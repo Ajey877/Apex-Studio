@@ -1,0 +1,6 @@
+{
+  "name": "Apex Studio DAW",
+  "description": "Professional multi-track digital audio workstation for song production, featuring polyphonic synthesis, audio sample slicing, 7-band parametric EQ, automation, step sequencing, piano roll, stem rendering, and Web MIDI hardware support.",
+  "requestFramePermissions": ["microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
