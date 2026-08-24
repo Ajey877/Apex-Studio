@@ -4,7 +4,7 @@ on:
   pull_request:
     branches: [phase-0-foundation-ui, main]
   push:
-    branches: [phase-0-foundation-ui, phase-2-audio-validation]
+    branches: [phase-0-foundation-ui]
 
 permissions:
   contents: read
@@ -20,7 +20,6 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: npm
 
       - name: Install dependencies
         run: npm install --legacy-peer-deps
