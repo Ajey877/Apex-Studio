@@ -36,7 +36,8 @@ afterEach(() => {
 
 describe('AudioClockTransport', () => {
   it('schedules steps from the AudioContext clock, not wall-clock drift', () => {
-    const context = new FakeAudioContext() as unknown as AudioContext;
+    const fakeContext = new FakeAudioContext();
+    const context = fakeContext as unknown as AudioContext;
     const transport = new AudioClockTransport(context, {
       lookAheadSeconds: 0.1,
       scheduleIntervalMs: 25,
@@ -51,7 +52,7 @@ describe('AudioClockTransport', () => {
     assert.equal(events.length, 1);
     assert.deepEqual(events[0], { step: 0, bar: 1, audioTime: 0 });
 
-    context.currentTime = 0.13;
+    fakeContext.currentTime = 0.13;
     const scheduled = timers.shift();
     assert.ok(scheduled);
     scheduled();
@@ -63,11 +64,12 @@ describe('AudioClockTransport', () => {
   });
 
   it('keeps musical position continuous when BPM changes while playing', () => {
-    const context = new FakeAudioContext() as unknown as AudioContext;
+    const fakeContext = new FakeAudioContext();
+    const context = fakeContext as unknown as AudioContext;
     const transport = new AudioClockTransport(context);
 
     transport.start();
-    context.currentTime = 1.5;
+    fakeContext.currentTime = 1.5;
     transport.setBpm(60);
 
     const state = transport.getState();
@@ -78,13 +80,14 @@ describe('AudioClockTransport', () => {
   });
 
   it('seeks without leaving stale scheduled time behind', () => {
-    const context = new FakeAudioContext() as unknown as AudioContext;
+    const fakeContext = new FakeAudioContext();
+    const context = fakeContext as unknown as AudioContext;
     const transport = new AudioClockTransport(context);
     const events: number[] = [];
 
     transport.setCallbacks({ onStep: (_step, _bar, audioTime) => events.push(audioTime) });
     transport.start();
-    context.currentTime = 0.4;
+    fakeContext.currentTime = 0.4;
     transport.seek(2);
 
     const scheduled = timers.pop();
