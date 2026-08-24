@@ -6,12 +6,15 @@
   "author": "Apex Studio Team",
   "main": "electron.cjs",
   "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "dev": "vite --port=3000 --host=0.0.0.0",
     "build": "vite build",
     "preview": "vite preview",
     "package:win": "vite build && electron-builder --win --x64 --publish never",
-    "clean": "rm -rf dist server.js",
+    "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true}); require('fs').rmSync('server.js',{force:true})\"",
     "lint": "tsc --noEmit"
   },
   "build": {
