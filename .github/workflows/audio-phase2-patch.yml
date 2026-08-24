@@ -1,0 +1,157 @@
+name: Audio Phase 2 Patch
+
+on:
+  push:
+    branches: [phase-0-foundation-ui]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Harden recording engine
+        shell: python
+        run: |
+          from pathlib import Path
+          p = Path('src/audio/audioEngine.ts')
+          s = p.read_text()
+          old = s
+
+          s = s.replace(
+              "  private recordingAnalyser: AnalyserNode | null = null;",
+              "  private recordingAnalyser: AnalyserNode | null = null;\n  private recordingStartTime = 0;"
+          )
+
+          s = s.replace(
+              "  public async startAudioRecording(): Promise<MediaStream> {\n    if (!this.ctx) await this.init();\n    this.recordedChunks = [];",
+              "  public async startAudioRecording(): Promise<MediaStream> {\n    if (!this.ctx) this.init();\n    const ctx = this.ctx;\n    if (!ctx) throw new Error('Audio engine failed to initialize');\n    this.recordedChunks = [];"
+          )
+
+          s = s.replace(
+              "    const source = this.ctx!.createMediaStreamSource(stream);",
+              "    const source = ctx.createMediaStreamSource(stream);"
+          )
+
+          s = s.replace(
+              "    this.mediaRecorder = new MediaRecorder(stream);",
+              "    if (typeof MediaRecorder === 'undefined') {\n      stream.getTracks().forEach(t => t.stop());\n      this.mediaStream = null;\n      throw new Error('MediaRecorder is not available in this environment');\n    }\n\n    const preferredMimeTypes = [\n      'audio/webm;codecs=opus',\n      'audio/webm',\n      'audio/ogg;codecs=opus'\n    ];\n    const mimeType = preferredMimeTypes.find(type => MediaRecorder.isTypeSupported(type));\n    this.mediaRecorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);"
+          )
+
+          s = s.replace(
+              "    this.mediaRecorder.start();\n\n    return stream;",
+              "    this.mediaRecorder.start(100);\n    this.recordingStartTime = performance.now();\n\n    return stream;"
+          )
+
+          start = s.index("  public async stopAudioRecording(): Promise<AudioRecording> {")
+          end = s.index("\n  // Web MIDI API Integration", start)
+          replacement = '''  public async stopAudioRecording(): Promise<AudioRecording> {
+    const startedAt = this.recordingStartTime;
+    const recorder = this.mediaRecorder;
+
+    if (!recorder) {
+      return {
+        id: `rec-${Date.now()}`,
+        name: 'Empty Take',
+        timestamp: Date.now(),
+        durationSeconds: 0,
+        waveform: []
+      };
+    }
+
+    return new Promise((resolve, reject) => {
+      recorder.onerror = () => {
+        reject(new Error('Audio recording failed'));
+      };
+
+      recorder.onstop = async () => {
+        try {
+          const blob = new Blob(this.recordedChunks, {
+            type: recorder.mimeType || 'audio/webm'
+          });
+          const url = URL.createObjectURL(blob);
+          const durationSeconds = Math.max(0, (performance.now() - startedAt) / 1000);
+
+          if (this.mediaStream) {
+            this.mediaStream.getTracks().forEach(t => t.stop());
+            this.mediaStream = null;
+          }
+          if (this.recordingAnalyser) {
+            this.recordingAnalyser.disconnect();
+            this.recordingAnalyser = null;
+          }
+          this.mediaRecorder = null;
+          this.recordingStartTime = 0;
+
+          let waveform: number[] = [];
+          try {
+            const arrayBuffer = await blob.arrayBuffer();
+            const audioBuffer = await this.getContext().decodeAudioData(arrayBuffer.slice(0));
+            const data = audioBuffer.getChannelData(0);
+            const buckets = 64;
+            const block = Math.max(1, Math.floor(data.length / buckets));
+            waveform = Array.from({ length: buckets }, (_, bucket) => {
+              let peak = 0;
+              const begin = bucket * block;
+              const end = Math.min(data.length, begin + block);
+              for (let i = begin; i < end; i++) peak = Math.max(peak, Math.abs(data[i]));
+              return Number(peak.toFixed(4));
+            });
+          } catch {
+            waveform = [];
+          }
+
+          resolve({
+            id: `rec-${Date.now()}`,
+            name: `Vocal Take ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}`,
+            timestamp: Date.now(),
+            durationSeconds,
+            audioBlob: blob,
+            audioUrl: url,
+            waveform
+          });
+        } catch (error) {
+          reject(error instanceof Error ? error : new Error('Unable to finalize recording'));
+        }
+      };
+
+      if (recorder.state === 'recording') {
+        recorder.stop();
+      } else {
+        recorder.onstop?.(new Event('stop'));
+      }
+    });
+  }
+'''
+          s = s[:start] + replacement + s[end:]
+
+          if s == old:
+              raise SystemExit('No recording changes were applied')
+          p.write_text(s)
+
+      - name: Verify source
+        run: |
+          npm install --legacy-peer-deps
+          npm run lint
+          npm run build
+
+      - name: Commit hardened recording engine
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/audio/audioEngine.ts
+          git commit -m 'fix: harden audio recording lifecycle and waveform generation'
+          git push
+
+      - name: Remove patch workflow
+        run: |
+          rm .github/workflows/audio-phase2-patch.yml
+          git add .github/workflows/audio-phase2-patch.yml
+          git commit -m 'chore: remove one-shot phase 2 patch workflow'
+          git push
