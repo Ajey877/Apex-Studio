@@ -54,10 +54,10 @@ class AudioEngine {
     // Lazy initialize on first interaction
   }
 
-  public async init() {
+  public init() {
     if (this.ctx && this.ctx.state !== 'closed') {
       if (this.ctx.state === 'suspended') {
-        await this.ctx.resume();
+        void this.ctx.resume();
       }
       return;
     }
