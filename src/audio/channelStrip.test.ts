@@ -29,14 +29,18 @@ function fakeContext(): AudioContext {
   return context as unknown as AudioContext;
 }
 
+function connections(node: AudioNode): unknown[] {
+  return (node as unknown as FakeNode).connections;
+}
+
 describe('MixerChannelStrip', () => {
   it('builds gain, pan, output and meter nodes', () => {
     const strip = new MixerChannelStrip(fakeContext(), 1, 'Lead');
     assert.equal(strip.state.name, 'Lead');
-    assert.equal(strip.input.connections[0], strip.gain);
-    assert.equal(strip.gain.connections[0], strip.panner);
-    assert.equal(strip.panner.connections[0], strip.output);
-    assert.equal(strip.output.connections[0], strip.meter);
+    assert.equal(connections(strip.input)[0], strip.gain);
+    assert.equal(connections(strip.gain)[0], strip.panner);
+    assert.equal(connections(strip.panner)[0], strip.output);
+    assert.equal(connections(strip.output)[0], strip.meter);
   });
 
   it('applies volume and pan to Web Audio parameters', () => {
