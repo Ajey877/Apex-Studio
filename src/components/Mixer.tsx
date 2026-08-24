@@ -40,6 +40,7 @@ export const Mixer: React.FC<MixerProps> = ({
   const [showAddFxMenu, setShowAddFxMenu] = useState(false);
   const [trackPeaks, setTrackPeaks] = useState<number[]>(Array(tracks.length).fill(0));
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const masterFaderCanvasRef = useRef<HTMLCanvasElement | null>(null);
 
   const selectedTrack = tracks.find(t => t.id === selectedTrackId) || tracks[0];
 
@@ -56,7 +57,7 @@ export const Mixer: React.FC<MixerProps> = ({
       });
       setTrackPeaks(peaks);
 
-      // 2. Master Spectrum Analyzer
+      // 2. Master Spectrum Analyzer (Top Bar)
       if (canvasRef.current) {
         const canvas = canvasRef.current;
         const ctx = canvas.getContext('2d');
@@ -76,6 +77,23 @@ export const Mixer: React.FC<MixerProps> = ({
 
             ctx.fillStyle = grad;
             ctx.fillRect(i * (barWidth + 1), canvas.height - barHeight, barWidth, barHeight);
+          }
+        }
+      }
+
+      // 3. Master Fader Real-Time Spectrum Backdrop
+      if (masterFaderCanvasRef.current) {
+        const faderCanvas = masterFaderCanvasRef.current;
+        const faderCtx = faderCanvas.getContext('2d');
+        if (faderCtx) {
+          faderCtx.clearRect(0, 0, faderCanvas.width, faderCanvas.height);
+          const barCount = 16;
+          const barW = faderCanvas.width / barCount;
+          for (let i = 0; i < barCount; i++) {
+            const val = isPlaying ? (freqData[i * 4] || 0) : 0;
+            const barH = (val / 255) * faderCanvas.height;
+            faderCtx.fillStyle = 'rgba(0, 255, 136, 0.25)';
+            faderCtx.fillRect(i * barW, faderCanvas.height - barH, barW - 1, barH);
           }
         }
       }
@@ -203,8 +221,16 @@ export const Mixer: React.FC<MixerProps> = ({
                     />
                   </div>
 
-                  {/* Fader Slider */}
+                  {/* Fader Slider with Master FFT spectrum backdrop */}
                   <div className="relative h-full flex items-center justify-center">
+                    {isMaster && (
+                      <canvas
+                        ref={masterFaderCanvasRef}
+                        width={28}
+                        height={120}
+                        className="absolute inset-0 w-full h-full pointer-events-none opacity-80 rounded"
+                      />
+                    )}
                     <input
                       type="range"
                       min="0"
@@ -213,7 +239,7 @@ export const Mixer: React.FC<MixerProps> = ({
                       value={track.volume}
                       onClick={(e) => e.stopPropagation()}
                       onChange={(e) => handleVolumeChange(track.id, parseFloat(e.target.value))}
-                      className="h-28 sm:h-32 w-1.5 accent-[#ff6e00] bg-[#121214] rounded cursor-pointer"
+                      className="relative z-10 h-28 sm:h-32 w-1.5 accent-[#ff6e00] bg-[#121214] rounded cursor-pointer"
                       style={{ writingMode: 'vertical-lr', direction: 'rtl' }}
                     />
                   </div>

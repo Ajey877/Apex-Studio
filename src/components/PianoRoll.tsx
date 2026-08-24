@@ -19,10 +19,13 @@ import {
   Radio,
   ChevronDown,
   CircleDot,
-  Zap
+  Zap,
+  Upload,
+  Download
 } from 'lucide-react';
 import { Channel, Note, MusicalScale, ChordStampType } from '../types/daw';
 import { audioEngine } from '../audio/audioEngine';
+import { MidiParser } from '../utils/midiParser';
 
 interface PianoRollProps {
   channel: Channel;
@@ -276,6 +279,56 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
     onUpdateChannel(channel.id, { notes: [] });
   };
 
+  const handleExportMidi = () => {
+    if (!notes || notes.length === 0) {
+      setStatusMessage('No notes to export in this channel.');
+      setTimeout(() => setStatusMessage(null), 3000);
+      return;
+    }
+    const blob = MidiParser.exportNotesToMidi(notes, 130, channel.name);
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${channel.name.toLowerCase().replace(/\s+/g, '_')}_midi.mid`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    setStatusMessage(`Exported ${notes.length} notes as standard .mid file!`);
+    setTimeout(() => setStatusMessage(null), 3000);
+  };
+
+  const handleImportMidi = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      const parsedTracks = await MidiParser.parseMidiFile(file);
+      if (parsedTracks.length === 0 || parsedTracks[0].notes.length === 0) {
+        setStatusMessage('No note events found in MIDI file.');
+        setTimeout(() => setStatusMessage(null), 3000);
+        return;
+      }
+
+      const importedNotes: Note[] = parsedTracks[0].notes.map((pn, idx) => ({
+        id: `midi-imp-${Date.now()}-${idx}`,
+        pitch: pn.pitch,
+        start: pn.startStep,
+        duration: pn.durationSteps,
+        velocity: pn.velocity
+      }));
+
+      onUpdateChannel(channel.id, { notes: [...notes, ...importedNotes] });
+      setStatusMessage(`Imported ${importedNotes.length} notes from ${file.name}!`);
+      setTimeout(() => setStatusMessage(null), 3000);
+    } catch (err: any) {
+      console.error(err);
+      setStatusMessage('Failed to parse MIDI file.');
+      setTimeout(() => setStatusMessage(null), 3000);
+    }
+    // reset input
+    e.target.value = '';
+  };
+
   const handleVelocityChange = (noteId: string, newVel: number) => {
     const clamped = Math.max(0.05, Math.min(1.0, newVel));
     const newNotes = notes.map(n => (n.id === noteId ? { ...n, velocity: clamped } : n));
@@ -446,6 +499,31 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
           >
             <Wand2 className="w-3 h-3 text-[#ff6e00]" />
             <span>Humanize</span>
+          </button>
+
+          {/* MIDI Import (.mid) */}
+          <label
+            className="flex items-center gap-1 px-2 py-1 bg-[#1e1e24] hover:bg-[#282830] text-[#00bcd4] hover:text-white rounded text-[10px] font-semibold border border-[#00bcd4]/30 transition cursor-pointer"
+            title="Import Standard MIDI File (.mid)"
+          >
+            <Upload className="w-3 h-3" />
+            <span>Import .mid</span>
+            <input
+              type="file"
+              accept=".mid,.midi"
+              onChange={handleImportMidi}
+              className="hidden"
+            />
+          </label>
+
+          {/* MIDI Export (.mid) */}
+          <button
+            onClick={handleExportMidi}
+            className="flex items-center gap-1 px-2 py-1 bg-[#1e1e24] hover:bg-[#282830] text-[#2ecc71] hover:text-white rounded text-[10px] font-semibold border border-[#2ecc71]/30 transition"
+            title="Export Channel Notes to Standard MIDI File (.mid)"
+          >
+            <Download className="w-3 h-3" />
+            <span>Export .mid</span>
           </button>
 
           <button

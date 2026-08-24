@@ -24,7 +24,16 @@ import {
   Minimize2,
   Smartphone,
   Activity,
-  Waves
+  Waves,
+  Scissors,
+  Monitor,
+  Zap,
+  Film,
+  Headphones,
+  Compass,
+  Wand2,
+  Sparkles,
+  FolderArchive
 } from 'lucide-react';
 import { ViewMode, PlayMode, ProjectMetadata } from '../types/daw';
 import { audioEngine } from '../audio/audioEngine';
@@ -56,6 +65,23 @@ interface TransportBarProps {
   onOpenMasteringSuite?: () => void;
   onOpenSampleManager?: () => void;
   onOpenGrossBeat?: () => void;
+  onOpenSlicer?: () => void;
+  onOpenVocalTuner?: () => void;
+  onOpenMidiLearn?: () => void;
+  onOpenMultiZoneSampler?: () => void;
+  onOpenWavetableSynth?: () => void;
+  onOpenWamPlugin?: () => void;
+  onOpenTakeComping?: () => void;
+  onOpenSidechain?: () => void;
+  onOpenPolyphonicEditor?: () => void;
+  onOpenDesktopApp?: () => void;
+  onOpenWarpProcessor?: () => void;
+  onOpenVideoScoring?: () => void;
+  onOpenSpatialAudio?: () => void;
+  onOpenMpeExpression?: () => void;
+  onOpenStemSplitter?: () => void;
+  onOpenMasterMacros?: () => void;
+  onOpenProjectZipBundle?: () => void;
   collaboratorCount: number;
   isProUser: boolean;
   isSidebarOpen: boolean;
@@ -89,6 +115,23 @@ export const TransportBar: React.FC<TransportBarProps> = ({
   onOpenMasteringSuite,
   onOpenSampleManager,
   onOpenGrossBeat,
+  onOpenSlicer,
+  onOpenVocalTuner,
+  onOpenMidiLearn,
+  onOpenMultiZoneSampler,
+  onOpenWavetableSynth,
+  onOpenWamPlugin,
+  onOpenTakeComping,
+  onOpenSidechain,
+  onOpenPolyphonicEditor,
+  onOpenDesktopApp,
+  onOpenWarpProcessor,
+  onOpenVideoScoring,
+  onOpenSpatialAudio,
+  onOpenMpeExpression,
+  onOpenStemSplitter,
+  onOpenMasterMacros,
+  onOpenProjectZipBundle,
   collaboratorCount,
   isProUser,
   isSidebarOpen,
@@ -175,9 +218,9 @@ export const TransportBar: React.FC<TransportBarProps> = ({
   return (
     <header id="fl-transport-bar" className="bg-[#1e1e20] border-b border-[#333336] select-none text-[#b0b0b0] shrink-0">
       {/* Top Navbar */}
-      <div className="h-12 flex items-center justify-between px-3 md:px-4 gap-2 md:gap-4">
+      <div className="h-12 flex items-center justify-between px-2 sm:px-3 md:px-4 gap-2 md:gap-4 overflow-hidden">
         {/* Brand & Project Info */}
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-2 sm:gap-3 shrink-0">
           <button
             onClick={onToggleSidebar}
             className="p-1.5 hover:bg-[#2d2d30] rounded text-[#777] hover:text-white transition"
@@ -319,7 +362,7 @@ export const TransportBar: React.FC<TransportBarProps> = ({
         </div>
 
         {/* Right Status Badges & Action Buttons */}
-        <div className="flex items-center gap-1.5 md:gap-2">
+        <div className="flex items-center gap-1.5 md:gap-2 overflow-x-auto no-scrollbar py-1 shrink">
           {/* Hardware MIDI Controller Status */}
           <button
             id="fl-midi-hub-btn"
@@ -345,6 +388,227 @@ export const TransportBar: React.FC<TransportBarProps> = ({
             >
               <Waves className="w-3.5 h-3.5 text-[#ff6e00]" />
               <span className="text-[10px] font-bold hidden lg:inline">GROSS BEAT</span>
+            </button>
+          )}
+
+          {/* Audio & Drum Slicer Button */}
+          {onOpenSlicer && (
+            <button
+              id="fl-slicer-btn"
+              onClick={onOpenSlicer}
+              className="flex items-center gap-1.5 px-2 py-1 bg-[#121214] hover:bg-[#222225] text-[#b0b0b0] hover:text-white rounded border border-[#333336] text-xs transition"
+              title="Open Edison Transient Drum Slicer & Chopper"
+            >
+              <Scissors className="w-3.5 h-3.5 text-[#00bcd4]" />
+              <span className="text-[10px] font-bold hidden lg:inline">SLICER</span>
+            </button>
+          )}
+
+          {/* Vocal Tuner Auto-Pitch Button */}
+          {onOpenVocalTuner && (
+            <button
+              id="fl-vocal-tuner-btn"
+              onClick={onOpenVocalTuner}
+              className="flex items-center gap-1.5 px-2 py-1 bg-[#121214] hover:bg-[#222225] text-[#b0b0b0] hover:text-white rounded border border-[#333336] text-xs transition"
+              title="Real-time Auto-Pitch & Vocal Tuner Pitch Correction (NewTone)"
+            >
+              <Mic className="w-3.5 h-3.5 text-[#00ff88]" />
+              <span className="text-[10px] font-bold hidden xl:inline">AUTOTUNE</span>
+            </button>
+          )}
+
+          {/* Wavetable Synth Button */}
+          {onOpenWavetableSynth && (
+            <button
+              id="fl-wavetable-btn"
+              onClick={onOpenWavetableSynth}
+              className="flex items-center gap-1.5 px-2 py-1 bg-[#121214] hover:bg-[#222225] text-[#b0b0b0] hover:text-white rounded border border-[#333336] text-xs transition"
+              title="Serum / Vital 3D Wavetable Morphing Synthesizer"
+            >
+              <Waves className="w-3.5 h-3.5 text-[#00e5ff]" />
+              <span className="text-[10px] font-bold hidden xl:inline">WAVETABLE</span>
+            </button>
+          )}
+
+          {/* Multi-Zone Sampler Keymapper */}
+          {onOpenMultiZoneSampler && (
+            <button
+              id="fl-multizone-btn"
+              onClick={onOpenMultiZoneSampler}
+              className="flex items-center gap-1.5 px-2 py-1 bg-[#121214] hover:bg-[#222225] text-[#b0b0b0] hover:text-white rounded border border-[#333336] text-xs transition"
+              title="DirectWave Multi-Zone Keyboard Split & Velocity Keymapping"
+            >
+              <Layers className="w-3.5 h-3.5 text-[#ff6e00]" />
+              <span className="text-[10px] font-bold hidden xl:inline">KEYMAP</span>
+            </button>
+          )}
+
+          {/* Third-Party WAM / VST3 Host Rack */}
+          {onOpenWamPlugin && (
+            <button
+              id="fl-wam-btn"
+              onClick={onOpenWamPlugin}
+              className="flex items-center gap-1.5 px-2 py-1 bg-[#121214] hover:bg-[#222225] text-[#b0b0b0] hover:text-white rounded border border-[#333336] text-xs transition"
+              title="Web Audio Modules (WAM2 / VST3) Third-Party Plugin Rack"
+            >
+              <Cpu className="w-3.5 h-3.5 text-[#a855f7]" />
+              <span className="text-[10px] font-bold hidden xl:inline">WAM/VST3</span>
+            </button>
+          )}
+
+          {/* Hardware MIDI Controller Learn */}
+          {onOpenMidiLearn && (
+            <button
+              id="fl-midi-learn-btn"
+              onClick={onOpenMidiLearn}
+              className="flex items-center gap-1.5 px-2 py-1 bg-[#121214] hover:bg-[#222225] text-[#b0b0b0] hover:text-white rounded border border-[#333336] text-xs transition"
+              title="Hardware MIDI Controller Learn & CC Mapping"
+            >
+              <Sliders className="w-3.5 h-3.5 text-[#ffaa00]" />
+              <span className="text-[10px] font-bold hidden xl:inline">MIDI LEARN</span>
+            </button>
+          )}
+
+          {/* Take Comping Multi-Lane Studio */}
+          {onOpenTakeComping && (
+            <button
+              id="fl-take-comp-btn"
+              onClick={onOpenTakeComping}
+              className="flex items-center gap-1.5 px-2 py-1 bg-[#121214] hover:bg-[#222225] text-[#b0b0b0] hover:text-white rounded border border-[#333336] text-xs transition"
+              title="Stacked Multi-Take Loop Recording & Swipe Comping"
+            >
+              <Scissors className="w-3.5 h-3.5 text-[#00e5ff]" />
+              <span className="text-[10px] font-bold hidden xl:inline">COMPING</span>
+            </button>
+          )}
+
+          {/* Sidechain Ducking Matrix */}
+          {onOpenSidechain && (
+            <button
+              id="fl-sidechain-matrix-btn"
+              onClick={onOpenSidechain}
+              className="flex items-center gap-1.5 px-2 py-1 bg-[#121214] hover:bg-[#222225] text-[#b0b0b0] hover:text-white rounded border border-[#333336] text-xs transition"
+              title="Dynamic Sidechain Ducking & Modulation Matrix"
+            >
+              <Zap className="w-3.5 h-3.5 text-[#ffaa00]" />
+              <span className="text-[10px] font-bold hidden xl:inline">SIDECHAIN</span>
+            </button>
+          )}
+
+          {/* Melodyne Polyphonic ARA Blob Editor */}
+          {onOpenPolyphonicEditor && (
+            <button
+              id="fl-polyphonic-editor-btn"
+              onClick={onOpenPolyphonicEditor}
+              className="flex items-center gap-1.5 px-2 py-1 bg-[#121214] hover:bg-[#222225] text-[#b0b0b0] hover:text-white rounded border border-[#333336] text-xs transition"
+              title="Melodyne / ARA2 Polyphonic Note Blob & Formant Editor"
+            >
+              <Activity className="w-3.5 h-3.5 text-[#00ff88]" />
+              <span className="text-[10px] font-bold hidden xl:inline">ARA BLOB</span>
+            </button>
+          )}
+
+          {/* Advanced Warp Modes (Beats, Tones, Texture, Complex Pro) */}
+          {onOpenWarpProcessor && (
+            <button
+              id="fl-warp-processor-btn"
+              onClick={onOpenWarpProcessor}
+              className="flex items-center gap-1.5 px-2 py-1 bg-[#121214] hover:bg-[#222225] text-[#b0b0b0] hover:text-white rounded border border-[#333336] text-xs transition"
+              title="Advanced Time-Stretch & Transient Warp Modes (Élastique Pro)"
+            >
+              <Zap className="w-3.5 h-3.5 text-[#00ff88]" />
+              <span className="text-[10px] font-bold hidden xl:inline">WARP</span>
+            </button>
+          )}
+
+          {/* Film Scoring Video Sync */}
+          {onOpenVideoScoring && (
+            <button
+              id="fl-video-scoring-btn"
+              onClick={onOpenVideoScoring}
+              className="flex items-center gap-1.5 px-2 py-1 bg-[#121214] hover:bg-[#222225] text-[#b0b0b0] hover:text-white rounded border border-[#333336] text-xs transition"
+              title="Film Scoring & SMPTE Video Timecode Monitor"
+            >
+              <Film className="w-3.5 h-3.5 text-[#a855f7]" />
+              <span className="text-[10px] font-bold hidden xl:inline">VIDEO SYNC</span>
+            </button>
+          )}
+
+          {/* 3D Dolby Atmos Spatial Panner */}
+          {onOpenSpatialAudio && (
+            <button
+              id="fl-spatial-panner-btn"
+              onClick={onOpenSpatialAudio}
+              className="flex items-center gap-1.5 px-2 py-1 bg-[#121214] hover:bg-[#222225] text-[#b0b0b0] hover:text-white rounded border border-[#333336] text-xs transition"
+              title="3D Dolby Atmos & Spatial Audio Binaural Panner"
+            >
+              <Headphones className="w-3.5 h-3.5 text-[#00e5ff]" />
+              <span className="text-[10px] font-bold hidden xl:inline">3D SPATIAL</span>
+            </button>
+          )}
+
+          {/* MPE Polyphonic Expression Editor */}
+          {onOpenMpeExpression && (
+            <button
+              id="fl-mpe-expression-btn"
+              onClick={onOpenMpeExpression}
+              className="flex items-center gap-1.5 px-2 py-1 bg-[#121214] hover:bg-[#222225] text-[#b0b0b0] hover:text-white rounded border border-[#333336] text-xs transition"
+              title="MPE (MIDI Polyphonic Expression) Per-Note Slide & Aftertouch"
+            >
+              <Sliders className="w-3.5 h-3.5 text-[#ff6e00]" />
+              <span className="text-[10px] font-bold hidden xl:inline">MPE</span>
+            </button>
+          )}
+
+          {/* AI Stem Splitter & Motif Generator */}
+          {onOpenStemSplitter && (
+            <button
+              id="fl-stem-splitter-btn"
+              onClick={onOpenStemSplitter}
+              className="flex items-center gap-1.5 px-2 py-1 bg-[#121214] hover:bg-[#222225] text-[#b0b0b0] hover:text-white rounded border border-[#333336] text-xs transition"
+              title="AI 4-Stem Audio Splitter & Neural Motif Generator"
+            >
+              <Wand2 className="w-3.5 h-3.5 text-[#ff6e00]" />
+              <span className="text-[10px] font-bold hidden xl:inline">AI STEMS</span>
+            </button>
+          )}
+
+          {/* Master Macro Performance Rack */}
+          {onOpenMasterMacros && (
+            <button
+              id="fl-master-macros-btn"
+              onClick={onOpenMasterMacros}
+              className="flex items-center gap-1.5 px-2 py-1 bg-[#121214] hover:bg-[#222225] text-[#b0b0b0] hover:text-white rounded border border-[#333336] text-xs transition"
+              title="Master Macro Performance Multi-Target Knobs"
+            >
+              <Sliders className="w-3.5 h-3.5 text-[#00ff88]" />
+              <span className="text-[10px] font-bold hidden xl:inline">MACROS</span>
+            </button>
+          )}
+
+          {/* Project ZIP Archive Exporter & Importer */}
+          {onOpenProjectZipBundle && (
+            <button
+              id="fl-project-zip-btn"
+              onClick={onOpenProjectZipBundle}
+              className="flex items-center gap-1.5 px-2 py-1 bg-[#1a1712] hover:bg-[#2a2218] text-[#ffaa00] hover:text-white rounded border border-[#ffaa00]/40 text-xs transition"
+              title="Project .ZIP Archive Exporter & Importer"
+            >
+              <FolderArchive className="w-3.5 h-3.5 text-[#ffaa00]" />
+              <span className="text-[10px] font-bold hidden xl:inline">.ZIP BUNDLE</span>
+            </button>
+          )}
+
+          {/* Standalone Desktop Computer Program Installer */}
+          {onOpenDesktopApp && (
+            <button
+              id="fl-desktop-app-btn"
+              onClick={onOpenDesktopApp}
+              className="flex items-center gap-1.5 px-2 py-1 bg-[#221812] hover:bg-[#332218] text-[#ffaa00] hover:text-white rounded border border-[#ff6e00]/50 text-xs transition font-bold shadow-sm"
+              title="Run as Standalone Windowed Desktop Computer Program (Windows / Mac / Linux)"
+            >
+              <Monitor className="w-3.5 h-3.5 text-[#ff6e00]" />
+              <span className="text-[10px] hidden sm:inline">DESKTOP APP</span>
             </button>
           )}
 

@@ -47,6 +47,23 @@ import { MasteringSuiteModal } from './components/MasteringSuiteModal';
 import { ArpeggiatorModal } from './components/ArpeggiatorModal';
 import { SampleManagerModal } from './components/SampleManagerModal';
 import { GrossBeatModal } from './components/GrossBeatModal';
+import { AudioSlicerModal } from './components/AudioSlicerModal';
+import { VocalTunerModal } from './components/VocalTunerModal';
+import { MidiLearnModal } from './components/MidiLearnModal';
+import { MultiZoneSamplerModal } from './components/MultiZoneSamplerModal';
+import { WavetableSynthModal } from './components/WavetableSynthModal';
+import { WamPluginModal } from './components/WamPluginModal';
+import { TakeCompingModal } from './components/TakeCompingModal';
+import { SidechainRoutingModal } from './components/SidechainRoutingModal';
+import { PolyphonicEditorModal } from './components/PolyphonicEditorModal';
+import { DesktopAppModal } from './components/DesktopAppModal';
+import { WarpAudioProcessorModal } from './components/WarpAudioProcessorModal';
+import { VideoScoringModal } from './components/VideoScoringModal';
+import { SpatialAudio3DPannerModal } from './components/SpatialAudio3DPannerModal';
+import { MpeExpressionModal } from './components/MpeExpressionModal';
+import { StemSplitterAiModal } from './components/StemSplitterAiModal';
+import { MasterMacroRackModal } from './components/MasterMacroRackModal';
+import { ProjectBundleZipModal } from './components/ProjectBundleZipModal';
 
 import { 
   Folder, 
@@ -113,10 +130,28 @@ export function App() {
   const [eqModalTrackId, setEqModalTrackId] = useState<number>(0);
   const [isMasteringSuiteOpen, setIsMasteringSuiteOpen] = useState(false);
   const [isGrossBeatOpen, setIsGrossBeatOpen] = useState(false);
+  const [isAudioSlicerOpen, setIsAudioSlicerOpen] = useState(false);
   const [isArpeggiatorOpen, setIsArpeggiatorOpen] = useState(false);
   const [arpChannelId, setArpChannelId] = useState<string>(DEFAULT_PROJECT.channels[0]?.id || 'ch-1');
   const [isSampleManagerOpen, setIsSampleManagerOpen] = useState(false);
   const [sampleChannelId, setSampleChannelId] = useState<string>(DEFAULT_PROJECT.channels[0]?.id || 'ch-1');
+  const [isVocalTunerOpen, setIsVocalTunerOpen] = useState(false);
+  const [isMidiLearnOpen, setIsMidiLearnOpen] = useState(false);
+  const [isMidiLearnActive, setIsMidiLearnActive] = useState(false);
+  const [isMultiZoneSamplerOpen, setIsMultiZoneSamplerOpen] = useState(false);
+  const [isWavetableSynthOpen, setIsWavetableSynthOpen] = useState(false);
+  const [isWamPluginOpen, setIsWamPluginOpen] = useState(false);
+  const [isTakeCompingOpen, setIsTakeCompingOpen] = useState(false);
+  const [isSidechainOpen, setIsSidechainOpen] = useState(false);
+  const [isPolyphonicEditorOpen, setIsPolyphonicEditorOpen] = useState(false);
+  const [isDesktopAppOpen, setIsDesktopAppOpen] = useState(false);
+  const [isWarpProcessorOpen, setIsWarpProcessorOpen] = useState(false);
+  const [isVideoScoringOpen, setIsVideoScoringOpen] = useState(false);
+  const [isSpatialAudioOpen, setIsSpatialAudioOpen] = useState(false);
+  const [isMpeExpressionOpen, setIsMpeExpressionOpen] = useState(false);
+  const [isStemSplitterOpen, setIsStemSplitterOpen] = useState(false);
+  const [isMasterMacrosOpen, setIsMasterMacrosOpen] = useState(false);
+  const [isProjectZipOpen, setIsProjectZipOpen] = useState(false);
 
   // --- Mastering Suite State ---
   const [masteringSuiteState, setMasteringSuiteState] = useState<MasteringSuiteState>({
@@ -499,8 +534,25 @@ export function App() {
           setIsParametricEqOpen(true);
         }}
         onOpenGrossBeat={() => setIsGrossBeatOpen(true)}
+        onOpenSlicer={() => setIsAudioSlicerOpen(true)}
         onOpenMasteringSuite={() => setIsMasteringSuiteOpen(true)}
         onOpenSampleManager={() => setIsSampleManagerOpen(true)}
+        onOpenVocalTuner={() => setIsVocalTunerOpen(true)}
+        onOpenMidiLearn={() => setIsMidiLearnOpen(true)}
+        onOpenMultiZoneSampler={() => setIsMultiZoneSamplerOpen(true)}
+        onOpenWavetableSynth={() => setIsWavetableSynthOpen(true)}
+        onOpenWamPlugin={() => setIsWamPluginOpen(true)}
+        onOpenTakeComping={() => setIsTakeCompingOpen(true)}
+        onOpenSidechain={() => setIsSidechainOpen(true)}
+        onOpenPolyphonicEditor={() => setIsPolyphonicEditorOpen(true)}
+        onOpenDesktopApp={() => setIsDesktopAppOpen(true)}
+        onOpenWarpProcessor={() => setIsWarpProcessorOpen(true)}
+        onOpenVideoScoring={() => setIsVideoScoringOpen(true)}
+        onOpenSpatialAudio={() => setIsSpatialAudioOpen(true)}
+        onOpenMpeExpression={() => setIsMpeExpressionOpen(true)}
+        onOpenStemSplitter={() => setIsStemSplitterOpen(true)}
+        onOpenMasterMacros={() => setIsMasterMacrosOpen(true)}
+        onOpenProjectZipBundle={() => setIsProjectZipOpen(true)}
         collaboratorCount={collaborators.length}
         isProUser={isProUser}
         isSidebarOpen={isSidebarOpen}
@@ -730,9 +782,12 @@ export function App() {
               clips={projectState.playlistClips}
               patterns={projectState.patterns}
               channels={projectState.channels}
+              markers={projectState.markers || []}
               onUpdateTracks={handleUpdateTracks}
               onUpdateClips={handleUpdateClips}
               onAddTrack={handleAddPlaylistTrack}
+              onUpdateMarkers={(markers) => setProjectState(prev => ({ ...prev, markers }))}
+              onSeekToBar={(bar) => setCurrentBar(bar)}
               currentBar={currentBar}
               isPlaying={isPlaying}
             />
@@ -926,6 +981,13 @@ export function App() {
         isPlaying={isPlaying}
       />
 
+      <AudioSlicerModal
+        isOpen={isAudioSlicerOpen}
+        onClose={() => setIsAudioSlicerOpen(false)}
+        channels={projectState.channels}
+        onUpdateChannel={(chId, updates) => handleUpdateChannel(chId, updates)}
+      />
+
       {(() => {
         const targetArpChannel = projectState.channels.find(c => c.id === arpChannelId) || projectState.channels[0];
         return targetArpChannel ? (
@@ -979,6 +1041,169 @@ export function App() {
           setIsRecording(false);
         }}
         onSaveRecording={handleSaveRecordingToPlaylist}
+      />
+
+      <VocalTunerModal
+        isOpen={isVocalTunerOpen}
+        onClose={() => setIsVocalTunerOpen(false)}
+        vocalTunerSettings={projectState.vocalTunerSettings || {
+          enabled: true,
+          rootKey: 0,
+          scale: 'minor',
+          retuneSpeedMs: 15,
+          formantShift: 0,
+          pitchCorrectionAmount: 0.85,
+          vibratoDepth: 0.2,
+          humanize: 0.3
+        }}
+        onUpdateVocalTuner={(settings) => setProjectState(prev => ({ ...prev, vocalTunerSettings: settings }))}
+        channels={projectState.channels}
+      />
+
+      <MidiLearnModal
+        isOpen={isMidiLearnOpen}
+        onClose={() => setIsMidiLearnOpen(false)}
+        mappings={projectState.midiMappings || []}
+        onUpdateMappings={(mappings) => setProjectState(prev => ({ ...prev, midiMappings: mappings }))}
+        isLearnActive={isMidiLearnActive}
+        onToggleLearn={() => setIsMidiLearnActive(!isMidiLearnActive)}
+        onClearAll={() => setProjectState(prev => ({ ...prev, midiMappings: [] }))}
+      />
+
+      <MultiZoneSamplerModal
+        isOpen={isMultiZoneSamplerOpen}
+        onClose={() => setIsMultiZoneSamplerOpen(false)}
+        channels={projectState.channels}
+        onUpdateChannel={handleUpdateChannel}
+      />
+
+      <WavetableSynthModal
+        isOpen={isWavetableSynthOpen}
+        onClose={() => setIsWavetableSynthOpen(false)}
+        channels={projectState.channels}
+        onUpdateChannel={handleUpdateChannel}
+      />
+
+      <WamPluginModal
+        isOpen={isWamPluginOpen}
+        onClose={() => setIsWamPluginOpen(false)}
+        mixerTracks={projectState.mixerTracks}
+        onUpdateMixerTracks={(tracks) => setProjectState(prev => ({ ...prev, mixerTracks: tracks }))}
+      />
+
+      <TakeCompingModal
+        isOpen={isTakeCompingOpen}
+        onClose={() => setIsTakeCompingOpen(false)}
+        onPromoteCompToPlaylist={(newClip) => {
+          setProjectState(prev => ({
+            ...prev,
+            playlistClips: [...prev.playlistClips, newClip]
+          }));
+        }}
+      />
+
+      <SidechainRoutingModal
+        isOpen={isSidechainOpen}
+        onClose={() => setIsSidechainOpen(false)}
+        mixerTracks={projectState.mixerTracks}
+        onUpdateMixerTracks={(tracks) => setProjectState(prev => ({ ...prev, mixerTracks: tracks }))}
+      />
+
+      <PolyphonicEditorModal
+        isOpen={isPolyphonicEditorOpen}
+        onClose={() => setIsPolyphonicEditorOpen(false)}
+      />
+
+      <DesktopAppModal
+        isOpen={isDesktopAppOpen}
+        onClose={() => setIsDesktopAppOpen(false)}
+      />
+
+      <WarpAudioProcessorModal
+        isOpen={isWarpProcessorOpen}
+        onClose={() => setIsWarpProcessorOpen(false)}
+        selectedClip={projectState.playlistClips[0] || null}
+        onUpdateClip={(updatedClip) => {
+          setProjectState(prev => ({
+            ...prev,
+            playlistClips: prev.playlistClips.map(c => c.id === updatedClip.id ? updatedClip : c)
+          }));
+        }}
+      />
+
+      <VideoScoringModal
+        isOpen={isVideoScoringOpen}
+        onClose={() => setIsVideoScoringOpen(false)}
+        currentBar={currentBar}
+        bpm={projectState.meta.bpm}
+        onSeekToBar={(bar) => {
+          setCurrentBar(bar);
+          setCurrentStep((bar - 1) * 16);
+        }}
+      />
+
+      <SpatialAudio3DPannerModal
+        isOpen={isSpatialAudioOpen}
+        onClose={() => setIsSpatialAudioOpen(false)}
+        mixerTracks={projectState.mixerTracks}
+      />
+
+      <MpeExpressionModal
+        isOpen={isMpeExpressionOpen}
+        onClose={() => setIsMpeExpressionOpen(false)}
+      />
+
+      <StemSplitterAiModal
+        isOpen={isStemSplitterOpen}
+        onClose={() => setIsStemSplitterOpen(false)}
+        onImportStemsToTracks={(stems) => {
+          const newTracks = stems.map((s, idx) => ({
+            id: projectState.playlistTracks.length + idx + 1,
+            name: s.name,
+            color: s.type === 'vocals' ? '#ff6e00' : s.type === 'drums' ? '#00ff88' : s.type === 'bass' ? '#00e5ff' : '#a855f7',
+            volume: 0.9,
+            pan: 0,
+            mute: false,
+            solo: false,
+            height: 'normal' as const
+          }));
+          const newClips = stems.map((s, idx) => ({
+            id: `stem-clip-${Date.now()}-${idx}`,
+            trackIndex: projectState.playlistTracks.length + idx,
+            startBar: 0,
+            lengthBars: 8,
+            type: 'audio' as const,
+            audioBufferId: `stem-${s.type}`,
+            audioName: s.name,
+            color: s.type === 'vocals' ? '#ff6e00' : s.type === 'drums' ? '#00ff88' : s.type === 'bass' ? '#00e5ff' : '#a855f7',
+            name: s.name
+          }));
+          setProjectState(prev => ({
+            ...prev,
+            playlistTracks: [...prev.playlistTracks, ...newTracks],
+            playlistClips: [...prev.playlistClips, ...newClips]
+          }));
+        }}
+      />
+
+      <MasterMacroRackModal
+        isOpen={isMasterMacrosOpen}
+        onClose={() => setIsMasterMacrosOpen(false)}
+        mixerTracks={projectState.mixerTracks}
+        channels={projectState.channels}
+        macroKnobs={projectState.macroKnobs}
+        onUpdateMacros={(macros) => {
+          setProjectState(prev => ({ ...prev, macroKnobs: macros }));
+        }}
+      />
+
+      <ProjectBundleZipModal
+        isOpen={isProjectZipOpen}
+        onClose={() => setIsProjectZipOpen(false)}
+        projectState={projectState}
+        onLoadProjectState={(loadedState) => {
+          setProjectState(loadedState);
+        }}
       />
 
       <OrientationLockModal />

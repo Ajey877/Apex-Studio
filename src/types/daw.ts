@@ -81,12 +81,81 @@ export interface SidechainSettings {
   attackMs: number; // 1 to 50 ms
   releaseMs: number; // 20 to 500 ms
   lowFreqOnly: boolean; // Duck only frequencies below 150 Hz
+  highPassFilterHz?: number; // Sidechain detector filter cutoff
+  gainReductionDb?: number; // Dynamic readout
+}
+
+export interface TakeRegion {
+  id: string;
+  takeIndex: number;
+  startStep: number;
+  lengthSteps: number;
+  isSelected: boolean;
+  color: string;
+  name?: string;
+}
+
+export interface TakeLane {
+  id: string;
+  name: string;
+  waveform: number[];
+  takeIndex: number;
+  timestamp: number;
+  color: string;
+  rating?: number; // 1 to 5 stars
+  isMuted?: boolean;
+}
+
+export interface PolyphonicBlob {
+  id: string;
+  originalPitch: number; // MIDI note (e.g. 64 = E4)
+  targetPitch: number; // Corrected MIDI note
+  startStep: number;
+  durationSteps: number;
+  amplitude: number;
+  formantShift: number; // semitones (-12 to +12)
+  pitchDriftAmount: number; // 0 to 1
+  vibratoDepth: number; // 0 to 1
+  color: string;
+}
+
+export type WarpMode = 'beats' | 'tones' | 'texture' | 'complex_pro' | 'repitch';
+
+export interface SpatialAudioSettings {
+  enabled: boolean;
+  azimuthDeg: number; // -180 to 180 horizontal degrees
+  elevationDeg: number; // -90 to 90 height degrees
+  distanceMeters: number; // 0.5 to 10 meters
+  binauralRoomSize: 'studio_dry' | 'concert_hall' | 'cathedral' | 'cinema_atmos';
+  lfeSubLevel: number; // Low Frequency Effects / Subwoofer send level
+  spread: number; // 0 to 1
+}
+
+export interface VideoScoringTrack {
+  enabled: boolean;
+  videoUrl?: string;
+  videoName?: string;
+  smpteOffsetFps: 24 | 25 | 29.97 | 30; // SMPTE Timecode frame rate
+  smpteStartHours: number;
+  smpteStartMinutes: number;
+  smpteStartSeconds: number;
+  smpteStartFrames: number;
+  hitPoints: Array<{ id: string; bar: number; name: string; type: 'dialogue' | 'hit' | 'cue' | 'transition'; color: string }>;
+}
+
+export interface MpeNoteExpression {
+  noteId: string;
+  pitchBendCurve: Array<{ timeStep: number; semitones: number }>; // -48 to +48 per-note bend
+  pressureCurve: Array<{ timeStep: number; pressure: number }>; // 0 to 1 aftertouch
+  slideTimbreCurve: Array<{ timeStep: number; timbre: number }>; // 0 to 1 CC74 brightness
 }
 
 export interface AutomationPoint {
   x: number; // 0 to 1 normalized along clip length or bar position
   y: number; // 0 to 1 normalized parameter value
-  tension?: number; // -1 to 1 bezier tension
+  tension?: number; // -1 to 1 bezier tension (-1 log, 0 linear, +1 exp)
+  lfoRateHz?: number; // If modulated by LFO
+  lfoDepth?: number;
 }
 
 export type AutomationTargetType = 
@@ -225,6 +294,8 @@ export interface PlaylistClip {
   timeStretchRate?: number; // 0.5x to 2.0x
   fadeInBars?: number; // 0 to 1 bar
   fadeOutBars?: number; // 0 to 1 bar
+  warpMode?: WarpMode; // Beats, Tones, Texture, Complex Pro
+  spatialAudio?: SpatialAudioSettings;
   // Automation specific
   automationTarget?: {
     type: AutomationTargetType;
@@ -423,6 +494,36 @@ export interface ParametricEqBand {
   color: string;
 }
 
+export interface ArrangementMarker {
+  id: string;
+  name: string; // e.g. "Intro", "Verse", "Build", "Drop", "Chorus", "Bridge", "Outro"
+  bar: number; // 0-indexed or 1-indexed bar position (e.g. 1, 9, 17, 33)
+  color: string; // Hex badge color
+}
+
+export interface MasterMacroKnob {
+  id: string;
+  name: string;
+  value: number; // 0 to 1
+  color: string;
+  mappings: Array<{
+    targetType: 'channel_volume' | 'channel_pan' | 'mixer_volume' | 'mixer_pan' | 'filter_cutoff' | 'reverb_wet' | 'delay_feedback';
+    targetId: string | number;
+    min: number;
+    max: number;
+    curve?: 'linear' | 'exponential' | 'logarithmic';
+  }>;
+}
+
+export interface StemSeparationResult {
+  vocalsBlobUrl?: string;
+  drumsBlobUrl?: string;
+  bassBlobUrl?: string;
+  otherBlobUrl?: string;
+  originalFileName: string;
+  durationSeconds: number;
+}
+
 export interface ProjectState {
   meta: ProjectMetadata;
   patterns: Pattern[];
@@ -438,4 +539,8 @@ export interface ProjectState {
   collaborators: CollabUser[];
   midiMappings: MidiMapping[];
   connectedMidiDevices?: MidiDeviceInfo[];
+  markers?: ArrangementMarker[];
+  vocalTuner?: VocalTunerSettings;
+  macroKnobs?: MasterMacroKnob[];
 }
+

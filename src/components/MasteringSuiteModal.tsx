@@ -100,10 +100,13 @@ export const MasteringSuiteModal: React.FC<MasteringSuiteModalProps> = ({
     lowBandReductionDb: 0,
     midBandReductionDb: 0,
     highBandReductionDb: 0,
+    phaseCorrelation: 0.95,
+    stereoSpread: 1.0,
     isClipping: false
   });
 
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const goniometerCanvasRef = useRef<HTMLCanvasElement | null>(null);
 
   // Live polling for meters and spectrum visualizer
   useEffect(() => {
@@ -116,12 +119,77 @@ export const MasteringSuiteModal: React.FC<MasteringSuiteModalProps> = ({
         setMeterMetrics(metrics);
       }
       drawMasterSpectrum();
+      drawGoniometer();
       animId = requestAnimationFrame(update);
     };
 
     animId = requestAnimationFrame(update);
     return () => cancelAnimationFrame(animId);
   }, [isOpen, isPlaying]);
+
+  const drawGoniometer = () => {
+    const canvas = goniometerCanvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    const width = canvas.width;
+    const height = canvas.height;
+    ctx.clearRect(0, 0, width, height);
+
+    // Dark radar background
+    ctx.fillStyle = '#08080a';
+    ctx.fillRect(0, 0, width, height);
+
+    const centerX = width / 2;
+    const centerY = height / 2;
+    const radius = Math.min(centerX, centerY) - 8;
+
+    // Outer grid circles
+    ctx.strokeStyle = '#1e1e24';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.arc(centerX, centerY, radius, 0, Math.PI * 2);
+    ctx.arc(centerX, centerY, radius * 0.6, 0, Math.PI * 2);
+    ctx.stroke();
+
+    // 45-degree axis lines (Left / Right / Mid / Side)
+    ctx.strokeStyle = '#282830';
+    ctx.beginPath();
+    ctx.moveTo(centerX, 5); ctx.lineTo(centerX, height - 5); // Mid (M)
+    ctx.moveTo(5, centerY); ctx.lineTo(width - 5, centerY); // Side (S)
+    ctx.moveTo(centerX - radius * 0.7, centerY + radius * 0.7); ctx.lineTo(centerX + radius * 0.7, centerY - radius * 0.7); // Left
+    ctx.moveTo(centerX - radius * 0.7, centerY - radius * 0.7); ctx.lineTo(centerX + radius * 0.7, centerY + radius * 0.7); // Right
+    ctx.stroke();
+
+    // Labels
+    ctx.fillStyle = '#666670';
+    ctx.font = '8px monospace';
+    ctx.fillText('M', centerX + 4, 12);
+    ctx.fillText('+S', width - 15, centerY - 4);
+    ctx.fillText('L', centerX - radius * 0.7 - 6, centerY - radius * 0.7);
+    ctx.fillText('R', centerX + radius * 0.7 + 2, centerY - radius * 0.7);
+
+    // Lissajous Vector Trace
+    const vectors = audioEngine.getStereoVectors(isPlaying ? 64 : 16);
+    if (vectors.length > 0) {
+      ctx.strokeStyle = meterMetrics.phaseCorrelation > 0.4 ? '#00ff88' : meterMetrics.phaseCorrelation >= 0 ? '#ffaa00' : '#ff0055';
+      ctx.lineWidth = 1.5;
+      ctx.shadowColor = ctx.strokeStyle;
+      ctx.shadowBlur = 8;
+      ctx.beginPath();
+
+      vectors.forEach((pt, idx) => {
+        const px = centerX + (pt.x * radius * 1.4);
+        const py = centerY - (pt.y * radius * 1.4);
+        if (idx === 0) ctx.moveTo(px, py);
+        else ctx.lineTo(px, py);
+      });
+
+      ctx.stroke();
+      ctx.shadowBlur = 0;
+    }
+  };
 
   const drawMasterSpectrum = () => {
     const canvas = canvasRef.current;
@@ -281,70 +349,152 @@ export const MasteringSuiteModal: React.FC<MasteringSuiteModalProps> = ({
 
           {/* Tab 1: Metering & LUFS */}
           {activeTab === 'metering' && (
-            <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
-              {/* Integrated LUFS */}
-              <div className="bg-[#18181d] border border-[#282830] rounded-xl p-4 flex flex-col items-center justify-center text-center">
-                <span className="text-[10px] font-bold text-[#888] uppercase tracking-wider mb-1">INTEGRATED LUFS</span>
-                <span className={`text-3xl font-mono font-black ${
-                  Math.abs(lufsDelta) <= 1.0 ? 'text-[#00ff88]' : lufsDelta > 1.0 ? 'text-[#ff0055]' : 'text-[#ffaa00]'
-                }`}>
-                  {meterMetrics.integratedLufs}
-                </span>
-                <span className="text-[10px] text-[#777] mt-1 font-mono">
-                  Target: {masteringState.lufsTarget} LUFS ({lufsDelta >= 0 ? `+${lufsDelta.toFixed(1)}` : lufsDelta.toFixed(1)} dB)
-                </span>
-                <div className="w-full bg-[#0a0a0c] h-1.5 rounded-full mt-3 overflow-hidden border border-[#333]">
-                  <div 
-                    className="h-full bg-gradient-to-r from-[#00ff88] via-[#ffaa00] to-[#ff0055]" 
-                    style={{ width: `${Math.min(100, Math.max(0, (meterMetrics.integratedLufs + 30) * 3.3))}%` }}
-                  />
+            <div className="space-y-3">
+              <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3">
+                {/* Integrated LUFS */}
+                <div className="bg-[#18181d] border border-[#282830] rounded-xl p-3 flex flex-col items-center justify-center text-center">
+                  <span className="text-[10px] font-bold text-[#888] uppercase tracking-wider mb-0.5">INTEGRATED LUFS</span>
+                  <span className={`text-2xl font-mono font-black ${
+                    Math.abs(lufsDelta) <= 1.0 ? 'text-[#00ff88]' : lufsDelta > 1.0 ? 'text-[#ff0055]' : 'text-[#ffaa00]'
+                  }`}>
+                    {meterMetrics.integratedLufs}
+                  </span>
+                  <span className="text-[9px] text-[#777] mt-0.5 font-mono">
+                    Target: {masteringState.lufsTarget} LUFS ({lufsDelta >= 0 ? `+${lufsDelta.toFixed(1)}` : lufsDelta.toFixed(1)} dB)
+                  </span>
+                  <div className="w-full bg-[#0a0a0c] h-1.5 rounded-full mt-2 overflow-hidden border border-[#333]">
+                    <div 
+                      className="h-full bg-gradient-to-r from-[#00ff88] via-[#ffaa00] to-[#ff0055]" 
+                      style={{ width: `${Math.min(100, Math.max(0, (meterMetrics.integratedLufs + 30) * 3.3))}%` }}
+                    />
+                  </div>
+                </div>
+
+                {/* Short-Term LUFS */}
+                <div className="bg-[#18181d] border border-[#282830] rounded-xl p-3 flex flex-col items-center justify-center text-center">
+                  <span className="text-[10px] font-bold text-[#888] uppercase tracking-wider mb-0.5">SHORT-TERM (3s)</span>
+                  <span className="text-2xl font-mono font-black text-white">
+                    {meterMetrics.shortTermLufs}
+                  </span>
+                  <span className="text-[9px] text-[#777] mt-0.5">Rolling average</span>
+                  <div className="w-full bg-[#0a0a0c] h-1.5 rounded-full mt-2 overflow-hidden border border-[#333]">
+                    <div 
+                      className="h-full bg-[#ff6e00]" 
+                      style={{ width: `${Math.min(100, Math.max(0, (meterMetrics.shortTermLufs + 30) * 3.3))}%` }}
+                    />
+                  </div>
+                </div>
+
+                {/* Momentary LUFS */}
+                <div className="bg-[#18181d] border border-[#282830] rounded-xl p-3 flex flex-col items-center justify-center text-center">
+                  <span className="text-[10px] font-bold text-[#888] uppercase tracking-wider mb-0.5">MOMENTARY (400ms)</span>
+                  <span className="text-2xl font-mono font-black text-[#00ffcc]">
+                    {meterMetrics.momentaryLufs}
+                  </span>
+                  <span className="text-[9px] text-[#777] mt-0.5">Instant peak</span>
+                  <div className="w-full bg-[#0a0a0c] h-1.5 rounded-full mt-2 overflow-hidden border border-[#333]">
+                    <div 
+                      className="h-full bg-[#00ffcc]" 
+                      style={{ width: `${Math.min(100, Math.max(0, (meterMetrics.momentaryLufs + 30) * 3.3))}%` }}
+                    />
+                  </div>
+                </div>
+
+                {/* True Peak dBFS */}
+                <div className="bg-[#18181d] border border-[#282830] rounded-xl p-3 flex flex-col items-center justify-center text-center">
+                  <span className="text-[10px] font-bold text-[#888] uppercase tracking-wider mb-0.5">TRUE PEAK dBFS</span>
+                  <span className={`text-2xl font-mono font-black ${meterMetrics.isClipping ? 'text-[#ff0055]' : 'text-white'}`}>
+                    {meterMetrics.truePeakDbfs} dB
+                  </span>
+                  <span className={`text-[9px] font-bold mt-0.5 ${meterMetrics.isClipping ? 'text-[#ff0055]' : 'text-[#00ff88]'}`}>
+                    {meterMetrics.isClipping ? 'CLIP DETECTED' : 'HEADROOM OK'}
+                  </span>
+                  <div className="w-full bg-[#0a0a0c] h-1.5 rounded-full mt-2 overflow-hidden border border-[#333]">
+                    <div 
+                      className={`h-full ${meterMetrics.isClipping ? 'bg-[#ff0055]' : 'bg-[#00ff88]'}`}
+                      style={{ width: `${Math.min(100, Math.max(0, (meterMetrics.truePeakDbfs + 30) * 3.3))}%` }}
+                    />
+                  </div>
                 </div>
               </div>
 
-              {/* Short-Term LUFS */}
-              <div className="bg-[#18181d] border border-[#282830] rounded-xl p-4 flex flex-col items-center justify-center text-center">
-                <span className="text-[10px] font-bold text-[#888] uppercase tracking-wider mb-1">SHORT-TERM (3s)</span>
-                <span className="text-3xl font-mono font-black text-white">
-                  {meterMetrics.shortTermLufs}
-                </span>
-                <span className="text-[10px] text-[#777] mt-1">Rolling average</span>
-                <div className="w-full bg-[#0a0a0c] h-1.5 rounded-full mt-3 overflow-hidden border border-[#333]">
-                  <div 
-                    className="h-full bg-[#ff6e00]" 
-                    style={{ width: `${Math.min(100, Math.max(0, (meterMetrics.shortTermLufs + 30) * 3.3))}%` }}
-                  />
+              {/* Goniometer + Stereo Phase Correlation Row */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3 bg-[#141418] border border-[#282830] rounded-xl p-3">
+                {/* 2D Goniometer Vector Scope */}
+                <div className="flex flex-col gap-1.5">
+                  <div className="flex items-center justify-between text-xs">
+                    <span className="font-bold text-white flex items-center gap-1.5">
+                      <Radio className="w-3.5 h-3.5 text-[#00ff88]" />
+                      <span>2D GONIOMETER STEREO FIELD SCOPE</span>
+                    </span>
+                    <span className="text-[10px] font-mono text-[#888]">Lissajous Vector</span>
+                  </div>
+                  <div className="flex items-center justify-center bg-[#08080a] rounded-lg border border-[#222] p-1">
+                    <canvas ref={goniometerCanvasRef} width={280} height={140} className="w-full max-w-[280px] h-32" />
+                  </div>
                 </div>
-              </div>
 
-              {/* Momentary LUFS */}
-              <div className="bg-[#18181d] border border-[#282830] rounded-xl p-4 flex flex-col items-center justify-center text-center">
-                <span className="text-[10px] font-bold text-[#888] uppercase tracking-wider mb-1">MOMENTARY (400ms)</span>
-                <span className="text-3xl font-mono font-black text-[#00ffcc]">
-                  {meterMetrics.momentaryLufs}
-                </span>
-                <span className="text-[10px] text-[#777] mt-1">Instantaneous peak</span>
-                <div className="w-full bg-[#0a0a0c] h-1.5 rounded-full mt-3 overflow-hidden border border-[#333]">
-                  <div 
-                    className="h-full bg-[#00ffcc]" 
-                    style={{ width: `${Math.min(100, Math.max(0, (meterMetrics.momentaryLufs + 30) * 3.3))}%` }}
-                  />
-                </div>
-              </div>
+                {/* Phase Correlation Meter & Streaming Platform Matrix */}
+                <div className="flex flex-col justify-between gap-2 text-xs">
+                  <div className="space-y-1.5">
+                    <div className="flex items-center justify-between">
+                      <span className="font-bold text-white">STEREO PHASE CORRELATION</span>
+                      <span className={`font-mono font-bold ${
+                        meterMetrics.phaseCorrelation > 0.4 ? 'text-[#00ff88]' : meterMetrics.phaseCorrelation >= 0 ? 'text-[#ffaa00]' : 'text-[#ff0055]'
+                      }`}>
+                        {meterMetrics.phaseCorrelation > 0 ? `+${meterMetrics.phaseCorrelation}` : meterMetrics.phaseCorrelation}
+                      </span>
+                    </div>
+                    {/* Phase Meter Bar: -1.0 to +1.0 */}
+                    <div className="relative w-full h-3 bg-[#0a0a0c] rounded border border-[#333] overflow-hidden flex items-center">
+                      <div className="absolute left-1/2 top-0 bottom-0 w-0.5 bg-[#555] z-10" />
+                      <div 
+                        className={`h-full transition-all duration-75 ${
+                          meterMetrics.phaseCorrelation > 0.4 ? 'bg-[#00ff88]' : meterMetrics.phaseCorrelation >= 0 ? 'bg-[#ffaa00]' : 'bg-[#ff0055]'
+                        }`}
+                        style={{
+                          marginLeft: `${Math.min(50, Math.max(0, (meterMetrics.phaseCorrelation + 1) * 50))}%`,
+                          width: `${Math.abs(meterMetrics.phaseCorrelation) * 50}%`
+                        }}
+                      />
+                    </div>
+                    <div className="flex justify-between text-[8px] font-mono text-[#666]">
+                      <span>-1.0 (Out of Phase)</span>
+                      <span>0.0 (Wide Stereo)</span>
+                      <span>+1.0 (Mono Coherent)</span>
+                    </div>
+                  </div>
 
-              {/* True Peak dBFS */}
-              <div className="bg-[#18181d] border border-[#282830] rounded-xl p-4 flex flex-col items-center justify-center text-center">
-                <span className="text-[10px] font-bold text-[#888] uppercase tracking-wider mb-1">TRUE PEAK dBFS</span>
-                <span className={`text-3xl font-mono font-black ${meterMetrics.isClipping ? 'text-[#ff0055]' : 'text-white'}`}>
-                  {meterMetrics.truePeakDbfs} dB
-                </span>
-                <span className={`text-[10px] font-bold mt-1 ${meterMetrics.isClipping ? 'text-[#ff0055]' : 'text-[#00ff88]'}`}>
-                  {meterMetrics.isClipping ? 'CLIP DETECTED' : 'HEADROOM OK'}
-                </span>
-                <div className="w-full bg-[#0a0a0c] h-1.5 rounded-full mt-3 overflow-hidden border border-[#333]">
-                  <div 
-                    className={`h-full ${meterMetrics.isClipping ? 'bg-[#ff0055]' : 'bg-[#00ff88]'}`}
-                    style={{ width: `${Math.min(100, Math.max(0, (meterMetrics.truePeakDbfs + 30) * 3.3))}%` }}
-                  />
+                  {/* Streaming Targets Compliance Badges */}
+                  <div className="space-y-1">
+                    <span className="text-[10px] font-bold text-[#888] uppercase block">STREAMING TARGET COMPLIANCE</span>
+                    <div className="grid grid-cols-2 gap-1.5 font-mono text-[10px]">
+                      <div className="bg-[#18181d] p-1.5 rounded border border-[#28282b] flex items-center justify-between">
+                        <span>Spotify (-14 LUFS)</span>
+                        <span className={Math.abs(meterMetrics.integratedLufs - (-14)) <= 1.5 ? 'text-[#00ff88] font-bold' : 'text-[#ffaa00]'}>
+                          {Math.abs(meterMetrics.integratedLufs - (-14)) <= 1.5 ? '✓ PASS' : `${(meterMetrics.integratedLufs - (-14)).toFixed(1)} dB`}
+                        </span>
+                      </div>
+                      <div className="bg-[#18181d] p-1.5 rounded border border-[#28282b] flex items-center justify-between">
+                        <span>Apple Music (-16 LUFS)</span>
+                        <span className={Math.abs(meterMetrics.integratedLufs - (-16)) <= 1.5 ? 'text-[#00ff88] font-bold' : 'text-[#ffaa00]'}>
+                          {Math.abs(meterMetrics.integratedLufs - (-16)) <= 1.5 ? '✓ PASS' : `${(meterMetrics.integratedLufs - (-16)).toFixed(1)} dB`}
+                        </span>
+                      </div>
+                      <div className="bg-[#18181d] p-1.5 rounded border border-[#28282b] flex items-center justify-between">
+                        <span>Club / Beatport (-9 LUFS)</span>
+                        <span className={Math.abs(meterMetrics.integratedLufs - (-9)) <= 1.5 ? 'text-[#00ff88] font-bold' : 'text-[#ffaa00]'}>
+                          {Math.abs(meterMetrics.integratedLufs - (-9)) <= 1.5 ? '✓ PASS' : `${(meterMetrics.integratedLufs - (-9)).toFixed(1)} dB`}
+                        </span>
+                      </div>
+                      <div className="bg-[#18181d] p-1.5 rounded border border-[#28282b] flex items-center justify-between">
+                        <span>YouTube (-14 LUFS)</span>
+                        <span className={Math.abs(meterMetrics.integratedLufs - (-14)) <= 1.5 ? 'text-[#00ff88] font-bold' : 'text-[#ffaa00]'}>
+                          {Math.abs(meterMetrics.integratedLufs - (-14)) <= 1.5 ? '✓ PASS' : `${(meterMetrics.integratedLufs - (-14)).toFixed(1)} dB`}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
                 </div>
               </div>
             </div>

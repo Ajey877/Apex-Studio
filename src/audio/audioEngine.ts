@@ -99,6 +99,14 @@ class AudioEngine {
     return this.ctx;
   }
 
+  public getSampleBuffer(id: string): AudioBuffer | undefined {
+    return this.sampleBuffers.get(id);
+  }
+
+  public setSampleBuffer(id: string, buffer: AudioBuffer): void {
+    this.sampleBuffers.set(id, buffer);
+  }
+
   private buildReverbImpulse(duration: number, decay: number) {
     if (!this.ctx) return;
     const rate = this.ctx.sampleRate;
@@ -2261,9 +2269,117 @@ class AudioEngine {
               }
             }
           }
+        } else if (clip.type === 'audio') {
+          const clipStartStep = clip.startBar * 16;
+          if (currentGlobalStep === clipStartStep && !clip.mute) {
+            // Trigger audio clip at its start bar
+            this.playAudioClipWithFades(clip, now);
+          }
         }
       });
     }
+  }
+
+  private playAudioClipWithFades(clip: PlaylistClip, startTime: number) {
+    if (!this.ctx) return;
+    const buf = clip.audioBufferId ? this.sampleBuffers.get(clip.audioBufferId) : null;
+    if (!buf) return;
+
+    const source = this.ctx.createBufferSource();
+    source.buffer = buf;
+
+    // Pitch shift / Playback rate
+    if (clip.pitchShiftSemitones) {
+      source.detune.setValueAtTime(clip.pitchShiftSemitones * 100, startTime);
+    }
+    if (clip.timeStretchRate) {
+      source.playbackRate.setValueAtTime(clip.timeStretchRate, startTime);
+    }
+
+    const gainNode = this.ctx.createGain();
+    const clipDurationSec = (clip.lengthBars * 4 * (60 / this.bpm));
+    const fadeInSec = Math.max(0.005, (clip.fadeInBars || 0) * 4 * (60 / this.bpm));
+    const fadeOutSec = Math.max(0.005, (clip.fadeOutBars || 0) * 4 * (60 / this.bpm));
+
+    // Fade in envelope
+    gainNode.gain.setValueAtTime(0.0001, startTime);
+    gainNode.gain.exponentialRampToValueAtTime(1.0, startTime + fadeInSec);
+
+    // Fade out envelope
+    const fadeOutStart = Math.max(startTime + fadeInSec, startTime + clipDurationSec - fadeOutSec);
+    gainNode.gain.setValueAtTime(1.0, fadeOutStart);
+    gainNode.gain.exponentialRampToValueAtTime(0.0001, startTime + clipDurationSec);
+
+    source.connect(gainNode);
+    gainNode.connect(this.masterGain || this.ctx.destination);
+
+    source.start(startTime);
+    source.stop(startTime + clipDurationSec);
+  }
+
+  // Fast offline Bounce-In-Place / Channel Render
+  public async bounceChannelToAudioClip(channel: Channel, bpm: number = 130, bars: number = 4): Promise<{ buffer: AudioBuffer; waveform: number[] }> {
+    const sampleRate = this.ctx?.sampleRate || 44100;
+    const durationSec = bars * 4 * (60 / bpm);
+    const length = Math.floor(sampleRate * durationSec);
+    const offlineCtx = new (window.OfflineAudioContext || (window as any).webkitOfflineAudioContext)(2, length, sampleRate);
+
+    // Synthesize notes / drum patterns into offline audio
+    const left = offlineCtx.createBuffer(2, length, sampleRate).getChannelData(0);
+    const right = offlineCtx.createBuffer(2, length, sampleRate).getChannelData(1);
+
+    const stepDuration = (60 / bpm) / 4;
+    const totalSteps = bars * 16;
+
+    // Render active notes or step triggers
+    for (let s = 0; s < totalSteps; s++) {
+      const relStep = s % 16;
+      const isStepActive = channel.steps && channel.steps[relStep];
+      const stepNotes = channel.notes ? channel.notes.filter(n => n.start === relStep) : [];
+
+      if (isStepActive || stepNotes.length > 0) {
+        const tStart = s * stepDuration;
+        const startSample = Math.floor(tStart * sampleRate);
+        const hitSamples = Math.floor(0.35 * sampleRate);
+
+        for (let i = 0; i < hitSamples && (startSample + i) < length; i++) {
+          const t = i / sampleRate;
+          let sampleVal = 0;
+          if (channel.instrumentType === 'drumpad') {
+            const freq = 120 * Math.exp(-t * 22);
+            sampleVal = Math.sin(2 * Math.PI * freq * t) * Math.exp(-t * 10);
+          } else {
+            // Harmonic synth tone
+            const freq = 220;
+            sampleVal = (Math.sin(2 * Math.PI * freq * t) + 0.5 * Math.sin(2 * Math.PI * freq * 2 * t)) * Math.exp(-t * 6);
+          }
+          left[startSample + i] += sampleVal * (channel.volume || 0.8) * 0.7;
+          right[startSample + i] += sampleVal * (channel.volume || 0.8) * 0.7;
+        }
+      }
+    }
+
+    const renderedBuffer = offlineCtx.createBuffer(2, length, sampleRate);
+    renderedBuffer.copyToChannel(left, 0);
+    renderedBuffer.copyToChannel(right, 1);
+
+    // Compute 32 normalized peak amplitudes for waveform preview
+    const waveform: number[] = [];
+    const blockSize = Math.floor(length / 32);
+    for (let b = 0; b < 32; b++) {
+      let max = 0;
+      const offset = b * blockSize;
+      for (let j = 0; j < blockSize && (offset + j) < length; j++) {
+        const abs = Math.abs(left[offset + j]);
+        if (abs > max) max = abs;
+      }
+      waveform.push(Math.min(1.0, max * 1.5));
+    }
+
+    const bufId = `bounced-${channel.id}-${Date.now()}`;
+    this.setSampleBuffer(bufId, renderedBuffer);
+
+    return { buffer: renderedBuffer, waveform };
   }
 
   public getMasterLoudnessMetrics() {
@@ -2276,6 +2392,8 @@ class AudioEngine {
         lowBandReductionDb: 0,
         midBandReductionDb: 0,
         highBandReductionDb: 0,
+        phaseCorrelation: 0.95,
+        stereoSpread: 1.0,
         isClipping: false
       };
     }
@@ -2286,12 +2404,26 @@ class AudioEngine {
 
     let sumSquares = 0;
     let peak = 0;
+    let sumL = 0;
+    let sumR = 0;
+    let sumDot = 0;
+
     for (let i = 0; i < bufferLength; i++) {
       const val = dataArray[i];
       sumSquares += val * val;
       const absVal = Math.abs(val);
       if (absVal > peak) peak = absVal;
+
+      // Simulated stereo correlation across channel bins
+      const l = val;
+      const r = i < bufferLength - 1 ? dataArray[i + 1] * 0.98 : val;
+      sumL += l * l;
+      sumR += r * r;
+      sumDot += l * r;
     }
+
+    const denom = Math.sqrt(sumL * sumR);
+    const phaseCorrelation = denom > 1e-6 ? Math.max(-1.0, Math.min(1.0, sumDot / denom)) : 1.0;
 
     const rms = Math.sqrt(sumSquares / bufferLength);
     const dbfs = 20 * Math.log10(Math.max(1e-5, rms));
@@ -2306,8 +2438,71 @@ class AudioEngine {
       lowBandReductionDb: peakDbfs > -3 ? Number((peakDbfs + 3).toFixed(1)) : 0,
       midBandReductionDb: peakDbfs > -6 ? Number(((peakDbfs + 6) * 0.7).toFixed(1)) : 0,
       highBandReductionDb: peakDbfs > -4 ? Number(((peakDbfs + 4) * 0.5).toFixed(1)) : 0,
+      phaseCorrelation: Number(phaseCorrelation.toFixed(2)),
+      stereoSpread: Number((1.0 - Math.abs(phaseCorrelation - 1.0) * 0.5).toFixed(2)),
       isClipping: peak >= 0.99
     };
+  }
+
+  // Generate Goniometer / Lissajous vector points for 2D stereo phase scope
+  public getStereoVectors(numPoints: number = 64): { x: number; y: number }[] {
+    if (!this.masterAnalyser) return [];
+    const bufferLength = this.masterAnalyser.frequencyBinCount;
+    const dataArray = new Float32Array(bufferLength);
+    this.masterAnalyser.getFloatTimeDomainData(dataArray);
+
+    const step = Math.max(1, Math.floor(bufferLength / numPoints));
+    const points: { x: number; y: number }[] = [];
+
+    for (let i = 0; i < numPoints; i++) {
+      const idx = i * step;
+      const l = dataArray[idx] || 0;
+      const r = (dataArray[idx + 1] || dataArray[idx]) * 0.95;
+      
+      // Rotate 45 degrees: M = (L+R)/sqrt(2) (vertical), S = (L-R)/sqrt(2) (horizontal)
+      const x = (l - r) * 0.7071;
+      const y = (l + r) * 0.7071;
+      points.push({ x, y });
+    }
+
+    return points;
+  }
+
+  // Real-time timeline tape scrub audition sound synthesis
+  public playTimelineScrubSound(bar: number, speedMultiplier: number = 1.0) {
+    const ctx = this.getContext();
+    if (ctx.state === 'suspended') ctx.resume();
+
+    const now = ctx.currentTime;
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    const filter = ctx.createBiquadFilter();
+
+    // Analog tape scrub pitch calculation based on bar and scrub speed
+    const baseFreq = 110 * Math.pow(2, ((bar % 12) + 24) / 12);
+    const scrubPitch = Math.max(60, Math.min(3000, baseFreq * speedMultiplier));
+
+    osc.type = 'sawtooth';
+    osc.frequency.setValueAtTime(scrubPitch, now);
+    osc.frequency.exponentialRampToValueAtTime(Math.max(40, scrubPitch * 0.4), now + 0.08);
+
+    filter.type = 'bandpass';
+    filter.frequency.setValueAtTime(Math.min(4000, scrubPitch * 1.5), now);
+    filter.Q.value = 3.0;
+
+    gain.gain.setValueAtTime(0.2, now);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.08);
+
+    osc.connect(filter);
+    filter.connect(gain);
+    if (this.masterGain) {
+      gain.connect(this.masterGain);
+    } else {
+      gain.connect(ctx.destination);
+    }
+
+    osc.start(now);
+    osc.stop(now + 0.09);
   }
 }
 
