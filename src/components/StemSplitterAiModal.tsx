@@ -6,8 +6,5 @@ interface StemSplitterAiModalProps {
   onImportStemsToTracks?: (stems: { name: string; type: 'vocals' | 'drums' | 'bass' | 'other' }[]) => void;
 }
 
-/**
- * AI functionality is intentionally disabled in the current Apex Studio release.
- * This compatibility component remains only so older project state can compile safely.
- */
+/** AI functionality is intentionally disabled in the current release. */
 export const StemSplitterAiModal: React.FC<StemSplitterAiModalProps> = () => null;
