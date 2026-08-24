@@ -1,10 +1,6 @@
 @import "tailwindcss";
 
-/*
- * Apex Studio Phase 0 design system
- * Midnight Aurora: premium, calm, iOS-quality creative UI.
- */
-
+/* Apex Studio Phase 0: Midnight Aurora design system. */
 :root {
   --apex-bg: #11131a;
   --apex-surface: #191c25;
@@ -27,13 +23,10 @@
 }
 
 @layer base {
-  html,
-  body,
-  #root {
+  html, body, #root {
     background: var(--apex-bg);
     color: var(--apex-text-2);
-    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text",
-      "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
     user-select: none;
     -webkit-user-select: none;
     overflow: hidden;
@@ -42,150 +35,75 @@
     touch-action: manipulation;
     -webkit-tap-highlight-color: transparent;
   }
-
-  button,
-  input,
-  select,
-  textarea {
-    touch-action: manipulation;
-  }
-
-  button {
-    -webkit-font-smoothing: antialiased;
-  }
-
-  input,
-  select,
-  textarea {
-    color-scheme: dark;
-  }
+  button, input, select, textarea { touch-action: manipulation; }
+  button { -webkit-font-smoothing: antialiased; }
+  input, select, textarea { color-scheme: dark; }
 }
 
-/* Existing Tailwind colors are mapped into the new visual system. */
+/* Map the old black/orange utility palette into the new visual identity. */
 .bg-\[\#0a0a0b\] { background-color: var(--apex-bg) !important; }
 .bg-\[\#121214\] { background-color: #151821 !important; }
-.bg-\[\#141416\] { background-color: var(--apex-surface) !important; }
-.bg-\[\#1a1a1d\] { background-color: var(--apex-surface) !important; }
+.bg-\[\#141416\], .bg-\[\#1a1a1d\] { background-color: var(--apex-surface) !important; }
 .bg-\[\#1e1e20\] { background-color: #161a23 !important; }
 .bg-\[\#18181c\] { background-color: #1c202b !important; }
-.bg-\[\#222225\] { background-color: var(--apex-surface-2) !important; }
-.bg-\[\#252525\] { background-color: var(--apex-surface-2) !important; }
+.bg-\[\#222225\], .bg-\[\#252525\] { background-color: var(--apex-surface-2) !important; }
 .bg-\[\#2d2d30\] { background-color: var(--apex-surface-3) !important; }
 
-.border-\[\#222225\],
-.border-\[\#26262a\],
-.border-\[\#28282e\],
-.border-\[\#2e2e34\],
-.border-\[\#333336\] {
+.border-\[\#222225\], .border-\[\#26262a\], .border-\[\#28282e\], .border-\[\#2e2e34\], .border-\[\#333336\] {
   border-color: var(--apex-border) !important;
 }
-
 .text-\[\#b0b0b0\] { color: var(--apex-text-2) !important; }
 .text-\[\#777\] { color: var(--apex-text-3) !important; }
 .text-\[\#888\] { color: #858da0 !important; }
-
 .bg-\[\#ff6e00\] { background-color: var(--apex-accent) !important; }
 .text-\[\#ff6e00\] { color: var(--apex-accent) !important; }
 .border-\[\#ff6e00\] { border-color: var(--apex-accent) !important; }
-
-[class*="bg-[#ff6e00]/"] {
-  background-color: color-mix(in srgb, var(--apex-accent) 16%, transparent) !important;
-}
+[class*="bg-[#ff6e00]/"] { background-color: color-mix(in srgb, var(--apex-accent) 16%, transparent) !important; }
 [class*="text-[#ff6e00]/"] { color: var(--apex-accent) !important; }
-[class*="border-[#ff6e00]/"] {
-  border-color: color-mix(in srgb, var(--apex-accent) 48%, transparent) !important;
-}
+[class*="border-[#ff6e00]/"] { border-color: color-mix(in srgb, var(--apex-accent) 48%, transparent) !important; }
 [class*="hover:bg-[#ff7d1a]"]:hover { background-color: var(--apex-accent-strong) !important; }
 [class*="hover:border-[#ff6e00]"]:hover { border-color: var(--apex-accent-strong) !important; }
-
-.text-\[\#00bcd4\],
-.text-\[\#00e5ff\] { color: var(--apex-cyan) !important; }
-
+.text-\[\#00bcd4\], .text-\[\#00e5ff\] { color: var(--apex-cyan) !important; }
 .bg-\[\#ff0000\] { background-color: var(--apex-danger) !important; }
-.text-\[\#00ff00\],
-.text-\[\#00ff88\] { color: var(--apex-success) !important; }
+.text-\[\#00ff00\], .text-\[\#00ff88\] { color: var(--apex-success) !important; }
 
-/* Remove prototype-only controls from the primary workflow. */
-#fl-pro-tier-btn,
-#fl-stem-splitter-btn {
-  display: none !important;
-}
+/* Keep prototype-only services out of the primary production workflow. */
+#fl-pro-tier-btn, #fl-stem-splitter-btn, #fl-collab-btn { display: none !important; }
 
-/* Premium desktop surfaces. */
 #fl-transport-bar {
   background: rgba(22, 26, 35, 0.96) !important;
   border-color: var(--apex-border) !important;
   backdrop-filter: blur(18px);
   -webkit-backdrop-filter: blur(18px);
 }
-
 #fl-view-tabs {
   background: rgba(25, 28, 37, 0.94) !important;
   border-color: var(--apex-border) !important;
 }
-
-[id$="-modal"] > div,
-[id*="-modal"] > div {
+[id$="-modal"] > div, [id*="-modal"] > div {
   border-radius: var(--apex-radius-lg) !important;
   box-shadow: var(--apex-shadow);
 }
-
-button {
-  min-height: 30px;
-}
-
-button:focus-visible,
-input:focus-visible,
-select:focus-visible,
-textarea:focus-visible {
+button { min-height: 30px; }
+button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible {
   outline: 2px solid color-mix(in srgb, var(--apex-accent) 75%, transparent);
   outline-offset: 2px;
 }
 
-.custom-scrollbar::-webkit-scrollbar {
-  width: 7px;
-  height: 7px;
-}
-
-.custom-scrollbar::-webkit-scrollbar-track {
-  background: transparent;
-}
-
-.custom-scrollbar::-webkit-scrollbar-thumb {
-  background: #343a4a;
-  border-radius: 999px;
-}
-
-.custom-scrollbar::-webkit-scrollbar-thumb:hover {
-  background: #4a5266;
-}
-
-.no-scrollbar::-webkit-scrollbar {
-  display: none;
-}
-
-.no-scrollbar {
-  -ms-overflow-style: none;
-  scrollbar-width: none;
-}
+.custom-scrollbar::-webkit-scrollbar { width: 7px; height: 7px; }
+.custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
+.custom-scrollbar::-webkit-scrollbar-thumb { background: #343a4a; border-radius: 999px; }
+.custom-scrollbar::-webkit-scrollbar-thumb:hover { background: #4a5266; }
+.no-scrollbar::-webkit-scrollbar { display: none; }
+.no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
 
 @keyframes fadeIn {
   from { opacity: 0; transform: translateY(3px) scale(0.99); }
   to { opacity: 1; transform: translateY(0) scale(1); }
 }
-
-.animate-fadeIn {
-  animation: fadeIn 0.16s cubic-bezier(0.16, 1, 0.3, 1) forwards;
-}
-
-@keyframes spinSlow {
-  from { transform: rotate(0deg); }
-  to { transform: rotate(360deg); }
-}
-
-.animate-spin-slow {
-  animation: spinSlow 8s linear infinite;
-}
+.animate-fadeIn { animation: fadeIn 0.16s cubic-bezier(0.16, 1, 0.3, 1) forwards; }
+@keyframes spinSlow { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+.animate-spin-slow { animation: spinSlow 8s linear infinite; }
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
