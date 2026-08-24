@@ -1,0 +1,35 @@
+name: Audio Validation
+
+on:
+  pull_request:
+    branches: [phase-0-foundation-ui, main]
+  push:
+    branches: [phase-0-foundation-ui]
+
+permissions:
+  contents: read
+
+jobs:
+  audio-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm install --legacy-peer-deps
+
+      - name: TypeScript check
+        run: npm run lint
+
+      - name: Audio transport tests
+        run: npm run test:audio
+
+      - name: Production build
+        run: npm run build
