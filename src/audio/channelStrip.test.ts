@@ -34,13 +34,23 @@ function connections(node: AudioNode): unknown[] {
 }
 
 describe('MixerChannelStrip', () => {
-  it('builds gain, pan, output and meter nodes', () => {
+  it('builds insert rack, gain, pan, output and meter nodes', () => {
     const strip = new MixerChannelStrip(fakeContext(), 1, 'Lead');
     assert.equal(strip.state.name, 'Lead');
-    assert.equal(connections(strip.input)[0], strip.gain);
+    assert.equal(connections(strip.input)[0], strip.inserts.input);
+    assert.equal(connections(strip.inserts.input)[0], strip.inserts.output);
+    assert.equal(connections(strip.inserts.output)[0], strip.gain);
     assert.equal(connections(strip.gain)[0], strip.panner);
     assert.equal(connections(strip.panner)[0], strip.output);
     assert.equal(connections(strip.output)[0], strip.meter);
+  });
+
+  it('routes inserted processing before the channel gain stage', () => {
+    const strip = new MixerChannelStrip(fakeContext(), 1);
+    const effect = new FakeNode() as unknown as AudioNode;
+    strip.inserts.add('eq', effect);
+    assert.equal(connections(strip.inserts.input)[0], effect);
+    assert.equal(connections(effect)[0], strip.inserts.output);
   });
 
   it('applies volume and pan to Web Audio parameters', () => {

@@ -4,6 +4,7 @@ import {
   dbToGain,
   isChannelAudible,
 } from './mixerChannel';
+import { ChannelInsertRack } from './insertRack';
 
 export interface ChannelStripNodes {
   input: AudioNode;
@@ -11,10 +12,11 @@ export interface ChannelStripNodes {
   meter: AnalyserNode;
 }
 
-/** A production channel strip: gain -> pan -> output, with a post-strip meter. */
+/** A production channel strip: inserts -> gain -> pan -> output, with a post-strip meter. */
 export class MixerChannelStrip {
   state: MixerChannelState;
   readonly input: GainNode;
+  readonly inserts: ChannelInsertRack;
   readonly gain: GainNode;
   readonly panner: StereoPannerNode;
   readonly output: GainNode;
@@ -29,6 +31,7 @@ export class MixerChannelStrip {
   ) {
     this.state = createMixerChannel(id, name);
     this.input = context.createGain();
+    this.inserts = new ChannelInsertRack(context);
     this.gain = context.createGain();
     this.panner = context.createStereoPanner();
     this.output = context.createGain();
@@ -36,7 +39,8 @@ export class MixerChannelStrip {
     this.meter.fftSize = 2048;
     this.meter.smoothingTimeConstant = 0.8;
 
-    this.input.connect(this.gain);
+    this.input.connect(this.inserts.input);
+    this.inserts.output.connect(this.gain);
     this.gain.connect(this.panner);
     this.panner.connect(this.output);
     this.output.connect(this.meter);
@@ -89,6 +93,7 @@ export class MixerChannelStrip {
 
   dispose(): void {
     this.input.disconnect();
+    this.inserts.dispose();
     this.gain.disconnect();
     this.panner.disconnect();
     this.output.disconnect();

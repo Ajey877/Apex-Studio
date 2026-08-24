@@ -33,7 +33,9 @@ describe('MixerMasterGraph', () => {
     graph.addChannel(channel);
     graph.connectDestination(destination as unknown as AudioNode);
 
-    assert.deepEqual(connections(channel.output), [graph.master.input]);
+    // The channel output already has a post-strip meter tap. Adding the channel
+    // must add the master input without removing that diagnostic tap.
+    assert.deepEqual(connections(channel.output), [channel.meter, graph.master.input]);
     assert.deepEqual(connections(graph.master.output), [destination]);
   });
 
