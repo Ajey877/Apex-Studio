@@ -94,7 +94,9 @@ describe('AudioClockTransport', () => {
     assert.ok(scheduled);
     scheduled();
 
-    assert.ok(events.some(time => Math.abs(time - 2.005) < 1e-9));
+    // Audio time is the AudioContext clock, while seek(2) is musical position.
+    // At context time 0.4 the first post-seek event is scheduled 5ms ahead.
+    assert.ok(events.some(time => Math.abs(time - 0.405) < 1e-9));
     assert.equal(transport.getState().positionSeconds, 2);
   });
 
