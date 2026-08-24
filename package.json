@@ -3,13 +3,14 @@
   "private": true,
   "version": "1.0.0",
   "description": "Apex Studio DAW - Professional Multi-Track Digital Audio Workstation",
+  "author": "Apex Studio Team",
   "main": "electron.cjs",
   "type": "module",
   "scripts": {
     "dev": "vite --port=3000 --host=0.0.0.0",
     "build": "vite build",
     "preview": "vite preview",
-    "package:win": "vite build && electron-builder --win --x64",
+    "package:win": "vite build && electron-builder --win --x64 --publish never",
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit"
   },
@@ -20,8 +21,10 @@
       "output": "dist-electron"
     },
     "win": {
-      "target": ["nsis", "portable"],
-      "icon": "public/icon.png"
+      "target": [
+        "nsis",
+        "portable"
+      ]
     },
     "nsis": {
       "oneClick": false,
@@ -55,16 +58,12 @@
     "@types/jszip": "^3.4.1",
     "@types/node": "^22.14.0",
     "autoprefixer": "^10.4.21",
+    "electron": "^33.2.1",
+    "electron-builder": "^25.1.8",
     "esbuild": "^0.25.0",
     "tailwindcss": "^4.1.14",
     "tsx": "^4.21.0",
     "typescript": "~5.8.2",
     "vite": "^6.2.3"
-    "author": "Apex Studio Team",
-"devDependencies": {
-  "electron": "^33.2.1",
-  "electron-builder": "^25.1.8",
-  ...
-}
   }
 }
