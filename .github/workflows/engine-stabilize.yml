@@ -1,0 +1,43 @@
+name: Engine Stabilize Patch
+
+on:
+  push:
+    branches: [phase-0-foundation-ui]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - name: Fix synchronous audio initialization
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('src/audio/audioEngine.ts')
+          s = p.read_text()
+          old = s
+          s = s.replace('public async init() {', 'public init() {', 1)
+          s = s.replace('await this.ctx.resume();', 'void this.ctx.resume();', 1)
+          if s == old:
+              raise SystemExit('Expected initialization patterns were not found')
+          p.write_text(s)
+          PY
+      - name: Commit patch
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/audio/audioEngine.ts
+          git commit -m 'fix: eliminate audio engine initialization race'
+          git push
+      - name: Remove one-shot patch workflow
+        run: |
+          rm .github/workflows/engine-stabilize.yml
+          git add .github/workflows/engine-stabilize.yml
+          git commit -m 'chore: remove one-shot engine patch workflow'
+          git push
