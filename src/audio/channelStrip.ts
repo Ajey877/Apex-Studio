@@ -13,7 +13,7 @@ export interface ChannelStripNodes {
 
 /** A production channel strip: gain -> pan -> output, with a post-strip meter. */
 export class MixerChannelStrip {
-  readonly state: MixerChannelState;
+  state: MixerChannelState;
   readonly input: GainNode;
   readonly gain: GainNode;
   readonly panner: StereoPannerNode;
@@ -48,11 +48,13 @@ export class MixerChannelStrip {
   }
 
   setVolumeDb(volumeDb: number): void {
+    if (!Number.isFinite(volumeDb)) throw new Error('Mixer volume must be finite.');
     this.state = { ...this.state, volumeDb: Math.max(-60, Math.min(12, volumeDb)) };
     this.applyState();
   }
 
   setPan(pan: number): void {
+    if (!Number.isFinite(pan)) throw new Error('Mixer pan must be finite.');
     this.state = { ...this.state, pan: Math.max(-1, Math.min(1, pan)) };
     this.applyState();
   }
