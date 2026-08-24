@@ -16,17 +16,14 @@ export interface TransportCallbacks {
   onStateChange?: (state: Readonly<TransportState>) => void;
 }
 
-/**
- * Audio-clock scheduler foundation.
- * JavaScript timers only wake the scheduler; musical events are timestamped
- * against AudioContext.currentTime so callback jitter does not move the event.
- */
+/** Audio-clock transport: musical position follows AudioContext time. */
 export class AudioClockTransport {
   private readonly context: AudioContext;
   private readonly lookAheadSeconds: number;
   private readonly scheduleIntervalMs: number;
   private timerId: number | null = null;
   private nextEventTime = 0;
+  private clockOrigin = 0;
   private state: TransportState = {
     bpm: 120,
     beatsPerBar: 4,
@@ -45,33 +42,35 @@ export class AudioClockTransport {
     this.scheduleIntervalMs = Math.max(10, options.scheduleIntervalMs ?? 25);
   }
 
-  setCallbacks(callbacks: TransportCallbacks): void {
-    this.callbacks = callbacks;
-  }
+  setCallbacks(callbacks: TransportCallbacks): void { this.callbacks = callbacks; }
 
   setBpm(bpm: number): void {
     if (!Number.isFinite(bpm) || bpm <= 0) return;
+    this.updatePositionFromClock();
     this.state.bpm = Math.min(999, Math.max(20, bpm));
+    this.updateMusicalPosition(this.state.positionSeconds);
+    this.emitState();
   }
 
-  setMode(mode: TransportMode): void {
-    this.state.mode = mode;
-  }
+  setMode(mode: TransportMode): void { this.state.mode = mode; this.emitState(); }
 
   getState(): Readonly<TransportState> {
+    this.updatePositionFromClock();
     return this.state;
   }
 
   start(): void {
     if (this.state.playing) return;
     const now = this.context.currentTime;
+    this.clockOrigin = now - this.state.positionSeconds;
+    this.nextEventTime = now;
     this.state.playing = true;
-    this.nextEventTime = Math.max(now, this.state.positionSeconds + now);
     this.schedule();
     this.emitState();
   }
 
   stop(resetPosition = true): void {
+    this.updatePositionFromClock();
     this.state.playing = false;
     if (this.timerId !== null) {
       window.clearTimeout(this.timerId);
@@ -88,55 +87,49 @@ export class AudioClockTransport {
   seek(positionSeconds: number): void {
     const next = Math.max(0, Number.isFinite(positionSeconds) ? positionSeconds : 0);
     this.state.positionSeconds = next;
-    const stepDuration = this.stepDurationSeconds;
-    const absoluteStep = Math.floor(next / stepDuration);
-    this.state.step = absoluteStep % this.stepsPerBar;
-    this.state.bar = Math.floor(absoluteStep / this.stepsPerBar) + 1;
+    this.updateMusicalPosition(next);
     if (this.state.playing) {
+      this.clockOrigin = this.context.currentTime - next;
       this.nextEventTime = this.context.currentTime + 0.005;
     }
     this.emitState();
   }
 
-  dispose(): void {
-    this.stop(false);
-    this.callbacks = {};
-  }
+  dispose(): void { this.stop(false); this.callbacks = {}; }
 
-  private get stepDurationSeconds(): number {
-    return 60 / this.state.bpm / this.state.stepsPerBeat;
-  }
-
-  private get stepsPerBar(): number {
-    return this.state.beatsPerBar * this.state.stepsPerBeat;
-  }
+  private get stepDurationSeconds(): number { return 60 / this.state.bpm / this.state.stepsPerBeat; }
+  private get stepsPerBar(): number { return this.state.beatsPerBar * this.state.stepsPerBeat; }
 
   private schedule = (): void => {
     if (!this.state.playing) return;
-
     const horizon = this.context.currentTime + this.lookAheadSeconds;
-    while (this.nextEventTime < horizon) {
-      const relative = this.nextEventTime - this.context.currentTime;
-      const absoluteStep = Math.max(0, Math.floor(this.state.positionSeconds / this.stepDurationSeconds));
-      const step = absoluteStep % this.stepsPerBar;
-      const bar = Math.floor(absoluteStep / this.stepsPerBar) + 1;
-
-      this.state.step = step;
-      this.state.bar = bar;
-      this.callbacks.onStep?.(step, bar, this.nextEventTime);
-
+    while (this.nextEventTime <= horizon) {
+      const position = Math.max(0, this.nextEventTime - this.clockOrigin);
+      const absoluteStep = Math.floor(position / this.stepDurationSeconds + 1e-9);
+      this.callbacks.onStep?.(
+        absoluteStep % this.stepsPerBar,
+        Math.floor(absoluteStep / this.stepsPerBar) + 1,
+        this.nextEventTime,
+      );
       this.nextEventTime += this.stepDurationSeconds;
-      this.state.positionSeconds += this.stepDurationSeconds;
-
-      // Keep unused variable from becoming a misleading timing source.
-      void relative;
     }
-
+    this.updatePositionFromClock();
     this.emitState();
     this.timerId = window.setTimeout(this.schedule, this.scheduleIntervalMs);
   };
 
-  private emitState(): void {
-    this.callbacks.onStateChange?.(this.state);
+  private updatePositionFromClock(): void {
+    if (!this.state.playing) return;
+    const position = Math.max(0, this.context.currentTime - this.clockOrigin);
+    this.state.positionSeconds = position;
+    this.updateMusicalPosition(position);
   }
+
+  private updateMusicalPosition(position: number): void {
+    const absoluteStep = Math.floor(position / this.stepDurationSeconds + 1e-9);
+    this.state.step = absoluteStep % this.stepsPerBar;
+    this.state.bar = Math.floor(absoluteStep / this.stepsPerBar) + 1;
+  }
+
+  private emitState(): void { this.callbacks.onStateChange?.(this.state); }
 }
