@@ -13,6 +13,7 @@ export class MasterBus {
   readonly gain: GainNode;
   readonly meter: AnalyserNode;
   readonly output: GainNode;
+  private destination: AudioNode | null = null;
 
   constructor(private readonly context: AudioContext) {
     this.input = context.createGain();
@@ -36,7 +37,10 @@ export class MasterBus {
   }
 
   connectDestination(destination: AudioNode): void {
+    if (this.destination === destination) return;
+    if (this.destination) this.output.disconnect(this.destination);
     this.output.connect(destination);
+    this.destination = destination;
   }
 
   getMeterLevels(): MasterBusMeterLevels {
@@ -53,6 +57,10 @@ export class MasterBus {
   }
 
   dispose(): void {
+    if (this.destination) {
+      this.output.disconnect(this.destination);
+      this.destination = null;
+    }
     this.input.disconnect();
     this.gain.disconnect();
     this.meter.disconnect();
