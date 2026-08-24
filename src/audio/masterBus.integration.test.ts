@@ -11,8 +11,9 @@ function connections(node: AudioNode): unknown[] { return (node as unknown as Fa
 
 describe('master integration', () => {
   it('keeps channel meter tap and master routing independent', () => {
-    const graph = new MixerMasterGraph(context());
-    const channel = new MixerChannelStrip(context(), 1);
+    const audioContext = context();
+    const graph = new MixerMasterGraph(audioContext);
+    const channel = new MixerChannelStrip(audioContext, 1);
     graph.addChannel(channel);
     assert.equal(connections(channel.output).length, 2);
     assert.ok(connections(channel.output).includes(channel.meter));
