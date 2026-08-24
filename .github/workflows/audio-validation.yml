@@ -4,7 +4,7 @@ on:
   pull_request:
     branches: [phase-0-foundation-ui, main]
   push:
-    branches: [phase-0-foundation-ui]
+    branches: [phase-0-foundation-ui, phase-2-audio-validation]
 
 permissions:
   contents: read
