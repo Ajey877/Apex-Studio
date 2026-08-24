@@ -39,13 +39,24 @@
 
 ---
 
-## 🖥️ Standalone Windows Desktop App (.EXE)
+## 💾 How to Install on PC (3 Easy Ways)
 
-Apex Studio runs offline as an independent Windows program:
+You can run Apex Studio on your Windows PC completely offline:
 
-- **1-Click Batch Runner**: Open the **DESKTOP APP** menu, download the bundle, and double-click `ApexStudio-Windows-Launcher.bat`.
-- **Compile `.EXE` Installer**: Right-click `Build-Windows-EXE.ps1` → *Run with PowerShell* to generate `Apex Studio DAW Setup.exe`.
-- **Install PWA**: Click the Install icon in Chrome/Edge to pin Apex Studio to your Windows Start Menu & Taskbar.
+### Method 1: Standalone `.exe` Installer (Recommended)
+1. Go to the GitHub **Releases** page (or click **DESKTOP APP** → **Download Setup.exe** in the top bar).
+2. Download `Apex Studio DAW Setup.exe`.
+3. Double-click the `.exe` file to install. It adds a Desktop Shortcut and Start Menu icon with low-latency hardware audio acceleration.
+
+### Method 2: 1-Click Portable Launcher (No Install Needed)
+1. Click **DESKTOP APP** in the DAW toolbar → **Download Windows Bundle (.ZIP)**.
+2. Extract the `.zip` to any folder (e.g., `Documents` or a USB drive).
+3. Double-click `ApexStudio-Windows-Launcher.bat` to launch the DAW immediately in its own native window.
+
+### Method 3: Install via Chrome / Edge (PWA)
+1. Open Apex Studio in Google Chrome, Microsoft Edge, or Brave.
+2. Click the **Install App** icon in your browser's address bar (or in the browser menu `⋮` → *Install Apex Studio*).
+3. The app will launch in its own standalone window and work 100% offline.
 
 ---
 
