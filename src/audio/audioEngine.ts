@@ -54,10 +54,10 @@ class AudioEngine {
     // Lazy initialize on first interaction
   }
 
-  public async init() {
+  public init() {
     if (this.ctx && this.ctx.state !== 'closed') {
       if (this.ctx.state === 'suspended') {
-        await this.ctx.resume();
+        void this.ctx.resume();
       }
       return;
     }
@@ -212,8 +212,10 @@ class AudioEngine {
       const fxNode = this.createFxNode(slot);
       if (fxNode) {
         currentSource.connect(fxNode);
-        currentSource = fxNode;
+        const chainEnd = (fxNode as AudioNode & { _chainEnd?: AudioNode })._chainEnd ?? fxNode;
+        currentSource = chainEnd;
         channel.fxNodes.push(fxNode);
+        if (chainEnd !== fxNode) channel.fxNodes.push(chainEnd);
       }
     });
 
