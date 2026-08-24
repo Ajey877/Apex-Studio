@@ -6,101 +6,87 @@
 
 ---
 
-## ⚡ Highlights & Core Architecture
+## ⚡ 5-Minute Quickstart Tutorial
 
-Apex Studio DAW brings the iconic, ultra-fast pattern-and-playlist production workflow (inspired by legendary DAWs like FL Studio and Ableton) to modern web standards and native desktop environments.
+### 1. Build a Drum Beat (Channel Rack)
+- Press <kbd>F6</kbd> (or <kbd>1</kbd>) to open the **Channel Rack**.
+- Click the 16 step buttons across Kick, Snare, Hi-Hat, and 808 channels to create a groove.
+- Press <kbd>Space</kbd> to listen in real time. Adjust tempo (BPM) at the top.
 
-- **🎚️ Complete Multi-Track Production**: 64-step polyphonic channel rack, multi-lane piano roll with chord/scale stamps, unlimited playlist arranger with audio clips, and 16-channel stereo mixer with 10 insert FX per track.
-- **🎹 Advanced Synthesizers & Samplers**: 3D Wavetable Morphing Synthesizer, DirectWave-style Multi-Zone Velocity Keymapped Sampler, Gross Beat (36 Time/Volume gates), and Web Audio Modules 2.0 (WAM2) plugin host.
-- **🎛️ Studio FX & Mastering Suite**: 7-Band Interactive Parametric EQ2 with FFT spectrum, 3-Band Linear-Phase Multiband Mastering Suite with True Peak Maximizer and LUFS metering, Tape Saturation, Chorus, Stereo Widener, and Sidechain Ducking.
-- **🚀 Advanced Studio Innovations**:
-  - **4-Stem AI Splitter**: Vocal, Drum, Bass, and Other stem isolation.
-  - **Élastique Transient Warp**: Real-time audio time-stretching with transient markers.
-  - **3D Spatial Audio & Binaural Panning**: Dolby Atmos-style 3D soundstage placement.
-  - **MPE 5D Touch Expression**: Multi-dimensional polyphonic glide, pressure, and timbre shaping.
-  - **SMPTE Cinema Scoring**: Lock audio cues to video timestamps at 24/30/60 fps.
-  - **Real-Time Tape Audio Scrubbing**: Analog auditioning when dragging the arranger ruler playhead.
-  - **Project `.ZIP` Bundle Exporter & Importer**: 1-click portable session packages with MIDI patterns and routing manifests.
+### 2. Play Melodies & Chords (Piano Roll or Keyboard)
+- Press <kbd>F7</kbd> (or <kbd>2</kbd>) to open the **Piano Roll**.
+- **No MIDI keyboard needed:** Play directly with your computer keys:
+  - White keys: <kbd>A</kbd> <kbd>S</kbd> <kbd>D</kbd> <kbd>F</kbd> <kbd>G</kbd> <kbd>H</kbd> <kbd>J</kbd> <kbd>K</kbd> <kbd>L</kbd>
+  - Black keys: <kbd>W</kbd> <kbd>E</kbd> <kbd>T</kbd> <kbd>Y</kbd> <kbd>U</kbd> <kbd>O</kbd> <kbd>P</kbd>
+  - Octave shift: <kbd>Z</kbd> (Down) / <kbd>X</kbd> (Up)
+  - Drum pads: Numeric Keypad <kbd>1</kbd>–<kbd>9</kbd>
+- Click to draw notes, drag edges to resize note length, or use **Chord & Scale Stamps**.
 
----
+### 3. Arrange Your Song (Playlist Arranger)
+- Press <kbd>F5</kbd> (or <kbd>3</kbd>) to view the **Playlist Arranger**.
+- Switch transport from **PAT** (Pattern) to **SONG** mode (<kbd>L</kbd>).
+- Click on any track lane to paint your patterns, loop sections, and structure verse/chorus.
+- Drag audio files (WAV/MP3) straight from your desktop onto the timeline.
 
-## 🖥️ Running on Windows (.EXE & Desktop Launcher)
+### 4. Mix & Polish (Mixer & FX Racks)
+- Press <kbd>F9</kbd> (or <kbd>4</kbd>) to open the **16-Track Mixer**.
+- Add studio plugins to any channel: **Parametric EQ2**, **Gross Beat**, **Reverb**, **Delay**, or **Sidechain Ducking**.
+- Open the **Mastering Suite** on the Master track for 3-Band Linear-Phase Compression & True Peak Limiting.
 
-Apex Studio includes full native desktop support for **Windows 10 & Windows 11**:
-
-### Option 1: 1-Click Launcher (No Installation Required)
-1. Open the **"DESKTOP APP"** menu in the top toolbar.
-2. Click **"Download Windows .EXE Bundle (.ZIP)"** and extract the files.
-3. Double-click `ApexStudio-Windows-Launcher.bat` (or `ApexStudio-Silent.vbs`) to run Apex Studio in a dedicated standalone window with hardware GPU acceleration and low-latency audio processing.
-
-### Option 2: Compile Standalone `.EXE` Installer
-1. Extract the downloaded Windows ZIP bundle.
-2. Right-click `Build-Windows-EXE.ps1` and select **"Run with PowerShell"** (or run `npx electron-builder --win --x64` in terminal).
-3. The standalone Windows installer (`Apex Studio DAW Setup.exe`) will be generated inside the `\dist` folder!
-
-### Option 3: Progressive Web App (PWA)
-1. Open in Google Chrome, Microsoft Edge, or Brave.
-2. Click the **Install** button in the browser address bar (or in the Desktop App modal).
-3. Apex Studio will install directly to your Windows Start Menu and Desktop with unthrottled background audio playback.
+### 5. Save & Export
+- Click **Export** in the top bar to render 24-bit/32-bit Float **WAV**, **MP3**, or **Stem ZIP** bundles.
+- Save your session locally with <kbd>Ctrl</kbd> + <kbd>S</kbd> or export a project `.zip` bundle.
 
 ---
 
-## 🎹 Studio Feature Reference
+## 🖥️ Standalone Windows Desktop App (.EXE)
 
-| Module | Features & Capabilities |
+Apex Studio runs offline as an independent Windows program:
+
+- **1-Click Batch Runner**: Open the **DESKTOP APP** menu, download the bundle, and double-click `ApexStudio-Windows-Launcher.bat`.
+- **Compile `.EXE` Installer**: Right-click `Build-Windows-EXE.ps1` → *Run with PowerShell* to generate `Apex Studio DAW Setup.exe`.
+- **Install PWA**: Click the Install icon in Chrome/Edge to pin Apex Studio to your Windows Start Menu & Taskbar.
+
+---
+
+## 🎹 Studio Feature Matrix
+
+| Module | Core Capabilities |
 | :--- | :--- |
-| **Channel Rack** | 64-Step Drum Sequencer, Swing %, Note Pitch/Velocity offsets, Channel mute/solo, MIDI Learn. |
-| **Piano Roll** | Polyphonic note editing, Chord Stamps (Maj, Min, 7th, 9th, Sus4), Scale Snapping (Aeolian, Dorian, Pentatonic), Velocity velocity bars, Note Splitting & Quantize. |
-| **Playlist Arranger** | Multi-lane timeline, Audio Clips, Pattern Clips, Automation Curves, Marker Navigation, Real-time Tape Scrub Audition. |
-| **Mixer** | 16 Stereo Insert Tracks + Master, 10 FX slots per track, Interactive Mini-FFT spectrum backdrop, Sidechain Send routing, Peak Metering. |
-| **3D Wavetable Synth** | Dual wavetable morphing oscillators, 3D surface visualizer, Sub-osc, Noise generator, Dual ADSR, 24dB Moog-style filter. |
-| **Mastering Suite** | 3-Band Linear Phase Compressor, Mid/Side Stereo Enhancer, True Peak Brickwall Maximizer, EBU R128 LUFS Loudness Meter. |
-| **Gross Beat** | 36 Time & Volume gating curves (Half-Speed, Stutter, Vinyl Brake, Gate, Flanger). |
-| **DirectWave Sampler** | Multi-zone velocity keymapping, Root Key tuning, Pitch envelope, Loop points, Reverse mode. |
-| **Stem Splitter AI** | 4-stem separation (Vocals, Drums, Bass, Instruments) with instant timeline placement. |
+| **Channel Rack** | 64-Step Drum Sequencer, Swing %, Velocity Offsets, MIDI Learn. |
+| **Piano Roll** | Polyphonic Editing, Scale/Chord Stamps, Velocity Bars, Note Chop/Quantize. |
+| **Playlist Arranger** | Multi-lane Timeline, Audio & Pattern Clips, Automation Curves, Tape Scrub. |
+| **16-Track Mixer** | 10 FX Inserts/Track, Spectrum Visualizer, Sidechain Routing, Peak Meters. |
+| **3D Wavetable Synth** | Dual Morphing Oscillators, 3D Wave Surface, Moog 24dB Filter, Dual ADSR. |
+| **Mastering Suite** | 3-Band Linear Phase Compressor, Mid/Side Width, True Peak Limiter, LUFS. |
+| **Gross Beat** | 36 Time/Volume Curves (Half-Speed, Stutter, Vinyl Brake, Gate, Flanger). |
+| **Stem Splitter AI** | 4-Stem Audio Separation (Vocals, Drums, Bass, Instruments) to Timeline. |
 
 ---
 
-## ⌨️ Essential Keyboard Shortcuts
+## ⌨️ Essential Hotkeys
 
-- <kbd>Space</kbd> — Play / Pause Transport
-- <kbd>F5</kbd> — Open Playlist Arranger
-- <kbd>F6</kbd> — Open Channel Rack Step Sequencer
-- <kbd>F7</kbd> — Open Piano Roll
-- <kbd>F9</kbd> — Open Mixer & FX Rack
-- <kbd>Ctrl</kbd> + <kbd>Z</kbd> — Undo Last Action
-- <kbd>Ctrl</kbd> + <kbd>Y</kbd> — Redo
-- <kbd>Ctrl</kbd> + <kbd>S</kbd> — Save Project to Local Storage
-- <kbd>M</kbd> — Toggle Metronome Click
-- <kbd>R</kbd> — Toggle Arm Audio Recording
+| Key | Action | Key | Action |
+| :--- | :--- | :--- | :--- |
+| <kbd>Space</kbd> | Play / Pause | <kbd>F5</kbd> or <kbd>3</kbd> | Playlist Arranger |
+| <kbd>L</kbd> | Pattern / Song Mode | <kbd>F6</kbd> or <kbd>1</kbd> | Channel Rack |
+| <kbd>R</kbd> | Arm Recording | <kbd>F7</kbd> or <kbd>2</kbd> | Piano Roll |
+| <kbd>M</kbd> | Toggle Metronome | <kbd>F9</kbd> or <kbd>4</kbd> | Mixer & FX Rack |
+| <kbd>Ctrl</kbd>+<kbd>S</kbd> | Save Project | <kbd>Ctrl</kbd>+<kbd>Z</kbd> / <kbd>Y</kbd> | Undo / Redo |
 
 ---
 
-## 🛠️ Development & Building
+## 🛠️ Quick Developer Commands
 
-### Requirements
-- Node.js 18+
-- npm / yarn / pnpm
-
-### Quickstart
 ```bash
-# 1. Install dependencies
-npm install
-
-# 2. Run local development server (binds to http://localhost:3000)
-npm run dev
-
-# 3. Build optimized production web app
-npm run build
-
-# 4. Package Windows .EXE installer (via Electron Builder)
-npx electron-builder --win --x64
+npm install          # Install dependencies
+npm run dev          # Run dev server (http://localhost:3000)
+npm run build        # Build production web bundle
+npx electron-builder --win --x64  # Build Windows .exe installer
 ```
 
 ---
 
-## 📜 License & Access
+## 📜 License & Community Access
 
-Apex Studio is **100% Free & Open Access** for all music producers, beatmakers, sound designers, and audio engineers.
-
-*Crafted with precision for next-generation music creators.*
+Apex Studio is **100% Free & Open Access** for all music producers, beatmakers, and sound designers.

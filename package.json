@@ -1,14 +1,39 @@
 {
-  "name": "react-example",
+  "name": "apex-studio-daw",
   "private": true,
-  "version": "0.0.0",
+  "version": "1.0.0",
+  "description": "Apex Studio DAW - Professional Multi-Track Digital Audio Workstation",
+  "main": "electron.cjs",
   "type": "module",
   "scripts": {
     "dev": "vite --port=3000 --host=0.0.0.0",
     "build": "vite build",
     "preview": "vite preview",
+    "package:win": "vite build && electron-builder --win --x64",
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit"
+  },
+  "build": {
+    "appId": "com.apexstudio.daw",
+    "productName": "Apex Studio DAW",
+    "directories": {
+      "output": "dist-electron"
+    },
+    "win": {
+      "target": ["nsis", "portable"],
+      "icon": "public/icon.png"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    },
+    "files": [
+      "dist/**/*",
+      "electron.cjs",
+      "preload.cjs"
+    ]
   },
   "dependencies": {
     "@google/genai": "^2.4.0",

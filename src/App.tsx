@@ -452,39 +452,135 @@ export function App() {
     }));
   };
 
+  // --- Computer Keypad & Keyboard Live Engine ---
+  const [keyboardOctave, setKeyboardOctave] = useState<number>(0);
+  const activeHeldKeysRef = useRef<Set<string>>(new Set());
+
   // --- Keyboard Shortcuts & Global Hotkeys ---
   useEffect(() => {
+    const KEY_NOTE_MAP: Record<string, number> = {
+      // QWERTY White & Black Piano Keys (C4 to E5)
+      'KeyA': 60, // C4
+      'KeyW': 61, // C#4
+      'KeyS': 62, // D4
+      'KeyE': 63, // D#4
+      'KeyD': 64, // E4
+      'KeyF': 65, // F4
+      'KeyT': 66, // F#4
+      'KeyG': 67, // G4
+      'KeyY': 68, // G#4
+      'KeyH': 69, // A4
+      'KeyU': 70, // A#4
+      'KeyJ': 71, // B4
+      'KeyK': 72, // C5
+      'KeyO': 73, // C#5
+      'KeyL': 74, // D5
+      'KeyP': 75, // D#5
+      'Semicolon': 76, // E5
+
+      // Numeric Keypad (Numpad 1..9 MPC Drum & Bass triggers)
+      'Numpad1': 36, // Kick / C2
+      'Numpad2': 38, // Snare / D2
+      'Numpad3': 42, // Closed Hat / F#2
+      'Numpad4': 46, // Open Hat / A#2
+      'Numpad5': 49, // Crash / C#3
+      'Numpad6': 39, // Clap / D#2
+      'Numpad7': 51, // Ride / D#3
+      'Numpad8': 48, // Mid Tom / C3
+      'Numpad9': 45  // Low Tom / A2
+    };
+
     const handleKeyDown = (e: KeyboardEvent) => {
       // Don't intercept when typing in text input fields
       if (['INPUT', 'SELECT', 'TEXTAREA'].includes((e.target as HTMLElement).tagName)) {
         return;
       }
 
+      // 1. Transport & Playback
       if (e.code === 'Space') {
         e.preventDefault();
         handleTogglePlay();
+        return;
       } else if (e.key === 'l' || e.key === 'L') {
         handleTogglePlayMode();
+        return;
       } else if (e.key === 'r' || e.key === 'R') {
         handleToggleRecord();
+        return;
       } else if (e.key === 'm' || e.key === 'M') {
         setMetronome(m => !m);
-      } else if (e.key === '1') {
+        return;
+      } else if (e.code === 'Numpad0' || e.key === '0' || e.code === 'Home') {
+        handleStop();
+        return;
+      }
+
+      // 2. View Switches (F-keys & Digits)
+      if (e.key === '1' || e.code === 'F6') {
+        e.preventDefault();
         setCurrentView('channel_rack');
-      } else if (e.key === '2') {
+        return;
+      } else if (e.key === '2' || e.code === 'F7') {
+        e.preventDefault();
         setCurrentView('piano_roll');
-      } else if (e.key === '3') {
+        return;
+      } else if (e.key === '3' || e.code === 'F5') {
+        e.preventDefault();
         setCurrentView('playlist');
-      } else if (e.key === '4') {
+        return;
+      } else if (e.key === '4' || e.code === 'F9') {
+        e.preventDefault();
         setCurrentView('mixer');
-      } else if (e.key === '5') {
+        return;
+      } else if (e.key === '5' || e.code === 'F8') {
+        e.preventDefault();
         setCurrentView('instruments');
+        return;
+      }
+
+      // 3. Octave Shift
+      if (e.code === 'KeyZ') {
+        setKeyboardOctave(prev => Math.max(-2, prev - 1));
+        return;
+      } else if (e.code === 'KeyX') {
+        setKeyboardOctave(prev => Math.min(2, prev + 1));
+        return;
+      }
+
+      // 4. Live Musical Keypad / Computer Keyboard Note Triggering
+      if (KEY_NOTE_MAP[e.code] !== undefined && !activeHeldKeysRef.current.has(e.code) && !e.repeat) {
+        activeHeldKeysRef.current.add(e.code);
+        const basePitch = KEY_NOTE_MAP[e.code];
+        // Apply octave shift only to non-numpad melodic keys
+        const isNumpad = e.code.startsWith('Numpad');
+        const pitch = isNumpad ? basePitch : basePitch + (keyboardOctave * 12);
+
+        const currentChan = projectState.channels.find(c => c.id === selectedChannelId) || projectState.channels[0];
+        if (currentChan) {
+          audioEngine.playNote(currentChan, {
+            id: `key-${e.code}-${Date.now()}`,
+            pitch,
+            start: 0,
+            duration: 1.2,
+            velocity: 0.95
+          });
+        }
+      }
+    };
+
+    const handleKeyUp = (e: KeyboardEvent) => {
+      if (activeHeldKeysRef.current.has(e.code)) {
+        activeHeldKeysRef.current.delete(e.code);
       }
     };
 
     window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [isPlaying, playMode, projectState]);
+    window.addEventListener('keyup', handleKeyUp);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('keyup', handleKeyUp);
+    };
+  }, [isPlaying, playMode, projectState, selectedChannelId, keyboardOctave]);
 
   const selectedChannel = projectState.channels.find(c => c.id === selectedChannelId) || projectState.channels[0];
 
