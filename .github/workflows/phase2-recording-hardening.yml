@@ -3,6 +3,8 @@ name: Phase 2 Recording Hardening
 on:
   push:
     branches: [phase-2-recording-hardening]
+  pull_request:
+    branches: [phase-0-foundation-ui]
 
 permissions:
   contents: write
@@ -16,147 +18,26 @@ jobs:
         run: |
           python3 - <<'PY'
           from pathlib import Path
-          import re
-
           p = Path('src/audio/audioEngine.ts')
           s = p.read_text()
-          s = s.replace("  private recordingAnalyser: AnalyserNode | null = null;", "  private recordingAnalyser: AnalyserNode | null = null;\n  private recordingStartedAt = 0;\n  private recordingMimeType = 'audio/webm';")
+          if 'private recordingStartedAt = 0;' not in s:
+              s = s.replace("  private recordingAnalyser: AnalyserNode | null = null;", "  private recordingAnalyser: AnalyserNode | null = null;\n  private recordingStartedAt = 0;\n  private recordingMimeType = 'audio/webm';")
           start = s.index('  // Real-Time Audio Recorder (Microphone/Line-In)')
           end = s.index('  // Web MIDI API Integration', start)
-          block = r'''  // Real-Time Audio Recorder (Microphone/Line-In)
-  public async startAudioRecording(): Promise<MediaStream> {
-    if (!this.ctx) this.init();
-    if (!this.ctx) throw new Error('Audio engine failed to initialize');
-    if (!navigator.mediaDevices?.getUserMedia) throw new Error('Microphone capture is not supported in this environment');
-    if (typeof MediaRecorder === 'undefined') throw new Error('MediaRecorder is not supported in this environment');
-    if (this.mediaRecorder && this.mediaRecorder.state !== 'inactive') {
-      throw new Error('A recording is already in progress');
-    }
-
-    this.recordedChunks = [];
-    const stream = await navigator.mediaDevices.getUserMedia({
-      audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false }
-    });
-
-    this.mediaStream = stream;
-    const source = this.ctx.createMediaStreamSource(stream);
-    this.recordingAnalyser?.disconnect();
-    this.recordingAnalyser = this.ctx.createAnalyser();
-    this.recordingAnalyser.fftSize = 512;
-    this.recordingAnalyser.smoothingTimeConstant = 0.65;
-    source.connect(this.recordingAnalyser);
-
-    const candidates = ['audio/webm;codecs=opus', 'audio/ogg;codecs=opus', 'audio/webm'];
-    const mimeType = candidates.find(type => MediaRecorder.isTypeSupported(type));
-    const options = mimeType ? { mimeType } : undefined;
-    this.recordingMimeType = mimeType ?? 'audio/webm';
-    this.mediaRecorder = new MediaRecorder(stream, options);
-    this.mediaRecorder.ondataavailable = (event) => {
-      if (event.data.size > 0) this.recordedChunks.push(event.data);
-    };
-    this.recordingStartedAt = performance.now();
-    this.mediaRecorder.start(250);
-    return stream;
-  }
-
-  public pauseAudioRecording(): void {
-    if (this.mediaRecorder?.state === 'recording') this.mediaRecorder.pause();
-  }
-
-  public resumeAudioRecording(): void {
-    if (this.mediaRecorder?.state === 'paused') this.mediaRecorder.resume();
-  }
-
-  public getRecordingPeak(): number {
-    if (!this.recordingAnalyser) return 0;
-    const array = new Uint8Array(this.recordingAnalyser.fftSize);
-    this.recordingAnalyser.getByteTimeDomainData(array);
-    let max = 0;
-    for (let i = 0; i < array.length; i++) max = Math.max(max, Math.abs(array[i] - 128) / 128);
-    return max;
-  }
-
-  private async buildRecordingWaveform(blob: Blob, sampleCount = 256): Promise<number[]> {
-    if (!this.ctx || blob.size === 0) return [];
-    try {
-      const bytes = await blob.arrayBuffer();
-      const decoded = await this.ctx.decodeAudioData(bytes.slice(0));
-      const channels = decoded.numberOfChannels;
-      const length = decoded.length;
-      const waveform = new Array(sampleCount).fill(0);
-      for (let i = 0; i < sampleCount; i++) {
-        const start = Math.floor((i / sampleCount) * length);
-        const end = Math.max(start + 1, Math.floor(((i + 1) / sampleCount) * length));
-        let peak = 0;
-        for (let frame = start; frame < end; frame++) {
-          for (let ch = 0; ch < channels; ch++) peak = Math.max(peak, Math.abs(decoded.getChannelData(ch)[frame]));
-        }
-        waveform[i] = Math.min(1, peak);
-      }
-      return waveform;
-    } catch {
-      return [];
-    }
-  }
-
-  public async stopAudioRecording(): Promise<AudioRecording> {
-    const recorder = this.mediaRecorder;
-    if (!recorder) {
-      throw new Error('No active recording');
-    }
-
-    return new Promise((resolve, reject) => {
-      recorder.onstop = async () => {
-        try {
-          const blob = new Blob(this.recordedChunks, { type: this.recordingMimeType });
-          const durationSeconds = Math.max(0, (performance.now() - this.recordingStartedAt) / 1000);
-          const waveform = await this.buildRecordingWaveform(blob);
-          const audioUrl = URL.createObjectURL(blob);
-
-          this.mediaStream?.getTracks().forEach(track => track.stop());
-          this.mediaStream = null;
-          this.recordingAnalyser?.disconnect();
-          this.recordingAnalyser = null;
-          this.mediaRecorder = null;
-          this.recordedChunks = [];
-
-          resolve({
-            id: `rec-${Date.now()}`,
-            name: `Audio Take ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}`,
-            timestamp: Date.now(),
-            durationSeconds,
-            audioBlob: blob,
-            audioUrl,
-            waveform,
-          });
-        } catch (error) {
-          reject(error);
-        }
-      };
-      recorder.onerror = () => reject(new Error('Audio recording failed'));
-      if (recorder.state !== 'inactive') recorder.stop();
-    });
-  }
-
-'''
+          block = '''  // Real-Time Audio Recorder (Microphone/Line-In)\n  public async startAudioRecording(): Promise<MediaStream> {\n    if (!this.ctx) this.init();\n    if (!this.ctx) throw new Error('Audio engine failed to initialize');\n    if (!navigator.mediaDevices?.getUserMedia) throw new Error('Microphone capture is not supported in this environment');\n    if (typeof MediaRecorder === 'undefined') throw new Error('MediaRecorder is not supported in this environment');\n    if (this.mediaRecorder && this.mediaRecorder.state !== 'inactive') throw new Error('A recording is already in progress');\n    this.recordedChunks = [];\n    const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false } });\n    this.mediaStream = stream;\n    const source = this.ctx.createMediaStreamSource(stream);\n    this.recordingAnalyser?.disconnect();\n    this.recordingAnalyser = this.ctx.createAnalyser();\n    this.recordingAnalyser.fftSize = 512;\n    this.recordingAnalyser.smoothingTimeConstant = 0.65;\n    source.connect(this.recordingAnalyser);\n    const candidates = ['audio/webm;codecs=opus', 'audio/ogg;codecs=opus', 'audio/webm'];\n    const mimeType = candidates.find(type => MediaRecorder.isTypeSupported(type));\n    this.recordingMimeType = mimeType ?? 'audio/webm';\n    this.mediaRecorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);\n    this.mediaRecorder.ondataavailable = event => { if (event.data.size > 0) this.recordedChunks.push(event.data); };\n    this.recordingStartedAt = performance.now();\n    this.mediaRecorder.start(250);\n    return stream;\n  }\n\n  public pauseAudioRecording(): void { if (this.mediaRecorder?.state === 'recording') this.mediaRecorder.pause(); }\n  public resumeAudioRecording(): void { if (this.mediaRecorder?.state === 'paused') this.mediaRecorder.resume(); }\n\n  public getRecordingPeak(): number {\n    if (!this.recordingAnalyser) return 0;\n    const array = new Uint8Array(this.recordingAnalyser.fftSize);\n    this.recordingAnalyser.getByteTimeDomainData(array);\n    let max = 0;\n    for (let i = 0; i < array.length; i++) max = Math.max(max, Math.abs(array[i] - 128) / 128);\n    return max;\n  }\n\n  private async buildRecordingWaveform(blob: Blob, sampleCount = 256): Promise<number[]> {\n    if (!this.ctx || blob.size === 0) return [];\n    try {\n      const decoded = await this.ctx.decodeAudioData(await blob.arrayBuffer());\n      const waveform = new Array(sampleCount).fill(0);\n      const channels = Array.from({ length: decoded.numberOfChannels }, (_, i) => decoded.getChannelData(i));\n      for (let i = 0; i < sampleCount; i++) {\n        const start = Math.floor(i * decoded.length / sampleCount);\n        const end = Math.max(start + 1, Math.floor((i + 1) * decoded.length / sampleCount));\n        let peak = 0;\n        for (let frame = start; frame < end; frame++) for (const channel of channels) peak = Math.max(peak, Math.abs(channel[frame]));\n        waveform[i] = Math.min(1, peak);\n      }\n      return waveform;\n    } catch { return []; }\n  }\n\n  public async stopAudioRecording(): Promise<AudioRecording> {\n    const recorder = this.mediaRecorder;\n    if (!recorder) throw new Error('No active recording');\n    return new Promise((resolve, reject) => {\n      recorder.onstop = async () => {\n        try {\n          const blob = new Blob(this.recordedChunks, { type: this.recordingMimeType });\n          const durationSeconds = Math.max(0, (performance.now() - this.recordingStartedAt) / 1000);\n          const waveform = await this.buildRecordingWaveform(blob);\n          const audioUrl = URL.createObjectURL(blob);\n          this.mediaStream?.getTracks().forEach(track => track.stop());\n          this.mediaStream = null;\n          this.recordingAnalyser?.disconnect();\n          this.recordingAnalyser = null;\n          this.mediaRecorder = null;\n          this.recordedChunks = [];\n          resolve({ id: `rec-${Date.now()}`, name: `Audio Take ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}`, timestamp: Date.now(), durationSeconds, audioBlob: blob, audioUrl, waveform });\n        } catch (error) { reject(error); }\n      };\n      recorder.onerror = () => reject(new Error('Audio recording failed'));\n      if (recorder.state !== 'inactive') recorder.stop();\n    });\n  }\n\n'''
           s = s[:start] + block + s[end:]
           p.write_text(s)
           PY
       - name: Typecheck and build
         run: |
-          corepack enable || true
-          if [ -f bun.lock ]; then curl -fsSL https://bun.sh/install | bash; export BUN_INSTALL="$HOME/.bun"; export PATH="$BUN_INSTALL/bin:$PATH"; bun install --frozen-lockfile; bun run build; else npm ci; npm run build; fi
-      - name: Commit patch
+          npm install
+          npm run lint
+          npm run build
+      - name: Commit patch when running on a branch
+        if: github.event_name == 'push'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add src/audio/audioEngine.ts
           git diff --cached --quiet || git commit -m "feat: harden real-time audio recording"
           git push
-      - name: Remove patch workflow
-        if: always()
-        run: |
-          rm -f .github/workflows/phase2-recording-hardening.yml
-          git add .github/workflows/phase2-recording-hardening.yml
-          git diff --cached --quiet || git commit -m "ci: remove one-shot phase 2 patch workflow"
-          git push || true
