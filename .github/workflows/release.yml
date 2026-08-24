@@ -22,10 +22,9 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: 'npm'
 
       - name: Install Project Dependencies
-        run: npm ci
+        run: npm install --legacy-peer-deps
 
       - name: Compile Optimized Web Bundle
         run: npm run build
@@ -33,7 +32,7 @@ jobs:
       - name: Package Standalone Windows Executable (.exe)
         run: npx electron-builder --win --x64
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Create GitHub Release & Upload Assets
         uses: softprops/action-gh-release@v2
@@ -42,10 +41,11 @@ jobs:
           name: "Apex Studio DAW ${{ github.ref_name }}"
           draft: false
           prerelease: false
-          generate_release_notes: true
+          generate_release_notes: false
+          body: "Official standalone Windows installer (.exe) for Apex Studio DAW. Unpack or install to run completely offline on Windows 10 & 11."
           files: |
-            dist/*.exe
-            dist/*.zip
-            dist/*.blockmap
+            dist-electron/*.exe
+            dist-electron/*.zip
+            dist-electron/*.blockmap
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
