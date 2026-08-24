@@ -21,7 +21,7 @@ jobs:
       - name: Setup Node.js Environment
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
 
       - name: Install Project Dependencies
         run: npm install --legacy-peer-deps
@@ -30,7 +30,7 @@ jobs:
         run: npm run build
 
       - name: Package Standalone Windows Executable (.exe)
-        run: npx electron-builder --win --x64
+        run: npx electron-builder --win --x64 --publish never
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -42,7 +42,7 @@ jobs:
           draft: false
           prerelease: false
           generate_release_notes: false
-          body: "Official standalone Windows installer (.exe) for Apex Studio DAW. Unpack or install to run completely offline on Windows 10 & 11."
+          body: "Official standalone Windows installer (.exe) for Apex Studio DAW."
           files: |
             dist-electron/*.exe
             dist-electron/*.zip
