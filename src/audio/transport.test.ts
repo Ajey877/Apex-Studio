@@ -1,9 +1,17 @@
-import { describe, expect, it, beforeEach, afterEach } from 'node:test';
+import { describe, it, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { AudioClockTransport } from './transport';
 
 class FakeAudioContext {
-  currentTime = 0;
+  private _currentTime = 0;
+
+  get currentTime(): number {
+    return this._currentTime;
+  }
+
+  set currentTime(value: number) {
+    this._currentTime = value;
+  }
 }
 
 type TimerCallback = () => void;
