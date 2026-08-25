@@ -1,0 +1,1 @@
+Phase 6 registry is a foundational model only. Audio routing, UI, timeline and persistence remain separate increments.
