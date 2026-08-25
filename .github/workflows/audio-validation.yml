@@ -4,7 +4,7 @@ on:
   pull_request:
     branches: [phase-0-foundation-ui, main]
   push:
-    branches: [phase-0-foundation-ui, main]
+    branches: [main, phase-0-foundation-ui, phase-5.5-hardening]
 
 permissions:
   contents: read
@@ -23,6 +23,9 @@ jobs:
 
       - name: Install dependencies
         run: npm install --legacy-peer-deps
+
+      - name: Desktop security configuration
+        run: npm run verify:desktop
 
       - name: TypeScript check
         run: npm run lint

@@ -26,11 +26,20 @@ jobs:
       - name: Install Project Dependencies
         run: npm install --legacy-peer-deps
 
+      - name: Desktop security configuration
+        run: npm run verify:desktop
+
+      - name: TypeScript check
+        run: npm run lint
+
+      - name: Audio regression tests
+        run: npm run test:audio
+
       - name: Compile Optimized Web Bundle
         run: npm run build
 
       - name: Package Standalone Windows Executable (.exe)
-        run: npx electron-builder --win --x64 --publish never
+        run: npm run package:win
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 

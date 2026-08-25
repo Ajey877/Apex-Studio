@@ -1,17 +1,17 @@
-name: Apex Studio CI
+name: Desktop Validation
 
 on:
-  push:
-    branches: [main, phase-0-foundation-ui, phase-5.5-hardening]
   pull_request:
     branches: [main]
+  push:
+    branches: [main, phase-5.5-hardening]
 
 permissions:
   contents: read
 
 jobs:
-  verify:
-    runs-on: ubuntu-latest
+  windows-package:
+    runs-on: windows-latest
 
     steps:
       - name: Checkout
@@ -33,3 +33,6 @@ jobs:
 
       - name: Production build
         run: npm run build
+
+      - name: Validate Windows package
+        run: npm run package:win:dir
