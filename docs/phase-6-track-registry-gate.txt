@@ -1,0 +1,3 @@
+Phase 6 Track Registry Gate
+CI + Audio Validation + Desktop Validation must pass before merge.
+No UI or audio-routing changes are included.
