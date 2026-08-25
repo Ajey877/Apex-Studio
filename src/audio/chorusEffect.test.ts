@@ -57,9 +57,15 @@ describe('ChorusEffect', () => {
     assert.doesNotThrow(() => effect.setParameter('mix', 0.75, 20));
     assert.throws(() => effect.setParameter('rate', 0, 20), /between 0.05 and 20/);
     assert.throws(() => effect.setParameter('depth', 0.021, 20), /between 0 and 0.02/);
+    assert.throws(() => effect.setParameter('depth', 0.05, 20), /cannot exceed the base delay/);
     assert.throws(() => effect.setParameter('delay', 0.081, 20), /between 0.005 and 0.08/);
+    assert.throws(() => effect.setParameter('delay', 0.005, 20), /cannot be smaller than the modulation depth/);
     assert.throws(() => effect.setParameter('mix', 1.1, 20), /between 0 and 1/);
     assert.throws(() => effect.setParameter('unknown', 1, 20), /Unknown Chorus/);
+  });
+
+  it('rejects unsafe constructor modulation combinations', () => {
+    assert.throws(() => new ChorusEffect(context(), 'unsafe', 1, 0.02, 0.005), /cannot exceed the base delay/);
   });
 
   it('rejects non-finite values and prevents use after disposal', () => {
