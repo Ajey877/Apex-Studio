@@ -15,6 +15,7 @@ import {
 } from 'lucide-react';
 import JSZip from 'jszip';
 import { ProjectState } from '../types/daw';
+import { normalizeProjectState } from '../state/projectState';
 
 interface ProjectBundleZipModalProps {
   isOpen: boolean;
@@ -132,7 +133,7 @@ Web: https://ai.studio
         }
 
         const manifestContent = await manifestFile.async('string');
-        const loadedState = JSON.parse(manifestContent) as ProjectState;
+        const loadedState = normalizeProjectState(JSON.parse(manifestContent));
 
         onLoadProjectState(loadedState);
         setIsImporting(false);
