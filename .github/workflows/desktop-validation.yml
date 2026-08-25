@@ -1,0 +1,36 @@
+name: Desktop Validation
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main, phase-5.5-hardening]
+
+permissions:
+  contents: read
+
+jobs:
+  windows-package:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm install --legacy-peer-deps
+
+      - name: TypeScript check
+        run: npm run lint
+
+      - name: Production build
+        run: npm run build
+
+      - name: Validate Windows package
+        run: npm run package:win:dir
