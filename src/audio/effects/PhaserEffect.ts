@@ -10,13 +10,14 @@ export class PhaserEffect implements AudioEffect {
   private readonly lfo: OscillatorNode;
   private readonly lfoDepth: GainNode;
   private readonly feedback: GainNode;
+  private readonly stageCount = 4;
   private currentCenterHz: number;
   private disposed = false;
   constructor(private readonly context: AudioContext, readonly id='phaser', rateHz=0.35, depthHz=900, centerHz=900, feedbackAmount=0.35, mix=0.5) {
     this.validate('rate',rateHz); this.validate('depth',depthHz); this.validate('center',centerHz); this.validate('feedback',feedbackAmount); this.validate('mix',mix); this.currentCenterHz=centerHz;
     this.input=context.createGain(); this.output=context.createGain(); this.dry=context.createGain(); this.wet=context.createGain(); this.feedback=context.createGain(); this.lfo=context.createOscillator(); this.lfoDepth=context.createGain();
-    this.stages=Array.from({length:4},()=>{const f=context.createBiquadFilter();f.type='allpass';return f;});
-    this.input.connect(this.dry);this.dry.connect(this.output);this.input.connect(this.stages[0]);for(let i=0;i<3;i++)this.stages[i].connect(this.stages[i+1]);this.stages[3].connect(this.wet);this.wet.connect(this.output);this.wet.connect(this.feedback);this.feedback.connect(this.stages[0]);this.lfo.connect(this.lfoDepth);for(const stage of this.stages)this.lfoDepth.connect(stage.frequency);this.lfo.start();
+    this.stages=Array.from({length:this.stageCount},()=>{const f=context.createBiquadFilter();f.type='allpass';return f;});
+    this.input.connect(this.dry);this.dry.connect(this.output);this.input.connect(this.stages[0]);for(let i=0;i<this.stageCount-1;i++)this.stages[i].connect(this.stages[i+1]);this.stages[this.stageCount-1].connect(this.wet);this.wet.connect(this.output);this.wet.connect(this.feedback);this.feedback.connect(this.stages[0]);this.lfo.connect(this.lfoDepth);for(const stage of this.stages)this.lfoDepth.connect(stage.frequency);this.lfo.start();
     this.setParameter('rate',rateHz,context.currentTime);this.setParameter('depth',depthHz,context.currentTime);this.setParameter('center',centerHz,context.currentTime);this.setParameter('feedback',feedbackAmount,context.currentTime);this.setParameter('mix',mix,context.currentTime);
   }
   setParameter(name:string,value:number,time:number):void{this.assertAlive();assertFiniteEffectParameter(name,value);if(!Number.isFinite(time))throw new Error('Effect parameter time must be finite.');this.validate(name,value);switch(name){case'rate':this.lfo.frequency.setValueAtTime(value,time);return;case'depth':this.lfoDepth.gain.setValueAtTime(value,time);return;case'center':this.currentCenterHz=value;this.updateCenters(time);return;case'feedback':this.feedback.gain.setValueAtTime(value,time);return;case'mix':this.dry.gain.setValueAtTime(1-value,time);this.wet.gain.setValueAtTime(value,time);return;default:throw new Error(`Unknown Phaser effect parameter: ${name}`);}}
