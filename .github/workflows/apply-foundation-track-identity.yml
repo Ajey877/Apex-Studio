@@ -1,0 +1,50 @@
+name: Apply foundation track identity patch
+
+on:
+  push:
+    branches:
+      - foundation-track-identity
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout branch
+        uses: actions/checkout@v4
+
+      - name: Apply exact identity fix and remove temporary workflow
+        shell: python
+        run: |
+          from pathlib import Path
+
+          path = Path('src/App.tsx')
+          text = path.read_text()
+
+          old_import = "import { audioEngine } from './audio/audioEngine';\n"
+          new_import = old_import + "import { allocateStableMixerTrackId } from './audio/mixerTrackIdentity';\n"
+          if new_import not in text:
+              if old_import not in text:
+                  raise SystemExit('Expected audioEngine import was not found.')
+              text = text.replace(old_import, new_import, 1)
+
+          old_expression = 'mixerTrackId: (projectState.channels.length % 7) + 1,'
+          new_expression = 'mixerTrackId: allocateStableMixerTrackId(projectState.channels, projectState.mixerTracks),'
+          if old_expression not in text:
+              raise SystemExit('Expected unsafe mixerTrackId allocation was not found.')
+          text = text.replace(old_expression, new_expression, 1)
+          path.write_text(text)
+
+          Path('.github/workflows/apply-foundation-track-identity.yml').unlink()
+
+      - name: Commit stabilization change
+        shell: bash
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/App.tsx .github/workflows/apply-foundation-track-identity.yml
+          git commit -m 'fix: stabilize mixer track identity allocation'
+          git push
