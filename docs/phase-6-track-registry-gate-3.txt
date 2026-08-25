@@ -1,0 +1,1 @@
+Acceptance: unique track IDs, stable removal semantics, immutable snapshots, validated gain/pan/mute/solo updates, deterministic errors for invalid operations.
