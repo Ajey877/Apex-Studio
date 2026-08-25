@@ -5,6 +5,11 @@ import {
   isChannelAudible,
 } from './mixerChannel';
 import { ChannelInsertRack } from './insertRack';
+import {
+  AutomationCurve,
+  clampAutomationPoints,
+  type AutomationPoint,
+} from './parameterAutomation';
 
 export interface ChannelStripNodes {
   input: AudioNode;
@@ -61,6 +66,19 @@ export class MixerChannelStrip {
     if (!Number.isFinite(pan)) throw new Error('Mixer pan must be finite.');
     this.state = { ...this.state, pan: Math.max(-1, Math.min(1, pan)) };
     this.applyState();
+  }
+
+  /** Schedule bounded volume automation in dB, converted to linear gain for Web Audio. */
+  scheduleVolumeAutomation(points: readonly AutomationPoint[], startTime = this.context.currentTime): void {
+    const bounded = clampAutomationPoints(points, -60, 12);
+    const gainPoints = bounded.map(point => ({ time: point.time, value: dbToGain(point.value) }));
+    new AutomationCurve(gainPoints).schedule(this.gain.gain, startTime);
+  }
+
+  /** Schedule bounded stereo-pan automation from -1 (left) to +1 (right). */
+  schedulePanAutomation(points: readonly AutomationPoint[], startTime = this.context.currentTime): void {
+    const bounded = clampAutomationPoints(points, -1, 1);
+    new AutomationCurve(bounded).schedule(this.panner.pan, startTime);
   }
 
   setMuted(muted: boolean): void {
