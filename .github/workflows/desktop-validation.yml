@@ -25,6 +25,9 @@ jobs:
       - name: Install dependencies
         run: npm install --legacy-peer-deps
 
+      - name: Desktop security configuration
+        run: npm run verify:desktop
+
       - name: TypeScript check
         run: npm run lint
 
