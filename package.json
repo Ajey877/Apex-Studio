@@ -17,7 +17,8 @@
     "package:win:dir": "vite build && electron-builder --win --x64 --dir --publish never",
     "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true}); require('fs').rmSync('server.js',{force:true})\"",
     "lint": "tsc --noEmit",
-    "test:audio": "tsx --test src/audio/*.test.ts src/audio/automation/*.test.ts"
+    "test:audio": "tsx --test src/audio/*.test.ts src/audio/automation/*.test.ts",
+    "verify:desktop": "node scripts/verify-desktop-config.mjs"
   },
   "build": {
     "appId": "com.apexstudio.daw",
