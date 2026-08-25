@@ -12,7 +12,8 @@ function context():AudioContext {
  const biquad=()=>({...node(),frequency:param(),type:'allpass'});
  const osc=()=>({...node(),frequency:param(),start(){},stop(){}});
  const compressor=()=>({...node(),threshold:param(),knee:param(),ratio:param(),attack:param(),release:param()});
- return {currentTime:10,createGain:gain,createBiquadFilter:biquad,createOscillator:osc,createDynamicsCompressor:compressor} as unknown as AudioContext;
+ const waveShaper=()=>({...node(),curve:null,oversample:'none'});
+ return {currentTime:10,createGain:gain,createBiquadFilter:biquad,createOscillator:osc,createDynamicsCompressor:compressor,createWaveShaper:waveShaper} as unknown as AudioContext;
 }
 
 describe('Phase 5 phaser and limiter effects',()=>{
@@ -26,7 +27,7 @@ describe('Phase 5 phaser and limiter effects',()=>{
   assert.throws(()=>e.setParameter('mix',Number.NaN,20),/must be finite/);
   e.dispose(); assert.doesNotThrow(()=>e.dispose()); assert.throws(()=>e.setParameter('mix',0.5,20),/disposed/);
  });
- it('constructs limiter with safety defaults and automates its controls',()=>{
+ it('constructs limiter with a final ceiling stage and automates its controls',()=>{
   const e=new LimiterEffect(context());
   assert.equal(e.name,'Limiter');
   assert.doesNotThrow(()=>e.setParameter('ceiling',-1,20));
