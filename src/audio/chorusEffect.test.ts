@@ -43,8 +43,10 @@ describe('ChorusEffect', () => {
     const effect = new ChorusEffect(context());
     assert.equal(effect.name, 'Chorus');
     assert.equal(effect.id, 'chorus');
-    assert.equal(effect.input.connections.length, 2);
-    assert.equal(effect.output.connections.length, 0);
+    const input = effect.input as unknown as FakeNode;
+    const output = effect.output as unknown as FakeNode;
+    assert.equal(input.connections.length, 2);
+    assert.equal(output.connections.length, 0);
   });
 
   it('validates and schedules all parameters', () => {
