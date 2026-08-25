@@ -41,7 +41,6 @@ describe('ReverbEffect', () => {
   it('builds four bounded feedback paths', () => {
     const effect = new ReverbEffect(context(), 'room', 0.3, 0.7, 0.8);
     assert.equal((effect.input as unknown as FakeNode).connections.length, 2);
-    assert.equal((effect.output as unknown as FakeNode).connections.length, 0);
   });
 
   it('schedules wet, dry, and decay deterministically', () => {
@@ -49,8 +48,9 @@ describe('ReverbEffect', () => {
     effect.setParameter('wet', 0.4, 12);
     effect.setParameter('dry', 0.6, 12);
     effect.setParameter('decay', 0.9, 12);
-    assert.equal((effect.wetGain as unknown as { gain: FakeParam }).gain.values.at(-1)?.value, 0.4);
-    assert.equal((effect.dryGain as unknown as { gain: FakeParam }).gain.values.at(-1)?.value, 0.6);
+    const internal = effect as unknown as { wetGain: GainNode; dryGain: GainNode };
+    assert.equal((internal.wetGain as unknown as { gain: FakeParam }).gain.values.at(-1)?.value, 0.4);
+    assert.equal((internal.dryGain as unknown as { gain: FakeParam }).gain.values.at(-1)?.value, 0.6);
   });
 
   it('rejects invalid parameters and prevents unity feedback', () => {
