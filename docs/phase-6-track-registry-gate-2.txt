@@ -1,0 +1,1 @@
+Phase 6 registry must remain UI-agnostic. Merge only after CI, Audio Validation, and Desktop Validation are green.
