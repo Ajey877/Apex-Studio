@@ -17,6 +17,7 @@ import {
   MasteringSuiteState
 } from './types/daw';
 import { audioEngine } from './audio/audioEngine';
+import { allocateStableMixerTrackId } from './audio/mixerTrackIdentity';
 import { 
   DEFAULT_PROJECT, 
   PRESET_PROJECTS, 
@@ -310,7 +311,7 @@ export function App() {
       name,
       color,
       instrumentType: type,
-      mixerTrackId: (projectState.channels.length % 7) + 1,
+      mixerTrackId: allocateStableMixerTrackId(projectState.channels, projectState.mixerTracks),
       volume: 0.85,
       pan: 0,
       pitch: 0,
