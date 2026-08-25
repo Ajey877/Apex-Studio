@@ -68,10 +68,11 @@ export class MixerChannelStrip {
     this.applyState();
   }
 
-  /** Schedule bounded volume automation in dB relative to the channel gain. */
+  /** Schedule bounded volume automation in dB, converted to linear gain for Web Audio. */
   scheduleVolumeAutomation(points: readonly AutomationPoint[], startTime = this.context.currentTime): void {
     const bounded = clampAutomationPoints(points, -60, 12);
-    new AutomationCurve(bounded).schedule(this.gain.gain, startTime);
+    const gainPoints = bounded.map(point => ({ time: point.time, value: dbToGain(point.value) }));
+    new AutomationCurve(gainPoints).schedule(this.gain.gain, startTime);
   }
 
   /** Schedule bounded stereo-pan automation from -1 (left) to +1 (right). */
