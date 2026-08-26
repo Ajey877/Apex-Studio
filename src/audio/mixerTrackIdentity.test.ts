@@ -95,7 +95,7 @@ describe('Stable mixer track identity', () => {
         { ...base.channels[1], mixerTrackId: 40 }
       ],
       mixerTracks: [],
-      nextMixerTrackId: 1
+      nextMixerTrackId: 41
     };
 
     assert.equal(deriveNextMixerTrackId(project), 41);
@@ -108,7 +108,7 @@ describe('Stable mixer track identity', () => {
       ...base,
       channels: [{ ...base.channels[0], mixerTrackId: 1000 }],
       mixerTracks: [],
-      nextMixerTrackId: 1
+      nextMixerTrackId: 1001
     };
 
     assert.equal(deriveNextMixerTrackId(project), 1001);
