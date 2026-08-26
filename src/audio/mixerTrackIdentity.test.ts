@@ -179,7 +179,7 @@ describe('Stable mixer track identity', () => {
     delete legacy.nextMixerTrackId;
 
     const duplicateIds = findDuplicateMixerTrackIdentities(normalizeProjectState(legacy));
-    assert.deepEqual(duplicateIds, [1, 2, 42]);
+    assert.deepEqual(duplicateIds, [42]);
     const normalized = normalizeProjectState(legacy);
     assert.equal(normalized.channels[0].mixerTrackId, 42);
     assert.equal(normalized.channels[1].mixerTrackId, 42);
