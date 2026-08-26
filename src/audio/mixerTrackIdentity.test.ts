@@ -88,6 +88,7 @@ describe('Stable mixer track identity', () => {
 
   it('handles non-sequential existing identities', () => {
     const project = createDefaultProjectState();
+    project.mixerTracks = [];
     project.channels = project.channels.map((channel, index) => ({
       ...channel,
       mixerTrackId: index === 0 ? 20 : 40
@@ -100,7 +101,9 @@ describe('Stable mixer track identity', () => {
 
   it('handles high existing identities', () => {
     const project = createDefaultProjectState();
+    project.mixerTracks = [];
     project.channels[0].mixerTrackId = 1000;
+    project.channels = project.channels.slice(0, 1);
     project.nextMixerTrackId = 1;
 
     assert.equal(deriveNextMixerTrackId(project), 1001);
