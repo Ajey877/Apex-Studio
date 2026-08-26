@@ -23,6 +23,7 @@ import {
   createDefaultMixerTracks, 
   createDefaultPlaylistTracks 
 } from './audio/presets';
+import { appendChannelWithAllocatedMixerTrackId } from './state/mixerTrackIdentity';
 
 // Component Suite
 import { TransportBar } from './components/TransportBar';
@@ -305,12 +306,11 @@ export function App() {
   };
 
   const handleAddChannel = (type: InstrumentType, name: string, color: string) => {
-    const newChan: Channel = {
+    const channel = {
       id: `ch-${Date.now()}`,
       name,
       color,
       instrumentType: type,
-      mixerTrackId: (projectState.channels.length % 7) + 1,
       volume: 0.85,
       pan: 0,
       pitch: 0,
@@ -319,13 +319,10 @@ export function App() {
       steps: Array(16).fill(false),
       notes: [],
       synthParams: audioEngine.getDefaultSynthParams()
-    };
+    } satisfies Omit<Channel, 'mixerTrackId'>;
 
-    setProjectState(prev => ({
-      ...prev,
-      channels: [...prev.channels, newChan]
-    }));
-    setSelectedChannelId(newChan.id);
+    setProjectState(prev => appendChannelWithAllocatedMixerTrackId(prev, channel));
+    setSelectedChannelId(channel.id);
   };
 
   const handleDeleteChannel = (channelId: string) => {
@@ -1106,27 +1103,24 @@ export function App() {
           handleUpdateChannel(chId, { customSample: sampleData });
         }}
         onCreateChannelFromSample={(sampleData) => {
-          const newCh: Channel = {
+          const channel = {
             id: `ch-sample-${Date.now()}`,
             name: sampleData.name || 'Sample Pad',
-            instrumentType: 'sampler',
+            instrumentType: 'sampler' as const,
             volume: 0.85,
             pan: 0,
             pitch: 0,
             mute: false,
             solo: false,
             color: '#00ff88',
-            mixerTrackId: 1,
             steps: Array(16).fill(false),
             notes: [],
             synthParams: { ...DEFAULT_PROJECT.channels[0].synthParams },
             customSample: sampleData
-          };
-          setProjectState(prev => ({
-            ...prev,
-            channels: [...prev.channels, newCh]
-          }));
-          setSelectedChannelId(newCh.id);
+          } satisfies Omit<Channel, 'mixerTrackId'>;
+
+          setProjectState(prev => appendChannelWithAllocatedMixerTrackId(prev, channel));
+          setSelectedChannelId(channel.id);
         }}
       />
 
@@ -1308,4 +1302,3 @@ export function App() {
 }
 
 export default App;
-
