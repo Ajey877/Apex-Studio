@@ -26,25 +26,34 @@ const collectOccupiedMixerTrackIds = (projectState: ProjectState): Set<number> =
 export const getOccupiedMixerTrackIds = (projectState: ProjectState): Set<number> =>
   collectOccupiedMixerTrackIds(projectState);
 
-export const findDuplicateMixerTrackIdentities = (projectState: ProjectState): number[] => {
+const findDuplicateIds = (ids: number[]): number[] => {
   const counts = new Map<number, number>();
-
-  for (const channel of projectState.channels) {
-    if (isPositiveSafeInteger(channel.mixerTrackId)) {
-      counts.set(channel.mixerTrackId, (counts.get(channel.mixerTrackId) ?? 0) + 1);
-    }
+  for (const id of ids) {
+    counts.set(id, (counts.get(id) ?? 0) + 1);
   }
-
-  for (const mixerTrack of projectState.mixerTracks) {
-    if (isPositiveSafeInteger(mixerTrack.id)) {
-      counts.set(mixerTrack.id, (counts.get(mixerTrack.id) ?? 0) + 1);
-    }
-  }
-
   return [...counts.entries()]
     .filter(([, count]) => count > 1)
     .map(([id]) => id)
     .sort((a, b) => a - b);
+};
+
+/** Detects duplicate records within each identity-bearing collection.
+ * A channel ID appearing once and the corresponding MixerTrack ID appearing once
+ * is the normal representation of the same mixer identity, not a duplicate.
+ */
+export const findDuplicateMixerTrackIdentities = (projectState: ProjectState): number[] => {
+  const channelDuplicates = findDuplicateIds(
+    projectState.channels
+      .map(channel => channel.mixerTrackId)
+      .filter(isPositiveSafeInteger)
+  );
+  const mixerDuplicates = findDuplicateIds(
+    projectState.mixerTracks
+      .map(mixerTrack => mixerTrack.id)
+      .filter(isPositiveSafeInteger)
+  );
+
+  return [...new Set([...channelDuplicates, ...mixerDuplicates])].sort((a, b) => a - b);
 };
 
 export const deriveNextMixerTrackId = (projectState: ProjectState): number => {
