@@ -534,6 +534,7 @@ export interface ProjectState {
   playlistClips: PlaylistClip[];
   mixerTracks: MixerTrack[];
   selectedMixerTrackId: number;
+  nextMixerTrackId: number;
   recordings: AudioRecording[];
   comments: CollabComment[];
   collaborators: CollabUser[];
