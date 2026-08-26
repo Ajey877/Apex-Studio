@@ -2164,15 +2164,29 @@ class AudioEngine {
     scheduleInterval();
   }
 
-  public stop() {
-    this.isPlaying = false;
-    if (this.timerId) {
-      clearTimeout(this.timerId);
-      this.timerId = null;
-    }
-    this.currentStep = 0;
-    this.currentBar = 1;
+ public stop() {
+  this.isPlaying = false;
+
+  if (this.timerId) {
+    clearTimeout(this.timerId);
+    this.timerId = null;
   }
+
+  const now = this.ctx?.currentTime;
+
+  for (const voice of this.activeVoices.values()) {
+    try {
+      voice.stop(now);
+    } catch (_) {
+      // Continue stopping remaining voices even if one has already stopped.
+    }
+  }
+
+  this.activeVoices.clear();
+
+  this.currentStep = 0;
+  this.currentBar = 1;
+}
 
   private triggerCurrentStep() {
     if (!this.ctx) return;
