@@ -36,3 +36,9 @@ jobs:
 
       - name: Validate Windows package
         run: npm run package:win:dir
+
+      - name: Upload Windows package
+        uses: actions/upload-artifact@v4
+        with:
+          name: apex-studio-windows
+          path: dist-electron
