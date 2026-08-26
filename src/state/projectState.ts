@@ -1,6 +1,11 @@
 import type { ProjectState } from '../types/daw';
 import { audioEngine } from '../audio/audioEngine';
 import { createDefaultMixerTracks, createDefaultPlaylistTracks } from '../audio/presets';
+import {
+  deriveNextMixerTrackId,
+  findDuplicateMixerTrackIdentities,
+  normalizeNextMixerTrackId
+} from './mixerTrackIdentity';
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -12,7 +17,7 @@ export const createDefaultProjectState = (): ProjectState => {
   const now = Date.now();
   const synthParams = audioEngine.getDefaultSynthParams();
 
-  return {
+  const project: ProjectState = {
     meta: {
       id: `proj-${now}`,
       name: 'Untitled Session',
@@ -67,12 +72,18 @@ export const createDefaultProjectState = (): ProjectState => {
     selectedChannelId: 'ch-1',
     mixerTracks: clone(createDefaultMixerTracks()),
     selectedMixerTrackId: 0,
+    nextMixerTrackId: 1,
     playlistTracks: clone(createDefaultPlaylistTracks()),
     playlistClips: [],
     recordings: [],
     comments: [],
     collaborators: [],
     midiMappings: []
+  };
+
+  return {
+    ...project,
+    nextMixerTrackId: deriveNextMixerTrackId(project)
   };
 };
 
@@ -143,12 +154,23 @@ export const normalizeProjectState = (input: unknown): ProjectState => {
       : (candidate.channels && Array.isArray(candidate.channels) && candidate.channels[0]?.id) || defaults.selectedChannelId,
     selectedMixerTrackId: typeof candidate.selectedMixerTrackId === 'number'
       ? candidate.selectedMixerTrackId
-      : defaults.selectedMixerTrackId
+      : defaults.selectedMixerTrackId,
+    nextMixerTrackId: 1
   };
+
+  const duplicateIdentities = findDuplicateMixerTrackIdentities(normalized);
+  if (duplicateIdentities.length > 0) {
+    console.warn(
+      `[Apex Studio] Project contains duplicate mixer identities: ${duplicateIdentities.join(', ')}. Existing identities were preserved.`
+    );
+  }
 
   if (!normalized.meta.id || !normalized.meta.name || !Number.isFinite(normalized.meta.bpm)) {
     throw new Error('Invalid project file: required project metadata is missing or malformed.');
   }
 
-  return normalized;
+  return {
+    ...normalized,
+    nextMixerTrackId: normalizeNextMixerTrackId(normalized, candidate.nextMixerTrackId)
+  };
 };
