@@ -14,6 +14,7 @@ import {
 } from 'lucide-react';
 import { ProjectState, ProjectMetadata } from '../types/daw';
 import { PRESET_PROJECTS } from '../audio/presets';
+import { createDefaultProjectState, normalizeProjectState } from '../state/projectState';
 
 interface ProjectManagerModalProps {
   isOpen: boolean;
@@ -54,81 +55,19 @@ export const ProjectManagerModal: React.FC<ProjectManagerModalProps> = ({
     reader.onload = (event) => {
       try {
         const parsed = JSON.parse(event.target?.result as string);
-        if (parsed.meta && parsed.channels) {
-          onLoadProject(parsed);
-          onClose();
-        }
+        const normalized = normalizeProjectState(parsed);
+        onLoadProject(normalized);
+        onClose();
       } catch (err) {
-        console.error('Could not parse project file.', err);
+        console.error('Could not load project file.', err);
+        window.alert(err instanceof Error ? err.message : 'Could not load project file.');
       }
     };
     reader.readAsText(file);
   };
 
   const handleCreateBlankProject = () => {
-    const blank: ProjectState = {
-      meta: {
-        id: `proj-${Date.now()}`,
-        name: 'Untitled Session',
-        author: 'Studio Producer',
-        bpm: 128,
-        timeSignature: [4, 4],
-        swing: 0,
-        masterVolume: 1.0,
-        masterPitch: 0,
-        created: Date.now(),
-        updated: Date.now(),
-        version: '4.5.2 Pro',
-        isEncrypted: true,
-        cloudSynced: true,
-        offlineReady: true,
-        totalEditTimeSeconds: 0
-      },
-      patterns: [{ id: 'pat-1', name: 'Pattern 1', color: '#ff6e00', lengthSteps: 16 }],
-      selectedPatternId: 'pat-1',
-      channels: [
-        {
-          id: 'ch-1',
-          name: '808 Kick Sub',
-          color: '#ff6e00',
-          instrumentType: 'drumpad',
-          mixerTrackId: 1,
-          volume: 0.95,
-          pan: 0,
-          pitch: 0,
-          mute: false,
-          solo: false,
-          steps: [true, false, false, false, true, false, false, false, true, false, false, false, true, false, false, false],
-          notes: [],
-          synthParams: {} as any
-        },
-        {
-          id: 'ch-2',
-          name: 'Snare Hard',
-          color: '#ff9800',
-          instrumentType: 'drumpad',
-          mixerTrackId: 2,
-          volume: 0.85,
-          pan: 0,
-          pitch: 0,
-          mute: false,
-          solo: false,
-          steps: [false, false, false, false, true, false, false, false, false, false, false, false, true, false, false, false],
-          notes: [],
-          synthParams: {} as any
-        }
-      ],
-      selectedChannelId: 'ch-1',
-      mixerTracks: currentState.mixerTracks,
-      selectedMixerTrackId: 0,
-      playlistTracks: currentState.playlistTracks,
-      playlistClips: [],
-      recordings: [],
-      comments: [],
-      collaborators: currentState.collaborators,
-      midiMappings: []
-    };
-    onLoadProject(blank);
+    onLoadProject(createDefaultProjectState());
     onClose();
   };
 
@@ -223,7 +162,7 @@ export const ProjectManagerModal: React.FC<ProjectManagerModalProps> = ({
                   key={proj.id}
                   className="p-3 bg-[#1a1a1d] hover:bg-[#222225] border border-[#333336] hover:border-[#ff6e00]/50 rounded-lg flex items-center justify-between transition cursor-pointer"
                   onClick={() => {
-                    onLoadProject(proj.state);
+                    onLoadProject(structuredClone(proj.state));
                     onClose();
                   }}
                 >

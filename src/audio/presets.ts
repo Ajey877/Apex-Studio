@@ -389,6 +389,7 @@ export const PRESET_PROJECTS: { id: string; name: string; genre: string; bpm: nu
       ],
       mixerTracks: createDefaultMixerTracks(),
       selectedMixerTrackId: 0,
+      nextMixerTrackId: 8,
       recordings: [],
       comments: [
         {
@@ -555,6 +556,7 @@ export const PRESET_PROJECTS: { id: string; name: string; genre: string; bpm: nu
       ],
       mixerTracks: createDefaultMixerTracks(),
       selectedMixerTrackId: 0,
+      nextMixerTrackId: 8,
       recordings: [],
       comments: [],
       collaborators: [
@@ -565,11 +567,9 @@ export const PRESET_PROJECTS: { id: string; name: string; genre: string; bpm: nu
   }
 ];
 
-export const getInitialProjectState = (): ProjectState => {
-  return PRESET_PROJECTS[0].state;
-};
+export const getInitialProjectState = (): ProjectState => structuredClone(PRESET_PROJECTS[0].state);
 
-export const DEFAULT_PROJECT: ProjectState = PRESET_PROJECTS[0].state;
+export const DEFAULT_PROJECT: ProjectState = structuredClone(PRESET_PROJECTS[0].state);
 
-export const createDefaultPlaylistTracks = () => PRESET_PROJECTS[0].state.playlistTracks;
+export const createDefaultPlaylistTracks = () => structuredClone(PRESET_PROJECTS[0].state.playlistTracks);
 
