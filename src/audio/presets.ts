@@ -389,6 +389,7 @@ export const PRESET_PROJECTS: { id: string; name: string; genre: string; bpm: nu
       ],
       mixerTracks: createDefaultMixerTracks(),
       selectedMixerTrackId: 0,
+      nextMixerTrackId: 8,
       recordings: [],
       comments: [
         {
@@ -555,6 +556,7 @@ export const PRESET_PROJECTS: { id: string; name: string; genre: string; bpm: nu
       ],
       mixerTracks: createDefaultMixerTracks(),
       selectedMixerTrackId: 0,
+      nextMixerTrackId: 8,
       recordings: [],
       comments: [],
       collaborators: [
