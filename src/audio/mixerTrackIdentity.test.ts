@@ -86,25 +86,30 @@ describe('Stable mixer track identity', () => {
     assert.equal(allocateMixerTrackIdentity(project).mixerTrackId, 11);
   });
 
-  it('handles non-sequential existing identities', () => {
-    const project = createDefaultProjectState();
-    project.mixerTracks = [];
-    project.channels = project.channels.map((channel, index) => ({
-      ...channel,
-      mixerTrackId: index === 0 ? 20 : 40
-    }));
-    project.nextMixerTrackId = 1;
+  it('handles non-sequential existing channel identities', () => {
+    const base = createDefaultProjectState();
+    const project: ProjectState = {
+      ...base,
+      channels: [
+        { ...base.channels[0], mixerTrackId: 20 },
+        { ...base.channels[1], mixerTrackId: 40 }
+      ],
+      mixerTracks: [],
+      nextMixerTrackId: 1
+    };
 
     assert.equal(deriveNextMixerTrackId(project), 41);
     assert.equal(allocateMixerTrackIdentity(project).mixerTrackId, 41);
   });
 
-  it('handles high existing identities', () => {
-    const project = createDefaultProjectState();
-    project.mixerTracks = [];
-    project.channels[0].mixerTrackId = 1000;
-    project.channels = project.channels.slice(0, 1);
-    project.nextMixerTrackId = 1;
+  it('handles high existing channel identities', () => {
+    const base = createDefaultProjectState();
+    const project: ProjectState = {
+      ...base,
+      channels: [{ ...base.channels[0], mixerTrackId: 1000 }],
+      mixerTracks: [],
+      nextMixerTrackId: 1
+    };
 
     assert.equal(deriveNextMixerTrackId(project), 1001);
     assert.equal(allocateMixerTrackIdentity(project).mixerTrackId, 1001);
