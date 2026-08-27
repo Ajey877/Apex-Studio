@@ -176,6 +176,21 @@ class AudioEngine {
     return channelObj;
   }
 
+  public deleteMixerChannel(trackId: number) {
+    const channel = this.mixerChannels.get(trackId);
+    if (channel) {
+      // Disconnect all nodes to allow garbage collection
+      channel.input.disconnect();
+      channel.panner.disconnect();
+      channel.duckingGain.disconnect();
+      channel.output.disconnect();
+      channel.analyser.disconnect();
+      channel.fxNodes.forEach(node => node.disconnect());
+
+      this.mixerChannels.delete(trackId);
+    }
+  }
+
   public updateMixerTrack(track: MixerTrack) {
     const channel = this.getOrCreateMixerChannel(track.id);
     if (!this.ctx) return;
