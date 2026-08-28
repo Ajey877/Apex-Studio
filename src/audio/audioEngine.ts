@@ -50,6 +50,8 @@ class AudioEngine {
   private midiAccess: any = null;
   private midiListeners: ((e: { type: 'noteOn' | 'noteOff' | 'cc' | 'pitchBend'; note?: number; velocity?: number; cc?: number; value?: number; midiChannel?: number }) => void)[] = [];
 
+  private playbackGeneration = 0;
+
   constructor() {
     // Lazy initialize on first interaction
   }
@@ -174,21 +176,6 @@ class AudioEngine {
 
     this.mixerChannels.set(trackId, channelObj);
     return channelObj;
-  }
-
-  public deleteMixerChannel(trackId: number) {
-    const channel = this.mixerChannels.get(trackId);
-    if (channel) {
-      // Disconnect all nodes to allow garbage collection
-      channel.input.disconnect();
-      channel.panner.disconnect();
-      channel.duckingGain.disconnect();
-      channel.output.disconnect();
-      channel.analyser.disconnect();
-      channel.fxNodes.forEach(node => node.disconnect());
-
-      this.mixerChannels.delete(trackId);
-    }
   }
 
   public updateMixerTrack(track: MixerTrack) {
@@ -2143,6 +2130,10 @@ class AudioEngine {
     }
 
     this.stop();
+
+    this.playbackGeneration++;
+    const currentGeneration = this.playbackGeneration;
+
     this.isPlaying = true;
     this.activeChannels = channels;
     this.activeClips = clips;
@@ -2150,7 +2141,7 @@ class AudioEngine {
     this.activePatternId = patternId;
 
     const scheduleInterval = () => {
-      if (!this.isPlaying) return;
+      if (!this.isPlaying || this.playbackGeneration !== currentGeneration) return;
 
       const secondsPerBeat = 60 / this.bpm;
       const secondsPerStep = secondsPerBeat / 4;
@@ -2181,6 +2172,7 @@ class AudioEngine {
 
  public stop() {
   this.isPlaying = false;
+  this.playbackGeneration++;
 
   if (this.timerId) {
     clearTimeout(this.timerId);
