@@ -9,7 +9,7 @@ import {
   GrossBeatState,
   SidechainSettings
 } from '../types/daw';
-import { AudioClockTransport } from './transport';
+import { AudioClockTransport, TransportState } from './transport';
 
 class AudioEngine {
   private ctx: AudioContext | null = null;
@@ -2152,6 +2152,7 @@ class AudioEngine {
   private currentStep: number = 0;
   private currentBar: number = 1;
   private stepCallback: ((step: number, bar: number) => void) | null = null;
+  private transportStateCallback: ((state: Readonly<TransportState>) => void) | null = null;
   private activeChannels: Channel[] = [];
   private activeClips: PlaylistClip[] = [];
   private activePlayMode: 'pat' | 'song' = 'pat';
@@ -2159,6 +2160,9 @@ class AudioEngine {
 
   public setBpm(bpm: number) {
     this.bpm = Math.max(20, Math.min(300, bpm));
+    if (this.transport) {
+      this.transport.setBpm(this.bpm);
+    }
   }
 
   public setSwing(swing: number) {
@@ -2171,6 +2175,10 @@ class AudioEngine {
 
   public setStepCallback(cb: (step: number, bar: number) => void) {
     this.stepCallback = cb;
+  }
+
+  public setTransportStateCallback(cb: ((state: Readonly<TransportState>) => void) | null) {
+    this.transportStateCallback = cb;
   }
 
   public play(
@@ -2219,6 +2227,10 @@ class AudioEngine {
         if (this.stepCallback) {
           this.stepCallback(step, bar);
         }
+      },
+      onStateChange: (state) => {
+        if (!this.isPlaying || this.playbackGeneration !== currentGeneration) return;
+        this.transportStateCallback?.(state);
       }
     });
 
