@@ -1,7 +1,8 @@
-import type { ProjectState } from '../types/daw';
+import type { ProjectState, Channel } from '../types/daw';
 import { audioEngine } from '../audio/audioEngine';
 import { createDefaultMixerTracks, createDefaultPlaylistTracks } from '../audio/presets';
 import {
+  MASTER_MIXER_TRACK_ID,
   deriveNextMixerTrackId,
   findDuplicateMixerTrackIdentities,
   normalizeNextMixerTrackId
@@ -174,3 +175,71 @@ export const normalizeProjectState = (input: unknown): ProjectState => {
     nextMixerTrackId: normalizeNextMixerTrackId(normalized, candidate.nextMixerTrackId)
   };
 };
+
+export interface DeleteChannelResult {
+  state: ProjectState;
+  deletedChannel: Channel | null;
+  removedMixerTrackId: number | null;
+}
+
+/**
+ * Pure state transition for channel deletion:
+ * - Preserves the final channel (minimum 1 channel).
+ * - Removes the channel from channels list.
+ * - Removes orphaned MixerTrack if no other surviving channel references it (and not Master track 0).
+ * - Updates selectedChannelId if deleted channel was selected.
+ * - Resets selectedMixerTrackId to 0 if removed mixer track was selected.
+ */
+export const deleteChannelFromProjectState = (
+  project: ProjectState,
+  channelId: string
+): DeleteChannelResult => {
+  if (project.channels.length <= 1) {
+    return {
+      state: project,
+      deletedChannel: null,
+      removedMixerTrackId: null
+    };
+  }
+
+  const channelToDelete = project.channels.find(ch => ch.id === channelId);
+  if (!channelToDelete) {
+    return {
+      state: project,
+      deletedChannel: null,
+      removedMixerTrackId: null
+    };
+  }
+
+  const trackId = channelToDelete.mixerTrackId;
+  const remainingChannels = project.channels.filter(ch => ch.id !== channelId);
+  const isTrackStillReferenced =
+    trackId === MASTER_MIXER_TRACK_ID || remainingChannels.some(ch => ch.mixerTrackId === trackId);
+
+  const nextMixerTracks = isTrackStillReferenced
+    ? project.mixerTracks
+    : project.mixerTracks.filter(t => t.id !== trackId);
+
+  const nextSelectedChannelId =
+    project.selectedChannelId === channelId
+      ? remainingChannels[0]?.id || 'ch-1'
+      : project.selectedChannelId;
+
+  const nextSelectedMixerTrackId =
+    !isTrackStillReferenced && project.selectedMixerTrackId === trackId
+      ? MASTER_MIXER_TRACK_ID
+      : project.selectedMixerTrackId;
+
+  return {
+    state: {
+      ...project,
+      channels: remainingChannels,
+      mixerTracks: nextMixerTracks,
+      selectedChannelId: nextSelectedChannelId,
+      selectedMixerTrackId: nextSelectedMixerTrackId
+    },
+    deletedChannel: channelToDelete,
+    removedMixerTrackId: isTrackStillReferenced ? null : trackId
+  };
+};
+

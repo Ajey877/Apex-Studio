@@ -24,6 +24,7 @@ import {
   createDefaultPlaylistTracks 
 } from './audio/presets';
 import { appendChannelWithAllocatedMixerTrackId } from './state/mixerTrackIdentity';
+import { deleteChannelFromProjectState } from './state/projectState';
 
 // Component Suite
 import { TransportBar } from './components/TransportBar';
@@ -327,12 +328,22 @@ export function App() {
 
   const handleDeleteChannel = (channelId: string) => {
     if (projectState.channels.length <= 1) return;
-    setProjectState(prev => ({
-      ...prev,
-      channels: prev.channels.filter(ch => ch.id !== channelId)
-    }));
+
+    const result = deleteChannelFromProjectState(projectState, channelId);
+    if (!result.deletedChannel) return;
+
+    audioEngine.stopChannelVoices(channelId);
+
+    if (result.removedMixerTrackId !== null) {
+      audioEngine.removeMixerChannel(result.removedMixerTrackId);
+      if (selectedTrackId === result.removedMixerTrackId) {
+        setSelectedTrackId(0);
+      }
+    }
+
+    setProjectState(result.state);
     if (selectedChannelId === channelId) {
-      setSelectedChannelId(projectState.channels[0]?.id || 'ch-1');
+      setSelectedChannelId(result.state.selectedChannelId);
     }
   };
 
