@@ -9,9 +9,12 @@ import {
   GrossBeatState,
   SidechainSettings
 } from '../types/daw';
+import { AudioClockTransport } from './transport';
 
 class AudioEngine {
   private ctx: AudioContext | null = null;
+  private transport: AudioClockTransport | null = null;
+  private playbackGeneration = 0;
   private masterGain: GainNode | null = null;
   private masterAnalyser: AnalyserNode | null = null;
   private grossBeatNode: GainNode | null = null;
@@ -83,6 +86,8 @@ class AudioEngine {
     for (let i = 0; i <= 8; i++) {
       this.getOrCreateMixerChannel(i);
     }
+
+    this.transport = new AudioClockTransport(this.ctx);
 
     // Init Web MIDI
     this.initMidi();
@@ -2176,52 +2181,61 @@ class AudioEngine {
   ) {
     if (!this.ctx) this.init();
     if (this.ctx && this.ctx.state === 'suspended') {
-      this.ctx.resume();
+      void this.ctx.resume();
     }
 
     this.stop();
+    this.playbackGeneration++;
+    const currentGeneration = this.playbackGeneration;
+
     this.isPlaying = true;
     this.activeChannels = channels;
     this.activeClips = clips;
     this.activePlayMode = mode;
     this.activePatternId = patternId;
 
-    const scheduleInterval = () => {
-      if (!this.isPlaying) return;
+    if (!this.transport && this.ctx) {
+      this.transport = new AudioClockTransport(this.ctx);
+    }
+    if (!this.transport) return;
 
-      const secondsPerBeat = 60 / this.bpm;
-      const secondsPerStep = secondsPerBeat / 4;
-      const msPerStep = secondsPerStep * 1000;
+    this.transport.setBpm(this.bpm);
+    this.transport.setMode(mode);
+    this.transport.setCallbacks({
+      onStep: (step, bar, audioTime) => {
+        if (!this.isPlaying || this.playbackGeneration !== currentGeneration) return;
 
-      // Apply swing to odd steps (1, 3, 5, 7...)
-      const swingOffset = (this.currentStep % 2 === 1) ? (this.swing / 100) * (msPerStep * 0.4) : 0;
-      const nextDelay = Math.max(15, msPerStep + (this.currentStep % 2 === 1 ? swingOffset : -swingOffset));
+        this.currentStep = step;
+        this.currentBar = bar;
 
-      this.triggerCurrentStep();
+        const secondsPerBeat = 60 / this.bpm;
+        const secondsPerStep = secondsPerBeat / 4;
+        const swingOffsetSeconds = step % 2 === 1
+          ? (this.swing / 100) * (secondsPerStep * 0.4)
+          : 0;
 
-      // Advance step
-      const nextStep = (this.currentStep + 1) % 16;
-      if (nextStep === 0) {
-        this.currentBar = this.activePlayMode === 'song' ? (this.currentBar % 16) + 1 : 1;
+        this.triggerCurrentStep(audioTime + swingOffsetSeconds);
+
+        if (this.stepCallback) {
+          this.stepCallback(step, bar);
+        }
       }
-      this.currentStep = nextStep;
+    });
 
-      if (this.stepCallback) {
-        this.stepCallback(this.currentStep, this.currentBar);
-      }
-
-      this.timerId = setTimeout(scheduleInterval, nextDelay);
-    };
-
-    scheduleInterval();
+    this.transport.start();
   }
 
  public stop() {
   this.isPlaying = false;
+  this.playbackGeneration++;
 
   if (this.timerId) {
     clearTimeout(this.timerId);
     this.timerId = null;
+  }
+
+  if (this.transport) {
+    this.transport.stop();
   }
 
   const now = this.ctx?.currentTime;
@@ -2240,9 +2254,9 @@ class AudioEngine {
   this.currentBar = 1;
 }
 
-  private triggerCurrentStep() {
+  private triggerCurrentStep(audioTime?: number) {
     if (!this.ctx) return;
-    const now = this.ctx.currentTime;
+    const now = audioTime ?? this.ctx.currentTime;
 
     // Metronome on quarter notes (steps 0, 4, 8, 12)
     if (this.metronome && this.currentStep % 4 === 0) {
