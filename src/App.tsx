@@ -236,8 +236,6 @@ export function App() {
   }, [metronome]);
 
   // Audio-clock transport state drives the UI playhead.
-  // This avoids advancing React state from the look-ahead onStep callbacks,
-  // which intentionally fire ahead of the audible event time.
   useEffect(() => {
     const handleTransportState = (state: { playing: boolean; step: number; bar: number }) => {
       setIsPlaying(prev => prev === state.playing ? prev : state.playing);
@@ -446,14 +444,26 @@ export function App() {
     }));
   };
 
-  const handleSaveRecordingToPlaylist = (recording: AudioRecording, targetTrackIndex: number) => {
+  // --- Phase 2: Real recording -> audio buffer -> playlist clip ---
+  const handleSaveRecordingToPlaylist = async (recording: AudioRecording, targetTrackIndex: number) => {
+    if (!recording.audioBlob || recording.audioBlob.size === 0) {
+      throw new Error('The recording contains no audio data');
+    }
+
+    const audioBufferId = `recording-${recording.id}`;
+    const loaded = await audioEngine.loadAudioFile(recording.audioBlob, audioBufferId);
+    const secondsPerBar = 240 / Math.max(20, projectState.meta.bpm);
+    const lengthBars = Math.max(1, Math.ceil(recording.durationSeconds / secondsPerBar));
+
     const newClip: PlaylistClip = {
       id: `rec-clip-${Date.now()}`,
       trackIndex: targetTrackIndex,
       startBar: 0,
-      lengthBars: Math.max(2, Math.ceil(recording.durationSeconds / 2)),
+      lengthBars,
       type: 'audio',
+      audioBufferId,
       audioName: recording.name,
+      audioWaveform: loaded.peaks,
       color: '#ff6e00',
       name: recording.name
     };
@@ -596,7 +606,6 @@ export function App() {
 
   const selectedChannel = projectState.channels.find(c => c.id === selectedChannelId) || projectState.channels[0];
 
-  // Audition sample in browser
   const handleAuditionSample = (name: string, pitch = 60) => {
     setPreviewingAudio(name);
     if (selectedChannel) {
@@ -669,174 +678,69 @@ export function App() {
 
       {/* 2. Main Studio Work Area */}
       <main className="flex-1 flex overflow-hidden">
-        {/* Left Studio Browser & File Manager */}
         {isSidebarOpen && (
           <aside className="w-56 md:w-64 bg-[#141416] border-r border-[#333336] flex flex-col shrink-0">
-            {/* Browser Header */}
             <div className="p-2.5 border-b border-[#333336] flex justify-between items-center bg-[#1a1a1d]">
               <span className="text-[10px] font-bold uppercase tracking-widest text-[#777]">STUDIO BROWSER</span>
-              <button 
-                onClick={() => setIsProjectManagerOpen(true)}
-                className="text-[#ff6e00] hover:text-white text-[10px] font-bold transition"
-              >
-                + New
-              </button>
+              <button onClick={() => setIsProjectManagerOpen(true)} className="text-[#ff6e00] hover:text-white text-[10px] font-bold transition">+ New</button>
             </div>
-
-            {/* Quick Search */}
             <div className="p-2 border-b border-[#333336] bg-[#121214]">
               <div className="flex items-center gap-1.5 bg-[#1a1a1d] px-2 py-1 rounded border border-[#333336]">
                 <Search className="w-3 h-3 text-[#777]" />
-                <input
-                  type="text"
-                  placeholder="Search samples & VSTs..."
-                  value={browserSearch}
-                  onChange={(e) => setBrowserSearch(e.target.value)}
-                  className="w-full bg-transparent text-[11px] text-white placeholder-[#555] focus:outline-none"
-                />
+                <input type="text" placeholder="Search samples & VSTs..." value={browserSearch} onChange={(e) => setBrowserSearch(e.target.value)} className="w-full bg-transparent text-[11px] text-white placeholder-[#555] focus:outline-none" />
               </div>
             </div>
-
-            {/* Tree Categories */}
             <div className="flex-1 overflow-y-auto custom-scrollbar p-2 space-y-3 text-xs">
-              {/* Category 1: Instruments */}
               <div className="space-y-1">
-                <div 
-                  onClick={() => setExpandedFolders(f => ({ ...f, instruments: !f.instruments }))}
-                  className="flex items-center justify-between text-[10px] font-bold text-[#777] hover:text-white cursor-pointer px-1"
-                >
-                  <span className="flex items-center gap-1">
-                    <Cpu className="w-3 h-3 text-[#ff6e00]" />
-                    <span>SYNTHS & GENERATORS</span>
-                  </span>
+                <div onClick={() => setExpandedFolders(f => ({ ...f, instruments: !f.instruments }))} className="flex items-center justify-between text-[10px] font-bold text-[#777] hover:text-white cursor-pointer px-1">
+                  <span className="flex items-center gap-1"><Cpu className="w-3 h-3 text-[#ff6e00]" /><span>SYNTHS & GENERATORS</span></span>
                   {expandedFolders.instruments ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
                 </div>
-
                 {expandedFolders.instruments && (
                   <div className="space-y-0.5 pl-3 border-l border-[#222225] mt-1">
-                    {[
-                      { name: 'Grand Concert Piano', type: 'grand_piano', color: '#e0e0e0' },
-                      { name: 'Vintage Rhodes MK1', type: 'rhodes_epiano', color: '#e67e22' },
-                      { name: 'Hammond B3 Organ', type: 'hammond_organ', color: '#d35400' },
-                      { name: 'Orchestral Strings', type: 'strings_ensemble', color: '#9b59b6' },
-                      { name: 'Pizzicato Strings', type: 'pizzicato_strings', color: '#8e44ad' },
-                      { name: 'Nylon Pluck Guitar', type: 'nylon_guitar', color: '#27ae60' },
-                      { name: 'Cinematic Horns/Brass', type: 'cinematic_brass', color: '#f39c12' },
-                      { name: '808 Tuned Sub Bass', type: 'sub_808', color: '#ff5722' },
-                      { name: 'TB-303 Acid Bassline', type: 'acid_303', color: '#2ecc71' },
-                      { name: 'Reese Heavy Bass', type: 'reese_bass', color: '#c0392b' },
-                      { name: 'JP-8000 Supersaw', type: 'supersaw_lead', color: '#00d2d3' },
-                      { name: 'Atmospheric Pad', type: 'ambient_pad', color: '#54a0ff' },
-                      { name: 'Vocal Choir Formant', type: 'vox_choir', color: '#ff9ff3' },
-                      { name: 'Wooden Marimba/Bell', type: 'marimba_bell', color: '#1dd1a1' },
-                      { name: '8-Bit Retro Chiptune', type: 'chiptune_8bit', color: '#feca57' },
-                      { name: 'MiniSynth Subtractive', type: 'minisynth', color: '#ff6e00' },
-                      { name: 'Toxic FM Synthesizer', type: 'fmsynth', color: '#00bcd4' },
-                      { name: 'DirectWave Sampler', type: 'sampler', color: '#4caf50' },
-                      { name: '808 Drum Machine', type: 'drumpad', color: '#ff5722' }
-                    ].map((item, i) => (
-                      <div
-                        key={i}
-                        onClick={() => handleAddChannel(item.type as InstrumentType, item.name, item.color)}
-                        className="flex items-center justify-between px-2 py-1 rounded hover:bg-[#222225] text-[11px] text-zinc-300 hover:text-white cursor-pointer group"
-                      >
-                        <span className="truncate">{item.name}</span>
-                        <span className="text-[9px] text-[#ff6e00] opacity-0 group-hover:opacity-100 font-bold">+ LOAD</span>
-                      </div>
+                    {[{ name: 'Grand Concert Piano', type: 'grand_piano', color: '#e0e0e0' },{ name: 'Vintage Rhodes MK1', type: 'rhodes_epiano', color: '#e67e22' },{ name: 'Hammond B3 Organ', type: 'hammond_organ', color: '#d35400' },{ name: 'Orchestral Strings', type: 'strings_ensemble', color: '#9b59b6' },{ name: 'Pizzicato Strings', type: 'pizzicato_strings', color: '#8e44ad' },{ name: 'Nylon Pluck Guitar', type: 'nylon_guitar', color: '#27ae60' },{ name: 'Cinematic Horns/Brass', type: 'cinematic_brass', color: '#f39c12' },{ name: '808 Tuned Sub Bass', type: 'sub_808', color: '#ff5722' },{ name: 'TB-303 Acid Bassline', type: 'acid_303', color: '#2ecc71' },{ name: 'Reese Heavy Bass', type: 'reese_bass', color: '#c0392b' },{ name: 'JP-8000 Supersaw', type: 'supersaw_lead', color: '#00d2d3' },{ name: 'Atmospheric Pad', type: 'ambient_pad', color: '#54a0ff' },{ name: 'Vocal Choir Formant', type: 'vox_choir', color: '#ff9ff3' },{ name: 'Wooden Marimba/Bell', type: 'marimba_bell', color: '#1dd1a1' },{ name: '8-Bit Retro Chiptune', type: 'chiptune_8bit', color: '#feca57' },{ name: 'MiniSynth Subtractive', type: 'minisynth', color: '#ff6e00' },{ name: 'Toxic FM Synthesizer', type: 'fmsynth', color: '#00bcd4' },{ name: 'DirectWave Sampler', type: 'sampler', color: '#4caf50' },{ name: '808 Drum Machine', type: 'drumpad', color: '#ff5722' }].map((item, i) => (
+                      <div key={i} onClick={() => handleAddChannel(item.type as InstrumentType, item.name, item.color)} className="flex items-center justify-between px-2 py-1 rounded hover:bg-[#222225] text-[11px] text-zinc-300 hover:text-white cursor-pointer group"><span className="truncate">{item.name}</span><span className="text-[9px] text-[#ff6e00] opacity-0 group-hover:opacity-100 font-bold">+ LOAD</span></div>
                     ))}
                   </div>
                 )}
               </div>
 
-              {/* Category 2: Drum Samples */}
               <div className="space-y-1">
-                <div 
-                  onClick={() => setExpandedFolders(f => ({ ...f, drums: !f.drums }))}
-                  className="flex items-center justify-between text-[10px] font-bold text-[#777] hover:text-white cursor-pointer px-1"
-                >
-                  <span className="flex items-center gap-1">
-                    <Disc className="w-3 h-3 text-[#ff6e00]" />
-                    <span>DRUM SAMPLES (808 / MPC)</span>
-                  </span>
+                <div onClick={() => setExpandedFolders(f => ({ ...f, drums: !f.drums }))} className="flex items-center justify-between text-[10px] font-bold text-[#777] hover:text-white cursor-pointer px-1">
+                  <span className="flex items-center gap-1"><Disc className="w-3 h-3 text-[#ff6e00]" /><span>DRUM SAMPLES (808 / MPC)</span></span>
                   {expandedFolders.drums ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
                 </div>
-
                 {expandedFolders.drums && (
                   <div className="space-y-0.5 pl-3 border-l border-[#222225] mt-1">
-                    {[
-                      { name: '808_Sub_Punch.wav', pitch: 36 },
-                      { name: 'Snare_Trap_Hard.wav', pitch: 38 },
-                      { name: 'HiHat_Closed_Tight.wav', pitch: 42 },
-                      { name: 'Clap_Studio_Dry.wav', pitch: 39 },
-                      { name: 'Perc_Rimshot_Wood.wav', pitch: 37 }
-                    ].map((sample, i) => (
-                      <div
-                        key={i}
-                        onClick={() => handleAuditionSample(sample.name, sample.pitch)}
-                        className={`flex items-center justify-between px-2 py-1 rounded text-[11px] cursor-pointer transition ${
-                          previewingAudio === sample.name ? 'bg-[#ff6e00] text-black font-bold' : 'hover:bg-[#222225] text-zinc-300 hover:text-white'
-                        }`}
-                      >
-                        <span className="truncate">{sample.name}</span>
-                        <Play className="w-2.5 h-2.5 opacity-60" />
-                      </div>
+                    {[{ name: '808_Sub_Punch.wav', pitch: 36 },{ name: 'Snare_Trap_Hard.wav', pitch: 38 },{ name: 'HiHat_Closed_Tight.wav', pitch: 42 },{ name: 'Clap_Studio_Dry.wav', pitch: 39 },{ name: 'Perc_Rimshot_Wood.wav', pitch: 37 }].map((sample, i) => (
+                      <div key={i} onClick={() => handleAuditionSample(sample.name, sample.pitch)} className={`flex items-center justify-between px-2 py-1 rounded text-[11px] cursor-pointer transition ${previewingAudio === sample.name ? 'bg-[#ff6e00] text-black font-bold' : 'hover:bg-[#222225] text-zinc-300 hover:text-white'}`}><span className="truncate">{sample.name}</span><Play className="w-2.5 h-2.5 opacity-60" /></div>
                     ))}
                   </div>
                 )}
               </div>
 
-              {/* Category 3: Demo Projects */}
               <div className="space-y-1">
-                <div 
-                  onClick={() => setExpandedFolders(f => ({ ...f, presets: !f.presets }))}
-                  className="flex items-center justify-between text-[10px] font-bold text-[#777] hover:text-white cursor-pointer px-1"
-                >
-                  <span className="flex items-center gap-1">
-                    <Folder className="w-3 h-3 text-[#ff6e00]" />
-                    <span>STUDIO DEMOS</span>
-                  </span>
+                <div onClick={() => setExpandedFolders(f => ({ ...f, presets: !f.presets }))} className="flex items-center justify-between text-[10px] font-bold text-[#777] hover:text-white cursor-pointer px-1">
+                  <span className="flex items-center gap-1"><Folder className="w-3 h-3 text-[#ff6e00]" /><span>STUDIO DEMOS</span></span>
                   {expandedFolders.presets ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
                 </div>
-
                 {expandedFolders.presets && (
                   <div className="space-y-0.5 pl-3 border-l border-[#222225] mt-1">
                     {PRESET_PROJECTS.map((p, i) => (
-                      <div
-                        key={i}
-                        onClick={() => setProjectState(p.state)}
-                        className="flex items-center justify-between px-2 py-1 rounded hover:bg-[#222225] text-[11px] text-zinc-300 hover:text-white cursor-pointer group"
-                      >
-                        <span className="truncate">{p.name}</span>
-                        <span className="text-[9px] text-[#ff6e00] font-mono">{p.bpm} BPM</span>
-                      </div>
+                      <div key={i} onClick={() => setProjectState(p.state)} className="flex items-center justify-between px-2 py-1 rounded hover:bg-[#222225] text-[11px] text-zinc-300 hover:text-white cursor-pointer group"><span className="truncate">{p.name}</span><span className="text-[9px] text-[#ff6e00] font-mono">{p.bpm} BPM</span></div>
                     ))}
                   </div>
                 )}
               </div>
             </div>
 
-            {/* Waveform Sample Preview Area at Sidebar Bottom */}
             <div className="p-3 border-t border-[#333336] bg-[#1a1a1d] space-y-1.5">
-              <div className="flex justify-between items-center text-[9px] font-bold">
-                <span className="text-white">ACTIVE PREVIEW:</span>
-                <span className="text-[#ff6e00] font-mono">{previewingAudio ? 'AUDITIONING' : 'READY'}</span>
-              </div>
-              <div className="h-6 bg-[#0a0a0b] rounded border border-[#333336] flex items-center px-1.5 gap-0.5 overflow-hidden">
-                {Array.from({ length: 28 }).map((_, i) => (
-                  <div
-                    key={i}
-                    className={`flex-1 rounded-xs transition-all ${
-                      previewingAudio ? 'bg-[#ff6e00]' : 'bg-[#333336]'
-                    }`}
-                    style={{ height: `${20 + (i % 7) * 12}%` }}
-                  />
-                ))}
-              </div>
+              <div className="flex justify-between items-center text-[9px] font-bold"><span className="text-white">ACTIVE PREVIEW:</span><span className="text-[#ff6e00] font-mono">{previewingAudio ? 'AUDITIONING' : 'READY'}</span></div>
+              <div className="h-6 bg-[#0a0a0b] rounded border border-[#333336] flex items-center px-1.5 gap-0.5 overflow-hidden">{Array.from({ length: 28 }).map((_, i) => <div key={i} className={`flex-1 rounded-xs transition-all ${previewingAudio ? 'bg-[#ff6e00]' : 'bg-[#333336]'}`} style={{ height: `${20 + (i % 7) * 12}%` }} />)}</div>
             </div>
           </aside>
         )}
 
-        {/* Central View Area */}
         <section className="flex-1 flex flex-col bg-[#121214] overflow-hidden">
           {currentView === 'channel_rack' && (
             <ChannelRack
@@ -850,22 +754,10 @@ export function App() {
               onUpdateChannel={handleUpdateChannel}
               onAddChannel={handleAddChannel}
               onDeleteChannel={handleDeleteChannel}
-              onOpenPianoRoll={(id) => {
-                setSelectedChannelId(id);
-                setCurrentView('piano_roll');
-              }}
-              onOpenInstrument={(id) => {
-                setSelectedChannelId(id);
-                setCurrentView('instruments');
-              }}
-              onOpenArp={(id) => {
-                setArpChannelId(id);
-                setIsArpeggiatorOpen(true);
-              }}
-              onOpenSampleManager={(id) => {
-                setSampleChannelId(id);
-                setIsSampleManagerOpen(true);
-              }}
+              onOpenPianoRoll={(id) => { setSelectedChannelId(id); setCurrentView('piano_roll'); }}
+              onOpenInstrument={(id) => { setSelectedChannelId(id); setCurrentView('instruments'); }}
+              onOpenArp={(id) => { setArpChannelId(id); setIsArpeggiatorOpen(true); }}
+              onOpenSampleManager={(id) => { setSampleChannelId(id); setIsSampleManagerOpen(true); }}
               currentStep={currentStep}
               isPlaying={isPlaying}
               swing={projectState.meta.swing}
@@ -911,10 +803,7 @@ export function App() {
               onDeleteFxSlot={handleDeleteFxSlot}
               onUpdateFxSlot={handleUpdateFxSlot}
               isPlaying={isPlaying}
-              onOpenParametricEq={(track) => {
-                setEqModalTrackId(track.id);
-                setIsParametricEqOpen(true);
-              }}
+              onOpenParametricEq={(track) => { setEqModalTrackId(track.id); setIsParametricEqOpen(true); }}
             />
           )}
 
@@ -929,46 +818,18 @@ export function App() {
 
           {currentView === 'sampler' && (
             <div className="flex flex-col h-full items-center justify-center p-8 bg-[#121214] text-center space-y-4">
-              <div className="w-16 h-16 bg-[#ff6e00]/15 border border-[#ff6e00]/30 rounded-2xl flex items-center justify-center text-[#ff6e00]">
-                <Volume2 className="w-8 h-8" />
-              </div>
-              <div>
-                <h2 className="text-xl font-bold text-white tracking-tight">DIRECTWAVE AUDIO SAMPLER & VOCAL CAPTURE</h2>
-                <p className="text-xs text-[#777] max-w-md mt-1">
-                  High-fidelity 48kHz Direct-to-Disk recording station with automatic waveform slicing and transient detection.
-                </p>
-              </div>
-
+              <div className="w-16 h-16 bg-[#ff6e00]/15 border border-[#ff6e00]/30 rounded-2xl flex items-center justify-center text-[#ff6e00]"><Volume2 className="w-8 h-8" /></div>
+              <div><h2 className="text-xl font-bold text-white tracking-tight">DIRECTWAVE AUDIO SAMPLER & VOCAL CAPTURE</h2><p className="text-xs text-[#777] max-w-md mt-1">High-fidelity 48kHz Direct-to-Disk recording station with automatic waveform slicing and transient detection.</p></div>
               <div className="flex items-center gap-3 pt-2">
-                <button
-                  onClick={() => setIsAudioRecorderOpen(true)}
-                  className="px-5 py-2.5 bg-[#ff6e00] hover:bg-[#ff7d1a] text-black font-bold text-xs rounded transition flex items-center gap-2 shadow"
-                >
-                  <div className="w-2.5 h-2.5 bg-black rounded-full" />
-                  <span>OPEN MICROPHONE RECORDER</span>
-                </button>
-
-                <button
-                  onClick={() => setIsSampleManagerOpen(true)}
-                  className="px-5 py-2.5 bg-[#00ff88] hover:bg-[#00e67a] text-black font-bold text-xs rounded transition flex items-center gap-2 shadow"
-                >
-                  <Volume2 className="w-3.5 h-3.5" />
-                  <span>DIRECTWAVE SAMPLE LOADER</span>
-                </button>
-
-                <button
-                  onClick={() => setCurrentView('instruments')}
-                  className="px-5 py-2.5 bg-[#222225] hover:bg-[#2d2d30] text-white font-bold text-xs rounded border border-[#333336] transition"
-                >
-                  Open VST Synthesizers
-                </button>
+                <button onClick={() => setIsAudioRecorderOpen(true)} className="px-5 py-2.5 bg-[#ff6e00] hover:bg-[#ff7d1a] text-black font-bold text-xs rounded transition flex items-center gap-2 shadow"><div className="w-2.5 h-2.5 bg-black rounded-full" /><span>OPEN MICROPHONE RECORDER</span></button>
+                <button onClick={() => setIsSampleManagerOpen(true)} className="px-5 py-2.5 bg-[#00ff88] hover:bg-[#00e67a] text-black font-bold text-xs rounded transition flex items-center gap-2 shadow"><Volume2 className="w-3.5 h-3.5" /><span>DIRECTWAVE SAMPLE LOADER</span></button>
+                <button onClick={() => setCurrentView('instruments')} className="px-5 py-2.5 bg-[#222225] hover:bg-[#2d2d30] text-white font-bold text-xs rounded border border-[#333336] transition">Open VST Synthesizers</button>
               </div>
             </div>
           )}
         </section>
       </main>
 
-      {/* 3. Bottom Studio Status Footer */}
       <footer className="h-6 bg-[#1a1a1d] border-t border-[#333336] flex items-center px-4 justify-between shrink-0 select-none">
         <div className="flex items-center gap-4 text-[9px]">
           <span className="text-[#777]">SYNC: <span className="text-[#00ff00] font-bold">ONLINE (E2EE)</span></span>
@@ -976,341 +837,48 @@ export function App() {
           <span className="text-[#777]">LATENCY: <span className="text-white font-bold">2.4ms (LOW)</span></span>
           <span className="text-[#777] hidden md:inline">PROJECT: <span className="text-[#ff6e00] font-bold">{projectState.meta.name}</span></span>
         </div>
-
         <div className="flex items-center gap-3 text-[9px] font-bold text-[#777]">
-          <button 
-            onClick={() => setIsHotkeysOpen(true)}
-            className="hover:text-white transition cursor-pointer"
-          >
-            HOTKEYS (SPACE / 1-5)
-          </button>
+          <button onClick={() => setIsHotkeysOpen(true)} className="hover:text-white transition cursor-pointer">HOTKEYS (SPACE / 1-5)</button>
           <span className="w-1 h-1 bg-[#444] rounded-full"></span>
-          <button 
-            onClick={() => setIsExportOpen(true)}
-            className="hover:text-white transition cursor-pointer"
-          >
-            EXPORT MASTER
-          </button>
+          <button onClick={() => setIsExportOpen(true)} className="hover:text-white transition cursor-pointer">EXPORT MASTER</button>
           <span className="w-1 h-1 bg-[#444] rounded-full"></span>
-          <button 
-            onClick={() => setIsSubscriptionOpen(true)}
-            className="text-[#ff6e00] hover:text-[#ff7d1a] transition cursor-pointer"
-          >
-            {isProUser ? 'PRO SUITE ACTIVE' : 'PREMIUM TIER'}
-          </button>
+          <button onClick={() => setIsSubscriptionOpen(true)} className="text-[#ff6e00] hover:text-[#ff7d1a] transition cursor-pointer">{isProUser ? 'PRO SUITE ACTIVE' : 'PREMIUM TIER'}</button>
         </div>
       </footer>
 
-      {/* 4. Modals Container */}
-      <ExportModal
-        isOpen={isExportOpen}
-        onClose={() => setIsExportOpen(false)}
-        channels={projectState.channels}
-        clips={projectState.playlistClips}
-        meta={projectState.meta}
-      />
-
-      <ProjectManagerModal
-        isOpen={isProjectManagerOpen}
-        onClose={() => setIsProjectManagerOpen(false)}
-        currentState={projectState}
-        onLoadProject={(st) => setProjectState(st)}
-        onUpdateMeta={handleUpdateMeta}
-      />
-
-      <CollaborationModal
-        isOpen={isCollabOpen}
-        onClose={() => setIsCollabOpen(false)}
-        comments={comments}
-        collaborators={collaborators}
-        onAddComment={(text, bar) => {
-          const newC: CollabComment = {
-            id: `c-${Date.now()}`,
-            author: 'Alex (You)',
-            avatarColor: '#ff6e00',
-            timestamp: Date.now(),
-            barPosition: bar,
-            text,
-            resolved: false
-          };
-          setComments(prev => [newC, ...prev]);
-        }}
-        onToggleResolveComment={(id) => {
-          setComments(prev => prev.map(c => c.id === id ? { ...c, resolved: !c.resolved } : c));
-        }}
-        isEncrypted={projectState.meta.isEncrypted}
-        onToggleEncryption={() => handleUpdateMeta({ isEncrypted: !projectState.meta.isEncrypted })}
-      />
-
-      <AnalyticsModal
-        isOpen={isAnalyticsOpen}
-        onClose={() => setIsAnalyticsOpen(false)}
-        meta={projectState.meta}
-        channels={projectState.channels}
-        clips={projectState.playlistClips}
-      />
-
-      <SubscriptionModal
-        isOpen={isSubscriptionOpen}
-        onClose={() => setIsSubscriptionOpen(false)}
-        isProUser={isProUser}
-        onTogglePro={() => setIsProUser(!isProUser)}
-      />
-
-      <HotkeysModal
-        isOpen={isHotkeysOpen}
-        onClose={() => setIsHotkeysOpen(false)}
-      />
-
-      <MidiControllerModal
-        isOpen={isMidiModalOpen}
-        onClose={() => setIsMidiModalOpen(false)}
-      />
-
-      <ParametricEqModal
-        isOpen={isParametricEqOpen}
-        onClose={() => setIsParametricEqOpen(false)}
-        track={projectState.mixerTracks.find(t => t.id === eqModalTrackId) || projectState.mixerTracks[0]}
-        onUpdateTrack={handleUpdateMixerTrack}
-      />
-
-      <MasteringSuiteModal
-        isOpen={isMasteringSuiteOpen}
-        onClose={() => setIsMasteringSuiteOpen(false)}
-        masteringState={masteringSuiteState}
-        onUpdateMasteringState={(st) => setMasteringSuiteState(st)}
-        isPlaying={isPlaying}
-      />
-
-      <GrossBeatModal
-        isOpen={isGrossBeatOpen}
-        onClose={() => setIsGrossBeatOpen(false)}
-        currentStep={currentStep}
-        isPlaying={isPlaying}
-      />
-
-      <AudioSlicerModal
-        isOpen={isAudioSlicerOpen}
-        onClose={() => setIsAudioSlicerOpen(false)}
-        channels={projectState.channels}
-        onUpdateChannel={(chId, updates) => handleUpdateChannel(chId, updates)}
-      />
-
+      <ExportModal isOpen={isExportOpen} onClose={() => setIsExportOpen(false)} channels={projectState.channels} clips={projectState.playlistClips} meta={projectState.meta} />
+      <ProjectManagerModal isOpen={isProjectManagerOpen} onClose={() => setIsProjectManagerOpen(false)} currentState={projectState} onLoadProject={(st) => setProjectState(st)} onUpdateMeta={handleUpdateMeta} />
+      <CollaborationModal isOpen={isCollabOpen} onClose={() => setIsCollabOpen(false)} comments={comments} collaborators={collaborators} onAddComment={(text, bar) => { const newC: CollabComment = { id: `c-${Date.now()}`, author: 'Alex (You)', avatarColor: '#ff6e00', timestamp: Date.now(), barPosition: bar, text, resolved: false }; setComments(prev => [newC, ...prev]); }} onToggleResolveComment={(id) => setComments(prev => prev.map(c => c.id === id ? { ...c, resolved: !c.resolved } : c))} isEncrypted={projectState.meta.isEncrypted} onToggleEncryption={() => handleUpdateMeta({ isEncrypted: !projectState.meta.isEncrypted })} />
+      <AnalyticsModal isOpen={isAnalyticsOpen} onClose={() => setIsAnalyticsOpen(false)} meta={projectState.meta} channels={projectState.channels} clips={projectState.playlistClips} />
+      <SubscriptionModal isOpen={isSubscriptionOpen} onClose={() => setIsSubscriptionOpen(false)} isProUser={isProUser} onTogglePro={() => setIsProUser(!isProUser)} />
+      <HotkeysModal isOpen={isHotkeysOpen} onClose={() => setIsHotkeysOpen(false)} />
+      <MidiControllerModal isOpen={isMidiModalOpen} onClose={() => setIsMidiModalOpen(false)} />
+      <ParametricEqModal isOpen={isParametricEqOpen} onClose={() => setIsParametricEqOpen(false)} track={projectState.mixerTracks.find(t => t.id === eqModalTrackId) || projectState.mixerTracks[0]} onUpdateTrack={handleUpdateMixerTrack} />
+      <MasteringSuiteModal isOpen={isMasteringSuiteOpen} onClose={() => setIsMasteringSuiteOpen(false)} masteringState={masteringSuiteState} onUpdateMasteringState={(st) => setMasteringSuiteState(st)} isPlaying={isPlaying} />
+      <GrossBeatModal isOpen={isGrossBeatOpen} onClose={() => setIsGrossBeatOpen(false)} currentStep={currentStep} isPlaying={isPlaying} />
+      <AudioSlicerModal isOpen={isAudioSlicerOpen} onClose={() => setIsAudioSlicerOpen(false)} channels={projectState.channels} onUpdateChannel={(chId, updates) => handleUpdateChannel(chId, updates)} />
       {(() => {
         const targetArpChannel = projectState.channels.find(c => c.id === arpChannelId) || projectState.channels[0];
-        return targetArpChannel ? (
-          <ArpeggiatorModal
-            isOpen={isArpeggiatorOpen}
-            onClose={() => setIsArpeggiatorOpen(false)}
-            channel={targetArpChannel}
-            onUpdateChannel={(updatedCh) => handleUpdateChannel(updatedCh.id, updatedCh)}
-            bpm={projectState.meta.bpm}
-          />
-        ) : null;
+        return targetArpChannel ? <ArpeggiatorModal isOpen={isArpeggiatorOpen} onClose={() => setIsArpeggiatorOpen(false)} channel={targetArpChannel} onUpdateChannel={(updatedCh) => handleUpdateChannel(updatedCh.id, updatedCh)} bpm={projectState.meta.bpm} /> : null;
       })()}
-
-      <SampleManagerModal
-        isOpen={isSampleManagerOpen}
-        onClose={() => setIsSampleManagerOpen(false)}
-        channels={projectState.channels}
-        selectedChannel={projectState.channels.find(c => c.id === sampleChannelId) || projectState.channels[0]}
-        onAssignSampleToChannel={(chId, sampleData) => {
-          handleUpdateChannel(chId, { customSample: sampleData });
-        }}
-        onCreateChannelFromSample={(sampleData) => {
-          const channel = {
-            id: `ch-sample-${Date.now()}`,
-            name: sampleData.name || 'Sample Pad',
-            instrumentType: 'sampler' as const,
-            volume: 0.85,
-            pan: 0,
-            pitch: 0,
-            mute: false,
-            solo: false,
-            color: '#00ff88',
-            steps: Array(16).fill(false),
-            notes: [],
-            synthParams: { ...DEFAULT_PROJECT.channels[0].synthParams },
-            customSample: sampleData
-          } satisfies Omit<Channel, 'mixerTrackId'>;
-
-          setProjectState(prev => appendChannelWithAllocatedMixerTrackId(prev, channel));
-          setSelectedChannelId(channel.id);
-        }}
-      />
-
-      <AudioRecorderModal
-        isOpen={isAudioRecorderOpen}
-        onClose={() => {
-          setIsAudioRecorderOpen(false);
-          setIsRecording(false);
-        }}
-        onSaveRecording={handleSaveRecordingToPlaylist}
-      />
-
-      <VocalTunerModal
-        isOpen={isVocalTunerOpen}
-        onClose={() => setIsVocalTunerOpen(false)}
-        vocalTunerSettings={projectState.vocalTunerSettings || {
-          enabled: true,
-          rootKey: 0,
-          scale: 'minor',
-          retuneSpeedMs: 15,
-          formantShift: 0,
-          pitchCorrectionAmount: 0.85,
-          vibratoDepth: 0.2,
-          humanize: 0.3
-        }}
-        onUpdateVocalTuner={(settings) => setProjectState(prev => ({ ...prev, vocalTunerSettings: settings }))}
-        channels={projectState.channels}
-      />
-
-      <MidiLearnModal
-        isOpen={isMidiLearnOpen}
-        onClose={() => setIsMidiLearnOpen(false)}
-        mappings={projectState.midiMappings || []}
-        onUpdateMappings={(mappings) => setProjectState(prev => ({ ...prev, midiMappings: mappings }))}
-        isLearnActive={isMidiLearnActive}
-        onToggleLearn={() => setIsMidiLearnActive(!isMidiLearnActive)}
-        onClearAll={() => setProjectState(prev => ({ ...prev, midiMappings: [] }))}
-      />
-
-      <MultiZoneSamplerModal
-        isOpen={isMultiZoneSamplerOpen}
-        onClose={() => setIsMultiZoneSamplerOpen(false)}
-        channels={projectState.channels}
-        onUpdateChannel={handleUpdateChannel}
-      />
-
-      <WavetableSynthModal
-        isOpen={isWavetableSynthOpen}
-        onClose={() => setIsWavetableSynthOpen(false)}
-        channels={projectState.channels}
-        onUpdateChannel={handleUpdateChannel}
-      />
-
-      <WamPluginModal
-        isOpen={isWamPluginOpen}
-        onClose={() => setIsWamPluginOpen(false)}
-        mixerTracks={projectState.mixerTracks}
-        onUpdateMixerTracks={(tracks) => setProjectState(prev => ({ ...prev, mixerTracks: tracks }))}
-      />
-
-      <TakeCompingModal
-        isOpen={isTakeCompingOpen}
-        onClose={() => setIsTakeCompingOpen(false)}
-        onPromoteCompToPlaylist={(newClip) => {
-          setProjectState(prev => ({
-            ...prev,
-            playlistClips: [...prev.playlistClips, newClip]
-          }));
-        }}
-      />
-
-      <SidechainRoutingModal
-        isOpen={isSidechainOpen}
-        onClose={() => setIsSidechainOpen(false)}
-        mixerTracks={projectState.mixerTracks}
-        onUpdateMixerTracks={(tracks) => setProjectState(prev => ({ ...prev, mixerTracks: tracks }))}
-      />
-
-      <PolyphonicEditorModal
-        isOpen={isPolyphonicEditorOpen}
-        onClose={() => setIsPolyphonicEditorOpen(false)}
-      />
-
-      <DesktopAppModal
-        isOpen={isDesktopAppOpen}
-        onClose={() => setIsDesktopAppOpen(false)}
-      />
-
-      <WarpAudioProcessorModal
-        isOpen={isWarpProcessorOpen}
-        onClose={() => setIsWarpProcessorOpen(false)}
-        selectedClip={projectState.playlistClips[0] || null}
-        onUpdateClip={(updatedClip) => {
-          setProjectState(prev => ({
-            ...prev,
-            playlistClips: prev.playlistClips.map(c => c.id === updatedClip.id ? updatedClip : c)
-          }));
-        }}
-      />
-
-      <VideoScoringModal
-        isOpen={isVideoScoringOpen}
-        onClose={() => setIsVideoScoringOpen(false)}
-        currentBar={currentBar}
-        bpm={projectState.meta.bpm}
-        onSeekToBar={(bar) => {
-          setCurrentBar(bar);
-          setCurrentStep((bar - 1) * 16);
-        }}
-      />
-
-      <SpatialAudio3DPannerModal
-        isOpen={isSpatialAudioOpen}
-        onClose={() => setIsSpatialAudioOpen(false)}
-        mixerTracks={projectState.mixerTracks}
-      />
-
-      <MpeExpressionModal
-        isOpen={isMpeExpressionOpen}
-        onClose={() => setIsMpeExpressionOpen(false)}
-      />
-
-      <StemSplitterAiModal
-        isOpen={isStemSplitterOpen}
-        onClose={() => setIsStemSplitterOpen(false)}
-        onImportStemsToTracks={(stems) => {
-          const newTracks = stems.map((s, idx) => ({
-            id: projectState.playlistTracks.length + idx + 1,
-            name: s.name,
-            color: s.type === 'vocals' ? '#ff6e00' : s.type === 'drums' ? '#00ff88' : s.type === 'bass' ? '#00e5ff' : '#a855f7',
-            volume: 0.9,
-            pan: 0,
-            mute: false,
-            solo: false,
-            height: 'normal' as const
-          }));
-          const newClips = stems.map((s, idx) => ({
-            id: `stem-clip-${Date.now()}-${idx}`,
-            trackIndex: projectState.playlistTracks.length + idx,
-            startBar: 0,
-            lengthBars: 8,
-            type: 'audio' as const,
-            audioBufferId: `stem-${s.type}`,
-            audioName: s.name,
-            color: s.type === 'vocals' ? '#ff6e00' : s.type === 'drums' ? '#00ff88' : s.type === 'bass' ? '#00e5ff' : '#a855f7',
-            name: s.name
-          }));
-          setProjectState(prev => ({
-            ...prev,
-            playlistTracks: [...prev.playlistTracks, ...newTracks],
-            playlistClips: [...prev.playlistClips, ...newClips]
-          }));
-        }}
-      />
-
-      <MasterMacroRackModal
-        isOpen={isMasterMacrosOpen}
-        onClose={() => setIsMasterMacrosOpen(false)}
-        mixerTracks={projectState.mixerTracks}
-        channels={projectState.channels}
-        macroKnobs={projectState.macroKnobs}
-        onUpdateMacros={(macros) => {
-          setProjectState(prev => ({ ...prev, macroKnobs: macros }));
-        }}
-      />
-
-      <ProjectBundleZipModal
-        isOpen={isProjectZipOpen}
-        onClose={() => setIsProjectZipOpen(false)}
-        projectState={projectState}
-        onLoadProjectState={(loadedState) => {
-          setProjectState(loadedState);
-        }}
-      />
-
+      <SampleManagerModal isOpen={isSampleManagerOpen} onClose={() => setIsSampleManagerOpen(false)} channels={projectState.channels} selectedChannel={projectState.channels.find(c => c.id === sampleChannelId) || projectState.channels[0]} onAssignSampleToChannel={(chId, sampleData) => { handleUpdateChannel(chId, { customSample: sampleData }); }} onCreateChannelFromSample={(sampleData) => { const channel = { id: `ch-sample-${Date.now()}`, name: sampleData.name || 'Sample Pad', instrumentType: 'sampler' as const, volume: 0.85, pan: 0, pitch: 0, mute: false, solo: false, color: '#00ff88', steps: Array(16).fill(false), notes: [], synthParams: { ...DEFAULT_PROJECT.channels[0].synthParams }, customSample: sampleData } satisfies Omit<Channel, 'mixerTrackId'>; setProjectState(prev => appendChannelWithAllocatedMixerTrackId(prev, channel)); setSelectedChannelId(channel.id); }} />
+      <AudioRecorderModal isOpen={isAudioRecorderOpen} onClose={() => { setIsAudioRecorderOpen(false); setIsRecording(false); }} onSaveRecording={handleSaveRecordingToPlaylist} />
+      <VocalTunerModal isOpen={isVocalTunerOpen} onClose={() => setIsVocalTunerOpen(false)} vocalTunerSettings={projectState.vocalTunerSettings || { enabled: true, rootKey: 0, scale: 'minor', retuneSpeedMs: 15, formantShift: 0, pitchCorrectionAmount: 0.85, vibratoDepth: 0.2, humanize: 0.3 }} onUpdateVocalTuner={(settings) => setProjectState(prev => ({ ...prev, vocalTunerSettings: settings }))} channels={projectState.channels} />
+      <MidiLearnModal isOpen={isMidiLearnOpen} onClose={() => setIsMidiLearnOpen(false)} mappings={projectState.midiMappings || []} onUpdateMappings={(mappings) => setProjectState(prev => ({ ...prev, midiMappings: mappings }))} isLearnActive={isMidiLearnActive} onToggleLearn={() => setIsMidiLearnActive(!isMidiLearnActive)} onClearAll={() => setProjectState(prev => ({ ...prev, midiMappings: [] }))} />
+      <MultiZoneSamplerModal isOpen={isMultiZoneSamplerOpen} onClose={() => setIsMultiZoneSamplerOpen(false)} channels={projectState.channels} onUpdateChannel={handleUpdateChannel} />
+      <WavetableSynthModal isOpen={isWavetableSynthOpen} onClose={() => setIsWavetableSynthOpen(false)} channels={projectState.channels} onUpdateChannel={handleUpdateChannel} />
+      <WamPluginModal isOpen={isWamPluginOpen} onClose={() => setIsWamPluginOpen(false)} mixerTracks={projectState.mixerTracks} onUpdateMixerTracks={(tracks) => setProjectState(prev => ({ ...prev, mixerTracks: tracks }))} />
+      <TakeCompingModal isOpen={isTakeCompingOpen} onClose={() => setIsTakeCompingOpen(false)} onPromoteCompToPlaylist={(newClip) => setProjectState(prev => ({ ...prev, playlistClips: [...prev.playlistClips, newClip] }))} />
+      <SidechainRoutingModal isOpen={isSidechainOpen} onClose={() => setIsSidechainOpen(false)} mixerTracks={projectState.mixerTracks} onUpdateMixerTracks={(tracks) => setProjectState(prev => ({ ...prev, mixerTracks: tracks }))} />
+      <PolyphonicEditorModal isOpen={isPolyphonicEditorOpen} onClose={() => setIsPolyphonicEditorOpen(false)} />
+      <DesktopAppModal isOpen={isDesktopAppOpen} onClose={() => setIsDesktopAppOpen(false)} />
+      <WarpAudioProcessorModal isOpen={isWarpProcessorOpen} onClose={() => setIsWarpProcessorOpen(false)} selectedClip={projectState.playlistClips[0] || null} onUpdateClip={(updatedClip) => setProjectState(prev => ({ ...prev, playlistClips: prev.playlistClips.map(c => c.id === updatedClip.id ? updatedClip : c) }))} />
+      <VideoScoringModal isOpen={isVideoScoringOpen} onClose={() => setIsVideoScoringOpen(false)} currentBar={currentBar} bpm={projectState.meta.bpm} onSeekToBar={(bar) => { setCurrentBar(bar); setCurrentStep((bar - 1) * 16); }} />
+      <SpatialAudio3DPannerModal isOpen={isSpatialAudioOpen} onClose={() => setIsSpatialAudioOpen(false)} mixerTracks={projectState.mixerTracks} />
+      <MpeExpressionModal isOpen={isMpeExpressionOpen} onClose={() => setIsMpeExpressionOpen(false)} />
+      <StemSplitterAiModal isOpen={isStemSplitterOpen} onClose={() => setIsStemSplitterOpen(false)} onImportStemsToTracks={(stems) => { const newTracks = stems.map((s, idx) => ({ id: projectState.playlistTracks.length + idx + 1, name: s.name, color: s.type === 'vocals' ? '#ff6e00' : s.type === 'drums' ? '#00ff88' : s.type === 'bass' ? '#00e5ff' : '#a855f7', volume: 0.9, pan: 0, mute: false, solo: false, height: 'normal' as const })); const newClips = stems.map((s, idx) => ({ id: `stem-clip-${Date.now()}-${idx}`, trackIndex: projectState.playlistTracks.length + idx, startBar: 0, lengthBars: 8, type: 'audio' as const, audioBufferId: `stem-${s.type}`, audioName: s.name, color: s.type === 'vocals' ? '#ff6e00' : s.type === 'drums' ? '#00ff88' : s.type === 'bass' ? '#00e5ff' : '#a855f7', name: s.name })); setProjectState(prev => ({ ...prev, playlistTracks: [...prev.playlistTracks, ...newTracks], playlistClips: [...prev.playlistClips, ...newClips] })); }} />
+      <MasterMacroRackModal isOpen={isMasterMacrosOpen} onClose={() => setIsMasterMacrosOpen(false)} mixerTracks={projectState.mixerTracks} channels={projectState.channels} macroKnobs={projectState.macroKnobs} onUpdateMacros={(macros) => setProjectState(prev => ({ ...prev, macroKnobs: macros }))} />
+      <ProjectBundleZipModal isOpen={isProjectZipOpen} onClose={() => setIsProjectZipOpen(false)} projectState={projectState} onLoadProjectState={(loadedState) => setProjectState(loadedState)} />
       <OrientationLockModal />
     </div>
   );
