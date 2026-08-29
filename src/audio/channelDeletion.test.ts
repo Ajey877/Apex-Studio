@@ -159,7 +159,7 @@ describe('Channel deletion lifecycle — AudioEngine', () => {
       [0, createTrackNodes(0)],
       [1, createTrackNodes(1)],
       [2, createTrackNodes(2)],
-    ]);
+    ]) as unknown as TestEngine['mixerChannels'];
     engine.activeVoices = new Map();
   });
 
