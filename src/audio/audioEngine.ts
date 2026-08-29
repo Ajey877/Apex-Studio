@@ -176,6 +176,46 @@ class AudioEngine {
     return channelObj;
   }
 
+  public hasMixerChannel(trackId: number): boolean {
+    return this.mixerChannels.has(trackId);
+  }
+
+  public removeMixerChannel(trackId: number): void {
+    if (trackId === 0) return; // Master track must never be disconnected or removed
+
+    const channel = this.mixerChannels.get(trackId);
+    if (!channel) return;
+
+    try {
+      channel.input.disconnect();
+    } catch (_) {}
+
+    channel.fxNodes.forEach(node => {
+      try {
+        node.disconnect();
+      } catch (_) {}
+    });
+    channel.fxNodes = [];
+
+    try {
+      channel.panner.disconnect();
+    } catch (_) {}
+
+    try {
+      channel.duckingGain.disconnect();
+    } catch (_) {}
+
+    try {
+      channel.output.disconnect();
+    } catch (_) {}
+
+    try {
+      channel.analyser.disconnect();
+    } catch (_) {}
+
+    this.mixerChannels.delete(trackId);
+  }
+
   public updateMixerTrack(track: MixerTrack) {
     const channel = this.getOrCreateMixerChannel(track.id);
     if (!this.ctx) return;
@@ -749,6 +789,18 @@ class AudioEngine {
       const voice = this.activeVoices.get(voiceId);
       voice?.stop();
       this.activeVoices.delete(voiceId);
+    }
+  }
+
+  public stopChannelVoices(channelId: string): void {
+    const prefix = `${channelId}-`;
+    for (const [voiceId, voice] of this.activeVoices.entries()) {
+      if (voiceId.startsWith(prefix)) {
+        try {
+          voice.stop();
+        } catch (_) {}
+        this.activeVoices.delete(voiceId);
+      }
     }
   }
 
