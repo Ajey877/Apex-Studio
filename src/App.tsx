@@ -327,24 +327,12 @@ export function App() {
 
   const handleDeleteChannel = (channelId: string) => {
     if (projectState.channels.length <= 1) return;
-
-    const channelToDelete = projectState.channels.find(ch => ch.id === channelId);
-
     setProjectState(prev => ({
       ...prev,
-      channels: prev.channels.filter(ch => ch.id !== channelId),
-      mixerTracks: channelToDelete
-        ? prev.mixerTracks.filter(mt => mt.id !== channelToDelete.mixerTrackId)
-        : prev.mixerTracks
+      channels: prev.channels.filter(ch => ch.id !== channelId)
     }));
-
-    if (channelToDelete) {
-      audioEngine.deleteMixerChannel(channelToDelete.mixerTrackId);
-    }
-
     if (selectedChannelId === channelId) {
-      const remainingChannels = projectState.channels.filter(ch => ch.id !== channelId);
-      setSelectedChannelId(remainingChannels[0]?.id || 'ch-1');
+      setSelectedChannelId(projectState.channels[0]?.id || 'ch-1');
     }
   };
 
