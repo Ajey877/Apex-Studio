@@ -547,6 +547,22 @@ export const ChannelRack: React.FC<ChannelRackProps> = ({
                   >
                     CLR
                   </button>
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onDeleteChannel(ch.id);
+                    }}
+                    disabled={channels.length <= 1}
+                    className="px-1 py-0.5 bg-[#222225] hover:bg-[#2d2d30] text-[#777] hover:text-red-400 rounded disabled:opacity-30 disabled:cursor-not-allowed flex items-center justify-center"
+                    title={
+                      channels.length <= 1
+                        ? 'Cannot delete the last channel'
+                        : 'Delete channel'
+                    }
+                    aria-label={`Delete ${ch.name}`}
+                  >
+                    <Trash2 className="w-2.5 h-2.5" />
+                  </button>
                 </div>
               </div>
 
