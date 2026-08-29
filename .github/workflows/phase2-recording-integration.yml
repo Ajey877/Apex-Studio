@@ -1,0 +1,130 @@
+name: Phase 2 Recording Integration
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches:
+      - fix/phase-2-recording-integration
+
+permissions:
+  contents: write
+
+jobs:
+  patch-and-validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout PR head
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.ref || github.ref_name }}
+          repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Apply recording integration
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          app = Path('src/App.tsx')
+          text = app.read_text(encoding='utf-8')
+          old = '''  const handleSaveRecordingToPlaylist = (recording: AudioRecording, targetTrackIndex: number) => {
+    const newClip: PlaylistClip = {
+      id: `rec-clip-${Date.now()}`,
+      trackIndex: targetTrackIndex,
+      startBar: 0,
+      lengthBars: Math.max(2, Math.ceil(recording.durationSeconds / 2)),
+      type: 'audio',
+      audioName: recording.name,
+      color: '#ff6e00',
+      name: recording.name
+    };
+
+    setProjectState(prev => ({
+      ...prev,
+      playlistClips: [...prev.playlistClips, newClip]
+    }));
+  };'''
+          new = '''  const handleSaveRecordingToPlaylist = async (recording: AudioRecording, targetTrackIndex: number) => {
+    if (!recording.audioBlob || recording.audioBlob.size === 0) {
+      throw new Error('The recording contains no audio data');
+    }
+
+    const audioBufferId = `recording-${recording.id}`;
+    const loaded = await audioEngine.loadAudioFile(recording.audioBlob, audioBufferId);
+    const secondsPerBar = 240 / Math.max(20, projectState.meta.bpm);
+    const lengthBars = Math.max(1, Math.ceil(recording.durationSeconds / secondsPerBar));
+
+    const newClip: PlaylistClip = {
+      id: `rec-clip-${Date.now()}`,
+      trackIndex: targetTrackIndex,
+      startBar: 0,
+      lengthBars,
+      type: 'audio',
+      audioBufferId,
+      audioName: recording.name,
+      audioWaveform: loaded.peaks,
+      color: '#ff6e00',
+      name: recording.name
+    };
+
+    setProjectState(prev => ({
+      ...prev,
+      playlistClips: [...prev.playlistClips, newClip]
+    }));
+  };'''
+          if old not in text:
+              raise SystemExit('App recording handler anchor not found')
+          app.write_text(text.replace(old, new, 1), encoding='utf-8')
+
+          modal = Path('src/components/AudioRecorderModal.tsx')
+          text = modal.read_text(encoding='utf-8')
+          old = "  onSaveRecording: (recording: AudioRecording, targetTrackIndex: number) => void;"
+          new = "  onSaveRecording: (recording: AudioRecording, targetTrackIndex: number) => void | Promise<void>;"
+          if old not in text: raise SystemExit('modal save callback anchor not found')
+          text = text.replace(old, new, 1)
+          old = "  const [recordedTake, setRecordedTake] = useState<AudioRecording | null>(null);\n  const [error, setError] = useState<string | null>(null);"
+          new = "  const [recordedTake, setRecordedTake] = useState<AudioRecording | null>(null);\n  const [error, setError] = useState<string | null>(null);\n  const [isApplying, setIsApplying] = useState(false);"
+          if old not in text: raise SystemExit('modal state anchor not found')
+          text = text.replace(old, new, 1)
+          old = "  useEffect(() => {\n    if (!isOpen) {\n      setRecordingState('idle');\n      setRecordSeconds(0);\n      setInputLevel(0);\n      setError(null);\n      setRecordedTake(null);\n    }\n  }, [isOpen]);"
+          new = "  useEffect(() => {\n    if (!isOpen) {\n      engineRef.current?.cancel();\n      setRecordingState('idle');\n      setRecordSeconds(0);\n      setInputLevel(0);\n      setError(null);\n      setRecordedTake(null);\n      setIsApplying(false);\n    }\n  }, [isOpen]);"
+          if old not in text: raise SystemExit('modal close cleanup anchor not found')
+          text = text.replace(old, new, 1)
+          old = "  const handleApplyToPlaylist = () => {\n    if (!recordedTake) return;\n    onSaveRecording(recordedTake, targetTrack);\n    onClose();\n  };"
+          new = "  const handleApplyToPlaylist = async () => {\n    if (!recordedTake || isApplying) return;\n    try {\n      setError(null);\n      setIsApplying(true);\n      await onSaveRecording(recordedTake, targetTrack);\n      onClose();\n    } catch (err) {\n      setError(err instanceof Error ? err.message : 'Unable to place recording on the playlist');\n      setIsApplying(false);\n    }\n  };"
+          if old not in text: raise SystemExit('modal apply handler anchor not found')
+          text = text.replace(old, new, 1)
+          old = "              <button onClick={handleApplyToPlaylist} className=\"w-full py-2 bg-[#ff6e00] hover:bg-[#ff7d1a] text-black font-bold text-xs rounded transition flex items-center justify-center gap-1.5\">\n                <Check className=\"w-4 h-4\" /> PLACE TAKE ON PLAYLIST\n              </button>"
+          new = "              <button onClick={handleApplyToPlaylist} disabled={isApplying} className=\"w-full py-2 bg-[#ff6e00] hover:bg-[#ff7d1a] text-black font-bold text-xs rounded transition flex items-center justify-center gap-1.5 disabled:opacity-50 disabled:cursor-wait\">\n                <Check className=\"w-4 h-4\" /> {isApplying ? 'PLACING TAKE…' : 'PLACE TAKE ON PLAYLIST'}\n              </button>"
+          if old not in text: raise SystemExit('modal apply button anchor not found')
+          modal.write_text(text.replace(old, new, 1), encoding='utf-8')
+
+          test = Path('src/audio/recording.integration.test.ts')
+          test.write_text('''import { describe, it } from 'node:test';\nimport assert from 'node:assert/strict';\nimport { readFileSync } from 'node:fs';\n\ndescribe('recording to playlist integration', () => {\n  it('loads recorded audio into the AudioEngine sample buffer before creating an audio clip', () => {\n    const source = readFileSync(new URL('../App.tsx', import.meta.url), 'utf8');\n    assert.match(source, /await audioEngine\\.loadAudioFile\\(recording\\.audioBlob, audioBufferId\\)/);\n    assert.match(source, /audioBufferId,/);\n    assert.match(source, /audioWaveform: loaded\\.peaks/);\n  });\n\n  it('sizes recorded clips from the current project BPM instead of a fixed two-second bar', () => {\n    const source = readFileSync(new URL('../App.tsx', import.meta.url), 'utf8');\n    assert.match(source, /const secondsPerBar = 240 \/ Math\\.max\\(20, projectState\\.meta\\.bpm\\)/);\n    assert.match(source, /Math\\.ceil\\(recording\\.durationSeconds \/ secondsPerBar\\)/);\n  });\n\n  it('cancels an active recording when the recorder modal closes', () => {\n    const source = readFileSync(new URL('../components/AudioRecorderModal.tsx', import.meta.url), 'utf8');\n    assert.match(source, /engineRef\\.current\\?\\.cancel\\(\\)/);\n  });\n});\n''', encoding='utf-8')
+          PY
+
+      - name: Commit recording integration
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/App.tsx src/components/AudioRecorderModal.tsx src/audio/recording.integration.test.ts .github/workflows/phase2-recording-integration.yml
+          git diff --cached --quiet && exit 0
+          git commit -m "fix: integrate recorded audio into playlist"
+          git push origin HEAD:${{ github.event.pull_request.head.ref || github.ref_name }}
+
+      - name: Install dependencies
+        run: npm install
+      - name: Run audio tests
+        run: npm run test:audio
+      - name: Run lint
+        run: npm run lint
+      - name: Run production build
+        run: npm run build
