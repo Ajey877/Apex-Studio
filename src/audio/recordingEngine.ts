@@ -1,3 +1,5 @@
+import { persistAudioClip } from './audioPersistence';
+
 export interface RecordingResult {
   id: string;
   name: string;
@@ -42,19 +44,12 @@ export class RecordingEngine {
     this.timesliceMs = Math.max(50, Math.floor(options.timesliceMs ?? 250));
   }
 
-  getState(): RecordingState {
-    return this.state;
-  }
-
-  getMimeType(): string {
-    return this.mimeType;
-  }
+  getState(): RecordingState { return this.state; }
+  getMimeType(): string { return this.mimeType; }
 
   getDurationSeconds(now = performance.now()): number {
     if (this.startedAt <= 0) return 0;
-    const end = this.state === 'recording' || this.state === 'paused' || this.state === 'stopping'
-      ? now
-      : this.startedAt;
+    const end = this.state === 'recording' || this.state === 'paused' || this.state === 'stopping' ? now : this.startedAt;
     const paused = this.pausedDurationMs + (this.state === 'paused' ? Math.max(0, now - this.pausedAt) : 0);
     return Math.max(0, (end - this.startedAt - paused) / 1000);
   }
@@ -65,17 +60,12 @@ export class RecordingEngine {
     if (typeof MediaRecorder === 'undefined') throw new Error('MediaRecorder is not supported in this environment');
 
     const stream = await navigator.mediaDevices.getUserMedia({
-      audio: {
-        echoCancellation: false,
-        noiseSuppression: false,
-        autoGainControl: false,
-      },
+      audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false }
     });
 
     try {
       const context = this.contextProvider();
       if (context.state === 'suspended') await context.resume();
-
       const source = context.createMediaStreamSource(stream);
       const analyser = context.createAnalyser();
       analyser.fftSize = 1024;
@@ -84,12 +74,8 @@ export class RecordingEngine {
 
       const mimeType = this.selectMimeType();
       const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
-      recorder.ondataavailable = event => {
-        if (event.data.size > 0) this.chunks.push(event.data);
-      };
-      recorder.onerror = () => {
-        this.state = 'idle';
-      };
+      recorder.ondataavailable = event => { if (event.data.size > 0) this.chunks.push(event.data); };
+      recorder.onerror = () => { this.state = 'idle'; };
 
       this.stream = stream;
       this.analyserSource = source;
@@ -134,10 +120,7 @@ export class RecordingEngine {
   }
 
   async stop(): Promise<RecordingResult> {
-    if (!this.recorder || (this.state !== 'recording' && this.state !== 'paused')) {
-      throw new Error('No active recording');
-    }
-
+    if (!this.recorder || (this.state !== 'recording' && this.state !== 'paused')) throw new Error('No active recording');
     const recorder = this.recorder;
     this.state = 'stopping';
     if (recorder.state !== 'inactive') recorder.stop();
@@ -148,20 +131,20 @@ export class RecordingEngine {
           const blob = new Blob(this.chunks, { type: this.mimeType || recorder.mimeType || 'audio/webm' });
           const waveform = await this.buildWaveform(blob);
           const durationSeconds = this.getDurationSeconds();
-          const url = URL.createObjectURL(blob);
-          resolve({
-            id: `rec-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          const id = `rec-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+          const resultValue: RecordingResult = {
+            id,
             name: `Audio Take ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}`,
-            timestamp: Date.now(),
-            durationSeconds,
-            blob,
-            url,
-            waveform,
-            mimeType: blob.type,
-          });
-        } catch (error) {
-          reject(error);
-        }
+            timestamp: Date.now(), durationSeconds, blob,
+            url: URL.createObjectURL(blob), waveform, mimeType: blob.type
+          };
+          try {
+            await persistAudioClip(`recording-${id}`, blob);
+          } catch (storageError) {
+            console.warn('[Apex Studio] Local audio persistence failed; recording remains available for this session.', storageError);
+          }
+          resolve(resultValue);
+        } catch (error) { reject(error); }
       };
       recorder.onerror = () => reject(new Error('Audio recording failed'));
     });
@@ -172,23 +155,14 @@ export class RecordingEngine {
 
   cancel(): void {
     if (!this.recorder) return;
-    try {
-      if (this.recorder.state !== 'inactive') this.recorder.stop();
-    } finally {
-      this.cleanup();
-    }
+    try { if (this.recorder.state !== 'inactive') this.recorder.stop(); }
+    finally { this.cleanup(); }
   }
 
-  dispose(): void {
-    this.cancel();
-  }
+  dispose(): void { this.cancel(); }
 
   private selectMimeType(): string | undefined {
-    const candidates = [
-      'audio/webm;codecs=opus',
-      'audio/ogg;codecs=opus',
-      'audio/webm',
-    ];
+    const candidates = ['audio/webm;codecs=opus', 'audio/ogg;codecs=opus', 'audio/webm'];
     return candidates.find(type => MediaRecorder.isTypeSupported(type));
   }
 
@@ -199,21 +173,15 @@ export class RecordingEngine {
       const decoded = await context.decodeAudioData(await blob.arrayBuffer());
       const channels = Array.from({ length: decoded.numberOfChannels }, (_, index) => decoded.getChannelData(index));
       const waveform = new Array(this.waveformSamples).fill(0);
-
       for (let bucket = 0; bucket < waveform.length; bucket++) {
         const start = Math.floor((bucket * decoded.length) / waveform.length);
         const end = Math.max(start + 1, Math.floor(((bucket + 1) * decoded.length) / waveform.length));
         let peak = 0;
-        for (let frame = start; frame < end; frame++) {
-          for (const channel of channels) peak = Math.max(peak, Math.abs(channel[frame] ?? 0));
-        }
+        for (let frame = start; frame < end; frame++) for (const channel of channels) peak = Math.max(peak, Math.abs(channel[frame] ?? 0));
         waveform[bucket] = Math.min(1, peak);
       }
       return waveform;
     } catch {
-      // Decoding can legitimately fail for a browser-specific recorder codec.
-      // The recording remains valid; callers receive an empty preview instead
-      // of fabricated waveform data.
       return [];
     }
   }
