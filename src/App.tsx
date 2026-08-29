@@ -235,14 +235,18 @@ export function App() {
     audioEngine.setMetronome(metronome);
   }, [metronome]);
 
-  // Clock tick listener from Audio Engine
+  // Audio-clock transport state drives the UI playhead.
+  // This avoids advancing React state from the look-ahead onStep callbacks,
+  // which intentionally fire ahead of the audible event time.
   useEffect(() => {
-    const handleStepTick = (step: number, bar: number) => {
-      setCurrentStep(step);
-      setCurrentBar(bar);
+    const handleTransportState = (state: { playing: boolean; step: number; bar: number }) => {
+      setIsPlaying(prev => prev === state.playing ? prev : state.playing);
+      setCurrentStep(prev => prev === state.step ? prev : state.step);
+      setCurrentBar(prev => prev === state.bar ? prev : state.bar);
     };
 
-    audioEngine.setStepCallback(handleStepTick);
+    audioEngine.setTransportStateCallback(handleTransportState);
+    return () => audioEngine.setTransportStateCallback(null);
   }, []);
 
   // --- Transport Controls ---
