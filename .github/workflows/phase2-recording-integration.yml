@@ -3,6 +3,9 @@ name: Phase 2 Recording Integration
 on:
   pull_request:
     branches: [main]
+  push:
+    branches:
+      - fix/phase-2-recording-integration
 
 permissions:
   contents: write
@@ -14,8 +17,8 @@ jobs:
       - name: Checkout PR head
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.head.ref }}
-          repository: ${{ github.event.pull_request.head.repo.full_name }}
+          ref: ${{ github.event.pull_request.head.ref || github.ref_name }}
+          repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
           fetch-depth: 0
 
       - name: Setup Node
@@ -82,35 +85,25 @@ jobs:
 
           modal = Path('src/components/AudioRecorderModal.tsx')
           text = modal.read_text(encoding='utf-8')
-
           old = "  onSaveRecording: (recording: AudioRecording, targetTrackIndex: number) => void;"
           new = "  onSaveRecording: (recording: AudioRecording, targetTrackIndex: number) => void | Promise<void>;"
-          if old not in text:
-              raise SystemExit('modal save callback anchor not found')
+          if old not in text: raise SystemExit('modal save callback anchor not found')
           text = text.replace(old, new, 1)
-
           old = "  const [recordedTake, setRecordedTake] = useState<AudioRecording | null>(null);\n  const [error, setError] = useState<string | null>(null);"
           new = "  const [recordedTake, setRecordedTake] = useState<AudioRecording | null>(null);\n  const [error, setError] = useState<string | null>(null);\n  const [isApplying, setIsApplying] = useState(false);"
-          if old not in text:
-              raise SystemExit('modal state anchor not found')
+          if old not in text: raise SystemExit('modal state anchor not found')
           text = text.replace(old, new, 1)
-
           old = "  useEffect(() => {\n    if (!isOpen) {\n      setRecordingState('idle');\n      setRecordSeconds(0);\n      setInputLevel(0);\n      setError(null);\n      setRecordedTake(null);\n    }\n  }, [isOpen]);"
           new = "  useEffect(() => {\n    if (!isOpen) {\n      engineRef.current?.cancel();\n      setRecordingState('idle');\n      setRecordSeconds(0);\n      setInputLevel(0);\n      setError(null);\n      setRecordedTake(null);\n      setIsApplying(false);\n    }\n  }, [isOpen]);"
-          if old not in text:
-              raise SystemExit('modal close cleanup anchor not found')
+          if old not in text: raise SystemExit('modal close cleanup anchor not found')
           text = text.replace(old, new, 1)
-
           old = "  const handleApplyToPlaylist = () => {\n    if (!recordedTake) return;\n    onSaveRecording(recordedTake, targetTrack);\n    onClose();\n  };"
           new = "  const handleApplyToPlaylist = async () => {\n    if (!recordedTake || isApplying) return;\n    try {\n      setError(null);\n      setIsApplying(true);\n      await onSaveRecording(recordedTake, targetTrack);\n      onClose();\n    } catch (err) {\n      setError(err instanceof Error ? err.message : 'Unable to place recording on the playlist');\n      setIsApplying(false);\n    }\n  };"
-          if old not in text:
-              raise SystemExit('modal apply handler anchor not found')
+          if old not in text: raise SystemExit('modal apply handler anchor not found')
           text = text.replace(old, new, 1)
-
           old = "              <button onClick={handleApplyToPlaylist} className=\"w-full py-2 bg-[#ff6e00] hover:bg-[#ff7d1a] text-black font-bold text-xs rounded transition flex items-center justify-center gap-1.5\">\n                <Check className=\"w-4 h-4\" /> PLACE TAKE ON PLAYLIST\n              </button>"
           new = "              <button onClick={handleApplyToPlaylist} disabled={isApplying} className=\"w-full py-2 bg-[#ff6e00] hover:bg-[#ff7d1a] text-black font-bold text-xs rounded transition flex items-center justify-center gap-1.5 disabled:opacity-50 disabled:cursor-wait\">\n                <Check className=\"w-4 h-4\" /> {isApplying ? 'PLACING TAKE…' : 'PLACE TAKE ON PLAYLIST'}\n              </button>"
-          if old not in text:
-              raise SystemExit('modal apply button anchor not found')
+          if old not in text: raise SystemExit('modal apply button anchor not found')
           modal.write_text(text.replace(old, new, 1), encoding='utf-8')
 
           test = Path('src/audio/recording.integration.test.ts')
@@ -125,16 +118,13 @@ jobs:
           git add src/App.tsx src/components/AudioRecorderModal.tsx src/audio/recording.integration.test.ts .github/workflows/phase2-recording-integration.yml
           git diff --cached --quiet && exit 0
           git commit -m "fix: integrate recorded audio into playlist"
-          git push origin HEAD:${{ github.event.pull_request.head.ref }}
+          git push origin HEAD:${{ github.event.pull_request.head.ref || github.ref_name }}
 
       - name: Install dependencies
         run: npm install
-
       - name: Run audio tests
         run: npm run test:audio
-
       - name: Run lint
         run: npm run lint
-
       - name: Run production build
         run: npm run build
