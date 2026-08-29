@@ -1,0 +1,106 @@
+name: Phase 3 UI Clock Sync
+
+on:
+  push:
+    branches:
+      - fix/phase-3-ui-clock-sync
+
+permissions:
+  contents: write
+
+jobs:
+  patch-and-validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Apply UI clock synchronization
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          engine = Path('src/audio/audioEngine.ts')
+          text = engine.read_text(encoding='utf-8')
+
+          old = "import { AudioClockTransport } from './transport';"
+          new = "import { AudioClockTransport, TransportState } from './transport';"
+          if old not in text:
+              raise SystemExit('transport import anchor not found')
+          text = text.replace(old, new, 1)
+
+          old = "  private stepCallback: ((step: number, bar: number) => void) | null = null;\n  private activeChannels: Channel[] = [];"
+          new = "  private stepCallback: ((step: number, bar: number) => void) | null = null;\n  private transportStateCallback: ((state: Readonly<TransportState>) => void) | null = null;\n  private activeChannels: Channel[] = [];"
+          if old not in text:
+              raise SystemExit('transport callback field anchor not found')
+          text = text.replace(old, new, 1)
+
+          old = "  public setBpm(bpm: number) {\n    this.bpm = Math.max(20, Math.min(300, bpm));\n  }"
+          new = "  public setBpm(bpm: number) {\n    this.bpm = Math.max(20, Math.min(300, bpm));\n    if (this.transport) {\n      this.transport.setBpm(this.bpm);\n    }\n  }"
+          if old not in text:
+              raise SystemExit('setBpm anchor not found')
+          text = text.replace(old, new, 1)
+
+          old = "  public setStepCallback(cb: (step: number, bar: number) => void) {\n    this.stepCallback = cb;\n  }"
+          new = "  public setStepCallback(cb: (step: number, bar: number) => void) {\n    this.stepCallback = cb;\n  }\n\n  public setTransportStateCallback(cb: ((state: Readonly<TransportState>) => void) | null) {\n    this.transportStateCallback = cb;\n  }"
+          if old not in text:
+              raise SystemExit('setStepCallback anchor not found')
+          text = text.replace(old, new, 1)
+
+          old = "      onStep: (step, bar, audioTime) => {\n        if (!this.isPlaying || this.playbackGeneration !== currentGeneration) return;\n\n        this.currentStep = step;"
+          new = "      onStep: (step, bar, audioTime) => {\n        if (!this.isPlaying || this.playbackGeneration !== currentGeneration) return;\n\n        this.currentStep = step;"
+          if old not in text:
+              raise SystemExit('onStep anchor not found')
+
+          old = "        if (this.stepCallback) {\n          this.stepCallback(step, bar);\n        }\n      }\n    });"
+          new = "        if (this.stepCallback) {\n          this.stepCallback(step, bar);\n        }\n      },\n      onStateChange: (state) => {\n        if (!this.isPlaying || this.playbackGeneration !== currentGeneration) return;\n        this.transportStateCallback?.(state);\n      }\n    });"
+          if old not in text:
+              raise SystemExit('transport callback close anchor not found')
+          text = text.replace(old, new, 1)
+
+          engine.write_text(text, encoding='utf-8')
+
+          app = Path('src/App.tsx')
+          text = app.read_text(encoding='utf-8')
+
+          old = "  // Clock tick listener from Audio Engine\n  useEffect(() => {\n    const handleStepTick = (step: number, bar: number) => {\n      setCurrentStep(step);\n      setCurrentBar(bar);\n    };\n\n    audioEngine.setStepCallback(handleStepTick);\n  }, []);"
+          new = "  // Audio-clock transport state drives the UI playhead.\n  // This avoids advancing React state from the look-ahead onStep callbacks,\n  // which intentionally fire ahead of the audible event time.\n  useEffect(() => {\n    const handleTransportState = (state: { playing: boolean; step: number; bar: number }) => {\n      setIsPlaying(prev => prev === state.playing ? prev : state.playing);\n      setCurrentStep(prev => prev === state.step ? prev : state.step);\n      setCurrentBar(prev => prev === state.bar ? prev : state.bar);\n    };\n\n    audioEngine.setTransportStateCallback(handleTransportState);\n    return () => audioEngine.setTransportStateCallback(null);\n  }, []);"
+          if old not in text:
+              raise SystemExit('App clock listener anchor not found')
+          text = text.replace(old, new, 1)
+
+          app.write_text(text, encoding='utf-8')
+
+          test = Path('src/audio/audioEngine.transport-sync.test.ts')
+          test.write_text('''import { describe, it } from 'node:test';\nimport assert from 'node:assert/strict';\nimport { readFileSync } from 'node:fs';\n\ndescribe('AudioEngine transport UI synchronization', () => {\n  it('exposes transport state separately from look-ahead step callbacks', () => {\n    const source = readFileSync(new URL('./audioEngine.ts', import.meta.url), 'utf8');\n    assert.match(source, /TransportState/);\n    assert.match(source, /setTransportStateCallback/);\n    assert.match(source, /onStateChange:/);\n    assert.match(source, /this\\.transportStateCallback\\?\\.\(state\\)/);\n  });\n\n  it('updates the live transport BPM while playing', () => {\n    const source = readFileSync(new URL('./audioEngine.ts', import.meta.url), 'utf8');\n    assert.match(source, /if \(this\\.transport\) \{\\s*this\\.transport\\.setBpm\(this\\.bpm\);/);\n  });\n\n  it('does not drive the React playhead from the look-ahead step callback', () => {\n    const source = readFileSync(new URL('../App.tsx', import.meta.url), 'utf8');\n    assert.match(source, /setTransportStateCallback\(handleTransportState\)/);\n    assert.doesNotMatch(source, /setStepCallback\(handleStepTick\)/);\n  });\n});\n''', encoding='utf-8')
+          PY
+
+      - name: Commit UI clock synchronization
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/audio/audioEngine.ts src/App.tsx src/audio/audioEngine.transport-sync.test.ts
+          git diff --cached --quiet && exit 0
+          git commit -m "fix: synchronize UI playhead with audio clock"
+          git push origin HEAD:fix/phase-3-ui-clock-sync
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Run audio tests
+        run: npm run test:audio
+
+      - name: Run lint
+        run: npm run lint
+
+      - name: Run production build
+        run: npm run build
