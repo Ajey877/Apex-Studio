@@ -34,7 +34,7 @@ test('snapBarPosition snaps to the requested grid', () => {
 
 test('movePlaylistClip snaps and changes playlist lane', () => {
   const moved = movePlaylistClip(baseClip, 10.13, 2, 0.25, { totalBars: 32, maxTracks: 8 });
-  assert.equal(moved.startBar, 10);
+  assert.equal(moved.startBar, 10.25);
   assert.equal(moved.trackIndex, 2);
   assert.equal(moved.lengthBars, 8);
 });
@@ -47,15 +47,15 @@ test('movePlaylistClip clamps to the timeline end', () => {
 
 test('resizePlaylistClipLeft preserves end and advances source offset', () => {
   const resized = resizePlaylistClipLeft(baseClip, 6.13, 0.25, 0.25, { totalBars: 32 });
-  assert.equal(resized.startBar, 6);
-  assert.equal(resized.lengthBars, 6);
-  assert.equal(resized.offsetSteps, 32);
+  assert.equal(resized.startBar, 6.25);
+  assert.equal(resized.lengthBars, 5.75);
+  assert.equal(resized.offsetSteps, 36);
 });
 
 test('resizePlaylistClipRight preserves start and changes duration', () => {
   const resized = resizePlaylistClipRight(baseClip, 14.13, 0.25, 0.25, { totalBars: 32 });
   assert.equal(resized.startBar, 4);
-  assert.equal(resized.lengthBars, 10);
+  assert.equal(resized.lengthBars, 10.25);
 });
 
 test('resizePlaylistClipRight cannot exceed timeline bounds', () => {
@@ -67,10 +67,10 @@ test('resizePlaylistClipRight cannot exceed timeline bounds', () => {
 test('splitPlaylistClip creates contiguous clips and advances right offset', () => {
   const [left, right] = splitPlaylistClip(baseClip, 8.13, 0.25, { totalBars: 32 });
   assert.equal(left.startBar, 4);
-  assert.equal(left.lengthBars, 4);
-  assert.equal(right.startBar, 8);
-  assert.equal(right.lengthBars, 4);
-  assert.equal(right.offsetSteps, 64);
+  assert.equal(left.lengthBars, 4.25);
+  assert.equal(right.startBar, 8.25);
+  assert.equal(right.lengthBars, 3.75);
+  assert.equal(right.offsetSteps, 68);
   assert.notEqual(left.id, right.id);
 });
 
