@@ -26,15 +26,19 @@ export function validatePlaylistClip(clip: PlaylistClip, bounds: PlaylistBounds 
 
   if (!clip.id) errors.push('Clip id is required');
   if (!Number.isInteger(clip.trackIndex) || clip.trackIndex < 0) errors.push('trackIndex must be a non-negative integer');
-  if (bounds.maxTracks !== undefined && clip.trackIndex >= bounds.maxTracks) errors.push('trackIndex exceeds playlist track count');
+  if (bounds.maxTracks !== undefined && (!Number.isInteger(bounds.maxTracks) || bounds.maxTracks <= 0)) errors.push('maxTracks must be a positive integer');
+  if (bounds.maxTracks !== undefined && Number.isInteger(clip.trackIndex) && clip.trackIndex >= bounds.maxTracks) errors.push('trackIndex exceeds playlist track count');
+  if (bounds.totalBars !== undefined && (!finite(bounds.totalBars) || bounds.totalBars <= 0)) errors.push('totalBars must be finite and greater than zero');
   if (!finite(clip.startBar) || clip.startBar < 0) errors.push('startBar must be finite and non-negative');
   if (!finite(clip.lengthBars) || clip.lengthBars <= 0) errors.push('lengthBars must be finite and greater than zero');
-  if (bounds.totalBars !== undefined && clip.startBar + clip.lengthBars > bounds.totalBars) errors.push('clip exceeds playlist timeline bounds');
+  if (bounds.totalBars !== undefined && finite(clip.startBar) && finite(clip.lengthBars) && clip.startBar + clip.lengthBars > bounds.totalBars) errors.push('clip exceeds playlist timeline bounds');
   if (clip.offsetSteps !== undefined && (!finite(clip.offsetSteps) || clip.offsetSteps < 0)) errors.push('offsetSteps must be finite and non-negative');
   if (clip.fadeInBars !== undefined && (!finite(clip.fadeInBars) || clip.fadeInBars < 0)) errors.push('fadeInBars must be non-negative');
   if (clip.fadeOutBars !== undefined && (!finite(clip.fadeOutBars) || clip.fadeOutBars < 0)) errors.push('fadeOutBars must be non-negative');
-  if (clip.fadeInBars !== undefined && clip.fadeInBars > clip.lengthBars / 2) errors.push('fadeInBars exceeds half the clip length');
-  if (clip.fadeOutBars !== undefined && clip.fadeOutBars > clip.lengthBars / 2) errors.push('fadeOutBars exceeds half the clip length');
+  if (finite(clip.lengthBars) && clip.lengthBars > 0) {
+    if (clip.fadeInBars !== undefined && clip.fadeInBars > clip.lengthBars / 2) errors.push('fadeInBars exceeds half the clip length');
+    if (clip.fadeOutBars !== undefined && clip.fadeOutBars > clip.lengthBars / 2) errors.push('fadeOutBars exceeds half the clip length');
+  }
 
   return { valid: errors.length === 0, errors };
 }
@@ -80,7 +84,10 @@ export function resizePlaylistClipLeft(
   const startBar = snapBarPosition(requestedStartBar, gridBars);
   const originalEnd = clip.startBar + clip.lengthBars;
   const maxStart = originalEnd - minimumLengthBars;
-  const nextStart = Math.min(startBar, maxStart);
+  const sourceOffset = clip.offsetSteps ?? 0;
+  const maxExtensionLeft = sourceOffset / STEPS_PER_BAR;
+  const minSourcePreservingStart = Math.max(0, clip.startBar - maxExtensionLeft);
+  const nextStart = Math.max(minSourcePreservingStart, Math.min(startBar, maxStart));
   const nextLength = originalEnd - nextStart;
   const deltaBars = nextStart - clip.startBar;
 
@@ -88,7 +95,9 @@ export function resizePlaylistClipLeft(
     ...cloneClip(clip),
     startBar: nextStart,
     lengthBars: nextLength,
-    offsetSteps: (clip.offsetSteps ?? 0) + Math.max(0, deltaBars * STEPS_PER_BAR)
+    offsetSteps: Math.max(0, sourceOffset + deltaBars * STEPS_PER_BAR),
+    fadeInBars: clip.fadeInBars === undefined ? undefined : Math.min(clip.fadeInBars, nextLength / 2),
+    fadeOutBars: clip.fadeOutBars === undefined ? undefined : Math.min(clip.fadeOutBars, nextLength / 2)
   };
 
   return assertValidPlaylistClip(resized, bounds);
@@ -103,13 +112,16 @@ export function resizePlaylistClipRight(
 ): PlaylistClip {
   if (!finite(minimumLengthBars) || minimumLengthBars <= 0) throw new Error('minimumLengthBars must be greater than zero');
   const endBar = snapBarPosition(requestedEndBar, gridBars);
-  const minimumEnd = clip.startBar + minimumLengthBars;
   const maxEnd = bounds.totalBars === undefined ? Number.POSITIVE_INFINITY : bounds.totalBars;
+  if (maxEnd < clip.startBar) throw new Error('Clip start exceeds playlist timeline bounds');
+  const minimumEnd = Math.min(maxEnd, clip.startBar + minimumLengthBars);
   const nextEnd = Math.max(minimumEnd, Math.min(endBar, maxEnd));
 
   const resized: PlaylistClip = {
     ...cloneClip(clip),
-    lengthBars: nextEnd - clip.startBar
+    lengthBars: nextEnd - clip.startBar,
+    fadeInBars: clip.fadeInBars === undefined ? undefined : Math.min(clip.fadeInBars, (nextEnd - clip.startBar) / 2),
+    fadeOutBars: clip.fadeOutBars === undefined ? undefined : Math.min(clip.fadeOutBars, (nextEnd - clip.startBar) / 2)
   };
 
   return assertValidPlaylistClip(resized, bounds);
