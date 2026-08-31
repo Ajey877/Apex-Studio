@@ -31,5 +31,8 @@ jobs:
       - name: TypeScript check
         run: npm run lint
 
+      - name: Playlist editing core tests
+        run: npx tsx --test src/components/playlistClipOperations.test.ts
+
       - name: Production build
         run: npm run build
