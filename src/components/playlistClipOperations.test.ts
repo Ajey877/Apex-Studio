@@ -52,6 +52,21 @@ test('resizePlaylistClipLeft preserves end and advances source offset', () => {
   assert.equal(resized.offsetSteps, 36);
 });
 
+test('resizePlaylistClipLeft reduces source offset when extending into available source', () => {
+  const clip = { ...baseClip, startBar: 8, offsetSteps: 32 };
+  const resized = resizePlaylistClipLeft(clip, 6, 0.25, 0.25, { totalBars: 32 });
+  assert.equal(resized.startBar, 6);
+  assert.equal(resized.lengthBars, 10);
+  assert.equal(resized.offsetSteps, 0);
+});
+
+test('resizePlaylistClipLeft cannot extend beyond available source offset', () => {
+  const clip = { ...baseClip, startBar: 8, offsetSteps: 16 };
+  const resized = resizePlaylistClipLeft(clip, 0, 0.25, 0.25, { totalBars: 32 });
+  assert.equal(resized.startBar, 7);
+  assert.equal(resized.offsetSteps, 0);
+});
+
 test('resizePlaylistClipRight preserves start and changes duration', () => {
   const resized = resizePlaylistClipRight(baseClip, 14.13, 0.25, 0.25, { totalBars: 32 });
   assert.equal(resized.startBar, 4);
@@ -61,6 +76,13 @@ test('resizePlaylistClipRight preserves start and changes duration', () => {
 test('resizePlaylistClipRight cannot exceed timeline bounds', () => {
   const resized = resizePlaylistClipRight(baseClip, 40, 0.25, 0.25, { totalBars: 16 });
   assert.equal(resized.lengthBars, 12);
+  assert.equal(resized.startBar + resized.lengthBars, 16);
+});
+
+test('resizePlaylistClipRight respects a minimum length without crossing a tight timeline', () => {
+  const clip = { ...baseClip, startBar: 15, lengthBars: 1 };
+  const resized = resizePlaylistClipRight(clip, 20, 0.25, 4, { totalBars: 16 });
+  assert.equal(resized.lengthBars, 1);
   assert.equal(resized.startBar + resized.lengthBars, 16);
 });
 
@@ -97,4 +119,10 @@ test('validatePlaylistClip catches invalid timeline values', () => {
   const result = validatePlaylistClip({ ...baseClip, startBar: -1 }, { totalBars: 32 });
   assert.equal(result.valid, false);
   assert.ok(result.errors.some(error => error.includes('startBar')));
+});
+
+test('validatePlaylistClip rejects invalid bounds', () => {
+  const result = validatePlaylistClip(baseClip, { totalBars: 0 });
+  assert.equal(result.valid, false);
+  assert.ok(result.errors.some(error => error.includes('totalBars')));
 });
