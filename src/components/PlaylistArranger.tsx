@@ -24,6 +24,15 @@ import {
 } from 'lucide-react';
 import { PlaylistTrack, PlaylistClip, Pattern, Channel, AutomationTargetType, ArrangementMarker } from '../types/daw';
 import { audioEngine } from '../audio/audioEngine';
+import {
+  DEFAULT_GRID_BARS,
+  deletePlaylistClip,
+  duplicatePlaylistClip,
+  movePlaylistClip,
+  resizePlaylistClipLeft,
+  resizePlaylistClipRight,
+  splitPlaylistClip,
+} from './playlistClipOperations';
 
 interface PlaylistArrangerProps {
   tracks: PlaylistTrack[];
@@ -39,6 +48,15 @@ interface PlaylistArrangerProps {
   currentBar: number;
   isPlaying: boolean;
 }
+
+const BAR_WIDTH = 96;
+const TRACK_HEIGHT = 64;
+const MIN_CLIP_LENGTH = DEFAULT_GRID_BARS;
+
+type Interaction =
+  | { kind: 'move'; clip: PlaylistClip; pointerId: number; originX: number; originY: number }
+  | { kind: 'resize-left'; clip: PlaylistClip; pointerId: number; originX: number }
+  | { kind: 'resize-right'; clip: PlaylistClip; pointerId: number; originX: number };
 
 const MARKER_PRESETS: { name: string; markers: { name: string; bar: number; color: string }[] }[] = [
   {
@@ -98,8 +116,12 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
   const [isMarkerMenuOpen, setIsMarkerMenuOpen] = useState(false);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [isScrubbing, setIsScrubbing] = useState(false);
+  const [interaction, setInteraction] = useState<Interaction | null>(null);
+  const didMoveRef = useRef(false);
   const lastScrubBarRef = useRef<number>(1);
   const rulerContainerRef = useRef<HTMLDivElement | null>(null);
+
+  const bounds = { totalBars, maxTracks: tracks.length };
 
   const handleRulerScrub = (clientX: number) => {
     if (!rulerContainerRef.current || !onSeekToBar) return;
@@ -207,33 +229,99 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
     onUpdateClips(updated);
   };
 
+  const updateInteraction = (clientX: number, clientY: number) => {
+    if (!interaction) return;
+    const clip = interaction.clip;
+
+    if (Math.abs(clientX - interaction.originX) > 2 || (interaction.kind === 'move' && Math.abs(clientY - interaction.originY) > 2)) {
+      didMoveRef.current = true;
+    }
+
+    try {
+      if (interaction.kind === 'move') {
+        const requestedStart = clip.startBar + (clientX - interaction.originX) / BAR_WIDTH;
+        const targetTrack = clip.trackIndex + Math.round((clientY - interaction.originY) / TRACK_HEIGHT);
+        const moved = movePlaylistClip(clip, requestedStart, targetTrack, DEFAULT_GRID_BARS, bounds);
+        onUpdateClips(clips.map(item => item.id === clip.id ? moved : item));
+      } else if (interaction.kind === 'resize-left') {
+        const requestedStart = clip.startBar + (clientX - interaction.originX) / BAR_WIDTH;
+        const resized = resizePlaylistClipLeft(clip, requestedStart, DEFAULT_GRID_BARS, MIN_CLIP_LENGTH, bounds);
+        onUpdateClips(clips.map(item => item.id === clip.id ? resized : item));
+      } else {
+        const requestedEnd = clip.startBar + clip.lengthBars + (clientX - interaction.originX) / BAR_WIDTH;
+        const resized = resizePlaylistClipRight(clip, requestedEnd, DEFAULT_GRID_BARS, MIN_CLIP_LENGTH, bounds);
+        onUpdateClips(clips.map(item => item.id === clip.id ? resized : item));
+      }
+    } catch (error) {
+      // Invalid coordinates are rejected by the operation layer; the UI remains unchanged.
+      console.warn('Playlist interaction rejected by operation layer', error);
+    }
+  };
+
+  const beginInteraction = (event: React.PointerEvent, next: Interaction) => {
+    if (activeTool !== 'place') return;
+    event.preventDefault();
+    event.stopPropagation();
+    didMoveRef.current = false;
+    event.currentTarget.setPointerCapture(event.pointerId);
+    setSelectedClipId(next.clip.id);
+    setInteraction(next);
+  };
+
+  const endInteraction = (event?: React.PointerEvent) => {
+    if (event && event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    setInteraction(null);
+  };
+
+  const deleteClip = (clipId: string) => {
+    onUpdateClips(deletePlaylistClip(clips, clipId));
+    if (selectedClipId === clipId) setSelectedClipId(null);
+    if (automationEditorClipId === clipId) setAutomationEditorClipId(null);
+  };
+
+  const duplicateClip = (clip: PlaylistClip) => {
+    try {
+      const duplicate = duplicatePlaylistClip(
+        clip,
+        `${clip.id}-copy-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        clip.startBar + clip.lengthBars,
+        clip.trackIndex,
+        DEFAULT_GRID_BARS,
+        bounds
+      );
+      onUpdateClips([...clips, duplicate]);
+      setSelectedClipId(duplicate.id);
+      if (clip.type === 'automation') setAutomationEditorClipId(duplicate.id);
+    } catch {
+      setStatusMessage('Duplicate cannot fit within the playlist bounds.');
+      setTimeout(() => setStatusMessage(null), 2000);
+    }
+  };
+
+  const splitClip = (clip: PlaylistClip, splitBar: number) => {
+    try {
+      const [left, right] = splitPlaylistClip(clip, splitBar, DEFAULT_GRID_BARS, bounds);
+      onUpdateClips([...deletePlaylistClip(clips, clip.id), left, right]);
+      setSelectedClipId(left.id);
+      if (automationEditorClipId === clip.id) setAutomationEditorClipId(null);
+    } catch {
+      setStatusMessage('Clip cannot be split at that position.');
+      setTimeout(() => setStatusMessage(null), 2000);
+    }
+  };
+
   const handleGridCellClick = (trackIndex: number, barIndex: number) => {
     const existingClip = clips.find(c => c.trackIndex === trackIndex && barIndex >= c.startBar && barIndex < c.startBar + c.lengthBars);
 
     if (activeTool === 'delete') {
-      if (existingClip) {
-        onUpdateClips(clips.filter(c => c.id !== existingClip.id));
-      }
+      if (existingClip) deleteClip(existingClip.id);
       return;
     }
 
     if (activeTool === 'cut' && existingClip) {
-      // Split clip at clicked bar
-      const splitOffset = barIndex - existingClip.startBar;
-      if (splitOffset > 0 && splitOffset < existingClip.lengthBars) {
-        const leftClip: PlaylistClip = {
-          ...existingClip,
-          id: `clip-split-1-${Date.now()}`,
-          lengthBars: splitOffset
-        };
-        const rightClip: PlaylistClip = {
-          ...existingClip,
-          id: `clip-split-2-${Date.now()}`,
-          startBar: barIndex,
-          lengthBars: existingClip.lengthBars - splitOffset
-        };
-        onUpdateClips(clips.map(c => c.id === existingClip.id ? leftClip : c).concat(rightClip));
-      }
+      splitClip(existingClip, barIndex);
       return;
     }
 
@@ -713,11 +801,29 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
                   return (
                     <div
                       key={clip.id}
+                      onPointerDown={(e) => {
+                        if (e.button !== 0) return;
+                        beginInteraction(e, { kind: 'move', clip, pointerId: e.pointerId, originX: e.clientX, originY: e.clientY });
+                      }}
+                      onPointerMove={(e) => {
+                        if (interaction && e.pointerId === interaction.pointerId) updateInteraction(e.clientX, e.clientY);
+                      }}
+                      onPointerUp={(e) => {
+                        if (interaction && e.pointerId === interaction.pointerId) endInteraction(e);
+                      }}
+                      onPointerCancel={(e) => {
+                        if (interaction && e.pointerId === interaction.pointerId) endInteraction(e);
+                      }}
                       onClick={(e) => {
                         e.stopPropagation();
+                        if (didMoveRef.current) {
+                          didMoveRef.current = false;
+                          return;
+                        }
                         if (activeTool === 'delete') {
-                          onUpdateClips(clips.filter(item => item.id !== clip.id));
+                          deleteClip(clip.id);
                         } else if (isAuto) {
+                          setSelectedClipId(clip.id);
                           setAutomationEditorClipId(clip.id);
                         } else {
                           setSelectedClipId(clip.id);
@@ -794,6 +900,7 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
                         <>
                           {/* Fade In Handle */}
                           <div
+                            onPointerDown={(e) => e.stopPropagation()}
                             onClick={(e) => {
                               e.stopPropagation();
                               handleAdjustClipFade(clip.id, 'in', 0.25);
@@ -807,6 +914,7 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
 
                           {/* Fade Out Handle */}
                           <div
+                            onPointerDown={(e) => e.stopPropagation()}
                             onClick={(e) => {
                               e.stopPropagation();
                               handleAdjustClipFade(clip.id, 'out', 0.25);
@@ -819,6 +927,20 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
                           </div>
                         </>
                       )}
+
+                      {/* Phase 4 clip resize handles */}
+                      <div
+                        role="separator"
+                        aria-label="Resize clip start"
+                        onPointerDown={(e) => beginInteraction(e, { kind: 'resize-left', clip, pointerId: e.pointerId, originX: e.clientX })}
+                        className="absolute left-0 top-0 bottom-0 w-1.5 cursor-ew-resize bg-white/20 hover:bg-white/40 z-30"
+                      />
+                      <div
+                        role="separator"
+                        aria-label="Resize clip end"
+                        onPointerDown={(e) => beginInteraction(e, { kind: 'resize-right', clip, pointerId: e.pointerId, originX: e.clientX })}
+                        className="absolute right-0 top-0 bottom-0 w-1.5 cursor-ew-resize bg-white/20 hover:bg-white/40 z-30"
+                      />
                     </div>
                   );
                 })}
@@ -870,9 +992,18 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
             )}
 
             <button
-              onClick={() => onUpdateClips(clips.filter(c => c.id !== selectedClip.id))}
-              className="px-2 py-1 bg-red-500/20 text-red-400 hover:bg-red-500/30 rounded font-bold"
+              onClick={() => duplicateClip(selectedClip)}
+              className="px-2 py-1 bg-[#282830] text-white hover:bg-[#333] rounded font-bold flex items-center gap-1"
             >
+              <Copy className="w-3 h-3" />
+              Duplicate
+            </button>
+
+            <button
+              onClick={() => deleteClip(selectedClip.id)}
+              className="px-2 py-1 bg-red-500/20 text-red-400 hover:bg-red-500/30 rounded font-bold flex items-center gap-1"
+            >
+              <Trash2 className="w-3 h-3" />
               Delete Clip
             </button>
 
@@ -943,4 +1074,3 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
     </div>
   );
 };
-
