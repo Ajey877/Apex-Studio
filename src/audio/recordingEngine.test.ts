@@ -29,7 +29,15 @@ class FakeAnalyser {
 
 class FakeAudioContext {
   state = 'running';
-  readonly decoded = { numberOfChannels: 1, length: 4, duration: 0.1, getChannelData: () => new Float32Array([0, 0.5, -0.25, 0.1]) } as AudioBuffer;
+  readonly decoded = {
+    numberOfChannels: 1,
+    length: 4,
+    duration: 0.1,
+    sampleRate: 44100,
+    getChannelData: () => new Float32Array([0, 0.5, -0.25, 0.1]),
+    copyFromChannel: () => {},
+    copyToChannel: () => {},
+  } as unknown as AudioBuffer;
   async resume(): Promise<void> {}
   createMediaStreamSource(): FakeSource { return new FakeSource(); }
   createAnalyser(): FakeAnalyser { return new FakeAnalyser(); }
