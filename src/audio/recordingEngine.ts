@@ -164,7 +164,7 @@ export class RecordingEngine {
 
       try {
         if (recorder.state !== 'inactive') recorder.stop();
-        else queueMicrotask(() => { if (!settled) void recorder.onstop?.(); });
+        else queueMicrotask(() => fail(new Error('Recording stopped before finalization')));
       } catch (error) {
         fail(error);
       }
