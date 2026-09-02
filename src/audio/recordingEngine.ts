@@ -54,6 +54,7 @@ export class RecordingEngine {
     if (this.state !== 'idle') throw new Error(`Cannot start recording while state is ${this.state}`);
     if (!navigator.mediaDevices?.getUserMedia) throw new Error('Microphone capture is not supported in this environment');
     if (typeof MediaRecorder === 'undefined') throw new Error('MediaRecorder is not supported in this environment');
+
     const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false } });
     try {
       const context = this.contextProvider();
@@ -66,7 +67,7 @@ export class RecordingEngine {
       const mimeType = this.selectMimeType();
       const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
       recorder.ondataavailable = event => { if (event.data.size > 0) this.chunks.push(event.data); };
-      recorder.onerror = () => { this.state = 'idle'; };
+      recorder.onerror = () => this.failAndCleanup(new Error('Audio recording failed'));
       this.stream = stream;
       this.analyserSource = source;
       this.analyser = analyser;
@@ -114,32 +115,52 @@ export class RecordingEngine {
     const recorder = this.recorder;
     this.state = 'stopping';
     if (recorder.state !== 'inactive') recorder.stop();
+
     const result = await new Promise<RecordingResult>((resolve, reject) => {
       recorder.onstop = async () => {
         try {
           const blob = new Blob(this.chunks, { type: this.mimeType || recorder.mimeType || 'audio/webm' });
+          if (!blob.size) throw new Error('Audio recording produced no data');
           const waveform = await this.buildWaveform(blob);
           const durationSeconds = this.getDurationSeconds();
           const id = `rec-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
           const resultValue: RecordingResult = { id, name: `Audio Take ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}`, timestamp: Date.now(), durationSeconds, blob, url: URL.createObjectURL(blob), waveform, mimeType: blob.type };
-          try { await persistAudioClip(`recording-${id}`, blob); }
-          catch (storageError) { console.warn('[Apex Studio] Local audio persistence failed; recording remains available for this session.', storageError); }
+          try {
+            await persistAudioClip(`recording-${id}`, blob);
+          } catch (storageError) {
+            console.warn('[Apex Studio] Local audio persistence failed; recording remains available for this session.', storageError);
+          }
           resolve(resultValue);
-        } catch (error) { reject(error); }
+        } catch (error) {
+          reject(error);
+        }
       };
       recorder.onerror = () => reject(new Error('Audio recording failed'));
     });
+
     this.cleanup();
     return result;
   }
 
   cancel(): void {
-    if (!this.recorder) return;
-    try { if (this.recorder.state !== 'inactive') this.recorder.stop(); }
-    finally { this.cleanup(); }
+    const recorder = this.recorder;
+    if (!recorder) {
+      this.cleanup();
+      return;
+    }
+    try {
+      if (recorder.state !== 'inactive') recorder.stop();
+    } finally {
+      this.cleanup();
+    }
   }
 
   dispose(): void { this.cancel(); }
+
+  private failAndCleanup(error: Error): void {
+    this.cleanup();
+    console.error('[Apex Studio] Recording failed.', error);
+  }
 
   private selectMimeType(): string | undefined {
     const candidates = ['audio/webm;codecs=opus', 'audio/ogg;codecs=opus', 'audio/webm'];
@@ -161,13 +182,17 @@ export class RecordingEngine {
         waveform[bucket] = Math.min(1, peak);
       }
       return waveform;
-    } catch { return []; }
+    } catch {
+      return [];
+    }
   }
 
   private cleanup(): void {
-    this.stream?.getTracks().forEach(track => track.stop());
-    this.analyserSource?.disconnect();
-    this.analyser?.disconnect();
+    this.stream?.getTracks().forEach(track => {
+      try { track.stop(); } catch (_) { /* best effort */ }
+    });
+    try { this.analyserSource?.disconnect(); } catch (_) { /* best effort */ }
+    try { this.analyser?.disconnect(); } catch (_) { /* best effort */ }
     this.stream = null;
     this.analyserSource = null;
     this.analyser = null;
