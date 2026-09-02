@@ -135,6 +135,39 @@ describe('live mixer FX hardening', () => {
     assert.ok(oscillators.every((created) => (created.startCalls as number) >= 1), 'modulation oscillators must be started');
   });
 
+  it('keeps the previous chain intact when a replacement cannot be built', () => {
+    const { context, nodes } = makeContext();
+    const channel = {
+      input: context.createGain(),
+      panner: context.createGain(),
+      fxNodes: [] as AudioNode[],
+    };
+    const engine = {
+      getContext: () => context,
+      getOrCreateMixerChannel: (_trackId: number) => channel,
+      rebuildTrackFxChain(_track: MixerTrack) {},
+      removeMixerChannel(_trackId: number) {},
+    };
+
+    installLiveFxChainHardening(engine);
+    engine.rebuildTrackFxChain(track([slot('delay', 0.5)]));
+    const oldFxNodes = [...channel.fxNodes];
+    const oldInputConnections = [...channel.input.connections];
+
+    assert.throws(
+      () => engine.rebuildTrackFxChain(track([slot('delay', 1.1)])),
+      /between 0 and 1/,
+    );
+
+    assert.deepEqual(channel.fxNodes, oldFxNodes, 'failed rebuild must not replace the active node list');
+    assert.deepEqual(channel.input.connections, oldInputConnections, 'failed rebuild must preserve the active input routing');
+    assert.ok(oldFxNodes.every((node) => (node as unknown as FakeNode).disconnectCalls === 0), 'failed rebuild must not tear down the active chain');
+
+    const createdAfterFailure = nodes.slice(oldFxNodes.length + 1);
+    assert.ok(createdAfterFailure.length > 0, 'the failing rebuild should have attempted new construction');
+    assert.ok(createdAfterFailure.every((node) => (node.disconnectCalls as number) > 0), 'partially created replacement nodes must be disposed');
+  });
+
   it('disposes the previous live chain before rebuilding and cleans it on track removal', () => {
     const { context, nodes } = makeContext();
     const channel = {
