@@ -17,7 +17,7 @@
     "package:win:dir": "vite build && electron-builder --win --x64 --dir --publish never",
     "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true}); require('fs').rmSync('server.js',{force:true})\"",
     "lint": "tsc --noEmit",
-    "test:audio": "tsx --test src/audio/*.test.ts src/audio/automation/*.test.ts",
+    "test:audio": "tsx --test src/audio/*.test.ts src/audio/automation/*.test.ts src/utils/*.test.ts",
     "verify:desktop": "node scripts/verify-desktop-config.mjs"
   },
   "build": {
@@ -48,6 +48,7 @@
     "@tailwindcss/vite": "^4.1.14",
     "@types/canvas-confetti": "^1.9.0",
     "@vitejs/plugin-react": "^5.0.4",
+    "@vitejs/plugin-react": "^5.0.4",
     "canvas-confetti": "^1.9.4",
     "dotenv": "^17.2.3",
     "express": "^4.21.2",
@@ -61,7 +62,6 @@
   },
   "devDependencies": {
     "@types/express": "^4.17.21",
-    "@types/jszip": "^3.4.1",
     "@types/node": "^22.14.0",
     "autoprefixer": "^10.4.21",
     "electron": "43.4.1",
