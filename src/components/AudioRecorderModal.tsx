@@ -22,7 +22,7 @@ export const AudioRecorderModal: React.FC<AudioRecorderModalProps> = ({ isOpen, 
   const engineRef = useRef<RecordingEngine | null>(null);
 
   useEffect(() => {
-    if (!engineRef.current) engineRef.current = new RecordingEngine(() => audioEngine.getContext());
+    if (!engineRef.current) engineRef.current = new RecordingEngine(() => audioEngine.getContext(), { onError: setError });
     return () => engineRef.current?.dispose();
   }, []);
 
@@ -46,8 +46,8 @@ export const AudioRecorderModal: React.FC<AudioRecorderModalProps> = ({ isOpen, 
             context.lineWidth = 2;
             context.beginPath();
             const mid = canvas.height / 2;
-            context.moveTo(0, mid);
             const amplitude = Math.max(1, peak * mid * 0.9);
+            context.moveTo(0, mid);
             for (let x = 0; x < canvas.width; x += 4) {
               const y = mid + Math.sin(x * 0.18) * amplitude * (0.35 + 0.65 * Math.abs(Math.sin(x * 0.031)));
               context.lineTo(x, y);
