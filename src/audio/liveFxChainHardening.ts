@@ -202,6 +202,30 @@ export function installLiveFxChainHardening(engine: AudioEngineLike): void {
     const ctx = this.getContext();
     const channel = this.getOrCreateMixerChannel(track.id);
     const previousEffects = states.get(track.id) ?? [];
+    const created: AudioEffect[] = [];
+    const createdNodes: AudioNode[] = [];
+    let firstInput: AudioNode | null = null;
+    let current: AudioNode | null = null;
+
+    try {
+      for (const slot of track.fxSlots) {
+        if (!slot.enabled) continue;
+        const effect = createEffect(ctx, slot);
+        if (!effect) continue;
+
+        if (!firstInput) firstInput = effect.input;
+        if (current) current.connect(effect.input);
+        current = effect.output;
+        created.push(effect);
+        if (!channel.fxNodes.includes(effect.input)) createdNodes.push(effect.input);
+        if (!channel.fxNodes.includes(effect.output) && effect.output !== effect.input) createdNodes.push(effect.output);
+      }
+
+      (current ?? channel.input).connect(channel.panner);
+    } catch (error) {
+      for (const effect of created) effect.dispose();
+      throw error;
+    }
 
     try { channel.input.disconnect(); } catch (_) {}
     for (const node of channel.fxNodes) {
@@ -211,20 +235,13 @@ export function installLiveFxChainHardening(engine: AudioEngineLike): void {
     states.delete(track.id);
     channel.fxNodes = [];
 
-    let current: AudioNode = channel.input;
-    const created: AudioEffect[] = [];
-    for (const slot of track.fxSlots) {
-      if (!slot.enabled) continue;
-      const effect = createEffect(ctx, slot);
-      if (!effect) continue;
-      current.connect(effect.input);
-      current = effect.output;
-      created.push(effect);
-      if (!channel.fxNodes.includes(effect.input)) channel.fxNodes.push(effect.input);
-      if (!channel.fxNodes.includes(effect.output)) channel.fxNodes.push(effect.output);
+    if (firstInput) {
+      channel.input.connect(firstInput);
+      channel.fxNodes = createdNodes;
+    } else {
+      channel.input.connect(channel.panner);
     }
 
-    current.connect(channel.panner);
     states.set(track.id, created);
   };
 
