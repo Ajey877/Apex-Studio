@@ -3,6 +3,7 @@ import { Download, FolderArchive, Sparkles, X } from 'lucide-react';
 import JSZip from 'jszip';
 import { Channel, PlaylistClip, ProjectMetadata } from '../types/daw';
 import { audioEngine } from '../audio/audioEngine';
+import { renderProjectTimelineOffline } from '../audio/offlineProjectRenderer';
 import { buildStandardMidiFile, getProjectRenderBars } from '../utils/exportUtils';
 import type { ExportScope } from '../utils/exportUtils';
 
@@ -96,12 +97,20 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, chann
           setRenderProgress(100);
           setStatusText('Stem package ready for download.');
         } else {
-          setStatusText(`Rendering WAV master (${totalBars} bars)...`);
-          setRenderProgress(50);
-          const wavBlob = await audioEngine.renderProjectToWav(channels, clips, meta.bpm, totalBars, bitDepth);
+          setStatusText(`Rendering timeline WAV (${totalBars} bars)...`);
+          setRenderProgress(35);
+          const renderedBuffer = await renderProjectTimelineOffline({
+            channels,
+            clips,
+            bpm: meta.bpm,
+            totalBars,
+            getAudioBuffer: id => audioEngine.getSampleBuffer(id),
+          });
+          setRenderProgress(85);
+          const wavBlob = audioEngine.encodeAudioBufferToWav(renderedBuffer, bitDepth);
           setDownloadUrl(URL.createObjectURL(wavBlob));
           setRenderProgress(100);
-          setStatusText('WAV master render complete.');
+          setStatusText('Timeline WAV master render complete.');
         }
       }
     } catch (error) {
