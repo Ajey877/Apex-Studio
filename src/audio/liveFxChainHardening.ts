@@ -72,7 +72,12 @@ function mixFor(slot: FxSlot): number {
 }
 
 function wrapWetDry(ctx: AudioContext, effect: AudioEffect, mix: number): AudioEffect {
-  return new WetDryEffect(ctx, effect, mix);
+  try {
+    return new WetDryEffect(ctx, effect, mix);
+  } catch (error) {
+    effect.dispose();
+    throw error;
+  }
 }
 
 function createImpulse(ctx: AudioContext): AudioBuffer {
@@ -113,18 +118,16 @@ function createTapeEffect(ctx: AudioContext, slot: FxSlot): AudioEffect {
   depth.connect(flutterDelay.delayTime);
   lfo.start();
 
-  const core = new CompositeEffect(`${slot.id}-tape-core`, 'Tape Saturation', saturation.input, flutterDelay, [filter, flutterDelay, lfo, depth], [saturation]);
-  return wrapWetDry(ctx, core, mixFor(slot));
+  return new CompositeEffect(`${slot.id}-tape-core`, 'Tape Saturation', saturation.input, flutterDelay, [filter, flutterDelay, lfo, depth], [saturation]);
 }
 
 function createEqualizer(ctx: AudioContext, slot: FxSlot): AudioEffect {
-  const low = new BiquadFilterEffect(ctx, `${slot.id}-low`, 'lowshelf', bounded(numericParam(slot, 'lowFreq', 120), 10, ctx.sampleRate / 2), numericParam(slot, 'lowQ', 1), numericParam(slot, 'lowGain', 0));
-  const mid = new BiquadFilterEffect(ctx, `${slot.id}-mid`, 'peaking', bounded(numericParam(slot, 'midFreq', 1200), 10, ctx.sampleRate / 2), bounded(numericParam(slot, 'midQ', 1.2), 0.0001, 1000), numericParam(slot, 'midGain', 0));
-  const high = new BiquadFilterEffect(ctx, `${slot.id}-high`, 'highshelf', bounded(numericParam(slot, 'highFreq', 6500), 10, ctx.sampleRate / 2), numericParam(slot, 'highQ', 1), numericParam(slot, 'highGain', 0));
+  const low = new BiquadFilterEffect(ctx, `${slot.id}-low`, 'lowshelf', bounded(numericParam(slot, 'lowFreq', 120), 10, ctx.sampleRate / 2), bounded(numericParam(slot, 'lowQ', 1), 0.0001, 1000), bounded(numericParam(slot, 'lowGain', 0), -40, 40));
+  const mid = new BiquadFilterEffect(ctx, `${slot.id}-mid`, 'peaking', bounded(numericParam(slot, 'midFreq', 1200), 10, ctx.sampleRate / 2), bounded(numericParam(slot, 'midQ', 1.2), 0.0001, 1000), bounded(numericParam(slot, 'midGain', 0), -40, 40));
+  const high = new BiquadFilterEffect(ctx, `${slot.id}-high`, 'highshelf', bounded(numericParam(slot, 'highFreq', 6500), 10, ctx.sampleRate / 2), bounded(numericParam(slot, 'highQ', 1), 0.0001, 1000), bounded(numericParam(slot, 'highGain', 0), -40, 40));
   low.output.connect(mid.input);
   mid.output.connect(high.input);
-  const core = new CompositeEffect(`${slot.id}-eq-core`, '3-Band EQ', low.input, high.output, [], [low, mid, high]);
-  return wrapWetDry(ctx, core, mixFor(slot));
+  return new CompositeEffect(`${slot.id}-eq-core`, '3-Band EQ', low.input, high.output, [], [low, mid, high]);
 }
 
 function createNativeWaveShaper(ctx: AudioContext, slot: FxSlot, type: 'distortion' | 'bitcrusher'): AudioEffect {
@@ -146,47 +149,57 @@ function createNativeWaveShaper(ctx: AudioContext, slot: FxSlot, type: 'distorti
     }
   }
   shaper.curve = curve;
-  const core = new CompositeEffect(`${slot.id}-${type}`, type === 'distortion' ? 'Distortion' : 'Bitcrusher', shaper, shaper, [shaper]);
-  return wrapWetDry(ctx, core, mixFor(slot));
+  return new CompositeEffect(`${slot.id}-${type}`, type === 'distortion' ? 'Distortion' : 'Bitcrusher', shaper, shaper, [shaper]);
 }
 
 function createReverb(ctx: AudioContext, slot: FxSlot): AudioEffect {
   const convolver = ctx.createConvolver();
   convolver.buffer = createImpulse(ctx);
-  const core = new CompositeEffect(`${slot.id}-reverb`, 'Reverb', convolver, convolver, [convolver]);
-  return wrapWetDry(ctx, core, mixFor(slot));
+  return new CompositeEffect(`${slot.id}-reverb`, 'Reverb', convolver, convolver, [convolver]);
 }
 
 function createEffect(ctx: AudioContext, slot: FxSlot): AudioEffect | null {
+  const mix = mixFor(slot);
+
   switch (slot.type) {
-    case 'equalizer': return createEqualizer(ctx, slot);
-    case 'reverb': return createReverb(ctx, slot);
+    case 'equalizer': return wrapWetDry(ctx, createEqualizer(ctx, slot), mix);
+    case 'reverb': return wrapWetDry(ctx, createReverb(ctx, slot), mix);
     case 'delay': {
-      const effect = new DelayEffect(ctx, slot.id, numericParam(slot, 'time', 0.35), bounded(numericParam(slot, 'feedback', 0.45), 0, 0.989), 1);
-      return wrapWetDry(ctx, effect, mixFor(slot));
+      const time = bounded(numericParam(slot, 'time', 0.35), 0, 10);
+      const feedback = bounded(numericParam(slot, 'feedback', 0.45), 0, 0.989);
+      const effect = new DelayEffect(ctx, slot.id, time, feedback, 1);
+      return wrapWetDry(ctx, effect, mix);
     }
-    case 'distortion': return createNativeWaveShaper(ctx, slot, 'distortion');
+    case 'distortion': return wrapWetDry(ctx, createNativeWaveShaper(ctx, slot, 'distortion'), mix);
     case 'compressor': {
-      const effect = new DynamicsCompressorEffect(ctx, slot.id, numericParam(slot, 'threshold', -18), bounded(numericParam(slot, 'knee', 24), 0, 40), bounded(numericParam(slot, 'ratio', 4), 1, 20), bounded(numericParam(slot, 'attack', 0.005), 0, 1), bounded(numericParam(slot, 'release', 0.15), 0, 1));
-      return wrapWetDry(ctx, effect, mixFor(slot));
+      const effect = new DynamicsCompressorEffect(
+        ctx,
+        slot.id,
+        bounded(numericParam(slot, 'threshold', -18), -100, 0),
+        bounded(numericParam(slot, 'knee', 24), 0, 40),
+        bounded(numericParam(slot, 'ratio', 4), 1, 20),
+        bounded(numericParam(slot, 'attack', 0.005), 0, 1),
+        bounded(numericParam(slot, 'release', 0.15), 0, 1),
+      );
+      return wrapWetDry(ctx, effect, mix);
     }
     case 'chorus': {
       const delay = bounded(numericParam(slot, 'delay', 0.02), 0.005, 0.08);
       const depth = bounded(numericParam(slot, 'depth', 0.003), 0, Math.min(0.02, delay));
       const effect = new ChorusEffect(ctx, slot.id, bounded(numericParam(slot, 'rate', 1.2), 0.05, 20), depth, delay, 1);
-      return wrapWetDry(ctx, effect, mixFor(slot));
+      return wrapWetDry(ctx, effect, mix);
     }
-    case 'bitcrusher': return createNativeWaveShaper(ctx, slot, 'bitcrusher');
+    case 'bitcrusher': return wrapWetDry(ctx, createNativeWaveShaper(ctx, slot, 'bitcrusher'), mix);
     case 'limiter': {
-      const effect = new LimiterEffect(ctx, slot.id, bounded(numericParam(slot, 'ceiling', -0.3), -12, 0), bounded(numericParam(slot, 'release', 0.08), 0.01, 1), numericParam(slot, 'drive', 0), 1);
-      return wrapWetDry(ctx, effect, mixFor(slot));
+      const effect = new LimiterEffect(ctx, slot.id, bounded(numericParam(slot, 'ceiling', -0.3), -12, 0), bounded(numericParam(slot, 'release', 0.08), 0.01, 1), bounded(numericParam(slot, 'drive', 0), -12, 24), 1);
+      return wrapWetDry(ctx, effect, mix);
     }
-    case 'tape_saturation': return createTapeEffect(ctx, slot);
+    case 'tape_saturation': return wrapWetDry(ctx, createTapeEffect(ctx, slot), mix);
     case 'gross_beat': {
       const gain = ctx.createGain();
       gain.gain.value = 1;
       const core = new CompositeEffect(`${slot.id}-gross-beat`, 'Gross Beat', gain, gain, [gain]);
-      return wrapWetDry(ctx, core, mixFor(slot));
+      return wrapWetDry(ctx, core, mix);
     }
     default: return null;
   }
@@ -202,6 +215,30 @@ export function installLiveFxChainHardening(engine: AudioEngineLike): void {
     const ctx = this.getContext();
     const channel = this.getOrCreateMixerChannel(track.id);
     const previousEffects = states.get(track.id) ?? [];
+    const created: AudioEffect[] = [];
+    const createdNodes: AudioNode[] = [];
+    let firstInput: AudioNode | null = null;
+    let current: AudioNode | null = null;
+
+    try {
+      for (const slot of track.fxSlots) {
+        if (!slot.enabled) continue;
+        const effect = createEffect(ctx, slot);
+        if (!effect) continue;
+
+        if (!firstInput) firstInput = effect.input;
+        if (current) current.connect(effect.input);
+        current = effect.output;
+        created.push(effect);
+        if (!channel.fxNodes.includes(effect.input)) createdNodes.push(effect.input);
+        if (!channel.fxNodes.includes(effect.output) && effect.output !== effect.input) createdNodes.push(effect.output);
+      }
+
+      (current ?? channel.input).connect(channel.panner);
+    } catch (error) {
+      for (const effect of created) effect.dispose();
+      throw error;
+    }
 
     try { channel.input.disconnect(); } catch (_) {}
     for (const node of channel.fxNodes) {
@@ -211,20 +248,13 @@ export function installLiveFxChainHardening(engine: AudioEngineLike): void {
     states.delete(track.id);
     channel.fxNodes = [];
 
-    let current: AudioNode = channel.input;
-    const created: AudioEffect[] = [];
-    for (const slot of track.fxSlots) {
-      if (!slot.enabled) continue;
-      const effect = createEffect(ctx, slot);
-      if (!effect) continue;
-      current.connect(effect.input);
-      current = effect.output;
-      created.push(effect);
-      if (!channel.fxNodes.includes(effect.input)) channel.fxNodes.push(effect.input);
-      if (!channel.fxNodes.includes(effect.output)) channel.fxNodes.push(effect.output);
+    if (firstInput) {
+      channel.input.connect(firstInput);
+      channel.fxNodes = createdNodes;
+    } else {
+      channel.input.connect(channel.panner);
     }
 
-    current.connect(channel.panner);
     states.set(track.id, created);
   };
 
