@@ -3,7 +3,8 @@ import { Download, FolderArchive, Sparkles, X } from 'lucide-react';
 import JSZip from 'jszip';
 import { Channel, PlaylistClip, ProjectMetadata } from '../types/daw';
 import { audioEngine } from '../audio/audioEngine';
-import { buildStandardMidiFile, getProjectRenderBars, ExportScope } from '../utils/exportUtils';
+import { buildStandardMidiFile, getProjectRenderBars } from '../utils/exportUtils';
+import type { ExportScope } from '../utils/exportUtils';
 
 interface ExportModalProps {
   isOpen: boolean;
