@@ -118,8 +118,7 @@ function createTapeEffect(ctx: AudioContext, slot: FxSlot): AudioEffect {
   depth.connect(flutterDelay.delayTime);
   lfo.start();
 
-  const core = new CompositeEffect(`${slot.id}-tape-core`, 'Tape Saturation', saturation.input, flutterDelay, [filter, flutterDelay, lfo, depth], [saturation]);
-  return wrapWetDry(ctx, core, mixFor(slot));
+  return new CompositeEffect(`${slot.id}-tape-core`, 'Tape Saturation', saturation.input, flutterDelay, [filter, flutterDelay, lfo, depth], [saturation]);
 }
 
 function createEqualizer(ctx: AudioContext, slot: FxSlot): AudioEffect {
@@ -128,8 +127,7 @@ function createEqualizer(ctx: AudioContext, slot: FxSlot): AudioEffect {
   const high = new BiquadFilterEffect(ctx, `${slot.id}-high`, 'highshelf', bounded(numericParam(slot, 'highFreq', 6500), 10, ctx.sampleRate / 2), bounded(numericParam(slot, 'highQ', 1), 0.0001, 1000), bounded(numericParam(slot, 'highGain', 0), -40, 40));
   low.output.connect(mid.input);
   mid.output.connect(high.input);
-  const core = new CompositeEffect(`${slot.id}-eq-core`, '3-Band EQ', low.input, high.output, [], [low, mid, high]);
-  return wrapWetDry(ctx, core, mixFor(slot));
+  return new CompositeEffect(`${slot.id}-eq-core`, '3-Band EQ', low.input, high.output, [], [low, mid, high]);
 }
 
 function createNativeWaveShaper(ctx: AudioContext, slot: FxSlot, type: 'distortion' | 'bitcrusher'): AudioEffect {
@@ -151,15 +149,13 @@ function createNativeWaveShaper(ctx: AudioContext, slot: FxSlot, type: 'distorti
     }
   }
   shaper.curve = curve;
-  const core = new CompositeEffect(`${slot.id}-${type}`, type === 'distortion' ? 'Distortion' : 'Bitcrusher', shaper, shaper, [shaper]);
-  return wrapWetDry(ctx, core, mixFor(slot));
+  return new CompositeEffect(`${slot.id}-${type}`, type === 'distortion' ? 'Distortion' : 'Bitcrusher', shaper, shaper, [shaper]);
 }
 
 function createReverb(ctx: AudioContext, slot: FxSlot): AudioEffect {
   const convolver = ctx.createConvolver();
   convolver.buffer = createImpulse(ctx);
-  const core = new CompositeEffect(`${slot.id}-reverb`, 'Reverb', convolver, convolver, [convolver]);
-  return wrapWetDry(ctx, core, mixFor(slot));
+  return new CompositeEffect(`${slot.id}-reverb`, 'Reverb', convolver, convolver, [convolver]);
 }
 
 function createEffect(ctx: AudioContext, slot: FxSlot): AudioEffect | null {
@@ -198,7 +194,7 @@ function createEffect(ctx: AudioContext, slot: FxSlot): AudioEffect | null {
       const effect = new LimiterEffect(ctx, slot.id, bounded(numericParam(slot, 'ceiling', -0.3), -12, 0), bounded(numericParam(slot, 'release', 0.08), 0.01, 1), bounded(numericParam(slot, 'drive', 0), -12, 24), 1);
       return wrapWetDry(ctx, effect, mix);
     }
-    case 'tape_saturation': return createTapeEffect(ctx, slot);
+    case 'tape_saturation': return wrapWetDry(ctx, createTapeEffect(ctx, slot), mix);
     case 'gross_beat': {
       const gain = ctx.createGain();
       gain.gain.value = 1;
