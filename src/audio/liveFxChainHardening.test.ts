@@ -16,30 +16,33 @@ type FakeNode = {
   disconnect(): void;
 };
 
-function param(value = 0): FakeParam {
-  return {
+function makeContext() {
+  const nodes: Array<Record<string, unknown>> = [];
+  let failingTarget: unknown = null;
+  let failConnections = false;
+
+  const param = (value = 0): FakeParam => ({
     value,
     values: [],
     setValueAtTime(next, time) {
       this.value = next;
       this.values.push({ value: next, time });
     },
-  };
-}
+  });
 
-function node(): FakeNode {
-  return {
-    connections: [],
-    disconnectCalls: 0,
-    connect(target) { this.connections.push(target); },
-    disconnect() { this.connections.length = 0; this.disconnectCalls += 1; },
-  };
-}
-
-function makeContext() {
-  const nodes: Array<Record<string, unknown>> = [];
   const make = <T extends Record<string, unknown>>(extra: T = {} as T): T & FakeNode => {
-    const created = Object.assign(node(), extra) as T & FakeNode;
+    const created = Object.assign({
+      connections: [],
+      disconnectCalls: 0,
+      connect(target: unknown) {
+        if (failConnections && target === failingTarget) throw new Error('simulated graph connection failure');
+        this.connections.push(target);
+      },
+      disconnect() {
+        this.connections.length = 0;
+        this.disconnectCalls += 1;
+      },
+    }, extra) as T & FakeNode;
     nodes.push(created);
     return created;
   };
@@ -58,7 +61,18 @@ function makeContext() {
     createBuffer: (_channels: number, length: number, _rate: number) => ({ getChannelData: () => new Float32Array(length) }),
   } as unknown as AudioContext;
 
-  return { context, nodes };
+  return {
+    context,
+    nodes,
+    failGraphConnection(target: unknown) {
+      failingTarget = target;
+      failConnections = true;
+    },
+    clearGraphConnectionFailure() {
+      failConnections = false;
+      failingTarget = null;
+    },
+  };
 }
 
 function slot(type: FxSlot['type'], mix = 0.5, params: Record<string, number> = {}): FxSlot {
@@ -135,8 +149,9 @@ describe('live mixer FX hardening', () => {
     assert.ok(oscillators.every((created) => (created.startCalls as number) >= 1), 'modulation oscillators must be started');
   });
 
-  it('keeps the previous chain intact when a replacement cannot be built', () => {
-    const { context, nodes } = makeContext();
+  it('keeps the previous chain intact when replacement graph construction fails', () => {
+    const fixture = makeContext();
+    const { context, nodes } = fixture;
     const channel = {
       input: context.createGain(),
       panner: context.createGain(),
@@ -154,18 +169,21 @@ describe('live mixer FX hardening', () => {
     const oldFxNodes = [...channel.fxNodes];
     const oldInputConnections = [...channel.input.connections];
 
+    fixture.failGraphConnection(channel.panner);
     assert.throws(
-      () => engine.rebuildTrackFxChain(track([slot('delay', 1.1)])),
-      /between 0 and 1/,
+      () => engine.rebuildTrackFxChain(track([slot('chorus', 0.5)])),
+      /simulated graph connection failure/,
     );
 
     assert.deepEqual(channel.fxNodes, oldFxNodes, 'failed rebuild must not replace the active node list');
     assert.deepEqual(channel.input.connections, oldInputConnections, 'failed rebuild must preserve the active input routing');
     assert.ok(oldFxNodes.every((node) => (node as unknown as FakeNode).disconnectCalls === 0), 'failed rebuild must not tear down the active chain');
 
-    const createdAfterFailure = nodes.slice(oldFxNodes.length + 1);
-    assert.ok(createdAfterFailure.length > 0, 'the failing rebuild should have attempted new construction');
-    assert.ok(createdAfterFailure.every((node) => (node.disconnectCalls as number) > 0), 'partially created replacement nodes must be disposed');
+    const replacementNodes = nodes.slice(oldFxNodes.length + 1);
+    assert.ok(replacementNodes.length > 0, 'the failing rebuild should have attempted new construction');
+    assert.ok(replacementNodes.every((node) => (node.disconnectCalls as number) > 0), 'partially created replacement nodes must be disposed');
+
+    fixture.clearGraphConnectionFailure();
   });
 
   it('disposes the previous live chain before rebuilding and cleans it on track removal', () => {
