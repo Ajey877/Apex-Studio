@@ -49,11 +49,11 @@ function buildMidiTrack(
   channel: Channel,
   channelIndex: number,
   clips: PlaylistClip[],
-  bpm: number,
+  meta: Pick<ProjectMetadata, 'bpm' | 'timeSignature'>,
 ): number[] {
   const midiChannel = channelIndex % 16;
   const events: MidiEvent[] = [];
-  const safeBpm = Number.isFinite(bpm) && bpm > 0 ? bpm : 120;
+  const safeBpm = Number.isFinite(meta.bpm) && meta.bpm > 0 ? meta.bpm : 120;
 
   const name = channel.name || `Channel ${channelIndex + 1}`;
   const nameBytes = Array.from(new TextEncoder().encode(name));
@@ -61,11 +61,15 @@ function buildMidiTrack(
 
   if (channelIndex === 0) {
     const microsPerQuarter = Math.max(1, Math.round(60_000_000 / safeBpm));
+    const numerator = Number.isFinite(meta.timeSignature?.[0]) && meta.timeSignature[0] > 0 ? Math.round(meta.timeSignature[0]) : 4;
+    const denominator = Number.isFinite(meta.timeSignature?.[1]) && meta.timeSignature[1] > 0 ? Math.round(meta.timeSignature[1]) : 4;
+    const denominatorPower = Math.max(0, Math.min(7, Math.round(Math.log2(denominator))));
     events.push({
       tick: 0,
       order: 0,
       data: [0xff, 0x51, 0x03, (microsPerQuarter >> 16) & 0xff, (microsPerQuarter >> 8) & 0xff, microsPerQuarter & 0xff],
     });
+    events.push({ tick: 0, order: 0, data: [0xff, 0x58, 0x04, numerator & 0xff, denominatorPower, 24, 8] });
   }
 
   for (const clip of clips) {
@@ -102,8 +106,8 @@ export function buildStandardMidiFile(
   clips: PlaylistClip[],
   meta: Pick<ProjectMetadata, 'bpm' | 'timeSignature'>,
 ): Blob {
-  const tracks = channels.map((channel, index) => buildMidiTrack(channel, index, clips, meta.bpm));
-  if (tracks.length === 0) tracks.push(buildMidiTrack({ id: 'empty', name: 'Apex Studio', notes: [] } as Channel, 0, [], meta.bpm));
+  const tracks = channels.map((channel, index) => buildMidiTrack(channel, index, clips, meta));
+  if (tracks.length === 0) tracks.push(buildMidiTrack({ id: 'empty', name: 'Apex Studio', notes: [] } as Channel, 0, [], meta));
 
   const header: number[] = [];
   pushString(header, 'MThd');
