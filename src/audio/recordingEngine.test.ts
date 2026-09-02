@@ -91,13 +91,14 @@ const installBrowserMocks = () => {
   };
 };
 
+const createContext = (): AudioContext => new FakeAudioContext() as unknown as AudioContext;
+
 test('recording stop decodes the Blob for waveform generation and releases capture resources', async () => {
   const mocks = installBrowserMocks();
   try {
-    const engine = new RecordingEngine(() => new FakeAudioContext(), { waveformSamples: 4 });
+    const engine = new RecordingEngine(createContext, { waveformSamples: 4 });
     await engine.start();
-    const resultPromise = engine.stop();
-    const result = await resultPromise;
+    const result = await engine.stop();
 
     assert.equal(result.blob.size > 0, true);
     assert.equal(result.mimeType, 'audio/webm');
@@ -113,7 +114,7 @@ test('recording stop decodes the Blob for waveform generation and releases captu
 test('cancel always stops the microphone and returns the engine to idle', async () => {
   const mocks = installBrowserMocks();
   try {
-    const engine = new RecordingEngine(() => new FakeAudioContext());
+    const engine = new RecordingEngine(createContext);
     await engine.start();
     engine.cancel();
     assert.equal(engine.getState(), 'idle');
@@ -126,7 +127,7 @@ test('cancel always stops the microphone and returns the engine to idle', async 
 test('MediaRecorder errors immediately clean up capture resources', async () => {
   const mocks = installBrowserMocks();
   try {
-    const engine = new RecordingEngine(() => new FakeAudioContext());
+    const engine = new RecordingEngine(createContext);
     await engine.start();
     mocks.recorderInstances[0].fail();
     assert.equal(engine.getState(), 'idle');
