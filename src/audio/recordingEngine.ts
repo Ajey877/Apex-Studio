@@ -19,6 +19,7 @@ export type RecordingState = 'idle' | 'recording' | 'paused' | 'stopping';
 export interface RecordingEngineOptions {
   waveformSamples?: number;
   timesliceMs?: number;
+  onError?: (error: Error) => void;
 }
 
 export class RecordingEngine {
@@ -34,10 +35,12 @@ export class RecordingEngine {
   private mimeType = '';
   private readonly waveformSamples: number;
   private readonly timesliceMs: number;
+  private readonly onError?: (error: Error) => void;
 
   constructor(private readonly contextProvider: () => AudioContext, options: RecordingEngineOptions = {}) {
     this.waveformSamples = Math.max(32, Math.min(2048, Math.floor(options.waveformSamples ?? 512)));
     this.timesliceMs = Math.max(50, Math.floor(options.timesliceMs ?? 250));
+    this.onError = options.onError;
   }
 
   getState(): RecordingState { return this.state; }
@@ -81,7 +84,17 @@ export class RecordingEngine {
       recorder.start(this.timesliceMs);
       return stream;
     } catch (error) {
-      stream.getTracks().forEach(track => track.stop());
+      stream.getTracks().forEach(track => {
+        try { track.stop(); } catch (_) { /* best effort */ }
+      });
+      try { this.analyserSource?.disconnect(); } catch (_) { /* best effort */ }
+      try { this.analyser?.disconnect(); } catch (_) { /* best effort */ }
+      this.stream = null;
+      this.analyserSource = null;
+      this.analyser = null;
+      this.recorder = null;
+      this.chunks = [];
+      this.state = 'idle';
       throw error;
     }
   }
@@ -114,10 +127,20 @@ export class RecordingEngine {
     if (!this.recorder || (this.state !== 'recording' && this.state !== 'paused')) throw new Error('No active recording');
     const recorder = this.recorder;
     this.state = 'stopping';
-    if (recorder.state !== 'inactive') recorder.stop();
 
-    const result = await new Promise<RecordingResult>((resolve, reject) => {
+    return await new Promise<RecordingResult>((resolve, reject) => {
+      let settled = false;
+      const fail = (error: unknown) => {
+        if (settled) return;
+        settled = true;
+        const normalized = error instanceof Error ? error : new Error('Audio recording failed');
+        this.cleanup();
+        this.onError?.(normalized);
+        reject(normalized);
+      };
+
       recorder.onstop = async () => {
+        if (settled) return;
         try {
           const blob = new Blob(this.chunks, { type: this.mimeType || recorder.mimeType || 'audio/webm' });
           if (!blob.size) throw new Error('Audio recording produced no data');
@@ -130,16 +153,22 @@ export class RecordingEngine {
           } catch (storageError) {
             console.warn('[Apex Studio] Local audio persistence failed; recording remains available for this session.', storageError);
           }
+          settled = true;
+          this.cleanup();
           resolve(resultValue);
         } catch (error) {
-          reject(error);
+          fail(error);
         }
       };
-      recorder.onerror = () => reject(new Error('Audio recording failed'));
-    });
+      recorder.onerror = () => fail(new Error('Audio recording failed'));
 
-    this.cleanup();
-    return result;
+      try {
+        if (recorder.state !== 'inactive') recorder.stop();
+        else queueMicrotask(() => { if (!settled) void recorder.onstop?.(); });
+      } catch (error) {
+        fail(error);
+      }
+    });
   }
 
   cancel(): void {
@@ -150,6 +179,8 @@ export class RecordingEngine {
     }
     try {
       if (recorder.state !== 'inactive') recorder.stop();
+    } catch (_) {
+      // Cancellation is best effort; cleanup below is unconditional.
     } finally {
       this.cleanup();
     }
@@ -159,6 +190,7 @@ export class RecordingEngine {
 
   private failAndCleanup(error: Error): void {
     this.cleanup();
+    this.onError?.(error);
     console.error('[Apex Studio] Recording failed.', error);
   }
 
