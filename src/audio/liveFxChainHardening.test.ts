@@ -167,7 +167,7 @@ describe('live mixer FX hardening', () => {
     installLiveFxChainHardening(engine);
     engine.rebuildTrackFxChain(track([slot('delay', 0.5)]));
     const oldFxNodes = [...channel.fxNodes];
-    const oldInputConnections = [...channel.input.connections];
+    const oldInputConnections = [...(channel.input as unknown as FakeNode).connections];
     const nodesBeforeFailure = nodes.length;
 
     fixture.failGraphConnection(channel.panner);
@@ -177,7 +177,7 @@ describe('live mixer FX hardening', () => {
     );
 
     assert.deepEqual(channel.fxNodes, oldFxNodes, 'failed rebuild must not replace the active node list');
-    assert.deepEqual(channel.input.connections, oldInputConnections, 'failed rebuild must preserve the active input routing');
+    assert.deepEqual((channel.input as unknown as FakeNode).connections, oldInputConnections, 'failed rebuild must preserve the active input routing');
     assert.ok(oldFxNodes.every((node) => (node as unknown as FakeNode).disconnectCalls === 0), 'failed rebuild must not tear down the active chain');
 
     const replacementNodes = nodes.slice(nodesBeforeFailure);
