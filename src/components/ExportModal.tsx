@@ -4,6 +4,7 @@ import JSZip from 'jszip';
 import { Channel, PlaylistClip, ProjectMetadata } from '../types/daw';
 import { audioEngine } from '../audio/audioEngine';
 import { renderProjectTimelineOffline } from '../audio/offlineProjectRenderer';
+import { audioBufferToWav } from '../audio/wavEncoder';
 import { buildStandardMidiFile, getProjectRenderBars } from '../utils/exportUtils';
 import type { ExportScope } from '../utils/exportUtils';
 
@@ -107,7 +108,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, chann
             getAudioBuffer: id => audioEngine.getSampleBuffer(id),
           });
           setRenderProgress(85);
-          const wavBlob = audioEngine.encodeAudioBufferToWav(renderedBuffer, bitDepth);
+          const wavBlob = audioBufferToWav(renderedBuffer, bitDepth);
           setDownloadUrl(URL.createObjectURL(wavBlob));
           setRenderProgress(100);
           setStatusText('Timeline WAV master render complete.');
