@@ -87,9 +87,9 @@ describe('live mixer FX hardening', () => {
     };
     const engine = {
       getContext: () => context,
-      getOrCreateMixerChannel: () => channel,
-      rebuildTrackFxChain() {},
-      removeMixerChannel() {},
+      getOrCreateMixerChannel: (_trackId: number) => channel,
+      rebuildTrackFxChain(_track: MixerTrack) {},
+      removeMixerChannel(_trackId: number) {},
     };
 
     installLiveFxChainHardening(engine);
@@ -119,9 +119,9 @@ describe('live mixer FX hardening', () => {
     };
     const engine = {
       getContext: () => context,
-      getOrCreateMixerChannel: () => channel,
-      rebuildTrackFxChain() {},
-      removeMixerChannel() {},
+      getOrCreateMixerChannel: (_trackId: number) => channel,
+      rebuildTrackFxChain(_track: MixerTrack) {},
+      removeMixerChannel(_trackId: number) {},
     };
 
     installLiveFxChainHardening(engine);
@@ -144,9 +144,9 @@ describe('live mixer FX hardening', () => {
     };
     const engine = {
       getContext: () => context,
-      getOrCreateMixerChannel: () => channel,
-      rebuildTrackFxChain() {},
-      removeMixerChannel() {},
+      getOrCreateMixerChannel: (_trackId: number) => channel,
+      rebuildTrackFxChain(_track: MixerTrack) {},
+      removeMixerChannel(_trackId: number) {},
     };
 
     installLiveFxChainHardening(engine);
