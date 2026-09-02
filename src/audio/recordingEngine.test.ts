@@ -104,13 +104,13 @@ const createContext = (): AudioContext => new FakeAudioContext() as unknown as A
 test('recording stop decodes the Blob for waveform generation and releases capture resources', async () => {
   const mocks = installBrowserMocks();
   try {
-    const engine = new RecordingEngine(createContext, { waveformSamples: 4 });
+    const engine = new RecordingEngine(createContext, { waveformSamples: 32 });
     await engine.start();
     const result = await engine.stop();
 
     assert.equal(result.blob.size > 0, true);
     assert.equal(result.mimeType, 'audio/webm');
-    assert.equal(result.waveform.length, 4);
+    assert.equal(result.waveform.length, 32);
     assert.ok(result.waveform.some(value => value > 0));
     assert.equal(engine.getState(), 'idle');
     assert.equal(mocks.stream.track.stopped, true);
