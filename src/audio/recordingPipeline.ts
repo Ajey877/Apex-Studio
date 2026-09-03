@@ -53,6 +53,7 @@ export const createRecordingPlaylistClip = (
     audioBufferId: registration.id,
     audioName: recording.name,
     audioWaveform: registration.peaks,
+    audioUnavailable: false,
     color: '#ff6e00',
     name: recording.name
   };
