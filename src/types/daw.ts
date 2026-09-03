@@ -52,11 +52,11 @@ export type FxType =
 
 export interface Note {
   id: string;
-  pitch: number; // MIDI note number 0-127 (e.g. 60 = C4)
-  start: number; // in steps (16th notes or fractional steps)
-  duration: number; // in steps
-  velocity: number; // 0 - 1.0
-  pan?: number; // -1.0 to 1.0
+  pitch: number;
+  start: number;
+  duration: number;
+  velocity: number;
+  pan?: number;
   muted?: boolean;
 }
 
@@ -65,24 +65,24 @@ export type ChordVoicing = 'root' | 'inversion1' | 'inversion2' | 'inversion3' |
 export interface GrossBeatState {
   enabled: boolean;
   preset: 'half_time' | 'tape_stop' | 'trance_gate' | 'sidechain_pump' | 'triplet_chopper' | 'stutter_32' | 'scratch_slow' | 'reverse';
-  mix: number; // 0 - 1.0
-  speed: 0.5 | 1.0 | 2.0; // 0.5 = Half Time
+  mix: number;
+  speed: 0.5 | 1.0 | 2.0;
   tapeStopActive: boolean;
-  tapeStopDurationMs: number; // 100 to 2000 ms
-  gateSteps: boolean[]; // 16 steps
-  pitchShiftSemitones: number; // e.g. -12 for half-time
+  tapeStopDurationMs: number;
+  gateSteps: boolean[];
+  pitchShiftSemitones: number;
 }
 
 export interface SidechainSettings {
   enabled: boolean;
-  sourceTrackId: number; // Mixer track ID of trigger (e.g. 1 for Kick)
-  threshold: number; // dB (-36 to 0)
-  amount: number; // 0 to 1.0 (ducking depth)
-  attackMs: number; // 1 to 50 ms
-  releaseMs: number; // 20 to 500 ms
-  lowFreqOnly: boolean; // Duck only frequencies below 150 Hz
-  highPassFilterHz?: number; // Sidechain detector filter cutoff
-  gainReductionDb?: number; // Dynamic readout
+  sourceTrackId: number;
+  threshold: number;
+  amount: number;
+  attackMs: number;
+  releaseMs: number;
+  lowFreqOnly: boolean;
+  highPassFilterHz?: number;
+  gainReductionDb?: number;
 }
 
 export interface TakeRegion {
@@ -102,20 +102,20 @@ export interface TakeLane {
   takeIndex: number;
   timestamp: number;
   color: string;
-  rating?: number; // 1 to 5 stars
+  rating?: number;
   isMuted?: boolean;
 }
 
 export interface PolyphonicBlob {
   id: string;
-  originalPitch: number; // MIDI note (e.g. 64 = E4)
-  targetPitch: number; // Corrected MIDI note
+  originalPitch: number;
+  targetPitch: number;
   startStep: number;
   durationSteps: number;
   amplitude: number;
-  formantShift: number; // semitones (-12 to +12)
-  pitchDriftAmount: number; // 0 to 1
-  vibratoDepth: number; // 0 to 1
+  formantShift: number;
+  pitchDriftAmount: number;
+  vibratoDepth: number;
   color: string;
 }
 
@@ -123,19 +123,19 @@ export type WarpMode = 'beats' | 'tones' | 'texture' | 'complex_pro' | 'repitch'
 
 export interface SpatialAudioSettings {
   enabled: boolean;
-  azimuthDeg: number; // -180 to 180 horizontal degrees
-  elevationDeg: number; // -90 to 90 height degrees
-  distanceMeters: number; // 0.5 to 10 meters
+  azimuthDeg: number;
+  elevationDeg: number;
+  distanceMeters: number;
   binauralRoomSize: 'studio_dry' | 'concert_hall' | 'cathedral' | 'cinema_atmos';
-  lfeSubLevel: number; // Low Frequency Effects / Subwoofer send level
-  spread: number; // 0 to 1
+  lfeSubLevel: number;
+  spread: number;
 }
 
 export interface VideoScoringTrack {
   enabled: boolean;
   videoUrl?: string;
   videoName?: string;
-  smpteOffsetFps: 24 | 25 | 29.97 | 30; // SMPTE Timecode frame rate
+  smpteOffsetFps: 24 | 25 | 29.97 | 30;
   smpteStartHours: number;
   smpteStartMinutes: number;
   smpteStartSeconds: number;
@@ -145,16 +145,16 @@ export interface VideoScoringTrack {
 
 export interface MpeNoteExpression {
   noteId: string;
-  pitchBendCurve: Array<{ timeStep: number; semitones: number }>; // -48 to +48 per-note bend
-  pressureCurve: Array<{ timeStep: number; pressure: number }>; // 0 to 1 aftertouch
-  slideTimbreCurve: Array<{ timeStep: number; timbre: number }>; // 0 to 1 CC74 brightness
+  pitchBendCurve: Array<{ timeStep: number; semitones: number }>;
+  pressureCurve: Array<{ timeStep: number; pressure: number }>;
+  slideTimbreCurve: Array<{ timeStep: number; timbre: number }>;
 }
 
 export interface AutomationPoint {
-  x: number; // 0 to 1 normalized along clip length or bar position
-  y: number; // 0 to 1 normalized parameter value
-  tension?: number; // -1 to 1 bezier tension (-1 log, 0 linear, +1 exp)
-  lfoRateHz?: number; // If modulated by LFO
+  x: number;
+  y: number;
+  tension?: number;
+  lfoRateHz?: number;
   lfoDepth?: number;
 }
 
@@ -173,13 +173,13 @@ export interface ArpSettings {
   enabled: boolean;
   mode: 'up' | 'down' | 'updown' | 'random' | 'chord_strum' | 'euclidean';
   rate: '1/4' | '1/8' | '1/16' | '1/32' | '1/8t' | '1/16t';
-  octaves: number; // 1 to 4
-  gate: number; // 0.1 to 1.5
-  swing: number; // 0 to 1.0
-  strumMs: number; // 0 to 50ms
-  euclideanSteps?: number; // e.g. 16
-  euclideanHits?: number; // e.g. 5
-  euclideanRotate?: number; // e.g. 0
+  octaves: number;
+  gate: number;
+  swing: number;
+  strumMs: number;
+  euclideanSteps?: number;
+  euclideanHits?: number;
+  euclideanRotate?: number;
 }
 
 export interface CustomSampleData {
@@ -191,11 +191,11 @@ export interface CustomSampleData {
   waveformPeaks: number[];
   blob?: Blob;
   url?: string;
-  trimStart?: number; // 0 to 1
-  trimEnd?: number; // 0 to 1
+  trimStart?: number;
+  trimEnd?: number;
   normalize?: boolean;
   reverse?: boolean;
-  rootPitch?: number; // default 60 (C4)
+  rootPitch?: number;
 }
 
 export interface Channel {
@@ -203,15 +203,15 @@ export interface Channel {
   name: string;
   color: string;
   instrumentType: InstrumentType;
-  mixerTrackId: number; // 0 = Master, 1-8 = Inserts
-  volume: number; // 0 - 1.0
-  pan: number; // -1.0 to 1.0
-  pitch: number; // semitones offset (-12 to +12)
+  mixerTrackId: number;
+  volume: number;
+  pan: number;
+  pitch: number;
   mute: boolean;
   solo: boolean;
-  steps: boolean[]; // 16 or 32 steps for step sequencer
+  steps: boolean[];
   stepVelocities?: number[];
-  notes: Note[]; // Notes for piano roll
+  notes: Note[];
   synthParams: SynthParameters;
   sampleUrl?: string;
   sampleName?: string;
@@ -220,43 +220,32 @@ export interface Channel {
 }
 
 export interface SynthParameters {
-  // MiniSynth (Subtractive)
   osc1Type: OscillatorType;
   osc1Octave: number;
   osc1Detune: number;
   osc1Mix: number;
-  
   osc2Type: OscillatorType;
   osc2Octave: number;
   osc2Detune: number;
   osc2Mix: number;
-
   filterType: BiquadFilterType;
-  filterCutoff: number; // 20 - 20000 Hz
-  filterResonance: number; // 0 - 20
-  filterEnvAmount: number; // 0 - 1.0
-
-  attack: number; // seconds
+  filterCutoff: number;
+  filterResonance: number;
+  filterEnvAmount: number;
+  attack: number;
   decay: number;
-  sustain: number; // 0 - 1.0
-  release: number; // seconds
-
-  lfoRate: number; // Hz
-  lfoDepth: number; // 0 - 1.0
+  sustain: number;
+  release: number;
+  lfoRate: number;
+  lfoDepth: number;
   lfoTarget: 'pitch' | 'filter' | 'volume' | 'none';
-
-  // Wavetable & Unison
-  unisonVoices?: number; // 1 to 7 voices
-  unisonDetune?: number; // 0 to 50 cents
-  unisonSpread?: number; // 0 to 1.0 stereo pan spread
-
-  // FM Synth
+  unisonVoices?: number;
+  unisonDetune?: number;
+  unisonSpread?: number;
   fmCarrierMultiplier: number;
   fmModulatorMultiplier: number;
   fmModulationIndex: number;
   fmFeedback: number;
-
-  // Sampler
   sampleRootNote: number;
   sampleGlide: number;
   sampleReverse: boolean;
@@ -267,39 +256,38 @@ export interface SynthParameters {
 export interface VocalTunerSettings {
   enabled: boolean;
   scale: MusicalScale;
-  rootKey: number; // 0 = C, 1 = C#, etc.
-  retuneSpeedMs: number; // 0 (hard snap / T-Pain) to 80 (natural)
-  formantShift: number; // -12 to +12 semitones
-  vibratoDepth: number; // 0 to 1.0
-  humanize: number; // 0 to 1.0
+  rootKey: number;
+  retuneSpeedMs: number;
+  formantShift: number;
+  vibratoDepth: number;
+  humanize: number;
 }
 
 export interface PlaylistClip {
   id: string;
-  trackIndex: number; // Playlist track row (0-15)
-  startBar: number; // Start in bars (1 bar = 16 steps)
-  lengthBars: number; // Duration in bars
+  trackIndex: number;
+  startBar: number;
+  lengthBars: number;
   type: 'pattern' | 'audio' | 'automation';
-  patternId?: string; // If type is pattern
+  patternId?: string;
   channelId?: string;
   audioBufferId?: string;
   audioName?: string;
-  audioWaveform?: number[]; // Normalized peaks for rendering
+  audioWaveform?: number[];
+  audioUnavailable?: boolean;
   color: string;
   name: string;
   offsetSteps?: number;
   mute?: boolean;
-  // Audio clip processing & crossfades
-  pitchShiftSemitones?: number; // -24 to +24 semitones
-  timeStretchRate?: number; // 0.5x to 2.0x
-  fadeInBars?: number; // 0 to 1 bar
-  fadeOutBars?: number; // 0 to 1 bar
-  warpMode?: WarpMode; // Beats, Tones, Texture, Complex Pro
+  pitchShiftSemitones?: number;
+  timeStretchRate?: number;
+  fadeInBars?: number;
+  fadeOutBars?: number;
+  warpMode?: WarpMode;
   spatialAudio?: SpatialAudioSettings;
-  // Automation specific
   automationTarget?: {
     type: AutomationTargetType;
-    targetId: string | number; // channel id or mixer track id
+    targetId: string | number;
     paramName?: string;
     label?: string;
   };
@@ -308,34 +296,30 @@ export interface PlaylistClip {
 
 export interface MultibandBandSettings {
   enabled: boolean;
-  gain: number; // dB (-12 to +12)
-  threshold: number; // dB (-48 to 0)
-  ratio: number; // 1 to 20
-  attack: number; // ms
-  release: number; // ms
-  knee: number; // dB
+  gain: number;
+  threshold: number;
+  ratio: number;
+  attack: number;
+  release: number;
+  knee: number;
   solo: boolean;
   mute: boolean;
 }
 
 export interface MasteringSuiteState {
   enabled: boolean;
-  // Multiband Crossover Frequencies
-  lowCrossFreq: number; // Hz (e.g. 150)
-  highCrossFreq: number; // Hz (e.g. 3500)
+  lowCrossFreq: number;
+  highCrossFreq: number;
   lowBand: MultibandBandSettings;
   midBand: MultibandBandSettings;
   highBand: MultibandBandSettings;
-  // Stereo Imager
-  monoSubFreq: number; // Hz (e.g. 120 - sum to mono below this)
-  stereoSpread: number; // 0 (mono) to 2.0 (super-wide)
-  // Maximizer / Brickwall Limiter
-  maximizerThreshold: number; // dB (-12 to 0)
-  maximizerCeiling: number; // dB (-1.0 to 0.0)
-  maximizerRelease: number; // ms (10 to 500)
+  monoSubFreq: number;
+  stereoSpread: number;
+  maximizerThreshold: number;
+  maximizerCeiling: number;
+  maximizerRelease: number;
   maximizerLookahead: boolean;
-  // Metering Targets
-  lufsTarget: number; // -14 for Spotify / Youtube, -9 for Club / Beatport
+  lufsTarget: number;
 }
 
 export interface PlaylistTrack {
@@ -354,7 +338,7 @@ export interface Pattern {
   id: string;
   name: string;
   color: string;
-  lengthSteps: number; // usually 16, 32, or 64
+  lengthSteps: number;
 }
 
 export interface FxSlot {
@@ -362,27 +346,27 @@ export interface FxSlot {
   type: FxType;
   name: string;
   enabled: boolean;
-  mix: number; // Wet/Dry 0 - 1.0
+  mix: number;
   params: Record<string, number | string | boolean>;
 }
 
 export interface MixerTrack {
-  id: number; // 0 is Master, 1-8+ are inserts, 9+ can be sub-busses / sends
+  id: number;
   name: string;
   color: string;
-  volume: number; // 0 - 1.25 (1.0 = 0dB)
-  pan: number; // -1.0 to 1.0
+  volume: number;
+  pan: number;
   mute: boolean;
   solo: boolean;
-  stereoWidth: number; // 0 = Mono, 1.0 = Normal, 2.0 = Extra wide
+  stereoWidth: number;
   fxSlots: FxSlot[];
   peakL: number;
   peakR: number;
   sidechain?: SidechainSettings;
-  routingTargetId?: number; // 0 = Master, or id of sub-group track
+  routingTargetId?: number;
   sends?: {
-    send1: number; // 0 to 1.0 (e.g. Reverb Aux)
-    send2: number; // 0 to 1.0 (e.g. Delay Aux)
+    send1: number;
+    send2: number;
   };
 }
 
@@ -391,8 +375,8 @@ export interface ProjectMetadata {
   name: string;
   author: string;
   bpm: number;
-  timeSignature: [number, number]; // [4, 4]
-  swing: number; // 0 - 1.0
+  timeSignature: [number, number];
+  swing: number;
   masterVolume: number;
   masterPitch: number;
   created: number;
@@ -438,6 +422,7 @@ export interface AudioRecording {
   timestamp: number;
   durationSeconds: number;
   waveform: number[];
+  audioBufferId?: string;
   audioBlob?: Blob;
   audioUrl?: string;
 }
@@ -487,24 +472,17 @@ export type ChordStampType =
 export interface ParametricEqBand {
   id: number;
   type: 'highpass' | 'lowshelf' | 'peaking' | 'highshelf' | 'lowpass';
-  frequency: number; // Hz (20 to 20000)
-  gain: number; // dB (-18 to +18)
-  q: number; // 0.1 to 18
+  frequency: number;
+  gain: number;
+  q: number;
   enabled: boolean;
   color: string;
-}
-
-export interface ArrangementMarker {
-  id: string;
-  name: string; // e.g. "Intro", "Verse", "Build", "Drop", "Chorus", "Bridge", "Outro"
-  bar: number; // 0-indexed or 1-indexed bar position (e.g. 1, 9, 17, 33)
-  color: string; // Hex badge color
 }
 
 export interface MasterMacroKnob {
   id: string;
   name: string;
-  value: number; // 0 to 1
+  value: number;
   color: string;
   mappings: Array<{
     targetType: 'channel_volume' | 'channel_pan' | 'mixer_volume' | 'mixer_pan' | 'filter_cutoff' | 'reverb_wet' | 'delay_feedback';
@@ -522,6 +500,13 @@ export interface StemSeparationResult {
   otherBlobUrl?: string;
   originalFileName: string;
   durationSeconds: number;
+}
+
+export interface ArrangementMarker {
+  id: string;
+  name: string;
+  bar: number;
+  color: string;
 }
 
 export interface ProjectState {
@@ -543,5 +528,5 @@ export interface ProjectState {
   markers?: ArrangementMarker[];
   vocalTuner?: VocalTunerSettings;
   macroKnobs?: MasterMacroKnob[];
+  vocalTunerSettings?: VocalTunerSettings;
 }
-
