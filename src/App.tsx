@@ -25,6 +25,7 @@ import {
 } from './audio/presets';
 import { appendChannelWithAllocatedMixerTrackId } from './state/mixerTrackIdentity';
 import { deleteChannelFromProjectState } from './state/projectState';
+import { persistProjectState, restorePersistedProjectState } from './state/projectPersistence';
 import { createRecordingPlaylistClip, getRecordingAudioBufferId, validateRecordingTargetTrack } from './audio/recordingPipeline';
 
 // Component Suite
@@ -95,6 +96,7 @@ import {
 export function App() {
   // --- Core DAW State ---
   const [projectState, setProjectState] = useState<ProjectState>(DEFAULT_PROJECT);
+  const projectPersistenceReadyRef = useRef(false);
   const [currentView, setCurrentView] = useState<ViewMode>('channel_rack');
   const [playMode, setPlayMode] = useState<PlayMode>('pat');
   const [isPlaying, setIsPlaying] = useState(false);
@@ -215,13 +217,45 @@ export function App() {
     { id: 'c2', author: 'Liam Vocal', avatarColor: '#00bcd4', timestamp: Date.now() - 7200000, barPosition: 9, text: 'Hook vocal drop starts here at Bar 9.', resolved: true }
   ]);
 
-  // Audio Engine Synchronization
+  // Project persistence is intentionally hydrated before autosave is enabled.
   useEffect(() => {
+    let cancelled = false;
     audioEngine.init();
-    audioEngine.setBpm(projectState.meta.bpm);
-    audioEngine.setSwing(projectState.meta.swing);
-    audioEngine.setMetronome(metronome);
+
+    const restore = async () => {
+      try {
+        const restored = await restorePersistedProjectState(audioEngine, DEFAULT_PROJECT);
+        if (!cancelled && restored.restored) {
+          setProjectState(restored.state);
+          setSelectedChannelId(restored.state.selectedChannelId || DEFAULT_PROJECT.channels[0]?.id || 'ch-1');
+          setSelectedTrackId(restored.state.selectedMixerTrackId ?? 0);
+          if (restored.missingAudioIds.length > 0) {
+            console.warn(`[Apex Studio] ${restored.missingAudioIds.length} persisted audio asset(s) were unavailable after reload.`);
+          }
+        }
+      } catch (error) {
+        console.warn('[Apex Studio] Project startup hydration failed; continuing with the current project.', error);
+      } finally {
+        if (!cancelled) projectPersistenceReadyRef.current = true;
+      }
+    };
+
+    void restore();
+    return () => {
+      cancelled = true;
+    };
   }, []);
+
+  // Controlled autosave: persist settled project changes without writing on every render.
+  useEffect(() => {
+    if (!projectPersistenceReadyRef.current) return;
+    const timer = window.setTimeout(() => {
+      void persistProjectState(projectState).catch(error => {
+        console.warn('[Apex Studio] Automatic project persistence failed.', error);
+      });
+    }, 350);
+    return () => window.clearTimeout(timer);
+  }, [projectState]);
 
   // Update audio engine settings when state changes
   useEffect(() => {
@@ -456,8 +490,9 @@ export function App() {
 
     const audioBufferId = getRecordingAudioBufferId(recording.id);
     const loaded = await audioEngine.loadAudioFile(recording.audioBlob, audioBufferId);
+    const persistedRecording: AudioRecording = { ...recording, audioBufferId };
     const newClip = createRecordingPlaylistClip(
-      recording,
+      persistedRecording,
       {
         id: audioBufferId,
         buffer: loaded.buffer,
@@ -472,7 +507,7 @@ export function App() {
 
     setProjectState(prev => ({
       ...prev,
-      recordings: [...prev.recordings, recording],
+      recordings: [...prev.recordings, persistedRecording],
       playlistClips: [...prev.playlistClips, newClip],
       meta: { ...prev.meta, updated: Date.now() }
     }));
@@ -486,43 +521,41 @@ export function App() {
   useEffect(() => {
     const KEY_NOTE_MAP: Record<string, number> = {
       // QWERTY White & Black Piano Keys (C4 to E5)
-      'KeyA': 60, // C4
-      'KeyW': 61, // C#4
-      'KeyS': 62, // D4
-      'KeyE': 63, // D#4
-      'KeyD': 64, // E4
-      'KeyF': 65, // F4
-      'KeyT': 66, // F#4
-      'KeyG': 67, // G4
-      'KeyY': 68, // G#4
-      'KeyH': 69, // A4
-      'KeyU': 70, // A#4
-      'KeyJ': 71, // B4
-      'KeyK': 72, // C5
-      'KeyO': 73, // C#5
-      'KeyL': 74, // D5
-      'KeyP': 75, // D#5
-      'Semicolon': 76, // E5
+      'KeyA': 60,
+      'KeyW': 61,
+      'KeyS': 62,
+      'KeyE': 63,
+      'KeyD': 64,
+      'KeyF': 65,
+      'KeyT': 66,
+      'KeyG': 67,
+      'KeyY': 68,
+      'KeyH': 69,
+      'KeyU': 70,
+      'KeyJ': 71,
+      'KeyK': 72,
+      'KeyO': 73,
+      'KeyL': 74,
+      'KeyP': 75,
+      'Semicolon': 76,
 
       // Numeric Keypad (Numpad 1..9 MPC Drum & Bass triggers)
-      'Numpad1': 36, // Kick / C2
-      'Numpad2': 38, // Snare / D2
-      'Numpad3': 42, // Closed Hat / F#2
-      'Numpad4': 46, // Open Hat / A#2
-      'Numpad5': 49, // Crash / C#3
-      'Numpad6': 39, // Clap / D#2
-      'Numpad7': 51, // Ride / D#3
-      'Numpad8': 48, // Mid Tom / C3
-      'Numpad9': 45  // Low Tom / A2
+      'Numpad1': 36,
+      'Numpad2': 38,
+      'Numpad3': 42,
+      'Numpad4': 46,
+      'Numpad5': 49,
+      'Numpad6': 39,
+      'Numpad7': 51,
+      'Numpad8': 48,
+      'Numpad9': 45
     };
 
     const handleKeyDown = (e: KeyboardEvent) => {
-      // Don't intercept when typing in text input fields
       if (['INPUT', 'SELECT', 'TEXTAREA'].includes((e.target as HTMLElement).tagName)) {
         return;
       }
 
-      // 1. Transport & Playback
       if (e.code === 'Space') {
         e.preventDefault();
         handleTogglePlay();
@@ -541,7 +574,6 @@ export function App() {
         return;
       }
 
-      // 2. View Switches (F-keys & Digits)
       if (e.key === '1' || e.code === 'F6') {
         e.preventDefault();
         setCurrentView('channel_rack');
@@ -564,7 +596,6 @@ export function App() {
         return;
       }
 
-      // 3. Octave Shift
       if (e.code === 'KeyZ') {
         setKeyboardOctave(prev => Math.max(-2, prev - 1));
         return;
@@ -573,11 +604,9 @@ export function App() {
         return;
       }
 
-      // 4. Live Musical Keypad / Computer Keyboard Note Triggering
       if (KEY_NOTE_MAP[e.code] !== undefined && !activeHeldKeysRef.current.has(e.code) && !e.repeat) {
         activeHeldKeysRef.current.add(e.code);
         const basePitch = KEY_NOTE_MAP[e.code];
-        // Apply octave shift only to non-numpad melodic keys
         const isNumpad = e.code.startsWith('Numpad');
         const pitch = isNumpad ? basePitch : basePitch + (keyboardOctave * 12);
 
