@@ -156,7 +156,8 @@ test('full recording persistence lifecycle stores Blob separately and re-registe
     assert.deepEqual(restored.hydratedAudioIds, [audioBufferId]);
     assert.equal(restored.missingAudioIds.length, 0);
     assert.ok(restored.state.recordings[0].audioBlob);
-    assert.equal(await getPersistedAudioClip(audioBufferId)?.then(value => value?.text()), 'binary-audio');
+    const persistedBlob = await getPersistedAudioClip(audioBufferId);
+    assert.equal(await persistedBlob?.text(), 'binary-audio');
     assert.equal(restored.state.playlistClips[0].audioUnavailable, false);
   } finally {
     await deletePersistedProjectState().catch(() => undefined);
@@ -182,7 +183,7 @@ test('missing audio asset does not prevent project restoration and marks the cli
     assert.equal(restored.state.playlistClips[0].audioUnavailable, true);
   } finally {
     await deletePersistedProjectState().catch(() => undefined);
-    await deletePersistedAudioClip(audioBufferId).catch(() => undefined);
+    await deletePersistedAudioClip('recording-rec-roundtrip').catch(() => undefined);
     restore();
   }
 });
