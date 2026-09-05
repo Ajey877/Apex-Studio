@@ -285,6 +285,7 @@ export interface PlaylistClip {
   audioBufferId?: string;
   audioName?: string;
   audioWaveform?: number[]; // Normalized peaks for rendering
+  audioUnavailable?: boolean;
   color: string;
   name: string;
   offsetSteps?: number;
@@ -438,6 +439,7 @@ export interface AudioRecording {
   timestamp: number;
   durationSeconds: number;
   waveform: number[];
+  audioBufferId?: string;
   audioBlob?: Blob;
   audioUrl?: string;
 }
@@ -544,4 +546,3 @@ export interface ProjectState {
   vocalTuner?: VocalTunerSettings;
   macroKnobs?: MasterMacroKnob[];
 }
-
