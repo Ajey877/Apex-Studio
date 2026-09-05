@@ -91,11 +91,11 @@ export class RecordingEngine {
       recorder.start(this.timesliceMs);
       return stream;
     } catch (error) {
+      try { source.disconnect(); } catch (_) { /* best effort */ }
+      try { analyser.disconnect(); } catch (_) { /* best effort */ }
       stream.getTracks().forEach(track => {
         try { track.stop(); } catch (_) { /* best effort */ }
       });
-      try { this.analyserSource?.disconnect(); } catch (_) { /* best effort */ }
-      try { this.analyser?.disconnect(); } catch (_) { /* best effort */ }
       this.stream = null;
       this.analyserSource = null;
       this.analyser = null;
