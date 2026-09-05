@@ -1,12 +1,13 @@
 import { audioEngine } from './audioEngine';
 import type { PlaylistClip } from '../types/daw';
+import { getAudioClipPlaybackContract, shouldSkipAudioClip } from './audioClipPlaybackContract';
 
 const activeBufferSources = new Set<AudioBufferSourceNode>();
 let installed = false;
 
 /**
  * Keeps BufferSource-based playlist audio under transport control and routes
- * playlist clips through the mixer insert selected by their playlist lane.
+ * playlist clips through the mixer insert selected by their source channel.
  */
 export function installAudioPlaybackLifecycle(): void {
   if (installed || typeof window === 'undefined' || typeof AudioContext === 'undefined') return;
@@ -32,34 +33,54 @@ export function installAudioPlaybackLifecycle(): void {
   if (typeof originalClipPlayback === 'function') {
     engine.playAudioClipWithFades = (clip: PlaylistClip, startTime: number) => {
       const ctx = engine.ctx as AudioContext | null;
-      if (!ctx) return;
+      if (!ctx || shouldSkipAudioClip(clip)) return;
+
       const buffer = clip.audioBufferId ? engine.sampleBuffers?.get(clip.audioBufferId) : null;
       if (!buffer) return;
 
+      const channel = clip.channelId
+        ? (engine.activeChannels?.find((candidate: { id: string }) => candidate.id === clip.channelId) ?? engine.activeChannels?.[0])
+        : engine.activeChannels?.[0];
+      if (channel?.mute) return;
+
+      const contract = getAudioClipPlaybackContract(clip, engine.bpm, buffer.duration);
+      if (!contract) return;
+
       const source = ctx.createBufferSource();
       source.buffer = buffer;
-      if (typeof clip.pitchShiftSemitones === 'number') source.detune.setValueAtTime(clip.pitchShiftSemitones * 100, startTime);
-      if (typeof clip.timeStretchRate === 'number' && clip.timeStretchRate > 0) source.playbackRate.setValueAtTime(clip.timeStretchRate, startTime);
+      source.playbackRate.setValueAtTime(contract.playbackRate, startTime);
+      source.detune.setValueAtTime(contract.pitchShiftSemitones * 100, startTime);
 
-      // Playlist lane 0 maps to mixer insert 1; master remains mixer track 0.
-      const mixerTrackId = Math.max(1, Math.floor(clip.trackIndex) + 1);
-      const mixer = engine.getOrCreateMixerChannel(mixerTrackId);
       const gainNode = ctx.createGain();
-      const bpm = Math.max(20, Number(engine.bpm) || 120);
-      const secondsPerBar = 240 / bpm;
-      const clipDurationSec = Math.max(0.005, clip.lengthBars * secondsPerBar);
-      const fadeInSec = Math.min(clipDurationSec, Math.max(0.005, (clip.fadeInBars || 0) * secondsPerBar));
-      const fadeOutSec = Math.min(clipDurationSec, Math.max(0.005, (clip.fadeOutBars || 0) * secondsPerBar));
-      const fadeOutStart = Math.max(startTime + fadeInSec, startTime + clipDurationSec - fadeOutSec);
+      const panner = typeof ctx.createStereoPanner === 'function' ? ctx.createStereoPanner() : null;
+      const channelVolume = typeof channel?.volume === 'number' ? Math.max(0, Math.min(1.25, channel.volume)) : 1;
+      const channelPan = typeof channel?.pan === 'number' ? Math.max(-1, Math.min(1, channel.pan)) : 0;
+      gainNode.gain.setValueAtTime(channelVolume, startTime);
+      if (panner) panner.pan.setValueAtTime(channelPan, startTime);
 
-      gainNode.gain.setValueAtTime(0.0001, startTime);
-      gainNode.gain.exponentialRampToValueAtTime(1.0, startTime + fadeInSec);
-      gainNode.gain.setValueAtTime(1.0, fadeOutStart);
-      gainNode.gain.exponentialRampToValueAtTime(0.0001, startTime + clipDurationSec);
+      if (contract.fadeInSeconds > 0) {
+        gainNode.gain.setValueAtTime(0.0001, startTime);
+        gainNode.gain.exponentialRampToValueAtTime(channelVolume, startTime + contract.fadeInSeconds);
+      }
+      if (contract.fadeOutSeconds > 0) {
+        gainNode.gain.setValueAtTime(channelVolume, startTime + contract.fadeOutStartSeconds);
+        gainNode.gain.exponentialRampToValueAtTime(0.0001, startTime + contract.clipDurationSeconds);
+      }
+
+      const mixerTrackId = typeof channel?.mixerTrackId === 'number'
+        ? channel.mixerTrackId
+        : Math.max(1, Math.floor(clip.trackIndex) + 1);
+      const mixer = engine.getOrCreateMixerChannel(mixerTrackId);
       source.connect(gainNode);
-      gainNode.connect(mixer.input);
-      source.start(startTime);
-      source.stop(startTime + clipDurationSec);
+      if (panner) {
+        gainNode.connect(panner);
+        panner.connect(mixer.input);
+      } else {
+        gainNode.connect(mixer.input);
+      }
+
+      source.start(startTime, contract.sourceOffsetSeconds, contract.sourceDurationSeconds);
+      source.stop(startTime + contract.clipDurationSeconds);
     };
   }
 }
