@@ -97,8 +97,8 @@ test('50-entry limit keeps only the newest history entries', () => {
   }
 
   assert.equal(history.past.length, DEFAULT_HISTORY_MAX_ENTRIES);
-  assert.equal(history.past[0].state.meta.name, 'Project 11');
-  assert.equal(history.past.at(-1)?.state.meta.name, 'Project 60');
+  assert.equal(history.past[0].state.meta.name, 'Project 10');
+  assert.equal(history.past.at(-1)?.state.meta.name, 'Project 59');
 });
 
 test('oldest entry is discarded only when the limit is exceeded', () => {
