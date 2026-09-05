@@ -194,11 +194,12 @@ test('binary and session-only fields are removed while audio references remain',
 
 test('normalization is applied before a snapshot is stored', () => {
   const state = makeState(0);
-  const raw = structuredClone(state) as ProjectState & { extraField?: string };
-  raw.extraField = 'not part of the model';
+  const raw = structuredClone(state);
+  delete raw.nextMixerTrackId;
   const snapshot = sanitizeProjectSnapshot(raw);
 
-  assert.equal('extraField' in snapshot, false);
+  assert.ok(Number.isFinite(snapshot.nextMixerTrackId));
+  assert.equal(snapshot.nextMixerTrackId, 3);
   assert.equal(snapshot.meta.name, state.meta.name);
   assert.equal(snapshot.channels.length, state.channels.length);
 });
