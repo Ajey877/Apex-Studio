@@ -1,4 +1,5 @@
 import { Channel, PlaylistClip } from '../types/daw';
+import { getAudioClipPlaybackContract, shouldSkipAudioClip } from './audioClipPlaybackContract';
 
 export interface OfflineProjectRendererOptions {
   channels: Channel[];
@@ -55,7 +56,7 @@ function scheduleFade(gain: GainNode, start: number, duration: number, fadeInBar
   const fadeIn = clamp(fadeInBars, 0, 1) * secondsPerBar;
   const fadeOut = clamp(fadeOutBars, 0, 1) * secondsPerBar;
   const inEnd = Math.min(duration, fadeIn);
-  const outStart = Math.max(0, duration - fadeOut);
+  const outStart = Math.max(inEnd, duration - fadeOut);
   gain.gain.setValueAtTime(0.0001, start);
   if (inEnd > 0) gain.gain.linearRampToValueAtTime(1, start + inEnd);
   else gain.gain.setValueAtTime(1, start);
@@ -79,32 +80,31 @@ export async function renderProjectTimelineOffline(options: OfflineProjectRender
   for (const clip of options.clips) {
     const start = clip.startBar * secondsPerBar;
     const clipDuration = Math.min(clip.lengthBars * secondsPerBar, totalDurationSeconds - start);
-    if (clip.mute || clipDuration <= 0 || start >= totalDurationSeconds) continue;
+    if (clipDuration <= 0 || start >= totalDurationSeconds) continue;
     const channel = options.channels.find(c => c.id === clip.channelId) ?? options.channels[0];
-    if (!channel || channel.mute) continue;
+    if (!channel || shouldSkipAudioClip(clip, channel.mute)) continue;
 
     if (clip.type === 'audio' && clip.audioBufferId) {
       const buffer = options.getAudioBuffer(clip.audioBufferId);
       if (!buffer) continue;
+      const contract = getAudioClipPlaybackContract(clip, safeBpm, buffer.duration);
+      if (!contract) continue;
+
       const source = offlineCtx.createBufferSource();
       source.buffer = buffer;
+      source.playbackRate.value = contract.playbackRate;
+      source.detune.value = contract.pitchShiftSemitones * 100;
       const gain = offlineCtx.createGain();
       const panner = offlineCtx.createStereoPanner();
-      const rate = clamp(clip.timeStretchRate ?? 1, 0.5, 2);
-      source.playbackRate.value = rate;
-      source.detune.value = clamp(clip.pitchShiftSemitones ?? 0, -24, 24) * 100;
-      const sourceOffset = Math.max(0, (clip.offsetSteps ?? 0) * (secondsPerBeat / 4));
-      if (sourceOffset >= buffer.duration) continue;
-      const sourceDuration = Math.min(buffer.duration - sourceOffset, clipDuration * rate);
       const baseGain = clamp(channel.volume, 0, 1.25);
       gain.gain.value = baseGain;
       panner.pan.value = clamp(channel.pan, -1, 1);
-      scheduleFade(gain, start, clipDuration, clip.fadeInBars, clip.fadeOutBars, secondsPerBar);
-      scheduleAutomation(clip, gain, panner, start, clipDuration, channel);
+      scheduleFade(gain, start, contract.clipDurationSeconds, clip.fadeInBars, clip.fadeOutBars, secondsPerBar);
+      scheduleAutomation(clip, gain, panner, start, contract.clipDurationSeconds, channel);
       source.connect(gain);
       gain.connect(panner);
       panner.connect(master);
-      source.start(start, sourceOffset, Math.max(0, sourceDuration));
+      source.start(start, contract.sourceOffsetSeconds, contract.sourceDurationSeconds);
       continue;
     }
 
