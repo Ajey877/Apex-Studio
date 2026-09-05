@@ -22,7 +22,7 @@ export const AudioRecorderModal: React.FC<AudioRecorderModalProps> = ({ isOpen, 
   const engineRef = useRef<RecordingEngine | null>(null);
 
   useEffect(() => {
-    if (!engineRef.current) engineRef.current = new RecordingEngine(() => audioEngine.getContext(), { onError: setError });
+    if (!engineRef.current) engineRef.current = new RecordingEngine(() => audioEngine.getContext(), { onError: error => setError(error.message) });
     return () => engineRef.current?.dispose();
   }, []);
 
