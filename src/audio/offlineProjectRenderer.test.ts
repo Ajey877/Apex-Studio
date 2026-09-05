@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { getOfflineRenderPlan } from './offlineProjectRenderer';
+import { getAudioClipPlaybackContract } from './audioClipPlaybackContract';
 import type { PlaylistClip } from '../types/daw';
 
 const clip = (overrides: Partial<PlaylistClip>): PlaylistClip => ({
@@ -35,4 +36,27 @@ test('offline render plan ignores zero-length clips and invalid negative duratio
     clip({ id: 'negative', lengthBars: -2 }),
   ], 120, 8);
   assert.deepEqual(plan, []);
+});
+
+test('offline audio source region matches the shared live playback contract', () => {
+  const audioClip = clip({
+    startBar: 3,
+    lengthBars: 2,
+    offsetSteps: 24,
+    timeStretchRate: 0.5,
+    pitchShiftSemitones: -7,
+    fadeInBars: 1,
+    fadeOutBars: 1,
+  });
+  const contract = getAudioClipPlaybackContract(audioClip, 120, 12);
+  assert.ok(contract);
+  assert.equal(contract.startSeconds, 6);
+  assert.equal(contract.clipDurationSeconds, 4);
+  assert.equal(contract.sourceOffsetSeconds, 3);
+  assert.equal(contract.sourceDurationSeconds, 2);
+  assert.equal(contract.playbackRate, 0.5);
+  assert.equal(contract.pitchShiftSemitones, -7);
+  assert.equal(contract.fadeInSeconds, 2);
+  assert.equal(contract.fadeOutSeconds, 2);
+  assert.equal(contract.fadeOutStartSeconds, 2);
 });
