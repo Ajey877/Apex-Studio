@@ -64,11 +64,13 @@ export class RecordingEngine {
     if (typeof MediaRecorder === 'undefined') throw new Error('MediaRecorder is not supported in this environment');
 
     const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false } });
+    let source: MediaStreamAudioSourceNode | null = null;
+    let analyser: AnalyserNode | null = null;
     try {
       const context = this.contextProvider();
       if (context.state === 'suspended') await context.resume();
-      const source = context.createMediaStreamSource(stream);
-      const analyser = context.createAnalyser();
+      source = context.createMediaStreamSource(stream);
+      analyser = context.createAnalyser();
       analyser.fftSize = 1024;
       analyser.smoothingTimeConstant = 0.65;
       source.connect(analyser);
@@ -91,8 +93,8 @@ export class RecordingEngine {
       recorder.start(this.timesliceMs);
       return stream;
     } catch (error) {
-      try { source.disconnect(); } catch (_) { /* best effort */ }
-      try { analyser.disconnect(); } catch (_) { /* best effort */ }
+      try { source?.disconnect(); } catch (_) { /* best effort */ }
+      try { analyser?.disconnect(); } catch (_) { /* best effort */ }
       stream.getTracks().forEach(track => {
         try { track.stop(); } catch (_) { /* best effort */ }
       });
