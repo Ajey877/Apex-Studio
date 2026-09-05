@@ -9,8 +9,6 @@ import {installAudioPlaybackLifecycle} from './audio/audioPlaybackLifecycle';
 installLiveFxChainHardening(audioEngine);
 installAudioPlaybackLifecycle();
 
-audioEngine.init();
-
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <App />
