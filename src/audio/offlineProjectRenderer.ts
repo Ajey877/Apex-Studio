@@ -82,9 +82,10 @@ export async function renderProjectTimelineOffline(options: OfflineProjectRender
     const clipDuration = Math.min(clip.lengthBars * secondsPerBar, totalDurationSeconds - start);
     if (clipDuration <= 0 || start >= totalDurationSeconds) continue;
     const channel = options.channels.find(c => c.id === clip.channelId) ?? options.channels[0];
-    if (!channel || shouldSkipAudioClip(clip, channel.mute)) continue;
+    if (!channel || clip.mute || channel.mute) continue;
 
     if (clip.type === 'audio' && clip.audioBufferId) {
+      if (shouldSkipAudioClip(clip, channel.mute)) continue;
       const buffer = options.getAudioBuffer(clip.audioBufferId);
       if (!buffer) continue;
       const contract = getAudioClipPlaybackContract(clip, safeBpm, buffer.duration);
