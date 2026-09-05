@@ -96,6 +96,7 @@ import {
 export function App() {
   // --- Core DAW State ---
   const [projectState, setProjectState] = useState<ProjectState>(DEFAULT_PROJECT);
+  const [isProjectHydrating, setIsProjectHydrating] = useState(true);
   const projectPersistenceReadyRef = useRef(false);
   const [currentView, setCurrentView] = useState<ViewMode>('channel_rack');
   const [playMode, setPlayMode] = useState<PlayMode>('pat');
@@ -220,7 +221,11 @@ export function App() {
   // Project persistence is intentionally hydrated before autosave is enabled.
   useEffect(() => {
     let cancelled = false;
-    audioEngine.init();
+    try {
+      audioEngine.init();
+    } catch (error) {
+      console.warn('[Apex Studio] Audio engine startup initialization failed; continuing with project hydration.', error);
+    }
 
     const restore = async () => {
       try {
@@ -236,7 +241,10 @@ export function App() {
       } catch (error) {
         console.warn('[Apex Studio] Project startup hydration failed; continuing with the current project.', error);
       } finally {
-        if (!cancelled) projectPersistenceReadyRef.current = true;
+        if (!cancelled) {
+          projectPersistenceReadyRef.current = true;
+          setIsProjectHydrating(false);
+        }
       }
     };
 
@@ -486,30 +494,27 @@ export function App() {
     }
 
     // Validate before registering so stale UI selections cannot leave orphaned buffers.
-    validateRecordingTargetTrack(projectState.playlistTracks, targetTrackIndex);
+    const targetTrack = validateRecordingTargetTrack(projectState.playlistTracks, targetTrackIndex);
+    const targetTrackId = targetTrack.id;
 
     const audioBufferId = getRecordingAudioBufferId(recording.id);
     const loaded = await audioEngine.loadAudioFile(recording.audioBlob, audioBufferId);
     const persistedRecording: AudioRecording = { ...recording, audioBufferId };
-    const newClip = createRecordingPlaylistClip(
-      persistedRecording,
-      {
-        id: audioBufferId,
-        buffer: loaded.buffer,
-        peaks: loaded.peaks,
-        duration: loaded.duration
-      },
-      projectState.playlistTracks,
-      targetTrackIndex,
-      projectState.meta.bpm,
-      `rec-clip-${Date.now()}`
-    );
-
+    // AudioEngine has no buffer-removal API; a removed target leaves only this narrow in-memory orphan.
     setProjectState(prev => ({
       ...prev,
-      recordings: [...prev.recordings, persistedRecording],
-      playlistClips: [...prev.playlistClips, newClip],
-      meta: { ...prev.meta, updated: Date.now() }
+      ...(prev.playlistTracks.some(track => track.id === targetTrackId) ? {
+        recordings: [...prev.recordings, persistedRecording],
+        playlistClips: [...prev.playlistClips, createRecordingPlaylistClip(
+          persistedRecording,
+          { id: audioBufferId, buffer: loaded.buffer, peaks: loaded.peaks, duration: loaded.duration },
+          prev.playlistTracks,
+          prev.playlistTracks.findIndex(track => track.id === targetTrackId),
+          prev.meta.bpm,
+          `rec-clip-${Date.now()}`
+        )],
+        meta: { ...prev.meta, updated: Date.now() }
+      } : {})
     }));
   };
 
@@ -652,6 +657,14 @@ export function App() {
     }
     setTimeout(() => setPreviewingAudio(null), 800);
   };
+
+  if (isProjectHydrating) {
+    return (
+      <div className="bg-[#0a0a0b] text-[#b0b0b0] h-screen w-screen flex items-center justify-center font-sans">
+        <div className="text-xs font-bold tracking-[0.2em] text-[#ff6e00]">LOADING PROJECT</div>
+      </div>
+    );
+  }
 
   return (
     <div id="phantom-mobile-daw" className="bg-[#0a0a0b] text-[#b0b0b0] h-screen w-screen flex flex-col font-sans select-none overflow-hidden">

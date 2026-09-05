@@ -10,7 +10,8 @@ describe('recording to playlist integration', () => {
       source,
       /import \{ createRecordingPlaylistClip, getRecordingAudioBufferId, validateRecordingTargetTrack \} from '\.\/audio\/recordingPipeline';/
     );
-    assert.match(source, /validateRecordingTargetTrack\(projectState\.playlistTracks, targetTrackIndex\)/);
+    assert.match(source, /const targetTrack = validateRecordingTargetTrack\(projectState\.playlistTracks, targetTrackIndex\)/);
+    assert.match(source, /const targetTrackId = targetTrack\.id/);
     assert.match(source, /const audioBufferId = getRecordingAudioBufferId\(recording\.id\)/);
     assert.match(source, /await audioEngine\.loadAudioFile\(recording\.audioBlob, audioBufferId\)/);
     assert.match(source, /createRecordingPlaylistClip\(/);
@@ -25,9 +26,18 @@ describe('recording to playlist integration', () => {
     const source = readFileSync(new URL('../App.tsx', import.meta.url), 'utf8');
 
     assert.match(source, /createRecordingPlaylistClip\(/);
-    assert.match(source, /projectState\.meta\.bpm/);
+    assert.match(source, /prev\.meta\.bpm/);
     assert.doesNotMatch(source, /const secondsPerBar = 240 \/ Math\.max\(20, projectState\.meta\.bpm\)/);
     assert.doesNotMatch(source, /Math\.ceil\(recording\.durationSeconds \/ secondsPerBar\)/);
+  });
+
+  it('gates editing and autosave until startup hydration completes', () => {
+    const source = readFileSync(new URL('../App.tsx', import.meta.url), 'utf8');
+
+    assert.match(source, /const \[isProjectHydrating, setIsProjectHydrating\] = useState\(true\)/);
+    assert.match(source, /if \(isProjectHydrating\)/);
+    assert.match(source, /projectPersistenceReadyRef\.current = true/);
+    assert.match(source, /if \(!projectPersistenceReadyRef\.current\) return/);
   });
 
   it('cancels an active recording when the recorder modal closes', () => {

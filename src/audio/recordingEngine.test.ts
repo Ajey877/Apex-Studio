@@ -60,6 +60,7 @@ class FakeMediaRecorder {
     this.state = 'inactive';
     queueMicrotask(() => {
       this.ondataavailable?.({ data: new Blob(['recorded'], { type: 'audio/webm' }) });
+        this.ondataavailable?.({ data: new Blob(['-tail'], { type: 'audio/webm' }) });
       void this.onstop?.();
     });
   }
@@ -104,7 +105,7 @@ const createContext = (): AudioContext => new FakeAudioContext() as unknown as A
 test('recording stop decodes the Blob for waveform generation and releases capture resources', async () => {
   const mocks = installBrowserMocks();
   try {
-    const engine = new RecordingEngine(createContext, { waveformSamples: 32 });
+    const engine = new RecordingEngine(createContext, { waveformSamples: 32, persistAudioClip: async () => {} });
     await engine.start();
     const result = await engine.stop();
 
@@ -124,7 +125,90 @@ test('cancel always stops the microphone and returns the engine to idle', async 
   try {
     const engine = new RecordingEngine(createContext);
     await engine.start();
-    engine.cancel();
+    await assert.rejects(engine.cancel(), /cancelled/);
+    assert.equal(engine.getState(), 'idle');
+    assert.equal(mocks.stream.track.stopped, true);
+  } finally {
+    mocks.restore();
+  }
+});
+
+test('persistence failure rejects stop, does not return a recording, and still cleans up', async () => {
+  const mocks = installBrowserMocks();
+  try {
+    const persistenceError = new Error('storage unavailable');
+    const errors: Error[] = [];
+    const engine = new RecordingEngine(createContext, {
+      persistAudioClip: async () => { throw persistenceError; },
+      onError: error => errors.push(error)
+    });
+    await engine.start();
+
+    await assert.rejects(engine.stop(), error => error === persistenceError);
+    assert.equal(errors[0], persistenceError);
+    assert.equal(engine.getState(), 'idle');
+    assert.equal(mocks.stream.track.stopped, true);
+  } finally {
+    mocks.restore();
+  }
+});
+
+test('a throwing onError callback cannot prevent stop from rejecting', async () => {
+  const mocks = installBrowserMocks();
+  try {
+    const engine = new RecordingEngine(createContext, {
+      persistAudioClip: async () => { throw new Error('storage unavailable'); },
+      onError: () => { throw new Error('callback failed'); }
+    });
+    await engine.start();
+
+    await assert.rejects(engine.stop(), /storage unavailable/);
+    assert.equal(engine.getState(), 'idle');
+  } finally {
+    mocks.restore();
+  }
+});
+
+test('repeated stop shares finalization and queued chunks are included', async () => {
+  const mocks = installBrowserMocks();
+  try {
+    const engine = new RecordingEngine(createContext, { persistAudioClip: async () => {} });
+    await engine.start();
+    const firstStop = engine.stop();
+    const secondStop = engine.stop();
+    assert.equal(firstStop, secondStop);
+    const result = await firstStop;
+    assert.equal(await result.blob.text(), 'recorded-tail');
+  } finally {
+    mocks.restore();
+  }
+});
+
+test('dispose during recording and repeated cancellation settle without duplicate cleanup', async () => {
+  const mocks = installBrowserMocks();
+  try {
+    const engine = new RecordingEngine(createContext, { persistAudioClip: async () => {} });
+    await engine.start();
+    const firstCancel = engine.cancel();
+    const secondCancel = engine.cancel();
+    await assert.rejects(firstCancel, /cancelled/);
+    await assert.rejects(secondCancel, /cancelled/);
+    await engine.dispose();
+    assert.equal(engine.getState(), 'idle');
+    assert.equal(mocks.stream.track.stopped, true);
+  } finally {
+    mocks.restore();
+  }
+});
+
+test('recorder error during finalization rejects and cleans up', async () => {
+  const mocks = installBrowserMocks();
+  try {
+    const engine = new RecordingEngine(createContext, { persistAudioClip: async () => {} });
+    await engine.start();
+    const stopping = engine.stop();
+    mocks.recorderInstances[0].fail();
+    await assert.rejects(stopping, /Audio recording failed/);
     assert.equal(engine.getState(), 'idle');
     assert.equal(mocks.stream.track.stopped, true);
   } finally {
