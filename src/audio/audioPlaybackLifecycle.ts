@@ -39,8 +39,8 @@ export function installAudioPlaybackLifecycle(): void {
       if (!buffer) return;
 
       const channel = clip.channelId
-        ? engine.activeChannels?.find((candidate: { id: string }) => candidate.id === clip.channelId)
-        : undefined;
+        ? (engine.activeChannels?.find((candidate: { id: string }) => candidate.id === clip.channelId) ?? engine.activeChannels?.[0])
+        : engine.activeChannels?.[0];
       if (channel?.mute) return;
 
       const contract = getAudioClipPlaybackContract(clip, engine.bpm, buffer.duration);
