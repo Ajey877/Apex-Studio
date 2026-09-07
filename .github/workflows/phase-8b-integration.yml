@@ -24,93 +24,105 @@ jobs:
           python3 <<'PY'
           from pathlib import Path
 
-          app = Path('src/App.tsx')
-          text = app.read_text()
+          def replace_once(path: str, text: str, old: str, new: str, label: str) -> str:
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f'{label}: expected exactly one match, found {count}')
+              return text.replace(old, new, 1)
 
-          text = text.replace(
+          app_path = Path('src/App.tsx')
+          app = app_path.read_text()
+
+          app = replace_once(
+              str(app_path), app,
               "import { persistProjectState, restorePersistedProjectState } from './state/projectPersistence';",
               "import { persistProjectState, restorePersistedProjectState } from './state/projectPersistence';\nimport { createPlaylistHistory, type PlaylistHistory } from './state/playlistHistory';",
-              1,
+              'App history import',
           )
 
-          text = text.replace(
+          app = replace_once(
+              str(app_path), app,
               "  const projectPersistenceReadyRef = useRef(false);",
               "  const projectPersistenceReadyRef = useRef(false);\n  const playlistHistoryRef = useRef<PlaylistHistory>(createPlaylistHistory(DEFAULT_PROJECT));\n  const [playlistHistoryState, setPlaylistHistoryState] = useState<PlaylistHistory>(() => playlistHistoryRef.current);\n  const playlistHistoryTimerRef = useRef<number | null>(null);\n  const pendingPlaylistStateRef = useRef<ProjectState | null>(null);",
-              1,
+              'App history state',
           )
 
           marker = "  // Project persistence is intentionally hydrated before autosave is enabled.\n"
-          helpers = '''  const flushPlaylistHistory = useCallback((fallbackState?: ProjectState) => {\n    if (playlistHistoryTimerRef.current !== null) {\n      window.clearTimeout(playlistHistoryTimerRef.current);\n      playlistHistoryTimerRef.current = null;\n    }\n\n    const pending = pendingPlaylistStateRef.current;\n    if (!pending) return;\n\n    const nextHistory = playlistHistoryRef.current.commit(pending, 'Playlist edit');\n    playlistHistoryRef.current = nextHistory;\n    setPlaylistHistoryState(nextHistory);\n    pendingPlaylistStateRef.current = null;\n  }, []);\n\n  const queuePlaylistHistory = useCallback((nextState: ProjectState) => {\n    pendingPlaylistStateRef.current = nextState;\n    if (playlistHistoryTimerRef.current !== null) {\n      window.clearTimeout(playlistHistoryTimerRef.current);\n    }\n    playlistHistoryTimerRef.current = window.setTimeout(() => {\n      playlistHistoryTimerRef.current = null;\n      const pending = pendingPlaylistStateRef.current;\n      if (!pending) return;\n      const nextHistory = playlistHistoryRef.current.commit(pending, 'Playlist edit');\n      playlistHistoryRef.current = nextHistory;\n      setPlaylistHistoryState(nextHistory);\n      pendingPlaylistStateRef.current = null;\n    }, 350);\n  }, []);\n\n  const resetPlaylistHistory = useCallback((state: ProjectState) => {\n    if (playlistHistoryTimerRef.current !== null) {\n      window.clearTimeout(playlistHistoryTimerRef.current);\n      playlistHistoryTimerRef.current = null;\n    }\n    pendingPlaylistStateRef.current = null;\n    const nextHistory = createPlaylistHistory(state);\n    playlistHistoryRef.current = nextHistory;\n    setPlaylistHistoryState(nextHistory);\n  }, []);\n\n  const handlePlaylistUndo = useCallback(() => {\n    flushPlaylistHistory();\n    const result = playlistHistoryRef.current.undo(projectState);\n    playlistHistoryRef.current = result.history;\n    setPlaylistHistoryState(result.history);\n    setProjectState(result.state);\n  }, [flushPlaylistHistory, projectState]);\n\n  const handlePlaylistRedo = useCallback(() => {\n    flushPlaylistHistory();\n    const result = playlistHistoryRef.current.redo(projectState);\n    playlistHistoryRef.current = result.history;\n    setPlaylistHistoryState(result.history);\n    setProjectState(result.state);\n  }, [flushPlaylistHistory, projectState]);\n\n'''
-          if marker not in text:
-              raise SystemExit('App marker not found')
-          text = text.replace(marker, helpers + marker, 1)
+          helpers = '''  const flushPlaylistHistory = useCallback(() => {\n    if (playlistHistoryTimerRef.current !== null) {\n      window.clearTimeout(playlistHistoryTimerRef.current);\n      playlistHistoryTimerRef.current = null;\n    }\n\n    const pending = pendingPlaylistStateRef.current;\n    if (!pending) return;\n\n    const nextHistory = playlistHistoryRef.current.commit(pending, 'Playlist edit');\n    playlistHistoryRef.current = nextHistory;\n    setPlaylistHistoryState(nextHistory);\n    pendingPlaylistStateRef.current = null;\n  }, []);\n\n  const queuePlaylistHistory = useCallback((nextState: ProjectState) => {\n    pendingPlaylistStateRef.current = nextState;\n    if (playlistHistoryTimerRef.current !== null) {\n      window.clearTimeout(playlistHistoryTimerRef.current);\n    }\n    playlistHistoryTimerRef.current = window.setTimeout(() => {\n      playlistHistoryTimerRef.current = null;\n      const pending = pendingPlaylistStateRef.current;\n      if (!pending) return;\n      const nextHistory = playlistHistoryRef.current.commit(pending, 'Playlist edit');\n      playlistHistoryRef.current = nextHistory;\n      setPlaylistHistoryState(nextHistory);\n      pendingPlaylistStateRef.current = null;\n    }, 350);\n  }, []);\n\n  const resetPlaylistHistory = useCallback((state: ProjectState) => {\n    if (playlistHistoryTimerRef.current !== null) {\n      window.clearTimeout(playlistHistoryTimerRef.current);\n      playlistHistoryTimerRef.current = null;\n    }\n    pendingPlaylistStateRef.current = null;\n    const nextHistory = createPlaylistHistory(state);\n    playlistHistoryRef.current = nextHistory;\n    setPlaylistHistoryState(nextHistory);\n  }, []);\n\n  const handlePlaylistUndo = useCallback(() => {\n    flushPlaylistHistory();\n    const result = playlistHistoryRef.current.undo(projectState);\n    playlistHistoryRef.current = result.history;\n    setPlaylistHistoryState(result.history);\n    setProjectState(result.state);\n  }, [flushPlaylistHistory, projectState]);\n\n  const handlePlaylistRedo = useCallback(() => {\n    flushPlaylistHistory();\n    const result = playlistHistoryRef.current.redo(projectState);\n    playlistHistoryRef.current = result.history;\n    setPlaylistHistoryState(result.history);\n    setProjectState(result.state);\n  }, [flushPlaylistHistory, projectState]);\n\n'''
+          app = replace_once(str(app_path), app, marker, helpers + marker, 'App history helpers')
 
-          text = text.replace(
+          app = replace_once(
+              str(app_path), app,
               "          setProjectState(restored.state);\n",
               "          setProjectState(restored.state);\n          resetPlaylistHistory(restored.state);\n",
-              1,
+              'App hydration reset',
           )
 
           old_handlers = '''  const handleUpdateTracks = (tracks: PlaylistTrack[]) => {\n    setProjectState(prev => ({ ...prev, playlistTracks: tracks }));\n  };\n\n  const handleUpdateClips = (clips: PlaylistClip[]) => {\n    setProjectState(prev => ({ ...prev, playlistClips: clips }));\n  };\n'''
           new_handlers = '''  const handleUpdateTracks = (tracks: PlaylistTrack[]) => {\n    const nextState = { ...projectState, playlistTracks: tracks };\n    setProjectState(nextState);\n    queuePlaylistHistory(nextState);\n  };\n\n  const handleUpdateClips = (clips: PlaylistClip[]) => {\n    const nextState = { ...projectState, playlistClips: clips };\n    setProjectState(nextState);\n    queuePlaylistHistory(nextState);\n  };\n'''
-          if old_handlers not in text:
-              raise SystemExit('App playlist handlers not found')
-          text = text.replace(old_handlers, new_handlers, 1)
+          app = replace_once(str(app_path), app, old_handlers, new_handlers, 'App playlist handlers')
 
-          text = text.replace(
-              "  const handleAddPlaylistTrack = () => {\n    const nextId = projectState.playlistTracks.length + 1;\n    const newTrack: PlaylistTrack = {\n      id: nextId,\n      name: `Track ${nextId}`,\n      color: '#ff6e00',\n      volume: 0.9,\n      pan: 0,\n      mute: false,\n      solo: false\n    };\n    setProjectState(prev => ({\n      ...prev,\n      playlistTracks: [...prev.playlistTracks, newTrack]\n    }));\n  };",
-              "  const handleAddPlaylistTrack = () => {\n    const nextId = projectState.playlistTracks.length + 1;\n    const newTrack: PlaylistTrack = {\n      id: nextId,\n      name: `Track ${nextId}`,\n      color: '#ff6e00',\n      volume: 0.9,\n      pan: 0,\n      mute: false,\n      solo: false\n    };\n    const nextState = { ...projectState, playlistTracks: [...projectState.playlistTracks, newTrack] };\n    setProjectState(nextState);\n    queuePlaylistHistory(nextState);\n  };",
-              1,
-          )
+          old_add_track = '''  const handleAddPlaylistTrack = () => {\n    const nextId = projectState.playlistTracks.length + 1;\n    const newTrack: PlaylistTrack = {\n      id: nextId,\n      name: `Track ${nextId}`,\n      color: '#ff6e00',\n      volume: 0.9,\n      pan: 0,\n      mute: false,\n      solo: false\n    };\n    setProjectState(prev => ({\n      ...prev,\n      playlistTracks: [...prev.playlistTracks, newTrack]\n    }));\n  };'''
+          new_add_track = '''  const handleAddPlaylistTrack = () => {\n    const nextId = projectState.playlistTracks.length + 1;\n    const newTrack: PlaylistTrack = {\n      id: nextId,\n      name: `Track ${nextId}`,\n      color: '#ff6e00',\n      volume: 0.9,\n      pan: 0,\n      mute: false,\n      solo: false\n    };\n    const nextState = { ...projectState, playlistTracks: [...projectState.playlistTracks, newTrack] };\n    setProjectState(nextState);\n    queuePlaylistHistory(nextState);\n  };\n\n  const handleUpdatePlaylistMarkers = (markers: ProjectState['markers']) => {\n    const nextState = { ...projectState, markers };\n    setProjectState(nextState);\n    queuePlaylistHistory(nextState);\n  };'''
+          app = replace_once(str(app_path), app, old_add_track, new_add_track, 'App playlist track handler')
 
-          text = text.replace(
+          app = replace_once(
+              str(app_path), app,
               "{PRESET_PROJECTS.map((p, i) => (\n                      <div key={i} onClick={() => setProjectState(p.state)}",
               "{PRESET_PROJECTS.map((p, i) => (\n                      <div key={i} onClick={() => { resetPlaylistHistory(p.state); setProjectState(p.state); }}",
-              1,
+              'App preset reset',
           )
 
-          text = text.replace(
+          app = replace_once(
+              str(app_path), app,
               "<ProjectManagerModal isOpen={isProjectManagerOpen} onClose={() => setIsProjectManagerOpen(false)} currentState={projectState} onLoadProject={(st) => setProjectState(st)} onUpdateMeta={handleUpdateMeta} />",
               "<ProjectManagerModal isOpen={isProjectManagerOpen} onClose={() => setIsProjectManagerOpen(false)} currentState={projectState} onLoadProject={(st) => { resetPlaylistHistory(st); setProjectState(st); }} onUpdateMeta={handleUpdateMeta} />",
-              1,
+              'App project manager reset',
           )
 
-          text = text.replace(
+          app = replace_once(
+              str(app_path), app,
               "<ProjectBundleZipModal isOpen={isProjectZipOpen} onClose={() => setIsProjectZipOpen(false)} projectState={projectState} onLoadProjectState={(loadedState) => setProjectState(loadedState)} />",
               "<ProjectBundleZipModal isOpen={isProjectZipOpen} onClose={() => setIsProjectZipOpen(false)} projectState={projectState} onLoadProjectState={(loadedState) => { resetPlaylistHistory(loadedState); setProjectState(loadedState); }} />",
-              1,
+              'App zip reset',
           )
 
           old_playlist = """  onAddTrack: () => void;\n  onSeekToBar?: (bar: number) => void;"""
           new_playlist = """  onAddTrack: () => void;\n  canUndo?: boolean;\n  canRedo?: boolean;\n  onUndo?: () => void;\n  onRedo?: () => void;\n  onSeekToBar?: (bar: number) => void;"""
 
-          playlist = Path('src/components/PlaylistArranger.tsx')
-          p = playlist.read_text()
-          if old_playlist in p:
-              p = p.replace(old_playlist, new_playlist, 1)
-          else:
-              raise SystemExit('Playlist interface marker not found')
-
-          p = p.replace(
+          playlist_path = Path('src/components/PlaylistArranger.tsx')
+          playlist = playlist_path.read_text()
+          playlist = replace_once(str(playlist_path), playlist, old_playlist, new_playlist, 'Playlist history props')
+          playlist = replace_once(
+              str(playlist_path), playlist,
               "  AudioWaveform\n} from 'lucide-react';",
               "  AudioWaveform,\n  Undo2,\n  Redo2\n} from 'lucide-react';",
-              1,
+              'Playlist history icons',
           )
-
-          p = p.replace(
+          playlist = replace_once(
+              str(playlist_path), playlist,
               "  onAddTrack,\n  onSeekToBar,",
               "  onAddTrack,\n  canUndo = false,\n  canRedo = false,\n  onUndo,\n  onRedo,\n  onSeekToBar,",
-              1,
+              'Playlist history destructure',
           )
 
-          toolbar_marker = """        <div className=\"flex items-center gap-2\">\n          {/* Arrangement Markers Button */}"""
-          toolbar_buttons = """        <div className=\"flex items-center gap-2\">\n          <div className=\"flex items-center gap-0.5 bg-[#121214] border border-[#333336] p-0.5 rounded\" title=\"Playlist history\">\n            <button\n              onClick={onUndo}\n              disabled={!canUndo}\n              className=\"p-1 text-[#aaa] hover:text-white disabled:text-[#444] disabled:cursor-not-allowed\"\n              aria-label=\"Undo playlist edit\"\n            >\n              <Undo2 className=\"w-3.5 h-3.5\" />\n            </button>\n            <button\n              onClick={onRedo}\n              disabled={!canRedo}\n              className=\"p-1 text-[#aaa] hover:text-white disabled:text-[#444] disabled:cursor-not-allowed\"\n              aria-label=\"Redo playlist edit\"\n            >\n              <Redo2 className=\"w-3.5 h-3.5\" />\n            </button>\n          </div>\n\n          {/* Arrangement Markers Button */}"""
-          if toolbar_marker not in p:
-              raise SystemExit('Playlist toolbar marker not found')
-          p = p.replace(toolbar_marker, toolbar_buttons, 1)
-          playlist.write_text(p)
+          history_toolbar = '''          <div className="flex items-center gap-0.5 bg-[#121214] border border-[#333336] p-0.5 rounded" title="Playlist history">\n            <button\n              onClick={onUndo}\n              disabled={!canUndo}\n              className="p-1 text-[#aaa] hover:text-white disabled:text-[#444] disabled:cursor-not-allowed"\n              aria-label="Undo playlist edit"\n            >\n              <Undo2 className="w-3.5 h-3.5" />\n            </button>\n            <button\n              onClick={onRedo}\n              disabled={!canRedo}\n              className="p-1 text-[#aaa] hover:text-white disabled:text-[#444] disabled:cursor-not-allowed"\n              aria-label="Redo playlist edit"\n            >\n              <Redo2 className="w-3.5 h-3.5" />\n            </button>\n          </div>\n\n'''
+          playlist = replace_once(
+              str(playlist_path), playlist,
+              "        <div className=\"flex items-center gap-2\">\n          {/* Arrangement Markers Button */}\n          <div className=\"relative\">",
+              "        <div className=\"flex items-center gap-2\">\n" + history_toolbar + "          {/* Arrangement Markers Button */}\n          <div className=\"relative\">",
+              'Playlist history toolbar',
+          )
+          playlist_path.write_text(playlist)
 
-          app.write_text(text)
+          app = replace_once(
+              str(app_path), app,
+              "              onAddTrack={handleAddPlaylistTrack}\n              onUpdateMarkers={(markers) => setProjectState(prev => ({ ...prev, markers }))}\n              onSeekToBar={(bar) => setCurrentBar(bar)}",
+              "              onAddTrack={handleAddPlaylistTrack}\n              canUndo={playlistHistoryState.canUndo}\n              canRedo={playlistHistoryState.canRedo}\n              onUndo={handlePlaylistUndo}\n              onRedo={handlePlaylistRedo}\n              onUpdateMarkers={handleUpdatePlaylistMarkers}\n              onSeekToBar={(bar) => setCurrentBar(bar)}",
+              'App playlist history wiring',
+          )
+
+          app_path.write_text(app)
           print('Phase 8B integration patch applied')
           PY
 
@@ -120,12 +132,12 @@ jobs:
           npm run lint
           npm run build
 
-      - name: Commit integration
+      - name: Commit integration and remove temporary runner
         shell: bash
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add src/App.tsx src/components/PlaylistArranger.tsx
-          git diff --cached --quiet && { echo "No integration changes detected"; exit 0; }
+          git add src/App.tsx src/components/PlaylistArranger.tsx .github/workflows/phase-8b-integration.yml
+          git rm .github/workflows/phase-8b-integration.yml
           git commit -m "Phase 8B: integrate playlist history"
           git push origin phase-8b-playlist-history
