@@ -199,7 +199,7 @@ test('normalization is applied before a snapshot is stored', () => {
   const snapshot = sanitizeProjectSnapshot(raw);
 
   assert.ok(Number.isFinite(snapshot.nextMixerTrackId));
-  assert.equal(snapshot.nextMixerTrackId, 3);
+  assert.equal(snapshot.nextMixerTrackId, 8);
   assert.equal(snapshot.meta.name, state.meta.name);
   assert.equal(snapshot.channels.length, state.channels.length);
 });
