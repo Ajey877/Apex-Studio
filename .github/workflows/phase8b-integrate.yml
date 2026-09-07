@@ -1,4 +1,4 @@
-name: Phase 8B Integration Runner
+name: Phase 8B one-shot integration
 
 on:
   push:
@@ -25,254 +25,24 @@ jobs:
       - name: Install dependencies
         run: npm install --legacy-peer-deps
 
-      - name: Integrate PlaylistArranger history
-        shell: bash
+      - name: Apply Phase 8B source integration
+        run: python3 .github/phase8b_integrate.py
+
+      - name: Focused Phase 8B tests
+        run: npx tsx --test src/state/projectHistory.test.ts src/state/playlistHistory.test.ts src/components/playlistClipOperations.test.ts
+
+      - name: TypeScript check
+        run: npm run lint
+
+      - name: Production build
+        run: npm run build
+
+      - name: Commit integrated Phase 8B
         run: |
           set -euo pipefail
-          git fetch origin main --depth=1
-          git show origin/main:src/components/PlaylistArranger.tsx > /tmp/PlaylistArranger.tsx
-          python <<'PY'
-          from pathlib import Path
-          import re
-
-          path = Path('/tmp/PlaylistArranger.tsx')
-          s = path.read_text()
-
-          def replace_once(text: str, old: str, new: str, name: str) -> str:
-              count = text.count(old)
-              if count != 1:
-                  raise SystemExit(f'{name}: expected 1 match, found {count}')
-              return text.replace(old, new)
-
-          s = replace_once(
-              s,
-              "import React, { useState, useRef } from 'react';",
-              "import React, { useEffect, useState, useRef } from 'react';",
-              'react import'
-          )
-          s = replace_once(
-              s,
-              "  AudioWaveform\n} from 'lucide-react';",
-              "  AudioWaveform,\n  Undo2,\n  Redo2\n} from 'lucide-react';",
-              'history icons'
-          )
-          s = replace_once(
-              s,
-              "import { audioEngine } from '../audio/audioEngine';",
-              "import { audioEngine } from '../audio/audioEngine';\nimport { createDefaultProjectState } from '../state/projectState';\nimport { applyPlaylistDocument, createPlaylistDocument, createPlaylistHistory, type PlaylistDocument, type PlaylistHistory } from '../state/playlistHistory';",
-              'history imports'
-          )
-          s = replace_once(
-              s,
-              "  onUpdateTracks,\n  onUpdateClips,\n  onUpdateMarkers,\n  onAddTrack,",
-              "  onUpdateTracks: onUpdateTracksProp,\n  onUpdateClips: onUpdateClipsProp,\n  onUpdateMarkers: onUpdateMarkersProp,\n  onAddTrack: onAddTrackProp,",
-              'callback aliases'
-          )
-
-          anchor = "  const bounds = { totalBars, maxTracks: tracks.length };"
-          history_block = r'''  const bounds = { totalBars, maxTracks: tracks.length };
-
-  const makeHistoryState = (document: PlaylistDocument) =>
-    applyPlaylistDocument(createDefaultProjectState(), document);
-  const currentPlaylistDocument = () =>
-    createPlaylistDocument(tracks, clips, markers);
-  const latestDocumentRef = useRef<PlaylistDocument>(currentPlaylistDocument());
-  const pendingLocalDocumentRef = useRef<PlaylistDocument | null>(null);
-  const interactionStartDocumentRef = useRef<PlaylistDocument | null>(null);
-  const interactionPreviewDocumentRef = useRef<PlaylistDocument | null>(null);
-
-  const [playlistHistory, setPlaylistHistory] = useState<PlaylistHistory>(() =>
-    createPlaylistHistory(makeHistoryState(currentPlaylistDocument()))
-  );
-
-  const commitPlaylistEdit = (document: PlaylistDocument, label: string) => {
-    latestDocumentRef.current = document;
-    pendingLocalDocumentRef.current = document;
-    setPlaylistHistory(previous => previous.commit(makeHistoryState(document), label));
-  };
-
-  const onUpdateTracks = (nextTracks: PlaylistTrack[]) => {
-    const document = createPlaylistDocument(
-      nextTracks,
-      latestDocumentRef.current.playlistClips,
-      latestDocumentRef.current.markers
-    );
-    latestDocumentRef.current = document;
-    onUpdateTracksProp(nextTracks);
-    if (interactionStartDocumentRef.current) {
-      interactionPreviewDocumentRef.current = document;
-    } else {
-      commitPlaylistEdit(document, 'Edit Playlist Track');
-    }
-  };
-
-  const onUpdateClips = (nextClips: PlaylistClip[]) => {
-    const document = createPlaylistDocument(
-      latestDocumentRef.current.playlistTracks,
-      nextClips,
-      latestDocumentRef.current.markers
-    );
-    latestDocumentRef.current = document;
-    onUpdateClipsProp(nextClips);
-    if (interactionStartDocumentRef.current) {
-      interactionPreviewDocumentRef.current = document;
-    } else {
-      commitPlaylistEdit(document, 'Edit Playlist Clip');
-    }
-  };
-
-  const onUpdateMarkers = (nextMarkers: ArrangementMarker[]) => {
-    const document = createPlaylistDocument(
-      latestDocumentRef.current.playlistTracks,
-      latestDocumentRef.current.playlistClips,
-      nextMarkers
-    );
-    latestDocumentRef.current = document;
-    onUpdateMarkersProp?.(nextMarkers);
-    if (interactionStartDocumentRef.current) {
-      interactionPreviewDocumentRef.current = document;
-    } else {
-      commitPlaylistEdit(document, 'Edit Arrangement Marker');
-    }
-  };
-
-  const onAddTrack = () => {
-    const nextId = tracks.length + 1;
-    const nextTrack: PlaylistTrack = {
-      id: nextId,
-      name: `Track ${nextId}`,
-      color: '#ff6e00',
-      volume: 0.9,
-      pan: 0,
-      mute: false,
-      solo: false
-    };
-    onAddTrackProp();
-    commitPlaylistEdit(
-      createPlaylistDocument(
-        [...tracks, nextTrack],
-        latestDocumentRef.current.playlistClips,
-        latestDocumentRef.current.markers
-      ),
-      'Add Playlist Track'
-    );
-  };
-
-  const applyPlaylistHistoryDocument = (document: PlaylistDocument) => {
-    latestDocumentRef.current = document;
-    pendingLocalDocumentRef.current = document;
-    onUpdateTracksProp(document.playlistTracks);
-    onUpdateClipsProp(document.playlistClips);
-    onUpdateMarkersProp?.(document.markers);
-  };
-
-  const undoPlaylistEdit = () => {
-    const result = playlistHistory.undo(makeHistoryState(latestDocumentRef.current));
-    if (result.history === playlistHistory) return;
-    const document = createPlaylistDocument(
-      result.state.playlistTracks,
-      result.state.playlistClips,
-      result.state.markers || []
-    );
-    setPlaylistHistory(result.history);
-    applyPlaylistHistoryDocument(document);
-  };
-
-  const redoPlaylistEdit = () => {
-    const result = playlistHistory.redo(makeHistoryState(latestDocumentRef.current));
-    if (result.history === playlistHistory) return;
-    const document = createPlaylistDocument(
-      result.state.playlistTracks,
-      result.state.playlistClips,
-      result.state.markers || []
-    );
-    setPlaylistHistory(result.history);
-    applyPlaylistHistoryDocument(document);
-  };
-
-  useEffect(() => {
-    const incoming = currentPlaylistDocument();
-    latestDocumentRef.current = incoming;
-
-    if (pendingLocalDocumentRef.current) {
-      if (JSON.stringify(pendingLocalDocumentRef.current) === JSON.stringify(incoming)) {
-        pendingLocalDocumentRef.current = null;
-      }
-      return;
-    }
-
-    if (
-      !interactionStartDocumentRef.current &&
-      JSON.stringify(incoming) !== JSON.stringify(playlistHistory.document)
-    ) {
-      setPlaylistHistory(createPlaylistHistory(makeHistoryState(incoming)));
-    }
-  }, [tracks, clips, markers, playlistHistory.document]);
-'''
-          s = replace_once(s, anchor, history_block, 'history block')
-
-          move_old = """        const moved = movePlaylistClip(clip, requestedStart, targetTrack, DEFAULT_GRID_BARS, bounds);\n        onUpdateClips(clips.map(item => item.id === clip.id ? moved : item));"""
-          move_new = """        const moved = movePlaylistClip(clip, requestedStart, targetTrack, DEFAULT_GRID_BARS, bounds);\n        onUpdateClipsProp(latestDocumentRef.current.playlistClips.map(item => item.id === clip.id ? moved : item));"""
-          s = replace_once(s, move_old, move_new, 'move preview')
-
-          resize_matches = [
-              ("resizePlaylistClipLeft(clip, requestedStart, DEFAULT_GRID_BARS, MIN_CLIP_LENGTH, bounds);", 'resize-left preview'),
-              ("resizePlaylistClipRight(clip, requestedEnd, DEFAULT_GRID_BARS, MIN_CLIP_LENGTH, bounds);", 'resize-right preview')
-          ]
-          for expression, name in resize_matches:
-              pattern = r"(        const resized = " + re.escape(expression) + r"\n)        onUpdateClips\(clips\.map\(item => item\.id === clip\.id \? resized : item\)\);"
-              replacement = r"\1        const nextClips = latestDocumentRef.current.playlistClips.map(item => item.id === clip.id ? resized : item);\n        latestDocumentRef.current = createPlaylistDocument(tracks, nextClips, markers);\n        interactionPreviewDocumentRef.current = latestDocumentRef.current;\n        onUpdateClipsProp(nextClips);"
-              s2, count = re.subn(pattern, replacement, s, count=1)
-              if count != 1:
-                  raise SystemExit(f'{name}: expected 1 match, found {count}')
-              s = s2
-
-          move_block = """        const moved = movePlaylistClip(clip, requestedStart, targetTrack, DEFAULT_GRID_BARS, bounds);\n        onUpdateClipsProp(latestDocumentRef.current.playlistClips.map(item => item.id === clip.id ? moved : item));"""
-          s = replace_once(
-              s,
-              move_block,
-              """        const nextClips = latestDocumentRef.current.playlistClips.map(item => item.id === clip.id ? moved : item);\n        latestDocumentRef.current = createPlaylistDocument(tracks, nextClips, markers);\n        interactionPreviewDocumentRef.current = latestDocumentRef.current;\n        onUpdateClipsProp(nextClips);""",
-              'move history preview'
-          )
-
-          s = replace_once(
-              s,
-              "    didMoveRef.current = false;\n    event.currentTarget.setPointerCapture(event.pointerId);",
-              "    didMoveRef.current = false;\n    const startDocument = currentPlaylistDocument();\n    interactionStartDocumentRef.current = startDocument;\n    interactionPreviewDocumentRef.current = startDocument;\n    latestDocumentRef.current = startDocument;\n    event.currentTarget.setPointerCapture(event.pointerId);",
-              'interaction start'
-          )
-
-          s = replace_once(
-              s,
-              "    if (event && event.currentTarget.hasPointerCapture(event.pointerId)) {\n      event.currentTarget.releasePointerCapture(event.pointerId);\n    }\n    setInteraction(null);",
-              "    if (event && event.currentTarget.hasPointerCapture(event.pointerId)) {\n      event.currentTarget.releasePointerCapture(event.pointerId);\n    }\n    const startDocument = interactionStartDocumentRef.current;\n    const previewDocument = interactionPreviewDocumentRef.current;\n    if (didMoveRef.current && startDocument && previewDocument && JSON.stringify(startDocument) !== JSON.stringify(previewDocument)) {\n      const label = interaction?.kind === 'move' ? 'Move Playlist Clip' : 'Resize Playlist Clip';\n      commitPlaylistEdit(previewDocument, label);\n    }\n    interactionStartDocumentRef.current = null;\n    interactionPreviewDocumentRef.current = null;\n    setInteraction(null);",
-              'interaction end'
-          )
-
-          s = replace_once(
-              s,
-              "          {/* Section Markers & Zoom & Add Track */}",
-              "          <div className=\"flex items-center gap-0.5 bg-[#121214] border border-[#333336] p-0.5 rounded\" aria-label=\"Playlist history\">\n            <button type=\"button\" onClick={undoPlaylistEdit} disabled={!playlistHistory.canUndo} title=\"Undo last playlist edit\" className={`px-2 py-0.5 rounded-sm font-semibold text-[10px] flex items-center gap-1 ${playlistHistory.canUndo ? 'text-white hover:bg-[#222225]' : 'text-[#444] cursor-not-allowed'}`}><Undo2 className=\"w-3 h-3\" />Undo</button>\n            <button type=\"button\" onClick={redoPlaylistEdit} disabled={!playlistHistory.canRedo} title=\"Redo last playlist edit\" className={`px-2 py-0.5 rounded-sm font-semibold text-[10px] flex items-center gap-1 ${playlistHistory.canRedo ? 'text-white hover:bg-[#222225]' : 'text-[#444] cursor-not-allowed'}`}><Redo2 className=\"w-3 h-3\" />Redo</button>\n          </div>\n\n          {/* Section Markers & Zoom & Add Track */",
-              'history toolbar'
-          )
-
-          Path('src/components/PlaylistArranger.tsx').write_text(s)
-          PY
-
-      - name: Validate integration
-        run: |
-          set -euo pipefail
-          npx tsx --test src/state/projectHistory.test.ts src/state/playlistHistory.test.ts src/components/playlistClipOperations.test.ts
-          npm run lint
-          npm run build
-
-      - name: Commit integration
-        shell: bash
-        run: |
-          set -euo pipefail
-          rm -f .github/workflows/phase8b-integrate.yml
+          rm -f .github/phase8b_integrate.py .github/workflows/phase8b-integrate.yml
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add src/components/PlaylistArranger.tsx .github/workflows/phase8b-integrate.yml
+          git add src/components/PlaylistArranger.tsx package.json src/state/playlistHistory.ts src/state/playlistHistory.test.ts .github/phase8b_integrate.py .github/workflows/phase8b-integrate.yml
           git commit -m 'Phase 8B: integrate playlist undo and redo'
           git push origin HEAD:phase-8b-playlist-history
