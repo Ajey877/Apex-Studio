@@ -27,7 +27,7 @@ import { appendChannelWithAllocatedMixerTrackId } from './state/mixerTrackIdenti
 import { deleteChannelFromProjectState } from './state/projectState';
 import { persistProjectState, restorePersistedProjectState } from './state/projectPersistence';
 import { createRecordingPlaylistClip, getRecordingAudioBufferId, validateRecordingTargetTrack } from './audio/recordingPipeline';
-import { applyPlaylistDocument, createPlaylistDocument, createPlaylistHistory, type PlaylistHistory } from './state/playlistHistory';
+import { createPlaylistHistory, type PlaylistHistory } from './state/playlistHistory';
 
 // Component Suite
 import { TransportBar } from './components/TransportBar';
@@ -587,21 +587,25 @@ export function App() {
     const loaded = await audioEngine.loadAudioFile(recording.audioBlob, audioBufferId);
     const persistedRecording: AudioRecording = { ...recording, audioBufferId };
     // AudioEngine has no buffer-removal API; a removed target leaves only this narrow in-memory orphan.
-    setProjectState(prev => ({
-      ...prev,
-      ...(prev.playlistTracks.some(track => track.id === targetTrackId) ? {
-        recordings: [...prev.recordings, persistedRecording],
-        playlistClips: [...prev.playlistClips, createRecordingPlaylistClip(
-          persistedRecording,
-          { id: audioBufferId, buffer: loaded.buffer, peaks: loaded.peaks, duration: loaded.duration },
-          prev.playlistTracks,
-          prev.playlistTracks.findIndex(track => track.id === targetTrackId),
-          prev.meta.bpm,
-          `rec-clip-${Date.now()}`
-        )],
-        meta: { ...prev.meta, updated: Date.now() }
-      } : {})
-    }));
+    const currentState = projectStateRef.current;
+    if (!currentState.playlistTracks.some(track => track.id === targetTrackId)) return;
+    const targetTrackIndex = currentState.playlistTracks.findIndex(track => track.id === targetTrackId);
+    const recordingClip = createRecordingPlaylistClip(
+      persistedRecording,
+      { id: audioBufferId, buffer: loaded.buffer, peaks: loaded.peaks, duration: loaded.duration },
+      currentState.playlistTracks,
+      targetTrackIndex,
+      currentState.meta.bpm,
+      `rec-clip-${Date.now()}`
+    );
+    const nextState = {
+      ...currentState,
+      recordings: [...currentState.recordings, persistedRecording],
+      playlistClips: [...currentState.playlistClips, recordingClip],
+      meta: { ...currentState.meta, updated: Date.now() }
+    };
+    updatePlaylistProjectState(nextState);
+    commitPlaylistHistory(nextState, 'Record audio to playlist');
   };
 
   // --- Computer Keypad & Keyboard Live Engine ---
@@ -1006,15 +1010,15 @@ export function App() {
       <MultiZoneSamplerModal isOpen={isMultiZoneSamplerOpen} onClose={() => setIsMultiZoneSamplerOpen(false)} channels={projectState.channels} onUpdateChannel={handleUpdateChannel} />
       <WavetableSynthModal isOpen={isWavetableSynthOpen} onClose={() => setIsWavetableSynthOpen(false)} channels={projectState.channels} onUpdateChannel={handleUpdateChannel} />
       <WamPluginModal isOpen={isWamPluginOpen} onClose={() => setIsWamPluginOpen(false)} mixerTracks={projectState.mixerTracks} onUpdateMixerTracks={(tracks) => setProjectState(prev => ({ ...prev, mixerTracks: tracks }))} />
-      <TakeCompingModal isOpen={isTakeCompingOpen} onClose={() => setIsTakeCompingOpen(false)} onPromoteCompToPlaylist={(newClip) => setProjectState(prev => ({ ...prev, playlistClips: [...prev.playlistClips, newClip] }))} />
+      <TakeCompingModal isOpen={isTakeCompingOpen} onClose={() => setIsTakeCompingOpen(false)} onPromoteCompToPlaylist={(newClip) => { const nextState = { ...projectStateRef.current, playlistClips: [...projectStateRef.current.playlistClips, newClip] }; updatePlaylistProjectState(nextState); commitPlaylistHistory(nextState, 'Promote comp to playlist'); }} />
       <SidechainRoutingModal isOpen={isSidechainOpen} onClose={() => setIsSidechainOpen(false)} mixerTracks={projectState.mixerTracks} onUpdateMixerTracks={(tracks) => setProjectState(prev => ({ ...prev, mixerTracks: tracks }))} />
       <PolyphonicEditorModal isOpen={isPolyphonicEditorOpen} onClose={() => setIsPolyphonicEditorOpen(false)} />
       <DesktopAppModal isOpen={isDesktopAppOpen} onClose={() => setIsDesktopAppOpen(false)} />
-      <WarpAudioProcessorModal isOpen={isWarpProcessorOpen} onClose={() => setIsWarpProcessorOpen(false)} selectedClip={projectState.playlistClips[0] || null} onUpdateClip={(updatedClip) => setProjectState(prev => ({ ...prev, playlistClips: prev.playlistClips.map(c => c.id === updatedClip.id ? updatedClip : c) }))} />
+      <WarpAudioProcessorModal isOpen={isWarpProcessorOpen} onClose={() => setIsWarpProcessorOpen(false)} selectedClip={projectState.playlistClips[0] || null} onUpdateClip={(updatedClip) => { const nextState = { ...projectStateRef.current, playlistClips: projectStateRef.current.playlistClips.map(c => c.id === updatedClip.id ? updatedClip : c) }; updatePlaylistProjectState(nextState); commitPlaylistHistory(nextState, 'Warp audio clip'); }} />
       <VideoScoringModal isOpen={isVideoScoringOpen} onClose={() => setIsVideoScoringOpen(false)} currentBar={currentBar} bpm={projectState.meta.bpm} onSeekToBar={(bar) => { setCurrentBar(bar); setCurrentStep((bar - 1) * 16); }} />
       <SpatialAudio3DPannerModal isOpen={isSpatialAudioOpen} onClose={() => setIsSpatialAudioOpen(false)} mixerTracks={projectState.mixerTracks} />
       <MpeExpressionModal isOpen={isMpeExpressionOpen} onClose={() => setIsMpeExpressionOpen(false)} />
-      <StemSplitterAiModal isOpen={isStemSplitterOpen} onClose={() => setIsStemSplitterOpen(false)} onImportStemsToTracks={(stems) => { const newTracks = stems.map((s, idx) => ({ id: projectState.playlistTracks.length + idx + 1, name: s.name, color: s.type === 'vocals' ? '#ff6e00' : s.type === 'drums' ? '#00ff88' : s.type === 'bass' ? '#00e5ff' : '#a855f7', volume: 0.9, pan: 0, mute: false, solo: false, height: 'normal' as const })); const newClips = stems.map((s, idx) => ({ id: `stem-clip-${Date.now()}-${idx}`, trackIndex: projectState.playlistTracks.length + idx, startBar: 0, lengthBars: 8, type: 'audio' as const, audioBufferId: `stem-${s.type}`, audioName: s.name, color: s.type === 'vocals' ? '#ff6e00' : s.type === 'drums' ? '#00ff88' : s.type === 'bass' ? '#00e5ff' : '#a855f7', name: s.name })); setProjectState(prev => ({ ...prev, playlistTracks: [...prev.playlistTracks, ...newTracks], playlistClips: [...prev.playlistClips, ...newClips] })); }} />
+      <StemSplitterAiModal isOpen={isStemSplitterOpen} onClose={() => setIsStemSplitterOpen(false)} onImportStemsToTracks={(stems) => { const base = projectStateRef.current; const newTracks = stems.map((s, idx) => ({ id: base.playlistTracks.length + idx + 1, name: s.name, color: s.type === 'vocals' ? '#ff6e00' : s.type === 'drums' ? '#00ff88' : s.type === 'bass' ? '#00e5ff' : '#a855f7', volume: 0.9, pan: 0, mute: false, solo: false, height: 'normal' as const })); const newClips = stems.map((s, idx) => ({ id: `stem-clip-${Date.now()}-${idx}`, trackIndex: base.playlistTracks.length + idx, startBar: 0, lengthBars: 8, type: 'audio' as const, audioBufferId: `stem-${s.type}`, audioName: s.name, color: s.type === 'vocals' ? '#ff6e00' : s.type === 'drums' ? '#00ff88' : s.type === 'bass' ? '#00e5ff' : '#a855f7', name: s.name })); const nextState = { ...base, playlistTracks: [...base.playlistTracks, ...newTracks], playlistClips: [...base.playlistClips, ...newClips] }; updatePlaylistProjectState(nextState); commitPlaylistHistory(nextState, 'Import stems to playlist'); }} />
       <MasterMacroRackModal isOpen={isMasterMacrosOpen} onClose={() => setIsMasterMacrosOpen(false)} mixerTracks={projectState.mixerTracks} channels={projectState.channels} macroKnobs={projectState.macroKnobs} onUpdateMacros={(macros) => setProjectState(prev => ({ ...prev, macroKnobs: macros }))} />
       <ProjectBundleZipModal isOpen={isProjectZipOpen} onClose={() => setIsProjectZipOpen(false)} projectState={projectState} onLoadProjectState={handleLoadProjectState} />
       <OrientationLockModal />
