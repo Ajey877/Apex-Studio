@@ -27,6 +27,7 @@ import { appendChannelWithAllocatedMixerTrackId } from './state/mixerTrackIdenti
 import { deleteChannelFromProjectState } from './state/projectState';
 import { persistProjectState, restorePersistedProjectState } from './state/projectPersistence';
 import { createRecordingPlaylistClip, getRecordingAudioBufferId, validateRecordingTargetTrack } from './audio/recordingPipeline';
+import { applyPlaylistDocument, createPlaylistDocument, createPlaylistHistory, type PlaylistHistory } from './state/playlistHistory';
 
 // Component Suite
 import { TransportBar } from './components/TransportBar';
@@ -107,6 +108,12 @@ export function App() {
   const [metronome, setMetronome] = useState(false);
   const [selectedChannelId, setSelectedChannelId] = useState<string>(DEFAULT_PROJECT.channels[0]?.id || 'ch-1');
   const [selectedTrackId, setSelectedTrackId] = useState<number>(0); // 0 = Master
+
+  // Phase 8B playlist history is intentionally scoped to playlist state only.
+  const playlistHistoryRef = useRef<PlaylistHistory>(createPlaylistHistory(DEFAULT_PROJECT));
+  const playlistInteractionActiveRef = useRef(false);
+  const projectStateRef = useRef<ProjectState>(DEFAULT_PROJECT);
+  const [playlistHistoryVersion, setPlaylistHistoryVersion] = useState(0);
 
   // --- Studio Browser / Sidebar State ---
   const [isSidebarOpen, setIsSidebarOpen] = useState(() => {
@@ -232,6 +239,8 @@ export function App() {
         const restored = await restorePersistedProjectState(audioEngine, DEFAULT_PROJECT);
         if (!cancelled && restored.restored) {
           setProjectState(restored.state);
+          projectStateRef.current = restored.state;
+          resetPlaylistHistory(restored.state);
           setSelectedChannelId(restored.state.selectedChannelId || DEFAULT_PROJECT.channels[0]?.id || 'ch-1');
           setSelectedTrackId(restored.state.selectedMixerTrackId ?? 0);
           if (restored.missingAudioIds.length > 0) {
@@ -336,6 +345,67 @@ export function App() {
     }
   };
 
+  // Keep a synchronous project ref for playlist pointer interactions.
+  useEffect(() => {
+    projectStateRef.current = projectState;
+  }, [projectState]);
+
+  const resetPlaylistHistory = useCallback((state: ProjectState) => {
+    const nextHistory = createPlaylistHistory(state);
+    playlistHistoryRef.current = nextHistory;
+    playlistInteractionActiveRef.current = false;
+    setPlaylistHistoryVersion(version => version + 1);
+  }, []);
+
+  const commitPlaylistHistory = useCallback((state: ProjectState, label: string) => {
+    const nextHistory = playlistHistoryRef.current.commit(state, label);
+    if (nextHistory !== playlistHistoryRef.current) {
+      playlistHistoryRef.current = nextHistory;
+      setPlaylistHistoryVersion(version => version + 1);
+    }
+  }, []);
+
+  const updatePlaylistProjectState = useCallback((state: ProjectState) => {
+    projectStateRef.current = state;
+    setProjectState(state);
+  }, []);
+
+  const handlePlaylistUndo = useCallback(() => {
+    if (playlistInteractionActiveRef.current) return;
+    const result = playlistHistoryRef.current.undo(projectStateRef.current);
+    if (result.history === playlistHistoryRef.current) return;
+    playlistHistoryRef.current = result.history;
+    projectStateRef.current = result.state;
+    setProjectState(result.state);
+    setPlaylistHistoryVersion(version => version + 1);
+  }, []);
+
+  const handlePlaylistRedo = useCallback(() => {
+    if (playlistInteractionActiveRef.current) return;
+    const result = playlistHistoryRef.current.redo(projectStateRef.current);
+    if (result.history === playlistHistoryRef.current) return;
+    playlistHistoryRef.current = result.history;
+    projectStateRef.current = result.state;
+    setProjectState(result.state);
+    setPlaylistHistoryVersion(version => version + 1);
+  }, []);
+
+  const handlePlaylistInteractionStart = useCallback(() => {
+    playlistInteractionActiveRef.current = true;
+  }, []);
+
+  const handlePlaylistInteractionEnd = useCallback(() => {
+    if (!playlistInteractionActiveRef.current) return;
+    playlistInteractionActiveRef.current = false;
+    commitPlaylistHistory(projectStateRef.current, 'Playlist interaction');
+  }, [commitPlaylistHistory]);
+
+  const handleLoadProjectState = useCallback((state: ProjectState) => {
+    projectStateRef.current = state;
+    setProjectState(state);
+    resetPlaylistHistory(state);
+  }, [resetPlaylistHistory]);
+
   // --- Project State Handlers ---
   const handleUpdateMeta = (updates: Partial<ProjectMetadata>) => {
     setProjectState(prev => ({
@@ -408,15 +478,29 @@ export function App() {
   };
 
   const handleUpdateTracks = (tracks: PlaylistTrack[]) => {
-    setProjectState(prev => ({ ...prev, playlistTracks: tracks }));
+    const nextState = { ...projectStateRef.current, playlistTracks: tracks };
+    updatePlaylistProjectState(nextState);
+    if (!playlistInteractionActiveRef.current) {
+      commitPlaylistHistory(nextState, 'Track change');
+    }
   };
 
   const handleUpdateClips = (clips: PlaylistClip[]) => {
-    setProjectState(prev => ({ ...prev, playlistClips: clips }));
+    const nextState = { ...projectStateRef.current, playlistClips: clips };
+    updatePlaylistProjectState(nextState);
+    if (!playlistInteractionActiveRef.current) {
+      commitPlaylistHistory(nextState, 'Clip change');
+    }
+  };
+
+  const handleUpdateMarkers = (markers: ProjectState['markers']) => {
+    const nextState = { ...projectStateRef.current, markers };
+    updatePlaylistProjectState(nextState);
+    commitPlaylistHistory(nextState, 'Marker change');
   };
 
   const handleAddPlaylistTrack = () => {
-    const nextId = projectState.playlistTracks.length + 1;
+    const nextId = projectStateRef.current.playlistTracks.length + 1;
     const newTrack: PlaylistTrack = {
       id: nextId,
       name: `Track ${nextId}`,
@@ -426,10 +510,12 @@ export function App() {
       mute: false,
       solo: false
     };
-    setProjectState(prev => ({
-      ...prev,
-      playlistTracks: [...prev.playlistTracks, newTrack]
-    }));
+    const nextState = {
+      ...projectStateRef.current,
+      playlistTracks: [...projectStateRef.current.playlistTracks, newTrack]
+    };
+    updatePlaylistProjectState(nextState);
+    commitPlaylistHistory(nextState, 'Add playlist track');
   };
 
   const handleUpdateMixerTrack = (trackId: number, updates: Partial<MixerTrack>) => {
@@ -773,7 +859,7 @@ export function App() {
                 {expandedFolders.presets && (
                   <div className="space-y-0.5 pl-3 border-l border-[#222225] mt-1">
                     {PRESET_PROJECTS.map((p, i) => (
-                      <div key={i} onClick={() => setProjectState(p.state)} className="flex items-center justify-between px-2 py-1 rounded hover:bg-[#222225] text-[11px] text-zinc-300 hover:text-white cursor-pointer group"><span className="truncate">{p.name}</span><span className="text-[9px] text-[#ff6e00] font-mono">{p.bpm} BPM</span></div>
+                      <div key={i} onClick={() => handleLoadProjectState(p.state)} className="flex items-center justify-between px-2 py-1 rounded hover:bg-[#222225] text-[11px] text-zinc-300 hover:text-white cursor-pointer group"><span className="truncate">{p.name}</span><span className="text-[9px] text-[#ff6e00] font-mono">{p.bpm} BPM</span></div>
                     ))}
                   </div>
                 )}
@@ -832,7 +918,13 @@ export function App() {
               onUpdateTracks={handleUpdateTracks}
               onUpdateClips={handleUpdateClips}
               onAddTrack={handleAddPlaylistTrack}
-              onUpdateMarkers={(markers) => setProjectState(prev => ({ ...prev, markers }))}
+              onUpdateMarkers={handleUpdateMarkers}
+              onPlaylistInteractionStart={handlePlaylistInteractionStart}
+              onPlaylistInteractionEnd={handlePlaylistInteractionEnd}
+              canUndo={playlistHistoryVersion >= 0 && playlistHistoryRef.current.canUndo}
+              canRedo={playlistHistoryVersion >= 0 && playlistHistoryRef.current.canRedo}
+              onUndo={handlePlaylistUndo}
+              onRedo={handlePlaylistRedo}
               onSeekToBar={(bar) => setCurrentBar(bar)}
               currentBar={currentBar}
               isPlaying={isPlaying}
@@ -893,7 +985,7 @@ export function App() {
       </footer>
 
       <ExportModal isOpen={isExportOpen} onClose={() => setIsExportOpen(false)} channels={projectState.channels} clips={projectState.playlistClips} meta={projectState.meta} />
-      <ProjectManagerModal isOpen={isProjectManagerOpen} onClose={() => setIsProjectManagerOpen(false)} currentState={projectState} onLoadProject={(st) => setProjectState(st)} onUpdateMeta={handleUpdateMeta} />
+      <ProjectManagerModal isOpen={isProjectManagerOpen} onClose={() => setIsProjectManagerOpen(false)} currentState={projectState} onLoadProject={handleLoadProjectState} onUpdateMeta={handleUpdateMeta} />
       <CollaborationModal isOpen={isCollabOpen} onClose={() => setIsCollabOpen(false)} comments={comments} collaborators={collaborators} onAddComment={(text, bar) => { const newC: CollabComment = { id: `c-${Date.now()}`, author: 'Alex (You)', avatarColor: '#ff6e00', timestamp: Date.now(), barPosition: bar, text, resolved: false }; setComments(prev => [newC, ...prev]); }} onToggleResolveComment={(id) => setComments(prev => prev.map(c => c.id === id ? { ...c, resolved: !c.resolved } : c))} isEncrypted={projectState.meta.isEncrypted} onToggleEncryption={() => handleUpdateMeta({ isEncrypted: !projectState.meta.isEncrypted })} />
       <AnalyticsModal isOpen={isAnalyticsOpen} onClose={() => setIsAnalyticsOpen(false)} meta={projectState.meta} channels={projectState.channels} clips={projectState.playlistClips} />
       <SubscriptionModal isOpen={isSubscriptionOpen} onClose={() => setIsSubscriptionOpen(false)} isProUser={isProUser} onTogglePro={() => setIsProUser(!isProUser)} />
@@ -924,7 +1016,7 @@ export function App() {
       <MpeExpressionModal isOpen={isMpeExpressionOpen} onClose={() => setIsMpeExpressionOpen(false)} />
       <StemSplitterAiModal isOpen={isStemSplitterOpen} onClose={() => setIsStemSplitterOpen(false)} onImportStemsToTracks={(stems) => { const newTracks = stems.map((s, idx) => ({ id: projectState.playlistTracks.length + idx + 1, name: s.name, color: s.type === 'vocals' ? '#ff6e00' : s.type === 'drums' ? '#00ff88' : s.type === 'bass' ? '#00e5ff' : '#a855f7', volume: 0.9, pan: 0, mute: false, solo: false, height: 'normal' as const })); const newClips = stems.map((s, idx) => ({ id: `stem-clip-${Date.now()}-${idx}`, trackIndex: projectState.playlistTracks.length + idx, startBar: 0, lengthBars: 8, type: 'audio' as const, audioBufferId: `stem-${s.type}`, audioName: s.name, color: s.type === 'vocals' ? '#ff6e00' : s.type === 'drums' ? '#00ff88' : s.type === 'bass' ? '#00e5ff' : '#a855f7', name: s.name })); setProjectState(prev => ({ ...prev, playlistTracks: [...prev.playlistTracks, ...newTracks], playlistClips: [...prev.playlistClips, ...newClips] })); }} />
       <MasterMacroRackModal isOpen={isMasterMacrosOpen} onClose={() => setIsMasterMacrosOpen(false)} mixerTracks={projectState.mixerTracks} channels={projectState.channels} macroKnobs={projectState.macroKnobs} onUpdateMacros={(macros) => setProjectState(prev => ({ ...prev, macroKnobs: macros }))} />
-      <ProjectBundleZipModal isOpen={isProjectZipOpen} onClose={() => setIsProjectZipOpen(false)} projectState={projectState} onLoadProjectState={(loadedState) => setProjectState(loadedState)} />
+      <ProjectBundleZipModal isOpen={isProjectZipOpen} onClose={() => setIsProjectZipOpen(false)} projectState={projectState} onLoadProjectState={handleLoadProjectState} />
       <OrientationLockModal />
     </div>
   );

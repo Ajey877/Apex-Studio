@@ -43,6 +43,12 @@ interface PlaylistArrangerProps {
   onUpdateTracks: (tracks: PlaylistTrack[]) => void;
   onUpdateClips: (clips: PlaylistClip[]) => void;
   onUpdateMarkers?: (markers: ArrangementMarker[]) => void;
+  onPlaylistInteractionStart?: (kind: Interaction['kind']) => void;
+  onPlaylistInteractionEnd?: () => void;
+  canUndo?: boolean;
+  canRedo?: boolean;
+  onUndo?: () => void;
+  onRedo?: () => void;
   onAddTrack: () => void;
   onSeekToBar?: (bar: number) => void;
   currentBar: number;
@@ -103,6 +109,12 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
   onUpdateTracks,
   onUpdateClips,
   onUpdateMarkers,
+  onPlaylistInteractionStart,
+  onPlaylistInteractionEnd,
+  canUndo = false,
+  canRedo = false,
+  onUndo,
+  onRedo,
   onAddTrack,
   onSeekToBar,
   currentBar,
@@ -263,6 +275,7 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
     event.preventDefault();
     event.stopPropagation();
     didMoveRef.current = false;
+    onPlaylistInteractionStart?.(next.kind);
     event.currentTarget.setPointerCapture(event.pointerId);
     setSelectedClipId(next.clip.id);
     setInteraction(next);
@@ -273,6 +286,7 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
       event.currentTarget.releasePointerCapture(event.pointerId);
     }
     setInteraction(null);
+    onPlaylistInteractionEnd?.();
   };
 
   const deleteClip = (clipId: string) => {
@@ -433,6 +447,26 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
           <div className="flex items-center gap-1.5 text-white font-bold text-xs uppercase tracking-wider">
             <Layers className="w-3.5 h-3.5 text-[#ff6e00]" />
             <span className="hidden sm:inline">PLAYLIST SONG ARRANGER</span>
+          </div>
+
+          {/* Playlist History */}
+          <div className="flex items-center gap-0.5 bg-[#121214] border border-[#333336] p-0.5 rounded text-xs">
+            <button
+              onClick={onUndo}
+              disabled={!canUndo}
+              className="px-2 py-0.5 rounded-sm font-semibold text-[10px] text-white hover:bg-[#333336] disabled:opacity-30 disabled:cursor-not-allowed"
+              title="Undo playlist edit"
+            >
+              Undo
+            </button>
+            <button
+              onClick={onRedo}
+              disabled={!canRedo}
+              className="px-2 py-0.5 rounded-sm font-semibold text-[10px] text-white hover:bg-[#333336] disabled:opacity-30 disabled:cursor-not-allowed"
+              title="Redo playlist edit"
+            >
+              Redo
+            </button>
           </div>
 
           {/* Clip Type Picker */}
