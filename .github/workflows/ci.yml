@@ -1,0 +1,38 @@
+name: Apex Studio CI
+
+on:
+  push:
+    branches: [main, phase-0-foundation-ui, phase-5.5-hardening, fix/phase-4-playlist-editing-core]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: npm install --legacy-peer-deps
+
+      - name: Desktop security configuration
+        run: npm run verify:desktop
+
+      - name: TypeScript check
+        run: npm run lint
+
+      - name: Playlist editing core tests
+        run: npx tsx --test src/components/playlistClipOperations.test.ts
+
+      - name: Production build
+        run: npm run build
