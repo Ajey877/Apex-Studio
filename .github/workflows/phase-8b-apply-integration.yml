@@ -1,0 +1,115 @@
+name: Phase 8B apply playlist history
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - phase-8b-playlist-history
+permissions:
+  contents: write
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: phase-8b-playlist-history
+          fetch-depth: 1
+      - name: Apply integration
+        shell: python
+        run: |
+          from pathlib import Path
+
+          app = Path('src/App.tsx')
+          text = app.read_text()
+
+          old = "import { createRecordingPlaylistClip, getRecordingAudioBufferId, validateRecordingTargetTrack } from './audio/recordingPipeline';"
+          new = old + "\nimport { applyPlaylistDocument, createPlaylistDocument, createPlaylistHistory, type PlaylistHistory } from './state/playlistHistory';"
+          assert text.count(old) == 1, 'App import anchor mismatch'
+          text = text.replace(old, new)
+
+          old = "  const [selectedTrackId, setSelectedTrackId] = useState<number>(0); // 0 = Master\n"
+          new = old + '''\n  // Phase 8B playlist history is intentionally scoped to playlist state only.\n  const playlistHistoryRef = useRef<PlaylistHistory>(createPlaylistHistory(DEFAULT_PROJECT));\n  const playlistInteractionActiveRef = useRef(false);\n  const projectStateRef = useRef<ProjectState>(DEFAULT_PROJECT);\n  const [playlistHistoryVersion, setPlaylistHistoryVersion] = useState(0);\n'''
+          assert text.count(old) == 1, 'App state anchor mismatch'
+          text = text.replace(old, new)
+
+          old = "  // --- Project State Handlers ---\n"
+          new = '''  // Keep a synchronous project ref for playlist pointer interactions.\n  useEffect(() => {\n    projectStateRef.current = projectState;\n  }, [projectState]);\n\n  const resetPlaylistHistory = useCallback((state: ProjectState) => {\n    const nextHistory = createPlaylistHistory(state);\n    playlistHistoryRef.current = nextHistory;\n    playlistInteractionActiveRef.current = false;\n    setPlaylistHistoryVersion(version => version + 1);\n  }, []);\n\n  const commitPlaylistHistory = useCallback((state: ProjectState, label: string) => {\n    const nextHistory = playlistHistoryRef.current.commit(state, label);\n    if (nextHistory !== playlistHistoryRef.current) {\n      playlistHistoryRef.current = nextHistory;\n      setPlaylistHistoryVersion(version => version + 1);\n    }\n  }, []);\n\n  const updatePlaylistProjectState = useCallback((state: ProjectState) => {\n    projectStateRef.current = state;\n    setProjectState(state);\n  }, []);\n\n  const handlePlaylistUndo = useCallback(() => {\n    if (playlistInteractionActiveRef.current) return;\n    const result = playlistHistoryRef.current.undo(projectStateRef.current);\n    if (result.history === playlistHistoryRef.current) return;\n    playlistHistoryRef.current = result.history;\n    projectStateRef.current = result.state;\n    setProjectState(result.state);\n    setPlaylistHistoryVersion(version => version + 1);\n  }, []);\n\n  const handlePlaylistRedo = useCallback(() => {\n    if (playlistInteractionActiveRef.current) return;\n    const result = playlistHistoryRef.current.redo(projectStateRef.current);\n    if (result.history === playlistHistoryRef.current) return;\n    playlistHistoryRef.current = result.history;\n    projectStateRef.current = result.state;\n    setProjectState(result.state);\n    setPlaylistHistoryVersion(version => version + 1);\n  }, []);\n\n  const handlePlaylistInteractionStart = useCallback(() => {\n    playlistInteractionActiveRef.current = true;\n  }, []);\n\n  const handlePlaylistInteractionEnd = useCallback(() => {\n    if (!playlistInteractionActiveRef.current) return;\n    playlistInteractionActiveRef.current = false;\n    commitPlaylistHistory(projectStateRef.current, 'Playlist interaction');\n  }, [commitPlaylistHistory]);\n\n  const handleLoadProjectState = useCallback((state: ProjectState) => {\n    projectStateRef.current = state;\n    setProjectState(state);\n    resetPlaylistHistory(state);\n  }, [resetPlaylistHistory]);\n\n  // --- Project State Handlers ---\n'''
+          assert text.count(old) == 1, 'App project-handler anchor mismatch'
+          text = text.replace(old, new)
+
+          old = '''  const handleUpdateTracks = (tracks: PlaylistTrack[]) => {\n    setProjectState(prev => ({ ...prev, playlistTracks: tracks }));\n  };\n\n  const handleUpdateClips = (clips: PlaylistClip[]) => {\n    setProjectState(prev => ({ ...prev, playlistClips: clips }));\n  };\n\n  const handleAddPlaylistTrack = () => {\n    const nextId = projectState.playlistTracks.length + 1;\n    const newTrack: PlaylistTrack = {\n      id: nextId,\n      name: `Track ${nextId}`,\n      color: '#ff6e00',\n      volume: 0.9,\n      pan: 0,\n      mute: false,\n      solo: false\n    };\n    setProjectState(prev => ({\n      ...prev,\n      playlistTracks: [...prev.playlistTracks, newTrack]\n    }));\n  };\n'''
+          new = '''  const handleUpdateTracks = (tracks: PlaylistTrack[]) => {\n    const nextState = { ...projectStateRef.current, playlistTracks: tracks };\n    updatePlaylistProjectState(nextState);\n    if (!playlistInteractionActiveRef.current) {\n      commitPlaylistHistory(nextState, 'Track change');\n    }\n  };\n\n  const handleUpdateClips = (clips: PlaylistClip[]) => {\n    const nextState = { ...projectStateRef.current, playlistClips: clips };\n    updatePlaylistProjectState(nextState);\n    if (!playlistInteractionActiveRef.current) {\n      commitPlaylistHistory(nextState, 'Clip change');\n    }\n  };\n\n  const handleUpdateMarkers = (markers: ProjectState['markers']) => {\n    const nextState = { ...projectStateRef.current, markers };\n    updatePlaylistProjectState(nextState);\n    commitPlaylistHistory(nextState, 'Marker change');\n  };\n\n  const handleAddPlaylistTrack = () => {\n    const nextId = projectStateRef.current.playlistTracks.length + 1;\n    const newTrack: PlaylistTrack = {\n      id: nextId,\n      name: `Track ${nextId}`,\n      color: '#ff6e00',\n      volume: 0.9,\n      pan: 0,\n      mute: false,\n      solo: false\n    };\n    const nextState = {\n      ...projectStateRef.current,\n      playlistTracks: [...projectStateRef.current.playlistTracks, newTrack]\n    };\n    updatePlaylistProjectState(nextState);\n    commitPlaylistHistory(nextState, 'Add playlist track');\n  };\n'''
+          assert text.count(old) == 1, 'App playlist handler block mismatch'
+          text = text.replace(old, new)
+
+          old = "          setProjectState(restored.state);\n          setSelectedChannelId(restored.state.selectedChannelId || DEFAULT_PROJECT.channels[0]?.id || 'ch-1');"
+          new = "          setProjectState(restored.state);\n          projectStateRef.current = restored.state;\n          resetPlaylistHistory(restored.state);\n          setSelectedChannelId(restored.state.selectedChannelId || DEFAULT_PROJECT.channels[0]?.id || 'ch-1');"
+          assert text.count(old) == 1, 'App hydration anchor mismatch'
+          text = text.replace(old, new)
+
+          old = "                    {PRESET_PROJECTS.map((p, i) => (\n                      <div key={i} onClick={() => setProjectState(p.state)}"
+          new = "                    {PRESET_PROJECTS.map((p, i) => (\n                      <div key={i} onClick={() => handleLoadProjectState(p.state)}"
+          assert text.count(old) == 1, 'App preset load anchor mismatch'
+          text = text.replace(old, new)
+
+          old = "              markers={projectState.markers || []}\n              onUpdateTracks={handleUpdateTracks}\n              onUpdateClips={handleUpdateClips}\n              onAddTrack={handleAddPlaylistTrack}\n              onUpdateMarkers={(markers) => setProjectState(prev => ({ ...prev, markers }))}\n              onSeekToBar={(bar) => setCurrentBar(bar)}"
+          new = "              markers={projectState.markers || []}\n              onUpdateTracks={handleUpdateTracks}\n              onUpdateClips={handleUpdateClips}\n              onAddTrack={handleAddPlaylistTrack}\n              onUpdateMarkers={handleUpdateMarkers}\n              onPlaylistInteractionStart={handlePlaylistInteractionStart}\n              onPlaylistInteractionEnd={handlePlaylistInteractionEnd}\n              canUndo={playlistHistoryVersion >= 0 && playlistHistoryRef.current.canUndo}\n              canRedo={playlistHistoryVersion >= 0 && playlistHistoryRef.current.canRedo}\n              onUndo={handlePlaylistUndo}\n              onRedo={handlePlaylistRedo}\n              onSeekToBar={(bar) => setCurrentBar(bar)}"
+          assert text.count(old) == 1, 'App PlaylistArranger props anchor mismatch'
+          text = text.replace(old, new)
+
+          old = "      <ProjectManagerModal isOpen={isProjectManagerOpen} onClose={() => setIsProjectManagerOpen(false)} currentState={projectState} onLoadProject={(st) => setProjectState(st)} onUpdateMeta={handleUpdateMeta} />"
+          new = "      <ProjectManagerModal isOpen={isProjectManagerOpen} onClose={() => setIsProjectManagerOpen(false)} currentState={projectState} onLoadProject={handleLoadProjectState} onUpdateMeta={handleUpdateMeta} />"
+          assert text.count(old) == 1, 'App project manager anchor mismatch'
+          text = text.replace(old, new)
+
+          old = "      <ProjectBundleZipModal isOpen={isProjectZipOpen} onClose={() => setIsProjectZipOpen(false)} projectState={projectState} onLoadProjectState={(loadedState) => setProjectState(loadedState)} />"
+          new = "      <ProjectBundleZipModal isOpen={isProjectZipOpen} onClose={() => setIsProjectZipOpen(false)} projectState={projectState} onLoadProjectState={handleLoadProjectState} />"
+          assert text.count(old) == 1, 'App project bundle anchor mismatch'
+          text = text.replace(old, new)
+
+          app.write_text(text)
+
+          pa = Path('src/components/PlaylistArranger.tsx')
+          text = pa.read_text()
+
+          old = "  onUpdateMarkers?: (markers: ArrangementMarker[]) => void;\n  onAddTrack: () => void;"
+          new = "  onUpdateMarkers?: (markers: ArrangementMarker[]) => void;\n  onPlaylistInteractionStart?: (kind: Interaction['kind']) => void;\n  onPlaylistInteractionEnd?: () => void;\n  canUndo?: boolean;\n  canRedo?: boolean;\n  onUndo?: () => void;\n  onRedo?: () => void;\n  onAddTrack: () => void;"
+          assert text.count(old) == 1, 'Playlist props anchor mismatch'
+          text = text.replace(old, new)
+
+          old = "  onUpdateMarkers,\n  onAddTrack,"
+          new = "  onUpdateMarkers,\n  onPlaylistInteractionStart,\n  onPlaylistInteractionEnd,\n  canUndo = false,\n  canRedo = false,\n  onUndo,\n  onRedo,\n  onAddTrack,"
+          assert text.count(old) == 1, 'Playlist destructuring anchor mismatch'
+          text = text.replace(old, new)
+
+          old = "    didMoveRef.current = false;\n    event.currentTarget.setPointerCapture(event.pointerId);"
+          new = "    didMoveRef.current = false;\n    onPlaylistInteractionStart?.(next.kind);\n    event.currentTarget.setPointerCapture(event.pointerId);"
+          assert text.count(old) == 1, 'Playlist begin anchor mismatch'
+          text = text.replace(old, new)
+
+          old = "    setInteraction(null);\n  };"
+          new = "    setInteraction(null);\n    onPlaylistInteractionEnd?.();\n  };"
+          assert text.count(old) == 1, 'Playlist end anchor mismatch'
+          text = text.replace(old, new)
+
+          old = "          {/* Clip Type Picker */}"
+          new = '''          {/* Playlist History */}\n          <div className="flex items-center gap-0.5 bg-[#121214] border border-[#333336] p-0.5 rounded text-xs">\n            <button\n              onClick={onUndo}\n              disabled={!canUndo}\n              className="px-2 py-0.5 rounded-sm font-semibold text-[10px] text-white hover:bg-[#333336] disabled:opacity-30 disabled:cursor-not-allowed"\n              title="Undo playlist edit"\n            >\n              Undo\n            </button>\n            <button\n              onClick={onRedo}\n              disabled={!canRedo}\n              className="px-2 py-0.5 rounded-sm font-semibold text-[10px] text-white hover:bg-[#333336] disabled:opacity-30 disabled:cursor-not-allowed"\n              title="Redo playlist edit"\n            >\n              Redo\n            </button>\n          </div>\n\n          {/* Clip Type Picker */}'''
+          assert text.count(old) == 1, 'Playlist toolbar anchor mismatch'
+          text = text.replace(old, new)
+
+          pa.write_text(text)
+          print('Playlist history integration patch applied.')
+      - name: Verify patch
+        run: |
+          git diff --check
+          test -f src/state/playlistHistory.ts
+          grep -q "onPlaylistInteractionStart" src/components/PlaylistArranger.tsx
+          grep -q "handlePlaylistUndo" src/App.tsx
+      - name: Commit integration and remove runner
+        run: |
+          rm -f .github/workflows/phase-8b-apply-integration.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/App.tsx src/components/PlaylistArranger.tsx .github/workflows/phase-8b-apply-integration.yml
+          git commit -m "Phase 8B: integrate playlist undo redo"
+          git push origin HEAD:phase-8b-playlist-history
