@@ -1,15 +1,15 @@
 name: Finalize Phase 8B
 
 on:
-  push:
-    branches: [phase-8b-playlist-history]
+  pull_request:
+    types: [synchronize]
 
 permissions:
   contents: write
 
 jobs:
   finalize:
-    if: ${{ !contains(github.event.head_commit.message, 'Phase 8B: integrate playlist undo and redo') }}
+    if: ${{ !contains(github.event.pull_request.head.sha, 'SKIP') }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
