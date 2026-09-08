@@ -1,0 +1,71 @@
+name: Phase 8C UI apply
+
+on:
+  pull_request:
+    types: [synchronize, opened, reopened]
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.event.pull_request.number == 66
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout PR branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+          repository: ${{ github.event.pull_request.head.repo.full_name }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Apply automation point drag support
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('src/components/PlaylistArranger.tsx')
+          s = p.read_text()
+
+          old = """  movePlaylistClip,\n  resizePlaylistClipLeft,\n  resizePlaylistClipRight,\n  splitPlaylistClip,\n"""
+          new = """  movePlaylistClip,\n  resizePlaylistClipLeft,\n  resizePlaylistClipRight,\n  splitPlaylistClip,\n  updatePlaylistAutomationPoint,\n"""
+          if old not in s:
+              raise SystemExit('import anchor not found')
+          s = s.replace(old, new, 1)
+
+          old = """type Interaction =\n  | { kind: 'move'; clip: PlaylistClip; pointerId: number; originX: number; originY: number }\n  | { kind: 'resize-left'; clip: PlaylistClip; pointerId: number; originX: number }\n  | { kind: 'resize-right'; clip: PlaylistClip; pointerId: number; originX: number };\n"""
+          new = """type Interaction =\n  | { kind: 'move'; clip: PlaylistClip; pointerId: number; originX: number; originY: number }\n  | { kind: 'resize-left'; clip: PlaylistClip; pointerId: number; originX: number }\n  | { kind: 'resize-right'; clip: PlaylistClip; pointerId: number; originX: number }\n  | { kind: 'automation-point'; clip: PlaylistClip; pointerId: number; pointIndex: number; originX: number; originY: number; automationTop: number };\n"""
+          if old not in s:
+              raise SystemExit('interaction type anchor not found')
+          s = s.replace(old, new, 1)
+
+          old = """    if (Math.abs(clientX - interaction.originX) > 2 || (interaction.kind === 'move' && Math.abs(clientY - interaction.originY) > 2)) {\n      didMoveRef.current = true;\n    }\n\n    try {\n      if (interaction.kind === 'move') {\n"""
+          new = """    if (Math.abs(clientX - interaction.originX) > 2 || (interaction.kind !== 'resize-left' && interaction.kind !== 'resize-right' && Math.abs(clientY - interaction.originY) > 2)) {\n      didMoveRef.current = true;\n    }\n\n    try {\n      if (interaction.kind === 'automation-point') {\n        const nextY = 1 - (clientY - interaction.automationTop) / 20;\n        const updated = updatePlaylistAutomationPoint(clip, interaction.pointIndex, nextY);\n        onUpdateClips(clips.map(item => item.id === clip.id ? updated : item));\n      } else if (interaction.kind === 'move') {\n"""
+          if old not in s:
+              raise SystemExit('update interaction anchor not found')
+          s = s.replace(old, new, 1)
+
+          old = """  const beginInteraction = (event: React.PointerEvent, next: Interaction) => {\n"""
+          new = """  const beginAutomationPointInteraction = (event: React.PointerEvent<SVGCircleElement>, clip: PlaylistClip, pointIndex: number) => {\n    if (activeTool !== 'place') return;\n    const svg = event.currentTarget.ownerSVGElement;\n    if (!svg || clip.type !== 'automation' || !clip.automationPoints?.[pointIndex]) return;\n    event.preventDefault();\n    event.stopPropagation();\n    const rect = svg.getBoundingClientRect();\n    didMoveRef.current = false;\n    onPlaylistInteractionStart?.('automation-point');\n    event.currentTarget.setPointerCapture(event.pointerId);\n    setSelectedClipId(clip.id);\n    setAutomationEditorClipId(clip.id);\n    setInteraction({\n      kind: 'automation-point',\n      clip,\n      pointerId: event.pointerId,\n      pointIndex,\n      originX: event.clientX,\n      originY: event.clientY,\n      automationTop: rect.top\n    });\n  };\n\n  const beginInteraction = (event: React.PointerEvent, next: Interaction) => {\n"""
+          if old not in s:
+              raise SystemExit('begin interaction anchor not found')
+          s = s.replace(old, new, 1)
+
+          old = """                              {clip.automationPoints.map((p, pIdx) => (\n                              <circle\n                                key={pIdx}\n                                cx={p.x * (clip.lengthBars * 96 - 12)}\n                                cy={(1 - p.y) * 20}\n                                r=\"3\"\n                                fill=\"#ffffff\"\n                              />\n                            ))}\n"""
+          new = """                            {clip.automationPoints.map((p, pIdx) => (\n                              <circle\n                                key={pIdx}\n                                cx={p.x * (clip.lengthBars * 96 - 12)}\n                                cy={(1 - p.y) * 20}\n                                r=\"3\"\n                                fill=\"#ffffff\"\n                                className=\"cursor-ns-resize\"\n                                style={{ touchAction: 'none' }}\n                                onPointerDown={(e) => {\n                                  if (e.button !== 0) return;\n                                  beginAutomationPointInteraction(e, clip, pIdx);\n                                }}\n                                onPointerMove={(e) => {\n                                  if (interaction?.kind === 'automation-point' && e.pointerId === interaction.pointerId) {\n                                    updateInteraction(e.clientX, e.clientY);\n                                  }\n                                }}\n                                onPointerUp={(e) => {\n                                  if (interaction?.kind === 'automation-point' && e.pointerId === interaction.pointerId) {\n                                    endInteraction(e);\n                                  }\n                                }}\n                                onPointerCancel={(e) => {\n                                  if (interaction?.kind === 'automation-point' && e.pointerId === interaction.pointerId) {\n                                    endInteraction(e);\n                                  }\n                                }}\n                              />\n                            ))}\n"""
+          if old not in s:
+              raise SystemExit('automation circle anchor not found')
+          s = s.replace(old, new, 1)
+
+          p.write_text(s)
+          PY
+
+          if git diff --quiet -- src/components/PlaylistArranger.tsx; then
+            echo 'No changes were made; anchors may already be applied.'
+            exit 0
+          fi
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/components/PlaylistArranger.tsx
+          git commit -m 'Phase 8C: enable automation point drag editing'
+          git push origin HEAD:${{ github.event.pull_request.head.ref }}
