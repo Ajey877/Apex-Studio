@@ -91,9 +91,9 @@ test('offline timeline render drives the same live song scheduling entrypoint an
 
     assert.equal(rendered.sampleRate, 44100);
     assert.deepEqual(updatedTrackIds, [0, 1]);
-    assert.equal(triggerTimes.length, 16);
+    assert.equal(triggerTimes.length, 32);
     assert.equal(triggerTimes[0], 0);
-    assert.equal(triggerTimes[15], 1.875);
+    assert.equal(triggerTimes[31], 3.875);
     assert.equal(engine.bpm, 128);
     assert.equal(engine.ctx, originalCtx);
     assert.equal(engine.activePlayMode, 'pat');
