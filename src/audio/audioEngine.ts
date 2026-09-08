@@ -756,10 +756,11 @@ class AudioEngine {
     target: { type: string; targetId: string | number; paramName?: string },
     value: number, // 0 to 1
     channels: Channel[],
-    mixerTracks: MixerTrack[]
+    mixerTracks: MixerTrack[],
+    atTime?: number
   ) {
     if (!this.ctx) return;
-    const now = this.ctx.currentTime;
+    const now = atTime ?? this.ctx.currentTime;
 
     if (target.type === 'master_vol') {
       if (this.masterGain) {
@@ -2387,7 +2388,7 @@ class AudioEngine {
           if (currentTotalBar >= clip.startBar && currentTotalBar <= clip.startBar + clip.lengthBars) {
             const relX = (currentTotalBar - clip.startBar) / clip.lengthBars;
             const val = this.interpolateAutomationCurve(clip.automationPoints, relX);
-            this.applyAutomationValue(clip.automationTarget, val, this.activeChannels, []);
+            this.applyAutomationValue(clip.automationTarget, val, this.activeChannels, [], now);
           }
         }
       });
