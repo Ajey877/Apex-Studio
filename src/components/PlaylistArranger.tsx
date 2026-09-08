@@ -936,16 +936,19 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
                                   beginAutomationPointInteraction(e, clip, pIdx);
                                 }}
                                 onPointerMove={(e) => {
+                                    e.stopPropagation();
                                   if (interaction?.kind === 'automation-point' && e.pointerId === interaction.pointerId) {
                                     updateInteraction(e.clientX, e.clientY);
                                   }
                                 }}
                                 onPointerUp={(e) => {
+                                    e.stopPropagation();
                                   if (interaction?.kind === 'automation-point' && e.pointerId === interaction.pointerId) {
                                     endInteraction(e);
                                   }
                                 }}
                                 onPointerCancel={(e) => {
+                                    e.stopPropagation();
                                   if (interaction?.kind === 'automation-point' && e.pointerId === interaction.pointerId) {
                                     endInteraction(e);
                                   }
