@@ -79,3 +79,34 @@ test('reset starts a fresh playlist history for a loaded project', () => {
   assert.equal(history.canUndo, false);
   assert.equal(history.canRedo, false);
 });
+
+test('playlist history restores markers and audio references while preserving unrelated state', () => {
+  const initial = makeState();
+  const edited = structuredClone(initial);
+  edited.channels[0].volume = 0.37;
+  edited.markers = [{ id: 'marker-1', name: 'Drop', bar: 17, color: '#ff0055' }];
+  edited.playlistClips = [{
+    id: 'audio-1',
+    trackIndex: 0,
+    startBar: 4,
+    lengthBars: 2,
+    type: 'audio',
+    audioBufferId: 'recording-buffer-1',
+    audioName: 'Vocal Take',
+    color: '#00ff88',
+    name: 'Vocal Take'
+  }];
+
+  let history = createPlaylistHistory(initial);
+  history = history.commit(edited, 'Add audio clip and marker');
+
+  const undone = history.undo(edited);
+  assert.deepEqual(undone.state.markers, []);
+  assert.deepEqual(undone.state.playlistClips, []);
+  assert.equal(undone.state.channels[0].volume, 0.37);
+
+  const redone = undone.history.redo(undone.state);
+  assert.equal(redone.state.markers[0].name, 'Drop');
+  assert.equal(redone.state.playlistClips[0].audioBufferId, 'recording-buffer-1');
+  assert.equal(redone.state.channels[0].volume, 0.37);
+});
