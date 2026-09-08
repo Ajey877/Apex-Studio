@@ -1,12 +1,12 @@
 # Phase 9A — Runtime Failure Containment Acceptance
 
-- [x] TypeScript/lint validation passes on the validated Phase 9A head.
-- [x] Unit/regression tests pass on the validated Phase 9A head.
-- [x] Production build passes on the validated Phase 9A head.
-- [x] Audio validation passes on the validated Phase 9A head.
-- [x] Desktop validation passes on the validated Phase 9A head.
+- [ ] TypeScript/lint validation passes on the final Phase 9A head.
+- [ ] Unit/regression tests pass on the final Phase 9A head.
+- [ ] Production build passes on the final Phase 9A head.
+- [ ] Audio validation passes on the final Phase 9A head.
+- [ ] Desktop validation passes on the final Phase 9A head.
 - [x] Error boundary renders a recovery surface when a descendant throws during render/lifecycle.
 - [x] Reload action is available and does not mutate project persistence code.
 - [x] No unrelated feature behavior changes in the reviewed diff.
 
-> The validation items above were green on the previous Phase 9A validation head. Any subsequent code change requires the workflows to pass again before merge.
+> CI, audio, and desktop validation were green on an earlier Phase 9A head. The final head must pass the workflows again before merge.
