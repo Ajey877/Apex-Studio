@@ -32,6 +32,7 @@ import {
   resizePlaylistClipLeft,
   resizePlaylistClipRight,
   splitPlaylistClip,
+  updatePlaylistAutomationPoint,
 } from './playlistClipOperations';
 
 interface PlaylistArrangerProps {
@@ -62,7 +63,8 @@ const MIN_CLIP_LENGTH = DEFAULT_GRID_BARS;
 type Interaction =
   | { kind: 'move'; clip: PlaylistClip; pointerId: number; originX: number; originY: number }
   | { kind: 'resize-left'; clip: PlaylistClip; pointerId: number; originX: number }
-  | { kind: 'resize-right'; clip: PlaylistClip; pointerId: number; originX: number };
+  | { kind: 'resize-right'; clip: PlaylistClip; pointerId: number; originX: number }
+  | { kind: 'automation-point'; clip: PlaylistClip; pointerId: number; pointIndex: number; originX: number; originY: number; automationTop: number };
 
 const MARKER_PRESETS: { name: string; markers: { name: string; bar: number; color: string }[] }[] = [
   {
@@ -245,12 +247,16 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
     if (!interaction) return;
     const clip = interaction.clip;
 
-    if (Math.abs(clientX - interaction.originX) > 2 || (interaction.kind === 'move' && Math.abs(clientY - interaction.originY) > 2)) {
+    if (Math.abs(clientX - interaction.originX) > 2 || (interaction.kind !== 'resize-left' && interaction.kind !== 'resize-right' && Math.abs(clientY - interaction.originY) > 2)) {
       didMoveRef.current = true;
     }
 
     try {
-      if (interaction.kind === 'move') {
+      if (interaction.kind === 'automation-point') {
+        const nextY = 1 - (clientY - interaction.automationTop) / 20;
+        const updated = updatePlaylistAutomationPoint(clip, interaction.pointIndex, nextY);
+        onUpdateClips(clips.map(item => item.id === clip.id ? updated : item));
+      } else if (interaction.kind === 'move') {
         const requestedStart = clip.startBar + (clientX - interaction.originX) / BAR_WIDTH;
         const targetTrack = clip.trackIndex + Math.round((clientY - interaction.originY) / TRACK_HEIGHT);
         const moved = movePlaylistClip(clip, requestedStart, targetTrack, DEFAULT_GRID_BARS, bounds);
@@ -268,6 +274,29 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
       // Invalid coordinates are rejected by the operation layer; the UI remains unchanged.
       console.warn('Playlist interaction rejected by operation layer', error);
     }
+  };
+
+  const beginAutomationPointInteraction = (event: React.PointerEvent<SVGCircleElement>, clip: PlaylistClip, pointIndex: number) => {
+    if (activeTool !== 'place') return;
+    const svg = event.currentTarget.ownerSVGElement;
+    if (!svg || clip.type !== 'automation' || !clip.automationPoints?.[pointIndex]) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const rect = svg.getBoundingClientRect();
+    didMoveRef.current = false;
+    onPlaylistInteractionStart?.('automation-point');
+    event.currentTarget.setPointerCapture(event.pointerId);
+    setSelectedClipId(clip.id);
+    setAutomationEditorClipId(clip.id);
+    setInteraction({
+      kind: 'automation-point',
+      clip,
+      pointerId: event.pointerId,
+      pointIndex,
+      originX: event.clientX,
+      originY: event.clientY,
+      automationTop: rect.top
+    });
   };
 
   const beginInteraction = (event: React.PointerEvent, next: Interaction) => {
@@ -900,6 +929,30 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
                                 cy={(1 - p.y) * 20}
                                 r="3"
                                 fill="#ffffff"
+                                className="cursor-ns-resize"
+                                style={{ touchAction: 'none' }}
+                                onPointerDown={(e) => {
+                                  if (e.button !== 0) return;
+                                  beginAutomationPointInteraction(e, clip, pIdx);
+                                }}
+                                onPointerMove={(e) => {
+                                    e.stopPropagation();
+                                  if (interaction?.kind === 'automation-point' && e.pointerId === interaction.pointerId) {
+                                    updateInteraction(e.clientX, e.clientY);
+                                  }
+                                }}
+                                onPointerUp={(e) => {
+                                    e.stopPropagation();
+                                  if (interaction?.kind === 'automation-point' && e.pointerId === interaction.pointerId) {
+                                    endInteraction(e);
+                                  }
+                                }}
+                                onPointerCancel={(e) => {
+                                    e.stopPropagation();
+                                  if (interaction?.kind === 'automation-point' && e.pointerId === interaction.pointerId) {
+                                    endInteraction(e);
+                                  }
+                                }}
                               />
                             ))}
                           </svg>

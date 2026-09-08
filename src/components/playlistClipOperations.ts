@@ -173,6 +173,27 @@ export function duplicatePlaylistClip(
   return movePlaylistClip({ ...cloneClip(clip), id }, startBar, trackIndex, gridBars, bounds);
 }
 
+export function updatePlaylistAutomationPoint(
+  clip: PlaylistClip,
+  pointIndex: number,
+  newY: number
+): PlaylistClip {
+  if (clip.type !== 'automation' || !clip.automationPoints) {
+    throw new Error('Automation point updates require an automation clip with points');
+  }
+  if (!Number.isInteger(pointIndex) || pointIndex < 0 || pointIndex >= clip.automationPoints.length) {
+    throw new Error('Automation point index is out of range');
+  }
+  if (!finite(newY)) throw new Error('Automation point value must be finite');
+
+  const updated = cloneClip(clip);
+  updated.automationPoints![pointIndex] = {
+    ...updated.automationPoints![pointIndex],
+    y: Math.max(0, Math.min(1, newY))
+  };
+  return assertValidPlaylistClip(updated);
+}
+
 export function deletePlaylistClip(clips: PlaylistClip[], clipId: string): PlaylistClip[] {
   return clips.filter(clip => clip.id !== clipId);
 }

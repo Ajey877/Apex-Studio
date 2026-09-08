@@ -9,6 +9,7 @@ import {
   resizePlaylistClipRight,
   snapBarPosition,
   splitPlaylistClip,
+  updatePlaylistAutomationPoint,
   validatePlaylistClip
 } from './playlistClipOperations';
 
@@ -107,6 +108,34 @@ test('duplicatePlaylistClip creates an independent clip identity', () => {
   assert.equal(duplicate.startBar, 16);
   assert.equal(duplicate.trackIndex, 3);
   assert.equal(duplicate.lengthBars, 8);
+});
+
+test('updatePlaylistAutomationPoint clamps values and preserves other point data', () => {
+  const clip: PlaylistClip = {
+    ...baseClip,
+    id: 'automation-1',
+    type: 'automation',
+    automationPoints: [
+      { x: 0, y: 0.25, tension: 0.4 },
+      { x: 0.5, y: 0.75, tension: -0.2 }
+    ]
+  };
+
+  const updated = updatePlaylistAutomationPoint(clip, 1, 2);
+  assert.equal(updated.automationPoints?.[1].y, 1);
+  assert.equal(updated.automationPoints?.[1].tension, -0.2);
+  assert.equal(updated.automationPoints?.[0].y, 0.25);
+  assert.notStrictEqual(updated, clip);
+});
+
+test('updatePlaylistAutomationPoint rejects invalid clips and indexes', () => {
+  assert.throws(() => updatePlaylistAutomationPoint(baseClip, 0, 0.5), /automation clip/);
+  const clip: PlaylistClip = {
+    ...baseClip,
+    type: 'automation',
+    automationPoints: [{ x: 0, y: 0.5, tension: 0 }]
+  };
+  assert.throws(() => updatePlaylistAutomationPoint(clip, 2, 0.5), /out of range/);
 });
 
 test('deletePlaylistClip removes only the requested clip', () => {
