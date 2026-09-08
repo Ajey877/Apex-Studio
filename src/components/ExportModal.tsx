@@ -18,7 +18,7 @@ interface ExportModalProps {
 
 type ExportFormat = 'wav24' | 'wav16' | 'wav32' | 'midi' | 'stems';
 
-export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, channels, clips, meta }) => {
+export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, channels, clips, meta, mixerTracks }) => {
   const [format, setFormat] = useState<ExportFormat>('wav24');
   const [scope, setScope] = useState<ExportScope>('song');
   const [isRendering, setIsRendering] = useState(false);
