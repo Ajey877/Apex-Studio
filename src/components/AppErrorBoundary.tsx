@@ -48,7 +48,7 @@ export class AppErrorBoundary extends Component<AppErrorBoundaryProps, AppErrorB
           </p>
           <h1 className="text-2xl font-semibold">Apex Studio could not load this view.</h1>
           <p className="mt-3 text-sm leading-6 text-white/70">
-            The application hit an unexpected error. Your saved project data is kept separate from this screen failure.
+            The application hit an unexpected error. Reload Apex Studio to try again.
           </p>
           {this.state.errorMessage && (
             <details className="mt-5 rounded-lg bg-black/30 p-3 text-xs text-white/50">
