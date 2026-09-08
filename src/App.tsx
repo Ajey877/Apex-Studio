@@ -589,12 +589,12 @@ export function App() {
     // AudioEngine has no buffer-removal API; a removed target leaves only this narrow in-memory orphan.
     const currentState = projectStateRef.current;
     if (!currentState.playlistTracks.some(track => track.id === targetTrackId)) return;
-    const targetTrackIndex = currentState.playlistTracks.findIndex(track => track.id === targetTrackId);
+    const currentTargetTrackIndex = currentState.playlistTracks.findIndex(track => track.id === targetTrackId);
     const recordingClip = createRecordingPlaylistClip(
       persistedRecording,
       { id: audioBufferId, buffer: loaded.buffer, peaks: loaded.peaks, duration: loaded.duration },
       currentState.playlistTracks,
-      targetTrackIndex,
+      currentTargetTrackIndex,
       currentState.meta.bpm,
       `rec-clip-${Date.now()}`
     );
