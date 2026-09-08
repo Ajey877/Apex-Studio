@@ -45,6 +45,9 @@ const mixerTracks: MixerTrack[] = [
     pan: 0,
     mute: false,
     solo: false,
+    stereoWidth: 1,
+    peakL: 0,
+    peakR: 0,
     fxSlots: [],
   },
   {
@@ -55,6 +58,9 @@ const mixerTracks: MixerTrack[] = [
     pan: 0,
     mute: false,
     solo: false,
+    stereoWidth: 1,
+    peakL: 0,
+    peakR: 0,
     fxSlots: [],
   },
 ];
