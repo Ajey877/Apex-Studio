@@ -1,0 +1,39 @@
+name: phase2-timepatch
+on:
+  push:
+    branches: [phase-2-core-workflow-reliability]
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: phase-2-core-workflow-reliability
+          fetch-depth: 0
+      - name: Patch automation scheduling time
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+          p = Path('src/audio/audioEngine.ts')
+          s = p.read_text()
+          old_sig = '''    value: number, // 0 to 1\n    channels: Channel[],\n    mixerTracks: MixerTrack[]\n  ) {\n    if (!this.ctx) return;\n    const now = this.ctx.currentTime;'''
+          new_sig = '''    value: number, // 0 to 1\n    channels: Channel[],\n    mixerTracks: MixerTrack[],\n    atTime?: number\n  ) {\n    if (!this.ctx) return;\n    const now = atTime ?? this.ctx.currentTime;'''
+          assert s.count(old_sig) == 1
+          s = s.replace(old_sig, new_sig)
+          old_call = '''            this.applyAutomationValue(clip.automationTarget, val, this.activeChannels, []);'''
+          new_call = '''            this.applyAutomationValue(clip.automationTarget, val, this.activeChannels, [], now);'''
+          assert s.count(old_call) == 1
+          s = s.replace(old_call, new_call)
+          p.write_text(s)
+          PY
+          git diff --check
+      - name: Remove patch workflow and commit
+        run: |
+          rm .github/workflows/phase2-timepatch.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/audio/audioEngine.ts .github/workflows/phase2-timepatch.yml
+          git commit -m "Phase 2A: schedule automation at render time"
+          git push origin phase-2-core-workflow-reliability
