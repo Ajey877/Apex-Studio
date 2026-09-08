@@ -18,9 +18,9 @@ Move Apex Studio from a feature-complete development baseline toward a release-r
 Implemented on `phase-9-production-hardening`:
 
 - Add a root React error boundary so an unexpected render/component failure produces a recoverable UI instead of a blank application surface.
-- Log the captured error and component stack through the existing application console path.
+- Log the captured error and component stack to the browser console.
 - Provide an explicit reload action.
-- Keep the boundary isolated from project persistence and audio state.
+- Keep the boundary independent of project persistence and audio state.
 
 ## Next hardening slices
 
