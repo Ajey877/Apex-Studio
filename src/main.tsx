@@ -4,11 +4,14 @@ import App from './App.tsx';
 import './index.css';
 import {audioEngine} from './audio/audioEngine';
 import {installLiveFxChainHardening} from './audio/liveFxChainHardening';
+import {AppErrorBoundary} from './components/AppErrorBoundary';
 
 installLiveFxChainHardening(audioEngine);
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
-    <App />
+    <AppErrorBoundary>
+      <App />
+    </AppErrorBoundary>
   </StrictMode>,
 );
