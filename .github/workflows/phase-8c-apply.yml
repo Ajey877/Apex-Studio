@@ -1,6 +1,8 @@
 name: Phase 8C apply
 
 on:
+  push:
+    branches: [phase-8c-playlist-history-hardening]
   pull_request:
     branches: [main]
 
@@ -15,8 +17,9 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Apply Phase 8C hardening
-        shell: python
+        shell: bash
         run: |
+          python3 - <<'PY'
           from pathlib import Path
 
           def replace(path, old, new, count=1):
@@ -38,12 +41,8 @@ jobs:
               throw new Error('Automation point index is out of range');
             }
             if (!finite(newY)) throw new Error('Automation point value must be finite');
-
             const updated = cloneClip(clip);
-            updated.automationPoints![pointIndex] = {
-              ...updated.automationPoints![pointIndex],
-              y: Math.max(0, Math.min(1, newY))
-            };
+            updated.automationPoints![pointIndex] = { ...updated.automationPoints![pointIndex], y: Math.max(0, Math.min(1, newY)) };
             return assertValidPlaylistClip(updated);
           }
 
@@ -51,16 +50,10 @@ jobs:
 
           replace('src/components/playlistClipOperations.test.ts', "  splitPlaylistClip,\n  validatePlaylistClip", "  splitPlaylistClip,\n  updatePlaylistAutomationPoint,\n  validatePlaylistClip")
           replace('src/components/playlistClipOperations.test.ts', "test('deletePlaylistClip removes only the requested clip', () => {", """test('updatePlaylistAutomationPoint clamps values and preserves other point data', () => {
-            const clip: PlaylistClip = {
-              ...baseClip,
-              id: 'automation-1',
-              type: 'automation',
-              automationPoints: [
-                { x: 0, y: 0.25, tension: 0.4 },
-                { x: 0.5, y: 0.75, tension: -0.2 }
-              ]
-            };
-
+            const clip: PlaylistClip = { ...baseClip, id: 'automation-1', type: 'automation', automationPoints: [
+              { x: 0, y: 0.25, tension: 0.4 },
+              { x: 0.5, y: 0.75, tension: -0.2 }
+            ] };
             const updated = updatePlaylistAutomationPoint(clip, 1, 2);
             assert.equal(updated.automationPoints?.[1].y, 1);
             assert.equal(updated.automationPoints?.[1].tension, -0.2);
@@ -70,11 +63,7 @@ jobs:
 
           test('updatePlaylistAutomationPoint rejects invalid clips and indexes', () => {
             assert.throws(() => updatePlaylistAutomationPoint(baseClip, 0, 0.5), /automation clip/);
-            const clip: PlaylistClip = {
-              ...baseClip,
-              type: 'automation',
-              automationPoints: [{ x: 0, y: 0.5, tension: 0 }]
-            };
+            const clip: PlaylistClip = { ...baseClip, type: 'automation', automationPoints: [{ x: 0, y: 0.5, tension: 0 }] };
             assert.throws(() => updatePlaylistAutomationPoint(clip, 2, 0.5), /out of range/);
           });
 
@@ -96,19 +85,19 @@ jobs:
         onUpdateClips(clips.map(item => item.id === clip.id ? updated : item));
       }""")
           replace('src/components/PlaylistArranger.tsx', "  const beginInteraction = (event: React.PointerEvent, next: Interaction) => {", """  const beginAutomationPointInteraction = (event: React.PointerEvent<SVGCircleElement>, clip: PlaylistClip, pointIndex: number) => {
-    if (activeTool !== 'place' || !clip.automationPoints?.[pointIndex]) return;
-    event.preventDefault();
-    event.stopPropagation();
-    const svg = event.currentTarget.ownerSVGElement;
-    if (!svg) return;
-    onPlaylistInteractionStart?.('automation-point');
-    event.currentTarget.setPointerCapture(event.pointerId);
-    setSelectedClipId(clip.id);
-    setAutomationEditorClipId(clip.id);
-    setInteraction({ kind: 'automation-point', clip, pointerId: event.pointerId, pointIndex, automationTop: svg.getBoundingClientRect().top });
-  };
+            if (activeTool !== 'place' || !clip.automationPoints?.[pointIndex]) return;
+            event.preventDefault();
+            event.stopPropagation();
+            const svg = event.currentTarget.ownerSVGElement;
+            if (!svg) return;
+            onPlaylistInteractionStart?.('automation-point');
+            event.currentTarget.setPointerCapture(event.pointerId);
+            setSelectedClipId(clip.id);
+            setAutomationEditorClipId(clip.id);
+            setInteraction({ kind: 'automation-point', clip, pointerId: event.pointerId, pointIndex, automationTop: svg.getBoundingClientRect().top });
+          };
 
-  const beginInteraction = (event: React.PointerEvent, next: Interaction) => {""")
+          const beginInteraction = (event: React.PointerEvent, next: Interaction) => {""")
           replace('src/components/PlaylistArranger.tsx', """                              <circle
                                 key={pIdx}
                                 cx={p.x * (clip.lengthBars * 96 - 12)}
@@ -156,6 +145,8 @@ jobs:
 
           Path('.github/workflows/phase-8c-apply.yml').unlink()
           print('Phase 8C source changes applied; temporary workflow removed.')
+          PY
+
       - name: Commit changes
         run: |
           git config user.name "github-actions[bot]"
