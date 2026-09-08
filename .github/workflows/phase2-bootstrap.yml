@@ -1,0 +1,181 @@
+name: Phase 2 bootstrap patch
+
+on:
+  push:
+    branches:
+      - phase-2-core-workflow-reliability
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout branch
+        uses: actions/checkout@v4
+        with:
+          ref: phase-2-core-workflow-reliability
+          fetch-depth: 0
+
+      - name: Apply focused Phase 2 renderer changes
+        shell: python
+        run: |
+          from pathlib import Path
+          import re
+
+          path = Path('src/audio/audioEngine.ts')
+          text = path.read_text()
+          marker = '  // High-Grade Offline Audio Renderer (WAV, MP3, MIDI, Stems)\n'
+          assert text.count(marker) == 1, 'offline renderer marker count changed'
+
+          method = r'''  /**
+   * Render the song through the same live transport scheduling, instrument voices,
+   * mixer routing, FX chains, automation evaluation, sidechain ducking, fades,
+   * and master processing used by live song playback.
+   *
+   * The live engine state is restored after rendering so export cannot replace or
+   * mutate the active realtime audio graph.
+   */
+  public async renderTimelineOffline(
+    channels: Channel[],
+    clips: PlaylistClip[],
+    mixerTracks: MixerTrack[],
+    bpm: number,
+    totalBars: number,
+    sampleRate?: number,
+  ): Promise<AudioBuffer> {
+    const previous = {
+      ctx: this.ctx,
+      transport: this.transport,
+      masterGain: this.masterGain,
+      masterAnalyser: this.masterAnalyser,
+      grossBeatNode: this.grossBeatNode,
+      mixerChannels: this.mixerChannels,
+      impulseResponses: this.impulseResponses,
+      activeVoices: this.activeVoices,
+      isPlaying: this.isPlaying,
+      activeChannels: this.activeChannels,
+      activeClips: this.activeClips,
+      activePlayMode: this.activePlayMode,
+      activePatternId: this.activePatternId,
+      currentStep: this.currentStep,
+      currentBar: this.currentBar,
+      bpm: this.bpm,
+      metronome: this.metronome,
+    };
+
+    const safeBpm = Math.max(20, Math.min(300, Number(bpm) || 120));
+    const secondsPerStep = (60 / safeBpm) / 4;
+    const totalDurationSeconds = Math.max(4, Math.max(1, totalBars) * 4 * (60 / safeBpm));
+    const renderSampleRate = sampleRate ?? previous.ctx?.sampleRate ?? 44100;
+    const lengthSamples = Math.ceil(renderSampleRate * totalDurationSeconds);
+    const offlineCtx = new OfflineAudioContext(2, lengthSamples, renderSampleRate);
+
+    try {
+      this.ctx = offlineCtx as unknown as AudioContext;
+      this.transport = null;
+      this.masterGain = offlineCtx.createGain();
+      this.grossBeatNode = offlineCtx.createGain();
+      this.masterAnalyser = offlineCtx.createAnalyser();
+      this.masterAnalyser.fftSize = 512;
+      this.masterAnalyser.smoothingTimeConstant = 0.8;
+      this.masterGain.connect(this.grossBeatNode);
+      this.grossBeatNode.connect(this.masterAnalyser);
+      this.masterAnalyser.connect(offlineCtx.destination);
+
+      this.mixerChannels = new Map();
+      this.impulseResponses = new Map();
+      this.activeVoices = new Map();
+      this.activeChannels = structuredClone(channels);
+      this.activeClips = structuredClone(clips);
+      this.activePlayMode = 'song';
+      this.activePatternId = undefined;
+      this.isPlaying = true;
+      this.currentStep = 0;
+      this.currentBar = 1;
+      this.bpm = safeBpm;
+      this.metronome = false;
+      this.buildReverbImpulse(2.5, 2.0);
+
+      const tracks = [...mixerTracks].sort((a, b) => a.id - b.id);
+      const masterTrack = tracks.find(track => track.id === 0);
+      if (masterTrack) this.updateMixerTrack(masterTrack);
+      else this.getOrCreateMixerChannel(0);
+      for (const track of tracks) {
+        if (track.id !== 0) this.updateMixerTrack(track);
+      }
+
+      const totalSteps = Math.ceil(totalDurationSeconds / secondsPerStep);
+      for (let globalStep = 0; globalStep < totalSteps; globalStep += 1) {
+        this.currentStep = globalStep % 16;
+        this.currentBar = Math.floor(globalStep / 16) + 1;
+        const swingOffsetSeconds = this.currentStep % 2 === 1
+          ? (this.swing / 100) * (secondsPerStep * 0.4)
+          : 0;
+        const audioTime = (globalStep * secondsPerStep) + swingOffsetSeconds;
+        if (audioTime >= totalDurationSeconds) break;
+        this.triggerCurrentStep(audioTime);
+      }
+
+      return await offlineCtx.startRendering();
+    } finally {
+      this.ctx = previous.ctx;
+      this.transport = previous.transport;
+      this.masterGain = previous.masterGain;
+      this.masterAnalyser = previous.masterAnalyser;
+      this.grossBeatNode = previous.grossBeatNode;
+      this.mixerChannels = previous.mixerChannels;
+      this.impulseResponses = previous.impulseResponses;
+      this.activeVoices = previous.activeVoices;
+      this.isPlaying = previous.isPlaying;
+      this.activeChannels = previous.activeChannels;
+      this.activeClips = previous.activeClips;
+      this.activePlayMode = previous.activePlayMode;
+      this.activePatternId = previous.activePatternId;
+      this.currentStep = previous.currentStep;
+      this.currentBar = previous.currentBar;
+      this.bpm = previous.bpm;
+      this.metronome = previous.metronome;
+    }
+  }
+
+'''
+          text = text.replace(marker, method + marker)
+
+          old = '''    source.connect(gainNode);\n    gainNode.connect(this.masterGain || this.ctx.destination);\n\n    source.start(startTime);\n    source.stop(startTime + clipDurationSec);'''
+          new = '''    source.connect(gainNode);\n\n    // Playlist audio uses the same insert routing as the live playback lifecycle.\n    const mixerTrackId = Math.max(1, Math.floor(clip.trackIndex) + 1);\n    const mixer = this.getOrCreateMixerChannel(mixerTrackId);\n    gainNode.connect(mixer.input);\n\n    source.start(startTime);\n    source.stop(startTime + clipDurationSec);'''
+          assert text.count(old) == 1, 'audio clip routing block count changed'
+          text = text.replace(old, new)
+          path.write_text(text)
+
+          export_path = Path('src/components/ExportModal.tsx')
+          export_text = export_path.read_text()
+          export_text = export_text.replace("import { renderProjectTimelineOffline } from '../audio/offlineProjectRenderer';\n", '')
+          export_text = export_text.replace('  meta: ProjectMetadata;\n', '  meta: ProjectMetadata;\n  mixerTracks: ProjectState[\'mixerTracks\'];\n')
+          export_text = export_text.replace("import { Channel, PlaylistClip, ProjectMetadata } from '../types/daw';", "import { Channel, PlaylistClip, ProjectMetadata, ProjectState } from '../types/daw';")
+          old_call = '''          const renderedBuffer = await renderProjectTimelineOffline({\n            channels,\n            clips,\n            bpm: meta.bpm,\n            totalBars,\n            getAudioBuffer: id => audioEngine.getSampleBuffer(id),\n          });'''
+          new_call = '''          const renderedBuffer = await audioEngine.renderTimelineOffline(\n            channels,\n            clips,\n            mixerTracks,\n            meta.bpm,\n            totalBars,\n          );'''
+          assert old_call in export_text, 'ExportModal offline renderer call not found'
+          export_text = export_text.replace(old_call, new_call)
+          export_path.write_text(export_text)
+
+          app_path = Path('src/App.tsx')
+          app_text = app_path.read_text()
+          old_props = '<ExportModal isOpen={isExportOpen} onClose={() => setIsExportOpen(false)} channels={projectState.channels} clips={projectState.playlistClips} meta={projectState.meta} />'
+          new_props = '<ExportModal isOpen={isExportOpen} onClose={() => setIsExportOpen(false)} channels={projectState.channels} clips={projectState.playlistClips} mixerTracks={projectState.mixerTracks} meta={projectState.meta} />'
+          assert app_text.count(old_props) == 1, 'ExportModal App usage count changed'
+          app_path.write_text(app_text.replace(old_props, new_props))
+
+      - name: Remove bootstrap workflow
+        run: rm .github/workflows/phase2-bootstrap.yml
+
+      - name: Commit focused Phase 2 renderer changes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/audio/audioEngine.ts src/components/ExportModal.tsx src/App.tsx .github/workflows/phase2-bootstrap.yml
+          git diff --cached --check
+          git commit -m "Phase 2A: reuse live DSP for offline timeline render"
+          git push origin phase-2-core-workflow-reliability
