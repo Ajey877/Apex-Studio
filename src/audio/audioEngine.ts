@@ -1966,6 +1966,63 @@ class AudioEngine {
     }
   }
 
+  public async renderTimelineOffline(
+    channels: Channel[],
+    clips: PlaylistClip[],
+    mixerTracks: MixerTrack[],
+    bpm: number,
+    totalBars: number,
+    sampleRate?: number,
+  ): Promise<AudioBuffer> {
+    const previous = { ctx: this.ctx, transport: this.transport, masterGain: this.masterGain, masterAnalyser: this.masterAnalyser, grossBeatNode: this.grossBeatNode, mixerChannels: this.mixerChannels, impulseResponses: this.impulseResponses, activeVoices: this.activeVoices, isPlaying: this.isPlaying, activeChannels: this.activeChannels, activeClips: this.activeClips, activePlayMode: this.activePlayMode, activePatternId: this.activePatternId, currentStep: this.currentStep, currentBar: this.currentBar, bpm: this.bpm, metronome: this.metronome };
+    const safeBpm = Math.max(20, Math.min(300, Number(bpm) || 120));
+    const secondsPerStep = (60 / safeBpm) / 4;
+    const totalDurationSeconds = Math.max(4, Math.max(1, totalBars) * 4 * (60 / safeBpm));
+    const renderSampleRate = sampleRate ?? previous.ctx?.sampleRate ?? 44100;
+    const offlineCtx = new OfflineAudioContext(2, Math.ceil(renderSampleRate * totalDurationSeconds), renderSampleRate);
+    try {
+      this.ctx = offlineCtx as unknown as AudioContext;
+      this.transport = null;
+      this.masterGain = offlineCtx.createGain();
+      this.grossBeatNode = offlineCtx.createGain();
+      this.masterAnalyser = offlineCtx.createAnalyser();
+      this.masterAnalyser.fftSize = 512;
+      this.masterAnalyser.smoothingTimeConstant = 0.8;
+      this.masterGain.connect(this.grossBeatNode);
+      this.grossBeatNode.connect(this.masterAnalyser);
+      this.masterAnalyser.connect(offlineCtx.destination);
+      this.mixerChannels = new Map();
+      this.impulseResponses = new Map();
+      this.activeVoices = new Map();
+      this.activeChannels = structuredClone(channels);
+      this.activeClips = structuredClone(clips);
+      this.activePlayMode = 'song';
+      this.activePatternId = undefined;
+      this.isPlaying = true;
+      this.currentStep = 0;
+      this.currentBar = 1;
+      this.bpm = safeBpm;
+      this.metronome = false;
+      this.buildReverbImpulse(2.5, 2.0);
+      const tracks = [...mixerTracks].sort((a, b) => a.id - b.id);
+      const masterTrack = tracks.find(track => track.id === 0);
+      if (masterTrack) this.updateMixerTrack(masterTrack); else this.getOrCreateMixerChannel(0);
+      for (const track of tracks) if (track.id !== 0) this.updateMixerTrack(track);
+      const totalSteps = Math.ceil(totalDurationSeconds / secondsPerStep);
+      for (let globalStep = 0; globalStep < totalSteps; globalStep += 1) {
+        this.currentStep = globalStep % 16;
+        this.currentBar = Math.floor(globalStep / 16) + 1;
+        const swingOffsetSeconds = this.currentStep % 2 === 1 ? (this.swing / 100) * (secondsPerStep * 0.4) : 0;
+        const audioTime = globalStep * secondsPerStep + swingOffsetSeconds;
+        if (audioTime >= totalDurationSeconds) break;
+        this.triggerCurrentStep(audioTime);
+      }
+      return await offlineCtx.startRendering();
+    } finally {
+      this.ctx = previous.ctx; this.transport = previous.transport; this.masterGain = previous.masterGain; this.masterAnalyser = previous.masterAnalyser; this.grossBeatNode = previous.grossBeatNode; this.mixerChannels = previous.mixerChannels; this.impulseResponses = previous.impulseResponses; this.activeVoices = previous.activeVoices; this.isPlaying = previous.isPlaying; this.activeChannels = previous.activeChannels; this.activeClips = previous.activeClips; this.activePlayMode = previous.activePlayMode; this.activePatternId = previous.activePatternId; this.currentStep = previous.currentStep; this.currentBar = previous.currentBar; this.bpm = previous.bpm; this.metronome = previous.metronome;
+    }
+  }
+
   // High-Grade Offline Audio Renderer (WAV, MP3, MIDI, Stems)
   public async renderProjectToWav(
     channels: Channel[],
@@ -2405,7 +2462,9 @@ class AudioEngine {
     gainNode.gain.exponentialRampToValueAtTime(0.0001, startTime + clipDurationSec);
 
     source.connect(gainNode);
-    gainNode.connect(this.masterGain || this.ctx.destination);
+    const mixerTrackId = Math.max(1, Math.floor(clip.trackIndex) + 1);
+    const mixer = this.getOrCreateMixerChannel(mixerTrackId);
+    gainNode.connect(mixer.input);
 
     source.start(startTime);
     source.stop(startTime + clipDurationSec);
