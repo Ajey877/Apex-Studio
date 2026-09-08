@@ -60,6 +60,23 @@ test('recording becomes an audio PlaylistClip with the registered buffer and rea
   assert.deepEqual(clip.audioWaveform, [0.1, 0.7, 0.3]);
 });
 
+test('valid recording remains placeable when waveform derivation failed', () => {
+  const take = recording({ waveform: [] });
+  const clip = createRecordingPlaylistClip(
+    take,
+    { id: getRecordingAudioBufferId(take.id), buffer, peaks: [], duration: buffer.duration },
+    tracks,
+    0,
+    120,
+    'rec-clip-no-waveform'
+  );
+
+  assert.equal(clip.type, 'audio');
+  assert.equal(clip.audioBufferId, 'recording-rec-test-1');
+  assert.deepEqual(clip.audioWaveform, []);
+  assert.equal(clip.audioUnavailable, false);
+});
+
 test('clip creation rejects mismatched buffer registration', () => {
   const take = recording();
   assert.throws(() => createRecordingPlaylistClip(
