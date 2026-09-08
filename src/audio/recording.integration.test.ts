@@ -16,10 +16,10 @@ describe('recording to playlist integration', () => {
     );
     assert.match(
       source,
-      /createRecordingPlaylistClip\(\s*persistedRecording,\s*\{ id: audioBufferId, buffer: loaded\.buffer, peaks: loaded\.peaks, duration: loaded\.duration \},\s*prev\.playlistTracks,\s*prev\.playlistTracks\.findIndex\(track => track\.id === targetTrackId\),\s*prev\.meta\.bpm/
+      /createRecordingPlaylistClip\(\s*persistedRecording,\s*\{ id: audioBufferId, buffer: loaded\.buffer, peaks: loaded\.peaks, duration: loaded\.duration \},\s*currentState\.playlistTracks,\s*currentTargetTrackIndex,\s*currentState\.meta\.bpm/
     );
-    assert.match(source, /recordings: \[\.\.\.prev\.recordings, persistedRecording\]/);
-    assert.match(source, /playlistClips: \[\.\.\.prev\.playlistClips, createRecordingPlaylistClip\(/);
+    assert.match(source, /recordings: \[\.\.\.currentState\.recordings, persistedRecording\]/);
+    assert.match(source, /playlistClips: \[\.\.\.currentState\.playlistClips, recordingClip\]/);
   });
 
   it('delegates BPM-aware clip sizing to the recording pipeline contract', () => {
@@ -27,7 +27,7 @@ describe('recording to playlist integration', () => {
 
     assert.match(
       source,
-      /createRecordingPlaylistClip\([\s\S]*prev\.playlistTracks\.findIndex\(track => track\.id === targetTrackId\),\s*prev\.meta\.bpm/
+      /createRecordingPlaylistClip\([\s\S]*currentState\.playlistTracks,\s*currentTargetTrackIndex,\s*currentState\.meta\.bpm/
     );
     assert.doesNotMatch(source, /const secondsPerBar = 240 \/ Math\.max\(20, projectState\.meta\.bpm\)/);
     assert.doesNotMatch(source, /Math\.ceil\(recording\.durationSeconds \/ secondsPerBar\)/);
