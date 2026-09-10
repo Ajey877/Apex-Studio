@@ -39,7 +39,10 @@ export const createRecordingPlaylistClip = (
   if (!recording.audioBlob || recording.audioBlob.size === 0) throw new Error('The recording contains no audio data');
   if (registration.id !== getRecordingAudioBufferId(recording.id)) throw new Error('Recording audio buffer registration does not match the recording');
   if (!registration.buffer || registration.buffer.duration <= 0) throw new Error('The recording audio buffer is invalid');
-  if (!Array.isArray(registration.peaks) || registration.peaks.length === 0) throw new Error('The recording waveform is unavailable');
+
+  // Waveform peaks are derived presentation metadata. A decode/peak-generation
+  // failure must never make an otherwise valid recorded buffer unusable.
+  const waveform = Array.isArray(registration.peaks) ? registration.peaks : [];
 
   validateRecordingTargetTrack(tracks, targetTrackIndex);
   const lengthBars = getRecordingLengthBars(registration.duration, bpm);
@@ -52,7 +55,7 @@ export const createRecordingPlaylistClip = (
     type: 'audio',
     audioBufferId: registration.id,
     audioName: recording.name,
-    audioWaveform: registration.peaks,
+    audioWaveform: waveform,
     audioUnavailable: false,
     color: '#ff6e00',
     name: recording.name

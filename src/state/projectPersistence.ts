@@ -15,6 +15,7 @@ export interface RestoredProjectState {
 }
 
 const CURRENT_PROJECT_STATE_VERSION = 1;
+let persistenceWriteQueue: Promise<void> = Promise.resolve();
 
 /** Serialize project state without storing binary audio data or session-only object URLs. */
 export const serializeProjectState = (state: ProjectState): string => JSON.stringify({
@@ -25,8 +26,16 @@ export const serializeProjectState = (state: ProjectState): string => JSON.strin
   return value;
 });
 
+/**
+ * Keep autosave writes ordered. IndexedDB transactions are atomic, but multiple
+ * asynchronous saves must not be allowed to complete out of order when a large
+ * project or slow storage makes an earlier write take longer than a later one.
+ */
 export const persistProjectState = async (state: ProjectState): Promise<void> => {
-  await persistProjectStateRecord(serializeProjectState(state));
+  const serialized = serializeProjectState(state);
+  const write = persistenceWriteQueue.then(() => persistProjectStateRecord(serialized));
+  persistenceWriteQueue = write.catch(() => undefined);
+  await write;
 };
 
 const getAudioIdsForProject = (state: ProjectState): string[] => {
