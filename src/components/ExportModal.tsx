@@ -77,7 +77,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, chann
         if (format === 'stems') {
           setStatusText(`Rendering isolated stems (${totalBars} bars)...`);
           setRenderProgress(35);
-          const { stems, master } = await audioEngine.renderProjectStems(channels, clips, meta.bpm, totalBars, bitDepth);
+          const { stems, master } = await audioEngine.renderProjectStems(channels, clips, mixerTracks, meta.bpm, totalBars, bitDepth);
           const zip = new JSZip();
           const folder = zip.folder(`${meta.name.replace(/\s+/g, '_')}_Stems_BPM${meta.bpm}`);
           Object.entries(stems).forEach(([stemName, blob]) => folder?.file(stemName, blob));
