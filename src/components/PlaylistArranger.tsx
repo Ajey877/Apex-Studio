@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { 
   Plus, 
   Layers, 
@@ -131,6 +131,7 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [isScrubbing, setIsScrubbing] = useState(false);
   const [interaction, setInteraction] = useState<Interaction | null>(null);
+  const interactionRef = useRef<Interaction | null>(null);
   const didMoveRef = useRef(false);
   const lastScrubBarRef = useRef<number>(1);
   const rulerContainerRef = useRef<HTMLDivElement | null>(null);
@@ -285,10 +286,14 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
     const rect = svg.getBoundingClientRect();
     didMoveRef.current = false;
     onPlaylistInteractionStart?.('automation-point');
-    event.currentTarget.setPointerCapture(event.pointerId);
+    try {
+      event.currentTarget.setPointerCapture(event.pointerId);
+    } catch {
+      // Browser or unmounted target may reject capture
+    }
     setSelectedClipId(clip.id);
     setAutomationEditorClipId(clip.id);
-    setInteraction({
+    const next: Interaction = {
       kind: 'automation-point',
       clip,
       pointerId: event.pointerId,
@@ -296,7 +301,9 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
       originX: event.clientX,
       originY: event.clientY,
       automationTop: rect.top
-    });
+    };
+    interactionRef.current = next;
+    setInteraction(next);
   };
 
   const beginInteraction = (event: React.PointerEvent, next: Interaction) => {
@@ -305,18 +312,69 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
     event.stopPropagation();
     didMoveRef.current = false;
     onPlaylistInteractionStart?.(next.kind);
-    event.currentTarget.setPointerCapture(event.pointerId);
+    try {
+      event.currentTarget.setPointerCapture(event.pointerId);
+    } catch {
+      // Browser or unmounted target may reject capture
+    }
     setSelectedClipId(next.clip.id);
+    interactionRef.current = next;
     setInteraction(next);
   };
 
-  const endInteraction = (event?: React.PointerEvent) => {
-    if (event && event.currentTarget.hasPointerCapture(event.pointerId)) {
-      event.currentTarget.releasePointerCapture(event.pointerId);
+  const endInteraction = (event?: React.PointerEvent | PointerEvent) => {
+    if (!interactionRef.current && !interaction) return;
+    try {
+      if (event && 'currentTarget' in event && event.currentTarget && typeof (event.currentTarget as any).hasPointerCapture === 'function') {
+        const target = event.currentTarget as HTMLElement;
+        if (target.hasPointerCapture(event.pointerId)) {
+          target.releasePointerCapture(event.pointerId);
+        }
+      }
+    } catch {
+      // Pointer capture already released or element unmounted
     }
+    interactionRef.current = null;
     setInteraction(null);
     onPlaylistInteractionEnd?.();
   };
+
+  // Window pointer listeners guarantee that even if DOM elements reparent or drop pointer capture,
+  // pointer up/cancel will always terminate the active playlist interaction safely.
+  useEffect(() => {
+    if (!interaction) return;
+
+    const handleWindowPointerMove = (e: PointerEvent) => {
+      const active = interactionRef.current;
+      if (active && e.pointerId === active.pointerId) {
+        updateInteraction(e.clientX, e.clientY);
+      }
+    };
+
+    const handleWindowPointerUp = (e: PointerEvent) => {
+      const active = interactionRef.current;
+      if (active && e.pointerId === active.pointerId) {
+        endInteraction(e);
+      }
+    };
+
+    const handleWindowPointerCancel = (e: PointerEvent) => {
+      const active = interactionRef.current;
+      if (active && e.pointerId === active.pointerId) {
+        endInteraction(e);
+      }
+    };
+
+    window.addEventListener('pointermove', handleWindowPointerMove);
+    window.addEventListener('pointerup', handleWindowPointerUp);
+    window.addEventListener('pointercancel', handleWindowPointerCancel);
+
+    return () => {
+      window.removeEventListener('pointermove', handleWindowPointerMove);
+      window.removeEventListener('pointerup', handleWindowPointerUp);
+      window.removeEventListener('pointercancel', handleWindowPointerCancel);
+    };
+  }, [interaction]);
 
   const deleteClip = (clipId: string) => {
     onUpdateClips(deletePlaylistClip(clips, clipId));
@@ -877,6 +935,9 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
                       onPointerCancel={(e) => {
                         if (interaction && e.pointerId === interaction.pointerId) endInteraction(e);
                       }}
+                      onLostPointerCapture={(e) => {
+                        if (interaction && e.pointerId === interaction.pointerId) endInteraction(e);
+                      }}
                       onClick={(e) => {
                         e.stopPropagation();
                         if (didMoveRef.current) {
@@ -953,6 +1014,12 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
                                     endInteraction(e);
                                   }
                                 }}
+                                onLostPointerCapture={(e) => {
+                                  e.stopPropagation();
+                                  if (interaction?.kind === 'automation-point' && e.pointerId === interaction.pointerId) {
+                                    endInteraction(e);
+                                  }
+                                }}
                               />
                             ))}
                           </svg>
@@ -1020,12 +1087,36 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
                         role="separator"
                         aria-label="Resize clip start"
                         onPointerDown={(e) => beginInteraction(e, { kind: 'resize-left', clip, pointerId: e.pointerId, originX: e.clientX })}
+                        onPointerMove={(e) => {
+                          if (interaction && e.pointerId === interaction.pointerId) updateInteraction(e.clientX, e.clientY);
+                        }}
+                        onPointerUp={(e) => {
+                          if (interaction && e.pointerId === interaction.pointerId) endInteraction(e);
+                        }}
+                        onPointerCancel={(e) => {
+                          if (interaction && e.pointerId === interaction.pointerId) endInteraction(e);
+                        }}
+                        onLostPointerCapture={(e) => {
+                          if (interaction && e.pointerId === interaction.pointerId) endInteraction(e);
+                        }}
                         className="absolute left-0 top-0 bottom-0 w-1.5 cursor-ew-resize bg-white/20 hover:bg-white/40 z-30"
                       />
                       <div
                         role="separator"
                         aria-label="Resize clip end"
                         onPointerDown={(e) => beginInteraction(e, { kind: 'resize-right', clip, pointerId: e.pointerId, originX: e.clientX })}
+                        onPointerMove={(e) => {
+                          if (interaction && e.pointerId === interaction.pointerId) updateInteraction(e.clientX, e.clientY);
+                        }}
+                        onPointerUp={(e) => {
+                          if (interaction && e.pointerId === interaction.pointerId) endInteraction(e);
+                        }}
+                        onPointerCancel={(e) => {
+                          if (interaction && e.pointerId === interaction.pointerId) endInteraction(e);
+                        }}
+                        onLostPointerCapture={(e) => {
+                          if (interaction && e.pointerId === interaction.pointerId) endInteraction(e);
+                        }}
                         className="absolute right-0 top-0 bottom-0 w-1.5 cursor-ew-resize bg-white/20 hover:bg-white/40 z-30"
                       />
                     </div>

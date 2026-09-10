@@ -109,3 +109,23 @@ export const createHistory = (
   const safeMaxEntries = clampMaxEntries(maxEntries);
   return createHistoryState(initialState, [], [], safeMaxEntries);
 };
+export interface KeyboardShortcutResolution {
+  action: 'undo' | 'redo' | 'none';
+}
+
+export function resolveUndoRedoShortcut(event: {
+  ctrlKey?: boolean;
+  metaKey?: boolean;
+  shiftKey?: boolean;
+  code?: string;
+  key?: string;
+}): KeyboardShortcutResolution {
+  const isModifier = Boolean(event.ctrlKey || event.metaKey);
+  if (!isModifier) return { action: 'none' };
+  const isZ = event.code === 'KeyZ' || event.key === 'z' || event.key === 'Z';
+  const isY = event.code === 'KeyY' || event.key === 'y' || event.key === 'Y';
+  if (isZ && !event.shiftKey) return { action: 'undo' };
+  if (isY || (isZ && Boolean(event.shiftKey))) return { action: 'redo' };
+  return { action: 'none' };
+}
+

@@ -27,7 +27,7 @@ import { appendChannelWithAllocatedMixerTrackId } from './state/mixerTrackIdenti
 import { deleteChannelFromProjectState } from './state/projectState';
 import { persistProjectState, restorePersistedProjectState } from './state/projectPersistence';
 import { createRecordingPlaylistClip, getRecordingAudioBufferId, validateRecordingTargetTrack } from './audio/recordingPipeline';
-import { createPlaylistHistory, type PlaylistHistory } from './state/playlistHistory';
+import { createHistory, type ProjectHistory, resolveUndoRedoShortcut } from './state/projectHistory';
 
 // Component Suite
 import { TransportBar } from './components/TransportBar';
@@ -109,11 +109,11 @@ export function App() {
   const [selectedChannelId, setSelectedChannelId] = useState<string>(DEFAULT_PROJECT.channels[0]?.id || 'ch-1');
   const [selectedTrackId, setSelectedTrackId] = useState<number>(0); // 0 = Master
 
-  // Phase 8B playlist history is intentionally scoped to playlist state only.
-  const playlistHistoryRef = useRef<PlaylistHistory>(createPlaylistHistory(DEFAULT_PROJECT));
+  // Project-wide history preserving channels, notes, playlist, and markers.
+  const projectHistoryRef = useRef<ProjectHistory>(createHistory(DEFAULT_PROJECT));
   const playlistInteractionActiveRef = useRef(false);
   const projectStateRef = useRef<ProjectState>(DEFAULT_PROJECT);
-  const [playlistHistoryVersion, setPlaylistHistoryVersion] = useState(0);
+  const [projectHistoryVersion, setProjectHistoryVersion] = useState(0);
 
   // --- Studio Browser / Sidebar State ---
   const [isSidebarOpen, setIsSidebarOpen] = useState(() => {
@@ -240,7 +240,7 @@ export function App() {
         if (!cancelled && restored.restored) {
           setProjectState(restored.state);
           projectStateRef.current = restored.state;
-          resetPlaylistHistory(restored.state);
+          resetProjectHistory(restored.state);
           setSelectedChannelId(restored.state.selectedChannelId || DEFAULT_PROJECT.channels[0]?.id || 'ch-1');
           setSelectedTrackId(restored.state.selectedMixerTrackId ?? 0);
           if (restored.missingAudioIds.length > 0) {
@@ -350,45 +350,50 @@ export function App() {
     projectStateRef.current = projectState;
   }, [projectState]);
 
-  const resetPlaylistHistory = useCallback((state: ProjectState) => {
-    const nextHistory = createPlaylistHistory(state);
-    playlistHistoryRef.current = nextHistory;
+  const resetProjectHistory = useCallback((state: ProjectState) => {
+    projectHistoryRef.current = createHistory(state);
     playlistInteractionActiveRef.current = false;
-    setPlaylistHistoryVersion(version => version + 1);
+    setProjectHistoryVersion(version => version + 1);
   }, []);
 
-  const commitPlaylistHistory = useCallback((state: ProjectState, label: string) => {
-    const nextHistory = playlistHistoryRef.current.commit(state, label);
-    if (nextHistory !== playlistHistoryRef.current) {
-      playlistHistoryRef.current = nextHistory;
-      setPlaylistHistoryVersion(version => version + 1);
+  const commitProjectHistory = useCallback((state: ProjectState, label: string) => {
+    const nextHistory = projectHistoryRef.current.commit(state, label);
+    if (nextHistory !== projectHistoryRef.current) {
+      projectHistoryRef.current = nextHistory;
+      setProjectHistoryVersion(version => version + 1);
     }
   }, []);
+
+  const resetPlaylistHistory = resetProjectHistory;
+  const commitPlaylistHistory = commitProjectHistory;
 
   const updatePlaylistProjectState = useCallback((state: ProjectState) => {
     projectStateRef.current = state;
     setProjectState(state);
   }, []);
 
-  const handlePlaylistUndo = useCallback(() => {
+  const handleUndo = useCallback(() => {
     if (playlistInteractionActiveRef.current) return;
-    const result = playlistHistoryRef.current.undo(projectStateRef.current);
-    if (result.history === playlistHistoryRef.current) return;
-    playlistHistoryRef.current = result.history;
-    projectStateRef.current = result.state;
-    setProjectState(result.state);
-    setPlaylistHistoryVersion(version => version + 1);
+    const nextHistory = projectHistoryRef.current.undo();
+    if (nextHistory === projectHistoryRef.current) return;
+    projectHistoryRef.current = nextHistory;
+    projectStateRef.current = nextHistory.present;
+    setProjectState(nextHistory.present);
+    setProjectHistoryVersion(version => version + 1);
   }, []);
 
-  const handlePlaylistRedo = useCallback(() => {
+  const handleRedo = useCallback(() => {
     if (playlistInteractionActiveRef.current) return;
-    const result = playlistHistoryRef.current.redo(projectStateRef.current);
-    if (result.history === playlistHistoryRef.current) return;
-    playlistHistoryRef.current = result.history;
-    projectStateRef.current = result.state;
-    setProjectState(result.state);
-    setPlaylistHistoryVersion(version => version + 1);
+    const nextHistory = projectHistoryRef.current.redo();
+    if (nextHistory === projectHistoryRef.current) return;
+    projectHistoryRef.current = nextHistory;
+    projectStateRef.current = nextHistory.present;
+    setProjectState(nextHistory.present);
+    setProjectHistoryVersion(version => version + 1);
   }, []);
+
+  const handlePlaylistUndo = handleUndo;
+  const handlePlaylistRedo = handleRedo;
 
   const handlePlaylistInteractionStart = useCallback(() => {
     playlistInteractionActiveRef.current = true;
@@ -397,14 +402,14 @@ export function App() {
   const handlePlaylistInteractionEnd = useCallback(() => {
     if (!playlistInteractionActiveRef.current) return;
     playlistInteractionActiveRef.current = false;
-    commitPlaylistHistory(projectStateRef.current, 'Playlist interaction');
-  }, [commitPlaylistHistory]);
+    commitProjectHistory(projectStateRef.current, 'Playlist interaction');
+  }, [commitProjectHistory]);
 
   const handleLoadProjectState = useCallback((state: ProjectState) => {
     projectStateRef.current = state;
     setProjectState(state);
-    resetPlaylistHistory(state);
-  }, [resetPlaylistHistory]);
+    resetProjectHistory(state);
+  }, [resetProjectHistory]);
 
   // --- Project State Handlers ---
   const handleUpdateMeta = (updates: Partial<ProjectMetadata>) => {
@@ -415,10 +420,13 @@ export function App() {
   };
 
   const handleUpdateChannel = (channelId: string, updates: Partial<Channel>) => {
-    setProjectState(prev => {
-      const updatedChannels = prev.channels.map(ch => ch.id === channelId ? { ...ch, ...updates } : ch);
-      return { ...prev, channels: updatedChannels };
-    });
+    const nextChannels = projectStateRef.current.channels.map(ch => ch.id === channelId ? { ...ch, ...updates } : ch);
+    const nextState = { ...projectStateRef.current, channels: nextChannels };
+    projectStateRef.current = nextState;
+    setProjectState(nextState);
+    if ('notes' in updates) {
+      commitProjectHistory(nextState, 'Edit notes');
+    }
   };
 
   const handleAddChannel = (type: InstrumentType, name: string, color: string) => {
@@ -651,55 +659,69 @@ export function App() {
         return;
       }
 
-      if (e.code === 'Space') {
+      // Modifier shortcuts take precedence over virtual piano keyboard triggers.
+      const shortcut = resolveUndoRedoShortcut(e);
+      if (shortcut.action === 'undo') {
+        e.preventDefault();
+        handleUndo();
+        return;
+      } else if (shortcut.action === 'redo') {
+        e.preventDefault();
+        handleRedo();
+        return;
+      }
+
+      const isModifier = Boolean(e.ctrlKey || e.metaKey);
+
+      if (!isModifier && e.code === 'Space') {
         e.preventDefault();
         handleTogglePlay();
         return;
-      } else if (e.key === 'l' || e.key === 'L') {
+      } else if (!isModifier && (e.key === 'l' || e.key === 'L')) {
         handleTogglePlayMode();
         return;
-      } else if (e.key === 'r' || e.key === 'R') {
+      } else if (!isModifier && (e.key === 'r' || e.key === 'R')) {
         handleToggleRecord();
         return;
-      } else if (e.key === 'm' || e.key === 'M') {
+      } else if (!isModifier && (e.key === 'm' || e.key === 'M')) {
         setMetronome(m => !m);
         return;
-      } else if (e.code === 'Numpad0' || e.key === '0' || e.code === 'Home') {
+      } else if (e.code === 'Numpad0' || (!isModifier && e.key === '0') || e.code === 'Home') {
         handleStop();
         return;
       }
 
-      if (e.key === '1' || e.code === 'F6') {
+      if (!isModifier && (e.key === '1' || e.code === 'F6')) {
         e.preventDefault();
         setCurrentView('channel_rack');
         return;
-      } else if (e.key === '2' || e.code === 'F7') {
+      } else if (!isModifier && (e.key === '2' || e.code === 'F7')) {
         e.preventDefault();
         setCurrentView('piano_roll');
         return;
-      } else if (e.key === '3' || e.code === 'F5') {
+      } else if (!isModifier && (e.key === '3' || e.code === 'F5')) {
         e.preventDefault();
         setCurrentView('playlist');
         return;
-      } else if (e.key === '4' || e.code === 'F9') {
+      } else if (!isModifier && (e.key === '4' || e.code === 'F9')) {
         e.preventDefault();
         setCurrentView('mixer');
         return;
-      } else if (e.key === '5' || e.code === 'F8') {
+      } else if (!isModifier && (e.key === '5' || e.code === 'F8')) {
         e.preventDefault();
         setCurrentView('instruments');
         return;
       }
 
-      if (e.code === 'KeyZ') {
+      if (!isModifier && e.code === 'KeyZ') {
         setKeyboardOctave(prev => Math.max(-2, prev - 1));
         return;
-      } else if (e.code === 'KeyX') {
+      } else if (!isModifier && e.code === 'KeyX') {
         setKeyboardOctave(prev => Math.min(2, prev + 1));
         return;
       }
 
-      if (KEY_NOTE_MAP[e.code] !== undefined && !activeHeldKeysRef.current.has(e.code) && !e.repeat) {
+      if (!isModifier && KEY_NOTE_MAP[e.code] !== undefined && !activeHeldKeysRef.current.has(e.code) && !e.repeat) {
         activeHeldKeysRef.current.add(e.code);
         const basePitch = KEY_NOTE_MAP[e.code];
         const isNumpad = e.code.startsWith('Numpad');
@@ -730,7 +752,7 @@ export function App() {
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('keyup', handleKeyUp);
     };
-  }, [isPlaying, playMode, projectState, selectedChannelId, keyboardOctave]);
+  }, [isPlaying, playMode, projectState, selectedChannelId, keyboardOctave, handleUndo, handleRedo]);
 
   const selectedChannel = projectState.channels.find(c => c.id === selectedChannelId) || projectState.channels[0];
 
@@ -925,10 +947,10 @@ export function App() {
               onUpdateMarkers={handleUpdateMarkers}
               onPlaylistInteractionStart={handlePlaylistInteractionStart}
               onPlaylistInteractionEnd={handlePlaylistInteractionEnd}
-              canUndo={playlistHistoryVersion >= 0 && playlistHistoryRef.current.canUndo}
-              canRedo={playlistHistoryVersion >= 0 && playlistHistoryRef.current.canRedo}
-              onUndo={handlePlaylistUndo}
-              onRedo={handlePlaylistRedo}
+              canUndo={projectHistoryVersion >= 0 && projectHistoryRef.current.canUndo}
+              canRedo={projectHistoryVersion >= 0 && projectHistoryRef.current.canRedo}
+              onUndo={handleUndo}
+              onRedo={handleRedo}
               onSeekToBar={(bar) => setCurrentBar(bar)}
               currentBar={currentBar}
               isPlaying={isPlaying}
