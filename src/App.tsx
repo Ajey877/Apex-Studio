@@ -310,7 +310,7 @@ export function App() {
         projectState.playlistClips,
         playMode,
         projectState.selectedPatternId,
-        projectState.mixerTracks
+        structuredClone(projectState.mixerTracks)
       );
       setIsPlaying(true);
     }
@@ -333,7 +333,7 @@ export function App() {
         projectState.playlistClips,
         nextMode,
         projectState.selectedPatternId,
-        projectState.mixerTracks
+        structuredClone(projectState.mixerTracks)
       );
     }
   };

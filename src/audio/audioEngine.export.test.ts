@@ -540,6 +540,38 @@ describe('Phase 3A: Render Architecture & Audio Fidelity', () => {
     );
   });
 
+  it('live automation does not mutate the original mixerTracks object when cloned', () => {
+    const prevCtx = (audioEngine as any).ctx;
+    (audioEngine as any).ctx = new MockOfflineAudioContext(2, 44100, 44100);
+    try {
+      const originalTracks: MixerTrack[] = [
+        {
+          id: 1,
+          name: 'Synth Track',
+          color: '#10b981',
+          volume: 0.9,
+          pan: 0,
+          mute: false,
+          solo: false,
+          stereoWidth: 1,
+          peakL: 0,
+          peakR: 0,
+          fxSlots: [],
+        },
+      ];
+      const clonedTracks = structuredClone(originalTracks);
+      audioEngine.applyAutomationValue({ type: 'mixer_vol', targetId: 1 }, 0.2, [], clonedTracks, 0);
+      audioEngine.applyAutomationValue({ type: 'mixer_pan', targetId: 1 }, 0.75, [], clonedTracks, 0);
+
+      assert.equal(clonedTracks[0].volume, 0.25);
+      assert.equal(clonedTracks[0].pan, 0.5);
+      assert.equal(originalTracks[0].volume, 0.9, 'Original mixerTracks volume must not be mutated by automation');
+      assert.equal(originalTracks[0].pan, 0, 'Original mixerTracks pan must not be mutated by automation');
+    } finally {
+      (audioEngine as any).ctx = prevCtx;
+    }
+  });
+
   // --- Requirement 4: Audio clip offsetSteps changes source playback position ---
   it('audio clip offsetSteps changes AudioBufferSourceNode start offset', async () => {
     let capturedContexts: MockOfflineAudioContext[] = [];
