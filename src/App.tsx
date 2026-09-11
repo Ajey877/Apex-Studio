@@ -14,6 +14,7 @@ import {
   CollabComment, 
   CollabUser,
   ProjectMetadata,
+  Pattern,
   MasteringSuiteState
 } from './types/daw';
 import { audioEngine } from './audio/audioEngine';
@@ -28,6 +29,27 @@ import { deleteChannelFromProjectState } from './state/projectState';
 import { hydrateProjectAudio, persistProjectState, restorePersistedProjectState } from './state/projectPersistence';
 import { createRecordingPlaylistClip, getRecordingAudioBufferId, validateRecordingTargetTrack } from './audio/recordingPipeline';
 import { createHistory, type ProjectHistory, resolveSaveShortcut, resolveUndoRedoShortcut } from './state/projectHistory';
+import {
+  ContinuousHistoryBatcher,
+  addFxSlotToProjectState,
+  addPatternToProjectState,
+  deleteFxSlotFromProjectState,
+  getChannelUpdateLabel,
+  getFxUpdateLabel,
+  getMetaUpdateLabel,
+  getMixerUpdateLabel,
+  isContinuousChannelUpdate,
+  isContinuousFxUpdate,
+  isContinuousMetaUpdate,
+  isContinuousMixerUpdate,
+  updateChannelInProjectState,
+  updateFxSlotInProjectState,
+  updateMacroKnobsInProjectState,
+  updateMidiMappingsInProjectState,
+  updateMixerTrackInProjectState,
+  updateProjectMetadataInProjectState,
+  updateVocalTunerInProjectState
+} from './state/projectMutations';
 
 // Component Suite
 import { TransportBar } from './components/TransportBar';
@@ -365,18 +387,27 @@ export function App() {
     }
   };
 
-  // Keep a synchronous project ref for playlist pointer interactions.
+  // Keep a synchronous project ref for pointer and history interactions.
   useEffect(() => {
     projectStateRef.current = projectState;
   }, [projectState]);
 
+  const continuousBatcherRef = useRef<ContinuousHistoryBatcher>(
+    new ContinuousHistoryBatcher({
+      debounceMs: 300,
+      onCommit: (state, label) => commitProjectHistory(state, label)
+    })
+  );
+
   const resetProjectHistory = useCallback((state: ProjectState) => {
+    continuousBatcherRef.current.cancel();
     projectHistoryRef.current = createHistory(state);
     playlistInteractionActiveRef.current = false;
     setProjectHistoryVersion(version => version + 1);
   }, []);
 
   const commitProjectHistory = useCallback((state: ProjectState, label: string) => {
+    continuousBatcherRef.current.cancel();
     const nextHistory = projectHistoryRef.current.commit(state, label);
     if (nextHistory !== projectHistoryRef.current) {
       projectHistoryRef.current = nextHistory;
@@ -392,24 +423,63 @@ export function App() {
     setProjectState(state);
   }, []);
 
+  const mutateProjectState = useCallback((
+    updater: (current: ProjectState) => ProjectState,
+    label: string,
+    options?: { isContinuous?: boolean }
+  ): ProjectState => {
+    const currentState = projectStateRef.current;
+    const nextState = updater(currentState);
+    projectStateRef.current = nextState;
+    setProjectState(nextState);
+
+    if (options?.isContinuous) {
+      continuousBatcherRef.current.update(nextState, label);
+    } else {
+      continuousBatcherRef.current.flush();
+      commitProjectHistory(nextState, label);
+    }
+    return nextState;
+  }, [commitProjectHistory]);
+
+  const handleContinuousInteractionStart = useCallback((label?: string) => {
+    continuousBatcherRef.current.start(label);
+  }, []);
+
+  const handleContinuousInteractionEnd = useCallback((label?: string) => {
+    continuousBatcherRef.current.flush(label);
+  }, []);
+
   const handleUndo = useCallback(() => {
     if (playlistInteractionActiveRef.current) return;
+    continuousBatcherRef.current.flush();
     const nextHistory = projectHistoryRef.current.undo();
     if (nextHistory === projectHistoryRef.current) return;
     projectHistoryRef.current = nextHistory;
     projectStateRef.current = nextHistory.present;
     setProjectState(nextHistory.present);
     setProjectHistoryVersion(version => version + 1);
+
+    // Sync live mixer tracks with audio engine
+    nextHistory.present.mixerTracks.forEach(track => {
+      audioEngine.updateMixerTrack(track);
+    });
   }, []);
 
   const handleRedo = useCallback(() => {
     if (playlistInteractionActiveRef.current) return;
+    continuousBatcherRef.current.flush();
     const nextHistory = projectHistoryRef.current.redo();
     if (nextHistory === projectHistoryRef.current) return;
     projectHistoryRef.current = nextHistory;
     projectStateRef.current = nextHistory.present;
     setProjectState(nextHistory.present);
     setProjectHistoryVersion(version => version + 1);
+
+    // Sync live mixer tracks with audio engine
+    nextHistory.present.mixerTracks.forEach(track => {
+      audioEngine.updateMixerTrack(track);
+    });
   }, []);
 
   const handlePlaylistUndo = handleUndo;
@@ -455,21 +525,26 @@ export function App() {
   }, [resetProjectHistory]);
 
   // --- Project State Handlers ---
-  const handleUpdateMeta = (updates: Partial<ProjectMetadata>) => {
-    setProjectState(prev => ({
-      ...prev,
-      meta: { ...prev.meta, ...updates, updated: Date.now() }
-    }));
+  const handleUpdateMeta = (updates: Partial<ProjectMetadata>, options?: { isContinuous?: boolean }) => {
+    const isContinuous = options?.isContinuous ?? isContinuousMetaUpdate(updates);
+    mutateProjectState(
+      current => updateProjectMetadataInProjectState(current, updates),
+      getMetaUpdateLabel(updates),
+      { isContinuous }
+    );
   };
 
-  const handleUpdateChannel = (channelId: string, updates: Partial<Channel>) => {
-    const nextChannels = projectStateRef.current.channels.map(ch => ch.id === channelId ? { ...ch, ...updates } : ch);
-    const nextState = { ...projectStateRef.current, channels: nextChannels };
-    projectStateRef.current = nextState;
-    setProjectState(nextState);
-    if ('notes' in updates) {
-      commitProjectHistory(nextState, 'Edit notes');
-    }
+  const handleUpdateChannel = (
+    channelId: string,
+    updates: Partial<Channel>,
+    options?: { isContinuous?: boolean }
+  ) => {
+    const isContinuous = options?.isContinuous ?? isContinuousChannelUpdate(updates);
+    mutateProjectState(
+      current => updateChannelInProjectState(current, channelId, updates),
+      getChannelUpdateLabel(updates),
+      { isContinuous }
+    );
   };
 
   const handleAddChannel = (type: InstrumentType, name: string, color: string) => {
@@ -488,14 +563,18 @@ export function App() {
       synthParams: audioEngine.getDefaultSynthParams()
     } satisfies Omit<Channel, 'mixerTrackId'>;
 
-    setProjectState(prev => appendChannelWithAllocatedMixerTrackId(prev, channel));
+    mutateProjectState(
+      current => appendChannelWithAllocatedMixerTrackId(current, channel),
+      'Add channel'
+    );
     setSelectedChannelId(channel.id);
   };
 
   const handleDeleteChannel = (channelId: string) => {
-    if (projectState.channels.length <= 1) return;
+    const currentState = projectStateRef.current;
+    if (currentState.channels.length <= 1) return;
 
-    const result = deleteChannelFromProjectState(projectState, channelId);
+    const result = deleteChannelFromProjectState(currentState, channelId);
     if (!result.deletedChannel) return;
 
     audioEngine.stopChannelVoices(channelId);
@@ -507,25 +586,28 @@ export function App() {
       }
     }
 
-    setProjectState(result.state);
+    mutateProjectState(
+      () => result.state,
+      'Delete channel'
+    );
     if (selectedChannelId === channelId) {
       setSelectedChannelId(result.state.selectedChannelId);
     }
   };
 
   const handleAddPattern = () => {
-    const nextIdx = projectState.patterns.length + 1;
-    const newPat = {
+    const current = projectStateRef.current;
+    const nextIdx = current.patterns.length + 1;
+    const newPat: Pattern = {
       id: `pat-${nextIdx}-${Date.now()}`,
       name: `Pattern ${nextIdx}`,
       color: '#ff6e00',
       lengthSteps: 16
     };
-    setProjectState(prev => ({
-      ...prev,
-      patterns: [...prev.patterns, newPat],
-      selectedPatternId: newPat.id
-    }));
+    mutateProjectState(
+      curr => addPatternToProjectState(curr, newPat),
+      'Add pattern'
+    );
   };
 
   const handleUpdateTracks = (tracks: PlaylistTrack[]) => {
@@ -569,11 +651,22 @@ export function App() {
     commitPlaylistHistory(nextState, 'Add playlist track');
   };
 
-  const handleUpdateMixerTrack = (trackId: number, updates: Partial<MixerTrack>) => {
-    setProjectState(prev => ({
-      ...prev,
-      mixerTracks: prev.mixerTracks.map(t => t.id === trackId ? { ...t, ...updates } : t)
-    }));
+  const handleUpdateMixerTrack = (
+    trackId: number,
+    updates: Partial<MixerTrack>,
+    options?: { isContinuous?: boolean }
+  ) => {
+    const isContinuous = options?.isContinuous ?? isContinuousMixerUpdate(updates);
+    mutateProjectState(
+      current => updateMixerTrackInProjectState(current, trackId, updates),
+      getMixerUpdateLabel(updates),
+      { isContinuous }
+    );
+
+    const target = projectStateRef.current.mixerTracks.find(t => t.id === trackId);
+    if (target) {
+      audioEngine.updateMixerTrack(target);
+    }
   };
 
   const handleAddFxSlot = (trackId: number, type: FxType) => {
@@ -586,42 +679,31 @@ export function App() {
       params: {}
     };
 
-    setProjectState(prev => ({
-      ...prev,
-      mixerTracks: prev.mixerTracks.map(t => {
-        if (t.id === trackId) {
-          return { ...t, fxSlots: [...t.fxSlots, newSlot] };
-        }
-        return t;
-      })
-    }));
+    mutateProjectState(
+      current => addFxSlotToProjectState(current, trackId, newSlot),
+      'Add effect'
+    );
   };
 
   const handleDeleteFxSlot = (trackId: number, slotId: string) => {
-    setProjectState(prev => ({
-      ...prev,
-      mixerTracks: prev.mixerTracks.map(t => {
-        if (t.id === trackId) {
-          return { ...t, fxSlots: t.fxSlots.filter(s => s.id !== slotId) };
-        }
-        return t;
-      })
-    }));
+    mutateProjectState(
+      current => deleteFxSlotFromProjectState(current, trackId, slotId),
+      'Delete effect'
+    );
   };
 
-  const handleUpdateFxSlot = (trackId: number, slotId: string, updates: Partial<FxSlot>) => {
-    setProjectState(prev => ({
-      ...prev,
-      mixerTracks: prev.mixerTracks.map(t => {
-        if (t.id === trackId) {
-          return {
-            ...t,
-            fxSlots: t.fxSlots.map(s => s.id === slotId ? { ...s, ...updates } : s)
-          };
-        }
-        return t;
-      })
-    }));
+  const handleUpdateFxSlot = (
+    trackId: number,
+    slotId: string,
+    updates: Partial<FxSlot>,
+    options?: { isContinuous?: boolean }
+  ) => {
+    const isContinuous = options?.isContinuous ?? isContinuousFxUpdate(updates);
+    mutateProjectState(
+      current => updateFxSlotInProjectState(current, trackId, slotId, updates),
+      getFxUpdateLabel(updates),
+      { isContinuous }
+    );
   };
 
   // --- Phase 6D: Recording -> decode -> register -> playlist clip ---
@@ -958,7 +1040,7 @@ export function App() {
               channels={projectState.channels}
               patterns={projectState.patterns}
               selectedPatternId={projectState.selectedPatternId}
-              onSelectPattern={(id) => setProjectState(prev => ({ ...prev, selectedPatternId: id }))}
+              onSelectPattern={(id) => { projectStateRef.current = { ...projectStateRef.current, selectedPatternId: id }; setProjectState(prev => ({ ...prev, selectedPatternId: id })); }}
               onAddPattern={handleAddPattern}
               selectedChannelId={selectedChannelId}
               onSelectChannel={(id) => setSelectedChannelId(id)}
@@ -973,6 +1055,8 @@ export function App() {
               isPlaying={isPlaying}
               swing={projectState.meta.swing}
               onUpdateSwing={(swing) => handleUpdateMeta({ swing })}
+              onInteractionStart={handleContinuousInteractionStart}
+              onInteractionEnd={handleContinuousInteractionEnd}
             />
           )}
 
@@ -1021,6 +1105,8 @@ export function App() {
               onUpdateFxSlot={handleUpdateFxSlot}
               isPlaying={isPlaying}
               onOpenParametricEq={(track) => { setEqModalTrackId(track.id); setIsParametricEqOpen(true); }}
+              onInteractionStart={handleContinuousInteractionStart}
+              onInteractionEnd={handleContinuousInteractionEnd}
             />
           )}
 
@@ -1078,15 +1164,15 @@ export function App() {
         const targetArpChannel = projectState.channels.find(c => c.id === arpChannelId) || projectState.channels[0];
         return targetArpChannel ? <ArpeggiatorModal isOpen={isArpeggiatorOpen} onClose={() => setIsArpeggiatorOpen(false)} channel={targetArpChannel} onUpdateChannel={(updatedCh) => handleUpdateChannel(updatedCh.id, updatedCh)} bpm={projectState.meta.bpm} /> : null;
       })()}
-      <SampleManagerModal isOpen={isSampleManagerOpen} onClose={() => setIsSampleManagerOpen(false)} channels={projectState.channels} selectedChannel={projectState.channels.find(c => c.id === sampleChannelId) || projectState.channels[0]} onAssignSampleToChannel={(chId, sampleData) => { handleUpdateChannel(chId, { customSample: sampleData }); }} onCreateChannelFromSample={(sampleData) => { const channel = { id: `ch-sample-${Date.now()}`, name: sampleData.name || 'Sample Pad', instrumentType: 'sampler' as const, volume: 0.85, pan: 0, pitch: 0, mute: false, solo: false, color: '#00ff88', steps: Array(16).fill(false), notes: [], synthParams: { ...DEFAULT_PROJECT.channels[0].synthParams }, customSample: sampleData } satisfies Omit<Channel, 'mixerTrackId'>; setProjectState(prev => appendChannelWithAllocatedMixerTrackId(prev, channel)); setSelectedChannelId(channel.id); }} />
+      <SampleManagerModal isOpen={isSampleManagerOpen} onClose={() => setIsSampleManagerOpen(false)} channels={projectState.channels} selectedChannel={projectState.channels.find(c => c.id === sampleChannelId) || projectState.channels[0]} onAssignSampleToChannel={(chId, sampleData) => { handleUpdateChannel(chId, { customSample: sampleData }); }} onCreateChannelFromSample={(sampleData) => { const channel = { id: `ch-sample-${Date.now()}`, name: sampleData.name || 'Sample Pad', instrumentType: 'sampler' as const, volume: 0.85, pan: 0, pitch: 0, mute: false, solo: false, color: '#00ff88', steps: Array(16).fill(false), notes: [], synthParams: { ...DEFAULT_PROJECT.channels[0].synthParams }, customSample: sampleData } satisfies Omit<Channel, 'mixerTrackId'>; mutateProjectState(current => appendChannelWithAllocatedMixerTrackId(current, channel), 'Create channel from sample'); setSelectedChannelId(channel.id); }} />
       <AudioRecorderModal isOpen={isAudioRecorderOpen} onClose={() => { setIsAudioRecorderOpen(false); setIsRecording(false); }} onSaveRecording={handleSaveRecordingToPlaylist} />
-      <VocalTunerModal isOpen={isVocalTunerOpen} onClose={() => setIsVocalTunerOpen(false)} vocalTunerSettings={projectState.vocalTunerSettings || { enabled: true, rootKey: 0, scale: 'minor', retuneSpeedMs: 15, formantShift: 0, pitchCorrectionAmount: 0.85, vibratoDepth: 0.2, humanize: 0.3 }} onUpdateVocalTuner={(settings) => setProjectState(prev => ({ ...prev, vocalTunerSettings: settings }))} channels={projectState.channels} />
-      <MidiLearnModal isOpen={isMidiLearnOpen} onClose={() => setIsMidiLearnOpen(false)} mappings={projectState.midiMappings || []} onUpdateMappings={(mappings) => setProjectState(prev => ({ ...prev, midiMappings: mappings }))} isLearnActive={isMidiLearnActive} onToggleLearn={() => setIsMidiLearnActive(!isMidiLearnActive)} onClearAll={() => setProjectState(prev => ({ ...prev, midiMappings: [] }))} />
+      <VocalTunerModal isOpen={isVocalTunerOpen} onClose={() => setIsVocalTunerOpen(false)} vocalTunerSettings={projectState.vocalTunerSettings || { enabled: true, rootKey: 0, scale: 'minor', retuneSpeedMs: 15, formantShift: 0, pitchCorrectionAmount: 0.85, vibratoDepth: 0.2, humanize: 0.3 }} onUpdateVocalTuner={(settings) => mutateProjectState(curr => updateVocalTunerInProjectState(curr, settings), 'Update vocal tuner')} channels={projectState.channels} />
+      <MidiLearnModal isOpen={isMidiLearnOpen} onClose={() => setIsMidiLearnOpen(false)} mappings={projectState.midiMappings || []} onUpdateMappings={(mappings) => mutateProjectState(curr => updateMidiMappingsInProjectState(curr, mappings), 'Update MIDI mappings')} isLearnActive={isMidiLearnActive} onToggleLearn={() => setIsMidiLearnActive(!isMidiLearnActive)} onClearAll={() => mutateProjectState(curr => updateMidiMappingsInProjectState(curr, []), 'Clear MIDI mappings')} />
       <MultiZoneSamplerModal isOpen={isMultiZoneSamplerOpen} onClose={() => setIsMultiZoneSamplerOpen(false)} channels={projectState.channels} onUpdateChannel={handleUpdateChannel} />
       <WavetableSynthModal isOpen={isWavetableSynthOpen} onClose={() => setIsWavetableSynthOpen(false)} channels={projectState.channels} onUpdateChannel={handleUpdateChannel} />
-      <WamPluginModal isOpen={isWamPluginOpen} onClose={() => setIsWamPluginOpen(false)} mixerTracks={projectState.mixerTracks} onUpdateMixerTracks={(tracks) => setProjectState(prev => ({ ...prev, mixerTracks: tracks }))} />
+      <WamPluginModal isOpen={isWamPluginOpen} onClose={() => setIsWamPluginOpen(false)} mixerTracks={projectState.mixerTracks} onUpdateMixerTracks={(tracks) => mutateProjectState(curr => ({ ...curr, mixerTracks: tracks }), 'Update mixer tracks')} />
       <TakeCompingModal isOpen={isTakeCompingOpen} onClose={() => setIsTakeCompingOpen(false)} onPromoteCompToPlaylist={(newClip) => { const nextState = { ...projectStateRef.current, playlistClips: [...projectStateRef.current.playlistClips, newClip] }; updatePlaylistProjectState(nextState); commitPlaylistHistory(nextState, 'Promote comp to playlist'); }} />
-      <SidechainRoutingModal isOpen={isSidechainOpen} onClose={() => setIsSidechainOpen(false)} mixerTracks={projectState.mixerTracks} onUpdateMixerTracks={(tracks) => setProjectState(prev => ({ ...prev, mixerTracks: tracks }))} />
+      <SidechainRoutingModal isOpen={isSidechainOpen} onClose={() => setIsSidechainOpen(false)} mixerTracks={projectState.mixerTracks} onUpdateMixerTracks={(tracks) => mutateProjectState(curr => ({ ...curr, mixerTracks: tracks }), 'Update mixer routing')} />
       <PolyphonicEditorModal isOpen={isPolyphonicEditorOpen} onClose={() => setIsPolyphonicEditorOpen(false)} />
       <DesktopAppModal isOpen={isDesktopAppOpen} onClose={() => setIsDesktopAppOpen(false)} />
       <WarpAudioProcessorModal isOpen={isWarpProcessorOpen} onClose={() => setIsWarpProcessorOpen(false)} selectedClip={projectState.playlistClips[0] || null} onUpdateClip={(updatedClip) => { const nextState = { ...projectStateRef.current, playlistClips: projectStateRef.current.playlistClips.map(c => c.id === updatedClip.id ? updatedClip : c) }; updatePlaylistProjectState(nextState); commitPlaylistHistory(nextState, 'Warp audio clip'); }} />
@@ -1094,7 +1180,7 @@ export function App() {
       <SpatialAudio3DPannerModal isOpen={isSpatialAudioOpen} onClose={() => setIsSpatialAudioOpen(false)} mixerTracks={projectState.mixerTracks} />
       <MpeExpressionModal isOpen={isMpeExpressionOpen} onClose={() => setIsMpeExpressionOpen(false)} />
       <StemSplitterAiModal isOpen={isStemSplitterOpen} onClose={() => setIsStemSplitterOpen(false)} onImportStemsToTracks={(stems) => { const base = projectStateRef.current; const newTracks = stems.map((s, idx) => ({ id: base.playlistTracks.length + idx + 1, name: s.name, color: s.type === 'vocals' ? '#ff6e00' : s.type === 'drums' ? '#00ff88' : s.type === 'bass' ? '#00e5ff' : '#a855f7', volume: 0.9, pan: 0, mute: false, solo: false, height: 'normal' as const })); const newClips = stems.map((s, idx) => ({ id: `stem-clip-${Date.now()}-${idx}`, trackIndex: base.playlistTracks.length + idx, startBar: 0, lengthBars: 8, type: 'audio' as const, audioBufferId: `stem-${s.type}`, audioName: s.name, color: s.type === 'vocals' ? '#ff6e00' : s.type === 'drums' ? '#00ff88' : s.type === 'bass' ? '#00e5ff' : '#a855f7', name: s.name })); const nextState = { ...base, playlistTracks: [...base.playlistTracks, ...newTracks], playlistClips: [...base.playlistClips, ...newClips] }; updatePlaylistProjectState(nextState); commitPlaylistHistory(nextState, 'Import stems to playlist'); }} />
-      <MasterMacroRackModal isOpen={isMasterMacrosOpen} onClose={() => setIsMasterMacrosOpen(false)} mixerTracks={projectState.mixerTracks} channels={projectState.channels} macroKnobs={projectState.macroKnobs} onUpdateMacros={(macros) => setProjectState(prev => ({ ...prev, macroKnobs: macros }))} />
+      <MasterMacroRackModal isOpen={isMasterMacrosOpen} onClose={() => setIsMasterMacrosOpen(false)} mixerTracks={projectState.mixerTracks} channels={projectState.channels} macroKnobs={projectState.macroKnobs} onUpdateMacros={(macros) => mutateProjectState(curr => updateMacroKnobsInProjectState(curr, macros), 'Update macro controls', { isContinuous: true })} />
       <ProjectBundleZipModal isOpen={isProjectZipOpen} onClose={() => setIsProjectZipOpen(false)} projectState={projectState} onLoadProjectState={handleLoadProjectState} />
       <OrientationLockModal />
     </div>
