@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createDefaultProjectState } from './projectState';
 import { getPersistedAudioClip, deletePersistedAudioClip, deletePersistedProjectState, persistAudioClip } from '../audio/audioPersistence';
-import { persistProjectState, restorePersistedProjectState, serializeProjectState } from './projectPersistence';
+import { hydrateProjectAudio, persistProjectState, restorePersistedProjectState, serializeProjectState } from './projectPersistence';
 import type { AudioRecording, PlaylistClip } from '../types/daw';
 
 class FakeRequest<T = unknown> {
@@ -184,6 +184,86 @@ test('missing audio asset does not prevent project restoration and marks the cli
   } finally {
     await deletePersistedProjectState().catch(() => undefined);
     await deletePersistedAudioClip('recording-rec-roundtrip').catch(() => undefined);
+    restore();
+  }
+});
+
+
+test('hydrateProjectAudio on arbitrary unhydrated project restores recordings, loads buffers, and clears audioUnavailable', async () => {
+  const restore = installIndexedDbMock();
+  try {
+    const { state, recording, clip, audioBufferId } = createRecordingProject();
+    // Simulate an unhydrated imported state: clip marked unavailable, recording lacks blob/url
+    const unhydratedState = {
+      ...state,
+      recordings: [{
+        id: recording.id,
+        name: recording.name,
+        timestamp: recording.timestamp,
+        durationSeconds: recording.durationSeconds,
+        waveform: recording.waveform,
+        audioBufferId
+      }],
+      playlistClips: [{
+        ...clip,
+        audioUnavailable: true
+      }]
+    };
+
+    const blob = recording.audioBlob!;
+    await persistAudioClip(audioBufferId, blob);
+
+    const loadedIds: string[] = [];
+    const hydrated = await hydrateProjectAudio(unhydratedState, {
+      loadAudioFile: async (loadedBlob, id) => {
+        loadedIds.push(id);
+        assert.equal(await loadedBlob.text(), 'binary-audio');
+        return { buffer: { duration: recording.durationSeconds } as AudioBuffer, peaks: recording.waveform, duration: recording.durationSeconds };
+      }
+    });
+
+    assert.deepEqual(loadedIds, [audioBufferId]);
+    assert.deepEqual(hydrated.hydratedAudioIds, [audioBufferId]);
+    assert.equal(hydrated.missingAudioIds.length, 0);
+    // Recordings are restored with audioBlob and audioUrl
+    assert.ok(hydrated.state.recordings[0].audioBlob);
+    assert.ok(hydrated.state.recordings[0].audioUrl);
+    // audioUnavailable is cleared from true to false
+    assert.equal(hydrated.state.playlistClips[0].audioUnavailable, false);
+  } finally {
+    await deletePersistedAudioClip('recording-rec-roundtrip').catch(() => undefined);
+    restore();
+  }
+});
+
+test('hydrateProjectAudio with missing audio marks playlistClip.audioUnavailable without corrupting project', async () => {
+  const restore = installIndexedDbMock();
+  try {
+    const { state, audioBufferId } = createRecordingProject();
+    const unhydratedState = {
+      ...state,
+      recordings: [{
+        ...state.recordings[0],
+        audioBlob: undefined,
+        audioUrl: undefined
+      }],
+      playlistClips: [{
+        ...state.playlistClips[0],
+        audioUnavailable: false
+      }]
+    };
+
+    const hydrated = await hydrateProjectAudio(unhydratedState, {
+      loadAudioFile: async () => ({ buffer: { duration: 1 } as AudioBuffer, peaks: [], duration: 1 })
+    });
+
+    assert.deepEqual(hydrated.missingAudioIds, [audioBufferId]);
+    assert.equal(hydrated.state.recordings[0].audioBlob, undefined);
+    assert.equal(hydrated.state.playlistClips[0].audioUnavailable, true);
+    // Preserves other project state
+    assert.equal(hydrated.state.channels.length, unhydratedState.channels.length);
+    assert.equal(hydrated.state.meta.bpm, unhydratedState.meta.bpm);
+  } finally {
     restore();
   }
 });

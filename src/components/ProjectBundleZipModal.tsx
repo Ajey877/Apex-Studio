@@ -4,12 +4,13 @@ import JSZip from 'jszip';
 import { ProjectState } from '../types/daw';
 import { normalizeProjectState } from '../state/projectState';
 import { getPersistedAudioClip, persistAudioClip } from '../audio/audioPersistence';
+import { audioEngine } from '../audio/audioEngine';
 
 interface ProjectBundleZipModalProps {
   isOpen: boolean;
   onClose: () => void;
   projectState: ProjectState;
-  onLoadProjectState: (state: ProjectState) => void;
+  onLoadProjectState: (state: ProjectState) => void | Promise<void>;
 }
 
 interface BundleAudioFile {
@@ -170,14 +171,20 @@ Engine: Apex Studio Digital Audio Workstation
           for (const audioFile of bundleManifest.audioFiles) {
             const entry = zip.file(audioFile.path);
             if (!entry || !audioFile.id) continue;
-            const blob = await entry.async('blob');
-            await persistAudioClip(audioFile.id, blob.type ? blob : new Blob([blob], { type: audioFile.mimeType || 'application/octet-stream' }));
+            const rawBlob = await entry.async('blob');
+            const typedBlob = rawBlob.type ? rawBlob : new Blob([rawBlob], { type: audioFile.mimeType || 'application/octet-stream' });
+            await persistAudioClip(audioFile.id, typedBlob);
+            try {
+              await audioEngine.loadAudioFile(typedBlob, audioFile.id);
+            } catch (err) {
+              console.warn(`[Apex Studio] Could not decode audio asset ${audioFile.id} into audio engine`, err);
+            }
             restoredAudioCount += 1;
           }
         }
       }
 
-      onLoadProjectState(loadedState);
+      await onLoadProjectState(loadedState);
       setIsImporting(false);
       setStatusMessage(`Imported "${loadedState.meta?.name || 'Project'}" and restored ${restoredAudioCount} audio asset(s).`);
       setTimeout(() => {

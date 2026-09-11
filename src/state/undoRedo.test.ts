@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createDefaultProjectState } from './projectState';
-import { createHistory, resolveUndoRedoShortcut } from './projectHistory';
+import { createHistory, resolveSaveShortcut, resolveUndoRedoShortcut } from './projectHistory';
 import { serializeProjectState, persistProjectState, restorePersistedProjectState } from './projectPersistence';
 import { getOfflineRenderPlan } from '../audio/offlineProjectRenderer';
 import type { Note, PlaylistClip, ProjectState } from '../types/daw';
@@ -78,6 +78,21 @@ test('Keyboard: Plain Z without modifier does NOT invoke undo or redo', () => {
 test('Keyboard: Plain Y without modifier does NOT invoke undo or redo', () => {
   const result = resolveUndoRedoShortcut({ ctrlKey: false, metaKey: false, code: 'KeyY', key: 'y' });
   assert.equal(result.action, 'none');
+});
+
+test('Keyboard: Ctrl+S invokes save', () => {
+  const result = resolveSaveShortcut({ ctrlKey: true, code: 'KeyS', key: 's' });
+  assert.equal(result, true);
+});
+
+test('Keyboard: Cmd+S (macOS) invokes save', () => {
+  const result = resolveSaveShortcut({ metaKey: true, code: 'KeyS', key: 's' });
+  assert.equal(result, true);
+});
+
+test('Keyboard: Plain S without modifier does NOT invoke save', () => {
+  const result = resolveSaveShortcut({ ctrlKey: false, metaKey: false, code: 'KeyS', key: 's' });
+  assert.equal(result, false);
 });
 
 // ==========================================

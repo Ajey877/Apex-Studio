@@ -7,6 +7,12 @@ export interface AudioHydrationEngine {
   loadAudioFile: (file: File | Blob, id: string) => Promise<{ buffer: AudioBuffer; peaks: number[]; duration: number }>;
 }
 
+export interface HydratedAudioResult {
+  state: ProjectState;
+  hydratedAudioIds: string[];
+  missingAudioIds: string[];
+}
+
 export interface RestoredProjectState {
   state: ProjectState;
   restored: boolean;
@@ -75,6 +81,68 @@ const hydrateRecording = async (
   };
 };
 
+/**
+ * Hydrate all audio assets referenced by a ProjectState into AudioEngine memory.
+ * Restores recording blobs and URLs, marks clips as available/unavailable,
+ * and loads available blobs into the audio engine.
+ */
+export const hydrateProjectAudio = async (
+  state: ProjectState,
+  audioEngine: AudioHydrationEngine
+): Promise<HydratedAudioResult> => {
+  const hydratedAudioIds: string[] = [];
+  const missingAudioIds: string[] = [];
+
+  const restoredRecordings = await Promise.all(state.recordings.map(async recording => {
+    try {
+      const result = await hydrateRecording(recording, audioEngine);
+      if (result.hydrated) hydratedAudioIds.push(result.audioId);
+      else missingAudioIds.push(result.audioId);
+      return result.recording;
+    } catch (error) {
+      const audioId = recording.audioBufferId || getRecordingAudioBufferId(recording.id);
+      missingAudioIds.push(audioId);
+      console.warn(`[Apex Studio] Could not restore recording audio ${audioId}`, error);
+      return { ...recording, audioBufferId: audioId };
+    }
+  }));
+
+  const loadedIds = new Set(hydratedAudioIds);
+  const clipIds = getAudioIdsForProject({ ...state, recordings: restoredRecordings });
+  for (const audioId of clipIds) {
+    if (loadedIds.has(audioId)) continue;
+    try {
+      const blob = await getPersistedAudioClip(audioId);
+      if (!blob || blob.size === 0) {
+        missingAudioIds.push(audioId);
+        continue;
+      }
+      await audioEngine.loadAudioFile(blob, audioId);
+      hydratedAudioIds.push(audioId);
+      loadedIds.add(audioId);
+    } catch (error) {
+      missingAudioIds.push(audioId);
+      console.warn(`[Apex Studio] Could not restore audio asset ${audioId}`, error);
+    }
+  }
+
+  const missingIds = new Set(missingAudioIds);
+  const playlistClips: PlaylistClip[] = state.playlistClips.map(clip => {
+    if (clip.type !== 'audio' || !clip.audioBufferId) return clip;
+    return { ...clip, audioUnavailable: missingIds.has(clip.audioBufferId) };
+  });
+
+  return {
+    state: {
+      ...state,
+      recordings: restoredRecordings,
+      playlistClips
+    },
+    hydratedAudioIds: [...new Set(hydratedAudioIds)],
+    missingAudioIds: [...new Set(missingAudioIds)]
+  };
+};
+
 /** Restore the persisted project and re-register every referenced audio asset before playback. */
 export const restorePersistedProjectState = async (
   audioEngine: AudioHydrationEngine,
@@ -89,57 +157,12 @@ export const restorePersistedProjectState = async (
     const parsed = JSON.parse(stateJson) as { persistenceVersion?: number; state?: unknown };
     const rawState = parsed?.state ?? parsed;
     const state = normalizeProjectState(rawState);
-    const hydratedAudioIds: string[] = [];
-    const missingAudioIds: string[] = [];
-
-    const restoredRecordings = await Promise.all(state.recordings.map(async recording => {
-      try {
-        const result = await hydrateRecording(recording, audioEngine);
-        if (result.hydrated) hydratedAudioIds.push(result.audioId);
-        else missingAudioIds.push(result.audioId);
-        return result.recording;
-      } catch (error) {
-        const audioId = recording.audioBufferId || getRecordingAudioBufferId(recording.id);
-        missingAudioIds.push(audioId);
-        console.warn(`[Apex Studio] Could not restore recording audio ${audioId}`, error);
-        return { ...recording, audioBufferId: audioId };
-      }
-    }));
-
-    const loadedIds = new Set(hydratedAudioIds);
-    const clipIds = getAudioIdsForProject({ ...state, recordings: restoredRecordings });
-    for (const audioId of clipIds) {
-      if (loadedIds.has(audioId)) continue;
-      try {
-        const blob = await getPersistedAudioClip(audioId);
-        if (!blob || blob.size === 0) {
-          missingAudioIds.push(audioId);
-          continue;
-        }
-        await audioEngine.loadAudioFile(blob, audioId);
-        hydratedAudioIds.push(audioId);
-        loadedIds.add(audioId);
-      } catch (error) {
-        missingAudioIds.push(audioId);
-        console.warn(`[Apex Studio] Could not restore audio asset ${audioId}`, error);
-      }
-    }
-
-    const missingIds = new Set(missingAudioIds);
-    const playlistClips: PlaylistClip[] = state.playlistClips.map(clip => {
-      if (clip.type !== 'audio' || !clip.audioBufferId) return clip;
-      return { ...clip, audioUnavailable: missingIds.has(clip.audioBufferId) };
-    });
-
+    const hydrated = await hydrateProjectAudio(state, audioEngine);
     return {
-      state: {
-        ...state,
-        recordings: restoredRecordings,
-        playlistClips
-      },
+      state: hydrated.state,
       restored: true,
-      hydratedAudioIds: [...new Set(hydratedAudioIds)],
-      missingAudioIds: [...new Set(missingAudioIds)]
+      hydratedAudioIds: hydrated.hydratedAudioIds,
+      missingAudioIds: hydrated.missingAudioIds
     };
   } catch (error) {
     console.warn('[Apex Studio] Persisted project state could not be restored; using a fresh project.', error);

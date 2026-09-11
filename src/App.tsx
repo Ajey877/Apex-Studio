@@ -25,9 +25,9 @@ import {
 } from './audio/presets';
 import { appendChannelWithAllocatedMixerTrackId } from './state/mixerTrackIdentity';
 import { deleteChannelFromProjectState } from './state/projectState';
-import { persistProjectState, restorePersistedProjectState } from './state/projectPersistence';
+import { hydrateProjectAudio, persistProjectState, restorePersistedProjectState } from './state/projectPersistence';
 import { createRecordingPlaylistClip, getRecordingAudioBufferId, validateRecordingTargetTrack } from './audio/recordingPipeline';
-import { createHistory, type ProjectHistory, resolveUndoRedoShortcut } from './state/projectHistory';
+import { createHistory, type ProjectHistory, resolveSaveShortcut, resolveUndoRedoShortcut } from './state/projectHistory';
 
 // Component Suite
 import { TransportBar } from './components/TransportBar';
@@ -99,6 +99,7 @@ export function App() {
   const [projectState, setProjectState] = useState<ProjectState>(DEFAULT_PROJECT);
   const [isProjectHydrating, setIsProjectHydrating] = useState(true);
   const projectPersistenceReadyRef = useRef(false);
+  const hasUnsavedChangesRef = useRef(false);
   const [currentView, setCurrentView] = useState<ViewMode>('channel_rack');
   const [playMode, setPlayMode] = useState<PlayMode>('pat');
   const [isPlaying, setIsPlaying] = useState(false);
@@ -266,13 +267,30 @@ export function App() {
   // Controlled autosave: persist settled project changes without writing on every render.
   useEffect(() => {
     if (!projectPersistenceReadyRef.current) return;
+    hasUnsavedChangesRef.current = true;
     const timer = window.setTimeout(() => {
-      void persistProjectState(projectState).catch(error => {
+      void persistProjectState(projectState).then(() => {
+        if (projectStateRef.current === projectState) {
+          hasUnsavedChangesRef.current = false;
+        }
+      }).catch(error => {
         console.warn('[Apex Studio] Automatic project persistence failed.', error);
       });
     }, 350);
     return () => window.clearTimeout(timer);
   }, [projectState]);
+
+  // Protect against closing/reloading while changes are unsettled.
+  useEffect(() => {
+    const handleBeforeUnload = (e: BeforeUnloadEvent) => {
+      if (hasUnsavedChangesRef.current) {
+        e.preventDefault();
+        e.returnValue = '';
+      }
+    };
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+  }, []);
 
   // Update audio engine settings when state changes
   useEffect(() => {
@@ -407,10 +425,33 @@ export function App() {
     commitProjectHistory(projectStateRef.current, 'Playlist interaction');
   }, [commitProjectHistory]);
 
-  const handleLoadProjectState = useCallback((state: ProjectState) => {
-    projectStateRef.current = state;
-    setProjectState(state);
-    resetProjectHistory(state);
+  const handleLoadProjectState = useCallback(async (state: ProjectState) => {
+    handleStop();
+    try {
+      const hydrated = await hydrateProjectAudio(state, audioEngine);
+      projectStateRef.current = hydrated.state;
+      setProjectState(hydrated.state);
+      resetProjectHistory(hydrated.state);
+      setSelectedChannelId(hydrated.state.selectedChannelId || hydrated.state.channels[0]?.id || 'ch-1');
+      setSelectedTrackId(hydrated.state.selectedMixerTrackId ?? 0);
+      void persistProjectState(hydrated.state).then(() => {
+        hasUnsavedChangesRef.current = false;
+      }).catch(error => {
+        console.warn('[Apex Studio] Failed to persist loaded project state.', error);
+      });
+    } catch (error) {
+      console.warn('[Apex Studio] Project audio hydration failed; loading project without audio.', error);
+      projectStateRef.current = state;
+      setProjectState(state);
+      resetProjectHistory(state);
+      setSelectedChannelId(state.selectedChannelId || state.channels[0]?.id || 'ch-1');
+      setSelectedTrackId(state.selectedMixerTrackId ?? 0);
+      void persistProjectState(state).then(() => {
+        hasUnsavedChangesRef.current = false;
+      }).catch(err => {
+        console.warn('[Apex Studio] Failed to persist loaded project state.', err);
+      });
+    }
   }, [resetProjectHistory]);
 
   // --- Project State Handlers ---
@@ -670,6 +711,16 @@ export function App() {
       } else if (shortcut.action === 'redo') {
         e.preventDefault();
         handleRedo();
+        return;
+      }
+
+      if (resolveSaveShortcut(e)) {
+        e.preventDefault();
+        void persistProjectState(projectStateRef.current).then(() => {
+          hasUnsavedChangesRef.current = false;
+        }).catch(error => {
+          console.warn('[Apex Studio] Manual project save failed.', error);
+        });
         return;
       }
 

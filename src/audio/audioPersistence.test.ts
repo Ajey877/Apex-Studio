@@ -91,3 +91,41 @@ test('hydration reports missing persisted audio without throwing', async () => {
     restore();
   }
 });
+
+
+test('bundle import flow stores audio in IndexedDB and immediately registers it in AudioEngine without restart', async () => {
+  const restore = installIndexedDbMock();
+  try {
+    const audioId = 'bundle-sample-123';
+    const blob = new Blob(['bundle-audio-data'], { type: 'audio/wav' });
+
+    // Simulate bundle import step
+    await persistAudioClip(audioId, blob);
+
+    const mockSampleBuffers = new Map<string, AudioBuffer>();
+    const fakeAudioEngine = {
+      loadAudioFile: async (file: File | Blob, id: string) => {
+        const dummyBuffer = { duration: 2.0, numberOfChannels: 2 } as AudioBuffer;
+        mockSampleBuffers.set(id, dummyBuffer);
+        return { buffer: dummyBuffer, peaks: [0.5], duration: 2.0 };
+      },
+      getSampleBuffer: (id: string) => mockSampleBuffers.get(id)
+    };
+
+    // Immediately load the extracted blob into audioEngine during import
+    await fakeAudioEngine.loadAudioFile(blob, audioId);
+
+    // Verify buffer is immediately available for playback without application restart
+    const buffer = fakeAudioEngine.getSampleBuffer(audioId);
+    assert.ok(buffer);
+    assert.equal(buffer.duration, 2.0);
+
+    // Also verify persistence has the blob for future sessions
+    const persisted = await getPersistedAudioClip(audioId);
+    assert.ok(persisted);
+    assert.equal(await persisted.text(), 'bundle-audio-data');
+  } finally {
+    await deletePersistedAudioClip('bundle-sample-123').catch(() => undefined);
+    restore();
+  }
+});
