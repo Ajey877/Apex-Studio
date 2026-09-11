@@ -785,7 +785,21 @@ class AudioEngine {
       const trk = mixerTracks.find(t => t.id === Number(target.targetId));
       if (trk) {
         trk.volume = value * 1.25;
-        this.updateMixerTrack(trk);
+      }
+      const mixerChannel = this.mixerChannels.get(Number(target.targetId));
+      if (mixerChannel) {
+        const targetVol = (trk && trk.mute) ? 0 : value * 1.25;
+        mixerChannel.output.gain.setTargetAtTime(targetVol, now, 0.02);
+      }
+    } else if (target.type === 'mixer_pan') {
+      const trk = mixerTracks.find(t => t.id === Number(target.targetId));
+      const targetPan = (value * 2) - 1;
+      if (trk) {
+        trk.pan = targetPan;
+      }
+      const mixerChannel = this.mixerChannels.get(Number(target.targetId));
+      if (mixerChannel && mixerChannel.panner && mixerChannel.panner.pan) {
+        mixerChannel.panner.pan.setTargetAtTime(targetPan, now, 0.02);
       }
     }
   }
@@ -1975,7 +1989,43 @@ class AudioEngine {
     totalBars: number,
     sampleRate?: number,
   ): Promise<AudioBuffer> {
-    const previous = { ctx: this.ctx, transport: this.transport, masterGain: this.masterGain, masterAnalyser: this.masterAnalyser, grossBeatNode: this.grossBeatNode, mixerChannels: this.mixerChannels, impulseResponses: this.impulseResponses, activeVoices: this.activeVoices, isPlaying: this.isPlaying, activeChannels: this.activeChannels, activeClips: this.activeClips, activePlayMode: this.activePlayMode, activePatternId: this.activePatternId, currentStep: this.currentStep, currentBar: this.currentBar, bpm: this.bpm, metronome: this.metronome };
+    // Validate audio buffers for all unmuted audio clips
+    for (const clip of clips) {
+      if (clip.type === 'audio' && !clip.mute) {
+        if (!clip.audioBufferId) {
+          throw new Error(
+            `Audio clip "${clip.name || clip.audioName || clip.id}" is missing an audioBufferId.`
+          );
+        }
+        const buffer = this.sampleBuffers.get(clip.audioBufferId);
+        if (!buffer) {
+          throw new Error(
+            `Missing audio buffer for clip "${clip.name || clip.audioName || clip.id}" (buffer ID: ${clip.audioBufferId}). The audio asset is not loaded in memory.`
+          );
+        }
+      }
+    }
+
+    const previous = {
+      ctx: this.ctx,
+      transport: this.transport,
+      masterGain: this.masterGain,
+      masterAnalyser: this.masterAnalyser,
+      grossBeatNode: this.grossBeatNode,
+      mixerChannels: this.mixerChannels,
+      impulseResponses: this.impulseResponses,
+      activeVoices: this.activeVoices,
+      isPlaying: this.isPlaying,
+      activeChannels: this.activeChannels,
+      activeClips: this.activeClips,
+      activeMixerTracks: this.activeMixerTracks,
+      activePlayMode: this.activePlayMode,
+      activePatternId: this.activePatternId,
+      currentStep: this.currentStep,
+      currentBar: this.currentBar,
+      bpm: this.bpm,
+      metronome: this.metronome
+    };
     const safeBpm = Math.max(20, Math.min(300, Number(bpm) || 120));
     const secondsPerStep = (60 / safeBpm) / 4;
     const totalDurationSeconds = Math.max(4, Math.max(1, totalBars) * 4 * (60 / safeBpm));
@@ -2006,6 +2056,7 @@ class AudioEngine {
       this.metronome = false;
       this.buildReverbImpulse(2.5, 2.0);
       const tracks = [...mixerTracks].sort((a, b) => a.id - b.id);
+      this.activeMixerTracks = structuredClone(tracks);
       const masterTrack = tracks.find(track => track.id === 0);
       if (masterTrack) this.updateMixerTrack(masterTrack); else this.getOrCreateMixerChannel(0);
       for (const track of tracks) if (track.id !== 0) this.updateMixerTrack(track);
@@ -2020,7 +2071,24 @@ class AudioEngine {
       }
       return await offlineCtx.startRendering();
     } finally {
-      this.ctx = previous.ctx; this.transport = previous.transport; this.masterGain = previous.masterGain; this.masterAnalyser = previous.masterAnalyser; this.grossBeatNode = previous.grossBeatNode; this.mixerChannels = previous.mixerChannels; this.impulseResponses = previous.impulseResponses; this.activeVoices = previous.activeVoices; this.isPlaying = previous.isPlaying; this.activeChannels = previous.activeChannels; this.activeClips = previous.activeClips; this.activePlayMode = previous.activePlayMode; this.activePatternId = previous.activePatternId; this.currentStep = previous.currentStep; this.currentBar = previous.currentBar; this.bpm = previous.bpm; this.metronome = previous.metronome;
+      this.ctx = previous.ctx;
+      this.transport = previous.transport;
+      this.masterGain = previous.masterGain;
+      this.masterAnalyser = previous.masterAnalyser;
+      this.grossBeatNode = previous.grossBeatNode;
+      this.mixerChannels = previous.mixerChannels;
+      this.impulseResponses = previous.impulseResponses;
+      this.activeVoices = previous.activeVoices;
+      this.isPlaying = previous.isPlaying;
+      this.activeChannels = previous.activeChannels;
+      this.activeClips = previous.activeClips;
+      this.activeMixerTracks = previous.activeMixerTracks;
+      this.activePlayMode = previous.activePlayMode;
+      this.activePatternId = previous.activePatternId;
+      this.currentStep = previous.currentStep;
+      this.currentBar = previous.currentBar;
+      this.bpm = previous.bpm;
+      this.metronome = previous.metronome;
     }
   }
 
@@ -2030,82 +2098,126 @@ class AudioEngine {
     clips: PlaylistClip[],
     bpm: number,
     totalBars: number,
-    bitDepth: 16 | 24 | 32 = 24
+    bitDepth: 16 | 24 | 32 = 24,
+    mixerTracks?: MixerTrack[]
   ): Promise<Blob> {
-    const secondsPerBeat = 60 / bpm;
-    const secondsPerBar = secondsPerBeat * 4;
-    const totalDurationSeconds = Math.max(4, totalBars * secondsPerBar);
-    const sampleRate = 44100;
-    const lengthSamples = Math.ceil(sampleRate * totalDurationSeconds);
-
-    const offlineCtx = new OfflineAudioContext(2, lengthSamples, sampleRate);
-    const masterGain = offlineCtx.createGain();
-    masterGain.connect(offlineCtx.destination);
-
-    // Schedule all notes across playlist clips
-    clips.forEach(clip => {
-      if (clip.type === 'pattern') {
-        const clipStartTime = clip.startBar * secondsPerBar;
-        const channel = channels.find(c => c.id === clip.channelId) || channels[0];
-        if (!channel || channel.mute) return;
-
-        // Render pattern notes
-        const patternNotes = channel.notes || [];
-        patternNotes.forEach(note => {
-          const noteStartTime = clipStartTime + (note.start * (secondsPerBeat / 4));
-          if (noteStartTime < totalDurationSeconds) {
-            this.renderNoteOffline(offlineCtx, channel, note, noteStartTime, masterGain);
-          }
-        });
-      }
-    });
-
-    const renderedBuffer = await offlineCtx.startRendering();
+    const renderedBuffer = await this.renderTimelineOffline(
+      channels,
+      clips,
+      mixerTracks ?? [],
+      bpm,
+      totalBars
+    );
     return this.audioBufferToWav(renderedBuffer, bitDepth);
   }
 
-  // Multi-Track Offline Stem Exporter: Renders individual isolated tracks for studio mastering
+  // Multi-Track Offline Stem Exporter: Renders individual isolated tracks with real DSP & FX
   public async renderProjectStems(
     channels: Channel[],
     clips: PlaylistClip[],
-    bpm: number,
-    totalBars: number,
-    bitDepth: 16 | 24 | 32 = 24
+    mixerTracksOrBpm: MixerTrack[] | number,
+    bpmOrTotalBars?: number,
+    totalBarsOrBitDepth?: number | (16 | 24 | 32),
+    bitDepthParam?: 16 | 24 | 32
   ): Promise<{ stems: Record<string, Blob>; master: Blob }> {
-    const secondsPerBeat = 60 / bpm;
-    const secondsPerBar = secondsPerBeat * 4;
-    const totalDurationSeconds = Math.max(4, totalBars * secondsPerBar);
-    const sampleRate = 44100;
-    const lengthSamples = Math.ceil(sampleRate * totalDurationSeconds);
+    let mixerTracks: MixerTrack[] = [];
+    let bpm = 120;
+    let totalBars = 4;
+    let bitDepth: 16 | 24 | 32 = 24;
+
+    if (Array.isArray(mixerTracksOrBpm)) {
+      mixerTracks = mixerTracksOrBpm;
+      bpm = Number(bpmOrTotalBars) || 120;
+      totalBars = Number(totalBarsOrBitDepth) || 4;
+      bitDepth = bitDepthParam ?? 24;
+    } else {
+      bpm = Number(mixerTracksOrBpm) || 120;
+      totalBars = Number(bpmOrTotalBars) || 4;
+      bitDepth = (totalBarsOrBitDepth as (16 | 24 | 32)) ?? 24;
+      mixerTracks = [];
+    }
+
+    // 1. Render Full Master Mix using verified offline timeline renderer
+    const masterBuffer = await this.renderTimelineOffline(
+      channels,
+      clips,
+      mixerTracks,
+      bpm,
+      totalBars
+    );
+    const master = this.audioBufferToWav(masterBuffer, bitDepth);
 
     const stems: Record<string, Blob> = {};
 
-    // 1. Render each channel individually as an isolated stem
+    // 2. Render each channel stem
     for (const channel of channels) {
-      const offlineCtx = new OfflineAudioContext(2, lengthSamples, sampleRate);
-      const trackGain = offlineCtx.createGain();
-      trackGain.connect(offlineCtx.destination);
-
-      clips.forEach(clip => {
-        if (clip.type === 'pattern' && clip.channelId === channel.id) {
-          const clipStartTime = clip.startBar * secondsPerBar;
-          const patternNotes = channel.notes || [];
-          patternNotes.forEach(note => {
-            const noteStartTime = clipStartTime + (note.start * (secondsPerBeat / 4));
-            if (noteStartTime < totalDurationSeconds) {
-              this.renderNoteOffline(offlineCtx, channel, note, noteStartTime, trackGain);
-            }
-          });
+      const channelClips = clips.filter(clip => {
+        if (clip.mute) return false;
+        if (clip.type === 'pattern') {
+          return clip.channelId === channel.id;
         }
+        if (clip.type === 'audio') {
+          return clip.channelId === channel.id;
+        }
+        if (clip.type === 'automation') {
+          const target = clip.automationTarget;
+          if (!target) return false;
+          return (
+            String(target.targetId) === String(channel.id) ||
+            String(target.targetId) === String(channel.mixerTrackId)
+          );
+        }
+        return false;
       });
 
-      const buffer = await offlineCtx.startRendering();
-      const cleanName = channel.name.replace(/[^a-zA-Z0-9_-]/g, '_');
-      stems[`${channel.id}_${cleanName}.wav`] = this.audioBufferToWav(buffer, bitDepth);
+      const stemBuffer = await this.renderTimelineOffline(
+        [channel],
+        channelClips,
+        mixerTracks,
+        bpm,
+        totalBars
+      );
+
+      const cleanName = (channel.name || `Channel_${channel.id}`).replace(/[^a-zA-Z0-9_-]/g, '_');
+      stems[`${channel.id}_${cleanName}.wav`] = this.audioBufferToWav(stemBuffer, bitDepth);
     }
 
-    // 2. Render Full Master Mix
-    const master = await this.renderProjectToWav(channels, clips, bpm, totalBars, bitDepth);
+    // 3. Render unassociated audio clips (recordings / samples not assigned to a channel)
+    // Group them by playlist trackIndex
+    const channelIds = new Set(channels.map(c => c.id));
+    const unassociatedAudioClips = clips.filter(
+      clip => clip.type === 'audio' && !clip.mute && (!clip.channelId || !channelIds.has(clip.channelId))
+    );
+
+    const clipsByTrack = new Map<number, PlaylistClip[]>();
+    for (const clip of unassociatedAudioClips) {
+      const trackIdx = Number.isFinite(clip.trackIndex) ? Math.floor(clip.trackIndex) : 0;
+      const list = clipsByTrack.get(trackIdx) || [];
+      list.push(clip);
+      clipsByTrack.set(trackIdx, list);
+    }
+
+    for (const [trackIdx, trackClips] of clipsByTrack.entries()) {
+      const mixerTrackId = Math.max(1, trackIdx + 1);
+      const trackAutomationClips = clips.filter(clip => {
+        if (clip.mute || clip.type !== 'automation' || !clip.automationTarget) return false;
+        return String(clip.automationTarget.targetId) === String(mixerTrackId);
+      });
+
+      const stemBuffer = await this.renderTimelineOffline(
+        [],
+        [...trackClips, ...trackAutomationClips],
+        mixerTracks,
+        bpm,
+        totalBars
+      );
+
+      const trackNum = trackIdx + 1;
+      const trackClipNames = trackClips.map(c => c.name || c.audioName).filter(Boolean);
+      const firstClipName = trackClipNames[0] || `Audio_Track_${trackNum}`;
+      const cleanName = firstClipName.replace(/[^a-zA-Z0-9_-]/g, '_');
+      stems[`track_${trackNum}_${cleanName}.wav`] = this.audioBufferToWav(stemBuffer, bitDepth);
+    }
 
     return { stems, master };
   }
@@ -2213,6 +2325,7 @@ class AudioEngine {
   private transportStateCallback: ((state: Readonly<TransportState>) => void) | null = null;
   private activeChannels: Channel[] = [];
   private activeClips: PlaylistClip[] = [];
+  private activeMixerTracks: MixerTrack[] = [];
   private activePlayMode: 'pat' | 'song' = 'pat';
   private activePatternId?: string;
 
@@ -2243,7 +2356,8 @@ class AudioEngine {
     channels: Channel[],
     clips: PlaylistClip[],
     mode: 'pat' | 'song',
-    patternId?: string
+    patternId?: string,
+    mixerTracks?: MixerTrack[]
   ) {
     if (!this.ctx) this.init();
     if (this.ctx && this.ctx.state === 'suspended') {
@@ -2259,6 +2373,9 @@ class AudioEngine {
     this.activeClips = clips;
     this.activePlayMode = mode;
     this.activePatternId = patternId;
+    if (mixerTracks) {
+      this.activeMixerTracks = mixerTracks;
+    }
 
     if (!this.transport && this.ctx) {
       this.transport = new AudioClockTransport(this.ctx);
@@ -2388,7 +2505,7 @@ class AudioEngine {
           if (currentTotalBar >= clip.startBar && currentTotalBar <= clip.startBar + clip.lengthBars) {
             const relX = (currentTotalBar - clip.startBar) / clip.lengthBars;
             const val = this.interpolateAutomationCurve(clip.automationPoints, relX);
-            this.applyAutomationValue(clip.automationTarget, val, this.activeChannels, [], now);
+            this.applyAutomationValue(clip.automationTarget, val, this.activeChannels, this.activeMixerTracks, now);
           }
         }
       });
@@ -2437,6 +2554,25 @@ class AudioEngine {
     const buf = clip.audioBufferId ? this.sampleBuffers.get(clip.audioBufferId) : null;
     if (!buf) return;
 
+    if (!Number.isFinite(clip.lengthBars) || clip.lengthBars <= 0) return;
+
+    const safeBpm = Number.isFinite(this.bpm) && this.bpm > 0 ? this.bpm : 120;
+    const secondsPerStep = (60 / safeBpm) / 4;
+    const offsetSeconds = Math.max(0, (clip.offsetSteps || 0) * secondsPerStep);
+
+    if (offsetSeconds >= buf.duration) return;
+
+    const clipDurationSec = clip.lengthBars * 4 * (60 / safeBpm);
+    if (!Number.isFinite(clipDurationSec) || clipDurationSec <= 0.0005) return;
+
+    const rate = Number.isFinite(clip.timeStretchRate) && (clip.timeStretchRate ?? 1) > 0 ? (clip.timeStretchRate ?? 1) : 1;
+    const playDurationBufferSec = clipDurationSec * rate;
+    const actualDurationBufferSec = Math.min(buf.duration - offsetSeconds, playDurationBufferSec);
+    if (actualDurationBufferSec <= 0) return;
+
+    const effectiveDuration = Math.min(clipDurationSec, actualDurationBufferSec / rate);
+    if (effectiveDuration <= 0.0005) return;
+
     const source = this.ctx.createBufferSource();
     source.buffer = buf;
 
@@ -2449,26 +2585,58 @@ class AudioEngine {
     }
 
     const gainNode = this.ctx.createGain();
-    const clipDurationSec = (clip.lengthBars * 4 * (60 / this.bpm));
-    const fadeInSec = Math.max(0.005, (clip.fadeInBars || 0) * 4 * (60 / this.bpm));
-    const fadeOutSec = Math.max(0.005, (clip.fadeOutBars || 0) * 4 * (60 / this.bpm));
 
-    // Fade in envelope
-    gainNode.gain.setValueAtTime(0.0001, startTime);
-    gainNode.gain.exponentialRampToValueAtTime(1.0, startTime + fadeInSec);
+    // Safe fade envelope calculation: in and out cannot invert or exceed half duration
+    const maxFade = effectiveDuration / 2;
+    const secondsPerBar = (60 / safeBpm) * 4;
+    const requestedFadeIn = Math.max(0, (clip.fadeInBars || 0) * secondsPerBar);
+    const requestedFadeOut = Math.max(0, (clip.fadeOutBars || 0) * secondsPerBar);
 
-    // Fade out envelope
-    const fadeOutStart = Math.max(startTime + fadeInSec, startTime + clipDurationSec - fadeOutSec);
-    gainNode.gain.setValueAtTime(1.0, fadeOutStart);
-    gainNode.gain.exponentialRampToValueAtTime(0.0001, startTime + clipDurationSec);
+    const minMicroFade = Math.min(0.002, maxFade);
+    const fadeInSec = Math.min(maxFade, requestedFadeIn > 0 ? requestedFadeIn : minMicroFade);
+    const fadeOutSec = Math.min(maxFade, requestedFadeOut > 0 ? requestedFadeOut : minMicroFade);
+
+    const t0 = startTime;
+    const t1 = startTime + fadeInSec;
+    const t2 = Math.max(t1, startTime + effectiveDuration - fadeOutSec);
+    const t3 = startTime + effectiveDuration;
+
+    let mixerTrackId = Math.max(1, Math.floor(clip.trackIndex) + 1);
+    let baseGain = 1.0;
+    if (clip.channelId) {
+      const ch = this.activeChannels.find(c => c.id === clip.channelId);
+      if (ch) {
+        if (Number.isFinite(ch.mixerTrackId)) {
+          mixerTrackId = ch.mixerTrackId;
+        }
+        if (Number.isFinite(ch.volume)) {
+          baseGain = Math.max(0, ch.volume);
+        }
+      }
+    }
+
+    const peakGain = Math.max(0.0001, baseGain);
+    gainNode.gain.setValueAtTime(0.0001, t0);
+    if (fadeInSec > 0.0001) {
+      gainNode.gain.exponentialRampToValueAtTime(peakGain, t1);
+    } else {
+      gainNode.gain.setValueAtTime(peakGain, t0);
+    }
+
+    if (t2 > t1) {
+      gainNode.gain.setValueAtTime(peakGain, t2);
+    }
+
+    if (fadeOutSec > 0.0001 && t3 > t2) {
+      gainNode.gain.exponentialRampToValueAtTime(0.0001, t3);
+    }
 
     source.connect(gainNode);
-    const mixerTrackId = Math.max(1, Math.floor(clip.trackIndex) + 1);
     const mixer = this.getOrCreateMixerChannel(mixerTrackId);
     gainNode.connect(mixer.input);
 
-    source.start(startTime);
-    source.stop(startTime + clipDurationSec);
+    source.start(startTime, offsetSeconds, actualDurationBufferSec);
+    source.stop(startTime + effectiveDuration);
   }
 
   // Fast offline Bounce-In-Place / Channel Render

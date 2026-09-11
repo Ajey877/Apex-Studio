@@ -309,7 +309,8 @@ export function App() {
         projectState.channels,
         projectState.playlistClips,
         playMode,
-        projectState.selectedPatternId
+        projectState.selectedPatternId,
+        structuredClone(projectState.mixerTracks)
       );
       setIsPlaying(true);
     }
@@ -331,7 +332,8 @@ export function App() {
         projectState.channels,
         projectState.playlistClips,
         nextMode,
-        projectState.selectedPatternId
+        projectState.selectedPatternId,
+        structuredClone(projectState.mixerTracks)
       );
     }
   };
