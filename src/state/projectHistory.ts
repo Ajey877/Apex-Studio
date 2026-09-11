@@ -129,3 +129,14 @@ export function resolveUndoRedoShortcut(event: {
   return { action: 'none' };
 }
 
+
+export function resolveSaveShortcut(event: {
+  ctrlKey?: boolean;
+  metaKey?: boolean;
+  code?: string;
+  key?: string;
+}): boolean {
+  const isModifier = Boolean(event.ctrlKey || event.metaKey);
+  if (!isModifier) return false;
+  return event.code === 'KeyS' || event.key === 's' || event.key === 'S';
+}

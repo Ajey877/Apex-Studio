@@ -809,6 +809,38 @@ describe('Phase 3A: Render Architecture & Audio Fidelity', () => {
     assert.ok(buffer.length > 0);
   });
 
+
+  it('imported audio clip immediately renders to offline master mix without application restart', async () => {
+    const importedBufferId = 'imported-asset-test';
+    const testBuf = createTestBuffer(4);
+    audioEngine.setSampleBuffer(importedBufferId, testBuf);
+
+    const importedClip: PlaylistClip = {
+      id: 'clip-imported-1',
+      name: 'Imported Audio',
+      trackIndex: 1,
+      startBar: 0,
+      lengthBars: 2,
+      type: 'audio',
+      audioBufferId: importedBufferId,
+      audioUnavailable: false,
+      color: '#8b5cf6',
+    };
+
+    const buffer = await audioEngine.renderTimelineOffline(
+      [],
+      [importedClip],
+      defaultMixerTracks,
+      120,
+      2
+    );
+
+    assert.ok(buffer);
+    assert.equal(buffer.sampleRate, 44100);
+    assert.equal(buffer.numberOfChannels, 2);
+    assert.ok(buffer.length > 0);
+  });
+
   // ==================================================
   // ATTACK TEST SUITE
   // ==================================================
