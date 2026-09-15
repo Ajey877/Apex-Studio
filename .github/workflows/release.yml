@@ -35,6 +35,9 @@ jobs:
       - name: Audio regression tests
         run: npm run test:audio
 
+      - name: History regression tests
+        run: npm run test:history
+
       - name: Compile Optimized Web Bundle
         run: npm run build
 
@@ -50,8 +53,22 @@ jobs:
           name: "Apex Studio DAW ${{ github.ref_name }}"
           draft: false
           prerelease: false
-          generate_release_notes: false
-          body: "Official standalone Windows installer (.exe) for Apex Studio DAW."
+          generate_release_notes: true
+          body: |
+            # Apex Studio DAW ${{ github.ref_name }}
+
+            Official Windows release of Apex Studio DAW.
+
+            This release includes the Phase 3C undo/redo completeness work and the validated core audio, history, build, and desktop-security checks.
+
+            ## Downloads
+            - **Installer:** `Apex Studio DAW-${{ github.ref_name }}-x64.exe`
+            - **Portable:** portable `.exe` if produced by electron-builder.
+
+            ## Notes
+            - Windows x64
+            - Electron 43.4.1
+            - Unsigned Windows binaries may show the normal Windows SmartScreen warning.
           files: |
             dist-electron/*.exe
             dist-electron/*.zip
