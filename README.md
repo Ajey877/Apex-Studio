@@ -1,92 +1,155 @@
-# 🎛️ Apex Studio DAW — Professional Digital Audio Workstation
+# 🎛️ Apex Studio DAW
 
-> **A studio-grade, multi-track digital audio workstation running directly in the browser and as a standalone native Windows desktop application.**
->
-> *100% Free & Open Access for Producers and Creators.*
+> **A free, open-access digital audio workstation for making complete tracks in your browser or on Windows.**
 
----
+Apex Studio combines a step sequencer, piano roll, playlist arranger, mixer, instruments, effects, recording, automation, and WAV/MIDI export in one project.
 
-## ⚡ 5-Minute Quickstart Tutorial
+**[🚀 Get Apex Studio](https://github.com/Ajey877/Apex-Studio) · [⬇️ Windows Releases](https://github.com/Ajey877/Apex-Studio/releases) · [🐛 Report a Bug](https://github.com/Ajey877/Apex-Studio/issues/new/choose) · [💬 Issues](https://github.com/Ajey877/Apex-Studio/issues)**
 
-### 1. Build a Drum Beat (Channel Rack)
-- Press <kbd>F6</kbd> (or <kbd>1</kbd>) to open the **Channel Rack**.
-- Click the step buttons across Kick, Snare, Hi-Hat, and 808 channels to create a groove.
-- Press <kbd>Space</kbd> to listen in real time. Adjust tempo (BPM) at the top.
-
-### 2. Play Melodies & Chords (Piano Roll or Keyboard)
-- Press <kbd>F7</kbd> (or <kbd>2</kbd>) to open the **Piano Roll**.
-- Play directly with your computer keyboard or connect a MIDI controller.
-- Click to draw notes, drag edges to resize note length, and use chord/scale tools.
-
-### 3. Arrange Your Song (Playlist Arranger)
-- Press <kbd>F5</kbd> (or <kbd>3</kbd>) to view the **Playlist Arranger**.
-- Switch transport from **PAT** (Pattern) to **SONG** mode (<kbd>L</kbd>).
-- Paint patterns, loop sections, and structure your song.
-- Drag audio files (WAV/MP3) onto the timeline.
-
-### 4. Mix & Polish (Mixer & FX Racks)
-- Press <kbd>F9</kbd> (or <kbd>4</kbd>) to open the **16-Track Mixer**.
-- Add studio processors such as Parametric EQ, Gross Beat, Reverb, Delay, and Sidechain Ducking.
-- Use the Mastering Suite for compression, stereo control, and limiting.
-
-### 5. Save & Export
-- Render WAV/MP3 or project ZIP bundles from the Export workflow.
-- Save your session locally with <kbd>Ctrl</kbd> + <kbd>S</kbd>.
+[![CI](https://github.com/Ajey877/Apex-Studio/actions/workflows/ci.yml/badge.svg)](https://github.com/Ajey877/Apex-Studio/actions/workflows/ci.yml)
+[![Audio Validation](https://github.com/Ajey877/Apex-Studio/actions/workflows/audio-validation.yml/badge.svg)](https://github.com/Ajey877/Apex-Studio/actions/workflows/audio-validation.yml)
+[![Desktop Validation](https://github.com/Ajey877/Apex-Studio/actions/workflows/desktop-validation.yml/badge.svg)](https://github.com/Ajey877/Apex-Studio/actions/workflows/desktop-validation.yml)
 
 ---
 
-## 💾 How to Install on PC
+## 🎧 What is Apex Studio?
 
-You can run Apex Studio on your Windows PC offline after installation.
+Apex Studio is being built as a practical DAW for producers, beatmakers, and sound designers who want a focused music-production workflow without paying for a commercial DAW.
 
-### Standalone `.exe` Installer
-1. Download the latest Apex Studio Windows installer from GitHub Releases.
-2. Run the installer.
-3. Launch Apex Studio from the Desktop or Start Menu.
+### Core workflow
 
-### Browser/PWA
-1. Open Apex Studio in a supported browser.
-2. Use the browser's Install App option if available.
+**Create → Arrange → Mix → Record → Automate → Export**
 
----
-
-## 🎹 Studio Feature Matrix
-
-| Module | Core Capabilities |
+| Module | What you can do |
 | :--- | :--- |
-| **Channel Rack** | Step Sequencing, Swing, Velocity, MIDI Learn. |
-| **Piano Roll** | Polyphonic Editing, Scale/Chord Tools, Velocity, Quantize. |
-| **Playlist Arranger** | Multi-lane Timeline, Audio & Pattern Clips, Automation. |
-| **16-Track Mixer** | FX Inserts, Spectrum Visualizer, Sidechain Routing, Peak Meters. |
-| **3D Wavetable Synth** | Dual Morphing Oscillators, Filters, ADSR. |
-| **Mastering Suite** | Multiband Compression, Mid/Side Width, True Peak Limiting, LUFS. |
-| **Gross Beat** | Time/Volume Curves, Stutter, Half-Speed, Gate and Brake effects. |
-
-> **AI policy:** Apex Studio currently contains **no active AI features, AI generation, AI stem separation, or AI API integration**. AI is intentionally out of scope until a later release.
-
----
-
-## ⌨️ Essential Hotkeys
-
-| Key | Action | Key | Action |
-| :--- | :--- | :--- | :--- |
-| <kbd>Space</kbd> | Play / Pause | <kbd>F5</kbd> or <kbd>3</kbd> | Playlist Arranger |
-| <kbd>L</kbd> | Pattern / Song Mode | <kbd>F6</kbd> or <kbd>1</kbd> | Channel Rack |
-| <kbd>R</kbd> | Arm Recording | <kbd>F7</kbd> or <kbd>2</kbd> | Piano Roll |
-| <kbd>M</kbd> | Toggle Metronome | <kbd>F9</kbd> or <kbd>4</kbd> | Mixer & FX Rack |
-| <kbd>Ctrl</kbd>+<kbd>S</kbd> | Save Project | <kbd>Ctrl</kbd>+<kbd>Z</kbd> / <kbd>Y</kbd> | Undo / Redo |
+| **Channel Rack** | Step sequencing, swing, velocity, MIDI learn |
+| **Piano Roll** | Polyphonic notes, scales, chords, velocity, quantize |
+| **Playlist Arranger** | Multi-lane arrangement, audio/pattern clips, automation |
+| **Mixer** | 16 tracks, inserts, routing, meters, spectrum visualization |
+| **Synth** | Dual wavetable oscillators, filters, ADSR, modulation |
+| **Recording** | Capture audio and place takes into the project |
+| **FX** | EQ, reverb, delay, compression, Gross Beat-style time/volume effects |
+| **Mastering** | Compression, stereo control, limiting and loudness tools |
+| **Export** | WAV, Standard MIDI and project/stem ZIP workflows |
 
 ---
 
-## 🛠️ Quick Developer Commands
+## ⚡ Try it quickly
+
+### 1. Build a beat
+Open the **Channel Rack** and program Kick, Snare, Hi-Hat and 808 steps.
+
+**Shortcut:** `F6` or `1`
+
+### 2. Write melodies
+Open the **Piano Roll**, draw notes, change their length/velocity, and use the scale/chord tools.
+
+**Shortcut:** `F7` or `2`
+
+### 3. Arrange the song
+Open the **Playlist Arranger**, switch to **SONG** mode, paint patterns and place audio clips on the timeline.
+
+**Shortcut:** `F5` or `3`
+
+### 4. Mix it
+Open the **Mixer**, route tracks, add effects and balance the master.
+
+**Shortcut:** `F9` or `4`
+
+### 5. Export
+Use the export workflow to render WAV, export Standard MIDI, or create a project/stem package.
+
+---
+
+## 💻 Run Apex Studio locally
+
+### Browser development build
+
+Requirements: **Node.js 20+**.
 
 ```bash
 npm install
 npm run dev
-npm run build
-npm run lint
-npx electron-builder --win --x64
 ```
+
+Then open the local Vite URL shown in the terminal.
+
+### Production build
+
+```bash
+npm run build
+```
+
+### Windows desktop build
+
+```bash
+npm install
+npm run package:win
+```
+
+The Windows installer and portable build are generated under `dist-electron/`.
+
+### Official Windows releases
+
+Tagged releases are built by GitHub Actions and publish the Windows `.exe`, `.zip`, and related release artifacts.
+
+**[Download from GitHub Releases →](https://github.com/Ajey877/Apex-Studio/releases)**
+
+---
+
+## ⌨️ Essential shortcuts
+
+| Key | Action | Key | Action |
+| :--- | :--- | :--- | :--- |
+| `Space` | Play / Pause | `F5` / `3` | Playlist Arranger |
+| `L` | Pattern / Song Mode | `F6` / `1` | Channel Rack |
+| `R` | Arm Recording | `F7` / `2` | Piano Roll |
+| `M` | Metronome | `F9` / `4` | Mixer & FX Rack |
+| `Ctrl` + `S` | Save Project | `Ctrl` + `Z` / `Y` | Undo / Redo |
+
+---
+
+## 🧪 Engineering quality
+
+Apex Studio is developed with automated validation around the audio engine and desktop packaging.
+
+Current repository validation includes:
+
+- TypeScript validation
+- Audio regression tests
+- Project/history regression tests
+- Desktop security configuration checks
+- Production Vite build
+- Windows Electron packaging validation
+
+See the GitHub Actions checks at the top of this README for the current status.
+
+---
+
+## 🛠️ Current development focus
+
+The project is prioritizing **reliability and real DAW workflows before adding more headline features**.
+
+Recent engineering work includes project persistence, portable project/audio bundles, offline rendering, live mixer FX integration, playlist/audio reliability, and document-level undo/redo. The repository history contains the detailed implementation and validation notes.
+
+### AI policy
+
+**Apex Studio currently has no active AI generation, AI stem separation, or AI API integration.** AI is intentionally out of scope until a later release.
+
+---
+
+## 🤝 Feedback and contributions
+
+If you try Apex Studio, the most useful feedback is concrete:
+
+- What workflow did you try?
+- What worked?
+- What broke?
+- What feature blocked you from finishing a track?
+
+**[Open an issue →](https://github.com/Ajey877/Apex-Studio/issues/new/choose)**
+
+If Apex Studio is useful to you, **a GitHub star helps other producers discover the project.**
 
 ---
 
