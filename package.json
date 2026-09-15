@@ -1,7 +1,7 @@
 {
   "name": "apex-studio-daw",
   "private": true,
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Apex Studio DAW - Professional Multi-Track Digital Audio Workstation",
   "author": "Apex Studio Team",
   "main": "electron.cjs",
