@@ -34,6 +34,8 @@ interface ChannelRackProps {
   isPlaying: boolean;
   swing: number;
   onUpdateSwing: (swing: number) => void;
+  onInteractionStart?: (label?: string) => void;
+  onInteractionEnd?: (label?: string) => void;
 }
 
 export const ChannelRack: React.FC<ChannelRackProps> = ({
@@ -54,7 +56,9 @@ export const ChannelRack: React.FC<ChannelRackProps> = ({
   currentStep,
   isPlaying,
   swing,
-  onUpdateSwing
+  onUpdateSwing,
+  onInteractionStart,
+  onInteractionEnd
 }) => {
   const [showAddMenu, setShowAddMenu] = useState(false);
   const [stepLength, setStepLength] = useState<16 | 32>(16);
@@ -140,6 +144,8 @@ export const ChannelRack: React.FC<ChannelRackProps> = ({
               max="0.5"
               step="0.05"
               value={swing}
+              onPointerDown={() => onInteractionStart?.('Change swing')}
+              onPointerUp={() => onInteractionEnd?.('Change swing')}
               onChange={(e) => onUpdateSwing(parseFloat(e.target.value))}
               className="w-14 h-1 accent-[#ff6e00] bg-[#333336] rounded cursor-pointer"
             />
@@ -446,6 +452,8 @@ export const ChannelRack: React.FC<ChannelRackProps> = ({
                       step="0.05"
                       value={ch.volume}
                       onClick={(e) => e.stopPropagation()}
+                      onPointerDown={() => onInteractionStart?.('Change channel volume')}
+                      onPointerUp={() => onInteractionEnd?.('Change channel volume')}
                       onChange={(e) => onUpdateChannel(ch.id, { volume: parseFloat(e.target.value) })}
                       className="w-10 h-1 accent-[#ff6e00] bg-[#333336] rounded cursor-pointer"
                     />
@@ -459,6 +467,8 @@ export const ChannelRack: React.FC<ChannelRackProps> = ({
                       step="0.1"
                       value={ch.pan}
                       onClick={(e) => e.stopPropagation()}
+                      onPointerDown={() => onInteractionStart?.('Change channel pan')}
+                      onPointerUp={() => onInteractionEnd?.('Change channel pan')}
                       onChange={(e) => onUpdateChannel(ch.id, { pan: parseFloat(e.target.value) })}
                       className="w-8 h-1 accent-[#777] bg-[#333336] rounded cursor-pointer"
                     />

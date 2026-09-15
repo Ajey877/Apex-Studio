@@ -24,6 +24,8 @@ interface MixerProps {
   onUpdateFxSlot: (trackId: number, slotId: string, updates: Partial<FxSlot>) => void;
   isPlaying: boolean;
   onOpenParametricEq?: (track: MixerTrack) => void;
+  onInteractionStart?: (label?: string) => void;
+  onInteractionEnd?: (label?: string) => void;
 }
 
 export const Mixer: React.FC<MixerProps> = ({
@@ -35,7 +37,9 @@ export const Mixer: React.FC<MixerProps> = ({
   onDeleteFxSlot,
   onUpdateFxSlot,
   isPlaying,
-  onOpenParametricEq
+  onOpenParametricEq,
+  onInteractionStart,
+  onInteractionEnd
 }) => {
   const [showAddFxMenu, setShowAddFxMenu] = useState(false);
   const [trackPeaks, setTrackPeaks] = useState<number[]>(Array(tracks.length).fill(0));
@@ -203,6 +207,8 @@ export const Mixer: React.FC<MixerProps> = ({
                     step="0.05"
                     value={track.pan}
                     onClick={(e) => e.stopPropagation()}
+                    onPointerDown={() => onInteractionStart?.('Change mixer pan')}
+                    onPointerUp={() => onInteractionEnd?.('Change mixer pan')}
                     onChange={(e) => handlePanChange(track.id, parseFloat(e.target.value))}
                     className="w-full h-1 accent-[#777] bg-[#121214] rounded cursor-pointer"
                   />
@@ -238,6 +244,8 @@ export const Mixer: React.FC<MixerProps> = ({
                       step="0.01"
                       value={track.volume}
                       onClick={(e) => e.stopPropagation()}
+                      onPointerDown={() => onInteractionStart?.('Change mixer volume')}
+                      onPointerUp={() => onInteractionEnd?.('Change mixer volume')}
                       onChange={(e) => handleVolumeChange(track.id, parseFloat(e.target.value))}
                       className="relative z-10 h-28 sm:h-32 w-1.5 accent-[#ff6e00] bg-[#121214] rounded cursor-pointer"
                       style={{ writingMode: 'vertical-lr', direction: 'rtl' }}
@@ -373,6 +381,8 @@ export const Mixer: React.FC<MixerProps> = ({
                         max="1.0"
                         step="0.05"
                         value={selectedTrack.sidechain.amount}
+                        onPointerDown={() => onInteractionStart?.('Update sidechain')}
+                        onPointerUp={() => onInteractionEnd?.('Update sidechain')}
                         onChange={(e) => {
                           const amt = parseFloat(e.target.value);
                           const sc = { ...selectedTrack.sidechain!, amount: amt };
