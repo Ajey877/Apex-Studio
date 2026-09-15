@@ -4,7 +4,7 @@ import JSZip from 'jszip';
 import { ProjectState } from '../types/daw';
 import { normalizeProjectState } from '../state/projectState';
 import { getPersistedAudioClip, persistAudioClip } from '../audio/audioPersistence';
-import { audioEngine } from '../audio/audioEngine';
+import { getAudioIdsForProject } from '../state/projectPersistence';
 
 interface ProjectBundleZipModalProps {
   isOpen: boolean;
@@ -27,17 +27,7 @@ const buildPortableManifest = (projectState: ProjectState): string => JSON.strin
   return value;
 }, 2);
 
-const getReferencedAudioIds = (projectState: ProjectState): string[] => {
-  const ids = new Set<string>();
-  projectState.playlistClips.forEach(clip => {
-    if (clip.type === 'audio' && clip.audioBufferId) ids.add(clip.audioBufferId);
-  });
-  projectState.channels.forEach(channel => {
-    if (channel.customSample?.id) ids.add(channel.customSample.id);
-  });
-  projectState.recordings.forEach(recording => ids.add(`recording-${recording.id}`));
-  return [...ids];
-};
+
 
 export const ProjectBundleZipModal: React.FC<ProjectBundleZipModalProps> = ({
   isOpen,
@@ -70,7 +60,7 @@ export const ProjectBundleZipModal: React.FC<ProjectBundleZipModalProps> = ({
       const audioFiles: BundleAudioFile[] = [];
       if (includeSamples) {
         const audioFolder = zip.folder('audio');
-        for (const audioId of getReferencedAudioIds(projectState)) {
+        for (const audioId of getAudioIdsForProject(projectState)) {
           try {
             const blob = await getPersistedAudioClip(audioId);
             if (!blob || blob.size === 0) continue;
@@ -174,11 +164,6 @@ Engine: Apex Studio Digital Audio Workstation
             const rawBlob = await entry.async('blob');
             const typedBlob = rawBlob.type ? rawBlob : new Blob([rawBlob], { type: audioFile.mimeType || 'application/octet-stream' });
             await persistAudioClip(audioFile.id, typedBlob);
-            try {
-              await audioEngine.loadAudioFile(typedBlob, audioFile.id);
-            } catch (err) {
-              console.warn(`[Apex Studio] Could not decode audio asset ${audioFile.id} into audio engine`, err);
-            }
             restoredAudioCount += 1;
           }
         }
@@ -212,7 +197,7 @@ Engine: Apex Studio Digital Audio Workstation
                 <h2 className="text-sm font-bold text-white tracking-wide">PROJECT ZIP ARCHIVE BUNDLER</h2>
                 <span className="px-1.5 py-0.5 rounded text-[9px] font-mono font-bold bg-[#ffaa00]/20 text-[#ffaa00] border border-[#ffaa00]/40">PORTABLE .ZIP</span>
               </div>
-              <p className="text-[10px] text-[#777]">Package project state plus persisted audio assets for portable sharing</p>
+              <p className="text-[10px] text-[#777]">Portable ZIP = project state + audio assets (complete portable archive)</p>
             </div>
           </div>
           <button onClick={onClose} className="text-[#777] hover:text-white p-1 rounded hover:bg-[#222226] transition"><X className="w-5 h-5" /></button>
@@ -228,6 +213,7 @@ Engine: Apex Studio Digital Audio Workstation
         <div className="p-5 overflow-y-auto custom-scrollbar space-y-4 text-xs">
           <div className="bg-[#18181c] p-4 rounded-xl border border-[#28282e] space-y-3">
             <span className="text-xs font-bold text-white uppercase block">EXPORT COMPLETE PROJECT ZIP</span>
+            <p className="text-[11px] text-[#777]">Portable ZIP bundle = project state + audio assets. Use this format to share sessions with all audio across computers.</p>
             <div className="space-y-2">
               <div>
                 <label className="text-[10px] text-[#888] font-bold block mb-1">ARCHIVE FILE NAME</label>
@@ -251,7 +237,7 @@ Engine: Apex Studio Digital Audio Workstation
 
           <div className="bg-[#18181c] p-4 rounded-xl border border-[#28282e] space-y-3">
             <span className="text-xs font-bold text-white uppercase block">IMPORT EXISTING PROJECT ZIP</span>
-            <p className="text-[11px] text-[#777]">Restore project state and rehydrate bundled audio assets into local storage before loading the session.</p>
+            <p className="text-[11px] text-[#777]">Restore project state and unpack bundled audio assets into local storage for canonical session hydration.</p>
             <button onClick={() => fileInputRef.current?.click()} disabled={isImporting} className="w-full py-2 bg-[#25252a] hover:bg-[#333338] disabled:opacity-50 text-white border border-[#444] font-bold rounded-lg transition shadow flex items-center justify-center gap-2">
               <Upload className="w-4 h-4 text-[#ffaa00]" /><span>{isImporting ? 'Unpacking Archive...' : 'Choose .ZIP File to Import'}</span>
             </button>

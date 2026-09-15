@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { getPersistedAudioClip, hydrateAudioClip, persistAudioClip, deletePersistedAudioClip } from './audioPersistence';
+import { getPersistedAudioClip, hydrateAudioClip, persistAudioClip, deletePersistedAudioClip, listPersistedAudioClipIds } from './audioPersistence';
 
 class FakeRequest<T = unknown> {
   result!: T;
@@ -25,6 +25,12 @@ class FakeObjectStore {
   put(value: { id: string }): void { this.store.set(value.id, value); this.tx.complete(); }
   get(id: string): FakeRequest { const request = new FakeRequest(); request.result = this.store.get(id); queueMicrotask(() => request.onsuccess?.()); return request; }
   delete(id: string): void { this.store.delete(id); this.tx.complete(); }
+  getAllKeys(): FakeRequest {
+    const request = new FakeRequest();
+    request.result = Array.from(this.store.keys());
+    queueMicrotask(() => request.onsuccess?.());
+    return request;
+  }
 }
 
 class FakeDb {
@@ -126,6 +132,20 @@ test('bundle import flow stores audio in IndexedDB and immediately registers it 
     assert.equal(await persisted.text(), 'bundle-audio-data');
   } finally {
     await deletePersistedAudioClip('bundle-sample-123').catch(() => undefined);
+    restore();
+  }
+});
+
+test('listPersistedAudioClipIds returns all stored audio clip IDs', async () => {
+  const restore = installIndexedDbMock();
+  try {
+    await persistAudioClip('clip-a', new Blob(['audio-a'], { type: 'audio/webm' }));
+    await persistAudioClip('clip-b', new Blob(['audio-b'], { type: 'audio/wav' }));
+    const keys = await listPersistedAudioClipIds();
+    assert.deepEqual(keys.sort(), ['clip-a', 'clip-b']);
+  } finally {
+    await deletePersistedAudioClip('clip-a').catch(() => undefined);
+    await deletePersistedAudioClip('clip-b').catch(() => undefined);
     restore();
   }
 });

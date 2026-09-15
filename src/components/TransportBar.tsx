@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { 
+  AlertTriangle,
   Play, 
   Pause, 
   Square, 
@@ -82,6 +83,7 @@ interface TransportBarProps {
   onOpenStemSplitter?: () => void;
   onOpenMasterMacros?: () => void;
   onOpenProjectZipBundle?: () => void;
+  saveError?: string | null;
   collaboratorCount: number;
   isProUser: boolean;
   isSidebarOpen: boolean;
@@ -132,6 +134,7 @@ export const TransportBar: React.FC<TransportBarProps> = ({
   onOpenStemSplitter,
   onOpenMasterMacros,
   onOpenProjectZipBundle,
+  saveError,
   collaboratorCount,
   isProUser,
   isSidebarOpen,
@@ -249,6 +252,17 @@ export const TransportBar: React.FC<TransportBarProps> = ({
           >
             <span className="truncate">{meta.name}</span>
           </button>
+
+          {saveError && (
+            <span
+              id="transport-save-error-indicator"
+              className="flex items-center gap-1 text-[10px] font-bold text-red-400 bg-red-950/60 border border-red-500/50 px-1.5 py-0.5 rounded shrink-0"
+              title={`Save failed: ${saveError}`}
+            >
+              <AlertTriangle className="w-3 h-3 text-red-400 shrink-0" />
+              <span className="hidden sm:inline">Save Failed</span>
+            </span>
+          )}
         </div>
 
         {/* BPM & Time LCD Pill */}
