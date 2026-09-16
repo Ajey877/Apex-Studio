@@ -64,7 +64,12 @@ export const AudioRecorderModal: React.FC<AudioRecorderModalProps> = ({ isOpen, 
 
   useEffect(() => {
     if (!isOpen) {
-      engineRef.current?.cancel();
+      // Cancellation is intentionally rejected by RecordingEngine so callers can
+      // distinguish it from a successful recording. Modal teardown is an expected
+      // cancellation path, so consume that rejection here to avoid an unhandled
+      // promise when the modal is closed while capture is active.
+      const cancellation = engineRef.current?.cancel();
+      if (cancellation) void cancellation.catch(() => undefined);
       setRecordingState('idle');
       setRecordSeconds(0);
       setInputLevel(0);
