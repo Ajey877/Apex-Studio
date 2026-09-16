@@ -271,9 +271,9 @@ export const Mixer: React.FC<MixerProps> = ({
                 <button
                   onClick={() => onOpenParametricEq(selectedTrack)}
                   className="px-1.5 py-0.5 bg-[#00bcd4]/15 hover:bg-[#00bcd4]/30 text-[#00bcd4] rounded text-[9px] font-mono border border-[#00bcd4]/30 transition"
-                  title="Open 7-Band Parametric EQ 2 Interface"
+                  title="Open 7-Band Parametric EQ Interface"
                 >
-                  EQ 2
+                  EQ
                 </button>
               )}
               <button
@@ -289,15 +289,15 @@ export const Mixer: React.FC<MixerProps> = ({
           {/* Add FX dropdown */}
           {showAddFxMenu && (
             <div className="bg-[#1e1e20] border-b border-[#333336] p-2 space-y-1 text-xs">
-              <div className="text-[9px] font-bold text-[#777] uppercase">Choose Effect Plugin</div>
+              <div className="text-[9px] font-bold text-[#777] uppercase">Choose Effect</div>
               <div className="grid grid-cols-2 gap-1 pt-1">
                 {[
-                  { id: 'equalizer', name: 'Parametric EQ 2' },
+                  { id: 'equalizer', name: '7-Band EQ' },
                   { id: 'tape_saturation', name: 'Tape Saturation' },
-                  { id: 'reverb', name: 'Fruity Reverb' },
+                  { id: 'reverb', name: 'Studio Reverb' },
                   { id: 'delay', name: 'Tape Delay' },
                   { id: 'distortion', name: 'Fast Distortion' },
-                  { id: 'compressor', name: 'Fruity Compressor' },
+                  { id: 'compressor', name: 'Studio Compressor' },
                   { id: 'bitcrusher', name: 'Bitcrusher' },
                   { id: 'limiter', name: 'Master Limiter' }
                 ].map((fx) => (
@@ -418,7 +418,7 @@ export const Mixer: React.FC<MixerProps> = ({
 
             {selectedTrack.fxSlots.length === 0 ? (
               <div className="text-center py-6 text-xs text-[#777]">
-                No effect plugins loaded. Click + to insert Tape Saturation, EQ 2, or Delay.
+                No effects loaded. Click + to insert 7-Band EQ, Reverb, Delay, or another effect.
               </div>
             ) : (
               selectedTrack.fxSlots.map((slot, idx) => (
