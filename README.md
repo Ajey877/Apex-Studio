@@ -330,6 +330,8 @@ When opening an issue, include:
 4. **Steps to reproduce it**
 5. **Browser/Windows environment**, if relevant
 
+See **[CONTRIBUTING.md](CONTRIBUTING.md)** for development and pull-request guidelines and **[SECURITY.md](SECURITY.md)** for security reports.
+
 ### Useful links
 
 - 🐛 [Report a bug](https://github.com/Ajey877/Apex-Studio/issues/new/choose)
@@ -354,7 +356,7 @@ See the [release page](https://github.com/Ajey877/Apex-Studio/releases/tag/v1.1.
 
 ## 📜 License
 
-See the repository for the current licensing terms and distribution information.
+Apex Studio is licensed under the **MIT License**. See [`LICENSE`](LICENSE) for the full terms.
 
 ---
 
