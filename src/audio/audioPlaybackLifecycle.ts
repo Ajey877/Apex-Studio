@@ -1,6 +1,15 @@
 import { audioEngine } from './audioEngine';
 import type { PlaylistClip } from '../types/daw';
 
+interface PlaybackLifecycleEngine {
+  stop: () => void;
+  playAudioClipWithFades?: (clip: PlaylistClip, startTime: number) => void;
+  ctx: AudioContext | null;
+  sampleBuffers?: Map<string, AudioBuffer>;
+  getOrCreateMixerChannel: (trackId: number) => { input: AudioNode };
+  bpm?: number;
+}
+
 const activeBufferSources = new Set<AudioBufferSourceNode>();
 let installed = false;
 
@@ -21,7 +30,8 @@ export function installAudioPlaybackLifecycle(): void {
     return source;
   };
 
-  const engine = audioEngine as any;
+  // Minimal type-safe internal access interface to engine runtime properties without architectural rewrite.
+  const engine = audioEngine as unknown as PlaybackLifecycleEngine;
   const originalStop = engine.stop.bind(audioEngine);
   engine.stop = () => {
     originalStop();
