@@ -33,7 +33,9 @@ import {
   DEFAULT_MAX_PITCH,
   NoteBounds,
   cloneNote,
+  deleteNotes,
   moveNote,
+  moveNotes,
   resizeNoteLeft,
   resizeNoteRight,
   updateNoteInNotes
@@ -43,9 +45,32 @@ const STEP_WIDTH = 28;
 const ROW_HEIGHT = 24;
 
 type NoteInteraction =
-  | { kind: 'move'; initialNote: Note; currentNote: Note; pointerId: number; originX: number; originY: number }
-  | { kind: 'resize-right'; initialNote: Note; currentNote: Note; pointerId: number; originX: number; originY: number }
-  | { kind: 'resize-left'; initialNote: Note; currentNote: Note; pointerId: number; originX: number; originY: number };
+  | {
+      kind: 'move';
+      anchorNoteId: string;
+      selectedIds: Set<string>;
+      initialNotes: Note[];
+      currentNotes: Note[];
+      pointerId: number;
+      originX: number;
+      originY: number;
+    }
+  | {
+      kind: 'resize-right';
+      initialNote: Note;
+      currentNote: Note;
+      pointerId: number;
+      originX: number;
+      originY: number;
+    }
+  | {
+      kind: 'resize-left';
+      initialNote: Note;
+      currentNote: Note;
+      pointerId: number;
+      originX: number;
+      originY: number;
+    };
 
 interface PianoRollProps {
   channel: Channel;
@@ -134,7 +159,9 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
   const [showVelocityDrawer, setShowVelocityDrawer] = useState(true);
   const [strumMs, setStrumMs] = useState(25);
   const [totalSteps, setTotalSteps] = useState(32);
-  const [selectedNoteId, setSelectedNoteId] = useState<string | null>(null);
+  const [selectedNoteIds, setSelectedNoteIds] = useState<Set<string>>(new Set());
+  const selectedNoteIdsRef = useRef<Set<string>>(new Set());
+  selectedNoteIdsRef.current = selectedNoteIds;
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [interaction, setInteraction] = useState<NoteInteraction | null>(null);
   const interactionRef = useRef<NoteInteraction | null>(null);
@@ -160,7 +187,9 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
   };
 
   const displayNotes = interaction
-    ? updateNoteInNotes(notes, interaction.currentNote, bounds)
+    ? (interaction.kind === 'move'
+        ? interaction.currentNotes
+        : updateNoteInNotes(notes, interaction.currentNote, bounds))
     : notes;
 
   const getNoteName = (pitch: number) => {
@@ -199,21 +228,42 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
 
     if (currentTool === 'erase') {
       if (existingIndex >= 0) {
+        const erasedId = notes[existingIndex].id;
         const newNotes = [...notes];
         newNotes.splice(existingIndex, 1);
         onUpdateChannel(channel.id, { notes: newNotes });
+        setSelectedNoteIds(prev => {
+          if (!prev.has(erasedId)) return prev;
+          const next = new Set(prev);
+          next.delete(erasedId);
+          return next;
+        });
       }
       return;
     }
 
     if (existingIndex >= 0) {
+      const existingNote = notes[existingIndex];
       if (currentTool === 'select') {
-        setSelectedNoteId(notes[existingIndex].id);
+        setSelectedNoteIds(new Set([existingNote.id]));
       } else {
         const newNotes = [...notes];
         newNotes.splice(existingIndex, 1);
         onUpdateChannel(channel.id, { notes: newNotes });
+        setSelectedNoteIds(prev => {
+          if (!prev.has(existingNote.id)) return prev;
+          const next = new Set(prev);
+          next.delete(existingNote.id);
+          return next;
+        });
       }
+      return;
+    }
+
+    // Clicked empty grid
+    if (currentTool === 'select') {
+      // In select mode, clicking empty grid clears selection
+      setSelectedNoteIds(new Set());
       return;
     }
 
@@ -253,11 +303,28 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
     } catch {
       // Browser or detached target fallback
     }
-    setSelectedNoteId(note.id);
+
+    let currentSelection = selectedNoteIdsRef.current;
+    if (event.shiftKey) {
+      const next = new Set(currentSelection);
+      if (next.has(note.id)) {
+        next.delete(note.id);
+      } else {
+        next.add(note.id);
+      }
+      currentSelection = next;
+      setSelectedNoteIds(next);
+    } else if (!currentSelection.has(note.id)) {
+      currentSelection = new Set([note.id]);
+      setSelectedNoteIds(currentSelection);
+    }
+
     const next: NoteInteraction = {
       kind: 'move',
-      initialNote: cloneNote(note),
-      currentNote: cloneNote(note),
+      anchorNoteId: note.id,
+      selectedIds: new Set(currentSelection),
+      initialNotes: notes.map(cloneNote),
+      currentNotes: notes.map(cloneNote),
       pointerId: event.pointerId,
       originX: event.clientX,
       originY: event.clientY
@@ -277,7 +344,9 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
     } catch {
       // Browser or detached target fallback
     }
-    setSelectedNoteId(note.id);
+    if (!selectedNoteIdsRef.current.has(note.id)) {
+      setSelectedNoteIds(new Set([note.id]));
+    }
     const next: NoteInteraction = {
       kind: direction === 'right' ? 'resize-right' : 'resize-left',
       initialNote: cloneNote(note),
@@ -297,52 +366,67 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
     const deltaX = clientX - active.originX;
     const deltaY = clientY - active.originY;
 
-    if (Math.abs(deltaX) > 2 || (active.kind === 'move' && Math.abs(deltaY) > 2)) {
+    if (Math.abs(deltaX) > 2 || Math.abs(deltaY) > 2) {
       didMoveRef.current = true;
     }
 
-    try {
-      let nextNote: Note;
-      if (active.kind === 'move') {
-        const deltaSteps = deltaX / STEP_WIDTH;
-        // Moving down (positive deltaY) lowers pitch; moving up (negative deltaY) raises pitch
-        const deltaPitch = -deltaY / ROW_HEIGHT;
-        const requestedStart = active.initialNote.start + deltaSteps;
-        const requestedPitch = active.initialNote.pitch + deltaPitch;
-        nextNote = moveNote(active.initialNote, requestedStart, requestedPitch, DEFAULT_GRID_STEPS, bounds);
+    const deltaSteps = deltaX / STEP_WIDTH;
+    const deltaPitch = -deltaY / ROW_HEIGHT;
 
-        if (nextNote.pitch !== lastAuditionedPitchRef.current) {
-          lastAuditionedPitchRef.current = nextNote.pitch;
-          audioEngine.playNote(channel, nextNote);
+    try {
+      if (active.kind === 'move') {
+        const movedNotes = moveNotes(
+          active.initialNotes,
+          active.selectedIds,
+          deltaSteps,
+          deltaPitch,
+          DEFAULT_GRID_STEPS,
+          bounds
+        );
+
+        const movedAnchor = movedNotes.find(n => n.id === active.anchorNoteId);
+        if (movedAnchor && movedAnchor.pitch !== lastAuditionedPitchRef.current) {
+          lastAuditionedPitchRef.current = movedAnchor.pitch;
+          audioEngine.playNote(channel, movedAnchor);
         }
+
+        const updated: NoteInteraction = {
+          ...active,
+          currentNotes: movedNotes
+        };
+        interactionRef.current = updated;
+        setInteraction(updated);
       } else if (active.kind === 'resize-right') {
-        const deltaSteps = deltaX / STEP_WIDTH;
         const requestedEnd = active.initialNote.start + active.initialNote.duration + deltaSteps;
-        nextNote = resizeNoteRight(
+        const nextNote = resizeNoteRight(
           active.initialNote,
           requestedEnd,
           DEFAULT_GRID_STEPS,
           DEFAULT_MIN_NOTE_DURATION,
           bounds
         );
+        const updated: NoteInteraction = {
+          ...active,
+          currentNote: nextNote
+        };
+        interactionRef.current = updated;
+        setInteraction(updated);
       } else {
-        const deltaSteps = deltaX / STEP_WIDTH;
         const requestedStart = active.initialNote.start + deltaSteps;
-        nextNote = resizeNoteLeft(
+        const nextNote = resizeNoteLeft(
           active.initialNote,
           requestedStart,
           DEFAULT_GRID_STEPS,
           DEFAULT_MIN_NOTE_DURATION,
           bounds
         );
+        const updated: NoteInteraction = {
+          ...active,
+          currentNote: nextNote
+        };
+        interactionRef.current = updated;
+        setInteraction(updated);
       }
-
-      const updated: NoteInteraction = {
-        ...active,
-        currentNote: nextNote
-      };
-      interactionRef.current = updated;
-      setInteraction(updated);
     } catch (error) {
       console.warn('Piano roll interaction rejected by operation layer', error);
     }
@@ -368,24 +452,39 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
       // Pointer capture already released
     }
 
-    const finalNote = active.currentNote;
-    const initialNote = active.initialNote;
     const didMove = didMoveRef.current;
-
     interactionRef.current = null;
     setInteraction(null);
 
-    if (
-      didMove &&
-      (finalNote.start !== initialNote.start ||
+    if (!didMove) return;
+
+    if (active.kind === 'move') {
+      const hasChanged = active.currentNotes.some(cn => {
+        const init = active.initialNotes.find(inNote => inNote.id === cn.id);
+        return !init || init.start !== cn.start || init.pitch !== cn.pitch || init.duration !== cn.duration;
+      });
+
+      if (hasChanged) {
+        try {
+          onUpdateChannel(channel.id, { notes: active.currentNotes });
+        } catch (err) {
+          console.error('Failed to commit moveNotes update', err);
+        }
+      }
+    } else {
+      const finalNote = active.currentNote;
+      const initialNote = active.initialNote;
+      if (
+        finalNote.start !== initialNote.start ||
         finalNote.pitch !== initialNote.pitch ||
-        finalNote.duration !== initialNote.duration)
-    ) {
-      try {
-        const nextNotes = updateNoteInNotes(notes, finalNote, bounds);
-        onUpdateChannel(channel.id, { notes: nextNotes });
-      } catch (err) {
-        console.error('Failed to commit note update', err);
+        finalNote.duration !== initialNote.duration
+      ) {
+        try {
+          const nextNotes = updateNoteInNotes(notes, finalNote, bounds);
+          onUpdateChannel(channel.id, { notes: nextNotes });
+        } catch (err) {
+          console.error('Failed to commit note resize update', err);
+        }
       }
     }
   };
@@ -395,6 +494,50 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
     setInteraction(null);
     didMoveRef.current = false;
   };
+
+  const handleDeleteSelected = () => {
+    const currentSelection = selectedNoteIdsRef.current;
+    if (currentSelection.size === 0) return;
+    const remainingNotes = deleteNotes(notes, currentSelection);
+    if (remainingNotes.length !== notes.length) {
+      onUpdateChannel(channel.id, { notes: remainingNotes });
+    }
+    setSelectedNoteIds(new Set());
+  };
+
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (['INPUT', 'SELECT', 'TEXTAREA'].includes((e.target as HTMLElement).tagName)) {
+        return;
+      }
+
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        setSelectedNoteIds(new Set());
+        return;
+      }
+
+      if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && (e.key === 'a' || e.key === 'A')) {
+        e.preventDefault();
+        e.stopPropagation();
+        setSelectedNoteIds(new Set(notes.map(n => n.id)));
+        return;
+      }
+
+      if (e.key === 'Delete' || e.key === 'Backspace') {
+        if (selectedNoteIdsRef.current.size > 0) {
+          e.preventDefault();
+          handleDeleteSelected();
+        }
+        return;
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [notes, channel.id]);
 
   useEffect(() => {
     if (!interaction) return;
@@ -503,6 +646,7 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
 
   const handleClearAllNotes = () => {
     onUpdateChannel(channel.id, { notes: [] });
+    setSelectedNoteIds(new Set());
   };
 
   const handleExportMidi = () => {
@@ -879,8 +1023,10 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
 
                   {/* Render Notes placed on this pitch line */}
                   {displayNotes.filter(n => n.pitch === pitch).map((n) => {
-                    const isSelected = n.id === selectedNoteId;
-                    const isInteractingThis = interaction?.currentNote.id === n.id;
+                    const isSelected = selectedNoteIds.has(n.id);
+                    const isInteractingThis = interaction?.kind === 'move'
+                      ? interaction.selectedIds.has(n.id)
+                      : interaction?.currentNote.id === n.id;
 
                     return (
                       <div
@@ -896,8 +1042,23 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
                           if (currentTool === 'erase') {
                             const newNotes = notes.filter(item => item.id !== n.id);
                             onUpdateChannel(channel.id, { notes: newNotes });
+                            setSelectedNoteIds(prev => {
+                              if (!prev.has(n.id)) return prev;
+                              const next = new Set(prev);
+                              next.delete(n.id);
+                              return next;
+                            });
                           } else {
-                            setSelectedNoteId(n.id);
+                            if (e.shiftKey) {
+                              setSelectedNoteIds(prev => {
+                                const next = new Set(prev);
+                                if (next.has(n.id)) next.delete(n.id);
+                                else next.add(n.id);
+                                return next;
+                              });
+                            } else {
+                              setSelectedNoteIds(new Set([n.id]));
+                            }
                             audioEngine.playNote(channel, n);
                           }
                         }}
