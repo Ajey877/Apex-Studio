@@ -153,3 +153,93 @@ export function updateNoteInNotes(notes: Note[], updatedNote: Note, bounds: Note
   }
   return notes.map(n => (n.id === updatedNote.id ? cloneNote(updatedNote) : n));
 }
+
+export function moveNotes(
+  notes: Note[],
+  selectedIds: Set<string> | string[],
+  requestedDeltaSteps: number,
+  requestedDeltaPitch: number,
+  gridSteps = DEFAULT_GRID_STEPS,
+  bounds: NoteBounds = {}
+): Note[] {
+  if (!finite(requestedDeltaSteps) || !finite(requestedDeltaPitch)) {
+    throw new Error('Delta values must be finite');
+  }
+  if (!finite(gridSteps) || gridSteps <= 0) {
+    throw new Error('Grid size must be greater than zero');
+  }
+
+  const idSet = selectedIds instanceof Set ? selectedIds : new Set(selectedIds);
+  if (idSet.size === 0) {
+    return notes.map(cloneNote);
+  }
+
+  const selectedNotes = notes.filter(n => idSet.has(n.id));
+  if (selectedNotes.length === 0) {
+    return notes.map(cloneNote);
+  }
+
+  const minPitch = bounds.minPitch ?? DEFAULT_MIN_PITCH;
+  const maxPitch = bounds.maxPitch ?? DEFAULT_MAX_PITCH;
+
+  // Compute group bounding envelope
+  let groupMinStart = Number.POSITIVE_INFINITY;
+  let groupMaxEnd = Number.NEGATIVE_INFINITY;
+  let groupMinPitch = Number.POSITIVE_INFINITY;
+  let groupMaxPitch = Number.NEGATIVE_INFINITY;
+
+  for (const n of selectedNotes) {
+    if (n.start < groupMinStart) groupMinStart = n.start;
+    const noteEnd = n.start + n.duration;
+    if (noteEnd > groupMaxEnd) groupMaxEnd = noteEnd;
+    if (n.pitch < groupMinPitch) groupMinPitch = n.pitch;
+    if (n.pitch > groupMaxPitch) groupMaxPitch = n.pitch;
+  }
+
+  // Snap requested deltas to grid
+  const snappedDeltaSteps = Math.round(requestedDeltaSteps / gridSteps) * gridSteps;
+  const snappedDeltaPitch = Math.round(requestedDeltaPitch);
+
+  // Collective boundary clamping
+  // 1. Minimum start >= 0 -> delta >= -groupMinStart
+  const minAllowedDeltaSteps = -groupMinStart;
+  // 2. Maximum end <= maxSteps (if specified) -> delta <= bounds.maxSteps - groupMaxEnd
+  const maxAllowedDeltaSteps = bounds.maxSteps === undefined
+    ? Number.POSITIVE_INFINITY
+    : Math.max(minAllowedDeltaSteps, bounds.maxSteps - groupMaxEnd);
+
+  const clampedDeltaSteps = Math.max(minAllowedDeltaSteps, Math.min(maxAllowedDeltaSteps, snappedDeltaSteps));
+  const finalDeltaSteps = Number(clampedDeltaSteps.toFixed(6));
+
+  // 3. Minimum pitch >= minPitch -> delta >= minPitch - groupMinPitch
+  const minAllowedDeltaPitch = minPitch - groupMinPitch;
+  // 4. Maximum pitch <= maxPitch -> delta <= maxPitch - groupMaxPitch
+  const maxAllowedDeltaPitch = maxPitch - groupMaxPitch;
+
+  const clampedDeltaPitch = Math.max(minAllowedDeltaPitch, Math.min(maxAllowedDeltaPitch, snappedDeltaPitch));
+  const finalDeltaPitch = Math.round(clampedDeltaPitch);
+
+  // Apply clamped deltas to selected notes, preserve unselected notes
+  return notes.map(n => {
+    if (!idSet.has(n.id)) {
+      return cloneNote(n);
+    }
+    const moved: Note = {
+      ...cloneNote(n),
+      start: Number((n.start + finalDeltaSteps).toFixed(6)),
+      pitch: n.pitch + finalDeltaPitch
+    };
+    return assertValidNote(moved, bounds);
+  });
+}
+
+export function deleteNotes(
+  notes: Note[],
+  selectedIds: Set<string> | string[]
+): Note[] {
+  const idSet = selectedIds instanceof Set ? selectedIds : new Set(selectedIds);
+  if (idSet.size === 0) {
+    return notes.map(cloneNote);
+  }
+  return notes.filter(n => !idSet.has(n.id)).map(cloneNote);
+}
