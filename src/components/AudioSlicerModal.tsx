@@ -13,7 +13,7 @@ import {
   ArrowRight,
   Disc
 } from 'lucide-react';
-import { Channel, Note } from '../types/daw';
+import { Channel, Note, InstrumentType } from '../types/daw';
 import { AudioSlicer, AudioSlice } from '../utils/audioSlicer';
 import { audioEngine } from '../audio/audioEngine';
 
@@ -22,7 +22,7 @@ interface AudioSlicerModalProps {
   onClose: () => void;
   channels: Channel[];
   onUpdateChannel: (channelId: string, updates: Partial<Channel>) => void;
-  onAddChannel?: (name: string, type: any) => void;
+  onAddChannel?: (name: string, type: InstrumentType) => void;
 }
 
 export const AudioSlicerModal: React.FC<AudioSlicerModalProps> = ({

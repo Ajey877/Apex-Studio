@@ -11,6 +11,47 @@ import {
 } from '../types/daw';
 import { AudioClockTransport, TransportState } from './transport';
 
+export type MidiEventPayload = {
+  type: 'noteOn' | 'noteOff' | 'cc' | 'pitchBend';
+  note?: number;
+  velocity?: number;
+  cc?: number;
+  value?: number;
+  midiChannel?: number;
+};
+
+export interface InternalMidiMessageEvent {
+  data: Uint8Array | number[];
+}
+
+interface WindowWithWebKitAudio extends Window {
+  webkitAudioContext?: typeof AudioContext;
+  webkitOfflineAudioContext?: typeof OfflineAudioContext;
+}
+
+interface ChainedAudioNode extends AudioNode {
+  _chainEnd?: AudioNode;
+}
+
+function setChainEnd<T extends AudioNode>(node: T, chainEnd: AudioNode): T {
+  (node as ChainedAudioNode)._chainEnd = chainEnd;
+  return node;
+}
+
+function getChainEnd(node: AudioNode): AudioNode {
+  return (node as ChainedAudioNode)._chainEnd ?? node;
+}
+
+export interface MixerChannel {
+  input: GainNode;
+  output: GainNode;
+  duckingGain: GainNode;
+  panner: StereoPannerNode | GainNode;
+  analyser: AnalyserNode;
+  fxNodes: AudioNode[];
+  sidechain?: SidechainSettings;
+}
+
 class AudioEngine {
   private ctx: AudioContext | null = null;
   private transport: AudioClockTransport | null = null;
@@ -18,15 +59,7 @@ class AudioEngine {
   private masterGain: GainNode | null = null;
   private masterAnalyser: AnalyserNode | null = null;
   private grossBeatNode: GainNode | null = null;
-  private mixerChannels: Map<number, {
-    input: GainNode;
-    output: GainNode;
-    duckingGain: GainNode;
-    panner: StereoPannerNode;
-    analyser: AnalyserNode;
-    fxNodes: AudioNode[];
-    sidechain?: SidechainSettings;
-  }> = new Map();
+  private mixerChannels: Map<number, MixerChannel> = new Map();
 
   private grossBeatState: GrossBeatState = {
     enabled: false,
@@ -50,8 +83,8 @@ class AudioEngine {
   private recordingAnalyser: AnalyserNode | null = null;
 
   // MIDI
-  private midiAccess: any = null;
-  private midiListeners: ((e: { type: 'noteOn' | 'noteOff' | 'cc' | 'pitchBend'; note?: number; velocity?: number; cc?: number; value?: number; midiChannel?: number }) => void)[] = [];
+  private midiAccess: MIDIAccess | null = null;
+  private midiListeners: ((e: MidiEventPayload) => void)[] = [];
 
   constructor() {
     // Lazy initialize on first interaction
@@ -65,7 +98,7 @@ class AudioEngine {
       return;
     }
 
-    const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+    const AudioContextClass = window.AudioContext || (window as unknown as WindowWithWebKitAudio).webkitAudioContext;
     this.ctx = new AudioContextClass({ latencyHint: 'interactive' });
 
     // Master bus with Time FX processor
@@ -95,7 +128,7 @@ class AudioEngine {
 
   public getContext(): AudioContext {
     if (!this.ctx) {
-      const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+      const AudioContextClass = window.AudioContext || (window as unknown as WindowWithWebKitAudio).webkitAudioContext;
       this.ctx = new AudioContextClass({ latencyHint: 'interactive' });
     }
     if (this.ctx.state === 'suspended') {
@@ -140,7 +173,7 @@ class AudioEngine {
     const input = ctx.createGain();
     const output = ctx.createGain();
     const duckingGain = ctx.createGain();
-    const panner = ctx.createStereoPanner ? ctx.createStereoPanner() : (ctx.createGain() as any);
+    const panner: StereoPannerNode | GainNode = ctx.createStereoPanner ? ctx.createStereoPanner() : ctx.createGain();
     const analyser = ctx.createAnalyser();
     analyser.fftSize = 256;
     analyser.smoothingTimeConstant = 0.7;
@@ -160,15 +193,7 @@ class AudioEngine {
       output.connect(masterChannel.input);
     }
 
-    const channelObj: {
-      input: GainNode;
-      output: GainNode;
-      duckingGain: GainNode;
-      panner: any;
-      analyser: AnalyserNode;
-      fxNodes: AudioNode[];
-      sidechain?: SidechainSettings;
-    } = {
+    const channelObj: MixerChannel = {
       input,
       output,
       duckingGain,
@@ -231,7 +256,7 @@ class AudioEngine {
     const targetVol = track.mute ? 0 : track.volume;
     channel.output.gain.setTargetAtTime(targetVol, now, 0.02);
 
-    if (channel.panner.pan) {
+    if ('pan' in channel.panner && channel.panner.pan) {
       channel.panner.pan.setTargetAtTime(track.pan, now, 0.02);
     }
 
@@ -257,7 +282,7 @@ class AudioEngine {
       const fxNode = this.createFxNode(slot);
       if (fxNode) {
         currentSource.connect(fxNode);
-        const chainEnd = (fxNode as AudioNode & { _chainEnd?: AudioNode })._chainEnd ?? fxNode;
+        const chainEnd = getChainEnd(fxNode);
         currentSource = chainEnd;
         channel.fxNodes.push(fxNode);
         if (chainEnd !== fxNode) channel.fxNodes.push(chainEnd);
@@ -294,7 +319,7 @@ class AudioEngine {
         mid.connect(high);
 
         // Return container wrapper object
-        (low as any)._chainEnd = high;
+        setChainEnd(low, high);
         return low;
       }
       case 'distortion': {
@@ -381,7 +406,7 @@ class AudioEngine {
         filter.Q.value = 0.7;
 
         shaper.connect(filter);
-        (shaper as any)._chainEnd = filter;
+        setChainEnd(shaper, filter);
         return shaper;
       }
       case 'gross_beat': {
@@ -798,7 +823,7 @@ class AudioEngine {
         trk.pan = targetPan;
       }
       const mixerChannel = this.mixerChannels.get(Number(target.targetId));
-      if (mixerChannel && mixerChannel.panner && mixerChannel.panner.pan) {
+      if (mixerChannel && 'pan' in mixerChannel.panner && mixerChannel.panner.pan) {
         mixerChannel.panner.pan.setTargetAtTime(targetPan, now, 0.02);
       }
     }
@@ -1952,15 +1977,15 @@ class AudioEngine {
     return devices;
   }
 
-  public addMidiListener(listener: (e: any) => void) {
+  public addMidiListener(listener: (e: MidiEventPayload) => void) {
     this.midiListeners.push(listener);
   }
 
-  public removeMidiListener(listener: (e: any) => void) {
+  public removeMidiListener(listener: (e: MidiEventPayload) => void) {
     this.midiListeners = this.midiListeners.filter(l => l !== listener);
   }
 
-  private handleMidiMessage(event: any) {
+  private handleMidiMessage(event: InternalMidiMessageEvent | MIDIMessageEvent) {
     const [status, data1, data2] = event.data;
     const command = status >> 4;
     const midiChannel = (status & 0xf) + 1;
@@ -2318,7 +2343,7 @@ class AudioEngine {
   private swing: number = 0;
   private metronome: boolean = false;
   private isPlaying: boolean = false;
-  private timerId: any = null;
+  private timerId: ReturnType<typeof setTimeout> | null = null;
   private currentStep: number = 0;
   private currentBar: number = 1;
   private stepCallback: ((step: number, bar: number) => void) | null = null;
@@ -2644,7 +2669,8 @@ class AudioEngine {
     const sampleRate = this.ctx?.sampleRate || 44100;
     const durationSec = bars * 4 * (60 / bpm);
     const length = Math.floor(sampleRate * durationSec);
-    const offlineCtx = new (window.OfflineAudioContext || (window as any).webkitOfflineAudioContext)(2, length, sampleRate);
+    const OfflineContextClass = window.OfflineAudioContext || (window as unknown as WindowWithWebKitAudio).webkitOfflineAudioContext;
+    const offlineCtx = new OfflineContextClass(2, length, sampleRate);
 
     // Synthesize notes / drum patterns into offline audio
     const left = offlineCtx.createBuffer(2, length, sampleRate).getChannelData(0);
