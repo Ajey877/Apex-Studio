@@ -28,10 +28,16 @@ jobs:
       - name: Configure GitHub Pages
         uses: actions/configure-pages@v5
 
+      - name: Prepare showcase artifact
+        run: |
+          mkdir -p _site
+          cp showcase/index.html _site/index.html
+          cp -R assets _site/assets
+
       - name: Upload showcase artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: .
+          path: _site
 
       - name: Deploy to GitHub Pages
         id: deployment
