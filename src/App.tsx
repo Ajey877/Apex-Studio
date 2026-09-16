@@ -25,8 +25,8 @@ import {
   createDefaultPlaylistTracks 
 } from './audio/presets';
 import { appendChannelWithAllocatedMixerTrackId } from './state/mixerTrackIdentity';
-import { deleteChannelFromProjectState } from './state/projectState';
-import { hydrateProjectAudio, persistProjectState, restorePersistedProjectState } from './state/projectPersistence';
+import { deleteChannelFromProjectState, normalizeProjectState } from './state/projectState';
+import { hydrateProjectAudio, persistProjectState, restorePersistedProjectState, saveAndReconcileProjectState } from './state/projectPersistence';
 import { createRecordingPlaylistClip, getRecordingAudioBufferId, validateRecordingTargetTrack } from './audio/recordingPipeline';
 import { createHistory, type ProjectHistory, resolveSaveShortcut, resolveUndoRedoShortcut } from './state/projectHistory';
 import {
@@ -113,6 +113,7 @@ import {
   ShieldCheck,
   Crown,
   Keyboard,
+  AlertTriangle,
   X
 } from 'lucide-react';
 
@@ -122,6 +123,7 @@ export function App() {
   const [isProjectHydrating, setIsProjectHydrating] = useState(true);
   const projectPersistenceReadyRef = useRef(false);
   const hasUnsavedChangesRef = useRef(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
   const [currentView, setCurrentView] = useState<ViewMode>('channel_rack');
   const [playMode, setPlayMode] = useState<PlayMode>('pat');
   const [isPlaying, setIsPlaying] = useState(false);
@@ -286,21 +288,42 @@ export function App() {
     };
   }, []);
 
+  const performSave = useCallback(async (
+    stateToSave: ProjectState = projectStateRef.current,
+    options?: { reconcileAudio?: boolean }
+  ): Promise<boolean> => {
+    try {
+      if (options?.reconcileAudio) {
+        await saveAndReconcileProjectState(stateToSave, {
+          history: projectHistoryRef.current,
+          reconcileAudio: true
+        });
+      } else {
+        await persistProjectState(stateToSave);
+      }
+
+      if (projectStateRef.current === stateToSave) {
+        hasUnsavedChangesRef.current = false;
+      }
+      setSaveError(null);
+      return true;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Storage persistence failed';
+      console.warn('[Apex Studio] Project save failed.', error);
+      setSaveError(message);
+      return false;
+    }
+  }, []);
+
   // Controlled autosave: persist settled project changes without writing on every render.
   useEffect(() => {
     if (!projectPersistenceReadyRef.current) return;
     hasUnsavedChangesRef.current = true;
     const timer = window.setTimeout(() => {
-      void persistProjectState(projectState).then(() => {
-        if (projectStateRef.current === projectState) {
-          hasUnsavedChangesRef.current = false;
-        }
-      }).catch(error => {
-        console.warn('[Apex Studio] Automatic project persistence failed.', error);
-      });
+      void performSave(projectState);
     }, 350);
     return () => window.clearTimeout(timer);
-  }, [projectState]);
+  }, [projectState, performSave]);
 
   // Protect against closing/reloading while changes are unsettled.
   useEffect(() => {
@@ -497,32 +520,25 @@ export function App() {
 
   const handleLoadProjectState = useCallback(async (state: ProjectState) => {
     handleStop();
+    const normalized = normalizeProjectState(state);
     try {
-      const hydrated = await hydrateProjectAudio(state, audioEngine);
+      const hydrated = await hydrateProjectAudio(normalized, audioEngine);
       projectStateRef.current = hydrated.state;
       setProjectState(hydrated.state);
       resetProjectHistory(hydrated.state);
       setSelectedChannelId(hydrated.state.selectedChannelId || hydrated.state.channels[0]?.id || 'ch-1');
       setSelectedTrackId(hydrated.state.selectedMixerTrackId ?? 0);
-      void persistProjectState(hydrated.state).then(() => {
-        hasUnsavedChangesRef.current = false;
-      }).catch(error => {
-        console.warn('[Apex Studio] Failed to persist loaded project state.', error);
-      });
+      void performSave(hydrated.state, { reconcileAudio: true });
     } catch (error) {
       console.warn('[Apex Studio] Project audio hydration failed; loading project without audio.', error);
-      projectStateRef.current = state;
-      setProjectState(state);
-      resetProjectHistory(state);
-      setSelectedChannelId(state.selectedChannelId || state.channels[0]?.id || 'ch-1');
-      setSelectedTrackId(state.selectedMixerTrackId ?? 0);
-      void persistProjectState(state).then(() => {
-        hasUnsavedChangesRef.current = false;
-      }).catch(err => {
-        console.warn('[Apex Studio] Failed to persist loaded project state.', err);
-      });
+      projectStateRef.current = normalized;
+      setProjectState(normalized);
+      resetProjectHistory(normalized);
+      setSelectedChannelId(normalized.selectedChannelId || normalized.channels[0]?.id || 'ch-1');
+      setSelectedTrackId(normalized.selectedMixerTrackId ?? 0);
+      void performSave(normalized, { reconcileAudio: false });
     }
-  }, [resetProjectHistory]);
+  }, [resetProjectHistory, performSave]);
 
   // --- Project State Handlers ---
   const handleUpdateMeta = (updates: Partial<ProjectMetadata>, options?: { isContinuous?: boolean }) => {
@@ -798,11 +814,7 @@ export function App() {
 
       if (resolveSaveShortcut(e)) {
         e.preventDefault();
-        void persistProjectState(projectStateRef.current).then(() => {
-          hasUnsavedChangesRef.current = false;
-        }).catch(error => {
-          console.warn('[Apex Studio] Manual project save failed.', error);
-        });
+        void performSave(projectStateRef.current, { reconcileAudio: true });
         return;
       }
 
@@ -967,7 +979,40 @@ export function App() {
         isProUser={isProUser}
         isSidebarOpen={isSidebarOpen}
         onToggleSidebar={() => setIsSidebarOpen(!isSidebarOpen)}
+        saveError={saveError}
       />
+
+      {saveError && (
+        <div
+          id="save-failure-banner"
+          role="alert"
+          className="bg-[#361111] border-b border-red-500/60 px-3 sm:px-4 py-1.5 flex items-center justify-between text-xs text-red-200 z-40 shrink-0 select-text"
+        >
+          <div className="flex items-center gap-2">
+            <AlertTriangle className="w-4 h-4 text-red-400 shrink-0" />
+            <span>
+              <strong>Project save failed:</strong> {saveError}. Recent changes could not be saved to local storage.
+            </span>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              id="save-retry-btn"
+              onClick={() => void performSave(projectStateRef.current, { reconcileAudio: true })}
+              className="px-2.5 py-0.5 bg-red-600 hover:bg-red-500 text-white font-bold text-[11px] rounded transition cursor-pointer"
+            >
+              Retry Save
+            </button>
+            <button
+              id="save-failure-dismiss-btn"
+              onClick={() => setSaveError(null)}
+              className="text-red-300 hover:text-white p-0.5 transition cursor-pointer"
+              title="Dismiss warning"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* 2. Main Studio Work Area */}
       <main className="flex-1 flex overflow-hidden">

@@ -81,6 +81,26 @@ export async function deletePersistedAudioClip(id: string): Promise<void> {
   }
 }
 
+export async function listPersistedAudioClipIds(): Promise<string[]> {
+  if (typeof indexedDB === 'undefined') return [];
+  const db = await openDb();
+  try {
+    return await new Promise<string[]>((resolve, reject) => {
+      const tx = db.transaction(AUDIO_STORE_NAME, 'readonly');
+      const store = tx.objectStore(AUDIO_STORE_NAME);
+      const request = store.getAllKeys();
+      request.onsuccess = () => {
+        const result = request.result || [];
+        resolve(result.map(key => String(key)));
+      };
+      request.onerror = () => reject(request.error || new Error('Unable to list audio clips'));
+      tx.onabort = () => reject(tx.error || new Error('Unable to list audio clips'));
+    });
+  } finally {
+    db.close();
+  }
+}
+
 export async function persistProjectStateRecord(stateJson: string): Promise<void> {
   if (!stateJson) return;
   const db = await openDb();

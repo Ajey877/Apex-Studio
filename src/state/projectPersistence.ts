@@ -1,5 +1,5 @@
 import type { AudioRecording, PlaylistClip, ProjectState } from '../types/daw';
-import { getPersistedAudioClip, getPersistedProjectStateRecord, persistProjectStateRecord } from '../audio/audioPersistence';
+import { deletePersistedAudioClip, getPersistedAudioClip, getPersistedProjectStateRecord, listPersistedAudioClipIds, persistProjectStateRecord } from '../audio/audioPersistence';
 import { normalizeProjectState } from './projectState';
 import { getRecordingAudioBufferId } from '../audio/recordingPipeline';
 
@@ -44,15 +44,19 @@ export const persistProjectState = async (state: ProjectState): Promise<void> =>
   await write;
 };
 
-const getAudioIdsForProject = (state: ProjectState): string[] => {
+export const getAudioIdsForProject = (state: ProjectState): string[] => {
   const ids = new Set<string>();
 
-  state.recordings.forEach(recording => {
+  state.recordings?.forEach(recording => {
     ids.add(recording.audioBufferId || getRecordingAudioBufferId(recording.id));
   });
 
-  state.playlistClips.forEach(clip => {
+  state.playlistClips?.forEach(clip => {
     if (clip.type === 'audio' && clip.audioBufferId) ids.add(clip.audioBufferId);
+  });
+
+  state.channels?.forEach(channel => {
+    if (channel.customSample?.id) ids.add(channel.customSample.id);
   });
 
   return [...ids];
@@ -169,3 +173,113 @@ export const restorePersistedProjectState = async (
     return { state: fallbackState, restored: false, hydratedAudioIds: [], missingAudioIds: [] };
   }
 };
+
+export interface AudioReconciliationOptions {
+  additionalStates?: ProjectState[];
+  history?: {
+    present: ProjectState;
+    past: readonly { state: ProjectState }[];
+    future: readonly { state: ProjectState }[];
+  };
+  additionalReferencedIds?: Iterable<string>;
+  storage?: {
+    listPersistedAudioClipIds: () => Promise<string[]>;
+    deletePersistedAudioClip: (id: string) => Promise<void>;
+  };
+}
+
+export interface AudioReconciliationResult {
+  preservedIds: string[];
+  removedIds: string[];
+}
+
+/**
+ * Reconciles persisted audio assets against the active project state (and optional history states).
+ * - Preserves any asset referenced by the active project, additional states, or history past/future.
+ * - Removes unreferenced orphan assets from persistent storage.
+ * - Does not modify or corrupt the project state.
+ * - Never deletes an asset merely because it was missing or temporarily unavailable during hydration.
+ */
+export const reconcilePersistedAudio = async (
+  activeState: ProjectState,
+  options?: AudioReconciliationOptions
+): Promise<AudioReconciliationResult> => {
+  const referencedIds = new Set<string>(getAudioIdsForProject(activeState));
+
+  if (options?.additionalStates) {
+    for (const state of options.additionalStates) {
+      for (const id of getAudioIdsForProject(state)) {
+        referencedIds.add(id);
+      }
+    }
+  }
+
+  if (options?.history) {
+    for (const id of getAudioIdsForProject(options.history.present)) {
+      referencedIds.add(id);
+    }
+    for (const entry of options.history.past) {
+      for (const id of getAudioIdsForProject(entry.state)) {
+        referencedIds.add(id);
+      }
+    }
+    for (const entry of options.history.future) {
+      for (const id of getAudioIdsForProject(entry.state)) {
+        referencedIds.add(id);
+      }
+    }
+  }
+
+  if (options?.additionalReferencedIds) {
+    for (const id of options.additionalReferencedIds) {
+      if (id) referencedIds.add(id);
+    }
+  }
+
+  const listFn = options?.storage?.listPersistedAudioClipIds ?? listPersistedAudioClipIds;
+  const deleteFn = options?.storage?.deletePersistedAudioClip ?? deletePersistedAudioClip;
+
+  const persistedIds = await listFn();
+  const preservedIds: string[] = [];
+  const removedIds: string[] = [];
+
+  for (const id of persistedIds) {
+    if (referencedIds.has(id)) {
+      preservedIds.push(id);
+    } else {
+      await deleteFn(id);
+      removedIds.push(id);
+    }
+  }
+
+  return {
+    preservedIds,
+    removedIds
+  };
+};
+
+export interface SaveAndReconcileOptions extends AudioReconciliationOptions {
+  reconcileAudio?: boolean;
+}
+
+/**
+ * Persists the project state and, when requested, reconciles persisted audio assets.
+ * Audio reconciliation only runs if project persistence succeeds first.
+ * Reconciliation failure will not turn a successful project persistence write into a save failure.
+ */
+export const saveAndReconcileProjectState = async (
+  state: ProjectState,
+  options?: SaveAndReconcileOptions
+): Promise<AudioReconciliationResult | null> => {
+  await persistProjectState(state);
+  if (options?.reconcileAudio === false) {
+    return null;
+  }
+  try {
+    return await reconcilePersistedAudio(state, options);
+  } catch (reconcileError) {
+    console.warn('[Apex Studio] Audio reconciliation failed after save.', reconcileError);
+    return null;
+  }
+};
+
