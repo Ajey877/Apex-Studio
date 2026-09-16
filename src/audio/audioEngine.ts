@@ -68,7 +68,7 @@ class AudioEngine {
     const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
     this.ctx = new AudioContextClass({ latencyHint: 'interactive' });
 
-    // Master bus with Gross Beat processor
+    // Master bus with Time FX processor
     this.masterGain = this.ctx.createGain();
     this.grossBeatNode = this.ctx.createGain();
     this.masterAnalyser = this.ctx.createAnalyser();
@@ -609,7 +609,7 @@ class AudioEngine {
     });
   }
 
-  // Gross Beat & Tape Stop Performance Controller
+  // Time FX & Tape Stop Performance Controller
   public triggerTapeStop(durationMs: number = 600) {
     if (!this.ctx) return;
     const ctx = this.ctx;
@@ -2459,7 +2459,7 @@ class AudioEngine {
       osc.stop(now + 0.05);
     }
 
-    // Gross Beat Rhythmic Chopper & Gater
+    // Time FX Rhythmic Chopper & Gater
     if (this.grossBeatState.enabled && this.grossBeatNode) {
       const stepVal = this.grossBeatState.gateSteps[this.currentStep % 16];
       const targetGain = stepVal ? 1.0 : Math.max(0.01, 1.0 - (this.grossBeatState.mix * 0.95));

@@ -271,9 +271,9 @@ export const Mixer: React.FC<MixerProps> = ({
                 <button
                   onClick={() => onOpenParametricEq(selectedTrack)}
                   className="px-1.5 py-0.5 bg-[#00bcd4]/15 hover:bg-[#00bcd4]/30 text-[#00bcd4] rounded text-[9px] font-mono border border-[#00bcd4]/30 transition"
-                  title="Open 7-Band Parametric EQ 2 Interface"
+                  title="Open 7-Band EQ Interface"
                 >
-                  EQ 2
+                  EQ
                 </button>
               )}
               <button
@@ -292,14 +292,14 @@ export const Mixer: React.FC<MixerProps> = ({
               <div className="text-[9px] font-bold text-[#777] uppercase">Choose Effect Plugin</div>
               <div className="grid grid-cols-2 gap-1 pt-1">
                 {[
-                  { id: 'equalizer', name: 'Parametric EQ 2' },
+                  { id: 'equalizer', name: '7-Band EQ' },
                   { id: 'tape_saturation', name: 'Tape Saturation' },
-                  { id: 'reverb', name: 'Fruity Reverb' },
+                  { id: 'reverb', name: 'Studio Reverb' },
                   { id: 'delay', name: 'Tape Delay' },
                   { id: 'distortion', name: 'Fast Distortion' },
-                  { id: 'compressor', name: 'Fruity Compressor' },
+                  { id: 'compressor', name: 'Studio Compressor' },
                   { id: 'bitcrusher', name: 'Bitcrusher' },
-                  { id: 'limiter', name: 'Master Limiter' }
+                  { id: 'limiter', name: 'Transparent Limiter' }
                 ].map((fx) => (
                   <button
                     key={fx.id}

@@ -152,7 +152,7 @@ export const WavetableSynthModal: React.FC<WavetableSynthModalProps> = ({
             </div>
             <div>
               <div className="flex items-center gap-2">
-                <h2 className="text-sm font-bold text-white tracking-wide">SERUM / VITAL ADVANCED WAVETABLE OSCILLATOR</h2>
+                <h2 className="text-sm font-bold text-white tracking-wide">ADVANCED WAVETABLE SYNTHESIZER</h2>
                 <span className="px-1.5 py-0.5 rounded text-[9px] font-mono font-bold bg-[#00e5ff]/20 text-[#00e5ff] border border-[#00e5ff]/40">
                   256-FRAME 3D MORPHING
                 </span>

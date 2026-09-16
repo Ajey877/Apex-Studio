@@ -198,7 +198,7 @@ function createEffect(ctx: AudioContext, slot: FxSlot): AudioEffect | null {
     case 'gross_beat': {
       const gain = ctx.createGain();
       gain.gain.value = 1;
-      const core = new CompositeEffect(`${slot.id}-gross-beat`, 'Gross Beat', gain, gain, [gain]);
+      const core = new CompositeEffect(`${slot.id}-gross-beat`, 'Time FX', gain, gain, [gain]);
       return wrapWetDry(ctx, core, mix);
     }
     default: return null;

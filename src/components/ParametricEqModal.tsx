@@ -317,7 +317,7 @@ export const ParametricEqModal: React.FC<ParametricEqModalProps> = ({
             </div>
             <div>
               <h2 className="text-base font-bold text-white flex items-center space-x-2">
-                <span>Parametric EQ 2 — 7-Band Dynamic Equalizer</span>
+                <span>7-Band EQ — Dynamic Equalizer</span>
                 <span className="text-[10px] px-2 py-0.5 rounded bg-[#ff6e00]/20 text-[#ff851b] font-mono font-medium border border-[#ff6e00]/30">
                   Track: {mixerTrack.name}
                 </span>

@@ -138,7 +138,7 @@ export const GrossBeatModal: React.FC<GrossBeatModalProps> = ({
             </div>
             <div>
               <div className="flex items-center gap-2">
-                <h2 className="text-sm font-bold text-white tracking-wide">GROSS BEAT & TIME FX BUFFER</h2>
+                <h2 className="text-sm font-bold text-white tracking-wide">TIME FX BUFFER</h2>
                 <span className="px-1.5 py-0.5 rounded text-[9px] font-mono font-bold bg-[#ff6e00]/20 text-[#ff6e00] border border-[#ff6e00]/40">
                   STUDIO DSP
                 </span>
