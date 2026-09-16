@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="theme-color" content="#09090b" />
+  <meta name="description" content="Apex Studio — a free, local-first digital audio workstation for making music." />
+  <title>Apex Studio — Free Local-First DAW</title>
+  <style>
+    :root { --bg:#09090b; --panel:#111114; --panel2:#18181b; --text:#f4f4f5; --muted:#a1a1aa; --line:#27272a; --accent:#fff; --max:1180px; }
+    * { box-sizing:border-box; }
+    html { scroll-behavior:smooth; }
+    body { margin:0; background:radial-gradient(circle at 50% -10%,#27272a 0,#09090b 42%); color:var(--text); font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; line-height:1.6; }
+    a { color:inherit; text-decoration:none; }
+    .wrap { width:min(var(--max),calc(100% - 40px)); margin:auto; }
+    nav { height:72px; display:flex; align-items:center; justify-content:space-between; border-bottom:1px solid rgba(255,255,255,.08); }
+    .brand { font-weight:800; letter-spacing:-.03em; font-size:20px; }
+    .navlinks { display:flex; gap:22px; color:var(--muted); font-size:14px; }
+    .navlinks a:hover { color:var(--text); }
+    .hero { padding:100px 0 70px; text-align:center; }
+    .eyebrow { display:inline-flex; padding:7px 12px; border:1px solid var(--line); border-radius:999px; color:#d4d4d8; font-size:12px; background:rgba(255,255,255,.03); }
+    h1 { max-width:900px; margin:22px auto 18px; font-size:clamp(48px,8vw,88px); line-height:.98; letter-spacing:-.065em; }
+    .hero p { max-width:680px; margin:0 auto 30px; color:var(--muted); font-size:18px; }
+    .actions { display:flex; justify-content:center; gap:12px; flex-wrap:wrap; }
+    .btn { display:inline-flex; align-items:center; justify-content:center; min-height:46px; padding:0 20px; border-radius:10px; border:1px solid var(--line); font-weight:700; font-size:14px; transition:.2s; }
+    .btn.primary { background:var(--accent); color:#09090b; border-color:var(--accent); }
+    .btn:hover { transform:translateY(-1px); border-color:#52525b; }
+    .showcase { margin:30px auto 100px; border:1px solid var(--line); border-radius:18px; overflow:hidden; background:#0c0c0f; box-shadow:0 25px 80px rgba(0,0,0,.45); }
+    .showcase img { display:block; width:100%; height:auto; }
+    .section { padding:85px 0; border-top:1px solid rgba(255,255,255,.07); }
+    .section h2 { margin:0 0 12px; font-size:38px; letter-spacing:-.04em; }
+    .section > p { color:var(--muted); max-width:680px; margin:0 0 38px; }
+    .grid { display:grid; grid-template-columns:repeat(3,1fr); gap:14px; }
+    .card { background:linear-gradient(180deg,var(--panel2),var(--panel)); border:1px solid var(--line); border-radius:14px; padding:24px; }
+    .card strong { display:block; margin-bottom:6px; font-size:17px; }
+    .card span { color:var(--muted); font-size:14px; }
+    .screens { display:grid; grid-template-columns:repeat(2,1fr); gap:18px; }
+    figure { margin:0; border:1px solid var(--line); border-radius:14px; overflow:hidden; background:var(--panel); }
+    figure img { width:100%; display:block; aspect-ratio:16/9; object-fit:cover; }
+    figcaption { padding:13px 15px; color:#d4d4d8; font-size:13px; }
+    .cta { text-align:center; padding:100px 0; }
+    .cta h2 { font-size:clamp(38px,6vw,64px); max-width:760px; margin:0 auto 25px; }
+    footer { border-top:1px solid var(--line); padding:28px 0 40px; color:var(--muted); font-size:13px; display:flex; justify-content:space-between; gap:20px; flex-wrap:wrap; }
+    footer div { display:flex; gap:18px; }
+    @media(max-width:760px){ .wrap{width:min(var(--max),calc(100% - 24px));} .hero{padding:70px 0 45px;} .navlinks{display:none;} .grid,.screens{grid-template-columns:1fr;} .section{padding:65px 0;} h1{font-size:52px;} }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <nav>
+      <a class="brand" href="#top">APEX STUDIO</a>
+      <div class="navlinks"><a href="#features">Features</a><a href="#workspace">Workspace</a><a href="#download">Download</a></div>
+    </nav>
+
+    <main id="top">
+      <section class="hero">
+        <span class="eyebrow">FREE • LOCAL-FIRST • DIGITAL AUDIO WORKSTATION</span>
+        <h1>Make music.<br>Keep control.</h1>
+        <p>Apex Studio is a creator-focused DAW built around real audio playback, editing, recording, mixing, saving and export — without requiring a cloud account.</p>
+        <div class="actions">
+          <a class="btn primary" href="https://github.com/Ajey877/Apex-Studio/releases/tag/v1.1.0" target="_blank" rel="noopener">Download for Windows</a>
+          <a class="btn" href="https://github.com/Ajey877/Apex-Studio" target="_blank" rel="noopener">View on GitHub</a>
+        </div>
+      </section>
+
+      <div class="showcase">
+        <img src="../assets/screenshots/playlist.jpg" alt="Apex Studio playlist workspace" />
+      </div>
+
+      <section class="section" id="features">
+        <h2>A real production workflow.</h2>
+        <p>Designed around the core loop: create, edit, arrange, record, mix, save, reopen and export.</p>
+        <div class="grid">
+          <div class="card"><strong>🎹 Compose</strong><span>Piano Roll, Channel Rack, instruments and patterns for building ideas.</span></div>
+          <div class="card"><strong>🎚️ Arrange & Mix</strong><span>Playlist editing, mixer channels, automation and effects.</span></div>
+          <div class="card"><strong>🎙️ Record</strong><span>Capture real microphone audio and place takes directly on the timeline.</span></div>
+          <div class="card"><strong>💾 Save & Reopen</strong><span>Local project persistence and audio hydration keep your work available.</span></div>
+          <div class="card"><strong>↩️ Undo & Redo</strong><span>Project history covers editing and production interactions across the workflow.</span></div>
+          <div class="card"><strong>📦 Export</strong><span>Render finished projects to WAV and export stems from the production timeline.</span></div>
+        </div>
+      </section>
+
+      <section class="section" id="workspace">
+        <h2>See the workspace.</h2>
+        <p>These are real Apex Studio screens from the project — not concept mockups.</p>
+        <div class="screens">
+          <figure><img src="../assets/screenshots/piano-roll.jpg" alt="Apex Studio Piano Roll" /><figcaption>Piano Roll — compose and edit notes.</figcaption></figure>
+          <figure><img src="../assets/screenshots/mixer.jpg" alt="Apex Studio Mixer" /><figcaption>Mixer — shape channels and effects.</figcaption></figure>
+          <figure><img src="../assets/screenshots/channel-rack.jpg" alt="Apex Studio Channel Rack" /><figcaption>Channel Rack — organize instruments and patterns.</figcaption></figure>
+          <figure><img src="../assets/screenshots/recorder.jpg" alt="Apex Studio Recorder" /><figcaption>Recorder — capture real audio takes.</figcaption></figure>
+          <figure><img src="../assets/screenshots/synth.jpg" alt="Apex Studio Synth" /><figcaption>Synth — build sounds inside the project.</figcaption></figure>
+          <figure><img src="../assets/screenshots/playlist.jpg" alt="Apex Studio Playlist" /><figcaption>Playlist — arrange the complete production.</figcaption></figure>
+        </div>
+      </section>
+
+      <section class="cta" id="download">
+        <h2>Ready to open Apex Studio?</h2>
+        <div class="actions">
+          <a class="btn primary" href="https://github.com/Ajey877/Apex-Studio/releases/tag/v1.1.0" target="_blank" rel="noopener">Get Apex Studio</a>
+          <a class="btn" href="https://github.com/Ajey877/Apex-Studio" target="_blank" rel="noopener">Explore the source</a>
+        </div>
+      </section>
+    </main>
+
+    <footer><span>© 2026 Apex Studio • MIT License</span><div><a href="https://github.com/Ajey877/Apex-Studio" target="_blank" rel="noopener">GitHub</a><a href="https://github.com/Ajey877/Apex-Studio/releases" target="_blank" rel="noopener">Releases</a></div></footer>
+  </div>
+</body>
+</html>
