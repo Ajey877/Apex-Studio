@@ -19,6 +19,10 @@ class MockAudioParam {
   value = 1;
   events: Array<{ type: string; value: number; time: number }> = [];
 
+  constructor(defaultValue = 1) {
+    this.value = defaultValue;
+  }
+
   setValueAtTime(value: number, time: number): void {
     this.value = value;
     this.events.push({ type: 'setValueAtTime', value, time });
@@ -67,6 +71,29 @@ class MockBiquadFilterNode extends MockAudioNode {
   frequency = new MockAudioParam();
   Q = new MockAudioParam();
   gain = new MockAudioParam();
+}
+
+class MockDelayNode extends MockAudioNode {
+  delayTime = new MockAudioParam(0);
+}
+
+class MockConvolverNode extends MockAudioNode {
+  buffer: any = null;
+  normalize = true;
+}
+
+class MockWaveShaperNode extends MockAudioNode {
+  curve: Float32Array | null = null;
+  oversample = 'none';
+}
+
+class MockDynamicsCompressorNode extends MockAudioNode {
+  threshold = new MockAudioParam(-24);
+  knee = new MockAudioParam(30);
+  ratio = new MockAudioParam(12);
+  attack = new MockAudioParam(0.003);
+  release = new MockAudioParam(0.25);
+  reduction = 0;
 }
 
 class MockBufferSourceNode extends MockAudioNode {
@@ -123,6 +150,10 @@ class MockOfflineAudioContext {
   createBiquadFilter(): MockBiquadFilterNode { return new MockBiquadFilterNode(); }
   createBufferSource(): MockBufferSourceNode { return new MockBufferSourceNode(); }
   createOscillator(): any { return { connect: () => undefined, start: () => undefined, stop: () => undefined, frequency: new MockAudioParam(), detune: new MockAudioParam(), type: 'sine' }; }
+  createDelay(): MockDelayNode { return new MockDelayNode(); }
+  createConvolver(): MockConvolverNode { return new MockConvolverNode(); }
+  createWaveShaper(): MockWaveShaperNode { return new MockWaveShaperNode(); }
+  createDynamicsCompressor(): MockDynamicsCompressorNode { return new MockDynamicsCompressorNode(); }
   createBuffer(channels: number, length: number, sampleRate: number): MockAudioBuffer {
     return new MockAudioBuffer(Math.max(1, Math.min(length, sampleRate)), 0);
   }
