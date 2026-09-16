@@ -53,6 +53,72 @@ It brings the main parts of a music-production workflow into one application —
 
 ---
 
+## 🎬 See Apex Studio
+
+### 🎛️ Your studio, in one place
+
+<p align="center">
+  <img src="assets/screenshots/playlist.jpg" alt="Apex Studio Playlist Arranger" width="100%">
+</p>
+
+<p align="center">
+  <b>Playlist Arranger</b><br>
+  Build your arrangement across patterns, audio clips and automation.
+</p>
+
+<br />
+
+<table>
+<tr>
+<td width="50%">
+
+<img src="assets/screenshots/channel-rack.jpg" alt="Apex Studio Channel Rack" width="100%">
+
+### 🥁 Channel Rack
+Program beats, patterns, swing and velocity.
+
+</td>
+<td width="50%">
+
+<img src="assets/screenshots/piano-roll.jpg" alt="Apex Studio Piano Roll" width="100%">
+
+### 🎹 Piano Roll
+Write melodies, chords and detailed note performances.
+
+</td>
+</tr>
+<tr>
+<td width="50%">
+
+<img src="assets/screenshots/mixer.jpg" alt="Apex Studio Mixer" width="100%">
+
+### 🎚️ Mixer
+Balance channels, route audio and shape your mix.
+
+</td>
+<td width="50%">
+
+<img src="assets/screenshots/synth.jpg" alt="Apex Studio Synth" width="100%">
+
+### 🎛️ Synth
+Shape sounds with oscillators, filters and modulation.
+
+</td>
+</tr>
+</table>
+
+<br />
+
+<p align="center">
+  <img src="assets/screenshots/recorder.jpg" alt="Apex Studio Recorder" width="80%">
+</p>
+
+<p align="center">
+  <b>🎙️ Record directly into your project.</b>
+</p>
+
+---
+
 ## 🎚️ Built for the actual workflow
 
 | 🎹 Workspace | What it does |
