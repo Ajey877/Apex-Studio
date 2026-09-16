@@ -26,6 +26,26 @@ import {
 import { Channel, Note, MusicalScale, ChordStampType } from '../types/daw';
 import { audioEngine } from '../audio/audioEngine';
 import { MidiParser } from '../utils/midiParser';
+import {
+  DEFAULT_GRID_STEPS,
+  DEFAULT_MIN_NOTE_DURATION,
+  DEFAULT_MIN_PITCH,
+  DEFAULT_MAX_PITCH,
+  NoteBounds,
+  cloneNote,
+  moveNote,
+  resizeNoteLeft,
+  resizeNoteRight,
+  updateNoteInNotes
+} from './pianoRollOperations';
+
+const STEP_WIDTH = 28;
+const ROW_HEIGHT = 24;
+
+type NoteInteraction =
+  | { kind: 'move'; initialNote: Note; currentNote: Note; pointerId: number; originX: number; originY: number }
+  | { kind: 'resize-right'; initialNote: Note; currentNote: Note; pointerId: number; originX: number; originY: number }
+  | { kind: 'resize-left'; initialNote: Note; currentNote: Note; pointerId: number; originX: number; originY: number };
 
 interface PianoRollProps {
   channel: Channel;
@@ -116,16 +136,32 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
   const [totalSteps, setTotalSteps] = useState(32);
   const [selectedNoteId, setSelectedNoteId] = useState<string | null>(null);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
+  const [interaction, setInteraction] = useState<NoteInteraction | null>(null);
+  const interactionRef = useRef<NoteInteraction | null>(null);
+  const didMoveRef = useRef(false);
+  const lastAuditionedPitchRef = useRef<number | null>(null);
 
   // Pitch range C2 (36) to C6 (84) = 49 keys
-  const minPitch = 36;
-  const maxPitch = 84;
+  const minPitch = DEFAULT_MIN_PITCH;
+  const maxPitch = DEFAULT_MAX_PITCH;
   const pitchRange: number[] = [];
   for (let p = maxPitch; p >= minPitch; p--) {
     pitchRange.push(p);
   }
 
   const notes = channel.notes || [];
+
+  const bounds: NoteBounds = {
+    minPitch,
+    maxPitch,
+    maxSteps: totalSteps,
+    minDuration: DEFAULT_MIN_NOTE_DURATION,
+    gridSteps: DEFAULT_GRID_STEPS
+  };
+
+  const displayNotes = interaction
+    ? updateNoteInNotes(notes, interaction.currentNote, bounds)
+    : notes;
 
   const getNoteName = (pitch: number) => {
     const names = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
@@ -204,6 +240,196 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
 
     onUpdateChannel(channel.id, { notes: newNotes });
   };
+
+  const beginMove = (event: React.PointerEvent, note: Note) => {
+    if (currentTool === 'erase') return;
+    if (event.button !== 0) return;
+    event.preventDefault();
+    event.stopPropagation();
+    didMoveRef.current = false;
+    lastAuditionedPitchRef.current = note.pitch;
+    try {
+      event.currentTarget.setPointerCapture(event.pointerId);
+    } catch {
+      // Browser or detached target fallback
+    }
+    setSelectedNoteId(note.id);
+    const next: NoteInteraction = {
+      kind: 'move',
+      initialNote: cloneNote(note),
+      currentNote: cloneNote(note),
+      pointerId: event.pointerId,
+      originX: event.clientX,
+      originY: event.clientY
+    };
+    interactionRef.current = next;
+    setInteraction(next);
+  };
+
+  const beginResize = (event: React.PointerEvent, note: Note, direction: 'right' | 'left') => {
+    if (currentTool === 'erase') return;
+    if (event.button !== 0) return;
+    event.preventDefault();
+    event.stopPropagation();
+    didMoveRef.current = false;
+    try {
+      event.currentTarget.setPointerCapture(event.pointerId);
+    } catch {
+      // Browser or detached target fallback
+    }
+    setSelectedNoteId(note.id);
+    const next: NoteInteraction = {
+      kind: direction === 'right' ? 'resize-right' : 'resize-left',
+      initialNote: cloneNote(note),
+      currentNote: cloneNote(note),
+      pointerId: event.pointerId,
+      originX: event.clientX,
+      originY: event.clientY
+    };
+    interactionRef.current = next;
+    setInteraction(next);
+  };
+
+  const updateInteraction = (clientX: number, clientY: number) => {
+    const active = interactionRef.current;
+    if (!active) return;
+
+    const deltaX = clientX - active.originX;
+    const deltaY = clientY - active.originY;
+
+    if (Math.abs(deltaX) > 2 || (active.kind === 'move' && Math.abs(deltaY) > 2)) {
+      didMoveRef.current = true;
+    }
+
+    try {
+      let nextNote: Note;
+      if (active.kind === 'move') {
+        const deltaSteps = deltaX / STEP_WIDTH;
+        // Moving down (positive deltaY) lowers pitch; moving up (negative deltaY) raises pitch
+        const deltaPitch = -deltaY / ROW_HEIGHT;
+        const requestedStart = active.initialNote.start + deltaSteps;
+        const requestedPitch = active.initialNote.pitch + deltaPitch;
+        nextNote = moveNote(active.initialNote, requestedStart, requestedPitch, DEFAULT_GRID_STEPS, bounds);
+
+        if (nextNote.pitch !== lastAuditionedPitchRef.current) {
+          lastAuditionedPitchRef.current = nextNote.pitch;
+          audioEngine.playNote(channel, nextNote);
+        }
+      } else if (active.kind === 'resize-right') {
+        const deltaSteps = deltaX / STEP_WIDTH;
+        const requestedEnd = active.initialNote.start + active.initialNote.duration + deltaSteps;
+        nextNote = resizeNoteRight(
+          active.initialNote,
+          requestedEnd,
+          DEFAULT_GRID_STEPS,
+          DEFAULT_MIN_NOTE_DURATION,
+          bounds
+        );
+      } else {
+        const deltaSteps = deltaX / STEP_WIDTH;
+        const requestedStart = active.initialNote.start + deltaSteps;
+        nextNote = resizeNoteLeft(
+          active.initialNote,
+          requestedStart,
+          DEFAULT_GRID_STEPS,
+          DEFAULT_MIN_NOTE_DURATION,
+          bounds
+        );
+      }
+
+      const updated: NoteInteraction = {
+        ...active,
+        currentNote: nextNote
+      };
+      interactionRef.current = updated;
+      setInteraction(updated);
+    } catch (error) {
+      console.warn('Piano roll interaction rejected by operation layer', error);
+    }
+  };
+
+  const endInteraction = (event?: React.PointerEvent | PointerEvent) => {
+    const active = interactionRef.current;
+    if (!active) return;
+
+    try {
+      if (
+        event &&
+        'currentTarget' in event &&
+        event.currentTarget &&
+        typeof (event.currentTarget as any).hasPointerCapture === 'function'
+      ) {
+        const target = event.currentTarget as HTMLElement;
+        if (target.hasPointerCapture(active.pointerId)) {
+          target.releasePointerCapture(active.pointerId);
+        }
+      }
+    } catch {
+      // Pointer capture already released
+    }
+
+    const finalNote = active.currentNote;
+    const initialNote = active.initialNote;
+    const didMove = didMoveRef.current;
+
+    interactionRef.current = null;
+    setInteraction(null);
+
+    if (
+      didMove &&
+      (finalNote.start !== initialNote.start ||
+        finalNote.pitch !== initialNote.pitch ||
+        finalNote.duration !== initialNote.duration)
+    ) {
+      try {
+        const nextNotes = updateNoteInNotes(notes, finalNote, bounds);
+        onUpdateChannel(channel.id, { notes: nextNotes });
+      } catch (err) {
+        console.error('Failed to commit note update', err);
+      }
+    }
+  };
+
+  const cancelInteraction = () => {
+    interactionRef.current = null;
+    setInteraction(null);
+    didMoveRef.current = false;
+  };
+
+  useEffect(() => {
+    if (!interaction) return;
+
+    const handleWindowPointerMove = (e: PointerEvent) => {
+      const active = interactionRef.current;
+      if (active && e.pointerId === active.pointerId) {
+        updateInteraction(e.clientX, e.clientY);
+      }
+    };
+
+    const handleWindowPointerUp = (e: PointerEvent) => {
+      const active = interactionRef.current;
+      if (active && e.pointerId === active.pointerId) {
+        endInteraction(e);
+      }
+    };
+
+    const handleWindowPointerCancel = (e: PointerEvent) => {
+      const active = interactionRef.current;
+      if (active && e.pointerId === active.pointerId) {
+        cancelInteraction();
+      }
+    };
+
+    window.addEventListener('pointermove', handleWindowPointerMove);
+    window.addEventListener('pointerup', handleWindowPointerUp);
+    window.addEventListener('pointercancel', handleWindowPointerCancel);
+
+    return () => {
+      window.removeEventListener('pointermove', handleWindowPointerMove);
+      window.removeEventListener('pointerup', handleWindowPointerUp);
+      window.removeEventListener('pointercancel', handleWindowPointerCancel);
+    };
+  }, [interaction]);
 
   const handleStrumNotes = () => {
     // Group notes by starting beat step
@@ -652,15 +878,21 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
                   ))}
 
                   {/* Render Notes placed on this pitch line */}
-                  {notes.filter(n => n.pitch === pitch).map((n) => {
+                  {displayNotes.filter(n => n.pitch === pitch).map((n) => {
                     const isSelected = n.id === selectedNoteId;
+                    const isInteractingThis = interaction?.currentNote.id === n.id;
 
                     return (
                       <div
                         key={n.id}
                         id={`note-block-${n.id}`}
+                        onPointerDown={(e) => beginMove(e, n)}
                         onClick={(e) => {
                           e.stopPropagation();
+                          if (didMoveRef.current) {
+                            didMoveRef.current = false;
+                            return;
+                          }
                           if (currentTool === 'erase') {
                             const newNotes = notes.filter(item => item.id !== n.id);
                             onUpdateChannel(channel.id, { notes: newNotes });
@@ -670,18 +902,38 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
                           }
                         }}
                         style={{
-                          left: `${n.start * 28}px`,
-                          width: `${Math.max(24, n.duration * 28 - 3)}px`,
-                          opacity: 0.4 + (n.velocity || 0.8) * 0.6
+                          left: `${n.start * STEP_WIDTH}px`,
+                          width: `${Math.max(16, n.duration * STEP_WIDTH - 3)}px`,
+                          opacity: 0.4 + (n.velocity || 0.8) * 0.6,
+                          touchAction: 'none'
                         }}
-                        className={`absolute top-0.5 bottom-0.5 rounded-sm border shadow flex items-center justify-between px-1 text-[8px] text-black font-bold overflow-hidden cursor-pointer active:scale-95 z-10 ${
+                        className={`absolute top-0.5 bottom-0.5 rounded-sm border shadow flex items-center justify-between px-1 text-[8px] text-black font-bold overflow-hidden cursor-grab active:cursor-grabbing z-10 select-none ${
                           isSelected
                             ? 'bg-[#ffffff] border-[#ffffff] text-black ring-2 ring-[#ff6e00]'
                             : 'bg-[#ff6e00] border-[#ff7d1a] text-black'
-                        }`}
+                        } ${isInteractingThis ? 'ring-2 ring-white shadow-xl opacity-90 brightness-110' : ''}`}
                       >
-                        <span className="truncate">{getNoteName(pitch)}</span>
-                        <div className="w-1 h-3 bg-black/40 rounded-xs" />
+                        {/* Left resize handle */}
+                        <div
+                          role="separator"
+                          aria-label="Resize note start"
+                          onPointerDown={(e) => beginResize(e, n, 'left')}
+                          className="absolute left-0 top-0 bottom-0 w-2 cursor-ew-resize hover:bg-black/20 z-20"
+                          style={{ touchAction: 'none' }}
+                        />
+
+                        <span className="truncate pointer-events-none">{getNoteName(pitch)}</span>
+
+                        {/* Right resize handle */}
+                        <div
+                          role="separator"
+                          aria-label="Resize note end"
+                          onPointerDown={(e) => beginResize(e, n, 'right')}
+                          className="absolute right-0 top-0 bottom-0 w-2.5 cursor-ew-resize hover:bg-black/20 flex items-center justify-center z-20"
+                          style={{ touchAction: 'none' }}
+                        >
+                          <div className="w-0.5 h-3 bg-black/40 rounded-xs pointer-events-none" />
+                        </div>
                       </div>
                     );
                   })}
@@ -700,7 +952,7 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
               <div className="flex-1 relative flex">
                 {Array.from({ length: totalSteps }).map((_, stepIdx) => {
                   const isBarStart = stepIdx % 4 === 0;
-                  const stepNotes = notes.filter(n => Math.floor(n.start) === stepIdx);
+                  const stepNotes = displayNotes.filter(n => Math.floor(n.start) === stepIdx);
 
                   return (
                     <div
