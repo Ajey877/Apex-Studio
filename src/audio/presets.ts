@@ -17,7 +17,7 @@ export const createDefaultMixerTracks = (): MixerTrack[] => [
       {
         id: 'fx-master-eq',
         type: 'equalizer',
-        name: 'Fruity Parametric EQ 2',
+        name: '7-Band EQ',
         enabled: true,
         mix: 1.0,
         params: { lowGain: 1.5, midGain: -0.5, highGain: 2.0, lowFreq: 100, midFreq: 1500, highFreq: 8000 }
@@ -25,7 +25,7 @@ export const createDefaultMixerTracks = (): MixerTrack[] => [
       {
         id: 'fx-master-limiter',
         type: 'limiter',
-        name: 'Fruity Master Limiter',
+        name: 'Transparent Limiter',
         enabled: true,
         mix: 1.0,
         params: { threshold: -0.2, ceiling: -0.1 }
@@ -47,7 +47,7 @@ export const createDefaultMixerTracks = (): MixerTrack[] => [
       {
         id: 'fx-1-comp',
         type: 'compressor',
-        name: 'Fruity Compressor',
+        name: 'Studio Compressor',
         enabled: true,
         mix: 0.8,
         params: { threshold: -14, ratio: 4.5, attack: 0.01, release: 0.1 }
@@ -55,7 +55,7 @@ export const createDefaultMixerTracks = (): MixerTrack[] => [
       {
         id: 'fx-1-dist',
         type: 'distortion',
-        name: 'Fruity Fast Dist',
+        name: 'Fast Distortion',
         enabled: true,
         mix: 0.25,
         params: { drive: 15 }
@@ -77,7 +77,7 @@ export const createDefaultMixerTracks = (): MixerTrack[] => [
       {
         id: 'fx-2-verb',
         type: 'reverb',
-        name: 'Fruity Reeverb 2',
+        name: 'Studio Reverb',
         enabled: true,
         mix: 0.3,
         params: { roomSize: 0.6, decay: 1.5 }
@@ -99,7 +99,7 @@ export const createDefaultMixerTracks = (): MixerTrack[] => [
       {
         id: 'fx-3-eq',
         type: 'equalizer',
-        name: 'Parametric EQ (Air Boost)',
+        name: '7-Band EQ (Air Boost)',
         enabled: true,
         mix: 1.0,
         params: { highGain: 4.0, highFreq: 10000 }
@@ -121,7 +121,7 @@ export const createDefaultMixerTracks = (): MixerTrack[] => [
       {
         id: 'fx-4-dist',
         type: 'distortion',
-        name: 'Fruity Blood Overdrive',
+        name: 'Blood Overdrive',
         enabled: true,
         mix: 0.35,
         params: { drive: 30 }
@@ -143,7 +143,7 @@ export const createDefaultMixerTracks = (): MixerTrack[] => [
       {
         id: 'fx-5-delay',
         type: 'delay',
-        name: 'Fruity Stereo Delay 3',
+        name: 'Stereo Delay',
         enabled: true,
         mix: 0.4,
         params: { time: 0.375, feedback: 0.45 }
@@ -151,7 +151,7 @@ export const createDefaultMixerTracks = (): MixerTrack[] => [
       {
         id: 'fx-5-verb',
         type: 'reverb',
-        name: 'Fruity Reeverb 2',
+        name: 'Studio Reverb',
         enabled: true,
         mix: 0.45,
         params: { roomSize: 0.8, decay: 2.2 }
@@ -173,7 +173,7 @@ export const createDefaultMixerTracks = (): MixerTrack[] => [
       {
         id: 'fx-6-chorus',
         type: 'chorus',
-        name: 'Fruity Chorus',
+        name: 'Chorus',
         enabled: true,
         mix: 0.6,
         params: { rate: 1.2, depth: 0.5 }
@@ -181,7 +181,7 @@ export const createDefaultMixerTracks = (): MixerTrack[] => [
       {
         id: 'fx-6-verb',
         type: 'reverb',
-        name: 'Fruity Convolver',
+        name: 'Convolver',
         enabled: true,
         mix: 0.55,
         params: { roomSize: 0.9, decay: 3.5 }
@@ -203,7 +203,7 @@ export const createDefaultMixerTracks = (): MixerTrack[] => [
       {
         id: 'fx-7-comp',
         type: 'compressor',
-        name: 'Fruity Limiter / Comp',
+        name: 'Limiter / Compressor',
         enabled: true,
         mix: 0.85,
         params: { threshold: -16, ratio: 4.0 }
@@ -211,7 +211,7 @@ export const createDefaultMixerTracks = (): MixerTrack[] => [
       {
         id: 'fx-7-delay',
         type: 'delay',
-        name: 'Fruity Delay Bank',
+        name: 'Delay Bank',
         enabled: true,
         mix: 0.35,
         params: { time: 0.25, feedback: 0.4 }
@@ -230,7 +230,7 @@ export const PRESET_PROJECTS: { id: string; name: string; genre: string; bpm: nu
       meta: {
         id: 'proj-trap-heat',
         name: 'Midnight Trap Heat',
-        author: 'FL Mobile Producer',
+        author: 'Studio Producer',
         bpm: 140,
         timeSignature: [4, 4],
         swing: 0.15,
@@ -407,7 +407,7 @@ export const PRESET_PROJECTS: { id: string; name: string; genre: string; bpm: nu
           avatarColor: '#00bcd4',
           timestamp: Date.now() - 1800000,
           barPosition: 8,
-          text: 'Recorded vocal harmony stems uploaded. Ready for auto-tune and delay ducking.',
+          text: 'Recorded vocal harmony stems uploaded. Ready for auto-pitch and delay ducking.',
           resolved: true
         }
       ],

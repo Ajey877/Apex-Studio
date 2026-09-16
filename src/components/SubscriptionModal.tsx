@@ -95,7 +95,7 @@ export const SubscriptionModal: React.FC<SubscriptionModalProps> = ({
               <ul className="space-y-1.5 text-[11px] text-[#ccc]">
                 <li className="flex items-center gap-2"><Check className="w-3.5 h-3.5 text-[#00ff88]" /><span>32-bit Float Multi-Stem ZIP & WAV Export</span></li>
                 <li className="flex items-center gap-2"><Check className="w-3.5 h-3.5 text-[#00ff88]" /><span>3-Band Linear Phase Mastering Limiter with LUFS</span></li>
-                <li className="flex items-center gap-2"><Check className="w-3.5 h-3.5 text-[#00ff88]" /><span>Gross Beat 36 Time & Volume Pattern Gates</span></li>
+                <li className="flex items-center gap-2"><Check className="w-3.5 h-3.5 text-[#00ff88]" /><span>Time FX 36 Time & Volume Pattern Gates</span></li>
                 <li className="flex items-center gap-2"><Check className="w-3.5 h-3.5 text-[#00ff88]" /><span>Native Windows .EXE Desktop Launcher</span></li>
               </ul>
             </div>

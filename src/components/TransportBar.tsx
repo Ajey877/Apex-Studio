@@ -392,16 +392,16 @@ export const TransportBar: React.FC<TransportBarProps> = ({
             <span className="text-[10px] font-bold hidden sm:inline">MIDI</span>
           </button>
 
-          {/* Gross Beat Time FX Button */}
+          {/* Time FX Button */}
           {onOpenGrossBeat && (
             <button
               id="fl-gross-beat-btn"
               onClick={onOpenGrossBeat}
               className="flex items-center gap-1.5 px-2 py-1 bg-[#121214] hover:bg-[#222225] text-[#b0b0b0] hover:text-white rounded border border-[#333336] text-xs transition"
-              title="Open Gross Beat, Half-Time & Turntable Tape Stop"
+              title="Open Time FX, Half-Time & Turntable Tape Stop"
             >
               <Waves className="w-3.5 h-3.5 text-[#ff6e00]" />
-              <span className="text-[10px] font-bold hidden lg:inline">GROSS BEAT</span>
+              <span className="text-[10px] font-bold hidden lg:inline">TIME FX</span>
             </button>
           )}
 
@@ -411,7 +411,7 @@ export const TransportBar: React.FC<TransportBarProps> = ({
               id="fl-slicer-btn"
               onClick={onOpenSlicer}
               className="flex items-center gap-1.5 px-2 py-1 bg-[#121214] hover:bg-[#222225] text-[#b0b0b0] hover:text-white rounded border border-[#333336] text-xs transition"
-              title="Open Edison Transient Drum Slicer & Chopper"
+              title="Open Transient Drum Slicer & Chopper"
             >
               <Scissors className="w-3.5 h-3.5 text-[#00bcd4]" />
               <span className="text-[10px] font-bold hidden lg:inline">SLICER</span>
@@ -424,10 +424,10 @@ export const TransportBar: React.FC<TransportBarProps> = ({
               id="fl-vocal-tuner-btn"
               onClick={onOpenVocalTuner}
               className="flex items-center gap-1.5 px-2 py-1 bg-[#121214] hover:bg-[#222225] text-[#b0b0b0] hover:text-white rounded border border-[#333336] text-xs transition"
-              title="Real-time Auto-Pitch & Vocal Tuner Pitch Correction (NewTone)"
+              title="Real-time Auto-Pitch & Vocal Tuner Pitch Correction"
             >
               <Mic className="w-3.5 h-3.5 text-[#00ff88]" />
-              <span className="text-[10px] font-bold hidden xl:inline">AUTOTUNE</span>
+              <span className="text-[10px] font-bold hidden xl:inline">AUTO-PITCH</span>
             </button>
           )}
 
@@ -437,7 +437,7 @@ export const TransportBar: React.FC<TransportBarProps> = ({
               id="fl-wavetable-btn"
               onClick={onOpenWavetableSynth}
               className="flex items-center gap-1.5 px-2 py-1 bg-[#121214] hover:bg-[#222225] text-[#b0b0b0] hover:text-white rounded border border-[#333336] text-xs transition"
-              title="Serum / Vital 3D Wavetable Morphing Synthesizer"
+              title="3D Wavetable Morphing Synthesizer"
             >
               <Waves className="w-3.5 h-3.5 text-[#00e5ff]" />
               <span className="text-[10px] font-bold hidden xl:inline">WAVETABLE</span>
@@ -626,16 +626,16 @@ export const TransportBar: React.FC<TransportBarProps> = ({
             </button>
           )}
 
-          {/* Parametric EQ 2 Master Button */}
+          {/* 7-Band EQ Master Button */}
           {onOpenParametricEq && (
             <button
               id="fl-master-eq-btn"
               onClick={onOpenParametricEq}
               className="flex items-center gap-1.5 px-2 py-1 bg-[#121214] hover:bg-[#222225] text-[#b0b0b0] hover:text-white rounded border border-[#333336] text-xs transition"
-              title="Open 7-Band Parametric EQ 2"
+              title="Open 7-Band EQ"
             >
               <BarChart2 className="w-3.5 h-3.5 text-[#00bcd4]" />
-              <span className="text-[10px] font-bold hidden lg:inline">EQ 2</span>
+              <span className="text-[10px] font-bold hidden lg:inline">7-BAND EQ</span>
             </button>
           )}
 

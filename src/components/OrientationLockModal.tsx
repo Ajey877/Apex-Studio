@@ -106,7 +106,7 @@ export const OrientationLockModal: React.FC<OrientationLockModalProps> = ({ onFo
       {/* Brand & Badge */}
       <div className="inline-flex items-center gap-1.5 px-3 py-1 bg-[#ff6e00]/15 border border-[#ff6e00]/40 rounded-full text-[#ff6e00] text-[11px] font-mono font-bold tracking-wide uppercase mb-3">
         <Sliders className="w-3.5 h-3.5" />
-        <span>FL STUDIO MOBILE • LANDSCAPE MODE ONLY</span>
+        <span>APEX STUDIO • LANDSCAPE MODE ONLY</span>
       </div>
 
       {/* Title */}
@@ -116,7 +116,7 @@ export const OrientationLockModal: React.FC<OrientationLockModalProps> = ({ onFo
 
       {/* Explanation */}
       <p className="text-xs text-[#999] max-w-sm leading-relaxed mb-6">
-        Phantom Mobile is precision-engineered for widescreen landscape orientation to provide full access to the 16-step sequencer, multi-octave piano roll, and 8-channel mixer.
+        Apex Studio is precision-engineered for widescreen landscape orientation to provide full access to the 16-step sequencer, multi-octave piano roll, and 8-channel mixer.
       </p>
 
       {/* Action Buttons */}

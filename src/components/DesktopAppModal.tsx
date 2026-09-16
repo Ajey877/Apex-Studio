@@ -278,7 +278,7 @@ OPTION 2: COMPILE STANDALONE INSTALLER (.EXE)
 AUDIO DRIVER OPTIMIZATION FOR WINDOWS:
 ----------------------------------------------------------------------
 For ultra-low latency (< 5ms) when recording MIDI or vocals:
-- ASIO4ALL / FL Studio ASIO Driver recommended
+- ASIO4ALL / Low-Latency ASIO Driver recommended
 - Exclusive Audio Mode is auto-enabled in the desktop executable
 `;
       zip.file('README_WINDOWS_EXE.txt', readme);

@@ -233,7 +233,7 @@ export const VocalTunerModal: React.FC<VocalTunerModalProps> = ({
             </div>
             <div>
               <div className="flex items-center gap-2">
-                <h2 className="text-sm font-bold text-white tracking-wide">PITCHER & NEWTONE VOCAL TUNER</h2>
+                <h2 className="text-sm font-bold text-white tracking-wide">AUTO-PITCH & VOCAL TUNER</h2>
                 <span className={`px-1.5 py-0.5 rounded text-[9px] font-mono font-bold border ${
                   vocalTunerSettings.enabled 
                     ? 'bg-[#00ff88]/20 text-[#00ff88] border-[#00ff88]/40' 
@@ -457,7 +457,7 @@ export const VocalTunerModal: React.FC<VocalTunerModalProps> = ({
                   vibratoDepth: 0,
                   humanize: 0
                 });
-                setStatusMessage('Reset to Default Auto-Tune snap');
+                setStatusMessage('Reset to Default Auto-Pitch snap');
               }}
               className="flex items-center gap-1 px-3 py-1.5 bg-[#222225] hover:bg-[#333338] text-white rounded transition"
             >
