@@ -135,6 +135,9 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
   const [isScrubbing, setIsScrubbing] = useState(false);
   const [interaction, setInteraction] = useState<Interaction | null>(null);
   const interactionRef = useRef<Interaction | null>(null);
+  // Always-current ref so updateInteraction never closes over a stale clips array.
+  const clipsRef = useRef(clips);
+  clipsRef.current = clips;
   const didMoveRef = useRef(false);
   const lastScrubBarRef = useRef<number>(1);
   const rulerContainerRef = useRef<HTMLDivElement | null>(null);
@@ -247,32 +250,38 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
     onUpdateClips(updated);
   };
 
+  // Read exclusively from refs so this function is safe to call from any stale closure
+  // (e.g. the window pointermove listener captured inside useEffect([interaction])).
+  // interactionRef.current always holds the live interaction; clipsRef.current always
+  // holds the latest clips array.
   const updateInteraction = (clientX: number, clientY: number) => {
-    if (!interaction) return;
-    const clip = interaction.clip;
+    const active = interactionRef.current;
+    if (!active) return;
+    const clip = active.clip;
 
-    if (Math.abs(clientX - interaction.originX) > 2 || (interaction.kind !== 'resize-left' && interaction.kind !== 'resize-right' && Math.abs(clientY - interaction.originY) > 2)) {
+    if (Math.abs(clientX - active.originX) > 2 || (active.kind !== 'resize-left' && active.kind !== 'resize-right' && Math.abs(clientY - active.originY) > 2)) {
       didMoveRef.current = true;
     }
 
+    const currentClips = clipsRef.current;
     try {
-      if (interaction.kind === 'automation-point') {
-        const nextY = 1 - (clientY - interaction.automationTop) / 20;
-        const updated = updatePlaylistAutomationPoint(clip, interaction.pointIndex, nextY);
-        onUpdateClips(clips.map(item => item.id === clip.id ? updated : item));
-      } else if (interaction.kind === 'move') {
-        const requestedStart = clip.startBar + (clientX - interaction.originX) / BAR_WIDTH;
-        const targetTrack = clip.trackIndex + Math.round((clientY - interaction.originY) / TRACK_HEIGHT);
+      if (active.kind === 'automation-point') {
+        const nextY = 1 - (clientY - active.automationTop) / 20;
+        const updated = updatePlaylistAutomationPoint(clip, active.pointIndex, nextY);
+        onUpdateClips(currentClips.map(item => item.id === clip.id ? updated : item));
+      } else if (active.kind === 'move') {
+        const requestedStart = clip.startBar + (clientX - active.originX) / BAR_WIDTH;
+        const targetTrack = clip.trackIndex + Math.round((clientY - active.originY) / TRACK_HEIGHT);
         const moved = movePlaylistClip(clip, requestedStart, targetTrack, DEFAULT_GRID_BARS, bounds);
-        onUpdateClips(clips.map(item => item.id === clip.id ? moved : item));
-      } else if (interaction.kind === 'resize-left') {
-        const requestedStart = clip.startBar + (clientX - interaction.originX) / BAR_WIDTH;
+        onUpdateClips(currentClips.map(item => item.id === clip.id ? moved : item));
+      } else if (active.kind === 'resize-left') {
+        const requestedStart = clip.startBar + (clientX - active.originX) / BAR_WIDTH;
         const resized = resizePlaylistClipLeft(clip, requestedStart, DEFAULT_GRID_BARS, MIN_CLIP_LENGTH, bounds);
-        onUpdateClips(clips.map(item => item.id === clip.id ? resized : item));
+        onUpdateClips(currentClips.map(item => item.id === clip.id ? resized : item));
       } else {
-        const requestedEnd = clip.startBar + clip.lengthBars + (clientX - interaction.originX) / BAR_WIDTH;
+        const requestedEnd = clip.startBar + clip.lengthBars + (clientX - active.originX) / BAR_WIDTH;
         const resized = resizePlaylistClipRight(clip, requestedEnd, DEFAULT_GRID_BARS, MIN_CLIP_LENGTH, bounds);
-        onUpdateClips(clips.map(item => item.id === clip.id ? resized : item));
+        onUpdateClips(currentClips.map(item => item.id === clip.id ? resized : item));
       }
     } catch (error) {
       // Invalid coordinates are rejected by the operation layer; the UI remains unchanged.

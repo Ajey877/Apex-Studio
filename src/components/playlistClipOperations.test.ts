@@ -288,3 +288,72 @@ test('resolvePlaylistKeyboardShortcut: unrelated keys resolve to none', () => {
   assert.equal(resolvePlaylistKeyboardShortcut({ key: 'd' }, true), 'none'); // plain d without modifier
   assert.equal(resolvePlaylistKeyboardShortcut({}, true), 'none');
 });
+
+// ---------------------------------------------------------------------------
+// Drag interaction math — determinism tests
+// These verify the origin-delta calculation that updateInteraction uses.
+// The formula is: requestedStart = clip.startBar + (clientX - originX) / BAR_WIDTH
+// which must produce correct snapped startBar for any mid-drag clientX.
+// ---------------------------------------------------------------------------
+
+const BAR_WIDTH = 96; // must match PlaylistArranger constant
+const BOUNDS = { totalBars: 32, maxTracks: 8 };
+const GRID = 0.25;
+
+test('drag math: right by exactly one bar (96px) from bar 4 lands at bar 5', () => {
+  const clip: PlaylistClip = { ...baseClip, startBar: 4, trackIndex: 0 };
+  const originX = 500;
+  const clientX = originX + BAR_WIDTH; // +96px = +1 bar
+  const requestedStart = clip.startBar + (clientX - originX) / BAR_WIDTH;
+  const moved = movePlaylistClip(clip, requestedStart, 0, GRID, BOUNDS);
+  assert.equal(moved.startBar, 5);
+});
+
+test('drag math: left by half a bar (48px) from bar 4 lands at bar 3.5 (on 0.25 grid)', () => {
+  const clip: PlaylistClip = { ...baseClip, startBar: 4, trackIndex: 0 };
+  const originX = 500;
+  const clientX = originX - 48; // -48px = -0.5 bar → requestedStart = 3.5, already on 0.25 grid
+  const requestedStart = clip.startBar + (clientX - originX) / BAR_WIDTH;
+  const moved = movePlaylistClip(clip, requestedStart, 0, GRID, BOUNDS);
+  assert.equal(moved.startBar, 3.5);
+});
+
+test('drag math: multiple consecutive move events from the same origin produce correct monotonic positions', () => {
+  // Simulate three pointer-move events during a single drag.
+  // Each event uses the SAME frozen clip.startBar and originX (origin-delta, not incremental).
+  const clip: PlaylistClip = { ...baseClip, startBar: 2, trackIndex: 0 };
+  const originX = 300;
+
+  const deltas = [48, 96, 192]; // 0.5 bar, 1 bar, 2 bars
+  const expected = [2.5, 3, 4];
+
+  for (let i = 0; i < deltas.length; i++) {
+    const clientX = originX + deltas[i];
+    const requestedStart = clip.startBar + (clientX - originX) / BAR_WIDTH;
+    const moved = movePlaylistClip(clip, requestedStart, clip.trackIndex, GRID, BOUNDS);
+    assert.equal(moved.startBar, expected[i], `delta ${deltas[i]}px should produce startBar ${expected[i]}`);
+  }
+});
+
+test('drag math: left drag from non-zero startBar does not go negative; clamps to 0', () => {
+  const clip: PlaylistClip = { ...baseClip, startBar: 0.5, trackIndex: 0 };
+  const originX = 200;
+  const clientX = originX - 200; // -200px = -2.08 bars → would go negative
+  const requestedStart = clip.startBar + (clientX - originX) / BAR_WIDTH;
+  const moved = movePlaylistClip(clip, requestedStart, 0, GRID, BOUNDS);
+  assert.equal(moved.startBar, 0); // clamped to 0
+});
+
+test('drag math: vertical track change is independent of horizontal position', () => {
+  const TRACK_HEIGHT = 64;
+  const clip: PlaylistClip = { ...baseClip, startBar: 4, trackIndex: 1 };
+  const originX = 500;
+  const originY = 100;
+  const clientX = originX + BAR_WIDTH; // +1 bar horizontally
+  const clientY = originY + TRACK_HEIGHT; // +1 track vertically
+  const requestedStart = clip.startBar + (clientX - originX) / BAR_WIDTH;
+  const targetTrack = clip.trackIndex + Math.round((clientY - originY) / TRACK_HEIGHT);
+  const moved = movePlaylistClip(clip, requestedStart, targetTrack, GRID, BOUNDS);
+  assert.equal(moved.startBar, 5, 'horizontal move correct');
+  assert.equal(moved.trackIndex, 2, 'vertical move correct');
+});
