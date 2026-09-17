@@ -384,6 +384,90 @@ export function duplicateNotes(
   };
 }
 
+export function transposeNotes(
+  notes: Note[],
+  selectedIds: Set<string> | string[],
+  semitones: number,
+  bounds: NoteBounds = {}
+): Note[] {
+  if (!finite(semitones) || !Number.isInteger(semitones)) {
+    throw new Error('semitones must be an integer');
+  }
+
+  const idSet = selectedIds instanceof Set ? selectedIds : new Set(selectedIds);
+  if (idSet.size === 0 || notes.length === 0 || semitones === 0) {
+    return notes.map(cloneNote);
+  }
+
+  const selectedNotes = notes.filter(n => idSet.has(n.id));
+  if (selectedNotes.length === 0) {
+    return notes.map(cloneNote);
+  }
+
+  const minPitch = bounds.minPitch ?? DEFAULT_MIN_PITCH;
+  const maxPitch = bounds.maxPitch ?? DEFAULT_MAX_PITCH;
+
+  for (const n of selectedNotes) {
+    const targetPitch = n.pitch + semitones;
+    if (targetPitch < minPitch || targetPitch > maxPitch) {
+      return notes.map(cloneNote);
+    }
+  }
+
+  return notes.map(n => {
+    if (!idSet.has(n.id)) {
+      return cloneNote(n);
+    }
+    const transposed: Note = {
+      ...cloneNote(n),
+      pitch: n.pitch + semitones
+    };
+    return assertValidNote(transposed, bounds);
+  });
+}
+
+export function nudgeNotes(
+  notes: Note[],
+  selectedIds: Set<string> | string[],
+  deltaSteps: number,
+  bounds: NoteBounds = {}
+): Note[] {
+  if (!finite(deltaSteps)) {
+    throw new Error('deltaSteps must be finite');
+  }
+
+  const idSet = selectedIds instanceof Set ? selectedIds : new Set(selectedIds);
+  if (idSet.size === 0 || notes.length === 0 || deltaSteps === 0) {
+    return notes.map(cloneNote);
+  }
+
+  const selectedNotes = notes.filter(n => idSet.has(n.id));
+  if (selectedNotes.length === 0) {
+    return notes.map(cloneNote);
+  }
+
+  for (const n of selectedNotes) {
+    const targetStart = Number((n.start + deltaSteps).toFixed(6));
+    const targetEnd = Number((targetStart + n.duration).toFixed(6));
+    if (targetStart < 0 || (bounds.maxSteps !== undefined && targetEnd > bounds.maxSteps)) {
+      return notes.map(cloneNote);
+    }
+  }
+
+  return notes.map(n => {
+    if (!idSet.has(n.id)) {
+      return cloneNote(n);
+    }
+    const rawTargetStart = Number((n.start + deltaSteps).toFixed(6));
+    const nextStart = rawTargetStart === 0 ? 0 : rawTargetStart;
+    const nudged: Note = {
+      ...cloneNote(n),
+      start: nextStart
+    };
+    return assertValidNote(nudged, bounds);
+  });
+}
+
 export const DEFAULT_STEP_WIDTH = 28;
 export const DEFAULT_ROW_HEIGHT = 24;
 export const MARQUEE_DRAG_THRESHOLD_PX = 4;

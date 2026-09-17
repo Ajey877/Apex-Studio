@@ -19,6 +19,7 @@ import {
   moveNote,
   moveNotes,
   normalizeRect,
+  nudgeNotes,
   rectsIntersect,
   resizeNoteLeft,
   resizeNoteRight,
@@ -26,6 +27,7 @@ import {
   resizeNotesRight,
   selectNotesInMarquee,
   snapStepPosition,
+  transposeNotes,
   updateNoteInNotes,
   validateNote
 } from './pianoRollOperations';
@@ -1398,4 +1400,420 @@ test('history: note duplication produces exactly one commit, supporting undo and
   // Undo restores original notes
   assert.equal(history[0].notes.length, 1);
   assert.equal(history[0].notes[0].id, 'h-a');
+});
+
+// ============================================================================
+// PHASE 5.3C: KEYBOARD TRANSPOSE & NUDGE TESTS
+// ============================================================================
+
+test('transposeNotes: +1 semitone transposition moves selected notes up by 1', () => {
+  const note1: Note = { id: 't1', pitch: 60, start: 0, duration: 2, velocity: 0.8 };
+  const note2: Note = { id: 't2', pitch: 64, start: 2, duration: 2, velocity: 0.8 };
+  const notes = [note1, note2];
+
+  const result = transposeNotes(notes, ['t1'], 1);
+  assert.equal(result.length, 2);
+  assert.equal(result[0].pitch, 61);
+  assert.equal(result[1].pitch, 64); // unselected note untouched
+});
+
+test('transposeNotes: -1 semitone transposition moves selected notes down by 1', () => {
+  const note1: Note = { id: 't1', pitch: 60, start: 0, duration: 2, velocity: 0.8 };
+  const notes = [note1];
+
+  const result = transposeNotes(notes, ['t1'], -1);
+  assert.equal(result.length, 1);
+  assert.equal(result[0].pitch, 59);
+});
+
+test('transposeNotes: +12 semitones transposes selected notes up by one octave', () => {
+  const note1: Note = { id: 't1', pitch: 60, start: 0, duration: 2, velocity: 0.8 };
+  const notes = [note1];
+
+  const result = transposeNotes(notes, ['t1'], 12);
+  assert.equal(result[0].pitch, 72);
+});
+
+test('transposeNotes: -12 semitones transposes selected notes down by one octave', () => {
+  const note1: Note = { id: 't1', pitch: 60, start: 0, duration: 2, velocity: 0.8 };
+  const notes = [note1];
+
+  const result = transposeNotes(notes, ['t1'], -12);
+  assert.equal(result[0].pitch, 48);
+});
+
+test('transposeNotes: multi-note chord transposes all notes maintaining relative intervals', () => {
+  // C Major triad: C4(60), E4(64), G4(67)
+  const n1: Note = { id: 'c1', pitch: 60, start: 0, duration: 4, velocity: 0.8 };
+  const n2: Note = { id: 'c2', pitch: 64, start: 0, duration: 4, velocity: 0.85 };
+  const n3: Note = { id: 'c3', pitch: 67, start: 0, duration: 4, velocity: 0.9 };
+  const notes = [n1, n2, n3];
+
+  const result = transposeNotes(notes, ['c1', 'c2', 'c3'], 2);
+  // D Major triad: D4(62), F#4(66), A4(69)
+  assert.equal(result[0].pitch, 62);
+  assert.equal(result[1].pitch, 66);
+  assert.equal(result[2].pitch, 69);
+  // Preserves relative intervals
+  assert.equal(result[1].pitch - result[0].pitch, 4);
+  assert.equal(result[2].pitch - result[1].pitch, 3);
+});
+
+test('transposeNotes: preserves relative pitch intervals across wide range of semitones', () => {
+  const n1: Note = { id: 'r1', pitch: 48, start: 0, duration: 2, velocity: 0.8 };
+  const n2: Note = { id: 'r2', pitch: 55, start: 0, duration: 2, velocity: 0.8 };
+  const n3: Note = { id: 'r3', pitch: 60, start: 0, duration: 2, velocity: 0.8 };
+  const notes = [n1, n2, n3];
+
+  const result = transposeNotes(notes, new Set(['r1', 'r2', 'r3']), 7);
+  assert.equal(result[0].pitch, 55);
+  assert.equal(result[1].pitch, 62);
+  assert.equal(result[2].pitch, 67);
+  assert.equal(result[1].pitch - result[0].pitch, 7);
+  assert.equal(result[2].pitch - result[1].pitch, 5);
+});
+
+test('transposeNotes: upper boundary rejection when any note exceeds maxPitch (default 84)', () => {
+  const n1: Note = { id: 'u1', pitch: 72, start: 0, duration: 2, velocity: 0.8 };
+  const n2: Note = { id: 'u2', pitch: 84, start: 0, duration: 2, velocity: 0.8 };
+  const notes = [n1, n2];
+
+  // +1 would push n2 to 85 > 84
+  const result = transposeNotes(notes, ['u1', 'u2'], 1);
+  // Entire operation rejected atomically
+  assert.equal(result[0].pitch, 72);
+  assert.equal(result[1].pitch, 84);
+});
+
+test('transposeNotes: lower boundary rejection when any note goes below minPitch (default 36)', () => {
+  const n1: Note = { id: 'l1', pitch: 36, start: 0, duration: 2, velocity: 0.8 };
+  const n2: Note = { id: 'l2', pitch: 48, start: 0, duration: 2, velocity: 0.8 };
+  const notes = [n1, n2];
+
+  // -1 would push n1 to 35 < 36
+  const result = transposeNotes(notes, ['l1', 'l2'], -1);
+  // Entire operation rejected atomically
+  assert.equal(result[0].pitch, 36);
+  assert.equal(result[1].pitch, 48);
+});
+
+test('transposeNotes: octave boundary rejection (+12 or -12 would push note out of bounds)', () => {
+  const nTop: Note = { id: 'ot', pitch: 75, start: 0, duration: 2, velocity: 0.8 };
+  const notesTop = [nTop];
+  // 75 + 12 = 87 > 84
+  const resTop = transposeNotes(notesTop, ['ot'], 12);
+  assert.equal(resTop[0].pitch, 75);
+
+  const nBot: Note = { id: 'ob', pitch: 45, start: 0, duration: 2, velocity: 0.8 };
+  const notesBot = [nBot];
+  // 45 - 12 = 33 < 36
+  const resBot = transposeNotes(notesBot, ['ob'], -12);
+  assert.equal(resBot[0].pitch, 45);
+});
+
+test('transposeNotes: metadata preservation keeps velocity, pan, muted, and custom properties', () => {
+  interface RichNote extends Note {
+    customColor?: string;
+  }
+  const note: RichNote = {
+    id: 'meta-t',
+    pitch: 60,
+    start: 2,
+    duration: 3,
+    velocity: 0.73,
+    pan: -0.25,
+    muted: true,
+    customColor: '#e74c3c'
+  };
+  const notes: Note[] = [note];
+
+  const result = transposeNotes(notes, ['meta-t'], 5) as RichNote[];
+  assert.equal(result[0].pitch, 65);
+  assert.equal(result[0].id, 'meta-t');
+  assert.equal(result[0].start, 2);
+  assert.equal(result[0].duration, 3);
+  assert.equal(result[0].velocity, 0.73);
+  assert.equal(result[0].pan, -0.25);
+  assert.equal(result[0].muted, true);
+  assert.equal(result[0].customColor, '#e74c3c');
+});
+
+test('transposeNotes: immutability ensures original array and note objects are not mutated', () => {
+  const origNote: Note = { id: 'imm-1', pitch: 60, start: 0, duration: 2, velocity: 0.8 };
+  const notes = [origNote];
+
+  const result = transposeNotes(notes, ['imm-1'], 3);
+  assert.notEqual(result, notes);
+  assert.notEqual(result[0], origNote);
+  assert.equal(origNote.pitch, 60); // original unchanged
+  assert.equal(result[0].pitch, 63);
+
+  // Even on rejected boundary, original array and objects must remain untouched and returns clones
+  const rejected = transposeNotes(notes, ['imm-1'], 30); // 60 + 30 = 90 > 84
+  assert.notEqual(rejected, notes);
+  assert.notEqual(rejected[0], origNote);
+  assert.equal(origNote.pitch, 60);
+  assert.equal(rejected[0].pitch, 60);
+});
+
+test('transposeNotes: empty or non-matching selection is a no-op returning cloned notes', () => {
+  const note1: Note = { id: 'noop-1', pitch: 60, start: 0, duration: 2, velocity: 0.8 };
+  const notes = [note1];
+
+  // Empty selection
+  const resEmpty = transposeNotes(notes, [], 2);
+  assert.notEqual(resEmpty, notes);
+  assert.equal(resEmpty[0].pitch, 60);
+
+  // Non-matching selection
+  const resUnknown = transposeNotes(notes, ['non-existent'], 2);
+  assert.notEqual(resUnknown, notes);
+  assert.equal(resUnknown[0].pitch, 60);
+
+  // Semitones = 0
+  const resZero = transposeNotes(notes, ['noop-1'], 0);
+  assert.notEqual(resZero, notes);
+  assert.equal(resZero[0].pitch, 60);
+});
+
+test('transposeNotes: atomic rejection prevents partial movement when one note in a chord hits bound', () => {
+  const n1: Note = { id: 'at-1', pitch: 60, start: 0, duration: 2, velocity: 0.8 };
+  const n2: Note = { id: 'at-2', pitch: 72, start: 0, duration: 2, velocity: 0.8 };
+  const n3: Note = { id: 'at-3', pitch: 84, start: 0, duration: 2, velocity: 0.8 };
+  const notes = [n1, n2, n3];
+
+  // +1: n1 -> 61 (valid), n2 -> 73 (valid), n3 -> 85 (invalid)
+  const result = transposeNotes(notes, ['at-1', 'at-2', 'at-3'], 1);
+  // Atomic rejection: NO PARTIAL MOVEMENT
+  assert.equal(result[0].pitch, 60);
+  assert.equal(result[1].pitch, 72);
+  assert.equal(result[2].pitch, 84);
+});
+
+test('transposeNotes: throws error on non-finite or non-integer semitones', () => {
+  const notes: Note[] = [{ id: 'err-1', pitch: 60, start: 0, duration: 2, velocity: 0.8 }];
+  assert.throws(() => transposeNotes(notes, ['err-1'], Number.NaN), /semitones must be an integer/);
+  assert.throws(() => transposeNotes(notes, ['err-1'], Number.POSITIVE_INFINITY), /semitones must be an integer/);
+  assert.throws(() => transposeNotes(notes, ['err-1'], 1.5), /semitones must be an integer/);
+});
+
+test('nudgeNotes: +1 step nudges selected notes forward by 1 grid step', () => {
+  const n1: Note = { id: 'nd-1', pitch: 60, start: 4, duration: 2, velocity: 0.8 };
+  const n2: Note = { id: 'nd-2', pitch: 64, start: 8, duration: 2, velocity: 0.8 };
+  const notes = [n1, n2];
+
+  const result = nudgeNotes(notes, ['nd-1'], 1);
+  assert.equal(result[0].start, 5);
+  assert.equal(result[0].duration, 2); // duration preserved
+  assert.equal(result[1].start, 8); // unselected note untouched
+});
+
+test('nudgeNotes: -1 step nudges selected notes backward by 1 grid step', () => {
+  const n1: Note = { id: 'nd-1', pitch: 60, start: 4, duration: 2, velocity: 0.8 };
+  const notes = [n1];
+
+  const result = nudgeNotes(notes, ['nd-1'], -1);
+  assert.equal(result[0].start, 3);
+  assert.equal(result[0].duration, 2);
+});
+
+test('nudgeNotes: +4 steps nudges selected notes forward by 1 beat (4 steps)', () => {
+  const n1: Note = { id: 'nd-1', pitch: 60, start: 2, duration: 2, velocity: 0.8 };
+  const notes = [n1];
+
+  const result = nudgeNotes(notes, ['nd-1'], 4);
+  assert.equal(result[0].start, 6);
+  assert.equal(result[0].duration, 2);
+});
+
+test('nudgeNotes: -4 steps nudges selected notes backward by 1 beat (4 steps)', () => {
+  const n1: Note = { id: 'nd-1', pitch: 60, start: 6, duration: 2, velocity: 0.8 };
+  const notes = [n1];
+
+  const result = nudgeNotes(notes, ['nd-1'], -4);
+  assert.equal(result[0].start, 2);
+  assert.equal(result[0].duration, 2);
+});
+
+test('nudgeNotes: multi-note motif nudges all notes preserving relative timing and offsets', () => {
+  const m1: Note = { id: 'm1', pitch: 60, start: 2, duration: 2, velocity: 0.8 };
+  const m2: Note = { id: 'm2', pitch: 64, start: 5, duration: 1, velocity: 0.85 };
+  const m3: Note = { id: 'm3', pitch: 67, start: 8, duration: 4, velocity: 0.9 };
+  const notes = [m1, m2, m3];
+
+  const result = nudgeNotes(notes, ['m1', 'm2', 'm3'], 3);
+  assert.equal(result[0].start, 5);
+  assert.equal(result[1].start, 8);
+  assert.equal(result[2].start, 11);
+
+  // Relative timing differences preserved
+  assert.equal(result[1].start - result[0].start, 3);
+  assert.equal(result[2].start - result[1].start, 3);
+
+  // Durations preserved
+  assert.equal(result[0].duration, 2);
+  assert.equal(result[1].duration, 1);
+  assert.equal(result[2].duration, 4);
+});
+
+test('nudgeNotes: preserves relative timing with fractional step deltas', () => {
+  const n1: Note = { id: 'f1', pitch: 60, start: 1.5, duration: 1.5, velocity: 0.8 };
+  const n2: Note = { id: 'f2', pitch: 62, start: 3.25, duration: 0.75, velocity: 0.8 };
+  const notes = [n1, n2];
+
+  const result = nudgeNotes(notes, ['f1', 'f2'], 0.5);
+  assert.equal(result[0].start, 2.0);
+  assert.equal(result[1].start, 3.75);
+  assert.equal(result[1].start - result[0].start, 1.75);
+});
+
+test('nudgeNotes: left boundary rejection when any note would start below step 0', () => {
+  const n1: Note = { id: 'lb-1', pitch: 60, start: 0, duration: 2, velocity: 0.8 };
+  const n2: Note = { id: 'lb-2', pitch: 64, start: 4, duration: 2, velocity: 0.8 };
+  const notes = [n1, n2];
+
+  // -1 would push n1 to start -1 < 0
+  const result = nudgeNotes(notes, ['lb-1', 'lb-2'], -1);
+  // Entire operation rejected: neither moves
+  assert.equal(result[0].start, 0);
+  assert.equal(result[1].start, 4);
+});
+
+test('nudgeNotes: right boundary rejection when any note would end beyond maxSteps', () => {
+  const n1: Note = { id: 'rb-1', pitch: 60, start: 10, duration: 2, velocity: 0.8 };
+  const n2: Note = { id: 'rb-2', pitch: 64, start: 14, duration: 2, velocity: 0.8 }; // ends at 16
+  const notes = [n1, n2];
+
+  // bounds maxSteps: 16. Nudge +1 pushes n2 to start 15, duration 2 -> end 17 > 16
+  const result = nudgeNotes(notes, ['rb-1', 'rb-2'], 1, { maxSteps: 16 });
+  // Entire operation rejected: neither moves
+  assert.equal(result[0].start, 10);
+  assert.equal(result[1].start, 14);
+});
+
+test('nudgeNotes: metadata preservation keeps pitch, duration, velocity, pan, and muted', () => {
+  interface RichNote extends Note {
+    customColor?: string;
+  }
+  const note: RichNote = {
+    id: 'meta-n',
+    pitch: 65,
+    start: 4,
+    duration: 3,
+    velocity: 0.88,
+    pan: 0.5,
+    muted: false,
+    customColor: '#3498db'
+  };
+  const notes: Note[] = [note];
+
+  const result = nudgeNotes(notes, ['meta-n'], 4) as RichNote[];
+  assert.equal(result[0].start, 8);
+  assert.equal(result[0].id, 'meta-n');
+  assert.equal(result[0].pitch, 65);
+  assert.equal(result[0].duration, 3);
+  assert.equal(result[0].velocity, 0.88);
+  assert.equal(result[0].pan, 0.5);
+  assert.equal(result[0].muted, false);
+  assert.equal(result[0].customColor, '#3498db');
+});
+
+test('nudgeNotes: immutability ensures original array and note objects are not mutated', () => {
+  const origNote: Note = { id: 'imm-n', pitch: 60, start: 4, duration: 2, velocity: 0.8 };
+  const notes = [origNote];
+
+  const result = nudgeNotes(notes, ['imm-n'], 1);
+  assert.notEqual(result, notes);
+  assert.notEqual(result[0], origNote);
+  assert.equal(origNote.start, 4);
+  assert.equal(result[0].start, 5);
+
+  // Rejection immutability
+  const rejected = nudgeNotes(notes, ['imm-n'], -10); // 4 - 10 = -6 < 0
+  assert.notEqual(rejected, notes);
+  assert.notEqual(rejected[0], origNote);
+  assert.equal(origNote.start, 4);
+  assert.equal(rejected[0].start, 4);
+});
+
+test('nudgeNotes: empty or non-matching selection is a no-op returning cloned notes', () => {
+  const note1: Note = { id: 'noop-n', pitch: 60, start: 4, duration: 2, velocity: 0.8 };
+  const notes = [note1];
+
+  const resEmpty = nudgeNotes(notes, [], 1);
+  assert.notEqual(resEmpty, notes);
+  assert.equal(resEmpty[0].start, 4);
+
+  const resUnknown = nudgeNotes(notes, ['ghost-note'], 1);
+  assert.notEqual(resUnknown, notes);
+  assert.equal(resUnknown[0].start, 4);
+
+  const resZero = nudgeNotes(notes, ['noop-n'], 0);
+  assert.notEqual(resZero, notes);
+  assert.equal(resZero[0].start, 4);
+});
+
+test('nudgeNotes: atomic rejection prevents partial movement when one note in motif hits left bound', () => {
+  const n1: Note = { id: 'an-1', pitch: 60, start: 0, duration: 2, velocity: 0.8 };
+  const n2: Note = { id: 'an-2', pitch: 64, start: 4, duration: 2, velocity: 0.8 };
+  const n3: Note = { id: 'an-3', pitch: 67, start: 8, duration: 2, velocity: 0.8 };
+  const notes = [n1, n2, n3];
+
+  // Nudge -1: n1 -> -1 (invalid), n2 -> 3 (valid in isolation), n3 -> 7 (valid in isolation)
+  const result = nudgeNotes(notes, ['an-1', 'an-2', 'an-3'], -1);
+  // Atomic rejection: NO PARTIAL MOVEMENT
+  assert.equal(result[0].start, 0);
+  assert.equal(result[1].start, 4);
+  assert.equal(result[2].start, 8);
+});
+
+test('nudgeNotes: atomic rejection prevents partial movement when one note in motif hits right bound', () => {
+  const n1: Note = { id: 'an-1', pitch: 60, start: 2, duration: 2, velocity: 0.8 };
+  const n2: Note = { id: 'an-2', pitch: 64, start: 6, duration: 2, velocity: 0.8 };
+  const n3: Note = { id: 'an-3', pitch: 67, start: 15, duration: 2, velocity: 0.8 }; // ends at 17
+  const notes = [n1, n2, n3];
+
+  // bounds maxSteps: 16. Nudge +1 pushes n3 to end 18 > 16
+  const result = nudgeNotes(notes, ['an-1', 'an-2', 'an-3'], 1, { maxSteps: 16 });
+  // Atomic rejection: NO PARTIAL MOVEMENT
+  assert.equal(result[0].start, 2);
+  assert.equal(result[1].start, 6);
+  assert.equal(result[2].start, 15);
+});
+
+test('nudgeNotes: throws error on non-finite deltaSteps', () => {
+  const notes: Note[] = [{ id: 'err-n', pitch: 60, start: 2, duration: 2, velocity: 0.8 }];
+  assert.throws(() => nudgeNotes(notes, ['err-n'], Number.NaN), /deltaSteps must be finite/);
+  assert.throws(() => nudgeNotes(notes, ['err-n'], Number.POSITIVE_INFINITY), /deltaSteps must be finite/);
+});
+
+test('history: transpose and nudge produce exactly one commit when changed, zero when rejected', () => {
+  const noteA: Note = { id: 'h-tn', pitch: 60, start: 2, duration: 2, velocity: 0.8 };
+  const initialNotes = [noteA];
+
+  // 1. Successful transpose produces one new state
+  const transposed = transposeNotes(initialNotes, ['h-tn'], 1);
+  const changedT = transposed.some((n, idx) => n.pitch !== initialNotes[idx].pitch);
+  assert.equal(changedT, true);
+  const history1 = [initialNotes, transposed];
+  assert.equal(history1.length, 2);
+  assert.equal(history1[1][0].pitch, 61);
+
+  // 2. Rejected transpose (exceeding maxPitch) does not change notes -> 0 history entries
+  const rejectedT = transposeNotes(history1[1], ['h-tn'], 50); // 61 + 50 = 111 > 84
+  const changedRejT = rejectedT.some((n, idx) => n.pitch !== history1[1][idx].pitch);
+  assert.equal(changedRejT, false); // No commit!
+
+  // 3. Successful nudge produces one new state
+  const nudged = nudgeNotes(history1[1], ['h-tn'], 1);
+  const changedN = nudged.some((n, idx) => n.start !== history1[1][idx].start);
+  assert.equal(changedN, true);
+  const history2 = [...history1, nudged];
+  assert.equal(history2.length, 3);
+  assert.equal(history2[2][0].start, 3);
+
+  // 4. Rejected nudge (below 0) does not change notes -> 0 history entries
+  const rejectedN = nudgeNotes(history2[2], ['h-tn'], -10); // 3 - 10 = -7 < 0
+  const changedRejN = rejectedN.some((n, idx) => n.start !== history2[2][idx].start);
+  assert.equal(changedRejN, false); // No commit!
 });

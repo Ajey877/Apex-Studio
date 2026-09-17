@@ -43,11 +43,13 @@ import {
   moveNote,
   moveNotes,
   normalizeRect,
+  nudgeNotes,
   resizeNoteLeft,
   resizeNoteRight,
   resizeNotesLeft,
   resizeNotesRight,
   selectNotesInMarquee,
+  transposeNotes,
   updateNoteInNotes
 } from './pianoRollOperations';
 
@@ -543,6 +545,30 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
     }
   };
 
+  const handleTransposeSelected = (semitones: number) => {
+    if (interactionRef.current || marqueeRef.current) return;
+    const currentSelection = selectedNoteIdsRef.current;
+    if (currentSelection.size === 0) return;
+
+    const updatedNotes = transposeNotes(notes, currentSelection, semitones, bounds);
+    const hasChanged = updatedNotes.some((n, idx) => n.pitch !== notes[idx].pitch);
+    if (hasChanged) {
+      onUpdateChannel(channel.id, { notes: updatedNotes });
+    }
+  };
+
+  const handleNudgeSelected = (deltaSteps: number) => {
+    if (interactionRef.current || marqueeRef.current) return;
+    const currentSelection = selectedNoteIdsRef.current;
+    if (currentSelection.size === 0) return;
+
+    const updatedNotes = nudgeNotes(notes, currentSelection, deltaSteps, bounds);
+    const hasChanged = updatedNotes.some((n, idx) => n.start !== notes[idx].start);
+    if (hasChanged) {
+      onUpdateChannel(channel.id, { notes: updatedNotes });
+    }
+  };
+
   const handleDeleteSelected = () => {
     const currentSelection = selectedNoteIdsRef.current;
     if (currentSelection.size === 0) return;
@@ -593,6 +619,46 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
           handleDeleteSelected();
         }
         return;
+      }
+
+      if (!e.ctrlKey && !e.metaKey && !e.altKey) {
+        if (e.key === 'ArrowUp') {
+          e.preventDefault();
+          e.stopPropagation();
+          if (!interactionRef.current && !marqueeRef.current) {
+            handleTransposeSelected(e.shiftKey ? 12 : 1);
+          }
+          return;
+        }
+
+        if (e.key === 'ArrowDown') {
+          e.preventDefault();
+          e.stopPropagation();
+          if (!interactionRef.current && !marqueeRef.current) {
+            handleTransposeSelected(e.shiftKey ? -12 : -1);
+          }
+          return;
+        }
+
+        if (e.key === 'ArrowRight') {
+          e.preventDefault();
+          e.stopPropagation();
+          if (!interactionRef.current && !marqueeRef.current) {
+            const stepDelta = e.shiftKey ? 4 : (bounds.gridSteps ?? DEFAULT_GRID_STEPS);
+            handleNudgeSelected(stepDelta);
+          }
+          return;
+        }
+
+        if (e.key === 'ArrowLeft') {
+          e.preventDefault();
+          e.stopPropagation();
+          if (!interactionRef.current && !marqueeRef.current) {
+            const stepDelta = e.shiftKey ? -4 : -(bounds.gridSteps ?? DEFAULT_GRID_STEPS);
+            handleNudgeSelected(stepDelta);
+          }
+          return;
+        }
       }
     };
 
