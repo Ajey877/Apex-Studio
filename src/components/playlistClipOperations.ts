@@ -1,4 +1,4 @@
-import type { PlaylistClip } from '../types/daw';
+import type { Channel, PlaylistClip, PlaylistTrack } from '../types/daw';
 
 export const STEPS_PER_BAR = 16;
 export const DEFAULT_GRID_BARS = 0.25;
@@ -202,4 +202,32 @@ export function replacePlaylistClip(clips: PlaylistClip[], updatedClip: Playlist
   assertValidPlaylistClip(updatedClip, bounds);
   if (!clips.some(clip => clip.id === updatedClip.id)) throw new Error(`Clip not found: ${updatedClip.id}`);
   return clips.map(clip => clip.id === updatedClip.id ? cloneClip(updatedClip) : clip);
+}
+
+export function resolvePlaylistTargetChannel(channels: Channel[], trackIndex: number): Channel | undefined {
+  if (!Array.isArray(channels) || channels.length === 0) return undefined;
+  return channels[trackIndex] ?? channels[0];
+}
+
+export function createPlaylistPatternClip(
+  trackIndex: number,
+  startBar: number,
+  channel?: Channel,
+  track?: PlaylistTrack,
+  lengthBars = 4,
+  id?: string,
+  bounds: PlaylistBounds = {}
+): PlaylistClip {
+  const clipId = id || `clip-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`;
+  const clip: PlaylistClip = {
+    id: clipId,
+    trackIndex,
+    startBar,
+    lengthBars,
+    type: 'pattern',
+    channelId: channel?.id,
+    color: track?.color || channel?.color || '#ff6e00',
+    name: `${track?.name || channel?.name || 'Track'} Block`
+  };
+  return assertValidPlaylistClip(clip, bounds);
 }

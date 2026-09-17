@@ -26,11 +26,13 @@ import { PlaylistTrack, PlaylistClip, Pattern, Channel, AutomationTargetType, Ar
 import { audioEngine } from '../audio/audioEngine';
 import {
   DEFAULT_GRID_BARS,
+  createPlaylistPatternClip,
   deletePlaylistClip,
   duplicatePlaylistClip,
   movePlaylistClip,
   resizePlaylistClipLeft,
   resizePlaylistClipRight,
+  resolvePlaylistTargetChannel,
   splitPlaylistClip,
   updatePlaylistAutomationPoint,
 } from './playlistClipOperations';
@@ -435,7 +437,7 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
     }
 
     // Place new clip according to selected clip type
-    const activeChannel = channels[0];
+    const targetChannel = resolvePlaylistTargetChannel(channels, trackIndex);
     let newClip: PlaylistClip;
 
     if (clipTypeToAdd === 'automation') {
@@ -449,8 +451,8 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
         name: 'Auto: Cutoff Filter',
         automationTarget: {
           type: 'channel_filter_cutoff',
-          targetId: activeChannel?.id || '',
-          label: `${activeChannel?.name || 'Channel'} Filter Cutoff`
+          targetId: targetChannel?.id || '',
+          label: `${targetChannel?.name || 'Channel'} Filter Cutoff`
         },
         automationPoints: [
           { x: 0, y: 0.2, tension: 0.3 },
@@ -474,16 +476,12 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
       };
     } else {
       // Pattern
-      newClip = {
-        id: `clip-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
+      newClip = createPlaylistPatternClip(
         trackIndex,
-        startBar: barIndex,
-        lengthBars: 4,
-        type: 'pattern',
-        channelId: activeChannel?.id,
-        color: '#ff6e00',
-        name: `${tracks[trackIndex]?.name || 'Track'} Block`
-      };
+        barIndex,
+        targetChannel,
+        tracks[trackIndex]
+      );
     }
 
     onUpdateClips([...clips, newClip]);

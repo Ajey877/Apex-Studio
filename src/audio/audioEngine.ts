@@ -52,6 +52,43 @@ export interface MixerChannel {
   sidechain?: SidechainSettings;
 }
 
+export function resolvePlayableContentLengthSteps(
+  channel?: Channel,
+  patternLengthSteps?: number
+): number {
+  const STEPS_PER_BAR = 16;
+  if (!channel) {
+    const fallback = typeof patternLengthSteps === 'number' && Number.isFinite(patternLengthSteps) && patternLengthSteps > 0
+      ? Math.max(1, Math.ceil(patternLengthSteps / STEPS_PER_BAR)) * STEPS_PER_BAR
+      : STEPS_PER_BAR;
+    return fallback;
+  }
+
+  let maxStep = 0;
+
+  if (typeof patternLengthSteps === 'number' && Number.isFinite(patternLengthSteps) && patternLengthSteps > 0) {
+    maxStep = Math.max(maxStep, patternLengthSteps);
+  }
+
+  if (Array.isArray(channel.steps) && channel.steps.length > 0) {
+    maxStep = Math.max(maxStep, channel.steps.length);
+  }
+
+  if (Array.isArray(channel.notes) && channel.notes.length > 0) {
+    for (const note of channel.notes) {
+      if (typeof note.start === 'number' && Number.isFinite(note.start) && note.start >= 0) {
+        const duration = (typeof note.duration === 'number' && Number.isFinite(note.duration) && note.duration > 0)
+          ? note.duration
+          : 1;
+        maxStep = Math.max(maxStep, note.start + duration);
+      }
+    }
+  }
+
+  const bars = Math.max(1, Math.ceil(maxStep / STEPS_PER_BAR));
+  return bars * STEPS_PER_BAR;
+}
+
 class AudioEngine {
   private ctx: AudioContext | null = null;
   private transport: AudioClockTransport | null = null;
@@ -2541,9 +2578,12 @@ class AudioEngine {
           const clipEndStep = clipStartStep + (clip.lengthBars * 16);
 
           if (currentGlobalStep >= clipStartStep && currentGlobalStep < clipEndStep) {
-            const relStep = (currentGlobalStep - clipStartStep) % 16;
             const channel = this.activeChannels.find(c => c.id === clip.channelId);
             if (channel && !channel.mute) {
+              const loopLength = resolvePlayableContentLengthSteps(channel);
+              const stepOffset = clip.offsetSteps || 0;
+              const relStep = ((currentGlobalStep - clipStartStep + stepOffset) % loopLength + loopLength) % loopLength;
+
               if (channel.steps && channel.steps[relStep]) {
                 const defaultPitch = channel.instrumentType === 'drumpad' ? 36 : 60;
                 this.playNote(channel, {

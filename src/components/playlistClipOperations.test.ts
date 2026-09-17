@@ -1,12 +1,14 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import type { PlaylistClip } from '../types/daw';
+import type { Channel, PlaylistClip, PlaylistTrack } from '../types/daw';
 import {
+  createPlaylistPatternClip,
   deletePlaylistClip,
   duplicatePlaylistClip,
   movePlaylistClip,
   resizePlaylistClipLeft,
   resizePlaylistClipRight,
+  resolvePlaylistTargetChannel,
   snapBarPosition,
   splitPlaylistClip,
   updatePlaylistAutomationPoint,
@@ -154,4 +156,88 @@ test('validatePlaylistClip rejects invalid bounds', () => {
   const result = validatePlaylistClip(baseClip, { totalBars: 0 });
   assert.equal(result.valid, false);
   assert.ok(result.errors.some(error => error.includes('totalBars')));
+});
+
+test('resolvePlaylistTargetChannel maps track index to intended channel', () => {
+  const channels = [
+    { id: 'ch-drums', name: 'Drums', color: '#ff5722' },
+    { id: 'ch-bass', name: 'Bass', color: '#00e5ff' },
+    { id: 'ch-lead', name: 'Lead', color: '#ffd600' }
+  ] as Channel[];
+
+  assert.equal(resolvePlaylistTargetChannel(channels, 0)?.id, 'ch-drums');
+  assert.equal(resolvePlaylistTargetChannel(channels, 1)?.id, 'ch-bass');
+  assert.equal(resolvePlaylistTargetChannel(channels, 2)?.id, 'ch-lead');
+  // Fallback for out-of-bounds track index
+  assert.equal(resolvePlaylistTargetChannel(channels, 5)?.id, 'ch-drums');
+  // Safe empty handling
+  assert.equal(resolvePlaylistTargetChannel([], 0), undefined);
+});
+
+test('createPlaylistPatternClip assigns intended channel, colors, and names', () => {
+  const channel: Channel = {
+    id: 'ch-bass',
+    name: 'Rolling Bass',
+    color: '#00e5ff',
+    instrumentType: 'minisynth',
+    mixerTrackId: 2,
+    volume: 0.8,
+    pan: 0,
+    pitch: 0,
+    mute: false,
+    solo: false,
+    steps: Array(16).fill(false),
+    notes: [],
+    synthParams: {} as any
+  };
+  const track: PlaylistTrack = {
+    id: 2,
+    name: 'Bass Lane',
+    color: '#00bcd4',
+    volume: 0.8,
+    pan: 0,
+    mute: false,
+    solo: false
+  };
+
+  const clip = createPlaylistPatternClip(1, 4, channel, track, 4, 'clip-custom-id');
+  assert.equal(clip.id, 'clip-custom-id');
+  assert.equal(clip.trackIndex, 1);
+  assert.equal(clip.startBar, 4);
+  assert.equal(clip.lengthBars, 4);
+  assert.equal(clip.type, 'pattern');
+  assert.equal(clip.channelId, 'ch-bass');
+  assert.equal(clip.name, 'Bass Lane Block');
+  assert.equal(clip.color, '#00bcd4');
+});
+
+test('createPlaylistPatternClip falls back cleanly when track or channel metadata is minimal', () => {
+  const channel: Channel = {
+    id: 'ch-synth',
+    name: 'Lead Synth',
+    color: '#ff007f',
+    instrumentType: 'minisynth',
+    mixerTrackId: 1,
+    volume: 0.8,
+    pan: 0,
+    pitch: 0,
+    mute: false,
+    solo: false,
+    steps: [],
+    notes: [],
+    synthParams: {} as any
+  };
+
+  // Without track metadata
+  const clipFromChannel = createPlaylistPatternClip(0, 0, channel);
+  assert.equal(clipFromChannel.channelId, 'ch-synth');
+  assert.equal(clipFromChannel.color, '#ff007f');
+  assert.equal(clipFromChannel.name, 'Lead Synth Block');
+
+  // Without channel or track metadata
+  const fallbackClip = createPlaylistPatternClip(0, 2);
+  assert.equal(fallbackClip.channelId, undefined);
+  assert.equal(fallbackClip.color, '#ff6e00');
+  assert.equal(fallbackClip.name, 'Track Block');
+  assert.equal(fallbackClip.lengthBars, 4);
 });
