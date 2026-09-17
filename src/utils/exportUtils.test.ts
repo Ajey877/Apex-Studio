@@ -47,6 +47,17 @@ describe('project export helpers', () => {
     assert.equal(getProjectRenderBars(clips, 'song'), 14);
   });
 
+  it('derives a 40-bar song from clips placed at UI Bars 33 through 40', () => {
+    const lateArrangement: PlaylistClip[] = [
+      { ...clips[0], id: 'kick', startBar: 32, lengthBars: 4 },
+      { ...clips[0], id: 'hihat', startBar: 32, lengthBars: 4 },
+      { ...clips[0], id: 'bass', startBar: 32, lengthBars: 4 },
+      { ...clips[0], id: 'bells', startBar: 32, lengthBars: 8 },
+    ];
+
+    assert.equal(getProjectRenderBars(lateArrangement, 'song'), 40);
+  });
+
   it('keeps the pattern export scope at the documented 4-bar loop', () => {
     assert.equal(getProjectRenderBars(clips, 'pattern'), 4);
   });
