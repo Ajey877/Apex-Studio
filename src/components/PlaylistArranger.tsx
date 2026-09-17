@@ -32,6 +32,7 @@ import {
   movePlaylistClip,
   resizePlaylistClipLeft,
   resizePlaylistClipRight,
+  resolvePlaylistKeyboardShortcut,
   resolvePlaylistTargetChannel,
   splitPlaylistClip,
   updatePlaylistAutomationPoint,
@@ -513,6 +514,64 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
   const activeAutomationClip = clips.find(c => c.id === automationEditorClipId);
   const selectedClip = clips.find(c => c.id === selectedClipId);
 
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (
+        target &&
+        (['INPUT', 'SELECT', 'TEXTAREA'].includes(target.tagName) || target.isContentEditable)
+      ) {
+        return;
+      }
+
+      const hasSelection = Boolean(selectedClipId && selectedClip);
+      const action = resolvePlaylistKeyboardShortcut(e, hasSelection);
+
+      if (action === 'escape') {
+        e.preventDefault();
+        if (interactionRef.current) {
+          endInteraction();
+          return;
+        }
+        if (isMarkerMenuOpen) {
+          setIsMarkerMenuOpen(false);
+          return;
+        }
+        if (selectedClipId) {
+          setSelectedClipId(null);
+          return;
+        }
+        return;
+      }
+
+      if (interactionRef.current) {
+        return;
+      }
+
+      if (action === 'delete') {
+        e.preventDefault();
+        if (selectedClipId) {
+          deleteClip(selectedClipId);
+        }
+        return;
+      }
+
+      if (action === 'duplicate') {
+        e.preventDefault();
+        e.stopPropagation();
+        if (selectedClip) {
+          duplicateClip(selectedClip);
+        }
+        return;
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [clips, selectedClipId, selectedClip, isMarkerMenuOpen, bounds]);
+
   return (
     <div id="fl-playlist-arranger" className="flex flex-col h-full bg-[#121214] select-none text-[#b0b0b0]">
       {/* Toast Notification */}
@@ -815,7 +874,7 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
                 <div
                   key={barIdx}
                   onClick={() => onSeekToBar && onSeekToBar(barIdx + 1)}
-                  className={`w-24 sm:w-28 h-full border-r border-[#333336] flex items-center justify-between px-2 text-[9px] font-mono transition select-none ${
+                  className={`w-24 h-full border-r border-[#333336] flex items-center justify-between px-2 text-[9px] font-mono transition select-none ${
                     isPlayHead ? 'bg-[#ff6e00]/20 text-[#ff6e00] font-bold' : 'text-[#777] hover:bg-white/5'
                   }`}
                 >
@@ -904,7 +963,7 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
                     <div
                       key={barIdx}
                       onClick={() => handleGridCellClick(trackIdx, barIdx)}
-                      className={`w-24 sm:w-28 h-full border-r border-[#1c1c20] cursor-pointer transition ${
+                      className={`w-24 h-full border-r border-[#1c1c20] cursor-pointer transition ${
                         isPlayheadBar ? 'bg-white/5' : 'hover:bg-white/10'
                       }`}
                     />

@@ -8,6 +8,7 @@ import {
   movePlaylistClip,
   resizePlaylistClipLeft,
   resizePlaylistClipRight,
+  resolvePlaylistKeyboardShortcut,
   resolvePlaylistTargetChannel,
   snapBarPosition,
   splitPlaylistClip,
@@ -240,4 +241,50 @@ test('createPlaylistPatternClip falls back cleanly when track or channel metadat
   assert.equal(fallbackClip.color, '#ff6e00');
   assert.equal(fallbackClip.name, 'Track Block');
   assert.equal(fallbackClip.lengthBars, 4);
+});
+
+test('resolvePlaylistKeyboardShortcut: Delete and Backspace resolve to delete when hasSelection is true', () => {
+  assert.equal(resolvePlaylistKeyboardShortcut({ key: 'Delete' }, true), 'delete');
+  assert.equal(resolvePlaylistKeyboardShortcut({ key: 'Backspace' }, true), 'delete');
+});
+
+test('resolvePlaylistKeyboardShortcut: Delete and Backspace resolve to none when hasSelection is false', () => {
+  assert.equal(resolvePlaylistKeyboardShortcut({ key: 'Delete' }, false), 'none');
+  assert.equal(resolvePlaylistKeyboardShortcut({ key: 'Backspace' }, false), 'none');
+});
+
+test('resolvePlaylistKeyboardShortcut: Ctrl+D and Cmd+D resolve to duplicate when hasSelection is true', () => {
+  assert.equal(resolvePlaylistKeyboardShortcut({ ctrlKey: true, key: 'd' }, true), 'duplicate');
+  assert.equal(resolvePlaylistKeyboardShortcut({ ctrlKey: true, key: 'D' }, true), 'duplicate');
+  assert.equal(resolvePlaylistKeyboardShortcut({ ctrlKey: true, code: 'KeyD' }, true), 'duplicate');
+  assert.equal(resolvePlaylistKeyboardShortcut({ metaKey: true, key: 'd' }, true), 'duplicate');
+  assert.equal(resolvePlaylistKeyboardShortcut({ metaKey: true, key: 'D' }, true), 'duplicate');
+  assert.equal(resolvePlaylistKeyboardShortcut({ metaKey: true, code: 'KeyD' }, true), 'duplicate');
+});
+
+test('resolvePlaylistKeyboardShortcut: Ctrl+D and Cmd+D resolve to none when hasSelection is false', () => {
+  assert.equal(resolvePlaylistKeyboardShortcut({ ctrlKey: true, key: 'd' }, false), 'none');
+  assert.equal(resolvePlaylistKeyboardShortcut({ metaKey: true, key: 'd' }, false), 'none');
+});
+
+test('resolvePlaylistKeyboardShortcut: Shift+Ctrl/Cmd+D and Alt+Ctrl/Cmd+D are rejected (resolve to none)', () => {
+  assert.equal(resolvePlaylistKeyboardShortcut({ ctrlKey: true, shiftKey: true, key: 'd' }, true), 'none');
+  assert.equal(resolvePlaylistKeyboardShortcut({ metaKey: true, shiftKey: true, key: 'd' }, true), 'none');
+  assert.equal(resolvePlaylistKeyboardShortcut({ ctrlKey: true, altKey: true, key: 'd' }, true), 'none');
+  assert.equal(resolvePlaylistKeyboardShortcut({ metaKey: true, altKey: true, key: 'd' }, true), 'none');
+  assert.equal(resolvePlaylistKeyboardShortcut({ ctrlKey: true, shiftKey: true, altKey: true, key: 'd' }, true), 'none');
+});
+
+test('resolvePlaylistKeyboardShortcut: Escape resolves to escape regardless of selection state', () => {
+  assert.equal(resolvePlaylistKeyboardShortcut({ key: 'Escape' }, true), 'escape');
+  assert.equal(resolvePlaylistKeyboardShortcut({ key: 'Escape' }, false), 'escape');
+});
+
+test('resolvePlaylistKeyboardShortcut: unrelated keys resolve to none', () => {
+  assert.equal(resolvePlaylistKeyboardShortcut({ key: 'a' }, true), 'none');
+  assert.equal(resolvePlaylistKeyboardShortcut({ key: 'Enter' }, true), 'none');
+  assert.equal(resolvePlaylistKeyboardShortcut({ key: 'Space' }, true), 'none');
+  assert.equal(resolvePlaylistKeyboardShortcut({ ctrlKey: true, key: 'c' }, true), 'none');
+  assert.equal(resolvePlaylistKeyboardShortcut({ key: 'd' }, true), 'none'); // plain d without modifier
+  assert.equal(resolvePlaylistKeyboardShortcut({}, true), 'none');
 });

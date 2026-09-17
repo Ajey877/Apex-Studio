@@ -231,3 +231,35 @@ export function createPlaylistPatternClip(
   };
   return assertValidPlaylistClip(clip, bounds);
 }
+
+export type PlaylistKeyboardAction = 'delete' | 'duplicate' | 'escape' | 'none';
+
+export function resolvePlaylistKeyboardShortcut(
+  event: {
+    key?: string;
+    code?: string;
+    ctrlKey?: boolean;
+    metaKey?: boolean;
+    shiftKey?: boolean;
+    altKey?: boolean;
+  },
+  hasSelection: boolean
+): PlaylistKeyboardAction {
+  if (event.key === 'Escape') {
+    return 'escape';
+  }
+
+  const isCtrlOrMeta = Boolean(event.ctrlKey || event.metaKey);
+  const isShift = Boolean(event.shiftKey);
+  const isAlt = Boolean(event.altKey);
+
+  if (isCtrlOrMeta && !isShift && !isAlt && (event.key === 'd' || event.key === 'D' || event.code === 'KeyD')) {
+    return hasSelection ? 'duplicate' : 'none';
+  }
+
+  if (!isCtrlOrMeta && !isShift && !isAlt && (event.key === 'Delete' || event.key === 'Backspace')) {
+    return hasSelection ? 'delete' : 'none';
+  }
+
+  return 'none';
+}

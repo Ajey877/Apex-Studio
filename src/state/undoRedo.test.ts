@@ -17,6 +17,7 @@ import {
 } from './projectMutations';
 import { deleteChannelFromProjectState } from './projectState';
 import { appendChannelWithAllocatedMixerTrackId } from './mixerTrackIdentity';
+import { deletePlaylistClip, duplicatePlaylistClip } from '../components/playlistClipOperations';
 
 // Helper to create clean test project state
 const createTestState = (): ProjectState => {
@@ -375,6 +376,55 @@ test('Playlist: After a problematic pointer sequence, Undo/Redo still works', ()
 
   const redone = undone.redo();
   assert.equal(redone.present.playlistClips[0].startBar, 4);
+});
+
+test('Playlist: Delete selected clip -> undo restores -> redo deletes', () => {
+  const initial = createTestState();
+  let history = createHistory(initial);
+  const targetClipId = initial.playlistClips[0].id;
+
+  const deletedState = structuredClone(initial);
+  deletedState.playlistClips = deletePlaylistClip(deletedState.playlistClips, targetClipId);
+
+  history = history.commit(deletedState, 'Clip change');
+  assert.equal(history.present.playlistClips.some(c => c.id === targetClipId), false);
+  assert.equal(history.canUndo, true);
+
+  const undone = history.undo();
+  assert.equal(undone.present.playlistClips.some(c => c.id === targetClipId), true);
+  assert.equal(undone.canRedo, true);
+
+  const redone = undone.redo();
+  assert.equal(redone.present.playlistClips.some(c => c.id === targetClipId), false);
+});
+
+test('Playlist: Duplicate selected clip -> undo removes duplicate -> redo restores duplicate', () => {
+  const initial = createTestState();
+  let history = createHistory(initial);
+  const sourceClip = initial.playlistClips[0];
+  const duplicateId = `${sourceClip.id}-duplicate-1`;
+
+  const duplicatedClip = duplicatePlaylistClip(
+    sourceClip,
+    duplicateId,
+    sourceClip.startBar + sourceClip.lengthBars,
+    sourceClip.trackIndex
+  );
+
+  const duplicatedState = structuredClone(initial);
+  duplicatedState.playlistClips = [...duplicatedState.playlistClips, duplicatedClip];
+
+  history = history.commit(duplicatedState, 'Clip change');
+  assert.equal(history.present.playlistClips.some(c => c.id === duplicateId), true);
+  assert.equal(history.present.playlistClips.length, initial.playlistClips.length + 1);
+
+  const undone = history.undo();
+  assert.equal(undone.present.playlistClips.some(c => c.id === duplicateId), false);
+  assert.equal(undone.present.playlistClips.length, initial.playlistClips.length);
+
+  const redone = undone.redo();
+  assert.equal(redone.present.playlistClips.some(c => c.id === duplicateId), true);
+  assert.equal(redone.present.playlistClips.length, initial.playlistClips.length + 1);
 });
 
 // ==========================================
