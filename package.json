@@ -18,6 +18,7 @@
     "package:win:dir": "vite build && electron-builder --win --x64 --dir --publish never",
     "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true}); require('fs').rmSync('server.js',{force:true})\"",
     "lint": "tsc --noEmit",
+    "test:pianoroll": "tsx --test src/components/pianoRollOperations.test.ts",
     "test:audio": "tsx --test src/audio/*.test.ts src/audio/automation/*.test.ts src/state/projectPersistence.test.ts src/utils/*.test.ts",
     "test:history": "tsx --test src/components/playlistClipOperations.test.ts src/state/playlistHistory.test.ts src/state/projectHistory.test.ts src/state/undoRedo.test.ts",
     "test:lifecycle": "tsx --test src/phase4Lifecycle.test.ts",

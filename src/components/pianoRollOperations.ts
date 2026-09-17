@@ -243,3 +243,116 @@ export function deleteNotes(
   }
   return notes.filter(n => !idSet.has(n.id)).map(cloneNote);
 }
+
+export const DEFAULT_STEP_WIDTH = 28;
+export const DEFAULT_ROW_HEIGHT = 24;
+export const MARQUEE_DRAG_THRESHOLD_PX = 4;
+
+export interface Rect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export type MarqueeSelectionMode = 'replace' | 'add' | 'toggle';
+
+export function normalizeRect(x1: number, y1: number, x2: number, y2: number): Rect {
+  const rx1 = Math.round(x1);
+  const ry1 = Math.round(y1);
+  const rx2 = Math.round(x2);
+  const ry2 = Math.round(y2);
+  const x = Math.min(rx1, rx2);
+  const y = Math.min(ry1, ry2);
+  const width = Math.abs(rx2 - rx1);
+  const height = Math.abs(ry2 - ry1);
+  return { x, y, width, height };
+}
+
+export function rectsIntersect(a: Rect, b: Rect): boolean {
+  const EPSILON = 1e-4;
+  return (
+    a.x <= b.x + b.width + EPSILON &&
+    a.x + a.width >= b.x - EPSILON &&
+    a.y <= b.y + b.height + EPSILON &&
+    a.y + a.height >= b.y - EPSILON
+  );
+}
+
+export function getNoteRect(
+  note: Note,
+  stepWidth = DEFAULT_STEP_WIDTH,
+  rowHeight = DEFAULT_ROW_HEIGHT,
+  maxPitch = DEFAULT_MAX_PITCH
+): Rect {
+  const x = note.start * stepWidth;
+  const y = (maxPitch - note.pitch) * rowHeight;
+  const width = Math.max(16, note.duration * stepWidth - 3);
+  const height = rowHeight;
+  return { x, y, width, height };
+}
+
+export function selectNotesInMarquee(
+  notes: Note[],
+  marqueeRect: Rect,
+  currentSelection: Set<string> | string[],
+  mode: MarqueeSelectionMode = 'replace',
+  stepWidth = DEFAULT_STEP_WIDTH,
+  rowHeight = DEFAULT_ROW_HEIGHT,
+  maxPitch = DEFAULT_MAX_PITCH
+): Set<string> {
+  const baseSet = currentSelection instanceof Set ? currentSelection : new Set(currentSelection);
+  const validNoteIds = new Set(notes.map(n => n.id));
+  const intersectingIds = new Set<string>();
+
+  for (const note of notes) {
+    const noteRect = getNoteRect(note, stepWidth, rowHeight, maxPitch);
+    if (rectsIntersect(noteRect, marqueeRect)) {
+      intersectingIds.add(note.id);
+    }
+  }
+
+  if (mode === 'replace') {
+    return intersectingIds;
+  }
+
+  const result = new Set<string>();
+
+  if (mode === 'add') {
+    for (const id of baseSet) {
+      if (validNoteIds.has(id)) {
+        result.add(id);
+      }
+    }
+    for (const id of intersectingIds) {
+      result.add(id);
+    }
+    return result;
+  }
+
+  if (mode === 'toggle') {
+    for (const id of baseSet) {
+      if (validNoteIds.has(id) && !intersectingIds.has(id)) {
+        result.add(id);
+      }
+    }
+    for (const id of intersectingIds) {
+      if (!baseSet.has(id)) {
+        result.add(id);
+      }
+    }
+    return result;
+  }
+
+  return result;
+}
+
+export function hasExceededDragThreshold(
+  startX: number,
+  startY: number,
+  currentX: number,
+  currentY: number,
+  threshold = MARQUEE_DRAG_THRESHOLD_PX
+): boolean {
+  return Math.hypot(currentX - startX, currentY - startY) >= threshold;
+}

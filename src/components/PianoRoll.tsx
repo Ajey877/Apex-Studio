@@ -31,18 +31,38 @@ import {
   DEFAULT_MIN_NOTE_DURATION,
   DEFAULT_MIN_PITCH,
   DEFAULT_MAX_PITCH,
+  DEFAULT_ROW_HEIGHT,
+  DEFAULT_STEP_WIDTH,
+  MARQUEE_DRAG_THRESHOLD_PX,
+  MarqueeSelectionMode,
   NoteBounds,
   cloneNote,
   deleteNotes,
+  hasExceededDragThreshold,
   moveNote,
   moveNotes,
+  normalizeRect,
   resizeNoteLeft,
   resizeNoteRight,
+  selectNotesInMarquee,
   updateNoteInNotes
 } from './pianoRollOperations';
 
-const STEP_WIDTH = 28;
-const ROW_HEIGHT = 24;
+const STEP_WIDTH = DEFAULT_STEP_WIDTH;
+const ROW_HEIGHT = DEFAULT_ROW_HEIGHT;
+
+interface MarqueeInteraction {
+  pointerId: number;
+  originClientX: number;
+  originClientY: number;
+  startX: number;
+  startY: number;
+  currentX: number;
+  currentY: number;
+  mode: MarqueeSelectionMode;
+  initialSelection: Set<string>;
+  hasDragged: boolean;
+}
 
 type NoteInteraction =
   | {
@@ -150,7 +170,7 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
   currentStep,
   isPlaying
 }) => {
-  const [currentTool, setCurrentTool] = useState<ToolType>('draw');
+  const [currentTool, setCurrentTool] = useState<ToolType>('select');
   const [rootKey, setRootKey] = useState<number>(0); // C
   const [selectedScaleIndex, setSelectedScaleIndex] = useState(0); // Natural Minor
   const [selectedChordStamp, setSelectedChordStamp] = useState(0); // Single Note
@@ -167,6 +187,11 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
   const interactionRef = useRef<NoteInteraction | null>(null);
   const didMoveRef = useRef(false);
   const lastAuditionedPitchRef = useRef<number | null>(null);
+
+  const [marquee, setMarquee] = useState<MarqueeInteraction | null>(null);
+  const marqueeRef = useRef<MarqueeInteraction | null>(null);
+  const didMarqueeDragRef = useRef(false);
+  const gridRef = useRef<HTMLDivElement>(null);
 
   // Pitch range C2 (36) to C6 (84) = 49 keys
   const minPitch = DEFAULT_MIN_PITCH;
@@ -224,6 +249,11 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
   };
 
   const handleGridClick = (pitch: number, step: number) => {
+    if (didMarqueeDragRef.current) {
+      didMarqueeDragRef.current = false;
+      return;
+    }
+
     const existingIndex = notes.findIndex(n => n.pitch === pitch && Math.abs(n.start - step) < 0.5);
 
     if (currentTool === 'erase') {
@@ -292,6 +322,7 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
   };
 
   const beginMove = (event: React.PointerEvent, note: Note) => {
+    if (marqueeRef.current) return;
     if (currentTool === 'erase') return;
     if (event.button !== 0) return;
     event.preventDefault();
@@ -334,6 +365,7 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
   };
 
   const beginResize = (event: React.PointerEvent, note: Note, direction: 'right' | 'left') => {
+    if (marqueeRef.current) return;
     if (currentTool === 'erase') return;
     if (event.button !== 0) return;
     event.preventDefault();
@@ -574,6 +606,212 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
     };
   }, [interaction]);
 
+  const marqueeCleanupRef = useRef<(() => void) | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (marqueeCleanupRef.current) {
+        marqueeCleanupRef.current();
+      }
+    };
+  }, []);
+
+  const handleGridPointerDown = (event: React.PointerEvent) => {
+    if (currentTool !== 'select') return;
+    if (event.button !== 0) return;
+    if (interactionRef.current) return;
+    if (marqueeRef.current) return;
+    const gridEl = gridRef.current;
+    if (!gridEl) return;
+
+    event.preventDefault();
+    didMarqueeDragRef.current = false;
+
+    try {
+      gridEl.setPointerCapture(event.pointerId);
+    } catch {
+      try {
+        (event.target as HTMLElement)?.setPointerCapture?.(event.pointerId);
+      } catch {
+        // Browser or detached target fallback
+      }
+    }
+
+    const rect = gridEl.getBoundingClientRect();
+    const startX = Math.round(event.clientX - rect.left);
+    const startY = Math.round(event.clientY - rect.top);
+
+    let mode: MarqueeSelectionMode = 'replace';
+    if (event.shiftKey) {
+      mode = 'add';
+    } else if (event.ctrlKey || event.metaKey) {
+      mode = 'toggle';
+    }
+
+    const initialSelection = new Set<string>(selectedNoteIdsRef.current);
+
+    const nextMarquee: MarqueeInteraction = {
+      pointerId: event.pointerId,
+      originClientX: event.clientX,
+      originClientY: event.clientY,
+      startX,
+      startY,
+      currentX: startX,
+      currentY: startY,
+      mode,
+      initialSelection,
+      hasDragged: false
+    };
+
+    marqueeRef.current = nextMarquee;
+
+    const handleWindowPointerMove = (e: PointerEvent) => {
+      const active = marqueeRef.current;
+      if (active && e.pointerId === active.pointerId) {
+        updateMarquee(e.clientX, e.clientY);
+      }
+    };
+
+    const cleanupListeners = () => {
+      window.removeEventListener('pointermove', handleWindowPointerMove);
+      window.removeEventListener('pointerup', handleWindowPointerUp);
+      window.removeEventListener('pointercancel', handleWindowPointerCancel);
+      marqueeCleanupRef.current = null;
+    };
+
+    const handleWindowPointerUp = (e: PointerEvent) => {
+      const active = marqueeRef.current;
+      if (active && e.pointerId === active.pointerId) {
+        cleanupListeners();
+        endMarquee(e);
+      }
+    };
+
+    const handleWindowPointerCancel = (e: PointerEvent) => {
+      const active = marqueeRef.current;
+      if (active && e.pointerId === active.pointerId) {
+        cleanupListeners();
+        cancelMarquee();
+      }
+    };
+
+    marqueeCleanupRef.current = cleanupListeners;
+    window.addEventListener('pointermove', handleWindowPointerMove);
+    window.addEventListener('pointerup', handleWindowPointerUp);
+    window.addEventListener('pointercancel', handleWindowPointerCancel);
+  };
+
+  const updateMarquee = (clientX: number, clientY: number) => {
+    const active = marqueeRef.current;
+    if (!active) return;
+    const gridEl = gridRef.current;
+    if (!gridEl) return;
+
+    const rect = gridEl.getBoundingClientRect();
+    const currentX = Math.round(clientX - rect.left);
+    const currentY = Math.round(clientY - rect.top);
+
+    const exceeded = hasExceededDragThreshold(active.originClientX, active.originClientY, clientX, clientY);
+    const hasDragged = active.hasDragged || exceeded;
+
+    if (!hasDragged) {
+      marqueeRef.current = {
+        ...active,
+        currentX,
+        currentY,
+        hasDragged: false
+      };
+      return;
+    }
+
+    didMarqueeDragRef.current = true;
+
+    const updated: MarqueeInteraction = {
+      ...active,
+      currentX,
+      currentY,
+      hasDragged: true
+    };
+    marqueeRef.current = updated;
+    setMarquee(updated);
+
+    const normRect = normalizeRect(active.startX, active.startY, currentX, currentY);
+    const nextSelection = selectNotesInMarquee(
+      notes,
+      normRect,
+      active.initialSelection,
+      active.mode,
+      STEP_WIDTH,
+      ROW_HEIGHT,
+      maxPitch
+    );
+    setSelectedNoteIds(nextSelection);
+  };
+
+  const endMarquee = (event: PointerEvent) => {
+    const active = marqueeRef.current;
+    if (!active) return;
+
+    try {
+      if (gridRef.current && typeof gridRef.current.releasePointerCapture === 'function') {
+        if (gridRef.current.hasPointerCapture(active.pointerId)) {
+          gridRef.current.releasePointerCapture(active.pointerId);
+        }
+      }
+    } catch {
+      // Pointer capture release fallback
+    }
+
+    marqueeRef.current = null;
+    setMarquee(null);
+
+    if (!active.hasDragged) {
+      if (active.mode === 'replace') {
+        setSelectedNoteIds(new Set());
+      } else {
+        didMarqueeDragRef.current = true;
+        setSelectedNoteIds(active.initialSelection);
+      }
+      return;
+    }
+
+    const gridEl = gridRef.current;
+    const currentX = gridEl ? Math.round(event.clientX - gridEl.getBoundingClientRect().left) : active.currentX;
+    const currentY = gridEl ? Math.round(event.clientY - gridEl.getBoundingClientRect().top) : active.currentY;
+    const normRect = normalizeRect(active.startX, active.startY, currentX, currentY);
+
+    const finalSelection = selectNotesInMarquee(
+      notes,
+      normRect,
+      active.initialSelection,
+      active.mode,
+      STEP_WIDTH,
+      ROW_HEIGHT,
+      maxPitch
+    );
+    setSelectedNoteIds(finalSelection);
+  };
+
+  const cancelMarquee = () => {
+    const active = marqueeRef.current;
+    if (!active) return;
+
+    try {
+      if (gridRef.current && typeof gridRef.current.releasePointerCapture === 'function') {
+        if (gridRef.current.hasPointerCapture(active.pointerId)) {
+          gridRef.current.releasePointerCapture(active.pointerId);
+        }
+      }
+    } catch {
+      // Pointer capture release fallback
+    }
+
+    marqueeRef.current = null;
+    setMarquee(null);
+    didMarqueeDragRef.current = false;
+    setSelectedNoteIds(active.initialSelection);
+  };
+
   const handleStrumNotes = () => {
     // Group notes by starting beat step
     const stepGroups = new Map<number, Note[]>();
@@ -737,6 +975,14 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
 
           {/* Tools */}
           <div className="flex items-center gap-1 bg-[#121214] p-0.5 rounded border border-[#333336]">
+            <button
+              id="piano-tool-select"
+              onClick={() => setCurrentTool('select')}
+              className={`p-1 rounded transition ${currentTool === 'select' ? 'bg-[#ff6e00] text-black font-bold' : 'text-[#777] hover:text-white'}`}
+              title="Select Tool (Marquee / Multi-Select)"
+            >
+              <MousePointer className="w-3.5 h-3.5" />
+            </button>
             <button
               onClick={() => setCurrentTool('draw')}
               className={`p-1 rounded transition ${currentTool === 'draw' ? 'bg-[#ff6e00] text-black font-bold' : 'text-[#777] hover:text-white'}`}
@@ -974,7 +1220,28 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
           </div>
 
           {/* Grid Rows for each pitch */}
-          <div className="min-w-[896px] flex-1">
+          <div
+            ref={gridRef}
+            onPointerDown={handleGridPointerDown}
+            style={{ touchAction: 'none' }}
+            className="min-w-[896px] flex-1 relative select-none"
+          >
+            {/* Active Marquee Selection Box */}
+            {marquee?.hasDragged && (() => {
+              const r = normalizeRect(marquee.startX, marquee.startY, marquee.currentX, marquee.currentY);
+              return (
+                <div
+                  className="absolute pointer-events-none border border-[#ff6e00] bg-[#ff6e00]/20 z-30 rounded-xs shadow-sm"
+                  style={{
+                    left: `${r.x}px`,
+                    top: `${r.y}px`,
+                    width: `${r.width}px`,
+                    height: `${r.height}px`
+                  }}
+                />
+              );
+            })()}
+
             {pitchRange.map((pitch) => {
               const isBlack = isBlackKey(pitch);
               const inScale = isInScale(pitch);

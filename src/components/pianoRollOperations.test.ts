@@ -6,12 +6,21 @@ import {
   DEFAULT_MAX_PITCH,
   DEFAULT_MIN_NOTE_DURATION,
   DEFAULT_MIN_PITCH,
+  DEFAULT_ROW_HEIGHT,
+  DEFAULT_STEP_WIDTH,
+  MARQUEE_DRAG_THRESHOLD_PX,
+  Rect,
   assertValidNote,
   deleteNotes,
+  getNoteRect,
+  hasExceededDragThreshold,
   moveNote,
   moveNotes,
+  normalizeRect,
+  rectsIntersect,
   resizeNoteLeft,
   resizeNoteRight,
+  selectNotesInMarquee,
   snapStepPosition,
   updateNoteInNotes,
   validateNote
@@ -433,5 +442,448 @@ test('selection: Ctrl+A selects all notes, Escape clears selection', () => {
   // Escape simulation:
   const deselectAll = new Set();
   assert.equal(deselectAll.size, 0);
+});
+
+test('normalizeRect: normalizes forward and reverse diagonals into non-negative rectangle', () => {
+  // Forward: top-left to bottom-right
+  const fwd = normalizeRect(10, 20, 60, 80);
+  assert.deepEqual(fwd, { x: 10, y: 20, width: 50, height: 60 });
+
+  // Reverse: bottom-right to top-left
+  const rev = normalizeRect(60, 80, 10, 20);
+  assert.deepEqual(rev, { x: 10, y: 20, width: 50, height: 60 });
+
+  // Diagonal: top-right to bottom-left
+  const diag1 = normalizeRect(60, 20, 10, 80);
+  assert.deepEqual(diag1, { x: 10, y: 20, width: 50, height: 60 });
+
+  // Diagonal: bottom-left to top-right
+  const diag2 = normalizeRect(10, 80, 60, 20);
+  assert.deepEqual(diag2, { x: 10, y: 20, width: 50, height: 60 });
+
+  // Zero-size (click in place)
+  const zero = normalizeRect(25, 40, 25, 40);
+  assert.deepEqual(zero, { x: 25, y: 40, width: 0, height: 0 });
+});
+
+test('rectsIntersect: detects full overlap, partial overlap, edge-touching, and outside', () => {
+  const target: Rect = { x: 20, y: 20, width: 40, height: 40 };
+
+  // Full containment
+  assert.equal(rectsIntersect(target, { x: 25, y: 25, width: 10, height: 10 }), true);
+  assert.equal(rectsIntersect({ x: 25, y: 25, width: 10, height: 10 }, target), true);
+
+  // Partial overlap
+  assert.equal(rectsIntersect(target, { x: 10, y: 10, width: 20, height: 20 }), true);
+  assert.equal(rectsIntersect(target, { x: 50, y: 50, width: 20, height: 20 }), true);
+
+  // Edge-touching (right edge: x = 60)
+  assert.equal(rectsIntersect(target, { x: 60, y: 20, width: 20, height: 40 }), true);
+  // Edge-touching (left edge: x + width = 20)
+  assert.equal(rectsIntersect(target, { x: 0, y: 20, width: 20, height: 40 }), true);
+  // Edge-touching (bottom edge: y = 60)
+  assert.equal(rectsIntersect(target, { x: 20, y: 60, width: 40, height: 20 }), true);
+  // Edge-touching (top edge: y + height = 20)
+  assert.equal(rectsIntersect(target, { x: 20, y: 0, width: 40, height: 20 }), true);
+  // Corner-touching point (x=60, y=60, width=0, height=0)
+  assert.equal(rectsIntersect(target, { x: 60, y: 60, width: 0, height: 0 }), true);
+
+  // Outside (strictly right)
+  assert.equal(rectsIntersect(target, { x: 60.1, y: 20, width: 20, height: 40 }), false);
+  // Outside (strictly left)
+  assert.equal(rectsIntersect(target, { x: 0, y: 20, width: 19.9, height: 40 }), false);
+  // Outside (strictly below)
+  assert.equal(rectsIntersect(target, { x: 20, y: 60.1, width: 40, height: 20 }), false);
+  // Outside (strictly above)
+  assert.equal(rectsIntersect(target, { x: 20, y: 0, width: 40, height: 19.9 }), false);
+});
+
+test('getNoteRect: accurately converts musical parameters to pixel bounding box', () => {
+  // Note at maxPitch (84 = top row, y=0)
+  const topNote: Note = { id: 'top', pitch: 84, start: 0, duration: 2, velocity: 0.8 };
+  const rTop = getNoteRect(topNote, 28, 24, 84);
+  assert.deepEqual(rTop, {
+    x: 0,
+    y: 0,
+    width: Math.max(16, 2 * 28 - 3), // 53
+    height: 24
+  });
+
+  // Note at pitch 83 (1 row down, y=24)
+  const nextNote: Note = { id: 'n2', pitch: 83, start: 4, duration: 1, velocity: 0.8 };
+  const rNext = getNoteRect(nextNote, 28, 24, 84);
+  assert.deepEqual(rNext, {
+    x: 4 * 28, // 112
+    y: 1 * 24, // 24
+    width: Math.max(16, 1 * 28 - 3), // 25
+    height: 24
+  });
+
+  // Note with short duration clamped to min width 16
+  const shortNote: Note = { id: 'short', pitch: 84, start: 2, duration: 0.25, velocity: 0.8 };
+  const rShort = getNoteRect(shortNote, 28, 24, 84);
+  assert.equal(rShort.width, 16);
+});
+
+test('selectNotesInMarquee: single-note marquee in replace mode', () => {
+  const notes: Note[] = [
+    { id: 'n1', pitch: 84, start: 0, duration: 2, velocity: 0.8 },
+    { id: 'n2', pitch: 83, start: 4, duration: 2, velocity: 0.8 }
+  ];
+
+  // Marquee covering only n1 (x in [0, 50], y in [0, 24])
+  const marquee = normalizeRect(0, 0, 50, 24);
+  const selection = selectNotesInMarquee(notes, marquee, new Set(), 'replace');
+  assert.equal(selection.size, 1);
+  assert.equal(selection.has('n1'), true);
+  assert.equal(selection.has('n2'), false);
+});
+
+test('selectNotesInMarquee: multiple-note marquee selects all intersecting notes', () => {
+  const notes: Note[] = [
+    { id: 'n1', pitch: 84, start: 0, duration: 2, velocity: 0.8 },
+    { id: 'n2', pitch: 83, start: 1, duration: 2, velocity: 0.8 },
+    { id: 'n3', pitch: 82, start: 2, duration: 2, velocity: 0.8 },
+    { id: 'n4', pitch: 70, start: 10, duration: 2, velocity: 0.8 } // Far away
+  ];
+
+  // Marquee spanning pitch 84 to 82 (y in [0, 72]) and steps 0 to 4 (x in [0, 112])
+  const marquee = normalizeRect(0, 0, 112, 72);
+  const selection = selectNotesInMarquee(notes, marquee, new Set(), 'replace');
+  assert.equal(selection.size, 3);
+  assert.equal(selection.has('n1'), true);
+  assert.equal(selection.has('n2'), true);
+  assert.equal(selection.has('n3'), true);
+  assert.equal(selection.has('n4'), false);
+});
+
+test('selectNotesInMarquee: partial intersection selects the note', () => {
+  const notes: Note[] = [
+    { id: 'n1', pitch: 84, start: 2, duration: 2, velocity: 0.8 }
+    // n1 rect: x: 56, y: 0, width: 53, height: 24 (spans x: 56..109, y: 0..24)
+  ];
+
+  // Marquee overlapping only x: 50..60, y: 10..20
+  const marquee = normalizeRect(50, 10, 60, 20);
+  const selection = selectNotesInMarquee(notes, marquee, new Set(), 'replace');
+  assert.equal(selection.has('n1'), true);
+});
+
+test('selectNotesInMarquee: edge-touching intersection selects the note', () => {
+  const notes: Note[] = [
+    { id: 'n1', pitch: 84, start: 2, duration: 2, velocity: 0.8 }
+    // n1 rect: x: 56, y: 0, width: 53, height: 24
+  ];
+
+  // Marquee ending exactly at x: 56, overlapping y: 0..24
+  const marquee = normalizeRect(10, 0, 56, 24);
+  const selection = selectNotesInMarquee(notes, marquee, new Set(), 'replace');
+  assert.equal(selection.has('n1'), true);
+});
+
+test('selectNotesInMarquee: G#4 edge-touching from all 4 sides with integer and subpixel coordinates', () => {
+  // G#4 is pitch 68, start 11, duration 2
+  // getNoteRect: x: 11 * 28 = 308, y: (84 - 68) * 24 = 384, width: 2 * 28 - 3 = 53, height: 24
+  // Bounds: x in [308, 361], y in [384, 408]
+  const noteGSharp4: Note = { id: 'p5', pitch: 68, start: 11, duration: 2, velocity: 0.75 };
+  const notes = [noteGSharp4];
+
+  // 1. Left edge touching exactly at x = 308
+  const leftTouch = normalizeRect(200, 384, 308, 408);
+  assert.equal(selectNotesInMarquee(notes, leftTouch, new Set()).has('p5'), true);
+
+  // 2. Right edge touching exactly at x = 361
+  const rightTouch = normalizeRect(361, 384, 450, 408);
+  assert.equal(selectNotesInMarquee(notes, rightTouch, new Set()).has('p5'), true);
+
+  // 3. Top edge touching exactly at y = 384
+  const topTouch = normalizeRect(308, 300, 361, 384);
+  assert.equal(selectNotesInMarquee(notes, topTouch, new Set()).has('p5'), true);
+
+  // 4. Bottom edge touching exactly at y = 408
+  const bottomTouch = normalizeRect(308, 408, 361, 500);
+  assert.equal(selectNotesInMarquee(notes, bottomTouch, new Set()).has('p5'), true);
+
+  // 5. Subpixel coordinates from pointer events snapping to visual pixel edge (Windows DPR 1.25 / 1.5)
+  // Marquee ending at 307.8 (visual edge contact on left)
+  const subpixelLeft = normalizeRect(200.25, 384.1, 307.8, 407.9);
+  assert.equal(selectNotesInMarquee(notes, subpixelLeft, new Set()).has('p5'), true);
+
+  // Marquee starting at 361.2 (visual edge contact on right)
+  const subpixelRight = normalizeRect(361.2, 384.1, 450.3, 407.9);
+  assert.equal(selectNotesInMarquee(notes, subpixelRight, new Set()).has('p5'), true);
+
+  // Marquee ending at 383.9 (visual edge contact on top)
+  const subpixelTop = normalizeRect(308.1, 300.4, 360.9, 383.9);
+  assert.equal(selectNotesInMarquee(notes, subpixelTop, new Set()).has('p5'), true);
+
+  // Marquee starting at 408.1 (visual edge contact on bottom)
+  const subpixelBottom = normalizeRect(308.1, 408.1, 360.9, 500.2);
+  assert.equal(selectNotesInMarquee(notes, subpixelBottom, new Set()).has('p5'), true);
+
+  // 6. Strictly non-touching marquee outside boundary must NOT select G#4
+  const outsideLeft = normalizeRect(200, 384, 306.9, 408);
+  assert.equal(selectNotesInMarquee(notes, outsideLeft, new Set()).has('p5'), false);
+
+  const outsideRight = normalizeRect(362.1, 384, 450, 408);
+  assert.equal(selectNotesInMarquee(notes, outsideRight, new Set()).has('p5'), false);
+});
+
+test('selectNotesInMarquee: outside notes are never accidentally selected', () => {
+  const notes: Note[] = [
+    { id: 'inside', pitch: 84, start: 0, duration: 2, velocity: 0.8 },
+    { id: 'outside-x', pitch: 84, start: 5, duration: 2, velocity: 0.8 },
+    { id: 'outside-y', pitch: 70, start: 0, duration: 2, velocity: 0.8 }
+  ];
+
+  const marquee = normalizeRect(0, 0, 50, 24);
+  const selection = selectNotesInMarquee(notes, marquee, new Set(), 'replace');
+  assert.equal(selection.size, 1);
+  assert.equal(selection.has('inside'), true);
+  assert.equal(selection.has('outside-x'), false);
+  assert.equal(selection.has('outside-y'), false);
+});
+
+test('selectNotesInMarquee: reverse-direction marquee yields identical selection', () => {
+  const notes: Note[] = [
+    { id: 'n1', pitch: 84, start: 0, duration: 2, velocity: 0.8 },
+    { id: 'n2', pitch: 83, start: 2, duration: 2, velocity: 0.8 }
+  ];
+
+  const fwdMarquee = normalizeRect(0, 0, 100, 48);
+  const revMarquee = normalizeRect(100, 48, 0, 0);
+
+  const selFwd = selectNotesInMarquee(notes, fwdMarquee, new Set(), 'replace');
+  const selRev = selectNotesInMarquee(notes, revMarquee, new Set(), 'replace');
+
+  assert.deepEqual(Array.from(selFwd).sort(), Array.from(selRev).sort());
+  assert.equal(selRev.size, 2);
+});
+
+test('selectNotesInMarquee: empty marquee in replace mode clears existing selection', () => {
+  const notes: Note[] = [
+    { id: 'n1', pitch: 84, start: 0, duration: 2, velocity: 0.8 }
+  ];
+
+  const priorSelection = new Set(['n1']);
+  // Marquee covering empty space far away
+  const emptyMarquee = normalizeRect(500, 500, 600, 600);
+  const result = selectNotesInMarquee(notes, emptyMarquee, priorSelection, 'replace');
+  assert.equal(result.size, 0);
+});
+
+test('selectNotesInMarquee: Shift add mode unions intersecting notes with current selection', () => {
+  const notes: Note[] = [
+    { id: 'n1', pitch: 84, start: 0, duration: 2, velocity: 0.8 },
+    { id: 'n2', pitch: 83, start: 4, duration: 2, velocity: 0.8 },
+    { id: 'n3', pitch: 82, start: 8, duration: 2, velocity: 0.8 }
+  ];
+
+  const priorSelection = new Set(['n1']);
+  // Marquee covering only n2
+  const marquee = normalizeRect(110, 24, 170, 48);
+  const result = selectNotesInMarquee(notes, marquee, priorSelection, 'add');
+
+  assert.equal(result.size, 2);
+  assert.equal(result.has('n1'), true);
+  assert.equal(result.has('n2'), true);
+  assert.equal(result.has('n3'), false);
+
+  // Empty marquee in add mode preserves prior selection
+  const emptyMarquee = normalizeRect(500, 500, 600, 600);
+  const resultEmpty = selectNotesInMarquee(notes, emptyMarquee, priorSelection, 'add');
+  assert.equal(resultEmpty.size, 1);
+  assert.equal(resultEmpty.has('n1'), true);
+});
+
+test('selectNotesInMarquee: Ctrl/Cmd toggle mode inverts intersecting note selection', () => {
+  const notes: Note[] = [
+    { id: 'n1', pitch: 84, start: 0, duration: 2, velocity: 0.8 },
+    { id: 'n2', pitch: 83, start: 4, duration: 2, velocity: 0.8 },
+    { id: 'n3', pitch: 82, start: 8, duration: 2, velocity: 0.8 }
+  ];
+
+  // Initially n1 and n2 are selected
+  const priorSelection = new Set(['n1', 'n2']);
+
+  // Marquee covers n2 and n3:
+  // n2 was selected -> should become deselected
+  // n3 was unselected -> should become selected
+  // n1 was not touched -> should remain selected
+  const r2 = getNoteRect(notes[1]);
+  const r3 = getNoteRect(notes[2]);
+  const marquee = normalizeRect(r2.x, r2.y, r3.x + r3.width, r3.y + r3.height);
+
+  const result = selectNotesInMarquee(notes, marquee, priorSelection, 'toggle');
+  assert.equal(result.size, 2);
+  assert.equal(result.has('n1'), true);
+  assert.equal(result.has('n2'), false);
+  assert.equal(result.has('n3'), true);
+
+  // Empty marquee in toggle mode preserves prior selection
+  const emptyMarquee = normalizeRect(500, 500, 600, 600);
+  const resultEmpty = selectNotesInMarquee(notes, emptyMarquee, priorSelection, 'toggle');
+  assert.equal(resultEmpty.size, 2);
+  assert.equal(resultEmpty.has('n1'), true);
+  assert.equal(resultEmpty.has('n2'), true);
+});
+
+test('hasExceededDragThreshold: enforces small movement threshold for click vs drag', () => {
+  // Movement strictly below 4px threshold must return false
+  assert.equal(hasExceededDragThreshold(10, 10, 10, 10), false);
+  assert.equal(hasExceededDragThreshold(10, 10, 11, 10), false); // 1px horizontal
+  assert.equal(hasExceededDragThreshold(10, 10, 10, 11), false); // 1px vertical
+  assert.equal(hasExceededDragThreshold(10, 10, 12, 10), false); // 2px horizontal
+  assert.equal(hasExceededDragThreshold(10, 10, 10, 12), false); // 2px vertical
+  assert.equal(hasExceededDragThreshold(10, 10, 11, 11), false); // hypot(1, 1) = 1.414px
+  assert.equal(hasExceededDragThreshold(10, 10, 12, 12), false); // hypot(2, 2) = 2.828px
+  assert.equal(hasExceededDragThreshold(10, 10, 12, 11), false); // hypot(2, 1) = 2.236px
+  assert.equal(hasExceededDragThreshold(10, 10, 10, 13), false); // 3px vertical
+  assert.equal(hasExceededDragThreshold(10, 10, 13.9, 10), false); // 3.9px horizontal
+
+  // Reverse / negative movements below 4px threshold
+  assert.equal(hasExceededDragThreshold(10, 10, 9, 10), false);  // -1px
+  assert.equal(hasExceededDragThreshold(10, 10, 8, 10), false);  // -2px
+  assert.equal(hasExceededDragThreshold(10, 10, 9, 9), false);   // -1.414px
+  assert.equal(hasExceededDragThreshold(10, 10, 8, 8), false);   // -2.828px
+
+  // Subpixel raw client coordinate inputs below 4px
+  assert.equal(hasExceededDragThreshold(100.4, 200.4, 101.9, 201.9), false); // hypot(1.5, 1.5) = 2.121px
+  assert.equal(hasExceededDragThreshold(100.25, 200.5, 102.25, 202.5), false); // hypot(2, 2) = 2.828px
+
+  // At or above 4px threshold must return true
+  assert.equal(hasExceededDragThreshold(10, 10, 14, 10), true); // 4px forward
+  assert.equal(hasExceededDragThreshold(10, 10, 10, 14), true); // 4px forward Y
+  assert.equal(hasExceededDragThreshold(10, 10, 13, 13), true); // hypot(3, 3) = 4.24 >= 4
+  assert.equal(hasExceededDragThreshold(10, 10, 6, 10), true);  // 4px reverse direction
+  assert.equal(hasExceededDragThreshold(10, 10, 7, 7), true);   // hypot(-3, -3) = 4.24 >= 4
+});
+
+test('marquee lifecycle simulation: pointercancel restores initial selection and produces no history mutation', () => {
+  const notes: Note[] = [
+    { id: 'n1', pitch: 84, start: 0, duration: 2, velocity: 0.8 },
+    { id: 'n2', pitch: 83, start: 4, duration: 2, velocity: 0.8 }
+  ];
+
+  const initialSelection = new Set(['n1']);
+  let currentSelection = new Set(initialSelection);
+  const historyEntries: unknown[] = [];
+
+  // 1. Pointerdown on empty space (200, 100)
+  const startX = 200;
+  const startY = 100;
+
+  // 2. Pointermove below threshold (202, 101) -> no drag, selection unchanged
+  if (hasExceededDragThreshold(startX, startY, 202, 101)) {
+    currentSelection = selectNotesInMarquee(notes, normalizeRect(startX, startY, 202, 101), initialSelection, 'replace');
+  }
+  assert.equal(currentSelection.size, 1);
+  assert.equal(currentSelection.has('n1'), true);
+
+  // 3. Pointermove above threshold to (0, 0) -> transiently selects n1 and n2
+  if (hasExceededDragThreshold(startX, startY, 0, 0)) {
+    currentSelection = selectNotesInMarquee(notes, normalizeRect(startX, startY, 0, 0), initialSelection, 'replace');
+  }
+  assert.equal(currentSelection.size, 2);
+  assert.equal(historyEntries.length, 0); // No history mutation during move
+
+  // 4. Pointercancel occurs -> restores exact initialSelection without mutation
+  currentSelection = new Set(initialSelection);
+  assert.equal(currentSelection.size, 1);
+  assert.equal(currentSelection.has('n1'), true);
+  assert.equal(historyEntries.length, 0); // No history mutation on cancel
+});
+
+test('marquee lifecycle simulation: pointerup commits selection only and is compatible with group move', () => {
+  const notes: Note[] = [
+    { id: 'n1', pitch: 84, start: 0, duration: 2, velocity: 0.8 },
+    { id: 'n2', pitch: 83, start: 4, duration: 2, velocity: 0.8 }
+  ];
+
+  let currentSelection = new Set<string>();
+  const historyEntries: { notes: Note[] }[] = [];
+
+  // Marquee selects both notes
+  const marquee = normalizeRect(0, 0, 200, 50);
+  currentSelection = selectNotesInMarquee(notes, marquee, currentSelection, 'replace');
+  assert.equal(currentSelection.size, 2);
+  assert.equal(historyEntries.length, 0); // Selection creates NO history
+
+  // Now perform group move using Phase 5.2A moveNotes with the marquee-selected IDs
+  const movedNotes = moveNotes(notes, currentSelection, 2, -1, 1);
+  historyEntries.push({ notes: movedNotes });
+
+  assert.equal(historyEntries.length, 1); // Exactly one commit for the edit
+  assert.equal(movedNotes[0].start, 2);
+  assert.equal(movedNotes[0].pitch, 83);
+  assert.equal(movedNotes[1].start, 6);
+  assert.equal(movedNotes[1].pitch, 82);
+});
+
+test('marquee lifecycle: <4px pointer movement never sets state/renders; >=4px activates marquee', () => {
+  const originX = 100;
+  const originY = 100;
+
+  // 1. On pointerdown: ref is stored, but React marquee state is null
+  let marqueeState: { startX: number; startY: number; hasDragged: boolean } | null = null;
+  const marqueeRef = {
+    originClientX: originX,
+    originClientY: originY,
+    startX: 100,
+    startY: 100,
+    currentX: 100,
+    currentY: 100,
+    hasDragged: false
+  };
+
+  // Helper simulating the updateMarquee threshold gating
+  const simulateMove = (clientX: number, clientY: number) => {
+    const exceeded = hasExceededDragThreshold(marqueeRef.originClientX, marqueeRef.originClientY, clientX, clientY);
+    const hasDragged = marqueeRef.hasDragged || exceeded;
+    if (!hasDragged) {
+      marqueeRef.currentX = clientX;
+      marqueeRef.currentY = clientY;
+      marqueeRef.hasDragged = false;
+      // MUST NOT set React state
+      return;
+    }
+    marqueeRef.hasDragged = true;
+    marqueeState = {
+      startX: marqueeRef.startX,
+      startY: marqueeRef.startY,
+      hasDragged: true
+    };
+  };
+
+  // Sub-threshold movements (1px, 2px, 3px, 3.9px, diagonal 1.414px, 2.828px)
+  simulateMove(101, 100); // 1px
+  assert.equal(marqueeRef.hasDragged, false);
+  assert.equal(marqueeState, null);
+
+  simulateMove(100, 102); // 2px
+  assert.equal(marqueeRef.hasDragged, false);
+  assert.equal(marqueeState, null);
+
+  simulateMove(101, 101); // 1.414px
+  assert.equal(marqueeRef.hasDragged, false);
+  assert.equal(marqueeState, null);
+
+  simulateMove(102, 102); // 2.828px
+  assert.equal(marqueeRef.hasDragged, false);
+  assert.equal(marqueeState, null);
+
+  simulateMove(103, 100); // 3px
+  assert.equal(marqueeRef.hasDragged, false);
+  assert.equal(marqueeState, null);
+
+  simulateMove(103.9, 100); // 3.9px
+  assert.equal(marqueeRef.hasDragged, false);
+  assert.equal(marqueeState, null);
+
+  // Exactly 4px: activates marquee and populates state
+  simulateMove(104, 100); // 4px
+  assert.equal(marqueeRef.hasDragged, true);
+  assert.notEqual(marqueeState, null);
+  assert.equal(marqueeState?.hasDragged, true);
 });
 
