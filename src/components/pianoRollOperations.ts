@@ -244,6 +244,64 @@ export function deleteNotes(
   return notes.filter(n => !idSet.has(n.id)).map(cloneNote);
 }
 
+export function resizeNotesRight(
+  notes: Note[],
+  selectedIds: Set<string> | string[],
+  requestedDeltaSteps: number,
+  gridSteps = DEFAULT_GRID_STEPS,
+  minimumDuration?: number,
+  bounds: NoteBounds = {}
+): Note[] {
+  if (!finite(requestedDeltaSteps)) {
+    throw new Error('Delta steps must be finite');
+  }
+  if (!finite(gridSteps) || gridSteps <= 0) {
+    throw new Error('Grid size must be greater than zero');
+  }
+
+  const idSet = selectedIds instanceof Set ? selectedIds : new Set(selectedIds);
+  if (idSet.size === 0 || notes.length === 0) {
+    return notes.map(cloneNote);
+  }
+
+  return notes.map(note => {
+    if (!idSet.has(note.id)) {
+      return cloneNote(note);
+    }
+    const requestedEnd = note.start + note.duration + requestedDeltaSteps;
+    return resizeNoteRight(note, requestedEnd, gridSteps, minimumDuration, bounds);
+  });
+}
+
+export function resizeNotesLeft(
+  notes: Note[],
+  selectedIds: Set<string> | string[],
+  requestedDeltaSteps: number,
+  gridSteps = DEFAULT_GRID_STEPS,
+  minimumDuration?: number,
+  bounds: NoteBounds = {}
+): Note[] {
+  if (!finite(requestedDeltaSteps)) {
+    throw new Error('Delta steps must be finite');
+  }
+  if (!finite(gridSteps) || gridSteps <= 0) {
+    throw new Error('Grid size must be greater than zero');
+  }
+
+  const idSet = selectedIds instanceof Set ? selectedIds : new Set(selectedIds);
+  if (idSet.size === 0 || notes.length === 0) {
+    return notes.map(cloneNote);
+  }
+
+  return notes.map(note => {
+    if (!idSet.has(note.id)) {
+      return cloneNote(note);
+    }
+    const requestedStart = note.start + requestedDeltaSteps;
+    return resizeNoteLeft(note, requestedStart, gridSteps, minimumDuration, bounds);
+  });
+}
+
 export const DEFAULT_STEP_WIDTH = 28;
 export const DEFAULT_ROW_HEIGHT = 24;
 export const MARQUEE_DRAG_THRESHOLD_PX = 4;

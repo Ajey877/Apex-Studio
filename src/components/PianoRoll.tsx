@@ -44,6 +44,8 @@ import {
   normalizeRect,
   resizeNoteLeft,
   resizeNoteRight,
+  resizeNotesLeft,
+  resizeNotesRight,
   selectNotesInMarquee,
   updateNoteInNotes
 } from './pianoRollOperations';
@@ -77,16 +79,20 @@ type NoteInteraction =
     }
   | {
       kind: 'resize-right';
-      initialNote: Note;
-      currentNote: Note;
+      anchorNoteId: string;
+      selectedIds: Set<string>;
+      initialNotes: Note[];
+      currentNotes: Note[];
       pointerId: number;
       originX: number;
       originY: number;
     }
   | {
       kind: 'resize-left';
-      initialNote: Note;
-      currentNote: Note;
+      anchorNoteId: string;
+      selectedIds: Set<string>;
+      initialNotes: Note[];
+      currentNotes: Note[];
       pointerId: number;
       originX: number;
       originY: number;
@@ -211,11 +217,7 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
     gridSteps: DEFAULT_GRID_STEPS
   };
 
-  const displayNotes = interaction
-    ? (interaction.kind === 'move'
-        ? interaction.currentNotes
-        : updateNoteInNotes(notes, interaction.currentNote, bounds))
-    : notes;
+  const displayNotes = interaction ? interaction.currentNotes : notes;
 
   const getNoteName = (pitch: number) => {
     const names = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
@@ -376,13 +378,19 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
     } catch {
       // Browser or detached target fallback
     }
-    if (!selectedNoteIdsRef.current.has(note.id)) {
-      setSelectedNoteIds(new Set([note.id]));
+
+    let currentSelection = selectedNoteIdsRef.current;
+    if (!currentSelection.has(note.id)) {
+      currentSelection = new Set([note.id]);
+      setSelectedNoteIds(currentSelection);
     }
+
     const next: NoteInteraction = {
       kind: direction === 'right' ? 'resize-right' : 'resize-left',
-      initialNote: cloneNote(note),
-      currentNote: cloneNote(note),
+      anchorNoteId: note.id,
+      selectedIds: new Set(currentSelection),
+      initialNotes: notes.map(cloneNote),
+      currentNotes: notes.map(cloneNote),
       pointerId: event.pointerId,
       originX: event.clientX,
       originY: event.clientY
@@ -429,32 +437,32 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
         interactionRef.current = updated;
         setInteraction(updated);
       } else if (active.kind === 'resize-right') {
-        const requestedEnd = active.initialNote.start + active.initialNote.duration + deltaSteps;
-        const nextNote = resizeNoteRight(
-          active.initialNote,
-          requestedEnd,
+        const resizedNotes = resizeNotesRight(
+          active.initialNotes,
+          active.selectedIds,
+          deltaSteps,
           DEFAULT_GRID_STEPS,
           DEFAULT_MIN_NOTE_DURATION,
           bounds
         );
         const updated: NoteInteraction = {
           ...active,
-          currentNote: nextNote
+          currentNotes: resizedNotes
         };
         interactionRef.current = updated;
         setInteraction(updated);
       } else {
-        const requestedStart = active.initialNote.start + deltaSteps;
-        const nextNote = resizeNoteLeft(
-          active.initialNote,
-          requestedStart,
+        const resizedNotes = resizeNotesLeft(
+          active.initialNotes,
+          active.selectedIds,
+          deltaSteps,
           DEFAULT_GRID_STEPS,
           DEFAULT_MIN_NOTE_DURATION,
           bounds
         );
         const updated: NoteInteraction = {
           ...active,
-          currentNote: nextNote
+          currentNotes: resizedNotes
         };
         interactionRef.current = updated;
         setInteraction(updated);
@@ -490,33 +498,16 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
 
     if (!didMove) return;
 
-    if (active.kind === 'move') {
-      const hasChanged = active.currentNotes.some(cn => {
-        const init = active.initialNotes.find(inNote => inNote.id === cn.id);
-        return !init || init.start !== cn.start || init.pitch !== cn.pitch || init.duration !== cn.duration;
-      });
+    const hasChanged = active.currentNotes.some(cn => {
+      const init = active.initialNotes.find(inNote => inNote.id === cn.id);
+      return !init || init.start !== cn.start || init.pitch !== cn.pitch || init.duration !== cn.duration;
+    });
 
-      if (hasChanged) {
-        try {
-          onUpdateChannel(channel.id, { notes: active.currentNotes });
-        } catch (err) {
-          console.error('Failed to commit moveNotes update', err);
-        }
-      }
-    } else {
-      const finalNote = active.currentNote;
-      const initialNote = active.initialNote;
-      if (
-        finalNote.start !== initialNote.start ||
-        finalNote.pitch !== initialNote.pitch ||
-        finalNote.duration !== initialNote.duration
-      ) {
-        try {
-          const nextNotes = updateNoteInNotes(notes, finalNote, bounds);
-          onUpdateChannel(channel.id, { notes: nextNotes });
-        } catch (err) {
-          console.error('Failed to commit note resize update', err);
-        }
+    if (hasChanged) {
+      try {
+        onUpdateChannel(channel.id, { notes: active.currentNotes });
+      } catch (err) {
+        console.error(`Failed to commit ${active.kind} update`, err);
       }
     }
   };
@@ -545,6 +536,10 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
 
       if (e.key === 'Escape') {
         e.preventDefault();
+        if (interactionRef.current) {
+          cancelInteraction();
+          return;
+        }
         setSelectedNoteIds(new Set());
         return;
       }
@@ -1291,9 +1286,7 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
                   {/* Render Notes placed on this pitch line */}
                   {displayNotes.filter(n => n.pitch === pitch).map((n) => {
                     const isSelected = selectedNoteIds.has(n.id);
-                    const isInteractingThis = interaction?.kind === 'move'
-                      ? interaction.selectedIds.has(n.id)
-                      : interaction?.currentNote.id === n.id;
+                    const isInteractingThis = Boolean(interaction?.selectedIds.has(n.id));
 
                     return (
                       <div

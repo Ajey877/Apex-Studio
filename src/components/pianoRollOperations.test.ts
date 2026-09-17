@@ -20,6 +20,8 @@ import {
   rectsIntersect,
   resizeNoteLeft,
   resizeNoteRight,
+  resizeNotesLeft,
+  resizeNotesRight,
   selectNotesInMarquee,
   snapStepPosition,
   updateNoteInNotes,
@@ -887,3 +889,215 @@ test('marquee lifecycle: <4px pointer movement never sets state/renders; >=4px a
   assert.equal(marqueeState?.hasDragged, true);
 });
 
+test('resizeNotesRight: resizes multiple selected notes together preserving start positions', () => {
+  const note1: Note = { id: 'r1', pitch: 60, start: 0, duration: 2, velocity: 0.8 };
+  const note2: Note = { id: 'r2', pitch: 64, start: 4, duration: 2, velocity: 0.8 };
+  const note3: Note = { id: 'r3', pitch: 67, start: 8, duration: 2, velocity: 0.8 };
+  const notes = [note1, note2, note3];
+
+  // Resize note1 and note2 by +2 steps; note3 is unselected
+  const resized = resizeNotesRight(notes, new Set(['r1', 'r2']), 2);
+
+  assert.equal(resized[0].id, 'r1');
+  assert.equal(resized[0].start, 0);
+  assert.equal(resized[0].duration, 4);
+
+  assert.equal(resized[1].id, 'r2');
+  assert.equal(resized[1].start, 4);
+  assert.equal(resized[1].duration, 4);
+
+  assert.equal(resized[2].id, 'r3');
+  assert.equal(resized[2].start, 8);
+  assert.equal(resized[2].duration, 2);
+});
+
+test('resizeNotesLeft: resizes multiple selected notes adjusting start while preserving right edges', () => {
+  const note1: Note = { id: 'l1', pitch: 60, start: 2, duration: 2, velocity: 0.8 }; // end = 4
+  const note2: Note = { id: 'l2', pitch: 64, start: 6, duration: 4, velocity: 0.8 }; // end = 10
+  const note3: Note = { id: 'l3', pitch: 67, start: 12, duration: 2, velocity: 0.8 }; // unselected
+  const notes = [note1, note2, note3];
+
+  // Drag left handle by -1 step (start moves earlier by 1, duration increases by 1)
+  const resized = resizeNotesLeft(notes, ['l1', 'l2'], -1);
+
+  assert.equal(resized[0].start, 1);
+  assert.equal(resized[0].duration, 3);
+  assert.equal(resized[0].start + resized[0].duration, 4); // right edge preserved
+
+  assert.equal(resized[1].start, 5);
+  assert.equal(resized[1].duration, 5);
+  assert.equal(resized[1].start + resized[1].duration, 10); // right edge preserved
+
+  assert.equal(resized[2].start, 12);
+  assert.equal(resized[2].duration, 2); // unselected untouched
+});
+
+test('resizeNotesRight & resizeNotesLeft: handle mixed note durations with minimum-duration clamping', () => {
+  const shortNote: Note = { id: 'short', pitch: 60, start: 2, duration: 0.5, velocity: 0.8 };
+  const longNote: Note = { id: 'long', pitch: 64, start: 4, duration: 4, velocity: 0.8 };
+  const notes = [shortNote, longNote];
+
+  // Shrink right by -2 steps: short note hits minDuration (0.25), long note shrinks to 2
+  const shrinkRight = resizeNotesRight(notes, ['short', 'long'], -2);
+  assert.equal(shrinkRight[0].start, 2);
+  assert.equal(shrinkRight[0].duration, DEFAULT_MIN_NOTE_DURATION); // clamped at 0.25
+  assert.equal(shrinkRight[1].start, 4);
+  assert.equal(shrinkRight[1].duration, 2);
+
+  // Shrink left by +2 steps (start moves right): short note hits minDuration (0.25), long note shrinks to 2
+  // originalEnds: short = 2.5, long = 8.0
+  const shrinkLeft = resizeNotesLeft(notes, ['short', 'long'], 2);
+  assert.equal(shrinkLeft[0].start, 2.5 - DEFAULT_MIN_NOTE_DURATION); // 2.25
+  assert.equal(shrinkLeft[0].duration, DEFAULT_MIN_NOTE_DURATION); // 0.25
+  assert.equal(shrinkLeft[0].start + shrinkLeft[0].duration, 2.5); // end preserved
+
+  assert.equal(shrinkLeft[1].start, 6);
+  assert.equal(shrinkLeft[1].duration, 2);
+  assert.equal(shrinkLeft[1].start + shrinkLeft[1].duration, 8); // end preserved
+});
+
+test('resizeNotesRight: enforces maximum timeline boundary bounds.maxSteps', () => {
+  const noteA: Note = { id: 'b-a', pitch: 60, start: 4, duration: 2, velocity: 0.8 };
+  const noteB: Note = { id: 'b-b', pitch: 64, start: 12, duration: 2, velocity: 0.8 }; // end = 14
+  const notes = [noteA, noteB];
+
+  // With maxSteps = 16: noteB can expand at most +2 steps (duration 4), noteA expands +4 steps (duration 6, end = 10)
+  const bounds = { maxSteps: 16 };
+  const resized = resizeNotesRight(notes, ['b-a', 'b-b'], 10, 1, undefined, bounds);
+
+  assert.equal(resized[0].duration, 12); // start 4 + 12 = 16 (clamped at maxSteps)
+  assert.equal(resized[1].duration, 4);  // start 12 + 4 = 16 (clamped at maxSteps)
+  assert.equal(resized[0].start + resized[0].duration <= 16, true);
+  assert.equal(resized[1].start + resized[1].duration <= 16, true);
+});
+
+test('resizeNotesLeft: clamps note start to zero and does not allow negative timeline positions', () => {
+  const noteA: Note = { id: 'l-a', pitch: 60, start: 1, duration: 2, velocity: 0.8 }; // end = 3
+  const noteB: Note = { id: 'l-b', pitch: 64, start: 4, duration: 2, velocity: 0.8 }; // end = 6
+  const notes = [noteA, noteB];
+
+  // Drag left by -10 steps (far beyond 0)
+  const resized = resizeNotesLeft(notes, ['l-a', 'l-b'], -10);
+
+  assert.equal(resized[0].start, 0);
+  assert.equal(resized[0].duration, 3); // end = 3
+  assert.equal(resized[1].start, 0);
+  assert.equal(resized[1].duration, 6); // end = 6
+});
+
+test('resizeNotesRight & resizeNotesLeft: single-note equivalence with resizeNoteRight & resizeNoteLeft', () => {
+  const singleNote: Note = { id: 'single', pitch: 60, start: 4, duration: 2, velocity: 0.8 };
+  const bounds = { maxSteps: 32, minDuration: 0.25 };
+
+  // Equivalence for right resize
+  const rightExpected = resizeNoteRight(singleNote, 4 + 2 + 3, 1, undefined, bounds);
+  const rightGroup = resizeNotesRight([singleNote], ['single'], 3, 1, undefined, bounds);
+  assert.deepEqual(rightGroup[0], rightExpected);
+
+  // Equivalence for left resize
+  const leftExpected = resizeNoteLeft(singleNote, 4 - 2, 1, undefined, bounds);
+  const leftGroup = resizeNotesLeft([singleNote], ['single'], -2, 1, undefined, bounds);
+  assert.deepEqual(leftGroup[0], leftExpected);
+});
+
+test('resizeNotesRight & resizeNotesLeft: preserve IDs, pitches, velocities, custom metadata, and immutability', () => {
+  interface CustomNote extends Note {
+    customColor?: string;
+    label?: string;
+  }
+  const note1: CustomNote = { id: 'c1', pitch: 60, start: 0, duration: 2, velocity: 0.77, customColor: '#ff0000', label: 'lead' };
+  const note2: CustomNote = { id: 'c2', pitch: 64, start: 4, duration: 2, velocity: 0.99, customColor: '#00ff00', label: 'harmony' };
+  const notes: Note[] = [note1, note2];
+
+  const resized = resizeNotesRight(notes, ['c1', 'c2'], 1);
+
+  // Assert input array and objects NOT mutated
+  assert.notEqual(resized, notes);
+  assert.notEqual(resized[0], notes[0]);
+  assert.equal(notes[0].duration, 2);
+
+  // Assert custom properties preserved
+  assert.equal((resized[0] as CustomNote).customColor, '#ff0000');
+  assert.equal((resized[0] as CustomNote).label, 'lead');
+  assert.equal(resized[0].velocity, 0.77);
+  assert.equal(resized[0].pitch, 60);
+  assert.equal(resized[0].id, 'c1');
+});
+
+test('resizeNotesRight & resizeNotesLeft: edge cases, empty selection, and validation errors', () => {
+  const note: Note = { id: 'e1', pitch: 60, start: 0, duration: 2, velocity: 0.8 };
+  const notes = [note];
+
+  // Empty selection returns clean cloned copy
+  const emptySel = resizeNotesRight(notes, new Set(), 2);
+  assert.deepEqual(emptySel, notes);
+  assert.notEqual(emptySel, notes);
+
+  // Empty notes returns empty array
+  assert.deepEqual(resizeNotesRight([], ['e1'], 2), []);
+  assert.deepEqual(resizeNotesLeft([], ['e1'], 2), []);
+
+  // Non-matching IDs returns clean copy
+  const nonMatch = resizeNotesLeft(notes, ['non-existent'], 2);
+  assert.deepEqual(nonMatch, notes);
+
+  // Non-finite delta throws
+  assert.throws(() => resizeNotesRight(notes, ['e1'], NaN), /Delta steps must be finite/);
+  assert.throws(() => resizeNotesLeft(notes, ['e1'], Infinity), /Delta steps must be finite/);
+
+  // Non-positive grid size throws
+  assert.throws(() => resizeNotesRight(notes, ['e1'], 1, 0), /Grid size must be greater than zero/);
+  assert.throws(() => resizeNotesLeft(notes, ['e1'], 1, -1), /Grid size must be greater than zero/);
+});
+
+test('history: group resize produces exactly one commit, supporting undo and redo', () => {
+  const noteA: Note = { id: 'res-a', pitch: 60, start: 0, duration: 2, velocity: 0.8 };
+  const noteB: Note = { id: 'res-b', pitch: 64, start: 4, duration: 4, velocity: 0.8 };
+  const state0 = { notes: [noteA, noteB] };
+
+  // Resize both notes by +2 steps
+  const state1 = { notes: resizeNotesRight(state0.notes, ['res-a', 'res-b'], 2) };
+  const history = [state0, state1];
+
+  assert.equal(history.length, 2);
+  assert.equal(history[1].notes[0].duration, 4);
+  assert.equal(history[1].notes[1].duration, 6);
+
+  // Undo restores original durations
+  assert.equal(history[0].notes[0].duration, 2);
+  assert.equal(history[0].notes[1].duration, 4);
+});
+
+test('resizeNotesRight & resizeNotesLeft: note already at DEFAULT_MIN_NOTE_DURATION remains stable when shrunk further', () => {
+  const minNote: Note = {
+    id: 'min-1',
+    pitch: 60,
+    start: 4,
+    duration: DEFAULT_MIN_NOTE_DURATION,
+    velocity: 0.8
+  };
+  const partnerNote: Note = {
+    id: 'partner-1',
+    pitch: 64,
+    start: 8,
+    duration: 2,
+    velocity: 0.8
+  };
+  const notes = [minNote, partnerNote];
+
+  // 1. resizeNotesRight: apply negative delta (shrink)
+  const rightShrunk = resizeNotesRight(notes, ['min-1', 'partner-1'], -1);
+  assert.equal(rightShrunk[0].duration, DEFAULT_MIN_NOTE_DURATION);
+  assert.equal(rightShrunk[0].start, 4);
+  assert.equal(rightShrunk[1].duration, 1);
+  assert.equal(rightShrunk[1].start, 8);
+
+  // 2. resizeNotesLeft: apply positive delta (shrink start rightwards)
+  const leftShrunk = resizeNotesLeft(notes, ['min-1', 'partner-1'], 1);
+  assert.equal(leftShrunk[0].duration, DEFAULT_MIN_NOTE_DURATION);
+  assert.equal(leftShrunk[0].start, 4);
+  assert.equal(leftShrunk[0].start + leftShrunk[0].duration, 4.25);
+  assert.equal(leftShrunk[1].start, 9);
+  assert.equal(leftShrunk[1].duration, 1);
+  assert.equal(leftShrunk[1].start + leftShrunk[1].duration, 10);
+});
