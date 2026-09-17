@@ -12,6 +12,8 @@ import {
   Rect,
   assertValidNote,
   deleteNotes,
+  duplicateNotes,
+  DuplicateNotesResult,
   getNoteRect,
   hasExceededDragThreshold,
   moveNote,
@@ -1100,4 +1102,300 @@ test('resizeNotesRight & resizeNotesLeft: note already at DEFAULT_MIN_NOTE_DURAT
   assert.equal(leftShrunk[1].start, 9);
   assert.equal(leftShrunk[1].duration, 1);
   assert.equal(leftShrunk[1].start + leftShrunk[1].duration, 10);
+});
+
+test('duplicateNotes: single note duplication places duplicate immediately after note end', () => {
+  const note: Note = { id: 'single-1', pitch: 60, start: 4, duration: 2, velocity: 0.85, pan: -0.2, muted: false };
+  const notes = [note];
+
+  const result = duplicateNotes(notes, ['single-1'], undefined, (n, i) => `${n.id}-dup-${i}`);
+
+  assert.equal(result.updatedNotes.length, 2);
+  assert.equal(result.duplicatedNotes.length, 1);
+
+  // Original preserved
+  assert.equal(result.updatedNotes[0].id, 'single-1');
+  assert.equal(result.updatedNotes[0].start, 4);
+
+  // Duplicate placed at 4 + 2 = 6
+  const dup = result.duplicatedNotes[0];
+  assert.equal(dup.id, 'single-1-dup-0');
+  assert.equal(dup.pitch, 60);
+  assert.equal(dup.start, 6);
+  assert.equal(dup.duration, 2);
+  assert.equal(dup.velocity, 0.85);
+  assert.equal(dup.pan, -0.2);
+  assert.equal(dup.muted, false);
+});
+
+test('duplicateNotes: contiguous multi-note duplication preserves group length and relative offsets', () => {
+  const noteA: Note = { id: 'c-a', pitch: 60, start: 0, duration: 2, velocity: 0.8 };
+  const noteB: Note = { id: 'c-b', pitch: 64, start: 2, duration: 2, velocity: 0.8 };
+  const notes = [noteA, noteB];
+
+  // groupStart = 0, groupEnd = 4, groupLength = 4
+  const result = duplicateNotes(notes, ['c-a', 'c-b'], undefined, (n, i) => `${n.id}-dup`);
+
+  assert.equal(result.updatedNotes.length, 4);
+  assert.equal(result.duplicatedNotes.length, 2);
+
+  // First duplicate at 0 + 4 = 4
+  assert.equal(result.duplicatedNotes[0].id, 'c-a-dup');
+  assert.equal(result.duplicatedNotes[0].start, 4);
+  assert.equal(result.duplicatedNotes[0].duration, 2);
+
+  // Second duplicate at 2 + 4 = 6
+  assert.equal(result.duplicatedNotes[1].id, 'c-b-dup');
+  assert.equal(result.duplicatedNotes[1].start, 6);
+  assert.equal(result.duplicatedNotes[1].duration, 2);
+});
+
+test('duplicateNotes: non-contiguous multi-note duplication preserves internal timing gaps', () => {
+  const note1: Note = { id: 'nc-1', pitch: 60, start: 0, duration: 2, velocity: 0.8 };
+  const note2: Note = { id: 'nc-2', pitch: 67, start: 6, duration: 2, velocity: 0.9 }; // gap of 4 steps (from 2 to 6)
+  const notes = [note1, note2];
+
+  // groupStart = 0, groupEnd = 8, groupLength = 8
+  const result = duplicateNotes(notes, ['nc-1', 'nc-2'], undefined, (n, i) => `${n.id}-dup`);
+
+  assert.equal(result.duplicatedNotes[0].start, 8);
+  assert.equal(result.duplicatedNotes[1].start, 14); // 6 + 8 = 14; gap between 10 and 14 is 4 steps!
+  assert.equal(result.duplicatedNotes[1].start - (result.duplicatedNotes[0].start + result.duplicatedNotes[0].duration), 4);
+});
+
+test('duplicateNotes: chord and motif relative pitch and spacing preservation', () => {
+  // C Major triad at start 4
+  const root: Note = { id: 'ch-c', pitch: 60, start: 4, duration: 4, velocity: 0.8 };
+  const third: Note = { id: 'ch-e', pitch: 64, start: 4, duration: 4, velocity: 0.75 };
+  const fifth: Note = { id: 'ch-g', pitch: 67, start: 4, duration: 4, velocity: 0.7 };
+  const notes = [root, third, fifth];
+
+  const result = duplicateNotes(notes, ['ch-c', 'ch-e', 'ch-g'], undefined, (n) => `${n.id}-dup`);
+
+  assert.equal(result.duplicatedNotes.length, 3);
+  result.duplicatedNotes.forEach((dup, i) => {
+    assert.equal(dup.start, 8); // 4 + 4
+    assert.equal(dup.duration, 4);
+    assert.equal(dup.pitch, notes[i].pitch);
+    assert.equal(dup.velocity, notes[i].velocity);
+  });
+});
+
+test('duplicateNotes: correct group envelope calculation with mixed durations and staggered starts', () => {
+  const noteA: Note = { id: 'st-a', pitch: 60, start: 3, duration: 5, velocity: 0.8 }; // end = 8
+  const noteB: Note = { id: 'st-b', pitch: 64, start: 1, duration: 2, velocity: 0.8 }; // start = 1, end = 3
+  const notes = [noteA, noteB];
+
+  // groupStart = 1, groupEnd = 8, groupLength = 7
+  const result = duplicateNotes(notes, ['st-a', 'st-b'], undefined, (n) => `${n.id}-dup`);
+
+  // noteA duplicate starts at 3 + 7 = 10, ends at 15
+  assert.equal(result.duplicatedNotes[0].start, 10);
+  assert.equal(result.duplicatedNotes[0].duration, 5);
+
+  // noteB duplicate starts at 1 + 7 = 8, ends at 10
+  assert.equal(result.duplicatedNotes[1].start, 8);
+  assert.equal(result.duplicatedNotes[1].duration, 2);
+});
+
+test('duplicateNotes: explicit positive offset overrides default groupLength', () => {
+  const note: Note = { id: 'off-1', pitch: 60, start: 0, duration: 2, velocity: 0.8 };
+  const notes = [note];
+
+  // Default would be offset = 2. Explicit offset = 16 (1 bar)
+  const result = duplicateNotes(notes, ['off-1'], 16, (n) => `${n.id}-bar2`);
+
+  assert.equal(result.duplicatedNotes[0].start, 16);
+  assert.equal(result.duplicatedNotes[0].duration, 2);
+});
+
+test('duplicateNotes: explicit offset boundary calculation validates actual duplicate end', () => {
+  const noteA: Note = { id: 'bnd-a', pitch: 60, start: 0, duration: 2, velocity: 0.8 };
+  const noteB: Note = { id: 'bnd-b', pitch: 64, start: 2, duration: 6, velocity: 0.8 }; // end = 8
+  const notes = [noteA, noteB];
+  const bounds = { maxSteps: 12 };
+
+  // Explicit offset 5: Note A end = 0 + 5 + 2 = 7 <= 12. Note B end = 2 + 5 + 6 = 13 > 12!
+  assert.throws(
+    () => duplicateNotes(notes, ['bnd-a', 'bnd-b'], 5, undefined, bounds),
+    /note exceeds timeline bounds/
+  );
+});
+
+test('duplicateNotes: rejects non-finite or negative or zero explicit offsetSteps', () => {
+  const note: Note = { id: 'inv-1', pitch: 60, start: 0, duration: 2, velocity: 0.8 };
+  const notes = [note];
+
+  assert.throws(() => duplicateNotes(notes, ['inv-1'], 0), /offsetSteps must be finite and greater than zero/);
+  assert.throws(() => duplicateNotes(notes, ['inv-1'], -4), /offsetSteps must be finite and greater than zero/);
+  assert.throws(() => duplicateNotes(notes, ['inv-1'], NaN), /offsetSteps must be finite and greater than zero/);
+  assert.throws(() => duplicateNotes(notes, ['inv-1'], Infinity), /offsetSteps must be finite and greater than zero/);
+});
+
+test('duplicateNotes: maxSteps overflow rejection and atomic no-partial duplication', () => {
+  const note1: Note = { id: 'ovf-1', pitch: 60, start: 8, duration: 4, velocity: 0.8 };
+  const note2: Note = { id: 'ovf-2', pitch: 64, start: 12, duration: 4, velocity: 0.8 }; // end = 16
+  const notes = [note1, note2];
+  const bounds = { maxSteps: 16 };
+
+  // groupLength = 8. Duplicates would end at 16 + 8 = 24 > 16.
+  assert.throws(
+    () => duplicateNotes(notes, ['ovf-1', 'ovf-2'], undefined, undefined, bounds),
+    /note exceeds timeline bounds/
+  );
+
+  // Original array remains completely untouched
+  assert.equal(notes.length, 2);
+  assert.equal(notes[0].start, 8);
+  assert.equal(notes[1].start, 12);
+});
+
+test('duplicateNotes: empty selection and non-matching IDs return clean copy without duplicates', () => {
+  const note: Note = { id: 'safe-1', pitch: 60, start: 0, duration: 2, velocity: 0.8 };
+  const notes = [note];
+
+  // Empty selection
+  const emptyRes = duplicateNotes(notes, new Set());
+  assert.deepEqual(emptyRes.updatedNotes, notes);
+  assert.notEqual(emptyRes.updatedNotes, notes);
+  assert.equal(emptyRes.duplicatedNotes.length, 0);
+
+  // Non-matching IDs
+  const nonMatchRes = duplicateNotes(notes, ['unknown-id']);
+  assert.deepEqual(nonMatchRes.updatedNotes, notes);
+  assert.equal(nonMatchRes.duplicatedNotes.length, 0);
+
+  // Empty notes list
+  const emptyNotesRes = duplicateNotes([], ['safe-1']);
+  assert.deepEqual(emptyNotesRes.updatedNotes, []);
+  assert.equal(emptyNotesRes.duplicatedNotes.length, 0);
+});
+
+test('duplicateNotes: unique generated IDs and collision avoidance', () => {
+  const note1: Note = { id: 'dup-id', pitch: 60, start: 0, duration: 2, velocity: 0.8 };
+  const note2: Note = { id: 'dup-id-dup-1', pitch: 64, start: 2, duration: 2, velocity: 0.8 };
+  const notes = [note1, note2];
+
+  // Generator deliberately returns an already-existing ID 'dup-id'
+  const result = duplicateNotes(notes, ['dup-id', 'dup-id-dup-1'], undefined, () => 'dup-id');
+
+  assert.equal(result.duplicatedNotes.length, 2);
+  const id0 = result.duplicatedNotes[0].id;
+  const id1 = result.duplicatedNotes[1].id;
+
+  // Verify none collide with existing notes
+  assert.notEqual(id0, 'dup-id');
+  assert.notEqual(id0, 'dup-id-dup-1');
+  assert.notEqual(id1, 'dup-id');
+  assert.notEqual(id1, 'dup-id-dup-1');
+
+  // Verify duplicates do not collide with each other
+  assert.notEqual(id0, id1);
+});
+
+test('duplicateNotes: metadata preservation and input immutability', () => {
+  interface RichNote extends Note {
+    customColor?: string;
+    label?: string;
+  }
+  const note: RichNote = {
+    id: 'meta-1',
+    pitch: 62,
+    start: 2,
+    duration: 3,
+    velocity: 0.73,
+    pan: 0.45,
+    muted: true,
+    customColor: '#9b59b6',
+    label: 'lead hook'
+  };
+  const notes: Note[] = [note];
+
+  const result = duplicateNotes(notes, ['meta-1']);
+
+  // Immutability checks
+  assert.notEqual(result.updatedNotes, notes);
+  assert.notEqual(result.updatedNotes[0], notes[0]);
+  assert.equal(notes.length, 1);
+  assert.equal(notes[0].start, 2);
+
+  // Duplicate metadata checks
+  const dup = result.duplicatedNotes[0] as RichNote;
+  assert.notEqual(dup.id, note.id);
+  assert.equal(dup.start, 5); // 2 + 3
+  assert.equal(dup.pitch, 62);
+  assert.equal(dup.duration, 3);
+  assert.equal(dup.velocity, 0.73);
+  assert.equal(dup.pan, 0.45);
+  assert.equal(dup.muted, true);
+  assert.equal(dup.customColor, '#9b59b6');
+  assert.equal(dup.label, 'lead hook');
+});
+
+test('duplicateNotes: ordering in updatedNotes appends duplicates after original notes', () => {
+  const note1: Note = { id: 'ord-1', pitch: 60, start: 0, duration: 2, velocity: 0.8 };
+  const note2: Note = { id: 'ord-2', pitch: 64, start: 2, duration: 2, velocity: 0.8 };
+  const note3: Note = { id: 'ord-3', pitch: 67, start: 4, duration: 2, velocity: 0.8 }; // unselected
+  const notes = [note1, note2, note3];
+
+  const result = duplicateNotes(notes, ['ord-1', 'ord-2'], undefined, (n) => `${n.id}-copy`);
+
+  assert.equal(result.updatedNotes.length, 5);
+  assert.equal(result.updatedNotes[0].id, 'ord-1');
+  assert.equal(result.updatedNotes[1].id, 'ord-2');
+  assert.equal(result.updatedNotes[2].id, 'ord-3');
+  assert.equal(result.updatedNotes[3].id, 'ord-1-copy');
+  assert.equal(result.updatedNotes[4].id, 'ord-2-copy');
+});
+
+test('duplicateNotes: repeated duplication semantics (e.g. repeated Ctrl+D)', () => {
+  const note1: Note = { id: 'loop-1', pitch: 60, start: 0, duration: 2, velocity: 0.8 };
+  const note2: Note = { id: 'loop-2', pitch: 64, start: 2, duration: 2, velocity: 0.8 };
+  let currentNotes: Note[] = [note1, note2];
+  let currentSelection = new Set(['loop-1', 'loop-2']);
+
+  // 1st duplication: Bar 1 -> Bar 2 (offset = 4)
+  const step1 = duplicateNotes(currentNotes, currentSelection, undefined, (n, i) => `dup1-${i}`);
+  currentNotes = step1.updatedNotes;
+  currentSelection = new Set(step1.duplicatedNotes.map(n => n.id));
+
+  assert.equal(currentNotes.length, 4);
+  assert.equal(step1.duplicatedNotes[0].start, 4);
+  assert.equal(step1.duplicatedNotes[1].start, 6);
+
+  // 2nd duplication: Bar 2 -> Bar 3 (offset = 4)
+  const step2 = duplicateNotes(currentNotes, currentSelection, undefined, (n, i) => `dup2-${i}`);
+  currentNotes = step2.updatedNotes;
+  currentSelection = new Set(step2.duplicatedNotes.map(n => n.id));
+
+  assert.equal(currentNotes.length, 6);
+  assert.equal(step2.duplicatedNotes[0].start, 8);
+  assert.equal(step2.duplicatedNotes[1].start, 10);
+
+  // 3rd duplication: Bar 3 -> Bar 4 (offset = 4)
+  const step3 = duplicateNotes(currentNotes, currentSelection, undefined, (n, i) => `dup3-${i}`);
+  currentNotes = step3.updatedNotes;
+
+  assert.equal(currentNotes.length, 8);
+  assert.equal(step3.duplicatedNotes[0].start, 12);
+  assert.equal(step3.duplicatedNotes[1].start, 14);
+});
+
+test('history: note duplication produces exactly one commit, supporting undo and redo', () => {
+  const noteA: Note = { id: 'h-a', pitch: 60, start: 0, duration: 2, velocity: 0.8 };
+  const state0 = { notes: [noteA] };
+
+  // Duplicate noteA
+  const result = duplicateNotes(state0.notes, ['h-a'], undefined, () => 'h-a-copy');
+  const state1 = { notes: result.updatedNotes };
+  const history = [state0, state1];
+
+  assert.equal(history.length, 2);
+  assert.equal(history[1].notes.length, 2);
+  assert.equal(history[1].notes[1].id, 'h-a-copy');
+  assert.equal(history[1].notes[1].start, 2);
+
+  // Undo restores original notes
+  assert.equal(history[0].notes.length, 1);
+  assert.equal(history[0].notes[0].id, 'h-a');
 });

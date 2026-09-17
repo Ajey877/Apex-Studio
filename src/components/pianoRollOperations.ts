@@ -302,6 +302,88 @@ export function resizeNotesLeft(
   });
 }
 
+export interface DuplicateNotesResult {
+  updatedNotes: Note[];
+  duplicatedNotes: Note[];
+}
+
+export function duplicateNotes(
+  notes: Note[],
+  selectedIds: Set<string> | string[],
+  offsetSteps?: number,
+  generateId?: (originalNote: Note, index: number) => string,
+  bounds: NoteBounds = {}
+): DuplicateNotesResult {
+  const idSet = selectedIds instanceof Set ? selectedIds : new Set(selectedIds);
+  if (idSet.size === 0 || notes.length === 0) {
+    return {
+      updatedNotes: notes.map(cloneNote),
+      duplicatedNotes: []
+    };
+  }
+
+  const selectedNotes = notes.filter(n => idSet.has(n.id));
+  if (selectedNotes.length === 0) {
+    return {
+      updatedNotes: notes.map(cloneNote),
+      duplicatedNotes: []
+    };
+  }
+
+  const groupStart = Math.min(...selectedNotes.map(n => n.start));
+  const groupEnd = Math.max(...selectedNotes.map(n => n.start + n.duration));
+  const groupLength = Number((groupEnd - groupStart).toFixed(6));
+
+  let effectiveOffset: number;
+  if (offsetSteps !== undefined) {
+    if (!finite(offsetSteps) || offsetSteps <= 0) {
+      throw new Error('offsetSteps must be finite and greater than zero');
+    }
+    effectiveOffset = offsetSteps;
+  } else {
+    effectiveOffset = groupLength;
+  }
+
+  const existingIds = new Set<string>(notes.map(n => n.id));
+  const defaultIdGen = (_original: Note, index: number): string =>
+    `note-${Date.now()}-${index}-${Math.random().toString(36).slice(2, 7)}`;
+  const idGenerator = generateId ?? defaultIdGen;
+
+  const duplicatedNotes: Note[] = [];
+  for (let i = 0; i < selectedNotes.length; i++) {
+    const original = selectedNotes[i];
+    const newStart = Number((original.start + effectiveOffset).toFixed(6));
+
+    let candidateId = idGenerator(original, i);
+    if (!candidateId || existingIds.has(candidateId)) {
+      let counter = 1;
+      let resolvedId = `${candidateId || 'note'}-dup-${counter}`;
+      while (existingIds.has(resolvedId)) {
+        counter++;
+        resolvedId = `${candidateId || 'note'}-dup-${counter}`;
+      }
+      candidateId = resolvedId;
+    }
+    existingIds.add(candidateId);
+
+    const duplicate: Note = {
+      ...cloneNote(original),
+      id: candidateId,
+      start: newStart
+    };
+
+    assertValidNote(duplicate, bounds);
+    duplicatedNotes.push(duplicate);
+  }
+
+  const updatedNotes = [...notes.map(cloneNote), ...duplicatedNotes];
+
+  return {
+    updatedNotes,
+    duplicatedNotes
+  };
+}
+
 export const DEFAULT_STEP_WIDTH = 28;
 export const DEFAULT_ROW_HEIGHT = 24;
 export const MARQUEE_DRAG_THRESHOLD_PX = 4;

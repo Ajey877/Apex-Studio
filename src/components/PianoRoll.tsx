@@ -38,6 +38,7 @@ import {
   NoteBounds,
   cloneNote,
   deleteNotes,
+  duplicateNotes,
   hasExceededDragThreshold,
   moveNote,
   moveNotes,
@@ -518,6 +519,30 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
     didMoveRef.current = false;
   };
 
+  const handleDuplicateSelected = () => {
+    if (interactionRef.current || marqueeRef.current) return;
+    const currentSelection = selectedNoteIdsRef.current;
+    if (currentSelection.size === 0) return;
+
+    try {
+      const { updatedNotes, duplicatedNotes } = duplicateNotes(
+        notes,
+        currentSelection,
+        undefined,
+        undefined,
+        bounds
+      );
+
+      if (duplicatedNotes.length === 0) return;
+
+      onUpdateChannel(channel.id, { notes: updatedNotes });
+      setSelectedNoteIds(new Set(duplicatedNotes.map(n => n.id)));
+    } catch {
+      setStatusMessage('Duplicate cannot fit within pattern bounds.');
+      setTimeout(() => setStatusMessage(null), 2000);
+    }
+  };
+
   const handleDeleteSelected = () => {
     const currentSelection = selectedNoteIdsRef.current;
     if (currentSelection.size === 0) return;
@@ -530,7 +555,11 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (['INPUT', 'SELECT', 'TEXTAREA'].includes((e.target as HTMLElement).tagName)) {
+      const target = e.target as HTMLElement | null;
+      if (
+        target &&
+        (['INPUT', 'SELECT', 'TEXTAREA'].includes(target.tagName) || target.isContentEditable)
+      ) {
         return;
       }
 
@@ -551,6 +580,13 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
         return;
       }
 
+      if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && (e.key === 'd' || e.key === 'D')) {
+        e.preventDefault();
+        e.stopPropagation();
+        handleDuplicateSelected();
+        return;
+      }
+
       if (e.key === 'Delete' || e.key === 'Backspace') {
         if (selectedNoteIdsRef.current.size > 0) {
           e.preventDefault();
@@ -564,7 +600,7 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
     return () => {
       window.removeEventListener('keydown', handleKeyDown);
     };
-  }, [notes, channel.id]);
+  }, [notes, channel.id, totalSteps]);
 
   useEffect(() => {
     if (!interaction) return;
