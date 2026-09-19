@@ -45,6 +45,18 @@ function getChainEnd(node: AudioNode): AudioNode {
 export type OfflineRenderScope = 'song' | 'pattern';
 export type OfflineRenderProgress = (progress: number, status: string) => void;
 
+/**
+ * Project-owned data that the live scheduler is allowed to receive while a
+ * playback take is running. The engine deliberately does not accept the
+ * complete React state object: these are the only collections consumed by
+ * real-time playback and each is cloned at the synchronization boundary.
+ */
+export interface PlaybackStateUpdate {
+  channels?: Channel[];
+  clips?: PlaylistClip[];
+  mixerTracks?: MixerTrack[];
+}
+
 export interface MixerChannel {
   input: GainNode;
   output: GainNode;
@@ -54,6 +66,69 @@ export interface MixerChannel {
   fxNodes: AudioNode[];
   sidechain?: SidechainSettings;
 }
+
+const isPlaybackRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value);
+
+/**
+ * Playback automation mutates the isolated active channel/mixer objects. To
+ * merge a project edit without erasing those transient values, compare the
+ * incoming project value with the last project value received by playback:
+ * unchanged project fields keep their active value, while changed fields are
+ * copied in. This keeps project edits authoritative without ever sharing a
+ * project object with the renderer.
+ */
+const playbackValuesEqual = (left: unknown, right: unknown): boolean => {
+  if (Object.is(left, right)) return true;
+  if (Array.isArray(left) || Array.isArray(right)) {
+    if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) return false;
+    return left.every((value, index) => playbackValuesEqual(value, right[index]));
+  }
+  if (isPlaybackRecord(left) || isPlaybackRecord(right)) {
+    if (!isPlaybackRecord(left) || !isPlaybackRecord(right)) return false;
+    const leftKeys = Object.keys(left);
+    const rightKeys = Object.keys(right);
+    if (leftKeys.length !== rightKeys.length) return false;
+    return leftKeys.every(key => Object.prototype.hasOwnProperty.call(right, key) && playbackValuesEqual(left[key], right[key]));
+  }
+  return false;
+};
+
+const mergePlaybackProjectEdits = (
+  activeValue: unknown,
+  previousProjectValue: unknown,
+  nextProjectValue: unknown
+): unknown => {
+  if (playbackValuesEqual(nextProjectValue, previousProjectValue)) return activeValue;
+
+  if (isPlaybackRecord(activeValue) && isPlaybackRecord(previousProjectValue) && isPlaybackRecord(nextProjectValue)) {
+    const merged = structuredClone(activeValue) as Record<string, unknown>;
+    const keys = new Set([...Object.keys(previousProjectValue), ...Object.keys(nextProjectValue)]);
+
+    for (const key of keys) {
+      const hadPreviousValue = Object.prototype.hasOwnProperty.call(previousProjectValue, key);
+      const hasNextValue = Object.prototype.hasOwnProperty.call(nextProjectValue, key);
+      if (!hasNextValue) {
+        if (hadPreviousValue) delete merged[key];
+        continue;
+      }
+      if (!hadPreviousValue) {
+        merged[key] = structuredClone(nextProjectValue[key]);
+        continue;
+      }
+      if (playbackValuesEqual(nextProjectValue[key], previousProjectValue[key])) continue;
+
+      merged[key] = mergePlaybackProjectEdits(
+        activeValue[key],
+        previousProjectValue[key],
+        nextProjectValue[key]
+      );
+    }
+    return merged;
+  }
+
+  return structuredClone(nextProjectValue);
+};
 
 export function resolvePlayableContentLengthSteps(
   channel?: Channel,
@@ -2126,6 +2201,8 @@ class AudioEngine {
       activeChannels: this.activeChannels,
       activeClips: this.activeClips,
       activeMixerTracks: this.activeMixerTracks,
+      playbackProjectChannels: this.playbackProjectChannels,
+      playbackProjectMixerTracks: this.playbackProjectMixerTracks,
       activePlayMode: this.activePlayMode,
       activePatternId: this.activePatternId,
       currentStep: this.currentStep,
@@ -2156,6 +2233,8 @@ class AudioEngine {
       this.activeVoices = new Map();
       this.activeChannels = structuredClone(channels);
       this.activeClips = structuredClone(clips);
+      this.playbackProjectChannels = structuredClone(channels);
+      this.playbackProjectMixerTracks = [];
       this.activePlayMode = renderScope === 'pattern' ? 'pat' : 'song';
       onProgress?.(40, `Offline graph ready (${renderScope === 'pattern' ? 'pattern' : 'song'} mode).`);
       this.activePatternId = undefined;
@@ -2174,6 +2253,7 @@ class AudioEngine {
         ? tracks
         : tracks.map(track => ({ ...track, fxSlots: [] }));
       this.activeMixerTracks = structuredClone(renderTracks);
+      this.playbackProjectMixerTracks = structuredClone(renderTracks);
       if (includeMixerFx) {
         this.buildReverbImpulse(2.5, 2.0);
       }
@@ -2220,6 +2300,8 @@ class AudioEngine {
       this.activeChannels = previous.activeChannels;
       this.activeClips = previous.activeClips;
       this.activeMixerTracks = previous.activeMixerTracks;
+      this.playbackProjectChannels = previous.playbackProjectChannels;
+      this.playbackProjectMixerTracks = previous.playbackProjectMixerTracks;
       this.activePlayMode = previous.activePlayMode;
       this.activePatternId = previous.activePatternId;
       this.currentStep = previous.currentStep;
@@ -2463,6 +2545,9 @@ class AudioEngine {
   private activeChannels: Channel[] = [];
   private activeClips: PlaylistClip[] = [];
   private activeMixerTracks: MixerTrack[] = [];
+  /** Last project-owned values supplied to the active playback take. */
+  private playbackProjectChannels: Channel[] = [];
+  private playbackProjectMixerTracks: MixerTrack[] = [];
   private activePlayMode: 'pat' | 'song' = 'pat';
   private activePatternId?: string;
 
@@ -2508,6 +2593,139 @@ class AudioEngine {
     };
   }
 
+  private getAutomationTargetKey(clip: PlaylistClip): string | null {
+    if (clip.type !== 'automation' || !clip.automationTarget) return null;
+    const target = clip.automationTarget;
+    return `${target.type}:${String(target.targetId)}:${target.paramName ?? ''}`;
+  }
+
+  private isAutomationClipActiveAtCurrentPosition(clip: PlaylistClip): boolean {
+    if (clip.type !== 'automation' || clip.mute || !clip.automationTarget) return false;
+    if (!Number.isFinite(clip.startBar) || !Number.isFinite(clip.lengthBars) || clip.lengthBars <= 0) return false;
+    const currentBarPosition = Math.max(0, this.currentBar - 1) + (this.currentStep / 16);
+    return currentBarPosition >= clip.startBar && currentBarPosition <= clip.startBar + clip.lengthBars;
+  }
+
+  /**
+   * Removing or moving the last active automation clip for a target must not
+   * leave its previous transient value latched in the isolated take. Restore
+   * that target from the latest project baseline; a still-active replacement
+   * clip remains authoritative and will be evaluated on the next scheduler
+   * callback.
+   */
+  private resetAutomationTargetsForClipChanges(previousClips: PlaylistClip[], nextClips: PlaylistClip[]): void {
+    const nextActiveTargets = new Set(
+      nextClips
+        .filter(clip => this.isAutomationClipActiveAtCurrentPosition(clip))
+        .map(clip => this.getAutomationTargetKey(clip))
+        .filter((key): key is string => Boolean(key))
+    );
+
+    for (const previousClip of previousClips) {
+      const previousTargetKey = this.getAutomationTargetKey(previousClip);
+      if (!previousTargetKey) continue;
+
+      const nextVersion = nextClips.find(clip => clip.id === previousClip.id);
+      const structuralChange = !nextVersion ||
+        previousClip.mute !== nextVersion.mute ||
+        previousClip.startBar !== nextVersion.startBar ||
+        previousClip.lengthBars !== nextVersion.lengthBars ||
+        !playbackValuesEqual(previousClip.automationTarget, nextVersion.automationTarget);
+      if (structuralChange && !nextActiveTargets.has(previousTargetKey)) {
+        this.resetActiveAutomationTarget(previousClip.automationTarget!);
+      }
+    }
+  }
+
+  private resetActiveAutomationTarget(target: NonNullable<PlaylistClip['automationTarget']>): void {
+    const now = this.ctx?.currentTime ?? 0;
+    if (target.type === 'channel_vol' || target.type === 'channel_pan' || target.type === 'channel_filter_cutoff') {
+      const activeChannel = this.activeChannels.find(channel => String(channel.id) === String(target.targetId));
+      const projectChannel = this.playbackProjectChannels.find(channel => String(channel.id) === String(target.targetId));
+      if (!activeChannel || !projectChannel) return;
+
+      if (target.type === 'channel_vol') activeChannel.volume = projectChannel.volume;
+      if (target.type === 'channel_pan') activeChannel.pan = projectChannel.pan;
+      if (target.type === 'channel_filter_cutoff' && activeChannel.synthParams && projectChannel.synthParams) {
+        activeChannel.synthParams.filterCutoff = projectChannel.synthParams.filterCutoff;
+      }
+      return;
+    }
+
+    if (target.type === 'mixer_vol' || target.type === 'mixer_pan') {
+      const trackId = Number(target.targetId);
+      const activeTrack = this.activeMixerTracks.find(track => track.id === trackId);
+      const projectTrack = this.playbackProjectMixerTracks.find(track => track.id === trackId);
+      if (!activeTrack || !projectTrack) return;
+
+      if (target.type === 'mixer_vol') activeTrack.volume = projectTrack.volume;
+      if (target.type === 'mixer_pan') activeTrack.pan = projectTrack.pan;
+      this.updateMixerTrack(activeTrack);
+      return;
+    }
+
+    if (target.type === 'master_vol' && this.masterGain) {
+      this.masterGain.gain.setTargetAtTime(1, now, 0.02);
+    }
+  }
+
+  /**
+   * Applies an edit to the isolated playback take without replacing the
+   * project object used by React/history/persistence. Playlist clips are
+   * replaced as a cloned schedule, while channel and mixer collections merge
+   * only fields that changed in project state so an in-flight automation value
+   * remains active until the next automation event.
+   */
+  public synchronizePlaybackState(update: PlaybackStateUpdate): void {
+    if (!this.isPlaying) return;
+
+    if (update.channels) {
+      const previousProjectById = new Map(this.playbackProjectChannels.map(channel => [channel.id, channel]));
+      const activeById = new Map(this.activeChannels.map(channel => [channel.id, channel]));
+      this.activeChannels = update.channels.map(channel => {
+        const previousProject = previousProjectById.get(channel.id);
+        const active = activeById.get(channel.id);
+        if (!previousProject || !active) return structuredClone(channel);
+        return mergePlaybackProjectEdits(active, previousProject, channel) as Channel;
+      });
+      this.playbackProjectChannels = structuredClone(update.channels);
+    }
+
+    if (update.clips) {
+      // The scheduler never mutates clips; replacing this clone makes move,
+      // resize, split and delete edits visible to the next scheduled step.
+      this.resetAutomationTargetsForClipChanges(this.activeClips, update.clips);
+      this.activeClips = structuredClone(update.clips);
+    }
+
+    if (update.mixerTracks) {
+      const previousProjectById = new Map(this.playbackProjectMixerTracks.map(track => [track.id, track]));
+      const activeById = new Map(this.activeMixerTracks.map(track => [track.id, track]));
+      const nextTracks = update.mixerTracks.map(track => {
+        const previousProject = previousProjectById.get(track.id);
+        const active = activeById.get(track.id);
+        const projectChanged = !previousProject || !playbackValuesEqual(track, previousProject);
+        const nextTrack = !previousProject || !active
+          ? structuredClone(track)
+          : mergePlaybackProjectEdits(active, previousProject, track) as MixerTrack;
+
+        if (projectChanged) this.updateMixerTrack(nextTrack);
+        return nextTrack;
+      });
+      const nextTrackIds = new Set(update.mixerTracks.map(track => track.id));
+      for (const trackId of this.activeMixerTracks.map(track => track.id)) {
+        if (!nextTrackIds.has(trackId)) this.removeMixerChannel(trackId);
+      }
+      this.activeMixerTracks = nextTracks;
+      this.playbackProjectMixerTracks = structuredClone(update.mixerTracks);
+    }
+  }
+
+  /** True only while the live transport owns an active playback take. */
+  public isPlaybackActive(): boolean {
+    return this.isPlaying;
+  }
+
   public play(
     channels: Channel[],
     clips: PlaylistClip[],
@@ -2524,14 +2742,20 @@ class AudioEngine {
     this.playbackGeneration++;
     const currentGeneration = this.playbackGeneration;
 
+    const playbackSnapshot = this.createPlaybackSnapshot(channels, clips, mixerTracks ?? []);
     this.isPlaying = true;
-    this.activeChannels = channels;
-    this.activeClips = clips;
+    this.activeChannels = playbackSnapshot.channels;
+    this.activeClips = playbackSnapshot.clips;
+    this.activeMixerTracks = playbackSnapshot.mixerTracks;
+    this.playbackProjectChannels = structuredClone(playbackSnapshot.channels);
+    this.playbackProjectMixerTracks = structuredClone(playbackSnapshot.mixerTracks);
     this.activePlayMode = mode;
     this.activePatternId = patternId;
-    if (mixerTracks) {
-      this.activeMixerTracks = mixerTracks;
-    }
+
+    // Apply the current project mixer graph at transport start. Subsequent
+    // mixer edits use synchronizePlaybackState and update only the changed
+    // active track while the transport remains running.
+    for (const track of this.activeMixerTracks) this.updateMixerTrack(track);
 
     if (!this.transport && this.ctx) {
       this.transport = new AudioClockTransport(this.ctx);
