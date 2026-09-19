@@ -1362,6 +1362,7 @@ export function App() {
               onSeekToBar={(bar) => setCurrentBar(bar)}
               currentBar={currentBar}
               isPlaying={isPlaying}
+              bpm={projectState.meta.bpm}
             />
           )}
 

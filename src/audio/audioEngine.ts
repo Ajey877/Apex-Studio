@@ -3070,10 +3070,40 @@ class AudioEngine {
     source.stop(startTime + effectiveDuration);
   }
 
-  // Fast offline Bounce-In-Place / Channel Render
-  public async bounceChannelToAudioClip(channel: Channel, bpm: number = 130, bars: number = 4): Promise<{ buffer: AudioBuffer; waveform: number[] }> {
+  /**
+   * Fast offline Bounce-In-Place / Channel Render.
+   *
+   * The channel is read over its full playable length — the same
+   * `resolvePlayableContentLengthSteps()` resolution Song Mode loops a pattern
+   * clip with — so 32/64-step sequences and piano-roll notes past step 15 are
+   * rendered instead of being cut to the first bar. The stem always contains
+   * whole passes of that content and is at least `minBars` long.
+   *
+   * `bpm` is the project tempo; it must come from project state so the stem's
+   * step spacing matches the arrangement grid. A non-finite value falls back to
+   * the transport tempo, which App keeps in sync with `meta.bpm`. The rendered
+   * length is returned so callers can derive `PlaylistClip.lengthBars` from the
+   * audio that was actually produced instead of a fixed number.
+   */
+  public async bounceChannelToAudioClip(
+    channel: Channel,
+    bpm: number,
+    minBars: number = 1
+  ): Promise<{ buffer: AudioBuffer; waveform: number[]; lengthBars: number; bpm: number }> {
+    const STEPS_PER_BAR = 16;
+    const requestedBpm = Number.isFinite(bpm) && bpm > 0 ? bpm : this.bpm;
+    const safeBpm = Math.max(20, Math.min(300, requestedBpm));
     const sampleRate = this.ctx?.sampleRate || 44100;
-    const durationSec = bars * 4 * (60 / bpm);
+
+    const loopLengthSteps = resolvePlayableContentLengthSteps(channel);
+    const loopLengthBars = loopLengthSteps / STEPS_PER_BAR;
+    const safeMinBars = Number.isFinite(minBars) && minBars > 0 ? minBars : 1;
+    const passes = Math.max(1, Math.ceil(safeMinBars / loopLengthBars));
+    const lengthBars = passes * loopLengthBars;
+
+    const stepDuration = (60 / safeBpm) / 4;
+    const totalSteps = lengthBars * STEPS_PER_BAR;
+    const durationSec = totalSteps * stepDuration;
     const length = Math.floor(sampleRate * durationSec);
     const OfflineContextClass = window.OfflineAudioContext || (window as unknown as WindowWithWebKitAudio).webkitOfflineAudioContext;
     const offlineCtx = new OfflineContextClass(2, length, sampleRate);
@@ -3082,12 +3112,9 @@ class AudioEngine {
     const left = offlineCtx.createBuffer(2, length, sampleRate).getChannelData(0);
     const right = offlineCtx.createBuffer(2, length, sampleRate).getChannelData(1);
 
-    const stepDuration = (60 / bpm) / 4;
-    const totalSteps = bars * 16;
-
-    // Render active notes or step triggers
+    // Render active notes or step triggers over the channel's full loop length
     for (let s = 0; s < totalSteps; s++) {
-      const relStep = s % 16;
+      const relStep = s % loopLengthSteps;
       const isStepActive = channel.steps && channel.steps[relStep];
       const stepNotes = channel.notes ? channel.notes.filter(n => n.start === relStep) : [];
 
@@ -3136,7 +3163,7 @@ class AudioEngine {
     const bufId = `bounced-${channel.id}-${Date.now()}`;
     this.sampleBuffers.set(bufId, renderedBuffer);
 
-    return { buffer: renderedBuffer, waveform };
+    return { buffer: renderedBuffer, waveform, lengthBars, bpm: safeBpm };
   }
 
   public getMasterLoudnessMetrics() {
