@@ -2143,7 +2143,7 @@ class AudioEngine {
       this.activeVoices = new Map();
       this.activeChannels = structuredClone(channels);
       this.activeClips = structuredClone(clips);
-      this.activePlayMode = renderScope;
+      this.activePlayMode = renderScope === 'pattern' ? 'pat' : 'song';
       onProgress?.(40, `Offline graph ready (${renderScope === 'pattern' ? 'pattern' : 'song'} mode).`);
       this.activePatternId = undefined;
       this.isPlaying = true;

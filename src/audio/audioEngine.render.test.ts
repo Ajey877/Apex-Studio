@@ -88,7 +88,17 @@ test('offline timeline render drives the same live song scheduling entrypoint an
   engine.activePlayMode = 'pat';
 
   try {
-    const rendered = await engine.renderTimelineOffline([], [], mixerTracks, 120, 1, 44100);
+    const rendered = await engine.renderTimelineOffline(
+      [],
+      [],
+      mixerTracks,
+      120,
+      1,
+      44100,
+      false,
+      'pattern',
+      (progress: number, status: string) => progressEvents.push({ progress, status }),
+    );
 
     assert.equal(rendered.sampleRate, 44100);
     assert.deepEqual(updatedTrackIds, [0, 1]);
@@ -97,7 +107,7 @@ test('offline timeline render drives the same live song scheduling entrypoint an
     assert.equal(triggerTimes[31], 3.875);
     assert.equal(engine.bpm, 128);
     assert.equal(engine.ctx, originalCtx);
-    assert.equal(engine.activePlayMode, 'song');
+    assert.equal(engine.activePlayMode, 'pat');
     assert.ok(progressEvents.some(event => event.progress === 40 && /pattern mode/i.test(event.status)));
     assert.equal(progressEvents.at(-1)?.progress, 85);
     assert.match(progressEvents.at(-1)?.status ?? '', /Encoding WAV/);
