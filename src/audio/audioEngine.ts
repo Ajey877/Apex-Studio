@@ -2050,6 +2050,7 @@ class AudioEngine {
     bpm: number,
     totalBars: number,
     sampleRate?: number,
+    includeMixerFx = false,
   ): Promise<AudioBuffer> {
     // Validate audio buffers for all unmuted audio clips
     for (const clip of clips) {
@@ -2116,12 +2117,22 @@ class AudioEngine {
       this.currentBar = 1;
       this.bpm = safeBpm;
       this.metronome = false;
-      this.buildReverbImpulse(2.5, 2.0);
+
+      // Browser exports use a bounded offline graph by default. Live mixer FX
+      // (especially convolution and feedback delay) can make OfflineAudioContext
+      // rendering disproportionately expensive. Preserve the full FX graph as an
+      // explicit opt-in for validation/internal callers.
       const tracks = [...mixerTracks].sort((a, b) => a.id - b.id);
-      this.activeMixerTracks = structuredClone(tracks);
-      const masterTrack = tracks.find(track => track.id === 0);
+      const renderTracks = includeMixerFx
+        ? tracks
+        : tracks.map(track => ({ ...track, fxSlots: [] }));
+      this.activeMixerTracks = structuredClone(renderTracks);
+      if (includeMixerFx) {
+        this.buildReverbImpulse(2.5, 2.0);
+      }
+      const masterTrack = renderTracks.find(track => track.id === 0);
       if (masterTrack) this.updateMixerTrack(masterTrack); else this.getOrCreateMixerChannel(0);
-      for (const track of tracks) if (track.id !== 0) this.updateMixerTrack(track);
+      for (const track of renderTracks) if (track.id !== 0) this.updateMixerTrack(track);
       const totalSteps = Math.ceil(totalDurationSeconds / secondsPerStep);
       // Schedule the offline timeline in small cooperative batches so the browser
       // can service rendering/UI work instead of appearing unresponsive on longer exports.
