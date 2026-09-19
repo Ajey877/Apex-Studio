@@ -15,11 +15,137 @@ export interface ClipValidationResult {
 
 const finite = (value: number): boolean => Number.isFinite(value);
 
+/**
+ * Two normalized X values closer than this are treated as the same envelope
+ * position. It matches the six-decimal quantization the interactive point
+ * operations (add / move) apply to X.
+ */
+const AUTOMATION_X_EPSILON = 1e-6;
+
 const cloneClip = (clip: PlaylistClip): PlaylistClip => ({
   ...clip,
+  // Deep-copy nested objects so duplicates / split halves never share state
+  // with their source clip (a shared automationTarget would let a rebind on
+  // one clip leak into the other).
+  automationTarget: clip.automationTarget ? { ...clip.automationTarget } : undefined,
   automationPoints: clip.automationPoints?.map(point => ({ ...point })),
   spatialAudio: clip.spatialAudio ? { ...clip.spatialAudio } : undefined
 });
+
+// Split remapping keeps full float precision on purpose: quantizing remapped X
+// would move points off their original bar positions. Clamping only guards
+// against float noise at the [0, 1] edges.
+const clampUnit = (value: number): number => Math.max(0, Math.min(1, value));
+
+/**
+ * Pure evaluator for a normalized automation envelope.
+ *
+ * This deliberately mirrors audioEngine.interpolateAutomationCurve so that
+ * editing operations (split remapping in particular) sample the envelope
+ * exactly the way Song Mode playback does: tension lives on the point that
+ * opens a segment (positive = ease-in / exponential, negative = ease-out /
+ * logarithmic), and the first / last values are held outside the outermost
+ * points. Keep the two in sync; the automation test-suite cross-checks them.
+ */
+export function evaluateAutomationEnvelope(points: AutomationPoint[], relX: number): number {
+  if (!Array.isArray(points) || points.length === 0) return 0.5;
+  if (points.length === 1) return points[0].y;
+
+  const sorted = [...points].sort((a, b) => a.x - b.x);
+  if (relX <= sorted[0].x) return sorted[0].y;
+  if (relX >= sorted[sorted.length - 1].x) return sorted[sorted.length - 1].y;
+
+  for (let i = 0; i < sorted.length - 1; i++) {
+    const p1 = sorted[i];
+    const p2 = sorted[i + 1];
+    if (relX >= p1.x && relX <= p2.x) {
+      const segT = (relX - p1.x) / (p2.x - p1.x);
+      const tension = p1.tension || 0;
+      let curvedT = segT;
+      if (tension > 0) {
+        curvedT = Math.pow(segT, 1 + tension * 2);
+      } else if (tension < 0) {
+        curvedT = 1 - Math.pow(1 - segT, 1 + Math.abs(tension) * 2);
+      }
+      return p1.y + (p2.y - p1.y) * curvedT;
+    }
+  }
+  return 0.5;
+}
+
+/**
+ * Cuts a normalized automation envelope at xSplit (strictly inside (0, 1))
+ * into two envelopes that are each remapped back onto [0, 1]:
+ *
+ * - the left half keeps the points in [0, xSplit] (x' = x / xSplit) and ends
+ *   at x = 1 with the envelope value at the split;
+ * - the right half keeps the points in [xSplit, 1]
+ *   (x' = (x - xSplit) / (1 - xSplit)) and begins at x = 0 with that same
+ *   value, so the seam is continuous during playback;
+ * - a point sitting exactly at xSplit becomes the shared boundary of both
+ *   halves instead of being duplicated next to a synthesized one;
+ * - point order, tension and any extra per-point data are preserved. When
+ *   the split lands inside a segment, the segment's tension (which lives on
+ *   its opening point) is carried onto the right half's opening point so the
+ *   curve keeps its character on both sides of the seam.
+ *
+ * Halves that would otherwise lack an outer endpoint get one that holds the
+ * neighbouring value, which is exactly what playback does past the outermost
+ * points, so the audible envelope is unchanged.
+ */
+export function splitAutomationPoints(
+  points: AutomationPoint[],
+  xSplit: number
+): { left: AutomationPoint[]; right: AutomationPoint[] } {
+  if (!finite(xSplit) || xSplit <= AUTOMATION_X_EPSILON || xSplit >= 1 - AUTOMATION_X_EPSILON) {
+    throw new Error('Automation split position must be strictly inside the envelope');
+  }
+  if (!Array.isArray(points) || points.length < 2) {
+    // An empty or single-point envelope is a constant: playback returns the
+    // same value everywhere, so both halves simply keep it.
+    const copy = Array.isArray(points) ? points.map(point => ({ ...point })) : [];
+    return { left: copy, right: copy.map(point => ({ ...point })) };
+  }
+
+  const sorted = points.map(point => ({ ...point })).sort((a, b) => a.x - b.x);
+  const boundaryIndex = sorted.findIndex(point => Math.abs(point.x - xSplit) < AUTOMATION_X_EPSILON);
+
+  let leftBoundary: AutomationPoint;
+  let rightBoundary: AutomationPoint;
+  if (boundaryIndex !== -1) {
+    // Shared boundary: the existing point closes the left half and opens the
+    // right half, keeping its value and its tension on both sides.
+    leftBoundary = { ...sorted[boundaryIndex], x: 1 };
+    rightBoundary = { ...sorted[boundaryIndex], x: 0 };
+  } else {
+    const splitValue = clampUnit(evaluateAutomationEnvelope(sorted, xSplit));
+    let openingIndex = -1;
+    for (let i = 0; i < sorted.length; i++) {
+      if (sorted[i].x < xSplit) openingIndex = i;
+    }
+    const cutsSegment = openingIndex !== -1 && openingIndex < sorted.length - 1;
+    const inheritedTension = cutsSegment ? (sorted[openingIndex].tension ?? 0) : 0;
+    leftBoundary = { x: 1, y: splitValue, tension: 0 };
+    rightBoundary = { x: 0, y: splitValue, tension: inheritedTension };
+  }
+
+  const left: AutomationPoint[] = sorted
+    .filter(point => point.x < xSplit - AUTOMATION_X_EPSILON)
+    .map(point => ({ ...point, x: clampUnit(point.x / xSplit) }));
+  left.push(leftBoundary);
+
+  const right: AutomationPoint[] = [
+    rightBoundary,
+    ...sorted
+      .filter(point => point.x > xSplit + AUTOMATION_X_EPSILON)
+      .map(point => ({ ...point, x: clampUnit((point.x - xSplit) / (1 - xSplit)) }))
+  ];
+
+  if (left[0].x > 0) left.unshift({ x: 0, y: left[0].y, tension: 0 });
+  if (right[right.length - 1].x < 1) right.push({ x: 1, y: right[right.length - 1].y, tension: 0 });
+
+  return { left, right };
+}
 
 export function validatePlaylistClip(clip: PlaylistClip, bounds: PlaylistBounds = {}): ClipValidationResult {
   const errors: string[] = [];
@@ -96,9 +222,17 @@ export function resizePlaylistClipLeft(
   const startBar = snapBarPosition(requestedStartBar, gridBars);
   const originalEnd = clip.startBar + clip.lengthBars;
   const maxStart = originalEnd - minimumLengthBars;
-  const sourceOffset = clip.offsetSteps ?? 0;
+  // Automation clips are normalized envelopes: their points stretch and
+  // compress with the clip (relative X) and there is no hidden source
+  // material before the clip start. offsetSteps therefore grants no
+  // left-extension credit and never limits it; it is normalized to 0 so a
+  // stale value (e.g. from an older split) cannot pretend otherwise.
+  // Pattern / audio clips keep the source-preserving rule: extending left may
+  // only reveal material that exists before the current offset.
+  const isAutomation = clip.type === 'automation';
+  const sourceOffset = isAutomation ? 0 : (clip.offsetSteps ?? 0);
   const maxExtensionLeft = sourceOffset / STEPS_PER_BAR;
-  const minSourcePreservingStart = Math.max(0, clip.startBar - maxExtensionLeft);
+  const minSourcePreservingStart = isAutomation ? 0 : Math.max(0, clip.startBar - maxExtensionLeft);
   const nextStart = Math.max(minSourcePreservingStart, Math.min(startBar, maxStart));
   const nextLength = originalEnd - nextStart;
   const deltaBars = nextStart - clip.startBar;
@@ -107,7 +241,7 @@ export function resizePlaylistClipLeft(
     ...cloneClip(clip),
     startBar: nextStart,
     lengthBars: nextLength,
-    offsetSteps: Math.max(0, sourceOffset + deltaBars * STEPS_PER_BAR),
+    offsetSteps: isAutomation ? 0 : Math.max(0, sourceOffset + deltaBars * STEPS_PER_BAR),
     fadeInBars: clip.fadeInBars === undefined ? undefined : Math.min(clip.fadeInBars, nextLength / 2),
     fadeOutBars: clip.fadeOutBars === undefined ? undefined : Math.min(clip.fadeOutBars, nextLength / 2)
   };
@@ -165,10 +299,26 @@ export function splitPlaylistClip(
     id: `${clip.id}-R-${stamp}`,
     startBar: splitBar,
     lengthBars: rightLength,
-    offsetSteps: sourceOffset + leftLength * STEPS_PER_BAR,
     fadeInBars: clip.fadeInBars === undefined ? undefined : Math.min(clip.fadeInBars, rightLength / 2),
     fadeOutBars: clip.fadeOutBars === undefined ? undefined : Math.min(clip.fadeOutBars, rightLength / 2)
   };
+
+  if (clip.type === 'automation') {
+    // An automation clip has no source material to offset into: playback
+    // evaluates its envelope purely by relative position inside the clip. So
+    // instead of advancing offsetSteps, the envelope itself is cut at the
+    // split position and each half is remapped onto its own [0, 1] range,
+    // keeping every point at its original bar position and both halves
+    // meeting at the exact envelope value of the split bar.
+    if (clip.automationPoints) {
+      const xSplit = leftLength / clip.lengthBars;
+      const halves = splitAutomationPoints(clip.automationPoints, xSplit);
+      left.automationPoints = halves.left;
+      right.automationPoints = halves.right;
+    }
+  } else {
+    right.offsetSteps = sourceOffset + leftLength * STEPS_PER_BAR;
+  }
 
   return [assertValidPlaylistClip(left, bounds), assertValidPlaylistClip(right, bounds)];
 }
@@ -226,8 +376,10 @@ export function addPlaylistAutomationPoint(
   const existingIdx = points.findIndex(p => Math.abs(p.x - clampedX) < 0.005);
   if (existingIdx !== -1) {
     // Never move the existing point onto an X that another point already
-    // occupies; only its Y follows the interaction.
-    const nextX = points.some((p, i) => i !== existingIdx && Math.abs(p.x - clampedX) < 1e-9)
+    // occupies, and never nudge a pinned endpoint off the clip edge; in those
+    // cases only its Y follows the interaction.
+    const isPinnedEndpoint = existingIdx === 0 || existingIdx === points.length - 1;
+    const nextX = isPinnedEndpoint || points.some((p, i) => i !== existingIdx && Math.abs(p.x - clampedX) < 1e-9)
       ? points[existingIdx].x
       : clampedX;
     const mergedPoint = {
@@ -279,11 +431,19 @@ export function movePlaylistAutomationPoint(
 
   const targetY = Number(Math.max(0, Math.min(1, newY)).toFixed(6));
 
+  // Endpoint pinning: the first point always anchors x = 0 and the last point
+  // always anchors x = 1 so the envelope spans the whole clip (and split
+  // halves keep meeting at their seam). Only their Y is editable; interior
+  // points keep the snap / collision rules below.
+  const pinnedX = pointIndex === 0 ? 0 : pointIndex === points.length - 1 ? 1 : null;
+
   // Resolve the target X so that two points can never share the same X:
   // coincident points create zero-width envelope segments, which evaluate as
   // an instantaneous value step during playback.
   let resolvedX: number | null;
-  if (snapGridSteps !== undefined && finite(snapGridSteps) && snapGridSteps > 0) {
+  if (pinnedX !== null) {
+    resolvedX = pinnedX;
+  } else if (snapGridSteps !== undefined && finite(snapGridSteps) && snapGridSteps > 0) {
     const steps = Math.floor(snapGridSteps);
     const requestedStep = Math.round(Math.max(0, Math.min(1, newX)) * steps);
     resolvedX = null;
