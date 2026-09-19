@@ -18,6 +18,59 @@ export interface OfflineRenderPlanItem {
 
 const clamp = (value: number, min: number, max: number): number => Math.min(max, Math.max(min, value));
 
+/**
+ * Phase 8B — export integrity (P1-4: Placeholder Audio Stem clip breaks export).
+ *
+ * An audio clip whose asset cannot be resolved (placeholder/never-registered
+ * buffer id, missing audioBufferId, or a clip hydration marked as
+ * `audioUnavailable` because its persisted audio is gone) must never be
+ * silently skipped: that produced a "successful" WAV containing silence where
+ * the clip's audio belonged. These helpers let every offline render path fail
+ * safely with a descriptive error *before* any audio is rendered or encoded.
+ */
+export const isAudioClipExportable = (
+  clip: PlaylistClip,
+  resolveBuffer: (id: string) => AudioBuffer | undefined
+): boolean => {
+  if (clip.type !== 'audio' || clip.mute) return true;
+  if (!clip.audioBufferId) return false;
+  if (clip.audioUnavailable) return false;
+  return Boolean(resolveBuffer(clip.audioBufferId));
+};
+
+const describeUnexportableClip = (
+  clip: PlaylistClip,
+  resolveBuffer: (id: string) => AudioBuffer | undefined
+): string => {
+  const label = clip.name || clip.audioName || clip.id;
+  if (!clip.audioBufferId) {
+    return `Audio clip "${label}" is missing an audioBufferId.`;
+  }
+  if (clip.audioUnavailable) {
+    return `Audio clip "${label}" (buffer ID: ${clip.audioBufferId}) references an unavailable audio asset; its persisted audio could not be restored.`;
+  }
+  if (!resolveBuffer(clip.audioBufferId)) {
+    return `Missing audio buffer for clip "${label}" (buffer ID: ${clip.audioBufferId}). The audio asset is not loaded in memory.`;
+  }
+  return `Audio clip "${label}" cannot be exported.`;
+};
+
+/**
+ * Throws when any unmuted audio clip in the timeline references an audio
+ * asset that cannot be resolved, so callers never render a misleading
+ * partial/silent export. Muted clips are skipped (they render nothing).
+ */
+export const assertAudioClipsExportable = (
+  clips: PlaylistClip[],
+  resolveBuffer: (id: string) => AudioBuffer | undefined
+): void => {
+  const problems = clips.filter(clip => !isAudioClipExportable(clip, resolveBuffer));
+  if (problems.length === 0) return;
+  const detail = describeUnexportableClip(problems[0], resolveBuffer);
+  const suffix = problems.length > 1 ? ` (${problems.length} audio clips cannot be exported)` : '';
+  throw new Error(`${detail}${suffix}`);
+};
+
 export function getOfflineRenderPlan(clips: PlaylistClip[], bpm: number, totalBars: number): OfflineRenderPlanItem[] {
   const safeBpm = Number.isFinite(bpm) && bpm > 0 ? bpm : 120;
   const secondsPerBar = (60 / safeBpm) * 4;
@@ -66,6 +119,10 @@ function scheduleFade(gain: GainNode, start: number, duration: number, fadeInBar
 }
 
 export async function renderProjectTimelineOffline(options: OfflineProjectRendererOptions): Promise<AudioBuffer> {
+  // Fail before any rendering starts: a missing/placeholder/unavailable audio
+  // asset must reject the export instead of rendering a silent stand-in.
+  assertAudioClipsExportable(options.clips, options.getAudioBuffer);
+
   const safeBpm = Number.isFinite(options.bpm) && options.bpm > 0 ? options.bpm : 120;
   const secondsPerBeat = 60 / safeBpm;
   const secondsPerBar = secondsPerBeat * 4;
