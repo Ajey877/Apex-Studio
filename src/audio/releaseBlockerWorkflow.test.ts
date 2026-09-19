@@ -24,7 +24,7 @@ import {
   persistAudioClip,
   type StoredProjectBackup
 } from './audioPersistence';
-import { encodeSampleBufferForStorage, installSampleBufferPersistence } from './sampleBufferPersistence';
+import { commitAfterSampleBufferPersistence, encodeSampleBufferForStorage, installSampleBufferPersistence } from './sampleBufferPersistence';
 import { importSampleFile } from './sampleImport';
 import { PRESET_PROJECTS } from './presets';
 import { createDefaultProjectState, normalizeProjectState } from '../state/projectState';
@@ -49,7 +49,7 @@ import {
   restoreProjectBackupState,
   type ProjectBackupStorage
 } from '../state/projectBackup';
-import { getProjectFingerprint, isPristineProject, planProjectReplacement } from '../state/projectReplacement';
+import { getProjectFingerprint, isPristineProject, planProjectReplacement, runProjectReplacementAfterBackup } from '../state/projectReplacement';
 import type { AudioRecording, Channel, PlaylistClip, ProjectState } from '../types/daw';
 
 // ---------------------------------------------------------------------------
@@ -395,6 +395,49 @@ describe('Phase 8A: dropped and bounced playlist audio persists across reloads',
     }
   });
 
+  test('playlist clip references wait for pending persistence before committing', async () => {
+    const engine = createFakeEngine();
+    let releasePersistence!: () => void;
+    let persistenceStarted!: () => void;
+    const started = new Promise<void>(resolve => { persistenceStarted = resolve; });
+    const persistenceFinished = new Promise<void>(resolve => { releasePersistence = resolve; });
+    installSampleBufferPersistence(engine, {
+      persistAudioClip: async () => {
+        persistenceStarted();
+        await persistenceFinished;
+      }
+    });
+
+    const references: string[] = [];
+    const droppedId = 'dropped-sample-pending';
+    engine.setSampleBuffer(droppedId, asAudioBuffer(new MockAudioBuffer(1, 16, 44100)));
+    const commit = commitAfterSampleBufferPersistence(engine, droppedId, () => references.push(droppedId));
+    assert.deepEqual(references, [], 'the dropped clip reference must not be committed while persistence is pending');
+
+    await started;
+    assert.deepEqual(references, []);
+    releasePersistence();
+    await commit;
+    assert.deepEqual(references, [droppedId], 'the reference may commit after persistence succeeds');
+  });
+
+  test('dropped and bounced clip references are not committed when persistence fails', async () => {
+    for (const id of ['dropped-sample-failure', 'bounced-clip-failure']) {
+      const engine = createFakeEngine();
+      installSampleBufferPersistence(engine, {
+        persistAudioClip: async () => { throw new Error(`persist failed for ${id}`); }
+      });
+      const references: string[] = [];
+      engine.setSampleBuffer(id, asAudioBuffer(new MockAudioBuffer(1, 16, 44100)));
+
+      await assert.rejects(
+        commitAfterSampleBufferPersistence(engine, id, () => references.push(id)),
+        new RegExp(`persist failed for ${id}`)
+      );
+      assert.deepEqual(references, [], `${id} must not become a project clip reference after persistence failure`);
+    }
+  });
+
   test('a storage failure never breaks in-session playback registration', async () => {
     const engine = createFakeEngine();
     const errors: Array<{ id: string; error: unknown }> = [];
@@ -406,7 +449,7 @@ describe('Phase 8A: dropped and bounced playlist audio persists across reloads',
 
     engine.setSampleBuffer('dropped-sample-2', buffer);
     assert.equal(engine.getSampleBuffer('dropped-sample-2'), buffer);
-    await withTimeout(controller.flush());
+    await assert.rejects(withTimeout(controller.flush()), /QuotaExceededError/);
 
     assert.equal(errors.length, 1);
     assert.equal(errors[0].id, 'dropped-sample-2');
@@ -500,10 +543,18 @@ describe('Phase 8A: Sample Manager imports persist the original file', () => {
       onPersistError: (id) => reported.push(id)
     });
     assert.equal(persisted, false);
-    assert.equal(sample.id, 'sample-fixed');
-    assert.equal(sample.name, 'clap');
+    assert.equal(sample, null, 'a failed persistence result cannot be attached to a project');
     assert.deepEqual(reported, ['sample-fixed']);
     assert.ok(engine.getSampleBuffer('sample-fixed'), 'the sample still plays for the current session');
+
+    const unchangedProject = createDefaultProjectState();
+    const projectAfterFailedImport: ProjectState = {
+      ...unchangedProject,
+      channels: unchangedProject.channels.map(channel =>
+        persisted && sample ? { ...channel, customSample: sample } : channel
+      )
+    };
+    assert.equal(projectAfterFailedImport.channels[0].customSample, undefined, 'failed imported audio must not create a customSample project reference');
   });
 });
 
@@ -512,6 +563,49 @@ describe('Phase 8A: Sample Manager imports persist the original file', () => {
 // ---------------------------------------------------------------------------
 
 describe('Phase 8A: project replacement requires confirmation and keeps a backup', () => {
+  test('backup errors expose retry/cancel only; there is no replace-without-backup path', () => {
+    const modal = readFileSync(path.join(repoRoot, 'src', 'components', 'ProjectReplaceConfirmModal.tsx'), 'utf8');
+    const app = readFileSync(path.join(repoRoot, 'src', 'App.tsx'), 'utf8');
+    assert.doesNotMatch(modal, /Replace Without Backup|onConfirmWithoutBackup/);
+    assert.match(modal, /Retry the backup or keep the current project/);
+    assert.doesNotMatch(app, /onConfirmWithoutBackup|confirmPendingReplacement\(false\)/);
+  });
+
+  test('backup failure blocks stop, hydration, reconciliation, and replacement; cancel is safe; retry succeeds', async () => {
+    const currentProject = { name: 'current project' };
+    const incomingProject = { name: 'incoming project' };
+    let activeProject = currentProject;
+    let shouldFailBackup = true;
+    const calls: string[] = [];
+    const replace = async () => {
+      calls.push('handleStop');
+      calls.push('hydrate incoming project');
+      calls.push('reconcile/delete audio');
+      activeProject = incomingProject;
+    };
+    const attemptReplacement = () => runProjectReplacementAfterBackup(
+      async () => {
+        calls.push('backup');
+        if (shouldFailBackup) throw new ProjectBackupError('Project backup failed: storage unavailable');
+      },
+      replace
+    );
+
+    await assert.rejects(attemptReplacement, ProjectBackupError);
+    assert.deepEqual(calls, ['backup'], 'backup failure must stop before any destructive replacement work');
+    assert.equal(activeProject, currentProject, 'backup failure must leave the current project active');
+
+    // Cancelling the failed confirmation performs no replacement work.
+    calls.length = 0;
+    assert.equal(activeProject, currentProject);
+    assert.deepEqual(calls, [], 'cancellation leaves the current project unchanged');
+
+    shouldFailBackup = false;
+    await attemptReplacement();
+    assert.deepEqual(calls, ['backup', 'handleStop', 'hydrate incoming project', 'reconcile/delete audio']);
+    assert.equal(activeProject, incomingProject, 'retry after a successful backup permits replacement');
+  });
+
   test('pristine templates are replaced without confirmation, projects with work are not', () => {
     const blank = createDefaultProjectState();
     const incoming = structuredClone(PRESET_PROJECTS[0].state);

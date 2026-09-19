@@ -28,7 +28,8 @@ import { appendChannelWithAllocatedMixerTrackId } from './state/mixerTrackIdenti
 import { deleteChannelFromProjectState, normalizeProjectState } from './state/projectState';
 import { hydrateProjectAudio, persistProjectState, restorePersistedProjectState, saveAndReconcileProjectState } from './state/projectPersistence';
 import { ProjectBackupError, backupProjectBeforeReplacement } from './state/projectBackup';
-import { planProjectReplacement, type ProjectReplacementPlan, type ProjectReplacementSource } from './state/projectReplacement';
+import { waitForSampleBufferPersistence } from './audio/sampleBufferPersistence';
+import { planProjectReplacement, runProjectReplacementAfterBackup, type ProjectReplacementPlan, type ProjectReplacementSource } from './state/projectReplacement';
 import { createRecordingPlaylistClip, getRecordingAudioBufferId, validateRecordingTargetTrack } from './audio/recordingPipeline';
 import { createHistory, type ProjectHistory, resolveSaveShortcut, resolveUndoRedoShortcut } from './state/projectHistory';
 import {
@@ -557,28 +558,31 @@ export function App() {
     options: { backup: boolean }
   ): Promise<void> => {
     const normalized = normalizeProjectState(state);
-    if (options.backup) {
-      // Throws ProjectBackupError; the confirm dialog surfaces it and nothing is replaced.
-      await backupProjectBeforeReplacement(projectStateRef.current, { reason: 'replace' });
-    }
-    handleStop();
-    try {
-      const hydrated = await hydrateProjectAudio(normalized, audioEngine);
-      projectStateRef.current = hydrated.state;
-      setProjectState(hydrated.state);
-      resetProjectHistory(hydrated.state);
-      setSelectedChannelId(hydrated.state.selectedChannelId || hydrated.state.channels[0]?.id || 'ch-1');
-      setSelectedTrackId(hydrated.state.selectedMixerTrackId ?? 0);
-      void performSave(hydrated.state, { reconcileAudio: true });
-    } catch (error) {
-      console.warn('[Apex Studio] Project audio hydration failed; loading project without audio.', error);
-      projectStateRef.current = normalized;
-      setProjectState(normalized);
-      resetProjectHistory(normalized);
-      setSelectedChannelId(normalized.selectedChannelId || normalized.channels[0]?.id || 'ch-1');
-      setSelectedTrackId(normalized.selectedMixerTrackId ?? 0);
-      void performSave(normalized, { reconcileAudio: false });
-    }
+    await runProjectReplacementAfterBackup(
+      options.backup
+        ? () => backupProjectBeforeReplacement(projectStateRef.current, { reason: 'replace' }).then(() => undefined)
+        : undefined,
+      async () => {
+        handleStop();
+        try {
+          const hydrated = await hydrateProjectAudio(normalized, audioEngine);
+          projectStateRef.current = hydrated.state;
+          setProjectState(hydrated.state);
+          resetProjectHistory(hydrated.state);
+          setSelectedChannelId(hydrated.state.selectedChannelId || hydrated.state.channels[0]?.id || 'ch-1');
+          setSelectedTrackId(hydrated.state.selectedMixerTrackId ?? 0);
+          void performSave(hydrated.state, { reconcileAudio: true });
+        } catch (error) {
+          console.warn('[Apex Studio] Project audio hydration failed; loading project without audio.', error);
+          projectStateRef.current = normalized;
+          setProjectState(normalized);
+          resetProjectHistory(normalized);
+          setSelectedChannelId(normalized.selectedChannelId || normalized.channels[0]?.id || 'ch-1');
+          setSelectedTrackId(normalized.selectedMixerTrackId ?? 0);
+          void performSave(normalized, { reconcileAudio: false });
+        }
+      }
+    );
   }, [resetProjectHistory, performSave]);
 
   const settlePendingReplacement = useCallback((replaced: boolean) => {
@@ -611,7 +615,7 @@ export function App() {
     });
   }, [applyProjectReplacement, settlePendingReplacement]);
 
-  const confirmPendingReplacement = useCallback(async (withBackup: boolean) => {
+  const confirmPendingReplacement = useCallback(async () => {
     const pending = pendingReplacementRef.current;
     if (!pending || pending.isWorking) return;
     const update = (patch: Partial<PendingProjectReplacement>) => {
@@ -623,7 +627,9 @@ export function App() {
     };
     update({ isWorking: true, backupError: null, error: null });
     try {
-      await applyProjectReplacement(pending.incomingState, { backup: withBackup && pending.plan.shouldBackup });
+      // A confirmed replacement always takes the backup-required path. There is
+      // intentionally no alternate confirmation that can bypass it.
+      await applyProjectReplacement(pending.incomingState, { backup: pending.plan.shouldBackup });
       settlePendingReplacement(true);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown error';
@@ -731,11 +737,43 @@ export function App() {
   };
 
   const handleUpdateClips = (clips: PlaylistClip[]) => {
-    const nextState = { ...projectStateRef.current, playlistClips: clips };
-    updatePlaylistProjectState(nextState);
-    if (!playlistInteractionActiveRef.current) {
-      commitPlaylistHistory(nextState, 'Clip change');
+    const currentState = projectStateRef.current;
+    const currentAudioIds = new Set(
+      currentState.playlistClips
+        .map(clip => clip.type === 'audio' ? clip.audioBufferId : undefined)
+        .filter((id): id is string => Boolean(id))
+    );
+    const newAudioIds = [...new Set(
+      clips
+        .filter(clip => clip.type === 'audio' && Boolean(clip.audioBufferId))
+        .map(clip => clip.audioBufferId as string)
+        .filter(id => !currentAudioIds.has(id))
+    )];
+
+    const commitClipChange = () => {
+      const nextState = { ...projectStateRef.current, playlistClips: clips };
+      updatePlaylistProjectState(nextState);
+      if (!playlistInteractionActiveRef.current) {
+        commitPlaylistHistory(nextState, 'Clip change');
+      }
+    };
+
+    if (newAudioIds.length === 0) {
+      commitClipChange();
+      return;
     }
+
+    // Dropped/bounced buffers are registered synchronously, but their storage
+    // write is asynchronous. Do not put the clip id into project state until
+    // every newly referenced asset has completed successfully.
+    void Promise.all(newAudioIds.map(id => waitForSampleBufferPersistence(audioEngine, id)))
+      .then(() => {
+        commitClipChange();
+      })
+      .catch(error => {
+        const message = error instanceof Error ? error.message : 'audio persistence failed';
+        setSaveError(`Audio asset could not be persisted: ${message}`);
+      });
   };
 
   const handleUpdateMarkers = (markers: ProjectState['markers']) => {
@@ -1329,8 +1367,7 @@ export function App() {
         isWorking={pendingReplacement?.isWorking ?? false}
         backupError={pendingReplacement?.backupError ?? null}
         error={pendingReplacement?.error ?? null}
-        onConfirm={() => void confirmPendingReplacement(true)}
-        onConfirmWithoutBackup={() => void confirmPendingReplacement(false)}
+        onConfirm={() => void confirmPendingReplacement()}
         onCancel={() => settlePendingReplacement(false)}
       />
       <OrientationLockModal />

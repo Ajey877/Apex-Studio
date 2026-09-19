@@ -7,12 +7,11 @@ import { MAX_PROJECT_BACKUPS } from '../state/projectBackup';
 interface ProjectReplaceConfirmModalProps {
   plan: ProjectReplacementPlan | null;
   isWorking: boolean;
-  /** Set when the backup step failed; the user may retry or explicitly replace without a backup. */
+  /** Set when the backup step failed; the user may retry or cancel. */
   backupError: string | null;
   /** Set when replacement failed for a reason other than the backup. */
   error: string | null;
   onConfirm: () => void;
-  onConfirmWithoutBackup: () => void;
   onCancel: () => void;
 }
 
@@ -27,7 +26,6 @@ export const ProjectReplaceConfirmModal: React.FC<ProjectReplaceConfirmModalProp
   backupError,
   error,
   onConfirm,
-  onConfirmWithoutBackup,
   onCancel
 }) => {
   if (!plan) return null;
@@ -75,7 +73,7 @@ export const ProjectReplaceConfirmModal: React.FC<ProjectReplaceConfirmModalProp
 
           {backupError && (
             <div id="project-replace-backup-error" role="alert" className="p-2.5 bg-[#361111] border border-red-500/60 rounded-lg text-[11px] text-red-200 select-text">
-              <strong>Backup failed:</strong> {backupError}. You can retry, keep the current project, or replace it without a backup.
+              <strong>Backup failed:</strong> {backupError}. Retry the backup or keep the current project.
             </div>
           )}
 
@@ -95,16 +93,6 @@ export const ProjectReplaceConfirmModal: React.FC<ProjectReplaceConfirmModalProp
           >
             Keep Current Project
           </button>
-          {backupError && (
-            <button
-              id="project-replace-without-backup-btn"
-              onClick={onConfirmWithoutBackup}
-              disabled={isWorking}
-              className="px-3 py-1.5 bg-red-700 hover:bg-red-600 text-white font-bold text-xs rounded transition disabled:opacity-40"
-            >
-              Replace Without Backup
-            </button>
-          )}
           <button
             id="project-replace-confirm-btn"
             onClick={onConfirm}

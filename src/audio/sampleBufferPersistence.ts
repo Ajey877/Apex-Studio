@@ -29,8 +29,10 @@ export interface SampleBufferPersistenceOptions {
 }
 
 export interface SampleBufferPersistenceController {
-  /** Resolves once every persistence write started so far has settled. */
+  /** Resolves once every persistence write started so far has settled. Rejects if any write failed. */
   flush(): Promise<void>;
+  /** Resolves only after this asset has been persisted; rejects when its write fails. */
+  waitFor(id: string): Promise<void>;
   getPendingIds(): string[];
   isInstalled(): boolean;
 }
@@ -70,6 +72,7 @@ export function installSampleBufferPersistence(
   });
 
   const pending = new Map<string, Promise<void>>();
+  const failures = new Map<string, unknown>();
   const originalSetSampleBuffer = engine.setSampleBuffer.bind(engine);
 
   engine.setSampleBuffer = function setSampleBufferAndPersist(id: string, buffer: AudioBuffer): void {
@@ -77,12 +80,20 @@ export function installSampleBufferPersistence(
     originalSetSampleBuffer(id, buffer);
     if (!id || !buffer || !shouldPersist(id, buffer)) return;
 
+    failures.delete(id);
     const write = defer(() => encode(buffer))
       .then(blob => persist(id, blob))
-      .catch(error => onError(id, error))
+      .catch(error => {
+        failures.set(id, error);
+        onError(id, error);
+        throw error;
+      })
       .finally(() => {
         if (pending.get(id) === write) pending.delete(id);
       });
+    // A caller that needs ordering uses waitFor(id), while this handler prevents
+    // an unobserved storage failure from becoming an unhandled rejection.
+    void write.catch(() => undefined);
     pending.set(id, write);
   };
 
@@ -92,6 +103,12 @@ export function installSampleBufferPersistence(
       while (pending.size > 0) {
         await Promise.all([...pending.values()]);
       }
+    },
+    waitFor(id) {
+      const write = pending.get(id);
+      if (write) return write;
+      const failure = failures.get(id);
+      return failure === undefined ? Promise.resolve() : Promise.reject(failure);
     },
     getPendingIds() {
       return [...pending.keys()];
@@ -104,3 +121,31 @@ export function installSampleBufferPersistence(
   controllers.set(engine as object, controller);
   return controller;
 }
+
+/** Returns the installed controller without changing the engine's architecture. */
+export const getSampleBufferPersistenceController = (
+  engine: SampleBufferEngineLike
+): SampleBufferPersistenceController | undefined => controllers.get(engine as object);
+
+/**
+ * Playlist audio callers use this gate before committing a clip to project state.
+ * A missing installer is treated as a failure rather than silently committing an
+ * asset that cannot be guaranteed to be persistent.
+ */
+export const waitForSampleBufferPersistence = async (
+  engine: SampleBufferEngineLike,
+  id: string
+): Promise<void> => {
+  const controller = getSampleBufferPersistenceController(engine);
+  if (!controller) throw new Error('Audio persistence is not installed');
+  await controller.waitFor(id);
+};
+
+export const commitAfterSampleBufferPersistence = async (
+  engine: SampleBufferEngineLike,
+  id: string,
+  commit: () => void
+): Promise<void> => {
+  await waitForSampleBufferPersistence(engine, id);
+  commit();
+};

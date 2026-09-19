@@ -108,3 +108,17 @@ export const planProjectReplacement = (
     reason: pristine ? 'pristine-current' : 'current-has-work'
   };
 };
+
+
+/**
+ * Runs the destructive part of a replacement only after its required backup
+ * has completed. A rejected backup deliberately prevents `replace` from being
+ * called, so callers cannot accidentally stop, hydrate, or reconcile first.
+ */
+export const runProjectReplacementAfterBackup = async <T>(
+  backup: (() => Promise<void>) | undefined,
+  replace: () => Promise<T> | T
+): Promise<T> => {
+  if (backup) await backup();
+  return replace();
+};

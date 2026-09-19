@@ -24,11 +24,16 @@ export interface ImportSampleFileOptions {
   onPersistError?: (id: string, error: unknown) => void;
 }
 
-export interface ImportSampleFileResult {
-  sample: CustomSampleData;
-  /** False when the audio plays this session but could not be written to storage. */
-  persisted: boolean;
-}
+export type ImportSampleFileResult =
+  | {
+      sample: CustomSampleData;
+      persisted: true;
+    }
+  | {
+      sample: null;
+      persisted: false;
+      error: unknown;
+    };
 
 export const createImportedSampleId = (now: number = Date.now()): string => `sample-${now}`;
 
@@ -47,13 +52,14 @@ export const importSampleFile = async (
   // Decode first: a file the engine cannot decode must never be persisted.
   const result = await options.engine.loadAudioFile(file, sampleId);
 
-  let persisted = true;
   try {
     // Persist the original bytes (compressed formats stay compact and decode identically on reload).
     await persist(sampleId, file);
   } catch (error) {
-    persisted = false;
     onPersistError(sampleId, error);
+    // The decoded buffer may remain available for auditioning this session, but
+    // callers must not receive a sample that can be attached to the project.
+    return { sample: null, persisted: false, error };
   }
 
   const fileName = 'name' in file && typeof file.name === 'string' ? file.name : 'Imported Sample';
@@ -70,5 +76,5 @@ export const importSampleFile = async (
     reverse: false
   };
 
-  return { sample, persisted };
+  return { sample, persisted: true };
 };
