@@ -17,7 +17,7 @@ import {
   Pattern,
   MasteringSuiteState
 } from './types/daw';
-import { audioEngine } from './audio/audioEngine';
+import { audioEngine, type PlaybackStateUpdate } from './audio/audioEngine';
 import { 
   DEFAULT_PROJECT, 
   PRESET_PROJECTS, 
@@ -477,13 +477,30 @@ export function App() {
     }
   }, []);
 
+  /**
+   * Keep only playback-consumed project collections synchronized while the
+   * engine owns an isolated take. Other React state remains UI/history state
+   * and is intentionally not copied into the real-time scheduler.
+   */
+  const synchronizeActivePlayback = useCallback((previous: ProjectState, next: ProjectState) => {
+    const update: PlaybackStateUpdate = {};
+    if (previous.channels !== next.channels) update.channels = next.channels;
+    if (previous.playlistClips !== next.playlistClips) update.clips = next.playlistClips;
+    if (previous.mixerTracks !== next.mixerTracks) update.mixerTracks = next.mixerTracks;
+    if (update.channels || update.clips || update.mixerTracks) {
+      audioEngine.synchronizePlaybackState(update);
+    }
+  }, []);
+
   const resetPlaylistHistory = resetProjectHistory;
   const commitPlaylistHistory = commitProjectHistory;
 
   const updatePlaylistProjectState = useCallback((state: ProjectState) => {
+    const previousState = projectStateRef.current;
     projectStateRef.current = state;
+    synchronizeActivePlayback(previousState, state);
     setProjectState(state);
-  }, []);
+  }, [synchronizeActivePlayback]);
 
   const mutateProjectState = useCallback((
     updater: (current: ProjectState) => ProjectState,
@@ -493,6 +510,7 @@ export function App() {
     const currentState = projectStateRef.current;
     const nextState = updater(currentState);
     projectStateRef.current = nextState;
+    synchronizeActivePlayback(currentState, nextState);
     setProjectState(nextState);
 
     if (options?.isContinuous) {
@@ -502,7 +520,7 @@ export function App() {
       commitProjectHistory(nextState, label);
     }
     return nextState;
-  }, [commitProjectHistory]);
+  }, [commitProjectHistory, synchronizeActivePlayback]);
 
   const handleContinuousInteractionStart = useCallback((label?: string) => {
     continuousBatcherRef.current.start(label);
@@ -515,34 +533,42 @@ export function App() {
   const handleUndo = useCallback(() => {
     if (playlistInteractionActiveRef.current) return;
     continuousBatcherRef.current.flush();
+    const previousState = projectStateRef.current;
     const nextHistory = projectHistoryRef.current.undo();
     if (nextHistory === projectHistoryRef.current) return;
     projectHistoryRef.current = nextHistory;
     projectStateRef.current = nextHistory.present;
+    synchronizeActivePlayback(previousState, nextHistory.present);
     setProjectState(nextHistory.present);
     setProjectHistoryVersion(version => version + 1);
 
-    // Sync live mixer tracks with audio engine
-    nextHistory.present.mixerTracks.forEach(track => {
-      audioEngine.updateMixerTrack(track);
-    });
-  }, []);
+    // When stopped there is no playback snapshot to update, so keep the live
+    // mixer graph in step with history for the next audition.
+    if (!audioEngine.isPlaybackActive()) {
+      nextHistory.present.mixerTracks.forEach(track => {
+        audioEngine.updateMixerTrack(track);
+      });
+    }
+  }, [synchronizeActivePlayback]);
 
   const handleRedo = useCallback(() => {
     if (playlistInteractionActiveRef.current) return;
     continuousBatcherRef.current.flush();
+    const previousState = projectStateRef.current;
     const nextHistory = projectHistoryRef.current.redo();
     if (nextHistory === projectHistoryRef.current) return;
     projectHistoryRef.current = nextHistory;
     projectStateRef.current = nextHistory.present;
+    synchronizeActivePlayback(previousState, nextHistory.present);
     setProjectState(nextHistory.present);
     setProjectHistoryVersion(version => version + 1);
 
-    // Sync live mixer tracks with audio engine
-    nextHistory.present.mixerTracks.forEach(track => {
-      audioEngine.updateMixerTrack(track);
-    });
-  }, []);
+    if (!audioEngine.isPlaybackActive()) {
+      nextHistory.present.mixerTracks.forEach(track => {
+        audioEngine.updateMixerTrack(track);
+      });
+    }
+  }, [synchronizeActivePlayback]);
 
   const handlePlaylistUndo = handleUndo;
   const handlePlaylistRedo = handleRedo;
@@ -822,7 +848,7 @@ export function App() {
     );
 
     const target = projectStateRef.current.mixerTracks.find(t => t.id === trackId);
-    if (target) {
+    if (target && !audioEngine.isPlaybackActive()) {
       audioEngine.updateMixerTrack(target);
     }
   };
