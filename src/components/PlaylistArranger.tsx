@@ -34,6 +34,7 @@ import {
   resizePlaylistClipRight,
   resolvePlaylistKeyboardShortcut,
   resolvePlaylistTargetChannel,
+  resolveClipClickBar,
   splitPlaylistClip,
   addPlaylistAutomationPoint,
   movePlaylistAutomationPoint,
@@ -1112,6 +1113,12 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
                         }
                         if (activeTool === 'delete') {
                           deleteClip(clip.id);
+                        } else if (activeTool === 'cut') {
+                          // Clips render above the grid cells, so a Slice click lands
+                          // here instead of handleGridCellClick: derive the bar from
+                          // the click position inside the clip and split in place.
+                          const clipLeft = e.currentTarget.getBoundingClientRect().left;
+                          splitClip(clip, resolveClipClickBar(clip, e.clientX, clipLeft, BAR_WIDTH));
                         } else {
                           selectClip(clip.id, { openAutomationEditor: isAuto });
                         }

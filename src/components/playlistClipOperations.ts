@@ -323,6 +323,19 @@ export function splitPlaylistClip(
   return [assertValidPlaylistClip(left, bounds), assertValidPlaylistClip(right, bounds)];
 }
 
+/**
+ * Bar position under a pointer inside a rendered clip. Clips are laid out at
+ * startBar * barWidthPx from the row origin, so the bar is the clip's start
+ * plus the pointer's offset from the clip's left edge, in bars. Used by the
+ * Slice tool: clips render above the grid cells, so a click on a clip never
+ * reaches the grid-cell handler and the bar must be derived from the clip's
+ * own geometry. Pure arithmetic - non-finite input yields a non-finite bar,
+ * which the split path rejects like any other invalid split position.
+ */
+export function resolveClipClickBar(clip: PlaylistClip, clientX: number, clipLeftPx: number, barWidthPx: number): number {
+  return clip.startBar + (clientX - clipLeftPx) / barWidthPx;
+}
+
 export function duplicatePlaylistClip(
   clip: PlaylistClip,
   id: string,

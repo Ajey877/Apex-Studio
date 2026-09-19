@@ -10,6 +10,7 @@ import {
   resizePlaylistClipRight,
   resolvePlaylistKeyboardShortcut,
   resolvePlaylistTargetChannel,
+  resolveClipClickBar,
   snapBarPosition,
   splitPlaylistClip,
   updatePlaylistAutomationPoint,
@@ -356,4 +357,107 @@ test('drag math: vertical track change is independent of horizontal position', (
   const moved = movePlaylistClip(clip, requestedStart, targetTrack, GRID, BOUNDS);
   assert.equal(moved.startBar, 5, 'horizontal move correct');
   assert.equal(moved.trackIndex, 2, 'vertical move correct');
+});
+
+// ---------------------------------------------------------------------------
+// Slice tool click math — regression tests
+// Clips render above the grid cells, so with the Slice tool active the click
+// lands on the clip element and never reaches handleGridCellClick. The clip's
+// onClick derives the bar from the click position inside the clip:
+//   clickedBar = clip.startBar + (clientX - clipRect.left) / BAR_WIDTH
+// and hands it to the existing splitClip() path (DEFAULT_GRID_BARS snapping).
+// ---------------------------------------------------------------------------
+
+const automationClip: PlaylistClip = {
+  id: 'auto-1',
+  trackIndex: 2,
+  startBar: 4,
+  lengthBars: 8,
+  type: 'automation',
+  color: '#00e5ff',
+  name: 'Auto: Cutoff',
+  automationTarget: { type: 'channel_filter_cutoff', targetId: 'ch-1', label: 'Cutoff' },
+  automationPoints: [
+    { x: 0, y: 0.2, tension: 0.3 },
+    { x: 0.5, y: 0.85, tension: -0.2 },
+    { x: 1, y: 0.3, tension: 0 }
+  ]
+};
+
+const patternClip: PlaylistClip = {
+  id: 'pat-1',
+  trackIndex: 0,
+  startBar: 4,
+  lengthBars: 8,
+  type: 'pattern',
+  channelId: 'ch-1',
+  color: '#ff6e00',
+  name: 'Pattern Block',
+  offsetSteps: 8
+};
+
+test('slice math: click offset inside the clip maps to the bar under the pointer', () => {
+  const clipLeft = 1234.5; // viewport x of the clip's left edge (arbitrary scroll / layout)
+  assert.equal(resolveClipClickBar(patternClip, clipLeft, clipLeft, BAR_WIDTH), 4);
+  assert.equal(resolveClipClickBar(patternClip, clipLeft + BAR_WIDTH, clipLeft, BAR_WIDTH), 5);
+  assert.equal(resolveClipClickBar(patternClip, clipLeft + 4 * BAR_WIDTH + 24, clipLeft, BAR_WIDTH), 8.25);
+  // Only the offset from the clip edge matters, not where the clip sits on screen.
+  assert.equal(
+    resolveClipClickBar(patternClip, 60, 12, BAR_WIDTH),
+    resolveClipClickBar(patternClip, 1048, 1000, BAR_WIDTH)
+  );
+  // A clip further down the timeline shifts the result by its start.
+  assert.equal(resolveClipClickBar({ ...patternClip, startBar: 16 }, 300 + 48, 300, BAR_WIDTH), 16.5);
+});
+
+test('slice math: pattern, audio and automation clips split at the clicked bar with grid snapping', () => {
+  const clipLeft = 500;
+  const clickX = clipLeft + 4 * BAR_WIDTH + 13; // bar 8.135 -> snaps to 8.25
+
+  const [patternLeft, patternRight] = splitPlaylistClip(patternClip, resolveClipClickBar(patternClip, clickX, clipLeft, BAR_WIDTH), GRID, BOUNDS);
+  assert.equal(patternLeft.startBar, 4);
+  assert.equal(patternLeft.lengthBars, 4.25);
+  assert.equal(patternRight.startBar, 8.25);
+  assert.equal(patternRight.lengthBars, 3.75);
+  assert.equal(patternRight.offsetSteps, 8 + 4.25 * 16); // pattern / audio semantics untouched
+
+  const [audioLeft, audioRight] = splitPlaylistClip(baseClip, resolveClipClickBar(baseClip, clickX, clipLeft, BAR_WIDTH), GRID, BOUNDS);
+  assert.equal(audioLeft.lengthBars, 4.25);
+  assert.equal(audioRight.startBar, 8.25);
+  assert.equal(audioRight.offsetSteps, 68);
+  assert.equal(audioLeft.audioBufferId, 'buffer-1');
+  assert.equal(audioRight.audioBufferId, 'buffer-1');
+
+  // Automation clips go through the Phase 6.2 envelope remap: both halves
+  // meet at the seam value and offsetSteps is left alone.
+  const [autoLeft, autoRight] = splitPlaylistClip(automationClip, resolveClipClickBar(automationClip, clickX, clipLeft, BAR_WIDTH), GRID, BOUNDS);
+  assert.equal(autoLeft.lengthBars, 4.25);
+  assert.equal(autoRight.startBar, 8.25);
+  assert.equal(autoLeft.offsetSteps, undefined);
+  assert.equal(autoRight.offsetSteps, undefined);
+  const seamLeft = autoLeft.automationPoints![autoLeft.automationPoints!.length - 1];
+  const seamRight = autoRight.automationPoints![0];
+  assert.equal(seamLeft.x, 1);
+  assert.equal(seamRight.x, 0);
+  assert.equal(seamLeft.y, seamRight.y);
+  assert.equal(autoLeft.automationPoints!.length, 3); // 0, 0.5 (now at bar 8), seam
+  assert.equal(autoRight.automationPoints!.length, 2); // seam, 1
+  assert.equal(autoLeft.automationTarget?.targetId, 'ch-1');
+  assert.equal(autoRight.automationTarget?.targetId, 'ch-1');
+});
+
+test('slice math: clicks that snap onto a clip edge are rejected instead of producing a degenerate clip', () => {
+  const clipLeft = 500;
+  const clipRight = clipLeft + patternClip.lengthBars * BAR_WIDTH - 4; // rendered width is lengthBars * 96 - 4
+  // Left edge and the first few pixels snap back to the clip start.
+  assert.throws(() => splitPlaylistClip(patternClip, resolveClipClickBar(patternClip, clipLeft, clipLeft, BAR_WIDTH), GRID, BOUNDS), /inside the clip/);
+  assert.throws(() => splitPlaylistClip(patternClip, resolveClipClickBar(patternClip, clipLeft + 11, clipLeft, BAR_WIDTH), GRID, BOUNDS), /inside the clip/);
+  // Right edge snaps to the clip end.
+  assert.throws(() => splitPlaylistClip(patternClip, resolveClipClickBar(patternClip, clipRight, clipLeft, BAR_WIDTH), GRID, BOUNDS), /inside the clip/);
+  // Just past the snap threshold produces the smallest grid-sized piece.
+  const [edgeLeft, edgeRight] = splitPlaylistClip(patternClip, resolveClipClickBar(patternClip, clipLeft + 13, clipLeft, BAR_WIDTH), GRID, BOUNDS);
+  assert.equal(edgeLeft.lengthBars, 0.25);
+  assert.equal(edgeRight.startBar, 4.25);
+  // Non-finite geometry surfaces as an invalid split (the UI shows its status message).
+  assert.throws(() => splitPlaylistClip(patternClip, resolveClipClickBar(patternClip, Number.NaN, clipLeft, BAR_WIDTH), GRID, BOUNDS), /finite/);
 });
