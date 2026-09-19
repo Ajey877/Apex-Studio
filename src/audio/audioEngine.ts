@@ -193,6 +193,11 @@ class AudioEngine {
     this.sampleBuffers.set(id, buffer);
   }
 
+  /** Ids of every audio asset currently registered in memory (recordings, imports, drops, bounces, hydrated assets). */
+  public getSampleBufferIds(): string[] {
+    return [...this.sampleBuffers.keys()];
+  }
+
   private buildReverbImpulse(duration: number, decay: number) {
     if (!this.ctx) return;
     const rate = this.ctx.sampleRate;
@@ -2845,8 +2850,11 @@ class AudioEngine {
       waveform.push(Math.min(1.0, max * 1.5));
     }
 
+    // Session-only convenience registration. The caller registers the buffer under the
+    // clip's own asset id via setSampleBuffer (which is what gets persisted), so this
+    // internal alias intentionally bypasses the persistence wrapper.
     const bufId = `bounced-${channel.id}-${Date.now()}`;
-    this.setSampleBuffer(bufId, renderedBuffer);
+    this.sampleBuffers.set(bufId, renderedBuffer);
 
     return { buffer: renderedBuffer, waveform };
   }

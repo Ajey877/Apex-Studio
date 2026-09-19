@@ -15,6 +15,7 @@ import {
 } from 'lucide-react';
 import { Channel, CustomSampleData } from '../types/daw';
 import { audioEngine } from '../audio/audioEngine';
+import { importSampleFile } from '../audio/sampleImport';
 
 interface SampleManagerModalProps {
   isOpen: boolean;
@@ -45,6 +46,7 @@ export const SampleManagerModal: React.FC<SampleManagerModalProps> = ({
   const [currentSample, setCurrentSample] = useState<CustomSampleData | null>(selectedChannel?.customSample || null);
   const [targetChannelId, setTargetChannelId] = useState<string>(selectedChannel?.id || channels[0]?.id || '');
   const [isLoading, setIsLoading] = useState(false);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [trimStart, setTrimStart] = useState<number>(0);
   const [trimEnd, setTrimEnd] = useState<number>(1.0);
   const [rootPitch, setRootPitch] = useState<number>(60);
@@ -56,28 +58,25 @@ export const SampleManagerModal: React.FC<SampleManagerModalProps> = ({
   const handleFileUpload = async (file: File) => {
     try {
       setIsLoading(true);
-      const sampleId = `sample-${Date.now()}`;
-      const result = await audioEngine.loadAudioFile(file, sampleId);
+      setErrorMessage(null);
+      // Decodes into the engine and persists the original file before exposing it
+      // as a project-assignable sample.
+      const result = await importSampleFile(file, { engine: audioEngine });
+      if (result.persisted === false) {
+        setCurrentSample(null);
+        const message = result.error instanceof Error ? result.error.message : 'Audio sample could not be saved';
+        setErrorMessage(`Sample import failed: ${message}`);
+        return;
+      }
 
-      const newSample: CustomSampleData = {
-        id: sampleId,
-        name: file.name.replace(/\.[^/.]+$/, ''),
-        duration: result.duration,
-        sampleRate: result.buffer.sampleRate,
-        channels: result.buffer.numberOfChannels,
-        waveformPeaks: result.peaks,
-        trimStart: 0,
-        trimEnd: 1.0,
-        rootPitch: 60,
-        reverse: false
-      };
-
-      setCurrentSample(newSample);
+      setCurrentSample(result.sample);
       setTrimStart(0);
       setTrimEnd(1.0);
       setRootPitch(60);
     } catch (err) {
       console.error('Error decoding audio sample:', err);
+      setCurrentSample(null);
+      setErrorMessage(`Sample import failed: ${err instanceof Error ? err.message : 'Unable to decode audio'}`);
     } finally {
       setIsLoading(false);
     }
@@ -179,6 +178,12 @@ export const SampleManagerModal: React.FC<SampleManagerModalProps> = ({
               <p className="text-[11px] text-[#777]">Supports WAV, MP3, AIFF, FLAC, OGG one-shots & loops</p>
             </div>
           </div>
+
+          {errorMessage && (
+            <div id="sample-manager-error" role="alert" className="p-2.5 bg-[#361111] border border-red-500/60 rounded-lg text-[11px] text-red-200 select-text">
+              {errorMessage}
+            </div>
+          )}
 
           {/* Sample Waveform Editor */}
           {currentSample ? (
