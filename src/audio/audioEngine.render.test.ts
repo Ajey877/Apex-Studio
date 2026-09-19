@@ -77,6 +77,7 @@ test('offline timeline render drives the same live song scheduling entrypoint an
 
   const triggerTimes: number[] = [];
   const updatedTrackIds: number[] = [];
+  const progressEvents: Array<{ progress: number; status: string }> = [];
 
   (globalThis as any).OfflineAudioContext = FakeOfflineAudioContext;
   engine.buildReverbImpulse = () => undefined;
@@ -96,7 +97,10 @@ test('offline timeline render drives the same live song scheduling entrypoint an
     assert.equal(triggerTimes[31], 3.875);
     assert.equal(engine.bpm, 128);
     assert.equal(engine.ctx, originalCtx);
-    assert.equal(engine.activePlayMode, 'pat');
+    assert.equal(engine.activePlayMode, 'song');
+    assert.ok(progressEvents.some(event => event.progress === 40 && /pattern mode/i.test(event.status)));
+    assert.equal(progressEvents.at(-1)?.progress, 85);
+    assert.match(progressEvents.at(-1)?.status ?? '', /Encoding WAV/);
   } finally {
     (globalThis as any).OfflineAudioContext = previousOfflineContext;
     engine.buildReverbImpulse = originalBuildReverbImpulse;
