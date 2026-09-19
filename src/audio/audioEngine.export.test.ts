@@ -395,21 +395,66 @@ describe('Phase 3A: Render Architecture & Audio Fidelity', () => {
       },
     ];
 
-    await audioEngine.renderProjectStems(
+    await audioEngine.renderTimelineOffline(
       [synthChannel],
       clips,
       defaultMixerTracks,
       120,
       1,
-      24
+      undefined,
+      true
     );
 
     assert.ok(capturedCtx !== null, 'Offline context must be created');
-    // MiniSynth creates osc1 and osc2 per note (dual oscillators) + filter, unlike legacy single osc fallback
+    // MiniSynth creates osc1 and osc2 per note (dual oscillators) + filter.
     const oscCount = capturedCtx.createdOscillators.length;
     assert.ok(oscCount >= 2, `Expected dual/multi-oscillator real synth voices, found ${oscCount}`);
-    // Mixer track 1 has an EQ effect slot, which creates a biquad filter
-    assert.ok(capturedCtx.createdFilters.length > 0, 'Mixer insert FX (EQ) must be created in render graph');
+    // Full mixer FX remains available as an explicit offline-render opt-in for validation/internal callers.
+    assert.ok(capturedCtx.createdFilters.length > 0, 'Mixer insert FX (EQ) must be created when explicitly enabled');
+  });
+
+  it('browser offline render bypasses mixer FX by default', async () => {
+    let capturedCtx: MockOfflineAudioContext | null = null;
+    class InspectingOfflineContext extends MockOfflineAudioContext {
+      constructor(c: number, l: number, s: number) {
+        super(c, l, s);
+        capturedCtx = this;
+      }
+    }
+    (globalThis as any).OfflineAudioContext = InspectingOfflineContext;
+
+    const drumChannel: Channel = {
+      ...synthChannel,
+      id: 'ch-render-safety',
+      name: 'Render Safety Kick',
+      instrumentType: 'drumpad',
+      steps: [true, ...new Array(15).fill(false)],
+      notes: [{ id: 'render-hit', pitch: 36, start: 0, duration: 1, velocity: 1 }],
+    };
+
+    await audioEngine.renderTimelineOffline(
+      [drumChannel],
+      [{
+        id: 'render-safety-clip',
+        name: 'Render Safety',
+        trackIndex: 0,
+        startBar: 0,
+        lengthBars: 4,
+        type: 'pattern',
+        channelId: drumChannel.id,
+        color: '#ff5722',
+      }],
+      defaultMixerTracks,
+      120,
+      4
+    );
+
+    assert.ok(capturedCtx !== null, 'Offline context must be created');
+    assert.equal(
+      capturedCtx.createdFilters.length,
+      0,
+      'Browser export should bypass mixer FX unless explicitly requested'
+    );
   });
 
   // --- Requirement 3: Mixer volume automation affects offline output ---
