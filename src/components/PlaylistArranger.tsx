@@ -71,9 +71,13 @@ interface PlaylistArrangerProps {
   onSeekToBar?: (bar: number) => void;
   currentBar: number;
   isPlaying: boolean;
+  /** Project tempo (`meta.bpm`); Bounce-In-Place renders stems at this tempo. */
+  bpm: number;
 }
 
 const BAR_WIDTH = 96;
+/** Bounced stems are at least this long; longer channel content extends the stem. */
+const MIN_BOUNCE_BARS = 4;
 const TRACK_HEIGHT = 64;
 const MIN_CLIP_LENGTH = DEFAULT_GRID_BARS;
 
@@ -148,7 +152,8 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
   onAddTrack,
   onSeekToBar,
   currentBar,
-  isPlaying
+  isPlaying,
+  bpm
 }) => {
   const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
   const [selectedPointIndex, setSelectedPointIndex] = useState<number | null>(null);
@@ -212,7 +217,9 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
 
     setStatusMessage(`Bouncing ${channel.name} into offline Audio Stem...`);
     try {
-      const { buffer, waveform } = await audioEngine.bounceChannelToAudioClip(channel, 130, 4);
+      // Render at the project tempo over the channel's full playable length so the
+      // stem lines up with the arrangement grid and no step past bar 1 is dropped.
+      const { buffer, waveform, lengthBars } = await audioEngine.bounceChannelToAudioClip(channel, bpm, MIN_BOUNCE_BARS);
       const bufId = `bounced-clip-${Date.now()}`;
       audioEngine.setSampleBuffer(bufId, buffer);
 
@@ -220,7 +227,8 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
         id: `audio-bounced-${Date.now()}`,
         trackIndex: trackIdx,
         startBar: 0,
-        lengthBars: 4,
+        // Clip metadata mirrors the rendered audio so playback never truncates or pads the stem.
+        lengthBars,
         type: 'audio',
         audioBufferId: bufId,
         audioName: `${channel.name} (Bounced Stem)`,
