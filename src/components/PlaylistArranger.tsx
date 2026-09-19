@@ -22,7 +22,7 @@ import {
   Snowflake,
   AudioWaveform
 } from 'lucide-react';
-import { PlaylistTrack, PlaylistClip, Pattern, Channel, AutomationTargetType, ArrangementMarker } from '../types/daw';
+import { PlaylistTrack, PlaylistClip, Pattern, Channel, AutomationTargetType, ArrangementMarker, MixerTrack } from '../types/daw';
 import { audioEngine } from '../audio/audioEngine';
 import {
   DEFAULT_GRID_BARS,
@@ -36,6 +36,10 @@ import {
   resolvePlaylistTargetChannel,
   splitPlaylistClip,
   updatePlaylistAutomationPoint,
+  addPlaylistAutomationPoint,
+  movePlaylistAutomationPoint,
+  deletePlaylistAutomationPoint,
+  updatePlaylistAutomationTarget,
 } from './playlistClipOperations';
 
 interface PlaylistArrangerProps {
@@ -43,6 +47,7 @@ interface PlaylistArrangerProps {
   clips: PlaylistClip[];
   patterns: Pattern[];
   channels: Channel[];
+  mixerTracks?: MixerTrack[];
   markers?: ArrangementMarker[];
   onUpdateTracks: (tracks: PlaylistTrack[]) => void;
   onUpdateClips: (clips: PlaylistClip[]) => void;
@@ -67,7 +72,17 @@ type Interaction =
   | { kind: 'move'; clip: PlaylistClip; pointerId: number; originX: number; originY: number }
   | { kind: 'resize-left'; clip: PlaylistClip; pointerId: number; originX: number }
   | { kind: 'resize-right'; clip: PlaylistClip; pointerId: number; originX: number }
-  | { kind: 'automation-point'; clip: PlaylistClip; pointerId: number; pointIndex: number; originX: number; originY: number; automationTop: number };
+  | {
+      kind: 'automation-point';
+      clip: PlaylistClip;
+      pointerId: number;
+      pointIndex: number;
+      originX: number;
+      originY: number;
+      automationLeft: number;
+      automationTop: number;
+      clipLengthBars: number;
+    };
 
 const MARKER_PRESETS: { name: string; markers: { name: string; bar: number; color: string }[] }[] = [
   {
@@ -110,6 +125,7 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
   clips,
   patterns,
   channels,
+  mixerTracks = [],
   markers = [],
   onUpdateTracks,
   onUpdateClips,
@@ -126,6 +142,7 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
   isPlaying
 }) => {
   const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
+  const [selectedPointIndex, setSelectedPointIndex] = useState<number | null>(null);
   const [totalBars, setTotalBars] = useState(32);
   const [activeTool, setActiveTool] = useState<'place' | 'cut' | 'delete'>('place');
   const [clipTypeToAdd, setClipTypeToAdd] = useState<'pattern' | 'audio' | 'automation'>('pattern');
@@ -266,9 +283,15 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
     const currentClips = clipsRef.current;
     try {
       if (active.kind === 'automation-point') {
-        const nextY = 1 - (clientY - active.automationTop) / 20;
-        const updated = updatePlaylistAutomationPoint(clip, active.pointIndex, nextY);
-        onUpdateClips(currentClips.map(item => item.id === clip.id ? updated : item));
+        const usableWidth = Math.max(1, active.clipLengthBars * 96 - 12);
+        const rawX = (clientX - active.automationLeft) / usableWidth;
+        const rawY = 1 - (clientY - active.automationTop) / 20;
+        const snapSteps = active.clipLengthBars > 0 ? Math.round(active.clipLengthBars / DEFAULT_GRID_BARS) : undefined;
+        const result = movePlaylistAutomationPoint(clip, active.pointIndex, rawX, rawY, snapSteps);
+        active.clip = result.clip;
+        active.pointIndex = result.nextIndex;
+        setSelectedPointIndex(result.nextIndex);
+        onUpdateClips(currentClips.map(item => item.id === clip.id ? result.clip : item));
       } else if (active.kind === 'move') {
         const requestedStart = clip.startBar + (clientX - active.originX) / BAR_WIDTH;
         const targetTrack = clip.trackIndex + Math.round((clientY - active.originY) / TRACK_HEIGHT);
@@ -298,13 +321,9 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
     const rect = svg.getBoundingClientRect();
     didMoveRef.current = false;
     onPlaylistInteractionStart?.('automation-point');
-    try {
-      event.currentTarget.setPointerCapture(event.pointerId);
-    } catch {
-      // Browser or unmounted target may reject capture
-    }
     setSelectedClipId(clip.id);
     setAutomationEditorClipId(clip.id);
+    setSelectedPointIndex(pointIndex);
     const next: Interaction = {
       kind: 'automation-point',
       clip,
@@ -312,7 +331,9 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
       pointIndex,
       originX: event.clientX,
       originY: event.clientY,
-      automationTop: rect.top
+      automationLeft: rect.left,
+      automationTop: rect.top,
+      clipLengthBars: clip.lengthBars
     };
     interactionRef.current = next;
     setInteraction(next);
@@ -353,26 +374,25 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
 
   // Window pointer listeners guarantee that even if DOM elements reparent or drop pointer capture,
   // pointer up/cancel will always terminate the active playlist interaction safely.
+  // Mounted continuously with zero render lag, reading synchronously from interactionRef.current.
   useEffect(() => {
-    if (!interaction) return;
-
     const handleWindowPointerMove = (e: PointerEvent) => {
       const active = interactionRef.current;
-      if (active && e.pointerId === active.pointerId) {
+      if (active && (active.pointerId === undefined || e.pointerId === active.pointerId)) {
         updateInteraction(e.clientX, e.clientY);
       }
     };
 
     const handleWindowPointerUp = (e: PointerEvent) => {
       const active = interactionRef.current;
-      if (active && e.pointerId === active.pointerId) {
+      if (active && (active.pointerId === undefined || e.pointerId === active.pointerId)) {
         endInteraction(e);
       }
     };
 
     const handleWindowPointerCancel = (e: PointerEvent) => {
       const active = interactionRef.current;
-      if (active && e.pointerId === active.pointerId) {
+      if (active && (active.pointerId === undefined || e.pointerId === active.pointerId)) {
         endInteraction(e);
       }
     };
@@ -386,7 +406,7 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
       window.removeEventListener('pointerup', handleWindowPointerUp);
       window.removeEventListener('pointercancel', handleWindowPointerCancel);
     };
-  }, [interaction]);
+  }, []);
 
   const deleteClip = (clipId: string) => {
     onUpdateClips(deletePlaylistClip(clips, clipId));
@@ -451,6 +471,7 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
     let newClip: PlaylistClip;
 
     if (clipTypeToAdd === 'automation') {
+      const initialTargetChannel = targetChannel || channels[0];
       newClip = {
         id: `auto-clip-${Date.now()}`,
         trackIndex,
@@ -458,11 +479,11 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
         lengthBars: 4,
         type: 'automation',
         color: '#00e5ff',
-        name: 'Auto: Cutoff Filter',
+        name: `Auto: ${initialTargetChannel?.name || 'Channel'} Cutoff`,
         automationTarget: {
           type: 'channel_filter_cutoff',
-          targetId: targetChannel?.id || '',
-          label: `${targetChannel?.name || 'Channel'} Filter Cutoff`
+          targetId: initialTargetChannel?.id || '',
+          label: `${initialTargetChannel?.name || 'Channel'} Filter Cutoff`
         },
         automationPoints: [
           { x: 0, y: 0.2, tension: 0.3 },
@@ -471,6 +492,7 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
         ]
       };
       setAutomationEditorClipId(newClip.id);
+      setSelectedPointIndex(null);
     } else if (clipTypeToAdd === 'audio') {
       newClip = {
         id: `audio-clip-${Date.now()}`,
@@ -498,26 +520,47 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
   };
 
   const handleUpdateAutomationPoint = (clipId: string, pointIndex: number, newY: number) => {
-    const updated = clips.map(c => {
-      if (c.id === clipId && c.automationPoints) {
-        const newPts = [...c.automationPoints];
-        newPts[pointIndex] = { ...newPts[pointIndex], y: Math.max(0, Math.min(1, newY)) };
-        return { ...c, automationPoints: newPts };
-      }
-      return c;
-    });
-    onUpdateClips(updated);
+    const targetClip = clips.find(c => c.id === clipId);
+    if (!targetClip || targetClip.type !== 'automation' || !targetClip.automationPoints?.[pointIndex]) return;
+    try {
+      const currentPt = targetClip.automationPoints[pointIndex];
+      const res = movePlaylistAutomationPoint(targetClip, pointIndex, currentPt.x, newY);
+      setSelectedPointIndex(res.nextIndex);
+      onUpdateClips(clips.map(c => c.id === clipId ? res.clip : c));
+    } catch (err) {
+      console.warn('Failed to update automation point', err);
+    }
   };
 
   const handleAddAutomationPoint = (clipId: string, normX: number, normY: number) => {
-    const updated = clips.map(c => {
-      if (c.id === clipId && c.automationPoints) {
-        const newPts = [...c.automationPoints, { x: normX, y: normY, tension: 0 }].sort((a, b) => a.x - b.x);
-        return { ...c, automationPoints: newPts };
-      }
-      return c;
-    });
-    onUpdateClips(updated);
+    const targetClip = clips.find(c => c.id === clipId);
+    if (!targetClip || targetClip.type !== 'automation') return;
+    try {
+      const res = addPlaylistAutomationPoint(targetClip, normX, normY);
+      setSelectedClipId(clipId);
+      setAutomationEditorClipId(clipId);
+      setSelectedPointIndex(res.pointIndex);
+      onUpdateClips(clips.map(c => c.id === clipId ? res.clip : c));
+    } catch (err) {
+      console.warn('Failed to add automation point', err);
+    }
+  };
+
+  const handleDeleteAutomationPoint = (clipId: string, pointIndex: number) => {
+    const targetClip = clips.find(c => c.id === clipId);
+    if (!targetClip || targetClip.type !== 'automation' || !targetClip.automationPoints) return;
+    if (targetClip.automationPoints.length <= 2) {
+      setStatusMessage('Automation lane must retain at least 2 points');
+      setTimeout(() => setStatusMessage(null), 2500);
+      return;
+    }
+    try {
+      const updatedClip = deletePlaylistAutomationPoint(targetClip, pointIndex);
+      setSelectedPointIndex(null);
+      onUpdateClips(clips.map(c => c.id === clipId ? updatedClip : c));
+    } catch (err) {
+      console.warn('Failed to delete automation point', err);
+    }
   };
 
   const activeAutomationClip = clips.find(c => c.id === automationEditorClipId);
@@ -548,6 +591,7 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
         }
         if (selectedClipId) {
           setSelectedClipId(null);
+          setSelectedPointIndex(null);
           return;
         }
         return;
@@ -560,6 +604,11 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
       if (action === 'delete') {
         e.preventDefault();
         if (selectedClipId) {
+          const selected = clips.find(c => c.id === selectedClipId);
+          if (selected?.type === 'automation' && selectedPointIndex !== null) {
+            handleDeleteAutomationPoint(selectedClipId, selectedPointIndex);
+            return;
+          }
           deleteClip(selectedClipId);
         }
         return;
@@ -605,6 +654,7 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
           {/* Playlist History */}
           <div className="flex items-center gap-0.5 bg-[#121214] border border-[#333336] p-0.5 rounded text-xs">
             <button
+              id="playlist-undo-btn"
               onClick={onUndo}
               disabled={!canUndo}
               className="px-2 py-0.5 rounded-sm font-semibold text-[10px] text-white hover:bg-[#333336] disabled:opacity-30 disabled:cursor-not-allowed"
@@ -613,6 +663,7 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
               Undo
             </button>
             <button
+              id="playlist-redo-btn"
               onClick={onRedo}
               disabled={!canRedo}
               className="px-2 py-0.5 rounded-sm font-semibold text-[10px] text-white hover:bg-[#333336] disabled:opacity-30 disabled:cursor-not-allowed"
@@ -625,6 +676,7 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
           {/* Clip Type Picker */}
           <div className="flex items-center gap-0.5 bg-[#121214] border border-[#333336] p-0.5 rounded text-xs">
             <button
+              id="playlist-clip-type-pattern"
               onClick={() => setClipTypeToAdd('pattern')}
               className={`px-2 py-0.5 rounded-sm font-semibold transition text-[10px] ${
                 clipTypeToAdd === 'pattern' ? 'bg-[#ff6e00] text-black shadow' : 'text-[#777] hover:text-white'
@@ -633,6 +685,7 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
               Pattern
             </button>
             <button
+              id="playlist-clip-type-audio"
               onClick={() => setClipTypeToAdd('audio')}
               className={`px-2 py-0.5 rounded-sm font-semibold transition text-[10px] ${
                 clipTypeToAdd === 'audio' ? 'bg-[#00ff88] text-black shadow' : 'text-[#777] hover:text-white'
@@ -641,6 +694,7 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
               Audio Stem
             </button>
             <button
+              id="playlist-clip-type-automation"
               onClick={() => setClipTypeToAdd('automation')}
               className={`px-2 py-0.5 rounded-sm font-semibold transition text-[10px] ${
                 clipTypeToAdd === 'automation' ? 'bg-[#00e5ff] text-black shadow' : 'text-[#777] hover:text-white'
@@ -964,6 +1018,7 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
                   }
                 }}
                 className="h-16 border-b border-[#1c1c20] flex relative bg-[#0e0e10] transition-colors"
+                data-track-lane={trackIdx}
               >
                 {/* 1 Bar grid slots */}
                 {Array.from({ length: totalBars }).map((_, barIdx) => {
@@ -971,6 +1026,7 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
                   return (
                     <div
                       key={barIdx}
+                      data-bar-cell={barIdx}
                       onClick={() => handleGridCellClick(trackIdx, barIdx)}
                       className={`w-24 h-full border-r border-[#1c1c20] cursor-pointer transition ${
                         isPlayheadBar ? 'bg-white/5' : 'hover:bg-white/10'
@@ -1042,52 +1098,62 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
                       {/* Content Preview & Fade Overlays */}
                       {isAuto && clip.automationPoints ? (
                         <div className="relative h-6 w-full flex items-center z-10">
-                          <svg className="w-full h-full overflow-visible">
+                          <svg
+                            className="w-full h-full overflow-visible cursor-crosshair"
+                            style={{ pointerEvents: 'all' }}
+                            onPointerDown={(e) => {
+                              if (e.button !== 0 || activeTool !== 'place') return;
+                              if ((e.target as HTMLElement).tagName?.toLowerCase() === 'circle') return;
+                              e.preventDefault();
+                              e.stopPropagation();
+                              const rect = e.currentTarget.getBoundingClientRect();
+                              const usableWidth = Math.max(1, clip.lengthBars * 96 - 12);
+                              const normX = Math.max(0, Math.min(1, (e.clientX - rect.left) / usableWidth));
+                              const normY = Math.max(0, Math.min(1, 1 - (e.clientY - rect.top) / 20));
+                              try {
+                                const res = addPlaylistAutomationPoint(clip, normX, normY);
+                                setSelectedClipId(clip.id);
+                                setAutomationEditorClipId(clip.id);
+                                setSelectedPointIndex(res.pointIndex);
+                                onUpdateClips(clips.map(c => c.id === clip.id ? res.clip : c));
+                              } catch (err) {
+                                console.warn('Failed to add automation point', err);
+                              }
+                            }}
+                          >
+                            <rect width="100%" height="100%" fill="transparent" />
                             <polyline
                               fill="none"
                               stroke="#00e5ff"
                               strokeWidth="2"
                               points={clip.automationPoints.map(p => `${p.x * (clip.lengthBars * 96 - 12)},${(1 - p.y) * 20}`).join(' ')}
                             />
-                            {clip.automationPoints.map((p, pIdx) => (
-                              <circle
-                                key={pIdx}
-                                cx={p.x * (clip.lengthBars * 96 - 12)}
-                                cy={(1 - p.y) * 20}
-                                r="3"
-                                fill="#ffffff"
-                                className="cursor-ns-resize"
-                                style={{ touchAction: 'none' }}
-                                onPointerDown={(e) => {
-                                  if (e.button !== 0) return;
-                                  beginAutomationPointInteraction(e, clip, pIdx);
-                                }}
-                                onPointerMove={(e) => {
+                            {clip.automationPoints.map((p, pIdx) => {
+                              const isPointSelected = isSelected && selectedPointIndex === pIdx;
+                              return (
+                                <circle
+                                  key={pIdx}
+                                  cx={p.x * (clip.lengthBars * 96 - 12)}
+                                  cy={(1 - p.y) * 20}
+                                  r={isPointSelected ? "4.5" : "3"}
+                                  fill={isPointSelected ? "#00e5ff" : "#ffffff"}
+                                  stroke={isPointSelected ? "#ffffff" : "none"}
+                                  strokeWidth="1.5"
+                                  className="cursor-move hover:r-[5px] transition-[r]"
+                                  style={{ touchAction: 'none' }}
+                                  onContextMenu={(e) => {
+                                    e.preventDefault();
                                     e.stopPropagation();
-                                  if (interaction?.kind === 'automation-point' && e.pointerId === interaction.pointerId) {
-                                    updateInteraction(e.clientX, e.clientY);
-                                  }
-                                }}
-                                onPointerUp={(e) => {
-                                    e.stopPropagation();
-                                  if (interaction?.kind === 'automation-point' && e.pointerId === interaction.pointerId) {
-                                    endInteraction(e);
-                                  }
-                                }}
-                                onPointerCancel={(e) => {
-                                    e.stopPropagation();
-                                  if (interaction?.kind === 'automation-point' && e.pointerId === interaction.pointerId) {
-                                    endInteraction(e);
-                                  }
-                                }}
-                                onLostPointerCapture={(e) => {
-                                  e.stopPropagation();
-                                  if (interaction?.kind === 'automation-point' && e.pointerId === interaction.pointerId) {
-                                    endInteraction(e);
-                                  }
-                                }}
-                              />
-                            ))}
+                                    handleDeleteAutomationPoint(clip.id, pIdx);
+                                  }}
+                                  onPointerDown={(e) => {
+                                    if (e.button === 2) return;
+                                    if (e.button !== 0) return;
+                                    beginAutomationPointInteraction(e, clip, pIdx);
+                                  }}
+                                />
+                              );
+                            })}
                           </svg>
                         </div>
                       ) : isAudio ? (
@@ -1258,57 +1324,147 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
 
       {/* Automation Node Quick Drawer */}
       {activeAutomationClip && (
-        <div className="bg-[#18181c] border-t border-[#00e5ff]/40 p-3 flex flex-col sm:flex-row items-center justify-between gap-3 text-xs">
+        <div className="bg-[#18181c] border-t border-[#00e5ff]/40 p-3 flex flex-col md:flex-row items-center justify-between gap-3 text-xs">
           <div className="flex items-center gap-2">
             <div className="w-6 h-6 rounded bg-[#00e5ff] flex items-center justify-center text-black font-bold">
               <TrendingUp className="w-3.5 h-3.5" />
             </div>
             <div>
-              <span className="font-bold text-white">AUTOMATION ENVELOPE: {activeAutomationClip.name}</span>
-              <p className="text-[10px] text-[#888]">Adjust curve points or change target parameter binding</p>
+              <div className="flex items-center gap-2">
+                <span className="font-bold text-white">AUTOMATION ENVELOPE: {activeAutomationClip.name}</span>
+                {selectedPointIndex !== null && activeAutomationClip.automationPoints?.[selectedPointIndex] && (
+                  <span className="px-1.5 py-0.5 rounded bg-[#00e5ff]/20 text-[#00e5ff] font-mono text-[10px]">
+                    Point #{selectedPointIndex + 1} (X: {activeAutomationClip.automationPoints[selectedPointIndex].x.toFixed(2)}, Y: {activeAutomationClip.automationPoints[selectedPointIndex].y.toFixed(2)})
+                  </span>
+                )}
+              </div>
+              <p className="text-[10px] text-[#888]">
+                Click envelope curve to add point • Drag to move (snapped to grid) • Right-click / Del to remove point
+              </p>
             </div>
           </div>
 
-          <div className="flex items-center gap-2">
-            <span className="text-[#888]">Binding:</span>
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-[#888]">Target:</span>
             <select
               value={activeAutomationClip.automationTarget?.type || 'channel_filter_cutoff'}
               onChange={(e) => {
-                const updated = clips.map(c => {
-                  if (c.id === activeAutomationClip.id) {
-                    return {
-                      ...c,
-                      name: `Auto: ${e.target.value}`,
-                      automationTarget: {
-                        type: e.target.value as AutomationTargetType,
-                        targetId: channels[0]?.id || '',
-                        label: e.target.value
-                      }
-                    };
-                  }
-                  return c;
+                const newType = e.target.value as AutomationTargetType;
+                let targetId: string | number = '';
+                let label = '';
+                if (newType.startsWith('channel_')) {
+                  const currChan = channels.find(c => c.id === activeAutomationClip.automationTarget?.targetId) || channels[0];
+                  targetId = currChan?.id || '';
+                  const paramLabel = newType === 'channel_filter_cutoff' ? 'Filter Cutoff' : newType === 'channel_vol' ? 'Volume' : 'Pan';
+                  label = `${currChan?.name || 'Channel'} ${paramLabel}`;
+                } else if (newType.startsWith('mixer_')) {
+                  const currTrk = mixerTracks.find(t => t.id === Number(activeAutomationClip.automationTarget?.targetId)) || mixerTracks[1] || mixerTracks[0];
+                  targetId = currTrk ? currTrk.id : 1;
+                  const paramLabel = newType === 'mixer_vol' ? 'Volume' : 'Pan';
+                  label = `Mixer ${currTrk?.name || targetId} ${paramLabel}`;
+                } else {
+                  targetId = 0;
+                  label = 'Master Output Volume';
+                }
+                const updated = updatePlaylistAutomationTarget(activeAutomationClip, {
+                  type: newType,
+                  targetId,
+                  label
                 });
-                onUpdateClips(updated);
+                onUpdateClips(clips.map(c => c.id === activeAutomationClip.id ? updated : c));
               }}
-              className="bg-[#0c0c0e] border border-[#333] text-white text-xs rounded p-1 font-bold"
+              className="bg-[#0c0c0e] border border-[#333] text-white text-xs rounded px-2 py-1 font-bold"
             >
               <option value="channel_filter_cutoff">Channel Filter Cutoff (Hz)</option>
               <option value="channel_vol">Channel Volume (0 - 100%)</option>
               <option value="channel_pan">Channel Panning (L/R)</option>
-              <option value="master_vol">Master Out Volume</option>
               <option value="mixer_vol">Mixer Insert Volume</option>
+              <option value="mixer_pan">Mixer Insert Panning</option>
+              <option value="master_vol">Master Out Volume</option>
             </select>
 
+            {/* Contextual Target Entity Selector */}
+            {(activeAutomationClip.automationTarget?.type || 'channel_filter_cutoff').startsWith('channel_') && (
+              <select
+                value={activeAutomationClip.automationTarget?.targetId || channels[0]?.id || ''}
+                onChange={(e) => {
+                  const ch = channels.find(c => c.id === e.target.value);
+                  const currentType = activeAutomationClip.automationTarget?.type || 'channel_filter_cutoff';
+                  const paramLabel = currentType === 'channel_filter_cutoff' ? 'Filter Cutoff' : currentType === 'channel_vol' ? 'Volume' : 'Pan';
+                  const updated = updatePlaylistAutomationTarget(activeAutomationClip, {
+                    type: currentType,
+                    targetId: e.target.value,
+                    label: `${ch?.name || 'Channel'} ${paramLabel}`
+                  });
+                  onUpdateClips(clips.map(c => c.id === activeAutomationClip.id ? updated : c));
+                }}
+                className="bg-[#0c0c0e] border border-[#333] text-white text-xs rounded px-2 py-1 font-bold max-w-[130px] truncate"
+              >
+                {channels.map(ch => (
+                  <option key={ch.id} value={ch.id}>{ch.name}</option>
+                ))}
+              </select>
+            )}
+
+            {(activeAutomationClip.automationTarget?.type || '').startsWith('mixer_') && (
+              <select
+                value={activeAutomationClip.automationTarget?.targetId ?? (mixerTracks[1]?.id ?? 1)}
+                onChange={(e) => {
+                  const trkId = Number(e.target.value);
+                  const trk = mixerTracks.find(t => t.id === trkId);
+                  const currentType = activeAutomationClip.automationTarget?.type || 'mixer_vol';
+                  const paramLabel = currentType === 'mixer_vol' ? 'Volume' : 'Pan';
+                  const updated = updatePlaylistAutomationTarget(activeAutomationClip, {
+                    type: currentType,
+                    targetId: trkId,
+                    label: `Mixer ${trk?.name || trkId} ${paramLabel}`
+                  });
+                  onUpdateClips(clips.map(c => c.id === activeAutomationClip.id ? updated : c));
+                }}
+                className="bg-[#0c0c0e] border border-[#333] text-white text-xs rounded px-2 py-1 font-bold max-w-[130px] truncate"
+              >
+                {mixerTracks.map(trk => (
+                  <option key={trk.id} value={trk.id}>{trk.name} (#{trk.id})</option>
+                ))}
+              </select>
+            )}
+
             <button
-              onClick={() => handleAddAutomationPoint(activeAutomationClip.id, 0.75, 0.5)}
+              onClick={() => handleAddAutomationPoint(activeAutomationClip.id, 0.5, 0.5)}
               className="px-2.5 py-1 bg-[#282830] hover:bg-[#333] text-white rounded font-bold"
+              title="Add a new automation point at center"
             >
               + Add Node
             </button>
 
             <button
-              onClick={() => setAutomationEditorClipId(null)}
+              onClick={() => {
+                const pts = activeAutomationClip.automationPoints || [];
+                const idxToDelete = selectedPointIndex !== null ? selectedPointIndex : pts.length - 1;
+                handleDeleteAutomationPoint(activeAutomationClip.id, idxToDelete);
+              }}
+              disabled={!activeAutomationClip.automationPoints || activeAutomationClip.automationPoints.length <= 2}
+              className={`px-2.5 py-1 rounded font-bold transition ${
+                activeAutomationClip.automationPoints && activeAutomationClip.automationPoints.length > 2
+                  ? 'bg-red-950/60 hover:bg-red-800 text-red-200 border border-red-800/40'
+                  : 'bg-[#202024] text-[#555] cursor-not-allowed'
+              }`}
+              title={
+                activeAutomationClip.automationPoints && activeAutomationClip.automationPoints.length > 2
+                  ? `Delete ${selectedPointIndex !== null ? `node #${selectedPointIndex + 1}` : 'node'}`
+                  : 'Automation lane must retain at least 2 points'
+              }
+            >
+              Delete Node
+            </button>
+
+            <button
+              onClick={() => {
+                setAutomationEditorClipId(null);
+                setSelectedPointIndex(null);
+              }}
               className="p-1 text-[#888] hover:text-white rounded"
+              title="Close editor drawer"
             >
               <X className="w-4 h-4" />
             </button>

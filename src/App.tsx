@@ -1122,6 +1122,7 @@ export function App() {
               clips={projectState.playlistClips}
               patterns={projectState.patterns}
               channels={projectState.channels}
+              mixerTracks={projectState.mixerTracks}
               markers={projectState.markers || []}
               onUpdateTracks={handleUpdateTracks}
               onUpdateClips={handleUpdateClips}

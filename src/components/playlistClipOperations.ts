@@ -1,4 +1,4 @@
-import type { Channel, PlaylistClip, PlaylistTrack } from '../types/daw';
+import type { Channel, PlaylistClip, PlaylistTrack, AutomationPoint, AutomationTargetType } from '../types/daw';
 
 export const STEPS_PER_BAR = 16;
 export const DEFAULT_GRID_BARS = 0.25;
@@ -38,6 +38,18 @@ export function validatePlaylistClip(clip: PlaylistClip, bounds: PlaylistBounds 
   if (finite(clip.lengthBars) && clip.lengthBars > 0) {
     if (clip.fadeInBars !== undefined && clip.fadeInBars > clip.lengthBars / 2) errors.push('fadeInBars exceeds half the clip length');
     if (clip.fadeOutBars !== undefined && clip.fadeOutBars > clip.lengthBars / 2) errors.push('fadeOutBars exceeds half the clip length');
+  }
+
+  if (clip.type === 'automation' && clip.automationPoints) {
+    for (let i = 0; i < clip.automationPoints.length; i++) {
+      const pt = clip.automationPoints[i];
+      if (!finite(pt.x) || pt.x < 0 || pt.x > 1) {
+        errors.push(`Automation point ${i} x must be finite and between 0 and 1`);
+      }
+      if (!finite(pt.y) || pt.y < 0 || pt.y > 1) {
+        errors.push(`Automation point ${i} y must be finite and between 0 and 1`);
+      }
+    }
   }
 
   return { valid: errors.length === 0, errors };
@@ -191,6 +203,130 @@ export function updatePlaylistAutomationPoint(
     ...updated.automationPoints![pointIndex],
     y: Math.max(0, Math.min(1, newY))
   };
+  return assertValidPlaylistClip(updated);
+}
+
+export function addPlaylistAutomationPoint(
+  clip: PlaylistClip,
+  normX: number,
+  normY: number
+): { clip: PlaylistClip; pointIndex: number } {
+  if (clip.type !== 'automation') {
+    throw new Error('Adding automation points requires an automation clip');
+  }
+  if (!finite(normX) || !finite(normY)) {
+    throw new Error('Automation point coordinates must be finite');
+  }
+
+  const clampedX = Math.max(0, Math.min(1, Number(normX.toFixed(6))));
+  const clampedY = Math.max(0, Math.min(1, Number(normY.toFixed(6))));
+  const points = clip.automationPoints ? clip.automationPoints.map(p => ({ ...p })) : [];
+
+  // If a point exists within 0.005 on normalized X, update its Y instead of stacking a duplicate
+  const existingIdx = points.findIndex(p => Math.abs(p.x - clampedX) < 0.005);
+  if (existingIdx !== -1) {
+    points[existingIdx] = {
+      ...points[existingIdx],
+      x: clampedX,
+      y: clampedY
+    };
+    points.sort((a, b) => a.x - b.x);
+    const pointIndex = points.findIndex(p => p.x === clampedX && p.y === clampedY);
+    const updated = cloneClip(clip);
+    updated.automationPoints = points;
+    return { clip: assertValidPlaylistClip(updated), pointIndex: Math.max(0, pointIndex) };
+  }
+
+  const newPoint: AutomationPoint = { x: clampedX, y: clampedY, tension: 0 };
+  points.push(newPoint);
+  points.sort((a, b) => a.x - b.x);
+
+  const pointIndex = points.indexOf(newPoint);
+  const updated = cloneClip(clip);
+  updated.automationPoints = points;
+  return { clip: assertValidPlaylistClip(updated), pointIndex: Math.max(0, pointIndex) };
+}
+
+export function movePlaylistAutomationPoint(
+  clip: PlaylistClip,
+  pointIndex: number,
+  newX: number,
+  newY: number,
+  snapGridSteps?: number
+): { clip: PlaylistClip; nextIndex: number } {
+  if (clip.type !== 'automation' || !clip.automationPoints) {
+    throw new Error('Automation point moves require an automation clip with points');
+  }
+  if (!Number.isInteger(pointIndex) || pointIndex < 0 || pointIndex >= clip.automationPoints.length) {
+    throw new Error('Automation point index is out of range');
+  }
+  if (!finite(newX) || !finite(newY)) {
+    throw new Error('Automation point coordinates must be finite');
+  }
+
+  let targetX = Math.max(0, Math.min(1, newX));
+  if (snapGridSteps !== undefined && finite(snapGridSteps) && snapGridSteps > 0) {
+    targetX = Math.max(0, Math.min(1, Math.round(targetX * snapGridSteps) / snapGridSteps));
+  }
+  targetX = Number(targetX.toFixed(6));
+  const targetY = Number(Math.max(0, Math.min(1, newY)).toFixed(6));
+
+  const points = clip.automationPoints.map(p => ({ ...p }));
+  const movingPoint = { ...points[pointIndex], x: targetX, y: targetY };
+  points[pointIndex] = movingPoint;
+
+  // Stable sort by x
+  points.sort((a, b) => a.x - b.x);
+  const nextIndex = points.indexOf(movingPoint);
+
+  const updated = cloneClip(clip);
+  updated.automationPoints = points;
+  return { clip: assertValidPlaylistClip(updated), nextIndex: Math.max(0, nextIndex) };
+}
+
+export function deletePlaylistAutomationPoint(
+  clip: PlaylistClip,
+  pointIndex: number
+): PlaylistClip {
+  if (clip.type !== 'automation' || !clip.automationPoints) {
+    throw new Error('Automation point deletion requires an automation clip with points');
+  }
+  if (!Number.isInteger(pointIndex) || pointIndex < 0 || pointIndex >= clip.automationPoints.length) {
+    throw new Error('Automation point index is out of range');
+  }
+  if (clip.automationPoints.length <= 2) {
+    throw new Error('Automation clip must retain at least two automation points');
+  }
+
+  const points = clip.automationPoints.map(p => ({ ...p }));
+  points.splice(pointIndex, 1);
+
+  const updated = cloneClip(clip);
+  updated.automationPoints = points;
+  return assertValidPlaylistClip(updated);
+}
+
+export function updatePlaylistAutomationTarget(
+  clip: PlaylistClip,
+  target: {
+    type: AutomationTargetType;
+    targetId: string | number;
+    paramName?: string;
+    label?: string;
+  }
+): PlaylistClip {
+  if (clip.type !== 'automation') {
+    throw new Error('Target updates require an automation clip');
+  }
+  if (!target || !target.type) {
+    throw new Error('Automation target and target type are required');
+  }
+
+  const updated = cloneClip(clip);
+  updated.automationTarget = { ...target };
+  if (target.label) {
+    updated.name = `Auto: ${target.label}`;
+  }
   return assertValidPlaylistClip(updated);
 }
 

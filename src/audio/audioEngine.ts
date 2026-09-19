@@ -832,8 +832,7 @@ class AudioEngine {
     mixerTracks: MixerTrack[],
     atTime?: number
   ) {
-    if (!this.ctx) return;
-    const now = atTime ?? this.ctx.currentTime;
+    const now = atTime ?? this.ctx?.currentTime ?? 0;
 
     if (target.type === 'master_vol') {
       if (this.masterGain) {
