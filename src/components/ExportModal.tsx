@@ -106,6 +106,13 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, chann
             mixerTracks,
             meta.bpm,
             totalBars,
+            undefined,
+            false,
+            scope,
+            (progress, status) => {
+              setRenderProgress(progress);
+              setStatusText(status);
+            },
           );
           setRenderProgress(85);
           const wavBlob = audioBufferToWav(renderedBuffer, bitDepth);

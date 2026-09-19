@@ -42,6 +42,9 @@ function getChainEnd(node: AudioNode): AudioNode {
   return (node as ChainedAudioNode)._chainEnd ?? node;
 }
 
+export type OfflineRenderScope = 'song' | 'pattern';
+export type OfflineRenderProgress = (progress: number, status: string) => void;
+
 export interface MixerChannel {
   input: GainNode;
   output: GainNode;
@@ -2071,7 +2074,11 @@ class AudioEngine {
     totalBars: number,
     sampleRate?: number,
     includeMixerFx = false,
+    renderScope: OfflineRenderScope = 'song',
+    onProgress?: OfflineRenderProgress,
   ): Promise<AudioBuffer> {
+    onProgress?.(15, `Preparing ${renderScope === 'pattern' ? 'pattern loop' : 'song'} export...`);
+
     // Validate audio buffers for all unmuted audio clips
     for (const clip of clips) {
       if (clip.type === 'audio' && !clip.mute) {
@@ -2136,7 +2143,8 @@ class AudioEngine {
       this.activeVoices = new Map();
       this.activeChannels = structuredClone(channels);
       this.activeClips = structuredClone(clips);
-      this.activePlayMode = 'song';
+      this.activePlayMode = renderScope === 'pattern' ? 'pat' : 'song';
+      onProgress?.(40, `Offline graph ready (${renderScope === 'pattern' ? 'pattern' : 'song'} mode).`);
       this.activePatternId = undefined;
       this.isPlaying = true;
       this.currentStep = 0;
@@ -2160,6 +2168,8 @@ class AudioEngine {
       if (masterTrack) this.updateMixerTrack(masterTrack); else this.getOrCreateMixerChannel(0);
       for (const track of renderTracks) if (track.id !== 0) this.updateMixerTrack(track);
       const totalSteps = Math.ceil(totalDurationSeconds / secondsPerStep);
+      const scheduleStartProgress = 40;
+      const scheduleEndProgress = 65;
       // Schedule the offline timeline in small cooperative batches so the browser
       // can service rendering/UI work instead of appearing unresponsive on longer exports.
       for (let globalStep = 0; globalStep < totalSteps; globalStep += 1) {
@@ -2169,12 +2179,19 @@ class AudioEngine {
         const audioTime = globalStep * secondsPerStep + swingOffsetSeconds;
         if (audioTime >= totalDurationSeconds) break;
         this.triggerCurrentStep(audioTime);
+        if ((globalStep + 1) % 4 === 0 || globalStep === totalSteps - 1) {
+          const scheduleProgress = scheduleStartProgress + Math.round(((globalStep + 1) / totalSteps) * (scheduleEndProgress - scheduleStartProgress));
+          onProgress?.(scheduleProgress, `Scheduling ${renderScope === 'pattern' ? 'pattern' : 'song'} audio (${globalStep + 1}/${totalSteps} steps)...`);
+        }
 
         if ((globalStep + 1) % 16 === 0 && globalStep + 1 < totalSteps) {
           await new Promise<void>(resolve => setTimeout(resolve, 0));
         }
       }
-      return await offlineCtx.startRendering();
+      onProgress?.(70, `Rendering offline audio (${totalDurationSeconds.toFixed(2)}s)...`);
+      const renderedBuffer = await offlineCtx.startRendering();
+      onProgress?.(85, 'Offline render complete. Encoding WAV...');
+      return renderedBuffer;
     } finally {
       this.isOfflineRendering = false;
       this.liveCtx = null;
