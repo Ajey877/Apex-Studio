@@ -2123,6 +2123,8 @@ class AudioEngine {
       if (masterTrack) this.updateMixerTrack(masterTrack); else this.getOrCreateMixerChannel(0);
       for (const track of tracks) if (track.id !== 0) this.updateMixerTrack(track);
       const totalSteps = Math.ceil(totalDurationSeconds / secondsPerStep);
+      // Schedule the offline timeline in small cooperative batches so the browser
+      // can service rendering/UI work instead of appearing unresponsive on longer exports.
       for (let globalStep = 0; globalStep < totalSteps; globalStep += 1) {
         this.currentStep = globalStep % 16;
         this.currentBar = Math.floor(globalStep / 16) + 1;
@@ -2130,6 +2132,10 @@ class AudioEngine {
         const audioTime = globalStep * secondsPerStep + swingOffsetSeconds;
         if (audioTime >= totalDurationSeconds) break;
         this.triggerCurrentStep(audioTime);
+
+        if ((globalStep + 1) % 16 === 0 && globalStep + 1 < totalSteps) {
+          await new Promise<void>(resolve => setTimeout(resolve, 0));
+        }
       }
       return await offlineCtx.startRendering();
     } finally {
