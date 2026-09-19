@@ -90,6 +90,8 @@ export function resolvePlayableContentLengthSteps(
 }
 
 class AudioEngine {
+  public isOfflineRendering = false;
+  private liveCtx: AudioContext | null = null;
   private ctx: AudioContext | null = null;
   private transport: AudioClockTransport | null = null;
   private playbackGeneration = 0;
@@ -128,9 +130,11 @@ class AudioEngine {
   }
 
   public init() {
+    if (this.isOfflineRendering) return;
+    const isOffline = this.ctx && (typeof (this.ctx as any).startRendering === 'function' || (typeof OfflineAudioContext !== 'undefined' && this.ctx instanceof OfflineAudioContext));
     if (this.ctx && this.ctx.state !== 'closed') {
-      if (this.ctx.state === 'suspended') {
-        void this.ctx.resume();
+      if (!isOffline && this.ctx.state === 'suspended') {
+        void this.ctx.resume().catch(() => {});
       }
       return;
     }
@@ -164,12 +168,16 @@ class AudioEngine {
   }
 
   public getContext(): AudioContext {
+    if (this.isOfflineRendering && this.ctx) {
+      return this.ctx;
+    }
     if (!this.ctx) {
       const AudioContextClass = window.AudioContext || (window as unknown as WindowWithWebKitAudio).webkitAudioContext;
       this.ctx = new AudioContextClass({ latencyHint: 'interactive' });
     }
-    if (this.ctx.state === 'suspended') {
-      this.ctx.resume();
+    const isOffline = typeof (this.ctx as any).startRendering === 'function' || (typeof OfflineAudioContext !== 'undefined' && this.ctx instanceof OfflineAudioContext);
+    if (!isOffline && this.ctx.state === 'suspended') {
+      void this.ctx.resume().catch(() => {});
     }
     return this.ctx;
   }
@@ -1452,7 +1460,10 @@ class AudioEngine {
     vib.frequency.value = 5.2;
     const vibGain = ctx.createGain();
     vibGain.gain.value = 4;
+    vib.connect(vibGain);
+    vibGain.connect(filter.frequency);
     vib.start(time + 0.1);
+    vib.stop(time + duration + 0.5);
 
     filter.connect(strGain);
     strGain.connect(destination);
@@ -1858,18 +1869,27 @@ class AudioEngine {
 
   // Metering & Visualizers
   public getMasterFrequencyData(array: Uint8Array) {
+    if (this.isOfflineRendering) {
+      array.fill(0);
+      return;
+    }
     if (this.masterAnalyser) {
       this.masterAnalyser.getByteFrequencyData(array);
     }
   }
 
   public getMasterWaveformData(array: Uint8Array) {
+    if (this.isOfflineRendering) {
+      array.fill(128);
+      return;
+    }
     if (this.masterAnalyser) {
       this.masterAnalyser.getByteTimeDomainData(array);
     }
   }
 
   public getMixerTrackPeak(trackId: number): number {
+    if (this.isOfflineRendering) return 0;
     const channel = this.mixerChannels.get(trackId);
     if (!channel || !this.ctx) return 0;
     const array = new Uint8Array(128);
@@ -2069,6 +2089,10 @@ class AudioEngine {
       }
     }
 
+    if (this.transport && this.isPlaying) {
+      this.transport.stop(false);
+    }
+
     const previous = {
       ctx: this.ctx,
       transport: this.transport,
@@ -2089,6 +2113,8 @@ class AudioEngine {
       bpm: this.bpm,
       metronome: this.metronome
     };
+    this.isOfflineRendering = true;
+    this.liveCtx = previous.ctx;
     const safeBpm = Math.max(20, Math.min(300, Number(bpm) || 120));
     const secondsPerStep = (60 / safeBpm) / 4;
     const totalDurationSeconds = Math.max(4, Math.max(1, totalBars) * 4 * (60 / safeBpm));
@@ -2150,6 +2176,8 @@ class AudioEngine {
       }
       return await offlineCtx.startRendering();
     } finally {
+      this.isOfflineRendering = false;
+      this.liveCtx = null;
       this.ctx = previous.ctx;
       this.transport = previous.transport;
       this.masterGain = previous.masterGain;

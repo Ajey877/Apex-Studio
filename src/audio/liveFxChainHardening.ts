@@ -44,6 +44,11 @@ class CompositeEffect implements AudioEffect {
   dispose(): void {
     for (const effect of this.effects) effect.dispose();
     for (const node of this.nodes) {
+      try {
+        if ('stop' in node && typeof (node as any).stop === 'function') {
+          (node as any).stop();
+        }
+      } catch (_) {}
       try { node.disconnect(); } catch (_) {}
     }
   }
@@ -212,8 +217,45 @@ export function installLiveFxChainHardening(engine: AudioEngineLike): void {
   const states = new Map<number, AudioEffect[]>();
 
   engine.rebuildTrackFxChain = function rebuildTrackFxChain(track: MixerTrack): void {
-    const ctx = this.getContext();
+    const rawCtx = (this as any).ctx;
+    const isOffline = (this as any).isOfflineRendering ||
+      (rawCtx && (typeof rawCtx.startRendering === 'function' || (typeof OfflineAudioContext !== 'undefined' && rawCtx instanceof OfflineAudioContext)));
+    const ctx = isOffline && rawCtx ? rawCtx : this.getContext();
     const channel = this.getOrCreateMixerChannel(track.id);
+
+    if (isOffline) {
+      try { channel.input.disconnect(); } catch (_) {}
+      for (const node of channel.fxNodes) {
+        try { node.disconnect(); } catch (_) {}
+      }
+      channel.fxNodes = [];
+
+      const createdNodes: AudioNode[] = [];
+      let firstInput: AudioNode | null = null;
+      let current: AudioNode | null = null;
+
+      for (const slot of track.fxSlots) {
+        if (!slot.enabled) continue;
+        const effect = createEffect(ctx, slot);
+        if (!effect) continue;
+
+        if (!firstInput) firstInput = effect.input;
+        if (current) current.connect(effect.input);
+        current = effect.output;
+        if (!channel.fxNodes.includes(effect.input)) createdNodes.push(effect.input);
+        if (!channel.fxNodes.includes(effect.output) && effect.output !== effect.input) createdNodes.push(effect.output);
+      }
+
+      if (firstInput && current) {
+        channel.input.connect(firstInput);
+        current.connect(channel.panner);
+        channel.fxNodes = createdNodes;
+      } else {
+        channel.input.connect(channel.panner);
+      }
+      return;
+    }
+
     const previousEffects = states.get(track.id) ?? [];
     const created: AudioEffect[] = [];
     const createdNodes: AudioNode[] = [];
