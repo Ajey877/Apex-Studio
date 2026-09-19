@@ -2084,12 +2084,20 @@ class AudioEngine {
   ): Promise<AudioBuffer> {
     onProgress?.(15, `Preparing ${renderScope === 'pattern' ? 'pattern loop' : 'song'} export...`);
 
-    // Validate audio buffers for all unmuted audio clips
+    // Validate audio buffers for all unmuted audio clips.
+    // Phase 8B (P1-4): an unresolvable or unavailable audio asset (placeholder
+    // stem, missing buffer, or hydration-flagged `audioUnavailable`) must fail
+    // the export up front instead of rendering a misleading silent WAV.
     for (const clip of clips) {
       if (clip.type === 'audio' && !clip.mute) {
         if (!clip.audioBufferId) {
           throw new Error(
             `Audio clip "${clip.name || clip.audioName || clip.id}" is missing an audioBufferId.`
+          );
+        }
+        if (clip.audioUnavailable) {
+          throw new Error(
+            `Audio clip "${clip.name || clip.audioName || clip.id}" (buffer ID: ${clip.audioBufferId}) references an unavailable audio asset; its persisted audio could not be restored.`
           );
         }
         const buffer = this.sampleBuffers.get(clip.audioBufferId);
