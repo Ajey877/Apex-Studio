@@ -1,6 +1,6 @@
 import test, { describe } from 'node:test';
 import assert from 'node:assert/strict';
-import type { PlaylistClip, Channel, MixerTrack } from '../types/daw';
+import type { PlaylistClip, Channel, MixerTrack, AutomationPoint } from '../types/daw';
 import {
   addPlaylistAutomationPoint,
   movePlaylistAutomationPoint,
@@ -9,10 +9,19 @@ import {
   updatePlaylistAutomationPoint,
   nextSelectedPointIndex,
   findAutomationPointIndexNearX,
-  resolveAddNodePosition
+  resolveAddNodePosition,
+  splitPlaylistClip,
+  splitAutomationPoints,
+  evaluateAutomationEnvelope,
+  resizePlaylistClipLeft,
+  resizePlaylistClipRight,
+  duplicatePlaylistClip,
+  validatePlaylistClip,
+  DEFAULT_GRID_BARS
 } from './playlistClipOperations';
 import { createHistory } from '../state/projectHistory';
 import { createDefaultProjectState, normalizeProjectState } from '../state/projectState';
+import { serializeProjectState } from '../state/projectPersistence';
 import { audioEngine } from '../audio/audioEngine';
 
 const createBaseAutoClip = (points = [
@@ -600,5 +609,772 @@ describe('Phase 6.1 Automation Point Operations', () => {
     // ...while the project state that feeds undo/redo and saves is untouched.
     assert.equal(JSON.stringify(state.channels), projectChannelsBefore);
     assert.equal(JSON.stringify(state.mixerTracks), projectMixerBefore);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 6.2: automation clip split & resize semantics
+// ---------------------------------------------------------------------------
+
+/** Bar positions are compared with a tolerance that absorbs the six-decimal X quantization. */
+const BAR_TOLERANCE = 1e-5;
+const VALUE_TOLERANCE = 2e-6;
+const STEP_BAR = 1 / 16;
+
+const assertClose = (actual: number, expected: number, tolerance: number, message?: string) => {
+  assert.ok(
+    Math.abs(actual - expected) <= tolerance,
+    message ?? `expected ${actual} to be within ${tolerance} of ${expected}`
+  );
+};
+
+const createMultiTensionClip = (overrides: Partial<PlaylistClip> = {}): PlaylistClip => ({
+  ...createBaseAutoClip([
+    { x: 0, y: 0.2, tension: 0.3 },
+    { x: 0.5, y: 0.85, tension: -0.2 },
+    { x: 1, y: 0.3, tension: 0 }
+  ]),
+  id: 'auto-clip-mt',
+  startBar: 4,
+  lengthBars: 8,
+  ...overrides
+});
+
+const relXAtBar = (clip: PlaylistClip, bar: number): number => (bar - clip.startBar) / clip.lengthBars;
+
+/** Value Song Mode would apply for `clip` at `bar`, using the engine's own evaluator. */
+const playbackValueAtBar = (clip: PlaylistClip, bar: number): number =>
+  audioEngine.interpolateAutomationCurve(clip.automationPoints!, relXAtBar(clip, bar));
+
+const pointBars = (clip: PlaylistClip): number[] =>
+  clip.automationPoints!.map(point => clip.startBar + point.x * clip.lengthBars);
+
+const assertWellFormedEnvelope = (clip: PlaylistClip, label: string) => {
+  const points = clip.automationPoints!;
+  assert.ok(points.length >= 2, `${label}: needs at least two points`);
+  assert.equal(points[0].x, 0, `${label}: first point must sit at x=0`);
+  assert.equal(points[points.length - 1].x, 1, `${label}: last point must sit at x=1`);
+  for (let i = 1; i < points.length; i++) {
+    assert.ok(points[i].x > points[i - 1].x, `${label}: point X values must be strictly increasing`);
+  }
+  for (const point of points) {
+    assert.ok(point.x >= 0 && point.x <= 1 && point.y >= 0 && point.y <= 1, `${label}: points must stay normalized`);
+  }
+  assert.deepEqual(validatePlaylistClip(clip, { totalBars: 64, maxTracks: 16 }).errors, []);
+};
+
+/**
+ * Mirrors the Song Mode automation pass in audioEngine: at every 1/16 step,
+ * every automation clip whose inclusive window contains the position is
+ * evaluated. Returns, per step, the values of all clips that fired.
+ */
+const songModeSweep = (clips: PlaylistClip[], fromBar: number, toBar: number): Array<{ bar: number; values: number[] }> => {
+  const steps: Array<{ bar: number; values: number[] }> = [];
+  const totalSteps = Math.round((toBar - fromBar) / STEP_BAR);
+  for (let i = 0; i <= totalSteps; i++) {
+    const bar = fromBar + i * STEP_BAR;
+    const values: number[] = [];
+    for (const clip of clips) {
+      if (clip.type !== 'automation' || clip.mute || !clip.automationTarget || !clip.automationPoints || clip.automationPoints.length < 2) continue;
+      if (bar >= clip.startBar && bar <= clip.startBar + clip.lengthBars) {
+        values.push(audioEngine.interpolateAutomationCurve(clip.automationPoints, relXAtBar(clip, bar)));
+      }
+    }
+    steps.push({ bar, values });
+  }
+  return steps;
+};
+
+describe('Phase 6.2 Automation Split & Resize Semantics', () => {
+  test('evaluateAutomationEnvelope mirrors the engine evaluator across tensions', () => {
+    const points: AutomationPoint[] = [
+      { x: 0, y: 0.1, tension: 0.6 },
+      { x: 0.3, y: 0.9, tension: 0 },
+      { x: 0.55, y: 0.35, tension: -0.8 },
+      { x: 1, y: 0.7, tension: 1 }
+    ];
+    for (let i = 0; i <= 512; i++) {
+      const relX = i / 512;
+      assert.equal(evaluateAutomationEnvelope(points, relX), audioEngine.interpolateAutomationCurve(points, relX));
+    }
+    for (const point of points) {
+      assert.equal(evaluateAutomationEnvelope(points, point.x), audioEngine.interpolateAutomationCurve(points, point.x));
+    }
+    // Held values outside the outermost points and degenerate envelopes.
+    const inner = [{ x: 0.25, y: 0.4 }, { x: 0.75, y: 0.6 }];
+    assert.equal(evaluateAutomationEnvelope(inner, 0), 0.4);
+    assert.equal(evaluateAutomationEnvelope(inner, 1), 0.6);
+    assert.equal(evaluateAutomationEnvelope([{ x: 0.5, y: 0.33 }], 0.9), 0.33);
+    assert.equal(evaluateAutomationEnvelope([], 0.5), 0.5);
+  });
+
+  test('split exactly on an existing point uses it as the shared boundary (lossless)', () => {
+    const clip = createMultiTensionClip();
+    const [left, right] = splitPlaylistClip(clip, 8, DEFAULT_GRID_BARS, { totalBars: 64 });
+
+    assert.equal(left.startBar, 4);
+    assert.equal(left.lengthBars, 4);
+    assert.equal(right.startBar, 8);
+    assert.equal(right.lengthBars, 4);
+
+    // The point at x=0.5 closes the left half and opens the right half; it is
+    // not duplicated next to a synthesized seam point.
+    assert.deepEqual(left.automationPoints, [
+      { x: 0, y: 0.2, tension: 0.3 },
+      { x: 1, y: 0.85, tension: -0.2 }
+    ]);
+    assert.deepEqual(right.automationPoints, [
+      { x: 0, y: 0.85, tension: -0.2 },
+      { x: 1, y: 0.3, tension: 0 }
+    ]);
+    assertWellFormedEnvelope(left, 'left');
+    assertWellFormedEnvelope(right, 'right');
+
+    // Every segment maps 1:1 onto an original segment with the same tension,
+    // so the audible envelope is reproduced at every step of the timeline.
+    for (let bar = 4; bar <= 12 + 1e-9; bar += STEP_BAR) {
+      const expected = playbackValueAtBar(clip, bar);
+      if (bar <= 8) assertClose(playbackValueAtBar(left, bar), expected, 1e-9, `left @ ${bar}`);
+      if (bar >= 8) assertClose(playbackValueAtBar(right, bar), expected, 1e-9, `right @ ${bar}`);
+    }
+
+    // The source clip is untouched.
+    assert.deepEqual(clip.automationPoints, [
+      { x: 0, y: 0.2, tension: 0.3 },
+      { x: 0.5, y: 0.85, tension: -0.2 },
+      { x: 1, y: 0.3, tension: 0 }
+    ]);
+  });
+
+  test('split between points synthesizes a seam at the envelope value and remaps both halves', () => {
+    const clip = createMultiTensionClip();
+    // Bar 6 -> xSplit = 0.25, inside the first segment (tension 0.3).
+    const [left, right] = splitPlaylistClip(clip, 6, DEFAULT_GRID_BARS, { totalBars: 64 });
+    const expectedSeam = audioEngine.interpolateAutomationCurve(clip.automationPoints!, 0.25);
+
+    assert.equal(left.automationPoints!.length, 2);
+    assert.equal(right.automationPoints!.length, 3);
+
+    const leftEnd = left.automationPoints![1];
+    const rightStart = right.automationPoints![0];
+    assert.equal(leftEnd.x, 1);
+    assert.equal(rightStart.x, 0);
+    assert.equal(leftEnd.y, rightStart.y);
+    assertClose(leftEnd.y, expectedSeam, 1e-6);
+
+    // The cut segment's tension (from its opening point) is carried onto the
+    // right half's opening point; untouched points keep their own tension.
+    assert.deepEqual(left.automationPoints![0], { x: 0, y: 0.2, tension: 0.3 });
+    assert.equal(rightStart.tension, 0.3);
+    assertClose(right.automationPoints![1].x, 1 / 3, 1e-12); // (0.5 - 0.25) / 0.75, full precision
+    assertClose(pointBars(right)[1], 8, 1e-12); // ...so the point stays exactly on bar 8
+    assert.equal(right.automationPoints![1].y, 0.85);
+    assert.equal(right.automationPoints![1].tension, -0.2);
+    assert.deepEqual(right.automationPoints![2], { x: 1, y: 0.3, tension: 0 });
+    assertWellFormedEnvelope(left, 'left');
+    assertWellFormedEnvelope(right, 'right');
+
+    // Uncut segments (and the head of an ease-in cut) reproduce the original
+    // envelope exactly; the seam value is shared bit-for-bit by both halves.
+    for (let bar = 4; bar <= 6 + 1e-9; bar += STEP_BAR) {
+      assertClose(playbackValueAtBar(left, bar), playbackValueAtBar(clip, bar), VALUE_TOLERANCE, `left @ ${bar}`);
+    }
+    for (let bar = 8; bar <= 12 + 1e-9; bar += STEP_BAR) {
+      assertClose(playbackValueAtBar(right, bar), playbackValueAtBar(clip, bar), VALUE_TOLERANCE, `right @ ${bar}`);
+    }
+    assert.equal(playbackValueAtBar(left, 6), playbackValueAtBar(right, 6));
+    assertClose(playbackValueAtBar(right, 8), 0.85, 1e-9);
+
+    // The approximated tail keeps the direction of the original segment.
+    let previous = playbackValueAtBar(right, 6);
+    for (let bar = 6 + STEP_BAR; bar <= 8 + 1e-9; bar += STEP_BAR) {
+      const value = playbackValueAtBar(right, bar);
+      assert.ok(value >= previous - 1e-12, `right half must keep rising through the cut segment (bar ${bar})`);
+      previous = value;
+    }
+  });
+
+  test('two-point envelope split is lossless for a linear ramp and continuous with tension', () => {
+    const ramp = createBaseAutoClip([
+      { x: 0, y: 0, tension: 0 },
+      { x: 1, y: 1, tension: 0 }
+    ]);
+    const [left, right] = splitPlaylistClip(ramp, 1, DEFAULT_GRID_BARS, { totalBars: 64 });
+    assert.deepEqual(left.automationPoints, [{ x: 0, y: 0, tension: 0 }, { x: 1, y: 0.25, tension: 0 }]);
+    assert.deepEqual(right.automationPoints, [{ x: 0, y: 0.25, tension: 0 }, { x: 1, y: 1, tension: 0 }]);
+    for (let bar = 0; bar <= 4 + 1e-9; bar += STEP_BAR) {
+      const expected = playbackValueAtBar(ramp, bar);
+      if (bar <= 1) assertClose(playbackValueAtBar(left, bar), expected, 1e-9);
+      if (bar >= 1) assertClose(playbackValueAtBar(right, bar), expected, 1e-9);
+    }
+
+    const curved = createBaseAutoClip([
+      { x: 0, y: 0.1, tension: 0.5 },
+      { x: 1, y: 0.9, tension: 0 }
+    ]);
+    const [curvedLeft, curvedRight] = splitPlaylistClip(curved, 3, DEFAULT_GRID_BARS, { totalBars: 64 });
+    const seam = audioEngine.interpolateAutomationCurve(curved.automationPoints!, 0.75);
+    assert.equal(curvedLeft.automationPoints!.length, 2);
+    assert.equal(curvedRight.automationPoints!.length, 2);
+    assertClose(curvedLeft.automationPoints![1].y, seam, 1e-6);
+    assert.equal(curvedLeft.automationPoints![1].y, curvedRight.automationPoints![0].y);
+    assert.equal(curvedLeft.automationPoints![0].tension, 0.5);
+    assert.equal(curvedRight.automationPoints![0].tension, 0.5);
+    assert.equal(playbackValueAtBar(curvedLeft, 3), playbackValueAtBar(curvedRight, 3));
+    // Ease-in curves are self-similar from their origin: the head is exact.
+    for (let bar = 0; bar <= 3 + 1e-9; bar += STEP_BAR) {
+      assertClose(playbackValueAtBar(curvedLeft, bar), playbackValueAtBar(curved, bar), VALUE_TOLERANCE);
+    }
+  });
+
+  test('near-edge splits keep both halves valid and every point on its bar', () => {
+    const clip = createMultiTensionClip({ startBar: 0 }); // bars 0..8
+
+    const [tinyLeft, bigRight] = splitPlaylistClip(clip, 0.25, DEFAULT_GRID_BARS, { totalBars: 64 });
+    assert.equal(tinyLeft.lengthBars, 0.25);
+    assert.equal(bigRight.startBar, 0.25);
+    assert.equal(bigRight.lengthBars, 7.75);
+    assertWellFormedEnvelope(tinyLeft, 'tiny left');
+    assertWellFormedEnvelope(bigRight, 'big right');
+    assert.deepEqual(tinyLeft.automationPoints!.map(p => p.x), [0, 1]);
+    assert.equal(bigRight.automationPoints!.length, 3);
+    assertClose(pointBars(bigRight)[1], 4, BAR_TOLERANCE); // the x=0.5 point still sits on bar 4
+    assert.equal(bigRight.automationPoints![0].tension, 0.3);
+    assert.equal(playbackValueAtBar(tinyLeft, 0.25), playbackValueAtBar(bigRight, 0.25));
+    assertClose(playbackValueAtBar(tinyLeft, 0.25), playbackValueAtBar(clip, 0.25), 1e-6);
+
+    const [bigLeft, tinyRight] = splitPlaylistClip(clip, 7.75, DEFAULT_GRID_BARS, { totalBars: 64 });
+    assert.equal(bigLeft.lengthBars, 7.75);
+    assert.equal(tinyRight.startBar, 7.75);
+    assert.equal(tinyRight.lengthBars, 0.25);
+    assertWellFormedEnvelope(bigLeft, 'big left');
+    assertWellFormedEnvelope(tinyRight, 'tiny right');
+    assert.equal(bigLeft.automationPoints!.length, 3);
+    assertClose(pointBars(bigLeft)[1], 4, BAR_TOLERANCE);
+    assert.deepEqual(tinyRight.automationPoints!.map(p => p.x), [0, 1]);
+    assert.equal(tinyRight.automationPoints![0].tension, -0.2); // cut segment opened by the x=0.5 point
+    assert.equal(playbackValueAtBar(bigLeft, 7.75), playbackValueAtBar(tinyRight, 7.75));
+    assertClose(playbackValueAtBar(tinyRight, 7.75), playbackValueAtBar(clip, 7.75), 1e-6);
+
+    // Boundary splits are still rejected, and the envelope helper refuses
+    // positions that would collapse a half onto its own endpoint.
+    assert.throws(() => splitPlaylistClip(clip, 0, DEFAULT_GRID_BARS), /inside the clip/);
+    assert.throws(() => splitPlaylistClip(clip, 8, DEFAULT_GRID_BARS), /inside the clip/);
+    assert.throws(() => splitAutomationPoints(clip.automationPoints!, 0), /inside the envelope/);
+    assert.throws(() => splitAutomationPoints(clip.automationPoints!, 1), /inside the envelope/);
+    assert.throws(() => splitAutomationPoints(clip.automationPoints!, Number.NaN), /inside the envelope/);
+  });
+
+  test('seam continuity holds for every grid position and coincident-boundary tolerance', () => {
+    const clip = createMultiTensionClip({
+      automationPoints: [
+        { x: 0, y: 0.2, tension: 0.3 },
+        { x: 0.3125, y: 0.9, tension: -0.5 },
+        { x: 0.5, y: 0.85, tension: -0.2 },
+        { x: 0.75, y: 0.1, tension: 0.8 },
+        { x: 1, y: 0.3, tension: 0 }
+      ]
+    });
+
+    for (let splitBar = 4.25; splitBar < 12; splitBar += DEFAULT_GRID_BARS) {
+      const [left, right] = splitPlaylistClip(clip, splitBar, DEFAULT_GRID_BARS, { totalBars: 64 });
+      assertWellFormedEnvelope(left, `left @ ${splitBar}`);
+      assertWellFormedEnvelope(right, `right @ ${splitBar}`);
+      const leftSeam = playbackValueAtBar(left, splitBar);
+      const rightSeam = playbackValueAtBar(right, splitBar);
+      assert.equal(leftSeam, rightSeam, `seam mismatch @ ${splitBar}`);
+      assertClose(leftSeam, playbackValueAtBar(clip, splitBar), 1e-6, `seam drifted from source @ ${splitBar}`);
+      // A split on an existing point shares it (n + 1 points overall); a split
+      // inside a segment synthesizes one seam point per half (n + 2).
+      const xSplit = relXAtBar(clip, splitBar);
+      const landsOnPoint = clip.automationPoints!.some(point => Math.abs(point.x - xSplit) < 1e-6);
+      assert.equal(
+        left.automationPoints!.length + right.automationPoints!.length,
+        clip.automationPoints!.length + (landsOnPoint ? 1 : 2),
+        `point count @ ${splitBar}`
+      );
+      // Every original point keeps its bar position in whichever half it landed.
+      const survivingBars = [...pointBars(left).slice(0, -1), ...pointBars(right).slice(1)];
+      for (const bar of pointBars(clip)) {
+        if (Math.abs(bar - splitBar) < 1e-9) continue; // the shared boundary is represented by the seam itself
+        assert.ok(survivingBars.some(candidate => Math.abs(candidate - bar) < 1e-9), `point @ bar ${bar} lost after split @ ${splitBar}`);
+      }
+    }
+
+    // A point within the coincidence tolerance of the split is the boundary
+    // rather than a near-duplicate of a synthesized seam point.
+    const nearly = splitAutomationPoints([
+      { x: 0, y: 0.1, tension: 0 },
+      { x: 0.5000004, y: 0.7, tension: 0.4 },
+      { x: 1, y: 0.2, tension: 0 }
+    ], 0.5);
+    assert.deepEqual(nearly.left, [{ x: 0, y: 0.1, tension: 0 }, { x: 1, y: 0.7, tension: 0.4 }]);
+    assert.deepEqual(nearly.right, [{ x: 0, y: 0.7, tension: 0.4 }, { x: 1, y: 0.2, tension: 0 }]);
+
+    // Halves lacking an outer endpoint receive one holding the neighbouring
+    // value, which is exactly what playback does past the outermost points.
+    const inner = splitAutomationPoints([{ x: 0.4, y: 0.25, tension: 0 }, { x: 0.8, y: 0.75, tension: 0 }], 0.2);
+    assert.deepEqual(inner.left, [{ x: 0, y: 0.25, tension: 0 }, { x: 1, y: 0.25, tension: 0 }]);
+    assert.equal(inner.right[0].x, 0);
+    assert.equal(inner.right[0].y, 0.25);
+    assert.equal(inner.right[inner.right.length - 1].x, 1);
+    assert.equal(inner.right[inner.right.length - 1].y, 0.75);
+    // The kept points land at their remapped positions: (0.4 - 0.2) / 0.8 and (0.8 - 0.2) / 0.8.
+    assertClose(inner.right[1].x, 0.25, 1e-12);
+    assertClose(inner.right[2].x, 0.75, 1e-12);
+    assertClose(evaluateAutomationEnvelope(inner.right, 0.25), 0.25, 1e-12);
+    assertClose(evaluateAutomationEnvelope(inner.right, 0.75), 0.75, 1e-12);
+    assertClose(evaluateAutomationEnvelope(inner.right, 0.5), 0.5, 1e-12); // linear between the two kept points
+
+    // Constant / empty envelopes are position independent and pass through.
+    assert.deepEqual(splitAutomationPoints([{ x: 0.5, y: 0.6 }], 0.3), { left: [{ x: 0.5, y: 0.6 }], right: [{ x: 0.5, y: 0.6 }] });
+    assert.deepEqual(splitAutomationPoints([], 0.3), { left: [], right: [] });
+  });
+
+  test('timing preservation: points keep their absolute bar positions on a non power-of-two split', () => {
+    const clip = createMultiTensionClip({
+      startBar: 3,
+      lengthBars: 6,
+      automationPoints: [
+        { x: 0, y: 0.2, tension: 0 },
+        { x: 0.125, y: 0.6, tension: 0.7, lfoRateHz: 2, lfoDepth: 0.3 },
+        { x: 0.5, y: 0.85, tension: -0.2 },
+        { x: 0.75, y: 0.4, tension: 0 },
+        { x: 1, y: 0.3, tension: 0 }
+      ]
+    });
+    const sourceBars = pointBars(clip); // 3, 3.75, 6, 7.5, 9
+
+    const [left, right] = splitPlaylistClip(clip, 5, DEFAULT_GRID_BARS, { totalBars: 64 }); // xSplit = 1/3
+    const leftBars = pointBars(left);
+    const rightBars = pointBars(right);
+
+    assert.equal(leftBars.length, 3); // 3, 3.75, seam @ 5
+    assertClose(leftBars[0], sourceBars[0], BAR_TOLERANCE);
+    assertClose(leftBars[1], sourceBars[1], BAR_TOLERANCE);
+    assertClose(leftBars[2], 5, BAR_TOLERANCE);
+
+    assert.equal(rightBars.length, 4); // seam @ 5, 6, 7.5, 9
+    assertClose(rightBars[0], 5, BAR_TOLERANCE);
+    assertClose(rightBars[1], sourceBars[2], BAR_TOLERANCE);
+    assertClose(rightBars[2], sourceBars[3], BAR_TOLERANCE);
+    assertClose(rightBars[3], sourceBars[4], BAR_TOLERANCE);
+
+    // Per-point data (tension, LFO modulation) travels with the point.
+    assert.equal(left.automationPoints![1].tension, 0.7);
+    assert.equal(left.automationPoints![1].lfoRateHz, 2);
+    assert.equal(left.automationPoints![1].lfoDepth, 0.3);
+    assert.equal(right.automationPoints![1].tension, -0.2);
+    // Ordering is preserved on both sides.
+    assert.deepEqual(left.automationPoints!.map(p => p.y).slice(0, 2), [0.2, 0.6]);
+    assert.deepEqual(right.automationPoints!.map(p => p.y).slice(1), [0.85, 0.4, 0.3]);
+    assertWellFormedEnvelope(left, 'left');
+    assertWellFormedEnvelope(right, 'right');
+  });
+
+  test('automation split never advances offsetSteps; pattern and audio splits are unchanged', () => {
+    const fresh = createMultiTensionClip();
+    assert.equal(fresh.offsetSteps, undefined);
+    const [freshLeft, freshRight] = splitPlaylistClip(fresh, 6, DEFAULT_GRID_BARS, { totalBars: 64 });
+    assert.equal(freshLeft.offsetSteps, undefined);
+    assert.equal(freshRight.offsetSteps, undefined);
+
+    // A stale offset (e.g. written by an older split) is carried, never grown.
+    const stale = createMultiTensionClip({ offsetSteps: 32 });
+    const [staleLeft, staleRight] = splitPlaylistClip(stale, 6, DEFAULT_GRID_BARS, { totalBars: 64 });
+    assert.equal(staleLeft.offsetSteps, 32);
+    assert.equal(staleRight.offsetSteps, 32);
+
+    // Splitting a half again keeps the same rule.
+    const [, again] = splitPlaylistClip(staleRight, 10, DEFAULT_GRID_BARS, { totalBars: 64 });
+    assert.equal(again.offsetSteps, 32);
+    assert.equal(again.startBar, 10);
+
+    // Pattern clips keep the source-offset advance and untouched fields.
+    const pattern: PlaylistClip = {
+      id: 'pat-split',
+      trackIndex: 0,
+      startBar: 4,
+      lengthBars: 8,
+      type: 'pattern',
+      channelId: 'ch-1',
+      color: '#ff6e00',
+      name: 'Pattern Block',
+      offsetSteps: 8
+    };
+    const [patternLeft, patternRight] = splitPlaylistClip(pattern, 8.25, DEFAULT_GRID_BARS, { totalBars: 64 });
+    assert.equal(patternLeft.offsetSteps, 8);
+    assert.equal(patternRight.offsetSteps, 8 + 4.25 * 16);
+    assert.equal(patternRight.startBar, 8.25);
+    assert.equal(patternRight.lengthBars, 3.75);
+    assert.equal(patternLeft.automationPoints, undefined);
+
+    // Audio clips as well (fades clamp to the new half lengths).
+    const audio: PlaylistClip = {
+      id: 'audio-split',
+      trackIndex: 1,
+      startBar: 4,
+      lengthBars: 8,
+      type: 'audio',
+      color: '#00ff88',
+      name: 'Vocal',
+      audioBufferId: 'buffer-1',
+      offsetSteps: 0,
+      fadeInBars: 0.5,
+      fadeOutBars: 0.5
+    };
+    const [audioLeft, audioRight] = splitPlaylistClip(audio, 8.13, DEFAULT_GRID_BARS, { totalBars: 64 });
+    assert.equal(audioLeft.lengthBars, 4.25);
+    assert.equal(audioRight.offsetSteps, 68);
+    assert.equal(audioRight.fadeInBars, 0.5);
+  });
+
+  test('left / right resize keeps relative-X stretch semantics and grants automation no offset credit', () => {
+    const clip = createMultiTensionClip({ startBar: 8, lengthBars: 4 }); // bars 8..12
+    const sourcePoints = clip.automationPoints!.map(p => ({ ...p }));
+
+    // Left extension is free for automation (no source material to run out of).
+    const extended = resizePlaylistClipLeft(clip, 6, DEFAULT_GRID_BARS, DEFAULT_GRID_BARS, { totalBars: 64 });
+    assert.equal(extended.startBar, 6);
+    assert.equal(extended.lengthBars, 6);
+    assert.equal(extended.offsetSteps, 0);
+    assert.deepEqual(extended.automationPoints, sourcePoints); // relative X untouched...
+    assertClose(pointBars(extended)[1], 9, BAR_TOLERANCE); // ...so the middle point stretched from bar 10 to bar 9
+
+    // A stale offset neither enables nor limits the extension: identical result.
+    const staleClip = createMultiTensionClip({ startBar: 8, lengthBars: 4, offsetSteps: 32 });
+    const staleExtended = resizePlaylistClipLeft(staleClip, 6, DEFAULT_GRID_BARS, DEFAULT_GRID_BARS, { totalBars: 64 });
+    assert.equal(staleExtended.startBar, 6);
+    assert.equal(staleExtended.lengthBars, 6);
+    assert.equal(staleExtended.offsetSteps, 0);
+    const farExtended = resizePlaylistClipLeft(staleClip, 0, DEFAULT_GRID_BARS, DEFAULT_GRID_BARS, { totalBars: 64 });
+    assert.equal(farExtended.startBar, 0); // not clamped to startBar - offsetSteps / 16
+    assert.equal(farExtended.lengthBars, 12);
+    assert.equal(farExtended.offsetSteps, 0);
+    const beyondZero = resizePlaylistClipLeft(staleClip, -3, DEFAULT_GRID_BARS, DEFAULT_GRID_BARS, { totalBars: 64 });
+    assert.equal(beyondZero.startBar, 0);
+
+    // Left shrink compresses the envelope, normalizes the offset and respects the minimum length.
+    const shrunk = resizePlaylistClipLeft(staleClip, 9, DEFAULT_GRID_BARS, DEFAULT_GRID_BARS, { totalBars: 64 });
+    assert.equal(shrunk.startBar, 9);
+    assert.equal(shrunk.lengthBars, 3);
+    assert.equal(shrunk.offsetSteps, 0);
+    assert.deepEqual(shrunk.automationPoints, sourcePoints);
+    assertClose(pointBars(shrunk)[1], 10.5, BAR_TOLERANCE);
+    const minimal = resizePlaylistClipLeft(clip, 11.9, DEFAULT_GRID_BARS, DEFAULT_GRID_BARS, { totalBars: 64 });
+    assert.equal(minimal.startBar, 11.75);
+    assert.equal(minimal.lengthBars, 0.25);
+
+    // Right resize: points untouched, offset untouched, bounds respected.
+    const widened = resizePlaylistClipRight(clip, 16, DEFAULT_GRID_BARS, DEFAULT_GRID_BARS, { totalBars: 64 });
+    assert.equal(widened.startBar, 8);
+    assert.equal(widened.lengthBars, 8);
+    assert.equal(widened.offsetSteps, undefined);
+    assert.deepEqual(widened.automationPoints, sourcePoints);
+    assertClose(pointBars(widened)[1], 12, BAR_TOLERANCE);
+    const clamped = resizePlaylistClipRight(clip, 40, DEFAULT_GRID_BARS, DEFAULT_GRID_BARS, { totalBars: 16 });
+    assert.equal(clamped.startBar + clamped.lengthBars, 16);
+    const narrowed = resizePlaylistClipRight(clip, 8.1, DEFAULT_GRID_BARS, DEFAULT_GRID_BARS, { totalBars: 64 });
+    assert.equal(narrowed.lengthBars, 0.25);
+
+    // Audio clips keep the source-preserving rule exactly as before.
+    const audio: PlaylistClip = {
+      id: 'audio-resize',
+      trackIndex: 1,
+      startBar: 8,
+      lengthBars: 8,
+      type: 'audio',
+      color: '#00ff88',
+      name: 'Vocal',
+      audioBufferId: 'buffer-1',
+      offsetSteps: 16
+    };
+    const audioExtended = resizePlaylistClipLeft(audio, 0, DEFAULT_GRID_BARS, DEFAULT_GRID_BARS, { totalBars: 64 });
+    assert.equal(audioExtended.startBar, 7); // limited by the 16 steps of available source
+    assert.equal(audioExtended.offsetSteps, 0);
+    const audioShrunk = resizePlaylistClipLeft(audio, 10, DEFAULT_GRID_BARS, DEFAULT_GRID_BARS, { totalBars: 64 });
+    assert.equal(audioShrunk.startBar, 10);
+    assert.equal(audioShrunk.offsetSteps, 48);
+    const noSource: PlaylistClip = { ...audio, offsetSteps: 0 };
+    assert.equal(resizePlaylistClipLeft(noSource, 4, DEFAULT_GRID_BARS, DEFAULT_GRID_BARS, { totalBars: 64 }).startBar, 8);
+  });
+
+  test('endpoint pinning: first and last points keep x=0 / x=1 while Y stays editable', () => {
+    const clip = createMultiTensionClip();
+
+    const { clip: firstMoved, nextIndex: firstIndex } = movePlaylistAutomationPoint(clip, 0, 0.4, 0.9);
+    assert.equal(firstIndex, 0);
+    assert.equal(firstMoved.automationPoints![0].x, 0);
+    assert.equal(firstMoved.automationPoints![0].y, 0.9);
+    assert.equal(firstMoved.automationPoints![0].tension, 0.3);
+
+    const { clip: lastMoved, nextIndex: lastIndex } = movePlaylistAutomationPoint(clip, 2, 0.3, 0.05);
+    assert.equal(lastIndex, 2);
+    assert.equal(lastMoved.automationPoints![2].x, 1);
+    assert.equal(lastMoved.automationPoints![2].y, 0.05);
+
+    // Grid snapping and out-of-range requests cannot unpin an endpoint either.
+    const { clip: snappedFirst } = movePlaylistAutomationPoint(clip, 0, 0.7, 0.5, 16);
+    assert.equal(snappedFirst.automationPoints![0].x, 0);
+    const { clip: overshotLast } = movePlaylistAutomationPoint(clip, 2, 1.5, 1.5, 16);
+    assert.equal(overshotLast.automationPoints![2].x, 1);
+    assert.equal(overshotLast.automationPoints![2].y, 1);
+
+    // Interior points keep the Phase 6.1 snap / collision behaviour.
+    const { clip: interior } = movePlaylistAutomationPoint(clip, 1, 0.6, 0.3);
+    assert.equal(interior.automationPoints![1].x, 0.6);
+    const { clip: snappedInterior } = movePlaylistAutomationPoint(clip, 1, 0.58, 0.5, 16);
+    assert.equal(snappedInterior.automationPoints![1].x, 0.5625);
+    const { clip: blocked, nextIndex: blockedIndex } = movePlaylistAutomationPoint(clip, 1, 1, 0.3);
+    assert.equal(blockedIndex, 1);
+    assert.equal(blocked.automationPoints![1].x, 0.5); // cannot land on the pinned endpoint
+    assert.equal(blocked.automationPoints![2].x, 1);
+
+    // Two-point envelopes: both points are endpoints.
+    const ramp = createBaseAutoClip([{ x: 0, y: 0, tension: 0 }, { x: 1, y: 1, tension: 0 }]);
+    assert.equal(movePlaylistAutomationPoint(ramp, 0, 0.9, 0.2).clip.automationPoints![0].x, 0);
+    assert.equal(movePlaylistAutomationPoint(ramp, 1, 0.1, 0.2).clip.automationPoints![1].x, 1);
+
+    // Adding right next to an endpoint (below the merge threshold) edits its
+    // value without nudging it off the clip edge.
+    const { clip: mergedStart, pointIndex: mergedStartIndex } = addPlaylistAutomationPoint(clip, 0.003, 0.65);
+    assert.equal(mergedStartIndex, 0);
+    assert.equal(mergedStart.automationPoints!.length, 3);
+    assert.equal(mergedStart.automationPoints![0].x, 0);
+    assert.equal(mergedStart.automationPoints![0].y, 0.65);
+    const { clip: mergedEnd } = addPlaylistAutomationPoint(clip, 0.998, 0.15);
+    assert.equal(mergedEnd.automationPoints![2].x, 1);
+    assert.equal(mergedEnd.automationPoints![2].y, 0.15);
+    // Interior merges still follow the click position.
+    const { clip: mergedInterior } = addPlaylistAutomationPoint(clip, 0.503, 0.5);
+    assert.equal(mergedInterior.automationPoints![1].x, 0.503);
+
+    // Pinned endpoints stay pinned on split halves too.
+    const [left, right] = splitPlaylistClip(clip, 6, DEFAULT_GRID_BARS, { totalBars: 64 });
+    assert.equal(movePlaylistAutomationPoint(left, 1, 0.2, 0.7).clip.automationPoints![1].x, 1);
+    assert.equal(movePlaylistAutomationPoint(right, 0, 0.8, 0.7).clip.automationPoints![0].x, 0);
+  });
+
+  test('duplicates and split halves are independent and keep their target binding', () => {
+    const clip = createMultiTensionClip();
+    const duplicate = duplicatePlaylistClip(clip, 'auto-clip-mt-copy', 12, 2, DEFAULT_GRID_BARS, { totalBars: 64, maxTracks: 16 });
+
+    assert.notEqual(duplicate.id, clip.id);
+    assert.equal(duplicate.startBar, 12);
+    assert.deepEqual(duplicate.automationPoints, clip.automationPoints);
+    assert.notEqual(duplicate.automationPoints, clip.automationPoints);
+    assert.notEqual(duplicate.automationPoints![1], clip.automationPoints![1]);
+    assert.deepEqual(duplicate.automationTarget, clip.automationTarget);
+    assert.notEqual(duplicate.automationTarget, clip.automationTarget);
+
+    // Editing the duplicate never reaches the source.
+    const { clip: editedDuplicate } = movePlaylistAutomationPoint(duplicate, 1, 0.7, 0.1);
+    assert.equal(editedDuplicate.automationPoints![1].x, 0.7);
+    assert.equal(clip.automationPoints![1].x, 0.5);
+    duplicate.automationPoints![1].y = 0.01;
+    assert.equal(clip.automationPoints![1].y, 0.85);
+
+    const rebound = updatePlaylistAutomationTarget(duplicate, { type: 'mixer_vol', targetId: 3, label: 'Insert 3 - Volume' });
+    assert.equal(rebound.automationTarget?.type, 'mixer_vol');
+    assert.equal(rebound.automationTarget?.targetId, 3);
+    assert.equal(rebound.name, 'Auto: Insert 3 - Volume');
+    assert.equal(clip.automationTarget?.type, 'channel_filter_cutoff');
+    assert.equal(clip.automationTarget?.targetId, 'ch-synth-1');
+    assert.equal(duplicate.automationTarget?.type, 'channel_filter_cutoff');
+
+    // Split halves each carry their own copy of the binding.
+    const [left, right] = splitPlaylistClip(clip, 6, DEFAULT_GRID_BARS, { totalBars: 64 });
+    assert.deepEqual(left.automationTarget, clip.automationTarget);
+    assert.deepEqual(right.automationTarget, clip.automationTarget);
+    assert.notEqual(left.automationTarget, right.automationTarget);
+    assert.notEqual(left.automationTarget, clip.automationTarget);
+    assert.notEqual(left.automationPoints, right.automationPoints);
+    assert.equal(left.trackIndex, clip.trackIndex);
+    assert.equal(right.trackIndex, clip.trackIndex);
+    assert.equal(left.color, clip.color);
+    const reboundLeft = updatePlaylistAutomationTarget(left, { type: 'master_vol', targetId: 0, label: 'Master Out' });
+    assert.equal(reboundLeft.automationTarget?.type, 'master_vol');
+    assert.equal(right.automationTarget?.type, 'channel_filter_cutoff');
+    assert.equal(clip.automationTarget?.type, 'channel_filter_cutoff');
+  });
+
+  test('workflow: create -> edit -> split -> seam -> resize -> endpoint -> undo/redo -> save/reload -> Song Mode', () => {
+    const state = createDefaultProjectState();
+    const targetChannel = state.channels[0];
+
+    // create: the arranger's default automation clip shape, bound to a real channel.
+    const created = createMultiTensionClip({
+      id: 'auto-workflow',
+      trackIndex: 0,
+      startBar: 4,
+      lengthBars: 8,
+      automationTarget: { type: 'channel_filter_cutoff', targetId: targetChannel.id, label: `${targetChannel.name} Filter Cutoff` }
+    });
+    state.playlistClips = [created];
+    let history = createHistory(state);
+    const commit = (clips: PlaylistClip[], label: string) => {
+      history = history.commit({ ...history.present, playlistClips: clips }, label);
+    };
+
+    // edit: add a node and move it.
+    const { clip: withNode, pointIndex } = addPlaylistAutomationPoint(created, 0.75, 0.1);
+    assert.equal(pointIndex, 2);
+    const { clip: edited } = movePlaylistAutomationPoint(withNode, pointIndex, 0.8, 0.05, 32);
+    assert.equal(edited.automationPoints![2].x, 0.8125);
+    commit([edited], 'Edit automation');
+
+    // split at bar 6 (inside the first segment).
+    const [left, right] = splitPlaylistClip(edited, 6, DEFAULT_GRID_BARS, { totalBars: 64 });
+    commit([left, right], 'Split automation clip');
+    assert.equal(history.present.playlistClips.length, 2);
+
+    // seam check: the two halves agree with each other and with the source.
+    const seamValue = playbackValueAtBar(left, 6);
+    assert.equal(seamValue, playbackValueAtBar(right, 6));
+    assertClose(seamValue, playbackValueAtBar(edited, 6), 1e-6);
+    assertClose(pointBars(right)[1], 8, BAR_TOLERANCE);
+    assertClose(pointBars(right)[2], 10.5, BAR_TOLERANCE);
+
+    // resize: extend the left half leftwards (stretch) and the right half rightwards.
+    const leftResized = resizePlaylistClipLeft(left, 2, DEFAULT_GRID_BARS, DEFAULT_GRID_BARS, { totalBars: 64 });
+    const rightResized = resizePlaylistClipRight(right, 14, DEFAULT_GRID_BARS, DEFAULT_GRID_BARS, { totalBars: 64 });
+    assert.equal(leftResized.startBar, 2);
+    assert.equal(leftResized.lengthBars, 4);
+    assert.equal(leftResized.offsetSteps, 0);
+    assert.equal(rightResized.lengthBars, 8);
+    assert.deepEqual(leftResized.automationPoints, left.automationPoints);
+    assert.deepEqual(rightResized.automationPoints, right.automationPoints);
+    commit([leftResized, rightResized], 'Resize automation clips');
+    // The seam still meets at bar 6 after both resizes.
+    assert.equal(playbackValueAtBar(leftResized, 6), playbackValueAtBar(rightResized, 6));
+
+    // endpoint check: dragging the seam points only changes their value.
+    const { clip: leftEdited } = movePlaylistAutomationPoint(leftResized, 1, 0.4, 0.95, 16);
+    const { clip: rightEdited } = movePlaylistAutomationPoint(rightResized, 0, 0.6, 0.95, 32);
+    assert.equal(leftEdited.automationPoints![1].x, 1);
+    assert.equal(rightEdited.automationPoints![0].x, 0);
+    assert.equal(leftEdited.automationPoints![1].y, 0.95);
+    assert.equal(rightEdited.automationPoints![0].y, 0.95);
+    commit([leftEdited, rightEdited], 'Edit seam value');
+    assert.equal(playbackValueAtBar(leftEdited, 6), playbackValueAtBar(rightEdited, 6));
+
+    // undo / redo.
+    history = history.undo();
+    assert.equal(history.present.playlistClips[0].automationPoints![1].y, left.automationPoints![1].y);
+    history = history.undo();
+    assert.equal(history.present.playlistClips[0].startBar, 4);
+    assert.equal(history.present.playlistClips[1].lengthBars, 6);
+    history = history.undo();
+    assert.equal(history.present.playlistClips.length, 1);
+    assert.deepEqual(history.present.playlistClips[0].automationPoints, edited.automationPoints);
+    history = history.redo();
+    assert.equal(history.present.playlistClips.length, 2);
+    assert.deepEqual(history.present.playlistClips[0].automationPoints, left.automationPoints);
+    history = history.redo();
+    history = history.redo();
+    assert.equal(history.present.playlistClips[0].startBar, 2);
+    assert.equal(history.present.playlistClips[0].automationPoints![1].y, 0.95);
+    assert.equal(history.present.playlistClips[1].automationPoints![0].y, 0.95);
+
+    // save / reload.
+    const serialized = serializeProjectState(history.present);
+    const reloaded = normalizeProjectState(JSON.parse(serialized).state);
+    assert.equal(reloaded.playlistClips.length, 2);
+    assert.deepEqual(reloaded.playlistClips[0].automationPoints, leftEdited.automationPoints);
+    assert.deepEqual(reloaded.playlistClips[1].automationPoints, rightEdited.automationPoints);
+    assert.deepEqual(reloaded.playlistClips[0].automationTarget, created.automationTarget);
+    assert.equal(reloaded.playlistClips[0].offsetSteps, 0);
+    assert.equal(reloaded.playlistClips[1].offsetSteps, undefined);
+    assertWellFormedEnvelope(reloaded.playlistClips[0], 'reloaded left');
+    assertWellFormedEnvelope(reloaded.playlistClips[1], 'reloaded right');
+
+    // Song Mode: the playback snapshot is isolated from the project and the
+    // seam applies the same filter cutoff from either half.
+    const snapshot = audioEngine.createPlaybackSnapshot(reloaded.channels, reloaded.playlistClips, reloaded.mixerTracks);
+    assert.notEqual(snapshot.clips, reloaded.playlistClips);
+    assert.deepEqual(snapshot.clips, reloaded.playlistClips);
+    const seamSteps = songModeSweep(snapshot.clips, 6, 6);
+    assert.equal(seamSteps[0].values.length, 2);
+    assert.equal(seamSteps[0].values[0], seamSteps[0].values[1]);
+
+    const engine = audioEngine as unknown as Record<PropertyKey, unknown>;
+    const originalCtx = engine.ctx;
+    engine.ctx = { currentTime: 0 };
+    try {
+      const cutoffs: number[] = [];
+      for (const clip of snapshot.clips) {
+        audioEngine.applyAutomationValue(clip.automationTarget!, playbackValueAtBar(clip, 6), snapshot.channels, snapshot.mixerTracks, 0);
+        cutoffs.push(snapshot.channels[0].synthParams.filterCutoff);
+      }
+      assert.equal(cutoffs[0], cutoffs[1]);
+      assert.equal(cutoffs[0], 40 + Math.pow(0.95, 2) * 18000);
+    } finally {
+      engine.ctx = originalCtx;
+    }
+    // The saved project itself was not written to by playback.
+    assert.equal(reloaded.channels[0].synthParams.filterCutoff, targetChannel.synthParams.filterCutoff);
+  });
+
+  test('playback seam regression: split clips reproduce the source envelope with no glitch at the seam', () => {
+    // Lossless case: a split on an existing point.
+    const clip = createMultiTensionClip({ startBar: 0 });
+    const [left, right] = splitPlaylistClip(clip, 4, DEFAULT_GRID_BARS, { totalBars: 64 });
+    const sweep = songModeSweep([left, right], 0, 8);
+    for (const step of sweep) {
+      const expected = playbackValueAtBar(clip, step.bar);
+      assert.ok(step.values.length >= 1, `no clip active at bar ${step.bar}`);
+      for (const value of step.values) assertClose(value, expected, 1e-9, `bar ${step.bar}`);
+    }
+    // At the seam both halves are inside their inclusive window: whichever
+    // fires last, the value is the same.
+    const seam = sweep.find(step => Math.abs(step.bar - 4) < 1e-12)!;
+    assert.equal(seam.values.length, 2);
+    assert.equal(seam.values[0], seam.values[1]);
+
+    // Linear envelopes split anywhere are lossless as well.
+    const linear = createBaseAutoClip([
+      { x: 0, y: 0.9, tension: 0 },
+      { x: 0.4, y: 0.1, tension: 0 },
+      { x: 0.7, y: 0.6, tension: 0 },
+      { x: 1, y: 0.2, tension: 0 }
+    ]);
+    for (const splitBar of [0.25, 1.25, 2.75, 3.75]) {
+      const [a, b] = splitPlaylistClip(linear, splitBar, DEFAULT_GRID_BARS, { totalBars: 64 });
+      for (const step of songModeSweep([a, b], 0, 4)) {
+        for (const value of step.values) assertClose(value, playbackValueAtBar(linear, step.bar), 2e-6, `split ${splitBar} @ bar ${step.bar}`);
+      }
+    }
+
+    // Curved envelopes split mid-segment: continuous at the seam, exact at
+    // every original point, and the neighbouring left clip never drifts.
+    const curvedSplit = splitPlaylistClip(clip, 2, DEFAULT_GRID_BARS, { totalBars: 64 });
+    const curvedSweep = songModeSweep(curvedSplit, 0, 8);
+    const curvedSeam = curvedSweep.find(step => Math.abs(step.bar - 2) < 1e-12)!;
+    assert.equal(curvedSeam.values.length, 2);
+    assert.equal(curvedSeam.values[0], curvedSeam.values[1]);
+    assertClose(curvedSeam.values[0], playbackValueAtBar(clip, 2), 1e-6);
+    for (const step of curvedSweep) {
+      if (step.bar <= 2) assertClose(step.values[0], playbackValueAtBar(clip, step.bar), 1e-9, `left @ ${step.bar}`);
+      if (step.bar >= 4) assertClose(step.values[step.values.length - 1], playbackValueAtBar(clip, step.bar), 1e-9, `right @ ${step.bar}`);
+    }
+    // Through the cut segment (bars 2..4) the right half stays inside the
+    // source segment's value range (no overshoot) and keeps its direction,
+    // and the seam itself introduces no discontinuity: the value change across
+    // the seam step is in line with the neighbouring steps.
+    const cutStart = playbackValueAtBar(clip, 2);
+    const cutEnd = playbackValueAtBar(clip, 4);
+    let previousValue = cutStart;
+    for (const step of curvedSweep) {
+      if (step.bar < 2 || step.bar > 4) continue;
+      const value = step.values[step.values.length - 1];
+      assert.ok(value >= Math.min(cutStart, cutEnd) - 1e-9 && value <= Math.max(cutStart, cutEnd) + 1e-9, `overshoot @ ${step.bar}`);
+      assert.ok(value >= previousValue - 1e-12, `direction change @ ${step.bar}`);
+      previousValue = value;
+    }
+    const seamIndex = curvedSweep.findIndex(step => Math.abs(step.bar - 2) < 1e-12);
+    const stepBefore = curvedSweep[seamIndex].values[0] - curvedSweep[seamIndex - 1].values[0];
+    const stepAfter = curvedSweep[seamIndex + 1].values[0] - curvedSweep[seamIndex].values[1];
+    assert.ok(stepBefore > 0 && stepAfter > 0, 'the envelope keeps rising across the seam');
+    assert.ok(Math.max(stepBefore, stepAfter) < 0.05, 'no audible jump at the seam step');
   });
 });
