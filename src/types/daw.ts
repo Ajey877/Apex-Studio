@@ -191,6 +191,13 @@ export interface CustomSampleData {
   waveformPeaks: number[];
   blob?: Blob;
   url?: string;
+  /**
+   * Set by project hydration when this sample's persisted audio could not be
+   * restored. Mirrors `PlaylistClip.audioUnavailable`: the project keeps the
+   * reference so the user can see (and recover) the missing asset; the audio
+   * itself is never fabricated.
+   */
+  audioUnavailable?: boolean;
   trimStart?: number; // 0 to 1
   trimEnd?: number; // 0 to 1
   normalize?: boolean;

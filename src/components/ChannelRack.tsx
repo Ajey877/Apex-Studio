@@ -14,6 +14,7 @@ import {
 } from 'lucide-react';
 import { Channel, Pattern, InstrumentType } from '../types/daw';
 import { audioEngine } from '../audio/audioEngine';
+import { describeMissingAudioSample, isChannelSampleAudioUnavailable } from '../state/audioAssetAvailability';
 
 interface ChannelRackProps {
   channels: Channel[];
@@ -516,12 +517,17 @@ export const ChannelRack: React.FC<ChannelRackProps> = ({
                         e.stopPropagation();
                         onOpenSampleManager(ch.id);
                       }}
+                      data-audio-unavailable={isChannelSampleAudioUnavailable(ch) ? 'true' : undefined}
                       className={`px-1 py-0.5 rounded text-[8px] font-mono font-bold transition ${
-                        ch.customSample
-                          ? 'bg-[#00ff88] text-black'
-                          : 'bg-[#222225] hover:bg-[#2d2d30] text-[#777] hover:text-white'
+                        isChannelSampleAudioUnavailable(ch)
+                          ? 'bg-red-600 text-white'
+                          : ch.customSample
+                            ? 'bg-[#00ff88] text-black'
+                            : 'bg-[#222225] hover:bg-[#2d2d30] text-[#777] hover:text-white'
                       }`}
-                      title="DirectWave Sample Loader & Waveform Slicer"
+                      title={isChannelSampleAudioUnavailable(ch) && ch.customSample
+                        ? describeMissingAudioSample(ch.customSample, ch.name)
+                        : 'DirectWave Sample Loader & Waveform Slicer'}
                     >
                       SMPL
                     </button>
