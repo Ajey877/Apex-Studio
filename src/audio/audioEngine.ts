@@ -2476,6 +2476,25 @@ class AudioEngine {
     this.transportStateCallback = cb;
   }
 
+  /**
+   * Creates an isolated copy of the project data a playback take runs on.
+   * The scheduler mutates channel volume/pan/filter values while evaluating
+   * automation, so playback must operate on clones: live automation must
+   * never write through to ProjectState (history entries and saved projects
+   * would otherwise capture transient playback values).
+   */
+  public createPlaybackSnapshot(
+    channels: Channel[],
+    clips: PlaylistClip[],
+    mixerTracks: MixerTrack[]
+  ): { channels: Channel[]; clips: PlaylistClip[]; mixerTracks: MixerTrack[] } {
+    return {
+      channels: structuredClone(channels),
+      clips: structuredClone(clips),
+      mixerTracks: structuredClone(mixerTracks)
+    };
+  }
+
   public play(
     channels: Channel[],
     clips: PlaylistClip[],
@@ -2624,7 +2643,7 @@ class AudioEngine {
 
       // 1. Evaluate automation clips at current bar & step
       this.activeClips.forEach(clip => {
-        if (clip.type === 'automation' && clip.automationTarget && clip.automationPoints && clip.automationPoints.length >= 2) {
+        if (clip.type === 'automation' && !clip.mute && clip.automationTarget && clip.automationPoints && clip.automationPoints.length >= 2) {
           const currentTotalBar = barIdx + (this.currentStep / 16);
           if (currentTotalBar >= clip.startBar && currentTotalBar <= clip.startBar + clip.lengthBars) {
             const relX = (currentTotalBar - clip.startBar) / clip.lengthBars;
