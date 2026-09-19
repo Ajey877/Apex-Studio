@@ -26,6 +26,11 @@ import {
 } from './audio/presets';
 import { appendChannelWithAllocatedMixerTrackId } from './state/mixerTrackIdentity';
 import { deleteChannelFromProjectState, normalizeProjectState } from './state/projectState';
+import {
+  DEFAULT_PATTERN_LENGTH_STEPS,
+  getSelectedPatternLengthSteps,
+  setPatternLengthStepsInProjectState
+} from './state/patternLength';
 import { hydrateProjectAudio, persistProjectState, restorePersistedProjectState, saveAndReconcileProjectState } from './state/projectPersistence';
 import { ProjectBackupError, backupProjectBeforeReplacement } from './state/projectBackup';
 import { waitForSampleBufferPersistence } from './audio/sampleBufferPersistence';
@@ -46,6 +51,7 @@ import {
   getFxUpdateLabel,
   getMetaUpdateLabel,
   getMixerUpdateLabel,
+  getPatternUpdateLabel,
   isContinuousChannelUpdate,
   isContinuousFxUpdate,
   isContinuousMetaUpdate,
@@ -390,9 +396,9 @@ export function App() {
 
   // --- Transport Controls ---
   // Pattern Mode loops over the selected pattern's declared length (16/32/64).
-  const selectedPatternLengthSteps = projectState.patterns.find(
-    pattern => pattern.id === projectState.selectedPatternId
-  )?.lengthSteps;
+  // `Pattern.lengthSteps` is the single source of truth: the Channel Rack grid,
+  // the Piano Roll width, this transport argument and Pattern export all read it.
+  const selectedPatternLengthSteps = getSelectedPatternLengthSteps(projectState);
 
   const handleTogglePlay = () => {
     if (isPlaying) {
@@ -494,7 +500,16 @@ export function App() {
     if (previous.channels !== next.channels) update.channels = next.channels;
     if (previous.playlistClips !== next.playlistClips) update.clips = next.playlistClips;
     if (previous.mixerTracks !== next.mixerTracks) update.mixerTracks = next.mixerTracks;
-    if (update.channels || update.clips || update.mixerTracks) {
+    // Pattern Mode plays the selected pattern, so its declared length belongs to
+    // the live take: a 16 <-> 32 change (or switching to a pattern of a different
+    // length) moves the running loop boundary instead of waiting for a restart.
+    // Song Mode ignores it inside the engine.
+    const previousPatternLengthSteps = getSelectedPatternLengthSteps(previous);
+    const nextPatternLengthSteps = getSelectedPatternLengthSteps(next);
+    if (previousPatternLengthSteps !== nextPatternLengthSteps) {
+      update.patternLengthSteps = nextPatternLengthSteps;
+    }
+    if (update.channels || update.clips || update.mixerTracks || update.patternLengthSteps !== undefined) {
       audioEngine.synchronizePlaybackState(update);
     }
   }, []);
@@ -761,11 +776,25 @@ export function App() {
       id: `pat-${nextIdx}-${Date.now()}`,
       name: `Pattern ${nextIdx}`,
       color: '#ff6e00',
-      lengthSteps: 16
+      lengthSteps: DEFAULT_PATTERN_LENGTH_STEPS
     };
     mutateProjectState(
       curr => addPatternToProjectState(curr, newPat),
       'Add pattern'
+    );
+  };
+
+  /**
+   * Channel Rack 16/32 control. It writes the SELECTED pattern's declared length
+   * through the project mutation layer, so the change is history-aware (undo/redo),
+   * persisted, and reaches the running playback take via `synchronizeActivePlayback`.
+   * A pattern id that matches nothing (corrupt/legacy project) is a safe no-op.
+   */
+  const handleUpdatePatternLength = (lengthSteps: number) => {
+    const updates = { lengthSteps };
+    mutateProjectState(
+      current => setPatternLengthStepsInProjectState(current, current.selectedPatternId, lengthSteps),
+      getPatternUpdateLabel(updates)
     );
   };
 
@@ -1310,8 +1339,17 @@ export function App() {
               channels={projectState.channels}
               patterns={projectState.patterns}
               selectedPatternId={projectState.selectedPatternId}
-              onSelectPattern={(id) => { projectStateRef.current = { ...projectStateRef.current, selectedPatternId: id }; setProjectState(prev => ({ ...prev, selectedPatternId: id })); }}
+              onSelectPattern={(id) => {
+                const previousState = projectStateRef.current;
+                projectStateRef.current = { ...previousState, selectedPatternId: id };
+                setProjectState(prev => ({ ...prev, selectedPatternId: id }));
+                // Pattern Mode plays the selected pattern, so the running take must
+                // follow the newly selected pattern's declared length (selection is
+                // a view change: it stays outside project history, as before).
+                synchronizeActivePlayback(previousState, projectStateRef.current);
+              }}
               onAddPattern={handleAddPattern}
+              onUpdatePatternLength={handleUpdatePatternLength}
               selectedChannelId={selectedChannelId}
               onSelectChannel={(id) => setSelectedChannelId(id)}
               onUpdateChannel={handleUpdateChannel}
@@ -1338,6 +1376,7 @@ export function App() {
               onUpdateChannel={handleUpdateChannel}
               currentStep={currentStep}
               isPlaying={isPlaying}
+              patternLengthSteps={selectedPatternLengthSteps}
             />
           )}
 
@@ -1421,7 +1460,7 @@ export function App() {
         </div>
       </footer>
 
-      <ExportModal isOpen={isExportOpen} onClose={() => setIsExportOpen(false)} channels={projectState.channels} clips={projectState.playlistClips} mixerTracks={projectState.mixerTracks} meta={projectState.meta} />
+      <ExportModal isOpen={isExportOpen} onClose={() => setIsExportOpen(false)} channels={projectState.channels} clips={projectState.playlistClips} mixerTracks={projectState.mixerTracks} meta={projectState.meta} patternLengthSteps={selectedPatternLengthSteps} />
       <ProjectManagerModal isOpen={isProjectManagerOpen} onClose={() => setIsProjectManagerOpen(false)} currentState={projectState} onLoadProject={handleLoadProjectState} onUpdateMeta={handleUpdateMeta} />
       <CollaborationModal isOpen={isCollabOpen} onClose={() => setIsCollabOpen(false)} comments={comments} collaborators={collaborators} onAddComment={(text, bar) => { const newC: CollabComment = { id: `c-${Date.now()}`, author: 'Alex (You)', avatarColor: '#ff6e00', timestamp: Date.now(), barPosition: bar, text, resolved: false }; setComments(prev => [newC, ...prev]); }} onToggleResolveComment={(id) => setComments(prev => prev.map(c => c.id === id ? { ...c, resolved: !c.resolved } : c))} isEncrypted={projectState.meta.isEncrypted} onToggleEncryption={() => handleUpdateMeta({ isEncrypted: !projectState.meta.isEncrypted })} />
       <AnalyticsModal isOpen={isAnalyticsOpen} onClose={() => setIsAnalyticsOpen(false)} meta={projectState.meta} channels={projectState.channels} clips={projectState.playlistClips} />

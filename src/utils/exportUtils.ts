@@ -1,9 +1,32 @@
 import type { Channel, PlaylistClip, ProjectMetadata } from '../types/daw';
+import { getPatternLengthBars } from '../state/patternLength';
 
 export type ExportScope = 'song' | 'pattern';
 
-export function getProjectRenderBars(clips: PlaylistClip[], scope: ExportScope): number {
-  if (scope === 'pattern') return 4;
+/**
+ * A Pattern Loop export renders the documented 4-bar window, which is also wide
+ * enough for every length the model expresses in the UI (16 and 32 steps) and
+ * for a 64-step pattern exactly.
+ */
+export const PATTERN_EXPORT_MIN_BARS = 4;
+
+/**
+ * Render window in bars.
+ *
+ * Song scope still ends at the last playlist clip. Pattern scope keeps the
+ * documented 4-bar loop, and grows with the selected pattern's declared
+ * `Pattern.lengthSteps` so the window can never truncate a longer pattern. The
+ * length itself is normalized by the single pattern-length source of truth; no
+ * second pattern-length calculation lives here.
+ */
+export function getProjectRenderBars(
+  clips: PlaylistClip[],
+  scope: ExportScope,
+  patternLengthSteps?: number
+): number {
+  if (scope === 'pattern') {
+    return Math.max(PATTERN_EXPORT_MIN_BARS, getPatternLengthBars(patternLengthSteps));
+  }
   const endBars = clips
     .filter(clip => Number.isFinite(clip.startBar) && Number.isFinite(clip.lengthBars) && clip.lengthBars > 0)
     .map(clip => clip.startBar + clip.lengthBars);

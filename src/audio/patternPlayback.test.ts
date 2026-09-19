@@ -328,7 +328,7 @@ describe('Pattern Mode loop boundary', () => {
 
   it('keeps a 16-step pattern one bar long even while a 32-step channel is idle in its second bar', () => {
     const { fakeCtx, triggered } = startTake({
-      channels: [makeChannel('ch-16', [0, 8], 16)],
+      channels: [makeChannel('ch-16', [0, 8], 32)],
       patternLengthSteps: 16
     });
 
@@ -345,12 +345,18 @@ describe('resolvePatternLoopLengthSteps', () => {
     assert.equal(resolvePatternLoopLengthSteps([], 48), 48);
   });
 
-  it('never cuts off reachable channel content and floors to one bar', () => {
+  it('treats a supplied Pattern.lengthSteps as authoritative and floors to one bar', () => {
     assert.equal(resolvePatternLoopLengthSteps([makeChannel('a', [0, 8], 16)], 16), 16);
-    assert.equal(resolvePatternLoopLengthSteps([makeChannel('a', [0, 15], 32)], 16), 32);
-    assert.equal(resolvePatternLoopLengthSteps([makeChannel('a', [0, 28], 32)], 16), 32);
-    assert.equal(resolvePatternLoopLengthSteps([makeNoteChannel('n', [20])], 16), 32);
+    assert.equal(resolvePatternLoopLengthSteps([makeChannel('a', [0, 15], 32)], 16), 16);
+    assert.equal(resolvePatternLoopLengthSteps([makeChannel('a', [0, 28], 32)], 16), 16);
+    assert.equal(resolvePatternLoopLengthSteps([makeNoteChannel('n', [20])], 16), 16);
     assert.equal(resolvePatternLoopLengthSteps([], undefined), 16);
+  });
+
+  it('falls back to channel content only when no Pattern model is available', () => {
+    assert.equal(resolvePatternLoopLengthSteps([makeChannel('a', [0, 28], 32)]), 32);
+    assert.equal(resolvePatternLoopLengthSteps([makeNoteChannel('n', [20])]), 32);
+    assert.equal(resolvePatternLoopLengthSteps([makeChannel('a', [63], 64)]), 64);
   });
 });
 
@@ -398,9 +404,11 @@ describe('Pattern Mode playback snapshot and live synchronization (Phase 9A)', (
     // The scheduler must never write through to the caller's project objects.
     assert.deepEqual(projectChannels, projectChannelsBeforeEdit);
 
-    // Extend the pattern to two bars while the transport keeps running.
+    // Extend the declared pattern and its channel content while the transport
+    // keeps running. Pattern.lengthSteps owns the boundary; the channel edit is
+    // merged into the isolated playback snapshot (Phase 9A).
     const extended = makeChannel('ch-live', [0, 4, 20], 32);
-    engine.synchronizePlaybackState({ channels: [extended] });
+    engine.synchronizePlaybackState({ channels: [extended], patternLengthSteps: 32 });
 
     assert.deepEqual(engine.activeChannels[0].steps.length, 32);
     assert.deepEqual(engine.playbackProjectChannels[0].steps.length, 32);
@@ -415,6 +423,47 @@ describe('Pattern Mode playback snapshot and live synchronization (Phase 9A)', (
     assertCloseTo(triggered[2].time, 20 * STEP_SECONDS_AT_120_BPM);
     // Reported position passes step 15 without wrapping, proving the loop is 32 long.
     assert.equal(transport.getState().step, 24);
+  });
+
+  it('updates a running take when only Pattern.lengthSteps changes 16 -> 32 -> 16', () => {
+    const projectChannels = [makeChannel('ch-length-live', [0, 15], 16)];
+    const projectBefore = structuredClone(projectChannels);
+    const { fakeCtx, transport } = startTake({
+      channels: projectChannels,
+      patternLengthSteps: 16
+    });
+
+    pumpSteps(fakeCtx, 4);
+    assert.equal(transport.getState().step, 4);
+
+    // This is the exact update App sends for a Channel Rack length click when no
+    // Channel.steps data changes. The active playback snapshot must adopt it.
+    engine.synchronizePlaybackState({ patternLengthSteps: 32 });
+    assert.equal(engine.activePatternLengthSteps, 32);
+    pumpSteps(fakeCtx, 16);
+    assert.equal(transport.getState().step, 20, 'the take passes step 15 without restarting');
+
+    engine.synchronizePlaybackState({ patternLengthSteps: 16 });
+    assert.equal(engine.activePatternLengthSteps, 16);
+    assert.equal(transport.getState().step, 4, 'the same continuous position is re-wrapped to one bar');
+    assert.deepEqual(projectChannels, projectBefore, 'scheduler synchronization never mutates project state');
+  });
+
+  it('ignores declared pattern-length synchronization in Song Mode', () => {
+    const channel = makeChannel('ch-song-sync', [0], 16);
+    const clip: PlaylistClip = {
+      id: 'clip-song-sync', trackIndex: 0, startBar: 0, lengthBars: 4,
+      type: 'pattern', channelId: channel.id, color: '#fff', name: 'Song'
+    };
+    const { fakeCtx, transport } = startTake({
+      channels: [channel], clips: [clip], mode: 'song', patternLengthSteps: 16
+    });
+
+    engine.synchronizePlaybackState({ patternLengthSteps: 32 });
+    pumpSteps(fakeCtx, 20);
+
+    assert.equal(engine.activePatternLengthSteps, 32, 'the project value is retained for a later mode change');
+    assert.equal(transport.getState().step, 4, 'Song Mode still reports the one-bar playlist grid');
   });
 
   it('keeps the playback take isolated from automation writes during Pattern Mode', () => {
@@ -548,14 +597,29 @@ describe('Offline render parity', () => {
     stereoWidth: 1, peakL: 0, peakR: 0, fxSlots: []
   });
 
-  const renderPatternScope = async (channels: Channel[]): Promise<number[]> => {
+  const renderPatternScope = async (
+    channels: Channel[],
+    patternLengthSteps?: number,
+    totalBars = 4
+  ): Promise<number[]> => {
     (globalThis as any).OfflineAudioContext = FakeOfflineAudioContext;
     engine.ctx = null;
     engine.updateMixerTrack = () => undefined;
     const visitedSteps: number[] = [];
     engine.triggerCurrentStep = () => visitedSteps.push(engine.currentStep);
 
-    await engine.renderTimelineOffline(channels, [], [masterTrack()], 120, 4, 44100, false, 'pattern');
+    await engine.renderTimelineOffline(
+      channels,
+      [],
+      [masterTrack()],
+      120,
+      totalBars,
+      44100,
+      false,
+      'pattern',
+      undefined,
+      patternLengthSteps
+    );
     return visitedSteps;
   };
 
@@ -570,10 +634,45 @@ describe('Offline render parity', () => {
   });
 
   it('keeps the historical one-bar loop for 16-step patterns', async () => {
-    const visitedSteps = await renderPatternScope([makeChannel('ch-16', [0, 15], 16)]);
+    const visitedSteps = await renderPatternScope([makeChannel('ch-16', [0, 15], 16)], 16);
 
     assert.equal(visitedSteps.length, 64);
     assert.equal(Math.max(...visitedSteps), 15);
     assert.deepEqual(visitedSteps.slice(14, 18), [14, 15, 0, 1]);
+  });
+
+  it('exports a declared 32-step loop even when steps 16-31 contain no notes', async () => {
+    // Critical Phase 9D regression: channel content alone resolves to 16 here.
+    const channel = makeChannel('ch-empty-tail', [0, 8], 16);
+    assert.equal(resolvePatternLoopLengthSteps([channel]), 16);
+
+    const visitedSteps = await renderPatternScope([channel], 32);
+
+    assert.equal(visitedSteps.length, 64);
+    assert.equal(Math.max(...visitedSteps), 31);
+    assert.deepEqual(visitedSteps.slice(30, 34), [30, 31, 0, 1]);
+  });
+
+  it('exports a declared 32-step loop containing unique events on 16, 20 and 31', async () => {
+    const channel = makeChannel('ch-late-events', [0, 15, 16, 20, 31], 32);
+    const visitedSteps = await renderPatternScope([channel], 32);
+
+    for (const step of [0, 15, 16, 20, 31]) assert.ok(visitedSteps.includes(step));
+    assert.deepEqual(visitedSteps.slice(31, 33), [31, 0]);
+  });
+
+  it('exports a declared 64-step loop, including an empty final three bars', async () => {
+    const channel = makeChannel('ch-64-empty-tail', [0, 8], 16);
+    const visitedSteps = await renderPatternScope([channel], 64);
+
+    assert.equal(visitedSteps.length, 64);
+    assert.deepEqual(visitedSteps, Array.from({ length: 64 }, (_, step) => step));
+    assert.equal(Math.max(...visitedSteps), 63);
+  });
+
+  it('restores the active live pattern length after offline export', async () => {
+    engine.activePatternLengthSteps = 32;
+    await renderPatternScope([makeChannel('ch-export', [0], 16)], 64);
+    assert.equal(engine.activePatternLengthSteps, 32);
   });
 });
