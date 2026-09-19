@@ -23,7 +23,10 @@ export const AudioRecorderModal: React.FC<AudioRecorderModalProps> = ({ isOpen, 
 
   useEffect(() => {
     if (!engineRef.current) engineRef.current = new RecordingEngine(() => audioEngine.getContext(), { onError: error => setError(error.message) });
-    return () => engineRef.current?.dispose();
+    return () => {
+      // Effect cleanups must be synchronous; dispose() is async and any failure is already reported via onError.
+      void engineRef.current?.dispose();
+    };
   }, []);
 
   useEffect(() => {

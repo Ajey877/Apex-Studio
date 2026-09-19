@@ -1,5 +1,5 @@
 import type { AudioRecording, PlaylistClip, ProjectState } from '../types/daw';
-import { deletePersistedAudioClip, getPersistedAudioClip, getPersistedProjectStateRecord, listPersistedAudioClipIds, persistProjectStateRecord } from '../audio/audioPersistence';
+import { deletePersistedAudioClip, getPersistedAudioClip, getPersistedProjectStateRecord, listPersistedAudioClipIds, listProjectBackupRecords, persistProjectStateRecord, type StoredProjectBackup } from '../audio/audioPersistence';
 import { normalizeProjectState } from './projectState';
 import { getRecordingAudioBufferId } from '../audio/recordingPipeline';
 
@@ -185,8 +185,25 @@ export interface AudioReconciliationOptions {
   storage?: {
     listPersistedAudioClipIds: () => Promise<string[]>;
     deletePersistedAudioClip: (id: string) => Promise<void>;
+    /** Optional override for the retained project backups whose audio must survive. */
+    listProjectBackupRecords?: () => Promise<StoredProjectBackup[]>;
   };
 }
+
+/**
+ * Audio ids referenced by a stored backup document. Unreadable backups
+ * contribute nothing (they cannot be restored, so their audio is not needed).
+ */
+export const getAudioIdsFromStoredBackup = (record: Pick<StoredProjectBackup, 'stateJson'>): string[] => {
+  try {
+    const parsed = JSON.parse(record.stateJson) as { state?: unknown } | null;
+    const rawState = parsed && typeof parsed === 'object' && 'state' in parsed ? parsed.state : parsed;
+    if (!rawState || typeof rawState !== 'object') return [];
+    return getAudioIdsForProject(rawState as ProjectState);
+  } catch {
+    return [];
+  }
+};
 
 export interface AudioReconciliationResult {
   preservedIds: string[];
@@ -196,6 +213,7 @@ export interface AudioReconciliationResult {
 /**
  * Reconciles persisted audio assets against the active project state (and optional history states).
  * - Preserves any asset referenced by the active project, additional states, or history past/future.
+ * - Preserves any asset referenced by a retained project backup (Phase 8A replacement safety net).
  * - Removes unreferenced orphan assets from persistent storage.
  * - Does not modify or corrupt the project state.
  * - Never deletes an asset merely because it was missing or temporarily unavailable during hydration.
@@ -238,6 +256,15 @@ export const reconcilePersistedAudio = async (
 
   const listFn = options?.storage?.listPersistedAudioClipIds ?? listPersistedAudioClipIds;
   const deleteFn = options?.storage?.deletePersistedAudioClip ?? deletePersistedAudioClip;
+  const listBackupsFn = options?.storage?.listProjectBackupRecords ?? listProjectBackupRecords;
+
+  // If the backups cannot be enumerated we must not guess: the thrown error aborts
+  // reconciliation before anything is deleted (saveAndReconcileProjectState logs it).
+  for (const backup of await listBackupsFn()) {
+    for (const id of getAudioIdsFromStoredBackup(backup)) {
+      referencedIds.add(id);
+    }
+  }
 
   const persistedIds = await listFn();
   const preservedIds: string[] = [];

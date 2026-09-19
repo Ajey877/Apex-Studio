@@ -15,6 +15,7 @@ import {
 } from 'lucide-react';
 import { Channel, CustomSampleData } from '../types/daw';
 import { audioEngine } from '../audio/audioEngine';
+import { importSampleFile } from '../audio/sampleImport';
 
 interface SampleManagerModalProps {
   isOpen: boolean;
@@ -56,21 +57,8 @@ export const SampleManagerModal: React.FC<SampleManagerModalProps> = ({
   const handleFileUpload = async (file: File) => {
     try {
       setIsLoading(true);
-      const sampleId = `sample-${Date.now()}`;
-      const result = await audioEngine.loadAudioFile(file, sampleId);
-
-      const newSample: CustomSampleData = {
-        id: sampleId,
-        name: file.name.replace(/\.[^/.]+$/, ''),
-        duration: result.duration,
-        sampleRate: result.buffer.sampleRate,
-        channels: result.buffer.numberOfChannels,
-        waveformPeaks: result.peaks,
-        trimStart: 0,
-        trimEnd: 1.0,
-        rootPitch: 60,
-        reverse: false
-      };
+      // Decodes into the engine and persists the original file so the sample survives reloads.
+      const { sample: newSample } = await importSampleFile(file, { engine: audioEngine });
 
       setCurrentSample(newSample);
       setTrimStart(0);
