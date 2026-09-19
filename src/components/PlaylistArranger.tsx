@@ -20,10 +20,16 @@ import {
   Flag,
   Bookmark,
   Snowflake,
-  AudioWaveform
+  AudioWaveform,
+  AlertTriangle
 } from 'lucide-react';
 import { PlaylistTrack, PlaylistClip, Pattern, Channel, AutomationTargetType, ArrangementMarker, MixerTrack } from '../types/daw';
 import { audioEngine } from '../audio/audioEngine';
+import {
+  MISSING_AUDIO_CLIP_BADGE_LABEL,
+  describeMissingAudioClip,
+  isPlaylistClipAudioUnavailable
+} from '../state/audioAssetAvailability';
 import {
   DEFAULT_GRID_BARS,
   createPlaylistPatternClip,
@@ -1084,11 +1090,18 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
                 {clips.filter(c => c.trackIndex === trackIdx).map((clip) => {
                   const isAuto = clip.type === 'automation';
                   const isAudio = clip.type === 'audio';
+                  // Phase 8C (P1-11): audio hydration flagged this clip's asset as
+                  // unrestorable. It must never look like a healthy clip.
+                  const isAudioMissing = isPlaylistClipAudioUnavailable(clip);
+                  const audioMissingDescription = isAudioMissing ? describeMissingAudioClip(clip) : undefined;
                   const isSelected = selectedClipId === clip.id;
 
                   return (
                     <div
                       key={clip.id}
+                      data-audio-unavailable={isAudioMissing ? 'true' : undefined}
+                      aria-label={audioMissingDescription}
+                      title={audioMissingDescription}
                       onPointerDown={(e) => {
                         if (e.button !== 0) return;
                         beginInteraction(e, { kind: 'move', clip, pointerId: e.pointerId, originX: e.clientX, originY: e.clientY });
@@ -1131,16 +1144,32 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
                         isAuto 
                           ? 'bg-[#002233]/90 border-[#00e5ff] hover:bg-[#00334d]' 
                           : isAudio 
-                            ? 'bg-[#002b1a]/90 border-[#00ff88] hover:bg-[#003d24]' 
+                            ? isAudioMissing
+                              ? 'bg-[#3a0d12]/90 border-red-500 hover:bg-[#46141a]'
+                              : 'bg-[#002b1a]/90 border-[#00ff88] hover:bg-[#003d24]'
                             : 'bg-[#1a1a1d] border-l-4 border-l-[#ff6e00] border-[#333336] hover:border-[#ff6e00]'
                       } ${isSelected ? 'ring-2 ring-white/60' : ''}`}
                     >
                       {/* Top Header */}
-                      <div className="flex items-center justify-between font-bold text-[10px] truncate z-10">
-                        <span className={`truncate ${isAuto ? 'text-[#00e5ff]' : isAudio ? 'text-[#00ff88]' : 'text-white'}`}>
-                          {clip.name}
-                        </span>
-                        <span className="text-[8px] opacity-70 font-mono">{clip.lengthBars}B</span>
+                      <div className="flex items-center justify-between gap-1 font-bold text-[10px] truncate z-10 min-w-0">
+                        <div className="flex items-center gap-1 min-w-0">
+                          <span className={`truncate ${isAuto ? 'text-[#00e5ff]' : isAudioMissing ? 'text-red-300' : isAudio ? 'text-[#00ff88]' : 'text-white'}`}>
+                            {clip.name}
+                          </span>
+                          {isAudioMissing && (
+                            <span
+                              id={`missing-audio-clip-badge-${clip.id}`}
+                              role="status"
+                              data-audio-unavailable="true"
+                              title={audioMissingDescription}
+                              className="flex items-center gap-0.5 px-1 py-[1px] rounded bg-red-600 text-white text-[8px] font-bold uppercase tracking-wide shrink-0"
+                            >
+                              <AlertTriangle className="w-2.5 h-2.5" />
+                              {MISSING_AUDIO_CLIP_BADGE_LABEL}
+                            </span>
+                          )}
+                        </div>
+                        <span className="text-[8px] opacity-70 font-mono shrink-0">{clip.lengthBars}B</span>
                       </div>
 
                       {/* Content Preview & Fade Overlays */}
@@ -1212,18 +1241,29 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
                           </svg>
                         </div>
                       ) : isAudio ? (
-                        <div className="relative flex items-center gap-0.5 h-4 opacity-80 z-10">
-                          {Array.from({ length: 32 }).map((_, i) => {
-                            const waveVal = clip.audioWaveform ? (clip.audioWaveform[i] || 0.4) : (0.2 + Math.sin(i * 0.5) * 0.4);
-                            return (
-                              <div 
-                                key={i} 
-                                className="flex-1 bg-[#00ff88] rounded-xs"
-                                style={{ height: `${Math.max(15, waveVal * 100)}%` }}
-                              />
-                            );
-                          })}
-                        </div>
+                        isAudioMissing ? (
+                          // No peaks are drawn for an unavailable asset: a green
+                          // waveform here would read as "loaded and ready".
+                          <div className="relative h-4 w-full flex items-center z-10" data-audio-unavailable="true">
+                            <div className="w-full border-t border-dashed border-red-400/80" />
+                            <span className="absolute left-0 text-[8px] font-bold uppercase tracking-wide text-red-300 bg-[#3a0d12]/80 pr-1">
+                              {MISSING_AUDIO_CLIP_BADGE_LABEL} — waveform unavailable
+                            </span>
+                          </div>
+                        ) : (
+                          <div className="relative flex items-center gap-0.5 h-4 opacity-80 z-10">
+                            {Array.from({ length: 32 }).map((_, i) => {
+                              const waveVal = clip.audioWaveform ? (clip.audioWaveform[i] || 0.4) : (0.2 + Math.sin(i * 0.5) * 0.4);
+                              return (
+                                <div
+                                  key={i}
+                                  className="flex-1 bg-[#00ff88] rounded-xs"
+                                  style={{ height: `${Math.max(15, waveVal * 100)}%` }}
+                                />
+                              );
+                            })}
+                          </div>
+                        )
                       ) : (
                         <div className="flex items-center gap-0.5 h-3 opacity-60 z-10">
                           {Array.from({ length: 16 }).map((_, i) => (
@@ -1374,6 +1414,18 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
 
             <button onClick={() => selectClip(null)} className="text-[#888] hover:text-white">✕</button>
           </div>
+
+          {isPlaylistClipAudioUnavailable(selectedClip) && (
+            <div
+              id="playlist-selected-clip-missing-audio"
+              role="alert"
+              data-audio-unavailable="true"
+              className="w-full flex items-center gap-2 px-2 py-1 rounded bg-[#361111] border border-red-500/60 text-[10px] text-red-200"
+            >
+              <AlertTriangle className="w-3.5 h-3.5 text-red-400 shrink-0" />
+              <span>{describeMissingAudioClip(selectedClip)}</span>
+            </div>
+          )}
         </div>
       )}
 

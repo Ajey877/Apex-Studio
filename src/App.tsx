@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { 
   ProjectState, 
   ViewMode, 
@@ -30,6 +30,11 @@ import { hydrateProjectAudio, persistProjectState, restorePersistedProjectState,
 import { ProjectBackupError, backupProjectBeforeReplacement } from './state/projectBackup';
 import { waitForSampleBufferPersistence } from './audio/sampleBufferPersistence';
 import { planProjectReplacement, runProjectReplacementAfterBackup, type ProjectReplacementPlan, type ProjectReplacementSource } from './state/projectReplacement';
+import {
+  collectMissingAudioAssets,
+  describeMissingAudioAssets,
+  getMissingAudioAssetsSignature
+} from './state/audioAssetAvailability';
 import { createRecordingPlaylistClip, getRecordingAudioBufferId, validateRecordingTargetTrack } from './audio/recordingPipeline';
 import { createHistory, type ProjectHistory, resolveSaveShortcut, resolveUndoRedoShortcut } from './state/projectHistory';
 import {
@@ -137,6 +142,9 @@ export function App() {
   const projectPersistenceReadyRef = useRef(false);
   const hasUnsavedChangesRef = useRef(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+  // Phase 8C (P1-11): missing audio must be visible in the app, not only in the
+  // console. The banner re-appears whenever the set of missing assets changes.
+  const [dismissedMissingAudioSignature, setDismissedMissingAudioSignature] = useState<string | null>(null);
   // Phase 8A: destructive project replacement waits for explicit confirmation (and a backup).
   const [pendingReplacement, setPendingReplacement] = useState<PendingProjectReplacement | null>(null);
   const pendingReplacementRef = useRef<PendingProjectReplacement | null>(null);
@@ -1037,6 +1045,17 @@ export function App() {
 
   const selectedChannel = projectState.channels.find(c => c.id === selectedChannelId) || projectState.channels[0];
 
+  // Phase 8C (P1-11): missing audio is derived from the project itself (hydration
+  // flags clips/samples), so it stays accurate across save, reload and recovery
+  // without a second source of truth.
+  const missingAudioAssets = useMemo(
+    () => collectMissingAudioAssets(projectState),
+    [projectState]
+  );
+  const missingAudioSignature = getMissingAudioAssetsSignature(missingAudioAssets);
+  const showMissingAudioBanner =
+    missingAudioAssets.totalCount > 0 && missingAudioSignature !== dismissedMissingAudioSignature;
+
   const handleAuditionSample = (name: string, pitch = 60) => {
     setPreviewingAudio(name);
     if (selectedChannel) {
@@ -1140,6 +1159,45 @@ export function App() {
               id="save-failure-dismiss-btn"
               onClick={() => setSaveError(null)}
               className="text-red-300 hover:text-white p-0.5 transition cursor-pointer"
+              title="Dismiss warning"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        </div>
+      )}
+
+      {showMissingAudioBanner && (
+        <div
+          id="missing-audio-banner"
+          role="alert"
+          data-audio-unavailable="true"
+          title={missingAudioAssets.messages.join('\n')}
+          className="bg-[#3a2411] border-b border-amber-500/60 px-3 sm:px-4 py-1.5 flex items-center justify-between text-xs text-amber-100 z-40 shrink-0 select-text"
+        >
+          <div className="flex items-center gap-2">
+            <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
+            <span>
+              <strong>Missing audio:</strong> {describeMissingAudioAssets(missingAudioAssets)}
+            </span>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            {missingAudioAssets.samples.length > 0 && (
+              <button
+                id="missing-audio-open-sample-loader-btn"
+                onClick={() => {
+                  setSampleChannelId(missingAudioAssets.samples[0].channelId);
+                  setIsSampleManagerOpen(true);
+                }}
+                className="px-2.5 py-0.5 bg-amber-500 hover:bg-amber-400 text-black font-bold text-[11px] rounded transition cursor-pointer"
+              >
+                Re-import Sample
+              </button>
+            )}
+            <button
+              id="missing-audio-dismiss-btn"
+              onClick={() => setDismissedMissingAudioSignature(missingAudioSignature)}
+              className="text-amber-200 hover:text-white p-0.5 transition cursor-pointer"
               title="Dismiss warning"
             >
               <X className="w-3.5 h-3.5" />

@@ -1,7 +1,8 @@
-import type { AudioRecording, PlaylistClip, ProjectState } from '../types/daw';
+import type { AudioRecording, Channel, PlaylistClip, ProjectState } from '../types/daw';
 import { deletePersistedAudioClip, getPersistedAudioClip, getPersistedProjectStateRecord, listPersistedAudioClipIds, listProjectBackupRecords, persistProjectStateRecord, type StoredProjectBackup } from '../audio/audioPersistence';
 import { normalizeProjectState } from './projectState';
 import { getRecordingAudioBufferId } from '../audio/recordingPipeline';
+import { isSampleAudioUnavailable } from './audioAssetAvailability';
 
 export interface AudioHydrationEngine {
   loadAudioFile: (file: File | Blob, id: string) => Promise<{ buffer: AudioBuffer; peaks: number[]; duration: number }>;
@@ -87,8 +88,8 @@ const hydrateRecording = async (
 
 /**
  * Hydrate all audio assets referenced by a ProjectState into AudioEngine memory.
- * Restores recording blobs and URLs, marks clips as available/unavailable,
- * and loads available blobs into the audio engine.
+ * Restores recording blobs and URLs, marks clips and channel samples as
+ * available/unavailable, and loads available blobs into the audio engine.
  */
 export const hydrateProjectAudio = async (
   state: ProjectState,
@@ -136,11 +137,23 @@ export const hydrateProjectAudio = async (
     return { ...clip, audioUnavailable: missingIds.has(clip.audioBufferId) };
   });
 
+  // Phase 8C (P1-11): channel samples are hydrated from the same asset store, so
+  // they carry the same availability flag. Unchanged channels keep their identity
+  // to avoid pointless state churn.
+  const channels: Channel[] = state.channels.map(channel => {
+    const sample = channel.customSample;
+    if (!sample?.id) return channel;
+    const audioUnavailable = missingIds.has(sample.id);
+    if (isSampleAudioUnavailable(sample) === audioUnavailable) return channel;
+    return { ...channel, customSample: { ...sample, audioUnavailable } };
+  });
+
   return {
     state: {
       ...state,
       recordings: restoredRecordings,
-      playlistClips
+      playlistClips,
+      channels
     },
     hydratedAudioIds: [...new Set(hydratedAudioIds)],
     missingAudioIds: [...new Set(missingAudioIds)]
