@@ -55,6 +55,13 @@ export interface PlaybackStateUpdate {
   channels?: Channel[];
   clips?: PlaylistClip[];
   mixerTracks?: MixerTrack[];
+  /**
+   * Declared `Pattern.lengthSteps` of the pattern Pattern Mode is playing. It is
+   * project state like the collections above, so a 16 <-> 32 length change made
+   * while the transport runs moves the loop boundary of the active take instead
+   * of waiting for a restart. Song Mode ignores it (bar-grid scheduling).
+   */
+  patternLengthSteps?: number;
 }
 
 export interface MixerChannel {
@@ -168,20 +175,27 @@ export function resolvePlayableContentLengthSteps(
 }
 
 /**
- * Pattern Mode loops over the length of the pattern that is playing.
+ * Pattern Mode loops over the declared length of the pattern that is playing.
  *
- * The project model stores this as `Pattern.lengthSteps` (16, 32 or 64), while
- * step-sequencer and piano-roll edits can also grow past the declared length.
- * The resolved loop length is therefore the declared pattern length raised to
- * whole bars, floored by the content of every channel of the playback snapshot
- * so no reachable step is ever cut off. Song Mode is unaffected: it resolves a
- * loop length per playlist clip instead.
+ * `Pattern.lengthSteps` is authoritative when supplied: channel data may be
+ * longer because reducing a pattern length intentionally preserves hidden steps
+ * and piano-roll notes, but those events are ignored until the declared length
+ * is extended again. This gives an exact 0..15 -> 0 or 0..31 -> 0 boundary and
+ * prevents a padded `Channel.steps` array from silently overriding the pattern.
+ *
+ * The content-derived branch is the compatibility fallback for legacy/internal
+ * callers that do not have a Pattern model. Song Mode is unaffected and still
+ * resolves each playlist channel's content length directly.
  */
 export function resolvePatternLoopLengthSteps(
   channels: Channel[],
   patternLengthSteps?: number
 ): number {
-  let loopLengthSteps = resolvePlayableContentLengthSteps(undefined, patternLengthSteps);
+  if (typeof patternLengthSteps === 'number' && Number.isFinite(patternLengthSteps) && patternLengthSteps > 0) {
+    return resolvePlayableContentLengthSteps(undefined, patternLengthSteps);
+  }
+
+  let loopLengthSteps = resolvePlayableContentLengthSteps();
   for (const channel of channels) {
     loopLengthSteps = Math.max(loopLengthSteps, resolvePlayableContentLengthSteps(channel));
   }
@@ -2167,6 +2181,17 @@ class AudioEngine {
     }
   }
 
+  /**
+   * Offline timeline render used by export.
+   *
+   * `patternLengthSteps` is the declared `Pattern.lengthSteps` of the pattern a
+   * Pattern Loop export renders. It is additive and optional: Song exports and
+   * every existing caller keep their behaviour, and a Pattern export without it
+   * resolves the loop from channel content exactly as before. When supplied it is
+   * handed to the same `resolvePatternLoopLengthSteps()` Pattern Mode plays with,
+   * so a pattern that declares 32 steps exports a 32-step loop even when steps
+   * 16-31 hold no notes. Loop length is never re-derived here.
+   */
   public async renderTimelineOffline(
     channels: Channel[],
     clips: PlaylistClip[],
@@ -2177,6 +2202,7 @@ class AudioEngine {
     includeMixerFx = false,
     renderScope: OfflineRenderScope = 'song',
     onProgress?: OfflineRenderProgress,
+    patternLengthSteps?: number,
   ): Promise<AudioBuffer> {
     onProgress?.(15, `Preparing ${renderScope === 'pattern' ? 'pattern loop' : 'song'} export...`);
 
@@ -2226,6 +2252,7 @@ class AudioEngine {
       playbackProjectMixerTracks: this.playbackProjectMixerTracks,
       activePlayMode: this.activePlayMode,
       activePatternId: this.activePatternId,
+      activePatternLengthSteps: this.activePatternLengthSteps,
       currentStep: this.currentStep,
       currentBar: this.currentBar,
       bpm: this.bpm,
@@ -2259,6 +2286,9 @@ class AudioEngine {
       this.activePlayMode = renderScope === 'pattern' ? 'pat' : 'song';
       onProgress?.(40, `Offline graph ready (${renderScope === 'pattern' ? 'pattern' : 'song'} mode).`);
       this.activePatternId = undefined;
+      // An offline Pattern render is its own take: it must not inherit (or leave
+      // behind) the declared length of a live playback take.
+      this.activePatternLengthSteps = renderScope === 'pattern' ? patternLengthSteps : undefined;
       this.isPlaying = true;
       this.currentStep = 0;
       this.currentBar = 1;
@@ -2284,9 +2314,11 @@ class AudioEngine {
       const totalSteps = Math.ceil(totalDurationSeconds / secondsPerStep);
       // A Pattern Loop export must wrap at the same boundary as Pattern Mode
       // playback, otherwise steps beyond the first bar render silence. Song
-      // exports keep the one-bar grid the playlist is scheduled on.
+      // exports keep the one-bar grid the playlist is scheduled on. The declared
+      // pattern length is passed to the same resolver playback uses, so a
+      // declared 32-step pattern exports 32 steps even with an empty second bar.
       const patternLoopSteps = renderScope === 'pattern'
-        ? resolvePatternLoopLengthSteps(this.activeChannels)
+        ? resolvePatternLoopLengthSteps(this.activeChannels, patternLengthSteps)
         : 16;
       const scheduleStartProgress = 40;
       const scheduleEndProgress = 65;
@@ -2331,6 +2363,7 @@ class AudioEngine {
       this.playbackProjectMixerTracks = previous.playbackProjectMixerTracks;
       this.activePlayMode = previous.activePlayMode;
       this.activePatternId = previous.activePatternId;
+      this.activePatternLengthSteps = previous.activePatternLengthSteps;
       this.currentStep = previous.currentStep;
       this.currentBar = previous.currentBar;
       this.bpm = previous.bpm;
@@ -2364,7 +2397,9 @@ class AudioEngine {
     mixerTracksOrBpm: MixerTrack[] | number,
     bpmOrTotalBars?: number,
     totalBarsOrBitDepth?: number | (16 | 24 | 32),
-    bitDepthParam?: 16 | 24 | 32
+    bitDepthParam?: 16 | 24 | 32,
+    renderScope: OfflineRenderScope = 'song',
+    patternLengthSteps?: number
   ): Promise<{ stems: Record<string, Blob>; master: Blob }> {
     let mixerTracks: MixerTrack[] = [];
     let bpm = 120;
@@ -2389,7 +2424,12 @@ class AudioEngine {
       clips,
       mixerTracks,
       bpm,
-      totalBars
+      totalBars,
+      undefined,
+      false,
+      renderScope,
+      undefined,
+      patternLengthSteps
     );
     const master = this.audioBufferToWav(masterBuffer, bitDepth);
 
@@ -2421,7 +2461,12 @@ class AudioEngine {
         channelClips,
         mixerTracks,
         bpm,
-        totalBars
+        totalBars,
+        undefined,
+        false,
+        renderScope,
+        undefined,
+        patternLengthSteps
       );
 
       const cleanName = (channel.name || `Channel_${channel.id}`).replace(/[^a-zA-Z0-9_-]/g, '_');
@@ -2455,7 +2500,12 @@ class AudioEngine {
         [...trackClips, ...trackAutomationClips],
         mixerTracks,
         bpm,
-        totalBars
+        totalBars,
+        undefined,
+        false,
+        renderScope,
+        undefined,
+        patternLengthSteps
       );
 
       const trackNum = trackIdx + 1;
@@ -2708,6 +2758,14 @@ class AudioEngine {
   public synchronizePlaybackState(update: PlaybackStateUpdate): void {
     if (!this.isPlaying) return;
 
+    // Adopt the declared pattern length before merging channel edits so a length
+    // change that arrives together with content is resolved against the new value.
+    const patternLengthChanged = typeof update.patternLengthSteps === 'number'
+      && update.patternLengthSteps !== this.activePatternLengthSteps;
+    if (patternLengthChanged) {
+      this.activePatternLengthSteps = update.patternLengthSteps;
+    }
+
     if (update.channels) {
       const previousProjectById = new Map(this.playbackProjectChannels.map(channel => [channel.id, channel]));
       const activeById = new Map(this.activeChannels.map(channel => [channel.id, channel]));
@@ -2718,16 +2776,15 @@ class AudioEngine {
         return mergePlaybackProjectEdits(active, previousProject, channel) as Channel;
       });
       this.playbackProjectChannels = structuredClone(update.channels);
+    }
 
-      // Extending or trimming step-sequencer/piano-roll content while Pattern
-      // Mode plays must move the loop boundary with it so the edit is audible
-      // without a transport restart. Song Mode resolves its loop length per
-      // playlist clip, so it is deliberately untouched here.
-      if (this.activePlayMode === 'pat') {
-        this.transport?.setPatternLoopSteps(
-          resolvePatternLoopLengthSteps(this.activeChannels, this.activePatternLengthSteps)
-        );
-      }
+    // Re-resolve once after either source changed. With a declared length the
+    // Pattern owns the boundary; without one, legacy content-derived takes still
+    // follow channel edits. Song Mode stays on its bar-relative playlist grid.
+    if ((update.channels || patternLengthChanged) && this.activePlayMode === 'pat') {
+      this.transport?.setPatternLoopSteps(
+        resolvePatternLoopLengthSteps(this.activeChannels, this.activePatternLengthSteps)
+      );
     }
 
     if (update.clips) {

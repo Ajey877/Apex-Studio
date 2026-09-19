@@ -58,8 +58,21 @@ describe('project export helpers', () => {
     assert.equal(getProjectRenderBars(lateArrangement, 'song'), 40);
   });
 
-  it('keeps the pattern export scope at the documented 4-bar loop', () => {
-    assert.equal(getProjectRenderBars(clips, 'pattern'), 4);
+  it('keeps 16/32/64-step pattern exports inside the documented 4-bar window', () => {
+    assert.equal(getProjectRenderBars(clips, 'pattern'), 4, 'legacy caller/default length');
+    assert.equal(getProjectRenderBars(clips, 'pattern', 16), 4);
+    assert.equal(getProjectRenderBars(clips, 'pattern', 32), 4);
+    assert.equal(getProjectRenderBars(clips, 'pattern', 64), 4);
+  });
+
+  it('grows the pattern render window instead of truncating lengths above 64 steps', () => {
+    assert.equal(getProjectRenderBars(clips, 'pattern', 80), 5);
+    assert.equal(getProjectRenderBars(clips, 'pattern', 128), 8);
+    assert.equal(getProjectRenderBars(clips, 'pattern', 256), 16);
+  });
+
+  it('does not let pattern length change the full-song render window', () => {
+    assert.equal(getProjectRenderBars(clips, 'song', 256), 14);
   });
 
   it('writes a valid Standard MIDI file containing a note event', async () => {

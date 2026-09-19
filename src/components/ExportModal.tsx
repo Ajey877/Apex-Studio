@@ -6,6 +6,7 @@ import { audioEngine } from '../audio/audioEngine';
 import { audioBufferToWav } from '../audio/wavEncoder';
 import { buildStandardMidiFile, getProjectRenderBars } from '../utils/exportUtils';
 import type { ExportScope } from '../utils/exportUtils';
+import { normalizePatternLengthSteps } from '../state/patternLength';
 
 interface ExportModalProps {
   isOpen: boolean;
@@ -14,11 +15,18 @@ interface ExportModalProps {
   clips: PlaylistClip[];
   meta: ProjectMetadata;
   mixerTracks: MixerTrack[];
+  /**
+   * Declared `Pattern.lengthSteps` of the selected pattern, resolved by App from
+   * project state. A Pattern Loop export passes it straight through to the
+   * offline render API so the export wraps where Pattern Mode wraps; the modal
+   * never resolves a pattern length itself.
+   */
+  patternLengthSteps?: number;
 }
 
 type ExportFormat = 'wav24' | 'wav16' | 'wav32' | 'midi' | 'stems';
 
-export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, channels, clips, meta, mixerTracks }) => {
+export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, channels, clips, meta, mixerTracks, patternLengthSteps }) => {
   const [format, setFormat] = useState<ExportFormat>('wav24');
   const [scope, setScope] = useState<ExportScope>('song');
   const [isRendering, setIsRendering] = useState(false);
@@ -60,7 +68,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, chann
     setStatusText('Preparing deterministic export...');
 
     try {
-      const totalBars = getProjectRenderBars(clips, scope);
+      const totalBars = getProjectRenderBars(clips, scope, patternLengthSteps);
 
       if (format === 'midi') {
         setStatusText(`Writing Standard MIDI (${totalBars} bars)...`);
@@ -77,7 +85,16 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, chann
         if (format === 'stems') {
           setStatusText(`Rendering isolated stems (${totalBars} bars)...`);
           setRenderProgress(35);
-          const { stems, master } = await audioEngine.renderProjectStems(channels, clips, mixerTracks, meta.bpm, totalBars, bitDepth);
+          const { stems, master } = await audioEngine.renderProjectStems(
+            channels,
+            clips,
+            mixerTracks,
+            meta.bpm,
+            totalBars,
+            bitDepth,
+            scope,
+            patternLengthSteps
+          );
           const zip = new JSZip();
           const folder = zip.folder(`${meta.name.replace(/\s+/g, '_')}_Stems_BPM${meta.bpm}`);
           Object.entries(stems).forEach(([stemName, blob]) => folder?.file(stemName, blob));
@@ -113,6 +130,9 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, chann
               setRenderProgress(progress);
               setStatusText(status);
             },
+            // Pattern scope wraps at the selected pattern's declared length; the
+            // render API ignores it for a Song export.
+            patternLengthSteps,
           );
           setRenderProgress(85);
           const wavBlob = audioBufferToWav(renderedBuffer, bitDepth);
@@ -139,6 +159,11 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, chann
     a.click();
     document.body.removeChild(a);
   };
+
+  // Pattern Loop copy states the length the render will actually use, so the
+  // modal can never claim a different loop than the selected pattern declares.
+  const patternLoopSteps = normalizePatternLengthSteps(patternLengthSteps);
+  const patternRenderBars = getProjectRenderBars(clips, 'pattern', patternLengthSteps);
 
   const formatOptions: Array<{ id: ExportFormat; name: string; desc: string }> = [
     { id: 'stems', name: 'All Stems (.zip)', desc: 'Multi-track WAV bundle' },
@@ -170,9 +195,9 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, chann
               <div className="font-bold text-xs">Full Song</div>
               <div className="text-[9px] text-[#777]">Render through the last playlist clip ({getProjectRenderBars(clips, 'song')} bars)</div>
             </button>
-            <button onClick={() => { setScope('pattern'); setDownloadUrl(null); }} className={`p-2.5 rounded-lg border text-left transition ${scope === 'pattern' ? 'bg-[#1a1a1d] border-[#ff6e00] text-white' : 'bg-[#121214] border-[#333336] text-[#777] hover:text-white'}`}>
+            <button id="export-scope-pattern" onClick={() => { setScope('pattern'); setDownloadUrl(null); }} className={`p-2.5 rounded-lg border text-left transition ${scope === 'pattern' ? 'bg-[#1a1a1d] border-[#ff6e00] text-white' : 'bg-[#121214] border-[#333336] text-[#777] hover:text-white'}`}>
               <div className="font-bold text-xs">Pattern Loop</div>
-              <div className="text-[9px] text-[#777]">Export the documented 4-bar loop</div>
+              <div className="text-[9px] text-[#777]">Export the selected pattern's {patternLoopSteps}-step loop ({patternRenderBars} bars)</div>
             </button>
           </div>
 

@@ -216,7 +216,7 @@ export interface Channel {
   pitch: number; // semitones offset (-12 to +12)
   mute: boolean;
   solo: boolean;
-  steps: boolean[]; // 16 or 32 steps for step sequencer
+  steps: boolean[]; // Channel-scoped sequencer data; typically 16/32, may preserve later steps
   stepVelocities?: number[];
   notes: Note[]; // Notes for piano roll
   synthParams: SynthParameters;
