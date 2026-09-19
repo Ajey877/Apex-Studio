@@ -167,6 +167,27 @@ export function resolvePlayableContentLengthSteps(
   return bars * STEPS_PER_BAR;
 }
 
+/**
+ * Pattern Mode loops over the length of the pattern that is playing.
+ *
+ * The project model stores this as `Pattern.lengthSteps` (16, 32 or 64), while
+ * step-sequencer and piano-roll edits can also grow past the declared length.
+ * The resolved loop length is therefore the declared pattern length raised to
+ * whole bars, floored by the content of every channel of the playback snapshot
+ * so no reachable step is ever cut off. Song Mode is unaffected: it resolves a
+ * loop length per playlist clip instead.
+ */
+export function resolvePatternLoopLengthSteps(
+  channels: Channel[],
+  patternLengthSteps?: number
+): number {
+  let loopLengthSteps = resolvePlayableContentLengthSteps(undefined, patternLengthSteps);
+  for (const channel of channels) {
+    loopLengthSteps = Math.max(loopLengthSteps, resolvePlayableContentLengthSteps(channel));
+  }
+  return loopLengthSteps;
+}
+
 class AudioEngine {
   public isOfflineRendering = false;
   private liveCtx: AudioContext | null = null;
@@ -2261,12 +2282,18 @@ class AudioEngine {
       if (masterTrack) this.updateMixerTrack(masterTrack); else this.getOrCreateMixerChannel(0);
       for (const track of renderTracks) if (track.id !== 0) this.updateMixerTrack(track);
       const totalSteps = Math.ceil(totalDurationSeconds / secondsPerStep);
+      // A Pattern Loop export must wrap at the same boundary as Pattern Mode
+      // playback, otherwise steps beyond the first bar render silence. Song
+      // exports keep the one-bar grid the playlist is scheduled on.
+      const patternLoopSteps = renderScope === 'pattern'
+        ? resolvePatternLoopLengthSteps(this.activeChannels)
+        : 16;
       const scheduleStartProgress = 40;
       const scheduleEndProgress = 65;
       // Schedule the offline timeline in small cooperative batches so the browser
       // can service rendering/UI work instead of appearing unresponsive on longer exports.
       for (let globalStep = 0; globalStep < totalSteps; globalStep += 1) {
-        this.currentStep = globalStep % 16;
+        this.currentStep = globalStep % patternLoopSteps;
         this.currentBar = Math.floor(globalStep / 16) + 1;
         const swingOffsetSeconds = this.currentStep % 2 === 1 ? (this.swing / 100) * (secondsPerStep * 0.4) : 0;
         const audioTime = globalStep * secondsPerStep + swingOffsetSeconds;
@@ -2550,6 +2577,8 @@ class AudioEngine {
   private playbackProjectMixerTracks: MixerTrack[] = [];
   private activePlayMode: 'pat' | 'song' = 'pat';
   private activePatternId?: string;
+  /** Declared `Pattern.lengthSteps` of the pattern the active take is looping. */
+  private activePatternLengthSteps?: number;
 
   public setBpm(bpm: number) {
     this.bpm = Math.max(20, Math.min(300, bpm));
@@ -2689,6 +2718,16 @@ class AudioEngine {
         return mergePlaybackProjectEdits(active, previousProject, channel) as Channel;
       });
       this.playbackProjectChannels = structuredClone(update.channels);
+
+      // Extending or trimming step-sequencer/piano-roll content while Pattern
+      // Mode plays must move the loop boundary with it so the edit is audible
+      // without a transport restart. Song Mode resolves its loop length per
+      // playlist clip, so it is deliberately untouched here.
+      if (this.activePlayMode === 'pat') {
+        this.transport?.setPatternLoopSteps(
+          resolvePatternLoopLengthSteps(this.activeChannels, this.activePatternLengthSteps)
+        );
+      }
     }
 
     if (update.clips) {
@@ -2731,7 +2770,8 @@ class AudioEngine {
     clips: PlaylistClip[],
     mode: 'pat' | 'song',
     patternId?: string,
-    mixerTracks?: MixerTrack[]
+    mixerTracks?: MixerTrack[],
+    patternLengthSteps?: number
   ) {
     if (!this.ctx) this.init();
     if (this.ctx && this.ctx.state === 'suspended') {
@@ -2751,6 +2791,7 @@ class AudioEngine {
     this.playbackProjectMixerTracks = structuredClone(playbackSnapshot.mixerTracks);
     this.activePlayMode = mode;
     this.activePatternId = patternId;
+    this.activePatternLengthSteps = patternLengthSteps;
 
     // Apply the current project mixer graph at transport start. Subsequent
     // mixer edits use synchronizePlaybackState and update only the changed
@@ -2764,6 +2805,13 @@ class AudioEngine {
 
     this.transport.setBpm(this.bpm);
     this.transport.setMode(mode);
+    // Pattern Mode loops over the pattern length (16/32/64 steps); Song Mode
+    // keeps the one-bar grid that playlist scheduling is built on.
+    this.transport.setPatternLoopSteps(
+      mode === 'pat'
+        ? resolvePatternLoopLengthSteps(this.activeChannels, patternLengthSteps)
+        : undefined
+    );
     this.transport.setCallbacks({
       onStep: (step, bar, audioTime) => {
         if (!this.isPlaying || this.playbackGeneration !== currentGeneration) return;
