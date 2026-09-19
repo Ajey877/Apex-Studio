@@ -368,12 +368,20 @@ export function App() {
       audioEngine.stop();
       setIsPlaying(false);
     } else {
-      audioEngine.play(
+      // Play from an isolated snapshot: automation writes channel volume/pan/filter
+      // during playback and must never mutate live project state (undo/redo and
+      // saves would otherwise capture transient playback values).
+      const snapshot = audioEngine.createPlaybackSnapshot(
         projectState.channels,
         projectState.playlistClips,
+        projectState.mixerTracks
+      );
+      audioEngine.play(
+        snapshot.channels,
+        snapshot.clips,
         playMode,
         projectState.selectedPatternId,
-        structuredClone(projectState.mixerTracks)
+        snapshot.mixerTracks
       );
       setIsPlaying(true);
     }
@@ -391,12 +399,17 @@ export function App() {
     setPlayMode(nextMode);
     if (isPlaying) {
       audioEngine.stop();
-      audioEngine.play(
+      const snapshot = audioEngine.createPlaybackSnapshot(
         projectState.channels,
         projectState.playlistClips,
+        projectState.mixerTracks
+      );
+      audioEngine.play(
+        snapshot.channels,
+        snapshot.clips,
         nextMode,
         projectState.selectedPatternId,
-        structuredClone(projectState.mixerTracks)
+        snapshot.mixerTracks
       );
     }
   };

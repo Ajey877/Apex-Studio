@@ -35,11 +35,13 @@ import {
   resolvePlaylistKeyboardShortcut,
   resolvePlaylistTargetChannel,
   splitPlaylistClip,
-  updatePlaylistAutomationPoint,
   addPlaylistAutomationPoint,
   movePlaylistAutomationPoint,
   deletePlaylistAutomationPoint,
   updatePlaylistAutomationTarget,
+  nextSelectedPointIndex,
+  findAutomationPointIndexNearX,
+  resolveAddNodePosition,
 } from './playlistClipOperations';
 
 interface PlaylistArrangerProps {
@@ -160,6 +162,23 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
   const rulerContainerRef = useRef<HTMLDivElement | null>(null);
 
   const bounds = { totalBars, maxTracks: tracks.length };
+
+  const NEAR_POINT_TOLERANCE_PX = 8;
+
+  /**
+   * Single funnel for clip selection. A selected automation point is only
+   * meaningful while its clip stays selected, so the index is resolved through
+   * nextSelectedPointIndex: switching to another clip, selecting a fresh clip,
+   * or clearing the selection can never leave a stale point index behind that
+   * a later Delete could act on.
+   */
+  const selectClip = (clipId: string | null, opts?: { openAutomationEditor?: boolean }) => {
+    setSelectedClipId(clipId);
+    setSelectedPointIndex(prev => nextSelectedPointIndex(selectedClipId, prev, clipId));
+    if (opts?.openAutomationEditor && clipId !== null) {
+      setAutomationEditorClipId(clipId);
+    }
+  };
 
   const handleRulerScrub = (clientX: number) => {
     if (!rulerContainerRef.current || !onSeekToBar) return;
@@ -318,11 +337,17 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
     if (!svg || clip.type !== 'automation' || !clip.automationPoints?.[pointIndex]) return;
     event.preventDefault();
     event.stopPropagation();
+    // Capture on the circle so the drag keeps receiving pointermove/up even
+    // when the pointer leaves the SVG or the element reparents mid-drag.
+    try {
+      event.currentTarget.setPointerCapture(event.pointerId);
+    } catch {
+      // Browser or unmounted target may reject capture
+    }
     const rect = svg.getBoundingClientRect();
     didMoveRef.current = false;
     onPlaylistInteractionStart?.('automation-point');
-    setSelectedClipId(clip.id);
-    setAutomationEditorClipId(clip.id);
+    selectClip(clip.id, { openAutomationEditor: true });
     setSelectedPointIndex(pointIndex);
     const next: Interaction = {
       kind: 'automation-point',
@@ -350,7 +375,7 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
     } catch {
       // Browser or unmounted target may reject capture
     }
-    setSelectedClipId(next.clip.id);
+    selectClip(next.clip.id);
     interactionRef.current = next;
     setInteraction(next);
   };
@@ -372,45 +397,78 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
     onPlaylistInteractionEnd?.();
   };
 
+  // Keep latest callbacks in refs so the permanently-mounted window listeners
+  // below never operate on stale closures (bounds, props, or state snapshots).
+  const updateInteractionRef = useRef(updateInteraction);
+  updateInteractionRef.current = updateInteraction;
+  const endInteractionRef = useRef(endInteraction);
+  endInteractionRef.current = endInteraction;
+  const onPlaylistInteractionEndRef = useRef(onPlaylistInteractionEnd);
+  onPlaylistInteractionEndRef.current = onPlaylistInteractionEnd;
+
   // Window pointer listeners guarantee that even if DOM elements reparent or drop pointer capture,
   // pointer up/cancel will always terminate the active playlist interaction safely.
-  // Mounted continuously with zero render lag, reading synchronously from interactionRef.current.
+  // Mounted continuously for the component lifetime, reading synchronously from refs.
   useEffect(() => {
     const handleWindowPointerMove = (e: PointerEvent) => {
       const active = interactionRef.current;
-      if (active && (active.pointerId === undefined || e.pointerId === active.pointerId)) {
-        updateInteraction(e.clientX, e.clientY);
+      if (active && e.pointerId === active.pointerId) {
+        updateInteractionRef.current(e.clientX, e.clientY);
       }
     };
 
     const handleWindowPointerUp = (e: PointerEvent) => {
       const active = interactionRef.current;
-      if (active && (active.pointerId === undefined || e.pointerId === active.pointerId)) {
-        endInteraction(e);
+      if (active && e.pointerId === active.pointerId) {
+        endInteractionRef.current(e);
       }
     };
 
     const handleWindowPointerCancel = (e: PointerEvent) => {
       const active = interactionRef.current;
-      if (active && (active.pointerId === undefined || e.pointerId === active.pointerId)) {
-        endInteraction(e);
+      if (active && e.pointerId === active.pointerId) {
+        endInteractionRef.current(e);
+      }
+    };
+
+    // If the window loses focus mid-drag (alt-tab, OS overlay), finalize the
+    // interaction so onPlaylistInteractionEnd always fires and undo/redo is
+    // never left blocked by a phantom active interaction.
+    const handleWindowBlur = () => {
+      if (interactionRef.current) {
+        endInteractionRef.current();
       }
     };
 
     window.addEventListener('pointermove', handleWindowPointerMove);
     window.addEventListener('pointerup', handleWindowPointerUp);
     window.addEventListener('pointercancel', handleWindowPointerCancel);
+    window.addEventListener('blur', handleWindowBlur);
 
     return () => {
       window.removeEventListener('pointermove', handleWindowPointerMove);
       window.removeEventListener('pointerup', handleWindowPointerUp);
       window.removeEventListener('pointercancel', handleWindowPointerCancel);
+      window.removeEventListener('blur', handleWindowBlur);
+    };
+  }, []);
+
+  // Unmount safety net: if the component unmounts mid-drag (view switch),
+  // release the App-level interaction lock so undo/redo and history commits
+  // are not stuck for the rest of the session.
+  useEffect(() => {
+    return () => {
+      if (interactionRef.current) {
+        interactionRef.current = null;
+        setInteraction(null);
+        onPlaylistInteractionEndRef.current?.();
+      }
     };
   }, []);
 
   const deleteClip = (clipId: string) => {
     onUpdateClips(deletePlaylistClip(clips, clipId));
-    if (selectedClipId === clipId) setSelectedClipId(null);
+    if (selectedClipId === clipId) selectClip(null);
     if (automationEditorClipId === clipId) setAutomationEditorClipId(null);
   };
 
@@ -425,7 +483,7 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
         bounds
       );
       onUpdateClips([...clips, duplicate]);
-      setSelectedClipId(duplicate.id);
+      selectClip(duplicate.id);
       if (clip.type === 'automation') setAutomationEditorClipId(duplicate.id);
     } catch {
       setStatusMessage('Duplicate cannot fit within the playlist bounds.');
@@ -437,7 +495,7 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
     try {
       const [left, right] = splitPlaylistClip(clip, splitBar, DEFAULT_GRID_BARS, bounds);
       onUpdateClips([...deletePlaylistClip(clips, clip.id), left, right]);
-      setSelectedClipId(left.id);
+      selectClip(left.id);
       if (automationEditorClipId === clip.id) setAutomationEditorClipId(null);
     } catch {
       setStatusMessage('Clip cannot be split at that position.');
@@ -459,10 +517,7 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
     }
 
     if (existingClip) {
-      setSelectedClipId(existingClip.id);
-      if (existingClip.type === 'automation') {
-        setAutomationEditorClipId(existingClip.id);
-      }
+      selectClip(existingClip.id, { openAutomationEditor: existingClip.type === 'automation' });
       return;
     }
 
@@ -519,26 +574,12 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
     onUpdateClips([...clips, newClip]);
   };
 
-  const handleUpdateAutomationPoint = (clipId: string, pointIndex: number, newY: number) => {
-    const targetClip = clips.find(c => c.id === clipId);
-    if (!targetClip || targetClip.type !== 'automation' || !targetClip.automationPoints?.[pointIndex]) return;
-    try {
-      const currentPt = targetClip.automationPoints[pointIndex];
-      const res = movePlaylistAutomationPoint(targetClip, pointIndex, currentPt.x, newY);
-      setSelectedPointIndex(res.nextIndex);
-      onUpdateClips(clips.map(c => c.id === clipId ? res.clip : c));
-    } catch (err) {
-      console.warn('Failed to update automation point', err);
-    }
-  };
-
   const handleAddAutomationPoint = (clipId: string, normX: number, normY: number) => {
     const targetClip = clips.find(c => c.id === clipId);
     if (!targetClip || targetClip.type !== 'automation') return;
     try {
       const res = addPlaylistAutomationPoint(targetClip, normX, normY);
-      setSelectedClipId(clipId);
-      setAutomationEditorClipId(clipId);
+      selectClip(clipId, { openAutomationEditor: true });
       setSelectedPointIndex(res.pointIndex);
       onUpdateClips(clips.map(c => c.id === clipId ? res.clip : c));
     } catch (err) {
@@ -566,6 +607,17 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
   const activeAutomationClip = clips.find(c => c.id === automationEditorClipId);
   const selectedClip = clips.find(c => c.id === selectedClipId);
 
+  // Selection hygiene: if the selected clip disappears or its point count
+  // shrinks below the selected index (delete, split, undo/redo), drop the
+  // stale point index so Delete can never act on an out-of-range point.
+  useEffect(() => {
+    if (selectedPointIndex === null) return;
+    const clip = clips.find(c => c.id === selectedClipId);
+    if (!clip || clip.type !== 'automation' || !clip.automationPoints || selectedPointIndex >= clip.automationPoints.length) {
+      setSelectedPointIndex(null);
+    }
+  }, [clips, selectedClipId, selectedPointIndex]);
+
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement | null;
@@ -590,8 +642,7 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
           return;
         }
         if (selectedClipId) {
-          setSelectedClipId(null);
-          setSelectedPointIndex(null);
+          selectClip(null);
           return;
         }
         return;
@@ -654,7 +705,6 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
           {/* Playlist History */}
           <div className="flex items-center gap-0.5 bg-[#121214] border border-[#333336] p-0.5 rounded text-xs">
             <button
-              id="playlist-undo-btn"
               onClick={onUndo}
               disabled={!canUndo}
               className="px-2 py-0.5 rounded-sm font-semibold text-[10px] text-white hover:bg-[#333336] disabled:opacity-30 disabled:cursor-not-allowed"
@@ -663,7 +713,6 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
               Undo
             </button>
             <button
-              id="playlist-redo-btn"
               onClick={onRedo}
               disabled={!canRedo}
               className="px-2 py-0.5 rounded-sm font-semibold text-[10px] text-white hover:bg-[#333336] disabled:opacity-30 disabled:cursor-not-allowed"
@@ -676,7 +725,6 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
           {/* Clip Type Picker */}
           <div className="flex items-center gap-0.5 bg-[#121214] border border-[#333336] p-0.5 rounded text-xs">
             <button
-              id="playlist-clip-type-pattern"
               onClick={() => setClipTypeToAdd('pattern')}
               className={`px-2 py-0.5 rounded-sm font-semibold transition text-[10px] ${
                 clipTypeToAdd === 'pattern' ? 'bg-[#ff6e00] text-black shadow' : 'text-[#777] hover:text-white'
@@ -685,7 +733,6 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
               Pattern
             </button>
             <button
-              id="playlist-clip-type-audio"
               onClick={() => setClipTypeToAdd('audio')}
               className={`px-2 py-0.5 rounded-sm font-semibold transition text-[10px] ${
                 clipTypeToAdd === 'audio' ? 'bg-[#00ff88] text-black shadow' : 'text-[#777] hover:text-white'
@@ -694,7 +741,6 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
               Audio Stem
             </button>
             <button
-              id="playlist-clip-type-automation"
               onClick={() => setClipTypeToAdd('automation')}
               className={`px-2 py-0.5 rounded-sm font-semibold transition text-[10px] ${
                 clipTypeToAdd === 'automation' ? 'bg-[#00e5ff] text-black shadow' : 'text-[#777] hover:text-white'
@@ -1018,7 +1064,6 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
                   }
                 }}
                 className="h-16 border-b border-[#1c1c20] flex relative bg-[#0e0e10] transition-colors"
-                data-track-lane={trackIdx}
               >
                 {/* 1 Bar grid slots */}
                 {Array.from({ length: totalBars }).map((_, barIdx) => {
@@ -1026,7 +1071,6 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
                   return (
                     <div
                       key={barIdx}
-                      data-bar-cell={barIdx}
                       onClick={() => handleGridCellClick(trackIdx, barIdx)}
                       className={`w-24 h-full border-r border-[#1c1c20] cursor-pointer transition ${
                         isPlayheadBar ? 'bg-white/5' : 'hover:bg-white/10'
@@ -1068,11 +1112,8 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
                         }
                         if (activeTool === 'delete') {
                           deleteClip(clip.id);
-                        } else if (isAuto) {
-                          setSelectedClipId(clip.id);
-                          setAutomationEditorClipId(clip.id);
                         } else {
-                          setSelectedClipId(clip.id);
+                          selectClip(clip.id, { openAutomationEditor: isAuto });
                         }
                       }}
                       style={{
@@ -1110,10 +1151,17 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
                               const usableWidth = Math.max(1, clip.lengthBars * 96 - 12);
                               const normX = Math.max(0, Math.min(1, (e.clientX - rect.left) / usableWidth));
                               const normY = Math.max(0, Math.min(1, 1 - (e.clientY - rect.top) / 20));
+                              // Clicks that land on/near an existing point select that point
+                              // instead of silently relocating it; adding happens on free space.
+                              const nearIdx = findAutomationPointIndexNearX(clip.automationPoints ?? [], normX, NEAR_POINT_TOLERANCE_PX / usableWidth);
+                              if (nearIdx !== null) {
+                                selectClip(clip.id, { openAutomationEditor: true });
+                                setSelectedPointIndex(nearIdx);
+                                return;
+                              }
                               try {
                                 const res = addPlaylistAutomationPoint(clip, normX, normY);
-                                setSelectedClipId(clip.id);
-                                setAutomationEditorClipId(clip.id);
+                                selectClip(clip.id, { openAutomationEditor: true });
                                 setSelectedPointIndex(res.pointIndex);
                                 onUpdateClips(clips.map(c => c.id === clip.id ? res.clip : c));
                               } catch (err) {
@@ -1139,7 +1187,7 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
                                   fill={isPointSelected ? "#00e5ff" : "#ffffff"}
                                   stroke={isPointSelected ? "#ffffff" : "none"}
                                   strokeWidth="1.5"
-                                  className="cursor-move hover:r-[5px] transition-[r]"
+                                  className="cursor-move"
                                   style={{ touchAction: 'none' }}
                                   onContextMenu={(e) => {
                                     e.preventDefault();
@@ -1317,7 +1365,7 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
               Delete Clip
             </button>
 
-            <button onClick={() => setSelectedClipId(null)} className="text-[#888] hover:text-white">✕</button>
+            <button onClick={() => selectClip(null)} className="text-[#888] hover:text-white">✕</button>
           </div>
         </div>
       )}
@@ -1430,9 +1478,15 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
             )}
 
             <button
-              onClick={() => handleAddAutomationPoint(activeAutomationClip.id, 0.5, 0.5)}
+              onClick={() => {
+                // Resolve a collision-free insert position (widest-gap midpoint,
+                // value on the envelope) so Add Node always adds on fresh clips
+                // whose template already has a node at the center.
+                const pos = resolveAddNodePosition(activeAutomationClip.automationPoints || []);
+                handleAddAutomationPoint(activeAutomationClip.id, pos.x, pos.y);
+              }}
               className="px-2.5 py-1 bg-[#282830] hover:bg-[#333] text-white rounded font-bold"
-              title="Add a new automation point at center"
+              title="Add a new automation point on the widest envelope gap"
             >
               + Add Node
             </button>

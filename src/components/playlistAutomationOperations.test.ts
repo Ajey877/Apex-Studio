@@ -6,7 +6,10 @@ import {
   movePlaylistAutomationPoint,
   deletePlaylistAutomationPoint,
   updatePlaylistAutomationTarget,
-  updatePlaylistAutomationPoint
+  updatePlaylistAutomationPoint,
+  nextSelectedPointIndex,
+  findAutomationPointIndexNearX,
+  resolveAddNodePosition
 } from './playlistClipOperations';
 import { createHistory } from '../state/projectHistory';
 import { createDefaultProjectState, normalizeProjectState } from '../state/projectState';
@@ -98,10 +101,72 @@ describe('Phase 6.1 Automation Point Operations', () => {
     assert.equal(updated.automationPoints?.[1].x, 0.6);
     assert.equal(updated.automationPoints?.[1].y, 0.3);
 
-    // Clamping outside bounds
-    const { clip: clamped, nextIndex: clampedIdx } = movePlaylistAutomationPoint(clip, 1, 1.5, -0.2);
-    assert.equal(clamped.automationPoints?.[clampedIdx].x, 1);
-    assert.equal(clamped.automationPoints?.[clampedIdx].y, 0);
+    // Y clamps outside [0, 1]
+    const { clip: yClamped } = movePlaylistAutomationPoint(clip, 1, 0.6, -0.2);
+    assert.equal(yClamped.automationPoints?.[1].x, 0.6);
+    assert.equal(yClamped.automationPoints?.[1].y, 0);
+
+    // Free movement near (but not onto) the endpoint still works
+    const { clip: nearEdge } = movePlaylistAutomationPoint(clip, 1, 0.999, 0.5);
+    assert.equal(nearEdge.automationPoints?.[1].x, 0.999);
+
+    // X clamped to 1 collides with the endpoint at x=1: the X is rejected
+    // (no coincident points / zero-width segments), the Y still applies.
+    const { clip: xRejected, nextIndex: rejectedIdx } = movePlaylistAutomationPoint(clip, 1, 1.5, -0.2);
+    assert.equal(rejectedIdx, 1);
+    assert.equal(xRejected.automationPoints?.[1].x, 0.5);
+    assert.equal(xRejected.automationPoints?.[1].y, 0);
+    assert.equal(xRejected.automationPoints?.[2].x, 1);
+  });
+
+  test('movePlaylistAutomationPoint never produces coincident X after grid snapping', () => {
+    const clip = createBaseAutoClip([
+      { x: 0, y: 0.1, tension: 0 },
+      { x: 0.5, y: 0.5, tension: 0 },
+      { x: 0.5625, y: 0.9, tension: 0 },
+      { x: 1, y: 0.2, tension: 0 }
+    ]);
+
+    // Requested snap step 8 (x=0.5) is occupied by point 1: nearest free step
+    // search engages. Steps 7 (0.4375) and 9 (0.5625) are both 1 step away and
+    // free; the tie deterministically resolves to the lower step.
+    const { clip: moved, nextIndex } = movePlaylistAutomationPoint(clip, 2, 0.51, 0.4, 16);
+    const xs = moved.automationPoints!.map(p => p.x);
+    assert.deepEqual(xs, [0, 0.4375, 0.5, 1]);
+    assert.equal(nextIndex, 1);
+    assert.equal(moved.automationPoints?.[1].y, 0.4);
+
+    // Unsnapped drop exactly onto another point's X is rejected as well.
+    const { clip: unsnapped } = movePlaylistAutomationPoint(clip, 2, 0.5, 0.7);
+    assert.equal(unsnapped.automationPoints?.[2].x, 0.5625);
+    assert.equal(unsnapped.automationPoints?.[2].y, 0.7);
+
+    // Envelope has no zero-width segments after every operation.
+    const sorted = [...unsnapped.automationPoints!].sort((a, b) => a.x - b.x);
+    for (let i = 1; i < sorted.length; i++) {
+      assert.ok(sorted[i].x - sorted[i - 1].x > 0, 'point X values must be strictly increasing');
+    }
+  });
+
+  test('movePlaylistAutomationPoint keeps snapped moves working near occupied steps', () => {
+    const clip = createBaseAutoClip([
+      { x: 0, y: 0.1, tension: 0 },
+      { x: 0.3, y: 0.5, tension: 0 },
+      { x: 0.7, y: 0.6, tension: 0 },
+      { x: 1, y: 0.9, tension: 0 }
+    ]);
+
+    // Requested step round(0.71*16)=11 -> 0.6875 (free) -> applied; it sorts
+    // in front of the off-grid point at 0.7.
+    const { clip: moved, nextIndex } = movePlaylistAutomationPoint(clip, 1, 0.71, 0.75, 16);
+    assert.equal(moved.automationPoints?.[1].x, 0.6875);
+    assert.equal(moved.automationPoints?.[1].y, 0.75);
+    assert.equal(nextIndex, 1);
+
+    // Requested step round(0.73*16)=12 -> 0.75 free -> crossing peers works.
+    const { clip: crossed } = movePlaylistAutomationPoint(clip, 1, 0.73, 0.8, 16);
+    assert.equal(crossed.automationPoints?.[2].x, 0.75);
+    assert.equal(crossed.automationPoints?.[1].x, 0.7);
   });
 
   test('movePlaylistAutomationPoint snaps X to grid subdivisions when requested', () => {
@@ -247,7 +312,6 @@ describe('Phase 6.1 Automation Point Operations', () => {
     // Midway between 0 and 0.5: linear value is 0.5
     assert.equal(Number(audioEngine.interpolateAutomationCurve(points, 0.25).toFixed(4)), 0.5);
 
-    // Target application: Channel Volume
     const mockChannel: Channel = {
       id: 'ch-test-1',
       name: 'Test Synth',
@@ -293,27 +357,6 @@ describe('Phase 6.1 Automation Point Operations', () => {
       }
     };
 
-    audioEngine.applyAutomationValue(
-      { type: 'channel_vol', targetId: 'ch-test-1' },
-      0.35,
-      [mockChannel],
-      [],
-      0
-    );
-    assert.equal(mockChannel.volume, 0.35);
-
-    // Channel Filter Cutoff
-    audioEngine.applyAutomationValue(
-      { type: 'channel_filter_cutoff', targetId: 'ch-test-1' },
-      0.5,
-      [mockChannel],
-      [],
-      0
-    );
-    // 40 + (0.5^2) * 18000 = 40 + 0.25 * 18000 = 4540
-    assert.equal(mockChannel.synthParams.filterCutoff, 4540);
-
-    // Mixer Volume
     const mockMixerTrack: MixerTrack = {
       id: 2,
       name: 'Insert 2',
@@ -328,13 +371,234 @@ describe('Phase 6.1 Automation Point Operations', () => {
       fxSlots: []
     };
 
-    audioEngine.applyAutomationValue(
-      { type: 'mixer_vol', targetId: 2 },
-      0.6,
-      [],
-      [mockMixerTrack],
-      0
-    );
-    assert.equal(mockMixerTrack.volume, 0.6 * 1.25);
+    // Test seam: the engine only applies automation once an AudioContext
+    // exists (production always has one: the transport or the offline
+    // renderer). Node tests install a minimal fake context plus fake audio
+    // graph nodes and restore the originals afterwards.
+    const engine = audioEngine as unknown as Record<PropertyKey, unknown>;
+    const originalCtx = engine.ctx;
+    const originalMasterGain = engine.masterGain;
+    const originalMixerChannels = engine.mixerChannels;
+    const masterGainCalls: Array<[number, number, number]> = [];
+    const mixerGainCalls: Array<[number, number, number]> = [];
+    const mixerPanCalls: Array<[number, number, number]> = [];
+
+    engine.ctx = { currentTime: 0 };
+    engine.masterGain = {
+      gain: { setTargetAtTime: (value: number, time: number, tc: number) => { masterGainCalls.push([value, time, tc]); } }
+    };
+    engine.mixerChannels = new Map([
+      [2, {
+        output: { gain: { setTargetAtTime: (value: number, time: number, tc: number) => { mixerGainCalls.push([value, time, tc]); } } },
+        panner: { pan: { setTargetAtTime: (value: number, time: number, tc: number) => { mixerPanCalls.push([value, time, tc]); } } }
+      }]
+    ]);
+
+    try {
+      // Channel Volume
+      audioEngine.applyAutomationValue(
+        { type: 'channel_vol', targetId: 'ch-test-1' },
+        0.35,
+        [mockChannel],
+        [],
+        0
+      );
+      assert.equal(mockChannel.volume, 0.35);
+
+      // Channel Pan (0..1 -> -1..1)
+      audioEngine.applyAutomationValue(
+        { type: 'channel_pan', targetId: 'ch-test-1' },
+        0.25,
+        [mockChannel],
+        [],
+        0
+      );
+      assert.equal(mockChannel.pan, -0.5);
+
+      // Channel Filter Cutoff
+      audioEngine.applyAutomationValue(
+        { type: 'channel_filter_cutoff', targetId: 'ch-test-1' },
+        0.5,
+        [mockChannel],
+        [],
+        0
+      );
+      // 40 + (0.5^2) * 18000 = 40 + 0.25 * 18000 = 4540
+      assert.equal(mockChannel.synthParams.filterCutoff, 4540);
+
+      // Master Volume (0..1 -> * 1.2 on the master gain AudioParam)
+      audioEngine.applyAutomationValue(
+        { type: 'master_vol', targetId: 0 },
+        0.5,
+        [],
+        [],
+        0
+      );
+      assert.deepEqual(masterGainCalls, [[0.6, 0, 0.02]]);
+
+      // Mixer Insert Volume: data model *and* smoothed AudioParam update
+      audioEngine.applyAutomationValue(
+        { type: 'mixer_vol', targetId: 2 },
+        0.6,
+        [],
+        [mockMixerTrack],
+        0
+      );
+      assert.equal(mockMixerTrack.volume, 0.6 * 1.25);
+      assert.deepEqual(mixerGainCalls, [[0.6 * 1.25, 0, 0.02]]);
+
+      // Muted insert: the AudioParam is driven to 0, the data model still
+      // records the automation value.
+      mockMixerTrack.mute = true;
+      audioEngine.applyAutomationValue(
+        { type: 'mixer_vol', targetId: 2 },
+        0.6,
+        [],
+        [mockMixerTrack],
+        0
+      );
+      assert.equal(mockMixerTrack.volume, 0.6 * 1.25);
+      assert.equal(mixerGainCalls[1][0], 0);
+      mockMixerTrack.mute = false;
+
+      // Mixer Insert Pan (0..1 -> -1..1)
+      audioEngine.applyAutomationValue(
+        { type: 'mixer_pan', targetId: 2 },
+        0.25,
+        [],
+        [mockMixerTrack],
+        0
+      );
+      assert.equal(mockMixerTrack.pan, -0.5);
+      assert.deepEqual(mixerPanCalls, [[-0.5, 0, 0.02]]);
+    } finally {
+      engine.ctx = originalCtx;
+      engine.masterGain = originalMasterGain;
+      engine.mixerChannels = originalMixerChannels;
+    }
+  });
+
+  test('selected automation point index never survives a clip change', () => {
+    // Re-selecting the same clip keeps the point selection (explicit point
+    // interactions re-set it anyway).
+    assert.equal(nextSelectedPointIndex('clip-a', 2, 'clip-a'), 2);
+
+    // Selecting a different clip clears it.
+    assert.equal(nextSelectedPointIndex('clip-a', 2, 'clip-b'), null);
+
+    // A newly created clip being selected clears it.
+    assert.equal(nextSelectedPointIndex('clip-a', 2, 'auto-clip-new'), null);
+
+    // Clip deletion / editor close clears it.
+    assert.equal(nextSelectedPointIndex('clip-a', 2, null), null);
+    assert.equal(nextSelectedPointIndex(null, null, 'clip-b'), null);
+  });
+
+  test('+ Add Node resolves a free position on a fresh default clip', () => {
+    const clip = createBaseAutoClip(); // template points at x = 0, 0.5, 1
+    const pos = resolveAddNodePosition(clip.automationPoints!);
+    assert.equal(pos.x, 0.25); // earliest widest gap (0..0.5) midpoint, not the occupied center
+    assert.ok(Math.abs(pos.y - 0.5) < 1e-9); // sits on the linear envelope
+
+    // The drawer's add path therefore really adds on a fresh clip.
+    const { clip: updated, pointIndex } = addPlaylistAutomationPoint(clip, pos.x, pos.y);
+    assert.equal(updated.automationPoints!.length, 4);
+    assert.equal(pointIndex, 1);
+    assert.ok(Math.abs(updated.automationPoints![1].y - pos.y) < 1e-9);
+  });
+
+  test('resolveAddNodePosition handles sparse and degenerate envelopes', () => {
+    assert.deepEqual(resolveAddNodePosition([]), { x: 0.5, y: 0.5 });
+
+    // Single point: widest gap is [0, 0.6]; value holds the point's y.
+    const single = resolveAddNodePosition([{ x: 0.6, y: 0.3, tension: 0 }]);
+    assert.equal(single.x, 0.3);
+    assert.equal(single.y, 0.3);
+
+    // Point pinned at the timeline start: widest gap is [0, 1].
+    const atStart = resolveAddNodePosition([{ x: 0, y: 0.8, tension: 0 }]);
+    assert.equal(atStart.x, 0.5);
+    assert.equal(atStart.y, 0.8);
+  });
+
+  test('addPlaylistAutomationPoint merge never moves a point onto an occupied X', () => {
+    const clip = createBaseAutoClip([
+      { x: 0, y: 0.1, tension: 0 },
+      { x: 0.5, y: 0.5, tension: 0 },
+      { x: 0.504, y: 0.6, tension: 0 },
+      { x: 1, y: 0.9, tension: 0 }
+    ]);
+
+    // Click at 0.504 merges into the first point within the threshold (0.5);
+    // its X must not advance onto the occupied 0.504 - only the Y updates.
+    const { clip: updated, pointIndex } = addPlaylistAutomationPoint(clip, 0.504, 0.3);
+    assert.equal(pointIndex, 1);
+    assert.deepEqual(updated.automationPoints!.map(p => p.x), [0, 0.5, 0.504, 1]);
+    assert.equal(updated.automationPoints![1].y, 0.3);
+  });
+
+  test('findAutomationPointIndexNearX selects the nearest point within tolerance', () => {
+    const points = [{ x: 0, y: 0 }, { x: 0.5, y: 0.5, tension: 0 }, { x: 1, y: 1 }];
+    assert.equal(findAutomationPointIndexNearX(points, 0.504, 0.01), 1);
+    assert.equal(findAutomationPointIndexNearX(points, 0.49, 0.005), null);
+    // Equidistant points resolve to the lowest index.
+    assert.equal(findAutomationPointIndexNearX([{ x: 0.4, y: 0 }, { x: 0.6, y: 0 }], 0.5, 0.2), 0);
+    assert.equal(findAutomationPointIndexNearX(points, Number.NaN, 0.1), null);
+    assert.equal(findAutomationPointIndexNearX(points, 0.5, -1), null);
+  });
+
+  test('playback snapshots isolate automation writes from project state', () => {
+    const state = createDefaultProjectState();
+    const projectChannelsBefore = JSON.stringify(state.channels);
+    const projectMixerBefore = JSON.stringify(state.mixerTracks);
+
+    const snapshot = audioEngine.createPlaybackSnapshot(state.channels, state.playlistClips, state.mixerTracks);
+    assert.notEqual(snapshot.channels, state.channels);
+    assert.notEqual(snapshot.channels[0], state.channels[0]);
+    assert.notEqual(snapshot.clips, state.playlistClips);
+    assert.notEqual(snapshot.mixerTracks, state.mixerTracks);
+    assert.deepEqual(snapshot.channels, state.channels);
+
+    // Engine seam (same rationale as in the applyAutomationValue test above).
+    const engine = audioEngine as unknown as Record<PropertyKey, unknown>;
+    const originalCtx = engine.ctx;
+    engine.ctx = { currentTime: 0 };
+    try {
+      const insertTrack = state.mixerTracks.find(t => t.id === 1) ?? state.mixerTracks[state.mixerTracks.length - 1];
+      audioEngine.applyAutomationValue(
+        { type: 'channel_vol', targetId: state.channels[0].id },
+        0.11,
+        snapshot.channels,
+        snapshot.mixerTracks,
+        0
+      );
+      audioEngine.applyAutomationValue(
+        { type: 'channel_filter_cutoff', targetId: state.channels[0].id },
+        1,
+        snapshot.channels,
+        snapshot.mixerTracks,
+        0
+      );
+      audioEngine.applyAutomationValue(
+        { type: 'mixer_vol', targetId: insertTrack.id },
+        0.44,
+        snapshot.channels,
+        snapshot.mixerTracks,
+        0
+      );
+    } finally {
+      engine.ctx = originalCtx;
+    }
+
+    // The playback take received the automation values...
+    assert.equal(snapshot.channels[0].volume, 0.11);
+    assert.equal(snapshot.channels[0].synthParams.filterCutoff, 40 + 1 * 18000);
+    const automatedInsertId = (state.mixerTracks.find(t => t.id === 1) ?? state.mixerTracks[state.mixerTracks.length - 1]).id;
+    const snapshotInsert = snapshot.mixerTracks.find(t => t.id === automatedInsertId)!;
+    assert.equal(snapshotInsert.volume, 0.44 * 1.25);
+
+    // ...while the project state that feeds undo/redo and saves is untouched.
+    assert.equal(JSON.stringify(state.channels), projectChannelsBefore);
+    assert.equal(JSON.stringify(state.mixerTracks), projectMixerBefore);
   });
 });

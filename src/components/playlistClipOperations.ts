@@ -225,13 +225,21 @@ export function addPlaylistAutomationPoint(
   // If a point exists within 0.005 on normalized X, update its Y instead of stacking a duplicate
   const existingIdx = points.findIndex(p => Math.abs(p.x - clampedX) < 0.005);
   if (existingIdx !== -1) {
-    points[existingIdx] = {
+    // Never move the existing point onto an X that another point already
+    // occupies; only its Y follows the interaction.
+    const nextX = points.some((p, i) => i !== existingIdx && Math.abs(p.x - clampedX) < 1e-9)
+      ? points[existingIdx].x
+      : clampedX;
+    const mergedPoint = {
       ...points[existingIdx],
-      x: clampedX,
+      x: nextX,
       y: clampedY
     };
+    points[existingIdx] = mergedPoint;
     points.sort((a, b) => a.x - b.x);
-    const pointIndex = points.findIndex(p => p.x === clampedX && p.y === clampedY);
+    // Track the updated point by identity: a value lookup would misresolve
+    // whenever the kept X (or Y) equals another point's.
+    const pointIndex = points.indexOf(mergedPoint);
     const updated = cloneClip(clip);
     updated.automationPoints = points;
     return { clip: assertValidPlaylistClip(updated), pointIndex: Math.max(0, pointIndex) };
@@ -264,14 +272,43 @@ export function movePlaylistAutomationPoint(
     throw new Error('Automation point coordinates must be finite');
   }
 
-  let targetX = Math.max(0, Math.min(1, newX));
-  if (snapGridSteps !== undefined && finite(snapGridSteps) && snapGridSteps > 0) {
-    targetX = Math.max(0, Math.min(1, Math.round(targetX * snapGridSteps) / snapGridSteps));
-  }
-  targetX = Number(targetX.toFixed(6));
+  const epsilon = 1e-9;
+  const points = clip.automationPoints.map(p => ({ ...p }));
+  const isOccupiedByOther = (x: number): boolean =>
+    points.some((p, i) => i !== pointIndex && Math.abs(p.x - x) < epsilon);
+
   const targetY = Number(Math.max(0, Math.min(1, newY)).toFixed(6));
 
-  const points = clip.automationPoints.map(p => ({ ...p }));
+  // Resolve the target X so that two points can never share the same X:
+  // coincident points create zero-width envelope segments, which evaluate as
+  // an instantaneous value step during playback.
+  let resolvedX: number | null;
+  if (snapGridSteps !== undefined && finite(snapGridSteps) && snapGridSteps > 0) {
+    const steps = Math.floor(snapGridSteps);
+    const requestedStep = Math.round(Math.max(0, Math.min(1, newX)) * steps);
+    resolvedX = null;
+    // Clamp to the nearest free grid step. Equidistant candidates resolve to
+    // the lower step so the outcome is deterministic.
+    for (let radius = 0; radius <= steps + 1 && resolvedX === null; radius++) {
+      const candidates = radius === 0 ? [requestedStep] : [requestedStep - radius, requestedStep + radius];
+      for (const step of candidates) {
+        if (step < 0 || step > steps) continue;
+        const candidate = Number((step / steps).toFixed(6));
+        if (!isOccupiedByOther(candidate)) {
+          resolvedX = candidate;
+          break;
+        }
+      }
+    }
+  } else {
+    const clampedX = Math.max(0, Math.min(1, newX));
+    resolvedX = isOccupiedByOther(clampedX) ? null : Number(clampedX.toFixed(6));
+  }
+
+  // If every candidate position is taken, the point keeps its previous X; the
+  // Y update still applies. The previous X is collision-free by invariant.
+  const targetX = resolvedX ?? points[pointIndex].x;
+
   const movingPoint = { ...points[pointIndex], x: targetX, y: targetY };
   points[pointIndex] = movingPoint;
 
@@ -304,6 +341,99 @@ export function deletePlaylistAutomationPoint(
   const updated = cloneClip(clip);
   updated.automationPoints = points;
   return assertValidPlaylistClip(updated);
+}
+
+/**
+ * Pure selection rule for automation point selection across clip changes.
+ * A selected point index is only meaningful while the same clip stays
+ * selected; switching clips, selecting a fresh clip, or closing/deleting the
+ * clip always clears it so a later Delete can never hit an unintended point.
+ */
+export function nextSelectedPointIndex(
+  previousClipId: string | null,
+  previousPointIndex: number | null,
+  nextClipId: string | null
+): number | null {
+  if (nextClipId === null || nextClipId === undefined) return null;
+  if (previousClipId !== nextClipId) return null;
+  return previousPointIndex;
+}
+
+/**
+ * Finds the index of the point nearest to normX within tolerance, or null.
+ * Ties resolve to the lowest index. Used to turn a click near an existing
+ * point into an explicit point selection instead of an accidental relocation.
+ */
+export function findAutomationPointIndexNearX(
+  points: AutomationPoint[],
+  normX: number,
+  tolerance: number
+): number | null {
+  if (!Array.isArray(points) || !finite(normX) || !finite(tolerance) || tolerance < 0) return null;
+  let bestIndex: number | null = null;
+  let bestDistance = tolerance;
+  for (let i = 0; i < points.length; i++) {
+    const distance = Math.abs(points[i].x - normX);
+    if (distance > tolerance) continue;
+    if (bestIndex === null || distance < bestDistance) {
+      bestIndex = i;
+      bestDistance = distance;
+    }
+  }
+  return bestIndex;
+}
+
+/**
+ * Chooses a collision-free insert position for a new automation node: the
+ * midpoint of the widest gap between consecutive points (timeline edges count
+ * as gaps). The value is the linear envelope value at that position, matching
+ * the rendered polyline. Deterministic: ties pick the earliest gap.
+ */
+export function resolveAddNodePosition(points: AutomationPoint[]): { x: number; y: number } {
+  if (!Array.isArray(points) || points.length === 0) return { x: 0.5, y: 0.5 };
+
+  const sorted = [...points].sort((a, b) => a.x - b.x);
+  let bestStart = 0;
+  let bestEnd = sorted[0].x;
+  let bestLeftY = sorted[0].y;   // y to hold when the gap starts at the timeline edge
+  let bestRightY = sorted[0].y;  // y to hold when the gap ends at the timeline edge
+  let hasLeftPoint = false;
+  let hasRightPoint = sorted.length > 0;
+
+  for (let i = 0; i < sorted.length - 1; i++) {
+    const width = sorted[i + 1].x - sorted[i].x;
+    if (width > bestEnd - bestStart) {
+      bestStart = sorted[i].x;
+      bestEnd = sorted[i + 1].x;
+      bestLeftY = sorted[i].y;
+      bestRightY = sorted[i + 1].y;
+      hasLeftPoint = true;
+      hasRightPoint = true;
+    }
+  }
+  const tailWidth = 1 - sorted[sorted.length - 1].x;
+  if (tailWidth > bestEnd - bestStart) {
+    bestStart = sorted[sorted.length - 1].x;
+    bestEnd = 1;
+    bestLeftY = sorted[sorted.length - 1].y;
+    bestRightY = sorted[sorted.length - 1].y;
+    hasLeftPoint = true;
+    hasRightPoint = false;
+  }
+
+  const x = Number(Math.max(0, Math.min(1, (bestStart + bestEnd) / 2)).toFixed(6));
+  let y: number;
+  if (bestEnd - bestStart < 1e-9) {
+    y = bestLeftY;
+  } else if (hasLeftPoint && hasRightPoint) {
+    const t = (x - bestStart) / (bestEnd - bestStart);
+    y = bestLeftY + (bestRightY - bestLeftY) * t;
+  } else if (hasRightPoint) {
+    y = bestRightY;
+  } else {
+    y = bestLeftY;
+  }
+  return { x, y: Number(Math.max(0, Math.min(1, y)).toFixed(6)) };
 }
 
 export function updatePlaylistAutomationTarget(
