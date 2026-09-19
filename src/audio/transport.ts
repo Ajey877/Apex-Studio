@@ -35,6 +35,7 @@ export class AudioClockTransport {
     bar: 1,
   };
   private callbacks: TransportCallbacks = {};
+  private patternLoopSteps: number | null = null;
 
   constructor(context: AudioContext, options: { lookAheadSeconds?: number; scheduleIntervalMs?: number } = {}) {
     this.context = context;
@@ -53,6 +54,24 @@ export class AudioClockTransport {
   }
 
   setMode(mode: TransportMode): void { this.state.mode = mode; this.emitState(); }
+
+  /**
+   * Pattern Mode loops over the length of the pattern being played instead of a
+   * fixed bar. Clearing it falls back to the bar grid. Song Mode always uses the
+   * bar grid because playlist scheduling is bar-relative.
+   */
+  setPatternLoopSteps(steps?: number): void {
+    const next = typeof steps === 'number' && Number.isFinite(steps) && steps > 0
+      ? Math.max(1, Math.floor(steps))
+      : null;
+    if (next === this.patternLoopSteps) return;
+    // The wrap length only changes how the continuous step counter is reported,
+    // so musical position and scheduling stay intact.
+    this.updatePositionFromClock();
+    this.patternLoopSteps = next;
+    this.updateMusicalPosition(this.state.positionSeconds);
+    this.emitState();
+  }
 
   getState(): Readonly<TransportState> {
     this.updatePositionFromClock();
@@ -99,6 +118,12 @@ export class AudioClockTransport {
 
   private get stepDurationSeconds(): number { return 60 / this.state.bpm / this.state.stepsPerBeat; }
   private get stepsPerBar(): number { return this.state.beatsPerBar * this.state.stepsPerBeat; }
+  /** Number of steps the reported musical position wraps at. */
+  private get stepLoopLength(): number {
+    return this.state.mode === 'pat' && this.patternLoopSteps !== null
+      ? this.patternLoopSteps
+      : this.stepsPerBar;
+  }
 
   private schedule = (): void => {
     if (!this.state.playing) return;
@@ -107,7 +132,7 @@ export class AudioClockTransport {
       const position = Math.max(0, this.nextEventTime - this.clockOrigin);
       const absoluteStep = Math.floor(position / this.stepDurationSeconds + 1e-9);
       this.callbacks.onStep?.(
-        absoluteStep % this.stepsPerBar,
+        absoluteStep % this.stepLoopLength,
         Math.floor(absoluteStep / this.stepsPerBar) + 1,
         this.nextEventTime,
       );
@@ -127,7 +152,7 @@ export class AudioClockTransport {
 
   private updateMusicalPosition(position: number): void {
     const absoluteStep = Math.floor(position / this.stepDurationSeconds + 1e-9);
-    this.state.step = absoluteStep % this.stepsPerBar;
+    this.state.step = absoluteStep % this.stepLoopLength;
     this.state.bar = Math.floor(absoluteStep / this.stepsPerBar) + 1;
   }
 

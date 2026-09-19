@@ -26,7 +26,8 @@ type EngineInternals = {
     clips: PlaylistClip[],
     mode: 'pat' | 'song',
     patternId?: string,
-    mixerTracks?: MixerTrack[]
+    mixerTracks?: MixerTrack[],
+    patternLengthSteps?: number
   ) => void;
   synchronizePlaybackState: (update: {
     channels?: Channel[];
@@ -53,6 +54,7 @@ let originalPlayNote: typeof engine.playNote;
 const fakeTransport = {
   setBpm: () => undefined,
   setMode: () => undefined,
+  setPatternLoopSteps: () => undefined,
   setCallbacks: () => undefined,
   start: () => undefined,
   stop: () => undefined,

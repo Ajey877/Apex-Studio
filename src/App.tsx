@@ -389,6 +389,11 @@ export function App() {
   }, []);
 
   // --- Transport Controls ---
+  // Pattern Mode loops over the selected pattern's declared length (16/32/64).
+  const selectedPatternLengthSteps = projectState.patterns.find(
+    pattern => pattern.id === projectState.selectedPatternId
+  )?.lengthSteps;
+
   const handleTogglePlay = () => {
     if (isPlaying) {
       audioEngine.stop();
@@ -407,7 +412,8 @@ export function App() {
         snapshot.clips,
         playMode,
         projectState.selectedPatternId,
-        snapshot.mixerTracks
+        snapshot.mixerTracks,
+        selectedPatternLengthSteps
       );
       setIsPlaying(true);
     }
@@ -435,7 +441,8 @@ export function App() {
         snapshot.clips,
         nextMode,
         projectState.selectedPatternId,
-        snapshot.mixerTracks
+        snapshot.mixerTracks,
+        selectedPatternLengthSteps
       );
     }
   };
