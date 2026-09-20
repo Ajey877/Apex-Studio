@@ -26,6 +26,7 @@ import {
 import { Channel, Note, MusicalScale, ChordStampType } from '../types/daw';
 import { audioEngine } from '../audio/audioEngine';
 import { MidiParser } from '../utils/midiParser';
+import { normalizePatternLengthSteps } from '../state/patternLength';
 import {
   DEFAULT_GRID_STEPS,
   DEFAULT_MIN_NOTE_DURATION,
@@ -108,7 +109,20 @@ interface PianoRollProps {
   onUpdateChannel: (channelId: string, updates: Partial<Channel>) => void;
   currentStep: number;
   isPlaying: boolean;
+  /**
+   * Declared `Pattern.lengthSteps` of the selected pattern. The Piano Roll stays
+   * the fixed-width editor it always was; this only guarantees the grid is never
+   * narrower than the pattern being edited.
+   */
+  patternLengthSteps?: number;
 }
+
+/**
+ * Historical Piano Roll width in steps (two bars). It is a floor, not a pattern
+ * length: notes written past a 16-step declaration stay visible and preserved;
+ * Pattern Mode/export ignore them until the declared length is extended again.
+ */
+const PIANO_ROLL_MIN_STEPS = 32;
 
 type ToolType = 'draw' | 'paint' | 'slice' | 'erase' | 'select';
 
@@ -177,7 +191,8 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
   onSelectChannel,
   onUpdateChannel,
   currentStep,
-  isPlaying
+  isPlaying,
+  patternLengthSteps
 }) => {
   const [currentTool, setCurrentTool] = useState<ToolType>('select');
   const [rootKey, setRootKey] = useState<number>(0); // C
@@ -187,7 +202,10 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
   const [showGhostNotes, setShowGhostNotes] = useState(true);
   const [showVelocityDrawer, setShowVelocityDrawer] = useState(true);
   const [strumMs, setStrumMs] = useState(25);
-  const [totalSteps, setTotalSteps] = useState(32);
+  // Phase 9D: the editor width follows the pattern model without ever shrinking
+  // below its historical two-bar default, so a declared 64-step pattern is fully
+  // editable and notes past a 16-step declaration are never hidden or lost.
+  const totalSteps = Math.max(PIANO_ROLL_MIN_STEPS, normalizePatternLengthSteps(patternLengthSteps));
   const [selectedNoteIds, setSelectedNoteIds] = useState<Set<string>>(new Set());
   const selectedNoteIdsRef = useRef<Set<string>>(new Set());
   selectedNoteIdsRef.current = selectedNoteIds;

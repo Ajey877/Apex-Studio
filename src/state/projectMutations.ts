@@ -83,6 +83,25 @@ export const addPatternToProjectState = (
   selectedPatternId: pattern.id
 });
 
+/**
+ * Updates one pattern by id, leaving every other pattern (and its identity)
+ * untouched. Pattern-scoped state such as `lengthSteps` is written through here
+ * so it participates in project history and persistence like any other edit.
+ */
+export const updatePatternInProjectState = (
+  state: ProjectState,
+  patternId: string,
+  updates: Partial<Pattern>
+): ProjectState => {
+  if (!state.patterns.some(pattern => pattern.id === patternId)) return state;
+  return {
+    ...state,
+    patterns: state.patterns.map(pattern => (
+      pattern.id === patternId ? { ...pattern, ...updates } : pattern
+    ))
+  };
+};
+
 export const updateProjectMetadataInProjectState = (
   state: ProjectState,
   updates: Partial<ProjectMetadata>
@@ -202,6 +221,17 @@ export const getMetaUpdateLabel = (updates: Partial<ProjectMetadata>): string =>
   if ('name' in updates) return 'Rename project';
   if ('timeSignature' in updates) return 'Change time signature';
   return 'Update project settings';
+};
+
+/**
+ * Pattern edits are discrete clicks (never continuous drags), so they always
+ * commit their own history entry.
+ */
+export const getPatternUpdateLabel = (updates: Partial<Pattern>): string => {
+  if ('lengthSteps' in updates) return 'Change pattern length';
+  if ('name' in updates) return 'Rename pattern';
+  if ('color' in updates) return 'Change pattern color';
+  return 'Update pattern';
 };
 
 export interface ContinuousBatcherOptions {
