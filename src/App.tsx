@@ -402,7 +402,9 @@ export function App() {
 
   const handleTogglePlay = () => {
     if (isPlaying) {
-      audioEngine.stop();
+      // Real pause: the transport keeps its position, scheduled audio is
+      // cancelled, and Play resumes from the paused position.
+      audioEngine.pause();
       setIsPlaying(false);
     } else {
       // Play from an isolated snapshot: automation writes channel volume/pan/filter
@@ -1398,7 +1400,15 @@ export function App() {
               canRedo={projectHistoryVersion >= 0 && projectHistoryRef.current.canRedo}
               onUndo={handleUndo}
               onRedo={handleRedo}
-              onSeekToBar={(bar) => setCurrentBar(bar)}
+              onSeekToBar={(bar) => {
+                // Real transport seek: works stopped, paused and playing. While
+                // playing it cancels audio scheduled for the old position and
+                // restarts any playlist audio clip the new position lands in.
+                const targetBar = Math.max(1, Math.floor(Number(bar) || 1));
+                const secondsPerBar = (60 / projectState.meta.bpm) * 4;
+                audioEngine.seek((targetBar - 1) * secondsPerBar);
+                setCurrentBar(targetBar);
+              }}
               currentBar={currentBar}
               isPlaying={isPlaying}
               bpm={projectState.meta.bpm}

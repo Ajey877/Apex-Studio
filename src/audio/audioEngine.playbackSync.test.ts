@@ -55,9 +55,22 @@ const fakeTransport = {
   setBpm: () => undefined,
   setMode: () => undefined,
   setPatternLoopSteps: () => undefined,
+  setSongEndSteps: () => undefined,
   setCallbacks: () => undefined,
   start: () => undefined,
   stop: () => undefined,
+  pause: () => undefined,
+  seek: () => undefined,
+  getState: () => ({
+    bpm: 120,
+    beatsPerBar: 4,
+    stepsPerBeat: 4,
+    mode: 'pat' as const,
+    playing: false,
+    positionSeconds: 0,
+    step: 0,
+    bar: 1,
+  }),
 };
 
 const makePatternClip = (channelId: string): PlaylistClip => ({

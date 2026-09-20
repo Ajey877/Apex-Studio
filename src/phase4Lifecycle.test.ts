@@ -51,6 +51,9 @@ class MockAudioParam {
 class MockAudioNode {
   connect(target: unknown): unknown { return target; }
   disconnect(): void {}
+  // Real AudioNode implements EventTarget; the transport controls clip
+  // sources through 'ended' listeners.
+  addEventListener(): void {}
 }
 
 class MockGainNode extends MockAudioNode {

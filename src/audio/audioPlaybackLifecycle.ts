@@ -1,21 +1,22 @@
 import { audioEngine } from './audioEngine';
-import type { PlaylistClip } from '../types/daw';
 
 interface PlaybackLifecycleEngine {
   stop: () => void;
-  playAudioClipWithFades?: (clip: PlaylistClip, startTime: number) => void;
   ctx: AudioContext | null;
-  sampleBuffers?: Map<string, AudioBuffer>;
-  getOrCreateMixerChannel: (trackId: number) => { input: AudioNode };
-  bpm?: number;
 }
 
 const activeBufferSources = new Set<AudioBufferSourceNode>();
 let installed = false;
 
 /**
- * Keeps BufferSource-based playlist audio under transport control and routes
- * playlist clips through the mixer insert selected by their playlist lane.
+ * Keeps BufferSource-based playlist audio under transport control.
+ *
+ * Clip scheduling, fade envelopes, seek offsets and mixer routing live in
+ * `audioEngine.playAudioClipWithFades` — the single production implementation.
+ * This module tracks every buffer source created by the context so an engine
+ * stop can cancel whatever the take scheduled, and exposes the live source
+ * count for diagnostics. The engine additionally cancels its own take's clip
+ * sources on pause, seek and song end.
  */
 export function installAudioPlaybackLifecycle(): void {
   if (installed || typeof window === 'undefined' || typeof AudioContext === 'undefined') return;
@@ -37,41 +38,6 @@ export function installAudioPlaybackLifecycle(): void {
     originalStop();
     stopAllBufferSources();
   };
-
-  const originalClipPlayback = engine.playAudioClipWithFades?.bind(audioEngine);
-  if (typeof originalClipPlayback === 'function') {
-    engine.playAudioClipWithFades = (clip: PlaylistClip, startTime: number) => {
-      const ctx = engine.ctx as AudioContext | null;
-      if (!ctx) return;
-      const buffer = clip.audioBufferId ? engine.sampleBuffers?.get(clip.audioBufferId) : null;
-      if (!buffer) return;
-
-      const source = ctx.createBufferSource();
-      source.buffer = buffer;
-      if (typeof clip.pitchShiftSemitones === 'number') source.detune.setValueAtTime(clip.pitchShiftSemitones * 100, startTime);
-      if (typeof clip.timeStretchRate === 'number' && clip.timeStretchRate > 0) source.playbackRate.setValueAtTime(clip.timeStretchRate, startTime);
-
-      // Playlist lane 0 maps to mixer insert 1; master remains mixer track 0.
-      const mixerTrackId = Math.max(1, Math.floor(clip.trackIndex) + 1);
-      const mixer = engine.getOrCreateMixerChannel(mixerTrackId);
-      const gainNode = ctx.createGain();
-      const bpm = Math.max(20, Number(engine.bpm) || 120);
-      const secondsPerBar = 240 / bpm;
-      const clipDurationSec = Math.max(0.005, clip.lengthBars * secondsPerBar);
-      const fadeInSec = Math.min(clipDurationSec, Math.max(0.005, (clip.fadeInBars || 0) * secondsPerBar));
-      const fadeOutSec = Math.min(clipDurationSec, Math.max(0.005, (clip.fadeOutBars || 0) * secondsPerBar));
-      const fadeOutStart = Math.max(startTime + fadeInSec, startTime + clipDurationSec - fadeOutSec);
-
-      gainNode.gain.setValueAtTime(0.0001, startTime);
-      gainNode.gain.exponentialRampToValueAtTime(1.0, startTime + fadeInSec);
-      gainNode.gain.setValueAtTime(1.0, fadeOutStart);
-      gainNode.gain.exponentialRampToValueAtTime(0.0001, startTime + clipDurationSec);
-      source.connect(gainNode);
-      gainNode.connect(mixer.input);
-      source.start(startTime);
-      source.stop(startTime + clipDurationSec);
-    };
-  }
 }
 
 export function getActiveBufferSourceCount(): number { return activeBufferSources.size; }

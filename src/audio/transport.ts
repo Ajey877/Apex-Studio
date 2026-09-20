@@ -14,6 +14,8 @@ export interface TransportState {
 export interface TransportCallbacks {
   onStep?: (step: number, bar: number, audioTime: number) => void;
   onStateChange?: (state: Readonly<TransportState>) => void;
+  /** Fired once when Song Mode reaches the end of the arrangement. */
+  onSongEnd?: () => void;
 }
 
 /** Audio-clock transport: musical position follows AudioContext time. */
@@ -36,6 +38,8 @@ export class AudioClockTransport {
   };
   private callbacks: TransportCallbacks = {};
   private patternLoopSteps: number | null = null;
+  /** First absolute step index at which Song Mode stops; null loops forever. */
+  private songEndSteps: number | null = null;
 
   constructor(context: AudioContext, options: { lookAheadSeconds?: number; scheduleIntervalMs?: number } = {}) {
     this.context = context;
@@ -54,6 +58,19 @@ export class AudioClockTransport {
   }
 
   setMode(mode: TransportMode): void { this.state.mode = mode; this.emitState(); }
+
+  /**
+   * Song Mode owns its real end: the absolute step index at which no more
+   * musical content is scheduled. `null` (the Pattern Mode default) keeps the
+   * grid looping forever. Changing the value while playing takes effect at the
+   * next scheduling tick, so a live edit that shortens the arrangement stops
+   * the transport at the new end.
+   */
+  setSongEndSteps(steps?: number): void {
+    this.songEndSteps = typeof steps === 'number' && Number.isFinite(steps) && steps > 0
+      ? Math.max(1, Math.floor(steps))
+      : null;
+  }
 
   /**
    * Pattern Mode loops over the length of the pattern being played instead of a
@@ -87,6 +104,13 @@ export class AudioClockTransport {
     this.schedule();
     this.emitState();
   }
+
+  /**
+   * Pauses playback at the current clock position. Unlike `stop()`, the
+   * position (seconds, bar, step) is preserved so a following `start()`
+   * resumes exactly where the music stopped.
+   */
+  pause(): void { this.stop(false); }
 
   stop(resetPosition = true): void {
     this.updatePositionFromClock();
@@ -131,6 +155,10 @@ export class AudioClockTransport {
     while (this.nextEventTime <= horizon) {
       const position = Math.max(0, this.nextEventTime - this.clockOrigin);
       const absoluteStep = Math.floor(position / this.stepDurationSeconds + 1e-9);
+      if (this.songEndSteps !== null && absoluteStep >= this.songEndSteps) {
+        this.finishAtSongEnd();
+        return;
+      }
       this.callbacks.onStep?.(
         absoluteStep % this.stepLoopLength,
         Math.floor(absoluteStep / this.stepsPerBar) + 1,
@@ -142,6 +170,24 @@ export class AudioClockTransport {
     this.emitState();
     this.timerId = window.setTimeout(this.schedule, this.scheduleIntervalMs);
   };
+
+  /**
+   * Song Mode reached its real end: halt exactly on the end position instead
+   * of wrapping. The last audible step is `songEndSteps - 1`; the reported
+   * position is the first silent position after the arrangement.
+   */
+  private finishAtSongEnd(): void {
+    this.state.playing = false;
+    if (this.timerId !== null) {
+      window.clearTimeout(this.timerId);
+      this.timerId = null;
+    }
+    const endPositionSeconds = this.songEndSteps * this.stepDurationSeconds;
+    this.state.positionSeconds = endPositionSeconds;
+    this.updateMusicalPosition(endPositionSeconds);
+    this.callbacks.onSongEnd?.();
+    this.emitState();
+  }
 
   private updatePositionFromClock(): void {
     if (!this.state.playing) return;
