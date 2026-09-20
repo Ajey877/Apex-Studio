@@ -225,6 +225,8 @@ class AudioEngine {
   };
 
   private activeVoices: Map<string, { stop: (time?: number) => void }> = new Map();
+  /** Buffer sources of the active take's playlist audio; cancelled by stop/pause/seek. */
+  private activeClipSources: Set<AudioBufferSourceNode> = new Set();
   private sampleBuffers: Map<string, AudioBuffer> = new Map();
   private impulseResponses: Map<string, AudioBuffer> = new Map();
 
@@ -2244,6 +2246,7 @@ class AudioEngine {
       mixerChannels: this.mixerChannels,
       impulseResponses: this.impulseResponses,
       activeVoices: this.activeVoices,
+      activeClipSources: this.activeClipSources,
       isPlaying: this.isPlaying,
       activeChannels: this.activeChannels,
       activeClips: this.activeClips,
@@ -2792,6 +2795,11 @@ class AudioEngine {
       // resize, split and delete edits visible to the next scheduled step.
       this.resetAutomationTargetsForClipChanges(this.activeClips, update.clips);
       this.activeClips = structuredClone(update.clips);
+      if (this.activePlayMode === 'song') {
+        // A clip edit moves the arrangement's real end; the running take must
+        // stop at the new end instead of a stale one.
+        this.transport?.setSongEndSteps(this.resolveSongEndSteps());
+      }
     }
 
     if (update.mixerTracks) {
@@ -2835,8 +2843,15 @@ class AudioEngine {
       void this.ctx.resume();
     }
 
-    this.stop();
+    // A new take tears down the previous take's audio without resetting the
+    // transport position: Stop already resets it to bar one, Pause keeps it,
+    // so Play resumes from wherever the playhead currently is.
     this.playbackGeneration++;
+    this.stopActivePlaybackAudio();
+    if (this.timerId) {
+      clearTimeout(this.timerId);
+      this.timerId = null;
+    }
     const currentGeneration = this.playbackGeneration;
 
     const playbackSnapshot = this.createPlaybackSnapshot(channels, clips, mixerTracks ?? []);
@@ -2869,6 +2884,21 @@ class AudioEngine {
         ? resolvePatternLoopLengthSteps(this.activeChannels, patternLengthSteps)
         : undefined
     );
+    // Song Mode owns its real end from the active clip schedule; Pattern Mode
+    // loops its declared length forever (Phase 9D).
+    const songEndSteps = mode === 'song' ? this.resolveSongEndSteps() : null;
+    this.transport.setSongEndSteps(songEndSteps ?? undefined);
+    // Starting at or beyond the arrangement's real end restarts from the top.
+    if (songEndSteps !== null) {
+      const stepDurationSeconds = 60 / this.bpm / 4;
+      if (this.transport.getState().positionSeconds >= songEndSteps * stepDurationSeconds - 1e-9) {
+        this.transport.seek(0);
+      }
+    }
+    if (this.transport.getState().playing) {
+      // Replacing a running take must restart the scheduler loop cleanly.
+      this.transport.stop(false);
+    }
     this.transport.setCallbacks({
       onStep: (step, bar, audioTime) => {
         if (!this.isPlaying || this.playbackGeneration !== currentGeneration) return;
@@ -2891,10 +2921,26 @@ class AudioEngine {
       onStateChange: (state) => {
         if (!this.isPlaying || this.playbackGeneration !== currentGeneration) return;
         this.transportStateCallback?.(state);
+      },
+      onSongEnd: () => {
+        if (this.playbackGeneration !== currentGeneration) return;
+        this.handleSongEnd();
       }
     });
 
     this.transport.start();
+
+    // Resuming a take at a mid-arrangement position must restore the audio the
+    // previous take silenced: playlist clips spanning the position restart
+    // from their correct offset and automation is re-based instead of
+    // latching the pre-pause value. A fresh start at position 0 leaves the
+    // scheduler's first-bar triggers untouched.
+    const resumedPositionSeconds = this.transport.getState().positionSeconds;
+    if (resumedPositionSeconds > 0) {
+      this.syncEnginePositionFromTransport();
+      this.retriggerAudioClipsAtPosition(resumedPositionSeconds);
+      this.rebaseAutomationAtPosition(resumedPositionSeconds);
+    }
   }
 
  public stop() {
@@ -2910,21 +2956,158 @@ class AudioEngine {
     this.transport.stop();
   }
 
-  const now = this.ctx?.currentTime;
-
-  for (const voice of this.activeVoices.values()) {
-    try {
-      voice.stop(now);
-    } catch (_) {
-      // Continue stopping remaining voices even if one has already stopped.
-    }
-  }
-
-  this.activeVoices.clear();
+  this.stopActivePlaybackAudio();
 
   this.currentStep = 0;
   this.currentBar = 1;
 }
+
+  /**
+   * Pauses the live take at its current position: everything the transport
+   * scheduled ahead — note voices and playlist clip sources — stops
+   * immediately, while the transport keeps the exact position so Play resumes
+   * from here. Transport actions never touch project data.
+   */
+  public pause(): void {
+    if (!this.isPlaying || !this.transport) return;
+    this.playbackGeneration++;
+    this.stopActivePlaybackAudio();
+    this.transport.pause();
+    this.isPlaying = false;
+    this.syncEnginePositionFromTransport();
+    const state = this.transport.getState();
+    this.transportStateCallback?.(state);
+  }
+
+  /**
+   * Moves the playhead to `positionSeconds` in every transport state
+   * (stopped, paused, playing). While playing, audio scheduled for the old
+   * position is cancelled, playlist audio clips spanning the new position
+   * restart from their correct offset, and automation is re-based so no
+   * pre-seek value stays latched until the next step boundary.
+   */
+  public seek(positionSeconds: number): void {
+    const transport = this.transport;
+    if (!transport || !this.ctx) return;
+
+    const boundedPosition = this.boundSeekPosition(positionSeconds);
+
+    if (this.isPlaying) {
+      this.stopActivePlaybackAudio();
+    }
+    transport.seek(boundedPosition);
+    this.syncEnginePositionFromTransport();
+
+    if (this.isPlaying) {
+      this.retriggerAudioClipsAtPosition(boundedPosition);
+      this.rebaseAutomationAtPosition(boundedPosition);
+    }
+    const state = transport.getState();
+    this.transportStateCallback?.(state);
+  }
+
+  /** Stops every playlist clip source and note voice of the active take. */
+  private stopActivePlaybackAudio(): void {
+    for (const source of Array.from(this.activeClipSources)) {
+      try { source.stop(); } catch (_) { /* already inactive */ }
+      this.activeClipSources.delete(source);
+    }
+
+    const now = this.ctx?.currentTime;
+    for (const voice of this.activeVoices.values()) {
+      try {
+        voice.stop(now);
+      } catch (_) {
+        // Continue stopping remaining voices even if one has already stopped.
+      }
+    }
+    this.activeVoices.clear();
+  }
+
+  /** Keeps the engine's step/bar mirror aligned with the authoritative transport position. */
+  private syncEnginePositionFromTransport(): void {
+    const state = this.transport?.getState();
+    if (!state) return;
+    this.currentStep = state.step;
+    this.currentBar = state.bar;
+  }
+
+  /** Total steps the Song Mode arrangement occupies, or null when it has none. */
+  private resolveSongEndSteps(): number | null {
+    let endSteps = 0;
+    for (const clip of this.activeClips) {
+      if (!Number.isFinite(clip.startBar) || !Number.isFinite(clip.lengthBars) || clip.lengthBars <= 0) continue;
+      endSteps = Math.max(endSteps, (clip.startBar + clip.lengthBars) * 16);
+    }
+    return endSteps > 0 ? endSteps : null;
+  }
+
+  /** Song Mode seeks never land past the arrangement's real end. */
+  private boundSeekPosition(positionSeconds: number): number {
+    const next = Math.max(0, Number.isFinite(positionSeconds) ? positionSeconds : 0);
+    if (this.activePlayMode !== 'song') return next;
+    const endSteps = this.resolveSongEndSteps();
+    if (endSteps === null) return next;
+    const stepDurationSeconds = 60 / this.bpm / 4;
+    return Math.min(next, endSteps * stepDurationSeconds);
+  }
+
+  /**
+   * Starts every unmuted audio clip whose body spans `positionSeconds` so a
+   * seek (or resume) into a clip restarts it from the correct offset instead
+   * of waiting for — or missing — its start-bar trigger. A clip that begins
+   * exactly at the position is left to the scheduler's start-bar trigger so
+   * it can never sound twice.
+   */
+  private retriggerAudioClipsAtPosition(positionSeconds: number): void {
+    const ctx = this.ctx;
+    if (!ctx || positionSeconds <= 0) return;
+    const stepDurationSeconds = 60 / this.bpm / 4;
+    const now = ctx.currentTime;
+    for (const clip of this.activeClips) {
+      if (clip.type !== 'audio' || clip.mute) continue;
+      if (!Number.isFinite(clip.startBar) || !Number.isFinite(clip.lengthBars) || clip.lengthBars <= 0) continue;
+      const startSeconds = clip.startBar * 16 * stepDurationSeconds;
+      const endSeconds = startSeconds + clip.lengthBars * 16 * stepDurationSeconds;
+      if (positionSeconds <= startSeconds || positionSeconds >= endSeconds) continue;
+      this.playAudioClipWithFades(clip, now, positionSeconds - startSeconds);
+    }
+  }
+
+  /**
+   * Writes the automation values at `positionSeconds` into the isolated take
+   * so a seek does not leave the pre-seek value latched until the next
+   * scheduled step re-evaluates the active clips.
+   */
+  private rebaseAutomationAtPosition(positionSeconds: number): void {
+    const ctx = this.ctx;
+    if (!ctx) return;
+    const secondsPerBar = 16 * (60 / this.bpm) / 4;
+    const barPosition = positionSeconds / secondsPerBar;
+    const now = ctx.currentTime;
+    for (const clip of this.activeClips) {
+      if (clip.type !== 'automation' || clip.mute || !clip.automationTarget) continue;
+      if (!clip.automationPoints || clip.automationPoints.length < 2) continue;
+      if (!Number.isFinite(clip.startBar) || !Number.isFinite(clip.lengthBars) || clip.lengthBars <= 0) continue;
+      if (barPosition < clip.startBar || barPosition > clip.startBar + clip.lengthBars) continue;
+      const relX = (barPosition - clip.startBar) / clip.lengthBars;
+      const value = this.interpolateAutomationCurve(clip.automationPoints, relX);
+      this.applyAutomationValue(clip.automationTarget, value, this.activeChannels, this.activeMixerTracks, now);
+    }
+  }
+
+  /** Song Mode reached its real end: halt the take exactly on the end position. */
+  private handleSongEnd(): void {
+    this.playbackGeneration++;
+    this.stopActivePlaybackAudio();
+    this.isPlaying = false;
+    const state = this.transport?.getState();
+    if (state) {
+      this.currentStep = state.step;
+      this.currentBar = state.bar;
+      this.transportStateCallback?.(state);
+    }
+  }
 
   private triggerCurrentStep(audioTime?: number) {
     if (!this.ctx) return;
@@ -3037,7 +3220,13 @@ class AudioEngine {
     }
   }
 
-  private playAudioClipWithFades(clip: PlaylistClip, startTime: number) {
+  /**
+   * `positionOffsetSeconds` is how far into the clip the transport position
+   * already is when the source is (re)started — 0 for the normal start-bar
+   * trigger, and `position - clipStart` for seek/resume re-triggers. The
+   * clip's own `offsetSteps` trim is applied first, so both compose.
+   */
+  private playAudioClipWithFades(clip: PlaylistClip, startTime: number, positionOffsetSeconds = 0) {
     if (!this.ctx) return;
     const buf = clip.audioBufferId ? this.sampleBuffers.get(clip.audioBufferId) : null;
     if (!buf) return;
@@ -3046,7 +3235,8 @@ class AudioEngine {
 
     const safeBpm = Number.isFinite(this.bpm) && this.bpm > 0 ? this.bpm : 120;
     const secondsPerStep = (60 / safeBpm) / 4;
-    const offsetSeconds = Math.max(0, (clip.offsetSteps || 0) * secondsPerStep);
+    const offsetSeconds =
+      Math.max(0, (clip.offsetSteps || 0) * secondsPerStep) + Math.max(0, positionOffsetSeconds);
 
     if (offsetSeconds >= buf.duration) return;
 
@@ -3125,6 +3315,11 @@ class AudioEngine {
 
     source.start(startTime, offsetSeconds, actualDurationBufferSec);
     source.stop(startTime + effectiveDuration);
+
+    // Keep the take's playlist audio under transport control: pause, seek and
+    // stop cancel it instead of letting it keep playing as zombie audio.
+    this.activeClipSources.add(source);
+    source.addEventListener('ended', () => this.activeClipSources.delete(source), { once: true });
   }
 
   /**
