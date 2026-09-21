@@ -4,6 +4,7 @@ import {
   MixerTrack, 
   FxSlot, 
   PlaylistClip, 
+  PlaylistTrack,
   SynthParameters,
   AudioRecording,
   GrossBeatState,
@@ -55,6 +56,12 @@ export interface PlaybackStateUpdate {
   channels?: Channel[];
   clips?: PlaylistClip[];
   mixerTracks?: MixerTrack[];
+  /**
+   * Playlist lane rows whose `mute` flag belongs to the live take. A muted lane
+   * silences the pattern and audio clips placed on it without touching the
+   * mixer insert they route to, so lanes sharing an insert stay independent.
+   */
+  playlistTracks?: PlaylistTrack[];
   /**
    * Declared `Pattern.lengthSteps` of the pattern Pattern Mode is playing. It is
    * project state like the collections above, so a 16 <-> 32 length change made
@@ -227,6 +234,10 @@ class AudioEngine {
   private activeVoices: Map<string, { stop: (time?: number) => void }> = new Map();
   /** Buffer sources of the active take's playlist audio; cancelled by stop/pause/seek. */
   private activeClipSources: Set<AudioBufferSourceNode> = new Set();
+  /** Playlist lane row each active clip source was started from, so a live lane mute can cancel exactly that lane's audio. */
+  private activeClipSourceLanes: Map<AudioBufferSourceNode, number> = new Map();
+  /** Playlist lane rows muted for the active take; enforced before clips reach their mixer insert. */
+  private playlistLaneMutes: Set<number> = new Set();
   private sampleBuffers: Map<string, AudioBuffer> = new Map();
   private impulseResponses: Map<string, AudioBuffer> = new Map();
 
@@ -2823,6 +2834,29 @@ class AudioEngine {
       this.activeMixerTracks = nextTracks;
       this.playbackProjectMixerTracks = structuredClone(update.mixerTracks);
     }
+
+    if (update.playlistTracks) {
+      const previousMutes = this.playlistLaneMutes;
+      const nextMutes = this.derivePlaylistLaneMutes(update.playlistTracks);
+      // A lane muted mid-take goes silent at once: its in-flight clip audio is
+      // cancelled and the scheduler stops triggering its pattern clips. The
+      // routed mixer insert is left untouched so lanes and channels sharing it
+      // keep sounding.
+      for (const lane of nextMutes) {
+        if (!previousMutes.has(lane)) this.stopActiveClipSourcesForLane(lane);
+      }
+      this.playlistLaneMutes = nextMutes;
+      // Unmuting mid-take must not wait for a future start-bar trigger: the
+      // lane's clip spanning the playhead restarts from the correct offset,
+      // exactly like a seek landing inside it.
+      if (this.activePlayMode === 'song') {
+        const positionSeconds = this.transport?.getState().positionSeconds ?? 0;
+        for (const lane of previousMutes) {
+          if (nextMutes.has(lane)) continue;
+          this.retriggerAudioClipsAtPosition(positionSeconds, lane);
+        }
+      }
+    }
   }
 
   /** True only while the live transport owns an active playback take. */
@@ -2836,7 +2870,8 @@ class AudioEngine {
     mode: 'pat' | 'song',
     patternId?: string,
     mixerTracks?: MixerTrack[],
-    patternLengthSteps?: number
+    patternLengthSteps?: number,
+    playlistTracks?: PlaylistTrack[]
   ) {
     if (!this.ctx) this.init();
     if (this.ctx && this.ctx.state === 'suspended') {
@@ -2859,6 +2894,7 @@ class AudioEngine {
     this.activeChannels = playbackSnapshot.channels;
     this.activeClips = playbackSnapshot.clips;
     this.activeMixerTracks = playbackSnapshot.mixerTracks;
+    this.playlistLaneMutes = this.derivePlaylistLaneMutes(playlistTracks);
     this.playbackProjectChannels = structuredClone(playbackSnapshot.channels);
     this.playbackProjectMixerTracks = structuredClone(playbackSnapshot.mixerTracks);
     this.activePlayMode = mode;
@@ -3012,6 +3048,7 @@ class AudioEngine {
       try { source.stop(); } catch (_) { /* already inactive */ }
       this.activeClipSources.delete(source);
     }
+    this.activeClipSourceLanes.clear();
 
     const now = this.ctx?.currentTime;
     for (const voice of this.activeVoices.values()) {
@@ -3030,6 +3067,42 @@ class AudioEngine {
     if (!state) return;
     this.currentStep = state.step;
     this.currentBar = state.bar;
+  }
+
+  /**
+   * Playlist lane rows muted in project state. Rows are array indices — the
+   * same coordinate space as `PlaylistClip.trackIndex`. Clips whose row is
+   * missing from the collection are never muted.
+   */
+  private derivePlaylistLaneMutes(tracks?: PlaylistTrack[]): Set<number> {
+    const mutes = new Set<number>();
+    if (!Array.isArray(tracks)) return mutes;
+    tracks.forEach((track, index) => {
+      if (track && track.mute === true) mutes.add(index);
+    });
+    return mutes;
+  }
+
+  /**
+   * A clip is lane-muted when its playlist row is muted. Lane mute is enforced
+   * at the trigger boundary — before the clip reaches its routed mixer insert —
+   * so muting one lane can never silence another lane or a channel that shares
+   * the same insert.
+   */
+  private isPlaylistLaneMuted(clip: PlaylistClip): boolean {
+    if (this.playlistLaneMutes.size === 0) return false;
+    if (!Number.isFinite(clip.trackIndex)) return false;
+    return this.playlistLaneMutes.has(Math.floor(clip.trackIndex));
+  }
+
+  /** Silences one lane immediately: cancels that lane's in-flight clip audio only. */
+  private stopActiveClipSourcesForLane(laneIndex: number): void {
+    for (const source of Array.from(this.activeClipSources)) {
+      if (this.activeClipSourceLanes.get(source) !== laneIndex) continue;
+      try { source.stop(); } catch (_) { /* already inactive */ }
+      this.activeClipSources.delete(source);
+      this.activeClipSourceLanes.delete(source);
+    }
   }
 
   /** Total steps the Song Mode arrangement occupies, or null when it has none. */
@@ -3058,14 +3131,23 @@ class AudioEngine {
    * of waiting for — or missing — its start-bar trigger. A clip that begins
    * exactly at the position is left to the scheduler's start-bar trigger so
    * it can never sound twice.
+   *
+   * With `laneIndex` the sweep is limited to clips on that playlist row; it is
+   * used when a lane is unmuted mid-take so only that lane's spanning clip
+   * restarts. Without it (seek/resume), still-muted lanes are skipped.
    */
-  private retriggerAudioClipsAtPosition(positionSeconds: number): void {
+  private retriggerAudioClipsAtPosition(positionSeconds: number, laneIndex?: number): void {
     const ctx = this.ctx;
     if (!ctx || positionSeconds <= 0) return;
     const stepDurationSeconds = 60 / this.bpm / 4;
     const now = ctx.currentTime;
     for (const clip of this.activeClips) {
       if (clip.type !== 'audio' || clip.mute) continue;
+      if (laneIndex === undefined) {
+        if (this.isPlaylistLaneMuted(clip)) continue;
+      } else {
+        if (!Number.isFinite(clip.trackIndex) || Math.floor(clip.trackIndex) !== laneIndex) continue;
+      }
       if (!Number.isFinite(clip.startBar) || !Number.isFinite(clip.lengthBars) || clip.lengthBars <= 0) continue;
       const startSeconds = clip.startBar * 16 * stepDurationSeconds;
       const endSeconds = startSeconds + clip.lengthBars * 16 * stepDurationSeconds;
@@ -3185,7 +3267,7 @@ class AudioEngine {
 
           if (currentGlobalStep >= clipStartStep && currentGlobalStep < clipEndStep) {
             const channel = this.activeChannels.find(c => c.id === clip.channelId);
-            if (channel && !channel.mute) {
+            if (channel && !channel.mute && !this.isPlaylistLaneMuted(clip)) {
               const loopLength = resolvePlayableContentLengthSteps(channel);
               const stepOffset = clip.offsetSteps || 0;
               const relStep = ((currentGlobalStep - clipStartStep + stepOffset) % loopLength + loopLength) % loopLength;
@@ -3211,7 +3293,7 @@ class AudioEngine {
           }
         } else if (clip.type === 'audio') {
           const clipStartStep = clip.startBar * 16;
-          if (currentGlobalStep === clipStartStep && !clip.mute) {
+          if (currentGlobalStep === clipStartStep && !clip.mute && !this.isPlaylistLaneMuted(clip)) {
             // Trigger audio clip at its start bar
             this.playAudioClipWithFades(clip, now);
           }
@@ -3319,7 +3401,13 @@ class AudioEngine {
     // Keep the take's playlist audio under transport control: pause, seek and
     // stop cancel it instead of letting it keep playing as zombie audio.
     this.activeClipSources.add(source);
-    source.addEventListener('ended', () => this.activeClipSources.delete(source), { once: true });
+    if (Number.isFinite(clip.trackIndex)) {
+      this.activeClipSourceLanes.set(source, Math.floor(clip.trackIndex));
+    }
+    source.addEventListener('ended', () => {
+      this.activeClipSources.delete(source);
+      this.activeClipSourceLanes.delete(source);
+    }, { once: true });
   }
 
   /**
