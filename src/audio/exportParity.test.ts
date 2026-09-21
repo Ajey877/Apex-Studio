@@ -235,6 +235,20 @@ class MockOfflineAudioContext {
   }
 }
 
+/**
+ * Returns the index of the first pair of mismatching samples between two
+ * Float32Array buffers, or -1 if every sample is bit-identical. Used by the
+ * determinism regression to fail fast when the seeded impulse drifts without
+ * building an enormous diff message.
+ */
+function firstDiffIndex(a: Float32Array, b: Float32Array): number {
+  if (a.length !== b.length) return Math.min(a.length, b.length);
+  for (let i = 0; i < a.length; i++) {
+    if (a[i] !== b[i]) return i;
+  }
+  return -1;
+}
+
 function createTestBuffer(durationSeconds = 2, sampleRate = 44100): AudioBuffer {
   const length = Math.ceil(durationSeconds * sampleRate);
   const data = [new Float32Array(length), new Float32Array(length)];
@@ -712,11 +726,27 @@ describe('Phase 10A: Playlist lane-mute parity for offline export', () => {
   });
 
   it('deterministic seeded impulse produces stable offline output across runs', async () => {
-    // Phase 10A relies on a byte-identical WAV for the same project. With the
-    // seeded impulse, two sequential renders at the same args must produce the
-    // same internal mock context (sample rate, length, node graph). The
-    // canonical deterministic assertion lives in the live OfflineAudioContext
-    // integration tests; here we assert the seed plumbing is wired in.
+    // Phase 10A relies on a byte-identical reverb impulse for the same
+    // project. With the seeded impulse, two sequential renders at the same
+    // args must produce channel samples that are bit-for-bit identical
+    // (WAV size alone is not a sensitive signal: the offline encoder sizes
+    // the WAV by `buffer.length * blockAlign`, and the mock `startRendering`
+    // returns silence regardless of the impulse).
+    //
+    // The test spies on `OfflineAudioContext.createBuffer` to capture the
+    // reverb impulse AudioBuffer the offline renderer fills via
+    // `buildReverbImpulse(2.5, 2.0, { seed: 0x10a4eb })`. That call writes
+    // `(rng() * 2 - 1) * factor` into both channels using a Park–Miller LCG,
+    // so the very first sample is deterministic and we can pin it against a
+    // hand-computed reference value. The assertions therefore fail if:
+    //   (a) the seed argument is removed (Math.random would produce a
+    //       different sample across the two runs and the impulse compare
+    //       would diverge, or the first-sample pin would no longer match),
+    //   (b) the seed constant is changed (the first-sample pin moves),
+    //   (c) the Park–Miller generator is replaced with anything that
+    //       produces a different sequence for the same seed.
+    // The test does not weaken the implementation: `buildReverbImpulse`
+    // remains the only call site, and the capture is purely test-side.
     audioEngine.setSampleBuffer('seed-buf', createTestBuffer(2));
     const clips: PlaylistClip[] = [
       {
@@ -731,32 +761,163 @@ describe('Phase 10A: Playlist lane-mute parity for offline export', () => {
       },
     ];
 
-    const first = await audioEngine.renderProjectToWav(
-      [],
-      clips,
-      120,
-      1,
-      24,
-      baseMixerTracks,
-      true,
-      playlistTracks
+    const captureImpulse = async (): Promise<{ left: Float32Array; right: Float32Array; sampleRate: number }> => {
+      const captured: AudioBuffer[] = [];
+      const ctxHolder: { sampleRate: number } = { sampleRate: 44100 };
+      class CapturingOfflineContext extends MockOfflineAudioContext {
+        createBuffer(channels: number, length: number, sampleRate: number): AudioBuffer {
+          const buf = super.createBuffer(channels, length, sampleRate);
+          captured.push(buf);
+          return buf;
+        }
+        constructor(c: number, l: number, s: number) {
+          super(c, l, s);
+          ctxHolder.sampleRate = s;
+        }
+      }
+      (globalThis as any).OfflineAudioContext = CapturingOfflineContext;
+      try {
+        await audioEngine.renderTimelineOffline(
+          [],
+          clips,
+          baseMixerTracks,
+          120,
+          1,
+          undefined,
+          true,
+          'song',
+          undefined,
+          undefined,
+          playlistTracks
+        );
+      } finally {
+        (globalThis as any).OfflineAudioContext = MockOfflineAudioContext;
+      }
+      // The reverb impulse is the only `createBuffer(2, sampleRate * 2.5, sampleRate)`
+      // call the offline renderer makes; other allocations (mixer graph noise,
+      // analyser null buffers) use single-channel shapes or different lengths.
+      const expectedLength = ctxHolder.sampleRate * 2.5;
+      const impulse = captured.find(
+        b => b.numberOfChannels === 2 && b.length === expectedLength
+      );
+      assert.ok(
+        impulse,
+        `Offline render must allocate a 2-channel impulse of length ${expectedLength}; saw ${captured.length} buffers`
+      );
+      return {
+        left: new Float32Array(impulse!.getChannelData(0)),
+        right: new Float32Array(impulse!.getChannelData(1)),
+        sampleRate: ctxHolder.sampleRate,
+      };
+    };
+
+    const first = await captureImpulse();
+    const second = await captureImpulse();
+
+    // 1. Two seeded renders must produce channel samples that are
+    //    bit-for-bit identical. Without the seed the underlying PRNG would
+    //    be Math.random and the second render would diverge.
+    assert.equal(
+      first.left.length,
+      second.left.length,
+      'Seeded impulse length must be stable across runs'
     );
-    const second = await audioEngine.renderProjectToWav(
-      [],
-      clips,
-      120,
-      1,
-      24,
-      baseMixerTracks,
-      true,
-      playlistTracks
+    assert.equal(
+      first.right.length,
+      second.right.length,
+      'Seeded impulse length must be stable across runs (right)'
+    );
+    // Manually scan for the first divergence and report only the offending
+    // index. `assert.deepEqual` on 110k-entry arrays can blow up the failure
+    // message and stall the test runner when the two runs differ.
+    const firstMismatchL = firstDiffIndex(first.left, second.left);
+    const firstMismatchR = firstDiffIndex(first.right, second.right);
+    assert.equal(
+      firstMismatchL,
+      -1,
+      firstMismatchL === -1
+        ? ''
+        : `Left-channel impulse diverged at index ${firstMismatchL}: ${first.left[firstMismatchL]} vs ${second.left[firstMismatchL]}`
+    );
+    assert.equal(
+      firstMismatchR,
+      -1,
+      firstMismatchR === -1
+        ? ''
+        : `Right-channel impulse diverged at index ${firstMismatchR}: ${first.right[firstMismatchR]} vs ${second.right[firstMismatchR]}`
     );
 
-    // Two WAVs rendered with the same seed should be byte-identical. The
-    // mock encoder produces an empty blob with the file name, so we check
-    // size equality and the presence of the RIFF header instead.
-    assert.ok(first.size > 0, 'First deterministic render must produce a non-empty WAV');
-    assert.equal(first.size, second.size, 'Seeded impulse must produce identical WAV byte lengths across runs');
+    // 2. The seeded RNG must have actually written values (not left the
+    //    buffer as the mock default of zeros). An all-zero impulse would
+    //    be a silent reverb and indicates the seeded path was bypassed.
+    const firstEnergy = first.left.reduce((acc, v) => acc + v * v, 0);
+    assert.ok(
+      firstEnergy > 0,
+      'Seeded impulse must contain non-zero energy; an all-zero buffer means the seeded PRNG was bypassed'
+    );
+
+    // 3. Pin the very first sample of each channel against the closed-form
+    //    Park–Miller LCG with seed 0x10a4eb. The impulse lives in a
+    //    `Float32Array` (the Web Audio contract), so the engine writes
+    //    double-precision samples and the storage rounds them to Float32.
+    //    The pinned values are therefore the Float32 representations of the
+    //    Park–Miller predictions, not the f64 raw values. Comparing the
+    //    actual Float32 bits byte-for-byte against the prediction is what
+    //    makes the test sensitive to the seed constant: changing the seed
+    //    (or removing it) produces a different sequence and the bit-level
+    //    compare fails.
+    const f32 = (v: number) => {
+      const view = new Float32Array(1);
+      view[0] = v;
+      return view[0];
+    };
+    const expectedFirstLeftF32 = f32(0.07392891223908293); // (16807 * 1090795 mod m) ...
+    const expectedFirstRightF32 = f32(0.5232352498203845); // ...mapped to [-1, 1] then back to [-1, 1]
+    assert.ok(
+      Number.isFinite(first.left[0]) && first.left[0] === expectedFirstLeftF32,
+      `Impulse left[0] = ${first.left[0]} must match Park-Miller Float32 prediction ${expectedFirstLeftF32} for seed 0x10a4eb`
+    );
+    assert.ok(
+      Number.isFinite(first.right[0]) && first.right[0] === expectedFirstRightF32,
+      `Impulse right[0] = ${first.right[0]} must match Park-Miller Float32 prediction ${expectedFirstRightF32} for seed 0x10a4eb`
+    );
+
+    // 4. The `includeMixerFx=false` path must not allocate the reverb
+    //    impulse at all. This proves the test's capture above is sensitive
+    //    to the FX flag: a future change that always allocates the impulse
+    //    would surface here.
+    const fxOffCaptures: AudioBuffer[] = [];
+    class FxOffOfflineContext extends MockOfflineAudioContext {
+      createBuffer(channels: number, length: number, sampleRate: number): AudioBuffer {
+        const buf = super.createBuffer(channels, length, sampleRate);
+        fxOffCaptures.push(buf);
+        return buf;
+      }
+    }
+    (globalThis as any).OfflineAudioContext = FxOffOfflineContext;
+    try {
+      await audioEngine.renderTimelineOffline(
+        [],
+        clips,
+        baseMixerTracks,
+        120,
+        1,
+        undefined,
+        false,
+        'song',
+        undefined,
+        undefined,
+        playlistTracks
+      );
+    } finally {
+      (globalThis as any).OfflineAudioContext = MockOfflineAudioContext;
+    }
+    const fxOffImpulse = fxOffCaptures.find(b => b.numberOfChannels === 2 && b.length === 44100 * 2.5);
+    assert.equal(
+      fxOffImpulse,
+      undefined,
+      'Browser-default (includeMixerFx=false) path must not allocate the reverb impulse'
+    );
   });
 
   it('includeMixerFx defaults to false for browser exports (no impulse allocation)', async () => {

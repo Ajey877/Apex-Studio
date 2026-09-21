@@ -243,6 +243,19 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, chann
             keeps the project's EQ, delay, and convolution reverb — including
             the FX tails that the deterministic impulse guarantees render
             identically between exports. Off keeps browser exports fast.
+
+            Only one option is active at a time: the "Project Default" tile is
+            active only while the user has not yet made an explicit choice
+            (`fxOverride === null`). Once the user picks Include FX or Bypass
+            FX, exactly the matching tile is active. This guarantees a single
+            clear selection instead of double-highlighting "Project Default"
+            together with whichever effective value happens to match.
+
+            The effective value passed to the renderer (`effectiveIncludeMixerFx`)
+            is identical to the prior implementation:
+              * `fxOverride === null` → `includeMixerFx` prop (project default, `false`)
+              * `fxOverride === true`  → `true`  (explicit Include FX)
+              * `fxOverride === false` → `false` (explicit Bypass FX)
           */}
           <div className="space-y-1">
             <label className="text-[10px] font-bold uppercase tracking-wider text-[#777]">Mixer FX in Export</label>
@@ -252,9 +265,14 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, chann
                 { id: 'on' as const, name: 'Include FX', desc: 'EQ, reverb, delay...' },
                 { id: 'off' as const, name: 'Bypass FX', desc: 'Faster, no reverb tail' }
               ].map(option => {
-                const isActive = (option.id === 'auto' && fxOverride === null) ||
-                  (option.id === 'on' && effectiveIncludeMixerFx) ||
-                  (option.id === 'off' && !effectiveIncludeMixerFx);
+                // Each button is active iff the user's per-export choice matches
+                // it. "Project Default" is only active while no explicit override
+                // exists; once the user picks Include FX or Bypass FX, that
+                // explicit choice wins and "Project Default" goes inactive.
+                const isActive =
+                  (option.id === 'auto' && fxOverride === null) ||
+                  (option.id === 'on' && fxOverride === true) ||
+                  (option.id === 'off' && fxOverride === false);
                 return (
                   <button
                     key={option.id}
