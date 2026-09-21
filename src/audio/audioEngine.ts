@@ -144,6 +144,27 @@ const mergePlaybackProjectEdits = (
   return structuredClone(nextProjectValue);
 };
 
+/**
+ * Deterministic PRNG used by the offline reverb-impulse generator.
+ *
+ * `Math.random()` is non-seeded, so an offline convolution reverb would produce
+ * a different tail on every export and the regression suite could not detect a
+ * DSP regression from a sample mismatch. A small linear congruential generator
+ * is sufficient for an impulse response: only amplitude distribution matters,
+ * and any reproducible noise source with reasonable autocorrelation works.
+ */
+function createSeededRandom(seed: number): () => number {
+  // Park-Miller LCG constants: a well-known deterministic 31-bit PRNG.
+  const a = 16807;
+  const m = 2147483647;
+  let state = Math.abs(Math.floor(seed)) % m;
+  if (state === 0) state = 1;
+  return () => {
+    state = (a * state) % m;
+    return (state - 1) / (m - 1);
+  };
+}
+
 export function resolvePlayableContentLengthSteps(
   channel?: Channel,
   patternLengthSteps?: number
@@ -321,7 +342,7 @@ class AudioEngine {
     return [...this.sampleBuffers.keys()];
   }
 
-  private buildReverbImpulse(duration: number, decay: number) {
+  private buildReverbImpulse(duration: number, decay: number, options?: { seed?: number }) {
     if (!this.ctx) return;
     const rate = this.ctx.sampleRate;
     const length = rate * duration;
@@ -329,13 +350,37 @@ class AudioEngine {
     const left = impulse.getChannelData(0);
     const right = impulse.getChannelData(1);
 
+    // Offline renders must produce a byte-identical WAV for the same project
+    // (regression coverage depends on that — see `src/audio/exportParity.test.ts`).
+    // Math.random() would change the convolution tail between exports, so the
+    // renderer is the only offline caller and supplies an explicit seed. The
+    // live engine keeps its existing seeded RNG behaviour.
+    const seed = options?.seed;
+    const rng = typeof seed === 'number' ? createSeededRandom(seed) : Math.random;
+
     for (let i = 0; i < length; i++) {
       const n = i / length;
       const factor = Math.pow(1 - n, decay);
-      left[i] = (Math.random() * 2 - 1) * factor;
-      right[i] = (Math.random() * 2 - 1) * factor;
+      left[i] = (rng() * 2 - 1) * factor;
+      right[i] = (rng() * 2 - 1) * factor;
     }
     this.impulseResponses.set('default', impulse);
+  }
+
+  /**
+   * A clip is lane-muted when its playlist row is muted. Lane mute is enforced
+   * at the trigger boundary — before the clip reaches its routed mixer insert —
+   * so muting one lane can never silence another lane or a channel that shares
+   * the same insert.
+   *
+   * `laneMutes` is the project-derived mute set; passing an empty set makes
+   * the check branch-free so callers in the hot path don't pay for the
+   * row-lookup when the project has no muted lanes.
+   */
+  private isClipPlaylistLaneMuted(clip: PlaylistClip, laneMutes: Set<number>): boolean {
+    if (laneMutes.size === 0) return false;
+    if (!Number.isFinite(clip.trackIndex)) return false;
+    return laneMutes.has(Math.floor(clip.trackIndex));
   }
 
   public getOrCreateMixerChannel(trackId: number) {
@@ -2216,15 +2261,24 @@ class AudioEngine {
     renderScope: OfflineRenderScope = 'song',
     onProgress?: OfflineRenderProgress,
     patternLengthSteps?: number,
+    playlistTracks?: PlaylistTrack[],
   ): Promise<AudioBuffer> {
     onProgress?.(15, `Preparing ${renderScope === 'pattern' ? 'pattern loop' : 'song'} export...`);
 
-    // Validate audio buffers for all unmuted audio clips.
+    // Phase 10A: a muted playlist lane must behave like a muted clip during
+    // export — a missing audio buffer on a silenced lane should never fail the
+    // export, and that lane's clips are dropped from the rendered WAV exactly
+    // the way the live scheduler drops them at the trigger boundary.
+    const offlineLaneMutes = this.derivePlaylistLaneMutes(playlistTracks);
+
+    // Validate audio buffers for all audible audio clips.
     // Phase 8B (P1-4): an unresolvable or unavailable audio asset (placeholder
     // stem, missing buffer, or hydration-flagged `audioUnavailable`) must fail
     // the export up front instead of rendering a misleading silent WAV.
+    // Phase 10A: lane-muted clips are silently dropped, so their missing
+    // buffers must not fail the export — only audible clips are validated.
     for (const clip of clips) {
-      if (clip.type === 'audio' && !clip.mute) {
+      if (clip.type === 'audio' && !clip.mute && !this.isClipPlaylistLaneMuted(clip, offlineLaneMutes)) {
         if (!clip.audioBufferId) {
           throw new Error(
             `Audio clip "${clip.name || clip.audioName || clip.id}" is missing an audioBufferId.`
@@ -2270,7 +2324,8 @@ class AudioEngine {
       currentStep: this.currentStep,
       currentBar: this.currentBar,
       bpm: this.bpm,
-      metronome: this.metronome
+      metronome: this.metronome,
+      playlistLaneMutes: this.playlistLaneMutes
     };
     this.isOfflineRendering = true;
     this.liveCtx = previous.ctx;
@@ -2319,8 +2374,17 @@ class AudioEngine {
         : tracks.map(track => ({ ...track, fxSlots: [] }));
       this.activeMixerTracks = structuredClone(renderTracks);
       this.playbackProjectMixerTracks = structuredClone(renderTracks);
+      // Phase 10A: share the project's lane-mute derivation with the offline
+      // scheduler so the trigger boundary drops muted-lane clips the same way
+      // the live `play()` boundary does. Without this, the offline renderer
+      // would still call `playAudioClipWithFades` on muted-lane audio clips.
+      this.playlistLaneMutes = offlineLaneMutes;
       if (includeMixerFx) {
-        this.buildReverbImpulse(2.5, 2.0);
+        // Phase 10A: a seeded impulse is required so offline exports are
+        // byte-deterministic across runs. The live engine never reaches this
+        // branch (`includeMixerFx` defaults to false on the offline path) and
+        // keeps its existing non-deterministic convolution tail.
+        this.buildReverbImpulse(2.5, 2.0, { seed: 0x10a4eb });
       }
       const masterTrack = renderTracks.find(track => track.id === 0);
       if (masterTrack) this.updateMixerTrack(masterTrack); else this.getOrCreateMixerChannel(0);
@@ -2382,6 +2446,7 @@ class AudioEngine {
       this.currentBar = previous.currentBar;
       this.bpm = previous.bpm;
       this.metronome = previous.metronome;
+      this.playlistLaneMutes = previous.playlistLaneMutes;
     }
   }
 
@@ -2392,14 +2457,22 @@ class AudioEngine {
     bpm: number,
     totalBars: number,
     bitDepth: 16 | 24 | 32 = 24,
-    mixerTracks?: MixerTrack[]
+    mixerTracks?: MixerTrack[],
+    includeMixerFx: boolean = false,
+    playlistTracks?: PlaylistTrack[]
   ): Promise<Blob> {
     const renderedBuffer = await this.renderTimelineOffline(
       channels,
       clips,
       mixerTracks ?? [],
       bpm,
-      totalBars
+      totalBars,
+      undefined,
+      includeMixerFx,
+      'song',
+      undefined,
+      undefined,
+      playlistTracks
     );
     return this.audioBufferToWav(renderedBuffer, bitDepth);
   }
@@ -2413,7 +2486,9 @@ class AudioEngine {
     totalBarsOrBitDepth?: number | (16 | 24 | 32),
     bitDepthParam?: 16 | 24 | 32,
     renderScope: OfflineRenderScope = 'song',
-    patternLengthSteps?: number
+    patternLengthSteps?: number,
+    playlistTracks?: PlaylistTrack[],
+    includeMixerFx: boolean = false
   ): Promise<{ stems: Record<string, Blob>; master: Blob }> {
     let mixerTracks: MixerTrack[] = [];
     let bpm = 120;
@@ -2432,6 +2507,12 @@ class AudioEngine {
       mixerTracks = [];
     }
 
+    // Phase 10A: stems must honour playlist lane mutes exactly like the master
+    // mix and the live scheduler — a muted lane is dropped before the stem
+    // pipeline runs its per-clip filters, so a missing audio buffer on a
+    // silenced lane never aborts the export.
+    const stemLaneMutes = this.derivePlaylistLaneMutes(playlistTracks);
+
     // 1. Render Full Master Mix using verified offline timeline renderer
     const masterBuffer = await this.renderTimelineOffline(
       channels,
@@ -2440,10 +2521,11 @@ class AudioEngine {
       bpm,
       totalBars,
       undefined,
-      false,
+      includeMixerFx,
       renderScope,
       undefined,
-      patternLengthSteps
+      patternLengthSteps,
+      playlistTracks
     );
     const master = this.audioBufferToWav(masterBuffer, bitDepth);
 
@@ -2453,6 +2535,7 @@ class AudioEngine {
     for (const channel of channels) {
       const channelClips = clips.filter(clip => {
         if (clip.mute) return false;
+        if (this.isClipPlaylistLaneMuted(clip, stemLaneMutes)) return false;
         if (clip.type === 'pattern') {
           return clip.channelId === channel.id;
         }
@@ -2477,10 +2560,11 @@ class AudioEngine {
         bpm,
         totalBars,
         undefined,
-        false,
+        includeMixerFx,
         renderScope,
         undefined,
-        patternLengthSteps
+        patternLengthSteps,
+        playlistTracks
       );
 
       const cleanName = (channel.name || `Channel_${channel.id}`).replace(/[^a-zA-Z0-9_-]/g, '_');
@@ -2491,7 +2575,11 @@ class AudioEngine {
     // Group them by playlist trackIndex
     const channelIds = new Set(channels.map(c => c.id));
     const unassociatedAudioClips = clips.filter(
-      clip => clip.type === 'audio' && !clip.mute && (!clip.channelId || !channelIds.has(clip.channelId))
+      clip =>
+        clip.type === 'audio' &&
+        !clip.mute &&
+        !this.isClipPlaylistLaneMuted(clip, stemLaneMutes) &&
+        (!clip.channelId || !channelIds.has(clip.channelId))
     );
 
     const clipsByTrack = new Map<number, PlaylistClip[]>();
@@ -2506,6 +2594,7 @@ class AudioEngine {
       const mixerTrackId = Math.max(1, trackIdx + 1);
       const trackAutomationClips = clips.filter(clip => {
         if (clip.mute || clip.type !== 'automation' || !clip.automationTarget) return false;
+        if (this.isClipPlaylistLaneMuted(clip, stemLaneMutes)) return false;
         return String(clip.automationTarget.targetId) === String(mixerTrackId);
       });
 
@@ -2516,10 +2605,11 @@ class AudioEngine {
         bpm,
         totalBars,
         undefined,
-        false,
+        includeMixerFx,
         renderScope,
         undefined,
-        patternLengthSteps
+        patternLengthSteps,
+        playlistTracks
       );
 
       const trackNum = trackIdx + 1;
