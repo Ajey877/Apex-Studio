@@ -210,11 +210,94 @@ function createEffect(ctx: AudioContext, slot: FxSlot): AudioEffect | null {
   }
 }
 
+export interface LiveFxChainHandle {
+  /** Per-slot effect lookup keyed by FxSlot.id — populated at chain construction. */
+  readonly slotEffects: ReadonlyMap<string, AudioEffect>;
+}
+
+/**
+ * Side-channel registry shared between `installLiveFxChainHardening` and the
+ * rest of the audio engine. Phase 10B uses this to:
+ *   (1) update slot.mix on the live WetDry wrapper without tearing the chain
+ *       down on every slider tick, and
+ *   (2) let the engine reach the same WetDry during fx_mix automation, so
+ *       playback and export both share a single live + offline code path.
+ *
+ * Lookup is by (trackId, slotId). An entry is registered when
+ * `rebuildTrackFxChain` constructs the chain for a track, and cleared on
+ * `removeMixerChannel` or the next rebuild of that track.
+ */
+interface LiveFxChainRegistry {
+  applyLiveMix(trackId: number, slotId: string, mix: number, currentTime: number): boolean;
+  getChain(trackId: number): LiveFxChainHandle | undefined;
+}
+
+function buildChain(track: MixerTrack, ctx: AudioContext): {
+  effects: AudioEffect[];
+  slotIndex: Map<string, AudioEffect>;
+  createdNodes: AudioNode[];
+  firstInput: AudioNode | null;
+  current: AudioNode | null;
+} {
+  const effects: AudioEffect[] = [];
+  const slotIndex = new Map<string, AudioEffect>();
+  const createdNodes: AudioNode[] = [];
+  let firstInput: AudioNode | null = null;
+  let current: AudioNode | null = null;
+
+  for (const slot of track.fxSlots) {
+    if (!slot.enabled) continue;
+    const effect = createEffect(ctx, slot);
+    if (!effect) continue;
+
+    if (!firstInput) firstInput = effect.input;
+    if (current) current.connect(effect.input);
+    current = effect.output;
+    effects.push(effect);
+    // The WetDry wrapper owns the slot.id and forwards unsupported setParameter
+    // calls through to the inner effect, so lookups by slotId hit the wrapper
+    // (which is what owns the dry/wet gain pair).
+    slotIndex.set(slot.id, effect);
+    if (!createdNodes.includes(effect.input)) createdNodes.push(effect.input);
+    if (effect.output !== effect.input && !createdNodes.includes(effect.output)) createdNodes.push(effect.output);
+  }
+
+  return { effects, slotIndex, createdNodes, firstInput, current };
+}
+
+function boundedMix(mix: number): number {
+  if (!Number.isFinite(mix)) return 0;
+  return Math.max(0, Math.min(1, mix));
+}
+
 export function installLiveFxChainHardening(engine: AudioEngineLike): void {
   if (installed.has(engine as object)) return;
   installed.add(engine as object);
 
   const states = new Map<number, AudioEffect[]>();
+  // Per-track slot-id index. Cleared on every rebuild of that track's chain.
+  const slotIndexByTrack = new Map<number, Map<string, AudioEffect>>();
+
+  const registry: LiveFxChainRegistry = {
+    getChain(trackId: number) {
+      const slotIndex = slotIndexByTrack.get(trackId);
+      if (!slotIndex) return undefined;
+      return { slotEffects: slotIndex };
+    },
+    applyLiveMix(trackId: number, slotId: string, mix: number, currentTime: number): boolean {
+      const slotIndex = slotIndexByTrack.get(trackId);
+      const effect = slotIndex?.get(slotId);
+      if (!effect) return false;
+      try {
+        effect.setParameter('mix', boundedMix(mix), currentTime);
+        return true;
+      } catch (_) {
+        return false;
+      }
+    },
+  };
+  // Expose the registry on the engine for the audio engine and tests.
+  (engine as unknown as { __liveFxChainRegistry: LiveFxChainRegistry }).__liveFxChainRegistry = registry;
 
   engine.rebuildTrackFxChain = function rebuildTrackFxChain(track: MixerTrack): void {
     const rawCtx = (this as any).ctx;
@@ -230,51 +313,34 @@ export function installLiveFxChainHardening(engine: AudioEngineLike): void {
       }
       channel.fxNodes = [];
 
-      const createdNodes: AudioNode[] = [];
-      let firstInput: AudioNode | null = null;
-      let current: AudioNode | null = null;
-
-      for (const slot of track.fxSlots) {
-        if (!slot.enabled) continue;
-        const effect = createEffect(ctx, slot);
-        if (!effect) continue;
-
-        if (!firstInput) firstInput = effect.input;
-        if (current) current.connect(effect.input);
-        current = effect.output;
-        if (!channel.fxNodes.includes(effect.input)) createdNodes.push(effect.input);
-        if (!channel.fxNodes.includes(effect.output) && effect.output !== effect.input) createdNodes.push(effect.output);
-      }
-
-      if (firstInput && current) {
-        channel.input.connect(firstInput);
-        current.connect(channel.panner);
-        channel.fxNodes = createdNodes;
+      const built = buildChain(track, ctx);
+      if (built.firstInput && built.current) {
+        channel.input.connect(built.firstInput);
+        built.current.connect(channel.panner);
+        channel.fxNodes = built.createdNodes;
       } else {
         channel.input.connect(channel.panner);
       }
+      // Offline renders are not registered for live re-application; the chain
+      // is rebuilt per export. The slot index still helps tests inspect state.
+      slotIndexByTrack.set(track.id, built.slotIndex);
       return;
     }
 
     const previousEffects = states.get(track.id) ?? [];
-    const created: AudioEffect[] = [];
-    const createdNodes: AudioNode[] = [];
+    let created: AudioEffect[] = [];
+    let createdNodes: AudioNode[] = [];
     let firstInput: AudioNode | null = null;
     let current: AudioNode | null = null;
+    let slotIndex: Map<string, AudioEffect> = new Map();
 
     try {
-      for (const slot of track.fxSlots) {
-        if (!slot.enabled) continue;
-        const effect = createEffect(ctx, slot);
-        if (!effect) continue;
-
-        if (!firstInput) firstInput = effect.input;
-        if (current) current.connect(effect.input);
-        current = effect.output;
-        created.push(effect);
-        if (!channel.fxNodes.includes(effect.input)) createdNodes.push(effect.input);
-        if (!channel.fxNodes.includes(effect.output) && effect.output !== effect.input) createdNodes.push(effect.output);
-      }
+      const built = buildChain(track, ctx);
+      created = built.effects;
+      createdNodes = built.createdNodes;
+      firstInput = built.firstInput;
+      current = built.current;
+      slotIndex = built.slotIndex;
 
       (current ?? channel.input).connect(channel.panner);
     } catch (error) {
@@ -298,6 +364,7 @@ export function installLiveFxChainHardening(engine: AudioEngineLike): void {
     }
 
     states.set(track.id, created);
+    slotIndexByTrack.set(track.id, slotIndex);
   };
 
   const originalRemove = engine.removeMixerChannel;
@@ -305,6 +372,36 @@ export function installLiveFxChainHardening(engine: AudioEngineLike): void {
     const effects = states.get(trackId) ?? [];
     for (const effect of effects) effect.dispose();
     states.delete(trackId);
+    slotIndexByTrack.delete(trackId);
     originalRemove.call(this, trackId);
   };
+}
+
+/**
+ * Phase 10B: Apply a new `mix` value to the live WetDry wrapper that owns the
+ * given slot, without tearing down the active chain. Returns `true` when the
+ * live chain owns a slot with that id; `false` when the caller must rebuild
+ * the chain (no live instance, slot disabled, or unknown slot id).
+ */
+export function applyLiveFxChainMix(
+  engine: { __liveFxChainRegistry?: LiveFxChainRegistry },
+  trackId: number,
+  slotId: string,
+  mix: number,
+  currentTime: number,
+): boolean {
+  return engine.__liveFxChainRegistry?.applyLiveMix(trackId, slotId, mix, currentTime) ?? false;
+}
+
+/**
+ * Phase 10B: Resolve the AudioEffect (typically a `WetDryEffect`) that backs
+ * the named slot on the live chain, or `undefined` when the chain has not
+ * been built yet (playback stopped) or the slot is not present.
+ */
+export function getLiveFxSlotEffect(
+  engine: { __liveFxChainRegistry?: LiveFxChainRegistry },
+  trackId: number,
+  slotId: string,
+): AudioEffect | undefined {
+  return engine.__liveFxChainRegistry?.getChain(trackId)?.slotEffects.get(slotId);
 }

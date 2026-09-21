@@ -108,6 +108,50 @@ const playbackValuesEqual = (left: unknown, right: unknown): boolean => {
   return false;
 };
 
+/**
+ * Phase 10B: a per-track edit where the only field that changed is a subset of
+ * `slot.mix` values for previously-known, enabled slots. Used during a live
+ * take to skip the full FX chain rebuild and route the new mix directly to
+ * the live WetDry wrapper. Any structural change (new slot, removed slot,
+ * enabled/disabled change, params change, channel volume/pan/mute/routing)
+ * returns `false` so the safe fall-back (a full rebuild via
+ * `updateMixerTrack`) handles it instead.
+ */
+interface TrackMixDiff {
+  onlyMixChanged: boolean;
+  mixChanges: Array<{ slotId: string; mix: number }>;
+}
+
+function trackOnlyMixChanged(previous: MixerTrack, next: MixerTrack): TrackMixDiff {
+  const mixChanges: Array<{ slotId: string; mix: number }> = [];
+  if (previous.id !== next.id) return { onlyMixChanged: false, mixChanges };
+  if (previous.fxSlots.length !== next.fxSlots.length) return { onlyMixChanged: false, mixChanges };
+  const previousById = new Map(previous.fxSlots.map(slot => [slot.id, slot]));
+  for (const nextSlot of next.fxSlots) {
+    const prevSlot = previousById.get(nextSlot.id);
+    if (!prevSlot) return { onlyMixChanged: false, mixChanges };
+    if (prevSlot.type !== nextSlot.type) return { onlyMixChanged: false, mixChanges };
+    if (prevSlot.enabled !== nextSlot.enabled) return { onlyMixChanged: false, mixChanges };
+    if (!playbackValuesEqual(prevSlot.params, nextSlot.params)) return { onlyMixChanged: false, mixChanges };
+    if (prevSlot.mix !== nextSlot.mix) {
+      mixChanges.push({ slotId: nextSlot.id, mix: nextSlot.mix });
+    }
+  }
+  const topLevelKeys: ReadonlyArray<keyof MixerTrack> = ['name', 'color', 'volume', 'pan', 'mute', 'solo', 'stereoWidth', 'peakL', 'peakR', 'sidechain', 'routingTargetId', 'sends'];
+  const optionalKeys = ['height', 'armedForRecord'];
+  for (const key of optionalKeys) {
+    if (!playbackValuesEqual((previous as any)[key], (next as any)[key])) {
+      return { onlyMixChanged: false, mixChanges };
+    }
+  }
+  for (const key of topLevelKeys) {
+    if (!playbackValuesEqual((previous as any)[key], (next as any)[key])) {
+      return { onlyMixChanged: false, mixChanges };
+    }
+  }
+  return { onlyMixChanged: mixChanges.length > 0, mixChanges };
+}
+
 const mergePlaybackProjectEdits = (
   activeValue: unknown,
   previousProjectValue: unknown,
@@ -1047,7 +1091,70 @@ class AudioEngine {
       if (mixerChannel && 'pan' in mixerChannel.panner && mixerChannel.panner.pan) {
         mixerChannel.panner.pan.setTargetAtTime(targetPan, now, 0.02);
       }
+    } else if (target.type === 'channel_filter_res') {
+      const ch = channels.find(c => c.id === target.targetId);
+      if (ch && ch.synthParams) {
+        // Map the automation's normalized 0-1 value onto the model's 0-20 resonance
+        // range. New voices constructed at note-trigger read this value, so the
+        // next note already hears the automated Q.
+        ch.synthParams.filterResonance = Math.max(0.0001, value * 20);
+      }
+    } else if (target.type === 'channel_pitch') {
+      const ch = channels.find(c => c.id === target.targetId);
+      if (ch) {
+        // Map normalized 0-1 onto the FL Studio-style ±12 semitone offset so the
+        // middle of the curve is no transposition. Every note trigger reads
+        // `channel.pitch`, so writing it here takes effect on the next note.
+        ch.pitch = (value * 24) - 12;
+      }
+    } else if (target.type === 'fx_mix') {
+      const trackId = Number(target.targetId);
+      const trk = mixerTracks.find(t => t.id === trackId);
+      if (trk) {
+        const slotId = target.paramName;
+        if (slotId) {
+          const slot = trk.fxSlots.find(s => s.id === slotId);
+          if (slot) {
+            // Offline renders consume slot.mix at chain construction time. Update
+            // the slot's mix so the next export rebuild (or next offline take)
+            // observes the automated value. Live playback updates the running
+            // WetDry via the patch registry, when installed, so the user hears
+            // the change without a chain rebuild.
+            slot.mix = Math.max(0, Math.min(1, value));
+            const registry = (this as unknown as {
+              __liveFxChainRegistry?: {
+                applyLiveMix(trackId: number, slotId: string, mix: number, currentTime: number): boolean;
+              };
+            }).__liveFxChainRegistry;
+            registry?.applyLiveMix(trackId, slotId, slot.mix, now);
+          }
+        }
+      }
     }
+  }
+
+  /**
+   * Phase 10B: Apply a slot.mix change to the live WetDry wrapper without
+   * tearing down the active chain. Returns true when the patch supplied an
+   * updated live WetDry, false when the caller must rebuild the chain (e.g.
+   * stopped playback with no live instance) — the project state is updated
+   * either way so the next chain rebuild picks up the value.
+   */
+  public setFxSlotMix(trackId: number, slotId: string, mix: number): boolean {
+    const bounded = Math.max(0, Math.min(1, Number(mix)));
+    if (!Number.isFinite(bounded)) return false;
+    const track = this.activeMixerTracks.find(t => t.id === trackId);
+    if (track) {
+      const slot = track.fxSlots.find(s => s.id === slotId);
+      if (slot) slot.mix = bounded;
+    }
+    const now = this.ctx?.currentTime ?? 0;
+    const registry = (this as unknown as {
+      __liveFxChainRegistry?: {
+        applyLiveMix(trackId: number, slotId: string, mix: number, currentTime: number): boolean;
+      };
+    }).__liveFxChainRegistry;
+    return registry?.applyLiveMix(trackId, slotId, bounded, now) ?? false;
   }
 
   public stopNote(voiceId: string) {
@@ -2822,7 +2929,7 @@ class AudioEngine {
 
   private resetActiveAutomationTarget(target: NonNullable<PlaylistClip['automationTarget']>): void {
     const now = this.ctx?.currentTime ?? 0;
-    if (target.type === 'channel_vol' || target.type === 'channel_pan' || target.type === 'channel_filter_cutoff') {
+    if (target.type === 'channel_vol' || target.type === 'channel_pan' || target.type === 'channel_filter_cutoff' || target.type === 'channel_filter_res' || target.type === 'channel_pitch') {
       const activeChannel = this.activeChannels.find(channel => String(channel.id) === String(target.targetId));
       const projectChannel = this.playbackProjectChannels.find(channel => String(channel.id) === String(target.targetId));
       if (!activeChannel || !projectChannel) return;
@@ -2831,6 +2938,12 @@ class AudioEngine {
       if (target.type === 'channel_pan') activeChannel.pan = projectChannel.pan;
       if (target.type === 'channel_filter_cutoff' && activeChannel.synthParams && projectChannel.synthParams) {
         activeChannel.synthParams.filterCutoff = projectChannel.synthParams.filterCutoff;
+      }
+      if (target.type === 'channel_filter_res' && activeChannel.synthParams && projectChannel.synthParams) {
+        activeChannel.synthParams.filterResonance = projectChannel.synthParams.filterResonance;
+      }
+      if (target.type === 'channel_pitch') {
+        activeChannel.pitch = projectChannel.pitch;
       }
       return;
     }
@@ -2844,6 +2957,29 @@ class AudioEngine {
       if (target.type === 'mixer_vol') activeTrack.volume = projectTrack.volume;
       if (target.type === 'mixer_pan') activeTrack.pan = projectTrack.pan;
       this.updateMixerTrack(activeTrack);
+      return;
+    }
+
+    if (target.type === 'fx_mix') {
+      // Reset to the project's declared slot.mix and re-apply on the live chain
+      // so a removed/finished automation clip does not leave the wet/dry value
+      // latched at the last automation value.
+      const trackId = Number(target.targetId);
+      const slotId = target.paramName;
+      if (!slotId) return;
+      const activeTrack = this.activeMixerTracks.find(track => track.id === trackId);
+      const projectTrack = this.playbackProjectMixerTracks.find(track => track.id === trackId);
+      if (!activeTrack || !projectTrack) return;
+      const activeSlot = activeTrack.fxSlots.find(slot => slot.id === slotId);
+      const projectSlot = projectTrack.fxSlots.find(slot => slot.id === slotId);
+      if (!activeSlot || !projectSlot) return;
+      activeSlot.mix = projectSlot.mix;
+      const registry = (this as unknown as {
+        __liveFxChainRegistry?: {
+          applyLiveMix(trackId: number, slotId: string, mix: number, currentTime: number): boolean;
+        };
+      }).__liveFxChainRegistry;
+      registry?.applyLiveMix(trackId, slotId, projectSlot.mix, now);
       return;
     }
 
@@ -2914,7 +3050,35 @@ class AudioEngine {
           ? structuredClone(track)
           : mergePlaybackProjectEdits(active, previousProject, track) as MixerTrack;
 
-        if (projectChanged) this.updateMixerTrack(nextTrack);
+        if (projectChanged) {
+          // Phase 10B: when an in-flight track edit only touched slot.mix on
+          // already-built FX slots, route the new mix values directly to the
+          // live WetDry wrappers and skip the full chain rebuild. The active
+          // track is updated so a future render/export sees the new values
+          // and `applyAutomationValue` for fx_mix reads the same source.
+          const mixDiff = previousProject ? trackOnlyMixChanged(previousProject, track) : { onlyMixChanged: false, mixChanges: [] };
+          if (mixDiff.onlyMixChanged) {
+            const now = this.ctx?.currentTime ?? 0;
+            for (const change of mixDiff.mixChanges) {
+              const slot = nextTrack.fxSlots.find(s => s.id === change.slotId);
+              if (slot) slot.mix = change.mix;
+              const registry = (this as unknown as {
+                __liveFxChainRegistry?: {
+                  applyLiveMix(trackId: number, slotId: string, mix: number, currentTime: number): boolean;
+                };
+              }).__liveFxChainRegistry;
+              const updated = registry?.applyLiveMix(nextTrack.id, change.slotId, change.mix, now);
+              // Fallback only if the live chain was not built (e.g. an offline
+              // take) — in that case the offline renderer rebuilds per export.
+              if (!updated && !this.isOfflineRendering) {
+                this.updateMixerTrack(nextTrack);
+                break;
+              }
+            }
+          } else {
+            this.updateMixerTrack(nextTrack);
+          }
+        }
         return nextTrack;
       });
       const nextTrackIds = new Set(update.mixerTracks.map(track => track.id));
