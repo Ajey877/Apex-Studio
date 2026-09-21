@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { Download, FolderArchive, Sparkles, X } from 'lucide-react';
 import JSZip from 'jszip';
-import { Channel, PlaylistClip, ProjectMetadata, MixerTrack } from '../types/daw';
+import { Channel, PlaylistClip, PlaylistTrack, ProjectMetadata, MixerTrack } from '../types/daw';
 import { audioEngine } from '../audio/audioEngine';
 import { audioBufferToWav } from '../audio/wavEncoder';
 import { buildStandardMidiFile, getProjectRenderBars } from '../utils/exportUtils';
@@ -22,11 +22,24 @@ interface ExportModalProps {
    * never resolves a pattern length itself.
    */
   patternLengthSteps?: number;
+  /**
+   * Playlist lane rows used by the project. Phase 10A uses them to honour
+   * per-lane mute state during offline export — a muted lane is dropped from
+   * the rendered WAV and from each stem, exactly like the live scheduler.
+   */
+  playlistTracks?: PlaylistTrack[];
+  /**
+   * When `true`, the offline render keeps the project's full mixer FX graph
+   * (EQ, delay, convolution reverb, etc.). Browser exports default to `false`
+   * because convolution feedback can dominate render cost; verification calls
+   * and the WAV-master quality path opt in explicitly.
+   */
+  includeMixerFx?: boolean;
 }
 
 type ExportFormat = 'wav24' | 'wav16' | 'wav32' | 'midi' | 'stems';
 
-export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, channels, clips, meta, mixerTracks, patternLengthSteps }) => {
+export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, channels, clips, meta, mixerTracks, patternLengthSteps, playlistTracks, includeMixerFx = false }) => {
   const [format, setFormat] = useState<ExportFormat>('wav24');
   const [scope, setScope] = useState<ExportScope>('song');
   const [isRendering, setIsRendering] = useState(false);
@@ -34,6 +47,10 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, chann
   const [downloadUrl, setDownloadUrl] = useState<string | null>(null);
   const [statusText, setStatusText] = useState('Ready to render');
   const [fileName, setFileName] = useState('');
+  // Local override so the user can opt into the FX-heavy path on a per-export
+  // basis without the App re-rendering. The prop is the project-level default.
+  const [fxOverride, setFxOverride] = useState<boolean | null>(null);
+  const effectiveIncludeMixerFx = fxOverride ?? includeMixerFx;
 
   useEffect(() => {
     if (!isOpen) return;
@@ -42,6 +59,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, chann
     setFileName(`${base}_master.wav`);
     setStatusText('Ready to render');
     setRenderProgress(0);
+    setFxOverride(null);
   }, [isOpen, meta.name]);
 
   useEffect(() => () => {
@@ -93,7 +111,9 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, chann
             totalBars,
             bitDepth,
             scope,
-            patternLengthSteps
+            patternLengthSteps,
+            playlistTracks,
+            effectiveIncludeMixerFx
           );
           const zip = new JSZip();
           const folder = zip.folder(`${meta.name.replace(/\s+/g, '_')}_Stems_BPM${meta.bpm}`);
@@ -124,7 +144,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, chann
             meta.bpm,
             totalBars,
             undefined,
-            false,
+            effectiveIncludeMixerFx,
             scope,
             (progress, status) => {
               setRenderProgress(progress);
@@ -133,6 +153,10 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, chann
             // Pattern scope wraps at the selected pattern's declared length; the
             // render API ignores it for a Song export.
             patternLengthSteps,
+            // Phase 10A: lane mutes from the playlist are enforced during export
+            // so a muted lane is dropped from the WAV exactly like the live
+            // scheduler drops it at the trigger boundary.
+            playlistTracks,
           );
           setRenderProgress(85);
           const wavBlob = audioBufferToWav(renderedBuffer, bitDepth);
@@ -210,6 +234,57 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, chann
                   <div className="text-[8px] text-[#777]">{option.desc}</div>
                 </button>
               ))}
+            </div>
+          </div>
+
+          {/*
+            Phase 10A export-quality toggle. Default (unset) follows the project
+            preference (App's `includeMixerFx` prop). When on, the offline graph
+            keeps the project's EQ, delay, and convolution reverb — including
+            the FX tails that the deterministic impulse guarantees render
+            identically between exports. Off keeps browser exports fast.
+
+            Only one option is active at a time: the "Project Default" tile is
+            active only while the user has not yet made an explicit choice
+            (`fxOverride === null`). Once the user picks Include FX or Bypass
+            FX, exactly the matching tile is active. This guarantees a single
+            clear selection instead of double-highlighting "Project Default"
+            together with whichever effective value happens to match.
+
+            The effective value passed to the renderer (`effectiveIncludeMixerFx`)
+            is identical to the prior implementation:
+              * `fxOverride === null` → `includeMixerFx` prop (project default, `false`)
+              * `fxOverride === true`  → `true`  (explicit Include FX)
+              * `fxOverride === false` → `false` (explicit Bypass FX)
+          */}
+          <div className="space-y-1">
+            <label className="text-[10px] font-bold uppercase tracking-wider text-[#777]">Mixer FX in Export</label>
+            <div className="grid grid-cols-3 gap-2">
+              {[
+                { id: 'auto' as const, name: 'Project Default', desc: `Currently: ${effectiveIncludeMixerFx ? 'On' : 'Off'}` },
+                { id: 'on' as const, name: 'Include FX', desc: 'EQ, reverb, delay...' },
+                { id: 'off' as const, name: 'Bypass FX', desc: 'Faster, no reverb tail' }
+              ].map(option => {
+                // Each button is active iff the user's per-export choice matches
+                // it. "Project Default" is only active while no explicit override
+                // exists; once the user picks Include FX or Bypass FX, that
+                // explicit choice wins and "Project Default" goes inactive.
+                const isActive =
+                  (option.id === 'auto' && fxOverride === null) ||
+                  (option.id === 'on' && fxOverride === true) ||
+                  (option.id === 'off' && fxOverride === false);
+                return (
+                  <button
+                    key={option.id}
+                    type="button"
+                    onClick={() => setFxOverride(option.id === 'auto' ? null : option.id === 'on')}
+                    className={`p-2 rounded border text-left transition ${isActive ? 'bg-[#ff6e00]/15 border-[#ff6e00] text-white' : 'bg-[#121214] border-[#333336] text-[#777] hover:text-white'}`}
+                  >
+                    <div className="font-bold text-[11px] text-white">{option.name}</div>
+                    <div className="text-[8px] text-[#777]">{option.desc}</div>
+                  </button>
+                );
+              })}
             </div>
           </div>
 
