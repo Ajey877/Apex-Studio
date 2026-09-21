@@ -421,7 +421,8 @@ export function App() {
         playMode,
         projectState.selectedPatternId,
         snapshot.mixerTracks,
-        selectedPatternLengthSteps
+        selectedPatternLengthSteps,
+        projectState.playlistTracks
       );
       setIsPlaying(true);
     }
@@ -450,7 +451,8 @@ export function App() {
         nextMode,
         projectState.selectedPatternId,
         snapshot.mixerTracks,
-        selectedPatternLengthSteps
+        selectedPatternLengthSteps,
+        projectState.playlistTracks
       );
     }
   };
@@ -502,6 +504,10 @@ export function App() {
     if (previous.channels !== next.channels) update.channels = next.channels;
     if (previous.playlistClips !== next.playlistClips) update.clips = next.playlistClips;
     if (previous.mixerTracks !== next.mixerTracks) update.mixerTracks = next.mixerTracks;
+    // Playlist lane mute is audio state for the running take: muting a lane
+    // silences its clips at the trigger boundary, unmuting restarts a clip the
+    // playhead is inside. The mixer insert routing is never touched.
+    if (previous.playlistTracks !== next.playlistTracks) update.playlistTracks = next.playlistTracks;
     // Pattern Mode plays the selected pattern, so its declared length belongs to
     // the live take: a 16 <-> 32 change (or switching to a pattern of a different
     // length) moves the running loop boundary instead of waiting for a restart.
@@ -511,7 +517,7 @@ export function App() {
     if (previousPatternLengthSteps !== nextPatternLengthSteps) {
       update.patternLengthSteps = nextPatternLengthSteps;
     }
-    if (update.channels || update.clips || update.mixerTracks || update.patternLengthSteps !== undefined) {
+    if (update.channels || update.clips || update.mixerTracks || update.playlistTracks || update.patternLengthSteps !== undefined) {
       audioEngine.synchronizePlaybackState(update);
     }
   }, []);
