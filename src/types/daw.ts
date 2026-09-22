@@ -406,8 +406,6 @@ export interface ProjectMetadata {
   created: number;
   updated: number;
   version: string;
-  isEncrypted: boolean;
-  cloudSynced: boolean;
   offlineReady: boolean;
   totalEditTimeSeconds: number;
 }
