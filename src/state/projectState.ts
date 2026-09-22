@@ -69,8 +69,6 @@ export const createDefaultProjectState = (): ProjectState => {
       created: now,
       updated: now,
       version: '4.5.2 Pro',
-      isEncrypted: true,
-      cloudSynced: true,
       offlineReady: true,
       totalEditTimeSeconds: 0
     },
