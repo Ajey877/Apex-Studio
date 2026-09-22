@@ -577,8 +577,8 @@ describe('Phase 11B: live/export FX parity matrix', () => {
       offlineKinds: offlineFixture.nodes.slice(offlineStart).map(nodeKind).sort(),
       liveFxCount: liveChannel.fxNodes.length,
       offlineFxCount: offlineChannel.fxNodes.length,
-      liveEffect: getLiveFxSlotEffect(liveEngine as any, 21, fxSlot.id),
-      offlineEffect: getLiveFxSlotEffect(offlineEngine as any, 21, fxSlot.id),
+      liveEffect: getLiveFxSlotEffect(liveEngine as any, 1, fxSlot.id),
+      offlineEffect: getLiveFxSlotEffect(offlineEngine as any, 1, fxSlot.id),
     };
   }
 
