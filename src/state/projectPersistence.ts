@@ -1,5 +1,5 @@
 import type { AudioRecording, Channel, PlaylistClip, ProjectState } from '../types/daw';
-import { deletePersistedAudioClip, getPersistedAudioClip, getPersistedProjectStateRecord, listPersistedAudioClipIds, listProjectBackupRecords, persistProjectStateRecord, type StoredProjectBackup } from '../audio/audioPersistence';
+import { deletePersistedAudioClip, getPersistedAudioClip, getPersistedProjectRecoverySnapshotRecord, getPersistedProjectStateRecord, listPersistedAudioClipIds, listProjectBackupRecords, persistProjectRecoverySnapshotRecord, persistProjectStateRecord, replacePersistedProjectStateRecord, type StoredProjectBackup } from '../audio/audioPersistence';
 import { normalizeProjectState } from './projectState';
 import { getRecordingAudioBufferId } from '../audio/recordingPipeline';
 import { isSampleAudioUnavailable } from './audioAssetAvailability';
@@ -17,6 +17,7 @@ export interface HydratedAudioResult {
 export interface RestoredProjectState {
   state: ProjectState;
   restored: boolean;
+  recovered: boolean;
   hydratedAudioIds: string[];
   missingAudioIds: string[];
 }
@@ -40,7 +41,16 @@ export const serializeProjectState = (state: ProjectState): string => JSON.strin
  */
 export const persistProjectState = async (state: ProjectState): Promise<void> => {
   const serialized = serializeProjectState(state);
-  const write = persistenceWriteQueue.then(() => persistProjectStateRecord(serialized));
+  const write = persistenceWriteQueue.then(async () => {
+    await persistProjectStateRecord(serialized);
+    try {
+      await persistProjectRecoverySnapshotRecord(serialized);
+    } catch (error) {
+      // The live project is already durable; a recovery-snapshot failure should not
+      // turn a successful save into a reported save failure.
+      console.warn('[Apex Studio] Recovery snapshot update failed after project save.', error);
+    }
+  });
   persistenceWriteQueue = write.catch(() => undefined);
   await write;
 };
