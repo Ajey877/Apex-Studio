@@ -200,7 +200,7 @@ export const normalizeProjectState = (input: unknown): ProjectState => {
     connectedMidiDevices: Array.isArray(candidate.connectedMidiDevices) ? clone(candidate.connectedMidiDevices) : [],
     markers: Array.isArray(candidate.markers) ? clone(candidate.markers) : [],
     macroKnobs: Array.isArray(candidate.macroKnobs) ? clone(candidate.macroKnobs) : [],
-    vocalTuner: candidate.vocalTuner === undefined ? undefined : clone(candidate.vocalTuner),
+    vocalTuner: candidate.vocalTuner === undefined ? undefined : clone(candidate.vocalTuner) as ProjectState['vocalTuner'],
     selectedPatternId: typeof candidate.selectedPatternId === 'string'
       ? candidate.selectedPatternId
       : defaults.selectedPatternId,
