@@ -33,7 +33,7 @@ import {
 } from './state/patternLength';
 import { hydrateProjectAudio, persistProjectState, restorePersistedProjectState, saveAndReconcileProjectState } from './state/projectPersistence';
 import { ProjectBackupError, backupProjectBeforeReplacement } from './state/projectBackup';
-import { waitForSampleBufferPersistence } from './audio/sampleBufferPersistence';
+import { getSampleBufferPersistenceController, waitForSampleBufferPersistence } from './audio/sampleBufferPersistence';
 import { planProjectReplacement, runProjectReplacementAfterBackup, type ProjectReplacementPlan, type ProjectReplacementSource } from './state/projectReplacement';
 import {
   collectMissingAudioAssets,
@@ -147,6 +147,8 @@ export function App() {
   const [isProjectHydrating, setIsProjectHydrating] = useState(true);
   const projectPersistenceReadyRef = useRef(false);
   const hasUnsavedChangesRef = useRef(false);
+  const skipNextAutosaveStateRef = useRef<ProjectState | null>(null);
+  const lifecycleSavePromiseRef = useRef<Promise<boolean> | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
   // Phase 8C (P1-11): missing audio must be visible in the app, not only in the
   // console. The banner re-appears whenever the set of missing assets changes.
@@ -298,6 +300,10 @@ export function App() {
           resetProjectHistory(restored.state);
           setSelectedChannelId(restored.state.selectedChannelId || DEFAULT_PROJECT.channels[0]?.id || 'ch-1');
           setSelectedTrackId(restored.state.selectedMixerTrackId ?? 0);
+          setDismissedMissingAudioSignature(restored.state.dismissedMissingAudioSignature ?? null);
+          if (restored.recovered) {
+            console.warn('[Apex Studio] The active project record was recovered from a last-known-good snapshot.');
+          }
           if (restored.missingAudioIds.length > 0) {
             console.warn(`[Apex Studio] ${restored.missingAudioIds.length} persisted audio asset(s) were unavailable after reload.`);
           }
@@ -350,6 +356,10 @@ export function App() {
   // Controlled autosave: persist settled project changes without writing on every render.
   useEffect(() => {
     if (!projectPersistenceReadyRef.current) return;
+    if (skipNextAutosaveStateRef.current === projectState) {
+      skipNextAutosaveStateRef.current = null;
+      return;
+    }
     hasUnsavedChangesRef.current = true;
     const timer = window.setTimeout(() => {
       void performSave(projectState);
@@ -357,17 +367,46 @@ export function App() {
     return () => window.clearTimeout(timer);
   }, [projectState, performSave]);
 
-  // Protect against closing/reloading while changes are unsettled.
+  // Save while the page is still active. IndexedDB writes created during
+  // unload/beforeunload are not guaranteed to complete, so visibilitychange is
+  // the primary recovery signal; beforeunload remains a last-chance trigger and
+  // warns when changes are still unsettled.
   useEffect(() => {
+    const flushLifecycleSave = () => {
+      if (!projectPersistenceReadyRef.current || !hasUnsavedChangesRef.current) return;
+      if (lifecycleSavePromiseRef.current) return;
+      const pendingAudio = getSampleBufferPersistenceController(audioEngine);
+      lifecycleSavePromiseRef.current = (async () => {
+        try {
+          if (pendingAudio) await pendingAudio.flush();
+          return await performSave(projectStateRef.current);
+        } finally {
+          lifecycleSavePromiseRef.current = null;
+        }
+      })();
+      void lifecycleSavePromiseRef.current.catch(error => {
+        console.warn('[Apex Studio] Lifecycle project save failed.', error);
+      });
+    };
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'hidden') flushLifecycleSave();
+    };
     const handleBeforeUnload = (e: BeforeUnloadEvent) => {
+      flushLifecycleSave();
       if (hasUnsavedChangesRef.current) {
         e.preventDefault();
         e.returnValue = '';
       }
     };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
     window.addEventListener('beforeunload', handleBeforeUnload);
-    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
-  }, []);
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('beforeunload', handleBeforeUnload);
+    };
+  }, [performSave]);
 
   // Update audio engine settings when state changes
   useEffect(() => {
@@ -631,19 +670,23 @@ export function App() {
         try {
           const hydrated = await hydrateProjectAudio(normalized, audioEngine);
           projectStateRef.current = hydrated.state;
+          skipNextAutosaveStateRef.current = hydrated.state;
           setProjectState(hydrated.state);
           resetProjectHistory(hydrated.state);
           setSelectedChannelId(hydrated.state.selectedChannelId || hydrated.state.channels[0]?.id || 'ch-1');
           setSelectedTrackId(hydrated.state.selectedMixerTrackId ?? 0);
-          void performSave(hydrated.state, { reconcileAudio: true });
+          const saved = await performSave(hydrated.state, { reconcileAudio: true });
+          if (!saved) throw new Error('Replaced project could not be persisted');
         } catch (error) {
           console.warn('[Apex Studio] Project audio hydration failed; loading project without audio.', error);
           projectStateRef.current = normalized;
+          skipNextAutosaveStateRef.current = normalized;
           setProjectState(normalized);
           resetProjectHistory(normalized);
           setSelectedChannelId(normalized.selectedChannelId || normalized.channels[0]?.id || 'ch-1');
           setSelectedTrackId(normalized.selectedMixerTrackId ?? 0);
-          void performSave(normalized, { reconcileAudio: false });
+          const saved = await performSave(normalized, { reconcileAudio: false });
+          if (!saved) throw new Error('Replaced project could not be persisted');
         }
       }
     );
@@ -946,6 +989,9 @@ export function App() {
 
     const audioBufferId = getRecordingAudioBufferId(recording.id);
     const loaded = await audioEngine.loadAudioFile(recording.audioBlob, audioBufferId);
+    // Recording registration uses the same persistence gate as dropped/bounced
+    // playlist audio. Do not commit a project reference before its asset is durable.
+    await waitForSampleBufferPersistence(audioEngine, audioBufferId);
     const persistedRecording: AudioRecording = { ...recording, audioBufferId };
     // AudioEngine has no buffer-removal API; a removed target leaves only this narrow in-memory orphan.
     const currentState = projectStateRef.current;
@@ -1266,7 +1312,12 @@ export function App() {
             )}
             <button
               id="missing-audio-dismiss-btn"
-              onClick={() => setDismissedMissingAudioSignature(missingAudioSignature)}
+              onClick={() => {
+                const nextState = { ...projectStateRef.current, dismissedMissingAudioSignature: missingAudioSignature, meta: { ...projectStateRef.current.meta, updated: Date.now() } };
+                projectStateRef.current = nextState;
+                setProjectState(nextState);
+                setDismissedMissingAudioSignature(missingAudioSignature);
+              }}
               className="text-amber-200 hover:text-white p-0.5 transition cursor-pointer"
               title="Dismiss warning"
             >
