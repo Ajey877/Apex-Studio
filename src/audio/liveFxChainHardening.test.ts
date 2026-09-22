@@ -569,8 +569,8 @@ describe('Phase 11B: live/export FX parity matrix', () => {
     const liveStart = liveFixture.nodes.length;
     const offlineStart = offlineFixture.nodes.length;
     const fxSlot = slot(type, mix);
-    liveEngine.rebuildTrackFxChain(trackWithId(21, [fxSlot]));
-    offlineEngine.rebuildTrackFxChain(trackWithId(21, [fxSlot]));
+    liveEngine.rebuildTrackFxChain(track([fxSlot]));
+    offlineEngine.rebuildTrackFxChain(track([fxSlot]));
 
     return {
       liveKinds: liveFixture.nodes.slice(liveStart).map(nodeKind).sort(),
