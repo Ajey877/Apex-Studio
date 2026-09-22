@@ -11,6 +11,8 @@ import {
   SidechainSettings
 } from '../types/daw';
 import { AudioClockTransport, TransportState } from './transport';
+import { ChorusEffect } from './effects/ChorusEffect';
+import { WetDryEffect } from './effects/WetDryEffect';
 
 export type MidiEventPayload = {
   type: 'noteOn' | 'noteOff' | 'cc' | 'pitchBend';
@@ -678,6 +680,25 @@ class AudioEngine {
         const gainNode = ctx.createGain();
         gainNode.gain.value = 1.0;
         return gainNode;
+      }
+      case 'chorus': {
+        // Phase 10C-B: defensive parity with liveFxChainHardening.createEffect.
+        // The hardening patch installed at app init already routes both live
+        // and offline FX chains through that factory, so `createFxNode` is
+        // currently a dead path. Wiring chorus here guarantees the legacy
+        // single-switch factory can never silently drop a chorus slot if a
+        // future refactor bypasses the patch (or if the patch is uninstalled
+        // for any reason). The full wet/dry wrapping matches the live path so
+        // a slot.mix change and the chorus modulation behavior are identical
+        // between the two factories.
+        const rate = Math.max(0.05, Math.min(20, Number(slot.params.rate ?? 1.2) || 1.2));
+        const delaySec = Math.max(0.005, Math.min(0.08, Number(slot.params.delay ?? 0.02) || 0.02));
+        const depthSec = Math.max(0, Math.min(Math.min(0.02, delaySec), Number(slot.params.depth ?? 0.003) || 0));
+        const mix = Math.max(0, Math.min(1, Number(slot.mix) || 0));
+        const chorus = new ChorusEffect(ctx, slot.id, rate, depthSec, delaySec, 1);
+        const wrapper = new WetDryEffect(ctx, chorus, mix);
+        setChainEnd(wrapper.input, wrapper.output);
+        return wrapper.input;
       }
       default:
         return null;

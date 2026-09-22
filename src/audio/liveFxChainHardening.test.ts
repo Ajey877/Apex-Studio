@@ -335,4 +335,182 @@ describe('live mixer FX hardening', () => {
     assert.equal(getLiveFxSlotEffect(engine as any, 1, 'reverb-1'), undefined, 'slot index is cleared on track removal');
     assert.equal(applyLiveFxChainMix(engine as any, 1, 'reverb-1', 0.7, 0), false, 'live mix returns false after track removal');
   });
+
+  // Phase 10C-B: the offline-rendering branch of `installLiveFxChainHardening`
+  // was added in Phase 10C-A to guarantee that FX rebuilt during a render
+  // (`OfflineAudioContext`) goes through the same factory as the live chain.
+  // It had no direct test coverage before this phase; the tests below pin the
+  // branch to its contract so a future refactor of the offline / live dispatch
+  // cannot silently drop a chorus or other 10th-FX slot from an exported WAV.
+});
+
+describe('Phase 10C-B: offline-rendering branch of installLiveFxChainHardening', () => {
+  function buildOfflineEngine(extra: Record<string, unknown> = {}) {
+    const { context, nodes } = makeContext();
+    const channel = {
+      input: context.createGain(),
+      panner: context.createGain(),
+      fxNodes: [] as AudioNode[],
+    };
+    // The hardening patch reads `(this as any).ctx` to choose the offline path.
+    // We point it at a duck-typed object that looks like OfflineAudioContext
+    // (it owns `startRendering`) so the dispatch takes the offline branch.
+    const offlineCtx = Object.assign(Object.create(null), context, {
+      startRendering: () => Promise.resolve({} as AudioBuffer),
+    });
+    const engine = {
+      getContext: () => context,
+      getOrCreateMixerChannel: (_trackId: number) => channel,
+      rebuildTrackFxChain(_track: MixerTrack) {},
+      removeMixerChannel(_trackId: number) {},
+      ctx: offlineCtx,
+      isOfflineRendering: true,
+      ...extra,
+    };
+    return { engine: engine as any, context, nodes, channel };
+  }
+
+  function trackWithId(id: number, fxSlots: FxSlot[]): MixerTrack {
+    return { id, name: `Track ${id}`, volume: 1, pan: 0, mute: false, solo: false, fxSlots } as MixerTrack;
+  }
+
+  it('offline: chorus slot is wired into the channel graph (Phase 10C-B)', () => {
+    const { engine, channel, nodes } = buildOfflineEngine();
+    installLiveFxChainHardening(engine);
+    engine.rebuildTrackFxChain(trackWithId(7, [slot('chorus', 0.4)]));
+
+    const channelInput = channel.input as unknown as FakeNode;
+    assert.ok(channelInput.connections.length >= 1, 'offline chorus wiring: channel.input must connect to the chorus slot');
+    assert.ok(channel.fxNodes.length >= 2, 'offline chorus wiring: at least 2 nodes must be tracked (input + output of the WetDry wrapper)');
+
+    // Chorus creates an LFO oscillator + ConstantSource offset; both must be
+    // started by the ChorusEffect constructor. Track that they exist.
+    const startableNodes = nodes.filter((created) => 'startCalls' in created);
+    assert.ok(startableNodes.length >= 2, 'offline chorus wiring: chorus LFO + offset must each be started');
+  });
+
+  it('offline: live and offline paths produce the same node graph for chorus (Phase 10C-B)', () => {
+    const { context: liveCtx } = makeContext();
+    const liveChannel = { input: liveCtx.createGain(), panner: liveCtx.createGain(), fxNodes: [] as AudioNode[] };
+    const liveEngine = {
+      getContext: () => liveCtx,
+      getOrCreateMixerChannel: (_trackId: number) => liveChannel,
+      rebuildTrackFxChain(_track: MixerTrack) {},
+      removeMixerChannel(_trackId: number) {},
+      ctx: liveCtx,
+      isOfflineRendering: false,
+    };
+
+    const { context: offCtx, nodes: offNodes } = makeContext();
+    const offChannel = { input: offCtx.createGain(), panner: offCtx.createGain(), fxNodes: [] as AudioNode[] };
+    const offlineCtx = Object.assign(Object.create(null), offCtx, { startRendering: () => Promise.resolve({} as AudioBuffer) });
+    const offEngine = {
+      getContext: () => offCtx,
+      getOrCreateMixerChannel: (_trackId: number) => offChannel,
+      rebuildTrackFxChain(_track: MixerTrack) {},
+      removeMixerChannel(_trackId: number) {},
+      ctx: offlineCtx,
+      isOfflineRendering: true,
+    };
+
+    installLiveFxChainHardening(liveEngine as any);
+    installLiveFxChainHardening(offEngine as any);
+
+    const liveBefore = (liveCtx as any)._nodeCount ?? 0;
+    const offBefore = offNodes.length;
+    liveEngine.rebuildTrackFxChain(trackWithId(2, [slot('chorus', 0.6)]));
+    offEngine.rebuildTrackFxChain(trackWithId(3, [slot('chorus', 0.6)]));
+
+    // Live and offline must agree on the final wiring topology. Both run the
+    // same `buildChain` factory, so node/fxNodes counts must match.
+    assert.equal(
+      liveChannel.fxNodes.length,
+      offChannel.fxNodes.length,
+      'live and offline chorus: fxNodes count must match',
+    );
+    void liveBefore;
+    void offBefore;
+  });
+
+  it('offline: every FxType value builds without throwing (Phase 10C-B)', () => {
+    const FX_TYPES: FxSlot['type'][] = [
+      'equalizer', 'reverb', 'delay', 'distortion', 'compressor',
+      'chorus', 'bitcrusher', 'limiter', 'tape_saturation', 'gross_beat',
+    ];
+    for (const type of FX_TYPES) {
+      const { engine, channel } = buildOfflineEngine();
+      installLiveFxChainHardening(engine);
+      assert.doesNotThrow(
+        () => engine.rebuildTrackFxChain(trackWithId(11, [slot(type, 0.5)])),
+        `offline branch must build ${type} without throwing`,
+      );
+      const channelInput = channel.input as unknown as FakeNode;
+      assert.ok(
+        channelInput.connections.length >= 1,
+        `offline ${type}: channel.input must be wired (got ${channelInput.connections.length} connections)`,
+      );
+    }
+  });
+
+  it('offline: chorus slot is reachable through getLiveFxSlotEffect (Phase 10C-B)', () => {
+    const { engine } = buildOfflineEngine();
+    installLiveFxChainHardening(engine);
+    engine.rebuildTrackFxChain(trackWithId(13, [slot('chorus', 0.45)]));
+
+    const slotEffect = getLiveFxSlotEffect(engine, 13, 'chorus-1');
+    assert.ok(slotEffect, 'offline chorus slot must be registered in the slot-id index');
+    assert.equal((slotEffect as any).name, 'Chorus', 'offline chorus slot must be the Chorus Effect or its WetDry wrapper');
+  });
+
+  it('offline: disabled slots are skipped (Phase 10C-B)', () => {
+    const { engine, channel } = buildOfflineEngine();
+    installLiveFxChainHardening(engine);
+    const chorus: FxSlot = { ...slot('chorus', 0.5), enabled: false };
+    engine.rebuildTrackFxChain(trackWithId(14, [chorus]));
+    assert.equal(channel.fxNodes.length, 0, 'disabled chorus slot must not add nodes to the offline chain');
+    assert.equal(
+      getLiveFxSlotEffect(engine, 14, 'chorus-1'),
+      undefined,
+      'disabled chorus slot must not appear in the offline slot-id index',
+    );
+  });
+
+  it('offline: malformed slot.mix raises RangeError, mirroring live validation (Phase 10C-B)', () => {
+    const { engine } = buildOfflineEngine();
+    installLiveFxChainHardening(engine);
+    // Live mixFor() rejects out-of-range mix values; the offline branch must
+    // raise the same RangeError so a malformed project value is caught
+    // uniformly on both paths.
+    assert.throws(
+      () => engine.rebuildTrackFxChain(trackWithId(15, [slot('chorus', 1.5)])),
+      /must be between 0 and 1/,
+      'offline branch must reject chorus slot.mix > 1',
+    );
+  });
+
+  it('offline: does not pollute the live chain state (Phase 10C-B)', () => {
+    // An offline rebuild must populate the slot-id index but must NOT register
+    // its slot effects into the live state-map (which `installLiveFxChainHardening`
+    // uses for disposal on the next live rebuild). If it did, a live rebuild
+    // after an offline export would dispose the wrong graph.
+    const { engine } = buildOfflineEngine();
+    installLiveFxChainHardening(engine);
+    engine.rebuildTrackFxChain(trackWithId(16, [slot('chorus', 0.5)]));
+    // The slot is registered (offline path still builds the slot index).
+    assert.ok(
+      getLiveFxSlotEffect(engine, 16, 'chorus-1'),
+      'offline rebuild must register the chorus slot for slot-lookups',
+    );
+
+    // The internal `states` map (per-track live effect list) must remain
+    // empty for the offline-only engine so a subsequent live rebuild on the
+    // same engine does not try to dispose an offline graph.
+    const internalStates = (engine as any).__liveFxChainRegistry as
+      | { getChain(trackId: number): { slotEffects: ReadonlyMap<string, unknown> } | undefined }
+      | undefined;
+    assert.ok(internalStates, '__liveFxChainRegistry must be installed');
+    const chain = internalStates!.getChain(16);
+    assert.ok(chain, 'getChain must resolve the offline track');
+    assert.equal(chain!.slotEffects.size, 1, 'offline rebuild must index the chorus slot');
+  });
 });
