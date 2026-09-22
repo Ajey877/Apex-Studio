@@ -76,6 +76,51 @@ function createWindow() {
 
   mainWindow.loadURL(startUrl);
 
+  if (process.env.APEX_SMOKE_TEST === '1') {
+    let smokeFinished = false;
+    const finishSmoke = (exitCode, reason) => {
+      if (smokeFinished) return;
+      smokeFinished = true;
+      if (reason) console.log('[Apex Studio smoke]', reason);
+      setTimeout(() => app.exit(exitCode), 50);
+    };
+
+    mainWindow.webContents.on('did-fail-load', (_event, errorCode, errorDescription) => {
+      finishSmoke(1, `renderer failed to load: ${errorCode} ${errorDescription}`);
+    });
+
+    mainWindow.webContents.on('render-process-gone', (_event, details) => {
+      finishSmoke(1, `renderer process ended: ${details.reason}`);
+    });
+
+    mainWindow.webContents.on('console-message', (_event, _level, message) => {
+      if (/error|uncaught|exception/i.test(message)) {
+        console.error('[Apex Studio smoke] renderer console:', message);
+      }
+    });
+
+    mainWindow.webContents.on('did-finish-load', async () => {
+      try {
+        const result = await mainWindow.webContents.executeJavaScript(`
+          (() => {
+            const bodyReady = document.readyState === 'complete' && !!document.body;
+            const indexedDbReady = typeof indexedDB !== 'undefined';
+            const audioReady = typeof AudioContext !== 'undefined' || typeof webkitAudioContext !== 'undefined';
+            return { bodyReady, indexedDbReady, audioReady, title: document.title };
+          })()
+        `);
+        console.log('[Apex Studio smoke] runtime checks:', JSON.stringify(result));
+        if (!result.bodyReady || !result.indexedDbReady || !result.audioReady) {
+          finishSmoke(1, 'required packaged runtime capabilities are unavailable');
+          return;
+        }
+        finishSmoke(0, `packaged renderer loaded successfully: ${result.title}`);
+      } catch (error) {
+        finishSmoke(1, `runtime check failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    });
+  }
+
   mainWindow.on('closed', () => {
     mainWindow = null;
   });
