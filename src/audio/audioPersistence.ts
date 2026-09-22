@@ -304,7 +304,9 @@ export async function deletePersistedProjectState(): Promise<void> {
   try {
     await new Promise<void>((resolve, reject) => {
       const tx = db.transaction(PROJECT_STORE_NAME, 'readwrite');
-      tx.objectStore(PROJECT_STORE_NAME).delete(CURRENT_PROJECT_ID);
+      const store = tx.objectStore(PROJECT_STORE_NAME);
+      store.delete(CURRENT_PROJECT_ID);
+      store.delete(RECOVERY_PROJECT_ID);
       tx.oncomplete = () => resolve();
       tx.onerror = () => reject(tx.error || new Error('Unable to delete project state'));
       tx.onabort = () => reject(tx.error || new Error('Unable to delete project state'));
