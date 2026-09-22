@@ -2,7 +2,7 @@ name: Apex Studio CI
 
 on:
   push:
-    branches: [main, phase-0-foundation-ui, phase-5.5-hardening, fix/phase-4-playlist-editing-core]
+    branches: [main, phase-0-foundation-ui, phase-5.5-hardening, fix/phase-4-playlist-editing-core, phase-10d-project-persistence-recovery]
   pull_request:
     branches: [main]
 
