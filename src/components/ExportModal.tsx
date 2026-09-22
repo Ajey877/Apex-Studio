@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Download, FolderArchive, Sparkles, X } from 'lucide-react';
 import JSZip from 'jszip';
 import { Channel, PlaylistClip, PlaylistTrack, ProjectMetadata, MixerTrack } from '../types/daw';
@@ -39,6 +39,29 @@ interface ExportModalProps {
 
 type ExportFormat = 'wav24' | 'wav16' | 'wav32' | 'midi' | 'stems';
 
+/**
+ * Pure helper exported for unit testing — returns true when the current
+ * export format produces a blob that can be auditioned by an `<audio>`
+ * element AND a download URL is available. MIDI and stem-zip blobs are not
+ * audibly playable, so the audition UI must stay hidden for them.
+ */
+export const canAuditionExport = (format: ExportFormat, hasDownloadUrl: boolean): boolean => {
+  if (!hasDownloadUrl) return false;
+  return format === 'wav16' || format === 'wav24' || format === 'wav32';
+};
+
+/**
+ * Pure helper exported for unit testing — formats a duration in seconds as
+ * `m:ss`. Used by the audition player's elapsed/total readout.
+ */
+export const formatAuditionTime = (seconds: number): string => {
+  if (!Number.isFinite(seconds) || seconds < 0) return '0:00';
+  const total = Math.floor(seconds);
+  const mm = Math.floor(total / 60);
+  const ss = total % 60;
+  return `${mm}:${ss.toString().padStart(2, '0')}`;
+};
+
 export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, channels, clips, meta, mixerTracks, patternLengthSteps, playlistTracks, includeMixerFx = false }) => {
   const [format, setFormat] = useState<ExportFormat>('wav24');
   const [scope, setScope] = useState<ExportScope>('song');
@@ -51,6 +74,18 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, chann
   // basis without the App re-rendering. The prop is the project-level default.
   const [fxOverride, setFxOverride] = useState<boolean | null>(null);
   const effectiveIncludeMixerFx = fxOverride ?? includeMixerFx;
+
+  // Export audition player — lets the user preview the rendered WAV before
+  // downloading. The element shares the existing `downloadUrl` blob (no second
+  // decode / re-encode) so memory usage stays flat. The audio element is
+  // re-mounted on format/scope changes because `key` flips on the same boundary
+  // that revokes the previous blob URL.
+  const [isAuditionPlaying, setIsAuditionPlaying] = useState(false);
+  const [auditionPosition, setAuditionPosition] = useState(0);
+  const [auditionDuration, setAuditionDuration] = useState(0);
+  const auditionAudioRef = useRef<HTMLAudioElement | null>(null);
+
+  const canAudition = canAuditionExport(format, downloadUrl !== null);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -65,6 +100,40 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, chann
   useEffect(() => () => {
     if (downloadUrl) URL.revokeObjectURL(downloadUrl);
   }, [downloadUrl]);
+
+  // Audition lifecycle: every render of the in-modal <audio> element shares
+  // the same `auditionAudioRef`, so the listeners below stay registered across
+  // blob-URL swaps (format/scope changes mount a new <audio> but the effect
+  // re-runs because `canAudition` flips). Resetting the play state and the
+  // timeline when the URL changes prevents the UI from claiming a phantom
+  // "playing" status for a stale blob.
+  useEffect(() => {
+    const audio = auditionAudioRef.current;
+    if (!audio) return;
+    setIsAuditionPlaying(false);
+    setAuditionPosition(0);
+    setAuditionDuration(Number.isFinite(audio.duration) ? audio.duration : 0);
+    const handlePlay = () => setIsAuditionPlaying(true);
+    const handlePause = () => setIsAuditionPlaying(false);
+    const handleEnded = () => {
+      setIsAuditionPlaying(false);
+      setAuditionPosition(0);
+    };
+    const handleTimeUpdate = () => setAuditionPosition(audio.currentTime);
+    const handleLoadedMetadata = () => setAuditionDuration(audio.duration);
+    audio.addEventListener('play', handlePlay);
+    audio.addEventListener('pause', handlePause);
+    audio.addEventListener('ended', handleEnded);
+    audio.addEventListener('timeupdate', handleTimeUpdate);
+    audio.addEventListener('loadedmetadata', handleLoadedMetadata);
+    return () => {
+      audio.removeEventListener('play', handlePlay);
+      audio.removeEventListener('pause', handlePause);
+      audio.removeEventListener('ended', handleEnded);
+      audio.removeEventListener('timeupdate', handleTimeUpdate);
+      audio.removeEventListener('loadedmetadata', handleLoadedMetadata);
+    };
+  }, [downloadUrl, format]);
 
   if (!isOpen) return null;
 
@@ -184,6 +253,34 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, chann
     document.body.removeChild(a);
   };
 
+  const handleAuditionToggle = () => {
+    const audio = auditionAudioRef.current;
+    if (!audio) return;
+    if (audio.paused) {
+      void audio.play().catch(() => {
+        // Autoplay can be blocked; pause state stays at false so the user can
+        // retry the click without an inconsistent UI.
+        setIsAuditionPlaying(false);
+      });
+    } else {
+      audio.pause();
+    }
+  };
+
+  const handleAuditionSeek = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const audio = auditionAudioRef.current;
+    if (!audio) return;
+    const next = Number(event.target.value);
+    if (Number.isFinite(next)) audio.currentTime = next;
+  };
+
+  const handleAuditionStop = () => {
+    const audio = auditionAudioRef.current;
+    if (!audio) return;
+    audio.pause();
+    audio.currentTime = 0;
+  };
+
   // Pattern Loop copy states the length the render will actually use, so the
   // modal can never claim a different loop than the selected pattern declares.
   const patternLoopSteps = normalizePatternLengthSteps(patternLengthSteps);
@@ -301,10 +398,69 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, chann
                 <span>{isRendering ? 'PROCESSING EXPORT...' : 'START EXPORT'}</span>
               </button>
             ) : (
-              <button onClick={handleDownload} className="w-full py-2.5 bg-[#00ff00] hover:bg-emerald-400 text-black font-bold text-xs rounded transition flex items-center justify-center gap-2 shadow">
-                <Download className="w-4 h-4" />
-                <span>DOWNLOAD {fileName}</span>
-              </button>
+              <>
+                {/* Audition preview: only meaningful for the WAV formats. MIDI
+                    and stem-zip blobs cannot be played by an <audio> element
+                    and the download URL is still valid for the Download
+                    button below. */}
+                {canAudition && (
+                  <div data-testid="export-audition" className="space-y-2 rounded-lg border border-[#333336] bg-[#121214] p-3">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[10px] font-bold uppercase tracking-wider text-[#777]">Audition Preview</span>
+                      <span className="text-[10px] font-mono text-[#b0b0b0]">{formatAuditionTime(auditionPosition)} / {formatAuditionTime(auditionDuration)}</span>
+                    </div>
+                    {/* The <audio> element shares the existing downloadUrl blob —
+                        no second decode or re-encode. `preload="metadata"` avoids
+                        a full buffer fetch just to display the duration. `key`
+                        flips when the URL or format changes so the element
+                        reloads cleanly without manual src management. */}
+                    <audio
+                      key={`${downloadUrl}-${format}`}
+                      ref={auditionAudioRef}
+                      src={downloadUrl}
+                      preload="metadata"
+                      data-testid="export-audition-audio"
+                      className="hidden"
+                    />
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={handleAuditionToggle}
+                        data-testid="export-audition-toggle"
+                        aria-label={isAuditionPlaying ? 'Pause preview' : 'Play preview'}
+                        className="flex-1 py-2 bg-[#1a1a1d] hover:bg-[#2d2d30] border border-[#333336] rounded text-xs font-bold text-white transition flex items-center justify-center gap-2"
+                      >
+                        <span className="text-[#ff6e00]">{isAuditionPlaying ? '❚❚' : '▶'}</span>
+                        <span>{isAuditionPlaying ? 'PAUSE' : 'PLAY PREVIEW'}</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleAuditionStop}
+                        aria-label="Stop preview"
+                        className="py-2 px-3 bg-[#1a1a1d] hover:bg-[#2d2d30] border border-[#333336] rounded text-xs font-bold text-[#b0b0b0] hover:text-white transition"
+                      >
+                        ■
+                      </button>
+                    </div>
+                    <input
+                      type="range"
+                      min={0}
+                      max={auditionDuration > 0 ? auditionDuration : 0}
+                      step={0.01}
+                      value={auditionPosition}
+                      onChange={handleAuditionSeek}
+                      aria-label="Seek preview"
+                      data-testid="export-audition-seek"
+                      className="w-full accent-[#ff6e00]"
+                      disabled={auditionDuration <= 0}
+                    />
+                  </div>
+                )}
+                <button onClick={handleDownload} className="w-full py-2.5 bg-[#00ff00] hover:bg-emerald-400 text-black font-bold text-xs rounded transition flex items-center justify-center gap-2 shadow">
+                  <Download className="w-4 h-4" />
+                  <span>DOWNLOAD {fileName}</span>
+                </button>
+              </>
             )}
           </div>
         </div>
