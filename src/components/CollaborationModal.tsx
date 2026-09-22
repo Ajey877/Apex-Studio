@@ -21,8 +21,6 @@ interface CollaborationModalProps {
   collaborators: CollabUser[];
   onAddComment: (text: string, barPosition: number) => void;
   onToggleResolveComment: (commentId: string) => void;
-  isEncrypted: boolean;
-  onToggleEncryption: () => void;
 }
 
 export const CollaborationModal: React.FC<CollaborationModalProps> = ({
@@ -31,9 +29,7 @@ export const CollaborationModal: React.FC<CollaborationModalProps> = ({
   comments,
   collaborators,
   onAddComment,
-  onToggleResolveComment,
-  isEncrypted,
-  onToggleEncryption
+  onToggleResolveComment
 }) => {
   const [newCommentText, setNewCommentText] = useState('');
   const [targetBar, setTargetBar] = useState(4);
@@ -64,8 +60,8 @@ export const CollaborationModal: React.FC<CollaborationModalProps> = ({
               <Users className="w-4 h-4 text-[#ff6e00]" />
             </div>
             <div>
-              <h3 className="font-bold text-sm text-white tracking-tight">REAL-TIME STUDIO COLLABORATION & FEEDBACK</h3>
-              <p className="text-[10px] text-[#777]">Live Multi-User Jamming & Bar-by-Bar Producer Comments</p>
+              <h3 className="font-bold text-sm text-white tracking-tight">STUDIO NOTES & COLLABORATION</h3>
+              <p className="text-[10px] text-[#777]">Local project notes & collaboration workspace</p>
             </div>
           </div>
           <button 
@@ -78,30 +74,19 @@ export const CollaborationModal: React.FC<CollaborationModalProps> = ({
 
         {/* Content */}
         <div className="p-5 space-y-4 max-h-[75vh] overflow-y-auto custom-scrollbar">
-          {/* Security & Share Bar */}
-          <div className="flex flex-wrap items-center justify-between bg-[#1a1a1d] p-3 rounded-lg border border-[#333336] gap-2">
-            <div className="flex items-center space-x-2">
-              <button
-                onClick={onToggleEncryption}
-                className={`flex items-center space-x-1 px-2.5 py-1 rounded text-xs font-bold transition ${
-                  isEncrypted 
-                    ? 'bg-[#00ff00]/15 text-[#00ff00] border border-[#00ff00]/40' 
-                    : 'bg-[#121214] text-[#777] border border-[#333336]'
-                }`}
-                title="End-to-End Encrypted Project State"
-              >
-                <Lock className="w-3.5 h-3.5" />
-                <span>{isEncrypted ? 'E2EE ENCRYPTED' : 'STANDARD SYNC'}</span>
-              </button>
-              <span className="text-[10px] text-[#777]">P2P WebRTC data sync active</span>
+          {/* Local sharing */}
+          <div className="flex items-center justify-between bg-[#1a1a1d] p-3 rounded-lg border border-[#333336] gap-2">
+            <div>
+              <div className="text-xs font-bold text-white">Local collaboration workspace</div>
+              <div className="text-[10px] text-[#777]">Comments and collaborator data are stored in this project. No live network sync is active.</div>
             </div>
-
             <button
               onClick={handleCopyShareLink}
               className="flex items-center space-x-1.5 px-3 py-1 bg-[#ff6e00] hover:bg-[#ff7d1a] text-black rounded text-xs font-bold transition active:scale-95 shadow"
+              title="Copy the current app URL"
             >
               {copiedLink ? <Check className="w-3.5 h-3.5" /> : <Share2 className="w-3.5 h-3.5" />}
-              <span>{copiedLink ? 'INVITE COPIED' : 'INVITE PRODUCER'}</span>
+              <span>{copiedLink ? 'LINK COPIED' : 'COPY APP LINK'}</span>
             </button>
           </div>
 
