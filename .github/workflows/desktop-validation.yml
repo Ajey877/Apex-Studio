@@ -2,9 +2,9 @@ name: Desktop Validation
 
 on:
   pull_request:
-    branches: [main]
+    branches: [main, phase-5-5-song-mode-verification]
   push:
-    branches: [main, phase-5.5-hardening]
+    branches: [main, phase-5.5-hardening, phase-5-5-song-mode-verification, phase-11-release-parity-validation]
 
 permissions:
   contents: read
