@@ -176,25 +176,79 @@ export const restorePersistedProjectState = async (
   fallbackState: ProjectState
 ): Promise<RestoredProjectState> => {
   const stateJson = await getPersistedProjectStateRecord();
-  if (!stateJson) {
-    return { state: fallbackState, restored: false, hydratedAudioIds: [], missingAudioIds: [] };
+
+  const recoverFromSerialized = async (
+    candidateJson: string,
+    source: string
+  ): Promise<RestoredProjectState | null> => {
+    try {
+      const parsed = JSON.parse(candidateJson) as { persistenceVersion?: number; state?: unknown };
+      const rawState = parsed?.state ?? parsed;
+      const state = normalizeProjectState(rawState);
+      const hydrated = await hydrateProjectAudio(state, audioEngine);
+      return {
+        state: hydrated.state,
+        restored: true,
+        recovered: source !== 'current-project',
+        hydratedAudioIds: hydrated.hydratedAudioIds,
+        missingAudioIds: hydrated.missingAudioIds
+      };
+    } catch (error) {
+      console.warn(`[Apex Studio] Project recovery candidate (${source}) could not be restored.`, error);
+      return null;
+    }
+  };
+
+  if (stateJson) {
+    const current = await recoverFromSerialized(stateJson, 'current-project');
+    if (current) return current;
   }
 
-  try {
-    const parsed = JSON.parse(stateJson) as { persistenceVersion?: number; state?: unknown };
-    const rawState = parsed?.state ?? parsed;
-    const state = normalizeProjectState(rawState);
-    const hydrated = await hydrateProjectAudio(state, audioEngine);
-    return {
-      state: hydrated.state,
-      restored: true,
-      hydratedAudioIds: hydrated.hydratedAudioIds,
-      missingAudioIds: hydrated.missingAudioIds
-    };
-  } catch (error) {
-    console.warn('[Apex Studio] Persisted project state could not be restored; using a fresh project.', error);
-    return { state: fallbackState, restored: false, hydratedAudioIds: [], missingAudioIds: [] };
+  // Keep one separate last-known-good snapshot. It is intentionally attempted
+  // before replacement backups because it is the closest recovery point.
+  const recoveryJson = await getPersistedProjectRecoverySnapshotRecord();
+  if (recoveryJson) {
+    const recovered = await recoverFromSerialized(recoveryJson, 'recovery-snapshot');
+    if (recovered) {
+      try {
+        // Atomically replace the corrupt active record with the valid snapshot.
+        await replacePersistedProjectStateRecord(recoveryJson);
+      } catch (error) {
+        console.warn('[Apex Studio] Could not replace the corrupt project record with its recovery snapshot.', error);
+      }
+      return recovered;
+    }
   }
+
+  // Last resort: retained pre-replacement backups.
+  try {
+    const backups = [...await listProjectBackupRecords()]
+      .sort((left, right) => (right.createdAt - left.createdAt) || right.id.localeCompare(left.id));
+
+    for (const backup of backups) {
+      const recovered = await recoverFromSerialized(backup.stateJson, `backup:${backup.id}`);
+      if (!recovered) continue;
+      try {
+        await replacePersistedProjectStateRecord(backup.stateJson);
+      } catch (error) {
+        console.warn('[Apex Studio] Could not promote the backup to the active project record.', error);
+      }
+      return recovered;
+    }
+  } catch (error) {
+    console.warn('[Apex Studio] Project backup recovery lookup failed.', error);
+  }
+
+  if (stateJson) {
+    console.warn('[Apex Studio] Persisted project state could not be restored; using a fresh project.');
+  }
+  return {
+    state: fallbackState,
+    restored: false,
+    recovered: false,
+    hydratedAudioIds: [],
+    missingAudioIds: []
+  };
 };
 
 export interface AudioReconciliationOptions {
