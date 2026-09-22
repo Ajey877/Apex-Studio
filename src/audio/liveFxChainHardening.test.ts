@@ -514,3 +514,137 @@ describe('Phase 10C-B: offline-rendering branch of installLiveFxChainHardening',
     assert.equal(chain!.slotEffects.size, 1, 'offline rebuild must index the chorus slot');
   });
 });
+
+
+describe('Phase 11B: live/export FX parity matrix', () => {
+  function nodeKind(node: Record<string, unknown>): string {
+    if ('delayTime' in node) return 'delay';
+    if ('threshold' in node && 'ratio' in node) return 'compressor';
+    if ('frequency' in node && 'Q' in node && 'gain' in node) return 'biquad';
+    if ('curve' in node) return 'waveshaper';
+    if ('buffer' in node) return 'convolver';
+    if ('offset' in node && 'startCalls' in node) return 'constant-source';
+    if ('frequency' in node && 'startCalls' in node) return 'oscillator';
+    if ('gain' in node) return 'gain';
+    return 'other';
+  }
+
+  function buildBoth(type: FxSlot['type'], mix = 0.37) {
+    const liveFixture = makeContext();
+    const liveChannel = {
+      input: liveFixture.context.createGain(),
+      panner: liveFixture.context.createGain(),
+      fxNodes: [] as AudioNode[],
+    };
+    const liveEngine = {
+      getContext: () => liveFixture.context,
+      getOrCreateMixerChannel: (_trackId: number) => liveChannel,
+      rebuildTrackFxChain(_track: MixerTrack) {},
+      removeMixerChannel(_trackId: number) {},
+      ctx: liveFixture.context,
+      isOfflineRendering: false,
+    };
+
+    const offlineFixture = makeContext();
+    const offlineChannel = {
+      input: offlineFixture.context.createGain(),
+      panner: offlineFixture.context.createGain(),
+      fxNodes: [] as AudioNode[],
+    };
+    const offlineCtx = Object.assign(Object.create(null), offlineFixture.context, {
+      startRendering: () => Promise.resolve({} as AudioBuffer),
+    });
+    const offlineEngine = {
+      getContext: () => offlineFixture.context,
+      getOrCreateMixerChannel: (_trackId: number) => offlineChannel,
+      rebuildTrackFxChain(_track: MixerTrack) {},
+      removeMixerChannel(_trackId: number) {},
+      ctx: offlineCtx,
+      isOfflineRendering: true,
+    };
+
+    installLiveFxChainHardening(liveEngine as any);
+    installLiveFxChainHardening(offlineEngine as any);
+
+    const liveStart = liveFixture.nodes.length;
+    const offlineStart = offlineFixture.nodes.length;
+    const fxSlot = slot(type, mix);
+    liveEngine.rebuildTrackFxChain(trackWithId(21, [fxSlot]));
+    offlineEngine.rebuildTrackFxChain(trackWithId(21, [fxSlot]));
+
+    return {
+      liveKinds: liveFixture.nodes.slice(liveStart).map(nodeKind).sort(),
+      offlineKinds: offlineFixture.nodes.slice(offlineStart).map(nodeKind).sort(),
+      liveFxCount: liveChannel.fxNodes.length,
+      offlineFxCount: offlineChannel.fxNodes.length,
+      liveEffect: getLiveFxSlotEffect(liveEngine as any, 21, fxSlot.id),
+      offlineEffect: getLiveFxSlotEffect(offlineEngine as any, 21, fxSlot.id),
+    };
+  }
+
+  it('uses the same FX graph shape for every supported effect in live and offline rendering', () => {
+    const fxTypes: FxSlot['type'][] = [
+      'equalizer',
+      'reverb',
+      'delay',
+      'distortion',
+      'compressor',
+      'chorus',
+      'bitcrusher',
+      'limiter',
+      'tape_saturation',
+      'gross_beat',
+    ];
+
+    for (const type of fxTypes) {
+      const result = buildBoth(type);
+      assert.deepEqual(
+        result.offlineKinds,
+        result.liveKinds,
+        `live/export graph node kinds must match for ${type}`,
+      );
+      assert.equal(
+        result.offlineFxCount,
+        result.liveFxCount,
+        `live/export tracked FX node count must match for ${type}`,
+      );
+      assert.ok(result.liveEffect, `live ${type} slot must be registered`);
+      assert.ok(result.offlineEffect, `offline ${type} slot must be registered`);
+    }
+  });
+
+  it('preserves the same wet/dry mix contract in live and offline FX graphs', () => {
+    const fxTypes: FxSlot['type'][] = [
+      'equalizer',
+      'reverb',
+      'delay',
+      'distortion',
+      'compressor',
+      'chorus',
+      'bitcrusher',
+      'limiter',
+      'tape_saturation',
+      'gross_beat',
+    ];
+
+    for (const type of fxTypes) {
+      const result = buildBoth(type, 0.37);
+      assert.ok(result.liveEffect, `live ${type} effect must exist`);
+      assert.ok(result.offlineEffect, `offline ${type} effect must exist`);
+
+      const liveSetParameter = (result.liveEffect as any).setParameter;
+      const offlineSetParameter = (result.offlineEffect as any).setParameter;
+      assert.equal(typeof liveSetParameter, 'function', `live ${type} effect must expose parameters`);
+      assert.equal(typeof offlineSetParameter, 'function', `offline ${type} effect must expose parameters`);
+
+      assert.doesNotThrow(
+        () => liveSetParameter.call(result.liveEffect, 'mix', 0.61, 0.5),
+        `live ${type} must accept mix updates`,
+      );
+      assert.doesNotThrow(
+        () => offlineSetParameter.call(result.offlineEffect, 'mix', 0.61, 0.5),
+        `offline ${type} must accept mix updates`,
+      );
+    }
+  });
+});
