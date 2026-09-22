@@ -1513,9 +1513,9 @@ export function App() {
 
       <footer className="h-6 bg-[#1a1a1d] border-t border-[#333336] flex items-center px-4 justify-between shrink-0 select-none">
         <div className="flex items-center gap-4 text-[9px]">
-          <span className="text-[#777]">SYNC: <span className="text-[#00ff00] font-bold">ONLINE (E2EE)</span></span>
+          <span className="text-[#777]">STORAGE: <span className="text-[#00ff00] font-bold">LOCAL</span></span>
           <span className="text-[#777]">DSP CPU: <span className="text-white font-bold">{isPlaying ? '18%' : '8%'}</span></span>
-          <span className="text-[#777]">LATENCY: <span className="text-white font-bold">2.4ms (LOW)</span></span>
+          
           <span className="text-[#777] hidden md:inline">PROJECT: <span className="text-[#ff6e00] font-bold">{projectState.meta.name}</span></span>
         </div>
         <div className="flex items-center gap-3 text-[9px] font-bold text-[#777]">
