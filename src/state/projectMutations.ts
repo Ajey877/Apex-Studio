@@ -209,7 +209,7 @@ export const getFxUpdateLabel = (updates: Partial<FxSlot>): string => {
 };
 
 export const isContinuousMetaUpdate = (updates: Partial<ProjectMetadata>): boolean => {
-  if ('name' in updates || 'timeSignature' in updates || 'isEncrypted' in updates) {
+  if ('name' in updates || 'timeSignature' in updates) {
     return false;
   }
   return 'swing' in updates || 'bpm' in updates;
