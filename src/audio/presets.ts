@@ -239,8 +239,6 @@ export const PRESET_PROJECTS: { id: string; name: string; genre: string; bpm: nu
         created: Date.now(),
         updated: Date.now(),
         version: '4.5.2 Pro',
-        isEncrypted: true,
-        cloudSynced: true,
         offlineReady: true,
         totalEditTimeSeconds: 3840
       },
@@ -440,8 +438,6 @@ export const PRESET_PROJECTS: { id: string; name: string; genre: string; bpm: nu
         created: Date.now(),
         updated: Date.now(),
         version: '4.5.2 Pro',
-        isEncrypted: true,
-        cloudSynced: true,
         offlineReady: true,
         totalEditTimeSeconds: 5120
       },
