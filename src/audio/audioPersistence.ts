@@ -3,6 +3,7 @@ const AUDIO_STORE_NAME = 'clips';
 const PROJECT_STORE_NAME = 'projects';
 const DB_VERSION = 2;
 const CURRENT_PROJECT_ID = 'current-project';
+const RECOVERY_PROJECT_ID = 'recovery-snapshot';
 /** Project backups share the `projects` store; the prefix keeps them apart from the live project record. */
 export const PROJECT_BACKUP_ID_PREFIX = 'backup:';
 
@@ -154,6 +155,67 @@ export async function getPersistedProjectStateRecord(): Promise<string | null> {
   }
 }
 
+/**
+ * Keeps a separate last-known-good project snapshot. It is updated only after
+ * the live project write succeeds, so a failed/corrupt live write cannot erase
+ * the previous recovery point.
+ */
+export async function persistProjectRecoverySnapshotRecord(stateJson: string): Promise<void> {
+  if (!stateJson) return;
+  const db = await openDb();
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction(PROJECT_STORE_NAME, 'readwrite');
+      tx.objectStore(PROJECT_STORE_NAME).put({
+        id: RECOVERY_PROJECT_ID,
+        stateJson,
+        updatedAt: Date.now()
+      } satisfies StoredProjectState);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error || new Error('Unable to persist project recovery snapshot'));
+      tx.onabort = () => reject(tx.error || new Error('Unable to persist project recovery snapshot'));
+    });
+  } finally {
+    db.close();
+  }
+}
+
+export async function getPersistedProjectRecoverySnapshotRecord(): Promise<string | null> {
+  if (typeof indexedDB === 'undefined') return null;
+  const db = await openDb();
+  try {
+    const result = await new Promise<StoredProjectState | undefined>((resolve, reject) => {
+      const tx = db.transaction(PROJECT_STORE_NAME, 'readonly');
+      const request = tx.objectStore(PROJECT_STORE_NAME).get(RECOVERY_PROJECT_ID);
+      request.onsuccess = () => resolve(request.result as StoredProjectState | undefined);
+      request.onerror = () => reject(request.error || new Error('Unable to read project recovery snapshot'));
+      tx.onabort = () => reject(tx.error || new Error('Unable to read project recovery snapshot'));
+    });
+    return result?.stateJson ?? null;
+  } finally {
+    db.close();
+  }
+}
+
+/** Atomically replaces the active record with a known-good fallback. */
+export async function replacePersistedProjectStateRecord(stateJson: string): Promise<void> {
+  if (!stateJson) return;
+  const db = await openDb();
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction(PROJECT_STORE_NAME, 'readwrite');
+      const store = tx.objectStore(PROJECT_STORE_NAME);
+      store.delete(CURRENT_PROJECT_ID);
+      store.put({ id: CURRENT_PROJECT_ID, stateJson, updatedAt: Date.now() } satisfies StoredProjectState);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error || new Error('Unable to replace project state with recovery snapshot'));
+      tx.onabort = () => reject(tx.error || new Error('Unable to replace project state with recovery snapshot'));
+    });
+  } finally {
+    db.close();
+  }
+}
+
 export async function persistProjectBackupRecord(record: StoredProjectBackup): Promise<void> {
   if (!isProjectBackupId(record.id) || !record.stateJson) {
     throw new Error('Invalid project backup record');
@@ -242,7 +304,9 @@ export async function deletePersistedProjectState(): Promise<void> {
   try {
     await new Promise<void>((resolve, reject) => {
       const tx = db.transaction(PROJECT_STORE_NAME, 'readwrite');
-      tx.objectStore(PROJECT_STORE_NAME).delete(CURRENT_PROJECT_ID);
+      const store = tx.objectStore(PROJECT_STORE_NAME);
+      store.delete(CURRENT_PROJECT_ID);
+      store.delete(RECOVERY_PROJECT_ID);
       tx.oncomplete = () => resolve();
       tx.onerror = () => reject(tx.error || new Error('Unable to delete project state'));
       tx.onabort = () => reject(tx.error || new Error('Unable to delete project state'));

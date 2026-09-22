@@ -552,4 +552,6 @@ export interface ProjectState {
   markers?: ArrangementMarker[];
   vocalTuner?: VocalTunerSettings;
   macroKnobs?: MasterMacroKnob[];
+  /** UI-only persistence marker for an acknowledged missing-audio warning. */
+  dismissedMissingAudioSignature?: string;
 }
