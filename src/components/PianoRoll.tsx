@@ -26,23 +26,49 @@ import {
 import { Channel, Note, MusicalScale, ChordStampType } from '../types/daw';
 import { audioEngine } from '../audio/audioEngine';
 import { MidiParser } from '../utils/midiParser';
+import { normalizePatternLengthSteps } from '../state/patternLength';
 import {
   DEFAULT_GRID_STEPS,
   DEFAULT_MIN_NOTE_DURATION,
   DEFAULT_MIN_PITCH,
   DEFAULT_MAX_PITCH,
+  DEFAULT_ROW_HEIGHT,
+  DEFAULT_STEP_WIDTH,
+  MARQUEE_DRAG_THRESHOLD_PX,
+  MarqueeSelectionMode,
   NoteBounds,
   cloneNote,
   deleteNotes,
+  duplicateNotes,
+  hasExceededDragThreshold,
   moveNote,
   moveNotes,
+  normalizeRect,
+  nudgeNotes,
   resizeNoteLeft,
   resizeNoteRight,
+  resizeNotesLeft,
+  resizeNotesRight,
+  selectNotesInMarquee,
+  transposeNotes,
   updateNoteInNotes
 } from './pianoRollOperations';
 
-const STEP_WIDTH = 28;
-const ROW_HEIGHT = 24;
+const STEP_WIDTH = DEFAULT_STEP_WIDTH;
+const ROW_HEIGHT = DEFAULT_ROW_HEIGHT;
+
+interface MarqueeInteraction {
+  pointerId: number;
+  originClientX: number;
+  originClientY: number;
+  startX: number;
+  startY: number;
+  currentX: number;
+  currentY: number;
+  mode: MarqueeSelectionMode;
+  initialSelection: Set<string>;
+  hasDragged: boolean;
+}
 
 type NoteInteraction =
   | {
@@ -57,16 +83,20 @@ type NoteInteraction =
     }
   | {
       kind: 'resize-right';
-      initialNote: Note;
-      currentNote: Note;
+      anchorNoteId: string;
+      selectedIds: Set<string>;
+      initialNotes: Note[];
+      currentNotes: Note[];
       pointerId: number;
       originX: number;
       originY: number;
     }
   | {
       kind: 'resize-left';
-      initialNote: Note;
-      currentNote: Note;
+      anchorNoteId: string;
+      selectedIds: Set<string>;
+      initialNotes: Note[];
+      currentNotes: Note[];
       pointerId: number;
       originX: number;
       originY: number;
@@ -79,7 +109,20 @@ interface PianoRollProps {
   onUpdateChannel: (channelId: string, updates: Partial<Channel>) => void;
   currentStep: number;
   isPlaying: boolean;
+  /**
+   * Declared `Pattern.lengthSteps` of the selected pattern. The Piano Roll stays
+   * the fixed-width editor it always was; this only guarantees the grid is never
+   * narrower than the pattern being edited.
+   */
+  patternLengthSteps?: number;
 }
+
+/**
+ * Historical Piano Roll width in steps (two bars). It is a floor, not a pattern
+ * length: notes written past a 16-step declaration stay visible and preserved;
+ * Pattern Mode/export ignore them until the declared length is extended again.
+ */
+const PIANO_ROLL_MIN_STEPS = 32;
 
 type ToolType = 'draw' | 'paint' | 'slice' | 'erase' | 'select';
 
@@ -148,9 +191,10 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
   onSelectChannel,
   onUpdateChannel,
   currentStep,
-  isPlaying
+  isPlaying,
+  patternLengthSteps
 }) => {
-  const [currentTool, setCurrentTool] = useState<ToolType>('draw');
+  const [currentTool, setCurrentTool] = useState<ToolType>('select');
   const [rootKey, setRootKey] = useState<number>(0); // C
   const [selectedScaleIndex, setSelectedScaleIndex] = useState(0); // Natural Minor
   const [selectedChordStamp, setSelectedChordStamp] = useState(0); // Single Note
@@ -158,7 +202,10 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
   const [showGhostNotes, setShowGhostNotes] = useState(true);
   const [showVelocityDrawer, setShowVelocityDrawer] = useState(true);
   const [strumMs, setStrumMs] = useState(25);
-  const [totalSteps, setTotalSteps] = useState(32);
+  // Phase 9D: the editor width follows the pattern model without ever shrinking
+  // below its historical two-bar default, so a declared 64-step pattern is fully
+  // editable and notes past a 16-step declaration are never hidden or lost.
+  const totalSteps = Math.max(PIANO_ROLL_MIN_STEPS, normalizePatternLengthSteps(patternLengthSteps));
   const [selectedNoteIds, setSelectedNoteIds] = useState<Set<string>>(new Set());
   const selectedNoteIdsRef = useRef<Set<string>>(new Set());
   selectedNoteIdsRef.current = selectedNoteIds;
@@ -167,6 +214,11 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
   const interactionRef = useRef<NoteInteraction | null>(null);
   const didMoveRef = useRef(false);
   const lastAuditionedPitchRef = useRef<number | null>(null);
+
+  const [marquee, setMarquee] = useState<MarqueeInteraction | null>(null);
+  const marqueeRef = useRef<MarqueeInteraction | null>(null);
+  const didMarqueeDragRef = useRef(false);
+  const gridRef = useRef<HTMLDivElement>(null);
 
   // Pitch range C2 (36) to C6 (84) = 49 keys
   const minPitch = DEFAULT_MIN_PITCH;
@@ -186,11 +238,7 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
     gridSteps: DEFAULT_GRID_STEPS
   };
 
-  const displayNotes = interaction
-    ? (interaction.kind === 'move'
-        ? interaction.currentNotes
-        : updateNoteInNotes(notes, interaction.currentNote, bounds))
-    : notes;
+  const displayNotes = interaction ? interaction.currentNotes : notes;
 
   const getNoteName = (pitch: number) => {
     const names = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
@@ -224,6 +272,11 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
   };
 
   const handleGridClick = (pitch: number, step: number) => {
+    if (didMarqueeDragRef.current) {
+      didMarqueeDragRef.current = false;
+      return;
+    }
+
     const existingIndex = notes.findIndex(n => n.pitch === pitch && Math.abs(n.start - step) < 0.5);
 
     if (currentTool === 'erase') {
@@ -292,6 +345,7 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
   };
 
   const beginMove = (event: React.PointerEvent, note: Note) => {
+    if (marqueeRef.current) return;
     if (currentTool === 'erase') return;
     if (event.button !== 0) return;
     event.preventDefault();
@@ -334,6 +388,7 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
   };
 
   const beginResize = (event: React.PointerEvent, note: Note, direction: 'right' | 'left') => {
+    if (marqueeRef.current) return;
     if (currentTool === 'erase') return;
     if (event.button !== 0) return;
     event.preventDefault();
@@ -344,13 +399,19 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
     } catch {
       // Browser or detached target fallback
     }
-    if (!selectedNoteIdsRef.current.has(note.id)) {
-      setSelectedNoteIds(new Set([note.id]));
+
+    let currentSelection = selectedNoteIdsRef.current;
+    if (!currentSelection.has(note.id)) {
+      currentSelection = new Set([note.id]);
+      setSelectedNoteIds(currentSelection);
     }
+
     const next: NoteInteraction = {
       kind: direction === 'right' ? 'resize-right' : 'resize-left',
-      initialNote: cloneNote(note),
-      currentNote: cloneNote(note),
+      anchorNoteId: note.id,
+      selectedIds: new Set(currentSelection),
+      initialNotes: notes.map(cloneNote),
+      currentNotes: notes.map(cloneNote),
       pointerId: event.pointerId,
       originX: event.clientX,
       originY: event.clientY
@@ -397,32 +458,32 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
         interactionRef.current = updated;
         setInteraction(updated);
       } else if (active.kind === 'resize-right') {
-        const requestedEnd = active.initialNote.start + active.initialNote.duration + deltaSteps;
-        const nextNote = resizeNoteRight(
-          active.initialNote,
-          requestedEnd,
+        const resizedNotes = resizeNotesRight(
+          active.initialNotes,
+          active.selectedIds,
+          deltaSteps,
           DEFAULT_GRID_STEPS,
           DEFAULT_MIN_NOTE_DURATION,
           bounds
         );
         const updated: NoteInteraction = {
           ...active,
-          currentNote: nextNote
+          currentNotes: resizedNotes
         };
         interactionRef.current = updated;
         setInteraction(updated);
       } else {
-        const requestedStart = active.initialNote.start + deltaSteps;
-        const nextNote = resizeNoteLeft(
-          active.initialNote,
-          requestedStart,
+        const resizedNotes = resizeNotesLeft(
+          active.initialNotes,
+          active.selectedIds,
+          deltaSteps,
           DEFAULT_GRID_STEPS,
           DEFAULT_MIN_NOTE_DURATION,
           bounds
         );
         const updated: NoteInteraction = {
           ...active,
-          currentNote: nextNote
+          currentNotes: resizedNotes
         };
         interactionRef.current = updated;
         setInteraction(updated);
@@ -458,33 +519,16 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
 
     if (!didMove) return;
 
-    if (active.kind === 'move') {
-      const hasChanged = active.currentNotes.some(cn => {
-        const init = active.initialNotes.find(inNote => inNote.id === cn.id);
-        return !init || init.start !== cn.start || init.pitch !== cn.pitch || init.duration !== cn.duration;
-      });
+    const hasChanged = active.currentNotes.some(cn => {
+      const init = active.initialNotes.find(inNote => inNote.id === cn.id);
+      return !init || init.start !== cn.start || init.pitch !== cn.pitch || init.duration !== cn.duration;
+    });
 
-      if (hasChanged) {
-        try {
-          onUpdateChannel(channel.id, { notes: active.currentNotes });
-        } catch (err) {
-          console.error('Failed to commit moveNotes update', err);
-        }
-      }
-    } else {
-      const finalNote = active.currentNote;
-      const initialNote = active.initialNote;
-      if (
-        finalNote.start !== initialNote.start ||
-        finalNote.pitch !== initialNote.pitch ||
-        finalNote.duration !== initialNote.duration
-      ) {
-        try {
-          const nextNotes = updateNoteInNotes(notes, finalNote, bounds);
-          onUpdateChannel(channel.id, { notes: nextNotes });
-        } catch (err) {
-          console.error('Failed to commit note resize update', err);
-        }
+    if (hasChanged) {
+      try {
+        onUpdateChannel(channel.id, { notes: active.currentNotes });
+      } catch (err) {
+        console.error(`Failed to commit ${active.kind} update`, err);
       }
     }
   };
@@ -493,6 +537,54 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
     interactionRef.current = null;
     setInteraction(null);
     didMoveRef.current = false;
+  };
+
+  const handleDuplicateSelected = () => {
+    if (interactionRef.current || marqueeRef.current) return;
+    const currentSelection = selectedNoteIdsRef.current;
+    if (currentSelection.size === 0) return;
+
+    try {
+      const { updatedNotes, duplicatedNotes } = duplicateNotes(
+        notes,
+        currentSelection,
+        undefined,
+        undefined,
+        bounds
+      );
+
+      if (duplicatedNotes.length === 0) return;
+
+      onUpdateChannel(channel.id, { notes: updatedNotes });
+      setSelectedNoteIds(new Set(duplicatedNotes.map(n => n.id)));
+    } catch {
+      setStatusMessage('Duplicate cannot fit within pattern bounds.');
+      setTimeout(() => setStatusMessage(null), 2000);
+    }
+  };
+
+  const handleTransposeSelected = (semitones: number) => {
+    if (interactionRef.current || marqueeRef.current) return;
+    const currentSelection = selectedNoteIdsRef.current;
+    if (currentSelection.size === 0) return;
+
+    const updatedNotes = transposeNotes(notes, currentSelection, semitones, bounds);
+    const hasChanged = updatedNotes.some((n, idx) => n.pitch !== notes[idx].pitch);
+    if (hasChanged) {
+      onUpdateChannel(channel.id, { notes: updatedNotes });
+    }
+  };
+
+  const handleNudgeSelected = (deltaSteps: number) => {
+    if (interactionRef.current || marqueeRef.current) return;
+    const currentSelection = selectedNoteIdsRef.current;
+    if (currentSelection.size === 0) return;
+
+    const updatedNotes = nudgeNotes(notes, currentSelection, deltaSteps, bounds);
+    const hasChanged = updatedNotes.some((n, idx) => n.start !== notes[idx].start);
+    if (hasChanged) {
+      onUpdateChannel(channel.id, { notes: updatedNotes });
+    }
   };
 
   const handleDeleteSelected = () => {
@@ -507,12 +599,20 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (['INPUT', 'SELECT', 'TEXTAREA'].includes((e.target as HTMLElement).tagName)) {
+      const target = e.target as HTMLElement | null;
+      if (
+        target &&
+        (['INPUT', 'SELECT', 'TEXTAREA'].includes(target.tagName) || target.isContentEditable)
+      ) {
         return;
       }
 
       if (e.key === 'Escape') {
         e.preventDefault();
+        if (interactionRef.current) {
+          cancelInteraction();
+          return;
+        }
         setSelectedNoteIds(new Set());
         return;
       }
@@ -524,6 +624,13 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
         return;
       }
 
+      if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && (e.key === 'd' || e.key === 'D')) {
+        e.preventDefault();
+        e.stopPropagation();
+        handleDuplicateSelected();
+        return;
+      }
+
       if (e.key === 'Delete' || e.key === 'Backspace') {
         if (selectedNoteIdsRef.current.size > 0) {
           e.preventDefault();
@@ -531,13 +638,53 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
         }
         return;
       }
+
+      if (!e.ctrlKey && !e.metaKey && !e.altKey) {
+        if (e.key === 'ArrowUp') {
+          e.preventDefault();
+          e.stopPropagation();
+          if (!interactionRef.current && !marqueeRef.current) {
+            handleTransposeSelected(e.shiftKey ? 12 : 1);
+          }
+          return;
+        }
+
+        if (e.key === 'ArrowDown') {
+          e.preventDefault();
+          e.stopPropagation();
+          if (!interactionRef.current && !marqueeRef.current) {
+            handleTransposeSelected(e.shiftKey ? -12 : -1);
+          }
+          return;
+        }
+
+        if (e.key === 'ArrowRight') {
+          e.preventDefault();
+          e.stopPropagation();
+          if (!interactionRef.current && !marqueeRef.current) {
+            const stepDelta = e.shiftKey ? 4 : (bounds.gridSteps ?? DEFAULT_GRID_STEPS);
+            handleNudgeSelected(stepDelta);
+          }
+          return;
+        }
+
+        if (e.key === 'ArrowLeft') {
+          e.preventDefault();
+          e.stopPropagation();
+          if (!interactionRef.current && !marqueeRef.current) {
+            const stepDelta = e.shiftKey ? -4 : -(bounds.gridSteps ?? DEFAULT_GRID_STEPS);
+            handleNudgeSelected(stepDelta);
+          }
+          return;
+        }
+      }
     };
 
     window.addEventListener('keydown', handleKeyDown);
     return () => {
       window.removeEventListener('keydown', handleKeyDown);
     };
-  }, [notes, channel.id]);
+  }, [notes, channel.id, totalSteps]);
 
   useEffect(() => {
     if (!interaction) return;
@@ -573,6 +720,212 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
       window.removeEventListener('pointercancel', handleWindowPointerCancel);
     };
   }, [interaction]);
+
+  const marqueeCleanupRef = useRef<(() => void) | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (marqueeCleanupRef.current) {
+        marqueeCleanupRef.current();
+      }
+    };
+  }, []);
+
+  const handleGridPointerDown = (event: React.PointerEvent) => {
+    if (currentTool !== 'select') return;
+    if (event.button !== 0) return;
+    if (interactionRef.current) return;
+    if (marqueeRef.current) return;
+    const gridEl = gridRef.current;
+    if (!gridEl) return;
+
+    event.preventDefault();
+    didMarqueeDragRef.current = false;
+
+    try {
+      gridEl.setPointerCapture(event.pointerId);
+    } catch {
+      try {
+        (event.target as HTMLElement)?.setPointerCapture?.(event.pointerId);
+      } catch {
+        // Browser or detached target fallback
+      }
+    }
+
+    const rect = gridEl.getBoundingClientRect();
+    const startX = Math.round(event.clientX - rect.left);
+    const startY = Math.round(event.clientY - rect.top);
+
+    let mode: MarqueeSelectionMode = 'replace';
+    if (event.shiftKey) {
+      mode = 'add';
+    } else if (event.ctrlKey || event.metaKey) {
+      mode = 'toggle';
+    }
+
+    const initialSelection = new Set<string>(selectedNoteIdsRef.current);
+
+    const nextMarquee: MarqueeInteraction = {
+      pointerId: event.pointerId,
+      originClientX: event.clientX,
+      originClientY: event.clientY,
+      startX,
+      startY,
+      currentX: startX,
+      currentY: startY,
+      mode,
+      initialSelection,
+      hasDragged: false
+    };
+
+    marqueeRef.current = nextMarquee;
+
+    const handleWindowPointerMove = (e: PointerEvent) => {
+      const active = marqueeRef.current;
+      if (active && e.pointerId === active.pointerId) {
+        updateMarquee(e.clientX, e.clientY);
+      }
+    };
+
+    const cleanupListeners = () => {
+      window.removeEventListener('pointermove', handleWindowPointerMove);
+      window.removeEventListener('pointerup', handleWindowPointerUp);
+      window.removeEventListener('pointercancel', handleWindowPointerCancel);
+      marqueeCleanupRef.current = null;
+    };
+
+    const handleWindowPointerUp = (e: PointerEvent) => {
+      const active = marqueeRef.current;
+      if (active && e.pointerId === active.pointerId) {
+        cleanupListeners();
+        endMarquee(e);
+      }
+    };
+
+    const handleWindowPointerCancel = (e: PointerEvent) => {
+      const active = marqueeRef.current;
+      if (active && e.pointerId === active.pointerId) {
+        cleanupListeners();
+        cancelMarquee();
+      }
+    };
+
+    marqueeCleanupRef.current = cleanupListeners;
+    window.addEventListener('pointermove', handleWindowPointerMove);
+    window.addEventListener('pointerup', handleWindowPointerUp);
+    window.addEventListener('pointercancel', handleWindowPointerCancel);
+  };
+
+  const updateMarquee = (clientX: number, clientY: number) => {
+    const active = marqueeRef.current;
+    if (!active) return;
+    const gridEl = gridRef.current;
+    if (!gridEl) return;
+
+    const rect = gridEl.getBoundingClientRect();
+    const currentX = Math.round(clientX - rect.left);
+    const currentY = Math.round(clientY - rect.top);
+
+    const exceeded = hasExceededDragThreshold(active.originClientX, active.originClientY, clientX, clientY);
+    const hasDragged = active.hasDragged || exceeded;
+
+    if (!hasDragged) {
+      marqueeRef.current = {
+        ...active,
+        currentX,
+        currentY,
+        hasDragged: false
+      };
+      return;
+    }
+
+    didMarqueeDragRef.current = true;
+
+    const updated: MarqueeInteraction = {
+      ...active,
+      currentX,
+      currentY,
+      hasDragged: true
+    };
+    marqueeRef.current = updated;
+    setMarquee(updated);
+
+    const normRect = normalizeRect(active.startX, active.startY, currentX, currentY);
+    const nextSelection = selectNotesInMarquee(
+      notes,
+      normRect,
+      active.initialSelection,
+      active.mode,
+      STEP_WIDTH,
+      ROW_HEIGHT,
+      maxPitch
+    );
+    setSelectedNoteIds(nextSelection);
+  };
+
+  const endMarquee = (event: PointerEvent) => {
+    const active = marqueeRef.current;
+    if (!active) return;
+
+    try {
+      if (gridRef.current && typeof gridRef.current.releasePointerCapture === 'function') {
+        if (gridRef.current.hasPointerCapture(active.pointerId)) {
+          gridRef.current.releasePointerCapture(active.pointerId);
+        }
+      }
+    } catch {
+      // Pointer capture release fallback
+    }
+
+    marqueeRef.current = null;
+    setMarquee(null);
+
+    if (!active.hasDragged) {
+      if (active.mode === 'replace') {
+        setSelectedNoteIds(new Set());
+      } else {
+        didMarqueeDragRef.current = true;
+        setSelectedNoteIds(active.initialSelection);
+      }
+      return;
+    }
+
+    const gridEl = gridRef.current;
+    const currentX = gridEl ? Math.round(event.clientX - gridEl.getBoundingClientRect().left) : active.currentX;
+    const currentY = gridEl ? Math.round(event.clientY - gridEl.getBoundingClientRect().top) : active.currentY;
+    const normRect = normalizeRect(active.startX, active.startY, currentX, currentY);
+
+    const finalSelection = selectNotesInMarquee(
+      notes,
+      normRect,
+      active.initialSelection,
+      active.mode,
+      STEP_WIDTH,
+      ROW_HEIGHT,
+      maxPitch
+    );
+    setSelectedNoteIds(finalSelection);
+  };
+
+  const cancelMarquee = () => {
+    const active = marqueeRef.current;
+    if (!active) return;
+
+    try {
+      if (gridRef.current && typeof gridRef.current.releasePointerCapture === 'function') {
+        if (gridRef.current.hasPointerCapture(active.pointerId)) {
+          gridRef.current.releasePointerCapture(active.pointerId);
+        }
+      }
+    } catch {
+      // Pointer capture release fallback
+    }
+
+    marqueeRef.current = null;
+    setMarquee(null);
+    didMarqueeDragRef.current = false;
+    setSelectedNoteIds(active.initialSelection);
+  };
 
   const handleStrumNotes = () => {
     // Group notes by starting beat step
@@ -737,6 +1090,14 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
 
           {/* Tools */}
           <div className="flex items-center gap-1 bg-[#121214] p-0.5 rounded border border-[#333336]">
+            <button
+              id="piano-tool-select"
+              onClick={() => setCurrentTool('select')}
+              className={`p-1 rounded transition ${currentTool === 'select' ? 'bg-[#ff6e00] text-black font-bold' : 'text-[#777] hover:text-white'}`}
+              title="Select Tool (Marquee / Multi-Select)"
+            >
+              <MousePointer className="w-3.5 h-3.5" />
+            </button>
             <button
               onClick={() => setCurrentTool('draw')}
               className={`p-1 rounded transition ${currentTool === 'draw' ? 'bg-[#ff6e00] text-black font-bold' : 'text-[#777] hover:text-white'}`}
@@ -974,7 +1335,28 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
           </div>
 
           {/* Grid Rows for each pitch */}
-          <div className="min-w-[896px] flex-1">
+          <div
+            ref={gridRef}
+            onPointerDown={handleGridPointerDown}
+            style={{ touchAction: 'none' }}
+            className="min-w-[896px] flex-1 relative select-none"
+          >
+            {/* Active Marquee Selection Box */}
+            {marquee?.hasDragged && (() => {
+              const r = normalizeRect(marquee.startX, marquee.startY, marquee.currentX, marquee.currentY);
+              return (
+                <div
+                  className="absolute pointer-events-none border border-[#ff6e00] bg-[#ff6e00]/20 z-30 rounded-xs shadow-sm"
+                  style={{
+                    left: `${r.x}px`,
+                    top: `${r.y}px`,
+                    width: `${r.width}px`,
+                    height: `${r.height}px`
+                  }}
+                />
+              );
+            })()}
+
             {pitchRange.map((pitch) => {
               const isBlack = isBlackKey(pitch);
               const inScale = isInScale(pitch);
@@ -1024,9 +1406,7 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
                   {/* Render Notes placed on this pitch line */}
                   {displayNotes.filter(n => n.pitch === pitch).map((n) => {
                     const isSelected = selectedNoteIds.has(n.id);
-                    const isInteractingThis = interaction?.kind === 'move'
-                      ? interaction.selectedIds.has(n.id)
-                      : interaction?.currentNote.id === n.id;
+                    const isInteractingThis = Boolean(interaction?.selectedIds.has(n.id));
 
                     return (
                       <div

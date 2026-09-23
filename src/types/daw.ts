@@ -191,6 +191,13 @@ export interface CustomSampleData {
   waveformPeaks: number[];
   blob?: Blob;
   url?: string;
+  /**
+   * Set by project hydration when this sample's persisted audio could not be
+   * restored. Mirrors `PlaylistClip.audioUnavailable`: the project keeps the
+   * reference so the user can see (and recover) the missing asset; the audio
+   * itself is never fabricated.
+   */
+  audioUnavailable?: boolean;
   trimStart?: number; // 0 to 1
   trimEnd?: number; // 0 to 1
   normalize?: boolean;
@@ -209,7 +216,7 @@ export interface Channel {
   pitch: number; // semitones offset (-12 to +12)
   mute: boolean;
   solo: boolean;
-  steps: boolean[]; // 16 or 32 steps for step sequencer
+  steps: boolean[]; // Channel-scoped sequencer data; typically 16/32, may preserve later steps
   stepVelocities?: number[];
   notes: Note[]; // Notes for piano roll
   synthParams: SynthParameters;
@@ -399,8 +406,6 @@ export interface ProjectMetadata {
   created: number;
   updated: number;
   version: string;
-  isEncrypted: boolean;
-  cloudSynced: boolean;
   offlineReady: boolean;
   totalEditTimeSeconds: number;
 }
@@ -545,4 +550,6 @@ export interface ProjectState {
   markers?: ArrangementMarker[];
   vocalTuner?: VocalTunerSettings;
   macroKnobs?: MasterMacroKnob[];
+  /** UI-only persistence marker for an acknowledged missing-audio warning. */
+  dismissedMissingAudioSignature?: string;
 }

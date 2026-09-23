@@ -1,24 +1,58 @@
-import React, { useRef } from 'react';
-import { FolderOpen, Download, Upload, X, Sparkles, Plus } from 'lucide-react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { FolderOpen, Download, Upload, X, Plus, ArchiveRestore, Trash2, RotateCcw } from 'lucide-react';
 import { ProjectState, ProjectMetadata } from '../types/daw';
 import { PRESET_PROJECTS } from '../audio/presets';
 import { createDefaultProjectState, normalizeProjectState } from '../state/projectState';
+import { deleteProjectBackup, listProjectBackups, restoreProjectBackupState, type ProjectBackupSummary } from '../state/projectBackup';
+import type { ProjectReplacementSource } from '../state/projectReplacement';
 
 
 interface ProjectManagerModalProps {
   isOpen: boolean;
   onClose: () => void;
   currentState: ProjectState;
-  onLoadProject: (state: ProjectState) => void | Promise<void>;
+  /** Resolves false when the user kept the current project (replacement confirmation declined). */
+  onLoadProject: (state: ProjectState, options?: { source?: ProjectReplacementSource }) => boolean | void | Promise<boolean | void>;
   onUpdateMeta: (meta: Partial<ProjectMetadata>) => void;
 }
 
+const formatBackupTime = (timestamp: number): string => {
+  try {
+    return new Date(timestamp).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' });
+  } catch {
+    return new Date(timestamp).toISOString();
+  }
+};
+
 export const ProjectManagerModal: React.FC<ProjectManagerModalProps> = ({ isOpen, onClose, currentState, onLoadProject, onUpdateMeta }) => {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const [backups, setBackups] = useState<ProjectBackupSummary[]>([]);
+  const [backupsError, setBackupsError] = useState<string | null>(null);
+  const [busyBackupId, setBusyBackupId] = useState<string | null>(null);
+
+  const refreshBackups = useCallback(async () => {
+    try {
+      setBackups(await listProjectBackups());
+      setBackupsError(null);
+    } catch (error) {
+      console.warn('[Apex Studio] Could not list project backups.', error);
+      setBackups([]);
+      setBackupsError(error instanceof Error ? error.message : 'Backups are unavailable');
+    }
+  }, []);
+
+  // Backups are written by the replacement flow, so refresh whenever the hub opens.
+  useEffect(() => {
+    if (!isOpen) return;
+    void refreshBackups();
+  }, [isOpen, refreshBackups]);
 
   if (!isOpen) return null;
 
-
+  const loadProject = async (state: ProjectState, source: ProjectReplacementSource): Promise<boolean> => {
+    const replaced = await onLoadProject(state, { source });
+    return replaced !== false;
+  };
 
   const handleExportProjectJson = () => {
     const jsonStr = JSON.stringify(currentState, (key, value) => {
@@ -42,8 +76,7 @@ export const ProjectManagerModal: React.FC<ProjectManagerModalProps> = ({ isOpen
     try {
       const parsed = JSON.parse(await file.text());
       const normalized = normalizeProjectState(parsed);
-      await onLoadProject(normalized);
-      onClose();
+      if (await loadProject(normalized, 'manifest-import')) onClose();
     } catch (err) {
       console.error('Could not load project file.', err);
       window.alert(err instanceof Error ? err.message : 'Could not load project file.');
@@ -53,13 +86,43 @@ export const ProjectManagerModal: React.FC<ProjectManagerModalProps> = ({ isOpen
   };
 
   const handleCreateBlankProject = async () => {
-    await onLoadProject(createDefaultProjectState());
-    onClose();
+    if (await loadProject(createDefaultProjectState(), 'new-session')) onClose();
   };
 
   const handleLoadPreset = async (state: ProjectState) => {
-    await onLoadProject(structuredClone(state));
-    onClose();
+    if (await loadProject(structuredClone(state), 'studio-demo')) onClose();
+  };
+
+  const handleRestoreBackup = async (backup: ProjectBackupSummary) => {
+    setBusyBackupId(backup.id);
+    try {
+      const state = await restoreProjectBackupState(backup.id);
+      if (!state) {
+        window.alert('This backup is no longer available.');
+        await refreshBackups();
+        return;
+      }
+      if (await loadProject(state, 'backup-restore')) onClose();
+    } catch (err) {
+      console.error('Could not restore project backup.', err);
+      window.alert(err instanceof Error ? err.message : 'Could not restore project backup.');
+    } finally {
+      setBusyBackupId(null);
+    }
+  };
+
+  const handleDeleteBackup = async (backup: ProjectBackupSummary) => {
+    if (!window.confirm(`Delete the backup of "${backup.name}" from ${formatBackupTime(backup.createdAt)}? Audio used only by this backup will be cleaned up on the next save.`)) return;
+    setBusyBackupId(backup.id);
+    try {
+      await deleteProjectBackup(backup.id);
+      await refreshBackups();
+    } catch (err) {
+      console.error('Could not delete project backup.', err);
+      window.alert(err instanceof Error ? err.message : 'Could not delete project backup.');
+    } finally {
+      setBusyBackupId(null);
+    }
   };
 
   return (
@@ -87,7 +150,7 @@ export const ProjectManagerModal: React.FC<ProjectManagerModalProps> = ({ isOpen
           </div>
 
           <div className="p-2.5 bg-[#121214] border border-[#222225] rounded-lg text-[10px] text-[#888]">
-            <span><strong>Format Guide:</strong> .flmp = project manifest/state backup. For a portable bundle containing audio assets, use <strong>Portable ZIP</strong>.</span>
+            <span><strong>Format Guide:</strong> .flmp = project manifest/state backup. For a portable bundle containing audio assets, use <strong>Portable ZIP</strong>. Opening a demo, manifest or bundle replaces the current project after confirmation and keeps an automatic backup below.</span>
           </div>
 
           <input type="file" ref={fileInputRef} onChange={handleImportFile} accept=".json,.flmp" className="hidden" />
@@ -98,6 +161,33 @@ export const ProjectManagerModal: React.FC<ProjectManagerModalProps> = ({ isOpen
               <input type="text" value={currentState.meta.name} onChange={(e) => onUpdateMeta({ name: e.target.value })} className="flex-1 bg-[#121214] border border-[#333336] rounded px-3 py-1.5 text-xs text-white focus:outline-none focus:border-[#ff6e00] font-bold" placeholder="Project title..." />
               <div className="text-[10px] text-[#777] font-mono bg-[#121214] px-2.5 py-1.5 rounded border border-[#333336]">{currentState.meta.bpm} BPM</div>
             </div>
+          </div>
+
+          <div id="project-recent-backups" className="space-y-2">
+            <div className="flex items-center justify-between">
+              <div className="text-[10px] font-bold uppercase tracking-wider text-[#777] flex items-center gap-1.5"><ArchiveRestore className="w-3 h-3 text-[#00ff88]" /><span>Recent Backups (auto-saved before a project is replaced)</span></div>
+              <button onClick={() => void refreshBackups()} className="text-[9px] font-bold text-[#777] hover:text-white transition flex items-center gap-1" title="Refresh backups"><RotateCcw className="w-3 h-3" /><span>REFRESH</span></button>
+            </div>
+            {backupsError ? (
+              <div className="p-2.5 bg-[#361111] border border-red-500/40 rounded-lg text-[10px] text-red-200">Backups are unavailable: {backupsError}</div>
+            ) : backups.length === 0 ? (
+              <div className="p-2.5 bg-[#121214] border border-[#222225] rounded-lg text-[10px] text-[#666]">No backups yet. One is created automatically whenever a project with work is replaced.</div>
+            ) : (
+              <div className="space-y-1.5">
+                {backups.map((backup) => (
+                  <div key={backup.id} className="p-2.5 bg-[#1a1a1d] border border-[#333336] rounded-lg flex items-center justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="text-xs font-bold text-white truncate">{backup.name}</div>
+                      <div className="text-[9px] text-[#777]">{formatBackupTime(backup.createdAt)} • {backup.channelCount} Instruments • {backup.clipCount} Clips • {backup.recordingCount} Takes • {backup.audioIds.length} Audio Assets</div>
+                    </div>
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      <button onClick={() => void handleRestoreBackup(backup)} disabled={busyBackupId !== null} className="px-2.5 py-1 bg-[#00ff88] hover:bg-[#00e67a] disabled:opacity-40 text-black font-bold text-[10px] rounded transition">{busyBackupId === backup.id ? 'WORKING…' : 'RESTORE'}</button>
+                      <button onClick={() => void handleDeleteBackup(backup)} disabled={busyBackupId !== null} className="p-1 rounded hover:bg-[#2d2d30] disabled:opacity-40 text-[#777] hover:text-red-300 transition" title="Delete backup"><Trash2 className="w-3.5 h-3.5" /></button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
 
           <div className="space-y-2">

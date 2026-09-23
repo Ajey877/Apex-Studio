@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { 
   ProjectState, 
   ViewMode, 
@@ -17,7 +17,7 @@ import {
   Pattern,
   MasteringSuiteState
 } from './types/daw';
-import { audioEngine } from './audio/audioEngine';
+import { audioEngine, type PlaybackStateUpdate } from './audio/audioEngine';
 import { 
   DEFAULT_PROJECT, 
   PRESET_PROJECTS, 
@@ -26,7 +26,20 @@ import {
 } from './audio/presets';
 import { appendChannelWithAllocatedMixerTrackId } from './state/mixerTrackIdentity';
 import { deleteChannelFromProjectState, normalizeProjectState } from './state/projectState';
+import {
+  DEFAULT_PATTERN_LENGTH_STEPS,
+  getSelectedPatternLengthSteps,
+  setPatternLengthStepsInProjectState
+} from './state/patternLength';
 import { hydrateProjectAudio, persistProjectState, restorePersistedProjectState, saveAndReconcileProjectState } from './state/projectPersistence';
+import { ProjectBackupError, backupProjectBeforeReplacement } from './state/projectBackup';
+import { getSampleBufferPersistenceController, waitForSampleBufferPersistence } from './audio/sampleBufferPersistence';
+import { planProjectReplacement, runProjectReplacementAfterBackup, type ProjectReplacementPlan, type ProjectReplacementSource } from './state/projectReplacement';
+import {
+  collectMissingAudioAssets,
+  describeMissingAudioAssets,
+  getMissingAudioAssetsSignature
+} from './state/audioAssetAvailability';
 import { createRecordingPlaylistClip, getRecordingAudioBufferId, validateRecordingTargetTrack } from './audio/recordingPipeline';
 import { createHistory, type ProjectHistory, resolveSaveShortcut, resolveUndoRedoShortcut } from './state/projectHistory';
 import {
@@ -38,6 +51,7 @@ import {
   getFxUpdateLabel,
   getMetaUpdateLabel,
   getMixerUpdateLabel,
+  getPatternUpdateLabel,
   isContinuousChannelUpdate,
   isContinuousFxUpdate,
   isContinuousMetaUpdate,
@@ -91,6 +105,7 @@ import { MpeExpressionModal } from './components/MpeExpressionModal';
 import { StemSplitterAiModal } from './components/StemSplitterAiModal';
 import { MasterMacroRackModal } from './components/MasterMacroRackModal';
 import { ProjectBundleZipModal } from './components/ProjectBundleZipModal';
+import { ProjectReplaceConfirmModal } from './components/ProjectReplaceConfirmModal';
 
 import { 
   Folder, 
@@ -117,13 +132,30 @@ import {
   X
 } from 'lucide-react';
 
+interface PendingProjectReplacement {
+  incomingState: ProjectState;
+  plan: ProjectReplacementPlan;
+  resolve: (replaced: boolean) => void;
+  isWorking: boolean;
+  backupError: string | null;
+  error: string | null;
+}
+
 export function App() {
   // --- Core DAW State ---
   const [projectState, setProjectState] = useState<ProjectState>(DEFAULT_PROJECT);
   const [isProjectHydrating, setIsProjectHydrating] = useState(true);
   const projectPersistenceReadyRef = useRef(false);
   const hasUnsavedChangesRef = useRef(false);
+  const skipNextAutosaveStateRef = useRef<ProjectState | null>(null);
+  const lifecycleSavePromiseRef = useRef<Promise<boolean> | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
+  // Phase 8C (P1-11): missing audio must be visible in the app, not only in the
+  // console. The banner re-appears whenever the set of missing assets changes.
+  const [dismissedMissingAudioSignature, setDismissedMissingAudioSignature] = useState<string | null>(null);
+  // Phase 8A: destructive project replacement waits for explicit confirmation (and a backup).
+  const [pendingReplacement, setPendingReplacement] = useState<PendingProjectReplacement | null>(null);
+  const pendingReplacementRef = useRef<PendingProjectReplacement | null>(null);
   const [currentView, setCurrentView] = useState<ViewMode>('channel_rack');
   const [playMode, setPlayMode] = useState<PlayMode>('pat');
   const [isPlaying, setIsPlaying] = useState(false);
@@ -268,6 +300,10 @@ export function App() {
           resetProjectHistory(restored.state);
           setSelectedChannelId(restored.state.selectedChannelId || DEFAULT_PROJECT.channels[0]?.id || 'ch-1');
           setSelectedTrackId(restored.state.selectedMixerTrackId ?? 0);
+          setDismissedMissingAudioSignature(restored.state.dismissedMissingAudioSignature ?? null);
+          if (restored.recovered) {
+            console.warn('[Apex Studio] The active project record was recovered from a last-known-good snapshot.');
+          }
           if (restored.missingAudioIds.length > 0) {
             console.warn(`[Apex Studio] ${restored.missingAudioIds.length} persisted audio asset(s) were unavailable after reload.`);
           }
@@ -296,7 +332,9 @@ export function App() {
       if (options?.reconcileAudio) {
         await saveAndReconcileProjectState(stateToSave, {
           history: projectHistoryRef.current,
-          reconcileAudio: true
+          reconcileAudio: true,
+          // Imported-but-unassigned samples and other session audio must not be purged mid-session.
+          additionalReferencedIds: audioEngine.getSampleBufferIds()
         });
       } else {
         await persistProjectState(stateToSave);
@@ -318,6 +356,10 @@ export function App() {
   // Controlled autosave: persist settled project changes without writing on every render.
   useEffect(() => {
     if (!projectPersistenceReadyRef.current) return;
+    if (skipNextAutosaveStateRef.current === projectState) {
+      skipNextAutosaveStateRef.current = null;
+      return;
+    }
     hasUnsavedChangesRef.current = true;
     const timer = window.setTimeout(() => {
       void performSave(projectState);
@@ -325,17 +367,46 @@ export function App() {
     return () => window.clearTimeout(timer);
   }, [projectState, performSave]);
 
-  // Protect against closing/reloading while changes are unsettled.
+  // Save while the page is still active. IndexedDB writes created during
+  // unload/beforeunload are not guaranteed to complete, so visibilitychange is
+  // the primary recovery signal; beforeunload remains a last-chance trigger and
+  // warns when changes are still unsettled.
   useEffect(() => {
+    const flushLifecycleSave = () => {
+      if (!projectPersistenceReadyRef.current || !hasUnsavedChangesRef.current) return;
+      if (lifecycleSavePromiseRef.current) return;
+      const pendingAudio = getSampleBufferPersistenceController(audioEngine);
+      lifecycleSavePromiseRef.current = (async () => {
+        try {
+          if (pendingAudio) await pendingAudio.flush();
+          return await performSave(projectStateRef.current);
+        } finally {
+          lifecycleSavePromiseRef.current = null;
+        }
+      })();
+      void lifecycleSavePromiseRef.current.catch(error => {
+        console.warn('[Apex Studio] Lifecycle project save failed.', error);
+      });
+    };
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'hidden') flushLifecycleSave();
+    };
     const handleBeforeUnload = (e: BeforeUnloadEvent) => {
+      flushLifecycleSave();
       if (hasUnsavedChangesRef.current) {
         e.preventDefault();
         e.returnValue = '';
       }
     };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
     window.addEventListener('beforeunload', handleBeforeUnload);
-    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
-  }, []);
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('beforeunload', handleBeforeUnload);
+    };
+  }, [performSave]);
 
   // Update audio engine settings when state changes
   useEffect(() => {
@@ -363,17 +434,34 @@ export function App() {
   }, []);
 
   // --- Transport Controls ---
+  // Pattern Mode loops over the selected pattern's declared length (16/32/64).
+  // `Pattern.lengthSteps` is the single source of truth: the Channel Rack grid,
+  // the Piano Roll width, this transport argument and Pattern export all read it.
+  const selectedPatternLengthSteps = getSelectedPatternLengthSteps(projectState);
+
   const handleTogglePlay = () => {
     if (isPlaying) {
-      audioEngine.stop();
+      // Real pause: the transport keeps its position, scheduled audio is
+      // cancelled, and Play resumes from the paused position.
+      audioEngine.pause();
       setIsPlaying(false);
     } else {
-      audioEngine.play(
+      // Play from an isolated snapshot: automation writes channel volume/pan/filter
+      // during playback and must never mutate live project state (undo/redo and
+      // saves would otherwise capture transient playback values).
+      const snapshot = audioEngine.createPlaybackSnapshot(
         projectState.channels,
         projectState.playlistClips,
+        projectState.mixerTracks
+      );
+      audioEngine.play(
+        snapshot.channels,
+        snapshot.clips,
         playMode,
         projectState.selectedPatternId,
-        structuredClone(projectState.mixerTracks)
+        snapshot.mixerTracks,
+        selectedPatternLengthSteps,
+        projectState.playlistTracks
       );
       setIsPlaying(true);
     }
@@ -391,12 +479,19 @@ export function App() {
     setPlayMode(nextMode);
     if (isPlaying) {
       audioEngine.stop();
-      audioEngine.play(
+      const snapshot = audioEngine.createPlaybackSnapshot(
         projectState.channels,
         projectState.playlistClips,
+        projectState.mixerTracks
+      );
+      audioEngine.play(
+        snapshot.channels,
+        snapshot.clips,
         nextMode,
         projectState.selectedPatternId,
-        structuredClone(projectState.mixerTracks)
+        snapshot.mixerTracks,
+        selectedPatternLengthSteps,
+        projectState.playlistTracks
       );
     }
   };
@@ -438,13 +533,43 @@ export function App() {
     }
   }, []);
 
+  /**
+   * Keep only playback-consumed project collections synchronized while the
+   * engine owns an isolated take. Other React state remains UI/history state
+   * and is intentionally not copied into the real-time scheduler.
+   */
+  const synchronizeActivePlayback = useCallback((previous: ProjectState, next: ProjectState) => {
+    const update: PlaybackStateUpdate = {};
+    if (previous.channels !== next.channels) update.channels = next.channels;
+    if (previous.playlistClips !== next.playlistClips) update.clips = next.playlistClips;
+    if (previous.mixerTracks !== next.mixerTracks) update.mixerTracks = next.mixerTracks;
+    // Playlist lane mute is audio state for the running take: muting a lane
+    // silences its clips at the trigger boundary, unmuting restarts a clip the
+    // playhead is inside. The mixer insert routing is never touched.
+    if (previous.playlistTracks !== next.playlistTracks) update.playlistTracks = next.playlistTracks;
+    // Pattern Mode plays the selected pattern, so its declared length belongs to
+    // the live take: a 16 <-> 32 change (or switching to a pattern of a different
+    // length) moves the running loop boundary instead of waiting for a restart.
+    // Song Mode ignores it inside the engine.
+    const previousPatternLengthSteps = getSelectedPatternLengthSteps(previous);
+    const nextPatternLengthSteps = getSelectedPatternLengthSteps(next);
+    if (previousPatternLengthSteps !== nextPatternLengthSteps) {
+      update.patternLengthSteps = nextPatternLengthSteps;
+    }
+    if (update.channels || update.clips || update.mixerTracks || update.playlistTracks || update.patternLengthSteps !== undefined) {
+      audioEngine.synchronizePlaybackState(update);
+    }
+  }, []);
+
   const resetPlaylistHistory = resetProjectHistory;
   const commitPlaylistHistory = commitProjectHistory;
 
   const updatePlaylistProjectState = useCallback((state: ProjectState) => {
+    const previousState = projectStateRef.current;
     projectStateRef.current = state;
+    synchronizeActivePlayback(previousState, state);
     setProjectState(state);
-  }, []);
+  }, [synchronizeActivePlayback]);
 
   const mutateProjectState = useCallback((
     updater: (current: ProjectState) => ProjectState,
@@ -454,6 +579,7 @@ export function App() {
     const currentState = projectStateRef.current;
     const nextState = updater(currentState);
     projectStateRef.current = nextState;
+    synchronizeActivePlayback(currentState, nextState);
     setProjectState(nextState);
 
     if (options?.isContinuous) {
@@ -463,7 +589,7 @@ export function App() {
       commitProjectHistory(nextState, label);
     }
     return nextState;
-  }, [commitProjectHistory]);
+  }, [commitProjectHistory, synchronizeActivePlayback]);
 
   const handleContinuousInteractionStart = useCallback((label?: string) => {
     continuousBatcherRef.current.start(label);
@@ -476,34 +602,42 @@ export function App() {
   const handleUndo = useCallback(() => {
     if (playlistInteractionActiveRef.current) return;
     continuousBatcherRef.current.flush();
+    const previousState = projectStateRef.current;
     const nextHistory = projectHistoryRef.current.undo();
     if (nextHistory === projectHistoryRef.current) return;
     projectHistoryRef.current = nextHistory;
     projectStateRef.current = nextHistory.present;
+    synchronizeActivePlayback(previousState, nextHistory.present);
     setProjectState(nextHistory.present);
     setProjectHistoryVersion(version => version + 1);
 
-    // Sync live mixer tracks with audio engine
-    nextHistory.present.mixerTracks.forEach(track => {
-      audioEngine.updateMixerTrack(track);
-    });
-  }, []);
+    // When stopped there is no playback snapshot to update, so keep the live
+    // mixer graph in step with history for the next audition.
+    if (!audioEngine.isPlaybackActive()) {
+      nextHistory.present.mixerTracks.forEach(track => {
+        audioEngine.updateMixerTrack(track);
+      });
+    }
+  }, [synchronizeActivePlayback]);
 
   const handleRedo = useCallback(() => {
     if (playlistInteractionActiveRef.current) return;
     continuousBatcherRef.current.flush();
+    const previousState = projectStateRef.current;
     const nextHistory = projectHistoryRef.current.redo();
     if (nextHistory === projectHistoryRef.current) return;
     projectHistoryRef.current = nextHistory;
     projectStateRef.current = nextHistory.present;
+    synchronizeActivePlayback(previousState, nextHistory.present);
     setProjectState(nextHistory.present);
     setProjectHistoryVersion(version => version + 1);
 
-    // Sync live mixer tracks with audio engine
-    nextHistory.present.mixerTracks.forEach(track => {
-      audioEngine.updateMixerTrack(track);
-    });
-  }, []);
+    if (!audioEngine.isPlaybackActive()) {
+      nextHistory.present.mixerTracks.forEach(track => {
+        audioEngine.updateMixerTrack(track);
+      });
+    }
+  }, [synchronizeActivePlayback]);
 
   const handlePlaylistUndo = handleUndo;
   const handlePlaylistRedo = handleRedo;
@@ -518,27 +652,102 @@ export function App() {
     commitProjectHistory(projectStateRef.current, 'Playlist interaction');
   }, [commitProjectHistory]);
 
-  const handleLoadProjectState = useCallback(async (state: ProjectState) => {
-    handleStop();
+  /**
+   * Replaces the open project. Validation happens before anything destructive:
+   * a project that fails normalization leaves the current project untouched.
+   */
+  const applyProjectReplacement = useCallback(async (
+    state: ProjectState,
+    options: { backup: boolean }
+  ): Promise<void> => {
     const normalized = normalizeProjectState(state);
-    try {
-      const hydrated = await hydrateProjectAudio(normalized, audioEngine);
-      projectStateRef.current = hydrated.state;
-      setProjectState(hydrated.state);
-      resetProjectHistory(hydrated.state);
-      setSelectedChannelId(hydrated.state.selectedChannelId || hydrated.state.channels[0]?.id || 'ch-1');
-      setSelectedTrackId(hydrated.state.selectedMixerTrackId ?? 0);
-      void performSave(hydrated.state, { reconcileAudio: true });
-    } catch (error) {
-      console.warn('[Apex Studio] Project audio hydration failed; loading project without audio.', error);
-      projectStateRef.current = normalized;
-      setProjectState(normalized);
-      resetProjectHistory(normalized);
-      setSelectedChannelId(normalized.selectedChannelId || normalized.channels[0]?.id || 'ch-1');
-      setSelectedTrackId(normalized.selectedMixerTrackId ?? 0);
-      void performSave(normalized, { reconcileAudio: false });
-    }
+    await runProjectReplacementAfterBackup(
+      options.backup
+        ? () => backupProjectBeforeReplacement(projectStateRef.current, { reason: 'replace' }).then(() => undefined)
+        : undefined,
+      async () => {
+        handleStop();
+        try {
+          const hydrated = await hydrateProjectAudio(normalized, audioEngine);
+          projectStateRef.current = hydrated.state;
+          skipNextAutosaveStateRef.current = hydrated.state;
+          setProjectState(hydrated.state);
+          resetProjectHistory(hydrated.state);
+          setSelectedChannelId(hydrated.state.selectedChannelId || hydrated.state.channels[0]?.id || 'ch-1');
+          setSelectedTrackId(hydrated.state.selectedMixerTrackId ?? 0);
+          const saved = await performSave(hydrated.state, { reconcileAudio: true });
+          if (!saved) throw new Error('Replaced project could not be persisted');
+        } catch (error) {
+          console.warn('[Apex Studio] Project audio hydration failed; loading project without audio.', error);
+          projectStateRef.current = normalized;
+          skipNextAutosaveStateRef.current = normalized;
+          setProjectState(normalized);
+          resetProjectHistory(normalized);
+          setSelectedChannelId(normalized.selectedChannelId || normalized.channels[0]?.id || 'ch-1');
+          setSelectedTrackId(normalized.selectedMixerTrackId ?? 0);
+          const saved = await performSave(normalized, { reconcileAudio: false });
+          if (!saved) throw new Error('Replaced project could not be persisted');
+        }
+      }
+    );
   }, [resetProjectHistory, performSave]);
+
+  const settlePendingReplacement = useCallback((replaced: boolean) => {
+    const pending = pendingReplacementRef.current;
+    pendingReplacementRef.current = null;
+    setPendingReplacement(null);
+    pending?.resolve(replaced);
+  }, []);
+
+  /**
+   * Entry point for every project load (demos, manifest/bundle import, new session,
+   * backup restore). Pristine templates are replaced immediately; anything with
+   * work waits for the confirm dialog. Resolves true only when the project was replaced.
+   */
+  const handleLoadProjectState = useCallback(async (
+    state: ProjectState,
+    options?: { source?: ProjectReplacementSource }
+  ): Promise<boolean> => {
+    const plan = planProjectReplacement(projectStateRef.current, state, { source: options?.source });
+    if (!plan.requiresConfirmation) {
+      await applyProjectReplacement(state, { backup: false });
+      return true;
+    }
+    // A newer request supersedes any dialog still waiting for an answer.
+    if (pendingReplacementRef.current) settlePendingReplacement(false);
+    return new Promise<boolean>(resolve => {
+      const pending: PendingProjectReplacement = { incomingState: state, plan, resolve, isWorking: false, backupError: null, error: null };
+      pendingReplacementRef.current = pending;
+      setPendingReplacement(pending);
+    });
+  }, [applyProjectReplacement, settlePendingReplacement]);
+
+  const confirmPendingReplacement = useCallback(async () => {
+    const pending = pendingReplacementRef.current;
+    if (!pending || pending.isWorking) return;
+    const update = (patch: Partial<PendingProjectReplacement>) => {
+      const current = pendingReplacementRef.current;
+      if (!current) return; // superseded or cancelled while working
+      const next = { ...current, ...patch };
+      pendingReplacementRef.current = next;
+      setPendingReplacement(next);
+    };
+    update({ isWorking: true, backupError: null, error: null });
+    try {
+      // A confirmed replacement always takes the backup-required path. There is
+      // intentionally no alternate confirmation that can bypass it.
+      await applyProjectReplacement(pending.incomingState, { backup: pending.plan.shouldBackup });
+      settlePendingReplacement(true);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      console.warn('[Apex Studio] Project replacement did not complete.', error);
+      if (error instanceof ProjectBackupError) {
+        update({ isWorking: false, backupError: message });
+      } else {
+        update({ isWorking: false, error: message });
+      }
+    }
+  }, [applyProjectReplacement, settlePendingReplacement]);
 
   // --- Project State Handlers ---
   const handleUpdateMeta = (updates: Partial<ProjectMetadata>, options?: { isContinuous?: boolean }) => {
@@ -618,11 +827,25 @@ export function App() {
       id: `pat-${nextIdx}-${Date.now()}`,
       name: `Pattern ${nextIdx}`,
       color: '#ff6e00',
-      lengthSteps: 16
+      lengthSteps: DEFAULT_PATTERN_LENGTH_STEPS
     };
     mutateProjectState(
       curr => addPatternToProjectState(curr, newPat),
       'Add pattern'
+    );
+  };
+
+  /**
+   * Channel Rack 16/32 control. It writes the SELECTED pattern's declared length
+   * through the project mutation layer, so the change is history-aware (undo/redo),
+   * persisted, and reaches the running playback take via `synchronizeActivePlayback`.
+   * A pattern id that matches nothing (corrupt/legacy project) is a safe no-op.
+   */
+  const handleUpdatePatternLength = (lengthSteps: number) => {
+    const updates = { lengthSteps };
+    mutateProjectState(
+      current => setPatternLengthStepsInProjectState(current, current.selectedPatternId, lengthSteps),
+      getPatternUpdateLabel(updates)
     );
   };
 
@@ -635,11 +858,43 @@ export function App() {
   };
 
   const handleUpdateClips = (clips: PlaylistClip[]) => {
-    const nextState = { ...projectStateRef.current, playlistClips: clips };
-    updatePlaylistProjectState(nextState);
-    if (!playlistInteractionActiveRef.current) {
-      commitPlaylistHistory(nextState, 'Clip change');
+    const currentState = projectStateRef.current;
+    const currentAudioIds = new Set(
+      currentState.playlistClips
+        .map(clip => clip.type === 'audio' ? clip.audioBufferId : undefined)
+        .filter((id): id is string => Boolean(id))
+    );
+    const newAudioIds = [...new Set(
+      clips
+        .filter(clip => clip.type === 'audio' && Boolean(clip.audioBufferId))
+        .map(clip => clip.audioBufferId as string)
+        .filter(id => !currentAudioIds.has(id))
+    )];
+
+    const commitClipChange = () => {
+      const nextState = { ...projectStateRef.current, playlistClips: clips };
+      updatePlaylistProjectState(nextState);
+      if (!playlistInteractionActiveRef.current) {
+        commitPlaylistHistory(nextState, 'Clip change');
+      }
+    };
+
+    if (newAudioIds.length === 0) {
+      commitClipChange();
+      return;
     }
+
+    // Dropped/bounced buffers are registered synchronously, but their storage
+    // write is asynchronous. Do not put the clip id into project state until
+    // every newly referenced asset has completed successfully.
+    void Promise.all(newAudioIds.map(id => waitForSampleBufferPersistence(audioEngine, id)))
+      .then(() => {
+        commitClipChange();
+      })
+      .catch(error => {
+        const message = error instanceof Error ? error.message : 'audio persistence failed';
+        setSaveError(`Audio asset could not be persisted: ${message}`);
+      });
   };
 
   const handleUpdateMarkers = (markers: ProjectState['markers']) => {
@@ -680,7 +935,7 @@ export function App() {
     );
 
     const target = projectStateRef.current.mixerTracks.find(t => t.id === trackId);
-    if (target) {
+    if (target && !audioEngine.isPlaybackActive()) {
       audioEngine.updateMixerTrack(target);
     }
   };
@@ -734,6 +989,9 @@ export function App() {
 
     const audioBufferId = getRecordingAudioBufferId(recording.id);
     const loaded = await audioEngine.loadAudioFile(recording.audioBlob, audioBufferId);
+    // Recording registration uses the same persistence gate as dropped/bounced
+    // playlist audio. Do not commit a project reference before its asset is durable.
+    await waitForSampleBufferPersistence(audioEngine, audioBufferId);
     const persistedRecording: AudioRecording = { ...recording, audioBufferId };
     // AudioEngine has no buffer-removal API; a removed target leaves only this narrow in-memory orphan.
     const currentState = projectStateRef.current;
@@ -903,6 +1161,17 @@ export function App() {
 
   const selectedChannel = projectState.channels.find(c => c.id === selectedChannelId) || projectState.channels[0];
 
+  // Phase 8C (P1-11): missing audio is derived from the project itself (hydration
+  // flags clips/samples), so it stays accurate across save, reload and recovery
+  // without a second source of truth.
+  const missingAudioAssets = useMemo(
+    () => collectMissingAudioAssets(projectState),
+    [projectState]
+  );
+  const missingAudioSignature = getMissingAudioAssetsSignature(missingAudioAssets);
+  const showMissingAudioBanner =
+    missingAudioAssets.totalCount > 0 && missingAudioSignature !== dismissedMissingAudioSignature;
+
   const handleAuditionSample = (name: string, pitch = 60) => {
     setPreviewingAudio(name);
     if (selectedChannel) {
@@ -1014,6 +1283,50 @@ export function App() {
         </div>
       )}
 
+      {showMissingAudioBanner && (
+        <div
+          id="missing-audio-banner"
+          role="alert"
+          data-audio-unavailable="true"
+          title={missingAudioAssets.messages.join('\n')}
+          className="bg-[#3a2411] border-b border-amber-500/60 px-3 sm:px-4 py-1.5 flex items-center justify-between text-xs text-amber-100 z-40 shrink-0 select-text"
+        >
+          <div className="flex items-center gap-2">
+            <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
+            <span>
+              <strong>Missing audio:</strong> {describeMissingAudioAssets(missingAudioAssets)}
+            </span>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            {missingAudioAssets.samples.length > 0 && (
+              <button
+                id="missing-audio-open-sample-loader-btn"
+                onClick={() => {
+                  setSampleChannelId(missingAudioAssets.samples[0].channelId);
+                  setIsSampleManagerOpen(true);
+                }}
+                className="px-2.5 py-0.5 bg-amber-500 hover:bg-amber-400 text-black font-bold text-[11px] rounded transition cursor-pointer"
+              >
+                Re-import Sample
+              </button>
+            )}
+            <button
+              id="missing-audio-dismiss-btn"
+              onClick={() => {
+                const nextState = { ...projectStateRef.current, dismissedMissingAudioSignature: missingAudioSignature, meta: { ...projectStateRef.current.meta, updated: Date.now() } };
+                projectStateRef.current = nextState;
+                setProjectState(nextState);
+                setDismissedMissingAudioSignature(missingAudioSignature);
+              }}
+              className="text-amber-200 hover:text-white p-0.5 transition cursor-pointer"
+              title="Dismiss warning"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* 2. Main Studio Work Area */}
       <main className="flex-1 flex overflow-hidden">
         {isSidebarOpen && (
@@ -1065,7 +1378,7 @@ export function App() {
                 {expandedFolders.presets && (
                   <div className="space-y-0.5 pl-3 border-l border-[#222225] mt-1">
                     {PRESET_PROJECTS.map((p, i) => (
-                      <div key={i} onClick={() => handleLoadProjectState(p.state)} className="flex items-center justify-between px-2 py-1 rounded hover:bg-[#222225] text-[11px] text-zinc-300 hover:text-white cursor-pointer group"><span className="truncate">{p.name}</span><span className="text-[9px] text-[#ff6e00] font-mono">{p.bpm} BPM</span></div>
+                      <div key={i} onClick={() => void handleLoadProjectState(p.state, { source: 'studio-demo' })} className="flex items-center justify-between px-2 py-1 rounded hover:bg-[#222225] text-[11px] text-zinc-300 hover:text-white cursor-pointer group"><span className="truncate">{p.name}</span><span className="text-[9px] text-[#ff6e00] font-mono">{p.bpm} BPM</span></div>
                     ))}
                   </div>
                 )}
@@ -1085,8 +1398,17 @@ export function App() {
               channels={projectState.channels}
               patterns={projectState.patterns}
               selectedPatternId={projectState.selectedPatternId}
-              onSelectPattern={(id) => { projectStateRef.current = { ...projectStateRef.current, selectedPatternId: id }; setProjectState(prev => ({ ...prev, selectedPatternId: id })); }}
+              onSelectPattern={(id) => {
+                const previousState = projectStateRef.current;
+                projectStateRef.current = { ...previousState, selectedPatternId: id };
+                setProjectState(prev => ({ ...prev, selectedPatternId: id }));
+                // Pattern Mode plays the selected pattern, so the running take must
+                // follow the newly selected pattern's declared length (selection is
+                // a view change: it stays outside project history, as before).
+                synchronizeActivePlayback(previousState, projectStateRef.current);
+              }}
               onAddPattern={handleAddPattern}
+              onUpdatePatternLength={handleUpdatePatternLength}
               selectedChannelId={selectedChannelId}
               onSelectChannel={(id) => setSelectedChannelId(id)}
               onUpdateChannel={handleUpdateChannel}
@@ -1113,6 +1435,7 @@ export function App() {
               onUpdateChannel={handleUpdateChannel}
               currentStep={currentStep}
               isPlaying={isPlaying}
+              patternLengthSteps={selectedPatternLengthSteps}
             />
           )}
 
@@ -1122,6 +1445,7 @@ export function App() {
               clips={projectState.playlistClips}
               patterns={projectState.patterns}
               channels={projectState.channels}
+              mixerTracks={projectState.mixerTracks}
               markers={projectState.markers || []}
               onUpdateTracks={handleUpdateTracks}
               onUpdateClips={handleUpdateClips}
@@ -1133,9 +1457,18 @@ export function App() {
               canRedo={projectHistoryVersion >= 0 && projectHistoryRef.current.canRedo}
               onUndo={handleUndo}
               onRedo={handleRedo}
-              onSeekToBar={(bar) => setCurrentBar(bar)}
+              onSeekToBar={(bar) => {
+                // Real transport seek: works stopped, paused and playing. While
+                // playing it cancels audio scheduled for the old position and
+                // restarts any playlist audio clip the new position lands in.
+                const targetBar = Math.max(1, Math.floor(Number(bar) || 1));
+                const secondsPerBar = (60 / projectState.meta.bpm) * 4;
+                audioEngine.seek((targetBar - 1) * secondsPerBar);
+                setCurrentBar(targetBar);
+              }}
               currentBar={currentBar}
               isPlaying={isPlaying}
+              bpm={projectState.meta.bpm}
             />
           )}
 
@@ -1180,9 +1513,9 @@ export function App() {
 
       <footer className="h-6 bg-[#1a1a1d] border-t border-[#333336] flex items-center px-4 justify-between shrink-0 select-none">
         <div className="flex items-center gap-4 text-[9px]">
-          <span className="text-[#777]">SYNC: <span className="text-[#00ff00] font-bold">ONLINE (E2EE)</span></span>
+          <span className="text-[#777]">STORAGE: <span className="text-[#00ff00] font-bold">LOCAL</span></span>
           <span className="text-[#777]">DSP CPU: <span className="text-white font-bold">{isPlaying ? '18%' : '8%'}</span></span>
-          <span className="text-[#777]">LATENCY: <span className="text-white font-bold">2.4ms (LOW)</span></span>
+          
           <span className="text-[#777] hidden md:inline">PROJECT: <span className="text-[#ff6e00] font-bold">{projectState.meta.name}</span></span>
         </div>
         <div className="flex items-center gap-3 text-[9px] font-bold text-[#777]">
@@ -1194,14 +1527,14 @@ export function App() {
         </div>
       </footer>
 
-      <ExportModal isOpen={isExportOpen} onClose={() => setIsExportOpen(false)} channels={projectState.channels} clips={projectState.playlistClips} mixerTracks={projectState.mixerTracks} meta={projectState.meta} />
+      <ExportModal isOpen={isExportOpen} onClose={() => setIsExportOpen(false)} channels={projectState.channels} clips={projectState.playlistClips} mixerTracks={projectState.mixerTracks} meta={projectState.meta} patternLengthSteps={selectedPatternLengthSteps} playlistTracks={projectState.playlistTracks} />
       <ProjectManagerModal isOpen={isProjectManagerOpen} onClose={() => setIsProjectManagerOpen(false)} currentState={projectState} onLoadProject={handleLoadProjectState} onUpdateMeta={handleUpdateMeta} />
-      <CollaborationModal isOpen={isCollabOpen} onClose={() => setIsCollabOpen(false)} comments={comments} collaborators={collaborators} onAddComment={(text, bar) => { const newC: CollabComment = { id: `c-${Date.now()}`, author: 'Alex (You)', avatarColor: '#ff6e00', timestamp: Date.now(), barPosition: bar, text, resolved: false }; setComments(prev => [newC, ...prev]); }} onToggleResolveComment={(id) => setComments(prev => prev.map(c => c.id === id ? { ...c, resolved: !c.resolved } : c))} isEncrypted={projectState.meta.isEncrypted} onToggleEncryption={() => handleUpdateMeta({ isEncrypted: !projectState.meta.isEncrypted })} />
+      <CollaborationModal isOpen={isCollabOpen} onClose={() => setIsCollabOpen(false)} comments={comments} collaborators={collaborators} onAddComment={(text, bar) => { const newC: CollabComment = { id: `c-${Date.now()}`, author: 'Alex (You)', avatarColor: '#ff6e00', timestamp: Date.now(), barPosition: bar, text, resolved: false }; setComments(prev => [newC, ...prev]); }} onToggleResolveComment={(id) => setComments(prev => prev.map(c => c.id === id ? { ...c, resolved: !c.resolved } : c))} />
       <AnalyticsModal isOpen={isAnalyticsOpen} onClose={() => setIsAnalyticsOpen(false)} meta={projectState.meta} channels={projectState.channels} clips={projectState.playlistClips} />
       <SubscriptionModal isOpen={isSubscriptionOpen} onClose={() => setIsSubscriptionOpen(false)} isProUser={isProUser} onTogglePro={() => setIsProUser(!isProUser)} />
       <HotkeysModal isOpen={isHotkeysOpen} onClose={() => setIsHotkeysOpen(false)} />
-      <MidiControllerModal isOpen={isMidiModalOpen} onClose={() => setIsMidiModalOpen(false)} />
-      <ParametricEqModal isOpen={isParametricEqOpen} onClose={() => setIsParametricEqOpen(false)} track={projectState.mixerTracks.find(t => t.id === eqModalTrackId) || projectState.mixerTracks[0]} onUpdateTrack={handleUpdateMixerTrack} />
+      <MidiControllerModal isOpen={isMidiModalOpen} onClose={() => setIsMidiModalOpen(false)} channels={projectState.channels} mixerTracks={projectState.mixerTracks} midiMappings={projectState.midiMappings || []} onUpdateMidiMappings={(mappings) => mutateProjectState(curr => updateMidiMappingsInProjectState(curr, mappings), 'Update MIDI mappings')} activeChannel={selectedChannel} />
+      <ParametricEqModal isOpen={isParametricEqOpen} onClose={() => setIsParametricEqOpen(false)} mixerTrack={projectState.mixerTracks.find(t => t.id === eqModalTrackId) || projectState.mixerTracks[0]} onUpdateTrack={(track) => handleUpdateMixerTrack(track.id, track)} />
       <MasteringSuiteModal isOpen={isMasteringSuiteOpen} onClose={() => setIsMasteringSuiteOpen(false)} masteringState={masteringSuiteState} onUpdateMasteringState={(st) => setMasteringSuiteState(st)} isPlaying={isPlaying} />
       <GrossBeatModal isOpen={isGrossBeatOpen} onClose={() => setIsGrossBeatOpen(false)} currentStep={currentStep} isPlaying={isPlaying} />
       <AudioSlicerModal isOpen={isAudioSlicerOpen} onClose={() => setIsAudioSlicerOpen(false)} channels={projectState.channels} onUpdateChannel={(chId, updates) => handleUpdateChannel(chId, updates)} />
@@ -1211,8 +1544,8 @@ export function App() {
       })()}
       <SampleManagerModal isOpen={isSampleManagerOpen} onClose={() => setIsSampleManagerOpen(false)} channels={projectState.channels} selectedChannel={projectState.channels.find(c => c.id === sampleChannelId) || projectState.channels[0]} onAssignSampleToChannel={(chId, sampleData) => { handleUpdateChannel(chId, { customSample: sampleData }); }} onCreateChannelFromSample={(sampleData) => { const channel = { id: `ch-sample-${Date.now()}`, name: sampleData.name || 'Sample Pad', instrumentType: 'sampler' as const, volume: 0.85, pan: 0, pitch: 0, mute: false, solo: false, color: '#00ff88', steps: Array(16).fill(false), notes: [], synthParams: { ...DEFAULT_PROJECT.channels[0].synthParams }, customSample: sampleData } satisfies Omit<Channel, 'mixerTrackId'>; mutateProjectState(current => appendChannelWithAllocatedMixerTrackId(current, channel), 'Create channel from sample'); setSelectedChannelId(channel.id); }} />
       <AudioRecorderModal isOpen={isAudioRecorderOpen} onClose={() => { setIsAudioRecorderOpen(false); setIsRecording(false); }} onSaveRecording={handleSaveRecordingToPlaylist} />
-      <VocalTunerModal isOpen={isVocalTunerOpen} onClose={() => setIsVocalTunerOpen(false)} vocalTunerSettings={projectState.vocalTunerSettings || { enabled: true, rootKey: 0, scale: 'minor', retuneSpeedMs: 15, formantShift: 0, pitchCorrectionAmount: 0.85, vibratoDepth: 0.2, humanize: 0.3 }} onUpdateVocalTuner={(settings) => mutateProjectState(curr => updateVocalTunerInProjectState(curr, settings), 'Update vocal tuner')} channels={projectState.channels} />
-      <MidiLearnModal isOpen={isMidiLearnOpen} onClose={() => setIsMidiLearnOpen(false)} mappings={projectState.midiMappings || []} onUpdateMappings={(mappings) => mutateProjectState(curr => updateMidiMappingsInProjectState(curr, mappings), 'Update MIDI mappings')} isLearnActive={isMidiLearnActive} onToggleLearn={() => setIsMidiLearnActive(!isMidiLearnActive)} onClearAll={() => mutateProjectState(curr => updateMidiMappingsInProjectState(curr, []), 'Clear MIDI mappings')} />
+      <VocalTunerModal isOpen={isVocalTunerOpen} onClose={() => setIsVocalTunerOpen(false)} vocalTunerSettings={projectState.vocalTuner || { enabled: true, rootKey: 0, scale: 'minor', retuneSpeedMs: 15, formantShift: 0, vibratoDepth: 0.2, humanize: 0.3 }} onUpdateVocalTuner={(settings) => mutateProjectState(curr => updateVocalTunerInProjectState(curr, settings), 'Update vocal tuner')} channels={projectState.channels} />
+      <MidiLearnModal isOpen={isMidiLearnOpen} onClose={() => setIsMidiLearnOpen(false)} midiMappings={projectState.midiMappings || []} onUpdateMidiMappings={(mappings) => mutateProjectState(curr => updateMidiMappingsInProjectState(curr, mappings), 'Update MIDI mappings')} channels={projectState.channels} mixerTracks={projectState.mixerTracks} connectedDevices={projectState.connectedMidiDevices || []} isMidiLearnActive={isMidiLearnActive} onToggleMidiLearn={(active) => setIsMidiLearnActive(active)} />
       <MultiZoneSamplerModal isOpen={isMultiZoneSamplerOpen} onClose={() => setIsMultiZoneSamplerOpen(false)} channels={projectState.channels} onUpdateChannel={handleUpdateChannel} />
       <WavetableSynthModal isOpen={isWavetableSynthOpen} onClose={() => setIsWavetableSynthOpen(false)} channels={projectState.channels} onUpdateChannel={handleUpdateChannel} />
       <WamPluginModal isOpen={isWamPluginOpen} onClose={() => setIsWamPluginOpen(false)} mixerTracks={projectState.mixerTracks} onUpdateMixerTracks={(tracks) => mutateProjectState(curr => ({ ...curr, mixerTracks: tracks }), 'Update mixer tracks')} />
@@ -1227,6 +1560,14 @@ export function App() {
       <StemSplitterAiModal isOpen={isStemSplitterOpen} onClose={() => setIsStemSplitterOpen(false)} onImportStemsToTracks={(stems) => { const base = projectStateRef.current; const newTracks = stems.map((s, idx) => ({ id: base.playlistTracks.length + idx + 1, name: s.name, color: s.type === 'vocals' ? '#ff6e00' : s.type === 'drums' ? '#00ff88' : s.type === 'bass' ? '#00e5ff' : '#a855f7', volume: 0.9, pan: 0, mute: false, solo: false, height: 'normal' as const })); const newClips = stems.map((s, idx) => ({ id: `stem-clip-${Date.now()}-${idx}`, trackIndex: base.playlistTracks.length + idx, startBar: 0, lengthBars: 8, type: 'audio' as const, audioBufferId: `stem-${s.type}`, audioName: s.name, color: s.type === 'vocals' ? '#ff6e00' : s.type === 'drums' ? '#00ff88' : s.type === 'bass' ? '#00e5ff' : '#a855f7', name: s.name })); const nextState = { ...base, playlistTracks: [...base.playlistTracks, ...newTracks], playlistClips: [...base.playlistClips, ...newClips] }; updatePlaylistProjectState(nextState); commitPlaylistHistory(nextState, 'Import stems to playlist'); }} />
       <MasterMacroRackModal isOpen={isMasterMacrosOpen} onClose={() => setIsMasterMacrosOpen(false)} mixerTracks={projectState.mixerTracks} channels={projectState.channels} macroKnobs={projectState.macroKnobs} onUpdateMacros={(macros) => mutateProjectState(curr => updateMacroKnobsInProjectState(curr, macros), 'Update macro controls', { isContinuous: true })} />
       <ProjectBundleZipModal isOpen={isProjectZipOpen} onClose={() => setIsProjectZipOpen(false)} projectState={projectState} onLoadProjectState={handleLoadProjectState} />
+      <ProjectReplaceConfirmModal
+        plan={pendingReplacement?.plan ?? null}
+        isWorking={pendingReplacement?.isWorking ?? false}
+        backupError={pendingReplacement?.backupError ?? null}
+        error={pendingReplacement?.error ?? null}
+        onConfirm={() => void confirmPendingReplacement()}
+        onCancel={() => settlePendingReplacement(false)}
+      />
       <OrientationLockModal />
     </div>
   );

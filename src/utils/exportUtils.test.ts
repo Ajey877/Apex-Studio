@@ -47,8 +47,32 @@ describe('project export helpers', () => {
     assert.equal(getProjectRenderBars(clips, 'song'), 14);
   });
 
-  it('keeps the pattern export scope at the documented 4-bar loop', () => {
-    assert.equal(getProjectRenderBars(clips, 'pattern'), 4);
+  it('derives a 40-bar song from clips placed at UI Bars 33 through 40', () => {
+    const lateArrangement: PlaylistClip[] = [
+      { ...clips[0], id: 'kick', startBar: 32, lengthBars: 4 },
+      { ...clips[0], id: 'hihat', startBar: 32, lengthBars: 4 },
+      { ...clips[0], id: 'bass', startBar: 32, lengthBars: 4 },
+      { ...clips[0], id: 'bells', startBar: 32, lengthBars: 8 },
+    ];
+
+    assert.equal(getProjectRenderBars(lateArrangement, 'song'), 40);
+  });
+
+  it('keeps 16/32/64-step pattern exports inside the documented 4-bar window', () => {
+    assert.equal(getProjectRenderBars(clips, 'pattern'), 4, 'legacy caller/default length');
+    assert.equal(getProjectRenderBars(clips, 'pattern', 16), 4);
+    assert.equal(getProjectRenderBars(clips, 'pattern', 32), 4);
+    assert.equal(getProjectRenderBars(clips, 'pattern', 64), 4);
+  });
+
+  it('grows the pattern render window instead of truncating lengths above 64 steps', () => {
+    assert.equal(getProjectRenderBars(clips, 'pattern', 80), 5);
+    assert.equal(getProjectRenderBars(clips, 'pattern', 128), 8);
+    assert.equal(getProjectRenderBars(clips, 'pattern', 256), 16);
+  });
+
+  it('does not let pattern length change the full-song render window', () => {
+    assert.equal(getProjectRenderBars(clips, 'song', 256), 14);
   });
 
   it('writes a valid Standard MIDI file containing a note event', async () => {

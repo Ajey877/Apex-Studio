@@ -1,11 +1,12 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Download, FolderArchive, Sparkles, X } from 'lucide-react';
 import JSZip from 'jszip';
-import { Channel, PlaylistClip, ProjectMetadata, MixerTrack } from '../types/daw';
+import { Channel, PlaylistClip, PlaylistTrack, ProjectMetadata, MixerTrack } from '../types/daw';
 import { audioEngine } from '../audio/audioEngine';
 import { audioBufferToWav } from '../audio/wavEncoder';
 import { buildStandardMidiFile, getProjectRenderBars } from '../utils/exportUtils';
 import type { ExportScope } from '../utils/exportUtils';
+import { normalizePatternLengthSteps } from '../state/patternLength';
 
 interface ExportModalProps {
   isOpen: boolean;
@@ -14,11 +15,54 @@ interface ExportModalProps {
   clips: PlaylistClip[];
   meta: ProjectMetadata;
   mixerTracks: MixerTrack[];
+  /**
+   * Declared `Pattern.lengthSteps` of the selected pattern, resolved by App from
+   * project state. A Pattern Loop export passes it straight through to the
+   * offline render API so the export wraps where Pattern Mode wraps; the modal
+   * never resolves a pattern length itself.
+   */
+  patternLengthSteps?: number;
+  /**
+   * Playlist lane rows used by the project. Phase 10A uses them to honour
+   * per-lane mute state during offline export — a muted lane is dropped from
+   * the rendered WAV and from each stem, exactly like the live scheduler.
+   */
+  playlistTracks?: PlaylistTrack[];
+  /**
+   * When `true`, the offline render keeps the project's full mixer FX graph
+   * (EQ, delay, convolution reverb, etc.). Browser exports default to `false`
+   * because convolution feedback can dominate render cost; verification calls
+   * and the WAV-master quality path opt in explicitly.
+   */
+  includeMixerFx?: boolean;
 }
 
 type ExportFormat = 'wav24' | 'wav16' | 'wav32' | 'midi' | 'stems';
 
-export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, channels, clips, meta, mixerTracks }) => {
+/**
+ * Pure helper exported for unit testing — returns true when the current
+ * export format produces a blob that can be auditioned by an `<audio>`
+ * element AND a download URL is available. MIDI and stem-zip blobs are not
+ * audibly playable, so the audition UI must stay hidden for them.
+ */
+export const canAuditionExport = (format: ExportFormat, hasDownloadUrl: boolean): boolean => {
+  if (!hasDownloadUrl) return false;
+  return format === 'wav16' || format === 'wav24' || format === 'wav32';
+};
+
+/**
+ * Pure helper exported for unit testing — formats a duration in seconds as
+ * `m:ss`. Used by the audition player's elapsed/total readout.
+ */
+export const formatAuditionTime = (seconds: number): string => {
+  if (!Number.isFinite(seconds) || seconds < 0) return '0:00';
+  const total = Math.floor(seconds);
+  const mm = Math.floor(total / 60);
+  const ss = total % 60;
+  return `${mm}:${ss.toString().padStart(2, '0')}`;
+};
+
+export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, channels, clips, meta, mixerTracks, patternLengthSteps, playlistTracks, includeMixerFx = false }) => {
   const [format, setFormat] = useState<ExportFormat>('wav24');
   const [scope, setScope] = useState<ExportScope>('song');
   const [isRendering, setIsRendering] = useState(false);
@@ -26,6 +70,22 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, chann
   const [downloadUrl, setDownloadUrl] = useState<string | null>(null);
   const [statusText, setStatusText] = useState('Ready to render');
   const [fileName, setFileName] = useState('');
+  // Local override so the user can opt into the FX-heavy path on a per-export
+  // basis without the App re-rendering. The prop is the project-level default.
+  const [fxOverride, setFxOverride] = useState<boolean | null>(null);
+  const effectiveIncludeMixerFx = fxOverride ?? includeMixerFx;
+
+  // Export audition player — lets the user preview the rendered WAV before
+  // downloading. The element shares the existing `downloadUrl` blob (no second
+  // decode / re-encode) so memory usage stays flat. The audio element is
+  // re-mounted on format/scope changes because `key` flips on the same boundary
+  // that revokes the previous blob URL.
+  const [isAuditionPlaying, setIsAuditionPlaying] = useState(false);
+  const [auditionPosition, setAuditionPosition] = useState(0);
+  const [auditionDuration, setAuditionDuration] = useState(0);
+  const auditionAudioRef = useRef<HTMLAudioElement | null>(null);
+
+  const canAudition = canAuditionExport(format, downloadUrl !== null);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -34,11 +94,46 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, chann
     setFileName(`${base}_master.wav`);
     setStatusText('Ready to render');
     setRenderProgress(0);
+    setFxOverride(null);
   }, [isOpen, meta.name]);
 
   useEffect(() => () => {
     if (downloadUrl) URL.revokeObjectURL(downloadUrl);
   }, [downloadUrl]);
+
+  // Audition lifecycle: every render of the in-modal <audio> element shares
+  // the same `auditionAudioRef`, so the listeners below stay registered across
+  // blob-URL swaps (format/scope changes mount a new <audio> but the effect
+  // re-runs because `canAudition` flips). Resetting the play state and the
+  // timeline when the URL changes prevents the UI from claiming a phantom
+  // "playing" status for a stale blob.
+  useEffect(() => {
+    const audio = auditionAudioRef.current;
+    if (!audio) return;
+    setIsAuditionPlaying(false);
+    setAuditionPosition(0);
+    setAuditionDuration(Number.isFinite(audio.duration) ? audio.duration : 0);
+    const handlePlay = () => setIsAuditionPlaying(true);
+    const handlePause = () => setIsAuditionPlaying(false);
+    const handleEnded = () => {
+      setIsAuditionPlaying(false);
+      setAuditionPosition(0);
+    };
+    const handleTimeUpdate = () => setAuditionPosition(audio.currentTime);
+    const handleLoadedMetadata = () => setAuditionDuration(audio.duration);
+    audio.addEventListener('play', handlePlay);
+    audio.addEventListener('pause', handlePause);
+    audio.addEventListener('ended', handleEnded);
+    audio.addEventListener('timeupdate', handleTimeUpdate);
+    audio.addEventListener('loadedmetadata', handleLoadedMetadata);
+    return () => {
+      audio.removeEventListener('play', handlePlay);
+      audio.removeEventListener('pause', handlePause);
+      audio.removeEventListener('ended', handleEnded);
+      audio.removeEventListener('timeupdate', handleTimeUpdate);
+      audio.removeEventListener('loadedmetadata', handleLoadedMetadata);
+    };
+  }, [downloadUrl, format]);
 
   if (!isOpen) return null;
 
@@ -60,7 +155,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, chann
     setStatusText('Preparing deterministic export...');
 
     try {
-      const totalBars = getProjectRenderBars(clips, scope);
+      const totalBars = getProjectRenderBars(clips, scope, patternLengthSteps);
 
       if (format === 'midi') {
         setStatusText(`Writing Standard MIDI (${totalBars} bars)...`);
@@ -77,7 +172,18 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, chann
         if (format === 'stems') {
           setStatusText(`Rendering isolated stems (${totalBars} bars)...`);
           setRenderProgress(35);
-          const { stems, master } = await audioEngine.renderProjectStems(channels, clips, mixerTracks, meta.bpm, totalBars, bitDepth);
+          const { stems, master } = await audioEngine.renderProjectStems(
+            channels,
+            clips,
+            mixerTracks,
+            meta.bpm,
+            totalBars,
+            bitDepth,
+            scope,
+            patternLengthSteps,
+            playlistTracks,
+            effectiveIncludeMixerFx
+          );
           const zip = new JSZip();
           const folder = zip.folder(`${meta.name.replace(/\s+/g, '_')}_Stems_BPM${meta.bpm}`);
           Object.entries(stems).forEach(([stemName, blob]) => folder?.file(stemName, blob));
@@ -106,6 +212,20 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, chann
             mixerTracks,
             meta.bpm,
             totalBars,
+            undefined,
+            effectiveIncludeMixerFx,
+            scope,
+            (progress, status) => {
+              setRenderProgress(progress);
+              setStatusText(status);
+            },
+            // Pattern scope wraps at the selected pattern's declared length; the
+            // render API ignores it for a Song export.
+            patternLengthSteps,
+            // Phase 10A: lane mutes from the playlist are enforced during export
+            // so a muted lane is dropped from the WAV exactly like the live
+            // scheduler drops it at the trigger boundary.
+            playlistTracks,
           );
           setRenderProgress(85);
           const wavBlob = audioBufferToWav(renderedBuffer, bitDepth);
@@ -132,6 +252,39 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, chann
     a.click();
     document.body.removeChild(a);
   };
+
+  const handleAuditionToggle = () => {
+    const audio = auditionAudioRef.current;
+    if (!audio) return;
+    if (audio.paused) {
+      void audio.play().catch(() => {
+        // Autoplay can be blocked; pause state stays at false so the user can
+        // retry the click without an inconsistent UI.
+        setIsAuditionPlaying(false);
+      });
+    } else {
+      audio.pause();
+    }
+  };
+
+  const handleAuditionSeek = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const audio = auditionAudioRef.current;
+    if (!audio) return;
+    const next = Number(event.target.value);
+    if (Number.isFinite(next)) audio.currentTime = next;
+  };
+
+  const handleAuditionStop = () => {
+    const audio = auditionAudioRef.current;
+    if (!audio) return;
+    audio.pause();
+    audio.currentTime = 0;
+  };
+
+  // Pattern Loop copy states the length the render will actually use, so the
+  // modal can never claim a different loop than the selected pattern declares.
+  const patternLoopSteps = normalizePatternLengthSteps(patternLengthSteps);
+  const patternRenderBars = getProjectRenderBars(clips, 'pattern', patternLengthSteps);
 
   const formatOptions: Array<{ id: ExportFormat; name: string; desc: string }> = [
     { id: 'stems', name: 'All Stems (.zip)', desc: 'Multi-track WAV bundle' },
@@ -163,9 +316,9 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, chann
               <div className="font-bold text-xs">Full Song</div>
               <div className="text-[9px] text-[#777]">Render through the last playlist clip ({getProjectRenderBars(clips, 'song')} bars)</div>
             </button>
-            <button onClick={() => { setScope('pattern'); setDownloadUrl(null); }} className={`p-2.5 rounded-lg border text-left transition ${scope === 'pattern' ? 'bg-[#1a1a1d] border-[#ff6e00] text-white' : 'bg-[#121214] border-[#333336] text-[#777] hover:text-white'}`}>
+            <button id="export-scope-pattern" onClick={() => { setScope('pattern'); setDownloadUrl(null); }} className={`p-2.5 rounded-lg border text-left transition ${scope === 'pattern' ? 'bg-[#1a1a1d] border-[#ff6e00] text-white' : 'bg-[#121214] border-[#333336] text-[#777] hover:text-white'}`}>
               <div className="font-bold text-xs">Pattern Loop</div>
-              <div className="text-[9px] text-[#777]">Export the documented 4-bar loop</div>
+              <div className="text-[9px] text-[#777]">Export the selected pattern's {patternLoopSteps}-step loop ({patternRenderBars} bars)</div>
             </button>
           </div>
 
@@ -178,6 +331,57 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, chann
                   <div className="text-[8px] text-[#777]">{option.desc}</div>
                 </button>
               ))}
+            </div>
+          </div>
+
+          {/*
+            Phase 10A export-quality toggle. Default (unset) follows the project
+            preference (App's `includeMixerFx` prop). When on, the offline graph
+            keeps the project's EQ, delay, and convolution reverb — including
+            the FX tails that the deterministic impulse guarantees render
+            identically between exports. Off keeps browser exports fast.
+
+            Only one option is active at a time: the "Project Default" tile is
+            active only while the user has not yet made an explicit choice
+            (`fxOverride === null`). Once the user picks Include FX or Bypass
+            FX, exactly the matching tile is active. This guarantees a single
+            clear selection instead of double-highlighting "Project Default"
+            together with whichever effective value happens to match.
+
+            The effective value passed to the renderer (`effectiveIncludeMixerFx`)
+            is identical to the prior implementation:
+              * `fxOverride === null` → `includeMixerFx` prop (project default, `false`)
+              * `fxOverride === true`  → `true`  (explicit Include FX)
+              * `fxOverride === false` → `false` (explicit Bypass FX)
+          */}
+          <div className="space-y-1">
+            <label className="text-[10px] font-bold uppercase tracking-wider text-[#777]">Mixer FX in Export</label>
+            <div className="grid grid-cols-3 gap-2">
+              {[
+                { id: 'auto' as const, name: 'Project Default', desc: `Currently: ${effectiveIncludeMixerFx ? 'On' : 'Off'}` },
+                { id: 'on' as const, name: 'Include FX', desc: 'EQ, reverb, delay...' },
+                { id: 'off' as const, name: 'Bypass FX', desc: 'Faster, no reverb tail' }
+              ].map(option => {
+                // Each button is active iff the user's per-export choice matches
+                // it. "Project Default" is only active while no explicit override
+                // exists; once the user picks Include FX or Bypass FX, that
+                // explicit choice wins and "Project Default" goes inactive.
+                const isActive =
+                  (option.id === 'auto' && fxOverride === null) ||
+                  (option.id === 'on' && fxOverride === true) ||
+                  (option.id === 'off' && fxOverride === false);
+                return (
+                  <button
+                    key={option.id}
+                    type="button"
+                    onClick={() => setFxOverride(option.id === 'auto' ? null : option.id === 'on')}
+                    className={`p-2 rounded border text-left transition ${isActive ? 'bg-[#ff6e00]/15 border-[#ff6e00] text-white' : 'bg-[#121214] border-[#333336] text-[#777] hover:text-white'}`}
+                  >
+                    <div className="font-bold text-[11px] text-white">{option.name}</div>
+                    <div className="text-[8px] text-[#777]">{option.desc}</div>
+                  </button>
+                );
+              })}
             </div>
           </div>
 
@@ -194,10 +398,69 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, chann
                 <span>{isRendering ? 'PROCESSING EXPORT...' : 'START EXPORT'}</span>
               </button>
             ) : (
-              <button onClick={handleDownload} className="w-full py-2.5 bg-[#00ff00] hover:bg-emerald-400 text-black font-bold text-xs rounded transition flex items-center justify-center gap-2 shadow">
-                <Download className="w-4 h-4" />
-                <span>DOWNLOAD {fileName}</span>
-              </button>
+              <>
+                {/* Audition preview: only meaningful for the WAV formats. MIDI
+                    and stem-zip blobs cannot be played by an <audio> element
+                    and the download URL is still valid for the Download
+                    button below. */}
+                {canAudition && (
+                  <div data-testid="export-audition" className="space-y-2 rounded-lg border border-[#333336] bg-[#121214] p-3">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[10px] font-bold uppercase tracking-wider text-[#777]">Audition Preview</span>
+                      <span className="text-[10px] font-mono text-[#b0b0b0]">{formatAuditionTime(auditionPosition)} / {formatAuditionTime(auditionDuration)}</span>
+                    </div>
+                    {/* The <audio> element shares the existing downloadUrl blob —
+                        no second decode or re-encode. `preload="metadata"` avoids
+                        a full buffer fetch just to display the duration. `key`
+                        flips when the URL or format changes so the element
+                        reloads cleanly without manual src management. */}
+                    <audio
+                      key={`${downloadUrl}-${format}`}
+                      ref={auditionAudioRef}
+                      src={downloadUrl}
+                      preload="metadata"
+                      data-testid="export-audition-audio"
+                      className="hidden"
+                    />
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={handleAuditionToggle}
+                        data-testid="export-audition-toggle"
+                        aria-label={isAuditionPlaying ? 'Pause preview' : 'Play preview'}
+                        className="flex-1 py-2 bg-[#1a1a1d] hover:bg-[#2d2d30] border border-[#333336] rounded text-xs font-bold text-white transition flex items-center justify-center gap-2"
+                      >
+                        <span className="text-[#ff6e00]">{isAuditionPlaying ? '❚❚' : '▶'}</span>
+                        <span>{isAuditionPlaying ? 'PAUSE' : 'PLAY PREVIEW'}</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleAuditionStop}
+                        aria-label="Stop preview"
+                        className="py-2 px-3 bg-[#1a1a1d] hover:bg-[#2d2d30] border border-[#333336] rounded text-xs font-bold text-[#b0b0b0] hover:text-white transition"
+                      >
+                        ■
+                      </button>
+                    </div>
+                    <input
+                      type="range"
+                      min={0}
+                      max={auditionDuration > 0 ? auditionDuration : 0}
+                      step={0.01}
+                      value={auditionPosition}
+                      onChange={handleAuditionSeek}
+                      aria-label="Seek preview"
+                      data-testid="export-audition-seek"
+                      className="w-full accent-[#ff6e00]"
+                      disabled={auditionDuration <= 0}
+                    />
+                  </div>
+                )}
+                <button onClick={handleDownload} className="w-full py-2.5 bg-[#00ff00] hover:bg-emerald-400 text-black font-bold text-xs rounded transition flex items-center justify-center gap-2 shadow">
+                  <Download className="w-4 h-4" />
+                  <span>DOWNLOAD {fileName}</span>
+                </button>
+              </>
             )}
           </div>
         </div>

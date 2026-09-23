@@ -12,6 +12,44 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
 
 const clone = <T>(value: T): T => structuredClone(value);
+const assertArrayOfRecords = (value: unknown, label: string, validator?: (entry: Record<string, unknown>) => boolean): void => {
+  if (!Array.isArray(value)) throw new Error(`Invalid project file: ${label} must be an array.`);
+  if (validator && value.some(entry => !isRecord(entry) || !validator(entry))) {
+    throw new Error(`Invalid project file: ${label} contains malformed entries.`);
+  }
+};
+
+const isMarker = (entry: Record<string, unknown>): boolean =>
+  typeof entry.id === 'string' &&
+  typeof entry.name === 'string' &&
+  Number.isFinite(entry.bar) &&
+  typeof entry.color === 'string';
+
+const isMidiDevice = (entry: Record<string, unknown>): boolean =>
+  typeof entry.id === 'string' &&
+  typeof entry.name === 'string' &&
+  typeof entry.state === 'string' &&
+  (entry.type === 'input' || entry.type === 'output') &&
+  (entry.manufacturer === undefined || typeof entry.manufacturer === 'string');
+
+const isMacroKnob = (entry: Record<string, unknown>): boolean =>
+  typeof entry.id === 'string' &&
+  typeof entry.name === 'string' &&
+  Number.isFinite(entry.value) &&
+  typeof entry.color === 'string' &&
+  Array.isArray(entry.mappings);
+
+const isVocalTuner = (value: unknown): boolean => {
+  if (!isRecord(value)) return false;
+  return typeof value.enabled === 'boolean' &&
+    typeof value.scale === 'string' &&
+    Number.isInteger(value.rootKey) &&
+    Number.isFinite(value.retuneSpeedMs) &&
+    Number.isFinite(value.formantShift) &&
+    Number.isFinite(value.vibratoDepth) &&
+    Number.isFinite(value.humanize);
+};
+
 
 /** Creates a fresh blank project state with no shared mutable project data. */
 export const createDefaultProjectState = (): ProjectState => {
@@ -31,8 +69,6 @@ export const createDefaultProjectState = (): ProjectState => {
       created: now,
       updated: now,
       version: '4.5.2 Pro',
-      isEncrypted: true,
-      cloudSynced: true,
       offlineReady: true,
       totalEditTimeSeconds: 0
     },
@@ -130,6 +166,18 @@ export const normalizeProjectState = (input: unknown): ProjectState => {
   if ('midiMappings' in candidate && candidate.midiMappings !== undefined && !Array.isArray(candidate.midiMappings)) {
     throw new Error('Invalid project file: MIDI mappings must be an array.');
   }
+  if ('connectedMidiDevices' in candidate && candidate.connectedMidiDevices !== undefined) {
+    assertArrayOfRecords(candidate.connectedMidiDevices, 'connected MIDI devices', isMidiDevice);
+  }
+  if ('markers' in candidate && candidate.markers !== undefined) {
+    assertArrayOfRecords(candidate.markers, 'markers', isMarker);
+  }
+  if ('macroKnobs' in candidate && candidate.macroKnobs !== undefined) {
+    assertArrayOfRecords(candidate.macroKnobs, 'macro knobs', isMacroKnob);
+  }
+  if ('vocalTuner' in candidate && candidate.vocalTuner !== undefined && !isVocalTuner(candidate.vocalTuner)) {
+    throw new Error('Invalid project file: vocal tuner settings are malformed.');
+  }
 
   const normalized: ProjectState = {
     ...defaults,
@@ -147,6 +195,10 @@ export const normalizeProjectState = (input: unknown): ProjectState => {
     comments: Array.isArray(candidate.comments) ? clone(candidate.comments) : defaults.comments,
     collaborators: Array.isArray(candidate.collaborators) ? clone(candidate.collaborators) : defaults.collaborators,
     midiMappings: Array.isArray(candidate.midiMappings) ? clone(candidate.midiMappings) : defaults.midiMappings,
+    connectedMidiDevices: Array.isArray(candidate.connectedMidiDevices) ? clone(candidate.connectedMidiDevices) : [],
+    markers: Array.isArray(candidate.markers) ? clone(candidate.markers) : [],
+    macroKnobs: Array.isArray(candidate.macroKnobs) ? clone(candidate.macroKnobs) : [],
+    vocalTuner: candidate.vocalTuner === undefined ? undefined : clone(candidate.vocalTuner) as ProjectState['vocalTuner'],
     selectedPatternId: typeof candidate.selectedPatternId === 'string'
       ? candidate.selectedPatternId
       : defaults.selectedPatternId,

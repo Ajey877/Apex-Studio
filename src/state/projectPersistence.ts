@@ -1,7 +1,8 @@
-import type { AudioRecording, PlaylistClip, ProjectState } from '../types/daw';
-import { deletePersistedAudioClip, getPersistedAudioClip, getPersistedProjectStateRecord, listPersistedAudioClipIds, persistProjectStateRecord } from '../audio/audioPersistence';
+import type { AudioRecording, Channel, PlaylistClip, ProjectState } from '../types/daw';
+import { deletePersistedAudioClip, getPersistedAudioClip, getPersistedProjectRecoverySnapshotRecord, getPersistedProjectStateRecord, listPersistedAudioClipIds, listProjectBackupRecords, persistProjectRecoverySnapshotRecord, persistProjectStateRecord, replacePersistedProjectStateRecord, type StoredProjectBackup } from '../audio/audioPersistence';
 import { normalizeProjectState } from './projectState';
 import { getRecordingAudioBufferId } from '../audio/recordingPipeline';
+import { isSampleAudioUnavailable } from './audioAssetAvailability';
 
 export interface AudioHydrationEngine {
   loadAudioFile: (file: File | Blob, id: string) => Promise<{ buffer: AudioBuffer; peaks: number[]; duration: number }>;
@@ -16,6 +17,7 @@ export interface HydratedAudioResult {
 export interface RestoredProjectState {
   state: ProjectState;
   restored: boolean;
+  recovered: boolean;
   hydratedAudioIds: string[];
   missingAudioIds: string[];
 }
@@ -39,7 +41,16 @@ export const serializeProjectState = (state: ProjectState): string => JSON.strin
  */
 export const persistProjectState = async (state: ProjectState): Promise<void> => {
   const serialized = serializeProjectState(state);
-  const write = persistenceWriteQueue.then(() => persistProjectStateRecord(serialized));
+  const write = persistenceWriteQueue.then(async () => {
+    await persistProjectStateRecord(serialized);
+    try {
+      await persistProjectRecoverySnapshotRecord(serialized);
+    } catch (error) {
+      // The live project is already durable; a recovery-snapshot failure should not
+      // turn a successful save into a reported save failure.
+      console.warn('[Apex Studio] Recovery snapshot update failed after project save.', error);
+    }
+  });
   persistenceWriteQueue = write.catch(() => undefined);
   await write;
 };
@@ -87,8 +98,8 @@ const hydrateRecording = async (
 
 /**
  * Hydrate all audio assets referenced by a ProjectState into AudioEngine memory.
- * Restores recording blobs and URLs, marks clips as available/unavailable,
- * and loads available blobs into the audio engine.
+ * Restores recording blobs and URLs, marks clips and channel samples as
+ * available/unavailable, and loads available blobs into the audio engine.
  */
 export const hydrateProjectAudio = async (
   state: ProjectState,
@@ -136,11 +147,23 @@ export const hydrateProjectAudio = async (
     return { ...clip, audioUnavailable: missingIds.has(clip.audioBufferId) };
   });
 
+  // Phase 8C (P1-11): channel samples are hydrated from the same asset store, so
+  // they carry the same availability flag. Unchanged channels keep their identity
+  // to avoid pointless state churn.
+  const channels: Channel[] = state.channels.map(channel => {
+    const sample = channel.customSample;
+    if (!sample?.id) return channel;
+    const audioUnavailable = missingIds.has(sample.id);
+    if (isSampleAudioUnavailable(sample) === audioUnavailable) return channel;
+    return { ...channel, customSample: { ...sample, audioUnavailable } };
+  });
+
   return {
     state: {
       ...state,
       recordings: restoredRecordings,
-      playlistClips
+      playlistClips,
+      channels
     },
     hydratedAudioIds: [...new Set(hydratedAudioIds)],
     missingAudioIds: [...new Set(missingAudioIds)]
@@ -153,25 +176,79 @@ export const restorePersistedProjectState = async (
   fallbackState: ProjectState
 ): Promise<RestoredProjectState> => {
   const stateJson = await getPersistedProjectStateRecord();
-  if (!stateJson) {
-    return { state: fallbackState, restored: false, hydratedAudioIds: [], missingAudioIds: [] };
+
+  const recoverFromSerialized = async (
+    candidateJson: string,
+    source: string
+  ): Promise<RestoredProjectState | null> => {
+    try {
+      const parsed = JSON.parse(candidateJson) as { persistenceVersion?: number; state?: unknown };
+      const rawState = parsed?.state ?? parsed;
+      const state = normalizeProjectState(rawState);
+      const hydrated = await hydrateProjectAudio(state, audioEngine);
+      return {
+        state: hydrated.state,
+        restored: true,
+        recovered: source !== 'current-project',
+        hydratedAudioIds: hydrated.hydratedAudioIds,
+        missingAudioIds: hydrated.missingAudioIds
+      };
+    } catch (error) {
+      console.warn(`[Apex Studio] Project recovery candidate (${source}) could not be restored.`, error);
+      return null;
+    }
+  };
+
+  if (stateJson) {
+    const current = await recoverFromSerialized(stateJson, 'current-project');
+    if (current) return current;
   }
 
-  try {
-    const parsed = JSON.parse(stateJson) as { persistenceVersion?: number; state?: unknown };
-    const rawState = parsed?.state ?? parsed;
-    const state = normalizeProjectState(rawState);
-    const hydrated = await hydrateProjectAudio(state, audioEngine);
-    return {
-      state: hydrated.state,
-      restored: true,
-      hydratedAudioIds: hydrated.hydratedAudioIds,
-      missingAudioIds: hydrated.missingAudioIds
-    };
-  } catch (error) {
-    console.warn('[Apex Studio] Persisted project state could not be restored; using a fresh project.', error);
-    return { state: fallbackState, restored: false, hydratedAudioIds: [], missingAudioIds: [] };
+  // Keep one separate last-known-good snapshot. It is intentionally attempted
+  // before replacement backups because it is the closest recovery point.
+  const recoveryJson = await getPersistedProjectRecoverySnapshotRecord();
+  if (recoveryJson) {
+    const recovered = await recoverFromSerialized(recoveryJson, 'recovery-snapshot');
+    if (recovered) {
+      try {
+        // Atomically replace the corrupt active record with the valid snapshot.
+        await replacePersistedProjectStateRecord(recoveryJson);
+      } catch (error) {
+        console.warn('[Apex Studio] Could not replace the corrupt project record with its recovery snapshot.', error);
+      }
+      return recovered;
+    }
   }
+
+  // Last resort: retained pre-replacement backups.
+  try {
+    const backups = [...await listProjectBackupRecords()]
+      .sort((left, right) => (right.createdAt - left.createdAt) || right.id.localeCompare(left.id));
+
+    for (const backup of backups) {
+      const recovered = await recoverFromSerialized(backup.stateJson, `backup:${backup.id}`);
+      if (!recovered) continue;
+      try {
+        await replacePersistedProjectStateRecord(backup.stateJson);
+      } catch (error) {
+        console.warn('[Apex Studio] Could not promote the backup to the active project record.', error);
+      }
+      return recovered;
+    }
+  } catch (error) {
+    console.warn('[Apex Studio] Project backup recovery lookup failed.', error);
+  }
+
+  if (stateJson) {
+    console.warn('[Apex Studio] Persisted project state could not be restored; using a fresh project.');
+  }
+  return {
+    state: fallbackState,
+    restored: false,
+    recovered: false,
+    hydratedAudioIds: [],
+    missingAudioIds: []
+  };
 };
 
 export interface AudioReconciliationOptions {
@@ -185,8 +262,25 @@ export interface AudioReconciliationOptions {
   storage?: {
     listPersistedAudioClipIds: () => Promise<string[]>;
     deletePersistedAudioClip: (id: string) => Promise<void>;
+    /** Optional override for the retained project backups whose audio must survive. */
+    listProjectBackupRecords?: () => Promise<StoredProjectBackup[]>;
   };
 }
+
+/**
+ * Audio ids referenced by a stored backup document. Unreadable backups
+ * contribute nothing (they cannot be restored, so their audio is not needed).
+ */
+export const getAudioIdsFromStoredBackup = (record: Pick<StoredProjectBackup, 'stateJson'>): string[] => {
+  try {
+    const parsed = JSON.parse(record.stateJson) as { state?: unknown } | null;
+    const rawState = parsed && typeof parsed === 'object' && 'state' in parsed ? parsed.state : parsed;
+    if (!rawState || typeof rawState !== 'object') return [];
+    return getAudioIdsForProject(rawState as ProjectState);
+  } catch {
+    return [];
+  }
+};
 
 export interface AudioReconciliationResult {
   preservedIds: string[];
@@ -196,6 +290,7 @@ export interface AudioReconciliationResult {
 /**
  * Reconciles persisted audio assets against the active project state (and optional history states).
  * - Preserves any asset referenced by the active project, additional states, or history past/future.
+ * - Preserves any asset referenced by a retained project backup (Phase 8A replacement safety net).
  * - Removes unreferenced orphan assets from persistent storage.
  * - Does not modify or corrupt the project state.
  * - Never deletes an asset merely because it was missing or temporarily unavailable during hydration.
@@ -238,6 +333,15 @@ export const reconcilePersistedAudio = async (
 
   const listFn = options?.storage?.listPersistedAudioClipIds ?? listPersistedAudioClipIds;
   const deleteFn = options?.storage?.deletePersistedAudioClip ?? deletePersistedAudioClip;
+  const listBackupsFn = options?.storage?.listProjectBackupRecords ?? listProjectBackupRecords;
+
+  // If the backups cannot be enumerated we must not guess: the thrown error aborts
+  // reconciliation before anything is deleted (saveAndReconcileProjectState logs it).
+  for (const backup of await listBackupsFn()) {
+    for (const id of getAudioIdsFromStoredBackup(backup)) {
+      referencedIds.add(id);
+    }
+  }
 
   const persistedIds = await listFn();
   const preservedIds: string[] = [];

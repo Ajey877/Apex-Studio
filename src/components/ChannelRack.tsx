@@ -14,6 +14,14 @@ import {
 } from 'lucide-react';
 import { Channel, Pattern, InstrumentType } from '../types/daw';
 import { audioEngine } from '../audio/audioEngine';
+import { describeMissingAudioSample, isChannelSampleAudioUnavailable } from '../state/audioAssetAvailability';
+import { PATTERN_LENGTH_CHOICES } from '../state/patternLength';
+import {
+  clearChannelSteps,
+  fillChannelSteps,
+  getChannelRackStepLength,
+  toggleChannelStep
+} from './channelRackOperations';
 
 interface ChannelRackProps {
   channels: Channel[];
@@ -21,6 +29,11 @@ interface ChannelRackProps {
   selectedPatternId: string;
   onSelectPattern: (id: string) => void;
   onAddPattern: () => void;
+  /**
+   * Writes the selected pattern's declared length (`Pattern.lengthSteps`) through
+   * project mutations/history. The rack owns no length state of its own.
+   */
+  onUpdatePatternLength: (lengthSteps: number) => void;
   selectedChannelId: string;
   onSelectChannel: (id: string) => void;
   onUpdateChannel: (channelId: string, updates: Partial<Channel>) => void;
@@ -44,6 +57,7 @@ export const ChannelRack: React.FC<ChannelRackProps> = ({
   selectedPatternId,
   onSelectPattern,
   onAddPattern,
+  onUpdatePatternLength,
   selectedChannelId,
   onSelectChannel,
   onUpdateChannel,
@@ -61,17 +75,23 @@ export const ChannelRack: React.FC<ChannelRackProps> = ({
   onInteractionEnd
 }) => {
   const [showAddMenu, setShowAddMenu] = useState(false);
-  const [stepLength, setStepLength] = useState<16 | 32>(16);
 
-  const selectedPattern = patterns.find(p => p.id === selectedPatternId) || patterns[0];
+  /**
+   * Phase 9D: the grid width is the selected pattern's declared length, read
+   * from project state. It used to be a component-local `useState<16 | 32>(16)`,
+   * which made the 16/32 control look like pattern state while `Pattern.lengthSteps`
+   * (playback, persistence and export) stayed at 16.
+   */
+  const stepLength = getChannelRackStepLength(patterns, selectedPatternId);
+
+  const handlePatternLengthChange = (lengthSteps: number) => {
+    if (lengthSteps === stepLength) return;
+    onUpdatePatternLength(lengthSteps);
+  };
 
   const handleStepClick = (channel: Channel, stepIndex: number) => {
-    const newSteps = [...channel.steps];
-    while (newSteps.length <= stepIndex) {
-      newSteps.push(false);
-    }
-    const nextState = !newSteps[stepIndex];
-    newSteps[stepIndex] = nextState;
+    const newSteps = toggleChannelStep(channel, stepIndex);
+    const nextState = newSteps[stepIndex];
 
     onUpdateChannel(channel.id, { steps: newSteps });
 
@@ -88,15 +108,11 @@ export const ChannelRack: React.FC<ChannelRackProps> = ({
   };
 
   const handleFillSteps = (channel: Channel, interval: number) => {
-    const newSteps = Array(stepLength).fill(false);
-    for (let i = 0; i < stepLength; i += interval) {
-      newSteps[i] = true;
-    }
-    onUpdateChannel(channel.id, { steps: newSteps });
+    onUpdateChannel(channel.id, { steps: fillChannelSteps(channel, interval, stepLength) });
   };
 
   const handleClearSteps = (channel: Channel) => {
-    onUpdateChannel(channel.id, { steps: Array(stepLength).fill(false) });
+    onUpdateChannel(channel.id, { steps: clearChannelSteps(channel, stepLength) });
   };
 
   return (
@@ -154,20 +170,23 @@ export const ChannelRack: React.FC<ChannelRackProps> = ({
             </span>
           </div>
 
-          {/* 16 / 32 steps */}
-          <div className="flex items-center gap-0.5 bg-[#121214] border border-[#333336] p-0.5 rounded text-[10px] font-bold">
-            <button
-              onClick={() => setStepLength(16)}
-              className={`px-2 py-0.5 rounded-sm transition ${stepLength === 16 ? 'bg-[#ff6e00] text-black' : 'text-[#777] hover:text-white'}`}
-            >
-              16 STEPS
-            </button>
-            <button
-              onClick={() => setStepLength(32)}
-              className={`px-2 py-0.5 rounded-sm transition ${stepLength === 32 ? 'bg-[#ff6e00] text-black' : 'text-[#777] hover:text-white'}`}
-            >
-              32 STEPS
-            </button>
+          {/* Pattern length: writes Pattern.lengthSteps of the selected pattern */}
+          <div
+            id="pattern-length-selector"
+            className="flex items-center gap-0.5 bg-[#121214] border border-[#333336] p-0.5 rounded text-[10px] font-bold"
+            title={`Pattern length: ${stepLength} steps`}
+          >
+            {PATTERN_LENGTH_CHOICES.map(choice => (
+              <button
+                key={choice}
+                id={`pattern-length-${choice}`}
+                onClick={() => handlePatternLengthChange(choice)}
+                aria-pressed={stepLength === choice}
+                className={`px-2 py-0.5 rounded-sm transition ${stepLength === choice ? 'bg-[#ff6e00] text-black' : 'text-[#777] hover:text-white'}`}
+              >
+                {choice} STEPS
+              </button>
+            ))}
           </div>
 
           {/* Add Channel */}
@@ -516,12 +535,17 @@ export const ChannelRack: React.FC<ChannelRackProps> = ({
                         e.stopPropagation();
                         onOpenSampleManager(ch.id);
                       }}
+                      data-audio-unavailable={isChannelSampleAudioUnavailable(ch) ? 'true' : undefined}
                       className={`px-1 py-0.5 rounded text-[8px] font-mono font-bold transition ${
-                        ch.customSample
-                          ? 'bg-[#00ff88] text-black'
-                          : 'bg-[#222225] hover:bg-[#2d2d30] text-[#777] hover:text-white'
+                        isChannelSampleAudioUnavailable(ch)
+                          ? 'bg-red-600 text-white'
+                          : ch.customSample
+                            ? 'bg-[#00ff88] text-black'
+                            : 'bg-[#222225] hover:bg-[#2d2d30] text-[#777] hover:text-white'
                       }`}
-                      title="DirectWave Sample Loader & Waveform Slicer"
+                      title={isChannelSampleAudioUnavailable(ch) && ch.customSample
+                        ? describeMissingAudioSample(ch.customSample, ch.name)
+                        : 'DirectWave Sample Loader & Waveform Slicer'}
                     >
                       SMPL
                     </button>

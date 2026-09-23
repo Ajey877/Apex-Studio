@@ -5,12 +5,14 @@ import { ProjectState } from '../types/daw';
 import { normalizeProjectState } from '../state/projectState';
 import { getPersistedAudioClip, persistAudioClip } from '../audio/audioPersistence';
 import { getAudioIdsForProject } from '../state/projectPersistence';
+import type { ProjectReplacementSource } from '../state/projectReplacement';
 
 interface ProjectBundleZipModalProps {
   isOpen: boolean;
   onClose: () => void;
   projectState: ProjectState;
-  onLoadProjectState: (state: ProjectState) => void | Promise<void>;
+  /** Resolves false when the user kept the current project (replacement confirmation declined). */
+  onLoadProjectState: (state: ProjectState, options?: { source?: ProjectReplacementSource }) => boolean | void | Promise<boolean | void>;
 }
 
 interface BundleAudioFile {
@@ -169,8 +171,13 @@ Engine: Apex Studio Digital Audio Workstation
         }
       }
 
-      await onLoadProjectState(loadedState);
+      const replaced = await onLoadProjectState(loadedState, { source: 'bundle-import' });
       setIsImporting(false);
+      if (replaced === false) {
+        setStatusMessage('Import cancelled — the current project was kept unchanged.');
+        setTimeout(() => setStatusMessage(null), 3500);
+        return;
+      }
       setStatusMessage(`Imported "${loadedState.meta?.name || 'Project'}" and restored ${restoredAudioCount} audio asset(s).`);
       setTimeout(() => {
         setStatusMessage(null);

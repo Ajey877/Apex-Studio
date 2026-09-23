@@ -51,6 +51,9 @@ class MockAudioParam {
 class MockAudioNode {
   connect(target: unknown): unknown { return target; }
   disconnect(): void {}
+  // Real AudioNode implements EventTarget; the transport controls clip
+  // sources through 'ended' listeners.
+  addEventListener(): void {}
 }
 
 class MockGainNode extends MockAudioNode {
@@ -329,4 +332,92 @@ test('Phase 4.1 full lifecycle survives save/reload/hydration, undo/redo, and WA
   // The WAV contains a real PCM/float payload, not only a header.
   const dataBytes = bytes.length - 44;
   assert.ok(dataBytes > 1000, `Expected rendered audio data, got ${dataBytes} bytes`);
+});
+
+
+test('Phase 11C persistence round trip survives a second edit/save/reopen and still exports', async () => {
+  const { project, audioBufferId, clip } = createLifecycleProject();
+  const sourceBlob = new Blob(['phase11c-audio-data'], { type: 'audio/wav' });
+
+  const firstEdit: ProjectState = {
+    ...project,
+    meta: { ...project.meta, name: 'Phase 11C Round Trip', bpm: 122 },
+    channels: project.channels.map((channel, index) =>
+      index === 0
+        ? { ...channel, notes: [{ id: 'phase11c-note', pitch: 64, start: 0, duration: 2, velocity: 0.8 }] }
+        : channel
+    ),
+    mixerTracks: project.mixerTracks.map(track =>
+      track.id === 1 ? { ...track, volume: 0.72, pan: -0.25, mute: false, solo: false } : track
+    ),
+    playlistClips: [{ ...clip, startBar: 2, lengthBars: 2 }],
+  };
+
+  await persistAudioClip(audioBufferId, sourceBlob);
+  await persistProjectState(firstEdit);
+
+  const firstReopen = await restorePersistedProjectState({
+    loadAudioFile: async (blob, id) => {
+      assert.equal(id, audioBufferId);
+      assert.equal(await blob.text(), 'phase11c-audio-data');
+      return { buffer: new MockAudioBuffer(44100, 0.25) as unknown as AudioBuffer, peaks: [0.2, 0.6, 0.3], duration: 1 };
+    },
+  }, createDefaultProjectState());
+
+  assert.equal(firstReopen.restored, true);
+  assert.equal(firstReopen.recovered, false);
+  assert.deepEqual(firstReopen.missingAudioIds, []);
+  assert.equal(firstReopen.state.meta.bpm, 122);
+  assert.equal(firstReopen.state.channels[0].notes[0].pitch, 64);
+  assert.equal(firstReopen.state.mixerTracks.find(track => track.id === 1)?.volume, 0.72);
+  assert.equal(firstReopen.state.mixerTracks.find(track => track.id === 1)?.pan, -0.25);
+  assert.equal(firstReopen.state.playlistClips[0].startBar, 2);
+
+  // EDIT AFTER REOPEN, then save again. This catches a stale-state regression
+  // where the first hydration succeeds but the second durable write loses data.
+  const secondEdit: ProjectState = {
+    ...firstReopen.state,
+    meta: { ...firstReopen.state.meta, bpm: 128 },
+    mixerTracks: firstReopen.state.mixerTracks.map(track =>
+      track.id === 1 ? { ...track, volume: 0.61, pan: 0.2 } : track
+    ),
+    playlistClips: firstReopen.state.playlistClips.map(item => ({ ...item, startBar: 3 })),
+  };
+  await persistProjectState(secondEdit);
+
+  const secondReopen = await restorePersistedProjectState({
+    loadAudioFile: async (blob, id) => {
+      assert.equal(id, audioBufferId);
+      assert.equal(await blob.text(), 'phase11c-audio-data');
+      return { buffer: new MockAudioBuffer(44100, 0.25) as unknown as AudioBuffer, peaks: [0.2, 0.6, 0.3], duration: 1 };
+    },
+  }, createDefaultProjectState());
+
+  assert.equal(secondReopen.restored, true);
+  assert.equal(secondReopen.recovered, false);
+  assert.deepEqual(secondReopen.missingAudioIds, []);
+  assert.equal(secondReopen.state.meta.bpm, 128);
+  assert.equal(secondReopen.state.mixerTracks.find(track => track.id === 1)?.volume, 0.61);
+  assert.equal(secondReopen.state.mixerTracks.find(track => track.id === 1)?.pan, 0.2);
+  assert.equal(secondReopen.state.playlistClips[0].startBar, 3);
+  assert.equal(secondReopen.state.playlistClips[0].audioUnavailable, false);
+
+  // The state that survived two save/reopen cycles must still be renderable.
+  audioEngine.setSampleBuffer(audioBufferId, new MockAudioBuffer(44100, 0.25) as unknown as AudioBuffer);
+  const wav = await audioEngine.renderProjectToWav(
+    secondReopen.state.channels,
+    secondReopen.state.playlistClips,
+    secondReopen.state.meta.bpm,
+    1,
+    24,
+    secondReopen.state.mixerTracks,
+  );
+
+  assert.ok(wav instanceof Blob);
+  assert.ok(wav.size > 44);
+  const bytes = new Uint8Array(await wav.arrayBuffer());
+  assert.equal(String.fromCharCode(...bytes.slice(0, 4)), 'RIFF');
+  assert.equal(String.fromCharCode(...bytes.slice(8, 12)), 'WAVE');
+  assert.equal(String.fromCharCode(...bytes.slice(36, 40)), 'data');
+  assert.ok(bytes.length - 44 > 1000);
 });

@@ -4,12 +4,15 @@ import {
   MixerTrack, 
   FxSlot, 
   PlaylistClip, 
+  PlaylistTrack,
   SynthParameters,
   AudioRecording,
   GrossBeatState,
   SidechainSettings
 } from '../types/daw';
 import { AudioClockTransport, TransportState } from './transport';
+import { ChorusEffect } from './effects/ChorusEffect';
+import { WetDryEffect } from './effects/WetDryEffect';
 
 export type MidiEventPayload = {
   type: 'noteOn' | 'noteOff' | 'cc' | 'pitchBend';
@@ -42,6 +45,34 @@ function getChainEnd(node: AudioNode): AudioNode {
   return (node as ChainedAudioNode)._chainEnd ?? node;
 }
 
+export type OfflineRenderScope = 'song' | 'pattern';
+export type OfflineRenderProgress = (progress: number, status: string) => void;
+
+/**
+ * Project-owned data that the live scheduler is allowed to receive while a
+ * playback take is running. The engine deliberately does not accept the
+ * complete React state object: these are the only collections consumed by
+ * real-time playback and each is cloned at the synchronization boundary.
+ */
+export interface PlaybackStateUpdate {
+  channels?: Channel[];
+  clips?: PlaylistClip[];
+  mixerTracks?: MixerTrack[];
+  /**
+   * Playlist lane rows whose `mute` flag belongs to the live take. A muted lane
+   * silences the pattern and audio clips placed on it without touching the
+   * mixer insert they route to, so lanes sharing an insert stay independent.
+   */
+  playlistTracks?: PlaylistTrack[];
+  /**
+   * Declared `Pattern.lengthSteps` of the pattern Pattern Mode is playing. It is
+   * project state like the collections above, so a 16 <-> 32 length change made
+   * while the transport runs moves the loop boundary of the active take instead
+   * of waiting for a restart. Song Mode ignores it (bar-grid scheduling).
+   */
+  patternLengthSteps?: number;
+}
+
 export interface MixerChannel {
   input: GainNode;
   output: GainNode;
@@ -52,7 +83,202 @@ export interface MixerChannel {
   sidechain?: SidechainSettings;
 }
 
+const isPlaybackRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value);
+
+/**
+ * Playback automation mutates the isolated active channel/mixer objects. To
+ * merge a project edit without erasing those transient values, compare the
+ * incoming project value with the last project value received by playback:
+ * unchanged project fields keep their active value, while changed fields are
+ * copied in. This keeps project edits authoritative without ever sharing a
+ * project object with the renderer.
+ */
+const playbackValuesEqual = (left: unknown, right: unknown): boolean => {
+  if (Object.is(left, right)) return true;
+  if (Array.isArray(left) || Array.isArray(right)) {
+    if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) return false;
+    return left.every((value, index) => playbackValuesEqual(value, right[index]));
+  }
+  if (isPlaybackRecord(left) || isPlaybackRecord(right)) {
+    if (!isPlaybackRecord(left) || !isPlaybackRecord(right)) return false;
+    const leftKeys = Object.keys(left);
+    const rightKeys = Object.keys(right);
+    if (leftKeys.length !== rightKeys.length) return false;
+    return leftKeys.every(key => Object.prototype.hasOwnProperty.call(right, key) && playbackValuesEqual(left[key], right[key]));
+  }
+  return false;
+};
+
+/**
+ * Phase 10B: a per-track edit where the only field that changed is a subset of
+ * `slot.mix` values for previously-known, enabled slots. Used during a live
+ * take to skip the full FX chain rebuild and route the new mix directly to
+ * the live WetDry wrapper. Any structural change (new slot, removed slot,
+ * enabled/disabled change, params change, channel volume/pan/mute/routing)
+ * returns `false` so the safe fall-back (a full rebuild via
+ * `updateMixerTrack`) handles it instead.
+ */
+interface TrackMixDiff {
+  onlyMixChanged: boolean;
+  mixChanges: Array<{ slotId: string; mix: number }>;
+}
+
+function trackOnlyMixChanged(previous: MixerTrack, next: MixerTrack): TrackMixDiff {
+  const mixChanges: Array<{ slotId: string; mix: number }> = [];
+  if (previous.id !== next.id) return { onlyMixChanged: false, mixChanges };
+  if (previous.fxSlots.length !== next.fxSlots.length) return { onlyMixChanged: false, mixChanges };
+  const previousById = new Map(previous.fxSlots.map(slot => [slot.id, slot]));
+  for (const nextSlot of next.fxSlots) {
+    const prevSlot = previousById.get(nextSlot.id);
+    if (!prevSlot) return { onlyMixChanged: false, mixChanges };
+    if (prevSlot.type !== nextSlot.type) return { onlyMixChanged: false, mixChanges };
+    if (prevSlot.enabled !== nextSlot.enabled) return { onlyMixChanged: false, mixChanges };
+    if (!playbackValuesEqual(prevSlot.params, nextSlot.params)) return { onlyMixChanged: false, mixChanges };
+    if (prevSlot.mix !== nextSlot.mix) {
+      mixChanges.push({ slotId: nextSlot.id, mix: nextSlot.mix });
+    }
+  }
+  const topLevelKeys: ReadonlyArray<keyof MixerTrack> = ['name', 'color', 'volume', 'pan', 'mute', 'solo', 'stereoWidth', 'peakL', 'peakR', 'sidechain', 'routingTargetId', 'sends'];
+  const optionalKeys = ['height', 'armedForRecord'];
+  for (const key of optionalKeys) {
+    if (!playbackValuesEqual((previous as any)[key], (next as any)[key])) {
+      return { onlyMixChanged: false, mixChanges };
+    }
+  }
+  for (const key of topLevelKeys) {
+    if (!playbackValuesEqual((previous as any)[key], (next as any)[key])) {
+      return { onlyMixChanged: false, mixChanges };
+    }
+  }
+  return { onlyMixChanged: mixChanges.length > 0, mixChanges };
+}
+
+const mergePlaybackProjectEdits = (
+  activeValue: unknown,
+  previousProjectValue: unknown,
+  nextProjectValue: unknown
+): unknown => {
+  if (playbackValuesEqual(nextProjectValue, previousProjectValue)) return activeValue;
+
+  if (isPlaybackRecord(activeValue) && isPlaybackRecord(previousProjectValue) && isPlaybackRecord(nextProjectValue)) {
+    const merged = structuredClone(activeValue) as Record<string, unknown>;
+    const keys = new Set([...Object.keys(previousProjectValue), ...Object.keys(nextProjectValue)]);
+
+    for (const key of keys) {
+      const hadPreviousValue = Object.prototype.hasOwnProperty.call(previousProjectValue, key);
+      const hasNextValue = Object.prototype.hasOwnProperty.call(nextProjectValue, key);
+      if (!hasNextValue) {
+        if (hadPreviousValue) delete merged[key];
+        continue;
+      }
+      if (!hadPreviousValue) {
+        merged[key] = structuredClone(nextProjectValue[key]);
+        continue;
+      }
+      if (playbackValuesEqual(nextProjectValue[key], previousProjectValue[key])) continue;
+
+      merged[key] = mergePlaybackProjectEdits(
+        activeValue[key],
+        previousProjectValue[key],
+        nextProjectValue[key]
+      );
+    }
+    return merged;
+  }
+
+  return structuredClone(nextProjectValue);
+};
+
+/**
+ * Deterministic PRNG used by the offline reverb-impulse generator.
+ *
+ * `Math.random()` is non-seeded, so an offline convolution reverb would produce
+ * a different tail on every export and the regression suite could not detect a
+ * DSP regression from a sample mismatch. A small linear congruential generator
+ * is sufficient for an impulse response: only amplitude distribution matters,
+ * and any reproducible noise source with reasonable autocorrelation works.
+ */
+function createSeededRandom(seed: number): () => number {
+  // Park-Miller LCG constants: a well-known deterministic 31-bit PRNG.
+  const a = 16807;
+  const m = 2147483647;
+  let state = Math.abs(Math.floor(seed)) % m;
+  if (state === 0) state = 1;
+  return () => {
+    state = (a * state) % m;
+    return (state - 1) / (m - 1);
+  };
+}
+
+export function resolvePlayableContentLengthSteps(
+  channel?: Channel,
+  patternLengthSteps?: number
+): number {
+  const STEPS_PER_BAR = 16;
+  if (!channel) {
+    const fallback = typeof patternLengthSteps === 'number' && Number.isFinite(patternLengthSteps) && patternLengthSteps > 0
+      ? Math.max(1, Math.ceil(patternLengthSteps / STEPS_PER_BAR)) * STEPS_PER_BAR
+      : STEPS_PER_BAR;
+    return fallback;
+  }
+
+  let maxStep = 0;
+
+  if (typeof patternLengthSteps === 'number' && Number.isFinite(patternLengthSteps) && patternLengthSteps > 0) {
+    maxStep = Math.max(maxStep, patternLengthSteps);
+  }
+
+  if (Array.isArray(channel.steps) && channel.steps.length > 0) {
+    maxStep = Math.max(maxStep, channel.steps.length);
+  }
+
+  if (Array.isArray(channel.notes) && channel.notes.length > 0) {
+    for (const note of channel.notes) {
+      if (typeof note.start === 'number' && Number.isFinite(note.start) && note.start >= 0) {
+        const duration = (typeof note.duration === 'number' && Number.isFinite(note.duration) && note.duration > 0)
+          ? note.duration
+          : 1;
+        maxStep = Math.max(maxStep, note.start + duration);
+      }
+    }
+  }
+
+  const bars = Math.max(1, Math.ceil(maxStep / STEPS_PER_BAR));
+  return bars * STEPS_PER_BAR;
+}
+
+/**
+ * Pattern Mode loops over the declared length of the pattern that is playing.
+ *
+ * `Pattern.lengthSteps` is authoritative when supplied: channel data may be
+ * longer because reducing a pattern length intentionally preserves hidden steps
+ * and piano-roll notes, but those events are ignored until the declared length
+ * is extended again. This gives an exact 0..15 -> 0 or 0..31 -> 0 boundary and
+ * prevents a padded `Channel.steps` array from silently overriding the pattern.
+ *
+ * The content-derived branch is the compatibility fallback for legacy/internal
+ * callers that do not have a Pattern model. Song Mode is unaffected and still
+ * resolves each playlist channel's content length directly.
+ */
+export function resolvePatternLoopLengthSteps(
+  channels: Channel[],
+  patternLengthSteps?: number
+): number {
+  if (typeof patternLengthSteps === 'number' && Number.isFinite(patternLengthSteps) && patternLengthSteps > 0) {
+    return resolvePlayableContentLengthSteps(undefined, patternLengthSteps);
+  }
+
+  let loopLengthSteps = resolvePlayableContentLengthSteps();
+  for (const channel of channels) {
+    loopLengthSteps = Math.max(loopLengthSteps, resolvePlayableContentLengthSteps(channel));
+  }
+  return loopLengthSteps;
+}
+
 class AudioEngine {
+  public isOfflineRendering = false;
+  private liveCtx: AudioContext | null = null;
   private ctx: AudioContext | null = null;
   private transport: AudioClockTransport | null = null;
   private playbackGeneration = 0;
@@ -73,6 +299,12 @@ class AudioEngine {
   };
 
   private activeVoices: Map<string, { stop: (time?: number) => void }> = new Map();
+  /** Buffer sources of the active take's playlist audio; cancelled by stop/pause/seek. */
+  private activeClipSources: Set<AudioBufferSourceNode> = new Set();
+  /** Playlist lane row each active clip source was started from, so a live lane mute can cancel exactly that lane's audio. */
+  private activeClipSourceLanes: Map<AudioBufferSourceNode, number> = new Map();
+  /** Playlist lane rows muted for the active take; enforced before clips reach their mixer insert. */
+  private playlistLaneMutes: Set<number> = new Set();
   private sampleBuffers: Map<string, AudioBuffer> = new Map();
   private impulseResponses: Map<string, AudioBuffer> = new Map();
 
@@ -91,9 +323,11 @@ class AudioEngine {
   }
 
   public init() {
+    if (this.isOfflineRendering) return;
+    const isOffline = this.ctx && (typeof (this.ctx as any).startRendering === 'function' || (typeof OfflineAudioContext !== 'undefined' && this.ctx instanceof OfflineAudioContext));
     if (this.ctx && this.ctx.state !== 'closed') {
-      if (this.ctx.state === 'suspended') {
-        void this.ctx.resume();
+      if (!isOffline && this.ctx.state === 'suspended') {
+        void this.ctx.resume().catch(() => {});
       }
       return;
     }
@@ -127,12 +361,16 @@ class AudioEngine {
   }
 
   public getContext(): AudioContext {
+    if (this.isOfflineRendering && this.ctx) {
+      return this.ctx;
+    }
     if (!this.ctx) {
       const AudioContextClass = window.AudioContext || (window as unknown as WindowWithWebKitAudio).webkitAudioContext;
       this.ctx = new AudioContextClass({ latencyHint: 'interactive' });
     }
-    if (this.ctx.state === 'suspended') {
-      this.ctx.resume();
+    const isOffline = typeof (this.ctx as any).startRendering === 'function' || (typeof OfflineAudioContext !== 'undefined' && this.ctx instanceof OfflineAudioContext);
+    if (!isOffline && this.ctx.state === 'suspended') {
+      void this.ctx.resume().catch(() => {});
     }
     return this.ctx;
   }
@@ -145,7 +383,12 @@ class AudioEngine {
     this.sampleBuffers.set(id, buffer);
   }
 
-  private buildReverbImpulse(duration: number, decay: number) {
+  /** Ids of every audio asset currently registered in memory (recordings, imports, drops, bounces, hydrated assets). */
+  public getSampleBufferIds(): string[] {
+    return [...this.sampleBuffers.keys()];
+  }
+
+  private buildReverbImpulse(duration: number, decay: number, options?: { seed?: number }) {
     if (!this.ctx) return;
     const rate = this.ctx.sampleRate;
     const length = rate * duration;
@@ -153,13 +396,37 @@ class AudioEngine {
     const left = impulse.getChannelData(0);
     const right = impulse.getChannelData(1);
 
+    // Offline renders must produce a byte-identical WAV for the same project
+    // (regression coverage depends on that — see `src/audio/exportParity.test.ts`).
+    // Math.random() would change the convolution tail between exports, so the
+    // renderer is the only offline caller and supplies an explicit seed. The
+    // live engine keeps its existing seeded RNG behaviour.
+    const seed = options?.seed;
+    const rng = typeof seed === 'number' ? createSeededRandom(seed) : Math.random;
+
     for (let i = 0; i < length; i++) {
       const n = i / length;
       const factor = Math.pow(1 - n, decay);
-      left[i] = (Math.random() * 2 - 1) * factor;
-      right[i] = (Math.random() * 2 - 1) * factor;
+      left[i] = (rng() * 2 - 1) * factor;
+      right[i] = (rng() * 2 - 1) * factor;
     }
     this.impulseResponses.set('default', impulse);
+  }
+
+  /**
+   * A clip is lane-muted when its playlist row is muted. Lane mute is enforced
+   * at the trigger boundary — before the clip reaches its routed mixer insert —
+   * so muting one lane can never silence another lane or a channel that shares
+   * the same insert.
+   *
+   * `laneMutes` is the project-derived mute set; passing an empty set makes
+   * the check branch-free so callers in the hot path don't pay for the
+   * row-lookup when the project has no muted lanes.
+   */
+  private isClipPlaylistLaneMuted(clip: PlaylistClip, laneMutes: Set<number>): boolean {
+    if (laneMutes.size === 0) return false;
+    if (!Number.isFinite(clip.trackIndex)) return false;
+    return laneMutes.has(Math.floor(clip.trackIndex));
   }
 
   public getOrCreateMixerChannel(trackId: number) {
@@ -413,6 +680,25 @@ class AudioEngine {
         const gainNode = ctx.createGain();
         gainNode.gain.value = 1.0;
         return gainNode;
+      }
+      case 'chorus': {
+        // Phase 10C-B: defensive parity with liveFxChainHardening.createEffect.
+        // The hardening patch installed at app init already routes both live
+        // and offline FX chains through that factory, so `createFxNode` is
+        // currently a dead path. Wiring chorus here guarantees the legacy
+        // single-switch factory can never silently drop a chorus slot if a
+        // future refactor bypasses the patch (or if the patch is uninstalled
+        // for any reason). The full wet/dry wrapping matches the live path so
+        // a slot.mix change and the chorus modulation behavior are identical
+        // between the two factories.
+        const rate = Math.max(0.05, Math.min(20, Number(slot.params.rate ?? 1.2) || 1.2));
+        const delaySec = Math.max(0.005, Math.min(0.08, Number(slot.params.delay ?? 0.02) || 0.02));
+        const depthSec = Math.max(0, Math.min(Math.min(0.02, delaySec), Number(slot.params.depth ?? 0.003) || 0));
+        const mix = Math.max(0, Math.min(1, Number(slot.mix) || 0));
+        const chorus = new ChorusEffect(ctx, slot.id, rate, depthSec, delaySec, 1);
+        const wrapper = new WetDryEffect(ctx, chorus, mix);
+        setChainEnd(wrapper.input, wrapper.output);
+        return wrapper.input;
       }
       default:
         return null;
@@ -826,7 +1112,70 @@ class AudioEngine {
       if (mixerChannel && 'pan' in mixerChannel.panner && mixerChannel.panner.pan) {
         mixerChannel.panner.pan.setTargetAtTime(targetPan, now, 0.02);
       }
+    } else if (target.type === 'channel_filter_res') {
+      const ch = channels.find(c => c.id === target.targetId);
+      if (ch && ch.synthParams) {
+        // Map the automation's normalized 0-1 value onto the model's 0-20 resonance
+        // range. New voices constructed at note-trigger read this value, so the
+        // next note already hears the automated Q.
+        ch.synthParams.filterResonance = Math.max(0.0001, value * 20);
+      }
+    } else if (target.type === 'channel_pitch') {
+      const ch = channels.find(c => c.id === target.targetId);
+      if (ch) {
+        // Map normalized 0-1 onto the FL Studio-style ±12 semitone offset so the
+        // middle of the curve is no transposition. Every note trigger reads
+        // `channel.pitch`, so writing it here takes effect on the next note.
+        ch.pitch = (value * 24) - 12;
+      }
+    } else if (target.type === 'fx_mix') {
+      const trackId = Number(target.targetId);
+      const trk = mixerTracks.find(t => t.id === trackId);
+      if (trk) {
+        const slotId = target.paramName;
+        if (slotId) {
+          const slot = trk.fxSlots.find(s => s.id === slotId);
+          if (slot) {
+            // Offline renders consume slot.mix at chain construction time. Update
+            // the slot's mix so the next export rebuild (or next offline take)
+            // observes the automated value. Live playback updates the running
+            // WetDry via the patch registry, when installed, so the user hears
+            // the change without a chain rebuild.
+            slot.mix = Math.max(0, Math.min(1, value));
+            const registry = (this as unknown as {
+              __liveFxChainRegistry?: {
+                applyLiveMix(trackId: number, slotId: string, mix: number, currentTime: number): boolean;
+              };
+            }).__liveFxChainRegistry;
+            registry?.applyLiveMix(trackId, slotId, slot.mix, now);
+          }
+        }
+      }
     }
+  }
+
+  /**
+   * Phase 10B: Apply a slot.mix change to the live WetDry wrapper without
+   * tearing down the active chain. Returns true when the patch supplied an
+   * updated live WetDry, false when the caller must rebuild the chain (e.g.
+   * stopped playback with no live instance) — the project state is updated
+   * either way so the next chain rebuild picks up the value.
+   */
+  public setFxSlotMix(trackId: number, slotId: string, mix: number): boolean {
+    const bounded = Math.max(0, Math.min(1, Number(mix)));
+    if (!Number.isFinite(bounded)) return false;
+    const track = this.activeMixerTracks.find(t => t.id === trackId);
+    if (track) {
+      const slot = track.fxSlots.find(s => s.id === slotId);
+      if (slot) slot.mix = bounded;
+    }
+    const now = this.ctx?.currentTime ?? 0;
+    const registry = (this as unknown as {
+      __liveFxChainRegistry?: {
+        applyLiveMix(trackId: number, slotId: string, mix: number, currentTime: number): boolean;
+      };
+    }).__liveFxChainRegistry;
+    return registry?.applyLiveMix(trackId, slotId, bounded, now) ?? false;
   }
 
   public stopNote(voiceId: string) {
@@ -1415,7 +1764,10 @@ class AudioEngine {
     vib.frequency.value = 5.2;
     const vibGain = ctx.createGain();
     vibGain.gain.value = 4;
+    vib.connect(vibGain);
+    vibGain.connect(filter.frequency);
     vib.start(time + 0.1);
+    vib.stop(time + duration + 0.5);
 
     filter.connect(strGain);
     strGain.connect(destination);
@@ -1821,18 +2173,27 @@ class AudioEngine {
 
   // Metering & Visualizers
   public getMasterFrequencyData(array: Uint8Array) {
+    if (this.isOfflineRendering) {
+      array.fill(0);
+      return;
+    }
     if (this.masterAnalyser) {
       this.masterAnalyser.getByteFrequencyData(array);
     }
   }
 
   public getMasterWaveformData(array: Uint8Array) {
+    if (this.isOfflineRendering) {
+      array.fill(128);
+      return;
+    }
     if (this.masterAnalyser) {
       this.masterAnalyser.getByteTimeDomainData(array);
     }
   }
 
   public getMixerTrackPeak(trackId: number): number {
+    if (this.isOfflineRendering) return 0;
     const channel = this.mixerChannels.get(trackId);
     if (!channel || !this.ctx) return 0;
     const array = new Uint8Array(128);
@@ -2006,6 +2367,17 @@ class AudioEngine {
     }
   }
 
+  /**
+   * Offline timeline render used by export.
+   *
+   * `patternLengthSteps` is the declared `Pattern.lengthSteps` of the pattern a
+   * Pattern Loop export renders. It is additive and optional: Song exports and
+   * every existing caller keep their behaviour, and a Pattern export without it
+   * resolves the loop from channel content exactly as before. When supplied it is
+   * handed to the same `resolvePatternLoopLengthSteps()` Pattern Mode plays with,
+   * so a pattern that declares 32 steps exports a 32-step loop even when steps
+   * 16-31 hold no notes. Loop length is never re-derived here.
+   */
   public async renderTimelineOffline(
     channels: Channel[],
     clips: PlaylistClip[],
@@ -2013,13 +2385,36 @@ class AudioEngine {
     bpm: number,
     totalBars: number,
     sampleRate?: number,
+    includeMixerFx = false,
+    renderScope: OfflineRenderScope = 'song',
+    onProgress?: OfflineRenderProgress,
+    patternLengthSteps?: number,
+    playlistTracks?: PlaylistTrack[],
   ): Promise<AudioBuffer> {
-    // Validate audio buffers for all unmuted audio clips
+    onProgress?.(15, `Preparing ${renderScope === 'pattern' ? 'pattern loop' : 'song'} export...`);
+
+    // Phase 10A: a muted playlist lane must behave like a muted clip during
+    // export — a missing audio buffer on a silenced lane should never fail the
+    // export, and that lane's clips are dropped from the rendered WAV exactly
+    // the way the live scheduler drops them at the trigger boundary.
+    const offlineLaneMutes = this.derivePlaylistLaneMutes(playlistTracks);
+
+    // Validate audio buffers for all audible audio clips.
+    // Phase 8B (P1-4): an unresolvable or unavailable audio asset (placeholder
+    // stem, missing buffer, or hydration-flagged `audioUnavailable`) must fail
+    // the export up front instead of rendering a misleading silent WAV.
+    // Phase 10A: lane-muted clips are silently dropped, so their missing
+    // buffers must not fail the export — only audible clips are validated.
     for (const clip of clips) {
-      if (clip.type === 'audio' && !clip.mute) {
+      if (clip.type === 'audio' && !clip.mute && !this.isClipPlaylistLaneMuted(clip, offlineLaneMutes)) {
         if (!clip.audioBufferId) {
           throw new Error(
             `Audio clip "${clip.name || clip.audioName || clip.id}" is missing an audioBufferId.`
+          );
+        }
+        if (clip.audioUnavailable) {
+          throw new Error(
+            `Audio clip "${clip.name || clip.audioName || clip.id}" (buffer ID: ${clip.audioBufferId}) references an unavailable audio asset; its persisted audio could not be restored.`
           );
         }
         const buffer = this.sampleBuffers.get(clip.audioBufferId);
@@ -2031,6 +2426,10 @@ class AudioEngine {
       }
     }
 
+    if (this.transport && this.isPlaying) {
+      this.transport.stop(false);
+    }
+
     const previous = {
       ctx: this.ctx,
       transport: this.transport,
@@ -2040,17 +2439,24 @@ class AudioEngine {
       mixerChannels: this.mixerChannels,
       impulseResponses: this.impulseResponses,
       activeVoices: this.activeVoices,
+      activeClipSources: this.activeClipSources,
       isPlaying: this.isPlaying,
       activeChannels: this.activeChannels,
       activeClips: this.activeClips,
       activeMixerTracks: this.activeMixerTracks,
+      playbackProjectChannels: this.playbackProjectChannels,
+      playbackProjectMixerTracks: this.playbackProjectMixerTracks,
       activePlayMode: this.activePlayMode,
       activePatternId: this.activePatternId,
+      activePatternLengthSteps: this.activePatternLengthSteps,
       currentStep: this.currentStep,
       currentBar: this.currentBar,
       bpm: this.bpm,
-      metronome: this.metronome
+      metronome: this.metronome,
+      playlistLaneMutes: this.playlistLaneMutes
     };
+    this.isOfflineRendering = true;
+    this.liveCtx = previous.ctx;
     const safeBpm = Math.max(20, Math.min(300, Number(bpm) || 120));
     const secondsPerStep = (60 / safeBpm) / 4;
     const totalDurationSeconds = Math.max(4, Math.max(1, totalBars) * 4 * (60 / safeBpm));
@@ -2072,30 +2478,81 @@ class AudioEngine {
       this.activeVoices = new Map();
       this.activeChannels = structuredClone(channels);
       this.activeClips = structuredClone(clips);
-      this.activePlayMode = 'song';
+      this.playbackProjectChannels = structuredClone(channels);
+      this.playbackProjectMixerTracks = [];
+      this.activePlayMode = renderScope === 'pattern' ? 'pat' : 'song';
+      onProgress?.(40, `Offline graph ready (${renderScope === 'pattern' ? 'pattern' : 'song'} mode).`);
       this.activePatternId = undefined;
+      // An offline Pattern render is its own take: it must not inherit (or leave
+      // behind) the declared length of a live playback take.
+      this.activePatternLengthSteps = renderScope === 'pattern' ? patternLengthSteps : undefined;
       this.isPlaying = true;
       this.currentStep = 0;
       this.currentBar = 1;
       this.bpm = safeBpm;
       this.metronome = false;
-      this.buildReverbImpulse(2.5, 2.0);
+
+      // Browser exports use a bounded offline graph by default. Live mixer FX
+      // (especially convolution and feedback delay) can make OfflineAudioContext
+      // rendering disproportionately expensive. Preserve the full FX graph as an
+      // explicit opt-in for validation/internal callers.
       const tracks = [...mixerTracks].sort((a, b) => a.id - b.id);
-      this.activeMixerTracks = structuredClone(tracks);
-      const masterTrack = tracks.find(track => track.id === 0);
+      const renderTracks = includeMixerFx
+        ? tracks
+        : tracks.map(track => ({ ...track, fxSlots: [] }));
+      this.activeMixerTracks = structuredClone(renderTracks);
+      this.playbackProjectMixerTracks = structuredClone(renderTracks);
+      // Phase 10A: share the project's lane-mute derivation with the offline
+      // scheduler so the trigger boundary drops muted-lane clips the same way
+      // the live `play()` boundary does. Without this, the offline renderer
+      // would still call `playAudioClipWithFades` on muted-lane audio clips.
+      this.playlistLaneMutes = offlineLaneMutes;
+      if (includeMixerFx) {
+        // Phase 10A: a seeded impulse is required so offline exports are
+        // byte-deterministic across runs. The live engine never reaches this
+        // branch (`includeMixerFx` defaults to false on the offline path) and
+        // keeps its existing non-deterministic convolution tail.
+        this.buildReverbImpulse(2.5, 2.0, { seed: 0x10a4eb });
+      }
+      const masterTrack = renderTracks.find(track => track.id === 0);
       if (masterTrack) this.updateMixerTrack(masterTrack); else this.getOrCreateMixerChannel(0);
-      for (const track of tracks) if (track.id !== 0) this.updateMixerTrack(track);
+      for (const track of renderTracks) if (track.id !== 0) this.updateMixerTrack(track);
       const totalSteps = Math.ceil(totalDurationSeconds / secondsPerStep);
+      // A Pattern Loop export must wrap at the same boundary as Pattern Mode
+      // playback, otherwise steps beyond the first bar render silence. Song
+      // exports keep the one-bar grid the playlist is scheduled on. The declared
+      // pattern length is passed to the same resolver playback uses, so a
+      // declared 32-step pattern exports 32 steps even with an empty second bar.
+      const patternLoopSteps = renderScope === 'pattern'
+        ? resolvePatternLoopLengthSteps(this.activeChannels, patternLengthSteps)
+        : 16;
+      const scheduleStartProgress = 40;
+      const scheduleEndProgress = 65;
+      // Schedule the offline timeline in small cooperative batches so the browser
+      // can service rendering/UI work instead of appearing unresponsive on longer exports.
       for (let globalStep = 0; globalStep < totalSteps; globalStep += 1) {
-        this.currentStep = globalStep % 16;
+        this.currentStep = globalStep % patternLoopSteps;
         this.currentBar = Math.floor(globalStep / 16) + 1;
         const swingOffsetSeconds = this.currentStep % 2 === 1 ? (this.swing / 100) * (secondsPerStep * 0.4) : 0;
         const audioTime = globalStep * secondsPerStep + swingOffsetSeconds;
         if (audioTime >= totalDurationSeconds) break;
         this.triggerCurrentStep(audioTime);
+        if ((globalStep + 1) % 4 === 0 || globalStep === totalSteps - 1) {
+          const scheduleProgress = scheduleStartProgress + Math.round(((globalStep + 1) / totalSteps) * (scheduleEndProgress - scheduleStartProgress));
+          onProgress?.(scheduleProgress, `Scheduling ${renderScope === 'pattern' ? 'pattern' : 'song'} audio (${globalStep + 1}/${totalSteps} steps)...`);
+        }
+
+        if ((globalStep + 1) % 16 === 0 && globalStep + 1 < totalSteps) {
+          await new Promise<void>(resolve => setTimeout(resolve, 0));
+        }
       }
-      return await offlineCtx.startRendering();
+      onProgress?.(70, `Rendering offline audio (${totalDurationSeconds.toFixed(2)}s)...`);
+      const renderedBuffer = await offlineCtx.startRendering();
+      onProgress?.(85, 'Offline render complete. Encoding WAV...');
+      return renderedBuffer;
     } finally {
+      this.isOfflineRendering = false;
+      this.liveCtx = null;
       this.ctx = previous.ctx;
       this.transport = previous.transport;
       this.masterGain = previous.masterGain;
@@ -2108,12 +2565,16 @@ class AudioEngine {
       this.activeChannels = previous.activeChannels;
       this.activeClips = previous.activeClips;
       this.activeMixerTracks = previous.activeMixerTracks;
+      this.playbackProjectChannels = previous.playbackProjectChannels;
+      this.playbackProjectMixerTracks = previous.playbackProjectMixerTracks;
       this.activePlayMode = previous.activePlayMode;
       this.activePatternId = previous.activePatternId;
+      this.activePatternLengthSteps = previous.activePatternLengthSteps;
       this.currentStep = previous.currentStep;
       this.currentBar = previous.currentBar;
       this.bpm = previous.bpm;
       this.metronome = previous.metronome;
+      this.playlistLaneMutes = previous.playlistLaneMutes;
     }
   }
 
@@ -2124,14 +2585,22 @@ class AudioEngine {
     bpm: number,
     totalBars: number,
     bitDepth: 16 | 24 | 32 = 24,
-    mixerTracks?: MixerTrack[]
+    mixerTracks?: MixerTrack[],
+    includeMixerFx: boolean = false,
+    playlistTracks?: PlaylistTrack[]
   ): Promise<Blob> {
     const renderedBuffer = await this.renderTimelineOffline(
       channels,
       clips,
       mixerTracks ?? [],
       bpm,
-      totalBars
+      totalBars,
+      undefined,
+      includeMixerFx,
+      'song',
+      undefined,
+      undefined,
+      playlistTracks
     );
     return this.audioBufferToWav(renderedBuffer, bitDepth);
   }
@@ -2143,7 +2612,11 @@ class AudioEngine {
     mixerTracksOrBpm: MixerTrack[] | number,
     bpmOrTotalBars?: number,
     totalBarsOrBitDepth?: number | (16 | 24 | 32),
-    bitDepthParam?: 16 | 24 | 32
+    bitDepthParam?: 16 | 24 | 32,
+    renderScope: OfflineRenderScope = 'song',
+    patternLengthSteps?: number,
+    playlistTracks?: PlaylistTrack[],
+    includeMixerFx: boolean = false
   ): Promise<{ stems: Record<string, Blob>; master: Blob }> {
     let mixerTracks: MixerTrack[] = [];
     let bpm = 120;
@@ -2162,13 +2635,25 @@ class AudioEngine {
       mixerTracks = [];
     }
 
+    // Phase 10A: stems must honour playlist lane mutes exactly like the master
+    // mix and the live scheduler — a muted lane is dropped before the stem
+    // pipeline runs its per-clip filters, so a missing audio buffer on a
+    // silenced lane never aborts the export.
+    const stemLaneMutes = this.derivePlaylistLaneMutes(playlistTracks);
+
     // 1. Render Full Master Mix using verified offline timeline renderer
     const masterBuffer = await this.renderTimelineOffline(
       channels,
       clips,
       mixerTracks,
       bpm,
-      totalBars
+      totalBars,
+      undefined,
+      includeMixerFx,
+      renderScope,
+      undefined,
+      patternLengthSteps,
+      playlistTracks
     );
     const master = this.audioBufferToWav(masterBuffer, bitDepth);
 
@@ -2178,6 +2663,7 @@ class AudioEngine {
     for (const channel of channels) {
       const channelClips = clips.filter(clip => {
         if (clip.mute) return false;
+        if (this.isClipPlaylistLaneMuted(clip, stemLaneMutes)) return false;
         if (clip.type === 'pattern') {
           return clip.channelId === channel.id;
         }
@@ -2200,7 +2686,13 @@ class AudioEngine {
         channelClips,
         mixerTracks,
         bpm,
-        totalBars
+        totalBars,
+        undefined,
+        includeMixerFx,
+        renderScope,
+        undefined,
+        patternLengthSteps,
+        playlistTracks
       );
 
       const cleanName = (channel.name || `Channel_${channel.id}`).replace(/[^a-zA-Z0-9_-]/g, '_');
@@ -2211,7 +2703,11 @@ class AudioEngine {
     // Group them by playlist trackIndex
     const channelIds = new Set(channels.map(c => c.id));
     const unassociatedAudioClips = clips.filter(
-      clip => clip.type === 'audio' && !clip.mute && (!clip.channelId || !channelIds.has(clip.channelId))
+      clip =>
+        clip.type === 'audio' &&
+        !clip.mute &&
+        !this.isClipPlaylistLaneMuted(clip, stemLaneMutes) &&
+        (!clip.channelId || !channelIds.has(clip.channelId))
     );
 
     const clipsByTrack = new Map<number, PlaylistClip[]>();
@@ -2226,6 +2722,7 @@ class AudioEngine {
       const mixerTrackId = Math.max(1, trackIdx + 1);
       const trackAutomationClips = clips.filter(clip => {
         if (clip.mute || clip.type !== 'automation' || !clip.automationTarget) return false;
+        if (this.isClipPlaylistLaneMuted(clip, stemLaneMutes)) return false;
         return String(clip.automationTarget.targetId) === String(mixerTrackId);
       });
 
@@ -2234,7 +2731,13 @@ class AudioEngine {
         [...trackClips, ...trackAutomationClips],
         mixerTracks,
         bpm,
-        totalBars
+        totalBars,
+        undefined,
+        includeMixerFx,
+        renderScope,
+        undefined,
+        patternLengthSteps,
+        playlistTracks
       );
 
       const trackNum = trackIdx + 1;
@@ -2351,8 +2854,13 @@ class AudioEngine {
   private activeChannels: Channel[] = [];
   private activeClips: PlaylistClip[] = [];
   private activeMixerTracks: MixerTrack[] = [];
+  /** Last project-owned values supplied to the active playback take. */
+  private playbackProjectChannels: Channel[] = [];
+  private playbackProjectMixerTracks: MixerTrack[] = [];
   private activePlayMode: 'pat' | 'song' = 'pat';
   private activePatternId?: string;
+  /** Declared `Pattern.lengthSteps` of the pattern the active take is looping. */
+  private activePatternLengthSteps?: number;
 
   public setBpm(bpm: number) {
     this.bpm = Math.max(20, Math.min(300, bpm));
@@ -2377,30 +2885,301 @@ class AudioEngine {
     this.transportStateCallback = cb;
   }
 
+  /**
+   * Creates an isolated copy of the project data a playback take runs on.
+   * The scheduler mutates channel volume/pan/filter values while evaluating
+   * automation, so playback must operate on clones: live automation must
+   * never write through to ProjectState (history entries and saved projects
+   * would otherwise capture transient playback values).
+   */
+  public createPlaybackSnapshot(
+    channels: Channel[],
+    clips: PlaylistClip[],
+    mixerTracks: MixerTrack[]
+  ): { channels: Channel[]; clips: PlaylistClip[]; mixerTracks: MixerTrack[] } {
+    return {
+      channels: structuredClone(channels),
+      clips: structuredClone(clips),
+      mixerTracks: structuredClone(mixerTracks)
+    };
+  }
+
+  private getAutomationTargetKey(clip: PlaylistClip): string | null {
+    if (clip.type !== 'automation' || !clip.automationTarget) return null;
+    const target = clip.automationTarget;
+    return `${target.type}:${String(target.targetId)}:${target.paramName ?? ''}`;
+  }
+
+  private isAutomationClipActiveAtCurrentPosition(clip: PlaylistClip): boolean {
+    if (clip.type !== 'automation' || clip.mute || !clip.automationTarget) return false;
+    if (!Number.isFinite(clip.startBar) || !Number.isFinite(clip.lengthBars) || clip.lengthBars <= 0) return false;
+    const currentBarPosition = Math.max(0, this.currentBar - 1) + (this.currentStep / 16);
+    return currentBarPosition >= clip.startBar && currentBarPosition <= clip.startBar + clip.lengthBars;
+  }
+
+  /**
+   * Removing or moving the last active automation clip for a target must not
+   * leave its previous transient value latched in the isolated take. Restore
+   * that target from the latest project baseline; a still-active replacement
+   * clip remains authoritative and will be evaluated on the next scheduler
+   * callback.
+   */
+  private resetAutomationTargetsForClipChanges(previousClips: PlaylistClip[], nextClips: PlaylistClip[]): void {
+    const nextActiveTargets = new Set(
+      nextClips
+        .filter(clip => this.isAutomationClipActiveAtCurrentPosition(clip))
+        .map(clip => this.getAutomationTargetKey(clip))
+        .filter((key): key is string => Boolean(key))
+    );
+
+    for (const previousClip of previousClips) {
+      const previousTargetKey = this.getAutomationTargetKey(previousClip);
+      if (!previousTargetKey) continue;
+
+      const nextVersion = nextClips.find(clip => clip.id === previousClip.id);
+      const structuralChange = !nextVersion ||
+        previousClip.mute !== nextVersion.mute ||
+        previousClip.startBar !== nextVersion.startBar ||
+        previousClip.lengthBars !== nextVersion.lengthBars ||
+        !playbackValuesEqual(previousClip.automationTarget, nextVersion.automationTarget);
+      if (structuralChange && !nextActiveTargets.has(previousTargetKey)) {
+        this.resetActiveAutomationTarget(previousClip.automationTarget!);
+      }
+    }
+  }
+
+  private resetActiveAutomationTarget(target: NonNullable<PlaylistClip['automationTarget']>): void {
+    const now = this.ctx?.currentTime ?? 0;
+    if (target.type === 'channel_vol' || target.type === 'channel_pan' || target.type === 'channel_filter_cutoff' || target.type === 'channel_filter_res' || target.type === 'channel_pitch') {
+      const activeChannel = this.activeChannels.find(channel => String(channel.id) === String(target.targetId));
+      const projectChannel = this.playbackProjectChannels.find(channel => String(channel.id) === String(target.targetId));
+      if (!activeChannel || !projectChannel) return;
+
+      if (target.type === 'channel_vol') activeChannel.volume = projectChannel.volume;
+      if (target.type === 'channel_pan') activeChannel.pan = projectChannel.pan;
+      if (target.type === 'channel_filter_cutoff' && activeChannel.synthParams && projectChannel.synthParams) {
+        activeChannel.synthParams.filterCutoff = projectChannel.synthParams.filterCutoff;
+      }
+      if (target.type === 'channel_filter_res' && activeChannel.synthParams && projectChannel.synthParams) {
+        activeChannel.synthParams.filterResonance = projectChannel.synthParams.filterResonance;
+      }
+      if (target.type === 'channel_pitch') {
+        activeChannel.pitch = projectChannel.pitch;
+      }
+      return;
+    }
+
+    if (target.type === 'mixer_vol' || target.type === 'mixer_pan') {
+      const trackId = Number(target.targetId);
+      const activeTrack = this.activeMixerTracks.find(track => track.id === trackId);
+      const projectTrack = this.playbackProjectMixerTracks.find(track => track.id === trackId);
+      if (!activeTrack || !projectTrack) return;
+
+      if (target.type === 'mixer_vol') activeTrack.volume = projectTrack.volume;
+      if (target.type === 'mixer_pan') activeTrack.pan = projectTrack.pan;
+      this.updateMixerTrack(activeTrack);
+      return;
+    }
+
+    if (target.type === 'fx_mix') {
+      // Reset to the project's declared slot.mix and re-apply on the live chain
+      // so a removed/finished automation clip does not leave the wet/dry value
+      // latched at the last automation value.
+      const trackId = Number(target.targetId);
+      const slotId = target.paramName;
+      if (!slotId) return;
+      const activeTrack = this.activeMixerTracks.find(track => track.id === trackId);
+      const projectTrack = this.playbackProjectMixerTracks.find(track => track.id === trackId);
+      if (!activeTrack || !projectTrack) return;
+      const activeSlot = activeTrack.fxSlots.find(slot => slot.id === slotId);
+      const projectSlot = projectTrack.fxSlots.find(slot => slot.id === slotId);
+      if (!activeSlot || !projectSlot) return;
+      activeSlot.mix = projectSlot.mix;
+      const registry = (this as unknown as {
+        __liveFxChainRegistry?: {
+          applyLiveMix(trackId: number, slotId: string, mix: number, currentTime: number): boolean;
+        };
+      }).__liveFxChainRegistry;
+      registry?.applyLiveMix(trackId, slotId, projectSlot.mix, now);
+      return;
+    }
+
+    if (target.type === 'master_vol' && this.masterGain) {
+      this.masterGain.gain.setTargetAtTime(1, now, 0.02);
+    }
+  }
+
+  /**
+   * Applies an edit to the isolated playback take without replacing the
+   * project object used by React/history/persistence. Playlist clips are
+   * replaced as a cloned schedule, while channel and mixer collections merge
+   * only fields that changed in project state so an in-flight automation value
+   * remains active until the next automation event.
+   */
+  public synchronizePlaybackState(update: PlaybackStateUpdate): void {
+    if (!this.isPlaying) return;
+
+    // Adopt the declared pattern length before merging channel edits so a length
+    // change that arrives together with content is resolved against the new value.
+    const patternLengthChanged = typeof update.patternLengthSteps === 'number'
+      && update.patternLengthSteps !== this.activePatternLengthSteps;
+    if (patternLengthChanged) {
+      this.activePatternLengthSteps = update.patternLengthSteps;
+    }
+
+    if (update.channels) {
+      const previousProjectById = new Map(this.playbackProjectChannels.map(channel => [channel.id, channel]));
+      const activeById = new Map(this.activeChannels.map(channel => [channel.id, channel]));
+      this.activeChannels = update.channels.map(channel => {
+        const previousProject = previousProjectById.get(channel.id);
+        const active = activeById.get(channel.id);
+        if (!previousProject || !active) return structuredClone(channel);
+        return mergePlaybackProjectEdits(active, previousProject, channel) as Channel;
+      });
+      this.playbackProjectChannels = structuredClone(update.channels);
+    }
+
+    // Re-resolve once after either source changed. With a declared length the
+    // Pattern owns the boundary; without one, legacy content-derived takes still
+    // follow channel edits. Song Mode stays on its bar-relative playlist grid.
+    if ((update.channels || patternLengthChanged) && this.activePlayMode === 'pat') {
+      this.transport?.setPatternLoopSteps(
+        resolvePatternLoopLengthSteps(this.activeChannels, this.activePatternLengthSteps)
+      );
+    }
+
+    if (update.clips) {
+      // The scheduler never mutates clips; replacing this clone makes move,
+      // resize, split and delete edits visible to the next scheduled step.
+      this.resetAutomationTargetsForClipChanges(this.activeClips, update.clips);
+      this.activeClips = structuredClone(update.clips);
+      if (this.activePlayMode === 'song') {
+        // A clip edit moves the arrangement's real end; the running take must
+        // stop at the new end instead of a stale one.
+        this.transport?.setSongEndSteps(this.resolveSongEndSteps());
+      }
+    }
+
+    if (update.mixerTracks) {
+      const previousProjectById = new Map(this.playbackProjectMixerTracks.map(track => [track.id, track]));
+      const activeById = new Map(this.activeMixerTracks.map(track => [track.id, track]));
+      const nextTracks = update.mixerTracks.map(track => {
+        const previousProject = previousProjectById.get(track.id);
+        const active = activeById.get(track.id);
+        const projectChanged = !previousProject || !playbackValuesEqual(track, previousProject);
+        const nextTrack = !previousProject || !active
+          ? structuredClone(track)
+          : mergePlaybackProjectEdits(active, previousProject, track) as MixerTrack;
+
+        if (projectChanged) {
+          // Phase 10B: when an in-flight track edit only touched slot.mix on
+          // already-built FX slots, route the new mix values directly to the
+          // live WetDry wrappers and skip the full chain rebuild. The active
+          // track is updated so a future render/export sees the new values
+          // and `applyAutomationValue` for fx_mix reads the same source.
+          const mixDiff = previousProject ? trackOnlyMixChanged(previousProject, track) : { onlyMixChanged: false, mixChanges: [] };
+          if (mixDiff.onlyMixChanged) {
+            const now = this.ctx?.currentTime ?? 0;
+            for (const change of mixDiff.mixChanges) {
+              const slot = nextTrack.fxSlots.find(s => s.id === change.slotId);
+              if (slot) slot.mix = change.mix;
+              const registry = (this as unknown as {
+                __liveFxChainRegistry?: {
+                  applyLiveMix(trackId: number, slotId: string, mix: number, currentTime: number): boolean;
+                };
+              }).__liveFxChainRegistry;
+              const updated = registry?.applyLiveMix(nextTrack.id, change.slotId, change.mix, now);
+              // Fallback only if the live chain was not built (e.g. an offline
+              // take) — in that case the offline renderer rebuilds per export.
+              if (!updated && !this.isOfflineRendering) {
+                this.updateMixerTrack(nextTrack);
+                break;
+              }
+            }
+          } else {
+            this.updateMixerTrack(nextTrack);
+          }
+        }
+        return nextTrack;
+      });
+      const nextTrackIds = new Set(update.mixerTracks.map(track => track.id));
+      for (const trackId of this.activeMixerTracks.map(track => track.id)) {
+        if (!nextTrackIds.has(trackId)) this.removeMixerChannel(trackId);
+      }
+      this.activeMixerTracks = nextTracks;
+      this.playbackProjectMixerTracks = structuredClone(update.mixerTracks);
+    }
+
+    if (update.playlistTracks) {
+      const previousMutes = this.playlistLaneMutes;
+      const nextMutes = this.derivePlaylistLaneMutes(update.playlistTracks);
+      // A lane muted mid-take goes silent at once: its in-flight clip audio is
+      // cancelled and the scheduler stops triggering its pattern clips. The
+      // routed mixer insert is left untouched so lanes and channels sharing it
+      // keep sounding.
+      for (const lane of nextMutes) {
+        if (!previousMutes.has(lane)) this.stopActiveClipSourcesForLane(lane);
+      }
+      this.playlistLaneMutes = nextMutes;
+      // Unmuting mid-take must not wait for a future start-bar trigger: the
+      // lane's clip spanning the playhead restarts from the correct offset,
+      // exactly like a seek landing inside it.
+      if (this.activePlayMode === 'song') {
+        const positionSeconds = this.transport?.getState().positionSeconds ?? 0;
+        for (const lane of previousMutes) {
+          if (nextMutes.has(lane)) continue;
+          this.retriggerAudioClipsAtPosition(positionSeconds, lane);
+        }
+      }
+    }
+  }
+
+  /** True only while the live transport owns an active playback take. */
+  public isPlaybackActive(): boolean {
+    return this.isPlaying;
+  }
+
   public play(
     channels: Channel[],
     clips: PlaylistClip[],
     mode: 'pat' | 'song',
     patternId?: string,
-    mixerTracks?: MixerTrack[]
+    mixerTracks?: MixerTrack[],
+    patternLengthSteps?: number,
+    playlistTracks?: PlaylistTrack[]
   ) {
     if (!this.ctx) this.init();
     if (this.ctx && this.ctx.state === 'suspended') {
       void this.ctx.resume();
     }
 
-    this.stop();
+    // A new take tears down the previous take's audio without resetting the
+    // transport position: Stop already resets it to bar one, Pause keeps it,
+    // so Play resumes from wherever the playhead currently is.
     this.playbackGeneration++;
+    this.stopActivePlaybackAudio();
+    if (this.timerId) {
+      clearTimeout(this.timerId);
+      this.timerId = null;
+    }
     const currentGeneration = this.playbackGeneration;
 
+    const playbackSnapshot = this.createPlaybackSnapshot(channels, clips, mixerTracks ?? []);
     this.isPlaying = true;
-    this.activeChannels = channels;
-    this.activeClips = clips;
+    this.activeChannels = playbackSnapshot.channels;
+    this.activeClips = playbackSnapshot.clips;
+    this.activeMixerTracks = playbackSnapshot.mixerTracks;
+    this.playlistLaneMutes = this.derivePlaylistLaneMutes(playlistTracks);
+    this.playbackProjectChannels = structuredClone(playbackSnapshot.channels);
+    this.playbackProjectMixerTracks = structuredClone(playbackSnapshot.mixerTracks);
     this.activePlayMode = mode;
     this.activePatternId = patternId;
-    if (mixerTracks) {
-      this.activeMixerTracks = mixerTracks;
-    }
+    this.activePatternLengthSteps = patternLengthSteps;
+
+    // Apply the current project mixer graph at transport start. Subsequent
+    // mixer edits use synchronizePlaybackState and update only the changed
+    // active track while the transport remains running.
+    for (const track of this.activeMixerTracks) this.updateMixerTrack(track);
 
     if (!this.transport && this.ctx) {
       this.transport = new AudioClockTransport(this.ctx);
@@ -2409,6 +3188,28 @@ class AudioEngine {
 
     this.transport.setBpm(this.bpm);
     this.transport.setMode(mode);
+    // Pattern Mode loops over the pattern length (16/32/64 steps); Song Mode
+    // keeps the one-bar grid that playlist scheduling is built on.
+    this.transport.setPatternLoopSteps(
+      mode === 'pat'
+        ? resolvePatternLoopLengthSteps(this.activeChannels, patternLengthSteps)
+        : undefined
+    );
+    // Song Mode owns its real end from the active clip schedule; Pattern Mode
+    // loops its declared length forever (Phase 9D).
+    const songEndSteps = mode === 'song' ? this.resolveSongEndSteps() : null;
+    this.transport.setSongEndSteps(songEndSteps ?? undefined);
+    // Starting at or beyond the arrangement's real end restarts from the top.
+    if (songEndSteps !== null) {
+      const stepDurationSeconds = 60 / this.bpm / 4;
+      if (this.transport.getState().positionSeconds >= songEndSteps * stepDurationSeconds - 1e-9) {
+        this.transport.seek(0);
+      }
+    }
+    if (this.transport.getState().playing) {
+      // Replacing a running take must restart the scheduler loop cleanly.
+      this.transport.stop(false);
+    }
     this.transport.setCallbacks({
       onStep: (step, bar, audioTime) => {
         if (!this.isPlaying || this.playbackGeneration !== currentGeneration) return;
@@ -2431,10 +3232,26 @@ class AudioEngine {
       onStateChange: (state) => {
         if (!this.isPlaying || this.playbackGeneration !== currentGeneration) return;
         this.transportStateCallback?.(state);
+      },
+      onSongEnd: () => {
+        if (this.playbackGeneration !== currentGeneration) return;
+        this.handleSongEnd();
       }
     });
 
     this.transport.start();
+
+    // Resuming a take at a mid-arrangement position must restore the audio the
+    // previous take silenced: playlist clips spanning the position restart
+    // from their correct offset and automation is re-based instead of
+    // latching the pre-pause value. A fresh start at position 0 leaves the
+    // scheduler's first-bar triggers untouched.
+    const resumedPositionSeconds = this.transport.getState().positionSeconds;
+    if (resumedPositionSeconds > 0) {
+      this.syncEnginePositionFromTransport();
+      this.retriggerAudioClipsAtPosition(resumedPositionSeconds);
+      this.rebaseAutomationAtPosition(resumedPositionSeconds);
+    }
   }
 
  public stop() {
@@ -2450,21 +3267,204 @@ class AudioEngine {
     this.transport.stop();
   }
 
-  const now = this.ctx?.currentTime;
-
-  for (const voice of this.activeVoices.values()) {
-    try {
-      voice.stop(now);
-    } catch (_) {
-      // Continue stopping remaining voices even if one has already stopped.
-    }
-  }
-
-  this.activeVoices.clear();
+  this.stopActivePlaybackAudio();
 
   this.currentStep = 0;
   this.currentBar = 1;
 }
+
+  /**
+   * Pauses the live take at its current position: everything the transport
+   * scheduled ahead — note voices and playlist clip sources — stops
+   * immediately, while the transport keeps the exact position so Play resumes
+   * from here. Transport actions never touch project data.
+   */
+  public pause(): void {
+    if (!this.isPlaying || !this.transport) return;
+    this.playbackGeneration++;
+    this.stopActivePlaybackAudio();
+    this.transport.pause();
+    this.isPlaying = false;
+    this.syncEnginePositionFromTransport();
+    const state = this.transport.getState();
+    this.transportStateCallback?.(state);
+  }
+
+  /**
+   * Moves the playhead to `positionSeconds` in every transport state
+   * (stopped, paused, playing). While playing, audio scheduled for the old
+   * position is cancelled, playlist audio clips spanning the new position
+   * restart from their correct offset, and automation is re-based so no
+   * pre-seek value stays latched until the next step boundary.
+   */
+  public seek(positionSeconds: number): void {
+    const transport = this.transport;
+    if (!transport || !this.ctx) return;
+
+    const boundedPosition = this.boundSeekPosition(positionSeconds);
+
+    if (this.isPlaying) {
+      this.stopActivePlaybackAudio();
+    }
+    transport.seek(boundedPosition);
+    this.syncEnginePositionFromTransport();
+
+    if (this.isPlaying) {
+      this.retriggerAudioClipsAtPosition(boundedPosition);
+      this.rebaseAutomationAtPosition(boundedPosition);
+    }
+    const state = transport.getState();
+    this.transportStateCallback?.(state);
+  }
+
+  /** Stops every playlist clip source and note voice of the active take. */
+  private stopActivePlaybackAudio(): void {
+    for (const source of Array.from(this.activeClipSources)) {
+      try { source.stop(); } catch (_) { /* already inactive */ }
+      this.activeClipSources.delete(source);
+    }
+    this.activeClipSourceLanes.clear();
+
+    const now = this.ctx?.currentTime;
+    for (const voice of this.activeVoices.values()) {
+      try {
+        voice.stop(now);
+      } catch (_) {
+        // Continue stopping remaining voices even if one has already stopped.
+      }
+    }
+    this.activeVoices.clear();
+  }
+
+  /** Keeps the engine's step/bar mirror aligned with the authoritative transport position. */
+  private syncEnginePositionFromTransport(): void {
+    const state = this.transport?.getState();
+    if (!state) return;
+    this.currentStep = state.step;
+    this.currentBar = state.bar;
+  }
+
+  /**
+   * Playlist lane rows muted in project state. Rows are array indices — the
+   * same coordinate space as `PlaylistClip.trackIndex`. Clips whose row is
+   * missing from the collection are never muted.
+   */
+  private derivePlaylistLaneMutes(tracks?: PlaylistTrack[]): Set<number> {
+    const mutes = new Set<number>();
+    if (!Array.isArray(tracks)) return mutes;
+    tracks.forEach((track, index) => {
+      if (track && track.mute === true) mutes.add(index);
+    });
+    return mutes;
+  }
+
+  /**
+   * A clip is lane-muted when its playlist row is muted. Lane mute is enforced
+   * at the trigger boundary — before the clip reaches its routed mixer insert —
+   * so muting one lane can never silence another lane or a channel that shares
+   * the same insert.
+   */
+  private isPlaylistLaneMuted(clip: PlaylistClip): boolean {
+    if (this.playlistLaneMutes.size === 0) return false;
+    if (!Number.isFinite(clip.trackIndex)) return false;
+    return this.playlistLaneMutes.has(Math.floor(clip.trackIndex));
+  }
+
+  /** Silences one lane immediately: cancels that lane's in-flight clip audio only. */
+  private stopActiveClipSourcesForLane(laneIndex: number): void {
+    for (const source of Array.from(this.activeClipSources)) {
+      if (this.activeClipSourceLanes.get(source) !== laneIndex) continue;
+      try { source.stop(); } catch (_) { /* already inactive */ }
+      this.activeClipSources.delete(source);
+      this.activeClipSourceLanes.delete(source);
+    }
+  }
+
+  /** Total steps the Song Mode arrangement occupies, or null when it has none. */
+  private resolveSongEndSteps(): number | null {
+    let endSteps = 0;
+    for (const clip of this.activeClips) {
+      if (!Number.isFinite(clip.startBar) || !Number.isFinite(clip.lengthBars) || clip.lengthBars <= 0) continue;
+      endSteps = Math.max(endSteps, (clip.startBar + clip.lengthBars) * 16);
+    }
+    return endSteps > 0 ? endSteps : null;
+  }
+
+  /** Song Mode seeks never land past the arrangement's real end. */
+  private boundSeekPosition(positionSeconds: number): number {
+    const next = Math.max(0, Number.isFinite(positionSeconds) ? positionSeconds : 0);
+    if (this.activePlayMode !== 'song') return next;
+    const endSteps = this.resolveSongEndSteps();
+    if (endSteps === null) return next;
+    const stepDurationSeconds = 60 / this.bpm / 4;
+    return Math.min(next, endSteps * stepDurationSeconds);
+  }
+
+  /**
+   * Starts every unmuted audio clip whose body spans `positionSeconds` so a
+   * seek (or resume) into a clip restarts it from the correct offset instead
+   * of waiting for — or missing — its start-bar trigger. A clip that begins
+   * exactly at the position is left to the scheduler's start-bar trigger so
+   * it can never sound twice.
+   *
+   * With `laneIndex` the sweep is limited to clips on that playlist row; it is
+   * used when a lane is unmuted mid-take so only that lane's spanning clip
+   * restarts. Without it (seek/resume), still-muted lanes are skipped.
+   */
+  private retriggerAudioClipsAtPosition(positionSeconds: number, laneIndex?: number): void {
+    const ctx = this.ctx;
+    if (!ctx || positionSeconds <= 0) return;
+    const stepDurationSeconds = 60 / this.bpm / 4;
+    const now = ctx.currentTime;
+    for (const clip of this.activeClips) {
+      if (clip.type !== 'audio' || clip.mute) continue;
+      if (laneIndex === undefined) {
+        if (this.isPlaylistLaneMuted(clip)) continue;
+      } else {
+        if (!Number.isFinite(clip.trackIndex) || Math.floor(clip.trackIndex) !== laneIndex) continue;
+      }
+      if (!Number.isFinite(clip.startBar) || !Number.isFinite(clip.lengthBars) || clip.lengthBars <= 0) continue;
+      const startSeconds = clip.startBar * 16 * stepDurationSeconds;
+      const endSeconds = startSeconds + clip.lengthBars * 16 * stepDurationSeconds;
+      if (positionSeconds <= startSeconds || positionSeconds >= endSeconds) continue;
+      this.playAudioClipWithFades(clip, now, positionSeconds - startSeconds);
+    }
+  }
+
+  /**
+   * Writes the automation values at `positionSeconds` into the isolated take
+   * so a seek does not leave the pre-seek value latched until the next
+   * scheduled step re-evaluates the active clips.
+   */
+  private rebaseAutomationAtPosition(positionSeconds: number): void {
+    const ctx = this.ctx;
+    if (!ctx) return;
+    const secondsPerBar = 16 * (60 / this.bpm) / 4;
+    const barPosition = positionSeconds / secondsPerBar;
+    const now = ctx.currentTime;
+    for (const clip of this.activeClips) {
+      if (clip.type !== 'automation' || clip.mute || !clip.automationTarget) continue;
+      if (!clip.automationPoints || clip.automationPoints.length < 2) continue;
+      if (!Number.isFinite(clip.startBar) || !Number.isFinite(clip.lengthBars) || clip.lengthBars <= 0) continue;
+      if (barPosition < clip.startBar || barPosition > clip.startBar + clip.lengthBars) continue;
+      const relX = (barPosition - clip.startBar) / clip.lengthBars;
+      const value = this.interpolateAutomationCurve(clip.automationPoints, relX);
+      this.applyAutomationValue(clip.automationTarget, value, this.activeChannels, this.activeMixerTracks, now);
+    }
+  }
+
+  /** Song Mode reached its real end: halt the take exactly on the end position. */
+  private handleSongEnd(): void {
+    this.playbackGeneration++;
+    this.stopActivePlaybackAudio();
+    this.isPlaying = false;
+    const state = this.transport?.getState();
+    if (state) {
+      this.currentStep = state.step;
+      this.currentBar = state.bar;
+      this.transportStateCallback?.(state);
+    }
+  }
 
   private triggerCurrentStep(audioTime?: number) {
     if (!this.ctx) return;
@@ -2525,7 +3525,7 @@ class AudioEngine {
 
       // 1. Evaluate automation clips at current bar & step
       this.activeClips.forEach(clip => {
-        if (clip.type === 'automation' && clip.automationTarget && clip.automationPoints && clip.automationPoints.length >= 2) {
+        if (clip.type === 'automation' && !clip.mute && clip.automationTarget && clip.automationPoints && clip.automationPoints.length >= 2) {
           const currentTotalBar = barIdx + (this.currentStep / 16);
           if (currentTotalBar >= clip.startBar && currentTotalBar <= clip.startBar + clip.lengthBars) {
             const relX = (currentTotalBar - clip.startBar) / clip.lengthBars;
@@ -2541,9 +3541,12 @@ class AudioEngine {
           const clipEndStep = clipStartStep + (clip.lengthBars * 16);
 
           if (currentGlobalStep >= clipStartStep && currentGlobalStep < clipEndStep) {
-            const relStep = (currentGlobalStep - clipStartStep) % 16;
             const channel = this.activeChannels.find(c => c.id === clip.channelId);
-            if (channel && !channel.mute) {
+            if (channel && !channel.mute && !this.isPlaylistLaneMuted(clip)) {
+              const loopLength = resolvePlayableContentLengthSteps(channel);
+              const stepOffset = clip.offsetSteps || 0;
+              const relStep = ((currentGlobalStep - clipStartStep + stepOffset) % loopLength + loopLength) % loopLength;
+
               if (channel.steps && channel.steps[relStep]) {
                 const defaultPitch = channel.instrumentType === 'drumpad' ? 36 : 60;
                 this.playNote(channel, {
@@ -2565,7 +3568,7 @@ class AudioEngine {
           }
         } else if (clip.type === 'audio') {
           const clipStartStep = clip.startBar * 16;
-          if (currentGlobalStep === clipStartStep && !clip.mute) {
+          if (currentGlobalStep === clipStartStep && !clip.mute && !this.isPlaylistLaneMuted(clip)) {
             // Trigger audio clip at its start bar
             this.playAudioClipWithFades(clip, now);
           }
@@ -2574,7 +3577,13 @@ class AudioEngine {
     }
   }
 
-  private playAudioClipWithFades(clip: PlaylistClip, startTime: number) {
+  /**
+   * `positionOffsetSeconds` is how far into the clip the transport position
+   * already is when the source is (re)started — 0 for the normal start-bar
+   * trigger, and `position - clipStart` for seek/resume re-triggers. The
+   * clip's own `offsetSteps` trim is applied first, so both compose.
+   */
+  private playAudioClipWithFades(clip: PlaylistClip, startTime: number, positionOffsetSeconds = 0) {
     if (!this.ctx) return;
     const buf = clip.audioBufferId ? this.sampleBuffers.get(clip.audioBufferId) : null;
     if (!buf) return;
@@ -2583,7 +3592,8 @@ class AudioEngine {
 
     const safeBpm = Number.isFinite(this.bpm) && this.bpm > 0 ? this.bpm : 120;
     const secondsPerStep = (60 / safeBpm) / 4;
-    const offsetSeconds = Math.max(0, (clip.offsetSteps || 0) * secondsPerStep);
+    const offsetSeconds =
+      Math.max(0, (clip.offsetSteps || 0) * secondsPerStep) + Math.max(0, positionOffsetSeconds);
 
     if (offsetSeconds >= buf.duration) return;
 
@@ -2662,12 +3672,53 @@ class AudioEngine {
 
     source.start(startTime, offsetSeconds, actualDurationBufferSec);
     source.stop(startTime + effectiveDuration);
+
+    // Keep the take's playlist audio under transport control: pause, seek and
+    // stop cancel it instead of letting it keep playing as zombie audio.
+    this.activeClipSources.add(source);
+    if (Number.isFinite(clip.trackIndex)) {
+      this.activeClipSourceLanes.set(source, Math.floor(clip.trackIndex));
+    }
+    source.addEventListener('ended', () => {
+      this.activeClipSources.delete(source);
+      this.activeClipSourceLanes.delete(source);
+    }, { once: true });
   }
 
-  // Fast offline Bounce-In-Place / Channel Render
-  public async bounceChannelToAudioClip(channel: Channel, bpm: number = 130, bars: number = 4): Promise<{ buffer: AudioBuffer; waveform: number[] }> {
+  /**
+   * Fast offline Bounce-In-Place / Channel Render.
+   *
+   * The channel is read over its full playable length — the same
+   * `resolvePlayableContentLengthSteps()` resolution Song Mode loops a pattern
+   * clip with — so 32/64-step sequences and piano-roll notes past step 15 are
+   * rendered instead of being cut to the first bar. The stem always contains
+   * whole passes of that content and is at least `minBars` long.
+   *
+   * `bpm` is the project tempo; it must come from project state so the stem's
+   * step spacing matches the arrangement grid. A non-finite value falls back to
+   * the transport tempo, which App keeps in sync with `meta.bpm`. The rendered
+   * length is returned so callers can derive `PlaylistClip.lengthBars` from the
+   * audio that was actually produced instead of a fixed number.
+   */
+  public async bounceChannelToAudioClip(
+    channel: Channel,
+    bpm: number,
+    minBars: number = 1
+  ): Promise<{ buffer: AudioBuffer; waveform: number[]; lengthBars: number; bpm: number }> {
+    const STEPS_PER_BAR = 16;
+    const requestedBpm = Number.isFinite(bpm) && bpm > 0 ? bpm : this.bpm;
+    const safeBpm = Math.max(20, Math.min(300, requestedBpm));
     const sampleRate = this.ctx?.sampleRate || 44100;
-    const durationSec = bars * 4 * (60 / bpm);
+
+    const loopLengthSteps = resolvePlayableContentLengthSteps(channel);
+    const loopLengthBars = loopLengthSteps / STEPS_PER_BAR;
+    const safeMinBars = Number.isFinite(minBars) && minBars > 0 ? minBars : 1;
+    const passes = Math.max(1, Math.ceil(safeMinBars / loopLengthBars));
+    const lengthBars = passes * loopLengthBars;
+
+    const stepDuration = (60 / safeBpm) / 4;
+    const totalSteps = lengthBars * STEPS_PER_BAR;
+    const durationSec = totalSteps * stepDuration;
     const length = Math.floor(sampleRate * durationSec);
     const OfflineContextClass = window.OfflineAudioContext || (window as unknown as WindowWithWebKitAudio).webkitOfflineAudioContext;
     const offlineCtx = new OfflineContextClass(2, length, sampleRate);
@@ -2676,12 +3727,9 @@ class AudioEngine {
     const left = offlineCtx.createBuffer(2, length, sampleRate).getChannelData(0);
     const right = offlineCtx.createBuffer(2, length, sampleRate).getChannelData(1);
 
-    const stepDuration = (60 / bpm) / 4;
-    const totalSteps = bars * 16;
-
-    // Render active notes or step triggers
+    // Render active notes or step triggers over the channel's full loop length
     for (let s = 0; s < totalSteps; s++) {
-      const relStep = s % 16;
+      const relStep = s % loopLengthSteps;
       const isStepActive = channel.steps && channel.steps[relStep];
       const stepNotes = channel.notes ? channel.notes.filter(n => n.start === relStep) : [];
 
@@ -2724,10 +3772,13 @@ class AudioEngine {
       waveform.push(Math.min(1.0, max * 1.5));
     }
 
+    // Session-only convenience registration. The caller registers the buffer under the
+    // clip's own asset id via setSampleBuffer (which is what gets persisted), so this
+    // internal alias intentionally bypasses the persistence wrapper.
     const bufId = `bounced-${channel.id}-${Date.now()}`;
-    this.setSampleBuffer(bufId, renderedBuffer);
+    this.sampleBuffers.set(bufId, renderedBuffer);
 
-    return { buffer: renderedBuffer, waveform };
+    return { buffer: renderedBuffer, waveform, lengthBars, bpm: safeBpm };
   }
 
   public getMasterLoudnessMetrics() {

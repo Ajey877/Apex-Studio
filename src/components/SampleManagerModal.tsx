@@ -11,10 +11,17 @@ import {
   Sliders, 
   FolderOpen,
   Plus,
-  Trash2
+  Trash2,
+  AlertTriangle
 } from 'lucide-react';
 import { Channel, CustomSampleData } from '../types/daw';
 import { audioEngine } from '../audio/audioEngine';
+import { importSampleFile } from '../audio/sampleImport';
+import {
+  MISSING_AUDIO_SAMPLE_BADGE_LABEL,
+  describeMissingAudioSample,
+  isSampleAudioUnavailable
+} from '../state/audioAssetAvailability';
 
 interface SampleManagerModalProps {
   isOpen: boolean;
@@ -45,6 +52,7 @@ export const SampleManagerModal: React.FC<SampleManagerModalProps> = ({
   const [currentSample, setCurrentSample] = useState<CustomSampleData | null>(selectedChannel?.customSample || null);
   const [targetChannelId, setTargetChannelId] = useState<string>(selectedChannel?.id || channels[0]?.id || '');
   const [isLoading, setIsLoading] = useState(false);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [trimStart, setTrimStart] = useState<number>(0);
   const [trimEnd, setTrimEnd] = useState<number>(1.0);
   const [rootPitch, setRootPitch] = useState<number>(60);
@@ -56,28 +64,25 @@ export const SampleManagerModal: React.FC<SampleManagerModalProps> = ({
   const handleFileUpload = async (file: File) => {
     try {
       setIsLoading(true);
-      const sampleId = `sample-${Date.now()}`;
-      const result = await audioEngine.loadAudioFile(file, sampleId);
+      setErrorMessage(null);
+      // Decodes into the engine and persists the original file before exposing it
+      // as a project-assignable sample.
+      const result = await importSampleFile(file, { engine: audioEngine });
+      if (result.persisted === false) {
+        setCurrentSample(null);
+        const message = result.error instanceof Error ? result.error.message : 'Audio sample could not be saved';
+        setErrorMessage(`Sample import failed: ${message}`);
+        return;
+      }
 
-      const newSample: CustomSampleData = {
-        id: sampleId,
-        name: file.name.replace(/\.[^/.]+$/, ''),
-        duration: result.duration,
-        sampleRate: result.buffer.sampleRate,
-        channels: result.buffer.numberOfChannels,
-        waveformPeaks: result.peaks,
-        trimStart: 0,
-        trimEnd: 1.0,
-        rootPitch: 60,
-        reverse: false
-      };
-
-      setCurrentSample(newSample);
+      setCurrentSample(result.sample);
       setTrimStart(0);
       setTrimEnd(1.0);
       setRootPitch(60);
     } catch (err) {
       console.error('Error decoding audio sample:', err);
+      setCurrentSample(null);
+      setErrorMessage(`Sample import failed: ${err instanceof Error ? err.message : 'Unable to decode audio'}`);
     } finally {
       setIsLoading(false);
     }
@@ -90,8 +95,15 @@ export const SampleManagerModal: React.FC<SampleManagerModalProps> = ({
     }
   };
 
+  // Phase 8C (P1-11): the selected channel's sample exists in the project but its
+  // persisted audio could not be restored. It must not be presented as healthy.
+  const isCurrentSampleUnavailable = isSampleAudioUnavailable(currentSample);
+  const unavailableSampleDescription = currentSample && isCurrentSampleUnavailable
+    ? describeMissingAudioSample(currentSample, selectedChannel?.name)
+    : undefined;
+
   const handleAudition = () => {
-    if (!currentSample) return;
+    if (!currentSample || isCurrentSampleUnavailable) return;
     const dummyNote = { id: 'audition', pitch: rootPitch, start: 0, duration: 1.5, velocity: 0.9 };
     const tempChannel: Channel = {
       ...selectedChannel,
@@ -107,7 +119,7 @@ export const SampleManagerModal: React.FC<SampleManagerModalProps> = ({
   };
 
   const handleAssign = () => {
-    if (!currentSample) return;
+    if (!currentSample || isCurrentSampleUnavailable) return;
     const finalSample: CustomSampleData = {
       ...currentSample,
       trimStart,
@@ -120,7 +132,7 @@ export const SampleManagerModal: React.FC<SampleManagerModalProps> = ({
   };
 
   const handleCreateNew = () => {
-    if (!currentSample) return;
+    if (!currentSample || isCurrentSampleUnavailable) return;
     const finalSample: CustomSampleData = {
       ...currentSample,
       trimStart,
@@ -180,29 +192,78 @@ export const SampleManagerModal: React.FC<SampleManagerModalProps> = ({
             </div>
           </div>
 
+          {errorMessage && (
+            <div id="sample-manager-error" role="alert" className="p-2.5 bg-[#361111] border border-red-500/60 rounded-lg text-[11px] text-red-200 select-text">
+              {errorMessage}
+            </div>
+          )}
+
           {/* Sample Waveform Editor */}
           {currentSample ? (
-            <div className="bg-[#18181d] border border-[#282830] rounded-xl p-4 space-y-3">
-              <div className="flex items-center justify-between">
-                <div>
-                  <span className="text-xs font-bold text-white">{currentSample.name}</span>
+            <div
+              id="sample-manager-sample-panel"
+              data-audio-unavailable={isCurrentSampleUnavailable ? 'true' : undefined}
+              className={`bg-[#18181d] border rounded-xl p-4 space-y-3 ${
+                isCurrentSampleUnavailable ? 'border-red-500/70' : 'border-[#282830]'
+              }`}
+            >
+              <div className="flex items-center justify-between gap-2">
+                <div className="min-w-0">
+                  <span className={`text-xs font-bold ${isCurrentSampleUnavailable ? 'text-red-300' : 'text-white'}`}>{currentSample.name}</span>
                   <span className="text-[10px] font-mono text-[#888] ml-2">
                     {currentSample.duration.toFixed(2)}s | {currentSample.sampleRate}Hz
                   </span>
+                  {isCurrentSampleUnavailable && (
+                    <span
+                      id="sample-manager-missing-badge"
+                      data-audio-unavailable="true"
+                      className="ml-2 inline-flex items-center gap-0.5 px-1 py-[1px] rounded bg-red-600 text-white text-[8px] font-bold uppercase tracking-wide align-middle"
+                    >
+                      <AlertTriangle className="w-2.5 h-2.5" />
+                      {MISSING_AUDIO_SAMPLE_BADGE_LABEL}
+                    </span>
+                  )}
                 </div>
 
                 <button
                   onClick={handleAudition}
-                  className="flex items-center gap-1.5 px-3 py-1 bg-[#00ff88] hover:bg-[#00e67a] text-black font-bold text-xs rounded transition shadow"
+                  disabled={isCurrentSampleUnavailable}
+                  title={unavailableSampleDescription}
+                  className={`flex items-center gap-1.5 px-3 py-1 font-bold text-xs rounded transition shadow ${
+                    isCurrentSampleUnavailable
+                      ? 'bg-[#2a2a30] text-[#777] cursor-not-allowed'
+                      : 'bg-[#00ff88] hover:bg-[#00e67a] text-black'
+                  }`}
                 >
-                  <Play className="w-3.5 h-3.5 fill-black" />
+                  <Play className="w-3.5 h-3.5 fill-current" />
                   <span>Audition Sample</span>
                 </button>
               </div>
 
+              {isCurrentSampleUnavailable && (
+                <div
+                  id="sample-manager-missing-audio"
+                  role="alert"
+                  data-audio-unavailable="true"
+                  className="flex items-start gap-2 p-2.5 bg-[#361111] border border-red-500/60 rounded-lg text-[11px] text-red-200 select-text"
+                >
+                  <AlertTriangle className="w-4 h-4 text-red-400 shrink-0 mt-0.5" />
+                  <span>{unavailableSampleDescription}</span>
+                </div>
+              )}
+
               {/* Waveform Visualization Canvas */}
-              <div className="relative h-20 bg-[#070709] border border-[#282830] rounded-lg p-2 flex items-center gap-0.5 overflow-hidden">
-                {currentSample.waveformPeaks.map((peak, idx) => {
+              <div className={`relative h-20 bg-[#070709] border rounded-lg p-2 flex items-center gap-0.5 overflow-hidden ${
+                isCurrentSampleUnavailable ? 'border-red-500/50' : 'border-[#282830]'
+              }`}>
+                {isCurrentSampleUnavailable ? (
+                  <>
+                    <div className="w-full border-t border-dashed border-red-400/80" />
+                    <span className="absolute left-2 text-[10px] font-bold uppercase tracking-wide text-red-300">
+                      {MISSING_AUDIO_SAMPLE_BADGE_LABEL} — waveform unavailable
+                    </span>
+                  </>
+                ) : currentSample.waveformPeaks.map((peak, idx) => {
                   const normIdx = idx / currentSample.waveformPeaks.length;
                   const isInsideTrim = normIdx >= trimStart && normIdx <= trimEnd;
                   return (
@@ -216,15 +277,19 @@ export const SampleManagerModal: React.FC<SampleManagerModalProps> = ({
                   );
                 })}
 
-                {/* Trim Markers */}
-                <div 
-                  className="absolute top-0 bottom-0 w-0.5 bg-[#00ff88] shadow-[0_0_8px_#00ff88]"
-                  style={{ left: `${trimStart * 100}%` }}
-                />
-                <div 
-                  className="absolute top-0 bottom-0 w-0.5 bg-[#ff0055] shadow-[0_0_8px_#ff0055]"
-                  style={{ left: `${trimEnd * 100}%` }}
-                />
+                {/* Trim Markers (hidden when the underlying audio is gone) */}
+                {!isCurrentSampleUnavailable && (
+                  <>
+                    <div
+                      className="absolute top-0 bottom-0 w-0.5 bg-[#00ff88] shadow-[0_0_8px_#00ff88]"
+                      style={{ left: `${trimStart * 100}%` }}
+                    />
+                    <div
+                      className="absolute top-0 bottom-0 w-0.5 bg-[#ff0055] shadow-[0_0_8px_#ff0055]"
+                      style={{ left: `${trimEnd * 100}%` }}
+                    />
+                  </>
+                )}
               </div>
 
               {/* Slicing & Root Note Controls */}
@@ -291,7 +356,13 @@ export const SampleManagerModal: React.FC<SampleManagerModalProps> = ({
                 <div className="flex items-center gap-2 w-full sm:w-auto justify-end">
                   <button
                     onClick={handleCreateNew}
-                    className="flex-1 sm:flex-none px-3 py-1.5 bg-[#282830] hover:bg-[#33333d] text-white font-bold text-xs rounded transition flex items-center justify-center gap-1"
+                    disabled={isCurrentSampleUnavailable}
+                    title={isCurrentSampleUnavailable ? 'Sample audio is missing — re-import the file before using this sample.' : undefined}
+                    className={`flex-1 sm:flex-none px-3 py-1.5 font-bold text-xs rounded transition flex items-center justify-center gap-1 ${
+                      isCurrentSampleUnavailable
+                        ? 'bg-[#222226] text-[#666] cursor-not-allowed'
+                        : 'bg-[#282830] hover:bg-[#33333d] text-white'
+                    }`}
                   >
                     <Plus className="w-3.5 h-3.5" />
                     <span>Create As New Channel</span>
@@ -299,7 +370,13 @@ export const SampleManagerModal: React.FC<SampleManagerModalProps> = ({
 
                   <button
                     onClick={handleAssign}
-                    className="flex-1 sm:flex-none px-4 py-1.5 bg-[#ff6e00] hover:bg-[#ff7d1a] text-black font-bold text-xs rounded transition flex items-center justify-center gap-1 shadow"
+                    disabled={isCurrentSampleUnavailable}
+                    title={isCurrentSampleUnavailable ? 'Sample audio is missing — re-import the file before assigning it.' : undefined}
+                    className={`flex-1 sm:flex-none px-4 py-1.5 font-bold text-xs rounded transition flex items-center justify-center gap-1 shadow ${
+                      isCurrentSampleUnavailable
+                        ? 'bg-[#222226] text-[#666] cursor-not-allowed'
+                        : 'bg-[#ff6e00] hover:bg-[#ff7d1a] text-black'
+                    }`}
                   >
                     <Check className="w-3.5 h-3.5" />
                     <span>Assign to Channel</span>

@@ -243,3 +243,340 @@ export function deleteNotes(
   }
   return notes.filter(n => !idSet.has(n.id)).map(cloneNote);
 }
+
+export function resizeNotesRight(
+  notes: Note[],
+  selectedIds: Set<string> | string[],
+  requestedDeltaSteps: number,
+  gridSteps = DEFAULT_GRID_STEPS,
+  minimumDuration?: number,
+  bounds: NoteBounds = {}
+): Note[] {
+  if (!finite(requestedDeltaSteps)) {
+    throw new Error('Delta steps must be finite');
+  }
+  if (!finite(gridSteps) || gridSteps <= 0) {
+    throw new Error('Grid size must be greater than zero');
+  }
+
+  const idSet = selectedIds instanceof Set ? selectedIds : new Set(selectedIds);
+  if (idSet.size === 0 || notes.length === 0) {
+    return notes.map(cloneNote);
+  }
+
+  return notes.map(note => {
+    if (!idSet.has(note.id)) {
+      return cloneNote(note);
+    }
+    const requestedEnd = note.start + note.duration + requestedDeltaSteps;
+    return resizeNoteRight(note, requestedEnd, gridSteps, minimumDuration, bounds);
+  });
+}
+
+export function resizeNotesLeft(
+  notes: Note[],
+  selectedIds: Set<string> | string[],
+  requestedDeltaSteps: number,
+  gridSteps = DEFAULT_GRID_STEPS,
+  minimumDuration?: number,
+  bounds: NoteBounds = {}
+): Note[] {
+  if (!finite(requestedDeltaSteps)) {
+    throw new Error('Delta steps must be finite');
+  }
+  if (!finite(gridSteps) || gridSteps <= 0) {
+    throw new Error('Grid size must be greater than zero');
+  }
+
+  const idSet = selectedIds instanceof Set ? selectedIds : new Set(selectedIds);
+  if (idSet.size === 0 || notes.length === 0) {
+    return notes.map(cloneNote);
+  }
+
+  return notes.map(note => {
+    if (!idSet.has(note.id)) {
+      return cloneNote(note);
+    }
+    const requestedStart = note.start + requestedDeltaSteps;
+    return resizeNoteLeft(note, requestedStart, gridSteps, minimumDuration, bounds);
+  });
+}
+
+export interface DuplicateNotesResult {
+  updatedNotes: Note[];
+  duplicatedNotes: Note[];
+}
+
+export function duplicateNotes(
+  notes: Note[],
+  selectedIds: Set<string> | string[],
+  offsetSteps?: number,
+  generateId?: (originalNote: Note, index: number) => string,
+  bounds: NoteBounds = {}
+): DuplicateNotesResult {
+  const idSet = selectedIds instanceof Set ? selectedIds : new Set(selectedIds);
+  if (idSet.size === 0 || notes.length === 0) {
+    return {
+      updatedNotes: notes.map(cloneNote),
+      duplicatedNotes: []
+    };
+  }
+
+  const selectedNotes = notes.filter(n => idSet.has(n.id));
+  if (selectedNotes.length === 0) {
+    return {
+      updatedNotes: notes.map(cloneNote),
+      duplicatedNotes: []
+    };
+  }
+
+  const groupStart = Math.min(...selectedNotes.map(n => n.start));
+  const groupEnd = Math.max(...selectedNotes.map(n => n.start + n.duration));
+  const groupLength = Number((groupEnd - groupStart).toFixed(6));
+
+  let effectiveOffset: number;
+  if (offsetSteps !== undefined) {
+    if (!finite(offsetSteps) || offsetSteps <= 0) {
+      throw new Error('offsetSteps must be finite and greater than zero');
+    }
+    effectiveOffset = offsetSteps;
+  } else {
+    effectiveOffset = groupLength;
+  }
+
+  const existingIds = new Set<string>(notes.map(n => n.id));
+  const defaultIdGen = (_original: Note, index: number): string =>
+    `note-${Date.now()}-${index}-${Math.random().toString(36).slice(2, 7)}`;
+  const idGenerator = generateId ?? defaultIdGen;
+
+  const duplicatedNotes: Note[] = [];
+  for (let i = 0; i < selectedNotes.length; i++) {
+    const original = selectedNotes[i];
+    const newStart = Number((original.start + effectiveOffset).toFixed(6));
+
+    let candidateId = idGenerator(original, i);
+    if (!candidateId || existingIds.has(candidateId)) {
+      let counter = 1;
+      let resolvedId = `${candidateId || 'note'}-dup-${counter}`;
+      while (existingIds.has(resolvedId)) {
+        counter++;
+        resolvedId = `${candidateId || 'note'}-dup-${counter}`;
+      }
+      candidateId = resolvedId;
+    }
+    existingIds.add(candidateId);
+
+    const duplicate: Note = {
+      ...cloneNote(original),
+      id: candidateId,
+      start: newStart
+    };
+
+    assertValidNote(duplicate, bounds);
+    duplicatedNotes.push(duplicate);
+  }
+
+  const updatedNotes = [...notes.map(cloneNote), ...duplicatedNotes];
+
+  return {
+    updatedNotes,
+    duplicatedNotes
+  };
+}
+
+export function transposeNotes(
+  notes: Note[],
+  selectedIds: Set<string> | string[],
+  semitones: number,
+  bounds: NoteBounds = {}
+): Note[] {
+  if (!finite(semitones) || !Number.isInteger(semitones)) {
+    throw new Error('semitones must be an integer');
+  }
+
+  const idSet = selectedIds instanceof Set ? selectedIds : new Set(selectedIds);
+  if (idSet.size === 0 || notes.length === 0 || semitones === 0) {
+    return notes.map(cloneNote);
+  }
+
+  const selectedNotes = notes.filter(n => idSet.has(n.id));
+  if (selectedNotes.length === 0) {
+    return notes.map(cloneNote);
+  }
+
+  const minPitch = bounds.minPitch ?? DEFAULT_MIN_PITCH;
+  const maxPitch = bounds.maxPitch ?? DEFAULT_MAX_PITCH;
+
+  for (const n of selectedNotes) {
+    const targetPitch = n.pitch + semitones;
+    if (targetPitch < minPitch || targetPitch > maxPitch) {
+      return notes.map(cloneNote);
+    }
+  }
+
+  return notes.map(n => {
+    if (!idSet.has(n.id)) {
+      return cloneNote(n);
+    }
+    const transposed: Note = {
+      ...cloneNote(n),
+      pitch: n.pitch + semitones
+    };
+    return assertValidNote(transposed, bounds);
+  });
+}
+
+export function nudgeNotes(
+  notes: Note[],
+  selectedIds: Set<string> | string[],
+  deltaSteps: number,
+  bounds: NoteBounds = {}
+): Note[] {
+  if (!finite(deltaSteps)) {
+    throw new Error('deltaSteps must be finite');
+  }
+
+  const idSet = selectedIds instanceof Set ? selectedIds : new Set(selectedIds);
+  if (idSet.size === 0 || notes.length === 0 || deltaSteps === 0) {
+    return notes.map(cloneNote);
+  }
+
+  const selectedNotes = notes.filter(n => idSet.has(n.id));
+  if (selectedNotes.length === 0) {
+    return notes.map(cloneNote);
+  }
+
+  for (const n of selectedNotes) {
+    const targetStart = Number((n.start + deltaSteps).toFixed(6));
+    const targetEnd = Number((targetStart + n.duration).toFixed(6));
+    if (targetStart < 0 || (bounds.maxSteps !== undefined && targetEnd > bounds.maxSteps)) {
+      return notes.map(cloneNote);
+    }
+  }
+
+  return notes.map(n => {
+    if (!idSet.has(n.id)) {
+      return cloneNote(n);
+    }
+    const rawTargetStart = Number((n.start + deltaSteps).toFixed(6));
+    const nextStart = rawTargetStart === 0 ? 0 : rawTargetStart;
+    const nudged: Note = {
+      ...cloneNote(n),
+      start: nextStart
+    };
+    return assertValidNote(nudged, bounds);
+  });
+}
+
+export const DEFAULT_STEP_WIDTH = 28;
+export const DEFAULT_ROW_HEIGHT = 24;
+export const MARQUEE_DRAG_THRESHOLD_PX = 4;
+
+export interface Rect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export type MarqueeSelectionMode = 'replace' | 'add' | 'toggle';
+
+export function normalizeRect(x1: number, y1: number, x2: number, y2: number): Rect {
+  const rx1 = Math.round(x1);
+  const ry1 = Math.round(y1);
+  const rx2 = Math.round(x2);
+  const ry2 = Math.round(y2);
+  const x = Math.min(rx1, rx2);
+  const y = Math.min(ry1, ry2);
+  const width = Math.abs(rx2 - rx1);
+  const height = Math.abs(ry2 - ry1);
+  return { x, y, width, height };
+}
+
+export function rectsIntersect(a: Rect, b: Rect): boolean {
+  const EPSILON = 1e-4;
+  return (
+    a.x <= b.x + b.width + EPSILON &&
+    a.x + a.width >= b.x - EPSILON &&
+    a.y <= b.y + b.height + EPSILON &&
+    a.y + a.height >= b.y - EPSILON
+  );
+}
+
+export function getNoteRect(
+  note: Note,
+  stepWidth = DEFAULT_STEP_WIDTH,
+  rowHeight = DEFAULT_ROW_HEIGHT,
+  maxPitch = DEFAULT_MAX_PITCH
+): Rect {
+  const x = note.start * stepWidth;
+  const y = (maxPitch - note.pitch) * rowHeight;
+  const width = Math.max(16, note.duration * stepWidth - 3);
+  const height = rowHeight;
+  return { x, y, width, height };
+}
+
+export function selectNotesInMarquee(
+  notes: Note[],
+  marqueeRect: Rect,
+  currentSelection: Set<string> | string[],
+  mode: MarqueeSelectionMode = 'replace',
+  stepWidth = DEFAULT_STEP_WIDTH,
+  rowHeight = DEFAULT_ROW_HEIGHT,
+  maxPitch = DEFAULT_MAX_PITCH
+): Set<string> {
+  const baseSet = currentSelection instanceof Set ? currentSelection : new Set(currentSelection);
+  const validNoteIds = new Set(notes.map(n => n.id));
+  const intersectingIds = new Set<string>();
+
+  for (const note of notes) {
+    const noteRect = getNoteRect(note, stepWidth, rowHeight, maxPitch);
+    if (rectsIntersect(noteRect, marqueeRect)) {
+      intersectingIds.add(note.id);
+    }
+  }
+
+  if (mode === 'replace') {
+    return intersectingIds;
+  }
+
+  const result = new Set<string>();
+
+  if (mode === 'add') {
+    for (const id of baseSet) {
+      if (validNoteIds.has(id)) {
+        result.add(id);
+      }
+    }
+    for (const id of intersectingIds) {
+      result.add(id);
+    }
+    return result;
+  }
+
+  if (mode === 'toggle') {
+    for (const id of baseSet) {
+      if (validNoteIds.has(id) && !intersectingIds.has(id)) {
+        result.add(id);
+      }
+    }
+    for (const id of intersectingIds) {
+      if (!baseSet.has(id)) {
+        result.add(id);
+      }
+    }
+    return result;
+  }
+
+  return result;
+}
+
+export function hasExceededDragThreshold(
+  startX: number,
+  startY: number,
+  currentX: number,
+  currentY: number,
+  threshold = MARQUEE_DRAG_THRESHOLD_PX
+): boolean {
+  return Math.hypot(currentX - startX, currentY - startY) >= threshold;
+}

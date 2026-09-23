@@ -2,9 +2,9 @@ name: Desktop Validation
 
 on:
   pull_request:
-    branches: [main]
+    branches: [main, phase-5-5-song-mode-verification]
   push:
-    branches: [main, phase-5.5-hardening]
+    branches: [main, phase-5.5-hardening, phase-5-5-song-mode-verification, phase-11-release-parity-validation]
 
 permissions:
   contents: read
@@ -36,6 +36,9 @@ jobs:
 
       - name: Validate Windows package
         run: npm run package:win:dir
+
+      - name: Run packaged Windows runtime smoke test
+        run: npm run smoke:win
 
       - name: Upload Windows package
         uses: actions/upload-artifact@v4
