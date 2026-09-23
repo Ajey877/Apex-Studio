@@ -59,7 +59,7 @@ jobs:
 
             Official Windows release of Apex Studio DAW.
 
-            This release is the v1.2.0 reliability release, validated across the core audio workflow, project persistence/recovery, export, build, and Windows desktop runtime.
+            This release is a reliability release, validated across the core audio workflow, project persistence/recovery, export, build, and Windows desktop runtime.
 
             ## Downloads
             - **Installer:** `Apex Studio DAW-${{ github.ref_name }}-x64.exe`
