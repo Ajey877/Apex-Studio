@@ -17,7 +17,7 @@ Build beats, write melodies, arrange tracks, record audio, shape your mix, and e
 
 <br />
 
-[🚀 **Download Apex Studio v1.1.0**](https://github.com/Ajey877/Apex-Studio/releases/tag/v1.1.0) · [📖 **Documentation**](#-getting-started) · [🐛 **Report a Bug**](https://github.com/Ajey877/Apex-Studio/issues/new/choose) · [💡 **Request an Improvement**](https://github.com/Ajey877/Apex-Studio/issues/new/choose)
+[🚀 **Apex Studio v1.2.0 Release Candidate**](https://github.com/Ajey877/Apex-Studio/pulls/111) · [📖 **Documentation**](#-getting-started) · [🐛 **Report a Bug**](https://github.com/Ajey877/Apex-Studio/issues/new/choose) · [💡 **Request an Improvement**](https://github.com/Ajey877/Apex-Studio/issues/new/choose)
 
 </div>
 
@@ -49,7 +49,7 @@ It brings the main parts of a music-production workflow into one application —
        EXPORT
 ```
 
-**v1.1.0** is a Windows-focused release with a browser development workflow and automated validation for the core audio, history, build, and desktop configuration paths.
+**v1.2.0** is the current release candidate, focused on making the complete local-first DAW workflow dependable: create, edit, arrange, record, mix, save, reopen, play and export. The release candidate adds deeper audio/export validation, project persistence and recovery hardening, safer audio-asset handling, and Windows desktop packaging validation.
 
 ---
 
@@ -158,11 +158,13 @@ The project can be packaged as a Windows installer or portable executable throug
 
 ## 🚀 Get Apex Studio
 
-### Windows — recommended for v1.1.0
+### Windows — v1.2.0 release candidate
 
-Download the latest release from GitHub:
+The v1.2.0 release candidate is being validated before it becomes the public stable release.
 
-**👉 [Download Apex Studio v1.1.0](https://github.com/Ajey877/Apex-Studio/releases/tag/v1.1.0)**
+**👉 [View the v1.2.0 release candidate](https://github.com/Ajey877/Apex-Studio/pulls/111)** · **[View stable releases](https://github.com/Ajey877/Apex-Studio/releases)**
+
+The current stable release remains v1.1.0 until the v1.2.0 release is published.
 
 The release workflow builds Windows packages including:
 
@@ -267,6 +269,17 @@ Render your finished work as WAV, export Standard MIDI, or create project/stem p
 
 ---
 
+## 🛡️ v1.2.0 release-candidate hardening
+
+The current release candidate concentrates on the workflows that must survive a real music-production session:
+
+- **Project persistence & recovery** — active saves, rolling recovery snapshots, validation of restored project state, and safer fallback when stored project data is damaged.
+- **Audio asset persistence** — imported and recorded audio can be persisted and restored with the project workflow, with missing-audio handling surfaced instead of silently producing incomplete results.
+- **Export integrity** — offline rendering and export paths have dedicated coverage for audio clips, patterns, stems, playlist arrangement, transport timing and FX-related behavior.
+- **Live/export parity coverage** — mixer and FX behavior is tested across live playback and offline rendering paths to reduce surprises between what you hear and what you export.
+- **Windows desktop validation** — the packaged Electron application is checked through desktop configuration and runtime smoke validation.
+- **Local-first state accuracy** — the UI does not claim cloud synchronization or end-to-end encryption that is not active in the application.
+
 ## 🧪 Built with reliability in mind
 
 Apex Studio is being developed with automated checks around the parts that matter most to a DAW: audio behavior, project state, desktop configuration and production builds.
@@ -346,11 +359,12 @@ If Apex Studio is useful to you, **a GitHub star helps the project get discovere
 
 ## 📈 Version
 
-**Current release: `v1.1.0`**
+**Release candidate: `v1.2.0`**  
+**Current stable release: `v1.1.0`**
 
-This release focuses on making the core project workflow more dependable, including audio rendering, project/audio hydration, persistence behavior, and document-level undo/redo.
+The v1.2.0 release candidate focuses on dependable end-to-end DAW workflows, including project persistence and recovery, audio-asset restoration, live/export validation, export integrity, and Windows desktop packaging/runtime validation.
 
-See the [release page](https://github.com/Ajey877/Apex-Studio/releases/tag/v1.1.0) for the downloadable Windows build and release information.
+The stable release remains v1.1.0 until v1.2.0 is published. See the [release candidate PR](https://github.com/Ajey877/Apex-Studio/pull/111) for validation status and the [releases page](https://github.com/Ajey877/Apex-Studio/releases) for published downloads.
 
 ---
 
@@ -364,8 +378,8 @@ Apex Studio is licensed under the **MIT License**. See [`LICENSE`](LICENSE) for 
 
 ### 🎛️ Make music. Keep it local. Keep creating.
 
-**Apex Studio — v1.1.0**
+**Apex Studio — v1.2.0 Release Candidate**
 
-[⬇️ Download](https://github.com/Ajey877/Apex-Studio/releases/tag/v1.1.0) · [⭐ Star on GitHub](https://github.com/Ajey877/Apex-Studio) · [🐛 Report an issue](https://github.com/Ajey877/Apex-Studio/issues/new/choose)
+[🚀 Release Candidate](https://github.com/Ajey877/Apex-Studio/pulls/111) · [📦 Stable Releases](https://github.com/Ajey877/Apex-Studio/releases) · [⭐ Star on GitHub](https://github.com/Ajey877/Apex-Studio) · [🐛 Report an issue](https://github.com/Ajey877/Apex-Studio/issues/new/choose)
 
 </div>
