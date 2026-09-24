@@ -48,7 +48,8 @@ test('subtractive renderer is independent of AudioEngine state', () => {
     channel, note, time: 0, destination: {} as AudioNode,
     audioContext: new Context() as unknown as BaseAudioContext, voiceId: 'v1',
   });
-  assert.ok(handle);\n  assert.equal(typeof handle.stop, 'function');
+  assert.ok(handle);
+  assert.equal(typeof handle.stop, 'function');
 });
 
 test('FM renderer is independent of AudioEngine state', () => {
@@ -57,5 +58,6 @@ test('FM renderer is independent of AudioEngine state', () => {
     destination: {} as AudioNode,
     audioContext: new Context() as unknown as BaseAudioContext, voiceId: 'v2',
   });
-  assert.equal(typeof handle?.stop, 'function');
+  assert.ok(handle);
+  assert.equal(typeof handle.stop, 'function');
 });
