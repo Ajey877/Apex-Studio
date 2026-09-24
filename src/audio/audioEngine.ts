@@ -16,6 +16,8 @@ import { ChorusEffect } from './effects/ChorusEffect';
 import { WetDryEffect } from './effects/WetDryEffect';
 import { createInstrumentRegistry, InstrumentRegistry } from './instrumentRegistry';
 import { renderIndependentPluckVoice } from './instruments/independentPluck';
+import { renderSubtractiveSynthVoice } from './instruments/subtractiveSynth';
+import { renderFmSynthVoice } from './instruments/fmSynth';
 
 export type MidiEventPayload = {
   type: 'noteOn' | 'noteOff' | 'cc' | 'pitchBend';
@@ -330,7 +332,7 @@ class AudioEngine {
     // contract without another growing instrumentType switch.
     this.instrumentRegistry = createInstrumentRegistry({
       drumpad: ({ channel, note, time, destination }) => this.triggerDrumVoice(channel, note, time, destination),
-      fmsynth: ({ channel, note, time, destination, voiceId }) => this.triggerFmVoice(channel, note, time, destination, voiceId),
+      fmsynth: renderFmSynthVoice,
       fm_bell: ({ channel, note, time, destination, voiceId }) => this.triggerFmVoice(channel, note, time, destination, voiceId),
       grand_piano: ({ channel, note, time, destination, voiceId }) => this.triggerGrandPianoVoice(channel, note, time, destination, voiceId),
       rhodes_epiano: ({ channel, note, time, destination, voiceId }) => this.triggerRhodesVoice(channel, note, time, destination, voiceId),
@@ -350,9 +352,9 @@ class AudioEngine {
       marimba_bell: ({ channel, note, time, destination, voiceId }) => this.triggerMarimbaVoice(channel, note, time, destination, voiceId),
       chiptune_8bit: ({ channel, note, time, destination, voiceId }) => this.triggerChiptuneVoice(channel, note, time, destination, voiceId),
       independent_pluck: renderIndependentPluckVoice,
-      minisynth: ({ channel, note, time, destination, voiceId }) => this.triggerSubtractiveVoice(channel, note, time, destination, voiceId),
-      wavetable: ({ channel, note, time, destination, voiceId }) => this.triggerSubtractiveVoice(channel, note, time, destination, voiceId),
-      sampler: ({ channel, note, time, destination, voiceId }) => this.triggerSubtractiveVoice(channel, note, time, destination, voiceId),
+      minisynth: renderSubtractiveSynthVoice,
+      wavetable: renderSubtractiveSynthVoice,
+      sampler: renderSubtractiveSynthVoice,
     }, ({ channel, note, time, destination, voiceId }) =>
       this.triggerSubtractiveVoice(channel, note, time, destination, voiceId)
     );
@@ -769,7 +771,7 @@ class AudioEngine {
     } else if (channel.customSample && channel.customSample.id) {
       this.triggerCustomSampleVoice(channel, note, time, mixerChannel.input, voiceId);
     } else {
-      this.instrumentRegistry.get(channel.instrumentType)({
+      const voiceHandle = this.instrumentRegistry.get(channel.instrumentType)({
         channel,
         note,
         time,
@@ -777,6 +779,9 @@ class AudioEngine {
         audioContext: this.ctx!,
         voiceId
       });
+      if (voiceHandle) {
+        this.activeVoices.set(voiceId, voiceHandle);
+      }
     }
   }
 
@@ -1460,178 +1465,6 @@ class AudioEngine {
   }
 
   // 2. 3-Osc Subtractive MiniSynth
-  private triggerSubtractiveVoice(channel: Channel, note: Note, time: number, destination: AudioNode, voiceId: string) {
-    if (!this.ctx) return;
-    const ctx = this.ctx;
-    const p = channel.synthParams || this.getDefaultSynthParams();
-
-    const baseFreq = this.midiToFreq(note.pitch + channel.pitch);
-    const duration = (note.duration || 1) * 0.25; // in seconds roughly based on tempo
-
-    // Gain Envelope
-    const ampGain = ctx.createGain();
-    const vel = (note.velocity || 0.8) * channel.volume;
-    const attack = Math.max(0.002, p.attack || 0.01);
-    const decay = Math.max(0.01, p.decay || 0.15);
-    const sustain = Math.max(0.001, p.sustain ?? 0.6);
-    const release = Math.max(0.02, p.release || 0.2);
-
-    ampGain.gain.setValueAtTime(0.0001, time);
-    ampGain.gain.linearRampToValueAtTime(vel, time + attack);
-    ampGain.gain.exponentialRampToValueAtTime(vel * sustain, time + attack + decay);
-
-    // Filter
-    const filter = ctx.createBiquadFilter();
-    filter.type = p.filterType || 'lowpass';
-    const cutoff = Math.min(18000, Math.max(40, p.filterCutoff || 2500));
-    filter.frequency.setValueAtTime(cutoff, time);
-    filter.Q.value = p.filterResonance || 2.0;
-
-    // Filter Envelope modulation
-    const envAmt = p.filterEnvAmount || 0.5;
-    if (envAmt > 0) {
-      filter.frequency.exponentialRampToValueAtTime(Math.min(19000, cutoff + (envAmt * 6000)), time + attack);
-      filter.frequency.exponentialRampToValueAtTime(cutoff, time + attack + decay);
-    }
-
-    // Oscillators & Unison Detune Engine
-    const unisonCount = Math.min(7, Math.max(1, p.unisonVoices || 1));
-    const unisonDetuneCents = p.unisonDetune || 15;
-    const oscList: OscillatorNode[] = [];
-
-    const osc1 = ctx.createOscillator();
-    osc1.type = p.osc1Type || 'sawtooth';
-    const oct1Mult = Math.pow(2, p.osc1Octave || 0);
-    osc1.frequency.setValueAtTime(baseFreq * oct1Mult, time);
-    osc1.detune.setValueAtTime(p.osc1Detune || 0, time);
-    oscList.push(osc1);
-
-    const osc2 = ctx.createOscillator();
-    osc2.type = p.osc2Type || 'square';
-    const oct2Mult = Math.pow(2, p.osc2Octave || 0);
-    osc2.frequency.setValueAtTime(baseFreq * oct2Mult, time);
-    osc2.detune.setValueAtTime(p.osc2Detune || 12, time); // slight default detune
-    oscList.push(osc2);
-
-    // If Unison is active (3, 5, 7 voices), generate detuned supersaw voices
-    const extraUnisonNodes: OscillatorNode[] = [];
-    if (unisonCount > 1) {
-      for (let u = 1; u < unisonCount; u++) {
-        const sign = u % 2 === 1 ? 1 : -1;
-        const detuneSpread = Math.ceil(u / 2) * (unisonDetuneCents / Math.floor(unisonCount / 2));
-        
-        const uOsc = ctx.createOscillator();
-        uOsc.type = p.osc1Type || 'sawtooth';
-        uOsc.frequency.setValueAtTime(baseFreq * oct1Mult, time);
-        uOsc.detune.setValueAtTime((p.osc1Detune || 0) + (sign * detuneSpread), time);
-        extraUnisonNodes.push(uOsc);
-        oscList.push(uOsc);
-      }
-    }
-
-    const oscMix1 = ctx.createGain();
-    oscMix1.gain.value = (p.osc1Mix ?? 0.8) / (1 + extraUnisonNodes.length * 0.35);
-
-    const oscMix2 = ctx.createGain();
-    oscMix2.gain.value = p.osc2Mix ?? 0.5;
-
-    // LFO
-    let lfo: OscillatorNode | null = null;
-    let lfoGain: GainNode | null = null;
-    if (p.lfoRate && p.lfoDepth && p.lfoTarget !== 'none') {
-      lfo = ctx.createOscillator();
-      lfo.frequency.value = p.lfoRate || 4;
-      lfoGain = ctx.createGain();
-
-      if (p.lfoTarget === 'pitch') {
-        lfoGain.gain.value = (p.lfoDepth || 0.2) * 50; // Detune cents
-        lfo.connect(lfoGain);
-        oscList.forEach(o => lfoGain!.connect(o.detune));
-      } else if (p.lfoTarget === 'filter') {
-        lfoGain.gain.value = (p.lfoDepth || 0.3) * 1200;
-        lfo.connect(lfoGain);
-        lfoGain.connect(filter.frequency);
-      }
-      lfo.start(time);
-    }
-
-    // Graph routing
-    osc1.connect(oscMix1);
-    extraUnisonNodes.forEach(u => u.connect(oscMix1));
-    osc2.connect(oscMix2);
-    oscMix1.connect(filter);
-    oscMix2.connect(filter);
-    filter.connect(ampGain);
-    ampGain.connect(destination);
-
-    oscList.forEach(o => o.start(time));
-
-    // Stop voice function
-    const stopTime = time + duration;
-    ampGain.gain.setValueAtTime(vel * sustain, stopTime);
-    ampGain.gain.exponentialRampToValueAtTime(0.0001, stopTime + release);
-
-    oscList.forEach(o => o.stop(stopTime + release + 0.05));
-    if (lfo) lfo.stop(stopTime + release + 0.05);
-
-    const voiceHandle = {
-      stop: (relTime?: number) => {
-        const now = relTime ?? ctx.currentTime;
-        ampGain.gain.cancelScheduledValues(now);
-        ampGain.gain.setValueAtTime(ampGain.gain.value, now);
-        ampGain.gain.exponentialRampToValueAtTime(0.0001, now + release);
-        oscList.forEach(o => {
-          try { o.stop(now + release + 0.05); } catch (_) {}
-        });
-        if (lfo) {
-          try { lfo.stop(now + release + 0.05); } catch (_) {}
-        }
-      }
-    };
-
-    this.activeVoices.set(voiceId, voiceHandle);
-  }
-
-  // 3. FM Synthesizer Engine
-  private triggerFmVoice(channel: Channel, note: Note, time: number, destination: AudioNode, voiceId: string) {
-    if (!this.ctx) return;
-    const ctx = this.ctx;
-    const p = channel.synthParams || this.getDefaultSynthParams();
-
-    const carrierFreq = this.midiToFreq(note.pitch + channel.pitch);
-    const modFreq = carrierFreq * (p.fmModulatorMultiplier || 2.0);
-    const modIndex = (p.fmModulationIndex || 150) * (note.velocity || 0.8);
-
-    const carrier = ctx.createOscillator();
-    carrier.type = 'sine';
-    carrier.frequency.setValueAtTime(carrierFreq, time);
-
-    const modulator = ctx.createOscillator();
-    modulator.type = 'sine';
-    modulator.frequency.setValueAtTime(modFreq, time);
-
-    const modGain = ctx.createGain();
-    modGain.gain.setValueAtTime(modIndex, time);
-    modGain.gain.exponentialRampToValueAtTime(0.001, time + (p.decay || 0.4));
-
-    modulator.connect(modGain);
-    modGain.connect(carrier.frequency);
-
-    const ampGain = ctx.createGain();
-    const vel = (note.velocity || 0.8) * channel.volume;
-    ampGain.gain.setValueAtTime(0.001, time);
-    ampGain.gain.linearRampToValueAtTime(vel, time + (p.attack || 0.01));
-    ampGain.gain.exponentialRampToValueAtTime(0.0001, time + (p.decay || 0.5) + (p.release || 0.2));
-
-    carrier.connect(ampGain);
-    ampGain.connect(destination);
-
-    carrier.start(time);
-    modulator.start(time);
-    carrier.stop(time + (p.decay || 0.5) + (p.release || 0.2) + 0.05);
-    modulator.stop(time + (p.decay || 0.5) + (p.release || 0.2) + 0.05);
-  }
-
   // --- Acoustic & Orchestral Instrument Synthesis Engines ---
 
   // 4. Grand Piano (Acoustic Concert Multi-Harmonic Model)
