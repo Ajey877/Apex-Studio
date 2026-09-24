@@ -1,7 +1,9 @@
 import type { InstrumentVoiceRenderer } from '../instrumentRegistry';
 import { midiToFrequency, createNoiseBuffer } from './legacyVoiceUtils';
 
-export const renderLegacyDrumVoice: InstrumentVoiceRenderer = ({ channel, note, time, destination, audioContext }) => {const pitch = note.pitch % 12; // Modulo to map drum pad
+export const renderLegacyDrumVoice: InstrumentVoiceRenderer = ({ channel, note, time, destination, audioContext }) => {
+  const ctx = audioContext;
+const pitch = note.pitch % 12; // Modulo to map drum pad
     const vel = (note.velocity || 0.8) * channel.volume;
 
     // Pitch mapping:
