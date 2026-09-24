@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { 
   Layers, 
   X, 
@@ -12,7 +12,7 @@ import {
   Scissors,
   FolderOpen
 } from 'lucide-react';
-import { Channel } from '../types/daw';
+import { Channel, SampleZone } from '../types/daw';
 import { audioEngine } from '../audio/audioEngine';
 
 interface MultiZoneSamplerModalProps {
@@ -22,16 +22,8 @@ interface MultiZoneSamplerModalProps {
   onUpdateChannel: (channelId: string, updates: Partial<Channel>) => void;
 }
 
-interface KeyZone {
-  id: string;
+interface KeyZone extends SampleZone {
   name: string;
-  lowNote: number; // 0 - 127 (e.g. 36 = C2)
-  highNote: number;
-  rootNote: number;
-  lowVel: number; // 0 - 127
-  highVel: number;
-  sampleBufferId: string;
-  tuneSemitones: number;
   color: string;
 }
 
@@ -50,44 +42,42 @@ export const MultiZoneSamplerModal: React.FC<MultiZoneSamplerModalProps> = ({
   onUpdateChannel
 }) => {
   const [selectedChannelId, setSelectedChannelId] = useState<string>(channels[0]?.id || '');
-  const [zones, setZones] = useState<KeyZone[]>([
-    {
-      id: 'zone-1',
-      name: 'Sub Bass 808 Zone',
-      lowNote: 24, // C1
-      highNote: 47, // B2
-      rootNote: 36, // C2
-      lowVel: 0,
-      highVel: 127,
-      sampleBufferId: 'kick',
-      tuneSemitones: 0,
-      color: '#ff6e00'
-    },
-    {
-      id: 'zone-2',
-      name: 'Warm Acoustic Grand Zone',
-      lowNote: 48, // C3
-      highNote: 71, // B4
-      rootNote: 60, // C4
-      lowVel: 0,
-      highVel: 127,
-      sampleBufferId: 'synth',
-      tuneSemitones: 0,
-      color: '#00ff88'
-    },
-    {
-      id: 'zone-3',
-      name: 'High Air Lead / Rhodes Zone',
-      lowNote: 72, // C5
-      highNote: 96, // C7
-      rootNote: 84, // C6
-      lowVel: 0,
-      highVel: 127,
-      sampleBufferId: 'hihat',
-      tuneSemitones: 0,
-      color: '#00e5ff'
+  const [zones, setZones] = useState<KeyZone[]>([]);
+
+  const selectedChannel = channels.find(channel => channel.id === selectedChannelId) || channels[0];
+
+  const commitZones = (updated: KeyZone[]) => {
+    commitZones(updated);
+    if (selectedChannel) {
+      onUpdateChannel(selectedChannel.id, { sampleZones: updated.map(({ name, color, ...zone }) => zone) });
     }
-  ]);
+  };
+
+  useEffect(() => {
+    if (!selectedChannel) return;
+    const persisted = selectedChannel.sampleZones || [];
+    if (persisted.length > 0) {
+      const hydrated = persisted.map((zone, index) => ({ ...zone, name: 'Zone ' + (index + 1), color: ['#ff6e00', '#00ff88', '#00e5ff', '#a855f7'][index % 4] }));
+      setZones(hydrated);
+      setSelectedZoneId(persisted[0].id);
+    } else if (selectedChannel.customSample?.id) {
+      const zone: KeyZone = {
+        id: 'zone-' + selectedChannel.id,
+        name: selectedChannel.customSample.name || 'Sample Zone',
+        lowNote: 0, highNote: 127, rootNote: selectedChannel.customSample.rootPitch ?? 60,
+        lowVelocity: 0, highVelocity: 127, sampleId: selectedChannel.customSample.id, tuneSemitones: 0,
+        trimStart: selectedChannel.customSample.trimStart, trimEnd: selectedChannel.customSample.trimEnd,
+        reverse: selectedChannel.customSample.reverse, loop: selectedChannel.synthParams.sampleLoop,
+        color: '#ff6e00'
+      };
+      setZones([zone]);
+      setSelectedZoneId(zone.id);
+      onUpdateChannel(selectedChannel.id, { sampleZones: [((({ name, color, ...z }) => z)(zone))] });
+    } else {
+      setZones([]);
+    }
+  }, [selectedChannelId, selectedChannel?.id, selectedChannel?.customSample?.id, selectedChannel?.sampleZones]);
+
   const [selectedZoneId, setSelectedZoneId] = useState<string>('zone-2');
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
 
@@ -104,11 +94,11 @@ export const MultiZoneSamplerModal: React.FC<MultiZoneSamplerModalProps> = ({
       rootNote: 60,
       lowVel: 0,
       highVel: 127,
-      sampleBufferId: 'synth',
+      sampleId: selectedChannel?.customSample?.id || '',
       tuneSemitones: 0,
       color: '#a855f7'
     };
-    setZones([...zones, newZone]);
+    commitZones([...zones, newZone]);
     setSelectedZoneId(newZone.id);
     setStatusMessage(`Created new Multi-Sample Zone!`);
     setTimeout(() => setStatusMessage(null), 3000);
@@ -116,7 +106,7 @@ export const MultiZoneSamplerModal: React.FC<MultiZoneSamplerModalProps> = ({
 
   const handleDeleteZone = (id: string) => {
     if (zones.length <= 1) return;
-    setZones(zones.filter(z => z.id !== id));
+    commitZones(zones.filter(z => z.id !== id));
     if (selectedZoneId === id) {
       setSelectedZoneId(zones[0].id);
     }
@@ -291,7 +281,7 @@ export const MultiZoneSamplerModal: React.FC<MultiZoneSamplerModalProps> = ({
                     value={selectedZone.lowNote}
                     onChange={(e) => {
                       const updated = zones.map(z => z.id === selectedZone.id ? { ...z, lowNote: Number(e.target.value) } : z);
-                      setZones(updated);
+                      commitZones(updated);
                     }}
                     className="w-full accent-[#ff6e00]"
                   />
@@ -310,7 +300,7 @@ export const MultiZoneSamplerModal: React.FC<MultiZoneSamplerModalProps> = ({
                     value={selectedZone.highNote}
                     onChange={(e) => {
                       const updated = zones.map(z => z.id === selectedZone.id ? { ...z, highNote: Number(e.target.value) } : z);
-                      setZones(updated);
+                      commitZones(updated);
                     }}
                     className="w-full accent-[#ff6e00]"
                   />
@@ -329,7 +319,7 @@ export const MultiZoneSamplerModal: React.FC<MultiZoneSamplerModalProps> = ({
                     value={selectedZone.rootNote}
                     onChange={(e) => {
                       const updated = zones.map(z => z.id === selectedZone.id ? { ...z, rootNote: Number(e.target.value) } : z);
-                      setZones(updated);
+                      commitZones(updated);
                     }}
                     className="w-full accent-[#00ff88]"
                   />
@@ -341,10 +331,10 @@ export const MultiZoneSamplerModal: React.FC<MultiZoneSamplerModalProps> = ({
                 <div>
                   <label className="text-[10px] text-[#888] font-bold block mb-1">ASSIGNED SAMPLE AUDIO BUFFER</label>
                   <select
-                    value={selectedZone.sampleBufferId}
+                    value={selectedZone.sampleId}
                     onChange={(e) => {
-                      const updated = zones.map(z => z.id === selectedZone.id ? { ...z, sampleBufferId: e.target.value } : z);
-                      setZones(updated);
+                      const updated = zones.map(z => z.id === selectedZone.id ? { ...z, sampleId: e.target.value } : z);
+                      commitZones(updated);
                     }}
                     className="w-full bg-[#121214] text-white p-2 rounded border border-[#333336]"
                   >
@@ -363,7 +353,7 @@ export const MultiZoneSamplerModal: React.FC<MultiZoneSamplerModalProps> = ({
                     value={selectedZone.name}
                     onChange={(e) => {
                       const updated = zones.map(z => z.id === selectedZone.id ? { ...z, name: e.target.value } : z);
-                      setZones(updated);
+                      commitZones(updated);
                     }}
                     className="w-full bg-[#121214] text-white p-1.5 rounded border border-[#333336]"
                   />
