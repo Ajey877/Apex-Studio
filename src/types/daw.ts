@@ -553,6 +553,8 @@ export interface ProjectState {
   meta: ProjectMetadata;
   patterns: Pattern[];
   selectedPatternId: string;
+  /** Persistent metadata for every imported sample available to the project. */
+  sampleLibrary?: CustomSampleData[];
   channels: Channel[];
   selectedChannelId: string;
   playlistTracks: PlaylistTrack[];
