@@ -22,7 +22,6 @@ class FakeNode {
   onended: (() => void) | null = null;
   stopCalls = 0;
   connect() {}
-  start() {}
   loop = false;
   loopStart = 0;
   loopEnd = 0;
