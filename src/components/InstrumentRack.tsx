@@ -146,7 +146,7 @@ export const InstrumentRack: React.FC<InstrumentRackProps> = ({
         <div className="flex items-center gap-2">
           <Cpu className="w-3.5 h-3.5 text-[#ff6e00]" />
           <span className="text-[10px] font-bold text-white uppercase tracking-wider">
-            VST GENERATOR: <span style={{ color: channel.color }}>{channel.name}</span>
+            INSTRUMENT: <span style={{ color: channel.color }}>{channel.name}</span>
           </span>
 
           <select
