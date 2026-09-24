@@ -16,6 +16,7 @@ class FakeNode {
   readonly gain = new FakeAudioParam();
   readonly frequency = new FakeAudioParam();
   readonly detune = new FakeAudioParam();
+  readonly playbackRate = new FakeAudioParam();
   readonly pan = new FakeAudioParam();
   readonly Q = { value: 0 };
   type = '';
