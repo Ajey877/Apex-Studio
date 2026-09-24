@@ -1532,7 +1532,6 @@ export function App() {
           <span className="w-1 h-1 bg-[#444] rounded-full"></span>
           <button onClick={() => setIsExportOpen(true)} className="hover:text-white transition cursor-pointer">EXPORT MASTER</button>
           <span className="w-1 h-1 bg-[#444] rounded-full"></span>
-          <button onClick={() => setIsSubscriptionOpen(true)} className="text-[#ff6e00] hover:text-[#ff7d1a] transition cursor-pointer">{isProUser ? 'PRO SUITE ACTIVE' : 'PREMIUM TIER'}</button>
         </div>
       </footer>
 
