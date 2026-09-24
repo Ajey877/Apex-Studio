@@ -125,11 +125,12 @@ describe('Phase 22 standalone voice lifecycle integration', () => {
       assert.equal(engine.activeVoices.size, 1);
       const voiceId = [...engine.activeVoices.keys()][0];
       const oscillator = ctx.oscillators[0];
+      const scheduledStopCalls = oscillator.stopCalls;
       engine.stopNote(voiceId);
       engine.stopNote(voiceId);
 
       assert.equal(engine.activeVoices.size, 0);
-      assert.equal(oscillator.stopCalls, 1);
+      assert.equal(oscillator.stopCalls, scheduledStopCalls + 1);
     }
   });
 
