@@ -14,7 +14,7 @@ import { findSampleZone, getSamplePlaybackRate, clampSampleRange } from './sampl
 import { AudioClockTransport, TransportState } from './transport';
 import { ChorusEffect } from './effects/ChorusEffect';
 import { WetDryEffect } from './effects/WetDryEffect';
-import { createInstrumentRegistry, InstrumentRegistry } from './instrumentRegistry';
+import { createInstrumentRegistry, InstrumentRegistry, InstrumentVoiceHandle } from './instrumentRegistry';
 import { renderIndependentPluckVoice } from './instruments/independentPluck';
 import { renderSubtractiveSynthVoice } from './instruments/subtractiveSynth';
 import { renderFmSynthVoice } from './instruments/fmSynth';
@@ -769,13 +769,21 @@ class AudioEngine {
     } else if (channel.customSample && channel.customSample.id) {
       this.triggerCustomSampleVoice(channel, note, time, mixerChannel.input, voiceId);
     } else {
-      const voiceHandle = this.instrumentRegistry.get(channel.instrumentType)({
+      let voiceHandle: InstrumentVoiceHandle | void;
+      const onEnded = () => {
+        if (voiceHandle && this.activeVoices.get(voiceId) === voiceHandle) {
+          this.activeVoices.delete(voiceId);
+        }
+      };
+
+      voiceHandle = this.instrumentRegistry.get(channel.instrumentType)({
         channel,
         note,
         time,
         destination: mixerChannel.input,
         audioContext: this.ctx!,
-        voiceId
+        voiceId,
+        onEnded,
       });
       if (voiceHandle) {
         this.activeVoices.set(voiceId, voiceHandle);

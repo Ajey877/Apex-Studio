@@ -8,6 +8,7 @@ export const renderSubtractiveSynthVoice: InstrumentVoiceRenderer = ({
   time,
   destination,
   audioContext,
+  onEnded,
 }) => {
   const ctx = audioContext;
   const p = channel.synthParams;
@@ -106,6 +107,7 @@ export const renderSubtractiveSynthVoice: InstrumentVoiceRenderer = ({
   ampGain.connect(destination);
 
   oscList.forEach(o => o.start(time));
+  if (oscList[0]) oscList[0].onended = () => onEnded?.();
 
   const stopTime = time + duration;
   ampGain.gain.setValueAtTime(vel * sustain, stopTime);

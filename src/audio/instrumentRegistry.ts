@@ -8,6 +8,8 @@ export interface InstrumentVoiceContext {
   /** The active live or OfflineAudioContext used for this render. */
   audioContext: BaseAudioContext;
   voiceId: string;
+  /** Called by a standalone renderer when its scheduled voice naturally completes. */
+  onEnded?: () => void;
 }
 
 export interface InstrumentVoiceHandle {

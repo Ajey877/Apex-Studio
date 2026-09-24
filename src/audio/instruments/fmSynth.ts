@@ -8,6 +8,7 @@ export const renderFmSynthVoice: InstrumentVoiceRenderer = ({
   time,
   destination,
   audioContext,
+  onEnded,
 }) => {
   const ctx = audioContext;
   const p = channel.synthParams;
@@ -44,6 +45,7 @@ export const renderFmSynthVoice: InstrumentVoiceRenderer = ({
 
   carrier.start(time);
   modulator.start(time);
+  carrier.onended = () => onEnded?.();
   const stopTime = time + decay + release + 0.05;
   carrier.stop(stopTime);
   modulator.stop(stopTime);
