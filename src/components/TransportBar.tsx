@@ -59,7 +59,6 @@ interface TransportBarProps {
   onOpenProjectManager: () => void;
   onOpenCollab: () => void;
   onOpenAnalytics: () => void;
-  onOpenSubscription: () => void;
   onOpenHotkeys: () => void;
   onOpenMidi: () => void;
   onOpenParametricEq?: () => void;
@@ -71,21 +70,15 @@ interface TransportBarProps {
   onOpenMidiLearn?: () => void;
   onOpenMultiZoneSampler?: () => void;
   onOpenWavetableSynth?: () => void;
-  onOpenWamPlugin?: () => void;
   onOpenTakeComping?: () => void;
   onOpenSidechain?: () => void;
   onOpenPolyphonicEditor?: () => void;
   onOpenDesktopApp?: () => void;
   onOpenWarpProcessor?: () => void;
-  onOpenVideoScoring?: () => void;
-  onOpenSpatialAudio?: () => void;
-  onOpenMpeExpression?: () => void;
-  onOpenStemSplitter?: () => void;
   onOpenMasterMacros?: () => void;
   onOpenProjectZipBundle?: () => void;
   saveError?: string | null;
   collaboratorCount: number;
-  isProUser: boolean;
   isSidebarOpen: boolean;
   onToggleSidebar: () => void;
 }
@@ -110,7 +103,6 @@ export const TransportBar: React.FC<TransportBarProps> = ({
   onOpenProjectManager,
   onOpenCollab,
   onOpenAnalytics,
-  onOpenSubscription,
   onOpenHotkeys,
   onOpenMidi,
   onOpenParametricEq,
@@ -122,21 +114,15 @@ export const TransportBar: React.FC<TransportBarProps> = ({
   onOpenMidiLearn,
   onOpenMultiZoneSampler,
   onOpenWavetableSynth,
-  onOpenWamPlugin,
   onOpenTakeComping,
   onOpenSidechain,
   onOpenPolyphonicEditor,
   onOpenDesktopApp,
   onOpenWarpProcessor,
-  onOpenVideoScoring,
-  onOpenSpatialAudio,
-  onOpenMpeExpression,
-  onOpenStemSplitter,
   onOpenMasterMacros,
   onOpenProjectZipBundle,
   saveError,
   collaboratorCount,
-  isProUser,
   isSidebarOpen,
   onToggleSidebar
 }) => {
@@ -457,19 +443,6 @@ export const TransportBar: React.FC<TransportBarProps> = ({
             </button>
           )}
 
-          {/* Third-Party WAM / VST3 Host Rack */}
-          {onOpenWamPlugin && (
-            <button
-              id="fl-wam-btn"
-              onClick={onOpenWamPlugin}
-              className="flex items-center gap-1.5 px-2 py-1 bg-[#121214] hover:bg-[#222225] text-[#b0b0b0] hover:text-white rounded border border-[#333336] text-xs transition"
-              title="Web Audio Modules (WAM2 / VST3) Third-Party Plugin Rack"
-            >
-              <Cpu className="w-3.5 h-3.5 text-[#a855f7]" />
-              <span className="text-[10px] font-bold hidden xl:inline">WAM/VST3</span>
-            </button>
-          )}
-
           {/* Hardware MIDI Controller Learn */}
           {onOpenMidiLearn && (
             <button
@@ -509,19 +482,6 @@ export const TransportBar: React.FC<TransportBarProps> = ({
             </button>
           )}
 
-          {/* Melodyne Polyphonic ARA Blob Editor */}
-          {onOpenPolyphonicEditor && (
-            <button
-              id="fl-polyphonic-editor-btn"
-              onClick={onOpenPolyphonicEditor}
-              className="flex items-center gap-1.5 px-2 py-1 bg-[#121214] hover:bg-[#222225] text-[#b0b0b0] hover:text-white rounded border border-[#333336] text-xs transition"
-              title="Melodyne / ARA2 Polyphonic Note Blob & Formant Editor"
-            >
-              <Activity className="w-3.5 h-3.5 text-[#00ff88]" />
-              <span className="text-[10px] font-bold hidden xl:inline">ARA BLOB</span>
-            </button>
-          )}
-
           {/* Advanced Warp Modes (Beats, Tones, Texture, Complex Pro) */}
           {onOpenWarpProcessor && (
             <button
@@ -532,58 +492,6 @@ export const TransportBar: React.FC<TransportBarProps> = ({
             >
               <Zap className="w-3.5 h-3.5 text-[#00ff88]" />
               <span className="text-[10px] font-bold hidden xl:inline">WARP</span>
-            </button>
-          )}
-
-          {/* Film Scoring Video Sync */}
-          {onOpenVideoScoring && (
-            <button
-              id="fl-video-scoring-btn"
-              onClick={onOpenVideoScoring}
-              className="flex items-center gap-1.5 px-2 py-1 bg-[#121214] hover:bg-[#222225] text-[#b0b0b0] hover:text-white rounded border border-[#333336] text-xs transition"
-              title="Film Scoring & SMPTE Video Timecode Monitor"
-            >
-              <Film className="w-3.5 h-3.5 text-[#a855f7]" />
-              <span className="text-[10px] font-bold hidden xl:inline">VIDEO SYNC</span>
-            </button>
-          )}
-
-          {/* 3D Dolby Atmos Spatial Panner */}
-          {onOpenSpatialAudio && (
-            <button
-              id="fl-spatial-panner-btn"
-              onClick={onOpenSpatialAudio}
-              className="flex items-center gap-1.5 px-2 py-1 bg-[#121214] hover:bg-[#222225] text-[#b0b0b0] hover:text-white rounded border border-[#333336] text-xs transition"
-              title="3D Dolby Atmos & Spatial Audio Binaural Panner"
-            >
-              <Headphones className="w-3.5 h-3.5 text-[#00e5ff]" />
-              <span className="text-[10px] font-bold hidden xl:inline">3D SPATIAL</span>
-            </button>
-          )}
-
-          {/* MPE Polyphonic Expression Editor */}
-          {onOpenMpeExpression && (
-            <button
-              id="fl-mpe-expression-btn"
-              onClick={onOpenMpeExpression}
-              className="flex items-center gap-1.5 px-2 py-1 bg-[#121214] hover:bg-[#222225] text-[#b0b0b0] hover:text-white rounded border border-[#333336] text-xs transition"
-              title="MPE (MIDI Polyphonic Expression) Per-Note Slide & Aftertouch"
-            >
-              <Sliders className="w-3.5 h-3.5 text-[#ff6e00]" />
-              <span className="text-[10px] font-bold hidden xl:inline">MPE</span>
-            </button>
-          )}
-
-          {/* AI Stem Splitter & Motif Generator */}
-          {onOpenStemSplitter && (
-            <button
-              id="fl-stem-splitter-btn"
-              onClick={onOpenStemSplitter}
-              className="flex items-center gap-1.5 px-2 py-1 bg-[#121214] hover:bg-[#222225] text-[#b0b0b0] hover:text-white rounded border border-[#333336] text-xs transition"
-              title="AI 4-Stem Audio Splitter & Neural Motif Generator"
-            >
-              <Wand2 className="w-3.5 h-3.5 text-[#ff6e00]" />
-              <span className="text-[10px] font-bold hidden xl:inline">AI STEMS</span>
             </button>
           )}
 
@@ -619,10 +527,10 @@ export const TransportBar: React.FC<TransportBarProps> = ({
               id="fl-desktop-app-btn"
               onClick={onOpenDesktopApp}
               className="flex items-center gap-1.5 px-2 py-1 bg-[#221812] hover:bg-[#332218] text-[#ffaa00] hover:text-white rounded border border-[#ff6e00]/50 text-xs transition font-bold shadow-sm"
-              title="Run as Standalone Windowed Desktop Computer Program (Windows / Mac / Linux)"
+              title="Open the Windows desktop application"
             >
               <Monitor className="w-3.5 h-3.5 text-[#ff6e00]" />
-              <span className="text-[10px] hidden sm:inline">DESKTOP APP</span>
+              <span className="text-[10px] hidden sm:inline">WINDOWS APP</span>
             </button>
           )}
 
@@ -695,7 +603,7 @@ export const TransportBar: React.FC<TransportBarProps> = ({
             id="fl-collab-btn"
             onClick={onOpenCollab}
             className="flex items-center gap-1.5 px-2 py-1 bg-[#121214] hover:bg-[#222225] text-[#b0b0b0] hover:text-white rounded border border-[#333336] text-xs transition"
-            title="Real-time multi-user collaboration"
+            title="Studio notes and local project annotations"
           >
             <Users className="w-3.5 h-3.5 text-[#ff6e00]" />
             <span className="text-[10px] font-bold text-[#ff6e00]">{collaboratorCount}</span>
@@ -706,27 +614,13 @@ export const TransportBar: React.FC<TransportBarProps> = ({
             id="fl-export-btn"
             onClick={onOpenExport}
             className="flex items-center gap-1 px-2.5 py-1 bg-[#ff6e00] hover:bg-[#ff7d1a] text-black rounded font-bold text-xs shadow-sm transition active:scale-95"
-            title="Render Master Stems (ZIP, WAV, MP3, MIDI)"
+            title="Render WAV, MIDI, and stems"
           >
             <Download className="w-3.5 h-3.5" />
             <span className="hidden sm:inline">EXPORT</span>
           </button>
 
-          {/* Pro Upgrade */}
-          <button
-            id="fl-pro-tier-btn"
-            onClick={onOpenSubscription}
-            className={`hidden md:flex items-center gap-1 px-2 py-1 rounded text-xs font-bold border transition ${
-              isProUser 
-                ? 'bg-[#222225] text-[#ff6e00] border-[#ff6e00]/40' 
-                : 'bg-[#121214] text-[#ff6e00] border-[#333336] hover:border-[#ff6e00]'
-            }`}
-            title="Pro Membership"
-          >
-            <Crown className="w-3.5 h-3.5 text-[#ff6e00]" />
-            <span className="text-[10px]">{isProUser ? 'PRO TIER' : 'UPGRADE'}</span>
-          </button>
-        </div>
+                  </div>
       </div>
 
       {/* Subnav Ribbon / View Navigation Tabs */}
@@ -793,7 +687,7 @@ export const TransportBar: React.FC<TransportBarProps> = ({
           }`}
         >
           <Cpu className="w-3.5 h-3.5 text-[#ff6e00]" />
-          <span>VST Synths</span>
+          <span>Instruments</span>
         </button>
 
         <button
