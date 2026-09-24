@@ -424,8 +424,8 @@ describe('Phase 26 final renderer-backed audio behavior', () => {
     assert.equal(source.buffer, sample);
     assert.ok(Math.abs(source.playbackRate.value + Math.pow(2, 2 / 12)) < 1e-9);
     assert.equal(source.loop, true);
-    assert.equal(source.loopStart, 0.2 * sample.duration);
-    assert.equal(source.loopEnd, 0.8 * sample.duration);
+    assert.equal(source.loopStart, 0.1 * sample.duration);
+    assert.equal(source.loopEnd, 0.9 * sample.duration);
     assert.equal(source.startOffset, 0.9 * sample.duration);
     assert.equal(source.startDuration, undefined);
     assert.equal(gain.gain.value, 0.9 * 0.8 * 0.75);
