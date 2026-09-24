@@ -119,6 +119,7 @@ export const renderOrganVoice: InstrumentVoiceRenderer = ({ channel, note, time,
     const amplitudes = [0.6, 1.0, 0.7, 0.4, 0.3];
 
     harmonics.forEach((h, i) => {
+  const ctx = audioContext;
       const osc = ctx.createOscillator();
       osc.type = 'sine';
       osc.frequency.setValueAtTime(f0 * h, time);
@@ -193,6 +194,7 @@ export const renderStringsVoice: InstrumentVoiceRenderer = ({ channel, note, tim
     // Detuned violin unison voices
     const detunes = [-12, -5, 0, 5, 12];
     detunes.forEach((d) => {
+  const ctx = audioContext;
       const osc = ctx.createOscillator();
       osc.type = 'sawtooth';
       osc.frequency.setValueAtTime(f0, time);
