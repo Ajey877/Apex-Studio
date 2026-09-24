@@ -18,6 +18,7 @@ export const renderIndependentPluckVoice: InstrumentVoiceRenderer = ({
   time,
   destination,
   audioContext,
+  onEnded,
 }) => {
   const ctx = audioContext;
   const frequency = midiToFrequency(note.pitch + channel.pitch);
@@ -57,6 +58,18 @@ export const renderIndependentPluckVoice: InstrumentVoiceRenderer = ({
 
   body.start(time);
   overtone.start(time);
+  body.onended = () => onEnded?.();
   body.stop(time + duration + 0.02);
   overtone.stop(time + duration + 0.02);
+
+  return {
+    stop: (relTime?: number) => {
+      const now = relTime ?? ctx.currentTime;
+      output.gain.cancelScheduledValues?.(now);
+      output.gain.setValueAtTime(Math.max(0.0001, output.gain.value), now);
+      output.gain.exponentialRampToValueAtTime(0.0001, now + 0.02);
+      try { body.stop(now + 0.025); } catch (_) {}
+      try { overtone.stop(now + 0.025); } catch (_) {}
+    },
+  };
 };
