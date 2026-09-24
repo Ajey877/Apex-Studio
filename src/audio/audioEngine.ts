@@ -10,9 +10,6 @@ import {
   GrossBeatState,
   SidechainSettings
 } from '../types/daw';
-import { 
-  // sample zone helpers remain owned by the standalone sampler renderer
-} from './sampleZones';
 import { AudioClockTransport, TransportState } from './transport';
 import { ChorusEffect } from './effects/ChorusEffect';
 import { WetDryEffect } from './effects/WetDryEffect';
