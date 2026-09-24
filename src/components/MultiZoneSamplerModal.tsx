@@ -338,11 +338,15 @@ export const MultiZoneSamplerModal: React.FC<MultiZoneSamplerModalProps> = ({
                     }}
                     className="w-full bg-[#121214] text-white p-2 rounded border border-[#333336]"
                   >
-                    <option value="kick">Deep Sub 808 Kick (.WAV)</option>
-                    <option value="snare">808 Crisp Snare Layer (.WAV)</option>
-                    <option value="hihat">Closed Titanium Hat (.WAV)</option>
-                    <option value="synth">Warm Poly Saw Key Sample (.WAV)</option>
-                    <option value="lead">Hyper Lead Saturated Wave (.WAV)</option>
+                    {Array.from(new Map(
+                      channels
+                        .filter(channel => channel.customSample?.id)
+                        .map(channel => [channel.customSample!.id, channel.customSample!])
+                    ).values()).map(sample => (
+                      <option key={sample.id} value={sample.id}>
+                        {sample.name || sample.id}
+                      </option>
+                    ))}
                   </select>
                 </div>
 
