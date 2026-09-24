@@ -779,3 +779,30 @@ test('autosave lifecycle bypasses reconciliation and does not prune storage', as
   }
 });
 
+
+
+test('project audio ids include samples referenced only by multi-sampler zones', () => {
+  const state = createDefaultProjectState();
+  const zoneOnlySampleId = 'zone-only-sample-1';
+  const sampleChannel = {
+    ...state.channels[0],
+    customSample: undefined,
+    sampleZones: [{
+      id: 'zone-1',
+      sampleId: zoneOnlySampleId,
+      lowNote: 0,
+      highNote: 127,
+      rootNote: 60,
+      lowVelocity: 0,
+      highVelocity: 127,
+      tuneSemitones: 0
+    }]
+  };
+
+  const ids = getAudioIdsForProject({
+    ...state,
+    channels: [sampleChannel]
+  });
+
+  assert.deepEqual(ids, [zoneOnlySampleId]);
+});
