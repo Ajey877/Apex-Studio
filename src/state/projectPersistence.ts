@@ -66,6 +66,10 @@ export const getAudioIdsForProject = (state: ProjectState): string[] => {
     if (clip.type === 'audio' && clip.audioBufferId) ids.add(clip.audioBufferId);
   });
 
+  state.sampleLibrary?.forEach(sample => {
+    if (sample.id) ids.add(sample.id);
+  });
+
   state.channels?.forEach(channel => {
     if (channel.customSample?.id) ids.add(channel.customSample.id);
     channel.sampleZones?.forEach(zone => {
@@ -153,6 +157,13 @@ export const hydrateProjectAudio = async (
   // Phase 8C (P1-11): channel samples are hydrated from the same asset store, so
   // they carry the same availability flag. Unchanged channels keep their identity
   // to avoid pointless state churn.
+  const sampleLibrary = (state.sampleLibrary || []).map(sample => {
+    if (!sample?.id) return sample;
+    const audioUnavailable = missingIds.has(sample.id);
+    if (isSampleAudioUnavailable(sample) === audioUnavailable) return sample;
+    return { ...sample, audioUnavailable };
+  });
+
   const channels: Channel[] = state.channels.map(channel => {
     const sample = channel.customSample;
     if (!sample?.id) return channel;
@@ -166,6 +177,7 @@ export const hydrateProjectAudio = async (
       ...state,
       recordings: restoredRecordings,
       playlistClips,
+      sampleLibrary,
       channels
     },
     hydratedAudioIds: [...new Set(hydratedAudioIds)],
