@@ -44,10 +44,12 @@ class MockNode {
 
 class MockAudioContext {
   readonly operations: Operation[] = [];
-  createGain() { this.operations.push(['createGain']); return new MockNode(this, this.operations); }
-  createBiquadFilter() { this.operations.push(['createBiquadFilter']); return new MockNode(this, this.operations); }
-  createOscillator() { this.operations.push(['createOscillator']); return new MockNode(this, this.operations); }
-  createStereoPanner() { this.operations.push(['createStereoPanner']); return new MockNode(this, this.operations); }
+  readonly nodes: MockNode[] = [];
+  private node(factory: () => MockNode) { const node = factory(); this.nodes.push(node); return node; }
+  createGain() { this.operations.push(['createGain']); return this.node(() => new MockNode(this, this.operations)); }
+  createBiquadFilter() { this.operations.push(['createBiquadFilter']); return this.node(() => new MockNode(this, this.operations)); }
+  createOscillator() { this.operations.push(['createOscillator']); return this.node(() => new MockNode(this, this.operations)); }
+  createStereoPanner() { this.operations.push(['createStereoPanner']); return this.node(() => new MockNode(this, this.operations)); }
 }
 
 const render = () => {
