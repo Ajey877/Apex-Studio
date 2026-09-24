@@ -829,7 +829,11 @@ class AudioEngine {
     };
 
     this.activeVoices.set(voiceId, { stop });
-    if (group > 0) this.activeDrumPads.get(group)?.add(voiceId) ?? this.activeDrumPads.set(group, new Set([voiceId]));
+    if (group > 0) {
+      const voices = this.activeDrumPads.get(group) || new Set<string>();
+      voices.add(voiceId);
+      this.activeDrumPads.set(group, voices);
+    }
     source.onended = () => {
       this.activeVoices.delete(voiceId);
       if (group > 0) this.activeDrumPads.get(group)?.delete(voiceId);
