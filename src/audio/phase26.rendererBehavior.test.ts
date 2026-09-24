@@ -313,7 +313,7 @@ const makeBaseChannel = (overrides: Record<string, unknown> = {}): Channel => ({
     sampleLoop: false,
   },
   ...overrides,
-} as Channel);
+} as unknown as Channel);
 
 const note = (id: string, start: number, pitch = 60, duration = 1, velocity = 1): Note =>
   ({ id, start, pitch, duration, velocity } as Note);
