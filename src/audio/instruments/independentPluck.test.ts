@@ -28,6 +28,7 @@ class MockNode {
   readonly frequency: MockAudioParam;
   readonly pan: MockAudioParam;
   readonly Q = { value: 0 };
+  onended: (() => void) | null = null;
   type = '';
   constructor(context: MockAudioContext, operations: Operation[]) {
     this.context = context;
@@ -53,7 +54,7 @@ const render = () => {
   const context = new MockAudioContext();
   const destination = {} as AudioNode;
 
-  renderIndependentPluckVoice({
+  const handle = renderIndependentPluckVoice({
     channel: {
       id: 'independent',
       name: 'Independent Pluck',
@@ -112,11 +113,11 @@ const render = () => {
     voiceId: 'voice-1',
   });
 
-  return context.operations;
+  return { context, handle, operations: context.operations };
 };
 
 test('independent pluck renders through the instrument contract', () => {
-  const operations = render();
+  const { operations } = render();
 
   assert.ok(operations.some(([name]) => name === 'createOscillator'));
   assert.ok(operations.some(([name]) => name === 'createBiquadFilter'));
@@ -128,7 +129,45 @@ test('independent pluck renders through the instrument contract', () => {
 });
 
 test('the same independent renderer produces identical live/offline scheduling', () => {
-  const liveOperations = render();
-  const offlineOperations = render();
+  const liveOperations = render().operations;
+  const offlineOperations = render().operations;
   assert.deepEqual(offlineOperations, liveOperations);
+});
+
+
+test('independent pluck returns a lifecycle handle and reports natural completion', () => {
+  const { context, handle } = render();
+  assert.ok(handle);
+  const body = context.nodes.find(node => node.type === 'triangle');
+  assert.ok(body);
+  let ended = false;
+  const ctx = context as unknown as BaseAudioContext;
+  const handleWithCallback = renderIndependentPluckVoice({
+    channel: {
+      id: 'independent',
+      name: 'Independent Pluck',
+      color: '#ff6e00',
+      instrumentType: 'independent_pluck',
+      mixerTrackId: 1,
+      volume: 0.8,
+      pan: 0,
+      pitch: 0,
+      mute: false,
+      solo: false,
+      steps: [],
+      notes: [],
+      synthParams: {} as any,
+    },
+    note: { id: 'n2', pitch: 60, start: 0, duration: 1, velocity: 0.8 },
+    time: 0,
+    destination: {} as AudioNode,
+    audioContext: ctx,
+    voiceId: 'voice-2',
+    onEnded: () => { ended = true; },
+  });
+  assert.ok(handleWithCallback);
+  const callbackBody = context.nodes.find(node => node.type === 'triangle' && node !== body);
+  assert.ok(callbackBody);
+  callbackBody.onended?.();
+  assert.equal(ended, true);
 });
