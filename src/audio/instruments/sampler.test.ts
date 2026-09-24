@@ -105,7 +105,7 @@ describe('sampler renderer', () => {
     assert.ok(handle);
     const source = ctx.sources[0];
     assert.equal(source.buffer, buffer);
-    assert.equal(source.playbackRate.value, 2);
+    assert.ok(Math.abs(source.playbackRate.value - Math.pow(2, 5 / 12)) < 1e-9);
     assert.equal(source.loop, true);
     assert.equal(source.loopStart, 0.4);
     assert.equal(source.loopEnd, 1.6);
