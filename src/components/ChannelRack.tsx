@@ -289,6 +289,21 @@ export const ChannelRack: React.FC<ChannelRackProps> = ({
                   <span className="text-[9px] text-[#888]">Brass</span>
                 </button>
 
+                {/* Section: Independent / Extensible */}
+                <div className="px-3 py-1 text-[8px] font-bold text-[#666] uppercase tracking-wider bg-[#161618]">
+                  Independent Voice
+                </div>
+                <button
+                  onClick={() => {
+                    onAddChannel('independent_pluck', 'Apex Independent Pluck', '#ff6e00');
+                    setShowAddMenu(false);
+                  }}
+                  className="w-full text-left px-3 py-1.5 hover:bg-[#2d2d30] hover:text-white flex items-center justify-between"
+                >
+                  <span className="font-semibold">Apex Independent Pluck</span>
+                  <span className="text-[9px] text-[#888]">Registry</span>
+                </button>
+
                 {/* Section: Bass & 808 */}
                 <div className="px-3 py-1 text-[8px] font-bold text-[#666] uppercase tracking-wider bg-[#161618]">
                   Bass & Low-End
