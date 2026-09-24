@@ -10,7 +10,11 @@ export interface InstrumentVoiceContext {
   voiceId: string;
 }
 
-export type InstrumentVoiceRenderer = (context: InstrumentVoiceContext) => void;
+export interface InstrumentVoiceHandle {
+  stop: (time?: number) => void;
+}
+
+export type InstrumentVoiceRenderer = (context: InstrumentVoiceContext) => InstrumentVoiceHandle | void;
 
 export interface InstrumentRegistry {
   get(instrumentType: InstrumentType): InstrumentVoiceRenderer;
