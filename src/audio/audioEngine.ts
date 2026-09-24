@@ -778,8 +778,16 @@ class AudioEngine {
       ? channel.drumPads?.find(candidate => candidate.note === note.pitch)
       : undefined;
     const chokeGroup = pad?.chokeGroup || 0;
+    const sampledDrumPadBuffer = pad?.sampleId
+      ? this.sampleBuffers.get(pad.sampleId)
+      : undefined;
+    const canChokeDrumPad =
+      channel.instrumentType === 'drumpad' &&
+      Boolean(pad?.sampleId) &&
+      Boolean(sampledDrumPadBuffer) &&
+      chokeGroup > 0;
 
-    if (chokeGroup > 0) {
+    if (canChokeDrumPad) {
       this.stopDrumPadChokeGroup(chokeGroup, time);
     }
 
