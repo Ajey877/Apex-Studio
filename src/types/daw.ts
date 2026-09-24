@@ -35,7 +35,8 @@ export type InstrumentType =
   | 'vox_choir'
   | 'marimba_bell'
   | 'fm_bell'
-  | 'chiptune_8bit';
+  | 'chiptune_8bit'
+  | 'independent_pluck';
 
 export type FxType = 
   | 'equalizer' 

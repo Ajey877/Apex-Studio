@@ -15,6 +15,7 @@ import { AudioClockTransport, TransportState } from './transport';
 import { ChorusEffect } from './effects/ChorusEffect';
 import { WetDryEffect } from './effects/WetDryEffect';
 import { createInstrumentRegistry, InstrumentRegistry } from './instrumentRegistry';
+import { renderIndependentPluckVoice } from './instruments/independentPluck';
 
 export type MidiEventPayload = {
   type: 'noteOn' | 'noteOff' | 'cc' | 'pitchBend';
@@ -348,6 +349,7 @@ class AudioEngine {
       vox_choir: ({ channel, note, time, destination, voiceId }) => this.triggerVoxChoirVoice(channel, note, time, destination, voiceId),
       marimba_bell: ({ channel, note, time, destination, voiceId }) => this.triggerMarimbaVoice(channel, note, time, destination, voiceId),
       chiptune_8bit: ({ channel, note, time, destination, voiceId }) => this.triggerChiptuneVoice(channel, note, time, destination, voiceId),
+      independent_pluck: renderIndependentPluckVoice,
       minisynth: ({ channel, note, time, destination, voiceId }) => this.triggerSubtractiveVoice(channel, note, time, destination, voiceId),
       wavetable: ({ channel, note, time, destination, voiceId }) => this.triggerSubtractiveVoice(channel, note, time, destination, voiceId),
       sampler: ({ channel, note, time, destination, voiceId }) => this.triggerSubtractiveVoice(channel, note, time, destination, voiceId),
@@ -772,6 +774,7 @@ class AudioEngine {
         note,
         time,
         destination: mixerChannel.input,
+        audioContext: this.ctx!,
         voiceId
       });
     }

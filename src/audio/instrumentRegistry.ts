@@ -5,6 +5,8 @@ export interface InstrumentVoiceContext {
   note: Note;
   time: number;
   destination: AudioNode;
+  /** The active live or OfflineAudioContext used for this render. */
+  audioContext: BaseAudioContext;
   voiceId: string;
 }
 
@@ -27,12 +29,8 @@ export const createInstrumentRegistry = (
     }
   }
 
-  // The fallback is deliberately not inserted under every instrument type.
-  // This keeps the registry extensible: unknown/new instrument types can use
-  // the same safe fallback without pretending they have a dedicated renderer.
   return {
     get: (instrumentType: InstrumentType) => registry.get(instrumentType) ?? fallback,
     has: (instrumentType: InstrumentType) => registry.has(instrumentType),
   };
-
 };
