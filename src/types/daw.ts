@@ -18,7 +18,6 @@ export type InstrumentType =
   | 'drumpad' 
   | 'wavetable' 
   | 'sampler' 
-  | 'vst_custom'
   | 'grand_piano'
   | 'rhodes_epiano'
   | 'hammond_organ'
