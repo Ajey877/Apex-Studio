@@ -1,4 +1,5 @@
 import type { InstrumentVoiceRenderer } from '../instrumentRegistry';
+import { renderLegacyDrumVoice } from './legacyDrum';
 
 export const renderDrumPadVoice: InstrumentVoiceRenderer = ({
   channel,
@@ -12,7 +13,8 @@ export const renderDrumPadVoice: InstrumentVoiceRenderer = ({
   const pad = channel.drumPads?.find(
     candidate => candidate.note === note.pitch && candidate.sampleId,
   );
-  if (!pad || !getSampleBuffer) return;
+  if (!pad || !pad.sampleId) return renderLegacyDrumVoice({ channel, note, time, destination, audioContext, voiceId: 'legacy-drum' });
+  if (!getSampleBuffer) return;
 
   const buffer = getSampleBuffer(pad.sampleId);
   if (!buffer) return;
