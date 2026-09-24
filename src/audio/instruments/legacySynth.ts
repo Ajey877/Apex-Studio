@@ -1,8 +1,10 @@
 import type { InstrumentVoiceRenderer } from '../instrumentRegistry';
+import { createLegacyVoiceHandle } from './legacyVoiceLifecycle';
 import { midiToFrequency } from './legacyVoiceUtils';
 
-export const renderAcid303Voice: InstrumentVoiceRenderer = ({ channel, note, time, destination, audioContext }) => {
+export const renderAcid303Voice: InstrumentVoiceRenderer = ({ channel, note, time, destination, audioContext, onEnded }) => {
   const ctx = audioContext;
+  const lifecycleSources: AudioScheduledSourceNode[] = [];
 const f0 = midiToFrequency(note.pitch + channel.pitch);
     const vel = (note.velocity || 0.8) * channel.volume;
     const duration = (note.duration || 1) * 0.25;
@@ -21,6 +23,7 @@ const f0 = midiToFrequency(note.pitch + channel.pitch);
     filter.frequency.exponentialRampToValueAtTime(Math.max(80, f0 * 1.5), time + 0.18);
 
     const osc = ctx.createOscillator();
+      lifecycleSources.push(osc);
     osc.type = 'sawtooth';
     osc.frequency.setValueAtTime(f0, time);
 
@@ -31,10 +34,11 @@ const f0 = midiToFrequency(note.pitch + channel.pitch);
     osc.start(time);
     osc.stop(time + duration + 0.15);
   
+  return createLegacyVoiceHandle(lifecycleSources, onEnded);
 };
-
-export const renderReeseBassVoice: InstrumentVoiceRenderer = ({ channel, note, time, destination, audioContext }) => {
+export const renderReeseBassVoice: InstrumentVoiceRenderer = ({ channel, note, time, destination, audioContext, onEnded }) => {
   const ctx = audioContext;
+  const lifecycleSources: AudioScheduledSourceNode[] = [];
 const f0 = midiToFrequency(note.pitch + channel.pitch);
     const vel = (note.velocity || 0.8) * channel.volume;
     const duration = (note.duration || 2) * 0.3;
@@ -54,6 +58,7 @@ const f0 = midiToFrequency(note.pitch + channel.pitch);
     detunes.forEach((d) => {
   const ctx = audioContext;
 const osc = ctx.createOscillator();
+      lifecycleSources.push(osc);
       osc.type = 'sawtooth';
       osc.frequency.setValueAtTime(f0, time);
       osc.detune.setValueAtTime(d, time);
@@ -68,15 +73,17 @@ const osc = ctx.createOscillator();
     filter.connect(ampGain);
     ampGain.connect(destination);
   
+  return createLegacyVoiceHandle(lifecycleSources, onEnded);
 };
-
-export const render808SubVoice: InstrumentVoiceRenderer = ({ channel, note, time, destination, audioContext }) => {
+export const render808SubVoice: InstrumentVoiceRenderer = ({ channel, note, time, destination, audioContext, onEnded }) => {
   const ctx = audioContext;
+  const lifecycleSources: AudioScheduledSourceNode[] = [];
 const f0 = midiToFrequency(note.pitch + channel.pitch);
     const vel = (note.velocity || 0.8) * channel.volume;
     const duration = (note.duration || 2) * 0.4;
 
     const osc = ctx.createOscillator();
+      lifecycleSources.push(osc);
     osc.type = 'sine';
     // Pitch punch drop
     osc.frequency.setValueAtTime(f0 * 1.8, time);
@@ -93,10 +100,11 @@ const f0 = midiToFrequency(note.pitch + channel.pitch);
     osc.start(time);
     osc.stop(time + duration + 0.55);
   
+  return createLegacyVoiceHandle(lifecycleSources, onEnded);
 };
-
-export const renderSupersawVoice: InstrumentVoiceRenderer = ({ channel, note, time, destination, audioContext }) => {
+export const renderSupersawVoice: InstrumentVoiceRenderer = ({ channel, note, time, destination, audioContext, onEnded }) => {
   const ctx = audioContext;
+  const lifecycleSources: AudioScheduledSourceNode[] = [];
 const f0 = midiToFrequency(note.pitch + channel.pitch);
     const vel = (note.velocity || 0.8) * channel.volume;
     const duration = (note.duration || 2) * 0.3;
@@ -116,6 +124,7 @@ const f0 = midiToFrequency(note.pitch + channel.pitch);
     supersawDetunes.forEach((d) => {
   const ctx = audioContext;
 const osc = ctx.createOscillator();
+      lifecycleSources.push(osc);
       osc.type = 'sawtooth';
       osc.frequency.setValueAtTime(f0, time);
       osc.detune.setValueAtTime(d, time);
@@ -130,10 +139,11 @@ const osc = ctx.createOscillator();
     filter.connect(ampGain);
     ampGain.connect(destination);
   
+  return createLegacyVoiceHandle(lifecycleSources, onEnded);
 };
-
-export const renderAmbientPadVoice: InstrumentVoiceRenderer = ({ channel, note, time, destination, audioContext }) => {
+export const renderAmbientPadVoice: InstrumentVoiceRenderer = ({ channel, note, time, destination, audioContext, onEnded }) => {
   const ctx = audioContext;
+  const lifecycleSources: AudioScheduledSourceNode[] = [];
 const f0 = midiToFrequency(note.pitch + channel.pitch);
     const vel = (note.velocity || 0.8) * channel.volume;
     const duration = (note.duration || 2) * 0.45;
@@ -150,11 +160,13 @@ const f0 = midiToFrequency(note.pitch + channel.pitch);
     filter.frequency.exponentialRampToValueAtTime(2800, time + 0.4);
 
     const osc1 = ctx.createOscillator();
+      lifecycleSources.push(osc1);
     osc1.type = 'sawtooth';
     osc1.frequency.setValueAtTime(f0, time);
     osc1.detune.setValueAtTime(-7, time);
 
     const osc2 = ctx.createOscillator();
+      lifecycleSources.push(osc2);
     osc2.type = 'triangle';
     osc2.frequency.setValueAtTime(f0, time);
     osc2.detune.setValueAtTime(7, time);
@@ -167,10 +179,11 @@ const f0 = midiToFrequency(note.pitch + channel.pitch);
     osc1.start(time); osc2.start(time);
     osc1.stop(time + duration + 0.75); osc2.stop(time + duration + 0.75);
   
+  return createLegacyVoiceHandle(lifecycleSources, onEnded);
 };
-
-export const renderVoxChoirVoice: InstrumentVoiceRenderer = ({ channel, note, time, destination, audioContext }) => {
+export const renderVoxChoirVoice: InstrumentVoiceRenderer = ({ channel, note, time, destination, audioContext, onEnded }) => {
   const ctx = audioContext;
+  const lifecycleSources: AudioScheduledSourceNode[] = [];
 const f0 = midiToFrequency(note.pitch + channel.pitch);
     const vel = (note.velocity || 0.8) * channel.volume;
     const duration = (note.duration || 2) * 0.35;
@@ -193,11 +206,13 @@ const f0 = midiToFrequency(note.pitch + channel.pitch);
     f2.Q.value = 6.0;
 
     const osc = ctx.createOscillator();
+      lifecycleSources.push(osc);
     osc.type = 'sawtooth';
     osc.frequency.setValueAtTime(f0, time);
 
     // Natural voice vibrato
     const vib = ctx.createOscillator();
+      lifecycleSources.push(vib);
     vib.frequency.value = 5.5;
     const vibGain = ctx.createGain();
     vibGain.gain.value = 6;
@@ -211,10 +226,11 @@ const f0 = midiToFrequency(note.pitch + channel.pitch);
     osc.start(time);
     osc.stop(time + duration + 0.35); vib.stop(time + duration + 0.35);
   
+  return createLegacyVoiceHandle(lifecycleSources, onEnded);
 };
-
-export const renderChiptuneVoice: InstrumentVoiceRenderer = ({ channel, note, time, destination, audioContext }) => {
+export const renderChiptuneVoice: InstrumentVoiceRenderer = ({ channel, note, time, destination, audioContext, onEnded }) => {
   const ctx = audioContext;
+  const lifecycleSources: AudioScheduledSourceNode[] = [];
 const f0 = midiToFrequency(note.pitch + channel.pitch);
     const vel = (note.velocity || 0.8) * channel.volume;
     const duration = (note.duration || 1) * 0.2;
@@ -225,6 +241,7 @@ const f0 = midiToFrequency(note.pitch + channel.pitch);
     ampGain.gain.setValueAtTime(0.0001, time + duration + 0.01); // Instant 8-bit gating
 
     const osc = ctx.createOscillator();
+      lifecycleSources.push(osc);
     osc.type = 'square';
     osc.frequency.setValueAtTime(f0, time);
 
@@ -234,4 +251,5 @@ const f0 = midiToFrequency(note.pitch + channel.pitch);
     osc.start(time);
     osc.stop(time + duration + 0.02);
   
+  return createLegacyVoiceHandle(lifecycleSources, onEnded);
 };

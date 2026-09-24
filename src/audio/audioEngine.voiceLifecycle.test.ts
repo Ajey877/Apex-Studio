@@ -45,6 +45,9 @@ class FakeAudioContext {
     this.bufferSources.push(node);
     return node;
   }
+  createBuffer(_channels: number, _length: number, _sampleRate: number) {
+    return { duration: _length / _sampleRate, getChannelData: () => new Float32Array(_length) } as unknown as AudioBuffer;
+  }
   createOscillator() {
     const node = new FakeNode();
     this.oscillators.push(node);
@@ -68,6 +71,7 @@ const SAVED_KEYS = [
   'retriggerAudioClipsAtPosition',
   'rebaseAutomationAtPosition',
   'sampleBuffers',
+  'instrumentRegistry',
 ];
 
 const makeChannel = (id: string, instrumentType: Channel['instrumentType']): Channel => {
@@ -89,7 +93,13 @@ const makeNote = (id: string): Note => ({
   velocity: 0.8,
 });
 
-const renderers: Channel['instrumentType'][] = ['minisynth', 'fmsynth', 'independent_pluck'];
+const renderers: Channel['instrumentType'][] = [
+  'minisynth', 'fmsynth', 'independent_pluck', 'sampler', 'wavetable', 'fm_bell',
+  'grand_piano', 'rhodes_epiano', 'hammond_organ', 'nylon_guitar', 'harpsichord',
+  'strings_ensemble', 'pizzicato_strings', 'cinematic_brass', 'acid_303', 'reese_bass',
+  'slap_bass', 'sub_808', 'supersaw_lead', 'ambient_pad', 'vox_choir', 'marimba_bell',
+  'chiptune_8bit',
+];
 
 beforeEach(() => {
   for (const key of SAVED_KEYS) saved[key] = engine[key];
@@ -122,10 +132,10 @@ describe('Phase 22 standalone voice lifecycle integration', () => {
       engine.playSingleVoice(makeChannel(`natural-${instrumentType}`, instrumentType), makeNote(`n-${instrumentType}`), 0);
 
       assert.equal(engine.activeVoices.size, 1, `${instrumentType} should register a handle`);
-      const naturalOscillator = ctx.oscillators.find((osc) => osc.onended);
-      assert.ok(naturalOscillator, `${instrumentType} should expose natural completion`);
+      const naturalSources = [...ctx.oscillators, ...ctx.bufferSources].filter((source) => source.onended);
+      assert.ok(naturalSources.length > 0, `${instrumentType} should expose natural completion`);
 
-      naturalOscillator.onended?.();
+      for (const source of naturalSources) source.onended?.();
       assert.equal(engine.activeVoices.size, 0, `${instrumentType} should be removed after natural completion`);
     }
   });
@@ -210,18 +220,20 @@ describe('Phase 22 standalone voice lifecycle integration', () => {
       engine.activeVoices.clear();
       const ctx = engine.ctx as FakeAudioContext;
       ctx.oscillators.length = 0;
+      ctx.bufferSources.length = 0;
       const channel = makeChannel(`stop-${instrumentType}`, instrumentType);
 
       engine.playSingleVoice(channel, makeNote(`n-${instrumentType}`), 0);
       assert.equal(engine.activeVoices.size, 1);
       const voiceId = [...engine.activeVoices.keys()][0];
       const oscillator = ctx.oscillators[0];
-      const scheduledStopCalls = oscillator.stopCalls;
+      const sources = [...ctx.oscillators, ...ctx.bufferSources];
+      const scheduledStopCalls = sources.reduce((sum, source) => sum + source.stopCalls, 0);
       engine.stopNote(voiceId);
       engine.stopNote(voiceId);
 
       assert.equal(engine.activeVoices.size, 0);
-      assert.equal(oscillator.stopCalls, scheduledStopCalls + 1);
+      assert.equal(sources.reduce((sum, source) => sum + source.stopCalls, 0), scheduledStopCalls + sources.length);
     }
   });
 
@@ -300,12 +312,59 @@ describe('Phase 22 standalone voice lifecycle integration', () => {
 
     for (let i = 0; i < 100; i += 1) {
       ctx.oscillators.length = 0;
+      ctx.bufferSources.length = 0;
       engine.playSingleVoice(makeChannel(`stress-${i}`, 'minisynth'), makeNote(`stress-note-${i}`), 0);
       assert.equal(engine.activeVoices.size, 1);
       ctx.oscillators.find((osc) => osc.onended)?.onended?.();
       assert.equal(engine.activeVoices.size, 0);
     }
   });
+  it('stale natural completion cannot remove a replacement voice', () => {
+    const ctx = engine.ctx as FakeAudioContext;
+    const channel = makeChannel('replacement', 'grand_piano');
+
+    engine.playSingleVoice(channel, makeNote('voice-a'), 0);
+    const oldOscillatorCount = ctx.oscillators.length;
+    const oldBufferSourceCount = ctx.bufferSources.length;
+    const oldSources = [...ctx.oscillators, ...ctx.bufferSources].filter((source) => source.onended);
+    assert.equal(engine.activeVoices.size, 1);
+
+    engine.playSingleVoice(channel, makeNote('voice-b'), 0);
+    assert.equal(engine.activeVoices.size, 2);
+
+    for (const source of oldSources) source.onended?.();
+    assert.equal(engine.activeVoices.size, 1);
+
+    const newSources = [
+      ...ctx.oscillators.slice(oldOscillatorCount),
+      ...ctx.bufferSources.slice(oldBufferSourceCount),
+    ].filter((source) => source.onended);
+    for (const source of newSources) source.onended?.();
+    assert.equal(engine.activeVoices.size, 0);
+  });
+
+  it('renderer failure leaves no lifecycle state and preserves an existing choke voice', () => {
+    const ctx = engine.ctx as FakeAudioContext;
+    const sampled = makeDrumPadChannel('failure-choke');
+    engine.sampleBuffers.set('kick-sample', { duration: 1 } as AudioBuffer);
+    engine.playSingleVoice(sampled, { ...makeNote('existing'), pitch: 36 }, 0);
+    const existing = ctx.bufferSources[0];
+    assert.equal(engine.activeVoices.size, 1);
+
+    const originalRegistry = engine.instrumentRegistry;
+    engine.instrumentRegistry = {
+      get: () => () => { throw new Error('renderer failure'); },
+      has: () => true,
+    };
+
+    engine.playSingleVoice(sampled, { ...makeNote('failed'), pitch: 36 }, 0.1);
+
+    assert.equal(existing.stopCalls, 0);
+    assert.equal(engine.activeVoices.size, 1);
+    assert.equal(engine.activeDrumPadVoices.size, 1);
+    engine.instrumentRegistry = originalRegistry;
+  });
+
 
   it('stop advances playback generation and clears active voices', () => {
     const generationBefore = engine.playbackGeneration;
@@ -428,7 +487,8 @@ describe('Phase 23 drum-pad lifecycle integration', () => {
     engine.playSingleVoice(second, { ...makeNote('legacy-choke-b'), pitch: 36 }, 0.1);
 
     assert.equal(firstSource.stopCalls, 0);
-    assert.equal(engine.activeVoices.size, 1);
+    assert.equal(engine.activeVoices.size, 2);
+    assert.equal(engine.activeDrumPadVoices.size, 1);
     assert.ok(ctx.oscillators.length > 0);
   });
 
