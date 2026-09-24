@@ -129,7 +129,7 @@ test('registry-backed renderers receive the OfflineAudioContext for every instru
     'marimba_bell', 'fm_bell', 'chiptune_8bit', 'independent_pluck',
   ];
 
-  (globalThis as any).OfflineAudioContext = FakeOfflineContextForRegistry;
+  (globalThis as any).OfflineAudioContext = FakeOfflineAudioContext;
   engine.updateMixerTrack = () => undefined;
   engine.getOrCreateMixerChannel = () => ({ input: {} });
   engine.triggerSidechainDucking = () => undefined;
@@ -179,7 +179,7 @@ test('registry-backed renderers receive the OfflineAudioContext for every instru
 
     assert.deepEqual(seenTypes, instrumentTypes);
     assert.equal(seenContexts.length, instrumentTypes.length);
-    assert.ok(seenContexts.every(context => context instanceof FakeOfflineContextForRegistry));
+    assert.ok(seenContexts.every(context => context instanceof FakeOfflineAudioContext));
   } finally {
     (globalThis as any).OfflineAudioContext = previousOfflineContext;
     engine.instrumentRegistry = originalRegistry;
