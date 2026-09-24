@@ -74,6 +74,7 @@ export const createDefaultProjectState = (): ProjectState => {
     },
     patterns: [{ id: 'pat-1', name: 'Pattern 1', color: '#ff6e00', lengthSteps: 16 }],
     selectedPatternId: 'pat-1',
+    sampleLibrary: [],
     channels: [
       {
         id: 'ch-1',
@@ -142,6 +143,9 @@ export const normalizeProjectState = (input: unknown): ProjectState => {
   if ('patterns' in candidate && candidate.patterns !== undefined && !Array.isArray(candidate.patterns)) {
     throw new Error('Invalid project file: patterns must be an array.');
   }
+  if ('sampleLibrary' in candidate && candidate.sampleLibrary !== undefined && !Array.isArray(candidate.sampleLibrary)) {
+    throw new Error('Invalid project file: sample library must be an array.');
+  }
   if ('channels' in candidate && candidate.channels !== undefined && !Array.isArray(candidate.channels)) {
     throw new Error('Invalid project file: channels must be an array.');
   }
@@ -187,6 +191,11 @@ export const normalizeProjectState = (input: unknown): ProjectState => {
       ...(candidate.meta as Partial<ProjectState['meta']> | undefined)
     },
     patterns: Array.isArray(candidate.patterns) ? clone(candidate.patterns) : defaults.patterns,
+    sampleLibrary: Array.isArray(candidate.sampleLibrary)
+      ? clone(candidate.sampleLibrary)
+      : clone((Array.isArray(candidate.channels) ? candidate.channels : defaults.channels)
+        .map(channel => channel.customSample)
+        .filter((sample): sample is NonNullable<typeof sample> => Boolean(sample?.id))),
     channels: Array.isArray(candidate.channels) ? clone(candidate.channels) : defaults.channels,
     playlistTracks: Array.isArray(candidate.playlistTracks) ? clone(candidate.playlistTracks) : defaults.playlistTracks,
     playlistClips: Array.isArray(candidate.playlistClips) ? clone(candidate.playlistClips) : defaults.playlistClips,

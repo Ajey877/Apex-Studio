@@ -19,6 +19,7 @@ interface MultiZoneSamplerModalProps {
   isOpen: boolean;
   onClose: () => void;
   channels: Channel[];
+  sampleLibrary: NonNullable<Channel['customSample']>[];
   onUpdateChannel: (channelId: string, updates: Partial<Channel>) => void;
 }
 
@@ -39,6 +40,7 @@ export const MultiZoneSamplerModal: React.FC<MultiZoneSamplerModalProps> = ({
   isOpen,
   onClose,
   channels,
+  sampleLibrary,
   onUpdateChannel
 }) => {
   const [selectedChannelId, setSelectedChannelId] = useState<string>(channels[0]?.id || '');
@@ -94,7 +96,7 @@ export const MultiZoneSamplerModal: React.FC<MultiZoneSamplerModalProps> = ({
       rootNote: 60,
       lowVelocity: 0,
       highVelocity: 127,
-      sampleId: selectedChannel?.customSample?.id || '',
+      sampleId: selectedChannel?.customSample?.id || sampleLibrary[0]?.id || '',
       tuneSemitones: 0,
       color: '#a855f7'
     };
@@ -338,11 +340,7 @@ export const MultiZoneSamplerModal: React.FC<MultiZoneSamplerModalProps> = ({
                     }}
                     className="w-full bg-[#121214] text-white p-2 rounded border border-[#333336]"
                   >
-                    {Array.from(new Map(
-                      channels
-                        .filter(channel => channel.customSample?.id)
-                        .map(channel => [channel.customSample!.id, channel.customSample!])
-                    ).values()).map(sample => (
+                    {sampleLibrary.map(sample => (
                       <option key={sample.id} value={sample.id}>
                         {sample.name || sample.id}
                       </option>

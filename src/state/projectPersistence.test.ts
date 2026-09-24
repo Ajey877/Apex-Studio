@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createDefaultProjectState } from './projectState';
+import { createDefaultProjectState, normalizeProjectState } from './projectState';
 import { getPersistedAudioClip, getPersistedProjectStateRecord, deletePersistedAudioClip, deletePersistedProjectState, listPersistedAudioClipIds, persistAudioClip } from '../audio/audioPersistence';
 import { getAudioIdsForProject, hydrateProjectAudio, persistProjectState, reconcilePersistedAudio, restorePersistedProjectState, saveAndReconcileProjectState, serializeProjectState } from './projectPersistence';
 import { createHistory } from './projectHistory';
@@ -805,4 +805,43 @@ test('project audio ids include samples referenced only by multi-sampler zones',
   });
 
   assert.deepEqual(ids, [zoneOnlySampleId]);
+});
+
+test('project audio ids include unassigned sample-library assets', () => {
+  const state = createDefaultProjectState();
+  const librarySampleId = 'library-only-sample-1';
+  const ids = getAudioIdsForProject({
+    ...state,
+    sampleLibrary: [{
+      id: librarySampleId,
+      name: 'Library Piano',
+      duration: 2,
+      sampleRate: 44100,
+      channels: 2,
+      waveformPeaks: [0.2, 0.8]
+    }]
+  });
+
+  assert.ok(ids.includes(librarySampleId));
+});
+
+test('project normalization migrates legacy channel samples into the sample library', () => {
+  const state = createDefaultProjectState();
+  const sampleId = 'legacy-channel-sample';
+  const sample = {
+    id: sampleId,
+    name: 'Legacy Kick',
+    duration: 0.8,
+    sampleRate: 44100,
+    channels: 2,
+    waveformPeaks: [0.5]
+  };
+  const legacyState = {
+    ...state,
+    sampleLibrary: undefined,
+    channels: [{ ...state.channels[0], customSample: sample }, ...state.channels.slice(1)]
+  };
+
+  const normalized = normalizeProjectState(legacyState);
+  assert.equal(normalized.sampleLibrary?.[0]?.id, sampleId);
 });
