@@ -174,6 +174,16 @@ describe('Phase 22 standalone voice lifecycle integration', () => {
     assert.equal(engine.activeVoices.size, 0);
   });
 
+  it('preserves sampler-without-sample fallback to subtractive synthesis', () => {
+    const channel = makeChannel('sampler-empty', 'sampler');
+
+    engine.playSingleVoice(channel, makeNote('empty-note'), 0);
+
+    assert.equal(engine.activeVoices.size, 1);
+    assert.equal((engine.ctx as FakeAudioContext).bufferSources.length, 0);
+    assert.ok((engine.ctx as FakeAudioContext).oscillators.some((osc) => osc.onended));
+  });
+
   it('preserves missing custom-sample fallback to subtractive synthesis', () => {
     const channel = makeChannel('sampler-missing', 'sampler');
     channel.customSample = {
