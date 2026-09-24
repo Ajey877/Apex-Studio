@@ -300,6 +300,7 @@ class AudioEngine {
   };
 
   private activeVoices: Map<string, { stop: (time?: number) => void }> = new Map();
+  private activeDrumPads: Map<number, Set<string>> = new Map();
   /** Buffer sources of the active take's playlist audio; cancelled by stop/pause/seek. */
   private activeClipSources: Set<AudioBufferSourceNode> = new Set();
   /** Playlist lane row each active clip source was started from, so a live lane mute can cancel exactly that lane's audio. */
@@ -729,7 +730,9 @@ class AudioEngine {
     // Trigger Dynamic Sidechain Ducking on receiving tracks
     this.triggerSidechainDucking(channel.mixerTrackId, time);
 
-    if (channel.customSample && channel.customSample.id) {
+    if (channel.instrumentType === 'drumpad' && channel.drumPads?.some(pad => pad.note === note.pitch)) {
+      this.triggerDrumPadVoice(channel, note, time, mixerChannel.input, voiceId);
+    } else if (channel.customSample && channel.customSample.id) {
       this.triggerCustomSampleVoice(channel, note, time, mixerChannel.input, voiceId);
     } else if (channel.instrumentType === 'drumpad') {
       this.triggerDrumVoice(channel, note, time, mixerChannel.input);
@@ -769,6 +772,71 @@ class AudioEngine {
       // MiniSynth (Subtractive) / Wavetable / Sampler / VST Custom
       this.triggerSubtractiveVoice(channel, note, time, mixerChannel.input, voiceId);
     }
+  }
+
+  public triggerDrumPadVoice(channel: Channel, note: Note, time: number, destination: AudioNode, voiceId: string) {
+    if (!this.ctx) return;
+    const pad = channel.drumPads?.find(candidate => candidate.note === note.pitch && candidate.sampleId);
+    if (!pad) {
+      this.triggerDrumVoice(channel, note, time, destination);
+      return;
+    }
+
+    const buffer = this.sampleBuffers.get(pad.sampleId);
+    if (!buffer) return;
+
+    const ctx = this.ctx;
+    const group = pad.chokeGroup || 0;
+    if (group > 0) {
+      this.activeDrumPads.get(group)?.forEach(id => this.activeVoices.get(id)?.stop(time));
+      this.activeDrumPads.set(group, new Set());
+    }
+
+    const source = ctx.createBufferSource();
+    source.buffer = buffer;
+    const playbackRate = Math.pow(2, Math.max(-24, Math.min(24, pad.tuneSemitones || 0)) / 12);
+    source.playbackRate.setValueAtTime(pad.reverse ? -playbackRate : playbackRate, time);
+
+    const gain = ctx.createGain();
+    const velocity = Math.max(0, Math.min(1, note.velocity ?? 0.8));
+    gain.gain.setValueAtTime(velocity * Math.max(0, Math.min(1.25, pad.volume)) * channel.volume, time);
+    const panner = ctx.createStereoPanner();
+    panner.pan.setValueAtTime(Math.max(-1, Math.min(1, pad.pan)), time);
+
+    source.connect(gain);
+    gain.connect(panner);
+    panner.connect(destination);
+
+    const startPct = Math.max(0, Math.min(1, pad.trimStart ?? 0));
+    const endPct = Math.max(startPct, Math.min(1, pad.trimEnd ?? 1));
+    const start = startPct * buffer.duration;
+    const end = endPct * buffer.duration;
+    const duration = Math.max(0.001, end - start);
+    if (pad.loop && end > start) {
+      source.loop = true;
+      source.loopStart = start;
+      source.loopEnd = end;
+    }
+
+    const stop = (stopTime?: number) => {
+      const t = stopTime ?? ctx.currentTime;
+      gain.gain.cancelScheduledValues(t);
+      gain.gain.setValueAtTime(Math.max(0.0001, gain.gain.value), t);
+      gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.02);
+      try { source.stop(t + 0.025); } catch (_) {}
+      this.activeVoices.delete(voiceId);
+      if (group > 0) this.activeDrumPads.get(group)?.delete(voiceId);
+    };
+
+    this.activeVoices.set(voiceId, { stop });
+    if (group > 0) this.activeDrumPads.get(group)?.add(voiceId) ?? this.activeDrumPads.set(group, new Set([voiceId]));
+    source.onended = () => {
+      this.activeVoices.delete(voiceId);
+      if (group > 0) this.activeDrumPads.get(group)?.delete(voiceId);
+    };
+
+    const offset = pad.reverse ? end : start;
+    source.start(time, offset, pad.loop ? undefined : duration);
   }
 
   public triggerCustomSampleVoice(channel: Channel, note: Note, time: number, destination: AudioNode, voiceId: string) {
