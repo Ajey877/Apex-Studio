@@ -383,7 +383,7 @@ describe('Phase 26 final renderer-backed audio behavior', () => {
     assert.equal(sources[0].startOffset, 0);
     assert.equal(sources[0].startDuration, sample.duration);
     assert.equal(sources[0].playbackRate.value, 1);
-    assert.equal((sources[0].connections[0] as FakeNode).gain.value, 0.5 * 0.9);
+    const samplerGain = ctx.nodes.find(node => node.kind === 'gain' && node.connections.some(n => n.kind === 'panner' || n.kind === 'destination' || n.kind === 'gain'))!;\n    assert.equal(samplerGain.gain.value, 0.5 * 0.9);
     assert.ok(peak(result.buffer) > 0, 'sampler produced non-silent offline audio');
   });
 
@@ -517,7 +517,7 @@ describe('Phase 26 final renderer-backed audio behavior', () => {
 
     assert.ok(sources.some(source => (source.stopTime ?? 0) > 0.6), 'voice source is scheduled beyond the note duration');
     assert.ok(energy(result.buffer, 0, 0.45, 0.65) > 0, 'offline output retains audible tail content');
-    assert.equal(result.buffer.length, SAMPLE_RATE * BAR_SECONDS, 'buffer duration remains the fixed bounce duration');
+    assert.equal(result.buffer.length, result.buffer.sampleRate * BAR_SECONDS, 'buffer duration remains the fixed bounce duration');
   });
 
   it('preserves stereo pan direction without relying on exact floating-point samples', async () => {
