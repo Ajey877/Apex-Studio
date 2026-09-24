@@ -67,9 +67,6 @@
 .bg-\[\#ff0000\] { background-color: var(--apex-danger) !important; }
 .text-\[\#00ff00\], .text-\[\#00ff88\] { color: var(--apex-success) !important; }
 
-/* Keep prototype-only services out of the primary production workflow. */
-#fl-pro-tier-btn, #fl-stem-splitter-btn, #fl-collab-btn { display: none !important; }
-
 #fl-transport-bar {
   background: rgba(22, 26, 35, 0.96) !important;
   border-color: var(--apex-border) !important;
