@@ -1,4 +1,5 @@
 import { 
+import { findSampleZone, getSamplePlaybackRate, clampSampleRange } from './sampleZones';
   Channel, 
   Note, 
   MixerTrack, 
@@ -773,26 +774,27 @@ class AudioEngine {
   public triggerCustomSampleVoice(channel: Channel, note: Note, time: number, destination: AudioNode, voiceId: string) {
     if (!this.ctx) return;
     const ctx = this.ctx;
-    const sampleId = channel.customSample?.id;
+    const zone = findSampleZone(channel.sampleZones, note);
+    const sampleId = zone?.sampleId || channel.customSample?.id;
     const buffer = sampleId ? this.sampleBuffers.get(sampleId) : null;
     if (!buffer) {
       this.triggerSubtractiveVoice(channel, note, time, destination, voiceId);
       return;
     }
 
+    const sample = zone ? this.sampleBuffers.get(zone.sampleId) : channel.customSample;
+    const rootPitch = zone?.rootNote ?? sample?.rootPitch ?? 60;
+    const tuneSemitones = zone?.tuneSemitones ?? 0;
+    const playbackRate = getSamplePlaybackRate(note.pitch, rootPitch, channel.pitch || 0, tuneSemitones);
+    const reverse = zone?.reverse ?? sample?.reverse ?? false;
     const source = ctx.createBufferSource();
     source.buffer = buffer;
-
-    // Resample according to root pitch
-    const rootPitch = channel.customSample?.rootPitch ?? 60;
-    const semitones = (note.pitch - rootPitch) + (channel.pitch || 0);
-    source.playbackRate.setValueAtTime(Math.pow(2, semitones / 12), time);
+    source.playbackRate.setValueAtTime(reverse ? -playbackRate : playbackRate, time);
 
     const gain = ctx.createGain();
-    const vel = (note.velocity || 0.8) * channel.volume;
-    gain.gain.setValueAtTime(vel, time);
+    const velocity = Math.max(0, Math.min(1, note.velocity ?? 0.8));
+    gain.gain.setValueAtTime(velocity * channel.volume, time);
 
-    // Filter
     const filter = ctx.createBiquadFilter();
     filter.type = channel.synthParams?.filterType || 'lowpass';
     filter.frequency.setValueAtTime(channel.synthParams?.filterCutoff || 18000, time);
@@ -802,16 +804,31 @@ class AudioEngine {
     filter.connect(gain);
     gain.connect(destination);
 
-    const trimStart = (channel.customSample?.trimStart || 0) * buffer.duration;
-    const trimEnd = (channel.customSample?.trimEnd || 1) * buffer.duration;
-    const duration = Math.max(0.05, trimEnd - trimStart);
+    const { start: trimStartPct, end: trimEndPct } = clampSampleRange(
+      zone?.trimStart ?? sample?.trimStart ?? 0,
+      zone?.trimEnd ?? sample?.trimEnd ?? 1
+    );
+    const trimStart = trimStartPct * buffer.duration;
+    const trimEnd = trimEndPct * buffer.duration;
+    const duration = Math.max(0.001, trimEnd - trimStart);
+    const loop = zone?.loop ?? channel.synthParams?.sampleLoop ?? false;
+    const loopStartPct = Math.max(trimStartPct, Math.min(trimEndPct, zone?.loopStart ?? trimStartPct));
+    const loopEndPct = Math.max(loopStartPct, Math.min(trimEndPct, zone?.loopEnd ?? trimEndPct));
 
-    source.start(time, trimStart, duration);
+    if (loop && loopEndPct > loopStartPct) {
+      source.loop = true;
+      source.loopStart = loopStartPct * buffer.duration;
+      source.loopEnd = loopEndPct * buffer.duration;
+    }
+
+    const offset = reverse ? trimEnd : trimStart;
+    source.start(time, offset, loop ? undefined : duration);
 
     this.activeVoices.set(voiceId, {
       stop: (stopTime?: number) => {
         const t = stopTime ?? ctx.currentTime;
-        gain.gain.setValueAtTime(gain.gain.value, t);
+        gain.gain.cancelScheduledValues(t);
+        gain.gain.setValueAtTime(Math.max(0.0001, gain.gain.value), t);
         gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.05);
         try { source.stop(t + 0.06); } catch (e) {}
       }
