@@ -14,6 +14,7 @@ import { findSampleZone, getSamplePlaybackRate, clampSampleRange } from './sampl
 import { AudioClockTransport, TransportState } from './transport';
 import { ChorusEffect } from './effects/ChorusEffect';
 import { WetDryEffect } from './effects/WetDryEffect';
+import { createInstrumentRegistry, InstrumentRegistry } from './instrumentRegistry';
 
 export type MidiEventPayload = {
   type: 'noteOn' | 'noteOff' | 'cc' | 'pitchBend';
@@ -309,6 +310,7 @@ class AudioEngine {
   private playlistLaneMutes: Set<number> = new Set();
   private sampleBuffers: Map<string, AudioBuffer> = new Map();
   private impulseResponses: Map<string, AudioBuffer> = new Map();
+  private readonly instrumentRegistry: InstrumentRegistry;
 
   // Recording
   private mediaStream: MediaStream | null = null;
@@ -321,7 +323,37 @@ class AudioEngine {
   private midiListeners: ((e: MidiEventPayload) => void)[] = [];
 
   constructor() {
-    // Lazy initialize on first interaction
+    // All built-in voices now enter through one registry boundary. The voice
+    // implementations remain unchanged; this phase separates dispatch from
+    // audio generation so a future external instrument can implement the same
+    // contract without another growing instrumentType switch.
+    this.instrumentRegistry = createInstrumentRegistry({
+      drumpad: ({ channel, note, time, destination }) => this.triggerDrumVoice(channel, note, time, destination),
+      fmsynth: ({ channel, note, time, destination, voiceId }) => this.triggerFmVoice(channel, note, time, destination, voiceId),
+      fm_bell: ({ channel, note, time, destination, voiceId }) => this.triggerFmVoice(channel, note, time, destination, voiceId),
+      grand_piano: ({ channel, note, time, destination, voiceId }) => this.triggerGrandPianoVoice(channel, note, time, destination, voiceId),
+      rhodes_epiano: ({ channel, note, time, destination, voiceId }) => this.triggerRhodesVoice(channel, note, time, destination, voiceId),
+      hammond_organ: ({ channel, note, time, destination, voiceId }) => this.triggerOrganVoice(channel, note, time, destination, voiceId),
+      nylon_guitar: ({ channel, note, time, destination, voiceId }) => this.triggerPluckedGuitarVoice(channel, note, time, destination, voiceId),
+      harpsichord: ({ channel, note, time, destination, voiceId }) => this.triggerPluckedGuitarVoice(channel, note, time, destination, voiceId),
+      strings_ensemble: ({ channel, note, time, destination, voiceId }) => this.triggerStringsVoice(channel, note, time, destination, voiceId),
+      pizzicato_strings: ({ channel, note, time, destination, voiceId }) => this.triggerPizzicatoVoice(channel, note, time, destination, voiceId),
+      cinematic_brass: ({ channel, note, time, destination, voiceId }) => this.triggerBrassVoice(channel, note, time, destination, voiceId),
+      acid_303: ({ channel, note, time, destination, voiceId }) => this.triggerAcid303Voice(channel, note, time, destination, voiceId),
+      reese_bass: ({ channel, note, time, destination, voiceId }) => this.triggerReeseBassVoice(channel, note, time, destination, voiceId),
+      slap_bass: ({ channel, note, time, destination, voiceId }) => this.triggerReeseBassVoice(channel, note, time, destination, voiceId),
+      sub_808: ({ channel, note, time, destination, voiceId }) => this.trigger808SubVoice(channel, note, time, destination, voiceId),
+      supersaw_lead: ({ channel, note, time, destination, voiceId }) => this.triggerSupersawVoice(channel, note, time, destination, voiceId),
+      ambient_pad: ({ channel, note, time, destination, voiceId }) => this.triggerAmbientPadVoice(channel, note, time, destination, voiceId),
+      vox_choir: ({ channel, note, time, destination, voiceId }) => this.triggerVoxChoirVoice(channel, note, time, destination, voiceId),
+      marimba_bell: ({ channel, note, time, destination, voiceId }) => this.triggerMarimbaVoice(channel, note, time, destination, voiceId),
+      chiptune_8bit: ({ channel, note, time, destination, voiceId }) => this.triggerChiptuneVoice(channel, note, time, destination, voiceId),
+      minisynth: ({ channel, note, time, destination, voiceId }) => this.triggerSubtractiveVoice(channel, note, time, destination, voiceId),
+      wavetable: ({ channel, note, time, destination, voiceId }) => this.triggerSubtractiveVoice(channel, note, time, destination, voiceId),
+      sampler: ({ channel, note, time, destination, voiceId }) => this.triggerSubtractiveVoice(channel, note, time, destination, voiceId),
+    }, ({ channel, note, time, destination, voiceId }) =>
+      this.triggerSubtractiveVoice(channel, note, time, destination, voiceId)
+    );
   }
 
   public init() {
@@ -734,45 +766,15 @@ class AudioEngine {
       this.triggerDrumPadVoice(channel, note, time, mixerChannel.input, voiceId);
     } else if (channel.customSample && channel.customSample.id) {
       this.triggerCustomSampleVoice(channel, note, time, mixerChannel.input, voiceId);
-    } else if (channel.instrumentType === 'drumpad') {
-      this.triggerDrumVoice(channel, note, time, mixerChannel.input);
-    } else if (channel.instrumentType === 'fmsynth' || channel.instrumentType === 'fm_bell') {
-      this.triggerFmVoice(channel, note, time, mixerChannel.input, voiceId);
-    } else if (channel.instrumentType === 'grand_piano') {
-      this.triggerGrandPianoVoice(channel, note, time, mixerChannel.input, voiceId);
-    } else if (channel.instrumentType === 'rhodes_epiano') {
-      this.triggerRhodesVoice(channel, note, time, mixerChannel.input, voiceId);
-    } else if (channel.instrumentType === 'hammond_organ') {
-      this.triggerOrganVoice(channel, note, time, mixerChannel.input, voiceId);
-    } else if (channel.instrumentType === 'nylon_guitar' || channel.instrumentType === 'harpsichord') {
-      this.triggerPluckedGuitarVoice(channel, note, time, mixerChannel.input, voiceId);
-    } else if (channel.instrumentType === 'strings_ensemble') {
-      this.triggerStringsVoice(channel, note, time, mixerChannel.input, voiceId);
-    } else if (channel.instrumentType === 'pizzicato_strings') {
-      this.triggerPizzicatoVoice(channel, note, time, mixerChannel.input, voiceId);
-    } else if (channel.instrumentType === 'cinematic_brass') {
-      this.triggerBrassVoice(channel, note, time, mixerChannel.input, voiceId);
-    } else if (channel.instrumentType === 'acid_303') {
-      this.triggerAcid303Voice(channel, note, time, mixerChannel.input, voiceId);
-    } else if (channel.instrumentType === 'reese_bass' || channel.instrumentType === 'slap_bass') {
-      this.triggerReeseBassVoice(channel, note, time, mixerChannel.input, voiceId);
-    } else if (channel.instrumentType === 'sub_808') {
-      this.trigger808SubVoice(channel, note, time, mixerChannel.input, voiceId);
-    } else if (channel.instrumentType === 'supersaw_lead') {
-      this.triggerSupersawVoice(channel, note, time, mixerChannel.input, voiceId);
-    } else if (channel.instrumentType === 'ambient_pad') {
-      this.triggerAmbientPadVoice(channel, note, time, mixerChannel.input, voiceId);
-    } else if (channel.instrumentType === 'vox_choir') {
-      this.triggerVoxChoirVoice(channel, note, time, mixerChannel.input, voiceId);
-    } else if (channel.instrumentType === 'marimba_bell') {
-      this.triggerMarimbaVoice(channel, note, time, mixerChannel.input, voiceId);
-    } else if (channel.instrumentType === 'chiptune_8bit') {
-      this.triggerChiptuneVoice(channel, note, time, mixerChannel.input, voiceId);
     } else {
-      // MiniSynth (Subtractive) / Wavetable / Sampler / VST Custom
-      this.triggerSubtractiveVoice(channel, note, time, mixerChannel.input, voiceId);
+      this.instrumentRegistry.get(channel.instrumentType)({
+        channel,
+        note,
+        time,
+        destination: mixerChannel.input,
+        voiceId
+      });
     }
-  }
 
   public triggerDrumPadVoice(channel: Channel, note: Note, time: number, destination: AudioNode, voiceId: string) {
     if (!this.ctx) return;
