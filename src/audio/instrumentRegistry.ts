@@ -10,6 +10,8 @@ export interface InstrumentVoiceContext {
   voiceId: string;
   /** Called by a standalone renderer when its scheduled voice naturally completes. */
   onEnded?: () => void;
+  /** Narrow lookup into AudioEngine's in-memory sample buffer cache. */
+  getSampleBuffer?: (id: string) => AudioBuffer | undefined;
 }
 
 export interface InstrumentVoiceHandle {
