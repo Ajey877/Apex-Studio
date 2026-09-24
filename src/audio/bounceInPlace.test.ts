@@ -11,7 +11,7 @@ import { afterEach, beforeEach, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { audioEngine, resolvePlayableContentLengthSteps } from './audioEngine';
-import type { Channel, Note } from '../types/daw';
+import type { Channel } from '../types/daw';
 
 type EngineInternals = Record<string, any>;
 const engine = audioEngine as unknown as EngineInternals;
@@ -69,14 +69,6 @@ const makeChannel = (
     ...overrides,
   };
 };
-
-const makeNote = (id: string, start: number, duration = 1): Note => ({
-  id,
-  pitch: 60,
-  start,
-  duration,
-  velocity: 0.9,
-});
 
 const expectedLength = (bars: number, bpm: number): number =>
   Math.floor(SAMPLE_RATE * bars * STEPS_PER_BAR * ((60 / bpm) / 4));
