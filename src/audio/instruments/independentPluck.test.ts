@@ -19,6 +19,9 @@ class MockAudioParam {
     this.value = value;
     this.operations.push([`${this.name}.exponential`, value, time]);
   }
+  cancelScheduledValues(time: number) {
+    this.operations.push([`${this.name}.cancel`, time]);
+  }
 }
 
 class MockNode {
