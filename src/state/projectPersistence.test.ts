@@ -845,3 +845,28 @@ test('project normalization migrates legacy channel samples into the sample libr
   const normalized = normalizeProjectState(legacyState);
   assert.equal(normalized.sampleLibrary?.[0]?.id, sampleId);
 });
+
+test('project audio ids include samples referenced only by drum pads', () => {
+  const state = createDefaultProjectState();
+  const padSampleId = 'drum-pad-only-sample';
+  const ids = getAudioIdsForProject({
+    ...state,
+    sampleLibrary: [],
+    channels: [{
+      ...state.channels[0],
+      customSample: undefined,
+      sampleZones: undefined,
+      drumPads: [{
+        id: 'kick',
+        note: 36,
+        name: 'Kick',
+        sampleId: padSampleId,
+        volume: 1,
+        pan: 0,
+        tuneSemitones: 0
+      }]
+    }]
+  });
+
+  assert.ok(ids.includes(padSampleId));
+});

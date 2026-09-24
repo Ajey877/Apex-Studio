@@ -14,12 +14,14 @@ import {
 } from 'lucide-react';
 import { Channel, SynthParameters, InstrumentType } from '../types/daw';
 import { audioEngine } from '../audio/audioEngine';
+import { DrumSamplerPanel } from './DrumSamplerPanel';
 
 interface InstrumentRackProps {
   channel: Channel;
   allChannels: Channel[];
   onSelectChannel: (channelId: string) => void;
   onUpdateChannel: (channelId: string, updates: Partial<Channel>) => void;
+  sampleLibrary: NonNullable<Channel['customSample']>[];
 }
 
 const SYNTH_PRESETS = [
@@ -109,7 +111,8 @@ export const InstrumentRack: React.FC<InstrumentRackProps> = ({
   channel,
   allChannels,
   onSelectChannel,
-  onUpdateChannel
+  onUpdateChannel,
+  sampleLibrary
 }) => {
   const p = channel.synthParams || audioEngine.getDefaultSynthParams();
 
@@ -171,6 +174,12 @@ export const InstrumentRack: React.FC<InstrumentRackProps> = ({
           ))}
         </div>
       </div>
+
+      {channel.instrumentType === 'drumpad' && (
+        <div className="p-4 pb-0">
+          <DrumSamplerPanel channel={channel} sampleLibrary={sampleLibrary} onUpdateChannel={onUpdateChannel} />
+        </div>
+      )}
 
       {/* Main Synthesizer & Sound Design Dashboard */}
       <div className="flex-1 overflow-y-auto custom-scrollbar p-4 space-y-4">

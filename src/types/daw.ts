@@ -222,6 +222,21 @@ export interface CustomSampleData {
   rootPitch?: number; // default 60 (C4)
 }
 
+export interface DrumPad {
+  id: string;
+  note: number;
+  name: string;
+  sampleId: string;
+  volume: number;
+  pan: number;
+  tuneSemitones: number;
+  trimStart?: number;
+  trimEnd?: number;
+  reverse?: boolean;
+  loop?: boolean;
+  chokeGroup?: number;
+}
+
 export interface Channel {
   id: string;
   name: string;
@@ -241,6 +256,7 @@ export interface Channel {
   sampleName?: string;
   customSample?: CustomSampleData;
   sampleZones?: SampleZone[];
+  drumPads?: DrumPad[];
   arp?: ArpSettings;
 }
 
