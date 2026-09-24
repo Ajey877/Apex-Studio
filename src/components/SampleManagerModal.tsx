@@ -28,6 +28,8 @@ interface SampleManagerModalProps {
   onClose: () => void;
   channels: Channel[];
   selectedChannel: Channel;
+  sampleLibrary: CustomSampleData[];
+  onSampleImported: (sample: CustomSampleData) => void;
   onAssignSampleToChannel: (channelId: string, sample: CustomSampleData) => void;
   onCreateChannelFromSample: (sample: CustomSampleData) => void;
 }
@@ -46,6 +48,8 @@ export const SampleManagerModal: React.FC<SampleManagerModalProps> = ({
   onClose,
   channels,
   selectedChannel,
+  sampleLibrary,
+  onSampleImported,
   onAssignSampleToChannel,
   onCreateChannelFromSample
 }) => {
@@ -76,6 +80,7 @@ export const SampleManagerModal: React.FC<SampleManagerModalProps> = ({
       }
 
       setCurrentSample(result.sample);
+      onSampleImported(result.sample);
       setTrimStart(0);
       setTrimEnd(1.0);
       setRootPitch(60);
@@ -197,6 +202,35 @@ export const SampleManagerModal: React.FC<SampleManagerModalProps> = ({
               {errorMessage}
             </div>
           )}
+
+          {/* Persistent Sample Library */}
+          <div className="bg-[#0c0c0e] border border-[#28282e] rounded-xl p-3 space-y-2">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2 text-xs font-bold text-white">
+                <Music className="w-3.5 h-3.5 text-[#ff6e00]" />
+                SAMPLE LIBRARY
+              </div>
+              <span className="text-[10px] text-[#777]">{sampleLibrary.length} sample{sampleLibrary.length === 1 ? '' : 's'}</span>
+            </div>
+            {sampleLibrary.length === 0 ? (
+              <p className="text-[11px] text-[#666]">Imported samples will stay available here even before they are assigned to a channel.</p>
+            ) : (
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 max-h-36 overflow-y-auto custom-scrollbar">
+                {sampleLibrary.map(sample => (
+                  <button key={sample.id} type="button" onClick={() => {
+                    setCurrentSample(sample);
+                    setTrimStart(sample.trimStart ?? 0);
+                    setTrimEnd(sample.trimEnd ?? 1);
+                    setRootPitch(sample.rootPitch ?? 60);
+                    setReverseSample(Boolean(sample.reverse));
+                  }} className={`text-left p-2 rounded-lg border transition ${currentSample?.id === sample.id ? 'border-[#ff6e00] bg-[#ff6e00]/10' : 'border-[#28282e] bg-[#121215] hover:border-[#555]'}`}>
+                    <div className="text-[11px] font-bold text-white truncate">{sample.name}</div>
+                    <div className="text-[9px] text-[#777] font-mono">{sample.duration.toFixed(2)}s · {sample.sampleRate}Hz</div>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
 
           {/* Sample Waveform Editor */}
           {currentSample ? (
