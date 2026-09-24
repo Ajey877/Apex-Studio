@@ -395,6 +395,43 @@ describe('Phase 23 drum-pad lifecycle integration', () => {
     assert.equal(engine.activeDrumPadVoices.size, 1);
   });
 
+  it('does not choke an existing sampled pad when the new pad sample buffer is missing', () => {
+    const first = makeDrumPadChannel('drum-missing-choke');
+    const second = makeDrumPadChannel('drum-missing-choke');
+    second.drumPads![0].sampleId = 'missing-sample';
+    engine.sampleBuffers.set('kick-sample', { duration: 1 } as AudioBuffer);
+
+    engine.playSingleVoice(first, { ...makeNote('missing-choke-a'), pitch: 36 }, 0);
+    const ctx = engine.ctx as FakeAudioContext;
+    const firstSource = ctx.bufferSources[0];
+    assert.equal(engine.activeVoices.size, 1);
+
+    engine.playSingleVoice(second, { ...makeNote('missing-choke-b'), pitch: 36 }, 0.1);
+
+    assert.equal(firstSource.stopCalls, 0);
+    assert.equal(engine.activeVoices.size, 1);
+    assert.equal(engine.activeDrumPadVoices.size, 1);
+    assert.equal(ctx.bufferSources.length, 1);
+  });
+
+  it('keeps legacy drum-synth fallback and existing sampled voice when new pad has no sampleId', () => {
+    const first = makeDrumPadChannel('drum-legacy-choke');
+    const second = makeDrumPadChannel('drum-legacy-choke');
+    second.drumPads![0].sampleId = '';
+    engine.sampleBuffers.set('kick-sample', { duration: 1 } as AudioBuffer);
+
+    engine.playSingleVoice(first, { ...makeNote('legacy-choke-a'), pitch: 36 }, 0);
+    const ctx = engine.ctx as FakeAudioContext;
+    const firstSource = ctx.bufferSources[0];
+    assert.equal(engine.activeVoices.size, 1);
+
+    engine.playSingleVoice(second, { ...makeNote('legacy-choke-b'), pitch: 36 }, 0.1);
+
+    assert.equal(firstSource.stopCalls, 0);
+    assert.equal(engine.activeVoices.size, 1);
+    assert.ok(ctx.oscillators.length > 0);
+  });
+
   it('explicit stop removes the drum-pad voice from AudioEngine lifecycle state', () => {
     const channel = makeDrumPadChannel('drum-stop');
     engine.sampleBuffers.set('kick-sample', { duration: 1 } as AudioBuffer);
