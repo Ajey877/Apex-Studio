@@ -50,7 +50,7 @@ test('library facets and pack counts are deterministic', () => {
   const samples = [
     sample(),
     sample({ id: 'snare-1', name: 'Snare', category: 'Drums', tags: ['snare'] }),
-    sample({ id: 'vox-1', name: 'Vocal', category: 'Vocals', tags: ['vocal'] })
+    sample({ id: 'vox-1', name: 'Vocal', category: 'Vocals', tags: ['vocal'], packId: undefined })
   ];
   const packs = [createSamplePack('Drums', 'Drums', [], 1)];
   packs[0].id = 'pack-drums';
