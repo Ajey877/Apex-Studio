@@ -6,7 +6,7 @@ export interface InstrumentVoiceContext {
   time: number;
   destination: AudioNode;
   /** The active live or OfflineAudioContext used for this render. */
-  audioContext: BaseAudioContext;
+  audioContext: AudioContext | OfflineAudioContext;
   voiceId: string;
 }
 
