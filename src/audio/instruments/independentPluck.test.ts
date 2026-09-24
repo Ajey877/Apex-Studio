@@ -51,7 +51,7 @@ class MockAudioContext {
 
 const render = () => {
   const context = new MockAudioContext();
-  const destination = { context } as unknown as AudioNode;
+  const destination = {} as AudioNode;
 
   renderIndependentPluckVoice({
     channel: {
@@ -78,6 +78,7 @@ const render = () => {
     },
     time: 1.5,
     destination,
+    audioContext: context as unknown as BaseAudioContext,
     voiceId: 'voice-1',
   });
 
