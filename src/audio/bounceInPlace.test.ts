@@ -34,7 +34,7 @@ class FakeAudioBuffer {
       { length: numberOfChannels },
       (_, channel) => Float32Array.from(
         { length },
-        (_, index) => channel === 0 && index % 1000 === seed ? 0.8 : 0,
+        (_, index) => channel === 0 && index === seed ? 0.8 : 0,
       ),
     );
   }
