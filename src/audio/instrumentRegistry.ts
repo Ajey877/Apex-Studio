@@ -1,4 +1,4 @@
-import type { Channel, InstrumentType, Note } from '../types/daw';import type { Channel, InstrumentType, Note } from '../types/daw';
+import type { Channel, InstrumentType, Note } from '../types/daw';
 
 export interface InstrumentVoiceContext {
   channel: Channel;
