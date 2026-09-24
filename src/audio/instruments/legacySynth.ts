@@ -48,6 +48,7 @@ export const renderReeseBassVoice: InstrumentVoiceRenderer = ({ channel, note, t
 
     const detunes = [-16, 0, 16];
     detunes.forEach((d) => {
+  const ctx = audioContext;
       const osc = ctx.createOscillator();
       osc.type = 'sawtooth';
       osc.frequency.setValueAtTime(f0, time);
@@ -105,6 +106,7 @@ export const renderSupersawVoice: InstrumentVoiceRenderer = ({ channel, note, ti
 
     const supersawDetunes = [-24, -14, -6, 0, 6, 14, 24];
     supersawDetunes.forEach((d) => {
+  const ctx = audioContext;
       const osc = ctx.createOscillator();
       osc.type = 'sawtooth';
       osc.frequency.setValueAtTime(f0, time);
