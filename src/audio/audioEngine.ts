@@ -10,7 +10,9 @@ import {
   GrossBeatState,
   SidechainSettings
 } from '../types/daw';
-import { findSampleZone, getSamplePlaybackRate, clampSampleRange } from './sampleZones';
+import { 
+  // sample zone helpers remain owned by the standalone sampler renderer
+} from './sampleZones';
 import { AudioClockTransport, TransportState } from './transport';
 import { ChorusEffect } from './effects/ChorusEffect';
 import { WetDryEffect } from './effects/WetDryEffect';
@@ -18,6 +20,7 @@ import { createInstrumentRegistry, InstrumentRegistry, InstrumentVoiceHandle } f
 import { renderIndependentPluckVoice } from './instruments/independentPluck';
 import { renderSubtractiveSynthVoice } from './instruments/subtractiveSynth';
 import { renderFmSynthVoice } from './instruments/fmSynth';
+import { renderSamplerVoice } from './instruments/sampler';
 
 export type MidiEventPayload = {
   type: 'noteOn' | 'noteOff' | 'cc' | 'pitchBend';
@@ -354,7 +357,7 @@ class AudioEngine {
       independent_pluck: renderIndependentPluckVoice,
       minisynth: renderSubtractiveSynthVoice,
       wavetable: renderSubtractiveSynthVoice,
-      sampler: renderSubtractiveSynthVoice,
+      sampler: renderSamplerVoice,
     }, renderSubtractiveSynthVoice);
   }
 
@@ -766,17 +769,35 @@ class AudioEngine {
 
     if (channel.instrumentType === 'drumpad' && channel.drumPads?.some(pad => pad.note === note.pitch)) {
       this.triggerDrumPadVoice(channel, note, time, mixerChannel.input, voiceId);
-    } else if (channel.customSample && channel.customSample.id) {
-      this.triggerCustomSampleVoice(channel, note, time, mixerChannel.input, voiceId);
-    } else {
-      let voiceHandle: InstrumentVoiceHandle | void;
-      const onEnded = () => {
-        if (voiceHandle && this.activeVoices.get(voiceId) === voiceHandle) {
-          this.activeVoices.delete(voiceId);
-        }
-      };
+      return;
+    }
 
-      voiceHandle = this.instrumentRegistry.get(channel.instrumentType)({
+    let voiceHandle: InstrumentVoiceHandle | void;
+    const onEnded = () => {
+      if (voiceHandle && this.activeVoices.get(voiceId) === voiceHandle) {
+        this.activeVoices.delete(voiceId);
+      }
+    };
+
+    const renderer = channel.customSample && channel.customSample.id
+      ? this.instrumentRegistry.get('sampler')
+      : this.instrumentRegistry.get(channel.instrumentType);
+
+    voiceHandle = renderer({
+      channel,
+      note,
+      time,
+      destination: mixerChannel.input,
+      audioContext: this.ctx!,
+      voiceId,
+      onEnded,
+      getSampleBuffer: (id) => this.sampleBuffers.get(id),
+    });
+
+    if (!voiceHandle && channel.customSample?.id) {
+      // Preserve the pre-22C missing-buffer behavior: custom-sample playback
+      // falls back to the existing subtractive synth renderer.
+      voiceHandle = renderSubtractiveSynthVoice({
         channel,
         note,
         time,
@@ -785,9 +806,10 @@ class AudioEngine {
         voiceId,
         onEnded,
       });
-      if (voiceHandle) {
-        this.activeVoices.set(voiceId, voiceHandle);
-      }
+    }
+
+    if (voiceHandle) {
+      this.activeVoices.set(voiceId, voiceHandle);
     }
   }
 
@@ -860,76 +882,6 @@ class AudioEngine {
     source.start(time, offset, pad.loop ? undefined : duration);
   }
 
-  public triggerCustomSampleVoice(channel: Channel, note: Note, time: number, destination: AudioNode, voiceId: string) {
-    if (!this.ctx) return;
-    const ctx = this.ctx;
-    const zone = findSampleZone(channel.sampleZones, note);
-    const sampleId = zone?.sampleId || channel.customSample?.id;
-    const buffer = sampleId ? this.sampleBuffers.get(sampleId) : null;
-    if (!buffer) {
-      renderSubtractiveSynthVoice({
-        channel,
-        note,
-        time,
-        destination,
-        audioContext: ctx,
-        voiceId,
-      });
-      return;
-    }
-
-    const sample = zone && zone.sampleId === channel.customSample?.id ? channel.customSample : channel.customSample;
-    const rootPitch = zone?.rootNote ?? sample?.rootPitch ?? 60;
-    const tuneSemitones = zone?.tuneSemitones ?? 0;
-    const playbackRate = getSamplePlaybackRate(note.pitch, rootPitch, channel.pitch || 0, tuneSemitones);
-    const reverse = zone?.reverse ?? sample?.reverse ?? false;
-    const source = ctx.createBufferSource();
-    source.buffer = buffer;
-    source.playbackRate.setValueAtTime(reverse ? -playbackRate : playbackRate, time);
-
-    const gain = ctx.createGain();
-    const velocity = Math.max(0, Math.min(1, note.velocity ?? 0.8));
-    gain.gain.setValueAtTime(velocity * channel.volume, time);
-
-    const filter = ctx.createBiquadFilter();
-    filter.type = channel.synthParams?.filterType || 'lowpass';
-    filter.frequency.setValueAtTime(channel.synthParams?.filterCutoff || 18000, time);
-    filter.Q.value = channel.synthParams?.filterResonance || 1.0;
-
-    source.connect(filter);
-    filter.connect(gain);
-    gain.connect(destination);
-
-    const { start: trimStartPct, end: trimEndPct } = clampSampleRange(
-      zone?.trimStart ?? sample?.trimStart ?? 0,
-      zone?.trimEnd ?? sample?.trimEnd ?? 1
-    );
-    const trimStart = trimStartPct * buffer.duration;
-    const trimEnd = trimEndPct * buffer.duration;
-    const duration = Math.max(0.001, trimEnd - trimStart);
-    const loop = zone?.loop ?? channel.synthParams?.sampleLoop ?? false;
-    const loopStartPct = Math.max(trimStartPct, Math.min(trimEndPct, zone?.loopStart ?? trimStartPct));
-    const loopEndPct = Math.max(loopStartPct, Math.min(trimEndPct, zone?.loopEnd ?? trimEndPct));
-
-    if (loop && loopEndPct > loopStartPct) {
-      source.loop = true;
-      source.loopStart = loopStartPct * buffer.duration;
-      source.loopEnd = loopEndPct * buffer.duration;
-    }
-
-    const offset = reverse ? trimEnd : trimStart;
-    source.start(time, offset, loop ? undefined : duration);
-
-    this.activeVoices.set(voiceId, {
-      stop: (stopTime?: number) => {
-        const t = stopTime ?? ctx.currentTime;
-        gain.gain.cancelScheduledValues(t);
-        gain.gain.setValueAtTime(Math.max(0.0001, gain.gain.value), t);
-        gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.05);
-        try { source.stop(t + 0.06); } catch (e) {}
-      }
-    });
-  }
 
   // Real-Time Arpeggiator & Euclidean Rhythm Engine
   public generateEuclideanPattern(steps: number = 16, hits: number = 5, rotate: number = 0): boolean[] {
