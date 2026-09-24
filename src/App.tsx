@@ -73,6 +73,7 @@ import { PlaylistArranger } from './components/PlaylistArranger';
 import { Mixer } from './components/Mixer';
 import { InstrumentRack } from './components/InstrumentRack';
 import { SampleSlicerPanel } from './components/SampleSlicerPanel';
+import { SampleLibraryPanel } from './components/SampleLibraryPanel';
 
 // Modals
 import { AudioRecorderModal } from './components/AudioRecorderModal';
@@ -1513,7 +1514,26 @@ export function App() {
                 </div>
               </div>
               {selectedChannel && (
-                <SampleSlicerPanel channel={selectedChannel} sampleLibrary={projectState.sampleLibrary || []} onUpdateChannel={handleUpdateChannel} />
+                <>
+                  <SampleLibraryPanel
+                    samples={projectState.sampleLibrary || []}
+                    packs={projectState.samplePacks || []}
+                    selectedChannel={selectedChannel}
+                    onUpdateSample={(sample) => mutateProjectState(
+                      current => ({
+                        ...current,
+                        sampleLibrary: (current.sampleLibrary || []).map(item => item.id === sample.id ? sample : item)
+                      }),
+                      'Update sample library metadata'
+                    )}
+                    onUpdatePacks={(samplePacks) => mutateProjectState(
+                      current => ({ ...current, samplePacks }),
+                      'Update sample packs'
+                    )}
+                    onUpdateChannel={handleUpdateChannel}
+                  />
+                  <SampleSlicerPanel channel={selectedChannel} sampleLibrary={projectState.sampleLibrary || []} onUpdateChannel={handleUpdateChannel} />
+                </>
               )}
             </div>
           )}
