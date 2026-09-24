@@ -220,6 +220,20 @@ export interface CustomSampleData {
   normalize?: boolean;
   reverse?: boolean;
   rootPitch?: number; // default 60 (C4)
+  /** Phase 19: reusable library organization metadata. */
+  packId?: string;
+  category?: string;
+  tags?: string[];
+}
+
+export interface SamplePack {
+  id: string;
+  name: string;
+  description?: string;
+  category?: string;
+  tags: string[];
+  created: number;
+  updated: number;
 }
 
 export interface DrumPad {
@@ -571,6 +585,8 @@ export interface ProjectState {
   selectedPatternId: string;
   /** Persistent metadata for every imported sample available to the project. */
   sampleLibrary?: CustomSampleData[];
+  /** Phase 19: persistent reusable sample-pack metadata. */
+  samplePacks?: SamplePack[];
   channels: Channel[];
   selectedChannelId: string;
   playlistTracks: PlaylistTrack[];
