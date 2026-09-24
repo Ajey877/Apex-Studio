@@ -791,9 +791,9 @@ class AudioEngine {
       getSampleBuffer: (id) => this.sampleBuffers.get(id),
     });
 
-    if (!voiceHandle && channel.customSample?.id) {
-      // Preserve the pre-22C missing-buffer behavior: custom-sample playback
-      // falls back to the existing subtractive synth renderer.
+    if (!voiceHandle && (channel.customSample?.id || channel.instrumentType === 'sampler')) {
+      // Preserve the pre-22C sampler behavior: an unavailable custom sample,
+      // and a sampler channel without a sample, both fall back to subtractive synthesis.
       voiceHandle = renderSubtractiveSynthVoice({
         channel,
         note,
