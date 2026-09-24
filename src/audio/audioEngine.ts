@@ -19,6 +19,8 @@ import { renderSubtractiveSynthVoice } from './instruments/subtractiveSynth';
 import { renderFmSynthVoice } from './instruments/fmSynth';
 import { renderSamplerVoice } from './instruments/sampler';
 import { renderDrumPadVoice } from './instruments/drumPad';
+import { renderGrandPianoVoice, renderRhodesVoice, renderOrganVoice, renderPluckedGuitarVoice, renderStringsVoice, renderPizzicatoVoice, renderBrassVoice, renderMarimbaVoice } from './instruments/legacyAcoustic';
+import { renderAcid303Voice, renderReeseBassVoice, render808SubVoice, renderSupersawVoice, renderAmbientPadVoice, renderVoxChoirVoice, renderChiptuneVoice } from './instruments/legacySynth';
 
 export type MidiEventPayload = {
   type: 'noteOn' | 'noteOff' | 'cc' | 'pitchBend';
@@ -336,23 +338,23 @@ class AudioEngine {
       drumpad: renderDrumPadVoice,
       fmsynth: renderFmSynthVoice,
       fm_bell: renderFmSynthVoice,
-      grand_piano: ({ channel, note, time, destination, voiceId }) => this.triggerGrandPianoVoice(channel, note, time, destination, voiceId),
-      rhodes_epiano: ({ channel, note, time, destination, voiceId }) => this.triggerRhodesVoice(channel, note, time, destination, voiceId),
-      hammond_organ: ({ channel, note, time, destination, voiceId }) => this.triggerOrganVoice(channel, note, time, destination, voiceId),
-      nylon_guitar: ({ channel, note, time, destination, voiceId }) => this.triggerPluckedGuitarVoice(channel, note, time, destination, voiceId),
-      harpsichord: ({ channel, note, time, destination, voiceId }) => this.triggerPluckedGuitarVoice(channel, note, time, destination, voiceId),
-      strings_ensemble: ({ channel, note, time, destination, voiceId }) => this.triggerStringsVoice(channel, note, time, destination, voiceId),
-      pizzicato_strings: ({ channel, note, time, destination, voiceId }) => this.triggerPizzicatoVoice(channel, note, time, destination, voiceId),
-      cinematic_brass: ({ channel, note, time, destination, voiceId }) => this.triggerBrassVoice(channel, note, time, destination, voiceId),
-      acid_303: ({ channel, note, time, destination, voiceId }) => this.triggerAcid303Voice(channel, note, time, destination, voiceId),
-      reese_bass: ({ channel, note, time, destination, voiceId }) => this.triggerReeseBassVoice(channel, note, time, destination, voiceId),
-      slap_bass: ({ channel, note, time, destination, voiceId }) => this.triggerReeseBassVoice(channel, note, time, destination, voiceId),
-      sub_808: ({ channel, note, time, destination, voiceId }) => this.trigger808SubVoice(channel, note, time, destination, voiceId),
-      supersaw_lead: ({ channel, note, time, destination, voiceId }) => this.triggerSupersawVoice(channel, note, time, destination, voiceId),
-      ambient_pad: ({ channel, note, time, destination, voiceId }) => this.triggerAmbientPadVoice(channel, note, time, destination, voiceId),
-      vox_choir: ({ channel, note, time, destination, voiceId }) => this.triggerVoxChoirVoice(channel, note, time, destination, voiceId),
-      marimba_bell: ({ channel, note, time, destination, voiceId }) => this.triggerMarimbaVoice(channel, note, time, destination, voiceId),
-      chiptune_8bit: ({ channel, note, time, destination, voiceId }) => this.triggerChiptuneVoice(channel, note, time, destination, voiceId),
+      grand_piano: renderGrandPianoVoice,
+      rhodes_epiano: renderRhodesVoice,
+      hammond_organ: renderOrganVoice,
+      nylon_guitar: renderPluckedGuitarVoice,
+      harpsichord: renderPluckedGuitarVoice,
+      strings_ensemble: renderStringsVoice,
+      pizzicato_strings: renderPizzicatoVoice,
+      cinematic_brass: renderBrassVoice,
+      acid_303: renderAcid303Voice,
+      reese_bass: renderReeseBassVoice,
+      slap_bass: renderReeseBassVoice,
+      sub_808: render808SubVoice,
+      supersaw_lead: renderSupersawVoice,
+      ambient_pad: renderAmbientPadVoice,
+      vox_choir: renderVoxChoirVoice,
+      marimba_bell: renderMarimbaVoice,
+      chiptune_8bit: renderChiptuneVoice,
       independent_pluck: renderIndependentPluckVoice,
       minisynth: renderSubtractiveSynthVoice,
       wavetable: renderSubtractiveSynthVoice,
@@ -808,12 +810,6 @@ class AudioEngine {
       getSampleBuffer: (id) => this.sampleBuffers.get(id),
     });
 
-    if (!voiceHandle && channel.instrumentType === 'drumpad' && (!pad || !pad.sampleId)) {
-      // Preserve the legacy drum synthesizer fallback when there is no sampled pad.
-      this.triggerDrumVoice(channel, note, time, mixerChannel.input);
-      return;
-    }
-
     if (!voiceHandle && (channel.customSample?.id || channel.instrumentType === 'sampler')) {
       // Preserve the pre-22C sampler behavior: an unavailable custom sample,
       // and a sampler channel without a sample, both fall back to subtractive synthesis.
@@ -1250,763 +1246,42 @@ class AudioEngine {
     }
   }
 
-  // 1. Drum Synthesizer Engine
-  private triggerDrumVoice(channel: Channel, note: Note, time: number, destination: AudioNode) {
-    if (!this.ctx) return;
-    const ctx = this.ctx;
-    const pitch = note.pitch % 12; // Modulo to map drum pad
-    const vel = (note.velocity || 0.8) * channel.volume;
 
-    // Pitch mapping:
-    // 0 / 36 = Kick, 1 / 38 = Snare, 2 / 42 = Closed HiHat, 3 / 46 = Open HiHat
-    // 4 / 39 = Clap, 5 / 35 = 808 Sub, 6 / 37 = Rim, 7 / 48 = Tom, 8 / 49 = Crash
-    const drumIndex = note.pitch >= 35 ? (note.pitch - 35) % 9 : note.pitch % 9;
-
-    const gain = ctx.createGain();
-    gain.gain.setValueAtTime(vel, time);
-    gain.connect(destination);
-
-    switch (drumIndex) {
-      case 1: // 36: Kick
-      case 0: {
-        const osc = ctx.createOscillator();
-        const oscGain = ctx.createGain();
-        osc.type = 'sine';
-        osc.frequency.setValueAtTime(140, time);
-        osc.frequency.exponentialRampToValueAtTime(38, time + 0.12);
-
-        oscGain.gain.setValueAtTime(1.0, time);
-        oscGain.gain.exponentialRampToValueAtTime(0.001, time + 0.35);
-
-        osc.connect(oscGain);
-        oscGain.connect(gain);
-        osc.start(time);
-        osc.stop(time + 0.36);
-        break;
-      }
-      case 3: // 38: Snare
-      case 2: {
-        // Noise + body tone
-        const osc = ctx.createOscillator();
-        const oscGain = ctx.createGain();
-        osc.type = 'triangle';
-        osc.frequency.setValueAtTime(185, time);
-        osc.frequency.exponentialRampToValueAtTime(90, time + 0.08);
-
-        oscGain.gain.setValueAtTime(0.7, time);
-        oscGain.gain.exponentialRampToValueAtTime(0.001, time + 0.18);
-        osc.connect(oscGain);
-        oscGain.connect(gain);
-        osc.start(time);
-        osc.stop(time + 0.19);
-
-        // Noise buffer
-        const noiseBuffer = this.createNoiseBuffer(0.2);
-        const noiseSource = ctx.createBufferSource();
-        noiseSource.buffer = noiseBuffer;
-
-        const noiseFilter = ctx.createBiquadFilter();
-        noiseFilter.type = 'highpass';
-        noiseFilter.frequency.value = 1200;
-
-        const noiseGain = ctx.createGain();
-        noiseGain.gain.setValueAtTime(0.8, time);
-        noiseGain.gain.exponentialRampToValueAtTime(0.001, time + 0.22);
-
-        noiseSource.connect(noiseFilter);
-        noiseFilter.connect(noiseGain);
-        noiseGain.connect(gain);
-        noiseSource.start(time);
-        noiseSource.stop(time + 0.23);
-        break;
-      }
-      case 4: // Clap
-      case 5: { // 808 Sub Bass
-        if (drumIndex === 5) {
-          const osc = ctx.createOscillator();
-          const oscGain = ctx.createGain();
-          osc.type = 'sine';
-          const subFreq = this.midiToFreq(note.pitch || 36);
-          osc.frequency.setValueAtTime(subFreq * 1.5, time);
-          osc.frequency.exponentialRampToValueAtTime(subFreq, time + 0.04);
-
-          oscGain.gain.setValueAtTime(1.0, time);
-          oscGain.gain.exponentialRampToValueAtTime(0.001, time + 0.8);
-          osc.connect(oscGain);
-          oscGain.connect(gain);
-          osc.start(time);
-          osc.stop(time + 0.82);
-        } else {
-          // Clap
-          const noise = ctx.createBufferSource();
-          noise.buffer = this.createNoiseBuffer(0.25);
-          const filter = ctx.createBiquadFilter();
-          filter.type = 'bandpass';
-          filter.frequency.value = 1400;
-          filter.Q.value = 2.0;
-
-          const clapGain = ctx.createGain();
-          // Triple burst
-          clapGain.gain.setValueAtTime(0.9, time);
-          clapGain.gain.exponentialRampToValueAtTime(0.05, time + 0.015);
-          clapGain.gain.setValueAtTime(0.9, time + 0.025);
-          clapGain.gain.exponentialRampToValueAtTime(0.05, time + 0.04);
-          clapGain.gain.setValueAtTime(1.0, time + 0.05);
-          clapGain.gain.exponentialRampToValueAtTime(0.001, time + 0.25);
-
-          noise.connect(filter);
-          filter.connect(clapGain);
-          clapGain.connect(gain);
-          noise.start(time);
-          noise.stop(time + 0.26);
-        }
-        break;
-      }
-      case 7: { // Closed HiHat (42)
-        const noise = ctx.createBufferSource();
-        noise.buffer = this.createNoiseBuffer(0.08);
-        const filter = ctx.createBiquadFilter();
-        filter.type = 'highpass';
-        filter.frequency.value = 7500;
-
-        const hhGain = ctx.createGain();
-        hhGain.gain.setValueAtTime(0.7, time);
-        hhGain.gain.exponentialRampToValueAtTime(0.001, time + 0.06);
-
-        noise.connect(filter);
-        filter.connect(hhGain);
-        hhGain.connect(gain);
-        noise.start(time);
-        noise.stop(time + 0.07);
-        break;
-      }
-      case 8: { // Open HiHat (46)
-        const noise = ctx.createBufferSource();
-        noise.buffer = this.createNoiseBuffer(0.45);
-        const filter = ctx.createBiquadFilter();
-        filter.type = 'highpass';
-        filter.frequency.value = 6500;
-
-        const openGain = ctx.createGain();
-        openGain.gain.setValueAtTime(0.8, time);
-        openGain.gain.exponentialRampToValueAtTime(0.001, time + 0.42);
-
-        noise.connect(filter);
-        filter.connect(openGain);
-        openGain.connect(gain);
-        noise.start(time);
-        noise.stop(time + 0.44);
-        break;
-      }
-      default: {
-        // Perc / Rim / Tom
-        const osc = ctx.createOscillator();
-        const oscGain = ctx.createGain();
-        osc.type = 'sine';
-        osc.frequency.setValueAtTime(320, time);
-        osc.frequency.exponentialRampToValueAtTime(110, time + 0.09);
-
-        oscGain.gain.setValueAtTime(0.7, time);
-        oscGain.gain.exponentialRampToValueAtTime(0.001, time + 0.12);
-        osc.connect(oscGain);
-        oscGain.connect(gain);
-        osc.start(time);
-        osc.stop(time + 0.13);
-      }
-    }
-  }
 
   // 2. 3-Osc Subtractive MiniSynth
   // --- Acoustic & Orchestral Instrument Synthesis Engines ---
 
-  // 4. Grand Piano (Acoustic Concert Multi-Harmonic Model)
-  private triggerGrandPianoVoice(channel: Channel, note: Note, time: number, destination: AudioNode, voiceId: string) {
-    if (!this.ctx) return;
-    const ctx = this.ctx;
-    const f0 = this.midiToFreq(note.pitch + channel.pitch);
-    const vel = (note.velocity || 0.8) * channel.volume;
-    const duration = (note.duration || 2) * 0.4;
 
-    const masterGain = ctx.createGain();
-    masterGain.gain.setValueAtTime(0.0001, time);
-    masterGain.gain.linearRampToValueAtTime(vel, time + 0.003); // Hammer strike
-    masterGain.gain.exponentialRampToValueAtTime(vel * 0.4, time + 0.3);
-    masterGain.gain.exponentialRampToValueAtTime(0.0001, time + duration + 0.4);
 
-    // Filter - acoustic damping
-    const filter = ctx.createBiquadFilter();
-    filter.type = 'lowpass';
-    const cutoff = Math.min(16000, f0 * 6 + vel * 3000);
-    filter.frequency.setValueAtTime(cutoff, time);
-    filter.frequency.exponentialRampToValueAtTime(f0 * 2, time + duration + 0.3);
 
-    // Harmonic partials (f0, 2*f0, 3*f0, 4*f0) with inharmonicity
-    const osc1 = ctx.createOscillator();
-    osc1.type = 'triangle';
-    osc1.frequency.setValueAtTime(f0, time);
 
-    const osc2 = ctx.createOscillator();
-    osc2.type = 'sine';
-    osc2.frequency.setValueAtTime(f0 * 2.002, time);
 
-    const osc3 = ctx.createOscillator();
-    osc3.type = 'sine';
-    osc3.frequency.setValueAtTime(f0 * 3.006, time);
 
-    const g1 = ctx.createGain(); g1.gain.value = 0.7;
-    const g2 = ctx.createGain(); g2.gain.value = 0.3;
-    const g3 = ctx.createGain(); g3.gain.value = 0.15;
 
-    // Hammer noise click transient
-    const hammer = ctx.createBufferSource();
-    hammer.buffer = this.createNoiseBuffer(0.015);
-    const hammerFilter = ctx.createBiquadFilter();
-    hammerFilter.type = 'bandpass';
-    hammerFilter.frequency.value = Math.min(6000, f0 * 3);
-    const hammerGain = ctx.createGain();
-    hammerGain.gain.setValueAtTime(vel * 0.25, time);
-    hammerGain.gain.exponentialRampToValueAtTime(0.001, time + 0.015);
-    hammer.connect(hammerFilter);
-    hammerFilter.connect(hammerGain);
-    hammerGain.connect(filter);
 
-    osc1.connect(g1); g1.connect(filter);
-    osc2.connect(g2); g2.connect(filter);
-    osc3.connect(g3); g3.connect(filter);
-    filter.connect(masterGain);
-    masterGain.connect(destination);
 
-    osc1.start(time); osc2.start(time); osc3.start(time); hammer.start(time);
-    const stopTime = time + duration + 0.5;
-    osc1.stop(stopTime); osc2.stop(stopTime); osc3.stop(stopTime); hammer.stop(time + 0.02);
-  }
 
-  // 5. Vintage Rhodes Electric Piano (Tine + Bell + Tremolo)
-  private triggerRhodesVoice(channel: Channel, note: Note, time: number, destination: AudioNode, voiceId: string) {
-    if (!this.ctx) return;
-    const ctx = this.ctx;
-    const f0 = this.midiToFreq(note.pitch + channel.pitch);
-    const vel = (note.velocity || 0.8) * channel.volume;
-    const duration = (note.duration || 2) * 0.35;
 
-    const mainGain = ctx.createGain();
-    mainGain.gain.setValueAtTime(0.0001, time);
-    mainGain.gain.linearRampToValueAtTime(vel, time + 0.005);
-    mainGain.gain.exponentialRampToValueAtTime(vel * 0.5, time + 0.25);
-    mainGain.gain.exponentialRampToValueAtTime(0.0001, time + duration + 0.3);
 
-    // Fundamental Sine Tine
-    const tine = ctx.createOscillator();
-    tine.type = 'sine';
-    tine.frequency.setValueAtTime(f0, time);
 
-    // Bell overtone at 3.98x
-    const bell = ctx.createOscillator();
-    bell.type = 'sine';
-    bell.frequency.setValueAtTime(f0 * 3.98, time);
-    const bellGain = ctx.createGain();
-    bellGain.gain.setValueAtTime(vel * 0.4, time);
-    bellGain.gain.exponentialRampToValueAtTime(0.001, time + 0.15);
 
-    // Tremolo LFO
-    const lfo = ctx.createOscillator();
-    lfo.frequency.value = 4.8;
-    const lfoGain = ctx.createGain();
-    lfoGain.gain.value = 0.08;
-    const tremGain = ctx.createGain();
-    tremGain.gain.value = 0.92;
-    lfo.connect(lfoGain);
-    lfoGain.connect(tremGain.gain);
 
-    tine.connect(mainGain);
-    bell.connect(bellGain);
-    bellGain.connect(mainGain);
-    mainGain.connect(tremGain);
-    tremGain.connect(destination);
 
-    tine.start(time); bell.start(time); lfo.start(time);
-    const stopTime = time + duration + 0.35;
-    tine.stop(stopTime); bell.stop(time + 0.2); lfo.stop(stopTime);
-  }
 
-  // 6. Hammond B3 Drawbar Organ
-  private triggerOrganVoice(channel: Channel, note: Note, time: number, destination: AudioNode, voiceId: string) {
-    if (!this.ctx) return;
-    const ctx = this.ctx;
-    const f0 = this.midiToFreq(note.pitch + channel.pitch);
-    const vel = (note.velocity || 0.8) * channel.volume;
-    const duration = (note.duration || 1.5) * 0.35;
 
-    const organGain = ctx.createGain();
-    organGain.gain.setValueAtTime(vel * 0.7, time);
-    organGain.gain.setValueAtTime(vel * 0.7, time + duration);
-    organGain.gain.exponentialRampToValueAtTime(0.0001, time + duration + 0.05);
 
-    // Additive Drawbars: 16' (0.5x), 8' (1x), 4' (2x), 2 2/3' (3x), 2' (4x)
-    const harmonics = [0.5, 1.0, 2.0, 3.0, 4.0];
-    const amplitudes = [0.6, 1.0, 0.7, 0.4, 0.3];
 
-    harmonics.forEach((h, i) => {
-      const osc = ctx.createOscillator();
-      osc.type = 'sine';
-      osc.frequency.setValueAtTime(f0 * h, time);
-      const g = ctx.createGain();
-      g.gain.value = amplitudes[i] * 0.25;
-      osc.connect(g);
-      g.connect(organGain);
-      osc.start(time);
-      osc.stop(time + duration + 0.08);
-    });
 
-    // Rotary Leslie chorus LFO
-    const rotaryLfo = ctx.createOscillator();
-    rotaryLfo.frequency.value = 6.2;
-    const rotaryDepth = ctx.createGain();
-    rotaryDepth.gain.value = 0.05;
-    rotaryLfo.connect(rotaryDepth);
 
-    organGain.connect(destination);
-    rotaryLfo.start(time);
-    rotaryLfo.stop(time + duration + 0.1);
-  }
 
-  // 7. Plucked Acoustic Guitar / Harpsichord (Karplus-Strong Model)
-  private triggerPluckedGuitarVoice(channel: Channel, note: Note, time: number, destination: AudioNode, voiceId: string) {
-    if (!this.ctx) return;
-    const ctx = this.ctx;
-    const f0 = this.midiToFreq(note.pitch + channel.pitch);
-    const vel = (note.velocity || 0.8) * channel.volume;
-    const duration = (note.duration || 2) * 0.4;
 
-    const pluckGain = ctx.createGain();
-    pluckGain.gain.setValueAtTime(0.0001, time);
-    pluckGain.gain.linearRampToValueAtTime(vel, time + 0.002);
-    pluckGain.gain.exponentialRampToValueAtTime(0.0001, time + duration + 0.25);
 
-    const filter = ctx.createBiquadFilter();
-    filter.type = 'lowpass';
-    filter.frequency.setValueAtTime(Math.min(14000, f0 * 8), time);
-    filter.frequency.exponentialRampToValueAtTime(f0 * 1.5, time + 0.3);
 
-    const osc1 = ctx.createOscillator();
-    osc1.type = 'sawtooth';
-    osc1.frequency.setValueAtTime(f0, time);
 
-    const osc2 = ctx.createOscillator();
-    osc2.type = 'triangle';
-    osc2.frequency.setValueAtTime(f0, time);
-    osc2.detune.setValueAtTime(4, time);
 
-    osc1.connect(filter);
-    osc2.connect(filter);
-    filter.connect(pluckGain);
-    pluckGain.connect(destination);
 
-    osc1.start(time); osc2.start(time);
-    osc1.stop(time + duration + 0.3); osc2.stop(time + duration + 0.3);
-  }
 
-  // 8. Orchestral String Ensemble (5-Voice Detuned Unison)
-  private triggerStringsVoice(channel: Channel, note: Note, time: number, destination: AudioNode, voiceId: string) {
-    if (!this.ctx) return;
-    const ctx = this.ctx;
-    const f0 = this.midiToFreq(note.pitch + channel.pitch);
-    const vel = (note.velocity || 0.8) * channel.volume;
-    const duration = (note.duration || 2) * 0.4;
 
-    const strGain = ctx.createGain();
-    strGain.gain.setValueAtTime(0.0001, time);
-    strGain.gain.linearRampToValueAtTime(vel * 0.8, time + 0.12); // Bowing swell
-    strGain.gain.setValueAtTime(vel * 0.8, time + duration);
-    strGain.gain.exponentialRampToValueAtTime(0.0001, time + duration + 0.4);
-
-    const filter = ctx.createBiquadFilter();
-    filter.type = 'lowpass';
-    filter.frequency.value = 5200;
-
-    // Detuned violin unison voices
-    const detunes = [-12, -5, 0, 5, 12];
-    detunes.forEach((d) => {
-      const osc = ctx.createOscillator();
-      osc.type = 'sawtooth';
-      osc.frequency.setValueAtTime(f0, time);
-      osc.detune.setValueAtTime(d, time);
-      const g = ctx.createGain();
-      g.gain.value = 0.18;
-      osc.connect(g);
-      g.connect(filter);
-      osc.start(time);
-      osc.stop(time + duration + 0.5);
-    });
-
-    // Natural string vibrato
-    const vib = ctx.createOscillator();
-    vib.frequency.value = 5.2;
-    const vibGain = ctx.createGain();
-    vibGain.gain.value = 4;
-    vib.connect(vibGain);
-    vibGain.connect(filter.frequency);
-    vib.start(time + 0.1);
-    vib.stop(time + duration + 0.5);
-
-    filter.connect(strGain);
-    strGain.connect(destination);
-  }
-
-  // 9. Orchestral Pizzicato Strings
-  private triggerPizzicatoVoice(channel: Channel, note: Note, time: number, destination: AudioNode, voiceId: string) {
-    if (!this.ctx) return;
-    const ctx = this.ctx;
-    const f0 = this.midiToFreq(note.pitch + channel.pitch);
-    const vel = (note.velocity || 0.8) * channel.volume;
-
-    const pizzGain = ctx.createGain();
-    pizzGain.gain.setValueAtTime(0.0001, time);
-    pizzGain.gain.linearRampToValueAtTime(vel, time + 0.002);
-    pizzGain.gain.exponentialRampToValueAtTime(0.0001, time + 0.35);
-
-    const filter = ctx.createBiquadFilter();
-    filter.type = 'bandpass';
-    filter.frequency.setValueAtTime(f0 * 2.2, time);
-    filter.Q.value = 3.0;
-
-    const osc = ctx.createOscillator();
-    osc.type = 'sawtooth';
-    osc.frequency.setValueAtTime(f0, time);
-
-    osc.connect(filter);
-    filter.connect(pizzGain);
-    pizzGain.connect(destination);
-
-    osc.start(time);
-    osc.stop(time + 0.4);
-  }
-
-  // 10. Cinematic Brass & Horn Section
-  private triggerBrassVoice(channel: Channel, note: Note, time: number, destination: AudioNode, voiceId: string) {
-    if (!this.ctx) return;
-    const ctx = this.ctx;
-    const f0 = this.midiToFreq(note.pitch + channel.pitch);
-    const vel = (note.velocity || 0.8) * channel.volume;
-    const duration = (note.duration || 2) * 0.35;
-
-    const brassGain = ctx.createGain();
-    brassGain.gain.setValueAtTime(0.0001, time);
-    brassGain.gain.linearRampToValueAtTime(vel * 0.9, time + 0.05); // Brass swell
-    brassGain.gain.setValueAtTime(vel * 0.9, time + duration);
-    brassGain.gain.exponentialRampToValueAtTime(0.0001, time + duration + 0.2);
-
-    const filter = ctx.createBiquadFilter();
-    filter.type = 'lowpass';
-    filter.frequency.setValueAtTime(400, time);
-    filter.frequency.exponentialRampToValueAtTime(Math.min(9000, f0 * 7), time + 0.07);
-    filter.frequency.exponentialRampToValueAtTime(f0 * 3, time + 0.3);
-    filter.Q.value = 4.0;
-
-    const osc1 = ctx.createOscillator();
-    osc1.type = 'sawtooth';
-    osc1.frequency.setValueAtTime(f0, time);
-    osc1.detune.setValueAtTime(-8, time);
-
-    const osc2 = ctx.createOscillator();
-    osc2.type = 'square';
-    osc2.frequency.setValueAtTime(f0, time);
-    osc2.detune.setValueAtTime(8, time);
-
-    osc1.connect(filter);
-    osc2.connect(filter);
-    filter.connect(brassGain);
-    brassGain.connect(destination);
-
-    osc1.start(time); osc2.start(time);
-    osc1.stop(time + duration + 0.25); osc2.stop(time + duration + 0.25);
-  }
-
-  // 11. Roland TB-303 Acid Bass (Diode Ladder Model)
-  private triggerAcid303Voice(channel: Channel, note: Note, time: number, destination: AudioNode, voiceId: string) {
-    if (!this.ctx) return;
-    const ctx = this.ctx;
-    const f0 = this.midiToFreq(note.pitch + channel.pitch);
-    const vel = (note.velocity || 0.8) * channel.volume;
-    const duration = (note.duration || 1) * 0.25;
-
-    const ampGain = ctx.createGain();
-    ampGain.gain.setValueAtTime(0.0001, time);
-    ampGain.gain.linearRampToValueAtTime(vel, time + 0.004);
-    ampGain.gain.exponentialRampToValueAtTime(vel * 0.4, time + 0.15);
-    ampGain.gain.exponentialRampToValueAtTime(0.0001, time + duration + 0.1);
-
-    // 24dB Diode Ladder Resonant Filter
-    const filter = ctx.createBiquadFilter();
-    filter.type = 'lowpass';
-    filter.Q.value = 14.0; // Acid squeal
-    filter.frequency.setValueAtTime(f0 * 12, time);
-    filter.frequency.exponentialRampToValueAtTime(Math.max(80, f0 * 1.5), time + 0.18);
-
-    const osc = ctx.createOscillator();
-    osc.type = 'sawtooth';
-    osc.frequency.setValueAtTime(f0, time);
-
-    osc.connect(filter);
-    filter.connect(ampGain);
-    ampGain.connect(destination);
-
-    osc.start(time);
-    osc.stop(time + duration + 0.15);
-  }
-
-  // 12. Reese Bass (Detuned Neuro / DnB Bass)
-  private triggerReeseBassVoice(channel: Channel, note: Note, time: number, destination: AudioNode, voiceId: string) {
-    if (!this.ctx) return;
-    const ctx = this.ctx;
-    const f0 = this.midiToFreq(note.pitch + channel.pitch);
-    const vel = (note.velocity || 0.8) * channel.volume;
-    const duration = (note.duration || 2) * 0.3;
-
-    const ampGain = ctx.createGain();
-    ampGain.gain.setValueAtTime(0.0001, time);
-    ampGain.gain.linearRampToValueAtTime(vel, time + 0.02);
-    ampGain.gain.setValueAtTime(vel * 0.9, time + duration);
-    ampGain.gain.exponentialRampToValueAtTime(0.0001, time + duration + 0.15);
-
-    const filter = ctx.createBiquadFilter();
-    filter.type = 'lowpass';
-    filter.frequency.value = 950;
-    filter.Q.value = 3.0;
-
-    const detunes = [-16, 0, 16];
-    detunes.forEach((d) => {
-      const osc = ctx.createOscillator();
-      osc.type = 'sawtooth';
-      osc.frequency.setValueAtTime(f0, time);
-      osc.detune.setValueAtTime(d, time);
-      const g = ctx.createGain();
-      g.gain.value = 0.33;
-      osc.connect(g);
-      g.connect(filter);
-      osc.start(time);
-      osc.stop(time + duration + 0.2);
-    });
-
-    filter.connect(ampGain);
-    ampGain.connect(destination);
-  }
-
-  // 13. Tuned 808 Sub Bass (Pitch Drop + Saturation)
-  private trigger808SubVoice(channel: Channel, note: Note, time: number, destination: AudioNode, voiceId: string) {
-    if (!this.ctx) return;
-    const ctx = this.ctx;
-    const f0 = this.midiToFreq(note.pitch + channel.pitch);
-    const vel = (note.velocity || 0.8) * channel.volume;
-    const duration = (note.duration || 2) * 0.4;
-
-    const osc = ctx.createOscillator();
-    osc.type = 'sine';
-    // Pitch punch drop
-    osc.frequency.setValueAtTime(f0 * 1.8, time);
-    osc.frequency.exponentialRampToValueAtTime(f0, time + 0.035);
-
-    const ampGain = ctx.createGain();
-    ampGain.gain.setValueAtTime(0.0001, time);
-    ampGain.gain.linearRampToValueAtTime(vel, time + 0.003);
-    ampGain.gain.exponentialRampToValueAtTime(0.0001, time + duration + 0.5);
-
-    osc.connect(ampGain);
-    ampGain.connect(destination);
-
-    osc.start(time);
-    osc.stop(time + duration + 0.55);
-  }
-
-  // 14. Supersaw Trance Lead (Roland JP-8000 7-Hypersaw Model)
-  private triggerSupersawVoice(channel: Channel, note: Note, time: number, destination: AudioNode, voiceId: string) {
-    if (!this.ctx) return;
-    const ctx = this.ctx;
-    const f0 = this.midiToFreq(note.pitch + channel.pitch);
-    const vel = (note.velocity || 0.8) * channel.volume;
-    const duration = (note.duration || 2) * 0.3;
-
-    const ampGain = ctx.createGain();
-    ampGain.gain.setValueAtTime(0.0001, time);
-    ampGain.gain.linearRampToValueAtTime(vel * 0.9, time + 0.015);
-    ampGain.gain.setValueAtTime(vel * 0.85, time + duration);
-    ampGain.gain.exponentialRampToValueAtTime(0.0001, time + duration + 0.25);
-
-    const filter = ctx.createBiquadFilter();
-    filter.type = 'lowpass';
-    filter.frequency.value = 8500;
-    filter.Q.value = 2.0;
-
-    const supersawDetunes = [-24, -14, -6, 0, 6, 14, 24];
-    supersawDetunes.forEach((d) => {
-      const osc = ctx.createOscillator();
-      osc.type = 'sawtooth';
-      osc.frequency.setValueAtTime(f0, time);
-      osc.detune.setValueAtTime(d, time);
-      const g = ctx.createGain();
-      g.gain.value = 0.14;
-      osc.connect(g);
-      g.connect(filter);
-      osc.start(time);
-      osc.stop(time + duration + 0.3);
-    });
-
-    filter.connect(ampGain);
-    ampGain.connect(destination);
-  }
-
-  // 15. Lush Ambient Pad (Slow Bloom)
-  private triggerAmbientPadVoice(channel: Channel, note: Note, time: number, destination: AudioNode, voiceId: string) {
-    if (!this.ctx) return;
-    const ctx = this.ctx;
-    const f0 = this.midiToFreq(note.pitch + channel.pitch);
-    const vel = (note.velocity || 0.8) * channel.volume;
-    const duration = (note.duration || 2) * 0.45;
-
-    const ampGain = ctx.createGain();
-    ampGain.gain.setValueAtTime(0.0001, time);
-    ampGain.gain.linearRampToValueAtTime(vel * 0.8, time + 0.35); // Slow bloom
-    ampGain.gain.setValueAtTime(vel * 0.8, time + duration);
-    ampGain.gain.exponentialRampToValueAtTime(0.0001, time + duration + 0.7);
-
-    const filter = ctx.createBiquadFilter();
-    filter.type = 'lowpass';
-    filter.frequency.setValueAtTime(600, time);
-    filter.frequency.exponentialRampToValueAtTime(2800, time + 0.4);
-
-    const osc1 = ctx.createOscillator();
-    osc1.type = 'sawtooth';
-    osc1.frequency.setValueAtTime(f0, time);
-    osc1.detune.setValueAtTime(-7, time);
-
-    const osc2 = ctx.createOscillator();
-    osc2.type = 'triangle';
-    osc2.frequency.setValueAtTime(f0, time);
-    osc2.detune.setValueAtTime(7, time);
-
-    osc1.connect(filter);
-    osc2.connect(filter);
-    filter.connect(ampGain);
-    ampGain.connect(destination);
-
-    osc1.start(time); osc2.start(time);
-    osc1.stop(time + duration + 0.75); osc2.stop(time + duration + 0.75);
-  }
-
-  // 16. Vocal Choir Formant Synthesizer (Vowel Formants A-E-O)
-  private triggerVoxChoirVoice(channel: Channel, note: Note, time: number, destination: AudioNode, voiceId: string) {
-    if (!this.ctx) return;
-    const ctx = this.ctx;
-    const f0 = this.midiToFreq(note.pitch + channel.pitch);
-    const vel = (note.velocity || 0.8) * channel.volume;
-    const duration = (note.duration || 2) * 0.35;
-
-    const ampGain = ctx.createGain();
-    ampGain.gain.setValueAtTime(0.0001, time);
-    ampGain.gain.linearRampToValueAtTime(vel * 0.85, time + 0.08);
-    ampGain.gain.setValueAtTime(vel * 0.85, time + duration);
-    ampGain.gain.exponentialRampToValueAtTime(0.0001, time + duration + 0.3);
-
-    // Formant filter 1 & 2 ("Ah" vowel: 800Hz / 1200Hz)
-    const f1 = ctx.createBiquadFilter();
-    f1.type = 'bandpass';
-    f1.frequency.value = 800;
-    f1.Q.value = 5.0;
-
-    const f2 = ctx.createBiquadFilter();
-    f2.type = 'bandpass';
-    f2.frequency.value = 1200;
-    f2.Q.value = 6.0;
-
-    const osc = ctx.createOscillator();
-    osc.type = 'sawtooth';
-    osc.frequency.setValueAtTime(f0, time);
-
-    // Natural voice vibrato
-    const vib = ctx.createOscillator();
-    vib.frequency.value = 5.5;
-    const vibGain = ctx.createGain();
-    vibGain.gain.value = 6;
-    vib.connect(osc.detune);
-    vib.start(time);
-
-    osc.connect(f1); osc.connect(f2);
-    f1.connect(ampGain); f2.connect(ampGain);
-    ampGain.connect(destination);
-
-    osc.start(time);
-    osc.stop(time + duration + 0.35); vib.stop(time + duration + 0.35);
-  }
-
-  // 17. Marimba & Kalimba Mallet Model
-  private triggerMarimbaVoice(channel: Channel, note: Note, time: number, destination: AudioNode, voiceId: string) {
-    if (!this.ctx) return;
-    const ctx = this.ctx;
-    const f0 = this.midiToFreq(note.pitch + channel.pitch);
-    const vel = (note.velocity || 0.8) * channel.volume;
-
-    const ampGain = ctx.createGain();
-    ampGain.gain.setValueAtTime(0.0001, time);
-    ampGain.gain.linearRampToValueAtTime(vel, time + 0.002);
-    ampGain.gain.exponentialRampToValueAtTime(0.0001, time + 0.45);
-
-    const osc = ctx.createOscillator();
-    osc.type = 'sine';
-    osc.frequency.setValueAtTime(f0, time);
-
-    // Wooden strike ping (4th harmonic)
-    const ping = ctx.createOscillator();
-    ping.type = 'sine';
-    ping.frequency.setValueAtTime(f0 * 4, time);
-    const pingGain = ctx.createGain();
-    pingGain.gain.setValueAtTime(vel * 0.3, time);
-    pingGain.gain.exponentialRampToValueAtTime(0.001, time + 0.04);
-
-    osc.connect(ampGain);
-    ping.connect(pingGain);
-    pingGain.connect(ampGain);
-    ampGain.connect(destination);
-
-    osc.start(time); ping.start(time);
-    osc.stop(time + 0.5); ping.stop(time + 0.05);
-  }
-
-  // 18. Chiptune 8-Bit Retro Synth
-  private triggerChiptuneVoice(channel: Channel, note: Note, time: number, destination: AudioNode, voiceId: string) {
-    if (!this.ctx) return;
-    const ctx = this.ctx;
-    const f0 = this.midiToFreq(note.pitch + channel.pitch);
-    const vel = (note.velocity || 0.8) * channel.volume;
-    const duration = (note.duration || 1) * 0.2;
-
-    const ampGain = ctx.createGain();
-    ampGain.gain.setValueAtTime(vel * 0.8, time);
-    ampGain.gain.setValueAtTime(vel * 0.8, time + duration);
-    ampGain.gain.setValueAtTime(0.0001, time + duration + 0.01); // Instant 8-bit gating
-
-    const osc = ctx.createOscillator();
-    osc.type = 'square';
-    osc.frequency.setValueAtTime(f0, time);
-
-    osc.connect(ampGain);
-    ampGain.connect(destination);
-
-    osc.start(time);
-    osc.stop(time + duration + 0.02);
-  }
-
-  // Noise Buffer Helper
-  private createNoiseBuffer(durationSeconds: number): AudioBuffer {
-    if (!this.ctx) this.init();
-    const ctx = this.ctx!;
-    const bufferSize = ctx.sampleRate * durationSeconds;
-    const buffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
-    const output = buffer.getChannelData(0);
-    for (let i = 0; i < bufferSize; i++) {
-      output[i] = Math.random() * 2 - 1;
-    }
-    return buffer;
-  }
 
   public midiToFreq(midiNote: number): number {
     return 440 * Math.pow(2, (midiNote - 69) / 12);
