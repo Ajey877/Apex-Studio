@@ -47,7 +47,7 @@ export const MultiZoneSamplerModal: React.FC<MultiZoneSamplerModalProps> = ({
   const selectedChannel = channels.find(channel => channel.id === selectedChannelId) || channels[0];
 
   const commitZones = (updated: KeyZone[]) => {
-    commitZones(updated);
+    setZones(updated);
     if (selectedChannel) {
       onUpdateChannel(selectedChannel.id, { sampleZones: updated.map(({ name, color, ...zone }) => zone) });
     }
