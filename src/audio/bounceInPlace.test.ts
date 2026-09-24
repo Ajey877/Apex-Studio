@@ -11,7 +11,7 @@ import { afterEach, beforeEach, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { audioEngine, resolvePlayableContentLengthSteps } from './audioEngine';
-import type { AudioClip, Channel, Note } from '../types/daw';
+import type { Channel, Note } from '../types/daw';
 
 type EngineInternals = Record<string, any>;
 const engine = audioEngine as unknown as EngineInternals;
