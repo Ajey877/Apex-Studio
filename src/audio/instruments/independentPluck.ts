@@ -17,8 +17,9 @@ export const renderIndependentPluckVoice: InstrumentVoiceRenderer = ({
   note,
   time,
   destination,
+  audioContext,
 }) => {
-  const ctx = destination.context;
+  const ctx = audioContext;
   const frequency = midiToFrequency(note.pitch + channel.pitch);
   const velocity = clamp((note.velocity ?? 0.8) * channel.volume, 0, 1);
   const duration = clamp((note.duration || 1) * 0.2, 0.05, 1.5);
