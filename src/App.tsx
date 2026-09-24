@@ -72,6 +72,7 @@ import { PianoRoll } from './components/PianoRoll';
 import { PlaylistArranger } from './components/PlaylistArranger';
 import { Mixer } from './components/Mixer';
 import { InstrumentRack } from './components/InstrumentRack';
+import { SampleSlicerPanel } from './components/SampleSlicerPanel';
 
 // Modals
 import { AudioRecorderModal } from './components/AudioRecorderModal';
@@ -1499,14 +1500,21 @@ export function App() {
           )}
 
           {currentView === 'sampler' && (
-            <div className="flex flex-col h-full items-center justify-center p-8 bg-[#121214] text-center space-y-4">
-              <div className="w-16 h-16 bg-[#ff6e00]/15 border border-[#ff6e00]/30 rounded-2xl flex items-center justify-center text-[#ff6e00]"><Volume2 className="w-8 h-8" /></div>
-              <div><h2 className="text-xl font-bold text-white tracking-tight">DIRECTWAVE AUDIO SAMPLER & VOCAL CAPTURE</h2><p className="text-xs text-[#777] max-w-md mt-1">High-fidelity 48kHz Direct-to-Disk recording station with automatic waveform slicing and transient detection.</p></div>
-              <div className="flex items-center gap-3 pt-2">
-                <button onClick={() => setIsAudioRecorderOpen(true)} className="px-5 py-2.5 bg-[#ff6e00] hover:bg-[#ff7d1a] text-black font-bold text-xs rounded transition flex items-center gap-2 shadow"><div className="w-2.5 h-2.5 bg-black rounded-full" /><span>OPEN MICROPHONE RECORDER</span></button>
-                <button onClick={() => setIsSampleManagerOpen(true)} className="px-5 py-2.5 bg-[#00ff88] hover:bg-[#00e67a] text-black font-bold text-xs rounded transition flex items-center gap-2 shadow"><Volume2 className="w-3.5 h-3.5" /><span>DIRECTWAVE SAMPLE LOADER</span></button>
-                <button onClick={() => setCurrentView('instruments')} className="px-5 py-2.5 bg-[#222225] hover:bg-[#2d2d30] text-white font-bold text-xs rounded border border-[#333336] transition">Open VST Synthesizers</button>
+            <div className="flex flex-col h-full overflow-y-auto p-4 bg-[#121214] items-center gap-4">
+              <div className="w-full max-w-4xl flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <h2 className="text-lg font-bold text-white">DIRECTWAVE SAMPLE WORKSTATION</h2>
+                  <p className="text-[10px] text-[#777]">Import, inspect, slice and map real audio into the drum sampler.</p>
+                </div>
+                <div className="flex gap-2">
+                  <button onClick={() => setIsAudioRecorderOpen(true)} className="px-3 py-2 bg-[#ff6e00] text-black font-bold text-xs rounded">RECORD</button>
+                  <button onClick={() => setIsSampleManagerOpen(true)} className="px-3 py-2 bg-[#00ff88] text-black font-bold text-xs rounded">SAMPLE LIBRARY</button>
+                  <button onClick={() => setCurrentView('instruments')} className="px-3 py-2 bg-[#222225] text-white font-bold text-xs rounded border border-[#333336]">INSTRUMENTS</button>
+                </div>
               </div>
+              {selectedChannel && (
+                <SampleSlicerPanel channel={selectedChannel} sampleLibrary={projectState.sampleLibrary || []} onUpdateChannel={handleUpdateChannel} />
+              )}
             </div>
           )}
         </section>
