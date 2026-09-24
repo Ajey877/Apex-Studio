@@ -1,5 +1,4 @@
 import { 
-import { findSampleZone, getSamplePlaybackRate, clampSampleRange } from './sampleZones';
   Channel, 
   Note, 
   MixerTrack, 
@@ -11,6 +10,7 @@ import { findSampleZone, getSamplePlaybackRate, clampSampleRange } from './sampl
   GrossBeatState,
   SidechainSettings
 } from '../types/daw';
+import { findSampleZone, getSamplePlaybackRate, clampSampleRange } from './sampleZones';
 import { AudioClockTransport, TransportState } from './transport';
 import { ChorusEffect } from './effects/ChorusEffect';
 import { WetDryEffect } from './effects/WetDryEffect';
