@@ -75,6 +75,9 @@ export const getAudioIdsForProject = (state: ProjectState): string[] => {
     channel.sampleZones?.forEach(zone => {
       if (zone.sampleId) ids.add(zone.sampleId);
     });
+    channel.drumPads?.forEach(pad => {
+      if (pad.sampleId) ids.add(pad.sampleId);
+    });
   });
 
   return [...ids];
