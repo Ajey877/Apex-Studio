@@ -10,7 +10,10 @@ export interface InstrumentVoiceContext {
 
 export type InstrumentVoiceRenderer = (context: InstrumentVoiceContext) => void;
 
-export type InstrumentRegistry = ReadonlyMap<InstrumentType, InstrumentVoiceRenderer>;
+export interface InstrumentRegistry {
+  get(instrumentType: InstrumentType): InstrumentVoiceRenderer;
+  has(instrumentType: InstrumentType): boolean;
+}
 
 export const createInstrumentRegistry = (
   renderers: Partial<Record<InstrumentType, InstrumentVoiceRenderer>>,
@@ -30,10 +33,6 @@ export const createInstrumentRegistry = (
   return {
     get: (instrumentType: InstrumentType) => registry.get(instrumentType) ?? fallback,
     has: (instrumentType: InstrumentType) => registry.has(instrumentType),
-    forEach: registry.forEach.bind(registry),
-    entries: registry.entries.bind(registry),
-    keys: registry.keys.bind(registry),
-    values: registry.values.bind(registry),
-    [Symbol.iterator]: registry[Symbol.iterator].bind(registry),
-  } as InstrumentRegistry;
+  };
+
 };
