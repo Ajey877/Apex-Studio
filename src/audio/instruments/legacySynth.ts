@@ -1,7 +1,9 @@
 import type { InstrumentVoiceRenderer } from '../instrumentRegistry';
 import { midiToFrequency } from './legacyVoiceUtils';
 
-export const renderAcid303Voice: InstrumentVoiceRenderer = ({ channel, note, time, destination, audioContext }) => {const f0 = midiToFrequency(note.pitch + channel.pitch);
+export const renderAcid303Voice: InstrumentVoiceRenderer = ({ channel, note, time, destination, audioContext }) => {
+  const ctx = audioContext;
+const f0 = midiToFrequency(note.pitch + channel.pitch);
     const vel = (note.velocity || 0.8) * channel.volume;
     const duration = (note.duration || 1) * 0.25;
 
@@ -31,7 +33,9 @@ export const renderAcid303Voice: InstrumentVoiceRenderer = ({ channel, note, tim
   
 };
 
-export const renderReeseBassVoice: InstrumentVoiceRenderer = ({ channel, note, time, destination, audioContext }) => {const f0 = midiToFrequency(note.pitch + channel.pitch);
+export const renderReeseBassVoice: InstrumentVoiceRenderer = ({ channel, note, time, destination, audioContext }) => {
+  const ctx = audioContext;
+const f0 = midiToFrequency(note.pitch + channel.pitch);
     const vel = (note.velocity || 0.8) * channel.volume;
     const duration = (note.duration || 2) * 0.3;
 
@@ -49,7 +53,7 @@ export const renderReeseBassVoice: InstrumentVoiceRenderer = ({ channel, note, t
     const detunes = [-16, 0, 16];
     detunes.forEach((d) => {
   const ctx = audioContext;
-      const osc = ctx.createOscillator();
+const osc = ctx.createOscillator();
       osc.type = 'sawtooth';
       osc.frequency.setValueAtTime(f0, time);
       osc.detune.setValueAtTime(d, time);
@@ -66,7 +70,9 @@ export const renderReeseBassVoice: InstrumentVoiceRenderer = ({ channel, note, t
   
 };
 
-export const render808SubVoice: InstrumentVoiceRenderer = ({ channel, note, time, destination, audioContext }) => {const f0 = midiToFrequency(note.pitch + channel.pitch);
+export const render808SubVoice: InstrumentVoiceRenderer = ({ channel, note, time, destination, audioContext }) => {
+  const ctx = audioContext;
+const f0 = midiToFrequency(note.pitch + channel.pitch);
     const vel = (note.velocity || 0.8) * channel.volume;
     const duration = (note.duration || 2) * 0.4;
 
@@ -89,7 +95,9 @@ export const render808SubVoice: InstrumentVoiceRenderer = ({ channel, note, time
   
 };
 
-export const renderSupersawVoice: InstrumentVoiceRenderer = ({ channel, note, time, destination, audioContext }) => {const f0 = midiToFrequency(note.pitch + channel.pitch);
+export const renderSupersawVoice: InstrumentVoiceRenderer = ({ channel, note, time, destination, audioContext }) => {
+  const ctx = audioContext;
+const f0 = midiToFrequency(note.pitch + channel.pitch);
     const vel = (note.velocity || 0.8) * channel.volume;
     const duration = (note.duration || 2) * 0.3;
 
@@ -107,7 +115,7 @@ export const renderSupersawVoice: InstrumentVoiceRenderer = ({ channel, note, ti
     const supersawDetunes = [-24, -14, -6, 0, 6, 14, 24];
     supersawDetunes.forEach((d) => {
   const ctx = audioContext;
-      const osc = ctx.createOscillator();
+const osc = ctx.createOscillator();
       osc.type = 'sawtooth';
       osc.frequency.setValueAtTime(f0, time);
       osc.detune.setValueAtTime(d, time);
@@ -124,7 +132,9 @@ export const renderSupersawVoice: InstrumentVoiceRenderer = ({ channel, note, ti
   
 };
 
-export const renderAmbientPadVoice: InstrumentVoiceRenderer = ({ channel, note, time, destination, audioContext }) => {const f0 = midiToFrequency(note.pitch + channel.pitch);
+export const renderAmbientPadVoice: InstrumentVoiceRenderer = ({ channel, note, time, destination, audioContext }) => {
+  const ctx = audioContext;
+const f0 = midiToFrequency(note.pitch + channel.pitch);
     const vel = (note.velocity || 0.8) * channel.volume;
     const duration = (note.duration || 2) * 0.45;
 
@@ -159,7 +169,9 @@ export const renderAmbientPadVoice: InstrumentVoiceRenderer = ({ channel, note, 
   
 };
 
-export const renderVoxChoirVoice: InstrumentVoiceRenderer = ({ channel, note, time, destination, audioContext }) => {const f0 = midiToFrequency(note.pitch + channel.pitch);
+export const renderVoxChoirVoice: InstrumentVoiceRenderer = ({ channel, note, time, destination, audioContext }) => {
+  const ctx = audioContext;
+const f0 = midiToFrequency(note.pitch + channel.pitch);
     const vel = (note.velocity || 0.8) * channel.volume;
     const duration = (note.duration || 2) * 0.35;
 
@@ -201,7 +213,9 @@ export const renderVoxChoirVoice: InstrumentVoiceRenderer = ({ channel, note, ti
   
 };
 
-export const renderChiptuneVoice: InstrumentVoiceRenderer = ({ channel, note, time, destination, audioContext }) => {const f0 = midiToFrequency(note.pitch + channel.pitch);
+export const renderChiptuneVoice: InstrumentVoiceRenderer = ({ channel, note, time, destination, audioContext }) => {
+  const ctx = audioContext;
+const f0 = midiToFrequency(note.pitch + channel.pitch);
     const vel = (note.velocity || 0.8) * channel.volume;
     const duration = (note.duration || 1) * 0.2;
 
