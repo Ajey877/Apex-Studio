@@ -775,6 +775,7 @@ class AudioEngine {
         voiceId
       });
     }
+  }
 
   public triggerDrumPadVoice(channel: Channel, note: Note, time: number, destination: AudioNode, voiceId: string) {
     if (!this.ctx) return;
