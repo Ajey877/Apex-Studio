@@ -1,14 +1,4 @@
-import type { CustomSampleData } from '../types/daw';
-
-export interface SamplePack {
-  id: string;
-  name: string;
-  description?: string;
-  category?: string;
-  tags: string[];
-  created: number;
-  updated: number;
-}
+import type { CustomSampleData, SamplePack } from '../types/daw';
 
 export interface SampleLibraryFilters {
   query?: string;
