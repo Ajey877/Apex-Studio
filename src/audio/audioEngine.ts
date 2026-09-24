@@ -1655,7 +1655,18 @@ class AudioEngine {
       Math.max(1, totalBars) * 4 * (60 / safeBpm),
     );
     const renderSampleRate = sampleRate ?? previous.ctx?.sampleRate ?? 44100;
-    const offlineCtx = new OfflineAudioContext(2, Math.ceil(renderSampleRate * totalDurationSeconds), renderSampleRate);
+    const OfflineContextClass =
+      (typeof window !== 'undefined' && (window as unknown as WindowWithWebKitAudio).OfflineAudioContext) ||
+      (typeof window !== 'undefined' && (window as unknown as WindowWithWebKitAudio).webkitOfflineAudioContext) ||
+      (globalThis as unknown as { OfflineAudioContext?: typeof OfflineAudioContext }).OfflineAudioContext;
+    if (!OfflineContextClass) {
+      throw new Error('OfflineAudioContext is unavailable in this environment.');
+    }
+    const offlineCtx = new OfflineContextClass(
+      2,
+      Math.ceil(renderSampleRate * totalDurationSeconds),
+      renderSampleRate,
+    );
     try {
       this.ctx = offlineCtx as unknown as AudioContext;
       this.transport = null;
