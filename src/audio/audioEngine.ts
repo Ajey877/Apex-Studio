@@ -333,7 +333,7 @@ class AudioEngine {
     this.instrumentRegistry = createInstrumentRegistry({
       drumpad: ({ channel, note, time, destination }) => this.triggerDrumVoice(channel, note, time, destination),
       fmsynth: renderFmSynthVoice,
-      fm_bell: ({ channel, note, time, destination, voiceId }) => this.triggerFmVoice(channel, note, time, destination, voiceId),
+      fm_bell: renderFmSynthVoice,
       grand_piano: ({ channel, note, time, destination, voiceId }) => this.triggerGrandPianoVoice(channel, note, time, destination, voiceId),
       rhodes_epiano: ({ channel, note, time, destination, voiceId }) => this.triggerRhodesVoice(channel, note, time, destination, voiceId),
       hammond_organ: ({ channel, note, time, destination, voiceId }) => this.triggerOrganVoice(channel, note, time, destination, voiceId),
@@ -355,9 +355,7 @@ class AudioEngine {
       minisynth: renderSubtractiveSynthVoice,
       wavetable: renderSubtractiveSynthVoice,
       sampler: renderSubtractiveSynthVoice,
-    }, ({ channel, note, time, destination, voiceId }) =>
-      this.triggerSubtractiveVoice(channel, note, time, destination, voiceId)
-    );
+    }, renderSubtractiveSynthVoice);
   }
 
   public init() {
@@ -861,7 +859,14 @@ class AudioEngine {
     const sampleId = zone?.sampleId || channel.customSample?.id;
     const buffer = sampleId ? this.sampleBuffers.get(sampleId) : null;
     if (!buffer) {
-      this.triggerSubtractiveVoice(channel, note, time, destination, voiceId);
+      renderSubtractiveSynthVoice({
+        channel,
+        note,
+        time,
+        destination,
+        audioContext: ctx,
+        voiceId,
+      });
       return;
     }
 
