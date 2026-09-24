@@ -774,6 +774,7 @@ class AudioEngine {
         note,
         time,
         destination: mixerChannel.input,
+        audioContext: this.ctx!,
         voiceId
       });
     }
