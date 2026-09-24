@@ -108,6 +108,93 @@ test('offline timeline accepts an exact minimum duration for renderer-backed bou
   }
 });
 
+
+test('registry-backed renderers receive the OfflineAudioContext for every instrument type', async () => {
+  const engine = audioEngine as any;
+  const previousOfflineContext = (globalThis as any).OfflineAudioContext;
+  const originalRegistry = engine.instrumentRegistry;
+  const originalUpdateMixerTrack = engine.updateMixerTrack;
+  const originalGetOrCreateMixerChannel = engine.getOrCreateMixerChannel;
+  const originalTriggerSidechainDucking = engine.triggerSidechainDucking;
+  const originalCtx = engine.ctx;
+
+  const seenTypes: string[] = [];
+  const seenContexts: unknown[] = [];
+  const instrumentTypes = [
+    'minisynth', 'fmsynth', 'drumpad', 'wavetable', 'sampler',
+    'grand_piano', 'rhodes_epiano', 'hammond_organ', 'harpsichord',
+    'nylon_guitar', 'strings_ensemble', 'pizzicato_strings',
+    'cinematic_brass', 'acid_303', 'reese_bass', 'sub_808',
+    'slap_bass', 'supersaw_lead', 'ambient_pad', 'vox_choir',
+    'marimba_bell', 'fm_bell', 'chiptune_8bit', 'independent_pluck',
+  ];
+
+  class FakeOfflineContextForRegistry extends FakeOfflineAudioContext {
+    readonly destination = new FakeNode();
+  }
+
+  (globalThis as any).OfflineAudioContext = FakeOfflineContextForRegistry;
+  engine.updateMixerTrack = () => undefined;
+  engine.getOrCreateMixerChannel = () => ({ input: {} });
+  engine.triggerSidechainDucking = () => undefined;
+  engine.ctx = null;
+  engine.instrumentRegistry = {
+    get: (instrumentType: string) => {
+      const original = originalRegistry.get(instrumentType);
+      return (context: any) => {
+        seenTypes.push(instrumentType);
+        seenContexts.push(context.audioContext);
+        return { stop: () => undefined };
+      };
+    },
+    has: (instrumentType: string) => originalRegistry.has(instrumentType),
+  };
+
+  const channels = instrumentTypes.map((instrumentType, index) => ({
+    id: `offline-${instrumentType}`,
+    name: instrumentType,
+    color: '#fff',
+    instrumentType,
+    mixerTrackId: index + 1,
+    volume: 0.8,
+    pan: 0,
+    pitch: 0,
+    mute: false,
+    solo: false,
+    steps: [true],
+    notes: [],
+    synthParams: {} as any,
+  }));
+
+  try {
+    await engine.renderTimelineOffline(
+      channels,
+      [],
+      [],
+      120,
+      1,
+      44100,
+      false,
+      'pattern',
+      undefined,
+      16,
+      undefined,
+      2,
+    );
+
+    assert.deepEqual(seenTypes, instrumentTypes);
+    assert.equal(seenContexts.length, instrumentTypes.length);
+    assert.ok(seenContexts.every(context => context instanceof FakeOfflineContextForRegistry));
+  } finally {
+    (globalThis as any).OfflineAudioContext = previousOfflineContext;
+    engine.instrumentRegistry = originalRegistry;
+    engine.updateMixerTrack = originalUpdateMixerTrack;
+    engine.getOrCreateMixerChannel = originalGetOrCreateMixerChannel;
+    engine.triggerSidechainDucking = originalTriggerSidechainDucking;
+    engine.ctx = originalCtx;
+  }
+});
+
 test('offline timeline render drives the same live song scheduling entrypoint and restores engine state', async () => {
   const engine = audioEngine as any;
   const previousOfflineContext = (globalThis as any).OfflineAudioContext;
