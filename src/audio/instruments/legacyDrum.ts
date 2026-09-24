@@ -1,8 +1,10 @@
 import type { InstrumentVoiceRenderer } from '../instrumentRegistry';
+import { createLegacyVoiceHandle } from './legacyVoiceLifecycle';
 import { midiToFrequency, createNoiseBuffer } from './legacyVoiceUtils';
 
-export const renderLegacyDrumVoice: InstrumentVoiceRenderer = ({ channel, note, time, destination, audioContext }) => {
+export const renderLegacyDrumVoice: InstrumentVoiceRenderer = ({ channel, note, time, destination, audioContext, onEnded }) => {
   const ctx = audioContext;
+  const lifecycleSources: AudioScheduledSourceNode[] = [];
 const pitch = note.pitch % 12; // Modulo to map drum pad
     const vel = (note.velocity || 0.8) * channel.volume;
 
@@ -19,6 +21,7 @@ const pitch = note.pitch % 12; // Modulo to map drum pad
       case 1: // 36: Kick
       case 0: {
         const osc = ctx.createOscillator();
+      lifecycleSources.push(osc);
         const oscGain = ctx.createGain();
         osc.type = 'sine';
         osc.frequency.setValueAtTime(140, time);
@@ -37,6 +40,7 @@ const pitch = note.pitch % 12; // Modulo to map drum pad
       case 2: {
         // Noise + body tone
         const osc = ctx.createOscillator();
+      lifecycleSources.push(osc);
         const oscGain = ctx.createGain();
         osc.type = 'triangle';
         osc.frequency.setValueAtTime(185, time);
@@ -52,6 +56,7 @@ const pitch = note.pitch % 12; // Modulo to map drum pad
         // Noise buffer
         const noiseBuffer = createNoiseBuffer(audioContext, 0.2);
         const noiseSource = ctx.createBufferSource();
+      lifecycleSources.push(noiseSource);
         noiseSource.buffer = noiseBuffer;
 
         const noiseFilter = ctx.createBiquadFilter();
@@ -73,6 +78,7 @@ const pitch = note.pitch % 12; // Modulo to map drum pad
       case 5: { // 808 Sub Bass
         if (drumIndex === 5) {
           const osc = ctx.createOscillator();
+      lifecycleSources.push(osc);
           const oscGain = ctx.createGain();
           osc.type = 'sine';
           const subFreq = midiToFrequency(note.pitch || 36);
@@ -88,6 +94,7 @@ const pitch = note.pitch % 12; // Modulo to map drum pad
         } else {
           // Clap
           const noise = ctx.createBufferSource();
+      lifecycleSources.push(noise);
           noise.buffer = createNoiseBuffer(audioContext, 0.25);
           const filter = ctx.createBiquadFilter();
           filter.type = 'bandpass';
@@ -113,6 +120,7 @@ const pitch = note.pitch % 12; // Modulo to map drum pad
       }
       case 7: { // Closed HiHat (42)
         const noise = ctx.createBufferSource();
+      lifecycleSources.push(noise);
         noise.buffer = createNoiseBuffer(audioContext, 0.08);
         const filter = ctx.createBiquadFilter();
         filter.type = 'highpass';
@@ -131,6 +139,7 @@ const pitch = note.pitch % 12; // Modulo to map drum pad
       }
       case 8: { // Open HiHat (46)
         const noise = ctx.createBufferSource();
+      lifecycleSources.push(noise);
         noise.buffer = createNoiseBuffer(audioContext, 0.45);
         const filter = ctx.createBiquadFilter();
         filter.type = 'highpass';
@@ -150,6 +159,7 @@ const pitch = note.pitch % 12; // Modulo to map drum pad
       default: {
         // Perc / Rim / Tom
         const osc = ctx.createOscillator();
+      lifecycleSources.push(osc);
         const oscGain = ctx.createGain();
         osc.type = 'sine';
         osc.frequency.setValueAtTime(320, time);
@@ -164,4 +174,5 @@ const pitch = note.pitch % 12; // Modulo to map drum pad
       }
     }
   
+  return createLegacyVoiceHandle(lifecycleSources, onEnded);
 };

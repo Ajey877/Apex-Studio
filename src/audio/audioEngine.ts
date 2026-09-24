@@ -789,31 +789,15 @@ class AudioEngine {
       Boolean(sampledDrumPadBuffer) &&
       chokeGroup > 0;
 
-    if (canChokeDrumPad) {
-      this.stopDrumPadChokeGroup(chokeGroup, time);
-    }
-
     const renderer = channel.instrumentType === 'drumpad'
       ? this.instrumentRegistry.get('drumpad')
       : channel.customSample && channel.customSample.id
         ? this.instrumentRegistry.get('sampler')
         : this.instrumentRegistry.get(channel.instrumentType);
 
-    voiceHandle = renderer({
-      channel,
-      note,
-      time,
-      destination: mixerChannel.input,
-      audioContext: this.ctx!,
-      voiceId,
-      onEnded,
-      getSampleBuffer: (id) => this.sampleBuffers.get(id),
-    });
-
-    if (!voiceHandle && (channel.customSample?.id || channel.instrumentType === 'sampler')) {
-      // Preserve the pre-22C sampler behavior: an unavailable custom sample,
-      // and a sampler channel without a sample, both fall back to subtractive synthesis.
-      voiceHandle = renderSubtractiveSynthVoice({
+    let rendererFailed = false;
+    try {
+      voiceHandle = renderer({
         channel,
         note,
         time,
@@ -821,16 +805,64 @@ class AudioEngine {
         audioContext: this.ctx!,
         voiceId,
         onEnded,
+        getSampleBuffer: (id) => this.sampleBuffers.get(id),
+      });
+    } catch (error) {
+      rendererFailed = true;
+      console.error('[AudioEngine] Instrument renderer failed', {
+        instrumentType: channel.instrumentType,
+        voiceId,
+        error,
       });
     }
 
-    if (voiceHandle) {
-      this.activeVoices.set(voiceId, voiceHandle);
-      if (chokeGroup > 0) {
-        const voices = this.activeDrumPadVoices.get(chokeGroup) || new Map<string, InstrumentVoiceHandle>();
-        voices.set(voiceId, voiceHandle);
-        this.activeDrumPadVoices.set(chokeGroup, voices);
+    if (rendererFailed) return;
+
+    if (!voiceHandle && (channel.customSample?.id || channel.instrumentType === 'sampler')) {
+      // Preserve the pre-22C sampler behavior: an unavailable custom sample,
+      // and a sampler channel without a sample, both fall back to subtractive synthesis.
+      try {
+        voiceHandle = renderSubtractiveSynthVoice({
+          channel,
+          note,
+          time,
+          destination: mixerChannel.input,
+          audioContext: this.ctx!,
+          voiceId,
+          onEnded,
+        });
+      } catch (error) {
+        console.error('[AudioEngine] Sampler fallback renderer failed', {
+          instrumentType: channel.instrumentType,
+          voiceId,
+          error,
+        });
+        return;
       }
+    }
+
+    if (
+      voiceHandle &&
+      (typeof voiceHandle !== 'object' || typeof voiceHandle.stop !== 'function')
+    ) {
+      console.error('[AudioEngine] Instrument renderer returned an invalid voice handle', {
+        instrumentType: channel.instrumentType,
+        voiceId,
+      });
+      return;
+    }
+
+    if (!voiceHandle) return;
+
+    if (canChokeDrumPad) {
+      this.stopDrumPadChokeGroup(chokeGroup, time);
+    }
+
+    this.activeVoices.set(voiceId, voiceHandle);
+    if (canChokeDrumPad && chokeGroup > 0) {
+      const voices = this.activeDrumPadVoices.get(chokeGroup) || new Map<string, InstrumentVoiceHandle>();
+      voices.set(voiceId, voiceHandle);
+      this.activeDrumPadVoices.set(chokeGroup, voices);
     }
   }
 

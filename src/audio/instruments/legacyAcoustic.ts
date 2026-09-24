@@ -1,8 +1,10 @@
 import type { InstrumentVoiceRenderer } from '../instrumentRegistry';
+import { createLegacyVoiceHandle } from './legacyVoiceLifecycle';
 import { midiToFrequency, createNoiseBuffer } from './legacyVoiceUtils';
 
-export const renderGrandPianoVoice: InstrumentVoiceRenderer = ({ channel, note, time, destination, audioContext }) => {
+export const renderGrandPianoVoice: InstrumentVoiceRenderer = ({ channel, note, time, destination, audioContext, onEnded }) => {
   const ctx = audioContext;
+  const lifecycleSources: AudioScheduledSourceNode[] = [];
 const f0 = midiToFrequency(note.pitch + channel.pitch);
     const vel = (note.velocity || 0.8) * channel.volume;
     const duration = (note.duration || 2) * 0.4;
@@ -22,14 +24,17 @@ const f0 = midiToFrequency(note.pitch + channel.pitch);
 
     // Harmonic partials (f0, 2*f0, 3*f0, 4*f0) with inharmonicity
     const osc1 = ctx.createOscillator();
+      lifecycleSources.push(osc1);
     osc1.type = 'triangle';
     osc1.frequency.setValueAtTime(f0, time);
 
     const osc2 = ctx.createOscillator();
+      lifecycleSources.push(osc2);
     osc2.type = 'sine';
     osc2.frequency.setValueAtTime(f0 * 2.002, time);
 
     const osc3 = ctx.createOscillator();
+      lifecycleSources.push(osc3);
     osc3.type = 'sine';
     osc3.frequency.setValueAtTime(f0 * 3.006, time);
 
@@ -39,6 +44,7 @@ const f0 = midiToFrequency(note.pitch + channel.pitch);
 
     // Hammer noise click transient
     const hammer = ctx.createBufferSource();
+      lifecycleSources.push(hammer);
     hammer.buffer = createNoiseBuffer(audioContext, 0.015);
     const hammerFilter = ctx.createBiquadFilter();
     hammerFilter.type = 'bandpass';
@@ -60,10 +66,11 @@ const f0 = midiToFrequency(note.pitch + channel.pitch);
     const stopTime = time + duration + 0.5;
     osc1.stop(stopTime); osc2.stop(stopTime); osc3.stop(stopTime); hammer.stop(time + 0.02);
   
+  return createLegacyVoiceHandle(lifecycleSources, onEnded);
 };
-
-export const renderRhodesVoice: InstrumentVoiceRenderer = ({ channel, note, time, destination, audioContext }) => {
+export const renderRhodesVoice: InstrumentVoiceRenderer = ({ channel, note, time, destination, audioContext, onEnded }) => {
   const ctx = audioContext;
+  const lifecycleSources: AudioScheduledSourceNode[] = [];
 const f0 = midiToFrequency(note.pitch + channel.pitch);
     const vel = (note.velocity || 0.8) * channel.volume;
     const duration = (note.duration || 2) * 0.35;
@@ -76,11 +83,13 @@ const f0 = midiToFrequency(note.pitch + channel.pitch);
 
     // Fundamental Sine Tine
     const tine = ctx.createOscillator();
+      lifecycleSources.push(tine);
     tine.type = 'sine';
     tine.frequency.setValueAtTime(f0, time);
 
     // Bell overtone at 3.98x
     const bell = ctx.createOscillator();
+      lifecycleSources.push(bell);
     bell.type = 'sine';
     bell.frequency.setValueAtTime(f0 * 3.98, time);
     const bellGain = ctx.createGain();
@@ -89,6 +98,7 @@ const f0 = midiToFrequency(note.pitch + channel.pitch);
 
     // Tremolo LFO
     const lfo = ctx.createOscillator();
+      lifecycleSources.push(lfo);
     lfo.frequency.value = 4.8;
     const lfoGain = ctx.createGain();
     lfoGain.gain.value = 0.08;
@@ -107,10 +117,11 @@ const f0 = midiToFrequency(note.pitch + channel.pitch);
     const stopTime = time + duration + 0.35;
     tine.stop(stopTime); bell.stop(time + 0.2); lfo.stop(stopTime);
   
+  return createLegacyVoiceHandle(lifecycleSources, onEnded);
 };
-
-export const renderOrganVoice: InstrumentVoiceRenderer = ({ channel, note, time, destination, audioContext }) => {
+export const renderOrganVoice: InstrumentVoiceRenderer = ({ channel, note, time, destination, audioContext, onEnded }) => {
   const ctx = audioContext;
+  const lifecycleSources: AudioScheduledSourceNode[] = [];
 const f0 = midiToFrequency(note.pitch + channel.pitch);
     const vel = (note.velocity || 0.8) * channel.volume;
     const duration = (note.duration || 1.5) * 0.35;
@@ -127,6 +138,7 @@ const f0 = midiToFrequency(note.pitch + channel.pitch);
     harmonics.forEach((h, i) => {
   const ctx = audioContext;
 const osc = ctx.createOscillator();
+      lifecycleSources.push(osc);
       osc.type = 'sine';
       osc.frequency.setValueAtTime(f0 * h, time);
       const g = ctx.createGain();
@@ -139,6 +151,7 @@ const osc = ctx.createOscillator();
 
     // Rotary Leslie chorus LFO
     const rotaryLfo = ctx.createOscillator();
+      lifecycleSources.push(rotaryLfo);
     rotaryLfo.frequency.value = 6.2;
     const rotaryDepth = ctx.createGain();
     rotaryDepth.gain.value = 0.05;
@@ -148,10 +161,11 @@ const osc = ctx.createOscillator();
     rotaryLfo.start(time);
     rotaryLfo.stop(time + duration + 0.1);
   
+  return createLegacyVoiceHandle(lifecycleSources, onEnded);
 };
-
-export const renderPluckedGuitarVoice: InstrumentVoiceRenderer = ({ channel, note, time, destination, audioContext }) => {
+export const renderPluckedGuitarVoice: InstrumentVoiceRenderer = ({ channel, note, time, destination, audioContext, onEnded }) => {
   const ctx = audioContext;
+  const lifecycleSources: AudioScheduledSourceNode[] = [];
 const f0 = midiToFrequency(note.pitch + channel.pitch);
     const vel = (note.velocity || 0.8) * channel.volume;
     const duration = (note.duration || 2) * 0.4;
@@ -167,10 +181,12 @@ const f0 = midiToFrequency(note.pitch + channel.pitch);
     filter.frequency.exponentialRampToValueAtTime(f0 * 1.5, time + 0.3);
 
     const osc1 = ctx.createOscillator();
+      lifecycleSources.push(osc1);
     osc1.type = 'sawtooth';
     osc1.frequency.setValueAtTime(f0, time);
 
     const osc2 = ctx.createOscillator();
+      lifecycleSources.push(osc2);
     osc2.type = 'triangle';
     osc2.frequency.setValueAtTime(f0, time);
     osc2.detune.setValueAtTime(4, time);
@@ -183,10 +199,11 @@ const f0 = midiToFrequency(note.pitch + channel.pitch);
     osc1.start(time); osc2.start(time);
     osc1.stop(time + duration + 0.3); osc2.stop(time + duration + 0.3);
   
+  return createLegacyVoiceHandle(lifecycleSources, onEnded);
 };
-
-export const renderStringsVoice: InstrumentVoiceRenderer = ({ channel, note, time, destination, audioContext }) => {
+export const renderStringsVoice: InstrumentVoiceRenderer = ({ channel, note, time, destination, audioContext, onEnded }) => {
   const ctx = audioContext;
+  const lifecycleSources: AudioScheduledSourceNode[] = [];
 const f0 = midiToFrequency(note.pitch + channel.pitch);
     const vel = (note.velocity || 0.8) * channel.volume;
     const duration = (note.duration || 2) * 0.4;
@@ -206,6 +223,7 @@ const f0 = midiToFrequency(note.pitch + channel.pitch);
     detunes.forEach((d) => {
   const ctx = audioContext;
 const osc = ctx.createOscillator();
+      lifecycleSources.push(osc);
       osc.type = 'sawtooth';
       osc.frequency.setValueAtTime(f0, time);
       osc.detune.setValueAtTime(d, time);
@@ -219,6 +237,7 @@ const osc = ctx.createOscillator();
 
     // Natural string vibrato
     const vib = ctx.createOscillator();
+      lifecycleSources.push(vib);
     vib.frequency.value = 5.2;
     const vibGain = ctx.createGain();
     vibGain.gain.value = 4;
@@ -230,10 +249,11 @@ const osc = ctx.createOscillator();
     filter.connect(strGain);
     strGain.connect(destination);
   
+  return createLegacyVoiceHandle(lifecycleSources, onEnded);
 };
-
-export const renderPizzicatoVoice: InstrumentVoiceRenderer = ({ channel, note, time, destination, audioContext }) => {
+export const renderPizzicatoVoice: InstrumentVoiceRenderer = ({ channel, note, time, destination, audioContext, onEnded }) => {
   const ctx = audioContext;
+  const lifecycleSources: AudioScheduledSourceNode[] = [];
 const f0 = midiToFrequency(note.pitch + channel.pitch);
     const vel = (note.velocity || 0.8) * channel.volume;
 
@@ -248,6 +268,7 @@ const f0 = midiToFrequency(note.pitch + channel.pitch);
     filter.Q.value = 3.0;
 
     const osc = ctx.createOscillator();
+      lifecycleSources.push(osc);
     osc.type = 'sawtooth';
     osc.frequency.setValueAtTime(f0, time);
 
@@ -258,10 +279,11 @@ const f0 = midiToFrequency(note.pitch + channel.pitch);
     osc.start(time);
     osc.stop(time + 0.4);
   
+  return createLegacyVoiceHandle(lifecycleSources, onEnded);
 };
-
-export const renderBrassVoice: InstrumentVoiceRenderer = ({ channel, note, time, destination, audioContext }) => {
+export const renderBrassVoice: InstrumentVoiceRenderer = ({ channel, note, time, destination, audioContext, onEnded }) => {
   const ctx = audioContext;
+  const lifecycleSources: AudioScheduledSourceNode[] = [];
 const f0 = midiToFrequency(note.pitch + channel.pitch);
     const vel = (note.velocity || 0.8) * channel.volume;
     const duration = (note.duration || 2) * 0.35;
@@ -280,11 +302,13 @@ const f0 = midiToFrequency(note.pitch + channel.pitch);
     filter.Q.value = 4.0;
 
     const osc1 = ctx.createOscillator();
+      lifecycleSources.push(osc1);
     osc1.type = 'sawtooth';
     osc1.frequency.setValueAtTime(f0, time);
     osc1.detune.setValueAtTime(-8, time);
 
     const osc2 = ctx.createOscillator();
+      lifecycleSources.push(osc2);
     osc2.type = 'square';
     osc2.frequency.setValueAtTime(f0, time);
     osc2.detune.setValueAtTime(8, time);
@@ -297,10 +321,11 @@ const f0 = midiToFrequency(note.pitch + channel.pitch);
     osc1.start(time); osc2.start(time);
     osc1.stop(time + duration + 0.25); osc2.stop(time + duration + 0.25);
   
+  return createLegacyVoiceHandle(lifecycleSources, onEnded);
 };
-
-export const renderMarimbaVoice: InstrumentVoiceRenderer = ({ channel, note, time, destination, audioContext }) => {
+export const renderMarimbaVoice: InstrumentVoiceRenderer = ({ channel, note, time, destination, audioContext, onEnded }) => {
   const ctx = audioContext;
+  const lifecycleSources: AudioScheduledSourceNode[] = [];
 const f0 = midiToFrequency(note.pitch + channel.pitch);
     const vel = (note.velocity || 0.8) * channel.volume;
 
@@ -310,11 +335,13 @@ const f0 = midiToFrequency(note.pitch + channel.pitch);
     ampGain.gain.exponentialRampToValueAtTime(0.0001, time + 0.45);
 
     const osc = ctx.createOscillator();
+      lifecycleSources.push(osc);
     osc.type = 'sine';
     osc.frequency.setValueAtTime(f0, time);
 
     // Wooden strike ping (4th harmonic)
     const ping = ctx.createOscillator();
+      lifecycleSources.push(ping);
     ping.type = 'sine';
     ping.frequency.setValueAtTime(f0 * 4, time);
     const pingGain = ctx.createGain();
@@ -329,4 +356,5 @@ const f0 = midiToFrequency(note.pitch + channel.pitch);
     osc.start(time); ping.start(time);
     osc.stop(time + 0.5); ping.stop(time + 0.05);
   
+  return createLegacyVoiceHandle(lifecycleSources, onEnded);
 };
