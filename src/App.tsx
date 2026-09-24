@@ -1494,6 +1494,7 @@ export function App() {
               allChannels={projectState.channels}
               onSelectChannel={(id) => setSelectedChannelId(id)}
               onUpdateChannel={handleUpdateChannel}
+              sampleLibrary={projectState.sampleLibrary || []}
             />
           )}
 
