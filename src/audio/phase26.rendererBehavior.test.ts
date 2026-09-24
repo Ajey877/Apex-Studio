@@ -328,6 +328,8 @@ const peak = (buffer: AudioBuffer, channel = 0) => {
   return max;
 };
 
+const sourceNodeGain = (_ctx: FakeOfflineAudioContext, source: FakeNode) => source.connections[0] as FakeNode;
+
 const energy = (buffer: AudioBuffer, channel: number, fromSeconds: number, toSeconds: number) => {
   const data = buffer.getChannelData(channel);
   const from = Math.max(0, Math.floor(fromSeconds * buffer.sampleRate));
@@ -418,8 +420,8 @@ describe('Phase 26 final renderer-backed audio behavior', () => {
     const result = await renderBounce(channel);
     const ctx = FakeOfflineAudioContext.instances[0];
     const source = ctx.nodes.find(node => node.kind === 'bufferSource')!;
-    const gain = ctx.nodes.find(node => node.kind === 'gain' && node.connections.some(n => n.kind === 'panner'))!;
-    const panner = ctx.nodes.find(node => node.kind === 'panner')!;
+    const gain = sourceNodeGain(ctx, source);
+    const panner = source.connections[0]?.connections[0] as FakeNode;
 
     assert.equal(source.buffer, sample);
     assert.ok(Math.abs(source.playbackRate.value + Math.pow(2, 2 / 12)) < 1e-9);
