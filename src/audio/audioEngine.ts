@@ -36,6 +36,7 @@ export interface InternalMidiMessageEvent {
 }
 
 interface WindowWithWebKitAudio extends Window {
+  OfflineAudioContext?: typeof OfflineAudioContext;
   webkitAudioContext?: typeof AudioContext;
   webkitOfflineAudioContext?: typeof OfflineAudioContext;
 }
