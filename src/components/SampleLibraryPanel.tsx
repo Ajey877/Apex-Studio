@@ -77,7 +77,7 @@ export const SampleLibraryPanel: React.FC<SampleLibraryPanelProps> = ({
     };
     onUpdateChannel(selectedChannel.id, {
       instrumentType: 'sampler',
-      sampleZones: existing.length ? existing : [zone],
+      sampleZones: existing.some(item => item.sampleId === selected.id) ? existing : [...existing, zone],
       customSample: selectedChannel.customSample?.id === selected.id ? selectedChannel.customSample : selected
     });
   };
