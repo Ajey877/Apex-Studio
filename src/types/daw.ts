@@ -182,6 +182,23 @@ export interface ArpSettings {
   euclideanRotate?: number; // e.g. 0
 }
 
+export interface SampleZone {
+  id: string;
+  sampleId: string;
+  lowNote: number;
+  highNote: number;
+  rootNote: number;
+  lowVelocity: number;
+  highVelocity: number;
+  tuneSemitones: number;
+  trimStart?: number;
+  trimEnd?: number;
+  reverse?: boolean;
+  loop?: boolean;
+  loopStart?: number;
+  loopEnd?: number;
+}
+
 export interface CustomSampleData {
   id: string;
   name: string;
@@ -223,6 +240,7 @@ export interface Channel {
   sampleUrl?: string;
   sampleName?: string;
   customSample?: CustomSampleData;
+  sampleZones?: SampleZone[];
   arp?: ArpSettings;
 }
 
