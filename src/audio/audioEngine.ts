@@ -782,7 +782,7 @@ class AudioEngine {
       return;
     }
 
-    const sample = zone ? this.sampleBuffers.get(zone.sampleId) : channel.customSample;
+    const sample = zone && zone.sampleId === channel.customSample?.id ? channel.customSample : channel.customSample;
     const rootPitch = zone?.rootNote ?? sample?.rootPitch ?? 60;
     const tuneSemitones = zone?.tuneSemitones ?? 0;
     const playbackRate = getSamplePlaybackRate(note.pitch, rootPitch, channel.pitch || 0, tuneSemitones);
