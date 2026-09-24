@@ -34,14 +34,7 @@ interface SampleManagerModalProps {
   onCreateChannelFromSample: (sample: CustomSampleData) => void;
 }
 
-const STOCK_SAMPLES = [
-  { name: 'Punchy 808 Sub Kick', duration: 0.85, root: 36, category: 'Bass' },
-  { name: 'Crisp Trap Clap', duration: 0.32, root: 39, category: 'Drums' },
-  { name: 'Metallic Closed Hi-Hat', duration: 0.12, root: 42, category: 'Drums' },
-  { name: 'Warm Acoustic Snare', duration: 0.45, root: 38, category: 'Drums' },
-  { name: 'Vocal Chop Formant (C4)', duration: 1.2, root: 60, category: 'Vocal' },
-  { name: 'Vintage Tape Bell One-Shot', duration: 1.5, root: 72, category: 'Synths' },
-];
+
 
 export const SampleManagerModal: React.FC<SampleManagerModalProps> = ({
   isOpen,
