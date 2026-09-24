@@ -16,23 +16,35 @@ class FakeNode {
   readonly gain = new FakeAudioParam();
   readonly frequency = new FakeAudioParam();
   readonly detune = new FakeAudioParam();
+  readonly playbackRate = new FakeAudioParam();
   readonly pan = new FakeAudioParam();
   readonly Q = { value: 0 };
   type = '';
   onended: (() => void) | null = null;
   stopCalls = 0;
   connect() {}
-  start() {}
-  stop() { this.stopCalls += 1; }
+  loop = false;
+  loopStart = 0;
+  loopEnd = 0;
+  buffer: AudioBuffer | null = null;
+  startArgs: unknown[] | null = null;
+  stop() { this.stopCalls += 1; this.onended?.(); }
+  start(...args: unknown[]) { this.startArgs = args; }
 }
 
 class FakeAudioContext {
   currentTime = 0;
   state = 'running';
   readonly oscillators: FakeNode[] = [];
+  readonly bufferSources: FakeNode[] = [];
   createGain() { return new FakeNode(); }
   createBiquadFilter() { return new FakeNode(); }
   createStereoPanner() { return new FakeNode(); }
+  createBufferSource() {
+    const node = new FakeNode();
+    this.bufferSources.push(node);
+    return node;
+  }
   createOscillator() {
     const node = new FakeNode();
     this.oscillators.push(node);
@@ -54,6 +66,7 @@ const SAVED_KEYS = [
   'triggerSidechainDucking',
   'retriggerAudioClipsAtPosition',
   'rebaseAutomationAtPosition',
+  'sampleBuffers',
 ];
 
 const makeChannel = (id: string, instrumentType: Channel['instrumentType']): Channel => {
@@ -90,6 +103,7 @@ beforeEach(() => {
   engine.triggerSidechainDucking = () => undefined;
   engine.retriggerAudioClipsAtPosition = () => undefined;
   engine.rebaseAutomationAtPosition = () => undefined;
+  engine.sampleBuffers = new Map();
 });
 
 afterEach(() => {
@@ -112,6 +126,81 @@ describe('Phase 22 standalone voice lifecycle integration', () => {
       naturalOscillator.onended?.();
       assert.equal(engine.activeVoices.size, 0, `${instrumentType} should be removed after natural completion`);
     }
+  });
+
+
+  it('routes a custom sample through the sampler renderer and cleans it naturally', () => {
+    const channel = makeChannel('sampler-production', 'sampler');
+    channel.customSample = {
+      id: 'sample-1',
+      name: 'Test Sample',
+      duration: 1,
+      sampleRate: 44100,
+      channels: 1,
+      waveformPeaks: [],
+      rootPitch: 60,
+      trimStart: 0.1,
+      trimEnd: 0.9,
+      reverse: true,
+    };
+    const zone = {
+      id: 'zone-1',
+      sampleId: 'sample-1',
+      lowNote: 0,
+      highNote: 127,
+      rootNote: 60,
+      lowVelocity: 0,
+      highVelocity: 127,
+      tuneSemitones: 2,
+      loop: true,
+      loopStart: 0.2,
+      loopEnd: 0.8,
+    };
+    channel.sampleZones = [zone];
+    const buffer = { duration: 2 } as AudioBuffer;
+    engine.sampleBuffers.set('sample-1', buffer);
+
+    engine.playSingleVoice(channel, makeNote('sampler-note'), 0);
+
+    assert.equal(engine.activeVoices.size, 1);
+    const source = (engine.ctx as FakeAudioContext).bufferSources[0];
+    assert.ok(source);
+    assert.equal(source.buffer, buffer);
+    assert.equal(source.loop, true);
+    assert.equal(source.loopStart, 0.4);
+    assert.equal(source.loopEnd, 1.6);
+    assert.deepEqual(source.startArgs, [0, 1.8, undefined]);
+
+    source.onended?.();
+    assert.equal(engine.activeVoices.size, 0);
+  });
+
+  it('preserves sampler-without-sample fallback to subtractive synthesis', () => {
+    const channel = makeChannel('sampler-empty', 'sampler');
+
+    engine.playSingleVoice(channel, makeNote('empty-note'), 0);
+
+    assert.equal(engine.activeVoices.size, 1);
+    assert.equal((engine.ctx as FakeAudioContext).bufferSources.length, 0);
+    assert.ok((engine.ctx as FakeAudioContext).oscillators.some((osc) => osc.onended));
+  });
+
+  it('preserves missing custom-sample fallback to subtractive synthesis', () => {
+    const channel = makeChannel('sampler-missing', 'sampler');
+    channel.customSample = {
+      id: 'missing-sample',
+      name: 'Missing',
+      duration: 1,
+      sampleRate: 44100,
+      channels: 1,
+      waveformPeaks: [],
+    };
+
+    engine.playSingleVoice(channel, makeNote('missing-note'), 0);
+
+    assert.equal(engine.activeVoices.size, 1);
+    assert.equal((engine.ctx as FakeAudioContext).bufferSources.length, 0);
+    assert.ok((engine.ctx as FakeAudioContext).oscillators.some((osc) => osc.onended));
   });
 
   it('stopNote is idempotent and does not leave the voice registered', () => {
@@ -180,6 +269,28 @@ describe('Phase 22 standalone voice lifecycle integration', () => {
 
     assert.deepEqual(stopped, ['pause', 'seek']);
     assert.equal(engine.activeVoices.size, 0);
+  });
+
+  it('repeatedly completes short sampler voices without activeVoices growth', () => {
+    const ctx = engine.ctx as FakeAudioContext;
+    const channel = makeChannel('sampler-stress', 'sampler');
+    channel.customSample = {
+      id: 'stress-sample',
+      name: 'Stress',
+      duration: 0.1,
+      sampleRate: 44100,
+      channels: 1,
+      waveformPeaks: [],
+    };
+    engine.sampleBuffers.set('stress-sample', { duration: 0.1 } as AudioBuffer);
+
+    for (let i = 0; i < 100; i += 1) {
+      ctx.bufferSources.length = 0;
+      engine.playSingleVoice(channel, makeNote(`sampler-stress-${i}`), 0);
+      assert.equal(engine.activeVoices.size, 1);
+      ctx.bufferSources[0]?.onended?.();
+      assert.equal(engine.activeVoices.size, 0);
+    }
   });
 
   it('repeatedly completes short standalone voices without activeVoices growth', () => {
