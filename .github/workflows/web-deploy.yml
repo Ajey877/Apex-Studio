@@ -56,3 +56,39 @@ jobs:
       - name: Deploy Pages artifact
         id: deployment
         uses: actions/deploy-pages@v4
+
+      - name: Public web smoke test
+        env:
+          PAGE_URL: ${{ steps.deployment.outputs.page_url }}
+        run: |
+          node --input-type=module <<'NODE'
+          const url = process.env.PAGE_URL;
+          if (!url) throw new Error('GitHub Pages deployment did not provide a page URL.');
+
+          const response = await fetch(url, { redirect: 'follow' });
+          const html = await response.text();
+
+          if (!response.ok) {
+            throw new Error(`Public site returned HTTP ${response.status}: ${url}`);
+          }
+          if (!html.includes('<title>Apex Studio DAW')) {
+            throw new Error('Public site HTML is missing the Apex Studio title.');
+          }
+          if (!/<script[^>]+type=["']module["'][^>]+src=["'][^"']+["']/.test(html)) {
+            throw new Error('Public site HTML is missing the production module script.');
+          }
+          if (html.includes('/src/main.tsx')) {
+            throw new Error('Public site is serving the development source entrypoint instead of the Vite production bundle.');
+          }
+
+          const scriptMatch = html.match(/<script[^>]+type=["']module["'][^>]+src=["']([^"']+)["']/);
+          if (scriptMatch) {
+            const assetUrl = new URL(scriptMatch[1], response.url).href;
+            const assetResponse = await fetch(assetUrl, { redirect: 'follow' });
+            if (!assetResponse.ok) {
+              throw new Error(`Production JS asset returned HTTP ${assetResponse.status}: ${assetUrl}`);
+            }
+          }
+
+          console.log(`Public web smoke test passed: ${response.url}`);
+          NODE
