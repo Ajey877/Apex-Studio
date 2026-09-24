@@ -136,8 +136,7 @@ test('registry-backed renderers receive the OfflineAudioContext for every instru
   engine.ctx = null;
   engine.instrumentRegistry = {
     get: (instrumentType: string) => {
-      const original = originalRegistry.get(instrumentType);
-      return (context: any) => {
+        return (context: any) => {
         seenTypes.push(instrumentType);
         seenContexts.push(context.audioContext);
         return { stop: () => undefined };
