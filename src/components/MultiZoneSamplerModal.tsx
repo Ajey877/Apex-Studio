@@ -65,7 +65,7 @@ export const MultiZoneSamplerModal: React.FC<MultiZoneSamplerModalProps> = ({
         id: 'zone-' + selectedChannel.id,
         name: selectedChannel.customSample.name || 'Sample Zone',
         lowNote: 0, highNote: 127, rootNote: selectedChannel.customSample.rootPitch ?? 60,
-        lowVelocityocity: 0, highVelocityocity: 127, sampleId: selectedChannel.customSample.id, tuneSemitones: 0,
+        lowVelocity: 0, highVelocity: 127, sampleId: selectedChannel.customSample.id, tuneSemitones: 0,
         trimStart: selectedChannel.customSample.trimStart, trimEnd: selectedChannel.customSample.trimEnd,
         reverse: selectedChannel.customSample.reverse, loop: selectedChannel.synthParams.sampleLoop,
         color: '#ff6e00'
