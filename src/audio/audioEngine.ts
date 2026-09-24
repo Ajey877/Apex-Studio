@@ -18,6 +18,7 @@ import { renderIndependentPluckVoice } from './instruments/independentPluck';
 import { renderSubtractiveSynthVoice } from './instruments/subtractiveSynth';
 import { renderFmSynthVoice } from './instruments/fmSynth';
 import { renderSamplerVoice } from './instruments/sampler';
+import { renderDrumPadVoice } from './instruments/drumPad';
 
 export type MidiEventPayload = {
   type: 'noteOn' | 'noteOff' | 'cc' | 'pitchBend';
@@ -304,7 +305,8 @@ class AudioEngine {
   };
 
   private activeVoices: Map<string, { stop: (time?: number) => void }> = new Map();
-  private activeDrumPads: Map<number, Set<string>> = new Map();
+  /** Renderer handles currently participating in drum-pad choke groups. */
+  private activeDrumPadVoices: Map<number, Map<string, InstrumentVoiceHandle>> = new Map();
   /** Buffer sources of the active take's playlist audio; cancelled by stop/pause/seek. */
   private activeClipSources: Set<AudioBufferSourceNode> = new Set();
   /** Playlist lane row each active clip source was started from, so a live lane mute can cancel exactly that lane's audio. */
@@ -331,7 +333,7 @@ class AudioEngine {
     // audio generation so a future external instrument can implement the same
     // contract without another growing instrumentType switch.
     this.instrumentRegistry = createInstrumentRegistry({
-      drumpad: ({ channel, note, time, destination }) => this.triggerDrumVoice(channel, note, time, destination),
+      drumpad: renderDrumPadVoice,
       fmsynth: renderFmSynthVoice,
       fm_bell: renderFmSynthVoice,
       grand_piano: ({ channel, note, time, destination, voiceId }) => this.triggerGrandPianoVoice(channel, note, time, destination, voiceId),
@@ -764,21 +766,36 @@ class AudioEngine {
     // Trigger Dynamic Sidechain Ducking on receiving tracks
     this.triggerSidechainDucking(channel.mixerTrackId, time);
 
-    if (channel.instrumentType === 'drumpad' && channel.drumPads?.some(pad => pad.note === note.pitch)) {
-      this.triggerDrumPadVoice(channel, note, time, mixerChannel.input, voiceId);
-      return;
-    }
-
     let voiceHandle: InstrumentVoiceHandle | void;
     const onEnded = () => {
       if (voiceHandle && this.activeVoices.get(voiceId) === voiceHandle) {
         this.activeVoices.delete(voiceId);
       }
+      this.removeDrumPadChokeVoice(voiceId, voiceHandle);
     };
 
-    const renderer = channel.customSample && channel.customSample.id
-      ? this.instrumentRegistry.get('sampler')
-      : this.instrumentRegistry.get(channel.instrumentType);
+    const pad = channel.instrumentType === 'drumpad'
+      ? channel.drumPads?.find(candidate => candidate.note === note.pitch)
+      : undefined;
+    const chokeGroup = pad?.chokeGroup || 0;
+    const sampledDrumPadBuffer = pad?.sampleId
+      ? this.sampleBuffers.get(pad.sampleId)
+      : undefined;
+    const canChokeDrumPad =
+      channel.instrumentType === 'drumpad' &&
+      Boolean(pad?.sampleId) &&
+      Boolean(sampledDrumPadBuffer) &&
+      chokeGroup > 0;
+
+    if (canChokeDrumPad) {
+      this.stopDrumPadChokeGroup(chokeGroup, time);
+    }
+
+    const renderer = channel.instrumentType === 'drumpad'
+      ? this.instrumentRegistry.get('drumpad')
+      : channel.customSample && channel.customSample.id
+        ? this.instrumentRegistry.get('sampler')
+        : this.instrumentRegistry.get(channel.instrumentType);
 
     voiceHandle = renderer({
       channel,
@@ -790,6 +807,12 @@ class AudioEngine {
       onEnded,
       getSampleBuffer: (id) => this.sampleBuffers.get(id),
     });
+
+    if (!voiceHandle && channel.instrumentType === 'drumpad' && (!pad || !pad.sampleId)) {
+      // Preserve the legacy drum synthesizer fallback when there is no sampled pad.
+      this.triggerDrumVoice(channel, note, time, mixerChannel.input);
+      return;
+    }
 
     if (!voiceHandle && (channel.customSample?.id || channel.instrumentType === 'sampler')) {
       // Preserve the pre-22C sampler behavior: an unavailable custom sample,
@@ -807,79 +830,44 @@ class AudioEngine {
 
     if (voiceHandle) {
       this.activeVoices.set(voiceId, voiceHandle);
+      if (chokeGroup > 0) {
+        const voices = this.activeDrumPadVoices.get(chokeGroup) || new Map<string, InstrumentVoiceHandle>();
+        voices.set(voiceId, voiceHandle);
+        this.activeDrumPadVoices.set(chokeGroup, voices);
+      }
     }
   }
 
-  public triggerDrumPadVoice(channel: Channel, note: Note, time: number, destination: AudioNode, voiceId: string) {
-    if (!this.ctx) return;
-    const pad = channel.drumPads?.find(candidate => candidate.note === note.pitch && candidate.sampleId);
-    if (!pad) {
-      this.triggerDrumVoice(channel, note, time, destination);
-      return;
+  private stopDrumPadChokeGroup(group: number, time: number) {
+    const voices = this.activeDrumPadVoices.get(group);
+    if (!voices) return;
+
+    for (const [voiceId, handle] of voices) {
+      try {
+        handle.stop(time);
+      } catch (_) {}
+      if (this.activeVoices.get(voiceId) === handle) {
+        this.activeVoices.delete(voiceId);
+      }
     }
-
-    const buffer = this.sampleBuffers.get(pad.sampleId);
-    if (!buffer) return;
-
-    const ctx = this.ctx;
-    const group = pad.chokeGroup || 0;
-    if (group > 0) {
-      this.activeDrumPads.get(group)?.forEach(id => this.activeVoices.get(id)?.stop(time));
-      this.activeDrumPads.set(group, new Set());
-    }
-
-    const source = ctx.createBufferSource();
-    source.buffer = buffer;
-    const playbackRate = Math.pow(2, Math.max(-24, Math.min(24, pad.tuneSemitones || 0)) / 12);
-    source.playbackRate.setValueAtTime(pad.reverse ? -playbackRate : playbackRate, time);
-
-    const gain = ctx.createGain();
-    const velocity = Math.max(0, Math.min(1, note.velocity ?? 0.8));
-    gain.gain.setValueAtTime(velocity * Math.max(0, Math.min(1.25, pad.volume)) * channel.volume, time);
-    const panner = ctx.createStereoPanner();
-    panner.pan.setValueAtTime(Math.max(-1, Math.min(1, pad.pan)), time);
-
-    source.connect(gain);
-    gain.connect(panner);
-    panner.connect(destination);
-
-    const startPct = Math.max(0, Math.min(1, pad.trimStart ?? 0));
-    const endPct = Math.max(startPct, Math.min(1, pad.trimEnd ?? 1));
-    const start = startPct * buffer.duration;
-    const end = endPct * buffer.duration;
-    const duration = Math.max(0.001, end - start);
-    if (pad.loop && end > start) {
-      source.loop = true;
-      source.loopStart = start;
-      source.loopEnd = end;
-    }
-
-    const stop = (stopTime?: number) => {
-      const t = stopTime ?? ctx.currentTime;
-      gain.gain.cancelScheduledValues(t);
-      gain.gain.setValueAtTime(Math.max(0.0001, gain.gain.value), t);
-      gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.02);
-      try { source.stop(t + 0.025); } catch (_) {}
-      this.activeVoices.delete(voiceId);
-      if (group > 0) this.activeDrumPads.get(group)?.delete(voiceId);
-    };
-
-    this.activeVoices.set(voiceId, { stop });
-    if (group > 0) {
-      const voices = this.activeDrumPads.get(group) || new Set<string>();
-      voices.add(voiceId);
-      this.activeDrumPads.set(group, voices);
-    }
-    source.onended = () => {
-      this.activeVoices.delete(voiceId);
-      if (group > 0) this.activeDrumPads.get(group)?.delete(voiceId);
-    };
-
-    const offset = pad.reverse ? end : start;
-    source.start(time, offset, pad.loop ? undefined : duration);
+    this.activeDrumPadVoices.delete(group);
   }
 
+  private removeDrumPadChokeVoice(
+    voiceId: string,
+    handle: InstrumentVoiceHandle | void,
+  ) {
+    if (!handle) return;
 
+    for (const [group, voices] of this.activeDrumPadVoices) {
+      if (voices.get(voiceId) !== handle) continue;
+      voices.delete(voiceId);
+      if (voices.size === 0) {
+        this.activeDrumPadVoices.delete(group);
+      }
+      break;
+    }
+  }
   // Real-Time Arpeggiator & Euclidean Rhythm Engine
   public generateEuclideanPattern(steps: number = 16, hits: number = 5, rotate: number = 0): boolean[] {
     const pattern = new Array(steps).fill(false);
@@ -1245,6 +1233,7 @@ class AudioEngine {
       const voice = this.activeVoices.get(voiceId);
       voice?.stop();
       this.activeVoices.delete(voiceId);
+      this.removeDrumPadChokeVoice(voiceId, voice);
     }
   }
 
@@ -1256,6 +1245,7 @@ class AudioEngine {
           voice.stop();
         } catch (_) {}
         this.activeVoices.delete(voiceId);
+        this.removeDrumPadChokeVoice(voiceId, voice);
       }
     }
   }
@@ -3224,6 +3214,7 @@ class AudioEngine {
       }
     }
     this.activeVoices.clear();
+    this.activeDrumPadVoices.clear();
   }
 
   /** Keeps the engine's step/bar mirror aligned with the authoritative transport position. */

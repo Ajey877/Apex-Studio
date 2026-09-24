@@ -59,6 +59,7 @@ const saved: Record<string, unknown> = {};
 const SAVED_KEYS = [
   'ctx',
   'activeVoices',
+  'activeDrumPadVoices',
   'isPlaying',
   'transport',
   'playbackGeneration',
@@ -96,6 +97,7 @@ beforeEach(() => {
   const ctx = new FakeAudioContext();
   engine.ctx = ctx;
   engine.activeVoices = new Map();
+  engine.activeDrumPadVoices = new Map();
   engine.isPlaying = false;
   engine.playbackGeneration = 0;
   engine.transport = null;
@@ -316,5 +318,147 @@ describe('Phase 22 standalone voice lifecycle integration', () => {
     assert.equal(engine.playbackGeneration, generationBefore + 1);
     assert.equal(engine.activeVoices.size, 0);
     assert.equal(engine.isPlaying, false);
+  });
+});
+
+const makeDrumPadChannel = (id = 'drum-pad'): Channel => {
+  const channel = makeChannel(id, 'drumpad');
+  channel.drumPads = [{
+    id: 'kick-pad',
+    note: 36,
+    name: 'Kick',
+    sampleId: 'kick-sample',
+    volume: 1,
+    pan: 0.2,
+    tuneSemitones: 2,
+    trimStart: 0.1,
+    trimEnd: 0.9,
+    reverse: false,
+    loop: false,
+    chokeGroup: 1,
+  }];
+  return channel;
+};
+
+describe('Phase 23 drum-pad lifecycle integration', () => {
+  it('dispatches sampled drum pads through InstrumentRegistry and owns lifecycle in AudioEngine', () => {
+    const channel = makeDrumPadChannel('drum-dispatch');
+    engine.sampleBuffers.set('kick-sample', { duration: 1 } as AudioBuffer);
+
+    const ctx = engine.ctx as FakeAudioContext;
+    const note = { ...makeNote('drum-note'), pitch: 36 };
+    engine.playSingleVoice(channel, note, 0);
+
+    assert.equal(engine.activeVoices.size, 1);
+    assert.equal(engine.activeDrumPadVoices.size, 1);
+    assert.equal(ctx.bufferSources.length, 1);
+
+    ctx.bufferSources[0].onended?.();
+    assert.equal(engine.activeVoices.size, 0);
+    assert.equal(engine.activeDrumPadVoices.size, 0);
+  });
+
+  it('falls back to the legacy drum synthesizer when a pad has no sampleId', () => {
+    const channel = makeDrumPadChannel('drum-fallback');
+    channel.drumPads![0].sampleId = '';
+
+    const ctx = engine.ctx as FakeAudioContext;
+    engine.playSingleVoice(channel, { ...makeNote('fallback'), pitch: 36 }, 0);
+
+    assert.equal(ctx.bufferSources.length, 0);
+    assert.ok(ctx.oscillators.length > 0);
+  });
+
+  it('does not synthesize a missing referenced pad sample', () => {
+    const channel = makeDrumPadChannel('drum-missing');
+
+    engine.playSingleVoice(channel, { ...makeNote('missing'), pitch: 36 }, 0);
+
+    assert.equal(engine.activeVoices.size, 0);
+    assert.equal((engine.ctx as FakeAudioContext).bufferSources.length, 0);
+  });
+
+  it('choke groups stop the previous renderer handle without renderer access to activeVoices', () => {
+    const first = makeDrumPadChannel('drum-choke');
+    const second = makeDrumPadChannel('drum-choke');
+    engine.sampleBuffers.set('kick-sample', { duration: 1 } as AudioBuffer);
+
+    engine.playSingleVoice(first, { ...makeNote('choke-a'), pitch: 36 }, 0);
+    const ctx = engine.ctx as FakeAudioContext;
+    const firstSource = ctx.bufferSources[0];
+    assert.equal(engine.activeVoices.size, 1);
+
+    engine.playSingleVoice(second, { ...makeNote('choke-b'), pitch: 36 }, 0.1);
+
+    assert.equal(firstSource.stopCalls, 1);
+    assert.equal(engine.activeVoices.size, 1);
+    assert.equal(engine.activeDrumPadVoices.size, 1);
+  });
+
+  it('does not choke an existing sampled pad when the new pad sample buffer is missing', () => {
+    const first = makeDrumPadChannel('drum-missing-choke');
+    const second = makeDrumPadChannel('drum-missing-choke');
+    second.drumPads![0].sampleId = 'missing-sample';
+    engine.sampleBuffers.set('kick-sample', { duration: 1 } as AudioBuffer);
+
+    engine.playSingleVoice(first, { ...makeNote('missing-choke-a'), pitch: 36 }, 0);
+    const ctx = engine.ctx as FakeAudioContext;
+    const firstSource = ctx.bufferSources[0];
+    assert.equal(engine.activeVoices.size, 1);
+
+    engine.playSingleVoice(second, { ...makeNote('missing-choke-b'), pitch: 36 }, 0.1);
+
+    assert.equal(firstSource.stopCalls, 0);
+    assert.equal(engine.activeVoices.size, 1);
+    assert.equal(engine.activeDrumPadVoices.size, 1);
+    assert.equal(ctx.bufferSources.length, 1);
+  });
+
+  it('keeps legacy drum-synth fallback and existing sampled voice when new pad has no sampleId', () => {
+    const first = makeDrumPadChannel('drum-legacy-choke');
+    const second = makeDrumPadChannel('drum-legacy-choke');
+    second.drumPads![0].sampleId = '';
+    engine.sampleBuffers.set('kick-sample', { duration: 1 } as AudioBuffer);
+
+    engine.playSingleVoice(first, { ...makeNote('legacy-choke-a'), pitch: 36 }, 0);
+    const ctx = engine.ctx as FakeAudioContext;
+    const firstSource = ctx.bufferSources[0];
+    assert.equal(engine.activeVoices.size, 1);
+
+    engine.playSingleVoice(second, { ...makeNote('legacy-choke-b'), pitch: 36 }, 0.1);
+
+    assert.equal(firstSource.stopCalls, 0);
+    assert.equal(engine.activeVoices.size, 1);
+    assert.ok(ctx.oscillators.length > 0);
+  });
+
+  it('explicit stop removes the drum-pad voice from AudioEngine lifecycle state', () => {
+    const channel = makeDrumPadChannel('drum-stop');
+    engine.sampleBuffers.set('kick-sample', { duration: 1 } as AudioBuffer);
+
+    engine.playSingleVoice(channel, { ...makeNote('stop'), pitch: 36 }, 0);
+    assert.equal(engine.activeVoices.size, 1);
+
+    const voiceId = [...engine.activeVoices.keys()][0];
+    engine.stopNote(voiceId);
+    engine.stopNote(voiceId);
+
+    assert.equal(engine.activeVoices.size, 0);
+    assert.equal(engine.activeDrumPadVoices.size, 0);
+  });
+
+  it('repeatedly completes short drum-pad voices without activeVoices growth', () => {
+    const channel = makeDrumPadChannel('drum-stress');
+    engine.sampleBuffers.set('kick-sample', { duration: 0.05 } as AudioBuffer);
+    const ctx = engine.ctx as FakeAudioContext;
+
+    for (let i = 0; i < 100; i += 1) {
+      ctx.bufferSources.length = 0;
+      engine.playSingleVoice(channel, { ...makeNote(`drum-stress-${i}`), pitch: 36 }, 0);
+      assert.equal(engine.activeVoices.size, 1);
+      ctx.bufferSources[0].onended?.();
+      assert.equal(engine.activeVoices.size, 0);
+      assert.equal(engine.activeDrumPadVoices.size, 0);
+    }
   });
 });
