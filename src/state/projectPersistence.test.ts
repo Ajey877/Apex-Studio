@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createDefaultProjectState } from './projectState';
+import { createDefaultProjectState, normalizeProjectState } from './projectState';
 import { getPersistedAudioClip, getPersistedProjectStateRecord, deletePersistedAudioClip, deletePersistedProjectState, listPersistedAudioClipIds, persistAudioClip } from '../audio/audioPersistence';
 import { getAudioIdsForProject, hydrateProjectAudio, persistProjectState, reconcilePersistedAudio, restorePersistedProjectState, saveAndReconcileProjectState, serializeProjectState } from './projectPersistence';
 import { createHistory } from './projectHistory';
@@ -842,7 +842,6 @@ test('project normalization migrates legacy channel samples into the sample libr
     channels: [{ ...state.channels[0], customSample: sample }, ...state.channels.slice(1)]
   };
 
-  const { normalizeProjectState } = require('./projectState') as typeof import('./projectState');
   const normalized = normalizeProjectState(legacyState);
   assert.equal(normalized.sampleLibrary?.[0]?.id, sampleId);
 });
