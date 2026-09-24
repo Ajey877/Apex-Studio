@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { createInstrumentRegistry } from './instrumentRegistry';
-import { renderGrandPianoVoice, renderRhodesVoice, renderOrganVoice, renderPluckedGuitarVoice, renderStringsVoice, renderPizzicatoVoice, renderBrassVoice, renderMarimbaVoice } from './instruments/legacyAcoustic';
-import { renderAcid303Voice, renderReeseBassVoice, render808SubVoice, renderSupersawVoice, renderAmbientPadVoice, renderVoxChoirVoice, renderChiptuneVoice } from './instruments/legacySynth';
-import { renderLegacyDrumVoice } from './instruments/legacyDrum';
+import { createInstrumentRegistry } from '../instrumentRegistry';
+import { renderGrandPianoVoice, renderRhodesVoice, renderOrganVoice, renderPluckedGuitarVoice, renderStringsVoice, renderPizzicatoVoice, renderBrassVoice, renderMarimbaVoice } from './legacyAcoustic';
+import { renderAcid303Voice, renderReeseBassVoice, render808SubVoice, renderSupersawVoice, renderAmbientPadVoice, renderVoxChoirVoice, renderChiptuneVoice } from './legacySynth';
+import { renderLegacyDrumVoice } from './legacyDrum';
 
 class FakeParam { value = 0; setValueAtTime(v:number){this.value=v;} linearRampToValueAtTime(v:number){this.value=v;} exponentialRampToValueAtTime(v:number){this.value=v;} cancelScheduledValues(){} }
 class FakeNode { readonly gain=new FakeParam(); readonly frequency=new FakeParam(); readonly detune=new FakeParam(); readonly playbackRate=new FakeParam(); readonly pan=new FakeParam(); type='sine'; Q=new FakeParam(); buffer:any=null; startCalls=0; stopCalls=0; connect(){} start(){this.startCalls++;} stop(){this.stopCalls++;} }
