@@ -129,10 +129,6 @@ test('registry-backed renderers receive the OfflineAudioContext for every instru
     'marimba_bell', 'fm_bell', 'chiptune_8bit', 'independent_pluck',
   ];
 
-  class FakeOfflineContextForRegistry extends FakeOfflineAudioContext {
-    readonly destination = new FakeNode();
-  }
-
   (globalThis as any).OfflineAudioContext = FakeOfflineContextForRegistry;
   engine.updateMixerTrack = () => undefined;
   engine.getOrCreateMixerChannel = () => ({ input: {} });
