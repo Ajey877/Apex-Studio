@@ -84,7 +84,6 @@ test('Project A -> B releases A-only URLs and keeps incoming B URLs', () => {
     assert.equal(sessionBlobUrlRegistry.isOwned(b), true);
     sessionBlobUrlRegistry.release(b);
   } finally {
-    sessionBlobUrlRegistry.releaseAllOwned();
     mocks.restore();
   }
 });
