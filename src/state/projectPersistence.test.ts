@@ -453,8 +453,8 @@ test('hydration registers a project recording Blob URL and replacement releases 
     assert.deepEqual(revoked, [urlA!]);
     assert.equal(sessionBlobUrlRegistry.getOwnerCount(urlA!), 0);
     assert.equal(sessionBlobUrlRegistry.getOwnerCount(urlB!), 1);
+    sessionBlobUrlRegistry.release(urlB!);
   } finally {
-    sessionBlobUrlRegistry.releaseAllOwned();
     URL.createObjectURL = originalCreate;
     URL.revokeObjectURL = originalRevoke;
     await deletePersistedAudioClip('recording-rec-roundtrip').catch(() => undefined);
