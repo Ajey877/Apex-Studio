@@ -1189,7 +1189,7 @@ test('Phase 38: sequential A -> reconcile -> B preserves B and still removes gen
 test('Phase 38: overlapping A/B saves keep B project persistence behind A reconciliation', async () => {
   const controller = new Phase38ControlledIndexedDb();
   controller.blockList = true;
-  phase38SeedAudio(controller, ['audio-a', 'audio-b']);
+  phase38SeedAudio(controller, ['audio-a', 'audio-b', 'orphan']);
   const restore = phase38InstallDb(controller);
   try {
     const stateA = phase38StateWithAudio('audio-a');
@@ -1330,15 +1330,17 @@ test('Phase 38: project persistence failure prevents reconciliation from executi
   const restore = phase38InstallDb(controller);
   try {
     let listCalls = 0;
-    const result = await saveAndReconcileProjectState(phase38StateWithAudio('audio-a'), {
-      reconcileAudio: true,
-      storage: {
-        listPersistedAudioClipIds: async () => { listCalls += 1; return ['orphan']; },
-        deletePersistedAudioClip: async () => undefined,
-        listProjectBackupRecords: async () => []
-      }
-    });
-    assert.equal(result, null);
+    await assert.rejects(
+      saveAndReconcileProjectState(phase38StateWithAudio('audio-a'), {
+        reconcileAudio: true,
+        storage: {
+          listPersistedAudioClipIds: async () => { listCalls += 1; return ['orphan']; },
+          deletePersistedAudioClip: async () => undefined,
+          listProjectBackupRecords: async () => []
+        }
+      }),
+      /forced project persistence failure/
+    );
     assert.equal(listCalls, 0);
   } finally {
     restore();
