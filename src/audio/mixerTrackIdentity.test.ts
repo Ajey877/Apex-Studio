@@ -5,7 +5,8 @@ import {
   appendChannelWithAllocatedMixerTrackId,
   deriveNextMixerTrackId,
   findDuplicateMixerTrackIdentities,
-  normalizeNextMixerTrackId
+  normalizeNextMixerTrackId,
+  normalizeMixerTrackIdentityIntegrity
 } from '../state/mixerTrackIdentity';
 import { createDefaultProjectState, normalizeProjectState } from '../state/projectState';
 import type { Channel, ProjectState } from '../types/daw';
@@ -219,5 +220,61 @@ describe('Stable mixer track identity', () => {
     assert.equal(normal.channels.at(-1)!.mixerTrackId, 8);
     assert.equal(sample.channels.at(-1)!.mixerTrackId, 9);
     assert.equal(sample.nextMixerTrackId, 10);
+  });
+});
+
+
+describe('Mixer track identity lifecycle integrity', () => {
+  it('creates exactly one mixer track for a newly allocated channel', () => {
+    const project = createDefaultProjectState();
+    const next = appendChannelWithAllocatedMixerTrackId(project, makeChannel(project, 'Created'));
+    const created = next.channels.at(-1)!;
+
+    assert.equal(next.mixerTracks.filter(track => track.id === created.mixerTrackId).length, 1);
+    assert.equal(created.mixerTrackId, 8);
+  });
+
+  it('repairs a duplicate channel mixer identity without changing the original identity', () => {
+    const project = createDefaultProjectState();
+    const duplicate = makeChannel(project, 'Duplicate');
+    duplicate.mixerTrackId = project.channels[0].mixerTrackId;
+    project.channels.push(duplicate);
+
+    const normalized = normalizeMixerTrackIdentityIntegrity(project);
+    const ids = normalized.channels.map(channel => channel.mixerTrackId);
+
+    assert.equal(new Set(ids).size, ids.length);
+    assert.equal(normalized.mixerTracks.filter(track => track.id === ids[0]).length, 1);
+    assert.equal(normalized.mixerTracks.filter(track => track.id === ids[2]).length, 1);
+  });
+
+  it('repairs a channel referencing a missing mixer track', () => {
+    const project = createDefaultProjectState();
+    project.channels[0] = { ...project.channels[0], mixerTrackId: 99 };
+
+    const normalized = normalizeProjectState(project);
+    const repairedId = normalized.channels[0].mixerTrackId;
+
+    assert.notEqual(repairedId, 99);
+    assert.equal(normalized.mixerTracks.filter(track => track.id === repairedId).length, 1);
+  });
+
+  it('deduplicates duplicate mixer-track records and preserves channel identities', () => {
+    const project = createDefaultProjectState();
+    project.mixerTracks.push({ ...project.mixerTracks[1], name: 'Duplicate Record' });
+
+    const normalized = normalizeProjectState(project);
+    assert.equal(normalized.mixerTracks.filter(track => track.id === 1).length, 1);
+    assert.deepEqual(normalized.channels.map(channel => channel.mixerTrackId), [1, 2]);
+  });
+
+  it('preserves routing through reorder and save/load normalization', () => {
+    const project = createDefaultProjectState();
+    project.mixerTracks[0].routingTargetId = 2;
+    project.mixerTracks = [...project.mixerTracks].reverse();
+
+    const reloaded = normalizeProjectState(JSON.parse(JSON.stringify(project)));
+    assert.equal(reloaded.mixerTracks.find(track => track.id === 1)?.routingTargetId, 2);
+    assert.deepEqual(reloaded.channels.map(channel => channel.mixerTrackId), [1, 2]);
   });
 });
