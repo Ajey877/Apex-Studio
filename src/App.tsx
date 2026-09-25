@@ -1044,7 +1044,11 @@ export function App() {
     const persistedRecording: AudioRecording = { ...recording, audioBufferId };
     // AudioEngine has no buffer-removal API; a removed target leaves only this narrow in-memory orphan.
     const currentState = projectStateRef.current;
-    if (!currentState.playlistTracks.some(track => track.id === targetTrackId)) return;
+    if (!currentState.playlistTracks.some(track => track.id === targetTrackId)) {
+      // The temporary take is being discarded because its target disappeared.
+      sessionBlobUrlRegistry.release(recording.audioUrl ?? '');
+      return;
+    }
     const currentTargetTrackIndex = currentState.playlistTracks.findIndex(track => track.id === targetTrackId);
     const recordingClip = createRecordingPlaylistClip(
       persistedRecording,
