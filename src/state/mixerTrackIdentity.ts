@@ -1,4 +1,4 @@
-import type { Channel, ProjectState } from '../types/daw';
+import type { Channel, MixerTrack, ProjectState } from '../types/daw';
 
 export const MASTER_MIXER_TRACK_ID = 0;
 
@@ -25,6 +25,78 @@ const collectOccupiedMixerTrackIds = (projectState: ProjectState): Set<number> =
 
 export const getOccupiedMixerTrackIds = (projectState: ProjectState): Set<number> =>
   collectOccupiedMixerTrackIds(projectState);
+
+/** Enforces the project-level channel <-> mixer-track identity invariant. */
+export const normalizeMixerTrackIdentityIntegrity = (projectState: ProjectState): ProjectState => {
+  const mixerTracksById = new Map<number, MixerTrack>();
+  const mixerTracks: MixerTrack[] = [];
+
+  for (const track of projectState.mixerTracks) {
+    if (!Number.isSafeInteger(track.id) || track.id < MASTER_MIXER_TRACK_ID) continue;
+    if (mixerTracksById.has(track.id)) continue;
+    mixerTracksById.set(track.id, track);
+    mixerTracks.push(track);
+  }
+
+  const usedChannelIds = new Set<number>();
+  const usedIds = new Set<number>(mixerTracks.map(track => track.id));
+  let nextId = Math.max(
+    deriveNextMixerTrackId({ ...projectState, mixerTracks }),
+    MASTER_MIXER_TRACK_ID + 1
+  );
+  let changed = mixerTracks.length !== projectState.mixerTracks.length;
+
+  const allocate = (): number => {
+    while (usedIds.has(nextId) || nextId === MASTER_MIXER_TRACK_ID) nextId += 1;
+    if (nextId >= Number.MAX_SAFE_INTEGER) throw new Error('Mixer track identity space is exhausted.');
+    const id = nextId++;
+    usedIds.add(id);
+    return id;
+  };
+
+  const channels = projectState.channels.map(channel => {
+    const originalId = channel.mixerTrackId;
+    const uniqueValidId = isPositiveSafeInteger(originalId) && !usedChannelIds.has(originalId);
+    const existingTrack = uniqueValidId ? mixerTracksById.get(originalId) : undefined;
+    const mixerTrackId = uniqueValidId ? originalId : allocate();
+    usedChannelIds.add(mixerTrackId);
+    if (uniqueValidId) usedIds.add(mixerTrackId);
+
+    if (!existingTrack) {
+      const createdTrack: MixerTrack = {
+        id: mixerTrackId,
+        name: channel.name,
+        color: channel.color,
+        volume: channel.volume,
+        pan: channel.pan,
+        mute: channel.mute,
+        solo: channel.solo,
+        stereoWidth: 1,
+        fxSlots: [],
+        peakL: 0,
+        peakR: 0,
+        routingTargetId: 0
+      };
+      mixerTracks.push(createdTrack);
+      mixerTracksById.set(mixerTrackId, createdTrack);
+      changed = true;
+    }
+
+    if (mixerTrackId !== originalId) {
+      changed = true;
+      return { ...channel, mixerTrackId };
+    }
+    return channel;
+  });
+
+  if (!changed) return projectState;
+  return {
+    ...projectState,
+    channels,
+    mixerTracks,
+    nextMixerTrackId: Math.max(projectState.nextMixerTrackId || 0, nextId)
+  };
+};
 
 const findDuplicateIds = (ids: number[]): number[] => {
   const counts = new Map<number, number>();
@@ -119,12 +191,28 @@ export const appendChannelWithAllocatedMixerTrackId = (
 ): ProjectState => {
   const allocation = allocateMixerTrackIdentity(projectState);
 
+  const mixerTrack: MixerTrack = {
+    id: allocation.mixerTrackId,
+    name: channel.name,
+    color: channel.color,
+    volume: channel.volume,
+    pan: channel.pan,
+    mute: channel.mute,
+    solo: channel.solo,
+    stereoWidth: 1,
+    fxSlots: [],
+    peakL: 0,
+    peakR: 0,
+    routingTargetId: MASTER_MIXER_TRACK_ID
+  };
+
   return {
     ...projectState,
     channels: [
       ...projectState.channels,
       { ...channel, mixerTrackId: allocation.mixerTrackId }
     ],
+    mixerTracks: [...projectState.mixerTracks, mixerTrack],
     nextMixerTrackId: allocation.nextMixerTrackId
   };
 };
