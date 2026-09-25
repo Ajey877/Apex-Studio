@@ -3,6 +3,7 @@ import { deletePersistedAudioClip, getPersistedAudioClip, getPersistedProjectRec
 import { normalizeProjectState } from './projectState';
 import { getRecordingAudioBufferId } from '../audio/recordingPipeline';
 import { isSampleAudioUnavailable } from './audioAssetAvailability';
+import { sessionBlobUrlRegistry } from './sessionBlobUrlRegistry';
 
 export interface AudioHydrationEngine {
   loadAudioFile: (file: File | Blob, id: string) => Promise<{ buffer: AudioBuffer; peaks: number[]; duration: number }>;
@@ -97,12 +98,14 @@ const hydrateRecording = async (
   }
 
   await audioEngine.loadAudioFile(blob, audioId);
+  const audioUrl = URL.createObjectURL(blob);
+  sessionBlobUrlRegistry.retain(audioUrl);
   return {
     recording: {
       ...recording,
       audioBufferId: audioId,
       audioBlob: blob,
-      audioUrl: URL.createObjectURL(blob)
+      audioUrl
     },
     hydrated: true,
     audioId

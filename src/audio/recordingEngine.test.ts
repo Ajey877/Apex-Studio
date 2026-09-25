@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { RecordingEngine } from './recordingEngine';
+import { sessionBlobUrlRegistry } from '../state/sessionBlobUrlRegistry';
 
 class FakeTrack {
   stopped = false;
@@ -73,6 +74,8 @@ const installBrowserMocks = () => {
   const OriginalMediaRecorder = globalThis.MediaRecorder;
   const OriginalNavigator = globalThis.navigator;
   const OriginalCreateObjectURL = URL.createObjectURL;
+  const OriginalRevokeObjectURL = URL.revokeObjectURL;
+  const revokedUrls: string[] = [];
 
   Object.defineProperty(globalThis, 'navigator', {
     configurable: true,
@@ -88,19 +91,38 @@ const installBrowserMocks = () => {
     },
   });
   URL.createObjectURL = () => 'blob:recording-test';
+  URL.revokeObjectURL = (url: string) => { revokedUrls.push(url); };
 
   return {
     stream,
     recorderInstances,
+    revokedUrls,
     restore: () => {
       Object.defineProperty(globalThis, 'navigator', { configurable: true, value: OriginalNavigator });
       Object.defineProperty(globalThis, 'MediaRecorder', { configurable: true, value: OriginalMediaRecorder });
       URL.createObjectURL = OriginalCreateObjectURL;
-    },
+      URL.revokeObjectURL = OriginalRevokeObjectURL;
+      },
   };
 };
 
 const createContext = (): AudioContext => new FakeAudioContext() as unknown as AudioContext;
+
+test('recording stop registers the temporary Blob URL for explicit ownership', async () => {
+  const mocks = installBrowserMocks();
+  try {
+    const engine = new RecordingEngine(createContext, { waveformSamples: 32, persistAudioClip: async () => {} });
+    const result = await engine.start().then(() => engine.stop());
+
+    assert.equal(result.url, 'blob:recording-test');
+    assert.equal(sessionBlobUrlRegistry.getOwnerCount(result.url), 1);
+
+    sessionBlobUrlRegistry.release(result.url);
+    assert.deepEqual(mocks.revokedUrls, ['blob:recording-test']);
+  } finally {
+    mocks.restore();
+  }
+});
 
 test('recording stop decodes the Blob for waveform generation and releases capture resources', async () => {
   const mocks = installBrowserMocks();

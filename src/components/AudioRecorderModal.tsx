@@ -3,6 +3,7 @@ import { Mic, Square, Pause, Play, Check, X, AlertCircle } from 'lucide-react';
 import { AudioRecording } from '../types/daw';
 import { audioEngine } from '../audio/audioEngine';
 import { RecordingEngine } from '../audio/recordingEngine';
+import { sessionBlobUrlRegistry } from '../state/sessionBlobUrlRegistry';
 
 interface AudioRecorderModalProps {
   isOpen: boolean;
@@ -77,6 +78,7 @@ export const AudioRecorderModal: React.FC<AudioRecorderModalProps> = ({ isOpen, 
       setRecordSeconds(0);
       setInputLevel(0);
       setError(null);
+      if (recordedTake?.audioUrl) sessionBlobUrlRegistry.release(recordedTake.audioUrl);
       setRecordedTake(null);
       setIsApplying(false);
     }
@@ -129,6 +131,8 @@ export const AudioRecorderModal: React.FC<AudioRecorderModalProps> = ({ isOpen, 
       setError(null);
       setIsApplying(true);
       await onSaveRecording(recordedTake, targetTrack);
+      // Ownership was transferred to the project by onSaveRecording.
+      setRecordedTake(null);
       onClose();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unable to place recording on the playlist');

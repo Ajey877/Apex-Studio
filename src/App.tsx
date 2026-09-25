@@ -34,6 +34,7 @@ import {
 import { getAudioIdsForProject, hydrateProjectAudio, persistProjectState, restorePersistedProjectState, saveAndReconcileProjectState } from './state/projectPersistence';
 import { ProjectBackupError, backupProjectBeforeReplacement } from './state/projectBackup';
 import { getSampleBufferPersistenceController, waitForSampleBufferPersistence } from './audio/sampleBufferPersistence';
+import { getProjectSessionBlobUrls, replaceProjectSessionBlobUrls, sessionBlobUrlRegistry } from './state/sessionBlobUrlRegistry';
 import { planProjectReplacement, runProjectReplacementAfterBackup, type ProjectReplacementPlan, type ProjectReplacementSource } from './state/projectReplacement';
 import {
   collectMissingAudioAssets,
@@ -704,7 +705,9 @@ export function App() {
       async () => {
         handleStop();
         try {
+          const previousProjectState = projectStateRef.current;
           const hydrated = await hydrateProjectAudio(normalized, audioEngine);
+          replaceProjectSessionBlobUrls(previousProjectState, hydrated.state);
           projectStateRef.current = hydrated.state;
           skipNextAutosaveStateRef.current = hydrated.state;
           setProjectState(hydrated.state);
@@ -722,6 +725,9 @@ export function App() {
           if (!saved) throw new Error('Replaced project could not be persisted');
         } catch (error) {
           console.warn('[Apex Studio] Project audio hydration failed; loading project without audio.', error);
+          for (const url of getProjectSessionBlobUrls(projectStateRef.current)) {
+            sessionBlobUrlRegistry.release(url);
+          }
           projectStateRef.current = normalized;
           skipNextAutosaveStateRef.current = normalized;
           setProjectState(normalized);
@@ -1038,7 +1044,11 @@ export function App() {
     const persistedRecording: AudioRecording = { ...recording, audioBufferId };
     // AudioEngine has no buffer-removal API; a removed target leaves only this narrow in-memory orphan.
     const currentState = projectStateRef.current;
-    if (!currentState.playlistTracks.some(track => track.id === targetTrackId)) return;
+    if (!currentState.playlistTracks.some(track => track.id === targetTrackId)) {
+      // The temporary take is being discarded because its target disappeared.
+      sessionBlobUrlRegistry.release(recording.audioUrl ?? '');
+      return;
+    }
     const currentTargetTrackIndex = currentState.playlistTracks.findIndex(track => track.id === targetTrackId);
     const recordingClip = createRecordingPlaylistClip(
       persistedRecording,
@@ -1056,6 +1066,9 @@ export function App() {
     };
     updatePlaylistProjectState(nextState);
     commitPlaylistHistory(nextState, 'Record audio to playlist');
+    // The modal's temporary recording ownership is transferred to the project
+    // only after the project state has successfully accepted the take.
+    sessionBlobUrlRegistry.transfer(recording.audioUrl ?? '');
   };
 
   // --- Computer Keypad & Keyboard Live Engine ---

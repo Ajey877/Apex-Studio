@@ -1,5 +1,6 @@
 import { persistAudioClip } from './audioPersistence';
 import { installAudioPlaybackLifecycle } from './audioPlaybackLifecycle';
+import { sessionBlobUrlRegistry } from '../state/sessionBlobUrlRegistry';
 
 installAudioPlaybackLifecycle();
 
@@ -166,7 +167,9 @@ export class RecordingEngine {
           const id = `rec-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
           await this.persistAudioClip(`recording-${id}`, blob);
           if (this.cancellationRequested) throw new Error('Audio recording was cancelled');
-          const resultValue: RecordingResult = { id, name: `Audio Take ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}`, timestamp: Date.now(), durationSeconds, blob, url: URL.createObjectURL(blob), waveform, mimeType: blob.type };
+          const url = URL.createObjectURL(blob);
+          sessionBlobUrlRegistry.retain(url);
+          const resultValue: RecordingResult = { id, name: `Audio Take ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}`, timestamp: Date.now(), durationSeconds, blob, url, waveform, mimeType: blob.type };
           settled = true;
           this.cleanup();
           resolve(resultValue);
