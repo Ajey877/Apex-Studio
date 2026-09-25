@@ -302,3 +302,18 @@ test('finished-but-unapplied take becomes stale after replacement', () => {
 
   assert.equal(isRecordingProjectGenerationCurrent(finishedTakeGeneration, generation), false);
 });
+
+
+test('replacement invalidation survives replacement persistence failure', async () => {
+  let generation = 0;
+  const recordingGeneration = generation;
+  let cancelled = false;
+
+  generation = nextRecordingProjectGeneration(generation);
+  cancelled = true;
+
+  await assert.rejects(Promise.reject(new Error('replacement persistence failed')), /replacement persistence failed/);
+
+  assert.equal(cancelled, true);
+  assert.equal(isRecordingProjectGenerationCurrent(recordingGeneration, generation), false);
+});
