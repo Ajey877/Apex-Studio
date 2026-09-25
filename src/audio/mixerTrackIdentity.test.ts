@@ -187,10 +187,11 @@ describe('Stable mixer track identity', () => {
     legacy.channels[1].mixerTrackId = 42;
     delete legacy.nextMixerTrackId;
 
-    const duplicateIds = findDuplicateMixerTrackIdentities(normalizeProjectState(legacy));
-    assert.deepEqual(duplicateIds, [42]);
+    assert.deepEqual(findDuplicateMixerTrackIdentities(legacy), [42]);
     const normalized = normalizeProjectState(legacy);
+    assert.deepEqual(findDuplicateMixerTrackIdentities(normalized), []);
     assert.equal(normalized.channels[0].mixerTrackId, 42);
+    assert.equal(normalized.channels[1].mixerTrackId, 43);
     assert.equal(normalized.channels[1].mixerTrackId, 42);
   });
 
@@ -272,7 +273,7 @@ describe('Mixer track identity lifecycle integrity', () => {
 
   it('preserves routing through reorder and save/load normalization', () => {
     const project = createDefaultProjectState();
-    project.mixerTracks[0].routingTargetId = 2;
+    project.mixerTracks.find(track => track.id === 1)!.routingTargetId = 2;
     project.mixerTracks = [...project.mixerTracks].reverse();
 
     const reloaded = normalizeProjectState(JSON.parse(JSON.stringify(project)));
