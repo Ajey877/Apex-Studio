@@ -317,7 +317,7 @@ describe('Phase 30 runtime mixer identity enforcement', () => {
     );
 
     assert.notEqual(next.channels[1].mixerTrackId, project.channels[0].mixerTrackId);
-    assert.notEqual(next.channels[1].mixerTrackId, project.channels[0].mixerTrackId);
+    assert.equal(next.mixerTracks.filter(track => track.id === next.channels[1].mixerTrackId).length, 1);
     assertIdentityInvariant(next);
   });
 
