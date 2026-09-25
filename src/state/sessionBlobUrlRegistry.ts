@@ -50,16 +50,6 @@ export class SessionBlobUrlRegistry {
   getOwnerCount(url: string): number {
     return this.owners.get(url) ?? 0;
   }
-
-  /**
-   * Test/support hook for deterministic cleanup. Production callers should
-   * normally release individual ownership instead.
-   */
-  releaseAllOwned(): void {
-    const urls = [...this.owners.keys()];
-    this.owners.clear();
-    for (const url of urls) URL.revokeObjectURL(url);
-  }
 }
 
 export const sessionBlobUrlRegistry = new SessionBlobUrlRegistry();
