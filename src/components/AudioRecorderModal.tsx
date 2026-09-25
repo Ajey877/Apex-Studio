@@ -64,7 +64,7 @@ export const AudioRecorderModal: React.FC<AudioRecorderModalProps> = ({ isOpen, 
     };
     animationId = requestAnimationFrame(update);
     return () => cancelAnimationFrame(animationId);
-  }, [isOpen, recordedTake]);
+  }, [isOpen]);
 
   useEffect(() => {
     if (!isOpen) {
