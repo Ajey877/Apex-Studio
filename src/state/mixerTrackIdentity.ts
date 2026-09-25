@@ -190,12 +190,28 @@ export const appendChannelWithAllocatedMixerTrackId = (
 ): ProjectState => {
   const allocation = allocateMixerTrackIdentity(projectState);
 
+  const mixerTrack: MixerTrack = {
+    id: allocation.mixerTrackId,
+    name: channel.name,
+    color: channel.color,
+    volume: channel.volume,
+    pan: channel.pan,
+    mute: channel.mute,
+    solo: channel.solo,
+    stereoWidth: 1,
+    fxSlots: [],
+    peakL: 0,
+    peakR: 0,
+    routingTargetId: MASTER_MIXER_TRACK_ID
+  };
+
   return {
     ...projectState,
     channels: [
       ...projectState.channels,
       { ...channel, mixerTrackId: allocation.mixerTrackId }
     ],
+    mixerTracks: [...projectState.mixerTracks, mixerTrack],
     nextMixerTrackId: allocation.nextMixerTrackId
   };
 };
