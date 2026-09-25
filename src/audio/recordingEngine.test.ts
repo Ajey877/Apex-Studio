@@ -101,8 +101,7 @@ const installBrowserMocks = () => {
       Object.defineProperty(globalThis, 'MediaRecorder', { configurable: true, value: OriginalMediaRecorder });
       URL.createObjectURL = OriginalCreateObjectURL;
       URL.revokeObjectURL = OriginalRevokeObjectURL;
-      sessionBlobUrlRegistry.releaseAllOwned();
-    },
+      },
   };
 };
 
