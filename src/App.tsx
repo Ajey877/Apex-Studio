@@ -576,10 +576,18 @@ export function App() {
 
   const updatePlaylistProjectState = useCallback((state: ProjectState) => {
     const previousState = projectStateRef.current;
-    projectStateRef.current = state;
-    synchronizeRuntimeState(previousState, state);
-    setProjectState(state);
-  }, [synchronizeActivePlayback]);
+    synchronizeBeforeRuntimePublication(
+      previousState,
+      state,
+      synchronizeRuntimeState,
+      publishedState => {
+        projectStateRef.current = publishedState;
+        setProjectState(publishedState);
+        return publishedState;
+      },
+      restoreRuntimeState,
+    );
+  }, [restoreRuntimeState, synchronizeRuntimeState]);
 
   const mutateProjectState = useCallback((
     updater: (current: ProjectState) => ProjectState,
@@ -597,16 +605,16 @@ export function App() {
         setProjectState(publishedState);
 
         if (options?.isContinuous) {
-      continuousBatcherRef.current.update(nextState, label);
-    } else {
-      continuousBatcherRef.current.flush();
+          continuousBatcherRef.current.update(publishedState, label);
+        } else {
+          continuousBatcherRef.current.flush();
           commitProjectHistory(publishedState, label);
         }
         return publishedState;
       },
       restoreRuntimeState,
     );
-  }, [commitProjectHistory, synchronizeActivePlayback]);
+  }, [commitProjectHistory, restoreRuntimeState, synchronizeRuntimeState]);
 
   const handleContinuousInteractionStart = useCallback((label?: string) => {
     continuousBatcherRef.current.start(label);
@@ -658,11 +666,6 @@ export function App() {
       restoreRuntimeState,
     );
 
-    if (!audioEngine.isPlaybackActive()) {
-      nextHistory.present.mixerTracks.forEach(track => {
-        audioEngine.updateMixerTrack(track);
-      });
-    }
   }, [restoreRuntimeState, synchronizeRuntimeState]);
 
   const handlePlaylistUndo = handleUndo;
