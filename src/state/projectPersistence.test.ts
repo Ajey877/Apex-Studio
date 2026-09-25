@@ -5,6 +5,7 @@ import { getPersistedAudioClip, getPersistedProjectStateRecord, deletePersistedA
 import { getAudioIdsForProject, hydrateProjectAudio, persistProjectState, reconcilePersistedAudio, restorePersistedProjectState, saveAndReconcileProjectState, serializeProjectState } from './projectPersistence';
 import { createHistory } from './projectHistory';
 import type { AudioRecording, PlaylistClip, ProjectState } from '../types/daw';
+import { replaceProjectSessionBlobUrls, sessionBlobUrlRegistry } from './sessionBlobUrlRegistry';
 
 class FakeRequest<T = unknown> {
   result!: T;
@@ -406,6 +407,58 @@ test('orphan audio cleanup preserves referenced assets and removes unreferenced 
     await deletePersistedAudioClip('recording-rec-roundtrip').catch(() => undefined);
     await deletePersistedAudioClip('orphan-clip-obsolete').catch(() => undefined);
     restore();
+  }
+});
+
+test('hydration registers a project recording Blob URL and replacement releases the obsolete URL', async () => {
+  const restoreDb = installIndexedDbMock();
+  const originalCreate = URL.createObjectURL;
+  const originalRevoke = URL.revokeObjectURL;
+  const revoked: string[] = [];
+  let sequence = 0;
+  URL.createObjectURL = () => `blob:hydrated-${++sequence}`;
+  URL.revokeObjectURL = (url: string) => revoked.push(url);
+
+  try {
+    const { state, audioBufferId } = createRecordingProject();
+    await persistAudioClip(audioBufferId, new Blob(['hydrated-audio'], { type: 'audio/webm' }));
+
+    const hydratedA = await hydrateProjectAudio(state, {
+      loadAudioFile: async () => ({
+        buffer: { duration: 1 } as AudioBuffer,
+        peaks: [0.5],
+        duration: 1
+      })
+    });
+
+    const urlA = hydratedA.state.recordings[0].audioUrl;
+    assert.ok(urlA);
+    assert.equal(sessionBlobUrlRegistry.getOwnerCount(urlA!), 1);
+
+    const hydratedB = await hydrateProjectAudio(state, {
+      loadAudioFile: async () => ({
+        buffer: { duration: 1 } as AudioBuffer,
+        peaks: [0.5],
+        duration: 1
+      })
+    });
+
+    const urlB = hydratedB.state.recordings[0].audioUrl;
+    assert.ok(urlB);
+    assert.notEqual(urlA, urlB);
+    assert.equal(sessionBlobUrlRegistry.getOwnerCount(urlB!), 1);
+
+    replaceProjectSessionBlobUrls(hydratedA.state, hydratedB.state);
+
+    assert.deepEqual(revoked, [urlA!]);
+    assert.equal(sessionBlobUrlRegistry.getOwnerCount(urlA!), 0);
+    assert.equal(sessionBlobUrlRegistry.getOwnerCount(urlB!), 1);
+  } finally {
+    sessionBlobUrlRegistry.releaseAllOwned();
+    URL.createObjectURL = originalCreate;
+    URL.revokeObjectURL = originalRevoke;
+    await deletePersistedAudioClip('recording-rec-roundtrip').catch(() => undefined);
+    restoreDb();
   }
 });
 
