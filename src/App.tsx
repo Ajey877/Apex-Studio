@@ -1644,6 +1644,7 @@ export function App() {
       <AudioRecorderModal
         isOpen={isAudioRecorderOpen}
         projectGeneration={recordingProjectGenerationRef.current}
+        getCurrentProjectGeneration={() => recordingProjectGenerationRef.current}
         onRegisterProjectReplacementHandler={handler => { cancelRecordingForReplacementRef.current = handler; }}
         onClose={() => { setIsAudioRecorderOpen(false); setIsRecording(false); }}
         onSaveRecording={handleSaveRecordingToPlaylist}
