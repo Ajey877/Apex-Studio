@@ -731,6 +731,9 @@ export function App() {
           if (!saved) throw new Error('Replaced project could not be persisted');
         } catch (error) {
           console.warn('[Apex Studio] Project audio hydration failed; loading project without audio.', error);
+          for (const url of getProjectSessionBlobUrls(projectStateRef.current)) {
+            sessionBlobUrlRegistry.release(url);
+          }
           projectStateRef.current = normalized;
           skipNextAutosaveStateRef.current = normalized;
           setProjectState(normalized);
