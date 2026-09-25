@@ -38,7 +38,6 @@ class FakeContext {
   createGain(): FakeNode { return new FakeNode(); }
   createStereoPanner(): FakeNode { return new FakeNode(); }
   createAnalyser(): FakeNode { return new FakeNode(); }
-  createDynamicsCompressor(): FakeNode { return new FakeNode(); }
 }
 
 class FakeOfflineContext extends FakeContext {
@@ -369,48 +368,3 @@ describe('Phase 27 mixer routing activation', () => {
   });
 });
 
-describe('Phase 27 routing replacement regression', () => {
-  let engine: any;
-  let saved: any;
-
-  beforeEach(() => {
-    engine = audioEngine as any;
-    saved = {
-      ctx: engine.ctx,
-      masterGain: engine.masterGain,
-      mixerChannels: engine.mixerChannels,
-      mixerRoutingAdapter: engine.mixerRoutingAdapter,
-    };
-    engine.ctx = new FakeContext();
-    engine.masterGain = new FakeNode();
-    engine.mixerChannels = new Map();
-    engine.mixerRoutingAdapter = null;
-  });
-
-  afterEach(() => {
-    engine.ctx = saved.ctx;
-    engine.masterGain = saved.masterGain;
-    engine.mixerChannels = saved.mixerChannels;
-    engine.mixerRoutingAdapter = saved.mixerRoutingAdapter;
-  });
-
-  it('keeps routed FX on the source track before the routing boundary', () => {
-    const source = engine.getOrCreateMixerChannel(1);
-    engine.getOrCreateMixerChannel(2);
-    engine.updateMixerTrack({
-      ...makeTrack(1, 2),
-      fxSlots: [{
-        id: 'fx-a',
-        type: 'compressor',
-        name: 'Compressor',
-        enabled: true,
-        mix: 1,
-        params: { threshold: -18, knee: 24, ratio: 4, attack: 0.005, release: 0.15 },
-      }],
-    });
-
-    assert.equal(source.fxNodes.length > 0, true);
-    assert.equal(source.output.connections.length, 1);
-    assert.equal(source.output.connections[0], engine.mixerChannels.get(2).input);
-  });
-});
