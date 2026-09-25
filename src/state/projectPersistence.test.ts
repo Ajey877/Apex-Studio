@@ -1006,10 +1006,14 @@ class Phase38FakeTransaction {
   oncomplete: (() => void) | null = null;
   onerror: (() => void) | null = null;
   onabort: (() => void) | null = null;
+  private store: Phase38FakeStore | null = null;
 
-  constructor(private readonly store: Phase38FakeStore) {}
+  setStore(store: Phase38FakeStore): void {
+    this.store = store;
+  }
 
   objectStore(): Phase38FakeStore {
+    if (!this.store) throw new Error('Fake transaction store is not initialized');
     return this.store;
   }
 
@@ -1077,6 +1081,24 @@ class Phase38FakeStore {
   }
 }
 
+class Phase38FakeDb {
+  readonly objectStoreNames = { contains: (name: string) => this.owner.stores.has(name) };
+
+  constructor(private readonly owner: Phase38ControlledIndexedDb) {}
+
+  transaction(storeName: string): Phase38FakeTransaction {
+    const records = this.owner.stores.get(storeName);
+    if (!records) throw new Error(`Missing fake store: ${storeName}`);
+    const tx = new Phase38FakeTransaction();
+    tx.setStore(new Phase38FakeStore(records, this.owner, storeName, tx));
+    return tx;
+  }
+
+  createObjectStore(): void {}
+
+  close(): void {}
+}
+
 class Phase38ControlledIndexedDb {
   readonly stores = new Map<string, Map<string, unknown>>([
     ['clips', new Map()],
@@ -1092,60 +1114,13 @@ class Phase38ControlledIndexedDb {
 
   readonly indexedDb = {
     open: () => {
-      const request = new Phase38FakeRequest<Phase38ControlledIndexedDb>();
-      request.result = this;
+      const request = new Phase38FakeRequest<Phase38FakeDb>();
+      request.result = new Phase38FakeDb(this);
       queueMicrotask(() => request.onsuccess?.());
       return request;
     }
   };
-
-  transaction(storeName: string): Phase38FakeTransaction {
-    const records = this.stores.get(storeName);
-    if (!records) throw new Error(`Missing fake store: ${storeName}`);
-    const tx = new Phase38FakeTransaction(
-      new Phase38FakeStore(records, this, storeName, undefined as unknown as Phase38FakeTransaction)
-    );
-    (tx as unknown as { store: Phase38FakeStore }).store = tx.objectStore();
-    return tx;
-  }
-
-  install(): () => void {
-    const previous = globalThis.indexedDB;
-    Object.defineProperty(globalThis, 'indexedDB', {
-      configurable: true,
-      value: {
-        open: () => {
-          const request = new Phase38FakeRequest<Phase38FakeDb>();
-          request.result = new Phase38FakeDb(this);
-          queueMicrotask(() => request.onsuccess?.());
-          return request;
-        }
-      }
-    });
-    return () => Object.defineProperty(globalThis, 'indexedDB', { configurable: true, value: previous });
-  }
 }
-
-class Phase38FakeDb {
-  readonly objectStoreNames = { contains: (name: string) => this.owner.stores.has(name) };
-
-  constructor(private readonly owner: Phase38ControlledIndexedDb) {}
-
-  transaction(storeName: string): Phase38FakeTransaction {
-    const records = this.owner.stores.get(storeName);
-    if (!records) throw new Error(`Missing fake store: ${storeName}`);
-    let tx!: Phase38FakeTransaction;
-    const store = new Phase38FakeStore(records, this.owner, storeName, undefined as unknown as Phase38FakeTransaction);
-    tx = new Phase38FakeTransaction(store);
-    (store as unknown as { tx: Phase38FakeTransaction }).tx = tx;
-    return tx;
-  }
-
-  createObjectStore(): void {}
-
-  close(): void {}
-}
-
 const phase38StateWithAudio = (audioId: string): ProjectState => {
   const state = createDefaultProjectState();
   const clip: PlaylistClip = {
