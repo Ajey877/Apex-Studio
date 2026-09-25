@@ -1,3 +1,4 @@
+import { normalizeMixerTrackIdentityIntegrity } from './mixerTrackIdentity';
 import type {
   Channel,
   FxSlot,
@@ -9,6 +10,16 @@ import type {
   ProjectState,
   VocalTunerSettings
 } from '../types/daw';
+
+/**
+ * Authoritative runtime mutation boundary for ProjectState.
+ * Every state mutation that reaches the live playback graph is normalized
+ * against the existing mixer identity invariant before publication.
+ */
+export const applyRuntimeProjectStateMutation = (
+  state: ProjectState,
+  updater: (current: ProjectState) => ProjectState
+): ProjectState => normalizeMixerTrackIdentityIntegrity(updater(state));
 
 export const updateChannelInProjectState = (
   state: ProjectState,
