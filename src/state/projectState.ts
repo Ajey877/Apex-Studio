@@ -5,7 +5,8 @@ import {
   MASTER_MIXER_TRACK_ID,
   deriveNextMixerTrackId,
   findDuplicateMixerTrackIdentities,
-  normalizeNextMixerTrackId
+  normalizeNextMixerTrackId,
+  normalizeMixerTrackIdentityIntegrity
 } from './mixerTrackIdentity';
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -244,12 +245,13 @@ export const normalizeProjectState = (input: unknown): ProjectState => {
     nextMixerTrackId: 1
   };
 
-  const routingNormalized = normalizeMixerRoutingReferences(normalized);
+  const identityNormalized = normalizeMixerTrackIdentityIntegrity(normalized);
+  const routingNormalized = normalizeMixerRoutingReferences(identityNormalized);
 
   const duplicateIdentities = findDuplicateMixerTrackIdentities(routingNormalized);
   if (duplicateIdentities.length > 0) {
-    console.warn(
-      `[Apex Studio] Project contains duplicate mixer identities: ${duplicateIdentities.join(', ')}. Existing identities were preserved.`
+    throw new Error(
+      `[Apex Studio] Project contains duplicate mixer identities after normalization: ${duplicateIdentities.join(', ')}`
     );
   }
 
@@ -259,7 +261,7 @@ export const normalizeProjectState = (input: unknown): ProjectState => {
 
   return {
     ...routingNormalized,
-    nextMixerTrackId: normalizeNextMixerTrackId(routingNormalized, candidate.nextMixerTrackId)
+    nextMixerTrackId: normalizeNextMixerTrackId(routingNormalized, routingNormalized.nextMixerTrackId)
   };
 };
 
