@@ -270,6 +270,21 @@ describe('Mixer track identity lifecycle integrity', () => {
     assert.deepEqual(normalized.channels.map(channel => channel.mixerTrackId), [1, 2]);
   });
 
+  it('preserves mixer identity and routing when a track record is replaced', () => {
+    const project = createDefaultProjectState();
+    project.mixerTracks = project.mixerTracks.map(track => (
+      track.id === 1 ? { ...track, name: 'Replaced Track', routingTargetId: 2 } : track
+    ));
+
+    const replaced = normalizeProjectState(project);
+    const track = replaced.mixerTracks.find(candidate => candidate.id === 1)!;
+
+    assert.equal(track.name, 'Replaced Track');
+    assert.equal(track.routingTargetId, 2);
+    assert.equal(replaced.channels.find(channel => channel.id === 'ch-1')!.mixerTrackId, 1);
+    assert.equal(replaced.mixerTracks.filter(candidate => candidate.id === 1).length, 1);
+  });
+
   it('preserves routing through reorder and save/load normalization', () => {
     const project = createDefaultProjectState();
     project.mixerTracks.find(track => track.id === 1)!.routingTargetId = 2;
