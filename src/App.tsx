@@ -42,6 +42,7 @@ import {
 } from './state/audioAssetAvailability';
 import { createRecordingPlaylistClip, getRecordingAudioBufferId, validateRecordingTargetTrack } from './audio/recordingPipeline';
 import { createHistory, type ProjectHistory, resolveSaveShortcut, resolveUndoRedoShortcut } from './state/projectHistory';
+import { synchronizeBeforeRuntimePublication } from './state/runtimeStatePublication';
 import {
   ContinuousHistoryBatcher,
   addFxSlotToProjectState,
@@ -534,7 +535,7 @@ export function App() {
     if (previous.playlistClips !== next.playlistClips) update.clips = next.playlistClips;
     if (previous.mixerTracks !== next.mixerTracks) update.mixerTracks = next.mixerTracks;
     // Playlist lane mute is audio state for the running take: muting a lane
-    // silences its clips at the trigger boundary, unmuting restarts a clip the
+    // silences its clips at the trigger boundary, unmuting restarts the clip the
     // playhead is inside. The mixer insert routing is never touched.
     if (previous.playlistTracks !== next.playlistTracks) update.playlistTracks = next.playlistTracks;
     // Pattern Mode plays the selected pattern, so its declared length belongs to
@@ -551,15 +552,46 @@ export function App() {
     }
   }, []);
 
+  const synchronizeRuntimeState = useCallback((previous: ProjectState, next: ProjectState) => {
+    synchronizeActivePlayback(previous, next);
+    if (!audioEngine.isPlaybackActive() && previous.mixerTracks !== next.mixerTracks) {
+      next.mixerTracks.forEach(track => audioEngine.updateMixerTrack(track));
+    }
+  }, [synchronizeActivePlayback]);
+
+  const restoreRuntimeState = useCallback((previous: ProjectState) => {
+    if (audioEngine.isPlaybackActive()) {
+      previous.mixerTracks.forEach(track => audioEngine.updateMixerTrack(track));
+      audioEngine.synchronizePlaybackState({
+        channels: previous.channels,
+        clips: previous.playlistClips,
+        mixerTracks: previous.mixerTracks,
+        playlistTracks: previous.playlistTracks,
+        patternLengthSteps: getSelectedPatternLengthSteps(previous),
+      });
+    } else {
+      previous.mixerTracks.forEach(track => audioEngine.updateMixerTrack(track));
+    }
+  }, []);
+
+
   const resetPlaylistHistory = resetProjectHistory;
   const commitPlaylistHistory = commitProjectHistory;
 
   const updatePlaylistProjectState = useCallback((state: ProjectState) => {
     const previousState = projectStateRef.current;
-    projectStateRef.current = state;
-    synchronizeActivePlayback(previousState, state);
-    setProjectState(state);
-  }, [synchronizeActivePlayback]);
+    synchronizeBeforeRuntimePublication(
+      previousState,
+      state,
+      synchronizeRuntimeState,
+      publishedState => {
+        projectStateRef.current = publishedState;
+        setProjectState(publishedState);
+        return publishedState;
+      },
+      restoreRuntimeState,
+    );
+  }, [restoreRuntimeState, synchronizeRuntimeState]);
 
   const mutateProjectState = useCallback((
     updater: (current: ProjectState) => ProjectState,
@@ -568,18 +600,25 @@ export function App() {
   ): ProjectState => {
     const currentState = projectStateRef.current;
     const nextState = applyRuntimeProjectStateMutation(currentState, updater);
-    projectStateRef.current = nextState;
-    synchronizeActivePlayback(currentState, nextState);
-    setProjectState(nextState);
+    return synchronizeBeforeRuntimePublication(
+      currentState,
+      nextState,
+      synchronizeRuntimeState,
+      publishedState => {
+        projectStateRef.current = publishedState;
+        setProjectState(publishedState);
 
-    if (options?.isContinuous) {
-      continuousBatcherRef.current.update(nextState, label);
-    } else {
-      continuousBatcherRef.current.flush();
-      commitProjectHistory(nextState, label);
-    }
-    return nextState;
-  }, [commitProjectHistory, synchronizeActivePlayback]);
+        if (options?.isContinuous) {
+          continuousBatcherRef.current.update(publishedState, label);
+        } else {
+          continuousBatcherRef.current.flush();
+          commitProjectHistory(publishedState, label);
+        }
+        return publishedState;
+      },
+      restoreRuntimeState,
+    );
+  }, [commitProjectHistory, restoreRuntimeState, synchronizeRuntimeState]);
 
   const handleContinuousInteractionStart = useCallback((label?: string) => {
     continuousBatcherRef.current.start(label);
@@ -595,20 +634,21 @@ export function App() {
     const previousState = projectStateRef.current;
     const nextHistory = projectHistoryRef.current.undo();
     if (nextHistory === projectHistoryRef.current) return;
-    projectHistoryRef.current = nextHistory;
-    projectStateRef.current = nextHistory.present;
-    synchronizeActivePlayback(previousState, nextHistory.present);
-    setProjectState(nextHistory.present);
-    setProjectHistoryVersion(version => version + 1);
+    synchronizeBeforeRuntimePublication(
+      previousState,
+      nextHistory.present,
+      synchronizeRuntimeState,
+      publishedState => {
+        projectHistoryRef.current = nextHistory;
+        projectStateRef.current = publishedState;
+        setProjectState(publishedState);
+        setProjectHistoryVersion(version => version + 1);
+        return publishedState;
+      },
+      restoreRuntimeState,
+    );
 
-    // When stopped there is no playback snapshot to update, so keep the live
-    // mixer graph in step with history for the next audition.
-    if (!audioEngine.isPlaybackActive()) {
-      nextHistory.present.mixerTracks.forEach(track => {
-        audioEngine.updateMixerTrack(track);
-      });
-    }
-  }, [synchronizeActivePlayback]);
+  }, [restoreRuntimeState, synchronizeRuntimeState]);
 
   const handleRedo = useCallback(() => {
     if (playlistInteractionActiveRef.current) return;
@@ -616,18 +656,21 @@ export function App() {
     const previousState = projectStateRef.current;
     const nextHistory = projectHistoryRef.current.redo();
     if (nextHistory === projectHistoryRef.current) return;
-    projectHistoryRef.current = nextHistory;
-    projectStateRef.current = nextHistory.present;
-    synchronizeActivePlayback(previousState, nextHistory.present);
-    setProjectState(nextHistory.present);
-    setProjectHistoryVersion(version => version + 1);
+    synchronizeBeforeRuntimePublication(
+      previousState,
+      nextHistory.present,
+      synchronizeRuntimeState,
+      publishedState => {
+        projectHistoryRef.current = nextHistory;
+        projectStateRef.current = publishedState;
+        setProjectState(publishedState);
+        setProjectHistoryVersion(version => version + 1);
+        return publishedState;
+      },
+      restoreRuntimeState,
+    );
 
-    if (!audioEngine.isPlaybackActive()) {
-      nextHistory.present.mixerTracks.forEach(track => {
-        audioEngine.updateMixerTrack(track);
-      });
-    }
-  }, [synchronizeActivePlayback]);
+  }, [restoreRuntimeState, synchronizeRuntimeState]);
 
   const handlePlaylistUndo = handleUndo;
   const handlePlaylistRedo = handleRedo;
