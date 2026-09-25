@@ -992,3 +992,460 @@ test('Phase 33: A -> B save/reload hydrates only incoming project audio', async 
     restore();
   }
 });
+
+
+class Phase38FakeRequest<T = unknown> {
+  result!: T;
+  error: Error | null = null;
+  onsuccess: (() => void) | null = null;
+  onerror: (() => void) | null = null;
+}
+
+class Phase38FakeTransaction {
+  error: Error | null = null;
+  oncomplete: (() => void) | null = null;
+  onerror: (() => void) | null = null;
+  onabort: (() => void) | null = null;
+
+  constructor(private readonly store: Phase38FakeStore) {}
+
+  objectStore(): Phase38FakeStore {
+    return this.store;
+  }
+
+  complete(): void {
+    queueMicrotask(() => this.oncomplete?.());
+  }
+
+  fail(error: Error): void {
+    this.error = error;
+    queueMicrotask(() => this.onerror?.());
+  }
+}
+
+class Phase38FakeStore {
+  constructor(
+    private readonly records: Map<string, unknown>,
+    private readonly controller: Phase38ControlledIndexedDb,
+    private readonly storeName: string,
+    private readonly tx: Phase38FakeTransaction
+  ) {}
+
+  put(value: { id: string }): void {
+    if (this.controller.failProjectWrites && this.storeName === 'projects' && value.id === 'current-project') {
+      this.tx.fail(new Error('forced project persistence failure'));
+      return;
+    }
+    this.records.set(value.id, value);
+    this.tx.complete();
+  }
+
+  get(id: string): Phase38FakeRequest {
+    const request = new Phase38FakeRequest();
+    request.result = this.records.get(id);
+    queueMicrotask(() => request.onsuccess?.());
+    return request;
+  }
+
+  delete(id: string): void {
+    if (this.storeName === 'clips' && this.controller.blockDeletes) {
+      this.controller.deleteStarted.resolve();
+      void this.controller.deleteGate.promise.then(() => {
+        this.records.delete(id);
+        this.tx.complete();
+      });
+      return;
+    }
+    this.records.delete(id);
+    this.tx.complete();
+  }
+
+  getAllKeys(): Phase38FakeRequest {
+    const request = new Phase38FakeRequest();
+    const finish = () => {
+      request.result = [...this.records.keys()];
+      request.onsuccess?.();
+    };
+
+    if (this.storeName === 'clips' && this.controller.blockList) {
+      this.controller.listStarted.resolve();
+      void this.controller.listGate.promise.then(finish);
+    } else {
+      queueMicrotask(finish);
+    }
+    return request;
+  }
+}
+
+class Phase38ControlledIndexedDb {
+  readonly stores = new Map<string, Map<string, unknown>>([
+    ['clips', new Map()],
+    ['projects', new Map()]
+  ]);
+  readonly listStarted = Promise.withResolvers<void>();
+  readonly deleteStarted = Promise.withResolvers<void>();
+  readonly listGate = Promise.withResolvers<void>();
+  readonly deleteGate = Promise.withResolvers<void>();
+  blockList = false;
+  blockDeletes = false;
+  failProjectWrites = false;
+
+  readonly indexedDb = {
+    open: () => {
+      const request = new Phase38FakeRequest<Phase38ControlledIndexedDb>();
+      request.result = this;
+      queueMicrotask(() => request.onsuccess?.());
+      return request;
+    }
+  };
+
+  transaction(storeName: string): Phase38FakeTransaction {
+    const records = this.stores.get(storeName);
+    if (!records) throw new Error(`Missing fake store: ${storeName}`);
+    const tx = new Phase38FakeTransaction(
+      new Phase38FakeStore(records, this, storeName, undefined as unknown as Phase38FakeTransaction)
+    );
+    (tx as unknown as { store: Phase38FakeStore }).store = tx.objectStore();
+    return tx;
+  }
+
+  install(): () => void {
+    const previous = globalThis.indexedDB;
+    Object.defineProperty(globalThis, 'indexedDB', {
+      configurable: true,
+      value: {
+        open: () => {
+          const request = new Phase38FakeRequest<Phase38FakeDb>();
+          request.result = new Phase38FakeDb(this);
+          queueMicrotask(() => request.onsuccess?.());
+          return request;
+        }
+      }
+    });
+    return () => Object.defineProperty(globalThis, 'indexedDB', { configurable: true, value: previous });
+  }
+}
+
+class Phase38FakeDb {
+  readonly objectStoreNames = { contains: (name: string) => this.owner.stores.has(name) };
+
+  constructor(private readonly owner: Phase38ControlledIndexedDb) {}
+
+  transaction(storeName: string): Phase38FakeTransaction {
+    const records = this.owner.stores.get(storeName);
+    if (!records) throw new Error(`Missing fake store: ${storeName}`);
+    let tx!: Phase38FakeTransaction;
+    const store = new Phase38FakeStore(records, this.owner, storeName, undefined as unknown as Phase38FakeTransaction);
+    tx = new Phase38FakeTransaction(store);
+    (store as unknown as { tx: Phase38FakeTransaction }).tx = tx;
+    return tx;
+  }
+
+  createObjectStore(): void {}
+
+  close(): void {}
+}
+
+const phase38StateWithAudio = (audioId: string): ProjectState => {
+  const state = createDefaultProjectState();
+  const clip: PlaylistClip = {
+    id: `phase38-clip-${audioId}`,
+    trackIndex: 1,
+    startBar: 1,
+    lengthBars: 1,
+    type: 'audio',
+    audioBufferId: audioId,
+    audioName: audioId,
+    audioWaveform: [0.2, 0.8],
+    audioUnavailable: false,
+    color: '#ff6e00',
+    name: audioId
+  };
+  return {
+    ...state,
+    playlistClips: [clip],
+    meta: { ...state.meta, name: `Phase 38 ${audioId}` }
+  };
+};
+
+const phase38InstallDb = (controller: Phase38ControlledIndexedDb) => {
+  const previous = globalThis.indexedDB;
+  Object.defineProperty(globalThis, 'indexedDB', {
+    configurable: true,
+    value: controller.indexedDb
+  });
+  return () => Object.defineProperty(globalThis, 'indexedDB', { configurable: true, value: previous });
+};
+
+const phase38SeedAudio = (controller: Phase38ControlledIndexedDb, ids: string[]) => {
+  const clips = controller.stores.get('clips')!;
+  for (const id of ids) clips.set(id, { id, blob: new Blob([`audio:${id}`], { type: 'audio/wav' }) });
+};
+
+test('Phase 38: sequential A -> reconcile -> B preserves B and still removes genuine orphans', async () => {
+  const controller = new Phase38ControlledIndexedDb();
+  const restore = phase38InstallDb(controller);
+  try {
+    phase38SeedAudio(controller, ['audio-a', 'orphan']);
+    const stateA = phase38StateWithAudio('audio-a');
+    const first = await saveAndReconcileProjectState(stateA, { reconcileAudio: true });
+    assert.deepEqual(first?.removedIds, ['orphan']);
+
+    phase38SeedAudio(controller, ['audio-b']);
+    const stateB = phase38StateWithAudio('audio-b');
+    const second = await saveAndReconcileProjectState(stateB, { reconcileAudio: true });
+    assert.deepEqual(second?.removedIds, ['audio-a']);
+    assert.ok(controller.stores.get('clips')!.has('audio-b'));
+    assert.equal(JSON.parse(controller.stores.get('projects')!.get('current-project').stateJson).state.meta.name, 'Phase 38 audio-b');
+  } finally {
+    restore();
+  }
+});
+
+test('Phase 38: overlapping A/B saves keep B project persistence behind A reconciliation', async () => {
+  const controller = new Phase38ControlledIndexedDb();
+  controller.blockList = true;
+  phase38SeedAudio(controller, ['audio-a', 'audio-b']);
+  const restore = phase38InstallDb(controller);
+  try {
+    const stateA = phase38StateWithAudio('audio-a');
+    const stateB = phase38StateWithAudio('audio-b');
+
+    const saveA = saveAndReconcileProjectState(stateA, {
+      reconcileAudio: true,
+      additionalReferencedIds: ['audio-b']
+    });
+    await controller.listStarted.promise;
+
+    const saveB = saveAndReconcileProjectState(stateB, {
+      reconcileAudio: true,
+      additionalReferencedIds: ['audio-b']
+    });
+
+    const currentBeforeRelease = JSON.parse(
+      controller.stores.get('projects')!.get('current-project').stateJson
+    ).state;
+    assert.equal(currentBeforeRelease.meta.name, 'Phase 38 audio-a');
+
+    controller.listGate.resolve();
+    await saveA;
+    await saveB;
+
+    const currentAfterRelease = JSON.parse(
+      controller.stores.get('projects')!.get('current-project').stateJson
+    ).state;
+    assert.equal(currentAfterRelease.meta.name, 'Phase 38 audio-b');
+    assert.ok(controller.stores.get('clips')!.has('audio-b'));
+  } finally {
+    restore();
+  }
+});
+
+test('Phase 38: a forced A-list -> B-save race cannot make B durable before A reconciliation completes', async () => {
+  const controller = new Phase38ControlledIndexedDb();
+  controller.blockList = true;
+  phase38SeedAudio(controller, ['audio-a', 'audio-b']);
+  const restore = phase38InstallDb(controller);
+  try {
+    const saveA = saveAndReconcileProjectState(phase38StateWithAudio('audio-a'), {
+      reconcileAudio: true,
+      additionalReferencedIds: ['audio-b']
+    });
+    await controller.listStarted.promise;
+
+    const saveB = saveAndReconcileProjectState(phase38StateWithAudio('audio-b'), {
+      reconcileAudio: true,
+      additionalReferencedIds: ['audio-b']
+    });
+
+    await Promise.resolve();
+    assert.equal(
+      JSON.parse(controller.stores.get('projects')!.get('current-project').stateJson).state.meta.name,
+      'Phase 38 audio-a'
+    );
+
+    controller.listGate.resolve();
+    await saveA;
+    await saveB;
+    assert.ok(controller.stores.get('clips')!.has('audio-b'));
+  } finally {
+    restore();
+  }
+});
+
+test('Phase 38: three overlapping saves execute as A -> reconcile -> B -> reconcile -> C -> reconcile', async () => {
+  const controller = new Phase38ControlledIndexedDb();
+  controller.blockList = true;
+  phase38SeedAudio(controller, ['audio-a', 'audio-b', 'audio-c']);
+  const restore = phase38InstallDb(controller);
+  try {
+    const saveA = saveAndReconcileProjectState(phase38StateWithAudio('audio-a'), {
+      reconcileAudio: true,
+      additionalReferencedIds: ['audio-b', 'audio-c']
+    });
+    await controller.listStarted.promise;
+
+    const saveB = saveAndReconcileProjectState(phase38StateWithAudio('audio-b'), {
+      reconcileAudio: true,
+      additionalReferencedIds: ['audio-c']
+    });
+    const saveC = saveAndReconcileProjectState(phase38StateWithAudio('audio-c'), {
+      reconcileAudio: true
+    });
+
+    assert.equal(
+      JSON.parse(controller.stores.get('projects')!.get('current-project').stateJson).state.meta.name,
+      'Phase 38 audio-a'
+    );
+
+    controller.listGate.resolve();
+    await saveA;
+    await saveB;
+    await saveC;
+
+    const current = JSON.parse(controller.stores.get('projects')!.get('current-project').stateJson).state;
+    assert.equal(current.meta.name, 'Phase 38 audio-c');
+  } finally {
+    restore();
+  }
+});
+
+test('Phase 38: reconciliation failure does not invalidate the successful project save or block the next save', async () => {
+  const controller = new Phase38ControlledIndexedDb();
+  const restore = phase38InstallDb(controller);
+  try {
+    const stateA = phase38StateWithAudio('audio-a');
+    const failed = await saveAndReconcileProjectState(stateA, {
+      reconcileAudio: true,
+      storage: {
+        listPersistedAudioClipIds: async () => { throw new Error('forced enumeration failure'); },
+        deletePersistedAudioClip: async () => undefined,
+        listProjectBackupRecords: async () => []
+      }
+    });
+    assert.equal(failed, null);
+    assert.equal(
+      JSON.parse(controller.stores.get('projects')!.get('current-project').stateJson).state.meta.name,
+      'Phase 38 audio-a'
+    );
+
+    const stateB = phase38StateWithAudio('audio-b');
+    await saveAndReconcileProjectState(stateB, { reconcileAudio: false });
+    assert.equal(
+      JSON.parse(controller.stores.get('projects')!.get('current-project').stateJson).state.meta.name,
+      'Phase 38 audio-b'
+    );
+  } finally {
+    restore();
+  }
+});
+
+test('Phase 38: project persistence failure prevents reconciliation from executing', async () => {
+  const controller = new Phase38ControlledIndexedDb();
+  controller.failProjectWrites = true;
+  const restore = phase38InstallDb(controller);
+  try {
+    let listCalls = 0;
+    const result = await saveAndReconcileProjectState(phase38StateWithAudio('audio-a'), {
+      reconcileAudio: true,
+      storage: {
+        listPersistedAudioClipIds: async () => { listCalls += 1; return ['orphan']; },
+        deletePersistedAudioClip: async () => undefined,
+        listProjectBackupRecords: async () => []
+      }
+    });
+    assert.equal(result, null);
+    assert.equal(listCalls, 0);
+  } finally {
+    restore();
+  }
+});
+
+test('Phase 38: retained backup references survive reconciliation', async () => {
+  const state = phase38StateWithAudio('backup-audio');
+  let deleted: string[] = [];
+  const result = await saveAndReconcileProjectState(state, {
+    reconcileAudio: true,
+    storage: {
+      listPersistedAudioClipIds: async () => ['backup-audio', 'orphan'],
+      deletePersistedAudioClip: async id => { deleted.push(id); },
+      listProjectBackupRecords: async () => [{
+        id: 'backup:phase38',
+        name: 'Backup',
+        reason: 'replace',
+        createdAt: 1,
+        stateJson: serializeProjectState(phase38StateWithAudio('backup-audio'))
+      }]
+    }
+  });
+  assert.deepEqual(result?.removedIds, ['orphan']);
+  assert.deepEqual(deleted, ['orphan']);
+});
+
+test('Phase 38: genuine orphan cleanup remains unchanged', async () => {
+  let deleted: string[] = [];
+  const result = await saveAndReconcileProjectState(phase38StateWithAudio('live-audio'), {
+    reconcileAudio: true,
+    storage: {
+      listPersistedAudioClipIds: async () => ['live-audio', 'orphan-1', 'orphan-2'],
+      deletePersistedAudioClip: async id => { deleted.push(id); },
+      listProjectBackupRecords: async () => []
+    }
+  });
+  assert.deepEqual(result?.preservedIds, ['live-audio']);
+  assert.deepEqual(result?.removedIds, ['orphan-1', 'orphan-2']);
+  assert.deepEqual(deleted, ['orphan-1', 'orphan-2']);
+});
+
+test('Phase 38: imported, recorded and bounced pending audio can remain protected by additional references', async () => {
+  const pendingIds = ['imported-sample', 'recorded-take', 'bounced-clip'];
+  const state = phase38StateWithAudio('project-audio');
+  let deleted: string[] = [];
+  const result = await saveAndReconcileProjectState(state, {
+    reconcileAudio: true,
+    additionalReferencedIds: pendingIds,
+    storage: {
+      listPersistedAudioClipIds: async () => [...pendingIds, 'project-audio', 'orphan'],
+      deletePersistedAudioClip: async id => { deleted.push(id); },
+      listProjectBackupRecords: async () => []
+    }
+  });
+  assert.deepEqual(result?.preservedIds.sort(), [...pendingIds, 'project-audio'].sort());
+  assert.deepEqual(result?.removedIds, ['orphan']);
+  assert.deepEqual(deleted, ['orphan']);
+});
+
+test('Phase 38: delayed deletion cannot start a newer save while the older reconciliation owns the queue', async () => {
+  const controller = new Phase38ControlledIndexedDb();
+  controller.blockDeletes = true;
+  phase38SeedAudio(controller, ['audio-a', 'audio-b']);
+  const restore = phase38InstallDb(controller);
+  try {
+    const saveA = saveAndReconcileProjectState(phase38StateWithAudio('audio-a'), {
+      reconcileAudio: true,
+      additionalReferencedIds: ['audio-b']
+    });
+    await controller.deleteStarted.promise;
+
+    const saveB = saveAndReconcileProjectState(phase38StateWithAudio('audio-b'), {
+      reconcileAudio: true,
+      additionalReferencedIds: ['audio-b']
+    });
+
+    await Promise.resolve();
+    assert.equal(
+      JSON.parse(controller.stores.get('projects')!.get('current-project').stateJson).state.meta.name,
+      'Phase 38 audio-a'
+    );
+
+    controller.deleteGate.resolve();
+    await saveA;
+    await saveB;
+    assert.equal(
+      JSON.parse(controller.stores.get('projects')!.get('current-project').stateJson).state.meta.name,
+      'Phase 38 audio-b'
+    );
+  } finally {
+    restore();
+  }
+});
