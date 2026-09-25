@@ -1163,6 +1163,9 @@ const phase38SeedAudio = (controller: Phase38ControlledIndexedDb, ids: string[])
   for (const id of ids) clips.set(id, { id, blob: new Blob([`audio:${id}`], { type: 'audio/wav' }) });
 };
 
+const phase38CurrentProject = (controller: Phase38ControlledIndexedDb): { stateJson: string } =>
+  controller.stores.get('projects')!.get('current-project') as { stateJson: string };
+
 test('Phase 38: sequential A -> reconcile -> B preserves B and still removes genuine orphans', async () => {
   const controller = new Phase38ControlledIndexedDb();
   const restore = phase38InstallDb(controller);
@@ -1177,7 +1180,7 @@ test('Phase 38: sequential A -> reconcile -> B preserves B and still removes gen
     const second = await saveAndReconcileProjectState(stateB, { reconcileAudio: true });
     assert.deepEqual(second?.removedIds, ['audio-a']);
     assert.ok(controller.stores.get('clips')!.has('audio-b'));
-    assert.equal(JSON.parse(controller.stores.get('projects')!.get('current-project').stateJson).state.meta.name, 'Phase 38 audio-b');
+    assert.equal(JSON.parse(phase38CurrentProject(controller).stateJson).state.meta.name, 'Phase 38 audio-b');
   } finally {
     restore();
   }
@@ -1204,7 +1207,7 @@ test('Phase 38: overlapping A/B saves keep B project persistence behind A reconc
     });
 
     const currentBeforeRelease = JSON.parse(
-      controller.stores.get('projects')!.get('current-project').stateJson
+      phase38CurrentProject(controller).stateJson
     ).state;
     assert.equal(currentBeforeRelease.meta.name, 'Phase 38 audio-a');
 
@@ -1213,7 +1216,7 @@ test('Phase 38: overlapping A/B saves keep B project persistence behind A reconc
     await saveB;
 
     const currentAfterRelease = JSON.parse(
-      controller.stores.get('projects')!.get('current-project').stateJson
+      phase38CurrentProject(controller).stateJson
     ).state;
     assert.equal(currentAfterRelease.meta.name, 'Phase 38 audio-b');
     assert.ok(controller.stores.get('clips')!.has('audio-b'));
@@ -1241,7 +1244,7 @@ test('Phase 38: a forced A-list -> B-save race cannot make B durable before A re
 
     await Promise.resolve();
     assert.equal(
-      JSON.parse(controller.stores.get('projects')!.get('current-project').stateJson).state.meta.name,
+      JSON.parse(phase38CurrentProject(controller).stateJson).state.meta.name,
       'Phase 38 audio-a'
     );
 
@@ -1275,7 +1278,7 @@ test('Phase 38: three overlapping saves execute as A -> reconcile -> B -> reconc
     });
 
     assert.equal(
-      JSON.parse(controller.stores.get('projects')!.get('current-project').stateJson).state.meta.name,
+      JSON.parse(phase38CurrentProject(controller).stateJson).state.meta.name,
       'Phase 38 audio-a'
     );
 
@@ -1284,7 +1287,7 @@ test('Phase 38: three overlapping saves execute as A -> reconcile -> B -> reconc
     await saveB;
     await saveC;
 
-    const current = JSON.parse(controller.stores.get('projects')!.get('current-project').stateJson).state;
+    const current = JSON.parse(phase38CurrentProject(controller).stateJson).state;
     assert.equal(current.meta.name, 'Phase 38 audio-c');
   } finally {
     restore();
@@ -1306,14 +1309,14 @@ test('Phase 38: reconciliation failure does not invalidate the successful projec
     });
     assert.equal(failed, null);
     assert.equal(
-      JSON.parse(controller.stores.get('projects')!.get('current-project').stateJson).state.meta.name,
+      JSON.parse(phase38CurrentProject(controller).stateJson).state.meta.name,
       'Phase 38 audio-a'
     );
 
     const stateB = phase38StateWithAudio('audio-b');
     await saveAndReconcileProjectState(stateB, { reconcileAudio: false });
     assert.equal(
-      JSON.parse(controller.stores.get('projects')!.get('current-project').stateJson).state.meta.name,
+      JSON.parse(phase38CurrentProject(controller).stateJson).state.meta.name,
       'Phase 38 audio-b'
     );
   } finally {
@@ -1415,7 +1418,7 @@ test('Phase 38: delayed deletion cannot start a newer save while the older recon
 
     await Promise.resolve();
     assert.equal(
-      JSON.parse(controller.stores.get('projects')!.get('current-project').stateJson).state.meta.name,
+      JSON.parse(phase38CurrentProject(controller).stateJson).state.meta.name,
       'Phase 38 audio-a'
     );
 
@@ -1423,7 +1426,7 @@ test('Phase 38: delayed deletion cannot start a newer save while the older recon
     await saveA;
     await saveB;
     assert.equal(
-      JSON.parse(controller.stores.get('projects')!.get('current-project').stateJson).state.meta.name,
+      JSON.parse(phase38CurrentProject(controller).stateJson).state.meta.name,
       'Phase 38 audio-b'
     );
   } finally {
