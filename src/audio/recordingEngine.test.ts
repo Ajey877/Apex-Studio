@@ -96,6 +96,7 @@ const installBrowserMocks = () => {
   return {
     stream,
     recorderInstances,
+    revokedUrls,
     restore: () => {
       Object.defineProperty(globalThis, 'navigator', { configurable: true, value: OriginalNavigator });
       Object.defineProperty(globalThis, 'MediaRecorder', { configurable: true, value: OriginalMediaRecorder });
