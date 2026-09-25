@@ -75,7 +75,7 @@ describe('Phase 32 runtime state ↔ AudioEngine failure containment', () => {
     assert.equal(published, false);
     assert.equal(projectStateRef, current);
     assert.equal(reactProjectState, current);
-    assert.equal(history.present, current);
+    assert.deepEqual(history.present, current);
     assert.equal(liveMixerVolume, current.mixerTracks[0].volume);
   });
 
@@ -121,5 +121,90 @@ describe('Phase 32 runtime state ↔ AudioEngine failure containment', () => {
     assert.equal(projectStateRef, committed.present);
     assert.equal(reactProjectState, committed.present);
     assert.equal(livePan, committed.present.mixerTracks[0].pan);
+  });
+
+  it('contains a failed redo publication without changing history or logical state', () => {
+    const current = createDefaultProjectState();
+    const next = {
+      ...current,
+      mixerTracks: current.mixerTracks.map(track =>
+        track.id === 0 ? { ...track, mute: true } : track
+      ),
+    };
+    const committed = createHistory(current).commit(next, 'mixer mute');
+    const afterUndo = committed.undo();
+
+    let history = afterUndo;
+    let projectStateRef = afterUndo.present;
+    let reactProjectState = afterUndo.present;
+    let liveMute = afterUndo.present.mixerTracks[0].mute;
+
+    const synchronize = () => {
+      liveMute = next.mixerTracks[0].mute;
+      throw new Error('injected redo synchronization failure');
+    };
+    const restore = (previous: typeof current) => {
+      liveMute = previous.mixerTracks[0].mute;
+    };
+
+    const redone = history.redo();
+    assert.throws(
+      () =>
+        synchronizeBeforeRuntimePublication(
+          afterUndo.present,
+          redone.present,
+          synchronize,
+          publishedState => {
+            history = redone;
+            projectStateRef = publishedState;
+            reactProjectState = publishedState;
+          },
+          restore,
+        ),
+      /injected redo synchronization failure/,
+    );
+
+    assert.equal(history, afterUndo);
+    assert.equal(projectStateRef, afterUndo.present);
+    assert.equal(reactProjectState, afterUndo.present);
+    assert.equal(liveMute, afterUndo.present.mixerTracks[0].mute);
+  });
+
+  it('surfaces both the original synchronization failure and restoration failure', () => {
+    const current = createDefaultProjectState();
+    const next = {
+      ...current,
+      mixerTracks: current.mixerTracks.map(track =>
+        track.id === 0 ? { ...track, volume: 0.25 } : track
+      ),
+    };
+    let published = false;
+    const originalError = new Error('injected synchronization failure');
+    const restorationError = new Error('injected restoration failure');
+
+    assert.throws(
+      () =>
+        synchronizeBeforeRuntimePublication(
+          current,
+          next,
+          () => {
+            throw originalError;
+          },
+          () => {
+            published = true;
+          },
+          () => {
+            throw restorationError;
+          },
+        ),
+      error => {
+        assert.ok(error instanceof AggregateError);
+        assert.equal(error.errors[0], originalError);
+        assert.equal(error.errors[1], restorationError);
+        return true;
+      },
+    );
+
+    assert.equal(published, false);
   });
 });
