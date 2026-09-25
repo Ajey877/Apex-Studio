@@ -58,8 +58,9 @@ export const normalizeMixerTrackIdentityIntegrity = (projectState: ProjectState)
     const originalId = channel.mixerTrackId;
     const uniqueValidId = isPositiveSafeInteger(originalId) && !usedChannelIds.has(originalId);
     const existingTrack = uniqueValidId ? mixerTracksById.get(originalId) : undefined;
-    const mixerTrackId = uniqueValidId && existingTrack ? originalId : allocate();
+    const mixerTrackId = uniqueValidId ? originalId : allocate();
     usedChannelIds.add(mixerTrackId);
+    if (uniqueValidId) usedIds.add(mixerTrackId);
 
     if (!existingTrack) {
       const createdTrack: MixerTrack = {
