@@ -26,13 +26,16 @@ const CURRENT_PROJECT_STATE_VERSION = 1;
 let persistenceWriteQueue: Promise<void> = Promise.resolve();
 
 /** Serialize project state without storing binary audio data or session-only object URLs. */
-export const serializeProjectState = (state: ProjectState): string => JSON.stringify({
-  persistenceVersion: CURRENT_PROJECT_STATE_VERSION,
-  state
-}, (key, value) => {
+export const serializeProjectState = (state: ProjectState): string => {
+  const normalizedState = normalizeProjectState(state);
+  return JSON.stringify({
+    persistenceVersion: CURRENT_PROJECT_STATE_VERSION,
+    state: normalizedState
+  }, (key, value) => {
   if (key === 'audioBlob' || key === 'audioUrl' || key === 'blob' || key === 'url') return undefined;
   return value;
-});
+  });
+};
 
 /**
  * Keep autosave writes ordered. IndexedDB transactions are atomic, but multiple
