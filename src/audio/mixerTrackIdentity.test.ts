@@ -236,8 +236,10 @@ describe('Mixer track identity lifecycle integrity', () => {
 
   it('repairs a duplicate channel mixer identity without changing the original identity', () => {
     const project = createDefaultProjectState();
-    const duplicate = makeChannel(project, 'Duplicate');
-    duplicate.mixerTrackId = project.channels[0].mixerTrackId;
+    const duplicate: Channel = {
+      ...makeChannel(project, 'Duplicate'),
+      mixerTrackId: project.channels[0].mixerTrackId
+    };
     project.channels.push(duplicate);
 
     const normalized = normalizeMixerTrackIdentityIntegrity(project);
