@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { RecordingEngine } from './recordingEngine';
 import { sessionBlobUrlRegistry } from '../state/sessionBlobUrlRegistry';
+import { isRecordingProjectGenerationCurrent, nextRecordingProjectGeneration } from '../state/recordingProjectLifecycle';
 
 class FakeTrack {
   stopped = false;
@@ -263,4 +264,41 @@ test('MediaRecorder errors immediately clean up capture resources', async () => 
   } finally {
     mocks.restore();
   }
+});
+
+
+test('project replacement invalidates the recording generation before stale commit', () => {
+  let generation = 0;
+  const recordingGeneration = generation;
+  generation = nextRecordingProjectGeneration(generation);
+
+  assert.equal(isRecordingProjectGenerationCurrent(recordingGeneration, generation), false);
+});
+
+test('recording generation stays valid during normal recording', () => {
+  const generation = 7;
+  assert.equal(isRecordingProjectGenerationCurrent(generation, generation), true);
+});
+
+test('stale recording commit gate leaves the incoming project unchanged', () => {
+  let generation = 0;
+  const recordingGeneration = generation;
+  const incomingProject = { recordings: [] as string[], playlistClips: [] as string[] };
+
+  generation = nextRecordingProjectGeneration(generation);
+
+  if (isRecordingProjectGenerationCurrent(recordingGeneration, generation)) {
+    incomingProject.recordings.push('stale-recording');
+    incomingProject.playlistClips.push('stale-clip');
+  }
+
+  assert.deepEqual(incomingProject, { recordings: [], playlistClips: [] });
+});
+
+test('finished-but-unapplied take becomes stale after replacement', () => {
+  let generation = 4;
+  const finishedTakeGeneration = generation;
+  generation = nextRecordingProjectGeneration(generation);
+
+  assert.equal(isRecordingProjectGenerationCurrent(finishedTakeGeneration, generation), false);
 });
