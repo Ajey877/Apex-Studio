@@ -333,6 +333,7 @@ export function App() {
         await persistProjectState(stateToSave);
       }
 
+      audioEngine.setProjectSampleBufferOwnership(getAudioIdsForProject(stateToSave));
       if (projectStateRef.current === stateToSave) {
         hasUnsavedChangesRef.current = false;
       }
@@ -701,10 +702,6 @@ export function App() {
         ? () => backupProjectBeforeReplacement(projectStateRef.current, { reason: 'replace' }).then(() => undefined)
         : undefined,
       async () => {
-        // Claim the outgoing state's current audio before hydrating the incoming
-        // project. This converts any newly-created project assets that were still
-        // session-resident into explicit outgoing project ownership.
-        audioEngine.setProjectSampleBufferOwnership(getAudioIdsForProject(projectStateRef.current));
         handleStop();
         try {
           const hydrated = await hydrateProjectAudio(normalized, audioEngine);
@@ -723,7 +720,6 @@ export function App() {
             additionalReferencedIds: replacementReferencedIds
           });
           if (!saved) throw new Error('Replaced project could not be persisted');
-          audioEngine.setProjectSampleBufferOwnership(getAudioIdsForProject(hydrated.state));
         } catch (error) {
           console.warn('[Apex Studio] Project audio hydration failed; loading project without audio.', error);
           projectStateRef.current = normalized;
@@ -734,7 +730,6 @@ export function App() {
           setSelectedTrackId(normalized.selectedMixerTrackId ?? 0);
           const saved = await performSave(normalized, { reconcileAudio: false });
           if (!saved) throw new Error('Replaced project could not be persisted');
-          audioEngine.setProjectSampleBufferOwnership(getAudioIdsForProject(normalized));
         }
       }
     );
