@@ -7,11 +7,14 @@ import { sessionBlobUrlRegistry } from '../state/sessionBlobUrlRegistry';
 
 interface AudioRecorderModalProps {
   isOpen: boolean;
+  projectGeneration: number;
+  getCurrentProjectGeneration: () => number;
   onClose: () => void;
-  onSaveRecording: (recording: AudioRecording, targetTrackIndex: number) => void | Promise<void>;
+  onRegisterProjectReplacementHandler: (handler: () => Promise<void>) => void;
+  onSaveRecording: (recording: AudioRecording, targetTrackIndex: number, projectGeneration: number) => void | Promise<void>;
 }
 
-export const AudioRecorderModal: React.FC<AudioRecorderModalProps> = ({ isOpen, onClose, onSaveRecording }) => {
+export const AudioRecorderModal: React.FC<AudioRecorderModalProps> = ({ isOpen, projectGeneration, getCurrentProjectGeneration, onClose, onRegisterProjectReplacementHandler, onSaveRecording }) => {
   const [recordingState, setRecordingState] = useState<'idle' | 'recording' | 'paused' | 'stopping'>('idle');
   const [recordSeconds, setRecordSeconds] = useState(0);
   const [inputLevel, setInputLevel] = useState(0);
@@ -21,6 +24,8 @@ export const AudioRecorderModal: React.FC<AudioRecorderModalProps> = ({ isOpen, 
   const [isApplying, setIsApplying] = useState(false);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const engineRef = useRef<RecordingEngine | null>(null);
+  const recordingProjectGenerationRef = useRef(projectGeneration);
+  const recordedTakeRef = useRef<AudioRecording | null>(null);
 
   useEffect(() => {
     if (!engineRef.current) engineRef.current = new RecordingEngine(() => audioEngine.getContext(), { onError: error => setError(error.message) });
@@ -29,6 +34,32 @@ export const AudioRecorderModal: React.FC<AudioRecorderModalProps> = ({ isOpen, 
       void engineRef.current?.dispose();
     };
   }, []);
+
+  useEffect(() => {
+    recordingProjectGenerationRef.current = projectGeneration;
+  }, [projectGeneration]);
+
+  useEffect(() => {
+    recordedTakeRef.current = recordedTake;
+  }, [recordedTake]);
+
+  const cancelForProjectReplacement = React.useCallback(async () => {
+    const cancellation = engineRef.current?.cancel();
+    if (cancellation) await cancellation.catch(() => undefined);
+    const take = recordedTakeRef.current;
+    if (take?.audioUrl) sessionBlobUrlRegistry.release(take.audioUrl);
+    recordedTakeRef.current = null;
+    setRecordedTake(null);
+    setRecordingState('idle');
+    setRecordSeconds(0);
+    setInputLevel(0);
+    setIsApplying(false);
+    onClose();
+  }, [onClose]);
+
+  useEffect(() => {
+    onRegisterProjectReplacementHandler(cancelForProjectReplacement);
+  }, [cancelForProjectReplacement, onRegisterProjectReplacementHandler]);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -88,7 +119,12 @@ export const AudioRecorderModal: React.FC<AudioRecorderModalProps> = ({ isOpen, 
     try {
       setError(null);
       setRecordedTake(null);
+      recordingProjectGenerationRef.current = projectGeneration;
       await engineRef.current!.start();
+      if (recordingProjectGenerationRef.current !== getCurrentProjectGeneration()) {
+        await engineRef.current!.cancel().catch(() => undefined);
+        throw new Error('The recording was cancelled because the project was replaced');
+      }
       setRecordingState('recording');
     } catch (err) {
       setRecordingState('idle');
@@ -130,7 +166,7 @@ export const AudioRecorderModal: React.FC<AudioRecorderModalProps> = ({ isOpen, 
     try {
       setError(null);
       setIsApplying(true);
-      await onSaveRecording(recordedTake, targetTrack);
+      await onSaveRecording(recordedTake, targetTrack, recordingProjectGenerationRef.current);
       // Ownership was transferred to the project by onSaveRecording.
       setRecordedTake(null);
       onClose();

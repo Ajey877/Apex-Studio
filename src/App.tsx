@@ -43,6 +43,7 @@ import {
 } from './state/audioAssetAvailability';
 import { createRecordingPlaylistClip, getRecordingAudioBufferId, validateRecordingTargetTrack } from './audio/recordingPipeline';
 import { createHistory, type ProjectHistory, resolveSaveShortcut, resolveUndoRedoShortcut } from './state/projectHistory';
+import { isRecordingProjectGenerationCurrent, nextRecordingProjectGeneration } from './state/recordingProjectLifecycle';
 import { synchronizeBeforeRuntimePublication } from './state/runtimeStatePublication';
 import {
   ContinuousHistoryBatcher,
@@ -169,6 +170,8 @@ export function App() {
   const projectHistoryRef = useRef<ProjectHistory>(createHistory(DEFAULT_PROJECT));
   const playlistInteractionActiveRef = useRef(false);
   const projectStateRef = useRef<ProjectState>(DEFAULT_PROJECT);
+  const recordingProjectGenerationRef = useRef(0);
+  const cancelRecordingForReplacementRef = useRef<(() => Promise<void>) | null>(null);
   const [projectHistoryVersion, setProjectHistoryVersion] = useState(0);
 
   // --- Studio Browser / Sidebar State ---
@@ -703,6 +706,8 @@ export function App() {
         ? () => backupProjectBeforeReplacement(projectStateRef.current, { reason: 'replace' }).then(() => undefined)
         : undefined,
       async () => {
+        recordingProjectGenerationRef.current = nextRecordingProjectGeneration(recordingProjectGenerationRef.current);
+        await cancelRecordingForReplacementRef.current?.();
         handleStop();
         try {
           const previousProjectState = projectStateRef.current;
@@ -1027,7 +1032,14 @@ export function App() {
   };
 
   // --- Phase 6D: Recording -> decode -> register -> playlist clip ---
-  const handleSaveRecordingToPlaylist = async (recording: AudioRecording, targetTrackIndex: number) => {
+  const handleSaveRecordingToPlaylist = async (
+    recording: AudioRecording,
+    targetTrackIndex: number,
+    recordingProjectGeneration: number
+  ) => {
+    if (!isRecordingProjectGenerationCurrent(recordingProjectGeneration, recordingProjectGenerationRef.current)) {
+      throw new Error('The recording belongs to a project that has already been replaced');
+    }
     if (!recording.audioBlob || recording.audioBlob.size === 0) {
       throw new Error('The recording contains no audio data');
     }
@@ -1041,9 +1053,17 @@ export function App() {
     // Recording registration uses the same persistence gate as dropped/bounced
     // playlist audio. Do not commit a project reference before its asset is durable.
     await waitForSampleBufferPersistence(audioEngine, audioBufferId);
+    if (!isRecordingProjectGenerationCurrent(recordingProjectGeneration, recordingProjectGenerationRef.current)) {
+      sessionBlobUrlRegistry.release(recording.audioUrl ?? '');
+      throw new Error('The recording belongs to a project that has already been replaced');
+    }
     const persistedRecording: AudioRecording = { ...recording, audioBufferId };
     // AudioEngine has no buffer-removal API; a removed target leaves only this narrow in-memory orphan.
     const currentState = projectStateRef.current;
+    if (!isRecordingProjectGenerationCurrent(recordingProjectGeneration, recordingProjectGenerationRef.current)) {
+      sessionBlobUrlRegistry.release(recording.audioUrl ?? '');
+      throw new Error('The recording belongs to a project that has already been replaced');
+    }
     if (!currentState.playlistTracks.some(track => track.id === targetTrackId)) {
       // The temporary take is being discarded because its target disappeared.
       sessionBlobUrlRegistry.release(recording.audioUrl ?? '');
@@ -1064,6 +1084,10 @@ export function App() {
       playlistClips: [...currentState.playlistClips, recordingClip],
       meta: { ...currentState.meta, updated: Date.now() }
     };
+    if (!isRecordingProjectGenerationCurrent(recordingProjectGeneration, recordingProjectGenerationRef.current)) {
+      sessionBlobUrlRegistry.release(recording.audioUrl ?? '');
+      throw new Error('The recording belongs to a project that has already been replaced');
+    }
     updatePlaylistProjectState(nextState);
     commitPlaylistHistory(nextState, 'Record audio to playlist');
     // The modal's temporary recording ownership is transferred to the project
@@ -1617,7 +1641,14 @@ export function App() {
         return targetArpChannel ? <ArpeggiatorModal isOpen={isArpeggiatorOpen} onClose={() => setIsArpeggiatorOpen(false)} channel={targetArpChannel} onUpdateChannel={(updatedCh) => handleUpdateChannel(updatedCh.id, updatedCh)} bpm={projectState.meta.bpm} /> : null;
       })()}
       <SampleManagerModal isOpen={isSampleManagerOpen} onClose={() => setIsSampleManagerOpen(false)} channels={projectState.channels} sampleLibrary={projectState.sampleLibrary || []} selectedChannel={projectState.channels.find(c => c.id === sampleChannelId) || projectState.channels[0]} onSampleImported={(sample) => { mutateProjectState(current => ({ ...current, sampleLibrary: [...(current.sampleLibrary || []).filter(existing => existing.id !== sample.id), sample] }), 'Import sample into library'); }} onAssignSampleToChannel={(chId, sampleData) => { handleUpdateChannel(chId, { customSample: sampleData }); }} onCreateChannelFromSample={(sampleData) => { const channel = { id: `ch-sample-${Date.now()}`, name: sampleData.name || 'Sample Pad', instrumentType: 'sampler' as const, volume: 0.85, pan: 0, pitch: 0, mute: false, solo: false, color: '#00ff88', steps: Array(16).fill(false), notes: [], synthParams: { ...DEFAULT_PROJECT.channels[0].synthParams }, customSample: sampleData } satisfies Omit<Channel, 'mixerTrackId'>; mutateProjectState(current => appendChannelWithAllocatedMixerTrackId(current, channel), 'Create channel from sample'); setSelectedChannelId(channel.id); }} />
-      <AudioRecorderModal isOpen={isAudioRecorderOpen} onClose={() => { setIsAudioRecorderOpen(false); setIsRecording(false); }} onSaveRecording={handleSaveRecordingToPlaylist} />
+      <AudioRecorderModal
+        isOpen={isAudioRecorderOpen}
+        projectGeneration={recordingProjectGenerationRef.current}
+        getCurrentProjectGeneration={() => recordingProjectGenerationRef.current}
+        onRegisterProjectReplacementHandler={handler => { cancelRecordingForReplacementRef.current = handler; }}
+        onClose={() => { setIsAudioRecorderOpen(false); setIsRecording(false); }}
+        onSaveRecording={handleSaveRecordingToPlaylist}
+      />
       <VocalTunerModal isOpen={isVocalTunerOpen} onClose={() => setIsVocalTunerOpen(false)} vocalTunerSettings={projectState.vocalTuner || { enabled: true, rootKey: 0, scale: 'minor', retuneSpeedMs: 15, formantShift: 0, vibratoDepth: 0.2, humanize: 0.3 }} onUpdateVocalTuner={(settings) => mutateProjectState(curr => updateVocalTunerInProjectState(curr, settings), 'Update vocal tuner')} channels={projectState.channels} />
       <MidiLearnModal isOpen={isMidiLearnOpen} onClose={() => setIsMidiLearnOpen(false)} midiMappings={projectState.midiMappings || []} onUpdateMidiMappings={(mappings) => mutateProjectState(curr => updateMidiMappingsInProjectState(curr, mappings), 'Update MIDI mappings')} channels={projectState.channels} mixerTracks={projectState.mixerTracks} connectedDevices={projectState.connectedMidiDevices || []} isMidiLearnActive={isMidiLearnActive} onToggleMidiLearn={(active) => setIsMidiLearnActive(active)} />
       <MultiZoneSamplerModal isOpen={isMultiZoneSamplerOpen} onClose={() => setIsMultiZoneSamplerOpen(false)} channels={projectState.channels} sampleLibrary={projectState.sampleLibrary || []} onUpdateChannel={handleUpdateChannel} />
