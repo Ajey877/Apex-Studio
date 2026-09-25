@@ -1099,15 +1099,21 @@ class Phase38FakeDb {
   close(): void {}
 }
 
+const phase38Deferred = <T>() => {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  const promise = new Promise<T>(nextResolve => { resolve = nextResolve; });
+  return { promise, resolve };
+};
+
 class Phase38ControlledIndexedDb {
   readonly stores = new Map<string, Map<string, unknown>>([
     ['clips', new Map()],
     ['projects', new Map()]
   ]);
-  readonly listStarted = Promise.withResolvers<void>();
-  readonly deleteStarted = Promise.withResolvers<void>();
-  readonly listGate = Promise.withResolvers<void>();
-  readonly deleteGate = Promise.withResolvers<void>();
+  readonly listStarted = phase38Deferred<void>();
+  readonly deleteStarted = phase38Deferred<void>();
+  readonly listGate = phase38Deferred<void>();
+  readonly deleteGate = phase38Deferred<void>();
   blockList = false;
   blockDeletes = false;
   failProjectWrites = false;
