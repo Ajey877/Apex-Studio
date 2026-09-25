@@ -61,3 +61,21 @@ test('undo and redo preserve the repaired routing state', () => {
   assert.equal(redone.present.mixerTracks.find(track => track.id === 1)?.routingTargetId, 0);
   assert.equal(redone.present.mixerTracks.some(track => track.id === 2), false);
 });
+
+
+test('project replacement normalization repairs identity gaps before routing validation', () => {
+  const incoming = createDefaultProjectState();
+  incoming.channels[0] = { ...incoming.channels[0], mixerTrackId: 500 };
+  incoming.mixerTracks = incoming.mixerTracks.map(track => (
+    track.id === 1 ? { ...track, routingTargetId: 2 } : track
+  ));
+
+  const replaced = normalizeProjectState(JSON.parse(JSON.stringify(incoming)));
+  const channelIds = replaced.channels.map(channel => channel.mixerTrackId);
+
+  assert.equal(new Set(channelIds).size, channelIds.length);
+  for (const id of channelIds) {
+    assert.equal(replaced.mixerTracks.filter(track => track.id === id).length, 1);
+  }
+  assert.equal(replaced.mixerTracks.find(track => track.id === 1)?.routingTargetId, 2);
+});
