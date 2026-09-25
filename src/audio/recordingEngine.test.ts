@@ -155,6 +155,19 @@ test('cancel always stops the microphone and returns the engine to idle', async 
   }
 });
 
+test('replacement cancellation never publishes a temporary Blob URL', async () => {
+  const mocks = installBrowserMocks();
+  try {
+    const engine = new RecordingEngine(createContext);
+    await engine.start();
+    await assert.rejects(engine.cancel(), /cancelled/);
+    assert.equal(sessionBlobUrlRegistry.getOwnerCount('blob:recording-test'), 0);
+    assert.deepEqual(mocks.revokedUrls, []);
+  } finally {
+    mocks.restore();
+  }
+});
+
 test('persistence failure rejects stop, does not return a recording, and still cleans up', async () => {
   const mocks = installBrowserMocks();
   try {
