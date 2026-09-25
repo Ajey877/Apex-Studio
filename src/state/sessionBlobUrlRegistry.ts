@@ -13,6 +13,17 @@ export class SessionBlobUrlRegistry {
     this.owners.set(url, (this.owners.get(url) ?? 0) + 1);
   }
 
+  /**
+   * Transfer one existing ownership slot from a temporary recording consumer
+   * to the active project. The URL remains owned exactly once.
+   */
+  transfer(url: string): void {
+    if (!url || !url.startsWith('blob:')) return;
+    if (!this.owners.has(url)) {
+      this.owners.set(url, 1);
+    }
+  }
+
   release(url: string): void {
     if (!url || !url.startsWith('blob:')) return;
 
@@ -61,20 +72,4 @@ export const getProjectSessionBlobUrls = (state: {
     if (recording.audioUrl?.startsWith('blob:')) urls.add(recording.audioUrl);
   }
   return [...urls];
-};
-
-export const reconcileProjectSessionBlobUrls = (
-  previousState: { recordings?: Array<{ audioUrl?: string }> },
-  nextState: { recordings?: Array<{ audioUrl?: string }> }
-): void => {
-  const previous = new Set(getProjectSessionBlobUrls(previousState));
-  const next = new Set(getProjectSessionBlobUrls(nextState));
-
-  for (const url of next) {
-    if (!previous.has(url)) sessionBlobUrlRegistry.retain(url);
-  }
-
-  for (const url of previous) {
-    if (!next.has(url)) sessionBlobUrlRegistry.release(url);
-  }
 };
