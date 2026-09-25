@@ -602,11 +602,18 @@ export function App() {
     const previousState = projectStateRef.current;
     const nextHistory = projectHistoryRef.current.undo();
     if (nextHistory === projectHistoryRef.current) return;
-    projectHistoryRef.current = nextHistory;
-    projectStateRef.current = nextHistory.present;
-    synchronizeActivePlayback(previousState, nextHistory.present);
-    setProjectState(nextHistory.present);
-    setProjectHistoryVersion(version => version + 1);
+    synchronizeBeforeRuntimePublication(
+      previousState,
+      nextHistory.present,
+      synchronizeActivePlayback,
+      publishedState => {
+        projectHistoryRef.current = nextHistory;
+        projectStateRef.current = publishedState;
+        setProjectState(publishedState);
+        setProjectHistoryVersion(version => version + 1);
+        return publishedState;
+      },
+    );
 
     // When stopped there is no playback snapshot to update, so keep the live
     // mixer graph in step with history for the next audition.
@@ -623,11 +630,18 @@ export function App() {
     const previousState = projectStateRef.current;
     const nextHistory = projectHistoryRef.current.redo();
     if (nextHistory === projectHistoryRef.current) return;
-    projectHistoryRef.current = nextHistory;
-    projectStateRef.current = nextHistory.present;
-    synchronizeActivePlayback(previousState, nextHistory.present);
-    setProjectState(nextHistory.present);
-    setProjectHistoryVersion(version => version + 1);
+    synchronizeBeforeRuntimePublication(
+      previousState,
+      nextHistory.present,
+      synchronizeActivePlayback,
+      publishedState => {
+        projectHistoryRef.current = nextHistory;
+        projectStateRef.current = publishedState;
+        setProjectState(publishedState);
+        setProjectHistoryVersion(version => version + 1);
+        return publishedState;
+      },
+    );
 
     if (!audioEngine.isPlaybackActive()) {
       nextHistory.present.mixerTracks.forEach(track => {
