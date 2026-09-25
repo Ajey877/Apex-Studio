@@ -701,6 +701,10 @@ export function App() {
         ? () => backupProjectBeforeReplacement(projectStateRef.current, { reason: 'replace' }).then(() => undefined)
         : undefined,
       async () => {
+        // Claim the outgoing state's current audio before hydrating the incoming
+        // project. This converts any newly-created project assets that were still
+        // session-resident into explicit outgoing project ownership.
+        audioEngine.setProjectSampleBufferOwnership(getAudioIdsForProject(projectStateRef.current));
         handleStop();
         try {
           const hydrated = await hydrateProjectAudio(normalized, audioEngine);
