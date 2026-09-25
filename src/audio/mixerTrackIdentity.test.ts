@@ -8,7 +8,10 @@ import {
   normalizeNextMixerTrackId,
   normalizeMixerTrackIdentityIntegrity
 } from '../state/mixerTrackIdentity';
-import { createDefaultProjectState, normalizeProjectState } from '../state/projectState';
+import { createDefaultProjectState, deleteChannelFromProjectState, normalizeProjectState } from '../state/projectState';
+import { createHistory } from '../state/projectHistory';
+import { serializeProjectState } from '../state/projectPersistence';
+import { applyRuntimeProjectStateMutation, updateChannelInProjectState, updateMixerTrackInProjectState } from '../state/projectMutations';
 import type { Channel, ProjectState } from '../types/daw';
 
 const clone = <T>(value: T): T => structuredClone(value);
@@ -293,5 +296,117 @@ describe('Mixer track identity lifecycle integrity', () => {
     const reloaded = normalizeProjectState(JSON.parse(JSON.stringify(project)));
     assert.equal(reloaded.mixerTracks.find(track => track.id === 1)?.routingTargetId, 2);
     assert.deepEqual(reloaded.channels.map(channel => channel.mixerTrackId), [1, 2]);
+  });
+});
+
+
+describe('Phase 30 runtime mixer identity enforcement', () => {
+  const assertIdentityInvariant = (project: ProjectState) => {
+    const channelIds = project.channels.map(channel => channel.mixerTrackId);
+    assert.equal(new Set(channelIds).size, channelIds.length);
+    for (const id of channelIds) {
+      assert.equal(project.mixerTracks.filter(track => track.id === id).length, 1);
+    }
+  };
+
+  it('rejects an arbitrary duplicate mixerTrackId at the runtime mutation boundary', () => {
+    const project = createDefaultProjectState();
+    const target = project.channels[1].mixerTrackId;
+    const next = applyRuntimeProjectStateMutation(project, current =>
+      updateChannelInProjectState(current, current.channels[1].id, { mixerTrackId: current.channels[0].mixerTrackId })
+    );
+
+    assert.notEqual(next.channels[1].mixerTrackId, project.channels[0].mixerTrackId);
+    assert.equal(next.channels[1].mixerTrackId, target);
+    assertIdentityInvariant(next);
+  });
+
+  it('atomically materializes a valid new mixer identity when a runtime identity change is requested', () => {
+    const project = createDefaultProjectState();
+    const nextId = 99;
+    const next = applyRuntimeProjectStateMutation(project, current =>
+      updateChannelInProjectState(current, current.channels[0].id, { mixerTrackId: nextId })
+    );
+    const mixerTrack = next.mixerTracks.find(track => track.id === nextId);
+
+    assert.equal(next.channels[0].mixerTrackId, nextId);
+    assert.ok(mixerTrack);
+    assert.equal(mixerTrack!.routingTargetId, 0);
+    assertIdentityInvariant(next);
+  });
+
+  it('creation -> runtime mutation -> undo/redo preserves mixer identity integrity', () => {
+    const initial = createDefaultProjectState();
+    const created = appendChannelWithAllocatedMixerTrackId(initial, makeChannel(initial, 'Runtime'));
+    const edited = applyRuntimeProjectStateMutation(created, current =>
+      updateChannelInProjectState(current, current.channels.at(-1)!.id, { volume: 0.4 })
+    );
+    let history = createHistory(initial).commit(created, 'Create channel').commit(edited, 'Edit channel');
+
+    assertIdentityInvariant(history.present);
+    history = history.undo();
+    assertIdentityInvariant(history.present);
+    assert.equal(history.present.channels.at(-1)!.mixerTrackId, created.channels.at(-1)!.mixerTrackId);
+    history = history.redo();
+    assertIdentityInvariant(history.present);
+    assert.equal(history.present.channels.at(-1)!.volume, 0.4);
+  });
+
+  it('deletion -> undo/redo preserves identity and routing repair', () => {
+    const project = createDefaultProjectState();
+    const routed = applyRuntimeProjectStateMutation(project, current =>
+      updateMixerTrackInProjectState(current, 1, { routingTargetId: 2 })
+    );
+    const deleted = deleteChannelFromProjectState(routed, 'ch-2');
+    let history = createHistory(routed).commit(deleted.state, 'Delete channel');
+
+    assertIdentityInvariant(history.present);
+    assert.equal(history.present.mixerTracks.find(track => track.id === 1)?.routingTargetId, 0);
+    history = history.undo();
+    assertIdentityInvariant(history.present);
+    assert.equal(history.present.mixerTracks.find(track => track.id === 1)?.routingTargetId, 2);
+    history = history.redo();
+    assertIdentityInvariant(history.present);
+    assert.equal(history.present.mixerTracks.some(track => track.id === 2), false);
+  });
+
+  it('runtime state survives save/load normalization without changing mixer identity', () => {
+    const project = createDefaultProjectState();
+    const runtime = applyRuntimeProjectStateMutation(project, current =>
+      updateMixerTrackInProjectState(current, 1, { routingTargetId: 2 })
+    );
+    const restored = normalizeProjectState(JSON.parse(serializeProjectState(runtime)).state);
+
+    assertIdentityInvariant(restored);
+    assert.deepEqual(restored.channels.map(channel => channel.mixerTrackId), runtime.channels.map(channel => channel.mixerTrackId));
+    assert.equal(restored.mixerTracks.find(track => track.id === 1)?.routingTargetId, 2);
+  });
+
+  it('runtime state can feed the existing live routing adapter without invalid identity references', () => {
+    const project = createDefaultProjectState();
+    const runtime = applyRuntimeProjectStateMutation(project, current =>
+      updateMixerTrackInProjectState(current, 1, { routingTargetId: 2 })
+    );
+    const graph = new MixerRoutingGraph();
+    for (const track of runtime.mixerTracks) graph.addTrack(track.id);
+    for (const track of runtime.mixerTracks.filter(track => track.id !== 0)) {
+      const result = graph.setRoute(track.id, track.routingTargetId ?? 0);
+      assert.equal(result.valid, true);
+    }
+    assertIdentityInvariant(runtime);
+  });
+
+  it('repairs stale and invalid runtime identity mutations before publication', () => {
+    const project = createDefaultProjectState();
+    const next = applyRuntimeProjectStateMutation(project, current =>
+      updateChannelInProjectState(current, current.channels[0].id, { mixerTrackId: -42 })
+    );
+    const repairedId = next.channels[0].mixerTrackId;
+
+    assert.ok(Number.isSafeInteger(repairedId));
+    assert.ok(repairedId > 0);
+    assert.notEqual(repairedId, -42);
+    assert.equal(next.mixerTracks.filter(track => track.id === repairedId).length, 1);
+    assertIdentityInvariant(next);
   });
 });
