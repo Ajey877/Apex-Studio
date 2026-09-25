@@ -538,6 +538,10 @@ export function App() {
     // silences its clips at the trigger boundary, unmuting restarts the clip the
     // playhead is inside. The mixer insert routing is never touched.
     if (previous.playlistTracks !== next.playlistTracks) update.playlistTracks = next.playlistTracks;
+    // Pattern Mode plays the selected pattern, so its declared length belongs to
+    // the live take: a 16 <-> 32 change (or switching to a pattern of a different
+    // length) moves the running loop boundary instead of waiting for a restart.
+    // Song Mode ignores it inside the engine.
     const previousPatternLengthSteps = getSelectedPatternLengthSteps(previous);
     const nextPatternLengthSteps = getSelectedPatternLengthSteps(next);
     if (previousPatternLengthSteps !== nextPatternLengthSteps) {
