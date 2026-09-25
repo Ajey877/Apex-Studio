@@ -26,6 +26,23 @@ export interface RestoredProjectState {
 const CURRENT_PROJECT_STATE_VERSION = 1;
 let persistenceWriteQueue: Promise<void> = Promise.resolve();
 
+const enqueuePersistenceOperation = async <T>(operation: () => Promise<T>): Promise<T> => {
+  const queuedOperation = persistenceWriteQueue.then(operation);
+  persistenceWriteQueue = queuedOperation.then(() => undefined, () => undefined);
+  return queuedOperation;
+};
+
+const persistSerializedProjectState = async (serialized: string): Promise<void> => {
+  await persistProjectStateRecord(serialized);
+  try {
+    await persistProjectRecoverySnapshotRecord(serialized);
+  } catch (error) {
+    // The live project is already durable; a recovery-snapshot failure should not
+    // turn a successful save into a reported save failure.
+    console.warn('[Apex Studio] Recovery snapshot update failed after project save.', error);
+  }
+};
+
 /** Serialize project state without storing binary audio data or session-only object URLs. */
 export const serializeProjectState = (state: ProjectState): string => {
   const normalizedState = normalizeProjectState(state);
@@ -45,18 +62,7 @@ export const serializeProjectState = (state: ProjectState): string => {
  */
 export const persistProjectState = async (state: ProjectState): Promise<void> => {
   const serialized = serializeProjectState(state);
-  const write = persistenceWriteQueue.then(async () => {
-    await persistProjectStateRecord(serialized);
-    try {
-      await persistProjectRecoverySnapshotRecord(serialized);
-    } catch (error) {
-      // The live project is already durable; a recovery-snapshot failure should not
-      // turn a successful save into a reported save failure.
-      console.warn('[Apex Studio] Recovery snapshot update failed after project save.', error);
-    }
-  });
-  persistenceWriteQueue = write.catch(() => undefined);
-  await write;
+  await enqueuePersistenceOperation(() => persistSerializedProjectState(serialized));
 };
 
 export const getAudioIdsForProject = (state: ProjectState): string[] => {
@@ -399,15 +405,26 @@ export const saveAndReconcileProjectState = async (
   state: ProjectState,
   options?: SaveAndReconcileOptions
 ): Promise<AudioReconciliationResult | null> => {
-  await persistProjectState(state);
-  if (options?.reconcileAudio === false) {
-    return null;
-  }
-  try {
-    return await reconcilePersistedAudio(state, options);
-  } catch (reconcileError) {
-    console.warn('[Apex Studio] Audio reconciliation failed after save.', reconcileError);
-    return null;
-  }
+  const serialized = serializeProjectState(state);
+
+  return enqueuePersistenceOperation(async () => {
+    // Keep project persistence and audio reconciliation in the same queue entry.
+    // A newer save cannot become durable until this save's reconciliation has
+    // finished, so stale reconciliation can never observe and delete newer audio.
+    await persistSerializedProjectState(serialized);
+
+    if (options?.reconcileAudio === false) {
+      return null;
+    }
+
+    try {
+      return await reconcilePersistedAudio(state, options);
+    } catch (reconcileError) {
+      // Project persistence has already succeeded. Reconciliation failure is
+      // non-fatal and must not prevent later queued saves from running.
+      console.warn('[Apex Studio] Audio reconciliation failed after save.', reconcileError);
+      return null;
+    }
+  });
 };
 
