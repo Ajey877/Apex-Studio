@@ -1413,7 +1413,7 @@ test('Phase 38: imported, recorded and bounced pending audio can remain protecte
 test('Phase 38: delayed deletion cannot start a newer save while the older reconciliation owns the queue', async () => {
   const controller = new Phase38ControlledIndexedDb();
   controller.blockDeletes = true;
-  phase38SeedAudio(controller, ['audio-a', 'audio-b']);
+  phase38SeedAudio(controller, ['audio-a', 'audio-b', 'orphan']);
   const restore = phase38InstallDb(controller);
   try {
     const saveA = saveAndReconcileProjectState(phase38StateWithAudio('audio-a'), {
