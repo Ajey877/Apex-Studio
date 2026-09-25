@@ -34,7 +34,7 @@ import {
 import { getAudioIdsForProject, hydrateProjectAudio, persistProjectState, restorePersistedProjectState, saveAndReconcileProjectState } from './state/projectPersistence';
 import { ProjectBackupError, backupProjectBeforeReplacement } from './state/projectBackup';
 import { getSampleBufferPersistenceController, waitForSampleBufferPersistence } from './audio/sampleBufferPersistence';
-import { getProjectSessionBlobUrls, sessionBlobUrlRegistry } from './state/sessionBlobUrlRegistry';
+import { getProjectSessionBlobUrls, replaceProjectSessionBlobUrls, sessionBlobUrlRegistry } from './state/sessionBlobUrlRegistry';
 import { planProjectReplacement, runProjectReplacementAfterBackup, type ProjectReplacementPlan, type ProjectReplacementSource } from './state/projectReplacement';
 import {
   collectMissingAudioAssets,
@@ -705,15 +705,9 @@ export function App() {
       async () => {
         handleStop();
         try {
-          const previousProjectUrls = getProjectSessionBlobUrls(projectStateRef.current);
+          const previousProjectState = projectStateRef.current;
           const hydrated = await hydrateProjectAudio(normalized, audioEngine);
-          const incomingProjectUrls = new Set(getProjectSessionBlobUrls(hydrated.state));
-          for (const url of incomingProjectUrls) {
-            if (!sessionBlobUrlRegistry.isOwned(url)) sessionBlobUrlRegistry.retain(url);
-          }
-          for (const url of previousProjectUrls) {
-            if (!incomingProjectUrls.has(url)) sessionBlobUrlRegistry.release(url);
-          }
+          replaceProjectSessionBlobUrls(previousProjectState, hydrated.state);
           projectStateRef.current = hydrated.state;
           skipNextAutosaveStateRef.current = hydrated.state;
           setProjectState(hydrated.state);
