@@ -45,6 +45,7 @@ import { createHistory, type ProjectHistory, resolveSaveShortcut, resolveUndoRed
 import {
   ContinuousHistoryBatcher,
   addFxSlotToProjectState,
+  applyRuntimeProjectStateMutation,
   addPatternToProjectState,
   deleteFxSlotFromProjectState,
   getChannelUpdateLabel,
@@ -566,7 +567,7 @@ export function App() {
     options?: { isContinuous?: boolean }
   ): ProjectState => {
     const currentState = projectStateRef.current;
-    const nextState = updater(currentState);
+    const nextState = applyRuntimeProjectStateMutation(currentState, updater);
     projectStateRef.current = nextState;
     synchronizeActivePlayback(currentState, nextState);
     setProjectState(nextState);
