@@ -14,6 +14,7 @@ import { AudioClockTransport, TransportState } from './transport';
 import { ChorusEffect } from './effects/ChorusEffect';
 import { WetDryEffect } from './effects/WetDryEffect';
 import { createInstrumentRegistry, InstrumentRegistry, InstrumentVoiceHandle } from './instrumentRegistry';
+import { MixerRoutingAdapter } from './mixerRoutingAdapter';
 import { renderIndependentPluckVoice } from './instruments/independentPluck';
 import { renderSubtractiveSynthVoice } from './instruments/subtractiveSynth';
 import { renderFmSynthVoice } from './instruments/fmSynth';
@@ -295,6 +296,8 @@ class AudioEngine {
   private masterAnalyser: AnalyserNode | null = null;
   private grossBeatNode: GainNode | null = null;
   private mixerChannels: Map<number, MixerChannel> = new Map();
+  private mixerRoutingAdapter: MixerRoutingAdapter | null = null;
+  private mixerRoutingChannelMap: Map<number, MixerChannel> | null = null;
 
   private grossBeatState: GrossBeatState = {
     enabled: false,
@@ -394,6 +397,8 @@ class AudioEngine {
     for (let i = 0; i <= 8; i++) {
       this.getOrCreateMixerChannel(i);
     }
+    this.mixerRoutingAdapter = new MixerRoutingAdapter(this.mixerChannels);
+    this.mixerRoutingChannelMap = this.mixerChannels;
 
     this.transport = new AudioClockTransport(this.ctx);
 
@@ -570,6 +575,51 @@ class AudioEngine {
 
     // Update FX chain if any
     this.rebuildTrackFxChain(track);
+    this.applyMixerTrackRouting(track);
+  }
+
+  private ensureMixerRoutingAdapter(): MixerRoutingAdapter {
+    if (!this.mixerChannels.has(0)) this.getOrCreateMixerChannel(0);
+    if (!this.mixerRoutingAdapter || this.mixerRoutingChannelMap !== this.mixerChannels) {
+      this.mixerRoutingAdapter = new MixerRoutingAdapter(this.mixerChannels);
+      this.mixerRoutingChannelMap = this.mixerChannels;
+    }
+    return this.mixerRoutingAdapter;
+  }
+
+  private applyMixerTrackRouting(track: MixerTrack): void {
+    if (track.id === 0) return;
+    const adapter = this.ensureMixerRoutingAdapter();
+    const existingRoutes = new Map(
+      adapter.getRoutes().map(route => [route.trackId, route.targetId]),
+    );
+    for (const trackId of this.mixerChannels.keys()) {
+      if (trackId !== 0 && !existingRoutes.has(trackId)) existingRoutes.set(trackId, 0);
+    }
+    existingRoutes.set(track.id, track.routingTargetId ?? 0);
+    const result = adapter.syncRoutes(
+      [...existingRoutes.entries()].map(([trackId, targetId]) => ({ trackId, targetId })),
+    );
+    if (!result.valid) {
+      console.error('[AudioEngine] Mixer routing update rejected', {
+        trackId: track.id,
+        targetId: track.routingTargetId ?? 0,
+        reason: result.reason,
+      });
+    }
+  }
+
+  private syncMixerRouting(tracks: MixerTrack[]): void {
+    // Some state-only synchronization paths (and their test doubles) can run
+    // without a constructed audio master. Routing is an audio-graph concern;
+    // defer it until the production mixer graph exists.
+    if (!this.mixerChannels.has(0)) return;
+    const adapter = this.ensureMixerRoutingAdapter();
+    const routes = tracks
+      .filter(track => track.id !== 0)
+      .map(track => ({ trackId: track.id, targetId: track.routingTargetId ?? 0 }));
+    const result = adapter.syncRoutes(routes);
+    if (!result.valid) throw new Error(result.reason ?? 'Invalid mixer routing.');
   }
 
   public rebuildTrackFxChain(track: MixerTrack) {
@@ -1633,6 +1683,8 @@ class AudioEngine {
       activeChannels: this.activeChannels,
       activeClips: this.activeClips,
       activeMixerTracks: this.activeMixerTracks,
+      mixerRoutingAdapter: this.mixerRoutingAdapter,
+      mixerRoutingChannelMap: this.mixerRoutingChannelMap,
       playbackProjectChannels: this.playbackProjectChannels,
       playbackProjectMixerTracks: this.playbackProjectMixerTracks,
       activePlayMode: this.activePlayMode,
@@ -1680,6 +1732,8 @@ class AudioEngine {
       this.grossBeatNode.connect(this.masterAnalyser);
       this.masterAnalyser.connect(offlineCtx.destination);
       this.mixerChannels = new Map();
+      this.mixerRoutingAdapter = null;
+      this.mixerRoutingChannelMap = null;
       this.impulseResponses = new Map();
       this.activeVoices = new Map();
       this.activeChannels = structuredClone(channels);
@@ -1723,6 +1777,7 @@ class AudioEngine {
       const masterTrack = renderTracks.find(track => track.id === 0);
       if (masterTrack) this.updateMixerTrack(masterTrack); else this.getOrCreateMixerChannel(0);
       for (const track of renderTracks) if (track.id !== 0) this.updateMixerTrack(track);
+      this.syncMixerRouting(renderTracks);
       const totalSteps = Math.ceil(totalDurationSeconds / secondsPerStep);
       // A Pattern Loop export must wrap at the same boundary as Pattern Mode
       // playback, otherwise steps beyond the first bar render silence. Song
@@ -1765,6 +1820,8 @@ class AudioEngine {
       this.masterAnalyser = previous.masterAnalyser;
       this.grossBeatNode = previous.grossBeatNode;
       this.mixerChannels = previous.mixerChannels;
+      this.mixerRoutingAdapter = previous.mixerRoutingAdapter;
+      this.mixerRoutingChannelMap = previous.mixerRoutingChannelMap;
       this.impulseResponses = previous.impulseResponses;
       this.activeVoices = previous.activeVoices;
       this.isPlaying = previous.isPlaying;
@@ -2314,6 +2371,7 @@ class AudioEngine {
       }
       this.activeMixerTracks = nextTracks;
       this.playbackProjectMixerTracks = structuredClone(update.mixerTracks);
+      this.syncMixerRouting(nextTracks);
     }
 
     if (update.playlistTracks) {
@@ -2386,6 +2444,7 @@ class AudioEngine {
     // mixer edits use synchronizePlaybackState and update only the changed
     // active track while the transport remains running.
     for (const track of this.activeMixerTracks) this.updateMixerTrack(track);
+    this.syncMixerRouting(this.activeMixerTracks);
 
     if (!this.transport && this.ctx) {
       this.transport = new AudioClockTransport(this.ctx);
