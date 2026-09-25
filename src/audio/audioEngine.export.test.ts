@@ -1157,5 +1157,41 @@ describe('Phase 3A: Render Architecture & Audio Fidelity', () => {
       assert.ok(result.stems['ch-synth-1_Lead_Synth.wav'] instanceof Blob);
       assert.ok(result.stems['track_2_Aud_0.wav'] instanceof Blob);
     });
+    it('Phase 33: export after A -> B replacement resolves the incoming B asset', async () => {
+      const outgoingId = 'phase33-export-a';
+      const incomingId = 'phase33-export-b';
+      audioEngine.setSampleBuffer(outgoingId, createTestBuffer(1));
+      audioEngine.setProjectSampleBufferOwnership([outgoingId]);
+      audioEngine.setSampleBuffer(incomingId, createTestBuffer(1));
+      audioEngine.setProjectSampleBufferOwnership([incomingId]);
+
+      assert.equal(audioEngine.getSampleBuffer(outgoingId), undefined);
+      assert.ok(audioEngine.getSampleBuffer(incomingId));
+
+      const clip: PlaylistClip = {
+        id: 'phase33-export-clip',
+        name: 'Project B Audio',
+        audioName: 'Project B Audio',
+        trackIndex: 1,
+        startBar: 0,
+        lengthBars: 1,
+        type: 'audio',
+        audioBufferId: incomingId,
+        color: '#8b5cf6',
+      };
+
+      await audioEngine.renderTimelineOffline(
+        [],
+        [clip],
+        defaultMixerTracks,
+        120,
+        1,
+        undefined,
+        true
+      );
+
+      audioEngine.setProjectSampleBufferOwnership([]);
+    });
+
   });
 });

@@ -870,3 +870,72 @@ test('project audio ids include samples referenced only by drum pads', () => {
 
   assert.ok(ids.includes(padSampleId));
 });
+
+
+test('Phase 33: A -> B save/reload hydrates only incoming project audio', async () => {
+  const restore = installIndexedDbMock();
+  try {
+    const base = createDefaultProjectState();
+    const audioA = 'phase33-reload-a';
+    const audioB = 'phase33-reload-b';
+    await persistAudioClip(audioA, new Blob(['A'], { type: 'audio/wav' }));
+    await persistAudioClip(audioB, new Blob(['B'], { type: 'audio/wav' }));
+
+    const stateA: ProjectState = {
+      ...base,
+      playlistClips: [{
+        id: 'phase33-clip-a',
+        trackIndex: 1,
+        startBar: 0,
+        lengthBars: 1,
+        type: 'audio',
+        audioBufferId: audioA,
+        color: '#fff',
+        name: 'A'
+      }]
+    };
+    const stateB: ProjectState = {
+      ...base,
+      playlistClips: [{
+        id: 'phase33-clip-b',
+        trackIndex: 1,
+        startBar: 0,
+        lengthBars: 1,
+        type: 'audio',
+        audioBufferId: audioB,
+        color: '#fff',
+        name: 'B'
+      }]
+    };
+
+    const firstLoaded: string[] = [];
+    await hydrateProjectAudio(stateA, {
+      loadAudioFile: async (_blob, id) => {
+        firstLoaded.push(id);
+        return { buffer: { duration: 1 } as AudioBuffer, peaks: [], duration: 1 };
+      }
+    });
+    assert.deepEqual(firstLoaded, [audioA]);
+
+    await persistProjectState(stateB);
+    const restoredRecord = JSON.parse((await getPersistedProjectStateRecord())!) as { state: ProjectState };
+    assert.deepEqual(getAudioIdsForProject(restoredRecord.state), [audioB]);
+
+    const reloaded: string[] = [];
+    const hydratedB = await hydrateProjectAudio(restoredRecord.state, {
+      loadAudioFile: async (_blob, id) => {
+        reloaded.push(id);
+        return { buffer: { duration: 1 } as AudioBuffer, peaks: [], duration: 1 };
+      }
+    });
+
+    assert.deepEqual(reloaded, [audioB]);
+    assert.deepEqual(hydratedB.hydratedAudioIds, [audioB]);
+    assert.equal(hydratedB.state.playlistClips[0].audioUnavailable, false);
+  } finally {
+    await deletePersistedAudioClip('phase33-reload-a').catch(() => undefined);
+    await deletePersistedAudioClip('phase33-reload-b').catch(() => undefined);
+    await deletePersistedProjectState().catch(() => undefined);
+    restore();
+  }
+});

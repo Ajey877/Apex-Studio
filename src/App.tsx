@@ -31,7 +31,7 @@ import {
   getSelectedPatternLengthSteps,
   setPatternLengthStepsInProjectState
 } from './state/patternLength';
-import { hydrateProjectAudio, persistProjectState, restorePersistedProjectState, saveAndReconcileProjectState } from './state/projectPersistence';
+import { getAudioIdsForProject, hydrateProjectAudio, persistProjectState, restorePersistedProjectState, saveAndReconcileProjectState } from './state/projectPersistence';
 import { ProjectBackupError, backupProjectBeforeReplacement } from './state/projectBackup';
 import { getSampleBufferPersistenceController, waitForSampleBufferPersistence } from './audio/sampleBufferPersistence';
 import { planProjectReplacement, runProjectReplacementAfterBackup, type ProjectReplacementPlan, type ProjectReplacementSource } from './state/projectReplacement';
@@ -292,6 +292,7 @@ export function App() {
           setSelectedChannelId(restored.state.selectedChannelId || DEFAULT_PROJECT.channels[0]?.id || 'ch-1');
           setSelectedTrackId(restored.state.selectedMixerTrackId ?? 0);
           setDismissedMissingAudioSignature(restored.state.dismissedMissingAudioSignature ?? null);
+          audioEngine.setProjectSampleBufferOwnership(getAudioIdsForProject(restored.state));
           if (restored.recovered) {
             console.warn('[Apex Studio] The active project record was recovered from a last-known-good snapshot.');
           }
@@ -317,20 +318,22 @@ export function App() {
 
   const performSave = useCallback(async (
     stateToSave: ProjectState = projectStateRef.current,
-    options?: { reconcileAudio?: boolean }
+    options?: { reconcileAudio?: boolean; additionalReferencedIds?: Iterable<string> }
   ): Promise<boolean> => {
     try {
       if (options?.reconcileAudio) {
         await saveAndReconcileProjectState(stateToSave, {
           history: projectHistoryRef.current,
           reconcileAudio: true,
-          // Imported-but-unassigned samples and other session audio must not be purged mid-session.
-          additionalReferencedIds: audioEngine.getSampleBufferIds()
+          // Preserve explicit session-only buffers without treating stale project-owned
+          // engine residency as a reference to the active project.
+          additionalReferencedIds: options?.additionalReferencedIds ?? audioEngine.getPersistableSampleBufferIds()
         });
       } else {
         await persistProjectState(stateToSave);
       }
 
+      audioEngine.setProjectSampleBufferOwnership(getAudioIdsForProject(stateToSave));
       if (projectStateRef.current === stateToSave) {
         hasUnsavedChangesRef.current = false;
       }
@@ -708,7 +711,14 @@ export function App() {
           resetProjectHistory(hydrated.state);
           setSelectedChannelId(hydrated.state.selectedChannelId || hydrated.state.channels[0]?.id || 'ch-1');
           setSelectedTrackId(hydrated.state.selectedMixerTrackId ?? 0);
-          const saved = await performSave(hydrated.state, { reconcileAudio: true });
+          const replacementReferencedIds = new Set([
+            ...getAudioIdsForProject(hydrated.state),
+            ...audioEngine.getSessionSampleBufferIds()
+          ]);
+          const saved = await performSave(hydrated.state, {
+            reconcileAudio: true,
+            additionalReferencedIds: replacementReferencedIds
+          });
           if (!saved) throw new Error('Replaced project could not be persisted');
         } catch (error) {
           console.warn('[Apex Studio] Project audio hydration failed; loading project without audio.', error);
