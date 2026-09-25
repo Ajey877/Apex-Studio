@@ -153,10 +153,53 @@ class MockAudioBuffer {
 
 const asAudioBuffer = (buffer: MockAudioBuffer): AudioBuffer => buffer as unknown as AudioBuffer;
 
+class MockAudioParam {
+  value = 0;
+  setValueAtTime(value: number): void { this.value = value; }
+  setTargetAtTime(value: number): void { this.value = value; }
+  linearRampToValueAtTime(value: number): void { this.value = value; }
+  exponentialRampToValueAtTime(value: number): void { this.value = value; }
+  cancelScheduledValues(): void {}
+}
+
+class MockAudioNode {
+  readonly gain = new MockAudioParam();
+  readonly frequency = new MockAudioParam();
+  readonly detune = new MockAudioParam();
+  readonly playbackRate = new MockAudioParam();
+  readonly pan = new MockAudioParam();
+  readonly Q = new MockAudioParam();
+  type = 'sine';
+  buffer: AudioBuffer | null = null;
+  onended: (() => void) | null = null;
+  loop = false;
+  loopStart = 0;
+  loopEnd = 0;
+  connect(): void {}
+  disconnect(): void {}
+  start(): void {}
+  stop(): void {}
+}
+
 class MockOfflineAudioContext {
+  readonly destination = new MockAudioNode();
+  currentTime = 0;
+
   constructor(readonly numberOfChannels: number, readonly length: number, readonly sampleRate: number) {}
+
   createBuffer(channels: number, length: number, sampleRate: number): MockAudioBuffer {
     return new MockAudioBuffer(channels, length, sampleRate);
+  }
+  createGain(): MockAudioNode { return new MockAudioNode(); }
+  createOscillator(): MockAudioNode { return new MockAudioNode(); }
+  createBufferSource(): MockAudioNode { return new MockAudioNode(); }
+  createBiquadFilter(): MockAudioNode { return new MockAudioNode(); }
+  createStereoPanner(): MockAudioNode { return new MockAudioNode(); }
+  createAnalyser(): MockAudioNode & { fftSize: number; smoothingTimeConstant: number } {
+    return Object.assign(new MockAudioNode(), { fftSize: 0, smoothingTimeConstant: 0 });
+  }
+  async startRendering(): Promise<AudioBuffer> {
+    return asAudioBuffer(new MockAudioBuffer(this.numberOfChannels, this.length, this.sampleRate));
   }
 }
 

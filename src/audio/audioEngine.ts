@@ -36,6 +36,7 @@ export interface InternalMidiMessageEvent {
 }
 
 interface WindowWithWebKitAudio extends Window {
+  OfflineAudioContext?: typeof OfflineAudioContext;
   webkitAudioContext?: typeof AudioContext;
   webkitOfflineAudioContext?: typeof OfflineAudioContext;
 }
@@ -1577,6 +1578,7 @@ class AudioEngine {
     onProgress?: OfflineRenderProgress,
     patternLengthSteps?: number,
     playlistTracks?: PlaylistTrack[],
+    minimumDurationSeconds: number = 4,
   ): Promise<AudioBuffer> {
     onProgress?.(15, `Preparing ${renderScope === 'pattern' ? 'pattern loop' : 'song'} export...`);
 
@@ -1646,9 +1648,26 @@ class AudioEngine {
     this.liveCtx = previous.ctx;
     const safeBpm = Math.max(20, Math.min(300, Number(bpm) || 120));
     const secondsPerStep = (60 / safeBpm) / 4;
-    const totalDurationSeconds = Math.max(4, Math.max(1, totalBars) * 4 * (60 / safeBpm));
+    const requestedMinimumDuration = Number.isFinite(minimumDurationSeconds) && minimumDurationSeconds >= 0
+      ? minimumDurationSeconds
+      : 4;
+    const totalDurationSeconds = Math.max(
+      requestedMinimumDuration,
+      Math.max(1, totalBars) * 4 * (60 / safeBpm),
+    );
     const renderSampleRate = sampleRate ?? previous.ctx?.sampleRate ?? 44100;
-    const offlineCtx = new OfflineAudioContext(2, Math.ceil(renderSampleRate * totalDurationSeconds), renderSampleRate);
+    const OfflineContextClass =
+      (typeof window !== 'undefined' && (window as unknown as WindowWithWebKitAudio).OfflineAudioContext) ||
+      (typeof window !== 'undefined' && (window as unknown as WindowWithWebKitAudio).webkitOfflineAudioContext) ||
+      (globalThis as unknown as { OfflineAudioContext?: typeof OfflineAudioContext }).OfflineAudioContext;
+    if (!OfflineContextClass) {
+      throw new Error('OfflineAudioContext is unavailable in this environment.');
+    }
+    const offlineCtx = new OfflineContextClass(
+      2,
+      Math.ceil(renderSampleRate * totalDurationSeconds),
+      renderSampleRate,
+    );
     try {
       this.ctx = offlineCtx as unknown as AudioContext;
       this.transport = null;
@@ -2905,69 +2924,58 @@ class AudioEngine {
     const lengthBars = passes * loopLengthBars;
 
     const stepDuration = (60 / safeBpm) / 4;
-    const totalSteps = lengthBars * STEPS_PER_BAR;
-    const durationSec = totalSteps * stepDuration;
-    const length = Math.floor(sampleRate * durationSec);
-    const OfflineContextClass = window.OfflineAudioContext || (window as unknown as WindowWithWebKitAudio).webkitOfflineAudioContext;
-    const offlineCtx = new OfflineContextClass(2, length, sampleRate);
+    const durationSec = lengthBars * STEPS_PER_BAR * stepDuration;
 
-    // Synthesize notes / drum patterns into offline audio
-    const left = offlineCtx.createBuffer(2, length, sampleRate).getChannelData(0);
-    const right = offlineCtx.createBuffer(2, length, sampleRate).getChannelData(1);
+    // Bounce-In-Place is an offline scheduling/rendering operation, not a second
+    // instrument DSP implementation. The existing timeline renderer already
+    // drives InstrumentRegistry -> instrument renderer against OfflineAudioContext.
+    // Disable arpeggiation and channel mute here to preserve the historical
+    // bounce contract: this method renders the channel's own step/note content,
+    // independent of live transport-only controls.
+    const bounceChannel = {
+      ...structuredClone(channel),
+      arp: undefined,
+      mute: false,
+    };
 
-    // Render active notes or step triggers over the channel's full loop length
-    for (let s = 0; s < totalSteps; s++) {
-      const relStep = s % loopLengthSteps;
-      const isStepActive = channel.steps && channel.steps[relStep];
-      const stepNotes = channel.notes ? channel.notes.filter(n => n.start === relStep) : [];
+    const renderedBuffer = await this.renderTimelineOffline(
+      [bounceChannel],
+      [],
+      [],
+      safeBpm,
+      lengthBars,
+      sampleRate,
+      false,
+      'pattern',
+      undefined,
+      loopLengthSteps,
+      undefined,
+      durationSec,
+    );
 
-      if (isStepActive || stepNotes.length > 0) {
-        const tStart = s * stepDuration;
-        const startSample = Math.floor(tStart * sampleRate);
-        const hitSamples = Math.floor(0.35 * sampleRate);
-
-        for (let i = 0; i < hitSamples && (startSample + i) < length; i++) {
-          const t = i / sampleRate;
-          let sampleVal = 0;
-          if (channel.instrumentType === 'drumpad') {
-            const freq = 120 * Math.exp(-t * 22);
-            sampleVal = Math.sin(2 * Math.PI * freq * t) * Math.exp(-t * 10);
-          } else {
-            // Harmonic synth tone
-            const freq = 220;
-            sampleVal = (Math.sin(2 * Math.PI * freq * t) + 0.5 * Math.sin(2 * Math.PI * freq * 2 * t)) * Math.exp(-t * 6);
-          }
-          left[startSample + i] += sampleVal * (channel.volume || 0.8) * 0.7;
-          right[startSample + i] += sampleVal * (channel.volume || 0.8) * 0.7;
-        }
-      }
-    }
-
-    const renderedBuffer = offlineCtx.createBuffer(2, length, sampleRate);
-    renderedBuffer.copyToChannel(left, 0);
-    renderedBuffer.copyToChannel(right, 1);
-
-    // Compute 32 normalized peak amplitudes for waveform preview
+    // The offline renderer is intentionally sized to the exact bounce duration
+    // above, so the returned AudioBuffer remains contract-compatible with the
+    // existing PlaylistClip lengthBars metadata.
     const waveform: number[] = [];
-    const blockSize = Math.floor(length / 32);
-    for (let b = 0; b < 32; b++) {
+    const left = renderedBuffer.getChannelData(0);
+    const blockSize = Math.max(1, Math.floor(renderedBuffer.length / 32));
+    for (let b = 0; b < 32; b += 1) {
       let max = 0;
       const offset = b * blockSize;
-      for (let j = 0; j < blockSize && (offset + j) < length; j++) {
-        const abs = Math.abs(left[offset + j]);
-        if (abs > max) max = abs;
+      for (let j = 0; j < blockSize && offset + j < renderedBuffer.length; j += 1) {
+        max = Math.max(max, Math.abs(left[offset + j]));
       }
       waveform.push(Math.min(1.0, max * 1.5));
     }
 
-    // Session-only convenience registration. The caller registers the buffer under the
-    // clip's own asset id via setSampleBuffer (which is what gets persisted), so this
-    // internal alias intentionally bypasses the persistence wrapper.
+    // Session-only convenience registration. The caller registers the buffer under
+    // the clip's own asset id via setSampleBuffer (which is what gets persisted).
     const bufId = `bounced-${channel.id}-${Date.now()}`;
     this.sampleBuffers.set(bufId, renderedBuffer);
 
     return { buffer: renderedBuffer, waveform, lengthBars, bpm: safeBpm };
   }
+
 
   public getMasterLoudnessMetrics() {
     if (!this.masterAnalyser || !this.ctx) {
