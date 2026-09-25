@@ -114,7 +114,7 @@ describe('Phase 32 runtime state ↔ AudioEngine failure containment', () => {
         },
         restore,
       ),
-      /injected undo/redo synchronization failure/,
+      /injected undo\/redo synchronization failure/,
     );
 
     assert.equal(history, committed);
