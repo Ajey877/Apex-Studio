@@ -1346,6 +1346,8 @@ test('Phase 38: project persistence failure prevents reconciliation from executi
 });
 
 test('Phase 38: retained backup references survive reconciliation', async () => {
+  const controller = new Phase38ControlledIndexedDb();
+  const restore = phase38InstallDb(controller);
   const state = phase38StateWithAudio('backup-audio');
   let deleted: string[] = [];
   const result = await saveAndReconcileProjectState(state, {
@@ -1364,9 +1366,12 @@ test('Phase 38: retained backup references survive reconciliation', async () => 
   });
   assert.deepEqual(result?.removedIds, ['orphan']);
   assert.deepEqual(deleted, ['orphan']);
+  restore();
 });
 
 test('Phase 38: genuine orphan cleanup remains unchanged', async () => {
+  const controller = new Phase38ControlledIndexedDb();
+  const restore = phase38InstallDb(controller);
   let deleted: string[] = [];
   const result = await saveAndReconcileProjectState(phase38StateWithAudio('live-audio'), {
     reconcileAudio: true,
@@ -1379,9 +1384,12 @@ test('Phase 38: genuine orphan cleanup remains unchanged', async () => {
   assert.deepEqual(result?.preservedIds, ['live-audio']);
   assert.deepEqual(result?.removedIds, ['orphan-1', 'orphan-2']);
   assert.deepEqual(deleted, ['orphan-1', 'orphan-2']);
+  restore();
 });
 
 test('Phase 38: imported, recorded and bounced pending audio can remain protected by additional references', async () => {
+  const controller = new Phase38ControlledIndexedDb();
+  const restore = phase38InstallDb(controller);
   const pendingIds = ['imported-sample', 'recorded-take', 'bounced-clip'];
   const state = phase38StateWithAudio('project-audio');
   let deleted: string[] = [];
@@ -1397,6 +1405,7 @@ test('Phase 38: imported, recorded and bounced pending audio can remain protecte
   assert.deepEqual(result?.preservedIds.sort(), [...pendingIds, 'project-audio'].sort());
   assert.deepEqual(result?.removedIds, ['orphan']);
   assert.deepEqual(deleted, ['orphan']);
+  restore();
 });
 
 test('Phase 38: delayed deletion cannot start a newer save while the older reconciliation owns the queue', async () => {
