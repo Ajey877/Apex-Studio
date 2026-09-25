@@ -1,5 +1,6 @@
 import { persistAudioClip } from './audioPersistence';
 import { installAudioPlaybackLifecycle } from './audioPlaybackLifecycle';
+import { sessionBlobUrlRegistry } from '../state/sessionBlobUrlRegistry';
 
 installAudioPlaybackLifecycle();
 
