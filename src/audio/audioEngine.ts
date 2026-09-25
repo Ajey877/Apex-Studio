@@ -320,6 +320,10 @@ class AudioEngine {
   /** Playlist lane rows muted for the active take; enforced before clips reach their mixer insert. */
   private playlistLaneMutes: Set<number> = new Set();
   private sampleBuffers: Map<string, AudioBuffer> = new Map();
+  /** Project-owned ids are replaced atomically at the project replacement boundary. */
+  private projectOwnedSampleBufferIds: Set<string> = new Set();
+  /** Buffers deliberately resident outside the active project (imports, previews, internal aliases). */
+  private sessionSampleBufferIds: Set<string> = new Set();
   private impulseResponses: Map<string, AudioBuffer> = new Map();
   private readonly instrumentRegistry: InstrumentRegistry;
 
@@ -425,11 +429,63 @@ class AudioEngine {
     return this.sampleBuffers.get(id);
   }
 
-  public setSampleBuffer(id: string, buffer: AudioBuffer): void {
+  private setSessionSampleBuffer(id: string, buffer: AudioBuffer): void {
     this.sampleBuffers.set(id, buffer);
+    this.sessionSampleBufferIds.add(id);
   }
 
-  /** Ids of every audio asset currently registered in memory (recordings, imports, drops, bounces, hydrated assets). */
+  public setSampleBuffer(id: string, buffer: AudioBuffer): void {
+    this.sampleBuffers.set(id, buffer);
+    if (!this.projectOwnedSampleBufferIds.has(id)) this.sessionSampleBufferIds.add(id);
+  }
+
+  /**
+   * Establishes the active project's ownership boundary without clearing
+   * legitimate session-only buffers. Outgoing project-owned buffers are
+   * released unless they were explicitly retained as session assets.
+   */
+  public setProjectSampleBufferOwnership(ids: Iterable<string>): void {
+    const nextProjectIds = new Set<string>();
+    for (const id of ids) if (id) nextProjectIds.add(id);
+
+    for (const id of this.projectOwnedSampleBufferIds) {
+      if (nextProjectIds.has(id)) continue;
+      if (!this.sessionSampleBufferIds.has(id)) this.sampleBuffers.delete(id);
+    }
+
+    for (const id of this.projectOwnedSampleBufferIds) {
+      if (!nextProjectIds.has(id)) this.projectOwnedSampleBufferIds.delete(id);
+    }
+
+    for (const id of nextProjectIds) {
+      this.projectOwnedSampleBufferIds.add(id);
+      this.sessionSampleBufferIds.delete(id);
+    }
+  }
+
+  /** Project-owned buffers currently resident in the engine. */
+  public getProjectOwnedSampleBufferIds(): string[] {
+    return [...this.projectOwnedSampleBufferIds].filter(id => this.sampleBuffers.has(id));
+  }
+
+  /** Session-only/internal buffers currently resident in the engine. */
+  public getSessionSampleBufferIds(): string[] {
+    return [...this.sessionSampleBufferIds].filter(id => this.sampleBuffers.has(id));
+  }
+
+  /**
+   * Assets eligible to keep during persistence reconciliation. This is the
+   * ownership-aware replacement for treating every resident engine buffer as
+   * a project reference.
+   */
+  public getPersistableSampleBufferIds(): string[] {
+    return [...new Set([
+      ...this.getProjectOwnedSampleBufferIds(),
+      ...this.getSessionSampleBufferIds()
+    ])];
+  }
+
+  /** Ids of every audio asset currently registered in memory. */
   public getSampleBufferIds(): string[] {
     return [...this.sampleBuffers.keys()];
   }
@@ -1147,7 +1203,7 @@ class AudioEngine {
     const ctx = this.getContext();
     const arrayBuffer = await file.arrayBuffer();
     const audioBuffer = await ctx.decodeAudioData(arrayBuffer);
-    this.sampleBuffers.set(id, audioBuffer);
+    this.setSessionSampleBuffer(id, audioBuffer);
 
     const rawData = audioBuffer.getChannelData(0);
     const numPeaks = 64;
@@ -3030,7 +3086,7 @@ class AudioEngine {
     // Session-only convenience registration. The caller registers the buffer under
     // the clip's own asset id via setSampleBuffer (which is what gets persisted).
     const bufId = `bounced-${channel.id}-${Date.now()}`;
-    this.sampleBuffers.set(bufId, renderedBuffer);
+    this.setSessionSampleBuffer(bufId, renderedBuffer);
 
     return { buffer: renderedBuffer, waveform, lengthBars, bpm: safeBpm };
   }
