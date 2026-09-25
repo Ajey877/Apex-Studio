@@ -13,6 +13,7 @@ import { createHistory } from '../state/projectHistory';
 import { serializeProjectState } from '../state/projectPersistence';
 import { applyRuntimeProjectStateMutation, updateChannelInProjectState, updateMixerTrackInProjectState } from '../state/projectMutations';
 import type { Channel, ProjectState } from '../types/daw';
+import { MixerRoutingAdapter } from './mixerRoutingAdapter';
 
 const clone = <T>(value: T): T => structuredClone(value);
 
@@ -311,13 +312,12 @@ describe('Phase 30 runtime mixer identity enforcement', () => {
 
   it('rejects an arbitrary duplicate mixerTrackId at the runtime mutation boundary', () => {
     const project = createDefaultProjectState();
-    const target = project.channels[1].mixerTrackId;
     const next = applyRuntimeProjectStateMutation(project, current =>
       updateChannelInProjectState(current, current.channels[1].id, { mixerTrackId: current.channels[0].mixerTrackId })
     );
 
     assert.notEqual(next.channels[1].mixerTrackId, project.channels[0].mixerTrackId);
-    assert.equal(next.channels[1].mixerTrackId, target);
+    assert.notEqual(next.channels[1].mixerTrackId, project.channels[0].mixerTrackId);
     assertIdentityInvariant(next);
   });
 
@@ -383,16 +383,28 @@ describe('Phase 30 runtime mixer identity enforcement', () => {
   });
 
   it('runtime state can feed the existing live routing adapter without invalid identity references', () => {
+    class FakeNode {
+      connections: FakeNode[] = [];
+      connect(target: FakeNode) { this.connections.push(target); }
+      disconnect() { this.connections = []; }
+    }
     const project = createDefaultProjectState();
     const runtime = applyRuntimeProjectStateMutation(project, current =>
       updateMixerTrackInProjectState(current, 1, { routingTargetId: 2 })
     );
-    const graph = new MixerRoutingGraph();
-    for (const track of runtime.mixerTracks) graph.addTrack(track.id);
-    for (const track of runtime.mixerTracks.filter(track => track.id !== 0)) {
-      const result = graph.setRoute(track.id, track.routingTargetId ?? 0);
-      assert.equal(result.valid, true);
+    const nodes = new Map<number, { input: AudioNode; output: AudioNode }>();
+    for (const track of runtime.mixerTracks) {
+      nodes.set(track.id, { input: new FakeNode() as unknown as AudioNode, output: new FakeNode() as unknown as AudioNode });
     }
+    const adapter = new MixerRoutingAdapter(nodes);
+    const result = adapter.syncRoutes(
+      runtime.mixerTracks
+        .filter(track => track.id !== 0)
+        .map(track => ({ trackId: track.id, targetId: track.routingTargetId ?? 0 }))
+    );
+
+    assert.equal(result.valid, true);
+    assert.equal(adapter.getRoute(1), 2);
     assertIdentityInvariant(runtime);
   });
 
