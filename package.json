@@ -19,7 +19,7 @@
     "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true}); require('fs').rmSync('server.js',{force:true})\"",
     "lint": "tsc --noEmit",
     "test:pianoroll": "tsx --test src/components/pianoRollOperations.test.ts",
-    "test:audio": "tsx --test src/audio/*.test.ts src/audio/automation/*.test.ts src/state/patternLength.test.ts src/audio/sampleBufferOwnership.test.ts" src/state/projectPersistence.test.ts src/state/projectRecovery.test.ts src/state/samplePackPersistence.test.ts src/phase4Lifecycle.test.ts src/utils/*.test.ts",
+    "test:audio": "tsx --test src/audio/*.test.ts src/audio/automation/*.test.ts src/state/patternLength.test.ts" src/state/projectPersistence.test.ts src/state/projectRecovery.test.ts src/state/samplePackPersistence.test.ts src/phase4Lifecycle.test.ts src/utils/*.test.ts",
     "test:history": "tsx --test src/components/playlistClipOperations.test.ts src/components/playlistAutomationOperations.test.ts src/state/playlistHistory.test.ts src/state/projectHistory.test.ts src/state/undoRedo.test.ts src/components/mixerRoutingUi.test.ts src/state/routingReferenceIntegrity.test.ts src/state/runtimeStatePublication.test.ts",
     "test:lifecycle": "tsx --test src/phase4Lifecycle.test.ts",
     "verify:desktop": "node scripts/verify-desktop-config.mjs",
