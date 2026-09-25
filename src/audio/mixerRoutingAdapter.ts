@@ -45,11 +45,35 @@ export class MixerRoutingAdapter {
     }
   }
 
+  syncRoutes(routes: MixerRoute[]): MixerRouteValidation {
+    const nextGraph = new MixerRoutingGraph(this.masterTrackId);
+    for (const route of routes) {
+      if (route.trackId === this.masterTrackId) continue;
+      if (!this.nodes.has(route.trackId) || !this.nodes.has(route.targetId)) {
+        return { valid: false, reason: `Mixer route ${route.trackId} -> ${route.targetId} references an unregistered track.` };
+      }
+      const validation = nextGraph.setRoute(route.trackId, route.targetId);
+      if (!validation.valid) return validation;
+    }
+
+    const previousGraph = this.graph;
+    const previousAppliedRoutes = this.appliedRoutes.map(route => ({ ...route }));
+    this.graph = nextGraph;
+    try {
+      this.rebuildLiveGraph();
+      return { valid: true };
+    } catch (error) {
+      this.graph = previousGraph;
+      this.appliedRoutes = previousAppliedRoutes;
+      this.rebuildLiveGraph();
+      throw error;
+    }
+  }
+
   removeRoute(trackId: number): void {
     if (!this.nodes.has(trackId) || trackId === this.masterTrackId) return;
     const previousRoutes = this.graph.getRoutes();
     this.graph.removeRoute(trackId);
-
     try {
       this.rebuildLiveGraph();
     } catch (error) {
@@ -74,7 +98,8 @@ export class MixerRoutingAdapter {
     const routes = this.graph.getRoutes();
     const previousRoutes = this.appliedRoutes.map(route => ({ ...route }));
 
-    for (const pair of this.nodes.values()) {
+    for (const [trackId, pair] of this.nodes) {
+      if (trackId === this.masterTrackId) continue;
       pair.output.disconnect();
     }
 
@@ -90,7 +115,8 @@ export class MixerRoutingAdapter {
       }
       this.appliedRoutes = routes.map(route => ({ ...route }));
     } catch (error) {
-      for (const pair of this.nodes.values()) {
+      for (const [trackId, pair] of this.nodes) {
+        if (trackId === this.masterTrackId) continue;
         pair.output.disconnect();
       }
       for (const route of previousRoutes) {
@@ -108,9 +134,7 @@ export class MixerRoutingAdapter {
     for (const route of routes) {
       if (route.trackId === this.masterTrackId) continue;
       const result = this.graph.setRoute(route.trackId, route.targetId);
-      if (!result.valid) {
-        throw new Error(`Unable to restore mixer routing: ${result.reason ?? 'unknown error'}`);
-      }
+      if (!result.valid) throw new Error(`Unable to restore mixer routing: ${result.reason ?? 'unknown error'}`);
     }
     this.appliedRoutes = routes.map(route => ({ ...route }));
     this.rebuildLiveGraph();
