@@ -69,7 +69,6 @@ test('temporary recording ownership can be transferred to the project without do
 
 test('Project A -> B releases A-only URLs and keeps incoming B URLs', () => {
   const mocks = installUrlMocks();
-  const registry = new SessionBlobUrlRegistry();
   try {
     const a = URL.createObjectURL(new Blob(['a']));
     const b = URL.createObjectURL(new Blob(['b']));
