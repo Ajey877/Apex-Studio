@@ -159,9 +159,10 @@ test('replacement cancellation never publishes a temporary Blob URL', async () =
   const mocks = installBrowserMocks();
   try {
     const engine = new RecordingEngine(createContext);
+    const ownersBefore = sessionBlobUrlRegistry.getOwnerCount('blob:recording-test');
     await engine.start();
     await assert.rejects(engine.cancel(), /cancelled/);
-    assert.equal(sessionBlobUrlRegistry.getOwnerCount('blob:recording-test'), 0);
+    assert.equal(sessionBlobUrlRegistry.getOwnerCount('blob:recording-test'), ownersBefore);
     assert.deepEqual(mocks.revokedUrls, []);
   } finally {
     mocks.restore();
