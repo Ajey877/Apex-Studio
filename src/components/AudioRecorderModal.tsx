@@ -8,12 +8,13 @@ import { sessionBlobUrlRegistry } from '../state/sessionBlobUrlRegistry';
 interface AudioRecorderModalProps {
   isOpen: boolean;
   projectGeneration: number;
+  getCurrentProjectGeneration: () => number;
   onClose: () => void;
   onRegisterProjectReplacementHandler: (handler: () => Promise<void>) => void;
   onSaveRecording: (recording: AudioRecording, targetTrackIndex: number, projectGeneration: number) => void | Promise<void>;
 }
 
-export const AudioRecorderModal: React.FC<AudioRecorderModalProps> = ({ isOpen, projectGeneration, onClose, onRegisterProjectReplacementHandler, onSaveRecording }) => {
+export const AudioRecorderModal: React.FC<AudioRecorderModalProps> = ({ isOpen, projectGeneration, getCurrentProjectGeneration, onClose, onRegisterProjectReplacementHandler, onSaveRecording }) => {
   const [recordingState, setRecordingState] = useState<'idle' | 'recording' | 'paused' | 'stopping'>('idle');
   const [recordSeconds, setRecordSeconds] = useState(0);
   const [inputLevel, setInputLevel] = useState(0);
@@ -120,7 +121,7 @@ export const AudioRecorderModal: React.FC<AudioRecorderModalProps> = ({ isOpen, 
       setRecordedTake(null);
       recordingProjectGenerationRef.current = projectGeneration;
       await engineRef.current!.start();
-      if (recordingProjectGenerationRef.current !== projectGeneration) {
+      if (recordingProjectGenerationRef.current !== getCurrentProjectGeneration()) {
         await engineRef.current!.cancel().catch(() => undefined);
         throw new Error('The recording was cancelled because the project was replaced');
       }
