@@ -29,7 +29,7 @@ test('invalid routing destinations normalize safely to Master', () => {
 test('deleting a mixer destination clears dependent routes', () => {
   const project = createDefaultProjectState();
   project.mixerTracks[1].routingTargetId = 2;
-  project.mixerTracks.push({ ...project.mixerTracks[1], id: 3, name: 'Unrelated Bus', routingTargetId: 1 });
+  project.mixerTracks.push({ ...project.mixerTracks[1], id: 8, name: 'Unrelated Bus', routingTargetId: 1 });
 
   const result = deleteChannelFromProjectState(project, 'ch-2');
 
@@ -41,11 +41,11 @@ test('deleting a mixer destination clears dependent routes', () => {
 test('unrelated routes remain unchanged when a destination is deleted', () => {
   const project = createDefaultProjectState();
   project.mixerTracks[1].routingTargetId = 2;
-  project.mixerTracks.push({ ...project.mixerTracks[1], id: 3, name: 'Unrelated Bus', routingTargetId: 1 });
+  project.mixerTracks.push({ ...project.mixerTracks[1], id: 8, name: 'Unrelated Bus', routingTargetId: 1 });
 
   const result = deleteChannelFromProjectState(project, 'ch-2');
 
-  assert.equal(result.state.mixerTracks.find(track => track.id === 3)?.routingTargetId, 1);
+  assert.equal(result.state.mixerTracks.find(track => track.id === 8)?.routingTargetId, 1);
 });
 
 test('undo and redo preserve the repaired routing state', () => {
