@@ -4,6 +4,7 @@ import {
   SessionBlobUrlRegistry,
   getProjectSessionBlobUrls,
   replaceProjectSessionBlobUrls,
+  sessionBlobUrlRegistry,
 } from './sessionBlobUrlRegistry';
 
 const installUrlMocks = () => {
@@ -77,16 +78,14 @@ test('Project A -> B releases A-only URLs and keeps incoming B URLs', () => {
     const projectA = { recordings: [{ audioUrl: a }] };
     const projectB = { recordings: [{ audioUrl: b }] };
 
-    const previous = registry;
-    replaceProjectSessionBlobUrls.call({} as never, projectA, projectB);
-    // The helper uses the module singleton, so exercise the same ownership
-    // contract directly on an isolated registry as well.
-    previous.release(a);
-    previous.retain(b);
+    sessionBlobUrlRegistry.retain(a);
+    replaceProjectSessionBlobUrls(projectA, projectB);
 
     assert.deepEqual(mocks.revoked, [a]);
-    assert.equal(previous.isOwned(b), true);
+    assert.equal(sessionBlobUrlRegistry.isOwned(b), true);
+    sessionBlobUrlRegistry.release(b);
   } finally {
+    sessionBlobUrlRegistry.releaseAllOwned();
     mocks.restore();
   }
 });
