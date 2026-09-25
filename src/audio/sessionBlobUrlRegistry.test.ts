@@ -98,13 +98,11 @@ test('shared incoming URL is not revoked during project replacement', () => {
     const projectA = { recordings: [{ audioUrl: shared }] };
     const projectB = { recordings: [{ audioUrl: shared }] };
 
-    const previous = new Set(getProjectSessionBlobUrls(projectA));
-    const next = new Set(getProjectSessionBlobUrls(projectB));
-    for (const url of next) if (!registry.isOwned(url)) registry.retain(url);
-    for (const url of previous) if (!next.has(url)) registry.release(url);
+    replaceProjectSessionBlobUrls(projectA, projectB);
 
     assert.deepEqual(mocks.revoked, []);
     assert.equal(registry.isOwned(shared), true);
+    registry.release(shared);
   } finally {
     mocks.restore();
   }
