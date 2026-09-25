@@ -14,11 +14,6 @@ class FakeNode {
   readonly connections: FakeNode[] = [];
   readonly gain = new FakeParam();
   readonly pan = new FakeParam();
-  readonly threshold = new FakeParam();
-  readonly knee = new FakeParam();
-  readonly ratio = new FakeParam();
-  readonly attack = new FakeParam();
-  readonly release = new FakeParam();
   fftSize = 0;
   smoothingTimeConstant = 0;
 
@@ -66,12 +61,6 @@ class FakeOfflineContext extends FakeContext {
   }
 
   createAnalyser(): FakeNode {
-    const node = new FakeNode();
-    this.nodes.push(node);
-    return node;
-  }
-
-  createDynamicsCompressor(): FakeNode {
     const node = new FakeNode();
     this.nodes.push(node);
     return node;
