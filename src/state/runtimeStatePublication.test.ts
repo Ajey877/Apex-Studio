@@ -79,6 +79,43 @@ describe('Phase 32 runtime state ↔ AudioEngine failure containment', () => {
     assert.equal(liveMixerVolume, current.mixerTracks[0].volume);
   });
 
+  it('contains a stopped-state synchronization failure before publication', () => {
+    const current = createDefaultProjectState();
+    const next = {
+      ...current,
+      mixerTracks: current.mixerTracks.map(track =>
+        track.id === 0 ? { ...track, volume: 0.4 } : track
+      ),
+    };
+    let projectStateRef = current;
+    let history = createHistory(current);
+    let liveMixerVolume = current.mixerTracks[0].volume;
+
+    assert.throws(
+      () =>
+        synchronizeBeforeRuntimePublication(
+          current,
+          next,
+          () => {
+            liveMixerVolume = next.mixerTracks[0].volume;
+            throw new Error('injected stopped-state synchronization failure');
+          },
+          publishedState => {
+            projectStateRef = publishedState;
+            history = history.commit(publishedState, 'stopped-state failure');
+          },
+          previous => {
+            liveMixerVolume = previous.mixerTracks[0].volume;
+          },
+        ),
+      /injected stopped-state synchronization failure/,
+    );
+
+    assert.equal(projectStateRef, current);
+    assert.equal(history.present.mixerTracks[0].volume, current.mixerTracks[0].volume);
+    assert.equal(liveMixerVolume, current.mixerTracks[0].volume);
+  });
+
   it('contains the same failure boundary for undo and redo publication', () => {
     const current = createDefaultProjectState();
     const next = {
