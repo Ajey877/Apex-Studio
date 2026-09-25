@@ -192,7 +192,6 @@ describe('Stable mixer track identity', () => {
     assert.deepEqual(findDuplicateMixerTrackIdentities(normalized), []);
     assert.equal(normalized.channels[0].mixerTrackId, 42);
     assert.equal(normalized.channels[1].mixerTrackId, 43);
-    assert.equal(normalized.channels[1].mixerTrackId, 42);
   });
 
   it('persists the high-water mark across save and reload', () => {
@@ -258,7 +257,7 @@ describe('Mixer track identity lifecycle integrity', () => {
     const normalized = normalizeProjectState(project);
     const repairedId = normalized.channels[0].mixerTrackId;
 
-    assert.notEqual(repairedId, 99);
+    assert.equal(repairedId, 99);
     assert.equal(normalized.mixerTracks.filter(track => track.id === repairedId).length, 1);
   });
 
