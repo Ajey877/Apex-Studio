@@ -72,8 +72,6 @@ test('Project A -> B releases A-only URLs and keeps incoming B URLs', () => {
   try {
     const a = URL.createObjectURL(new Blob(['a']));
     const b = URL.createObjectURL(new Blob(['b']));
-    registry.retain(a);
-
     const projectA = { recordings: [{ audioUrl: a }] };
     const projectB = { recordings: [{ audioUrl: b }] };
 
