@@ -42,6 +42,7 @@ import {
 } from './state/audioAssetAvailability';
 import { createRecordingPlaylistClip, getRecordingAudioBufferId, validateRecordingTargetTrack } from './audio/recordingPipeline';
 import { createHistory, type ProjectHistory, resolveSaveShortcut, resolveUndoRedoShortcut } from './state/projectHistory';
+import { synchronizeBeforeRuntimePublication } from './state/runtimeStatePublication';
 import {
   ContinuousHistoryBatcher,
   addFxSlotToProjectState,
@@ -568,17 +569,23 @@ export function App() {
   ): ProjectState => {
     const currentState = projectStateRef.current;
     const nextState = applyRuntimeProjectStateMutation(currentState, updater);
-    projectStateRef.current = nextState;
-    synchronizeActivePlayback(currentState, nextState);
-    setProjectState(nextState);
+    return synchronizeBeforeRuntimePublication(
+      currentState,
+      nextState,
+      synchronizeActivePlayback,
+      publishedState => {
+        projectStateRef.current = publishedState;
+        setProjectState(publishedState);
 
-    if (options?.isContinuous) {
+        if (options?.isContinuous) {
       continuousBatcherRef.current.update(nextState, label);
     } else {
       continuousBatcherRef.current.flush();
-      commitProjectHistory(nextState, label);
-    }
-    return nextState;
+          commitProjectHistory(publishedState, label);
+        }
+        return publishedState;
+      },
+    );
   }, [commitProjectHistory, synchronizeActivePlayback]);
 
   const handleContinuousInteractionStart = useCallback((label?: string) => {
