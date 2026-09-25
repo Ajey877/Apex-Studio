@@ -261,7 +261,7 @@ export const normalizeProjectState = (input: unknown): ProjectState => {
 
   return {
     ...routingNormalized,
-    nextMixerTrackId: normalizeNextMixerTrackId(routingNormalized, routingNormalized.nextMixerTrackId)
+    nextMixerTrackId: normalizeNextMixerTrackId(routingNormalized, candidate.nextMixerTrackId)
   };
 };
 
