@@ -15,6 +15,26 @@ import { MixerTrack, FxSlot, FxType } from '../types/daw';
 import { audioEngine } from '../audio/audioEngine';
 import { MixerRoutingGraph } from '../audio/mixerRouting';
 
+export const applyMixerRoutingSelection = (
+  tracks: MixerTrack[],
+  trackId: number,
+  targetId: number,
+  onUpdateTrack: (trackId: number, updates: Partial<MixerTrack>) => void
+): boolean => {
+  const graph = new MixerRoutingGraph();
+  for (const track of tracks) {
+    if (track.id === 0 || track.id === trackId) continue;
+    const result = graph.setRoute(track.id, track.routingTargetId ?? 0);
+    if (!result.valid) return false;
+  }
+
+  const validation = graph.setRoute(trackId, targetId);
+  if (!validation.valid) return false;
+
+  onUpdateTrack(trackId, { routingTargetId: targetId });
+  return true;
+};
+
 interface MixerProps {
   tracks: MixerTrack[];
   selectedTrackId: number;
@@ -50,17 +70,8 @@ export const Mixer: React.FC<MixerProps> = ({
   const selectedTrack = tracks.find(t => t.id === selectedTrackId) || tracks[0];
 
   const handleRoutingChange = (trackId: number, targetId: number) => {
-    const graph = new MixerRoutingGraph();
-    for (const track of tracks) {
-      if (track.id === 0 || track.id === trackId) continue;
-      const result = graph.setRoute(track.id, track.routingTargetId ?? 0);
-      if (!result.valid) return;
-    }
+    if (!applyMixerRoutingSelection(tracks, trackId, targetId, onUpdateTrack)) return;
 
-    const validation = graph.setRoute(trackId, targetId);
-    if (!validation.valid) return;
-
-    onUpdateTrack(trackId, { routingTargetId: targetId });
     const target = tracks.find(t => t.id === trackId);
     if (target) {
       audioEngine.updateMixerTrack({ ...target, routingTargetId: targetId });
