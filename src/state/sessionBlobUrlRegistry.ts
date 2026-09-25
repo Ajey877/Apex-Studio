@@ -73,3 +73,19 @@ export const getProjectSessionBlobUrls = (state: {
   }
   return [...urls];
 };
+
+export const replaceProjectSessionBlobUrls = (
+  previousState: { recordings?: Array<{ audioUrl?: string }> },
+  nextState: { recordings?: Array<{ audioUrl?: string }> }
+): void => {
+  const previous = new Set(getProjectSessionBlobUrls(previousState));
+  const next = new Set(getProjectSessionBlobUrls(nextState));
+
+  for (const url of next) {
+    if (!sessionBlobUrlRegistry.isOwned(url)) sessionBlobUrlRegistry.retain(url);
+  }
+
+  for (const url of previous) {
+    if (!next.has(url)) sessionBlobUrlRegistry.release(url);
+  }
+};
