@@ -12,6 +12,30 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
 
 const clone = <T>(value: T): T => structuredClone(value);
+
+/**
+ * Normalizes mixer routing references at the project-state boundary.
+ * Master (0) is always valid; every other target must be an existing mixer track.
+ * Valid routes are preserved; malformed or stale references fall back to Master.
+ */
+export const normalizeMixerRoutingReferences = (project: ProjectState): ProjectState => {
+  const mixerTrackIds = new Set(project.mixerTracks.map(track => track.id));
+  const mixerTracks = project.mixerTracks.map(track => {
+    const targetId = track.routingTargetId;
+    const normalizedTargetId =
+      targetId === undefined || targetId === 0
+        ? 0
+        : Number.isInteger(targetId) && mixerTrackIds.has(targetId)
+          ? targetId
+          : 0;
+
+    return track.routingTargetId === normalizedTargetId
+      ? track
+      : { ...track, routingTargetId: normalizedTargetId };
+  });
+
+  return mixerTracks === project.mixerTracks ? project : { ...project, mixerTracks };
+};
 const assertArrayOfRecords = (value: unknown, label: string, validator?: (entry: Record<string, unknown>) => boolean): void => {
   if (!Array.isArray(value)) throw new Error(`Invalid project file: ${label} must be an array.`);
   if (validator && value.some(entry => !isRecord(entry) || !validator(entry))) {
@@ -220,7 +244,9 @@ export const normalizeProjectState = (input: unknown): ProjectState => {
     nextMixerTrackId: 1
   };
 
-  const duplicateIdentities = findDuplicateMixerTrackIdentities(normalized);
+  const routingNormalized = normalizeMixerRoutingReferences(normalized);
+
+  const duplicateIdentities = findDuplicateMixerTrackIdentities(routingNormalized);
   if (duplicateIdentities.length > 0) {
     console.warn(
       `[Apex Studio] Project contains duplicate mixer identities: ${duplicateIdentities.join(', ')}. Existing identities were preserved.`
@@ -232,8 +258,8 @@ export const normalizeProjectState = (input: unknown): ProjectState => {
   }
 
   return {
-    ...normalized,
-    nextMixerTrackId: normalizeNextMixerTrackId(normalized, candidate.nextMixerTrackId)
+    ...routingNormalized,
+    nextMixerTrackId: normalizeNextMixerTrackId(routingNormalized, candidate.nextMixerTrackId)
   };
 };
 
@@ -279,7 +305,9 @@ export const deleteChannelFromProjectState = (
 
   const nextMixerTracks = isTrackStillReferenced
     ? project.mixerTracks
-    : project.mixerTracks.filter(t => t.id !== trackId);
+    : project.mixerTracks
+      .filter(t => t.id !== trackId)
+      .map(t => t.routingTargetId === trackId ? { ...t, routingTargetId: MASTER_MIXER_TRACK_ID } : t);
 
   const nextSelectedChannelId =
     project.selectedChannelId === channelId
