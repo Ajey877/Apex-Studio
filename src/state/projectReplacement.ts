@@ -2,6 +2,7 @@ import type { ProjectState } from '../types/daw';
 import { PRESET_PROJECTS } from '../audio/presets';
 import { createDefaultProjectState } from './projectState';
 import { sanitizeProjectSnapshot } from './projectHistory';
+import { advancePlaylistAudioProjectGeneration } from './playlistAudioPublication';
 
 /**
  * Phase 8A — destructive project replacement policy.
@@ -120,5 +121,8 @@ export const runProjectReplacementAfterBackup = async <T>(
   replace: () => Promise<T> | T
 ): Promise<T> => {
   if (backup) await backup();
+  // Invalidate pending dropped/bounced playlist-audio publications immediately
+  // before the incoming project is allowed to become current.
+  advancePlaylistAudioProjectGeneration();
   return replace();
 };
