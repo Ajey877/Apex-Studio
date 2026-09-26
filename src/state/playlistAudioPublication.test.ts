@@ -10,17 +10,17 @@ import { runProjectReplacementAfterBackup } from './projectReplacement';
 import { synchronizeBeforeRuntimePublication } from './runtimeStatePublication';
 import type { ProjectState } from '../types/daw';
 
-interface Deferred<T> {
-  promise: Promise<T>;
-  resolve: (value?: T | PromiseLike<T>) => void;
+interface Deferred {
+  promise: Promise<void>;
+  resolve: () => void;
   reject: (reason?: unknown) => void;
 }
 
-const deferred = <T>(): Deferred<T> => {
-  let resolve!: Deferred<T>['resolve'];
-  let reject!: Deferred<T>['reject'];
-  const promise = new Promise<T>((res, rej) => {
-    resolve = res;
+const deferred = (): Deferred => {
+  let resolve!: Deferred['resolve'];
+  let reject!: Deferred['reject'];
+  const promise = new Promise<void>((res, rej) => {
+    resolve = () => res();
     reject = rej;
   });
   return { promise, resolve, reject };
@@ -40,8 +40,8 @@ const makeState = (playlistClips: unknown): ProjectState => ({ playlistClips } a
 
 const startBlockedPersistence = async (id: string) => {
   const engine = createFakeEngine();
-  const persistStarted = deferred<void>();
-  const releasePersistence = deferred<void>();
+  const persistStarted = deferred();
+  const releasePersistence = deferred();
 
   installSampleBufferPersistence(engine, {
     encode: () => new Blob(['wav'], { type: 'audio/wav' }),
@@ -150,10 +150,10 @@ test('NORMAL SUCCESS publishes when generation and playlist revision are unchang
 
 test('MULTIPLE OPERATIONS cannot let an older captured revision overwrite a newer publication', async () => {
   const engine = createFakeEngine();
-  const releaseA = deferred<void>();
-  const releaseB = deferred<void>();
+  const releaseA = deferred();
+  const releaseB = deferred();
   let started = 0;
-  const startedBoth = deferred<void>();
+  const startedBoth = deferred();
 
   installSampleBufferPersistence(engine, {
     encode: () => new Blob(['wav']),
