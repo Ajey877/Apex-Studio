@@ -12,7 +12,7 @@ import type { ProjectState } from '../types/daw';
 
 interface Deferred<T> {
   promise: Promise<T>;
-  resolve: (value: T | PromiseLike<T>) => void;
+  resolve: (value?: T | PromiseLike<T>) => void;
   reject: (reason?: unknown) => void;
 }
 
