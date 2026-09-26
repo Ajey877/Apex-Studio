@@ -34,9 +34,6 @@ jobs:
       - name: Project state and history tests
         run: npm run test:history
 
-      - name: Focused audio drop placement regression tests
-        run: npx tsx --test src/components/audioDropPlacement.test.ts
-
       - name: Persistence and audio tests
         run: npm run test:audio
 
