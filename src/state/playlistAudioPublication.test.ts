@@ -9,7 +9,6 @@ import {
 import { runProjectReplacementAfterBackup } from './projectReplacement';
 import { synchronizeBeforeRuntimePublication } from './runtimeStatePublication';
 import { DEFAULT_PROJECT } from '../audio/presets';
-import type { ProjectState } from '../types/daw';
 
 interface Deferred {
   promise: Promise<void>;
@@ -37,10 +36,11 @@ const createFakeEngine = () => {
   };
 };
 
-const makeState = (playlistClips: ProjectState['playlistClips']): ProjectState => ({
-  ...DEFAULT_PROJECT,
-  playlistClips,
-});
+const makeState = (playlistClips: typeof DEFAULT_PROJECT.playlistClips) => {
+  const state = structuredClone(DEFAULT_PROJECT);
+  state.playlistClips = playlistClips;
+  return state;
+};
 
 const startBlockedPersistence = async (id: string) => {
   const engine = createFakeEngine();
@@ -95,8 +95,11 @@ test('BOUNCE + PROJECT REPLACEMENT rejects stale publication', async () => {
 test('SAME-PROJECT INTERVENING EDIT rejects stale captured playlist state', async () => {
   const { wait, releasePersistence } = await startBlockedPersistence('same-project-audio');
   let published = false;
-  const currentClips = [...DEFAULT_PROJECT.playlistClips];
-  const editedClips = currentClips.map((clip, index) => index === 0 ? { ...clip, startBar: clip.startBar + 1 } : clip);
+  const currentClips = structuredClone(DEFAULT_PROJECT.playlistClips);
+  const editedClips = structuredClone(currentClips);
+  if (editedClips[0]) {
+    editedClips[0] = { ...editedClips[0], startBar: editedClips[0].startBar + 1 };
+  }
 
   const publication = wait.then(() => {
     published = true;
@@ -179,11 +182,13 @@ test('MULTIPLE OPERATIONS cannot let an older captured revision overwrite a newe
 
   // Operation A is now the newer committed playlist state. A's publication
   // advances the same revision used by the stale-publication guard.
-  const before = makeState([...DEFAULT_PROJECT.playlistClips]);
-  const after = makeState([...DEFAULT_PROJECT.playlistClips, {
-    ...DEFAULT_PROJECT.playlistClips[0],
-    id: `phase40-operation-a-${Date.now()}`,
-  }]);
+  const beforeClips = structuredClone(DEFAULT_PROJECT.playlistClips);
+  const afterClips = structuredClone(beforeClips);
+  if (afterClips[0]) {
+    afterClips[0] = { ...afterClips[0], name: `${afterClips[0].name} (A)` };
+  }
+  const before = makeState(beforeClips);
+  const after = makeState(afterClips);
   synchronizeBeforeRuntimePublication(before, after, () => undefined, state => state);
 
   releaseB.resolve();
@@ -194,12 +199,14 @@ test('publication tokens change across project generation and playlist revision 
   const initial = captureCurrentPlaylistAudioPublicationToken();
   assert.equal(isCurrentPlaylistAudioPublication(initial), true);
 
+  const beforeClips = structuredClone(DEFAULT_PROJECT.playlistClips);
+  const afterClips = structuredClone(beforeClips);
+  if (afterClips[0]) {
+    afterClips[0] = { ...afterClips[0], name: `${afterClips[0].name} (edited)` };
+  }
   synchronizeBeforeRuntimePublication(
-    makeState([...DEFAULT_PROJECT.playlistClips]),
-    makeState([...DEFAULT_PROJECT.playlistClips, {
-      ...DEFAULT_PROJECT.playlistClips[0],
-      id: `phase40-token-${Date.now()}`,
-    }]),
+    makeState(beforeClips),
+    makeState(afterClips),
     () => undefined,
     state => state,
   );
