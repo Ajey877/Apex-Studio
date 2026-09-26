@@ -50,6 +50,7 @@ import {
   findAutomationPointIndexNearX,
   resolveAddNodePosition,
 } from './playlistClipOperations';
+import { resolveInitialAudioDropStartBar } from './audioDropPlacement';
 
 interface PlaylistArrangerProps {
   tracks: PlaylistTrack[];
@@ -1057,7 +1058,11 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
                         const newDroppedClip: PlaylistClip = {
                           id: `audio-drop-${Date.now()}`,
                           trackIndex: trackIdx,
-                          startBar: currentBar - 1 >= 0 ? currentBar - 1 : 0,
+                          startBar: resolveInitialAudioDropStartBar(
+                            currentBar,
+                            durationBars,
+                            { totalBars, gridBars: DEFAULT_GRID_BARS }
+                          ),
                           lengthBars: durationBars,
                           type: 'audio',
                           audioBufferId: bufId,
