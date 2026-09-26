@@ -82,9 +82,11 @@ const loadProductionHandleUpdateClips = () => {
   if (!match) throw new Error('Could not locate App.handleUpdateClips production boundary');
 
   // App.tsx is TypeScript/TSX. The extracted handler is executed by Function(),
-  // so remove the one TypeScript assertion present in the production body while
+  // so remove only the TypeScript syntax present in the production body while
   // leaving the handler logic itself untouched.
-  const productionBody = match[1].replace(/\bas\s+string\b/g, '');
+  const productionBody = match[1]
+    .replace(/\bas\s+string\b/g, '')
+    .replace(/\(id\): id is string =>/g, '(id) =>');
 
   return new Function(
     'clips',
