@@ -159,16 +159,10 @@ test('DROPPED AUDIO + PROJECT REPLACEMENT rejects stale publication at App.handl
   const staleClip = audioClip('dropped-project-audio', 'Dropped Audio');
   let published = false;
 
-  invokeProductionHandleUpdateClips(
-    [...projectStateRef.current.playlistClips, staleClip],
-    projectStateRef,
-    engine,
-    state => { published = true; projectStateRef.current = state; },
-  );
+  invokeProductionHandleUpdateClips([...projectStateRef.current.playlistClips, staleClip], projectStateRef, engine,
+    state => { published = true; projectStateRef.current = state; });
 
-  await runProjectReplacementAfterBackup(undefined, async () => {
-    projectStateRef.current = projectB;
-  });
+  await runProjectReplacementAfterBackup(undefined, async () => { projectStateRef.current = projectB; });
   releasePersistence.resolve();
   await Promise.resolve();
   await Promise.resolve();
@@ -186,16 +180,10 @@ test('BOUNCE + PROJECT REPLACEMENT rejects stale publication at App.handleUpdate
   const bouncedClip = audioClip('bounced-project-audio', 'Kick [Bounced Stem]');
   let published = false;
 
-  invokeProductionHandleUpdateClips(
-    [...projectStateRef.current.playlistClips, bouncedClip],
-    projectStateRef,
-    engine,
-    state => { published = true; projectStateRef.current = state; },
-  );
+  invokeProductionHandleUpdateClips([...projectStateRef.current.playlistClips, bouncedClip], projectStateRef, engine,
+    state => { published = true; projectStateRef.current = state; });
 
-  await runProjectReplacementAfterBackup(undefined, async () => {
-    projectStateRef.current = projectB;
-  });
+  await runProjectReplacementAfterBackup(undefined, async () => { projectStateRef.current = projectB; });
   releasePersistence.resolve();
   await Promise.resolve();
   await Promise.resolve();
@@ -212,12 +200,8 @@ test('SAME-PROJECT INTERVENING EDIT survives the real App.handleUpdateClips publ
   const staleClip = audioClip('same-project-audio', 'Dropped Audio');
   let stalePublished = false;
 
-  invokeProductionHandleUpdateClips(
-    [...currentClips, staleClip],
-    projectStateRef,
-    engine,
-    state => { stalePublished = true; projectStateRef.current = state; },
-  );
+  invokeProductionHandleUpdateClips([...currentClips, staleClip], projectStateRef, engine,
+    state => { stalePublished = true; projectStateRef.current = state; });
 
   const editedClips = currentClips.map((clip, index) => index === 0
     ? { ...clip, startBar: clip.startBar + 1, name: 'A3' }
@@ -245,13 +229,11 @@ test('PERSISTENCE FAILURE through App.handleUpdateClips never publishes a playli
   let published = false;
   let saveError = '';
 
-  invokeProductionHandleUpdateClips(
-    [...projectStateRef.current.playlistClips, failedClip],
-    projectStateRef,
-    engine,
+  // The production handler waits on an asset that must already be registered.
+  engine.setSampleBuffer('failed-audio', {} as AudioBuffer);
+  invokeProductionHandleUpdateClips([...projectStateRef.current.playlistClips, failedClip], projectStateRef, engine,
     state => { published = true; projectStateRef.current = state; },
-    error => { saveError = error; },
-  );
+    error => { saveError = error; });
 
   await persistStarted.promise;
   await Promise.resolve();
@@ -268,12 +250,8 @@ test('NORMAL SUCCESS through App.handleUpdateClips publishes the new audio clip'
   const newClip = audioClip('successful-audio', 'Dropped Audio');
   const published = deferred();
 
-  invokeProductionHandleUpdateClips(
-    [...projectStateRef.current.playlistClips, newClip],
-    projectStateRef,
-    engine,
-    state => { projectStateRef.current = state; published.resolve(); },
-  );
+  invokeProductionHandleUpdateClips([...projectStateRef.current.playlistClips, newClip], projectStateRef, engine,
+    state => { projectStateRef.current = state; published.resolve(); });
   releasePersistence.resolve();
   await published.promise;
 
@@ -305,14 +283,10 @@ test('MULTIPLE OPERATIONS: older App.handleUpdateClips publication cannot overwr
 
   engine.setSampleBuffer('operation-a', {} as AudioBuffer);
   engine.setSampleBuffer('operation-b', {} as AudioBuffer);
-  invokeProductionHandleUpdateClips([...projectStateRef.current.playlistClips, clipA], projectStateRef, engine, state => {
-    publishedA = true;
-    publishThroughRuntimeBoundary(projectStateRef, state);
-  });
-  invokeProductionHandleUpdateClips([...projectStateRef.current.playlistClips, clipB], projectStateRef, engine, state => {
-    publishedB = true;
-    publishThroughRuntimeBoundary(projectStateRef, state);
-  });
+  invokeProductionHandleUpdateClips([...projectStateRef.current.playlistClips, clipA], projectStateRef, engine,
+    state => { publishedA = true; publishThroughRuntimeBoundary(projectStateRef, state); });
+  invokeProductionHandleUpdateClips([...projectStateRef.current.playlistClips, clipB], projectStateRef, engine,
+    state => { publishedB = true; publishThroughRuntimeBoundary(projectStateRef, state); });
 
   await Promise.all([startedA.promise, startedB.promise]);
   releaseA.resolve();
