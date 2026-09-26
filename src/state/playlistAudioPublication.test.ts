@@ -8,6 +8,7 @@ import {
 } from './playlistAudioPublication';
 import { runProjectReplacementAfterBackup } from './projectReplacement';
 import { synchronizeBeforeRuntimePublication } from './runtimeStatePublication';
+import { DEFAULT_PROJECT } from '../audio/presets';
 import type { ProjectState } from '../types/daw';
 
 interface Deferred {
@@ -36,7 +37,10 @@ const createFakeEngine = () => {
   };
 };
 
-const makeState = (playlistClips: unknown): ProjectState => ({ playlistClips } as ProjectState);
+const makeState = (playlistClips: ProjectState['playlistClips']): ProjectState => ({
+  ...DEFAULT_PROJECT,
+  playlistClips,
+});
 
 const startBlockedPersistence = async (id: string) => {
   const engine = createFakeEngine();
@@ -91,8 +95,8 @@ test('BOUNCE + PROJECT REPLACEMENT rejects stale publication', async () => {
 test('SAME-PROJECT INTERVENING EDIT rejects stale captured playlist state', async () => {
   const { wait, releasePersistence } = await startBlockedPersistence('same-project-audio');
   let published = false;
-  const currentClips = ['A1', 'A2'];
-  const editedClips = ['A1', 'A3'];
+  const currentClips = [...DEFAULT_PROJECT.playlistClips];
+  const editedClips = currentClips.map((clip, index) => index === 0 ? { ...clip, startBar: clip.startBar + 1 } : clip);
 
   const publication = wait.then(() => {
     published = true;
@@ -175,8 +179,11 @@ test('MULTIPLE OPERATIONS cannot let an older captured revision overwrite a newe
 
   // Operation A is now the newer committed playlist state. A's publication
   // advances the same revision used by the stale-publication guard.
-  const before = makeState(['A1']);
-  const after = makeState(['A1', 'A2']);
+  const before = makeState([...DEFAULT_PROJECT.playlistClips]);
+  const after = makeState([...DEFAULT_PROJECT.playlistClips, {
+    ...DEFAULT_PROJECT.playlistClips[0],
+    id: `phase40-operation-a-${Date.now()}`,
+  }]);
   synchronizeBeforeRuntimePublication(before, after, () => undefined, state => state);
 
   releaseB.resolve();
@@ -188,8 +195,11 @@ test('publication tokens change across project generation and playlist revision 
   assert.equal(isCurrentPlaylistAudioPublication(initial), true);
 
   synchronizeBeforeRuntimePublication(
-    makeState(['A1']),
-    makeState(['A1', 'A2']),
+    makeState([...DEFAULT_PROJECT.playlistClips]),
+    makeState([...DEFAULT_PROJECT.playlistClips, {
+      ...DEFAULT_PROJECT.playlistClips[0],
+      id: `phase40-token-${Date.now()}`,
+    }]),
     () => undefined,
     state => state,
   );
