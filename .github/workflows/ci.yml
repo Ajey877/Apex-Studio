@@ -35,7 +35,7 @@ jobs:
         run: npm run test:history
 
       - name: Focused audio drop placement regression tests
-        run: npx vitest run src/components/audioDropPlacement.test.ts
+        run: npx tsx --test src/components/audioDropPlacement.test.ts
 
       - name: Persistence and audio tests
         run: npm run test:audio
