@@ -226,6 +226,7 @@ test('SAME-PROJECT INTERVENING EDIT survives the real App.handleUpdateClips publ
 test('PERSISTENCE FAILURE through App.handleUpdateClips never publishes a playlist clip', async () => {
   const engine = createFakeEngine();
   const persistStarted = deferred();
+  const saveErrorReported = deferred();
   const expected = new Error('quota exceeded');
   installSampleBufferPersistence(engine, {
     encode: () => new Blob(['wav']),
@@ -239,11 +240,13 @@ test('PERSISTENCE FAILURE through App.handleUpdateClips never publishes a playli
   engine.setSampleBuffer('failed-audio', {} as AudioBuffer);
   invokeProductionHandleUpdateClips([...projectStateRef.current.playlistClips, failedClip], projectStateRef, engine,
     state => { published = true; projectStateRef.current = state; },
-    error => { saveError = error; });
+    error => {
+      saveError = error;
+      saveErrorReported.resolve();
+    });
 
   await persistStarted.promise;
-  await Promise.resolve();
-  await Promise.resolve();
+  await saveErrorReported.promise;
 
   assert.equal(published, false);
   assert.deepEqual(projectStateRef.current.playlistClips, DEFAULT_PROJECT.playlistClips);
