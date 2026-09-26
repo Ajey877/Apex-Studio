@@ -85,7 +85,7 @@ const loadProductionHandleUpdateClips = () => {
     'clips',
     'projectStateRef',
     'audioEngine',
-    'persistenceWait',
+    'waitForSampleBufferPersistence',
     'updatePlaylistProjectState',
     'playlistInteractionActiveRef',
     'commitPlaylistHistory',
@@ -95,7 +95,7 @@ const loadProductionHandleUpdateClips = () => {
     clips: PlaylistClip[],
     projectStateRef: { current: ProjectState },
     audioEngine: ReturnType<typeof createFakeEngine>,
-    persistenceWait: PersistenceWait,
+    waitForSampleBufferPersistence: PersistenceWait,
     updatePlaylistProjectState: (state: ProjectState) => void,
     playlistInteractionActiveRef: { current: boolean },
     commitPlaylistHistory: (state: ProjectState, label: string) => void,
@@ -229,7 +229,6 @@ test('PERSISTENCE FAILURE through App.handleUpdateClips never publishes a playli
   let published = false;
   let saveError = '';
 
-  // The production handler waits on an asset that must already be registered.
   engine.setSampleBuffer('failed-audio', {} as AudioBuffer);
   invokeProductionHandleUpdateClips([...projectStateRef.current.playlistClips, failedClip], projectStateRef, engine,
     state => { published = true; projectStateRef.current = state; },
