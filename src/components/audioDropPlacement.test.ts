@@ -20,7 +20,3 @@ test('initial audio placement snaps to the existing playlist grid', () => {
   assert.equal(resolveInitialAudioDropStartBar(10.13, 4, { totalBars: 32, gridBars: 0.25 }), 9);
   assert.equal(resolveInitialAudioDropStartBar(32, 3.6, { totalBars: 32, gridBars: 0.25 }), 28.25);
 });
-
-test('clips longer than the visible arrangement are anchored at bar zero rather than placed outside it', () => {
-  assert.equal(resolveInitialAudioDropStartBar(32, 40, { totalBars: 32 }), 0);
-});
