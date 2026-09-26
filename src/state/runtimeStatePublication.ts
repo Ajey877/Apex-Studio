@@ -1,4 +1,5 @@
 import type { ProjectState } from '../types/daw';
+import { notePlaylistAudioPlaylistRevision } from './playlistAudioPublication';
 
 /**
  * Synchronize runtime consumers before publishing a new logical project state.
@@ -27,5 +28,8 @@ export function synchronizeBeforeRuntimePublication<T>(
     }
     throw error;
   }
-  return publish(nextState);
+
+  const result = publish(nextState);
+  notePlaylistAudioPlaylistRevision(currentState.playlistClips, nextState.playlistClips);
+  return result;
 }
