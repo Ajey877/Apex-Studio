@@ -1,5 +1,9 @@
 import { persistAudioClip } from './audioPersistence';
 import { audioBufferToWav } from './wavEncoder';
+import {
+  captureCurrentPlaylistAudioPublicationToken,
+  isCurrentPlaylistAudioPublication,
+} from '../state/playlistAudioPublication';
 
 /**
  * Phase 8A — persistent dropped/bounced audio.
@@ -131,6 +135,12 @@ export const getSampleBufferPersistenceController = (
  * Playlist audio callers use this gate before committing a clip to project state.
  * A missing installer is treated as a failure rather than silently committing an
  * asset that cannot be guaranteed to be persistent.
+ *
+ * The publication token is captured before waiting and validated only after the
+ * persistence write succeeds. Project replacement advances the generation, while
+ * committed playlist-clip edits advance the playlist revision. Either change
+ * therefore rejects a stale callback before it can reach `onUpdateClips`'s
+ * publication path.
  */
 export const waitForSampleBufferPersistence = async (
   engine: SampleBufferEngineLike,
@@ -138,7 +148,13 @@ export const waitForSampleBufferPersistence = async (
 ): Promise<void> => {
   const controller = getSampleBufferPersistenceController(engine);
   if (!controller) throw new Error('Audio persistence is not installed');
+
+  const token = captureCurrentPlaylistAudioPublicationToken();
   await controller.waitFor(id);
+
+  if (!isCurrentPlaylistAudioPublication(token)) {
+    throw new Error('Stale playlist audio publication rejected after project or playlist state changed');
+  }
 };
 
 export const commitAfterSampleBufferPersistence = async (
