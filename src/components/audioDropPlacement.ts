@@ -8,6 +8,10 @@ export interface AudioDropPlacementBounds {
 /**
  * Resolve the initial timeline position for an imported audio clip.
  * The imported clip must fit completely inside the usable arrangement.
+ *
+ * The final clamp intentionally happens after grid snapping as well as before
+ * it. Rounding a non-grid-aligned maximum start can otherwise move the clip
+ * back outside the arrangement by one grid step.
  */
 export function resolveInitialAudioDropStartBar(
   currentBar: number,
@@ -23,5 +27,7 @@ export function resolveInitialAudioDropStartBar(
 
   const requestedStart = Math.max(0, Number.isFinite(currentBar) ? currentBar - 1 : 0);
   const maxStart = Math.max(0, totalBars - lengthBars);
-  return snapBarPosition(Math.min(requestedStart, maxStart), gridBars);
+  const snappedStart = snapBarPosition(Math.min(requestedStart, maxStart), gridBars);
+
+  return Math.min(snappedStart, maxStart);
 }
