@@ -1,0 +1,65 @@
+name: Apply targeted audio boundary patch
+
+on:
+  push:
+    branches: [fix/audio-clip-hard-boundary]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.head_ref || github.ref_name }}
+
+      - name: Patch audio clip creation boundaries
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('src/components/PlaylistArranger.tsx')
+          text = path.read_text()
+
+          replacements = {
+              'onUpdateClips([...clips, newDroppedClip]);': '''onUpdateClips([
+                            ...clips,
+                            {
+                              ...newDroppedClip,
+                              startBar: Math.min(
+                                newDroppedClip.startBar,
+                                Math.max(0, totalBars - newDroppedClip.lengthBars)
+                              )
+                            }
+                          ]);''',
+              'onUpdateClips([...clips, newClip]);': '''onUpdateClips([
+        ...clips,
+        {
+          ...newClip,
+          startBar: Math.min(newClip.startBar, Math.max(0, totalBars - newClip.lengthBars))
+        }
+      ]);'''
+          }
+
+          changed = False
+          for old, new in replacements.items():
+              if old in text:
+                  text = text.replace(old, new, 1)
+                  changed = True
+
+          if changed:
+              path.write_text(text)
+          PY
+
+      - name: Commit targeted patch
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/components/PlaylistArranger.tsx
+          git commit -m 'fix: enforce playlist bounds on audio clip creation' || exit 0
+          git push origin HEAD:${{ github.head_ref || github.ref_name }}
