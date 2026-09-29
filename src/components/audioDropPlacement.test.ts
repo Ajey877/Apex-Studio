@@ -17,3 +17,9 @@ test('never creates a negative initial position', () => {
 test('handles clips longer than the arrangement at bar zero', () => {
   assert.equal(resolveInitialAudioDropStartBar(32, 40, { totalBars: 32 }), 0);
 });
+
+test('snaps a non-grid-aligned legal start down without exceeding the timeline', () => {
+  const start = resolveInitialAudioDropStartBar(32, 3.9, { totalBars: 32, gridBars: 0.25 });
+  assert.equal(start, 28);
+  assert.ok(start + 3.9 <= 32);
+});
