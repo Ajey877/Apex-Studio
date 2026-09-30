@@ -49,6 +49,22 @@ interface MixerProps {
   onInteractionEnd?: (label?: string) => void;
 }
 
+/**
+ * Peak-meter level for one mixer strip.
+ *
+ * `audioEngine.getMixerTrackPeak` reads the channel analyser, which is wired
+ * after the channel's own gain node - so the reading already contains the
+ * fader's effect. The previous code multiplied by `track.volume` again, which
+ * displayed a track at 0.5 as another 6 dB quieter than the audio actually is
+ * (and `Math.min` then hid the error at the top of the scale). A meter must
+ * show what its tap measured, so the scaling factor is simply the tap.
+ */
+export const computeMixerMeterLevel = (rawPeak: number, isPlaying: boolean): number => {
+  if (!isPlaying) return 0;
+  if (!Number.isFinite(rawPeak) || rawPeak <= 0) return 0;
+  return Math.min(1.0, rawPeak);
+};
+
 export const Mixer: React.FC<MixerProps> = ({
   tracks,
   selectedTrackId,
@@ -85,10 +101,8 @@ export const Mixer: React.FC<MixerProps> = ({
 
     const updateVisuals = () => {
       // 1. Peak levels for each track
-      const peaks = tracks.map(t => {
-        const peak = audioEngine.getMixerTrackPeak(t.id);
-        return isPlaying ? Math.min(1.0, peak * (t.volume || 1.0)) : 0;
-      });
+      // Post-fader tap, no second copy of the fader gain (see computeMixerMeterLevel).
+      const peaks = tracks.map(t => computeMixerMeterLevel(audioEngine.getMixerTrackPeak(t.id), isPlaying));
       setTrackPeaks(peaks);
 
       // 2. Master Spectrum Analyzer (Top Bar)
