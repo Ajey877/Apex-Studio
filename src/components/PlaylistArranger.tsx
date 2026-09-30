@@ -50,7 +50,7 @@ import {
   findAutomationPointIndexNearX,
   resolveAddNodePosition,
 } from './playlistClipOperations';
-import { resolveInitialAudioDropStartBar } from './audioDropPlacement';
+import { resolveAudioDropStartBarFromClientX } from './audioDropPlacement';
 
 interface PlaylistArrangerProps {
   tracks: PlaylistTrack[];
@@ -1033,6 +1033,8 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
                   if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
                     const file = e.dataTransfer.files[0];
                     if (file.type.startsWith('audio/') || file.name.endsWith('.wav') || file.name.endsWith('.mp3') || file.name.endsWith('.ogg')) {
+                      const dropClientX = e.clientX;
+                      const trackRect = e.currentTarget.getBoundingClientRect();
                       setStatusMessage(`Importing sample "${file.name}" to Track #${track.id}...`);
                       try {
                         const arrayBuf = await file.arrayBuffer();
@@ -1058,10 +1060,12 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
                         const newDroppedClip: PlaylistClip = {
                           id: `audio-drop-${Date.now()}`,
                           trackIndex: trackIdx,
-                          startBar: resolveInitialAudioDropStartBar(
-                            currentBar,
+                          startBar: resolveAudioDropStartBarFromClientX(
+                            dropClientX,
+                            trackRect.left,
                             durationBars,
-                            { totalBars, gridBars: DEFAULT_GRID_BARS }
+                            { totalBars, gridBars: DEFAULT_GRID_BARS },
+                            BAR_WIDTH
                           ),
                           lengthBars: durationBars,
                           type: 'audio',
