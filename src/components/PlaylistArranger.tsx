@@ -1052,9 +1052,11 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
                       const dropClientY = e.clientY;
                       const trackRect = e.currentTarget.getBoundingClientRect();
                       const container = timelineScrollContainerRef.current;
-                      const containerRect = container?.getBoundingClientRect();
-                      const scrollLeft = container?.scrollLeft ?? 0;
-                      const scrollTop = container?.scrollTop ?? 0;
+                      const playlistRect = container ? container.getBoundingClientRect() : trackRect;
+                      const scrollLeft = container ? container.scrollLeft : 0;
+                      const scrollTop = container ? container.scrollTop : 0;
+                      const timelineOriginX = playlistRect.left;
+                      const timelineOriginY = playlistRect.top;
                       setStatusMessage(`Importing sample "${file.name}" to Track #${track.id}...`);
                       try {
                         const arrayBuf = await file.arrayBuffer();
@@ -1082,10 +1084,8 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
                           dropClientY,
                           durationBars,
                           {
-                            trackLeft: trackRect.left,
-                            trackTop: trackRect.top,
-                            viewportLeft: containerRect?.left,
-                            viewportTop: containerRect?.top,
+                            viewportLeft: timelineOriginX,
+                            viewportTop: timelineOriginY,
                             scrollLeft,
                             scrollTop,
                             barWidth: BAR_WIDTH,
