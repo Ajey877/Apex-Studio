@@ -11,6 +11,11 @@ import {
   SidechainSettings
 } from '../types/daw';
 import { AudioClockTransport, TransportState } from './transport';
+import { LoudnessMeter } from './loudnessMeasurement';
+import { TruePeakMeter } from './truePeak';
+import { StereoFieldMeter, computeMidSideVectors } from './stereoMeasurement';
+import { createMeasurementWindowPlanner, MeasurementWindowPlanner } from './masterMeasurementStream';
+import type { AudioLatencyMetrics, MasterMeasurementSnapshot } from '../types/daw';
 import { ChorusEffect } from './effects/ChorusEffect';
 import { WetDryEffect } from './effects/WetDryEffect';
 import { createInstrumentRegistry, InstrumentRegistry, InstrumentVoiceHandle } from './instrumentRegistry';
@@ -295,6 +300,23 @@ class AudioEngine {
   private masterGain: GainNode | null = null;
   private masterAnalyser: AnalyserNode | null = null;
   private grossBeatNode: GainNode | null = null;
+  /**
+   * Phase 45 master metering tap. `masterAnalyser` above stays exactly where
+   * it was (it down-mixes to mono, which is fine for the spectrum the mixer
+   * already reads); the splitter below is what makes an independent L/R
+   * measurement possible. Both analysers are leaves, mirroring the working
+   * per-channel analyser, so nothing about the audible graph changes.
+   */
+  private masterSplitter: ChannelSplitterNode | null = null;
+  private masterAnalyserL: AnalyserNode | null = null;
+  private masterAnalyserR: AnalyserNode | null = null;
+  private loudnessMeter: LoudnessMeter | null = null;
+  private truePeakMeter: TruePeakMeter | null = null;
+  private stereoFieldMeter: StereoFieldMeter | null = null;
+  private measurementPlanner: MeasurementWindowPlanner = createMeasurementWindowPlanner();
+  private measurementPumping = false;
+  private measurementTimerId: ReturnType<typeof setInterval> | null = null;
+  private measurementScratch: { left: Float32Array; right: Float32Array } | null = null;
   private mixerChannels: Map<number, MixerChannel> = new Map();
   private mixerRoutingAdapter: MixerRoutingAdapter | null = null;
   private mixerRoutingChannelMap: Map<number, MixerChannel> | null = null;
@@ -393,6 +415,7 @@ class AudioEngine {
     this.masterGain.connect(this.grossBeatNode);
     this.grossBeatNode.connect(this.masterAnalyser);
     this.masterAnalyser.connect(this.ctx.destination);
+    this.createMasterMeasurementTap(this.ctx);
 
     // Build default reverb impulse response
     this.buildReverbImpulse(2.5, 2.0);
@@ -2485,6 +2508,11 @@ class AudioEngine {
     const currentGeneration = this.playbackGeneration;
 
     const playbackSnapshot = this.createPlaybackSnapshot(channels, clips, mixerTracks ?? []);
+    // A new take is a new measurement session: starting from a stale
+    // integrated value would publish a loudness number for audio that was
+    // never part of this take.
+    this.resetMasterMeasurement();
+    this.startMasterMeasurementPump();
     this.isPlaying = true;
     this.activeChannels = playbackSnapshot.channels;
     this.activeClips = playbackSnapshot.clips;
@@ -2578,6 +2606,8 @@ class AudioEngine {
  public stop() {
   this.isPlaying = false;
   this.playbackGeneration++;
+  this.stopMasterMeasurementPump();
+  this.resetMasterMeasurement();
 
   if (this.timerId) {
     clearTimeout(this.timerId);
@@ -2606,6 +2636,9 @@ class AudioEngine {
     this.stopActivePlaybackAudio();
     this.transport.pause();
     this.isPlaying = false;
+    // The last measurement stays readable, but the pump stops so the numbers
+    // cannot drift into a state that no longer corresponds to any audio.
+    this.stopMasterMeasurementPump();
     this.syncEnginePositionFromTransport();
     const state = this.transport.getState();
     this.transportStateCallback?.(state);
@@ -2628,6 +2661,10 @@ class AudioEngine {
       this.stopActivePlaybackAudio();
     }
     transport.seek(boundedPosition);
+    // Seeking jumps the programme position, so blocks before and after it do
+    // not belong to one measurement; discard the session instead of averaging
+    // two unrelated positions into one "integrated" figure.
+    this.resetMasterMeasurement();
     this.syncEnginePositionFromTransport();
 
     if (this.isPlaying) {
@@ -2780,6 +2817,7 @@ class AudioEngine {
     this.playbackGeneration++;
     this.stopActivePlaybackAudio();
     this.isPlaying = false;
+    this.stopMasterMeasurementPump();
     const state = this.transport?.getState();
     if (state) {
       this.currentStep = state.step;
@@ -3092,90 +3130,261 @@ class AudioEngine {
   }
 
 
-  public getMasterLoudnessMetrics() {
-    if (!this.masterAnalyser || !this.ctx) {
-      return {
-        momentaryLufs: -24,
-        shortTermLufs: -24,
-        integratedLufs: -14.2,
-        truePeakDbfs: -6.0,
-        lowBandReductionDb: 0,
-        midBandReductionDb: 0,
-        highBandReductionDb: 0,
-        phaseCorrelation: 0.95,
-        stereoSpread: 1.0,
-        isClipping: false
-      };
+  /**
+   * Master-bus measurement snapshot.
+   *
+   * Every number here comes from samples that actually passed the master
+   * output: BS.1770-4 loudness from the splitter tap, inter-sample peaks from
+   * the oversampled detector, and correlation from independent L/R buffers.
+   * Fields stay null until the audio exists to measure them - a meter may show
+   * less, but it must never show a measurement it did not make.
+   */
+  public getMasterLoudnessMetrics(): MasterMeasurementSnapshot {
+    // During an offline bounce `ctx` and `masterAnalyser` are swapped for the
+    // render graph, so reading them here would meter a non-real-time graph and
+    // present it as live. Same protection the spectrum getters already use.
+    if (this.isOfflineRendering) {
+      return this.unavailableMasterMeasurement('offline-render');
+    }
+    if (!this.loudnessMeter || !this.truePeakMeter || !this.stereoFieldMeter) {
+      return this.unavailableMasterMeasurement('engine-idle');
     }
 
-    const bufferLength = this.masterAnalyser.frequencyBinCount;
-    const dataArray = new Float32Array(bufferLength);
-    this.masterAnalyser.getFloatTimeDomainData(dataArray);
-
-    let sumSquares = 0;
-    let peak = 0;
-    let sumL = 0;
-    let sumR = 0;
-    let sumDot = 0;
-
-    for (let i = 0; i < bufferLength; i++) {
-      const val = dataArray[i];
-      sumSquares += val * val;
-      const absVal = Math.abs(val);
-      if (absVal > peak) peak = absVal;
-
-      // Simulated stereo correlation across channel bins
-      const l = val;
-      const r = i < bufferLength - 1 ? dataArray[i + 1] * 0.98 : val;
-      sumL += l * l;
-      sumR += r * r;
-      sumDot += l * r;
-    }
-
-    const denom = Math.sqrt(sumL * sumR);
-    const phaseCorrelation = denom > 1e-6 ? Math.max(-1.0, Math.min(1.0, sumDot / denom)) : 1.0;
-
-    const rms = Math.sqrt(sumSquares / bufferLength);
-    const dbfs = 20 * Math.log10(Math.max(1e-5, rms));
-    const lufs = Math.max(-70, Math.min(0, dbfs - 0.691));
-    const peakDbfs = 20 * Math.log10(Math.max(1e-5, peak));
+    const loudness = this.loudnessMeter.getReading();
+    const peaks = this.truePeakMeter.getReading();
+    const field = this.stereoFieldMeter.getReading();
+    const measured = loudness.blockCount > 0 || peaks.truePeakDbfs !== null;
+    const truePeakDbfs = peaks.truePeakDbfs;
 
     return {
-      momentaryLufs: Number(lufs.toFixed(1)),
-      shortTermLufs: Number((lufs * 0.95).toFixed(1)),
-      integratedLufs: Number((lufs * 0.92).toFixed(1)),
-      truePeakDbfs: Number(peakDbfs.toFixed(1)),
-      lowBandReductionDb: peakDbfs > -3 ? Number((peakDbfs + 3).toFixed(1)) : 0,
-      midBandReductionDb: peakDbfs > -6 ? Number(((peakDbfs + 6) * 0.7).toFixed(1)) : 0,
-      highBandReductionDb: peakDbfs > -4 ? Number(((peakDbfs + 4) * 0.5).toFixed(1)) : 0,
-      phaseCorrelation: Number(phaseCorrelation.toFixed(2)),
-      stereoSpread: Number((1.0 - Math.abs(phaseCorrelation - 1.0) * 0.5).toFixed(2)),
-      isClipping: peak >= 0.99
+      momentaryLufs: loudness.momentaryLufs,
+      shortTermLufs: loudness.shortTermLufs,
+      integratedLufs: loudness.integratedLufs,
+      blockCount: loudness.blockCount,
+      gatedBlockCount: loudness.gatedBlockCount,
+      measuredSeconds: loudness.measuredSeconds,
+      shortTermReady: loudness.shortTermReady,
+      truePeakDbfs,
+      truePeakLeftDbfs: peaks.leftDbfs,
+      truePeakRightDbfs: peaks.rightDbfs,
+      samplePeakDbfs: peaks.samplePeakDbfs,
+      oversampleFactor: peaks.oversample,
+      phaseCorrelation: field.correlation,
+      sideMidRatioDb: field.sideMidRatioDb,
+      midPowerDbfs: field.midPowerDbfs,
+      sidePowerDbfs: field.sidePowerDbfs,
+      headroomDb: truePeakDbfs === null ? null : Math.round(-truePeakDbfs * 10) / 10,
+      // Clipping is decided from the reconstructed peak, not from the largest
+      // sample value: fs/4 material can overshoot by 3 dB between samples.
+      isClipping: truePeakDbfs === null ? null : truePeakDbfs >= 0,
+      isPumping: this.measurementPumping,
+      droppedSampleCount: this.measurementPlanner.unreadSampleCount,
+      sampleRate: this.ctx?.sampleRate ?? null,
+      availability: measured ? 'measured' : 'no-audio',
     };
   }
 
-  // Generate Goniometer / Lissajous vector points for 2D stereo phase scope
+  /**
+   * Goniometer vectors built from real Mid/Side of the master bus.
+   *
+   * Returns nothing when there is no signal: an empty scope is the honest
+   * rendering of "not measured", where a fabricated cluster of points would be
+   * a drawing of a stereo field that was never observed.
+   */
   public getStereoVectors(numPoints: number = 64): { x: number; y: number }[] {
-    if (!this.masterAnalyser) return [];
-    const bufferLength = this.masterAnalyser.frequencyBinCount;
-    const dataArray = new Float32Array(bufferLength);
-    this.masterAnalyser.getFloatTimeDomainData(dataArray);
+    if (this.isOfflineRendering) return [];
+    const windows = this.readMasterChannelWindows();
+    if (!windows) return [];
+    return computeMidSideVectors(windows.left, windows.right, numPoints);
+  }
 
-    const step = Math.max(1, Math.floor(bufferLength / numPoints));
-    const points: { x: number; y: number }[] = [];
+  /**
+   * Sample rate and latency of the live context, for surfaces that must not
+   * print a hard-coded "44.1kHz". Null means "there is no audio context yet",
+   * which the UI renders as an unavailable state rather than a guess.
+   */
+  public getSampleRate(): number | null {
+    const ctx = this.liveCtx ?? this.ctx;
+    return ctx ? ctx.sampleRate : null;
+  }
 
-    for (let i = 0; i < numPoints; i++) {
-      const idx = i * step;
-      const l = dataArray[idx] || 0;
-      const r = (dataArray[idx + 1] || dataArray[idx]) * 0.95;
-      
-      // Rotate 45 degrees: M = (L+R)/sqrt(2) (vertical), S = (L-R)/sqrt(2) (horizontal)
-      const x = (l - r) * 0.7071;
-      const y = (l + r) * 0.7071;
-      points.push({ x, y });
+  public getLatencyMetrics(): AudioLatencyMetrics | null {
+    const ctx = this.liveCtx ?? this.ctx;
+    if (!ctx) return null;
+    const baseLatency = (ctx as AudioContext & { baseLatency?: number }).baseLatency;
+    const outputLatency = (ctx as AudioContext & { outputLatency?: number }).outputLatency;
+    // Chromium renders in fixed 128-frame quanta; that is a block size, not a
+    // round-trip latency, so both are reported and labelled separately.
+    const renderQuantumSamples = 128;
+    return {
+      sampleRate: ctx.sampleRate,
+      baseLatencySeconds: Number.isFinite(baseLatency) ? (baseLatency as number) : null,
+      outputLatencySeconds: Number.isFinite(outputLatency) ? (outputLatency as number) : null,
+      renderQuantumSamples,
+      renderQuantumSeconds: renderQuantumSamples / ctx.sampleRate,
+    };
+  }
+
+  /**
+   * Discards every accumulated measurement. Callers that replace a project or
+   * restart a take must not keep an integrated value that belongs to the
+   * previous programme.
+   */
+  public resetMasterMeasurement(): void {
+    this.loudnessMeter?.reset();
+    this.truePeakMeter?.reset();
+    this.stereoFieldMeter?.reset();
+    this.measurementPlanner.reset();
+  }
+
+  private unavailableMasterMeasurement(availability: MasterMeasurementSnapshot['availability']): MasterMeasurementSnapshot {
+    return {
+      momentaryLufs: null,
+      shortTermLufs: null,
+      integratedLufs: null,
+      blockCount: 0,
+      gatedBlockCount: 0,
+      measuredSeconds: 0,
+      shortTermReady: false,
+      truePeakDbfs: null,
+      truePeakLeftDbfs: null,
+      truePeakRightDbfs: null,
+      samplePeakDbfs: null,
+      oversampleFactor: this.truePeakMeter ? this.truePeakMeter.getReading().oversample : null,
+      phaseCorrelation: null,
+      sideMidRatioDb: null,
+      midPowerDbfs: null,
+      sidePowerDbfs: null,
+      headroomDb: null,
+      isClipping: null,
+      isPumping: false,
+      droppedSampleCount: this.measurementPlanner.unreadSampleCount,
+      sampleRate: this.getSampleRate(),
+      availability,
+    };
+  }
+
+  /**
+   * Adds the stereo measurement tap: master output -> ChannelSplitter(2) ->
+   * one analyser per channel, both as leaves. The audible path is untouched.
+   */
+  private createMasterMeasurementTap(ctx: AudioContext | OfflineAudioContext): void {
+    this.disposeMasterMeasurementTap();
+    if (typeof ctx.createChannelSplitter !== 'function' || typeof ctx.createAnalyser !== 'function') {
+      return;
     }
 
-    return points;
+    const splitter = ctx.createChannelSplitter(2);
+    // 4096 samples keeps ~85 ms of history at 48 kHz, which is more headroom
+    // than the pump interval needs, so no audio is ever skipped between reads.
+    const analyserL = ctx.createAnalyser();
+    const analyserR = ctx.createAnalyser();
+    for (const analyser of [analyserL, analyserR]) {
+      analyser.fftSize = 4096;
+      // Smoothing belongs to the FFT; time-domain reads must see raw samples
+      // or the reconstructed peak and block energies would be filtered values.
+      analyser.smoothingTimeConstant = 0;
+    }
+
+    this.masterSplitter = splitter;
+    this.masterAnalyserL = analyserL;
+    this.masterAnalyserR = analyserR;
+
+    if (this.grossBeatNode) {
+      this.grossBeatNode.connect(splitter);
+      splitter.connect(analyserL, 0);
+      splitter.connect(analyserR, 1);
+    }
+
+    const sampleRate = ctx.sampleRate;
+    this.loudnessMeter = new LoudnessMeter(sampleRate);
+    this.truePeakMeter = new TruePeakMeter({ oversample: 4, tapsPerPhase: 12 });
+    this.stereoFieldMeter = new StereoFieldMeter();
+    this.stereoFieldMeter.setSampleRate(sampleRate);
+    this.measurementPlanner.reset();
+  }
+
+  private disposeMasterMeasurementTap(): void {
+    try { this.masterSplitter?.disconnect(); } catch (_) { /* already torn down */ }
+    try { this.masterAnalyserL?.disconnect(); } catch (_) { /* already torn down */ }
+    try { this.masterAnalyserR?.disconnect(); } catch (_) { /* already torn down */ }
+    this.masterSplitter = null;
+    this.masterAnalyserL = null;
+    this.masterAnalyserR = null;
+    this.measurementScratch = null;
+  }
+
+  /**
+   * Measurement is driven by the engine, not by whoever happens to be looking.
+   * A modal that only samples while it is mounted would silently freeze the
+   * integrated value, which is how a stale figure ends up presented as live.
+   */
+  private startMasterMeasurementPump(): void {
+    if (this.measurementTimerId !== null) return;
+    this.measurementPumping = true;
+    this.measurementTimerId = setInterval(() => {
+      this.pumpMasterMeasurement();
+    }, 20);
+    // A live timer holds the Node event loop open (tests, SSR). The pump is
+    // housekeeping, never a reason to keep a process alive; browsers return a
+    // plain number here, hence the capability check.
+    const timer = this.measurementTimerId as unknown as { unref?: () => void };
+    if (typeof timer?.unref === 'function') timer.unref();
+  }
+
+  private stopMasterMeasurementPump(): void {
+    if (this.measurementTimerId !== null) {
+      clearInterval(this.measurementTimerId);
+      this.measurementTimerId = null;
+    }
+    this.measurementPumping = false;
+  }
+
+  /**
+   * Consumes only the samples that arrived since the previous read.
+   *
+   * An AnalyserNode only offers the tail of its input, so the engine maps the
+   * context clock onto a sample index and takes exactly the new region. If the
+   * page was throttled and audio went by unread, the shortfall is counted and
+   * published instead of being quietly guessed at.
+   */
+  private pumpMasterMeasurement(): void {
+    if (this.isOfflineRendering) return;
+    const ctx = this.ctx;
+    if (!ctx || !this.masterAnalyserL || !this.masterAnalyserR) return;
+    if (!this.loudnessMeter || !this.truePeakMeter || !this.stereoFieldMeter) return;
+
+    const windows = this.readMasterChannelWindows();
+    if (!windows) return;
+
+    const size = windows.left.length;
+    // Absolute sample index of the newest frame the context has rendered. The
+    // planner decides which part of the tail has not been measured yet, and
+    // counts anything that went by unread (published as droppedSampleCount
+    // rather than quietly guessed at).
+    const plan = this.measurementPlanner.plan(Math.floor(ctx.currentTime * ctx.sampleRate), size);
+    if (plan.primed || plan.count <= 0) return;
+
+    const left = windows.left.subarray(plan.offset, plan.offset + plan.count);
+    const right = windows.right.subarray(plan.offset, plan.offset + plan.count);
+    this.loudnessMeter.pushFrame(left, right);
+    this.truePeakMeter.pushFrame(left, right);
+    this.stereoFieldMeter.pushFrame(left, right);
+  }
+
+  /** Raw, unsmoothed time-domain windows of the two master channels. */
+  private readMasterChannelWindows(): { left: Float32Array; right: Float32Array } | null {
+    const analyserL = this.masterAnalyserL;
+    const analyserR = this.masterAnalyserR;
+    if (!analyserL || !analyserR) return null;
+
+    const size = analyserL.fftSize;
+    if (!this.measurementScratch || this.measurementScratch.left.length !== size) {
+      this.measurementScratch = { left: new Float32Array(size), right: new Float32Array(size) };
+    }
+    analyserL.getFloatTimeDomainData(this.measurementScratch.left);
+    analyserR.getFloatTimeDomainData(this.measurementScratch.right);
+    return this.measurementScratch;
   }
 
   // Real-time timeline tape scrub audition sound synthesis

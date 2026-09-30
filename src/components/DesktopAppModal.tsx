@@ -20,6 +20,8 @@ import {
   FileCode
 } from 'lucide-react';
 import JSZip from 'jszip';
+import { audioEngine } from '../audio/audioEngine';
+import type { AudioLatencyMetrics } from '../types/daw';
 
 interface DesktopAppModalProps {
   isOpen: boolean;
@@ -60,6 +62,24 @@ export const DesktopAppModal: React.FC<DesktopAppModalProps> = ({
     window.addEventListener('resize', handleResize);
     return () => window.removeEventListener('resize', handleResize);
   }, []);
+
+  /**
+   * Audio engine facts read from the live AudioContext. There is deliberately
+   * no fallback constant: before an audio context exists this reports "engine
+   * not started" instead of showing a latency figure the app never measured.
+   */
+  const [audioEngineInfo, setAudioEngineInfo] = useState<AudioLatencyMetrics | null>(null);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    const read = () => setAudioEngineInfo(audioEngine.getLatencyMetrics());
+    read();
+    const timerId = setInterval(read, 1000);
+    return () => clearInterval(timerId);
+  }, [isOpen]);
+
+  const formatMs = (seconds: number | null | undefined): string | null =>
+    seconds === null || seconds === undefined || !Number.isFinite(seconds) ? null : `${(seconds * 1000).toFixed(2)}ms`;
 
   useEffect(() => {
     const handleBeforeInstallPrompt = (e: Event) => {
@@ -504,8 +524,19 @@ For ultra-low latency (< 5ms) when recording MIDI or vocals:
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
                 <div className="bg-[#141418] p-3 rounded-lg border border-[#26262a] space-y-1">
                   <span className="text-[10px] text-[#777] font-bold block">AUDIO ENGINE LATENCY</span>
-                  <span className="text-[#00ff88] font-mono text-sm font-bold">5.8ms (128 Samples)</span>
-                  <p className="text-[10px] text-[#666]">Direct AudioContext Worklet thread execution</p>
+                  <span className="text-[#00ff88] font-mono text-sm font-bold">
+                    {audioEngineInfo
+                      ? [
+                          `base ${formatMs(audioEngineInfo.baseLatencySeconds) ?? 'not reported'}`,
+                          `output ${formatMs(audioEngineInfo.outputLatencySeconds) ?? 'not reported'}`,
+                        ].join(' / ')
+                      : 'ENGINE NOT STARTED'}
+                  </span>
+                  <p className="text-[10px] text-[#666]">
+                    {audioEngineInfo
+                      ? `Render quantum ${audioEngineInfo.renderQuantumSamples} frames (${(audioEngineInfo.renderQuantumSeconds * 1000).toFixed(2)}ms) at ${(audioEngineInfo.sampleRate / 1000).toFixed(1)}kHz, read from AudioContext.baseLatency / outputLatency.`
+                      : 'Latency is read from AudioContext.baseLatency / outputLatency once the audio engine exists.'}
+                  </p>
                 </div>
 
                 <div className="bg-[#141418] p-3 rounded-lg border border-[#26262a] space-y-1">
@@ -515,9 +546,12 @@ For ultra-low latency (< 5ms) when recording MIDI or vocals:
                 </div>
 
                 <div className="bg-[#141418] p-3 rounded-lg border border-[#26262a] space-y-1">
-                  <span className="text-[10px] text-[#777] font-bold block">CPU MULTI-THREADING</span>
-                  <span className="text-[#ffaa00] font-mono text-sm font-bold">Web Audio Worklet</span>
-                  <p className="text-[10px] text-[#666]">Separate real-time audio thread from UI rendering</p>
+                  <span className="text-[10px] text-[#777] font-bold block">AUDIO THREADING</span>
+                  <span className="text-[#ffaa00] font-mono text-sm font-bold">Web Audio graph thread</span>
+                  <p className="text-[10px] text-[#666]">
+                    Node processing runs on the browser audio thread while voices are scheduled from the main thread.
+                    No AudioWorklet processor is used by the engine today.
+                  </p>
                 </div>
               </div>
             </div>

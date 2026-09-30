@@ -394,6 +394,77 @@ export interface MasteringSuiteState {
   lufsTarget: number; // -14 for Spotify / Youtube, -9 for Club / Beatport
 }
 
+/**
+ * Why a master measurement is unavailable. Kept explicit so the UI can say
+ * "not measured" instead of quietly displaying a plausible number.
+ * - `measured`: at least one real block of master audio has been analysed.
+ * - `no-audio`: the engine ran but the master bus carried only silence.
+ * - `engine-idle`: no audio context / measurement tap exists yet.
+ * - `offline-render`: a bounce owns the graph; live meters must not read it.
+ */
+export type MasterMeasurementAvailability =
+  | 'measured'
+  | 'no-audio'
+  | 'engine-idle'
+  | 'offline-render';
+
+/**
+ * Snapshot of genuine master-bus measurements (Phase 45).
+ *
+ * Nullability is the contract: `null` means "this was not measured", and no
+ * consumer may render one of these fields as a result, a status, or a pass.
+ */
+export interface MasterMeasurementSnapshot {
+  // --- ITU-R BS.1770-4 loudness (K-weighted, gated) ---
+  momentaryLufs: number | null;
+  shortTermLufs: number | null;
+  integratedLufs: number | null;
+  /** Complete 400 ms gating blocks produced since the last reset. */
+  blockCount: number;
+  /** Blocks that survived the absolute and relative gates. */
+  gatedBlockCount: number;
+  /** Seconds of master audio actually measured. */
+  measuredSeconds: number;
+  /** False until 3 s of blocks exist, i.e. while short-term is not yet a 3 s figure. */
+  shortTermReady: boolean;
+
+  // --- Inter-sample peaks (never a plain sample peak) ---
+  truePeakDbfs: number | null;
+  truePeakLeftDbfs: number | null;
+  truePeakRightDbfs: number | null;
+  /** Largest raw sample magnitude, kept separate so the two cannot be confused. */
+  samplePeakDbfs: number | null;
+  /** Oversampling factor the detector actually used; null when there was no
+   * detector to ask, never a default that implies a measurement happened. */
+  oversampleFactor: number | null;
+  headroomDb: number | null;
+  /** Null when undecidable; true only when the reconstructed peak reaches 0 dBFS. */
+  isClipping: boolean | null;
+
+  // --- Stereo field from an independent L/R tap ---
+  phaseCorrelation: number | null;
+  sideMidRatioDb: number | null;
+  midPowerDbfs: number | null;
+  sidePowerDbfs: number | null;
+
+  // --- Measurement provenance ---
+  /** True while the engine is actively consuming master audio. */
+  isPumping: boolean;
+  /** Samples the pump could not read (e.g. a throttled tab); never guessed. */
+  droppedSampleCount: number;
+  sampleRate: number | null;
+  availability: MasterMeasurementAvailability;
+}
+
+/** Latency reported by the live audio context, with unknowns left unknown. */
+export interface AudioLatencyMetrics {
+  sampleRate: number;
+  baseLatencySeconds: number | null;
+  outputLatencySeconds: number | null;
+  renderQuantumSamples: number;
+  renderQuantumSeconds: number;
+}
+
 export interface PlaylistTrack {
   id: number;
   name: string;

@@ -14,7 +14,7 @@ import {
   Sparkles,
   Gauge
 } from 'lucide-react';
-import { MasteringSuiteState, MultibandBandSettings } from '../types/daw';
+import { MasteringSuiteState, MultibandBandSettings, MasterMeasurementSnapshot } from '../types/daw';
 import { audioEngine } from '../audio/audioEngine';
 
 interface MasteringSuiteModalProps {
@@ -25,10 +25,35 @@ interface MasteringSuiteModalProps {
   isPlaying: boolean;
 }
 
+/**
+ * Display tolerance for the loudness-target readout. This is a presentation
+ * threshold chosen by the UI; it is not a delivery certification, and the
+ * readout says so rather than claiming a platform "pass".
+ */
+const TARGET_TOLERANCE_DB = 1.5;
+
+/** Master analyser bins: fftSize 512 -> 256 bins spanning DC..Nyquist. */
+const MASTER_FFT_BINS = 256;
+
+/**
+ * The mastering processing controls are intentionally not wired to the audio
+ * graph in this phase (Phase 46 owns the master chain). Showing live "GR"
+ * values or an "active" status for them would be a measurement the engine
+ * never made, so every one of these panels says what it is.
+ */
+const NotAppliedBanner = ({ label }: { label: string }) => (
+  <div className="bg-[#0a0a0c] border border-[#ffaa00]/40 rounded-lg px-3 py-2 flex items-center justify-between gap-2">
+    <span className="text-[10px] font-mono font-bold text-[#ffaa00] uppercase tracking-wider">
+      {label}: NOT APPLIED — NO PROCESSING IN SIGNAL PATH
+    </span>
+    <span className="text-[10px] text-[#777] whitespace-nowrap">STORED AS INTENT · PHASE 46</span>
+  </div>
+);
+
 const MASTERING_PRESETS = [
   {
     name: 'Streaming Standard (-14 LUFS)',
-    desc: 'Transparent loudness optimized for Spotify, Apple Music & YouTube with pristine dynamic range.',
+    desc: 'Transparent loudness optimized for Spotify, Apple Music & YouTube with values stored for a future master chain.',
     lufsTarget: -14.0,
     lowGain: 0.5,
     midGain: -0.2,
@@ -42,7 +67,7 @@ const MASTERING_PRESETS = [
   },
   {
     name: 'Club & Beatport Banger (-9 LUFS)',
-    desc: 'Dense, aggressive master with heavy sub punch and pushed transients for sound system impact.',
+    desc: 'Dense, aggressive master with heavy sub punch and pushed transients values stored for a future master chain.',
     lufsTarget: -9.0,
     lowGain: 2.5,
     midGain: 0.5,
@@ -92,18 +117,14 @@ export const MasteringSuiteModal: React.FC<MasteringSuiteModalProps> = ({
   isPlaying
 }) => {
   const [activeTab, setActiveTab] = useState<'metering' | 'multiband' | 'imager' | 'maximizer'>('metering');
-  const [meterMetrics, setMeterMetrics] = useState({
-    momentaryLufs: -24,
-    shortTermLufs: -24,
-    integratedLufs: -14.2,
-    truePeakDbfs: -6.0,
-    lowBandReductionDb: 0,
-    midBandReductionDb: 0,
-    highBandReductionDb: 0,
-    phaseCorrelation: 0.95,
-    stereoSpread: 1.0,
-    isClipping: false
-  });
+  // No seed values: `null` is the honest "nothing has been measured yet" state,
+  // and every readout below has to handle it. The default object this replaces
+  // carried a plausible integrated LUFS figure, a reassuring peak and a wide
+  // correlation, which let the compliance badges read PASS before a single
+  // sample of audio existed.
+  const [measurement, setMeasurement] = useState<MasterMeasurementSnapshot | null>(null);
+  const measurementRef = useRef<MasterMeasurementSnapshot | null>(null);
+  const spectrumDataRef = useRef<Uint8Array | null>(null);
 
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const goniometerCanvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -114,10 +135,13 @@ export const MasteringSuiteModal: React.FC<MasteringSuiteModalProps> = ({
 
     let animId: number;
     const update = () => {
-      if (isPlaying) {
-        const metrics = audioEngine.getMasterLoudnessMetrics();
-        setMeterMetrics(metrics);
-      }
+      // The engine pumps measurement while the transport runs; this surface only
+      // reads it. Reading every frame (instead of only while playing) keeps the
+      // numbers live *and* makes the "not measuring" state explicit, rather than
+      // leaving a frozen figure on screen looking current.
+      const next = audioEngine.getMasterLoudnessMetrics();
+      measurementRef.current = next;
+      setMeasurement(next);
       drawMasterSpectrum();
       drawGoniometer();
       animId = requestAnimationFrame(update);
@@ -125,7 +149,7 @@ export const MasteringSuiteModal: React.FC<MasteringSuiteModalProps> = ({
 
     animId = requestAnimationFrame(update);
     return () => cancelAnimationFrame(animId);
-  }, [isOpen, isPlaying]);
+  }, [isOpen]);
 
   const drawGoniometer = () => {
     const canvas = goniometerCanvasRef.current;
@@ -170,10 +194,24 @@ export const MasteringSuiteModal: React.FC<MasteringSuiteModalProps> = ({
     ctx.fillText('L', centerX - radius * 0.7 - 6, centerY - radius * 0.7);
     ctx.fillText('R', centerX + radius * 0.7 + 2, centerY - radius * 0.7);
 
-    // Lissajous Vector Trace
-    const vectors = audioEngine.getStereoVectors(isPlaying ? 64 : 16);
-    if (vectors.length > 0) {
-      ctx.strokeStyle = meterMetrics.phaseCorrelation > 0.4 ? '#00ff88' : meterMetrics.phaseCorrelation >= 0 ? '#ffaa00' : '#ff0055';
+    // Lissajous trace from the measured Mid/Side of the master bus. No points
+    // means no measurement, so the scope stays dark instead of drawing a
+    // plausible cluster.
+    const current = measurementRef.current;
+    const vectors = audioEngine.getStereoVectors(current?.isPumping ? 128 : 32);
+    const correlation = current?.phaseCorrelation ?? null;
+    if (vectors.length === 0) {
+      ctx.fillStyle = '#4a4a52';
+      ctx.font = '9px monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText('NO SIGNAL - STEREO FIELD NOT MEASURED', centerX, centerY + 3);
+      ctx.textAlign = 'left';
+      return;
+    }
+    if (correlation === null) {
+      ctx.strokeStyle = '#4a4a52';
+    } else if (vectors.length > 0) {
+      ctx.strokeStyle = correlation > 0.4 ? '#00ff88' : correlation >= 0 ? '#ffaa00' : '#ff0055';
       ctx.lineWidth = 1.5;
       ctx.shadowColor = ctx.strokeStyle;
       ctx.shadowBlur = 8;
@@ -219,9 +257,25 @@ export const MasteringSuiteModal: React.FC<MasteringSuiteModalProps> = ({
     gradient.addColorStop(0.6, '#ff6e00');
     gradient.addColorStop(1, '#ff0055');
 
+    // Real master FFT, read through the same engine API the mixer already uses.
+    // Each bar averages the analyser bins that fall under it, so the shape is a
+    // display aggregation of measured data rather than an animation.
+    let data = spectrumDataRef.current;
+    if (!data || data.length !== MASTER_FFT_BINS) {
+      data = new Uint8Array(MASTER_FFT_BINS);
+      spectrumDataRef.current = data;
+    }
+    audioEngine.getMasterFrequencyData(data);
+
+    const binsPerBar = Math.max(1, Math.floor(MASTER_FFT_BINS / bars));
     for (let i = 0; i < bars; i++) {
-      const freqFactor = isPlaying ? Math.sin((i * 0.4) + (Date.now() * 0.008)) * 0.3 + 0.5 : 0.05;
-      const barHeight = Math.max(4, freqFactor * (height - 10));
+      let sum = 0;
+      for (let b = 0; b < binsPerBar; b++) {
+        sum += data[i * binsPerBar + b] ?? 0;
+      }
+      const level = sum / (binsPerBar * 255);
+      const barHeight = level * (height - 10);
+      if (barHeight <= 0) continue;
 
       ctx.fillStyle = gradient;
       ctx.fillRect(i * barWidth + 1, height - barHeight, barWidth - 2, barHeight);
@@ -243,7 +297,36 @@ export const MasteringSuiteModal: React.FC<MasteringSuiteModalProps> = ({
     });
   };
 
-  const lufsDelta = meterMetrics.integratedLufs - (masteringState.lufsTarget || -14.0);
+  const integratedLufs = measurement?.integratedLufs ?? null;
+  const lufsTargetValue = masteringState.lufsTarget ?? -14.0;
+  const lufsDelta = integratedLufs === null ? null : integratedLufs - lufsTargetValue;
+  // The gate every status readout shares: a verdict may only exist when the
+  // measurement it refers to exists.
+  const isMeasured = measurement?.availability === 'measured';
+  const isMeasuring = !!measurement && measurement.isPumping;
+  const sampleRateHz = measurement?.sampleRate ?? null;
+  const availabilityNote = (() => {
+    if (!measurement) return 'WAITING FOR ENGINE';
+    switch (measurement.availability) {
+      case 'measured': return isMeasuring ? 'MEASURING' : 'LAST MEASUREMENT (TRANSPORT NOT RUNNING)';
+      case 'no-audio': return 'NO SIGNAL ON MASTER BUS';
+      case 'offline-render': return 'UNAVAILABLE DURING OFFLINE BOUNCE';
+      default: return 'ENGINE NOT STARTED';
+    }
+  })();
+  const formatDb = (value: number | null | undefined, decimals = 1, suffix = ''): string =>
+    value === null || value === undefined ? '—' : `${value.toFixed(decimals)}${suffix}`;
+  const formatSigned = (value: number | null | undefined, decimals = 2): string =>
+    value === null || value === undefined ? '—' : `${value > 0 ? '+' : ''}${value.toFixed(decimals)}`;
+  const complianceClass = (target: number): string => {
+    if (integratedLufs === null) return 'text-[#666]';
+    return Math.abs(integratedLufs - target) <= TARGET_TOLERANCE_DB ? 'text-[#00ff88] font-bold' : 'text-[#ffaa00]';
+  };
+  const complianceText = (target: number): string => {
+    if (integratedLufs === null) return 'NOT MEASURED';
+    const delta = integratedLufs - target;
+    return Math.abs(delta) <= TARGET_TOLERANCE_DB ? 'ON TARGET' : `${delta > 0 ? '+' : ''}${delta.toFixed(1)} dB`;
+  };
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-3 bg-black/80 backdrop-blur-md animate-fade-in select-none">
@@ -256,25 +339,26 @@ export const MasteringSuiteModal: React.FC<MasteringSuiteModalProps> = ({
             </div>
             <div>
               <div className="flex items-center gap-2">
-                <h2 className="text-sm font-black tracking-wide text-white uppercase">APEX MASTERING SUITE PRO</h2>
+                <h2 className="text-sm font-black tracking-wide text-white uppercase">APEX MASTERING SUITE</h2>
                 <span className="text-[10px] bg-[#ff6e00]/20 text-[#ff6e00] border border-[#ff6e00]/40 px-1.5 py-0.5 rounded font-mono font-bold">
-                  ITU-R BS.1770 / EBU R128
+                  ITU-R BS.1770-4 / EBU R128
                 </span>
               </div>
-              <p className="text-[11px] text-[#888]">Commercial-grade loudness compliance, 3-band dynamics & brickwall limiting</p>
+              <p className="text-[11px] text-[#888]">
+                Master bus measurement: gated loudness, inter-sample peak and stereo field. Processing controls below are
+                stored intent only - the master chain is not wired yet.
+              </p>
             </div>
           </div>
 
           <div className="flex items-center gap-2">
-            <button
-              onClick={() => onUpdateMasteringState({ ...masteringState, enabled: !masteringState.enabled })}
-              className={`px-3 py-1 text-xs font-bold rounded flex items-center gap-1.5 transition ${
-                masteringState.enabled ? 'bg-[#00ff88] text-black shadow-md' : 'bg-[#222] text-[#888] hover:text-white'
-              }`}
+            <span
+              title="Phase 46 owns the master processing chain. Until it exists there is nothing to enable or bypass, so this reads as a fact rather than a switch."
+              className="px-3 py-1 text-xs font-bold rounded flex items-center gap-1.5 bg-[#222] text-[#888] border border-[#333]"
             >
               <ShieldCheck className="w-3.5 h-3.5" />
-              <span>{masteringState.enabled ? 'SUITE ACTIVE' : 'BYPASSED'}</span>
-            </button>
+              <span>MASTER CHAIN: NOT APPLIED</span>
+            </span>
 
             <button
               onClick={onClose}
@@ -341,8 +425,12 @@ export const MasteringSuiteModal: React.FC<MasteringSuiteModalProps> = ({
           {/* Top Spectrum Preview */}
           <div className="bg-[#0b0b0e] border border-[#222226] rounded-xl p-3 flex flex-col gap-2">
             <div className="flex items-center justify-between text-[11px] font-mono text-[#888]">
-              <span>MASTER BUS REAL-TIME FFT SPECTRUM</span>
-              <span className="text-[#00ff88]">{isPlaying ? 'LIVE SIGNAL 44.1kHz / 32-BIT FLOAT' : 'IDLE'}</span>
+              <span>{`MASTER BUS FFT SPECTRUM (${MASTER_FFT_BINS} BINS${sampleRateHz ? ` · DC-${Math.round(sampleRateHz / 2000)}kHz` : ''})`}</span>
+              <span className={isMeasuring ? 'text-[#00ff88]' : 'text-[#888]'}>
+                {sampleRateHz
+                  ? `${(sampleRateHz / 1000).toFixed(1)}kHz · 32-bit float · ${availabilityNote}`
+                  : 'NO CONTEXT - SPECTRUM NOT MEASURED'}
+              </span>
             </div>
             <canvas ref={canvasRef} width={760} height={60} className="w-full h-14 rounded bg-[#070709]" />
           </div>
@@ -355,17 +443,21 @@ export const MasteringSuiteModal: React.FC<MasteringSuiteModalProps> = ({
                 <div className="bg-[#18181d] border border-[#282830] rounded-xl p-3 flex flex-col items-center justify-center text-center">
                   <span className="text-[10px] font-bold text-[#888] uppercase tracking-wider mb-0.5">INTEGRATED LUFS</span>
                   <span className={`text-2xl font-mono font-black ${
-                    Math.abs(lufsDelta) <= 1.0 ? 'text-[#00ff88]' : lufsDelta > 1.0 ? 'text-[#ff0055]' : 'text-[#ffaa00]'
+                    integratedLufs === null
+                      ? 'text-[#666]'
+                      : Math.abs(lufsDelta ?? 0) <= 1.0 ? 'text-[#00ff88]' : (lufsDelta ?? 0) > 1.0 ? 'text-[#ff0055]' : 'text-[#ffaa00]'
                   }`}>
-                    {meterMetrics.integratedLufs}
+                    {formatDb(integratedLufs)}
                   </span>
                   <span className="text-[9px] text-[#777] mt-0.5 font-mono">
-                    Target: {masteringState.lufsTarget} LUFS ({lufsDelta >= 0 ? `+${lufsDelta.toFixed(1)}` : lufsDelta.toFixed(1)} dB)
+                    {integratedLufs === null
+                      ? `Target ${lufsTargetValue} LUFS · ${measurement?.blockCount ?? 0} blocks measured`
+                      : `Target ${lufsTargetValue} LUFS (${formatSigned(lufsDelta)} dB)`}
                   </span>
                   <div className="w-full bg-[#0a0a0c] h-1.5 rounded-full mt-2 overflow-hidden border border-[#333]">
                     <div 
                       className="h-full bg-gradient-to-r from-[#00ff88] via-[#ffaa00] to-[#ff0055]" 
-                      style={{ width: `${Math.min(100, Math.max(0, (meterMetrics.integratedLufs + 30) * 3.3))}%` }}
+                      style={{ width: `${integratedLufs === null ? 0 : Math.min(100, Math.max(0, (integratedLufs + 30) * 3.3))}%` }}
                     />
                   </div>
                 </div>
@@ -374,13 +466,17 @@ export const MasteringSuiteModal: React.FC<MasteringSuiteModalProps> = ({
                 <div className="bg-[#18181d] border border-[#282830] rounded-xl p-3 flex flex-col items-center justify-center text-center">
                   <span className="text-[10px] font-bold text-[#888] uppercase tracking-wider mb-0.5">SHORT-TERM (3s)</span>
                   <span className="text-2xl font-mono font-black text-white">
-                    {meterMetrics.shortTermLufs}
+                    {measurement?.shortTermReady ? formatDb(measurement?.shortTermLufs) : '—'}
                   </span>
-                  <span className="text-[9px] text-[#777] mt-0.5">Rolling average</span>
+                  <span className="text-[9px] text-[#777] mt-0.5">
+                    {measurement?.shortTermReady
+                      ? 'Rolling 3 s average'
+                      : `COLLECTING ${Math.min(3, measurement?.measuredSeconds ?? 0).toFixed(1)}s / 3.0s`}
+                  </span>
                   <div className="w-full bg-[#0a0a0c] h-1.5 rounded-full mt-2 overflow-hidden border border-[#333]">
                     <div 
                       className="h-full bg-[#ff6e00]" 
-                      style={{ width: `${Math.min(100, Math.max(0, (meterMetrics.shortTermLufs + 30) * 3.3))}%` }}
+                      style={{ width: `${!measurement?.shortTermReady ? 0 : Math.min(100, Math.max(0, ((measurement?.shortTermLufs ?? -30) + 30) * 3.3))}%` }}
                     />
                   </div>
                 </div>
@@ -389,30 +485,47 @@ export const MasteringSuiteModal: React.FC<MasteringSuiteModalProps> = ({
                 <div className="bg-[#18181d] border border-[#282830] rounded-xl p-3 flex flex-col items-center justify-center text-center">
                   <span className="text-[10px] font-bold text-[#888] uppercase tracking-wider mb-0.5">MOMENTARY (400ms)</span>
                   <span className="text-2xl font-mono font-black text-[#00ffcc]">
-                    {meterMetrics.momentaryLufs}
+                    {formatDb(measurement?.momentaryLufs)}
                   </span>
-                  <span className="text-[9px] text-[#777] mt-0.5">Instant peak</span>
+                  <span className="text-[9px] text-[#777] mt-0.5">
+                    {measurement && measurement.blockCount > 0
+                      ? `${measurement.gatedBlockCount}/${measurement.blockCount} blocks above gate`
+                      : 'NO GATING BLOCKS YET'}
+                  </span>
                   <div className="w-full bg-[#0a0a0c] h-1.5 rounded-full mt-2 overflow-hidden border border-[#333]">
                     <div 
                       className="h-full bg-[#00ffcc]" 
-                      style={{ width: `${Math.min(100, Math.max(0, (meterMetrics.momentaryLufs + 30) * 3.3))}%` }}
+                      style={{ width: `${measurement?.momentaryLufs === null || measurement?.momentaryLufs === undefined ? 0 : Math.min(100, Math.max(0, (measurement.momentaryLufs + 30) * 3.3))}%` }}
                     />
                   </div>
                 </div>
 
                 {/* True Peak dBFS */}
                 <div className="bg-[#18181d] border border-[#282830] rounded-xl p-3 flex flex-col items-center justify-center text-center">
-                  <span className="text-[10px] font-bold text-[#888] uppercase tracking-wider mb-0.5">TRUE PEAK dBFS</span>
-                  <span className={`text-2xl font-mono font-black ${meterMetrics.isClipping ? 'text-[#ff0055]' : 'text-white'}`}>
-                    {meterMetrics.truePeakDbfs} dB
+                  <span className="text-[10px] font-bold text-[#888] uppercase tracking-wider mb-0.5">
+                    TRUE PEAK dBFS ({measurement?.oversampleFactor ? `${measurement.oversampleFactor}× ISP` : 'ISP'})
                   </span>
-                  <span className={`text-[9px] font-bold mt-0.5 ${meterMetrics.isClipping ? 'text-[#ff0055]' : 'text-[#00ff88]'}`}>
-                    {meterMetrics.isClipping ? 'CLIP DETECTED' : 'HEADROOM OK'}
+                  <span className={`text-2xl font-mono font-black ${
+                    measurement?.isClipping === null || measurement?.isClipping === undefined ? 'text-[#666]' : measurement.isClipping ? 'text-[#ff0055]' : 'text-white'
+                  }`}>
+                    {formatDb(measurement?.truePeakDbfs)} dB
+                  </span>
+                  <span className={`text-[9px] font-bold mt-0.5 ${
+                    measurement?.isClipping ? 'text-[#ff0055]' : measurement?.isClipping === false ? 'text-[#00ff88]' : 'text-[#666]'
+                  }`}>
+                    {measurement?.isClipping === null || measurement?.isClipping === undefined
+                      ? 'NOT MEASURED'
+                      : measurement.isClipping
+                        ? 'OVER 0 dBFS AFTER RECONSTRUCTION'
+                        : `HEADROOM ${formatDb(measurement.headroomDb, 1, ' dB')}`}
+                  </span>
+                  <span className="text-[8px] text-[#666] mt-0.5 font-mono">
+                    sample peak {formatDb(measurement?.samplePeakDbfs)} dBFS
                   </span>
                   <div className="w-full bg-[#0a0a0c] h-1.5 rounded-full mt-2 overflow-hidden border border-[#333]">
                     <div 
-                      className={`h-full ${meterMetrics.isClipping ? 'bg-[#ff0055]' : 'bg-[#00ff88]'}`}
-                      style={{ width: `${Math.min(100, Math.max(0, (meterMetrics.truePeakDbfs + 30) * 3.3))}%` }}
+                      className={`h-full ${measurement?.isClipping ? 'bg-[#ff0055]' : 'bg-[#00ff88]'}`}
+                      style={{ width: `${measurement?.truePeakDbfs === null || measurement?.truePeakDbfs === undefined ? 0 : Math.min(100, Math.max(0, (measurement.truePeakDbfs + 30) * 3.3))}%` }}
                     />
                   </div>
                 </div>
@@ -427,7 +540,9 @@ export const MasteringSuiteModal: React.FC<MasteringSuiteModalProps> = ({
                       <Radio className="w-3.5 h-3.5 text-[#00ff88]" />
                       <span>2D GONIOMETER STEREO FIELD SCOPE</span>
                     </span>
-                    <span className="text-[10px] font-mono text-[#888]">Lissajous Vector</span>
+                    <span className="text-[10px] font-mono text-[#888]">
+                      {measurement?.isPumping ? 'Mid/Side from master tap' : 'NOT MEASURING'}
+                    </span>
                   </div>
                   <div className="flex items-center justify-center bg-[#08080a] rounded-lg border border-[#222] p-1">
                     <canvas ref={goniometerCanvasRef} width={280} height={140} className="w-full max-w-[280px] h-32" />
@@ -440,9 +555,11 @@ export const MasteringSuiteModal: React.FC<MasteringSuiteModalProps> = ({
                     <div className="flex items-center justify-between">
                       <span className="font-bold text-white">STEREO PHASE CORRELATION</span>
                       <span className={`font-mono font-bold ${
-                        meterMetrics.phaseCorrelation > 0.4 ? 'text-[#00ff88]' : meterMetrics.phaseCorrelation >= 0 ? 'text-[#ffaa00]' : 'text-[#ff0055]'
+                        measurement?.phaseCorrelation === null || measurement?.phaseCorrelation === undefined
+                          ? 'text-[#666]'
+                          : measurement.phaseCorrelation > 0.4 ? 'text-[#00ff88]' : measurement.phaseCorrelation >= 0 ? 'text-[#ffaa00]' : 'text-[#ff0055]'
                       }`}>
-                        {meterMetrics.phaseCorrelation > 0 ? `+${meterMetrics.phaseCorrelation}` : meterMetrics.phaseCorrelation}
+                        {formatSigned(measurement?.phaseCorrelation)}
                       </span>
                     </div>
                     {/* Phase Meter Bar: -1.0 to +1.0 */}
@@ -450,11 +567,13 @@ export const MasteringSuiteModal: React.FC<MasteringSuiteModalProps> = ({
                       <div className="absolute left-1/2 top-0 bottom-0 w-0.5 bg-[#555] z-10" />
                       <div 
                         className={`h-full transition-all duration-75 ${
-                          meterMetrics.phaseCorrelation > 0.4 ? 'bg-[#00ff88]' : meterMetrics.phaseCorrelation >= 0 ? 'bg-[#ffaa00]' : 'bg-[#ff0055]'
+                          measurement?.phaseCorrelation === null || measurement?.phaseCorrelation === undefined
+                            ? 'bg-[#333]'
+                            : measurement.phaseCorrelation > 0.4 ? 'bg-[#00ff88]' : measurement.phaseCorrelation >= 0 ? 'bg-[#ffaa00]' : 'bg-[#ff0055]'
                         }`}
                         style={{
-                          marginLeft: `${Math.min(50, Math.max(0, (meterMetrics.phaseCorrelation + 1) * 50))}%`,
-                          width: `${Math.abs(meterMetrics.phaseCorrelation) * 50}%`
+                          marginLeft: `${measurement?.phaseCorrelation === null || measurement?.phaseCorrelation === undefined ? 50 : Math.min(50, Math.max(0, (measurement.phaseCorrelation + 1) * 50))}%`,
+                          width: `${measurement?.phaseCorrelation === null || measurement?.phaseCorrelation === undefined ? 0 : Math.abs(measurement.phaseCorrelation) * 50}%`
                         }}
                       />
                     </div>
@@ -467,30 +586,30 @@ export const MasteringSuiteModal: React.FC<MasteringSuiteModalProps> = ({
 
                   {/* Streaming Targets Compliance Badges */}
                   <div className="space-y-1">
-                    <span className="text-[10px] font-bold text-[#888] uppercase block">STREAMING TARGET COMPLIANCE</span>
+                    <span className="text-[10px] font-bold text-[#888] uppercase block">STREAMING LOUDNESS TARGETS</span>
                     <div className="grid grid-cols-2 gap-1.5 font-mono text-[10px]">
                       <div className="bg-[#18181d] p-1.5 rounded border border-[#28282b] flex items-center justify-between">
                         <span>Spotify (-14 LUFS)</span>
-                        <span className={Math.abs(meterMetrics.integratedLufs - (-14)) <= 1.5 ? 'text-[#00ff88] font-bold' : 'text-[#ffaa00]'}>
-                          {Math.abs(meterMetrics.integratedLufs - (-14)) <= 1.5 ? '✓ PASS' : `${(meterMetrics.integratedLufs - (-14)).toFixed(1)} dB`}
+                        <span className={complianceClass(-14)}>
+                          {complianceText(-14)}
                         </span>
                       </div>
                       <div className="bg-[#18181d] p-1.5 rounded border border-[#28282b] flex items-center justify-between">
                         <span>Apple Music (-16 LUFS)</span>
-                        <span className={Math.abs(meterMetrics.integratedLufs - (-16)) <= 1.5 ? 'text-[#00ff88] font-bold' : 'text-[#ffaa00]'}>
-                          {Math.abs(meterMetrics.integratedLufs - (-16)) <= 1.5 ? '✓ PASS' : `${(meterMetrics.integratedLufs - (-16)).toFixed(1)} dB`}
+                        <span className={complianceClass(-16)}>
+                          {complianceText(-16)}
                         </span>
                       </div>
                       <div className="bg-[#18181d] p-1.5 rounded border border-[#28282b] flex items-center justify-between">
                         <span>Club / Beatport (-9 LUFS)</span>
-                        <span className={Math.abs(meterMetrics.integratedLufs - (-9)) <= 1.5 ? 'text-[#00ff88] font-bold' : 'text-[#ffaa00]'}>
-                          {Math.abs(meterMetrics.integratedLufs - (-9)) <= 1.5 ? '✓ PASS' : `${(meterMetrics.integratedLufs - (-9)).toFixed(1)} dB`}
+                        <span className={complianceClass(-9)}>
+                          {complianceText(-9)}
                         </span>
                       </div>
                       <div className="bg-[#18181d] p-1.5 rounded border border-[#28282b] flex items-center justify-between">
                         <span>YouTube (-14 LUFS)</span>
-                        <span className={Math.abs(meterMetrics.integratedLufs - (-14)) <= 1.5 ? 'text-[#00ff88] font-bold' : 'text-[#ffaa00]'}>
-                          {Math.abs(meterMetrics.integratedLufs - (-14)) <= 1.5 ? '✓ PASS' : `${(meterMetrics.integratedLufs - (-14)).toFixed(1)} dB`}
+                        <span className={complianceClass(-14)}>
+                          {complianceText(-14)}
                         </span>
                       </div>
                     </div>
@@ -503,6 +622,9 @@ export const MasteringSuiteModal: React.FC<MasteringSuiteModalProps> = ({
           {/* Tab 2: Multiband Dynamics */}
           {activeTab === 'multiband' && (
             <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+              <div className="md:col-span-3">
+                <NotAppliedBanner label="3-BAND MULTIBAND COMPRESSOR" />
+              </div>
               {/* Low Band */}
               <div className="bg-[#18181d] border border-[#282830] rounded-xl p-3 flex flex-col gap-3">
                 <div className="flex items-center justify-between border-b border-[#282830] pb-2">
@@ -566,7 +688,7 @@ export const MasteringSuiteModal: React.FC<MasteringSuiteModalProps> = ({
                 {/* Reduction Meter */}
                 <div className="bg-[#0a0a0c] p-2 rounded border border-[#222] flex items-center justify-between text-[10px] font-mono">
                   <span className="text-[#888]">GR (Low)</span>
-                  <span className="text-[#ffaa00]">-{meterMetrics.lowBandReductionDb} dB</span>
+                  <span className="text-[#666]">NOT MEASURED - NO LOW BAND COMPRESSOR IN PATH</span>
                 </div>
               </div>
 
@@ -633,7 +755,7 @@ export const MasteringSuiteModal: React.FC<MasteringSuiteModalProps> = ({
                 {/* Reduction Meter */}
                 <div className="bg-[#0a0a0c] p-2 rounded border border-[#222] flex items-center justify-between text-[10px] font-mono">
                   <span className="text-[#888]">GR (Mid)</span>
-                  <span className="text-[#00ff88]">-{meterMetrics.midBandReductionDb} dB</span>
+                  <span className="text-[#666]">NOT MEASURED - NO MID BAND COMPRESSOR IN PATH</span>
                 </div>
               </div>
 
@@ -700,7 +822,7 @@ export const MasteringSuiteModal: React.FC<MasteringSuiteModalProps> = ({
                 {/* Reduction Meter */}
                 <div className="bg-[#0a0a0c] p-2 rounded border border-[#222] flex items-center justify-between text-[10px] font-mono">
                   <span className="text-[#888]">GR (High)</span>
-                  <span className="text-[#00e5ff]">-{meterMetrics.highBandReductionDb} dB</span>
+                  <span className="text-[#666]">NOT MEASURED - NO HIGH BAND COMPRESSOR IN PATH</span>
                 </div>
               </div>
             </div>
@@ -709,6 +831,9 @@ export const MasteringSuiteModal: React.FC<MasteringSuiteModalProps> = ({
           {/* Tab 3: Stereo Imager & Sub Mono */}
           {activeTab === 'imager' && (
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div className="md:col-span-2">
+                <NotAppliedBanner label="STEREO IMAGER / SUB-MONO" />
+              </div>
               <div className="bg-[#18181d] border border-[#282830] rounded-xl p-4 flex flex-col gap-3">
                 <div className="flex items-center gap-2 text-white font-bold text-xs">
                   <Radio className="w-4 h-4 text-[#ff6e00]" />
@@ -756,6 +881,9 @@ export const MasteringSuiteModal: React.FC<MasteringSuiteModalProps> = ({
           {/* Tab 4: Brickwall Maximizer */}
           {activeTab === 'maximizer' && (
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div className="md:col-span-2">
+                <NotAppliedBanner label="MAXIMIZER / BRICKWALL LIMITER" />
+              </div>
               <div className="bg-[#18181d] border border-[#282830] rounded-xl p-4 flex flex-col gap-3">
                 <div className="flex items-center gap-2 text-white font-bold text-xs">
                   <Zap className="w-4 h-4 text-[#ff0055]" />
@@ -793,12 +921,16 @@ export const MasteringSuiteModal: React.FC<MasteringSuiteModalProps> = ({
 
               <div className="bg-[#18181d] border border-[#282830] rounded-xl p-4 flex flex-col justify-between">
                 <div>
-                  <span className="text-xs font-bold text-white">FAST PEAK LOOKAHEAD</span>
-                  <p className="text-[11px] text-[#888] mt-1">Zero-latency inter-sample peak protection to guarantee no digital distortion on DAC converters.</p>
+                  <span className="text-xs font-bold text-white">INTER-SAMPLE PEAK MEASUREMENT</span>
+                  <p className="text-[11px] text-[#888] mt-1">
+                    The TRUE PEAK readout on the metering tab reconstructs the waveform at
+                    {measurement?.oversampleFactor ? ` ${measurement.oversampleFactor}x ` : ' '} oversampling and reports the measured
+                    inter-sample maximum. It measures only: nothing here limits, delays or protects the signal.
+                  </p>
                 </div>
                 <div className="bg-[#0c0c0e] p-2.5 rounded border border-[#222] flex items-center justify-between text-xs font-mono">
-                  <span className="text-[#888]">Lookahead Buffer</span>
-                  <span className="text-[#00ff88] font-bold">2.5ms INTERPOLATED</span>
+                  <span className="text-[#888]">Lookahead / Latency</span>
+                  <span className="text-[#666] font-bold">NONE - NOT IMPLEMENTED</span>
                 </div>
               </div>
             </div>
@@ -809,9 +941,13 @@ export const MasteringSuiteModal: React.FC<MasteringSuiteModalProps> = ({
             <div className="flex items-center justify-between mb-2">
               <span className="text-xs font-bold text-white uppercase tracking-wider flex items-center gap-1.5">
                 <Sparkles className="w-3.5 h-3.5 text-[#ff6e00]" />
-                COMMERCIAL MASTERING PRESETS
+                MASTERING PRESETS
               </span>
             </div>
+            <p className="text-[10px] text-[#888] -mt-1 mb-2">
+              Selecting a preset stores values only. No processor reads them yet, so the sound of the project does not
+              change and no export is affected.
+            </p>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2">
               {MASTERING_PRESETS.map((preset, idx) => (
@@ -834,13 +970,22 @@ export const MasteringSuiteModal: React.FC<MasteringSuiteModalProps> = ({
         {/* Footer */}
         <div className="bg-[#18181c] border-t border-[#28282e] px-4 py-2.5 flex items-center justify-between">
           <span className="text-[11px] text-[#888] font-mono">
-            STATUS: {masteringState.enabled ? 'ACTIVE (READY FOR STEM & MASTER EXPORT)' : 'BYPASS'}
+            STATUS: {availabilityNote}
+            {' · '}
+            {measurement && measurement.blockCount > 0
+              ? `${measurement.measuredSeconds.toFixed(1)}s / ${measurement.blockCount} blocks measured`
+              : 'NO MEASUREMENT YET'}
+            {' · '}
+            TRANSPORT: {isPlaying ? 'PLAYING' : 'STOPPED'}
+            {measurement && measurement.droppedSampleCount > 0
+              ? ` · ${measurement.droppedSampleCount} SAMPLES UNREAD (INCOMPLETE)`
+              : ''}
           </span>
           <button
             onClick={onClose}
             className="px-4 py-1.5 bg-[#ff6e00] hover:bg-[#ff7d1a] text-black font-bold text-xs rounded transition shadow"
           >
-            Apply & Done
+            Close
           </button>
         </div>
       </div>
