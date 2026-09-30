@@ -1,0 +1,33 @@
+name: Temporary production patch runner
+
+on:
+  push:
+    branches: [fix/audio-clip-hard-boundary]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Apply production boundary guard
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('src/components/PlaylistArranger.tsx')
+          s=p.read_text()
+          old="""        onUpdateClips([...clips, newClip]);"""
+          new="""        onUpdateClips([...clips, { ...newClip, startBar: Math.min(newClip.startBar, Math.max(0, totalBars - newClip.lengthBars)) }]);"""
+          if old not in s: raise SystemExit('audio/grid publication site not found')
+          s=s.replace(old,new,1)
+          p.write_text(s)
+          PY
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/components/PlaylistArranger.tsx
+          git commit -m 'fix: enforce audio clip timeline boundary at publication'
+          git push
