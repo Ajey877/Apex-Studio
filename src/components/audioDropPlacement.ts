@@ -3,9 +3,85 @@ import { snapBarPosition } from './playlistClipOperations';
 export interface AudioDropPlacementBounds {
   totalBars: number;
   gridBars?: number;
+  maxTracks?: number;
 }
 
+export type PlaylistPlacementBounds = AudioDropPlacementBounds;
+
 export const DEFAULT_BAR_WIDTH_PX = 96;
+export const DEFAULT_TRACK_HEIGHT_PX = 64;
+
+export interface PlaylistCoordinateContext {
+  /** Viewport-relative left edge of the playlist container or track element. */
+  viewportLeft?: number;
+  /** Horizontal scroll offset in pixels. */
+  scrollLeft?: number;
+  /** Viewport-relative top edge of the playlist container or track element. */
+  viewportTop?: number;
+  /** Vertical scroll offset in pixels. */
+  scrollTop?: number;
+  /** Direct element bounding client rect left (convenience if element.getBoundingClientRect() is passed). */
+  trackLeft?: number;
+  /** Direct element bounding client rect top (convenience if element.getBoundingClientRect() is passed). */
+  trackTop?: number;
+  /** Pixels per bar (default: 96). */
+  barWidth?: number;
+  /** Pixels per track row (default: 64). */
+  trackHeight?: number;
+  /** Timeline horizontal/vertical zoom or scale factor (default: 1). */
+  zoom?: number;
+}
+
+export interface PlaylistDropPlacementResult {
+  contentX: number;
+  contentY: number;
+  rawBar: number;
+  startBar: number;
+  trackIndex: number;
+}
+
+/**
+ * Convert client mouse/drop coordinates into playlist content coordinates,
+ * taking into account horizontal/vertical scrolling, viewport offsets,
+ * track-row offsets, and timeline zoom/scale.
+ */
+export function clientToPlaylistContentCoordinates(
+  clientX: number,
+  clientY: number,
+  context: PlaylistCoordinateContext = {}
+): { contentX: number; contentY: number } {
+  const zoom = context.zoom ?? 1;
+  if (!Number.isFinite(zoom) || zoom <= 0) {
+    throw new Error('zoom must be finite and greater than zero');
+  }
+
+  // When trackLeft is provided, it is already relative to the scrolled viewport:
+  // (clientX - trackLeft) / zoom gives the exact content coordinate from the lane's start.
+  // When viewportLeft and scrollLeft are provided:
+  // (clientX - viewportLeft) / zoom + scrollLeft gives the exact same content coordinate.
+  const contentX = context.trackLeft !== undefined
+    ? (clientX - context.trackLeft) / zoom
+    : (clientX - (context.viewportLeft ?? 0)) / zoom + (context.scrollLeft ?? 0);
+
+  const contentY = context.trackTop !== undefined
+    ? (clientY - context.trackTop) / zoom
+    : (clientY - (context.viewportTop ?? 0)) / zoom + (context.scrollTop ?? 0);
+
+  return { contentX, contentY };
+}
+
+/**
+ * Convert playlist content X coordinate into fractional timeline bar position.
+ */
+export function contentXToTimelineBar(
+  contentX: number,
+  barWidth: number = DEFAULT_BAR_WIDTH_PX
+): number {
+  if (!Number.isFinite(barWidth) || barWidth <= 0) {
+    throw new Error('barWidth must be finite and greater than zero');
+  }
+  return contentX / barWidth;
+}
 
 /**
  * Convert client drop coordinates into a timeline bar position.
@@ -16,14 +92,15 @@ export function resolveTimelineBarFromClientX(
   trackLeftPx: number,
   barWidthPx: number = DEFAULT_BAR_WIDTH_PX
 ): number {
-  if (!Number.isFinite(barWidthPx) || barWidthPx <= 0) {
-    throw new Error('barWidthPx must be finite and greater than zero');
-  }
-  return (clientX - trackLeftPx) / barWidthPx;
+  const { contentX } = clientToPlaylistContentCoordinates(clientX, 0, {
+    trackLeft: trackLeftPx,
+    barWidth: barWidthPx,
+  });
+  return contentXToTimelineBar(contentX, barWidthPx);
 }
 
 /**
- * Resolve the timeline startBar for a dropped audio clip from a requested bar position.
+ * Resolve the timeline startBar for an audio clip from a requested bar position.
  * Snaps to the arrangement grid (default 0.25 bars) and clamps within legal bounds
  * [0, totalBars - lengthBars]. If snapping would push the clip past maxStart,
  * floor-snaps down to keep it fully within the arrangement.
@@ -51,6 +128,71 @@ export function resolveAudioDropStartBar(
 }
 
 /**
+ * Complete unified placement calculation for playlist drops:
+ * clientX/clientY -> playlist content coordinates -> timeline position ->
+ * grid-snapped bar -> boundary-clamped startBar and trackIndex.
+ */
+export function resolvePlaylistDropPlacement(
+  clientX: number,
+  clientY: number,
+  lengthBars: number,
+  context: PlaylistCoordinateContext,
+  bounds: PlaylistPlacementBounds
+): PlaylistDropPlacementResult {
+  const { contentX, contentY } = clientToPlaylistContentCoordinates(clientX, clientY, context);
+  const barWidth = context.barWidth ?? DEFAULT_BAR_WIDTH_PX;
+  const trackHeight = context.trackHeight ?? DEFAULT_TRACK_HEIGHT_PX;
+  const rawBar = contentXToTimelineBar(contentX, barWidth);
+  const startBar = resolveAudioDropStartBar(rawBar, lengthBars, bounds);
+  const rawTrack = Math.floor(contentY / trackHeight);
+  let trackIndex = Math.max(0, Number.isFinite(rawTrack) ? rawTrack : 0);
+  if (bounds.maxTracks !== undefined && bounds.maxTracks > 0) {
+    trackIndex = Math.min(trackIndex, bounds.maxTracks - 1);
+  }
+
+  return {
+    contentX,
+    contentY,
+    rawBar,
+    startBar,
+    trackIndex,
+  };
+}
+
+/**
+ * Shared coordinate helper for moving existing playlist clips:
+ * calculates delta in content coordinates, applies grid snapping, and clamps
+ * within timeline and track boundaries.
+ */
+export function resolvePlaylistClipMove(
+  clip: { startBar: number; trackIndex: number; lengthBars: number },
+  originX: number,
+  originY: number,
+  clientX: number,
+  clientY: number,
+  context: PlaylistCoordinateContext = {},
+  bounds: PlaylistPlacementBounds
+): { startBar: number; trackIndex: number } {
+  const zoom = context.zoom ?? 1;
+  const barWidth = context.barWidth ?? DEFAULT_BAR_WIDTH_PX;
+  const trackHeight = context.trackHeight ?? DEFAULT_TRACK_HEIGHT_PX;
+
+  const deltaContentX = (clientX - originX) / zoom;
+  const deltaBars = deltaContentX / barWidth;
+  const requestedStart = clip.startBar + deltaBars;
+  const startBar = resolveAudioDropStartBar(requestedStart, clip.lengthBars, bounds);
+
+  const deltaContentY = (clientY - originY) / zoom;
+  const deltaTracks = Math.round(deltaContentY / trackHeight);
+  let trackIndex = Math.max(0, clip.trackIndex + deltaTracks);
+  if (bounds.maxTracks !== undefined && bounds.maxTracks > 0) {
+    trackIndex = Math.min(trackIndex, bounds.maxTracks - 1);
+  }
+
+  return { startBar, trackIndex };
+}
+
+/**
  * Resolve the initial timeline startBar for an imported audio clip directly from
  * drop event coordinates (e.clientX) and track lane bounds.
  */
@@ -61,8 +203,14 @@ export function resolveAudioDropStartBarFromClientX(
   bounds: AudioDropPlacementBounds,
   barWidthPx: number = DEFAULT_BAR_WIDTH_PX
 ): number {
-  const requestedBar = resolveTimelineBarFromClientX(clientX, trackLeftPx, barWidthPx);
-  return resolveAudioDropStartBar(requestedBar, lengthBars, bounds);
+  const { startBar } = resolvePlaylistDropPlacement(
+    clientX,
+    0,
+    lengthBars,
+    { trackLeft: trackLeftPx, barWidth: barWidthPx },
+    bounds
+  );
+  return startBar;
 }
 
 /**
