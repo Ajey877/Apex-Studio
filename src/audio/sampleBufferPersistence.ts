@@ -3,6 +3,7 @@ import { audioBufferToWav } from './wavEncoder';
 import {
   captureCurrentPlaylistAudioPublicationToken,
   isCurrentPlaylistAudioPublication,
+  isPlaylistAudioProjectGenerationCurrent,
 } from '../state/playlistAudioPublication';
 
 /**
@@ -141,16 +142,34 @@ export const getSampleBufferPersistenceController = (
  * committed playlist-clip edits advance the playlist revision. Either change
  * therefore rejects a stale callback before it can reach `onUpdateClips`'s
  * publication path.
+ *
+ * `allowAdditivePlaylistRevision` relaxes only the playlist-revision half, for an
+ * update the caller has already proven to be a pure append (existing clips kept,
+ * same order, new clips appended). Independent additive imports must not reject
+ * each other; the generation half and the caller's re-resolution against the live
+ * playlist still do.
  */
+export interface WaitForSampleBufferPersistenceOptions {
+  allowAdditivePlaylistRevision?: boolean;
+}
+
 export const waitForSampleBufferPersistence = async (
   engine: SampleBufferEngineLike,
-  id: string
+  id: string,
+  options?: WaitForSampleBufferPersistenceOptions
 ): Promise<void> => {
   const controller = getSampleBufferPersistenceController(engine);
   if (!controller) throw new Error('Audio persistence is not installed');
 
   const token = captureCurrentPlaylistAudioPublicationToken();
   await controller.waitFor(id);
+
+  if (options?.allowAdditivePlaylistRevision) {
+    if (!isPlaylistAudioProjectGenerationCurrent(token)) {
+      throw new Error('Stale playlist audio publication rejected after the project was replaced');
+    }
+    return;
+  }
 
   if (!isCurrentPlaylistAudioPublication(token)) {
     throw new Error('Stale playlist audio publication rejected after project or playlist state changed');
