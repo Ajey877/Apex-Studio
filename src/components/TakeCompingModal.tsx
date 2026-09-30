@@ -21,6 +21,13 @@ import { audioEngine } from '../audio/audioEngine';
 interface TakeCompingModalProps {
   isOpen: boolean;
   onClose: () => void;
+  /**
+   * Publication gate for a promoted comp clip. Retained as the App-side
+   * invariant boundary: Phase 48 refuses promotion in this modal because the
+   * panel holds no real audio asset, and App additionally rejects any clip
+   * that reaches it without an `audioBufferId`, so the contract stays safe if a
+   * future panel ever does produce promotable audio.
+   */
   onPromoteCompToPlaylist: (newClip: PlaylistClip) => void;
 }
 
@@ -72,8 +79,7 @@ const INITIAL_COMP_SELECTIONS = [
 
 export const TakeCompingModal: React.FC<TakeCompingModalProps> = ({
   isOpen,
-  onClose,
-  onPromoteCompToPlaylist
+  onClose
 }) => {
   const [takes, setTakes] = useState<TakeLane[]>(DEFAULT_TAKES);
   const [compSlices, setCompSlices] = useState(INITIAL_COMP_SELECTIONS);
@@ -131,32 +137,25 @@ export const TakeCompingModal: React.FC<TakeCompingModalProps> = ({
   };
 
   const handlePromoteToPlaylist = () => {
-    const compositeWaveform: number[] = [];
-    compSlices.forEach(slice => {
-      const sourceTake = takes[slice.takeIndex] || takes[0];
-      const startIdx = Math.floor((slice.startStep / 16) * sourceTake.waveform.length);
-      const slicePoints = sourceTake.waveform.slice(startIdx, startIdx + 6);
-      compositeWaveform.push(...slicePoints);
-    });
-
-    const newClip: PlaylistClip = {
-      id: `comp-vocal-${Date.now()}`,
-      trackIndex: 0,
-      startBar: 1,
-      lengthBars: 4,
-      type: 'audio',
-      color: '#00e5ff',
-      name: 'Master Comped Vocal (Takes 1-4 Spliced)',
-      audioWaveform: compositeWaveform,
-      fadeInBars: 0.05,
-      fadeOutBars: 0.05
-    };
-
-    onPromoteCompToPlaylist(newClip);
-    setStatusMessage('Promoted Composite Vocal Track directly to Playlist!');
-    setTimeout(() => {
-      onClose();
-    }, 1200);
+    /**
+     * Phase 48: this used to fabricate an audio-type playlist clip named after
+     * the composite take, carrying a decorative waveform and no audio asset id,
+     * and hand it straight to the playlist.
+     *
+     * The takes in this panel are presentation data — hardcoded peak arrays
+     * with no recorded blob behind them — so there is no audio asset that could
+     * legitimately back a promoted clip. The fabricated clip played nothing,
+     * was never flagged by the missing-audio surfaces, and hard-blocked WAV and
+     * stem export for the whole project.
+     *
+     * Promotion is therefore refused here instead of publishing an unplayable
+     * clip. Real take comping (decoding and splicing actual recorded audio) is
+     * out of scope; nothing here invents audio or an asset id.
+     */
+    setStatusMessage(
+      'This comp has no recorded audio asset behind it, so there is nothing to promote. ' +
+      'Capture a take with the Audio Recorder and place it on the playlist, or drop an audio file onto a lane.'
+    );
   };
 
   return (
@@ -388,6 +387,7 @@ export const TakeCompingModal: React.FC<TakeCompingModalProps> = ({
             </button>
             <button
               onClick={handlePromoteToPlaylist}
+              title="This comp holds no recorded audio asset, so it cannot be promoted to the playlist."
               className="px-4 py-1.5 bg-[#00e5ff] hover:bg-[#33edff] text-black font-bold rounded transition shadow flex items-center gap-1.5"
             >
               <Check className="w-4 h-4" />

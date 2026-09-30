@@ -294,4 +294,20 @@ test('production PlaylistArranger uses unified coordinate placement for audio dr
     arrangerSource,
     /if\s*\(clipTypeToAdd\s*===\s*'automation'\)\s*\{[\s\S]*?startBar:\s*barIndex,\s*lengthBars:\s*4,\s*type:\s*'automation'/
   );
+
+  /**
+   * Phase 48 — this suite previously stopped at the automation branch, which
+   * left the sibling `clipTypeToAdd === 'audio'` producer unasserted. That
+   * producer built a `type: 'audio'` clip with a decorative `audioWaveform` and
+   * no `audioBufferId`: silent in playback, invisible to the missing-audio
+   * surfaces, and a hard blocker for WAV/stem export. Assert here that it stays
+   * gone, and that the three real audio insertion paths still supply an id.
+   */
+  assert.doesNotMatch(arrangerSource, /clipTypeToAdd\s*===\s*'audio'/);
+  assert.doesNotMatch(arrangerSource, /audio-clip-\$\{Date\.now\(\)\}/);
+  assert.doesNotMatch(arrangerSource, /Audio Stem \/ Vocal/);
+
+  // Legitimate audio clip creation keeps its buffer registration.
+  assert.match(arrangerSource, /audioBufferId:\s*bufId,/);
+  assert.match(arrangerSource, /bounceChannelToAudioClip\(/);
 });

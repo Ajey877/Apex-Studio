@@ -164,7 +164,7 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
   const [selectedPointIndex, setSelectedPointIndex] = useState<number | null>(null);
   const [totalBars, setTotalBars] = useState(32);
   const [activeTool, setActiveTool] = useState<'place' | 'cut' | 'delete'>('place');
-  const [clipTypeToAdd, setClipTypeToAdd] = useState<'pattern' | 'audio' | 'automation'>('pattern');
+  const [clipTypeToAdd, setClipTypeToAdd] = useState<'pattern' | 'automation'>('pattern');
   const [automationEditorClipId, setAutomationEditorClipId] = useState<string | null>(null);
   const [isMarkerMenuOpen, setIsMarkerMenuOpen] = useState(false);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
@@ -576,21 +576,15 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
       };
       setAutomationEditorClipId(newClip.id);
       setSelectedPointIndex(null);
-    } else if (clipTypeToAdd === 'audio') {
-      newClip = {
-        id: `audio-clip-${Date.now()}`,
-        trackIndex,
-        startBar: barIndex,
-        lengthBars: 4,
-        type: 'audio',
-        color: '#00ff88',
-        name: 'Audio Stem / Vocal',
-        fadeInBars: 0.25,
-        fadeOutBars: 0.5,
-        audioWaveform: [0.1, 0.4, 0.8, 0.6, 0.9, 0.7, 0.4, 0.2, 0.8, 0.9, 0.5, 0.3, 0.1, 0.6, 0.8, 0.2]
-      };
     } else {
-      // Pattern
+      // Pattern.
+      //
+      // Phase 48: there is deliberately no `audio` branch here. The one that
+      // used to exist drew a placeholder clip carrying a decorative
+      // `audioWaveform` and no `audioBufferId`: silent during playback, never
+      // flagged by the missing-audio surfaces, and a hard blocker for WAV and
+      // stem export. Playlist audio is only ever created by a path that owns a
+      // real buffer — drag/drop, recording, or bounce-in-place.
       newClip = createPlaylistPatternClip(
         trackIndex,
         barIndex,
@@ -750,7 +744,10 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
             </button>
           </div>
 
-          {/* Clip Type Picker */}
+          {/* Clip Type Picker.
+              Phase 48: no "Audio Stem" option. A drawn audio clip had no audio
+              behind it and deadlocked export. Real audio arrives by dropping a
+              file on a lane, recording a take, or bouncing a channel. */}
           <div className="flex items-center gap-0.5 bg-[#121214] border border-[#333336] p-0.5 rounded text-xs">
             <button
               onClick={() => setClipTypeToAdd('pattern')}
@@ -759,14 +756,6 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
               }`}
             >
               Pattern
-            </button>
-            <button
-              onClick={() => setClipTypeToAdd('audio')}
-              className={`px-2 py-0.5 rounded-sm font-semibold transition text-[10px] ${
-                clipTypeToAdd === 'audio' ? 'bg-[#00ff88] text-black shadow' : 'text-[#777] hover:text-white'
-              }`}
-            >
-              Audio Stem
             </button>
             <button
               onClick={() => setClipTypeToAdd('automation')}
