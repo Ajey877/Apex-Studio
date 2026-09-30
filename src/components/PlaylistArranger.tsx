@@ -1188,7 +1188,7 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
                         left: `${clip.startBar * 96}px`,
                         width: `${clip.lengthBars * 96 - 4}px`
                       }}
-                      className={`absolute top-1 bottom-1 border rounded-sm p-1.5 flex flex-col justify-between overflow-hidden shadow cursor-pointer transition relative group ${
+                      className={`absolute top-1 bottom-1 border rounded-sm p-1.5 flex flex-col justify-between overflow-hidden shadow cursor-pointer transition group ${
                         isAuto 
                           ? 'bg-[#002233]/90 border-[#00e5ff] hover:bg-[#00334d]' 
                           : isAudio 
