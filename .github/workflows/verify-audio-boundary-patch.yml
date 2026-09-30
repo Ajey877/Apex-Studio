@@ -1,0 +1,11 @@
+name: Verify audio boundary patch
+
+on:
+  workflow_dispatch:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: echo "Use the production PlaylistArranger implementation and existing test suite for verification."
