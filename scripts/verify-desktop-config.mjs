@@ -1,5 +1,9 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { createRequire } from 'node:module';
+
+const require = createRequire(import.meta.url);
+const { canRequestPermission, canCheckPermission } = require('../desktop-permissions.cjs');
 
 const root = process.cwd();
 const packageJson = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
@@ -28,7 +32,8 @@ const requiredSnippets = [
   ["on('will-navigate'", 'navigation guard'],
   ['setWindowOpenHandler', 'new-window guard'],
   ["on('will-attach-webview'", 'webview blocked'],
-  ['setPermissionRequestHandler', 'permission policy']
+  ['setPermissionRequestHandler', 'permission request policy'],
+  ['setPermissionCheckHandler', 'permission check policy']
 ];
 
 for (const [snippet, label] of requiredSnippets) {
@@ -58,4 +63,29 @@ if (preload.includes('exposeInMainWorld(\'electron\'')) {
   throw new Error('Preload must not expose the raw Electron API.');
 }
 
-console.log('Desktop security configuration checks passed.');
+const appUrl = 'file:///app/dist/index.html';
+for (const permission of ['media', 'midi', 'midiSysex']) {
+  if (!canRequestPermission(appUrl, permission) || !canCheckPermission(appUrl, permission)) {
+    throw new Error(`Desktop permission regression: app content must request and check ${permission}.`);
+  }
+}
+for (const permission of ['fullscreen', 'clipboard-read', 'clipboard-sanitized-write']) {
+  if (!canCheckPermission(appUrl, permission)) {
+    throw new Error(`Desktop permission regression: existing ${permission} check must remain available.`);
+  }
+  if (canRequestPermission(appUrl, permission)) {
+    throw new Error(`Desktop permission regression: ${permission} must not be broadly request-granted.`);
+  }
+}
+for (const url of ['https://example.com', 'http://localhost:3000.evil.test']) {
+  if (canRequestPermission(url, 'midi') || canCheckPermission(url, 'midi')) {
+    throw new Error(`Desktop permission regression: external origin received MIDI permission: ${url}`);
+  }
+}
+for (const permission of ['geolocation', 'notifications', 'usb', 'hid']) {
+  if (canRequestPermission(appUrl, permission) || canCheckPermission(appUrl, permission)) {
+    throw new Error(`Desktop permission regression: unrelated ${permission} was granted.`);
+  }
+}
+
+console.log('Desktop security configuration and permission semantics checks passed.');

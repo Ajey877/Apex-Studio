@@ -1,5 +1,6 @@
 const { app, BrowserWindow, shell, session } = require('electron');
 const path = require('path');
+const { canRequestPermission, canCheckPermission } = require('./desktop-permissions.cjs');
 
 // Chromium audio switches must be registered before app readiness.
 app.commandLine.appendSwitch('enable-exclusive-audio');
@@ -127,12 +128,15 @@ function createWindow() {
 }
 
 app.whenReady().then(() => {
-  // This application does not need arbitrary browser permissions. Microphone
-  // access is the only permission currently required by the recorder.
+  // Grant only the permissions required by app content; external origins stay denied.
   session.defaultSession.setPermissionRequestHandler((webContents, permission, callback) => {
-    const requestingUrl = webContents.getURL();
-    const isAppContent = requestingUrl.startsWith('file://') || requestingUrl.startsWith(DEV_URL);
-    callback(isAppContent && permission === 'media');
+    callback(canRequestPermission(webContents.getURL(), permission));
+  });
+
+  // Electron's permission checks also gate APIs that do not trigger a request
+  // callback. Keep the app's existing fullscreen/clipboard capabilities intact.
+  session.defaultSession.setPermissionCheckHandler((_webContents, permission, requestingOrigin) => {
+    return canCheckPermission(requestingOrigin, permission);
   });
 
   // Apply a restrictive production CSP. Development keeps Vite's HMR environment intact.
