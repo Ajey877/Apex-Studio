@@ -45,3 +45,17 @@ test('request and check handlers are both wired to the shared policy', () => {
   assert.match(source, /canRequestPermission\(webContents\.getURL\(\), permission\)/);
   assert.match(source, /canCheckPermission\(requestingOrigin, permission\)/);
 });
+
+test('electron-builder packages every required desktop main-process file', () => {
+  const packageJson = JSON.parse(fs.readFileSync(require.resolve('../package.json'), 'utf8'));
+  const packagedFiles = packageJson.build?.files ?? [];
+  const normalizedEntries = packagedFiles.map((entry) => String(entry).replace(/^\.\//, ''));
+  // Every main-process file electron.cjs loads at startup must ship inside the
+  // packaged app (build.files), or the packaged executable dies at require time.
+  for (const file of ['electron.cjs', 'preload.cjs', 'desktop-permissions.cjs']) {
+    assert.ok(
+      normalizedEntries.includes(file),
+      `${file} must be present in build.files so the packaged app can require it`
+    );
+  }
+});

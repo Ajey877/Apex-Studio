@@ -63,6 +63,23 @@ if (preload.includes('exposeInMainWorld(\'electron\'')) {
   throw new Error('Preload must not expose the raw Electron API.');
 }
 
+// Every desktop main-process file that electron.cjs loads at startup must be
+// included in the electron-builder package configuration. Otherwise the
+// packaged executable dies at require time before app readiness.
+const packagedFiles = packageJson.build?.files ?? [];
+const normalizedPackagedFiles = packagedFiles.map((entry) => String(entry).replace(/^\.\//, ''));
+const requiredPackagedFiles = new Set(['electron.cjs', 'preload.cjs', 'desktop-permissions.cjs']);
+for (const match of electronConfig.matchAll(/require\(['"]\.\/([^'"]+)['"]\)/g)) {
+  requiredPackagedFiles.add(match[1]);
+}
+for (const file of requiredPackagedFiles) {
+  if (!normalizedPackagedFiles.includes(file)) {
+    throw new Error(
+      `Desktop packaging regression: ${file} is required by the desktop main process but is missing from build.files.`
+    );
+  }
+}
+
 const appUrl = 'file:///app/dist/index.html';
 for (const permission of ['media', 'midi', 'midiSysex']) {
   if (!canRequestPermission(appUrl, permission) || !canCheckPermission(appUrl, permission)) {
