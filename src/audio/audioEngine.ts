@@ -27,6 +27,16 @@ import { renderSamplerVoice } from './instruments/sampler';
 import { renderDrumPadVoice } from './instruments/drumPad';
 import { renderGrandPianoVoice, renderRhodesVoice, renderOrganVoice, renderPluckedGuitarVoice, renderStringsVoice, renderPizzicatoVoice, renderBrassVoice, renderMarimbaVoice } from './instruments/legacyAcoustic';
 import { renderAcid303Voice, renderReeseBassVoice, render808SubVoice, renderSupersawVoice, renderAmbientPadVoice, renderVoxChoirVoice, renderChiptuneVoice } from './instruments/legacySynth';
+import {
+  channelVolumeFromNormalized,
+  filterCutoffFromNormalized,
+  filterResonanceFromNormalized,
+  fxMixFromNormalized,
+  masterOutputGainFromNormalized,
+  mixerVolumeFromNormalized,
+  panFromNormalized,
+  pitchFromNormalized
+} from './parameterScaling';
 
 export type MidiEventPayload = {
   type: 'noteOn' | 'noteOff' | 'cc' | 'pitchBend';
@@ -1283,36 +1293,36 @@ class AudioEngine {
 
     if (target.type === 'master_vol') {
       if (this.masterGain) {
-        this.masterGain.gain.setTargetAtTime(value * 1.2, now, 0.02);
+        this.masterGain.gain.setTargetAtTime(masterOutputGainFromNormalized(value), now, 0.02);
       }
     } else if (target.type === 'channel_vol') {
       const ch = channels.find(c => c.id === target.targetId);
       if (ch) {
-        ch.volume = value;
+        ch.volume = channelVolumeFromNormalized(value);
       }
     } else if (target.type === 'channel_pan') {
       const ch = channels.find(c => c.id === target.targetId);
       if (ch) {
-        ch.pan = (value * 2) - 1;
+        ch.pan = panFromNormalized(value);
       }
     } else if (target.type === 'channel_filter_cutoff') {
       const ch = channels.find(c => c.id === target.targetId);
       if (ch && ch.synthParams) {
-        ch.synthParams.filterCutoff = 40 + Math.pow(value, 2) * 18000;
+        ch.synthParams.filterCutoff = filterCutoffFromNormalized(value);
       }
     } else if (target.type === 'mixer_vol') {
       const trk = mixerTracks.find(t => t.id === Number(target.targetId));
       if (trk) {
-        trk.volume = value * 1.25;
+        trk.volume = mixerVolumeFromNormalized(value);
       }
       const mixerChannel = this.mixerChannels.get(Number(target.targetId));
       if (mixerChannel) {
-        const targetVol = (trk && trk.mute) ? 0 : value * 1.25;
+        const targetVol = (trk && trk.mute) ? 0 : mixerVolumeFromNormalized(value);
         mixerChannel.output.gain.setTargetAtTime(targetVol, now, 0.02);
       }
     } else if (target.type === 'mixer_pan') {
       const trk = mixerTracks.find(t => t.id === Number(target.targetId));
-      const targetPan = (value * 2) - 1;
+      const targetPan = panFromNormalized(value);
       if (trk) {
         trk.pan = targetPan;
       }
@@ -1326,7 +1336,7 @@ class AudioEngine {
         // Map the automation's normalized 0-1 value onto the model's 0-20 resonance
         // range. New voices constructed at note-trigger read this value, so the
         // next note already hears the automated Q.
-        ch.synthParams.filterResonance = Math.max(0.0001, value * 20);
+        ch.synthParams.filterResonance = filterResonanceFromNormalized(value);
       }
     } else if (target.type === 'channel_pitch') {
       const ch = channels.find(c => c.id === target.targetId);
@@ -1334,7 +1344,7 @@ class AudioEngine {
         // Map normalized 0-1 onto the FL Studio-style ±12 semitone offset so the
         // middle of the curve is no transposition. Every note trigger reads
         // `channel.pitch`, so writing it here takes effect on the next note.
-        ch.pitch = (value * 24) - 12;
+        ch.pitch = pitchFromNormalized(value);
       }
     } else if (target.type === 'fx_mix') {
       const trackId = Number(target.targetId);
@@ -1349,7 +1359,7 @@ class AudioEngine {
             // observes the automated value. Live playback updates the running
             // WetDry via the patch registry, when installed, so the user hears
             // the change without a chain rebuild.
-            slot.mix = Math.max(0, Math.min(1, value));
+            slot.mix = fxMixFromNormalized(value);
             const registry = (this as unknown as {
               __liveFxChainRegistry?: {
                 applyLiveMix(trackId: number, slotId: string, mix: number, currentTime: number): boolean;
