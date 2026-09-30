@@ -46,6 +46,11 @@ import { createRecordingPlaylistClip, getRecordingAudioBufferId, validateRecordi
 import { createHistory, type ProjectHistory, resolveSaveShortcut, resolveUndoRedoShortcut } from './state/projectHistory';
 import { isRecordingProjectGenerationCurrent, nextRecordingProjectGeneration } from './state/recordingProjectLifecycle';
 import { isPureAdditivePlaylistClipAppend, resolveAdditivePlaylistClipPublication } from './state/playlistAudioPublication';
+import {
+  describeRejectedPlaylistAudioClips,
+  isPublishablePlaylistClip,
+  resolvePlaylistClipPublication
+} from './state/playlistClipIntegrity';
 import { synchronizeBeforeRuntimePublication } from './state/runtimeStatePublication';
 import {
   ContinuousHistoryBatcher,
@@ -957,8 +962,29 @@ export function App() {
     }
   };
 
-  const handleUpdateClips = (clips: PlaylistClip[]) => {
+  const handleUpdateClips = (incomingClips: PlaylistClip[]) => {
     const currentState = projectStateRef.current;
+
+    /**
+     * Phase 48 publication invariant. A `type: 'audio'` clip with no real
+     * `audioBufferId` is silent during playback, is never flagged by the
+     * missing-audio surfaces, and hard-blocks WAV and stem export for the whole
+     * project. It must never reach project state, project history, or
+     * persistence — so the gate runs before `updatePlaylistProjectState`,
+     * before the history commit, and before the autosave that follows it.
+     *
+     * Valid clips in the same batch still publish, so a legitimate drag/drop
+     * travelling alongside a rejected clip is never lost. When a rejection
+     * leaves nothing that differs from the live playlist we return instead of
+     * publishing a no-op state object.
+     */
+    const { publishable: clips, rejected, shouldPublish } =
+      resolvePlaylistClipPublication(currentState.playlistClips, incomingClips);
+    if (rejected.length > 0) {
+      setSaveError(describeRejectedPlaylistAudioClips(rejected));
+      if (!shouldPublish) return;
+    }
+
     const currentAudioIds = new Set(
       currentState.playlistClips
         .map(clip => clip.type === 'audio' ? clip.audioBufferId : undefined)
@@ -1094,6 +1120,25 @@ export function App() {
       getFxUpdateLabel(updates),
       { isContinuous }
     );
+  };
+
+  /**
+   * Phase 48: the take-comping promotion path is gated by the same invariant as
+   * `handleUpdateClips`. A clip with no real `audioBufferId` never reaches
+   * project state or history; the refusal is reported through the existing
+   * save-error surface. Nothing here fabricates audio or a buffer id.
+   */
+  const handlePromoteCompToPlaylist = (newClip: PlaylistClip) => {
+    if (!isPublishablePlaylistClip(newClip)) {
+      setSaveError(describeRejectedPlaylistAudioClips([newClip]));
+      return;
+    }
+    const nextState = {
+      ...projectStateRef.current,
+      playlistClips: [...projectStateRef.current.playlistClips, newClip]
+    };
+    updatePlaylistProjectState(nextState);
+    commitPlaylistHistory(nextState, 'Promote comp to playlist');
   };
 
   // --- Phase 6D: Recording -> decode -> register -> playlist clip ---
@@ -1718,7 +1763,7 @@ export function App() {
       <MidiLearnModal isOpen={isMidiLearnOpen} onClose={() => setIsMidiLearnOpen(false)} midiMappings={projectState.midiMappings || []} onUpdateMidiMappings={(mappings) => mutateProjectState(curr => updateMidiMappingsInProjectState(curr, mappings), 'Update MIDI mappings')} channels={projectState.channels} mixerTracks={projectState.mixerTracks} connectedDevices={projectState.connectedMidiDevices || []} isMidiLearnActive={isMidiLearnActive} onToggleMidiLearn={(active) => setIsMidiLearnActive(active)} />
       <MultiZoneSamplerModal isOpen={isMultiZoneSamplerOpen} onClose={() => setIsMultiZoneSamplerOpen(false)} channels={projectState.channels} sampleLibrary={projectState.sampleLibrary || []} onUpdateChannel={handleUpdateChannel} />
       <WavetableSynthModal isOpen={isWavetableSynthOpen} onClose={() => setIsWavetableSynthOpen(false)} channels={projectState.channels} onUpdateChannel={handleUpdateChannel} />
-      <TakeCompingModal isOpen={isTakeCompingOpen} onClose={() => setIsTakeCompingOpen(false)} onPromoteCompToPlaylist={(newClip) => { const nextState = { ...projectStateRef.current, playlistClips: [...projectStateRef.current.playlistClips, newClip] }; updatePlaylistProjectState(nextState); commitPlaylistHistory(nextState, 'Promote comp to playlist'); }} />
+      <TakeCompingModal isOpen={isTakeCompingOpen} onClose={() => setIsTakeCompingOpen(false)} onPromoteCompToPlaylist={handlePromoteCompToPlaylist} />
       <SidechainRoutingModal isOpen={isSidechainOpen} onClose={() => setIsSidechainOpen(false)} mixerTracks={projectState.mixerTracks} onUpdateMixerTracks={(tracks) => mutateProjectState(curr => ({ ...curr, mixerTracks: tracks }), 'Update mixer routing')} />
       <PolyphonicEditorModal isOpen={isPolyphonicEditorOpen} onClose={() => setIsPolyphonicEditorOpen(false)} />
       <DesktopAppModal isOpen={isDesktopAppOpen} onClose={() => setIsDesktopAppOpen(false)} />

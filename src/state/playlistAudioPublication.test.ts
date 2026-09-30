@@ -16,6 +16,12 @@ import {
 } from './playlistAudioPublication';
 import { runProjectReplacementAfterBackup } from './projectReplacement';
 import { synchronizeBeforeRuntimePublication } from './runtimeStatePublication';
+// Aliased so `typeof` below resolves to the imported binding rather than to the
+// same-named parameter of the extracted handler's signature.
+import {
+  describeRejectedPlaylistAudioClips as describeRejectedPlaylistAudioClipsImpl,
+  resolvePlaylistClipPublication as resolvePlaylistClipPublicationImpl,
+} from './playlistClipIntegrity';
 import { DEFAULT_PROJECT } from '../audio/presets';
 import type { PlaylistClip, ProjectState } from '../types/daw';
 
@@ -134,7 +140,7 @@ const loadProductionHandleUpdateClips = () => {
     'utf8',
   );
   const match = appSource.match(
-    /const handleUpdateClips = \(clips: PlaylistClip\[\]\) => \{([\s\S]*?)\n  \};\n\n  const handleUpdateMarkers/
+    /const handleUpdateClips = \(incomingClips: PlaylistClip\[\]\) => \{([\s\S]*?)\n  \};\n\n  const handleUpdateMarkers/
   );
   if (!match) throw new Error('Could not locate App.handleUpdateClips production boundary');
 
@@ -146,7 +152,7 @@ const loadProductionHandleUpdateClips = () => {
     .replace(/\(id\): id is string =>/g, '(id) =>');
 
   return new Function(
-    'clips',
+    'incomingClips',
     'projectStateRef',
     'audioEngine',
     'waitForSampleBufferPersistence',
@@ -156,9 +162,14 @@ const loadProductionHandleUpdateClips = () => {
     'setSaveError',
     'isPureAdditivePlaylistClipAppend',
     'resolveAdditivePlaylistClipPublication',
+    // Phase 48: the publication invariant is injected as the real production
+    // implementation, so this harness still executes the true handler body
+    // including the audio-clip gate.
+    'resolvePlaylistClipPublication',
+    'describeRejectedPlaylistAudioClips',
     productionBody,
   ) as unknown as (
-    clips: PlaylistClip[],
+    incomingClips: PlaylistClip[],
     projectStateRef: { current: ProjectState },
     audioEngine: FakeEngine,
     waitForSampleBufferPersistence: PersistenceWait,
@@ -175,6 +186,8 @@ const loadProductionHandleUpdateClips = () => {
       captureTimeClips: readonly T[],
       capturedClips: readonly T[],
     ) => T[] | null,
+    resolvePlaylistClipPublication: typeof resolvePlaylistClipPublicationImpl,
+    describeRejectedPlaylistAudioClips: typeof describeRejectedPlaylistAudioClipsImpl,
   ) => void;
 };
 
@@ -202,6 +215,8 @@ const invokeProductionHandleUpdateClips = (
     overrides.setSaveError ?? (() => undefined),
     isPureAdditivePlaylistClipAppend,
     resolveAdditivePlaylistClipPublication,
+    resolvePlaylistClipPublicationImpl,
+    describeRejectedPlaylistAudioClipsImpl,
   );
 };
 
@@ -962,4 +977,83 @@ test('publication tokens change across project generation and playlist revision 
   const afterEdit = captureCurrentPlaylistAudioPublicationToken();
   advancePlaylistAudioProjectGeneration();
   assert.equal(isCurrentPlaylistAudioPublication(afterEdit), false);
+});
+
+// ---------------------------------------------------------------------------
+// Phase 48 — audio clip publication invariant at the real production boundary
+// ---------------------------------------------------------------------------
+
+/** The exact clip shape the removed PlaylistArranger "Audio Stem" producer built. */
+const audiolessAudioClip = (id: string, name: string): PlaylistClip => ({
+  id,
+  trackIndex: 1,
+  startBar: 4,
+  lengthBars: 4,
+  type: 'audio',
+  color: '#00ff88',
+  name,
+  fadeInBars: 0.25,
+  fadeOutBars: 0.5,
+  audioWaveform: [0.1, 0.4, 0.8, 0.6, 0.9, 0.7, 0.4, 0.2],
+});
+
+test('PHASE 48: an audioless audio clip is never published, never committed, and reports through setSaveError', async () => {
+  const engine = createFakeEngine();
+  const clips = baseClips();
+  const projectStateRef = { current: makeState(clips) };
+  const harness = createPublicationHarness(projectStateRef);
+  const placeholder = audiolessAudioClip('audio-clip-1700000000000', 'Audio Stem / Vocal');
+
+  invokeProductionHandleUpdateClips(
+    [...clips, placeholder], projectStateRef, engine, harness.publish,
+    { setSaveError: harness.setSaveError, commitPlaylistHistory: harness.commitPlaylistHistory },
+  );
+  await awaitPublicationOutcome(engine);
+
+  assert.deepEqual(harness.publishedStates, [], 'nothing may reach the runtime/state boundary');
+  assert.deepEqual(harness.history, [], 'nothing may be committed to project history');
+  assert.equal(harness.saveErrors.length, 1, 'the rejection must reach the save-error surface');
+  assert.match(harness.saveErrors[0]!, /Audio Stem \/ Vocal/);
+  assert.match(harness.saveErrors[0]!, /no audio asset/);
+  assert.deepEqual(projectStateRef.current.playlistClips, clips, 'project state is untouched');
+});
+
+test('PHASE 48: a valid drop in the same batch still publishes while the invalid clip is rejected', async () => {
+  const { engine, releasePersistence } = await startBlockedPersistence('phase48-valid-audio');
+  const clips = baseClips();
+  const projectStateRef = { current: makeState(clips) };
+  const harness = createPublicationHarness(projectStateRef);
+  const placeholder = audiolessAudioClip('audio-clip-1700000000001', 'Audio Stem / Vocal');
+  const valid = audioClip('phase48-valid-audio', 'Dropped Audio');
+
+  invokeProductionHandleUpdateClips(
+    [...clips, placeholder, valid], projectStateRef, engine, harness.publish,
+    { setSaveError: harness.setSaveError, commitPlaylistHistory: harness.commitPlaylistHistory },
+  );
+  releasePersistence.resolve();
+  await harness.waitForPublications(1);
+
+  const published = projectStateRef.current.playlistClips;
+  assert.equal(published.some(clip => clip.id === valid.id), true, 'the legitimate drop is never lost');
+  assert.equal(published.some(clip => clip.id === placeholder.id), false, 'the invalid clip is never published');
+  assert.equal(harness.saveErrors.length, 1);
+  assert.deepEqual(harness.history.map(entry => entry.label), ['Clip change']);
+});
+
+test('PHASE 48: a fully valid clip update publishes exactly as before, with no save error', async () => {
+  const { engine, releasePersistence } = await startBlockedPersistence('phase48-clean-audio');
+  const clips = baseClips();
+  const projectStateRef = { current: makeState(clips) };
+  const harness = createPublicationHarness(projectStateRef);
+  const valid = audioClip('phase48-clean-audio', 'Dropped Audio');
+
+  invokeProductionHandleUpdateClips(
+    [...clips, valid], projectStateRef, engine, harness.publish,
+    { setSaveError: harness.setSaveError, commitPlaylistHistory: harness.commitPlaylistHistory },
+  );
+  releasePersistence.resolve();
+  await harness.waitForPublications(1);
+
+  assert.equal(projectStateRef.current.playlistClips.some(clip => clip.id === valid.id), true);
+  assert.deepEqual(harness.saveErrors, [], 'the invariant must be invisible to valid updates');
 });

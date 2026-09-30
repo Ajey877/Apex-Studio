@@ -1,6 +1,7 @@
-import type { ProjectState, Channel } from '../types/daw';
+import type { ProjectState, Channel, PlaylistClip } from '../types/daw';
 import { audioEngine } from '../audio/audioEngine';
 import { createDefaultMixerTracks, createDefaultPlaylistTracks } from '../audio/presets';
+import { markAudioClipsMissingBufferId } from './playlistClipIntegrity';
 import {
   MASTER_MIXER_TRACK_ID,
   deriveNextMixerTrackId,
@@ -223,7 +224,14 @@ export const normalizeProjectState = (input: unknown): ProjectState => {
         .filter((sample): sample is NonNullable<typeof sample> => Boolean(sample?.id))),
     channels: Array.isArray(candidate.channels) ? clone(candidate.channels) : defaults.channels,
     playlistTracks: Array.isArray(candidate.playlistTracks) ? clone(candidate.playlistTracks) : defaults.playlistTracks,
-    playlistClips: Array.isArray(candidate.playlistClips) ? clone(candidate.playlistClips) : defaults.playlistClips,
+    // Phase 48 legacy recovery: an audio clip that reached persistence without
+    // an `audioBufferId` (an older build could publish one) is silent, blocks
+    // WAV/stem export, and was invisible. Flag it so the existing Phase 8C
+    // badge, banner and remediation text explain it. Never deleted, never
+    // given an invented buffer id.
+    playlistClips: Array.isArray(candidate.playlistClips)
+      ? markAudioClipsMissingBufferId(clone(candidate.playlistClips) as PlaylistClip[])
+      : defaults.playlistClips,
     mixerTracks: Array.isArray(candidate.mixerTracks) ? clone(candidate.mixerTracks) : defaults.mixerTracks,
     recordings: Array.isArray(candidate.recordings) ? clone(candidate.recordings) : defaults.recordings,
     comments: Array.isArray(candidate.comments) ? clone(candidate.comments) : defaults.comments,
