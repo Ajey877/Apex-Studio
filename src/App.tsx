@@ -17,7 +17,8 @@ import {
   Pattern,
   MasteringSuiteState
 } from './types/daw';
-import { audioEngine, type PlaybackStateUpdate } from './audio/audioEngine';
+import { audioEngine, type MidiEventPayload, type PlaybackStateUpdate } from './audio/audioEngine';
+import { MidiCcMappingRuntime } from './audio/midiMappingRuntime';
 import { 
   DEFAULT_PROJECT, 
   PRESET_PROJECTS, 
@@ -627,6 +628,50 @@ export function App() {
       restoreRuntimeState,
     );
   }, [commitProjectHistory, restoreRuntimeState, synchronizeRuntimeState]);
+
+  // Keep the MIDI bridge pointed at the freshest mutation callback without
+  // re-subscribing to the engine's MIDI stream on every render.
+  const mutateProjectStateRef = useRef(mutateProjectState);
+  useEffect(() => {
+    mutateProjectStateRef.current = mutateProjectState;
+  }, [mutateProjectState]);
+
+  /**
+   * Phase 46: make saved MIDI CC mappings actually control their targets.
+   *
+   * The runtime is a consumer of the audio engine's existing MIDI stream (the
+   * same one the transport LED and MIDI Learn use) and applies each mapping
+   * through the existing project mutation/history path, so undo/redo,
+   * persistence and live playback stay consistent. The master output is the one
+   * target that is not project state, so it goes through the engine's existing
+   * master-volume parameter API.
+   */
+  useEffect(() => {
+    const midiMappingRuntime = new MidiCcMappingRuntime({
+      getProjectState: () => projectStateRef.current,
+      applyProjectMutation: (updater, label) => {
+        mutateProjectStateRef.current(updater, label, { isContinuous: true });
+      },
+      applyMasterVolume: normalizedValue => {
+        const state = projectStateRef.current;
+        audioEngine.applyAutomationValue(
+          { type: 'master_vol', targetId: 0 },
+          normalizedValue,
+          state.channels,
+          state.mixerTracks,
+        );
+      }
+    });
+
+    const handleMidiMessage = (event: MidiEventPayload) => {
+      midiMappingRuntime.handleMidiEvent(event);
+    };
+
+    audioEngine.addMidiListener(handleMidiMessage);
+    return () => {
+      audioEngine.removeMidiListener(handleMidiMessage);
+    };
+  }, []);
 
   const handleContinuousInteractionStart = useCallback((label?: string) => {
     continuousBatcherRef.current.start(label);

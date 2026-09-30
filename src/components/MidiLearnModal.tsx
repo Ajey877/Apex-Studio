@@ -15,6 +15,8 @@ import {
   Keyboard
 } from 'lucide-react';
 import { MidiMapping, Channel, MixerTrack, MidiDeviceInfo } from '../types/daw';
+import { audioEngine, type MidiEventPayload } from '../audio/audioEngine';
+import { createMidiMappingForCc, resolveMidiLearnCapture } from '../audio/midiMappingRuntime';
 
 interface MidiLearnModalProps {
   isOpen: boolean;
@@ -50,12 +52,11 @@ export const MidiLearnModal: React.FC<MidiLearnModalProps> = ({
       setStatusMessage(`CC #${manualCc} is already bound. Overwriting...`);
     }
 
-    const newMapping: MidiMapping = {
-      ccNumber: manualCc,
-      targetType: selectedTargetType,
-      targetId: selectedTargetId,
-      paramName: selectedTargetType === 'master_vol' ? 'Master Volume' : `${selectedTargetType} #${selectedTargetId}`
-    };
+    const newMapping: MidiMapping = createMidiMappingForCc(
+      manualCc,
+      selectedTargetType,
+      selectedTargetId
+    );
 
     const filtered = midiMappings.filter(m => m.ccNumber !== manualCc);
     onUpdateMidiMappings([...filtered, newMapping]);
@@ -72,6 +73,41 @@ export const MidiLearnModal: React.FC<MidiLearnModalProps> = ({
     setStatusMessage('Cleared all MIDI CC mappings.');
     setTimeout(() => setStatusMessage(null), 3000);
   };
+
+  /**
+   * MIDI Learn is armed by the header button; this connects that state to the
+   * engine's existing MIDI event stream. The first incoming CC is captured,
+   * bound to the selected target, stored through the project mutation path and
+   * then actually controls the target through the runtime mapping bridge.
+   */
+  useEffect(() => {
+    if (!isOpen || !isMidiLearnActive) return;
+
+    const handleLearnedCc = (event: MidiEventPayload) => {
+      const capture = resolveMidiLearnCapture(event, midiMappings, {
+        targetType: selectedTargetType,
+        targetId: selectedTargetId
+      });
+      if (!capture) return;
+
+      onUpdateMidiMappings(capture.mappings);
+      setManualCc(capture.ccNumber);
+      setStatusMessage(`Learned MIDI CC #${capture.ccNumber} → ${capture.mapping.paramName}.`);
+      onToggleMidiLearn(false);
+      setTimeout(() => setStatusMessage(null), 3000);
+    };
+
+    audioEngine.addMidiListener(handleLearnedCc);
+    return () => audioEngine.removeMidiListener(handleLearnedCc);
+  }, [
+    isOpen,
+    isMidiLearnActive,
+    midiMappings,
+    onToggleMidiLearn,
+    onUpdateMidiMappings,
+    selectedTargetId,
+    selectedTargetType
+  ]);
 
   if (!isOpen) return null;
 
@@ -159,6 +195,15 @@ export const MidiLearnModal: React.FC<MidiLearnModalProps> = ({
               </div>
             )}
           </div>
+
+          {isMidiLearnActive && (
+            <div className="bg-[#ff6e00]/10 border border-[#ff6e00]/50 rounded-lg p-3 flex items-center gap-2 animate-pulse">
+              <Radio className="w-4 h-4 text-[#ff6e00]" />
+              <span className="text-xs text-white font-bold">
+                Waiting for a MIDI CC — move a knob or fader to bind it to the selected target.
+              </span>
+            </div>
+          )}
 
           {/* Quick Manual Bind Form */}
           <div className="bg-[#18181b] p-3 rounded-lg border border-[#28282b] space-y-2">
