@@ -76,7 +76,7 @@ interface PlaylistArrangerProps {
   onSeekToBar?: (bar: number) => void;
   currentBar: number;
   isPlaying: boolean;
-  /** Project tempo (`meta.bpm`); Bounce-In-Place renders stems at this tempo. */
+  /** Project tempo (`meta.bpm`); Bounce-In-Place renders stems at this tempo and imported audio is sized to it. */
   bpm: number;
 }
 
@@ -1076,7 +1076,7 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
                           peaks.push(Math.min(1, (sum / blockSize) * 3));
                         }
 
-                        const durationBars = Math.max(1, Math.round(decoded.duration / ((4 * 60) / 130)));
+                        const durationBars = Math.max(1, Math.round(decoded.duration / ((4 * 60) / bpm)));
                         const dropPlacement = resolvePlaylistDropPlacement(
                           dropClientX,
                           dropClientY,
