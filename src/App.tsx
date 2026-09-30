@@ -44,6 +44,7 @@ import {
 import { createRecordingPlaylistClip, getRecordingAudioBufferId, validateRecordingTargetTrack } from './audio/recordingPipeline';
 import { createHistory, type ProjectHistory, resolveSaveShortcut, resolveUndoRedoShortcut } from './state/projectHistory';
 import { isRecordingProjectGenerationCurrent, nextRecordingProjectGeneration } from './state/recordingProjectLifecycle';
+import { isPureAdditivePlaylistClipAppend, resolveAdditivePlaylistClipPublication } from './state/playlistAudioPublication';
 import { synchronizeBeforeRuntimePublication } from './state/runtimeStatePublication';
 import {
   ContinuousHistoryBatcher,
@@ -925,8 +926,23 @@ export function App() {
         .filter(id => !currentAudioIds.has(id))
     )];
 
+    // An import that only appends clips can land on top of whatever the playlist
+    // became while its asset was being persisted. Anything else keeps the strict
+    // gate, so a stale or conflicting write can never clobber newer edits.
+    const isAdditiveImport = isPureAdditivePlaylistClipAppend(currentState.playlistClips, clips);
+
     const commitClipChange = () => {
-      const nextState = { ...projectStateRef.current, playlistClips: clips };
+      const latestState = projectStateRef.current;
+      const playlistClips = isAdditiveImport
+        ? resolveAdditivePlaylistClipPublication(latestState.playlistClips, currentState.playlistClips, clips)
+        : clips;
+      // Null means the captured update is no longer valid against the live
+      // playlist: reject it rather than republishing the stale snapshot. When the
+      // merge resolves to the live array itself, a sibling publication already
+      // carried every appended clip and there is nothing left to publish.
+      if (playlistClips === null) return;
+      if (playlistClips === latestState.playlistClips && playlistClips !== clips) return;
+      const nextState = { ...latestState, playlistClips };
       updatePlaylistProjectState(nextState);
       if (!playlistInteractionActiveRef.current) {
         commitPlaylistHistory(nextState, 'Clip change');
@@ -941,7 +957,11 @@ export function App() {
     // Dropped/bounced buffers are registered synchronously, but their storage
     // write is asynchronous. Do not put the clip id into project state until
     // every newly referenced asset has completed successfully.
-    void Promise.all(newAudioIds.map(id => waitForSampleBufferPersistence(audioEngine, id)))
+    void Promise.all(newAudioIds.map(id => waitForSampleBufferPersistence(
+      audioEngine,
+      id,
+      isAdditiveImport ? { allowAdditivePlaylistRevision: true } : undefined
+    )))
       .then(() => {
         commitClipChange();
       })
