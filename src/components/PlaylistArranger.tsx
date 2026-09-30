@@ -50,7 +50,11 @@ import {
   findAutomationPointIndexNearX,
   resolveAddNodePosition,
 } from './playlistClipOperations';
-import { resolveInitialAudioDropStartBar } from './audioDropPlacement';
+import {
+  resolvePlaylistDropPlacement,
+  resolvePlaylistClipMove,
+  resolveAudioDropStartBarFromClientX,
+} from './audioDropPlacement';
 
 interface PlaylistArrangerProps {
   tracks: PlaylistTrack[];
@@ -173,6 +177,7 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
   const didMoveRef = useRef(false);
   const lastScrubBarRef = useRef<number>(1);
   const rulerContainerRef = useRef<HTMLDivElement | null>(null);
+  const timelineScrollContainerRef = useRef<HTMLDivElement | null>(null);
 
   const bounds = { totalBars, maxTracks: tracks.length };
 
@@ -328,9 +333,16 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
         setSelectedPointIndex(result.nextIndex);
         onUpdateClips(currentClips.map(item => item.id === clip.id ? result.clip : item));
       } else if (active.kind === 'move') {
-        const requestedStart = clip.startBar + (clientX - active.originX) / BAR_WIDTH;
-        const targetTrack = clip.trackIndex + Math.round((clientY - active.originY) / TRACK_HEIGHT);
-        const moved = movePlaylistClip(clip, requestedStart, targetTrack, DEFAULT_GRID_BARS, bounds);
+        const movedCoords = resolvePlaylistClipMove(
+          clip,
+          active.originX,
+          active.originY,
+          clientX,
+          clientY,
+          { barWidth: BAR_WIDTH, trackHeight: TRACK_HEIGHT },
+          { totalBars, maxTracks: tracks.length, gridBars: DEFAULT_GRID_BARS }
+        );
+        const moved = movePlaylistClip(clip, movedCoords.startBar, movedCoords.trackIndex, DEFAULT_GRID_BARS, bounds);
         onUpdateClips(currentClips.map(item => item.id === clip.id ? moved : item));
       } else if (active.kind === 'resize-left') {
         const requestedStart = clip.startBar + (clientX - active.originX) / BAR_WIDTH;
@@ -945,7 +957,10 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
         </div>
 
         {/* Timeline Clips Area */}
-        <div className="flex-1 flex flex-col overflow-auto custom-scrollbar bg-[#0a0a0b]">
+        <div
+          ref={timelineScrollContainerRef}
+          className="flex-1 flex flex-col overflow-auto custom-scrollbar bg-[#0a0a0b]"
+        >
           {/* Top Section Markers Ribbon */}
           <div className="flex h-5 bg-[#121215] border-b border-[#28282b] sticky top-0 z-20 min-w-[768px] relative">
             {markers.map((marker) => (
@@ -1033,6 +1048,13 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
                   if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
                     const file = e.dataTransfer.files[0];
                     if (file.type.startsWith('audio/') || file.name.endsWith('.wav') || file.name.endsWith('.mp3') || file.name.endsWith('.ogg')) {
+                      const dropClientX = e.clientX;
+                      const dropClientY = e.clientY;
+                      const trackRect = e.currentTarget.getBoundingClientRect();
+                      const container = timelineScrollContainerRef.current;
+                      const containerRect = container?.getBoundingClientRect();
+                      const scrollLeft = container?.scrollLeft ?? 0;
+                      const scrollTop = container?.scrollTop ?? 0;
                       setStatusMessage(`Importing sample "${file.name}" to Track #${track.id}...`);
                       try {
                         const arrayBuf = await file.arrayBuffer();
@@ -1055,14 +1077,27 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
                         }
 
                         const durationBars = Math.max(1, Math.round(decoded.duration / ((4 * 60) / 130)));
+                        const dropPlacement = resolvePlaylistDropPlacement(
+                          dropClientX,
+                          dropClientY,
+                          durationBars,
+                          {
+                            trackLeft: trackRect.left,
+                            trackTop: trackRect.top,
+                            viewportLeft: containerRect?.left,
+                            viewportTop: containerRect?.top,
+                            scrollLeft,
+                            scrollTop,
+                            barWidth: BAR_WIDTH,
+                            trackHeight: TRACK_HEIGHT,
+                          },
+                          { totalBars, gridBars: DEFAULT_GRID_BARS, maxTracks: tracks.length }
+                        );
+
                         const newDroppedClip: PlaylistClip = {
                           id: `audio-drop-${Date.now()}`,
                           trackIndex: trackIdx,
-                          startBar: resolveInitialAudioDropStartBar(
-                            currentBar,
-                            durationBars,
-                            { totalBars, gridBars: DEFAULT_GRID_BARS }
-                          ),
+                          startBar: dropPlacement.startBar,
                           lengthBars: durationBars,
                           type: 'audio',
                           audioBufferId: bufId,
