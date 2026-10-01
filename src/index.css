@@ -265,7 +265,10 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .apex-tab,
 .apex-tool-menu-item,
 .apex-brand,
-.apex-project-name {
+.apex-project-name,
+.apex-browser-action,
+.apex-browser-folder-btn,
+.apex-browser-row {
   min-height: 0;
   display: inline-flex;
   align-items: center;
@@ -720,6 +723,283 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   flex: 1 1 auto;
   text-align: left;
 }
+
+/* ===========================================================================
+   Studio browser (UI Milestone 1C — Step 3).
+
+   The sidebar keeps its shipped geometry (w-56 / md:w-64, a right border, a
+   flex column) and moves its theming onto the shell tokens, like the transport
+   did in Step 2. Four distinct surfaces — header, search, body, preview — so
+   each band of the panel reads as what it is. Rows and folder headers are
+   native buttons in JSX; the primitives below only style them, so keyboard
+   access and the focus-visible ring come from the element, not the CSS.
+   =========================================================================== */
+.apex-sidebar {
+  background: var(--apex-panel);
+  border-right-color: var(--apex-border);
+}
+
+/* --- Browser header ------------------------------------------------------ */
+.apex-browser-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 10px;
+  background: var(--apex-panel-header);
+  border-bottom: 1px solid var(--apex-border);
+}
+
+.apex-browser-title {
+  font-size: var(--apex-type-micro);
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--apex-text-muted);
+}
+
+.apex-browser-action {
+  height: var(--apex-control-sm);
+  padding: 0 8px;
+  gap: 4px;
+  color: var(--apex-accent);
+  font-size: var(--apex-type-micro);
+  font-weight: 600;
+}
+.apex-browser-action:hover { color: var(--apex-text); }
+.apex-browser-action-icon { width: 12px; height: 12px; }
+
+/* --- Browser search ------------------------------------------------------ */
+.apex-browser-search {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 8px;
+  height: var(--apex-control-sm);
+  padding: 0 8px;
+  border: 1px solid var(--apex-border);
+  border-radius: var(--apex-radius-control);
+  background: var(--apex-chrome-inset);
+}
+.apex-browser-search:focus-within {
+  border-color: var(--apex-state-selected-border);
+}
+.apex-browser-search-icon {
+  width: 13px;
+  height: 13px;
+  flex-shrink: 0;
+  color: var(--apex-text-muted);
+}
+.apex-browser-search-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  background: transparent;
+  border: 0;
+  outline: none;
+  font-size: var(--apex-type-label);
+  color: var(--apex-text);
+}
+.apex-browser-search-input::placeholder { color: var(--apex-text-3); }
+
+/* --- Browser body -------------------------------------------------------- */
+.apex-browser-body {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  padding: 2px 8px 8px;
+}
+
+.apex-browser-folder + .apex-browser-folder { margin-top: 10px; }
+
+/* Focus — one ring, from one token, and never removed (the shell vocabulary). */
+.apex-browser-action:focus-visible,
+.apex-browser-folder-btn:focus-visible,
+.apex-browser-row:focus-visible {
+  outline: 2px solid var(--apex-state-focus);
+  outline-offset: 2px;
+}
+
+.apex-browser-folder-btn {
+  width: 100%;
+  padding: 4px 6px;
+  font-size: var(--apex-type-micro);
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--apex-text-muted);
+}
+
+.apex-browser-folder-icon {
+  width: 13px;
+  height: 13px;
+  flex-shrink: 0;
+  color: var(--apex-accent);
+}
+
+.apex-browser-folder-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.apex-browser-caret {
+  width: 12px;
+  height: 12px;
+  flex-shrink: 0;
+  color: var(--apex-text-muted);
+}
+
+.apex-browser-folder-items {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 2px 0 0 8px;
+  padding-left: 8px;
+  border-left: 1px solid var(--apex-border);
+}
+
+/* One row vocabulary for every entry in every folder. */
+.apex-browser-row {
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  padding: 4px 8px;
+  font-size: var(--apex-type-label);
+  color: var(--apex-text-2);
+}
+.apex-browser-row-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.apex-browser-row-hint {
+  flex-shrink: 0;
+  font-size: var(--apex-type-micro);
+  font-weight: 600;
+  color: var(--apex-accent);
+  font-variant-numeric: tabular-nums;
+}
+/* The "+ Load" hint is secondary: revealed on hover or keyboard focus. */
+.apex-browser-row-hint--reveal { opacity: 0; transition: opacity 120ms ease; }
+.apex-browser-row:hover .apex-browser-row-hint--reveal,
+.apex-browser-row:focus-visible .apex-browser-row-hint--reveal { opacity: 1; }
+.apex-browser-row-icon {
+  width: 12px;
+  height: 12px;
+  flex-shrink: 0;
+  opacity: 0.6;
+}
+
+/* The auditioned sample is the row's selected state — token-driven, and the
+   state is also carried by aria-pressed in the markup. */
+.apex-browser-row[aria-pressed="true"] {
+  background-color: var(--apex-state-selected);
+  border-color: var(--apex-state-selected-border);
+  color: var(--apex-text);
+  font-weight: 600;
+}
+.apex-browser-row[aria-pressed="true"] .apex-browser-row-icon { opacity: 1; color: var(--apex-accent); }
+
+.apex-browser-empty {
+  margin: 0;
+  padding: 4px 8px;
+  font-size: var(--apex-type-label);
+  font-style: italic;
+  color: var(--apex-text-3);
+}
+
+/* --- Browser preview ----------------------------------------------------- */
+.apex-browser-preview {
+  padding: 8px 10px;
+  background: var(--apex-panel-header);
+  border-top: 1px solid var(--apex-border);
+}
+.apex-browser-preview-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.apex-browser-preview-label {
+  font-size: var(--apex-type-micro);
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--apex-text-muted);
+}
+.apex-browser-preview-state {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: var(--apex-type-micro);
+  font-weight: 600;
+  color: var(--apex-text-3);
+}
+.apex-browser-preview-state[data-active="true"] { color: var(--apex-accent); }
+.apex-browser-preview-sample {
+  margin-top: 2px;
+  font-size: var(--apex-type-label);
+  color: var(--apex-text-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ===========================================================================
+   Status bar (UI Milestone 1C — Step 3).
+
+   Informational chrome on the --apex-chrome-status token: real project name,
+   real save state, the active view from the workspace tab model, and real
+   project counts. No controls — the bar has nothing to press.
+   =========================================================================== */
+.apex-statusbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 0 16px;
+  overflow: hidden;
+  background: var(--apex-chrome-status);
+  border-top: 1px solid var(--apex-border);
+  color: var(--apex-text-muted);
+}
+.apex-statusbar-group {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  min-width: 0;
+}
+.apex-status-item {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  min-width: 0;
+}
+.apex-status-label {
+  font-size: var(--apex-type-micro);
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--apex-text-3);
+}
+.apex-status-value {
+  font-size: var(--apex-type-micro);
+  color: var(--apex-text-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 180px;
+  font-variant-numeric: tabular-nums;
+}
+/* Save state: green only when a real save succeeded, danger + message when
+   the existing saveError is set. State is carried by data-state and text, not
+   colour alone. */
+.apex-status-item--save .apex-status-value { font-weight: 600; }
+.apex-status-item--save[data-state="ok"] .apex-status-value { color: var(--apex-success); }
+.apex-status-item--save[data-state="error"] .apex-status-value { color: var(--apex-danger); }
 
 /* ---------------------------------------------------------------------------
    Shell responsive ladder.
