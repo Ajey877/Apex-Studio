@@ -45,6 +45,15 @@ import {
 } from './state/audioAssetAvailability';
 import { createRecordingPlaylistClip, getRecordingAudioBufferId, validateRecordingTargetTrack } from './audio/recordingPipeline';
 import { createHistory, type ProjectHistory, resolveSaveShortcut, resolveUndoRedoShortcut } from './state/projectHistory';
+import { KEY_NOTE_MAP, getKeyboardNotePitch } from './state/musicalKeyboard';
+import { fullscreenController } from './state/fullscreen';
+import { createNewSessionRequest } from './state/newSession';
+import { resolveApplicationMenuShortcut, type ApplicationMenuCommandId } from './state/applicationMenu';
+import {
+  createApplicationMenuCommandState,
+  runApplicationMenuCommand,
+  type ApplicationMenuCommandDeps
+} from './state/applicationMenuCommands';
 import { isRecordingProjectGenerationCurrent, nextRecordingProjectGeneration } from './state/recordingProjectLifecycle';
 import { isPureAdditivePlaylistClipAppend, resolveAdditivePlaylistClipPublication } from './state/playlistAudioPublication';
 import {
@@ -78,6 +87,7 @@ import {
 } from './state/projectMutations';
 
 // Component Suite
+import { ApplicationMenuBar } from './components/ApplicationMenuBar';
 import { TransportBar } from './components/TransportBar';
 import { ChannelRack } from './components/ChannelRack';
 import { PianoRoll } from './components/PianoRoll';
@@ -1216,43 +1226,121 @@ export function App() {
   };
 
   // --- Computer Keypad & Keyboard Live Engine ---
+  // --- Application Menu (UI Milestone 1B) ---
+  // Every entry below is an existing production entry point. The menu adds no new
+  // project lifecycle, persistence or audio behaviour — it only makes the current
+  // capabilities reachable from a desktop-style menu bar.
+  const bpmInputRef = useRef<HTMLInputElement | null>(null);
+  const manifestInputRef = useRef<HTMLInputElement | null>(null);
+
+  /**
+   * Opens a project manifest (.flmp/.json). This is the single importer: the
+   * Project Hub button and File → Open Project Manifest both reach it, and it
+   * funnels into the same handleLoadProjectState replacement path as every other
+   * project load.
+   */
+  const handleManifestImport = useCallback(async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    try {
+      const parsed = JSON.parse(await file.text());
+      const normalized = normalizeProjectState(parsed);
+      const replaced = await handleLoadProjectState(normalized, { source: 'manifest-import' });
+      if (replaced !== false) setIsProjectManagerOpen(false);
+    } catch (error) {
+      console.error('Could not load project file.', error);
+      window.alert(error instanceof Error ? error.message : 'Could not load project file.');
+    } finally {
+      event.target.value = '';
+    }
+  }, [handleLoadProjectState]);
+
+  const menuCommandDeps: ApplicationMenuCommandDeps = {
+    newSession: () => {
+      // Shared with the Project Hub "New Session" tile: one blank document and one
+      // replacement source, so both entry points run the identical lifecycle.
+      const request = createNewSessionRequest();
+      void handleLoadProjectState(request.state, request.options);
+    },
+    openProjectManifest: () => manifestInputRef.current?.click(),
+    save: () => performSave(projectStateRef.current, { reconcileAudio: true }),
+    exportAudio: () => setIsExportOpen(true),
+    exportProjectBundle: () => setIsProjectZipOpen(true),
+    exportProjectManifest: () => setIsProjectManagerOpen(true),
+
+    undo: handleUndo,
+    redo: handleRedo,
+
+    selectView: view => setCurrentView(view),
+    toggleBrowser: () => setIsSidebarOpen(open => !open),
+    toggleFullscreen: () => {
+      void fullscreenController.toggle();
+    },
+
+    openProjectHub: () => setIsProjectManagerOpen(true),
+    openProjectStatistics: () => setIsAnalyticsOpen(true),
+    editTempo: () => {
+      const input = bpmInputRef.current;
+      if (!input) return;
+      input.focus();
+      input.select();
+    },
+
+    showInstrumentBrowser: () => setIsSidebarOpen(true),
+    addPlaylistTrack: handleAddPlaylistTrack,
+    toggleSelectedChannelMute: () => {
+      const channel = projectStateRef.current.channels.find(candidate => candidate.id === selectedChannelId);
+      if (channel) handleUpdateChannel(channel.id, { mute: !channel.mute });
+    },
+    toggleSelectedChannelSolo: () => {
+      const channel = projectStateRef.current.channels.find(candidate => candidate.id === selectedChannelId);
+      if (channel) handleUpdateChannel(channel.id, { solo: !channel.solo });
+    },
+    deleteSelectedChannel: () => handleDeleteChannel(selectedChannelId),
+
+    toggleMetronome: () => setMetronome(value => !value),
+    toggleRecord: handleToggleRecord,
+
+    openMidiDevices: () => setIsMidiModalOpen(true),
+    openMidiLearn: () => setIsMidiLearnOpen(true),
+    openKeyboardShortcuts: () => setIsHotkeysOpen(true),
+
+    // projectHistoryVersion is read so the menu re-renders with fresh history
+    // state exactly like the existing Playlist undo/redo wiring does.
+    canUndo: () => projectHistoryVersion >= 0 && projectHistoryRef.current.canUndo,
+    canRedo: () => projectHistoryVersion >= 0 && projectHistoryRef.current.canRedo,
+    hasSelectedChannel: () => projectState.channels.some(channel => channel.id === selectedChannelId),
+    canDeleteSelectedChannel: () => projectState.channels.length > 1,
+    currentView: () => currentView,
+    isBrowserOpen: () => isSidebarOpen,
+    isFullscreen: () => fullscreenController.isFullscreen(),
+    isMetronomeOn: () => metronome,
+    isRecording: () => isRecording,
+  };
+
+  const menuCommandState = createApplicationMenuCommandState(menuCommandDeps);
+
+  const menuCommandDepsRef = useRef(menuCommandDeps);
+  useEffect(() => {
+    menuCommandDepsRef.current = menuCommandDeps;
+  });
+
+  const handleMenuCommand = useCallback((id: ApplicationMenuCommandId) => {
+    runApplicationMenuCommand(id, menuCommandDepsRef.current);
+  }, []);
+
+  // Keeps the global keydown subscription stable while always dispatching to the
+  // freshest menu dependencies.
+  const runApplicationMenuCommandRef = useRef(handleMenuCommand);
+  useEffect(() => {
+    runApplicationMenuCommandRef.current = handleMenuCommand;
+  }, [handleMenuCommand]);
+
   const [keyboardOctave, setKeyboardOctave] = useState<number>(0);
   const activeHeldKeysRef = useRef<Set<string>>(new Set());
 
   // --- Keyboard Shortcuts & Global Hotkeys ---
   useEffect(() => {
-    const KEY_NOTE_MAP: Record<string, number> = {
-      // QWERTY White & Black Piano Keys (C4 to E5)
-      'KeyA': 60,
-      'KeyW': 61,
-      'KeyS': 62,
-      'KeyE': 63,
-      'KeyD': 64,
-      'KeyF': 65,
-      'KeyT': 66,
-      'KeyG': 67,
-      'KeyY': 68,
-      'KeyH': 69,
-      'KeyU': 70,
-      'KeyJ': 71,
-      'KeyK': 72,
-      'KeyO': 73,
-      'KeyL': 74,
-      'KeyP': 75,
-      'Semicolon': 76,
-
-      // Numeric Keypad (Numpad 1..9 MPC Drum & Bass triggers)
-      'Numpad1': 36,
-      'Numpad2': 38,
-      'Numpad3': 42,
-      'Numpad4': 46,
-      'Numpad5': 49,
-      'Numpad6': 39,
-      'Numpad7': 51,
-      'Numpad8': 48,
-      'Numpad9': 45
-    };
-
     const handleKeyDown = (e: KeyboardEvent) => {
       if (['INPUT', 'SELECT', 'TEXTAREA'].includes((e.target as HTMLElement).tagName)) {
         return;
@@ -1261,8 +1349,13 @@ export function App() {
       // Modifier shortcuts take precedence over virtual piano keyboard triggers.
       const shortcut = resolveUndoRedoShortcut(e);
       const isModifier = Boolean(e.ctrlKey || e.metaKey);
+      // UI Milestone 1B application-shell accelerators. The resolver requires
+      // Ctrl/Cmd and rejects Shift/Alt, while note entry is only reachable without
+      // a modifier, so these can never take a key away from the virtual piano.
+      const applicationShortcut = resolveApplicationMenuShortcut(e);
       if (audioEngine.isOfflineRenderLeaseHeld()) {
         const isOfflineRenderMutationKey = shortcut.action !== 'none' ||
+          applicationShortcut !== null ||
           (!isModifier && (e.code === 'Space' || e.code === 'KeyL' || e.code === 'KeyR' || e.code === 'KeyM')) ||
           e.code === 'Numpad0' || e.code === 'Home' ||
           (!isModifier && e.key === '0') ||
@@ -1271,6 +1364,12 @@ export function App() {
           e.preventDefault();
           return;
         }
+      }
+
+      if (applicationShortcut) {
+        e.preventDefault();
+        runApplicationMenuCommandRef.current(applicationShortcut);
+        return;
       }
 
       if (shortcut.action === 'undo') {
@@ -1337,11 +1436,10 @@ export function App() {
         return;
       }
 
-      if (!isModifier && KEY_NOTE_MAP[e.code] !== undefined && !activeHeldKeysRef.current.has(e.code) && !e.repeat) {
+      const notePitch = isModifier ? null : getKeyboardNotePitch(e.code, keyboardOctave);
+      if (notePitch !== null && !activeHeldKeysRef.current.has(e.code) && !e.repeat) {
         activeHeldKeysRef.current.add(e.code);
-        const basePitch = KEY_NOTE_MAP[e.code];
-        const isNumpad = e.code.startsWith('Numpad');
-        const pitch = isNumpad ? basePitch : basePitch + (keyboardOctave * 12);
+        const pitch = notePitch;
 
         const currentChan = projectState.channels.find(c => c.id === selectedChannelId) || projectState.channels[0];
         if (currentChan) {
@@ -1407,6 +1505,14 @@ export function App() {
 
   return (
     <div id="phantom-mobile-daw" className="bg-[#0a0a0b] text-[#b0b0b0] h-screen w-screen flex flex-col font-sans select-none overflow-hidden">
+      {/* 0. Application Menu (UI Milestone 1B).
+          Rendered as a SIBLING ABOVE the transport on purpose: src/uiAudit.css
+          positions the transport with `#fl-transport-bar > div:first-child >
+          div:nth-child(4)`, so the transport must keep its current parent and
+          child order. Nesting the menu inside the header would silently
+          re-target those overrides and move the workspace. */}
+      <ApplicationMenuBar commandState={menuCommandState} onRunCommand={handleMenuCommand} />
+
       {/* 1. Top Transport Header */}
       <TransportBar
         currentView={currentView}
@@ -1453,6 +1559,7 @@ export function App() {
         isSidebarOpen={isSidebarOpen}
         onToggleSidebar={() => setIsSidebarOpen(!isSidebarOpen)}
         saveError={saveError}
+        bpmInputRef={bpmInputRef}
       />
 
       {saveError && (
@@ -1758,7 +1865,16 @@ export function App() {
       </footer>
 
       <ExportModal isOpen={isExportOpen} onClose={() => setIsExportOpen(false)} channels={projectState.channels} clips={projectState.playlistClips} mixerTracks={projectState.mixerTracks} meta={projectState.meta} patternLengthSteps={selectedPatternLengthSteps} playlistTracks={projectState.playlistTracks} />
-      <ProjectManagerModal isOpen={isProjectManagerOpen} onClose={() => setIsProjectManagerOpen(false)} currentState={projectState} onLoadProject={handleLoadProjectState} onUpdateMeta={handleUpdateMeta} />
+      {/* The single manifest importer, shared by File → Open Project Manifest and the Project Hub. */}
+      <input
+        id="project-manifest-input"
+        type="file"
+        ref={manifestInputRef}
+        onChange={handleManifestImport}
+        accept=".json,.flmp"
+        className="hidden"
+      />
+      <ProjectManagerModal isOpen={isProjectManagerOpen} onClose={() => setIsProjectManagerOpen(false)} currentState={projectState} onLoadProject={handleLoadProjectState} onUpdateMeta={handleUpdateMeta} onRequestManifestImport={() => manifestInputRef.current?.click()} />
       <CollaborationModal isOpen={isCollabOpen} onClose={() => setIsCollabOpen(false)} comments={comments} collaborators={collaborators} onAddComment={(text, bar) => { const newC: CollabComment = { id: `c-${Date.now()}`, author: 'Alex (You)', avatarColor: '#ff6e00', timestamp: Date.now(), barPosition: bar, text, resolved: false }; setComments(prev => [newC, ...prev]); }} onToggleResolveComment={(id) => setComments(prev => prev.map(c => c.id === id ? { ...c, resolved: !c.resolved } : c))} />
       <AnalyticsModal isOpen={isAnalyticsOpen} onClose={() => setIsAnalyticsOpen(false)} meta={projectState.meta} channels={projectState.channels} clips={projectState.playlistClips} />
       <HotkeysModal isOpen={isHotkeysOpen} onClose={() => setIsHotkeysOpen(false)} />

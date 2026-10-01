@@ -167,3 +167,22 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
     --playlist-track-label-width: 124px;
   }
 }
+
+/* ---------------------------------------------------------------------------
+   Application menu bar (UI Milestone 1B).
+
+   The menu bar is application chrome, not a workspace control, so it opts out of
+   the global `button { min-height: 30px }` rule above. Everything else about the
+   bar and its dropdowns is expressed with the same mapped utility classes the
+   transport uses, so it inherits the existing palette without a parallel theme.
+
+   Deliberately scoped to #application-menu-bar: it must never reach into
+   #fl-transport-bar, whose positional overrides live in uiAudit.css.
+--------------------------------------------------------------------------- */
+#application-menu-bar button {
+  min-height: 0;
+}
+
+#application-menu-bar {
+  border-top: none;
+}
