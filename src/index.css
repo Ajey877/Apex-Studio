@@ -40,7 +40,10 @@
   input, select, textarea { color-scheme: dark; }
 }
 
-/* Map the old black/orange utility palette into the new visual identity. */
+/* Map the old black/orange utility palette into the new visual identity.
+   UI 1C: this layer now exists for the parts of the app that have not been
+   converted yet. The shell (transport, view ribbon, tool overflow) no longer
+   depends on it and uses the tokens below instead. */
 .bg-\[\#0a0a0b\] { background-color: var(--apex-bg) !important; }
 .bg-\[\#121214\] { background-color: #151821 !important; }
 .bg-\[\#141416\], .bg-\[\#1a1a1d\] { background-color: var(--apex-surface) !important; }
@@ -68,13 +71,11 @@
 .text-\[\#00ff00\], .text-\[\#00ff88\] { color: var(--apex-success) !important; }
 
 #fl-transport-bar {
-  background: rgba(22, 26, 35, 0.96) !important;
+  background: var(--apex-chrome-transport) !important;
   border-color: var(--apex-border) !important;
-  backdrop-filter: blur(18px);
-  -webkit-backdrop-filter: blur(18px);
 }
 #fl-view-tabs {
-  background: rgba(25, 28, 37, 0.94) !important;
+  background: var(--apex-chrome-ribbon) !important;
   border-color: var(--apex-border) !important;
 }
 [id$="-modal"] > div, [id*="-modal"] > div {
@@ -185,4 +186,594 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 
 #application-menu-bar {
   border-top: none;
+}
+
+/* ===========================================================================
+   Apex shell tokens & primitives (UI Milestone 1C — transport + view ribbon).
+
+   The shell consumes these tokens directly instead of the legacy black/orange
+   utility palette above, so nothing in the transport depends on the
+   `[class*=…]` compatibility mapping any more. Midnight Aurora stays the base
+   palette: deep navy/graphite surfaces, one restrained violet accent, cyan as a
+   secondary, gold reserved for semantics, red only for recording and errors, and
+   green only for genuine status.
+   =========================================================================== */
+:root {
+  /* Chrome surfaces — the shell bands, from the app menu down to the workspace. */
+  --apex-chrome-menu: #0e1017;
+  --apex-chrome-transport: #161a26;
+  --apex-chrome-ribbon: #12151f;
+  --apex-chrome-status: #12151e;
+  /* Inset surface for readouts and segmented controls. */
+  --apex-chrome-inset: color-mix(in srgb, #000000 34%, var(--apex-chrome-transport));
+
+  /* Panel surfaces — consumed by the tool overflow panel today, and by the
+     workspace panels in the following shell pass. */
+  --apex-panel: var(--apex-surface);
+  --apex-panel-header: #1f2431;
+  --apex-canvas: #151821;
+
+  /* Control heights. `sm` is the WCAG 2.2 target-size floor. */
+  --apex-control-sm: 24px;
+  --apex-control-md: 28px;
+  --apex-control-lg: 34px;
+
+  /* One interaction-state vocabulary for the whole shell. */
+  --apex-state-hover: rgba(255, 255, 255, 0.055);
+  --apex-state-pressed: rgba(255, 255, 255, 0.1);
+  --apex-state-selected: color-mix(in srgb, var(--apex-accent) 18%, transparent);
+  --apex-state-selected-border: color-mix(in srgb, var(--apex-accent) 60%, transparent);
+  --apex-state-disabled: #6b7488;
+  --apex-state-focus: color-mix(in srgb, var(--apex-accent) 78%, transparent);
+  --apex-state-playing: var(--apex-accent);
+  --apex-state-playing-fg: #0d0f16;
+  --apex-state-recording: var(--apex-danger);
+  --apex-state-recording-fg: #1b0c0e;
+
+  /* Shell type scale: four steps, two weights. */
+  --apex-type-micro: 10px;
+  --apex-type-label: 11px;
+  --apex-type-body: 12px;
+  --apex-type-emphasis: 13px;
+  /* AA-safe secondary text for chrome (5.9:1 on the transport surface). */
+  --apex-text-muted: #8b95a8;
+
+  /* Compact control radius, distinct from the modal radius scale. */
+  --apex-radius-control: 6px;
+}
+
+/* The two shell bands. The transport owns no bottom border: the ribbon's top
+   border is the single separator between them. */
+.apex-transport {
+  /* Shell type base: chrome controls inherit this and refine it. */
+  font-size: var(--apex-type-label);
+  color: var(--apex-text-2);
+}
+
+/*
+ * Shell controls own their height through --apex-control-*. The global
+ * `button { min-height: 30px }` rule above is a workspace rule; chrome opts out
+ * explicitly here rather than with per-component overrides.
+ */
+.apex-icon-btn,
+.apex-tool-chip,
+.apex-primary-action,
+.apex-toggle,
+.apex-transport-btn,
+.apex-mode-switch,
+.apex-tap,
+.apex-tab,
+.apex-tool-menu-item,
+.apex-brand,
+.apex-project-name {
+  min-height: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  font-family: inherit;
+  font-size: var(--apex-type-label);
+  font-weight: 400;
+  color: var(--apex-text-2);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--apex-radius-control);
+  cursor: pointer;
+  transition: background-color 120ms ease, color 120ms ease, border-color 120ms ease;
+}
+
+/* Hover — one shared treatment for every shell control. */
+.apex-icon-btn:hover,
+.apex-tool-chip:hover,
+.apex-transport-btn:hover,
+.apex-toggle:hover,
+.apex-tab:hover,
+.apex-tool-menu-item:hover,
+.apex-tap:hover,
+.apex-project-name:hover {
+  background-color: var(--apex-state-hover);
+  color: var(--apex-text);
+}
+
+/* Pressed — the same overlay, one step stronger. */
+.apex-icon-btn:active,
+.apex-tool-chip:active,
+.apex-primary-action:active,
+.apex-transport-btn:active,
+.apex-toggle:active,
+.apex-tab:active,
+.apex-tool-menu-item:active,
+.apex-tap:active {
+  background-color: var(--apex-state-pressed);
+}
+
+/* Focus — one ring, from one token, and never removed. */
+.apex-icon-btn:focus-visible,
+.apex-tool-chip:focus-visible,
+.apex-primary-action:focus-visible,
+.apex-transport-btn:focus-visible,
+.apex-toggle:focus-visible,
+.apex-mode-switch:focus-visible,
+.apex-tap:focus-visible,
+.apex-tab:focus-visible,
+.apex-tool-menu-item:focus-visible,
+.apex-brand:focus-visible,
+.apex-project-name:focus-visible {
+  outline: 2px solid var(--apex-state-focus);
+  outline-offset: 2px;
+}
+
+/* Selected — for toggles that report state with aria-pressed. */
+.apex-icon-btn[aria-pressed="true"],
+.apex-tool-chip[aria-pressed="true"],
+.apex-toggle[aria-pressed="true"] {
+  background-color: var(--apex-state-selected);
+  border-color: var(--apex-state-selected-border);
+  color: var(--apex-text);
+}
+
+/* Disabled — the state is announced, and it is not colour alone. */
+.apex-tool-menu-item:disabled {
+  color: var(--apex-state-disabled);
+  background-color: transparent;
+  cursor: default;
+}
+
+.apex-icon { width: 16px; height: 16px; }
+.apex-chip-icon { width: 15px; height: 15px; }
+.apex-chip-caret { width: 12px; height: 12px; opacity: 0.7; }
+.apex-chip-label { font-size: var(--apex-type-label); }
+.apex-badge-icon { width: 13px; height: 13px; }
+
+/* --- Brand ---------------------------------------------------------------- */
+.apex-brand {
+  height: var(--apex-control-lg);
+  padding: 0 6px;
+}
+.apex-brand-mark {
+  position: relative;
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  background: var(--apex-accent);
+  transition: transform 140ms ease;
+}
+.apex-brand-mark::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--apex-chrome-transport);
+  transform: translate(-50%, -50%);
+}
+.apex-brand:hover .apex-brand-mark { transform: scale(1.06); }
+
+.apex-shell-divider {
+  width: 1px;
+  height: 18px;
+  background: var(--apex-border);
+  /* The divider is decorative spacing; it steps out on narrow desktops. */
+  display: none;
+}
+
+.apex-project-name {
+  height: var(--apex-control-md);
+  max-width: 110px;
+  padding: 0 8px;
+  background: var(--apex-chrome-inset);
+  border-color: var(--apex-border);
+  font-size: var(--apex-type-label);
+  font-weight: 600;
+}
+.apex-project-name-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.apex-badge-danger {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: var(--apex-control-sm);
+  padding: 0 6px;
+  border: 1px solid color-mix(in srgb, var(--apex-danger) 55%, transparent);
+  border-radius: var(--apex-radius-control);
+  background: color-mix(in srgb, var(--apex-danger) 18%, transparent);
+  color: color-mix(in srgb, var(--apex-danger) 55%, #ffffff);
+  font-size: var(--apex-type-micro);
+  font-weight: 600;
+}
+
+/* --- Transport readout ---------------------------------------------------- */
+.apex-readout {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: var(--apex-control-lg);
+  padding: 0 10px;
+  border: 1px solid var(--apex-border);
+  border-radius: var(--apex-radius-control);
+  background: var(--apex-chrome-inset);
+}
+.apex-readout-cell {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 1px;
+}
+/* Label above value: the compact DAW-readout shape, and the reason the readout
+   no longer costs the tool cluster a third of the header width. */
+.apex-readout-field {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.apex-readout-label {
+  font-size: var(--apex-type-micro);
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--apex-text-muted);
+}
+.apex-readout-value,
+.apex-readout-input {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: var(--apex-type-body);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.01em;
+  color: var(--apex-text);
+}
+.apex-readout-input {
+  width: 42px;
+  padding: 0;
+  text-align: left;
+  background: transparent;
+  border: 0;
+  border-radius: 4px;
+  font-weight: 600;
+  color: var(--apex-accent);
+  appearance: textfield;
+  -moz-appearance: textfield;
+}
+.apex-readout-input::-webkit-outer-spin-button,
+.apex-readout-input::-webkit-inner-spin-button {
+  appearance: none;
+  margin: 0;
+}
+.apex-readout-divider {
+  width: 1px;
+  align-self: stretch;
+  margin: 7px 0;
+  background: var(--apex-border);
+}
+.apex-tap {
+  height: 18px;
+  padding: 0 5px;
+  font-size: var(--apex-type-micro);
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  color: var(--apex-text-muted);
+  border-color: var(--apex-border);
+}
+
+/* --- Playback controls ---------------------------------------------------- */
+.apex-transport-cluster { color: var(--apex-text-2); }
+
+.apex-mode-switch {
+  height: var(--apex-control-md);
+  padding: 2px;
+  gap: 2px;
+  background: var(--apex-chrome-inset);
+  border-color: var(--apex-border);
+}
+.apex-mode-switch:hover {
+  border-color: var(--apex-state-selected-border);
+}
+.apex-mode-option {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  padding: 0 7px;
+  border-radius: 4px;
+  font-size: var(--apex-type-micro);
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  color: var(--apex-text-muted);
+}
+.apex-mode-switch[data-mode="pat"] .apex-mode-option:first-of-type,
+.apex-mode-switch[data-mode="song"] .apex-mode-option:last-of-type {
+  background: var(--apex-state-selected);
+  color: var(--apex-text);
+  box-shadow: inset 0 0 0 1px var(--apex-state-selected-border);
+}
+
+.apex-transport-btn {
+  width: var(--apex-control-lg);
+  height: var(--apex-control-lg);
+  padding: 0;
+  gap: 6px;
+  background: var(--apex-chrome-inset);
+  border-color: var(--apex-border);
+  color: var(--apex-text);
+}
+.apex-transport-btn:hover {
+  background-color: var(--apex-state-hover);
+  border-color: var(--apex-state-selected-border);
+}
+.apex-transport-icon { width: 16px; height: 16px; }
+
+.apex-transport-btn--play[data-playing="true"] {
+  background: var(--apex-state-playing);
+  border-color: var(--apex-state-playing);
+  color: var(--apex-state-playing-fg);
+}
+.apex-transport-btn--play[data-playing="true"]:hover {
+  background: var(--apex-accent-strong);
+  border-color: var(--apex-accent-strong);
+}
+
+.apex-transport-btn--record {
+  width: auto;
+  padding: 0 9px;
+}
+.apex-record-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--apex-state-recording);
+  opacity: 0.55;
+  transition: opacity 120ms ease;
+}
+.apex-transport-btn--record:hover .apex-record-dot,
+.apex-transport-btn--record:focus-visible .apex-record-dot { opacity: 0.9; }
+.apex-transport-btn--record[aria-pressed="true"] {
+  background: var(--apex-state-recording);
+  border-color: var(--apex-state-recording);
+  color: var(--apex-state-recording-fg);
+}
+.apex-transport-btn--record[aria-pressed="true"] .apex-record-dot {
+  opacity: 1;
+  background: var(--apex-state-recording-fg);
+  animation: apexRecordBlink 1.2s steps(1, end) infinite;
+}
+@keyframes apexRecordBlink {
+  0%, 55% { opacity: 1; }
+  56%, 100% { opacity: 0.25; }
+}
+.apex-transport-label {
+  font-size: var(--apex-type-micro);
+  font-weight: 600;
+  letter-spacing: 0.08em;
+}
+
+.apex-toggle {
+  height: var(--apex-control-md);
+  padding: 0 8px;
+}
+.apex-toggle-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.5;
+}
+.apex-toggle[aria-pressed="true"] .apex-toggle-dot { opacity: 1; }
+
+/* --- Tool cluster --------------------------------------------------------- */
+.apex-tool-cluster {
+  /* The cluster is the fourth child of the row. It packs its controls from the
+     start so that the pinned `overflow-hidden` on the row can only ever clip the
+     trailing, menu-backed status chips — never Export or the overflow trigger. */
+  justify-content: flex-start;
+}
+
+.apex-icon-btn {
+  width: var(--apex-control-md);
+  height: var(--apex-control-md);
+  padding: 0;
+}
+
+.apex-tool-chip {
+  height: var(--apex-control-md);
+  padding: 0 8px;
+}
+
+.apex-primary-action {
+  height: var(--apex-control-md);
+  padding: 0 10px;
+  background: var(--apex-accent);
+  border-color: var(--apex-accent);
+  color: var(--apex-state-playing-fg);
+  font-weight: 600;
+}
+.apex-primary-action:hover {
+  background: var(--apex-accent-strong);
+  border-color: var(--apex-accent-strong);
+  color: var(--apex-state-playing-fg);
+}
+
+.apex-status-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--apex-success);
+  opacity: 0.25;
+  transition: opacity 120ms ease, transform 120ms ease;
+}
+.apex-status-dot[data-active="true"] {
+  opacity: 1;
+  transform: scale(1.35);
+}
+
+/* --- Workspace view ribbon ------------------------------------------------ */
+.apex-ribbon {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  height: 32px;
+  padding: 0 8px;
+  border-top: 1px solid var(--apex-border);
+  /* Safety valve only: at every supported width the six tabs fit, and below the
+     label breakpoint they are icon-only. */
+  overflow-x: auto;
+}
+
+.apex-tab {
+  height: var(--apex-control-sm);
+  padding: 0 10px;
+  color: var(--apex-text-2);
+}
+.apex-tab-icon { width: 14px; height: 14px; }
+.apex-tab[aria-current="page"] {
+  background: var(--apex-state-selected);
+  color: var(--apex-text);
+  font-weight: 600;
+  /* Second, non-colour signal: a 2px indicator and a weight change. */
+  box-shadow: inset 0 -2px 0 var(--apex-state-selected-border);
+}
+.apex-tab[aria-current="page"] .apex-tab-icon { color: var(--apex-accent); }
+
+/* --- Tool overflow panel -------------------------------------------------- */
+.apex-tool-cluster-item {
+  display: inline-flex;
+  align-items: center;
+}
+
+.apex-tool-menu {
+  z-index: 60;
+  min-width: 268px;
+  padding: 6px;
+  overflow-y: auto;
+  background: var(--apex-panel);
+  border: 1px solid var(--apex-border);
+  border-radius: var(--apex-radius-md);
+  box-shadow: var(--apex-shadow);
+}
+.apex-tool-menu-header {
+  padding: 2px 8px 6px;
+  font-size: var(--apex-type-emphasis);
+  font-weight: 600;
+  color: var(--apex-text);
+}
+.apex-tool-menu-group + .apex-tool-menu-group {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid var(--apex-border);
+}
+.apex-tool-menu-group-label {
+  padding: 2px 8px 4px;
+  font-size: var(--apex-type-micro);
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--apex-text-muted);
+}
+.apex-tool-menu-item {
+  width: 100%;
+  height: var(--apex-control-sm);
+  padding: 0 8px;
+  justify-content: flex-start;
+  font-size: var(--apex-type-body);
+  border-radius: 4px;
+}
+.apex-tool-menu-icon {
+  width: 15px;
+  height: 15px;
+  color: var(--apex-text-muted);
+}
+.apex-tool-menu-item:hover,
+.apex-tool-menu-item:focus-visible {
+  color: var(--apex-text);
+}
+.apex-tool-menu-item:hover .apex-tool-menu-icon,
+.apex-tool-menu-item:focus-visible .apex-tool-menu-icon {
+  color: var(--apex-accent);
+}
+.apex-tool-menu-item:disabled .apex-tool-menu-icon { color: var(--apex-state-disabled); }
+.apex-tool-menu-label {
+  flex: 1 1 auto;
+  text-align: left;
+}
+
+/* ---------------------------------------------------------------------------
+   Shell responsive ladder.
+
+   Desktop is the target: the ladder below loses labels before it loses controls,
+   and the only controls it hides are ones the application menu also exposes
+   (View → Fullscreen, Help → Keyboard Shortcuts, MIDI → MIDI Devices,
+   View → Studio Browser). Nothing is ever hidden without another way in.
+--------------------------------------------------------------------------- */
+@media (min-width: 640px) {
+  .apex-tab-label { display: inline; }
+}
+@media (max-width: 639px) {
+  .apex-tab-label { display: none; }
+}
+
+@media (min-width: 1024px) {
+  .apex-readout-cell--position { display: flex; }
+  .apex-readout-divider--wide { display: block; }
+  .apex-shell-divider { display: block; }
+  .apex-sidebar-toggle { display: inline-flex; }
+  .apex-transport-label,
+  .apex-toggle .apex-chip-label,
+  .apex-primary-action .apex-chip-label { display: inline; }
+}
+@media (max-width: 1023px) {
+  .apex-readout-cell--position { display: none; }
+  .apex-readout-divider--wide { display: none; }
+  .apex-sidebar-toggle { display: none; }
+  .apex-transport-label,
+  .apex-toggle .apex-chip-label,
+  .apex-primary-action .apex-chip-label { display: none; }
+}
+
+@media (min-width: 768px) {
+  .apex-project-name { max-width: 130px; }
+}
+@media (min-width: 1280px) {
+  .apex-project-name { max-width: 180px; }
+}
+
+@media (min-width: 1536px) {
+  .apex-tools-trigger .apex-chip-label { display: inline; }
+}
+@media (max-width: 1535px) {
+  .apex-tools-trigger .apex-chip-label { display: none; }
+}
+
+/* Status and utility chips are the lowest priority cluster content: they are
+   hidden below xl instead of being clipped, and every one of them has an
+   application-menu command. */
+@media (min-width: 1280px) {
+  .apex-chip-xl { display: inline-flex; }
+}
+@media (max-width: 1279px) {
+  .apex-chip-xl { display: none; }
 }
