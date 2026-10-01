@@ -1,4 +1,5 @@
 import { normalizeMixerTrackIdentityIntegrity } from './mixerTrackIdentity';
+import { applyMacroRackUpdate } from './macroMappings';
 import type {
   Channel,
   FxSlot,
@@ -125,13 +126,24 @@ export const updateProjectMetadataInProjectState = (
   }
 });
 
-export const updateMacroKnobsInProjectState = (
+/**
+ * Phase 51 — publishes a Master Macro Rack change.
+ *
+ * A macro rack edit is not "just" the knob array: each knob resolves, through its
+ * mappings, to concrete channel / mixer / FX parameters. Writing the knobs alone
+ * (the pre-Phase 51 behaviour) left every mapped parameter at its old value, so
+ * the rack was decorative.
+ *
+ * `applyMacroRackUpdate` returns the knob array *and* every resolved parameter in
+ * one new ProjectState. Because callers publish that single object through the
+ * normal mutation + history boundary, a macro move is one atomic edit: it cannot
+ * half-apply, and undo restores the knobs and every parameter they drove
+ * together.
+ */
+export const updateMacroRackInProjectState = (
   state: ProjectState,
   macroKnobs: MasterMacroKnob[]
-): ProjectState => ({
-  ...state,
-  macroKnobs
-});
+): ProjectState => applyMacroRackUpdate(state, macroKnobs);
 
 export const updateVocalTunerInProjectState = (
   state: ProjectState,
