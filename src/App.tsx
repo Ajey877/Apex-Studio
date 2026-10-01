@@ -21,7 +21,6 @@ import { audioEngine, type MidiEventPayload, type PlaybackStateUpdate } from './
 import { MidiCcMappingRuntime } from './audio/midiMappingRuntime';
 import { 
   DEFAULT_PROJECT, 
-  PRESET_PROJECTS, 
   createDefaultMixerTracks, 
   createDefaultPlaylistTracks 
 } from './audio/presets';
@@ -96,6 +95,8 @@ import { Mixer } from './components/Mixer';
 import { InstrumentRack } from './components/InstrumentRack';
 import { SampleSlicerPanel } from './components/SampleSlicerPanel';
 import { SampleLibraryPanel } from './components/SampleLibraryPanel';
+import { StudioBrowser } from './components/StudioBrowser';
+import { StatusBar } from './components/StatusBar';
 
 // Modals
 import { AudioRecorderModal } from './components/AudioRecorderModal';
@@ -125,30 +126,7 @@ import { MasterMacroRackModal } from './components/MasterMacroRackModal';
 import { ProjectBundleZipModal } from './components/ProjectBundleZipModal';
 import { ProjectReplaceConfirmModal } from './components/ProjectReplaceConfirmModal';
 
-import { 
-  Folder, 
-  Music, 
-  Disc, 
-  Cpu, 
-  Radio, 
-  Sliders, 
-  Volume2, 
-  Play, 
-  Pause, 
-  Plus, 
-  Search, 
-  ChevronRight, 
-  ChevronDown,
-  Layers,
-  Sparkles,
-  Zap,
-  Clock,
-  ShieldCheck,
-  Crown,
-  Keyboard,
-  AlertTriangle,
-  X
-} from 'lucide-react';
+import { AlertTriangle, X } from 'lucide-react';
 
 interface PendingProjectReplacement {
   incomingState: ProjectState;
@@ -1641,66 +1619,17 @@ export function App() {
       {/* 2. Main Studio Work Area */}
       <main className="flex-1 flex overflow-hidden">
         {isSidebarOpen && (
-          <aside className="w-56 md:w-64 bg-[#141416] border-r border-[#333336] flex flex-col shrink-0">
-            <div className="p-2.5 border-b border-[#333336] flex justify-between items-center bg-[#1a1a1d]">
-              <span className="text-[10px] font-bold uppercase tracking-widest text-[#777]">STUDIO BROWSER</span>
-              <button onClick={() => setIsProjectManagerOpen(true)} className="text-[#ff6e00] hover:text-white text-[10px] font-bold transition">+ New</button>
-            </div>
-            <div className="p-2 border-b border-[#333336] bg-[#121214]">
-              <div className="flex items-center gap-1.5 bg-[#1a1a1d] px-2 py-1 rounded border border-[#333336]">
-                <Search className="w-3 h-3 text-[#777]" />
-                <input type="text" placeholder="Search samples & VSTs..." value={browserSearch} onChange={(e) => setBrowserSearch(e.target.value)} className="w-full bg-transparent text-[11px] text-white placeholder-[#555] focus:outline-none" />
-              </div>
-            </div>
-            <div className="flex-1 overflow-y-auto custom-scrollbar p-2 space-y-3 text-xs">
-              <div className="space-y-1">
-                <div onClick={() => setExpandedFolders(f => ({ ...f, instruments: !f.instruments }))} className="flex items-center justify-between text-[10px] font-bold text-[#777] hover:text-white cursor-pointer px-1">
-                  <span className="flex items-center gap-1"><Cpu className="w-3 h-3 text-[#ff6e00]" /><span>SYNTHS & GENERATORS</span></span>
-                  {expandedFolders.instruments ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
-                </div>
-                {expandedFolders.instruments && (
-                  <div className="space-y-0.5 pl-3 border-l border-[#222225] mt-1">
-                    {[{ name: 'Grand Concert Piano', type: 'grand_piano', color: '#e0e0e0' },{ name: 'Vintage Rhodes MK1', type: 'rhodes_epiano', color: '#e67e22' },{ name: 'Hammond B3 Organ', type: 'hammond_organ', color: '#d35400' },{ name: 'Orchestral Strings', type: 'strings_ensemble', color: '#9b59b6' },{ name: 'Pizzicato Strings', type: 'pizzicato_strings', color: '#8e44ad' },{ name: 'Nylon Pluck Guitar', type: 'nylon_guitar', color: '#27ae60' },{ name: 'Cinematic Horns/Brass', type: 'cinematic_brass', color: '#f39c12' },{ name: '808 Tuned Sub Bass', type: 'sub_808', color: '#ff5722' },{ name: 'TB-303 Acid Bassline', type: 'acid_303', color: '#2ecc71' },{ name: 'Reese Heavy Bass', type: 'reese_bass', color: '#c0392b' },{ name: 'JP-8000 Supersaw', type: 'supersaw_lead', color: '#00d2d3' },{ name: 'Atmospheric Pad', type: 'ambient_pad', color: '#54a0ff' },{ name: 'Vocal Choir Formant', type: 'vox_choir', color: '#ff9ff3' },{ name: 'Wooden Marimba/Bell', type: 'marimba_bell', color: '#1dd1a1' },{ name: '8-Bit Retro Chiptune', type: 'chiptune_8bit', color: '#feca57' },{ name: 'MiniSynth Subtractive', type: 'minisynth', color: '#ff6e00' },{ name: 'Toxic FM Synthesizer', type: 'fmsynth', color: '#00bcd4' },{ name: 'DirectWave Sampler', type: 'sampler', color: '#4caf50' },{ name: '808 Drum Machine', type: 'drumpad', color: '#ff5722' }].map((item, i) => (
-                      <div key={i} onClick={() => handleAddChannel(item.type as InstrumentType, item.name, item.color)} className="flex items-center justify-between px-2 py-1 rounded hover:bg-[#222225] text-[11px] text-zinc-300 hover:text-white cursor-pointer group"><span className="truncate">{item.name}</span><span className="text-[9px] text-[#ff6e00] opacity-0 group-hover:opacity-100 font-bold">+ LOAD</span></div>
-                    ))}
-                  </div>
-                )}
-              </div>
-
-              <div className="space-y-1">
-                <div onClick={() => setExpandedFolders(f => ({ ...f, drums: !f.drums }))} className="flex items-center justify-between text-[10px] font-bold text-[#777] hover:text-white cursor-pointer px-1">
-                  <span className="flex items-center gap-1"><Disc className="w-3 h-3 text-[#ff6e00]" /><span>DRUM SAMPLES (808 / MPC)</span></span>
-                  {expandedFolders.drums ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
-                </div>
-                {expandedFolders.drums && (
-                  <div className="space-y-0.5 pl-3 border-l border-[#222225] mt-1">
-                    {[{ name: '808_Sub_Punch.wav', pitch: 36 },{ name: 'Snare_Trap_Hard.wav', pitch: 38 },{ name: 'HiHat_Closed_Tight.wav', pitch: 42 },{ name: 'Clap_Studio_Dry.wav', pitch: 39 },{ name: 'Perc_Rimshot_Wood.wav', pitch: 37 }].map((sample, i) => (
-                      <div key={i} onClick={() => handleAuditionSample(sample.name, sample.pitch)} className={`flex items-center justify-between px-2 py-1 rounded text-[11px] cursor-pointer transition ${previewingAudio === sample.name ? 'bg-[#ff6e00] text-black font-bold' : 'hover:bg-[#222225] text-zinc-300 hover:text-white'}`}><span className="truncate">{sample.name}</span><Play className="w-2.5 h-2.5 opacity-60" /></div>
-                    ))}
-                  </div>
-                )}
-              </div>
-
-              <div className="space-y-1">
-                <div onClick={() => setExpandedFolders(f => ({ ...f, presets: !f.presets }))} className="flex items-center justify-between text-[10px] font-bold text-[#777] hover:text-white cursor-pointer px-1">
-                  <span className="flex items-center gap-1"><Folder className="w-3 h-3 text-[#ff6e00]" /><span>STUDIO DEMOS</span></span>
-                  {expandedFolders.presets ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
-                </div>
-                {expandedFolders.presets && (
-                  <div className="space-y-0.5 pl-3 border-l border-[#222225] mt-1">
-                    {PRESET_PROJECTS.map((p, i) => (
-                      <div key={i} onClick={() => void handleLoadProjectState(p.state, { source: 'studio-demo' })} className="flex items-center justify-between px-2 py-1 rounded hover:bg-[#222225] text-[11px] text-zinc-300 hover:text-white cursor-pointer group"><span className="truncate">{p.name}</span><span className="text-[9px] text-[#ff6e00] font-mono">{p.bpm} BPM</span></div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            </div>
-
-            <div className="p-3 border-t border-[#333336] bg-[#1a1a1d] space-y-1.5">
-              <div className="flex justify-between items-center text-[9px] font-bold"><span className="text-white">ACTIVE PREVIEW:</span><span className="text-[#ff6e00] font-mono">{previewingAudio ? 'AUDITIONING' : 'READY'}</span></div>
-              <div className="h-6 bg-[#0a0a0b] rounded border border-[#333336] flex items-center px-1.5 gap-0.5 overflow-hidden">{Array.from({ length: 28 }).map((_, i) => <div key={i} className={`flex-1 rounded-xs transition-all ${previewingAudio ? 'bg-[#ff6e00]' : 'bg-[#333336]'}`} style={{ height: `${20 + (i % 7) * 12}%` }} />)}</div>
-            </div>
-          </aside>
+          <StudioBrowser
+            search={browserSearch}
+            onSearchChange={setBrowserSearch}
+            expandedFolders={expandedFolders}
+            onToggleFolder={(folderId) => setExpandedFolders(f => ({ ...f, [folderId]: !f[folderId] }))}
+            previewingAudio={previewingAudio}
+            onOpenProjectManager={() => setIsProjectManagerOpen(true)}
+            onAddInstrument={(instrument) => handleAddChannel(instrument.type, instrument.name, instrument.color)}
+            onAuditionSample={handleAuditionSample}
+            onLoadPresetProject={(preset) => void handleLoadProjectState(preset.state, { source: 'studio-demo' })}
+          />
         )}
 
         <section className="flex-1 flex flex-col bg-[#121214] overflow-hidden">
@@ -1849,20 +1778,13 @@ export function App() {
         </section>
       </main>
 
-      <footer className="h-6 bg-[#1a1a1d] border-t border-[#333336] flex items-center px-4 justify-between shrink-0 select-none">
-        <div className="flex items-center gap-4 text-[9px]">
-          <span className="text-[#777]">STORAGE: <span className="text-[#00ff00] font-bold">LOCAL</span></span>
-          <span className="text-[#777]">DSP CPU: <span className="text-white font-bold">{isPlaying ? '18%' : '8%'}</span></span>
-          
-          <span className="text-[#777] hidden md:inline">PROJECT: <span className="text-[#ff6e00] font-bold">{projectState.meta.name}</span></span>
-        </div>
-        <div className="flex items-center gap-3 text-[9px] font-bold text-[#777]">
-          <button onClick={() => setIsHotkeysOpen(true)} className="hover:text-white transition cursor-pointer">HOTKEYS (SPACE / 1-5)</button>
-          <span className="w-1 h-1 bg-[#444] rounded-full"></span>
-          <button onClick={() => setIsExportOpen(true)} className="hover:text-white transition cursor-pointer">EXPORT MASTER</button>
-          <span className="w-1 h-1 bg-[#444] rounded-full"></span>
-        </div>
-      </footer>
+      <StatusBar
+        meta={projectState.meta}
+        currentView={currentView}
+        saveError={saveError}
+        channelCount={projectState.channels.length}
+        clipCount={projectState.playlistClips.length}
+      />
 
       <ExportModal isOpen={isExportOpen} onClose={() => setIsExportOpen(false)} channels={projectState.channels} clips={projectState.playlistClips} mixerTracks={projectState.mixerTracks} meta={projectState.meta} patternLengthSteps={selectedPatternLengthSteps} playlistTracks={projectState.playlistTracks} />
       {/* The single manifest importer, shared by File → Open Project Manifest and the Project Hub. */}
