@@ -38,6 +38,7 @@ import {
 } from 'lucide-react';
 import { ViewMode, PlayMode, ProjectMetadata } from '../types/daw';
 import { audioEngine } from '../audio/audioEngine';
+import { fullscreenController } from '../state/fullscreen';
 
 interface TransportBarProps {
   currentView: ViewMode;
@@ -81,6 +82,11 @@ interface TransportBarProps {
   collaboratorCount: number;
   isSidebarOpen: boolean;
   onToggleSidebar: () => void;
+  /**
+   * UI Milestone 1B: lets the application menu focus the existing tempo field
+   * (Project → Edit Tempo) instead of introducing a second BPM control.
+   */
+  bpmInputRef?: React.Ref<HTMLInputElement>;
 }
 
 export const TransportBar: React.FC<TransportBarProps> = ({
@@ -124,7 +130,8 @@ export const TransportBar: React.FC<TransportBarProps> = ({
   saveError,
   collaboratorCount,
   isSidebarOpen,
-  onToggleSidebar
+  onToggleSidebar,
+  bpmInputRef
 }) => {
   const [tapTimes, setTapTimes] = useState<number[]>([]);
   const [cpuUsage, setCpuUsage] = useState(12);
@@ -144,30 +151,16 @@ export const TransportBar: React.FC<TransportBarProps> = ({
 
   useEffect(() => {
     const handleFsChange = () => {
-      setIsFullscreen(Boolean(document.fullscreenElement));
+      setIsFullscreen(fullscreenController.isFullscreen());
     };
     document.addEventListener('fullscreenchange', handleFsChange);
     return () => document.removeEventListener('fullscreenchange', handleFsChange);
   }, []);
 
+  // The shared controller is the single implementation, used by both this button
+  // and View → Fullscreen in the application menu.
   const handleToggleFullscreen = async () => {
-    try {
-      if (!document.fullscreenElement) {
-        if (document.documentElement.requestFullscreen) {
-          await document.documentElement.requestFullscreen();
-        }
-        if (screen.orientation && 'lock' in screen.orientation) {
-          // @ts-ignore
-          await screen.orientation.lock('landscape').catch(() => {});
-        }
-      } else {
-        if (document.exitFullscreen) {
-          await document.exitFullscreen();
-        }
-      }
-    } catch (e) {
-      console.log('Fullscreen error', e);
-    }
+    setIsFullscreen(await fullscreenController.toggle());
   };
 
   // Dynamic DSP simulation
@@ -257,6 +250,7 @@ export const TransportBar: React.FC<TransportBarProps> = ({
             <span className="text-[9px] font-bold uppercase tracking-wider text-[#777]">BPM</span>
             <input
               id="fl-bpm-input"
+              ref={bpmInputRef}
               type="number"
               min="40"
               max="260"

@@ -1,12 +1,43 @@
 import React from 'react';
-import { Keyboard, X, Sparkles, Command } from 'lucide-react';
+import { Keyboard, X, Command } from 'lucide-react';
 
 interface HotkeysModalProps {
   isOpen: boolean;
   onClose: () => void;
 }
 
-const SHORTCUT_GROUPS = [
+export interface HotkeyGroup {
+  category: string;
+  items: readonly { key: string; desc: string }[];
+}
+
+/**
+ * Documented shortcuts.
+ *
+ * Every row here must correspond to a real keydown handler. UI Milestone 1B
+ * removed three rows that documented handlers the application never had
+ * (`Ctrl + E` for a render engine, and `B / P` and `D / E` for tool switching),
+ * and added the two new application-shell accelerators.
+ *
+ * `src/state/hotkeyDocumentation.test.ts` fails if a row is added that cannot be
+ * traced back to a resolver or the virtual keyboard note map.
+ */
+export const HOTKEY_GROUPS: readonly HotkeyGroup[] = [
+  {
+    category: 'Project & File',
+    items: [
+      { key: 'Ctrl + N', desc: 'New Session' },
+      { key: 'Ctrl + O', desc: 'Open Project Manifest' },
+      { key: 'Ctrl + S', desc: 'Save & Sync Project' }
+    ]
+  },
+  {
+    category: 'Editing',
+    items: [
+      { key: 'Ctrl + Z', desc: 'Undo Action' },
+      { key: 'Ctrl + Y', desc: 'Redo Action' }
+    ]
+  },
   {
     category: 'Playback & Transport',
     items: [
@@ -25,17 +56,6 @@ const SHORTCUT_GROUPS = [
       { key: 'F5 / 3', desc: 'Open Playlist Arranger' },
       { key: 'F9 / 4', desc: 'Open Studio Mixer & FX' },
       { key: 'F8 / 5', desc: 'Open VST Instrument Rack' }
-    ]
-  },
-  {
-    category: 'Editing & Tools',
-    items: [
-      { key: 'Ctrl + Z', desc: 'Undo Action' },
-      { key: 'Ctrl + Y', desc: 'Redo Action' },
-      { key: 'Ctrl + S', desc: 'Save & Sync Project' },
-      { key: 'Ctrl + E', desc: 'Open Master Render Engine' },
-      { key: 'B / P', desc: 'Draw / Paint Tool' },
-      { key: 'D / E', desc: 'Delete / Erase Tool' }
     ]
   },
   {
@@ -77,7 +97,7 @@ export const HotkeysModal: React.FC<HotkeysModalProps> = ({ isOpen, onClose }) =
         {/* Content */}
         <div className="p-4 sm:p-5 space-y-4 overflow-y-auto custom-scrollbar flex-1">
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            {SHORTCUT_GROUPS.map((group, gIdx) => (
+            {HOTKEY_GROUPS.map((group, gIdx) => (
               <div key={gIdx} className="bg-[#1a1a1d] border border-[#333336] rounded-lg p-3 space-y-2">
                 <div className="text-[10px] font-bold uppercase tracking-wider text-[#ff6e00] border-b border-[#333336] pb-1">
                   {group.category}

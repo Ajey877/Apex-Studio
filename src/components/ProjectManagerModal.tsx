@@ -1,10 +1,10 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { FolderOpen, Download, Upload, X, Plus, ArchiveRestore, Trash2, RotateCcw } from 'lucide-react';
 import { ProjectState, ProjectMetadata } from '../types/daw';
 import { PRESET_PROJECTS } from '../audio/presets';
-import { createDefaultProjectState, normalizeProjectState } from '../state/projectState';
 import { deleteProjectBackup, listProjectBackups, restoreProjectBackupState, type ProjectBackupSummary } from '../state/projectBackup';
 import type { ProjectReplacementSource } from '../state/projectReplacement';
+import { createNewSessionRequest } from '../state/newSession';
 
 
 interface ProjectManagerModalProps {
@@ -14,6 +14,12 @@ interface ProjectManagerModalProps {
   /** Resolves false when the user kept the current project (replacement confirmation declined). */
   onLoadProject: (state: ProjectState, options?: { source?: ProjectReplacementSource }) => boolean | void | Promise<boolean | void>;
   onUpdateMeta: (meta: Partial<ProjectMetadata>) => void;
+  /**
+   * UI Milestone 1B: the manifest `<input type="file">` now lives in App so the
+   * Project Hub button and File → Open Project Manifest share one importer and one
+   * project-replacement path.
+   */
+  onRequestManifestImport: () => void;
 }
 
 const formatBackupTime = (timestamp: number): string => {
@@ -24,8 +30,7 @@ const formatBackupTime = (timestamp: number): string => {
   }
 };
 
-export const ProjectManagerModal: React.FC<ProjectManagerModalProps> = ({ isOpen, onClose, currentState, onLoadProject, onUpdateMeta }) => {
-  const fileInputRef = useRef<HTMLInputElement | null>(null);
+export const ProjectManagerModal: React.FC<ProjectManagerModalProps> = ({ isOpen, onClose, currentState, onLoadProject, onUpdateMeta, onRequestManifestImport }) => {
   const [backups, setBackups] = useState<ProjectBackupSummary[]>([]);
   const [backupsError, setBackupsError] = useState<string | null>(null);
   const [busyBackupId, setBusyBackupId] = useState<string | null>(null);
@@ -70,23 +75,11 @@ export const ProjectManagerModal: React.FC<ProjectManagerModalProps> = ({ isOpen
     URL.revokeObjectURL(url);
   };
 
-  const handleImportFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    try {
-      const parsed = JSON.parse(await file.text());
-      const normalized = normalizeProjectState(parsed);
-      if (await loadProject(normalized, 'manifest-import')) onClose();
-    } catch (err) {
-      console.error('Could not load project file.', err);
-      window.alert(err instanceof Error ? err.message : 'Could not load project file.');
-    } finally {
-      e.target.value = '';
-    }
-  };
-
   const handleCreateBlankProject = async () => {
-    if (await loadProject(createDefaultProjectState(), 'new-session')) onClose();
+    // Shared with the File → New Session menu command so both entry points
+    // produce byte-identical replacement requests.
+    const request = createNewSessionRequest();
+    if (await loadProject(request.state, request.options.source)) onClose();
   };
 
   const handleLoadPreset = async (state: ProjectState) => {
@@ -144,7 +137,7 @@ export const ProjectManagerModal: React.FC<ProjectManagerModalProps> = ({ isOpen
             <button onClick={handleExportProjectJson} className="p-3 bg-[#1a1a1d] hover:bg-[#222225] border border-[#333336] hover:border-[#ff6e00] rounded-lg text-left transition flex flex-col space-y-1">
               <Download className="w-4 h-4 text-[#00ff00]" /><div className="text-xs font-bold text-white">Backup Manifest (.flmp)</div><div className="text-[9px] text-[#777]">Project manifest/state backup (no audio)</div>
             </button>
-            <button onClick={() => fileInputRef.current?.click()} className="p-3 bg-[#1a1a1d] hover:bg-[#222225] border border-[#333336] hover:border-[#ff6e00] rounded-lg text-left transition flex flex-col space-y-1">
+            <button onClick={onRequestManifestImport} className="p-3 bg-[#1a1a1d] hover:bg-[#222225] border border-[#333336] hover:border-[#ff6e00] rounded-lg text-left transition flex flex-col space-y-1">
               <Upload className="w-4 h-4 text-cyan-400" /><div className="text-xs font-bold text-white">Open Manifest (.flmp)</div><div className="text-[9px] text-[#777]">Loads project state; rehydrates local audio</div>
             </button>
           </div>
@@ -152,8 +145,6 @@ export const ProjectManagerModal: React.FC<ProjectManagerModalProps> = ({ isOpen
           <div className="p-2.5 bg-[#121214] border border-[#222225] rounded-lg text-[10px] text-[#888]">
             <span><strong>Format Guide:</strong> .flmp = project manifest/state backup. For a portable bundle containing audio assets, use <strong>Portable ZIP</strong>. Opening a demo, manifest or bundle replaces the current project after confirmation and keeps an automatic backup below.</span>
           </div>
-
-          <input type="file" ref={fileInputRef} onChange={handleImportFile} accept=".json,.flmp" className="hidden" />
 
           <div className="p-3.5 bg-[#1a1a1d] border border-[#333336] rounded-lg space-y-2">
             <div className="text-[10px] font-bold uppercase tracking-wider text-[#777]">Active Project Details</div>
