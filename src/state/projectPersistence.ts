@@ -1,6 +1,7 @@
 import type { AudioRecording, Channel, PlaylistClip, ProjectState } from '../types/daw';
 import { deletePersistedAudioClip, getPersistedAudioClip, getPersistedProjectRecoverySnapshotRecord, getPersistedProjectStateRecord, listPersistedAudioClipIds, listProjectBackupRecords, persistProjectRecoverySnapshotRecord, persistProjectStateRecord, replacePersistedProjectStateRecord, type StoredProjectBackup } from '../audio/audioPersistence';
 import { normalizeProjectState } from './projectState';
+import { reapplyMacroRackOnHydration } from './macroMappings';
 import { getRecordingAudioBufferId } from '../audio/recordingPipeline';
 import { isSampleAudioUnavailable } from './audioAssetAvailability';
 import { sessionBlobUrlRegistry } from './sessionBlobUrlRegistry';
@@ -214,7 +215,13 @@ export const restorePersistedProjectState = async (
     try {
       const parsed = JSON.parse(candidateJson) as { persistenceVersion?: number; state?: unknown };
       const rawState = parsed?.state ?? parsed;
-      const state = normalizeProjectState(rawState);
+      // Phase 51: a reopened project's stored macro rack is the document of
+      // record for every parameter its mappings drive, so re-apply it on the way
+      // in. Idempotent: a state that already matches its rack is returned
+      // unchanged. Deliberately *not* part of `normalizeProjectState`, which also
+      // runs on every save and history snapshot — re-applying there would revert
+      // a manual parameter edit that intentionally overrides a macro.
+      const state = reapplyMacroRackOnHydration(normalizeProjectState(rawState));
       const hydrated = await hydrateProjectAudio(state, audioEngine);
       return {
         state: hydrated.state,

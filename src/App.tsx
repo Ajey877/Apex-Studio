@@ -27,6 +27,7 @@ import {
 } from './audio/presets';
 import { appendChannelWithAllocatedMixerTrackId } from './state/mixerTrackIdentity';
 import { deleteChannelFromProjectState, normalizeProjectState } from './state/projectState';
+import { reapplyMacroRackOnHydration } from './state/macroMappings';
 import {
   DEFAULT_PATTERN_LENGTH_STEPS,
   getSelectedPatternLengthSteps,
@@ -69,7 +70,7 @@ import {
   isContinuousMixerUpdate,
   updateChannelInProjectState,
   updateFxSlotInProjectState,
-  updateMacroKnobsInProjectState,
+  updateMacroRackInProjectState,
   updateMidiMappingsInProjectState,
   updateMixerTrackInProjectState,
   updateProjectMetadataInProjectState,
@@ -755,7 +756,12 @@ export function App() {
     state: ProjectState,
     options: { backup: boolean }
   ): Promise<void> => {
-    const normalized = normalizeProjectState(state);
+    // Phase 51: every interactive load path (project manager import, bundle ZIP,
+    // demo project, backup restore) funnels through here, so this is where a
+    // loaded macro rack is re-applied to the parameters it drives. Doing it
+    // before hydration/backup means the published, persisted and audio-hydrated
+    // state are all the same resolved document.
+    const normalized = reapplyMacroRackOnHydration(normalizeProjectState(state));
     await runProjectReplacementAfterBackup(
       options.backup
         ? () => backupProjectBeforeReplacement(projectStateRef.current, { reason: 'replace' }).then(() => undefined)
@@ -1783,7 +1789,7 @@ export function App() {
       <PolyphonicEditorModal isOpen={isPolyphonicEditorOpen} onClose={() => setIsPolyphonicEditorOpen(false)} />
       <DesktopAppModal isOpen={isDesktopAppOpen} onClose={() => setIsDesktopAppOpen(false)} />
       <WarpAudioProcessorModal isOpen={isWarpProcessorOpen} onClose={() => setIsWarpProcessorOpen(false)} selectedClip={projectState.playlistClips[0] || null} onUpdateClip={(updatedClip) => { const nextState = { ...projectStateRef.current, playlistClips: projectStateRef.current.playlistClips.map(c => c.id === updatedClip.id ? updatedClip : c) }; updatePlaylistProjectState(nextState); commitPlaylistHistory(nextState, 'Warp audio clip'); }} />
-      <MasterMacroRackModal isOpen={isMasterMacrosOpen} onClose={() => setIsMasterMacrosOpen(false)} mixerTracks={projectState.mixerTracks} channels={projectState.channels} macroKnobs={projectState.macroKnobs} onUpdateMacros={(macros) => mutateProjectState(curr => updateMacroKnobsInProjectState(curr, macros), 'Update macro controls', { isContinuous: true })} />
+      <MasterMacroRackModal isOpen={isMasterMacrosOpen} onClose={() => setIsMasterMacrosOpen(false)} mixerTracks={projectState.mixerTracks} channels={projectState.channels} macroKnobs={projectState.macroKnobs} onUpdateMacros={(macros) => mutateProjectState(curr => updateMacroRackInProjectState(curr, macros), 'Update macro controls', { isContinuous: true })} />
       <ProjectBundleZipModal isOpen={isProjectZipOpen} onClose={() => setIsProjectZipOpen(false)} projectState={projectState} onLoadProjectState={handleLoadProjectState} />
       <ProjectReplaceConfirmModal
         plan={pendingReplacement?.plan ?? null}
