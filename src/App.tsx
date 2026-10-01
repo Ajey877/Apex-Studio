@@ -445,6 +445,7 @@ export function App() {
   const selectedPatternLengthSteps = getSelectedPatternLengthSteps(projectState);
 
   const handleTogglePlay = () => {
+    if (audioEngine.isOfflineRenderLeaseHeld()) return;
     if (isPlaying) {
       // Real pause: the transport keeps its position, scheduled audio is
       // cancelled, and Play resumes from the paused position.
@@ -473,6 +474,7 @@ export function App() {
   };
 
   const handleStop = () => {
+    if (audioEngine.isOfflineRenderLeaseHeld()) return;
     audioEngine.stop();
     setIsPlaying(false);
     setCurrentStep(0);
@@ -480,6 +482,7 @@ export function App() {
   };
 
   const handleTogglePlayMode = () => {
+    if (audioEngine.isOfflineRenderLeaseHeld()) return;
     const nextMode: PlayMode = playMode === 'pat' ? 'song' : 'pat';
     setPlayMode(nextMode);
     if (isPlaying) {
@@ -502,6 +505,7 @@ export function App() {
   };
 
   const handleToggleRecord = () => {
+    if (audioEngine.isOfflineRenderLeaseHeld()) return;
     if (isRecording) {
       setIsRecording(false);
     } else {
@@ -1250,6 +1254,19 @@ export function App() {
 
       // Modifier shortcuts take precedence over virtual piano keyboard triggers.
       const shortcut = resolveUndoRedoShortcut(e);
+      const isModifier = Boolean(e.ctrlKey || e.metaKey);
+      if (audioEngine.isOfflineRenderLeaseHeld()) {
+        const isOfflineRenderMutationKey = shortcut.action !== 'none' ||
+          (!isModifier && (e.code === 'Space' || e.code === 'KeyL' || e.code === 'KeyR' || e.code === 'KeyM')) ||
+          e.code === 'Numpad0' || e.code === 'Home' ||
+          (!isModifier && e.key === '0') ||
+          (!isModifier && KEY_NOTE_MAP[e.code] !== undefined);
+        if (isOfflineRenderMutationKey) {
+          e.preventDefault();
+          return;
+        }
+      }
+
       if (shortcut.action === 'undo') {
         e.preventDefault();
         handleUndo();
@@ -1265,8 +1282,6 @@ export function App() {
         void performSave(projectStateRef.current, { reconcileAudio: true });
         return;
       }
-
-      const isModifier = Boolean(e.ctrlKey || e.metaKey);
 
       if (!isModifier && e.code === 'Space') {
         e.preventDefault();

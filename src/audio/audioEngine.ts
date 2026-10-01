@@ -303,6 +303,11 @@ export function resolvePatternLoopLengthSteps(
 
 class AudioEngine {
   public isOfflineRendering = false;
+  private offlineRenderLeaseHeld = false;
+  private offlineRenderOperationDepth = 0;
+  private liveSampleBuffersDuringOfflineRender: Map<string, AudioBuffer> | null = null;
+  private liveProjectSampleBufferIdsDuringOfflineRender: Set<string> | null = null;
+  private liveSessionSampleBufferIdsDuringOfflineRender: Set<string> | null = null;
   private liveCtx: AudioContext | null = null;
   private ctx: AudioContext | null = null;
   private transport: AudioClockTransport | null = null;
@@ -402,8 +407,27 @@ class AudioEngine {
     }, renderSubtractiveSynthVoice);
   }
 
+  /** True while a timeline render owns the shared engine's mutable audio state. */
+  public isOfflineRenderLeaseHeld(): boolean {
+    return this.offlineRenderLeaseHeld;
+  }
+
+  /** Renderer-owned graph work is allowed; live callers remain fenced out. */
+  private shouldBlockLiveMutation(): boolean {
+    return this.offlineRenderLeaseHeld && this.offlineRenderOperationDepth === 0;
+  }
+
+  private withOfflineRenderOperation<T>(operation: () => T): T {
+    this.offlineRenderOperationDepth += 1;
+    try {
+      return operation();
+    } finally {
+      this.offlineRenderOperationDepth -= 1;
+    }
+  }
+
   public init() {
-    if (this.isOfflineRendering) return;
+    if (this.shouldBlockLiveMutation() || this.isOfflineRendering) return;
     const isOffline = this.ctx && (typeof (this.ctx as any).startRendering === 'function' || (typeof OfflineAudioContext !== 'undefined' && this.ctx instanceof OfflineAudioContext));
     if (this.ctx && this.ctx.state !== 'closed') {
       if (!isOffline && this.ctx.state === 'suspended') {
@@ -444,6 +468,10 @@ class AudioEngine {
   }
 
   public getContext(): AudioContext {
+    if (this.shouldBlockLiveMutation()) {
+      if (this.liveCtx) return this.liveCtx;
+      throw new Error('A live audio context is unavailable while an offline render is isolated.');
+    }
     if (this.isOfflineRendering && this.ctx) {
       return this.ctx;
     }
@@ -458,18 +486,36 @@ class AudioEngine {
     return this.ctx;
   }
 
+  private getLiveSampleBufferStore(): Map<string, AudioBuffer> {
+    return this.shouldBlockLiveMutation() && this.liveSampleBuffersDuringOfflineRender
+      ? this.liveSampleBuffersDuringOfflineRender
+      : this.sampleBuffers;
+  }
+
+  private getLiveProjectSampleBufferIds(): Set<string> {
+    return this.shouldBlockLiveMutation() && this.liveProjectSampleBufferIdsDuringOfflineRender
+      ? this.liveProjectSampleBufferIdsDuringOfflineRender
+      : this.projectOwnedSampleBufferIds;
+  }
+
+  private getLiveSessionSampleBufferIds(): Set<string> {
+    return this.shouldBlockLiveMutation() && this.liveSessionSampleBufferIdsDuringOfflineRender
+      ? this.liveSessionSampleBufferIdsDuringOfflineRender
+      : this.sessionSampleBufferIds;
+  }
+
   public getSampleBuffer(id: string): AudioBuffer | undefined {
-    return this.sampleBuffers.get(id);
+    return this.getLiveSampleBufferStore().get(id);
   }
 
   private setSessionSampleBuffer(id: string, buffer: AudioBuffer): void {
-    this.sampleBuffers.set(id, buffer);
-    this.sessionSampleBufferIds.add(id);
+    this.getLiveSampleBufferStore().set(id, buffer);
+    this.getLiveSessionSampleBufferIds().add(id);
   }
 
   public setSampleBuffer(id: string, buffer: AudioBuffer): void {
-    this.sampleBuffers.set(id, buffer);
-    if (!this.projectOwnedSampleBufferIds.has(id)) this.sessionSampleBufferIds.add(id);
+    this.getLiveSampleBufferStore().set(id, buffer);
+    if (!this.getLiveProjectSampleBufferIds().has(id)) this.getLiveSessionSampleBufferIds().add(id);
   }
 
   /**
@@ -478,32 +524,37 @@ class AudioEngine {
    * released unless they were explicitly retained as session assets.
    */
   public setProjectSampleBufferOwnership(ids: Iterable<string>): void {
+    const sampleBuffers = this.getLiveSampleBufferStore();
+    const projectOwnedIds = this.getLiveProjectSampleBufferIds();
+    const sessionIds = this.getLiveSessionSampleBufferIds();
     const nextProjectIds = new Set<string>();
     for (const id of ids) if (id) nextProjectIds.add(id);
 
-    for (const id of this.projectOwnedSampleBufferIds) {
+    for (const id of projectOwnedIds) {
       if (nextProjectIds.has(id)) continue;
-      if (!this.sessionSampleBufferIds.has(id)) this.sampleBuffers.delete(id);
+      if (!sessionIds.has(id)) sampleBuffers.delete(id);
     }
 
-    for (const id of this.projectOwnedSampleBufferIds) {
-      if (!nextProjectIds.has(id)) this.projectOwnedSampleBufferIds.delete(id);
+    for (const id of projectOwnedIds) {
+      if (!nextProjectIds.has(id)) projectOwnedIds.delete(id);
     }
 
     for (const id of nextProjectIds) {
-      this.projectOwnedSampleBufferIds.add(id);
-      this.sessionSampleBufferIds.delete(id);
+      projectOwnedIds.add(id);
+      sessionIds.delete(id);
     }
   }
 
   /** Project-owned buffers currently resident in the engine. */
   public getProjectOwnedSampleBufferIds(): string[] {
-    return [...this.projectOwnedSampleBufferIds].filter(id => this.sampleBuffers.has(id));
+    const sampleBuffers = this.getLiveSampleBufferStore();
+    return [...this.getLiveProjectSampleBufferIds()].filter(id => sampleBuffers.has(id));
   }
 
   /** Session-only/internal buffers currently resident in the engine. */
   public getSessionSampleBufferIds(): string[] {
-    return [...this.sessionSampleBufferIds].filter(id => this.sampleBuffers.has(id));
+    const sampleBuffers = this.getLiveSampleBufferStore();
+    return [...this.getLiveSessionSampleBufferIds()].filter(id => sampleBuffers.has(id));
   }
 
   /**
@@ -520,7 +571,7 @@ class AudioEngine {
 
   /** Ids of every audio asset currently registered in memory. */
   public getSampleBufferIds(): string[] {
-    return [...this.sampleBuffers.keys()];
+    return [...this.getLiveSampleBufferStore().keys()];
   }
 
   private buildReverbImpulse(duration: number, decay: number, options?: { seed?: number }) {
@@ -565,6 +616,9 @@ class AudioEngine {
   }
 
   public getOrCreateMixerChannel(trackId: number) {
+    if (this.shouldBlockLiveMutation()) {
+      throw new Error('Live mixer channels cannot be created during an offline render.');
+    }
     if (!this.ctx) this.init();
     const ctx = this.ctx!;
 
@@ -613,6 +667,7 @@ class AudioEngine {
   }
 
   public removeMixerChannel(trackId: number): void {
+    if (this.shouldBlockLiveMutation()) return;
     if (trackId === 0) return; // Master track must never be disconnected or removed
 
     const channel = this.mixerChannels.get(trackId);
@@ -649,6 +704,7 @@ class AudioEngine {
   }
 
   public updateMixerTrack(track: MixerTrack) {
+    if (this.shouldBlockLiveMutation()) return;
     const channel = this.getOrCreateMixerChannel(track.id);
     if (!this.ctx) return;
 
@@ -712,7 +768,7 @@ class AudioEngine {
   }
 
   public rebuildTrackFxChain(track: MixerTrack) {
-    if (!this.ctx) return;
+    if (this.shouldBlockLiveMutation() || !this.ctx) return;
     const ctx = this.ctx;
     const channel = this.getOrCreateMixerChannel(track.id);
 
@@ -887,6 +943,7 @@ class AudioEngine {
 
   // Instrument sound triggers
   public playNote(channel: Channel, note: Note, startTime?: number, bpm: number = 120) {
+    if (this.shouldBlockLiveMutation()) return;
     if (!this.ctx) this.init();
     const ctx = this.ctx!;
     const time = startTime ?? ctx.currentTime;
@@ -901,7 +958,7 @@ class AudioEngine {
   }
 
   public playSingleVoice(channel: Channel, note: Note, time: number) {
-    if (!this.ctx) return;
+    if (this.shouldBlockLiveMutation() || !this.ctx) return;
     const mixerChannel = this.getOrCreateMixerChannel(channel.mixerTrackId);
     const voiceId = `${channel.id}-${note.pitch}-${Math.random()}`;
 
@@ -1057,6 +1114,7 @@ class AudioEngine {
   }
 
   public playArpSequence(channel: Channel, rootNote: Note, startTime: number, bpm: number) {
+    if (this.shouldBlockLiveMutation()) return;
     const arp = channel.arp;
     if (!arp) return;
 
@@ -1119,7 +1177,7 @@ class AudioEngine {
 
   // Dynamic Sidechain Ducking Processor (Kick to Bass / Lead ducking)
   public triggerSidechainDucking(sourceTrackId: number, time: number) {
-    if (!this.ctx) return;
+    if (this.shouldBlockLiveMutation() || !this.ctx) return;
 
     this.mixerChannels.forEach((targetChannel, targetId) => {
       if (targetId === sourceTrackId) return;
@@ -1140,7 +1198,7 @@ class AudioEngine {
 
   // Time FX & Tape Stop Performance Controller
   public triggerTapeStop(durationMs: number = 600) {
-    if (!this.ctx) return;
+    if (this.shouldBlockLiveMutation() || !this.ctx) return;
     const ctx = this.ctx;
     const now = ctx.currentTime;
     const durSec = durationMs / 1000;
@@ -1155,6 +1213,7 @@ class AudioEngine {
   }
 
   public setGrossBeatState(state: Partial<GrossBeatState>) {
+    if (this.shouldBlockLiveMutation()) return;
     this.grossBeatState = { ...this.grossBeatState, ...state };
     if (!this.ctx || !this.grossBeatNode) return;
     const now = this.ctx.currentTime;
@@ -1288,7 +1347,7 @@ class AudioEngine {
     mixerTracks: MixerTrack[],
     atTime?: number
   ) {
-    if (!this.ctx) return;
+    if (this.shouldBlockLiveMutation() || !this.ctx) return;
     const now = atTime ?? this.ctx.currentTime;
 
     if (target.type === 'master_vol') {
@@ -1380,6 +1439,7 @@ class AudioEngine {
    * either way so the next chain rebuild picks up the value.
    */
   public setFxSlotMix(trackId: number, slotId: string, mix: number): boolean {
+    if (this.shouldBlockLiveMutation()) return false;
     const bounded = Math.max(0, Math.min(1, Number(mix)));
     if (!Number.isFinite(bounded)) return false;
     const track = this.activeMixerTracks.find(t => t.id === trackId);
@@ -1397,6 +1457,7 @@ class AudioEngine {
   }
 
   public stopNote(voiceId: string) {
+    if (this.shouldBlockLiveMutation()) return;
     if (this.activeVoices.has(voiceId)) {
       const voice = this.activeVoices.get(voiceId);
       voice?.stop();
@@ -1406,6 +1467,7 @@ class AudioEngine {
   }
 
   public stopChannelVoices(channelId: string): void {
+    if (this.shouldBlockLiveMutation()) return;
     const prefix = `${channelId}-`;
     for (const [voiceId, voice] of this.activeVoices.entries()) {
       if (voiceId.startsWith(prefix)) {
@@ -1535,6 +1597,9 @@ class AudioEngine {
 
   // Real-time Audio Recorder (Microphone/Line-In)
   public async startAudioRecording(): Promise<MediaStream> {
+    if (this.shouldBlockLiveMutation()) {
+      throw new Error('Recording cannot start while an offline render is running.');
+    }
     if (!this.ctx) await this.init();
     this.recordedChunks = [];
 
@@ -1719,214 +1784,256 @@ class AudioEngine {
     playlistTracks?: PlaylistTrack[],
     minimumDurationSeconds: number = 4,
   ): Promise<AudioBuffer> {
-    onProgress?.(15, `Preparing ${renderScope === 'pattern' ? 'pattern loop' : 'song'} export...`);
-
-    // Phase 10A: a muted playlist lane must behave like a muted clip during
-    // export — a missing audio buffer on a silenced lane should never fail the
-    // export, and that lane's clips are dropped from the rendered WAV exactly
-    // the way the live scheduler drops them at the trigger boundary.
-    const offlineLaneMutes = this.derivePlaylistLaneMutes(playlistTracks);
-
-    // Validate audio buffers for all audible audio clips.
-    // Phase 8B (P1-4): an unresolvable or unavailable audio asset (placeholder
-    // stem, missing buffer, or hydration-flagged `audioUnavailable`) must fail
-    // the export up front instead of rendering a misleading silent WAV.
-    // Phase 10A: lane-muted clips are silently dropped, so their missing
-    // buffers must not fail the export — only audible clips are validated.
-    for (const clip of clips) {
-      if (clip.type === 'audio' && !clip.mute && !this.isClipPlaylistLaneMuted(clip, offlineLaneMutes)) {
-        if (!clip.audioBufferId) {
-          throw new Error(
-            `Audio clip "${clip.name || clip.audioName || clip.id}" is missing an audioBufferId.`
-          );
-        }
-        if (clip.audioUnavailable) {
-          throw new Error(
-            `Audio clip "${clip.name || clip.audioName || clip.id}" (buffer ID: ${clip.audioBufferId}) references an unavailable audio asset; its persisted audio could not be restored.`
-          );
-        }
-        const buffer = this.sampleBuffers.get(clip.audioBufferId);
-        if (!buffer) {
-          throw new Error(
-            `Missing audio buffer for clip "${clip.name || clip.audioName || clip.id}" (buffer ID: ${clip.audioBufferId}). The audio asset is not loaded in memory.`
-          );
-        }
-      }
+    if (this.offlineRenderLeaseHeld) {
+      throw new Error('An offline timeline render is already running.');
     }
-
-    if (this.transport && this.isPlaying) {
-      this.transport.stop(false);
-    }
-
-    const previous = {
-      ctx: this.ctx,
-      transport: this.transport,
-      masterGain: this.masterGain,
-      masterAnalyser: this.masterAnalyser,
-      grossBeatNode: this.grossBeatNode,
-      mixerChannels: this.mixerChannels,
-      impulseResponses: this.impulseResponses,
-      activeVoices: this.activeVoices,
-      activeClipSources: this.activeClipSources,
-      isPlaying: this.isPlaying,
-      activeChannels: this.activeChannels,
-      activeClips: this.activeClips,
-      activeMixerTracks: this.activeMixerTracks,
-      mixerRoutingAdapter: this.mixerRoutingAdapter,
-      mixerRoutingChannelMap: this.mixerRoutingChannelMap,
-      playbackProjectChannels: this.playbackProjectChannels,
-      playbackProjectMixerTracks: this.playbackProjectMixerTracks,
-      activePlayMode: this.activePlayMode,
-      activePatternId: this.activePatternId,
-      activePatternLengthSteps: this.activePatternLengthSteps,
-      currentStep: this.currentStep,
-      currentBar: this.currentBar,
-      bpm: this.bpm,
-      metronome: this.metronome,
-      playlistLaneMutes: this.playlistLaneMutes
-    };
-    this.isOfflineRendering = true;
-    this.liveCtx = previous.ctx;
-    const safeBpm = Math.max(20, Math.min(300, Number(bpm) || 120));
-    const secondsPerStep = (60 / safeBpm) / 4;
-    const requestedMinimumDuration = Number.isFinite(minimumDurationSeconds) && minimumDurationSeconds >= 0
-      ? minimumDurationSeconds
-      : 4;
-    const totalDurationSeconds = Math.max(
-      requestedMinimumDuration,
-      Math.max(1, totalBars) * 4 * (60 / safeBpm),
-    );
-    const renderSampleRate = sampleRate ?? previous.ctx?.sampleRate ?? 44100;
-    const OfflineContextClass =
-      (typeof window !== 'undefined' && (window as unknown as WindowWithWebKitAudio).OfflineAudioContext) ||
-      (typeof window !== 'undefined' && (window as unknown as WindowWithWebKitAudio).webkitOfflineAudioContext) ||
-      (globalThis as unknown as { OfflineAudioContext?: typeof OfflineAudioContext }).OfflineAudioContext;
-    if (!OfflineContextClass) {
-      throw new Error('OfflineAudioContext is unavailable in this environment.');
-    }
-    const offlineCtx = new OfflineContextClass(
-      2,
-      Math.ceil(renderSampleRate * totalDurationSeconds),
-      renderSampleRate,
-    );
+    this.offlineRenderLeaseHeld = true;
+    let transportToResume: AudioClockTransport | null = null;
     try {
-      this.ctx = offlineCtx as unknown as AudioContext;
-      this.transport = null;
-      this.masterGain = offlineCtx.createGain();
-      this.grossBeatNode = offlineCtx.createGain();
-      this.masterAnalyser = offlineCtx.createAnalyser();
-      this.masterAnalyser.fftSize = 512;
-      this.masterAnalyser.smoothingTimeConstant = 0.8;
-      this.masterGain.connect(this.grossBeatNode);
-      this.grossBeatNode.connect(this.masterAnalyser);
-      this.masterAnalyser.connect(offlineCtx.destination);
-      this.mixerChannels = new Map();
-      this.mixerRoutingAdapter = null;
-      this.mixerRoutingChannelMap = null;
-      this.impulseResponses = new Map();
-      this.activeVoices = new Map();
-      this.activeChannels = structuredClone(channels);
-      this.activeClips = structuredClone(clips);
-      this.playbackProjectChannels = structuredClone(channels);
-      this.playbackProjectMixerTracks = [];
-      this.activePlayMode = renderScope === 'pattern' ? 'pat' : 'song';
-      onProgress?.(40, `Offline graph ready (${renderScope === 'pattern' ? 'pattern' : 'song'} mode).`);
-      this.activePatternId = undefined;
-      // An offline Pattern render is its own take: it must not inherit (or leave
-      // behind) the declared length of a live playback take.
-      this.activePatternLengthSteps = renderScope === 'pattern' ? patternLengthSteps : undefined;
-      this.isPlaying = true;
-      this.currentStep = 0;
-      this.currentBar = 1;
-      this.bpm = safeBpm;
-      this.metronome = false;
+      onProgress?.(15, `Preparing ${renderScope === 'pattern' ? 'pattern loop' : 'song'} export...`);
 
-      // Browser exports use a bounded offline graph by default. Live mixer FX
-      // (especially convolution and feedback delay) can make OfflineAudioContext
-      // rendering disproportionately expensive. Preserve the full FX graph as an
-      // explicit opt-in for validation/internal callers.
-      const tracks = [...mixerTracks].sort((a, b) => a.id - b.id);
-      const renderTracks = includeMixerFx
-        ? tracks
-        : tracks.map(track => ({ ...track, fxSlots: [] }));
-      this.activeMixerTracks = structuredClone(renderTracks);
-      this.playbackProjectMixerTracks = structuredClone(renderTracks);
-      // Phase 10A: share the project's lane-mute derivation with the offline
-      // scheduler so the trigger boundary drops muted-lane clips the same way
-      // the live `play()` boundary does. Without this, the offline renderer
-      // would still call `playAudioClipWithFades` on muted-lane audio clips.
-      this.playlistLaneMutes = offlineLaneMutes;
-      if (includeMixerFx) {
-        // Phase 10A: a seeded impulse is required so offline exports are
-        // byte-deterministic across runs. The live engine never reaches this
-        // branch (`includeMixerFx` defaults to false on the offline path) and
-        // keeps its existing non-deterministic convolution tail.
-        this.buildReverbImpulse(2.5, 2.0, { seed: 0x10a4eb });
-      }
-      const masterTrack = renderTracks.find(track => track.id === 0);
-      if (masterTrack) this.updateMixerTrack(masterTrack); else this.getOrCreateMixerChannel(0);
-      for (const track of renderTracks) if (track.id !== 0) this.updateMixerTrack(track);
-      this.syncMixerRouting(renderTracks);
-      const totalSteps = Math.ceil(totalDurationSeconds / secondsPerStep);
-      // A Pattern Loop export must wrap at the same boundary as Pattern Mode
-      // playback, otherwise steps beyond the first bar render silence. Song
-      // exports keep the one-bar grid the playlist is scheduled on. The declared
-      // pattern length is passed to the same resolver playback uses, so a
-      // declared 32-step pattern exports 32 steps even with an empty second bar.
-      const patternLoopSteps = renderScope === 'pattern'
-        ? resolvePatternLoopLengthSteps(this.activeChannels, patternLengthSteps)
-        : 16;
-      const scheduleStartProgress = 40;
-      const scheduleEndProgress = 65;
-      // Schedule the offline timeline in small cooperative batches so the browser
-      // can service rendering/UI work instead of appearing unresponsive on longer exports.
-      for (let globalStep = 0; globalStep < totalSteps; globalStep += 1) {
-        this.currentStep = globalStep % patternLoopSteps;
-        this.currentBar = Math.floor(globalStep / 16) + 1;
-        const swingOffsetSeconds = this.currentStep % 2 === 1 ? (this.swing / 100) * (secondsPerStep * 0.4) : 0;
-        const audioTime = globalStep * secondsPerStep + swingOffsetSeconds;
-        if (audioTime >= totalDurationSeconds) break;
-        this.triggerCurrentStep(audioTime);
-        if ((globalStep + 1) % 4 === 0 || globalStep === totalSteps - 1) {
-          const scheduleProgress = scheduleStartProgress + Math.round(((globalStep + 1) / totalSteps) * (scheduleEndProgress - scheduleStartProgress));
-          onProgress?.(scheduleProgress, `Scheduling ${renderScope === 'pattern' ? 'pattern' : 'song'} audio (${globalStep + 1}/${totalSteps} steps)...`);
-        }
+      // Phase 10A: a muted playlist lane must behave like a muted clip during
+      // export — a missing audio buffer on a silenced lane should never fail the
+      // export, and that lane's clips are dropped from the rendered WAV exactly
+      // the way the live scheduler drops them at the trigger boundary.
+      const offlineLaneMutes = this.derivePlaylistLaneMutes(playlistTracks);
 
-        if ((globalStep + 1) % 16 === 0 && globalStep + 1 < totalSteps) {
-          await new Promise<void>(resolve => setTimeout(resolve, 0));
+      // Validate audio buffers for all audible audio clips.
+      // Phase 8B (P1-4): an unresolvable or unavailable audio asset (placeholder
+      // stem, missing buffer, or hydration-flagged `audioUnavailable`) must fail
+      // the export up front instead of rendering a misleading silent WAV.
+      // Phase 10A: lane-muted clips are silently dropped, so their missing
+      // buffers must not fail the export — only audible clips are validated.
+      for (const clip of clips) {
+        if (clip.type === 'audio' && !clip.mute && !this.isClipPlaylistLaneMuted(clip, offlineLaneMutes)) {
+          if (!clip.audioBufferId) {
+            throw new Error(
+              `Audio clip "${clip.name || clip.audioName || clip.id}" is missing an audioBufferId.`
+            );
+          }
+          if (clip.audioUnavailable) {
+            throw new Error(
+              `Audio clip "${clip.name || clip.audioName || clip.id}" (buffer ID: ${clip.audioBufferId}) references an unavailable audio asset; its persisted audio could not be restored.`
+            );
+          }
+          const buffer = this.sampleBuffers.get(clip.audioBufferId);
+          if (!buffer) {
+            throw new Error(
+              `Missing audio buffer for clip "${clip.name || clip.audioName || clip.id}" (buffer ID: ${clip.audioBufferId}). The audio asset is not loaded in memory.`
+            );
+          }
         }
       }
-      onProgress?.(70, `Rendering offline audio (${totalDurationSeconds.toFixed(2)}s)...`);
-      const renderedBuffer = await offlineCtx.startRendering();
-      onProgress?.(85, 'Offline render complete. Encoding WAV...');
-      return renderedBuffer;
+
+      const previous = {
+        ctx: this.ctx,
+        liveCtx: this.liveCtx,
+        transport: this.transport,
+        transportWasPlaying: this.transport?.getState().playing ?? false,
+        masterGain: this.masterGain,
+        masterAnalyser: this.masterAnalyser,
+        grossBeatNode: this.grossBeatNode,
+        mixerChannels: this.mixerChannels,
+        impulseResponses: this.impulseResponses,
+        activeVoices: this.activeVoices,
+        activeDrumPadVoices: this.activeDrumPadVoices,
+        activeClipSources: this.activeClipSources,
+        activeClipSourceLanes: this.activeClipSourceLanes,
+        isPlaying: this.isPlaying,
+        activeChannels: this.activeChannels,
+        activeClips: this.activeClips,
+        activeMixerTracks: this.activeMixerTracks,
+        mixerRoutingAdapter: this.mixerRoutingAdapter,
+        mixerRoutingChannelMap: this.mixerRoutingChannelMap,
+        playbackProjectChannels: this.playbackProjectChannels,
+        playbackProjectMixerTracks: this.playbackProjectMixerTracks,
+        activePlayMode: this.activePlayMode,
+        activePatternId: this.activePatternId,
+        activePatternLengthSteps: this.activePatternLengthSteps,
+        currentStep: this.currentStep,
+        currentBar: this.currentBar,
+        bpm: this.bpm,
+        metronome: this.metronome,
+        playlistLaneMutes: this.playlistLaneMutes,
+        sampleBuffers: this.sampleBuffers,
+        projectOwnedSampleBufferIds: this.projectOwnedSampleBufferIds,
+        sessionSampleBufferIds: this.sessionSampleBufferIds,
+        liveSampleBuffersDuringOfflineRender: this.liveSampleBuffersDuringOfflineRender,
+        liveProjectSampleBufferIdsDuringOfflineRender: this.liveProjectSampleBufferIdsDuringOfflineRender,
+        liveSessionSampleBufferIdsDuringOfflineRender: this.liveSessionSampleBufferIdsDuringOfflineRender,
+      };
+      if (previous.transport && previous.transportWasPlaying) {
+        transportToResume = previous.transport;
+        previous.transport.stop(false);
+      }
+      const safeBpm = Math.max(20, Math.min(300, Number(bpm) || 120));
+      const secondsPerStep = (60 / safeBpm) / 4;
+      const requestedMinimumDuration = Number.isFinite(minimumDurationSeconds) && minimumDurationSeconds >= 0
+        ? minimumDurationSeconds
+        : 4;
+      const totalDurationSeconds = Math.max(
+        requestedMinimumDuration,
+        Math.max(1, totalBars) * 4 * (60 / safeBpm),
+      );
+      const renderSampleRate = sampleRate ?? previous.ctx?.sampleRate ?? 44100;
+      const OfflineContextClass =
+        (typeof window !== 'undefined' && (window as unknown as WindowWithWebKitAudio).OfflineAudioContext) ||
+        (typeof window !== 'undefined' && (window as unknown as WindowWithWebKitAudio).webkitOfflineAudioContext) ||
+        (globalThis as unknown as { OfflineAudioContext?: typeof OfflineAudioContext }).OfflineAudioContext;
+      if (!OfflineContextClass) {
+        throw new Error('OfflineAudioContext is unavailable in this environment.');
+      }
+      const offlineCtx = new OfflineContextClass(
+        2,
+        Math.ceil(renderSampleRate * totalDurationSeconds),
+        renderSampleRate,
+      );
+      this.isOfflineRendering = true;
+      this.liveCtx = previous.ctx;
+      try {
+        this.withOfflineRenderOperation(() => {
+          this.ctx = offlineCtx as unknown as AudioContext;
+          this.transport = null;
+          this.masterGain = offlineCtx.createGain();
+          this.grossBeatNode = offlineCtx.createGain();
+          this.masterAnalyser = offlineCtx.createAnalyser();
+          this.masterAnalyser.fftSize = 512;
+          this.masterAnalyser.smoothingTimeConstant = 0.8;
+          this.masterGain.connect(this.grossBeatNode);
+          this.grossBeatNode.connect(this.masterAnalyser);
+          this.masterAnalyser.connect(offlineCtx.destination);
+          this.mixerChannels = new Map();
+          this.mixerRoutingAdapter = null;
+          this.mixerRoutingChannelMap = null;
+          this.impulseResponses = new Map();
+          this.activeVoices = new Map();
+          this.activeDrumPadVoices = new Map();
+          this.activeClipSources = new Set();
+          this.activeClipSourceLanes = new Map();
+          this.activeChannels = structuredClone(channels);
+          this.activeClips = structuredClone(clips);
+          this.playbackProjectChannels = structuredClone(channels);
+          this.playbackProjectMixerTracks = [];
+          this.activePlayMode = renderScope === 'pattern' ? 'pat' : 'song';
+          this.sampleBuffers = new Map(previous.sampleBuffers);
+          this.projectOwnedSampleBufferIds = new Set(previous.projectOwnedSampleBufferIds);
+          this.sessionSampleBufferIds = new Set(previous.sessionSampleBufferIds);
+          this.liveSampleBuffersDuringOfflineRender = previous.sampleBuffers;
+          this.liveProjectSampleBufferIdsDuringOfflineRender = previous.projectOwnedSampleBufferIds;
+          this.liveSessionSampleBufferIdsDuringOfflineRender = previous.sessionSampleBufferIds;
+        });
+        onProgress?.(40, `Offline graph ready (${renderScope === 'pattern' ? 'pattern' : 'song'} mode).`);
+        this.activePatternId = undefined;
+        // An offline Pattern render is its own take: it must not inherit (or leave
+        // behind) the declared length of a live playback take.
+        this.activePatternLengthSteps = renderScope === 'pattern' ? patternLengthSteps : undefined;
+        this.isPlaying = true;
+        this.currentStep = 0;
+        this.currentBar = 1;
+        this.bpm = safeBpm;
+        this.metronome = false;
+
+        // Browser exports use a bounded offline graph by default. Live mixer FX
+        // (especially convolution and feedback delay) can make OfflineAudioContext
+        // rendering disproportionately expensive. Preserve the full FX graph as an
+        // explicit opt-in for validation/internal callers.
+        const tracks = [...mixerTracks].sort((a, b) => a.id - b.id);
+        const renderTracks = includeMixerFx
+          ? tracks
+          : tracks.map(track => ({ ...track, fxSlots: [] }));
+        this.activeMixerTracks = structuredClone(renderTracks);
+        this.playbackProjectMixerTracks = structuredClone(renderTracks);
+        // Phase 10A: share the project's lane-mute derivation with the offline
+        // scheduler so the trigger boundary drops muted-lane clips the same way
+        // the live `play()` boundary does. Without this, the offline renderer
+        // would still call `playAudioClipWithFades` on muted-lane audio clips.
+        this.playlistLaneMutes = offlineLaneMutes;
+        this.withOfflineRenderOperation(() => {
+          if (includeMixerFx) {
+            // Phase 10A: a seeded impulse is required so offline exports are
+            // byte-deterministic across runs. The live engine never reaches this
+            // branch (`includeMixerFx` defaults to false on the offline path) and
+            // keeps its existing non-deterministic convolution tail.
+            this.buildReverbImpulse(2.5, 2.0, { seed: 0x10a4eb });
+          }
+          const masterTrack = renderTracks.find(track => track.id === 0);
+          if (masterTrack) this.updateMixerTrack(masterTrack); else this.getOrCreateMixerChannel(0);
+          for (const track of renderTracks) if (track.id !== 0) this.updateMixerTrack(track);
+          this.syncMixerRouting(renderTracks);
+        });
+        const totalSteps = Math.ceil(totalDurationSeconds / secondsPerStep);
+        // A Pattern Loop export must wrap at the same boundary as Pattern Mode
+        // playback, otherwise steps beyond the first bar render silence. Song
+        // exports keep the one-bar grid the playlist is scheduled on. The declared
+        // pattern length is passed to the same resolver playback uses, so a
+        // declared 32-step pattern exports 32 steps even with an empty second bar.
+        const patternLoopSteps = renderScope === 'pattern'
+          ? resolvePatternLoopLengthSteps(this.activeChannels, patternLengthSteps)
+          : 16;
+        const scheduleStartProgress = 40;
+        const scheduleEndProgress = 65;
+        // Schedule the offline timeline in small cooperative batches so the browser
+        // can service rendering/UI work instead of appearing unresponsive on longer exports.
+        for (let globalStep = 0; globalStep < totalSteps; globalStep += 1) {
+          this.currentStep = globalStep % patternLoopSteps;
+          this.currentBar = Math.floor(globalStep / 16) + 1;
+          const swingOffsetSeconds = this.currentStep % 2 === 1 ? (this.swing / 100) * (secondsPerStep * 0.4) : 0;
+          const audioTime = globalStep * secondsPerStep + swingOffsetSeconds;
+          if (audioTime >= totalDurationSeconds) break;
+          this.withOfflineRenderOperation(() => this.triggerCurrentStep(audioTime));
+          if ((globalStep + 1) % 4 === 0 || globalStep === totalSteps - 1) {
+            const scheduleProgress = scheduleStartProgress + Math.round(((globalStep + 1) / totalSteps) * (scheduleEndProgress - scheduleStartProgress));
+            onProgress?.(scheduleProgress, `Scheduling ${renderScope === 'pattern' ? 'pattern' : 'song'} audio (${globalStep + 1}/${totalSteps} steps)...`);
+          }
+
+          if ((globalStep + 1) % 16 === 0 && globalStep + 1 < totalSteps) {
+            await new Promise<void>(resolve => setTimeout(resolve, 0));
+          }
+        }
+        onProgress?.(70, `Rendering offline audio (${totalDurationSeconds.toFixed(2)}s)...`);
+        const renderedBuffer = await offlineCtx.startRendering();
+        onProgress?.(85, 'Offline render complete. Encoding WAV...');
+        return renderedBuffer;
+      } finally {
+        this.isOfflineRendering = false;
+        this.liveCtx = previous.liveCtx;
+        this.ctx = previous.ctx;
+        this.transport = previous.transport;
+        this.masterGain = previous.masterGain;
+        this.masterAnalyser = previous.masterAnalyser;
+        this.grossBeatNode = previous.grossBeatNode;
+        this.mixerChannels = previous.mixerChannels;
+        this.mixerRoutingAdapter = previous.mixerRoutingAdapter;
+        this.mixerRoutingChannelMap = previous.mixerRoutingChannelMap;
+        this.impulseResponses = previous.impulseResponses;
+        this.activeVoices = previous.activeVoices;
+        this.activeDrumPadVoices = previous.activeDrumPadVoices;
+        this.activeClipSources = previous.activeClipSources;
+        this.activeClipSourceLanes = previous.activeClipSourceLanes;
+        this.isPlaying = previous.isPlaying;
+        this.activeChannels = previous.activeChannels;
+        this.activeClips = previous.activeClips;
+        this.activeMixerTracks = previous.activeMixerTracks;
+        this.playbackProjectChannels = previous.playbackProjectChannels;
+        this.playbackProjectMixerTracks = previous.playbackProjectMixerTracks;
+        this.activePlayMode = previous.activePlayMode;
+        this.activePatternId = previous.activePatternId;
+        this.activePatternLengthSteps = previous.activePatternLengthSteps;
+        this.currentStep = previous.currentStep;
+        this.currentBar = previous.currentBar;
+        this.bpm = previous.bpm;
+        this.metronome = previous.metronome;
+        this.playlistLaneMutes = previous.playlistLaneMutes;
+        this.sampleBuffers = previous.sampleBuffers;
+        this.projectOwnedSampleBufferIds = previous.projectOwnedSampleBufferIds;
+        this.sessionSampleBufferIds = previous.sessionSampleBufferIds;
+        this.liveSampleBuffersDuringOfflineRender = previous.liveSampleBuffersDuringOfflineRender;
+        this.liveProjectSampleBufferIdsDuringOfflineRender = previous.liveProjectSampleBufferIdsDuringOfflineRender;
+        this.liveSessionSampleBufferIdsDuringOfflineRender = previous.liveSessionSampleBufferIdsDuringOfflineRender;
+      }
     } finally {
-      this.isOfflineRendering = false;
-      this.liveCtx = null;
-      this.ctx = previous.ctx;
-      this.transport = previous.transport;
-      this.masterGain = previous.masterGain;
-      this.masterAnalyser = previous.masterAnalyser;
-      this.grossBeatNode = previous.grossBeatNode;
-      this.mixerChannels = previous.mixerChannels;
-      this.mixerRoutingAdapter = previous.mixerRoutingAdapter;
-      this.mixerRoutingChannelMap = previous.mixerRoutingChannelMap;
-      this.impulseResponses = previous.impulseResponses;
-      this.activeVoices = previous.activeVoices;
-      this.isPlaying = previous.isPlaying;
-      this.activeChannels = previous.activeChannels;
-      this.activeClips = previous.activeClips;
-      this.activeMixerTracks = previous.activeMixerTracks;
-      this.playbackProjectChannels = previous.playbackProjectChannels;
-      this.playbackProjectMixerTracks = previous.playbackProjectMixerTracks;
-      this.activePlayMode = previous.activePlayMode;
-      this.activePatternId = previous.activePatternId;
-      this.activePatternLengthSteps = previous.activePatternLengthSteps;
-      this.currentStep = previous.currentStep;
-      this.currentBar = previous.currentBar;
-      this.bpm = previous.bpm;
-      this.metronome = previous.metronome;
-      this.playlistLaneMutes = previous.playlistLaneMutes;
+      this.offlineRenderLeaseHeld = false;
+      if (transportToResume) transportToResume.start();
     }
   }
 
@@ -2215,6 +2322,7 @@ class AudioEngine {
   private activePatternLengthSteps?: number;
 
   public setBpm(bpm: number) {
+    if (this.shouldBlockLiveMutation()) return;
     this.bpm = Math.max(20, Math.min(300, bpm));
     if (this.transport) {
       this.transport.setBpm(this.bpm);
@@ -2222,10 +2330,12 @@ class AudioEngine {
   }
 
   public setSwing(swing: number) {
+    if (this.shouldBlockLiveMutation()) return;
     this.swing = Math.max(0, Math.min(100, swing));
   }
 
   public setMetronome(enabled: boolean) {
+    if (this.shouldBlockLiveMutation()) return;
     this.metronome = enabled;
   }
 
@@ -2369,7 +2479,7 @@ class AudioEngine {
    * remains active until the next automation event.
    */
   public synchronizePlaybackState(update: PlaybackStateUpdate): void {
-    if (!this.isPlaying) return;
+    if (this.shouldBlockLiveMutation() || !this.isPlaying) return;
 
     // Adopt the declared pattern length before merging channel edits so a length
     // change that arrives together with content is resolved against the new value.
@@ -2501,6 +2611,7 @@ class AudioEngine {
     patternLengthSteps?: number,
     playlistTracks?: PlaylistTrack[]
   ) {
+    if (this.shouldBlockLiveMutation()) return;
     if (!this.ctx) this.init();
     if (this.ctx && this.ctx.state === 'suspended') {
       void this.ctx.resume();
@@ -2571,7 +2682,7 @@ class AudioEngine {
     }
     this.transport.setCallbacks({
       onStep: (step, bar, audioTime) => {
-        if (!this.isPlaying || this.playbackGeneration !== currentGeneration) return;
+        if (this.offlineRenderLeaseHeld || !this.isPlaying || this.playbackGeneration !== currentGeneration) return;
 
         this.currentStep = step;
         this.currentBar = bar;
@@ -2589,11 +2700,11 @@ class AudioEngine {
         }
       },
       onStateChange: (state) => {
-        if (!this.isPlaying || this.playbackGeneration !== currentGeneration) return;
+        if (this.offlineRenderLeaseHeld || !this.isPlaying || this.playbackGeneration !== currentGeneration) return;
         this.transportStateCallback?.(state);
       },
       onSongEnd: () => {
-        if (this.playbackGeneration !== currentGeneration) return;
+        if (this.offlineRenderLeaseHeld || this.playbackGeneration !== currentGeneration) return;
         this.handleSongEnd();
       }
     });
@@ -2614,6 +2725,7 @@ class AudioEngine {
   }
 
  public stop() {
+  if (this.shouldBlockLiveMutation()) return;
   this.isPlaying = false;
   this.playbackGeneration++;
   this.stopMasterMeasurementPump();
@@ -2641,7 +2753,7 @@ class AudioEngine {
    * from here. Transport actions never touch project data.
    */
   public pause(): void {
-    if (!this.isPlaying || !this.transport) return;
+    if (this.shouldBlockLiveMutation() || !this.isPlaying || !this.transport) return;
     this.playbackGeneration++;
     this.stopActivePlaybackAudio();
     this.transport.pause();
@@ -2662,6 +2774,7 @@ class AudioEngine {
    * pre-seek value stays latched until the next step boundary.
    */
   public seek(positionSeconds: number): void {
+    if (this.shouldBlockLiveMutation()) return;
     const transport = this.transport;
     if (!transport || !this.ctx) return;
 
@@ -3399,6 +3512,7 @@ class AudioEngine {
 
   // Real-time timeline tape scrub audition sound synthesis
   public playTimelineScrubSound(bar: number, speedMultiplier: number = 1.0) {
+    if (this.shouldBlockLiveMutation()) return;
     const ctx = this.getContext();
     if (ctx.state === 'suspended') ctx.resume();
 
