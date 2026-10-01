@@ -15,6 +15,8 @@ import {
   resolveAdditivePlaylistClipPublication,
 } from './playlistAudioPublication';
 import { runProjectReplacementAfterBackup } from './projectReplacement';
+import { normalizeProjectState } from './projectState';
+import { isAudioClipExportable } from '../audio/offlineProjectRenderer';
 import { synchronizeBeforeRuntimePublication } from './runtimeStatePublication';
 // Aliased so `typeof` below resolves to the imported binding rather than to the
 // same-named parameter of the extracted handler's signature.
@@ -1056,4 +1058,130 @@ test('PHASE 48: a fully valid clip update publishes exactly as before, with no s
 
   assert.equal(projectStateRef.current.playlistClips.some(clip => clip.id === valid.id), true);
   assert.deepEqual(harness.saveErrors, [], 'the invariant must be invisible to valid updates');
+});
+
+// ---------------------------------------------------------------------------
+// Phase 49 — legacy audioless clips survive unrelated playlist publications
+// ---------------------------------------------------------------------------
+
+const LEGACY_CLIP_ID = 'legacy-vocal-1';
+
+/**
+ * The exact state Phase 48 hydration leaves behind for an already-persisted
+ * audioless clip: the clip is retained, no `audioBufferId` is invented, and
+ * `normalizeProjectState` flags it `audioUnavailable`.
+ */
+const hydrateLegacyClips = (): PlaylistClip[] =>
+  normalizeProjectState(makeState([
+    audiolessAudioClip(LEGACY_CLIP_ID, 'Legacy Vocal Take'),
+    ...baseClips(),
+  ])).playlistClips;
+
+test('PHASE 49: a legacy audioless clip survives an unrelated edit at the real App.handleUpdateClips boundary', async () => {
+  const engine = createFakeEngine();
+  const clips = hydrateLegacyClips();
+  const legacy = clips[0]!;
+  const projectStateRef = { current: makeState(clips) };
+  const harness = createPublicationHarness(projectStateRef);
+
+  // An unrelated move, published the way the arranger does: the whole playlist
+  // array is rebuilt and handed to handleUpdateClips.
+  const incoming = clips.map(clip => clip.id === 'clip-7' ? { ...clip, startBar: 8 } : clip);
+
+  invokeProductionHandleUpdateClips(
+    incoming, projectStateRef, engine, harness.publish,
+    { setSaveError: harness.setSaveError, commitPlaylistHistory: harness.commitPlaylistHistory },
+  );
+  await awaitPublicationOutcome(engine);
+
+  const published = projectStateRef.current.playlistClips;
+  assert.equal(published.length, incoming.length, 'no clip may be deleted');
+  assert.deepEqual(published.map(clip => clip.id), incoming.map(clip => clip.id), 'order must be preserved');
+  assert.equal(published[0], legacy, 'the legacy clip must still be the live clip object');
+  assert.equal(published.find(clip => clip.id === 'clip-7')?.startBar, 8, 'the unrelated edit must still land');
+  assert.equal(legacy.audioBufferId, undefined, 'no audioBufferId may be invented');
+  assert.equal(legacy.audioUnavailable, true);
+  assert.equal(isAudioClipExportable(legacy, () => undefined), false, 'it must keep blocking export');
+  assert.deepEqual(harness.saveErrors, [], 'an unrelated edit must not be reported as a refusal');
+  assert.equal(
+    harness.history.every(entry => entry.state.playlistClips.some(clip => clip.id === LEGACY_CLIP_ID)),
+    true,
+    'no history entry may describe a playlist without the legacy clip',
+  );
+});
+
+test('PHASE 49: re-sending the unchanged playlist never deletes the legacy clip', async () => {
+  const engine = createFakeEngine();
+  const clips = hydrateLegacyClips();
+  const legacy = clips[0]!;
+  const projectStateRef = { current: makeState(clips) };
+  const harness = createPublicationHarness(projectStateRef);
+
+  invokeProductionHandleUpdateClips(
+    [...clips], projectStateRef, engine, harness.publish,
+    { setSaveError: harness.setSaveError, commitPlaylistHistory: harness.commitPlaylistHistory },
+  );
+  await awaitPublicationOutcome(engine);
+
+  const published = projectStateRef.current.playlistClips;
+  assert.equal(published.length, clips.length);
+  assert.equal(published[0], legacy);
+  assert.equal(
+    published.every((clip, index) => clip === clips[index]),
+    true,
+    'the playlist content may not change at all',
+  );
+  assert.deepEqual(harness.saveErrors, [], 'a clip that was already present must not be reported as refused');
+});
+
+test('PHASE 49: a mixed batch retains the legacy clip, refuses the new invalid clip, and publishes the valid one', async () => {
+  const { engine, releasePersistence } = await startBlockedPersistence('phase49-valid-audio');
+  const clips = hydrateLegacyClips();
+  const legacy = clips[0]!;
+  const projectStateRef = { current: makeState(clips) };
+  const harness = createPublicationHarness(projectStateRef);
+  const introduced = audiolessAudioClip('phase49-new-broken', 'New Broken Stem');
+  const valid = audioClip('phase49-valid-audio', 'Dropped Audio');
+
+  invokeProductionHandleUpdateClips(
+    [...clips, introduced, valid], projectStateRef, engine, harness.publish,
+    { setSaveError: harness.setSaveError, commitPlaylistHistory: harness.commitPlaylistHistory },
+  );
+  releasePersistence.resolve();
+  await harness.waitForPublications(1);
+
+  const published = projectStateRef.current.playlistClips;
+  assert.equal(published[0], legacy, 'the legacy clip is retained in its original position');
+  assert.equal(published.some(clip => clip.id === introduced.id), false, 'the new invalid clip is refused');
+  assert.equal(published.some(clip => clip.id === valid.id), true, 'the legitimate drop is never lost');
+  assert.equal(legacy.audioBufferId, undefined, 'no audioBufferId may be invented');
+  assert.equal(legacy.audioUnavailable, true);
+  assert.equal(harness.saveErrors.length, 1, 'only the newly introduced clip is refused');
+  assert.match(harness.saveErrors[0]!, /New Broken Stem/);
+  assert.match(harness.saveErrors[0]!, /was not added to the playlist/, 'Phase 48 wording is preserved');
+  assert.doesNotMatch(harness.saveErrors[0]!, /Legacy Vocal Take/, 'the retained clip is not refused');
+  assert.deepEqual(harness.history.map(entry => entry.label), ['Clip change']);
+});
+
+test('PHASE 49: an already-present legacy clip does not weaken the refusal of a newly introduced audioless clip', async () => {
+  const engine = createFakeEngine();
+  const clips = hydrateLegacyClips();
+  const projectStateRef = { current: makeState(clips) };
+  const harness = createPublicationHarness(projectStateRef);
+  const introduced = audiolessAudioClip('phase49-only-new', 'Only New Broken');
+
+  invokeProductionHandleUpdateClips(
+    [...clips, introduced], projectStateRef, engine, harness.publish,
+    { setSaveError: harness.setSaveError, commitPlaylistHistory: harness.commitPlaylistHistory },
+  );
+  await awaitPublicationOutcome(engine);
+
+  assert.equal(
+    projectStateRef.current.playlistClips.every((clip, index) => clip === clips[index]),
+    true,
+    'the live playlist must be untouched',
+  );
+  assert.equal(projectStateRef.current.playlistClips.some(clip => clip.id === introduced.id), false);
+  assert.equal(harness.saveErrors.length, 1);
+  assert.match(harness.saveErrors[0]!, /Only New Broken/);
 });
