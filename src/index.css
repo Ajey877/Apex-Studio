@@ -730,10 +730,12 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
    View → Studio Browser). Nothing is ever hidden without another way in.
 --------------------------------------------------------------------------- */
 @media (min-width: 640px) {
-  .apex-tab-label { display: inline; }
+  .apex-tab-label,
+  .apex-badge-text { display: inline; }
 }
 @media (max-width: 639px) {
-  .apex-tab-label { display: none; }
+  .apex-tab-label,
+  .apex-badge-text { display: none; }
 }
 
 @media (min-width: 1024px) {
