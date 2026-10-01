@@ -1,16 +1,54 @@
+/*
+ * Apex Studio — positional shell CSS.
+ *
+ * This file owns the selectors that depend on the transport's exact DOM shape.
+ * src/state/applicationShellLayout.test.ts pins these selectors, so they are
+ * addressed by position on purpose and must not be re-scoped.
+ */
 
+/*
+ * The tool cluster is the fourth direct child of the transport row. UI 1C
+ * removed the `max-width: 34vw / 30vw` caps that clipped the old 20-button
+ * strip: the cluster now holds a compact core set plus the overflow trigger, so
+ * it only needs to be allowed to shrink under its content width. The core-first
+ * ordering inside the cluster (see TransportBar) means the row's pinned
+ * `overflow-hidden` can only ever clip the trailing, menu-backed status chips.
+ */
 @media (max-width: 1100px) {
   #fl-transport-bar > div:first-child > div:nth-child(4) {
-    max-width: 34vw;
+    min-width: 0;
   }
 }
 
 @media (max-width: 820px) {
-  #fl-logo-btn > span::after {
-    font-size: 0.8rem;
-  }
-
   #fl-transport-bar > div:first-child > div:nth-child(4) {
-    max-width: 30vw;
+    min-width: 0;
+  }
+}
+
+/*
+ * Brand wordmark. The mark is drawn in JSX and the wordmark itself is rendered
+ * from CSS, so the transport markup stays presentation-free and the responsive
+ * treatment lives in one place. The span is a direct child of the logo button,
+ * which is why the mark is an <i>.
+ */
+#fl-logo-btn > span {
+  font-size: 0 !important;
+  letter-spacing: -0.01em;
+}
+
+#fl-logo-btn > span::after {
+  content: 'APEX STUDIO';
+  font-size: var(--apex-type-emphasis);
+  font-weight: 600;
+  letter-spacing: -0.005em;
+  color: var(--apex-text);
+}
+
+/* Below the shell's desktop floor the mark alone carries the brand, which buys
+   the transport the room it needs for the readout and the tool cluster. */
+@media (max-width: 1023px) {
+  #fl-logo-btn > span {
+    display: none !important;
   }
 }
