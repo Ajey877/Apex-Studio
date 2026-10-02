@@ -8,6 +8,8 @@ export interface InstrumentVoiceContext {
   /** The active live or OfflineAudioContext used for this render. */
   audioContext: BaseAudioContext;
   voiceId: string;
+  /** True when `destination` already applies channel-level panning (`Channel.pan`). */
+  channelPanApplied?: boolean;
   /** Called by a standalone renderer when its scheduled voice naturally completes. */
   onEnded?: () => void;
   /** Narrow lookup into AudioEngine's in-memory sample buffer cache. */

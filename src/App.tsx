@@ -571,8 +571,17 @@ export function App() {
 
   const synchronizeRuntimeState = useCallback((previous: ProjectState, next: ProjectState) => {
     synchronizeActivePlayback(previous, next);
-    if (!audioEngine.isPlaybackActive() && previous.mixerTracks !== next.mixerTracks) {
-      next.mixerTracks.forEach(track => audioEngine.updateMixerTrack(track));
+    if (!audioEngine.isPlaybackActive()) {
+      if (previous.mixerTracks !== next.mixerTracks) {
+        next.mixerTracks.forEach(track => audioEngine.updateMixerTrack(track));
+      }
+      if (previous.channels !== next.channels) {
+        next.channels.forEach(channel => {
+          if (audioEngine.getChannelPanner(channel.id)) {
+            audioEngine.updateChannel(channel);
+          }
+        });
+      }
     }
   }, [synchronizeActivePlayback]);
 
@@ -588,6 +597,11 @@ export function App() {
       });
     } else {
       previous.mixerTracks.forEach(track => audioEngine.updateMixerTrack(track));
+      previous.channels.forEach(channel => {
+        if (audioEngine.getChannelPanner(channel.id)) {
+          audioEngine.updateChannel(channel);
+        }
+      });
     }
   }, []);
 
@@ -916,6 +930,7 @@ export function App() {
     if (!result.deletedChannel) return;
 
     audioEngine.stopChannelVoices(channelId);
+    audioEngine.removeChannelPanner(channelId);
 
     if (result.removedMixerTrackId !== null) {
       audioEngine.removeMixerChannel(result.removedMixerTrackId);
