@@ -14,10 +14,17 @@ import {
   ArrowRight,
   Disc
 } from 'lucide-react';
-import { Channel, Note, InstrumentType } from '../types/daw';
+import { Channel, InstrumentType } from '../types/daw';
 import { AudioSlicer, AudioSlice } from '../utils/audioSlicer';
 import { audioEngine } from '../audio/audioEngine';
 import { isSlicerSourceReady, resolveSlicerAudioSource, slicerSourceMessage } from './audioSlicerSource';
+import {
+  MAX_SLICER_CHOPS,
+  isSlicerChopRefused,
+  publishSlicerChops,
+  slicerChopPianoRollMessage,
+  slicerChopStepSequencerMessage,
+} from './audioSlicerPublication';
 
 interface AudioSlicerModalProps {
   isOpen: boolean;
@@ -176,35 +183,55 @@ export const AudioSlicerModal: React.FC<AudioSlicerModalProps> = ({
     });
   }, [audioBuffer, slices, activeSliceId]);
 
-  // Export slices as sequential chromatic notes in Piano Roll
-  const handleMapToPianoRoll = () => {
-    if (!activeChannel || slices.length === 0 || !sourceReady) return;
+  // Phase 55: both publication actions go through the audited chop publisher.
+  // The chops that leave this modal are the regions the detector found — real
+  // start/end trims on the channel's real sample, on real pad notes — or the
+  // publication is refused and the user is told why. Neither action publishes a
+  // slice count on its own any more.
+  const publishChops = () =>
+    publishSlicerChops(slices, slicerSource, {
+      stepCount: activeChannel?.steps.length || MAX_SLICER_CHOPS,
+    });
 
-    const notes: Note[] = slices.map((slice, idx) => ({
-      id: `slice-note-${Date.now()}-${idx}`,
-      pitch: 60 + idx, // C4, C#4, D4, etc.
-      start: idx * 1, // 1 step per slice
-      duration: 1,
-      velocity: 0.85
-    }));
-
-    onUpdateChannel(activeChannel.id, { notes });
-    setStatusMessage(`Successfully mapped ${slices.length} chops sequentially to Piano Roll!`);
+  const showStatus = (message: string) => {
+    setStatusMessage(message);
     setTimeout(() => setStatusMessage(null), 3000);
   };
 
-  // Map slices to 16-pad Step Sequencer
-  const handleMapToStepSequencer = () => {
-    if (!activeChannel || slices.length === 0 || !sourceReady) return;
+  // Publish the detected chops to the piano roll as real, playable chops.
+  const handleMapToPianoRoll = () => {
+    if (!activeChannel) return;
 
-    const steps = new Array(16).fill(false);
-    slices.forEach((_, idx) => {
-      if (idx < 16) steps[idx] = true;
+    const publication = publishChops();
+    if (isSlicerChopRefused(publication)) {
+      showStatus(publication.message);
+      return;
+    }
+
+    onUpdateChannel(activeChannel.id, {
+      instrumentType: 'drumpad',
+      drumPads: publication.pads,
+      notes: publication.notes,
     });
+    showStatus(slicerChopPianoRollMessage(publication));
+  };
 
-    onUpdateChannel(activeChannel.id, { steps });
-    setStatusMessage(`Chops mapped to 16 step sequencer pattern triggers!`);
-    setTimeout(() => setStatusMessage(null), 3000);
+  // Publish the detected chops to the 16-pad step sequencer.
+  const handleMapToStepSequencer = () => {
+    if (!activeChannel) return;
+
+    const publication = publishChops();
+    if (isSlicerChopRefused(publication)) {
+      showStatus(publication.message);
+      return;
+    }
+
+    onUpdateChannel(activeChannel.id, {
+      instrumentType: 'drumpad',
+      drumPads: publication.pads,
+      steps: publication.steps,
+    });
+    showStatus(slicerChopStepSequencerMessage(publication));
   };
 
   if (!isOpen) return null;
@@ -359,7 +386,7 @@ export const AudioSlicerModal: React.FC<AudioSlicerModalProps> = ({
                   <Grid className="w-3.5 h-3.5 text-[#00bcd4]" />
                   <span>16-CHOP AUDITION PADS (CLICK TO PLAY)</span>
                 </span>
-                <span className="text-[10px] font-mono text-[#666]">Keys C4 - D#5</span>
+                <span className="text-[10px] font-mono text-[#666]">Chop notes C2 - D#3</span>
               </div>
 
               <div className="grid grid-cols-4 sm:grid-cols-8 gap-2">
