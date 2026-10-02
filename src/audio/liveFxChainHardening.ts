@@ -17,6 +17,7 @@ interface MixerChannelLike {
 interface AudioEngineLike {
   getContext(): AudioContext;
   getOrCreateMixerChannel(trackId: number): MixerChannelLike;
+  getOfflineReverbImpulseResponse?(): AudioBuffer | undefined;
   rebuildTrackFxChain(track: MixerTrack): void;
   removeMixerChannel(trackId: number): void;
 }
@@ -157,18 +158,20 @@ function createNativeWaveShaper(ctx: AudioContext, slot: FxSlot, type: 'distorti
   return new CompositeEffect(`${slot.id}-${type}`, type === 'distortion' ? 'Distortion' : 'Bitcrusher', shaper, shaper, [shaper]);
 }
 
-function createReverb(ctx: AudioContext, slot: FxSlot): AudioEffect {
+function createReverb(ctx: AudioContext, slot: FxSlot, offlineImpulse?: AudioBuffer): AudioEffect {
   const convolver = ctx.createConvolver();
-  convolver.buffer = createImpulse(ctx);
+  // Offline export supplies the seeded impulse already created by AudioEngine.
+  // The live path intentionally keeps generating its existing per-chain impulse.
+  convolver.buffer = offlineImpulse ?? createImpulse(ctx);
   return new CompositeEffect(`${slot.id}-reverb`, 'Reverb', convolver, convolver, [convolver]);
 }
 
-function createEffect(ctx: AudioContext, slot: FxSlot): AudioEffect | null {
+function createEffect(ctx: AudioContext, slot: FxSlot, offlineReverbImpulse?: AudioBuffer): AudioEffect | null {
   const mix = mixFor(slot);
 
   switch (slot.type) {
     case 'equalizer': return wrapWetDry(ctx, createEqualizer(ctx, slot), mix);
-    case 'reverb': return wrapWetDry(ctx, createReverb(ctx, slot), mix);
+    case 'reverb': return wrapWetDry(ctx, createReverb(ctx, slot, offlineReverbImpulse), mix);
     case 'delay': {
       const time = bounded(numericParam(slot, 'time', 0.35), 0, 10);
       const feedback = bounded(numericParam(slot, 'feedback', 0.45), 0, 0.989);
@@ -231,7 +234,7 @@ interface LiveFxChainRegistry {
   getChain(trackId: number): LiveFxChainHandle | undefined;
 }
 
-function buildChain(track: MixerTrack, ctx: AudioContext): {
+function buildChain(track: MixerTrack, ctx: AudioContext, offlineReverbImpulse?: AudioBuffer): {
   effects: AudioEffect[];
   slotIndex: Map<string, AudioEffect>;
   createdNodes: AudioNode[];
@@ -246,7 +249,7 @@ function buildChain(track: MixerTrack, ctx: AudioContext): {
 
   for (const slot of track.fxSlots) {
     if (!slot.enabled) continue;
-    const effect = createEffect(ctx, slot);
+    const effect = createEffect(ctx, slot, offlineReverbImpulse);
     if (!effect) continue;
 
     if (!firstInput) firstInput = effect.input;
@@ -312,7 +315,8 @@ export function installLiveFxChainHardening(engine: AudioEngineLike): void {
       }
       channel.fxNodes = [];
 
-      const built = buildChain(track, ctx);
+      const offlineReverbImpulse = this.getOfflineReverbImpulseResponse?.();
+      const built = buildChain(track, ctx, offlineReverbImpulse);
       if (built.firstInput && built.current) {
         channel.input.connect(built.firstInput);
         built.current.connect(channel.panner);

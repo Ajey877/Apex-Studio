@@ -577,6 +577,12 @@ class AudioEngine {
     return [...this.getLiveSampleBufferStore().keys()];
   }
 
+  /** The seeded impulse prepared for the current offline render, if one exists. */
+  public getOfflineReverbImpulseResponse(): AudioBuffer | undefined {
+    if (!this.isOfflineRendering) return undefined;
+    return this.impulseResponses.get('default');
+  }
+
   private buildReverbImpulse(duration: number, decay: number, options?: { seed?: number }) {
     if (!this.ctx) return;
     const rate = this.ctx.sampleRate;
