@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { ModalFrame } from './ModalFrame';
 import { 
   X, 
   Radio, 
@@ -130,8 +131,10 @@ export const MidiControllerModal: React.FC<MidiControllerModalProps> = ({
   if (!isOpen) return null;
 
   return (
-    <div 
+    <ModalFrame
       id="midi-controller-modal-overlay"
+      labelledBy="midi-controller-modal-title"
+      onClose={onClose}
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4 animate-in fade-in"
     >
       <div 
@@ -145,7 +148,7 @@ export const MidiControllerModal: React.FC<MidiControllerModalProps> = ({
               <Radio className="w-5 h-5" />
             </div>
             <div>
-              <h2 className="text-base font-bold text-white flex items-center space-x-2">
+              <h2 id="midi-controller-modal-title" className="text-base font-bold text-white flex items-center space-x-2">
                 <span>Hardware MIDI & Controller Hub</span>
                 <span className="text-[10px] px-2 py-0.5 rounded bg-[#27ae60]/20 text-[#2ecc71] font-mono font-medium border border-[#27ae60]/30">
                   Web MIDI Studio
@@ -159,6 +162,7 @@ export const MidiControllerModal: React.FC<MidiControllerModalProps> = ({
           <button
             id="close-midi-modal-btn"
             onClick={onClose}
+            aria-label="Close MIDI controller"
             className="text-[#888] hover:text-white p-1.5 rounded-lg hover:bg-[#27272a] transition-colors"
           >
             <X className="w-5 h-5" />
@@ -539,6 +543,6 @@ export const MidiControllerModal: React.FC<MidiControllerModalProps> = ({
           </button>
         </div>
       </div>
-    </div>
+    </ModalFrame>
   );
 };

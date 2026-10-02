@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
+import { ModalFrame } from './ModalFrame';
 import { 
   Sliders, 
   Activity, 
@@ -329,7 +330,7 @@ export const MasteringSuiteModal: React.FC<MasteringSuiteModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-3 bg-black/80 backdrop-blur-md animate-fade-in select-none">
+    <ModalFrame labelledBy="mastering-suite-modal-title" onClose={onClose} className="fixed inset-0 z-50 flex items-center justify-center p-3 bg-black/80 backdrop-blur-md animate-fade-in select-none">
       <div className="bg-[#121215] border border-[#ff6e00]/40 rounded-xl w-full max-w-4xl max-h-[90vh] flex flex-col shadow-2xl overflow-hidden text-[#e0e0e0]">
         {/* Header */}
         <div className="bg-[#18181c] border-b border-[#28282e] px-4 py-3 flex items-center justify-between">
@@ -339,7 +340,7 @@ export const MasteringSuiteModal: React.FC<MasteringSuiteModalProps> = ({
             </div>
             <div>
               <div className="flex items-center gap-2">
-                <h2 className="text-sm font-black tracking-wide text-white uppercase">APEX MASTERING SUITE</h2>
+                <h2 id="mastering-suite-modal-title" className="text-sm font-black tracking-wide text-white uppercase">APEX MASTERING SUITE</h2>
                 <span className="text-[10px] bg-[#ff6e00]/20 text-[#ff6e00] border border-[#ff6e00]/40 px-1.5 py-0.5 rounded font-mono font-bold">
                   ITU-R BS.1770-4 / EBU R128
                 </span>
@@ -362,6 +363,7 @@ export const MasteringSuiteModal: React.FC<MasteringSuiteModalProps> = ({
 
             <button
               onClick={onClose}
+              aria-label="Close mastering suite"
               className="p-1 text-[#888] hover:text-white hover:bg-[#28282e] rounded transition"
             >
               <X className="w-5 h-5" />
@@ -989,6 +991,6 @@ export const MasteringSuiteModal: React.FC<MasteringSuiteModalProps> = ({
           </button>
         </div>
       </div>
-    </div>
+    </ModalFrame>
   );
 };

@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { ModalFrame } from './ModalFrame';
 import { 
   Sliders, 
   Radio, 
@@ -112,7 +113,7 @@ export const MidiLearnModal: React.FC<MidiLearnModalProps> = ({
   if (!isOpen) return null;
 
   return (
-    <div id="fl-midi-learn-modal" className="fixed inset-0 bg-black/85 backdrop-blur-md z-50 flex items-center justify-center p-3 sm:p-4 select-none">
+    <ModalFrame id="fl-midi-learn-modal" labelledBy="fl-midi-learn-modal-title" onClose={onClose} className="fixed inset-0 bg-black/85 backdrop-blur-md z-50 flex items-center justify-center p-3 sm:p-4 select-none">
       <div className="bg-[#121214] border border-[#2e2e32] rounded-xl w-full max-w-3xl shadow-2xl overflow-hidden text-[#b0b0b0] flex flex-col max-h-[92vh]">
         {/* Header */}
         <div className="px-5 py-3.5 bg-[#18181b] border-b border-[#2e2e32] flex items-center justify-between">
@@ -122,7 +123,7 @@ export const MidiLearnModal: React.FC<MidiLearnModalProps> = ({
             </div>
             <div>
               <div className="flex items-center gap-2">
-                <h2 className="text-sm font-bold text-white tracking-wide">MIDI CONTROLLER LEARN & MAPPING</h2>
+                <h2 id="fl-midi-learn-modal-title" className="text-sm font-bold text-white tracking-wide">MIDI CONTROLLER LEARN & MAPPING</h2>
                 <span className={`px-1.5 py-0.5 rounded text-[9px] font-mono font-bold border ${
                   isMidiLearnActive 
                     ? 'bg-[#ff6e00]/20 text-[#ff6e00] border-[#ff6e00]/40 animate-pulse' 
@@ -150,6 +151,7 @@ export const MidiLearnModal: React.FC<MidiLearnModalProps> = ({
 
             <button
               onClick={onClose}
+              aria-label="Close MIDI learn"
               className="text-[#777] hover:text-white p-1 rounded hover:bg-[#222225] transition"
             >
               <X className="w-5 h-5" />
@@ -340,6 +342,6 @@ export const MidiLearnModal: React.FC<MidiLearnModalProps> = ({
           </button>
         </div>
       </div>
-    </div>
+    </ModalFrame>
   );
 };

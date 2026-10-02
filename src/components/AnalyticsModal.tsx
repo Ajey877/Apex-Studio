@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { ModalFrame } from './ModalFrame';
 import { 
   BarChart2, 
   Clock, 
@@ -48,7 +49,7 @@ export const AnalyticsModal: React.FC<AnalyticsModalProps> = ({
   const seconds = sessionSeconds % 60;
 
   return (
-    <div id="analytics-modal" className="fixed inset-0 bg-black/85 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+    <ModalFrame id="analytics-modal" labelledBy="analytics-modal-title" onClose={onClose} className="fixed inset-0 bg-black/85 backdrop-blur-sm z-50 flex items-center justify-center p-4">
       <div className="bg-[#141416] border border-[#333336] rounded-xl w-full max-w-lg shadow-2xl overflow-hidden text-[#b0b0b0]">
         {/* Header */}
         <div className="px-5 py-3.5 bg-[#1a1a1d] border-b border-[#333336] flex items-center justify-between">
@@ -57,12 +58,13 @@ export const AnalyticsModal: React.FC<AnalyticsModalProps> = ({
               <BarChart2 className="w-4 h-4 text-[#ff6e00]" />
             </div>
             <div>
-              <h3 className="font-bold text-sm text-white tracking-tight">STUDIO TELEMETRY & PRODUCTION METRICS</h3>
+              <h3 id="analytics-modal-title" className="font-bold text-sm text-white tracking-tight">STUDIO TELEMETRY & PRODUCTION METRICS</h3>
               <p className="text-[10px] text-[#777]">Time Tracking, Arranger Density & Performance Stats</p>
             </div>
           </div>
           <button 
             onClick={onClose} 
+            aria-label="Close analytics"
             className="p-1 rounded hover:bg-[#2d2d30] text-[#777] hover:text-white transition"
           >
             <X className="w-4 h-4" />
@@ -128,6 +130,6 @@ export const AnalyticsModal: React.FC<AnalyticsModalProps> = ({
           </div>
         </div>
       </div>
-    </div>
+    </ModalFrame>
   );
 };

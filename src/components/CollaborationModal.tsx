@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { ModalFrame } from './ModalFrame';
 import { 
   Users, 
   X, 
@@ -51,7 +52,7 @@ export const CollaborationModal: React.FC<CollaborationModalProps> = ({
   };
 
   return (
-    <div id="collab-modal" className="fixed inset-0 bg-black/85 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+    <ModalFrame id="collab-modal" labelledBy="collab-modal-title" onClose={onClose} className="fixed inset-0 bg-black/85 backdrop-blur-sm z-50 flex items-center justify-center p-4">
       <div className="bg-[#141416] border border-[#333336] rounded-xl w-full max-w-xl shadow-2xl overflow-hidden text-[#b0b0b0]">
         {/* Header */}
         <div className="px-5 py-3.5 bg-[#1a1a1d] border-b border-[#333336] flex items-center justify-between">
@@ -60,12 +61,13 @@ export const CollaborationModal: React.FC<CollaborationModalProps> = ({
               <Users className="w-4 h-4 text-[#ff6e00]" />
             </div>
             <div>
-              <h3 className="font-bold text-sm text-white tracking-tight">STUDIO NOTES & COLLABORATION</h3>
+              <h3 id="collab-modal-title" className="font-bold text-sm text-white tracking-tight">STUDIO NOTES & COLLABORATION</h3>
               <p className="text-[10px] text-[#777]">Local project notes & collaboration workspace</p>
             </div>
           </div>
           <button 
             onClick={onClose} 
+            aria-label="Close collaboration"
             className="p-1 rounded hover:bg-[#2d2d30] text-[#777] hover:text-white transition"
           >
             <X className="w-4 h-4" />
@@ -194,6 +196,6 @@ export const CollaborationModal: React.FC<CollaborationModalProps> = ({
           </form>
         </div>
       </div>
-    </div>
+    </ModalFrame>
   );
 };

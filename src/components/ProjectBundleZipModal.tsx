@@ -1,4 +1,5 @@
 import React, { useState, useRef } from 'react';
+import { ModalFrame } from './ModalFrame';
 import { Download, Upload, Sparkles, FolderArchive, X } from 'lucide-react';
 import JSZip from 'jszip';
 import { ProjectState } from '../types/daw';
@@ -194,20 +195,20 @@ Engine: Apex Studio Digital Audio Workstation
   };
 
   return (
-    <div id="fl-project-zip-modal" className="fixed inset-0 bg-black/85 backdrop-blur-md z-50 flex items-center justify-center p-3 sm:p-4 select-none">
+    <ModalFrame id="fl-project-zip-modal" labelledBy="fl-project-zip-modal-title" onClose={onClose} className="fixed inset-0 bg-black/85 backdrop-blur-md z-50 flex items-center justify-center p-3 sm:p-4 select-none">
       <div className="bg-[#121215] border border-[#ffaa00]/40 rounded-xl w-full max-w-2xl shadow-2xl overflow-hidden text-[#b0b0b0] flex flex-col max-h-[92vh]">
         <div className="px-5 py-3.5 bg-[#18181c] border-b border-[#2e2e34] flex items-center justify-between">
           <div className="flex items-center gap-3">
             <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-[#ffaa00] to-[#ff6600] flex items-center justify-center text-black shadow-md font-bold"><FolderArchive className="w-5 h-5" /></div>
             <div>
               <div className="flex items-center gap-2">
-                <h2 className="text-sm font-bold text-white tracking-wide">PROJECT ZIP ARCHIVE BUNDLER</h2>
+                <h2 id="fl-project-zip-modal-title" className="text-sm font-bold text-white tracking-wide">PROJECT ZIP ARCHIVE BUNDLER</h2>
                 <span className="px-1.5 py-0.5 rounded text-[9px] font-mono font-bold bg-[#ffaa00]/20 text-[#ffaa00] border border-[#ffaa00]/40">PORTABLE .ZIP</span>
               </div>
               <p className="text-[10px] text-[#777]">Portable ZIP = project state + audio assets (complete portable archive)</p>
             </div>
           </div>
-          <button onClick={onClose} className="text-[#777] hover:text-white p-1 rounded hover:bg-[#222226] transition"><X className="w-5 h-5" /></button>
+          <button onClick={onClose} aria-label="Close project bundler" className="text-[#777] hover:text-white p-1 rounded hover:bg-[#222226] transition"><X className="w-5 h-5" /></button>
         </div>
 
         {statusMessage && (
@@ -257,6 +258,6 @@ Engine: Apex Studio Digital Audio Workstation
           <button onClick={onClose} className="px-4 py-1.5 bg-[#25252a] hover:bg-[#333338] text-white font-bold rounded transition">Close</button>
         </div>
       </div>
-    </div>
+    </ModalFrame>
   );
 };

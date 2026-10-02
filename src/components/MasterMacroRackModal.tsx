@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { ModalFrame } from './ModalFrame';
 import { 
   Sliders, 
   X, 
@@ -107,7 +108,7 @@ export const MasterMacroRackModal: React.FC<MasterMacroRackModalProps> = ({
   };
 
   return (
-    <div id="fl-master-macro-modal" className="fixed inset-0 bg-black/85 backdrop-blur-md z-50 flex items-center justify-center p-3 sm:p-4 select-none">
+    <ModalFrame id="fl-master-macro-modal" labelledBy="fl-master-macro-modal-title" onClose={onClose} className="fixed inset-0 bg-black/85 backdrop-blur-md z-50 flex items-center justify-center p-3 sm:p-4 select-none">
       <div className="bg-[#121215] border border-[#00ff88]/40 rounded-xl w-full max-w-4xl shadow-2xl overflow-hidden text-[#b0b0b0] flex flex-col max-h-[92vh]">
         {/* Header */}
         <div className="px-5 py-3.5 bg-[#18181c] border-b border-[#2e2e34] flex items-center justify-between">
@@ -117,7 +118,7 @@ export const MasterMacroRackModal: React.FC<MasterMacroRackModalProps> = ({
             </div>
             <div>
               <div className="flex items-center gap-2">
-                <h2 className="text-sm font-bold text-white tracking-wide">MASTER MACRO PERFORMANCE RACK</h2>
+                <h2 id="fl-master-macro-modal-title" className="text-sm font-bold text-white tracking-wide">MASTER MACRO PERFORMANCE RACK</h2>
                 <span className="px-1.5 py-0.5 rounded text-[9px] font-mono font-bold bg-[#00ff88]/20 text-[#00ff88] border border-[#00ff88]/40">
                   MULTI-TARGET MATRIX
                 </span>
@@ -137,6 +138,7 @@ export const MasterMacroRackModal: React.FC<MasterMacroRackModalProps> = ({
 
             <button
               onClick={onClose}
+              aria-label="Close macro rack"
               className="text-[#777] hover:text-white p-1 rounded hover:bg-[#222226] transition"
             >
               <X className="w-5 h-5" />
@@ -258,6 +260,6 @@ export const MasterMacroRackModal: React.FC<MasterMacroRackModalProps> = ({
           </button>
         </div>
       </div>
-    </div>
+    </ModalFrame>
   );
 };

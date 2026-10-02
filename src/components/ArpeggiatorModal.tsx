@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { ModalFrame } from './ModalFrame';
 import { 
   Sparkles, 
   Play, 
@@ -89,7 +90,7 @@ export const ArpeggiatorModal: React.FC<ArpeggiatorModalProps> = ({
   );
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-3 bg-black/80 backdrop-blur-md animate-fade-in select-none">
+    <ModalFrame labelledBy="arpeggiator-modal-title" onClose={onClose} className="fixed inset-0 z-50 flex items-center justify-center p-3 bg-black/80 backdrop-blur-md animate-fade-in select-none">
       <div className="bg-[#121215] border border-[#ff6e00]/40 rounded-xl w-full max-w-xl flex flex-col shadow-2xl overflow-hidden text-[#e0e0e0]">
         {/* Header */}
         <div className="bg-[#18181c] border-b border-[#28282e] px-4 py-3 flex items-center justify-between">
@@ -99,7 +100,7 @@ export const ArpeggiatorModal: React.FC<ArpeggiatorModalProps> = ({
             </div>
             <div>
               <div className="flex items-center gap-2">
-                <h2 className="text-sm font-bold text-white uppercase">{channel.name} ARPEGGIATOR</h2>
+                <h2 id="arpeggiator-modal-title" className="text-sm font-bold text-white uppercase">{channel.name} ARPEGGIATOR</h2>
                 <span className={`text-[10px] px-1.5 py-0.5 rounded font-mono font-bold ${
                   arpState.enabled ? 'bg-[#00ff88]/20 text-[#00ff88] border border-[#00ff88]/40' : 'bg-[#222] text-[#888]'
                 }`}>
@@ -119,7 +120,7 @@ export const ArpeggiatorModal: React.FC<ArpeggiatorModalProps> = ({
             >
               {arpState.enabled ? 'ON' : 'OFF'}
             </button>
-            <button onClick={onClose} className="p-1 text-[#888] hover:text-white rounded">
+            <button onClick={onClose} aria-label="Close arpeggiator" className="p-1 text-[#888] hover:text-white rounded">
               <X className="w-5 h-5" />
             </button>
           </div>
@@ -300,6 +301,6 @@ export const ArpeggiatorModal: React.FC<ArpeggiatorModalProps> = ({
           </button>
         </div>
       </div>
-    </div>
+    </ModalFrame>
   );
 };

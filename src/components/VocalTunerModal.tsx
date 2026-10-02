@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
+import { ModalFrame } from './ModalFrame';
 import { 
   Mic, 
   X, 
@@ -223,7 +224,7 @@ export const VocalTunerModal: React.FC<VocalTunerModalProps> = ({
   if (!isOpen) return null;
 
   return (
-    <div id="fl-vocal-tuner-modal" className="fixed inset-0 bg-black/85 backdrop-blur-md z-50 flex items-center justify-center p-3 sm:p-4 select-none">
+    <ModalFrame id="fl-vocal-tuner-modal" labelledBy="fl-vocal-tuner-modal-title" onClose={onClose} className="fixed inset-0 bg-black/85 backdrop-blur-md z-50 flex items-center justify-center p-3 sm:p-4 select-none">
       <div className="bg-[#121214] border border-[#2e2e32] rounded-xl w-full max-w-3xl shadow-2xl overflow-hidden text-[#b0b0b0] flex flex-col max-h-[92vh]">
         {/* Header */}
         <div className="px-5 py-3.5 bg-[#18181b] border-b border-[#2e2e32] flex items-center justify-between">
@@ -233,7 +234,7 @@ export const VocalTunerModal: React.FC<VocalTunerModalProps> = ({
             </div>
             <div>
               <div className="flex items-center gap-2">
-                <h2 className="text-sm font-bold text-white tracking-wide">AUTO-PITCH & VOCAL TUNER</h2>
+                <h2 id="fl-vocal-tuner-modal-title" className="text-sm font-bold text-white tracking-wide">AUTO-PITCH & VOCAL TUNER</h2>
                 <span className={`px-1.5 py-0.5 rounded text-[9px] font-mono font-bold border ${
                   vocalTunerSettings.enabled 
                     ? 'bg-[#00ff88]/20 text-[#00ff88] border-[#00ff88]/40' 
@@ -261,6 +262,7 @@ export const VocalTunerModal: React.FC<VocalTunerModalProps> = ({
 
             <button
               onClick={onClose}
+              aria-label="Close vocal tuner"
               className="text-[#777] hover:text-white p-1 rounded hover:bg-[#222225] transition"
             >
               <X className="w-5 h-5" />
@@ -474,6 +476,6 @@ export const VocalTunerModal: React.FC<VocalTunerModalProps> = ({
           </button>
         </div>
       </div>
-    </div>
+    </ModalFrame>
   );
 };

@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { ModalFrame } from './ModalFrame';
 import { 
   Sliders, 
   X, 
@@ -106,7 +107,7 @@ export const SidechainRoutingModal: React.FC<SidechainRoutingModalProps> = ({
   };
 
   return (
-    <div id="fl-sidechain-routing-modal" className="fixed inset-0 bg-black/85 backdrop-blur-md z-50 flex items-center justify-center p-3 sm:p-4 select-none">
+    <ModalFrame id="fl-sidechain-routing-modal" labelledBy="fl-sidechain-routing-modal-title" onClose={onClose} className="fixed inset-0 bg-black/85 backdrop-blur-md z-50 flex items-center justify-center p-3 sm:p-4 select-none">
       <div className="bg-[#121215] border border-[#ffaa00]/40 rounded-xl w-full max-w-4xl shadow-2xl overflow-hidden text-[#b0b0b0] flex flex-col max-h-[92vh]">
         {/* Header */}
         <div className="px-5 py-3.5 bg-[#18181c] border-b border-[#2e2e34] flex items-center justify-between">
@@ -116,7 +117,7 @@ export const SidechainRoutingModal: React.FC<SidechainRoutingModalProps> = ({
             </div>
             <div>
               <div className="flex items-center gap-2">
-                <h2 className="text-sm font-bold text-white tracking-wide">DYNAMIC SIDECHAIN DUCKING & MODULATION MATRIX</h2>
+                <h2 id="fl-sidechain-routing-modal-title" className="text-sm font-bold text-white tracking-wide">DYNAMIC SIDECHAIN DUCKING & MODULATION MATRIX</h2>
                 <span className="px-1.5 py-0.5 rounded text-[9px] font-mono font-bold bg-[#ffaa00]/20 text-[#ffaa00] border border-[#ffaa00]/40">
                   PEAK DUCK DSP
                 </span>
@@ -136,6 +137,7 @@ export const SidechainRoutingModal: React.FC<SidechainRoutingModalProps> = ({
 
             <button
               onClick={onClose}
+              aria-label="Close sidechain routing"
               className="text-[#777] hover:text-white p-1 rounded hover:bg-[#222226] transition"
             >
               <X className="w-5 h-5" />
@@ -326,6 +328,6 @@ export const SidechainRoutingModal: React.FC<SidechainRoutingModalProps> = ({
           </button>
         </div>
       </div>
-    </div>
+    </ModalFrame>
   );
 };

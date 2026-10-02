@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
+import { ModalFrame } from './ModalFrame';
 import { Download, FolderArchive, Sparkles, X } from 'lucide-react';
 import JSZip from 'jszip';
 import { Channel, PlaylistClip, PlaylistTrack, ProjectMetadata, MixerTrack } from '../types/daw';
@@ -295,14 +296,14 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, chann
   ];
 
   return (
-    <div id="export-modal" className="fixed inset-0 bg-black/85 backdrop-blur-sm z-50 flex items-center justify-center p-3 sm:p-4">
+    <ModalFrame id="export-modal" labelledBy="export-modal-title" onClose={onClose} className="fixed inset-0 bg-black/85 backdrop-blur-sm z-50 flex items-center justify-center p-3 sm:p-4">
       <div className="bg-[#141416] border border-[#333336] rounded-xl w-full max-w-lg shadow-2xl overflow-hidden text-[#b0b0b0] max-h-[90vh] flex flex-col">
         <div className="px-4 sm:px-5 py-3 bg-[#1a1a1d] border-b border-[#333336] flex items-center justify-between shrink-0">
           <div>
-            <h3 className="font-bold text-sm text-white tracking-tight">PROJECT EXPORT</h3>
+            <h3 id="export-modal-title" className="font-bold text-sm text-white tracking-tight">PROJECT EXPORT</h3>
             <p className="text-[10px] text-[#777]">WAV, Standard MIDI, and multi-track stem export</p>
           </div>
-          <button onClick={onClose} className="p-1 rounded hover:bg-[#2d2d30] text-[#777] hover:text-white transition"><X className="w-4 h-4" /></button>
+          <button onClick={onClose} aria-label="Close export" className="p-1 rounded hover:bg-[#2d2d30] text-[#777] hover:text-white transition"><X className="w-4 h-4" /></button>
         </div>
 
         <div className="p-4 sm:p-5 space-y-4 overflow-y-auto custom-scrollbar flex-1">
@@ -465,6 +466,6 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, chann
           </div>
         </div>
       </div>
-    </div>
+    </ModalFrame>
   );
 };
