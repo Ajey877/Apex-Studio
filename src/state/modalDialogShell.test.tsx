@@ -238,7 +238,7 @@ const MODAL_CASES: ModalCase[] = [
   },
   {
     name: 'Sample Manager', file: 'SampleManagerModal.tsx', modalId: null,
-    titleId: 'sample-manager-modal-title', titleText: 'DIRECTWAVE AUDIO SAMPLE LOADER',
+    titleId: 'sample-manager-modal-title', titleText: 'APEX AUDIO SAMPLE LOADER',
     closeLabel: 'Close sample manager', overlayClass: OVERLAY_FLOATING,
     open: React.createElement(SampleManagerModal, {
       isOpen: true, onClose: noop, channels, sampleLibrary: DEFAULT_PROJECT.sampleLibrary ?? [],
@@ -307,7 +307,7 @@ const MODAL_CASES: ModalCase[] = [
   },
   {
     name: 'Audio Slicer', file: 'AudioSlicerModal.tsx', modalId: 'audio-slicer-modal',
-    titleId: 'audio-slicer-modal-title', titleText: 'EDISON TRANSIENT SLICER & CHOPPER',
+    titleId: 'audio-slicer-modal-title', titleText: 'SAMPLE TRANSIENT SLICER & CHOPPER',
     closeLabel: 'Close audio slicer', overlayClass: OVERLAY_STUDIO,
     open: React.createElement(AudioSlicerModal, {
       isOpen: true, onClose: noop, channels, onUpdateChannel: noop,
@@ -375,7 +375,7 @@ const MODAL_CASES: ModalCase[] = [
   },
   {
     name: 'Multi-Zone Sampler', file: 'MultiZoneSamplerModal.tsx', modalId: 'fl-multizone-sampler-modal',
-    titleId: 'fl-multizone-sampler-modal-title', titleText: 'DIRECTWAVE MULTI-SAMPLE KEYMAPPER',
+    titleId: 'fl-multizone-sampler-modal-title', titleText: 'APEX MULTI-SAMPLE KEYMAPPER',
     closeLabel: 'Close multi-zone sampler', overlayClass: OVERLAY_STUDIO,
     open: React.createElement(MultiZoneSamplerModal, {
       isOpen: true, onClose: noop, channels,
@@ -388,7 +388,7 @@ const MODAL_CASES: ModalCase[] = [
   },
   {
     name: 'Parametric EQ', file: 'ParametricEqModal.tsx', modalId: 'parametric-eq-modal-overlay',
-    titleId: 'parametric-eq-modal-title', titleText: '7-Band EQ — Dynamic Equalizer',
+    titleId: 'parametric-eq-modal-title', titleText: '3-Band EQ — Dynamic Equalizer',
     closeLabel: 'Close parametric EQ', overlayClass: OVERLAY_HUB,
     open: React.createElement(ParametricEqModal, {
       isOpen: true, onClose: noop, mixerTrack: firstMixerTrack, onUpdateTrack: noop,
@@ -399,7 +399,7 @@ const MODAL_CASES: ModalCase[] = [
   },
   {
     name: 'Polyphonic Editor', file: 'PolyphonicEditorModal.tsx', modalId: 'fl-polyphonic-editor-modal',
-    titleId: 'fl-polyphonic-editor-modal-title', titleText: 'MELODYNE / ARA2 POLYPHONIC AUDIO BLOB EDITOR',
+    titleId: 'fl-polyphonic-editor-modal-title', titleText: 'POLYPHONIC AUDIO BLOB EDITOR (PROTOTYPE)',
     closeLabel: 'Close polyphonic editor', overlayClass: OVERLAY_STUDIO,
     open: React.createElement(PolyphonicEditorModal, { isOpen: true, onClose: noop }),
     closed: React.createElement(PolyphonicEditorModal, { isOpen: false, onClose: noop }),
@@ -463,18 +463,18 @@ const MODAL_CASES: ModalCase[] = [
   },
   {
     name: 'Warp Processor', file: 'WarpAudioProcessorModal.tsx', modalId: 'fl-warp-processor-modal',
-    titleId: 'fl-warp-processor-modal-title', titleText: 'ADVANCED TIME-STRETCH & TRANSIENT WARP ENGINE',
+    titleId: 'fl-warp-processor-modal-title', titleText: 'AUDIO CLIP PITCH & PLAYBACK RATE',
     closeLabel: 'Close warp processor', overlayClass: OVERLAY_STUDIO,
     open: React.createElement(WarpAudioProcessorModal, {
-      isOpen: true, onClose: noop, selectedClip: null, onUpdateClip: noop,
+      isOpen: true, onClose: noop, clips: [], selectedClipId: null, onUpdateClip: noop,
     }),
     closed: React.createElement(WarpAudioProcessorModal, {
-      isOpen: false, onClose: noop, selectedClip: null, onUpdateClip: noop,
+      isOpen: false, onClose: noop, clips: [], selectedClipId: null, onUpdateClip: noop,
     }),
   },
   {
     name: 'Wavetable Synth', file: 'WavetableSynthModal.tsx', modalId: 'fl-wavetable-synth-modal',
-    titleId: 'fl-wavetable-synth-modal-title', titleText: 'ADVANCED WAVETABLE SYNTHESIZER',
+    titleId: 'fl-wavetable-synth-modal-title', titleText: 'ADVANCED SYNTH PREVIEW (WAVETABLE NOT IMPLEMENTED)',
     closeLabel: 'Close wavetable synth', overlayClass: OVERLAY_STUDIO,
     open: React.createElement(WavetableSynthModal, {
       isOpen: true, onClose: noop, channels, onUpdateChannel: noop,

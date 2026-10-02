@@ -122,6 +122,7 @@ import { SidechainRoutingModal } from './components/SidechainRoutingModal';
 import { PolyphonicEditorModal } from './components/PolyphonicEditorModal';
 import { DesktopAppModal } from './components/DesktopAppModal';
 import { WarpAudioProcessorModal } from './components/WarpAudioProcessorModal';
+import { DEFAULT_INCLUDE_MIXER_FX } from './components/exportMixerFxPreference';
 import { MasterMacroRackModal } from './components/MasterMacroRackModal';
 import { ProjectBundleZipModal } from './components/ProjectBundleZipModal';
 import { ProjectReplaceConfirmModal } from './components/ProjectReplaceConfirmModal';
@@ -162,6 +163,13 @@ export function App() {
   const [metronome, setMetronome] = useState(false);
   const [selectedChannelId, setSelectedChannelId] = useState<string>(DEFAULT_PROJECT.channels[0]?.id || 'ch-1');
   const [selectedTrackId, setSelectedTrackId] = useState<number>(0); // 0 = Master
+  /**
+   * Phase 52: the playlist's selected clip id, published up from
+   * PlaylistArranger. Timeline tools (the Warp processor) use it so they edit
+   * the clip the user selected instead of whichever clip happened to be first
+   * in the array.
+   */
+  const [selectedPlaylistClipId, setSelectedPlaylistClipId] = useState<string | null>(null);
 
   // Project-wide history preserving channels, notes, playlist, and markers.
   const projectHistoryRef = useRef<ProjectHistory>(createHistory(DEFAULT_PROJECT));
@@ -1704,6 +1712,7 @@ export function App() {
               canRedo={projectHistoryVersion >= 0 && projectHistoryRef.current.canRedo}
               onUndo={handleUndo}
               onRedo={handleRedo}
+              onSelectedClipIdChange={setSelectedPlaylistClipId}
               onSeekToBar={(bar) => {
                 // Real transport seek: works stopped, paused and playing. While
                 // playing it cancels audio scheduled for the old position and
@@ -1749,7 +1758,7 @@ export function App() {
             <div className="flex flex-col h-full overflow-y-auto p-4 bg-[#121214] items-center gap-4">
               <div className="w-full max-w-4xl flex flex-wrap items-center justify-between gap-2">
                 <div>
-                  <h2 className="text-lg font-bold text-white">DIRECTWAVE SAMPLE WORKSTATION</h2>
+                  <h2 className="text-lg font-bold text-white">APEX SAMPLE WORKSTATION</h2>
                   <p className="text-[10px] text-[#777]">Import, inspect, slice and map real audio into the drum sampler.</p>
                 </div>
                 <div className="flex gap-2">
@@ -1793,7 +1802,7 @@ export function App() {
         clipCount={projectState.playlistClips.length}
       />
 
-      <ExportModal isOpen={isExportOpen} onClose={() => setIsExportOpen(false)} channels={projectState.channels} clips={projectState.playlistClips} mixerTracks={projectState.mixerTracks} meta={projectState.meta} patternLengthSteps={selectedPatternLengthSteps} playlistTracks={projectState.playlistTracks} />
+      <ExportModal isOpen={isExportOpen} onClose={() => setIsExportOpen(false)} channels={projectState.channels} clips={projectState.playlistClips} mixerTracks={projectState.mixerTracks} meta={projectState.meta} patternLengthSteps={selectedPatternLengthSteps} playlistTracks={projectState.playlistTracks} includeMixerFx={DEFAULT_INCLUDE_MIXER_FX} />
       {/* The single manifest importer, shared by File → Open Project Manifest and the Project Hub. */}
       <input
         id="project-manifest-input"
@@ -1833,7 +1842,7 @@ export function App() {
       <SidechainRoutingModal isOpen={isSidechainOpen} onClose={() => setIsSidechainOpen(false)} mixerTracks={projectState.mixerTracks} onUpdateMixerTracks={(tracks) => mutateProjectState(curr => ({ ...curr, mixerTracks: tracks }), 'Update mixer routing')} />
       <PolyphonicEditorModal isOpen={isPolyphonicEditorOpen} onClose={() => setIsPolyphonicEditorOpen(false)} />
       <DesktopAppModal isOpen={isDesktopAppOpen} onClose={() => setIsDesktopAppOpen(false)} />
-      <WarpAudioProcessorModal isOpen={isWarpProcessorOpen} onClose={() => setIsWarpProcessorOpen(false)} selectedClip={projectState.playlistClips[0] || null} onUpdateClip={(updatedClip) => { const nextState = { ...projectStateRef.current, playlistClips: projectStateRef.current.playlistClips.map(c => c.id === updatedClip.id ? updatedClip : c) }; updatePlaylistProjectState(nextState); commitPlaylistHistory(nextState, 'Warp audio clip'); }} />
+      <WarpAudioProcessorModal isOpen={isWarpProcessorOpen} onClose={() => setIsWarpProcessorOpen(false)} clips={projectState.playlistClips} selectedClipId={selectedPlaylistClipId} onUpdateClip={(updatedClip) => { const nextState = { ...projectStateRef.current, playlistClips: projectStateRef.current.playlistClips.map(c => c.id === updatedClip.id ? updatedClip : c) }; updatePlaylistProjectState(nextState); commitPlaylistHistory(nextState, 'Warp audio clip'); }} />
       <MasterMacroRackModal isOpen={isMasterMacrosOpen} onClose={() => setIsMasterMacrosOpen(false)} mixerTracks={projectState.mixerTracks} channels={projectState.channels} macroKnobs={projectState.macroKnobs} onUpdateMacros={(macros) => mutateProjectState(curr => updateMacroRackInProjectState(curr, macros), 'Update macro controls', { isContinuous: true })} />
       <ProjectBundleZipModal isOpen={isProjectZipOpen} onClose={() => setIsProjectZipOpen(false)} projectState={projectState} onLoadProjectState={handleLoadProjectState} />
       <ProjectReplaceConfirmModal

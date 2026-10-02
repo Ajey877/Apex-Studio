@@ -106,13 +106,16 @@ export const TakeCompingModal: React.FC<TakeCompingModalProps> = ({
       takeIndex: (idx % 2 === 0) ? 1 : (idx === 1 ? 0 : 2)
     }));
     setCompSlices(auto);
-    setStatusMessage('AI Smart Comp generated optimal vocal phrase alignment!');
+    // Truthful label: this is a fixed alternating pattern over placeholder
+    // takes, not analysis of anything.
+    setStatusMessage('Demo Auto-Comp applied to the placeholder takes (no audio involved).');
     setTimeout(() => setStatusMessage(null), 3000);
   };
 
   const handleAuditionComposite = () => {
     setIsAuditioning(true);
-    // Trigger synth note preview representing the composite comp
+    // Truthful label: this plays a synthesised preview tone. The placeholder
+    // takes carry no audio, so there is no composite to audition.
     audioEngine.playNote(
       {
         id: 'comp-audition',
@@ -172,10 +175,10 @@ export const TakeCompingModal: React.FC<TakeCompingModalProps> = ({
               <div className="flex items-center gap-2">
                 <h2 id="fl-take-comping-modal-title" className="text-sm font-bold text-white tracking-wide">STACKED MULTI-TAKE SWIPE COMPING STUDIO</h2>
                 <span className="px-1.5 py-0.5 rounded text-[9px] font-mono font-bold bg-[#00e5ff]/20 text-[#00e5ff] border border-[#00e5ff]/40">
-                  SEAMLESS CROSSFADES
+                  DEMO — NOT YET FUNCTIONAL
                 </span>
               </div>
-              <p className="text-[10px] text-[#777]">Swipe and splice the best vocal phrases from loop takes into a single polished master track</p>
+              <p className="text-[10px] text-[#777]">Demo layout for stacked takes. The takes shown are placeholders; real comping is not implemented yet.</p>
             </div>
           </div>
 
@@ -195,7 +198,7 @@ export const TakeCompingModal: React.FC<TakeCompingModalProps> = ({
               }`}
             >
               <Play className="w-3.5 h-3.5" />
-              <span>{isAuditioning ? 'Auditioning Comp...' : 'Audition Composite'}</span>
+              <span>{isAuditioning ? 'Playing Preview Tone...' : 'Preview Tone'}</span>
             </button>
 
             <button
@@ -206,6 +209,14 @@ export const TakeCompingModal: React.FC<TakeCompingModalProps> = ({
               <X className="w-5 h-5" />
             </button>
           </div>
+        </div>
+
+        {/* Demo notice: the takes below are placeholders with no recorded audio. */}
+        <div className="bg-[#0a0a0c] border-b border-[#ffaa00]/40 px-5 py-2 flex items-center justify-between gap-2">
+          <span className="text-[10px] font-mono font-bold text-[#ffaa00] uppercase tracking-wider">
+            DEMO — INCOMPLETE FEATURE, NO REAL TAKES OR RENDERED COMP
+          </span>
+          <span className="text-[10px] text-[#777] whitespace-nowrap">PROMOTION DISABLED</span>
         </div>
 
         {/* Status Toast */}
@@ -368,7 +379,7 @@ export const TakeCompingModal: React.FC<TakeCompingModalProps> = ({
         {/* Footer */}
         <div className="px-5 py-3.5 bg-[#18181c] border-t border-[#2e2e34] flex items-center justify-between text-xs">
           <div className="flex items-center gap-3">
-            <span className="text-[10px] text-[#777]">Equal-Power Crossfade Algorithm Active</span>
+            <span className="text-[10px] text-[#777]">Crossfade length is not applied — no comp is rendered</span>
             <input
               type="range"
               min="5"

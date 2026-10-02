@@ -74,6 +74,12 @@ interface PlaylistArrangerProps {
   onRedo?: () => void;
   onAddTrack: () => void;
   onSeekToBar?: (bar: number) => void;
+  /**
+   * Phase 52: publishes the selected clip id upwards so timeline tools (the Warp
+   * processor) act on the clip the user actually selected. The selection itself
+   * stays owned by this component; this is a notification only.
+   */
+  onSelectedClipIdChange?: (clipId: string | null) => void;
   currentBar: number;
   isPlaying: boolean;
   /** Project tempo (`meta.bpm`); Bounce-In-Place renders stems at this tempo and imported audio is sized to it. */
@@ -156,6 +162,7 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
   onRedo,
   onAddTrack,
   onSeekToBar,
+  onSelectedClipIdChange,
   currentBar,
   isPlaying,
   bpm
@@ -192,6 +199,7 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
    */
   const selectClip = (clipId: string | null, opts?: { openAutomationEditor?: boolean }) => {
     setSelectedClipId(clipId);
+    onSelectedClipIdChange?.(clipId);
     setSelectedPointIndex(prev => nextSelectedPointIndex(selectedClipId, prev, clipId));
     if (opts?.openAutomationEditor && clipId !== null) {
       setAutomationEditorClipId(clipId);

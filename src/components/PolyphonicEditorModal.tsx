@@ -62,7 +62,7 @@ export const PolyphonicEditorModal: React.FC<PolyphonicEditorModalProps> = ({
     audioEngine.playNote(
       {
         id: 'poly-audition',
-        name: 'ARA Audio Vocal',
+        name: 'Prototype Blob Preview',
         instrumentType: 'vox_choir',
         volume: 0.9,
         pan: 0,
@@ -77,7 +77,9 @@ export const PolyphonicEditorModal: React.FC<PolyphonicEditorModalProps> = ({
       },
       { id: `blob-aud-${Date.now()}`, pitch: Math.round(blob.targetPitch), start: 0, duration: blob.durationSteps / 4, velocity: blob.amplitude }
     );
-    setStatusMessage(`Auditioning Blob: ${midiToName(blob.targetPitch)}`);
+    // Truthful label: this plays a synthesised preview at the blob's pitch.
+    // It does not play back (or pitch-shift) any audio from the project.
+    setStatusMessage(`Preview tone at ${midiToName(blob.targetPitch)} (synth preview, not your audio)`);
     setTimeout(() => setStatusMessage(null), 2000);
   };
 
@@ -88,7 +90,7 @@ export const PolyphonicEditorModal: React.FC<PolyphonicEditorModalProps> = ({
       pitchDriftAmount: b.pitchDriftAmount * (1 - pitchDriftCorrection / 100)
     }));
     setBlobs(quantized);
-    setStatusMessage('100% Perfect Pitch Correction & Drift Alignment Applied!');
+    setStatusMessage('Demo blobs snapped to the nearest semitone (prototype display only).');
     setTimeout(() => setStatusMessage(null), 3000);
   };
 
@@ -121,12 +123,12 @@ export const PolyphonicEditorModal: React.FC<PolyphonicEditorModalProps> = ({
             </div>
             <div>
               <div className="flex items-center gap-2">
-                <h2 id="fl-polyphonic-editor-modal-title" className="text-sm font-bold text-white tracking-wide">MELODYNE / ARA2 POLYPHONIC AUDIO BLOB EDITOR</h2>
+                <h2 id="fl-polyphonic-editor-modal-title" className="text-sm font-bold text-white tracking-wide">POLYPHONIC AUDIO BLOB EDITOR (PROTOTYPE)</h2>
                 <span className="px-1.5 py-0.5 rounded text-[9px] font-mono font-bold bg-[#00ff88]/20 text-[#00ff88] border border-[#00ff88]/40">
-                  POLYPHONIC DNA ALGORITHM
+                  PROTOTYPE — DEMO BLOBS
                 </span>
               </div>
-              <p className="text-[10px] text-[#777]">Direct graphical manipulation of polyphonic harmonic blobs, pitch center, formant shifts, and vibrato contours</p>
+              <p className="text-[10px] text-[#777]">Prototype surface with sample blobs. It does not analyse, import or play back your audio.</p>
             </div>
           </div>
 
@@ -162,7 +164,14 @@ export const PolyphonicEditorModal: React.FC<PolyphonicEditorModalProps> = ({
 
         {/* Modal Body */}
         <div className="p-5 overflow-y-auto custom-scrollbar space-y-4">
-          {/* Graphical Melodyne Piano Roll Canvas */}
+          <div className="bg-[#0a0a0c] border border-[#ffaa00]/40 rounded-lg px-3 py-2 flex items-center justify-between gap-2">
+            <span className="text-[10px] font-mono font-bold text-[#ffaa00] uppercase tracking-wider">
+              NOT APPLIED — PROTOTYPE, NO AUDIO ANALYSIS OR EDITING
+            </span>
+            <span className="text-[10px] text-[#777] whitespace-nowrap">SAMPLE BLOBS ONLY</span>
+          </div>
+
+          {/* Prototype blob timeline */}
           <div className="bg-[#0b0b0d] p-3 rounded-xl border border-[#26262a] space-y-2">
             <div className="flex items-center justify-between text-xs">
               <span className="font-bold text-white flex items-center gap-1.5">
@@ -170,7 +179,7 @@ export const PolyphonicEditorModal: React.FC<PolyphonicEditorModalProps> = ({
                 <span>SPECTRAL NOTE BLOB TIMELINE (16 STEPS)</span>
               </span>
               <span className="text-[10px] font-mono text-[#00ff88]">
-                {blobs.length} Harmonics Detected
+                {blobs.length} Demo Blobs (not detected from audio)
               </span>
             </div>
 
@@ -341,13 +350,13 @@ export const PolyphonicEditorModal: React.FC<PolyphonicEditorModalProps> = ({
 
         {/* Footer */}
         <div className="px-5 py-3.5 bg-[#18181c] border-t border-[#2e2e34] flex items-center justify-between text-xs">
-          <span className="text-[10px] text-[#666]">Direct ARA2 Phase-Locked Resampling Active</span>
+          <span className="text-[10px] text-[#666]">Prototype: edits stay in this window and never reach the audio engine</span>
           <button
             onClick={onClose}
             className="px-4 py-1.5 bg-[#00ff88] hover:bg-[#33ff9f] text-black font-bold rounded transition shadow flex items-center gap-1.5"
           >
             <Check className="w-4 h-4" />
-            <span>Apply ARA Audio Edits</span>
+            <span>Close Prototype</span>
           </button>
         </div>
       </div>

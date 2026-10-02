@@ -1,4 +1,4 @@
-// Audio Transient & Grid Slicer Engine (Edison / Simpler Style)
+// Audio Transient & Grid Slicer Engine
 export interface AudioSlice {
   id: number;
   startSec: number;
