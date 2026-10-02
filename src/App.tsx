@@ -125,6 +125,7 @@ import { WarpAudioProcessorModal } from './components/WarpAudioProcessorModal';
 import { MasterMacroRackModal } from './components/MasterMacroRackModal';
 import { ProjectBundleZipModal } from './components/ProjectBundleZipModal';
 import { ProjectReplaceConfirmModal } from './components/ProjectReplaceConfirmModal';
+import { hasOpenModalDialog } from './components/ModalFrame';
 
 import { AlertTriangle, X } from 'lucide-react';
 
@@ -1321,6 +1322,12 @@ export function App() {
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (['INPUT', 'SELECT', 'TEXTAREA'].includes((e.target as HTMLElement).tagName)) {
+        return;
+      }
+
+      // UI Milestone 1C Step 4 — while any modal owns the interaction, the
+      // shell shortcuts stay inert (Escape itself is handled by the dialog).
+      if (hasOpenModalDialog(typeof document === 'undefined' ? undefined : document)) {
         return;
       }
 

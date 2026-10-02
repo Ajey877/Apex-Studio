@@ -1059,3 +1059,32 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 @media (max-width: 1279px) {
   .apex-chip-xl { display: none; }
 }
+
+/* ===========================================================================
+   UI Milestone 1C Step 4 — shared modal and dialog primitives.
+   ModalFrame carries the overlay primitive on every framed dialog; the dialog
+   panel stays each modal's own direct child div, reached here through the
+   preserved overlay structure. Everything below reuses the Midnight Aurora
+   tokens above: no new palette, no gradients, no neon, no specificity escapes.
+   =========================================================================== */
+:root {
+  /* Canonical dialog scrim, drawn from the darkest chrome surface. */
+  --apex-modal-overlay: color-mix(in srgb, var(--apex-chrome-menu) 84%, transparent);
+}
+
+/* Modal overlay primitive: owns the scrim for every Step 4 dialog. */
+.apex-modal-overlay {
+  background-color: var(--apex-modal-overlay);
+}
+
+/* The overlay receives programmatic focus on open; it never shows a ring. */
+.apex-modal-overlay:focus {
+  outline: none;
+}
+
+/* Dialog surface primitive: the shared panel treatment. */
+.apex-dialog,
+.apex-modal-overlay > div {
+  border-radius: var(--apex-radius-lg);
+  box-shadow: var(--apex-shadow);
+}

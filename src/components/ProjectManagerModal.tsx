@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
+import { ModalFrame } from './ModalFrame';
 import { FolderOpen, Download, Upload, X, Plus, ArchiveRestore, Trash2, RotateCcw } from 'lucide-react';
 import { ProjectState, ProjectMetadata } from '../types/daw';
 import { PRESET_PROJECTS } from '../audio/presets';
@@ -119,14 +120,14 @@ export const ProjectManagerModal: React.FC<ProjectManagerModalProps> = ({ isOpen
   };
 
   return (
-    <div id="project-manager-modal" className="fixed inset-0 bg-black/85 backdrop-blur-sm z-50 flex items-center justify-center p-3 sm:p-4">
+    <ModalFrame id="project-manager-modal" labelledBy="project-manager-modal-title" onClose={onClose} className="fixed inset-0 bg-black/85 backdrop-blur-sm z-50 flex items-center justify-center p-3 sm:p-4">
       <div className="bg-[#141416] border border-[#333336] rounded-xl w-full max-w-2xl shadow-2xl overflow-hidden text-[#b0b0b0] max-h-[90vh] flex flex-col">
         <div className="px-4 sm:px-5 py-3 bg-[#1a1a1d] border-b border-[#333336] flex items-center justify-between shrink-0">
           <div className="flex items-center space-x-2.5">
             <div className="w-7 h-7 bg-[#ff6e00]/15 border border-[#ff6e00]/30 rounded flex items-center justify-center"><FolderOpen className="w-4 h-4 text-[#ff6e00]" /></div>
-            <div><h3 className="font-bold text-sm text-white tracking-tight">STUDIO PROJECT HUB & DEMO TEMPLATES</h3><p className="text-[10px] text-[#777]">Open Demos, Backup Project Manifest (.flmp), or Start a New Beat</p></div>
+            <div><h3 id="project-manager-modal-title" className="font-bold text-sm text-white tracking-tight">STUDIO PROJECT HUB & DEMO TEMPLATES</h3><p className="text-[10px] text-[#777]">Open Demos, Backup Project Manifest (.flmp), or Start a New Beat</p></div>
           </div>
-          <button onClick={onClose} className="p-1 rounded hover:bg-[#2d2d30] text-[#777] hover:text-white transition"><X className="w-4 h-4" /></button>
+          <button onClick={onClose} aria-label="Close project manager" className="p-1 rounded hover:bg-[#2d2d30] text-[#777] hover:text-white transition"><X className="w-4 h-4" /></button>
         </div>
 
         <div className="p-4 sm:p-5 space-y-4 overflow-y-auto custom-scrollbar flex-1">
@@ -197,6 +198,6 @@ export const ProjectManagerModal: React.FC<ProjectManagerModalProps> = ({ isOpen
           </div>
         </div>
       </div>
-    </div>
+    </ModalFrame>
   );
 };

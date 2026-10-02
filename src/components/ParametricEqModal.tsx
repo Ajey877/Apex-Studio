@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
+import { ModalFrame } from './ModalFrame';
 import { 
   X, 
   Activity, 
@@ -301,8 +302,10 @@ export const ParametricEqModal: React.FC<ParametricEqModalProps> = ({
   if (!isOpen) return null;
 
   return (
-    <div 
+    <ModalFrame
       id="parametric-eq-modal-overlay"
+      labelledBy="parametric-eq-modal-title"
+      onClose={onClose}
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4 animate-in fade-in"
     >
       <div 
@@ -316,7 +319,7 @@ export const ParametricEqModal: React.FC<ParametricEqModalProps> = ({
               <Activity className="w-5 h-5" />
             </div>
             <div>
-              <h2 className="text-base font-bold text-white flex items-center space-x-2">
+              <h2 id="parametric-eq-modal-title" className="text-base font-bold text-white flex items-center space-x-2">
                 <span>7-Band EQ — Dynamic Equalizer</span>
                 <span className="text-[10px] px-2 py-0.5 rounded bg-[#ff6e00]/20 text-[#ff851b] font-mono font-medium border border-[#ff6e00]/30">
                   Track: {mixerTrack.name}
@@ -330,6 +333,7 @@ export const ParametricEqModal: React.FC<ParametricEqModalProps> = ({
           <button
             id="close-parametric-eq-btn"
             onClick={onClose}
+            aria-label="Close parametric EQ"
             className="text-[#888] hover:text-white p-1.5 rounded-lg hover:bg-[#27272a] transition-colors"
           >
             <X className="w-5 h-5" />
@@ -496,6 +500,6 @@ export const ParametricEqModal: React.FC<ParametricEqModalProps> = ({
           </button>
         </div>
       </div>
-    </div>
+    </ModalFrame>
   );
 };

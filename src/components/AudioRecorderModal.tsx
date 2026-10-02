@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
+import { ModalFrame } from './ModalFrame';
 import { Mic, Square, Pause, Play, Check, X, AlertCircle } from 'lucide-react';
 import { AudioRecording } from '../types/daw';
 import { audioEngine } from '../audio/audioEngine';
@@ -186,11 +187,11 @@ export const AudioRecorderModal: React.FC<AudioRecorderModalProps> = ({ isOpen, 
   if (!isOpen) return null;
 
   return (
-    <div id="audio-recorder-modal" className="fixed inset-0 bg-black/85 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+    <ModalFrame id="audio-recorder-modal" labelledBy="audio-recorder-modal-title" onClose={onClose} className="fixed inset-0 bg-black/85 backdrop-blur-sm z-50 flex items-center justify-center p-4">
       <div className="bg-[#141416] border border-[#333336] rounded-xl w-full max-w-lg shadow-2xl overflow-hidden text-[#b0b0b0]">
         <div className="px-5 py-3.5 bg-[#1a1a1d] border-b border-[#333336] flex items-center justify-between">
-          <div className="flex items-center space-x-2.5"><div className="w-7 h-7 bg-[#ff6e00]/15 border border-[#ff6e00]/30 rounded flex items-center justify-center"><Mic className="w-4 h-4 text-[#ff6e00]" /></div><div><h3 className="font-bold text-sm text-white tracking-tight">AUDIO RECORDER</h3><p className="text-[10px] text-[#777]">Real microphone / line-in capture</p></div></div>
-          <button onClick={onClose} disabled={recordingState === 'stopping' || isApplying} className="p-1 rounded hover:bg-[#2d2d30] text-[#777] hover:text-white transition disabled:opacity-40"><X className="w-4 h-4" /></button>
+          <div className="flex items-center space-x-2.5"><div className="w-7 h-7 bg-[#ff6e00]/15 border border-[#ff6e00]/30 rounded flex items-center justify-center"><Mic className="w-4 h-4 text-[#ff6e00]" /></div><div><h3 id="audio-recorder-modal-title" className="font-bold text-sm text-white tracking-tight">AUDIO RECORDER</h3><p className="text-[10px] text-[#777]">Real microphone / line-in capture</p></div></div>
+          <button onClick={onClose} aria-label="Close audio recorder" disabled={recordingState === 'stopping' || isApplying} className="p-1 rounded hover:bg-[#2d2d30] text-[#777] hover:text-white transition disabled:opacity-40"><X className="w-4 h-4" /></button>
         </div>
         <div className="p-5 space-y-4">
           <div className="bg-[#0a0a0b] border border-[#333336] rounded-lg p-4 flex flex-col items-center justify-center space-y-2">
@@ -212,6 +213,6 @@ export const AudioRecorderModal: React.FC<AudioRecorderModalProps> = ({ isOpen, 
           </div>}
         </div>
       </div>
-    </div>
+    </ModalFrame>
   );
 };

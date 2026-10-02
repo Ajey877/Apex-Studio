@@ -1,4 +1,5 @@
 import React from 'react';
+import { ModalFrame } from './ModalFrame';
 import { Keyboard, X, Command } from 'lucide-react';
 
 interface HotkeysModalProps {
@@ -73,7 +74,7 @@ export const HotkeysModal: React.FC<HotkeysModalProps> = ({ isOpen, onClose }) =
   if (!isOpen) return null;
 
   return (
-    <div id="hotkeys-modal" className="fixed inset-0 bg-black/85 backdrop-blur-sm z-50 flex items-center justify-center p-3 sm:p-4">
+    <ModalFrame id="hotkeys-modal" labelledBy="hotkeys-modal-title" onClose={onClose} className="fixed inset-0 bg-black/85 backdrop-blur-sm z-50 flex items-center justify-center p-3 sm:p-4">
       <div className="bg-[#141416] border border-[#333336] rounded-xl w-full max-w-2xl shadow-2xl overflow-hidden text-[#b0b0b0] max-h-[90vh] flex flex-col">
         {/* Header */}
         <div className="px-4 sm:px-5 py-3 bg-[#1a1a1d] border-b border-[#333336] flex items-center justify-between shrink-0">
@@ -82,12 +83,13 @@ export const HotkeysModal: React.FC<HotkeysModalProps> = ({ isOpen, onClose }) =
               <Keyboard className="w-4 h-4 text-[#ff6e00]" />
             </div>
             <div>
-              <h3 className="font-bold text-sm text-white tracking-tight">STUDIO KEYBOARD SHORTCUTS & HOTKEYS</h3>
+              <h3 id="hotkeys-modal-title" className="font-bold text-sm text-white tracking-tight">STUDIO KEYBOARD SHORTCUTS & HOTKEYS</h3>
               <p className="text-[10px] text-[#777]">Desktop & Hardware Controller Keybindings</p>
             </div>
           </div>
           <button 
             onClick={onClose} 
+            aria-label="Close hotkeys"
             className="p-1 rounded hover:bg-[#2d2d30] text-[#777] hover:text-white transition"
           >
             <X className="w-4 h-4" />
@@ -130,6 +132,6 @@ export const HotkeysModal: React.FC<HotkeysModalProps> = ({ isOpen, onClose }) =
           </div>
         </div>
       </div>
-    </div>
+    </ModalFrame>
   );
 };

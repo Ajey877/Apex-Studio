@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { ModalFrame } from './ModalFrame';
 import { 
   X, 
   Power, 
@@ -128,7 +129,7 @@ export const GrossBeatModal: React.FC<GrossBeatModalProps> = ({
   };
 
   return (
-    <div id="gross-beat-modal" className="fixed inset-0 bg-black/85 backdrop-blur-md z-50 flex items-center justify-center p-3 sm:p-4 select-none">
+    <ModalFrame id="gross-beat-modal" labelledBy="gross-beat-modal-title" onClose={onClose} className="fixed inset-0 bg-black/85 backdrop-blur-md z-50 flex items-center justify-center p-3 sm:p-4 select-none">
       <div className="bg-[#121214] border border-[#2e2e32] rounded-xl w-full max-w-2xl shadow-2xl overflow-hidden text-[#b0b0b0] flex flex-col max-h-[92vh]">
         {/* Modal Top Header */}
         <div className="px-5 py-3.5 bg-[#18181b] border-b border-[#2e2e32] flex items-center justify-between">
@@ -138,7 +139,7 @@ export const GrossBeatModal: React.FC<GrossBeatModalProps> = ({
             </div>
             <div>
               <div className="flex items-center gap-2">
-                <h2 className="text-sm font-bold text-white tracking-wide">TIME FX BUFFER</h2>
+                <h2 id="gross-beat-modal-title" className="text-sm font-bold text-white tracking-wide">TIME FX BUFFER</h2>
                 <span className="px-1.5 py-0.5 rounded text-[9px] font-mono font-bold bg-[#ff6e00]/20 text-[#ff6e00] border border-[#ff6e00]/40">
                   STUDIO DSP
                 </span>
@@ -163,6 +164,7 @@ export const GrossBeatModal: React.FC<GrossBeatModalProps> = ({
 
             <button
               onClick={onClose}
+              aria-label="Close Gross Beat"
               className="text-[#777] hover:text-white p-1 rounded hover:bg-[#222225] transition"
             >
               <X className="w-5 h-5" />
@@ -388,6 +390,6 @@ export const GrossBeatModal: React.FC<GrossBeatModalProps> = ({
           </button>
         </div>
       </div>
-    </div>
+    </ModalFrame>
   );
 };

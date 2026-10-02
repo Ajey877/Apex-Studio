@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
+import { ModalFrame } from './ModalFrame';
 import { 
   X, 
   Scissors, 
@@ -240,7 +241,7 @@ export const AudioSlicerModal: React.FC<AudioSlicerModalProps> = ({
   if (!isOpen) return null;
 
   return (
-    <div id="audio-slicer-modal" className="fixed inset-0 bg-black/85 backdrop-blur-md z-50 flex items-center justify-center p-3 sm:p-4 select-none">
+    <ModalFrame id="audio-slicer-modal" labelledBy="audio-slicer-modal-title" onClose={onClose} className="fixed inset-0 bg-black/85 backdrop-blur-md z-50 flex items-center justify-center p-3 sm:p-4 select-none">
       <div className="bg-[#121214] border border-[#2e2e32] rounded-xl w-full max-w-3xl shadow-2xl overflow-hidden text-[#b0b0b0] flex flex-col max-h-[92vh]">
         {/* Header */}
         <div className="px-5 py-3.5 bg-[#18181b] border-b border-[#2e2e32] flex items-center justify-between">
@@ -250,7 +251,7 @@ export const AudioSlicerModal: React.FC<AudioSlicerModalProps> = ({
             </div>
             <div>
               <div className="flex items-center gap-2">
-                <h2 className="text-sm font-bold text-white tracking-wide">EDISON TRANSIENT SLICER & CHOPPER</h2>
+                <h2 id="audio-slicer-modal-title" className="text-sm font-bold text-white tracking-wide">EDISON TRANSIENT SLICER & CHOPPER</h2>
                 <span className="px-1.5 py-0.5 rounded text-[9px] font-mono font-bold bg-[#00bcd4]/20 text-[#00bcd4] border border-[#00bcd4]/40">
                   AUTO-CHOP
                 </span>
@@ -261,6 +262,7 @@ export const AudioSlicerModal: React.FC<AudioSlicerModalProps> = ({
 
           <button
             onClick={onClose}
+            aria-label="Close audio slicer"
             className="text-[#777] hover:text-white p-1 rounded hover:bg-[#222225] transition"
           >
             <X className="w-5 h-5" />
@@ -424,6 +426,6 @@ export const AudioSlicerModal: React.FC<AudioSlicerModalProps> = ({
           </button>
         </div>
       </div>
-    </div>
+    </ModalFrame>
   );
 };
