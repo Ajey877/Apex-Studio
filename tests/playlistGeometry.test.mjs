@@ -92,6 +92,55 @@ test('scrolling keeps the clip aligned with ruler/grid coordinates', async () =>
   }
 });
 
+// The fixture's existing clip sits at Bars 5-8 (startBar 4), leaving the rest of
+// the 32-bar timeline empty so grid clicks actually create clips. `.w-24.h-full
+// .cursor-pointer` selects the arrangement grid cells specifically — the bar
+// ruler uses the same width/height classes but is `select-none`, not clickable.
+const gridCell = (page, barIndex) =>
+  page.locator('#fl-playlist-arranger .w-24.h-full.cursor-pointer').nth(barIndex);
+
+const readClips = page =>
+  page.locator('#fixture-project-clips').evaluate(element => JSON.parse(element.textContent));
+
+test('Phase 54: clicking the final grid cell clamps the new clip inside the 32-bar timeline', async () => {
+  const { page } = await openFixture(4);
+  try {
+    // Place mode + pattern clip type is the fixture default. Click the last
+    // grid cell (Bar 32, zero-indexed bar 31). Before Phase 54 this published a
+    // 4-bar clip at startBar 31 ending at bar 35 — outside the timeline, and
+    // outside the export window, which is how a 32-bar arrangement exported as
+    // a 35-bar WAV.
+    await gridCell(page, 31).click();
+
+    const published = await readClips(page);
+    const added = published.find(clip => clip.id !== 'fixture-audio');
+    assert.ok(added, 'clicking an empty grid cell must create a clip');
+    assert.ok(
+      added.startBar + added.lengthBars <= 32,
+      `created clip spans ${added.startBar}..${added.startBar + added.lengthBars} on a 32-bar timeline`
+    );
+    assert.equal(added.startBar, 28, 'it is pulled back to the latest legal start bar');
+  } finally {
+    await page.close();
+  }
+});
+
+test('Phase 54: a clip created mid-timeline keeps the exact clicked position', async () => {
+  const { page } = await openFixture(4);
+  try {
+    // Bar 21 (zero-indexed 20) has room for a 4-bar clip, so placement must be
+    // unchanged by the clamp — this guards against over-correcting.
+    await gridCell(page, 20).click();
+
+    const published = await readClips(page);
+    const added = published.find(clip => clip.id !== 'fixture-audio');
+    assert.ok(added, 'a clip is created');
+    assert.equal(added.startBar, 20, 'no clamping when the clip already fits');
+  } finally {
+    await page.close();
+  }
+});
+
 test('drag from end to Bar 5 updates state and layout; undo/redo restore both', async () => {
   const { page, clip } = await openFixture(28, 3600);
   try {

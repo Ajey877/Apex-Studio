@@ -526,7 +526,10 @@ describe('Pattern length wiring is single-sourced', () => {
 
   it('ExportModal passes the declared length through instead of resolving its own', () => {
     assert.match(exportModalSource, /patternLengthSteps\?: number;/, 'additive optional prop');
-    assert.match(exportModalSource, /getProjectRenderBars\(clips, scope, patternLengthSteps\)/);
+    // Phase 54 added the project timeline as a fourth argument (the render
+    // window is clamped to it); the declared pattern length is still passed
+    // straight through rather than re-resolved here.
+    assert.match(exportModalSource, /getProjectRenderBars\(clips, scope, patternLengthSteps, totalBars\)/);
     assert.match(exportModalSource, /renderTimelineOffline\(/);
     assert.match(exportModalSource, /renderProjectStems\(/);
     const stemCall = exportModalSource.slice(

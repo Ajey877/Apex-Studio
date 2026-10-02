@@ -56,6 +56,9 @@ function Fixture() {
     <div style={{ height: '100vh', display: 'flex', flexDirection: 'column' }}>
       <output id="fixture-project-clips" hidden>{JSON.stringify(clips)}</output>
       <PlaylistArranger
+        // Phase 54: the timeline length is project-owned, so the fixture supplies
+        // it exactly like App does rather than relying on component-local state.
+        totalBars={32} onUpdateTotalBars={() => {}}
         tracks={tracks} clips={clips} patterns={[]} channels={[]} bpm={130}
         currentBar={1} isPlaying={false}
         onUpdateTracks={() => {}} onUpdateClips={update} onAddTrack={() => {}}
