@@ -11,6 +11,11 @@ import {
   SidechainSettings
 } from '../types/daw';
 import { AudioClockTransport, TransportState } from './transport';
+import {
+  GROSS_BEAT_OPEN_GAIN,
+  grossBeatAlternatingSteps,
+  resolveGrossBeatGateGain,
+} from './grossBeatGate';
 import { LoudnessMeter } from './loudnessMeasurement';
 import { TruePeakMeter } from './truePeak';
 import { StereoFieldMeter, computeMidSideVectors } from './stereoMeasurement';
@@ -338,13 +343,11 @@ class AudioEngine {
 
   private grossBeatState: GrossBeatState = {
     enabled: false,
-    preset: 'half_time',
     mix: 1.0,
-    speed: 0.5,
-    tapeStopActive: false,
-    tapeStopDurationMs: 600,
-    gateSteps: [true, false, true, false, true, false, true, false, true, false, true, false, true, false, true, false],
-    pitchShiftSemitones: -12
+    // Phase 57: the only Gross Beat behaviour the engine implements is a
+    // 16-step amplitude gate on the master bus. There is no time, pitch or
+    // tape state to carry.
+    gateSteps: grossBeatAlternatingSteps(),
   };
 
   private activeVoices: Map<string, { stop: (time?: number) => void }> = new Map();
@@ -439,7 +442,7 @@ class AudioEngine {
     const AudioContextClass = window.AudioContext || (window as unknown as WindowWithWebKitAudio).webkitAudioContext;
     this.ctx = new AudioContextClass({ latencyHint: 'interactive' });
 
-    // Master bus with Time FX processor
+    // Master bus with the master amplitude gate
     this.masterGain = this.ctx.createGain();
     this.grossBeatNode = this.ctx.createGain();
     this.masterAnalyser = this.ctx.createAnalyser();
@@ -1196,8 +1199,14 @@ class AudioEngine {
     });
   }
 
-  // Time FX & Tape Stop Performance Controller
-  public triggerTapeStop(durationMs: number = 600) {
+  /**
+   * Phase 57: MASTER BRAKE.
+   *
+   * A master-gain fade to silence and back. It is NOT tape-speed deceleration,
+   * a turntable slowdown or a pitch-changing tape stop - the engine has no
+   * playback-rate or pitch processing to decelerate.
+   */
+  public triggerMasterBrake(durationMs: number = 600) {
     if (this.shouldBlockLiveMutation() || !this.ctx) return;
     const ctx = this.ctx;
     const now = ctx.currentTime;
@@ -1205,10 +1214,10 @@ class AudioEngine {
 
     if (this.grossBeatNode) {
       this.grossBeatNode.gain.cancelScheduledValues(now);
-      this.grossBeatNode.gain.setValueAtTime(1.0, now);
-      // Classic vinyl deceleration ramp
+      this.grossBeatNode.gain.setValueAtTime(GROSS_BEAT_OPEN_GAIN, now);
+      // Master gain fade to silence, then straight back to unity.
       this.grossBeatNode.gain.exponentialRampToValueAtTime(0.0001, now + durSec);
-      this.grossBeatNode.gain.setValueAtTime(1.0, now + durSec + 0.05);
+      this.grossBeatNode.gain.setValueAtTime(GROSS_BEAT_OPEN_GAIN, now + durSec + 0.05);
     }
   }
 
@@ -1219,7 +1228,7 @@ class AudioEngine {
     const now = this.ctx.currentTime;
     if (!this.grossBeatState.enabled) {
       this.grossBeatNode.gain.cancelScheduledValues(now);
-      this.grossBeatNode.gain.setTargetAtTime(1.0, now, 0.01);
+      this.grossBeatNode.gain.setTargetAtTime(GROSS_BEAT_OPEN_GAIN, now, 0.01);
     }
   }
 
@@ -2967,10 +2976,11 @@ class AudioEngine {
       osc.stop(now + 0.05);
     }
 
-    // Time FX Rhythmic Chopper & Gater
+    // Phase 57: 16-step amplitude gate on the master bus. The gain comes from
+    // the shared resolver so the live transport and the offline/export
+    // renderer (which both call this method) stay behaviourally identical.
     if (this.grossBeatState.enabled && this.grossBeatNode) {
-      const stepVal = this.grossBeatState.gateSteps[this.currentStep % 16];
-      const targetGain = stepVal ? 1.0 : Math.max(0.01, 1.0 - (this.grossBeatState.mix * 0.95));
+      const targetGain = resolveGrossBeatGateGain(this.grossBeatState, this.currentStep);
       this.grossBeatNode.gain.cancelScheduledValues(now);
       this.grossBeatNode.gain.setTargetAtTime(targetGain, now, 0.012);
     }

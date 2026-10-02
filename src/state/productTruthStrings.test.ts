@@ -153,6 +153,17 @@ describe('Phase 52 — truthful not-applied states', () => {
     assert.ok(!/7-band/i.test(source));
   });
 
+  it('the Gross Beat menu entry names the amplitude gate it opens', () => {
+    // Phase 57: this entry used to be labelled "Time FX" with a "tape-stop
+    // brake" tooltip. The engine implements neither - it implements a 16-step
+    // amplitude gate on the master bus.
+    const source = read('src/components/TransportToolsMenu.tsx');
+    assert.ok(!/Time FX/i.test(source), 'the menu must not advertise time FX');
+    assert.ok(!/tape-stop/i.test(source), 'the menu must not advertise a tape-stop brake');
+    assert.match(source, /label: 'Master Gate'/);
+    assert.match(source, /Sixteen-step amplitude gate on the master bus/);
+  });
+
   it('the mixer insert EQ is named for the band count it implements', () => {
     assert.ok(!/7-Band/i.test(read('src/components/Mixer.tsx')));
     assert.ok(!/7-Band/i.test(read('src/components/ParametricEqModal.tsx')));

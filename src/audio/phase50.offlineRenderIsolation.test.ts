@@ -231,15 +231,12 @@ function resetEngineForTest(): void {
   engine.bpm = 120;
   engine.swing = 0;
   engine.metronome = false;
+  // Phase 57: the engine only implements a 16-step amplitude gate on the
+  // master bus, so the offline-render fixture pins only that state.
   engine.grossBeatState = {
     enabled: false,
-    preset: 'half_time',
     mix: 1,
-    speed: 0.5,
-    tapeStopActive: false,
-    tapeStopDurationMs: 600,
     gateSteps: Array.from({ length: 16 }, (_, index) => index % 2 === 0),
-    pitchShiftSemitones: -12,
   };
   engine.timerId = null;
   engine.transportStateCallback = null;

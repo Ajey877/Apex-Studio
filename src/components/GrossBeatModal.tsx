@@ -1,20 +1,28 @@
 import React, { useState, useEffect } from 'react';
-import { ModalFrame } from './ModalFrame';
-import { 
-  X, 
-  Power, 
-  Disc, 
-  Sliders, 
-  Play, 
-  RotateCcw, 
-  Zap, 
-  Sparkles,
-  Volume2,
-  Clock,
+import {
+  X,
+  Power,
+  Sliders,
+  Disc,
   Waves
 } from 'lucide-react';
+import { ModalFrame } from './ModalFrame';
 import { GrossBeatState } from '../types/daw';
 import { audioEngine } from '../audio/audioEngine';
+import {
+  GROSS_BEAT_GATE_PRESETS,
+  grossBeatAllOpenSteps,
+  resolveGrossBeatClosedGain,
+} from '../audio/grossBeatGate';
+
+/**
+ * Phase 57 - Gross Beat truth pass.
+ *
+ * This modal used to advertise a "TIME FX BUFFER" with half-time, buffer speed,
+ * octave pitch drops and a turntable tape brake. The engine implements none of
+ * that. It implements a 16-step amplitude gate on the master bus, and this
+ * surface now says so.
+ */
 
 interface GrossBeatModalProps {
   isOpen: boolean;
@@ -23,50 +31,7 @@ interface GrossBeatModalProps {
   isPlaying: boolean;
 }
 
-const PRESETS: { id: GrossBeatState['preset']; name: string; desc: string; steps: boolean[]; speed: 0.5 | 1.0 | 2.0 }[] = [
-  {
-    id: 'half_time',
-    name: 'Half-Time (1/2x Speed)',
-    desc: 'Trap & Hip-Hop half-tempo octave drop',
-    steps: [true, true, true, true, false, false, false, false, true, true, true, true, false, false, false, false],
-    speed: 0.5
-  },
-  {
-    id: 'tape_stop',
-    name: 'Vinyl Tape Brake',
-    desc: 'Turntable motor stop pitch drop curve',
-    steps: [true, true, true, true, true, true, true, true, false, false, false, false, false, false, false, false],
-    speed: 1.0
-  },
-  {
-    id: 'trance_gate',
-    name: 'Trance 16-Step Gate',
-    desc: 'Classic EDM side-chopped rhythmic envelope',
-    steps: [true, false, true, false, true, false, true, false, true, false, true, false, true, false, true, false],
-    speed: 1.0
-  },
-  {
-    id: 'sidechain_pump',
-    name: 'Sidechain 4-on-Floor Pump',
-    desc: 'Deep French house pumping curve',
-    steps: [false, true, true, true, false, true, true, true, false, true, true, true, false, true, true, true],
-    speed: 1.0
-  },
-  {
-    id: 'triplet_chopper',
-    name: 'Triplet Drill Chopper',
-    desc: 'UK Drill & Trap syncopated stutter',
-    steps: [true, true, false, true, true, false, true, true, false, true, true, false, true, false, true, false],
-    speed: 1.0
-  },
-  {
-    id: 'stutter_32',
-    name: '1/32 Micro Stutter',
-    desc: 'High-speed glitch build-up',
-    steps: [true, false, true, false, true, true, false, true, false, true, true, false, true, false, true, true],
-    speed: 2.0
-  }
-];
+const BRAKE_DURATIONS = [250, 500, 800, 1200, 1800];
 
 export const GrossBeatModal: React.FC<GrossBeatModalProps> = ({
   isOpen,
@@ -77,6 +42,7 @@ export const GrossBeatModal: React.FC<GrossBeatModalProps> = ({
   const [grossState, setGrossState] = useState<GrossBeatState>(() => audioEngine.getGrossBeatState());
   const [brakeDuration, setBrakeDuration] = useState<number>(600); // ms
   const [isBraking, setIsBraking] = useState<boolean>(false);
+  const [activePresetId, setActivePresetId] = useState<string | null>(null);
 
   useEffect(() => {
     if (isOpen) {
@@ -86,47 +52,44 @@ export const GrossBeatModal: React.FC<GrossBeatModalProps> = ({
 
   if (!isOpen) return null;
 
-  const handleTogglePower = () => {
-    const updated = { ...grossState, enabled: !grossState.enabled };
+  const publish = (updated: GrossBeatState) => {
     setGrossState(updated);
     audioEngine.setGrossBeatState(updated);
+  };
+
+  const handleTogglePower = () => {
+    publish({ ...grossState, enabled: !grossState.enabled });
   };
 
   const handleMixChange = (val: number) => {
-    const updated = { ...grossState, mix: val };
-    setGrossState(updated);
-    audioEngine.setGrossBeatState(updated);
+    publish({ ...grossState, mix: val });
   };
 
-  const handlePresetSelect = (presetId: GrossBeatState['preset']) => {
-    const found = PRESETS.find(p => p.id === presetId);
+  const handlePresetSelect = (presetId: string) => {
+    const found = GROSS_BEAT_GATE_PRESETS.find(p => p.id === presetId);
     if (!found) return;
-    const updated: GrossBeatState = {
-      ...grossState,
-      enabled: true,
-      preset: presetId,
-      gateSteps: [...found.steps],
-      speed: found.speed
-    };
-    setGrossState(updated);
-    audioEngine.setGrossBeatState(updated);
+    setActivePresetId(presetId);
+    // Presets only ever write the gate pattern. They do not change tempo,
+    // pitch or playback rate, because the engine has no such processing.
+    publish({ ...grossState, enabled: true, gateSteps: [...found.steps] });
   };
 
   const handleStepToggle = (index: number) => {
     const newSteps = [...grossState.gateSteps];
     newSteps[index] = !newSteps[index];
-    const updated = { ...grossState, gateSteps: newSteps };
-    setGrossState(updated);
-    audioEngine.setGrossBeatState(updated);
+    setActivePresetId(null);
+    publish({ ...grossState, gateSteps: newSteps });
   };
 
   const handleTriggerBrake = () => {
     setIsBraking(true);
-    audioEngine.triggerTapeStop(brakeDuration);
+    audioEngine.triggerMasterBrake(brakeDuration);
     setTimeout(() => {
       setIsBraking(false);
     }, brakeDuration + 100);
   };
+
+  const closedGainPercent = Math.round(resolveGrossBeatClosedGain(grossState.mix) * 100);
 
   return (
     <ModalFrame id="gross-beat-modal" labelledBy="gross-beat-modal-title" onClose={onClose} className="fixed inset-0 bg-black/85 backdrop-blur-md z-50 flex items-center justify-center p-3 sm:p-4 select-none">
@@ -139,12 +102,12 @@ export const GrossBeatModal: React.FC<GrossBeatModalProps> = ({
             </div>
             <div>
               <div className="flex items-center gap-2">
-                <h2 id="gross-beat-modal-title" className="text-sm font-bold text-white tracking-wide">TIME FX BUFFER</h2>
+                <h2 id="gross-beat-modal-title" className="text-sm font-bold text-white tracking-wide">MASTER GATE</h2>
                 <span className="px-1.5 py-0.5 rounded text-[9px] font-mono font-bold bg-[#ff6e00]/20 text-[#ff6e00] border border-[#ff6e00]/40">
-                  STUDIO DSP
+                  AMPLITUDE GATE
                 </span>
               </div>
-              <p className="text-[10px] text-[#777]">Half-Time, Turntable Tape-Stop & 16-Step Rhythmic Gater</p>
+              <p className="text-[10px] text-[#777]">Sixteen-step amplitude gate on the master bus</p>
             </div>
           </div>
 
@@ -174,12 +137,24 @@ export const GrossBeatModal: React.FC<GrossBeatModalProps> = ({
 
         {/* Modal Body Content */}
         <div className="p-5 overflow-y-auto custom-scrollbar space-y-5">
+
+          {/* Truth disclosure: what the gate does, and what it does not do. */}
+          <div className="bg-[#18181b] p-3 rounded-lg border border-[#28282b] space-y-1">
+            <p className="text-[11px] text-[#b0b0b0]">
+              16-step gate on the master bus, live and in export.
+            </p>
+            <p className="text-[10px] text-[#777] leading-relaxed">
+              <span className="font-bold text-[#ff6e00]">NOT APPLIED:</span> no time-stretch, pitch-shift,
+              half-time or tape processing &mdash; the engine gates gain on the steps below and nothing else.
+            </p>
+          </div>
+
           {/* Main Controls Header Row */}
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-            {/* Mix Wet/Dry */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            {/* Gate Depth */}
             <div className="bg-[#18181b] p-3 rounded-lg border border-[#28282b] flex flex-col justify-between">
               <div className="flex items-center justify-between text-xs mb-1.5">
-                <span className="text-[#888] font-bold text-[10px] uppercase">WET / DRY MIX</span>
+                <span className="text-[#888] font-bold text-[10px] uppercase">GATE DEPTH</span>
                 <span className="font-mono text-[#ff6e00] font-bold text-xs">{Math.round(grossState.mix * 100)}%</span>
               </div>
               <input
@@ -192,46 +167,18 @@ export const GrossBeatModal: React.FC<GrossBeatModalProps> = ({
                 className="w-full h-1.5 accent-[#ff6e00] bg-[#121214] rounded cursor-pointer"
               />
               <div className="flex justify-between text-[9px] text-[#555] mt-1 font-mono">
-                <span>0% Dry</span>
-                <span>100% Full Wet</span>
+                <span>0% open</span>
+                <span>100% full chop</span>
+              </div>
+              <div className="text-[9px] text-[#777] mt-1 font-mono">
+                Closed steps: {closedGainPercent}% gain
               </div>
             </div>
 
-            {/* Playback Speed Multiplier */}
-            <div className="bg-[#18181b] p-3 rounded-lg border border-[#28282b] flex flex-col justify-between">
-              <span className="text-[#888] font-bold text-[10px] uppercase mb-1">TIME BUFFER SPEED</span>
-              <div className="grid grid-cols-3 gap-1">
-                {[
-                  { label: '1/2x Half', val: 0.5 },
-                  { label: '1x Norm', val: 1.0 },
-                  { label: '2x Fast', val: 2.0 }
-                ].map((sp) => (
-                  <button
-                    key={sp.val}
-                    onClick={() => {
-                      const updated = { ...grossState, speed: sp.val as 0.5 | 1.0 | 2.0 };
-                      setGrossState(updated);
-                      audioEngine.setGrossBeatState(updated);
-                    }}
-                    className={`py-1 rounded text-[10px] font-bold transition font-mono ${
-                      grossState.speed === sp.val
-                        ? 'bg-[#ff6e00] text-black'
-                        : 'bg-[#121214] text-[#888] hover:text-white border border-[#28282b]'
-                    }`}
-                  >
-                    {sp.label}
-                  </button>
-                ))}
-              </div>
-              <div className="text-[9px] text-[#777] mt-1 truncate">
-                {grossState.speed === 0.5 ? 'Octave down pitch drop' : 'Standard sync rate'}
-              </div>
-            </div>
-
-            {/* Instant Tape Brake Trigger */}
+            {/* Master Brake Trigger */}
             <div className="bg-[#18181b] p-3 rounded-lg border border-[#28282b] flex flex-col justify-between">
               <div className="flex items-center justify-between text-[10px] text-[#888] font-bold uppercase mb-1">
-                <span>TURNTABLE BRAKE</span>
+                <span>MASTER BRAKE</span>
                 <span className="text-white font-mono">{brakeDuration}ms</span>
               </div>
               <div className="flex items-center gap-2">
@@ -244,21 +191,21 @@ export const GrossBeatModal: React.FC<GrossBeatModalProps> = ({
                   }`}
                 >
                   <Disc className={`w-3.5 h-3.5 ${isBraking ? 'animate-spin' : ''}`} />
-                  <span>{isBraking ? 'STOPPING...' : 'TAPE STOP'}</span>
+                  <span>{isBraking ? 'BRAKING...' : 'BRAKE'}</span>
                 </button>
                 <select
                   value={brakeDuration}
                   onChange={(e) => setBrakeDuration(parseInt(e.target.value))}
                   className="bg-[#121214] text-white text-[10px] font-mono px-2 py-1.5 rounded border border-[#333336] focus:outline-none"
                 >
-                  <option value="250">250ms</option>
-                  <option value="500">500ms</option>
-                  <option value="800">800ms</option>
-                  <option value="1200">1.2s</option>
-                  <option value="1800">1.8s</option>
+                  {BRAKE_DURATIONS.map((duration) => (
+                    <option key={duration} value={duration}>{duration}ms</option>
+                  ))}
                 </select>
               </div>
-              <div className="text-[9px] text-[#555] mt-1 font-mono">Simulates analog turntable shutoff</div>
+              <div className="text-[9px] text-[#555] mt-1 font-mono">
+                Master gain fade to silence and back &mdash; not a tape or turntable stop.
+              </div>
             </div>
           </div>
 
@@ -267,14 +214,14 @@ export const GrossBeatModal: React.FC<GrossBeatModalProps> = ({
             <div className="flex items-center justify-between text-xs">
               <span className="text-white font-bold text-xs flex items-center gap-1.5">
                 <Sliders className="w-3.5 h-3.5 text-[#ff6e00]" />
-                <span>CHOPPER & RHYTHMIC PRESETS</span>
+                <span>GATE PATTERN PRESETS</span>
               </span>
-              <span className="text-[10px] text-[#777]">Click to load pattern</span>
+              <span className="text-[10px] text-[#777]">Click to load a pattern</span>
             </div>
 
             <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-              {PRESETS.map((p) => {
-                const isActive = grossState.preset === p.id && grossState.enabled;
+              {GROSS_BEAT_GATE_PRESETS.map((p) => {
+                const isActive = activePresetId === p.id && grossState.enabled;
                 return (
                   <button
                     key={p.id}
@@ -296,31 +243,27 @@ export const GrossBeatModal: React.FC<GrossBeatModalProps> = ({
             </div>
           </div>
 
-          {/* 16-Step Interactive Rhythmic Gate Visualizer */}
+          {/* 16-Step Interactive Amplitude Gate Grid */}
           <div className="bg-[#18181b] p-4 rounded-xl border border-[#28282b] space-y-3">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
-                <span className="text-xs font-bold text-white">16-STEP TIME CHOPPER GRID</span>
-                <span className="text-[10px] font-mono text-[#777]">1/16 Beat Grid</span>
+                <span className="text-xs font-bold text-white">16-STEP AMPLITUDE GATE GRID</span>
+                <span className="text-[10px] font-mono text-[#777]">1/16 beat grid</span>
               </div>
               <div className="flex items-center gap-2">
                 <button
                   onClick={() => {
-                    const allOn = new Array(16).fill(true);
-                    const updated = { ...grossState, gateSteps: allOn };
-                    setGrossState(updated);
-                    audioEngine.setGrossBeatState(updated);
+                    setActivePresetId(null);
+                    publish({ ...grossState, gateSteps: grossBeatAllOpenSteps() });
                   }}
                   className="px-2 py-0.5 rounded text-[9px] bg-[#222225] text-[#888] hover:text-white"
                 >
-                  All Active
+                  All Open
                 </button>
                 <button
                   onClick={() => {
-                    const inv = grossState.gateSteps.map(s => !s);
-                    const updated = { ...grossState, gateSteps: inv };
-                    setGrossState(updated);
-                    audioEngine.setGrossBeatState(updated);
+                    setActivePresetId(null);
+                    publish({ ...grossState, gateSteps: grossState.gateSteps.map(s => !s) });
                   }}
                   className="px-2 py-0.5 rounded text-[9px] bg-[#222225] text-[#888] hover:text-white"
                 >
@@ -379,14 +322,14 @@ export const GrossBeatModal: React.FC<GrossBeatModalProps> = ({
         {/* Modal Footer */}
         <div className="px-5 py-3 bg-[#18181b] border-t border-[#2e2e32] flex items-center justify-between text-xs">
           <div className="flex items-center gap-2 text-[#777]">
-            <Clock className="w-3.5 h-3.5 text-[#ff6e00]" />
-            <span>Master Bus Time Manipulation</span>
+            <Waves className="w-3.5 h-3.5 text-[#ff6e00]" />
+            <span>Master Bus Amplitude Gate</span>
           </div>
           <button
             onClick={onClose}
             className="px-4 py-1.5 bg-[#ff6e00] hover:bg-[#ff8526] text-black font-bold text-xs rounded transition shadow"
           >
-            Apply & Close
+            Apply &amp; Close
           </button>
         </div>
       </div>

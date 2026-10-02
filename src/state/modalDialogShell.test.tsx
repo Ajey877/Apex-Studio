@@ -325,7 +325,7 @@ const MODAL_CASES: ModalCase[] = [
   },
   {
     name: 'Gross Beat', file: 'GrossBeatModal.tsx', modalId: 'gross-beat-modal',
-    titleId: 'gross-beat-modal-title', titleText: 'TIME FX BUFFER',
+    titleId: 'gross-beat-modal-title', titleText: 'MASTER GATE',
     closeLabel: 'Close Gross Beat', overlayClass: OVERLAY_STUDIO,
     open: React.createElement(GrossBeatModal, { isOpen: true, onClose: noop, currentStep: 0, isPlaying: false }),
     closed: React.createElement(GrossBeatModal, { isOpen: false, onClose: noop, currentStep: 0, isPlaying: false }),

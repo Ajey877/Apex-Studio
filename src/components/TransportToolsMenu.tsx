@@ -138,8 +138,8 @@ export const TRANSPORT_TOOL_GROUPS: readonly TransportToolGroupSpec[] = [
     items: [
       {
         id: 'fl-gross-beat-btn',
-        label: 'Time FX',
-        title: 'Master gating effects and tape-stop brake',
+        label: 'Master Gate',
+        title: 'Sixteen-step amplitude gate on the master bus',
         icon: Waves,
         handler: 'timeFx',
       },
