@@ -2,6 +2,7 @@ import type { ProjectState, Channel, PlaylistClip } from '../types/daw';
 import { audioEngine } from '../audio/audioEngine';
 import { createDefaultMixerTracks, createDefaultPlaylistTracks } from '../audio/presets';
 import { markAudioClipsMissingBufferId } from './playlistClipIntegrity';
+import { DEFAULT_TIMELINE_BARS, normalizeTimelineBars, revalidateProjectTimeline } from './playlistTimeline';
 import {
   MASTER_MIXER_TRACK_ID,
   deriveNextMixerTrackId,
@@ -139,6 +140,7 @@ export const createDefaultProjectState = (): ProjectState => {
     nextMixerTrackId: 1,
     playlistTracks: clone(createDefaultPlaylistTracks()),
     playlistClips: [],
+    totalBars: DEFAULT_TIMELINE_BARS,
     recordings: [],
     comments: [],
     collaborators: [],
@@ -239,6 +241,10 @@ export const normalizeProjectState = (input: unknown): ProjectState => {
     midiMappings: Array.isArray(candidate.midiMappings) ? clone(candidate.midiMappings) : defaults.midiMappings,
     connectedMidiDevices: Array.isArray(candidate.connectedMidiDevices) ? clone(candidate.connectedMidiDevices) : [],
     markers: Array.isArray(candidate.markers) ? clone(candidate.markers) : [],
+    // Phase 54: an absent or malformed length resolves to the default here and
+    // the arrangement is revalidated against it before the document is handed
+    // back (see the `revalidateProjectTimeline` wrap on the return value).
+    totalBars: normalizeTimelineBars(candidate.totalBars),
     macroKnobs: Array.isArray(candidate.macroKnobs) ? clone(candidate.macroKnobs) : [],
     vocalTuner: candidate.vocalTuner === undefined ? undefined : clone(candidate.vocalTuner) as ProjectState['vocalTuner'],
     selectedPatternId: typeof candidate.selectedPatternId === 'string'
@@ -267,10 +273,10 @@ export const normalizeProjectState = (input: unknown): ProjectState => {
     throw new Error('Invalid project file: required project metadata is missing or malformed.');
   }
 
-  return {
+  return revalidateProjectTimeline({
     ...routingNormalized,
     nextMixerTrackId: normalizeNextMixerTrackId(routingNormalized, candidate.nextMixerTrackId)
-  };
+  });
 };
 
 export interface DeleteChannelResult {

@@ -55,6 +55,15 @@ import {
   resolvePlaylistClipMove,
   resolveAudioDropStartBarFromClientX,
 } from './audioDropPlacement';
+import {
+  MAX_TIMELINE_BARS,
+  MIN_TIMELINE_BARS,
+  clampStartBarToTimeline,
+} from '../state/playlistTimeline';
+
+/** Both grid-click producers create a 4-bar clip; the timeline clamp needs its length. */
+const DEFAULT_PATTERN_CLIP_LENGTH_BARS = 4;
+const AUTOMATION_CLIP_LENGTH_BARS = 4;
 
 interface PlaylistArrangerProps {
   tracks: PlaylistTrack[];
@@ -84,6 +93,18 @@ interface PlaylistArrangerProps {
   isPlaying: boolean;
   /** Project tempo (`meta.bpm`); Bounce-In-Place renders stems at this tempo and imported audio is sized to it. */
   bpm: number;
+  /**
+   * Phase 54: the arrangement length, owned by `ProjectState` and passed down.
+   *
+   * It is deliberately required: this component used to keep its own
+   * `useState(32)`, which is how a clip clicked near the end of the timeline
+   * ended up past the boundary while the document (and the export window) had a
+   * different idea of how long the arrangement was. Requiring the prop means
+   * there is exactly one owner and the compiler enforces it.
+   */
+  totalBars: number;
+  /** Publishes a new arrangement length through the normal project mutation path (single history entry). */
+  onUpdateTotalBars: (totalBars: number) => void;
 }
 
 const BAR_WIDTH = 96;
@@ -165,11 +186,12 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
   onSelectedClipIdChange,
   currentBar,
   isPlaying,
+  totalBars,
+  onUpdateTotalBars,
   bpm
 }) => {
   const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
   const [selectedPointIndex, setSelectedPointIndex] = useState<number | null>(null);
-  const [totalBars, setTotalBars] = useState(32);
   const [activeTool, setActiveTool] = useState<'place' | 'cut' | 'delete'>('place');
   const [clipTypeToAdd, setClipTypeToAdd] = useState<'pattern' | 'automation'>('pattern');
   const [automationEditorClipId, setAutomationEditorClipId] = useState<string | null>(null);
@@ -557,7 +579,14 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
       return;
     }
 
-    // Place new clip according to selected clip type
+    // Place new clip according to selected clip type.
+    //
+    // Phase 54: both branches below place a 4-bar clip at the clicked bar, so
+    // both must resolve that bar against the timeline before publishing. This
+    // is the path that could previously create a clip ending at bar 35 on a
+    // 32-bar timeline: the pattern branch called `createPlaylistPatternClip`
+    // without `bounds` (so `assertValidPlaylistClip` skipped its timeline
+    // check) and the automation branch never validated at all.
     const targetChannel = resolvePlaylistTargetChannel(channels, trackIndex);
     let newClip: PlaylistClip;
 
@@ -566,8 +595,8 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
       newClip = {
         id: `auto-clip-${Date.now()}`,
         trackIndex,
-        startBar: barIndex,
-        lengthBars: 4,
+        startBar: clampStartBarToTimeline(barIndex, AUTOMATION_CLIP_LENGTH_BARS, bounds),
+        lengthBars: AUTOMATION_CLIP_LENGTH_BARS,
         type: 'automation',
         color: '#00e5ff',
         name: `Auto: ${initialTargetChannel?.name || 'Channel'} Cutoff`,
@@ -595,9 +624,12 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
       // real buffer — drag/drop, recording, or bounce-in-place.
       newClip = createPlaylistPatternClip(
         trackIndex,
-        barIndex,
+        clampStartBarToTimeline(barIndex, DEFAULT_PATTERN_CLIP_LENGTH_BARS, bounds),
         targetChannel,
-        tracks[trackIndex]
+        tracks[trackIndex],
+        DEFAULT_PATTERN_CLIP_LENGTH_BARS,
+        undefined,
+        bounds
       );
     }
 
@@ -880,7 +912,7 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
 
           <div className="flex items-center gap-1 bg-[#121214] border border-[#333336] p-0.5 rounded">
             <button
-              onClick={() => setTotalBars(prev => Math.max(8, prev - 8))}
+              onClick={() => onUpdateTotalBars(Math.max(MIN_TIMELINE_BARS, totalBars - 8))}
               className="p-1 text-[#777] hover:text-white"
               title="Zoom In"
             >
@@ -888,7 +920,7 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
             </button>
             <span className="text-[9px] text-[#ff6e00] font-mono px-1">{totalBars} Bars</span>
             <button
-              onClick={() => setTotalBars(prev => Math.min(64, prev + 8))}
+              onClick={() => onUpdateTotalBars(Math.min(MAX_TIMELINE_BARS, totalBars + 8))}
               className="p-1 text-[#777] hover:text-white"
               title="Zoom Out"
             >

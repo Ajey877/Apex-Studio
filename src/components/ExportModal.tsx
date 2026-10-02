@@ -30,6 +30,12 @@ interface ExportModalProps {
    */
   patternLengthSteps?: number;
   /**
+   * Phase 54: the project's authoritative playlist timeline length, resolved by
+   * App from `ProjectState`. A Song render is clamped to it, so the exported
+   * window can never be longer than the arrangement the user can see.
+   */
+  totalBars?: number;
+  /**
    * Playlist lane rows used by the project. Phase 10A uses them to honour
    * per-lane mute state during offline export — a muted lane is dropped from
    * the rendered WAV and from each stem, exactly like the live scheduler.
@@ -69,7 +75,7 @@ export const formatAuditionTime = (seconds: number): string => {
   return `${mm}:${ss.toString().padStart(2, '0')}`;
 };
 
-export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, channels, clips, meta, mixerTracks, patternLengthSteps, playlistTracks, includeMixerFx = DEFAULT_INCLUDE_MIXER_FX }) => {
+export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, channels, clips, meta, mixerTracks, patternLengthSteps, playlistTracks, includeMixerFx = DEFAULT_INCLUDE_MIXER_FX, totalBars }) => {
   const [format, setFormat] = useState<ExportFormat>('wav24');
   const [scope, setScope] = useState<ExportScope>('song');
   const [isRendering, setIsRendering] = useState(false);
@@ -162,10 +168,12 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, chann
     setStatusText('Preparing deterministic export...');
 
     try {
-      const totalBars = getProjectRenderBars(clips, scope, patternLengthSteps);
+      // Phase 54: the render window is resolved against the same timeline the
+      // arranger uses, so "32 bars on screen" can never export as 35.
+      const renderBars = getProjectRenderBars(clips, scope, patternLengthSteps, totalBars);
 
       if (format === 'midi') {
-        setStatusText(`Writing Standard MIDI (${totalBars} bars)...`);
+        setStatusText(`Writing Standard MIDI (${renderBars} bars)...`);
         setRenderProgress(60);
         const midiBlob = buildStandardMidiFile(channels, clips, meta);
         setDownloadUrl(URL.createObjectURL(midiBlob));
@@ -177,14 +185,14 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, chann
         if (format === 'wav32') bitDepth = 32;
 
         if (format === 'stems') {
-          setStatusText(`Rendering isolated stems (${totalBars} bars)...`);
+          setStatusText(`Rendering isolated stems (${renderBars} bars)...`);
           setRenderProgress(35);
           const { stems, master } = await audioEngine.renderProjectStems(
             channels,
             clips,
             mixerTracks,
             meta.bpm,
-            totalBars,
+            renderBars,
             bitDepth,
             scope,
             patternLengthSteps,
@@ -202,7 +210,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, chann
             `TIME SIGNATURE: ${meta.timeSignature?.join('/') ?? '4/4'}`,
             `SWING: ${meta.swing}`,
             `TRACKS COUNT: ${channels.length}`,
-            `RENDER BARS: ${totalBars}`,
+            `RENDER BARS: ${renderBars}`,
             `EXPORT DATE: ${new Date().toISOString()}`,
           ].join('\n'));
           setRenderProgress(80);
@@ -211,14 +219,14 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, chann
           setRenderProgress(100);
           setStatusText('Stem package ready for download.');
         } else {
-          setStatusText(`Rendering timeline WAV (${totalBars} bars)...`);
+          setStatusText(`Rendering timeline WAV (${renderBars} bars)...`);
           setRenderProgress(35);
           const renderedBuffer = await audioEngine.renderTimelineOffline(
             channels,
             clips,
             mixerTracks,
             meta.bpm,
-            totalBars,
+            renderBars,
             undefined,
             effectiveIncludeMixerFx,
             scope,
@@ -321,7 +329,9 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, chann
           <div className="grid grid-cols-2 gap-2">
             <button onClick={() => { setScope('song'); setDownloadUrl(null); }} className={`p-2.5 rounded-lg border text-left transition ${scope === 'song' ? 'bg-[#1a1a1d] border-[#ff6e00] text-white' : 'bg-[#121214] border-[#333336] text-[#777] hover:text-white'}`}>
               <div className="font-bold text-xs">Full Song</div>
-              <div className="text-[9px] text-[#777]">Render through the last playlist clip ({getProjectRenderBars(clips, 'song')} bars)</div>
+              {/* Phase 54: the stated length is resolved from the same timeline
+                  contract the renderer uses, so the label and the WAV agree. */}
+              <div className="text-[9px] text-[#777]">Render through the last playlist clip ({getProjectRenderBars(clips, 'song', undefined, totalBars)} bars)</div>
             </button>
             <button id="export-scope-pattern" onClick={() => { setScope('pattern'); setDownloadUrl(null); }} className={`p-2.5 rounded-lg border text-left transition ${scope === 'pattern' ? 'bg-[#1a1a1d] border-[#ff6e00] text-white' : 'bg-[#121214] border-[#333336] text-[#777] hover:text-white'}`}>
               <div className="font-bold text-xs">Pattern Loop</div>

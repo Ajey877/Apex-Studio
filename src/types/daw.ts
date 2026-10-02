@@ -671,6 +671,16 @@ export interface ProjectState {
   midiMappings: MidiMapping[];
   connectedMidiDevices?: MidiDeviceInfo[];
   markers?: ArrangementMarker[];
+  /**
+   * Phase 54: playlist timeline length in bars — the single authority for
+   * playlist clip bounds and the export render window.
+   *
+   * Optional in the type so project documents written before this phase still
+   * load; `normalizeProjectState` always resolves it to a concrete, legal
+   * length (`DEFAULT_TIMELINE_BARS` when absent), and revalidates the
+   * arrangement against it.
+   */
+  totalBars?: number;
   vocalTuner?: VocalTunerSettings;
   macroKnobs?: MasterMacroKnob[];
   /** UI-only persistence marker for an acknowledged missing-audio warning. */

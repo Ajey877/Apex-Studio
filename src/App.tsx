@@ -47,6 +47,7 @@ import { createHistory, type ProjectHistory, resolveSaveShortcut, resolveUndoRed
 import { KEY_NOTE_MAP, getKeyboardNotePitch } from './state/musicalKeyboard';
 import { fullscreenController } from './state/fullscreen';
 import { createNewSessionRequest } from './state/newSession';
+import { getProjectTimelineBars, setTimelineBarsInProjectState } from './state/playlistTimeline';
 import { resolveApplicationMenuShortcut, type ApplicationMenuCommandId } from './state/applicationMenu';
 import {
   createApplicationMenuCommandState,
@@ -1055,6 +1056,19 @@ export function App() {
     commitPlaylistHistory(nextState, 'Marker change');
   };
 
+  /**
+   * Phase 54: the playlist timeline length is project state, not component
+   * state, so changing it goes through the same mutation + history path as any
+   * other arrangement edit. `setTimelineBarsInProjectState` also revalidates
+   * every clip against the new boundary, which is what makes shrink safe.
+   */
+  const handleUpdateTotalBars = (totalBars: number) => {
+    mutateProjectState(
+      current => setTimelineBarsInProjectState(current, totalBars),
+      'Change timeline length'
+    );
+  };
+
   const handleAddPlaylistTrack = () => {
     const nextId = projectStateRef.current.playlistTracks.length + 1;
     const newTrack: PlaylistTrack = {
@@ -1463,6 +1477,13 @@ export function App() {
 
   const selectedChannel = projectState.channels.find(c => c.id === selectedChannelId) || projectState.channels[0];
 
+  /**
+   * Phase 54: resolved once here and passed to both the arranger and the export
+   * modal, so clip bounds and the render window can never disagree about how
+   * long the arrangement is.
+   */
+  const projectTimelineBars = getProjectTimelineBars(projectState);
+
   // Phase 8C (P1-11): missing audio is derived from the project itself (hydration
   // flags clips/samples), so it stays accurate across save, reload and recovery
   // without a second source of truth.
@@ -1696,6 +1717,8 @@ export function App() {
 
           {currentView === 'playlist' && (
             <PlaylistArranger
+              totalBars={projectTimelineBars}
+              onUpdateTotalBars={handleUpdateTotalBars}
               tracks={projectState.playlistTracks}
               clips={projectState.playlistClips}
               patterns={projectState.patterns}
@@ -1802,7 +1825,7 @@ export function App() {
         clipCount={projectState.playlistClips.length}
       />
 
-      <ExportModal isOpen={isExportOpen} onClose={() => setIsExportOpen(false)} channels={projectState.channels} clips={projectState.playlistClips} mixerTracks={projectState.mixerTracks} meta={projectState.meta} patternLengthSteps={selectedPatternLengthSteps} playlistTracks={projectState.playlistTracks} includeMixerFx={DEFAULT_INCLUDE_MIXER_FX} />
+      <ExportModal isOpen={isExportOpen} onClose={() => setIsExportOpen(false)} channels={projectState.channels} clips={projectState.playlistClips} mixerTracks={projectState.mixerTracks} meta={projectState.meta} patternLengthSteps={selectedPatternLengthSteps} playlistTracks={projectState.playlistTracks} includeMixerFx={DEFAULT_INCLUDE_MIXER_FX} totalBars={projectTimelineBars} />
       {/* The single manifest importer, shared by File → Open Project Manifest and the Project Hub. */}
       <input
         id="project-manifest-input"

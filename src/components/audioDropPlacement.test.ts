@@ -289,10 +289,22 @@ test('production PlaylistArranger uses unified coordinate placement for audio dr
   assert.match(arrangerSource, /const\s+movedCoords\s*=\s*resolvePlaylistClipMove\(/);
   assert.match(arrangerSource, /movePlaylistClip\(\s*clip,\s*movedCoords\.startBar,\s*movedCoords\.trackIndex/);
 
-  // Automation path remains unchanged: startBar: barIndex
+  /**
+   * Phase 54 — the automation branch used to be asserted as `startBar: barIndex`,
+   * i.e. the unclamped click bar. That was the bug, not the contract: a 4-bar
+   * automation clip clicked onto the last cell of a 32-bar timeline was created
+   * ending at bar 35. Both grid-click producers now resolve their start bar
+   * through the shared timeline clamp before publishing.
+   */
   assert.match(
     arrangerSource,
-    /if\s*\(clipTypeToAdd\s*===\s*'automation'\)\s*\{[\s\S]*?startBar:\s*barIndex,\s*lengthBars:\s*4,\s*type:\s*'automation'/
+    /if\s*\(clipTypeToAdd\s*===\s*'automation'\)\s*\{[\s\S]*?startBar:\s*clampStartBarToTimeline\(/,
+    'the automation branch must clamp its start bar against the timeline'
+  );
+  assert.doesNotMatch(
+    arrangerSource,
+    /startBar:\s*barIndex,\s*lengthBars:\s*4,\s*type:\s*'automation'/,
+    'no grid-click producer may publish an unclamped click bar'
   );
 
   /**

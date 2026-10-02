@@ -18,11 +18,18 @@ export const PATTERN_EXPORT_MIN_BARS = 4;
  * `Pattern.lengthSteps` so the window can never truncate a longer pattern. The
  * length itself is normalized by the single pattern-length source of truth; no
  * second pattern-length calculation lives here.
+ *
+ * Phase 54: when the project's authoritative timeline length is supplied, a
+ * song render can never be longer than the timeline the user can see. Clips are
+ * already clamped to `totalBars` at creation, on shrink and on load, so this is
+ * the final guarantee rather than the only one — it exists so a 32-bar timeline
+ * can never produce a 35-bar export again.
  */
 export function getProjectRenderBars(
   clips: PlaylistClip[],
   scope: ExportScope,
-  patternLengthSteps?: number
+  patternLengthSteps?: number,
+  totalBars?: number
 ): number {
   if (scope === 'pattern') {
     return Math.max(PATTERN_EXPORT_MIN_BARS, getPatternLengthBars(patternLengthSteps));
@@ -30,7 +37,9 @@ export function getProjectRenderBars(
   const endBars = clips
     .filter(clip => Number.isFinite(clip.startBar) && Number.isFinite(clip.lengthBars) && clip.lengthBars > 0)
     .map(clip => clip.startBar + clip.lengthBars);
-  return Math.max(1, ...endBars);
+  const lastClipBar = Math.max(1, ...endBars);
+  if (totalBars === undefined || !Number.isFinite(totalBars) || totalBars <= 0) return lastClipBar;
+  return Math.min(lastClipBar, Math.round(totalBars));
 }
 
 const clampMidi = (value: number): number => Math.max(0, Math.min(127, Math.round(value)));
