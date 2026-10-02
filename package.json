@@ -28,7 +28,7 @@
     "verify:desktop": "node scripts/verify-desktop-config.mjs",
     "smoke:win": "node scripts/desktop-smoke.mjs",
     "test:metering": "tsx --test src/audio/loudnessMeasurement.test.ts src/audio/truePeak.test.ts src/audio/stereoMeasurement.test.ts src/audio/masterMeasurementStream.test.ts src/audio/meteringTruthfulness.test.ts src/components/masteringMeteringUi.test.ts",
-    "test:truth": "tsx --test src/components/audioSlicerSource.test.ts src/components/warpClipTarget.test.ts src/components/parametricEqPublication.test.ts src/components/vocalTunerTruthfulness.test.tsx src/state/productTruthStrings.test.ts"
+    "test:truth": "tsx --test src/components/audioSlicerSource.test.ts src/components/warpClipTarget.test.ts src/components/parametricEqPublication.test.ts src/components/vocalTunerTruthfulness.test.tsx src/state/productTruthStrings.test.ts src/components/grossBeatTruth.test.tsx"
   },
   "build": {
     "appId": "com.apexstudio.daw",

@@ -62,15 +62,15 @@ export interface Note {
 
 export type ChordVoicing = 'root' | 'inversion1' | 'inversion2' | 'inversion3' | 'drop2' | 'open_spread';
 
+/**
+ * Phase 57: Gross Beat is an amplitude gate, not a time/pitch processor.
+ * The engine gates the master bus gain on a 16-step grid; there is no
+ * time-stretch, pitch-shift, half-time or tape processing to configure.
+ */
 export interface GrossBeatState {
   enabled: boolean;
-  preset: 'half_time' | 'tape_stop' | 'trance_gate' | 'sidechain_pump' | 'triplet_chopper' | 'stutter_32' | 'scratch_slow' | 'reverse';
-  mix: number; // 0 - 1.0
-  speed: 0.5 | 1.0 | 2.0; // 0.5 = Half Time
-  tapeStopActive: boolean;
-  tapeStopDurationMs: number; // 100 to 2000 ms
+  mix: number; // 0 - 1.0 gate depth
   gateSteps: boolean[]; // 16 steps
-  pitchShiftSemitones: number; // e.g. -12 for half-time
 }
 
 export interface SidechainSettings {
