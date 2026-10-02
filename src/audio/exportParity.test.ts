@@ -1,6 +1,7 @@
 import { describe, it, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { audioEngine } from './audioEngine';
+import { installLiveFxChainHardening } from './liveFxChainHardening';
 import type { Channel, PlaylistClip, PlaylistTrack, MixerTrack } from '../types/daw';
 
 // --- Web Audio Mock Classes ---
@@ -725,28 +726,103 @@ describe('Phase 10A: Playlist lane-mute parity for offline export', () => {
     assert.ok(restoredMutes instanceof Set, 'playlistLaneMutes must be restored to a Set');
   });
 
-  it('deterministic seeded impulse produces stable offline output across runs', async () => {
-    // Phase 10A relies on a byte-identical reverb impulse for the same
-    // project. With the seeded impulse, two sequential renders at the same
-    // args must produce channel samples that are bit-for-bit identical
-    // (WAV size alone is not a sensitive signal: the offline encoder sizes
-    // the WAV by `buffer.length * blockAlign`, and the mock `startRendering`
-    // returns silence regardless of the impulse).
+  it('production offline FX factory assigns identical non-zero impulses to the actual reverb convolvers', async () => {
+    installLiveFxChainHardening(audioEngine);
+
+    const mixerTracksWithReverb = baseMixerTracks.map(mixerTrack => mixerTrack.id === 1
+      ? {
+          ...mixerTrack,
+          fxSlots: [{
+            id: 'phase59-reverb',
+            type: 'reverb' as const,
+            name: 'Phase 59 Reverb',
+            enabled: true,
+            mix: 0.5,
+            params: {},
+          }],
+        }
+      : mixerTrack);
+
+    const captureProductionConvolverImpulse = async (): Promise<{ left: Float32Array; right: Float32Array }> => {
+      const previousOfflineAudioContext = (globalThis as any).OfflineAudioContext;
+      let capturedContext: MockOfflineAudioContext | undefined;
+      class CapturingOfflineAudioContext extends MockOfflineAudioContext {
+        constructor(channels: number, length: number, sampleRate: number) {
+          super(channels, length, sampleRate);
+          capturedContext = this;
+        }
+      }
+
+      (globalThis as any).OfflineAudioContext = CapturingOfflineAudioContext;
+      try {
+        await audioEngine.renderTimelineOffline(
+          [],
+          [],
+          mixerTracksWithReverb,
+          120,
+          1,
+          undefined,
+          true,
+          'song',
+          undefined,
+          undefined,
+          []
+        );
+      } finally {
+        (globalThis as any).OfflineAudioContext = previousOfflineAudioContext;
+      }
+
+      assert.ok(capturedContext, 'offline render must construct a capturing OfflineAudioContext');
+      assert.equal(capturedContext!.createdConvolvers.length, 1, 'the enabled reverb slot must build exactly one ConvolverNode');
+      const convolver = capturedContext!.createdConvolvers[0];
+      assert.ok(convolver.buffer, 'the production reverb factory must assign ConvolverNode.buffer');
+      const impulse = convolver.buffer as AudioBuffer;
+      return {
+        left: new Float32Array(impulse.getChannelData(0)),
+        right: new Float32Array(impulse.getChannelData(1)),
+      };
+    };
+
+    const first = await captureProductionConvolverImpulse();
+    const second = await captureProductionConvolverImpulse();
+    const firstMismatchLeft = firstDiffIndex(first.left, second.left);
+    const firstMismatchRight = firstDiffIndex(first.right, second.right);
+
+    assert.equal(
+      firstMismatchLeft,
+      -1,
+      firstMismatchLeft === -1
+        ? ''
+        : `Actual production ConvolverNode left impulses diverged at sample ${firstMismatchLeft}: ${first.left[firstMismatchLeft]} vs ${second.left[firstMismatchLeft]}`
+    );
+    assert.equal(
+      firstMismatchRight,
+      -1,
+      firstMismatchRight === -1
+        ? ''
+        : `Actual production ConvolverNode right impulses diverged at sample ${firstMismatchRight}: ${first.right[firstMismatchRight]} vs ${second.right[firstMismatchRight]}`
+    );
+
+    const impulseEnergy = (channel: Float32Array) => channel.reduce((energy, sample) => energy + sample * sample, 0);
+    assert.ok(
+      impulseEnergy(first.left) + impulseEnergy(first.right) > 0,
+      'the impulse assigned to the actual ConvolverNode must contain non-zero energy'
+    );
+  });
+
+  it('engine-generated seeded offline impulse buffer is stable across runs', async () => {
+    // This is a low-level guard for AudioEngine's seeded impulse generator,
+    // not a production FX-factory integration test: it captures the buffer
+    // built before mixer-chain construction. The preceding test separately
+    // verifies the impulse assigned to the actual production ConvolverNode.
     //
     // The test spies on `OfflineAudioContext.createBuffer` to capture the
-    // reverb impulse AudioBuffer the offline renderer fills via
-    // `buildReverbImpulse(2.5, 2.0, { seed: 0x10a4eb })`. That call writes
-    // `(rng() * 2 - 1) * factor` into both channels using a Park–Miller LCG,
-    // so the very first sample is deterministic and we can pin it against a
-    // hand-computed reference value. The assertions therefore fail if:
-    //   (a) the seed argument is removed (Math.random would produce a
-    //       different sample across the two runs and the impulse compare
-    //       would diverge, or the first-sample pin would no longer match),
-    //   (b) the seed constant is changed (the first-sample pin moves),
-    //   (c) the Park–Miller generator is replaced with anything that
-    //       produces a different sequence for the same seed.
-    // The test does not weaken the implementation: `buildReverbImpulse`
-    // remains the only call site, and the capture is purely test-side.
+    // AudioBuffer filled via `buildReverbImpulse(2.5, 2.0, { seed: 0x10a4eb })`.
+    // That call writes `(rng() * 2 - 1) * factor` into both channels using a
+    // Park–Miller LCG, so the first sample can be pinned to a hand-computed
+    // reference. The assertions therefore fail if the seed, seed constant,
+    // or deterministic generator changes. The mock `startRendering()` still
+    // returns silence, so this test makes no claim about rendered PCM.
     audioEngine.setSampleBuffer('seed-buf', createTestBuffer(2));
     const clips: PlaylistClip[] = [
       {
