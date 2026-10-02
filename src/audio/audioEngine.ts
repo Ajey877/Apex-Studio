@@ -798,6 +798,18 @@ class AudioEngine {
     currentSource.connect(channel.panner);
   }
 
+  /**
+   * Legacy single-switch FX factory. Phase 10C-B deliberately kept it in sync
+   * with `liveFxChainHardening.createEffect` for chorus, and
+   * `phase10cB.test.ts` still exercises that defensive contract on the
+   * unwrapped path, so the factory is retained.
+   *
+   * Phase 58 removed the dead mixer `gross_beat` insert from `FxType`. Its
+   * unity-gain branch had no defensive contract and is gone; slots persisted
+   * by pre-Phase-58 projects now fall through to `default` and are dropped.
+   * Phase 57's master-bus `grossBeat` amplitude gate is a separate subsystem
+   * (see `grossBeatGate.ts`) and is unaffected.
+   */
   private createFxNode(slot: FxSlot): AudioNode | null {
     if (!this.ctx) return null;
     const ctx = this.ctx;
@@ -914,11 +926,6 @@ class AudioEngine {
         shaper.connect(filter);
         setChainEnd(shaper, filter);
         return shaper;
-      }
-      case 'gross_beat': {
-        const gainNode = ctx.createGain();
-        gainNode.gain.value = 1.0;
-        return gainNode;
       }
       case 'chorus': {
         // Phase 10C-B: defensive parity with liveFxChainHardening.createEffect.

@@ -200,12 +200,11 @@ function createEffect(ctx: AudioContext, slot: FxSlot): AudioEffect | null {
       return wrapWetDry(ctx, effect, mix);
     }
     case 'tape_saturation': return wrapWetDry(ctx, createTapeEffect(ctx, slot), mix);
-    case 'gross_beat': {
-      const gain = ctx.createGain();
-      gain.gain.value = 1;
-      const core = new CompositeEffect(`${slot.id}-gross-beat`, 'Time FX', gain, gain, [gain]);
-      return wrapWetDry(ctx, core, mix);
-    }
+    // Phase 58: the dead mixer `gross_beat` insert (a unity GainNode that never
+    // processed audio) was removed from `FxType`. Slot objects carried in by
+    // pre-Phase-58 projects fall through to `default` and are dropped instead
+    // of inserting a no-op node. Phase 57's master-bus `grossBeat` amplitude
+    // gate lives in `grossBeatGate.ts`/`audioEngine.ts` and is unrelated.
     default: return null;
   }
 }

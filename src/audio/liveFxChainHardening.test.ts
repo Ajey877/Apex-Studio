@@ -435,7 +435,7 @@ describe('Phase 10C-B: offline-rendering branch of installLiveFxChainHardening',
   it('offline: every FxType value builds without throwing (Phase 10C-B)', () => {
     const FX_TYPES: FxSlot['type'][] = [
       'equalizer', 'reverb', 'delay', 'distortion', 'compressor',
-      'chorus', 'bitcrusher', 'limiter', 'tape_saturation', 'gross_beat',
+      'chorus', 'bitcrusher', 'limiter', 'tape_saturation',
     ];
     for (const type of FX_TYPES) {
       const { engine, channel } = buildOfflineEngine();
@@ -593,7 +593,6 @@ describe('Phase 11B: live/export FX parity matrix', () => {
       'bitcrusher',
       'limiter',
       'tape_saturation',
-      'gross_beat',
     ];
 
     for (const type of fxTypes) {
@@ -624,7 +623,6 @@ describe('Phase 11B: live/export FX parity matrix', () => {
       'bitcrusher',
       'limiter',
       'tape_saturation',
-      'gross_beat',
     ];
 
     for (const type of fxTypes) {

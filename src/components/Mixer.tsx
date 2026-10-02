@@ -343,7 +343,6 @@ export const Mixer: React.FC<MixerProps> = ({
                   { id: 'distortion', name: 'Fast Distortion' },
                   { id: 'compressor', name: 'Studio Compressor' },
                   { id: 'chorus', name: 'Stereo Chorus' },
-                  { id: 'gross_beat', name: 'Gross Beat' },
                   { id: 'bitcrusher', name: 'Bitcrusher' },
                   { id: 'limiter', name: 'Transparent Limiter' }
                 ].map((fx) => (

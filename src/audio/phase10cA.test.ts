@@ -128,7 +128,6 @@ describe('Phase 10C-A: FX picker dropdown completeness', () => {
       'bitcrusher',
       'limiter',
       'tape_saturation',
-      'gross_beat',
     ];
 
     // Static source inspection — the dropdown array lives inline in the JSX
@@ -161,7 +160,7 @@ describe('Phase 10C-A: FX picker dropdown completeness', () => {
     // `id: '...'` inside the dropdown region must be a real FxType.
     const SUPPORTED_FX_TYPES = new Set<string>([
       'equalizer', 'reverb', 'delay', 'distortion', 'compressor',
-      'chorus', 'bitcrusher', 'limiter', 'tape_saturation', 'gross_beat',
+      'chorus', 'bitcrusher', 'limiter', 'tape_saturation',
     ]);
 
     const mixerPath = resolve(__dirname, '..', 'components', 'Mixer.tsx');
