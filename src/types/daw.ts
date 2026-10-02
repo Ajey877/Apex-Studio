@@ -47,8 +47,7 @@ export type FxType =
   | 'chorus' 
   | 'bitcrusher' 
   | 'limiter'
-  | 'tape_saturation'
-  | 'gross_beat';
+  | 'tape_saturation';
 
 export interface Note {
   id: string;
