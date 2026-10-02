@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState } from 'react';
 import { ModalFrame } from './ModalFrame';
 import { 
   Mic, 
@@ -99,114 +99,16 @@ export const VocalTunerModal: React.FC<VocalTunerModalProps> = ({
   channels
 }) => {
   const [selectedChannelId, setSelectedChannelId] = useState<string>(channels[0]?.id || '');
-  const [isLiveMicActive, setIsLiveMicActive] = useState(false);
-  const [detectedPitch, setDetectedPitch] = useState<{ note: string; cents: number; hz: number }>({
-    note: 'A4',
-    cents: 0,
-    hz: 440
-  });
-  const [targetSnapNote, setTargetSnapNote] = useState<string>('A4');
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
 
-  const canvasRef = useRef<HTMLCanvasElement | null>(null);
-
-  // Animate tuner pitch needle & chromatic pitch wheel
-  useEffect(() => {
-    if (!isOpen) return;
-
-    let animId: number;
-    let phase = 0;
-
-    const render = () => {
-      phase += 0.05;
-      // Simulated live pitch fluctuation around key root
-      const rootOffset = vocalTunerSettings.rootKey;
-      const baseHz = 220 * Math.pow(2, (rootOffset + Math.sin(phase) * 1.5) / 12);
-      const semitone = Math.round(12 * Math.log2(baseHz / 440)) + 69;
-      const noteNames = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
-      const noteName = noteNames[semitone % 12] + Math.floor(semitone / 12 - 1);
-      const cents = Math.round((Math.sin(phase * 1.3) * (vocalTunerSettings.retuneSpeedMs > 10 ? 35 : 5)));
-
-      setDetectedPitch({
-        note: noteName,
-        cents: cents,
-        hz: Math.round(baseHz)
-      });
-      setTargetSnapNote(noteNames[(rootOffset + (vocalTunerSettings.scale === 'minor' ? 3 : 4)) % 12] + '4');
-
-      drawTunerCanvas(cents);
-      animId = requestAnimationFrame(render);
-    };
-
-    animId = requestAnimationFrame(render);
-    return () => cancelAnimationFrame(animId);
-  }, [isOpen, vocalTunerSettings]);
-
-  const drawTunerCanvas = (cents: number) => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-
-    const width = canvas.width;
-    const height = canvas.height;
-    ctx.clearRect(0, 0, width, height);
-
-    // Background gradient
-    const bgGrad = ctx.createLinearGradient(0, 0, 0, height);
-    bgGrad.addColorStop(0, '#0e0e12');
-    bgGrad.addColorStop(1, '#16161c');
-    ctx.fillStyle = bgGrad;
-    ctx.fillRect(0, 0, width, height);
-
-    // Center pitch target line
-    const centerX = width / 2;
-    ctx.strokeStyle = '#00ff88';
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.moveTo(centerX, 15);
-    ctx.lineTo(centerX, height - 15);
-    ctx.stroke();
-
-    // Scale tick marks (-50 to +50 cents)
-    for (let c = -50; c <= 50; c += 10) {
-      const x = centerX + (c / 50) * (width * 0.42);
-      ctx.strokeStyle = c === 0 ? '#00ff88' : '#333338';
-      ctx.lineWidth = c % 25 === 0 ? 1.5 : 1;
-      ctx.beginPath();
-      ctx.moveTo(x, height / 2 - 15);
-      ctx.lineTo(x, height / 2 + 15);
-      ctx.stroke();
-
-      if (c % 25 === 0) {
-        ctx.fillStyle = '#66666c';
-        ctx.font = '9px monospace';
-        ctx.textAlign = 'center';
-        ctx.fillText(`${c > 0 ? '+' : ''}${c}`, x, height / 2 + 28);
-      }
-    }
-
-    // Detected pitch indicator needle
-    const clampedCents = Math.max(-50, Math.min(50, cents));
-    const needleX = centerX + (clampedCents / 50) * (width * 0.42);
-
-    // Glow around needle
-    const isTuned = Math.abs(cents) < 8;
-    ctx.fillStyle = isTuned ? '#00ff88' : '#ff0055';
-    ctx.shadowColor = isTuned ? '#00ff88' : '#ff0055';
-    ctx.shadowBlur = 12;
-    ctx.beginPath();
-    ctx.arc(needleX, height / 2, 7, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.shadowBlur = 0;
-
-    // Pitch label text
-    ctx.fillStyle = '#ffffff';
-    ctx.font = 'bold 12px monospace';
-    ctx.textAlign = 'center';
-    ctx.fillText(`${clampedCents > 0 ? '+' : ''}${clampedCents} ct`, needleX, height / 2 - 18);
-  };
-
+  /**
+   * Phase 52: this panel used to animate a pitch needle from `Math.sin(phase)`
+   * and print the result as "Detected: <note> (<n>Hz)" next to a control
+   * labelled REAL-TIME PITCH QUANTIZER. No microphone is opened and no pitch
+   * detection exists anywhere in the app, so every one of those numbers was
+   * invented. The readout is gone rather than restyled: a meter may show less,
+   * but it must never show a measurement it did not make.
+   */
   const handleApplyPreset = (preset: typeof PRESETS[0]) => {
     onUpdateVocalTuner({
       ...vocalTunerSettings,
@@ -240,10 +142,10 @@ export const VocalTunerModal: React.FC<VocalTunerModalProps> = ({
                     ? 'bg-[#00ff88]/20 text-[#00ff88] border-[#00ff88]/40' 
                     : 'bg-[#333]/20 text-[#777] border-[#444]'
                 }`}>
-                  {vocalTunerSettings.enabled ? 'ACTIVE' : 'BYPASSED'}
+                  {vocalTunerSettings.enabled ? 'ENABLED (NOT APPLIED)' : 'DISABLED'}
                 </span>
               </div>
-              <p className="text-[10px] text-[#777]">Real-time vocal scale snapping, robotic retune & formant shifting</p>
+              <p className="text-[10px] text-[#777]">Scale, retune, formant and vibrato settings — stored with the project, not applied to audio in this build</p>
             </div>
           </div>
 
@@ -257,7 +159,7 @@ export const VocalTunerModal: React.FC<VocalTunerModalProps> = ({
               }`}
             >
               <Zap className="w-3.5 h-3.5" />
-              <span>{vocalTunerSettings.enabled ? 'ON' : 'OFF'}</span>
+              <span>{vocalTunerSettings.enabled ? 'ON (STORED)' : 'OFF'}</span>
             </button>
 
             <button
@@ -300,6 +202,13 @@ export const VocalTunerModal: React.FC<VocalTunerModalProps> = ({
           </div>
 
           {/* Scale & Key Lock Engine */}
+          <div className="bg-[#0a0a0c] border border-[#ffaa00]/40 rounded-lg px-3 py-2 flex items-center justify-between gap-2">
+            <span className="text-[10px] font-mono font-bold text-[#ffaa00] uppercase tracking-wider">
+              AUTO-PITCH: NOT APPLIED — NO PROCESSING IN SIGNAL PATH
+            </span>
+            <span className="text-[10px] text-[#777] whitespace-nowrap">STORED AS PROJECT INTENT</span>
+          </div>
+
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             {/* Root Key */}
             <div className="bg-[#18181b] p-3 rounded-lg border border-[#28282b] space-y-2">
@@ -336,25 +245,27 @@ export const VocalTunerModal: React.FC<VocalTunerModalProps> = ({
             </div>
           </div>
 
-          {/* Real-time Tuner Needle Canvas Display */}
-          <div className="bg-[#0f0f12] rounded-xl border border-[#28282b] p-3.5 space-y-2">
+          {/* Pitch quantizer — no detection exists, so nothing is measured. */}
+          <div className="bg-[#0f0f12] rounded-xl border border-[#ffaa00]/40 p-3.5 space-y-2">
             <div className="flex items-center justify-between text-xs">
               <div className="flex items-center gap-2">
-                <Activity className="w-4 h-4 text-[#00ff88]" />
-                <span className="font-bold text-white">REAL-TIME PITCH QUANTIZER</span>
+                <Activity className="w-4 h-4 text-[#ffaa00]" />
+                <span className="font-bold text-white">PITCH DETECTION UNAVAILABLE</span>
               </div>
-              <div className="flex items-center gap-3 font-mono text-[11px]">
-                <span className="text-[#888]">Detected: <strong className="text-white">{detectedPitch.note}</strong> ({detectedPitch.hz}Hz)</span>
-                <span className="text-[#00ff88]">Snapped: <strong>{targetSnapNote}</strong></span>
-              </div>
+              <span className="px-1.5 py-0.5 rounded text-[9px] font-mono font-bold bg-[#ffaa00]/20 text-[#ffaa00] border border-[#ffaa00]/40">
+                NOT APPLIED — NO PITCH ANALYSIS IN SIGNAL PATH
+              </span>
             </div>
 
-            <canvas
-              ref={canvasRef}
-              width={700}
-              height={90}
-              className="w-full h-24 rounded-lg bg-[#0a0a0c] border border-[#222225]"
-            />
+            <div className="w-full h-24 rounded-lg bg-[#0a0a0c] border border-[#222225] flex items-center justify-center px-5">
+              <p className="text-[11px] text-[#888] text-center font-mono leading-relaxed">
+                NO MEASURED PITCH
+                <span className="block mt-1.5 font-sans">
+                  This build does not analyse audio, so there is no detected note, frequency or cents value to show.
+                  The controls below are stored with the project as intent.
+                </span>
+              </p>
+            </div>
           </div>
 
           {/* Knobs Matrix: Retune Speed, Formants, Vibrato, Humanize */}

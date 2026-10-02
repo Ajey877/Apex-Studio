@@ -1,129 +1,109 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { ModalFrame } from './ModalFrame';
-import { 
-  Zap, 
-  X, 
-  Sparkles, 
-  Activity, 
-  Play, 
-  RotateCcw, 
-  Check, 
-  Sliders, 
-  Layers, 
-  Flame, 
-  Compass, 
-  Radio, 
-  Volume2
-} from 'lucide-react';
-import { WarpMode, PlaylistClip } from '../types/daw';
+import { Zap, X, Sparkles, Play, Check } from 'lucide-react';
+import { PlaylistClip } from '../types/daw';
 import { audioEngine } from '../audio/audioEngine';
+import {
+  WARP_BEHAVIOUR_SUMMARY,
+  isWarpTargetReady,
+  resolveWarpTarget,
+  warpTargetMessage,
+} from './warpClipTarget';
 
 interface WarpAudioProcessorModalProps {
   isOpen: boolean;
   onClose: () => void;
-  selectedClip?: PlaylistClip | null;
+  /**
+   * Every clip in the project plus the id of the clip the user selected, so the
+   * tool edits the clip they chose. It used to receive `playlistClips[0]`, which
+   * silently edited an unrelated clip on any multi-clip timeline.
+   */
+  clips: PlaylistClip[];
+  selectedClipId: string | null;
   onUpdateClip?: (clip: PlaylistClip) => void;
 }
 
 export const WarpAudioProcessorModal: React.FC<WarpAudioProcessorModalProps> = ({
   isOpen,
   onClose,
-  selectedClip,
+  clips,
+  selectedClipId,
   onUpdateClip
 }) => {
-  const [warpMode, setWarpMode] = useState<WarpMode>(selectedClip?.warpMode || 'complex_pro');
-  const [transientGranularity, setTransientGranularity] = useState<number>(32); // 1/16, 1/32, 1/64
-  const [grainSizeMs, setGrainSizeMs] = useState<number>(65); // 20 to 150 ms
-  const [formantPreservation, setFormantPreservation] = useState<number>(85); // 0 to 100%
-  const [envelopeDecay, setEnvelopeDecay] = useState<number>(100); // 0 to 100%
-  const [pitchSemitones, setPitchSemitones] = useState<number>(selectedClip?.pitchShiftSemitones || 0);
-  const [stretchRate, setStretchRate] = useState<number>(selectedClip?.timeStretchRate || 1.0);
+  const target = resolveWarpTarget(clips, selectedClipId);
+  const targetClip = isWarpTargetReady(target) ? target.clip : null;
+  const blocker = isWarpTargetReady(target) ? '' : warpTargetMessage(target);
+
+  const [pitchSemitones, setPitchSemitones] = useState<number>(targetClip?.pitchShiftSemitones || 0);
+  const [stretchRate, setStretchRate] = useState<number>(targetClip?.timeStretchRate || 1.0);
   const [isAuditioning, setIsAuditioning] = useState<boolean>(false);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
 
+  // The modal stays mounted between openings, so re-seed the controls whenever
+  // it opens or the target clip changes. Without this the sliders would keep
+  // showing the previous clip's values.
+  useEffect(() => {
+    if (!isOpen) return;
+    setPitchSemitones(targetClip?.pitchShiftSemitones ?? 0);
+    setStretchRate(targetClip?.timeStretchRate ?? 1.0);
+  }, [isOpen, targetClip?.id]);
+
   if (!isOpen) return null;
 
+  /**
+   * Audition the *selected clip's own audio* at the current pitch and rate.
+   *
+   * The previous audition built a fake `sampler` channel with no sample behind
+   * it; the sampler renderer finds no buffer and returns early, so the button
+   * played nothing while reporting "Auditioning … Warp DSP Algorithm". This
+   * plays the real buffer through the engine's context so the preview is the
+   * actual clip audio at the settings shown.
+   */
   const handleAuditionWarp = () => {
-    setIsAuditioning(true);
-    // Audition with pitch shift and warp timbre
-    audioEngine.playNote(
-      {
-        id: 'warp-audition',
-        name: 'Warp Sample',
-        instrumentType: 'sampler',
-        volume: 0.9,
-        pan: 0,
-        pitch: pitchSemitones,
-        mute: false,
-        solo: false,
-        color: '#00ff88',
-        mixerTrackId: 1,
-        steps: [],
-        notes: [],
-        synthParams: {} as any
-      },
-      { id: `warp-test-${Date.now()}`, pitch: 60 + pitchSemitones, start: 0, duration: 2 * stretchRate, velocity: 0.9 }
-    );
+    if (!targetClip?.audioBufferId) {
+      setStatusMessage('This clip has no loaded audio to audition.');
+      setTimeout(() => setStatusMessage(null), 2500);
+      return;
+    }
+    const buffer = audioEngine.getSampleBuffer(targetClip.audioBufferId);
+    if (!buffer) {
+      setStatusMessage('This clip’s audio is not loaded in this session, so it cannot be auditioned.');
+      setTimeout(() => setStatusMessage(null), 2500);
+      return;
+    }
 
-    setTimeout(() => {
-      setIsAuditioning(false);
-    }, 1800);
-    setStatusMessage(`Auditioning ${warpMode.toUpperCase()} Warp DSP Algorithm`);
+    const ctx = audioEngine.getContext();
+    const source = ctx.createBufferSource();
+    source.buffer = buffer;
+    source.playbackRate.value = stretchRate;
+    source.detune.value = pitchSemitones * 100;
+
+    const gain = ctx.createGain();
+    gain.gain.value = 0.9;
+    source.connect(gain);
+    gain.connect(ctx.destination);
+
+    const previewSeconds = Math.min(buffer.duration / Math.max(0.05, stretchRate), 4);
+    setIsAuditioning(true);
+    source.start(0, 0, previewSeconds);
+    source.onended = () => setIsAuditioning(false);
+
+    setStatusMessage('Previewing the clip’s own audio at the pitch and rate above (mixer inserts bypassed).');
     setTimeout(() => setStatusMessage(null), 2500);
   };
 
   const handleApplyWarp = () => {
-    if (selectedClip && onUpdateClip) {
-      onUpdateClip({
-        ...selectedClip,
-        warpMode,
-        pitchShiftSemitones: pitchSemitones,
-        timeStretchRate: stretchRate
-      });
-    }
-    setStatusMessage(`Applied ${warpMode.toUpperCase()} Granular Warp to Timeline Clip!`);
+    if (!targetClip || !onUpdateClip) return;
+    onUpdateClip({
+      ...targetClip,
+      pitchShiftSemitones: pitchSemitones,
+      timeStretchRate: stretchRate
+    });
+    setStatusMessage(`Applied pitch ${pitchSemitones > 0 ? '+' : ''}${pitchSemitones} st and ${stretchRate.toFixed(2)}x rate to "${targetClip.name}".`);
     setTimeout(() => {
       onClose();
     }, 1000);
   };
-
-  const WARP_MODES = [
-    {
-      id: 'beats' as WarpMode,
-      name: 'Beats Mode',
-      desc: 'Optimized for rhythmic material, percussive transients, and drum loops. Zero transient phase smearing.',
-      color: '#00ff88',
-      tag: 'TRANSIENT LOCK'
-    },
-    {
-      id: 'tones' as WarpMode,
-      name: 'Tones Mode',
-      desc: 'Granular pitch synchronous overlap-add for monophonic lead vocals, basslines, and solo brass.',
-      color: '#00e5ff',
-      tag: 'MONO PITCH'
-    },
-    {
-      id: 'texture' as WarpMode,
-      name: 'Texture Mode',
-      desc: 'Micro-grain cloud synthesis with random flux for ambient drone pads, lush polyphonic fields, and soundscapes.',
-      color: '#a855f7',
-      tag: 'GRAIN CLOUD'
-    },
-    {
-      id: 'complex_pro' as WarpMode,
-      name: 'Complex Pro (Élastique)',
-      desc: 'State-of-the-art polyphonic time-stretching with formant preservation and vocal envelope morphing.',
-      color: '#ff6e00',
-      tag: 'FLAGSHIP PRO'
-    },
-    {
-      id: 'repitch' as WarpMode,
-      name: 'Re-Pitch (Tape Speed)',
-      desc: 'Classic vinyl tape-stop and sampler repitching where tempo and pitch scale proportionately together.',
-      color: '#ffaa00',
-      tag: 'ANALOG TAPE'
-    }
-  ];
 
   return (
     <ModalFrame id="fl-warp-processor-modal" labelledBy="fl-warp-processor-modal-title" onClose={onClose} className="fixed inset-0 bg-black/85 backdrop-blur-md z-50 flex items-center justify-center p-3 sm:p-4 select-none">
@@ -136,24 +116,27 @@ export const WarpAudioProcessorModal: React.FC<WarpAudioProcessorModalProps> = (
             </div>
             <div>
               <div className="flex items-center gap-2">
-                <h2 id="fl-warp-processor-modal-title" className="text-sm font-bold text-white tracking-wide">ADVANCED TIME-STRETCH & TRANSIENT WARP ENGINE</h2>
-                <span className="px-1.5 py-0.5 rounded text-[9px] font-mono font-bold bg-[#00ff88]/20 text-[#00ff88] border border-[#00ff88]/40">
-                  ÉLASTIQUE PRO DSP
+                <h2 id="fl-warp-processor-modal-title" className="text-sm font-bold text-white tracking-wide">AUDIO CLIP PITCH &amp; PLAYBACK RATE</h2>
+                <span className="px-1.5 py-0.5 rounded text-[9px] font-mono font-bold bg-[#ffaa00]/20 text-[#ffaa00] border border-[#ffaa00]/40">
+                  REPITCH — LENGTH NOT PRESERVED
                 </span>
               </div>
-              <p className="text-[10px] text-[#777]">Granular time-stretching, formant preservation, and transient preservation algorithms</p>
+              <p className="text-[10px] text-[#777]">
+                {targetClip ? `Editing "${targetClip.name}"` : 'No audio clip selected'}
+              </p>
             </div>
           </div>
 
           <div className="flex items-center gap-2">
             <button
               onClick={handleAuditionWarp}
-              className={`px-3 py-1 text-black font-bold text-xs rounded transition flex items-center gap-1.5 shadow ${
+              disabled={!targetClip}
+              className={`px-3 py-1 text-black font-bold text-xs rounded transition flex items-center gap-1.5 shadow disabled:opacity-40 ${
                 isAuditioning ? 'bg-white' : 'bg-[#00ff88] hover:bg-[#33ff9f]'
               }`}
             >
               <Play className="w-3.5 h-3.5" />
-              <span>{isAuditioning ? 'Auditioning...' : 'Audition Warp'}</span>
+              <span>{isAuditioning ? 'Previewing...' : 'Preview Clip'}</span>
             </button>
 
             <button
@@ -179,56 +162,45 @@ export const WarpAudioProcessorModal: React.FC<WarpAudioProcessorModalProps> = (
 
         {/* Modal Body */}
         <div className="p-5 overflow-y-auto custom-scrollbar space-y-4">
-          {/* Warp Mode Selection Grid */}
-          <div className="space-y-2">
-            <span className="text-xs font-bold text-white uppercase tracking-wider block">
-              SELECT WARP ALGORITHM
-            </span>
-
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2.5">
-              {WARP_MODES.map((m) => {
-                const isSelected = warpMode === m.id;
-                return (
-                  <div
-                    key={m.id}
-                    onClick={() => setWarpMode(m.id)}
-                    style={{ borderColor: isSelected ? m.color : '#28282e' }}
-                    className={`p-3 rounded-xl border-2 cursor-pointer transition flex flex-col justify-between space-y-2 ${
-                      isSelected ? 'bg-[#18181f] ring-2 ring-white/20 shadow-lg' : 'bg-[#141417] hover:border-[#444]'
-                    }`}
-                  >
-                    <div className="flex items-center justify-between">
-                      <span className="text-xs font-bold text-white">{m.name}</span>
-                      <span 
-                        style={{ color: m.color, borderColor: `${m.color}66` }}
-                        className="text-[8px] font-mono font-bold px-1.5 py-0.5 rounded border bg-white/[0.03]"
-                      >
-                        {m.tag}
-                      </span>
-                    </div>
-
-                    <p className="text-[10px] text-[#777] leading-relaxed">{m.desc}</p>
-
-                    <div className="flex items-center justify-between text-[9px] font-mono pt-1 border-t border-white/5">
-                      <span className="text-[#555]">Phase Coherence</span>
-                      <span style={{ color: isSelected ? m.color : '#888' }} className="font-bold">
-                        {isSelected ? '✓ ACTIVE' : 'Select'}
-                      </span>
-                    </div>
-                  </div>
-                );
-              })}
+          {/* Target: the clip this tool will actually change. */}
+          <div className="bg-[#18181c] p-3 rounded-xl border border-[#28282e]">
+            <div className="flex items-center justify-between text-xs">
+              <span className="text-white font-bold uppercase tracking-wider">TARGET CLIP</span>
+              {targetClip ? (
+                <span className="text-[10px] font-mono text-[#00ff88]">
+                  {targetClip.name} · bar {targetClip.startBar} · {targetClip.lengthBars} bar{targetClip.lengthBars === 1 ? '' : 's'}
+                </span>
+              ) : (
+                <span className="text-[10px] font-mono text-[#ffaa00]">NOTHING SELECTED</span>
+              )}
             </div>
           </div>
 
-          {/* Granular & Formant Sliders */}
+          {!targetClip && (
+            <div className="bg-[#0a0a0c] border border-[#ffaa00]/40 rounded-xl px-4 py-3">
+              <span className="text-[11px] font-mono font-bold text-[#ffaa00] uppercase tracking-wider block mb-1">
+                NO AUDIO CLIP TO WARP
+              </span>
+              <span className="text-[11px] text-[#888]">{blocker}</span>
+            </div>
+          )}
+
+          {/* What is and is not implemented. */}
+          <div className="bg-[#0a0a0c] border border-[#ffaa00]/40 rounded-lg px-3 py-2 flex items-center justify-between gap-2">
+            <span className="text-[10px] font-mono font-bold text-[#ffaa00] uppercase tracking-wider">
+              PITCH AND RATE ONLY — LENGTH IS NOT PRESERVED
+            </span>
+            <span className="text-[10px] text-[#777] whitespace-nowrap">NO LENGTH-PRESERVING STRETCH</span>
+          </div>
+
+          {/* Implemented controls */}
           <div className="bg-[#18181c] p-4 rounded-xl border border-[#28282e] space-y-4">
             <div className="flex items-center justify-between">
-              <span className="text-xs font-bold text-white uppercase">FINE-GRAIN TIMBRE & FORMANT CONTROLS</span>
-              <span className="text-[10px] font-mono text-[#00ff88]">Real-time Resynthesis</span>
+              <span className="text-xs font-bold text-white uppercase">PITCH &amp; SPEED (APPLIED TO THIS CLIP)</span>
+              <span className="text-[10px] font-mono text-[#00ff88]">{WARP_BEHAVIOUR_SUMMARY}</span>
             </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 text-xs">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
               {/* Pitch Shift */}
               <div className="bg-[#121214] p-3 rounded-lg border border-[#242428] space-y-1.5">
                 <div className="flex justify-between text-xs">
@@ -240,16 +212,17 @@ export const WarpAudioProcessorModal: React.FC<WarpAudioProcessorModalProps> = (
                   min="-24"
                   max="24"
                   value={pitchSemitones}
+                  disabled={!targetClip}
                   onChange={(e) => setPitchSemitones(Number(e.target.value))}
-                  className="w-full accent-[#00ff88]"
+                  className="w-full accent-[#00ff88] disabled:opacity-40"
                 />
-                <span className="text-[9px] text-[#666] block">-2 to +2 full octaves</span>
+                <span className="text-[9px] text-[#666] block">Detunes the clip without changing its length.</span>
               </div>
 
               {/* Stretch Rate */}
               <div className="bg-[#121214] p-3 rounded-lg border border-[#242428] space-y-1.5">
                 <div className="flex justify-between text-xs">
-                  <span className="text-white font-bold">STRETCH RATIO</span>
+                  <span className="text-white font-bold">PLAYBACK RATE</span>
                   <span className="text-[#00e5ff] font-mono font-bold">{stretchRate.toFixed(2)}x</span>
                 </div>
                 <input
@@ -258,44 +231,13 @@ export const WarpAudioProcessorModal: React.FC<WarpAudioProcessorModalProps> = (
                   max="3.0"
                   step="0.05"
                   value={stretchRate}
+                  disabled={!targetClip}
                   onChange={(e) => setStretchRate(Number(e.target.value))}
-                  className="w-full accent-[#00e5ff]"
+                  className="w-full accent-[#00e5ff] disabled:opacity-40"
                 />
-                <span className="text-[9px] text-[#666] block">0.25x (hyper-speed) to 3x (super-slow)</span>
-              </div>
-
-              {/* Formant Preservation */}
-              <div className="bg-[#121214] p-3 rounded-lg border border-[#242428] space-y-1.5">
-                <div className="flex justify-between text-xs">
-                  <span className="text-white font-bold">FORMANT LOCK</span>
-                  <span className="text-[#ff6e00] font-mono font-bold">{formantPreservation}%</span>
-                </div>
-                <input
-                  type="range"
-                  min="0"
-                  max="100"
-                  value={formantPreservation}
-                  onChange={(e) => setFormantPreservation(Number(e.target.value))}
-                  className="w-full accent-[#ff6e00]"
-                />
-                <span className="text-[9px] text-[#666] block">Prevents "chipmunk" vocal effect</span>
-              </div>
-
-              {/* Grain Window Size */}
-              <div className="bg-[#121214] p-3 rounded-lg border border-[#242428] space-y-1.5">
-                <div className="flex justify-between text-xs">
-                  <span className="text-white font-bold">GRAIN WINDOW</span>
-                  <span className="text-[#a855f7] font-mono font-bold">{grainSizeMs} ms</span>
-                </div>
-                <input
-                  type="range"
-                  min="20"
-                  max="150"
-                  value={grainSizeMs}
-                  onChange={(e) => setGrainSizeMs(Number(e.target.value))}
-                  className="w-full accent-[#a855f7]"
-                />
-                <span className="text-[9px] text-[#666] block">Micro-grain overlap window</span>
+                <span className="text-[9px] text-[#666] block">
+                  Speeds the clip up or slows it down. Pitch rides with the rate: slower is lower.
+                </span>
               </div>
             </div>
           </div>
@@ -303,7 +245,9 @@ export const WarpAudioProcessorModal: React.FC<WarpAudioProcessorModalProps> = (
 
         {/* Footer */}
         <div className="px-5 py-3.5 bg-[#18181c] border-t border-[#2e2e34] flex items-center justify-between text-xs">
-          <span className="text-[10px] text-[#666]">Élastique 3.4.1 Resampling Kernel Ready</span>
+          <span className="text-[10px] text-[#666]">
+            Applies to live playback and WAV export
+          </span>
           <div className="flex items-center gap-2">
             <button
               onClick={onClose}
@@ -313,10 +257,11 @@ export const WarpAudioProcessorModal: React.FC<WarpAudioProcessorModalProps> = (
             </button>
             <button
               onClick={handleApplyWarp}
-              className="px-4 py-1.5 bg-[#00ff88] hover:bg-[#33ff9f] text-black font-bold rounded transition shadow flex items-center gap-1.5"
+              disabled={!targetClip}
+              className="px-4 py-1.5 bg-[#00ff88] hover:bg-[#33ff9f] disabled:opacity-40 disabled:hover:bg-[#00ff88] text-black font-bold rounded transition shadow flex items-center gap-1.5"
             >
               <Check className="w-4 h-4" />
-              <span>Apply Warp Algorithm</span>
+              <span>Apply to Clip</span>
             </button>
           </div>
         </div>

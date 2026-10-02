@@ -153,7 +153,7 @@ export const SampleManagerModal: React.FC<SampleManagerModalProps> = ({
               <FolderOpen className="w-4 h-4" />
             </div>
             <div>
-              <h2 id="sample-manager-modal-title" className="text-sm font-bold text-white uppercase">DIRECTWAVE AUDIO SAMPLE LOADER</h2>
+              <h2 id="sample-manager-modal-title" className="text-sm font-bold text-white uppercase">APEX AUDIO SAMPLE LOADER</h2>
               <p className="text-[11px] text-[#888]">Import custom WAV / MP3 one-shots, slice waveforms & map across piano roll</p>
             </div>
           </div>

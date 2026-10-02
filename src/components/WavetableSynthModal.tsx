@@ -130,7 +130,9 @@ export const WavetableSynthModal: React.FC<WavetableSynthModalProps> = ({
     if (targetChannel) {
       audioEngine.playNote(targetChannel, { id: `wt-aud-${Date.now()}`, pitch: 60, start: 0, duration: 2, velocity: 0.85 });
     }
-    setStatusMessage('Auditioning Wavetable Lead (C4)...');
+    // Truthful label: this plays the channel's existing voice. None of the
+    // preview controls above reach the audio engine.
+    setStatusMessage('Previewing the channel synth as-is (C4)...');
     setTimeout(() => setStatusMessage(null), 2000);
   };
 
@@ -138,7 +140,7 @@ export const WavetableSynthModal: React.FC<WavetableSynthModalProps> = ({
     setMorphPosition(p.morphPosition);
     setWarpMode(p.warpMode as any);
     setWarpAmount(p.warpAmount);
-    setStatusMessage(`Loaded Wavetable: ${p.name}`);
+    setStatusMessage(`Loaded preview curve: ${p.name} (display only)`);
     setTimeout(() => setStatusMessage(null), 3000);
   };
 
@@ -153,12 +155,12 @@ export const WavetableSynthModal: React.FC<WavetableSynthModalProps> = ({
             </div>
             <div>
               <div className="flex items-center gap-2">
-                <h2 id="fl-wavetable-synth-modal-title" className="text-sm font-bold text-white tracking-wide">ADVANCED WAVETABLE SYNTHESIZER</h2>
+                <h2 id="fl-wavetable-synth-modal-title" className="text-sm font-bold text-white tracking-wide">ADVANCED SYNTH PREVIEW (WAVETABLE NOT IMPLEMENTED)</h2>
                 <span className="px-1.5 py-0.5 rounded text-[9px] font-mono font-bold bg-[#00e5ff]/20 text-[#00e5ff] border border-[#00e5ff]/40">
-                  256-FRAME 3D MORPHING
+                  PREVIEW ONLY
                 </span>
               </div>
-              <p className="text-[10px] text-[#777]">Frame interpolation, spectral warp modes, additive harmonic series, & 16-voice hypersaw</p>
+              <p className="text-[10px] text-[#777]">Preview surface. The selected channel plays with its existing subtractive synth; no wavetable engine exists yet.</p>
             </div>
           </div>
 
@@ -194,6 +196,13 @@ export const WavetableSynthModal: React.FC<WavetableSynthModalProps> = ({
 
         {/* Modal Body */}
         <div className="p-5 overflow-y-auto custom-scrollbar space-y-4">
+          <div className="bg-[#0a0a0c] border border-[#ffaa00]/40 rounded-lg px-3 py-2 flex items-center justify-between gap-2">
+            <span className="text-[10px] font-mono font-bold text-[#ffaa00] uppercase tracking-wider">
+              NOT APPLIED — NO WAVETABLE OSCILLATOR IN THE ENGINE
+            </span>
+            <span className="text-[10px] text-[#777] whitespace-nowrap">CHANNEL USES ITS SUBTRACTIVE SYNTH</span>
+          </div>
+
           {/* 3D Waterfall Display */}
           <div className="bg-[#0b0b0d] p-3 rounded-xl border border-[#26262a] flex flex-col gap-2">
             <div className="flex items-center justify-between text-xs">
@@ -202,7 +211,7 @@ export const WavetableSynthModal: React.FC<WavetableSynthModalProps> = ({
                 <span>3D WAVETABLE WATERFALL OSCILLOGRAM</span>
               </span>
               <span className="text-[10px] font-mono text-[#00e5ff]">
-                FRAME {(morphPosition * 255).toFixed(0)} / 256
+                FRAME {(morphPosition * 15).toFixed(0)} / 16 (preview)
               </span>
             </div>
 
@@ -226,7 +235,7 @@ export const WavetableSynthModal: React.FC<WavetableSynthModalProps> = ({
                 onChange={(e) => setMorphPosition(Number(e.target.value))}
                 className="w-full accent-[#00e5ff]"
               />
-              <p className="text-[10px] text-[#777]">Smooth spline interpolation between adjacent wavetable frames.</p>
+              <p className="text-[10px] text-[#777]">Preview curve only — no audio is generated from it.</p>
             </div>
 
             {/* Spectral Warp Mode */}
@@ -262,13 +271,13 @@ export const WavetableSynthModal: React.FC<WavetableSynthModalProps> = ({
             {/* Hyper Unison */}
             <div className="bg-[#18181c] p-3 rounded-xl border border-[#28282e] space-y-2">
               <div className="flex justify-between text-xs text-white font-bold">
-                <span>HYPERSAW UNISON VOICES</span>
+                <span>UNISON VOICES (ENGINE MAX 7)</span>
                 <span className="text-[#00ff88] font-mono">{unisonVoices} Voices</span>
               </div>
               <input
                 type="range"
                 min="1"
-                max="16"
+                max="7"
                 step="1"
                 value={unisonVoices}
                 onChange={(e) => setUnisonVoices(Number(e.target.value))}
@@ -312,7 +321,7 @@ export const WavetableSynthModal: React.FC<WavetableSynthModalProps> = ({
           {/* Presets Grid */}
           <div className="bg-[#141418] p-3 rounded-xl border border-[#28282e] space-y-2">
             <span className="text-xs font-bold text-white block uppercase tracking-wider">
-              FLAGSHIP WAVETABLE PRESETS
+              PREVIEW PRESETS (CURVE SHAPES ONLY)
             </span>
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
               {WAVETABLE_PRESETS.map((p, idx) => (
@@ -331,12 +340,12 @@ export const WavetableSynthModal: React.FC<WavetableSynthModalProps> = ({
 
         {/* Footer */}
         <div className="px-5 py-3.5 bg-[#18181c] border-t border-[#2e2e34] flex items-center justify-between text-xs">
-          <span className="text-[10px] text-[#666]">Real-time Wavetable Osc Routing active for active Channel synthesizer</span>
+          <span className="text-[10px] text-[#666]">Preview only: this window does not change how the channel sounds</span>
           <button
             onClick={onClose}
             className="px-4 py-1.5 bg-[#00e5ff] hover:bg-[#33edff] text-black font-bold rounded transition shadow"
           >
-            Apply Wavetable to Track
+            Close Preview
           </button>
         </div>
       </div>

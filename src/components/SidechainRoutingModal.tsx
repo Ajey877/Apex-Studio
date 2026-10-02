@@ -318,7 +318,7 @@ export const SidechainRoutingModal: React.FC<SidechainRoutingModalProps> = ({
 
         {/* Footer */}
         <div className="px-5 py-3.5 bg-[#18181c] border-t border-[#2e2e34] flex items-center justify-between text-xs">
-          <span className="text-[10px] text-[#666]">Real-time lookahead sidechain dynamic envelope active</span>
+          <span className="text-[10px] text-[#666]">Ducking is triggered by notes on the source track (no level detector)</span>
           <button
             onClick={handleApplyRouting}
             className="px-4 py-1.5 bg-[#ffaa00] hover:bg-[#ffbb22] text-black font-bold rounded transition shadow flex items-center gap-1.5"

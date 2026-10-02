@@ -17,6 +17,7 @@ import {
 import { Channel, Note, InstrumentType } from '../types/daw';
 import { AudioSlicer, AudioSlice } from '../utils/audioSlicer';
 import { audioEngine } from '../audio/audioEngine';
+import { isSlicerSourceReady, resolveSlicerAudioSource, slicerSourceMessage } from './audioSlicerSource';
 
 interface AudioSlicerModalProps {
   isOpen: boolean;
@@ -38,68 +39,36 @@ export const AudioSlicerModal: React.FC<AudioSlicerModalProps> = ({
   const [slices, setSlices] = useState<AudioSlice[]>([]);
   const [activeSliceId, setActiveSliceId] = useState<number | null>(null);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
-  const [audioBuffer, setAudioBuffer] = useState<AudioBuffer | null>(null);
 
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
 
   const activeChannel = channels.find(c => c.id === selectedChannelId) || channels[0];
 
-  // Generate or load audio buffer for slicing
+  // Phase 52: the slicer operates on a real, already-loaded sample and nothing
+  // else. It used to synthesize a breakbeat whenever the channel had no sample,
+  // then draw that generated buffer as the channel's audio and report slice and
+  // "chops mapped" counts for it. There is no generated audio here: when no real
+  // buffer is available the source resolves to an explicit unavailable state.
+  const slicerSource = resolveSlicerAudioSource(
+    activeChannel,
+    id => audioEngine.getSampleBuffer(id)
+  );
+  const sourceReady = isSlicerSourceReady(slicerSource);
+  const audioBuffer = sourceReady ? slicerSource.buffer : null;
+  const unavailableMessage = slicerSourceMessage(slicerSource);
+
+  // Reload the real sample buffer whenever the modal opens or the target
+  // channel changes. Slices are recomputed from that buffer only.
   useEffect(() => {
     if (!isOpen) return;
-
-    const ctx = audioEngine.getContext();
-    // Check if channel has custom sample or generate standard drum break buffer for slicing
-    if (activeChannel?.customSample?.id && audioEngine.getSampleBuffer(activeChannel.customSample.id)) {
-      const buf = audioEngine.getSampleBuffer(activeChannel.customSample.id);
-      setAudioBuffer(buf);
-      computeSlices(buf, sliceMode, sensitivity);
-    } else {
-      // Create a rich synthetic vintage breakbeat buffer (Kick, Snare, Hihats, Percussion) for instant slicing
-      const sampleRate = ctx.sampleRate;
-      const duration = 2.0; // 2 seconds = 1 bar at ~120bpm
-      const length = sampleRate * duration;
-      const buf = ctx.createBuffer(2, length, sampleRate);
-      const left = buf.getChannelData(0);
-      const right = buf.getChannelData(1);
-
-      // Synthesize classic funky drum break pattern with 8 transients
-      const hits = [
-        { time: 0.0, type: 'kick', freq: 110, decay: 0.3 },
-        { time: 0.25, type: 'hihat', freq: 8000, decay: 0.05 },
-        { time: 0.5, type: 'snare', freq: 220, decay: 0.2 },
-        { time: 0.75, type: 'hihat', freq: 8000, decay: 0.05 },
-        { time: 1.0, type: 'kick', freq: 110, decay: 0.25 },
-        { time: 1.25, type: 'kick', freq: 100, decay: 0.2 },
-        { time: 1.5, type: 'snare', freq: 240, decay: 0.22 },
-        { time: 1.75, type: 'hihat', freq: 8500, decay: 0.08 }
-      ];
-
-      hits.forEach(hit => {
-        const startSample = Math.floor(hit.time * sampleRate);
-        const hitSamples = Math.floor(hit.decay * sampleRate);
-        for (let i = 0; i < hitSamples && (startSample + i) < length; i++) {
-          const t = i / sampleRate;
-          let val = 0;
-          if (hit.type === 'kick') {
-            const f = hit.freq * Math.exp(-t * 25);
-            val = Math.sin(2 * Math.PI * f * t) * Math.exp(-t * 12);
-          } else if (hit.type === 'snare') {
-            const body = Math.sin(2 * Math.PI * hit.freq * t) * Math.exp(-t * 15);
-            const noise = (Math.random() * 2 - 1) * Math.exp(-t * 18);
-            val = body * 0.4 + noise * 0.6;
-          } else {
-            val = (Math.random() * 2 - 1) * Math.exp(-t * 40);
-          }
-          left[startSample + i] += val * 0.75;
-          right[startSample + i] += val * 0.75;
-        }
-      });
-
-      setAudioBuffer(buf);
-      computeSlices(buf, sliceMode, sensitivity);
+    if (slicerSource.kind !== 'sample') {
+      setSlices([]);
+      setActiveSliceId(null);
+      return;
     }
-  }, [isOpen, selectedChannelId]);
+    setActiveSliceId(null);
+    computeSlices(slicerSource.buffer, sliceMode, sensitivity);
+  }, [isOpen, selectedChannelId, slicerSource.kind, slicerSource.kind === 'sample' ? slicerSource.sampleId : '']);
 
   const computeSlices = (buf: AudioBuffer, mode: string, sens: number) => {
     if (!buf) return;
@@ -209,7 +178,7 @@ export const AudioSlicerModal: React.FC<AudioSlicerModalProps> = ({
 
   // Export slices as sequential chromatic notes in Piano Roll
   const handleMapToPianoRoll = () => {
-    if (!activeChannel || slices.length === 0) return;
+    if (!activeChannel || slices.length === 0 || !sourceReady) return;
 
     const notes: Note[] = slices.map((slice, idx) => ({
       id: `slice-note-${Date.now()}-${idx}`,
@@ -226,7 +195,7 @@ export const AudioSlicerModal: React.FC<AudioSlicerModalProps> = ({
 
   // Map slices to 16-pad Step Sequencer
   const handleMapToStepSequencer = () => {
-    if (!activeChannel || slices.length === 0) return;
+    if (!activeChannel || slices.length === 0 || !sourceReady) return;
 
     const steps = new Array(16).fill(false);
     slices.forEach((_, idx) => {
@@ -251,7 +220,7 @@ export const AudioSlicerModal: React.FC<AudioSlicerModalProps> = ({
             </div>
             <div>
               <div className="flex items-center gap-2">
-                <h2 id="audio-slicer-modal-title" className="text-sm font-bold text-white tracking-wide">EDISON TRANSIENT SLICER & CHOPPER</h2>
+                <h2 id="audio-slicer-modal-title" className="text-sm font-bold text-white tracking-wide">SAMPLE TRANSIENT SLICER & CHOPPER</h2>
                 <span className="px-1.5 py-0.5 rounded text-[9px] font-mono font-bold bg-[#00bcd4]/20 text-[#00bcd4] border border-[#00bcd4]/40">
                   AUTO-CHOP
                 </span>
@@ -313,6 +282,7 @@ export const AudioSlicerModal: React.FC<AudioSlicerModalProps> = ({
                   <button
                     key={m.id}
                     onClick={() => handleModeChange(m.id as any)}
+                    disabled={!sourceReady}
                     className={`py-1 rounded text-[10px] font-bold transition font-mono ${
                       sliceMode === m.id
                         ? 'bg-[#00bcd4] text-black'
@@ -338,7 +308,8 @@ export const AudioSlicerModal: React.FC<AudioSlicerModalProps> = ({
                 step="0.05"
                 value={sensitivity}
                 onChange={(e) => handleSensitivityChange(parseFloat(e.target.value))}
-                className="w-full h-1.5 accent-[#00bcd4] bg-[#121214] rounded cursor-pointer"
+                disabled={!sourceReady}
+                className="w-full h-1.5 accent-[#00bcd4] bg-[#121214] rounded cursor-pointer disabled:opacity-40"
               />
               <div className="flex justify-between text-[9px] text-[#555] mt-1 font-mono">
                 <span>Fewer Chops</span>
@@ -352,51 +323,68 @@ export const AudioSlicerModal: React.FC<AudioSlicerModalProps> = ({
             <div className="flex items-center justify-between text-xs">
               <span className="font-bold text-white flex items-center gap-1.5">
                 <Disc className="w-3.5 h-3.5 text-[#00bcd4]" />
-                <span>SAMPLE BREAK WAVEFORM ({slices.length} CHOP REGIONS)</span>
+                <span>
+                  {sourceReady
+                    ? `SAMPLE WAVEFORM (${slices.length} CHOP REGIONS)`
+                    : 'SAMPLE WAVEFORM — NO AUDIO LOADED'}
+                </span>
               </span>
-              <span className="text-[10px] text-[#777] font-mono">Click pads below to audition chops</span>
+              <span className="text-[10px] text-[#777] font-mono">
+                {sourceReady ? 'Click pads below to audition chops' : 'Nothing to slice yet'}
+              </span>
             </div>
 
-            <canvas
-              ref={canvasRef}
-              width={700}
-              height={140}
-              className="w-full h-36 rounded-lg bg-[#0a0a0c] border border-[#222225]"
-            />
+            {sourceReady ? (
+              <canvas
+                ref={canvasRef}
+                width={700}
+                height={140}
+                className="w-full h-36 rounded-lg bg-[#0a0a0c] border border-[#222225]"
+              />
+            ) : (
+              <div className="w-full h-36 rounded-lg bg-[#0a0a0c] border border-[#ffaa00]/40 flex items-center justify-center px-5">
+                <p className="text-[11px] text-[#ffaa00] text-center font-mono leading-relaxed">
+                  NO SAMPLE TO SLICE
+                  <span className="block mt-1.5 text-[#888] font-sans">{unavailableMessage}</span>
+                </p>
+              </div>
+            )}
           </div>
 
-          {/* 16 Chop Drum Pads Matrix */}
-          <div className="space-y-2">
-            <div className="flex items-center justify-between text-xs">
-              <span className="text-white font-bold text-xs flex items-center gap-1.5">
-                <Grid className="w-3.5 h-3.5 text-[#00bcd4]" />
-                <span>16-CHOP AUDITION PADS (CLICK TO PLAY)</span>
-              </span>
-              <span className="text-[10px] font-mono text-[#666]">Keys C4 - D#5</span>
-            </div>
+          {/* 16 Chop Drum Pads Matrix — only exists when there is real audio behind it. */}
+          {sourceReady && slices.length > 0 && (
+            <div className="space-y-2">
+              <div className="flex items-center justify-between text-xs">
+                <span className="text-white font-bold text-xs flex items-center gap-1.5">
+                  <Grid className="w-3.5 h-3.5 text-[#00bcd4]" />
+                  <span>16-CHOP AUDITION PADS (CLICK TO PLAY)</span>
+                </span>
+                <span className="text-[10px] font-mono text-[#666]">Keys C4 - D#5</span>
+              </div>
 
-            <div className="grid grid-cols-4 sm:grid-cols-8 gap-2">
-              {slices.map((slice, idx) => {
-                const isActive = activeSliceId === slice.id;
-                return (
-                  <button
-                    key={slice.id}
-                    onClick={() => playSlice(slice)}
-                    className={`p-3 rounded-lg border flex flex-col items-center justify-center transition active:scale-95 ${
-                      isActive
-                        ? 'bg-[#00bcd4] border-[#00e5ff] text-black shadow-lg'
-                        : 'bg-[#18181b] border-[#28282b] hover:border-[#00bcd4] text-white hover:bg-[#1e1e24]'
-                    }`}
-                  >
-                    <span className="font-mono font-bold text-sm">PAD {idx + 1}</span>
-                    <span className={`text-[9px] font-mono mt-0.5 ${isActive ? 'text-black/80' : 'text-[#777]'}`}>
-                      {(slice.endSec - slice.startSec).toFixed(2)}s
-                    </span>
-                  </button>
-                );
-              })}
+              <div className="grid grid-cols-4 sm:grid-cols-8 gap-2">
+                {slices.map((slice, idx) => {
+                  const isActive = activeSliceId === slice.id;
+                  return (
+                    <button
+                      key={slice.id}
+                      onClick={() => playSlice(slice)}
+                      className={`p-3 rounded-lg border flex flex-col items-center justify-center transition active:scale-95 ${
+                        isActive
+                          ? 'bg-[#00bcd4] border-[#00e5ff] text-black shadow-lg'
+                          : 'bg-[#18181b] border-[#28282b] hover:border-[#00bcd4] text-white hover:bg-[#1e1e24]'
+                      }`}
+                    >
+                      <span className="font-mono font-bold text-sm">PAD {idx + 1}</span>
+                      <span className={`text-[9px] font-mono mt-0.5 ${isActive ? 'text-black/80' : 'text-[#777]'}`}>
+                        {(slice.endSec - slice.startSec).toFixed(2)}s
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
             </div>
-          </div>
+          )}
         </div>
 
         {/* Footer Actions */}
@@ -404,14 +392,16 @@ export const AudioSlicerModal: React.FC<AudioSlicerModalProps> = ({
           <div className="flex items-center gap-2">
             <button
               onClick={handleMapToPianoRoll}
-              className="flex items-center gap-1.5 px-3 py-1.5 bg-[#00bcd4] hover:bg-[#00acc1] text-black font-bold rounded transition shadow"
+              disabled={!sourceReady || slices.length === 0}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-[#00bcd4] hover:bg-[#00acc1] disabled:opacity-40 disabled:hover:bg-[#00bcd4] text-black font-bold rounded transition shadow"
             >
               <Music className="w-3.5 h-3.5" />
               <span>Map Chops to Piano Roll</span>
             </button>
             <button
               onClick={handleMapToStepSequencer}
-              className="flex items-center gap-1.5 px-3 py-1.5 bg-[#222225] hover:bg-[#333338] text-white font-semibold rounded border border-[#333336] transition"
+              disabled={!sourceReady || slices.length === 0}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-[#222225] hover:bg-[#333338] disabled:opacity-40 disabled:hover:bg-[#222225] text-white font-semibold rounded border border-[#333336] transition"
             >
               <Zap className="w-3.5 h-3.5 text-[#ff6e00]" />
               <span>Map to 16 Steps</span>

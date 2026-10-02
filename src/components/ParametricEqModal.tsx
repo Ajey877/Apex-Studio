@@ -13,6 +13,14 @@ import {
 } from 'lucide-react';
 import { ParametricEqBand, MixerTrack } from '../types/daw';
 import { audioEngine } from '../audio/audioEngine';
+import {
+  EQ_BAND_SPECS,
+  EQ_PRESETS,
+  createFlatEqBands,
+  findEqualizerSlot,
+  publishEqBandsToTrack,
+  readEqBandsFromTrack,
+} from './parametricEqBands';
 
 interface ParametricEqModalProps {
   isOpen: boolean;
@@ -21,78 +29,41 @@ interface ParametricEqModalProps {
   onUpdateTrack: (track: MixerTrack) => void;
 }
 
-const DEFAULT_BANDS: ParametricEqBand[] = [
-  { id: 1, type: 'highpass', frequency: 40, gain: 0, q: 1.0, enabled: true, color: '#e74c3c' },
-  { id: 2, type: 'lowshelf', frequency: 120, gain: 2.0, q: 0.9, enabled: true, color: '#e67e22' },
-  { id: 3, type: 'peaking', frequency: 450, gain: -1.5, q: 1.8, enabled: true, color: '#f1c40f' },
-  { id: 4, type: 'peaking', frequency: 1200, gain: 0.0, q: 1.5, enabled: true, color: '#2ecc71' },
-  { id: 5, type: 'peaking', frequency: 3500, gain: 3.0, q: 1.4, enabled: true, color: '#00bcd4' },
-  { id: 6, type: 'highshelf', frequency: 9000, gain: 2.5, q: 0.8, enabled: true, color: '#3498db' },
-  { id: 7, type: 'lowpass', frequency: 18000, gain: 0, q: 1.0, enabled: true, color: '#9b59b6' },
-];
-
-const EQ_PRESETS = [
-  {
-    name: 'Vocal Clarity & Air',
-    bands: [
-      { id: 1, type: 'highpass', frequency: 80, gain: 0, q: 1.0, enabled: true, color: '#e74c3c' },
-      { id: 2, type: 'lowshelf', frequency: 200, gain: -2.0, q: 0.9, enabled: true, color: '#e67e22' },
-      { id: 3, type: 'peaking', frequency: 450, gain: -3.0, q: 2.5, enabled: true, color: '#f1c40f' },
-      { id: 4, type: 'peaking', frequency: 2800, gain: 3.5, q: 1.5, enabled: true, color: '#2ecc71' },
-      { id: 5, type: 'peaking', frequency: 5000, gain: 2.0, q: 1.2, enabled: true, color: '#00bcd4' },
-      { id: 6, type: 'highshelf', frequency: 11000, gain: 4.5, q: 0.7, enabled: true, color: '#3498db' },
-      { id: 7, type: 'lowpass', frequency: 20000, gain: 0, q: 1.0, enabled: true, color: '#9b59b6' },
-    ]
-  },
-  {
-    name: '808 Sub Bass Sculpt',
-    bands: [
-      { id: 1, type: 'highpass', frequency: 28, gain: 0, q: 1.2, enabled: true, color: '#e74c3c' },
-      { id: 2, type: 'lowshelf', frequency: 65, gain: 4.0, q: 1.2, enabled: true, color: '#e67e22' },
-      { id: 3, type: 'peaking', frequency: 220, gain: -4.5, q: 3.0, enabled: true, color: '#f1c40f' },
-      { id: 4, type: 'peaking', frequency: 800, gain: 1.5, q: 2.0, enabled: true, color: '#2ecc71' },
-      { id: 5, type: 'peaking', frequency: 2500, gain: -3.0, q: 1.0, enabled: true, color: '#00bcd4' },
-      { id: 6, type: 'highshelf', frequency: 6000, gain: -6.0, q: 0.8, enabled: true, color: '#3498db' },
-      { id: 7, type: 'lowpass', frequency: 12000, gain: 0, q: 1.0, enabled: true, color: '#9b59b6' },
-    ]
-  },
-  {
-    name: 'Master Bus Polish',
-    bands: [
-      { id: 1, type: 'highpass', frequency: 25, gain: 0, q: 0.8, enabled: true, color: '#e74c3c' },
-      { id: 2, type: 'lowshelf', frequency: 100, gain: 1.2, q: 0.7, enabled: true, color: '#e67e22' },
-      { id: 3, type: 'peaking', frequency: 350, gain: -1.0, q: 1.5, enabled: true, color: '#f1c40f' },
-      { id: 4, type: 'peaking', frequency: 1500, gain: 0.0, q: 1.0, enabled: true, color: '#2ecc71' },
-      { id: 5, type: 'peaking', frequency: 4500, gain: 1.5, q: 1.2, enabled: true, color: '#00bcd4' },
-      { id: 6, type: 'highshelf', frequency: 12500, gain: 2.5, q: 0.7, enabled: true, color: '#3498db' },
-      { id: 7, type: 'lowpass', frequency: 20000, gain: 0, q: 0.7, enabled: true, color: '#9b59b6' },
-    ]
-  },
-  {
-    name: 'Punchy Drum Bus',
-    bands: [
-      { id: 1, type: 'highpass', frequency: 35, gain: 0, q: 1.0, enabled: true, color: '#e74c3c' },
-      { id: 2, type: 'lowshelf', frequency: 85, gain: 3.5, q: 1.0, enabled: true, color: '#e67e22' },
-      { id: 3, type: 'peaking', frequency: 400, gain: -3.5, q: 2.2, enabled: true, color: '#f1c40f' },
-      { id: 4, type: 'peaking', frequency: 2500, gain: 2.5, q: 1.8, enabled: true, color: '#2ecc71' },
-      { id: 5, type: 'peaking', frequency: 6000, gain: 3.0, q: 1.2, enabled: true, color: '#00bcd4' },
-      { id: 6, type: 'highshelf', frequency: 10000, gain: 2.0, q: 0.8, enabled: true, color: '#3498db' },
-      { id: 7, type: 'lowpass', frequency: 19000, gain: 0, q: 1.0, enabled: true, color: '#9b59b6' },
-    ]
-  }
-];
-
+/**
+ * Phase 52: the editor is three stages because the production `equalizer`
+ * insert is three biquads — lowshelf, peaking, highshelf (see
+ * `liveFxChainHardening.createEqualizer`). The previous seven-band editor drew
+ * two extra filters the engine never built and published nothing at all.
+ */
 export const ParametricEqModal: React.FC<ParametricEqModalProps> = ({
   isOpen,
   onClose,
   mixerTrack,
   onUpdateTrack
 }) => {
-  const [bands, setBands] = useState<ParametricEqBand[]>(DEFAULT_BANDS);
-  const [selectedBandId, setSelectedBandId] = useState<number>(3);
+  const [bands, setBands] = useState<ParametricEqBand[]>(() => readEqBandsFromTrack(mixerTrack));
+  const [selectedBandId, setSelectedBandId] = useState<number>(2);
   const [draggingBandId, setDraggingBandId] = useState<number | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const animFrameRef = useRef<number | null>(null);
+
+  /**
+   * Dragging fires far faster than React re-renders, so the handlers below would
+   * otherwise read a stale `bands` array and drop intermediate moves. The ref
+   * always holds the newest committed value.
+   */
+  const bandsRef = useRef<ParametricEqBand[]>(bands);
+  const setBandsSynced = (next: ParametricEqBand[]) => {
+    bandsRef.current = next;
+    setBands(next);
+  };
+
+  // Re-read the track's published bands whenever the modal is opened on it, so
+  // the editor always shows the values the engine is actually using.
+  useEffect(() => {
+    if (!isOpen) return;
+    setBandsSynced(readEqBandsFromTrack(mixerTrack));
+  }, [isOpen, mixerTrack.id]);
 
   // 60fps Canvas Spectrum & Response Curve Renderer
   useEffect(() => {
@@ -284,7 +255,7 @@ export const ParametricEqModal: React.FC<ParametricEqModalProps> = ({
     const newFreq = xToFreq(mouseX, canvas.width);
     const newGain = yToDb(mouseY, canvas.height);
 
-    setBands(prev =>
+    commitBands(prev =>
       prev.map(b => (b.id === draggingBandId ? { ...b, frequency: newFreq, gain: newGain } : b))
     );
   };
@@ -295,8 +266,18 @@ export const ParametricEqModal: React.FC<ParametricEqModalProps> = ({
 
   const currentBand = bands.find(b => b.id === selectedBandId) || bands[0];
 
-  const applyPreset = (preset: typeof EQ_PRESETS[0]) => {
-    setBands(preset.bands as ParametricEqBand[]);
+  /**
+   * Every edit is written straight through to the track's EQ insert, so the
+   * values reach the audio engine instead of stopping in React state.
+   */
+  const commitBands = (update: ParametricEqBand[] | ((prev: ParametricEqBand[]) => ParametricEqBand[])) => {
+    const next = typeof update === 'function' ? update(bandsRef.current) : update;
+    setBandsSynced(next);
+    onUpdateTrack(publishEqBandsToTrack(mixerTrack, next));
+  };
+
+  const applyPreset = (preset: (typeof EQ_PRESETS)[number]) => {
+    commitBands(preset.bands as ParametricEqBand[]);
   };
 
   if (!isOpen) return null;
@@ -320,7 +301,7 @@ export const ParametricEqModal: React.FC<ParametricEqModalProps> = ({
             </div>
             <div>
               <h2 id="parametric-eq-modal-title" className="text-base font-bold text-white flex items-center space-x-2">
-                <span>7-Band EQ — Dynamic Equalizer</span>
+                <span>3-Band EQ — Dynamic Equalizer</span>
                 <span className="text-[10px] px-2 py-0.5 rounded bg-[#ff6e00]/20 text-[#ff851b] font-mono font-medium border border-[#ff6e00]/30">
                   Track: {mixerTrack.name}
                 </span>
@@ -375,7 +356,7 @@ export const ParametricEqModal: React.FC<ParametricEqModalProps> = ({
             />
           </div>
 
-          {/* 7-Band Selector Buttons */}
+          {/* Band Selector Buttons */}
           <div className="grid grid-cols-7 gap-2">
             {bands.map((b) => (
               <button
@@ -402,23 +383,13 @@ export const ParametricEqModal: React.FC<ParametricEqModalProps> = ({
           {/* Precision Parameter Controls for Selected Band */}
           {currentBand && (
             <div className="p-4 bg-[#202024] rounded-xl border border-[#2e2e32] grid grid-cols-1 md:grid-cols-4 gap-4 items-center">
-              {/* Type */}
+              {/* Type — fixed per stage: these are the three filters the insert builds. */}
               <div className="space-y-1">
                 <label className="text-[10px] font-bold text-[#888] uppercase tracking-wider block">Filter Type</label>
-                <select
-                  value={currentBand.type}
-                  onChange={(e) => {
-                    const newType = e.target.value as ParametricEqBand['type'];
-                    setBands(prev => prev.map(b => (b.id === currentBand.id ? { ...b, type: newType } : b)));
-                  }}
-                  className="w-full bg-[#18181b] border border-[#333336] rounded-lg px-3 py-1.5 text-xs text-white capitalize font-semibold"
-                >
-                  <option value="highpass">High Pass / Low Cut</option>
-                  <option value="lowshelf">Low Shelf</option>
-                  <option value="peaking">Peaking Bell</option>
-                  <option value="highshelf">High Shelf</option>
-                  <option value="lowpass">Low Pass / High Cut</option>
-                </select>
+                <div className="w-full bg-[#18181b] border border-[#333336] rounded-lg px-3 py-1.5 text-xs text-white capitalize font-semibold">
+                  {EQ_BAND_SPECS.find(spec => spec.role === (currentBand.id === 1 ? 'low' : currentBand.id === 2 ? 'mid' : 'high'))?.label ?? 'Band'}
+                </div>
+                <span className="text-[9px] text-[#666] block">Fixed by the insert's signal chain.</span>
               </div>
 
               {/* Frequency */}
@@ -434,7 +405,7 @@ export const ParametricEqModal: React.FC<ParametricEqModalProps> = ({
                   value={currentBand.frequency}
                   onChange={(e) => {
                     const f = Number(e.target.value);
-                    setBands(prev => prev.map(b => (b.id === currentBand.id ? { ...b, frequency: f } : b)));
+                    commitBands(prev => prev.map(b => (b.id === currentBand.id ? { ...b, frequency: f } : b)));
                   }}
                   className="w-full accent-[#ff6e00] h-1.5 bg-[#333] rounded-lg cursor-pointer"
                 />
@@ -454,7 +425,7 @@ export const ParametricEqModal: React.FC<ParametricEqModalProps> = ({
                   value={currentBand.gain}
                   onChange={(e) => {
                     const g = Number(e.target.value);
-                    setBands(prev => prev.map(b => (b.id === currentBand.id ? { ...b, gain: g } : b)));
+                    commitBands(prev => prev.map(b => (b.id === currentBand.id ? { ...b, gain: g } : b)));
                   }}
                   className="w-full accent-[#ff6e00] h-1.5 bg-[#333] rounded-lg cursor-pointer"
                 />
@@ -474,7 +445,7 @@ export const ParametricEqModal: React.FC<ParametricEqModalProps> = ({
                   value={currentBand.q}
                   onChange={(e) => {
                     const qVal = Number(e.target.value);
-                    setBands(prev => prev.map(b => (b.id === currentBand.id ? { ...b, q: qVal } : b)));
+                    commitBands(prev => prev.map(b => (b.id === currentBand.id ? { ...b, q: qVal } : b)));
                   }}
                   className="w-full accent-[#ff6e00] h-1.5 bg-[#333] rounded-lg cursor-pointer"
                 />
@@ -486,7 +457,7 @@ export const ParametricEqModal: React.FC<ParametricEqModalProps> = ({
         {/* Footer */}
         <div className="flex items-center justify-between px-6 py-3 border-t border-[#2a2a2d] bg-[#141416] text-xs text-[#888]">
           <button
-            onClick={() => setBands(DEFAULT_BANDS)}
+            onClick={() => commitBands(createFlatEqBands())}
             className="flex items-center space-x-1.5 text-xs text-[#888] hover:text-white"
           >
             <RotateCcw className="w-3.5 h-3.5" />
@@ -496,7 +467,7 @@ export const ParametricEqModal: React.FC<ParametricEqModalProps> = ({
             onClick={onClose}
             className="px-4 py-1.5 bg-[#ff6e00] hover:bg-[#ff851b] text-white font-bold rounded-lg transition-colors"
           >
-            Apply to Track
+            Done
           </button>
         </div>
       </div>

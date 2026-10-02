@@ -135,12 +135,12 @@ export const MultiZoneSamplerModal: React.FC<MultiZoneSamplerModalProps> = ({
             </div>
             <div>
               <div className="flex items-center gap-2">
-                <h2 id="fl-multizone-sampler-modal-title" className="text-sm font-bold text-white tracking-wide">DIRECTWAVE MULTI-SAMPLE KEYMAPPER</h2>
+                <h2 id="fl-multizone-sampler-modal-title" className="text-sm font-bold text-white tracking-wide">APEX MULTI-SAMPLE KEYMAPPER</h2>
                 <span className="px-1.5 py-0.5 rounded text-[9px] font-mono font-bold bg-[#ff6e00]/20 text-[#ff6e00] border border-[#ff6e00]/40">
-                  SFZ / MULTI-ZONE
+                  MULTI-ZONE
                 </span>
               </div>
-              <p className="text-[10px] text-[#777]">Map distinct audio samples across MIDI key ranges C0 - B8 with velocity crossfades</p>
+              <p className="text-[10px] text-[#777]">Map distinct audio samples across MIDI key ranges C0 - B8 with velocity splits</p>
             </div>
           </div>
 
@@ -369,7 +369,7 @@ export const MultiZoneSamplerModal: React.FC<MultiZoneSamplerModalProps> = ({
 
         {/* Footer */}
         <div className="px-5 py-3.5 bg-[#18181c] border-t border-[#2e2e34] flex items-center justify-between text-xs">
-          <span className="text-[10px] text-[#666]">Dynamic Pitch Resampling & Velocity Zone Splitting Active</span>
+          <span className="text-[10px] text-[#666]">Zone selection, tuning, trims and loop points are applied to playback</span>
           <button
             onClick={onClose}
             className="px-4 py-1.5 bg-[#ff6e00] hover:bg-[#ff7d1a] text-black font-bold rounded transition shadow"

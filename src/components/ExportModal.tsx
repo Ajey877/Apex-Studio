@@ -8,6 +8,12 @@ import { audioBufferToWav } from '../audio/wavEncoder';
 import { buildStandardMidiFile, getProjectRenderBars } from '../utils/exportUtils';
 import type { ExportScope } from '../utils/exportUtils';
 import { normalizePatternLengthSteps } from '../state/patternLength';
+import {
+  DEFAULT_INCLUDE_MIXER_FX,
+  describeExportFxDefault,
+  resolveExportFxChoice,
+  type ExportFxChoice
+} from './exportMixerFxPreference';
 
 interface ExportModalProps {
   isOpen: boolean;
@@ -63,7 +69,7 @@ export const formatAuditionTime = (seconds: number): string => {
   return `${mm}:${ss.toString().padStart(2, '0')}`;
 };
 
-export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, channels, clips, meta, mixerTracks, patternLengthSteps, playlistTracks, includeMixerFx = false }) => {
+export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, channels, clips, meta, mixerTracks, patternLengthSteps, playlistTracks, includeMixerFx = DEFAULT_INCLUDE_MIXER_FX }) => {
   const [format, setFormat] = useState<ExportFormat>('wav24');
   const [scope, setScope] = useState<ExportScope>('song');
   const [isRendering, setIsRendering] = useState(false);
@@ -73,8 +79,8 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, chann
   const [fileName, setFileName] = useState('');
   // Local override so the user can opt into the FX-heavy path on a per-export
   // basis without the App re-rendering. The prop is the project-level default.
-  const [fxOverride, setFxOverride] = useState<boolean | null>(null);
-  const effectiveIncludeMixerFx = fxOverride ?? includeMixerFx;
+  const [fxOverride, setFxOverride] = useState<ExportFxChoice | null>(null);
+  const effectiveIncludeMixerFx = resolveExportFxChoice(fxOverride, includeMixerFx);
 
   // Export audition player — lets the user preview the rendered WAV before
   // downloading. The element shares the existing `downloadUrl` blob (no second
@@ -351,15 +357,17 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, chann
 
             The effective value passed to the renderer (`effectiveIncludeMixerFx`)
             is identical to the prior implementation:
-              * `fxOverride === null` → `includeMixerFx` prop (project default, `false`)
-              * `fxOverride === true`  → `true`  (explicit Include FX)
-              * `fxOverride === false` → `false` (explicit Bypass FX)
+              * `fxOverride === null` → `includeMixerFx` prop (project default,
+                `DEFAULT_INCLUDE_MIXER_FX`, which is `true` so exports match
+                what the user monitored)
+              * `fxOverride === 'on'`  → `true`  (explicit Include FX)
+              * `fxOverride === 'off'` → `false` (explicit Bypass FX)
           */}
           <div className="space-y-1">
             <label className="text-[10px] font-bold uppercase tracking-wider text-[#777]">Mixer FX in Export</label>
             <div className="grid grid-cols-3 gap-2">
               {[
-                { id: 'auto' as const, name: 'Project Default', desc: `Currently: ${effectiveIncludeMixerFx ? 'On' : 'Off'}` },
+                { id: 'auto' as const, name: 'Project Default', desc: describeExportFxDefault(includeMixerFx) },
                 { id: 'on' as const, name: 'Include FX', desc: 'EQ, reverb, delay...' },
                 { id: 'off' as const, name: 'Bypass FX', desc: 'Faster, no reverb tail' }
               ].map(option => {
@@ -369,13 +377,13 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, chann
                 // explicit choice wins and "Project Default" goes inactive.
                 const isActive =
                   (option.id === 'auto' && fxOverride === null) ||
-                  (option.id === 'on' && fxOverride === true) ||
-                  (option.id === 'off' && fxOverride === false);
+                  (option.id === 'on' && fxOverride === 'on') ||
+                  (option.id === 'off' && fxOverride === 'off');
                 return (
                   <button
                     key={option.id}
                     type="button"
-                    onClick={() => setFxOverride(option.id === 'auto' ? null : option.id === 'on')}
+                    onClick={() => setFxOverride(option.id === 'auto' ? null : option.id)}
                     className={`p-2 rounded border text-left transition ${isActive ? 'bg-[#ff6e00]/15 border-[#ff6e00] text-white' : 'bg-[#121214] border-[#333336] text-[#777] hover:text-white'}`}
                   >
                     <div className="font-bold text-[11px] text-white">{option.name}</div>

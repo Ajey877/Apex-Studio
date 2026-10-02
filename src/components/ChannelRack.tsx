@@ -430,12 +430,12 @@ export const ChannelRack: React.FC<ChannelRackProps> = ({
                 </button>
                 <button
                   onClick={() => {
-                    onAddChannel('sampler', 'DirectWave Sampler', '#4caf50');
+                    onAddChannel('sampler', 'Apex Sampler', '#4caf50');
                     setShowAddMenu(false);
                   }}
                   className="w-full text-left px-3 py-1.5 hover:bg-[#2d2d30] hover:text-white flex items-center justify-between"
                 >
-                  <span className="font-semibold">DirectWave Sampler</span>
+                  <span className="font-semibold">Apex Sampler</span>
                   <span className="text-[9px] text-[#888]">Sample</span>
                 </button>
               </div>
@@ -560,7 +560,7 @@ export const ChannelRack: React.FC<ChannelRackProps> = ({
                       }`}
                       title={isChannelSampleAudioUnavailable(ch) && ch.customSample
                         ? describeMissingAudioSample(ch.customSample, ch.name)
-                        : 'DirectWave Sample Loader & Waveform Slicer'}
+                        : 'Sample loader & waveform slicer'}
                     >
                       SMPL
                     </button>

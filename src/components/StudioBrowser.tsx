@@ -78,7 +78,7 @@ export const STUDIO_BROWSER_INSTRUMENTS: readonly StudioBrowserInstrument[] = [
   { name: '8-Bit Retro Chiptune', type: 'chiptune_8bit', color: '#feca57' },
   { name: 'MiniSynth Subtractive', type: 'minisynth', color: '#ff6e00' },
   { name: 'Toxic FM Synthesizer', type: 'fmsynth', color: '#00bcd4' },
-  { name: 'DirectWave Sampler', type: 'sampler', color: '#4caf50' },
+  { name: 'Apex Sampler', type: 'sampler', color: '#4caf50' },
   { name: '808 Drum Machine', type: 'drumpad', color: '#ff5722' },
 ];
 

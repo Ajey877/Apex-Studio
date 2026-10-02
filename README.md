@@ -101,7 +101,7 @@ Balance channels, route audio and shape your mix.
 <img src="assets/screenshots/synth.jpg" alt="Apex Studio Synth" width="100%">
 
 ### 🎛️ Synth
-Shape sounds with oscillators, filters and modulation.
+Shape sounds with two oscillators, filters and modulation.
 
 </td>
 </tr>
@@ -126,8 +126,8 @@ Shape sounds with oscillators, filters and modulation.
 | **Channel Rack** | Build patterns with step sequencing, swing, velocity and MIDI learn. |
 | **Piano Roll** | Create polyphonic melodies, edit note length and velocity, use scales/chords and quantization tools. |
 | **Playlist Arranger** | Arrange patterns and audio clips across multiple lanes, including automation. |
-| **Mixer** | Work across mixer tracks with volume, pan, routing, metering and insert effects. |
-| **Synth** | Shape sounds with dual wavetable oscillators, filters, ADSR and modulation controls. |
+| **Mixer** | Work across mixer tracks with volume, pan, routing, metering and insert effects (EQ, reverb, delay, compression, limiter). |
+| **Synth** | Shape sounds with dual oscillators, filters, ADSR and modulation controls. |
 | **Recording** | Capture audio and place recorded takes into the project. |
 | **FX** | Use EQ, reverb, delay, compression and time/volume-style effects. |
 | **Export** | Render WAV, export Standard MIDI, and create project/stem packages. |
@@ -303,6 +303,20 @@ That means the current priority is making this loop dependable:
 > **Create → Edit → Arrange → Record → Mix → Save → Reopen → Export**
 
 Features that are not production-ready are not presented as finished just for the sake of a bigger feature list.
+
+### Feature status
+
+The table in [Built for the actual workflow](#-built-for-the-actual-workflow) lists capabilities that run end to end.
+The surfaces below are **in the app but not wired into the audio engine yet**, and they say so in their own UI:
+
+| Surface | Status |
+|---|---|
+| **Vocal Tuner** | Settings are saved with the project but **not applied** — there is no pitch detection or pitch correction in the signal path. |
+| **Warp Processor** | Applies **pitch and playback rate** to an audio clip. Length-preserving time-stretch is **not implemented**, so pitch rides with the rate. |
+| **Take Comping** | **Prototype / demo.** Shows placeholder takes; it never invents audio, and promoting a comp needs recorded assets that exist. |
+| **Wavetable Synth** | **Preview surface.** The channel keeps playing with its dual-oscillator subtractive synth; there is no wavetable engine behind this window yet. |
+| **Polyphonic Blob Editor** | **Prototype.** Displays sample blobs; it does not analyse, import or play back project audio. |
+| **Mastering Suite** | Loudness and true-peak **metering is live**. The mastering processors are **not applied** to the master bus. |
 
 ### Local collaboration and sync status
 
