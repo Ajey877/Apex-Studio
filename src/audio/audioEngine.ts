@@ -1187,7 +1187,13 @@ class AudioEngine {
   }
 
   // Instrument sound triggers
-  public playNote(channel: Channel, note: Note, startTime?: number, bpm: number = 120) {
+  public playNote(
+    channel: Channel,
+    note: Note,
+    startTime?: number,
+    bpm: number = 120,
+    midiChannel?: number,
+  ) {
     if (this.shouldBlockLiveMutation()) return;
     if (!this.ctx) this.init();
     const ctx = this.ctx!;
@@ -1199,10 +1205,10 @@ class AudioEngine {
       return;
     }
 
-    this.playSingleVoice(channel, note, time);
+    this.playSingleVoice(channel, note, time, midiChannel);
   }
 
-  public playSingleVoice(channel: Channel, note: Note, time: number) {
+  public playSingleVoice(channel: Channel, note: Note, time: number, midiChannel?: number) {
     if (this.shouldBlockLiveMutation() || !this.ctx) return;
     if (channel.mute) return;
     if (
@@ -1214,7 +1220,9 @@ class AudioEngine {
     }
 
     const mixerChannel = this.getOrCreateMixerChannel(channel.mixerTrackId);
-    const voiceId = `${channel.id}-${note.pitch}-${Math.random()}`;
+    const voiceId = midiChannel === undefined
+      ? `${channel.id}-${note.pitch}-${Math.random()}`
+      : `${channel.id}-${note.pitch}-midi-${midiChannel}-${Math.random()}`;
 
     // Trigger Dynamic Sidechain Ducking on receiving tracks
     this.triggerSidechainDucking(channel.mixerTrackId, time);
@@ -1827,11 +1835,13 @@ class AudioEngine {
     }
   }
 
-  public stopChannelNote(channelId: string, pitch: number): number {
+  public stopChannelNote(channelId: string, pitch: number, midiChannel?: number): number {
     if (this.shouldBlockLiveMutation()) return 0;
     if (!Number.isFinite(pitch)) return 0;
     const normalizedPitch = Math.round(pitch);
-    const prefix = `${channelId}-${normalizedPitch}-`;
+    const prefix = midiChannel === undefined
+      ? `${channelId}-${normalizedPitch}-`
+      : `${channelId}-${normalizedPitch}-midi-${midiChannel}-`;
     let stopped = 0;
     for (const voiceId of Array.from(this.activeVoices.keys())) {
       if (voiceId.startsWith(prefix)) {
