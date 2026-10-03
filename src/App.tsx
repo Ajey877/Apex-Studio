@@ -18,7 +18,7 @@ import {
   MasteringSuiteState
 } from './types/daw';
 import { audioEngine, type MidiEventPayload, type PlaybackStateUpdate } from './audio/audioEngine';
-import { MidiCcMappingRuntime } from './audio/midiMappingRuntime';
+import { MidiCcMappingRuntime, MidiNoteInputRuntime, isRackChannelAudible } from './audio/midiMappingRuntime';
 import { 
   DEFAULT_PROJECT, 
   createDefaultMixerTracks, 
@@ -573,9 +573,32 @@ export function App() {
     synchronizeActivePlayback(previous, next);
     if (!audioEngine.isPlaybackActive()) {
       if (previous.mixerTracks !== next.mixerTracks) {
+        const nextTrackIds = new Set(next.mixerTracks.map(track => track.id));
+        for (const previousTrack of previous.mixerTracks) {
+          if (previousTrack.id !== 0 && !nextTrackIds.has(previousTrack.id)) {
+            audioEngine.removeMixerChannel(previousTrack.id);
+          }
+        }
         next.mixerTracks.forEach(track => audioEngine.updateMixerTrack(track));
       }
       if (previous.channels !== next.channels) {
+        const nextChannelIds = new Set(next.channels.map(channel => channel.id));
+        for (const previousChannel of previous.channels) {
+          if (!nextChannelIds.has(previousChannel.id)) {
+            audioEngine.stopChannelVoices(previousChannel.id);
+            audioEngine.removeChannelPanner(previousChannel.id);
+          }
+        }
+        for (const nextChannel of next.channels) {
+          const prevChannel = previous.channels.find(c => c.id === nextChannel.id);
+          if (
+            prevChannel &&
+            isRackChannelAudible(prevChannel, previous.channels) &&
+            !isRackChannelAudible(nextChannel, next.channels)
+          ) {
+            audioEngine.stopChannelVoices(nextChannel.id);
+          }
+        }
         next.channels.forEach(channel => {
           if (audioEngine.getChannelPanner(channel.id)) {
             audioEngine.updateChannel(channel);
@@ -658,15 +681,18 @@ export function App() {
     mutateProjectStateRef.current = mutateProjectState;
   }, [mutateProjectState]);
 
+  const selectedChannelIdRef = useRef(selectedChannelId);
+  useEffect(() => {
+    selectedChannelIdRef.current = selectedChannelId;
+  }, [selectedChannelId]);
+
   /**
-   * Phase 46: make saved MIDI CC mappings actually control their targets.
+   * Phase 46 & Phase 61: make saved MIDI CC mappings control their targets and
+   * route hardware MIDI `noteOn`/`noteOff` messages to the active Channel Rack
+   * instrument.
    *
-   * The runtime is a consumer of the audio engine's existing MIDI stream (the
-   * same one the transport LED and MIDI Learn use) and applies each mapping
-   * through the existing project mutation/history path, so undo/redo,
-   * persistence and live playback stay consistent. The master output is the one
-   * target that is not project state, so it goes through the engine's existing
-   * master-volume parameter API.
+   * Both runtimes consume the audio engine's existing MIDI stream (the same one
+   * the transport LED and MIDI Learn use).
    */
   useEffect(() => {
     const midiMappingRuntime = new MidiCcMappingRuntime({
@@ -685,12 +711,25 @@ export function App() {
       }
     });
 
+    const midiNoteRuntime = new MidiNoteInputRuntime({
+      getProjectState: () => projectStateRef.current,
+      getSelectedChannelId: () => selectedChannelIdRef.current,
+      playNote: (channel, note, startTime, bpm) => {
+        audioEngine.playNote(channel, note, startTime, bpm);
+      },
+      stopChannelNote: (channelId, pitch) => {
+        audioEngine.stopChannelNote(channelId, pitch);
+      },
+    });
+
     const handleMidiMessage = (event: MidiEventPayload) => {
+      midiNoteRuntime.handleMidiEvent(event);
       midiMappingRuntime.handleMidiEvent(event);
     };
 
     audioEngine.addMidiListener(handleMidiMessage);
     return () => {
+      midiNoteRuntime.releaseAllNotes();
       audioEngine.removeMidiListener(handleMidiMessage);
     };
   }, []);
@@ -785,6 +824,7 @@ export function App() {
         try {
           const previousProjectState = projectStateRef.current;
           const hydrated = await hydrateProjectAudio(normalized, audioEngine);
+          synchronizeRuntimeState(previousProjectState, hydrated.state);
           replaceProjectSessionBlobUrls(previousProjectState, hydrated.state);
           projectStateRef.current = hydrated.state;
           skipNextAutosaveStateRef.current = hydrated.state;
@@ -803,7 +843,9 @@ export function App() {
           if (!saved) throw new Error('Replaced project could not be persisted');
         } catch (error) {
           console.warn('[Apex Studio] Project audio hydration failed; loading project without audio.', error);
-          for (const url of getProjectSessionBlobUrls(projectStateRef.current)) {
+          const previousProjectState = projectStateRef.current;
+          synchronizeRuntimeState(previousProjectState, normalized);
+          for (const url of getProjectSessionBlobUrls(previousProjectState)) {
             sessionBlobUrlRegistry.release(url);
           }
           projectStateRef.current = normalized;
@@ -817,7 +859,7 @@ export function App() {
         }
       }
     );
-  }, [resetProjectHistory, performSave]);
+  }, [resetProjectHistory, performSave, synchronizeRuntimeState]);
 
   const settlePendingReplacement = useCallback((replaced: boolean) => {
     const pending = pendingReplacementRef.current;
@@ -1464,7 +1506,7 @@ export function App() {
         const pitch = notePitch;
 
         const currentChan = projectState.channels.find(c => c.id === selectedChannelId) || projectState.channels[0];
-        if (currentChan) {
+        if (currentChan && isRackChannelAudible(currentChan, projectState.channels)) {
           audioEngine.playNote(currentChan, {
             id: `key-${e.code}-${Date.now()}`,
             pitch,

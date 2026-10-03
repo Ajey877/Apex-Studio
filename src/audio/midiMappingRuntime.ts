@@ -26,7 +26,7 @@
  *    behaviour.
  */
 
-import type { Channel, MidiMapping, MixerTrack, ProjectState } from '../types/daw';
+import type { Channel, MidiMapping, MixerTrack, Note, ProjectState } from '../types/daw';
 import type { MidiEventPayload } from './audioEngine';
 import {
   channelVolumeFromNormalized,
@@ -73,16 +73,17 @@ export const findMidiMappingForCc = (
 export type MidiCcResolution =
   | {
       kind: 'project';
+      status: 'supported';
       parameter: string;
       value: number;
       label: string;
       /** Pure transition: never mutates the state it is given. */
       apply: (state: ProjectState) => ProjectState;
     }
-  | { kind: 'engine-master-volume'; parameter: string; value: number; label: string }
-  | { kind: 'unsupported'; reason: string };
+  | { kind: 'engine-master-volume'; status: 'supported'; parameter: string; value: number; label: string }
+  | { kind: 'unsupported'; status: 'unsupported'; reason: string };
 
-const unsupported = (reason: string): MidiCcResolution => ({ kind: 'unsupported', reason });
+const unsupported = (reason: string): MidiCcResolution => ({ kind: 'unsupported', status: 'unsupported', reason });
 
 const midiLabel = (mapping: MidiMapping, detail: string): string =>
   `MIDI CC ${mapping.ccNumber}: ${detail}`;
@@ -142,6 +143,7 @@ const resolveFxParamTarget = (
       };
       return {
         kind: 'project',
+        status: 'supported',
         parameter: 'fx_param.filterCutoff',
         value: updates.synthParams!.filterCutoff,
         label: midiLabel(mapping, getChannelUpdateLabel(updates)),
@@ -154,6 +156,7 @@ const resolveFxParamTarget = (
       };
       return {
         kind: 'project',
+        status: 'supported',
         parameter: 'fx_param.filterResonance',
         value: updates.synthParams!.filterResonance,
         label: midiLabel(mapping, getChannelUpdateLabel(updates)),
@@ -172,6 +175,7 @@ const resolveFxParamTarget = (
       const updates = { mix: fxMixFromNormalized(normalizedValue) };
       return {
         kind: 'project',
+        status: 'supported',
         parameter: 'fx_param.mix',
         value: updates.mix,
         label: midiLabel(mapping, getFxUpdateLabel(updates)),
@@ -191,7 +195,7 @@ const resolveFxParamTarget = (
 export const resolveMidiCcTarget = (
   mapping: MidiMapping,
   state: ProjectState,
-  normalizedValue: number,
+  normalizedValue: number = 0.5,
 ): MidiCcResolution => {
   const value = clampNormalized(normalizedValue);
 
@@ -199,6 +203,7 @@ export const resolveMidiCcTarget = (
     case 'master_vol':
       return {
         kind: 'engine-master-volume',
+        status: 'supported',
         parameter: 'master_vol',
         value,
         label: midiLabel(mapping, 'Master output volume'),
@@ -210,6 +215,7 @@ export const resolveMidiCcTarget = (
       const updates: Partial<Channel> = { volume: channelVolumeFromNormalized(value) };
       return {
         kind: 'project',
+        status: 'supported',
         parameter: 'channel_vol',
         value: updates.volume!,
         label: midiLabel(mapping, getChannelUpdateLabel(updates)),
@@ -223,6 +229,7 @@ export const resolveMidiCcTarget = (
       const updates: Partial<Channel> = { pan: panFromNormalized(value) };
       return {
         kind: 'project',
+        status: 'supported',
         parameter: 'channel_pan',
         value: updates.pan!,
         label: midiLabel(mapping, getChannelUpdateLabel(updates)),
@@ -241,6 +248,7 @@ export const resolveMidiCcTarget = (
           : { pan: panFromNormalized(value) };
       return {
         kind: 'project',
+        status: 'supported',
         parameter: mapping.targetType,
         value: mapping.targetType === 'mixer_vol' ? updates.volume! : updates.pan!,
         label: midiLabel(mapping, getMixerUpdateLabel(updates)),
@@ -385,3 +393,171 @@ export const resolveMidiLearnCapture = (
 
   return { ccNumber, mapping, mappings };
 };
+
+/**
+ * Phase 61: Canonical Channel Rack audibility predicate.
+ *
+ * A channel is audible iff it is not muted (`!channel.mute`) AND either no
+ * channel in `channels` has `solo: true` or this channel has `solo: true`.
+ * Consequently, a channel with both `solo: true` and `mute: true` is silent
+ * itself while still solo-silencing non-soloed channels.
+ */
+export const isRackChannelAudible = (
+  channel: Pick<Channel, 'mute' | 'solo'>,
+  channels: readonly Pick<Channel, 'mute' | 'solo'>[],
+): boolean => {
+  if (channel.mute) return false;
+  const hasSolo = channels.some(candidate => Boolean(candidate.solo));
+  return !hasSolo || Boolean(channel.solo);
+};
+
+export interface MidiNoteInputRuntimePorts {
+  getProjectState(): ProjectState;
+  getSelectedChannelId?(): string | null | undefined;
+  playNote(channel: Channel, note: Note, startTime?: number, bpm?: number): void;
+  stopChannelNote(channelId: string, pitch: number): number | void;
+}
+
+export type MidiNoteDispatchStatus = 'note_on' | 'note_off' | 'muted' | 'ignored';
+
+export interface MidiNoteDispatchResult {
+  status: MidiNoteDispatchStatus;
+  channelId?: string;
+  note?: number;
+  velocity?: number;
+  midiChannel?: number;
+}
+
+interface HeldMidiNoteEntry {
+  channelId: string;
+  pitch: number;
+  midiChannel: number;
+}
+
+/**
+ * Phase 61: Hardware Web MIDI keyboard performance bridge (`noteOn` / `noteOff`).
+ *
+ * Consumes the audio engine's existing `midiListeners` stream alongside
+ * `MidiCcMappingRuntime`, routing incoming MIDI `noteOn` messages to the
+ * active/selected Channel Rack instrument and stopping the sustaining voice
+ * on the originating channel when the matching `noteOff` arrives.
+ */
+export class MidiNoteInputRuntime {
+  private readonly heldNotes = new Map<string, HeldMidiNoteEntry>();
+
+  constructor(private readonly ports: MidiNoteInputRuntimePorts) {}
+
+  handleMidiEvent(event: MidiEventPayload | null | undefined): MidiNoteDispatchResult {
+    if (!event || (event.type !== 'noteOn' && event.type !== 'noteOff')) {
+      return { status: 'ignored' };
+    }
+    if (typeof event.note !== 'number' || !Number.isFinite(event.note)) {
+      return { status: 'ignored' };
+    }
+
+    const pitch = Math.max(0, Math.min(127, Math.round(event.note)));
+    const midiChannel =
+      typeof event.midiChannel === 'number' && Number.isFinite(event.midiChannel)
+        ? Math.max(1, Math.min(16, Math.round(event.midiChannel)))
+        : 1;
+    const noteKey = `${midiChannel}:${pitch}`;
+
+    const isNoteOff =
+      event.type === 'noteOff' ||
+      (event.type === 'noteOn' && typeof event.velocity === 'number' && event.velocity <= 0);
+
+    if (isNoteOff) {
+      let held = this.heldNotes.get(noteKey);
+      let matchedKey = noteKey;
+      if (!held && event.midiChannel === undefined) {
+        for (const [key, entry] of this.heldNotes.entries()) {
+          if (entry.pitch === pitch) {
+            held = entry;
+            matchedKey = key;
+            break;
+          }
+        }
+      }
+      if (held) {
+        this.heldNotes.delete(matchedKey);
+        this.ports.stopChannelNote(held.channelId, pitch);
+        return {
+          status: 'note_off',
+          channelId: held.channelId,
+          note: pitch,
+          midiChannel: held.midiChannel,
+        };
+      }
+
+      const state = this.ports.getProjectState();
+      const selectedId = this.ports.getSelectedChannelId?.() ?? state.selectedChannelId;
+      const fallbackChannel = state.channels.find(c => c.id === selectedId) ?? state.channels[0];
+      if (fallbackChannel) {
+        this.ports.stopChannelNote(fallbackChannel.id, pitch);
+      }
+      return {
+        status: 'note_off',
+        channelId: fallbackChannel?.id,
+        note: pitch,
+        midiChannel,
+      };
+    }
+
+    const state = this.ports.getProjectState();
+    const selectedId = this.ports.getSelectedChannelId?.() ?? state.selectedChannelId;
+    const channel = state.channels.find(c => c.id === selectedId) ?? state.channels[0];
+    if (!channel) {
+      return { status: 'ignored' };
+    }
+
+    if (!isRackChannelAudible(channel, state.channels)) {
+      return {
+        status: 'muted',
+        channelId: channel.id,
+        note: pitch,
+        midiChannel,
+      };
+    }
+
+    const existing = this.heldNotes.get(noteKey);
+    if (existing) {
+      this.ports.stopChannelNote(existing.channelId, pitch);
+    }
+
+    const velocity = Math.max(1 / 127, clampNormalized(event.velocity ?? 0.8));
+    this.heldNotes.set(noteKey, {
+      channelId: channel.id,
+      pitch,
+      midiChannel,
+    });
+
+    this.ports.playNote(
+      channel,
+      {
+        id: `midi-${midiChannel}-${pitch}-${Date.now()}`,
+        pitch,
+        start: 0,
+        duration: 8,
+        velocity,
+      },
+      undefined,
+      state.meta?.bpm ?? 120,
+    );
+
+    return {
+      status: 'note_on',
+      channelId: channel.id,
+      note: pitch,
+      velocity,
+      midiChannel,
+    };
+  }
+
+  releaseAllNotes(): void {
+    for (const entry of this.heldNotes.values()) {
+      this.ports.stopChannelNote(entry.channelId, entry.pitch);
+    }
+    this.heldNotes.clear();
+  }
+}
+

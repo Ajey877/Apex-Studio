@@ -474,6 +474,21 @@ export const ChannelRack: React.FC<ChannelRackProps> = ({
                   }`}
                   title={ch.mute ? 'Unmute' : 'Mute'}
                 />
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onUpdateChannel(ch.id, { solo: !ch.solo });
+                  }}
+                  aria-label={ch.solo ? `Unsolo ${ch.name}` : `Solo ${ch.name}`}
+                  className={`w-4 h-4 rounded text-[8px] font-bold border transition flex items-center justify-center ${
+                    ch.solo
+                      ? 'bg-[#ffaa00] text-black border-[#ffaa00]'
+                      : 'bg-[#1a1a1d] text-[#777] border-[#333336] hover:text-white'
+                  }`}
+                  title={ch.solo ? 'Unsolo Channel' : 'Solo Channel'}
+                >
+                  S
+                </button>
 
                 {/* Pan & Volume Mini Knobs */}
                 <div className="flex items-center gap-1.5 text-[9px]">
