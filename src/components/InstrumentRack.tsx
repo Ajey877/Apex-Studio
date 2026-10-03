@@ -124,7 +124,8 @@ export const InstrumentRack: React.FC<InstrumentRackProps> = ({
 
   const handleApplyPreset = (preset: typeof SYNTH_PRESETS[0]) => {
     onUpdateChannel(channel.id, {
-      synthParams: { ...p, ...preset.params } as any
+      instrumentType: preset.type as Channel['instrumentType'],
+      synthParams: { ...p, ...preset.params } as SynthParameters
     });
   };
 

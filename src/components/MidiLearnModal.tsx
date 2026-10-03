@@ -19,6 +19,43 @@ import { MidiMapping, Channel, MixerTrack, MidiDeviceInfo } from '../types/daw';
 import { audioEngine, type MidiEventPayload } from '../audio/audioEngine';
 import { createMidiMappingForCc, resolveMidiLearnCapture } from '../audio/midiMappingRuntime';
 
+export const isChannelScopedMidiTarget = (targetType: MidiMapping['targetType']): boolean =>
+  targetType === 'channel_vol' || targetType === 'channel_pan' || targetType === 'fx_param';
+
+export const normalizeMidiLearnTargetSelection = (
+  targetType: MidiMapping['targetType'],
+  currentTargetId: string | number,
+  channels: readonly Channel[],
+  mixerTracks: readonly MixerTrack[],
+): { targetId: string | number; paramName?: string } => {
+  if (targetType === 'master_vol') {
+    return { targetId: 0 };
+  }
+
+  if (isChannelScopedMidiTarget(targetType)) {
+    const matched = channels.find(c => c.id === String(currentTargetId));
+    const targetId = matched ? matched.id : (channels[0]?.id ?? 'ch-1');
+    return targetType === 'fx_param'
+      ? { targetId, paramName: 'filterCutoff' }
+      : { targetId };
+  }
+
+  const matchedTrack = mixerTracks.find(t => String(t.id) === String(currentTargetId));
+  const targetId = matchedTrack ? matchedTrack.id : (mixerTracks[0]?.id ?? 0);
+  return { targetId };
+};
+
+export const buildMidiLearnMapping = (
+  ccNumber: number,
+  targetType: MidiMapping['targetType'],
+  currentTargetId: string | number,
+  channels: readonly Channel[],
+  mixerTracks: readonly MixerTrack[],
+): MidiMapping => {
+  const normalized = normalizeMidiLearnTargetSelection(targetType, currentTargetId, channels, mixerTracks);
+  return createMidiMappingForCc(ccNumber, targetType, normalized.targetId, normalized.paramName);
+};
+
 interface MidiLearnModalProps {
   isOpen: boolean;
   onClose: () => void;
@@ -53,10 +90,12 @@ export const MidiLearnModal: React.FC<MidiLearnModalProps> = ({
       setStatusMessage(`CC #${manualCc} is already bound. Overwriting...`);
     }
 
-    const newMapping: MidiMapping = createMidiMappingForCc(
+    const newMapping: MidiMapping = buildMidiLearnMapping(
       manualCc,
       selectedTargetType,
-      selectedTargetId
+      selectedTargetId,
+      channels,
+      mixerTracks,
     );
 
     const filtered = midiMappings.filter(m => m.ccNumber !== manualCc);
@@ -85,9 +124,16 @@ export const MidiLearnModal: React.FC<MidiLearnModalProps> = ({
     if (!isOpen || !isMidiLearnActive) return;
 
     const handleLearnedCc = (event: MidiEventPayload) => {
+      const normalized = normalizeMidiLearnTargetSelection(
+        selectedTargetType,
+        selectedTargetId,
+        channels,
+        mixerTracks,
+      );
       const capture = resolveMidiLearnCapture(event, midiMappings, {
         targetType: selectedTargetType,
-        targetId: selectedTargetId
+        targetId: normalized.targetId,
+        paramName: normalized.paramName,
       });
       if (!capture) return;
 
@@ -101,9 +147,11 @@ export const MidiLearnModal: React.FC<MidiLearnModalProps> = ({
     audioEngine.addMidiListener(handleLearnedCc);
     return () => audioEngine.removeMidiListener(handleLearnedCc);
   }, [
+    channels,
     isOpen,
     isMidiLearnActive,
     midiMappings,
+    mixerTracks,
     onToggleMidiLearn,
     onUpdateMidiMappings,
     selectedTargetId,
@@ -229,7 +277,13 @@ export const MidiLearnModal: React.FC<MidiLearnModalProps> = ({
                 <label className="text-[9px] text-[#777] font-mono block mb-0.5">TARGET CONTROL</label>
                 <select
                   value={selectedTargetType}
-                  onChange={(e) => setSelectedTargetType(e.target.value as any)}
+                  onChange={(e) => {
+                    const nextType = e.target.value as MidiMapping['targetType'];
+                    setSelectedTargetType(nextType);
+                    setSelectedTargetId(
+                      normalizeMidiLearnTargetSelection(nextType, selectedTargetId, channels, mixerTracks).targetId
+                    );
+                  }}
                   className="w-full bg-[#121214] text-white text-xs px-2 py-1.5 rounded border border-[#333336]"
                 >
                   <option value="master_vol">Master Out Volume</option>
@@ -249,7 +303,7 @@ export const MidiLearnModal: React.FC<MidiLearnModalProps> = ({
                   onChange={(e) => setSelectedTargetId(e.target.value)}
                   className="w-full bg-[#121214] text-white text-xs px-2 py-1.5 rounded border border-[#333336]"
                 >
-                  {selectedTargetType.startsWith('channel') ? (
+                  {isChannelScopedMidiTarget(selectedTargetType) ? (
                     channels.map(c => (
                       <option key={c.id} value={c.id}>{c.name}</option>
                     ))

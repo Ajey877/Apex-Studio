@@ -18,6 +18,7 @@ export const renderIndependentPluckVoice: InstrumentVoiceRenderer = ({
   time,
   destination,
   audioContext,
+  channelPanApplied,
   onEnded,
 }) => {
   const ctx = audioContext;
@@ -30,7 +31,9 @@ export const renderIndependentPluckVoice: InstrumentVoiceRenderer = ({
   const body = ctx.createOscillator();
   const overtone = ctx.createOscillator();
   const overtoneGain = ctx.createGain();
-  const panner = ctx.createStereoPanner();
+  const hasNotePan = typeof note.pan === 'number' && Number.isFinite(note.pan);
+  const useVoicePanner = !channelPanApplied || hasNotePan;
+  const panner = useVoicePanner ? ctx.createStereoPanner() : null;
 
   body.type = 'triangle';
   body.frequency.setValueAtTime(frequency, time);
@@ -43,7 +46,9 @@ export const renderIndependentPluckVoice: InstrumentVoiceRenderer = ({
   filter.frequency.setValueAtTime(clamp(frequency * 5, 900, 11000), time);
   filter.Q.value = 1.1;
 
-  panner.pan.setValueAtTime(clamp(note.pan ?? channel.pan, -1, 1), time);
+  if (panner) {
+    panner.pan.setValueAtTime(clamp(note.pan ?? channel.pan, -1, 1), time);
+  }
 
   output.gain.setValueAtTime(0.0001, time);
   output.gain.linearRampToValueAtTime(Math.max(0.001, velocity), time + 0.004);
@@ -53,8 +58,12 @@ export const renderIndependentPluckVoice: InstrumentVoiceRenderer = ({
   overtone.connect(overtoneGain);
   overtoneGain.connect(filter);
   filter.connect(output);
-  output.connect(panner);
-  panner.connect(destination);
+  if (panner) {
+    output.connect(panner);
+    panner.connect(destination);
+  } else {
+    output.connect(destination);
+  }
 
   body.start(time);
   overtone.start(time);

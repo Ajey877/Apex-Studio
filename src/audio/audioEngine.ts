@@ -42,6 +42,9 @@ import {
   panFromNormalized,
   pitchFromNormalized
 } from './parameterScaling';
+import { isRackChannelAudible } from './midiMappingRuntime';
+
+export { isRackChannelAudible };
 
 export type MidiEventPayload = {
   type: 'noteOn' | 'noteOff' | 'cc' | 'pitchBend';
@@ -111,6 +114,13 @@ export interface MixerChannel {
   analyser: AnalyserNode;
   fxNodes: AudioNode[];
   sidechain?: SidechainSettings;
+}
+
+export interface ChannelPannerEntry {
+  panner: StereoPannerNode | GainNode;
+  mixerTrackId: number;
+  destination: AudioNode;
+  pan: number;
 }
 
 const isPlaybackRecord = (value: unknown): value is Record<string, unknown> =>
@@ -338,6 +348,7 @@ class AudioEngine {
   private measurementTimerId: ReturnType<typeof setInterval> | null = null;
   private measurementScratch: { left: Float32Array; right: Float32Array } | null = null;
   private mixerChannels: Map<number, MixerChannel> = new Map();
+  private channelPanners: Map<string, ChannelPannerEntry> = new Map();
   private mixerRoutingAdapter: MixerRoutingAdapter | null = null;
   private mixerRoutingChannelMap: Map<number, MixerChannel> | null = null;
 
@@ -351,12 +362,18 @@ class AudioEngine {
   };
 
   private activeVoices: Map<string, { stop: (time?: number) => void }> = new Map();
+  /** Per-voice post-envelope channel volume trim so live `Channel.volume` and `channel_vol` automation modulate sustaining voices without double-scaling. */
+  private activeVoiceChannelVolumes: Map<string, { channelId: string; baseVolume: number; gainNode: GainNode }> = new Map();
   /** Renderer handles currently participating in drum-pad choke groups. */
   private activeDrumPadVoices: Map<number, Map<string, InstrumentVoiceHandle>> = new Map();
   /** Buffer sources of the active take's playlist audio; cancelled by stop/pause/seek. */
   private activeClipSources: Set<AudioBufferSourceNode> = new Set();
   /** Playlist lane row each active clip source was started from, so a live lane mute can cancel exactly that lane's audio. */
   private activeClipSourceLanes: Map<AudioBufferSourceNode, number> = new Map();
+  /** Channel Rack channel ID each channel-affiliated active clip source was started from. */
+  private activeClipSourceChannels: Map<AudioBufferSourceNode, string> = new Map();
+  /** Per-clip post-fade channel volume trim for channel-affiliated audio clips. */
+  private activeClipChannelVolumes: Map<AudioBufferSourceNode, { channelId: string; baseVolume: number; gainNode: GainNode }> = new Map();
   /** Playlist lane rows muted for the active take; enforced before clips reach their mixer insert. */
   private playlistLaneMutes: Set<number> = new Set();
   private sampleBuffers: Map<string, AudioBuffer> = new Map();
@@ -709,7 +726,216 @@ class AudioEngine {
       channel.analyser.disconnect();
     } catch (_) {}
 
+    if (this.channelPanners) {
+      for (const [channelId, entry] of [...this.channelPanners.entries()]) {
+        if (entry.mixerTrackId === trackId) {
+          this.removeChannelPanner(channelId);
+        }
+      }
+    }
+
     this.mixerChannels.delete(trackId);
+  }
+
+  private clampChannelPan(pan: unknown): number {
+    const numeric = typeof pan === 'number' && Number.isFinite(pan) ? pan : 0;
+    return Math.max(-1, Math.min(1, numeric));
+  }
+
+  private applyPanToNode(panner: StereoPannerNode | GainNode, pan: number, time: number): void {
+    if (!panner || typeof panner !== 'object' || !('pan' in panner) || !panner.pan) return;
+    const clamped = this.clampChannelPan(pan);
+    if (typeof panner.pan.setValueAtTime === 'function') {
+      panner.pan.setValueAtTime(clamped, time);
+    } else {
+      panner.pan.value = clamped;
+    }
+  }
+
+  private applyGainToNode(gainNode: GainNode, gainValue: number, time: number): void {
+    if (!gainNode || typeof gainNode !== 'object' || !('gain' in gainNode) || !gainNode.gain) return;
+    const clamped = Math.max(0, Number.isFinite(gainValue) ? gainValue : 1);
+    if (typeof gainNode.gain.setValueAtTime === 'function') {
+      gainNode.gain.setValueAtTime(clamped, time);
+    } else {
+      gainNode.gain.value = clamped;
+    }
+  }
+
+  private isChannelAudibleInTake(
+    channel: Pick<Channel, 'mute' | 'solo'>,
+    channels: readonly Pick<Channel, 'mute' | 'solo'>[] = this.activeChannels,
+  ): boolean {
+    return isRackChannelAudible(channel, channels);
+  }
+
+  private isAudioClipChannelAudible(clip: PlaylistClip): boolean {
+    if (!clip.channelId) return true;
+    const channel = this.activeChannels.find(candidate => candidate.id === clip.channelId);
+    if (!channel) return true;
+    return this.isChannelAudibleInTake(channel);
+  }
+
+  private cleanupVoiceChannelVolume(voiceId: string): void {
+    const entry = this.activeVoiceChannelVolumes?.get(voiceId);
+    if (!entry) return;
+    this.activeVoiceChannelVolumes.delete(voiceId);
+    try {
+      entry.gainNode.disconnect();
+    } catch (_) {}
+  }
+
+  private cleanupClipChannelVolume(source: AudioBufferSourceNode): void {
+    this.activeClipSourceChannels?.delete(source);
+    const entry = this.activeClipChannelVolumes?.get(source);
+    if (!entry) return;
+    this.activeClipChannelVolumes.delete(source);
+    try {
+      entry.gainNode.disconnect();
+    } catch (_) {}
+  }
+
+  private updateChannelVolumeForActiveAudio(channelId: string, volume: number, time?: number): void {
+    if (!this.ctx) return;
+    const effectiveTime = typeof time === 'number' && Number.isFinite(time)
+      ? time
+      : (this.ctx.currentTime ?? 0);
+    const clampedVol = Math.max(0, Number.isFinite(volume) ? volume : 0);
+
+    if (this.activeVoiceChannelVolumes) {
+      for (const entry of this.activeVoiceChannelVolumes.values()) {
+        if (entry.channelId !== channelId) continue;
+        const ratio = entry.baseVolume > 1e-4 ? clampedVol / entry.baseVolume : clampedVol;
+        this.applyGainToNode(entry.gainNode, ratio, effectiveTime);
+      }
+    }
+
+    if (this.activeClipChannelVolumes) {
+      for (const entry of this.activeClipChannelVolumes.values()) {
+        if (entry.channelId !== channelId) continue;
+        const ratio = entry.baseVolume > 1e-4 ? clampedVol / entry.baseVolume : clampedVol;
+        this.applyGainToNode(entry.gainNode, ratio, effectiveTime);
+      }
+    }
+  }
+
+  /**
+   * Returns (creating if needed) the shared per-channel stereo panner that sits
+   * between all voices/clips of `channel` and its target `mixerChannel.input`.
+   *
+   * Keeping one panner per `Channel.id` rather than mutating `MixerTrack.pan`
+   * preserves independent Channel vs. Mixer Track panning, allows multiple
+   * channels to share a mixer insert with distinct channel pans, and lets live
+   * `Channel.pan` edits, `channel_pan` automation, and MIDI CC mappings update
+   * an in-flight channel AudioParam without restarting playback.
+   */
+  public getOrCreateChannelPanner(
+    channel: Pick<Channel, 'id' | 'pan' | 'mixerTrackId'>,
+    time?: number,
+  ): (StereoPannerNode | GainNode) | null {
+    if (this.shouldBlockLiveMutation() || !this.ctx) return null;
+    if (typeof this.ctx.createStereoPanner !== 'function') return null;
+
+    const mixerChannel = this.getOrCreateMixerChannel(channel.mixerTrackId);
+    if (!mixerChannel?.input) return null;
+
+    if (!this.channelPanners) {
+      this.channelPanners = new Map();
+    }
+
+    const effectiveTime = typeof time === 'number' && Number.isFinite(time)
+      ? time
+      : (this.ctx.currentTime ?? 0);
+    const clampedPan = this.clampChannelPan(channel.pan);
+    let entry = this.channelPanners.get(channel.id);
+
+    if (!entry) {
+      const panner = this.ctx.createStereoPanner();
+      if (typeof (panner as unknown as { connect?: unknown }).connect === 'function') {
+        panner.connect(mixerChannel.input);
+      }
+      entry = {
+        panner,
+        mixerTrackId: channel.mixerTrackId,
+        destination: mixerChannel.input,
+        pan: clampedPan,
+      };
+      this.channelPanners.set(channel.id, entry);
+      this.applyPanToNode(panner, clampedPan, effectiveTime);
+      return panner;
+    }
+
+    if (entry.mixerTrackId !== channel.mixerTrackId || entry.destination !== mixerChannel.input) {
+      try {
+        entry.panner.disconnect();
+      } catch (_) {}
+      if (typeof (entry.panner as unknown as { connect?: unknown }).connect === 'function') {
+        entry.panner.connect(mixerChannel.input);
+      }
+      entry.mixerTrackId = channel.mixerTrackId;
+      entry.destination = mixerChannel.input;
+    }
+
+    if (entry.pan !== clampedPan) {
+      entry.pan = clampedPan;
+      this.applyPanToNode(entry.panner, clampedPan, effectiveTime);
+    }
+
+    return entry.panner;
+  }
+
+  public getChannelPanner(channelId: string): (StereoPannerNode | GainNode) | undefined {
+    return this.channelPanners?.get(channelId)?.panner;
+  }
+
+  public updateChannel(
+    channel: Pick<Channel, 'id' | 'pan' | 'mixerTrackId'> & Partial<Pick<Channel, 'volume'>>,
+    atTime?: number,
+  ): void {
+    if (this.shouldBlockLiveMutation() || !this.ctx) return;
+    const now = typeof atTime === 'number' && Number.isFinite(atTime)
+      ? atTime
+      : (this.ctx.currentTime ?? 0);
+    if (typeof channel.volume === 'number' && Number.isFinite(channel.volume)) {
+      this.updateChannelVolumeForActiveAudio(channel.id, channel.volume, now);
+    }
+    if (typeof this.ctx.createStereoPanner !== 'function') return;
+    const panner = this.getOrCreateChannelPanner(channel, now);
+    if (!panner) return;
+    const clampedPan = this.clampChannelPan(channel.pan);
+    const entry = this.channelPanners?.get(channel.id);
+    if (entry) {
+      entry.pan = clampedPan;
+    }
+    this.applyPanToNode(panner, clampedPan, now);
+  }
+
+  public removeChannelPanner(channelId: string): void {
+    if (this.shouldBlockLiveMutation() || !this.channelPanners) return;
+    const entry = this.channelPanners.get(channelId);
+    if (!entry) return;
+    try {
+      entry.panner.disconnect();
+    } catch (_) {}
+    this.channelPanners.delete(channelId);
+  }
+
+  private syncChannelPanners(channels: Channel[], time: number): void {
+    if (!this.channelPanners) {
+      this.channelPanners = new Map();
+      return;
+    }
+    const nextIds = new Set(channels.map(channel => channel.id));
+    for (const channelId of [...this.channelPanners.keys()]) {
+      if (!nextIds.has(channelId)) {
+        this.removeChannelPanner(channelId);
+      }
+    }
+    for (const channel of channels) {
+      if (this.channelPanners.has(channel.id)) {
+        this.updateChannel(channel, time);
+      }
+    }
   }
 
   public updateMixerTrack(track: MixerTrack) {
@@ -745,7 +971,10 @@ class AudioEngine {
     if (track.id === 0) return;
     const adapter = this.ensureMixerRoutingAdapter();
     const existingRoutes = new Map(
-      adapter.getRoutes().map(route => [route.trackId, route.targetId]),
+      adapter
+        .getRoutes()
+        .filter(route => this.mixerChannels.has(route.trackId))
+        .map(route => [route.trackId, route.targetId]),
     );
     for (const trackId of this.mixerChannels.keys()) {
       if (trackId !== 0 && !existingRoutes.has(trackId)) existingRoutes.set(trackId, 0);
@@ -975,6 +1204,15 @@ class AudioEngine {
 
   public playSingleVoice(channel: Channel, note: Note, time: number) {
     if (this.shouldBlockLiveMutation() || !this.ctx) return;
+    if (channel.mute) return;
+    if (
+      this.isPlaying &&
+      this.activeChannels.some(candidate => candidate.id === channel.id) &&
+      !this.isChannelAudibleInTake(channel)
+    ) {
+      return;
+    }
+
     const mixerChannel = this.getOrCreateMixerChannel(channel.mixerTrackId);
     const voiceId = `${channel.id}-${note.pitch}-${Math.random()}`;
 
@@ -982,7 +1220,25 @@ class AudioEngine {
     this.triggerSidechainDucking(channel.mixerTrackId, time);
 
     let voiceHandle: InstrumentVoiceHandle | void;
+    let notePanner: StereoPannerNode | null = null;
+    let voiceTrimGain: GainNode | null = null;
+    const cleanupNotePanner = () => {
+      if (notePanner) {
+        try {
+          notePanner.disconnect();
+        } catch (_) {}
+        notePanner = null;
+      }
+      if (voiceTrimGain) {
+        try {
+          voiceTrimGain.disconnect();
+        } catch (_) {}
+        voiceTrimGain = null;
+      }
+      this.activeVoiceChannelVolumes?.delete(voiceId);
+    };
     const onEnded = () => {
+      cleanupNotePanner();
       if (voiceHandle && this.activeVoices.get(voiceId) === voiceHandle) {
         this.activeVoices.delete(voiceId);
       }
@@ -1002,21 +1258,71 @@ class AudioEngine {
       Boolean(sampledDrumPadBuffer) &&
       chokeGroup > 0;
 
+    const usesCustomSamplerOverride =
+      channel.instrumentType !== 'drumpad' && Boolean(channel.customSample && channel.customSample.id);
     const renderer = channel.instrumentType === 'drumpad'
       ? this.instrumentRegistry.get('drumpad')
-      : channel.customSample && channel.customSample.id
+      : usesCustomSamplerOverride
         ? this.instrumentRegistry.get('sampler')
         : this.instrumentRegistry.get(channel.instrumentType);
+
+    const hasNotePan = typeof note.pan === 'number' && Number.isFinite(note.pan);
+    let voiceDestination: AudioNode = mixerChannel.input;
+    let channelPanApplied = false;
+
+    if (hasNotePan) {
+      // Note-level pan overrides Channel.pan for this specific voice without
+      // mutating the shared channel panner used by other notes on the channel.
+      const rendererOwnsNotePanner =
+        channel.instrumentType === 'independent_pluck' && !usesCustomSamplerOverride;
+      if (rendererOwnsNotePanner) {
+        voiceDestination = mixerChannel.input;
+        channelPanApplied = false;
+      } else if (typeof this.ctx.createStereoPanner === 'function' && mixerChannel?.input) {
+        notePanner = this.ctx.createStereoPanner();
+        this.applyPanToNode(notePanner, note.pan!, time);
+        if (typeof (notePanner as unknown as { connect?: unknown }).connect === 'function') {
+          notePanner.connect(mixerChannel.input);
+        }
+        voiceDestination = notePanner;
+        channelPanApplied = true;
+      }
+    } else {
+      const channelPanner = this.getOrCreateChannelPanner(channel, time);
+      if (channelPanner) {
+        voiceDestination = channelPanner;
+        channelPanApplied = true;
+      }
+    }
+
+    const rawVol = typeof channel.volume === 'number' && Number.isFinite(channel.volume)
+      ? Math.max(0, channel.volume)
+      : 0.8;
+    const baseVolume = rawVol > 1e-4 ? rawVol : 1;
+    const rendererChannel = rawVol > 1e-4 ? channel : { ...channel, volume: 1 };
+    let rendererDestination: AudioNode = voiceDestination;
+
+    if (typeof this.ctx.createGain === 'function' && voiceDestination) {
+      voiceTrimGain = this.ctx.createGain();
+      if (rawVol <= 1e-4) {
+        this.applyGainToNode(voiceTrimGain, 0, time);
+      }
+      if (typeof (voiceTrimGain as unknown as { connect?: unknown }).connect === 'function') {
+        voiceTrimGain.connect(voiceDestination);
+      }
+      rendererDestination = voiceTrimGain;
+    }
 
     let rendererFailed = false;
     try {
       voiceHandle = renderer({
-        channel,
+        channel: rendererChannel,
         note,
         time,
-        destination: mixerChannel.input,
+        destination: rendererDestination,
         audioContext: this.ctx!,
         voiceId,
+        channelPanApplied,
         onEnded,
         getSampleBuffer: (id) => this.sampleBuffers.get(id),
       });
@@ -1029,22 +1335,27 @@ class AudioEngine {
       });
     }
 
-    if (rendererFailed) return;
+    if (rendererFailed) {
+      cleanupNotePanner();
+      return;
+    }
 
     if (!voiceHandle && (channel.customSample?.id || channel.instrumentType === 'sampler')) {
       // Preserve the pre-22C sampler behavior: an unavailable custom sample,
       // and a sampler channel without a sample, both fall back to subtractive synthesis.
       try {
         voiceHandle = renderSubtractiveSynthVoice({
-          channel,
+          channel: rendererChannel,
           note,
           time,
-          destination: mixerChannel.input,
+          destination: rendererDestination,
           audioContext: this.ctx!,
           voiceId,
+          channelPanApplied,
           onEnded,
         });
       } catch (error) {
+        cleanupNotePanner();
         console.error('[AudioEngine] Sampler fallback renderer failed', {
           instrumentType: channel.instrumentType,
           voiceId,
@@ -1058,6 +1369,7 @@ class AudioEngine {
       voiceHandle &&
       (typeof voiceHandle !== 'object' || typeof voiceHandle.stop !== 'function')
     ) {
+      cleanupNotePanner();
       console.error('[AudioEngine] Instrument renderer returned an invalid voice handle', {
         instrumentType: channel.instrumentType,
         voiceId,
@@ -1065,10 +1377,24 @@ class AudioEngine {
       return;
     }
 
-    if (!voiceHandle) return;
+    if (!voiceHandle) {
+      cleanupNotePanner();
+      return;
+    }
 
     if (canChokeDrumPad) {
       this.stopDrumPadChokeGroup(chokeGroup, time);
+    }
+
+    if (voiceTrimGain) {
+      if (!this.activeVoiceChannelVolumes) {
+        this.activeVoiceChannelVolumes = new Map();
+      }
+      this.activeVoiceChannelVolumes.set(voiceId, {
+        channelId: channel.id,
+        baseVolume,
+        gainNode: voiceTrimGain,
+      });
     }
 
     this.activeVoices.set(voiceId, voiceHandle);
@@ -1087,6 +1413,7 @@ class AudioEngine {
       try {
         handle.stop(time);
       } catch (_) {}
+      this.cleanupVoiceChannelVolume(voiceId);
       if (this.activeVoices.get(voiceId) === handle) {
         this.activeVoices.delete(voiceId);
       }
@@ -1377,14 +1704,25 @@ class AudioEngine {
         this.masterGain.gain.setTargetAtTime(masterOutputGainFromNormalized(value), now, 0.02);
       }
     } else if (target.type === 'channel_vol') {
-      const ch = channels.find(c => c.id === target.targetId);
+      const targetVol = channelVolumeFromNormalized(value);
+      const ch = channels.find(c => String(c.id) === String(target.targetId));
       if (ch) {
-        ch.volume = channelVolumeFromNormalized(value);
+        ch.volume = targetVol;
       }
+      this.updateChannelVolumeForActiveAudio(String(target.targetId), targetVol, now);
     } else if (target.type === 'channel_pan') {
       const ch = channels.find(c => c.id === target.targetId);
+      const targetPan = panFromNormalized(value);
       if (ch) {
-        ch.pan = panFromNormalized(value);
+        ch.pan = targetPan;
+        this.updateChannel(ch, now);
+      } else {
+        const panner = this.getChannelPanner(String(target.targetId));
+        if (panner) {
+          const entry = this.channelPanners?.get(String(target.targetId));
+          if (entry) entry.pan = this.clampChannelPan(targetPan);
+          this.applyPanToNode(panner, targetPan, now);
+        }
       }
     } else if (target.type === 'channel_filter_cutoff') {
       const ch = channels.find(c => c.id === target.targetId);
@@ -1483,9 +1821,25 @@ class AudioEngine {
     if (this.activeVoices.has(voiceId)) {
       const voice = this.activeVoices.get(voiceId);
       voice?.stop();
+      this.cleanupVoiceChannelVolume(voiceId);
       this.activeVoices.delete(voiceId);
       this.removeDrumPadChokeVoice(voiceId, voice);
     }
+  }
+
+  public stopChannelNote(channelId: string, pitch: number): number {
+    if (this.shouldBlockLiveMutation()) return 0;
+    if (!Number.isFinite(pitch)) return 0;
+    const normalizedPitch = Math.round(pitch);
+    const prefix = `${channelId}-${normalizedPitch}-`;
+    let stopped = 0;
+    for (const voiceId of Array.from(this.activeVoices.keys())) {
+      if (voiceId.startsWith(prefix)) {
+        this.stopNote(voiceId);
+        stopped += 1;
+      }
+    }
+    return stopped;
   }
 
   public stopChannelVoices(channelId: string): void {
@@ -1496,6 +1850,7 @@ class AudioEngine {
         try {
           voice.stop();
         } catch (_) {}
+        this.cleanupVoiceChannelVolume(voiceId);
         this.activeVoices.delete(voiceId);
         this.removeDrumPadChokeVoice(voiceId, voice);
       }
@@ -1856,11 +2211,15 @@ class AudioEngine {
         masterAnalyser: this.masterAnalyser,
         grossBeatNode: this.grossBeatNode,
         mixerChannels: this.mixerChannels,
+        channelPanners: this.channelPanners,
         impulseResponses: this.impulseResponses,
         activeVoices: this.activeVoices,
+        activeVoiceChannelVolumes: this.activeVoiceChannelVolumes,
         activeDrumPadVoices: this.activeDrumPadVoices,
         activeClipSources: this.activeClipSources,
         activeClipSourceLanes: this.activeClipSourceLanes,
+        activeClipSourceChannels: this.activeClipSourceChannels,
+        activeClipChannelVolumes: this.activeClipChannelVolumes,
         isPlaying: this.isPlaying,
         activeChannels: this.activeChannels,
         activeClips: this.activeClips,
@@ -1925,13 +2284,17 @@ class AudioEngine {
           this.grossBeatNode.connect(this.masterAnalyser);
           this.masterAnalyser.connect(offlineCtx.destination);
           this.mixerChannels = new Map();
+          this.channelPanners = new Map();
           this.mixerRoutingAdapter = null;
           this.mixerRoutingChannelMap = null;
           this.impulseResponses = new Map();
           this.activeVoices = new Map();
+          this.activeVoiceChannelVolumes = new Map();
           this.activeDrumPadVoices = new Map();
           this.activeClipSources = new Set();
           this.activeClipSourceLanes = new Map();
+          this.activeClipSourceChannels = new Map();
+          this.activeClipChannelVolumes = new Map();
           this.activeChannels = structuredClone(channels);
           this.activeClips = structuredClone(clips);
           this.playbackProjectChannels = structuredClone(channels);
@@ -2025,13 +2388,17 @@ class AudioEngine {
         this.masterAnalyser = previous.masterAnalyser;
         this.grossBeatNode = previous.grossBeatNode;
         this.mixerChannels = previous.mixerChannels;
+        this.channelPanners = previous.channelPanners;
         this.mixerRoutingAdapter = previous.mixerRoutingAdapter;
         this.mixerRoutingChannelMap = previous.mixerRoutingChannelMap;
         this.impulseResponses = previous.impulseResponses;
         this.activeVoices = previous.activeVoices;
+        this.activeVoiceChannelVolumes = previous.activeVoiceChannelVolumes;
         this.activeDrumPadVoices = previous.activeDrumPadVoices;
         this.activeClipSources = previous.activeClipSources;
         this.activeClipSourceLanes = previous.activeClipSourceLanes;
+        this.activeClipSourceChannels = previous.activeClipSourceChannels;
+        this.activeClipChannelVolumes = previous.activeClipChannelVolumes;
         this.isPlaying = previous.isPlaying;
         this.activeChannels = previous.activeChannels;
         this.activeClips = previous.activeClips;
@@ -2142,6 +2509,8 @@ class AudioEngine {
 
     // 2. Render each channel stem
     for (const channel of channels) {
+      const channelAudible = isRackChannelAudible(channel, channels);
+      const effectiveChannel: Channel = channelAudible ? channel : { ...channel, mute: true };
       const channelClips = clips.filter(clip => {
         if (clip.mute) return false;
         if (this.isClipPlaylistLaneMuted(clip, stemLaneMutes)) return false;
@@ -2163,7 +2532,7 @@ class AudioEngine {
       });
 
       const stemBuffer = await this.renderTimelineOffline(
-        [channel],
+        [effectiveChannel],
         channelClips,
         mixerTracks,
         bpm,
@@ -2395,7 +2764,7 @@ class AudioEngine {
   }
 
   private isAutomationClipActiveAtCurrentPosition(clip: PlaylistClip): boolean {
-    if (clip.type !== 'automation' || clip.mute || !clip.automationTarget) return false;
+    if (clip.type !== 'automation' || clip.mute || this.isPlaylistLaneMuted(clip) || !clip.automationTarget) return false;
     if (!Number.isFinite(clip.startBar) || !Number.isFinite(clip.lengthBars) || clip.lengthBars <= 0) return false;
     const currentBarPosition = Math.max(0, this.currentBar - 1) + (this.currentStep / 16);
     return currentBarPosition >= clip.startBar && currentBarPosition <= clip.startBar + clip.lengthBars;
@@ -2432,6 +2801,25 @@ class AudioEngine {
     }
   }
 
+  private resetAutomationTargetsForLaneMuteChange(newlyMutedLanes: ReadonlySet<number>): void {
+    if (newlyMutedLanes.size === 0) return;
+    const remainingActiveTargets = new Set(
+      this.activeClips
+        .filter(clip => this.isAutomationClipActiveAtCurrentPosition(clip))
+        .map(clip => this.getAutomationTargetKey(clip))
+        .filter((key): key is string => Boolean(key)),
+    );
+
+    for (const clip of this.activeClips) {
+      if (clip.type !== 'automation' || clip.mute || !clip.automationTarget) continue;
+      if (!Number.isFinite(clip.trackIndex) || !newlyMutedLanes.has(Math.floor(clip.trackIndex))) continue;
+      const targetKey = this.getAutomationTargetKey(clip);
+      if (targetKey && !remainingActiveTargets.has(targetKey)) {
+        this.resetActiveAutomationTarget(clip.automationTarget);
+      }
+    }
+  }
+
   private resetActiveAutomationTarget(target: NonNullable<PlaylistClip['automationTarget']>): void {
     const now = this.ctx?.currentTime ?? 0;
     if (target.type === 'channel_vol' || target.type === 'channel_pan' || target.type === 'channel_filter_cutoff' || target.type === 'channel_filter_res' || target.type === 'channel_pitch') {
@@ -2439,8 +2827,14 @@ class AudioEngine {
       const projectChannel = this.playbackProjectChannels.find(channel => String(channel.id) === String(target.targetId));
       if (!activeChannel || !projectChannel) return;
 
-      if (target.type === 'channel_vol') activeChannel.volume = projectChannel.volume;
-      if (target.type === 'channel_pan') activeChannel.pan = projectChannel.pan;
+      if (target.type === 'channel_vol') {
+        activeChannel.volume = projectChannel.volume;
+        this.updateChannelVolumeForActiveAudio(activeChannel.id, activeChannel.volume, now);
+      }
+      if (target.type === 'channel_pan') {
+        activeChannel.pan = projectChannel.pan;
+        this.updateChannel(activeChannel, now);
+      }
       if (target.type === 'channel_filter_cutoff' && activeChannel.synthParams && projectChannel.synthParams) {
         activeChannel.synthParams.filterCutoff = projectChannel.synthParams.filterCutoff;
       }
@@ -2512,15 +2906,53 @@ class AudioEngine {
     }
 
     if (update.channels) {
+      const now = this.ctx?.currentTime ?? 0;
+      const previousChannels = this.activeChannels;
+      const previouslyAudibleIds = new Set(
+        previousChannels
+          .filter(channel => isRackChannelAudible(channel, previousChannels))
+          .map(channel => channel.id),
+      );
       const previousProjectById = new Map(this.playbackProjectChannels.map(channel => [channel.id, channel]));
       const activeById = new Map(this.activeChannels.map(channel => [channel.id, channel]));
+      const nextChannelIds = new Set(update.channels.map(channel => channel.id));
+
+      for (const prevChannel of previousChannels) {
+        if (!nextChannelIds.has(prevChannel.id)) {
+          this.stopChannelVoices(prevChannel.id);
+          this.stopActiveClipSourcesForChannel(prevChannel.id);
+        }
+      }
+
       this.activeChannels = update.channels.map(channel => {
         const previousProject = previousProjectById.get(channel.id);
         const active = activeById.get(channel.id);
-        if (!previousProject || !active) return structuredClone(channel);
-        return mergePlaybackProjectEdits(active, previousProject, channel) as Channel;
+        const nextChannel = (!previousProject || !active)
+          ? structuredClone(channel)
+          : (mergePlaybackProjectEdits(active, previousProject, channel) as Channel);
+        const panOrRoutingChanged = !previousProject
+          || previousProject.pan !== channel.pan
+          || previousProject.mixerTrackId !== channel.mixerTrackId;
+        const volumeChanged = !previousProject || previousProject.volume !== channel.volume;
+        if (panOrRoutingChanged || volumeChanged || this.channelPanners?.has(nextChannel.id)) {
+          this.updateChannel(nextChannel, now);
+        }
+        return nextChannel;
       });
+      this.syncChannelPanners(this.activeChannels, now);
       this.playbackProjectChannels = structuredClone(update.channels);
+
+      const positionSeconds = this.transport?.getState().positionSeconds ?? 0;
+      for (const nextChannel of this.activeChannels) {
+        const wasAudible = previouslyAudibleIds.has(nextChannel.id);
+        const isNowAudible = isRackChannelAudible(nextChannel, this.activeChannels);
+        if (wasAudible && !isNowAudible) {
+          this.stopChannelVoices(nextChannel.id);
+          this.stopActiveClipSourcesForChannel(nextChannel.id);
+        } else if (!wasAudible && isNowAudible && this.activePlayMode === 'song') {
+          this.retriggerAudioClipsForChannelAtPosition(positionSeconds, nextChannel.id);
+        }
+      }
     }
 
     // Re-resolve once after either source changed. With a declared length the
@@ -2598,22 +3030,32 @@ class AudioEngine {
     if (update.playlistTracks) {
       const previousMutes = this.playlistLaneMutes;
       const nextMutes = this.derivePlaylistLaneMutes(update.playlistTracks);
+      const newlyMutedLanes = new Set<number>();
       // A lane muted mid-take goes silent at once: its in-flight clip audio is
       // cancelled and the scheduler stops triggering its pattern clips. The
       // routed mixer insert is left untouched so lanes and channels sharing it
       // keep sounding.
       for (const lane of nextMutes) {
-        if (!previousMutes.has(lane)) this.stopActiveClipSourcesForLane(lane);
+        if (!previousMutes.has(lane)) {
+          newlyMutedLanes.add(lane);
+          this.stopActiveClipSourcesForLane(lane);
+        }
       }
       this.playlistLaneMutes = nextMutes;
+      this.resetAutomationTargetsForLaneMuteChange(newlyMutedLanes);
       // Unmuting mid-take must not wait for a future start-bar trigger: the
       // lane's clip spanning the playhead restarts from the correct offset,
       // exactly like a seek landing inside it.
       if (this.activePlayMode === 'song') {
         const positionSeconds = this.transport?.getState().positionSeconds ?? 0;
+        let anyLaneUnmuted = false;
         for (const lane of previousMutes) {
           if (nextMutes.has(lane)) continue;
+          anyLaneUnmuted = true;
           this.retriggerAudioClipsAtPosition(positionSeconds, lane);
+        }
+        if (anyLaneUnmuted) {
+          this.rebaseAutomationAtPosition(positionSeconds);
         }
       }
     }
@@ -2670,8 +3112,17 @@ class AudioEngine {
     // Apply the current project mixer graph at transport start. Subsequent
     // mixer edits use synchronizePlaybackState and update only the changed
     // active track while the transport remains running.
+    if (this.activeMixerTracks.length > 0 && this.mixerChannels) {
+      const nextTrackIds = new Set(this.activeMixerTracks.map(track => track.id));
+      for (const trackId of [...this.mixerChannels.keys()]) {
+        if (trackId !== 0 && !nextTrackIds.has(trackId)) {
+          this.removeMixerChannel(trackId);
+        }
+      }
+    }
     for (const track of this.activeMixerTracks) this.updateMixerTrack(track);
     this.syncMixerRouting(this.activeMixerTracks);
+    this.syncChannelPanners(this.activeChannels, this.ctx?.currentTime ?? 0);
 
     if (!this.transport && this.ctx) {
       this.transport = new AudioClockTransport(this.ctx);
@@ -2824,19 +3275,24 @@ class AudioEngine {
   private stopActivePlaybackAudio(): void {
     for (const source of Array.from(this.activeClipSources)) {
       try { source.stop(); } catch (_) { /* already inactive */ }
+      this.cleanupClipChannelVolume(source);
       this.activeClipSources.delete(source);
     }
     this.activeClipSourceLanes.clear();
+    this.activeClipSourceChannels?.clear();
+    this.activeClipChannelVolumes?.clear();
 
     const now = this.ctx?.currentTime;
-    for (const voice of this.activeVoices.values()) {
+    for (const [voiceId, voice] of this.activeVoices.entries()) {
       try {
         voice.stop(now);
       } catch (_) {
         // Continue stopping remaining voices even if one has already stopped.
       }
+      this.cleanupVoiceChannelVolume(voiceId);
     }
     this.activeVoices.clear();
+    this.activeVoiceChannelVolumes?.clear();
     this.activeDrumPadVoices.clear();
   }
 
@@ -2879,6 +3335,18 @@ class AudioEngine {
     for (const source of Array.from(this.activeClipSources)) {
       if (this.activeClipSourceLanes.get(source) !== laneIndex) continue;
       try { source.stop(); } catch (_) { /* already inactive */ }
+      this.cleanupClipChannelVolume(source);
+      this.activeClipSources.delete(source);
+      this.activeClipSourceLanes.delete(source);
+    }
+  }
+
+  /** Silences one channel's in-flight playlist audio clips immediately. */
+  private stopActiveClipSourcesForChannel(channelId: string): void {
+    for (const source of Array.from(this.activeClipSources)) {
+      if (this.activeClipSourceChannels?.get(source) !== channelId) continue;
+      try { source.stop(); } catch (_) { /* already inactive */ }
+      this.cleanupClipChannelVolume(source);
       this.activeClipSources.delete(source);
       this.activeClipSourceLanes.delete(source);
     }
@@ -2922,11 +3390,28 @@ class AudioEngine {
     const now = ctx.currentTime;
     for (const clip of this.activeClips) {
       if (clip.type !== 'audio' || clip.mute) continue;
+      if (!this.isAudioClipChannelAudible(clip)) continue;
       if (laneIndex === undefined) {
         if (this.isPlaylistLaneMuted(clip)) continue;
       } else {
         if (!Number.isFinite(clip.trackIndex) || Math.floor(clip.trackIndex) !== laneIndex) continue;
       }
+      if (!Number.isFinite(clip.startBar) || !Number.isFinite(clip.lengthBars) || clip.lengthBars <= 0) continue;
+      const startSeconds = clip.startBar * 16 * stepDurationSeconds;
+      const endSeconds = startSeconds + clip.lengthBars * 16 * stepDurationSeconds;
+      if (positionSeconds <= startSeconds || positionSeconds >= endSeconds) continue;
+      this.playAudioClipWithFades(clip, now, positionSeconds - startSeconds);
+    }
+  }
+
+  private retriggerAudioClipsForChannelAtPosition(positionSeconds: number, channelId: string): void {
+    const ctx = this.ctx;
+    if (!ctx || positionSeconds <= 0) return;
+    const stepDurationSeconds = 60 / this.bpm / 4;
+    const now = ctx.currentTime;
+    for (const clip of this.activeClips) {
+      if (clip.type !== 'audio' || clip.mute || clip.channelId !== channelId) continue;
+      if (this.isPlaylistLaneMuted(clip) || !this.isAudioClipChannelAudible(clip)) continue;
       if (!Number.isFinite(clip.startBar) || !Number.isFinite(clip.lengthBars) || clip.lengthBars <= 0) continue;
       const startSeconds = clip.startBar * 16 * stepDurationSeconds;
       const endSeconds = startSeconds + clip.lengthBars * 16 * stepDurationSeconds;
@@ -2947,7 +3432,7 @@ class AudioEngine {
     const barPosition = positionSeconds / secondsPerBar;
     const now = ctx.currentTime;
     for (const clip of this.activeClips) {
-      if (clip.type !== 'automation' || clip.mute || !clip.automationTarget) continue;
+      if (clip.type !== 'automation' || clip.mute || this.isPlaylistLaneMuted(clip) || !clip.automationTarget) continue;
       if (!clip.automationPoints || clip.automationPoints.length < 2) continue;
       if (!Number.isFinite(clip.startBar) || !Number.isFinite(clip.lengthBars) || clip.lengthBars <= 0) continue;
       if (barPosition < clip.startBar || barPosition > clip.startBar + clip.lengthBars) continue;
@@ -3001,7 +3486,7 @@ class AudioEngine {
     if (this.activePlayMode === 'pat') {
       // Trigger all channel active steps
       this.activeChannels.forEach(channel => {
-        if (channel.mute) return;
+        if (!this.isChannelAudibleInTake(channel)) return;
 
         // 1. Step sequencer trigger
         if (channel.steps && channel.steps[this.currentStep]) {
@@ -3031,7 +3516,7 @@ class AudioEngine {
 
       // 1. Evaluate automation clips at current bar & step
       this.activeClips.forEach(clip => {
-        if (clip.type === 'automation' && !clip.mute && clip.automationTarget && clip.automationPoints && clip.automationPoints.length >= 2) {
+        if (clip.type === 'automation' && !clip.mute && !this.isPlaylistLaneMuted(clip) && clip.automationTarget && clip.automationPoints && clip.automationPoints.length >= 2) {
           const currentTotalBar = barIdx + (this.currentStep / 16);
           if (currentTotalBar >= clip.startBar && currentTotalBar <= clip.startBar + clip.lengthBars) {
             const relX = (currentTotalBar - clip.startBar) / clip.lengthBars;
@@ -3048,7 +3533,7 @@ class AudioEngine {
 
           if (currentGlobalStep >= clipStartStep && currentGlobalStep < clipEndStep) {
             const channel = this.activeChannels.find(c => c.id === clip.channelId);
-            if (channel && !channel.mute && !this.isPlaylistLaneMuted(clip)) {
+            if (channel && this.isChannelAudibleInTake(channel) && !this.isPlaylistLaneMuted(clip)) {
               const loopLength = resolvePlayableContentLengthSteps(channel);
               const stepOffset = clip.offsetSteps || 0;
               const relStep = ((currentGlobalStep - clipStartStep + stepOffset) % loopLength + loopLength) % loopLength;
@@ -3074,7 +3559,12 @@ class AudioEngine {
           }
         } else if (clip.type === 'audio') {
           const clipStartStep = clip.startBar * 16;
-          if (currentGlobalStep === clipStartStep && !clip.mute && !this.isPlaylistLaneMuted(clip)) {
+          if (
+            currentGlobalStep === clipStartStep &&
+            !clip.mute &&
+            !this.isPlaylistLaneMuted(clip) &&
+            this.isAudioClipChannelAudible(clip)
+          ) {
             // Trigger audio clip at its start bar
             this.playAudioClipWithFades(clip, now);
           }
@@ -3091,6 +3581,7 @@ class AudioEngine {
    */
   private playAudioClipWithFades(clip: PlaylistClip, startTime: number, positionOffsetSeconds = 0) {
     if (!this.ctx) return;
+    if (!this.isAudioClipChannelAudible(clip)) return;
     const buf = clip.audioBufferId ? this.sampleBuffers.get(clip.audioBufferId) : null;
     if (!buf) return;
 
@@ -3144,9 +3635,12 @@ class AudioEngine {
 
     let mixerTrackId = Math.max(1, Math.floor(clip.trackIndex) + 1);
     let baseGain = 1.0;
+    let clipChannel: Channel | undefined;
     if (clip.channelId) {
       const ch = this.activeChannels.find(c => c.id === clip.channelId);
       if (ch) {
+        if (!this.isChannelAudibleInTake(ch)) return;
+        clipChannel = ch;
         if (Number.isFinite(ch.mixerTrackId)) {
           mixerTrackId = ch.mixerTrackId;
         }
@@ -3156,7 +3650,8 @@ class AudioEngine {
       }
     }
 
-    const peakGain = Math.max(0.0001, baseGain);
+    const effectiveBaseVolume = baseGain > 1e-4 ? baseGain : 1.0;
+    const peakGain = Math.max(0.0001, effectiveBaseVolume);
     gainNode.gain.setValueAtTime(0.0001, t0);
     if (fadeInSec > 0.0001) {
       gainNode.gain.exponentialRampToValueAtTime(peakGain, t1);
@@ -3174,7 +3669,32 @@ class AudioEngine {
 
     source.connect(gainNode);
     const mixer = this.getOrCreateMixerChannel(mixerTrackId);
-    gainNode.connect(mixer.input);
+    const clipDestination = clipChannel
+      ? this.getOrCreateChannelPanner(clipChannel, startTime)
+      : null;
+
+    if (clipChannel && typeof this.ctx.createGain === 'function') {
+      const clipTrimGain = this.ctx.createGain();
+      if (baseGain <= 1e-4) {
+        this.applyGainToNode(clipTrimGain, 0, startTime);
+      }
+      gainNode.connect(clipTrimGain);
+      clipTrimGain.connect(clipDestination ?? mixer.input);
+      if (!this.activeClipSourceChannels) {
+        this.activeClipSourceChannels = new Map();
+      }
+      if (!this.activeClipChannelVolumes) {
+        this.activeClipChannelVolumes = new Map();
+      }
+      this.activeClipSourceChannels.set(source, clipChannel.id);
+      this.activeClipChannelVolumes.set(source, {
+        channelId: clipChannel.id,
+        baseVolume: effectiveBaseVolume,
+        gainNode: clipTrimGain,
+      });
+    } else {
+      gainNode.connect(clipDestination ?? mixer.input);
+    }
 
     source.start(startTime, offsetSeconds, actualDurationBufferSec);
     source.stop(startTime + effectiveDuration);
@@ -3186,6 +3706,7 @@ class AudioEngine {
       this.activeClipSourceLanes.set(source, Math.floor(clip.trackIndex));
     }
     source.addEventListener('ended', () => {
+      this.cleanupClipChannelVolume(source);
       this.activeClipSources.delete(source);
       this.activeClipSourceLanes.delete(source);
     }, { once: true });

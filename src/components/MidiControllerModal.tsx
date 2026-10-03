@@ -15,6 +15,65 @@ import {
 } from 'lucide-react';
 import { MidiDeviceInfo, MidiMapping, Channel, MixerTrack } from '../types/daw';
 import { audioEngine } from '../audio/audioEngine';
+import { resolveMidiLearnCapture, type MidiLearnTarget } from '../audio/midiMappingRuntime';
+
+export interface QuickArmTargetDescriptor extends MidiLearnTarget {
+  label: string;
+  subtitle: string;
+}
+
+export const buildQuickArmTargets = (
+  activeChannel: Channel,
+  mixerTracks: readonly MixerTrack[],
+): QuickArmTargetDescriptor[] => {
+  const routedTrack = mixerTracks.find(t => t.id === activeChannel.mixerTrackId);
+  const reverbSlot =
+    routedTrack?.fxSlots.find(slot => slot.type === 'reverb') ??
+    mixerTracks.flatMap(t => t.fxSlots).find(slot => slot.type === 'reverb') ??
+    routedTrack?.fxSlots[0] ??
+    mixerTracks.flatMap(t => t.fxSlots)[0];
+
+  const fourthTarget: QuickArmTargetDescriptor = reverbSlot
+    ? {
+        label: 'Reverb Wet Mix',
+        subtitle: 'Spatial FX',
+        targetType: 'fx_param',
+        targetId: reverbSlot.id,
+        paramName: 'mix',
+      }
+    : {
+        label: 'Filter Resonance',
+        subtitle: 'Synth Reso/Cutoff',
+        targetType: 'fx_param',
+        targetId: activeChannel.id,
+        paramName: 'filterResonance',
+      };
+
+  return [
+    {
+      label: 'Master Volume',
+      subtitle: 'Click to Learn CC',
+      targetType: 'master_vol',
+      targetId: 0,
+      paramName: 'Master Volume',
+    },
+    {
+      label: `${activeChannel.name} Vol`,
+      subtitle: 'Active Channel',
+      targetType: 'channel_vol',
+      targetId: activeChannel.id,
+      paramName: `${activeChannel.name} Vol`,
+    },
+    {
+      label: 'Filter Cutoff',
+      subtitle: 'Synth Reso/Cutoff',
+      targetType: 'fx_param',
+      targetId: activeChannel.id,
+      paramName: 'filterCutoff',
+    },
+    fourthTarget,
+  ];
+};
 
 interface MidiControllerModalProps {
   isOpen: boolean;
@@ -78,15 +137,15 @@ export const MidiControllerModal: React.FC<MidiControllerModalProps> = ({
 
       // If MIDI Learn mode is active and we received a CC message
       if (e.type === 'cc' && learningTarget) {
-        const updated = midiMappings.filter(
-          m => !(m.targetType === learningTarget.targetType && m.targetId === learningTarget.targetId && m.paramName === learningTarget.paramName)
-        );
-        updated.push({
-          ...learningTarget,
-          ccNumber: e.cc
+        const capture = resolveMidiLearnCapture(e, midiMappings, {
+          targetType: learningTarget.targetType,
+          targetId: learningTarget.targetId,
+          paramName: learningTarget.paramName,
         });
-        onUpdateMidiMappings(updated);
-        setLearningTarget(null);
+        if (capture) {
+          onUpdateMidiMappings(capture.mappings);
+          setLearningTarget(null);
+        }
       }
     };
 
@@ -94,7 +153,7 @@ export const MidiControllerModal: React.FC<MidiControllerModalProps> = ({
     return () => {
       audioEngine.removeMidiListener(handleMidiEvent);
     };
-  }, [isOpen, learningTarget, midiMappings]);
+  }, [isOpen, learningTarget, midiMappings, onUpdateMidiMappings]);
 
   const refreshDevices = async () => {
     await audioEngine.initMidi();
@@ -322,37 +381,16 @@ export const MidiControllerModal: React.FC<MidiControllerModalProps> = ({
 
                 {/* Quick Arm Matrix */}
                 <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                  <button
-                    onClick={() => handleStartLearn('master_vol', 'master')}
-                    className="p-2.5 bg-[#202024] hover:bg-[#2a2a2e] border border-[#2e2e32] hover:border-[#ff6e00] rounded-lg text-left transition-colors group"
-                  >
-                    <div className="text-xs font-bold text-white group-hover:text-[#ff6e00]">Master Volume</div>
-                    <div className="text-[10px] text-[#888]">Click to Learn CC</div>
-                  </button>
-
-                  <button
-                    onClick={() => handleStartLearn('channel_vol', activeChannel.id)}
-                    className="p-2.5 bg-[#202024] hover:bg-[#2a2a2e] border border-[#2e2e32] hover:border-[#ff6e00] rounded-lg text-left transition-colors group"
-                  >
-                    <div className="text-xs font-bold text-white group-hover:text-[#ff6e00]">{activeChannel.name} Vol</div>
-                    <div className="text-[10px] text-[#888]">Active Channel</div>
-                  </button>
-
-                  <button
-                    onClick={() => handleStartLearn('fx_param', activeChannel.id, 'filterCutoff')}
-                    className="p-2.5 bg-[#202024] hover:bg-[#2a2a2e] border border-[#2e2e32] hover:border-[#ff6e00] rounded-lg text-left transition-colors group"
-                  >
-                    <div className="text-xs font-bold text-white group-hover:text-[#ff6e00]">Filter Cutoff</div>
-                    <div className="text-[10px] text-[#888]">Synth Reso/Cutoff</div>
-                  </button>
-
-                  <button
-                    onClick={() => handleStartLearn('fx_param', activeChannel.id, 'reverb')}
-                    className="p-2.5 bg-[#202024] hover:bg-[#2a2a2e] border border-[#2e2e32] hover:border-[#ff6e00] rounded-lg text-left transition-colors group"
-                  >
-                    <div className="text-xs font-bold text-white group-hover:text-[#ff6e00]">Reverb Wet Mix</div>
-                    <div className="text-[10px] text-[#888]">Spatial FX</div>
-                  </button>
+                  {buildQuickArmTargets(activeChannel, mixerTracks).map(target => (
+                    <button
+                      key={`${target.targetType}:${String(target.targetId)}:${target.paramName ?? ''}`}
+                      onClick={() => handleStartLearn(target.targetType, target.targetId, target.paramName)}
+                      className="p-2.5 bg-[#202024] hover:bg-[#2a2a2e] border border-[#2e2e32] hover:border-[#ff6e00] rounded-lg text-left transition-colors group"
+                    >
+                      <div className="text-xs font-bold text-white group-hover:text-[#ff6e00]">{target.label}</div>
+                      <div className="text-[10px] text-[#888]">{target.subtitle}</div>
+                    </button>
+                  ))}
                 </div>
 
                 {/* Existing Mappings List */}
