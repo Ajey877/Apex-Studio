@@ -271,6 +271,88 @@ test('J. Imported audio placement: full drop event simulation with horizontal sc
   assert.ok(result.startBar + 4 <= 32);
 });
 
+test('drop at Bar 5 with a 4-bar clip sets startBar ~ 5 and endBar ~ 9', () => {
+  const timelineOriginX = 176;
+  const clientX = timelineOriginX + 5 * DEFAULT_BAR_WIDTH_PX;
+  const durationBars = 4;
+  const placement = resolvePlaylistDropPlacement(
+    clientX,
+    0,
+    durationBars,
+    { viewportLeft: timelineOriginX, scrollLeft: 0, barWidth: DEFAULT_BAR_WIDTH_PX },
+    { totalBars: 32, gridBars: 0.25 }
+  );
+  assert.equal(placement.startBar, 5);
+  const endBar = placement.startBar + durationBars;
+  assert.equal(endBar, 9);
+});
+
+test('drop at Bar 18 sets startBar to 18', () => {
+  const timelineOriginX = 176;
+  const clientX = timelineOriginX + 18 * DEFAULT_BAR_WIDTH_PX;
+  const durationBars = 4;
+  const placement = resolvePlaylistDropPlacement(
+    clientX,
+    0,
+    durationBars,
+    { viewportLeft: timelineOriginX, scrollLeft: 0, barWidth: DEFAULT_BAR_WIDTH_PX },
+    { totalBars: 32, gridBars: 0.25 }
+  );
+  assert.equal(placement.startBar, 18);
+  assert.equal(placement.startBar + durationBars, 22);
+});
+
+test('drop near Bar 29 with a 4-bar clip clamps so endBar <= 32 (startBar = 28)', () => {
+  const timelineOriginX = 176;
+  const clientX = timelineOriginX + 29 * DEFAULT_BAR_WIDTH_PX;
+  const durationBars = 4;
+  const placement = resolvePlaylistDropPlacement(
+    clientX,
+    0,
+    durationBars,
+    { viewportLeft: timelineOriginX, scrollLeft: 0, barWidth: DEFAULT_BAR_WIDTH_PX },
+    { totalBars: 32, gridBars: 0.25 }
+  );
+  assert.equal(placement.startBar, 28);
+  const endBar = placement.startBar + durationBars;
+  assert.ok(endBar <= 32);
+  assert.equal(endBar, 32);
+});
+
+test('horizontal scrolling: drop position accounts for timeline container scrollLeft', () => {
+  const timelineOriginX = 176;
+  const scrollLeft = 4 * DEFAULT_BAR_WIDTH_PX; // scrolled 4 bars to the right
+  // User drops at visible bar 1 (clientX = origin + 1 bar)
+  const clientX = timelineOriginX + 1 * DEFAULT_BAR_WIDTH_PX;
+  const durationBars = 4;
+  const placement = resolvePlaylistDropPlacement(
+    clientX,
+    0,
+    durationBars,
+    { viewportLeft: timelineOriginX, scrollLeft, barWidth: DEFAULT_BAR_WIDTH_PX },
+    { totalBars: 32, gridBars: 0.25 }
+  );
+  // Expected logical bar = 1 visible bar + 4 scrolled bars = 5
+  assert.equal(placement.startBar, 5);
+  assert.equal(placement.startBar + durationBars, 9);
+});
+
+test('grid snapping: drop coordinate snaps to nearest 0.25-bar boundary', () => {
+  const timelineOriginX = 176;
+  // Drop at bar 5.18 (closer to 5.25 than 5.0)
+  const clientX = timelineOriginX + 5.18 * DEFAULT_BAR_WIDTH_PX;
+  const durationBars = 4;
+  const placement = resolvePlaylistDropPlacement(
+    clientX,
+    0,
+    durationBars,
+    { viewportLeft: timelineOriginX, scrollLeft: 0, barWidth: DEFAULT_BAR_WIDTH_PX },
+    { totalBars: 32, gridBars: 0.25 }
+  );
+  assert.equal(placement.startBar, 5.25);
+  assert.equal(placement.startBar + durationBars, 9.25);
+});
+
 test('production PlaylistArranger uses unified coordinate placement for audio drop and clip move', () => {
   const arrangerSource = readFileSync(
     fileURLToPath(new URL('./PlaylistArranger.tsx', import.meta.url)),

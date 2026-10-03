@@ -55,17 +55,16 @@ export function clientToPlaylistContentCoordinates(
     throw new Error('zoom must be finite and greater than zero');
   }
 
-  // When trackLeft is provided, it is already relative to the scrolled viewport:
-  // (clientX - trackLeft) / zoom gives the exact content coordinate from the lane's start.
-  // When viewportLeft and scrollLeft are provided:
-  // (clientX - viewportLeft) / zoom + scrollLeft gives the exact same content coordinate.
-  const contentX = context.trackLeft !== undefined
-    ? (clientX - context.trackLeft) / zoom
-    : (clientX - (context.viewportLeft ?? 0)) / zoom + (context.scrollLeft ?? 0);
+  // Uses the playlist timeline's horizontal coordinate system:
+  // (clientX - timelineOriginX) / zoom + scrollLeft
+  // If trackLeft is provided without viewportLeft, trackLeft is used as the origin.
+  const originX = context.viewportLeft ?? context.trackLeft ?? 0;
+  const scrollX = context.scrollLeft ?? 0;
+  const contentX = (clientX - originX) / zoom + scrollX;
 
-  const contentY = context.trackTop !== undefined
-    ? (clientY - context.trackTop) / zoom
-    : (clientY - (context.viewportTop ?? 0)) / zoom + (context.scrollTop ?? 0);
+  const originY = context.viewportTop ?? context.trackTop ?? 0;
+  const scrollY = context.scrollTop ?? 0;
+  const contentY = (clientY - originY) / zoom + scrollY;
 
   return { contentX, contentY };
 }
