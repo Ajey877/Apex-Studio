@@ -714,11 +714,11 @@ export function App() {
     const midiNoteRuntime = new MidiNoteInputRuntime({
       getProjectState: () => projectStateRef.current,
       getSelectedChannelId: () => selectedChannelIdRef.current,
-      playNote: (channel, note, startTime, bpm) => {
-        audioEngine.playNote(channel, note, startTime, bpm);
+      playNote: (channel, note, startTime, bpm, midiChannel) => {
+        audioEngine.playNote(channel, note, startTime, bpm, midiChannel);
       },
-      stopChannelNote: (channelId, pitch) => {
-        audioEngine.stopChannelNote(channelId, pitch);
+      stopChannelNote: (channelId, pitch, midiChannel) => {
+        audioEngine.stopChannelNote(channelId, pitch, midiChannel);
       },
     });
 

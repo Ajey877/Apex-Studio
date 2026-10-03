@@ -1003,6 +1003,101 @@ describe('Phase 61 Priority 5 — channel_vol Automation Reaches Sustaining Voic
   });
 });
 
+describe('Phase 63 — MIDI channel-aware voice ownership', () => {
+  function attachMidiRuntime() {
+    const channel = makeChannel('ch-midi-channel-aware');
+    const state = {
+      ...createDefaultProjectState(),
+      channels: [channel],
+      selectedChannelId: channel.id,
+    };
+    const MidiNoteInputRuntime = (midiMappingRuntimeModule as any).MidiNoteInputRuntime;
+    const runtime = new MidiNoteInputRuntime({
+      getProjectState: () => state,
+      getSelectedChannelId: () => channel.id,
+      playNote: (
+        targetChannel: Channel,
+        note: Note,
+        startTime?: number,
+        bpm?: number,
+        midiChannel?: number,
+      ) => (audioEngine as any).playNote(targetChannel, note, startTime, bpm, midiChannel),
+      stopChannelNote: (channelId: string, pitch: number, midiChannel?: number) =>
+        (audioEngine as any).stopChannelNote(channelId, pitch, midiChannel),
+    });
+    const listener = (event: any) => runtime.handleMidiEvent(event);
+    audioEngine.addMidiListener(listener);
+    return { runtime, listener };
+  }
+
+  function sendRawMidi(status: number, pitch: number, velocity: number) {
+    engine.handleMidiMessage({ data: new Uint8Array([status, pitch, velocity]) });
+  }
+
+  it('releases only the originating channel voice and preserves velocity-zero note-off', () => {
+    setupLiveGraph();
+    const previousVoiceChannelVolumes = engine.activeVoiceChannelVolumes;
+    engine.activeVoiceChannelVolumes = new Map();
+    const { runtime, listener } = attachMidiRuntime();
+
+    try {
+      sendRawMidi(0x90, 60, 100); // MIDI channel 1, noteOn
+      sendRawMidi(0x91, 60, 100); // MIDI channel 2, same pitch
+      assert.equal(engine.activeVoices.size, 2, 'both channel-specific voices should be active');
+      assert.equal((runtime as any).heldNotes.size, 2, 'both MIDI channel/pitch pairs should be held');
+
+      sendRawMidi(0x80, 60, 0); // MIDI channel 1, noteOff
+      assert.equal(engine.activeVoices.size, 1, 'channel 2 voice must remain active after channel 1 noteOff');
+      assert.equal((runtime as any).heldNotes.size, 1, 'channel 2 note must remain held');
+
+      sendRawMidi(0x81, 60, 0); // MIDI channel 2, noteOff
+      assert.equal(engine.activeVoices.size, 0, 'channel 2 noteOff must release its remaining voice');
+      assert.equal((runtime as any).heldNotes.size, 0, 'all channel-specific held-note state must clear');
+
+      sendRawMidi(0x90, 60, 100);
+      assert.equal(engine.activeVoices.size, 1, 'a subsequent single-channel noteOn still starts a voice');
+      sendRawMidi(0x90, 60, 0); // velocity-zero noteOn == noteOff
+      assert.equal(engine.activeVoices.size, 0, 'velocity-zero noteOn must release the held voice');
+      assert.equal((runtime as any).heldNotes.size, 0, 'velocity-zero release clears held-note state');
+    } finally {
+      runtime.releaseAllNotes();
+      audioEngine.removeMidiListener(listener);
+      engine.activeVoiceChannelVolumes = previousVoiceChannelVolumes;
+    }
+  });
+
+  it('survives rapid overlapping same-pitch channel bursts and preserves polyphonic release', () => {
+    setupLiveGraph();
+    const previousVoiceChannelVolumes = engine.activeVoiceChannelVolumes;
+    engine.activeVoiceChannelVolumes = new Map();
+    const { runtime, listener } = attachMidiRuntime();
+
+    try {
+      for (let i = 0; i < 64; i++) {
+        const pitch = 60 + (i % 4);
+        sendRawMidi(0x90, pitch, 100);
+        sendRawMidi(0x91, pitch, 96);
+        assert.equal(engine.activeVoices.size, 2, `burst ${i}: both channel voices start`);
+        sendRawMidi(0x80, pitch, 0);
+        assert.equal(engine.activeVoices.size, 1, `burst ${i}: channel 2 voice survives channel 1 noteOff`);
+        sendRawMidi(0x91, pitch, 0);
+        assert.equal(engine.activeVoices.size, 0, `burst ${i}: channel 2 velocity-zero noteOff clears the final voice`);
+        assert.equal((runtime as any).heldNotes.size, 0, `burst ${i}: held-note state is empty`);
+      }
+
+      for (let pitch = 48; pitch < 60; pitch++) sendRawMidi(0x90, pitch, 100);
+      assert.equal(engine.activeVoices.size, 12, 'single-channel polyphonic note-ons remain independent');
+      for (let pitch = 48; pitch < 60; pitch++) sendRawMidi(0x80, pitch, 0);
+      assert.equal(engine.activeVoices.size, 0, 'polyphonic note-offs release every voice');
+      assert.equal(engine.activeVoiceChannelVolumes.size, 0, 'voice trim bookkeeping is fully cleaned');
+    } finally {
+      runtime.releaseAllNotes();
+      audioEngine.removeMidiListener(listener);
+      engine.activeVoiceChannelVolumes = previousVoiceChannelVolumes;
+    }
+  });
+});
+
 describe('Phase 61 Priority 6 — Muted Playlist Lane Automation Parity', () => {
   it('skips automation clips on muted playlist lanes in live playback, seek rebase, and offline WAV export', async () => {
     setupLiveGraph();
