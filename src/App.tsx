@@ -8,6 +8,7 @@ import {
   PlaylistTrack, 
   PlaylistClip, 
   MixerTrack, 
+  Note,
   FxType, 
   FxSlot, 
   AudioRecording, 
@@ -957,6 +958,41 @@ export function App() {
     );
   };
 
+  /**
+   * Phase 66 F3-B: a Standard MIDI File may hold several note-bearing tracks.
+   * The track that lands in the channel being edited is written by the Piano
+   * Roll itself; every additional track gets a channel of its own through this
+   * callback. `appendChannelWithAllocatedMixerTrackId` is the same project-state
+   * path the Channel Rack uses, so the new channel is published with its notes in
+   * one mutation (no window where it exists empty) and is persisted with an
+   * allocated mixer insert like any other channel.
+   */
+  const midiImportChannelSequenceRef = useRef(0);
+  const handleCreateChannelFromMidiImport = (name: string, notes: Note[]): string => {
+    const channelId = `ch-midi-${Date.now()}-${midiImportChannelSequenceRef.current}`;
+    midiImportChannelSequenceRef.current += 1;
+    const channel = {
+      id: channelId,
+      name,
+      color: '#00e5ff',
+      instrumentType: 'minisynth',
+      volume: 0.85,
+      pan: 0,
+      pitch: 0,
+      mute: false,
+      solo: false,
+      steps: Array(16).fill(false),
+      notes,
+      synthParams: audioEngine.getDefaultSynthParams()
+    } satisfies Omit<Channel, 'mixerTrackId'>;
+
+    mutateProjectState(
+      current => appendChannelWithAllocatedMixerTrackId(current, channel),
+      'Import MIDI track'
+    );
+    return channelId;
+  };
+
   const handleAddChannel = (type: InstrumentType, name: string, color: string) => {
     const channel = {
       id: `ch-${Date.now()}`,
@@ -1786,6 +1822,7 @@ export function App() {
               isPlaying={isPlaying}
               patternLengthSteps={selectedPatternLengthSteps}
               bpm={projectState.meta.bpm}
+              onCreateChannelFromMidiImport={handleCreateChannelFromMidiImport}
             />
           )}
 
