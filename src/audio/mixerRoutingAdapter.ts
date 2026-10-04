@@ -3,6 +3,19 @@ import { MixerRoute, MixerRouteValidation, MixerRoutingGraph } from './mixerRout
 export interface MixerAudioNodePair {
   input: AudioNode;
   output: AudioNode;
+  /**
+   * Phase 64 — optional leaf that must stay fed by `output`.
+   *
+   * The mixer's post-fader metering analyser hangs off the channel output. A
+   * routing rebuild has to clear the output's edges to drop stale routes, and
+   * Web Audio's no-argument `disconnect()` clears *every* edge — so without
+   * this the strip lost its meter tap on the first Play (or the first mixer
+   * edit) and reported silence for the rest of the session while the channel
+   * was audibly playing. Taps are leaves: reconnecting them never changes the
+   * audible routing, and a tap that fails to reconnect is ignored rather than
+   * allowed to break a route change.
+   */
+  meterTap?: AudioNode;
 }
 
 /**
@@ -98,10 +111,8 @@ export class MixerRoutingAdapter {
     const routes = this.graph.getRoutes();
     const previousRoutes = this.appliedRoutes.map(route => ({ ...route }));
 
-    for (const [trackId, pair] of this.nodes) {
-      if (trackId === this.masterTrackId) continue;
-      pair.output.disconnect();
-    }
+    this.disconnectOutputs();
+    this.restoreMeterTaps();
 
     try {
       for (const route of routes) {
@@ -115,10 +126,8 @@ export class MixerRoutingAdapter {
       }
       this.appliedRoutes = routes.map(route => ({ ...route }));
     } catch (error) {
-      for (const [trackId, pair] of this.nodes) {
-        if (trackId === this.masterTrackId) continue;
-        pair.output.disconnect();
-      }
+      this.disconnectOutputs();
+      this.restoreMeterTaps();
       for (const route of previousRoutes) {
         if (route.trackId === this.masterTrackId) continue;
         const source = this.nodes.get(route.trackId);
@@ -126,6 +135,32 @@ export class MixerRoutingAdapter {
         if (source && target) source.output.connect(target.input);
       }
       throw error;
+    }
+  }
+
+  /** Clears every edge out of a non-master channel output, ready for re-routing. */
+  private disconnectOutputs(): void {
+    for (const [trackId, pair] of this.nodes) {
+      if (trackId === this.masterTrackId) continue;
+      pair.output.disconnect();
+    }
+  }
+
+  /**
+   * Re-attaches the metering taps that `disconnectOutputs()` just cleared.
+   *
+   * A tap that cannot be re-attached must not abort a routing change: the
+   * audible graph is what this method is not responsible for, and a throw here
+   * would roll back a valid route edit. It is therefore best effort.
+   */
+  private restoreMeterTaps(): void {
+    for (const pair of this.nodes.values()) {
+      if (!pair.meterTap) continue;
+      try {
+        pair.output.connect(pair.meterTap);
+      } catch {
+        // A detached tap only costs metering accuracy for that strip.
+      }
     }
   }
 

@@ -25,6 +25,7 @@ import {
 } from 'lucide-react';
 import { PlaylistTrack, PlaylistClip, Pattern, Channel, AutomationTargetType, ArrangementMarker, MixerTrack } from '../types/daw';
 import { audioEngine } from '../audio/audioEngine';
+import { resolvePlaylistBounceTarget } from './playlistBounceTarget';
 import {
   MISSING_AUDIO_CLIP_BADGE_LABEL,
   describeMissingAudioClip,
@@ -248,21 +249,42 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
   };
 
   const handleBounceTrack = async (trackIdx: number) => {
-    const channel = channels[trackIdx] || channels[0];
-    if (!channel) return;
+    // Phase 64: the lane decides the channel. Using the lane index as a channel
+    // index bounced the wrong instrument on any project whose channel list does
+    // not match its lane order (the factory project is one of them), and an empty
+    // lane silently bounced `channels[0]`.
+    const target = resolvePlaylistBounceTarget(channels, clips, trackIdx);
+    const channel = target.channelId ? channels.find(c => c.id === target.channelId) : undefined;
+    if (!channel || target.status !== 'ready') {
+      setStatusMessage(
+        target.status === 'empty'
+          ? 'Nothing to bounce on this lane.'
+          : 'This lane has no channel to bounce.',
+      );
+      setTimeout(() => setStatusMessage(null), 3000);
+      return;
+    }
 
     setStatusMessage(`Bouncing ${channel.name} into offline Audio Stem...`);
     try {
       // Render at the project tempo over the channel's full playable length so the
       // stem lines up with the arrangement grid and no step past bar 1 is dropped.
-      const { buffer, waveform, lengthBars } = await audioEngine.bounceChannelToAudioClip(channel, bpm, MIN_BOUNCE_BARS);
+      // The project's mixer strips are passed through so the stem carries the same
+      // insert FX, fader and bus routing the lane was monitored through.
+      const bounceOptions = { mixerTracks, includeMixerFx: true };
+      const { buffer, waveform, lengthBars } = await audioEngine.bounceChannelToAudioClip(
+        channel,
+        bpm,
+        MIN_BOUNCE_BARS,
+        bounceOptions,
+      );
       const bufId = `bounced-clip-${Date.now()}`;
       audioEngine.setSampleBuffer(bufId, buffer);
 
       const newAudioClip: PlaylistClip = {
         id: `audio-bounced-${Date.now()}`,
         trackIndex: trackIdx,
-        startBar: 0,
+        startBar: target.startBar,
         // Clip metadata mirrors the rendered audio so playback never truncates or pads the stem.
         lengthBars,
         type: 'audio',

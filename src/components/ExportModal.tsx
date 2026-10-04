@@ -175,7 +175,15 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, chann
       if (format === 'midi') {
         setStatusText(`Writing Standard MIDI (${renderBars} bars)...`);
         setRenderProgress(60);
-        const midiBlob = buildStandardMidiFile(channels, clips, meta);
+        // Phase 64: the MIDI file is written for the same window and the same
+        // audibility rules as the WAV/stem renderer, so the scope the user
+        // selected, the declared pattern length and the muted lanes all apply.
+        const midiBlob = buildStandardMidiFile(channels, clips, meta, {
+          scope,
+          patternLengthSteps,
+          totalBars,
+          playlistTracks,
+        });
         setDownloadUrl(URL.createObjectURL(midiBlob));
         setRenderProgress(100);
         setStatusText('Standard MIDI export complete.');

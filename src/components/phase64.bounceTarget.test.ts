@@ -42,6 +42,9 @@ describe('Phase 64 F4 — lane content decides the bounce target', () => {
   });
 
   it('resolves every populated factory lane to the channel its clips name', () => {
+    // The factory project deliberately interleaves its channel list: the channel
+    // order is kick, snare, hi-hat, 808, pluck while the lanes are kick, hi-hat,
+    // 808, pluck. Only lane 0 happens to agree with its index.
     const expected: Record<number, string> = {
       0: 'ch-kick',
       1: 'ch-hihat',
@@ -51,9 +54,11 @@ describe('Phase 64 F4 — lane content decides the bounce target', () => {
     for (const [lane, channelId] of Object.entries(expected)) {
       const target = resolvePlaylistBounceTarget(factoryChannels, factoryClips, Number(lane));
       assert.equal(target.channelId, channelId, `lane ${lane} must bounce ${channelId}`);
+    }
+    for (const lane of [1, 2, 3]) {
       assert.notEqual(
-        target.channelId,
-        factoryChannels[Number(lane)]?.id,
+        resolvePlaylistBounceTarget(factoryChannels, factoryClips, lane).channelId,
+        factoryChannels[lane]?.id,
         `lane ${lane} must never fall back to channels[${lane}]`,
       );
     }

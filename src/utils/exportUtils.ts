@@ -1,7 +1,35 @@
-import type { Channel, PlaylistClip, ProjectMetadata } from '../types/daw';
+import type { Channel, PlaylistClip, PlaylistTrack, ProjectMetadata } from '../types/daw';
 import { getPatternLengthBars } from '../state/patternLength';
+import {
+  resolvePatternLoopLengthSteps,
+  resolvePlayableContentLengthSteps,
+} from '../audio/audioEngine';
+import { derivePlaylistLaneMutes, isClipLaneMuted } from '../audio/playlistLaneMutes';
 
 export type ExportScope = 'song' | 'pattern';
+
+/**
+ * Phase 64 — the export options the dialog already knows.
+ *
+ * Before this, `buildStandardMidiFile` received only the channels, clips and
+ * metadata: the selected scope, the declared pattern length, the project's
+ * timeline length and the playlist lane rows were all dropped on the floor, so a
+ * "Pattern Loop (4 bars)" MIDI export wrote events from bar 24 and a muted lane
+ * was exported as if it were audible. The options below are the same values the
+ * WAV/stem renderer is given, so one scope selection produces one window.
+ *
+ * All fields are optional: the three-argument form keeps working as a Full Song
+ * export, which is what every legacy caller meant.
+ */
+export interface MidiExportOptions {
+  scope?: ExportScope;
+  /** Declared `Pattern.lengthSteps` of the selected pattern (see `state/patternLength`). */
+  patternLengthSteps?: number;
+  /** Authoritative playlist timeline length; clamps the Song window (Phase 54). */
+  totalBars?: number;
+  /** Playlist lane rows; muted rows are dropped exactly like the WAV renderer. */
+  playlistTracks?: PlaylistTrack[];
+}
 
 /**
  * A Pattern Loop export renders the documented 4-bar window, which is also wide
@@ -77,15 +105,88 @@ interface MidiEvent {
   data: number[];
 }
 
+/** The arrangement grid: 16 steps per bar, one 16th note per 120 ticks at 480 PPQ. */
+const STEPS_PER_BAR = 16;
+const TICKS_PER_STEP = 120;
+const TICKS_PER_BAR = STEPS_PER_BAR * TICKS_PER_STEP;
+
+/** One schedulable piece of channel content inside the pattern loop. */
+interface ChannelContentStep {
+  /** Position inside the loop, 0-based. */
+  relStep: number;
+  pitch: number;
+  durationSteps: number;
+  velocity: number;
+}
+
+/**
+ * Positions inside a loop that actually hold content.
+ *
+ * A step lane entry and a piano-roll note start are both step-indexed, and both
+ * are ignored past the resolved loop length — the same rule playback applies, so
+ * a `Channel.steps` array that is longer than the declared pattern length does
+ * not leak hidden steps into an export.
+ */
+const channelContentSteps = (channel: Channel, loopLengthSteps: number): number[] => {
+  const positions = new Set<number>();
+  if (Array.isArray(channel.steps)) {
+    channel.steps.forEach((active, index) => {
+      if (active === true && index < loopLengthSteps) positions.add(index);
+    });
+  }
+  for (const note of channel.notes ?? []) {
+    if (note.muted) continue;
+    const start = Math.round(Number(note.start));
+    if (Number.isFinite(start) && start >= 0 && start < loopLengthSteps) positions.add(start);
+  }
+  return Array.from(positions).sort((a, b) => a - b);
+};
+
+/** The events a single loop position produces: its step-lane hit plus any notes starting there. */
+const contentEventsAtStep = (channel: Channel, relStep: number): ChannelContentStep[] => {
+  const events: ChannelContentStep[] = [];
+  if (Array.isArray(channel.steps) && channel.steps[relStep]) {
+    events.push({
+      relStep,
+      pitch: channel.instrumentType === 'drumpad' ? 36 : 60,
+      durationSteps: 1,
+      velocity: 0.9,
+    });
+  }
+  for (const note of channel.notes ?? []) {
+    if (note.muted) continue;
+    if (Math.round(Number(note.start)) !== relStep) continue;
+    const duration = Number.isFinite(note.duration) && note.duration > 0 ? note.duration : 1;
+    events.push({
+      relStep,
+      pitch: note.pitch,
+      durationSteps: duration,
+      velocity: Number.isFinite(note.velocity) ? note.velocity : 0.8,
+    });
+  }
+  return events;
+};
+
+interface MidiTrackContext {
+  scope: ExportScope;
+  /** Pattern Mode wrap boundary (`resolvePatternLoopLengthSteps`), used by Pattern scope. */
+  patternLoopSteps: number;
+  /** Advertised render window in ticks; nothing at or past it is written. */
+  windowTicks: number;
+  laneMutes: Set<number>;
+}
+
 function buildMidiTrack(
   channel: Channel,
   channelIndex: number,
   clips: PlaylistClip[],
   meta: Pick<ProjectMetadata, 'bpm' | 'timeSignature'>,
+  context?: MidiTrackContext,
 ): number[] {
   const midiChannel = channelIndex % 16;
   const events: MidiEvent[] = [];
   const safeBpm = Number.isFinite(meta.bpm) && meta.bpm > 0 ? meta.bpm : 120;
+  const windowTicks = context ? context.windowTicks : Number.POSITIVE_INFINITY;
 
   const name = channel.name || `Channel ${channelIndex + 1}`;
   const nameBytes = Array.from(new TextEncoder().encode(name));
@@ -104,16 +205,49 @@ function buildMidiTrack(
     events.push({ tick: 0, order: 0, data: [0xff, 0x58, 0x04, numerator & 0xff, denominatorPower, 24, 8] });
   }
 
-  for (const clip of clips) {
-    if (clip.type !== 'pattern' || clip.mute || clip.channelId !== channel.id) continue;
-    const clipStartTick = Math.max(0, Math.round(clip.startBar * 1920));
-    for (const note of channel.notes ?? []) {
-      if (note.muted) continue;
-      const startTick = clipStartTick + Math.max(0, Math.round(note.start * 120));
-      const durationTick = Math.max(1, Math.round(Math.max(0.01, note.duration) * 120));
-      const velocity = Math.max(1, Math.min(127, Math.round((note.velocity ?? 0.8) * 127)));
-      events.push({ tick: startTick, order: 2, data: [0x90 | midiChannel, clampMidi(note.pitch), velocity] });
-      events.push({ tick: startTick + durationTick, order: 1, data: [0x80 | midiChannel, clampMidi(note.pitch), 0] });
+  /**
+   * Writes one content event at an absolute timeline step.
+   *
+   * Events that begin at or past the advertised window are dropped: the dialog
+   * names a bar count, so the file must not contain anything it cannot describe.
+   * A note whose release lands past the window keeps its release, exactly like a
+   * note-off at the very end of a DAW export.
+   */
+  const emitAtStep = (absoluteStep: number, content: ChannelContentStep): void => {
+    const startTick = absoluteStep * TICKS_PER_STEP;
+    if (startTick < 0 || startTick >= windowTicks) return;
+    const durationTick = Math.max(1, Math.round(Math.max(0.01, content.durationSteps) * TICKS_PER_STEP));
+    const velocity = Math.max(1, Math.min(127, Math.round(content.velocity * 127)));
+    events.push({ tick: startTick, order: 2, data: [0x90 | midiChannel, clampMidi(content.pitch), velocity] });
+    events.push({ tick: startTick + durationTick, order: 1, data: [0x80 | midiChannel, clampMidi(content.pitch), 0] });
+  };
+
+  if (context && context.scope === 'pattern') {
+    // Pattern Mode: the loop is the declared pattern length and it wraps for as
+    // long as the window lasts, so the MIDI matches a Pattern Loop WAV render.
+    const loopLength = Math.max(1, Math.round(context.patternLoopSteps));
+    const windowSteps = Math.ceil(windowTicks / TICKS_PER_STEP);
+    for (const relStep of channelContentSteps(channel, loopLength)) {
+      for (let step = relStep; step < windowSteps; step += loopLength) {
+        for (const content of contentEventsAtStep(channel, relStep)) emitAtStep(step, content);
+      }
+    }
+  } else {
+    // Song Mode: each clip plays the channel's content on its own loop length and
+    // its own `offsetSteps` trim, from the clip's start bar to its end bar.
+    const loopLength = Math.max(1, resolvePlayableContentLengthSteps(channel));
+    for (const clip of clips) {
+      if (clip.type !== 'pattern' || clip.mute || clip.channelId !== channel.id) continue;
+      if (context && isClipLaneMuted(clip, context.laneMutes)) continue;
+      const startStep = Math.round(clip.startBar * STEPS_PER_BAR);
+      const endStep = startStep + Math.round(clip.lengthBars * STEPS_PER_BAR);
+      const offsetSteps = Math.max(0, Math.round(Number(clip.offsetSteps) || 0));
+      for (const relStep of channelContentSteps(channel, loopLength)) {
+        const phase = ((relStep - offsetSteps) % loopLength + loopLength) % loopLength;
+        for (let step = startStep + phase; step < endStep; step += loopLength) {
+          for (const content of contentEventsAtStep(channel, relStep)) emitAtStep(step, content);
+        }
+      }
     }
   }
 
@@ -137,9 +271,23 @@ export function buildStandardMidiFile(
   channels: Channel[],
   clips: PlaylistClip[],
   meta: Pick<ProjectMetadata, 'bpm' | 'timeSignature'>,
+  options: MidiExportOptions = {},
 ): Blob {
-  const tracks = channels.map((channel, index) => buildMidiTrack(channel, index, clips, meta));
-  if (tracks.length === 0) tracks.push(buildMidiTrack({ id: 'empty', name: 'Apex Studio', notes: [] } as Channel, 0, [], meta));
+  const scope: ExportScope = options.scope === 'pattern' ? 'pattern' : 'song';
+  // The same window the WAV/stem renderer is handed, so the dialog's bar count
+  // and the file's contents cannot disagree.
+  const windowTicks = getProjectRenderBars(clips, scope, options.patternLengthSteps, options.totalBars) * TICKS_PER_BAR;
+  const context: MidiTrackContext = {
+    scope,
+    patternLoopSteps: resolvePatternLoopLengthSteps(channels, options.patternLengthSteps),
+    windowTicks,
+    laneMutes: derivePlaylistLaneMutes(options.playlistTracks),
+  };
+
+  const tracks = channels.map((channel, index) => buildMidiTrack(channel, index, clips, meta, context));
+  if (tracks.length === 0) {
+    tracks.push(buildMidiTrack({ id: 'empty', name: 'Apex Studio', notes: [] } as Channel, 0, [], meta, context));
+  }
 
   const header: number[] = [];
   pushString(header, 'MThd');

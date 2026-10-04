@@ -1,15 +1,24 @@
 /**
  * Phase 64 — F3: Standard MIDI export.
  *
- * The export dialog offers a scope (Full Song / Pattern Loop) and states the
- * bar count it will write, but `buildStandardMidiFile` received only
+ * The export dialog offers a scope (Full Song / Pattern Loop) and states the bar
+ * count it will write, but `buildStandardMidiFile` received only
  * `(channels, clips, meta)`: the scope was dropped, so a "Pattern Loop (4 bars)"
- * export contained events from the whole arrangement. It also serialised only
+ * export contained events from the entire arrangement. It also serialised only
  * `Channel.notes`, so a Channel Rack step pattern — the primary drum workflow —
- * exported as an empty track, and `PlaylistClip.offsetSteps` and playlist lane
- * mutes were ignored while playback and the WAV renderer honour both.
+ * exported as an empty track, while `PlaylistClip.offsetSteps` and playlist lane
+ * mutes were ignored.
  *
- * Every assertion below decodes the real bytes the production function emits.
+ * Every expectation below mirrors the offline WAV renderer's scheduler, which is
+ * the audible definition of what an export of this window contains:
+ * - song scope repeats a channel's content inside each clip at
+ *   `resolvePlayableContentLengthSteps()`, shifted by `clip.offsetSteps`;
+ * - pattern scope wraps at `resolvePatternLoopLengthSteps()`, which the declared
+ *   `Pattern.lengthSteps` makes authoritative;
+ * - a muted clip, and every clip on a muted lane, is skipped;
+ * - nothing is written outside the advertised window.
+ *
+ * Every assertion decodes the real bytes the production function emits.
  */
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
@@ -19,8 +28,9 @@ import {
 } from './exportUtils';
 import type { Channel, PlaylistClip, PlaylistTrack } from '../types/daw';
 
-const TICKS_PER_BAR = 1920;
 const TICKS_PER_STEP = 120;
+const TICKS_PER_BAR = 1920;
+const STEPS_PER_BAR = 16;
 
 interface DecodedNote {
   tick: number;
@@ -32,7 +42,6 @@ interface DecodedNote {
 interface DecodedTrack {
   name: string | null;
   notes: DecodedNote[];
-  audioTicks: number[];
   endTick: number;
 }
 
@@ -74,7 +83,6 @@ export function decodeMidiFile(bytes: Uint8Array): DecodedMidi {
     let tick = 0;
     let runningStatus: number | null = null;
     const notes: DecodedNote[] = [];
-    const audioTicks: number[] = [];
     let name: string | null = null;
 
     while (index < end) {
@@ -109,20 +117,12 @@ export function decodeMidiFile(bytes: Uint8Array): DecodedMidi {
       const dataLength = status >= 0xf0 ? 0 : 2;
       const data = Array.from(bytes.slice(index, index + dataLength));
       index += dataLength;
-      const command = status & 0xf0;
-      if (command === 0x90 && data[1] > 0) {
-        notes.push({
-          tick,
-          channel: status & 0x0f,
-          pitch: data[0],
-          velocity: data[1],
-        });
-      } else if (command === 0xb0) {
-        audioTicks.push(tick);
+      if ((status & 0xf0) === 0x90 && data[1] > 0) {
+        notes.push({ tick, channel: status & 0x0f, pitch: data[0], velocity: data[1] });
       }
     }
 
-    tracks.push({ name, notes, audioTicks, endTick: tick });
+    tracks.push({ name, notes, endTick: tick });
     cursor = end;
   }
 
@@ -145,6 +145,12 @@ const channel = (id: string, overrides: Partial<Channel> = {}): Channel => ({
   synthParams: {} as Channel['synthParams'],
   ...overrides,
 });
+
+const stepsAt = (active: number[], length = 16): boolean[] => {
+  const steps = new Array(length).fill(false);
+  for (const index of active) steps[index] = true;
+  return steps;
+};
 
 const patternClip = (
   id: string,
@@ -176,8 +182,11 @@ const playlistTracks = (count: number): PlaylistTrack[] =>
 
 const asBytes = async (blob: Blob): Promise<Uint8Array> => new Uint8Array(await blob.arrayBuffer());
 
-describe('Phase 64 F3 — Pattern Loop scope is preserved in the .mid', () => {
-  it('writes only the requested bar window, not the whole arrangement', async () => {
+const noteTicks = (decoded: DecodedMidi, trackIndex = 0): number[] =>
+  decoded.tracks[trackIndex].notes.map(note => note.tick);
+
+describe('Phase 64 F3 — export scope selects the written window', () => {
+  it('writes only the pattern-loop window, not the whole arrangement', async () => {
     const lead = channel('ch-lead', {
       notes: [{ id: 'n1', pitch: 60, start: 0, duration: 2, velocity: 0.9 }],
     });
@@ -187,8 +196,8 @@ describe('Phase 64 F3 — Pattern Loop scope is preserved in the .mid', () => {
       patternClip('clip-3', 'ch-lead', 24),
     ];
 
-    const patternBars = getProjectRenderBars(clips, 'pattern', 16);
-    assert.equal(patternBars, 4, 'the dialog advertises a 4-bar pattern loop');
+    const windowBars = getProjectRenderBars(clips, 'pattern', 16);
+    assert.equal(windowBars, 4, 'the dialog advertises a 4-bar pattern loop');
 
     const decoded = decodeMidiFile(await asBytes(
       buildStandardMidiFile([lead], clips, { bpm: 120, timeSignature: [4, 4] }, {
@@ -197,17 +206,20 @@ describe('Phase 64 F3 — Pattern Loop scope is preserved in the .mid', () => {
       }),
     ));
 
-    const noteOns = decoded.tracks.flatMap(track => track.notes);
-    assert.equal(noteOns.length, 1, 'only the clip inside the loop window is exported');
-    for (const note of noteOns) {
+    // Pattern Mode wraps every 16 steps, so the 4-bar window holds four passes.
+    assert.deepEqual(
+      noteTicks(decoded),
+      [0, 1, 2, 3].map(pass => pass * STEPS_PER_BAR * TICKS_PER_STEP),
+    );
+    for (const tick of noteTicks(decoded)) {
       assert.ok(
-        note.tick < patternBars * TICKS_PER_BAR,
-        `note at tick ${note.tick} is outside the advertised ${patternBars}-bar window`,
+        tick < windowBars * TICKS_PER_BAR,
+        `note at tick ${tick} is outside the advertised ${windowBars}-bar window`,
       );
     }
   });
 
-  it('keeps Full Song scope spanning the last clip', async () => {
+  it('keeps Song scope spanning the whole arrangement', async () => {
     const lead = channel('ch-lead', {
       notes: [{ id: 'n1', pitch: 60, start: 0, duration: 2, velocity: 0.9 }],
     });
@@ -216,21 +228,35 @@ describe('Phase 64 F3 — Pattern Loop scope is preserved in the .mid', () => {
       patternClip('clip-2', 'ch-lead', 8),
     ];
 
-    const decoded = decodeMidiFile(await asBytes(
+    const songScope = decodeMidiFile(await asBytes(
       buildStandardMidiFile([lead], clips, { bpm: 120, timeSignature: [4, 4] }, { scope: 'song' }),
     ));
-    const ticks = decoded.tracks.flatMap(track => track.notes.map(note => note.tick)).sort((a, b) => a - b);
-    assert.deepEqual(ticks, [0, 8 * TICKS_PER_BAR], 'song scope keeps every clip start');
+    assert.deepEqual(
+      noteTicks(songScope),
+      [0, STEPS_PER_BAR, 8 * STEPS_PER_BAR, 8 * STEPS_PER_BAR + STEPS_PER_BAR].map(step => step * TICKS_PER_STEP),
+      'song scope writes every clip in the arrangement',
+    );
+
+    const patternScope = decodeMidiFile(await asBytes(
+      buildStandardMidiFile([lead], clips, { bpm: 120, timeSignature: [4, 4] }, {
+        scope: 'pattern',
+        patternLengthSteps: 16,
+      }),
+    ));
+    assert.ok(
+      noteTicks(patternScope).every(tick => tick < 4 * TICKS_PER_BAR),
+      'pattern scope must not reach the clip at bar 9',
+    );
   });
 
   it('drops events at or past the end of the render window', async () => {
     const lead = channel('ch-lead', {
       notes: [
         { id: 'inside', pitch: 60, start: 0, duration: 2, velocity: 0.9 },
-        { id: 'outside', pitch: 72, start: 8, duration: 2, velocity: 0.9 },
+        { id: 'outside', pitch: 72, start: 32, duration: 2, velocity: 0.9 },
       ],
     });
-    // A note starting at bar 3 of a 2-bar clip sits past a 2-bar render window.
+    // A 4-bar clip in a project the user has shortened to 2 bars.
     const clips = [patternClip('clip-1', 'ch-lead', 0, { lengthBars: 4 })];
 
     const decoded = decodeMidiFile(await asBytes(
@@ -239,18 +265,13 @@ describe('Phase 64 F3 — Pattern Loop scope is preserved in the .mid', () => {
         totalBars: 2,
       }),
     ));
-    const pitches = decoded.tracks.flatMap(track => track.notes.map(note => note.pitch));
-    assert.deepEqual(pitches, [60], 'the note past the 2-bar window is not exported');
+    assert.deepEqual(noteTicks(decoded), [0], 'the event past the 2-bar window is not written');
   });
 });
 
 describe('Phase 64 F3 — step-sequencer content is exported', () => {
   it('serialises Channel.steps as notes on the 16th-note grid', async () => {
-    const steps = new Array(16).fill(false);
-    steps[0] = true;
-    steps[3] = true;
-    steps[7] = true;
-    const drums = channel('ch-drums', { instrumentType: 'drumpad', steps });
+    const drums = channel('ch-drums', { instrumentType: 'drumpad', steps: stepsAt([0, 3, 7]) });
     const clips = [patternClip('clip-1', 'ch-drums', 0)];
 
     const decoded = decodeMidiFile(await asBytes(
@@ -260,25 +281,20 @@ describe('Phase 64 F3 — step-sequencer content is exported', () => {
       }),
     ));
 
-    const notes = decoded.tracks[0].notes.sort((a, b) => a.tick - b.tick);
+    const notes = decoded.tracks[0].notes;
+    const perLoop = [0, 3, 7];
     assert.deepEqual(
-      notes.map(note => note.tick),
-      [0, 3 * TICKS_PER_STEP, 7 * TICKS_PER_STEP],
-      'every active step must produce a note at its own 16th-note position',
+      noteTicks(decoded),
+      [0, 1, 2, 3].flatMap(pass => perLoop.map(step => (pass * STEPS_PER_BAR + step) * TICKS_PER_STEP)),
+      'every active step must produce a note at its own 16th-note position in every loop pass',
     );
     assert.ok(notes.every(note => note.velocity === Math.round(0.9 * 127)));
-    assert.deepEqual(
-      notes.map(note => note.pitch),
-      [36, 36, 36],
-      'drum-pad steps use the channel default pitch',
-    );
+    assert.ok(notes.every(note => note.pitch === 36), 'drum-pad steps use the channel default pitch');
   });
 
   it('exports step and piano-roll content together for one channel', async () => {
-    const steps = new Array(16).fill(false);
-    steps[2] = true;
     const synth = channel('ch-synth', {
-      steps,
+      steps: stepsAt([2]),
       notes: [{ id: 'n1', pitch: 64, start: 5, duration: 2, velocity: 0.8 }],
     });
     const clips = [patternClip('clip-1', 'ch-synth', 0)];
@@ -289,17 +305,37 @@ describe('Phase 64 F3 — step-sequencer content is exported', () => {
         patternLengthSteps: 16,
       }),
     ));
-    const notes = decoded.tracks[0].notes.sort((a, b) => a.tick - b.tick);
-    assert.deepEqual(notes.map(note => note.tick), [2 * TICKS_PER_STEP, 5 * TICKS_PER_STEP]);
-    assert.deepEqual(notes.map(note => note.pitch), [60, 64]);
+    const notes = decoded.tracks[0].notes;
+    assert.deepEqual(
+      noteTicks(decoded),
+      [0, 1, 2, 3].flatMap(pass => [2, 5].map(step => (pass * STEPS_PER_BAR + step) * TICKS_PER_STEP)),
+    );
+    assert.deepEqual([...new Set(notes.map(note => note.pitch))], [60, 64]);
   });
 
   it('repeats a short pattern across a multi-loop render window', async () => {
-    const steps = new Array(16).fill(false);
-    steps[0] = true;
-    const drums = channel('ch-drums', { instrumentType: 'drumpad', steps });
-    // A 32-step (2-bar) loop rendered into the dialog's 4-bar pattern window.
+    const drums = channel('ch-drums', { instrumentType: 'drumpad', steps: stepsAt([0]) });
     const clips = [patternClip('clip-1', 'ch-drums', 0, { lengthBars: 4 })];
+
+    // A declared 2-bar pattern loop rendered into the dialog's 4-bar window.
+    const decoded = decodeMidiFile(await asBytes(
+      buildStandardMidiFile([drums], clips, { bpm: 120, timeSignature: [4, 4] }, {
+        scope: 'pattern',
+        patternLengthSteps: 32,
+      }),
+    ));
+    assert.deepEqual(noteTicks(decoded), [0, 2 * TICKS_PER_BAR], 'the loop restarts every pattern length');
+  });
+});
+
+describe('Phase 64 F3 — clip offset and lane mute semantics', () => {
+  it('keeps Pattern scope clip-less: a clip offset cannot trim the pattern loop', async () => {
+    // Pattern Mode never consults clips, so `offsetSteps` — a clip property —
+    // has no meaning there. The loop boundary stays the declared pattern length.
+    const drums = channel('ch-drums', { instrumentType: 'drumpad', steps: stepsAt([19], 32) });
+    const clips = [patternClip('clip-1', 'ch-drums', 0, { offsetSteps: 2 })];
+    const windowBars = getProjectRenderBars(clips, 'pattern', 32);
+    assert.equal(windowBars, 4);
 
     const decoded = decodeMidiFile(await asBytes(
       buildStandardMidiFile([drums], clips, { bpm: 120, timeSignature: [4, 4] }, {
@@ -308,28 +344,24 @@ describe('Phase 64 F3 — step-sequencer content is exported', () => {
       }),
     ));
     assert.deepEqual(
-      decoded.tracks[0].notes.map(note => note.tick),
-      [0, 2 * TICKS_PER_BAR],
-      'the loop restarts every pattern length inside the window',
+      noteTicks(decoded),
+      [19 * TICKS_PER_STEP, 19 * TICKS_PER_STEP + 2 * TICKS_PER_BAR],
+      'the content keeps its own step position and wraps at the declared length',
     );
   });
-});
 
-describe('Phase 64 F3 — clip offset and lane mute semantics', () => {
-  it('applies PlaylistClip.offsetSteps the way playback does', async () => {
-    const steps = new Array(16).fill(false);
-    steps[3] = true;
-    const drums = channel('ch-drums', { instrumentType: 'drumpad', steps });
-    // offsetSteps = 2 rotates the content: content step 3 sounds at step 1.
-    const clips = [patternClip('clip-1', 'ch-drums', 0, { offsetSteps: 2 })];
-
+  it('applies PlaylistClip.offsetSteps in Song scope too', async () => {
+    const drums = channel('ch-drums', { instrumentType: 'drumpad', steps: stepsAt([3]) });
+    const clips = [patternClip('clip-1', 'ch-drums', 4, { offsetSteps: 2 })];
     const decoded = decodeMidiFile(await asBytes(
-      buildStandardMidiFile([drums], clips, { bpm: 120, timeSignature: [4, 4] }, {
-        scope: 'pattern',
-        patternLengthSteps: 16,
-      }),
+      buildStandardMidiFile([drums], clips, { bpm: 120, timeSignature: [4, 4] }, { scope: 'song' }),
     ));
-    assert.deepEqual(decoded.tracks[0].notes.map(note => note.tick), [1 * TICKS_PER_STEP]);
+    const clipStartTick = 4 * TICKS_PER_BAR;
+    assert.deepEqual(
+      noteTicks(decoded),
+      [clipStartTick + TICKS_PER_STEP, clipStartTick + TICKS_PER_STEP + STEPS_PER_BAR * TICKS_PER_STEP],
+      'content step 3 trimmed by 2 sounds on the clip grid at step 1, then loops',
+    );
   });
 
   it('omits muted playlist lanes, matching the WAV renderer', async () => {
@@ -350,8 +382,8 @@ describe('Phase 64 F3 — clip offset and lane mute semantics', () => {
       }),
     ));
     assert.deepEqual(
-      decoded.tracks[0].notes.map(note => note.tick),
-      [0],
+      noteTicks(decoded),
+      [0, STEPS_PER_BAR * TICKS_PER_STEP],
       'a muted lane must not reach the exported MIDI',
     );
   });
@@ -370,7 +402,7 @@ describe('Phase 64 F3 — clip offset and lane mute semantics', () => {
 });
 
 describe('Phase 64 F3 — legacy callers and file structure', () => {
-  it('keeps the three-argument form working and unscoped', async () => {
+  it('keeps the three-argument form working and unscoped (Song)', async () => {
     const lead = channel('ch-lead', {
       notes: [{ id: 'n1', pitch: 60, start: 0, duration: 2, velocity: 0.9 }],
     });
@@ -382,10 +414,14 @@ describe('Phase 64 F3 — legacy callers and file structure', () => {
     assert.equal(decoded.format, 0, 'a single-channel file is a format-0 file');
     assert.equal(decoded.trackCount, 1);
     assert.equal(decoded.ticksPerQuarter, 480);
-    assert.deepEqual(decoded.tracks[0].notes.map(note => note.tick), [8 * TICKS_PER_BAR]);
+    assert.deepEqual(
+      noteTicks(decoded),
+      [8 * STEPS_PER_BAR * TICKS_PER_STEP, 9 * STEPS_PER_BAR * TICKS_PER_STEP],
+      'the clip content repeats inside its 2-bar clip',
+    );
   });
 
-  it('reports the window it actually wrote so the dialog cannot overstate it', async () => {
+  it('never writes content the advertised window cannot hold', async () => {
     const lead = channel('ch-lead', {
       notes: [{ id: 'n1', pitch: 60, start: 0, duration: 2, velocity: 0.9 }],
     });
@@ -396,7 +432,18 @@ describe('Phase 64 F3 — legacy callers and file structure', () => {
         patternLengthSteps: 16,
       }),
     ));
-    const lastNoteTick = Math.max(...decoded.tracks.flatMap(track => track.notes.map(note => note.tick)));
-    assert.ok(lastNoteTick < getProjectRenderBars(clips, 'pattern', 16) * TICKS_PER_BAR);
+    const windowTicks = getProjectRenderBars(clips, 'pattern', 16) * TICKS_PER_BAR;
+    assert.ok(noteTicks(decoded).every(tick => tick < windowTicks));
+  });
+
+  it('names each track after its channel', async () => {
+    const decoded = decodeMidiFile(await asBytes(
+      buildStandardMidiFile(
+        [channel('ch-lead', { name: 'Lead Pluck' })],
+        [patternClip('clip-1', 'ch-lead', 0)],
+        { bpm: 120, timeSignature: [4, 4] },
+      ),
+    ));
+    assert.equal(decoded.tracks[0].name, 'Lead Pluck');
   });
 });

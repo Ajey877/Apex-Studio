@@ -327,7 +327,8 @@ describe('Phase 64 F1 — swing magnitude reaches the offline renderer', () => {
     audioEngine.setSwing(PROJECT_SWING_MAX);
     audioEngine.play([channel], [] as PlaylistClip[], 'pat', 'pat-1', makeMixerTracks(), 16, []);
     noteStarts = [];
-    transport.emitStep(1, 1, 0);
+    // Step 1's grid position, exactly as the transport would report it.
+    transport.emitStep(1, 1, SECONDS_PER_STEP);
     const liveOffset = noteStarts[0];
 
     setupLiveGraph();

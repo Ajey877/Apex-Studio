@@ -48,6 +48,44 @@ export const FILTER_RESONANCE_MAX = 20;
 export const filterResonanceFromNormalized = (value: number): number =>
   Math.max(FILTER_RESONANCE_MIN, value * FILTER_RESONANCE_MAX);
 
+/**
+ * Swing: `ProjectMetadata.swing` is a project-owned fraction.
+ *
+ * The Channel Rack slider spans 0..0.5 and labels that value "100 %"
+ * (`ChannelRack.tsx`), i.e. 0.5 is full scale, and the transport's groove offset
+ * is 40 % of a step at full scale. The engine used to divide this fraction by
+ * 100 — the range its field used to be documented with — which under-scaled the
+ * groove by 100x (0.25 ms instead of 25 ms at 120 BPM) and made the control
+ * inaudible. The conversion now lives here, next to the other normalized-value
+ * conversions, and is the single source both the live scheduler and the offline
+ * renderer use.
+ */
+export const SWING_PROJECT_FULL_SCALE = 0.5;
+
+/** Portion of a 16th-note step the groove displaces an off-beat at full swing. */
+export const SWING_MAX_STEP_FRACTION = 0.4;
+
+/** Clamps a project swing fraction to its declared 0..0.5 range; non-finite input is silent. */
+export const clampProjectSwing = (value: unknown): number => {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return 0;
+  return Math.max(0, Math.min(SWING_PROJECT_FULL_SCALE, value));
+};
+
+/**
+ * Seconds an off-beat step is delayed for a project swing fraction.
+ *
+ * Even steps are never displaced (the scheduler only calls this for odd steps),
+ * and a value above full scale saturates instead of over-swinging.
+ */
+export const swingOffsetSecondsForStep = (
+  projectSwing: unknown,
+  secondsPerStep: number,
+): number => {
+  if (!Number.isFinite(secondsPerStep) || secondsPerStep <= 0) return 0;
+  const normalized = clampProjectSwing(projectSwing) / SWING_PROJECT_FULL_SCALE;
+  return normalized * SWING_MAX_STEP_FRACTION * secondsPerStep;
+};
+
 /** Channel pitch: normalized 0..1 maps onto the ±12 semitone model range. */
 export const PITCH_RANGE_SEMITONES = 12;
 

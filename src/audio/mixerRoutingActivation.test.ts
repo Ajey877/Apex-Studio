@@ -241,11 +241,18 @@ describe('Phase 27 mixer routing activation', () => {
       engine.updateMixerTrack(makeTrack(2));
       engine.updateMixerTrack(makeTrack(1, 2));
 
-      assert.deepEqual(a.output.connections, [b.input]);
-      assert.equal(a.output.connections.includes(master.input), false);
+      // Phase 64: a strip's output also feeds its own post-fader metering
+      // analyser. That tap is not a route, so routing assertions compare the
+      // edges that are not the tap — and the tap must have survived the rebuild.
+      const routingTargets = (channel: any) =>
+        channel.output.connections.filter((target: FakeNode) => target !== channel.analyser);
+      assert.deepEqual(routingTargets(a), [b.input]);
+      assert.equal(routingTargets(a).includes(master.input), false);
+      assert.ok(a.output.connections.includes(a.analyser), 'insert meter tap survives a routing rebuild');
 
       engine.updateMixerTrack(makeTrack(1, 0));
-      assert.deepEqual(a.output.connections, [master.input]);
+      assert.deepEqual(routingTargets(a), [master.input]);
+      assert.ok(a.output.connections.includes(a.analyser));
     } finally {
       engine.ctx = previousCtx;
       engine.masterGain = previousMasterGain;
@@ -289,9 +296,17 @@ describe('Phase 27 mixer routing activation', () => {
       const track3Input = ctx.nodes[18];
       const track3Output = ctx.nodes[19];
 
-      assert.deepEqual(track1Output.connections, [track2Input]);
-      assert.deepEqual(track2Output.connections, [track3Input]);
-      assert.deepEqual(track3Output.connections, [masterInput]);
+      // Each strip's analyser is created three nodes after its output
+      // (output, duckingGain, panner, analyser). Phase 64 keeps that tap fed
+      // across the routing pass, so route edges are compared without it.
+      const analyserOf = (output: FakeNode) => ctx.nodes[ctx.nodes.indexOf(output) + 3];
+      const routingTargets = (output: FakeNode) =>
+        output.connections.filter(target => target !== analyserOf(output));
+
+      assert.deepEqual(routingTargets(track1Output), [track2Input]);
+      assert.deepEqual(routingTargets(track2Output), [track3Input]);
+      assert.deepEqual(routingTargets(track3Output), [masterInput]);
+      assert.ok(track1Output.connections.includes(analyserOf(track1Output)), 'offline meter tap survives');
       assert.equal((engine.mixerChannels as Map<number, any>).size, 0, 'offline graph state is restored after rendering');
     } finally {
       engine.ctx = previousCtx;
