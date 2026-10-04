@@ -86,6 +86,18 @@ export const swingOffsetSecondsForStep = (
   return normalized * SWING_MAX_STEP_FRACTION * secondsPerStep;
 };
 
+/**
+ * The same groove displacement, expressed in the caller's tick resolution.
+ *
+ * The MIDI writer stores time on the file's own PPQ grid, so it cannot use the
+ * seconds form directly. Dividing the conversion above by one step and
+ * multiplying by the ticks in a step keeps the *groove maths itself* in
+ * `swingOffsetSecondsForStep`: the exported file cannot swing by a different
+ * amount than the take the user monitored.
+ */
+export const swingOffsetTicksForStep = (projectSwing: unknown, ticksPerStep: number): number =>
+  Math.round(swingOffsetSecondsForStep(projectSwing, 1) * ticksPerStep);
+
 /** The Arpeggiator's "Strum Micro-Delay" range in milliseconds, as the modal slider declares it. */
 export const ARP_STRUM_MS_MAX = 50;
 
