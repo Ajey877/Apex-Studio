@@ -4,6 +4,8 @@ import {
   resolvePatternLoopLengthSteps,
   resolvePlayableContentLengthSteps,
 } from '../audio/audioEngine';
+import { isRackChannelAudible } from '../audio/midiMappingRuntime';
+import { swingOffsetTicksForStep } from '../audio/parameterScaling';
 import { derivePlaylistLaneMutes, isClipLaneMuted } from '../audio/playlistLaneMutes';
 
 export type ExportScope = 'song' | 'pattern';
@@ -110,6 +112,15 @@ const STEPS_PER_BAR = 16;
 const TICKS_PER_STEP = 120;
 const TICKS_PER_BAR = STEPS_PER_BAR * TICKS_PER_STEP;
 
+/**
+ * Tolerance for resolving which step boundary a tick-quantised onset belongs to.
+ *
+ * Onsets arrive on the tick grid (`midiOnsetSteps`), and repeated additions can
+ * leave an exact step as `4.999999999`. Flooring with this epsilon keeps the
+ * boundary — and therefore the groove the onset inherits — stable.
+ */
+const STEP_EPSILON = 1e-6;
+
 /** One schedulable piece of channel content inside the pattern loop. */
 interface ChannelContentStep {
   /** Position inside the loop, 0-based. */
@@ -152,7 +163,9 @@ const channelContentSteps = (channel: Channel, loopLengthSteps: number): number[
     });
   }
   for (const note of channel.notes ?? []) {
-    if (note.muted) continue;
+    // Phase 68 F3: no `note.muted` filter. The audio scheduler plays every note
+    // in `Channel.notes`; the export used to drop the ones a field no production
+    // path writes, which made the file disagree with the take.
     const start = midiOnsetSteps(note.start);
     if (start !== null && start < loopLengthSteps) positions.add(start);
   }
@@ -171,7 +184,6 @@ const contentEventsAtStep = (channel: Channel, relStep: number): ChannelContentS
     });
   }
   for (const note of channel.notes ?? []) {
-    if (note.muted) continue;
     if (midiOnsetSteps(note.start) !== relStep) continue;
     const duration = Number.isFinite(note.duration) && note.duration > 0 ? note.duration : 1;
     events.push({
@@ -193,12 +205,26 @@ interface MidiTrackContext {
   laneMutes: Set<number>;
 }
 
+/**
+ * Metadata the writer needs. `swing` is optional so the legacy three-argument
+ * call sites keep meaning "no groove", while `ExportModal` passes the project
+ * document's own `ProjectMetadata.swing` straight through.
+ */
+type MidiExportMeta = Pick<ProjectMetadata, 'bpm' | 'timeSignature'> & { swing?: number };
+
 function buildMidiTrack(
   channel: Channel,
   channelIndex: number,
   clips: PlaylistClip[],
-  meta: Pick<ProjectMetadata, 'bpm' | 'timeSignature'>,
+  meta: MidiExportMeta,
   context?: MidiTrackContext,
+  /**
+   * Phase 68 F3: whether this channel is audible under the canonical Channel
+   * Rack predicate. The track is still written (so track order and the MIDI
+   * channel number derived from `channelIndex` stay aligned with the project)
+   * but it carries no note events, exactly as the channel produces no audio.
+   */
+  audible: boolean = true,
 ): number[] {
   const midiChannel = channelIndex % 16;
   const events: MidiEvent[] = [];
@@ -229,11 +255,20 @@ function buildMidiTrack(
    * names a bar count, so the file must not contain anything it cannot describe.
    * A note whose release lands past the window keeps its release, exactly like a
    * note-off at the very end of a DAW export.
+   *
+   * Phase 68 F2: the start tick carries the project's groove. The scheduler
+   * (`audioEngine` live and offline) displaces only the odd step boundaries, and
+   * a fractional onset belongs to the boundary at or before it — so the groove
+   * an onset takes is the one belonging to `floor(start)`, never a
+   * re-quantisation of the onset itself. A straight project (`swing = 0`) adds
+   * exactly zero ticks and leaves today's bytes untouched.
    */
   const emitAtStep = (absoluteStep: number, content: ChannelContentStep): void => {
     // A sub-step onset lands on a fractional step position; the file stores it on
     // the tick grid, which is what `Math.round` resolves for a whole step too.
-    const startTick = Math.round(absoluteStep * TICKS_PER_STEP);
+    const boundaryStep = Math.floor(absoluteStep + STEP_EPSILON);
+    const grooveTicks = boundaryStep % 2 === 0 ? 0 : swingOffsetTicksForStep(meta.swing, TICKS_PER_STEP);
+    const startTick = Math.round(absoluteStep * TICKS_PER_STEP) + grooveTicks;
     if (startTick < 0 || startTick >= windowTicks) return;
     const durationTick = Math.max(1, Math.round(Math.max(0.01, content.durationSteps) * TICKS_PER_STEP));
     const velocity = Math.max(1, Math.min(127, Math.round(content.velocity * 127)));
@@ -241,7 +276,12 @@ function buildMidiTrack(
     events.push({ tick: startTick + durationTick, order: 1, data: [0x80 | midiChannel, clampMidi(content.pitch), 0] });
   };
 
-  if (context && context.scope === 'pattern') {
+  if (!audible) {
+    // A muted or solo-silenced channel writes no note events. The rest of the
+    // track (name, and the tempo/time-signature map on track 0) is kept so a
+    // reader cannot lose the channel map or mistake the silence for a missing
+    // part; the audio it replaces is silent for the same predicate.
+  } else if (context && context.scope === 'pattern') {
     // Pattern Mode: the loop is the declared pattern length and it wraps for as
     // long as the window lasts, so the MIDI matches a Pattern Loop WAV render.
     const loopLength = Math.max(1, Math.round(context.patternLoopSteps));
@@ -289,7 +329,7 @@ function buildMidiTrack(
 export function buildStandardMidiFile(
   channels: Channel[],
   clips: PlaylistClip[],
-  meta: Pick<ProjectMetadata, 'bpm' | 'timeSignature'>,
+  meta: MidiExportMeta,
   options: MidiExportOptions = {},
 ): Blob {
   const scope: ExportScope = options.scope === 'pattern' ? 'pattern' : 'song';
@@ -303,7 +343,11 @@ export function buildStandardMidiFile(
     laneMutes: derivePlaylistLaneMutes(options.playlistTracks),
   };
 
-  const tracks = channels.map((channel, index) => buildMidiTrack(channel, index, clips, meta, context));
+  // Phase 68 F3: one audibility contract for the whole application. The live
+  // scheduler and the offline/stem renderer gate on `isRackChannelAudible`, so
+  // the file is written from the same predicate instead of a MIDI-only rule.
+  const tracks = channels.map((channel, index) =>
+    buildMidiTrack(channel, index, clips, meta, context, isRackChannelAudible(channel, channels)));
   if (tracks.length === 0) {
     tracks.push(buildMidiTrack({ id: 'empty', name: 'Apex Studio', notes: [] } as Channel, 0, [], meta, context));
   }

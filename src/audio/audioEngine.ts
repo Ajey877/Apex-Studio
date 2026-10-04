@@ -42,7 +42,8 @@ import {
   mixerVolumeFromNormalized,
   panFromNormalized,
   pitchFromNormalized,
-  swingOffsetSecondsForStep
+  swingOffsetSecondsForStep,
+  arpStrumSecondsForVoice
 } from './parameterScaling';
 import { isRackChannelAudible } from './midiMappingRuntime';
 import { derivePlaylistLaneMutes, isClipLaneMuted } from './playlistLaneMutes';
@@ -1524,6 +1525,16 @@ class AudioEngine {
     return pattern;
   }
 
+  /**
+   * Schedules the channel's arpeggiator voices for one incoming note.
+   *
+   * Phase 68 F1: the modal's "Strum Micro-Delay" (`ArpSettings.strumMs`, a
+   * declared 0–50 ms) is applied here as a per-voice micro-delay on top of the
+   * rate grid — voice 0 never moves, so a zero delay is byte-identical to the
+   * historic schedule, and every later voice rolls behind it. Live playback and
+   * the offline renderer both reach this method through `playNote`, so the take
+   * and the bounce keep sharing one arpeggiator.
+   */
   public playArpSequence(channel: Channel, rootNote: Note, startTime: number, bpm: number) {
     if (this.shouldBlockLiveMutation()) return;
     const arp = channel.arp;
@@ -1561,7 +1572,10 @@ class AudioEngine {
       let pIdx = 0;
       euc.forEach((hit, idx) => {
         if (hit) {
-          const t = startTime + (idx * stepDuration);
+          // The Strum Micro-Delay rolls every voice of the sequence: voice 0
+          // stays on the grid and each later voice follows by `arp.strumMs`.
+          const voiceIndex = pIdx;
+          const t = startTime + (idx * stepDuration) + arpStrumSecondsForVoice(arp.strumMs, voiceIndex);
           const p = pitches[pIdx % pitches.length];
           pIdx++;
           this.playSingleVoice(channel, {
@@ -1577,7 +1591,7 @@ class AudioEngine {
     const totalSteps = Math.min(16, sequence.length * 2);
     for (let i = 0; i < totalSteps; i++) {
       const pitch = sequence[i % sequence.length];
-      const t = startTime + (i * stepDuration);
+      const t = startTime + (i * stepDuration) + arpStrumSecondsForVoice(arp.strumMs, i);
       this.playSingleVoice(channel, {
         ...rootNote,
         pitch,
