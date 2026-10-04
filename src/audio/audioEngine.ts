@@ -34,15 +34,18 @@ import { renderGrandPianoVoice, renderRhodesVoice, renderOrganVoice, renderPluck
 import { renderAcid303Voice, renderReeseBassVoice, render808SubVoice, renderSupersawVoice, renderAmbientPadVoice, renderVoxChoirVoice, renderChiptuneVoice } from './instruments/legacySynth';
 import {
   channelVolumeFromNormalized,
+  clampProjectSwing,
   filterCutoffFromNormalized,
   filterResonanceFromNormalized,
   fxMixFromNormalized,
   masterOutputGainFromNormalized,
   mixerVolumeFromNormalized,
   panFromNormalized,
-  pitchFromNormalized
+  pitchFromNormalized,
+  swingOffsetSecondsForStep
 } from './parameterScaling';
 import { isRackChannelAudible } from './midiMappingRuntime';
+import { derivePlaylistLaneMutes, isClipLaneMuted } from './playlistLaneMutes';
 
 export { isRackChannelAudible };
 
@@ -114,6 +117,12 @@ export interface MixerChannel {
   analyser: AnalyserNode;
   fxNodes: AudioNode[];
   sidechain?: SidechainSettings;
+  /**
+   * Phase 64 — the post-fader metering tap, declared so `MixerRoutingAdapter`
+   * can re-attach it after a routing rebuild clears the output's edges.
+   * `analyser` is the tap; it is never part of the audible signal path.
+   */
+  meterTap?: AudioNode;
 }
 
 export interface ChannelPannerEntry {
@@ -682,6 +691,7 @@ class AudioEngine {
       panner,
       analyser,
       fxNodes: [] as AudioNode[],
+      meterTap: analyser,
     };
 
     this.mixerChannels.set(trackId, channelObj);
@@ -1187,7 +1197,13 @@ class AudioEngine {
   }
 
   // Instrument sound triggers
-  public playNote(channel: Channel, note: Note, startTime?: number, bpm: number = 120) {
+  public playNote(
+    channel: Channel,
+    note: Note,
+    startTime?: number,
+    bpm: number = 120,
+    midiChannel?: number,
+  ) {
     if (this.shouldBlockLiveMutation()) return;
     if (!this.ctx) this.init();
     const ctx = this.ctx!;
@@ -1199,10 +1215,10 @@ class AudioEngine {
       return;
     }
 
-    this.playSingleVoice(channel, note, time);
+    this.playSingleVoice(channel, note, time, midiChannel);
   }
 
-  public playSingleVoice(channel: Channel, note: Note, time: number) {
+  public playSingleVoice(channel: Channel, note: Note, time: number, midiChannel?: number) {
     if (this.shouldBlockLiveMutation() || !this.ctx) return;
     if (channel.mute) return;
     if (
@@ -1214,7 +1230,9 @@ class AudioEngine {
     }
 
     const mixerChannel = this.getOrCreateMixerChannel(channel.mixerTrackId);
-    const voiceId = `${channel.id}-${note.pitch}-${Math.random()}`;
+    const voiceId = midiChannel === undefined
+      ? `${channel.id}-${note.pitch}-${Math.random()}`
+      : `${channel.id}-${note.pitch}-midi-${midiChannel}-${Math.random()}`;
 
     // Trigger Dynamic Sidechain Ducking on receiving tracks
     this.triggerSidechainDucking(channel.mixerTrackId, time);
@@ -1827,11 +1845,13 @@ class AudioEngine {
     }
   }
 
-  public stopChannelNote(channelId: string, pitch: number): number {
+  public stopChannelNote(channelId: string, pitch: number, midiChannel?: number): number {
     if (this.shouldBlockLiveMutation()) return 0;
     if (!Number.isFinite(pitch)) return 0;
     const normalizedPitch = Math.round(pitch);
-    const prefix = `${channelId}-${normalizedPitch}-`;
+    const prefix = midiChannel === undefined
+      ? `${channelId}-${normalizedPitch}-`
+      : `${channelId}-${normalizedPitch}-midi-${midiChannel}-`;
     let stopped = 0;
     for (const voiceId of Array.from(this.activeVoices.keys())) {
       if (voiceId.startsWith(prefix)) {
@@ -2362,7 +2382,11 @@ class AudioEngine {
         for (let globalStep = 0; globalStep < totalSteps; globalStep += 1) {
           this.currentStep = globalStep % patternLoopSteps;
           this.currentBar = Math.floor(globalStep / 16) + 1;
-          const swingOffsetSeconds = this.currentStep % 2 === 1 ? (this.swing / 100) * (secondsPerStep * 0.4) : 0;
+          // Same groove conversion the live scheduler uses, so an offline export
+          // swings exactly as much as the take the user monitored.
+          const swingOffsetSeconds = this.currentStep % 2 === 1
+            ? swingOffsetSecondsForStep(this.swing, secondsPerStep)
+            : 0;
           const audioTime = globalStep * secondsPerStep + swingOffsetSeconds;
           if (audioTime >= totalDurationSeconds) break;
           this.withOfflineRenderOperation(() => this.triggerCurrentStep(audioTime));
@@ -2693,6 +2717,12 @@ class AudioEngine {
 
   // --- Transport & Sequencer Loop ---
   private bpm: number = 128;
+  /**
+   * Project swing as the project document stores it: a 0..0.5 fraction where
+   * 0.5 is the Channel Rack's "100 %". It is never converted to a 0..100 scale —
+   * `swingOffsetSecondsForStep` owns the conversion so the live scheduler and
+   * the offline renderer cannot disagree about the unit.
+   */
   private swing: number = 0;
   private metronome: boolean = false;
   private isPlaying: boolean = false;
@@ -2720,9 +2750,15 @@ class AudioEngine {
     }
   }
 
+  /**
+   * Accepts `ProjectMetadata.swing` (the 0..0.5 project fraction) unchanged.
+   *
+   * The transport does not need to be rebuilt: both scheduler offsets read this
+   * value every step, so a swing edit is audible on the next step.
+   */
   public setSwing(swing: number) {
     if (this.shouldBlockLiveMutation()) return;
-    this.swing = Math.max(0, Math.min(100, swing));
+    this.swing = clampProjectSwing(swing);
   }
 
   public setMetronome(enabled: boolean) {
@@ -3163,7 +3199,7 @@ class AudioEngine {
         const secondsPerBeat = 60 / this.bpm;
         const secondsPerStep = secondsPerBeat / 4;
         const swingOffsetSeconds = step % 2 === 1
-          ? (this.swing / 100) * (secondsPerStep * 0.4)
+          ? swingOffsetSecondsForStep(this.swing, secondsPerStep)
           : 0;
 
         this.triggerCurrentStep(audioTime + swingOffsetSeconds);
@@ -3310,12 +3346,7 @@ class AudioEngine {
    * missing from the collection are never muted.
    */
   private derivePlaylistLaneMutes(tracks?: PlaylistTrack[]): Set<number> {
-    const mutes = new Set<number>();
-    if (!Array.isArray(tracks)) return mutes;
-    tracks.forEach((track, index) => {
-      if (track && track.mute === true) mutes.add(index);
-    });
-    return mutes;
+    return derivePlaylistLaneMutes(tracks);
   }
 
   /**
@@ -3325,9 +3356,7 @@ class AudioEngine {
    * the same insert.
    */
   private isPlaylistLaneMuted(clip: PlaylistClip): boolean {
-    if (this.playlistLaneMutes.size === 0) return false;
-    if (!Number.isFinite(clip.trackIndex)) return false;
-    return this.playlistLaneMutes.has(Math.floor(clip.trackIndex));
+    return isClipLaneMuted(clip, this.playlistLaneMutes);
   }
 
   /** Silences one lane immediately: cancels that lane's in-flight clip audio only. */
@@ -3726,11 +3755,20 @@ class AudioEngine {
    * the transport tempo, which App keeps in sync with `meta.bpm`. The rendered
    * length is returned so callers can derive `PlaylistClip.lengthBars` from the
    * audio that was actually produced instead of a fixed number.
+   *
+   * Phase 64 — optional mixer pass-through. Bouncing a playlist lane used to be
+   * dry: the insert FX, the strip fader and the bus routing the user monitored
+   * were bypassed, so the bounced clip did not sound like the lane it replaced.
+   * Callers that want the monitored mix pass the project's `mixerTracks` (and
+   * opt into FX with `includeMixerFx`, the same default-on/opt-in switch the WAV
+   * export uses). Omitting the options keeps the historical dry contract for
+   * internal callers that render a bare channel.
    */
   public async bounceChannelToAudioClip(
     channel: Channel,
     bpm: number,
-    minBars: number = 1
+    minBars: number = 1,
+    options: { mixerTracks?: MixerTrack[]; includeMixerFx?: boolean } = {}
   ): Promise<{ buffer: AudioBuffer; waveform: number[]; lengthBars: number; bpm: number }> {
     const STEPS_PER_BAR = 16;
     const requestedBpm = Number.isFinite(bpm) && bpm > 0 ? bpm : this.bpm;
@@ -3761,11 +3799,11 @@ class AudioEngine {
     const renderedBuffer = await this.renderTimelineOffline(
       [bounceChannel],
       [],
-      [],
+      Array.isArray(options.mixerTracks) ? options.mixerTracks : [],
       safeBpm,
       lengthBars,
       sampleRate,
-      false,
+      options.includeMixerFx === true,
       'pattern',
       undefined,
       loopLengthSteps,

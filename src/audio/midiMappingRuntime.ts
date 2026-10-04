@@ -414,8 +414,8 @@ export const isRackChannelAudible = (
 export interface MidiNoteInputRuntimePorts {
   getProjectState(): ProjectState;
   getSelectedChannelId?(): string | null | undefined;
-  playNote(channel: Channel, note: Note, startTime?: number, bpm?: number): void;
-  stopChannelNote(channelId: string, pitch: number): number | void;
+  playNote(channel: Channel, note: Note, startTime?: number, bpm?: number, midiChannel?: number): void;
+  stopChannelNote(channelId: string, pitch: number, midiChannel?: number): number | void;
 }
 
 export type MidiNoteDispatchStatus = 'note_on' | 'note_off' | 'muted' | 'ignored';
@@ -480,7 +480,7 @@ export class MidiNoteInputRuntime {
       }
       if (held) {
         this.heldNotes.delete(matchedKey);
-        this.ports.stopChannelNote(held.channelId, pitch);
+        this.ports.stopChannelNote(held.channelId, pitch, held.midiChannel);
         return {
           status: 'note_off',
           channelId: held.channelId,
@@ -493,7 +493,7 @@ export class MidiNoteInputRuntime {
       const selectedId = this.ports.getSelectedChannelId?.() ?? state.selectedChannelId;
       const fallbackChannel = state.channels.find(c => c.id === selectedId) ?? state.channels[0];
       if (fallbackChannel) {
-        this.ports.stopChannelNote(fallbackChannel.id, pitch);
+        this.ports.stopChannelNote(fallbackChannel.id, pitch, midiChannel);
       }
       return {
         status: 'note_off',
@@ -521,7 +521,7 @@ export class MidiNoteInputRuntime {
 
     const existing = this.heldNotes.get(noteKey);
     if (existing) {
-      this.ports.stopChannelNote(existing.channelId, pitch);
+      this.ports.stopChannelNote(existing.channelId, pitch, existing.midiChannel);
     }
 
     const velocity = Math.max(1 / 127, clampNormalized(event.velocity ?? 0.8));
@@ -542,6 +542,7 @@ export class MidiNoteInputRuntime {
       },
       undefined,
       state.meta?.bpm ?? 120,
+      midiChannel,
     );
 
     return {
@@ -555,7 +556,7 @@ export class MidiNoteInputRuntime {
 
   releaseAllNotes(): void {
     for (const entry of this.heldNotes.values()) {
-      this.ports.stopChannelNote(entry.channelId, entry.pitch);
+      this.ports.stopChannelNote(entry.channelId, entry.pitch, entry.midiChannel);
     }
     this.heldNotes.clear();
   }

@@ -4,6 +4,7 @@ import { Download, FolderArchive, Sparkles, X } from 'lucide-react';
 import JSZip from 'jszip';
 import { Channel, PlaylistClip, PlaylistTrack, ProjectMetadata, MixerTrack } from '../types/daw';
 import { audioEngine } from '../audio/audioEngine';
+import { formatProjectSwingPercent } from '../audio/parameterScaling';
 import { audioBufferToWav } from '../audio/wavEncoder';
 import { buildStandardMidiFile, getProjectRenderBars } from '../utils/exportUtils';
 import type { ExportScope } from '../utils/exportUtils';
@@ -175,7 +176,15 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, chann
       if (format === 'midi') {
         setStatusText(`Writing Standard MIDI (${renderBars} bars)...`);
         setRenderProgress(60);
-        const midiBlob = buildStandardMidiFile(channels, clips, meta);
+        // Phase 64: the MIDI file is written for the same window and the same
+        // audibility rules as the WAV/stem renderer, so the scope the user
+        // selected, the declared pattern length and the muted lanes all apply.
+        const midiBlob = buildStandardMidiFile(channels, clips, meta, {
+          scope,
+          patternLengthSteps,
+          totalBars,
+          playlistTracks,
+        });
         setDownloadUrl(URL.createObjectURL(midiBlob));
         setRenderProgress(100);
         setStatusText('Standard MIDI export complete.');
@@ -208,7 +217,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, chann
             `AUTHOR: ${meta.author || 'Studio Producer'}`,
             `TEMPO / BPM: ${meta.bpm}`,
             `TIME SIGNATURE: ${meta.timeSignature?.join('/') ?? '4/4'}`,
-            `SWING: ${meta.swing}`,
+            `SWING: ${formatProjectSwingPercent(meta.swing)}`,
             `TRACKS COUNT: ${channels.length}`,
             `RENDER BARS: ${renderBars}`,
             `EXPORT DATE: ${new Date().toISOString()}`,

@@ -198,10 +198,24 @@ describe('Phase 26: bounce callers remain contract-compatible', () => {
     const end = source.indexOf('const handleAddMarker', start);
     const handler = source.slice(start, end);
 
-    assert.match(handler, /bounceChannelToAudioClip\(channel, bpm, MIN_BOUNCE_BARS\)/);
+    // Phase 64: the call gained an options argument (mixer pass-through) while
+    // keeping the renderer-backed bounce API and the bpm/MIN_BOUNCE_BARS contract.
+    assert.match(handler, /bounceChannelToAudioClip\(\s*channel,\s*bpm,\s*MIN_BOUNCE_BARS,\s*bounceOptions,?\s*\)/);
+    assert.match(handler, /mixerTracks,\s*includeMixerFx:\s*true/);
     assert.match(handler, /const \{ buffer, waveform, lengthBars \}/);
     assert.match(handler, /lengthBars,/);
     assert.match(handler, /audioWaveform: waveform/);
+  });
+
+  it('PlaylistArranger resolves the lane channel before bouncing (Phase 64)', () => {
+    const source = readFileSync(new URL('../components/PlaylistArranger.tsx', import.meta.url), 'utf8');
+    const start = source.indexOf('const handleBounceTrack');
+    const end = source.indexOf('const handleAddMarker', start);
+    const handler = source.slice(start, end);
+
+    assert.match(handler, /resolvePlaylistBounceTarget\(channels, clips, trackIdx\)/);
+    assert.doesNotMatch(handler, /channels\[trackIdx\]/, 'the lane index must never index the channel list');
+    assert.match(handler, /startBar: target\.startBar/, 'the stem is anchored at the lane content');
   });
 
   it('the old standalone renderNoteOffline helper is not referenced by the production source', () => {
