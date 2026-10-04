@@ -1,0 +1,80 @@
+import type { Channel, MixerTrack, PlaylistClip, PlaylistTrack, ProjectState } from '../types/daw';
+import { getSelectedPatternLengthSteps } from './patternLength';
+
+/**
+ * Phase 66 F2: re-publish the authoritative project runtime state to the live
+ * engine after an offline render released its lease.
+ *
+ * An offline timeline render swaps the engine's live graph for the frozen
+ * offline take and fences live callers out (`AudioEngine.renderTimelineOffline`,
+ * Phase 50/51). Everything the user changes while the export runs — tempo, swing,
+ * mixer moves, channel edits, playlist edits — is written to the project document
+ * in React, but the engine calls that would apply it are discarded by the lease,
+ * and the App only publishes those values on a *change*. Without this step the
+ * engine keeps playing the pre-render tempo/swing/mixer while the UI shows the
+ * new ones (`/tmp/probes/p3_lease.ts`).
+ *
+ * The project document is the source of truth, so this is a publication and not
+ * a merge: the engine's settings are set, a running take receives the playback
+ * collections through the same merge path a live edit uses, and a stopped engine
+ * additionally gets the mixer/channel graph state a concrete control owns. It
+ * deliberately does not create graph state that the engine has never built (a
+ * channel with no panner is left alone) — the same rule `App.tsx` follows when it
+ * publishes a stopped engine.
+ */
+export interface LiveEngineResynchronizationPort {
+  setBpm(bpm: number): void;
+  setSwing(swing: number): void;
+  setMetronome(enabled: boolean): void;
+  isPlaybackActive(): boolean;
+  synchronizePlaybackState(update: {
+    channels?: Channel[];
+    clips?: PlaylistClip[];
+    mixerTracks?: MixerTrack[];
+    playlistTracks?: PlaylistTrack[];
+    patternLengthSteps?: number;
+  }): void;
+  updateMixerTrack(track: MixerTrack): void;
+  updateChannel(channel: Channel): void;
+  getChannelPanner(channelId: string): unknown;
+}
+
+export interface LiveEngineResynchronizationOptions {
+  /**
+   * Transport metronome: UI/transport state rather than project data, so the
+   * caller supplies it. It is fenced by the lease like every other live write.
+   */
+  metronome: boolean;
+}
+
+export function resynchronizeLiveEngineFromProjectState(
+  engine: LiveEngineResynchronizationPort,
+  state: ProjectState,
+  options: LiveEngineResynchronizationOptions,
+): void {
+  engine.setBpm(state.meta.bpm);
+  engine.setSwing(state.meta.swing);
+  engine.setMetronome(options.metronome);
+
+  // A take the renderer resumed is a running take: project edits belong in it via
+  // the same merge path a live edit uses, so in-flight automation values survive
+  // until their next automation event. This is a no-op when nothing is playing.
+  engine.synchronizePlaybackState({
+    channels: state.channels,
+    clips: state.playlistClips,
+    mixerTracks: state.mixerTracks,
+    playlistTracks: state.playlistTracks,
+    patternLengthSteps: getSelectedPatternLengthSteps(state),
+  });
+
+  if (engine.isPlaybackActive()) return;
+
+  for (const track of state.mixerTracks) {
+    engine.updateMixerTrack(track);
+  }
+  for (const channel of state.channels) {
+    if (engine.getChannelPanner(channel.id)) {
+      engine.updateChannel(channel);
+    }
+  }
+}

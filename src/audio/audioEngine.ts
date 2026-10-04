@@ -325,9 +325,30 @@ export function resolvePatternLoopLengthSteps(
   return loopLengthSteps;
 }
 
+/**
+ * Fractional `Note.start` onsets are real project data: Piano Roll chord
+ * stamping writes a per-note strum offset in fractional steps, "Strum Chords"
+ * writes `step + idx * 0.04`, and MIDI import quantises to quarter steps. The
+ * scheduler fires one event per step boundary, so an onset belongs to the
+ * boundary at or before it and its fractional remainder is a displacement from
+ * that boundary — `4.25` sounds a quarter of a step after the step-4 boundary.
+ *
+ * Returns the displacement in steps for an onset that belongs to `currentStep`,
+ * or `null` when the onset does not belong to this step at all (it is earlier,
+ * later, or unusable). Integer onsets therefore resolve to a displacement of
+ * exactly `0`, which keeps their historic timing byte-identical, and an onset
+ * can only ever belong to one step, so it cannot be triggered twice.
+ */
+export function noteOnsetOffsetSteps(start: unknown, currentStep: number): number | null {
+  if (typeof start !== 'number' || !Number.isFinite(start) || start < 0) return null;
+  const offsetSteps = start - currentStep;
+  return offsetSteps >= 0 && offsetSteps < 1 ? offsetSteps : null;
+}
+
 class AudioEngine {
   public isOfflineRendering = false;
   private offlineRenderLeaseHeld = false;
+  private offlineRenderCompleteCallback: (() => void) | null = null;
   private offlineRenderOperationDepth = 0;
   private liveSampleBuffersDuringOfflineRender: Map<string, AudioBuffer> | null = null;
   private liveProjectSampleBufferIdsDuringOfflineRender: Set<string> | null = null;
@@ -439,6 +460,35 @@ class AudioEngine {
   /** True while a timeline render owns the shared engine's mutable audio state. */
   public isOfflineRenderLeaseHeld(): boolean {
     return this.offlineRenderLeaseHeld;
+  }
+
+  /**
+   * Registers the callback invoked once an offline timeline render has released
+   * the render lease — on success and on failure, after the live graph and a
+   * previously running take have been restored.
+   *
+   * The lease deliberately discards every live mutation issued while the offline
+   * graph owns the engine (Phase 50/51): a live write must never reach the frozen
+   * take. The other half of that contract is the owner's: whatever the user
+   * changed in the project document while the export ran has to be re-published
+   * to the live engine when the lease ends, otherwise playback keeps the
+   * pre-render tempo/swing/mixer while the UI shows the new values. The engine
+   * cannot re-publish project state itself, so it reports the release and the
+   * project document's owner answers with the authoritative state.
+   */
+  public setOfflineRenderCompleteCallback(callback: (() => void) | null): void {
+    this.offlineRenderCompleteCallback = callback;
+  }
+
+  private notifyOfflineRenderComplete(): void {
+    const callback = this.offlineRenderCompleteCallback;
+    if (!callback) return;
+    try {
+      callback();
+    } catch (error) {
+      // A failed re-publication must not turn a finished export into a failure.
+      console.error('[Apex Studio] Offline render completion handler failed', error);
+    }
   }
 
   /** Renderer-owned graph work is allowed; live callers remain fenced out. */
@@ -2446,7 +2496,14 @@ class AudioEngine {
       }
     } finally {
       this.offlineRenderLeaseHeld = false;
-      if (transportToResume) transportToResume.start();
+      try {
+        if (transportToResume) transportToResume.start();
+      } finally {
+        // The live engine is back and a resumed take is running again: this is
+        // the moment the project document re-publishes itself, so a change made
+        // during the render cannot be left behind on the offline side.
+        this.notifyOfflineRenderComplete();
+      }
     }
   }
 
@@ -3488,6 +3545,13 @@ class AudioEngine {
   private triggerCurrentStep(audioTime?: number) {
     if (!this.ctx) return;
     const now = audioTime ?? this.ctx.currentTime;
+    // `now` is the already (possibly swung) step boundary the transport reported
+    // for this step. A fractional `Note.start` keeps its sub-step remainder as a
+    // displacement from that boundary; integer onsets resolve to 0 and keep their
+    // exact historic timing. Live playback and the offline renderer share this
+    // method, so an export cannot place a note anywhere the take did not.
+    const safeBpm = Number.isFinite(this.bpm) && this.bpm > 0 ? this.bpm : 120;
+    const secondsPerStep = (60 / safeBpm) / 4;
 
     // Metronome on quarter notes (steps 0, 4, 8, 12)
     if (this.metronome && this.currentStep % 4 === 0) {
@@ -3532,8 +3596,9 @@ class AudioEngine {
         // 2. Piano roll notes starting on this step
         if (channel.notes) {
           channel.notes.forEach(note => {
-            if (note.start === this.currentStep) {
-              this.playNote(channel, note, now);
+            const offsetSteps = noteOnsetOffsetSteps(note.start, this.currentStep);
+            if (offsetSteps !== null) {
+              this.playNote(channel, note, now + offsetSteps * secondsPerStep);
             }
           });
         }
@@ -3579,8 +3644,9 @@ class AudioEngine {
               }
               if (channel.notes) {
                 channel.notes.forEach(note => {
-                  if (note.start === relStep) {
-                    this.playNote(channel, note, now);
+                  const offsetSteps = noteOnsetOffsetSteps(note.start, relStep);
+                  if (offsetSteps !== null) {
+                    this.playNote(channel, note, now + offsetSteps * secondsPerStep);
                   }
                 });
               }

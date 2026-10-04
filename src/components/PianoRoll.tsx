@@ -26,6 +26,7 @@ import {
 import { Channel, Note, MusicalScale, ChordStampType } from '../types/daw';
 import { audioEngine } from '../audio/audioEngine';
 import { MidiParser } from '../utils/midiParser';
+import { planMidiImport } from './pianoRollMidiImport';
 import { normalizePatternLengthSteps } from '../state/patternLength';
 import {
   DEFAULT_GRID_STEPS,
@@ -115,6 +116,21 @@ interface PianoRollProps {
    * narrower than the pattern being edited.
    */
   patternLengthSteps?: number;
+  /**
+   * `ProjectMetadata.bpm` — the project document's authoritative tempo. The MIDI
+   * export writes it into the file so this channel's export and the project
+   * export dialog describe the same tempo. There is no default: a second tempo
+   * source is exactly the defect this prop removes.
+   */
+  bpm: number;
+  /**
+   * Phase 66 F3-B: creates a channel for an additional note-bearing track of an
+   * imported MIDI file and returns its id. The channel is created through the
+   * app's own project-state path (allocated mixer insert, persisted with its
+   * notes). It is required, not optional: an import must never silently fall back
+   * to folding other tracks into the edited channel.
+   */
+  onCreateChannelFromMidiImport: (name: string, notes: Note[]) => string;
 }
 
 /**
@@ -185,6 +201,14 @@ const CHORD_STAMPS = [
   { name: 'Power Chord 5th', offsets: [0, 7, 12] }
 ];
 
+/**
+ * Phase 66 F3-A: the one place the Piano Roll's MIDI export is written. It takes
+ * the project document's tempo — never a constant — so the per-channel export
+ * and the project export dialog cannot state different tempos for one project.
+ */
+export const buildPianoRollMidiExport = (notes: Note[], bpm: number, trackName: string): Blob =>
+  MidiParser.exportNotesToMidi(notes, bpm, trackName);
+
 export const PianoRoll: React.FC<PianoRollProps> = ({
   channel,
   allChannels,
@@ -192,7 +216,9 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
   onUpdateChannel,
   currentStep,
   isPlaying,
-  patternLengthSteps
+  patternLengthSteps,
+  bpm,
+  onCreateChannelFromMidiImport
 }) => {
   const [currentTool, setCurrentTool] = useState<ToolType>('select');
   const [rootKey, setRootKey] = useState<number>(0); // C
@@ -1008,7 +1034,7 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
       setTimeout(() => setStatusMessage(null), 3000);
       return;
     }
-    const blob = MidiParser.exportNotesToMidi(notes, 130, channel.name);
+    const blob = buildPianoRollMidiExport(notes, bpm, channel.name);
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
@@ -1026,23 +1052,39 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
     if (!file) return;
     try {
       const parsedTracks = await MidiParser.parseMidiFile(file);
-      if (parsedTracks.length === 0 || parsedTracks[0].notes.length === 0) {
+      // A Format-1 file holds one track per part: the first note-bearing track
+      // belongs to the channel being edited, the rest become channels of their
+      // own. Nothing is merged and nothing is dropped without saying so.
+      const plan = planMidiImport(parsedTracks);
+      if (plan.destinations.length === 0) {
         setStatusMessage('No note events found in MIDI file.');
         setTimeout(() => setStatusMessage(null), 3000);
         return;
       }
 
-      const importedNotes: Note[] = parsedTracks[0].notes.map((pn, idx) => ({
-        id: `midi-imp-${Date.now()}-${idx}`,
-        pitch: pn.pitch,
-        start: pn.startStep,
-        duration: pn.durationSteps,
-        velocity: pn.velocity
-      }));
+      let importedNoteCount = 0;
+      let createdChannelCount = 0;
+      for (const destination of plan.destinations) {
+        importedNoteCount += destination.notes.length;
+        if (destination.kind === 'current') {
+          onUpdateChannel(channel.id, { notes: [...notes, ...destination.notes] });
+        } else {
+          onCreateChannelFromMidiImport(destination.name, destination.notes);
+          createdChannelCount += 1;
+        }
+      }
 
-      onUpdateChannel(channel.id, { notes: [...notes, ...importedNotes] });
-      setStatusMessage(`Imported ${importedNotes.length} notes from ${file.name}!`);
-      setTimeout(() => setStatusMessage(null), 3000);
+      const trackCount = plan.destinations.length;
+      const channelSummary = createdChannelCount > 0
+        ? ` into ${createdChannelCount} new channel${createdChannelCount === 1 ? '' : 's'}`
+        : '';
+      const skippedSummary = plan.skippedEmptyTrackNames.length > 0
+        ? ` ${plan.skippedEmptyTrackNames.length} empty track${plan.skippedEmptyTrackNames.length === 1 ? '' : 's'} skipped.`
+        : '';
+      setStatusMessage(
+        `Imported ${importedNoteCount} notes from ${trackCount} track${trackCount === 1 ? '' : 's'}${channelSummary} of ${file.name}!${skippedSummary}`
+      );
+      setTimeout(() => setStatusMessage(null), 4000);
     } catch (err: any) {
       console.error(err);
       setStatusMessage('Failed to parse MIDI file.');

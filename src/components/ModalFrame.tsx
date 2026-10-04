@@ -192,20 +192,35 @@ export interface ModalFrameProps {
   labelledBy: string;
   /** The modal's existing onClose wiring. */
   onClose: () => void;
+  /**
+   * Whether the frame may be dismissed right now (Escape). Defaults to true.
+   *
+   * A modal that owns a long-running operation — the export dialog while a render
+   * holds the engine's render lease — sets this to false so Escape cannot discard
+   * work that is still in flight. Dismissal is then refused instead of silently
+   * accepted: the dialog (and the finished export) can only be closed once the
+   * operation finished.
+   */
+  dismissible?: boolean;
   /** The modal's existing overlay classes, preserved verbatim. */
   className?: string;
   /** The modal's existing panel markup — stays the direct child div. */
   children?: React.ReactNode;
 }
 
-export const ModalFrame: React.FC<ModalFrameProps> = ({ id, labelledBy, onClose, className, children }) => {
+export const ModalFrame: React.FC<ModalFrameProps> = ({ id, labelledBy, onClose, dismissible = true, className, children }) => {
   const overlayRef = useRef<HTMLDivElement | null>(null);
   const openerRef = useRef<DialogOpener | null>(null);
   const onCloseRef = useRef(onClose);
+  const dismissibleRef = useRef(dismissible);
 
   useEffect(() => {
     onCloseRef.current = onClose;
   }, [onClose]);
+
+  useEffect(() => {
+    dismissibleRef.current = dismissible;
+  }, [dismissible]);
 
   // Mount: register the id, capture the opener, move focus into the dialog.
   // Unmount: unregister the id, restore focus to the opener.
@@ -244,6 +259,10 @@ export const ModalFrame: React.FC<ModalFrameProps> = ({ id, labelledBy, onClose,
   }, []);
 
   const handleKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    // A modal that owns work still in flight refuses the dismissal instead of
+    // accepting it: nothing is consumed, the shell's global hotkeys stay inert
+    // while the dialog is mounted, and the close wiring never runs.
+    if (!dismissibleRef.current) return;
     handleDialogEscapeKey(event, onCloseRef.current);
   };
 
