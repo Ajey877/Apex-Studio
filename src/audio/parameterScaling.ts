@@ -86,6 +86,26 @@ export const swingOffsetSecondsForStep = (
   return normalized * SWING_MAX_STEP_FRACTION * secondsPerStep;
 };
 
+/** The Arpeggiator's "Strum Micro-Delay" range in milliseconds, as the modal slider declares it. */
+export const ARP_STRUM_MS_MAX = 50;
+
+/**
+ * Seconds voice `voiceIndex` of an arpeggio is delayed by the Strum Micro-Delay.
+ *
+ * Voice 0 is never delayed, which keeps `strumMs = 0` schedules — and the first
+ * voice of every sequence at any setting — exactly where they were before the
+ * control had a reader. The value is sanitised here rather than at each call
+ * site: a negative or non-finite delay is silent and a value beyond the slider's
+ * declared 0–50 ms range saturates, so a hand-edited project file cannot push
+ * voices arbitrarily far into the future.
+ */
+export const arpStrumSecondsForVoice = (strumMs: unknown, voiceIndex: number): number => {
+  if (typeof strumMs !== 'number' || !Number.isFinite(strumMs)) return 0;
+  if (!Number.isFinite(voiceIndex) || voiceIndex <= 0) return 0;
+  const clamped = Math.max(0, Math.min(ARP_STRUM_MS_MAX, strumMs));
+  return (Math.floor(voiceIndex) * clamped) / 1000;
+};
+
 /**
  * Human-readable project swing, in the unit the Channel Rack slider shows
  * (`Math.round(swing * 200)%`). Exported metadata files must not print the raw
