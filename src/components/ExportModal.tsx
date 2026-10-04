@@ -4,6 +4,7 @@ import { Download, FolderArchive, Sparkles, X } from 'lucide-react';
 import JSZip from 'jszip';
 import { Channel, PlaylistClip, PlaylistTrack, ProjectMetadata, MixerTrack } from '../types/daw';
 import { audioEngine } from '../audio/audioEngine';
+import { formatProjectSwingPercent } from '../audio/parameterScaling';
 import { audioBufferToWav } from '../audio/wavEncoder';
 import { buildStandardMidiFile, getProjectRenderBars } from '../utils/exportUtils';
 import type { ExportScope } from '../utils/exportUtils';
@@ -216,7 +217,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, chann
             `AUTHOR: ${meta.author || 'Studio Producer'}`,
             `TEMPO / BPM: ${meta.bpm}`,
             `TIME SIGNATURE: ${meta.timeSignature?.join('/') ?? '4/4'}`,
-            `SWING: ${meta.swing}`,
+            `SWING: ${formatProjectSwingPercent(meta.swing)}`,
             `TRACKS COUNT: ${channels.length}`,
             `RENDER BARS: ${renderBars}`,
             `EXPORT DATE: ${new Date().toISOString()}`,

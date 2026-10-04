@@ -86,6 +86,15 @@ export const swingOffsetSecondsForStep = (
   return normalized * SWING_MAX_STEP_FRACTION * secondsPerStep;
 };
 
+/**
+ * Human-readable project swing, in the unit the Channel Rack slider shows
+ * (`Math.round(swing * 200)%`). Exported metadata files must not print the raw
+ * fraction next to the slider's percentage, or the same value reads as two
+ * different settings in the same session.
+ */
+export const formatProjectSwingPercent = (projectSwing: unknown): string =>
+  `${Math.round((clampProjectSwing(projectSwing) / SWING_PROJECT_FULL_SCALE) * 100)}%`;
+
 /** Channel pitch: normalized 0..1 maps onto the ±12 semitone model range. */
 export const PITCH_RANGE_SEMITONES = 12;
 

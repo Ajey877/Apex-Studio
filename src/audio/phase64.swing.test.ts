@@ -19,7 +19,7 @@
 import { afterEach, beforeEach, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { audioEngine } from './audioEngine';
-import { swingOffsetSecondsForStep } from './parameterScaling';
+import { formatProjectSwingPercent, swingOffsetSecondsForStep } from './parameterScaling';
 import type { Channel, MixerTrack, PlaylistClip } from '../types/daw';
 
 const SAMPLE_RATE = 8000;
@@ -365,5 +365,21 @@ describe('Phase 64 F1 — one shared swing conversion', () => {
       0.4 * SECONDS_PER_STEP,
     );
     assert.equal(swingOffsetSecondsForStep(Number.NaN, SECONDS_PER_STEP), 0);
+  });
+});
+
+describe('Phase 64 F1 — the export readout speaks the same unit as the Channel Rack', () => {
+  it('renders the project swing fraction as the slider percentage', () => {
+    // `project_info.txt` used to print the raw fraction ("SWING: 0.25") while the
+    // Channel Rack showed "50%" for the same value.
+    assert.equal(formatProjectSwingPercent(0), '0%');
+    assert.equal(formatProjectSwingPercent(0.25), '50%');
+    assert.equal(formatProjectSwingPercent(PROJECT_SWING_MAX), '100%');
+  });
+
+  it('sanitises the same values the scheduler sanitises', () => {
+    assert.equal(formatProjectSwingPercent(Number.NaN), '0%');
+    assert.equal(formatProjectSwingPercent(-1), '0%');
+    assert.equal(formatProjectSwingPercent(50), '100%');
   });
 });
