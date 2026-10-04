@@ -115,6 +115,13 @@ interface PianoRollProps {
    * narrower than the pattern being edited.
    */
   patternLengthSteps?: number;
+  /**
+   * `ProjectMetadata.bpm` — the project document's authoritative tempo. The MIDI
+   * export writes it into the file so this channel's export and the project
+   * export dialog describe the same tempo. There is no default: a second tempo
+   * source is exactly the defect this prop removes.
+   */
+  bpm: number;
 }
 
 /**
@@ -185,6 +192,13 @@ const CHORD_STAMPS = [
   { name: 'Power Chord 5th', offsets: [0, 7, 12] }
 ];
 
+/**
+ * Phase 66 F3-A: the one place the Piano Roll's MIDI export is written. It takes
+ * the project document's tempo — never a constant — so the per-channel export
+ * and the project export dialog cannot state different tempos for one project.
+ */
+export const buildPianoRollMidiExport = (notes: Note[], bpm: number, trackName: string): Blob =>
+  MidiParser.exportNotesToMidi(notes, bpm, trackName);
 export const PianoRoll: React.FC<PianoRollProps> = ({
   channel,
   allChannels,
@@ -192,7 +206,8 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
   onUpdateChannel,
   currentStep,
   isPlaying,
-  patternLengthSteps
+  patternLengthSteps,
+  bpm,
 }) => {
   const [currentTool, setCurrentTool] = useState<ToolType>('select');
   const [rootKey, setRootKey] = useState<number>(0); // C
@@ -1008,7 +1023,7 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
       setTimeout(() => setStatusMessage(null), 3000);
       return;
     }
-    const blob = MidiParser.exportNotesToMidi(notes, 130, channel.name);
+    const blob = buildPianoRollMidiExport(notes, bpm, channel.name);
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;

@@ -1785,6 +1785,7 @@ export function App() {
               currentStep={currentStep}
               isPlaying={isPlaying}
               patternLengthSteps={selectedPatternLengthSteps}
+              bpm={projectState.meta.bpm}
             />
           )}
 
