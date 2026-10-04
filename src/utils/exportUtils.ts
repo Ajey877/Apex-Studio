@@ -120,12 +120,29 @@ interface ChannelContentStep {
 }
 
 /**
+ * The step position a note onset is written at, snapped to the file's own tick
+ * resolution (120 ticks per 16th-note step). `Note.start` is a *fractional*
+ * step position for strummed chords (`PianoRoll.tsx`), for "Strum Chords" and
+ * for MIDI import's quarter-step quantiser, and the scheduler plays those onsets
+ * at the fractional position. Rounding the onset to the nearest step here would
+ * move it — a 4.5 onset to step 5 — and make the file disagree with the take.
+ * Snapping to the tick grid keeps one exact value for the loop arithmetic and
+ * the byte writer.
+ */
+const midiOnsetSteps = (start: unknown): number | null => {
+  const value = Number(start);
+  if (!Number.isFinite(value) || value < 0) return null;
+  return Math.round(value * TICKS_PER_STEP) / TICKS_PER_STEP;
+};
+
+/**
  * Positions inside a loop that actually hold content.
  *
  * A step lane entry and a piano-roll note start are both step-indexed, and both
  * are ignored past the resolved loop length — the same rule playback applies, so
  * a `Channel.steps` array that is longer than the declared pattern length does
- * not leak hidden steps into an export.
+ * not leak hidden steps into an export. Sub-step note onsets stay at their own
+ * position instead of being folded onto the step grid.
  */
 const channelContentSteps = (channel: Channel, loopLengthSteps: number): number[] => {
   const positions = new Set<number>();
@@ -136,8 +153,8 @@ const channelContentSteps = (channel: Channel, loopLengthSteps: number): number[
   }
   for (const note of channel.notes ?? []) {
     if (note.muted) continue;
-    const start = Math.round(Number(note.start));
-    if (Number.isFinite(start) && start >= 0 && start < loopLengthSteps) positions.add(start);
+    const start = midiOnsetSteps(note.start);
+    if (start !== null && start < loopLengthSteps) positions.add(start);
   }
   return Array.from(positions).sort((a, b) => a - b);
 };
@@ -155,7 +172,7 @@ const contentEventsAtStep = (channel: Channel, relStep: number): ChannelContentS
   }
   for (const note of channel.notes ?? []) {
     if (note.muted) continue;
-    if (Math.round(Number(note.start)) !== relStep) continue;
+    if (midiOnsetSteps(note.start) !== relStep) continue;
     const duration = Number.isFinite(note.duration) && note.duration > 0 ? note.duration : 1;
     events.push({
       relStep,
@@ -214,7 +231,9 @@ function buildMidiTrack(
    * note-off at the very end of a DAW export.
    */
   const emitAtStep = (absoluteStep: number, content: ChannelContentStep): void => {
-    const startTick = absoluteStep * TICKS_PER_STEP;
+    // A sub-step onset lands on a fractional step position; the file stores it on
+    // the tick grid, which is what `Math.round` resolves for a whole step too.
+    const startTick = Math.round(absoluteStep * TICKS_PER_STEP);
     if (startTick < 0 || startTick >= windowTicks) return;
     const durationTick = Math.max(1, Math.round(Math.max(0.01, content.durationSteps) * TICKS_PER_STEP));
     const velocity = Math.max(1, Math.min(127, Math.round(content.velocity * 127)));
