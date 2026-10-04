@@ -92,16 +92,20 @@ export const CollaborationModal: React.FC<CollaborationModalProps> = ({
             </button>
           </div>
 
-          {/* Active Collaborators Presence List */}
+          {/* Project collaborators stored in the project document.
+              This build has no network sync, so no live presence (online/idle)
+              may be claimed here: only the stored identity and role are shown. */}
           <div className="space-y-2">
             <div className="text-[10px] font-bold uppercase tracking-wider text-[#777]">
-              Online Studio Session ({collaborators.length} Producers)
+              Project Collaborators ({collaborators.length})
             </div>
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-              {collaborators.map((user) => (
-                <div key={user.id} className="flex items-center justify-between p-2.5 bg-[#1a1a1d] rounded-lg border border-[#333336]">
-                  <div className="flex items-center space-x-2">
-                    <div 
+            {collaborators.length === 0 ? (
+              <p className="text-[10px] text-[#666]">No collaborators recorded in this project.</p>
+            ) : (
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                {collaborators.map((user) => (
+                  <div key={user.id} className="flex items-center space-x-2 p-2.5 bg-[#1a1a1d] rounded-lg border border-[#333336]">
+                    <div
                       className="w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold text-black shadow-sm"
                       style={{ backgroundColor: user.color }}
                     >
@@ -112,14 +116,9 @@ export const CollaborationModal: React.FC<CollaborationModalProps> = ({
                       <div className="text-[9px] text-[#777] font-mono">{user.role}</div>
                     </div>
                   </div>
-
-                  <div className="flex items-center space-x-1 text-[9px] font-mono text-[#00ff00]">
-                    <span className="w-2 h-2 rounded-full bg-[#00ff00] animate-pulse" />
-                    <span>{user.status.toUpperCase()}</span>
-                  </div>
-                </div>
-              ))}
-            </div>
+                ))}
+              </div>
+            )}
           </div>
 
           {/* Timeline Bar Comments List */}
@@ -128,38 +127,42 @@ export const CollaborationModal: React.FC<CollaborationModalProps> = ({
               Timeline Mix Feedback & Annotations ({comments.length})
             </div>
 
-            <div className="space-y-2">
-              {comments.map((comment) => (
-                <div
-                  key={comment.id}
-                  className={`p-3 rounded-lg border transition ${
-                    comment.resolved 
-                      ? 'bg-[#121214] border-[#222225] opacity-50' 
-                      : 'bg-[#1a1a1d] border-[#333336]'
-                  }`}
-                >
-                  <div className="flex items-center justify-between text-xs mb-1">
-                    <div className="flex items-center space-x-1.5">
-                      <span className="font-bold text-white">{comment.author}</span>
-                      <span className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-[#121214] text-[#ff6e00] border border-[#333336]">
-                        BAR {comment.barPosition}
-                      </span>
+            {comments.length === 0 ? (
+              <p className="text-[10px] text-[#666]">No studio notes recorded in this project yet.</p>
+            ) : (
+              <div className="space-y-2">
+                {comments.map((comment) => (
+                  <div
+                    key={comment.id}
+                    className={`p-3 rounded-lg border transition ${
+                      comment.resolved 
+                        ? 'bg-[#121214] border-[#222225] opacity-50' 
+                        : 'bg-[#1a1a1d] border-[#333336]'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between text-xs mb-1">
+                      <div className="flex items-center space-x-1.5">
+                        <span className="font-bold text-white">{comment.author}</span>
+                        <span className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-[#121214] text-[#ff6e00] border border-[#333336]">
+                          BAR {comment.barPosition}
+                        </span>
+                      </div>
+                      <button
+                        onClick={() => onToggleResolveComment(comment.id)}
+                        className={`text-[9px] font-bold px-2 py-0.5 rounded transition ${
+                          comment.resolved 
+                            ? 'bg-[#222225] text-[#777]' 
+                            : 'bg-[#00ff00]/20 text-[#00ff00] hover:bg-[#00ff00]/30'
+                        }`}
+                      >
+                        {comment.resolved ? 'RESOLVED' : 'MARK RESOLVED'}
+                      </button>
                     </div>
-                    <button
-                      onClick={() => onToggleResolveComment(comment.id)}
-                      className={`text-[9px] font-bold px-2 py-0.5 rounded transition ${
-                        comment.resolved 
-                          ? 'bg-[#222225] text-[#777]' 
-                          : 'bg-[#00ff00]/20 text-[#00ff00] hover:bg-[#00ff00]/30'
-                      }`}
-                    >
-                      {comment.resolved ? 'RESOLVED' : 'MARK RESOLVED'}
-                    </button>
+                    <p className="text-xs text-[#b0b0b0]">{comment.text}</p>
                   </div>
-                  <p className="text-xs text-[#b0b0b0]">{comment.text}</p>
-                </div>
-              ))}
-            </div>
+                ))}
+              </div>
+            )}
           </div>
 
           {/* Post New Comment */}
