@@ -3590,7 +3590,7 @@ class AudioEngine {
             start: this.currentStep,
             duration: 1,
             velocity: 0.9
-          }, now);
+          }, now, safeBpm);
         }
 
         // 2. Piano roll notes starting on this step
@@ -3598,7 +3598,7 @@ class AudioEngine {
           channel.notes.forEach(note => {
             const offsetSteps = noteOnsetOffsetSteps(note.start, this.currentStep);
             if (offsetSteps !== null) {
-              this.playNote(channel, note, now + offsetSteps * secondsPerStep);
+              this.playNote(channel, note, now + offsetSteps * secondsPerStep, safeBpm);
             }
           });
         }
@@ -3640,13 +3640,13 @@ class AudioEngine {
                   start: relStep,
                   duration: 1,
                   velocity: 0.9
-                }, now);
+                }, now, safeBpm);
               }
               if (channel.notes) {
                 channel.notes.forEach(note => {
                   const offsetSteps = noteOnsetOffsetSteps(note.start, relStep);
                   if (offsetSteps !== null) {
-                    this.playNote(channel, note, now + offsetSteps * secondsPerStep);
+                    this.playNote(channel, note, now + offsetSteps * secondsPerStep, safeBpm);
                   }
                 });
               }
