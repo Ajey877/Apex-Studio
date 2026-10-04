@@ -12,8 +12,6 @@ import {
   FxType, 
   FxSlot, 
   AudioRecording, 
-  CollabComment, 
-  CollabUser,
   ProjectMetadata,
   Pattern,
   MasteringSuiteState
@@ -66,9 +64,11 @@ import { synchronizeBeforeRuntimePublication } from './state/runtimeStatePublica
 import { resynchronizeLiveEngineFromProjectState } from './state/liveEngineResynchronization';
 import {
   ContinuousHistoryBatcher,
+  addCollabCommentInProjectState,
   addFxSlotToProjectState,
   applyRuntimeProjectStateMutation,
   addPatternToProjectState,
+  createLocalCollabComment,
   deleteFxSlotFromProjectState,
   getChannelUpdateLabel,
   getFxUpdateLabel,
@@ -79,6 +79,7 @@ import {
   isContinuousFxUpdate,
   isContinuousMetaUpdate,
   isContinuousMixerUpdate,
+  toggleCollabCommentResolvedInProjectState,
   updateChannelInProjectState,
   updateFxSlotInProjectState,
   updateMacroRackInProjectState,
@@ -274,16 +275,13 @@ export function App() {
     maximizerLookahead: true
   });
 
-  // --- Pro & Collab State ---
-  const [collaborators, setCollaborators] = useState<CollabUser[]>([
-    { id: 'u1', name: 'Alex (You)', color: '#ff6e00', avatar: 'A', role: 'Producer', status: 'editing', lastActive: 'Now' },
-    { id: 'u2', name: 'Maya Beats', color: '#00ff00', avatar: 'M', role: 'Mixing Engineer', status: 'online', lastActive: '1m ago' },
-    { id: 'u3', name: 'Liam Vocal', color: '#00bcd4', avatar: 'L', role: 'Vocalist', status: 'idle', lastActive: '5m ago' }
-  ]);
-  const [comments, setComments] = useState<CollabComment[]>([
-    { id: 'c1', author: 'Maya Beats', avatarColor: '#00ff00', timestamp: Date.now() - 3600000, barPosition: 5, text: 'The 808 sub bass needs a tight sidechain ducking on kick hit.', resolved: false },
-    { id: 'c2', author: 'Liam Vocal', avatarColor: '#00bcd4', timestamp: Date.now() - 7200000, barPosition: 9, text: 'Hook vocal drop starts here at Bar 9.', resolved: true }
-  ]);
+  // --- Collab State ---
+  // Phase 70: studio notes and collaborators are project data. The panel reads
+  // the document directly and edits it through `mutateProjectState`, so a note
+  // survives a reload exactly like every other project edit. No demo people and
+  // no session-local list exist any more.
+  const collaborators = projectState.collaborators;
+  const comments = projectState.comments;
 
   // Project persistence is intentionally hydrated before autosave is enabled.
   useEffect(() => {
@@ -1947,7 +1945,24 @@ export function App() {
         className="hidden"
       />
       <ProjectManagerModal isOpen={isProjectManagerOpen} onClose={() => setIsProjectManagerOpen(false)} currentState={projectState} onLoadProject={handleLoadProjectState} onUpdateMeta={handleUpdateMeta} onRequestManifestImport={() => manifestInputRef.current?.click()} />
-      <CollaborationModal isOpen={isCollabOpen} onClose={() => setIsCollabOpen(false)} comments={comments} collaborators={collaborators} onAddComment={(text, bar) => { const newC: CollabComment = { id: `c-${Date.now()}`, author: 'Alex (You)', avatarColor: '#ff6e00', timestamp: Date.now(), barPosition: bar, text, resolved: false }; setComments(prev => [newC, ...prev]); }} onToggleResolveComment={(id) => setComments(prev => prev.map(c => c.id === id ? { ...c, resolved: !c.resolved } : c))} />
+      <CollaborationModal
+        isOpen={isCollabOpen}
+        onClose={() => setIsCollabOpen(false)}
+        comments={comments}
+        collaborators={collaborators}
+        onAddComment={(text, bar) => {
+          mutateProjectState(
+            state => addCollabCommentInProjectState(state, createLocalCollabComment(text, bar, Date.now())),
+            'Add studio note'
+          );
+        }}
+        onToggleResolveComment={(id) => {
+          mutateProjectState(
+            state => toggleCollabCommentResolvedInProjectState(state, id),
+            'Resolve studio note'
+          );
+        }}
+      />
       <AnalyticsModal isOpen={isAnalyticsOpen} onClose={() => setIsAnalyticsOpen(false)} meta={projectState.meta} channels={projectState.channels} clips={projectState.playlistClips} />
       <HotkeysModal isOpen={isHotkeysOpen} onClose={() => setIsHotkeysOpen(false)} />
       <MidiControllerModal isOpen={isMidiModalOpen} onClose={() => setIsMidiModalOpen(false)} channels={projectState.channels} mixerTracks={projectState.mixerTracks} midiMappings={projectState.midiMappings || []} onUpdateMidiMappings={(mappings) => mutateProjectState(curr => updateMidiMappingsInProjectState(curr, mappings), 'Update MIDI mappings')} activeChannel={selectedChannel} />

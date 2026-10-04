@@ -2,6 +2,7 @@ import { normalizeMixerTrackIdentityIntegrity } from './mixerTrackIdentity';
 import { applyMacroRackUpdate } from './macroMappings';
 import type {
   Channel,
+  CollabComment,
   FxSlot,
   MasterMacroKnob,
   MidiMapping,
@@ -38,6 +39,52 @@ export const updateMixerTrackInProjectState = (
 ): ProjectState => ({
   ...state,
   mixerTracks: state.mixerTracks.map(t => (t.id === trackId ? { ...t, ...updates } : t))
+});
+
+/**
+ * Phase 70 — the collaboration panel's local author label.
+ *
+ * This build has no accounts and no network sync, so a note written here is
+ * authored by the operator of this session. The label is deliberately generic:
+ * the previous "Alex (You)" / "Maya Beats" identities were demo data and were
+ * never part of the project document.
+ */
+export const LOCAL_COLLAB_AUTHOR = 'You';
+export const LOCAL_COLLAB_AUTHOR_COLOR = '#ff6e00';
+
+/** A note about to be stored in the project, stamped with the caller's clock. */
+export const createLocalCollabComment = (
+  text: string,
+  barPosition: number,
+  now: number,
+  id: string = `c-${now}`
+): CollabComment => ({
+  id,
+  author: LOCAL_COLLAB_AUTHOR,
+  avatarColor: LOCAL_COLLAB_AUTHOR_COLOR,
+  timestamp: now,
+  barPosition,
+  text,
+  resolved: false
+});
+
+/** Newest note first, exactly like the panel has always listed them. */
+export const addCollabCommentInProjectState = (
+  state: ProjectState,
+  comment: CollabComment
+): ProjectState => ({
+  ...state,
+  comments: [comment, ...state.comments]
+});
+
+export const toggleCollabCommentResolvedInProjectState = (
+  state: ProjectState,
+  commentId: string
+): ProjectState => ({
+  ...state,
+  comments: state.comments.map(comment =>
+    comment.id === commentId ? { ...comment, resolved: !comment.resolved } : comment
+  )
 });
 
 export const addFxSlotToProjectState = (
