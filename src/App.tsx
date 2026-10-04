@@ -62,6 +62,7 @@ import {
   resolvePlaylistClipPublication
 } from './state/playlistClipIntegrity';
 import { synchronizeBeforeRuntimePublication } from './state/runtimeStatePublication';
+import { resynchronizeLiveEngineFromProjectState } from './state/liveEngineResynchronization';
 import {
   ContinuousHistoryBatcher,
   addFxSlotToProjectState,
@@ -423,6 +424,21 @@ export function App() {
 
   useEffect(() => {
     audioEngine.setMetronome(metronome);
+  }, [metronome]);
+
+  /**
+   * Phase 66 F2: an offline render holds the render lease, which fences live
+   * mutations out of the frozen offline take — including the tempo/swing/mixer
+   * writes made while the Export dialog renders. Those changes are still written
+   * to the project document here, so when the lease is released the engine has to
+   * be re-published from it. Otherwise playback would keep the pre-render tempo
+   * and swing while the UI (and the next save) show the new values.
+   */
+  useEffect(() => {
+    audioEngine.setOfflineRenderCompleteCallback(() => {
+      resynchronizeLiveEngineFromProjectState(audioEngine, projectStateRef.current, { metronome });
+    });
+    return () => audioEngine.setOfflineRenderCompleteCallback(null);
   }, [metronome]);
 
   // Audio-clock transport state drives the UI playhead.

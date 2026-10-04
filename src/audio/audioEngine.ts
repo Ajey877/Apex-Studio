@@ -462,6 +462,35 @@ class AudioEngine {
     return this.offlineRenderLeaseHeld;
   }
 
+  /**
+   * Registers the callback invoked once an offline timeline render has released
+   * the render lease — on success and on failure, after the live graph and a
+   * previously running take have been restored.
+   *
+   * The lease deliberately discards every live mutation issued while the offline
+   * graph owns the engine (Phase 50/51): a live write must never reach the frozen
+   * take. The other half of that contract is the owner's: whatever the user
+   * changed in the project document while the export ran has to be re-published
+   * to the live engine when the lease ends, otherwise playback keeps the
+   * pre-render tempo/swing/mixer while the UI shows the new values. The engine
+   * cannot re-publish project state itself, so it reports the release and the
+   * project document's owner answers with the authoritative state.
+   */
+  public setOfflineRenderCompleteCallback(callback: (() => void) | null): void {
+    this.offlineRenderCompleteCallback = callback;
+  }
+
+  private notifyOfflineRenderComplete(): void {
+    const callback = this.offlineRenderCompleteCallback;
+    if (!callback) return;
+    try {
+      callback();
+    } catch (error) {
+      // A failed re-publication must not turn a finished export into a failure.
+      console.error('[Apex Studio] Offline render completion handler failed', error);
+    }
+  }
+
   /** Renderer-owned graph work is allowed; live callers remain fenced out. */
   private shouldBlockLiveMutation(): boolean {
     return this.offlineRenderLeaseHeld && this.offlineRenderOperationDepth === 0;
@@ -2467,7 +2496,14 @@ class AudioEngine {
       }
     } finally {
       this.offlineRenderLeaseHeld = false;
-      if (transportToResume) transportToResume.start();
+      try {
+        if (transportToResume) transportToResume.start();
+      } finally {
+        // The live engine is back and a resumed take is running again: this is
+        // the moment the project document re-publishes itself, so a change made
+        // during the render cannot be left behind on the offline side.
+        this.notifyOfflineRenderComplete();
+      }
     }
   }
 
