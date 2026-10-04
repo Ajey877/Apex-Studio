@@ -319,14 +319,25 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, chann
   ];
 
   return (
-    <ModalFrame id="export-modal" labelledBy="export-modal-title" onClose={onClose} className="fixed inset-0 bg-black/85 backdrop-blur-sm z-50 flex items-center justify-center p-3 sm:p-4">
+    // Phase 66 F2: while a render is in flight the dialog is not dismissible.
+    // Dismissing it would unmount the progress UI, revoke the finished blob and
+    // silently discard the export while the render keeps running — the frame
+    // refuses Escape (and the close control is disabled) instead of pretending
+    // the dialog closed.
+    <ModalFrame id="export-modal" labelledBy="export-modal-title" onClose={onClose} dismissible={!isRendering} className="fixed inset-0 bg-black/85 backdrop-blur-sm z-50 flex items-center justify-center p-3 sm:p-4">
       <div className="bg-[#141416] border border-[#333336] rounded-xl w-full max-w-lg shadow-2xl overflow-hidden text-[#b0b0b0] max-h-[90vh] flex flex-col">
         <div className="px-4 sm:px-5 py-3 bg-[#1a1a1d] border-b border-[#333336] flex items-center justify-between shrink-0">
           <div>
             <h3 id="export-modal-title" className="font-bold text-sm text-white tracking-tight">PROJECT EXPORT</h3>
             <p className="text-[10px] text-[#777]">WAV, Standard MIDI, and multi-track stem export</p>
           </div>
-          <button onClick={onClose} aria-label="Close export" className="p-1 rounded hover:bg-[#2d2d30] text-[#777] hover:text-white transition"><X className="w-4 h-4" /></button>
+          <button
+            onClick={onClose}
+            disabled={isRendering}
+            aria-label="Close export"
+            title={isRendering ? 'Export in progress — the dialog closes when it finishes' : 'Close export'}
+            className="p-1 rounded hover:bg-[#2d2d30] text-[#777] hover:text-white transition disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent"
+          ><X className="w-4 h-4" /></button>
         </div>
 
         <div className="p-4 sm:p-5 space-y-4 overflow-y-auto custom-scrollbar flex-1">
