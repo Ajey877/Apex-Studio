@@ -1898,6 +1898,56 @@ class AudioEngine {
     return registry?.applyLiveMix(trackId, slotId, bounded, now) ?? false;
   }
 
+  /**
+   * Phase 80: Apply a single named FX parameter to the live AudioEffect
+   * backing the slot on the given track, without rebuilding the chain.
+   *
+   * Returns true when the live chain accepted the new value (so the user
+   * hears the change immediately). Returns false when:
+   *   - the engine is offline-rendering or otherwise fenced,
+   *   - the value is non-finite,
+   *   - no live WetDry/effect exists for that slot (e.g. playback stopped
+   *     and the chain hasn't been built yet),
+   *   - the inner effect rejected the parameter (unknown name or
+   *     out-of-range value — `BiquadFilterEffect.setParameter` throws
+   *     `RangeError` for an out-of-range frequency, etc.).
+   *
+   * In all "false" cases the project state has already been updated (the
+   * caller is expected to mutate ProjectState first), so the next chain
+   * rebuild — or the next offline export — picks the value up. This is the
+   * "state is the source of truth" property Phase 80 requires.
+   */
+  public setFxSlotParameter(
+    trackId: number,
+    slotId: string,
+    paramName: string,
+    value: number,
+  ): boolean {
+    if (this.shouldBlockLiveMutation()) return false;
+    if (!Number.isFinite(value)) return false;
+    if (typeof paramName !== 'string' || !paramName.trim()) return false;
+    const track = this.activeMixerTracks.find(t => t.id === trackId);
+    if (track) {
+      const slot = track.fxSlots.find(s => s.id === slotId);
+      if (slot) {
+        slot.params = { ...slot.params, [paramName]: value };
+      }
+    }
+    const now = this.ctx?.currentTime ?? 0;
+    const registry = (this as unknown as {
+      __liveFxChainRegistry?: {
+        applyLiveParameter(
+          trackId: number,
+          slotId: string,
+          paramName: string,
+          value: number,
+          currentTime: number,
+        ): boolean;
+      };
+    }).__liveFxChainRegistry;
+    return registry?.applyLiveParameter(trackId, slotId, paramName, value, now) ?? false;
+  }
+
   public stopNote(voiceId: string) {
     if (this.shouldBlockLiveMutation()) return;
     if (this.activeVoices.has(voiceId)) {

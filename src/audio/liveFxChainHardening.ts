@@ -231,6 +231,18 @@ export interface LiveFxChainHandle {
  */
 interface LiveFxChainRegistry {
   applyLiveMix(trackId: number, slotId: string, mix: number, currentTime: number): boolean;
+  /**
+   * Apply a single named parameter to a live slot's underlying AudioEffect
+   * without rebuilding the chain. Returns true when the live chain owns a
+   * slot with that id AND the effect supports the parameter; false
+   * otherwise (caller should rebuild the chain or correct the parameter
+   * name). `paramName` is the AudioEffect.setParameter contract — typically
+   * the engine-level names (`threshold`, `ratio`, `attack`, `release`,
+   * `knee`, `delayTime`, `feedback`, `decay`, `wet`, `dry`, `ceiling`,
+   * `drive`, `frequency`, `q`, `gain`, …). Names not on the contract are
+   * rejected so a typo cannot silently no-op.
+   */
+  applyLiveParameter(trackId: number, slotId: string, paramName: string, value: number, currentTime: number): boolean;
   getChain(trackId: number): LiveFxChainHandle | undefined;
 }
 
@@ -292,6 +304,20 @@ export function installLiveFxChainHardening(engine: AudioEngineLike): void {
       if (!effect) return false;
       try {
         effect.setParameter('mix', boundedMix(mix), currentTime);
+        return true;
+      } catch (_) {
+        return false;
+      }
+    },
+    applyLiveParameter(trackId: number, slotId: string, paramName: string, value: number, currentTime: number): boolean {
+      if (!Number.isFinite(value)) return false;
+      const slotIndex = slotIndexByTrack.get(trackId);
+      const effect = slotIndex?.get(slotId);
+      if (!effect) return false;
+      try {
+        // WetDryEffect.setParameter forwards non-'mix' names to its inner
+        // effect, so the AudioEffect contract is reached in one call.
+        effect.setParameter(paramName, value, currentTime);
         return true;
       } catch (_) {
         return false;
@@ -407,4 +433,25 @@ export function getLiveFxSlotEffect(
   slotId: string,
 ): AudioEffect | undefined {
   return engine.__liveFxChainRegistry?.getChain(trackId)?.slotEffects.get(slotId);
+}
+
+/**
+ * Phase 80: Apply a single named parameter to the live AudioEffect that
+ * backs the named slot, without rebuilding the chain. Mirrors
+ * `applyLiveFxChainMix` for the `mix` value but works for every parameter
+ * the effect's `setParameter` contract accepts. Returns true when the live
+ * chain owns a slot with that id AND the effect accepted the value; false
+ * when the caller must rebuild the chain (no live instance, slot disabled,
+ * or the effect rejected the parameter — e.g. an unknown name or
+ * out-of-range value).
+ */
+export function applyLiveFxSlotParameter(
+  engine: { __liveFxChainRegistry?: LiveFxChainRegistry },
+  trackId: number,
+  slotId: string,
+  paramName: string,
+  value: number,
+  currentTime: number,
+): boolean {
+  return engine.__liveFxChainRegistry?.applyLiveParameter(trackId, slotId, paramName, value, currentTime) ?? false;
 }
