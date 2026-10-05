@@ -235,3 +235,43 @@ test('Phase 80: projectStateAudioConsumers lists every FxSlot field Phase 80 own
     );
   }
 });
+
+test('Phase 80: live-bridge membership matches the contract (no drift)', async () => {
+  // The audio engine keeps a small membership table for the live
+  // fast path (`isFxParamLiveUpdatableByName` in src/audio/fxLiveSync.ts).
+  // The table MUST agree with the contract — the contract is the
+  // source of truth, the membership table is the runtime
+  // optimization. This test pins the agreement: a future param
+  // added to the contract but missing from the membership table
+  // would silently fall back to the slow path, which is correct
+  // (the audio engine still rebuilds) but missing the optimization.
+  // A future param in the membership table but missing from the
+  // contract is a bug — the engine would claim "live updatable"
+  // for a param that the AudioEffect does not consume.
+  const { isFxParamLiveUpdatableByName } = await import('./fxLiveSync');
+  for (const [fxType, family] of Object.entries(FX_PARAMETER_FAMILIES)) {
+    if (!family) {
+      // Dead family: every param in the membership table must
+      // return false EXCEPT 'mix', which the WetDry wrapper owns
+      // for every slot. (Future dead families must register
+      // explicitly as null in the contract — see the
+      // "every FxType has a contract entry" test above.)
+      assert.equal(isFxParamLiveUpdatableByName(fxType, 'mix'), true);
+      assert.equal(isFxParamLiveUpdatableByName(fxType, 'drive'), false);
+      assert.equal(isFxParamLiveUpdatableByName(fxType, 'wet'), false);
+      assert.equal(isFxParamLiveUpdatableByName(fxType, 'rate'), false);
+      continue;
+    }
+    for (const p of family.parameters) {
+      assert.equal(
+        isFxParamLiveUpdatableByName(fxType, p.id),
+        true,
+        `Live-bridge membership table is missing ${fxType}.${p.id} — the contract says it is live-routable but the runtime would treat it as structural.`,
+      );
+    }
+  }
+  // 'mix' is the WetDry wrapper and is always live-routable.
+  for (const fxType of ['equalizer', 'compressor', 'delay', 'reverb', 'limiter']) {
+    assert.equal(isFxParamLiveUpdatableByName(fxType, 'mix'), true);
+  }
+});

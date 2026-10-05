@@ -47,6 +47,7 @@ import {
 } from './parameterScaling';
 import { isRackChannelAudible } from './midiMappingRuntime';
 import { derivePlaylistLaneMutes, isClipLaneMuted } from './playlistLaneMutes';
+import { isFxParamLiveUpdatableByName } from './fxLiveSync';
 
 export { isRackChannelAudible };
 
@@ -236,38 +237,6 @@ function trackLiveUpdatableChanged(previous: MixerTrack, next: MixerTrack): Trac
     mixChanges,
     paramChanges,
   };
-}
-
-/**
- * Phase 80: resolve whether a slot's param name is in the live-edit
- * contract without importing the full contract (which would cause a
- * module-load cycle). The contract is small and stable; we mirror the
- * relevant subset here. The canonical source remains
- * `fxParameterContract.ts`; this function MUST match its membership.
- */
-function isFxParamLiveUpdatableByName(fxType: string, paramName: string): boolean {
-  if (paramName === 'mix') return true; // WetDryEffect wrapper
-  // EQ — all 9 band params route to BiquadFilterEffect's AudioParams.
-  if (fxType === 'equalizer') {
-    return paramName === 'lowFreq' || paramName === 'lowGain' || paramName === 'lowQ'
-      || paramName === 'midFreq' || paramName === 'midGain' || paramName === 'midQ'
-      || paramName === 'highFreq' || paramName === 'highGain' || paramName === 'highQ';
-  }
-  if (fxType === 'compressor') {
-    return paramName === 'threshold' || paramName === 'knee' || paramName === 'ratio'
-      || paramName === 'attack' || paramName === 'release';
-  }
-  if (fxType === 'delay') {
-    return paramName === 'time' || paramName === 'feedback';
-  }
-  if (fxType === 'limiter') {
-    return paramName === 'ceiling' || paramName === 'release' || paramName === 'drive';
-  }
-  // Reverb has no AudioParam-updatable per-slot params; only the
-  // WetDry mix is live-editable.
-  // Distortion, bitcrusher, tape_saturation, chorus bake their
-  // parameter into a curve or LFO and are not live-updatable.
-  return false;
 }
 
 const mergePlaybackProjectEdits = (
