@@ -161,30 +161,60 @@ const playbackValuesEqual = (left: unknown, right: unknown): boolean => {
 };
 
 /**
- * Phase 10B: a per-track edit where the only field that changed is a subset of
- * `slot.mix` values for previously-known, enabled slots. Used during a live
- * take to skip the full FX chain rebuild and route the new mix directly to
- * the live WetDry wrapper. Any structural change (new slot, removed slot,
- * enabled/disabled change, params change, channel volume/pan/mute/routing)
- * returns `false` so the safe fall-back (a full rebuild via
+ * Phase 10B + Phase 80: a per-track edit where the only fields that changed
+ * are a subset of `slot.mix` and `slot.params` values for previously-known,
+ * enabled slots. Used during a live take to skip the full FX chain rebuild
+ * and route the new values directly to the live AudioEffect's AudioParams.
+ *
+ * A `params` change is live-routable ONLY when the change is finite numeric
+ * and the AudioEffect's setParameter contract accepts the name; the
+ * live-bridge registry silently refuses anything else. Any structural
+ * change (new slot, removed slot, enabled/disabled change, type change,
+ * name change) returns `false` so the safe fall-back (a full rebuild via
  * `updateMixerTrack`) handles it instead.
  */
-interface TrackMixDiff {
-  onlyMixChanged: boolean;
+interface TrackLiveFxDiff {
+  onlyLiveUpdatableChanged: boolean;
   mixChanges: Array<{ slotId: string; mix: number }>;
+  /**
+   * Each entry is a single AudioParam that the live AudioEffect accepts
+   * for the named slot — i.e. the value was finite and the AudioParam
+   * name maps to a real contract entry. The live-bridge path consumes
+   * these; values that the bridge refuses are dropped (the project
+   * state is still authoritative for the next chain rebuild).
+   */
+  paramChanges: Array<{ slotId: string; paramName: string; value: number }>;
 }
 
-function trackOnlyMixChanged(previous: MixerTrack, next: MixerTrack): TrackMixDiff {
+function trackLiveUpdatableChanged(previous: MixerTrack, next: MixerTrack): TrackLiveFxDiff {
   const mixChanges: Array<{ slotId: string; mix: number }> = [];
-  if (previous.id !== next.id) return { onlyMixChanged: false, mixChanges };
-  if (previous.fxSlots.length !== next.fxSlots.length) return { onlyMixChanged: false, mixChanges };
+  const paramChanges: Array<{ slotId: string; paramName: string; value: number }> = [];
+  if (previous.id !== next.id) return { onlyLiveUpdatableChanged: false, mixChanges, paramChanges };
+  if (previous.fxSlots.length !== next.fxSlots.length) return { onlyLiveUpdatableChanged: false, mixChanges, paramChanges };
   const previousById = new Map(previous.fxSlots.map(slot => [slot.id, slot]));
   for (const nextSlot of next.fxSlots) {
     const prevSlot = previousById.get(nextSlot.id);
-    if (!prevSlot) return { onlyMixChanged: false, mixChanges };
-    if (prevSlot.type !== nextSlot.type) return { onlyMixChanged: false, mixChanges };
-    if (prevSlot.enabled !== nextSlot.enabled) return { onlyMixChanged: false, mixChanges };
-    if (!playbackValuesEqual(prevSlot.params, nextSlot.params)) return { onlyMixChanged: false, mixChanges };
+    if (!prevSlot) return { onlyLiveUpdatableChanged: false, mixChanges, paramChanges };
+    if (prevSlot.type !== nextSlot.type) return { onlyLiveUpdatableChanged: false, mixChanges, paramChanges };
+    if (prevSlot.enabled !== nextSlot.enabled) return { onlyLiveUpdatableChanged: false, mixChanges, paramChanges };
+    // Detect changed params (numeric only — string/boolean params are
+    // not in the live contract).
+    const prevParams = (prevSlot.params ?? {}) as Record<string, unknown>;
+    const nextParams = (nextSlot.params ?? {}) as Record<string, unknown>;
+    const allKeys = new Set<string>([...Object.keys(prevParams), ...Object.keys(nextParams)]);
+    for (const key of allKeys) {
+      const prevValue = prevParams[key];
+      const nextValue = nextParams[key];
+      if (playbackValuesEqual(prevValue, nextValue)) continue;
+      // Phase 80: only the AudioParam-updatable families accept live
+      // param edits. The contract registry (FX_PARAMETER_FAMILIES) is
+      // the source of truth; we import it dynamically to avoid the
+      // module-load cycle between fxParameterContract and audioEngine.
+      const liveUpdatable = isFxParamLiveUpdatableByName(nextSlot.type, key);
+      if (!liveUpdatable) return { onlyLiveUpdatableChanged: false, mixChanges, paramChanges };
+      if (typeof nextValue !== 'number' || !Number.isFinite(nextValue)) continue;
+      paramChanges.push({ slotId: nextSlot.id, paramName: key, value: nextValue });
+    }
     if (prevSlot.mix !== nextSlot.mix) {
       mixChanges.push({ slotId: nextSlot.id, mix: nextSlot.mix });
     }
@@ -193,15 +223,51 @@ function trackOnlyMixChanged(previous: MixerTrack, next: MixerTrack): TrackMixDi
   const optionalKeys = ['height', 'armedForRecord'];
   for (const key of optionalKeys) {
     if (!playbackValuesEqual((previous as any)[key], (next as any)[key])) {
-      return { onlyMixChanged: false, mixChanges };
+      return { onlyLiveUpdatableChanged: false, mixChanges, paramChanges };
     }
   }
   for (const key of topLevelKeys) {
     if (!playbackValuesEqual((previous as any)[key], (next as any)[key])) {
-      return { onlyMixChanged: false, mixChanges };
+      return { onlyLiveUpdatableChanged: false, mixChanges, paramChanges };
     }
   }
-  return { onlyMixChanged: mixChanges.length > 0, mixChanges };
+  return {
+    onlyLiveUpdatableChanged: mixChanges.length > 0 || paramChanges.length > 0,
+    mixChanges,
+    paramChanges,
+  };
+}
+
+/**
+ * Phase 80: resolve whether a slot's param name is in the live-edit
+ * contract without importing the full contract (which would cause a
+ * module-load cycle). The contract is small and stable; we mirror the
+ * relevant subset here. The canonical source remains
+ * `fxParameterContract.ts`; this function MUST match its membership.
+ */
+function isFxParamLiveUpdatableByName(fxType: string, paramName: string): boolean {
+  if (paramName === 'mix') return true; // WetDryEffect wrapper
+  // EQ — all 9 band params route to BiquadFilterEffect's AudioParams.
+  if (fxType === 'equalizer') {
+    return paramName === 'lowFreq' || paramName === 'lowGain' || paramName === 'lowQ'
+      || paramName === 'midFreq' || paramName === 'midGain' || paramName === 'midQ'
+      || paramName === 'highFreq' || paramName === 'highGain' || paramName === 'highQ';
+  }
+  if (fxType === 'compressor') {
+    return paramName === 'threshold' || paramName === 'knee' || paramName === 'ratio'
+      || paramName === 'attack' || paramName === 'release';
+  }
+  if (fxType === 'delay') {
+    return paramName === 'time' || paramName === 'feedback';
+  }
+  if (fxType === 'limiter') {
+    return paramName === 'ceiling' || paramName === 'release' || paramName === 'drive';
+  }
+  // Reverb has no AudioParam-updatable per-slot params; only the
+  // WetDry mix is live-editable.
+  // Distortion, bitcrusher, tape_saturation, chorus bake their
+  // parameter into a curve or LFO and are not live-updatable.
+  return false;
 }
 
 const mergePlaybackProjectEdits = (
@@ -3123,28 +3189,45 @@ class AudioEngine {
           : mergePlaybackProjectEdits(active, previousProject, track) as MixerTrack;
 
         if (projectChanged) {
-          // Phase 10B: when an in-flight track edit only touched slot.mix on
-          // already-built FX slots, route the new mix values directly to the
-          // live WetDry wrappers and skip the full chain rebuild. The active
-          // track is updated so a future render/export sees the new values
-          // and `applyAutomationValue` for fx_mix reads the same source.
-          const mixDiff = previousProject ? trackOnlyMixChanged(previousProject, track) : { onlyMixChanged: false, mixChanges: [] };
-          if (mixDiff.onlyMixChanged) {
+          // Phase 10B + Phase 80: when an in-flight track edit only touched
+          // slot.mix and/or in-contract slot.params on already-built FX
+          // slots, route the new values directly to the live AudioParams
+          // and skip the full chain rebuild. The active track is updated
+          // so a future render/export sees the new values and
+          // `applyAutomationValue` for fx_mix reads the same source.
+          const diff = previousProject
+            ? trackLiveUpdatableChanged(previousProject, track)
+            : { onlyLiveUpdatableChanged: false, mixChanges: [], paramChanges: [] };
+          if (diff.onlyLiveUpdatableChanged) {
             const now = this.ctx?.currentTime ?? 0;
-            for (const change of mixDiff.mixChanges) {
+            const registry = (this as unknown as {
+              __liveFxChainRegistry?: {
+                applyLiveMix(trackId: number, slotId: string, mix: number, currentTime: number): boolean;
+                applyLiveParameter(trackId: number, slotId: string, paramName: string, value: number, currentTime: number): boolean;
+              };
+            }).__liveFxChainRegistry;
+            for (const change of diff.mixChanges) {
               const slot = nextTrack.fxSlots.find(s => s.id === change.slotId);
               if (slot) slot.mix = change.mix;
-              const registry = (this as unknown as {
-                __liveFxChainRegistry?: {
-                  applyLiveMix(trackId: number, slotId: string, mix: number, currentTime: number): boolean;
-                };
-              }).__liveFxChainRegistry;
               const updated = registry?.applyLiveMix(nextTrack.id, change.slotId, change.mix, now);
-              // Fallback only if the live chain was not built (e.g. an offline
-              // take) — in that case the offline renderer rebuilds per export.
               if (!updated && !this.isOfflineRendering) {
                 this.updateMixerTrack(nextTrack);
                 break;
+              }
+            }
+            for (const change of diff.paramChanges) {
+              const slot = nextTrack.fxSlots.find(s => s.id === change.slotId);
+              if (slot) {
+                slot.params = { ...slot.params, [change.paramName]: change.value };
+              }
+              const updated = registry?.applyLiveParameter(nextTrack.id, change.slotId, change.paramName, change.value, now);
+              if (!updated && !this.isOfflineRendering) {
+                // Live chain rejected the value (out-of-range, unknown
+                // name) — the project state has already been updated so
+                // the next chain rebuild / next offline export will
+                // pick it up. We don't force a rebuild here because a
+                // bad value should not destroy the running chain.
+                continue;
               }
             }
           } else {

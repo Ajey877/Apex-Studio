@@ -14,6 +14,7 @@ import {
 import { MixerTrack, FxSlot, FxType } from '../types/daw';
 import { audioEngine } from '../audio/audioEngine';
 import { MixerRoutingGraph } from '../audio/mixerRouting';
+import { FxParameterControls } from './fxParameterControls';
 
 export const applyMixerRoutingSelection = (
   tracks: MixerTrack[],
@@ -483,20 +484,19 @@ export const Mixer: React.FC<MixerProps> = ({
                     </div>
                   </div>
 
-                  {/* Wet/Dry Mix */}
-                  <div className="flex items-center justify-between text-[9px] text-[#777]">
-                    <span>WET MIX</span>
-                    <input
-                      type="range"
-                      min="0"
-                      max="1"
-                      step="0.05"
-                      value={slot.mix}
-                      onChange={(e) => onUpdateFxSlot(selectedTrack.id, slot.id, { mix: parseFloat(e.target.value) })}
-                      className="w-20 h-1 accent-[#ff6e00] bg-[#121214] rounded"
-                    />
-                    <span className="font-mono text-[#ff6e00]">{Math.round(slot.mix * 100)}%</span>
-                  </div>
+                  {/* Wet/Dry Mix + per-slot parameter controls. The mix
+                      slider is duplicated inside the controls panel for
+                      layout symmetry; the contract is the same
+                      `onUpdateFxSlot({ mix: … })` call. Phase 80 wires
+                      the in-contract params (EQ bands, compressor
+                      threshold/ratio/attack/release/knee, delay time +
+                      feedback, limiter ceiling/release/drive) to the
+                      live AudioParams via the live-bridge registry. */}
+                  <FxParameterControls
+                    slot={slot}
+                    trackId={selectedTrack.id}
+                    onUpdateFxSlot={onUpdateFxSlot}
+                  />
                 </div>
               ))
             )}
