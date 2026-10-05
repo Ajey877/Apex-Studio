@@ -71,6 +71,32 @@ class CompositeEffect implements AudioEffect {
 
 const installed = new WeakSet<object>();
 
+/**
+ * Phase 80: translate a slot-param name (the contract surface) into the
+ * name the AudioEffect's `setParameter` contract expects. Most slot-param
+ * names match the AudioEffect names directly (compressor, limiter,
+ * WetDry's `mix`). EQ performs its own translation via
+ * CompositeEffect.paramRoutes (per-band slot-params → `frequency`/`gain`/`q`).
+ *
+ * The only family that needs registry-side translation is delay, where
+ * the slot stores `time` but the DelayEffect contract is `delayTime`. The
+ * `createEffect` factory reads `slot.params.time` at construction and
+ * passes the value to the DelayEffect constructor, but at runtime the
+ * AudioEffect.setParameter switch only recognises `delayTime`. The
+ * translate is a no-op for every other case.
+ */
+function translateSlotParamToFxName(effect: AudioEffect, slotParamName: string): string {
+  // Only the WetDryEffect wrapping a DelayEffect needs the translate;
+  // we identify it by the inner effect's `name` field.
+  const inner = (effect as unknown as { instance?: { name?: string } }).instance
+    ?? (effect as unknown as { effect?: { name?: string } }).effect;
+  const innerName = (inner as unknown as { name?: string })?.name;
+  if (innerName === 'Delay') {
+    if (slotParamName === 'time') return 'delayTime';
+  }
+  return slotParamName;
+}
+
 function numericParam(slot: FxSlot, name: string, fallback: number): number {
   const raw = slot.params?.[name];
   if (raw === undefined || raw === null || raw === '') return fallback;
@@ -345,9 +371,18 @@ export function installLiveFxChainHardening(engine: AudioEngineLike): void {
       const effect = slotIndex?.get(slotId);
       if (!effect) return false;
       try {
+        // Phase 80: translate the slot-param name (the contract surface)
+        // to the AudioEffect param name. EQ does this internally via its
+        // CompositeEffect.paramRoutes; the other families rely on a
+        // direct name match, EXCEPT delay which stores `time` in the
+        // slot but consumes `delayTime` on the DelayEffect contract.
+        // The translate table is the single source of truth for slot-param
+        // → AudioParam renames; it is the registry-side mirror of
+        // fxParameterContract.ts (the contract test pins parity).
+        const translated = translateSlotParamToFxName(effect, paramName);
         // WetDryEffect.setParameter forwards non-'mix' names to its inner
         // effect, so the AudioEffect contract is reached in one call.
-        effect.setParameter(paramName, value, currentTime);
+        effect.setParameter(translated, value, currentTime);
         return true;
       } catch (_) {
         return false;
