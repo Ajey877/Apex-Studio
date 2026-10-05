@@ -8,8 +8,6 @@ import {
   Mic, 
   Music, 
   Split, 
-  ZoomIn, 
-  ZoomOut, 
   Sliders, 
   Scissors, 
   Activity, 
@@ -232,8 +230,12 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
   const handleRulerScrub = (clientX: number) => {
     if (!rulerContainerRef.current || !onSeekToBar) return;
     const rect = rulerContainerRef.current.getBoundingClientRect();
-    const relativeX = Math.max(0, clientX - rect.left);
-    const barWidth = 96; // Standard bar slot width
+    // Phase 79: ruler scrub must account for horizontal scroll, mirroring the
+    // audio-drop placement fix (PRs #151/#152). Without `scrollLeft`, scrubbing
+    // while the timeline is scrolled past bar 1 seeks to the wrong bar.
+    const scrollLeft = timelineScrollContainerRef.current?.scrollLeft ?? 0;
+    const relativeX = Math.max(0, clientX - rect.left + scrollLeft);
+    const barWidth = BAR_WIDTH; // Standard bar slot width
     const targetBar = Math.min(totalBars, Math.max(1, Math.floor(relativeX / barWidth) + 1));
 
     if (targetBar !== lastScrubBarRef.current) {
@@ -932,21 +934,26 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
             )}
           </div>
 
+          {/* Phase 79: the +/- buttons change the playlist timeline LENGTH
+              (totalBars), they do NOT zoom horizontally. Relabel honestly
+              instead of pretending to zoom. Phase 80+ will add real zoom. */}
           <div className="flex items-center gap-1 bg-[#121214] border border-[#333336] p-0.5 rounded">
             <button
               onClick={() => onUpdateTotalBars(Math.max(MIN_TIMELINE_BARS, totalBars - 8))}
-              className="p-1 text-[#777] hover:text-white"
-              title="Zoom In"
+              className="px-1.5 py-0.5 text-[#777] hover:text-white text-xs font-bold leading-none"
+              title="Shorter timeline (−8 bars)"
+              aria-label="Shorter timeline"
             >
-              <ZoomIn className="w-3 h-3" />
+              −
             </button>
             <span className="text-[9px] text-[#ff6e00] font-mono px-1">{totalBars} Bars</span>
             <button
               onClick={() => onUpdateTotalBars(Math.min(MAX_TIMELINE_BARS, totalBars + 8))}
-              className="p-1 text-[#777] hover:text-white"
-              title="Zoom Out"
+              className="px-1.5 py-0.5 text-[#777] hover:text-white text-xs font-bold leading-none"
+              title="Longer timeline (+8 bars)"
+              aria-label="Longer timeline"
             >
-              <ZoomOut className="w-3 h-3" />
+              +
             </button>
           </div>
 
