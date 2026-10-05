@@ -22,6 +22,10 @@ const PROPS = {
   onClose: () => undefined,
   currentStep: 0,
   isPlaying: false,
+  // Phase 79: the modal reads state from ProjectState; tests supply a default
+  // pattern (disabled) so the surface renders the bypass state.
+  grossBeatState: { enabled: false, mix: 1.0, gateSteps: Array(16).fill(true) as boolean[] },
+  onUpdateGrossBeat: () => undefined,
 };
 
 function renderModal(overrides: Partial<typeof PROPS> = {}): string {
@@ -166,22 +170,19 @@ test('the power switch reports bypass while the gate is disabled', () => {
 });
 
 test('renders the engine gate pattern and reports an active gate', () => {
-  const saved = audioEngine.getGrossBeatState();
-  try {
-    audioEngine.setGrossBeatState({
-      enabled: true,
-      mix: 0.5,
-      gateSteps: Array.from({ length: 16 }, (_, index) => index < 8),
-    });
-    const markup = renderModal();
-    assert.match(markup, />EFFECT ACTIVE</);
-    assert.match(markup, /50%/);
-    // 1 - 0.5 * 0.95 = 0.525
-    assert.match(markup, /Closed steps: 53% gain/);
-    assert.equal(resolveGrossBeatClosedGain(0.5), 0.525);
-  } finally {
-    audioEngine.setGrossBeatState(saved);
-  }
+  // Phase 79: the modal reads state from props (ProjectState-owned), not
+  // straight from audioEngine. Pass an active override via renderModal.
+  const enabled: GrossBeatState = {
+    enabled: true,
+    mix: 0.5,
+    gateSteps: Array.from({ length: 16 }, (_, index) => index < 8),
+  };
+  const markup = renderModal({ grossBeatState: enabled });
+  assert.match(markup, />EFFECT ACTIVE</);
+  assert.match(markup, /50%/);
+  // 1 - 0.5 * 0.95 = 0.525
+  assert.match(markup, /Closed steps: 53% gain/);
+  assert.equal(resolveGrossBeatClosedGain(0.5), 0.525);
 });
 
 test('the engine Gross Beat state carries only the fields the gate uses', () => {

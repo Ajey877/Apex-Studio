@@ -1,7 +1,33 @@
-import type { ProjectState, Channel, PlaylistClip } from '../types/daw';
+import type { GrossBeatState, ProjectState, Channel, PlaylistClip } from '../types/daw';
 import { audioEngine } from '../audio/audioEngine';
 import { createDefaultMixerTracks, createDefaultPlaylistTracks } from '../audio/presets';
 import { markAudioClipsMissingBufferId } from './playlistClipIntegrity';
+
+/**
+ * Phase 79: default Gross Beat gate state used when the persisted project has
+ * no grossBeatState field (pre-migration documents) or when the field is
+ * malformed. Must match audioEngine's initial state exactly so that
+ * bootstrapping a fresh project leaves the engine in sync.
+ *
+ * Inlined (rather than re-exporting `grossBeatAlternatingSteps`) to avoid a
+ * circular import at module load — projectState.ts is loaded very early by
+ * presets and tests, and pulling in audioEngine via grossBeatGate creates a
+ * TDZ cycle when a test imports the modal first.
+ */
+const DEFAULT_GROSS_BEAT_STEPS: boolean[] = [true, false, true, false, true, false, true, false, true, false, true, false, true, false, true, false];
+export const DEFAULT_GROSS_BEAT_STATE: GrossBeatState = {
+  enabled: false,
+  mix: 1.0,
+  gateSteps: DEFAULT_GROSS_BEAT_STEPS,
+};
+
+const isGrossBeatState = (v: unknown): v is GrossBeatState => {
+  if (!isRecord(v)) return false;
+  if (typeof v.enabled !== 'boolean') return false;
+  if (typeof v.mix !== 'number' || !Number.isFinite(v.mix)) return false;
+  if (!Array.isArray(v.gateSteps) || v.gateSteps.length !== 16) return false;
+  return v.gateSteps.every(step => typeof step === 'boolean');
+};
 import { DEFAULT_TIMELINE_BARS, normalizeTimelineBars, revalidateProjectTimeline } from './playlistTimeline';
 import {
   MASTER_MIXER_TRACK_ID,
@@ -15,6 +41,8 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
 
 const clone = <T>(value: T): T => structuredClone(value);
+
+const clamp01 = (n: number): number => Math.max(0, Math.min(1, n));
 
 /**
  * Normalizes mixer routing references at the project-state boundary.
@@ -144,7 +172,12 @@ export const createDefaultProjectState = (): ProjectState => {
     recordings: [],
     comments: [],
     collaborators: [],
-    midiMappings: []
+    midiMappings: [],
+    // Phase 79: Gross Beat is owned by ProjectState (like macroKnobs); the
+    // engine reads from this on load/undo/redo instead of holding its own
+    // private truth, so save/load round-trips and project replacement all
+    // preserve the gate pattern.
+    grossBeatState: { ...DEFAULT_GROSS_BEAT_STATE, gateSteps: [...DEFAULT_GROSS_BEAT_STATE.gateSteps] }
   };
 
   return {
@@ -207,6 +240,9 @@ export const normalizeProjectState = (input: unknown): ProjectState => {
   if ('macroKnobs' in candidate && candidate.macroKnobs !== undefined) {
     assertArrayOfRecords(candidate.macroKnobs, 'macro knobs', isMacroKnob);
   }
+  if ('grossBeatState' in candidate && candidate.grossBeatState !== undefined && !isGrossBeatState(candidate.grossBeatState)) {
+    throw new Error('Invalid project file: Gross Beat state is malformed (expected 16-step boolean grid).');
+  }
   if ('vocalTuner' in candidate && candidate.vocalTuner !== undefined && !isVocalTuner(candidate.vocalTuner)) {
     throw new Error('Invalid project file: vocal tuner settings are malformed.');
   }
@@ -246,6 +282,9 @@ export const normalizeProjectState = (input: unknown): ProjectState => {
     // back (see the `revalidateProjectTimeline` wrap on the return value).
     totalBars: normalizeTimelineBars(candidate.totalBars),
     macroKnobs: Array.isArray(candidate.macroKnobs) ? clone(candidate.macroKnobs) : [],
+    grossBeatState: isGrossBeatState(candidate.grossBeatState)
+      ? { ...clone(candidate.grossBeatState) as GrossBeatState, mix: clamp01((candidate.grossBeatState as GrossBeatState).mix) }
+      : { ...DEFAULT_GROSS_BEAT_STATE, gateSteps: [...DEFAULT_GROSS_BEAT_STATE.gateSteps] },
     vocalTuner: candidate.vocalTuner === undefined ? undefined : clone(candidate.vocalTuner) as ProjectState['vocalTuner'],
     selectedPatternId: typeof candidate.selectedPatternId === 'string'
       ? candidate.selectedPatternId

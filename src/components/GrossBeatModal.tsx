@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import {
   X,
   Power,
@@ -29,6 +29,9 @@ interface GrossBeatModalProps {
   onClose: () => void;
   currentStep: number;
   isPlaying: boolean;
+  /** Phase 79: project-owned gate state. Same pattern as VocalTunerModal. */
+  grossBeatState: GrossBeatState;
+  onUpdateGrossBeat: (patch: Partial<GrossBeatState>) => void;
 }
 
 const BRAKE_DURATIONS = [250, 500, 800, 1200, 1800];
@@ -37,32 +40,30 @@ export const GrossBeatModal: React.FC<GrossBeatModalProps> = ({
   isOpen,
   onClose,
   currentStep,
-  isPlaying
+  isPlaying,
+  grossBeatState,
+  onUpdateGrossBeat,
 }) => {
-  const [grossState, setGrossState] = useState<GrossBeatState>(() => audioEngine.getGrossBeatState());
+  // Brake UI is transient (one-shot envelope trigger), not persisted — stays local.
   const [brakeDuration, setBrakeDuration] = useState<number>(600); // ms
   const [isBraking, setIsBraking] = useState<boolean>(false);
   const [activePresetId, setActivePresetId] = useState<string | null>(null);
 
-  useEffect(() => {
-    if (isOpen) {
-      setGrossState(audioEngine.getGrossBeatState());
-    }
-  }, [isOpen]);
-
   if (!isOpen) return null;
 
-  const publish = (updated: GrossBeatState) => {
-    setGrossState(updated);
-    audioEngine.setGrossBeatState(updated);
+  const publish = (patch: Partial<GrossBeatState>) => {
+    // Push into ProjectState (undo/redo/save/load all round-trip through it).
+    // App propagates the new state into audioEngine via the normal project
+    // publication path, so the engine and document cannot diverge.
+    onUpdateGrossBeat(patch);
   };
 
   const handleTogglePower = () => {
-    publish({ ...grossState, enabled: !grossState.enabled });
+    publish({ enabled: !grossBeatState.enabled });
   };
 
   const handleMixChange = (val: number) => {
-    publish({ ...grossState, mix: val });
+    publish({ mix: val });
   };
 
   const handlePresetSelect = (presetId: string) => {
@@ -71,14 +72,14 @@ export const GrossBeatModal: React.FC<GrossBeatModalProps> = ({
     setActivePresetId(presetId);
     // Presets only ever write the gate pattern. They do not change tempo,
     // pitch or playback rate, because the engine has no such processing.
-    publish({ ...grossState, enabled: true, gateSteps: [...found.steps] });
+    publish({ enabled: true, gateSteps: [...found.steps] });
   };
 
   const handleStepToggle = (index: number) => {
-    const newSteps = [...grossState.gateSteps];
+    const newSteps = [...grossBeatState.gateSteps];
     newSteps[index] = !newSteps[index];
     setActivePresetId(null);
-    publish({ ...grossState, gateSteps: newSteps });
+    publish({ gateSteps: newSteps });
   };
 
   const handleTriggerBrake = () => {
@@ -89,7 +90,7 @@ export const GrossBeatModal: React.FC<GrossBeatModalProps> = ({
     }, brakeDuration + 100);
   };
 
-  const closedGainPercent = Math.round(resolveGrossBeatClosedGain(grossState.mix) * 100);
+  const closedGainPercent = Math.round(resolveGrossBeatClosedGain(grossBeatState.mix) * 100);
 
   return (
     <ModalFrame id="gross-beat-modal" labelledBy="gross-beat-modal-title" onClose={onClose} className="fixed inset-0 bg-black/85 backdrop-blur-md z-50 flex items-center justify-center p-3 sm:p-4 select-none">
@@ -116,13 +117,13 @@ export const GrossBeatModal: React.FC<GrossBeatModalProps> = ({
             <button
               onClick={handleTogglePower}
               className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition shadow-sm ${
-                grossState.enabled
+                grossBeatState.enabled
                   ? 'bg-[#ff6e00] text-black hover:bg-[#ff8526]'
                   : 'bg-[#222225] text-[#777] hover:text-white border border-[#333]'
               }`}
             >
               <Power className="w-3.5 h-3.5" />
-              <span>{grossState.enabled ? 'EFFECT ACTIVE' : 'BYPASS'}</span>
+              <span>{grossBeatState.enabled ? 'EFFECT ACTIVE' : 'BYPASS'}</span>
             </button>
 
             <button
@@ -155,14 +156,14 @@ export const GrossBeatModal: React.FC<GrossBeatModalProps> = ({
             <div className="bg-[#18181b] p-3 rounded-lg border border-[#28282b] flex flex-col justify-between">
               <div className="flex items-center justify-between text-xs mb-1.5">
                 <span className="text-[#888] font-bold text-[10px] uppercase">GATE DEPTH</span>
-                <span className="font-mono text-[#ff6e00] font-bold text-xs">{Math.round(grossState.mix * 100)}%</span>
+                <span className="font-mono text-[#ff6e00] font-bold text-xs">{Math.round(grossBeatState.mix * 100)}%</span>
               </div>
               <input
                 type="range"
                 min="0"
                 max="1"
                 step="0.05"
-                value={grossState.mix}
+                value={grossBeatState.mix}
                 onChange={(e) => handleMixChange(parseFloat(e.target.value))}
                 className="w-full h-1.5 accent-[#ff6e00] bg-[#121214] rounded cursor-pointer"
               />
@@ -221,7 +222,7 @@ export const GrossBeatModal: React.FC<GrossBeatModalProps> = ({
 
             <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
               {GROSS_BEAT_GATE_PRESETS.map((p) => {
-                const isActive = activePresetId === p.id && grossState.enabled;
+                const isActive = activePresetId === p.id && grossBeatState.enabled;
                 return (
                   <button
                     key={p.id}
@@ -254,7 +255,7 @@ export const GrossBeatModal: React.FC<GrossBeatModalProps> = ({
                 <button
                   onClick={() => {
                     setActivePresetId(null);
-                    publish({ ...grossState, gateSteps: grossBeatAllOpenSteps() });
+                    publish({ gateSteps: grossBeatAllOpenSteps() });
                   }}
                   className="px-2 py-0.5 rounded text-[9px] bg-[#222225] text-[#888] hover:text-white"
                 >
@@ -263,7 +264,7 @@ export const GrossBeatModal: React.FC<GrossBeatModalProps> = ({
                 <button
                   onClick={() => {
                     setActivePresetId(null);
-                    publish({ ...grossState, gateSteps: grossState.gateSteps.map(s => !s) });
+                    publish({ gateSteps: grossBeatState.gateSteps.map(s => !s) });
                   }}
                   className="px-2 py-0.5 rounded text-[9px] bg-[#222225] text-[#888] hover:text-white"
                 >
@@ -274,7 +275,7 @@ export const GrossBeatModal: React.FC<GrossBeatModalProps> = ({
 
             {/* 16 Step Buttons */}
             <div className="grid grid-cols-16 gap-1 sm:gap-1.5 h-20 items-end bg-[#0e0e10] p-2 rounded-lg border border-[#222225]">
-              {grossState.gateSteps.map((isActive, idx) => {
+              {grossBeatState.gateSteps.map((isActive, idx) => {
                 const isCurrent = isPlaying && currentStep === idx;
                 const isBeatStart = idx % 4 === 0;
 

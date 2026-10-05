@@ -681,6 +681,13 @@ export interface ProjectState {
    */
   totalBars?: number;
   vocalTuner?: VocalTunerSettings;
+  /**
+   * Phase 79: Gross Beat gate state owned by the project. Hydrated into the
+   * engine on project load; mutated through the same macro-rack bridge
+   * pattern as Phase 51 master macros so save/load, undo/redo, and project
+   * replacement all round-trip the gate pattern correctly.
+   */
+  grossBeatState?: GrossBeatState;
   macroKnobs?: MasterMacroKnob[];
   /** UI-only persistence marker for an acknowledged missing-audio warning. */
   dismissedMissingAudioSignature?: string;

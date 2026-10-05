@@ -86,8 +86,10 @@ import {
   updateMidiMappingsInProjectState,
   updateMixerTrackInProjectState,
   updateProjectMetadataInProjectState,
+  updateGrossBeatInProjectState,
   updateVocalTunerInProjectState
 } from './state/projectMutations';
+import { DEFAULT_GROSS_BEAT_STATE } from './state/projectState';
 
 // Component Suite
 import { ApplicationMenuBar } from './components/ApplicationMenuBar';
@@ -586,6 +588,18 @@ export function App() {
 
   const synchronizeRuntimeState = useCallback((previous: ProjectState, next: ProjectState) => {
     synchronizeActivePlayback(previous, next);
+    // Phase 79: Gross Beat state lives in ProjectState; push any change to the
+    // engine immediately so the master gate follows undo/redo/load/preset edits.
+    const prevGross = previous.grossBeatState ?? DEFAULT_GROSS_BEAT_STATE;
+    const nextGross = next.grossBeatState ?? DEFAULT_GROSS_BEAT_STATE;
+    if (
+      prevGross.enabled !== nextGross.enabled ||
+      prevGross.mix !== nextGross.mix ||
+      prevGross.gateSteps.length !== nextGross.gateSteps.length ||
+      prevGross.gateSteps.some((v, i) => v !== nextGross.gateSteps[i])
+    ) {
+      audioEngine.setGrossBeatState(nextGross);
+    }
     if (!audioEngine.isPlaybackActive()) {
       if (previous.mixerTracks !== next.mixerTracks) {
         const nextTrackIds = new Set(next.mixerTracks.map(track => track.id));
@@ -624,6 +638,9 @@ export function App() {
   }, [synchronizeActivePlayback]);
 
   const restoreRuntimeState = useCallback((previous: ProjectState) => {
+    // Phase 79: undo/redo restores the document; republish the Gross Beat gate
+    // so the engine can't keep playing a pattern the user just undid.
+    audioEngine.setGrossBeatState(previous.grossBeatState ?? DEFAULT_GROSS_BEAT_STATE);
     if (audioEngine.isPlaybackActive()) {
       previous.mixerTracks.forEach(track => audioEngine.updateMixerTrack(track));
       audioEngine.synchronizePlaybackState({
@@ -1968,7 +1985,14 @@ export function App() {
       <MidiControllerModal isOpen={isMidiModalOpen} onClose={() => setIsMidiModalOpen(false)} channels={projectState.channels} mixerTracks={projectState.mixerTracks} midiMappings={projectState.midiMappings || []} onUpdateMidiMappings={(mappings) => mutateProjectState(curr => updateMidiMappingsInProjectState(curr, mappings), 'Update MIDI mappings')} activeChannel={selectedChannel} />
       <ParametricEqModal isOpen={isParametricEqOpen} onClose={() => setIsParametricEqOpen(false)} mixerTrack={projectState.mixerTracks.find(t => t.id === eqModalTrackId) || projectState.mixerTracks[0]} onUpdateTrack={(track) => handleUpdateMixerTrack(track.id, track)} />
       <MasteringSuiteModal isOpen={isMasteringSuiteOpen} onClose={() => setIsMasteringSuiteOpen(false)} masteringState={masteringSuiteState} onUpdateMasteringState={(st) => setMasteringSuiteState(st)} isPlaying={isPlaying} />
-      <GrossBeatModal isOpen={isGrossBeatOpen} onClose={() => setIsGrossBeatOpen(false)} currentStep={currentStep} isPlaying={isPlaying} />
+      <GrossBeatModal
+        isOpen={isGrossBeatOpen}
+        onClose={() => setIsGrossBeatOpen(false)}
+        currentStep={currentStep}
+        isPlaying={isPlaying}
+        grossBeatState={projectState.grossBeatState ?? DEFAULT_GROSS_BEAT_STATE}
+        onUpdateGrossBeat={(patch) => mutateProjectState(curr => updateGrossBeatInProjectState(curr, patch), 'Update Gross Beat gate')}
+      />
       <AudioSlicerModal isOpen={isAudioSlicerOpen} onClose={() => setIsAudioSlicerOpen(false)} channels={projectState.channels} onUpdateChannel={(chId, updates) => handleUpdateChannel(chId, updates)} />
       {(() => {
         const targetArpChannel = projectState.channels.find(c => c.id === arpChannelId) || projectState.channels[0];

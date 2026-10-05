@@ -43,6 +43,8 @@ function createRecordingEngine(options: { playing: boolean; knownPannerChannelId
     setBpm(bpm: number) { calls.push({ method: 'setBpm', args: [bpm] }); },
     setSwing(swing: number) { calls.push({ method: 'setSwing', args: [swing] }); },
     setMetronome(enabled: boolean) { calls.push({ method: 'setMetronome', args: [enabled] }); },
+    setGrossBeatState(state: unknown) { calls.push({ method: 'setGrossBeatState', args: [state] }); },
+    setMasterVolume(gain: number) { calls.push({ method: 'setMasterVolume', args: [gain] }); },
     isPlaybackActive() { return options.playing; },
     synchronizePlaybackState(update: PlaybackUpdateLike) {
       calls.push({ method: 'synchronizePlaybackState', args: [update] });
