@@ -33,12 +33,26 @@ class CompositeEffect implements AudioEffect {
     output: AudioNode,
     private readonly nodes: AudioNode[],
     private readonly effects: AudioEffect[] = [],
+    /**
+     * Optional slot-param → AudioEffect route. When provided,
+     * `setParameter(name, value, time)` looks up `name` here and forwards
+     * the call to the matching inner AudioEffect's AudioParam. This is
+     * what makes the EQ's per-band params (`lowFreq` → inner low-band
+     * BiquadFilterEffect's `frequency`) live-updatable without rebuilding
+     * the chain.
+     */
+    private readonly paramRoutes?: Readonly<Record<string, { effect: AudioEffect; audioParam: string }>>,
   ) {
     this.input = input;
     this.output = output;
   }
 
-  setParameter(): void {
+  setParameter(name: string, value: number, time: number): void {
+    if (this.paramRoutes && Object.prototype.hasOwnProperty.call(this.paramRoutes, name)) {
+      const route = this.paramRoutes[name]!;
+      route.effect.setParameter(route.audioParam, value, time);
+      return;
+    }
     throw new Error(`${this.name} exposes fixed live-chain parameters.`);
   }
 
@@ -133,7 +147,23 @@ function createEqualizer(ctx: AudioContext, slot: FxSlot): AudioEffect {
   const high = new BiquadFilterEffect(ctx, `${slot.id}-high`, 'highshelf', bounded(numericParam(slot, 'highFreq', 6500), 10, ctx.sampleRate / 2), bounded(numericParam(slot, 'highQ', 1), 0.0001, 1000), bounded(numericParam(slot, 'highGain', 0), -40, 40));
   low.output.connect(mid.input);
   mid.output.connect(high.input);
-  return new CompositeEffect(`${slot.id}-eq-core`, '3-Band EQ', low.input, high.output, [], [low, mid, high]);
+  // Phase 80: route per-band slot-param names to the inner
+  // BiquadFilterEffect's AudioParam. This is the live-edit plumbing
+  // for the EQ family — without it, an EQ band parameter edit would
+  // require a chain rebuild on every move, and the contract test
+  // rejects that as a fake parameter.
+  const paramRoutes: Record<string, { effect: AudioEffect; audioParam: string }> = {
+    lowFreq: { effect: low, audioParam: 'frequency' },
+    lowGain: { effect: low, audioParam: 'gain' },
+    lowQ: { effect: low, audioParam: 'q' },
+    midFreq: { effect: mid, audioParam: 'frequency' },
+    midGain: { effect: mid, audioParam: 'gain' },
+    midQ: { effect: mid, audioParam: 'q' },
+    highFreq: { effect: high, audioParam: 'frequency' },
+    highGain: { effect: high, audioParam: 'gain' },
+    highQ: { effect: high, audioParam: 'q' },
+  };
+  return new CompositeEffect(`${slot.id}-eq-core`, '3-Band EQ', low.input, high.output, [], [low, mid, high], paramRoutes);
 }
 
 function createNativeWaveShaper(ctx: AudioContext, slot: FxSlot, type: 'distortion' | 'bitcrusher'): AudioEffect {

@@ -96,19 +96,19 @@ const param = (id: string, label: string, unit: FxParamUnit, min: number, max: n
  * `audioParam` is the same as the slot-param name.
  */
 const EQ_PARAMS: readonly FxParameterSpec[] = [
-  param('lowFreq', 'Low Frequency', 'Hz', 20, 20000, 120),
-  param('lowGain', 'Low Gain', 'dB', -18, 18, 0),
-  param('lowQ', 'Low Q', 'unit', 0.1, 10, 0.9),
-  param('midFreq', 'Mid Frequency', 'Hz', 20, 20000, 1200),
-  param('midGain', 'Mid Gain', 'dB', -18, 18, 0),
-  param('midQ', 'Mid Q', 'unit', 0.1, 10, 1.2),
-  param('highFreq', 'High Frequency', 'Hz', 20, 20000, 6500),
-  param('highGain', 'High Gain', 'dB', -18, 18, 0),
-  param('highQ', 'High Q', 'unit', 0.1, 10, 0.8),
+  param('lowFreq', 'Low Frequency', 'Hz', 20, 20000, 120, 'frequency'),
+  param('lowGain', 'Low Gain', 'dB', -18, 18, 0, 'gain'),
+  param('lowQ', 'Low Q', 'unit', 0.1, 10, 0.9, 'q'),
+  param('midFreq', 'Mid Frequency', 'Hz', 20, 20000, 1200, 'frequency'),
+  param('midGain', 'Mid Gain', 'dB', -18, 18, 0, 'gain'),
+  param('midQ', 'Mid Q', 'unit', 0.1, 10, 1.2, 'q'),
+  param('highFreq', 'High Frequency', 'Hz', 20, 20000, 6500, 'frequency'),
+  param('highGain', 'High Gain', 'dB', -18, 18, 0, 'gain'),
+  param('highQ', 'High Q', 'unit', 0.1, 10, 0.8, 'q'),
 ];
-// Note: ranges above match `liveFxChainHardening.createEqualizer`
-// (lowQ default 1.0 → we keep 0.9 so a freshly-added EQ slot has the
-// same audible shape as the existing `fx-master-eq` preset).
+// Note: ranges above match `liveFxChainHardening.createEqualizer` (lowQ
+// default 1.0 → we keep 0.9 so a freshly-added EQ slot has the same
+// audible shape as the existing `fx-master-eq` preset).
 
 /**
  * Compressor: a single DynamicsCompressorEffect. Slot params map directly
