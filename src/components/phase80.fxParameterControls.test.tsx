@@ -131,3 +131,24 @@ test('Phase 80: contract test — UI unit conversion matches DSP units (delay, l
   assert.equal(delaySlot.params.time, 0.25);
   assert.equal(delaySlot.params.feedback, 0.3);
 });
+
+test('Phase 80 drag grouping: param sliders accept onInteractionStart/onInteractionEnd', () => {
+  // The component accepts the parent App's drag-grouping callbacks
+  // and forwards them to every slider. The prop forwarding is
+  // exercised at runtime by the drag-history test
+  // (phase80.fxDragHistory.test.ts). Here we just confirm the
+  // optional props don't break rendering and the expected sliders
+  // are present in the EQ row.
+  const html = renderToStaticMarkup(
+    <FxParameterControls
+      slot={eqSlot}
+      trackId={trackId}
+      onUpdateFxSlot={() => {}}
+      onInteractionStart={() => {}}
+      onInteractionEnd={() => {}}
+    />,
+  );
+  assert.ok(html.includes('Low'));
+  assert.ok(html.includes('Mid'));
+  assert.ok(html.includes('High'));
+});

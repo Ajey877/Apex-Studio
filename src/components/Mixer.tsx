@@ -496,6 +496,8 @@ export const Mixer: React.FC<MixerProps> = ({
                     slot={slot}
                     trackId={selectedTrack.id}
                     onUpdateFxSlot={onUpdateFxSlot}
+                    onInteractionStart={onInteractionStart}
+                    onInteractionEnd={onInteractionEnd}
                   />
                 </div>
               ))

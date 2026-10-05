@@ -31,6 +31,15 @@ interface FxParameterControlsProps {
   slot: FxSlot;
   onUpdateFxSlot: (trackId: number, slotId: string, updates: Partial<FxSlot>) => void;
   trackId: number;
+  /**
+   * Phase 80 drag grouping: when the user starts dragging a slider,
+   * the parent App starts a continuous history batcher; on
+   * pointer-up / change-end the batch is flushed into a single
+   * history entry. Without this, every animation frame of a
+   * parameter drag would be its own undo step.
+   */
+  onInteractionStart?: (label?: string) => void;
+  onInteractionEnd?: (label?: string) => void;
 }
 
 interface ParamFormatOptions {
@@ -55,7 +64,10 @@ const ParamSlider: React.FC<{
   step: number;
   unit: string;
   onChange: (value: number) => void;
-}> = ({ label, value, min, max, step, unit, onChange }) => {
+  onInteractionStart?: (label?: string) => void;
+  onInteractionEnd?: (label?: string) => void;
+  dragLabel?: string;
+}> = ({ label, value, min, max, step, unit, onChange, onInteractionStart, onInteractionEnd, dragLabel }) => {
   const decimals = step >= 1 ? 0 : step >= 0.1 ? 1 : step >= 0.01 ? 2 : 3;
   return (
     <div className="flex items-center justify-between text-[9px] text-[#777]">
@@ -67,6 +79,9 @@ const ParamSlider: React.FC<{
         step={step}
         value={value}
         onChange={(e) => onChange(parseFloat(e.target.value))}
+        onPointerDown={() => onInteractionStart?.(dragLabel ?? `Change ${label}`)}
+        onPointerUp={() => onInteractionEnd?.(dragLabel ?? `Change ${label}`)}
+        onBlur={() => onInteractionEnd?.(dragLabel ?? `Change ${label}`)}
         className="w-20 h-1 accent-[#ff6e00] bg-[#121214] rounded"
       />
       <span className="font-mono text-[#ff6e00] w-12 text-right">
@@ -81,7 +96,9 @@ const EQParamRow: React.FC<{
   band: 'low' | 'mid' | 'high';
   bandLabel: string;
   onChange: (paramName: string, value: number) => void;
-}> = ({ slot, band, bandLabel, onChange }) => {
+  onInteractionStart?: (label?: string) => void;
+  onInteractionEnd?: (label?: string) => void;
+}> = ({ slot, band, bandLabel, onChange, onInteractionStart, onInteractionEnd }) => {
   const freq = Number(slot.params[`${band}Freq`]) || 1000;
   const gain = Number(slot.params[`${band}Gain`]) || 0;
   const q = Number(slot.params[`${band}Q`]) || 1;
@@ -96,6 +113,9 @@ const EQParamRow: React.FC<{
         step={1}
         unit=" Hz"
         onChange={(v) => onChange(`${band}Freq`, clampFxParameterValue('equalizer', `${band}Freq`, v))}
+        onInteractionStart={onInteractionStart}
+        onInteractionEnd={onInteractionEnd}
+        dragLabel={`Change ${bandLabel} EQ frequency`}
       />
       <ParamSlider
         label="Gain"
@@ -105,6 +125,9 @@ const EQParamRow: React.FC<{
         step={0.1}
         unit=" dB"
         onChange={(v) => onChange(`${band}Gain`, clampFxParameterValue('equalizer', `${band}Gain`, v))}
+        onInteractionStart={onInteractionStart}
+        onInteractionEnd={onInteractionEnd}
+        dragLabel={`Change ${bandLabel} EQ gain`}
       />
       <ParamSlider
         label="Q"
@@ -114,12 +137,21 @@ const EQParamRow: React.FC<{
         step={0.1}
         unit=""
         onChange={(v) => onChange(`${band}Q`, clampFxParameterValue('equalizer', `${band}Q`, v))}
+        onInteractionStart={onInteractionStart}
+        onInteractionEnd={onInteractionEnd}
+        dragLabel={`Change ${bandLabel} EQ Q`}
       />
     </div>
   );
 };
 
-export const FxParameterControls: React.FC<FxParameterControlsProps> = ({ slot, onUpdateFxSlot, trackId }) => {
+export const FxParameterControls: React.FC<FxParameterControlsProps> = ({
+  slot,
+  onUpdateFxSlot,
+  trackId,
+  onInteractionStart,
+  onInteractionEnd,
+}) => {
   const updateParam = (paramName: string, value: number) => {
     onUpdateFxSlot(trackId, slot.id, { params: { ...slot.params, [paramName]: value } });
   };
@@ -139,6 +171,9 @@ export const FxParameterControls: React.FC<FxParameterControlsProps> = ({ slot, 
           step={0.05}
           value={slot.mix}
           onChange={(e) => onUpdateFxSlot(trackId, slot.id, { mix: parseFloat(e.target.value) })}
+          onPointerDown={() => onInteractionStart?.('Change effect mix')}
+          onPointerUp={() => onInteractionEnd?.('Change effect mix')}
+          onBlur={() => onInteractionEnd?.('Change effect mix')}
           className="w-20 h-1 accent-[#ff6e00] bg-[#121214] rounded"
         />
         <span className="font-mono text-[#ff6e00] w-12 text-right">{Math.round(slot.mix * 100)}%</span>
@@ -200,7 +235,12 @@ export const FxParameterControls: React.FC<FxParameterControlsProps> = ({ slot, 
   );
 };
 
-const CompressorRows: React.FC<{ slot: FxSlot; onChange: (name: string, value: number) => void }> = ({ slot, onChange }) => {
+const CompressorRows: React.FC<{
+  slot: FxSlot;
+  onChange: (name: string, value: number) => void;
+  onInteractionStart?: (label?: string) => void;
+  onInteractionEnd?: (label?: string) => void;
+}> = ({ slot, onChange, onInteractionStart, onInteractionEnd }) => {
   const threshold = Number(slot.params.threshold) || -18;
   const ratio = Number(slot.params.ratio) || 4;
   const attack = Number(slot.params.attack) || 0.005;
@@ -216,6 +256,9 @@ const CompressorRows: React.FC<{ slot: FxSlot; onChange: (name: string, value: n
         step={0.5}
         unit=" dB"
         onChange={(v) => onChange('threshold', clampFxParameterValue('compressor', 'threshold', v))}
+        onInteractionStart={onInteractionStart}
+        onInteractionEnd={onInteractionEnd}
+        dragLabel="Change compressor threshold"
       />
       <ParamSlider
         label="Ratio"
@@ -225,6 +268,9 @@ const CompressorRows: React.FC<{ slot: FxSlot; onChange: (name: string, value: n
         step={0.1}
         unit=":1"
         onChange={(v) => onChange('ratio', clampFxParameterValue('compressor', 'ratio', v))}
+        onInteractionStart={onInteractionStart}
+        onInteractionEnd={onInteractionEnd}
+        dragLabel="Change compressor ratio"
       />
       <ParamSlider
         label="Attack"
@@ -234,6 +280,9 @@ const CompressorRows: React.FC<{ slot: FxSlot; onChange: (name: string, value: n
         step={0.1}
         unit=" ms"
         onChange={(v) => onChange('attack', clampFxParameterValue('compressor', 'attack', v / 1000))}
+        onInteractionStart={onInteractionStart}
+        onInteractionEnd={onInteractionEnd}
+        dragLabel="Change compressor attack"
       />
       <ParamSlider
         label="Release"
@@ -243,6 +292,9 @@ const CompressorRows: React.FC<{ slot: FxSlot; onChange: (name: string, value: n
         step={1}
         unit=" ms"
         onChange={(v) => onChange('release', clampFxParameterValue('compressor', 'release', v / 1000))}
+        onInteractionStart={onInteractionStart}
+        onInteractionEnd={onInteractionEnd}
+        dragLabel="Change compressor release"
       />
       <ParamSlider
         label="Knee"
@@ -252,16 +304,20 @@ const CompressorRows: React.FC<{ slot: FxSlot; onChange: (name: string, value: n
         step={0.5}
         unit=" dB"
         onChange={(v) => onChange('knee', clampFxParameterValue('compressor', 'knee', v))}
+        onInteractionStart={onInteractionStart}
+        onInteractionEnd={onInteractionEnd}
+        dragLabel="Change compressor knee"
       />
     </>
   );
 };
 
-const DelayRows: React.FC<{ slot: FxSlot; onChange: (name: string, value: number) => void }> = ({ slot, onChange }) => {
-  // The contract stores `time` in seconds and `feedback` as a unit
-  // value (0..0.989). The UI shows them in ms and percent; the
-  // conversion happens here so the value reaching the engine is in
-  // DSP units.
+const DelayRows: React.FC<{
+  slot: FxSlot;
+  onChange: (name: string, value: number) => void;
+  onInteractionStart?: (label?: string) => void;
+  onInteractionEnd?: (label?: string) => void;
+}> = ({ slot, onChange, onInteractionStart, onInteractionEnd }) => {
   const time = Number(slot.params.time) || 0.25;
   const feedback = Number(slot.params.feedback) || 0.3;
   return (
@@ -274,6 +330,9 @@ const DelayRows: React.FC<{ slot: FxSlot; onChange: (name: string, value: number
         step={1}
         unit=" ms"
         onChange={(v) => onChange('time', clampFxParameterValue('delay', 'time', v / 1000))}
+        onInteractionStart={onInteractionStart}
+        onInteractionEnd={onInteractionEnd}
+        dragLabel="Change delay time"
       />
       <ParamSlider
         label="Feedback"
@@ -283,12 +342,20 @@ const DelayRows: React.FC<{ slot: FxSlot; onChange: (name: string, value: number
         step={0.5}
         unit=" %"
         onChange={(v) => onChange('feedback', clampFxParameterValue('delay', 'feedback', v / 100))}
+        onInteractionStart={onInteractionStart}
+        onInteractionEnd={onInteractionEnd}
+        dragLabel="Change delay feedback"
       />
     </>
   );
 };
 
-const LimiterRows: React.FC<{ slot: FxSlot; onChange: (name: string, value: number) => void }> = ({ slot, onChange }) => {
+const LimiterRows: React.FC<{
+  slot: FxSlot;
+  onChange: (name: string, value: number) => void;
+  onInteractionStart?: (label?: string) => void;
+  onInteractionEnd?: (label?: string) => void;
+}> = ({ slot, onChange, onInteractionStart, onInteractionEnd }) => {
   const ceiling = Number(slot.params.ceiling) || -0.3;
   const release = Number(slot.params.release) || 0.08;
   const drive = Number(slot.params.drive) || 0;
@@ -302,6 +369,9 @@ const LimiterRows: React.FC<{ slot: FxSlot; onChange: (name: string, value: numb
         step={0.1}
         unit=" dB"
         onChange={(v) => onChange('ceiling', clampFxParameterValue('limiter', 'ceiling', v))}
+        onInteractionStart={onInteractionStart}
+        onInteractionEnd={onInteractionEnd}
+        dragLabel="Change limiter ceiling"
       />
       <ParamSlider
         label="Release"
@@ -311,6 +381,9 @@ const LimiterRows: React.FC<{ slot: FxSlot; onChange: (name: string, value: numb
         step={1}
         unit=" ms"
         onChange={(v) => onChange('release', clampFxParameterValue('limiter', 'release', v / 1000))}
+        onInteractionStart={onInteractionStart}
+        onInteractionEnd={onInteractionEnd}
+        dragLabel="Change limiter release"
       />
       <ParamSlider
         label="Drive"
@@ -320,6 +393,9 @@ const LimiterRows: React.FC<{ slot: FxSlot; onChange: (name: string, value: numb
         step={0.5}
         unit=" dB"
         onChange={(v) => onChange('drive', clampFxParameterValue('limiter', 'drive', v))}
+        onInteractionStart={onInteractionStart}
+        onInteractionEnd={onInteractionEnd}
+        dragLabel="Change limiter drive"
       />
     </>
   );
