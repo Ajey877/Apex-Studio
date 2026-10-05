@@ -16,7 +16,6 @@ import {
   Gauge
 } from 'lucide-react';
 import { VocalTunerSettings, MusicalScale, Channel } from '../types/daw';
-import { audioEngine } from '../audio/audioEngine';
 
 interface VocalTunerModalProps {
   isOpen: boolean;
@@ -185,6 +184,14 @@ export const VocalTunerModal: React.FC<VocalTunerModalProps> = ({
 
         {/* Modal Body */}
         <div className="p-5 overflow-y-auto custom-scrollbar space-y-4">
+          {/* Phase 79: preset/root/scale/knob matrix is STORED INTENT only — wrapped in a
+              single disabled fieldset with a uniform "NOT APPLIED" banner so no control
+              appears to be altering live audio. onUpdateVocalTuner still fires so the
+              values persist as project intent for a future vocal-tuner phase. */}
+          <fieldset disabled className="opacity-60 relative">
+            <div className="absolute -top-2 right-2 px-1.5 py-0.5 rounded text-[9px] font-mono font-bold bg-[#ffaa00]/20 text-[#ffaa00] border border-[#ffaa00]/40 z-10">
+              NOT APPLIED — STORED INTENT
+            </div>
           {/* Quick Presets Bar */}
           <div className="bg-[#18181b] p-3 rounded-lg border border-[#28282b] space-y-2">
             <span className="text-[10px] text-[#888] font-bold uppercase tracking-wider block">PRO VOCAL PRESETS</span>
@@ -268,7 +275,10 @@ export const VocalTunerModal: React.FC<VocalTunerModalProps> = ({
             </div>
           </div>
 
-          {/* Knobs Matrix: Retune Speed, Formants, Vibrato, Humanize */}
+          {/* Knobs Matrix: Retune Speed, Formants, Vibrato, Humanize — STORED INTENT ONLY.
+              Phase 79: these sliders are kept for intent-storage (so a future vocal-tuner
+              phase can read the user's saved preferences) but the panel is disabled and
+              labelled so no control implies the engine is processing audio. */}
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
             {/* Retune Speed */}
             <div className="bg-[#18181b] p-3 rounded-lg border border-[#28282b] flex flex-col justify-between">
@@ -354,6 +364,7 @@ export const VocalTunerModal: React.FC<VocalTunerModalProps> = ({
               <span className="text-[9px] text-[#555] mt-1 font-mono">Micro-variation preserve</span>
             </div>
           </div>
+          </fieldset>
         </div>
 
         {/* Footer */}
