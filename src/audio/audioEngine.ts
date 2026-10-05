@@ -189,7 +189,7 @@ function trackOnlyMixChanged(previous: MixerTrack, next: MixerTrack): TrackMixDi
       mixChanges.push({ slotId: nextSlot.id, mix: nextSlot.mix });
     }
   }
-  const topLevelKeys: ReadonlyArray<keyof MixerTrack> = ['name', 'color', 'volume', 'pan', 'mute', 'solo', 'stereoWidth', 'peakL', 'peakR', 'sidechain', 'routingTargetId', 'sends'];
+  const topLevelKeys: ReadonlyArray<keyof MixerTrack> = ['name', 'color', 'volume', 'pan', 'mute', 'solo', 'peakL', 'peakR', 'sidechain', 'routingTargetId', 'sends'];
   const optionalKeys = ['height', 'armedForRecord'];
   for (const key of optionalKeys) {
     if (!playbackValuesEqual((previous as any)[key], (next as any)[key])) {
@@ -1983,42 +1983,7 @@ class AudioEngine {
   }
 
   public getDefaultSynthParams(): SynthParameters {
-    return {
-      osc1Type: 'sawtooth',
-      osc1Octave: 0,
-      osc1Detune: 0,
-      osc1Mix: 0.8,
-
-      osc2Type: 'square',
-      osc2Octave: 0,
-      osc2Detune: 7,
-      osc2Mix: 0.5,
-
-      filterType: 'lowpass',
-      filterCutoff: 3500,
-      filterResonance: 2.5,
-      filterEnvAmount: 0.4,
-
-      attack: 0.01,
-      decay: 0.25,
-      sustain: 0.6,
-      release: 0.2,
-
-      lfoRate: 4,
-      lfoDepth: 0.1,
-      lfoTarget: 'none',
-
-      fmCarrierMultiplier: 1.0,
-      fmModulatorMultiplier: 2.0,
-      fmModulationIndex: 200,
-      fmFeedback: 0,
-
-      sampleRootNote: 60,
-      sampleGlide: 0,
-      sampleReverse: false,
-      sampleLoop: false,
-      sampleDrive: 0,
-    };
+    return getDefaultSynthParamsValue();
   }
 
   // Metering & Visualizers
@@ -2835,6 +2800,19 @@ class AudioEngine {
   public setMetronome(enabled: boolean) {
     if (this.shouldBlockLiveMutation()) return;
     this.metronome = enabled;
+  }
+
+  /**
+   * Phase 79: apply `ProjectMetadata.masterVolume` to the master bus gain.
+   * This was previously a persisted-but-inert value (documented as such in
+   * midiMappingRuntime). Wiring it here is a one-line setTargetAtTime — no
+   * new DSP, just the same master-gain automation already uses — so it
+   * satisfies "wire if trivial".
+   */
+  public setMasterVolume(linearGain: number) {
+    if (this.shouldBlockLiveMutation() || !this.ctx || !this.masterGain) return;
+    const clamped = Math.max(0, Math.min(1.5, linearGain));
+    this.masterGain.gain.setTargetAtTime(clamped, this.ctx.currentTime, 0.02);
   }
 
   public setStepCallback(cb: (step: number, bar: number) => void) {
@@ -4209,6 +4187,51 @@ class AudioEngine {
     osc.start(now);
     osc.stop(now + 0.09);
   }
+}
+
+/**
+ * Default synth parameters shared by the engine and by preset construction.
+ * Exported at module scope so presets can call it without importing the
+ * `audioEngine` singleton (which would create a circular import between
+ * `audioEngine` and `presets` and trigger a TDZ at module load).
+ */
+export function getDefaultSynthParamsValue(): SynthParameters {
+  return {
+    osc1Type: 'sawtooth',
+    osc1Octave: 0,
+    osc1Detune: 0,
+    osc1Mix: 0.8,
+
+    osc2Type: 'square',
+    osc2Octave: 0,
+    osc2Detune: 7,
+    osc2Mix: 0.5,
+
+    filterType: 'lowpass',
+    filterCutoff: 3500,
+    filterResonance: 2.5,
+    filterEnvAmount: 0.4,
+
+    attack: 0.01,
+    decay: 0.25,
+    sustain: 0.6,
+    release: 0.2,
+
+    lfoRate: 4,
+    lfoDepth: 0.1,
+    lfoTarget: 'none',
+
+    fmCarrierMultiplier: 1.0,
+    fmModulatorMultiplier: 2.0,
+    fmModulationIndex: 200,
+    fmFeedback: 0,
+
+    sampleRootNote: 60,
+    sampleGlide: 0,
+    sampleReverse: false,
+    sampleLoop: false,
+    sampleDrive: 0,
+  };
 }
 
 export const audioEngine = new AudioEngine();

@@ -1,5 +1,5 @@
 import { ProjectState, Channel, MixerTrack, PlaylistClip } from '../types/daw';
-import { audioEngine } from './audioEngine';
+import { getDefaultSynthParamsValue } from './audioEngine';
 
 export const createDefaultMixerTracks = (): MixerTrack[] => [
   {
@@ -266,7 +266,7 @@ export const PRESET_PROJECTS: { id: string; name: string; genre: string; bpm: nu
             { id: 'n2', pitch: 36, start: 6, duration: 1, velocity: 0.9 },
             { id: 'n3', pitch: 36, start: 10, duration: 1, velocity: 0.95 }
           ],
-          synthParams: audioEngine.getDefaultSynthParams()
+          synthParams: getDefaultSynthParamsValue()
         },
         {
           id: 'ch-snare',
@@ -284,7 +284,7 @@ export const PRESET_PROJECTS: { id: string; name: string; genre: string; bpm: nu
             { id: 's1', pitch: 38, start: 4, duration: 1, velocity: 0.9 },
             { id: 's2', pitch: 38, start: 12, duration: 1, velocity: 0.95 }
           ],
-          synthParams: audioEngine.getDefaultSynthParams()
+          synthParams: getDefaultSynthParamsValue()
         },
         {
           id: 'ch-hihat',
@@ -308,7 +308,7 @@ export const PRESET_PROJECTS: { id: string; name: string; genre: string; bpm: nu
             { id: 'h7', pitch: 42, start: 12, duration: 0.5, velocity: 0.85 },
             { id: 'h8', pitch: 42, start: 14, duration: 0.5, velocity: 0.7 }
           ],
-          synthParams: audioEngine.getDefaultSynthParams()
+          synthParams: getDefaultSynthParamsValue()
         },
         {
           id: 'ch-808',
@@ -328,7 +328,7 @@ export const PRESET_PROJECTS: { id: string; name: string; genre: string; bpm: nu
             { id: 'b3', pitch: 39, start: 10, duration: 4, velocity: 0.9 }
           ],
           synthParams: {
-            ...audioEngine.getDefaultSynthParams(),
+            ...getDefaultSynthParamsValue(),
             osc1Type: 'sine',
             osc2Type: 'triangle',
             osc1Mix: 0.9,
@@ -360,7 +360,7 @@ export const PRESET_PROJECTS: { id: string; name: string; genre: string; bpm: nu
             { id: 'p6', pitch: 65, start: 14, duration: 2, velocity: 0.7 }
           ],
           synthParams: {
-            ...audioEngine.getDefaultSynthParams(),
+            ...getDefaultSynthParamsValue(),
             fmCarrierMultiplier: 1.0,
             fmModulatorMultiplier: 3.5,
             fmModulationIndex: 280,
@@ -460,7 +460,7 @@ export const PRESET_PROJECTS: { id: string; name: string; genre: string; bpm: nu
           solo: false,
           steps: [true, false, false, false, true, false, false, false, true, false, false, false, true, false, false, false],
           notes: [{ id: 'k1', pitch: 36, start: 0, duration: 1, velocity: 1 }],
-          synthParams: audioEngine.getDefaultSynthParams()
+          synthParams: getDefaultSynthParamsValue()
         },
         {
           id: 'ch-sw-snare',
@@ -475,7 +475,7 @@ export const PRESET_PROJECTS: { id: string; name: string; genre: string; bpm: nu
           solo: false,
           steps: [false, false, false, false, true, false, false, false, false, false, false, false, true, false, false, false],
           notes: [{ id: 's1', pitch: 38, start: 4, duration: 1, velocity: 1 }],
-          synthParams: audioEngine.getDefaultSynthParams()
+          synthParams: getDefaultSynthParamsValue()
         },
         {
           id: 'ch-sw-bass',
@@ -500,7 +500,7 @@ export const PRESET_PROJECTS: { id: string; name: string; genre: string; bpm: nu
             { id: 'b8', pitch: 44, start: 14, duration: 1, velocity: 0.8 }
           ],
           synthParams: {
-            ...audioEngine.getDefaultSynthParams(),
+            ...getDefaultSynthParamsValue(),
             osc1Type: 'sawtooth',
             osc2Type: 'sawtooth',
             osc1Detune: -5,
@@ -528,7 +528,7 @@ export const PRESET_PROJECTS: { id: string; name: string; genre: string; bpm: nu
             { id: 'l3', pitch: 67, start: 10, duration: 4, velocity: 0.9 }
           ],
           synthParams: {
-            ...audioEngine.getDefaultSynthParams(),
+            ...getDefaultSynthParamsValue(),
             osc1Type: 'sawtooth',
             osc2Type: 'square',
             osc1Mix: 0.8,
