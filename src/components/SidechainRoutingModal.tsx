@@ -59,15 +59,16 @@ export const SidechainRoutingModal: React.FC<SidechainRoutingModalProps> = ({
   const handleApplyRouting = () => {
     const updated = mixerTracks.map(t => {
       if (t.id === selectedDestTrackId) {
+        // Phase 79: only emit the fields the engine actually consumes
+        // (enabled, sourceTrackId, amount, attackMs, releaseMs). The
+        // threshold/lowFreqOnly/highPassFilterHz/gainReductionDb fields
+        // existed only as UI placeholders and are stripped.
         const sidechain: SidechainSettings = {
           enabled: isEnabled,
           sourceTrackId,
-          threshold: thresholdDb,
           amount: duckAmount,
           attackMs,
           releaseMs,
-          lowFreqOnly,
-          highPassFilterHz
         };
         return { ...t, sidechain };
       }

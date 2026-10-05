@@ -75,13 +75,25 @@ export interface GrossBeatState {
 export interface SidechainSettings {
   enabled: boolean;
   sourceTrackId: number; // Mixer track ID of trigger (e.g. 1 for Kick)
-  threshold: number; // dB (-36 to 0)
+  /**
+   * Phase 79: the following three fields were previously exposed in the UI
+   * and persisted, but the engine's sidechain ducking is note-triggered, not
+   * level-detected — there is no threshold detector, no frequency-selective
+   * ducking, and no detector high-pass. They are preserved here as OPTIONAL
+   * fields for backward-compat loading; normalizeProjectState strips them
+   * from the normalized ProjectState so they no longer survive a save/load
+   * round-trip into the active document. They will return if a Phase 88
+   * level-detected sidechain compressor is implemented.
+   */
+  /** @deprecated Obsolete Phase 79 — persisted from an inert UI control; stripped on load. */
+  threshold?: number;
   amount: number; // 0 to 1.0 (ducking depth)
   attackMs: number; // 1 to 50 ms
   releaseMs: number; // 20 to 500 ms
-  lowFreqOnly: boolean; // Duck only frequencies below 150 Hz
-  highPassFilterHz?: number; // Sidechain detector filter cutoff
-  gainReductionDb?: number; // Dynamic readout
+  /** @deprecated Obsolete Phase 79 — persisted from an inert UI control; stripped on load. */
+  lowFreqOnly?: boolean;
+  /** @deprecated Obsolete Phase 79 — persisted from an inert UI control; stripped on load. */
+  highPassFilterHz?: number;
 }
 
 export interface TakeRegion {
@@ -120,14 +132,20 @@ export interface PolyphonicBlob {
 
 export type WarpMode = 'beats' | 'tones' | 'texture' | 'complex_pro' | 'repitch';
 
+/**
+ * Phase 79: SpatialAudioSettings is retained as a type-only export for
+ * backward-compat hydration (normalizeProjectState needs to recognise the
+ * shape to strip it from legacy clips). No mixer/instrument/clip DSP reads
+ * it, and no UI edits it. It will not round-trip into normalized state.
+ */
 export interface SpatialAudioSettings {
   enabled: boolean;
-  azimuthDeg: number; // -180 to 180 horizontal degrees
-  elevationDeg: number; // -90 to 90 height degrees
-  distanceMeters: number; // 0.5 to 10 meters
+  azimuthDeg: number;
+  elevationDeg: number;
+  distanceMeters: number;
   binauralRoomSize: 'studio_dry' | 'concert_hall' | 'cathedral' | 'cinema_atmos';
-  lfeSubLevel: number; // Low Frequency Effects / Subwoofer send level
-  spread: number; // 0 to 1
+  lfeSubLevel: number;
+  spread: number;
 }
 
 export interface VideoScoringTrack {
@@ -299,10 +317,13 @@ export interface SynthParameters {
   lfoDepth: number; // 0 - 1.0
   lfoTarget: 'pitch' | 'filter' | 'volume' | 'none';
 
-  // Wavetable & Unison
+  // Wavetable & Unison (preview-only modal controls; not in DSP. Phase 79:
+  // unisonSpread dropped — was persisted into synthParams but no consumer
+  // ever read it. Voices/Detune kept on the type because the wavetable
+  // modal's local UI state and future wavetable phases may reference them;
+  // they are preview-only and not read by any audio engine consumer today.)
   unisonVoices?: number; // 1 to 7 voices
   unisonDetune?: number; // 0 to 50 cents
-  unisonSpread?: number; // 0 to 1.0 stereo pan spread
 
   // FM Synth
   fmCarrierMultiplier: number;
@@ -350,7 +371,10 @@ export interface PlaylistClip {
   fadeInBars?: number; // 0 to 1 bar
   fadeOutBars?: number; // 0 to 1 bar
   warpMode?: WarpMode; // Beats, Tones, Texture, Complex Pro
-  spatialAudio?: SpatialAudioSettings;
+  // Phase 79: spatialAudio was persisted on clips but no DSP consumer, no
+  // UI editor, no playback code ever read it. Removed from the type;
+  // normalizeProjectState strips it from legacy documents on load so old
+  // files still parse without carrying dead data.
   // Automation specific
   automationTarget?: {
     type: AutomationTargetType;
@@ -500,7 +524,17 @@ export interface MixerTrack {
   pan: number; // -1.0 to 1.0
   mute: boolean;
   solo: boolean;
-  stereoWidth: number; // 0 = Mono, 1.0 = Normal, 2.0 = Extra wide
+  /**
+   * Phase 79: stereoWidth was persisted on every mixer track and populated by
+   * presets, but no DSP consumer, no UI control, and no live-sync path ever
+   * read it. It is retained as OPTIONAL for backward-compat (old project
+   * files still have it); normalizeProjectState strips it from the
+   * normalized active ProjectState so it does not survive a save/load cycle.
+   * If a future stereo-widener phase implements this, it will re-add the
+   * field with a real consumer and a UI control.
+   * @deprecated Obsolete Phase 79 — persisted inert value; stripped on load.
+   */
+  stereoWidth?: number;
   fxSlots: FxSlot[];
   peakL: number;
   peakR: number;

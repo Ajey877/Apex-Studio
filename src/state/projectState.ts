@@ -28,6 +28,64 @@ const isGrossBeatState = (v: unknown): v is GrossBeatState => {
   if (!Array.isArray(v.gateSteps) || v.gateSteps.length !== 16) return false;
   return v.gateSteps.every(step => typeof step === 'boolean');
 };
+
+/**
+ * Phase 79: strip obsolete audio-affecting fields from legacy documents so
+ * they can no longer masquerade as real DSP. These helpers are called on
+ * channels / clips / mixer tracks during normalizeProjectState so:
+ *   - old project files still load (no throw);
+ *   - the obsolete fields DO NOT survive into the normalized ProjectState;
+ *   - subsequent re-saves will not emit them.
+ *
+ * When a real consumer is ever added for a field, remove the strip for that
+ * field and wire it up — do NOT add a new persisted audio field without
+ * registering it in the consumer-invariant test (see
+ * phase79.projectStateConsumers.test.ts).
+ */
+
+// Obsolete fields on Channel.synthParams that were persisted but never read by
+// any audio engine path. Drop them from legacy synthParams on load.
+const OBSOLETE_SYNTH_PARAM_KEYS = ['unisonSpread'] as const;
+
+function stripObsoleteChannelFields<C extends { synthParams?: Record<string, unknown> | null }>(channel: C): C {
+  if (!channel.synthParams || typeof channel.synthParams !== 'object') return channel;
+  let cleaned: Record<string, unknown> | undefined;
+  for (const key of OBSOLETE_SYNTH_PARAM_KEYS) {
+    if (key in channel.synthParams) {
+      if (!cleaned) cleaned = { ...channel.synthParams };
+      delete cleaned[key];
+    }
+  }
+  if (!cleaned) return channel;
+  return { ...channel, synthParams: cleaned as C['synthParams'] };
+}
+
+// Obsolete fields on mixer tracks (stereoWidth, inert sidechain fields).
+function stripObsoleteMixerTrackFields<T extends { stereoWidth?: unknown; sidechain?: Record<string, unknown> | null }>(track: T): T {
+  const next: Record<string, unknown> = { ...track };
+  delete next.stereoWidth;
+  if (track.sidechain && typeof track.sidechain === 'object') {
+    const sc = { ...track.sidechain };
+    // threshold/lowFreqOnly/highPassFilterHz/gainReductionDb are inert UI ghosts.
+    delete sc.threshold;
+    delete sc.lowFreqOnly;
+    delete sc.highPassFilterHz;
+    delete sc.gainReductionDb;
+    next.sidechain = sc as T['sidechain'];
+  }
+  return next as T;
+}
+
+// Obsolete fields on PlaylistClip.
+function stripObsoleteClipFields(clip: PlaylistClip): PlaylistClip {
+  // Cast-then-omit: spatialAudio is no longer on the PlaylistClip type so we
+  // strip via a record intermediate. Legacy objects parsed from JSON may still
+  // carry the key; we must drop it.
+  const legacy = clip as unknown as Record<string, unknown>;
+  if (!('spatialAudio' in legacy)) return clip;
+  const { spatialAudio: _dropped, ...rest } = legacy;
+  return rest as unknown as PlaylistClip;
+}
 import { DEFAULT_TIMELINE_BARS, normalizeTimelineBars, revalidateProjectTimeline } from './playlistTimeline';
 import {
   MASTER_MIXER_TRACK_ID,
@@ -260,7 +318,11 @@ export const normalizeProjectState = (input: unknown): ProjectState => {
       : clone((Array.isArray(candidate.channels) ? candidate.channels : defaults.channels)
         .map(channel => channel.customSample)
         .filter((sample): sample is NonNullable<typeof sample> => Boolean(sample?.id))),
-    channels: Array.isArray(candidate.channels) ? clone(candidate.channels) : defaults.channels,
+    // Phase 79 backward-compat: strip obsolete `unisonSpread` from every
+    // channel's synthParams if an older project saved it. The field was never
+    // consumed by any DSP and must not round-trip back out on the next save.
+    channels: (Array.isArray(candidate.channels) ? clone(candidate.channels) : defaults.channels)
+      .map(stripObsoleteChannelFields),
     playlistTracks: Array.isArray(candidate.playlistTracks) ? clone(candidate.playlistTracks) : defaults.playlistTracks,
     // Phase 48 legacy recovery: an audio clip that reached persistence without
     // an `audioBufferId` (an older build could publish one) is silent, blocks
@@ -269,8 +331,10 @@ export const normalizeProjectState = (input: unknown): ProjectState => {
     // given an invented buffer id.
     playlistClips: Array.isArray(candidate.playlistClips)
       ? markAudioClipsMissingBufferId(clone(candidate.playlistClips) as PlaylistClip[])
+          .map(stripObsoleteClipFields)
       : defaults.playlistClips,
-    mixerTracks: Array.isArray(candidate.mixerTracks) ? clone(candidate.mixerTracks) : defaults.mixerTracks,
+    mixerTracks: (Array.isArray(candidate.mixerTracks) ? clone(candidate.mixerTracks) : defaults.mixerTracks)
+      .map(stripObsoleteMixerTrackFields),
     recordings: Array.isArray(candidate.recordings) ? clone(candidate.recordings) : defaults.recordings,
     comments: Array.isArray(candidate.comments) ? clone(candidate.comments) : defaults.comments,
     collaborators: Array.isArray(candidate.collaborators) ? clone(candidate.collaborators) : defaults.collaborators,
