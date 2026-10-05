@@ -118,6 +118,20 @@ function scheduleFade(gain: GainNode, start: number, duration: number, fadeInBar
   }
 }
 
+/**
+ * Phase 79 note: this is a SECOND offline renderer that is NOT used for
+ * production export. The production export path is `AudioEngine.renderTimelineOffline`
+ * (audioEngine.ts), which shares the live graph and honours FX, mixer routing,
+ * and the Gross Beat master gate.
+ *
+ * This function is kept for the integrity tests in `exportStemIntegrity.test.ts`
+ * which exercise `isAudioClipExportable`, `assertAudioClipsExportable`, and
+ * `getOfflineRenderPlan` — the utility helpers defined ABOVE this function —
+ * against a minimal offline path. DO NOT route new code through this function.
+ * The helpers at the top of this module (`isAudioClipExportable`,
+ * `assertAudioClipsExportable`, `getOfflineRenderPlan`) ARE production-critical
+ * and used by audioEngine.ts; they must not be deleted.
+ */
 export async function renderProjectTimelineOffline(options: OfflineProjectRendererOptions): Promise<AudioBuffer> {
   // Fail before any rendering starts: a missing/placeholder/unavailable audio
   // asset must reject the export instead of rendering a silent stand-in.

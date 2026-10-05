@@ -4,6 +4,7 @@ import type {
   Channel,
   CollabComment,
   FxSlot,
+  GrossBeatState,
   MasterMacroKnob,
   MidiMapping,
   MixerTrack,
@@ -12,6 +13,7 @@ import type {
   ProjectState,
   VocalTunerSettings
 } from '../types/daw';
+import { DEFAULT_GROSS_BEAT_STATE } from './projectState';
 
 /**
  * Authoritative runtime mutation boundary for ProjectState.
@@ -199,6 +201,26 @@ export const updateVocalTunerInProjectState = (
   ...state,
   vocalTuner: vocalTunerSettings
 });
+
+/**
+ * Phase 79: atomic update for Gross Beat gate state. Like macroKnobs, the
+ * project document owns the state — every modal toggle/step click/preset
+ * select goes through this mutator so undo/redo, save/load, and project
+ * replacement all preserve the pattern.
+ */
+export const updateGrossBeatInProjectState = (
+  state: ProjectState,
+  patch: Partial<GrossBeatState>
+): ProjectState => {
+  const base = state.grossBeatState ?? DEFAULT_GROSS_BEAT_STATE;
+  const next: GrossBeatState = { ...base, ...patch };
+  // Defensive: always keep exactly 16 boolean entries.
+  if (!Array.isArray(next.gateSteps) || next.gateSteps.length !== 16 || next.gateSteps.some(s => typeof s !== 'boolean')) {
+    next.gateSteps = [...DEFAULT_GROSS_BEAT_STATE.gateSteps];
+  }
+  next.mix = Math.max(0, Math.min(1, next.mix));
+  return { ...state, grossBeatState: next };
+};
 
 export const updateMidiMappingsInProjectState = (
   state: ProjectState,

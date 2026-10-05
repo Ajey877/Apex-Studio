@@ -1,5 +1,6 @@
-import type { Channel, MixerTrack, PlaylistClip, PlaylistTrack, ProjectState } from '../types/daw';
+import type { Channel, GrossBeatState, MixerTrack, PlaylistClip, PlaylistTrack, ProjectState } from '../types/daw';
 import { getSelectedPatternLengthSteps } from './patternLength';
+import { DEFAULT_GROSS_BEAT_STATE } from './projectState';
 
 /**
  * Phase 66 F2: re-publish the authoritative project runtime state to the live
@@ -26,6 +27,8 @@ export interface LiveEngineResynchronizationPort {
   setBpm(bpm: number): void;
   setSwing(swing: number): void;
   setMetronome(enabled: boolean): void;
+  setGrossBeatState(state: GrossBeatState): void;
+  setMasterVolume(linearGain: number): void;
   isPlaybackActive(): boolean;
   synchronizePlaybackState(update: {
     channels?: Channel[];
@@ -55,6 +58,15 @@ export function resynchronizeLiveEngineFromProjectState(
   engine.setBpm(state.meta.bpm);
   engine.setSwing(state.meta.swing);
   engine.setMetronome(options.metronome);
+  // Phase 79: Gross Beat state is project-owned. Any path that republishes
+  // project state to the engine (load, undo/redo, post-offline-resync) must
+  // push the gate pattern so the master bus can't drift out of sync with the
+  // document.
+  engine.setGrossBeatState(state.grossBeatState ?? DEFAULT_GROSS_BEAT_STATE);
+  // Phase 79: ProjectMetadata.masterVolume was previously persisted but not
+  // applied; wiring it here (trivial setTargetAtTime on the existing master
+  // gain node) makes it real without adding new DSP.
+  engine.setMasterVolume(typeof state.meta.masterVolume === 'number' ? state.meta.masterVolume : 1.0);
 
   // A take the renderer resumed is a running take: project edits belong in it via
   // the same merge path a live edit uses, so in-flight automation values survive

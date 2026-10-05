@@ -27,9 +27,10 @@ const cloneClip = (clip: PlaylistClip): PlaylistClip => ({
   // Deep-copy nested objects so duplicates / split halves never share state
   // with their source clip (a shared automationTarget would let a rebind on
   // one clip leak into the other).
+  // Phase 79: spatialAudio was dropped from PlaylistClip (no DSP consumer),
+  // so the clone no longer needs to copy it.
   automationTarget: clip.automationTarget ? { ...clip.automationTarget } : undefined,
   automationPoints: clip.automationPoints?.map(point => ({ ...point })),
-  spatialAudio: clip.spatialAudio ? { ...clip.spatialAudio } : undefined
 });
 
 // Split remapping keeps full float precision on purpose: quantizing remapped X

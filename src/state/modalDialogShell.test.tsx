@@ -51,6 +51,7 @@ import { VocalTunerModal } from '../components/VocalTunerModal';
 import { WarpAudioProcessorModal } from '../components/WarpAudioProcessorModal';
 import { WavetableSynthModal } from '../components/WavetableSynthModal';
 import { DEFAULT_PROJECT } from '../audio/presets';
+import { DEFAULT_GROSS_BEAT_STATE } from './projectState';
 import type { MasteringSuiteState, VocalTunerSettings } from '../types/daw';
 import type { ProjectReplacementPlan as ReplacementPlan } from '../state/projectReplacement';
 
@@ -327,8 +328,14 @@ const MODAL_CASES: ModalCase[] = [
     name: 'Gross Beat', file: 'GrossBeatModal.tsx', modalId: 'gross-beat-modal',
     titleId: 'gross-beat-modal-title', titleText: 'MASTER GATE',
     closeLabel: 'Close Gross Beat', overlayClass: OVERLAY_STUDIO,
-    open: React.createElement(GrossBeatModal, { isOpen: true, onClose: noop, currentStep: 0, isPlaying: false }),
-    closed: React.createElement(GrossBeatModal, { isOpen: false, onClose: noop, currentStep: 0, isPlaying: false }),
+    open: React.createElement(GrossBeatModal, {
+      isOpen: true, onClose: noop, currentStep: 0, isPlaying: false,
+      grossBeatState: DEFAULT_GROSS_BEAT_STATE, onUpdateGrossBeat: noop,
+    }),
+    closed: React.createElement(GrossBeatModal, {
+      isOpen: false, onClose: noop, currentStep: 0, isPlaying: false,
+      grossBeatState: DEFAULT_GROSS_BEAT_STATE, onUpdateGrossBeat: noop,
+    }),
   },
   {
     name: 'Master Macro Rack', file: 'MasterMacroRackModal.tsx', modalId: 'fl-master-macro-modal',

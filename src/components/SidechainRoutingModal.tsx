@@ -1,18 +1,12 @@
 import React, { useState, useEffect } from 'react';
 import { ModalFrame } from './ModalFrame';
 import { 
-  Sliders, 
   X, 
   Sparkles, 
-  Activity, 
-  Radio, 
   ArrowRight, 
-  Volume2, 
-  RotateCcw,
   Play,
   Check,
-  Zap,
-  Filter
+  Zap
 } from 'lucide-react';
 import { MixerTrack, SidechainSettings } from '../types/daw';
 import { audioEngine } from '../audio/audioEngine';
@@ -33,12 +27,14 @@ export const SidechainRoutingModal: React.FC<SidechainRoutingModalProps> = ({
   const [selectedDestTrackId, setSelectedDestTrackId] = useState<number>(2); // e.g. Bass track #2
   const [sourceTrackId, setSourceTrackId] = useState<number>(1); // e.g. Kick track #1
   const [isEnabled, setIsEnabled] = useState<boolean>(true);
-  const [thresholdDb, setThresholdDb] = useState<number>(-18);
+  // Inert parameters preserved for forward-compat (Phase 88 level-detected sidechain);
+  // not presented as controls today.
+  const [thresholdDb] = useState<number>(-18);
   const [duckAmount, setDuckAmount] = useState<number>(0.85);
   const [attackMs, setAttackMs] = useState<number>(5);
   const [releaseMs, setReleaseMs] = useState<number>(120);
-  const [lowFreqOnly, setLowFreqOnly] = useState<boolean>(true);
-  const [highPassFilterHz, setHighPassFilterHz] = useState<number>(140);
+  const [lowFreqOnly] = useState<boolean>(true);
+  const [highPassFilterHz] = useState<number>(140);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
 
   // Meter animation
@@ -63,15 +59,16 @@ export const SidechainRoutingModal: React.FC<SidechainRoutingModalProps> = ({
   const handleApplyRouting = () => {
     const updated = mixerTracks.map(t => {
       if (t.id === selectedDestTrackId) {
+        // Phase 79: only emit the fields the engine actually consumes
+        // (enabled, sourceTrackId, amount, attackMs, releaseMs). The
+        // threshold/lowFreqOnly/highPassFilterHz/gainReductionDb fields
+        // existed only as UI placeholders and are stripped.
         const sidechain: SidechainSettings = {
           enabled: isEnabled,
           sourceTrackId,
-          threshold: thresholdDb,
           amount: duckAmount,
           attackMs,
           releaseMs,
-          lowFreqOnly,
-          highPassFilterHz
         };
         return { ...t, sidechain };
       }
@@ -172,16 +169,16 @@ export const SidechainRoutingModal: React.FC<SidechainRoutingModalProps> = ({
                   <option key={m.id} value={m.id}>Track #{m.id}: {m.name}</option>
                 ))}
               </select>
-              <span className="text-[9px] text-[#666] block">Audio peaks from this track trigger the compression envelope</span>
+              <span className="text-[9px] text-[#666] block">Notes on this track trigger the ducking envelope (no level detector)</span>
             </div>
 
-            {/* Dynamic Arrow & Gain Reduction Meter */}
+            {/* Preview meter — visual rhythm preview only (not reading live audio). */}
             <div className="flex flex-col items-center justify-center gap-1 px-2">
               <div className="flex items-center gap-2">
                 <ArrowRight className="w-5 h-5 text-[#ffaa00]" />
               </div>
               <div className="text-[9px] font-mono text-[#ffaa00] font-bold">
-                -{meterReduction.toFixed(1)} dB
+                preview ~{meterReduction.toFixed(1)} dB
               </div>
               <div className="w-20 h-2 bg-[#222] rounded-full overflow-hidden border border-[#333]">
                 <div 
@@ -189,6 +186,7 @@ export const SidechainRoutingModal: React.FC<SidechainRoutingModalProps> = ({
                   className="h-full bg-gradient-to-r from-[#00ff88] via-[#ffaa00] to-red-500 transition-all duration-75"
                 />
               </div>
+              <span className="text-[8px] text-[#555]">visual preview</span>
             </div>
 
             {/* Target Destination Track Selection */}
@@ -207,25 +205,13 @@ export const SidechainRoutingModal: React.FC<SidechainRoutingModalProps> = ({
             </div>
           </div>
 
-          {/* Sidechain Parameters Grid */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
-            {/* Threshold */}
-            <div className="bg-[#18181c] p-3 rounded-xl border border-[#28282e] space-y-2">
-              <div className="flex justify-between text-xs">
-                <span className="text-white font-bold">THRESHOLD</span>
-                <span className="text-[#ffaa00] font-mono font-bold">{thresholdDb} dB</span>
-              </div>
-              <input
-                type="range"
-                min="-36"
-                max="0"
-                value={thresholdDb}
-                onChange={(e) => setThresholdDb(Number(e.target.value))}
-                className="w-full accent-[#ffaa00]"
-              />
-              <span className="text-[9px] text-[#777] block">Trigger level to initiate ducking envelope</span>
-            </div>
-
+          {/* Sidechain Parameters Grid.
+              Phase 79: threshold / lowFreqOnly / highPassFilterHz were displayed but
+              the engine's sidechain is a note-triggered envelope (not level-detected),
+              so those three controls had no effect. They are removed from the UI
+              rather than presented as functional. Threshold/lowFreq controls will
+              return when Phase 88 ships a real level-detected sidechain compressor. */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
             {/* Duck Depth / Ratio */}
             <div className="bg-[#18181c] p-3 rounded-xl border border-[#28282e] space-y-2">
               <div className="flex justify-between text-xs">
@@ -279,41 +265,11 @@ export const SidechainRoutingModal: React.FC<SidechainRoutingModalProps> = ({
             </div>
           </div>
 
-          {/* Frequency-Selective Sidechain Filtering */}
-          <div className="bg-[#18181c] p-4 rounded-xl border border-[#28282e] space-y-3">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <Filter className="w-4 h-4 text-[#ffaa00]" />
-                <span className="text-xs font-bold text-white uppercase">FREQUENCY-SELECTIVE LOW-END DUCKING (SUB DUCK)</span>
-              </div>
-              <label className="flex items-center gap-2 text-xs text-white cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={lowFreqOnly}
-                  onChange={(e) => setLowFreqOnly(e.target.checked)}
-                  className="accent-[#ffaa00]"
-                />
-                <span>Duck Low Frequencies Only (&lt;150Hz)</span>
-              </label>
-            </div>
-
-            <p className="text-[10px] text-[#777]">
-              When enabled, only the sub-bass frequencies below the crossover are ducked when the kick hits, keeping the highs and mid-harmonics untouched.
-            </p>
-
-            <div className="flex items-center gap-3">
-              <span className="text-xs text-[#888] font-mono">Detector High-Pass Cutoff:</span>
-              <input
-                type="range"
-                min="40"
-                max="500"
-                value={highPassFilterHz}
-                onChange={(e) => setHighPassFilterHz(Number(e.target.value))}
-                className="w-48 accent-[#ffaa00]"
-              />
-              <span className="text-xs font-mono font-bold text-white">{highPassFilterHz} Hz</span>
-            </div>
-          </div>
+          {/* Frequency-selective / detector controls intentionally not rendered.
+              They are preserved in the SidechainSettings type and persisted as
+              intent for Phase 88 (level-detected sidechain) but do not reach DSP
+              today, so displaying them would imply audio behavior that does not
+              exist. */}
         </div>
 
         {/* Footer */}

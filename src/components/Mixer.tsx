@@ -374,14 +374,16 @@ export const Mixer: React.FC<MixerProps> = ({
                   <button
                     onClick={() => {
                       const cur = selectedTrack.sidechain?.enabled;
+                      // Phase 79: only emit the sidechain fields the engine
+                      // actually consumes (enabled/source/amount/attack/release).
+                      // threshold / lowFreqOnly / highPassFilterHz were UI-only
+                      // and were never wired to DSP — they are stripped.
                       const newSidechain = {
                         enabled: !cur,
                         sourceTrackId: selectedTrack.sidechain?.sourceTrackId ?? 1,
-                        threshold: selectedTrack.sidechain?.threshold ?? -18,
                         amount: selectedTrack.sidechain?.amount ?? 0.75,
                         attackMs: selectedTrack.sidechain?.attackMs ?? 5,
                         releaseMs: selectedTrack.sidechain?.releaseMs ?? 140,
-                        lowFreqOnly: selectedTrack.sidechain?.lowFreqOnly ?? true
                       };
                       onUpdateTrack(selectedTrack.id, { sidechain: newSidechain });
                       audioEngine.updateMixerTrack({ ...selectedTrack, sidechain: newSidechain });
@@ -439,22 +441,8 @@ export const Mixer: React.FC<MixerProps> = ({
                       <span className="font-mono text-[#ff6e00] text-[9px]">{Math.round(selectedTrack.sidechain.amount * 100)}%</span>
                     </div>
 
-                    <div className="flex items-center justify-between text-[9px] text-[#777]">
-                      <span>LOW FREQ ONLY (&lt;150Hz)</span>
-                      <button
-                        onClick={() => {
-                          const sc = { ...selectedTrack.sidechain!, lowFreqOnly: !selectedTrack.sidechain?.lowFreqOnly };
-                          onUpdateTrack(selectedTrack.id, { sidechain: sc });
-                          audioEngine.updateMixerTrack({ ...selectedTrack, sidechain: sc });
-                        }}
-                        className={`px-1.5 py-0.5 rounded text-[8px] font-bold ${
-                          selectedTrack.sidechain.lowFreqOnly
-                            ? 'bg-[#00bcd4]/20 text-[#00bcd4] border border-[#00bcd4]/40'
-                            : 'bg-[#222225] text-[#666]'
-                        }`}
-                      >
-                        {selectedTrack.sidechain.lowFreqOnly ? 'LOWS ONLY' : 'FULL BAND'}
-                      </button>
+                    <div className="text-[9px] text-[#666] italic pt-0.5">
+                      Note-triggered envelope — no level detector.
                     </div>
                   </div>
                 )}

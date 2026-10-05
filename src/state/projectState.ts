@@ -1,7 +1,91 @@
-import type { ProjectState, Channel, PlaylistClip } from '../types/daw';
+import type { GrossBeatState, ProjectState, Channel, PlaylistClip } from '../types/daw';
 import { audioEngine } from '../audio/audioEngine';
 import { createDefaultMixerTracks, createDefaultPlaylistTracks } from '../audio/presets';
 import { markAudioClipsMissingBufferId } from './playlistClipIntegrity';
+
+/**
+ * Phase 79: default Gross Beat gate state used when the persisted project has
+ * no grossBeatState field (pre-migration documents) or when the field is
+ * malformed. Must match audioEngine's initial state exactly so that
+ * bootstrapping a fresh project leaves the engine in sync.
+ *
+ * Inlined (rather than re-exporting `grossBeatAlternatingSteps`) to avoid a
+ * circular import at module load — projectState.ts is loaded very early by
+ * presets and tests, and pulling in audioEngine via grossBeatGate creates a
+ * TDZ cycle when a test imports the modal first.
+ */
+const DEFAULT_GROSS_BEAT_STEPS: boolean[] = [true, false, true, false, true, false, true, false, true, false, true, false, true, false, true, false];
+export const DEFAULT_GROSS_BEAT_STATE: GrossBeatState = {
+  enabled: false,
+  mix: 1.0,
+  gateSteps: DEFAULT_GROSS_BEAT_STEPS,
+};
+
+const isGrossBeatState = (v: unknown): v is GrossBeatState => {
+  if (!isRecord(v)) return false;
+  if (typeof v.enabled !== 'boolean') return false;
+  if (typeof v.mix !== 'number' || !Number.isFinite(v.mix)) return false;
+  if (!Array.isArray(v.gateSteps) || v.gateSteps.length !== 16) return false;
+  return v.gateSteps.every(step => typeof step === 'boolean');
+};
+
+/**
+ * Phase 79: strip obsolete audio-affecting fields from legacy documents so
+ * they can no longer masquerade as real DSP. These helpers are called on
+ * channels / clips / mixer tracks during normalizeProjectState so:
+ *   - old project files still load (no throw);
+ *   - the obsolete fields DO NOT survive into the normalized ProjectState;
+ *   - subsequent re-saves will not emit them.
+ *
+ * When a real consumer is ever added for a field, remove the strip for that
+ * field and wire it up — do NOT add a new persisted audio field without
+ * registering it in the consumer-invariant test (see
+ * phase79.projectStateConsumers.test.ts).
+ */
+
+// Obsolete fields on Channel.synthParams that were persisted but never read by
+// any audio engine path. Drop them from legacy synthParams on load.
+const OBSOLETE_SYNTH_PARAM_KEYS = ['unisonSpread'] as const;
+
+function stripObsoleteChannelFields<C extends { synthParams?: Record<string, unknown> | null }>(channel: C): C {
+  if (!channel.synthParams || typeof channel.synthParams !== 'object') return channel;
+  let cleaned: Record<string, unknown> | undefined;
+  for (const key of OBSOLETE_SYNTH_PARAM_KEYS) {
+    if (key in channel.synthParams) {
+      if (!cleaned) cleaned = { ...channel.synthParams };
+      delete cleaned[key];
+    }
+  }
+  if (!cleaned) return channel;
+  return { ...channel, synthParams: cleaned as C['synthParams'] };
+}
+
+// Obsolete fields on mixer tracks (stereoWidth, inert sidechain fields).
+function stripObsoleteMixerTrackFields<T extends { stereoWidth?: unknown; sidechain?: Record<string, unknown> | null }>(track: T): T {
+  const next: Record<string, unknown> = { ...track };
+  delete next.stereoWidth;
+  if (track.sidechain && typeof track.sidechain === 'object') {
+    const sc = { ...track.sidechain };
+    // threshold/lowFreqOnly/highPassFilterHz/gainReductionDb are inert UI ghosts.
+    delete sc.threshold;
+    delete sc.lowFreqOnly;
+    delete sc.highPassFilterHz;
+    delete sc.gainReductionDb;
+    next.sidechain = sc as T['sidechain'];
+  }
+  return next as T;
+}
+
+// Obsolete fields on PlaylistClip.
+function stripObsoleteClipFields(clip: PlaylistClip): PlaylistClip {
+  // Cast-then-omit: spatialAudio is no longer on the PlaylistClip type so we
+  // strip via a record intermediate. Legacy objects parsed from JSON may still
+  // carry the key; we must drop it.
+  const legacy = clip as unknown as Record<string, unknown>;
+  if (!('spatialAudio' in legacy)) return clip;
+  const { spatialAudio: _dropped, ...rest } = legacy;
+  return rest as unknown as PlaylistClip;
+}
 import { DEFAULT_TIMELINE_BARS, normalizeTimelineBars, revalidateProjectTimeline } from './playlistTimeline';
 import {
   MASTER_MIXER_TRACK_ID,
@@ -15,6 +99,8 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
 
 const clone = <T>(value: T): T => structuredClone(value);
+
+const clamp01 = (n: number): number => Math.max(0, Math.min(1, n));
 
 /**
  * Normalizes mixer routing references at the project-state boundary.
@@ -144,7 +230,12 @@ export const createDefaultProjectState = (): ProjectState => {
     recordings: [],
     comments: [],
     collaborators: [],
-    midiMappings: []
+    midiMappings: [],
+    // Phase 79: Gross Beat is owned by ProjectState (like macroKnobs); the
+    // engine reads from this on load/undo/redo instead of holding its own
+    // private truth, so save/load round-trips and project replacement all
+    // preserve the gate pattern.
+    grossBeatState: { ...DEFAULT_GROSS_BEAT_STATE, gateSteps: [...DEFAULT_GROSS_BEAT_STATE.gateSteps] }
   };
 
   return {
@@ -207,6 +298,9 @@ export const normalizeProjectState = (input: unknown): ProjectState => {
   if ('macroKnobs' in candidate && candidate.macroKnobs !== undefined) {
     assertArrayOfRecords(candidate.macroKnobs, 'macro knobs', isMacroKnob);
   }
+  if ('grossBeatState' in candidate && candidate.grossBeatState !== undefined && !isGrossBeatState(candidate.grossBeatState)) {
+    throw new Error('Invalid project file: Gross Beat state is malformed (expected 16-step boolean grid).');
+  }
   if ('vocalTuner' in candidate && candidate.vocalTuner !== undefined && !isVocalTuner(candidate.vocalTuner)) {
     throw new Error('Invalid project file: vocal tuner settings are malformed.');
   }
@@ -224,7 +318,11 @@ export const normalizeProjectState = (input: unknown): ProjectState => {
       : clone((Array.isArray(candidate.channels) ? candidate.channels : defaults.channels)
         .map(channel => channel.customSample)
         .filter((sample): sample is NonNullable<typeof sample> => Boolean(sample?.id))),
-    channels: Array.isArray(candidate.channels) ? clone(candidate.channels) : defaults.channels,
+    // Phase 79 backward-compat: strip obsolete `unisonSpread` from every
+    // channel's synthParams if an older project saved it. The field was never
+    // consumed by any DSP and must not round-trip back out on the next save.
+    channels: (Array.isArray(candidate.channels) ? clone(candidate.channels) : defaults.channels)
+      .map(stripObsoleteChannelFields),
     playlistTracks: Array.isArray(candidate.playlistTracks) ? clone(candidate.playlistTracks) : defaults.playlistTracks,
     // Phase 48 legacy recovery: an audio clip that reached persistence without
     // an `audioBufferId` (an older build could publish one) is silent, blocks
@@ -233,8 +331,10 @@ export const normalizeProjectState = (input: unknown): ProjectState => {
     // given an invented buffer id.
     playlistClips: Array.isArray(candidate.playlistClips)
       ? markAudioClipsMissingBufferId(clone(candidate.playlistClips) as PlaylistClip[])
+          .map(stripObsoleteClipFields)
       : defaults.playlistClips,
-    mixerTracks: Array.isArray(candidate.mixerTracks) ? clone(candidate.mixerTracks) : defaults.mixerTracks,
+    mixerTracks: (Array.isArray(candidate.mixerTracks) ? clone(candidate.mixerTracks) : defaults.mixerTracks)
+      .map(stripObsoleteMixerTrackFields),
     recordings: Array.isArray(candidate.recordings) ? clone(candidate.recordings) : defaults.recordings,
     comments: Array.isArray(candidate.comments) ? clone(candidate.comments) : defaults.comments,
     collaborators: Array.isArray(candidate.collaborators) ? clone(candidate.collaborators) : defaults.collaborators,
@@ -246,6 +346,9 @@ export const normalizeProjectState = (input: unknown): ProjectState => {
     // back (see the `revalidateProjectTimeline` wrap on the return value).
     totalBars: normalizeTimelineBars(candidate.totalBars),
     macroKnobs: Array.isArray(candidate.macroKnobs) ? clone(candidate.macroKnobs) : [],
+    grossBeatState: isGrossBeatState(candidate.grossBeatState)
+      ? { ...clone(candidate.grossBeatState) as GrossBeatState, mix: clamp01((candidate.grossBeatState as GrossBeatState).mix) }
+      : { ...DEFAULT_GROSS_BEAT_STATE, gateSteps: [...DEFAULT_GROSS_BEAT_STATE.gateSteps] },
     vocalTuner: candidate.vocalTuner === undefined ? undefined : clone(candidate.vocalTuner) as ProjectState['vocalTuner'],
     selectedPatternId: typeof candidate.selectedPatternId === 'string'
       ? candidate.selectedPatternId
