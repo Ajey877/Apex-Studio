@@ -74,6 +74,7 @@ import {
 } from './state/playlistClipIntegrity';
 import { synchronizeBeforeRuntimePublication } from './state/runtimeStatePublication';
 import { resynchronizeLiveEngineFromProjectState } from './state/liveEngineResynchronization';
+import { readThemePreference, writeThemePreference, type ThemeMode } from './state/theme';
 import {
   ContinuousHistoryBatcher,
   addCollabCommentInProjectState,
@@ -143,6 +144,7 @@ import { WarpAudioProcessorModal } from './components/WarpAudioProcessorModal';
 import { DEFAULT_INCLUDE_MIXER_FX } from './components/exportMixerFxPreference';
 import { MasterMacroRackModal } from './components/MasterMacroRackModal';
 import { ProjectBundleZipModal } from './components/ProjectBundleZipModal';
+import { AppearanceSettingsModal } from './components/AppearanceSettingsModal';
 import { ProjectReplaceConfirmModal } from './components/ProjectReplaceConfirmModal';
 import { hasOpenModalDialog } from './components/ModalFrame';
 
@@ -360,6 +362,8 @@ export function App() {
   const [isWarpProcessorOpen, setIsWarpProcessorOpen] = useState(false);
   const [isMasterMacrosOpen, setIsMasterMacrosOpen] = useState(false);
   const [isProjectZipOpen, setIsProjectZipOpen] = useState(false);
+  const [isAppearanceSettingsOpen, setIsAppearanceSettingsOpen] = useState(false);
+  const [themeMode, setThemeMode] = useState<ThemeMode>(() => readThemePreference());
 
   // --- Collab State ---
   // Phase 70: studio notes and collaborators are project data. The panel reads
@@ -376,6 +380,10 @@ export function App() {
 
   // UI-02: persist workspace layout preferences independently of project data
   useEffect(() => { writeWorkspaceLayoutPreference(WORKSPACE_LAYOUT_KEYS.density, density); }, [density]);
+  useEffect(() => { writeThemePreference(themeMode); }, [themeMode]);
+  useEffect(() => {
+    document.documentElement.dataset.theme = themeMode;
+  }, [themeMode]);
   useEffect(() => { writeWorkspaceLayoutPreference(WORKSPACE_LAYOUT_KEYS.browserWidth, String(browserExpandedWidth)); }, [browserExpandedWidth]);
   useEffect(() => { writeWorkspaceLayoutPreference(WORKSPACE_LAYOUT_KEYS.inspectorWidth, String(inspectorExpandedWidth)); }, [inspectorExpandedWidth]);
   useEffect(() => {
@@ -1785,14 +1793,14 @@ export function App() {
 
   if (isProjectHydrating) {
     return (
-      <div className="bg-[#0a0a0b] text-[#b0b0b0] h-screen w-screen flex items-center justify-center font-sans">
+      <div className="bg-[var(--apex-bg)] text-[var(--apex-text)] h-screen w-screen flex items-center justify-center font-sans">
         <div className="text-xs font-bold tracking-[0.2em] text-[#ff6e00]">LOADING PROJECT</div>
       </div>
     );
   }
 
   return (
-    <div id="phantom-mobile-daw" className="bg-[#0a0a0b] text-[#b0b0b0] h-screen w-screen flex flex-col font-sans select-none overflow-hidden">
+    <div id="phantom-mobile-daw" data-theme={themeMode} className="bg-[var(--apex-bg)] text-[var(--apex-text)] h-screen w-screen flex flex-col font-sans select-none overflow-hidden">
       {/* 0. Application Menu (UI Milestone 1B).
           Rendered as a SIBLING ABOVE the transport on purpose: src/uiAudit.css
           positions the transport with `#fl-transport-bar > div:first-child >
@@ -2164,7 +2172,9 @@ export function App() {
             <div className="h-full flex flex-col">
               <header className="h-10 shrink-0 flex items-center justify-between px-3 border-b border-[#2b3040] bg-[#191c25]">
                 <span className="text-[11px] font-bold tracking-[0.12em] text-[#f4f5f8]">INSPECTOR</span>
-                <button
+                <div className="flex items-center gap-1">
+                  <button type="button" onClick={() => setIsAppearanceSettingsOpen(true)} aria-label="Open Settings" title="Settings" className="rounded px-1.5 py-1 text-[10px] text-[var(--apex-text-2)] hover:text-[var(--apex-text)]">SETTINGS</button>
+                  <button
                   type="button"
                   aria-label="Collapse Inspector"
                   title="Collapse Inspector"
@@ -2173,6 +2183,7 @@ export function App() {
                 >
                   <span aria-hidden="true">›</span>
                 </button>
+                </div>
               </header>
               <div className="flex-1 overflow-y-auto custom-scrollbar p-3 flex flex-col gap-3">
                 {selectedChannel ? (
@@ -2222,6 +2233,7 @@ export function App() {
                 <span aria-hidden="true" className="text-[11px]">≡</span>
               </button>
               <span className="text-[10px] tracking-[0.18em] text-[#737c8f] [writing-mode:vertical-lr] rotate-180 select-none">INSPECTOR</span>
+              <button type="button" onClick={() => setIsAppearanceSettingsOpen(true)} aria-label="Open Settings" className="mt-3 rounded-md px-1 py-2 text-[10px] text-[var(--apex-text-2)] hover:text-[var(--apex-text)] [writing-mode:vertical-lr]">SETTINGS</button>
             </div>
           )}
         </div>
@@ -2317,6 +2329,7 @@ export function App() {
         onConfirm={() => void confirmPendingReplacement()}
         onCancel={() => settlePendingReplacement(false)}
       />
+      <AppearanceSettingsModal isOpen={isAppearanceSettingsOpen} mode={themeMode} onChange={setThemeMode} onClose={() => setIsAppearanceSettingsOpen(false)} />
       <OrientationLockModal />
     </div>
   );
