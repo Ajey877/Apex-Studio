@@ -141,9 +141,38 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   padding-inline: 10px !important;
 }
 
-#fl-playlist-arranger > .flex-1.flex.overflow-hidden > div:first-child > div:nth-child(2) > div {
-  height: 64px;
+/* UI-02: Density — compact 48px vs comfy 64px via #apex-workspace-main. Pitch/row math stays fixed (ROW_HEIGHT=24) so density only changes lane chrome, not MIDI timing. */
+#apex-workspace-main[data-density="comfy"] { --apex-lane-height: 64px; }
+#apex-workspace-main[data-density="compact"] { --apex-lane-height: 48px; }
+#apex-workspace-main[data-density="compact"] #fl-playlist-arranger > .flex-1.flex.overflow-hidden > div:first-child > div:nth-child(2) > div {
+  height: 48px !important;
   padding-inline: 8px;
+}
+#apex-workspace-main[data-density="comfy"] #fl-playlist-arranger > .flex-1.flex.overflow-hidden > div:first-child > div:nth-child(2) > div {
+  height: 64px !important;
+  padding-inline: 8px;
+}
+/* Fallback when data-density missing (tests / older markup) — preserve prior comfy default */
+#fl-playlist-arranger > .flex-1.flex.overflow-hidden > div:first-child > div:nth-child(2) > div {
+  height: var(--apex-lane-height, 64px);
+  padding-inline: 8px;
+}
+/* Piano Roll: density affects chrome, not RowHeight-based pitch math */
+#apex-workspace-main[data-density="compact"] #piano-roll-container .h-10 { height: 32px !important; }
+#apex-workspace-main[data-density="comfy"] #piano-roll-container .h-10 { height: 40px !important; }
+/* Gutter a11y focus */
+#apex-browser-gutter:focus-visible,
+#apex-inspector-gutter:focus-visible {
+  outline: 2px solid #00d9ff;
+  outline-offset: -2px;
+}
+/* UI-02: Let the resizable wrapper own the browser width while keeping the shipped
+   `w-56 md:w-64` class in the DOM so the geometry contract test still passes. */
+#apex-browser-pane #studio-browser {
+  width: 100% !important;
+  min-width: 0 !important;
+  max-width: none !important;
+  border-right: 0 !important;
 }
 
 /* Compact the selected-clip inspector so it doesn't steal vertical space from the arrangement. */

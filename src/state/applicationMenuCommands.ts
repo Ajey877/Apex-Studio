@@ -25,6 +25,8 @@ export interface ApplicationMenuCommandDeps {
 
   selectView: (view: ViewMode) => void;
   toggleBrowser: () => void;
+  toggleInspector?: () => void;
+  setDensity?: (density: 'compact' | 'comfy') => void;
   toggleFullscreen: () => void;
 
   openProjectHub: () => void;
@@ -50,6 +52,8 @@ export interface ApplicationMenuCommandDeps {
   canDeleteSelectedChannel: () => boolean;
   currentView: () => ViewMode;
   isBrowserOpen: () => boolean;
+  isInspectorOpen?: () => boolean;
+  getDensity?: () => 'compact' | 'comfy';
   isFullscreen: () => boolean;
   isMetronomeOn: () => boolean;
   isRecording: () => boolean;
@@ -64,6 +68,8 @@ export type ApplicationMenuCommandStateSource = Pick<
   | 'canDeleteSelectedChannel'
   | 'currentView'
   | 'isBrowserOpen'
+  | 'isInspectorOpen'
+  | 'getDensity'
   | 'isFullscreen'
   | 'isMetronomeOn'
   | 'isRecording'
@@ -85,6 +91,9 @@ const checkedStateResolvers: Partial<
   Record<ApplicationMenuCommandId, (deps: ApplicationMenuCommandStateSource) => boolean>
 > = {
   'view.browser': deps => deps.isBrowserOpen(),
+  'view.inspector': deps => deps.isInspectorOpen?.() ?? false,
+  'view.densityCompact': deps => (deps.getDensity?.() ?? 'comfy') === 'compact',
+  'view.densityComfy': deps => (deps.getDensity?.() ?? 'comfy') === 'comfy',
   'view.fullscreen': deps => deps.isFullscreen(),
   'audio.metronome': deps => deps.isMetronomeOn(),
   'audio.record': deps => deps.isRecording(),
@@ -160,6 +169,15 @@ const runCommand = (id: ApplicationMenuCommandId, deps: ApplicationMenuCommandDe
 
     case 'view.browser':
       deps.toggleBrowser();
+      return;
+    case 'view.inspector':
+      deps.toggleInspector?.();
+      return;
+    case 'view.densityCompact':
+      deps.setDensity?.('compact');
+      return;
+    case 'view.densityComfy':
+      deps.setDensity?.('comfy');
       return;
     case 'view.fullscreen':
       void deps.toggleFullscreen();
