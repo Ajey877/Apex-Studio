@@ -25,7 +25,7 @@ import { ChorusEffect } from './effects/ChorusEffect';
 import { WetDryEffect } from './effects/WetDryEffect';
 import { createInstrumentRegistry, InstrumentRegistry, InstrumentVoiceHandle } from './instrumentRegistry';
 import { MixerRoutingAdapter } from './mixerRoutingAdapter';
-import { buildDryStemMixerTracks, getDirectAuxSendSourceIds, getUpstreamMixerTrackIds } from './auxStemRouting';
+import { buildDryStemMixerTracks, buildWetStemMixerTracks, getDirectAuxSendSourceIds, getUpstreamMixerTrackIds } from './auxStemRouting';
 import { renderIndependentPluckVoice } from './instruments/independentPluck';
 import { renderSubtractiveSynthVoice } from './instruments/subtractiveSynth';
 import { renderFmSynthVoice } from './instruments/fmSynth';
@@ -3037,12 +3037,14 @@ class AudioEngine {
         });
         if (wetChannels.length === 0 && wetClips.length === 0) continue;
         // Build wet mixer graph: source direct goes to dummy silent, aux -> return -> master
-        const wetMixerTracks: typeof mixerTracks = mixerTracks.map(t => {
-          if (sourceMixerIds.has(t.id)) {
-            return { ...t, routingTargetId: DUMMY_SILENT_ID };
-          }
-          return t;
-        });
+        // Isolate this return: remove sends to every other return, including
+        // sends owned by upstream buses, while preserving this return's path.
+        const wetMixerTracks: typeof mixerTracks = buildWetStemMixerTracks(
+          mixerTracks,
+          sourceMixerIds,
+          ret.id,
+          DUMMY_SILENT_ID
+        );
         if (!dummyExists && !wetMixerTracks.some(t => t.id === DUMMY_SILENT_ID)) {
           wetMixerTracks.push({
             id: DUMMY_SILENT_ID,
