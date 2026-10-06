@@ -41,3 +41,22 @@ export function getUpstreamMixerTrackIds(mixerTracks: MixerTrack[], sinkIds: Set
   }
   return included;
 }
+
+
+/**
+ * Build an isolated wet-return snapshot. Keep only sends to the selected return,
+ * and divert each direct sender's ordinary bus output to the silent sink so the
+ * return stem contains neither dry source audio nor audio from other returns.
+ */
+export function buildWetStemMixerTracks(
+  mixerTracks: MixerTrack[],
+  sourceIds: Set<number>,
+  returnId: number,
+  silentSinkId: number
+): MixerTrack[] {
+  return mixerTracks.map(track => ({
+    ...track,
+    ...(sourceIds.has(track.id) ? { routingTargetId: silentSinkId } : {}),
+    auxSends: (track.auxSends ?? []).filter(send => send.targetId === returnId),
+  }));
+}
