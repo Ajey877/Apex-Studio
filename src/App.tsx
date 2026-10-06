@@ -1,4 +1,16 @@
 import { DEFAULT_MASTERING_SUITE_STATE } from './audio/masteringState';
+import {
+  WORKSPACE_LAYOUT_LIMITS,
+  WORKSPACE_LAYOUT_KEYS,
+  clamp,
+  loadBrowserWidth,
+  loadDensity,
+  loadInspectorWidth,
+  normalizeBrowserWidth,
+  normalizeDensity,
+  normalizeInspectorWidth,
+  writeWorkspaceLayoutPreference,
+} from './state/workspaceLayout';
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { 
   ProjectState, 
@@ -187,6 +199,11 @@ export function App() {
 
   // --- Studio Browser / Sidebar State ---
   const [isSidebarOpen, setIsSidebarOpen] = useState(() => {
+    try {
+      const raw = typeof window !== 'undefined' ? window.localStorage.getItem('apex:browserCollapsed') : null;
+      if (raw === 'true') return false;
+      if (raw === 'false') return true;
+    } catch {}
     if (typeof window !== 'undefined') {
       return window.innerWidth >= 1024;
     }
@@ -199,6 +216,103 @@ export function App() {
     'presets': true
   });
   const [previewingAudio, setPreviewingAudio] = useState<string | null>(null);
+
+  // --- UI-02: Resizable workspace shell & density ---
+  const [density, setDensity] = useState<'compact' | 'comfy'>(() => {
+    try { return loadDensity(); } catch { return 'comfy'; }
+  });
+  const [browserExpandedWidth, setBrowserExpandedWidth] = useState<number>(() => {
+    try { return loadBrowserWidth(); } catch { return WORKSPACE_LAYOUT_LIMITS.browser.default; }
+  });
+  const [inspectorExpandedWidth, setInspectorExpandedWidth] = useState<number>(() => {
+    try { return loadInspectorWidth(); } catch { return WORKSPACE_LAYOUT_LIMITS.inspector.default; }
+  });
+  const [isInspectorOpen, setIsInspectorOpen] = useState<boolean>(() => {
+    try {
+      const raw = typeof window !== 'undefined' ? window.localStorage.getItem('apex:inspectorCollapsed') : null;
+      if (raw === 'true') return false;
+      if (raw === 'false') return true;
+    } catch {}
+    return false;
+  });
+  const browserWidth = isSidebarOpen ? browserExpandedWidth : WORKSPACE_LAYOUT_LIMITS.browser.collapsed;
+  const inspectorWidth = isInspectorOpen ? inspectorExpandedWidth : WORKSPACE_LAYOUT_LIMITS.inspector.collapsed;
+  const activeGutterRef = useRef<'browser' | 'inspector' | null>(null);
+  const isResizingRef = useRef(false);
+  const [isResizing, setIsResizing] = useState(false);
+
+  const handleBrowserGutterPointerDown = useCallback((event: React.PointerEvent) => {
+    if (!isSidebarOpen) return;
+    event.preventDefault();
+    const target = event.currentTarget as HTMLElement;
+    try { (target as any).setPointerCapture?.(event.pointerId); } catch {}
+    activeGutterRef.current = 'browser';
+    isResizingRef.current = true;
+    setIsResizing(true);
+    const onMove = (e: PointerEvent) => {
+      if (activeGutterRef.current !== 'browser') return;
+      const rect = (document.getElementById('apex-workspace-main') as HTMLElement | null)?.getBoundingClientRect();
+      const baseLeft = rect ? rect.left : 0;
+      const next = clamp(e.clientX - baseLeft, WORKSPACE_LAYOUT_LIMITS.browser.min, WORKSPACE_LAYOUT_LIMITS.browser.max);
+      setBrowserExpandedWidth(normalizeBrowserWidth(next));
+    };
+    const onUp = () => {
+      activeGutterRef.current = null;
+      isResizingRef.current = false;
+      setIsResizing(false);
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      window.removeEventListener('pointercancel', onUp);
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+    window.addEventListener('pointercancel', onUp);
+  }, [isSidebarOpen]);
+
+  const handleInspectorGutterPointerDown = useCallback((event: React.PointerEvent) => {
+    if (!isInspectorOpen) return;
+    event.preventDefault();
+    const target = event.currentTarget as HTMLElement;
+    try { (target as any).setPointerCapture?.(event.pointerId); } catch {}
+    activeGutterRef.current = 'inspector';
+    isResizingRef.current = true;
+    setIsResizing(true);
+    const onMove = (e: PointerEvent) => {
+      if (activeGutterRef.current !== 'inspector') return;
+      const rect = (document.getElementById('apex-workspace-main') as HTMLElement | null)?.getBoundingClientRect();
+      const width = rect ? rect.width : window.innerWidth;
+      // inspector gutter at right: distance from right edge
+      const next = clamp(width - (e.clientX - (rect ? rect.left : 0)), WORKSPACE_LAYOUT_LIMITS.inspector.min, WORKSPACE_LAYOUT_LIMITS.inspector.max);
+      setInspectorExpandedWidth(normalizeInspectorWidth(next));
+    };
+    const onUp = () => {
+      activeGutterRef.current = null;
+      isResizingRef.current = false;
+      setIsResizing(false);
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      window.removeEventListener('pointercancel', onUp);
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+    window.addEventListener('pointercancel', onUp);
+  }, [isInspectorOpen]);
+
+  const handleGutterKeyDown = useCallback((gutter: 'browser' | 'inspector', event: React.KeyboardEvent) => {
+    const step = event.shiftKey ? 24 : 8;
+    if (gutter === 'browser' && isSidebarOpen) {
+      if (event.key === 'ArrowLeft') { event.preventDefault(); setBrowserExpandedWidth(v => normalizeBrowserWidth(v - step)); }
+      if (event.key === 'ArrowRight') { event.preventDefault(); setBrowserExpandedWidth(v => normalizeBrowserWidth(v + step)); }
+      if (event.key === 'Home') { event.preventDefault(); setBrowserExpandedWidth(WORKSPACE_LAYOUT_LIMITS.browser.min); }
+      if (event.key === 'End') { event.preventDefault(); setBrowserExpandedWidth(WORKSPACE_LAYOUT_LIMITS.browser.max); }
+    }
+    if (gutter === 'inspector' && isInspectorOpen) {
+      if (event.key === 'ArrowLeft') { event.preventDefault(); setInspectorExpandedWidth(v => normalizeInspectorWidth(v + step)); }
+      if (event.key === 'ArrowRight') { event.preventDefault(); setInspectorExpandedWidth(v => normalizeInspectorWidth(v - step)); }
+      if (event.key === 'Home') { event.preventDefault(); setInspectorExpandedWidth(WORKSPACE_LAYOUT_LIMITS.inspector.max); }
+      if (event.key === 'End') { event.preventDefault(); setInspectorExpandedWidth(WORKSPACE_LAYOUT_LIMITS.inspector.min); }
+    }
+  }, [isSidebarOpen, isInspectorOpen]);
 
   // --- Modals Visibility State ---
   const [isExportOpen, setIsExportOpen] = useState(false);
@@ -242,6 +356,17 @@ export function App() {
   useEffect(() => {
     audioEngine.setMasteringState(projectState.masteringSuiteState ?? DEFAULT_MASTERING_SUITE_STATE);
   }, [projectState.masteringSuiteState]);
+
+  // UI-02: persist workspace layout preferences independently of project data
+  useEffect(() => { writeWorkspaceLayoutPreference(WORKSPACE_LAYOUT_KEYS.density, density); }, [density]);
+  useEffect(() => { writeWorkspaceLayoutPreference(WORKSPACE_LAYOUT_KEYS.browserWidth, String(browserExpandedWidth)); }, [browserExpandedWidth]);
+  useEffect(() => { writeWorkspaceLayoutPreference(WORKSPACE_LAYOUT_KEYS.inspectorWidth, String(inspectorExpandedWidth)); }, [inspectorExpandedWidth]);
+  useEffect(() => {
+    try { if (typeof window !== 'undefined' && window.localStorage) window.localStorage.setItem('apex:browserCollapsed', String(!isSidebarOpen)); } catch {}
+  }, [isSidebarOpen]);
+  useEffect(() => {
+    try { if (typeof window !== 'undefined' && window.localStorage) window.localStorage.setItem('apex:inspectorCollapsed', String(!isInspectorOpen)); } catch {}
+  }, [isInspectorOpen]);
 
   // Project persistence is intentionally hydrated before autosave is enabled.
   useEffect(() => {
@@ -1397,6 +1522,8 @@ export function App() {
 
     selectView: view => setCurrentView(view),
     toggleBrowser: () => setIsSidebarOpen(open => !open),
+    toggleInspector: () => setIsInspectorOpen(open => !open),
+    setDensity: (next: 'compact' | 'comfy') => setDensity(normalizeDensity(next)),
     toggleFullscreen: () => {
       void fullscreenController.toggle();
     },
@@ -1437,6 +1564,8 @@ export function App() {
     canDeleteSelectedChannel: () => projectState.channels.length > 1,
     currentView: () => currentView,
     isBrowserOpen: () => isSidebarOpen,
+    isInspectorOpen: () => isInspectorOpen,
+    getDensity: () => density,
     isFullscreen: () => fullscreenController.isFullscreen(),
     isMetronomeOn: () => metronome,
     isRecording: () => isRecording,
@@ -1473,6 +1602,11 @@ export function App() {
       // UI Milestone 1C Step 4 — while any modal owns the interaction, the
       // shell shortcuts stay inert (Escape itself is handled by the dialog).
       if (hasOpenModalDialog(typeof document === 'undefined' ? undefined : document)) {
+        return;
+      }
+
+      // UI-02: do not steal keys while a gutter is being dragged or focused for keyboard resize
+      if (activeGutterRef.current !== null || isResizingRef.current) {
         return;
       }
 
@@ -1775,23 +1909,65 @@ export function App() {
         </div>
       )}
 
-      {/* 2. Main Studio Work Area */}
-      <main className="flex-1 flex overflow-hidden">
-        {isSidebarOpen && (
-          <StudioBrowser
-            search={browserSearch}
-            onSearchChange={setBrowserSearch}
-            expandedFolders={expandedFolders}
-            onToggleFolder={(folderId) => setExpandedFolders(f => ({ ...f, [folderId]: !f[folderId] }))}
-            previewingAudio={previewingAudio}
-            onOpenProjectManager={() => setIsProjectManagerOpen(true)}
-            onAddInstrument={(instrument) => handleAddChannel(instrument.type, instrument.name, instrument.color)}
-            onAuditionSample={handleAuditionSample}
-            onLoadPresetProject={(preset) => void handleLoadProjectState(preset.state, { source: 'studio-demo' })}
-          />
-        )}
+      {/* 2. Main Studio Work Area — UI-02: Resizable three-pane shell */}
+      <main id="apex-workspace-main" data-density={density} className="flex-1 flex overflow-hidden relative">
+        {/* Browser pane — collapses to 40px rail, restores last expanded width */}
+        <div
+          id="apex-browser-pane"
+          data-collapsed={!isSidebarOpen}
+          style={{ width: browserWidth, minWidth: browserWidth, maxWidth: browserWidth }}
+          className="shrink-0 flex flex-col overflow-hidden bg-[#121214] border-r border-[#2b3040]"
+        >
+          {isSidebarOpen && (
+            <div className="min-w-0 grow flex flex-col overflow-hidden">
+              <StudioBrowser
+                search={browserSearch}
+                onSearchChange={setBrowserSearch}
+                expandedFolders={expandedFolders}
+                onToggleFolder={(folderId) => setExpandedFolders(f => ({ ...f, [folderId]: !f[folderId] }))}
+                previewingAudio={previewingAudio}
+                onOpenProjectManager={() => setIsProjectManagerOpen(true)}
+                onAddInstrument={(instrument) => handleAddChannel(instrument.type, instrument.name, instrument.color)}
+                onAuditionSample={handleAuditionSample}
+                onLoadPresetProject={(preset) => void handleLoadProjectState(preset.state, { source: 'studio-demo' })}
+              />
+            </div>
+          )}
+          {!isSidebarOpen && (
+            <div className="h-full flex flex-col items-center py-3 gap-2">
+              <button
+                type="button"
+                aria-label="Expand Studio Browser"
+                title="Expand Studio Browser (Ctrl+B)"
+                onClick={() => setIsSidebarOpen(true)}
+                className="w-7 h-7 rounded-md bg-[#191c25] border border-[#2b3040] flex items-center justify-center text-[#aeb5c4] hover:text-white hover:border-[#9b8afb] transition-colors"
+              >
+                <span aria-hidden="true" className="text-[11px]">≡</span>
+              </button>
+              <span className="text-[10px] tracking-[0.18em] text-[#737c8f] [writing-mode:vertical-lr] rotate-180 select-none">BROWSER</span>
+            </div>
+          )}
+        </div>
 
-        <section className="flex-1 flex flex-col bg-[#121214] overflow-hidden">
+        {/* Browser gutter — 6px, pointer + keyboard resizable, no leak */}
+        <div
+          id="apex-browser-gutter"
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Resize Studio Browser"
+          aria-valuenow={browserExpandedWidth}
+          aria-valuemin={WORKSPACE_LAYOUT_LIMITS.browser.min}
+          aria-valuemax={WORKSPACE_LAYOUT_LIMITS.browser.max}
+          tabIndex={isSidebarOpen ? 0 : -1}
+          onPointerDown={handleBrowserGutterPointerDown}
+          onKeyDown={event => handleGutterKeyDown('browser', event)}
+          className={`w-[6px] shrink-0 flex items-center justify-center cursor-col-resize select-none transition-colors ${isSidebarOpen ? 'bg-[#121214] hover:bg-[#2b3040] focus-visible:bg-[#9b8afb] focus-visible:outline-none' : 'bg-[#121214] opacity-60 pointer-events-none'}`}
+          style={{ touchAction: 'none' }}
+        >
+          <span aria-hidden="true" className="w-px h-8 bg-[#2b3040] pointer-events-none" />
+        </div>
+
+        <section className="flex-1 flex flex-col bg-[#121214] overflow-hidden min-w-[320px]">
           {currentView === 'channel_rack' && (
             <ChannelRack
               channels={projectState.channels}
@@ -1941,6 +2117,104 @@ export function App() {
             </div>
           )}
         </section>
+
+        {/* Inspector gutter — 6px, keyboard + pointer */}
+        <div
+          id="apex-inspector-gutter"
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Resize Inspector"
+          aria-valuenow={inspectorExpandedWidth}
+          aria-valuemin={WORKSPACE_LAYOUT_LIMITS.inspector.min}
+          aria-valuemax={WORKSPACE_LAYOUT_LIMITS.inspector.max}
+          tabIndex={isInspectorOpen ? 0 : -1}
+          onPointerDown={handleInspectorGutterPointerDown}
+          onKeyDown={event => handleGutterKeyDown('inspector', event)}
+          className={`w-[6px] shrink-0 flex items-center justify-center cursor-col-resize select-none transition-colors ${isInspectorOpen ? 'bg-[#121214] hover:bg-[#2b3040] focus-visible:bg-[#9b8afb] focus-visible:outline-none' : 'bg-[#121214] opacity-60 pointer-events-none'}`}
+          style={{ touchAction: 'none' }}
+        >
+          <span aria-hidden="true" className="w-px h-8 bg-[#2b3040] pointer-events-none" />
+        </div>
+
+        {/* Inspector pane — honest empty state when no context */}
+        <div
+          id="apex-inspector-pane"
+          data-collapsed={!isInspectorOpen}
+          style={{ width: inspectorWidth, minWidth: inspectorWidth, maxWidth: inspectorWidth }}
+          className="shrink-0 flex flex-col overflow-hidden bg-[#191c25] border-l border-[#2b3040]"
+        >
+          {isInspectorOpen ? (
+            <div className="h-full flex flex-col">
+              <header className="h-10 shrink-0 flex items-center justify-between px-3 border-b border-[#2b3040] bg-[#191c25]">
+                <span className="text-[11px] font-bold tracking-[0.12em] text-[#f4f5f8]">INSPECTOR</span>
+                <button
+                  type="button"
+                  aria-label="Collapse Inspector"
+                  title="Collapse Inspector"
+                  onClick={() => setIsInspectorOpen(false)}
+                  className="w-6 h-6 rounded flex items-center justify-center text-[#737c8f] hover:text-white hover:bg-[#262b38] transition-colors"
+                >
+                  <span aria-hidden="true">›</span>
+                </button>
+              </header>
+              <div className="flex-1 overflow-y-auto custom-scrollbar p-3 flex flex-col gap-3">
+                {selectedChannel ? (
+                  <div className="rounded-lg border border-[#2b3040] bg-[#202430] p-3">
+                    <div className="text-[10px] tracking-[0.14em] text-[#737c8f] mb-1">SELECTED CHANNEL</div>
+                    <div className="text-sm font-semibold text-white truncate">{selectedChannel.name}</div>
+                    <div className="text-xs text-[#aeb5c4]">{selectedChannel.instrumentType} • {selectedChannel.mute ? 'Muted' : 'Audible'} {selectedChannel.solo ? '• Solo' : ''}</div>
+                  </div>
+                ) : (
+                  <div className="rounded-lg border border-dashed border-[#2b3040] p-4 text-center">
+                    <div className="text-sm font-semibold text-[#aeb5c4]">No channel</div>
+                    <div className="text-xs text-[#737c8f] mt-1">Select a channel in the Rack</div>
+                  </div>
+                )}
+                {projectState.playlistClips.find(c => c.id === (typeof selectedPlaylistClipId === 'string' ? selectedPlaylistClipId : null)) ? (
+                  <div className="rounded-lg border border-[#2b3040] bg-[#202430] p-3">
+                    <div className="text-[10px] tracking-[0.14em] text-[#737c8f] mb-1">SELECTED CLIP</div>
+                    <div className="text-sm font-semibold text-white truncate">{projectState.playlistClips.find(c => c.id === selectedPlaylistClipId)!.name || projectState.playlistClips.find(c => c.id === selectedPlaylistClipId)!.id}</div>
+                    <div className="text-xs text-[#aeb5c4]">Bar {(projectState.playlistClips.find(c => c.id === selectedPlaylistClipId) as any).startBar ?? '?'}</div>
+                  </div>
+                ) : (
+                  <div className="rounded-lg border border-dashed border-[#2b3040] p-4 text-center">
+                    <div className="w-8 h-8 mx-auto mb-2 rounded-full bg-[#262b38] flex items-center justify-center text-[#737c8f]">◯</div>
+                    <div className="text-xs font-semibold text-[#aeb5c4]">No selection</div>
+                    <div className="text-[11px] text-[#737c8f] mt-1">Select a clip, note or channel to inspect its properties.</div>
+                  </div>
+                )}
+                <div className="rounded-lg border border-[#2b3040] bg-[#202430] p-3">
+                  <div className="text-[10px] tracking-[0.14em] text-[#737c8f] mb-2">WORKSPACE</div>
+                  <div className="flex items-center justify-between text-xs"><span className="text-[#aeb5c4]">Density</span><span className="font-mono text-white">{density === 'compact' ? '48px Compact' : '64px Comfortable'}</span></div>
+                  <div className="mt-2 flex gap-1">
+                    <button type="button" role="radio" aria-checked={density === 'compact'} onClick={() => setDensity('compact')} className={`flex-1 h-7 rounded text-xs font-semibold border ${density === 'compact' ? 'bg-[#9b8afb] text-white border-[#9b8afb]' : 'bg-[#262b38] text-[#aeb5c4] border-[#2b3040] hover:border-[#9b8afb]'}`}>Compact</button>
+                    <button type="button" role="radio" aria-checked={density === 'comfy'} onClick={() => setDensity('comfy')} className={`flex-1 h-7 rounded text-xs font-semibold border ${density === 'comfy' ? 'bg-[#9b8afb] text-white border-[#9b8afb]' : 'bg-[#262b38] text-[#aeb5c4] border-[#2b3040] hover:border-[#9b8afb]'}`}>Comfortable</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          ) : (
+            <div className="h-full flex flex-col items-center py-3 gap-2">
+              <button
+                type="button"
+                aria-label="Expand Inspector"
+                title="Expand Inspector"
+                onClick={() => setIsInspectorOpen(true)}
+                className="w-7 h-7 rounded-md bg-[#191c25] border border-[#2b3040] flex items-center justify-center text-[#aeb5c4] hover:text-white hover:border-[#9b8afb] transition-colors"
+              >
+                <span aria-hidden="true" className="text-[11px]">≡</span>
+              </button>
+              <span className="text-[10px] tracking-[0.18em] text-[#737c8f] [writing-mode:vertical-lr] rotate-180 select-none">INSPECTOR</span>
+            </div>
+          )}
+        </div>
+        {isResizing && (
+          <div
+            aria-hidden="true"
+            className="absolute inset-0 z-30 cursor-col-resize select-none"
+            style={{ touchAction: 'none' }}
+          />
+        )}
       </main>
 
       <StatusBar

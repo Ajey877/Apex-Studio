@@ -46,6 +46,9 @@ export type ApplicationMenuCommandId =
   | 'view.instruments'
   | 'view.recorder'
   | 'view.browser'
+  | 'view.inspector'
+  | 'view.densityCompact'
+  | 'view.densityComfy'
   | 'view.fullscreen'
   // Project — existing Hub, the currently unreachable statistics modal, and the
   // always-visible tempo field.
@@ -119,7 +122,10 @@ export const APPLICATION_MENU_COMMANDS: Readonly<Record<ApplicationMenuCommandId
   'view.mixer': { label: 'Mixer', accelerator: 'F9' },
   'view.instruments': { label: 'Instruments', accelerator: 'F8' },
   'view.recorder': { label: 'Recorder' },
-  'view.browser': { label: 'Studio Browser' },
+  'view.browser': { label: 'Studio Browser', accelerator: 'Ctrl+B' },
+  'view.inspector': { label: 'Inspector' },
+  'view.densityCompact': { label: 'Compact', accelerator: '' },
+  'view.densityComfy': { label: 'Comfortable', accelerator: '' },
   'view.fullscreen': { label: 'Fullscreen' },
 
   'project.hub': { label: 'Project Hub…' },
@@ -190,6 +196,11 @@ export const APPLICATION_MENUS: readonly ApplicationMenu[] = [
       command('view.recorder', APPLICATION_MENU_COMMANDS['view.recorder']),
       separator,
       command('view.browser', APPLICATION_MENU_COMMANDS['view.browser']),
+      command('view.inspector', APPLICATION_MENU_COMMANDS['view.inspector']),
+      separator,
+      command('view.densityCompact', APPLICATION_MENU_COMMANDS['view.densityCompact']),
+      command('view.densityComfy', APPLICATION_MENU_COMMANDS['view.densityComfy']),
+      separator,
       command('view.fullscreen', APPLICATION_MENU_COMMANDS['view.fullscreen']),
     ],
   },
@@ -390,6 +401,9 @@ export const resolveApplicationMenuShortcut = (
 
   const isO = event.code === 'KeyO' || event.key === 'o' || event.key === 'O';
   if (isO) return 'file.openManifest';
+
+  const isB = event.code === 'KeyB' || event.key === 'b' || event.key === 'B';
+  if (isB) return 'view.browser';
 
   return null;
 };
