@@ -949,8 +949,7 @@ export const MasteringSuiteModal: React.FC<MasteringSuiteModalProps> = ({
               </span>
             </div>
             <p className="text-[10px] text-[#888] -mt-1 mb-2">
-              Selecting a preset stores values only. No processor reads them yet, so the sound of the project does not
-              change and no export is affected.
+              Selecting a preset applies its settings to the project. Enabled mastering processors use supported settings in live playback and offline export. Preset LUFS targets are references, not measured compliance guarantees.
             </p>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2">
