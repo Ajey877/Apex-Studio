@@ -48,6 +48,12 @@ import {
 import { isRackChannelAudible } from './midiMappingRuntime';
 import { derivePlaylistLaneMutes, isClipLaneMuted } from './playlistLaneMutes';
 import { isFxParamLiveUpdatableByName } from './fxLiveSync';
+import {
+  fxTargetIdBelongsToTrack,
+  resolveFxParameterUpdate,
+  resolveFxSlot,
+} from './fxParameterControl';
+import { resolveFxParameterSpec } from './fxParameterContract';
 
 export { isRackChannelAudible };
 
@@ -1905,7 +1911,60 @@ class AudioEngine {
           }
         }
       }
+    } else if (target.type === 'fx_param') {
+      // Phase 81: real automation for every parameter the FX contract owns.
+      //
+      // The resolution, the range conversion and the "is this parameter real?"
+      // test all come from `fxParameterControl`, the same module the MIDI CC
+      // bridge uses, so a lane and a hardware knob can never disagree about a
+      // parameter's range. A target whose track, slot or parameter is gone
+      // resolves to `rejected` and changes nothing — a deleted insert must
+      // never redirect the lane onto a different effect.
+      const resolution = resolveFxParameterUpdate(mixerTracks, target.targetId, target.paramName, value);
+      if (resolution.status !== 'resolved') return;
+      const { update } = resolution;
+      const trk = mixerTracks.find(t => t.id === update.trackId);
+      const slot = trk?.fxSlots.find(s => s.id === update.slotId);
+      if (!trk || !slot) return;
+      const registry = this.getLiveFxChainRegistry();
+      if (update.isMix) {
+        // Same destination as the legacy `fx_mix` target: `FxSlot.mix`, owned
+        // by the WetDry wrapper. Writing it here keeps the offline rebuild and
+        // the live AudioParam on one value.
+        slot.mix = update.value;
+        registry?.applyLiveMix(update.trackId, update.slotId, update.value, now);
+        return;
+      }
+      // The contract id (`'time'`, `'threshold'`, …) is what `FxSlot.params`
+      // stores and what the live registry accepts; the registry owns the
+      // slot-param -> AudioParam rename (delay `time` -> `delayTime`, EQ bands
+      // -> `frequency`/`gain`/`q`). Resolving the AudioParam name here instead
+      // would fork that table.
+      slot.params = { ...slot.params, [update.paramId]: update.value };
+      registry?.applyLiveParameter(update.trackId, update.slotId, update.paramId, update.value, now);
     }
+  }
+
+  /**
+   * Phase 81: the live FX chain registry installed by
+   * `installLiveFxChainHardening`, or `undefined` when no chain has been built
+   * (playback never started, slot disabled, or the hardening is not installed).
+   *
+   * Callers must treat `undefined` as "the value is in the isolated take's
+   * project state; the next chain rebuild or offline render will pick it up",
+   * never as an error — that is the Phase 80 "state is the source of truth"
+   * contract.
+   */
+  private getLiveFxChainRegistry(): {
+    applyLiveMix(trackId: number, slotId: string, mix: number, currentTime: number): boolean;
+    applyLiveParameter(trackId: number, slotId: string, paramName: string, value: number, currentTime: number): boolean;
+  } | undefined {
+    return (this as unknown as {
+      __liveFxChainRegistry?: {
+        applyLiveMix(trackId: number, slotId: string, mix: number, currentTime: number): boolean;
+        applyLiveParameter(trackId: number, slotId: string, paramName: string, value: number, currentTime: number): boolean;
+      };
+    }).__liveFxChainRegistry;
   }
 
   /**
@@ -2452,10 +2511,22 @@ class AudioEngine {
         this.bpm = safeBpm;
         this.metronome = false;
 
-        // Browser exports use a bounded offline graph by default. Live mixer FX
-        // (especially convolution and feedback delay) can make OfflineAudioContext
-        // rendering disproportionately expensive. Preserve the full FX graph as an
-        // explicit opt-in for validation/internal callers.
+        // `includeMixerFx` decides whether the offline graph carries the mixer
+        // inserts the user monitored, and with them any FX automation lane.
+        //
+        // Every production export states its intent explicitly, so nothing here
+        // relies on the parameter default: the Export modal forwards the Phase 52
+        // product default (`DEFAULT_INCLUDE_MIXER_FX === true`) to both the master
+        // WAV render and `renderProjectStems`, and Bounce-In-Place passes `true`.
+        // A normal export therefore renders the full FX graph.
+        //
+        // `false` is two things at once, both deliberate: the dry bounce a user
+        // can still choose on purpose, and the engine-boundary default. Live mixer
+        // FX (especially convolution and feedback delay) can make
+        // OfflineAudioContext rendering disproportionately expensive, so an
+        // internal caller that omits the argument gets the bounded graph rather
+        // than an accidental full one. See
+        // src/audio/phase81.offlineExportFxAutomation.test.ts.
         const tracks = [...mixerTracks].sort((a, b) => a.id - b.id);
         const renderTracks = includeMixerFx
           ? tracks
@@ -2470,9 +2541,9 @@ class AudioEngine {
         this.withOfflineRenderOperation(() => {
           if (includeMixerFx) {
             // Phase 10A: a seeded impulse is required so offline exports are
-            // byte-deterministic across runs. The live engine never reaches this
-            // branch (`includeMixerFx` defaults to false on the offline path) and
-            // keeps its existing non-deterministic convolution tail.
+            // byte-deterministic across runs. Only this offline branch seeds it —
+            // the live engine builds its convolution impulse elsewhere and keeps
+            // its existing non-deterministic tail.
             this.buildReverbImpulse(2.5, 2.0, { seed: 0x10a4eb });
           }
           const masterTrack = renderTracks.find(track => track.id === 0);
@@ -2670,7 +2741,7 @@ class AudioEngine {
           if (!target) return false;
           return (
             String(target.targetId) === String(channel.id) ||
-            String(target.targetId) === String(channel.mixerTrackId)
+            this.automationClipTargetsMixerTrack(clip, channel.mixerTrackId)
           );
         }
         return false;
@@ -2718,7 +2789,7 @@ class AudioEngine {
       const trackAutomationClips = clips.filter(clip => {
         if (clip.mute || clip.type !== 'automation' || !clip.automationTarget) return false;
         if (this.isClipPlaylistLaneMuted(clip, stemLaneMutes)) return false;
-        return String(clip.automationTarget.targetId) === String(mixerTrackId);
+        return this.automationClipTargetsMixerTrack(clip, mixerTrackId);
       });
 
       const stemBuffer = await this.renderTimelineOffline(
@@ -2927,6 +2998,24 @@ class AudioEngine {
     };
   }
 
+  /**
+   * Phase 81: true when an automation clip's target addresses `trackId`.
+   *
+   * Numeric-target forms (`mixer_vol`, `mixer_pan`, and the legacy `fx_mix`,
+   * whose `targetId` is the mixer track id) compare directly, exactly as before
+   * this phase. The Phase 81 `fx_param` form carries a composite
+   * `"<trackId>/<slotId>"` id, so it is resolved through `fxParameterControl`
+   * — without that, an offline stem render would silently drop the FX
+   * automation that drives the insert it is rendering and diverge from the
+   * live take.
+   */
+  private automationClipTargetsMixerTrack(clip: PlaylistClip, trackId: number): boolean {
+    if (clip.type !== 'automation' || !clip.automationTarget) return false;
+    const target = clip.automationTarget;
+    if (target.type === 'fx_param') return fxTargetIdBelongsToTrack(target.targetId, trackId);
+    return String(target.targetId) === String(trackId);
+  }
+
   private getAutomationTargetKey(clip: PlaylistClip): string | null {
     if (clip.type !== 'automation' || !clip.automationTarget) return null;
     const target = clip.automationTarget;
@@ -3049,6 +3138,39 @@ class AudioEngine {
         };
       }).__liveFxChainRegistry;
       registry?.applyLiveMix(trackId, slotId, projectSlot.mix, now);
+      return;
+    }
+
+    if (target.type === 'fx_param') {
+      // Phase 81: mirror the `fx_mix` reset for the whole contract. When the
+      // last active automation clip for an FX parameter is removed, muted or
+      // finished, the take must fall back to the project's declared value
+      // instead of leaving the last automated value latched in the running
+      // AudioParam. A target whose track/slot/param no longer exists resolves
+      // to nothing and is left alone — there is no live parameter to reset.
+      const lookup = resolveFxSlot(this.activeMixerTracks, target.targetId);
+      if (lookup.status !== 'resolved') return;
+      const paramId = typeof target.paramName === 'string' ? target.paramName.trim() : '';
+      if (!paramId) return;
+      const projectLookup = resolveFxSlot(this.playbackProjectMixerTracks, target.targetId);
+      if (projectLookup.status !== 'resolved') return;
+      const activeSlot = lookup.slot;
+      const projectSlot = projectLookup.slot;
+      // The project document is the baseline being restored, so the contract
+      // lookup uses the project slot's family. A live slot whose type no longer
+      // matches simply rejects the value at the AudioEffect and stays untouched.
+      const spec = resolveFxParameterSpec(projectSlot.type, paramId);
+      if (!spec) return;
+      const registry = this.getLiveFxChainRegistry();
+      if (spec.id === 'mix') {
+        activeSlot.mix = projectSlot.mix;
+        registry?.applyLiveMix(lookup.track.id, activeSlot.id, activeSlot.mix, now);
+        return;
+      }
+      const stored = projectSlot.params?.[paramId];
+      const restored = typeof stored === 'number' && Number.isFinite(stored) ? stored : spec.default;
+      activeSlot.params = { ...activeSlot.params, [paramId]: restored };
+      registry?.applyLiveParameter(lookup.track.id, activeSlot.id, paramId, restored, now);
       return;
     }
 

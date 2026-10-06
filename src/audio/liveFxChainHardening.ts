@@ -280,23 +280,30 @@ export interface LiveFxChainHandle {
  *       down on every slider tick, and
  *   (2) let the engine reach the same WetDry during fx_mix automation, so
  *       playback and export both share a single live + offline code path.
+ * Phase 81 extends (2) to every parameter the FX contract owns.
  *
  * Lookup is by (trackId, slotId). An entry is registered when
  * `rebuildTrackFxChain` constructs the chain for a track, and cleared on
  * `removeMixerChannel` or the next rebuild of that track.
+ *
+ * The lookup is context-aware: while the engine is rendering offline it names
+ * the chain built for that render, and at every other time it names the live
+ * chain the user can hear. An offline render therefore never leaves the live
+ * table pointing at AudioParams belonging to a finished OfflineAudioContext —
+ * `true` from `applyLive*` always means "the chain that is currently rendering
+ * took the value".
  */
 interface LiveFxChainRegistry {
   applyLiveMix(trackId: number, slotId: string, mix: number, currentTime: number): boolean;
   /**
-   * Apply a single named parameter to a live slot's underlying AudioEffect
-   * without rebuilding the chain. Returns true when the live chain owns a
-   * slot with that id AND the effect supports the parameter; false
-   * otherwise (caller should rebuild the chain or correct the parameter
-   * name). `paramName` is the AudioEffect.setParameter contract — typically
-   * the engine-level names (`threshold`, `ratio`, `attack`, `release`,
-   * `knee`, `delayTime`, `feedback`, `decay`, `wet`, `dry`, `ceiling`,
-   * `drive`, `frequency`, `q`, `gain`, …). Names not on the contract are
-   * rejected so a typo cannot silently no-op.
+   * Apply a single named parameter to the currently rendering chain's slot
+   * AudioEffect without rebuilding the chain. Returns true when that chain owns
+   * a slot with that id AND the effect supports the parameter; false otherwise
+   * (caller should rebuild the chain or correct the parameter name). `paramName`
+   * is the AudioEffect.setParameter contract — typically the engine-level names
+   * (`threshold`, `ratio`, `attack`, `release`, `knee`, `delayTime`, `feedback`,
+   * `decay`, `wet`, `dry`, `ceiling`, `drive`, `frequency`, `q`, `gain`, …).
+   * Names not on the contract are rejected so a typo cannot silently no-op.
    */
   applyLiveParameter(trackId: number, slotId: string, paramName: string, value: number, currentTime: number): boolean;
   getChain(trackId: number): LiveFxChainHandle | undefined;
@@ -347,16 +354,43 @@ export function installLiveFxChainHardening(engine: AudioEngineLike): void {
   const states = new Map<number, AudioEffect[]>();
   // Per-track slot-id index. Cleared on every rebuild of that track's chain.
   const slotIndexByTrack = new Map<number, Map<string, AudioEffect>>();
+  /**
+   * Phase 81 correction: the index for chains built by an offline render.
+   *
+   * An export builds a throwaway chain per render. Registering it in the live
+   * index above meant the live lookup table kept pointing at AudioParams owned
+   * by a finished `OfflineAudioContext` once the export returned, so live
+   * automation and MIDI CC wrote their values into dead nodes — and got `true`
+   * back, which is the "the live chain took it" signal, so no caller rebuilt
+   * and the insert silently stopped following the lane until something else
+   * forced a full chain rebuild.
+   *
+   * The offline chain now has its own index, and the lookup follows whichever
+   * context the engine is rendering in, using the same predicate the rebuild
+   * wrapper already uses to decide which chain to build.
+   */
+  const offlineSlotIndexByTrack = new Map<number, Map<string, AudioEffect>>();
+
+  const isOfflineRenderContext = (): boolean => {
+    const rawCtx = (engine as unknown as { ctx?: unknown }).ctx;
+    return Boolean((engine as unknown as { isOfflineRendering?: boolean }).isOfflineRendering) ||
+      Boolean(rawCtx && (
+        typeof (rawCtx as { startRendering?: unknown }).startRendering === 'function' ||
+        (typeof OfflineAudioContext !== 'undefined' && rawCtx instanceof OfflineAudioContext)
+      ));
+  };
+
+  const slotIndexFor = (trackId: number): Map<string, AudioEffect> | undefined =>
+    (isOfflineRenderContext() ? offlineSlotIndexByTrack : slotIndexByTrack).get(trackId);
 
   const registry: LiveFxChainRegistry = {
     getChain(trackId: number) {
-      const slotIndex = slotIndexByTrack.get(trackId);
+      const slotIndex = slotIndexFor(trackId);
       if (!slotIndex) return undefined;
       return { slotEffects: slotIndex };
     },
     applyLiveMix(trackId: number, slotId: string, mix: number, currentTime: number): boolean {
-      const slotIndex = slotIndexByTrack.get(trackId);
-      const effect = slotIndex?.get(slotId);
+      const effect = slotIndexFor(trackId)?.get(slotId);
       if (!effect) return false;
       try {
         effect.setParameter('mix', boundedMix(mix), currentTime);
@@ -367,8 +401,7 @@ export function installLiveFxChainHardening(engine: AudioEngineLike): void {
     },
     applyLiveParameter(trackId: number, slotId: string, paramName: string, value: number, currentTime: number): boolean {
       if (!Number.isFinite(value)) return false;
-      const slotIndex = slotIndexByTrack.get(trackId);
-      const effect = slotIndex?.get(slotId);
+      const effect = slotIndexFor(trackId)?.get(slotId);
       if (!effect) return false;
       try {
         // Phase 80: translate the slot-param name (the contract surface)
@@ -415,9 +448,10 @@ export function installLiveFxChainHardening(engine: AudioEngineLike): void {
       } else {
         channel.input.connect(channel.panner);
       }
-      // Offline renders are not registered for live re-application; the chain
-      // is rebuilt per export. The slot index still helps tests inspect state.
-      slotIndexByTrack.set(track.id, built.slotIndex);
+      // An offline render is not registered for live re-application: it goes
+      // into its own index so the live lookup table still names the chain the
+      // user can hear once the export returns.
+      offlineSlotIndexByTrack.set(track.id, built.slotIndex);
       return;
     }
 
@@ -467,6 +501,7 @@ export function installLiveFxChainHardening(engine: AudioEngineLike): void {
     for (const effect of effects) effect.dispose();
     states.delete(trackId);
     slotIndexByTrack.delete(trackId);
+    offlineSlotIndexByTrack.delete(trackId);
     originalRemove.call(this, trackId);
   };
 }

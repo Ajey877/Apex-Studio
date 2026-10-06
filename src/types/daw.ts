@@ -184,6 +184,22 @@ export type AutomationTargetType =
   | 'mixer_vol' 
   | 'mixer_pan' 
   | 'fx_mix' 
+  /**
+   * Phase 81: any parameter the FX contract (`fxParameterContract.ts`) owns on
+   * a mixer insert slot, including the slot's wet/dry mix.
+   *
+   * Addressing: `targetId` is the composite `"<mixerTrackId>/<fxSlotId>"` and
+   * `paramName` is the contract slot-param id (`'lowFreq'`, `'threshold'`,
+   * `'time'`, `'ceiling'`, … , or `'mix'`). The composite id pins the track, so
+   * a deleted or replaced slot resolves to nothing instead of silently driving
+   * a different insert. `fxParameterControl.resolveFxParameterUpdate` is the
+   * single resolver; the legacy bare-slot-id form is accepted there for
+   * pre-Phase 81 documents but is never written by the UI.
+   *
+   * `fx_mix` is retained unchanged: it addresses `targetId` = mixer track id
+   * (number) and `paramName` = slot id, and existing projects keep using it.
+   */
+  | 'fx_param'
   | 'master_vol';
 
 export interface ArpSettings {
