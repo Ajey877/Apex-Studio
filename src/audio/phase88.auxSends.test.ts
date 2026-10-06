@@ -6,7 +6,7 @@ import { createDefaultProjectState, normalizeProjectState, MAX_AUX_SENDS_PER_TRA
 import { updateMixerTrackInProjectState } from '../state/projectMutations';
 import { applyAuxSendSelection } from '../components/Mixer';
 import type { MixerTrack, ProjectState } from '../types/daw';
-import { buildDryStemMixerTracks, getDirectAuxSendSourceIds, getUpstreamMixerTrackIds } from './auxStemRouting';
+import { buildDryStemMixerTracks, buildWetStemMixerTracks, getDirectAuxSendSourceIds, getUpstreamMixerTrackIds } from './auxStemRouting';
 
 type EngineInternals = Record<string, any>;
 const engine = audioEngine as unknown as EngineInternals;
@@ -408,7 +408,21 @@ describe('Phase 88 stem routing regressions', () => {
     assert.equal(upstream.has(9), false, 'return itself is not treated as a source');
   });
 
-  it('handles multiple levels of upstream bus routing and cycles without looping forever', () => {
+  it('isolates a wet return stem from sends to other returns on source and upstream buses', () => {
+    const tracks = [
+      track(1, { routingTargetId: 2, auxSends: [{ targetId: 8, amount: 0.5 }] }),
+      track(2, { routingTargetId: 0, auxSends: [{ targetId: 8, amount: 0.7 }, { targetId: 9, amount: 0.4 }] }),
+      track(8, { isAux: true, routingTargetId: 0 }),
+      track(9, { isAux: true, routingTargetId: 0 }),
+    ];
+    const wet = buildWetStemMixerTracks(tracks, new Set([2]), 9, 9999);
+    assert.equal(wet.find(t => t.id === 2)?.routingTargetId, 9999, 'direct sender dry output is diverted');
+    assert.deepEqual(wet.find(t => t.id === 1)?.auxSends, [], 'upstream send to another return is removed');
+    assert.deepEqual(wet.find(t => t.id === 2)?.auxSends, [{ targetId: 9, amount: 0.4 }], 'only selected return send remains');
+    assert.deepEqual(tracks[1].auxSends, [{ targetId: 8, amount: 0.7 }, { targetId: 9, amount: 0.4 }], 'source project is immutable');
+  });
+
+  it('handles multiple levels of upstream bus routing', () => {
     const tracks = [
       track(1, { routingTargetId: 2 }),
       track(2, { routingTargetId: 3 }),
