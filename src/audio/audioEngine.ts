@@ -8,6 +8,7 @@ import {
   SynthParameters,
   AudioRecording,
   GrossBeatState,
+  MasteringSuiteState,
   SidechainSettings
 } from '../types/daw';
 import { AudioClockTransport, TransportState } from './transport';
@@ -20,6 +21,8 @@ import { LoudnessMeter } from './loudnessMeasurement';
 import { TruePeakMeter } from './truePeak';
 import { StereoFieldMeter, computeMidSideVectors } from './stereoMeasurement';
 import { createMeasurementWindowPlanner, MeasurementWindowPlanner } from './masterMeasurementStream';
+import { DEFAULT_MASTERING_SUITE_STATE, normalizeMasteringSuiteState } from './masteringState';
+import { MasteringProcessor } from './masteringProcessor';
 import type { AudioLatencyMetrics, MasterMeasurementSnapshot } from '../types/daw';
 import { ChorusEffect } from './effects/ChorusEffect';
 import { WetDryEffect } from './effects/WetDryEffect';
@@ -408,6 +411,8 @@ class AudioEngine {
   private transport: AudioClockTransport | null = null;
   private playbackGeneration = 0;
   private masterGain: GainNode | null = null;
+  private masteringProcessor: MasteringProcessor | null = null;
+  private masteringState: MasteringSuiteState = structuredClone(DEFAULT_MASTERING_SUITE_STATE);
   private masterAnalyser: AnalyserNode | null = null;
   private grossBeatNode: GainNode | null = null;
   /**
@@ -575,8 +580,11 @@ class AudioEngine {
     this.masterAnalyser.fftSize = 512;
     this.masterAnalyser.smoothingTimeConstant = 0.8;
 
+    this.masteringProcessor?.dispose();
+    this.masteringProcessor = new MasteringProcessor(this.ctx, this.masteringState);
     this.masterGain.connect(this.grossBeatNode);
-    this.grossBeatNode.connect(this.masterAnalyser);
+    this.grossBeatNode.connect(this.masteringProcessor.input);
+    this.masteringProcessor.output.connect(this.masterAnalyser);
     this.masterAnalyser.connect(this.ctx.destination);
     this.createMasterMeasurementTap(this.ctx);
 
@@ -2623,6 +2631,7 @@ class AudioEngine {
         transport: this.transport,
         transportWasPlaying: this.transport?.getState().playing ?? false,
         masterGain: this.masterGain,
+        masteringProcessor: this.masteringProcessor,
         masterAnalyser: this.masterAnalyser,
         grossBeatNode: this.grossBeatNode,
         mixerChannels: this.mixerChannels,
@@ -2695,8 +2704,10 @@ class AudioEngine {
           this.masterAnalyser = offlineCtx.createAnalyser();
           this.masterAnalyser.fftSize = 512;
           this.masterAnalyser.smoothingTimeConstant = 0.8;
+          this.masteringProcessor = new MasteringProcessor(offlineCtx as unknown as AudioContext, this.masteringState);
           this.masterGain.connect(this.grossBeatNode);
-          this.grossBeatNode.connect(this.masterAnalyser);
+          this.grossBeatNode.connect(this.masteringProcessor.input);
+          this.masteringProcessor.output.connect(this.masterAnalyser);
           this.masterAnalyser.connect(offlineCtx.destination);
           this.mixerChannels = new Map();
           this.channelPanners = new Map();
@@ -2815,6 +2826,9 @@ class AudioEngine {
         this.liveCtx = previous.liveCtx;
         this.ctx = previous.ctx;
         this.transport = previous.transport;
+        if (this.masteringProcessor && this.masteringProcessor !== previous.masteringProcessor) this.masteringProcessor.dispose();
+        this.masteringProcessor = previous.masteringProcessor;
+        this.masteringProcessor?.setState(this.masteringState);
         this.masterGain = previous.masterGain;
         this.masterAnalyser = previous.masterAnalyser;
         this.grossBeatNode = previous.grossBeatNode;
@@ -3282,6 +3296,12 @@ class AudioEngine {
    * new DSP, just the same master-gain automation already uses — so it
    * satisfies "wire if trivial".
    */
+  /** Phase 89: keep the live and offline master processors synchronized with project state. */
+  public setMasteringState(state: MasteringSuiteState): void {
+    this.masteringState = normalizeMasteringSuiteState(state);
+    if (!this.isOfflineRendering) this.masteringProcessor?.setState(this.masteringState);
+  }
+
   public setMasterVolume(linearGain: number) {
     if (this.shouldBlockLiveMutation() || !this.ctx || !this.masterGain) return;
     const clamped = Math.max(0, Math.min(1.5, linearGain));
