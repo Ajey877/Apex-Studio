@@ -581,10 +581,24 @@ class AudioEngine {
     this.masterAnalyser.smoothingTimeConstant = 0.8;
 
     this.masteringProcessor?.dispose();
-    this.masteringProcessor = new MasteringProcessor(this.ctx, this.masteringState);
+    // Lightweight test/fallback contexts may not implement the full Web Audio DSP API.
+    // Keep those contexts usable with a transparent master path; real browser AudioContext
+    // supports these nodes and receives the complete mastering processor.
+    const supportsMasteringDsp =
+      typeof (this.ctx as any).createChannelSplitter === 'function' &&
+      typeof (this.ctx as any).createChannelMerger === 'function' &&
+      typeof (this.ctx as any).createDynamicsCompressor === 'function' &&
+      typeof (this.ctx as any).createWaveShaper === 'function';
+    this.masteringProcessor = supportsMasteringDsp
+      ? new MasteringProcessor(this.ctx, this.masteringState)
+      : null;
     this.masterGain.connect(this.grossBeatNode);
-    this.grossBeatNode.connect(this.masteringProcessor.input);
-    this.masteringProcessor.output.connect(this.masterAnalyser);
+    if (this.masteringProcessor) {
+      this.grossBeatNode.connect(this.masteringProcessor.input);
+      this.masteringProcessor.output.connect(this.masterAnalyser);
+    } else {
+      this.grossBeatNode.connect(this.masterAnalyser);
+    }
     this.masterAnalyser.connect(this.ctx.destination);
     this.createMasterMeasurementTap(this.ctx);
 
@@ -2704,10 +2718,21 @@ class AudioEngine {
           this.masterAnalyser = offlineCtx.createAnalyser();
           this.masterAnalyser.fftSize = 512;
           this.masterAnalyser.smoothingTimeConstant = 0.8;
-          this.masteringProcessor = new MasteringProcessor(offlineCtx as unknown as AudioContext, this.masteringState);
+          const offlineSupportsMasteringDsp =
+            typeof (offlineCtx as any).createChannelSplitter === 'function' &&
+            typeof (offlineCtx as any).createChannelMerger === 'function' &&
+            typeof (offlineCtx as any).createDynamicsCompressor === 'function' &&
+            typeof (offlineCtx as any).createWaveShaper === 'function';
+          this.masteringProcessor = offlineSupportsMasteringDsp
+            ? new MasteringProcessor(offlineCtx as unknown as AudioContext, this.masteringState)
+            : null;
           this.masterGain.connect(this.grossBeatNode);
-          this.grossBeatNode.connect(this.masteringProcessor.input);
-          this.masteringProcessor.output.connect(this.masterAnalyser);
+          if (this.masteringProcessor) {
+            this.grossBeatNode.connect(this.masteringProcessor.input);
+            this.masteringProcessor.output.connect(this.masterAnalyser);
+          } else {
+            this.grossBeatNode.connect(this.masterAnalyser);
+          }
           this.masterAnalyser.connect(offlineCtx.destination);
           this.mixerChannels = new Map();
           this.channelPanners = new Map();
