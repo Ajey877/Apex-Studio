@@ -1,3 +1,4 @@
+import { DEFAULT_MASTERING_SUITE_STATE } from './audio/masteringState';
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { 
   ProjectState, 
@@ -14,7 +15,6 @@ import {
   AudioRecording, 
   ProjectMetadata,
   Pattern,
-  MasteringSuiteState
 } from './types/daw';
 import { audioEngine, type MidiEventPayload, type PlaybackStateUpdate } from './audio/audioEngine';
 import { MidiCcMappingRuntime, MidiNoteInputRuntime, isRackChannelAudible } from './audio/midiMappingRuntime';
@@ -229,53 +229,6 @@ export function App() {
   const [isWarpProcessorOpen, setIsWarpProcessorOpen] = useState(false);
   const [isMasterMacrosOpen, setIsMasterMacrosOpen] = useState(false);
   const [isProjectZipOpen, setIsProjectZipOpen] = useState(false);
-
-  // --- Mastering Suite State ---
-  const [masteringSuiteState, setMasteringSuiteState] = useState<MasteringSuiteState>({
-    enabled: true,
-    lufsTarget: -14.0,
-    lowCrossFreq: 150,
-    highCrossFreq: 3500,
-    lowBand: {
-      enabled: true,
-      threshold: -18,
-      ratio: 3.0,
-      attack: 20,
-      release: 100,
-      gain: 1.0,
-      knee: 6,
-      solo: false,
-      mute: false
-    },
-    midBand: {
-      enabled: true,
-      threshold: -22,
-      ratio: 2.5,
-      attack: 15,
-      release: 80,
-      gain: 0.0,
-      knee: 4,
-      solo: false,
-      mute: false
-    },
-    highBand: {
-      enabled: true,
-      threshold: -20,
-      ratio: 2.0,
-      attack: 10,
-      release: 60,
-      gain: 1.5,
-      knee: 3,
-      solo: false,
-      mute: false
-    },
-    stereoSpread: 1.15,
-    monoSubFreq: 120,
-    maximizerThreshold: -3.5,
-    maximizerCeiling: -0.2,
-    maximizerRelease: 80,
-    maximizerLookahead: true
-  });
 
   // --- Collab State ---
   // Phase 70: studio notes and collaborators are project data. The panel reads
@@ -2026,7 +1979,7 @@ export function App() {
       <HotkeysModal isOpen={isHotkeysOpen} onClose={() => setIsHotkeysOpen(false)} />
       <MidiControllerModal isOpen={isMidiModalOpen} onClose={() => setIsMidiModalOpen(false)} channels={projectState.channels} mixerTracks={projectState.mixerTracks} midiMappings={projectState.midiMappings || []} onUpdateMidiMappings={(mappings) => mutateProjectState(curr => updateMidiMappingsInProjectState(curr, mappings), 'Update MIDI mappings')} activeChannel={selectedChannel} />
       <ParametricEqModal isOpen={isParametricEqOpen} onClose={() => setIsParametricEqOpen(false)} mixerTrack={projectState.mixerTracks.find(t => t.id === eqModalTrackId) || projectState.mixerTracks[0]} onUpdateTrack={(track) => handleUpdateMixerTrack(track.id, track)} />
-      <MasteringSuiteModal isOpen={isMasteringSuiteOpen} onClose={() => setIsMasteringSuiteOpen(false)} masteringState={masteringSuiteState} onUpdateMasteringState={(st) => setMasteringSuiteState(st)} isPlaying={isPlaying} />
+      <MasteringSuiteModal isOpen={isMasteringSuiteOpen} onClose={() => setIsMasteringSuiteOpen(false)} masteringState={projectState.masteringSuiteState ?? DEFAULT_MASTERING_SUITE_STATE} onUpdateMasteringState={(st) => mutateProjectState(curr => ({ ...curr, masteringSuiteState: st }), "Update mastering settings")} isPlaying={isPlaying} />
       <GrossBeatModal
         isOpen={isGrossBeatOpen}
         onClose={() => setIsGrossBeatOpen(false)}
