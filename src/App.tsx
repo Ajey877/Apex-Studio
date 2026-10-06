@@ -238,6 +238,11 @@ export function App() {
   const collaborators = projectState.collaborators;
   const comments = projectState.comments;
 
+  // Phase 89: saved project state is the sole owner of mastering controls.
+  useEffect(() => {
+    audioEngine.setMasteringState(projectState.masteringSuiteState ?? DEFAULT_MASTERING_SUITE_STATE);
+  }, [projectState.masteringSuiteState]);
+
   // Project persistence is intentionally hydrated before autosave is enabled.
   useEffect(() => {
     let cancelled = false;
