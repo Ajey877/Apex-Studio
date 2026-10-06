@@ -272,6 +272,7 @@ export const isContinuousMixerUpdate = (updates: Partial<MixerTrack>): boolean =
     const keys = Object.keys(updates.sidechain);
     return keys.length === 1 && keys[0] === 'amount';
   }
+  if ('auxSends' in updates) return true;
   return 'volume' in updates || 'pan' in updates;
 };
 
@@ -281,6 +282,7 @@ export const getMixerUpdateLabel = (updates: Partial<MixerTrack>): string => {
   if ('mute' in updates) return 'Toggle mixer mute';
   if ('solo' in updates) return 'Toggle mixer solo';
   if ('sidechain' in updates) return 'Update sidechain';
+  if ('auxSends' in updates) return 'Update aux send';
   return 'Update mixer track';
 };
 
