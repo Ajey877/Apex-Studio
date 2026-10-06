@@ -292,7 +292,7 @@ describe('Phase 45: mastering surface presents only measured values', () => {
     assert.match(MODAL_SOURCE, /PROCESSING ENABLED/);
     assert.match(MODAL_SOURCE, /LIVE \\+ OFFLINE PATH/);
     assert.match(MODAL_SOURCE, /BYPASSED/);
-    assert.doesNotMatch(MODAL_SOURCE, /NOT APPLIED \\u2014 NO PROCESSING IN SIGNAL PATH/);
+    assert.equal(MODAL_SOURCE.includes('NOT APPLIED — NO PROCESSING IN SIGNAL PATH'), false, 'obsolete not-applied claim must be removed');
     assert.match(MODAL_SOURCE, /NOT MEASURED/);
   });
 
