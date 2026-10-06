@@ -55,7 +55,7 @@ describe('Phase 89 real master processor', () => {
     assert.equal(compressors[3].threshold.value, DEFAULT_MASTERING_SUITE_STATE.maximizerThreshold);
     assert.equal(shaper?.oversample, '4x');
     assert.ok(shaper?.curve instanceof Float32Array);
-    assert.ok(processor.input.connections.length >= 2, 'input feeds both bypass and processing paths');
+    assert.ok((processor.input as unknown as FakeGain).connections.length >= 2, 'input feeds both bypass and processing paths');
     processor.dispose();
   });
 
