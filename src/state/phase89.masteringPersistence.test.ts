@@ -23,7 +23,7 @@ describe('Phase 89 mastering settings are project-owned', () => {
   });
 
   it('migrates older projects and clamps malformed settings safely', () => {
-    const project = createDefaultProjectState() as Record<string, unknown>;
+    const project = createDefaultProjectState() as unknown as Record<string, unknown>;
     delete project.masteringSuiteState;
     const migrated = normalizeProjectState(project);
     assert.deepEqual(migrated.masteringSuiteState, DEFAULT_MASTERING_SUITE_STATE);
