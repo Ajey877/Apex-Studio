@@ -245,6 +245,87 @@ export function clampFxParameterValue(
 }
 
 /**
+ * Phase 81: resolves the full spec for a slot-param id, including the
+ * per-slot wet/dry `mix` — which lives on `FxSlot.mix` and is therefore
+ * deliberately NOT a member of `FX_PARAMETER_FAMILIES[fxType].parameters`
+ * (see `resolveFxParamRange`, which only answers for family params).
+ *
+ * Returns `null` for a param the contract does not own, so a caller can
+ * never reach DSP with a dead parameter name.
+ */
+export function resolveFxParameterSpec(fxType: FxType, paramId: string): FxParameterSpec | null {
+  if (paramId === SLOT_MIX_PARAMETER.id) return SLOT_MIX_PARAMETER;
+  const family = FX_PARAMETER_FAMILIES[fxType];
+  if (!family) return null;
+  return family.parameters.find(p => p.id === paramId) ?? null;
+}
+
+/** Clamps into a spec's own range; non-finite input falls back to the spec default. */
+function clampToSpec(spec: FxParameterSpec, value: number): number {
+  if (!Number.isFinite(value)) return spec.default;
+  return Math.max(spec.min, Math.min(spec.max, value));
+}
+
+/**
+ * Phase 81: normalized 0..1 control value -> the contract's own value.
+ *
+ * Automation lanes and MIDI CC both carry a normalized 0..1 value, but
+ * almost no FX parameter has a native 0..1 range: compressor threshold is
+ * -100..0 dB, EQ frequency is 20..20000 Hz, limiter drive is -12..24 dB.
+ * This is the single conversion both paths must use, so a knob and a lane
+ * can never disagree about what a parameter's range is (the same property
+ * `parameterScaling.ts` guarantees for channel/mixer parameters).
+ *
+ * The mapping is linear across `[min, max]`. Returns `null` when the
+ * parameter is not in the contract, so an unknown id is rejected rather
+ * than silently passed through.
+ */
+export function fxParamValueFromNormalized(
+  fxType: FxType,
+  paramId: string,
+  normalized: number,
+): number | null {
+  const spec = resolveFxParameterSpec(fxType, paramId);
+  if (!spec) return null;
+  if (!Number.isFinite(normalized)) return spec.default;
+  const t = Math.max(0, Math.min(1, normalized));
+  return clampToSpec(spec, spec.min + t * (spec.max - spec.min));
+}
+
+/**
+ * Phase 81: inverse of `fxParamValueFromNormalized` — a contract value
+ * expressed as the normalized 0..1 control value. Used to seed an
+ * automation lane / CC readout from the slot's current value so the UI and
+ * the DSP agree before the user moves anything.
+ *
+ * Returns `null` when the parameter is not in the contract or the value is
+ * not finite.
+ */
+export function fxParamValueToNormalized(
+  fxType: FxType,
+  paramId: string,
+  value: number,
+): number | null {
+  const spec = resolveFxParameterSpec(fxType, paramId);
+  if (!spec) return null;
+  if (!Number.isFinite(value)) return null;
+  const span = spec.max - spec.min;
+  if (span <= 0) return 0;
+  return Math.max(0, Math.min(1, (clampToSpec(spec, value) - spec.min) / span));
+}
+
+/**
+ * Phase 81: every parameter a slot of this family exposes to automation and
+ * MIDI CC, in contract declaration order, always followed by the per-slot
+ * wet/dry `mix` (which every slot has, including the families whose DSP
+ * bakes its own parameters into a curve).
+ */
+export function listFxParameterSpecs(fxType: FxType): readonly FxParameterSpec[] {
+  const family = FX_PARAMETER_FAMILIES[fxType];
+  return [...(family?.parameters ?? []), SLOT_MIX_PARAMETER];
+}
+
+/**
  * Returns true if the param is real and live-updatable through the
  * existing live chain (AudioParam-based), false otherwise. The dead
  * families (`distortion`, `bitcrusher`, …) return false for every param.

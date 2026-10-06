@@ -24,6 +24,15 @@ import {
 import { PlaylistTrack, PlaylistClip, Pattern, Channel, AutomationTargetType, ArrangementMarker, MixerTrack } from '../types/daw';
 import { audioEngine } from '../audio/audioEngine';
 import { resolvePlaylistBounceTarget } from './playlistBounceTarget';
+import { formatFxParameterRange, listFxSlotOptions } from '../audio/fxParameterControl';
+import {
+  buildFxAutomationTarget,
+  buildFxParamAutomationTarget,
+  buildFxSlotAutomationTarget,
+  fxAutomationSlotTargetId,
+  listFxSlotParameterOptions,
+  type FxAutomationTargetType,
+} from './fxAutomationTargets';
 import {
   MISSING_AUDIO_CLIP_BADGE_LABEL,
   describeMissingAudioClip,
@@ -1564,6 +1573,7 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
               onChange={(e) => {
                 const newType = e.target.value as AutomationTargetType;
                 let targetId: string | number = '';
+                let paramName: string | undefined;
                 let label = '';
                 if (newType.startsWith('channel_')) {
                   const currChan = channels.find(c => c.id === activeAutomationClip.automationTarget?.targetId) || channels[0];
@@ -1575,6 +1585,15 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
                   targetId = currTrk ? currTrk.id : 1;
                   const paramLabel = newType === 'mixer_vol' ? 'Volume' : 'Pan';
                   label = `Mixer ${currTrk?.name || targetId} ${paramLabel}`;
+                } else if (newType === 'fx_mix' || newType === 'fx_param') {
+                  // Phase 81: FX slot targets. The slot list (and, for
+                  // `fx_param`, the parameter list) comes from the FX contract
+                  // through `fxParameterControl`, so the picker can only offer
+                  // a parameter that has a real AudioParam consumer.
+                  const next = buildFxAutomationTarget(newType, mixerTracks, activeAutomationClip.automationTarget);
+                  targetId = next.targetId;
+                  paramName = next.paramName;
+                  label = next.label;
                 } else {
                   targetId = 0;
                   label = 'Master Output Volume';
@@ -1582,6 +1601,7 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
                 const updated = updatePlaylistAutomationTarget(activeAutomationClip, {
                   type: newType,
                   targetId,
+                  paramName,
                   label
                 });
                 onUpdateClips(clips.map(c => c.id === activeAutomationClip.id ? updated : c));
@@ -1593,6 +1613,8 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
               <option value="channel_pan">Channel Panning (L/R)</option>
               <option value="mixer_vol">Mixer Insert Volume</option>
               <option value="mixer_pan">Mixer Insert Panning</option>
+              <option value="fx_param">FX Slot Parameter</option>
+              <option value="fx_mix">FX Slot Wet/Dry Mix</option>
               <option value="master_vol">Master Out Volume</option>
             </select>
 
@@ -1641,6 +1663,67 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
                 ))}
               </select>
             )}
+
+            {/* Phase 81: FX slot + contract parameter selectors. The candidate
+                lists come from the FX contract, so a parameter that has no real
+                AudioParam consumer can never be offered here. */}
+            {(activeAutomationClip.automationTarget?.type === 'fx_mix' || activeAutomationClip.automationTarget?.type === 'fx_param') && (() => {
+              const fxTargetType = activeAutomationClip.automationTarget!.type as FxAutomationTargetType;
+              const slotTargetId = fxAutomationSlotTargetId(activeAutomationClip.automationTarget);
+              const slotOptions = listFxSlotOptions(mixerTracks);
+              const parsedSlot = slotTargetId.split('/');
+              const slotTrackId = parsedSlot.length === 2 && parsedSlot[0] !== '' ? Number(parsedSlot[0]) : null;
+              const paramOptions = listFxSlotParameterOptions(mixerTracks, slotTrackId, parsedSlot.length === 2 ? parsedSlot[1] : '');
+
+              const publish = (draft: { type: AutomationTargetType; targetId: string | number; paramName?: string; label?: string }) => {
+                const updated = updatePlaylistAutomationTarget(activeAutomationClip, draft);
+                onUpdateClips(clips.map(c => c.id === activeAutomationClip.id ? updated : c));
+              };
+
+              return (
+                <>
+                  <select
+                    value={slotTargetId}
+                    onChange={(e) => publish(buildFxSlotAutomationTarget(fxTargetType, mixerTracks, e.target.value, activeAutomationClip.automationTarget))}
+                    className="bg-[#0c0c0e] border border-[#333] text-white text-xs rounded px-2 py-1 font-bold max-w-[160px] truncate"
+                    title="FX slot this envelope drives"
+                  >
+                    {slotOptions.length === 0 && <option value="">— no effect slots —</option>}
+                    {!slotOptions.some(option => option.targetId === slotTargetId) && slotTargetId !== '' && (
+                      <option value={slotTargetId}>{'— missing FX slot —'}</option>
+                    )}
+                    {slotOptions.map(option => (
+                      <option key={option.targetId} value={option.targetId}>{option.label}</option>
+                    ))}
+                  </select>
+
+                  {fxTargetType === 'fx_param' && (
+                    <select
+                      value={activeAutomationClip.automationTarget?.paramName ?? ''}
+                      onChange={(e) => {
+                        const draft = buildFxParamAutomationTarget(mixerTracks, slotTargetId, e.target.value);
+                        if (draft) publish(draft);
+                      }}
+                      className="bg-[#0c0c0e] border border-[#333] text-white text-xs rounded px-2 py-1 font-bold max-w-[190px] truncate"
+                      title="Contract parameter this envelope drives"
+                    >
+                      {paramOptions.length === 0 && <option value="">— no automatable parameter —</option>}
+                      {paramOptions.map(option => (
+                        <option key={option.paramId} value={option.paramId}>
+                          {`${option.paramLabel} (${formatFxParameterRange(option)})`}
+                        </option>
+                      ))}
+                    </select>
+                  )}
+
+                  {fxTargetType === 'fx_param' && paramOptions.length === 0 && (
+                    <span className="text-[10px] text-[#a88] italic">
+                      This effect bakes its parameters at chain build; only its wet/dry mix is automatable.
+                    </span>
+                  )}
+                </>
+              );
+            })()}
 
             <button
               onClick={() => {

@@ -17,10 +17,39 @@ import {
 } from 'lucide-react';
 import { MidiMapping, Channel, MixerTrack, MidiDeviceInfo } from '../types/daw';
 import { audioEngine, type MidiEventPayload } from '../audio/audioEngine';
-import { createMidiMappingForCc, resolveMidiLearnCapture } from '../audio/midiMappingRuntime';
+import { buildFxSlotParameterMapping, createMidiMappingForCc, resolveMidiLearnCapture, type MidiLearnTarget } from '../audio/midiMappingRuntime';
+import { formatFxParameterRange, listFxParameterOptions, listFxSlotOptions } from '../audio/fxParameterControl';
 
 export const isChannelScopedMidiTarget = (targetType: MidiMapping['targetType']): boolean =>
   targetType === 'channel_vol' || targetType === 'channel_pan' || targetType === 'fx_param';
+
+/**
+ * Phase 81: the target-control dropdown offers one entry that is not itself a
+ * persisted `MidiMapping.targetType`. `"fx_slot_param"` is the UI mode for
+ * "bind a contract parameter on an insert FX slot"; it publishes as
+ * `targetType: 'fx_param'` with the composite `"<trackId>/<slotId>"` target id
+ * and the contract param id as `paramName`. The pre-existing `"fx_param"`
+ * entry (channel filter cutoff) is untouched.
+ */
+export const FX_SLOT_PARAM_UI_TARGET = 'fx_slot_param' as const;
+
+export type MidiLearnUiTarget = MidiMapping['targetType'] | typeof FX_SLOT_PARAM_UI_TARGET;
+
+export const isFxSlotParamUiTarget = (
+  targetType: MidiLearnUiTarget,
+): targetType is typeof FX_SLOT_PARAM_UI_TARGET => targetType === FX_SLOT_PARAM_UI_TARGET;
+
+/**
+ * The first FX slot parameter the project can actually bind, or `null` when the
+ * project has no FX slot with a contract parameter. Used to seed the slot and
+ * parameter selectors so the form never starts in an unbindable state.
+ */
+export const defaultFxSlotParameterSelection = (
+  mixerTracks: readonly MixerTrack[],
+): { slotTargetId: string; paramId: string } | null => {
+  const first = listFxParameterOptions(mixerTracks)[0];
+  return first ? { slotTargetId: first.targetId, paramId: first.paramId } : null;
+};
 
 export const normalizeMidiLearnTargetSelection = (
   targetType: MidiMapping['targetType'],
@@ -79,10 +108,43 @@ export const MidiLearnModal: React.FC<MidiLearnModalProps> = ({
   isMidiLearnActive,
   onToggleMidiLearn
 }) => {
-  const [selectedTargetType, setSelectedTargetType] = useState<MidiMapping['targetType']>('master_vol');
+  const [selectedTargetType, setSelectedTargetType] = useState<MidiLearnUiTarget>('master_vol');
   const [selectedTargetId, setSelectedTargetId] = useState<string | number>(0);
   const [manualCc, setManualCc] = useState<number>(1);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
+  /** Phase 81: composite `"<trackId>/<slotId>"` id + contract param id for the FX slot binder. */
+  const [fxSlotTargetId, setFxSlotTargetId] = useState<string>('');
+  const [fxParamId, setFxParamId] = useState<string>('');
+
+  const fxSlotOptions = listFxSlotOptions(mixerTracks);
+  const allFxParamOptions = listFxParameterOptions(mixerTracks);
+  const fxParamOptions = allFxParamOptions.filter(option => option.targetId === fxSlotTargetId);
+  const fxSlotExists = fxSlotOptions.some(option => option.targetId === fxSlotTargetId);
+  const fxParamExists = fxParamOptions.some(option => option.paramId === fxParamId);
+  /**
+   * The selection the form falls back to when the current one is unbindable:
+   * the picked slot's first contract parameter when the slot still exists,
+   * otherwise the project's first bindable FX parameter.
+   */
+  const fxFallback = fxSlotExists
+    ? fxParamOptions[0]
+    : allFxParamOptions.find(option => option.targetId === fxSlotTargetId) ?? allFxParamOptions[0];
+  const fxFallbackSlotTargetId = fxFallback?.targetId ?? '';
+  const fxFallbackParamId = fxFallback?.paramId ?? '';
+
+  /**
+   * Keeps the FX slot selection valid: it seeds the pickers the first time the
+   * user chooses the FX slot binder, and re-seeds when the picked slot no
+   * longer exists (an effect was deleted while the modal was open) so the form
+   * can never publish a binding for a slot that is gone. The dependency list is
+   * all primitives, so a re-render that changes nothing re-runs nothing.
+   */
+  useEffect(() => {
+    if (!isFxSlotParamUiTarget(selectedTargetType)) return;
+    if (fxSlotExists && fxParamExists) return;
+    setFxSlotTargetId(fxFallbackSlotTargetId);
+    setFxParamId(fxFallbackParamId);
+  }, [fxFallbackParamId, fxFallbackSlotTargetId, fxParamExists, fxSlotExists, fxParamId, fxSlotTargetId, selectedTargetType]);
 
   const handleAddMapping = () => {
     const exists = midiMappings.some(m => m.ccNumber === manualCc);
@@ -90,13 +152,21 @@ export const MidiLearnModal: React.FC<MidiLearnModalProps> = ({
       setStatusMessage(`CC #${manualCc} is already bound. Overwriting...`);
     }
 
-    const newMapping: MidiMapping = buildMidiLearnMapping(
-      manualCc,
-      selectedTargetType,
-      selectedTargetId,
-      channels,
-      mixerTracks,
-    );
+    const newMapping: MidiMapping | null = isFxSlotParamUiTarget(selectedTargetType)
+      ? buildFxSlotParameterMapping(manualCc, mixerTracks, fxSlotTargetId, fxParamId)
+      : buildMidiLearnMapping(
+          manualCc,
+          selectedTargetType,
+          selectedTargetId,
+          channels,
+          mixerTracks,
+        );
+
+    if (!newMapping) {
+      setStatusMessage('That FX slot has no contract parameter to bind.');
+      setTimeout(() => setStatusMessage(null), 3000);
+      return;
+    }
 
     const filtered = midiMappings.filter(m => m.ccNumber !== manualCc);
     onUpdateMidiMappings([...filtered, newMapping]);
@@ -124,17 +194,25 @@ export const MidiLearnModal: React.FC<MidiLearnModalProps> = ({
     if (!isOpen || !isMidiLearnActive) return;
 
     const handleLearnedCc = (event: MidiEventPayload) => {
-      const normalized = normalizeMidiLearnTargetSelection(
-        selectedTargetType,
-        selectedTargetId,
-        channels,
-        mixerTracks,
-      );
-      const capture = resolveMidiLearnCapture(event, midiMappings, {
-        targetType: selectedTargetType,
-        targetId: normalized.targetId,
-        paramName: normalized.paramName,
-      });
+      // Phase 81: the FX slot binder publishes as `fx_param` with the composite
+      // `"<trackId>/<slotId>"` id and the contract param id; every other entry
+      // keeps the pre-existing normalization.
+      const learnTarget: MidiLearnTarget = isFxSlotParamUiTarget(selectedTargetType)
+        ? { targetType: 'fx_param', targetId: fxSlotTargetId, paramName: fxParamId }
+        : (() => {
+            const normalized = normalizeMidiLearnTargetSelection(
+              selectedTargetType,
+              selectedTargetId,
+              channels,
+              mixerTracks,
+            );
+            return {
+              targetType: selectedTargetType,
+              targetId: normalized.targetId,
+              paramName: normalized.paramName,
+            };
+          })();
+      const capture = resolveMidiLearnCapture(event, midiMappings, learnTarget);
       if (!capture) return;
 
       onUpdateMidiMappings(capture.mappings);
@@ -155,7 +233,9 @@ export const MidiLearnModal: React.FC<MidiLearnModalProps> = ({
     onToggleMidiLearn,
     onUpdateMidiMappings,
     selectedTargetId,
-    selectedTargetType
+    selectedTargetType,
+    fxSlotTargetId,
+    fxParamId
   ]);
 
   if (!isOpen) return null;
@@ -278,8 +358,16 @@ export const MidiLearnModal: React.FC<MidiLearnModalProps> = ({
                 <select
                   value={selectedTargetType}
                   onChange={(e) => {
-                    const nextType = e.target.value as MidiMapping['targetType'];
+                    const nextType = e.target.value as MidiLearnUiTarget;
                     setSelectedTargetType(nextType);
+                    if (isFxSlotParamUiTarget(nextType)) {
+                      // Phase 81: seed the slot + parameter pickers from the FX
+                      // contract so the form starts on a bindable parameter.
+                      const seed = defaultFxSlotParameterSelection(mixerTracks);
+                      setFxSlotTargetId(seed?.slotTargetId ?? '');
+                      setFxParamId(seed?.paramId ?? '');
+                      return;
+                    }
                     setSelectedTargetId(
                       normalizeMidiLearnTargetSelection(nextType, selectedTargetId, channels, mixerTracks).targetId
                     );
@@ -292,28 +380,69 @@ export const MidiLearnModal: React.FC<MidiLearnModalProps> = ({
                   <option value="mixer_vol">Mixer Insert Fader</option>
                   <option value="mixer_pan">Mixer Insert Pan</option>
                   <option value="fx_param">Filter Cutoff (Hz)</option>
+                  <option value={FX_SLOT_PARAM_UI_TARGET}>FX Slot Parameter</option>
                 </select>
               </div>
 
-              {/* Target Item / Track */}
+              {/* Target Item / Track (or FX slot, for the Phase 81 FX binder) */}
               <div>
-                <label className="text-[9px] text-[#777] font-mono block mb-0.5">ASSIGN TO TRACK</label>
-                <select
-                  value={selectedTargetId}
-                  onChange={(e) => setSelectedTargetId(e.target.value)}
-                  className="w-full bg-[#121214] text-white text-xs px-2 py-1.5 rounded border border-[#333336]"
-                >
-                  {isChannelScopedMidiTarget(selectedTargetType) ? (
-                    channels.map(c => (
-                      <option key={c.id} value={c.id}>{c.name}</option>
-                    ))
-                  ) : (
-                    mixerTracks.map(m => (
-                      <option key={m.id} value={m.id}>{m.name} (#{m.id})</option>
-                    ))
-                  )}
-                </select>
+                <label className="text-[9px] text-[#777] font-mono block mb-0.5">
+                  {isFxSlotParamUiTarget(selectedTargetType) ? 'ASSIGN TO FX SLOT' : 'ASSIGN TO TRACK'}
+                </label>
+                {isFxSlotParamUiTarget(selectedTargetType) ? (
+                  <select
+                    value={fxSlotTargetId}
+                    onChange={(e) => {
+                      const nextSlot = e.target.value;
+                      setFxSlotTargetId(nextSlot);
+                      setFxParamId(allFxParamOptions.find(option => option.targetId === nextSlot)?.paramId ?? '');
+                    }}
+                    className="w-full bg-[#121214] text-white text-xs px-2 py-1.5 rounded border border-[#333336]"
+                  >
+                    {fxSlotOptions.length === 0 && <option value="">No effect slots</option>}
+                    {fxSlotOptions.map(option => (
+                      <option key={option.targetId} value={option.targetId}>{option.label}</option>
+                    ))}
+                  </select>
+                ) : (
+                  <select
+                    value={selectedTargetId}
+                    onChange={(e) => setSelectedTargetId(e.target.value)}
+                    className="w-full bg-[#121214] text-white text-xs px-2 py-1.5 rounded border border-[#333336]"
+                  >
+                    {isChannelScopedMidiTarget(selectedTargetType) ? (
+                      channels.map(c => (
+                        <option key={c.id} value={c.id}>{c.name}</option>
+                      ))
+                    ) : (
+                      mixerTracks.map(m => (
+                        <option key={m.id} value={m.id}>{m.name} (#{m.id})</option>
+                      ))
+                    )}
+                  </select>
+                )}
               </div>
+
+              {/* Phase 81: the contract parameter the CC drives. Every entry is
+                  a parameter with a real AudioParam consumer, and the label
+                  shows the DSP range the 0-127 byte is mapped across. */}
+              {isFxSlotParamUiTarget(selectedTargetType) && (
+                <div>
+                  <label className="text-[9px] text-[#777] font-mono block mb-0.5">FX PARAMETER</label>
+                  <select
+                    value={fxParamId}
+                    onChange={(e) => setFxParamId(e.target.value)}
+                    className="w-full bg-[#121214] text-white text-xs px-2 py-1.5 rounded border border-[#333336]"
+                  >
+                    {fxParamOptions.length === 0 && <option value="">No contract parameter</option>}
+                    {fxParamOptions.map(option => (
+                      <option key={option.paramId} value={option.paramId}>
+                        {`${option.paramLabel} (${formatFxParameterRange(option)})`}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
 
               {/* Add Button */}
               <div className="flex items-end">

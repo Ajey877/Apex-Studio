@@ -26,17 +26,23 @@
  *    behaviour.
  */
 
-import type { Channel, MidiMapping, MixerTrack, Note, ProjectState } from '../types/daw';
+import type { Channel, FxSlot, MidiMapping, MixerTrack, Note, ProjectState } from '../types/daw';
 import type { MidiEventPayload } from './audioEngine';
 import {
   channelVolumeFromNormalized,
   clampNormalized,
   filterCutoffFromNormalized,
   filterResonanceFromNormalized,
-  fxMixFromNormalized,
   mixerVolumeFromNormalized,
   panFromNormalized,
 } from './parameterScaling';
+import {
+  formatFxSlotTargetId,
+  listFxParameterOptions,
+  parseFxSlotTargetId,
+  resolveFxParameterUpdate,
+  resolveFxSlot,
+} from './fxParameterControl';
 import {
   getChannelUpdateLabel,
   getFxUpdateLabel,
@@ -109,7 +115,7 @@ const toMixerTrackId = (targetId: string | number): number | null => {
 };
 
 /**
- * `fx_param` covers two shapes that both already have a runtime setter and a
+ * `fx_param` covers three shapes, all of which have a real runtime setter and a
  * documented range:
  *
  *  1. a channel synth parameter — `targetId` is a channel id and `paramName`
@@ -117,11 +123,23 @@ const toMixerTrackId = (targetId: string | number): number | null => {
  *     matching the MIDI Learn quick-arm buttons;
  *  2. an FX slot wet/dry mix — `targetId` is the `FxSlot.id` and `paramName` is
  *     `mix`, matching the shipped preset mapping (`fx-5-verb` + `mix`) and the
- *     `fx_mix` automation target.
+ *     `fx_mix` automation target;
+ *  3. Phase 81: any parameter the FX contract (`fxParameterContract.ts`) owns
+ *     on an insert slot — EQ band frequency/gain/Q, compressor
+ *     threshold/knee/ratio/attack/release, delay time/feedback, limiter
+ *     ceiling/release/drive, and the slot mix. `targetId` is preferably the
+ *     composite `"<trackId>/<slotId>"` form so the mapping cannot be silently
+ *     redirected when a slot is deleted or a different insert reuses an id;
+ *     the legacy bare-slot-id form keeps resolving for existing documents.
  *
- * Anything else (e.g. a channel-wide "reverb" amount, or arbitrary
- * `FxSlot.params` entries which are only read when a chain is built) has no
- * runtime setter and is reported instead of guessed at.
+ * Shape 3 shares `fxParameterControl.resolveFxParameterUpdate` with the
+ * `fx_param` automation target, so a hardware knob and an automation lane
+ * convert the same normalized value through the same contract range and reject
+ * the same stale targets.
+ *
+ * Anything else (e.g. a channel-wide "reverb" amount, or a `FxSlot.params` key
+ * the contract does not own, which would have no AudioParam consumer) is
+ * reported instead of guessed at.
  */
 const resolveFxParamTarget = (
   mapping: MidiMapping,
@@ -168,24 +186,43 @@ const resolveFxParamTarget = (
     );
   }
 
-  if (paramName === 'mix') {
-    for (const track of state.mixerTracks) {
-      const slot = track.fxSlots.find(candidate => candidate.id === String(mapping.targetId));
-      if (!slot) continue;
-      const updates = { mix: fxMixFromNormalized(normalizedValue) };
-      return {
-        kind: 'project',
-        status: 'supported',
-        parameter: 'fx_param.mix',
-        value: updates.mix,
-        label: midiLabel(mapping, getFxUpdateLabel(updates)),
-        apply: current => updateFxSlotInProjectState(current, track.id, slot.id, updates),
-      };
-    }
-    return unsupported(`No FX slot matches target id "${String(mapping.targetId)}".`);
+  // Phase 81: FX slot parameters, resolved through the shared contract path.
+  const resolution = resolveFxParameterUpdate(state.mixerTracks, mapping.targetId, paramName, normalizedValue);
+  if (resolution.status !== 'resolved') {
+    return unsupported(resolution.reason);
+  }
+  const { update } = resolution;
+
+  if (update.isMix) {
+    const updates = { mix: update.value };
+    return {
+      kind: 'project',
+      status: 'supported',
+      parameter: 'fx_param.mix',
+      value: updates.mix,
+      label: midiLabel(mapping, getFxUpdateLabel(updates)),
+      apply: current => updateFxSlotInProjectState(current, update.trackId, update.slotId, updates),
+    };
   }
 
-  return unsupported(`FX parameter "${paramName}" has no runtime setter.`);
+  const paramUpdates: Partial<FxSlot> = { params: { [update.paramId]: update.value } };
+  return {
+    kind: 'project',
+    status: 'supported',
+    parameter: `fx_param.${update.paramId}`,
+    value: update.value,
+    label: midiLabel(mapping, `${getFxUpdateLabel(paramUpdates)} (${update.spec.label})`),
+    // Re-read the slot inside the updater so a CC stream cannot overwrite a
+    // sibling parameter that changed between resolution and publication, and
+    // so a slot deleted in that window is a no-op rather than a resurrect.
+    apply: current => {
+      const lookup = resolveFxSlot(current.mixerTracks, mapping.targetId);
+      if (lookup.status !== 'resolved' || lookup.slot.id !== update.slotId) return current;
+      return updateFxSlotInProjectState(current, lookup.track.id, lookup.slot.id, {
+        params: { ...lookup.slot.params, [update.paramId]: update.value },
+      });
+    },
+  };
 };
 
 /**
@@ -344,6 +381,32 @@ export const createMidiMappingForCc = (
   targetId,
   paramName: paramName ?? defaultMidiMappingLabel(targetType, targetId),
 });
+
+/**
+ * Phase 81: builds a CC mapping for one FX contract parameter on one insert
+ * slot.
+ *
+ * The target id is the deterministic composite `"<trackId>/<slotId>"`, so the
+ * binding keeps addressing the effect the user picked even if another insert
+ * later grows a slot with the same id. Returns `null` when the slot does not
+ * exist or the parameter is not in the contract — a mapping that could never
+ * reach an AudioParam is not created, rather than created and silently inert.
+ */
+export const buildFxSlotParameterMapping = (
+  ccNumber: number,
+  mixerTracks: readonly MixerTrack[] | undefined,
+  compositeSlotTargetId: string,
+  paramId: string,
+): MidiMapping | null => {
+  const parsed = parseFxSlotTargetId(compositeSlotTargetId);
+  if (parsed.trackId === null || !parsed.slotId) return null;
+  const id = typeof paramId === 'string' ? paramId.trim() : '';
+  if (!id) return null;
+  const offered = listFxParameterOptions(mixerTracks, { trackId: parsed.trackId, slotId: parsed.slotId })
+    .some(option => option.paramId === id);
+  if (!offered) return null;
+  return createMidiMappingForCc(ccNumber, 'fx_param', formatFxSlotTargetId(parsed.trackId, parsed.slotId), id);
+};
 
 export interface MidiLearnTarget {
   targetType: MidiMapping['targetType'];
