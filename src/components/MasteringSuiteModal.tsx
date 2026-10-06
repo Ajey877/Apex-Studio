@@ -352,13 +352,16 @@ export const MasteringSuiteModal: React.FC<MasteringSuiteModalProps> = ({
           </div>
 
           <div className="flex items-center gap-2">
-            <span
-              title="Phase 46 owns the master processing chain. Until it exists there is the master processor can be enabled or bypassed here."
-              className="px-3 py-1 text-xs font-bold rounded flex items-center gap-1.5 bg-[#222] text-[#888] border border-[#333]"
+            <button
+              type="button"
+              title={masteringState.enabled ? "Bypass master processing" : "Enable master processing"}
+              aria-label={masteringState.enabled ? "Bypass master processing" : "Enable master processing"}
+              onClick={() => onUpdateMasteringState({ ...masteringState, enabled: !masteringState.enabled })}
+              className={`px-3 py-1 text-xs font-bold rounded flex items-center gap-1.5 border ${masteringState.enabled ? 'bg-[#10251b] text-[#00d26a] border-[#00d26a]/40' : 'bg-[#222] text-[#ffaa00] border-[#ffaa00]/40'}`}
             >
               <ShieldCheck className="w-3.5 h-3.5" />
               <span>MASTER CHAIN: {masteringState.enabled ? "ACTIVE DSP" : "BYPASSED"}</span>
-            </span>
+            </button>
 
             <button
               onClick={onClose}
