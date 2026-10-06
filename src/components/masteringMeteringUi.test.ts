@@ -75,7 +75,7 @@ describe('Phase 45: mastering modal readouts', () => {
       assert.ok(MODAL_SOURCE.includes(label), `${label} status missing`);
     }
     assert.match(MODAL_SOURCE, /PROCESSING ENABLED/);
-    assert.match(MODAL_SOURCE, /LIVE \\+ OFFLINE PATH/);
+    assert.match(MODAL_SOURCE, /LIVE \+ OFFLINE PATH/);
     assert.match(MODAL_SOURCE, /BYPASSED/);
     assert.doesNotMatch(MODAL_SOURCE, /NOT APPLIED/);
     assert.match(MODAL_SOURCE, /NOT MEASURED/);
