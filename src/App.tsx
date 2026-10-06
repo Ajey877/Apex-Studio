@@ -148,10 +148,6 @@ interface PendingProjectReplacement {
 export function App() {
   // --- Core DAW State ---
   const [projectState, setProjectState] = useState<ProjectState>(DEFAULT_PROJECT);
-  // Phase 89: every project load/edit must drive the real live and offline master DSP.
-  useEffect(() => {
-    audioEngine.setMasteringState(projectState.masteringSuiteState ?? DEFAULT_MASTERING_SUITE_STATE);
-  }, [projectState.masteringSuiteState]);
   const [isProjectHydrating, setIsProjectHydrating] = useState(true);
   const projectPersistenceReadyRef = useRef(false);
   const hasUnsavedChangesRef = useRef(false);
