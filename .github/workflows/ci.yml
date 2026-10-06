@@ -37,5 +37,11 @@ jobs:
       - name: Persistence and audio tests
         run: npm run test:audio
 
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium
+
+      - name: Real offline audio rendering (browser)
+        run: npx playwright test
+
       - name: Production build
         run: npm run build

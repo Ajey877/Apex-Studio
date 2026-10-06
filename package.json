@@ -32,7 +32,10 @@
     "verify:desktop": "node scripts/verify-desktop-config.mjs",
     "smoke:win": "node scripts/desktop-smoke.mjs",
     "test:metering": "tsx --test src/audio/loudnessMeasurement.test.ts src/audio/truePeak.test.ts src/audio/stereoMeasurement.test.ts src/audio/masterMeasurementStream.test.ts src/audio/meteringTruthfulness.test.ts src/components/masteringMeteringUi.test.ts",
-    "test:truth": "tsx --test src/components/audioSlicerSource.test.ts src/components/warpClipTarget.test.ts src/components/parametricEqPublication.test.ts src/components/vocalTunerTruthfulness.test.tsx src/state/productTruthStrings.test.ts src/components/grossBeatTruth.test.tsx src/components/phase70.collaborationTruth.test.tsx src/components/phase68.projectStatisticsTruthfulness.test.tsx"
+    "test:truth": "tsx --test src/components/audioSlicerSource.test.ts src/components/warpClipTarget.test.ts src/components/parametricEqPublication.test.ts src/components/vocalTunerTruthfulness.test.tsx src/state/productTruthStrings.test.ts src/components/grossBeatTruth.test.tsx src/components/phase70.collaborationTruth.test.tsx src/components/phase68.projectStatisticsTruthfulness.test.tsx",
+    "test:browser": "node scripts/run-browser-tests.mjs",
+    "test:browser:playwright": "npx playwright test",
+    "test:browser:node": "node --import tsx scripts/realOfflineRenderNode.mjs"
   },
   "build": {
     "appId": "com.apexstudio.daw",
@@ -74,6 +77,7 @@
     "vite": "^6.2.3"
   },
   "devDependencies": {
+    "@playwright/test": "^1.63.0",
     "@types/jszip": "^3.4.1",
     "@types/node": "^22.14.0",
     "@types/react": "^19.3.0",
@@ -83,6 +87,7 @@
     "electron-builder": "26.15.3",
     "playwright": "^1.63.0",
     "tsx": "^4.21.0",
-    "typescript": "~5.8.2"
+    "typescript": "~5.8.2",
+    "web-audio-engine": "^0.13.4"
   }
 }
