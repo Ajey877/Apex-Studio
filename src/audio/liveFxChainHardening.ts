@@ -33,12 +33,26 @@ class CompositeEffect implements AudioEffect {
     output: AudioNode,
     private readonly nodes: AudioNode[],
     private readonly effects: AudioEffect[] = [],
+    /**
+     * Optional slot-param → AudioEffect route. When provided,
+     * `setParameter(name, value, time)` looks up `name` here and forwards
+     * the call to the matching inner AudioEffect's AudioParam. This is
+     * what makes the EQ's per-band params (`lowFreq` → inner low-band
+     * BiquadFilterEffect's `frequency`) live-updatable without rebuilding
+     * the chain.
+     */
+    private readonly paramRoutes?: Readonly<Record<string, { effect: AudioEffect; audioParam: string }>>,
   ) {
     this.input = input;
     this.output = output;
   }
 
-  setParameter(): void {
+  setParameter(name: string, value: number, time: number): void {
+    if (this.paramRoutes && Object.prototype.hasOwnProperty.call(this.paramRoutes, name)) {
+      const route = this.paramRoutes[name]!;
+      route.effect.setParameter(route.audioParam, value, time);
+      return;
+    }
     throw new Error(`${this.name} exposes fixed live-chain parameters.`);
   }
 
@@ -56,6 +70,32 @@ class CompositeEffect implements AudioEffect {
 }
 
 const installed = new WeakSet<object>();
+
+/**
+ * Phase 80: translate a slot-param name (the contract surface) into the
+ * name the AudioEffect's `setParameter` contract expects. Most slot-param
+ * names match the AudioEffect names directly (compressor, limiter,
+ * WetDry's `mix`). EQ performs its own translation via
+ * CompositeEffect.paramRoutes (per-band slot-params → `frequency`/`gain`/`q`).
+ *
+ * The only family that needs registry-side translation is delay, where
+ * the slot stores `time` but the DelayEffect contract is `delayTime`. The
+ * `createEffect` factory reads `slot.params.time` at construction and
+ * passes the value to the DelayEffect constructor, but at runtime the
+ * AudioEffect.setParameter switch only recognises `delayTime`. The
+ * translate is a no-op for every other case.
+ */
+function translateSlotParamToFxName(effect: AudioEffect, slotParamName: string): string {
+  // Only the WetDryEffect wrapping a DelayEffect needs the translate;
+  // we identify it by the inner effect's `name` field.
+  const inner = (effect as unknown as { instance?: { name?: string } }).instance
+    ?? (effect as unknown as { effect?: { name?: string } }).effect;
+  const innerName = (inner as unknown as { name?: string })?.name;
+  if (innerName === 'Delay') {
+    if (slotParamName === 'time') return 'delayTime';
+  }
+  return slotParamName;
+}
 
 function numericParam(slot: FxSlot, name: string, fallback: number): number {
   const raw = slot.params?.[name];
@@ -133,7 +173,23 @@ function createEqualizer(ctx: AudioContext, slot: FxSlot): AudioEffect {
   const high = new BiquadFilterEffect(ctx, `${slot.id}-high`, 'highshelf', bounded(numericParam(slot, 'highFreq', 6500), 10, ctx.sampleRate / 2), bounded(numericParam(slot, 'highQ', 1), 0.0001, 1000), bounded(numericParam(slot, 'highGain', 0), -40, 40));
   low.output.connect(mid.input);
   mid.output.connect(high.input);
-  return new CompositeEffect(`${slot.id}-eq-core`, '3-Band EQ', low.input, high.output, [], [low, mid, high]);
+  // Phase 80: route per-band slot-param names to the inner
+  // BiquadFilterEffect's AudioParam. This is the live-edit plumbing
+  // for the EQ family — without it, an EQ band parameter edit would
+  // require a chain rebuild on every move, and the contract test
+  // rejects that as a fake parameter.
+  const paramRoutes: Record<string, { effect: AudioEffect; audioParam: string }> = {
+    lowFreq: { effect: low, audioParam: 'frequency' },
+    lowGain: { effect: low, audioParam: 'gain' },
+    lowQ: { effect: low, audioParam: 'q' },
+    midFreq: { effect: mid, audioParam: 'frequency' },
+    midGain: { effect: mid, audioParam: 'gain' },
+    midQ: { effect: mid, audioParam: 'q' },
+    highFreq: { effect: high, audioParam: 'frequency' },
+    highGain: { effect: high, audioParam: 'gain' },
+    highQ: { effect: high, audioParam: 'q' },
+  };
+  return new CompositeEffect(`${slot.id}-eq-core`, '3-Band EQ', low.input, high.output, [], [low, mid, high], paramRoutes);
 }
 
 function createNativeWaveShaper(ctx: AudioContext, slot: FxSlot, type: 'distortion' | 'bitcrusher'): AudioEffect {
@@ -231,6 +287,18 @@ export interface LiveFxChainHandle {
  */
 interface LiveFxChainRegistry {
   applyLiveMix(trackId: number, slotId: string, mix: number, currentTime: number): boolean;
+  /**
+   * Apply a single named parameter to a live slot's underlying AudioEffect
+   * without rebuilding the chain. Returns true when the live chain owns a
+   * slot with that id AND the effect supports the parameter; false
+   * otherwise (caller should rebuild the chain or correct the parameter
+   * name). `paramName` is the AudioEffect.setParameter contract — typically
+   * the engine-level names (`threshold`, `ratio`, `attack`, `release`,
+   * `knee`, `delayTime`, `feedback`, `decay`, `wet`, `dry`, `ceiling`,
+   * `drive`, `frequency`, `q`, `gain`, …). Names not on the contract are
+   * rejected so a typo cannot silently no-op.
+   */
+  applyLiveParameter(trackId: number, slotId: string, paramName: string, value: number, currentTime: number): boolean;
   getChain(trackId: number): LiveFxChainHandle | undefined;
 }
 
@@ -292,6 +360,29 @@ export function installLiveFxChainHardening(engine: AudioEngineLike): void {
       if (!effect) return false;
       try {
         effect.setParameter('mix', boundedMix(mix), currentTime);
+        return true;
+      } catch (_) {
+        return false;
+      }
+    },
+    applyLiveParameter(trackId: number, slotId: string, paramName: string, value: number, currentTime: number): boolean {
+      if (!Number.isFinite(value)) return false;
+      const slotIndex = slotIndexByTrack.get(trackId);
+      const effect = slotIndex?.get(slotId);
+      if (!effect) return false;
+      try {
+        // Phase 80: translate the slot-param name (the contract surface)
+        // to the AudioEffect param name. EQ does this internally via its
+        // CompositeEffect.paramRoutes; the other families rely on a
+        // direct name match, EXCEPT delay which stores `time` in the
+        // slot but consumes `delayTime` on the DelayEffect contract.
+        // The translate table is the single source of truth for slot-param
+        // → AudioParam renames; it is the registry-side mirror of
+        // fxParameterContract.ts (the contract test pins parity).
+        const translated = translateSlotParamToFxName(effect, paramName);
+        // WetDryEffect.setParameter forwards non-'mix' names to its inner
+        // effect, so the AudioEffect contract is reached in one call.
+        effect.setParameter(translated, value, currentTime);
         return true;
       } catch (_) {
         return false;
@@ -407,4 +498,25 @@ export function getLiveFxSlotEffect(
   slotId: string,
 ): AudioEffect | undefined {
   return engine.__liveFxChainRegistry?.getChain(trackId)?.slotEffects.get(slotId);
+}
+
+/**
+ * Phase 80: Apply a single named parameter to the live AudioEffect that
+ * backs the named slot, without rebuilding the chain. Mirrors
+ * `applyLiveFxChainMix` for the `mix` value but works for every parameter
+ * the effect's `setParameter` contract accepts. Returns true when the live
+ * chain owns a slot with that id AND the effect accepted the value; false
+ * when the caller must rebuild the chain (no live instance, slot disabled,
+ * or the effect rejected the parameter — e.g. an unknown name or
+ * out-of-range value).
+ */
+export function applyLiveFxSlotParameter(
+  engine: { __liveFxChainRegistry?: LiveFxChainRegistry },
+  trackId: number,
+  slotId: string,
+  paramName: string,
+  value: number,
+  currentTime: number,
+): boolean {
+  return engine.__liveFxChainRegistry?.applyLiveParameter(trackId, slotId, paramName, value, currentTime) ?? false;
 }

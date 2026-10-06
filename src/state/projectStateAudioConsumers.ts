@@ -90,6 +90,21 @@ export const PROJECT_STATE_AUDIO_FIELDS: AudioFieldRegistry = {
   // ---- MixerTrack fields (mixerTracks[] is consumed; per-leaf enforcement
   // is in the test — it rejects any non-allowlisted keys that look like
   // audio DSP state.) ----
+
+  // ---- Phase 80: FxSlot fields (mixerTracks[].fxSlots[] is consumed) ----
+  // FxSlot itself is consumed via liveFxChainHardening.createEffect
+  // (rebuilds the AudioParam-based chain at construction) and the
+  // live bridge (applyLiveFxChainMix / applyLiveFxSlotParameter updates
+  // the running AudioParam values without a rebuild). The full parameter
+  // catalog is in src/audio/fxParameterContract.ts: every param in that
+  // file is a real AudioParam on a real AudioEffect, and the
+  // phase80.fxParameterContract test guards it.
+  'mixerTracks[].fxSlots[].type':    { classification: 'consumed', consumer: 'liveFxChainHardening.createEffect', note: 'Phase 80 — selects the AudioEffect factory at chain construction.' },
+  'mixerTracks[].fxSlots[].enabled': { classification: 'consumed', consumer: 'liveFxChainHardening.buildChain (skip when false)', note: 'Phase 80 — disabled slots are not wired into the live or offline chain.' },
+  'mixerTracks[].fxSlots[].mix':     { classification: 'consumed', consumer: 'audioEngine.setFxSlotMix / applyLiveFxChainMix (live + offline)', note: 'Phase 80 — wet/dry mix of the slot, owned by the WetDryEffect wrapper. Live-updatable.' },
+  'mixerTracks[].fxSlots[].params':  { classification: 'consumed', consumer: 'liveFxChainHardening.createEffect + audioEngine.setFxSlotParameter', note: 'Phase 80 — slot-param dict. Each key is registered in src/audio/fxParameterContract.ts and routes to a real AudioParam on a real AudioEffect. Live-updatable for the AudioParam-updatable families (equalizer, compressor, delay, limiter). The remaining families (distortion, bitcrusher, tape_saturation, chorus) deliberately have no entry in the contract; a future phase that adds live editing for them must (a) wire an AudioParam in the AudioEffect and (b) register the params in the contract — there is no path that lets a slot param reach DSP without both.' },
+  'mixerTracks[].fxSlots[].id':      { classification: 'metadata', note: 'Slot id; used by the live bridge to look up the WetDryEffect on the running chain.' },
+  'mixerTracks[].fxSlots[].name':    { classification: 'metadata', note: 'UI display only.' },
 };
 
 /**
