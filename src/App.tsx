@@ -240,12 +240,15 @@ export function App() {
   const activeGutterRef = useRef<'browser' | 'inspector' | null>(null);
   const isResizingRef = useRef(false);
   const [isResizing, setIsResizing] = useState(false);
+  const gutterCleanupRef = useRef<(() => void) | null>(null);
 
   const handleBrowserGutterPointerDown = useCallback((event: React.PointerEvent) => {
     if (!isSidebarOpen) return;
     event.preventDefault();
     const target = event.currentTarget as HTMLElement;
     try { (target as any).setPointerCapture?.(event.pointerId); } catch {}
+    // cleanup any previous drag (small-window rapid switch edge case)
+    gutterCleanupRef.current?.();
     activeGutterRef.current = 'browser';
     isResizingRef.current = true;
     setIsResizing(true);
@@ -260,10 +263,12 @@ export function App() {
       activeGutterRef.current = null;
       isResizingRef.current = false;
       setIsResizing(false);
+      gutterCleanupRef.current = null;
       window.removeEventListener('pointermove', onMove);
       window.removeEventListener('pointerup', onUp);
       window.removeEventListener('pointercancel', onUp);
     };
+    gutterCleanupRef.current = onUp;
     window.addEventListener('pointermove', onMove);
     window.addEventListener('pointerup', onUp);
     window.addEventListener('pointercancel', onUp);
@@ -274,6 +279,7 @@ export function App() {
     event.preventDefault();
     const target = event.currentTarget as HTMLElement;
     try { (target as any).setPointerCapture?.(event.pointerId); } catch {}
+    gutterCleanupRef.current?.();
     activeGutterRef.current = 'inspector';
     isResizingRef.current = true;
     setIsResizing(true);
@@ -289,14 +295,25 @@ export function App() {
       activeGutterRef.current = null;
       isResizingRef.current = false;
       setIsResizing(false);
+      gutterCleanupRef.current = null;
       window.removeEventListener('pointermove', onMove);
       window.removeEventListener('pointerup', onUp);
       window.removeEventListener('pointercancel', onUp);
     };
+    gutterCleanupRef.current = onUp;
     window.addEventListener('pointermove', onMove);
     window.addEventListener('pointerup', onUp);
     window.addEventListener('pointercancel', onUp);
   }, [isInspectorOpen]);
+
+  // cleanup pointer listeners if component unmounts mid-drag (prevents leak)
+  useEffect(() => {
+    return () => {
+      try { gutterCleanupRef.current?.(); } catch {}
+      activeGutterRef.current = null;
+      isResizingRef.current = false;
+    };
+  }, []);
 
   const handleGutterKeyDown = useCallback((gutter: 'browser' | 'inspector', event: React.KeyboardEvent) => {
     const step = event.shiftKey ? 24 : 8;
