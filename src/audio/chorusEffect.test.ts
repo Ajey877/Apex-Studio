@@ -79,4 +79,59 @@ describe('ChorusEffect', () => {
     assert.doesNotThrow(() => effect.dispose());
     assert.throws(() => effect.setParameter('mix', 0.2, 0), /disposed/);
   });
+
+  it('falls back to delayTime when ConstantSource is unavailable (offline)', () => {
+    // This test does not claim acoustic equivalence; it only verifies that
+    // the constructor does not throw and that the delay automation is routed
+    // to the available AudioParam so an offline export does not crash.
+    const delayParam = param();
+    const delayNode = { ...node(), delayTime: delayParam };
+    let delayConnects = 0;
+    const originalConnect = delayNode.connect.bind(delayNode);
+    // Count connections into delayTime is not directly observable in this mock,
+    // but we can verify construction succeeds and dispose remains safe.
+
+    function contextWithoutConstantSource(): AudioContext {
+      const makeGain = () => ({ ...node(), gain: param(1) }) as unknown as GainNode;
+      const makeDelay = () => delayNode as unknown as DelayNode;
+      const makeOscillator = () => ({ ...node(), frequency: param(), start() {}, stop() {} }) as unknown as OscillatorNode;
+      return {
+        currentTime: 11,
+        createGain: makeGain,
+        createDelay: makeDelay,
+        createOscillator: makeOscillator,
+      } as unknown as AudioContext;
+    }
+
+    const ctx = contextWithoutConstantSource();
+    let effect: ChorusEffect | undefined;
+    assert.doesNotThrow(() => {
+      effect = new ChorusEffect(ctx, 'fallback', 1.2, 0.003, 0.02, 0.25);
+    });
+    assert.ok(effect, 'effect must be constructed without ConstantSource');
+    // After construction the fallback path should have scheduled the base delay
+    // on delay.delayTime (since no offset node exists).
+    assert.ok(delayParam.calls.some(([v]) => v === 0.02), 'fallback base delay scheduled on delayTime');
+
+    // Clear and verify live automation routes to delayTime when offset is absent.
+    delayParam.calls.length = 0;
+    assert.doesNotThrow(() => effect!.setParameter('delay', 0.03, 15));
+    assert.ok(
+      delayParam.calls.some(([v, t]) => v === 0.03 && t === 15),
+      'fallback delay update must route to delayTime',
+    );
+
+    // Other parameters must remain live-updatable without ConstantSource.
+    assert.doesNotThrow(() => effect!.setParameter('rate', 2, 15));
+    assert.doesNotThrow(() => effect!.setParameter('depth', 0.005, 15));
+    assert.doesNotThrow(() => effect!.setParameter('mix', 0.5, 15));
+
+    // Dispose must handle the absent ConstantSource and remain idempotent.
+    assert.doesNotThrow(() => effect!.dispose());
+    assert.doesNotThrow(() => effect!.dispose());
+    assert.throws(() => effect!.setParameter('mix', 0.2, 20), /disposed/);
+
+    void delayConnects;
+    void originalConnect;
+  });
 });

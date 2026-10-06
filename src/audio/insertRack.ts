@@ -61,6 +61,7 @@ export class ChannelInsertRack {
   dispose(): void {
     this.input.disconnect();
     for (const slot of this.slots) slot.node.disconnect();
+    this.output.disconnect();
     this.slots = [];
   }
 
