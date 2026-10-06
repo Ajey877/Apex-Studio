@@ -32,7 +32,8 @@
     "verify:desktop": "node scripts/verify-desktop-config.mjs",
     "smoke:win": "node scripts/desktop-smoke.mjs",
     "test:metering": "tsx --test src/audio/loudnessMeasurement.test.ts src/audio/truePeak.test.ts src/audio/stereoMeasurement.test.ts src/audio/masterMeasurementStream.test.ts src/audio/meteringTruthfulness.test.ts src/components/masteringMeteringUi.test.ts",
-    "test:truth": "tsx --test src/components/audioSlicerSource.test.ts src/components/warpClipTarget.test.ts src/components/parametricEqPublication.test.ts src/components/vocalTunerTruthfulness.test.tsx src/state/productTruthStrings.test.ts src/components/grossBeatTruth.test.tsx src/components/phase70.collaborationTruth.test.tsx src/components/phase68.projectStatisticsTruthfulness.test.tsx"
+    "test:truth": "tsx --test src/components/audioSlicerSource.test.ts src/components/warpClipTarget.test.ts src/components/parametricEqPublication.test.ts src/components/vocalTunerTruthfulness.test.tsx src/state/productTruthStrings.test.ts src/components/grossBeatTruth.test.tsx src/components/phase70.collaborationTruth.test.tsx src/components/phase68.projectStatisticsTruthfulness.test.tsx",
+    "test:browser": "npx playwright test"
   },
   "build": {
     "appId": "com.apexstudio.daw",
@@ -74,6 +75,7 @@
     "vite": "^6.2.3"
   },
   "devDependencies": {
+    "@playwright/test": "^1.63.0",
     "@types/jszip": "^3.4.1",
     "@types/node": "^22.14.0",
     "@types/react": "^19.3.0",
