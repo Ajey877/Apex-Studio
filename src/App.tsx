@@ -23,7 +23,7 @@ import {
   createDefaultMixerTracks, 
   createDefaultPlaylistTracks 
 } from './audio/presets';
-import { appendChannelWithAllocatedMixerTrackId } from './state/mixerTrackIdentity';
+import { allocateMixerTrackIdentity, appendChannelWithAllocatedMixerTrackId } from './state/mixerTrackIdentity';
 import { deleteChannelFromProjectState, normalizeProjectState } from './state/projectState';
 import { reapplyMacroRackOnHydration } from './state/macroMappings';
 import {
@@ -1230,6 +1230,47 @@ export function App() {
     }
   };
 
+  const handleCreateAuxReturnTrack = () => {
+    const allocation = allocateMixerTrackIdentity(projectStateRef.current);
+    const newTrack: MixerTrack = {
+      id: allocation.mixerTrackId,
+      name: `Return ${allocation.mixerTrackId}`,
+      color: '#7e57c2',
+      volume: 0.85,
+      pan: 0,
+      mute: false,
+      solo: false,
+      peakL: 0,
+      peakR: 0,
+      fxSlots: [
+        {
+          id: `fx-${allocation.mixerTrackId}-verb`,
+          type: 'reverb',
+          name: 'Studio Reverb',
+          enabled: true,
+          mix: 1.0,
+          params: { roomSize: 0.7, decay: 2.0 },
+        },
+      ],
+      isAux: true,
+      routingTargetId: 0,
+    };
+    mutateProjectState(
+      current => ({
+        ...current,
+        mixerTracks: [...current.mixerTracks, newTrack],
+        nextMixerTrackId: allocation.nextMixerTrackId,
+        selectedMixerTrackId: newTrack.id,
+      }),
+      'Create aux return'
+    );
+    setSelectedTrackId(newTrack.id);
+    try {
+      audioEngine.getOrCreateMixerChannel(newTrack.id);
+      audioEngine.updateMixerTrack(newTrack);
+    } catch (_) {}
+  };
+
   const handleAddFxSlot = (trackId: number, type: FxType) => {
     const newSlot: FxSlot = {
       id: `fx-${Date.now()}`,
@@ -1890,6 +1931,7 @@ export function App() {
               onOpenParametricEq={(track) => { setEqModalTrackId(track.id); setIsParametricEqOpen(true); }}
               onInteractionStart={handleContinuousInteractionStart}
               onInteractionEnd={handleContinuousInteractionEnd}
+              onCreateAuxReturn={handleCreateAuxReturnTrack}
             />
           )}
 

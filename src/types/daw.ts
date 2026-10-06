@@ -200,7 +200,15 @@ export type AutomationTargetType =
    * (number) and `paramName` = slot id, and existing projects keep using it.
    */
   | 'fx_param'
-  | 'master_vol';
+  | 'master_vol'
+  /**
+   * Phase 88: post-fader aux send amount. Each targetId is the source mixer
+   * track id; `mixer_send1` drives `auxSends[0].amount`, `mixer_send2` drives
+   * `auxSends[1].amount` (0..1). They exist on the same automation infra as
+   * `mixer_vol` / `mixer_pan` and are clamped + persisted like any other lane.
+   */
+  | 'mixer_send1'
+  | 'mixer_send2';
 
 export interface ArpSettings {
   enabled: boolean;
@@ -556,10 +564,30 @@ export interface MixerTrack {
   peakR: number;
   sidechain?: SidechainSettings;
   routingTargetId?: number; // 0 = Master, or id of sub-group track
+  /**
+   * @deprecated Legacy pre-Phase-88 inert sends. Still parsed for migration
+   * but never written by Phase-88 code; normalizeProjectState migrates
+   * non-zero values into `auxSends` on first load.
+   */
   sends?: {
     send1: number; // 0 to 1.0 (e.g. Reverb Aux)
     send2: number; // 0 to 1.0 (e.g. Delay Aux)
   };
+  /**
+   * Phase 88: explicit post-fader aux sends. Each entry is a connection
+   * from this track's post-fader output through a dedicated GainNode into
+   * the target track's input. `amount` is linear 0..1 gain. At most 2
+   * entries; empty or undefined means no sends. Persisted, normalized,
+   * and automated via `mixer_send1` / `mixer_send2`.
+   */
+  auxSends?: Array<{ targetId: number; amount: number }>;
+  /**
+   * Phase 88: true for a return/aux bus track. An `isAux` track has its
+   * own MixerChannel and FX chain (insert→…→Master) and is typically the
+   * target of one or more `auxSends`. Not exclusive — any track can be a
+   * target — but marking returns helps UI/filtering and stabilizes IDs.
+   */
+  isAux?: boolean;
 }
 
 export interface ProjectMetadata {

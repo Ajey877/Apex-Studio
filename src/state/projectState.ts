@@ -61,6 +61,205 @@ function stripObsoleteChannelFields<C extends { synthParams?: Record<string, unk
 }
 
 // Obsolete fields on mixer tracks (stereoWidth, inert sidechain fields).
+export const MAX_AUX_SENDS_PER_TRACK = 2;
+
+export const clampAuxSendAmount = (value: unknown): number | null => {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return null;
+  return Math.max(0, Math.min(1, value));
+};
+
+export const normalizeAuxSendsForTrack = (
+  track: { id: number; auxSends?: unknown; sends?: unknown },
+  validTargetIds: Set<number>,
+  preferredAuxIds?: number[]
+): Array<{ targetId: number; amount: number }> | undefined => {
+  const rawAux = (track as unknown as { auxSends?: unknown }).auxSends;
+  const rawLegacy = (track as unknown as { sends?: unknown }).sends;
+  let candidates: Array<{ targetId: number; amount: number }> = [];
+
+  if (Array.isArray(rawAux)) {
+    for (const entry of rawAux) {
+      if (!entry || typeof entry !== 'object') continue;
+      const rec = entry as Record<string, unknown>;
+      const targetId = rec.targetId;
+      const amount = clampAuxSendAmount(rec.amount);
+      if (!Number.isInteger(targetId) || amount === null) continue;
+      if (targetId === track.id) continue;
+      if (targetId === 0) continue; // Master cannot be aux target (no wet tail)
+      if (!validTargetIds.has(targetId as number)) continue;
+      candidates.push({ targetId: targetId as number, amount });
+    }
+  } else if (
+    rawLegacy &&
+    typeof rawLegacy === 'object' &&
+    !Array.isArray(rawLegacy)
+  ) {
+    const legacy = rawLegacy as Record<string, unknown>;
+    const s1 = clampAuxSendAmount(legacy.send1);
+    const s2 = clampAuxSendAmount(legacy.send2);
+    // Legacy sends had no target; prefer explicit aux returns, else
+    // first two non-self inserts. If no candidate exists, the non-zero send
+    // is preserved as an amount to the first valid aux target slot and will
+    // be dropped by the validTargetIds check if none exists — caller may
+    // lazily create returns for legacy migration.
+    const preferred = (preferredAuxIds ?? []).filter(id => id !== track.id && validTargetIds.has(id));
+    const fallback = [...validTargetIds].filter(id => id !== track.id && id !== 0).sort((a, b) => a - b);
+    const auxTargets = preferred.length > 0 ? preferred : fallback;
+    if (s1 !== null && s1 > 0 && auxTargets[0] !== undefined) {
+      candidates.push({ targetId: auxTargets[0], amount: s1 });
+    }
+    if (s2 !== null && s2 > 0 && auxTargets[1] !== undefined) {
+      candidates.push({ targetId: auxTargets[1], amount: s2 });
+    } else if (s2 !== null && s2 > 0 && auxTargets[0] !== undefined && candidates.length === 0) {
+      // Only one aux target available — map send2 there if send1 empty
+      candidates.push({ targetId: auxTargets[0], amount: s2 });
+    }
+  }
+
+  // Deduplicate by targetId, keep first, cap at 2
+  const seen = new Set<number>();
+  const deduped: Array<{ targetId: number; amount: number }> = [];
+  for (const c of candidates) {
+    if (seen.has(c.targetId)) continue;
+    seen.add(c.targetId);
+    deduped.push(c);
+    if (deduped.length >= MAX_AUX_SENDS_PER_TRACK) break;
+  }
+  if (deduped.length === 0) return undefined;
+  return deduped;
+};
+
+export const normalizeAuxSendReferences = (project: ProjectState): ProjectState => {
+  const validIds = new Set(project.mixerTracks.map(t => t.id));
+  const preferredAuxIds = project.mixerTracks.filter(t => (t as unknown as { isAux?: unknown }).isAux === true).map(t => t.id).sort((a, b) => a - b);
+  let changed = false;
+  const nextTracks = project.mixerTracks.map(track => {
+    const normalized = normalizeAuxSendsForTrack(track as unknown as { id: number; auxSends?: unknown; sends?: unknown }, validIds, preferredAuxIds);
+    const current = (track as unknown as { auxSends?: unknown }).auxSends as Array<{ targetId: number; amount: number }> | undefined;
+    const currentNormalized = current && Array.isArray(current) ? current : undefined;
+    const equal = (a: typeof normalized, b: typeof currentNormalized): boolean => {
+      if (a === undefined && b === undefined) return true;
+      if (!a || !b) return false;
+      if (a.length !== b.length) return false;
+      for (let i = 0; i < a.length; i++) {
+        if (a[i].targetId !== b[i].targetId) return false;
+        if (Math.abs(a[i].amount - b[i].amount) > 1e-6) return false;
+      }
+      return true;
+    };
+    const hasLegacySends = (track as unknown as { sends?: unknown }).sends !== undefined;
+    const hasMalformedIsAux = ('isAux' in track) && (typeof (track as unknown as { isAux: unknown }).isAux !== 'boolean' || (track.id === 0 && (track as unknown as { isAux: boolean }).isAux === true));
+    if (equal(normalized, currentNormalized) && !hasLegacySends && !hasMalformedIsAux) {
+      return track;
+    }
+    if (equal(normalized, currentNormalized)) {
+      // AuxSends already equal but we still need to strip legacy `sends` or fix isAux
+      changed = true;
+      const next: Record<string, unknown> = { ...track };
+      if (hasLegacySends) delete next.sends;
+      if ('isAux' in next) {
+        if (track.id === 0) delete next.isAux;
+        else if (typeof next.isAux !== 'boolean') {
+          if (next.isAux) next.isAux = true; else delete next.isAux;
+        }
+      }
+      return next as unknown as typeof track;
+    }
+    changed = true;
+    const next: Record<string, unknown> = { ...track };
+    if (normalized === undefined) {
+      delete next.auxSends;
+    } else {
+      next.auxSends = normalized;
+    }
+    // Legacy `sends` is stripped once we have a normalized auxSends or even if we drop it entirely
+    if ('sends' in next) delete next.sends;
+    if ('isAux' in next) {
+      if (track.id === 0) delete next.isAux;
+      else if (typeof next.isAux !== 'boolean') {
+        if (next.isAux) next.isAux = true; else delete next.isAux;
+      }
+    }
+    return next as unknown as typeof track;
+  });
+
+  // Ensure any aux target that was referenced but missing does not create phantom — already dropped.
+  // No auto-creation here; migration that needs new returns is handled separately.
+  if (!changed) return project;
+  return { ...project, mixerTracks: nextTracks };
+};
+
+export const migrateLegacySendsToAuxSends = (project: ProjectState): ProjectState => {
+  // Detect legacy projects where at least one track has `sends` with non-zero
+  // but no valid auxSends target exists. We synthesize up to 2 aux return
+  // tracks (isAux:true) so the legacy amount has a destination instead of
+  // being silently dropped. This mirrors the Phase 88 requirement that
+  // existing inert send1/send2 values must no longer be ignored.
+  const hasLegacy = project.mixerTracks.some(t => {
+    const s = (t as unknown as { sends?: { send1?: unknown; send2?: unknown } }).sends;
+    if (!s || typeof s !== 'object') return false;
+    const a1 = typeof s.send1 === 'number' && Number.isFinite(s.send1) ? s.send1 : 0;
+    const a2 = typeof s.send2 === 'number' && Number.isFinite(s.send2) ? s.send2 : 0;
+    return (a1 > 0 || a2 > 0) && !(Array.isArray((t as unknown as { auxSends?: unknown }).auxSends) && (t as unknown as { auxSends: unknown[] }).auxSends.length > 0);
+  });
+  if (!hasLegacy) return project;
+
+  // Ensure at least 2 aux returns exist; create them if missing.
+  const existingIds = new Set(project.mixerTracks.map(t => t.id));
+  const auxReturnCandidates = project.mixerTracks.filter(t => (t as unknown as { isAux?: unknown }).isAux === true).map(t => t.id).sort((a, b) => a - b);
+  let nextId = Math.max(0, ...project.mixerTracks.map(t => t.id)) + 1;
+  const ensureReturn = (index: number): number => {
+    if (auxReturnCandidates[index] !== undefined && existingIds.has(auxReturnCandidates[index])) {
+      return auxReturnCandidates[index];
+    }
+    // Reuse spare insert ids 8,9 if free, else allocate nextId
+    const preferred = 8 + index;
+    if (!existingIds.has(preferred)) {
+      existingIds.add(preferred);
+      return preferred;
+    }
+    while (existingIds.has(nextId)) nextId++;
+    const id = nextId++;
+    existingIds.add(id);
+    return id;
+  };
+
+  const needed = hasLegacy ? 2 : 0;
+  const returnIds: number[] = [];
+  for (let i = 0; i < needed; i++) returnIds.push(ensureReturn(i));
+
+  // Create missing return tracks
+  const missingReturns: typeof project.mixerTracks = [];
+  for (let i = 0; i < returnIds.length; i++) {
+    const id = returnIds[i];
+    if (project.mixerTracks.some(t => t.id === id)) continue;
+    const name = i === 0 ? 'Reverb Return' : 'Delay Return';
+    const color = i === 0 ? '#7e57c2' : '#00acc1';
+    const fx = i === 0
+      ? [{ id: `fx-${id}-verb`, type: 'reverb' as const, name: 'Studio Reverb', enabled: true, mix: 1.0, params: { roomSize: 0.7, decay: 2.0 } }]
+      : [{ id: `fx-${id}-delay`, type: 'delay' as const, name: 'Tape Delay', enabled: true, mix: 0.6, params: { time: 0.35, feedback: 0.4 } }];
+    missingReturns.push({
+      id,
+      name,
+      color,
+      volume: 0.85,
+      pan: 0,
+      mute: false,
+      solo: false,
+      peakL: 0,
+      peakR: 0,
+      fxSlots: fx as unknown as typeof fx,
+      isAux: true,
+    } as unknown as typeof project.mixerTracks[0]);
+  }
+
+  if (missingReturns.length === 0) return project;
+  return {
+    ...project,
+    mixerTracks: [...project.mixerTracks, ...missingReturns],
+  };
+};
+
 function stripObsoleteMixerTrackFields<T extends { stereoWidth?: unknown; sidechain?: Record<string, unknown> | null }>(track: T): T {
   const next: Record<string, unknown> = { ...track };
   delete next.stereoWidth;
@@ -364,8 +563,10 @@ export const normalizeProjectState = (input: unknown): ProjectState => {
 
   const identityNormalized = normalizeMixerTrackIdentityIntegrity(normalized);
   const routingNormalized = normalizeMixerRoutingReferences(identityNormalized);
+  const legacyMigrated = migrateLegacySendsToAuxSends(routingNormalized);
+  const auxNormalized = normalizeAuxSendReferences(legacyMigrated);
 
-  const duplicateIdentities = findDuplicateMixerTrackIdentities(routingNormalized);
+  const duplicateIdentities = findDuplicateMixerTrackIdentities(auxNormalized);
   if (duplicateIdentities.length > 0) {
     throw new Error(
       `[Apex Studio] Project contains duplicate mixer identities after normalization: ${duplicateIdentities.join(', ')}`
@@ -377,8 +578,8 @@ export const normalizeProjectState = (input: unknown): ProjectState => {
   }
 
   return revalidateProjectTimeline({
-    ...routingNormalized,
-    nextMixerTrackId: normalizeNextMixerTrackId(routingNormalized, candidate.nextMixerTrackId)
+    ...auxNormalized,
+    nextMixerTrackId: normalizeNextMixerTrackId(auxNormalized, candidate.nextMixerTrackId)
   });
 };
 
@@ -423,10 +624,27 @@ export const deleteChannelFromProjectState = (
     trackId === MASTER_MIXER_TRACK_ID || remainingChannels.some(ch => ch.mixerTrackId === trackId);
 
   const nextMixerTracks = isTrackStillReferenced
-    ? project.mixerTracks
+    ? project.mixerTracks.map(t => {
+        // Even when the deleted track itself is retained (shared), other tracks
+        // that sent to it via aux must not retain a stale target.
+        if (!t.auxSends) return t;
+        const filtered = t.auxSends.filter(s => s.targetId !== trackId);
+        if (filtered.length === t.auxSends.length) return t;
+        return { ...t, auxSends: filtered.length === 0 ? undefined : filtered };
+      })
     : project.mixerTracks
       .filter(t => t.id !== trackId)
-      .map(t => t.routingTargetId === trackId ? { ...t, routingTargetId: MASTER_MIXER_TRACK_ID } : t);
+      .map(t => {
+        let next: typeof t = t;
+        if (t.routingTargetId === trackId) next = { ...next, routingTargetId: MASTER_MIXER_TRACK_ID };
+        if (t.auxSends) {
+          const filtered = t.auxSends.filter(s => s.targetId !== trackId);
+          if (filtered.length !== t.auxSends.length) {
+            next = { ...next, auxSends: filtered.length === 0 ? undefined : filtered };
+          }
+        }
+        return next;
+      });
 
   const nextSelectedChannelId =
     project.selectedChannelId === channelId

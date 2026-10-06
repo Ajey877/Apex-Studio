@@ -320,6 +320,66 @@ test.describe('Production AudioEngine offline export path (real browser)', () =>
     expect(result.wetMax).toBeGreaterThan(1e-4);
   });
 
+  test('send to return reverb produces measurable wet difference vs dry', async ({ page }) => {
+    await page.goto('http://localhost:3000');
+    const result = await page.evaluate(async () => {
+      // @ts-ignore
+      const mod: any = await import('/src/audio/audioEngine.ts');
+      const engine = mod.audioEngine;
+      const channel = {
+        id: 'ch-test',
+        name: 'Test Synth',
+        color: '#7e57c2',
+        instrumentType: 'minisynth' as const,
+        mixerTrackId: 1,
+        volume: 0.9,
+        pan: 0,
+        pitch: 0,
+        mute: false,
+        solo: false,
+        steps: Array(16).fill(false),
+        notes: [{ id: 'n1', pitch: 60, start: 0, duration: 4, velocity: 0.9 }],
+        synthParams: engine.getDefaultSynthParams ? engine.getDefaultSynthParams() : {},
+      };
+      const clip = { id: 'clip-1', trackIndex: 0, startBar: 0, lengthBars: 1, type: 'pattern' as const, channelId: 'ch-test', color: '#7e57c2', name: 'Test Clip' };
+      const dryTracks = [
+        { id: 0, name: 'Master', color: '#3b82f6', volume: 1, pan: 0, mute: false, solo: false, peakL: 0, peakR: 0, fxSlots: [] },
+        { id: 1, name: 'Dry Source', color: '#7e57c2', volume: 1, pan: 0, mute: false, solo: false, peakL: 0, peakR: 0, fxSlots: [], auxSends: [] },
+        { id: 8, name: 'Reverb Return', color: '#7e57c2', volume: 0.85, pan: 0, mute: false, solo: false, peakL: 0, peakR: 0, isAux: true, fxSlots: [{ id: 'fx-8-verb', type: 'reverb', name: 'Studio Reverb', enabled: true, mix: 1.0, params: { roomSize: 0.7, decay: 2.2 } }] },
+      ];
+      const wetTracks = [
+        { id: 0, name: 'Master', color: '#3b82f6', volume: 1, pan: 0, mute: false, solo: false, peakL: 0, peakR: 0, fxSlots: [] },
+        { id: 1, name: 'Wet Source', color: '#7e57c2', volume: 1, pan: 0, mute: false, solo: false, peakL: 0, peakR: 0, fxSlots: [], auxSends: [{ targetId: 8, amount: 0.8 }] },
+        { id: 8, name: 'Reverb Return', color: '#7e57c2', volume: 0.85, pan: 0, mute: false, solo: false, peakL: 0, peakR: 0, isAux: true, fxSlots: [{ id: 'fx-8-verb', type: 'reverb', name: 'Studio Reverb', enabled: true, mix: 1.0, params: { roomSize: 0.7, decay: 2.2 } }] },
+      ];
+      const dry: AudioBuffer = await engine.renderTimelineOffline([channel], [clip], dryTracks, 120, 1, 44100, true);
+      const wet: AudioBuffer = await engine.renderTimelineOffline([channel], [clip], wetTracks, 120, 1, 44100, true);
+      const d0 = dry.getChannelData(0);
+      const w0 = wet.getChannelData(0);
+      let diffEnergy = 0;
+      let maxDiff = 0;
+      const len = Math.min(d0.length, w0.length);
+      for (let i = 0; i < len; i++) {
+        const diff = Math.abs(w0[i] - d0[i]);
+        diffEnergy += diff * diff;
+        if (diff > maxDiff) maxDiff = diff;
+      }
+      let dryMax = 0; for (let i = 0; i < d0.length; i++) { const a = Math.abs(d0[i]); if (a > dryMax) dryMax = a; }
+      let wetMax = 0; for (let i = 0; i < w0.length; i++) { const a = Math.abs(w0[i]); if (a > wetMax) wetMax = a; }
+      const dryFinite = d0.every(Number.isFinite);
+      const wetFinite = w0.every(Number.isFinite);
+      return { diffEnergy, maxDiff, dryFinite, wetFinite, dryMax, wetMax };
+    });
+    expect(result.dryFinite, 'dry buffer has non-finite').toBe(true);
+    expect(result.wetFinite, 'wet buffer has non-finite').toBe(true);
+    expect(result.maxDiff, `send to return reverb should cause measurable wet difference but maxDiff=${result.maxDiff}`).toBeGreaterThan(1e-4);
+    expect(result.diffEnergy).toBeGreaterThan(1e-6);
+    expect(result.dryMax).toBeGreaterThan(1e-4);
+    expect(result.wetMax).toBeGreaterThan(1e-4);
+    // Wet should be at least somewhat louder due to return reverb tail, or at least different
+    expect(result.wetMax).not.toBeCloseTo(result.dryMax, 2);
+  });
+
   test('missing buffer for unmuted audio clip throws descriptive error', async ({ page }) => {
     await page.goto('http://localhost:3000');
     const result = await page.evaluate(async () => {

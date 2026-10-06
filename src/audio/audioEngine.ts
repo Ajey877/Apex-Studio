@@ -25,6 +25,7 @@ import { ChorusEffect } from './effects/ChorusEffect';
 import { WetDryEffect } from './effects/WetDryEffect';
 import { createInstrumentRegistry, InstrumentRegistry, InstrumentVoiceHandle } from './instrumentRegistry';
 import { MixerRoutingAdapter } from './mixerRoutingAdapter';
+import { buildDryStemMixerTracks, buildWetStemMixerTracks, getDirectAuxSendSourceIds, getUpstreamMixerTrackIds } from './auxStemRouting';
 import { renderIndependentPluckVoice } from './instruments/independentPluck';
 import { renderSubtractiveSynthVoice } from './instruments/subtractiveSynth';
 import { renderFmSynthVoice } from './instruments/fmSynth';
@@ -131,6 +132,13 @@ export interface MixerChannel {
    * `analyser` is the tap; it is never part of the audible signal path.
    */
   meterTap?: AudioNode;
+  /**
+   * Phase 88 — per-source post-fader aux send gains. Each entry is
+   * `output -> GainNode(amount) -> target.input`. Stored on the source
+   * channel so `disconnectOutputs` / `syncAuxSends` can recreate the edge
+   * after a bus rebuild without leaking. The map key is the target track id.
+   */
+  auxSendGains?: Map<number, GainNode>;
 }
 
 export interface ChannelPannerEntry {
@@ -226,7 +234,7 @@ function trackLiveUpdatableChanged(previous: MixerTrack, next: MixerTrack): Trac
       mixChanges.push({ slotId: nextSlot.id, mix: nextSlot.mix });
     }
   }
-  const topLevelKeys: ReadonlyArray<keyof MixerTrack> = ['name', 'color', 'volume', 'pan', 'mute', 'solo', 'peakL', 'peakR', 'sidechain', 'routingTargetId', 'sends'];
+  const topLevelKeys: ReadonlyArray<keyof MixerTrack> = ['name', 'color', 'volume', 'pan', 'mute', 'solo', 'peakL', 'peakR', 'sidechain', 'routingTargetId', 'sends', 'auxSends', 'isAux'];
   const optionalKeys = ['height', 'armedForRecord'];
   for (const key of optionalKeys) {
     if (!playbackValuesEqual((previous as any)[key], (next as any)[key])) {
@@ -784,6 +792,7 @@ class AudioEngine {
       analyser,
       fxNodes: [] as AudioNode[],
       meterTap: analyser,
+      auxSendGains: new Map<number, GainNode>(),
     };
 
     this.mixerChannels.set(trackId, channelObj);
@@ -827,6 +836,23 @@ class AudioEngine {
     try {
       channel.analyser.disconnect();
     } catch (_) {}
+
+    // Phase 88: disconnect aux send gains owned by this source
+    if (channel.auxSendGains) {
+      for (const gain of channel.auxSendGains.values()) {
+        try { gain.disconnect(); } catch (_) {}
+      }
+      channel.auxSendGains.clear();
+    }
+
+    // Phase 88: remove incoming aux sends from other tracks that targeted the deleted track
+    for (const [, otherChannel] of this.mixerChannels) {
+      if (!otherChannel.auxSendGains?.has(trackId)) continue;
+      const gain = otherChannel.auxSendGains.get(trackId)!;
+      try { otherChannel.output.disconnect(gain as unknown as AudioNode); } catch (_) {}
+      try { gain.disconnect(); } catch (_) {}
+      otherChannel.auxSendGains.delete(trackId);
+    }
 
     if (this.channelPanners) {
       for (const [channelId, entry] of [...this.channelPanners.entries()]) {
@@ -1091,6 +1117,10 @@ class AudioEngine {
         targetId: track.routingTargetId ?? 0,
         reason: result.reason,
       });
+    } else {
+      // Phase 88: bus rebuild cleared aux taps; restore them and sync this track's sends
+      this.restoreAuxSendConnections();
+      this.syncAuxSendsForTrack(track);
     }
   }
 
@@ -1105,6 +1135,182 @@ class AudioEngine {
       .map(track => ({ trackId: track.id, targetId: track.routingTargetId ?? 0 }));
     const result = adapter.syncRoutes(routes);
     if (!result.valid) throw new Error(result.reason ?? 'Invalid mixer routing.');
+    // Phase 88: bus rebuild cleared output edges including aux taps; restore them
+    this.restoreAuxSendConnections();
+    // Phase 88: sync all aux sends after bus topology is stable
+    this.syncAllAuxSends(tracks);
+  }
+
+  // Phase 88: aux send graph — post-fader GainNode per send
+  private clampAuxSendAmount(amount: unknown): number {
+    const n = typeof amount === 'number' && Number.isFinite(amount) ? amount : 0;
+    return Math.max(0, Math.min(1, n));
+  }
+
+  private ensureAuxSendGainsMap(channel: MixerChannel): Map<number, GainNode> {
+    if (!channel.auxSendGains) channel.auxSendGains = new Map<number, GainNode>();
+    return channel.auxSendGains;
+  }
+
+  /**
+   * Validates that adding aux edges `newAux` to the combined bus+aux graph
+   * does not introduce a cycle. Returns null if valid, or a reason string.
+   */
+  private validateAuxSendsNoCycle(
+    tracks: MixerTrack[],
+    newAuxForSource?: { sourceId: number; auxSends: Array<{ targetId: number; amount: number }> }
+  ): string | null {
+    // Build adjacency from routingTargetId + auxSends (including proposed change)
+    const adj = new Map<number, Set<number>>();
+    for (const t of tracks) {
+      if (t.id === 0) continue;
+      const target = t.routingTargetId ?? 0;
+      if (target !== 0) {
+        if (!adj.has(t.id)) adj.set(t.id, new Set());
+        adj.get(t.id)!.add(target);
+      }
+      let sends = t.auxSends ?? [];
+      if (newAuxForSource && t.id === newAuxForSource.sourceId) {
+        sends = newAuxForSource.auxSends;
+      }
+      for (const s of sends) {
+        if (s.targetId === 0 || s.targetId === t.id) continue;
+        if (!adj.has(t.id)) adj.set(t.id, new Set());
+        adj.get(t.id)!.add(s.targetId);
+      }
+    }
+    // DFS cycle detection
+    const visited = new Set<number>();
+    const stack = new Set<number>();
+    const dfs = (node: number): boolean => {
+      if (stack.has(node)) return true;
+      if (visited.has(node)) return false;
+      visited.add(node);
+      stack.add(node);
+      const neighbors = adj.get(node);
+      if (neighbors) {
+        for (const n of neighbors) {
+          if (n === 0) continue;
+          if (dfs(n)) return true;
+        }
+      }
+      stack.delete(node);
+      return false;
+    };
+    for (const id of adj.keys()) {
+      if (dfs(id)) return 'Aux send would create a routing cycle.';
+    }
+    return null;
+  }
+
+  public syncAuxSendsForTrack(track: MixerTrack, allTracks?: MixerTrack[]): void {
+    if (this.shouldBlockLiveMutation() || !this.ctx) return;
+    // Master cannot send
+    if (track.id === 0) {
+      const ch = this.mixerChannels.get(track.id);
+      if (ch?.auxSendGains) {
+        for (const g of ch.auxSendGains.values()) { try { g.disconnect(); } catch (_) {} }
+        ch.auxSendGains.clear();
+      }
+      return;
+    }
+    // Validate no cycle if allTracks provided
+    if (allTracks) {
+      const cycleReason = this.validateAuxSendsNoCycle(allTracks, { sourceId: track.id, auxSends: track.auxSends ?? [] });
+      if (cycleReason) {
+        console.error('[AudioEngine] Aux send update rejected', { trackId: track.id, reason: cycleReason });
+        return;
+      }
+    }
+    const channel = this.mixerChannels.get(track.id);
+    if (!channel) return;
+    const map = this.ensureAuxSendGainsMap(channel);
+    const desired = (track.auxSends ?? []).slice(0, 2);
+    const desiredIds = new Set(desired.map(s => s.targetId));
+    // Remove stale
+    for (const [targetId, gain] of [...map.entries()]) {
+      if (!desiredIds.has(targetId)) {
+        try { channel.output.disconnect(gain as unknown as AudioNode); } catch (_) {}
+        try { gain.disconnect(); } catch (_) {}
+        map.delete(targetId);
+      }
+    }
+    // Add / update
+    for (const send of desired) {
+      const clamped = this.clampAuxSendAmount(send.amount);
+      if (clamped <= 1e-6) {
+        // Keep gain but set to 0; still connected so automation can drive it later
+      }
+      if (!Number.isInteger(send.targetId) || send.targetId === track.id || send.targetId === 0) continue;
+      const targetChannel = this.mixerChannels.get(send.targetId);
+      if (!targetChannel) {
+        // Target not yet created as audio channel; ensure it exists so the send has a destination
+        try { this.getOrCreateMixerChannel(send.targetId); } catch (_) {}
+        const tc2 = this.mixerChannels.get(send.targetId);
+        if (!tc2) continue;
+        // continue to connect to tc2
+      }
+      const targetCh = this.mixerChannels.get(send.targetId)!;
+      let gain = map.get(send.targetId);
+      if (!gain) {
+        gain = this.ctx.createGain();
+        gain.gain.value = clamped;
+        map.set(send.targetId, gain);
+        try { channel.output.connect(gain); } catch (_) {}
+        try { gain.connect(targetCh.input); } catch (_) {}
+      } else {
+        // Update amount
+        const now = this.ctx.currentTime;
+        if (typeof gain.gain.setTargetAtTime === 'function') {
+          gain.gain.setTargetAtTime(clamped, now, 0.02);
+        } else {
+          gain.gain.value = clamped;
+        }
+        // Ensure connections exist (in case bus rebuild cleared output edge)
+        try { channel.output.connect(gain); } catch (_) {}
+        try { gain.connect(targetCh.input); } catch (_) {}
+      }
+    }
+  }
+
+  private syncAllAuxSends(tracks: MixerTrack[]): void {
+    if (!this.mixerChannels.has(0)) return;
+    // First validate global cycle — if any cycle, log and skip offending tracks?
+    // We already validate per-track in syncAuxSendsForTrack, but do a full check first.
+    const cycle = this.validateAuxSendsNoCycle(tracks);
+    if (cycle) {
+      console.error('[AudioEngine] Aux send sync rejected due to cycle', { reason: cycle });
+      return;
+    }
+    for (const track of tracks) {
+      if (track.id === 0) continue;
+      this.syncAuxSendsForTrack(track);
+    }
+    // Ensure any aux gains whose target track was removed are pruned
+    const validIds = new Set(tracks.map(t => t.id));
+    for (const [, ch] of this.mixerChannels) {
+      if (!ch.auxSendGains) continue;
+      for (const [tid, gain] of [...ch.auxSendGains.entries()]) {
+        if (!validIds.has(tid)) {
+          try { gain.disconnect(); } catch (_) {}
+          ch.auxSendGains.delete(tid);
+        }
+      }
+    }
+    this.restoreAuxSendConnections();
+  }
+
+  private restoreAuxSendConnections(): void {
+    if (!this.ctx) return;
+    for (const [, channel] of this.mixerChannels) {
+      if (!channel.auxSendGains || channel.auxSendGains.size === 0) continue;
+      for (const gain of channel.auxSendGains.values()) {
+        try { channel.output.connect(gain); } catch (_) {}
+        // gain -> target.input is already connected; but ensure it stays
+        // No-op if already connected; Web Audio allows duplicate connect.
+      }
+      // Meter tap was restored by MixerRoutingAdapter.restoreMeterTaps; ensure aux gains don't interfere
+    }
   }
 
   public rebuildTrackFxChain(track: MixerTrack) {
@@ -1942,6 +2148,22 @@ class AudioEngine {
       // would fork that table.
       slot.params = { ...slot.params, [update.paramId]: update.value };
       registry?.applyLiveParameter(update.trackId, update.slotId, update.paramId, update.value, now);
+    } else if (target.type === 'mixer_send1' || target.type === 'mixer_send2') {
+      const trackId = Number(target.targetId);
+      const idx = target.type === 'mixer_send1' ? 0 : 1;
+      const trk = mixerTracks.find(t => t.id === trackId);
+      if (!trk || !trk.auxSends || !trk.auxSends[idx]) return;
+      const clamped = Math.max(0, Math.min(1, value));
+      trk.auxSends[idx].amount = clamped;
+      const ch = this.mixerChannels.get(trackId);
+      const gain = ch?.auxSendGains?.get(trk.auxSends[idx].targetId);
+      if (gain) {
+        if (typeof gain.gain.setTargetAtTime === 'function') {
+          gain.gain.setTargetAtTime(clamped, now, 0.02);
+        } else {
+          gain.gain.value = clamped;
+        }
+      }
     }
   }
 
@@ -2747,10 +2969,14 @@ class AudioEngine {
         return false;
       });
 
+      // Phase 88: a channel can feed a bus that owns the aux send. Strip sends
+      // from the entire render snapshot so no downstream bus can leak wet audio
+      // into a nominally dry channel stem.
+      const dryMixerTracks = buildDryStemMixerTracks(mixerTracks);
       const stemBuffer = await this.renderTimelineOffline(
         [effectiveChannel],
         channelClips,
-        mixerTracks,
+        dryMixerTracks,
         bpm,
         totalBars,
         undefined,
@@ -2763,6 +2989,97 @@ class AudioEngine {
 
       const cleanName = (channel.name || `Channel_${channel.id}`).replace(/[^a-zA-Z0-9_-]/g, '_');
       stems[`${channel.id}_${cleanName}.wav`] = this.audioBufferToWav(stemBuffer, bitDepth);
+    }
+
+    // Phase 88: render wet stems for each aux return (isAux or targeted by any auxSend)
+    {
+      const auxiliaryTrackIds = new Set<number>();
+      for (const t of mixerTracks) {
+        if ((t as unknown as { isAux?: unknown }).isAux === true) auxiliaryTrackIds.add(t.id);
+        for (const s of t.auxSends ?? []) auxiliaryTrackIds.add(s.targetId);
+      }
+      const auxReturns = mixerTracks.filter(t => auxiliaryTrackIds.has(t.id));
+      const DUMMY_SILENT_ID = 9999;
+      const dummyExists = mixerTracks.some(t => t.id === DUMMY_SILENT_ID);
+      for (const ret of auxReturns) {
+        // Keep direct senders distinct (their outputs are diverted to silence),
+        // but include every upstream track routed into those senders when selecting
+        // channels for the wet render (e.g. instrument -> subgroup -> reverb).
+        const sourceMixerIds = getDirectAuxSendSourceIds(mixerTracks, ret.id);
+        if (sourceMixerIds.size === 0) continue;
+        const wetSourceMixerIds = getUpstreamMixerTrackIds(mixerTracks, sourceMixerIds);
+        const sourceChannelIds = new Set(channels.filter(c => wetSourceMixerIds.has(c.mixerTrackId)).map(c => c.id));
+        if (sourceChannelIds.size === 0) continue;
+        const wetChannels = channels.filter(c => sourceChannelIds.has(c.id)).map(c => {
+          const audible = isRackChannelAudible(c, channels);
+          return audible ? c : { ...c, mute: true } as typeof c;
+        });
+        const wetClips = clips.filter(clip => {
+          if (clip.mute) return false;
+          if (this.isClipPlaylistLaneMuted(clip, stemLaneMutes)) return false;
+          if (clip.type === 'pattern' || clip.type === 'audio') {
+            return !!clip.channelId && sourceChannelIds.has(clip.channelId);
+          }
+          if (clip.type === 'automation' && clip.automationTarget) {
+            const tgt = clip.automationTarget as unknown as { targetId: unknown };
+            // include automation that targets source tracks or the return itself
+            const tid = Number(tgt.targetId);
+            if (wetSourceMixerIds.has(tid) || tid === ret.id) return true;
+            if (sourceChannelIds.has(String(tgt.targetId))) return true;
+            // also fx_param composite
+            if (typeof tgt.targetId === 'string' && (tgt.targetId as string).includes('/')) {
+              const part = Number((tgt.targetId as string).split('/')[0]);
+              if (wetSourceMixerIds.has(part) || part === ret.id) return true;
+            }
+            return false;
+          }
+          return false;
+        });
+        if (wetChannels.length === 0 && wetClips.length === 0) continue;
+        // Build wet mixer graph: source direct goes to dummy silent, aux -> return -> master
+        // Isolate this return: remove sends to every other return, including
+        // sends owned by upstream buses, while preserving this return's path.
+        const wetMixerTracks: typeof mixerTracks = buildWetStemMixerTracks(
+          mixerTracks,
+          sourceMixerIds,
+          ret.id,
+          DUMMY_SILENT_ID
+        );
+        if (!dummyExists && !wetMixerTracks.some(t => t.id === DUMMY_SILENT_ID)) {
+          wetMixerTracks.push({
+            id: DUMMY_SILENT_ID,
+            name: 'Silent Dummy',
+            color: '#000000',
+            volume: 0,
+            pan: 0,
+            mute: false,
+            solo: false,
+            peakL: 0,
+            peakR: 0,
+            fxSlots: [],
+            routingTargetId: 0,
+          } as unknown as typeof mixerTracks[0]);
+        }
+        try {
+          const wetBuffer = await this.renderTimelineOffline(
+            wetChannels,
+            wetClips,
+            wetMixerTracks,
+            bpm,
+            totalBars,
+            undefined,
+            includeMixerFx,
+            renderScope,
+            undefined,
+            patternLengthSteps,
+            playlistTracks
+          );
+          const cleanRetName = (ret.name || `Return_${ret.id}`).replace(/[^a-zA-Z0-9_-]/g, '_');
+          stems[`return_${ret.id}_${cleanRetName}.wav`] = this.audioBufferToWav(wetBuffer, bitDepth);
+        } catch (e) {
+          console.warn('[AudioEngine] Wet return stem render failed', { returnId: ret.id, error: String(e) });
+        }
+      }
     }
 
     // 3. Render unassociated audio clips (recordings / samples not assigned to a channel)
@@ -3171,6 +3488,23 @@ class AudioEngine {
       const restored = typeof stored === 'number' && Number.isFinite(stored) ? stored : spec.default;
       activeSlot.params = { ...activeSlot.params, [paramId]: restored };
       registry?.applyLiveParameter(lookup.track.id, activeSlot.id, paramId, restored, now);
+      return;
+    }
+
+    if (target.type === 'mixer_send1' || target.type === 'mixer_send2') {
+      const trackId = Number(target.targetId);
+      const idx = target.type === 'mixer_send1' ? 0 : 1;
+      const activeTrack = this.activeMixerTracks.find(track => track.id === trackId);
+      const projectTrack = this.playbackProjectMixerTracks.find(track => track.id === trackId);
+      if (!activeTrack || !projectTrack || !activeTrack.auxSends || !projectTrack.auxSends || !activeTrack.auxSends[idx] || !projectTrack.auxSends[idx]) return;
+      activeTrack.auxSends[idx].amount = projectTrack.auxSends[idx].amount;
+      const ch = this.mixerChannels.get(trackId);
+      const gain = ch?.auxSendGains?.get(activeTrack.auxSends[idx].targetId);
+      if (gain) {
+        const restored = projectTrack.auxSends[idx].amount;
+        if (typeof gain.gain.setTargetAtTime === 'function') gain.gain.setTargetAtTime(restored, now, 0.02);
+        else gain.gain.value = restored;
+      }
       return;
     }
 

@@ -36,6 +36,63 @@ export const applyMixerRoutingSelection = (
   return true;
 };
 
+export const applyAuxSendSelection = (
+  tracks: MixerTrack[],
+  sourceId: number,
+  nextAuxSends: Array<{ targetId: number; amount: number }>,
+  onUpdateTrack: (trackId: number, updates: Partial<MixerTrack>) => void
+): boolean => {
+  if (nextAuxSends.length > 2) return false;
+  const validIds = new Set(tracks.map(t => t.id));
+  const seen = new Set<number>();
+  for (const s of nextAuxSends) {
+    if (!Number.isInteger(s.targetId) || s.targetId === sourceId || s.targetId === 0) return false;
+    if (!validIds.has(s.targetId)) return false;
+    if (seen.has(s.targetId)) return false;
+    seen.add(s.targetId);
+    if (typeof s.amount !== 'number' || !Number.isFinite(s.amount) || s.amount < 0 || s.amount > 1) return false;
+  }
+  // Cycle check: aux edges + bus routes must be acyclic
+  const graph = new MixerRoutingGraph();
+  for (const track of tracks) {
+    if (track.id === 0) continue;
+    const r = graph.setRoute(track.id, track.routingTargetId ?? 0);
+    if (!r.valid) return false;
+  }
+  // Build adjacency including aux
+  const adj = new Map<number, Set<number>>();
+  for (const t of tracks) {
+    if (t.id === 0) continue;
+    const rt = t.routingTargetId ?? 0;
+    if (rt !== 0) {
+      if (!adj.has(t.id)) adj.set(t.id, new Set());
+      adj.get(t.id)!.add(rt);
+    }
+    const sends = t.id === sourceId ? nextAuxSends : (t.auxSends ?? []);
+    for (const s of sends) {
+      if (s.targetId === 0 || s.targetId === t.id) continue;
+      if (!adj.has(t.id)) adj.set(t.id, new Set());
+      adj.get(t.id)!.add(s.targetId);
+    }
+  }
+  const visited = new Set<number>();
+  const stack = new Set<number>();
+  const dfs = (node: number): boolean => {
+    if (stack.has(node)) return true;
+    if (visited.has(node)) return false;
+    visited.add(node);
+    stack.add(node);
+    const neigh = adj.get(node);
+    if (neigh) for (const n of neigh) { if (n===0) continue; if (dfs(n)) return true; }
+    stack.delete(node);
+    return false;
+  };
+  for (const id of adj.keys()) if (dfs(id)) return false;
+
+  onUpdateTrack(sourceId, { auxSends: nextAuxSends.length === 0 ? undefined : nextAuxSends });
+  return true;
+};
+
 interface MixerProps {
   tracks: MixerTrack[];
   selectedTrackId: number;
@@ -48,6 +105,7 @@ interface MixerProps {
   onOpenParametricEq?: (track: MixerTrack) => void;
   onInteractionStart?: (label?: string) => void;
   onInteractionEnd?: (label?: string) => void;
+  onCreateAuxReturn?: () => void;
 }
 
 /**
@@ -77,7 +135,8 @@ export const Mixer: React.FC<MixerProps> = ({
   isPlaying,
   onOpenParametricEq,
   onInteractionStart,
-  onInteractionEnd
+  onInteractionEnd,
+  onCreateAuxReturn
 }) => {
   const [showAddFxMenu, setShowAddFxMenu] = useState(false);
   const [trackPeaks, setTrackPeaks] = useState<number[]>(Array(tracks.length).fill(0));
@@ -93,6 +152,84 @@ export const Mixer: React.FC<MixerProps> = ({
     if (target) {
       audioEngine.updateMixerTrack({ ...target, routingTargetId: targetId });
     }
+  };
+
+  const handleAuxSendAmountChange = (trackId: number, index: number, amount: number) => {
+    const track = tracks.find(t => t.id === trackId);
+    if (!track) return;
+    const base = track.auxSends ? [...track.auxSends] : [];
+    // Ensure we have entries up to index
+    while (base.length <= index) {
+      // For placeholder, pick first available return as target if possible
+      const candidateTargets = tracks.filter(t => t.id !== trackId && t.id !== 0).map(t => t.id);
+      const used = new Set(base.map(s => s.targetId));
+      const free = candidateTargets.find(id => !used.has(id));
+      if (free === undefined) return;
+      base.push({ targetId: free, amount: 0 });
+    }
+    const clamped = Math.max(0, Math.min(1, amount));
+    base[index] = { ...base[index], amount: clamped };
+    if (!applyAuxSendSelection(tracks, trackId, base, onUpdateTrack)) return;
+    const updated = tracks.find(t => t.id === trackId);
+    // Apply live gain
+    const liveTrack = { ...(updated ?? track), auxSends: base } as typeof track;
+    audioEngine.updateMixerTrack(liveTrack);
+    // Also sync aux gain directly if engine already has channel
+    try { (audioEngine as unknown as { syncAuxSendsForTrack?: (t: unknown) => void }).syncAuxSendsForTrack?.(liveTrack); } catch (_) {}
+  };
+
+  const handleAuxSendTargetChange = (trackId: number, index: number, targetId: number) => {
+    const track = tracks.find(t => t.id === trackId);
+    if (!track) return;
+    const base = track.auxSends ? [...track.auxSends] : [];
+    while (base.length <= index) {
+      base.push({ targetId, amount: 0 });
+      if (!applyAuxSendSelection(tracks, trackId, base, onUpdateTrack)) return;
+      const updated = { ...(tracks.find(t => t.id === trackId) ?? track), auxSends: base } as typeof track;
+      audioEngine.updateMixerTrack(updated);
+      return;
+    }
+    base[index] = { ...base[index], targetId };
+    if (!applyAuxSendSelection(tracks, trackId, base, onUpdateTrack)) return;
+    const updated = { ...(tracks.find(t => t.id === trackId) ?? track), auxSends: base } as typeof track;
+    audioEngine.updateMixerTrack(updated);
+    try { (audioEngine as unknown as { syncAuxSendsForTrack?: (t: unknown) => void }).syncAuxSendsForTrack?.(updated); } catch (_) {}
+  };
+
+  const handleAddAuxSend = (trackId: number) => {
+    const track = tracks.find(t => t.id === trackId);
+    if (!track) return;
+    const base = track.auxSends ? [...track.auxSends] : [];
+    if (base.length >= 2) return;
+    const candidateTargets = tracks.filter(t => t.id !== trackId && t.id !== 0).map(t => t.id);
+    const used = new Set(base.map(s => s.targetId));
+    let free = candidateTargets.find(id => !used.has(id));
+    if (free === undefined) {
+      if (onCreateAuxReturn) {
+        onCreateAuxReturn();
+        return;
+      }
+      return;
+    }
+    base.push({ targetId: free, amount: 0.5 });
+    if (!applyAuxSendSelection(tracks, trackId, base, onUpdateTrack)) return;
+    const updated = { ...(tracks.find(t => t.id === trackId) ?? track), auxSends: base } as typeof track;
+    audioEngine.updateMixerTrack(updated);
+  };
+
+  const handleRemoveAuxSend = (trackId: number, index: number) => {
+    const track = tracks.find(t => t.id === trackId);
+    if (!track || !track.auxSends) return;
+    const base = track.auxSends.filter((_, i) => i !== index);
+    applyAuxSendSelection(tracks, trackId, base, onUpdateTrack);
+    const updated = { ...(tracks.find(t => t.id === trackId) ?? track), auxSends: base.length === 0 ? undefined : base } as typeof track;
+    audioEngine.updateMixerTrack(updated);
+    // Cleanup gain
+    try {
+      const ch = (audioEngine as unknown as { mixerChannels?: Map<number, { auxSendGains?: Map<number, unknown> }> }).mixerChannels?.get(trackId);
+      // gain cleanup handled by sync
+      (audioEngine as unknown as { syncAuxSendsForTrack?: (t: unknown) => void }).syncAuxSendsForTrack?.(updated);
+    } catch (_) {}
   };
 
   // Spectrum Visualizer & Peak Meter Animation loop
@@ -446,6 +583,89 @@ export const Mixer: React.FC<MixerProps> = ({
                       Note-triggered envelope — no level detector.
                     </div>
                   </div>
+                )}
+              </div>
+            )}
+
+            {/* Phase 88: Post-Fader Aux Sends (≤2, no pre/post, no pan) */}
+            {selectedTrack.id !== 0 && (
+              <div className="bg-[#18181b] border border-[#2e2e32] rounded p-2 text-[10px] space-y-1.5">
+                <div className="flex items-center justify-between">
+                  <span className="font-bold text-white flex items-center gap-1">
+                    <span className="w-2 h-2 bg-[#7e57c2] rounded-full" />
+                    <span>AUX SENDS (POST-FADER)</span>
+                  </span>
+                  <div className="flex items-center gap-1">
+                    <span className="text-[8px] text-[#777]">{(selectedTrack.auxSends?.length ?? 0)}/2</span>
+                    {onCreateAuxReturn && (
+                      <button
+                        onClick={onCreateAuxReturn}
+                        className="px-1 py-0.5 bg-[#7e57c2]/15 hover:bg-[#7e57c2]/30 text-[#7e57c2] rounded text-[7px] font-bold border border-[#7e57c2]/30 transition"
+                        title="Create new aux return track"
+                      >
+                        + RETURN
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                {(selectedTrack.auxSends ?? []).map((send, idx) => (
+                  <div key={idx} className="bg-[#222225] rounded p-1.5 flex flex-col gap-1.5 border border-[#2a2a2e]">
+                    <div className="flex items-center justify-between gap-1">
+                      <span className="font-bold text-[#aaa]">SEND {idx + 1}</span>
+                      <button
+                        onClick={() => handleRemoveAuxSend(selectedTrack.id, idx)}
+                        className="text-[#777] hover:text-red-400 text-[10px] leading-none"
+                        title="Remove send"
+                      >
+                        ×
+                      </button>
+                    </div>
+
+                    <div className="flex items-center justify-between gap-1">
+                      <span className="text-[#888]">RETURN</span>
+                      <select
+                        value={send.targetId}
+                        onChange={(e) => handleAuxSendTargetChange(selectedTrack.id, idx, parseInt(e.target.value, 10))}
+                        className="bg-[#121214] text-white text-[9px] px-1.5 py-0.5 rounded border border-[#333336] min-w-[110px]"
+                      >
+                        {tracks.filter(t => t.id !== selectedTrack.id && t.id !== 0).map(t => (
+                          <option key={t.id} value={t.id}>
+                            {t.isAux ? '↳ ' : ''}{t.id}: {t.name}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+
+                    <div className="flex items-center justify-between gap-1 text-[#888]">
+                      <span>AMOUNT</span>
+                      <input
+                        type="range"
+                        min="0"
+                        max="1"
+                        step="0.01"
+                        value={send.amount}
+                        onPointerDown={() => onInteractionStart?.('Change aux send')}
+                        onPointerUp={() => onInteractionEnd?.('Change aux send')}
+                        onChange={(e) => handleAuxSendAmountChange(selectedTrack.id, idx, parseFloat(e.target.value))}
+                        className="w-20 h-1 accent-[#7e57c2] bg-[#121214] rounded"
+                      />
+                      <span className="font-mono text-[#7e57c2] text-[9px] min-w-[28px] text-right">{Math.round(send.amount * 100)}%</span>
+                    </div>
+                  </div>
+                ))}
+
+                {(selectedTrack.auxSends?.length ?? 0) < 2 && (
+                  <button
+                    onClick={() => handleAddAuxSend(selectedTrack.id)}
+                    className="w-full py-1 text-[9px] font-bold rounded border border-dashed border-[#333336] hover:border-[#7e57c2]/50 text-[#777] hover:text-[#7e57c2] transition"
+                  >
+                    + Add Post-Fader Send
+                  </button>
+                )}
+
+                {(selectedTrack.auxSends?.length ?? 0) === 0 && (
+                  <div className="text-[9px] text-[#666] italic">No sends. Post-fader sends feed the Return track&apos;s FX → Master.</div>
                 )}
               </div>
             )}
