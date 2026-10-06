@@ -1,4 +1,14 @@
+import { existsSync } from 'node:fs';
 import { defineConfig, devices } from '@playwright/test';
+
+const customChromiumPath = existsSync('/tmp/chromium') ? '/tmp/chromium' : undefined;
+const customEnv = customChromiumPath
+  ? {
+      ...process.env,
+      LD_LIBRARY_PATH: ['/tmp/al2023/lib', '/tmp', process.env.LD_LIBRARY_PATH].filter(Boolean).join(':'),
+      FONTCONFIG_PATH: '/tmp/fonts',
+    }
+  : undefined;
 
 export default defineConfig({
   testDir: 'browser-tests',
@@ -13,7 +23,24 @@ export default defineConfig({
   projects: [
     {
       name: 'chromium',
-      use: { ...devices['Desktop Chrome'] },
+      use: {
+        ...devices['Desktop Chrome'],
+        ...(customChromiumPath
+          ? {
+              launchOptions: {
+                executablePath: customChromiumPath,
+                args: [
+                  '--no-sandbox',
+                  '--no-zygote',
+                  '--disable-setuid-sandbox',
+                  '--disable-dev-shm-usage',
+                  '--disable-gpu',
+                ],
+                env: customEnv,
+              },
+            }
+          : {}),
+      },
     },
   ],
   webServer: {

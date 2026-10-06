@@ -308,7 +308,9 @@ test.describe('Production AudioEngine offline export path (real browser)', () =>
       }
       const dryFinite = d0.every(Number.isFinite);
       const wetFinite = w0.every(Number.isFinite);
-      return { diffEnergy, maxDiff, dryFinite, wetFinite, dryMax: Math.max(...Array.from(d0).map(Math.abs)), wetMax: Math.max(...Array.from(w0).map(Math.abs)) };
+      let dryMax = 0; for (let i=0;i<d0.length;i++) { const a=Math.abs(d0[i]); if(a>dryMax) dryMax=a; }
+      let wetMax = 0; for (let i=0;i<w0.length;i++) { const a=Math.abs(w0[i]); if(a>wetMax) wetMax=a; }
+      return { diffEnergy, maxDiff, dryFinite, wetFinite, dryMax, wetMax };
     });
     expect(result.dryFinite, 'dry buffer has non-finite').toBe(true);
     expect(result.wetFinite, 'wet buffer has non-finite').toBe(true);
