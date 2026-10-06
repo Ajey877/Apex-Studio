@@ -23,7 +23,7 @@ function param(): Param {
 function createContext(): AudioContext {
   return {
     currentTime: 3,
-    createGain: node,
+    createGain: () => ({ ...node(), gain: param() }),
     createDelay: () => ({ ...node(), delayTime: param() }),
   } as unknown as AudioContext;
 }
@@ -45,7 +45,10 @@ describe('DelayEffect', () => {
     const delayNode = effect as unknown as { delay: { delayTime: Param }; feedback: { gain: Param }; dry: { gain: Param }; wet: { gain: Param } };
     assert.deepEqual(delayNode.delay.delayTime.values.at(-1), { value: 0.75, time: 8 });
     assert.deepEqual(delayNode.feedback.gain.values.at(-1), { value: 0.6, time: 9 });
-    assert.deepEqual(delayNode.dry.gain.values.at(-1), { value: 0.2, time: 10 });
+    // dry is 1 - mix, floating point: use tolerance for 0.2
+    const dryLast = delayNode.dry.gain.values.at(-1)!;
+    assert.ok(Math.abs(dryLast.value - 0.2) < 1e-9, `dry gain expected ~0.2 but got ${dryLast.value}`);
+    assert.equal(dryLast.time, 10);
     assert.deepEqual(delayNode.wet.gain.values.at(-1), { value: 0.8, time: 10 });
   });
 
