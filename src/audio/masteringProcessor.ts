@@ -13,6 +13,7 @@ export class MasteringProcessor {
   private readonly bypassGain: GainNode;
   private readonly wetGain: GainNode;
   private readonly bandGains: GainNode[] = [];
+  private readonly bandSum: GainNode;
   private readonly bandCompressors: DynamicsCompressorNode[] = [];
   private readonly crossoverNodes: BiquadFilterNode[][] = [];
   private readonly imagerSplitter: ChannelSplitterNode;
@@ -41,7 +42,7 @@ export class MasteringProcessor {
     this.input.connect(this.bypassGain);
     this.bypassGain.connect(this.output);
 
-    const sum = context.createGain();
+    this.bandSum = context.createGain();
     const bandFallbacks = [state.lowBand, state.midBand, state.highBand];
     for (let i = 0; i < 3; i++) {
       const filters: BiquadFilterNode[] = [];
@@ -64,7 +65,7 @@ export class MasteringProcessor {
       }
       previous.connect(compressor);
       compressor.connect(gain);
-      gain.connect(sum);
+      gain.connect(this.bandSum);
       this.crossoverNodes.push(filters);
       this.bandCompressors.push(compressor);
       this.bandGains.push(gain);
@@ -85,7 +86,7 @@ export class MasteringProcessor {
     this.sideToRight = context.createGain();
     this.imagerMerger = context.createChannelMerger(2);
 
-    sum.connect(this.imagerSplitter);
+    this.bandSum.connect(this.imagerSplitter);
     this.imagerSplitter.connect(this.midLeft, 0);
     this.imagerSplitter.connect(this.midRight, 1);
     this.imagerSplitter.connect(this.sideLeft, 0);
@@ -160,6 +161,7 @@ export class MasteringProcessor {
     this.output.disconnect();
     this.bypassGain.disconnect();
     this.wetGain.disconnect();
+    this.bandSum.disconnect();
     for (const filters of this.crossoverNodes) for (const filter of filters) filter.disconnect();
     for (const compressor of this.bandCompressors) compressor.disconnect();
     for (const gain of this.bandGains) gain.disconnect();
