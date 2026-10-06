@@ -25,6 +25,7 @@ import { ChorusEffect } from './effects/ChorusEffect';
 import { WetDryEffect } from './effects/WetDryEffect';
 import { createInstrumentRegistry, InstrumentRegistry, InstrumentVoiceHandle } from './instrumentRegistry';
 import { MixerRoutingAdapter } from './mixerRoutingAdapter';
+import { buildDryStemMixerTracks, getDirectAuxSendSourceIds, getUpstreamMixerTrackIds } from './auxStemRouting';
 import { renderIndependentPluckVoice } from './instruments/independentPluck';
 import { renderSubtractiveSynthVoice } from './instruments/subtractiveSynth';
 import { renderFmSynthVoice } from './instruments/fmSynth';
@@ -2968,13 +2969,10 @@ class AudioEngine {
         return false;
       });
 
-      // Phase 88: channel stems are DRY — aux sends from this channel's mixer track are muted
-      const dryMixerTracks = mixerTracks.map(t => {
-        if (t.id === effectiveChannel.mixerTrackId && t.auxSends && t.auxSends.length > 0) {
-          return { ...t, auxSends: [] as typeof t.auxSends };
-        }
-        return t;
-      });
+      // Phase 88: a channel can feed a bus that owns the aux send. Strip sends
+      // from the entire render snapshot so no downstream bus can leak wet audio
+      // into a nominally dry channel stem.
+      const dryMixerTracks = buildDryStemMixerTracks(mixerTracks);
       const stemBuffer = await this.renderTimelineOffline(
         [effectiveChannel],
         channelClips,
@@ -3004,12 +3002,13 @@ class AudioEngine {
       const DUMMY_SILENT_ID = 9999;
       const dummyExists = mixerTracks.some(t => t.id === DUMMY_SILENT_ID);
       for (const ret of auxReturns) {
-        const sourceMixerIds = new Set<number>();
-        for (const t of mixerTracks) {
-          if (t.auxSends?.some(s => s.targetId === ret.id)) sourceMixerIds.add(t.id);
-        }
+        // Keep direct senders distinct (their outputs are diverted to silence),
+        // but include every upstream track routed into those senders when selecting
+        // channels for the wet render (e.g. instrument -> subgroup -> reverb).
+        const sourceMixerIds = getDirectAuxSendSourceIds(mixerTracks, ret.id);
         if (sourceMixerIds.size === 0) continue;
-        const sourceChannelIds = new Set(channels.filter(c => sourceMixerIds.has(c.mixerTrackId)).map(c => c.id));
+        const wetSourceMixerIds = getUpstreamMixerTrackIds(mixerTracks, sourceMixerIds);
+        const sourceChannelIds = new Set(channels.filter(c => wetSourceMixerIds.has(c.mixerTrackId)).map(c => c.id));
         if (sourceChannelIds.size === 0) continue;
         const wetChannels = channels.filter(c => sourceChannelIds.has(c.id)).map(c => {
           const audible = isRackChannelAudible(c, channels);
