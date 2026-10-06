@@ -1,5 +1,4 @@
 import { DEFAULT_MASTERING_SUITE_STATE, normalizeMasteringSuiteState } from '../audio/masteringState';
-import { DEFAULT_MASTERING_SUITE_STATE, normalizeMasteringSuiteState } from '../audio/masteringState';
 import type { GrossBeatState, ProjectState, Channel, PlaylistClip } from '../types/daw';
 import { audioEngine } from '../audio/audioEngine';
 import { createDefaultMixerTracks, createDefaultPlaylistTracks } from '../audio/presets';
@@ -437,7 +436,7 @@ export const createDefaultProjectState = (): ProjectState => {
     // private truth, so save/load round-trips and project replacement all
     // preserve the gate pattern.
     grossBeatState: { ...DEFAULT_GROSS_BEAT_STATE, gateSteps: [...DEFAULT_GROSS_BEAT_STATE.gateSteps] },
-    masteringSuiteState: structuredClone(DEFAULT_MASTERING_SUITE_STATE)
+    masteringSuiteState: clone(DEFAULT_MASTERING_SUITE_STATE)
   };
 
   return {
