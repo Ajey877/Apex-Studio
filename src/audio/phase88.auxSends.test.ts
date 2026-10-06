@@ -6,6 +6,7 @@ import { createDefaultProjectState, normalizeProjectState, MAX_AUX_SENDS_PER_TRA
 import { updateMixerTrackInProjectState } from '../state/projectMutations';
 import { applyAuxSendSelection } from '../components/Mixer';
 import type { MixerTrack, ProjectState } from '../types/daw';
+import { buildDryStemMixerTracks, getDirectAuxSendSourceIds, getUpstreamMixerTrackIds } from './auxStemRouting';
 
 type EngineInternals = Record<string, any>;
 const engine = audioEngine as unknown as EngineInternals;
@@ -359,5 +360,63 @@ describe('Phase 88 — Aux Sends / Return Bussing', () => {
       assert.equal(wetMixerTracks.find(t => t.id === 1)!.routingTargetId, DUMMY);
       assert.equal(wetMixerTracks.find(t => t.id === retId)!.routingTargetId, 0, 'return still to master');
     });
+  });
+});
+
+
+describe('Phase 88 stem routing regressions', () => {
+  const track = (id: number, overrides: Partial<MixerTrack> = {}): MixerTrack => ({
+    id,
+    name: `Track ${id}`,
+    color: '#000000',
+    volume: 1,
+    pan: 0,
+    mute: false,
+    solo: false,
+    peakL: 0,
+    peakR: 0,
+    fxSlots: [],
+    routingTargetId: 0,
+    ...overrides,
+  });
+
+  it('removes aux sends from every track in a dry stem snapshot without mutating project state', () => {
+    const tracks = [
+      track(1, { auxSends: [{ targetId: 9, amount: 0.7 }] }),
+      track(2, { routingTargetId: 1, auxSends: [{ targetId: 8, amount: 0.4 }] }),
+      track(9, { isAux: true } as Partial<MixerTrack>),
+    ];
+    const dry = buildDryStemMixerTracks(tracks);
+    assert.deepEqual(dry.map(t => t.auxSends ?? []), [[], [], []]);
+    assert.equal(tracks[0].auxSends?.length, 1, 'original project remains unchanged');
+    assert.equal(tracks[1].auxSends?.length, 1, 'downstream bus send is also removed');
+  });
+
+  it('finds instrument channels upstream of a bus that sends to an aux return', () => {
+    const tracks = [
+      track(1, { routingTargetId: 2 }),
+      track(2, { routingTargetId: 0, auxSends: [{ targetId: 9, amount: 0.65 }] }),
+      track(3, { routingTargetId: 1 }),
+      track(9, { isAux: true } as Partial<MixerTrack>),
+      track(10, { routingTargetId: 0 }),
+    ];
+    const directSources = getDirectAuxSendSourceIds(tracks, 9);
+    assert.deepEqual([...directSources], [2]);
+    const upstream = getUpstreamMixerTrackIds(tracks, directSources);
+    assert.deepEqual([...upstream].sort((a, b) => a - b), [1, 2, 3]);
+    assert.equal(upstream.has(10), false, 'unrelated track is excluded');
+    assert.equal(upstream.has(9), false, 'return itself is not treated as a source');
+  });
+
+  it('handles multiple levels of upstream bus routing and cycles without looping forever', () => {
+    const tracks = [
+      track(1, { routingTargetId: 2 }),
+      track(2, { routingTargetId: 3 }),
+      track(3, { auxSends: [{ targetId: 9, amount: 1 }] }),
+      track(4, { routingTargetId: 2 }),
+      track(9, { isAux: true } as Partial<MixerTrack>),
+    ];
+    const upstream = getUpstreamMixerTrackIds(tracks, getDirectAuxSendSourceIds(tracks, 9));
+    assert.deepEqual([...upstream].sort((a, b) => a - b), [1, 2, 3, 4]);
   });
 });
