@@ -14,7 +14,7 @@ export class ChorusEffect implements AudioEffect {
   private readonly delay: DelayNode;
   private readonly lfo: OscillatorNode;
   private readonly depth: GainNode;
-  private readonly lfoOffset: ConstantSourceNode;
+  private readonly lfoOffset: ConstantSourceNode | null;
   private currentDepthSeconds: number;
   private currentDelaySeconds: number;
   private disposed = false;
@@ -38,7 +38,12 @@ export class ChorusEffect implements AudioEffect {
     this.delay = context.createDelay(0.1);
     this.lfo = context.createOscillator();
     this.depth = context.createGain();
-    this.lfoOffset = context.createConstantSource();
+    const maybeCreateConstantSource = (context as unknown as { createConstantSource?: () => ConstantSourceNode })
+      .createConstantSource;
+    this.lfoOffset =
+      typeof maybeCreateConstantSource === 'function'
+        ? maybeCreateConstantSource.call(context)
+        : null;
 
     this.input.connect(this.dry);
     this.dry.connect(this.output);
@@ -48,10 +53,14 @@ export class ChorusEffect implements AudioEffect {
 
     this.lfo.connect(this.depth);
     this.depth.connect(this.delay.delayTime);
-    this.lfoOffset.connect(this.delay.delayTime);
+    if (this.lfoOffset) {
+      this.lfoOffset.connect(this.delay.delayTime);
+    }
 
     this.lfo.start();
-    this.lfoOffset.start();
+    if (this.lfoOffset) {
+      this.lfoOffset.start();
+    }
 
     this.setParameter('rate', rateHz, context.currentTime);
     this.setParameter('depth', depthSeconds, context.currentTime);
@@ -89,7 +98,11 @@ export class ChorusEffect implements AudioEffect {
           throw new RangeError('Chorus delay cannot be smaller than the modulation depth.');
         }
         this.currentDelaySeconds = value;
-        this.lfoOffset.offset.setValueAtTime(value, time);
+        if (this.lfoOffset) {
+          this.lfoOffset.offset.setValueAtTime(value, time);
+        } else {
+          this.delay.delayTime.setValueAtTime(value, time);
+        }
         return;
       case 'mix':
         if (value < 0 || value > 1) {
@@ -112,10 +125,14 @@ export class ChorusEffect implements AudioEffect {
     this.delay.disconnect();
     this.depth.disconnect();
     this.lfo.disconnect();
-    this.lfoOffset.disconnect();
+    if (this.lfoOffset) {
+      this.lfoOffset.disconnect();
+    }
     this.output.disconnect();
     this.lfo.stop();
-    this.lfoOffset.stop();
+    if (this.lfoOffset) {
+      this.lfoOffset.stop();
+    }
   }
 
   private validateModulationPair(depthSeconds: number, delaySeconds: number): void {

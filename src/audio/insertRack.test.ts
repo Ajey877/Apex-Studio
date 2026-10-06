@@ -84,6 +84,39 @@ describe('ChannelInsertRack', () => {
 
     assert.equal(connections(rack.input).length, 0);
     assert.equal(connections(node).length, 0);
+    assert.equal(connections(rack.output).length, 0);
     assert.equal(rack.getSlots().length, 0);
+  });
+
+  it('dispose disconnects output and remains safe when called repeatedly', () => {
+    const rack = new ChannelInsertRack(fakeContext());
+    const first = new FakeNode() as unknown as AudioNode;
+    const second = new FakeNode() as unknown as AudioNode;
+    rack.add('a', first);
+    rack.add('b', second);
+    assert.equal(connections(second)[0], rack.output);
+
+    rack.dispose();
+
+    assert.equal(connections(rack.input).length, 0);
+    assert.equal(connections(rack.output).length, 0);
+    assert.equal(connections(first).length, 0);
+    assert.equal(connections(second).length, 0);
+    assert.equal(rack.getSlots().length, 0);
+
+    assert.doesNotThrow(() => rack.dispose());
+    assert.equal(connections(rack.input).length, 0);
+    assert.equal(connections(rack.output).length, 0);
+    assert.equal(rack.getSlots().length, 0);
+  });
+
+  it('dispose with no inserts disconnects input and output', () => {
+    const rack = new ChannelInsertRack(fakeContext());
+    assert.equal(connections(rack.input)[0], rack.output);
+    rack.dispose();
+    assert.equal(connections(rack.input).length, 0);
+    assert.equal(connections(rack.output).length, 0);
+    assert.equal(rack.getSlots().length, 0);
+    assert.doesNotThrow(() => rack.dispose());
   });
 });
