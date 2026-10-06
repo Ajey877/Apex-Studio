@@ -3024,12 +3024,12 @@ class AudioEngine {
             const tgt = clip.automationTarget as unknown as { targetId: unknown };
             // include automation that targets source tracks or the return itself
             const tid = Number(tgt.targetId);
-            if (sourceMixerIds.has(tid) || tid === ret.id) return true;
+            if (wetSourceMixerIds.has(tid) || tid === ret.id) return true;
             if (sourceChannelIds.has(String(tgt.targetId))) return true;
             // also fx_param composite
             if (typeof tgt.targetId === 'string' && (tgt.targetId as string).includes('/')) {
               const part = Number((tgt.targetId as string).split('/')[0]);
-              if (sourceMixerIds.has(part) || part === ret.id) return true;
+              if (wetSourceMixerIds.has(part) || part === ret.id) return true;
             }
             return false;
           }
