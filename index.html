@@ -9,6 +9,23 @@
     <meta property="og:description" content="Professional multi-track digital audio workstation for song production, synthesis, mixing, and stem mastering." />
     <meta property="og:type" content="website" />
     <meta name="twitter:card" content="summary_large_image" />
+    <script>
+      // UI-03: apply the stored theme BEFORE first paint so a light
+      // preference never flashes dark. Classic inline script — it runs while
+      // the document is parsing, ahead of the deferred module bundle.
+      // Dark is the default: anything missing, malformed, or inaccessible
+      // leaves the default (unmarked) CSS scope in place.
+      (function () {
+        try {
+          var stored = window.localStorage.getItem('apex:theme');
+          if (typeof stored === 'string' && stored.trim().toLowerCase() === 'light') {
+            document.documentElement.dataset.theme = 'light';
+          }
+        } catch (error) {
+          // localStorage unavailable (privacy mode, blocked storage) — stay dark.
+        }
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

@@ -11,6 +11,13 @@ import {
   normalizeInspectorWidth,
   writeWorkspaceLayoutPreference,
 } from './state/workspaceLayout';
+import {
+  applyThemeToDocument,
+  loadThemePreference,
+  writeThemePreference,
+  announceThemeChange,
+  type ThemeMode,
+} from './state/themePreference';
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { 
   ProjectState, 
@@ -235,6 +242,12 @@ export function App() {
     } catch {}
     return false;
   });
+  // UI-03: theme is an application preference (localStorage apex:theme), never
+  // project data. Initialized from the stored preference; the index.html early
+  // script has already applied it to <html> before first paint, so this state
+  // and the document attribute start in agreement. The Settings selector
+  // (Phase 2) will be the first consumer of setTheme.
+  const [theme, setTheme] = useState<ThemeMode>(() => loadThemePreference());
   const browserWidth = isSidebarOpen ? browserExpandedWidth : WORKSPACE_LAYOUT_LIMITS.browser.collapsed;
   const inspectorWidth = isInspectorOpen ? inspectorExpandedWidth : WORKSPACE_LAYOUT_LIMITS.inspector.collapsed;
   const activeGutterRef = useRef<'browser' | 'inspector' | null>(null);
@@ -384,6 +397,17 @@ export function App() {
   useEffect(() => {
     try { if (typeof window !== 'undefined' && window.localStorage) window.localStorage.setItem('apex:inspectorCollapsed', String(!isInspectorOpen)); } catch {}
   }, [isInspectorOpen]);
+
+  // UI-03: keep the document attribute in sync with React state, persist the
+  // preference (idempotent — also repairs a malformed stored value on load),
+  // and announce the change so canvas visualizations can re-read the CSS
+  // variable palette (Phase 4). Pure UI concern: no audio, project, or
+  // persistence code is touched.
+  useEffect(() => {
+    applyThemeToDocument(theme);
+    writeThemePreference(theme);
+    announceThemeChange(theme);
+  }, [theme]);
 
   // Project persistence is intentionally hydrated before autosave is enabled.
   useEffect(() => {

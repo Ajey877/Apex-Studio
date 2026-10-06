@@ -9,7 +9,9 @@
   --apex-border: #2b3040;
   --apex-text: #f4f5f8;
   --apex-text-2: #aeb5c4;
-  --apex-text-3: #737c8f;
+  /* UI-03: raised from #737c8f (4.43:1, below WCAG AA for the 10px micro
+     labels it styles) to 4.5:1 on the app background and on panels. */
+  --apex-text-3: #828b9e;
   --apex-accent: #9b8afb;
   --apex-accent-strong: #b2a5ff;
   --apex-cyan: #67d9ff;
@@ -20,6 +22,180 @@
   --apex-radius-md: 14px;
   --apex-radius-lg: 18px;
   --apex-shadow: 0 12px 36px rgba(0, 0, 0, 0.28);
+}
+
+/* ===========================================================================
+   UI-03 — shared interaction & canvas semantic tokens (dark defaults).
+
+   Selection/playhead/note/clip states and every canvas palette get one
+   source of truth per theme here. The dark values reproduce TODAY'S rendered
+   appearance byte-for-byte — including the values the legacy compatibility
+   layer below resolves to (e.g. `bg-[#ff6e00]` notes render as the accent,
+   `bg-[#1a1a1d]` clips render as the surface) — so the dark theme is
+   visually unchanged until components migrate to consume these tokens
+   (Phases 3–4). The light scope at the end of this file redefines the same
+   set; themeTokens.test.ts pins both scopes.
+   =========================================================================== */
+:root {
+  /* Control boundary token that must clear WCAG 1.4.11 (3:1) in both themes. */
+  --apex-border-strong: #3a4152;
+
+  /* Selection & playhead — replaces the white-alpha overlays. */
+  --apex-selection-ring: rgba(255, 255, 255, 0.6);
+  --apex-playhead: rgba(255, 255, 255, 0.05);
+  --apex-grid-hover: rgba(255, 255, 255, 0.1);
+
+  /* Piano roll note states (today's rendered dark values). */
+  --apex-note-fill: var(--apex-accent);
+  --apex-note-border: #ff7d1a;
+  --apex-note-ghost-fill: rgba(255, 255, 255, 0.1);
+  --apex-note-ghost-border: rgba(255, 255, 255, 0.2);
+
+  /* Playlist clip states per type (today's rendered dark values). */
+  --apex-clip-midi-fill: var(--apex-surface);
+  --apex-clip-midi-accent: #ff6e00;
+  --apex-clip-midi-border: var(--apex-border);
+  --apex-clip-audio-fill: rgba(0, 43, 26, 0.9);
+  --apex-clip-audio-border: #00ff88;
+  --apex-clip-automation-fill: rgba(0, 34, 51, 0.9);
+  --apex-clip-automation-border: #00e5ff;
+  --apex-clip-missing-fill: rgba(58, 13, 18, 0.9);
+  --apex-clip-missing-border: #ef4444;
+
+  /* Canvas visualization palette (today's rendered dark values). */
+  --apex-canvas-bg: #08080a;
+  --apex-canvas-grid: #1e1e24;
+  --apex-canvas-grid-strong: #282830;
+  --apex-canvas-text: #666670;
+  --apex-meter-1: #00ff00;
+  --apex-meter-2: #ff6e00;
+  --apex-meter-3: #ff0000;
+  --apex-fader-fill: rgba(0, 255, 136, 0.25);
+  --apex-correlation-pos: #00ff88;
+  --apex-correlation-zero: #ffaa00;
+  --apex-correlation-neg: #ff0055;
+
+  /* Scrollbars (consumed by .custom-scrollbar below). */
+  --apex-scrollbar-thumb: #343a4a;
+  --apex-scrollbar-hover: #4a5266;
+}
+
+/* ===========================================================================
+   UI-03 — Light theme scope.
+
+   Applied as `data-theme="light"` on <html>: the index.html early script sets
+   it before first paint (no dark flash), and src/state/themePreference.ts
+   keeps it synchronized with React state afterwards. Dark is the default
+   (unmarked) scope, so this block ONLY overrides — it defines every core
+   semantic token and every shared interaction/canvas token so nothing
+   silently inherits a dark value. themeTokens.test.ts enforces the set.
+
+   NOTE: this scope intentionally lives with the token definitions above,
+   BEFORE the shared modal section further down — modalDialogShell.test.ts
+   pins that no literal colours appear from that modal marker to end of file,
+   so the light palette must stay out of the slice after it.
+
+   Direction: neutral light-gray workspace surfaces, clear panel separation,
+   dark readable text, one restrained indigo accent. WCAG AA is enforced by
+   the token contrast test: text pairs >= 4.5:1 on bg and surface,
+   accent-as-text >= 4.5:1, and border-strong >= 3:1 on surface (1.4.11).
+   =========================================================================== */
+:root[data-theme="light"] {
+  /* Workspace + panel surfaces. */
+  --apex-bg: #e4e7ec;
+  --apex-surface: #f7f8fa;
+  --apex-surface-2: #eef0f4;
+  --apex-surface-3: #e3e6ec;
+  --apex-border: #c9ced8;
+  --apex-border-strong: #848da0;
+  --apex-text: #1b1e26;
+  --apex-text-2: #454b59;
+  --apex-text-3: #5d6675;
+
+  /* Restrained indigo accent — accessible as text, as a fill with white
+     foreground, and as a hover target. */
+  --apex-accent: #4f46e5;
+  --apex-accent-strong: #4338ca;
+  --apex-cyan: #0e7490;
+  --apex-gold: #92400e;
+  --apex-danger: #b91c1c;
+  --apex-success: #047857;
+  --apex-shadow: 0 12px 36px rgba(15, 23, 42, 0.12);
+
+  /* Chrome bands — the app frame stays the darkest band so panels read as
+     raised, mirroring the dark theme's information hierarchy. */
+  --apex-chrome-menu: #dfe2e8;
+  --apex-chrome-transport: #eef0f4;
+  --apex-chrome-ribbon: #f2f4f7;
+  --apex-chrome-status: #eceff3;
+  --apex-chrome-inset: #e2e5eb;
+  --apex-panel: var(--apex-surface);
+  --apex-panel-header: #eef0f4;
+  --apex-canvas: #ffffff;
+
+  /* Interaction states — dark overlays instead of the dark theme's light ones. */
+  --apex-state-hover: rgba(0, 0, 0, 0.045);
+  --apex-state-pressed: rgba(0, 0, 0, 0.08);
+  --apex-state-selected: color-mix(in srgb, var(--apex-accent) 12%, transparent);
+  --apex-state-selected-border: color-mix(in srgb, var(--apex-accent) 45%, transparent);
+  --apex-state-disabled: #8f97a5;
+  --apex-state-focus: color-mix(in srgb, var(--apex-accent) 78%, transparent);
+  --apex-state-playing: var(--apex-accent);
+  --apex-state-playing-fg: #ffffff;
+  --apex-state-recording: var(--apex-danger);
+  --apex-state-recording-fg: #ffffff;
+
+  /* Dialog scrim — dark ink over the light workspace. */
+  --apex-modal-overlay: rgba(16, 18, 24, 0.45);
+
+  /* Selection & playhead — dark ink overlays (the white-alpha dark values
+     would be invisible on light surfaces). */
+  --apex-selection-ring: rgba(30, 34, 45, 0.55);
+  --apex-playhead: rgba(30, 34, 45, 0.07);
+  --apex-grid-hover: rgba(30, 34, 45, 0.06);
+
+  /* Piano roll note states. */
+  --apex-note-fill: var(--apex-accent);
+  --apex-note-border: var(--apex-accent-strong);
+  --apex-note-ghost-fill: rgba(20, 24, 34, 0.1);
+  --apex-note-ghost-border: rgba(20, 24, 34, 0.22);
+
+  /* Playlist clip states per type. */
+  --apex-clip-midi-fill: #e9ebf0;
+  --apex-clip-midi-accent: var(--apex-accent);
+  --apex-clip-midi-border: #c3c8d2;
+  --apex-clip-audio-fill: rgba(3, 68, 52, 0.12);
+  --apex-clip-audio-border: #047857;
+  --apex-clip-automation-fill: rgba(8, 60, 90, 0.1);
+  --apex-clip-automation-border: #0e7490;
+  --apex-clip-missing-fill: rgba(127, 29, 29, 0.1);
+  --apex-clip-missing-border: #b91c1c;
+
+  /* Canvas visualization palette. */
+  --apex-canvas-bg: #ffffff;
+  --apex-canvas-grid: #e6e9ef;
+  --apex-canvas-grid-strong: #cdd2db;
+  --apex-canvas-text: #7a8291;
+  --apex-meter-1: #059669;
+  --apex-meter-2: #d97706;
+  --apex-meter-3: #dc2626;
+  --apex-fader-fill: rgba(4, 120, 87, 0.22);
+  --apex-correlation-pos: #047857;
+  --apex-correlation-zero: #b45309;
+  --apex-correlation-neg: #be123c;
+
+  /* Scrollbars. */
+  --apex-scrollbar-thumb: #b7bec9;
+  --apex-scrollbar-hover: #9aa3b0;
+}
+
+/* Native form controls, scrollbars, and select menus follow the active theme
+   (the dark base sets color-scheme: dark in @layer base below; this rule wins
+   by specificity and by being unlayered). */
+:root[data-theme="light"] input,
+:root[data-theme="light"] select,
+:root[data-theme="light"] textarea {
+  color-scheme: light;
 }
 
 @layer base {
@@ -90,8 +266,10 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 
 .custom-scrollbar::-webkit-scrollbar { width: 7px; height: 7px; }
 .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
-.custom-scrollbar::-webkit-scrollbar-thumb { background: #343a4a; border-radius: 999px; }
-.custom-scrollbar::-webkit-scrollbar-thumb:hover { background: #4a5266; }
+/* UI-03: token-driven so the scrollbar follows the active theme. Dark values
+   are unchanged from the previous hardcoded #343a4a / #4a5266. */
+.custom-scrollbar::-webkit-scrollbar-thumb { background: var(--apex-scrollbar-thumb); border-radius: 999px; }
+.custom-scrollbar::-webkit-scrollbar-thumb:hover { background: var(--apex-scrollbar-hover); }
 .no-scrollbar::-webkit-scrollbar { display: none; }
 .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
 

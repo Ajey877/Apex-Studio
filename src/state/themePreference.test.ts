@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
+  THEME_CHANGE_EVENT,
   THEME_PREFERENCE_KEY,
+  announceThemeChange,
   applyThemeToDocument,
   loadThemePreference,
   normalizeTheme,
@@ -168,4 +170,25 @@ test('applyThemeToDocument returns to the default (dark) scope by removing the a
 
 test('applyThemeToDocument is a safe no-op without a document', () => {
   assert.doesNotThrow(() => applyThemeToDocument('light'));
+});
+
+// --- theme change announcement (canvas integration, Phase 4) -----------------
+
+test('announceThemeChange dispatches apex:themechange with the theme detail', () => {
+  const seen: Array<{ type: string; detail: unknown }> = [];
+  const win = {
+    dispatchEvent: (event: Event) => {
+      seen.push({ type: event.type, detail: (event as { detail?: unknown }).detail });
+      return true;
+    },
+  };
+  announceThemeChange('light', win);
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0].type, 'apex:themechange');
+  assert.equal(THEME_CHANGE_EVENT, 'apex:themechange');
+  assert.deepEqual(seen[0].detail, { theme: 'light' });
+});
+
+test('announceThemeChange is a safe no-op without a window', () => {
+  assert.doesNotThrow(() => announceThemeChange('dark'));
 });
