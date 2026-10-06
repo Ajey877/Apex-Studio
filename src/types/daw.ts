@@ -766,6 +766,8 @@ export interface ProjectState {
    * replacement all round-trip the gate pattern correctly.
    */
   grossBeatState?: GrossBeatState;
+  /** Phase 89: mastering controls belong to the project document, not a component-local state. */
+  masteringSuiteState?: MasteringSuiteState;
   macroKnobs?: MasterMacroKnob[];
   /** UI-only persistence marker for an acknowledged missing-audio warning. */
   dismissedMissingAudioSignature?: string;
