@@ -105,7 +105,10 @@ describe('sampler renderer', () => {
     assert.ok(handle);
     const source = ctx.sources[0];
     assert.equal(source.buffer, buffer);
-    assert.ok(Math.abs(source.playbackRate.value - Math.pow(2, 5 / 12)) < 1e-9);
+    // Contract: playbackRate = 2^((notePitch - rootNote) + channelPitch + tuneSemitones)/12
+    // Example: (72 - 60) + 1 (channelPitch) + 2 (tune) = 15 semitones => 2^(15/12)
+    // reverse:true => negative rate
+    assert.ok(Math.abs(source.playbackRate.value + Math.pow(2, 15 / 12)) < 1e-9);
     assert.equal(source.loop, true);
     assert.equal(source.loopStart, 0.4);
     assert.equal(source.loopEnd, 1.6);
@@ -113,6 +116,38 @@ describe('sampler renderer', () => {
 
     source.onended?.();
     assert.equal(ended, 1);
+  });
+
+  it('applies root note, channel pitch, and zone tuning additively', () => {
+    const ctx = new FakeContext();
+    const buffer = { duration: 1 } as AudioBuffer;
+    // No zone tuning, no channel pitch: one octave above root (72 vs 60) => 2^(12/12)=2
+    const handle1 = renderSamplerVoice({
+      channel: channel({ pitch: 0, sampleZones: [{ id:'z', sampleId:'sample', lowNote:0, highNote:127, rootNote:60, lowVelocity:0, highVelocity:127, tuneSemitones:0 } as any]}),
+      note, time: 0, destination: {} as AudioNode, audioContext: ctx as any, voiceId:'v1', getSampleBuffer: id=> id==='sample'?buffer:undefined,
+    });
+    assert.ok(handle1);
+    assert.ok(Math.abs(ctx.sources[0].playbackRate.value - Math.pow(2, 12/12)) < 1e-9);
+
+    // With channel pitch and tune, they add
+    const ctx2 = new FakeContext();
+    const handle2 = renderSamplerVoice({
+      channel: channel({ pitch: 2, sampleZones: [{ id:'z', sampleId:'sample', lowNote:0, highNote:127, rootNote:60, lowVelocity:0, highVelocity:127, tuneSemitones: -1 } as any]}),
+      note: { id:'n', pitch: 60, start:0, duration:1, velocity:1 } as any, time: 0, destination: {} as AudioNode, audioContext: ctx2 as any, voiceId:'v2', getSampleBuffer: id=> id==='sample'?buffer:undefined,
+    });
+    assert.ok(handle2);
+    // (60-60)+2 + (-1) =1 semitone => 2^(1/12)
+    assert.ok(Math.abs(ctx2.sources[0].playbackRate.value - Math.pow(2, 1/12)) < 1e-9);
+
+    // Reverse playback flips sign
+    const ctx3 = new FakeContext();
+    const handle3 = renderSamplerVoice({
+      channel: channel({ pitch: 0, sampleZones: [{ id:'z', sampleId:'sample', lowNote:0, highNote:127, rootNote:60, lowVelocity:0, highVelocity:127, tuneSemitones:0, reverse:true } as any]}),
+      note: { id:'n', pitch: 60, start:0, duration:1, velocity:1 } as any, time: 0, destination: {} as AudioNode, audioContext: ctx3 as any, voiceId:'v3', getSampleBuffer: id=> id==='sample'?buffer:undefined,
+    });
+    assert.ok(handle3);
+    // root 60, note 60 => 0 semitones, reverse => -1
+    assert.ok(Math.abs(ctx3.sources[0].playbackRate.value + 1) < 1e-9);
   });
 
   it('returns no voice when the resolver cannot supply the selected sample', () => {

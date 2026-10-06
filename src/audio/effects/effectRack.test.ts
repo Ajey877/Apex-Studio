@@ -53,8 +53,17 @@ describe('EffectRack', () => {
     const slots = rack.getSlots();
     assert.deepEqual(slots.map((slot) => slot.id), ['first', 'second']);
     assert.equal(slots.every((slot) => !slot.bypassed), true);
-    assert.equal((first.input as unknown as FakeNode).connections.length, 1);
-    assert.equal((second.input as unknown as FakeNode).connections.length, 1);
+    // Serial chain: rack.input -> first.input, first.output -> second.input, second.output -> rack.output
+    // Connections are recorded on the source node (the caller of connect)
+    assert.equal((rack.input as unknown as FakeNode).connections.length, 1);
+    assert.equal((rack.input as unknown as FakeNode).connections[0], first.input);
+    assert.equal((first.output as unknown as FakeNode).connections.length, 1);
+    assert.equal((first.output as unknown as FakeNode).connections[0], second.input);
+    assert.equal((second.output as unknown as FakeNode).connections.length, 1);
+    assert.equal((second.output as unknown as FakeNode).connections[0], rack.output);
+    // Destination inputs should have no outgoing connections
+    assert.equal((first.input as unknown as FakeNode).connections.length, 0);
+    assert.equal((second.input as unknown as FakeNode).connections.length, 0);
   });
 
   it('bypasses and restores a slot without disposing it', () => {
@@ -65,12 +74,19 @@ describe('EffectRack', () => {
 
     rack.setBypassed('first', true);
     assert.equal(rack.getSlots()[0]?.bypassed, true);
+    // When bypassed, the effect is disconnected and the rack input connects directly to output
     assert.equal((first.input as unknown as FakeNode).connections.length, 0);
+    assert.equal((first.output as unknown as FakeNode).connections.length, 0);
+    assert.equal((rack.input as unknown as FakeNode).connections.length, 1);
+    assert.equal((rack.input as unknown as FakeNode).connections[0], rack.output);
     assert.deepEqual(disposed, []);
 
     rack.setBypassed('first', false);
     assert.equal(rack.getSlots()[0]?.bypassed, false);
-    assert.equal((first.input as unknown as FakeNode).connections.length, 1);
+    assert.equal((rack.input as unknown as FakeNode).connections.length, 1);
+    assert.equal((rack.input as unknown as FakeNode).connections[0], first.input);
+    assert.equal((first.output as unknown as FakeNode).connections.length, 1);
+    assert.equal((first.output as unknown as FakeNode).connections[0], rack.output);
   });
 
   it('supports deterministic ordering and rejects duplicate or invalid slots', () => {

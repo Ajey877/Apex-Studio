@@ -98,7 +98,10 @@ describe('drum-pad renderer', () => {
     assert.equal(source.loop, true);
     assert.equal(source.loopStart, 0.2);
     assert.equal(source.loopEnd, 1.8);
-    assert.equal(ctx.gains[0].gain.value, 0.75 * 1 * 0.9);
+    // Production contract: gain = velocity * min(1.25, pad.volume) * channel.volume
+    // This matches sampler/subtractive/fmSynth which all include channel.volume per-voice.
+    // velocity 0.75 * pad.volume 0.9 * channel.volume 0.8 = 0.54
+    assert.equal(ctx.gains[0].gain.value, 0.75 * 0.9 * 0.8);
     assert.equal(ctx.panners[0].pan.value, 0.25);
     assert.deepEqual(source.startArgs, [2, 1.8, undefined]);
 
