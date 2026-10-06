@@ -24,7 +24,7 @@ export const AppearanceSettingsModal: React.FC<AppearanceSettingsModalProps> = (
           <legend className="mb-3 text-sm font-semibold">Appearance</legend>
           <div className="grid grid-cols-2 gap-3" role="radiogroup" aria-label="Color theme">
             {(['dark', 'light'] as const).map(option => (
-              <label key={option} className={`cursor-pointer rounded-lg border p-3 transition-colors ${mode === option ? 'border-[var(--apex-accent)] bg-[var(--apex-state-selected)]' : 'border-[var(--apex-border)] hover:border-[var(--apex-accent)]'}`}>
+              <label key={option} className={`cursor-pointer rounded-lg border p-3 transition-colors focus-within:ring-2 focus-within:ring-[var(--apex-state-focus)] ${mode === option ? 'border-[var(--apex-accent)] bg-[var(--apex-state-selected)]' : 'border-[var(--apex-border)] hover:border-[var(--apex-accent)]'}`}>
                 <input type="radio" name="theme-mode" value={option} checked={mode === option} onChange={() => onChange(option)} className="sr-only" />
                 <span className="block text-sm font-medium">{option === 'dark' ? 'Dark' : 'Light'}</span>
                 <span className="mt-1 block text-xs text-[var(--apex-text-2)]">{option === 'dark' ? 'Midnight Aurora' : 'Bright workspace'}</span>

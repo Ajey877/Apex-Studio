@@ -1793,14 +1793,14 @@ export function App() {
 
   if (isProjectHydrating) {
     return (
-      <div className="bg-[#0a0a0b] text-[#b0b0b0] h-screen w-screen flex items-center justify-center font-sans">
+      <div className="bg-[var(--apex-bg)] text-[var(--apex-text)] h-screen w-screen flex items-center justify-center font-sans">
         <div className="text-xs font-bold tracking-[0.2em] text-[#ff6e00]">LOADING PROJECT</div>
       </div>
     );
   }
 
   return (
-    <div id="phantom-mobile-daw" data-theme={themeMode} className="bg-[#0a0a0b] text-[#b0b0b0] h-screen w-screen flex flex-col font-sans select-none overflow-hidden">
+    <div id="phantom-mobile-daw" data-theme={themeMode} className="bg-[var(--apex-bg)] text-[var(--apex-text)] h-screen w-screen flex flex-col font-sans select-none overflow-hidden">
       {/* 0. Application Menu (UI Milestone 1B).
           Rendered as a SIBLING ABOVE the transport on purpose: src/uiAudit.css
           positions the transport with `#fl-transport-bar > div:first-child >
