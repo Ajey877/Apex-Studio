@@ -898,6 +898,15 @@ describe('Phase 81: live and offline paths share the same parameter semantics', 
     const liveDelayTime = readAudioParam('delay', 'time', 'fx-delay', 3)!.value;
     assert.ok(Math.abs(liveDelayTime - 10) < 1e-9, 'live full-scale delay time is 10 s');
 
+    const liveEffect = getLiveFxSlotEffect(engine, 3, 'fx-delay');
+    assert.ok(liveEffect, 'the live chain must exist before the render');
+
+    // The offline chain is captured while the render is still in flight: since
+    // the Phase 81 export-isolation correction an offline render registers in
+    // its own slot index, so after the render the registry names the live chain
+    // again. Reading the offline chain post-render would silently read the live
+    // one and this test would stop testing what it claims.
+    let offlineEffect: unknown;
     engine.isPlaying = false;
     await audioEngine.renderTimelineOffline(
       structuredClone(fixture.channels),
@@ -908,16 +917,23 @@ describe('Phase 81: live and offline paths share the same parameter semantics', 
       undefined,
       true,
       'song',
-      undefined,
+      (progress) => {
+        if (progress >= 70) offlineEffect = getLiveFxSlotEffect(engine, 3, 'fx-delay');
+      },
       undefined,
     );
 
-    // The offline render registers its own chain in the same registry, so the
-    // offline slot index is what remains readable after the render.
-    const offlineDelayTime = readAudioParam('delay', 'time', 'fx-delay', 3)!.value;
+    assert.ok(offlineEffect, 'the offline render must build the delay chain');
+    assert.notEqual(offlineEffect, liveEffect, 'the offline chain is its own instance');
+    const offlineDelayTime = ((offlineEffect as any).effect.delay.delayTime as { value: number }).value;
     assert.ok(
       Math.abs(offlineDelayTime - liveDelayTime) < 1e-9,
       `offline (${offlineDelayTime}) and live (${liveDelayTime}) must agree on the contract value`,
     );
+
+    // And the live chain is still the one the registry hands out afterwards,
+    // with the value the live take set — the render wrote nothing into it.
+    assert.equal(getLiveFxSlotEffect(engine, 3, 'fx-delay'), liveEffect);
+    assert.ok(Math.abs(readAudioParam('delay', 'time', 'fx-delay', 3)!.value - liveDelayTime) < 1e-9);
   });
 });

@@ -2511,10 +2511,22 @@ class AudioEngine {
         this.bpm = safeBpm;
         this.metronome = false;
 
-        // Browser exports use a bounded offline graph by default. Live mixer FX
-        // (especially convolution and feedback delay) can make OfflineAudioContext
-        // rendering disproportionately expensive. Preserve the full FX graph as an
-        // explicit opt-in for validation/internal callers.
+        // `includeMixerFx` decides whether the offline graph carries the mixer
+        // inserts the user monitored, and with them any FX automation lane.
+        //
+        // Every production export states its intent explicitly, so nothing here
+        // relies on the parameter default: the Export modal forwards the Phase 52
+        // product default (`DEFAULT_INCLUDE_MIXER_FX === true`) to both the master
+        // WAV render and `renderProjectStems`, and Bounce-In-Place passes `true`.
+        // A normal export therefore renders the full FX graph.
+        //
+        // `false` is two things at once, both deliberate: the dry bounce a user
+        // can still choose on purpose, and the engine-boundary default. Live mixer
+        // FX (especially convolution and feedback delay) can make
+        // OfflineAudioContext rendering disproportionately expensive, so an
+        // internal caller that omits the argument gets the bounded graph rather
+        // than an accidental full one. See
+        // src/audio/phase81.offlineExportFxAutomation.test.ts.
         const tracks = [...mixerTracks].sort((a, b) => a.id - b.id);
         const renderTracks = includeMixerFx
           ? tracks
@@ -2529,9 +2541,9 @@ class AudioEngine {
         this.withOfflineRenderOperation(() => {
           if (includeMixerFx) {
             // Phase 10A: a seeded impulse is required so offline exports are
-            // byte-deterministic across runs. The live engine never reaches this
-            // branch (`includeMixerFx` defaults to false on the offline path) and
-            // keeps its existing non-deterministic convolution tail.
+            // byte-deterministic across runs. Only this offline branch seeds it —
+            // the live engine builds its convolution impulse elsewhere and keeps
+            // its existing non-deterministic tail.
             this.buildReverbImpulse(2.5, 2.0, { seed: 0x10a4eb });
           }
           const masterTrack = renderTracks.find(track => track.id === 0);

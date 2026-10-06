@@ -16,10 +16,13 @@
  */
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
+import React from 'react';
+import { renderToStaticMarkup } from 'react-dom/server';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
-import type { FxSlot, FxType, MixerTrack, ProjectState } from '../types/daw';
+import type { FxSlot, FxType, MixerTrack, PlaylistClip, PlaylistTrack, ProjectState } from '../types/daw';
+import { PlaylistArranger } from './PlaylistArranger';
 import {
   formatFxParameterRange,
   listFxParameterOptions,
@@ -493,5 +496,85 @@ describe('Phase 81: the pickers render the contract list, not a hardcoded one', 
     }
     const offeredOptions: FxParameterOption[] = listFxParameterOptions(tracks);
     assert.equal(offeredOptions.length, offered.size, 'no duplicate offers');
+  });
+});
+
+describe('Phase 81: the modified arranger still renders', () => {
+  /**
+   * `tests/playlistGeometry.test.mjs` mounts this exact component in a real
+   * browser, but Playwright's Chromium cannot be downloaded in every
+   * environment (its CDN is blocked in some sandboxes), so that gate can be
+   * unrunnable through no fault of the code. This is the executable substitute
+   * available in Node: a real `react-dom/server` render of the real component.
+   *
+   * LIMITATION, stated plainly: a static render produces markup only. It proves
+   * the component still constructs and emits the nodes the browser fixture looks
+   * for; it does NOT prove computed layout, scrolling or pointer geometry, and it
+   * is not a replacement for the browser test.
+   */
+  const playlistTracks: PlaylistTrack[] = [
+    { id: 1, name: 'Audio 1', color: '#00ff88', volume: 1, pan: 0, mute: false, solo: false } as PlaylistTrack,
+  ];
+
+  const audioClip: PlaylistClip = {
+    id: 'fixture-audio', trackIndex: 0, startBar: 28, lengthBars: 4, type: 'audio',
+    audioBufferId: 'fixture-buffer', audioName: 'Fixture Audio', name: 'Fixture Audio',
+    color: '#00ff88', audioWaveform: Array(32).fill(0.5),
+  } as PlaylistClip;
+
+  const automationClip: PlaylistClip = {
+    id: 'auto-fx', trackIndex: 0, startBar: 0, lengthBars: 4, type: 'automation',
+    color: '#00e5ff', name: 'Auto: FX', automationPoints: [{ x: 0, y: 0 }, { x: 1, y: 1 }],
+    automationTarget: { type: 'fx_param', targetId: '2/fx-comp', paramName: 'threshold', label: 'Threshold' },
+  } as PlaylistClip;
+
+  const render = (clips: PlaylistClip[], mixerTracks: MixerTrack[]): string =>
+    renderToStaticMarkup(
+      React.createElement(PlaylistArranger as never, {
+        tracks: playlistTracks,
+        clips,
+        patterns: [],
+        channels: [],
+        mixerTracks,
+        onUpdateTracks: () => {},
+        onUpdateClips: () => {},
+        onAddTrack: () => {},
+        currentBar: 1,
+        isPlaying: false,
+        bpm: 120,
+        totalBars: 32,
+        onUpdateTotalBars: () => {},
+      }),
+    );
+
+  it('renders the arranger root and clip the browser fixture asserts on', () => {
+    const html = render([audioClip], []);
+    assert.ok(html.includes('fl-playlist-arranger'), 'the fixture selects #fl-playlist-arranger');
+    assert.ok(html.includes('Fixture Audio'), 'the clip the geometry fixture locates must render');
+  });
+
+  it('renders with FX-bearing mixer tracks and an FX automation clip in the document', () => {
+    const html = render([audioClip, automationClip], familyTracks());
+    assert.ok(html.includes('fl-playlist-arranger'));
+    assert.ok(html.includes('Fixture Audio'));
+    assert.ok(html.length > 1000, 'the arranger rendered its grid, not an empty shell');
+  });
+
+  it('mounts the FX pickers only while the automation editor is open', () => {
+    // The editor is opened by a pointer interaction on internal state, so a
+    // static render cannot open it. What it CAN prove is that the pickers are
+    // not leaking into the timeline markup for every clip that happens to be an
+    // automation lane — which would put two FX slot selects on screen at once.
+    const html = render([audioClip, automationClip], familyTracks());
+    assert.equal(
+      html.includes('FX slot this envelope drives'),
+      false,
+      'the slot picker must not render outside the automation editor',
+    );
+    assert.equal(
+      html.includes('Contract parameter this envelope drives'),
+      false,
+      'the parameter picker must not render outside the automation editor',
+    );
   });
 });
