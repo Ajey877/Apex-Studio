@@ -37,24 +37,23 @@ const TARGET_TOLERANCE_DB = 1.5;
 const MASTER_FFT_BINS = 256;
 
 /**
- * The mastering processing controls are intentionally not wired to the audio
- * graph in this phase (Phase 46 owns the master chain). Showing live "GR"
- * values or an "active" status for them would be a measurement the engine
- * never made, so every one of these panels says what it is.
+ * The controls now drive the shared live/offline master processor. This status
+ * reports whether that processor is enabled; it does not claim a loudness or
+ * delivery target has been achieved.
  */
-const NotAppliedBanner = ({ label }: { label: string }) => (
-  <div className="bg-[#0a0a0c] border border-[#ffaa00]/40 rounded-lg px-3 py-2 flex items-center justify-between gap-2">
-    <span className="text-[10px] font-mono font-bold text-[#ffaa00] uppercase tracking-wider">
-      {label}: NOT APPLIED — NO PROCESSING IN SIGNAL PATH
+const MasteringPathStatus = ({ label, enabled }: { label: string; enabled: boolean }) => (
+  <div className={`bg-[#0a0a0c] border rounded-lg px-3 py-2 flex items-center justify-between gap-2 ${enabled ? 'border-[#00d26a]/40' : 'border-[#ffaa00]/40'}`}>
+    <span className={`text-[10px] font-mono font-bold uppercase tracking-wider ${enabled ? 'text-[#00d26a]' : 'text-[#ffaa00]'}`}>
+      {label}: {enabled ? 'PROCESSING ENABLED' : 'BYPASSED'}
     </span>
-    <span className="text-[10px] text-[#777] whitespace-nowrap">STORED AS INTENT · PHASE 46</span>
+    <span className="text-[10px] text-[#777] whitespace-nowrap">{enabled ? 'LIVE + OFFLINE PATH' : 'DRY SIGNAL PATH'}</span>
   </div>
 );
 
 const MASTERING_PRESETS = [
   {
     name: 'Streaming Standard (-14 LUFS)',
-    desc: 'Transparent loudness optimized for Spotify, Apple Music & YouTube with values stored for a future master chain.',
+    desc: 'Transparent loudness optimized for Spotify, Apple Music & YouTube with processed by the mastering chain.',
     lufsTarget: -14.0,
     lowGain: 0.5,
     midGain: -0.2,
@@ -68,7 +67,7 @@ const MASTERING_PRESETS = [
   },
   {
     name: 'Club & Beatport Banger (-9 LUFS)',
-    desc: 'Dense, aggressive master with heavy sub punch and pushed transients values stored for a future master chain.',
+    desc: 'Dense, aggressive master with heavy sub punch and pushed transients processed by the mastering chain.',
     lufsTarget: -9.0,
     lowGain: 2.5,
     midGain: 0.5,
@@ -354,11 +353,11 @@ export const MasteringSuiteModal: React.FC<MasteringSuiteModalProps> = ({
 
           <div className="flex items-center gap-2">
             <span
-              title="Phase 46 owns the master processing chain. Until it exists there is nothing to enable or bypass, so this reads as a fact rather than a switch."
+              title="Phase 46 owns the master processing chain. Until it exists there is the master processor can be enabled or bypassed here."
               className="px-3 py-1 text-xs font-bold rounded flex items-center gap-1.5 bg-[#222] text-[#888] border border-[#333]"
             >
               <ShieldCheck className="w-3.5 h-3.5" />
-              <span>MASTER CHAIN: NOT APPLIED</span>
+              <span>MASTER CHAIN: {masteringState.enabled ? "ACTIVE DSP" : "BYPASSED"}</span>
             </span>
 
             <button
@@ -625,7 +624,7 @@ export const MasteringSuiteModal: React.FC<MasteringSuiteModalProps> = ({
           {activeTab === 'multiband' && (
             <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
               <div className="md:col-span-3">
-                <NotAppliedBanner label="3-BAND MULTIBAND COMPRESSOR" />
+                <MasteringPathStatus label="3-BAND MULTIBAND COMPRESSOR" enabled={masteringState.enabled} />
               </div>
               {/* Low Band */}
               <div className="bg-[#18181d] border border-[#282830] rounded-xl p-3 flex flex-col gap-3">
@@ -834,7 +833,7 @@ export const MasteringSuiteModal: React.FC<MasteringSuiteModalProps> = ({
           {activeTab === 'imager' && (
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div className="md:col-span-2">
-                <NotAppliedBanner label="STEREO IMAGER / SUB-MONO" />
+                <MasteringPathStatus label="STEREO IMAGER / SUB-MONO" enabled={masteringState.enabled} />
               </div>
               <div className="bg-[#18181d] border border-[#282830] rounded-xl p-4 flex flex-col gap-3">
                 <div className="flex items-center gap-2 text-white font-bold text-xs">
@@ -884,7 +883,7 @@ export const MasteringSuiteModal: React.FC<MasteringSuiteModalProps> = ({
           {activeTab === 'maximizer' && (
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div className="md:col-span-2">
-                <NotAppliedBanner label="MAXIMIZER / BRICKWALL LIMITER" />
+                <MasteringPathStatus label="MAXIMIZER / BRICKWALL LIMITER" enabled={masteringState.enabled} />
               </div>
               <div className="bg-[#18181d] border border-[#282830] rounded-xl p-4 flex flex-col gap-3">
                 <div className="flex items-center gap-2 text-white font-bold text-xs">
