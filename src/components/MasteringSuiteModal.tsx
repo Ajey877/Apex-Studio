@@ -53,7 +53,7 @@ const MasteringPathStatus = ({ label, enabled }: { label: string; enabled: boole
 const MASTERING_PRESETS = [
   {
     name: 'Streaming Standard (-14 LUFS)',
-    desc: 'Transparent loudness optimized for Spotify, Apple Music & YouTube with processed by the mastering chain.',
+    desc: 'Transparent loudness reference for Spotify, Apple Music & YouTube — LUFS target is metering reference only, processed by the mastering chain when enabled.',
     lufsTarget: -14.0,
     lowGain: 0.5,
     midGain: -0.2,
@@ -346,7 +346,7 @@ export const MasteringSuiteModal: React.FC<MasteringSuiteModalProps> = ({
               </div>
               <p className="text-[11px] text-[#888]">
                 Master bus measurement: gated loudness, inter-sample peak and stereo field. Processing controls below are
-                stored intent only - the master chain is not wired yet.
+                wired to live and offline master paths when enabled.
               </p>
             </div>
           </div>
@@ -692,7 +692,7 @@ export const MasteringSuiteModal: React.FC<MasteringSuiteModalProps> = ({
                 {/* Reduction Meter */}
                 <div className="bg-[#0a0a0c] p-2 rounded border border-[#222] flex items-center justify-between text-[10px] font-mono">
                   <span className="text-[#888]">GR (Low)</span>
-                  <span className="text-[#666]">NOT MEASURED - NO LOW BAND COMPRESSOR IN PATH</span>
+                  <span className="text-[#666]">NOT MEASURED — compressor in path, no GR metering</span>
                 </div>
               </div>
 
@@ -759,7 +759,7 @@ export const MasteringSuiteModal: React.FC<MasteringSuiteModalProps> = ({
                 {/* Reduction Meter */}
                 <div className="bg-[#0a0a0c] p-2 rounded border border-[#222] flex items-center justify-between text-[10px] font-mono">
                   <span className="text-[#888]">GR (Mid)</span>
-                  <span className="text-[#666]">NOT MEASURED - NO MID BAND COMPRESSOR IN PATH</span>
+                  <span className="text-[#666]">NOT MEASURED — compressor in path, no GR metering</span>
                 </div>
               </div>
 
@@ -826,7 +826,7 @@ export const MasteringSuiteModal: React.FC<MasteringSuiteModalProps> = ({
                 {/* Reduction Meter */}
                 <div className="bg-[#0a0a0c] p-2 rounded border border-[#222] flex items-center justify-between text-[10px] font-mono">
                   <span className="text-[#888]">GR (High)</span>
-                  <span className="text-[#666]">NOT MEASURED - NO HIGH BAND COMPRESSOR IN PATH</span>
+                  <span className="text-[#666]">NOT MEASURED — compressor in path, no GR metering</span>
                 </div>
               </div>
             </div>
@@ -932,9 +932,14 @@ export const MasteringSuiteModal: React.FC<MasteringSuiteModalProps> = ({
                     inter-sample maximum. It measures only: nothing here limits, delays or protects the signal.
                   </p>
                 </div>
-                <div className="bg-[#0c0c0e] p-2.5 rounded border border-[#222] flex items-center justify-between text-xs font-mono">
-                  <span className="text-[#888]">Lookahead / Latency</span>
-                  <span className="text-[#666] font-bold">NONE - NOT IMPLEMENTED</span>
+                <div className="bg-[#0c0c0e] p-2.5 rounded border border-[#222] flex flex-col gap-1 text-xs font-mono">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[#888]">Lookahead / Latency</span>
+                    <span className="text-[#666] font-bold">No delay — attack 1 ms on / 5 ms off</span>
+                  </div>
+                  <p className="text-[10px] text-[#666] leading-tight">
+                    Maximizer is DynamicsCompressor (ratio 20) + 4× oversampled WaveShaper hard clip — no true-peak lookahead buffer.
+                  </p>
                 </div>
               </div>
             </div>
