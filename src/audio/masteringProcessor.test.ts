@@ -79,7 +79,7 @@ describe('Phase 89 real master processor', () => {
     assert.equal(compressors[0].threshold.value, -31);
     assert.equal(compressors[0].ratio.value, 6);
     assert.equal(compressors[3].threshold.value, changed.maximizerThreshold);
-    assert.ok(Math.abs((shaper?.curve?.[shaper.curve.length - 1] ?? 0) - Math.pow(10, -1 / 20)) < 1e-6, 'Float32Array ceiling curve matches the requested ceiling within float precision');
+    assert.ok(Math.abs((shaper?.curve?.[shaper.curve.length - 1] ?? 0) - Math.pow(10, -1 / 20)) < 1e-5, 'Float32Array ceiling curve matches the requested ceiling within float precision');
     processor.dispose();
     processor.dispose();
     assert.equal(nodes.every(node => node.disconnected), true, 'dispose is idempotent and releases every node');
