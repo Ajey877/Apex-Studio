@@ -1,3 +1,4 @@
+import { DEFAULT_MASTERING_SUITE_STATE, normalizeMasteringSuiteState } from '../audio/masteringState';
 import type { GrossBeatState, ProjectState, Channel, PlaylistClip } from '../types/daw';
 import { audioEngine } from '../audio/audioEngine';
 import { createDefaultMixerTracks, createDefaultPlaylistTracks } from '../audio/presets';
@@ -434,7 +435,8 @@ export const createDefaultProjectState = (): ProjectState => {
     // engine reads from this on load/undo/redo instead of holding its own
     // private truth, so save/load round-trips and project replacement all
     // preserve the gate pattern.
-    grossBeatState: { ...DEFAULT_GROSS_BEAT_STATE, gateSteps: [...DEFAULT_GROSS_BEAT_STATE.gateSteps] }
+    grossBeatState: { ...DEFAULT_GROSS_BEAT_STATE, gateSteps: [...DEFAULT_GROSS_BEAT_STATE.gateSteps] },
+    masteringSuiteState: clone(DEFAULT_MASTERING_SUITE_STATE)
   };
 
   return {
@@ -548,6 +550,7 @@ export const normalizeProjectState = (input: unknown): ProjectState => {
     grossBeatState: isGrossBeatState(candidate.grossBeatState)
       ? { ...clone(candidate.grossBeatState) as GrossBeatState, mix: clamp01((candidate.grossBeatState as GrossBeatState).mix) }
       : { ...DEFAULT_GROSS_BEAT_STATE, gateSteps: [...DEFAULT_GROSS_BEAT_STATE.gateSteps] },
+    masteringSuiteState: normalizeMasteringSuiteState(candidate.masteringSuiteState),
     vocalTuner: candidate.vocalTuner === undefined ? undefined : clone(candidate.vocalTuner) as ProjectState['vocalTuner'],
     selectedPatternId: typeof candidate.selectedPatternId === 'string'
       ? candidate.selectedPatternId

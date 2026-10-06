@@ -289,7 +289,10 @@ describe('Phase 45: mastering surface presents only measured values', () => {
     assert.doesNotMatch(MODAL_SOURCE, /44\.1kHz/, 'the sample rate must be read, not printed');
     assert.doesNotMatch(MODAL_SOURCE, /Commercial-grade loudness compliance/);
     assert.doesNotMatch(MODAL_SOURCE, /SUITE ACTIVE/);
-    assert.match(MODAL_SOURCE, /NOT APPLIED \u2014 NO PROCESSING IN SIGNAL PATH/);
+    assert.match(MODAL_SOURCE, /PROCESSING ENABLED/);
+    assert.equal(MODAL_SOURCE.includes('LIVE + OFFLINE PATH'), true, 'status must identify the live and offline processing paths');
+    assert.match(MODAL_SOURCE, /BYPASSED/);
+    assert.equal(MODAL_SOURCE.includes('NOT APPLIED — NO PROCESSING IN SIGNAL PATH'), false, 'obsolete not-applied claim must be removed');
     assert.match(MODAL_SOURCE, /NOT MEASURED/);
   });
 

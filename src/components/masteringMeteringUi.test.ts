@@ -70,13 +70,15 @@ describe('Phase 45: mastering modal readouts', () => {
     assert.match(MODAL_SOURCE, /SAMPLES UNREAD/);
   });
 
-  it('labels the processing tabs as not applied', () => {
+  it('reports the real master processing path without claiming a delivery target was achieved', () => {
     for (const label of ['3-BAND MULTIBAND COMPRESSOR', 'STEREO IMAGER / SUB-MONO', 'MAXIMIZER / BRICKWALL LIMITER']) {
-      assert.ok(MODAL_SOURCE.includes(label), `${label} banner missing`);
+      assert.ok(MODAL_SOURCE.includes(label), `${label} status missing`);
     }
-    assert.ok((MODAL_SOURCE.match(/NOT APPLIED — NO PROCESSING IN SIGNAL PATH/g) ?? []).length === 1, 'the banner is one shared component');
-    assert.match(MODAL_SOURCE, /NONE - NOT IMPLEMENTED/);
-    assert.match(MODAL_SOURCE, /stores values only/);
+    assert.match(MODAL_SOURCE, /PROCESSING ENABLED/);
+    assert.match(MODAL_SOURCE, /LIVE \+ OFFLINE PATH/);
+    assert.match(MODAL_SOURCE, /BYPASSED/);
+    assert.doesNotMatch(MODAL_SOURCE, /NOT APPLIED/);
+    assert.match(MODAL_SOURCE, /NOT MEASURED/);
   });
 
   it('polls the engine instead of only sampling while playing', () => {

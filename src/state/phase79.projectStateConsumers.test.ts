@@ -135,6 +135,8 @@ test('Default project state does not contain any stripped inert fields', () => {
       // objects (ProjectState/Channel/MixerTrack/PlaylistClip/SidechainSettings),
       // not on per-effect parameter dictionaries.
       if (k === 'params' && /\.fxSlots\[\d+\]$/.test(path)) { continue; }
+      // Phase 89 adds a real mastering DSP configuration; its compressor fields (threshold, ratio, attack, release, gain) are intentionally valid project data, not stripped legacy fields.
+      if (path === 'state.masteringSuiteState' || path.startsWith('state.masteringSuiteState.')) { continue; }
       assert.equal(
         STRIPPED_INERT_FIELDS.includes(k),
         false,

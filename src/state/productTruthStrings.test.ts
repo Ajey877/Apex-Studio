@@ -106,11 +106,13 @@ describe('Phase 52 — README matches the implementation', () => {
 });
 
 describe('Phase 52 — truthful not-applied states', () => {
-  it('Mastering Suite still declares its processors are out of the signal path', () => {
+  it('Mastering Suite accurately reports its implemented processing path', () => {
     const source = read('src/components/MasteringSuiteModal.tsx');
-    assert.ok(source.includes('NOT APPLIED'));
-    assert.ok(source.includes('NO PROCESSING IN SIGNAL PATH'));
-    assert.ok(!/>\s*GR\s*</.test(source.replace(/NOT MEASURED/g, '')), 'no bare gain-reduction readout');
+    assert.ok(source.includes('PROCESSING ENABLED'));
+    assert.ok(source.includes('LIVE + OFFLINE PATH'));
+    assert.ok(source.includes('BYPASSED'));
+    assert.ok(!source.includes('NO PROCESSING IN SIGNAL PATH'));
+    assert.ok(!/\\bGR\\b/.test(source.replace(/NOT MEASURED/g, '')), 'no bare gain-reduction readout');
   });
 
   it('Polyphonic editor declares its demo blobs are not source-audio analysis', () => {
