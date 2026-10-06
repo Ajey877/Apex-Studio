@@ -271,6 +271,42 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   --apex-radius-control: 6px;
 }
 
+:root[data-theme="light"] {
+  --apex-bg: #eef1f6;
+  --apex-surface: #ffffff;
+  --apex-surface-2: #f4f6fa;
+  --apex-surface-3: #e8ecf3;
+  --apex-border: #c9d0dc;
+  --apex-text: #18202d;
+  --apex-text-2: #465267;
+  --apex-text-3: #68758a;
+  --apex-accent: #6552ce;
+  --apex-accent-strong: #5140b8;
+  --apex-cyan: #087da8;
+  --apex-gold: #9a5d00;
+  --apex-danger: #bd2638;
+  --apex-success: #14734e;
+  --apex-chrome-menu: #f7f8fb;
+  --apex-chrome-transport: #ffffff;
+  --apex-chrome-ribbon: #eef1f6;
+  --apex-chrome-status: #e5e9f0;
+  --apex-chrome-inset: #e3e8f0;
+  --apex-panel: #ffffff;
+  --apex-panel-header: #e7ebf2;
+  --apex-canvas: #f4f6fa;
+  --apex-state-hover: rgba(24, 32, 45, 0.07);
+  --apex-state-pressed: rgba(24, 32, 45, 0.12);
+  --apex-state-disabled: #7b8799;
+  --apex-state-playing-fg: #ffffff;
+  --apex-state-recording-fg: #ffffff;
+  --apex-text-muted: #59677c;
+}
+
+:root[data-theme="light"] body,
+:root[data-theme="light"] #root { color-scheme: light; }
+:root[data-theme="dark"] body,
+:root[data-theme="dark"] #root { color-scheme: dark; }
+
 /* The two shell bands. The transport owns no bottom border: the ribbon's top
    border is the single separator between them. */
 .apex-transport {
