@@ -29,6 +29,21 @@ features. Those gaps are documented in [Current Limitations](#current-limitation
 
 ---
 
+## Try Apex Studio
+
+**[🎛️ Launch Apex Studio →](https://ajey877.github.io/Apex-Studio/)**
+
+Try the current browser build of Apex Studio.
+
+The live site is the browser build of `main`, published by the repository's GitHub Pages
+deployment workflow. It is the same active-development / pre-professional build described in this
+README — loading the site is not a claim that every workflow is production-ready, and
+[Current Limitations](#current-limitations) and
+[Transparency: Prototype / Demo Features](#transparency-prototype--demo-features) remain
+authoritative.
+
+---
+
 ## What Works Today
 
 | Area | Current status |
