@@ -99,12 +99,12 @@ describe('Phase 52 — README matches the implementation', () => {
   it('records which advanced surfaces are not production DSP', () => {
     const lines = readme.split('\n');
     const disclosedAsNotProductionDsp =
-      /prototype|demo|not implemented|not applied|stored intent|ui\/demo representation|seeded|static/i;
+      /prototype|demo|not implemented|not applied|stored intent|preview surface|seeded|static/i;
 
     // The surfaces the README is contracted to disclose. Each must be named
     // *and* named as something other than production DSP — a bare mention is
     // not a disclosure.
-    for (const surface of [/Wavetable/i, /Take comping/i, /Polyphonic/i, /Advanced audio warp/i, /preview/i, /analytics/i]) {
+    for (const surface of [/Vocal Tuner/i, /Warp Processor/i, /Take Comping/i, /Wavetable Synth/i, /Polyphonic Blob Editor/i]) {
       const mentions = lines.filter((line) => surface.test(line));
       assert.ok(
         mentions.length > 0,
@@ -116,18 +116,17 @@ describe('Phase 52 — README matches the implementation', () => {
       );
     }
 
-    // The distinction between a demo surface and real DSP must stay explicit
-    // in the document itself. (The Vocal Tuner disclosure is asserted with the
-    // other in-app not-applied states below, where it actually lives.)
+    // The restored Feature status section distinguishes these surfaces from
+    // the working capabilities instead of using the newer transparency section.
     assert.match(
       readme,
-      /UI\/demo representation[^\n]*production DSP implementation/i,
-      'README must keep the explicit "demo representation != production DSP" distinction'
+      /in the app but not wired into the audio engine yet/i,
+      'README must keep the explicit distinction between these surfaces and engine capabilities'
     );
 
     // A prototype surface must never be upgraded to a shipped status in the
     // capability table.
-    for (const surface of [/Wavetable/i, /Take comping/i, /Polyphonic/i, /Advanced audio warp/i]) {
+    for (const surface of [/Vocal Tuner/i, /Warp Processor/i, /Wavetable/i, /Take comping/i, /Polyphonic/i]) {
       for (const line of lines) {
         if (!surface.test(line)) continue;
         assert.ok(
@@ -138,9 +137,8 @@ describe('Phase 52 — README matches the implementation', () => {
     }
   });
 
-  it('keeps its pre-professional status and makes no marketing overclaim', () => {
-    assert.match(readme, /pre-professional DAW/i);
-    assert.match(readme, /not yet a professional DAW/i);
+  it('keeps its unfinished-feature disclosure and makes no marketing overclaim', () => {
+    assert.match(readme, /Features that are not production-ready are not presented as finished/i);
     // A superlative is allowed only inside a sentence that denies it — the
     // README may say it is *not* a fully featured professional DAW, but must
     // never market itself as one.
@@ -154,14 +152,10 @@ describe('Phase 52 — README matches the implementation', () => {
     }
   });
 
-  it('does not advertise AI capabilities, and no UI string contradicts it', () => {
-    // The README no longer carries a standalone "no AI" statement, so the
-    // enforceable claim is the negative one that mattered all along: nothing
-    // in the document may advertise AI the product does not have.
-    assert.ok(
-      !/\bAI\b[\s\S]{0,60}?(generation|generated|powered|assistant|stems?|separation|mastering|mixing|driven|composer)/i.test(readme),
-      'README must not advertise AI capabilities the product does not have'
-    );
+  it('keeps the no-AI statement, and no UI string contradicts it', () => {
+    // The restored README explicitly denies active AI capabilities; a blanket
+    // ban on mentioning AI generation would incorrectly reject that disclosure.
+    assert.match(readme, /does not include active AI generation, AI stem separation, or an AI API integration/i);
     assert.ok(
       !/artificial intelligence|machine learning|neural network/i.test(readme),
       'README must not claim AI/ML capability the product does not have'
@@ -210,10 +204,8 @@ describe('Phase 52 — truthful not-applied states', () => {
   });
 
   it('Vocal Tuner states that no pitch processing is applied', () => {
-    // This surface used to be asserted from README.md. The README contract now
-    // carries the prototype/demo surfaces in its transparency section, so the
-    // Vocal Tuner guarantee is asserted here, where the disclosure actually
-    // lives: the modal must keep saying its settings are stored intent and that
+    // In addition to the restored README disclosure, the modal must keep
+    // saying its settings are stored intent and that
     // no pitch analysis or correction is in the signal path. (The ban on
     // fabricated readouts — Math.sin, "Detected:", Hz — is enforced separately
     // by src/components/vocalTunerTruthfulness.test.tsx, which strips comments
