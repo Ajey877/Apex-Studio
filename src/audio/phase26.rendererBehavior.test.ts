@@ -10,6 +10,7 @@
 import assert from 'node:assert/strict';
 import { describe, it, beforeEach, afterEach } from 'node:test';
 import { audioEngine } from './audioEngine';
+import { GATE_CHARACTER, resolveGateSeconds } from './noteGate';
 import type { Channel, Note } from '../types/daw';
 
 const SAMPLE_RATE = 8000;
@@ -519,8 +520,26 @@ describe('Phase 26 final renderer-backed audio behavior', () => {
     const ctx = FakeOfflineAudioContext.instances[0];
     const sources = ctx.nodes.filter(node => node.kind === 'oscillator');
 
-    assert.ok(sources.some(source => (source.stopTime ?? 0) > 0.6), 'voice source is scheduled beyond the note duration');
-    assert.ok(energy(result.buffer, 0, 0.45, 0.65) > 0, 'offline output retains audible tail content');
+    // Phase 1B rewrite. This test previously pinned the tempo-invariant
+    // defect: it asserted a stop time beyond 0.6 s, which only held because
+    // the gate ignored BPM (1 step × 0.35 = 0.35 s at every tempo, plus the
+    // 0.35 s release tail ⇒ 0.70 s). The corrected gate is tempo-relative:
+    // 1 step at 120 BPM is 0.125 s, times the rhodes sustain character 1.4
+    // ⇒ 0.175 s gate, plus the same fixed 0.35 s release tail ⇒ 0.525 s.
+    const gateSeconds = resolveGateSeconds(1, BPM, { characterFactor: GATE_CHARACTER.sustained });
+    const expectedStop = gateSeconds + 0.35;
+    assert.ok(
+      sources.some(source => Math.abs((source.stopTime ?? 0) - expectedStop) < 1e-9),
+      `voice source must stop at gate+release tail (${expectedStop}s), saw [${sources.map(s => s.stopTime)}]`,
+    );
+    assert.ok(
+      sources.some(source => (source.stopTime ?? 0) > gateSeconds),
+      'voice source is scheduled beyond the note gate (the release tail is retained)',
+    );
+    assert.ok(
+      energy(result.buffer, 0, gateSeconds + 0.05, gateSeconds + 0.2) > 0,
+      'offline output retains audible tail content beyond the gate',
+    );
     assert.equal(result.buffer.length, result.buffer.sampleRate * BAR_SECONDS, 'buffer duration remains the fixed bounce duration');
   });
 

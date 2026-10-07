@@ -46,7 +46,7 @@ const note: Note = { id: 'n1', pitch: 60, start: 0, duration: 1, velocity: 0.8 }
 test('subtractive renderer is independent of AudioEngine state', () => {
   const handle = renderSubtractiveSynthVoice({
     channel, note, time: 0, destination: {} as AudioNode,
-    audioContext: new Context() as unknown as BaseAudioContext, voiceId: 'v1',
+    audioContext: new Context() as unknown as BaseAudioContext, voiceId: 'v1', bpm: 120,
   });
   assert.ok(handle);
   assert.equal(typeof handle.stop, 'function');
@@ -56,7 +56,7 @@ test('FM renderer is independent of AudioEngine state', () => {
   const handle = renderFmSynthVoice({
     channel: { ...channel, instrumentType: 'fmsynth' }, note, time: 0,
     destination: {} as AudioNode,
-    audioContext: new Context() as unknown as BaseAudioContext, voiceId: 'v2',
+    audioContext: new Context() as unknown as BaseAudioContext, voiceId: 'v2', bpm: 120,
   });
   assert.ok(handle);
   assert.equal(typeof handle.stop, 'function');

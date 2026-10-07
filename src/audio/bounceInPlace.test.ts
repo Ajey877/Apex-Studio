@@ -218,12 +218,18 @@ describe('Phase 26: bounce callers remain contract-compatible', () => {
     assert.match(handler, /startBar: target\.startBar/, 'the stem is anchored at the lane content');
   });
 
-  it('the old standalone renderNoteOffline helper is not referenced by the production source', () => {
+  /**
+   * Phase 1B: `renderNoteOffline` was dead code carrying a third, divergent
+   * duration→seconds formula (`(note.duration || 1) * 0.25`). It has been
+   * DELETED rather than fixed. This guard keeps it deleted: the helper carried
+   * no callers, so any reappearance would be a new duplicate gate formula.
+   */
+  it('the deleted standalone renderNoteOffline helper does not come back', () => {
     const source = readFileSync(new URL('./audioEngine.ts', import.meta.url), 'utf8');
-    const marker = 'private renderNoteOffline(';
-    const start = source.indexOf(marker);
-    assert.ok(start >= 0);
-    const before = source.slice(0, start);
-    assert.equal((before.match(/renderNoteOffline\s*\(/g) || []).length, 0);
+    assert.equal(
+      source.includes('renderNoteOffline'),
+      false,
+      'renderNoteOffline was dead code removed in Phase 1B and must not be reintroduced',
+    );
   });
 });

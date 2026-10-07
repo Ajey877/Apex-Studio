@@ -115,7 +115,7 @@ const render = () => {
     time: 1.5,
     destination,
     audioContext: context as unknown as BaseAudioContext,
-    voiceId: 'voice-1',
+    voiceId: 'voice-1', bpm: 120,
   });
 
   return { context, handle, operations: context.operations };
@@ -167,7 +167,7 @@ test('independent pluck returns a lifecycle handle and reports natural completio
     time: 0,
     destination: {} as AudioNode,
     audioContext: ctx,
-    voiceId: 'voice-2',
+    voiceId: 'voice-2', bpm: 120,
     onEnded: () => { ended = true; },
   });
   assert.ok(handleWithCallback);

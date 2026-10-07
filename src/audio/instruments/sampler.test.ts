@@ -97,7 +97,7 @@ describe('sampler renderer', () => {
       time: 3,
       destination: {} as AudioNode,
       audioContext: ctx as any,
-      voiceId: 'voice',
+      voiceId: 'voice', bpm: 120,
       onEnded: () => { ended += 1; },
       getSampleBuffer: (id) => id === 'sample' ? buffer : undefined,
     });
@@ -124,7 +124,7 @@ describe('sampler renderer', () => {
     // No zone tuning, no channel pitch: one octave above root (72 vs 60) => 2^(12/12)=2
     const handle1 = renderSamplerVoice({
       channel: channel({ pitch: 0, sampleZones: [{ id:'z', sampleId:'sample', lowNote:0, highNote:127, rootNote:60, lowVelocity:0, highVelocity:127, tuneSemitones:0 } as any]}),
-      note, time: 0, destination: {} as AudioNode, audioContext: ctx as any, voiceId:'v1', getSampleBuffer: id=> id==='sample'?buffer:undefined,
+      note, time: 0, destination: {} as AudioNode, audioContext: ctx as any, voiceId:'v1', bpm: 120, getSampleBuffer: id=> id==='sample'?buffer:undefined,
     });
     assert.ok(handle1);
     assert.ok(Math.abs(ctx.sources[0].playbackRate.value - Math.pow(2, 12/12)) < 1e-9);
@@ -133,7 +133,7 @@ describe('sampler renderer', () => {
     const ctx2 = new FakeContext();
     const handle2 = renderSamplerVoice({
       channel: channel({ pitch: 2, sampleZones: [{ id:'z', sampleId:'sample', lowNote:0, highNote:127, rootNote:60, lowVelocity:0, highVelocity:127, tuneSemitones: -1 } as any]}),
-      note: { id:'n', pitch: 60, start:0, duration:1, velocity:1 } as any, time: 0, destination: {} as AudioNode, audioContext: ctx2 as any, voiceId:'v2', getSampleBuffer: id=> id==='sample'?buffer:undefined,
+      note: { id:'n', pitch: 60, start:0, duration:1, velocity:1 } as any, time: 0, destination: {} as AudioNode, audioContext: ctx2 as any, voiceId:'v2', bpm: 120, getSampleBuffer: id=> id==='sample'?buffer:undefined,
     });
     assert.ok(handle2);
     // (60-60)+2 + (-1) =1 semitone => 2^(1/12)
@@ -143,7 +143,7 @@ describe('sampler renderer', () => {
     const ctx3 = new FakeContext();
     const handle3 = renderSamplerVoice({
       channel: channel({ pitch: 0, sampleZones: [{ id:'z', sampleId:'sample', lowNote:0, highNote:127, rootNote:60, lowVelocity:0, highVelocity:127, tuneSemitones:0, reverse:true } as any]}),
-      note: { id:'n', pitch: 60, start:0, duration:1, velocity:1 } as any, time: 0, destination: {} as AudioNode, audioContext: ctx3 as any, voiceId:'v3', getSampleBuffer: id=> id==='sample'?buffer:undefined,
+      note: { id:'n', pitch: 60, start:0, duration:1, velocity:1 } as any, time: 0, destination: {} as AudioNode, audioContext: ctx3 as any, voiceId:'v3', bpm: 120, getSampleBuffer: id=> id==='sample'?buffer:undefined,
     });
     assert.ok(handle3);
     // root 60, note 60 => 0 semitones, reverse => -1
@@ -158,7 +158,7 @@ describe('sampler renderer', () => {
       time: 0,
       destination: {} as AudioNode,
       audioContext: ctx as any,
-      voiceId: 'missing',
+      voiceId: 'missing', bpm: 120,
       getSampleBuffer: () => undefined,
     });
 
@@ -174,7 +174,7 @@ describe('sampler renderer', () => {
       time: 0,
       destination: {} as AudioNode,
       audioContext: ctx as any,
-      voiceId: 'stop',
+      voiceId: 'stop', bpm: 120,
       getSampleBuffer: () => ({ duration: 1 } as AudioBuffer),
     });
 

@@ -102,7 +102,7 @@ test('FM synth renders independently and returns a stoppable voice', () => {
     time: 1.5,
     destination: {} as AudioNode,
     audioContext: context as unknown as BaseAudioContext,
-    voiceId: 'voice-1',
+    voiceId: 'voice-1', bpm: 120,
   });
 
   assert.ok(handle);

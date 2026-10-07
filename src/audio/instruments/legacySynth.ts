@@ -1,13 +1,17 @@
 import type { InstrumentVoiceRenderer } from '../instrumentRegistry';
+import { GATE_CHARACTER, resolveGateSeconds } from '../noteGate';
 import { createLegacyVoiceHandle } from './legacyVoiceLifecycle';
 import { midiToFrequency } from './legacyVoiceUtils';
 
-export const renderAcid303Voice: InstrumentVoiceRenderer = ({ channel, note, time, destination, audioContext, onEnded }) => {
+export const renderAcid303Voice: InstrumentVoiceRenderer = ({ channel, note, time, destination, audioContext, bpm, onEnded }) => {
   const ctx = audioContext;
   const lifecycleSources: AudioScheduledSourceNode[] = [];
 const f0 = midiToFrequency(note.pitch + channel.pitch);
     const vel = (note.velocity || 0.8) * channel.volume;
-    const duration = (note.duration || 1) * 0.25;
+    const duration = resolveGateSeconds(note.duration, bpm, {
+    characterFactor: GATE_CHARACTER.neutral,
+    fallbackSteps: 1,
+  });
 
     const ampGain = ctx.createGain();
     ampGain.gain.setValueAtTime(0.0001, time);
@@ -36,12 +40,15 @@ const f0 = midiToFrequency(note.pitch + channel.pitch);
   
   return createLegacyVoiceHandle(lifecycleSources, onEnded);
 };
-export const renderReeseBassVoice: InstrumentVoiceRenderer = ({ channel, note, time, destination, audioContext, onEnded }) => {
+export const renderReeseBassVoice: InstrumentVoiceRenderer = ({ channel, note, time, destination, audioContext, bpm, onEnded }) => {
   const ctx = audioContext;
   const lifecycleSources: AudioScheduledSourceNode[] = [];
 const f0 = midiToFrequency(note.pitch + channel.pitch);
     const vel = (note.velocity || 0.8) * channel.volume;
-    const duration = (note.duration || 2) * 0.3;
+    const duration = resolveGateSeconds(note.duration, bpm, {
+    characterFactor: GATE_CHARACTER.firm,
+    fallbackSteps: 2,
+  });
 
     const ampGain = ctx.createGain();
     ampGain.gain.setValueAtTime(0.0001, time);
@@ -75,12 +82,15 @@ const osc = ctx.createOscillator();
   
   return createLegacyVoiceHandle(lifecycleSources, onEnded);
 };
-export const render808SubVoice: InstrumentVoiceRenderer = ({ channel, note, time, destination, audioContext, onEnded }) => {
+export const render808SubVoice: InstrumentVoiceRenderer = ({ channel, note, time, destination, audioContext, bpm, onEnded }) => {
   const ctx = audioContext;
   const lifecycleSources: AudioScheduledSourceNode[] = [];
 const f0 = midiToFrequency(note.pitch + channel.pitch);
     const vel = (note.velocity || 0.8) * channel.volume;
-    const duration = (note.duration || 2) * 0.4;
+    const duration = resolveGateSeconds(note.duration, bpm, {
+    characterFactor: GATE_CHARACTER.broad,
+    fallbackSteps: 2,
+  });
 
     const osc = ctx.createOscillator();
       lifecycleSources.push(osc);
@@ -102,12 +112,15 @@ const f0 = midiToFrequency(note.pitch + channel.pitch);
   
   return createLegacyVoiceHandle(lifecycleSources, onEnded);
 };
-export const renderSupersawVoice: InstrumentVoiceRenderer = ({ channel, note, time, destination, audioContext, onEnded }) => {
+export const renderSupersawVoice: InstrumentVoiceRenderer = ({ channel, note, time, destination, audioContext, bpm, onEnded }) => {
   const ctx = audioContext;
   const lifecycleSources: AudioScheduledSourceNode[] = [];
 const f0 = midiToFrequency(note.pitch + channel.pitch);
     const vel = (note.velocity || 0.8) * channel.volume;
-    const duration = (note.duration || 2) * 0.3;
+    const duration = resolveGateSeconds(note.duration, bpm, {
+    characterFactor: GATE_CHARACTER.firm,
+    fallbackSteps: 2,
+  });
 
     const ampGain = ctx.createGain();
     ampGain.gain.setValueAtTime(0.0001, time);
@@ -141,12 +154,15 @@ const osc = ctx.createOscillator();
   
   return createLegacyVoiceHandle(lifecycleSources, onEnded);
 };
-export const renderAmbientPadVoice: InstrumentVoiceRenderer = ({ channel, note, time, destination, audioContext, onEnded }) => {
+export const renderAmbientPadVoice: InstrumentVoiceRenderer = ({ channel, note, time, destination, audioContext, bpm, onEnded }) => {
   const ctx = audioContext;
   const lifecycleSources: AudioScheduledSourceNode[] = [];
 const f0 = midiToFrequency(note.pitch + channel.pitch);
     const vel = (note.velocity || 0.8) * channel.volume;
-    const duration = (note.duration || 2) * 0.45;
+    const duration = resolveGateSeconds(note.duration, bpm, {
+    characterFactor: GATE_CHARACTER.pad,
+    fallbackSteps: 2,
+  });
 
     const ampGain = ctx.createGain();
     ampGain.gain.setValueAtTime(0.0001, time);
@@ -181,12 +197,15 @@ const f0 = midiToFrequency(note.pitch + channel.pitch);
   
   return createLegacyVoiceHandle(lifecycleSources, onEnded);
 };
-export const renderVoxChoirVoice: InstrumentVoiceRenderer = ({ channel, note, time, destination, audioContext, onEnded }) => {
+export const renderVoxChoirVoice: InstrumentVoiceRenderer = ({ channel, note, time, destination, audioContext, bpm, onEnded }) => {
   const ctx = audioContext;
   const lifecycleSources: AudioScheduledSourceNode[] = [];
 const f0 = midiToFrequency(note.pitch + channel.pitch);
     const vel = (note.velocity || 0.8) * channel.volume;
-    const duration = (note.duration || 2) * 0.35;
+    const duration = resolveGateSeconds(note.duration, bpm, {
+    characterFactor: GATE_CHARACTER.sustained,
+    fallbackSteps: 2,
+  });
 
     const ampGain = ctx.createGain();
     ampGain.gain.setValueAtTime(0.0001, time);
@@ -228,12 +247,15 @@ const f0 = midiToFrequency(note.pitch + channel.pitch);
   
   return createLegacyVoiceHandle(lifecycleSources, onEnded);
 };
-export const renderChiptuneVoice: InstrumentVoiceRenderer = ({ channel, note, time, destination, audioContext, onEnded }) => {
+export const renderChiptuneVoice: InstrumentVoiceRenderer = ({ channel, note, time, destination, audioContext, bpm, onEnded }) => {
   const ctx = audioContext;
   const lifecycleSources: AudioScheduledSourceNode[] = [];
 const f0 = midiToFrequency(note.pitch + channel.pitch);
     const vel = (note.velocity || 0.8) * channel.volume;
-    const duration = (note.duration || 1) * 0.2;
+    const duration = resolveGateSeconds(note.duration, bpm, {
+    characterFactor: GATE_CHARACTER.percussive,
+    fallbackSteps: 1,
+  });
 
     const ampGain = ctx.createGain();
     ampGain.gain.setValueAtTime(vel * 0.8, time);
