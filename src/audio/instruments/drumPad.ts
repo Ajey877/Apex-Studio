@@ -15,6 +15,11 @@ export const renderDrumPadVoice: InstrumentVoiceRenderer = ({
     candidate => candidate.note === note.pitch && candidate.sampleId,
   );
   if (!pad || !pad.sampleId) return renderLegacyDrumVoice({ channel, note, time, destination, audioContext, voiceId: 'legacy-drum', bpm, onEnded });
+  // Phase 1C (D9): unlike the sampler route, a drum pad has NO substitute
+  // voice — `audioEngine.ts` only falls back for `customSample?.id || sampler`,
+  // which a drumpad channel never satisfies. Returning no handle here therefore
+  // means the hit is dropped, so the engine reports it explicitly through its
+  // diagnostic channel rather than leaving the channel silently dead.
   if (!getSampleBuffer) return;
 
   const buffer = getSampleBuffer(pad.sampleId);

@@ -1737,6 +1737,24 @@ class AudioEngine {
     }
 
     if (!voiceHandle) {
+      // Phase 1C (D9): the drum-pad sample route is the only sampler-family
+      // path with no substitute voice. A pad whose referenced asset could not
+      // be restored therefore used to become completely silent with no
+      // diagnostic anywhere in the stack — `renderDrumPadVoice` bare-returns,
+      // and the fallback branch above only fires for `customSample?.id ||
+      // sampler`, which a drum-pad channel never satisfies. Report it through
+      // the engine's existing diagnostic channel so the dropped voice is at
+      // least observable. This deliberately does NOT invent a substitute
+      // voice: a drum pad is not a synth lead, and playing one would be a new
+      // sound-design decision, not a bug fix.
+      if (channel.instrumentType === 'drumpad' && pad?.sampleId && !sampledDrumPadBuffer) {
+        console.error('[AudioEngine] Drum pad sample unavailable', {
+          instrumentType: channel.instrumentType,
+          voiceId,
+          sampleId: pad.sampleId,
+          pitch: note.pitch,
+        });
+      }
       cleanupNotePanner();
       return;
     }
