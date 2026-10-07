@@ -1,4 +1,5 @@
 import { stepsToBeats, beatsToMidiTicks, bpmToMicrosecondsPerQuarter, DEFAULT_MIDI_PPQ } from '../music/musicalTime';
+import { minNoteDurationTicks, midiTicksToDurationSteps, stepsToMidiDurationTicks } from '../music/noteDurationPolicy';
 import { Note } from '../types/daw';
 
 // Binary Standard MIDI File (SMF) Generator & Parser
@@ -52,7 +53,10 @@ export class MidiParser {
     // Note events
     notes.forEach(n => {
       const startTick = Math.round(n.start * ticksPerStep);
-      const durationTicks = Math.max(1, Math.round(n.duration * ticksPerStep));
+      // Phase 1D: the note-off delta comes from the shared duration policy, so
+      // both MIDI writers floor at the same declared minimum (one tick, a format
+      // rule) instead of each inventing one. 0.25 steps writes an exact 30 ticks.
+      const durationTicks = stepsToMidiDurationTicks(n.duration, ticksPerStep);
       const endTick = startTick + durationTicks;
       const vel = Math.max(1, Math.min(127, Math.round((n.velocity || 0.8) * 127)));
 
@@ -246,7 +250,9 @@ export class MidiParser {
           } while (sb & 0x80);
           offset += sysexLen;
         } else if (eventType === 0x9) {
-          // Note On
+          // Note On. Phase 1D: both floors below come from the shared duration
+          // policy, so a 30-tick note at 480 PPQ imports as the 0.25 steps it
+          // is instead of being promoted to half a step.
           const notePitch = view.getUint8(offset++);
           const velocity = view.getUint8(offset++);
           if (velocity > 0) {
@@ -255,11 +261,11 @@ export class MidiParser {
             // Note On with 0 vel is Note Off
             const active = activeNotes.get(notePitch);
             if (active) {
-              const durTicks = Math.max(ticksPerStep / 2, currentTick - active.startTick);
+              const durTicks = Math.max(minNoteDurationTicks(ticksPerStep), currentTick - active.startTick);
               parsedNotes.push({
                 pitch: notePitch,
                 startStep: Math.round((active.startTick / ticksPerStep) * 4) / 4,
-                durationSteps: Math.max(0.5, Math.round((durTicks / ticksPerStep) * 4) / 4),
+                durationSteps: midiTicksToDurationSteps(durTicks, ticksPerStep),
                 velocity: active.velocity / 127
               });
               activeNotes.delete(notePitch);
@@ -271,11 +277,11 @@ export class MidiParser {
           const _vel = view.getUint8(offset++);
           const active = activeNotes.get(notePitch);
           if (active) {
-            const durTicks = Math.max(ticksPerStep / 2, currentTick - active.startTick);
+            const durTicks = Math.max(minNoteDurationTicks(ticksPerStep), currentTick - active.startTick);
             parsedNotes.push({
               pitch: notePitch,
               startStep: Math.round((active.startTick / ticksPerStep) * 4) / 4,
-              durationSteps: Math.max(0.5, Math.round((durTicks / ticksPerStep) * 4) / 4),
+              durationSteps: midiTicksToDurationSteps(durTicks, ticksPerStep),
               velocity: active.velocity / 127
             });
             activeNotes.delete(notePitch);

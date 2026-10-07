@@ -26,6 +26,7 @@ import {
 import { Channel, Note, MusicalScale, ChordStampType } from '../types/daw';
 import { audioEngine } from '../audio/audioEngine';
 import { MidiParser } from '../utils/midiParser';
+import { quantizeDurationSteps } from '../music/noteDurationPolicy';
 import { planMidiImport } from './pianoRollMidiImport';
 import { normalizePatternLengthSteps } from '../state/patternLength';
 import {
@@ -1015,10 +1016,14 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
   };
 
   const handleQuantizeNotes = () => {
+    // Onsets snap to the 1-step positional grid. Durations snap to the declared
+    // duration grid instead (Phase 1D): the old `Math.max(1, Math.round(...))`
+    // multiplied every legal short note, so quantizing a 0.25-step note made it
+    // four times longer than the note the user drew.
     const newNotes = notes.map(n => ({
       ...n,
       start: Math.round(n.start),
-      duration: Math.max(1, Math.round(n.duration))
+      duration: quantizeDurationSteps(n.duration)
     }));
     onUpdateChannel(channel.id, { notes: newNotes });
   };
