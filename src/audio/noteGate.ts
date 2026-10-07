@@ -65,7 +65,13 @@ export const GATE_SECONDS_PER_STEP_AT_60BPM = 0.25;
  * an explicit product decision rather than an accident of a magic number.
  *
  * Deliberately NOT flattened to 1: these differences are a large part of what
- * makes the 26 instruments distinguishable.
+ * makes the instruments distinguishable.
+ *
+ * These six characters cover exactly the 18 duration-gated instruments. The
+ * other six instruments (fmsynth, fm_bell, pizzicato_strings, marimba_bell,
+ * sampler, drumpad) deliberately have a fixed envelope or sample-defined length
+ * instead — see `INSTRUMENT_GATE_POLICY` in `./instrumentGatePolicy` for the
+ * declared per-instrument policy and the reason for each.
  */
 export const GATE_CHARACTER = Object.freeze({
   /** Legacy 0.20 — chiptune_8bit, independent_pluck. */
@@ -104,9 +110,15 @@ const isPositiveFinite = (value: unknown): value is number =>
  * Converts a musical duration in sixteenth-note steps into the instrument's
  * audible gate in seconds.
  *
- * The only sanctioned duration→seconds conversion in the codebase; every
- * instrument renderer must route through it rather than multiplying by its own
- * constant.
+ * The only sanctioned duration→seconds conversion in the codebase. Every
+ * renderer must use it rather than multiplying by its own constant.
+ *
+ * Scope (Phase 1C): only the 18 `DURATION_GATED` instruments call this. The
+ * four `FIXED_ENVELOPE` instruments (fmsynth, fm_bell, pizzicato_strings,
+ * marimba_bell) and the two `SAMPLE_LENGTH` instruments (sampler, drumpad) do
+ * not convert `Note.duration` at all, because for them the audible voice length
+ * is owned by the envelope or the sample asset. Those are declared product
+ * decisions, not omissions — see `INSTRUMENT_GATE_POLICY`.
  */
 export const resolveGateSeconds = (
   durationSteps: unknown,

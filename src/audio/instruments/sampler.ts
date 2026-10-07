@@ -18,6 +18,12 @@ export const renderSamplerVoice: InstrumentVoiceRenderer = ({
   const sampleId = zone?.sampleId || sample?.id;
   const buffer = sampleId ? getSampleBuffer(sampleId) : undefined;
 
+  // Returning no handle is the documented contract for "this sample could not
+  // be resolved": the engine (Phase 1C, `audioEngine.ts`) then substitutes the
+  // subtractive-synth voice for any channel carrying a `customSample.id` or
+  // typed `sampler`. That is the fallback the UI promises in
+  // `describeMissingAudioSample`, so do NOT return a silent handle here — that
+  // would defeat the fallback and make the promise false.
   if (!buffer) return;
 
   const rootPitch = zone?.rootNote ?? sample?.rootPitch ?? 60;
