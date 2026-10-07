@@ -1,183 +1,280 @@
-<div align="center">
+# Apex Studio
 
-# 🎛️ Apex Studio
+Apex Studio is an actively developed digital audio workstation focused on building a serious,
+local-first music production environment around Web Audio, MIDI, audio arrangement, instruments,
+mixing, recording, and offline rendering. It runs in the browser and can be packaged as a desktop
+application with Electron.
 
-### A free, local-first DAW for making music.
-
-**Create. Arrange. Record. Mix. Export.**
-
-Build beats, write melodies, arrange tracks, record audio, shape your mix, and export your work — without a subscription or cloud-first workflow.
-
-<br />
-
-[![Latest Release](https://img.shields.io/github/v/release/Ajey877/Apex-Studio?display_name=tag&sort=semver&style=for-the-badge&label=LATEST)](https://github.com/Ajey877/Apex-Studio/releases)
-[![CI](https://img.shields.io/github/actions/workflow/status/Ajey877/Apex-Studio/ci.yml?style=for-the-badge&label=CI)](https://github.com/Ajey877/Apex-Studio/actions/workflows/ci.yml)
-[![Audio Validation](https://img.shields.io/github/actions/workflow/status/Ajey877/Apex-Studio/audio-validation.yml?style=for-the-badge&label=AUDIO%20VALIDATION)](https://github.com/Ajey877/Apex-Studio/actions/workflows/audio-validation.yml)
-[![Desktop Validation](https://img.shields.io/github/actions/workflow/status/Ajey877/Apex-Studio/desktop-validation.yml?style=for-the-badge&label=DESKTOP%20VALIDATION)](https://github.com/Ajey877/Apex-Studio/actions/workflows/desktop-validation.yml)
-
-<br />
-
-[🚀 **Download Apex Studio v1.2.1**](https://github.com/Ajey877/Apex-Studio/releases/tag/v1.2.1) · [📖 **Documentation**](#-getting-started) · [🐛 **Report a Bug**](https://github.com/Ajey877/Apex-Studio/issues/new/choose) · [💡 **Request an Improvement**](https://github.com/Ajey877/Apex-Studio/issues/new/choose)
-
-</div>
+It is **not yet a professional DAW**, and it is not presented as one. This README describes what
+the project actually does today, and what it does not.
 
 ---
 
-## ✨ What is Apex Studio?
+## Current Status
 
-Apex Studio is a creator-focused digital audio workstation built around a simple idea:
+> **Development status: Active development / pre-professional DAW**
 
-> **Music software should help you make music, not get in the way.**
+The core audio foundation is real. Procedural instrument and audio generation, sampler and
+drum-pad paths, basic mixer and routing, insert effects and aux sends, local IndexedDB
+persistence, project history and recovery, offline WAV/stem rendering, Standard MIDI
+import/export, mastering DSP, K-weighted loudness and inter-sample true-peak measurement, and a
+persisted dark/light theme are all implemented and used by the application.
 
-It brings the main parts of a music-production workflow into one application — from the first drum pattern to the final WAV export.
+However, Apex Studio is still undergoing architectural and workflow development before it should
+be considered production-ready or a full professional DAW. Several musical-model, automation,
+recording, MIDI-interoperability, and desktop-integration areas remain incomplete, and a small
+number of advanced panels are intentionally disclosed as prototypes rather than finished
+features. Those gaps are documented in [Current Limitations](#current-limitations) and
+[Transparency: Prototype / Demo Features](#transparency-prototype--demo-features).
 
-### The workflow
+---
+
+## What Works Today
+
+| Area | Current status |
+|---|---|
+| Web Audio engine | Implemented |
+| Procedural instruments | Implemented |
+| Sampler / drum-pad path | Implemented |
+| Mixer / routing | Implemented |
+| Insert effects / aux sends | Implemented |
+| MIDI note workflow | Implemented, limited interoperability |
+| Piano Roll | Implemented, core musical-model limitations remain |
+| Playlist / arrangement | Implemented, timeline/model limitations remain |
+| Audio recording | Implemented, limited DAW workflow |
+| Audio import/export | Implemented, format/workflow limitations |
+| Project persistence | Implemented locally |
+| Undo/redo/history | Implemented locally |
+| Offline rendering | Implemented |
+| Mastering DSP | Implemented |
+| Loudness / true-peak measurement | Implemented |
+| Dark/light theme | Implemented |
+| Desktop/Electron | Partial |
+| Plugin hosting | Not implemented |
+| Advanced audio warp | Not implemented |
+| Full multitrack recording | Not implemented |
+| Take comping | Prototype/demo |
+| Polyphonic audio editing | Prototype/demo |
+| Wavetable synthesis | Prototype/demo / not implemented in engine |
+
+---
+
+## Core Capabilities
+
+### Audio Engine
+
+Playback, mixing, effects, recording, and export run on the Web Audio API — Apex Studio is not a
+visual mock-up. The engine builds and maintains a real audio graph: per-channel voices, insert
+effect chains, mixer routing, aux sends, a master bus with measurement taps, and a transport
+scheduler. Offline rendering (WAV and stem export) rebuilds the same graph in an
+`OfflineAudioContext` and reuses the same playback routines. Instrument generation is
+procedural: the built-in subtractive synth and drum/sampler voices are synthesized or played
+back from real buffers, not placeholders.
+
+### MIDI
+
+Apex Studio supports MIDI-note-oriented workflows: notes can be written and edited in the Piano
+Roll and Channel Rack, performed through a MIDI controller, and exported as Standard MIDI Files.
+MIDI import is supported for note data with a number of interoperability limitations — see
+[Current Limitations](#midi). MIDI Learn maps controller input to real project and mixer
+parameters at runtime.
+
+### Arrangement
+
+The Playlist Arranger provides clip- and lane-based arrangement over a timeline, including audio
+clips, pattern playback, automation lanes, mute/solo, and bounce-in-place. The arrangement layer
+is functional, but the underlying pattern model still needs architectural work: patterns do not
+yet own independent musical note content, and time-signature and note-duration semantics are not
+fully consistent with the transport. See [Current Limitations](#core-musical-model).
+
+### Mixer
+
+The mixer provides per-track gain, pan, mute/solo, routing, insert effects (including EQ,
+compression, delay, and reverb), and aux sends to return tracks. Master processing is applied to
+both live playback and offline renders when enabled.
+
+### Persistence
+
+Projects are stored locally in IndexedDB with autosave, recovery snapshots, backups, and project
+history. Persistence is local-only: there is no cloud account, background sync, or server-side
+storage, and network collaboration is not active.
+
+### Mastering
+
+The mastering chain applies real multiband compression, stereo width, mono-sub filtering, and
+ceiling processing to the master path, and the master bus exposes real measurement: ITU-R
+BS.1770-4 K-weighted gated loudness, 4× oversampled inter-sample true-peak detection, and
+stereo correlation/Mid-Side metering. Measurement reports `null`/`NOT MEASURED` rather than
+inventing values, and reports `unavailable` during an offline bounce.
+What it does **not** yet guarantee: the maximizer is a fast-attack compressor plus an
+oversampled hard clip rather than a true lookahead brickwall limiter, and the LUFS target is a
+metering/compliance reference, not an automatic loudness-normalization stage.
+
+---
+
+## Current Limitations
+
+Apex Studio has meaningful gaps. These are the most important ones, based on the project's
+read-only engineering audits.
+
+### Core musical model
+
+- **Patterns do not own independent musical note content.** A pattern currently carries
+  identity, naming, and length, while note content lives on channels. This limits how patterns
+  can be reused, copied, and varied across an arrangement.
+- **Note-duration semantics are inconsistent with tempo.** Note lengths are not yet expressed in
+  a single, tempo-consistent musical unit across editing, playback, and export.
+- **Time signature is largely metadata/display.** The transport runs 4/4 internally; changing
+  the project time signature does not yet change transport timing.
+- **Automation has lifecycle/reset defects.** Automation lanes and parameters are functional, but
+  reset, re-initialization, and reload behavior are not yet fully reliable.
+
+### MIDI
+
+- **Import limitations for same-pitch overlapping notes** — such notes are not represented
+  correctly on import.
+- **Tempo metadata handling is incomplete** during MIDI interoperation.
+- **Pitch bend is not fully implemented**, and pitch bend/output MIDI paths are incomplete.
+- **MIDI output is incomplete**, so Apex Studio is not yet a reliable MIDI master/slave endpoint
+  for external hardware or other DAWs.
+- **Broader controller, program-change, and automation interchange** is not yet complete.
+
+### Audio
+
+- **Time-stretch is repitching, not pitch-preserving warp.** Clip stretch and the warp surface
+  change speed and pitch together (sample-rate/playback-rate change). Pitch-preserving
+  time-stretching, granular processing, and formant handling are not implemented.
+- **Advanced audio editing is not implemented** in the engine; polyphonic audio editing remains a
+  disclosed demo surface.
+- **Recording is real but not a full multitrack DAW recording workflow.** Recording captures
+  audio and places takes in the project, but the recording path is not yet a complete multitrack
+  tracking workflow with full monitoring/comping semantics.
+- **Take comping is a disclosed prototype**, not a finished comping engine.
+- **32-bit float WAV export clamps samples before writing**, so float export is not currently a
+  fully lossless container for above-0 dBFS material.
+
+### Effects and routing
+
+- **Sidechain is note-triggered ducking, not detector-based sidechain compression.** There is no
+  level detector or sidechain input, so threshold-based and frequency-selective ducking behavior
+  is not available.
+- **Deeper live effect-parameter coverage is incomplete** — some effect surfaces and parameters
+  are stored intent rather than being applied in the live/offline signal path.
+- **No third-party plugin hosting.** There is no VST/AU/AAX host, and no plugin scanning,
+  sandboxing, or bridging architecture.
+
+### Desktop
+
+- **Electron/package parity is incomplete.** The generated Windows packaging path does not fully
+  match the root Electron packaging path, so desktop builds and the browser build are not yet
+  guaranteed to behave identically.
+- **No native low-latency driver path.** The desktop build uses the browser/Chromium audio stack;
+  there is no ASIO/CoreAudio/WASAPI-exclusive low-latency driver integration.
+- **No AudioWorklet processor.** Audio processing runs on the standard Web Audio node graph;
+  custom worklet DSP has not been implemented.
+
+### Accessibility
+
+- **Browser-level accessibility validation remains incomplete.** Some focus order, keyboard
+  navigation, labeling, and screen-reader behaviors have not yet been verified across browsers.
+
+---
+
+## Transparency: Prototype / Demo Features
+
+Some visible advanced panels are intentionally prototypes or demos. They are useful as design
+sketches and as a preview of direction, but they are **not** production DSP implementations, and
+they are labeled as such where the application surfaces them.
+
+| Surface | Status |
+|---|---|
+| Wavetable preview | UI/demo representation. The channel keeps playing its dual-oscillator subtractive synth; there is no wavetable engine behind this window. |
+| Take comping | Prototype/demo. It does not invent audio and will not promote a comp without real recorded assets. |
+| Polyphonic audio editing | Prototype/demo. Displays sample blobs; it does not analyze, import, or play back project audio. |
+| Certain waveform/visual previews | UI/demo representation, not a rendering of the user's audio content. |
+| Sidechain visual preview | UI/demo representation of routing intent; the audio path applies note-triggered ducking, not detector-based compression. |
+| Analytics presentation | Some values are seeded/static presentation values rather than measured telemetry. |
+
+The distinction matters:
+
+> **UI/demo representation ≠ production DSP implementation**
+
+Where a capability is not implemented in the engine, the project's goal is to say so in the UI
+and in this README rather than to imply that the processing exists.
+
+---
+
+## Testing
+
+The repository contains substantial automated validation, but test definitions should not be
+interpreted as proof that every workflow is currently production-ready.
+
+Current validation covers:
+
+- **TypeScript validation** — `npm run lint` (`tsc --noEmit`).
+- **State/history tests** — `npm run test:history` covers undo/redo, playlist and project
+  history, routing, shell, and application-state behavior.
+- **Audio tests** — `npm run test:audio` covers engine, instrument, effect, automation,
+  persistence, metering, and rendering behavior.
+- **Offline rendering tests** — export, stem integrity, and offline/live parity suites, plus a
+  headless Node rendering harness.
+- **Playwright/browser tests** — `browser-tests/realOfflineRender.spec.ts` exercises real
+  offline audio rendering in Chromium.
+- **Production build** — `npm run build`.
+- **Electron/desktop validation** — desktop security-configuration checks and a packaged
+  Windows runtime smoke test, run in the desktop validation workflow.
+- **Test discovery guard** — `npm run verify:test-discovery` fails when a test file is not
+  covered by any test script.
+
+CI runs these suites in the workflows under `.github/workflows/`. No coverage percentage is
+claimed here. Passing tests should be read as "the covered contracts hold", not as a statement
+that every user workflow is production-ready.
+
+---
+
+## Architecture
+
+Apex Studio is a single-page application with a layered audio architecture:
 
 ```text
-        CREATE
-          ↓
-        EDIT
-          ↓
-       ARRANGE
-          ↓
-       RECORD
-          ↓
-         MIX
-          ↓
-        SAVE
-          ↓
-       EXPORT
+React / UI
+    ↓
+Project / Application State
+    ↓
+Audio Engine
+    ↓
+Instrument / Voice / FX / Mixer / Mastering
+    ↓
+Web Audio
 ```
 
-**v1.2.1** is a reliability-focused release centered on the complete music-production loop: create, edit, arrange, record, mix, save, reopen, and export. It includes hardened audio playback/rendering, project persistence and recovery, export validation, and Windows packaging/runtime validation.
+- **React / UI** — the workspace surfaces (Channel Rack, Piano Roll, Playlist Arranger, Mixer,
+  modals) and the application shell.
+- **Project / Application State** — the single `ProjectState` document plus history and mutation
+  paths. Persisted audio-affecting fields are tracked in an explicit registry so a field must
+  either have a real audio consumer or be classified as metadata/intent.
+- **Audio Engine** — owns the `AudioContext`, transport, scheduler, voice lifecycle, recording,
+  and the offline render path, and rebuilds an equivalent graph in an `OfflineAudioContext` for
+  export.
+- **Instrument / Voice / FX / Mixer / Mastering** — synth, sampler, and drum voices; insert
+  effects; mixer routing and sends; the master chain and its measurement taps.
+- **Web Audio** — the platform layer that actually runs the graph.
+
+Two supporting systems sit alongside the audio path:
+
+- **Persistence** — IndexedDB-backed project documents, audio-asset hydration, backups,
+  recovery, and project history.
+- **Offline rendering** — WAV and stem rendering through an offline graph.
+- **Electron/desktop integration** — the desktop shell packages the built web application and
+  applies its own security and audio-related configuration; parity between the desktop and
+  browser paths is still being brought into line (see
+  [Current Limitations](#desktop)).
 
 ---
 
-## 🎬 See Apex Studio
+## Running Locally
 
-### 🎛️ Your studio, in one place
-
-<p align="center">
-  <img src="assets/screenshots/playlist.jpg" alt="Apex Studio Playlist Arranger" width="100%">
-</p>
-
-<p align="center">
-  <b>Playlist Arranger</b><br>
-  Build your arrangement across patterns, audio clips and automation.
-</p>
-
-<br />
-
-<table>
-<tr>
-<td width="50%">
-
-<img src="assets/screenshots/channel-rack.jpg" alt="Apex Studio Channel Rack" width="100%">
-
-### 🥁 Channel Rack
-Program beats, patterns, swing and velocity.
-
-</td>
-<td width="50%">
-
-<img src="assets/screenshots/piano-roll.jpg" alt="Apex Studio Piano Roll" width="100%">
-
-### 🎹 Piano Roll
-Write melodies, chords and detailed note performances.
-
-</td>
-</tr>
-<tr>
-<td width="50%">
-
-<img src="assets/screenshots/mixer.jpg" alt="Apex Studio Mixer" width="100%">
-
-### 🎚️ Mixer
-Balance channels, route audio and shape your mix.
-
-</td>
-<td width="50%">
-
-<img src="assets/screenshots/synth.jpg" alt="Apex Studio Synth" width="100%">
-
-### 🎛️ Synth
-Shape sounds with two oscillators, filters and modulation.
-
-</td>
-</tr>
-</table>
-
-<br />
-
-<p align="center">
-  <img src="assets/screenshots/recorder.jpg" alt="Apex Studio Recorder" width="80%">
-</p>
-
-<p align="center">
-  <b>🎙️ Record directly into your project.</b>
-</p>
-
----
-
-## 🎚️ Built for the actual workflow
-
-| 🎹 Workspace | What it does |
-|---|---|
-| **Channel Rack** | Build patterns with step sequencing, swing, velocity and MIDI learn. |
-| **Piano Roll** | Create polyphonic melodies, edit note length and velocity, use scales/chords and quantization tools. |
-| **Playlist Arranger** | Arrange patterns and audio clips across multiple lanes, including automation. |
-| **Mixer** | Work across mixer tracks with volume, pan, routing, metering and insert effects (EQ, reverb, delay, compression, limiter). |
-| **Synth** | Shape sounds with dual oscillators, filters, ADSR and modulation controls. |
-| **Recording** | Capture audio and place recorded takes into the project. |
-| **FX** | Use EQ, reverb, delay, compression and time/volume-style effects. |
-| **Export** | Render WAV, export Standard MIDI, and create project/stem packages. |
-
----
-
-## 🎵 Why Apex Studio?
-
-### 🆓 Free to use
-No subscription is required to run the project.
-
-### 💾 Local-first
-Your project workflow is designed around local storage and local processing rather than requiring a cloud account.
-
-### 🎛️ One workflow
-Step sequencing, piano roll editing, arrangement, recording, mixing and export live together instead of being split across separate tools.
-
-### ↩️ Real project editing
-Document-level undo/redo covers the core project state, with continuous controls grouped into meaningful history actions.
-
-### 🔊 Real audio pipeline
-Apex Studio uses Web Audio APIs for playback, mixing, effects, recording and offline rendering rather than being only a visual mock-up.
-
-### 🖥️ Windows desktop build
-The project can be packaged as a Windows installer or portable executable through Electron.
-
----
-
-## 🚀 Get Apex Studio
-
-### Windows — recommended
-
-Download the latest release from GitHub:
-
-**👉 [Download Apex Studio v1.2.1](https://github.com/Ajey877/Apex-Studio/releases/tag/v1.2.1)**
-
-The release workflow builds Windows packages including:
-
-- **Windows installer (.exe)**
-- **Portable Windows build**
-- Release metadata generated by the build pipeline
-
-> **Note:** Windows releases are generated by GitHub Actions. If you are looking at a release while its build is still running, wait for the release assets to appear.
-
-### Run from source
-
-Requirements:
-
-- **Node.js 20 or newer**
-- npm
+Requirements: **Node.js 20 or newer** and npm.
 
 ```bash
 git clone https://github.com/Ajey877/Apex-Studio.git
@@ -186,211 +283,64 @@ npm install
 npm run dev
 ```
 
-Open the local Vite URL shown in the terminal.
-
-### Production build
+The Vite dev server prints the local URL to open.
 
 ```bash
-npm run build
+npm run build        # production web build
+npm run package:win  # Windows Electron package (installer + portable), output in dist-electron/
 ```
 
-### Package Windows locally
+---
 
-```bash
-npm install
-npm run package:win
-```
+## Roadmap
 
-Build output is written to `dist-electron/`.
+The next strategic priorities identified by the project's audits, in rough order:
+
+1. **Core musical model and timing correctness** — independent pattern content, tempo-consistent
+   note durations, and real time-signature/timing semantics.
+2. **Automation, MIDI, and recording semantics** — automation lifecycle/reset correctness, MIDI
+   interoperability (overlapping notes, tempo, pitch bend, MIDI output), and a complete
+   recording workflow.
+3. **Instrument/effect depth** — deeper live parameter coverage, detector-based sidechain, and
+   stronger instrument/effect implementations.
+4. **Persistence/export integrity** — export correctness and fidelity, including lossless float
+   export that does not clamp samples before writing, and clearer export behavior.
+5. **Desktop/package truth and parity** — aligning the generated Windows packaging path with the
+   root Electron packaging path.
+6. **Accessibility and interaction quality** — browser-level accessibility validation and
+   interaction hardening.
+7. **Professional engine capabilities** — wavetable synthesis, pitch-preserving time-stretch,
+   take comping, polyphonic audio editing, plugin hosting, and native low-latency paths.
+
+The exact implementation order may change as engineering audits continue.
 
 ---
 
-## ⚡ Your first session
+## Positioning
 
-### 1. 🥁 Start with a beat
+Apex Studio should be described as:
 
-Open **Channel Rack** and program a simple Kick, Snare, Hi-Hat or 808 pattern.
+> Apex Studio is an actively developed DAW project with a credible Web Audio foundation and an
+> ambitious path toward professional music production.
 
-**Shortcut:** `F6` or `1`
-
-### 2. 🎹 Write a melody
-
-Open **Piano Roll**, draw notes, adjust their length and velocity, and use the available scale/chord tools.
-
-**Shortcut:** `F7` or `2`
-
-### 3. 🧩 Build the arrangement
-
-Open **Playlist Arranger**, switch between pattern/song workflow as needed, and place patterns or audio clips on the timeline.
-
-**Shortcut:** `F5` or `3`
-
-### 4. 🎚️ Shape the mix
-
-Open the **Mixer**, balance your channels, route tracks, and add effects.
-
-**Shortcut:** `F9` or `4`
-
-### 5. 🎙️ Record
-
-Arm recording, capture audio, and place the take into your project.
-
-**Shortcut:** `R`
-
-### 6. 💾 Save and reopen
-
-Use project save/reopen workflows to keep working across sessions.
-
-**Shortcut:** `Ctrl + S`
-
-### 7. 📦 Export
-
-Render your finished work as WAV, export Standard MIDI, or create project/stem packages.
+It is **not** production-ready, and it is **not** a fully featured professional DAW today. Its
+strongest attributes right now are the honesty of its contracts, the breadth of its implemented
+Web Audio foundation, and a test suite that pins the behavior it claims.
 
 ---
 
-## ⌨️ Essential shortcuts
+## Contributing
 
-| Shortcut | Action |
-|---|---|
-| `Space` | Play / Pause |
-| `L` | Pattern / Song Mode |
-| `R` | Arm Recording |
-| `M` | Metronome |
-| `Ctrl + S` | Save Project |
-| `Ctrl + Z` | Undo |
-| `Ctrl + Y` | Redo |
-| `F5` / `3` | Playlist Arranger |
-| `F6` / `1` | Channel Rack |
-| `F7` / `2` | Piano Roll |
-| `F9` / `4` | Mixer & FX Rack |
+Contributions are welcome, especially bug reports that describe a real production workflow
+breakdown. Please include what you were trying to do, what you expected, what happened, and the
+steps to reproduce it.
+
+- See [CONTRIBUTING.md](CONTRIBUTING.md) for development and pull-request guidelines.
+- See [SECURITY.md](SECURITY.md) for security reports.
+- [Report a bug or request an improvement](https://github.com/Ajey877/Apex-Studio/issues/new/choose)
 
 ---
 
-## 🧪 Built with reliability in mind
+## License
 
-Apex Studio is being developed with automated checks and real-runtime validation around the parts that matter most to a DAW: audio behavior, project state, desktop configuration, production builds, persistence, and export.
-
-The v1.2.1 release was validated through:
-
-- ✅ TypeScript compilation
-- ✅ Audio regression and persistence tests
-- ✅ Project recovery/audio hydration tests
-- ✅ Project history and undo/redo tests
-- ✅ Desktop security configuration
-- ✅ Production Vite builds
-- ✅ Windows Electron packaging
-- ✅ Live/offline audio workflow validation
-- ✅ Real browser cold-reopen persistence validation
-- ✅ WAV export verification
-
-The final runtime workflow was exercised as:
-
-> **Create → Edit → Arrange → Mix → Play → Save → Close → Reopen → Restore → Play → Export**
-
-Check the **Actions** tab for the current CI state:
-
-**[View GitHub Actions →](https://github.com/Ajey877/Apex-Studio/actions)**
-
----
-
-## 🧭 Product direction
-
-Apex Studio is intentionally focusing on **trustworthy core DAW workflows before adding more headline features**.
-
-That means the current priority is making this loop dependable:
-
-> **Create → Edit → Arrange → Record → Mix → Save → Reopen → Export**
-
-Features that are not production-ready are not presented as finished just for the sake of a bigger feature list.
-
-### Feature status
-
-The table in [Built for the actual workflow](#-built-for-the-actual-workflow) lists capabilities that run end to end.
-The surfaces below are **in the app but not wired into the audio engine yet**, and they say so in their own UI:
-
-| Surface | Status |
-|---|---|
-| **Vocal Tuner** | Settings are saved with the project but **not applied** — there is no pitch detection or pitch correction in the signal path. |
-| **Warp Processor** | Applies **pitch and playback rate** to an audio clip. Length-preserving time-stretch is **not implemented**, so pitch rides with the rate. |
-| **Take Comping** | **Prototype / demo.** Shows placeholder takes; it never invents audio, and promoting a comp needs recorded assets that exist. |
-| **Wavetable Synth** | **Preview surface.** The channel keeps playing with its dual-oscillator subtractive synth; there is no wavetable engine behind this window yet. |
-| **Polyphonic Blob Editor** | **Prototype.** Displays sample blobs; it does not analyse, import or play back project audio. |
-| **Mastering Suite** | Loudness and true-peak **metering is live**. The mastering processors are **not applied** to the master bus. |
-
-### Local collaboration and sync status
-
-Apex Studio currently uses a **local-first project workflow**. Project state and audio assets are stored locally; live network collaboration and cloud synchronization are not currently active.
-
-### AI status
-
-**Apex Studio currently does not include active AI generation, AI stem separation, or an AI API integration.** AI is intentionally outside the current core scope.
-
----
-
-## 🛠️ Tech stack
-
-- **React 19** — application UI
-- **TypeScript** — application logic and type safety
-- **Vite** — development and production web builds
-- **Web Audio API** — audio playback, processing and rendering
-- **Electron** — Windows desktop packaging
-- **Electron Builder** — installer and portable builds
-- **IndexedDB** — local project/audio persistence
-- **Tailwind CSS** — UI styling
-
-The project is designed to run locally and does not require a hosted backend for its core music-production workflow.
-
----
-
-## 🤝 Feedback, bugs & contributions
-
-Apex Studio is most useful when real producers tell us where the workflow breaks down.
-
-When opening an issue, include:
-
-1. **What you were trying to do**
-2. **What you expected to happen**
-3. **What actually happened**
-4. **Steps to reproduce it**
-5. **Browser/Windows environment**, if relevant
-
-See **[CONTRIBUTING.md](CONTRIBUTING.md)** for development and pull-request guidelines and **[SECURITY.md](SECURITY.md)** for security reports.
-
-### Useful links
-
-- 🐛 [Report a bug](https://github.com/Ajey877/Apex-Studio/issues/new/choose)
-- 💡 [Open an issue / suggest an improvement](https://github.com/Ajey877/Apex-Studio/issues/new/choose)
-- 🔀 [View pull requests](https://github.com/Ajey877/Apex-Studio/pulls)
-- ⚙️ [View GitHub Actions](https://github.com/Ajey877/Apex-Studio/actions)
-- 📦 [View releases](https://github.com/Ajey877/Apex-Studio/releases)
-
-If Apex Studio is useful to you, **a GitHub star helps the project get discovered by other creators.** ⭐
-
----
-
-## 📈 Version
-
-**Current release: `v1.2.1`**
-
-v1.2.1 focuses on release parity and real-world DAW reliability: audio transport and rendering, mixer/FX behavior, project persistence and recovery, missing-audio handling, export/stem integrity, and Windows runtime validation.
-
-See the [release page](https://github.com/Ajey877/Apex-Studio/releases/tag/v1.2.1) for the downloadable Windows build and release information.
-
----
-
-## 📜 License
-
-Apex Studio is licensed under the **MIT License**. See [`LICENSE`](LICENSE) for the full terms.
-
----
-
-<div align="center">
-
-### 🎛️ Make music. Keep it local. Keep creating.
-
-**Apex Studio — v1.2.1**
-
-[⬇️ Download](https://github.com/Ajey877/Apex-Studio/releases/tag/v1.2.1) · [⭐ Star on GitHub](https://github.com/Ajey877/Apex-Studio) · [🐛 Report an issue](https://github.com/Ajey877/Apex-Studio/issues/new/choose)
-
-</div>
+Apex Studio is licensed under the **MIT License**. See [LICENSE](LICENSE) for the full terms.
