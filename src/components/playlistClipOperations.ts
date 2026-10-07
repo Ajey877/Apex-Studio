@@ -1,6 +1,7 @@
+import { stepsPerBar, LEGACY_TIME_SIGNATURE } from '../music/musicalTime';
 import type { Channel, PlaylistClip, PlaylistTrack, AutomationPoint, AutomationTargetType } from '../types/daw';
 
-export const STEPS_PER_BAR = 16;
+export const STEPS_PER_BAR = stepsPerBar(LEGACY_TIME_SIGNATURE);
 export const DEFAULT_GRID_BARS = 0.25;
 
 export interface PlaylistBounds {

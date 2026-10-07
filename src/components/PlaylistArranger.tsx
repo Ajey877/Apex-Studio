@@ -1,3 +1,4 @@
+import { barsToBeats, beatsToSeconds, LEGACY_TIME_SIGNATURE } from '../music/musicalTime';
 import React, { useState, useRef, useEffect } from 'react';
 import { 
   Plus, 
@@ -1143,7 +1144,7 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
                           peaks.push(Math.min(1, (sum / blockSize) * 3));
                         }
 
-                        const durationBars = Math.max(1, Math.round(decoded.duration / ((4 * 60) / bpm)));
+                        const durationBars = Math.max(1, Math.round(decoded.duration / beatsToSeconds(barsToBeats(1, LEGACY_TIME_SIGNATURE), bpm)));
                         const dropPlacement = resolvePlaylistDropPlacement(
                           dropClientX,
                           dropClientY,

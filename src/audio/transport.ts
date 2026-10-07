@@ -1,3 +1,4 @@
+import { beatsPerBar, beatsToSeconds, LEGACY_TIME_SIGNATURE, SIXTEENTH_STEPS_PER_BEAT } from '../music/musicalTime';
 export type TransportMode = 'pat' | 'song';
 
 export interface TransportState {
@@ -28,8 +29,8 @@ export class AudioClockTransport {
   private clockOrigin = 0;
   private state: TransportState = {
     bpm: 120,
-    beatsPerBar: 4,
-    stepsPerBeat: 4,
+    beatsPerBar: beatsPerBar(LEGACY_TIME_SIGNATURE),
+    stepsPerBeat: SIXTEENTH_STEPS_PER_BEAT,
     mode: 'pat',
     playing: false,
     positionSeconds: 0,
@@ -140,7 +141,7 @@ export class AudioClockTransport {
 
   dispose(): void { this.stop(false); this.callbacks = {}; }
 
-  private get stepDurationSeconds(): number { return 60 / this.state.bpm / this.state.stepsPerBeat; }
+  private get stepDurationSeconds(): number { return beatsToSeconds(1, this.state.bpm) / this.state.stepsPerBeat; }
   private get stepsPerBar(): number { return this.state.beatsPerBar * this.state.stepsPerBeat; }
   /** Number of steps the reported musical position wraps at. */
   private get stepLoopLength(): number {

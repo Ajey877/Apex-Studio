@@ -1,3 +1,4 @@
+import { beatsPerBar, beatsToSeconds, SIXTEENTH_STEPS_PER_BEAT, LEGACY_TIME_SIGNATURE } from '../music/musicalTime';
 import { Channel, PlaylistClip } from '../types/daw';
 
 export interface OfflineProjectRendererOptions {
@@ -73,7 +74,7 @@ export const assertAudioClipsExportable = (
 
 export function getOfflineRenderPlan(clips: PlaylistClip[], bpm: number, totalBars: number): OfflineRenderPlanItem[] {
   const safeBpm = Number.isFinite(bpm) && bpm > 0 ? bpm : 120;
-  const secondsPerBar = (60 / safeBpm) * 4;
+  const secondsPerBar = beatsToSeconds(beatsPerBar(LEGACY_TIME_SIGNATURE), safeBpm);
   const limit = Math.max(0, totalBars) * secondsPerBar;
 
   return clips
@@ -138,8 +139,8 @@ export async function renderProjectTimelineOffline(options: OfflineProjectRender
   assertAudioClipsExportable(options.clips, options.getAudioBuffer);
 
   const safeBpm = Number.isFinite(options.bpm) && options.bpm > 0 ? options.bpm : 120;
-  const secondsPerBeat = 60 / safeBpm;
-  const secondsPerBar = secondsPerBeat * 4;
+  const secondsPerBeat = beatsToSeconds(1, safeBpm);
+  const secondsPerBar = secondsPerBeat * beatsPerBar(LEGACY_TIME_SIGNATURE);
   const totalDurationSeconds = Math.max(4, options.totalBars * secondsPerBar);
   const sampleRate = options.sampleRate ?? 44100;
   const offlineCtx = new OfflineAudioContext(2, Math.ceil(sampleRate * totalDurationSeconds), sampleRate);
@@ -164,7 +165,7 @@ export async function renderProjectTimelineOffline(options: OfflineProjectRender
       const rate = clamp(clip.timeStretchRate ?? 1, 0.5, 2);
       source.playbackRate.value = rate;
       source.detune.value = clamp(clip.pitchShiftSemitones ?? 0, -24, 24) * 100;
-      const sourceOffset = Math.max(0, (clip.offsetSteps ?? 0) * (secondsPerBeat / 4));
+      const sourceOffset = Math.max(0, (clip.offsetSteps ?? 0) * (secondsPerBeat / SIXTEENTH_STEPS_PER_BEAT));
       if (sourceOffset >= buffer.duration) continue;
       const sourceDuration = Math.min(buffer.duration - sourceOffset, clipDuration * rate);
       const baseGain = clamp(channel.volume, 0, 1.25);
@@ -189,8 +190,8 @@ export async function renderProjectTimelineOffline(options: OfflineProjectRender
       panner.connect(master);
       for (const note of channel.notes ?? []) {
         if (note.muted) continue;
-        const noteStart = start + ((note.start - (clip.offsetSteps ?? 0)) * secondsPerBeat / 4);
-        const noteDuration = Math.min(note.duration * secondsPerBeat / 4, clipDuration - Math.max(0, noteStart - start));
+        const noteStart = start + ((note.start - (clip.offsetSteps ?? 0)) * secondsPerBeat / SIXTEENTH_STEPS_PER_BEAT);
+        const noteDuration = Math.min(note.duration * secondsPerBeat / SIXTEENTH_STEPS_PER_BEAT, clipDuration - Math.max(0, noteStart - start));
         if (noteStart < start || noteStart >= totalDurationSeconds || noteDuration <= 0) continue;
         const osc = offlineCtx.createOscillator();
         const noteGain = offlineCtx.createGain();

@@ -1,3 +1,5 @@
+import { beatsPerBar, stepsPerBar, stepsToBeats, beatsToSeconds, SIXTEENTH_STEPS_PER_BEAT, LEGACY_TIME_SIGNATURE } from '../music/musicalTime';
+
 import { 
   Channel, 
   Note, 
@@ -58,6 +60,9 @@ import {
   resolveFxSlot,
 } from './fxParameterControl';
 import { resolveFxParameterSpec } from './fxParameterContract';
+
+// Phase 1A: derive the existing 4/4 grid; do not wire project meter into playback.
+const STEPS_PER_BAR = stepsPerBar(LEGACY_TIME_SIGNATURE);
 
 export { isRackChannelAudible };
 
@@ -317,7 +322,6 @@ export function resolvePlayableContentLengthSteps(
   channel?: Channel,
   patternLengthSteps?: number
 ): number {
-  const STEPS_PER_BAR = 16;
   if (!channel) {
     const fallback = typeof patternLengthSteps === 'number' && Number.isFinite(patternLengthSteps) && patternLengthSteps > 0
       ? Math.max(1, Math.ceil(patternLengthSteps / STEPS_PER_BAR)) * STEPS_PER_BAR
@@ -1809,14 +1813,14 @@ class AudioEngine {
     const arp = channel.arp;
     if (!arp) return;
 
-    const secondsPerBeat = 60 / bpm;
-    let stepDuration = secondsPerBeat / 4; // 1/16
+    const secondsPerBeat = beatsToSeconds(1, bpm);
+    let stepDuration = secondsPerBeat / SIXTEENTH_STEPS_PER_BEAT; // 1/16
     if (arp.rate === '1/4') stepDuration = secondsPerBeat;
     else if (arp.rate === '1/8') stepDuration = secondsPerBeat / 2;
-    else if (arp.rate === '1/16') stepDuration = secondsPerBeat / 4;
+    else if (arp.rate === '1/16') stepDuration = secondsPerBeat / SIXTEENTH_STEPS_PER_BEAT;
     else if (arp.rate === '1/32') stepDuration = secondsPerBeat / 8;
     else if (arp.rate === '1/8t') stepDuration = (secondsPerBeat / 2) * (2 / 3);
-    else if (arp.rate === '1/16t') stepDuration = (secondsPerBeat / 4) * (2 / 3);
+    else if (arp.rate === '1/16t') stepDuration = (secondsPerBeat / SIXTEENTH_STEPS_PER_BEAT) * (2 / 3);
 
     const octaves = arp.octaves || 1;
     const basePitch = rootNote.pitch;
@@ -2686,13 +2690,13 @@ class AudioEngine {
         previous.transport.stop(false);
       }
       const safeBpm = Math.max(20, Math.min(300, Number(bpm) || 120));
-      const secondsPerStep = (60 / safeBpm) / 4;
+      const secondsPerStep = beatsToSeconds(stepsToBeats(1), safeBpm);
       const requestedMinimumDuration = Number.isFinite(minimumDurationSeconds) && minimumDurationSeconds >= 0
         ? minimumDurationSeconds
         : 4;
       const totalDurationSeconds = Math.max(
         requestedMinimumDuration,
-        Math.max(1, totalBars) * 4 * (60 / safeBpm),
+        Math.max(1, totalBars) * beatsPerBar(LEGACY_TIME_SIGNATURE) * beatsToSeconds(1, safeBpm),
       );
       const renderSampleRate = sampleRate ?? previous.ctx?.sampleRate ?? 44100;
       const OfflineContextClass =
@@ -2817,14 +2821,14 @@ class AudioEngine {
         // declared 32-step pattern exports 32 steps even with an empty second bar.
         const patternLoopSteps = renderScope === 'pattern'
           ? resolvePatternLoopLengthSteps(this.activeChannels, patternLengthSteps)
-          : 16;
+          : STEPS_PER_BAR;
         const scheduleStartProgress = 40;
         const scheduleEndProgress = 65;
         // Schedule the offline timeline in small cooperative batches so the browser
         // can service rendering/UI work instead of appearing unresponsive on longer exports.
         for (let globalStep = 0; globalStep < totalSteps; globalStep += 1) {
           this.currentStep = globalStep % patternLoopSteps;
-          this.currentBar = Math.floor(globalStep / 16) + 1;
+          this.currentBar = Math.floor(globalStep / STEPS_PER_BAR) + 1;
           // Same groove conversion the live scheduler uses, so an offline export
           // swings exactly as much as the take the user monitored.
           const swingOffsetSeconds = this.currentStep % 2 === 1
@@ -3387,7 +3391,7 @@ class AudioEngine {
   private isAutomationClipActiveAtCurrentPosition(clip: PlaylistClip): boolean {
     if (clip.type !== 'automation' || clip.mute || this.isPlaylistLaneMuted(clip) || !clip.automationTarget) return false;
     if (!Number.isFinite(clip.startBar) || !Number.isFinite(clip.lengthBars) || clip.lengthBars <= 0) return false;
-    const currentBarPosition = Math.max(0, this.currentBar - 1) + (this.currentStep / 16);
+    const currentBarPosition = Math.max(0, this.currentBar - 1) + (this.currentStep / STEPS_PER_BAR);
     return currentBarPosition >= clip.startBar && currentBarPosition <= clip.startBar + clip.lengthBars;
   }
 
@@ -3832,7 +3836,7 @@ class AudioEngine {
     this.transport.setSongEndSteps(songEndSteps ?? undefined);
     // Starting at or beyond the arrangement's real end restarts from the top.
     if (songEndSteps !== null) {
-      const stepDurationSeconds = 60 / this.bpm / 4;
+      const stepDurationSeconds = beatsToSeconds(stepsToBeats(1), this.bpm);
       if (this.transport.getState().positionSeconds >= songEndSteps * stepDurationSeconds - 1e-9) {
         this.transport.seek(0);
       }
@@ -3848,8 +3852,8 @@ class AudioEngine {
         this.currentStep = step;
         this.currentBar = bar;
 
-        const secondsPerBeat = 60 / this.bpm;
-        const secondsPerStep = secondsPerBeat / 4;
+        const secondsPerBeat = beatsToSeconds(1, this.bpm);
+        const secondsPerStep = secondsPerBeat / SIXTEENTH_STEPS_PER_BEAT;
         const swingOffsetSeconds = step % 2 === 1
           ? swingOffsetSecondsForStep(this.swing, secondsPerStep)
           : 0;
@@ -4038,7 +4042,7 @@ class AudioEngine {
     let endSteps = 0;
     for (const clip of this.activeClips) {
       if (!Number.isFinite(clip.startBar) || !Number.isFinite(clip.lengthBars) || clip.lengthBars <= 0) continue;
-      endSteps = Math.max(endSteps, (clip.startBar + clip.lengthBars) * 16);
+      endSteps = Math.max(endSteps, (clip.startBar + clip.lengthBars) * STEPS_PER_BAR);
     }
     return endSteps > 0 ? endSteps : null;
   }
@@ -4049,7 +4053,7 @@ class AudioEngine {
     if (this.activePlayMode !== 'song') return next;
     const endSteps = this.resolveSongEndSteps();
     if (endSteps === null) return next;
-    const stepDurationSeconds = 60 / this.bpm / 4;
+    const stepDurationSeconds = beatsToSeconds(stepsToBeats(1), this.bpm);
     return Math.min(next, endSteps * stepDurationSeconds);
   }
 
@@ -4067,7 +4071,7 @@ class AudioEngine {
   private retriggerAudioClipsAtPosition(positionSeconds: number, laneIndex?: number): void {
     const ctx = this.ctx;
     if (!ctx || positionSeconds <= 0) return;
-    const stepDurationSeconds = 60 / this.bpm / 4;
+    const stepDurationSeconds = beatsToSeconds(stepsToBeats(1), this.bpm);
     const now = ctx.currentTime;
     for (const clip of this.activeClips) {
       if (clip.type !== 'audio' || clip.mute) continue;
@@ -4078,8 +4082,8 @@ class AudioEngine {
         if (!Number.isFinite(clip.trackIndex) || Math.floor(clip.trackIndex) !== laneIndex) continue;
       }
       if (!Number.isFinite(clip.startBar) || !Number.isFinite(clip.lengthBars) || clip.lengthBars <= 0) continue;
-      const startSeconds = clip.startBar * 16 * stepDurationSeconds;
-      const endSeconds = startSeconds + clip.lengthBars * 16 * stepDurationSeconds;
+      const startSeconds = clip.startBar * STEPS_PER_BAR * stepDurationSeconds;
+      const endSeconds = startSeconds + clip.lengthBars * STEPS_PER_BAR * stepDurationSeconds;
       if (positionSeconds <= startSeconds || positionSeconds >= endSeconds) continue;
       this.playAudioClipWithFades(clip, now, positionSeconds - startSeconds);
     }
@@ -4088,14 +4092,14 @@ class AudioEngine {
   private retriggerAudioClipsForChannelAtPosition(positionSeconds: number, channelId: string): void {
     const ctx = this.ctx;
     if (!ctx || positionSeconds <= 0) return;
-    const stepDurationSeconds = 60 / this.bpm / 4;
+    const stepDurationSeconds = beatsToSeconds(stepsToBeats(1), this.bpm);
     const now = ctx.currentTime;
     for (const clip of this.activeClips) {
       if (clip.type !== 'audio' || clip.mute || clip.channelId !== channelId) continue;
       if (this.isPlaylistLaneMuted(clip) || !this.isAudioClipChannelAudible(clip)) continue;
       if (!Number.isFinite(clip.startBar) || !Number.isFinite(clip.lengthBars) || clip.lengthBars <= 0) continue;
-      const startSeconds = clip.startBar * 16 * stepDurationSeconds;
-      const endSeconds = startSeconds + clip.lengthBars * 16 * stepDurationSeconds;
+      const startSeconds = clip.startBar * STEPS_PER_BAR * stepDurationSeconds;
+      const endSeconds = startSeconds + clip.lengthBars * STEPS_PER_BAR * stepDurationSeconds;
       if (positionSeconds <= startSeconds || positionSeconds >= endSeconds) continue;
       this.playAudioClipWithFades(clip, now, positionSeconds - startSeconds);
     }
@@ -4109,7 +4113,7 @@ class AudioEngine {
   private rebaseAutomationAtPosition(positionSeconds: number): void {
     const ctx = this.ctx;
     if (!ctx) return;
-    const secondsPerBar = 16 * (60 / this.bpm) / 4;
+    const secondsPerBar = beatsToSeconds(beatsPerBar(LEGACY_TIME_SIGNATURE), this.bpm);
     const barPosition = positionSeconds / secondsPerBar;
     const now = ctx.currentTime;
     for (const clip of this.activeClips) {
@@ -4146,7 +4150,7 @@ class AudioEngine {
     // exact historic timing. Live playback and the offline renderer share this
     // method, so an export cannot place a note anywhere the take did not.
     const safeBpm = Number.isFinite(this.bpm) && this.bpm > 0 ? this.bpm : 120;
-    const secondsPerStep = (60 / safeBpm) / 4;
+    const secondsPerStep = beatsToSeconds(stepsToBeats(1), safeBpm);
 
     // Metronome on quarter notes (steps 0, 4, 8, 12)
     if (this.metronome && this.currentStep % 4 === 0) {
@@ -4201,12 +4205,12 @@ class AudioEngine {
     } else {
       // Song mode: trigger clips in current bar
       const barIdx = this.currentBar - 1;
-      const currentGlobalStep = (barIdx * 16) + this.currentStep;
+      const currentGlobalStep = (barIdx * STEPS_PER_BAR) + this.currentStep;
 
       // 1. Evaluate automation clips at current bar & step
       this.activeClips.forEach(clip => {
         if (clip.type === 'automation' && !clip.mute && !this.isPlaylistLaneMuted(clip) && clip.automationTarget && clip.automationPoints && clip.automationPoints.length >= 2) {
-          const currentTotalBar = barIdx + (this.currentStep / 16);
+          const currentTotalBar = barIdx + (this.currentStep / STEPS_PER_BAR);
           if (currentTotalBar >= clip.startBar && currentTotalBar <= clip.startBar + clip.lengthBars) {
             const relX = (currentTotalBar - clip.startBar) / clip.lengthBars;
             const val = this.interpolateAutomationCurve(clip.automationPoints, relX);
@@ -4217,8 +4221,8 @@ class AudioEngine {
 
       this.activeClips.forEach(clip => {
         if (clip.type === 'pattern') {
-          const clipStartStep = clip.startBar * 16;
-          const clipEndStep = clipStartStep + (clip.lengthBars * 16);
+          const clipStartStep = clip.startBar * STEPS_PER_BAR;
+          const clipEndStep = clipStartStep + (clip.lengthBars * STEPS_PER_BAR);
 
           if (currentGlobalStep >= clipStartStep && currentGlobalStep < clipEndStep) {
             const channel = this.activeChannels.find(c => c.id === clip.channelId);
@@ -4248,7 +4252,7 @@ class AudioEngine {
             }
           }
         } else if (clip.type === 'audio') {
-          const clipStartStep = clip.startBar * 16;
+          const clipStartStep = clip.startBar * STEPS_PER_BAR;
           if (
             currentGlobalStep === clipStartStep &&
             !clip.mute &&
@@ -4278,13 +4282,13 @@ class AudioEngine {
     if (!Number.isFinite(clip.lengthBars) || clip.lengthBars <= 0) return;
 
     const safeBpm = Number.isFinite(this.bpm) && this.bpm > 0 ? this.bpm : 120;
-    const secondsPerStep = (60 / safeBpm) / 4;
+    const secondsPerStep = beatsToSeconds(stepsToBeats(1), safeBpm);
     const offsetSeconds =
       Math.max(0, (clip.offsetSteps || 0) * secondsPerStep) + Math.max(0, positionOffsetSeconds);
 
     if (offsetSeconds >= buf.duration) return;
 
-    const clipDurationSec = clip.lengthBars * 4 * (60 / safeBpm);
+    const clipDurationSec = clip.lengthBars * beatsPerBar(LEGACY_TIME_SIGNATURE) * beatsToSeconds(1, safeBpm);
     if (!Number.isFinite(clipDurationSec) || clipDurationSec <= 0.0005) return;
 
     const rate = Number.isFinite(clip.timeStretchRate) && (clip.timeStretchRate ?? 1) > 0 ? (clip.timeStretchRate ?? 1) : 1;
@@ -4310,7 +4314,7 @@ class AudioEngine {
 
     // Safe fade envelope calculation: in and out cannot invert or exceed half duration
     const maxFade = effectiveDuration / 2;
-    const secondsPerBar = (60 / safeBpm) * 4;
+    const secondsPerBar = beatsToSeconds(beatsPerBar(LEGACY_TIME_SIGNATURE), safeBpm);
     const requestedFadeIn = Math.max(0, (clip.fadeInBars || 0) * secondsPerBar);
     const requestedFadeOut = Math.max(0, (clip.fadeOutBars || 0) * secondsPerBar);
 
@@ -4431,7 +4435,6 @@ class AudioEngine {
     minBars: number = 1,
     options: { mixerTracks?: MixerTrack[]; includeMixerFx?: boolean } = {}
   ): Promise<{ buffer: AudioBuffer; waveform: number[]; lengthBars: number; bpm: number }> {
-    const STEPS_PER_BAR = 16;
     const requestedBpm = Number.isFinite(bpm) && bpm > 0 ? bpm : this.bpm;
     const safeBpm = Math.max(20, Math.min(300, requestedBpm));
     const sampleRate = this.ctx?.sampleRate || 44100;
@@ -4442,7 +4445,7 @@ class AudioEngine {
     const passes = Math.max(1, Math.ceil(safeMinBars / loopLengthBars));
     const lengthBars = passes * loopLengthBars;
 
-    const stepDuration = (60 / safeBpm) / 4;
+    const stepDuration = beatsToSeconds(stepsToBeats(1), safeBpm);
     const durationSec = lengthBars * STEPS_PER_BAR * stepDuration;
 
     // Bounce-In-Place is an offline scheduling/rendering operation, not a second

@@ -1,3 +1,4 @@
+import { barsToBeats, beatsToSeconds, LEGACY_TIME_SIGNATURE } from './music/musicalTime';
 import { DEFAULT_MASTERING_SUITE_STATE } from './audio/masteringState';
 import {
   WORKSPACE_LAYOUT_LIMITS,
@@ -2068,7 +2069,7 @@ export function App() {
                 // playing it cancels audio scheduled for the old position and
                 // restarts any playlist audio clip the new position lands in.
                 const targetBar = Math.max(1, Math.floor(Number(bar) || 1));
-                const secondsPerBar = (60 / projectState.meta.bpm) * 4;
+                const secondsPerBar = beatsToSeconds(barsToBeats(1, LEGACY_TIME_SIGNATURE), projectState.meta.bpm);
                 audioEngine.seek((targetBar - 1) * secondsPerBar);
                 setCurrentBar(targetBar);
               }}
