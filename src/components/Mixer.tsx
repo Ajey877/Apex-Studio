@@ -308,28 +308,28 @@ export const Mixer: React.FC<MixerProps> = ({
   };
 
   return (
-    <div id="fl-mixer-console" className="flex flex-col h-full bg-[#0a0a0b] select-none text-[#b0b0b0]">
+    <div id="fl-mixer-console" className="flex flex-col h-full bg-[var(--apex-canvas)] select-none text-[var(--apex-text-2)]">
       {/* Top Header with Master Spectrum Analyzer */}
-      <div className="h-9 bg-[#1e1e20] border-b border-[#333336] flex items-center justify-between px-4 shrink-0 gap-4">
+      <div className="h-9 bg-[var(--apex-panel-header)] border-b border-[var(--apex-border)] flex items-center justify-between px-4 shrink-0 gap-4">
         <div className="flex items-center gap-2">
-          <Sliders className="w-3.5 h-3.5 text-[#ff6e00]" />
-          <span className="text-[10px] text-white font-bold uppercase tracking-wider">STUDIO MIXING CONSOLE & FX INSERT ROUTING</span>
+          <Sliders className="w-3.5 h-3.5 text-[var(--apex-accent)]" />
+          <span className="text-[10px] text-[var(--apex-text)] font-bold uppercase tracking-wider">STUDIO MIXING CONSOLE & FX INSERT ROUTING</span>
         </div>
 
         {/* Master Real-time FFT Visualizer */}
-        <div className="flex items-center gap-2 bg-[#121214] px-2.5 py-0.5 rounded border border-[#333336]">
-          <span className="text-[9px] font-mono text-[#777]">MASTER FFT</span>
+        <div className="flex items-center gap-2 bg-[var(--apex-chrome-inset)] px-2.5 py-0.5 rounded border border-[var(--apex-border)]">
+          <span className="text-[9px] font-mono text-[var(--apex-text-3)]">MASTER FFT</span>
           <canvas
             ref={canvasRef}
             width={180}
             height={20}
-            className="rounded bg-[#0a0a0b]"
+            className="rounded bg-[var(--apex-canvas)]"
           />
         </div>
       </div>
 
       {/* Main Console Split: Left Channel Strips | Right FX Rack */}
-      <div className="flex-1 flex overflow-hidden bg-[#1a1a1d] p-3 gap-2">
+      <div className="flex-1 flex overflow-hidden bg-[var(--apex-panel-header)] p-3 gap-2">
         {/* Left: Mixer Channel Faders Strip (Scrollable) */}
         <div className="flex-1 flex overflow-x-auto custom-scrollbar gap-1.5 pb-2">
           {tracks.map((track, idx) => {
@@ -344,16 +344,16 @@ export const Mixer: React.FC<MixerProps> = ({
                 onClick={() => onSelectTrack(track.id)}
                 className={`w-20 sm:w-24 flex-shrink-0 flex flex-col justify-between py-2 px-1.5 rounded border transition-all cursor-pointer ${
                   isSelected 
-                    ? 'bg-[#222225] border-[#ff6e00] border-t-2 shadow-lg' 
+                    ? 'bg-[var(--apex-surface-2)] border-[var(--apex-accent)] border-t-2 shadow-lg'
                     : isMaster 
-                      ? 'bg-[#18181b] border-[#333336]' 
-                      : 'bg-[#222225] border-[#333336] hover:border-[#555]'
+                      ? 'bg-[var(--apex-panel)] border-[var(--apex-border)]'
+                      : 'bg-[var(--apex-surface-2)] border-[var(--apex-border)] hover:border-[var(--apex-grid-line-strong)]'
                 }`}
               >
                 {/* Channel Header (Name & Mute) */}
                 <div className="flex flex-col items-center gap-1">
                   <div className="w-full flex items-center justify-between px-1">
-                    <span className={`text-[9px] font-bold font-mono ${isSelected ? 'text-[#ff6e00]' : 'text-[#777]'}`}>
+                    <span className={`text-[9px] font-bold font-mono ${isSelected ? 'text-[var(--apex-accent)]' : 'text-[var(--apex-text-3)]'}`}>
                       {isMaster ? 'MST' : `INS ${track.id}`}
                     </span>
                     <button
@@ -362,15 +362,15 @@ export const Mixer: React.FC<MixerProps> = ({
                         onUpdateTrack(track.id, { mute: !track.mute });
                       }}
                       className={`w-2.5 h-2.5 rounded-full border ${
-                        !track.mute ? 'bg-[#00ff00] border-[#00ff00]' : 'bg-[#333336] border-[#444]'
+                        !track.mute ? 'bg-[var(--apex-success)] border-[var(--apex-success)]' : 'bg-[var(--apex-surface-3)] border-[var(--apex-border)]'
                       }`}
                       title={track.mute ? 'Unmute' : 'Mute'}
                     />
                   </div>
 
                   <span 
-                    className="text-[11px] font-bold truncate max-w-full px-1 text-white"
-                    style={{ color: isSelected ? '#ff6e00' : track.color || '#fff' }}
+                    className="text-[11px] font-bold truncate max-w-full px-1 text-[var(--apex-text)]"
+                    style={{ color: isSelected ? 'var(--apex-accent)' : track.color || 'var(--apex-text)' }}
                   >
                     {track.name}
                   </span>
@@ -378,7 +378,7 @@ export const Mixer: React.FC<MixerProps> = ({
 
                 {/* Pan Mini Slider */}
                 <div className="flex flex-col items-center gap-0.5 my-1.5 px-1">
-                  <div className="flex items-center justify-between w-full text-[8px] text-[#777]">
+                  <div className="flex items-center justify-between w-full text-[8px] text-[var(--apex-text-3)]">
                     <span>PAN</span>
                     <span className="font-mono">{Math.round(track.pan * 100)}</span>
                   </div>
@@ -392,14 +392,14 @@ export const Mixer: React.FC<MixerProps> = ({
                     onPointerDown={() => onInteractionStart?.('Change mixer pan')}
                     onPointerUp={() => onInteractionEnd?.('Change mixer pan')}
                     onChange={(e) => handlePanChange(track.id, parseFloat(e.target.value))}
-                    className="w-full h-1 accent-[#777] bg-[#121214] rounded cursor-pointer"
+                    className="w-full h-1 accent-[var(--apex-text-muted)] bg-[var(--apex-chrome-inset)] rounded cursor-pointer"
                   />
                 </div>
 
                 {/* Vertical Fader & Peak Meter Pair */}
                 <div className="flex-1 flex items-center justify-center gap-2 my-2 min-h-[140px]">
                   {/* VU Peak Meter */}
-                  <div className="w-2 h-full bg-[#121214] rounded-full p-0.5 flex flex-col justify-end overflow-hidden border border-[#333336]">
+                  <div className="w-2 h-full bg-[var(--apex-chrome-inset)] rounded-full p-0.5 flex flex-col justify-end overflow-hidden border border-[var(--apex-border)]">
                     <div 
                       className="w-full rounded-full transition-all duration-75"
                       style={{
@@ -429,14 +429,14 @@ export const Mixer: React.FC<MixerProps> = ({
                       onPointerDown={() => onInteractionStart?.('Change mixer volume')}
                       onPointerUp={() => onInteractionEnd?.('Change mixer volume')}
                       onChange={(e) => handleVolumeChange(track.id, parseFloat(e.target.value))}
-                      className="relative z-10 h-28 sm:h-32 w-1.5 accent-[#ff6e00] bg-[#121214] rounded cursor-pointer"
+                      className="relative z-10 h-28 sm:h-32 w-1.5 accent-[var(--apex-accent)] bg-[var(--apex-chrome-inset)] rounded cursor-pointer"
                       style={{ writingMode: 'vertical-lr', direction: 'rtl' }}
                     />
                   </div>
                 </div>
 
                 {/* dB Readout */}
-                <div className="text-center font-mono text-[9px] text-[#777] bg-[#121214] py-0.5 rounded border border-[#333336]">
+                <div className="text-center font-mono text-[9px] text-[var(--apex-text-3)] bg-[var(--apex-chrome-inset)] py-0.5 rounded border border-[var(--apex-border)]">
                   {track.volume > 0.05 ? `${(20 * Math.log10(track.volume)).toFixed(1)} dB` : '-INF'}
                 </div>
               </div>
@@ -445,14 +445,14 @@ export const Mixer: React.FC<MixerProps> = ({
         </div>
 
         {/* Right: Studio FX Rack Inspector */}
-        <div className="w-56 sm:w-64 border border-[#333336] rounded bg-[#121214] flex flex-col shrink-0">
-          <div className="p-2 text-[10px] font-bold border-b border-[#333336] flex items-center justify-between text-white bg-[#1a1a1d]">
+        <div className="w-56 sm:w-64 border border-[var(--apex-border)] rounded bg-[var(--apex-chrome-inset)] flex flex-col shrink-0">
+          <div className="p-2 text-[10px] font-bold border-b border-[var(--apex-border)] flex items-center justify-between text-[var(--apex-text)] bg-[var(--apex-panel-header)]">
             <span className="uppercase tracking-wider">FX SLOTS ({selectedTrack.name.toUpperCase()})</span>
             <div className="flex items-center gap-1">
               {onOpenParametricEq && (
                 <button
                   onClick={() => onOpenParametricEq(selectedTrack)}
-                  className="px-1.5 py-0.5 bg-[#00bcd4]/15 hover:bg-[#00bcd4]/30 text-[#00bcd4] rounded text-[9px] font-mono border border-[#00bcd4]/30 transition"
+                  className="px-1.5 py-0.5 bg-[color-mix(in_srgb,var(--apex-cyan)_15%,transparent)] hover:bg-[color-mix(in_srgb,var(--apex-cyan)_30%,transparent)] text-[var(--apex-cyan)] rounded text-[9px] font-mono border border-[color-mix(in_srgb,var(--apex-cyan)_30%,transparent)] transition"
                   title="Open 3-Band EQ Interface"
                 >
                   EQ
@@ -460,7 +460,7 @@ export const Mixer: React.FC<MixerProps> = ({
               )}
               <button
                 onClick={() => setShowAddFxMenu(!showAddFxMenu)}
-                className="p-1 text-[#ff6e00] hover:text-white rounded hover:bg-[#2d2d30] transition"
+                className="p-1 text-[var(--apex-accent)] hover:text-[var(--apex-text)] rounded hover:bg-[var(--apex-state-hover)] transition"
                 title="Add Effect Plugin"
               >
                 <Plus className="w-3.5 h-3.5" />
@@ -470,8 +470,8 @@ export const Mixer: React.FC<MixerProps> = ({
 
           {/* Add FX dropdown */}
           {showAddFxMenu && (
-            <div className="bg-[#1e1e20] border-b border-[#333336] p-2 space-y-1 text-xs">
-              <div className="text-[9px] font-bold text-[#777] uppercase">Choose Effect Plugin</div>
+            <div className="bg-[var(--apex-panel-header)] border-b border-[var(--apex-border)] p-2 space-y-1 text-xs">
+              <div className="text-[9px] font-bold text-[var(--apex-text-3)] uppercase">Choose Effect Plugin</div>
               <div className="grid grid-cols-2 gap-1 pt-1">
                 {[
                   { id: 'equalizer', name: '3-Band EQ' },
@@ -490,7 +490,7 @@ export const Mixer: React.FC<MixerProps> = ({
                       onAddFxSlot(selectedTrack.id, fx.id as FxType);
                       setShowAddFxMenu(false);
                     }}
-                    className="p-1.5 bg-[#141416] hover:bg-[#ff6e00] hover:text-black rounded text-[10px] text-left font-medium transition truncate"
+                    className="p-1.5 bg-[var(--apex-panel)] hover:bg-[var(--apex-accent-strong)] hover:text-[var(--apex-state-playing-fg)] rounded text-[10px] text-left font-medium transition truncate"
                   >
                     {fx.name}
                   </button>
@@ -503,10 +503,10 @@ export const Mixer: React.FC<MixerProps> = ({
           <div className="flex-1 overflow-y-auto custom-scrollbar p-2 space-y-1.5">
             {/* Dynamic Sidechain Routing Header for Inserts (Track 1+) */}
             {selectedTrack.id > 0 && (
-              <div className="bg-[#18181b] border border-[#2e2e32] rounded p-2 text-[10px] space-y-1.5">
+              <div className="bg-[var(--apex-panel)] border border-[var(--apex-border)] rounded p-2 text-[10px] space-y-1.5">
                 <div className="flex items-center justify-between">
-                  <span className="font-bold text-white flex items-center gap-1">
-                    <Zap className="w-3 h-3 text-[#ff6e00]" />
+                  <span className="font-bold text-[var(--apex-text)] flex items-center gap-1">
+                    <Zap className="w-3 h-3 text-[var(--apex-accent)]" />
                     <span>DYNAMIC SIDECHAIN DUCK</span>
                   </span>
                   <button
@@ -528,8 +528,8 @@ export const Mixer: React.FC<MixerProps> = ({
                     }}
                     className={`px-1.5 py-0.5 rounded font-bold text-[9px] transition ${
                       selectedTrack.sidechain?.enabled
-                        ? 'bg-[#ff6e00] text-black'
-                        : 'bg-[#222225] text-[#777] hover:text-white'
+                        ? 'bg-[var(--apex-accent)] text-[var(--apex-state-playing-fg)]'
+                        : 'bg-[var(--apex-surface-2)] text-[var(--apex-text-3)] hover:text-[var(--apex-text)]'
                     }`}
                   >
                     {selectedTrack.sidechain?.enabled ? 'ACTIVE' : 'OFF'}
@@ -537,8 +537,8 @@ export const Mixer: React.FC<MixerProps> = ({
                 </div>
 
                 {selectedTrack.sidechain?.enabled && (
-                  <div className="space-y-1.5 pt-1 border-t border-[#262629]">
-                    <div className="flex items-center justify-between text-[#888]">
+                  <div className="space-y-1.5 pt-1 border-t border-[var(--apex-border)]">
+                    <div className="flex items-center justify-between text-[var(--apex-text-muted)]">
                       <span>TRIGGER SOURCE</span>
                       <select
                         value={selectedTrack.sidechain.sourceTrackId}
@@ -548,7 +548,7 @@ export const Mixer: React.FC<MixerProps> = ({
                           onUpdateTrack(selectedTrack.id, { sidechain: sc });
                           audioEngine.updateMixerTrack({ ...selectedTrack, sidechain: sc });
                         }}
-                        className="bg-[#121214] text-white text-[9px] px-1.5 py-0.5 rounded border border-[#333336]"
+                        className="bg-[var(--apex-chrome-inset)] text-[var(--apex-text)] text-[9px] px-1.5 py-0.5 rounded border border-[var(--apex-border)]"
                       >
                         {tracks.filter(t => t.id !== selectedTrack.id && t.id > 0).map(t => (
                           <option key={t.id} value={t.id}>
@@ -558,7 +558,7 @@ export const Mixer: React.FC<MixerProps> = ({
                       </select>
                     </div>
 
-                    <div className="flex items-center justify-between text-[#888]">
+                    <div className="flex items-center justify-between text-[var(--apex-text-muted)]">
                       <span>DUCK DEPTH</span>
                       <input
                         type="range"
@@ -574,12 +574,12 @@ export const Mixer: React.FC<MixerProps> = ({
                           onUpdateTrack(selectedTrack.id, { sidechain: sc });
                           audioEngine.updateMixerTrack({ ...selectedTrack, sidechain: sc });
                         }}
-                        className="w-20 h-1 accent-[#ff6e00] bg-[#121214] rounded"
+                        className="w-20 h-1 accent-[var(--apex-accent)] bg-[var(--apex-chrome-inset)] rounded"
                       />
-                      <span className="font-mono text-[#ff6e00] text-[9px]">{Math.round(selectedTrack.sidechain.amount * 100)}%</span>
+                      <span className="font-mono text-[var(--apex-accent)] text-[9px]">{Math.round(selectedTrack.sidechain.amount * 100)}%</span>
                     </div>
 
-                    <div className="text-[9px] text-[#666] italic pt-0.5">
+                    <div className="text-[9px] text-[var(--apex-text-3)] italic pt-0.5">
                       Note-triggered envelope — no level detector.
                     </div>
                   </div>
@@ -589,14 +589,14 @@ export const Mixer: React.FC<MixerProps> = ({
 
             {/* Phase 88: Post-Fader Aux Sends (≤2, no pre/post, no pan) */}
             {selectedTrack.id !== 0 && (
-              <div className="bg-[#18181b] border border-[#2e2e32] rounded p-2 text-[10px] space-y-1.5">
+              <div className="bg-[var(--apex-panel)] border border-[var(--apex-border)] rounded p-2 text-[10px] space-y-1.5">
                 <div className="flex items-center justify-between">
-                  <span className="font-bold text-white flex items-center gap-1">
+                  <span className="font-bold text-[var(--apex-text)] flex items-center gap-1">
                     <span className="w-2 h-2 bg-[#7e57c2] rounded-full" />
                     <span>AUX SENDS (POST-FADER)</span>
                   </span>
                   <div className="flex items-center gap-1">
-                    <span className="text-[8px] text-[#777]">{(selectedTrack.auxSends?.length ?? 0)}/2</span>
+                    <span className="text-[8px] text-[var(--apex-text-3)]">{(selectedTrack.auxSends?.length ?? 0)}/2</span>
                     {onCreateAuxReturn && (
                       <button
                         onClick={onCreateAuxReturn}
@@ -610,12 +610,12 @@ export const Mixer: React.FC<MixerProps> = ({
                 </div>
 
                 {(selectedTrack.auxSends ?? []).map((send, idx) => (
-                  <div key={idx} className="bg-[#222225] rounded p-1.5 flex flex-col gap-1.5 border border-[#2a2a2e]">
+                  <div key={idx} className="bg-[var(--apex-surface-2)] rounded p-1.5 flex flex-col gap-1.5 border border-[var(--apex-border)]">
                     <div className="flex items-center justify-between gap-1">
-                      <span className="font-bold text-[#aaa]">SEND {idx + 1}</span>
+                      <span className="font-bold text-[var(--apex-text-2)]">SEND {idx + 1}</span>
                       <button
                         onClick={() => handleRemoveAuxSend(selectedTrack.id, idx)}
-                        className="text-[#777] hover:text-red-400 text-[10px] leading-none"
+                        className="text-[var(--apex-text-3)] hover:text-[var(--apex-danger)] text-[10px] leading-none"
                         title="Remove send"
                       >
                         ×
@@ -623,11 +623,11 @@ export const Mixer: React.FC<MixerProps> = ({
                     </div>
 
                     <div className="flex items-center justify-between gap-1">
-                      <span className="text-[#888]">RETURN</span>
+                      <span className="text-[var(--apex-text-muted)]">RETURN</span>
                       <select
                         value={send.targetId}
                         onChange={(e) => handleAuxSendTargetChange(selectedTrack.id, idx, parseInt(e.target.value, 10))}
-                        className="bg-[#121214] text-white text-[9px] px-1.5 py-0.5 rounded border border-[#333336] min-w-[110px]"
+                        className="bg-[var(--apex-chrome-inset)] text-[var(--apex-text)] text-[9px] px-1.5 py-0.5 rounded border border-[var(--apex-border)] min-w-[110px]"
                       >
                         {tracks.filter(t => t.id !== selectedTrack.id && t.id !== 0).map(t => (
                           <option key={t.id} value={t.id}>
@@ -637,7 +637,7 @@ export const Mixer: React.FC<MixerProps> = ({
                       </select>
                     </div>
 
-                    <div className="flex items-center justify-between gap-1 text-[#888]">
+                    <div className="flex items-center justify-between gap-1 text-[var(--apex-text-muted)]">
                       <span>AMOUNT</span>
                       <input
                         type="range"
@@ -648,7 +648,7 @@ export const Mixer: React.FC<MixerProps> = ({
                         onPointerDown={() => onInteractionStart?.('Change aux send')}
                         onPointerUp={() => onInteractionEnd?.('Change aux send')}
                         onChange={(e) => handleAuxSendAmountChange(selectedTrack.id, idx, parseFloat(e.target.value))}
-                        className="w-20 h-1 accent-[#7e57c2] bg-[#121214] rounded"
+                        className="w-20 h-1 accent-[#7e57c2] bg-[var(--apex-chrome-inset)] rounded"
                       />
                       <span className="font-mono text-[#7e57c2] text-[9px] min-w-[28px] text-right">{Math.round(send.amount * 100)}%</span>
                     </div>
@@ -658,35 +658,35 @@ export const Mixer: React.FC<MixerProps> = ({
                 {(selectedTrack.auxSends?.length ?? 0) < 2 && (
                   <button
                     onClick={() => handleAddAuxSend(selectedTrack.id)}
-                    className="w-full py-1 text-[9px] font-bold rounded border border-dashed border-[#333336] hover:border-[#7e57c2]/50 text-[#777] hover:text-[#7e57c2] transition"
+                    className="w-full py-1 text-[9px] font-bold rounded border border-dashed border-[var(--apex-border)] hover:border-[#7e57c2]/50 text-[var(--apex-text-3)] hover:text-[#7e57c2] transition"
                   >
                     + Add Post-Fader Send
                   </button>
                 )}
 
                 {(selectedTrack.auxSends?.length ?? 0) === 0 && (
-                  <div className="text-[9px] text-[#666] italic">No sends. Post-fader sends feed the Return track&apos;s FX → Master.</div>
+                  <div className="text-[9px] text-[var(--apex-text-3)] italic">No sends. Post-fader sends feed the Return track&apos;s FX → Master.</div>
                 )}
               </div>
             )}
 
             {selectedTrack.fxSlots.length === 0 ? (
-              <div className="text-center py-6 text-xs text-[#777]">
+              <div className="text-center py-6 text-xs text-[var(--apex-text-3)]">
                 No effect plugins loaded. Click + to insert Tape Saturation, EQ 2, or Delay.
               </div>
             ) : (
               selectedTrack.fxSlots.map((slot, idx) => (
                 <div
                   key={slot.id}
-                  className={`bg-[#222225] px-2 py-2 rounded text-[11px] flex flex-col gap-1.5 border-l-2 transition ${
-                    slot.enabled ? 'border-[#ff6e00]' : 'border-[#444] opacity-60'
+                  className={`bg-[var(--apex-surface-2)] px-2 py-2 rounded text-[11px] flex flex-col gap-1.5 border-l-2 transition ${
+                    slot.enabled ? 'border-[var(--apex-accent)]' : 'border-[var(--apex-border)] opacity-60'
                   }`}
                 >
-                  <div className="flex items-center justify-between text-white">
+                  <div className="flex items-center justify-between text-[var(--apex-text)]">
                     <div className="flex items-center gap-1.5 font-bold text-xs truncate">
                       <button
                         onClick={() => onUpdateFxSlot(selectedTrack.id, slot.id, { enabled: !slot.enabled })}
-                        className={`text-xs ${slot.enabled ? 'text-[#ff6e00]' : 'text-[#777]'}`}
+                        className={`text-xs ${slot.enabled ? 'text-[var(--apex-accent)]' : 'text-[var(--apex-text-3)]'}`}
                       >
                         ●
                       </button>
@@ -696,7 +696,7 @@ export const Mixer: React.FC<MixerProps> = ({
                     <div className="flex items-center gap-1">
                       <button
                         onClick={() => onDeleteFxSlot(selectedTrack.id, slot.id)}
-                        className="text-[#777] hover:text-red-400 p-0.5"
+                        className="text-[var(--apex-text-3)] hover:text-[var(--apex-danger)] p-0.5"
                         title="Remove FX"
                       >
                         <Trash2 className="w-3 h-3" />
@@ -726,7 +726,7 @@ export const Mixer: React.FC<MixerProps> = ({
             {/* Empty Slot Placeholder */}
             <div 
               onClick={() => setShowAddFxMenu(true)}
-              className="border border-dashed border-[#333336] hover:border-[#ff6e00]/50 h-8 rounded mt-2 flex items-center justify-center cursor-pointer text-[10px] text-[#555] hover:text-[#ff6e00] transition"
+              className="border border-dashed border-[var(--apex-border)] hover:border-[var(--apex-state-selected-border)] h-8 rounded mt-2 flex items-center justify-center cursor-pointer text-[10px] text-[var(--apex-text-3)] hover:text-[var(--apex-accent)] transition"
             >
               + Add Next Effect Slot
             </div>

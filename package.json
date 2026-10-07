@@ -27,7 +27,7 @@
     "test:all": "tsx --test src/**/*.test.ts src/**/*.test.tsx",
     "verify:test-discovery": "node scripts/verify-test-discovery.mjs",
     "test:lifecycle": "tsx --test src/phase4Lifecycle.test.ts",
-    "test:shell": "tsx --test src/state/applicationMenu.test.ts src/state/applicationMenuCommands.test.ts src/state/applicationMenuBarRender.test.tsx src/state/applicationMenuBarBehavior.test.ts src/state/applicationShellLayout.test.ts src/state/applicationShellRender.test.tsx src/state/shellDesignTokens.test.ts src/state/transportShell.test.tsx src/state/studioBrowserShell.test.tsx src/state/statusBarShell.test.tsx src/state/hotkeyDocumentation.test.ts src/state/fullscreen.test.ts src/state/musicalKeyboard.test.ts src/state/newSession.test.ts src/state/modalDialogShell.test.tsx",
+    "test:shell": "tsx --test src/state/theme.test.ts src/state/ui04ThemeConsistency.test.ts src/components/AppearanceSettingsModal.test.tsx src/state/applicationMenu.test.ts src/state/applicationMenuCommands.test.ts src/state/applicationMenuBarRender.test.tsx src/state/applicationMenuBarBehavior.test.ts src/state/applicationShellLayout.test.ts src/state/workspaceShell.test.ts src/state/applicationShellRender.test.tsx src/state/shellDesignTokens.test.ts src/state/transportShell.test.tsx src/state/studioBrowserShell.test.tsx src/state/statusBarShell.test.tsx src/state/hotkeyDocumentation.test.ts src/state/fullscreen.test.ts src/state/musicalKeyboard.test.ts src/state/newSession.test.ts src/state/modalDialogShell.test.tsx",
     "test:desktop-permissions": "node --test tests/desktopPermissions.test.cjs",
     "verify:desktop": "node scripts/verify-desktop-config.mjs",
     "smoke:win": "node scripts/desktop-smoke.mjs",

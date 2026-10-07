@@ -1108,9 +1108,9 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
     : [];
 
   return (
-    <div id="piano-roll-container" className="h-full flex flex-col bg-[#141416] text-[#b0b0b0] select-none overflow-hidden">
+    <div id="piano-roll-container" className="h-full flex flex-col bg-[var(--apex-canvas)] text-[var(--apex-text-2)] select-none overflow-hidden">
       {/* Top Toolbar */}
-      <div className="h-10 px-3 bg-[#18181b] border-b border-[#2e2e32] flex items-center justify-between gap-2 shrink-0 overflow-x-auto custom-scrollbar">
+      <div className="h-10 px-3 bg-[var(--apex-panel-header)] border-b border-[var(--apex-border)] flex items-center justify-between gap-2 shrink-0 overflow-x-auto custom-scrollbar">
         {/* Left: Active Channel Selector */}
         <div className="flex items-center gap-2 shrink-0">
           <div className="flex items-center gap-1 text-xs">
@@ -1118,7 +1118,7 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
             <select
               value={channel.id}
               onChange={(e) => onSelectChannel(e.target.value)}
-              className="bg-[#121214] text-white font-bold text-xs px-2 py-1 rounded border border-[#333336] focus:outline-none cursor-pointer"
+              className="bg-[var(--apex-chrome-inset)] text-[var(--apex-text)] font-bold text-xs px-2 py-1 rounded border border-[var(--apex-border)] focus:outline-none cursor-pointer"
             >
               {allChannels.map(c => (
                 <option key={c.id} value={c.id}>
@@ -1128,35 +1128,35 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
             </select>
           </div>
 
-          <div className="h-4 w-px bg-[#333]" />
+          <div className="h-4 w-px bg-[var(--apex-border)]" />
 
           {/* Tools */}
-          <div className="flex items-center gap-1 bg-[#121214] p-0.5 rounded border border-[#333336]">
+          <div className="flex items-center gap-1 bg-[var(--apex-chrome-inset)] p-0.5 rounded border border-[var(--apex-border)]">
             <button
               id="piano-tool-select"
               onClick={() => setCurrentTool('select')}
-              className={`p-1 rounded transition ${currentTool === 'select' ? 'bg-[#ff6e00] text-black font-bold' : 'text-[#777] hover:text-white'}`}
+              className={`p-1 rounded transition ${currentTool === 'select' ? 'bg-[var(--apex-accent)] text-[var(--apex-state-playing-fg)] font-bold' : 'text-[var(--apex-text-3)] hover:text-[var(--apex-text)]'}`}
               title="Select Tool (Marquee / Multi-Select)"
             >
               <MousePointer className="w-3.5 h-3.5" />
             </button>
             <button
               onClick={() => setCurrentTool('draw')}
-              className={`p-1 rounded transition ${currentTool === 'draw' ? 'bg-[#ff6e00] text-black font-bold' : 'text-[#777] hover:text-white'}`}
+              className={`p-1 rounded transition ${currentTool === 'draw' ? 'bg-[var(--apex-accent)] text-[var(--apex-state-playing-fg)] font-bold' : 'text-[var(--apex-text-3)] hover:text-[var(--apex-text)]'}`}
               title="Draw Note (Pencil)"
             >
               <Pencil className="w-3.5 h-3.5" />
             </button>
             <button
               onClick={() => setCurrentTool('paint')}
-              className={`p-1 rounded transition ${currentTool === 'paint' ? 'bg-[#ff6e00] text-black font-bold' : 'text-[#777] hover:text-white'}`}
+              className={`p-1 rounded transition ${currentTool === 'paint' ? 'bg-[var(--apex-accent)] text-[var(--apex-state-playing-fg)] font-bold' : 'text-[var(--apex-text-3)] hover:text-[var(--apex-text)]'}`}
               title="Paint Notes (Brush)"
             >
               <Paintbrush className="w-3.5 h-3.5" />
             </button>
             <button
               onClick={() => setCurrentTool('erase')}
-              className={`p-1 rounded transition ${currentTool === 'erase' ? 'bg-[#ff0000] text-white font-bold' : 'text-[#777] hover:text-white'}`}
+              className={`p-1 rounded transition ${currentTool === 'erase' ? 'bg-[var(--apex-danger)] text-[var(--apex-state-recording-fg)] font-bold' : 'text-[var(--apex-text-3)] hover:text-[var(--apex-text)]'}`}
               title="Erase Note (Eraser)"
             >
               <Eraser className="w-3.5 h-3.5" />
@@ -1167,12 +1167,12 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
         {/* Middle: Scale Highlighting & Chord Stamper */}
         <div className="flex items-center gap-2 shrink-0">
           {/* Root Key & Scale */}
-          <div className="flex items-center gap-1 text-[11px] bg-[#121214] px-2 py-0.5 rounded border border-[#333336]">
-            <span className="text-[#ff6e00] font-bold text-[10px]">KEY:</span>
+          <div className="flex items-center gap-1 text-[11px] bg-[var(--apex-chrome-inset)] px-2 py-0.5 rounded border border-[var(--apex-border)]">
+            <span className="text-[var(--apex-accent)] font-bold text-[10px]">KEY:</span>
             <select
               value={rootKey}
               onChange={(e) => setRootKey(Number(e.target.value))}
-              className="bg-transparent text-white font-bold text-xs focus:outline-none cursor-pointer"
+              className="bg-transparent text-[var(--apex-text)] font-bold text-xs focus:outline-none cursor-pointer"
             >
               {ROOT_KEYS.map(k => (
                 <option key={k.val} value={k.val}>{k.name}</option>
@@ -1181,7 +1181,7 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
             <select
               value={selectedScaleIndex}
               onChange={(e) => setSelectedScaleIndex(Number(e.target.value))}
-              className="bg-transparent text-[#aaa] text-xs focus:outline-none cursor-pointer max-w-[140px] truncate"
+              className="bg-transparent text-[var(--apex-text-2)] text-xs focus:outline-none cursor-pointer max-w-[140px] truncate"
             >
               {SCALE_PRESETS.map((scale, idx) => (
                 <option key={idx} value={idx}>{scale.name}</option>
@@ -1190,23 +1190,23 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
           </div>
 
           {/* Chord Stamp & Voicing */}
-          <div className="flex items-center gap-1.5 text-[11px] bg-[#121214] px-2 py-0.5 rounded border border-[#333336]">
-            <span className="text-[#00bcd4] font-bold text-[10px]">STAMP:</span>
+          <div className="flex items-center gap-1.5 text-[11px] bg-[var(--apex-chrome-inset)] px-2 py-0.5 rounded border border-[var(--apex-border)]">
+            <span className="text-[var(--apex-cyan)] font-bold text-[10px]">STAMP:</span>
             <select
               value={selectedChordStamp}
               onChange={(e) => setSelectedChordStamp(Number(e.target.value))}
-              className="bg-transparent text-white font-bold text-xs focus:outline-none cursor-pointer"
+              className="bg-transparent text-[var(--apex-text)] font-bold text-xs focus:outline-none cursor-pointer"
             >
               {CHORD_STAMPS.map((stamp, idx) => (
                 <option key={idx} value={idx}>{stamp.name}</option>
               ))}
             </select>
 
-            <span className="text-[#ff9800] font-bold text-[10px] ml-1">VOICING:</span>
+            <span className="text-[var(--apex-gold)] font-bold text-[10px] ml-1">VOICING:</span>
             <select
               value={selectedVoicing}
               onChange={(e) => setSelectedVoicing(e.target.value)}
-              className="bg-transparent text-[#ddd] text-xs focus:outline-none cursor-pointer"
+              className="bg-transparent text-[var(--apex-text)] text-xs focus:outline-none cursor-pointer"
             >
               {CHORD_VOICINGS.map((v) => (
                 <option key={v.id} value={v.id}>{v.name}</option>
@@ -1220,7 +1220,7 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
           {/* Strum Chords Button */}
           <button
             onClick={handleStrumNotes}
-            className="flex items-center gap-1 px-2 py-1 bg-[#1e1e24] hover:bg-[#282830] text-[#00bcd4] hover:text-white rounded text-[10px] font-semibold border border-[#00bcd4]/30 transition shadow-sm"
+            className="flex items-center gap-1 px-2 py-1 bg-[var(--apex-surface-2)] hover:bg-[var(--apex-state-hover)] text-[var(--apex-cyan)] hover:text-[var(--apex-text)] rounded text-[10px] font-semibold border border-[#00bcd4]/30 transition shadow-sm"
             title="Strum chord notes with micro-timing offset"
           >
             <Music className="w-3 h-3" />
@@ -1230,10 +1230,10 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
           {/* Extract Root Bassline */}
           <button
             onClick={handleExtractBassline}
-            className="flex items-center gap-1 px-2 py-1 bg-[#2e1a12] hover:bg-[#3d2419] text-[#ff9800] hover:text-white rounded text-[10px] font-bold border border-[#ff9800]/40 transition shadow-sm"
+            className="flex items-center gap-1 px-2 py-1 bg-[var(--apex-surface-2)] hover:bg-[var(--apex-state-hover)] text-[var(--apex-gold)] hover:text-[var(--apex-text)] rounded text-[10px] font-bold border border-[#ff9800]/40 transition shadow-sm"
             title="Auto-extract lowest root notes to 808/Bassline channel"
           >
-            <Zap className="w-3 h-3 text-[#ff6e00]" />
+            <Zap className="w-3 h-3 text-[var(--apex-accent)]" />
             <span>Extract 808 Bass</span>
           </button>
 
@@ -1242,8 +1242,8 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
             onClick={() => setShowGhostNotes(!showGhostNotes)}
             className={`flex items-center gap-1 px-2 py-1 rounded text-[10px] font-semibold border transition ${
               showGhostNotes
-                ? 'bg-[#2a2a2e] text-[#2ecc71] border-[#2ecc71]/40'
-                : 'bg-[#121214] text-[#666] border-[#333]'
+                ? 'bg-[var(--apex-surface-3)] text-[var(--apex-success)] border-[#2ecc71]/40'
+                : 'bg-[var(--apex-chrome-inset)] text-[var(--apex-text-3)] border-[var(--apex-border)]'
             }`}
             title="Toggle Ghost Notes from other channels"
           >
@@ -1256,8 +1256,8 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
             onClick={() => setShowVelocityDrawer(!showVelocityDrawer)}
             className={`flex items-center gap-1 px-2 py-1 rounded text-[10px] font-semibold border transition ${
               showVelocityDrawer
-                ? 'bg-[#ff6e00]/15 text-[#ff6e00] border-[#ff6e00]/40'
-                : 'bg-[#121214] text-[#666] border-[#333]'
+                ? 'bg-[var(--apex-state-selected)] text-[var(--apex-accent)] border-[var(--apex-state-selected-border)]'
+                : 'bg-[var(--apex-chrome-inset)] text-[var(--apex-text-3)] border-[var(--apex-border)]'
             }`}
             title="Toggle Note Velocity Editor"
           >
@@ -1267,16 +1267,16 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
 
           <button
             onClick={handleHumanizeVelocities}
-            className="flex items-center gap-1 px-2 py-1 bg-[#222225] hover:bg-[#2d2d30] text-[#b0b0b0] hover:text-white rounded text-[10px] font-semibold border border-[#333336]"
+            className="flex items-center gap-1 px-2 py-1 bg-[var(--apex-surface-2)] hover:bg-[var(--apex-state-hover)] text-[var(--apex-text-2)] hover:text-[var(--apex-text)] rounded text-[10px] font-semibold border border-[var(--apex-border)]"
             title="Humanize velocities with natural swing"
           >
-            <Wand2 className="w-3 h-3 text-[#ff6e00]" />
+            <Wand2 className="w-3 h-3 text-[var(--apex-accent)]" />
             <span>Humanize</span>
           </button>
 
           {/* MIDI Import (.mid) */}
           <label
-            className="flex items-center gap-1 px-2 py-1 bg-[#1e1e24] hover:bg-[#282830] text-[#00bcd4] hover:text-white rounded text-[10px] font-semibold border border-[#00bcd4]/30 transition cursor-pointer"
+            className="flex items-center gap-1 px-2 py-1 bg-[var(--apex-surface-2)] hover:bg-[var(--apex-state-hover)] text-[var(--apex-cyan)] hover:text-[var(--apex-text)] rounded text-[10px] font-semibold border border-[#00bcd4]/30 transition cursor-pointer"
             title="Import Standard MIDI File (.mid)"
           >
             <Upload className="w-3 h-3" />
@@ -1292,7 +1292,7 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
           {/* MIDI Export (.mid) */}
           <button
             onClick={handleExportMidi}
-            className="flex items-center gap-1 px-2 py-1 bg-[#1e1e24] hover:bg-[#282830] text-[#2ecc71] hover:text-white rounded text-[10px] font-semibold border border-[#2ecc71]/30 transition"
+            className="flex items-center gap-1 px-2 py-1 bg-[var(--apex-surface-2)] hover:bg-[var(--apex-state-hover)] text-[var(--apex-success)] hover:text-[var(--apex-text)] rounded text-[10px] font-semibold border border-[#2ecc71]/30 transition"
             title="Export Channel Notes to Standard MIDI File (.mid)"
           >
             <Download className="w-3 h-3" />
@@ -1301,7 +1301,7 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
 
           <button
             onClick={handleClearAllNotes}
-            className="p-1.5 bg-[#222225] hover:bg-red-500/20 text-[#777] hover:text-red-400 rounded text-[10px] border border-[#333336]"
+            className="p-1.5 bg-[var(--apex-surface-2)] hover:bg-[color-mix(in_srgb,var(--apex-danger)_20%,transparent)] text-[var(--apex-text-3)] hover:text-[var(--apex-danger)] rounded text-[10px] border border-[var(--apex-border)]"
             title="Clear all notes"
           >
             <Trash2 className="w-3.5 h-3.5" />
@@ -1311,19 +1311,19 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
 
       {/* Action Toast Feedback */}
       {statusMessage && (
-        <div className="bg-[#ff6e00] text-black font-bold text-xs px-3 py-1 flex items-center justify-between shadow-md transition-all">
+        <div className="bg-[var(--apex-accent)] text-[var(--apex-state-playing-fg)] font-bold text-xs px-3 py-1 flex items-center justify-between shadow-md transition-all">
           <div className="flex items-center gap-1.5">
             <Sparkles className="w-3.5 h-3.5" />
             <span>{statusMessage}</span>
           </div>
-          <button onClick={() => setStatusMessage(null)} className="text-black/80 hover:text-black text-xs">✕</button>
+          <button onClick={() => setStatusMessage(null)} className="text-[var(--apex-state-playing-fg)] hover:text-[var(--apex-state-playing-fg)] text-xs">✕</button>
         </div>
       )}
 
       {/* Main Piano Roll Matrix: Left Keys & Right Step Grid */}
       <div className="flex-1 flex overflow-hidden">
         {/* Left: Interactive Virtual Piano Keys Strip */}
-        <div className="w-16 sm:w-20 bg-[#141416] border-r border-[#333336] flex flex-col overflow-y-auto custom-scrollbar shrink-0 select-none">
+        <div className="w-16 sm:w-20 bg-[var(--apex-panel)] border-r border-[var(--apex-border)] flex flex-col overflow-y-auto custom-scrollbar shrink-0 select-none">
           {pitchRange.map((pitch) => {
             const isBlack = isBlackKey(pitch);
             const inScale = isInScale(pitch);
@@ -1339,26 +1339,26 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
                   e.preventDefault();
                   handleAuditionKey(pitch);
                 }}
-                className={`h-6 border-b flex items-center justify-between px-1.5 text-[9px] font-mono font-bold transition active:bg-[#ff6e00] active:text-black select-none relative ${
+                className={`h-6 border-b flex items-center justify-between px-1.5 text-[9px] font-mono font-bold transition active:bg-[var(--apex-accent)] active:text-[var(--apex-state-playing-fg)] select-none relative ${
                   isBlack
-                    ? 'bg-[#0a0a0b] text-[#777] border-[#222225] hover:bg-[#1a1a1d]'
-                    : 'bg-[#1a1a1d] text-white border-[#333336] hover:bg-[#242428]'
+                    ? 'bg-[var(--apex-piano-key-accidental)] text-[var(--apex-text-3)] border-[var(--apex-grid-line)] hover:bg-[var(--apex-state-hover)]'
+                    : 'bg-[var(--apex-piano-key-natural)] text-[var(--apex-text)] border-[var(--apex-grid-line-strong)] hover:bg-[var(--apex-state-hover)]'
                 } ${inScale ? '' : 'opacity-40'}`}
               >
                 <div className="flex items-center space-x-1">
-                  {isRoot && <span className="w-1.5 h-1.5 rounded-full bg-[#ff6e00]" />}
+                  {isRoot && <span className="w-1.5 h-1.5 rounded-full bg-[var(--apex-accent)]" />}
                   <span>{noteName}</span>
                 </div>
-                {pitch % 12 === 0 && <span className="text-[7px] text-[#ff6e00]">OCT</span>}
+                {pitch % 12 === 0 && <span className="text-[7px] text-[var(--apex-accent)]">OCT</span>}
               </button>
             );
           })}
         </div>
 
         {/* Right: Note Grid Timeline */}
-        <div className="flex-1 overflow-auto custom-scrollbar bg-[#0e0e10] relative flex flex-col">
+        <div className="flex-1 overflow-auto custom-scrollbar bg-[var(--apex-canvas)] relative flex flex-col">
           {/* Header Bars Step Numbers */}
-          <div className="h-6 bg-[#1a1a1d] border-b border-[#333336] sticky top-0 z-20 flex min-w-[896px]">
+          <div className="h-6 bg-[var(--apex-panel-header)] border-b border-[var(--apex-border)] sticky top-0 z-20 flex min-w-[896px]">
             {Array.from({ length: totalSteps }).map((_, stepIdx) => {
               const isBarStart = stepIdx % 4 === 0;
               const isCurrentStep = isPlaying && (currentStep % totalSteps) === stepIdx;
@@ -1367,8 +1367,8 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
                 <div
                   key={stepIdx}
                   className={`w-7 h-full flex items-center justify-center font-mono text-[8px] border-r ${
-                    isBarStart ? 'border-[#444] text-white font-bold bg-[#222225]' : 'border-[#222225] text-[#555]'
-                  } ${isCurrentStep ? 'bg-[#ff6e00]/20 text-[#ff6e00]' : ''}`}
+                    isBarStart ? 'border-[var(--apex-grid-line-strong)] text-[var(--apex-text)] font-bold bg-[var(--apex-surface-2)]' : 'border-[var(--apex-grid-line)] text-[var(--apex-text-3)]'
+                  } ${isCurrentStep ? 'bg-[var(--apex-state-selected)] text-[var(--apex-accent)]' : ''}`}
                 >
                   {isBarStart ? `${Math.floor(stepIdx / 4) + 1}` : ''}
                 </div>
@@ -1388,7 +1388,7 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
               const r = normalizeRect(marquee.startX, marquee.startY, marquee.currentX, marquee.currentY);
               return (
                 <div
-                  className="absolute pointer-events-none border border-[#ff6e00] bg-[#ff6e00]/20 z-30 rounded-xs shadow-sm"
+                  className="absolute pointer-events-none border border-[var(--apex-accent)] bg-[var(--apex-state-selected)] z-30 rounded-xs shadow-sm"
                   style={{
                     left: `${r.x}px`,
                     top: `${r.y}px`,
@@ -1409,10 +1409,10 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
                   key={pitch}
                   className={`h-6 border-b flex relative ${
                     isRoot
-                      ? 'bg-[#ff6e00]/10 border-[#ff6e00]/30'
+                      ? 'bg-[var(--apex-state-selected)] border-[var(--apex-state-selected-border)]'
                       : isBlack
-                      ? 'bg-[#0e0e10] border-[#1c1c20]'
-                      : 'bg-[#121214] border-[#202024]'
+                      ? 'bg-[var(--apex-piano-row-accidental)] border-[var(--apex-grid-line)]'
+                      : 'bg-[var(--apex-piano-row-natural)] border-[var(--apex-grid-line-strong)]'
                   } ${inScale ? '' : 'opacity-60'}`}
                 >
                   {/* Grid cells */}
@@ -1425,8 +1425,8 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
                         key={stepIdx}
                         onClick={() => handleGridClick(pitch, stepIdx)}
                         className={`w-7 h-full border-r cursor-pointer transition-colors ${
-                          isBarStart ? 'border-[#333336]' : 'border-[#1a1a1d]'
-                        } ${isCurrent ? 'bg-white/5' : 'hover:bg-white/10'}`}
+                          isBarStart ? 'border-[var(--apex-grid-line-strong)]' : 'border-[var(--apex-grid-line)]'
+                        } ${isCurrent ? 'bg-[var(--apex-state-selected)]' : 'hover:bg-[var(--apex-state-hover)]'}`}
                       />
                     );
                   })}
@@ -1439,9 +1439,9 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
                         left: `${gn.start * 28}px`,
                         width: `${Math.max(24, gn.duration * 28 - 3)}px`
                       }}
-                      className="absolute top-1 bottom-1 bg-[#ffffff]/10 border border-[#ffffff]/20 rounded-xs pointer-events-none z-5 flex items-center px-1"
+                      className="absolute top-1 bottom-1 bg-[var(--apex-state-selected)] border border-[var(--apex-state-selected-border)] rounded-xs pointer-events-none z-5 flex items-center px-1"
                     >
-                      <span className="text-[7px] text-[#888] truncate">{gn.channelName}</span>
+                      <span className="text-[7px] text-[var(--apex-text-muted)] truncate">{gn.channelName}</span>
                     </div>
                   ))}
 
@@ -1490,11 +1490,11 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
                           opacity: 0.4 + (n.velocity || 0.8) * 0.6,
                           touchAction: 'none'
                         }}
-                        className={`absolute top-0.5 bottom-0.5 rounded-sm border shadow flex items-center justify-between px-1 text-[8px] text-black font-bold overflow-hidden cursor-grab active:cursor-grabbing z-10 select-none ${
+                        className={`absolute top-0.5 bottom-0.5 rounded-sm border shadow flex items-center justify-between px-1 text-[8px] font-bold overflow-hidden cursor-grab active:cursor-grabbing z-10 select-none ${
                           isSelected
-                            ? 'bg-[#ffffff] border-[#ffffff] text-black ring-2 ring-[#ff6e00]'
-                            : 'bg-[#ff6e00] border-[#ff7d1a] text-black'
-                        } ${isInteractingThis ? 'ring-2 ring-white shadow-xl opacity-90 brightness-110' : ''}`}
+                            ? 'bg-[var(--apex-surface-3)] border-[var(--apex-accent)] text-[var(--apex-text)] ring-2 ring-[var(--apex-accent)]'
+                            : 'bg-[var(--apex-accent)] border-[var(--apex-accent-strong)] text-[var(--apex-state-playing-fg)]'
+                        } ${isInteractingThis ? 'ring-2 ring-[var(--apex-accent-strong)] shadow-xl opacity-90 brightness-110' : ''}`}
                       >
                         {/* Left resize handle */}
                         <div
@@ -1527,9 +1527,9 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
 
           {/* Velocity Stalks Editor Drawer */}
           {showVelocityDrawer && (
-            <div className="h-20 bg-[#121214] border-t border-[#2e2e32] min-w-[896px] sticky bottom-0 z-20 flex flex-col">
-              <div className="px-3 py-1 bg-[#18181b] border-b border-[#28282b] flex items-center justify-between text-[9px] text-[#888]">
-                <span className="font-bold uppercase tracking-wider text-white">Note Velocity Stalks (Dynamics)</span>
+            <div className="h-20 bg-[var(--apex-panel)] border-t border-[var(--apex-border)] min-w-[896px] sticky bottom-0 z-20 flex flex-col">
+              <div className="px-3 py-1 bg-[var(--apex-panel-header)] border-b border-[var(--apex-border)] flex items-center justify-between text-[9px] text-[var(--apex-text-muted)]">
+                <span className="font-bold uppercase tracking-wider text-[var(--apex-text)]">Note Velocity Stalks (Dynamics)</span>
                 <span>Click & drag stalk heights to adjust loudness</span>
               </div>
               <div className="flex-1 relative flex">
@@ -1541,7 +1541,7 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
                     <div
                       key={`vel-${stepIdx}`}
                       className={`w-7 h-full border-r relative flex items-end justify-center pb-1 ${
-                        isBarStart ? 'border-[#333336]' : 'border-[#1a1a1d]'
+                        isBarStart ? 'border-[var(--apex-border)]' : 'border-[var(--apex-grid-line)]'
                       }`}
                     >
                       {stepNotes.map(n => {
@@ -1559,10 +1559,10 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
                                 handleVelocityChange(n.id, newVel);
                               }
                             }}
-                            className="w-2 bg-[#ff6e00] hover:bg-white rounded-t cursor-ns-resize transition-all relative group"
+                            className="w-2 bg-[var(--apex-accent)] hover:bg-[var(--apex-accent-strong)] rounded-t cursor-ns-resize transition-all relative group"
                             style={{ height: `${velHeight}%` }}
                           >
-                            <span className="hidden group-hover:block absolute -top-5 left-1/2 -translate-x-1/2 bg-black px-1 rounded text-[8px] text-white font-mono z-30">
+                            <span className="hidden group-hover:block absolute -top-5 left-1/2 -translate-x-1/2 bg-[var(--apex-panel)] border border-[var(--apex-border)] px-1 rounded text-[8px] text-[var(--apex-text)] font-mono z-30">
                               {Math.round((n.velocity || 0.8) * 127)}
                             </span>
                           </div>

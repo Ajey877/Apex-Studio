@@ -2,6 +2,7 @@
 
 /* Apex Studio Phase 0: Midnight Aurora design system. */
 :root {
+  color-scheme: dark;
   --apex-bg: #11131a;
   --apex-surface: #191c25;
   --apex-surface-2: #202430;
@@ -37,7 +38,7 @@
   }
   button, input, select, textarea { touch-action: manipulation; }
   button { -webkit-font-smoothing: antialiased; }
-  input, select, textarea { color-scheme: dark; }
+  input, select, textarea { color-scheme: inherit; }
 }
 
 /* Map the old black/orange utility palette into the new visual identity.
@@ -90,8 +91,8 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 
 .custom-scrollbar::-webkit-scrollbar { width: 7px; height: 7px; }
 .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
-.custom-scrollbar::-webkit-scrollbar-thumb { background: #343a4a; border-radius: 999px; }
-.custom-scrollbar::-webkit-scrollbar-thumb:hover { background: #4a5266; }
+.custom-scrollbar::-webkit-scrollbar-thumb { background: var(--apex-scrollbar-thumb); border-radius: 999px; }
+.custom-scrollbar::-webkit-scrollbar-thumb:hover { background: var(--apex-scrollbar-thumb-hover); }
 .no-scrollbar::-webkit-scrollbar { display: none; }
 .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
 
@@ -163,7 +164,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 /* Gutter a11y focus */
 #apex-browser-gutter:focus-visible,
 #apex-inspector-gutter:focus-visible {
-  outline: 2px solid #00d9ff;
+  outline: 2px solid var(--apex-state-focus);
   outline-offset: -2px;
 }
 /* UI-02: Let the resizable wrapper own the browser width while keeping the shipped
@@ -176,13 +177,13 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 }
 
 /* Compact the selected-clip inspector so it doesn't steal vertical space from the arrangement. */
-#fl-playlist-arranger > div.bg-\[\#18181c\].border-t {
+#fl-playlist-arranger > .apex-playlist-selection-panel {
   min-height: 40px;
   padding-top: 7px !important;
   padding-bottom: 7px !important;
 }
 
-#fl-playlist-arranger > div.bg-\[\#18181c\].border-t button {
+#fl-playlist-arranger > .apex-playlist-selection-panel button {
   min-height: 28px;
 }
 
@@ -258,6 +259,21 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   --apex-state-playing-fg: #0d0f16;
   --apex-state-recording: var(--apex-danger);
   --apex-state-recording-fg: #1b0c0e;
+  --apex-state-drop: color-mix(in srgb, var(--apex-success) 16%, transparent);
+
+  /* Fine grid lines stay visible without competing with notes or clips. */
+  --apex-grid-line: #242936;
+  --apex-grid-line-strong: #343a4a;
+
+  /* Piano keys are structural surfaces, unlike the user-owned instrument colors. */
+  --apex-piano-key-natural: #202430;
+  --apex-piano-key-accidental: #11131a;
+  --apex-piano-row-natural: #151821;
+  --apex-piano-row-accidental: #11131a;
+
+  /* Scrollbars follow the active surface instead of retaining a dark-only thumb. */
+  --apex-scrollbar-thumb: #343a4a;
+  --apex-scrollbar-thumb-hover: #4a5266;
 
   /* Shell type scale: four steps, two weights. */
   --apex-type-micro: 10px;
@@ -296,16 +312,37 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   --apex-canvas: #f4f6fa;
   --apex-state-hover: rgba(24, 32, 45, 0.07);
   --apex-state-pressed: rgba(24, 32, 45, 0.12);
+  --apex-state-selected: color-mix(in srgb, var(--apex-accent) 18%, transparent);
+  --apex-state-selected-border: color-mix(in srgb, var(--apex-accent) 60%, transparent);
   --apex-state-disabled: #7b8799;
   --apex-state-playing-fg: #ffffff;
   --apex-state-recording-fg: #ffffff;
+  --apex-state-drop: color-mix(in srgb, var(--apex-success) 14%, transparent);
+  --apex-grid-line: #e5e9f0;
+  --apex-grid-line-strong: #c9d0dc;
+  --apex-piano-key-natural: #ffffff;
+  --apex-piano-key-accidental: #dfe4ec;
+  --apex-piano-row-natural: #ffffff;
+  --apex-piano-row-accidental: #f0f2f6;
+  --apex-scrollbar-thumb: #7b8799;
+  --apex-scrollbar-thumb-hover: #59677c;
+  --apex-shadow: 0 12px 36px rgba(24, 32, 45, 0.12);
   --apex-text-muted: #59677c;
 }
 
-:root[data-theme="light"] body,
-:root[data-theme="light"] #root { color-scheme: light; }
-:root[data-theme="dark"] body,
-:root[data-theme="dark"] #root { color-scheme: dark; }
+:root[data-theme="light"] { color-scheme: light; }
+:root[data-theme="dark"] { color-scheme: dark; }
+
+/* Focus-independent DAW states shared by both themes. */
+.apex-step-active {
+  background-color: var(--apex-accent);
+  border-color: var(--apex-accent-strong);
+  box-shadow: 0 0 8px color-mix(in srgb, var(--apex-accent) 40%, transparent);
+}
+
+#fl-playlist-arranger .apex-playlist-drop-target {
+  background-color: var(--apex-state-drop) !important;
+}
 
 /* The two shell bands. The transport owns no bottom border: the ribbon's top
    border is the single separator between them. */
@@ -1133,8 +1170,8 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
    tokens above: no new palette, no gradients, no neon, no specificity escapes.
    =========================================================================== */
 :root {
-  /* Canonical dialog scrim, drawn from the darkest chrome surface. */
-  --apex-modal-overlay: color-mix(in srgb, var(--apex-chrome-menu) 84%, transparent);
+  /* A neutral dark scrim remains legible and consistent over both theme palettes. */
+  --apex-modal-overlay: rgba(5, 7, 12, 0.66);
 }
 
 /* Modal overlay primitive: owns the scrim for every Step 4 dialog. */

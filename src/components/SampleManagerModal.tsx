@@ -145,20 +145,20 @@ export const SampleManagerModal: React.FC<SampleManagerModalProps> = ({
 
   return (
     <ModalFrame labelledBy="sample-manager-modal-title" onClose={onClose} className="fixed inset-0 z-50 flex items-center justify-center p-3 bg-black/80 backdrop-blur-md animate-fade-in select-none">
-      <div className="bg-[#121215] border border-[#ff6e00]/40 rounded-xl w-full max-w-2xl flex flex-col shadow-2xl overflow-hidden text-[#e0e0e0]">
+      <div className="bg-[var(--apex-panel)] border border-[var(--apex-state-selected-border)] rounded-xl w-full max-w-2xl flex flex-col shadow-2xl overflow-hidden text-[var(--apex-text-2)]">
         {/* Header */}
-        <div className="bg-[#18181c] border-b border-[#28282e] px-4 py-3 flex items-center justify-between">
+        <div className="bg-[var(--apex-panel-header)] border-b border-[var(--apex-border)] px-4 py-3 flex items-center justify-between">
           <div className="flex items-center gap-2.5">
-            <div className="w-8 h-8 rounded-lg bg-[#ff6e00] flex items-center justify-center text-black font-black">
+            <div className="w-8 h-8 rounded-lg bg-[var(--apex-accent)] flex items-center justify-center text-[var(--apex-state-playing-fg)] font-black">
               <FolderOpen className="w-4 h-4" />
             </div>
             <div>
-              <h2 id="sample-manager-modal-title" className="text-sm font-bold text-white uppercase">APEX AUDIO SAMPLE LOADER</h2>
-              <p className="text-[11px] text-[#888]">Import custom WAV / MP3 one-shots, slice waveforms & map across piano roll</p>
+              <h2 id="sample-manager-modal-title" className="text-sm font-bold text-[var(--apex-text)] uppercase">APEX AUDIO SAMPLE LOADER</h2>
+              <p className="text-[11px] text-[var(--apex-text-muted)]">Import custom WAV / MP3 one-shots, slice waveforms & map across piano roll</p>
             </div>
           </div>
 
-          <button onClick={onClose} aria-label="Close sample manager" className="p-1 text-[#888] hover:text-white rounded">
+          <button onClick={onClose} aria-label="Close sample manager" className="p-1 text-[var(--apex-text-muted)] hover:text-[var(--apex-text)] rounded">
             <X className="w-5 h-5" />
           </button>
         </div>
@@ -169,7 +169,7 @@ export const SampleManagerModal: React.FC<SampleManagerModalProps> = ({
             onDragOver={(e) => e.preventDefault()}
             onDrop={handleDrop}
             onClick={() => fileInputRef.current?.click()}
-            className="border-2 border-dashed border-[#333339] hover:border-[#ff6e00] bg-[#0c0c0e] hover:bg-[#121215] p-6 rounded-xl text-center cursor-pointer transition flex flex-col items-center justify-center gap-2"
+            className="border-2 border-dashed border-[var(--apex-border)] hover:border-[var(--apex-accent-strong)] bg-[var(--apex-canvas)] hover:bg-[var(--apex-state-hover)] p-6 rounded-xl text-center cursor-pointer transition flex flex-col items-center justify-center gap-2"
           >
             <input
               ref={fileInputRef}
@@ -182,32 +182,32 @@ export const SampleManagerModal: React.FC<SampleManagerModalProps> = ({
                 }
               }}
             />
-            <div className="w-10 h-10 rounded-full bg-[#1e1e24] flex items-center justify-center text-[#ff6e00]">
+            <div className="w-10 h-10 rounded-full bg-[var(--apex-surface-2)] flex items-center justify-center text-[var(--apex-accent)]">
               <Upload className="w-5 h-5" />
             </div>
             <div>
-              <span className="text-xs font-bold text-white">Drag & drop your audio sample here</span>
-              <p className="text-[11px] text-[#777]">Supports WAV, MP3, AIFF, FLAC, OGG one-shots & loops</p>
+              <span className="text-xs font-bold text-[var(--apex-text)]">Drag & drop your audio sample here</span>
+              <p className="text-[11px] text-[var(--apex-text-3)]">Supports WAV, MP3, AIFF, FLAC, OGG one-shots & loops</p>
             </div>
           </div>
 
           {errorMessage && (
-            <div id="sample-manager-error" role="alert" className="p-2.5 bg-[#361111] border border-red-500/60 rounded-lg text-[11px] text-red-200 select-text">
+            <div id="sample-manager-error" role="alert" className="p-2.5 bg-[color-mix(in_srgb,var(--apex-danger)_12%,var(--apex-panel))] border border-[color-mix(in_srgb,var(--apex-danger)_55%,transparent)] rounded-lg text-[11px] text-[var(--apex-danger)] select-text">
               {errorMessage}
             </div>
           )}
 
           {/* Persistent Sample Library */}
-          <div className="bg-[#0c0c0e] border border-[#28282e] rounded-xl p-3 space-y-2">
+          <div className="bg-[var(--apex-canvas)] border border-[var(--apex-border)] rounded-xl p-3 space-y-2">
             <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2 text-xs font-bold text-white">
-                <Music className="w-3.5 h-3.5 text-[#ff6e00]" />
+              <div className="flex items-center gap-2 text-xs font-bold text-[var(--apex-text)]">
+                <Music className="w-3.5 h-3.5 text-[var(--apex-accent)]" />
                 SAMPLE LIBRARY
               </div>
-              <span className="text-[10px] text-[#777]">{sampleLibrary.length} sample{sampleLibrary.length === 1 ? '' : 's'}</span>
+              <span className="text-[10px] text-[var(--apex-text-3)]">{sampleLibrary.length} sample{sampleLibrary.length === 1 ? '' : 's'}</span>
             </div>
             {sampleLibrary.length === 0 ? (
-              <p className="text-[11px] text-[#666]">Imported samples will stay available here even before they are assigned to a channel.</p>
+              <p className="text-[11px] text-[var(--apex-text-3)]">Imported samples will stay available here even before they are assigned to a channel.</p>
             ) : (
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 max-h-36 overflow-y-auto custom-scrollbar">
                 {sampleLibrary.map(sample => (
@@ -217,9 +217,9 @@ export const SampleManagerModal: React.FC<SampleManagerModalProps> = ({
                     setTrimEnd(sample.trimEnd ?? 1);
                     setRootPitch(sample.rootPitch ?? 60);
                     setReverseSample(Boolean(sample.reverse));
-                  }} className={`text-left p-2 rounded-lg border transition ${currentSample?.id === sample.id ? 'border-[#ff6e00] bg-[#ff6e00]/10' : 'border-[#28282e] bg-[#121215] hover:border-[#555]'}`}>
-                    <div className="text-[11px] font-bold text-white truncate">{sample.name}</div>
-                    <div className="text-[9px] text-[#777] font-mono">{sample.duration.toFixed(2)}s · {sample.sampleRate}Hz</div>
+                  }} className={`text-left p-2 rounded-lg border transition ${currentSample?.id === sample.id ? 'border-[var(--apex-accent)] bg-[var(--apex-state-selected)]' : 'border-[var(--apex-border)] bg-[var(--apex-panel)] hover:border-[var(--apex-grid-line-strong)]'}`}>
+                    <div className="text-[11px] font-bold text-[var(--apex-text)] truncate">{sample.name}</div>
+                    <div className="text-[9px] text-[var(--apex-text-3)] font-mono">{sample.duration.toFixed(2)}s · {sample.sampleRate}Hz</div>
                   </button>
                 ))}
               </div>
@@ -231,21 +231,21 @@ export const SampleManagerModal: React.FC<SampleManagerModalProps> = ({
             <div
               id="sample-manager-sample-panel"
               data-audio-unavailable={isCurrentSampleUnavailable ? 'true' : undefined}
-              className={`bg-[#18181d] border rounded-xl p-4 space-y-3 ${
-                isCurrentSampleUnavailable ? 'border-red-500/70' : 'border-[#282830]'
+              className={`bg-[var(--apex-panel)] border rounded-xl p-4 space-y-3 ${
+                isCurrentSampleUnavailable ? 'border-[color-mix(in_srgb,var(--apex-danger)_55%,transparent)]' : 'border-[var(--apex-border)]'
               }`}
             >
               <div className="flex items-center justify-between gap-2">
                 <div className="min-w-0">
-                  <span className={`text-xs font-bold ${isCurrentSampleUnavailable ? 'text-red-300' : 'text-white'}`}>{currentSample.name}</span>
-                  <span className="text-[10px] font-mono text-[#888] ml-2">
+                  <span className={`text-xs font-bold ${isCurrentSampleUnavailable ? 'text-[var(--apex-danger)]' : 'text-[var(--apex-text)]'}`}>{currentSample.name}</span>
+                  <span className="text-[10px] font-mono text-[var(--apex-text-muted)] ml-2">
                     {currentSample.duration.toFixed(2)}s | {currentSample.sampleRate}Hz
                   </span>
                   {isCurrentSampleUnavailable && (
                     <span
                       id="sample-manager-missing-badge"
                       data-audio-unavailable="true"
-                      className="ml-2 inline-flex items-center gap-0.5 px-1 py-[1px] rounded bg-red-600 text-white text-[8px] font-bold uppercase tracking-wide align-middle"
+                      className="ml-2 inline-flex items-center gap-0.5 px-1 py-[1px] rounded bg-[var(--apex-danger)] text-[var(--apex-state-recording-fg)] text-[8px] font-bold uppercase tracking-wide align-middle"
                     >
                       <AlertTriangle className="w-2.5 h-2.5" />
                       {MISSING_AUDIO_SAMPLE_BADGE_LABEL}
@@ -259,8 +259,8 @@ export const SampleManagerModal: React.FC<SampleManagerModalProps> = ({
                   title={unavailableSampleDescription}
                   className={`flex items-center gap-1.5 px-3 py-1 font-bold text-xs rounded transition shadow ${
                     isCurrentSampleUnavailable
-                      ? 'bg-[#2a2a30] text-[#777] cursor-not-allowed'
-                      : 'bg-[#00ff88] hover:bg-[#00e67a] text-black'
+                      ? 'bg-[var(--apex-surface-3)] text-[var(--apex-text-3)] cursor-not-allowed'
+                      : 'bg-[var(--apex-success)] hover:brightness-110 text-[var(--apex-state-playing-fg)]'
                   }`}
                 >
                   <Play className="w-3.5 h-3.5 fill-current" />
@@ -273,21 +273,21 @@ export const SampleManagerModal: React.FC<SampleManagerModalProps> = ({
                   id="sample-manager-missing-audio"
                   role="alert"
                   data-audio-unavailable="true"
-                  className="flex items-start gap-2 p-2.5 bg-[#361111] border border-red-500/60 rounded-lg text-[11px] text-red-200 select-text"
+                  className="flex items-start gap-2 p-2.5 bg-[color-mix(in_srgb,var(--apex-danger)_12%,var(--apex-panel))] border border-[color-mix(in_srgb,var(--apex-danger)_55%,transparent)] rounded-lg text-[11px] text-[var(--apex-danger)] select-text"
                 >
-                  <AlertTriangle className="w-4 h-4 text-red-400 shrink-0 mt-0.5" />
+                  <AlertTriangle className="w-4 h-4 text-[var(--apex-danger)] shrink-0 mt-0.5" />
                   <span>{unavailableSampleDescription}</span>
                 </div>
               )}
 
               {/* Waveform Visualization Canvas */}
-              <div className={`relative h-20 bg-[#070709] border rounded-lg p-2 flex items-center gap-0.5 overflow-hidden ${
-                isCurrentSampleUnavailable ? 'border-red-500/50' : 'border-[#282830]'
+              <div className={`relative h-20 bg-[var(--apex-canvas)] border rounded-lg p-2 flex items-center gap-0.5 overflow-hidden ${
+                isCurrentSampleUnavailable ? 'border-[color-mix(in_srgb,var(--apex-danger)_55%,transparent)]' : 'border-[var(--apex-border)]'
               }`}>
                 {isCurrentSampleUnavailable ? (
                   <>
-                    <div className="w-full border-t border-dashed border-red-400/80" />
-                    <span className="absolute left-2 text-[10px] font-bold uppercase tracking-wide text-red-300">
+                    <div className="w-full border-t border-dashed border-[color-mix(in_srgb,var(--apex-danger)_80%,transparent)]" />
+                    <span className="absolute left-2 text-[10px] font-bold uppercase tracking-wide text-[var(--apex-danger)]">
                       {MISSING_AUDIO_SAMPLE_BADGE_LABEL} — waveform unavailable
                     </span>
                   </>
@@ -298,7 +298,7 @@ export const SampleManagerModal: React.FC<SampleManagerModalProps> = ({
                     <div
                       key={idx}
                       className={`flex-1 rounded-xs transition-all ${
-                        isInsideTrim ? 'bg-[#ff6e00]' : 'bg-[#333339]'
+                        isInsideTrim ? 'bg-[var(--apex-accent)]' : 'bg-[var(--apex-surface-3)]'
                       }`}
                       style={{ height: `${Math.max(10, peak * 90)}%` }}
                     />
@@ -309,11 +309,11 @@ export const SampleManagerModal: React.FC<SampleManagerModalProps> = ({
                 {!isCurrentSampleUnavailable && (
                   <>
                     <div
-                      className="absolute top-0 bottom-0 w-0.5 bg-[#00ff88] shadow-[0_0_8px_#00ff88]"
+                      className="absolute top-0 bottom-0 w-0.5 bg-[var(--apex-success)] shadow-[0_0_8px_var(--apex-success)]"
                       style={{ left: `${trimStart * 100}%` }}
                     />
                     <div
-                      className="absolute top-0 bottom-0 w-0.5 bg-[#ff0055] shadow-[0_0_8px_#ff0055]"
+                      className="absolute top-0 bottom-0 w-0.5 bg-[var(--apex-danger)] shadow-[0_0_8px_var(--apex-danger)]"
                       style={{ left: `${trimEnd * 100}%` }}
                     />
                   </>
@@ -323,40 +323,40 @@ export const SampleManagerModal: React.FC<SampleManagerModalProps> = ({
               {/* Slicing & Root Note Controls */}
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
                 <div>
-                  <div className="flex justify-between text-[11px] text-[#888] mb-1">
+                  <div className="flex justify-between text-[11px] text-[var(--apex-text-muted)] mb-1">
                     <span>Start Trim</span>
-                    <span className="font-mono text-[#00ff88]">{(trimStart * 100).toFixed(0)}%</span>
+                    <span className="font-mono text-[var(--apex-success)]">{(trimStart * 100).toFixed(0)}%</span>
                   </div>
                   <input
                     type="range" min="0" max="0.9" step="0.01"
                     value={trimStart}
                     onChange={(e) => setTrimStart(Number(e.target.value))}
-                    className="w-full accent-[#00ff88]"
+                    className="w-full accent-[var(--apex-success)]"
                   />
                 </div>
 
                 <div>
-                  <div className="flex justify-between text-[11px] text-[#888] mb-1">
+                  <div className="flex justify-between text-[11px] text-[var(--apex-text-muted)] mb-1">
                     <span>End Trim</span>
-                    <span className="font-mono text-[#ff0055]">{(trimEnd * 100).toFixed(0)}%</span>
+                    <span className="font-mono text-[var(--apex-danger)]">{(trimEnd * 100).toFixed(0)}%</span>
                   </div>
                   <input
                     type="range" min="0.1" max="1.0" step="0.01"
                     value={trimEnd}
                     onChange={(e) => setTrimEnd(Number(e.target.value))}
-                    className="w-full accent-[#ff0055]"
+                    className="w-full accent-[var(--apex-danger)]"
                   />
                 </div>
 
                 <div>
-                  <div className="flex justify-between text-[11px] text-[#888] mb-1">
+                  <div className="flex justify-between text-[11px] text-[var(--apex-text-muted)] mb-1">
                     <span>Root Key (Pitch)</span>
-                    <span className="font-mono text-[#ff6e00]">MIDI {rootPitch}</span>
+                    <span className="font-mono text-[var(--apex-accent)]">MIDI {rootPitch}</span>
                   </div>
                   <select
                     value={rootPitch}
                     onChange={(e) => setRootPitch(Number(e.target.value))}
-                    className="w-full bg-[#0c0c0e] border border-[#333] text-white text-xs rounded p-1"
+                    className="w-full bg-[var(--apex-canvas)] border border-[var(--apex-border)] text-[var(--apex-text)] text-xs rounded p-1"
                   >
                     <option value={36}>C2 (Sub / Kick 36)</option>
                     <option value={48}>C3 (Low Octave 48)</option>
@@ -367,13 +367,13 @@ export const SampleManagerModal: React.FC<SampleManagerModalProps> = ({
               </div>
 
               {/* Target Channel Destination */}
-              <div className="pt-2 border-t border-[#282830] flex flex-col sm:flex-row items-center justify-between gap-3">
+              <div className="pt-2 border-t border-[var(--apex-border)] flex flex-col sm:flex-row items-center justify-between gap-3">
                 <div className="flex items-center gap-2 w-full sm:w-auto">
-                  <span className="text-xs text-[#888]">Target Channel:</span>
+                  <span className="text-xs text-[var(--apex-text-muted)]">Target Channel:</span>
                   <select
                     value={targetChannelId}
                     onChange={(e) => setTargetChannelId(e.target.value)}
-                    className="bg-[#0c0c0e] border border-[#333] text-white text-xs rounded p-1.5 font-bold"
+                    className="bg-[var(--apex-canvas)] border border-[var(--apex-border)] text-[var(--apex-text)] text-xs rounded p-1.5 font-bold"
                   >
                     {channels.map(ch => (
                       <option key={ch.id} value={ch.id}>{ch.name}</option>
@@ -388,8 +388,8 @@ export const SampleManagerModal: React.FC<SampleManagerModalProps> = ({
                     title={isCurrentSampleUnavailable ? 'Sample audio is missing — re-import the file before using this sample.' : undefined}
                     className={`flex-1 sm:flex-none px-3 py-1.5 font-bold text-xs rounded transition flex items-center justify-center gap-1 ${
                       isCurrentSampleUnavailable
-                        ? 'bg-[#222226] text-[#666] cursor-not-allowed'
-                        : 'bg-[#282830] hover:bg-[#33333d] text-white'
+                        ? 'bg-[var(--apex-surface-2)] text-[var(--apex-text-3)] cursor-not-allowed'
+                        : 'bg-[var(--apex-surface-3)] hover:bg-[var(--apex-state-hover)] text-[var(--apex-text)]'
                     }`}
                   >
                     <Plus className="w-3.5 h-3.5" />
@@ -402,8 +402,8 @@ export const SampleManagerModal: React.FC<SampleManagerModalProps> = ({
                     title={isCurrentSampleUnavailable ? 'Sample audio is missing — re-import the file before assigning it.' : undefined}
                     className={`flex-1 sm:flex-none px-4 py-1.5 font-bold text-xs rounded transition flex items-center justify-center gap-1 shadow ${
                       isCurrentSampleUnavailable
-                        ? 'bg-[#222226] text-[#666] cursor-not-allowed'
-                        : 'bg-[#ff6e00] hover:bg-[#ff7d1a] text-black'
+                        ? 'bg-[var(--apex-surface-2)] text-[var(--apex-text-3)] cursor-not-allowed'
+                        : 'bg-[var(--apex-accent)] hover:bg-[var(--apex-accent-strong)] text-[var(--apex-state-playing-fg)]'
                     }`}
                   >
                     <Check className="w-3.5 h-3.5" />
@@ -413,7 +413,7 @@ export const SampleManagerModal: React.FC<SampleManagerModalProps> = ({
               </div>
             </div>
           ) : (
-            <div className="bg-[#18181d] border border-[#282830] rounded-xl p-4 text-center text-xs text-[#777]">
+            <div className="bg-[var(--apex-panel)] border border-[var(--apex-border)] rounded-xl p-4 text-center text-xs text-[var(--apex-text-3)]">
               No custom sample loaded yet. Drop an audio file or click browse above.
             </div>
           )}

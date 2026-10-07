@@ -93,51 +93,51 @@ export const SampleLibraryPanel: React.FC<SampleLibraryPanelProps> = ({
   };
 
   return (
-    <div className="w-full max-w-5xl bg-[#17171a] border border-[#333336] rounded-xl p-4 space-y-4">
+    <div className="w-full max-w-5xl bg-[var(--apex-panel)] border border-[var(--apex-border)] rounded-xl p-4 space-y-4">
       <div className="flex items-center justify-between gap-3">
         <div>
-          <div className="text-sm font-bold text-white flex items-center gap-2"><Package className="w-4 h-4 text-[#ff6e00]" /> SAMPLE PACK LIBRARY</div>
-          <div className="text-[9px] text-[#777] mt-1">Organize persistent samples, then send the same source asset to the slicer, drum pads or multi-zone sampler.</div>
+          <div className="text-sm font-bold text-[var(--apex-text)] flex items-center gap-2"><Package className="w-4 h-4 text-[var(--apex-accent)]" /> SAMPLE PACK LIBRARY</div>
+          <div className="text-[9px] text-[var(--apex-text-3)] mt-1">Organize persistent samples, then send the same source asset to the slicer, drum pads or multi-zone sampler.</div>
         </div>
-        <span className="text-[9px] font-mono text-[#00ff88]">{filtered.length}/{samples.length} SAMPLES</span>
+        <span className="text-[9px] font-mono text-[var(--apex-success)]">{filtered.length}/{samples.length} SAMPLES</span>
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-5 gap-2">
         <div className="md:col-span-2 relative">
-          <Search className="absolute left-2 top-2.5 w-3.5 h-3.5 text-[#666]" />
+          <Search className="absolute left-2 top-2.5 w-3.5 h-3.5 text-[var(--apex-text-3)]" />
           <input value={query} onChange={e => setQuery(e.target.value)} placeholder="Search samples, packs, tags..."
-            className="w-full bg-[#111113] text-white text-xs p-2 pl-7 rounded border border-[#333336]" />
+            className="w-full bg-[var(--apex-chrome-inset)] text-[var(--apex-text)] text-xs p-2 pl-7 rounded border border-[var(--apex-border)]" />
         </div>
-        <select value={packId} onChange={e => setPackId(e.target.value)} className="bg-[#111113] text-white text-xs p-2 rounded border border-[#333336]">
+        <select value={packId} onChange={e => setPackId(e.target.value)} className="bg-[var(--apex-chrome-inset)] text-[var(--apex-text)] text-xs p-2 rounded border border-[var(--apex-border)]">
           <option value="">All packs</option>
           {packs.map(pack => <option key={pack.id} value={pack.id}>{pack.name} ({counts[pack.id] || 0})</option>)}
         </select>
-        <select value={category} onChange={e => setCategory(e.target.value)} className="bg-[#111113] text-white text-xs p-2 rounded border border-[#333336]">
+        <select value={category} onChange={e => setCategory(e.target.value)} className="bg-[var(--apex-chrome-inset)] text-[var(--apex-text)] text-xs p-2 rounded border border-[var(--apex-border)]">
           <option value="">All categories</option>
           {categories.map(item => <option key={item} value={item}>{item}</option>)}
         </select>
-        <select value={tag} onChange={e => setTag(e.target.value)} className="bg-[#111113] text-white text-xs p-2 rounded border border-[#333336]">
+        <select value={tag} onChange={e => setTag(e.target.value)} className="bg-[var(--apex-chrome-inset)] text-[var(--apex-text)] text-xs p-2 rounded border border-[var(--apex-border)]">
           <option value="">All tags</option>
           {tags.map(item => <option key={item} value={item}>{item}</option>)}
         </select>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-[220px_1fr_260px] gap-3">
-        <div className="bg-[#111113] border border-[#29292d] rounded-lg p-3 space-y-2">
-          <div className="text-[9px] font-bold text-[#777] uppercase flex items-center gap-1"><Folder className="w-3 h-3" /> Packs</div>
-          <button type="button" onClick={() => setPackId('')} className={`w-full text-left px-2 py-1.5 rounded text-[10px] ${!packId ? 'bg-[#ff6e00] text-black font-bold' : 'text-white hover:bg-[#222225]'}`}>All Samples</button>
+        <div className="bg-[var(--apex-chrome-inset)] border border-[var(--apex-border)] rounded-lg p-3 space-y-2">
+          <div className="text-[9px] font-bold text-[var(--apex-text-3)] uppercase flex items-center gap-1"><Folder className="w-3 h-3" /> Packs</div>
+          <button type="button" onClick={() => setPackId('')} className={`w-full text-left px-2 py-1.5 rounded text-[10px] ${!packId ? 'bg-[var(--apex-accent)] text-[var(--apex-state-playing-fg)] font-bold' : 'text-[var(--apex-text)] hover:bg-[var(--apex-state-hover)]'}`}>All Samples</button>
           {packs.map(pack => (
             <button key={pack.id} type="button" onClick={() => setPackId(pack.id)}
-              className={`w-full text-left px-2 py-1.5 rounded text-[10px] flex justify-between ${packId === pack.id ? 'bg-[#ff6e00] text-black font-bold' : 'text-white hover:bg-[#222225]'}`}>
+              className={`w-full text-left px-2 py-1.5 rounded text-[10px] flex justify-between ${packId === pack.id ? 'bg-[var(--apex-accent)] text-[var(--apex-state-playing-fg)] font-bold' : 'text-[var(--apex-text)] hover:bg-[var(--apex-state-hover)]'}`}>
               <span className="truncate">{pack.name}</span><span>{counts[pack.id] || 0}</span>
             </button>
           ))}
-          <div className="border-t border-[#29292d] pt-2 space-y-1.5">
+          <div className="border-t border-[var(--apex-border)] pt-2 space-y-1.5">
             <input value={newPackName} onChange={e => setNewPackName(e.target.value)} placeholder="New pack name"
-              className="w-full bg-[#18181c] text-white text-[10px] p-1.5 rounded border border-[#333336]" />
+              className="w-full bg-[var(--apex-chrome-inset)] text-[var(--apex-text)] text-[10px] p-1.5 rounded border border-[var(--apex-border)]" />
             <input value={newTags} onChange={e => setNewTags(e.target.value)} placeholder="tags: drums, one-shots"
-              className="w-full bg-[#18181c] text-white text-[10px] p-1.5 rounded border border-[#333336]" />
-            <button type="button" onClick={createPack} className="w-full py-1.5 bg-[#222225] text-white border border-[#333336] rounded text-[9px] font-bold flex items-center justify-center gap-1">
+              className="w-full bg-[var(--apex-chrome-inset)] text-[var(--apex-text)] text-[10px] p-1.5 rounded border border-[var(--apex-border)]" />
+            <button type="button" onClick={createPack} className="w-full py-1.5 bg-[var(--apex-surface-2)] text-[var(--apex-text)] border border-[var(--apex-border)] rounded text-[9px] font-bold flex items-center justify-center gap-1">
               <Plus className="w-3 h-3" /> CREATE PACK
             </button>
           </div>
@@ -146,35 +146,35 @@ export const SampleLibraryPanel: React.FC<SampleLibraryPanelProps> = ({
         <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 content-start max-h-64 overflow-y-auto pr-1">
           {filtered.map(sample => (
             <button type="button" key={sample.id} onClick={() => setSelectedId(sample.id)}
-              className={`text-left p-2 rounded-lg border ${selected?.id === sample.id ? 'border-[#ff6e00] bg-[#ff6e00]/10' : 'border-[#333336] bg-[#111113]'}`}>
-              <div className="text-[10px] font-bold text-white truncate">{sample.name}</div>
-              <div className="text-[8px] text-[#777] truncate">{sample.category || 'Uncategorized'}</div>
-              <div className="text-[8px] text-[#555] mt-1 flex items-center gap-1"><Tag className="w-2.5 h-2.5" /> {(sample.tags || []).slice(0, 3).join(', ') || 'no tags'}</div>
-              {sample.audioUnavailable && <div className="text-[8px] text-red-400 flex items-center gap-1 mt-1"><AlertTriangle className="w-2.5 h-2.5" /> audio missing</div>}
+              className={`text-left p-2 rounded-lg border ${selected?.id === sample.id ? 'border-[var(--apex-state-selected-border)] bg-[var(--apex-state-selected)]' : 'border-[var(--apex-border)] bg-[var(--apex-chrome-inset)]'}`}>
+              <div className="text-[10px] font-bold text-[var(--apex-text)] truncate">{sample.name}</div>
+              <div className="text-[8px] text-[var(--apex-text-3)] truncate">{sample.category || 'Uncategorized'}</div>
+              <div className="text-[8px] text-[var(--apex-text-3)] mt-1 flex items-center gap-1"><Tag className="w-2.5 h-2.5" /> {(sample.tags || []).slice(0, 3).join(', ') || 'no tags'}</div>
+              {sample.audioUnavailable && <div className="text-[8px] text-[var(--apex-danger)] flex items-center gap-1 mt-1"><AlertTriangle className="w-2.5 h-2.5" /> audio missing</div>}
             </button>
           ))}
-          {!filtered.length && <div className="col-span-full text-[10px] text-[#666] p-6 text-center">No samples match these filters.</div>}
+          {!filtered.length && <div className="col-span-full text-[10px] text-[var(--apex-text-3)] p-6 text-center">No samples match these filters.</div>}
         </div>
 
-        <div className="bg-[#111113] border border-[#29292d] rounded-lg p-3 space-y-2">
+        <div className="bg-[var(--apex-chrome-inset)] border border-[var(--apex-border)] rounded-lg p-3 space-y-2">
           {selected ? <>
-            <div className="text-xs font-bold text-white truncate">{selected.name}</div>
+            <div className="text-xs font-bold text-[var(--apex-text)] truncate">{selected.name}</div>
             <input value={selected.name} onChange={e => onUpdateSample(updateSampleMetadata(selected, { name: e.target.value }))}
-              className="w-full bg-[#18181c] text-white text-[10px] p-1.5 rounded border border-[#333336]" />
+              className="w-full bg-[var(--apex-chrome-inset)] text-[var(--apex-text)] text-[10px] p-1.5 rounded border border-[var(--apex-border)]" />
             <select value={selected.packId || ''} onChange={e => onUpdateSample(updateSampleMetadata(selected, { packId: e.target.value || undefined }))}
-              className="w-full bg-[#18181c] text-white text-[10px] p-1.5 rounded border border-[#333336]">
+              className="w-full bg-[var(--apex-chrome-inset)] text-[var(--apex-text)] text-[10px] p-1.5 rounded border border-[var(--apex-border)]">
               <option value="">No pack</option>{packs.map(pack => <option key={pack.id} value={pack.id}>{pack.name}</option>)}
             </select>
             <input value={selected.category || ''} onChange={e => onUpdateSample(updateSampleMetadata(selected, { category: e.target.value }))}
-              placeholder="Category" className="w-full bg-[#18181c] text-white text-[10px] p-1.5 rounded border border-[#333336]" />
+              placeholder="Category" className="w-full bg-[var(--apex-chrome-inset)] text-[var(--apex-text)] text-[10px] p-1.5 rounded border border-[var(--apex-border)]" />
             <input value={(selected.tags || []).join(', ')} onChange={e => onUpdateSample(updateSampleMetadata(selected, { tags: e.target.value.split(',') }))}
-              placeholder="Tags, comma separated" className="w-full bg-[#18181c] text-white text-[10px] p-1.5 rounded border border-[#333336]" />
+              placeholder="Tags, comma separated" className="w-full bg-[var(--apex-chrome-inset)] text-[var(--apex-text)] text-[10px] p-1.5 rounded border border-[var(--apex-border)]" />
             <div className="grid grid-cols-2 gap-2 pt-1">
-              <button type="button" disabled={Boolean(selected.audioUnavailable)} onClick={assignToDrum} className="py-2 bg-[#ff6e00] text-black rounded text-[9px] font-bold flex items-center justify-center gap-1 disabled:opacity-40"><Drum className="w-3 h-3" /> DRUM PAD</button>
-              <button type="button" disabled={Boolean(selected.audioUnavailable)} onClick={assignToMulti} className="py-2 bg-[#00ff88] text-black rounded text-[9px] font-bold flex items-center justify-center gap-1 disabled:opacity-40"><Layers className="w-3 h-3" /> MULTISAMPLER</button>
+              <button type="button" disabled={Boolean(selected.audioUnavailable)} onClick={assignToDrum} className="py-2 bg-[var(--apex-accent)] text-[var(--apex-state-playing-fg)] rounded text-[9px] font-bold flex items-center justify-center gap-1 disabled:opacity-40"><Drum className="w-3 h-3" /> DRUM PAD</button>
+              <button type="button" disabled={Boolean(selected.audioUnavailable)} onClick={assignToMulti} className="py-2 bg-[var(--apex-success)] text-[var(--apex-state-playing-fg)] rounded text-[9px] font-bold flex items-center justify-center gap-1 disabled:opacity-40"><Layers className="w-3 h-3" /> MULTISAMPLER</button>
             </div>
-            <div className="text-[8px] text-[#666] flex items-center gap-1"><Save className="w-2.5 h-2.5" /> Metadata is stored in the project document.</div>
-          </> : <div className="text-[10px] text-[#666]">Import a sample to start building a pack.</div>}
+            <div className="text-[8px] text-[var(--apex-text-3)] flex items-center gap-1"><Save className="w-2.5 h-2.5" /> Metadata is stored in the project document.</div>
+          </> : <div className="text-[10px] text-[var(--apex-text-3)]">Import a sample to start building a pack.</div>}
         </div>
       </div>
     </div>
