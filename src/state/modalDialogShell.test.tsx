@@ -26,6 +26,7 @@ import {
   type FocusTrapCandidate,
 } from '../components/ModalFrame';
 import { AnalyticsModal } from '../components/AnalyticsModal';
+import { AppearanceSettingsModal } from '../components/AppearanceSettingsModal';
 import { ArpeggiatorModal } from '../components/ArpeggiatorModal';
 import { AudioRecorderModal } from '../components/AudioRecorderModal';
 import { AudioSlicerModal } from '../components/AudioSlicerModal';
@@ -236,6 +237,13 @@ const MODAL_CASES: ModalCase[] = [
       isOpen: false, onClose: noop, currentState: DEFAULT_PROJECT,
       onLoadProject: noop, onUpdateMeta: noop, onRequestManifestImport: noop,
     }),
+  },
+  {
+    name: 'Appearance Settings', file: 'AppearanceSettingsModal.tsx', modalId: 'appearance-settings-modal',
+    titleId: 'appearance-settings-modal-title', titleText: 'Settings',
+    closeLabel: 'Close Settings', overlayClass: 'fixed inset-0 z-[70] flex items-center justify-center bg-black/60 p-4',
+    open: React.createElement(AppearanceSettingsModal, { isOpen: true, mode: 'dark', onChange: noop, onClose: noop }),
+    closed: React.createElement(AppearanceSettingsModal, { isOpen: false, mode: 'dark', onChange: noop, onClose: noop }),
   },
   {
     name: 'Sample Manager', file: 'SampleManagerModal.tsx', modalId: null,
@@ -688,7 +696,7 @@ test('the pinned modal id contract itself holds no duplicates', () => {
   const ids = MODAL_CASES.map((modalCase) => modalCase.modalId).filter(
     (modalId): modalId is string => modalId !== null
   );
-  assert.equal(ids.length, 21, 'twenty-one migrated modals carry overlay ids');
+  assert.equal(ids.length, 22, 'twenty-two migrated modals carry overlay ids');
   assert.equal(new Set(ids).size, ids.length, 'every modal id must be unique');
   const titleIds = MODAL_CASES.map((modalCase) => modalCase.titleId);
   assert.equal(new Set(titleIds).size, titleIds.length, 'every title id must be unique');
@@ -839,8 +847,8 @@ test('ModalFrame keeps every hook before any conditional early return', () => {
 // 3. Every migrated modal renders the dialog contract
 // ---------------------------------------------------------------------------
 
-test('all twenty-four migrated modals render role, modal state and naming', () => {
-  assert.equal(MODAL_CASES.length, 24, 'the audit counts twenty-four migrated surfaces');
+test('all twenty-five migrated modals render role, modal state and naming', () => {
+  assert.equal(MODAL_CASES.length, 25, 'the audit counts twenty-five migrated surfaces');
   for (const modalCase of MODAL_CASES) {
     const html = renderCase(modalCase, modalCase.open);
     const root = rootTagOf(html);

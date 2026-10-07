@@ -777,32 +777,32 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
   }, [clips, selectedClipId, selectedClip, isMarkerMenuOpen, bounds]);
 
   return (
-    <div id="fl-playlist-arranger" className="flex flex-col h-full bg-[#121214] select-none text-[#b0b0b0]">
+    <div id="fl-playlist-arranger" className="flex flex-col h-full bg-[var(--apex-canvas)] select-none text-[var(--apex-text-2)]">
       {/* Toast Notification */}
       {statusMessage && (
-        <div className="bg-[#ff6e00] text-black font-bold text-xs px-4 py-1 flex items-center justify-between shadow-md z-20">
+        <div className="bg-[var(--apex-accent)] text-[var(--apex-state-playing-fg)] font-bold text-xs px-4 py-1 flex items-center justify-between shadow-md z-20">
           <div className="flex items-center gap-1.5">
             <Sparkles className="w-3.5 h-3.5" />
             <span>{statusMessage}</span>
           </div>
-          <button onClick={() => setStatusMessage(null)} className="text-black/80 hover:text-black">✕</button>
+          <button onClick={() => setStatusMessage(null)} className="text-[var(--apex-state-playing-fg)] hover:text-[var(--apex-state-playing-fg)]">✕</button>
         </div>
       )}
 
       {/* Playlist Top Toolbar */}
-      <div className="h-10 bg-[#1e1e20] border-b border-[#333336] flex items-center justify-between px-3 shrink-0 gap-3">
+      <div className="h-10 bg-[var(--apex-panel-header)] border-b border-[var(--apex-border)] flex items-center justify-between px-3 shrink-0 gap-3">
         <div className="flex items-center gap-2 sm:gap-4">
-          <div className="flex items-center gap-1.5 text-white font-bold text-xs uppercase tracking-wider">
-            <Layers className="w-3.5 h-3.5 text-[#ff6e00]" />
+          <div className="flex items-center gap-1.5 text-[var(--apex-text)] font-bold text-xs uppercase tracking-wider">
+            <Layers className="w-3.5 h-3.5 text-[var(--apex-accent)]" />
             <span className="hidden sm:inline">PLAYLIST SONG ARRANGER</span>
           </div>
 
           {/* Playlist History */}
-          <div className="flex items-center gap-0.5 bg-[#121214] border border-[#333336] p-0.5 rounded text-xs">
+          <div className="flex items-center gap-0.5 bg-[var(--apex-chrome-inset)] border border-[var(--apex-border)] p-0.5 rounded text-xs">
             <button
               onClick={onUndo}
               disabled={!canUndo}
-              className="px-2 py-0.5 rounded-sm font-semibold text-[10px] text-white hover:bg-[#333336] disabled:opacity-30 disabled:cursor-not-allowed"
+              className="px-2 py-0.5 rounded-sm font-semibold text-[10px] text-[var(--apex-text)] hover:bg-[var(--apex-state-hover)] disabled:opacity-30 disabled:cursor-not-allowed"
               title="Undo playlist edit"
             >
               Undo
@@ -810,7 +810,7 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
             <button
               onClick={onRedo}
               disabled={!canRedo}
-              className="px-2 py-0.5 rounded-sm font-semibold text-[10px] text-white hover:bg-[#333336] disabled:opacity-30 disabled:cursor-not-allowed"
+              className="px-2 py-0.5 rounded-sm font-semibold text-[10px] text-[var(--apex-text)] hover:bg-[var(--apex-state-hover)] disabled:opacity-30 disabled:cursor-not-allowed"
               title="Redo playlist edit"
             >
               Redo
@@ -821,11 +821,11 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
               Phase 48: no "Audio Stem" option. A drawn audio clip had no audio
               behind it and deadlocked export. Real audio arrives by dropping a
               file on a lane, recording a take, or bouncing a channel. */}
-          <div className="flex items-center gap-0.5 bg-[#121214] border border-[#333336] p-0.5 rounded text-xs">
+          <div className="flex items-center gap-0.5 bg-[var(--apex-chrome-inset)] border border-[var(--apex-border)] p-0.5 rounded text-xs">
             <button
               onClick={() => setClipTypeToAdd('pattern')}
               className={`px-2 py-0.5 rounded-sm font-semibold transition text-[10px] ${
-                clipTypeToAdd === 'pattern' ? 'bg-[#ff6e00] text-black shadow' : 'text-[#777] hover:text-white'
+                clipTypeToAdd === 'pattern' ? 'bg-[var(--apex-accent)] text-[var(--apex-state-playing-fg)] shadow' : 'text-[var(--apex-text-3)] hover:text-[var(--apex-text)]'
               }`}
             >
               Pattern
@@ -833,7 +833,7 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
             <button
               onClick={() => setClipTypeToAdd('automation')}
               className={`px-2 py-0.5 rounded-sm font-semibold transition text-[10px] ${
-                clipTypeToAdd === 'automation' ? 'bg-[#00e5ff] text-black shadow' : 'text-[#777] hover:text-white'
+                clipTypeToAdd === 'automation' ? 'bg-[#00e5ff] text-black shadow' : 'text-[var(--apex-text-3)] hover:text-[var(--apex-text)]'
               }`}
             >
               Automation
@@ -841,11 +841,11 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
           </div>
 
           {/* Tools */}
-          <div className="flex items-center gap-0.5 bg-[#121214] border border-[#333336] p-0.5 rounded text-xs">
+          <div className="flex items-center gap-0.5 bg-[var(--apex-chrome-inset)] border border-[var(--apex-border)] p-0.5 rounded text-xs">
             <button
               onClick={() => setActiveTool('place')}
               className={`px-2 py-0.5 rounded-sm font-semibold transition text-[10px] ${
-                activeTool === 'place' ? 'bg-[#ff6e00] text-black shadow' : 'text-[#777] hover:text-white'
+                activeTool === 'place' ? 'bg-[var(--apex-accent)] text-[var(--apex-state-playing-fg)] shadow' : 'text-[var(--apex-text-3)] hover:text-[var(--apex-text)]'
               }`}
             >
               Draw
@@ -853,7 +853,7 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
             <button
               onClick={() => setActiveTool('cut')}
               className={`px-2 py-0.5 rounded-sm font-semibold transition text-[10px] ${
-                activeTool === 'cut' ? 'bg-[#00e5ff] text-black shadow' : 'text-[#777] hover:text-white'
+                activeTool === 'cut' ? 'bg-[#00e5ff] text-black shadow' : 'text-[var(--apex-text-3)] hover:text-[var(--apex-text)]'
               }`}
             >
               Slice
@@ -861,7 +861,7 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
             <button
               onClick={() => setActiveTool('delete')}
               className={`px-2 py-0.5 rounded-sm font-semibold transition text-[10px] ${
-                activeTool === 'delete' ? 'bg-[#ff0000] text-white shadow' : 'text-[#777] hover:text-white'
+                activeTool === 'delete' ? 'bg-[var(--apex-danger)] text-[var(--apex-state-recording-fg)] shadow' : 'text-[var(--apex-text-3)] hover:text-[var(--apex-text)]'
               }`}
             >
               Erase
@@ -875,7 +875,7 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
           <div className="relative">
             <button
               onClick={() => setIsMarkerMenuOpen(!isMarkerMenuOpen)}
-              className="flex items-center gap-1.5 px-2 py-1 bg-[#18181c] hover:bg-[#25252a] text-[#ffaa00] border border-[#ffaa00]/30 rounded text-xs font-bold transition shadow"
+              className="flex items-center gap-1.5 px-2 py-1 bg-[var(--apex-panel)] hover:bg-[var(--apex-surface-3)] text-[#ffaa00] border border-[#ffaa00]/30 rounded text-xs font-bold transition shadow"
               title="Arrangement Timeline Section Markers"
             >
               <Flag className="w-3 h-3" />
@@ -883,18 +883,18 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
             </button>
 
             {isMarkerMenuOpen && (
-              <div className="absolute right-0 top-full mt-1 w-64 bg-[#18181c] border border-[#333338] rounded-xl shadow-2xl p-3 z-30 space-y-3">
-                <div className="flex items-center justify-between border-b border-[#28282b] pb-2">
-                  <span className="text-xs font-bold text-white flex items-center gap-1.5">
+              <div className="absolute right-0 top-full mt-1 w-64 bg-[var(--apex-panel)] border border-[var(--apex-border)] rounded-xl shadow-2xl p-3 z-30 space-y-3">
+                <div className="flex items-center justify-between border-b border-[var(--apex-border)] pb-2">
+                  <span className="text-xs font-bold text-[var(--apex-text)] flex items-center gap-1.5">
                     <Flag className="w-3.5 h-3.5 text-[#ffaa00]" />
                     <span>TIMELINE SECTION MARKERS</span>
                   </span>
-                  <button onClick={() => setIsMarkerMenuOpen(false)} className="text-[#888] hover:text-white">✕</button>
+                  <button onClick={() => setIsMarkerMenuOpen(false)} className="text-[var(--apex-text-muted)] hover:text-[var(--apex-text)]">✕</button>
                 </div>
 
                 {/* Quick Add at Playhead */}
                 <div className="space-y-1.5">
-                  <span className="text-[10px] font-bold text-[#888] uppercase block">QUICK ADD MARKER (BAR {currentBar})</span>
+                  <span className="text-[10px] font-bold text-[var(--apex-text-muted)] uppercase block">QUICK ADD MARKER (BAR {currentBar})</span>
                   <div className="grid grid-cols-2 gap-1 text-[10px] font-bold">
                     <button
                       onClick={() => handleAddMarker('Intro', currentBar, '#00e5ff')}
@@ -924,17 +924,17 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
                 </div>
 
                 {/* Presets */}
-                <div className="space-y-1.5 border-t border-[#28282b] pt-2">
-                  <span className="text-[10px] font-bold text-[#888] uppercase block">PRESET STRUCTURES</span>
+                <div className="space-y-1.5 border-t border-[var(--apex-border)] pt-2">
+                  <span className="text-[10px] font-bold text-[var(--apex-text-muted)] uppercase block">PRESET STRUCTURES</span>
                   <div className="space-y-1">
                     {MARKER_PRESETS.map((p, idx) => (
                       <button
                         key={idx}
                         onClick={() => handleApplyMarkerPreset(p)}
-                        className="w-full text-left p-1.5 rounded bg-[#121214] hover:bg-[#222225] text-xs text-white border border-[#2e2e32] flex items-center justify-between"
+                        className="w-full text-left p-1.5 rounded bg-[var(--apex-chrome-inset)] hover:bg-[var(--apex-surface-2)] text-xs text-[var(--apex-text)] border border-[var(--apex-border)] flex items-center justify-between"
                       >
                         <span>{p.name}</span>
-                        <span className="text-[9px] text-[#777]">{p.markers.length} pts</span>
+                        <span className="text-[9px] text-[var(--apex-text-3)]">{p.markers.length} pts</span>
                       </button>
                     ))}
                   </div>
@@ -946,19 +946,19 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
           {/* Phase 79: the +/- buttons change the playlist timeline LENGTH
               (totalBars), they do NOT zoom horizontally. Relabel honestly
               instead of pretending to zoom. Phase 80+ will add real zoom. */}
-          <div className="flex items-center gap-1 bg-[#121214] border border-[#333336] p-0.5 rounded">
+          <div className="flex items-center gap-1 bg-[var(--apex-chrome-inset)] border border-[var(--apex-border)] p-0.5 rounded">
             <button
               onClick={() => onUpdateTotalBars(Math.max(MIN_TIMELINE_BARS, totalBars - 8))}
-              className="px-1.5 py-0.5 text-[#777] hover:text-white text-xs font-bold leading-none"
+              className="px-1.5 py-0.5 text-[var(--apex-text-3)] hover:text-[var(--apex-text)] text-xs font-bold leading-none"
               title="Shorter timeline (−8 bars)"
               aria-label="Shorter timeline"
             >
               −
             </button>
-            <span className="text-[9px] text-[#ff6e00] font-mono px-1">{totalBars} Bars</span>
+            <span className="text-[9px] text-[var(--apex-accent)] font-mono px-1">{totalBars} Bars</span>
             <button
               onClick={() => onUpdateTotalBars(Math.min(MAX_TIMELINE_BARS, totalBars + 8))}
-              className="px-1.5 py-0.5 text-[#777] hover:text-white text-xs font-bold leading-none"
+              className="px-1.5 py-0.5 text-[var(--apex-text-3)] hover:text-[var(--apex-text)] text-xs font-bold leading-none"
               title="Longer timeline (+8 bars)"
               aria-label="Longer timeline"
             >
@@ -969,7 +969,7 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
           <button
             id="add-playlist-track-btn"
             onClick={onAddTrack}
-            className="flex items-center gap-1 px-2.5 py-1 bg-[#ff6e00] hover:bg-[#ff7d1a] text-black font-bold text-[11px] rounded transition active:scale-95 shadow"
+            className="flex items-center gap-1 px-2.5 py-1 bg-[var(--apex-accent)] hover:bg-[var(--apex-accent-strong)] text-[var(--apex-state-playing-fg)] font-bold text-[11px] rounded transition active:scale-95 shadow"
           >
             <Plus className="w-3.5 h-3.5" />
             <span className="hidden sm:inline">Add Track Row</span>
@@ -980,8 +980,8 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
       {/* Main Playlist Matrix */}
       <div className="flex-1 flex overflow-hidden">
         {/* Track Headers List on Left */}
-        <div className="w-36 sm:w-44 bg-[#141416] border-r border-[#333336] flex flex-col shrink-0">
-          <div className="h-12 bg-[#1a1a1d] border-b border-[#333336] px-3 flex items-center justify-between text-[9px] font-bold text-[#777] uppercase tracking-wider">
+        <div className="w-36 sm:w-44 bg-[var(--apex-panel)] border-r border-[var(--apex-border)] flex flex-col shrink-0">
+          <div className="h-12 bg-[var(--apex-panel-header)] border-b border-[var(--apex-border)] px-3 flex items-center justify-between text-[9px] font-bold text-[var(--apex-text-3)] uppercase tracking-wider">
             <span>TRACK LANES</span>
             <span>BOUNCE</span>
           </div>
@@ -990,7 +990,7 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
             {tracks.map((track, idx) => (
               <div
                 key={track.id}
-                className="h-16 border-b border-[#222225] px-2 flex items-center justify-between bg-[#141416] hover:bg-[#1a1a1d] transition group"
+                className="h-16 border-b border-[var(--apex-grid-line)] px-2 flex items-center justify-between bg-[var(--apex-panel)] hover:bg-[var(--apex-state-hover)] transition group"
               >
                 <div className="flex items-center gap-1.5 min-w-0">
                   <button
@@ -998,12 +998,12 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
                     className={`w-2.5 h-2.5 rounded-full border transition shrink-0 ${
                       !track.mute 
                         ? 'bg-[#00ff88] border-[#00ff88]' 
-                        : 'bg-[#333336] border-[#444]'
+                        : 'bg-[var(--apex-surface-3)] border-[var(--apex-border)]'
                     }`}
                   />
                   <div className="flex flex-col min-w-0">
-                    <span className="text-xs font-bold text-white truncate">{track.name}</span>
-                    <span className="text-[8px] text-[#777] font-mono">TRACK {idx + 1}</span>
+                    <span className="text-xs font-bold text-[var(--apex-text)] truncate">{track.name}</span>
+                    <span className="text-[8px] text-[var(--apex-text-3)] font-mono">TRACK {idx + 1}</span>
                   </div>
                 </div>
 
@@ -1011,12 +1011,12 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
                   {/* Bounce / Freeze Button */}
                   <button
                     onClick={() => handleBounceTrack(idx)}
-                    className="opacity-0 group-hover:opacity-100 p-1 bg-[#222] hover:bg-[#00ff88] hover:text-black text-[#888] rounded transition"
+                    className="opacity-0 group-hover:opacity-100 p-1 bg-[var(--apex-surface-2)] hover:bg-[#00ff88] hover:text-[var(--apex-state-playing-fg)] text-[var(--apex-text-muted)] rounded transition"
                     title="Bounce Channel to Audio Clip Stem"
                   >
                     <Snowflake className="w-3 h-3" />
                   </button>
-                  <div className="w-1.5 h-8 rounded-xs bg-[#ff6e00]" />
+                  <div className="w-1.5 h-8 rounded-xs bg-[var(--apex-accent)]" />
                 </div>
               </div>
             ))}
@@ -1026,10 +1026,10 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
         {/* Timeline Clips Area */}
         <div
           ref={timelineScrollContainerRef}
-          className="flex-1 flex flex-col overflow-auto custom-scrollbar bg-[#0a0a0b]"
+          className="flex-1 flex flex-col overflow-auto custom-scrollbar bg-[var(--apex-canvas)]"
         >
           {/* Top Section Markers Ribbon */}
-          <div className="flex h-5 bg-[#121215] border-b border-[#28282b] sticky top-0 z-20 min-w-[768px] relative">
+          <div className="flex h-5 bg-[var(--apex-panel-header)] border-b border-[var(--apex-border)] sticky top-0 z-20 min-w-[768px] relative">
             {markers.map((marker) => (
               <div
                 key={marker.id}
@@ -1049,7 +1049,7 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
                     e.stopPropagation();
                     handleDeleteMarker(marker.id);
                   }}
-                  className="hover:text-red-400 opacity-60 hover:opacity-100 ml-1 text-[8px]"
+                  className="hover:text-[var(--apex-danger)] opacity-60 hover:opacity-100 ml-1 text-[8px]"
                 >
                   ✕
                 </button>
@@ -1071,8 +1071,8 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
             }}
             onMouseUp={() => setIsScrubbing(false)}
             onMouseLeave={() => setIsScrubbing(false)}
-            className={`flex h-7 bg-[#1a1a1d] border-b border-[#333336] sticky top-5 z-10 min-w-[768px] ${
-              isScrubbing ? 'cursor-ew-resize bg-[#242429]' : 'cursor-pointer'
+            className={`flex h-7 bg-[var(--apex-panel-header)] border-b border-[var(--apex-border)] sticky top-5 z-10 min-w-[768px] ${
+              isScrubbing ? 'cursor-ew-resize bg-[var(--apex-state-pressed)]' : 'cursor-pointer'
             }`}
           >
             {Array.from({ length: totalBars }).map((_, barIdx) => {
@@ -1081,12 +1081,12 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
                 <div
                   key={barIdx}
                   onClick={() => onSeekToBar && onSeekToBar(barIdx + 1)}
-                  className={`w-24 h-full border-r border-[#333336] flex items-center justify-between px-2 text-[9px] font-mono transition select-none ${
-                    isPlayHead ? 'bg-[#ff6e00]/20 text-[#ff6e00] font-bold' : 'text-[#777] hover:bg-white/5'
+                  className={`w-24 h-full border-r border-[var(--apex-border)] flex items-center justify-between px-2 text-[9px] font-mono transition select-none ${
+                    isPlayHead ? 'bg-[var(--apex-state-selected)] text-[var(--apex-accent)] font-bold' : 'text-[var(--apex-text-3)] hover:bg-[var(--apex-state-hover)]'
                   }`}
                 >
                   <span>BAR {barIdx + 1}</span>
-                  <span className="text-[7px] text-[#555]">| : : :</span>
+                  <span className="text-[7px] text-[var(--apex-text-3)]">| : : :</span>
                 </div>
               );
             })}
@@ -1100,17 +1100,17 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
                 onDragOver={(e) => {
                   e.preventDefault();
                   e.stopPropagation();
-                  e.currentTarget.classList.add('bg-[#1a2e22]');
+                  e.currentTarget.classList.add('apex-playlist-drop-target');
                 }}
                 onDragLeave={(e) => {
                   e.preventDefault();
                   e.stopPropagation();
-                  e.currentTarget.classList.remove('bg-[#1a2e22]');
+                  e.currentTarget.classList.remove('apex-playlist-drop-target');
                 }}
                 onDrop={async (e) => {
                   e.preventDefault();
                   e.stopPropagation();
-                  e.currentTarget.classList.remove('bg-[#1a2e22]');
+                  e.currentTarget.classList.remove('apex-playlist-drop-target');
 
                   if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
                     const file = e.dataTransfer.files[0];
@@ -1185,7 +1185,7 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
                     }
                   }
                 }}
-                className="h-16 border-b border-[#1c1c20] flex relative bg-[#0e0e10] transition-colors"
+                className="h-16 border-b border-[var(--apex-grid-line)] flex relative bg-[var(--apex-canvas)] transition-colors"
               >
                 {/* 1 Bar grid slots */}
                 {Array.from({ length: totalBars }).map((_, barIdx) => {
@@ -1194,8 +1194,8 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
                     <div
                       key={barIdx}
                       onClick={() => handleGridCellClick(trackIdx, barIdx)}
-                      className={`w-24 h-full border-r border-[#1c1c20] cursor-pointer transition ${
-                        isPlayheadBar ? 'bg-white/5' : 'hover:bg-white/10'
+                      className={`w-24 h-full border-r border-[var(--apex-grid-line)] cursor-pointer transition ${
+                        isPlayheadBar ? 'bg-[var(--apex-state-selected)]' : 'hover:bg-[var(--apex-state-hover)]'
                       }`}
                     />
                   );
@@ -1260,15 +1260,15 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
                           ? 'bg-[#002233]/90 border-[#00e5ff] hover:bg-[#00334d]' 
                           : isAudio 
                             ? isAudioMissing
-                              ? 'bg-[#3a0d12]/90 border-red-500 hover:bg-[#46141a]'
+                              ? 'bg-[color-mix(in_srgb,var(--apex-danger)_18%,var(--apex-panel))] border-[var(--apex-danger)] hover:bg-[color-mix(in_srgb,var(--apex-danger)_24%,var(--apex-panel))]'
                               : 'bg-[#002b1a]/90 border-[#00ff88] hover:bg-[#003d24]'
-                            : 'bg-[#1a1a1d] border-l-4 border-l-[#ff6e00] border-[#333336] hover:border-[#ff6e00]'
-                      } ${isSelected ? 'ring-2 ring-white/60' : ''}`}
+                            : 'bg-[var(--apex-surface-2)] border-l-4 border-l-[var(--apex-accent)] border-[var(--apex-border)] hover:border-[var(--apex-accent)]'
+                      } ${isSelected ? 'ring-2 ring-[var(--apex-accent)]' : ''}`}
                     >
                       {/* Top Header */}
                       <div className="flex items-center justify-between gap-1 font-bold text-[10px] truncate z-10 min-w-0">
                         <div className="flex items-center gap-1 min-w-0">
-                          <span className={`truncate ${isAuto ? 'text-[#00e5ff]' : isAudioMissing ? 'text-red-300' : isAudio ? 'text-[#00ff88]' : 'text-white'}`}>
+                          <span className={`truncate ${isAuto ? 'text-[#00e5ff]' : isAudioMissing ? 'text-[var(--apex-danger)]' : isAudio ? 'text-[#00ff88]' : 'text-[var(--apex-text)]'}`}>
                             {clip.name}
                           </span>
                           {isAudioMissing && (
@@ -1277,7 +1277,7 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
                               role="status"
                               data-audio-unavailable="true"
                               title={audioMissingDescription}
-                              className="flex items-center gap-0.5 px-1 py-[1px] rounded bg-red-600 text-white text-[8px] font-bold uppercase tracking-wide shrink-0"
+                              className="flex items-center gap-0.5 px-1 py-[1px] rounded bg-[var(--apex-danger)] text-[var(--apex-state-recording-fg)] text-[8px] font-bold uppercase tracking-wide shrink-0"
                             >
                               <AlertTriangle className="w-2.5 h-2.5" />
                               {MISSING_AUDIO_CLIP_BADGE_LABEL}
@@ -1360,8 +1360,8 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
                           // No peaks are drawn for an unavailable asset: a green
                           // waveform here would read as "loaded and ready".
                           <div className="relative h-4 w-full flex items-center z-10" data-audio-unavailable="true">
-                            <div className="w-full border-t border-dashed border-red-400/80" />
-                            <span className="absolute left-0 text-[8px] font-bold uppercase tracking-wide text-red-300 bg-[#3a0d12]/80 pr-1">
+                            <div className="w-full border-t border-dashed border-[color-mix(in_srgb,var(--apex-danger)_80%,transparent)]" />
+                            <span className="absolute left-0 text-[8px] font-bold uppercase tracking-wide text-[var(--apex-danger)] bg-[color-mix(in_srgb,var(--apex-danger)_18%,var(--apex-panel))] pr-1">
                               {MISSING_AUDIO_CLIP_BADGE_LABEL} — waveform unavailable
                             </span>
                           </div>
@@ -1384,7 +1384,7 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
                           {Array.from({ length: 16 }).map((_, i) => (
                             <div 
                               key={i} 
-                              className="flex-1 bg-[#ff6e00] rounded-xs"
+                              className="flex-1 bg-[var(--apex-accent)] rounded-xs"
                               style={{ height: `${20 + (i % 5) * 15}%` }}
                             />
                           ))}
@@ -1441,7 +1441,7 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
                         onLostPointerCapture={(e) => {
                           if (interaction && e.pointerId === interaction.pointerId) endInteraction(e);
                         }}
-                        className="absolute left-0 top-0 bottom-0 w-1.5 cursor-ew-resize bg-white/20 hover:bg-white/40 z-30"
+                        className="absolute left-0 top-0 bottom-0 w-1.5 cursor-ew-resize bg-[var(--apex-state-hover)] hover:bg-[var(--apex-state-pressed)] z-30"
                       />
                       <div
                         role="separator"
@@ -1459,7 +1459,7 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
                         onLostPointerCapture={(e) => {
                           if (interaction && e.pointerId === interaction.pointerId) endInteraction(e);
                         }}
-                        className="absolute right-0 top-0 bottom-0 w-1.5 cursor-ew-resize bg-white/20 hover:bg-white/40 z-30"
+                        className="absolute right-0 top-0 bottom-0 w-1.5 cursor-ew-resize bg-[var(--apex-state-hover)] hover:bg-[var(--apex-state-pressed)] z-30"
                       />
                     </div>
                   );
@@ -1472,10 +1472,10 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
 
       {/* Clip Property Inspector Drawer for Selected Clip */}
       {selectedClip && !activeAutomationClip && (
-        <div className="bg-[#18181c] border-t border-[#333338] p-2.5 px-4 flex flex-wrap items-center justify-between gap-3 text-xs">
+        <div className="apex-playlist-selection-panel bg-[var(--apex-panel)] border-t border-[var(--apex-border)] p-2.5 px-4 flex flex-wrap items-center justify-between gap-3 text-xs">
           <div className="flex items-center gap-2">
-            <span className="font-bold text-white">{selectedClip.name}</span>
-            <span className="text-[10px] text-[#777] font-mono">({selectedClip.lengthBars} Bars)</span>
+            <span className="font-bold text-[var(--apex-text)]">{selectedClip.name}</span>
+            <span className="text-[10px] text-[var(--apex-text-3)] font-mono">({selectedClip.lengthBars} Bars)</span>
           </div>
 
           <div className="flex items-center gap-3">
@@ -1484,13 +1484,13 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
                 <span>Fade In: <strong>{selectedClip.fadeInBars || 0}B</strong></span>
                 <button
                   onClick={() => handleAdjustClipFade(selectedClip.id, 'in', -0.25)}
-                  className="px-1.5 py-0.5 bg-[#25252a] rounded hover:bg-[#333]"
+                  className="px-1.5 py-0.5 bg-[var(--apex-surface-3)] rounded hover:bg-[var(--apex-state-hover)]"
                 >
                   -
                 </button>
                 <button
                   onClick={() => handleAdjustClipFade(selectedClip.id, 'in', 0.25)}
-                  className="px-1.5 py-0.5 bg-[#25252a] rounded hover:bg-[#333]"
+                  className="px-1.5 py-0.5 bg-[var(--apex-surface-3)] rounded hover:bg-[var(--apex-state-hover)]"
                 >
                   +
                 </button>
@@ -1498,13 +1498,13 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
                 <span className="ml-2">Fade Out: <strong>{selectedClip.fadeOutBars || 0}B</strong></span>
                 <button
                   onClick={() => handleAdjustClipFade(selectedClip.id, 'out', -0.25)}
-                  className="px-1.5 py-0.5 bg-[#25252a] rounded hover:bg-[#333]"
+                  className="px-1.5 py-0.5 bg-[var(--apex-surface-3)] rounded hover:bg-[var(--apex-state-hover)]"
                 >
                   -
                 </button>
                 <button
                   onClick={() => handleAdjustClipFade(selectedClip.id, 'out', 0.25)}
-                  className="px-1.5 py-0.5 bg-[#25252a] rounded hover:bg-[#333]"
+                  className="px-1.5 py-0.5 bg-[var(--apex-surface-3)] rounded hover:bg-[var(--apex-state-hover)]"
                 >
                   +
                 </button>
@@ -1513,7 +1513,7 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
 
             <button
               onClick={() => duplicateClip(selectedClip)}
-              className="px-2 py-1 bg-[#282830] text-white hover:bg-[#333] rounded font-bold flex items-center gap-1"
+              className="px-2 py-1 bg-[var(--apex-surface-3)] text-[var(--apex-text)] hover:bg-[var(--apex-state-hover)] rounded font-bold flex items-center gap-1"
             >
               <Copy className="w-3 h-3" />
               Duplicate
@@ -1521,13 +1521,13 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
 
             <button
               onClick={() => deleteClip(selectedClip.id)}
-              className="px-2 py-1 bg-red-500/20 text-red-400 hover:bg-red-500/30 rounded font-bold flex items-center gap-1"
+              className="px-2 py-1 bg-[color-mix(in_srgb,var(--apex-danger)_20%,transparent)] text-[var(--apex-danger)] hover:bg-[color-mix(in_srgb,var(--apex-danger)_30%,transparent)] rounded font-bold flex items-center gap-1"
             >
               <Trash2 className="w-3 h-3" />
               Delete Clip
             </button>
 
-            <button onClick={() => selectClip(null)} className="text-[#888] hover:text-white">✕</button>
+            <button onClick={() => selectClip(null)} className="text-[var(--apex-text-muted)] hover:text-[var(--apex-text)]">✕</button>
           </div>
 
           {isPlaylistClipAudioUnavailable(selectedClip) && (
@@ -1535,9 +1535,9 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
               id="playlist-selected-clip-missing-audio"
               role="alert"
               data-audio-unavailable="true"
-              className="w-full flex items-center gap-2 px-2 py-1 rounded bg-[#361111] border border-red-500/60 text-[10px] text-red-200"
+              className="w-full flex items-center gap-2 px-2 py-1 rounded bg-[color-mix(in_srgb,var(--apex-danger)_12%,var(--apex-panel))] border border-[color-mix(in_srgb,var(--apex-danger)_55%,transparent)] text-[10px] text-[var(--apex-danger)]"
             >
-              <AlertTriangle className="w-3.5 h-3.5 text-red-400 shrink-0" />
+              <AlertTriangle className="w-3.5 h-3.5 text-[var(--apex-danger)] shrink-0" />
               <span>{describeMissingAudioClip(selectedClip)}</span>
             </div>
           )}
@@ -1546,28 +1546,28 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
 
       {/* Automation Node Quick Drawer */}
       {activeAutomationClip && (
-        <div className="bg-[#18181c] border-t border-[#00e5ff]/40 p-3 flex flex-col md:flex-row items-center justify-between gap-3 text-xs">
+        <div className="bg-[var(--apex-panel)] border-t border-[#00e5ff]/40 p-3 flex flex-col md:flex-row items-center justify-between gap-3 text-xs">
           <div className="flex items-center gap-2">
             <div className="w-6 h-6 rounded bg-[#00e5ff] flex items-center justify-center text-black font-bold">
               <TrendingUp className="w-3.5 h-3.5" />
             </div>
             <div>
               <div className="flex items-center gap-2">
-                <span className="font-bold text-white">AUTOMATION ENVELOPE: {activeAutomationClip.name}</span>
+                <span className="font-bold text-[var(--apex-text)]">AUTOMATION ENVELOPE: {activeAutomationClip.name}</span>
                 {selectedPointIndex !== null && activeAutomationClip.automationPoints?.[selectedPointIndex] && (
                   <span className="px-1.5 py-0.5 rounded bg-[#00e5ff]/20 text-[#00e5ff] font-mono text-[10px]">
                     Point #{selectedPointIndex + 1} (X: {activeAutomationClip.automationPoints[selectedPointIndex].x.toFixed(2)}, Y: {activeAutomationClip.automationPoints[selectedPointIndex].y.toFixed(2)})
                   </span>
                 )}
               </div>
-              <p className="text-[10px] text-[#888]">
+              <p className="text-[10px] text-[var(--apex-text-muted)]">
                 Click envelope curve to add point • Drag to move (snapped to grid) • Right-click / Del to remove point
               </p>
             </div>
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
-            <span className="text-[#888]">Target:</span>
+            <span className="text-[var(--apex-text-muted)]">Target:</span>
             <select
               value={activeAutomationClip.automationTarget?.type || 'channel_filter_cutoff'}
               onChange={(e) => {
@@ -1606,7 +1606,7 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
                 });
                 onUpdateClips(clips.map(c => c.id === activeAutomationClip.id ? updated : c));
               }}
-              className="bg-[#0c0c0e] border border-[#333] text-white text-xs rounded px-2 py-1 font-bold"
+              className="bg-[var(--apex-chrome-inset)] border border-[var(--apex-border)] text-[var(--apex-text)] text-xs rounded px-2 py-1 font-bold"
             >
               <option value="channel_filter_cutoff">Channel Filter Cutoff (Hz)</option>
               <option value="channel_vol">Channel Volume (0 - 100%)</option>
@@ -1633,7 +1633,7 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
                   });
                   onUpdateClips(clips.map(c => c.id === activeAutomationClip.id ? updated : c));
                 }}
-                className="bg-[#0c0c0e] border border-[#333] text-white text-xs rounded px-2 py-1 font-bold max-w-[130px] truncate"
+                className="bg-[var(--apex-chrome-inset)] border border-[var(--apex-border)] text-[var(--apex-text)] text-xs rounded px-2 py-1 font-bold max-w-[130px] truncate"
               >
                 {channels.map(ch => (
                   <option key={ch.id} value={ch.id}>{ch.name}</option>
@@ -1656,7 +1656,7 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
                   });
                   onUpdateClips(clips.map(c => c.id === activeAutomationClip.id ? updated : c));
                 }}
-                className="bg-[#0c0c0e] border border-[#333] text-white text-xs rounded px-2 py-1 font-bold max-w-[130px] truncate"
+                className="bg-[var(--apex-chrome-inset)] border border-[var(--apex-border)] text-[var(--apex-text)] text-xs rounded px-2 py-1 font-bold max-w-[130px] truncate"
               >
                 {mixerTracks.map(trk => (
                   <option key={trk.id} value={trk.id}>{trk.name} (#{trk.id})</option>
@@ -1685,7 +1685,7 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
                   <select
                     value={slotTargetId}
                     onChange={(e) => publish(buildFxSlotAutomationTarget(fxTargetType, mixerTracks, e.target.value, activeAutomationClip.automationTarget))}
-                    className="bg-[#0c0c0e] border border-[#333] text-white text-xs rounded px-2 py-1 font-bold max-w-[160px] truncate"
+                    className="bg-[var(--apex-chrome-inset)] border border-[var(--apex-border)] text-[var(--apex-text)] text-xs rounded px-2 py-1 font-bold max-w-[160px] truncate"
                     title="FX slot this envelope drives"
                   >
                     {slotOptions.length === 0 && <option value="">— no effect slots —</option>}
@@ -1704,7 +1704,7 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
                         const draft = buildFxParamAutomationTarget(mixerTracks, slotTargetId, e.target.value);
                         if (draft) publish(draft);
                       }}
-                      className="bg-[#0c0c0e] border border-[#333] text-white text-xs rounded px-2 py-1 font-bold max-w-[190px] truncate"
+                      className="bg-[var(--apex-chrome-inset)] border border-[var(--apex-border)] text-[var(--apex-text)] text-xs rounded px-2 py-1 font-bold max-w-[190px] truncate"
                       title="Contract parameter this envelope drives"
                     >
                       {paramOptions.length === 0 && <option value="">— no automatable parameter —</option>}
@@ -1717,7 +1717,7 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
                   )}
 
                   {fxTargetType === 'fx_param' && paramOptions.length === 0 && (
-                    <span className="text-[10px] text-[#a88] italic">
+                    <span className="text-[10px] text-[var(--apex-text-3)] italic">
                       This effect bakes its parameters at chain build; only its wet/dry mix is automatable.
                     </span>
                   )}
@@ -1733,7 +1733,7 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
                 const pos = resolveAddNodePosition(activeAutomationClip.automationPoints || []);
                 handleAddAutomationPoint(activeAutomationClip.id, pos.x, pos.y);
               }}
-              className="px-2.5 py-1 bg-[#282830] hover:bg-[#333] text-white rounded font-bold"
+              className="px-2.5 py-1 bg-[var(--apex-surface-3)] hover:bg-[var(--apex-state-hover)] text-[var(--apex-text)] rounded font-bold"
               title="Add a new automation point on the widest envelope gap"
             >
               + Add Node
@@ -1748,8 +1748,8 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
               disabled={!activeAutomationClip.automationPoints || activeAutomationClip.automationPoints.length <= 2}
               className={`px-2.5 py-1 rounded font-bold transition ${
                 activeAutomationClip.automationPoints && activeAutomationClip.automationPoints.length > 2
-                  ? 'bg-red-950/60 hover:bg-red-800 text-red-200 border border-red-800/40'
-                  : 'bg-[#202024] text-[#555] cursor-not-allowed'
+                  ? 'bg-[color-mix(in_srgb,var(--apex-danger)_14%,var(--apex-panel))] hover:bg-[color-mix(in_srgb,var(--apex-danger)_22%,var(--apex-panel))] text-[var(--apex-danger)] border border-[color-mix(in_srgb,var(--apex-danger)_45%,transparent)]'
+                  : 'bg-[var(--apex-surface-2)] text-[var(--apex-text-3)] cursor-not-allowed'
               }`}
               title={
                 activeAutomationClip.automationPoints && activeAutomationClip.automationPoints.length > 2
@@ -1765,7 +1765,7 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
                 setAutomationEditorClipId(null);
                 setSelectedPointIndex(null);
               }}
-              className="p-1 text-[#888] hover:text-white rounded"
+              className="p-1 text-[var(--apex-text-muted)] hover:text-[var(--apex-text)] rounded"
               title="Close editor drawer"
             >
               <X className="w-4 h-4" />

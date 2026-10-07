@@ -220,13 +220,13 @@ test('Accessibility semantics for gutters', () => {
 test('Small window width - main min sizing and flex handling', () => {
   const app = appSource();
   const css = indexCss();
-  // main has flex-1 and min-w-[320px] for central section
-  assert.ok(app.includes('className="flex-1 flex flex-col bg-[#121214] overflow-hidden min-w-[320px]"'), 'main central min 320');
+  // Main keeps its center minimum while using the shared canvas token.
+  assert.ok(app.includes('className="flex-1 flex flex-col bg-[var(--apex-canvas)] overflow-hidden min-w-[320px]"'), 'central pane keeps its semantic canvas and 320px minimum');
   assert.ok(app.includes('id="apex-workspace-main"'), 'workspace main id');
   assert.ok(app.includes('className="flex-1 flex overflow-hidden relative"'), 'workspace main is flex-1 flex overflow-hidden');
-  // browser and inspector panes are shrink-0 with fixed widths
-  assert.ok(app.includes('shrink-0 flex flex-col overflow-hidden bg-[#121214] border-r'), 'browser pane shrink-0');
-  assert.ok(app.includes('shrink-0 flex flex-col overflow-hidden bg-[#191c25] border-l'), 'inspector pane shrink-0');
+  // Browser and Inspector stay fixed-width flex panes with shared panel tokens.
+  assert.ok(app.includes('shrink-0 flex flex-col overflow-hidden bg-[var(--apex-panel)] border-r'), 'browser pane keeps its semantic panel background and shrink-0 sizing');
+  assert.ok(app.includes('shrink-0 flex flex-col overflow-hidden bg-[var(--apex-panel)] border-l'), 'inspector pane keeps its semantic panel background and shrink-0 sizing');
   // gutters are shrink-0 6px
   assert.ok(app.includes('w-[6px] shrink-0'), 'gutters 6px shrink-0');
   // css has fallback for playlist label width at small breakpoints

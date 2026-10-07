@@ -140,20 +140,20 @@ export const InstrumentRack: React.FC<InstrumentRackProps> = ({
   };
 
   return (
-    <div id="fl-instrument-rack" className="flex flex-col h-full bg-[#121214] select-none text-[#b0b0b0]">
+    <div id="fl-instrument-rack" className="flex flex-col h-full bg-[var(--apex-canvas)] select-none text-[var(--apex-text-2)]">
       {/* Top Bar with Channel Switcher & Preset Selector */}
-      <div className="h-9 bg-[#1e1e20] border-b border-[#333336] flex items-center justify-between px-4 shrink-0 gap-4">
+      <div className="h-9 bg-[var(--apex-panel-header)] border-b border-[var(--apex-border)] flex items-center justify-between px-4 shrink-0 gap-4">
         {/* Active Instrument Title */}
         <div className="flex items-center gap-2">
-          <Cpu className="w-3.5 h-3.5 text-[#ff6e00]" />
-          <span className="text-[10px] font-bold text-white uppercase tracking-wider">
-            INSTRUMENT: <span style={{ color: channel.color }}>{channel.name}</span>
+          <Cpu className="w-3.5 h-3.5 text-[var(--apex-accent)]" />
+          <span className="text-[10px] font-bold text-[var(--apex-text)] uppercase tracking-wider">
+            INSTRUMENT: <span style={{ color: channel.color || 'var(--apex-text)' }}>{channel.name}</span>
           </span>
 
           <select
             value={channel.id}
             onChange={(e) => onSelectChannel(e.target.value)}
-            className="bg-[#121214] text-[#ff6e00] font-bold text-xs px-2 py-0.5 rounded border border-[#333336] focus:outline-none cursor-pointer ml-2"
+            className="bg-[var(--apex-chrome-inset)] text-[var(--apex-accent)] font-bold text-xs px-2 py-0.5 rounded border border-[var(--apex-border)] focus:outline-none cursor-pointer ml-2"
           >
             {allChannels.map((ch) => (
               <option key={ch.id} value={ch.id}>{ch.name}</option>
@@ -163,12 +163,12 @@ export const InstrumentRack: React.FC<InstrumentRackProps> = ({
 
         {/* Quick Synth Presets */}
         <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar">
-          <span className="text-[9px] text-[#777] uppercase font-bold">PRESETS:</span>
+          <span className="text-[9px] text-[var(--apex-text-3)] uppercase font-bold">PRESETS:</span>
           {SYNTH_PRESETS.map((pre, idx) => (
             <button
               key={idx}
               onClick={() => handleApplyPreset(pre)}
-              className="px-2 py-0.5 bg-[#121214] hover:bg-[#ff6e00] hover:text-black text-white text-[10px] font-semibold rounded border border-[#333336] transition whitespace-nowrap"
+              className="px-2 py-0.5 bg-[var(--apex-chrome-inset)] hover:bg-[var(--apex-accent-strong)] hover:text-[var(--apex-state-playing-fg)] text-[var(--apex-text)] text-[10px] font-semibold rounded border border-[var(--apex-border)] transition whitespace-nowrap"
             >
               {pre.name}
             </button>
@@ -187,23 +187,23 @@ export const InstrumentRack: React.FC<InstrumentRackProps> = ({
         {/* Synth Engine Sections */}
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
           {/* Section 1: Dual Oscillators (Sound Generation) */}
-          <div className="bg-[#1a1a1d] border border-[#333336] rounded-lg p-3 space-y-3">
-            <div className="flex items-center justify-between border-b border-[#333336] pb-1.5">
-              <span className="text-xs font-bold text-white uppercase tracking-tight flex items-center gap-1.5">
-                <Activity className="w-3.5 h-3.5 text-[#ff6e00]" />
+          <div className="bg-[var(--apex-panel)] border border-[var(--apex-border)] rounded-lg p-3 space-y-3">
+            <div className="flex items-center justify-between border-b border-[var(--apex-border)] pb-1.5">
+              <span className="text-xs font-bold text-[var(--apex-text)] uppercase tracking-tight flex items-center gap-1.5">
+                <Activity className="w-3.5 h-3.5 text-[var(--apex-accent)]" />
                 <span>OSCILLATORS 1 & 2</span>
               </span>
-              <span className="text-[9px] text-[#ff6e00] font-mono font-bold">SUBTRACTIVE / FM</span>
+              <span className="text-[9px] text-[var(--apex-accent)] font-mono font-bold">SUBTRACTIVE / FM</span>
             </div>
 
             {/* Osc 1 */}
-            <div className="space-y-1.5 bg-[#121214] p-2.5 rounded border border-[#333336]">
+            <div className="space-y-1.5 bg-[var(--apex-chrome-inset)] p-2.5 rounded border border-[var(--apex-border)]">
               <div className="flex items-center justify-between text-xs">
-                <span className="text-white font-bold">OSC 1 (Waveform)</span>
+                <span className="text-[var(--apex-text)] font-bold">OSC 1 (Waveform)</span>
                 <select
                   value={p.osc1Type}
                   onChange={(e) => handleUpdateParams({ osc1Type: e.target.value as OscillatorType })}
-                  className="bg-[#222225] text-white text-xs px-2 py-0.5 rounded border border-[#333336]"
+                  className="bg-[var(--apex-surface-2)] text-[var(--apex-text)] text-xs px-2 py-0.5 rounded border border-[var(--apex-border)]"
                 >
                   <option value="sawtooth">Sawtooth</option>
                   <option value="square">Square / Pulse</option>
@@ -212,20 +212,20 @@ export const InstrumentRack: React.FC<InstrumentRackProps> = ({
                 </select>
               </div>
 
-              <div className="grid grid-cols-2 gap-2 text-[10px] text-[#777] pt-1">
+              <div className="grid grid-cols-2 gap-2 text-[10px] text-[var(--apex-text-3)] pt-1">
                 <div>
-                  <div className="flex justify-between"><span>DETUNE</span><span className="text-[#ff6e00]">{p.osc1Detune}c</span></div>
+                  <div className="flex justify-between"><span>DETUNE</span><span className="text-[var(--apex-accent)]">{p.osc1Detune}c</span></div>
                   <input
                     type="range"
                     min="-50"
                     max="50"
                     value={p.osc1Detune}
                     onChange={(e) => handleUpdateParams({ osc1Detune: Number(e.target.value) })}
-                    className="w-full h-1 accent-[#ff6e00] bg-[#333336] rounded"
+                    className="w-full h-1 accent-[var(--apex-accent)] bg-[var(--apex-surface-3)] rounded"
                   />
                 </div>
                 <div>
-                  <div className="flex justify-between"><span>MIX</span><span className="text-[#ff6e00]">{Math.round(p.osc1Mix * 100)}%</span></div>
+                  <div className="flex justify-between"><span>MIX</span><span className="text-[var(--apex-accent)]">{Math.round(p.osc1Mix * 100)}%</span></div>
                   <input
                     type="range"
                     min="0"
@@ -233,20 +233,20 @@ export const InstrumentRack: React.FC<InstrumentRackProps> = ({
                     step="0.05"
                     value={p.osc1Mix}
                     onChange={(e) => handleUpdateParams({ osc1Mix: parseFloat(e.target.value) })}
-                    className="w-full h-1 accent-[#ff6e00] bg-[#333336] rounded"
+                    className="w-full h-1 accent-[var(--apex-accent)] bg-[var(--apex-surface-3)] rounded"
                   />
                 </div>
               </div>
             </div>
 
             {/* Osc 2 */}
-            <div className="space-y-1.5 bg-[#121214] p-2.5 rounded border border-[#333336]">
+            <div className="space-y-1.5 bg-[var(--apex-chrome-inset)] p-2.5 rounded border border-[var(--apex-border)]">
               <div className="flex items-center justify-between text-xs">
-                <span className="text-white font-bold">OSC 2 (Layer)</span>
+                <span className="text-[var(--apex-text)] font-bold">OSC 2 (Layer)</span>
                 <select
                   value={p.osc2Type}
                   onChange={(e) => handleUpdateParams({ osc2Type: e.target.value as OscillatorType })}
-                  className="bg-[#222225] text-white text-xs px-2 py-0.5 rounded border border-[#333336]"
+                  className="bg-[var(--apex-surface-2)] text-[var(--apex-text)] text-xs px-2 py-0.5 rounded border border-[var(--apex-border)]"
                 >
                   <option value="sawtooth">Sawtooth</option>
                   <option value="square">Square / Pulse</option>
@@ -255,20 +255,20 @@ export const InstrumentRack: React.FC<InstrumentRackProps> = ({
                 </select>
               </div>
 
-              <div className="grid grid-cols-2 gap-2 text-[10px] text-[#777] pt-1">
+              <div className="grid grid-cols-2 gap-2 text-[10px] text-[var(--apex-text-3)] pt-1">
                 <div>
-                  <div className="flex justify-between"><span>DETUNE</span><span className="text-[#ff6e00]">{p.osc2Detune}c</span></div>
+                  <div className="flex justify-between"><span>DETUNE</span><span className="text-[var(--apex-accent)]">{p.osc2Detune}c</span></div>
                   <input
                     type="range"
                     min="-50"
                     max="50"
                     value={p.osc2Detune}
                     onChange={(e) => handleUpdateParams({ osc2Detune: Number(e.target.value) })}
-                    className="w-full h-1 accent-[#ff6e00] bg-[#333336] rounded"
+                    className="w-full h-1 accent-[var(--apex-accent)] bg-[var(--apex-surface-3)] rounded"
                   />
                 </div>
                 <div>
-                  <div className="flex justify-between"><span>MIX</span><span className="text-[#ff6e00]">{Math.round(p.osc2Mix * 100)}%</span></div>
+                  <div className="flex justify-between"><span>MIX</span><span className="text-[var(--apex-accent)]">{Math.round(p.osc2Mix * 100)}%</span></div>
                   <input
                     type="range"
                     min="0"
@@ -276,7 +276,7 @@ export const InstrumentRack: React.FC<InstrumentRackProps> = ({
                     step="0.05"
                     value={p.osc2Mix}
                     onChange={(e) => handleUpdateParams({ osc2Mix: parseFloat(e.target.value) })}
-                    className="w-full h-1 accent-[#ff6e00] bg-[#333336] rounded"
+                    className="w-full h-1 accent-[var(--apex-accent)] bg-[var(--apex-surface-3)] rounded"
                   />
                 </div>
               </div>
@@ -284,21 +284,21 @@ export const InstrumentRack: React.FC<InstrumentRackProps> = ({
           </div>
 
           {/* Section 2: Analog Ladder Filter & LFO */}
-          <div className="bg-[#1a1a1d] border border-[#333336] rounded-lg p-3 space-y-3">
-            <div className="flex items-center justify-between border-b border-[#333336] pb-1.5">
-              <span className="text-xs font-bold text-white uppercase tracking-tight flex items-center gap-1.5">
-                <Sliders className="w-3.5 h-3.5 text-[#ff6e00]" />
+          <div className="bg-[var(--apex-panel)] border border-[var(--apex-border)] rounded-lg p-3 space-y-3">
+            <div className="flex items-center justify-between border-b border-[var(--apex-border)] pb-1.5">
+              <span className="text-xs font-bold text-[var(--apex-text)] uppercase tracking-tight flex items-center gap-1.5">
+                <Sliders className="w-3.5 h-3.5 text-[var(--apex-accent)]" />
                 <span>STATE VARIABLE FILTER</span>
               </span>
-              <span className="text-[9px] text-[#ff6e00] font-mono font-bold">24dB LADDER</span>
+              <span className="text-[9px] text-[var(--apex-accent)] font-mono font-bold">24dB LADDER</span>
             </div>
 
-            <div className="space-y-3 bg-[#121214] p-3 rounded border border-[#333336]">
+            <div className="space-y-3 bg-[var(--apex-chrome-inset)] p-3 rounded border border-[var(--apex-border)]">
               {/* Cutoff */}
               <div className="space-y-1">
                 <div className="flex justify-between text-xs">
-                  <span className="text-white font-semibold">CUTOFF FREQUENCY</span>
-                  <span className="text-[#ff6e00] font-mono">{Math.round(p.filterCutoff)} Hz</span>
+                  <span className="text-[var(--apex-text)] font-semibold">CUTOFF FREQUENCY</span>
+                  <span className="text-[var(--apex-accent)] font-mono">{Math.round(p.filterCutoff)} Hz</span>
                 </div>
                 <input
                   type="range"
@@ -307,15 +307,15 @@ export const InstrumentRack: React.FC<InstrumentRackProps> = ({
                   step="20"
                   value={p.filterCutoff}
                   onChange={(e) => handleUpdateParams({ filterCutoff: Number(e.target.value) })}
-                  className="w-full h-1.5 accent-[#ff6e00] bg-[#333336] rounded"
+                  className="w-full h-1.5 accent-[var(--apex-accent)] bg-[var(--apex-surface-3)] rounded"
                 />
               </div>
 
               {/* Resonance */}
               <div className="space-y-1">
                 <div className="flex justify-between text-xs">
-                  <span className="text-white font-semibold">RESONANCE (Q-FACTOR)</span>
-                  <span className="text-[#ff6e00] font-mono">{p.filterResonance.toFixed(1)}</span>
+                  <span className="text-[var(--apex-text)] font-semibold">RESONANCE (Q-FACTOR)</span>
+                  <span className="text-[var(--apex-accent)] font-mono">{p.filterResonance.toFixed(1)}</span>
                 </div>
                 <input
                   type="range"
@@ -324,18 +324,18 @@ export const InstrumentRack: React.FC<InstrumentRackProps> = ({
                   step="0.5"
                   value={p.filterResonance}
                   onChange={(e) => handleUpdateParams({ filterResonance: parseFloat(e.target.value) })}
-                  className="w-full h-1.5 accent-[#ff6e00] bg-[#333336] rounded"
+                  className="w-full h-1.5 accent-[var(--apex-accent)] bg-[var(--apex-surface-3)] rounded"
                 />
               </div>
 
               {/* LFO Modulation Rate & Target */}
-              <div className="pt-2 border-t border-[#333336] space-y-2 text-xs">
+              <div className="pt-2 border-t border-[var(--apex-border)] space-y-2 text-xs">
                 <div className="flex items-center justify-between">
-                  <span className="text-[#777] font-bold text-[10px]">LFO MOD DESTINATION</span>
+                  <span className="text-[var(--apex-text-3)] font-bold text-[10px]">LFO MOD DESTINATION</span>
                   <select
                     value={p.lfoTarget}
                     onChange={(e) => handleUpdateParams({ lfoTarget: e.target.value as any })}
-                    className="bg-[#222225] text-white text-[10px] px-2 py-0.5 rounded border border-[#333336]"
+                    className="bg-[var(--apex-surface-2)] text-[var(--apex-text)] text-[10px] px-2 py-0.5 rounded border border-[var(--apex-border)]"
                   >
                     <option value="none">Off (No Mod)</option>
                     <option value="filter">Filter Cutoff (Wah)</option>
@@ -344,7 +344,7 @@ export const InstrumentRack: React.FC<InstrumentRackProps> = ({
                   </select>
                 </div>
 
-                <div className="flex justify-between text-[10px] text-[#777]">
+                <div className="flex justify-between text-[10px] text-[var(--apex-text-3)]">
                   <span>RATE: {p.lfoRate} Hz</span>
                   <input
                     type="range"
@@ -353,7 +353,7 @@ export const InstrumentRack: React.FC<InstrumentRackProps> = ({
                     step="0.5"
                     value={p.lfoRate}
                     onChange={(e) => handleUpdateParams({ lfoRate: parseFloat(e.target.value) })}
-                    className="w-24 h-1 accent-[#ff6e00] bg-[#333336] rounded"
+                    className="w-24 h-1 accent-[var(--apex-accent)] bg-[var(--apex-surface-3)] rounded"
                   />
                 </div>
               </div>
@@ -361,21 +361,21 @@ export const InstrumentRack: React.FC<InstrumentRackProps> = ({
           </div>
 
           {/* Section 3: ADSR Amplitude Envelope */}
-          <div className="bg-[#1a1a1d] border border-[#333336] rounded-lg p-3 space-y-3">
-            <div className="flex items-center justify-between border-b border-[#333336] pb-1.5">
-              <span className="text-xs font-bold text-white uppercase tracking-tight flex items-center gap-1.5">
-                <Flame className="w-3.5 h-3.5 text-[#ff6e00]" />
+          <div className="bg-[var(--apex-panel)] border border-[var(--apex-border)] rounded-lg p-3 space-y-3">
+            <div className="flex items-center justify-between border-b border-[var(--apex-border)] pb-1.5">
+              <span className="text-xs font-bold text-[var(--apex-text)] uppercase tracking-tight flex items-center gap-1.5">
+                <Flame className="w-3.5 h-3.5 text-[var(--apex-accent)]" />
                 <span>ADSR AMPLITUDE ENVELOPE</span>
               </span>
-              <span className="text-[9px] text-[#ff6e00] font-mono font-bold">SHAPE</span>
+              <span className="text-[9px] text-[var(--apex-accent)] font-mono font-bold">SHAPE</span>
             </div>
 
-            <div className="bg-[#121214] p-3 rounded border border-[#333336] space-y-2.5">
+            <div className="bg-[var(--apex-chrome-inset)] p-3 rounded border border-[var(--apex-border)] space-y-2.5">
               {/* Attack */}
               <div className="space-y-0.5 text-xs">
-                <div className="flex justify-between text-[10px] text-[#777]">
+                <div className="flex justify-between text-[10px] text-[var(--apex-text-3)]">
                   <span>ATTACK TIME</span>
-                  <span className="text-[#ff6e00] font-mono">{(p.attack * 1000).toFixed(0)} ms</span>
+                  <span className="text-[var(--apex-accent)] font-mono">{(p.attack * 1000).toFixed(0)} ms</span>
                 </div>
                 <input
                   type="range"
@@ -384,15 +384,15 @@ export const InstrumentRack: React.FC<InstrumentRackProps> = ({
                   step="0.01"
                   value={p.attack}
                   onChange={(e) => handleUpdateParams({ attack: parseFloat(e.target.value) })}
-                  className="w-full h-1 accent-[#ff6e00] bg-[#333336] rounded"
+                  className="w-full h-1 accent-[var(--apex-accent)] bg-[var(--apex-surface-3)] rounded"
                 />
               </div>
 
               {/* Decay */}
               <div className="space-y-0.5 text-xs">
-                <div className="flex justify-between text-[10px] text-[#777]">
+                <div className="flex justify-between text-[10px] text-[var(--apex-text-3)]">
                   <span>DECAY TIME</span>
-                  <span className="text-[#ff6e00] font-mono">{(p.decay * 1000).toFixed(0)} ms</span>
+                  <span className="text-[var(--apex-accent)] font-mono">{(p.decay * 1000).toFixed(0)} ms</span>
                 </div>
                 <input
                   type="range"
@@ -401,15 +401,15 @@ export const InstrumentRack: React.FC<InstrumentRackProps> = ({
                   step="0.05"
                   value={p.decay}
                   onChange={(e) => handleUpdateParams({ decay: parseFloat(e.target.value) })}
-                  className="w-full h-1 accent-[#ff6e00] bg-[#333336] rounded"
+                  className="w-full h-1 accent-[var(--apex-accent)] bg-[var(--apex-surface-3)] rounded"
                 />
               </div>
 
               {/* Sustain */}
               <div className="space-y-0.5 text-xs">
-                <div className="flex justify-between text-[10px] text-[#777]">
+                <div className="flex justify-between text-[10px] text-[var(--apex-text-3)]">
                   <span>SUSTAIN LEVEL</span>
-                  <span className="text-[#ff6e00] font-mono">{Math.round(p.sustain * 100)}%</span>
+                  <span className="text-[var(--apex-accent)] font-mono">{Math.round(p.sustain * 100)}%</span>
                 </div>
                 <input
                   type="range"
@@ -418,15 +418,15 @@ export const InstrumentRack: React.FC<InstrumentRackProps> = ({
                   step="0.05"
                   value={p.sustain}
                   onChange={(e) => handleUpdateParams({ sustain: parseFloat(e.target.value) })}
-                  className="w-full h-1 accent-[#ff6e00] bg-[#333336] rounded"
+                  className="w-full h-1 accent-[var(--apex-accent)] bg-[var(--apex-surface-3)] rounded"
                 />
               </div>
 
               {/* Release */}
               <div className="space-y-0.5 text-xs">
-                <div className="flex justify-between text-[10px] text-[#777]">
+                <div className="flex justify-between text-[10px] text-[var(--apex-text-3)]">
                   <span>RELEASE TIME</span>
-                  <span className="text-[#ff6e00] font-mono">{(p.release * 1000).toFixed(0)} ms</span>
+                  <span className="text-[var(--apex-accent)] font-mono">{(p.release * 1000).toFixed(0)} ms</span>
                 </div>
                 <input
                   type="range"
@@ -435,7 +435,7 @@ export const InstrumentRack: React.FC<InstrumentRackProps> = ({
                   step="0.05"
                   value={p.release}
                   onChange={(e) => handleUpdateParams({ release: parseFloat(e.target.value) })}
-                  className="w-full h-1 accent-[#ff6e00] bg-[#333336] rounded"
+                  className="w-full h-1 accent-[var(--apex-accent)] bg-[var(--apex-surface-3)] rounded"
                 />
               </div>
             </div>
@@ -443,13 +443,13 @@ export const InstrumentRack: React.FC<InstrumentRackProps> = ({
         </div>
 
         {/* Live Touch Synthesizer Keyboard (2 Octaves: C3 to C5) */}
-        <div className="bg-[#1a1a1d] border border-[#333336] rounded-lg p-3 space-y-2">
+        <div className="bg-[var(--apex-panel)] border border-[var(--apex-border)] rounded-lg p-3 space-y-2">
           <div className="flex items-center justify-between text-xs">
-            <span className="font-bold text-white tracking-wider text-[10px] uppercase">LIVE TOUCH SYNTHESIZER KEYBOARD</span>
-            <span className="text-[10px] text-[#777]">Trigger live with mouse, touch, or computer keys (A-K)</span>
+            <span className="font-bold text-[var(--apex-text)] tracking-wider text-[10px] uppercase">LIVE TOUCH SYNTHESIZER KEYBOARD</span>
+            <span className="text-[10px] text-[var(--apex-text-3)]">Trigger live with mouse, touch, or computer keys (A-K)</span>
           </div>
 
-          <div className="flex h-28 bg-[#121214] p-1.5 rounded border border-[#333336] overflow-x-auto select-none">
+          <div className="flex h-28 bg-[var(--apex-chrome-inset)] p-1.5 rounded border border-[var(--apex-border)] overflow-x-auto select-none">
             {[48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72].map((midiNote) => {
               const isBlack = [1, 3, 6, 8, 10].includes(midiNote % 12);
               const noteNames = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
@@ -466,11 +466,11 @@ export const InstrumentRack: React.FC<InstrumentRackProps> = ({
                   }}
                   className={`flex-1 min-w-[28px] sm:min-w-[34px] rounded-sm transition active:scale-95 flex flex-col justify-end items-center pb-2 text-[8px] font-mono font-bold mx-0.5 select-none ${
                     isBlack
-                      ? 'bg-[#0a0a0b] text-[#777] hover:bg-[#1a1a1d] active:bg-[#ff6e00] active:text-black border border-[#222225] h-3/4 z-10 -mx-2.5 shadow'
-                      : 'bg-[#222225] text-white hover:bg-[#2d2d30] active:bg-[#ff6e00] active:text-black border border-[#333336] h-full shadow-sm'
+                      ? 'bg-[var(--apex-piano-key-accidental)] text-[var(--apex-text-3)] hover:bg-[var(--apex-state-hover)] active:bg-[var(--apex-accent)] active:text-[var(--apex-state-playing-fg)] border border-[var(--apex-grid-line)] h-3/4 z-10 -mx-2.5 shadow'
+                      : 'bg-[var(--apex-piano-key-natural)] text-[var(--apex-text)] hover:bg-[var(--apex-state-hover)] active:bg-[var(--apex-accent)] active:text-[var(--apex-state-playing-fg)] border border-[var(--apex-grid-line-strong)] h-full shadow-sm'
                   }`}
                 >
-                  <span className={midiNote % 12 === 0 ? 'text-[#ff6e00] font-bold' : ''}>{label}</span>
+                  <span className={midiNote % 12 === 0 ? 'text-[var(--apex-accent)] font-bold' : ''}>{label}</span>
                 </button>
               );
             })}

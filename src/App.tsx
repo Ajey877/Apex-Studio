@@ -11,7 +11,7 @@ import {
   normalizeInspectorWidth,
   writeWorkspaceLayoutPreference,
 } from './state/workspaceLayout';
-import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import React, { useState, useEffect, useLayoutEffect, useCallback, useMemo, useRef } from 'react';
 import { 
   ProjectState, 
   ViewMode, 
@@ -381,7 +381,8 @@ export function App() {
   // UI-02: persist workspace layout preferences independently of project data
   useEffect(() => { writeWorkspaceLayoutPreference(WORKSPACE_LAYOUT_KEYS.density, density); }, [density]);
   useEffect(() => { writeThemePreference(themeMode); }, [themeMode]);
-  useEffect(() => {
+  // Apply the root palette before paint so a saved Light preference never flashes the dark defaults.
+  useLayoutEffect(() => {
     document.documentElement.dataset.theme = themeMode;
   }, [themeMode]);
   useEffect(() => { writeWorkspaceLayoutPreference(WORKSPACE_LAYOUT_KEYS.browserWidth, String(browserExpandedWidth)); }, [browserExpandedWidth]);
@@ -1794,7 +1795,7 @@ export function App() {
   if (isProjectHydrating) {
     return (
       <div className="bg-[var(--apex-bg)] text-[var(--apex-text)] h-screen w-screen flex items-center justify-center font-sans">
-        <div className="text-xs font-bold tracking-[0.2em] text-[#ff6e00]">LOADING PROJECT</div>
+        <div className="text-xs font-bold tracking-[0.2em] text-[var(--apex-accent)]">LOADING PROJECT</div>
       </div>
     );
   }
@@ -1862,10 +1863,10 @@ export function App() {
         <div
           id="save-failure-banner"
           role="alert"
-          className="bg-[#361111] border-b border-red-500/60 px-3 sm:px-4 py-1.5 flex items-center justify-between text-xs text-red-200 z-40 shrink-0 select-text"
+          className="bg-[color-mix(in_srgb,var(--apex-danger)_12%,var(--apex-panel))] border-b border-[color-mix(in_srgb,var(--apex-danger)_55%,transparent)] px-3 sm:px-4 py-1.5 flex items-center justify-between text-xs text-[var(--apex-danger)] z-40 shrink-0 select-text"
         >
           <div className="flex items-center gap-2">
-            <AlertTriangle className="w-4 h-4 text-red-400 shrink-0" />
+            <AlertTriangle className="w-4 h-4 text-[var(--apex-danger)] shrink-0" />
             <span>
               <strong>Project save failed:</strong> {saveError}. Recent changes could not be saved to local storage.
             </span>
@@ -1874,14 +1875,14 @@ export function App() {
             <button
               id="save-retry-btn"
               onClick={() => void performSave(projectStateRef.current, { reconcileAudio: true })}
-              className="px-2.5 py-0.5 bg-red-600 hover:bg-red-500 text-white font-bold text-[11px] rounded transition cursor-pointer"
+              className="px-2.5 py-0.5 bg-[var(--apex-danger)] hover:brightness-110 text-[var(--apex-state-recording-fg)] font-bold text-[11px] rounded transition cursor-pointer"
             >
               Retry Save
             </button>
             <button
               id="save-failure-dismiss-btn"
               onClick={() => setSaveError(null)}
-              className="text-red-300 hover:text-white p-0.5 transition cursor-pointer"
+              className="text-[var(--apex-danger)] hover:text-[var(--apex-text)] p-0.5 transition cursor-pointer"
               title="Dismiss warning"
             >
               <X className="w-3.5 h-3.5" />
@@ -1896,10 +1897,10 @@ export function App() {
           role="alert"
           data-audio-unavailable="true"
           title={missingAudioAssets.messages.join('\n')}
-          className="bg-[#3a2411] border-b border-amber-500/60 px-3 sm:px-4 py-1.5 flex items-center justify-between text-xs text-amber-100 z-40 shrink-0 select-text"
+          className="bg-[color-mix(in_srgb,var(--apex-gold)_12%,var(--apex-panel))] border-b border-[color-mix(in_srgb,var(--apex-gold)_55%,transparent)] px-3 sm:px-4 py-1.5 flex items-center justify-between text-xs text-[var(--apex-text)] z-40 shrink-0 select-text"
         >
           <div className="flex items-center gap-2">
-            <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
+            <AlertTriangle className="w-4 h-4 text-[var(--apex-gold)] shrink-0" />
             <span>
               <strong>Missing audio:</strong> {describeMissingAudioAssets(missingAudioAssets)}
             </span>
@@ -1912,7 +1913,7 @@ export function App() {
                   setSampleChannelId(missingAudioAssets.samples[0].channelId);
                   setIsSampleManagerOpen(true);
                 }}
-                className="px-2.5 py-0.5 bg-amber-500 hover:bg-amber-400 text-black font-bold text-[11px] rounded transition cursor-pointer"
+                className="px-2.5 py-0.5 bg-[var(--apex-gold)] hover:brightness-110 text-[var(--apex-state-playing-fg)] font-bold text-[11px] rounded transition cursor-pointer"
               >
                 Re-import Sample
               </button>
@@ -1925,7 +1926,7 @@ export function App() {
                 setProjectState(nextState);
                 setDismissedMissingAudioSignature(missingAudioSignature);
               }}
-              className="text-amber-200 hover:text-white p-0.5 transition cursor-pointer"
+              className="text-[var(--apex-gold)] hover:text-[var(--apex-text)] p-0.5 transition cursor-pointer"
               title="Dismiss warning"
             >
               <X className="w-3.5 h-3.5" />
@@ -1941,7 +1942,7 @@ export function App() {
           id="apex-browser-pane"
           data-collapsed={!isSidebarOpen}
           style={{ width: browserWidth, minWidth: browserWidth, maxWidth: browserWidth }}
-          className="shrink-0 flex flex-col overflow-hidden bg-[#121214] border-r border-[#2b3040]"
+          className="shrink-0 flex flex-col overflow-hidden bg-[var(--apex-panel)] border-r border-[var(--apex-border)]"
         >
           {isSidebarOpen && (
             <div className="min-w-0 grow flex flex-col overflow-hidden">
@@ -1965,11 +1966,11 @@ export function App() {
                 aria-label="Expand Studio Browser"
                 title="Expand Studio Browser (Ctrl+B)"
                 onClick={() => setIsSidebarOpen(true)}
-                className="w-7 h-7 rounded-md bg-[#191c25] border border-[#2b3040] flex items-center justify-center text-[#aeb5c4] hover:text-white hover:border-[#9b8afb] transition-colors"
+                className="w-7 h-7 rounded-md bg-[var(--apex-panel-header)] border border-[var(--apex-border)] flex items-center justify-center text-[var(--apex-text-2)] hover:text-[var(--apex-text)] hover:border-[var(--apex-accent)] transition-colors"
               >
                 <span aria-hidden="true" className="text-[11px]">≡</span>
               </button>
-              <span className="text-[10px] tracking-[0.18em] text-[#737c8f] [writing-mode:vertical-lr] rotate-180 select-none">BROWSER</span>
+              <span className="text-[10px] tracking-[0.18em] text-[var(--apex-text-3)] [writing-mode:vertical-lr] rotate-180 select-none">BROWSER</span>
             </div>
           )}
         </div>
@@ -1986,13 +1987,13 @@ export function App() {
           tabIndex={isSidebarOpen ? 0 : -1}
           onPointerDown={handleBrowserGutterPointerDown}
           onKeyDown={event => handleGutterKeyDown('browser', event)}
-          className={`w-[6px] shrink-0 flex items-center justify-center cursor-col-resize select-none transition-colors ${isSidebarOpen ? 'bg-[#121214] hover:bg-[#2b3040] focus-visible:bg-[#9b8afb] focus-visible:outline-none' : 'bg-[#121214] opacity-60 pointer-events-none'}`}
+          className={`w-[6px] shrink-0 flex items-center justify-center cursor-col-resize select-none transition-colors ${isSidebarOpen ? 'bg-[var(--apex-canvas)] hover:bg-[var(--apex-surface-3)] focus-visible:bg-[var(--apex-accent)] focus-visible:outline-none' : 'bg-[var(--apex-canvas)] opacity-60 pointer-events-none'}`}
           style={{ touchAction: 'none' }}
         >
-          <span aria-hidden="true" className="w-px h-8 bg-[#2b3040] pointer-events-none" />
+          <span aria-hidden="true" className="w-px h-8 bg-[var(--apex-border)] pointer-events-none" />
         </div>
 
-        <section className="flex-1 flex flex-col bg-[#121214] overflow-hidden min-w-[320px]">
+        <section className="flex-1 flex flex-col bg-[var(--apex-canvas)] overflow-hidden min-w-[320px]">
           {currentView === 'channel_rack' && (
             <ChannelRack
               channels={projectState.channels}
@@ -2105,16 +2106,16 @@ export function App() {
           )}
 
           {currentView === 'sampler' && (
-            <div className="flex flex-col h-full overflow-y-auto p-4 bg-[#121214] items-center gap-4">
+            <div className="flex flex-col h-full overflow-y-auto p-4 bg-[var(--apex-canvas)] text-[var(--apex-text-2)] items-center gap-4">
               <div className="w-full max-w-4xl flex flex-wrap items-center justify-between gap-2">
                 <div>
-                  <h2 className="text-lg font-bold text-white">APEX SAMPLE WORKSTATION</h2>
-                  <p className="text-[10px] text-[#777]">Import, inspect, slice and map real audio into the drum sampler.</p>
+                  <h2 className="text-lg font-bold text-[var(--apex-text)]">APEX SAMPLE WORKSTATION</h2>
+                  <p className="text-[10px] text-[var(--apex-text-3)]">Import, inspect, slice and map real audio into the drum sampler.</p>
                 </div>
                 <div className="flex gap-2">
-                  <button onClick={() => setIsAudioRecorderOpen(true)} className="px-3 py-2 bg-[#ff6e00] text-black font-bold text-xs rounded">RECORD</button>
-                  <button onClick={() => setIsSampleManagerOpen(true)} className="px-3 py-2 bg-[#00ff88] text-black font-bold text-xs rounded">SAMPLE LIBRARY</button>
-                  <button onClick={() => setCurrentView('instruments')} className="px-3 py-2 bg-[#222225] text-white font-bold text-xs rounded border border-[#333336]">INSTRUMENTS</button>
+                  <button onClick={() => setIsAudioRecorderOpen(true)} className="px-3 py-2 bg-[var(--apex-accent)] text-[var(--apex-state-playing-fg)] font-bold text-xs rounded">RECORD</button>
+                  <button onClick={() => setIsSampleManagerOpen(true)} className="px-3 py-2 bg-[var(--apex-success)] text-[var(--apex-state-playing-fg)] font-bold text-xs rounded">SAMPLE LIBRARY</button>
+                  <button onClick={() => setCurrentView('instruments')} className="px-3 py-2 bg-[var(--apex-surface-2)] text-[var(--apex-text)] font-bold text-xs rounded border border-[var(--apex-border)]">INSTRUMENTS</button>
                 </div>
               </div>
               {selectedChannel && (
@@ -2155,10 +2156,10 @@ export function App() {
           tabIndex={isInspectorOpen ? 0 : -1}
           onPointerDown={handleInspectorGutterPointerDown}
           onKeyDown={event => handleGutterKeyDown('inspector', event)}
-          className={`w-[6px] shrink-0 flex items-center justify-center cursor-col-resize select-none transition-colors ${isInspectorOpen ? 'bg-[#121214] hover:bg-[#2b3040] focus-visible:bg-[#9b8afb] focus-visible:outline-none' : 'bg-[#121214] opacity-60 pointer-events-none'}`}
+          className={`w-[6px] shrink-0 flex items-center justify-center cursor-col-resize select-none transition-colors ${isInspectorOpen ? 'bg-[var(--apex-canvas)] hover:bg-[var(--apex-surface-3)] focus-visible:bg-[var(--apex-accent)] focus-visible:outline-none' : 'bg-[var(--apex-canvas)] opacity-60 pointer-events-none'}`}
           style={{ touchAction: 'none' }}
         >
-          <span aria-hidden="true" className="w-px h-8 bg-[#2b3040] pointer-events-none" />
+          <span aria-hidden="true" className="w-px h-8 bg-[var(--apex-border)] pointer-events-none" />
         </div>
 
         {/* Inspector pane — honest empty state when no context */}
@@ -2166,12 +2167,12 @@ export function App() {
           id="apex-inspector-pane"
           data-collapsed={!isInspectorOpen}
           style={{ width: inspectorWidth, minWidth: inspectorWidth, maxWidth: inspectorWidth }}
-          className="shrink-0 flex flex-col overflow-hidden bg-[#191c25] border-l border-[#2b3040]"
+          className="shrink-0 flex flex-col overflow-hidden bg-[var(--apex-panel)] border-l border-[var(--apex-border)]"
         >
           {isInspectorOpen ? (
             <div className="h-full flex flex-col">
-              <header className="h-10 shrink-0 flex items-center justify-between px-3 border-b border-[#2b3040] bg-[#191c25]">
-                <span className="text-[11px] font-bold tracking-[0.12em] text-[#f4f5f8]">INSPECTOR</span>
+              <header className="h-10 shrink-0 flex items-center justify-between px-3 border-b border-[var(--apex-border)] bg-[var(--apex-panel-header)]">
+                <span className="text-[11px] font-bold tracking-[0.12em] text-[var(--apex-text)]">INSPECTOR</span>
                 <div className="flex items-center gap-1">
                   <button type="button" onClick={() => setIsAppearanceSettingsOpen(true)} aria-label="Open Settings" title="Settings" className="rounded px-1.5 py-1 text-[10px] text-[var(--apex-text-2)] hover:text-[var(--apex-text)]">SETTINGS</button>
                   <button
@@ -2179,7 +2180,7 @@ export function App() {
                   aria-label="Collapse Inspector"
                   title="Collapse Inspector"
                   onClick={() => setIsInspectorOpen(false)}
-                  className="w-6 h-6 rounded flex items-center justify-center text-[#737c8f] hover:text-white hover:bg-[#262b38] transition-colors"
+                  className="w-6 h-6 rounded flex items-center justify-center text-[var(--apex-text-3)] hover:text-[var(--apex-text)] hover:bg-[var(--apex-state-hover)] transition-colors"
                 >
                   <span aria-hidden="true">›</span>
                 </button>
@@ -2187,36 +2188,36 @@ export function App() {
               </header>
               <div className="flex-1 overflow-y-auto custom-scrollbar p-3 flex flex-col gap-3">
                 {selectedChannel ? (
-                  <div className="rounded-lg border border-[#2b3040] bg-[#202430] p-3">
-                    <div className="text-[10px] tracking-[0.14em] text-[#737c8f] mb-1">SELECTED CHANNEL</div>
-                    <div className="text-sm font-semibold text-white truncate">{selectedChannel.name}</div>
-                    <div className="text-xs text-[#aeb5c4]">{selectedChannel.instrumentType} • {selectedChannel.mute ? 'Muted' : 'Audible'} {selectedChannel.solo ? '• Solo' : ''}</div>
+                  <div className="rounded-lg border border-[var(--apex-border)] bg-[var(--apex-surface-2)] p-3">
+                    <div className="text-[10px] tracking-[0.14em] text-[var(--apex-text-3)] mb-1">SELECTED CHANNEL</div>
+                    <div className="text-sm font-semibold text-[var(--apex-text)] truncate">{selectedChannel.name}</div>
+                    <div className="text-xs text-[var(--apex-text-2)]">{selectedChannel.instrumentType} • {selectedChannel.mute ? 'Muted' : 'Audible'} {selectedChannel.solo ? '• Solo' : ''}</div>
                   </div>
                 ) : (
-                  <div className="rounded-lg border border-dashed border-[#2b3040] p-4 text-center">
-                    <div className="text-sm font-semibold text-[#aeb5c4]">No channel</div>
-                    <div className="text-xs text-[#737c8f] mt-1">Select a channel in the Rack</div>
+                  <div className="rounded-lg border border-dashed border-[var(--apex-border)] p-4 text-center">
+                    <div className="text-sm font-semibold text-[var(--apex-text-2)]">No channel</div>
+                    <div className="text-xs text-[var(--apex-text-3)] mt-1">Select a channel in the Rack</div>
                   </div>
                 )}
                 {projectState.playlistClips.find(c => c.id === (typeof selectedPlaylistClipId === 'string' ? selectedPlaylistClipId : null)) ? (
-                  <div className="rounded-lg border border-[#2b3040] bg-[#202430] p-3">
-                    <div className="text-[10px] tracking-[0.14em] text-[#737c8f] mb-1">SELECTED CLIP</div>
-                    <div className="text-sm font-semibold text-white truncate">{projectState.playlistClips.find(c => c.id === selectedPlaylistClipId)!.name || projectState.playlistClips.find(c => c.id === selectedPlaylistClipId)!.id}</div>
-                    <div className="text-xs text-[#aeb5c4]">Bar {(projectState.playlistClips.find(c => c.id === selectedPlaylistClipId) as any).startBar ?? '?'}</div>
+                  <div className="rounded-lg border border-[var(--apex-border)] bg-[var(--apex-surface-2)] p-3">
+                    <div className="text-[10px] tracking-[0.14em] text-[var(--apex-text-3)] mb-1">SELECTED CLIP</div>
+                    <div className="text-sm font-semibold text-[var(--apex-text)] truncate">{projectState.playlistClips.find(c => c.id === selectedPlaylistClipId)!.name || projectState.playlistClips.find(c => c.id === selectedPlaylistClipId)!.id}</div>
+                    <div className="text-xs text-[var(--apex-text-2)]">Bar {(projectState.playlistClips.find(c => c.id === selectedPlaylistClipId) as any).startBar ?? '?'}</div>
                   </div>
                 ) : (
-                  <div className="rounded-lg border border-dashed border-[#2b3040] p-4 text-center">
-                    <div className="w-8 h-8 mx-auto mb-2 rounded-full bg-[#262b38] flex items-center justify-center text-[#737c8f]">◯</div>
-                    <div className="text-xs font-semibold text-[#aeb5c4]">No selection</div>
-                    <div className="text-[11px] text-[#737c8f] mt-1">Select a clip, note or channel to inspect its properties.</div>
+                  <div className="rounded-lg border border-dashed border-[var(--apex-border)] p-4 text-center">
+                    <div className="w-8 h-8 mx-auto mb-2 rounded-full bg-[var(--apex-surface-3)] flex items-center justify-center text-[var(--apex-text-3)]">◯</div>
+                    <div className="text-xs font-semibold text-[var(--apex-text-2)]">No selection</div>
+                    <div className="text-[11px] text-[var(--apex-text-3)] mt-1">Select a clip, note or channel to inspect its properties.</div>
                   </div>
                 )}
-                <div className="rounded-lg border border-[#2b3040] bg-[#202430] p-3">
-                  <div className="text-[10px] tracking-[0.14em] text-[#737c8f] mb-2">WORKSPACE</div>
-                  <div className="flex items-center justify-between text-xs"><span className="text-[#aeb5c4]">Density</span><span className="font-mono text-white">{density === 'compact' ? '48px Compact' : '64px Comfortable'}</span></div>
+                <div className="rounded-lg border border-[var(--apex-border)] bg-[var(--apex-surface-2)] p-3">
+                  <div className="text-[10px] tracking-[0.14em] text-[var(--apex-text-3)] mb-2">WORKSPACE</div>
+                  <div className="flex items-center justify-between text-xs"><span className="text-[var(--apex-text-2)]">Density</span><span className="font-mono text-[var(--apex-text)]">{density === 'compact' ? '48px Compact' : '64px Comfortable'}</span></div>
                   <div className="mt-2 flex gap-1">
-                    <button type="button" role="radio" aria-checked={density === 'compact'} onClick={() => setDensity('compact')} className={`flex-1 h-7 rounded text-xs font-semibold border ${density === 'compact' ? 'bg-[#9b8afb] text-white border-[#9b8afb]' : 'bg-[#262b38] text-[#aeb5c4] border-[#2b3040] hover:border-[#9b8afb]'}`}>Compact</button>
-                    <button type="button" role="radio" aria-checked={density === 'comfy'} onClick={() => setDensity('comfy')} className={`flex-1 h-7 rounded text-xs font-semibold border ${density === 'comfy' ? 'bg-[#9b8afb] text-white border-[#9b8afb]' : 'bg-[#262b38] text-[#aeb5c4] border-[#2b3040] hover:border-[#9b8afb]'}`}>Comfortable</button>
+                    <button type="button" role="radio" aria-checked={density === 'compact'} onClick={() => setDensity('compact')} className={`flex-1 h-7 rounded text-xs font-semibold border ${density === 'compact' ? 'bg-[var(--apex-accent)] text-[var(--apex-state-playing-fg)] border-[var(--apex-accent)]' : 'bg-[var(--apex-surface-3)] text-[var(--apex-text-2)] border-[var(--apex-border)] hover:border-[var(--apex-accent)]'}`}>Compact</button>
+                    <button type="button" role="radio" aria-checked={density === 'comfy'} onClick={() => setDensity('comfy')} className={`flex-1 h-7 rounded text-xs font-semibold border ${density === 'comfy' ? 'bg-[var(--apex-accent)] text-[var(--apex-state-playing-fg)] border-[var(--apex-accent)]' : 'bg-[var(--apex-surface-3)] text-[var(--apex-text-2)] border-[var(--apex-border)] hover:border-[var(--apex-accent)]'}`}>Comfortable</button>
                   </div>
                 </div>
               </div>
@@ -2228,11 +2229,11 @@ export function App() {
                 aria-label="Expand Inspector"
                 title="Expand Inspector"
                 onClick={() => setIsInspectorOpen(true)}
-                className="w-7 h-7 rounded-md bg-[#191c25] border border-[#2b3040] flex items-center justify-center text-[#aeb5c4] hover:text-white hover:border-[#9b8afb] transition-colors"
+                className="w-7 h-7 rounded-md bg-[var(--apex-panel-header)] border border-[var(--apex-border)] flex items-center justify-center text-[var(--apex-text-2)] hover:text-[var(--apex-text)] hover:border-[var(--apex-accent)] transition-colors"
               >
                 <span aria-hidden="true" className="text-[11px]">≡</span>
               </button>
-              <span className="text-[10px] tracking-[0.18em] text-[#737c8f] [writing-mode:vertical-lr] rotate-180 select-none">INSPECTOR</span>
+              <span className="text-[10px] tracking-[0.18em] text-[var(--apex-text-3)] [writing-mode:vertical-lr] rotate-180 select-none">INSPECTOR</span>
               <button type="button" onClick={() => setIsAppearanceSettingsOpen(true)} aria-label="Open Settings" className="mt-3 rounded-md px-1 py-2 text-[10px] text-[var(--apex-text-2)] hover:text-[var(--apex-text)] [writing-mode:vertical-lr]">SETTINGS</button>
             </div>
           )}

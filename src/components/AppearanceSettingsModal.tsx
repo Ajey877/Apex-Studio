@@ -1,5 +1,6 @@
-import React, { useEffect, useId, useRef } from 'react';
+import React from 'react';
 import type { ThemeMode } from '../state/theme';
+import { ModalFrame } from './ModalFrame';
 
 interface AppearanceSettingsModalProps {
   isOpen: boolean;
@@ -9,16 +10,22 @@ interface AppearanceSettingsModalProps {
 }
 
 export const AppearanceSettingsModal: React.FC<AppearanceSettingsModalProps> = ({ isOpen, mode, onChange, onClose }) => {
-  const titleId = useId();
-  const closeRef = useRef<HTMLButtonElement>(null);
-  useEffect(() => { if (isOpen) closeRef.current?.focus(); }, [isOpen]);
   if (!isOpen) return null;
+
   return (
-    <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/60" role="dialog" aria-modal="true" aria-labelledby={titleId}>
-      <section className="w-[min(92vw,32rem)] rounded-[var(--apex-radius-lg)] border border-[var(--apex-border)] bg-[var(--apex-surface)] p-5 text-[var(--apex-text)] shadow-2xl">
+    <ModalFrame
+      id="appearance-settings-modal"
+      labelledBy="appearance-settings-modal-title"
+      onClose={onClose}
+      className="fixed inset-0 z-[70] flex items-center justify-center bg-black/60 p-4"
+    >
+      <div className="apex-dialog w-[min(92vw,32rem)] border border-[var(--apex-border)] bg-[var(--apex-surface)] p-5 text-[var(--apex-text)]">
         <div className="mb-5 flex items-start justify-between gap-4">
-          <div><h2 id={titleId} className="text-base font-semibold">Settings</h2><p className="mt-1 text-xs text-[var(--apex-text-2)]">Appearance and accessibility preferences</p></div>
-          <button ref={closeRef} type="button" onClick={onClose} aria-label="Close Settings" className="apex-icon-btn rounded-md px-2 text-[var(--apex-text-2)] hover:text-[var(--apex-text)]">✕</button>
+          <div>
+            <h2 id="appearance-settings-modal-title" className="text-base font-semibold">Settings</h2>
+            <p className="mt-1 text-xs text-[var(--apex-text-2)]">Appearance and accessibility preferences</p>
+          </div>
+          <button type="button" onClick={onClose} aria-label="Close Settings" className="apex-icon-btn rounded-md px-2 text-[var(--apex-text-2)] hover:text-[var(--apex-text)]">✕</button>
         </div>
         <fieldset>
           <legend className="mb-3 text-sm font-semibold">Appearance</legend>
@@ -32,7 +39,7 @@ export const AppearanceSettingsModal: React.FC<AppearanceSettingsModalProps> = (
             ))}
           </div>
         </fieldset>
-      </section>
-    </div>
+      </div>
+    </ModalFrame>
   );
 };

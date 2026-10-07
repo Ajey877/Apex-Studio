@@ -325,47 +325,47 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, chann
     // refuses Escape (and the close control is disabled) instead of pretending
     // the dialog closed.
     <ModalFrame id="export-modal" labelledBy="export-modal-title" onClose={onClose} dismissible={!isRendering} className="fixed inset-0 bg-black/85 backdrop-blur-sm z-50 flex items-center justify-center p-3 sm:p-4">
-      <div className="bg-[#141416] border border-[#333336] rounded-xl w-full max-w-lg shadow-2xl overflow-hidden text-[#b0b0b0] max-h-[90vh] flex flex-col">
-        <div className="px-4 sm:px-5 py-3 bg-[#1a1a1d] border-b border-[#333336] flex items-center justify-between shrink-0">
+      <div className="bg-[var(--apex-panel)] border border-[var(--apex-border)] rounded-xl w-full max-w-lg shadow-2xl overflow-hidden text-[var(--apex-text-2)] max-h-[90vh] flex flex-col">
+        <div className="px-4 sm:px-5 py-3 bg-[var(--apex-panel-header)] border-b border-[var(--apex-border)] flex items-center justify-between shrink-0">
           <div>
-            <h3 id="export-modal-title" className="font-bold text-sm text-white tracking-tight">PROJECT EXPORT</h3>
-            <p className="text-[10px] text-[#777]">WAV, Standard MIDI, and multi-track stem export</p>
+            <h3 id="export-modal-title" className="font-bold text-sm text-[var(--apex-text)] tracking-tight">PROJECT EXPORT</h3>
+            <p className="text-[10px] text-[var(--apex-text-3)]">WAV, Standard MIDI, and multi-track stem export</p>
           </div>
           <button
             onClick={onClose}
             disabled={isRendering}
             aria-label="Close export"
             title={isRendering ? 'Export in progress — the dialog closes when it finishes' : 'Close export'}
-            className="p-1 rounded hover:bg-[#2d2d30] text-[#777] hover:text-white transition disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent"
+            className="p-1 rounded hover:bg-[var(--apex-state-hover)] text-[var(--apex-text-3)] hover:text-[var(--apex-text)] transition disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent"
           ><X className="w-4 h-4" /></button>
         </div>
 
         <div className="p-4 sm:p-5 space-y-4 overflow-y-auto custom-scrollbar flex-1">
           <div className="space-y-1">
-            <label className="text-[10px] font-bold uppercase tracking-wider text-[#777]">Output Filename</label>
-            <input value={fileName} onChange={e => setFileName(e.target.value)} className="w-full bg-[#121214] border border-[#333336] rounded px-3 py-1.5 text-xs text-white focus:outline-none focus:border-[#ff6e00] font-mono" />
+            <label className="text-[10px] font-bold uppercase tracking-wider text-[var(--apex-text-3)]">Output Filename</label>
+            <input value={fileName} onChange={e => setFileName(e.target.value)} className="w-full bg-[var(--apex-chrome-inset)] border border-[var(--apex-border)] rounded px-3 py-1.5 text-xs text-[var(--apex-text)] focus:outline-none focus:border-[var(--apex-accent)] font-mono" />
           </div>
 
           <div className="grid grid-cols-2 gap-2">
-            <button onClick={() => { setScope('song'); setDownloadUrl(null); }} className={`p-2.5 rounded-lg border text-left transition ${scope === 'song' ? 'bg-[#1a1a1d] border-[#ff6e00] text-white' : 'bg-[#121214] border-[#333336] text-[#777] hover:text-white'}`}>
+            <button onClick={() => { setScope('song'); setDownloadUrl(null); }} className={`p-2.5 rounded-lg border text-left transition ${scope === 'song' ? 'bg-[var(--apex-state-selected)] border-[var(--apex-accent)] text-[var(--apex-text)]' : 'bg-[var(--apex-chrome-inset)] border-[var(--apex-border)] text-[var(--apex-text-3)] hover:text-[var(--apex-text)]'}`}>
               <div className="font-bold text-xs">Full Song</div>
               {/* Phase 54: the stated length is resolved from the same timeline
                   contract the renderer uses, so the label and the WAV agree. */}
-              <div className="text-[9px] text-[#777]">Render through the last playlist clip ({getProjectRenderBars(clips, 'song', undefined, totalBars)} bars)</div>
+              <div className="text-[9px] text-[var(--apex-text-3)]">Render through the last playlist clip ({getProjectRenderBars(clips, 'song', undefined, totalBars)} bars)</div>
             </button>
-            <button id="export-scope-pattern" onClick={() => { setScope('pattern'); setDownloadUrl(null); }} className={`p-2.5 rounded-lg border text-left transition ${scope === 'pattern' ? 'bg-[#1a1a1d] border-[#ff6e00] text-white' : 'bg-[#121214] border-[#333336] text-[#777] hover:text-white'}`}>
+            <button id="export-scope-pattern" onClick={() => { setScope('pattern'); setDownloadUrl(null); }} className={`p-2.5 rounded-lg border text-left transition ${scope === 'pattern' ? 'bg-[var(--apex-state-selected)] border-[var(--apex-accent)] text-[var(--apex-text)]' : 'bg-[var(--apex-chrome-inset)] border-[var(--apex-border)] text-[var(--apex-text-3)] hover:text-[var(--apex-text)]'}`}>
               <div className="font-bold text-xs">Pattern Loop</div>
-              <div className="text-[9px] text-[#777]">Export the selected pattern's {patternLoopSteps}-step loop ({patternRenderBars} bars)</div>
+              <div className="text-[9px] text-[var(--apex-text-3)]">Export the selected pattern's {patternLoopSteps}-step loop ({patternRenderBars} bars)</div>
             </button>
           </div>
 
           <div className="space-y-1">
-            <label className="text-[10px] font-bold uppercase tracking-wider text-[#777]">Format & Quality</label>
+            <label className="text-[10px] font-bold uppercase tracking-wider text-[var(--apex-text-3)]">Format & Quality</label>
             <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
               {formatOptions.map(option => (
-                <button key={option.id} onClick={() => handleFormatChange(option.id)} className={`p-2 rounded border text-left transition ${format === option.id ? 'bg-[#ff6e00]/15 border-[#ff6e00] text-white' : 'bg-[#121214] border-[#333336] text-[#777] hover:text-white'}`}>
-                  <div className="font-bold text-xs text-white">{option.name}</div>
-                  <div className="text-[8px] text-[#777]">{option.desc}</div>
+                <button key={option.id} onClick={() => handleFormatChange(option.id)} className={`p-2 rounded border text-left transition ${format === option.id ? 'bg-[var(--apex-state-selected)] border-[var(--apex-accent)] text-[var(--apex-text)]' : 'bg-[var(--apex-chrome-inset)] border-[var(--apex-border)] text-[var(--apex-text-3)] hover:text-[var(--apex-text)]'}`}>
+                  <div className="font-bold text-xs text-[var(--apex-text)]">{option.name}</div>
+                  <div className="text-[8px] text-[var(--apex-text-3)]">{option.desc}</div>
                 </button>
               ))}
             </div>
@@ -394,7 +394,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, chann
               * `fxOverride === 'off'` → `false` (explicit Bypass FX)
           */}
           <div className="space-y-1">
-            <label className="text-[10px] font-bold uppercase tracking-wider text-[#777]">Mixer FX in Export</label>
+            <label className="text-[10px] font-bold uppercase tracking-wider text-[var(--apex-text-3)]">Mixer FX in Export</label>
             <div className="grid grid-cols-3 gap-2">
               {[
                 { id: 'auto' as const, name: 'Project Default', desc: describeExportFxDefault(includeMixerFx) },
@@ -414,25 +414,25 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, chann
                     key={option.id}
                     type="button"
                     onClick={() => setFxOverride(option.id === 'auto' ? null : option.id)}
-                    className={`p-2 rounded border text-left transition ${isActive ? 'bg-[#ff6e00]/15 border-[#ff6e00] text-white' : 'bg-[#121214] border-[#333336] text-[#777] hover:text-white'}`}
+                    className={`p-2 rounded border text-left transition ${isActive ? 'bg-[var(--apex-state-selected)] border-[var(--apex-accent)] text-[var(--apex-text)]' : 'bg-[var(--apex-chrome-inset)] border-[var(--apex-border)] text-[var(--apex-text-3)] hover:text-[var(--apex-text)]'}`}
                   >
-                    <div className="font-bold text-[11px] text-white">{option.name}</div>
-                    <div className="text-[8px] text-[#777]">{option.desc}</div>
+                    <div className="font-bold text-[11px] text-[var(--apex-text)]">{option.name}</div>
+                    <div className="text-[8px] text-[var(--apex-text-3)]">{option.desc}</div>
                   </button>
                 );
               })}
             </div>
           </div>
 
-          <div className="pt-2 border-t border-[#333336] space-y-3">
+          <div className="pt-2 border-t border-[var(--apex-border)] space-y-3">
             <div className="flex justify-between text-xs font-mono">
-              <span className={isRendering ? 'text-[#ff6e00]' : 'text-[#777]'}>{statusText}</span>
-              {isRendering && <span className="text-white font-bold">{renderProgress}%</span>}
+              <span className={isRendering ? 'text-[var(--apex-accent)]' : 'text-[var(--apex-text-3)]'}>{statusText}</span>
+              {isRendering && <span className="text-[var(--apex-text)] font-bold">{renderProgress}%</span>}
             </div>
-            {isRendering && <div className="w-full h-2 bg-[#121214] rounded-full overflow-hidden border border-[#333336]"><div className="h-full bg-[#ff6e00] transition-all duration-150" style={{ width: `${renderProgress}%` }} /></div>}
+            {isRendering && <div className="w-full h-2 bg-[var(--apex-chrome-inset)] rounded-full overflow-hidden border border-[var(--apex-border)]"><div className="h-full bg-[var(--apex-accent)] transition-all duration-150" style={{ width: `${renderProgress}%` }} /></div>}
 
             {!downloadUrl ? (
-              <button onClick={handleStartExport} disabled={isRendering} className="w-full py-2.5 bg-[#ff6e00] hover:bg-[#ff7d1a] disabled:opacity-50 text-black font-bold text-xs rounded transition flex items-center justify-center gap-2 shadow">
+              <button onClick={handleStartExport} disabled={isRendering} className="w-full py-2.5 bg-[var(--apex-accent)] hover:bg-[var(--apex-accent-strong)] disabled:opacity-50 text-[var(--apex-state-playing-fg)] font-bold text-xs rounded transition flex items-center justify-center gap-2 shadow">
                 {format === 'stems' ? <FolderArchive className="w-4 h-4" /> : <Sparkles className="w-4 h-4" />}
                 <span>{isRendering ? 'PROCESSING EXPORT...' : 'START EXPORT'}</span>
               </button>
@@ -443,10 +443,10 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, chann
                     and the download URL is still valid for the Download
                     button below. */}
                 {canAudition && (
-                  <div data-testid="export-audition" className="space-y-2 rounded-lg border border-[#333336] bg-[#121214] p-3">
+                  <div data-testid="export-audition" className="space-y-2 rounded-lg border border-[var(--apex-border)] bg-[var(--apex-chrome-inset)] p-3">
                     <div className="flex items-center justify-between">
-                      <span className="text-[10px] font-bold uppercase tracking-wider text-[#777]">Audition Preview</span>
-                      <span className="text-[10px] font-mono text-[#b0b0b0]">{formatAuditionTime(auditionPosition)} / {formatAuditionTime(auditionDuration)}</span>
+                      <span className="text-[10px] font-bold uppercase tracking-wider text-[var(--apex-text-3)]">Audition Preview</span>
+                      <span className="text-[10px] font-mono text-[var(--apex-text-2)]">{formatAuditionTime(auditionPosition)} / {formatAuditionTime(auditionDuration)}</span>
                     </div>
                     {/* The <audio> element shares the existing downloadUrl blob —
                         no second decode or re-encode. `preload="metadata"` avoids
@@ -467,16 +467,16 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, chann
                         onClick={handleAuditionToggle}
                         data-testid="export-audition-toggle"
                         aria-label={isAuditionPlaying ? 'Pause preview' : 'Play preview'}
-                        className="flex-1 py-2 bg-[#1a1a1d] hover:bg-[#2d2d30] border border-[#333336] rounded text-xs font-bold text-white transition flex items-center justify-center gap-2"
+                        className="flex-1 py-2 bg-[var(--apex-panel-header)] hover:bg-[var(--apex-state-hover)] border border-[var(--apex-border)] rounded text-xs font-bold text-[var(--apex-text)] transition flex items-center justify-center gap-2"
                       >
-                        <span className="text-[#ff6e00]">{isAuditionPlaying ? '❚❚' : '▶'}</span>
+                        <span className="text-[var(--apex-accent)]">{isAuditionPlaying ? '❚❚' : '▶'}</span>
                         <span>{isAuditionPlaying ? 'PAUSE' : 'PLAY PREVIEW'}</span>
                       </button>
                       <button
                         type="button"
                         onClick={handleAuditionStop}
                         aria-label="Stop preview"
-                        className="py-2 px-3 bg-[#1a1a1d] hover:bg-[#2d2d30] border border-[#333336] rounded text-xs font-bold text-[#b0b0b0] hover:text-white transition"
+                        className="py-2 px-3 bg-[var(--apex-panel-header)] hover:bg-[var(--apex-state-hover)] border border-[var(--apex-border)] rounded text-xs font-bold text-[var(--apex-text-2)] hover:text-[var(--apex-text)] transition"
                       >
                         ■
                       </button>
@@ -490,12 +490,12 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, chann
                       onChange={handleAuditionSeek}
                       aria-label="Seek preview"
                       data-testid="export-audition-seek"
-                      className="w-full accent-[#ff6e00]"
+                      className="w-full accent-[var(--apex-accent)]"
                       disabled={auditionDuration <= 0}
                     />
                   </div>
                 )}
-                <button onClick={handleDownload} className="w-full py-2.5 bg-[#00ff00] hover:bg-emerald-400 text-black font-bold text-xs rounded transition flex items-center justify-center gap-2 shadow">
+                <button onClick={handleDownload} className="w-full py-2.5 bg-[var(--apex-success)] hover:brightness-110 text-[var(--apex-state-playing-fg)] font-bold text-xs rounded transition flex items-center justify-center gap-2 shadow">
                   <Download className="w-4 h-4" />
                   <span>DOWNLOAD {fileName}</span>
                 </button>
