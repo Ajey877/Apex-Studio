@@ -7,13 +7,14 @@ export const renderDrumPadVoice: InstrumentVoiceRenderer = ({
   time,
   destination,
   audioContext,
+  bpm,
   onEnded,
   getSampleBuffer,
 }) => {
   const pad = channel.drumPads?.find(
     candidate => candidate.note === note.pitch && candidate.sampleId,
   );
-  if (!pad || !pad.sampleId) return renderLegacyDrumVoice({ channel, note, time, destination, audioContext, voiceId: 'legacy-drum', onEnded });
+  if (!pad || !pad.sampleId) return renderLegacyDrumVoice({ channel, note, time, destination, audioContext, voiceId: 'legacy-drum', bpm, onEnded });
   if (!getSampleBuffer) return;
 
   const buffer = getSampleBuffer(pad.sampleId);

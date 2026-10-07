@@ -86,7 +86,7 @@ describe('drum-pad renderer', () => {
       time: 2,
       destination: {} as AudioNode,
       audioContext: ctx as any,
-      voiceId: 'voice',
+      voiceId: 'voice', bpm: 120,
       onEnded: () => { ended += 1; },
       getSampleBuffer: id => id === 'kick' ? buffer : undefined,
     });
@@ -117,7 +117,7 @@ describe('drum-pad renderer', () => {
       time: 0,
       destination: {} as AudioNode,
       audioContext: ctx as any,
-      voiceId: 'missing',
+      voiceId: 'missing', bpm: 120,
       getSampleBuffer: () => undefined,
     });
 
@@ -134,7 +134,7 @@ describe('drum-pad renderer', () => {
       time: 0,
       destination: {} as AudioNode,
       audioContext: ctx as any,
-      voiceId: 'stop',
+      voiceId: 'stop', bpm: 120,
       onEnded: () => { ended += 1; },
       getSampleBuffer: () => ({ duration: 1 } as AudioBuffer),
     });

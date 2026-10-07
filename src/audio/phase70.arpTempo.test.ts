@@ -325,14 +325,33 @@ describe('Phase 70 F1 — Pattern Mode arp Step Rate follows the project tempo',
     }
   });
 
-  it('keeps voice durations on the rate grid as well as the onsets', () => {
+  it('keeps voice durations in sixteenth-note STEPS, scaled by the gate only', () => {
+    // Phase 1B rewrite. This test previously pinned the defect: it asserted
+    // `voice.duration === gridSeconds(60, 4) * 0.5`, i.e. SECONDS stored in
+    // `Note.duration`. The corrected contract is that `Note.duration` is
+    // sixteenth-note steps, so the gate is a proportion of the rate's step
+    // length and is tempo-INDEPENDENT — the renderer converts steps→seconds
+    // with the project BPM downstream.
     const recorded = emitPatternStep(60, makeArpChannel({}, { gate: 0.5 }), 1, 1, 10);
-    const expectedDuration = gridSeconds(60, 4) * 0.5;
+    // Default rate 1/16 = 1 step; gate 0.5 ⇒ 0.5 steps.
+    const expectedSteps = 1 * 0.5;
     for (const voice of recorded) {
       assert.ok(
-        Math.abs(voice.duration - expectedDuration) < 1e-9,
-        `expected gate-scaled duration ${expectedDuration}s, saw ${voice.duration}s`,
+        Math.abs(voice.duration - expectedSteps) < 1e-9,
+        `expected gate-scaled duration ${expectedSteps} steps, saw ${voice.duration}`,
       );
+    }
+    // The same musical gate must yield the same STEP duration at every tempo:
+    // only the derived seconds change. This is the assertion the old seconds-
+    // valued expectation could never make.
+    for (const bpm of [60, 120, 180]) {
+      const atTempo = emitPatternStep(bpm, makeArpChannel({}, { gate: 0.5 }), 1, 1, 10);
+      for (const voice of atTempo) {
+        assert.ok(
+          Math.abs(voice.duration - expectedSteps) < 1e-9,
+          `arp Note.duration must stay ${expectedSteps} steps at ${bpm} BPM, saw ${voice.duration}`,
+        );
+      }
     }
   });
 });
@@ -443,9 +462,12 @@ describe('Phase 70 F1 — arp sequence, euclidean and fallback behaviour stay un
     assert.deepEqual(singleOctave.map(voice => voice.pitch), [60, 63, 67, 70, 60, 63, 67, 70]);
 
     const defaultGate = emitPatternStep(120, makeArpChannel({}, { gate: undefined as unknown as number }), 1, 1, 0);
+    // Phase 1B: the 0.8 default is preserved, but it now scales the rate's STEP
+    // length (1/16 = 1 step) rather than its seconds, so the value is a step
+    // count: 1 * 0.8 = 0.8 steps.
     assert.ok(
-      Math.abs(defaultGate[0].duration - gridSeconds(120, 4) * 0.8) < 1e-9,
-      'an unset gate keeps the historic 0.8 default',
+      Math.abs(defaultGate[0].duration - 1 * 0.8) < 1e-9,
+      `an unset gate keeps the historic 0.8 default in steps, saw ${defaultGate[0].duration}`,
     );
   });
 });

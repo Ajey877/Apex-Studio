@@ -1,4 +1,5 @@
 import { beatsPerBar, stepsPerBar, stepsToBeats, beatsToSeconds, SIXTEENTH_STEPS_PER_BEAT, LEGACY_TIME_SIGNATURE } from '../music/musicalTime';
+import { arpStepSeconds, resolveArpNoteDurationSteps, resolveArpRateSteps } from './noteGate';
 
 import { 
   Channel, 
@@ -1542,6 +1543,20 @@ class AudioEngine {
     this.playSingleVoice(channel, note, time, midiChannel);
   }
 
+  /**
+   * The authoritative tempo for instrument rendering, in BPM.
+   *
+   * Phase 1B: renderers receive this so they can convert `Note.duration`
+   * (sixteenth-note steps) into a gate in seconds. It is the engine's live
+   * tempo, which `App` keeps in sync with `ProjectState.meta.bpm` and which
+   * `renderTimelineOffline` sets to the export's own tempo before scheduling —
+   * so a renderer never guesses, and an export gate always equals the gate the
+   * user monitored.
+   */
+  private getRenderBpm(): number {
+    return Number.isFinite(this.bpm) && this.bpm > 0 ? this.bpm : 120;
+  }
+
   public playSingleVoice(channel: Channel, note: Note, time: number, midiChannel?: number) {
     if (this.shouldBlockLiveMutation() || !this.ctx) return;
     if (channel.mute) return;
@@ -1664,6 +1679,7 @@ class AudioEngine {
         destination: rendererDestination,
         audioContext: this.ctx!,
         voiceId,
+        bpm: this.getRenderBpm(),
         channelPanApplied,
         onEnded,
         getSampleBuffer: (id) => this.sampleBuffers.get(id),
@@ -1693,6 +1709,7 @@ class AudioEngine {
           destination: rendererDestination,
           audioContext: this.ctx!,
           voiceId,
+          bpm: this.getRenderBpm(),
           channelPanApplied,
           onEnded,
         });
@@ -1813,14 +1830,14 @@ class AudioEngine {
     const arp = channel.arp;
     if (!arp) return;
 
-    const secondsPerBeat = beatsToSeconds(1, bpm);
-    let stepDuration = secondsPerBeat / SIXTEENTH_STEPS_PER_BEAT; // 1/16
-    if (arp.rate === '1/4') stepDuration = secondsPerBeat;
-    else if (arp.rate === '1/8') stepDuration = secondsPerBeat / 2;
-    else if (arp.rate === '1/16') stepDuration = secondsPerBeat / SIXTEENTH_STEPS_PER_BEAT;
-    else if (arp.rate === '1/32') stepDuration = secondsPerBeat / 8;
-    else if (arp.rate === '1/8t') stepDuration = (secondsPerBeat / 2) * (2 / 3);
-    else if (arp.rate === '1/16t') stepDuration = (secondsPerBeat / SIXTEENTH_STEPS_PER_BEAT) * (2 / 3);
+    // Phase 1B: one canonical step table now feeds BOTH the onset spacing and
+    // the note duration. `arpStepSeconds` is arithmetically identical to the
+    // previous rate divisions, so Phase 70's onsets are unchanged; but the
+    // duration is now expressed in STEPS instead of seconds, which is what
+    // `Note.duration` means everywhere else in the product.
+    const rateSteps = resolveArpRateSteps(arp.rate);
+    const stepDuration = arpStepSeconds(arp.rate, bpm);
+    const arpNoteDurationSteps = resolveArpNoteDurationSteps(rateSteps, arp.gate);
 
     const octaves = arp.octaves || 1;
     const basePitch = rootNote.pitch;
@@ -1854,7 +1871,7 @@ class AudioEngine {
           this.playSingleVoice(channel, {
             ...rootNote,
             pitch: p,
-            duration: stepDuration * (arp.gate || 0.8)
+            duration: arpNoteDurationSteps
           }, t);
         }
       });
@@ -1868,7 +1885,7 @@ class AudioEngine {
       this.playSingleVoice(channel, {
         ...rootNote,
         pitch,
-        duration: stepDuration * (arp.gate || 0.8)
+        duration: arpNoteDurationSteps
       }, t);
     }
   }
@@ -3174,34 +3191,6 @@ class AudioEngine {
     }
 
     return { stems, master };
-  }
-
-  private renderNoteOffline(
-    ctx: OfflineAudioContext,
-    channel: Channel,
-    note: Note,
-    time: number,
-    destination: AudioNode
-  ) {
-    const freq = this.midiToFreq(note.pitch);
-    const osc = ctx.createOscillator();
-    const gain = ctx.createGain();
-
-    osc.type = channel.synthParams?.osc1Type || 'sawtooth';
-    osc.frequency.setValueAtTime(freq, time);
-
-    const vel = (note.velocity || 0.8) * channel.volume;
-    const dur = (note.duration || 1) * 0.25;
-
-    gain.gain.setValueAtTime(0.0001, time);
-    gain.gain.linearRampToValueAtTime(vel, time + 0.01);
-    gain.gain.exponentialRampToValueAtTime(0.0001, time + dur + 0.2);
-
-    osc.connect(gain);
-    gain.connect(destination);
-
-    osc.start(time);
-    osc.stop(time + dur + 0.25);
   }
 
   // AudioBuffer to Lossless WAV encoder with IEEE Float or PCM Header

@@ -1,4 +1,5 @@
 import type { InstrumentVoiceRenderer } from '../instrumentRegistry';
+import { GATE_CHARACTER, resolveGateSeconds } from '../noteGate';
 
 const midiToFrequency = (midi: number) => 440 * Math.pow(2, (midi - 69) / 12);
 
@@ -8,12 +9,16 @@ export const renderSubtractiveSynthVoice: InstrumentVoiceRenderer = ({
   time,
   destination,
   audioContext,
+  bpm,
   onEnded,
 }) => {
   const ctx = audioContext;
   const p = channel.synthParams;
   const baseFreq = midiToFrequency(note.pitch + channel.pitch);
-  const duration = (note.duration || 1) * 0.25;
+  const duration = resolveGateSeconds(note.duration, bpm, {
+    characterFactor: GATE_CHARACTER.neutral,
+    fallbackSteps: 1,
+  });
 
   const ampGain = ctx.createGain();
   const vel = (note.velocity || 0.8) * channel.volume;

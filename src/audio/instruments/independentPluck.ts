@@ -1,4 +1,5 @@
 import type { InstrumentVoiceRenderer } from '../instrumentRegistry';
+import { GATE_CHARACTER, resolveGateSeconds } from '../noteGate';
 
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
 
@@ -18,13 +19,25 @@ export const renderIndependentPluckVoice: InstrumentVoiceRenderer = ({
   time,
   destination,
   audioContext,
+  bpm,
   channelPanApplied,
   onEnded,
 }) => {
   const ctx = audioContext;
   const frequency = midiToFrequency(note.pitch + channel.pitch);
   const velocity = clamp((note.velocity ?? 0.8) * channel.volume, 0, 1);
-  const duration = clamp((note.duration || 1) * 0.2, 0.05, 1.5);
+  // Phase 1B: the gate is now tempo-relative. The pre-existing [0.05s, 1.5s]
+  // clamp is deliberately preserved — reviewing or removing that cap is a
+  // DEFERRED audit item (it is instrument character, not the unit defect) and
+  // must not change in this phase.
+  const duration = clamp(
+    resolveGateSeconds(note.duration, bpm, {
+      characterFactor: GATE_CHARACTER.percussive,
+      fallbackSteps: 1,
+    }),
+    0.05,
+    1.5,
+  );
 
   const output = ctx.createGain();
   const filter = ctx.createBiquadFilter();

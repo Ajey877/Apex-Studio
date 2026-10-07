@@ -15,8 +15,44 @@ import {
   Flame,
   Volume2
 } from 'lucide-react';
-import { PolyphonicBlob, MusicalScale } from '../types/daw';
+import { Channel, Note, PolyphonicBlob, MusicalScale } from '../types/daw';
 import { audioEngine } from '../audio/audioEngine';
+
+/**
+ * Phase 1B — the audition note for a vocal blob.
+ *
+ * `PolyphonicBlob.durationSteps` and `Note.duration` are BOTH sixteenth-note
+ * steps, so the value is passed straight through. The previous code divided by
+ * 4, converting steps to beats and then feeding beats into a steps field — a
+ * 4-step blob auditioned with a 1-beat gate, a quarter of its real length once
+ * the renderer converted again.
+ *
+ * Pure and exported so the unit contract is regression-tested without a DOM.
+ */
+export const polyphonicBlobAuditionNote = (blob: PolyphonicBlob): Note => ({
+  id: `blob-aud-${Date.now()}`,
+  pitch: Math.round(blob.targetPitch),
+  start: 0,
+  duration: blob.durationSteps,
+  velocity: blob.amplitude,
+});
+
+/** Synthetic preview channel for blob auditioning (no project audio involved). */
+const PREVIEW_CHANNEL: Channel = {
+  id: 'poly-audition',
+  name: 'Prototype Blob Preview',
+  instrumentType: 'vox_choir',
+  volume: 0.9,
+  pan: 0,
+  pitch: 0,
+  mute: false,
+  solo: false,
+  color: '#00e5ff',
+  mixerTrackId: 1,
+  steps: [],
+  notes: [],
+  synthParams: {} as any,
+};
 
 interface PolyphonicEditorModalProps {
   isOpen: boolean;
@@ -60,22 +96,8 @@ export const PolyphonicEditorModal: React.FC<PolyphonicEditorModalProps> = ({
 
   const handleAuditionBlob = (blob: PolyphonicBlob) => {
     audioEngine.playNote(
-      {
-        id: 'poly-audition',
-        name: 'Prototype Blob Preview',
-        instrumentType: 'vox_choir',
-        volume: 0.9,
-        pan: 0,
-        pitch: 0,
-        mute: false,
-        solo: false,
-        color: '#00e5ff',
-        mixerTrackId: 1,
-        steps: [],
-        notes: [],
-        synthParams: {} as any
-      },
-      { id: `blob-aud-${Date.now()}`, pitch: Math.round(blob.targetPitch), start: 0, duration: blob.durationSteps / 4, velocity: blob.amplitude }
+      PREVIEW_CHANNEL,
+      polyphonicBlobAuditionNote(blob),
     );
     // Truthful label: this plays a synthesised preview at the blob's pitch.
     // It does not play back (or pitch-shift) any audio from the project.
