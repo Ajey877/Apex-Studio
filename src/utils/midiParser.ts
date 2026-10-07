@@ -1,3 +1,4 @@
+import { stepsToBeats, beatsToMidiTicks, bpmToMicrosecondsPerQuarter, DEFAULT_MIDI_PPQ } from '../music/musicalTime';
 import { Note } from '../types/daw';
 
 // Binary Standard MIDI File (SMF) Generator & Parser
@@ -14,9 +15,9 @@ export interface ParsedMidiTrack {
 export class MidiParser {
   // Generate Standard MIDI File (.mid) binary Blob from Notes
   public static exportNotesToMidi(notes: Note[], bpm: number = 130, trackName: string = 'Apex Studio Track'): Blob {
-    const ticksPerQuarter = 480; // Standard MIDI resolution (480 ticks = 1 quarter note = 4 steps)
-    const ticksPerStep = ticksPerQuarter / 4; // 120 ticks per 16th note step
-    const microsecondsPerBeat = Math.round(60000000 / bpm);
+    const ticksPerQuarter = DEFAULT_MIDI_PPQ; // Standard MIDI resolution (480 ticks = 1 quarter note = 4 steps)
+    const ticksPerStep = beatsToMidiTicks(stepsToBeats(1), ticksPerQuarter); // 120 ticks per 16th note step
+    const microsecondsPerBeat = Math.round(bpmToMicrosecondsPerQuarter(bpm));
 
     // Build MIDI Events
     interface RawMidiEvent {
@@ -172,8 +173,8 @@ export class MidiParser {
     const division = view.getUint16(offset);
     offset += 2;
 
-    const ticksPerQuarter = (division & 0x8000) === 0 ? division : 480;
-    const ticksPerStep = ticksPerQuarter / 4;
+    const ticksPerQuarter = (division & 0x8000) === 0 ? division : DEFAULT_MIDI_PPQ;
+    const ticksPerStep = beatsToMidiTicks(stepsToBeats(1), ticksPerQuarter);
 
     const tracks: ParsedMidiTrack[] = [];
 

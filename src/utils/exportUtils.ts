@@ -1,3 +1,4 @@
+import { stepsPerBar, stepsToBeats, beatsToMidiTicks, bpmToMicrosecondsPerQuarter, DEFAULT_MIDI_PPQ, LEGACY_TIME_SIGNATURE } from '../music/musicalTime';
 import type { Channel, PlaylistClip, PlaylistTrack, ProjectMetadata } from '../types/daw';
 import { getPatternLengthBars } from '../state/patternLength';
 import {
@@ -108,8 +109,8 @@ interface MidiEvent {
 }
 
 /** The arrangement grid: 16 steps per bar, one 16th note per 120 ticks at 480 PPQ. */
-const STEPS_PER_BAR = 16;
-const TICKS_PER_STEP = 120;
+const STEPS_PER_BAR = stepsPerBar(LEGACY_TIME_SIGNATURE);
+const TICKS_PER_STEP = beatsToMidiTicks(stepsToBeats(1), DEFAULT_MIDI_PPQ);
 const TICKS_PER_BAR = STEPS_PER_BAR * TICKS_PER_STEP;
 
 /**
@@ -236,7 +237,7 @@ function buildMidiTrack(
   events.push({ tick: 0, order: 0, data: [0xff, 0x03, ...writeVlq(nameBytes.length), ...nameBytes] });
 
   if (channelIndex === 0) {
-    const microsPerQuarter = Math.max(1, Math.round(60_000_000 / safeBpm));
+    const microsPerQuarter = Math.max(1, Math.round(bpmToMicrosecondsPerQuarter(safeBpm)));
     const numerator = Number.isFinite(meta.timeSignature?.[0]) && meta.timeSignature[0] > 0 ? Math.round(meta.timeSignature[0]) : 4;
     const denominator = Number.isFinite(meta.timeSignature?.[1]) && meta.timeSignature[1] > 0 ? Math.round(meta.timeSignature[1]) : 4;
     const denominatorPower = Math.max(0, Math.min(7, Math.round(Math.log2(denominator))));
@@ -357,7 +358,7 @@ export function buildStandardMidiFile(
   pushUint32(header, 6);
   pushUint16(header, tracks.length > 1 ? 1 : 0);
   pushUint16(header, tracks.length);
-  pushUint16(header, 480);
+  pushUint16(header, DEFAULT_MIDI_PPQ);
 
   const bytes = new Uint8Array([...header, ...tracks.flat()]);
   return new Blob([bytes], { type: 'audio/midi' });

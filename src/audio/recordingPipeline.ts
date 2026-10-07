@@ -1,3 +1,4 @@
+import { barsToBeats, beatsToSeconds, LEGACY_TIME_SIGNATURE } from '../music/musicalTime';
 import type { AudioRecording, PlaylistClip, PlaylistTrack } from '../types/daw';
 
 export interface RecordingBufferRegistration {
@@ -15,7 +16,7 @@ export const getRecordingAudioBufferId = (recordingId: string): string => {
 export const getRecordingLengthBars = (durationSeconds: number, bpm: number): number => {
   if (!Number.isFinite(durationSeconds) || durationSeconds <= 0) throw new Error('Recording duration must be greater than zero');
   const safeBpm = Number.isFinite(bpm) ? Math.max(20, bpm) : 120;
-  const secondsPerBar = 240 / safeBpm;
+  const secondsPerBar = beatsToSeconds(barsToBeats(1, LEGACY_TIME_SIGNATURE), safeBpm);
   return Math.max(1, Math.ceil(durationSeconds / secondsPerBar));
 };
 

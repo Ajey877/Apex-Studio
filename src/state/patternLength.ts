@@ -1,3 +1,4 @@
+import { stepsPerBar, LEGACY_TIME_SIGNATURE } from '../music/musicalTime';
 import type { Pattern, ProjectState } from '../types/daw';
 import { updatePatternInProjectState } from './projectMutations';
 
@@ -22,7 +23,7 @@ import { updatePatternInProjectState } from './projectMutations';
  */
 
 /** One bar of the step grid. Pattern lengths are always whole bars. */
-export const PATTERN_STEPS_PER_BAR = 16;
+export const PATTERN_STEPS_PER_BAR = stepsPerBar(LEGACY_TIME_SIGNATURE);
 
 /** A new/default pattern is one bar long, matching the default project and every preset. */
 export const DEFAULT_PATTERN_LENGTH_STEPS = PATTERN_STEPS_PER_BAR;

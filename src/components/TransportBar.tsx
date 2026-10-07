@@ -1,3 +1,4 @@
+import { beatsToSeconds } from '../music/musicalTime';
 import React, { useEffect, useMemo, useState } from 'react';
 import {
   AlertTriangle,
@@ -280,7 +281,7 @@ export const TransportBar: React.FC<TransportBarProps> = ({
   const formatted16th = (currentStep % 4) + 1;
 
   // Calculate song time string (e.g. 03:24:12)
-  const totalSeconds = Math.floor(((currentBar - 1) * 4 + (currentStep % 4)) * (60 / meta.bpm) / 4);
+  const totalSeconds = Math.floor(((currentBar - 1) * 4 + (currentStep % 4)) * beatsToSeconds(1, meta.bpm) / 4);
   const songTimeStr = `${String(Math.floor(totalSeconds / 60)).padStart(2, '0')}:${String(totalSeconds % 60).padStart(2, '0')}:${String((currentStep % 16) * 6).padStart(2, '0')}`;
   const barPosition = `${String(currentBar).padStart(2, '0')}.${formattedBeat}.${formatted16th}`;
 

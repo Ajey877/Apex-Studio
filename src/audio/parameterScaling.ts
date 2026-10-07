@@ -1,3 +1,4 @@
+import { millisecondsToSeconds } from '../music/musicalTime';
 /**
  * Phase 46 — canonical normalized-value (0..1) -> DAW parameter conversions.
  *
@@ -115,7 +116,7 @@ export const arpStrumSecondsForVoice = (strumMs: unknown, voiceIndex: number): n
   if (typeof strumMs !== 'number' || !Number.isFinite(strumMs)) return 0;
   if (!Number.isFinite(voiceIndex) || voiceIndex <= 0) return 0;
   const clamped = Math.max(0, Math.min(ARP_STRUM_MS_MAX, strumMs));
-  return (Math.floor(voiceIndex) * clamped) / 1000;
+  return millisecondsToSeconds(Math.floor(voiceIndex) * clamped);
 };
 
 /**
