@@ -1,4 +1,4 @@
-import { barsToBeats, beatsToSeconds, LEGACY_TIME_SIGNATURE } from '../music/musicalTime';
+import { barsToBeats, beatsToSeconds, resolveProjectTimeSignature } from '../music/musicalTime';
 import React, { useState, useRef, useEffect } from 'react';
 import { 
   Plus, 
@@ -103,6 +103,12 @@ interface PlaylistArrangerProps {
   /** Project tempo (`meta.bpm`); Bounce-In-Place renders stems at this tempo and imported audio is sized to it. */
   bpm: number;
   /**
+   * Phase 1F: the project meter (`meta.timeSignature`). Bar<->step clip
+   * arithmetic and imported-audio sizing use it (3/4 = 12 steps per bar);
+   * omitting it keeps the legacy 4/4 grid for backward compatibility.
+   */
+  timeSignature?: [number, number];
+  /**
    * Phase 54: the arrangement length, owned by `ProjectState` and passed down.
    *
    * It is deliberately required: this component used to keep its own
@@ -197,8 +203,12 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
   isPlaying,
   totalBars,
   onUpdateTotalBars,
-  bpm
+  bpm,
+  timeSignature
 }) => {
+  // Phase 1F: one resolved meter for every bar<->step conversion in the
+  // arranger. Missing/unsupported values fall back to the legacy 4/4 grid.
+  const meter = resolveProjectTimeSignature({ timeSignature });
   const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
   const [selectedPointIndex, setSelectedPointIndex] = useState<number | null>(null);
   const [activeTool, setActiveTool] = useState<'place' | 'cut' | 'delete'>('place');
@@ -410,7 +420,7 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
         onUpdateClips(currentClips.map(item => item.id === clip.id ? moved : item));
       } else if (active.kind === 'resize-left') {
         const requestedStart = clip.startBar + (clientX - active.originX) / BAR_WIDTH;
-        const resized = resizePlaylistClipLeft(clip, requestedStart, DEFAULT_GRID_BARS, MIN_CLIP_LENGTH, bounds);
+        const resized = resizePlaylistClipLeft(clip, requestedStart, DEFAULT_GRID_BARS, MIN_CLIP_LENGTH, bounds, meter);
         onUpdateClips(currentClips.map(item => item.id === clip.id ? resized : item));
       } else {
         const requestedEnd = clip.startBar + clip.lengthBars + (clientX - active.originX) / BAR_WIDTH;
@@ -585,7 +595,7 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
 
   const splitClip = (clip: PlaylistClip, splitBar: number) => {
     try {
-      const [left, right] = splitPlaylistClip(clip, splitBar, DEFAULT_GRID_BARS, bounds);
+      const [left, right] = splitPlaylistClip(clip, splitBar, DEFAULT_GRID_BARS, bounds, meter);
       onUpdateClips([...deletePlaylistClip(clips, clip.id), left, right]);
       selectClip(left.id);
       if (automationEditorClipId === clip.id) setAutomationEditorClipId(null);
@@ -1144,7 +1154,9 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
                           peaks.push(Math.min(1, (sum / blockSize) * 3));
                         }
 
-                        const durationBars = Math.max(1, Math.round(decoded.duration / beatsToSeconds(barsToBeats(1, LEGACY_TIME_SIGNATURE), bpm)));
+                        // Phase 1F: imported audio is sized to the project bar
+                        // (3/4 = 1.5 s @ 120 BPM), matching the runtime grid.
+                        const durationBars = Math.max(1, Math.round(decoded.duration / beatsToSeconds(barsToBeats(1, meter), bpm)));
                         const dropPlacement = resolvePlaylistDropPlacement(
                           dropClientX,
                           dropClientY,

@@ -1,4 +1,4 @@
-import { barsToBeats, beatsToSeconds, LEGACY_TIME_SIGNATURE } from './music/musicalTime';
+import { barsToBeats, beatsToSeconds, resolveProjectTimeSignature } from './music/musicalTime';
 import { DEFAULT_MASTERING_SUITE_STATE } from './audio/masteringState';
 import {
   WORKSPACE_LAYOUT_LIMITS,
@@ -528,6 +528,13 @@ export function App() {
   useEffect(() => {
     audioEngine.setBpm(projectState.meta.bpm);
   }, [projectState.meta.bpm]);
+
+  // Phase 1F: publish the project meter to the runtime. The engine resolves
+  // missing/unsupported values to the legacy 4/4 grid itself, so this is the
+  // single source of truth for playback, offline render, bounce and seeking.
+  useEffect(() => {
+    audioEngine.setTimeSignature(projectState.meta.timeSignature);
+  }, [projectState.meta.timeSignature]);
 
   useEffect(() => {
     audioEngine.setSwing(projectState.meta.swing);
@@ -1482,7 +1489,8 @@ export function App() {
       currentState.playlistTracks,
       currentTargetTrackIndex,
       currentState.meta.bpm,
-      `rec-clip-${Date.now()}`
+      `rec-clip-${Date.now()}`,
+      currentState.meta.timeSignature
     );
     const nextState = {
       ...currentState,
@@ -2069,13 +2077,17 @@ export function App() {
                 // playing it cancels audio scheduled for the old position and
                 // restarts any playlist audio clip the new position lands in.
                 const targetBar = Math.max(1, Math.floor(Number(bar) || 1));
-                const secondsPerBar = beatsToSeconds(barsToBeats(1, LEGACY_TIME_SIGNATURE), projectState.meta.bpm);
+                // Phase 1F: a bar seek converts through the resolved project
+                // meter — bar 2 of a 3/4 project starts 12 steps (1.5 s @ 120
+                // BPM) after the origin, not 16.
+                const secondsPerBar = beatsToSeconds(barsToBeats(1, resolveProjectTimeSignature(projectState.meta)), projectState.meta.bpm);
                 audioEngine.seek((targetBar - 1) * secondsPerBar);
                 setCurrentBar(targetBar);
               }}
               currentBar={currentBar}
               isPlaying={isPlaying}
               bpm={projectState.meta.bpm}
+              timeSignature={projectState.meta.timeSignature}
             />
           )}
 

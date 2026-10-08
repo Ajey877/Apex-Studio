@@ -1,4 +1,4 @@
-import { beatsPerBar, stepsPerBar, stepsToBeats, beatsToSeconds, SIXTEENTH_STEPS_PER_BEAT, LEGACY_TIME_SIGNATURE } from '../music/musicalTime';
+import { beatsPerBar, stepsPerBar, stepsToBeats, beatsToSeconds, SIXTEENTH_STEPS_PER_BEAT, LEGACY_TIME_SIGNATURE, resolveProjectTimeSignature, type TimeSignature } from '../music/musicalTime';
 import { arpStepSeconds, resolveArpNoteDurationSteps, resolveArpRateSteps } from './noteGate';
 
 import { 
@@ -62,8 +62,14 @@ import {
 } from './fxParameterControl';
 import { resolveFxParameterSpec } from './fxParameterContract';
 
-// Phase 1A: derive the existing 4/4 grid; do not wire project meter into playback.
-const STEPS_PER_BAR = stepsPerBar(LEGACY_TIME_SIGNATURE);
+// Phase 1F: the legacy 4/4 grid (LEGACY_TIME_SIGNATURE) remains the DEFAULT
+// for the pure resolvers below — missing/unsupported project meters must keep
+// the historic behaviour. Runtime paths that know the project meter pass it
+// explicitly, and the engine instance uses its resolved `this.meter` bar size.
+// There is deliberately no fixed STEPS_PER_BAR runtime constant any more.
+
+/** True when the meter is the legacy 4/4 grid. */
+const isLegacyMeter = (meter: TimeSignature): boolean => meter[0] === 4 && meter[1] === 4;
 
 export { isRackChannelAudible };
 
@@ -321,7 +327,7 @@ function createSeededRandom(seed: number): () => number {
 
 /**
  * The musical extent of a channel's content: the furthest **onset** position
- * (not end position), rounded up to whole bars.
+ * (not end position), rounded up to whole bars of the supplied meter.
  *
  * NOTE TAILS MUST NOT CHANGE MUSICAL LOOP/PATTERN EXTENT.  A note starting at
  * 15.75 with duration 1 (ending at 16.75) does not push a 16-step content
@@ -331,21 +337,38 @@ function createSeededRandom(seed: number): () => number {
  *
  * `patternLengthSteps` overrides content when supplied (Pattern mode uses the
  * declared pattern length; Song mode / bounce leave it undefined).
+ *
+ * Phase 1F: `meter` sets the bar size the extent rounds up to — 16 steps for
+ * the default legacy 4/4, 12 for a resolved 3/4 or 6/8 project. A DECLARED
+ * pattern length in a non-legacy meter is kept as an absolute step quantity
+ * (never re-rounded onto the new bar grid), because `Pattern.lengthSteps`
+ * must not be silently reinterpreted when the meter changes.
  */
 export function resolvePlayableContentLengthSteps(
   channel?: Channel,
-  patternLengthSteps?: number
+  patternLengthSteps?: number,
+  meter: TimeSignature = LEGACY_TIME_SIGNATURE
 ): number {
+  const barSteps = stepsPerBar(meter);
+  const declared = typeof patternLengthSteps === 'number' && Number.isFinite(patternLengthSteps) && patternLengthSteps > 0;
   if (!channel) {
-    const fallback = typeof patternLengthSteps === 'number' && Number.isFinite(patternLengthSteps) && patternLengthSteps > 0
-      ? Math.max(1, Math.ceil(patternLengthSteps / STEPS_PER_BAR)) * STEPS_PER_BAR
-      : STEPS_PER_BAR;
-    return fallback;
+    if (!declared) return barSteps;
+    // Legacy 4/4 keeps its historic whole-bar rounding; other supported meters
+    // treat the declared length as absolute steps.
+    return isLegacyMeter(meter)
+      ? Math.max(1, Math.ceil(patternLengthSteps / barSteps)) * barSteps
+      : Math.max(1, Math.ceil(patternLengthSteps));
+  }
+
+  if (declared && !isLegacyMeter(meter)) {
+    // The declared pattern length is authoritative and absolute; channel data
+    // beyond it is ignored exactly the way legacy Pattern mode ignores it.
+    return Math.max(1, Math.ceil(patternLengthSteps));
   }
 
   let maxStep = 0;
 
-  if (typeof patternLengthSteps === 'number' && Number.isFinite(patternLengthSteps) && patternLengthSteps > 0) {
+  if (declared) {
     maxStep = Math.max(maxStep, patternLengthSteps);
   }
 
@@ -362,8 +385,8 @@ export function resolvePlayableContentLengthSteps(
     }
   }
 
-  const bars = Math.max(1, Math.ceil(maxStep / STEPS_PER_BAR));
-  return bars * STEPS_PER_BAR;
+  const bars = Math.max(1, Math.ceil(maxStep / barSteps));
+  return bars * barSteps;
 }
 
 /**
@@ -384,15 +407,16 @@ export function resolvePlayableContentLengthSteps(
  */
 export function resolvePatternLoopLengthSteps(
   channels: Channel[],
-  patternLengthSteps?: number
+  patternLengthSteps?: number,
+  meter: TimeSignature = LEGACY_TIME_SIGNATURE
 ): number {
   if (typeof patternLengthSteps === 'number' && Number.isFinite(patternLengthSteps) && patternLengthSteps > 0) {
-    return resolvePlayableContentLengthSteps(undefined, patternLengthSteps);
+    return resolvePlayableContentLengthSteps(undefined, patternLengthSteps, meter);
   }
 
-  let loopLengthSteps = resolvePlayableContentLengthSteps();
+  let loopLengthSteps = resolvePlayableContentLengthSteps(undefined, undefined, meter);
   for (const channel of channels) {
-    loopLengthSteps = Math.max(loopLengthSteps, resolvePlayableContentLengthSteps(channel));
+    loopLengthSteps = Math.max(loopLengthSteps, resolvePlayableContentLengthSteps(channel, undefined, meter));
   }
   return loopLengthSteps;
 }
@@ -2743,9 +2767,11 @@ class AudioEngine {
       const requestedMinimumDuration = Number.isFinite(minimumDurationSeconds) && minimumDurationSeconds >= 0
         ? minimumDurationSeconds
         : 4;
+      // Phase 1F: the render window uses the resolved project meter, so a 3/4
+      // export renders 12-step (1.5 s @ 120 BPM) bars exactly like live playback.
       const totalDurationSeconds = Math.max(
         requestedMinimumDuration,
-        Math.max(1, totalBars) * beatsPerBar(LEGACY_TIME_SIGNATURE) * beatsToSeconds(1, safeBpm),
+        Math.max(1, totalBars) * beatsPerBar(this.meter) * beatsToSeconds(1, safeBpm),
       );
       const renderSampleRate = sampleRate ?? previous.ctx?.sampleRate ?? 44100;
       const OfflineContextClass =
@@ -2869,15 +2895,16 @@ class AudioEngine {
         // pattern length is passed to the same resolver playback uses, so a
         // declared 32-step pattern exports 32 steps even with an empty second bar.
         const patternLoopSteps = renderScope === 'pattern'
-          ? resolvePatternLoopLengthSteps(this.activeChannels, patternLengthSteps)
-          : STEPS_PER_BAR;
+          ? resolvePatternLoopLengthSteps(this.activeChannels, patternLengthSteps, this.meter)
+          : this.currentStepsPerBar;
         const scheduleStartProgress = 40;
         const scheduleEndProgress = 65;
         // Schedule the offline timeline in small cooperative batches so the browser
         // can service rendering/UI work instead of appearing unresponsive on longer exports.
+        const offlineStepsPerBar = this.currentStepsPerBar;
         for (let globalStep = 0; globalStep < totalSteps; globalStep += 1) {
           this.currentStep = globalStep % patternLoopSteps;
-          this.currentBar = Math.floor(globalStep / STEPS_PER_BAR) + 1;
+          this.currentBar = Math.floor(globalStep / offlineStepsPerBar) + 1;
           // Same groove conversion the live scheduler uses, so an offline export
           // swings exactly as much as the take the user monitored.
           const swingOffsetSeconds = this.currentStep % 2 === 1
@@ -3291,6 +3318,17 @@ class AudioEngine {
   // --- Transport & Sequencer Loop ---
   private bpm: number = 128;
   /**
+   * Phase 1F — the resolved project meter. It owns the runtime BAR SIZE:
+   * steps per bar, seconds per bar, bar boundaries for transport/scheduler,
+   * playlist clip scheduling, offline render, bounce and fades. It never
+   * rewrites absolute step quantities (`Pattern.lengthSteps`, `offsetSteps`).
+   * Defaults to the legacy 4/4 grid; App publishes the project value with
+   * `setTimeSignature`, and unsupported/missing metadata resolves to [4,4].
+   * Content EXTENT stays owned by the Phase 1E resolver, which receives this
+   * meter only as its bar-rounding unit.
+   */
+  private meter: TimeSignature = LEGACY_TIME_SIGNATURE;
+  /**
    * Project swing as the project document stores it: a 0..0.5 fraction where
    * 0.5 is the Channel Rack's "100 %". It is never converted to a 0..100 scale —
    * `swingOffsetSecondsForStep` owns the conversion so the live scheduler and
@@ -3321,6 +3359,40 @@ class AudioEngine {
     if (this.transport) {
       this.transport.setBpm(this.bpm);
     }
+  }
+
+  /**
+   * Phase 1F — publish the project's time signature to the runtime.
+   *
+   * The value goes through the single meter resolution authority, so missing
+   * or unsupported metadata keeps the legacy 4/4 grid and a supported meter
+   * (3/4, 6/8) becomes the truthful bar size for playback, scheduling,
+   * offline render and bounce. The running transport remaps its bar grid in
+   * place; the next take also receives the meter in `play()`.
+   */
+  public setTimeSignature(meter: TimeSignature | readonly [number, number] | undefined) {
+    if (this.shouldBlockLiveMutation()) return;
+    const resolved = resolveProjectTimeSignature({ timeSignature: meter });
+    if (resolved[0] === this.meter[0] && resolved[1] === this.meter[1]) return;
+    this.meter = resolved;
+    if (this.transport) {
+      this.transport.setTimeSignature(resolved);
+    }
+  }
+
+  /** The meter the runtime currently plays with (always a resolved value). */
+  public getTimeSignature(): TimeSignature {
+    return this.meter;
+  }
+
+  /** Runtime bar size in sixteenth-note steps under the resolved meter. */
+  private get currentStepsPerBar(): number {
+    return stepsPerBar(this.meter);
+  }
+
+  /** Runtime bar duration in seconds under the resolved meter at `bpm`. */
+  private secondsPerBarAt(bpm: number): number {
+    return beatsToSeconds(beatsPerBar(this.meter), bpm);
   }
 
   /**
@@ -3412,7 +3484,7 @@ class AudioEngine {
   private isAutomationClipActiveAtCurrentPosition(clip: PlaylistClip): boolean {
     if (clip.type !== 'automation' || clip.mute || this.isPlaylistLaneMuted(clip) || !clip.automationTarget) return false;
     if (!Number.isFinite(clip.startBar) || !Number.isFinite(clip.lengthBars) || clip.lengthBars <= 0) return false;
-    const currentBarPosition = Math.max(0, this.currentBar - 1) + (this.currentStep / STEPS_PER_BAR);
+    const currentBarPosition = Math.max(0, this.currentBar - 1) + (this.currentStep / this.currentStepsPerBar);
     return currentBarPosition >= clip.startBar && currentBarPosition <= clip.startBar + clip.lengthBars;
   }
 
@@ -3656,7 +3728,7 @@ class AudioEngine {
     // follow channel edits. Song Mode stays on its bar-relative playlist grid.
     if ((update.channels || patternLengthChanged) && this.activePlayMode === 'pat') {
       this.transport?.setPatternLoopSteps(
-        resolvePatternLoopLengthSteps(this.activeChannels, this.activePatternLengthSteps)
+        resolvePatternLoopLengthSteps(this.activeChannels, this.activePatternLengthSteps, this.meter)
       );
     }
 
@@ -3843,12 +3915,15 @@ class AudioEngine {
     if (!this.transport) return;
 
     this.transport.setBpm(this.bpm);
+    // Phase 1F: the take plays under the resolved project meter. This remaps
+    // the transport bar grid (bar numbers, beat count, song-end position).
+    this.transport.setTimeSignature(this.meter);
     this.transport.setMode(mode);
     // Pattern Mode loops over the pattern length (16/32/64 steps); Song Mode
     // keeps the one-bar grid that playlist scheduling is built on.
     this.transport.setPatternLoopSteps(
       mode === 'pat'
-        ? resolvePatternLoopLengthSteps(this.activeChannels, patternLengthSteps)
+        ? resolvePatternLoopLengthSteps(this.activeChannels, patternLengthSteps, this.meter)
         : undefined
     );
     // Song Mode owns its real end from the active clip schedule; Pattern Mode
@@ -4061,9 +4136,10 @@ class AudioEngine {
   /** Total steps the Song Mode arrangement occupies, or null when it has none. */
   private resolveSongEndSteps(): number | null {
     let endSteps = 0;
+    const stepsBar = this.currentStepsPerBar;
     for (const clip of this.activeClips) {
       if (!Number.isFinite(clip.startBar) || !Number.isFinite(clip.lengthBars) || clip.lengthBars <= 0) continue;
-      endSteps = Math.max(endSteps, (clip.startBar + clip.lengthBars) * STEPS_PER_BAR);
+      endSteps = Math.max(endSteps, (clip.startBar + clip.lengthBars) * stepsBar);
     }
     return endSteps > 0 ? endSteps : null;
   }
@@ -4103,8 +4179,8 @@ class AudioEngine {
         if (!Number.isFinite(clip.trackIndex) || Math.floor(clip.trackIndex) !== laneIndex) continue;
       }
       if (!Number.isFinite(clip.startBar) || !Number.isFinite(clip.lengthBars) || clip.lengthBars <= 0) continue;
-      const startSeconds = clip.startBar * STEPS_PER_BAR * stepDurationSeconds;
-      const endSeconds = startSeconds + clip.lengthBars * STEPS_PER_BAR * stepDurationSeconds;
+      const startSeconds = clip.startBar * this.currentStepsPerBar * stepDurationSeconds;
+      const endSeconds = startSeconds + clip.lengthBars * this.currentStepsPerBar * stepDurationSeconds;
       if (positionSeconds <= startSeconds || positionSeconds >= endSeconds) continue;
       this.playAudioClipWithFades(clip, now, positionSeconds - startSeconds);
     }
@@ -4119,8 +4195,8 @@ class AudioEngine {
       if (clip.type !== 'audio' || clip.mute || clip.channelId !== channelId) continue;
       if (this.isPlaylistLaneMuted(clip) || !this.isAudioClipChannelAudible(clip)) continue;
       if (!Number.isFinite(clip.startBar) || !Number.isFinite(clip.lengthBars) || clip.lengthBars <= 0) continue;
-      const startSeconds = clip.startBar * STEPS_PER_BAR * stepDurationSeconds;
-      const endSeconds = startSeconds + clip.lengthBars * STEPS_PER_BAR * stepDurationSeconds;
+      const startSeconds = clip.startBar * this.currentStepsPerBar * stepDurationSeconds;
+      const endSeconds = startSeconds + clip.lengthBars * this.currentStepsPerBar * stepDurationSeconds;
       if (positionSeconds <= startSeconds || positionSeconds >= endSeconds) continue;
       this.playAudioClipWithFades(clip, now, positionSeconds - startSeconds);
     }
@@ -4134,7 +4210,7 @@ class AudioEngine {
   private rebaseAutomationAtPosition(positionSeconds: number): void {
     const ctx = this.ctx;
     if (!ctx) return;
-    const secondsPerBar = beatsToSeconds(beatsPerBar(LEGACY_TIME_SIGNATURE), this.bpm);
+    const secondsPerBar = this.secondsPerBarAt(this.bpm);
     const barPosition = positionSeconds / secondsPerBar;
     const now = ctx.currentTime;
     for (const clip of this.activeClips) {
@@ -4226,12 +4302,13 @@ class AudioEngine {
     } else {
       // Song mode: trigger clips in current bar
       const barIdx = this.currentBar - 1;
-      const currentGlobalStep = (barIdx * STEPS_PER_BAR) + this.currentStep;
+      const stepsBar = this.currentStepsPerBar;
+      const currentGlobalStep = (barIdx * stepsBar) + this.currentStep;
 
       // 1. Evaluate automation clips at current bar & step
       this.activeClips.forEach(clip => {
         if (clip.type === 'automation' && !clip.mute && !this.isPlaylistLaneMuted(clip) && clip.automationTarget && clip.automationPoints && clip.automationPoints.length >= 2) {
-          const currentTotalBar = barIdx + (this.currentStep / STEPS_PER_BAR);
+          const currentTotalBar = barIdx + (this.currentStep / stepsBar);
           if (currentTotalBar >= clip.startBar && currentTotalBar <= clip.startBar + clip.lengthBars) {
             const relX = (currentTotalBar - clip.startBar) / clip.lengthBars;
             const val = this.interpolateAutomationCurve(clip.automationPoints, relX);
@@ -4242,13 +4319,13 @@ class AudioEngine {
 
       this.activeClips.forEach(clip => {
         if (clip.type === 'pattern') {
-          const clipStartStep = clip.startBar * STEPS_PER_BAR;
-          const clipEndStep = clipStartStep + (clip.lengthBars * STEPS_PER_BAR);
+          const clipStartStep = clip.startBar * stepsBar;
+          const clipEndStep = clipStartStep + (clip.lengthBars * stepsBar);
 
           if (currentGlobalStep >= clipStartStep && currentGlobalStep < clipEndStep) {
             const channel = this.activeChannels.find(c => c.id === clip.channelId);
             if (channel && this.isChannelAudibleInTake(channel) && !this.isPlaylistLaneMuted(clip)) {
-              const loopLength = resolvePlayableContentLengthSteps(channel);
+              const loopLength = resolvePlayableContentLengthSteps(channel, undefined, this.meter);
               const stepOffset = clip.offsetSteps || 0;
               const relStep = ((currentGlobalStep - clipStartStep + stepOffset) % loopLength + loopLength) % loopLength;
 
@@ -4273,7 +4350,7 @@ class AudioEngine {
             }
           }
         } else if (clip.type === 'audio') {
-          const clipStartStep = clip.startBar * STEPS_PER_BAR;
+          const clipStartStep = clip.startBar * stepsBar;
           if (
             currentGlobalStep === clipStartStep &&
             !clip.mute &&
@@ -4309,7 +4386,9 @@ class AudioEngine {
 
     if (offsetSeconds >= buf.duration) return;
 
-    const clipDurationSec = clip.lengthBars * beatsPerBar(LEGACY_TIME_SIGNATURE) * beatsToSeconds(1, safeBpm);
+    // Phase 1F: a clip's bar length converts through the resolved project
+    // meter, so a 3/4 audio clip lasts 12 steps (not 16) per declared bar.
+    const clipDurationSec = clip.lengthBars * this.secondsPerBarAt(safeBpm);
     if (!Number.isFinite(clipDurationSec) || clipDurationSec <= 0.0005) return;
 
     const rate = Number.isFinite(clip.timeStretchRate) && (clip.timeStretchRate ?? 1) > 0 ? (clip.timeStretchRate ?? 1) : 1;
@@ -4335,7 +4414,7 @@ class AudioEngine {
 
     // Safe fade envelope calculation: in and out cannot invert or exceed half duration
     const maxFade = effectiveDuration / 2;
-    const secondsPerBar = beatsToSeconds(beatsPerBar(LEGACY_TIME_SIGNATURE), safeBpm);
+    const secondsPerBar = this.secondsPerBarAt(safeBpm);
     const requestedFadeIn = Math.max(0, (clip.fadeInBars || 0) * secondsPerBar);
     const requestedFadeOut = Math.max(0, (clip.fadeOutBars || 0) * secondsPerBar);
 
@@ -4460,14 +4539,15 @@ class AudioEngine {
     const safeBpm = Math.max(20, Math.min(300, requestedBpm));
     const sampleRate = this.ctx?.sampleRate || 44100;
 
-    const loopLengthSteps = resolvePlayableContentLengthSteps(channel);
-    const loopLengthBars = loopLengthSteps / STEPS_PER_BAR;
+    const loopLengthSteps = resolvePlayableContentLengthSteps(channel, undefined, this.meter);
+    const stepsBar = this.currentStepsPerBar;
+    const loopLengthBars = loopLengthSteps / stepsBar;
     const safeMinBars = Number.isFinite(minBars) && minBars > 0 ? minBars : 1;
     const passes = Math.max(1, Math.ceil(safeMinBars / loopLengthBars));
     const lengthBars = passes * loopLengthBars;
 
     const stepDuration = beatsToSeconds(stepsToBeats(1), safeBpm);
-    const durationSec = lengthBars * STEPS_PER_BAR * stepDuration;
+    const durationSec = lengthBars * stepsBar * stepDuration;
 
     // Bounce-In-Place is an offline scheduling/rendering operation, not a second
     // instrument DSP implementation. The existing timeline renderer already

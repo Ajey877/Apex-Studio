@@ -621,6 +621,7 @@ describe('Phase 60 — Shared Channel-Pan Boundary & Mixer Independence', () => 
       setBpm: () => undefined,
       setMode: () => undefined,
       setPatternLoopSteps: () => undefined,
+      setTimeSignature: () => undefined,
       setSongEndSteps: () => undefined,
       setCallbacks: () => undefined,
       start: () => undefined,

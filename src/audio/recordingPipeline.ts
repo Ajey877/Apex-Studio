@@ -1,4 +1,4 @@
-import { barsToBeats, beatsToSeconds, LEGACY_TIME_SIGNATURE } from '../music/musicalTime';
+import { barsToBeats, beatsToSeconds, LEGACY_TIME_SIGNATURE, resolveProjectTimeSignature, type TimeSignature } from '../music/musicalTime';
 import type { AudioRecording, PlaylistClip, PlaylistTrack } from '../types/daw';
 
 export interface RecordingBufferRegistration {
@@ -13,10 +13,15 @@ export const getRecordingAudioBufferId = (recordingId: string): string => {
   return `recording-${recordingId}`;
 };
 
-export const getRecordingLengthBars = (durationSeconds: number, bpm: number): number => {
+/**
+ * Phase 1F: recording bar timing derives from the resolved project meter — a
+ * 3/4 bar lasts 3 beats (1.5 s at 120 BPM), not 4. Missing/unsupported meters
+ * resolve to the legacy 4/4 bar, exactly like the rest of the runtime.
+ */
+export const getRecordingLengthBars = (durationSeconds: number, bpm: number, meter: TimeSignature = LEGACY_TIME_SIGNATURE): number => {
   if (!Number.isFinite(durationSeconds) || durationSeconds <= 0) throw new Error('Recording duration must be greater than zero');
   const safeBpm = Number.isFinite(bpm) ? Math.max(20, bpm) : 120;
-  const secondsPerBar = beatsToSeconds(barsToBeats(1, LEGACY_TIME_SIGNATURE), safeBpm);
+  const secondsPerBar = beatsToSeconds(barsToBeats(1, resolveProjectTimeSignature({ timeSignature: meter })), safeBpm);
   return Math.max(1, Math.ceil(durationSeconds / secondsPerBar));
 };
 
@@ -35,7 +40,8 @@ export const createRecordingPlaylistClip = (
   tracks: PlaylistTrack[],
   targetTrackIndex: number,
   bpm: number,
-  id = `rec-clip-${Date.now()}`
+  id = `rec-clip-${Date.now()}`,
+  meter: TimeSignature = LEGACY_TIME_SIGNATURE
 ): PlaylistClip => {
   if (!recording.audioBlob || recording.audioBlob.size === 0) throw new Error('The recording contains no audio data');
   if (registration.id !== getRecordingAudioBufferId(recording.id)) throw new Error('Recording audio buffer registration does not match the recording');
@@ -46,7 +52,7 @@ export const createRecordingPlaylistClip = (
   const waveform = Array.isArray(registration.peaks) ? registration.peaks : [];
 
   validateRecordingTargetTrack(tracks, targetTrackIndex);
-  const lengthBars = getRecordingLengthBars(registration.duration, bpm);
+  const lengthBars = getRecordingLengthBars(registration.duration, bpm, meter);
 
   return {
     id,

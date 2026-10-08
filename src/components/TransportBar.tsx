@@ -1,4 +1,4 @@
-import { beatsToSeconds } from '../music/musicalTime';
+import { beatsPerBar, beatsToSeconds, resolveProjectTimeSignature, SIXTEENTH_STEPS_PER_BEAT } from '../music/musicalTime';
 import React, { useEffect, useMemo, useState } from 'react';
 import {
   AlertTriangle,
@@ -277,7 +277,13 @@ export const TransportBar: React.FC<TransportBarProps> = ({
     ]
   );
 
-  const formattedBeat = (currentStep % 4) + 1;
+  // Phase 1F: the beat slot is meter-aware — in 3/4 the transport never shows
+  // a beat 4. The beat is the step's quarter-note position inside the bar
+  // (the step counter wraps at the meter's bar size), wrapped by the beat
+  // count so a non-bar-aligned pattern loop cannot display a phantom beat.
+  // The 16th-note subdivision slot keeps its existing semantics unchanged.
+  const meterBeatsPerBar = beatsPerBar(resolveProjectTimeSignature(meta));
+  const formattedBeat = (Math.floor(currentStep / SIXTEENTH_STEPS_PER_BEAT) % meterBeatsPerBar) + 1;
   const formatted16th = (currentStep % 4) + 1;
 
   // Calculate song time string (e.g. 03:24:12)

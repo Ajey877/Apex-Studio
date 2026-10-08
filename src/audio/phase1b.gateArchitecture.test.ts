@@ -491,6 +491,7 @@ describe('Phase 1B D — live and offline production paths agree on gate semanti
       let callbacks: { onStep?: (step: number, bar: number, t: number) => void } | null = null;
       engine.transport = {
         setBpm: () => undefined, setMode: () => undefined, setPatternLoopSteps: () => undefined,
+        setTimeSignature: () => undefined,
         setSongEndSteps: () => undefined,
         setCallbacks: (next: typeof callbacks) => { callbacks = next; },
         start: () => undefined, stop: () => undefined, pause: () => undefined, seek: () => undefined,
