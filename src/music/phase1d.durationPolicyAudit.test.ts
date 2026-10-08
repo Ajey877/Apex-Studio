@@ -191,7 +191,6 @@ const EXPECTED_INVENTORY: readonly ExpectedLayer[] = Object.freeze([
   { id: 'midi.export-project', file: 'src/utils/exportUtils.ts', role: 'EXPORT_TICK_FLOOR', domain: 'midi-ticks', consumesPolicy: true, declaredMinimum: 1, probeExpected: 1 },
   { id: 'midi.export-content-fallback', file: 'src/utils/exportUtils.ts', role: 'FALLBACK', domain: 'note-steps', consumesPolicy: false, declaredMinimum: 1, probeExpected: 1 },
   { id: 'midi.import-plan', file: 'src/components/pianoRollMidiImport.ts', role: 'PASS_THROUGH', domain: 'note-steps', consumesPolicy: false, declaredMinimum: null, probeExpected: 0.25 },
-  { id: 'engine.playable-length-fallback', file: 'src/audio/audioEngine.ts', role: 'FALLBACK', domain: 'note-steps', consumesPolicy: false, declaredMinimum: 1 },
   { id: 'engine.bass-extraction-fallback', file: 'src/audio/audioEngine.ts', role: 'FALLBACK', domain: 'note-steps', consumesPolicy: false, declaredMinimum: 2 },
   { id: 'engine.offline-render-window', file: 'src/audio/audioEngine.ts', role: 'NON_MUSICAL', domain: 'audio-seconds', consumesPolicy: false, declaredMinimum: null },
   { id: 'polyphonic.blob-audition', file: 'src/components/PolyphonicEditorModal.tsx', role: 'PASS_THROUGH', domain: 'note-steps', consumesPolicy: false, declaredMinimum: null },
@@ -206,7 +205,6 @@ const EXPECTED_INVENTORY: readonly ExpectedLayer[] = Object.freeze([
 /** Every site the narrow scan is expected to find, once the policy is in place. */
 const EXPECTED_SCANNED_SITES: readonly string[] = Object.freeze([
   'src/audio/audioEngine.ts::extractBassNotesFromChords',
-  'src/audio/audioEngine.ts::resolvePlayableContentLengthSteps',
   'src/audio/instruments/drumPad.ts::renderDrumPadVoice',
   'src/audio/instruments/sampler.ts::renderSamplerVoice',
   'src/components/pianoRollOperations.ts::DEFAULT_MIN_NOTE_DURATION',

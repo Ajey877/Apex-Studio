@@ -319,6 +319,19 @@ function createSeededRandom(seed: number): () => number {
   };
 }
 
+/**
+ * The musical extent of a channel's content: the furthest **onset** position
+ * (not end position), rounded up to whole bars.
+ *
+ * NOTE TAILS MUST NOT CHANGE MUSICAL LOOP/PATTERN EXTENT.  A note starting at
+ * 15.75 with duration 1 (ending at 16.75) does not push a 16-step content
+ * extent to 32.  The note's gate/tail still sounds at its onset and plays for
+ * its legitimate duration, but the loop boundary remains determined by onset
+ * positions and the step array alone.
+ *
+ * `patternLengthSteps` overrides content when supplied (Pattern mode uses the
+ * declared pattern length; Song mode / bounce leave it undefined).
+ */
 export function resolvePlayableContentLengthSteps(
   channel?: Channel,
   patternLengthSteps?: number
@@ -340,13 +353,11 @@ export function resolvePlayableContentLengthSteps(
     maxStep = Math.max(maxStep, channel.steps.length);
   }
 
+  // Onset positions only — note tails must not expand the loop extent.
   if (Array.isArray(channel.notes) && channel.notes.length > 0) {
     for (const note of channel.notes) {
       if (typeof note.start === 'number' && Number.isFinite(note.start) && note.start >= 0) {
-        const duration = (typeof note.duration === 'number' && Number.isFinite(note.duration) && note.duration > 0)
-          ? note.duration
-          : 1;
-        maxStep = Math.max(maxStep, note.start + duration);
+        maxStep = Math.max(maxStep, note.start);
       }
     }
   }
@@ -365,8 +376,11 @@ export function resolvePlayableContentLengthSteps(
  * prevents a padded `Channel.steps` array from silently overriding the pattern.
  *
  * The content-derived branch is the compatibility fallback for legacy/internal
- * callers that do not have a Pattern model. Song Mode is unaffected and still
- * resolves each playlist channel's content length directly.
+ * callers that do not have a Pattern model. Content extent uses **onset**
+ * positions only — note tails must not expand the loop (Phase 1E invariant).
+ *
+ * Song Mode clip repetition and bounce both use `resolvePlayableContentLengthSteps`
+ * directly, which applies the same onset-only rule.
  */
 export function resolvePatternLoopLengthSteps(
   channels: Channel[],
