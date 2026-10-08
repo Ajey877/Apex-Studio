@@ -426,6 +426,39 @@ export const DURATION_ALTERING_LAYERS: readonly DurationPolicyLayer[] = Object.f
     anchors: ['resolveGateSeconds'],
   },
   {
+    id: 'gate.arp-transient-duration',
+    file: 'src/audio/noteGate.ts',
+    symbols: ['resolveArpNoteDurationSteps', 'ARP_RATE_STEPS', 'DEFAULT_ARP_GATE'],
+    role: 'AUDIBLE_GATE_SEPARATE_POLICY',
+    domain: 'note-steps',
+    consumesPolicy: false,
+    declaredMinimum: null,
+    behavior:
+      'Derives the length of one arpeggiated voice in steps as arp rate times gate proportion. The result is ' +
+      'written into a throwaway note handed to the live voice trigger in src/audio/audioEngine.ts; it is never ' +
+      'stored on a channel, never persisted, never exported and never shown in the Piano Roll.',
+    reason:
+      'A transient playback gate, not a notated length, so it intentionally emits values below the 0.25-step ' +
+      'musical minimum and off the duration grid: at the 1/32 rate with the shortest gate the arp slider offers ' +
+      'it yields 0.05 steps. That is the Phase 1C question of how long a single voice sounds, not the question ' +
+      'this module owns. Flooring or snapping it to the musical minimum would lengthen every fast arpeggio and ' +
+      'audibly change the instrument, so it declares no minimum of its own and must never consume this policy.',
+    anchors: [
+      'export const resolveArpNoteDurationSteps = (rateSteps: number, gate: unknown): number =>',
+      '* (isPositiveFinite(gate) ? gate : DEFAULT_ARP_GATE);',
+      "'1/32': 0.5,",
+    ],
+    forbiddenAnchors: [
+      'noteDurationPolicy',
+      'quantizeDurationSteps',
+      'isOnDurationGrid',
+      'MIN_NOTE_DURATION_STEPS',
+      'DURATION_GRID_STEPS',
+      'Math.max(0.25',
+      '* 4) / 4',
+    ],
+  },
+  {
     id: 'gate.instrument-policy',
     file: 'src/audio/instrumentGatePolicy.ts',
     symbols: ['INSTRUMENT_GATE_POLICY', 'fallbackSteps'],

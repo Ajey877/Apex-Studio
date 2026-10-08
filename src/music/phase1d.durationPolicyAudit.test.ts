@@ -38,6 +38,7 @@ import { MidiParser } from '../utils/midiParser';
 import { buildStandardMidiFile } from '../utils/exportUtils';
 import { planMidiImport } from '../components/pianoRollMidiImport';
 import { resizeNoteRight } from '../components/pianoRollOperations';
+import { resolveArpNoteDurationSteps, resolveArpRateSteps } from '../audio/noteGate';
 import type { Channel, Note } from '../types/daw';
 import type { DurationPolicyLayer } from './noteDurationPolicy';
 
@@ -195,6 +196,7 @@ const EXPECTED_INVENTORY: readonly ExpectedLayer[] = Object.freeze([
   { id: 'engine.offline-render-window', file: 'src/audio/audioEngine.ts', role: 'NON_MUSICAL', domain: 'audio-seconds', consumesPolicy: false, declaredMinimum: null },
   { id: 'polyphonic.blob-audition', file: 'src/components/PolyphonicEditorModal.tsx', role: 'PASS_THROUGH', domain: 'note-steps', consumesPolicy: false, declaredMinimum: null },
   { id: 'gate.note-gate', file: 'src/audio/noteGate.ts', role: 'AUDIBLE_GATE_SEPARATE_POLICY', domain: 'audio-seconds', consumesPolicy: false, declaredMinimum: null },
+  { id: 'gate.arp-transient-duration', file: 'src/audio/noteGate.ts', role: 'AUDIBLE_GATE_SEPARATE_POLICY', domain: 'note-steps', consumesPolicy: false, declaredMinimum: null, probeExpected: 0.05 },
   { id: 'gate.instrument-policy', file: 'src/audio/instrumentGatePolicy.ts', role: 'AUDIBLE_GATE_SEPARATE_POLICY', domain: 'note-steps', consumesPolicy: false, declaredMinimum: 1 },
   { id: 'render.offline-note-gate', file: 'src/audio/offlineProjectRenderer.ts', role: 'AUDIBLE_GATE_SEPARATE_POLICY', domain: 'audio-seconds', consumesPolicy: false, declaredMinimum: null },
   { id: 'dsp.sample-trim-drumpad', file: 'src/audio/instruments/drumPad.ts', role: 'NON_MUSICAL', domain: 'audio-seconds', consumesPolicy: false, declaredMinimum: null },
@@ -398,6 +400,11 @@ const LAYER_PROBES: Readonly<Record<string, () => number | Promise<number>>> = O
   'midi.import-plan': () =>
     planMidiImport([{ name: 'Probe', notes: [{ pitch: 60, startStep: 0, durationSteps: 0.25, velocity: 0.8 }] }])
       .destinations[0].notes[0].duration,
+  // The shortest length the transient arpeggiator gate can emit: the 1/32 rate
+  // (0.5 steps) at the shortest gate the arp slider offers (0.1). Landing below
+  // the musical minimum is the POINT — this probe exists so that clamping or
+  // snapping the helper to the note-duration policy fails the audit.
+  'gate.arp-transient-duration': () => resolveArpNoteDurationSteps(resolveArpRateSteps('1/32'), 0.1),
 });
 
 // ---------------------------------------------------------------------------
