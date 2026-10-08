@@ -171,7 +171,9 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, chann
     try {
       // Phase 54: the render window is resolved against the same timeline the
       // arranger uses, so "32 bars on screen" can never export as 35.
-      const renderBars = getProjectRenderBars(clips, scope, patternLengthSteps, totalBars);
+      // Phase 1F: the window is meter-aware so a pattern loop that is longer
+      // than one 3/4 bar still fits the rendered bars.
+      const renderBars = getProjectRenderBars(clips, scope, patternLengthSteps, totalBars, meta.timeSignature);
 
       if (format === 'midi') {
         setStatusText(`Writing Standard MIDI (${renderBars} bars)...`);
@@ -308,7 +310,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, chann
   // Pattern Loop copy states the length the render will actually use, so the
   // modal can never claim a different loop than the selected pattern declares.
   const patternLoopSteps = normalizePatternLengthSteps(patternLengthSteps);
-  const patternRenderBars = getProjectRenderBars(clips, 'pattern', patternLengthSteps);
+  const patternRenderBars = getProjectRenderBars(clips, 'pattern', patternLengthSteps, undefined, meta.timeSignature);
 
   const formatOptions: Array<{ id: ExportFormat; name: string; desc: string }> = [
     { id: 'stems', name: 'All Stems (.zip)', desc: 'Multi-track WAV bundle' },

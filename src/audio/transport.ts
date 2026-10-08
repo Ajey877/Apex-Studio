@@ -1,4 +1,4 @@
-import { beatsPerBar, beatsToSeconds, LEGACY_TIME_SIGNATURE, SIXTEENTH_STEPS_PER_BEAT } from '../music/musicalTime';
+import { beatsPerBar, beatsToSeconds, stepsPerBar, LEGACY_TIME_SIGNATURE, resolveProjectTimeSignature, SIXTEENTH_STEPS_PER_BEAT, type TimeSignature } from '../music/musicalTime';
 export type TransportMode = 'pat' | 'song';
 
 export interface TransportState {
@@ -41,6 +41,13 @@ export class AudioClockTransport {
   private patternLoopSteps: number | null = null;
   /** First absolute step index at which Song Mode stops; null loops forever. */
   private songEndSteps: number | null = null;
+  /**
+   * Phase 1F — the resolved project meter. It determines the bar grid the
+   * step counter is mapped onto (bar numbers and beat count); step duration
+   * itself stays a sixteenth note at the transport tempo. Defaults to the
+   * legacy 4/4 grid so a transport nobody configured keeps its old behaviour.
+   */
+  private meter: TimeSignature = LEGACY_TIME_SIGNATURE;
 
   constructor(context: AudioContext, options: { lookAheadSeconds?: number; scheduleIntervalMs?: number } = {}) {
     this.context = context;
@@ -54,6 +61,22 @@ export class AudioClockTransport {
     if (!Number.isFinite(bpm) || bpm <= 0) return;
     this.updatePositionFromClock();
     this.state.bpm = Math.min(999, Math.max(20, bpm));
+    this.updateMusicalPosition(this.state.positionSeconds);
+    this.emitState();
+  }
+
+  /**
+   * Phase 1F — publish the resolved project meter. The bar grid remaps the
+   * current absolute step position (a 3/4 bar wraps every 12 steps), so the
+   * reported bar/beat stay truthful through the change; unsupported values
+   * resolve to the legacy 4/4 grid.
+   */
+  setTimeSignature(meter: TimeSignature): void {
+    const resolved = resolveProjectTimeSignature({ timeSignature: meter });
+    if (resolved[0] === this.meter[0] && resolved[1] === this.meter[1]) return;
+    this.updatePositionFromClock();
+    this.meter = resolved;
+    this.state.beatsPerBar = beatsPerBar(resolved);
     this.updateMusicalPosition(this.state.positionSeconds);
     this.emitState();
   }
@@ -142,7 +165,7 @@ export class AudioClockTransport {
   dispose(): void { this.stop(false); this.callbacks = {}; }
 
   private get stepDurationSeconds(): number { return beatsToSeconds(1, this.state.bpm) / this.state.stepsPerBeat; }
-  private get stepsPerBar(): number { return this.state.beatsPerBar * this.state.stepsPerBeat; }
+  private get stepsPerBar(): number { return stepsPerBar(this.meter); }
   /** Number of steps the reported musical position wraps at. */
   private get stepLoopLength(): number {
     return this.state.mode === 'pat' && this.patternLoopSteps !== null

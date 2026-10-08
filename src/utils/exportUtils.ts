@@ -1,7 +1,7 @@
-import { stepsPerBar, stepsToBeats, beatsToMidiTicks, bpmToMicrosecondsPerQuarter, DEFAULT_MIDI_PPQ, LEGACY_TIME_SIGNATURE } from '../music/musicalTime';
+import { stepsPerBar, stepsToBeats, beatsToMidiTicks, bpmToMicrosecondsPerQuarter, DEFAULT_MIDI_PPQ, LEGACY_TIME_SIGNATURE, resolveProjectTimeSignature, type TimeSignature } from '../music/musicalTime';
 import { MIN_MIDI_NOTE_OFF_DELTA_TICKS } from '../music/noteDurationPolicy';
 import type { Channel, PlaylistClip, PlaylistTrack, ProjectMetadata } from '../types/daw';
-import { getPatternLengthBars } from '../state/patternLength';
+import { normalizePatternLengthSteps } from '../state/patternLength';
 import {
   resolvePatternLoopLengthSteps,
   resolvePlayableContentLengthSteps,
@@ -61,10 +61,17 @@ export function getProjectRenderBars(
   clips: PlaylistClip[],
   scope: ExportScope,
   patternLengthSteps?: number,
-  totalBars?: number
+  totalBars?: number,
+  meter: TimeSignature = LEGACY_TIME_SIGNATURE
 ): number {
   if (scope === 'pattern') {
-    return Math.max(PATTERN_EXPORT_MIN_BARS, getPatternLengthBars(patternLengthSteps));
+    // Phase 1F: the window must cover the declared pattern loop, whose length
+    // is an absolute step quantity. In a 3/4 project a legacy 16-step pattern
+    // is longer than one 12-step bar, so the bar window grows until the loop
+    // fits — the 4/4 arithmetic (loop steps / 16 per bar) is unchanged.
+    const resolvedMeter = resolveProjectTimeSignature({ timeSignature: meter });
+    const loopSteps = normalizePatternLengthSteps(patternLengthSteps);
+    return Math.max(PATTERN_EXPORT_MIN_BARS, Math.ceil(loopSteps / stepsPerBar(resolvedMeter)));
   }
   const endBars = clips
     .filter(clip => Number.isFinite(clip.startBar) && Number.isFinite(clip.lengthBars) && clip.lengthBars > 0)
@@ -109,10 +116,18 @@ interface MidiEvent {
   data: number[];
 }
 
-/** The arrangement grid: 16 steps per bar, one 16th note per 120 ticks at 480 PPQ. */
-const STEPS_PER_BAR = stepsPerBar(LEGACY_TIME_SIGNATURE);
+/** One 16th-note step is always 120 ticks at 480 PPQ, independent of meter. */
 const TICKS_PER_STEP = beatsToMidiTicks(stepsToBeats(1), DEFAULT_MIDI_PPQ);
-const TICKS_PER_BAR = STEPS_PER_BAR * TICKS_PER_STEP;
+
+/**
+ * Phase 1F — the arrangement grid follows the resolved project meter: steps
+ * per bar come from `stepsPerBar(meter)` (16 for legacy 4/4, 12 for 3/4 and
+ * the mechanical 6/8), so an exported bar holds exactly as many steps as the
+ * runtime plays. The time-signature meta event and the note layout therefore
+ * describe the same meter.
+ */
+const stepsPerBarFor = (meter: TimeSignature): number => stepsPerBar(resolveProjectTimeSignature({ timeSignature: meter }));
+const ticksPerBarFor = (meter: TimeSignature): number => stepsPerBarFor(meter) * TICKS_PER_STEP;
 
 /**
  * Tolerance for resolving which step boundary a tick-quantised onset belongs to.
@@ -231,6 +246,9 @@ function buildMidiTrack(
   const midiChannel = channelIndex % 16;
   const events: MidiEvent[] = [];
   const safeBpm = Number.isFinite(meta.bpm) && meta.bpm > 0 ? meta.bpm : 120;
+  // Phase 1F: the note grid follows the resolved project meter (legacy 4/4 for
+  // missing/unsupported metadata), matching the runtime bar size exactly.
+  const resolvedMeter = resolveProjectTimeSignature(meta);
   const windowTicks = context ? context.windowTicks : Number.POSITIVE_INFINITY;
 
   const name = channel.name || `Channel ${channelIndex + 1}`;
@@ -300,12 +318,13 @@ function buildMidiTrack(
   } else {
     // Song Mode: each clip plays the channel's content on its own loop length and
     // its own `offsetSteps` trim, from the clip's start bar to its end bar.
-    const loopLength = Math.max(1, resolvePlayableContentLengthSteps(channel));
+    const loopLength = Math.max(1, resolvePlayableContentLengthSteps(channel, undefined, resolvedMeter));
+    const stepsBar = stepsPerBarFor(resolvedMeter);
     for (const clip of clips) {
       if (clip.type !== 'pattern' || clip.mute || clip.channelId !== channel.id) continue;
       if (context && isClipLaneMuted(clip, context.laneMutes)) continue;
-      const startStep = Math.round(clip.startBar * STEPS_PER_BAR);
-      const endStep = startStep + Math.round(clip.lengthBars * STEPS_PER_BAR);
+      const startStep = Math.round(clip.startBar * stepsBar);
+      const endStep = startStep + Math.round(clip.lengthBars * stepsBar);
       const offsetSteps = Math.max(0, Math.round(Number(clip.offsetSteps) || 0));
       for (const relStep of channelContentSteps(channel, loopLength)) {
         const phase = ((relStep - offsetSteps) % loopLength + loopLength) % loopLength;
@@ -339,12 +358,16 @@ export function buildStandardMidiFile(
   options: MidiExportOptions = {},
 ): Blob {
   const scope: ExportScope = options.scope === 'pattern' ? 'pattern' : 'song';
+  // Phase 1F: one resolved meter drives the window size and the note grid, so
+  // the file's bar length (ticks per bar) matches both the declared
+  // time-signature meta event and the runtime's 3/4 = 12-step scheduling.
+  const resolvedMeter = resolveProjectTimeSignature(meta);
   // The same window the WAV/stem renderer is handed, so the dialog's bar count
   // and the file's contents cannot disagree.
-  const windowTicks = getProjectRenderBars(clips, scope, options.patternLengthSteps, options.totalBars) * TICKS_PER_BAR;
+  const windowTicks = getProjectRenderBars(clips, scope, options.patternLengthSteps, options.totalBars, resolvedMeter) * ticksPerBarFor(resolvedMeter);
   const context: MidiTrackContext = {
     scope,
-    patternLoopSteps: resolvePatternLoopLengthSteps(channels, options.patternLengthSteps),
+    patternLoopSteps: resolvePatternLoopLengthSteps(channels, options.patternLengthSteps, resolvedMeter),
     windowTicks,
     laneMutes: derivePlaylistLaneMutes(options.playlistTracks),
   };

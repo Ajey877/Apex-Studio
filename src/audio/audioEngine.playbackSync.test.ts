@@ -55,6 +55,7 @@ const fakeTransport = {
   setBpm: () => undefined,
   setMode: () => undefined,
   setPatternLoopSteps: () => undefined,
+  setTimeSignature: () => undefined,
   setSongEndSteps: () => undefined,
   setCallbacks: () => undefined,
   start: () => undefined,

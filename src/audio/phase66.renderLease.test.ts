@@ -214,6 +214,7 @@ function attachRecordingTransport() {
     setBpm: () => undefined,
     setMode: () => undefined,
     setPatternLoopSteps: () => undefined,
+    setTimeSignature: () => undefined,
     setSongEndSteps: () => undefined,
     setCallbacks: (next: typeof callbacks) => { callbacks = next; },
     start: () => { calls.push('start'); },

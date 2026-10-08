@@ -1,8 +1,18 @@
-import { stepsPerBar, LEGACY_TIME_SIGNATURE } from '../music/musicalTime';
+import { stepsPerBar, LEGACY_TIME_SIGNATURE, resolveProjectTimeSignature, type TimeSignature } from '../music/musicalTime';
 import type { Channel, PlaylistClip, PlaylistTrack, AutomationPoint, AutomationTargetType } from '../types/daw';
 
 export const STEPS_PER_BAR = stepsPerBar(LEGACY_TIME_SIGNATURE);
 export const DEFAULT_GRID_BARS = 0.25;
+
+/**
+ * Phase 1F — steps per bar under the resolved project meter. Clip positions
+ * (`startBar`, `lengthBars`) are bar quantities, while `offsetSteps` stays an
+ * ABSOLUTE step quantity; converting between them must use the project's bar
+ * size (12 steps in 3/4, 16 in the legacy 4/4 default). Callers that do not
+ * know the meter keep the legacy grid.
+ */
+const stepsPerBarForMeter = (meter?: TimeSignature): number =>
+  stepsPerBar(resolveProjectTimeSignature({ timeSignature: meter }));
 
 export interface PlaylistBounds {
   totalBars?: number;
@@ -218,7 +228,8 @@ export function resizePlaylistClipLeft(
   requestedStartBar: number,
   gridBars = DEFAULT_GRID_BARS,
   minimumLengthBars = gridBars,
-  bounds: PlaylistBounds = {}
+  bounds: PlaylistBounds = {},
+  meter?: TimeSignature
 ): PlaylistClip {
   if (!finite(minimumLengthBars) || minimumLengthBars <= 0) throw new Error('minimumLengthBars must be greater than zero');
   const startBar = snapBarPosition(requestedStartBar, gridBars);
@@ -233,7 +244,8 @@ export function resizePlaylistClipLeft(
   // only reveal material that exists before the current offset.
   const isAutomation = clip.type === 'automation';
   const sourceOffset = isAutomation ? 0 : (clip.offsetSteps ?? 0);
-  const maxExtensionLeft = sourceOffset / STEPS_PER_BAR;
+  const stepsBar = stepsPerBarForMeter(meter);
+  const maxExtensionLeft = sourceOffset / stepsBar;
   const minSourcePreservingStart = isAutomation ? 0 : Math.max(0, clip.startBar - maxExtensionLeft);
   const nextStart = Math.max(minSourcePreservingStart, Math.min(startBar, maxStart));
   const nextLength = originalEnd - nextStart;
@@ -243,7 +255,7 @@ export function resizePlaylistClipLeft(
     ...cloneClip(clip),
     startBar: nextStart,
     lengthBars: nextLength,
-    offsetSteps: isAutomation ? 0 : Math.max(0, sourceOffset + deltaBars * STEPS_PER_BAR),
+    offsetSteps: isAutomation ? 0 : Math.max(0, sourceOffset + deltaBars * stepsBar),
     fadeInBars: clip.fadeInBars === undefined ? undefined : Math.min(clip.fadeInBars, nextLength / 2),
     fadeOutBars: clip.fadeOutBars === undefined ? undefined : Math.min(clip.fadeOutBars, nextLength / 2)
   };
@@ -279,7 +291,8 @@ export function splitPlaylistClip(
   clip: PlaylistClip,
   requestedSplitBar: number,
   gridBars = DEFAULT_GRID_BARS,
-  bounds: PlaylistBounds = {}
+  bounds: PlaylistBounds = {},
+  meter?: TimeSignature
 ): [PlaylistClip, PlaylistClip] {
   const splitBar = snapBarPosition(requestedSplitBar, gridBars);
   const clipEnd = clip.startBar + clip.lengthBars;
@@ -319,7 +332,10 @@ export function splitPlaylistClip(
       right.automationPoints = halves.right;
     }
   } else {
-    right.offsetSteps = sourceOffset + leftLength * STEPS_PER_BAR;
+    // Phase 1F: the revealed source offset advances by the project bar size —
+    // 12 steps per bar in 3/4, 16 in the legacy 4/4 default. `offsetSteps`
+    // itself stays an absolute step quantity.
+    right.offsetSteps = sourceOffset + leftLength * stepsPerBarForMeter(meter);
   }
 
   return [assertValidPlaylistClip(left, bounds), assertValidPlaylistClip(right, bounds)];

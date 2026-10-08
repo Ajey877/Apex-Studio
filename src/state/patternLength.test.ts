@@ -527,9 +527,10 @@ describe('Pattern length wiring is single-sourced', () => {
   it('ExportModal passes the declared length through instead of resolving its own', () => {
     assert.match(exportModalSource, /patternLengthSteps\?: number;/, 'additive optional prop');
     // Phase 54 added the project timeline as a fourth argument (the render
-    // window is clamped to it); the declared pattern length is still passed
-    // straight through rather than re-resolved here.
-    assert.match(exportModalSource, /getProjectRenderBars\(clips, scope, patternLengthSteps, totalBars\)/);
+    // window is clamped to it); Phase 1F added the project meter as a fifth
+    // (the bar size the window counts). The declared pattern length is still
+    // passed straight through rather than re-resolved here.
+    assert.match(exportModalSource, /getProjectRenderBars\(clips, scope, patternLengthSteps, totalBars, meta\.timeSignature\)/);
     assert.match(exportModalSource, /renderTimelineOffline\(/);
     assert.match(exportModalSource, /renderProjectStems\(/);
     const stemCall = exportModalSource.slice(
@@ -555,7 +556,7 @@ describe('Pattern length wiring is single-sourced', () => {
     const renderFn = engineSource.slice(renderStart, engineSource.indexOf('// High-Grade Offline Audio Renderer', renderStart));
     assert.ok(renderStart > 0);
     assert.match(renderFn, /patternLengthSteps\?: number,/);
-    assert.match(renderFn, /resolvePatternLoopLengthSteps\(this\.activeChannels, patternLengthSteps\)/);
+    assert.match(renderFn, /resolvePatternLoopLengthSteps\(this\.activeChannels, patternLengthSteps, this\.meter\)/);
     assert.equal(
       renderFn.match(/resolvePatternLoopLengthSteps\(/g)?.length,
       1,

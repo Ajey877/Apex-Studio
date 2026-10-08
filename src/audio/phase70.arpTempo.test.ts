@@ -227,6 +227,7 @@ function attachFakeTransport(bpm: number) {
     setBpm: () => undefined,
     setMode: () => undefined,
     setPatternLoopSteps: () => undefined,
+    setTimeSignature: () => undefined,
     setSongEndSteps: () => undefined,
     setCallbacks: (next: typeof callbacks) => { callbacks = next; },
     start: () => undefined,

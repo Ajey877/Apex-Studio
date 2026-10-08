@@ -7,8 +7,10 @@
  * transport: 20–999). Signed quantities are useful for offsets. IEEE-754
  * NaN/Infinity propagation is intentional: this layer must not silently repair
  * malformed legacy input or introduce exceptions into existing scheduling.
- * Meter validation is explicit because meter arithmetic is a new API; runtime
- * consumers still pass LEGACY_TIME_SIGNATURE, NOT project metadata.
+ * Meter validation is explicit because meter arithmetic is a new API.
+ * Phase 1F: runtime consumers resolve the project meter through
+ * `resolveProjectTimeSignature()` (supported meters run at their own bar size;
+ * missing/unsupported metadata keeps the LEGACY_TIME_SIGNATURE 4/4 grid).
  *
  * Numeric aliases avoid casts/schema changes at the legacy boundaries. Stored
  * Note.start/duration remain steps in Phase 1A; only conversions use beats.
@@ -50,3 +52,57 @@ export const millisecondsToSeconds = (milliseconds: number): Seconds => millisec
 
 /** MIDI tempo metadata; keep division before writer rounding (not seconds × 1e6). */
 export const bpmToMicrosecondsPerQuarter = (bpm: number): number => 60_000_000 / bpm;
+
+/**
+ * Phase 1F — meters the runtime executes truthfully at their own bar size.
+ *
+ * `stepsPerBar(meter)` of one of these values is the authoritative runtime bar
+ * size for transport, pattern/song playback, playlist scheduling, offline
+ * render, bounce, recording timing and MIDI export:
+ *
+ *   [4, 4]  16 sixteenth-note steps per bar (the legacy grid);
+ *   [3, 4]  12 sixteenth-note steps per bar (3 quarter-note beats);
+ *   [6, 8]  MECHANICAL support only: 12 sixteenth-note steps per bar, three
+ *           quarter-note beats. There is deliberately NO dotted-quarter beat
+ *           grouping, NO 2+3/3+2 subdivision and NO compound beat display —
+ *           the runtime treats it as a 12-step bar until a future phase adds
+ *           true compound-meter behaviour.
+ *
+ * Every other stored meter ([7, 8], [5, 4], [2, 4], …) is explicitly DEFERRED:
+ * irregular beat grouping is not implemented and the Phase 1A pinned MIDI
+ * contract still requires the legacy grid for them, so they resolve to the
+ * documented [4, 4] legacy behaviour instead of being half-truthful.
+ */
+export const isRuntimeSupportedMeter = (candidate: unknown): candidate is TimeSignature => {
+  if (!Array.isArray(candidate) || candidate.length !== 2) return false;
+  const [numerator, denominator] = candidate;
+  if (!Number.isSafeInteger(numerator) || !Number.isSafeInteger(denominator)) return false;
+  if (numerator === 4 && denominator === 4) return true;
+  if (numerator === 3 && denominator === 4) return true;
+  if (numerator === 6 && denominator === 8) return true;
+  return false;
+};
+
+/**
+ * Phase 1F — the single meter resolution authority.
+ *
+ * Returns the project's actual runtime `TimeSignature`: the stored value when
+ * it is a supported meter, otherwise the [4, 4] legacy fallback. Missing or
+ * legacy metadata (no `timeSignature` field at all) therefore keeps behaving
+ * exactly like 4/4 — the pre-Phase-1F behaviour — and unsupported values can
+ * never put the runtime on a half-implemented grid.
+ *
+ * Pure: never mutates the supplied metadata and never touches pattern data
+ * (`Pattern.lengthSteps` stays an absolute step quantity regardless of meter).
+ */
+export function resolveProjectTimeSignature(
+  meta: { timeSignature?: unknown } | null | undefined
+): TimeSignature {
+  const candidate = meta !== null && typeof meta === 'object'
+    ? (meta as { timeSignature?: unknown }).timeSignature
+    : undefined;
+  if (isRuntimeSupportedMeter(candidate)) {
+    return Object.freeze([candidate[0], candidate[1]] as const);
+  }
+  return LEGACY_TIME_SIGNATURE;
+}

@@ -374,8 +374,8 @@ test('Phase 54: the export modal feeds the authoritative timeline into render le
   const modal = read('../components/ExportModal.tsx');
   assert.match(
     modal,
-    /getProjectRenderBars\(clips,\s*scope,\s*patternLengthSteps,\s*totalBars\)/,
-    'the render window must be resolved against the project timeline',
+    /getProjectRenderBars\(clips,\s*scope,\s*patternLengthSteps,\s*totalBars,\s*meta\.timeSignature\)/,
+    'the render window must be resolved against the project timeline (and the project meter)',
   );
 
   // App resolves the timeline once, from ProjectState, and hands the same value

@@ -41,6 +41,7 @@ function createRecordingEngine(options: { playing: boolean; knownPannerChannelId
   const known = new Set(options.knownPannerChannelIds ?? []);
   const engine = {
     setBpm(bpm: number) { calls.push({ method: 'setBpm', args: [bpm] }); },
+    setTimeSignature(meter: readonly [number, number] | undefined) { calls.push({ method: 'setTimeSignature', args: [meter] }); },
     setSwing(swing: number) { calls.push({ method: 'setSwing', args: [swing] }); },
     setMetronome(enabled: boolean) { calls.push({ method: 'setMetronome', args: [enabled] }); },
     setGrossBeatState(state: unknown) { calls.push({ method: 'setGrossBeatState', args: [state] }); },
@@ -71,6 +72,16 @@ describe('Phase 66 F2 — the live engine is re-published from the project docum
     assert.deepEqual(methodsOf('setBpm')[0]?.args, [200], 'the engine must end on the project tempo');
     assert.deepEqual(methodsOf('setSwing')[0]?.args, [0.4], 'and on the project swing');
     assert.deepEqual(methodsOf('setMetronome')[0]?.args, [true], 'and on the transport metronome state');
+  });
+
+  it('publishes the project meter (Phase 1F)', () => {
+    const state = createDefaultProjectState();
+    state.meta.timeSignature = [3, 4];
+    const { engine, methodsOf } = createRecordingEngine();
+
+    resynchronizeLiveEngineFromProjectState(engine, state, { metronome: false });
+
+    assert.deepEqual(methodsOf('setTimeSignature')[0]?.args, [[3, 4]], 'the engine must end on the project meter');
   });
 
   it('publishes every mixer track to a stopped engine', () => {
