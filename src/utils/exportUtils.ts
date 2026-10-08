@@ -1,4 +1,5 @@
 import { stepsPerBar, stepsToBeats, beatsToMidiTicks, bpmToMicrosecondsPerQuarter, DEFAULT_MIDI_PPQ, LEGACY_TIME_SIGNATURE } from '../music/musicalTime';
+import { MIN_MIDI_NOTE_OFF_DELTA_TICKS } from '../music/noteDurationPolicy';
 import type { Channel, PlaylistClip, PlaylistTrack, ProjectMetadata } from '../types/daw';
 import { getPatternLengthBars } from '../state/patternLength';
 import {
@@ -271,7 +272,11 @@ function buildMidiTrack(
     const grooveTicks = boundaryStep % 2 === 0 ? 0 : swingOffsetTicksForStep(meta.swing, TICKS_PER_STEP);
     const startTick = Math.round(absoluteStep * TICKS_PER_STEP) + grooveTicks;
     if (startTick < 0 || startTick >= windowTicks) return;
-    const durationTick = Math.max(1, Math.round(Math.max(0.01, content.durationSteps) * TICKS_PER_STEP));
+    // Phase 1D: the note-off delta floor is the policy's declared format minimum
+    // (one tick), shared with the Piano Roll's channel writer rather than
+    // restated here. The 0.01-step guard below predates the policy and only
+    // binds for a duration that is already invalid.
+    const durationTick = Math.max(MIN_MIDI_NOTE_OFF_DELTA_TICKS, Math.round(Math.max(0.01, content.durationSteps) * TICKS_PER_STEP));
     const velocity = Math.max(1, Math.min(127, Math.round(content.velocity * 127)));
     events.push({ tick: startTick, order: 2, data: [0x90 | midiChannel, clampMidi(content.pitch), velocity] });
     events.push({ tick: startTick + durationTick, order: 1, data: [0x80 | midiChannel, clampMidi(content.pitch), 0] });

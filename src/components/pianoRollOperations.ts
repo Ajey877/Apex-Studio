@@ -1,9 +1,15 @@
 import type { Note } from '../types/daw';
+import { MIN_NOTE_DURATION_STEPS } from '../music/noteDurationPolicy';
 
 export const DEFAULT_MIN_PITCH = 36; // C2
 export const DEFAULT_MAX_PITCH = 84; // C6
 export const DEFAULT_GRID_STEPS = 1; // 1 step = 1/16th note
-export const DEFAULT_MIN_NOTE_DURATION = 0.25; // 1/64th step minimum length
+/**
+ * The Piano Roll's shortest drawable/resizable note, read from the shared
+ * duration policy (Phase 1D) rather than restated here. 0.25 steps is a 64th
+ * note: one sixteenth of a beat.
+ */
+export const DEFAULT_MIN_NOTE_DURATION = MIN_NOTE_DURATION_STEPS;
 
 export interface NoteBounds {
   minPitch?: number;
