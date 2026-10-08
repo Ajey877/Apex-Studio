@@ -43,6 +43,8 @@ describe('resolvePlayableContentLengthSteps', () => {
     } as Channel;
     assert.equal(resolvePlayableContentLengthSteps(channelSteps32), 32);
 
+    // Note onset at step 20 → 2-bar content extent.
+    // Note tails must not extend the extent (Phase 1E invariant).
     const channelNotes32 = {
       id: 'ch-notes-32',
       steps: Array(16).fill(false),
@@ -54,7 +56,7 @@ describe('resolvePlayableContentLengthSteps', () => {
     assert.equal(resolvePlayableContentLengthSteps(channelNotes32), 32);
   });
 
-  it('resolves 64 steps for 4-bar piano roll progression', () => {
+  it('resolves 48 steps for 3-bar piano roll progression', () => {
     const channelNotes64 = {
       id: 'ch-notes-64',
       steps: Array(16).fill(false),
@@ -62,10 +64,11 @@ describe('resolvePlayableContentLengthSteps', () => {
         { id: 'n1', pitch: 60, start: 0, duration: 4, velocity: 0.9 },
         { id: 'n2', pitch: 62, start: 16, duration: 4, velocity: 0.9 },
         { id: 'n3', pitch: 64, start: 32, duration: 4, velocity: 0.9 },
-        { id: 'n4', pitch: 65, start: 48, duration: 4, velocity: 0.9 }
+        // onset 47 → ceil(47/16)*16 = 48 (3 bars). Duration is ignored (Phase 1E).
+        { id: 'n4', pitch: 65, start: 47, duration: 1, velocity: 0.9 }
       ]
     } as Channel;
-    assert.equal(resolvePlayableContentLengthSteps(channelNotes64), 64);
+    assert.equal(resolvePlayableContentLengthSteps(channelNotes64), 48);
   });
 
   it('respects explicit pattern lengthSteps parameter', () => {
@@ -99,7 +102,9 @@ describe('Song Mode playback multi-bar scheduling', () => {
         { id: 'n-bar1', pitch: 60, start: 0, duration: 4, velocity: 0.9 },
         { id: 'n-bar2', pitch: 64, start: 16, duration: 4, velocity: 0.9 },
         { id: 'n-bar3', pitch: 67, start: 32, duration: 4, velocity: 0.9 },
-        { id: 'n-bar4', pitch: 71, start: 48, duration: 4, velocity: 0.9 },
+        // Note at onset 47: content extent = ceil(47/16)*16 = 48 = 3 bars.
+        // The note triggers when relStep = 47 (bar 3, step 15 in the loop).
+        { id: 'n-bar3b', pitch: 71, start: 47, duration: 1, velocity: 0.9 },
       ],
       synthParams: {} as any
     };
@@ -155,9 +160,9 @@ describe('Song Mode playback multi-bar scheduling', () => {
       engine.currentStep = 0;
       engine.triggerCurrentStep(1.0);
 
-      // Bar 4, Step 0 (global step 48) -> note at start 48 (MUST be reached!)
-      engine.currentBar = 4;
-      engine.currentStep = 0;
+      // Bar 3, Step 15 (global step 47) -> note at start 47 (MUST be reached!)
+      engine.currentBar = 3;
+      engine.currentStep = 15;
       engine.triggerCurrentStep(1.5);
 
       assert.equal(playedNotes.length, 4);
@@ -167,7 +172,7 @@ describe('Song Mode playback multi-bar scheduling', () => {
       assert.equal(playedNotes[1].pitch, 64);
       assert.equal(playedNotes[2].start, 32);
       assert.equal(playedNotes[2].pitch, 67);
-      assert.equal(playedNotes[3].start, 48);
+      assert.equal(playedNotes[3].start, 47);
       assert.equal(playedNotes[3].pitch, 71);
     } finally {
       engine.ctx = originalCtx;
@@ -260,7 +265,8 @@ describe('Song Mode playback multi-bar scheduling', () => {
       pitch: 0,
       mute: false,
       solo: false,
-      steps: Array(16).fill(false),
+      // 32-step array = 2-bar content (notes at 0 and 16, onset-only extent = 32)
+      steps: Array(32).fill(false),
       notes: [
         { id: 'n1', pitch: 60, start: 0, duration: 4, velocity: 0.9 },
         { id: 'n2', pitch: 72, start: 16, duration: 4, velocity: 0.9 }

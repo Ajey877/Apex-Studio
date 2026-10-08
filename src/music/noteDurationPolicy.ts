@@ -356,20 +356,6 @@ export const DURATION_ALTERING_LAYERS: readonly DurationPolicyLayer[] = Object.f
     anchors: ['duration: parsedNote.durationSteps'],
   },
   {
-    id: 'engine.playable-length-fallback',
-    file: 'src/audio/audioEngine.ts',
-    symbols: ['resolvePlayableContentLengthSteps'],
-    role: 'FALLBACK',
-    domain: 'note-steps',
-    consumesPolicy: false,
-    declaredMinimum: 1,
-    behavior: 'Measures how much timeline a channel occupies, treating an unusable note length as one step.',
-    reason:
-      'This computes a pattern length, not a note. A one-step assumption only widens the loop boundary and cannot ' +
-      'shorten anything the user hears, so it stays as it is.',
-    anchors: ['Number.isFinite(note.duration) && note.duration > 0'],
-  },
-  {
     id: 'engine.bass-extraction-fallback',
     file: 'src/audio/audioEngine.ts',
     symbols: ['extractBassNotesFromChords'],
