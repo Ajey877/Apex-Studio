@@ -287,8 +287,17 @@ export const TransportBar: React.FC<TransportBarProps> = ({
   const formatted16th = (currentStep % 4) + 1;
 
   // Calculate song time string (e.g. 03:24:12)
-  const totalSeconds = Math.floor(((currentBar - 1) * 4 + (currentStep % 4)) * beatsToSeconds(1, meta.bpm) / 4);
-  const songTimeStr = `${String(Math.floor(totalSeconds / 60)).padStart(2, '0')}:${String(totalSeconds % 60).padStart(2, '0')}:${String((currentStep % 16) * 6).padStart(2, '0')}`;
+  // Phase 1H: the Time cell is the wall-clock position of the displayed
+  // bar.beat.step — (bar - 1) bars plus the step's beat offset, converted
+  // through the resolved meter and the project tempo. The previous formula
+  // divided the beat position by 4 (the readout ran at 1/4 of real time),
+  // read the 16th-note subdivision as the beat, assumed a fixed 4-beat bar,
+  // and showed a BPM-independent tick count in the centisecond field.
+  const positionBeats =
+    (currentBar - 1) * meterBeatsPerBar + currentStep / SIXTEENTH_STEPS_PER_BEAT;
+  const positionCentiseconds = Math.floor(positionBeats * beatsToSeconds(1, meta.bpm) * 100 + 1e-9);
+  const totalSeconds = Math.floor(positionCentiseconds / 100);
+  const songTimeStr = `${String(Math.floor(totalSeconds / 60)).padStart(2, '0')}:${String(totalSeconds % 60).padStart(2, '0')}:${String(positionCentiseconds % 100).padStart(2, '0')}`;
   const barPosition = `${String(currentBar).padStart(2, '0')}.${formattedBeat}.${formatted16th}`;
 
   return (
