@@ -100,6 +100,9 @@ import {
   updateMidiMappingsInProjectState,
   updateMixerTrackInProjectState,
   updateProjectMetadataInProjectState,
+  setProjectTimeSignatureInProjectState,
+  setSevenEightGroupingInProjectState,
+  getTimeSignatureEditLabel,
   updateGrossBeatInProjectState,
   updateVocalTunerInProjectState
 } from './state/projectMutations';
@@ -125,6 +128,7 @@ import { CollaborationModal } from './components/CollaborationModal';
 import { AnalyticsModal } from './components/AnalyticsModal';
 import { ProjectManagerModal } from './components/ProjectManagerModal';
 import { HotkeysModal } from './components/HotkeysModal';
+import { ProjectSettingsModal } from './components/ProjectSettingsModal';
 import { OrientationLockModal } from './components/OrientationLockModal';
 import { MidiControllerModal } from './components/MidiControllerModal';
 import { ParametricEqModal } from './components/ParametricEqModal';
@@ -340,6 +344,7 @@ export function App() {
   const [isCollabOpen, setIsCollabOpen] = useState(false);
   const [isAnalyticsOpen, setIsAnalyticsOpen] = useState(false);
   const [isHotkeysOpen, setIsHotkeysOpen] = useState(false);
+  const [isProjectSettingsOpen, setIsProjectSettingsOpen] = useState(false);
   const [isAudioRecorderOpen, setIsAudioRecorderOpen] = useState(false);
   const [isMidiModalOpen, setIsMidiModalOpen] = useState(false);
   const [isParametricEqOpen, setIsParametricEqOpen] = useState(false);
@@ -535,6 +540,13 @@ export function App() {
   useEffect(() => {
     audioEngine.setTimeSignature(projectState.meta.timeSignature);
   }, [projectState.meta.timeSignature]);
+
+  // Phase 1J: the 7/8 metronome accent grouping is project data published the
+  // same way as the meter (undo/redo, load and replacement all flow through
+  // projectState). Missing/unknown values resolve to 2+2+3 inside the engine.
+  useEffect(() => {
+    audioEngine.setSevenEightGrouping(projectState.meta.sevenEightGrouping);
+  }, [projectState.meta.sevenEightGrouping]);
 
   useEffect(() => {
     audioEngine.setSwing(projectState.meta.swing);
@@ -1077,6 +1089,29 @@ export function App() {
     );
   };
 
+  /**
+   * Phase 1J: Project Settings meter edit. One discrete history entry per real
+   * change; selecting the active meter is a no-op. The mutation rejects any
+   * meter outside 4/4, 3/4, 6/8 and 7/8 and never touches clips or patterns.
+   */
+  const handleSetTimeSignature = (meter: [number, number]) => {
+    const current = projectStateRef.current;
+    if (setProjectTimeSignatureInProjectState(current, meter) === current) return;
+    mutateProjectState(
+      state => setProjectTimeSignatureInProjectState(state, meter),
+      getTimeSignatureEditLabel(meter)
+    );
+  };
+
+  const handleSetSevenEightGrouping = (grouping: '2+2+3' | '3+2+2' | '2+3+2') => {
+    const current = projectStateRef.current;
+    if (setSevenEightGroupingInProjectState(current, grouping) === current) return;
+    mutateProjectState(
+      state => setSevenEightGroupingInProjectState(state, grouping),
+      'Change 7/8 accent grouping'
+    );
+  };
+
   const handleUpdateChannel = (
     channelId: string,
     updates: Partial<Channel>,
@@ -1572,6 +1607,8 @@ export function App() {
       input.select();
     },
 
+    openProjectSettings: () => setIsProjectSettingsOpen(true),
+
     showInstrumentBrowser: () => setIsSidebarOpen(true),
     addPlaylistTrack: handleAddPlaylistTrack,
     toggleSelectedChannelMute: () => {
@@ -1841,6 +1878,7 @@ export function App() {
         onOpenCollab={() => setIsCollabOpen(true)}
         onOpenAnalytics={() => setIsAnalyticsOpen(true)}
         onOpenHotkeys={() => setIsHotkeysOpen(true)}
+        onOpenProjectSettings={() => setIsProjectSettingsOpen(true)}
         onOpenMidi={() => setIsMidiModalOpen(true)}
         onOpenParametricEq={() => {
           setEqModalTrackId(0);
@@ -2088,6 +2126,7 @@ export function App() {
               isPlaying={isPlaying}
               bpm={projectState.meta.bpm}
               timeSignature={projectState.meta.timeSignature}
+              sevenEightGrouping={projectState.meta.sevenEightGrouping}
             />
           )}
 
@@ -2299,6 +2338,14 @@ export function App() {
       />
       <AnalyticsModal isOpen={isAnalyticsOpen} onClose={() => setIsAnalyticsOpen(false)} meta={projectState.meta} channels={projectState.channels} clips={projectState.playlistClips} saveError={saveError} />
       <HotkeysModal isOpen={isHotkeysOpen} onClose={() => setIsHotkeysOpen(false)} />
+      <ProjectSettingsModal
+        isOpen={isProjectSettingsOpen}
+        timeSignature={projectState.meta.timeSignature}
+        sevenEightGrouping={projectState.meta.sevenEightGrouping}
+        onSelectTimeSignature={handleSetTimeSignature}
+        onSelectSevenEightGrouping={handleSetSevenEightGrouping}
+        onClose={() => setIsProjectSettingsOpen(false)}
+      />
       <MidiControllerModal isOpen={isMidiModalOpen} onClose={() => setIsMidiModalOpen(false)} channels={projectState.channels} mixerTracks={projectState.mixerTracks} midiMappings={projectState.midiMappings || []} onUpdateMidiMappings={(mappings) => mutateProjectState(curr => updateMidiMappingsInProjectState(curr, mappings), 'Update MIDI mappings')} activeChannel={selectedChannel} />
       <ParametricEqModal isOpen={isParametricEqOpen} onClose={() => setIsParametricEqOpen(false)} mixerTrack={projectState.mixerTracks.find(t => t.id === eqModalTrackId) || projectState.mixerTracks[0]} onUpdateTrack={(track) => handleUpdateMixerTrack(track.id, track)} />
       <MasteringSuiteModal isOpen={isMasteringSuiteOpen} onClose={() => setIsMasteringSuiteOpen(false)} masteringState={projectState.masteringSuiteState ?? DEFAULT_MASTERING_SUITE_STATE} onUpdateMasteringState={(st) => mutateProjectState(curr => ({ ...curr, masteringSuiteState: st }), "Update mastering settings")} isPlaying={isPlaying} />

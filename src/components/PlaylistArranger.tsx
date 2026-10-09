@@ -1,3 +1,5 @@
+import { PlaylistRulerTicks } from './PlaylistRulerTicks';
+import { resolveSevenEightGrouping } from '../music/meterPulse';
 import { barsToBeats, beatsToSeconds, resolveProjectTimeSignature } from '../music/musicalTime';
 import React, { useState, useRef, useEffect } from 'react';
 import { 
@@ -108,6 +110,8 @@ interface PlaylistArrangerProps {
    * omitting it keeps the legacy 4/4 grid for backward compatibility.
    */
   timeSignature?: [number, number];
+  /** Phase 1J: 7/8 accent grouping drawn as ruler group lines. */
+  sevenEightGrouping?: string;
   /**
    * Phase 54: the arrangement length, owned by `ProjectState` and passed down.
    *
@@ -204,11 +208,13 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
   totalBars,
   onUpdateTotalBars,
   bpm,
-  timeSignature
+  timeSignature,
+  sevenEightGrouping
 }) => {
   // Phase 1F: one resolved meter for every bar<->step conversion in the
   // arranger. Missing/unsupported values fall back to the legacy 4/4 grid.
   const meter = resolveProjectTimeSignature({ timeSignature });
+  const rulerGrouping = resolveSevenEightGrouping({ sevenEightGrouping });
   const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
   const [selectedPointIndex, setSelectedPointIndex] = useState<number | null>(null);
   const [activeTool, setActiveTool] = useState<'place' | 'cut' | 'delete'>('place');
@@ -1092,12 +1098,15 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
                 <div
                   key={barIdx}
                   onClick={() => onSeekToBar && onSeekToBar(barIdx + 1)}
-                  className={`w-24 h-full border-r border-[var(--apex-border)] flex items-center justify-between px-2 text-[9px] font-mono transition select-none ${
+                  className={`relative w-24 h-full border-r border-[var(--apex-border)] flex items-center justify-between px-2 text-[9px] font-mono transition select-none ${
                     isPlayHead ? 'bg-[var(--apex-state-selected)] text-[var(--apex-accent)] font-bold' : 'text-[var(--apex-text-3)] hover:bg-[var(--apex-state-hover)]'
                   }`}
                 >
                   <span>BAR {barIdx + 1}</span>
-                  <span className="text-[7px] text-[var(--apex-text-3)]">| : : :</span>
+                  {barIdx === 0 && (
+                    <span className="text-[7px] text-[var(--apex-text-3)]" data-ruler-meter>{`${meter[0]}/${meter[1]}`}</span>
+                  )}
+                  <PlaylistRulerTicks meter={meter} grouping={rulerGrouping} />
                 </div>
               );
             })}

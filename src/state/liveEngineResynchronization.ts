@@ -26,6 +26,8 @@ import { DEFAULT_GROSS_BEAT_STATE } from './projectState';
 export interface LiveEngineResynchronizationPort {
   setBpm(bpm: number): void;
   setTimeSignature(meter: readonly [number, number] | undefined): void;
+  /** Phase 1J: 7/8 metronome accent grouping (optional for narrow test ports). */
+  setSevenEightGrouping?(grouping: string | undefined): void;
   setSwing(swing: number): void;
   setMetronome(enabled: boolean): void;
   setGrossBeatState(state: GrossBeatState): void;
@@ -61,6 +63,7 @@ export function resynchronizeLiveEngineFromProjectState(
   // lease release must re-publish it so the live take plays the project's
   // actual bar size (resolved to the legacy 4/4 grid when unsupported).
   engine.setTimeSignature(state.meta.timeSignature);
+  engine.setSevenEightGrouping?.(state.meta.sevenEightGrouping);
   engine.setSwing(state.meta.swing);
   engine.setMetronome(options.metronome);
   // Phase 79: Gross Beat state is project-owned. Any path that republishes

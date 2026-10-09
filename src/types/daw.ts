@@ -596,6 +596,12 @@ export interface ProjectMetadata {
   author: string;
   bpm: number;
   timeSignature: [number, number]; // [4, 4]
+  /**
+   * Phase 1J: metronome/ruler accent grouping used while the meter is 7/8.
+   * Optional and additive — projects saved before Phase 1J omit it and resolve
+   * to '2+2+3' (see `resolveSevenEightGrouping`). Ignored in other meters.
+   */
+  sevenEightGrouping?: '2+2+3' | '3+2+2' | '2+3+2';
   swing: number; // 0 - 1.0
   masterVolume: number;
   masterPitch: number;

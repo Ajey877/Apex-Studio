@@ -72,10 +72,14 @@ describe('AudioClockTransport', () => {
     fakeContext.currentTime = 1.5;
     transport.setBpm(60);
 
+    // Phase 1J: the musical position (step 12 = 3 beats at 120 BPM) survives
+    // the tempo change; the elapsed-seconds equivalent is rescaled (3 beats at
+    // 60 BPM = 3.0 s). Before Phase 1J the seconds were kept and the step
+    // jumped back to 6, re-scheduling steps 6–11.
     const state = transport.getState();
     assert.equal(state.bpm, 60);
-    assert.ok(Math.abs(state.positionSeconds - 1.5) < 1e-9);
-    assert.equal(state.step, 6);
+    assert.ok(Math.abs(state.positionSeconds - 3.0) < 1e-9);
+    assert.equal(state.step, 12);
     assert.equal(state.bar, 1);
   });
 

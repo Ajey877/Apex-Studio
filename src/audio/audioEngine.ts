@@ -1,4 +1,6 @@
 import { beatsPerBar, stepsPerBar, stepsToBeats, beatsToSeconds, SIXTEENTH_STEPS_PER_BEAT, LEGACY_TIME_SIGNATURE, resolveProjectTimeSignature, type TimeSignature } from '../music/musicalTime';
+import { DEFAULT_SEVEN_EIGHT_GROUPING, isSevenEightGrouping, resolveMeterPulseLayout, resolveMetronomeClickLevel, type MeterPulseLayout, type SevenEightGrouping } from '../music/meterPulse';
+import { scheduleMetronomeClick } from './metronomeClick';
 import { arpStepSeconds, resolveArpNoteDurationSteps, resolveArpRateSteps } from './noteGate';
 
 import { 
@@ -3336,6 +3338,11 @@ class AudioEngine {
    */
   private swing: number = 0;
   private metronome: boolean = false;
+  /** Phase 1J: 7/8 accent grouping and the cached pulse layout it produces. */
+  private sevenEightGrouping: SevenEightGrouping = DEFAULT_SEVEN_EIGHT_GROUPING;
+  private metronomePulseLayout: MeterPulseLayout | null = null;
+  /** Phase 1J: clicks scheduled ahead of the audio clock, cancelled on stop/seek/pause. */
+  private activeMetronomeClicks: Set<OscillatorNode> = new Set();
   private isPlaying: boolean = false;
   private timerId: ReturnType<typeof setTimeout> | null = null;
   private currentStep: number = 0;
@@ -3409,6 +3416,47 @@ class AudioEngine {
   public setMetronome(enabled: boolean) {
     if (this.shouldBlockLiveMutation()) return;
     this.metronome = enabled;
+    // Turning the click off must also silence clicks already scheduled inside
+    // the transport look-ahead window.
+    if (!enabled) this.cancelScheduledMetronomeClicks();
+  }
+
+  /**
+   * Phase 1J — the 7/8 accent grouping (`ProjectMetadata.sevenEightGrouping`).
+   * Unknown values resolve to the 2+2+3 default. Takes effect from the next
+   * scheduled step; the grouping is ignored in 4/4, 3/4 and 6/8.
+   */
+  public setSevenEightGrouping(grouping: SevenEightGrouping | string | undefined) {
+    if (this.shouldBlockLiveMutation()) return;
+    const resolved = isSevenEightGrouping(grouping) ? grouping : DEFAULT_SEVEN_EIGHT_GROUPING;
+    if (resolved === this.sevenEightGrouping) return;
+    this.sevenEightGrouping = resolved;
+    this.metronomePulseLayout = null;
+  }
+
+  public getSevenEightGrouping(): SevenEightGrouping {
+    return this.sevenEightGrouping;
+  }
+
+  /** Phase 1J — the pulse layout the metronome clicks for the resolved meter. */
+  public getMetronomePulseLayout(): MeterPulseLayout {
+    const cached = this.metronomePulseLayout;
+    if (cached && cached.meter[0] === this.meter[0] && cached.meter[1] === this.meter[1]) return cached;
+    const layout = resolveMeterPulseLayout(this.meter, this.sevenEightGrouping);
+    this.metronomePulseLayout = layout;
+    return layout;
+  }
+
+  /** Stops (or pre-empts) every click that has been scheduled but not finished. */
+  private cancelScheduledMetronomeClicks(): void {
+    if (this.activeMetronomeClicks.size === 0) return;
+    const now = this.ctx?.currentTime ?? 0;
+    for (const osc of Array.from(this.activeMetronomeClicks)) {
+      // stop(now) before the scheduled start means the click never sounds.
+      try { osc.stop(now); } catch (_) { /* already stopped */ }
+      try { osc.disconnect(); } catch (_) { /* already disconnected */ }
+    }
+    this.activeMetronomeClicks.clear();
   }
 
   /**
@@ -4082,6 +4130,10 @@ class AudioEngine {
     this.activeVoices.clear();
     this.activeVoiceChannelVolumes?.clear();
     this.activeDrumPadVoices.clear();
+    // Phase 1J: clicks the transport scheduled inside its look-ahead window
+    // belong to the interrupted position; without this a stop/seek/pause let
+    // up to ~100 ms of stale clicks sound (and a seek doubled them).
+    this.cancelScheduledMetronomeClicks();
   }
 
   /** Keeps the engine's step/bar mirror aligned with the authoritative transport position. */
@@ -4249,18 +4301,23 @@ class AudioEngine {
     const safeBpm = Number.isFinite(this.bpm) && this.bpm > 0 ? this.bpm : 120;
     const secondsPerStep = beatsToSeconds(stepsToBeats(1), safeBpm);
 
-    // Metronome on quarter notes (steps 0, 4, 8, 12)
-    if (this.metronome && this.currentStep % 4 === 0) {
-      const isDownbeat = this.currentStep === 0;
-      const osc = this.ctx.createOscillator();
-      const gain = this.ctx.createGain();
-      osc.frequency.setValueAtTime(isDownbeat ? 1400 : 880, now);
-      gain.gain.setValueAtTime(0.3, now);
-      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.04);
-      osc.connect(gain);
-      gain.connect(this.masterGain || this.ctx.destination);
-      osc.start(now);
-      osc.stop(now + 0.05);
+    // Phase 1J: the click grid comes from the resolved project meter and the
+    // authoritative transport step — quarter pulses in 4/4 and 3/4, eighth
+    // pulses in 6/8 (3+3) and 7/8 (configurable grouping) — instead of a
+    // hardcoded `step % 4` that ignored the meter. The step is folded onto the
+    // bar grid so long patterns accent every bar line.
+    if (this.metronome) {
+      const level = resolveMetronomeClickLevel(this.getMetronomePulseLayout(), this.currentStep);
+      if (level !== null) {
+        const osc = scheduleMetronomeClick(this.ctx, this.masterGain || this.ctx.destination, now, level);
+        this.activeMetronomeClicks.add(osc);
+        const release = () => { this.activeMetronomeClicks.delete(osc); };
+        if (typeof (osc as { addEventListener?: unknown }).addEventListener === 'function') {
+          osc.addEventListener('ended', release);
+        } else {
+          (osc as unknown as { onended?: (() => void) | null }).onended = release;
+        }
+      }
     }
 
     // Phase 57: 16-step amplitude gate on the master bus. The gain comes from
