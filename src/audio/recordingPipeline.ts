@@ -1,4 +1,5 @@
 import { barsToBeats, beatsToSeconds, LEGACY_TIME_SIGNATURE, resolveProjectTimeSignature, type TimeSignature } from '../music/musicalTime';
+import type { PunchCapturePlan } from '../music/punchRecording';
 import type { AudioRecording, PlaylistClip, PlaylistTrack } from '../types/daw';
 
 export interface RecordingBufferRegistration {
@@ -78,4 +79,124 @@ export const createRecordingPlaylistClip = (
     color: '#ff6e00',
     name: recording.name
   };
+};
+
+// --- Phase 1L: punch-in / punch-out take placement --------------------------
+
+/**
+ * Phase 1L — where a punch take lands on the playlist.
+ *
+ * Unlike an ordinary take (which is rounded UP to whole bars by
+ * `getRecordingLengthBars`), a punch take's geometry IS its musical window:
+ * `startBar` is the punch-in bar (fractional when the punch-in is inside a
+ * bar) and `lengthBars` is the punched length in bars, both taken from the
+ * capture plan that the runtime actually executed.
+ */
+export interface PunchClipPlacement {
+  /** 0-based fractional playlist bar the take begins at. */
+  readonly startBar: number;
+  /** Punched length in bars (fractional is legal — playlist clips are bar floats). */
+  readonly lengthBars: number;
+  /** Decoded audio length the take may keep, in seconds. */
+  readonly trimSeconds: number;
+}
+
+export const planPunchClipPlacement = (plan: PunchCapturePlan): PunchClipPlacement => {
+  if (!Number.isFinite(plan.clipStartBar) || plan.clipStartBar < 0) {
+    throw new Error('The punch-in position is not a legal playlist bar');
+  }
+  if (!Number.isFinite(plan.clipLengthBars) || plan.clipLengthBars <= 0) {
+    throw new Error('The punch window has no length');
+  }
+  if (!Number.isFinite(plan.captureDurationSeconds) || plan.captureDurationSeconds <= 0) {
+    throw new Error('The punch window has no duration');
+  }
+  return Object.freeze({
+    startBar: plan.clipStartBar,
+    lengthBars: plan.clipLengthBars,
+    trimSeconds: plan.captureDurationSeconds,
+  });
+};
+
+/**
+ * Phase 1L — trims a decoded take to the punch window.
+ *
+ * `MediaRecorder` cannot start or stop on a sample: it opens when the count-in
+ * resolves and closes a task or two after the punch-out timer fires, so the
+ * encoded blob is normally a few milliseconds longer than the punched window.
+ * Trimming the decoded buffer to the window is what guarantees the project
+ * never holds audio from beyond punch-out, and it keeps the clip's audio the
+ * same length as its playlist geometry.
+ *
+ * A buffer already at or inside the window is returned unchanged (never padded
+ * and never re-allocated), so a take cannot grow silence it never recorded.
+ * `createBuffer` is injected because a raw `AudioBuffer` is only constructible
+ * through an `AudioContext` (or `OfflineAudioContext`).
+ */
+export const trimAudioBufferToSeconds = (
+  buffer: AudioBuffer,
+  seconds: number,
+  createBuffer: (numberOfChannels: number, length: number, sampleRate: number) => AudioBuffer
+): AudioBuffer => {
+  if (!buffer || !(buffer.duration > 0)) throw new Error('The recording audio buffer is invalid');
+  if (!Number.isFinite(seconds) || seconds <= 0) throw new Error('Punch trim length must be greater than zero');
+  const targetLength = Math.min(buffer.length, Math.floor(seconds * buffer.sampleRate + 1e-6));
+  if (targetLength >= buffer.length) return buffer;
+  const trimmed = createBuffer(buffer.numberOfChannels, targetLength, buffer.sampleRate);
+  for (let channel = 0; channel < buffer.numberOfChannels; channel++) {
+    const source = buffer.getChannelData(channel);
+    trimmed.getChannelData(channel).set(source.subarray(0, targetLength));
+  }
+  return trimmed;
+};
+
+/**
+ * Phase 1L — builds the playlist clip for a punch take.
+ *
+ * The take is ADDED at the punched window; no existing clip is moved, resized
+ * or deleted (a punch take never overwrites unrelated content). The clip keeps
+ * its exact punched geometry, and when the arrangement length is supplied the
+ * clip is held inside it, so a punch take can never exceed the arrangement.
+ */
+export const createPunchRecordingPlaylistClip = (
+  recording: AudioRecording,
+  registration: RecordingBufferRegistration,
+  tracks: PlaylistTrack[],
+  targetTrackIndex: number,
+  placement: PunchClipPlacement,
+  id = `punch-clip-${Date.now()}`,
+  totalBars?: number
+): PlaylistClip => {
+  if (!recording.audioBlob || recording.audioBlob.size === 0) throw new Error('The recording contains no audio data');
+  if (registration.id !== getRecordingAudioBufferId(recording.id)) throw new Error('Recording audio buffer registration does not match the recording');
+  if (!registration.buffer || registration.buffer.duration <= 0) throw new Error('The recording audio buffer is invalid');
+
+  validateRecordingTargetTrack(tracks, targetTrackIndex);
+
+  const clip: PlaylistClip = {
+    id,
+    trackIndex: targetTrackIndex,
+    startBar: placement.startBar,
+    lengthBars: placement.lengthBars,
+    type: 'audio',
+    audioBufferId: registration.id,
+    audioName: recording.name,
+    audioWaveform: Array.isArray(registration.peaks) ? registration.peaks : [],
+    audioUnavailable: false,
+    color: '#ff6e00',
+    name: recording.name
+  };
+
+  // Defense-in-depth: the punch plan already truncates the window at the
+  // arrangement end, but a clip must never reach past the length it is handed.
+  // The arrangement length stays an argument — runtime audio must not read the
+  // timeline capacity constant (Phase 1G anchor) — and this applies only the
+  // geometric rule, never a cap of its own.
+  if (!Number.isFinite(totalBars) || (totalBars as number) <= 0) return clip;
+  const arrangementBars = totalBars as number;
+  const lengthBars = Math.min(clip.lengthBars, arrangementBars);
+  const startBar = Math.min(Math.max(0, clip.startBar), Math.max(0, arrangementBars - lengthBars));
+  return startBar === clip.startBar && lengthBars === clip.lengthBars
+    ? clip
+    : { ...clip, startBar, lengthBars };
 };

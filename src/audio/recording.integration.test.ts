@@ -8,7 +8,9 @@ describe('recording to playlist integration', () => {
 
     assert.match(
       source,
-      /import \{ createRecordingPlaylistClip, getRecordingAudioBufferId, validateRecordingTargetTrack \} from '\.\/audio\/recordingPipeline';/
+      // Phase 1L adds the punch clip factory and its buffer trim to the same
+      // validated pipeline import — a punch take never bypasses it.
+      /import \{ createPunchRecordingPlaylistClip, createRecordingPlaylistClip, getRecordingAudioBufferId, trimAudioBufferToSeconds, validateRecordingTargetTrack, type PunchClipPlacement \} from '\.\/audio\/recordingPipeline';/
     );
     assert.match(
       source,
@@ -16,10 +18,21 @@ describe('recording to playlist integration', () => {
     );
     assert.match(
       source,
-      /createRecordingPlaylistClip\(\s*persistedRecording,\s*\{ id: audioBufferId, buffer: loaded\.buffer, peaks: loaded\.peaks, duration: loaded\.duration \},\s*currentState\.playlistTracks,\s*currentTargetTrackIndex,\s*currentState\.meta\.bpm/
+      // Phase 1L names the registration because a punch take re-registers a
+      // trimmed buffer; it is still built from the buffer AudioEngine loaded.
+      /let registration = \{ id: audioBufferId, buffer: loaded\.buffer, peaks: loaded\.peaks, duration: loaded\.duration \};[\s\S]*createRecordingPlaylistClip\(\s*persistedRecording,\s*registration,\s*currentState\.playlistTracks,\s*currentTargetTrackIndex,\s*currentState\.meta\.bpm/
     );
     assert.match(source, /recordings: \[\.\.\.currentState\.recordings, persistedRecording\]/);
     assert.match(source, /playlistClips: \[\.\.\.currentState\.playlistClips, recordingClip\]/);
+
+    // Phase 1L: the only re-registration a punch take may perform is the
+    // trimmed buffer, and it must be persisted through AudioEngine before the
+    // clip that references it is built — so nothing past punch-out can play,
+    // export or survive a reload.
+    assert.match(
+      source,
+      /trimAudioBufferToSeconds\(loaded\.buffer, punchPlacement\.trimSeconds[\s\S]*audioEngine\.setSampleBuffer\(audioBufferId, trimmed\);\s*await waitForSampleBufferPersistence\(audioEngine, audioBufferId\);\s*registration = \{ id: audioBufferId, buffer: trimmed, peaks: loaded\.peaks, duration: trimmed\.duration \};/
+    );
   });
 
   it('delegates BPM-aware clip sizing to the recording pipeline contract', () => {

@@ -52,6 +52,7 @@ export const PROJECT_STATE_AUDIO_FIELDS: AudioFieldRegistry = {
   'meta.timeSignature':    { classification: 'consumed', consumer: 'audioEngine.ts:setTimeSignature / transport / render', note: 'Sets the resolved bar grid: 4/4, 3/4, mechanical 6/8, or 7/8; unsupported/missing values fall back to 4/4.' },
   'meta.sevenEightGrouping': { classification: 'consumed', consumer: 'audioEngine.ts:setSevenEightGrouping / metronome + playlist ruler', note: 'Phase 1J: 7/8 accent grouping (2+2+3, 3+2+2, 2+3+2) for metronome clicks and ruler ticks; missing/unknown resolves to 2+2+3. Never moves notes or clips.' },
   'meta.countInBars':      { classification: 'consumed', consumer: 'audioEngine.ts:setCountInBars / countInScheduler.ts', note: 'Phase 1K: recording count-in length (0=Off, 1, 2 bars) using the meter pulse layout; missing/unknown resolves to 0. Never moves notes or clips.' },
+  'meta.punchRecording':   { classification: 'consumed', consumer: 'audioEngine.ts:setPunchRecording / beginPunchRecording / punchCaptureWindow.ts', note: 'Phase 1L: bar/beat-anchored punch window. Capture starts at punch-in (after the count-in pre-roll) and stops at punch-out; the take is placed at the punch-in bar. Disabled/missing keeps ordinary recording. Never moves or deletes other clips.' },
   'meta.created':          { classification: 'metadata', note: 'Timestamp.' },
   'meta.updated':          { classification: 'metadata', note: 'Timestamp.' },
   'meta.version':          { classification: 'metadata', note: 'Display string.' },

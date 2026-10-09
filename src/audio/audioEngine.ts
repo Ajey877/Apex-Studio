@@ -2,6 +2,8 @@ import { beatsPerBar, stepsPerBar, stepsToBeats, beatsToSeconds, SIXTEENTH_STEPS
 import { DEFAULT_SEVEN_EIGHT_GROUPING, isSevenEightGrouping, resolveMeterPulseLayout, resolveMetronomeClickLevel, type MeterPulseLayout, type SevenEightGrouping } from '../music/meterPulse';
 import { captureBarNumbers, planCountInCapturePosition, resolveCountInBars, type CountInBars } from '../music/countIn';
 import { CountInCancelledError, CountInScheduler, type CountInClickHandle, type CountInResult } from './countInScheduler';
+import { DEFAULT_PUNCH_RECORDING, planPunchCapture, resolvePunchRecording, type PunchCapturePlan, type PunchRecordingSettings } from '../music/punchRecording';
+import { PunchCancelledError, PunchCaptureWindow, type PunchWindowResult } from './punchCaptureWindow';
 import { scheduleMetronomeClick } from './metronomeClick';
 import { arpStepSeconds, resolveArpNoteDurationSteps, resolveArpRateSteps } from './noteGate';
 
@@ -463,7 +465,32 @@ export interface RecordingCountInResult extends CountInResult {
   readonly clipStartBar: number;
 }
 
-export { CountInCancelledError };
+export { CountInCancelledError, PunchCancelledError };
+
+/**
+ * Phase 1L — one armed punch take.
+ *
+ * The engine runs the SAME count-in scheduler Phase 1K introduced, but plans it
+ * backwards from the punch-in: the pre-roll occupies the bars immediately
+ * before punch-in, so the count-in's capture moment IS the punch-in and no
+ * pre-roll audio can enter the take. `phase` distinguishes the two halves of
+ * the take because their cancellation rules differ — a stop or a seek kills
+ * either, while the arrangement running out only kills a take that has not
+ * started capturing yet (an armed window already ends at the project end).
+ */
+export interface PunchRecordingSession {
+  /** The musical window that was armed, including the project-end rule. */
+  readonly plan: PunchCapturePlan;
+  /** Audio-clock moment capture began (the punch-in moment). */
+  readonly captureTime: number;
+  /**
+   * Resolves exactly when capture must stop (punch-out) and rejects with
+   * `PunchCancelledError` when the take is aborted. The caller owns the
+   * recorder: it starts `RecordingEngine` after the session resolves and stops
+   * it when `punchOut` resolves.
+   */
+  readonly punchOut: Promise<PunchWindowResult>;
+}
 
 class AudioEngine {
   public isOfflineRendering = false;
@@ -3376,6 +3403,17 @@ class AudioEngine {
    */
   private countInBars: CountInBars = 0;
   private countInScheduler: CountInScheduler | null = null;
+  /**
+   * Phase 1L — punch-in / punch-out recording.
+   *
+   * `punchRecording` is the persisted project setting (`meta.punchRecording`,
+   * bar/beat anchored). The capture window owns only the punch-out stop moment;
+   * capture itself stays in the one `RecordingEngine` path and the pre-roll
+   * stays in the one `CountInScheduler`.
+   */
+  private punchRecording: PunchRecordingSettings = DEFAULT_PUNCH_RECORDING;
+  private punchWindow: PunchCaptureWindow | null = null;
+  private activePunchTake: { plan: PunchCapturePlan; phase: 'pre-roll' | 'capture' } | null = null;
   private isPlaying: boolean = false;
   private timerId: ReturnType<typeof setTimeout> | null = null;
   private currentStep: number = 0;
@@ -3403,6 +3441,10 @@ class AudioEngine {
     // place — the musical capture position is unchanged, only its wall-clock
     // moment moves. Stale scheduled clicks are stopped inside the scheduler.
     this.countInScheduler?.retime(this.bpm);
+    // Phase 1L: the same rule for an armed punch take — the punched length is
+    // musical, so the remaining beats are re-measured at the new tempo instead
+    // of the take being cut short (or over-run) by the change.
+    this.punchWindow?.retime(this.bpm);
   }
 
   /**
@@ -3422,6 +3464,12 @@ class AudioEngine {
     if (this.transport) {
       this.transport.setTimeSignature(resolved);
     }
+    // Phase 1L: punch positions are bar-anchored, so a meter change moves the
+    // moment the user chose. A punch take planned under the old meter would
+    // capture the wrong bars, so it is aborted (and the UI says so) rather than
+    // silently re-targeted. This runs before the count-in restart below, which
+    // then finds nothing to restart.
+    this.cancelPunchRecording();
     // Phase 1K: "N bars" of count-in no longer describes the same musical
     // length after a meter change, so the count-in restarts under the new
     // bar grid from the change point (its waiting promise survives).
@@ -3611,6 +3659,198 @@ class AudioEngine {
       clearTimer,
     });
     return this.countInScheduler;
+  }
+
+  // --- Phase 1L: punch-in / punch-out recording ----------------------------
+
+  /**
+   * Phase 1L — the persisted punch setting, published like the count-in.
+   * Missing or malformed values resolve to the disabled default, so a project
+   * saved before Phase 1L keeps recording ordinary takes.
+   */
+  public setPunchRecording(settings: unknown): void {
+    if (this.shouldBlockLiveMutation()) return;
+    this.punchRecording = resolvePunchRecording({ punchRecording: settings });
+  }
+
+  public getPunchRecording(): PunchRecordingSettings {
+    return this.punchRecording;
+  }
+
+  public isPunchRecordingEnabled(): boolean {
+    return this.punchRecording.enabled;
+  }
+
+  /** True while a punch take is counting in or capturing. */
+  public isPunchTakeActive(): boolean {
+    return this.activePunchTake !== null;
+  }
+
+  /** The punch window currently being captured, or null. */
+  public getActivePunchPlan(): PunchCapturePlan | null {
+    return this.activePunchTake?.plan ?? null;
+  }
+
+  /**
+   * Phase 1L — plans a punch take without arming anything.
+   *
+   * The same pure policy the UI validates with (`src/music/punchRecording.ts`),
+   * read against the engine's live tempo, meter and 7/8 grouping so the plan
+   * the recorder arms is the plan the transport and the count-in will execute.
+   * Throws `RangeError` for an invalid window instead of planning a take of the
+   * wrong music.
+   */
+  public planPunchTake(options: { settings?: unknown; countInBars?: unknown; totalBars?: number } = {}): PunchCapturePlan {
+    const settings = resolvePunchRecording({ punchRecording: options.settings ?? this.punchRecording });
+    return planPunchCapture({
+      settings,
+      meter: this.meter,
+      grouping: this.sevenEightGrouping,
+      totalBars: Number.isFinite(options.totalBars) && (options.totalBars as number) > 0
+        ? (options.totalBars as number)
+        : 0,
+      countInBars: options.countInBars ?? this.countInBars,
+      bpm: this.bpm,
+    });
+  }
+
+  /**
+   * Phase 1L — arms one punch take: pre-roll first, capture second, punch-out
+   * scheduled.
+   *
+   * The pre-roll is the existing Phase 1K count-in, planned BACKWARDS from the
+   * punch-in (`startBeat = punchIn - countInBeats`), so the scheduler's capture
+   * moment is exactly the punch-in. `RecordingEngine.start()` must only run
+   * after the returned promise resolves — that is what keeps count-in clicks and
+   * any other pre-roll audio out of the take. `punchOut` then resolves at the
+   * punch-out moment, where the caller stops capture.
+   *
+   * Lifecycle guarantees:
+   *   - a stale take is cancelled before a new one is armed, and a second
+   *     `beginRecordingCountIn` while one runs still throws, so a double-pressed
+   *     Record can never arm two recorders or two stop moments;
+   *   - the playhead is moved to the pre-roll start, so the transport position
+   *     and the take's musical position agree (this runs BEFORE anything is
+   *     armed, because `seek()` cancels count-ins and punch takes);
+   *   - `stop()`, `pause()`, `seek()` and `cancelPunchRecording()` abort both
+   *     phases: pending count-in clicks are silenced, the stop moment is
+   *     cleared and the waiting promise rejects (no take, no partial offset);
+   *   - a tempo change re-times the remaining pre-roll and the remaining punch
+   *     window in place, preserving both musical lengths;
+   *   - a meter change aborts the take: `meta.punchRecording` is bar-anchored,
+   *     so bar 9 beat 1 now means a different moment, and the capture position
+   *     the user chose no longer exists. Cancelling is the only honest answer;
+   *   - the arrangement running out aborts a take that has not started
+   *     capturing; an armed capture window already ends at the project end.
+   */
+  public beginPunchRecording(options: { settings?: unknown; countInBars?: unknown; totalBars?: number } = {}): Promise<PunchRecordingSession> {
+    if (this.shouldBlockLiveMutation()) {
+      return Promise.reject(new Error('Recording is unavailable while an offline render is running'));
+    }
+    const settings = resolvePunchRecording({ punchRecording: options.settings ?? this.punchRecording });
+    if (!settings.enabled) {
+      return Promise.reject(new Error('Punch recording is off: enable it before starting a punch take'));
+    }
+    let plan: PunchCapturePlan;
+    try {
+      plan = planPunchCapture({
+        settings,
+        meter: this.meter,
+        grouping: this.sevenEightGrouping,
+        totalBars: Number.isFinite(options.totalBars) && (options.totalBars as number) > 0
+          ? (options.totalBars as number)
+          : 0,
+        countInBars: options.countInBars ?? this.countInBars,
+        bpm: this.bpm,
+      });
+    } catch (error) {
+      return Promise.reject(error instanceof Error ? error : new Error('Invalid punch recording range'));
+    }
+    if (!this.ctx) this.init();
+    const ctx = this.ctx;
+    if (!ctx) return Promise.reject(new Error('Audio context unavailable for punch recording'));
+    if (ctx.state === 'suspended') void ctx.resume();
+
+    // Drop any stale take (and its count-in / stop moment) before arming.
+    this.cancelPunchRecording();
+    // Park the playhead at the pre-roll start so the transport and the take
+    // agree on position. Must happen before arming: seek() cancels takes.
+    if (plan.countInStartBeat > 1e-9 && this.transport) {
+      this.seek(beatsToSeconds(plan.countInStartBeat, this.bpm));
+    }
+
+    const take: { plan: PunchCapturePlan; phase: 'pre-roll' | 'capture' } = { plan, phase: 'pre-roll' };
+    this.activePunchTake = take;
+    const scheduler = this.ensureCountInScheduler();
+    const started = scheduler.start({
+      bars: plan.countInBars,
+      layout: this.getMetronomePulseLayout(),
+      bpm: this.bpm,
+      startBeat: plan.countInStartBeat,
+    });
+    // A count-in that never reaches capture (stop/seek/cancel) leaves no armed
+    // take behind. This handler only clears bookkeeping; the caller's await on
+    // the returned promise still sees the rejection.
+    void started.catch(() => {
+      if (this.activePunchTake === take) this.activePunchTake = null;
+    });
+
+    return started.then(result => {
+      if (this.activePunchTake !== take) throw new PunchCancelledError();
+      take.phase = 'capture';
+      const punchOut = this.ensurePunchWindow().arm({
+        captureTime: result.captureTime,
+        durationBeats: plan.captureDurationBeats,
+        bpm: this.bpm,
+      });
+      // A take that reached its punch-out — or was cancelled — is finished, so
+      // the engine must stop reporting it as armed. `isPunchTakeActive()` is
+      // what the transport lifecycle checks, and a stale "armed" flag would
+      // make a later stop/seek cancel a take that no longer exists.
+      void punchOut.then(
+        () => { if (this.activePunchTake === take) this.activePunchTake = null; },
+        () => { if (this.activePunchTake === take) this.activePunchTake = null; },
+      );
+      return { plan, captureTime: result.captureTime, punchOut };
+    });
+  }
+
+  /**
+   * Phase 1L — aborts an armed punch take: pending pre-roll clicks are
+   * silenced, the punch-out moment is cleared and every waiting promise
+   * rejects. Idempotent, and a no-op for an ordinary (non-punch) count-in.
+   */
+  public cancelPunchRecording(): void {
+    if (!this.activePunchTake) return;
+    this.activePunchTake = null;
+    this.countInScheduler?.cancel();
+    this.punchWindow?.cancel();
+  }
+
+  /**
+   * The arrangement ran out before punch-in. Only a take that has not started
+   * capturing is cancelled: an armed capture window already ends at the project
+   * end, so cancelling it would discard a complete take.
+   */
+  private cancelPunchPreRoll(): void {
+    if (this.activePunchTake?.phase !== 'pre-roll') return;
+    this.cancelPunchRecording();
+  }
+
+  private ensurePunchWindow(): PunchCaptureWindow {
+    if (this.punchWindow) return this.punchWindow;
+    const scheduleTimer = (fn: () => void, delayMs: number): unknown =>
+      typeof window !== 'undefined' ? window.setTimeout(fn, delayMs) : setTimeout(fn, delayMs);
+    const clearTimer = (handle: unknown): void => {
+      if (typeof window !== 'undefined') window.clearTimeout(handle as number);
+      else clearTimeout(handle as ReturnType<typeof setTimeout>);
+    };
+    this.punchWindow = new PunchCaptureWindow({
+      now: () => this.ctx?.currentTime ?? 0,
+      setTimer: scheduleTimer,
+      clearTimer,
+    });
+    return this.punchWindow;
   }
 
   /** Musical position of the transport in quarter beats (0 when never played). */
@@ -4196,9 +4436,9 @@ class AudioEngine {
 
  public stop() {
   if (this.shouldBlockLiveMutation()) return;
-  // Phase 1K: a stop aborts any count-in — its capture moment no longer
-  // exists and every pending click must be silenced.
+  // Phase 1K/1L: a stop aborts any count-in and any armed punch take.
   this.cancelRecordingCountIn();
+  this.cancelPunchRecording();
   this.isPlaying = false;
   this.playbackGeneration++;
   this.stopMasterMeasurementPump();
@@ -4231,6 +4471,8 @@ class AudioEngine {
     // toward, so the count-in aborts exactly like a stop (pending clicks
     // silenced, waiting recorder cancelled).
     this.cancelRecordingCountIn();
+    // Phase 1L: a paused transport has no punch-in or punch-out to reach.
+    this.cancelPunchRecording();
     if (!this.isPlaying || !this.transport) return;
     this.playbackGeneration++;
     this.stopActivePlaybackAudio();
@@ -4253,8 +4495,9 @@ class AudioEngine {
    */
   public seek(positionSeconds: number): void {
     if (this.shouldBlockLiveMutation()) return;
-    // Phase 1K: a seek aborts any in-flight count-in.
+    // Phase 1K/1L: a seek aborts an in-flight count-in or armed punch take.
     this.cancelRecordingCountIn();
+    this.cancelPunchRecording();
     const transport = this.transport;
     if (!transport || !this.ctx) return;
     const boundedPosition = this.boundSeekPosition(positionSeconds);
@@ -4263,9 +4506,8 @@ class AudioEngine {
       this.stopActivePlaybackAudio();
     }
     transport.seek(boundedPosition);
-    // Seeking jumps the programme position, so blocks before and after it do
-    // not belong to one measurement; discard the session instead of averaging
-    // two unrelated positions into one "integrated" figure.
+    // A seek jumps the programme position: discard the session rather than
+    // average two unrelated positions into one "integrated" figure.
     this.resetMasterMeasurement();
     this.syncEnginePositionFromTransport();
 
@@ -4451,6 +4693,10 @@ class AudioEngine {
     // Phase 1K: the arrangement ended — any count-in would capture past the
     // song's end at a stale offset.
     this.cancelRecordingCountIn();
+    // Phase 1L: only a take still counting in is abandoned here. A take already
+    // capturing has a punch-out that is the project end by definition, so it
+    // completes normally instead of throwing away a finished take.
+    this.cancelPunchPreRoll();
     this.playbackGeneration++;
     this.stopActivePlaybackAudio();
     this.isPlaying = false;
