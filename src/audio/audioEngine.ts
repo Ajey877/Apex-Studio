@@ -6,6 +6,7 @@ import { DEFAULT_PUNCH_RECORDING, planPunchCapture, resolvePunchRecording, type 
 import { PunchCancelledError, PunchCaptureWindow, type PunchWindowResult } from './punchCaptureWindow';
 import { scheduleMetronomeClick } from './metronomeClick';
 import { arpStepSeconds, resolveArpNoteDurationSteps, resolveArpRateSteps } from './noteGate';
+import { resolveInaudibleTakeClipIds } from './takeLaneManager';
 
 import { 
   Channel, 
@@ -555,6 +556,8 @@ class AudioEngine {
   private activeClipChannelVolumes: Map<AudioBufferSourceNode, { channelId: string; baseVolume: number; gainNode: GainNode }> = new Map();
   /** Playlist lane rows muted for the active take; enforced before clips reach their mixer insert. */
   private playlistLaneMutes: Set<number> = new Set();
+  /** Phase 1M — clip IDs of take-group members that are not the active take. Refreshed when clips change. */
+  private inaudibleTakeClipIds: Set<string> | null = null;
   private sampleBuffers: Map<string, AudioBuffer> = new Map();
   /** Project-owned ids are replaced atomically at the project replacement boundary. */
   private projectOwnedSampleBufferIds: Set<string> = new Set();
@@ -864,6 +867,23 @@ class AudioEngine {
     if (laneMutes.size === 0) return false;
     if (!Number.isFinite(clip.trackIndex)) return false;
     return laneMutes.has(Math.floor(clip.trackIndex));
+  }
+
+  /**
+   * Phase 1M — true when a clip is part of a take group but is not the active
+   * take. Inactive takes are silent during playback and export, so the
+   * musician hears only the selected comp. Clips without a `takeGroupId` are
+   * never inaudible by this rule.
+   */
+  private isClipTakeInactive(clip: PlaylistClip): boolean {
+    if (!clip.takeGroupId) return false;
+    if (!this.inaudibleTakeClipIds) return false;
+    return this.inaudibleTakeClipIds.has(clip.id);
+  }
+
+  /** Phase 1M — refreshes the set of inaudible take-clip IDs from the current active clips. */
+  private refreshInaudibleTakeClipIds(): void {
+    this.inaudibleTakeClipIds = resolveInaudibleTakeClipIds(this.activeClips);
   }
 
   public getOrCreateMixerChannel(trackId: number) {
@@ -2746,8 +2766,10 @@ class AudioEngine {
       // the export up front instead of rendering a misleading silent WAV.
       // Phase 10A: lane-muted clips are silently dropped, so their missing
       // buffers must not fail the export — only audible clips are validated.
+      // Phase 1M: inactive takes are silently dropped like muted-lane clips.
+      const offlineInaudibleTakes = resolveInaudibleTakeClipIds(clips);
       for (const clip of clips) {
-        if (clip.type === 'audio' && !clip.mute && !this.isClipPlaylistLaneMuted(clip, offlineLaneMutes)) {
+        if (clip.type === 'audio' && !clip.mute && !this.isClipPlaylistLaneMuted(clip, offlineLaneMutes) && !offlineInaudibleTakes.has(clip.id)) {
           if (!clip.audioBufferId) {
             throw new Error(
               `Audio clip "${clip.name || clip.audioName || clip.id}" is missing an audioBufferId.`
@@ -2878,6 +2900,7 @@ class AudioEngine {
           this.activeClipChannelVolumes = new Map();
           this.activeChannels = structuredClone(channels);
           this.activeClips = structuredClone(clips);
+          this.refreshInaudibleTakeClipIds();
           this.playbackProjectChannels = structuredClone(channels);
           this.playbackProjectMixerTracks = [];
           this.activePlayMode = renderScope === 'pattern' ? 'pat' : 'song';
@@ -3003,6 +3026,7 @@ class AudioEngine {
         this.isPlaying = previous.isPlaying;
         this.activeChannels = previous.activeChannels;
         this.activeClips = previous.activeClips;
+        this.refreshInaudibleTakeClipIds();
         this.activeMixerTracks = previous.activeMixerTracks;
         this.playbackProjectChannels = previous.playbackProjectChannels;
         this.playbackProjectMixerTracks = previous.playbackProjectMixerTracks;
@@ -3122,6 +3146,7 @@ class AudioEngine {
       const channelClips = clips.filter(clip => {
         if (clip.mute) return false;
         if (this.isClipPlaylistLaneMuted(clip, stemLaneMutes)) return false;
+        if (this.isClipTakeInactive(clip)) return false;
         if (clip.type === 'pattern') {
           return clip.channelId === channel.id;
         }
@@ -3187,6 +3212,7 @@ class AudioEngine {
         const wetClips = clips.filter(clip => {
           if (clip.mute) return false;
           if (this.isClipPlaylistLaneMuted(clip, stemLaneMutes)) return false;
+          if (this.isClipTakeInactive(clip)) return false;
           if (clip.type === 'pattern' || clip.type === 'audio') {
             return !!clip.channelId && sourceChannelIds.has(clip.channelId);
           }
@@ -3260,6 +3286,7 @@ class AudioEngine {
         clip.type === 'audio' &&
         !clip.mute &&
         !this.isClipPlaylistLaneMuted(clip, stemLaneMutes) &&
+        !this.isClipTakeInactive(clip) &&
         (!clip.channelId || !channelIds.has(clip.channelId))
     );
 
@@ -3276,6 +3303,7 @@ class AudioEngine {
       const trackAutomationClips = clips.filter(clip => {
         if (clip.mute || clip.type !== 'automation' || !clip.automationTarget) return false;
         if (this.isClipPlaylistLaneMuted(clip, stemLaneMutes)) return false;
+        if (this.isClipTakeInactive(clip)) return false;
         return this.automationClipTargetsMixerTrack(clip, mixerTrackId);
       });
 
@@ -4186,6 +4214,7 @@ class AudioEngine {
       // resize, split and delete edits visible to the next scheduled step.
       this.resetAutomationTargetsForClipChanges(this.activeClips, update.clips);
       this.activeClips = structuredClone(update.clips);
+      this.refreshInaudibleTakeClipIds();
       if (this.activePlayMode === 'song') {
         // A clip edit moves the arrangement's real end; the running take must
         // stop at the new end instead of a stale one.
@@ -4335,6 +4364,7 @@ class AudioEngine {
     this.isPlaying = true;
     this.activeChannels = playbackSnapshot.channels;
     this.activeClips = playbackSnapshot.clips;
+    this.refreshInaudibleTakeClipIds();
     this.activeMixerTracks = playbackSnapshot.mixerTracks;
     this.playlistLaneMutes = this.derivePlaylistLaneMutes(playlistTracks);
     this.playbackProjectChannels = structuredClone(playbackSnapshot.channels);
@@ -4636,6 +4666,7 @@ class AudioEngine {
     const now = ctx.currentTime;
     for (const clip of this.activeClips) {
       if (clip.type !== 'audio' || clip.mute) continue;
+      if (this.isClipTakeInactive(clip)) continue;
       if (!this.isAudioClipChannelAudible(clip)) continue;
       if (laneIndex === undefined) {
         if (this.isPlaylistLaneMuted(clip)) continue;
@@ -4657,6 +4688,7 @@ class AudioEngine {
     const now = ctx.currentTime;
     for (const clip of this.activeClips) {
       if (clip.type !== 'audio' || clip.mute || clip.channelId !== channelId) continue;
+      if (this.isClipTakeInactive(clip)) continue;
       if (this.isPlaylistLaneMuted(clip) || !this.isAudioClipChannelAudible(clip)) continue;
       if (!Number.isFinite(clip.startBar) || !Number.isFinite(clip.lengthBars) || clip.lengthBars <= 0) continue;
       const startSeconds = clip.startBar * this.currentStepsPerBar * stepDurationSeconds;
@@ -4831,6 +4863,7 @@ class AudioEngine {
             currentGlobalStep === clipStartStep &&
             !clip.mute &&
             !this.isPlaylistLaneMuted(clip) &&
+            !this.isClipTakeInactive(clip) &&
             this.isAudioClipChannelAudible(clip)
           ) {
             // Trigger audio clip at its start bar

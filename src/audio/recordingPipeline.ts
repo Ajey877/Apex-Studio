@@ -200,3 +200,85 @@ export const createPunchRecordingPlaylistClip = (
     ? clip
     : { ...clip, startBar, lengthBars };
 };
+
+// --- Phase 1M: take-lane recording clip creation ----------------------------
+
+import { nextTakeIndexForGroup } from './takeLaneManager';
+
+/**
+ * Phase 1M — creates a playlist clip for a new recording take that belongs to
+ * an existing take group, or starts a new group.
+ *
+ * The clip is placed at the same position as the existing takes (or at a
+ * caller-supplied position for a new group). The `takeIndex` is computed from
+ * the existing group clips so it is always unique. The new clip becomes the
+ * active take automatically, so the musician hears the most recent recording
+ * immediately after capture.
+ *
+ * When `takeGroupId` is `undefined`, a new group is created and the clip
+ * starts as take 0. When a `takeGroupId` is supplied, the clip joins that
+ * group and its `takeIndex` is set to the next available value.
+ *
+ * The function is pure: it creates the clip but does not mutate the existing
+ * clips array. Callers are responsible for updating the active take on every
+ * clip in the group via `selectActiveTake` or by setting `activeTakeIndex`.
+ */
+export const createTakeRecordingPlaylistClip = (
+  recording: AudioRecording,
+  registration: RecordingBufferRegistration,
+  tracks: PlaylistTrack[],
+  targetTrackIndex: number,
+  placement: PunchClipPlacement,
+  takeGroupId: string | undefined,
+  existingClips: readonly PlaylistClip[] = [],
+  id = `take-clip-${Date.now()}`,
+  totalBars?: number
+): PlaylistClip => {
+  // Create the base clip using the existing punch placement logic
+  const baseClip = createPunchRecordingPlaylistClip(
+    recording,
+    registration,
+    tracks,
+    targetTrackIndex,
+    placement,
+    id,
+    totalBars
+  );
+
+  if (!takeGroupId) {
+    // New group: take 0, active
+    return {
+      ...baseClip,
+      takeGroupId: `take-group-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      takeIndex: 0,
+      activeTakeIndex: 0,
+    };
+  }
+
+  // Existing group: compute next takeIndex, mark as active
+  const nextIndex = nextTakeIndexForGroup(existingClips, takeGroupId);
+  return {
+    ...baseClip,
+    takeGroupId,
+    takeIndex: nextIndex,
+    activeTakeIndex: nextIndex,
+  };
+};
+
+/**
+ * Phase 1M — given a set of clips and a takeGroupId, updates `activeTakeIndex`
+ * on every clip in the group to the specified take. Returns the full clip
+ * array with the selection applied. This is the persistence-safe way to
+ * change take selection: it goes through the normal clip publication path.
+ */
+export const applyTakeSelectionToClips = (
+  clips: readonly PlaylistClip[],
+  takeGroupId: string,
+  activeTakeIndex: number
+): PlaylistClip[] => {
+  return clips.map(clip => {
+    if (clip.takeGroupId !== takeGroupId) return clip;
+    if (clip.activeTakeIndex === activeTakeIndex) return clip;
+    return { ...clip, activeTakeIndex: activeTakeIndex };
+  });
+};
