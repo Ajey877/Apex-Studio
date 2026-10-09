@@ -14,8 +14,8 @@ export const getRecordingAudioBufferId = (recordingId: string): string => {
 };
 
 /**
- * Phase 1F: recording bar timing derives from the resolved project meter — a
- * 3/4 bar lasts 3 beats (1.5 s at 120 BPM), not 4. Missing/unsupported meters
+ * Phase 1F/1I: recording bar timing derives from the resolved project meter —
+ * 3/4 lasts 1.5 s and 7/8 lasts 1.75 s at 120 BPM. Missing/unsupported meters
  * resolve to the legacy 4/4 bar, exactly like the rest of the runtime.
  */
 export const getRecordingLengthBars = (durationSeconds: number, bpm: number, meter: TimeSignature = LEGACY_TIME_SIGNATURE): number => {

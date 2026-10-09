@@ -8,7 +8,7 @@
  * NaN/Infinity propagation is intentional: this layer must not silently repair
  * malformed legacy input or introduce exceptions into existing scheduling.
  * Meter validation is explicit because meter arithmetic is a new API.
- * Phase 1F: runtime consumers resolve the project meter through
+ * Phase 1F/1I: runtime consumers resolve the project meter through
  * `resolveProjectTimeSignature()` (supported meters run at their own bar size;
  * missing/unsupported metadata keeps the LEGACY_TIME_SIGNATURE 4/4 grid).
  *
@@ -54,7 +54,7 @@ export const millisecondsToSeconds = (milliseconds: number): Seconds => millisec
 export const bpmToMicrosecondsPerQuarter = (bpm: number): number => 60_000_000 / bpm;
 
 /**
- * Phase 1F — meters the runtime executes truthfully at their own bar size.
+ * Phase 1F/1I — meters the runtime executes truthfully at their own bar size.
  *
  * `stepsPerBar(meter)` of one of these values is the authoritative runtime bar
  * size for transport, pattern/song playback, playlist scheduling, offline
@@ -63,15 +63,14 @@ export const bpmToMicrosecondsPerQuarter = (bpm: number): number => 60_000_000 /
  *   [4, 4]  16 sixteenth-note steps per bar (the legacy grid);
  *   [3, 4]  12 sixteenth-note steps per bar (3 quarter-note beats);
  *   [6, 8]  MECHANICAL support only: 12 sixteenth-note steps per bar, three
- *           quarter-note beats. There is deliberately NO dotted-quarter beat
- *           grouping, NO 2+3/3+2 subdivision and NO compound beat display —
- *           the runtime treats it as a 12-step bar until a future phase adds
- *           true compound-meter behaviour.
+ *           quarter-note beats. Existing 6/8 behavior deliberately has no
+ *           dotted-quarter grouping, 2+3/3+2 subdivision or compound display;
+ *   [7, 8]  14 sixteenth-note steps per bar (3.5 quarter-note beats), with
+ *           seven eighth-note beats in the TransportBar display.
  *
- * Every other stored meter ([7, 8], [5, 4], [2, 4], …) is explicitly DEFERRED:
- * irregular beat grouping is not implemented and the Phase 1A pinned MIDI
- * contract still requires the legacy grid for them, so they resolve to the
- * documented [4, 4] legacy behaviour instead of being half-truthful.
+ * Other stored meters ([5, 4], [2, 4], …) remain deferred and resolve to the
+ * documented [4, 4] legacy behavior rather than entering a partially supported
+ * runtime grid. The 7/8 MIDI layout is updated with its supported 14-step bar.
  */
 export const isRuntimeSupportedMeter = (candidate: unknown): candidate is TimeSignature => {
   if (!Array.isArray(candidate) || candidate.length !== 2) return false;
@@ -80,17 +79,19 @@ export const isRuntimeSupportedMeter = (candidate: unknown): candidate is TimeSi
   if (numerator === 4 && denominator === 4) return true;
   if (numerator === 3 && denominator === 4) return true;
   if (numerator === 6 && denominator === 8) return true;
+  if (numerator === 7 && denominator === 8) return true;
   return false;
 };
 
 /**
- * Phase 1F — the single meter resolution authority.
+ * Phase 1F/1I — the single meter resolution authority.
  *
  * Returns the project's actual runtime `TimeSignature`: the stored value when
  * it is a supported meter, otherwise the [4, 4] legacy fallback. Missing or
  * legacy metadata (no `timeSignature` field at all) therefore keeps behaving
- * exactly like 4/4 — the pre-Phase-1F behaviour — and unsupported values can
- * never put the runtime on a half-implemented grid.
+ * exactly like 4/4 — the pre-Phase-1F behavior — and unsupported values can
+ * never put the runtime on a half-implemented grid. Supported meters are
+ * 4/4, 3/4, mechanical 6/8, and 7/8.
  *
  * Pure: never mutates the supplied metadata and never touches pattern data
  * (`Pattern.lengthSteps` stays an absolute step quantity regardless of meter).

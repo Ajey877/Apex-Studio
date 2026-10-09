@@ -338,10 +338,10 @@ function createSeededRandom(seed: number): () => number {
  * `patternLengthSteps` overrides content when supplied (Pattern mode uses the
  * declared pattern length; Song mode / bounce leave it undefined).
  *
- * Phase 1F: `meter` sets the bar size the extent rounds up to — 16 steps for
- * the default legacy 4/4, 12 for a resolved 3/4 or 6/8 project. A DECLARED
- * pattern length in a non-legacy meter is kept as an absolute step quantity
- * (never re-rounded onto the new bar grid), because `Pattern.lengthSteps`
+ * Phase 1F/1I: `meter` sets the bar size the extent rounds up to — 16 steps
+ * for the default legacy 4/4, 12 for 3/4 or mechanical 6/8, and 14 for 7/8.
+ * A DECLARED pattern length in a non-legacy meter is kept as an absolute step
+ * quantity (never re-rounded onto the new bar grid), because `Pattern.lengthSteps`
  * must not be silently reinterpreted when the meter changes.
  */
 export function resolvePlayableContentLengthSteps(
@@ -3362,13 +3362,13 @@ class AudioEngine {
   }
 
   /**
-   * Phase 1F — publish the project's time signature to the runtime.
+   * Phase 1F/1I — publish the project's time signature to the runtime.
    *
    * The value goes through the single meter resolution authority, so missing
    * or unsupported metadata keeps the legacy 4/4 grid and a supported meter
-   * (3/4, 6/8) becomes the truthful bar size for playback, scheduling,
-   * offline render and bounce. The running transport remaps its bar grid in
-   * place; the next take also receives the meter in `play()`.
+   * (3/4, mechanical 6/8, or 7/8) becomes the truthful bar size for playback,
+   * scheduling, offline render and bounce. The running transport remaps its
+   * bar grid in place; the next take also receives the meter in `play()`.
    */
   public setTimeSignature(meter: TimeSignature | readonly [number, number] | undefined) {
     if (this.shouldBlockLiveMutation()) return;

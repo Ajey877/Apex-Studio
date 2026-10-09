@@ -175,12 +175,13 @@ test('TEST D: 3/4 at 120 BPM — the song time uses 3-beat bars (Phase 1F meter 
 });
 
 // ---------------------------------------------------------------------------
-// TEST E — deferred meters keep the documented 4/4 readout
+// TEST E — 7/8 song time uses its 3.5 quarter-note beats per bar
 // ---------------------------------------------------------------------------
 
-test('TEST E: a deferred meter (7/8) resolves to the documented 4/4 song time', () => {
+test('TEST E: 7/8 at 120 BPM — the song-time cell advances by 1.75 seconds per bar', () => {
   const meta78 = metaWith({ timeSignature: [7, 8] });
-  assert.equal(songTimeOf({ currentBar: 2, currentStep: 0, meta: meta78 }), '00:02:00');
+  assert.equal(songTimeOf({ currentBar: 2, currentStep: 0, meta: meta78 }), '00:01:75');
+  assert.equal(songTimeOf({ currentBar: 2, currentStep: 12, meta: meta78 }), '00:03:25');
 });
 
 // ---------------------------------------------------------------------------
@@ -210,10 +211,43 @@ test('TEST F: the song time never runs backwards inside a bar and advances one b
 // TEST G — isolation: the bar.beat.step position cell is unchanged
 // ---------------------------------------------------------------------------
 
-test('TEST G: the Bar position cell keeps its Phase 1F behaviour (not touched by this fix)', () => {
+test('TEST G: the Bar position cell keeps its existing 4/4 and 3/4 behavior', () => {
   assert.equal(barPositionOf({ currentBar: 2, currentStep: 5 }), '02.2.2');
   assert.equal(
     barPositionOf({ currentBar: 2, currentStep: 4, meta: metaWith({ timeSignature: [3, 4] }) }),
     '02.2.1',
   );
+});
+
+test('Phase 1I: 7/8 displays seven eighth-note beats with two sixteenth subdivisions each', () => {
+  const meta78 = metaWith({ timeSignature: [7, 8] });
+  const expected = [
+    '01.1.1', '01.1.2',
+    '01.2.1', '01.2.2',
+    '01.3.1', '01.3.2',
+    '01.4.1', '01.4.2',
+    '01.5.1', '01.5.2',
+    '01.6.1', '01.6.2',
+    '01.7.1', '01.7.2',
+  ];
+  expected.forEach((position, currentStep) => {
+    assert.equal(
+      barPositionOf({ currentBar: 1, currentStep, meta: meta78 }),
+      position,
+      `7/8 step ${currentStep}`,
+    );
+  });
+  assert.equal(barPositionOf({ currentBar: 2, currentStep: 0, meta: meta78 }), '02.1.1');
+  assert.equal(barPositionOf({ currentBar: 1, currentStep: 14, meta: meta78 }), '01.1.1');
+  assert.equal(barPositionOf({ currentBar: 1, currentStep: 15, meta: meta78 }), '01.1.2');
+});
+
+test('Phase 1I: mechanical 6/8 keeps its existing three quarter-note-beat display', () => {
+  const meta68 = metaWith({ timeSignature: [6, 8] });
+  assert.equal(barPositionOf({ currentBar: 1, currentStep: 0, meta: meta68 }), '01.1.1');
+  assert.equal(barPositionOf({ currentBar: 1, currentStep: 3, meta: meta68 }), '01.1.4');
+  assert.equal(barPositionOf({ currentBar: 1, currentStep: 4, meta: meta68 }), '01.2.1');
+  assert.equal(barPositionOf({ currentBar: 1, currentStep: 8, meta: meta68 }), '01.3.1');
+  assert.equal(barPositionOf({ currentBar: 1, currentStep: 11, meta: meta68 }), '01.3.4');
+  assert.equal(barPositionOf({ currentBar: 2, currentStep: 0, meta: meta68 }), '02.1.1');
 });

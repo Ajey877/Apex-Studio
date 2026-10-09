@@ -277,14 +277,18 @@ export const TransportBar: React.FC<TransportBarProps> = ({
     ]
   );
 
-  // Phase 1F: the beat slot is meter-aware — in 3/4 the transport never shows
-  // a beat 4. The beat is the step's quarter-note position inside the bar
-  // (the step counter wraps at the meter's bar size), wrapped by the beat
-  // count so a non-bar-aligned pattern loop cannot display a phantom beat.
-  // The 16th-note subdivision slot keeps its existing semantics unchanged.
-  const meterBeatsPerBar = beatsPerBar(resolveProjectTimeSignature(meta));
-  const formattedBeat = (Math.floor(currentStep / SIXTEENTH_STEPS_PER_BEAT) % meterBeatsPerBar) + 1;
-  const formatted16th = (currentStep % 4) + 1;
+  // Phase 1F/1I: keep the existing quarter-note beat display for 4/4, 3/4,
+  // and mechanical 6/8. In 7/8, display the seven eighth-note beats instead:
+  // each beat spans two sixteenth steps, and its subdivision is 1..2. Wrapping
+  // the beat index prevents a longer absolute pattern loop from showing a
+  // phantom eighth-note beat after the seven-beat bar.
+  const resolvedMeter = resolveProjectTimeSignature(meta);
+  const meterBeatsPerBar = beatsPerBar(resolvedMeter);
+  const isSevenEight = resolvedMeter[0] === 7 && resolvedMeter[1] === 8;
+  const stepsPerDisplayedBeat = isSevenEight ? SIXTEENTH_STEPS_PER_BEAT / 2 : SIXTEENTH_STEPS_PER_BEAT;
+  const displayedBeatsPerBar = isSevenEight ? 7 : meterBeatsPerBar;
+  const formattedBeat = (Math.floor(currentStep / stepsPerDisplayedBeat) % displayedBeatsPerBar) + 1;
+  const formatted16th = (currentStep % stepsPerDisplayedBeat) + 1;
 
   // Calculate song time string (e.g. 03:24:12)
   // Phase 1H: the Time cell is the wall-clock position of the displayed

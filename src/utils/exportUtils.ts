@@ -120,11 +120,11 @@ interface MidiEvent {
 const TICKS_PER_STEP = beatsToMidiTicks(stepsToBeats(1), DEFAULT_MIDI_PPQ);
 
 /**
- * Phase 1F — the arrangement grid follows the resolved project meter: steps
+ * Phase 1F/1I — the arrangement grid follows the resolved project meter: steps
  * per bar come from `stepsPerBar(meter)` (16 for legacy 4/4, 12 for 3/4 and
- * the mechanical 6/8), so an exported bar holds exactly as many steps as the
- * runtime plays. The time-signature meta event and the note layout therefore
- * describe the same meter.
+ * mechanical 6/8, 14 for 7/8), so an exported bar holds exactly as many steps
+ * as the runtime plays. At 480 PPQ, each 7/8 bar is 1,680 ticks. The
+ * time-signature meta event and note layout therefore describe the same meter.
  */
 const stepsPerBarFor = (meter: TimeSignature): number => stepsPerBar(resolveProjectTimeSignature({ timeSignature: meter }));
 const ticksPerBarFor = (meter: TimeSignature): number => stepsPerBarFor(meter) * TICKS_PER_STEP;

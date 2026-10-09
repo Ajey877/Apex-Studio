@@ -529,7 +529,7 @@ export function App() {
     audioEngine.setBpm(projectState.meta.bpm);
   }, [projectState.meta.bpm]);
 
-  // Phase 1F: publish the project meter to the runtime. The engine resolves
+  // Phase 1F/1I: publish the project meter to the runtime. The engine resolves
   // missing/unsupported values to the legacy 4/4 grid itself, so this is the
   // single source of truth for playback, offline render, bounce and seeking.
   useEffect(() => {
