@@ -57,7 +57,7 @@ export function resynchronizeLiveEngineFromProjectState(
   options: LiveEngineResynchronizationOptions,
 ): void {
   engine.setBpm(state.meta.bpm);
-  // Phase 1F: the meter is runtime state the same way tempo is — a render
+  // Phase 1F/1I: the meter is runtime state the same way tempo is — a render
   // lease release must re-publish it so the live take plays the project's
   // actual bar size (resolved to the legacy 4/4 grid when unsupported).
   engine.setTimeSignature(state.meta.timeSignature);

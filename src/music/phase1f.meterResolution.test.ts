@@ -1,11 +1,11 @@
 /**
- * Phase 1F — Truthful 3/4 time signature runtime: meter resolution authority,
+ * Phase 1F/1I — truthful project-meter runtime: meter resolution authority,
  * backward compatibility, recording timing, MIDI export parity and playlist
- * bar arithmetic.
+ * bar arithmetic. Phase 1I extends the same coverage to 7/8.
  *
- * Core invariant of this phase:
+ * Core invariant:
  *   For supported meters, `stepsPerBar(project.meta.timeSignature)` is the
- *   authoritative runtime bar size. 3/4 = 12 sixteenth-note steps per bar.
+ *   authoritative runtime bar size (3/4 = 12 steps; 7/8 = 14 steps).
  *   Missing/unsupported meter metadata resolves to legacy [4,4].
  *   `Pattern.lengthSteps` is an ABSOLUTE step quantity and is never
  *   reinterpreted when the meter changes (16 stays 16, never 16 -> 12).
@@ -82,12 +82,12 @@ describe('Phase 1F TEST N — meter resolution authority falls back to 4/4', () 
   it('explicit supported meters resolve to themselves', () => {
     assert.deepEqual(resolveProjectTimeSignature({ timeSignature: [4, 4] }), [4, 4]);
     assert.deepEqual(resolveProjectTimeSignature({ timeSignature: [3, 4] }), [3, 4]);
+    assert.deepEqual(resolveProjectTimeSignature({ timeSignature: [6, 8] }), [6, 8]);
+    assert.deepEqual(resolveProjectTimeSignature({ timeSignature: [7, 8] }), [7, 8]);
   });
 
   it('unsupported or malformed values fall back to [4,4]', () => {
-    // 7/8 is explicitly deferred in Phase 1F (no irregular grouping; the Phase 1A
-    // pinned MIDI contract also requires the legacy grid for it).
-    assert.deepEqual(resolveProjectTimeSignature({ timeSignature: [7, 8] }), [4, 4]);
+    assert.deepEqual(resolveProjectTimeSignature({ timeSignature: [5, 4] }), [4, 4]);
     assert.deepEqual(resolveProjectTimeSignature({ timeSignature: [3, 3] }), [4, 4]);
     assert.deepEqual(resolveProjectTimeSignature({ timeSignature: [0, 4] }), [4, 4]);
     assert.deepEqual(resolveProjectTimeSignature({ timeSignature: [-3, 4] }), [4, 4]);
@@ -101,16 +101,16 @@ describe('Phase 1F TEST N — meter resolution authority falls back to 4/4', () 
     const meta: { timeSignature?: unknown } = { timeSignature: [3, 4] };
     resolveProjectTimeSignature(meta);
     assert.deepEqual(meta, { timeSignature: [3, 4] });
-    const badMeta: { timeSignature?: unknown } = { timeSignature: [7, 8] };
+    const badMeta: { timeSignature?: unknown } = { timeSignature: [5, 4] };
     resolveProjectTimeSignature(badMeta);
-    assert.deepEqual(badMeta, { timeSignature: [7, 8] });
+    assert.deepEqual(badMeta, { timeSignature: [5, 4] });
   });
 
-  it('classifies runtime-supported meters explicitly (6/8 is mechanical, 7/8 deferred)', () => {
+  it('classifies runtime-supported meters explicitly (6/8 mechanical; 7/8 supported)', () => {
     assert.equal(isRuntimeSupportedMeter([4, 4]), true);
     assert.equal(isRuntimeSupportedMeter([3, 4]), true);
     assert.equal(isRuntimeSupportedMeter([6, 8]), true);
-    assert.equal(isRuntimeSupportedMeter([7, 8]), false);
+    assert.equal(isRuntimeSupportedMeter([7, 8]), true);
     assert.equal(isRuntimeSupportedMeter([5, 4]), false);
     assert.equal(isRuntimeSupportedMeter([2, 4]), false);
     assert.equal(isRuntimeSupportedMeter(undefined), false);
@@ -123,6 +123,12 @@ describe('Phase 1F TEST N — meter resolution authority falls back to 4/4', () 
     assert.deepEqual(restored.meta.timeSignature, [4, 4]);
     // and the resolver agrees on the raw stored shape
     assert.deepEqual(resolveProjectTimeSignature(legacy.meta as never), [4, 4]);
+  });
+
+  it('a persisted 7/8 project keeps its meter through project normalization', () => {
+    const project = createDefaultProjectState();
+    project.meta.timeSignature = [7, 8];
+    assert.deepEqual(normalizeProjectState(project).meta.timeSignature, [7, 8]);
   });
 });
 
@@ -153,10 +159,22 @@ describe('Phase 1F — 3/4 bar size arithmetic (steps and seconds)', () => {
     const meter = resolveProjectTimeSignature({ timeSignature: [6, 8] });
     assert.deepEqual(meter, [6, 8]);
     assert.equal(stepsPerBar(meter), 12);
-    // Mechanical support only: the model gives 3 quarter-note beats per bar.
-    // There is deliberately no dotted-quarter beat grouping and no compound
-    // beat display anywhere in the runtime.
+    // Mechanical support only: the model and existing display give 3
+    // quarter-note beats per bar, with no compound-beat grouping added here.
     assert.equal(beatsPerBar(meter), 3);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 1I — 7/8 resolves to a 14-step bar / 3.5 quarter-note beats
+// ---------------------------------------------------------------------------
+describe('Phase 1I — 7/8 meter arithmetic', () => {
+  it('a 7/8 bar is 14 sixteenth-note steps and lasts 1.75 seconds at 120 BPM', () => {
+    const meter = resolveProjectTimeSignature({ timeSignature: [7, 8] });
+    assert.equal(stepsPerBar(meter), 14);
+    assert.equal(beatsPerBar(meter), 3.5);
+    const seconds = beatsToSeconds(barsToBeats(1, meter), 120);
+    assert.equal(seconds, 1.75);
   });
 });
 
@@ -191,6 +209,9 @@ describe('Phase 1F TEST O — pattern length is never reinterpreted by the meter
     // A bar-aligned 3/4 length is accepted exactly.
     assert.equal(resolvePatternLoopLengthSteps([ch], 12, [3, 4]), 12);
     assert.equal(resolvePatternLoopLengthSteps([ch], 24, [3, 4]), 24);
+    // 7/8 uses its 14-step bar, but still preserves explicit non-legacy lengths.
+    assert.equal(resolvePatternLoopLengthSteps([ch], 14, [7, 8]), 14);
+    assert.equal(resolvePatternLoopLengthSteps([ch], 16, [7, 8]), 16);
     // 4/4 keeps its existing whole-bar rounding.
     assert.equal(resolvePatternLoopLengthSteps([ch], 16, [4, 4]), 16);
     assert.equal(resolvePatternLoopLengthSteps([ch], 40, [4, 4]), 48);
@@ -206,6 +227,14 @@ describe('Phase 1F — content extent uses the project bar size (Phase 1E rule i
     assert.equal(resolvePlayableContentLengthSteps(ch, undefined, [3, 4]), 24);
     const ch12 = mkChannel('ext12', { steps: Array(12).fill(false) });
     assert.equal(resolvePlayableContentLengthSteps(ch12, undefined, [3, 4]), 12);
+  });
+
+  it('rounds channel content to the 14-step 7/8 bar without reinterpreting declared steps', () => {
+    const ch14 = mkChannel('ext78', { steps: Array(14).fill(false) });
+    assert.equal(resolvePlayableContentLengthSteps(ch14, undefined, [7, 8]), 14);
+    const ch15 = mkChannel('ext78-plus-one', { steps: Array(15).fill(false) });
+    assert.equal(resolvePlayableContentLengthSteps(ch15, undefined, [7, 8]), 28);
+    assert.equal(resolvePlayableContentLengthSteps(ch14, 16, [7, 8]), 16);
   });
 
   it('note tails still do not expand the extent in 3/4', () => {
@@ -240,6 +269,10 @@ describe('Phase 1F — content extent uses the project bar size (Phase 1E rule i
 describe('Phase 1F TEST J — recording bar calculations use the project meter', () => {
   it('a 1.5 s take at 120 BPM in 3/4 is exactly 1 bar', () => {
     assert.equal(getRecordingLengthBars(1.5, 120, [3, 4]), 1);
+  });
+
+  it('a 1.75 s take at 120 BPM in 7/8 is exactly 1 bar', () => {
+    assert.equal(getRecordingLengthBars(1.75, 120, [7, 8]), 1);
   });
 
   it('a 6.0 s take at 120 BPM is 3 bars in 3/4 but 4 bars in 4/4', () => {
@@ -432,22 +465,36 @@ describe('Phase 1F TEST K/L — MIDI export agrees with the 3/4 runtime', () => 
     });
   });
 
-  it('deferred meters keep the Phase 1A legacy grid (7/8 pinned contract)', () => {
-    const ch = mkChannel('midi-78', { steps: [true, ...Array(15).fill(false)] });
-    const clip = mkClip('midi-78', 1, 1);
+  it('mechanical 6/8 keeps its existing 1,440-tick 12-step bar', () => {
+    const ch = mkChannel('midi-68', { steps: [true, ...Array(11).fill(false)] });
+    const clip = mkClip('midi-68', 1, 1);
+    const blob = buildStandardMidiFile(
+      [ch], [clip], { bpm: 120, timeSignature: [6, 8] }, { scope: 'song' }
+    );
+    return blob.arrayBuffer().then(ab => {
+      const decoded = decodeMidi(new Uint8Array(ab));
+      assert.equal(decoded.ticksPerQuarter, 480);
+      assert.deepEqual(decoded.tracks[0].timeSignature, { numerator: 6, denominator: 8 });
+      assert.equal(decoded.tracks[0].notes[0].tick, 1440);
+    });
+  });
+
+  it('7/8 song bars export as 1,680 ticks at 480 PPQ', () => {
+    const ch = mkChannel('midi-78', { steps: [true, ...Array(13).fill(false)] });
+    const clips = [mkClip('midi-78', 1, 1), mkClip('midi-78', 2, 1)];
     const blob = buildStandardMidiFile(
       [ch],
-      [clip],
+      clips,
       { bpm: 120, timeSignature: [7, 8] },
       { scope: 'song' }
     );
     return blob.arrayBuffer().then(ab => {
       const decoded = decodeMidi(new Uint8Array(ab));
       const track = decoded.tracks[0];
-      // The metadata still names the stored meter, but the note grid stays on
-      // the legacy 16-step bar because 7/8 is not a runtime-supported meter.
+      assert.equal(decoded.ticksPerQuarter, 480);
       assert.deepEqual(track.timeSignature, { numerator: 7, denominator: 8 });
-      assert.equal(track.notes[0].tick, 1920);
+      assert.deepEqual(track.notes.map(note => note.tick), [1680, 3360]);
+      assert.ok(!track.notes.some(note => note.tick === 1920), '7/8 must not retain a 1,920-tick 4/4 bar');
     });
   });
 
@@ -498,6 +545,12 @@ describe('Phase 1F — playlist clip operations use the project bar size', () =>
     const clip = mkClip('split-44', 0, 2);
     const [, right] = splitPlaylistClip(clip, 1, 0.25, {});
     assert.equal(right.offsetSteps, 16);
+  });
+
+  it('splitting a 7/8 clip advances offsetSteps by 14 steps per bar', () => {
+    const clip = mkClip('split-78', 0, 2);
+    const [, right] = splitPlaylistClip(clip, 1, 0.25, {}, [7, 8]);
+    assert.equal(right.offsetSteps, 14);
   });
 
   it('left-resize credits offsetSteps at 12 steps per bar in 3/4', () => {

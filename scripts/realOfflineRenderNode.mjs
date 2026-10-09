@@ -169,5 +169,35 @@ try {
   pass(`production: deterministic (maxDiff=${maxDiff.toExponential(2)})`);
 } catch(e){ fail('production: deterministic', e); }
 
+// 9. Phase 1I — real 7/8 offline render and bounce retain audible audio
+try {
+  audioEngine.setTimeSignature([7,8]);
+  const ch = {
+    id:'ch-78', name:'7/8 Synth', color:'#10b981', instrumentType:'minisynth', mixerTrackId:1,
+    volume:0.9, pan:0, pitch:0, mute:false, solo:false, steps:Array(14).fill(false),
+    notes:[
+      {id:'n-downbeat', pitch:60, start:0, duration:1, velocity:0.9},
+      {id:'n-final-eighth', pitch:67, start:13, duration:0.5, velocity:0.9},
+    ],
+    synthParams:baseSynthParams,
+  };
+  const clip = { id:'clip-78', trackIndex:0, startBar:0, lengthBars:1, type:'pattern', channelId:'ch-78', color:'#10b981', name:'7/8 bar' };
+  const rendered = await audioEngine.renderTimelineOffline(
+    [ch], [clip], mixerTracks, 120, 1, 48000, false, 'song', undefined, undefined, undefined, 0
+  );
+  const renderStats = stats(rendered);
+  assert(Math.abs(rendered.duration - 1.75) < 1e-9, `7/8 render duration ${rendered.duration}, expected 1.75 s`);
+  assert(renderStats.finite, '7/8 render contains non-finite samples');
+  assert(renderStats.max > 1e-4, `7/8 render should be audible, max=${renderStats.max}`);
+
+  const bounced = await audioEngine.bounceChannelToAudioClip(ch, 120, 1);
+  const bounceStats = stats(bounced.buffer);
+  assert(bounced.lengthBars === 1, `7/8 bounce length ${bounced.lengthBars} bars, expected 1`);
+  assert(Math.abs(bounced.buffer.duration - 1.75) < 1e-9, `7/8 bounce duration ${bounced.buffer.duration}, expected 1.75 s`);
+  assert(bounceStats.finite, '7/8 bounce contains non-finite samples');
+  assert(bounceStats.max > 1e-4, `7/8 bounce should be audible, max=${bounceStats.max}`);
+  pass(`Phase 1I: real 7/8 render + bounce audible (duration=${rendered.duration.toFixed(2)}s, max=${Math.max(renderStats.max, bounceStats.max).toFixed(4)})`);
+} catch(e){ fail('Phase 1I: real 7/8 render and bounce', e); }
+
 console.log(`\n=== Results: ${passed} passed, ${failed} failed ===`);
 if (failed>0) process.exit(1);

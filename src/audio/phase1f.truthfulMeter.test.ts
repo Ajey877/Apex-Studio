@@ -1,12 +1,12 @@
 /**
- * Phase 1F — Truthful 3/4 time signature runtime: engine, transport,
- * scheduler, offline render and bounce parity.
+ * Phase 1F/1I — truthful project-meter runtime: engine, transport, scheduler,
+ * offline render and bounce parity.
  *
- * Core invariant of this phase: for supported meters the runtime bar size is
- * `stepsPerBar(project.meta.timeSignature)` — 3/4 is 12 sixteenth-note steps
- * and 1.5 seconds per bar at 120 BPM. Live playback, production offline
- * rendering and bounce must all agree on that grid. Phase 1E's content-extent
- * rule (note tails never expand the loop) survives unchanged.
+ * Core invariant: for supported meters, the runtime bar size is
+ * `stepsPerBar(project.meta.timeSignature)` — 3/4 is 12 steps and 7/8 is 14
+ * steps (1.5 s and 1.75 s per bar respectively at 120 BPM). Live playback,
+ * production offline rendering and bounce must agree on that grid. Phase 1E's
+ * content-extent rule (note tails never expand the loop) survives unchanged.
  *
  * Every behavioural assertion drives the production playback path through a
  * fake AudioContext clock with manually pumped transport timers, exactly like
@@ -85,11 +85,24 @@ class MockOfflineAudioContext {
     this.sampleRate = sampleRate;
   }
 
-  createGain() { return { gain: { setValueAtTime() {}, setTargetAtTime() {}, cancelScheduledValues() {} }, connect: () => {}, disconnect: () => {} }; }
-  createStereoPanner() { return { pan: { setValueAtTime() {}, setTargetAtTime() {} }, connect: () => {}, disconnect: () => {} }; }
+  createGain() {
+    return {
+      gain: {
+        value: 1,
+        setValueAtTime() {},
+        setTargetAtTime() {},
+        linearRampToValueAtTime() {},
+        exponentialRampToValueAtTime() {},
+        cancelScheduledValues() {},
+      },
+      connect: () => {},
+      disconnect: () => {},
+    };
+  }
+  createStereoPanner() { return { pan: { value: 0, setValueAtTime() {}, setTargetAtTime() {} }, connect: () => {}, disconnect: () => {} }; }
   createAnalyser() { return { fftSize: 256, smoothingTimeConstant: 0.7, connect: () => {}, disconnect: () => {}, getFloatTimeDomainData() {} }; }
   createBufferSource() { return { buffer: null, start() {}, stop() {}, connect: () => {}, disconnect: () => {} }; }
-  createOscillator() { return { frequency: { setValueAtTime() {} }, start() {}, stop() {}, connect: () => {}, disconnect: () => {} }; }
+  createOscillator() { return { type: 'sine', frequency: { value: 440, setValueAtTime() {}, exponentialRampToValueAtTime() {} }, start() {}, stop() {}, connect: () => {}, disconnect: () => {} }; }
   createBiquadFilter() { return { type: 'lowpass', frequency: { setValueAtTime() {}, linearRampToValueAtTime() {}, exponentialRampToValueAtTime() {} }, Q: { value: 1 }, gain: { setValueAtTime() {} }, connect: () => {}, disconnect: () => {} }; }
   createDelay() { return { delayTime: { setValueAtTime() {} }, connect: () => {}, disconnect: () => {} }; }
   createConvolver() { return { buffer: null, normalize: true, connect: () => {}, disconnect: () => {} }; }
@@ -503,6 +516,66 @@ describe('Phase 1F TEST H — bounce uses the same bar duration', () => {
     const result = await audioEngine.bounceChannelToAudioClip(channel, 120, 1);
     assert.equal(result.lengthBars, 1);
     assert.ok(closeTo(result.buffer.duration, 2.0), `bounce rendered ${result.buffer.duration}s, expected 2.0s`);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 1F compatibility — mechanical 6/8 remains a 12-step, 3-quarter-beat bar
+// ---------------------------------------------------------------------------
+describe('Phase 1F compatibility — mechanical 6/8 runtime remains unchanged', () => {
+  it('a one-bar 6/8 song still ends after 12 steps and 1.5 seconds', () => {
+    const channel = makeChannel('ch-68-live', [0], 12);
+    const clip = makePatternClip('clip-68-live', 'ch-68-live', 0, 1);
+    const take = startTake({ channels: [channel], clips: [clip], mode: 'song', meter: [6, 8] });
+
+    assert.equal(engine.resolveSongEndSteps(), 12);
+    assert.equal(take.transport.getState().beatsPerBar, 3);
+    pumpSteps(take.fakeCtx, 18);
+    assert.equal(take.transport.getState().playing, false);
+    assert.ok(closeTo(take.transport.getState().positionSeconds, 1.5));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 1I — 7/8 runtime, offline-render and bounce parity
+// ---------------------------------------------------------------------------
+describe('Phase 1I — 7/8 runs on a 14-step bar', () => {
+  it('live song playback wraps after 14 steps and one bar lasts 1.75 s', () => {
+    const channel = makeChannel('ch-78-live', [0, 13], 14);
+    const clip = makePatternClip('clip-78-live', 'ch-78-live', 0, 1);
+    const take = startTake({ channels: [channel], clips: [clip], mode: 'song', meter: [7, 8] });
+
+    assert.equal(engine.resolveSongEndSteps(), 14);
+    assert.equal(take.transport.getState().beatsPerBar, 3.5);
+    pumpSteps(take.fakeCtx, 18);
+
+    assert.equal(take.transport.getState().playing, false, 'the one-bar song ends after 14 sixteenth steps');
+    assert.ok(closeTo(take.transport.getState().positionSeconds, 1.75), 'one 7/8 bar lasts 1.75 s at 120 BPM');
+    assert.deepEqual(take.reported[13], { step: 13, bar: 1 });
+    assert.ok(take.triggered.some(hit => hit.step === 13 && closeTo(hit.time, 13 * STEP_SECONDS_AT_120_BPM)));
+  });
+
+  it('offline render and bounce both preserve the 14-step 1.75 s bar', async () => {
+    (globalThis as any).OfflineAudioContext = MockOfflineAudioContext;
+    engine.setTimeSignature([7, 8]);
+    engine.bpm = 120;
+    engine.setSwing(0);
+
+    const channel = makeChannel('ch-78-offline', [0, 13], 14);
+    const clip = makePatternClip('clip-78-offline', 'ch-78-offline', 0, 1);
+    const hitTimes: number[] = [];
+    engine.playNote = (_channel: Channel, _note: { start: number }, time?: number) => { hitTimes.push(time ?? 0); };
+
+    const buffer = await audioEngine.renderTimelineOffline(
+      [channel], [clip], [], 120, 1, 44100, false, 'song', undefined, undefined, [], 0
+    );
+    assert.ok(closeTo(buffer.duration, 1.75), `offline render ${buffer.duration}s, expected one 7/8 bar`);
+    assert.ok(hitTimes.some(time => closeTo(time, 13 * STEP_SECONDS_AT_120_BPM)), 'offline schedules sixteenth step 13');
+    assert.ok(!hitTimes.some(time => closeTo(time, 14 * STEP_SECONDS_AT_120_BPM)), 'step 14 is the exclusive bar end');
+
+    const bounced = await audioEngine.bounceChannelToAudioClip(channel, 120, 1);
+    assert.equal(bounced.lengthBars, 1);
+    assert.ok(closeTo(bounced.buffer.duration, 1.75), `bounce ${bounced.buffer.duration}s, expected one 7/8 bar`);
   });
 });
 

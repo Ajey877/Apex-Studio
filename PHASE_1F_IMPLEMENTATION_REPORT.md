@@ -35,8 +35,8 @@ rewritten — Phase 1F wires the resolved project meter through the runtime.
 
 `src/music/musicalTime.ts` (the mathematical authority) gains:
 
-- `isRuntimeSupportedMeter(candidate)` — explicit runtime support set: `[4,4]`, `[3,4]`, and mechanically
-  `[6,8]` (documented below). Everything else is rejected.
+- `isRuntimeSupportedMeter(candidate)` — original Phase 1F support set: `[4,4]`, `[3,4]`, and mechanically
+  `[6,8]` (documented below). Phase 1I adds `[7,8]`; other meters remain deferred.
 - `resolveProjectTimeSignature(meta)` — returns the stored meter when supported, otherwise the frozen
   `LEGACY_TIME_SIGNATURE` `[4,4]`. Pure: never mutates its input, never touches pattern data.
 
@@ -45,9 +45,10 @@ Support-set rationale:
 - `[6,8]` resolves mechanically to the same 12-step bar. This is explicitly documented as
   **mechanical-only** support: no dotted-quarter beat grouping, no 2+3/3+2 subdivision, no compound beat
   display. True compound-meter behaviour is deferred.
-- `[7,8]` (and `[5,4]`, `[2,4]`, …) are **deferred**: irregular grouping is unimplemented, and the Phase 1A
-  pinned-byte MIDI contract (`src/music/legacyTiming.test.ts`) requires the legacy grid for `[7,8]`.
-  They resolve to documented 4/4 behaviour rather than running half-truthful.
+- Phase 1I adds `[7,8]` as a 14-sixteenth-step bar (3.5 quarter-note beats), with seven eighth-note beats
+  in TransportBar and 1,680 MIDI ticks per bar at 480 PPQ. Its affected MIDI fingerprints are updated;
+  unrelated 4/4, 3/4, 6/8 and piano-MIDI golden bytes stay unchanged.
+- Other meters such as `[5,4]` and `[2,4]` remain deferred and resolve to documented 4/4 behaviour.
 
 ## Backward-compatibility rule (tested)
 
@@ -112,10 +113,9 @@ Support-set rationale:
 9. `src/App.tsx` — publishes the meter to the engine (`useEffect`, mirroring BPM/swing), meter-aware bar
    seek, passes `timeSignature` to the arranger, passes it into `createRecordingPlaylistClip`.
 10. `src/state/liveEngineResynchronization.ts` — the post-render-lease publication re-publishes the meter.
-11. `src/components/TransportBar.tsx` — the beat slot is meter-aware (`floor(step/4) mod beatsPerBar + 1`):
-    3/4 shows beats 1–3 and never beat 4. The 16th-note subdivision slot keeps its existing formula.
-    (The transport displays the true beat-within-bar; previously the beat slot duplicated the tick slot —
-    the change is required by the "never display beat 4 in 3/4" rule.)
+11. `src/components/TransportBar.tsx` — Phase 1F keeps the existing quarter-note beat display for 4/4,
+    3/4 and mechanical 6/8. Phase 1I displays seven eighth-note beats in 7/8, with two sixteenth-step
+    subdivisions per beat and no phantom eighth-note beat.
 
 ## Tests
 
@@ -125,10 +125,10 @@ New files (both auto-discovered by existing `src/**/*.test.ts` globs — no pack
   bar), TEST C (1.5 s bar), TEST D (bar boundaries 0/11/12/23/24), TEST E (12-step pattern loop), TEST F
   (song scheduling), TEST G (offline parity incl. scheduled-step grid), TEST H (bounce parity), TEST I
   (startBar 1 = 12 steps), TEST P (Phase 1E tail invariant in both meters), plus behavioural mutation guards.
-- `src/music/phase1f.meterResolution.test.ts` (31 tests) — TEST N (resolver fallbacks, no mutation, legacy
-  persistence), TEST O (pattern length preservation), TEST J (recording timing), TEST K/L (MIDI note layout
-  vs declared meter, 1440-tick bars, deferred-meter pin), playlist bar arithmetic, 6/8 documentation checks,
-  mutation guards.
+- `src/music/phase1f.meterResolution.test.ts` — original Phase 1F coverage for resolver fallbacks, no
+  mutation, legacy persistence, pattern-length preservation, recording timing, MIDI layout and playlist
+  arithmetic; Phase 1I extends it with 7/8 resolution/normalization, 14-step content and playlist bars,
+  1.75-second recording timing, 1,680-tick MIDI bars, and unchanged 6/8 behavior.
 
 RED capture (before any production change):
 - Runtime file: 14/18 failing (`engine.setTimeSignature is not a function` + fixed-grid assertion failures);
@@ -161,18 +161,19 @@ Updated existing tests (all direct consequences of the new wiring, nothing unrel
 NOT changed (verified by diff): MIDI parser/import (`midiParser.ts`), the second offline renderer
 (`offlineProjectRenderer.ts` — still fully legacy by design), automation data model, metering/mastering,
 plugin/instrument architecture, persistence format, Piano Roll UX, pattern-length UX ([16,32] choices
-untouched), 6/8 compound grouping, 7/8 grouping, workflows/dependencies/scripts (package.json, .github,
-scripts/ all untouched), and the unrelated TransportBar `totalSeconds` `/4` bug — that line was not modified
-(separate hotfix; it is not required by meter wiring and stays documented as a known issue).
+untouched), meter-picker UI, true 6/8 compound grouping and generalized meter-grouping systems, package
+manifest/dependency changes, and the unrelated TransportBar `totalSeconds` `/4` bug — that line was not
+modified (separate hotfix; it is not required by meter wiring and stays documented as a known issue).
+The existing `scripts/realOfflineRenderNode.mjs` probe was extended only to verify audible 7/8 render/bounce parity.
 
 ## Remaining known issues
 
 1. TransportBar song-time `totalSeconds` still carries the audited spurious `/4` (P1, separate hotfix —
    deliberately NOT bundled into Phase 1F; meter wiring did not require touching that line).
-2. 7/8 / 5/4 / 2/4 etc. remain deferred: they resolve to documented 4/4 runtime behaviour; a 7/8 MIDI export
-   still declares 7/8 metadata on the legacy 16-step grid (Phase 1A pinned contract) — full support requires
-   irregular grouping and is a future phase.
-3. 6/8 runs as a mechanical 12-step bar without compound grouping/display (documented in the resolver).
+2. 5/4, 2/4 and other unlisted meters remain deferred and resolve to the documented 4/4 runtime behavior.
+   7/8 is now supported on its 14-step bar, with seven displayed eighth-note beats and 1,680 MIDI ticks at
+   480 PPQ; no generalized meter-grouping system or meter-picker UI was added.
+3. 6/8 remains a mechanical 12-step bar with its existing three-quarter-beat display and no compound grouping.
 4. A non-bar-aligned legacy pattern length (e.g. 16 steps in 3/4) loops at its absolute length and therefore
    drifts across bar lines — this is the required backward-compatible behaviour, not a defect.
 5. Browser-based geometry tests (`tests/playlistGeometry.test.mjs`) cannot run in this sandbox because
@@ -193,7 +194,7 @@ scripts/ all untouched), and the unrelated TransportBar `totalSeconds` `/4` bug 
 | `npm run lint`      | exit 0 |
 | `npm run build`     | exit 0 |
 | discovery           | 192/192 files, 0 orphaned |
-| Phase 1A legacy MIDI bytes (incl. 7/8) | 8/8 pass (`legacyTiming.test.ts`) |
+| Phase 1A MIDI fingerprints (Phase 1F baseline; 7/8 values later re-fingerprinted by Phase 1I) | 8/8 pass (`legacyTiming.test.ts`) |
 | Phase 1E extent suite | passes inside test:audio/test:all |
 
 Status: IMPLEMENTATION COMPLETE — READY FOR INDEPENDENT AUDIT (nothing committed or pushed, per instructions).

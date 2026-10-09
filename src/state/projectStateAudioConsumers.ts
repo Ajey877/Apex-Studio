@@ -49,7 +49,7 @@ export const PROJECT_STATE_AUDIO_FIELDS: AudioFieldRegistry = {
   'meta.name':             { classification: 'metadata', note: 'Display only.' },
   'meta.author':           { classification: 'metadata', note: 'Display only.' },
   'meta.id':               { classification: 'metadata', note: 'Document id.' },
-  'meta.timeSignature':    { classification: 'metadata', note: 'UI display; transport runs 4/4 internally.' },
+  'meta.timeSignature':    { classification: 'consumed', consumer: 'audioEngine.ts:setTimeSignature / transport / render', note: 'Sets the resolved bar grid: 4/4, 3/4, mechanical 6/8, or 7/8; unsupported/missing values fall back to 4/4.' },
   'meta.created':          { classification: 'metadata', note: 'Timestamp.' },
   'meta.updated':          { classification: 'metadata', note: 'Timestamp.' },
   'meta.version':          { classification: 'metadata', note: 'Display string.' },

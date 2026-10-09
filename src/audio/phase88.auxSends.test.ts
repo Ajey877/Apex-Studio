@@ -38,21 +38,33 @@ class FakeAudioContext {
   get currentTime() { return 0; }
 }
 
+// Mock AudioParam supports the scheduling methods exercised by the real
+// instrument renderers so an offline test cannot pass after a swallowed
+// renderer exception caused by an incomplete fake context.
+const mockAudioParam = (value = 0) => ({
+  value,
+  setValueAtTime(next: number) { this.value = next; },
+  setTargetAtTime(next: number) { this.value = next; },
+  linearRampToValueAtTime(next: number) { this.value = next; },
+  exponentialRampToValueAtTime(next: number) { this.value = next; },
+  cancelScheduledValues() {},
+});
+
 // Mock for offline
 class MockOfflineAudioContext {
   readonly destination = { connect: () => {} };
   numberOfChannels: number; length: number; sampleRate: number; currentTime = 0;
   constructor(ch: number, len: number, sr: number) { this.numberOfChannels = ch; this.length = len; this.sampleRate = sr; }
-  createGain() { return { gain: { value: 1, setValueAtTime(v: number) { this.value = v; }, setTargetAtTime(v: number) { this.value = v; } }, connect() {}, disconnect() {} }; }
-  createStereoPanner() { return { pan: { setValueAtTime() {}, setTargetAtTime() {} }, connect() {}, disconnect() {} }; }
+  createGain() { return { gain: mockAudioParam(1), connect() {}, disconnect() {} }; }
+  createStereoPanner() { return { pan: mockAudioParam(0), connect() {}, disconnect() {} }; }
   createAnalyser() { return { fftSize: 256, smoothingTimeConstant: 0.7, connect() {}, disconnect() {} }; }
-  createBufferSource() { return { buffer: null, start() {}, stop() {}, connect() {}, disconnect() {} }; }
-  createOscillator() { return { frequency: { setValueAtTime() {} }, start() {}, stop() {}, connect() {}, disconnect() {} }; }
-  createBiquadFilter() { return { type: 'lowpass', frequency: { setValueAtTime() {} , setTargetAtTime() {}, exponentialRampToValueAtTime() {} }, Q: { value: 1 }, gain: { setValueAtTime() {} }, connect() {}, disconnect() {} }; }
-  createDelay() { return { delayTime: { setValueAtTime() {} }, connect() {}, disconnect() {} }; }
+  createBufferSource() { return { buffer: null, playbackRate: mockAudioParam(1), detune: mockAudioParam(0), start() {}, stop() {}, connect() {}, disconnect() {} }; }
+  createOscillator() { return { type: 'sawtooth', frequency: mockAudioParam(440), detune: mockAudioParam(0), start() {}, stop() {}, connect() {}, disconnect() {} }; }
+  createBiquadFilter() { return { type: 'lowpass', frequency: mockAudioParam(350), Q: mockAudioParam(1), gain: mockAudioParam(0), connect() {}, disconnect() {} }; }
+  createDelay() { return { delayTime: mockAudioParam(0), connect() {}, disconnect() {} }; }
   createConvolver() { return { buffer: null, connect() {}, disconnect() {} }; }
   createWaveShaper() { return { curve: null, connect() {}, disconnect() {} }; }
-  createDynamicsCompressor() { return { threshold: { value: 0 }, ratio: { value: 0 }, attack: { value: 0 }, release: { value: 0 }, connect() {}, disconnect() {} }; }
+  createDynamicsCompressor() { return { threshold: mockAudioParam(-24), ratio: mockAudioParam(12), attack: mockAudioParam(0.003), release: mockAudioParam(0.25), connect() {}, disconnect() {} }; }
   createBuffer(_c: number, len: number, _sr: number) { return { numberOfChannels: 1, length: len, sampleRate: 44100, duration: len/44100, getChannelData: () => new Float32Array(len), copyFromChannel(){}, copyToChannel(){} } as unknown as AudioBuffer; }
   async startRendering() { return { numberOfChannels: 2, length: this.length, sampleRate: this.sampleRate, duration: this.length/this.sampleRate, getChannelData: () => new Float32Array(this.length), copyFromChannel(){}, copyToChannel(){} } as unknown as AudioBuffer; }
 }

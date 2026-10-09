@@ -27,26 +27,27 @@ const clip = (): PlaylistClip => ({
   startBar: 0.25, lengthBars: 6, offsetSteps: 3.5, name: 'Timing fixture', color: '#fff',
 });
 
-// Captured from unchanged production consumers at 2cdc844 (runtime identical
-// to main 5c22fe8), BEFORE any consumer adopted musicalTime. Do not regenerate
-// these to accept timing changes: Phase 1A requires byte-identical MIDI output.
+// Original fingerprints were captured before musicalTime consumers changed.
+// The six Standard MIDI fingerprints (pattern/song at three tempos) are
+// intentionally refreshed for Phase 1I's newly supported 7/8, 14-step bar.
+// Piano-export fingerprints and all unrelated timing contracts stay pinned.
 const MIDI_SHA256: Record<string, string> = {
-  '60-pattern': 'fa09435780f97aefc7821a6dca40954d8b9471c7641640ccfd6187bf7a3bb328',
-  '60-song': 'b84cb4b9ca5b9ff306e5fee3121b3923d86f77c80a81c1fdedefa05c355145f9',
+  '60-pattern': '7f9b24bbe5148223fb9970678f81889d3eb44545d4a3791ba8054e57e24385fa',
+  '60-song': '46cff5dce714ebe3b4b580513d0c7f073bc6fe5fa84e864fcb8e2f80d18c0684',
   '60-piano': 'eb459ea51d9f84a572331a610a182b14369797a5bbd0157c8b66ef9382e25b24',
-  '120-pattern': '89df6cc576259e9bd6fcf78005d80f9495e62eb60a639e8d660dc4c42b71b5f8',
-  '120-song': 'e7165d9d319f5169a160712dda09ad37d4fbb6bcc62020ebdacf57fc769ea8fd',
+  '120-pattern': '162341353fd7342bc04b8ec0748abb16248fc7db7e82cfbddaaf677bd77b8d51',
+  '120-song': 'ea3706892d3cca0b9cb6656d1348c14528091213cdfaec667329c14909fdbfd5',
   '120-piano': '1787d0d83bbbb795e4d3cd3ffa7cc4bc096fc594926481bb2d7aa6a33cc8340e',
-  '240-pattern': 'f952359a3dce06b44a8b9abd393b6e966c1c378040598f3e50de8d010793b398',
-  '240-song': 'd13725e68a82afceefb54183a22bf5d1ac80987cde5b80914fe6ba3b5199e640',
+  '240-pattern': 'df2c7dad2cb8ef36a233588cdd276896e097bc06d6da1c71b9bedc3a38e21f31',
+  '240-song': '9c26875b6a0b003c4acac03de14fd0007fa346eb2dc37f44a2e9b4148ef415e9',
   '240-piano': '4cad4bfa2d54bc038eec0f80667179e1bc6b0f72a5899fcf05fa8fb0ad9c3abd',
 };
 const hash = async (blob: Blob): Promise<string> =>
   createHash('sha256').update(Buffer.from(await blob.arrayBuffer())).digest('hex');
 
-describe('Phase 1A — preserve existing timing contracts', () => {
+describe('Phase 1A/1I — timing contracts and supported 7/8 MIDI fingerprints', () => {
   for (const bpm of [60, 120, 240]) {
-    it(`keeps both MIDI writers byte-identical at ${bpm} BPM`, async () => {
+    it(`keeps the supported 7/8 MIDI fingerprints stable at ${bpm} BPM`, async () => {
       const ch = channel();
       for (const scope of ['pattern', 'song'] as const) {
         const blob = buildStandardMidiFile([ch], [clip()], { bpm, timeSignature: [7, 8], swing: 0.375 }, {

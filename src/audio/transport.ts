@@ -42,10 +42,10 @@ export class AudioClockTransport {
   /** First absolute step index at which Song Mode stops; null loops forever. */
   private songEndSteps: number | null = null;
   /**
-   * Phase 1F — the resolved project meter. It determines the bar grid the
-   * step counter is mapped onto (bar numbers and beat count); step duration
-   * itself stays a sixteenth note at the transport tempo. Defaults to the
-   * legacy 4/4 grid so a transport nobody configured keeps its old behaviour.
+   * Phase 1F/1I — the resolved project meter. It determines the bar grid the
+   * step counter is mapped onto (bar numbers and quarter-note beat count); the
+   * step duration itself stays a sixteenth note at the transport tempo.
+   * Defaults to the legacy 4/4 grid so an unconfigured transport keeps its old behavior.
    */
   private meter: TimeSignature = LEGACY_TIME_SIGNATURE;
 
@@ -66,8 +66,8 @@ export class AudioClockTransport {
   }
 
   /**
-   * Phase 1F — publish the resolved project meter. The bar grid remaps the
-   * current absolute step position (a 3/4 bar wraps every 12 steps), so the
+   * Phase 1F/1I — publish the resolved project meter. The bar grid remaps the
+   * current absolute step position (12 steps in 3/4, 14 in 7/8), so the
    * reported bar/beat stay truthful through the change; unsupported values
    * resolve to the legacy 4/4 grid.
    */
