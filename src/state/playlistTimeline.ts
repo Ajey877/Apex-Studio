@@ -28,9 +28,14 @@ import type { PlaylistClip, ProjectState } from '../types/daw';
 /** New projects default to the documented 32-bar arrangement. */
 export const DEFAULT_TIMELINE_BARS = 32;
 
-/** Bounds the arranger's -8 / +8 controls have always enforced. */
+/** Lower bound of the arranger's -8 control. */
 export const MIN_TIMELINE_BARS = 8;
-export const MAX_TIMELINE_BARS = 64;
+/**
+ * Phase 1G — the single capacity authority for the playlist timeline (512 bars).
+ * Every timeline length is resolved through `normalizeTimelineBars`, which clamps
+ * to this value; no other module may declare or hard-code a timeline cap.
+ */
+export const MAX_TIMELINE_BARS = 512;
 
 export interface TimelineClipBounds {
   totalBars?: number;
