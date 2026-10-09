@@ -57,10 +57,35 @@ export class AudioClockTransport {
 
   setCallbacks(callbacks: TransportCallbacks): void { this.callbacks = callbacks; }
 
+  /**
+   * Phase 1J correction: a tempo change preserves the MUSICAL position (the
+   * continuous step/beat count), not the elapsed seconds. Previously the
+   * seconds were kept and re-divided by the new step length, so a 120 → 60 BPM
+   * change at step 12 jumped back to step 6 and steps 6–11 were scheduled a
+   * second time (duplicate notes and metronome clicks); speeding up skipped
+   * steps instead. Now the clock origin is re-anchored so the step already
+   * reached stays reached, and the next unscheduled step keeps its index and is
+   * placed on the new tempo's grid. Steps already handed out inside the
+   * look-ahead window keep their old-tempo times; the new tempo applies from the
+   * first step not yet scheduled, never earlier than the last scheduled one.
+   */
   setBpm(bpm: number): void {
     if (!Number.isFinite(bpm) || bpm <= 0) return;
     this.updatePositionFromClock();
+    const previousStepSeconds = this.stepDurationSeconds;
+    const positionSteps = this.state.positionSeconds / previousStepSeconds;
+    const pendingSteps = (this.nextEventTime - this.clockOrigin) / previousStepSeconds;
+    const lastScheduledTime = this.nextEventTime - previousStepSeconds;
     this.state.bpm = Math.min(999, Math.max(20, bpm));
+    const nextStepSeconds = this.stepDurationSeconds;
+    this.state.positionSeconds = positionSteps * nextStepSeconds;
+    if (this.state.playing) {
+      this.clockOrigin = this.context.currentTime - this.state.positionSeconds;
+      this.nextEventTime = Math.max(
+        this.clockOrigin + pendingSteps * nextStepSeconds,
+        lastScheduledTime + 1e-6,
+      );
+    }
     this.updateMusicalPosition(this.state.positionSeconds);
     this.emitState();
   }

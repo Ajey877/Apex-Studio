@@ -72,6 +72,8 @@ export interface TransportBarProps {
    * UI 1C: it stays the only tempo control in the shell.
    */
   bpmInputRef?: React.Ref<HTMLInputElement>;
+  /** Phase 1J: the Meter readout opens Project Settings (time signature). */
+  onOpenProjectSettings?: () => void;
 }
 
 export interface WorkspaceTab {
@@ -188,7 +190,8 @@ export const TransportBar: React.FC<TransportBarProps> = ({
   collaboratorCount,
   isSidebarOpen,
   onToggleSidebar,
-  bpmInputRef
+  bpmInputRef,
+  onOpenProjectSettings
 }) => {
   const [tapTimes, setTapTimes] = useState<number[]>([]);
   const [isFullscreen, setIsFullscreen] = useState(false);
@@ -384,6 +387,25 @@ export const TransportBar: React.FC<TransportBarProps> = ({
                 TAP
               </button>
             </span>
+          </div>
+
+          <span className="apex-readout-divider" aria-hidden="true" />
+
+          {/* Phase 1J: the active (resolved) time signature, always visible. */}
+          <div className="apex-readout-cell">
+            <span className="apex-readout-label">Meter</span>
+            <button
+              type="button"
+              id="fl-meter-readout"
+              onClick={onOpenProjectSettings}
+              disabled={!onOpenProjectSettings}
+              data-meter={`${resolvedMeter[0]}/${resolvedMeter[1]}`}
+              aria-label={`Time signature ${resolvedMeter[0]}/${resolvedMeter[1]}. Open Project Settings.`}
+              title="Time signature — open Project Settings"
+              className="apex-readout-value cursor-pointer hover:text-[var(--apex-accent)]"
+            >
+              {`${resolvedMeter[0]}/${resolvedMeter[1]}`}
+            </button>
           </div>
 
           <span className="apex-readout-divider" aria-hidden="true" />

@@ -113,7 +113,7 @@ describe('Phase 1A/1I — timing contracts and supported 7/8 MIDI fingerprints',
     assert.equal(trimmed.startBar + trimmed.lengthBars, original.startBar + original.lengthBars);
   });
 
-  it('retains transport 4/4 scheduling and the existing tempo-change policy', () => {
+  it('retains transport 4/4 scheduling; Phase 1J tempo changes keep the musical position', () => {
     const originalWindow = globalThis.window;
     let pending: (() => void) | undefined;
     globalThis.window = { setTimeout: (fn: () => void) => { pending = fn; return 1; }, clearTimeout: () => {} } as unknown as Window & typeof globalThis;
@@ -127,7 +127,9 @@ describe('Phase 1A/1I — timing contracts and supported 7/8 MIDI fingerprints',
       assert.deepEqual(events, Array.from({ length: 17 }, (_, i) => [i % 16, Math.floor(i / 16) + 1, i * 0.125]));
       transport.seek(1.5);
       transport.setBpm(60);
-      assert.equal(transport.getState().step, 6, 'tempo continuity is deliberately NOT fixed in Phase 1A');
+      // Phase 1A deliberately left tempo continuity unfixed (step 12 jumped to
+      // 6). Phase 1J fixes it: the musical position is preserved.
+      assert.equal(transport.getState().step, 12, 'Phase 1J: tempo change preserves the musical position');
       assert.equal(transport.getState().beatsPerBar, 4);
       assert.equal(transport.getState().stepsPerBeat, 4);
     } finally {

@@ -32,6 +32,8 @@ export interface ApplicationMenuCommandDeps {
   openProjectHub: () => void;
   openProjectStatistics: () => void;
   editTempo: () => void;
+  /** Phase 1J: Project Settings — time signature and 7/8 accent grouping. */
+  openProjectSettings: () => void;
 
   showInstrumentBrowser: () => void;
   addPlaylistTrack: () => void;
@@ -191,6 +193,9 @@ const runCommand = (id: ApplicationMenuCommandId, deps: ApplicationMenuCommandDe
       return;
     case 'project.tempo':
       deps.editTempo();
+      return;
+    case 'project.settings':
+      deps.openProjectSettings();
       return;
 
     case 'track.instrumentBrowser':

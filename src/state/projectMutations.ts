@@ -14,6 +14,8 @@ import type {
   VocalTunerSettings
 } from '../types/daw';
 import { DEFAULT_GROSS_BEAT_STATE } from './projectState';
+import { isRuntimeSupportedMeter } from '../music/musicalTime';
+import { formatTimeSignature, isSameTimeSignature, isSevenEightGrouping } from '../music/meterPulse';
 
 /**
  * Authoritative runtime mutation boundary for ProjectState.
@@ -163,17 +165,93 @@ export const updatePatternInProjectState = (
   };
 };
 
+/**
+ * Phase 1J: thrown when an edit tries to store a meter (or 7/8 grouping) the
+ * runtime does not execute. Rejecting at the mutation boundary keeps the
+ * document from holding a value the transport would silently play as 4/4.
+ */
+export class UnsupportedMeterEditError extends RangeError {
+  constructor(message: string) {
+    super(message);
+    this.name = 'UnsupportedMeterEditError';
+  }
+}
+
+const assertSupportedMeterUpdates = (updates: Partial<ProjectMetadata>): void => {
+  if ('timeSignature' in updates && !isRuntimeSupportedMeter(updates.timeSignature)) {
+    const value: unknown = updates.timeSignature;
+    const label = Array.isArray(value) ? value.join('/') : String(value);
+    throw new UnsupportedMeterEditError(
+      `Unsupported time signature ${label}: only 4/4, 3/4, 6/8 and 7/8 are available.`
+    );
+  }
+  if ('sevenEightGrouping' in updates && !isSevenEightGrouping(updates.sevenEightGrouping)) {
+    throw new UnsupportedMeterEditError(
+      `Unsupported 7/8 grouping ${String(updates.sevenEightGrouping)}: use 2+2+3, 3+2+2 or 2+3+2.`
+    );
+  }
+};
+
 export const updateProjectMetadataInProjectState = (
   state: ProjectState,
   updates: Partial<ProjectMetadata>
-): ProjectState => ({
-  ...state,
-  meta: {
-    ...state.meta,
-    ...updates,
-    updated: Date.now()
+): ProjectState => {
+  assertSupportedMeterUpdates(updates);
+  return {
+    ...state,
+    meta: {
+      ...state.meta,
+      ...updates,
+      ...('timeSignature' in updates && updates.timeSignature
+        ? { timeSignature: [updates.timeSignature[0], updates.timeSignature[1]] as [number, number] }
+        : {}),
+      updated: Date.now()
+    }
+  };
+};
+
+/**
+ * Phase 1J — the single meter edit used by Project Settings.
+ *
+ * Clip policy (bar-anchored): playlist clips store `startBar`/`lengthBars` and
+ * patterns store absolute sixteenth-step data. A meter change rewrites ONLY
+ * `meta.timeSignature`; every clip, pattern, note and marker keeps its stored
+ * value bit-for-bit, so a clip that starts on bar 5 still starts on bar 5 and
+ * switching back (or Undo) restores the exact previous timing. What changes is
+ * the bar's duration, so clips land at a different time in seconds.
+ *
+ * Returns the SAME state object when the meter is already active (no history
+ * entry), and throws `UnsupportedMeterEditError` for anything outside
+ * 4/4, 3/4, 6/8 and 7/8.
+ */
+export const setProjectTimeSignatureInProjectState = (
+  state: ProjectState,
+  meter: unknown
+): ProjectState => {
+  if (!isRuntimeSupportedMeter(meter)) {
+    assertSupportedMeterUpdates({ timeSignature: meter as [number, number] });
   }
-});
+  const supported = meter as readonly [number, number];
+  if (isSameTimeSignature(state.meta.timeSignature, supported)) return state;
+  return updateProjectMetadataInProjectState(state, { timeSignature: [supported[0], supported[1]] });
+};
+
+/** Phase 1J — choose the 7/8 accent grouping (2+2+3, 3+2+2 or 2+3+2). */
+export const setSevenEightGroupingInProjectState = (
+  state: ProjectState,
+  grouping: unknown
+): ProjectState => {
+  if (!isSevenEightGrouping(grouping)) {
+    assertSupportedMeterUpdates({ sevenEightGrouping: grouping as ProjectMetadata['sevenEightGrouping'] });
+  }
+  const current = state.meta.sevenEightGrouping;
+  if (current === grouping) return state;
+  return updateProjectMetadataInProjectState(state, { sevenEightGrouping: grouping as ProjectMetadata['sevenEightGrouping'] });
+};
+
+/** History label for a meter edit, e.g. "Change time signature to 7/8". */
+export const getTimeSignatureEditLabel = (meter: readonly [number, number]): string =>
+  `Change time signature to ${formatTimeSignature(meter)}`;
 
 /**
  * Phase 51 — publishes a Master Macro Rack change.
@@ -303,7 +381,7 @@ export const getFxUpdateLabel = (updates: Partial<FxSlot>): string => {
 };
 
 export const isContinuousMetaUpdate = (updates: Partial<ProjectMetadata>): boolean => {
-  if ('name' in updates || 'timeSignature' in updates) {
+  if ('name' in updates || 'timeSignature' in updates || 'sevenEightGrouping' in updates) {
     return false;
   }
   return 'swing' in updates || 'bpm' in updates;
@@ -314,6 +392,7 @@ export const getMetaUpdateLabel = (updates: Partial<ProjectMetadata>): string =>
   if ('swing' in updates) return 'Change swing';
   if ('name' in updates) return 'Rename project';
   if ('timeSignature' in updates) return 'Change time signature';
+  if ('sevenEightGrouping' in updates) return 'Change 7/8 accent grouping';
   return 'Update project settings';
 };
 

@@ -91,7 +91,7 @@ test('unsupported commands that must not be fabricated are absent from the menu 
     'Paste',
     'Select All',
     'About',
-    'Time Signature',
+    // Phase 1J: 'Time Signature' is now real (Project → Project Settings).
     'Sample Rate',
     'Audio Settings',
     'Monitoring',

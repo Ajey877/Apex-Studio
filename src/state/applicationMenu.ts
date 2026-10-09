@@ -55,6 +55,7 @@ export type ApplicationMenuCommandId =
   | 'project.hub'
   | 'project.statistics'
   | 'project.tempo'
+  | 'project.settings'
   // Track — real channel and playlist-track operations only.
   | 'track.instrumentBrowser'
   | 'track.newPlaylistTrack'
@@ -131,6 +132,7 @@ export const APPLICATION_MENU_COMMANDS: Readonly<Record<ApplicationMenuCommandId
   'project.hub': { label: 'Project Hub…' },
   'project.statistics': { label: 'Project Statistics…' },
   'project.tempo': { label: 'Edit Tempo (BPM)…' },
+  'project.settings': { label: 'Project Settings (Time Signature)…' },
 
   'track.instrumentBrowser': { label: 'Show Instrument Browser' },
   'track.newPlaylistTrack': { label: 'New Playlist Track' },
@@ -212,6 +214,7 @@ export const APPLICATION_MENUS: readonly ApplicationMenu[] = [
       command('project.statistics', APPLICATION_MENU_COMMANDS['project.statistics']),
       separator,
       command('project.tempo', APPLICATION_MENU_COMMANDS['project.tempo']),
+      command('project.settings', APPLICATION_MENU_COMMANDS['project.settings']),
     ],
   },
   {
@@ -318,23 +321,10 @@ export const UNSUPPORTED_APPLICATION_MENU_COMMANDS: readonly UnsupportedApplicat
       'Deletion is view-scoped: the Playlist and Piano Roll own their own keydown handlers. There is no central handler to call yet.',
   },
   {
-    id: 'project.timeSignature',
-    label: 'Time Signature',
-    menu: 'project',
-    reason:
-      'updateProjectMetadataInProjectState() supports it, but no UI exists and it never reaches the transport or audio math. Needs an engine decision first.',
-  },
-  {
     id: 'project.sampleRate',
     label: 'Sample Rate',
     menu: 'project',
     reason: 'Not a project concept: the rate is read from the live AudioContext and written into the WAV header.',
-  },
-  {
-    id: 'project.settings',
-    label: 'Project Settings',
-    menu: 'project',
-    reason: 'No project settings surface exists.',
   },
   {
     id: 'track.rename',

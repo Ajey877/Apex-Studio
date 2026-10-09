@@ -112,7 +112,7 @@ test('no unsupported command is ever presented as a functional menu row', () => 
     '>Paste<',
     'Select All',
     '>About<',
-    'Time Signature',
+    // Phase 1J: 'Time Signature' is now real (Project → Project Settings).
     'Sample Rate',
     'Audio Settings',
     'Monitoring',
@@ -194,4 +194,9 @@ test('the menu bar renders nothing that could displace or cover the transport', 
   assert.equal(html.includes('fl-transport-bar'), false);
   assert.equal(html.includes('fl-view-tabs'), false);
   assert.equal(html.includes('phantom-mobile-daw'), false);
+});
+
+test('Phase 1J: the Project menu renders the real Project Settings (Time Signature) command', () => {
+  const html = renderBar('project');
+  assert.ok(html.includes('Project Settings (Time Signature)…'), 'Project Settings must render in the Project menu');
 });
