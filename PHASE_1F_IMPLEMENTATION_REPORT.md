@@ -197,4 +197,12 @@ The existing `scripts/realOfflineRenderNode.mjs` probe was extended only to veri
 | Phase 1A MIDI fingerprints (Phase 1F baseline; 7/8 values later re-fingerprinted by Phase 1I) | 8/8 pass (`legacyTiming.test.ts`) |
 | Phase 1E extent suite | passes inside test:audio/test:all |
 
-Status: IMPLEMENTATION COMPLETE — READY FOR INDEPENDENT AUDIT (nothing committed or pushed, per instructions).
+Status: Phase 1F was complete at the time of this historical report. Current Phase 1I implementation and verification follow.
+
+## Phase 1I addendum — 7/8 meter support (2026-10-09)
+
+- Runtime resolution now admits 7/8 as a 14-sixteenth-step bar (3.5 quarter-note beats / 1.75 seconds at 120 BPM). TransportBar shows seven eighth-note beats with subdivisions 1–2; 4/4, 3/4 and mechanical 6/8 behavior remain unchanged.
+- MIDI uses 1,680 ticks per 7/8 bar at 480 PPQ. Only the six affected 7/8 Standard MIDI fingerprints were regenerated; piano-MIDI and other meter expectations remain pinned.
+- The real offline-render probe now checks 7/8 WAV scheduling and bounce through `web-audio-engine`, including finite, non-silent PCM. Incomplete AudioParam methods in two test-only fake contexts were completed after they caused swallowed instrument-renderer failures; no `createOscillator is not a function` warning remains.
+- Verification: focused meter/TransportBar/MIDI tests 75/75; `npm run test:timing` 121/121; `npm run test:audio` 1395/1395; `npm run test:history` 647/647; `npm run lint` and `npm run build` pass; `npm run test:browser:node` 9/9, including audible 1.75-second 7/8 render and bounce. The build retains Vite's existing advisory for a minified chunk over 500 kB. The audio suite's only renderer-failure log is its intentional negative-path fixture.
+- Work is on the Arena-pinned `arena/c11a1e89-apex-studio` branch, based on the verified `main` SHA `23a12d506a3871b4164d157426bd3794bf5c382f`. PR [#200](https://github.com/Ajey877/Apex-Studio/pull/200) is open against `main` and has not been merged.
