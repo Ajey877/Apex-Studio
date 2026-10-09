@@ -27,6 +27,9 @@ import { Channel, Note, MusicalScale, ChordStampType } from '../types/daw';
 import { audioEngine } from '../audio/audioEngine';
 import { MidiParser } from '../utils/midiParser';
 import { quantizeDurationSteps } from '../music/noteDurationPolicy';
+import { resolveProjectTimeSignature } from '../music/musicalTime';
+import { resolveSevenEightGrouping, type SevenEightGrouping } from '../music/meterPulse';
+import { resolvePianoRollGridModel, type PianoRollStepDecoration } from '../music/pianoRollGrid';
 import { planMidiImport } from './pianoRollMidiImport';
 import { normalizePatternLengthSteps } from '../state/patternLength';
 import {
@@ -132,6 +135,15 @@ interface PianoRollProps {
    * to folding other tracks into the edited channel.
    */
   onCreateChannelFromMidiImport: (name: string, notes: Note[]) => string;
+  /**
+   * Phase 1K: `ProjectMetadata.timeSignature` — the meter the grid decoration
+   * (labels, beat divisions, bar lines, one-bar navigation) follows. Optional;
+   * missing/unsupported values decorate the legacy 4/4 grid, exactly as the
+   * runtime plays them. Presentation only: stored notes stay sixteenth steps.
+   */
+  timeSignature?: [number, number];
+  /** Phase 1K: `ProjectMetadata.sevenEightGrouping` for 7/8 group lines. */
+  sevenEightGrouping?: string;
 }
 
 /**
@@ -219,7 +231,9 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
   isPlaying,
   patternLengthSteps,
   bpm,
-  onCreateChannelFromMidiImport
+  onCreateChannelFromMidiImport,
+  timeSignature,
+  sevenEightGrouping
 }) => {
   const [currentTool, setCurrentTool] = useState<ToolType>('select');
   const [rootKey, setRootKey] = useState<number>(0); // C
@@ -233,6 +247,40 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
   // below its historical two-bar default, so a declared 64-step pattern is fully
   // editable and notes past a 16-step declaration are never hidden or lost.
   const totalSteps = Math.max(PIANO_ROLL_MIN_STEPS, normalizePatternLengthSteps(patternLengthSteps));
+  // Phase 1K: meter-aware grid decoration (labels, line strengths, navigation
+  // deltas). 4/4 and 3/4 resolve to the historical quarter-note decoration;
+  // 6/8 and 7/8 get bar / beat-group / eighth-pulse lines from the same pulse
+  // layout the metronome clicks. Notes stay sixteenth-step storage throughout.
+  const gridModel = resolvePianoRollGridModel(
+    resolveProjectTimeSignature({ timeSignature }),
+    resolveSevenEightGrouping({ sevenEightGrouping: sevenEightGrouping as SevenEightGrouping | undefined }),
+    totalSteps
+  );
+  /** Phase 1K: decoration of one grid step (safe default off the grid). */
+  const stepDecoration = (stepIdx: number): PianoRollStepDecoration =>
+    gridModel.steps[stepIdx] ?? {
+      step: stepIdx, strength: 'none', label: null, pulseIndexInBar: -1, groupIndexInBar: -1, barIndex: -1,
+    };
+  /**
+   * Ruler cell styling. The legacy quarter scheme (4/4, 3/4) is byte-for-byte
+   * the historical look; eighth meters add a bar tint so the bar line is
+   * distinct from the beat-group lines of 6/8 / 7/8.
+   */
+  const rulerCellClass = (deco: PianoRollStepDecoration): string => {
+    if (gridModel.legacyQuarterDecoration) {
+      return deco.strength === 'none'
+        ? 'border-[var(--apex-grid-line)] text-[var(--apex-text-3)]'
+        : 'border-[var(--apex-grid-line-strong)] text-[var(--apex-text)] font-bold bg-[var(--apex-surface-2)]';
+    }
+    if (deco.strength === 'bar') return 'border-[var(--apex-grid-line-strong)] text-[var(--apex-text)] font-bold bg-[var(--apex-surface-2)]';
+    if (deco.strength === 'group') return 'border-[var(--apex-grid-line-strong)] text-[var(--apex-text)] font-bold';
+    return 'border-[var(--apex-grid-line)] text-[var(--apex-text-3)]';
+  };
+  /** Grid-row line colour: strong on bar and beat-group lines, subtle elsewhere. */
+  const gridCellLineClass = (deco: PianoRollStepDecoration): string =>
+    deco.strength === 'none' || (deco.strength === 'pulse' && !gridModel.legacyQuarterDecoration)
+      ? 'border-[var(--apex-grid-line)]'
+      : 'border-[var(--apex-grid-line-strong)]';
   const [selectedNoteIds, setSelectedNoteIds] = useState<Set<string>>(new Set());
   const selectedNoteIdsRef = useRef<Set<string>>(new Set());
   selectedNoteIdsRef.current = selectedNoteIds;
@@ -666,6 +714,18 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
         return;
       }
 
+      // Phase 1K: Alt+Arrow navigates one bar of the ACTIVE meter (16 steps in
+      // 4/4, 12 in 3/4 and 6/8, 14 in 7/8) — bar navigation that follows the
+      // meter instead of a hardcoded 16.
+      if (e.altKey && !e.ctrlKey && !e.metaKey && (e.key === 'ArrowRight' || e.key === 'ArrowLeft')) {
+        e.preventDefault();
+        e.stopPropagation();
+        if (!interactionRef.current && !marqueeRef.current) {
+          handleNudgeSelected(e.key === 'ArrowRight' ? gridModel.barSteps : -gridModel.barSteps);
+        }
+        return;
+      }
+
       if (!e.ctrlKey && !e.metaKey && !e.altKey) {
         if (e.key === 'ArrowUp') {
           e.preventDefault();
@@ -689,7 +749,10 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
           e.preventDefault();
           e.stopPropagation();
           if (!interactionRef.current && !marqueeRef.current) {
-            const stepDelta = e.shiftKey ? 4 : (bounds.gridSteps ?? DEFAULT_GRID_STEPS);
+            // Phase 1K: Shift+Arrow moves one metronome pulse — one quarter
+            // (4 steps) in 4/4 and 3/4, exactly the historical nudge; one
+            // eighth (2 steps) in 6/8 and 7/8.
+            const stepDelta = e.shiftKey ? gridModel.pulseSteps : (bounds.gridSteps ?? DEFAULT_GRID_STEPS);
             handleNudgeSelected(stepDelta);
           }
           return;
@@ -699,7 +762,7 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
           e.preventDefault();
           e.stopPropagation();
           if (!interactionRef.current && !marqueeRef.current) {
-            const stepDelta = e.shiftKey ? -4 : -(bounds.gridSteps ?? DEFAULT_GRID_STEPS);
+            const stepDelta = e.shiftKey ? -gridModel.pulseSteps : -(bounds.gridSteps ?? DEFAULT_GRID_STEPS);
             handleNudgeSelected(stepDelta);
           }
           return;
@@ -711,7 +774,7 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
     return () => {
       window.removeEventListener('keydown', handleKeyDown);
     };
-  }, [notes, channel.id, totalSteps]);
+  }, [notes, channel.id, totalSteps, gridModel.pulseSteps, gridModel.barSteps]);
 
   useEffect(() => {
     if (!interaction) return;
@@ -1365,17 +1428,17 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
           {/* Header Bars Step Numbers */}
           <div className="h-6 bg-[var(--apex-panel-header)] border-b border-[var(--apex-border)] sticky top-0 z-20 flex min-w-[896px]">
             {Array.from({ length: totalSteps }).map((_, stepIdx) => {
-              const isBarStart = stepIdx % 4 === 0;
+              const deco = stepDecoration(stepIdx);
               const isCurrentStep = isPlaying && (currentStep % totalSteps) === stepIdx;
 
               return (
                 <div
                   key={stepIdx}
-                  className={`w-7 h-full flex items-center justify-center font-mono text-[8px] border-r ${
-                    isBarStart ? 'border-[var(--apex-grid-line-strong)] text-[var(--apex-text)] font-bold bg-[var(--apex-surface-2)]' : 'border-[var(--apex-grid-line)] text-[var(--apex-text-3)]'
-                  } ${isCurrentStep ? 'bg-[var(--apex-state-selected)] text-[var(--apex-accent)]' : ''}`}
+                  data-step={stepIdx}
+                  data-line-strength={deco.strength}
+                  className={`w-7 h-full flex items-center justify-center font-mono text-[8px] border-r ${rulerCellClass(deco)} ${isCurrentStep ? 'bg-[var(--apex-state-selected)] text-[var(--apex-accent)]' : ''}`}
                 >
-                  {isBarStart ? `${Math.floor(stepIdx / 4) + 1}` : ''}
+                  {deco.label ?? ''}
                 </div>
               );
             })}
@@ -1422,16 +1485,16 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
                 >
                   {/* Grid cells */}
                   {Array.from({ length: totalSteps }).map((_, stepIdx) => {
-                    const isBarStart = stepIdx % 4 === 0;
+                    const deco = stepDecoration(stepIdx);
                     const isCurrent = isPlaying && (currentStep % totalSteps) === stepIdx;
 
                     return (
                       <div
                         key={stepIdx}
                         onClick={() => handleGridClick(pitch, stepIdx)}
-                        className={`w-7 h-full border-r cursor-pointer transition-colors ${
-                          isBarStart ? 'border-[var(--apex-grid-line-strong)]' : 'border-[var(--apex-grid-line)]'
-                        } ${isCurrent ? 'bg-[var(--apex-state-selected)]' : 'hover:bg-[var(--apex-state-hover)]'}`}
+                        data-step={stepIdx}
+                        data-line-strength={deco.strength}
+                        className={`w-7 h-full border-r cursor-pointer transition-colors ${gridCellLineClass(deco)} ${isCurrent ? 'bg-[var(--apex-state-selected)]' : 'hover:bg-[var(--apex-state-hover)]'}`}
                       />
                     );
                   })}
@@ -1539,14 +1602,18 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
               </div>
               <div className="flex-1 relative flex">
                 {Array.from({ length: totalSteps }).map((_, stepIdx) => {
-                  const isBarStart = stepIdx % 4 === 0;
+                  const deco = stepDecoration(stepIdx);
                   const stepNotes = displayNotes.filter(n => Math.floor(n.start) === stepIdx);
 
                   return (
                     <div
                       key={`vel-${stepIdx}`}
+                      data-step={stepIdx}
+                      data-line-strength={deco.strength}
                       className={`w-7 h-full border-r relative flex items-end justify-center pb-1 ${
-                        isBarStart ? 'border-[var(--apex-border)]' : 'border-[var(--apex-grid-line)]'
+                        deco.strength === 'none' || (deco.strength === 'pulse' && !gridModel.legacyQuarterDecoration)
+                          ? 'border-[var(--apex-grid-line)]'
+                          : 'border-[var(--apex-border)]'
                       }`}
                     >
                       {stepNotes.map(n => {

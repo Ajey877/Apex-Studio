@@ -16,6 +16,7 @@ import type {
 import { DEFAULT_GROSS_BEAT_STATE } from './projectState';
 import { isRuntimeSupportedMeter } from '../music/musicalTime';
 import { formatTimeSignature, isSameTimeSignature, isSevenEightGrouping } from '../music/meterPulse';
+import { isCountInBars, type CountInBars } from '../music/countIn';
 
 /**
  * Authoritative runtime mutation boundary for ProjectState.
@@ -190,7 +191,23 @@ const assertSupportedMeterUpdates = (updates: Partial<ProjectMetadata>): void =>
       `Unsupported 7/8 grouping ${String(updates.sevenEightGrouping)}: use 2+2+3, 3+2+2 or 2+3+2.`
     );
   }
+  if ('countInBars' in updates && !isCountInBars(updates.countInBars)) {
+    throw new InvalidRecordingSettingError(
+      `Unsupported recording count-in ${String(updates.countInBars)}: use 0 (Off), 1 or 2 bars.`
+    );
+  }
 };
+
+/**
+ * Phase 1K: thrown when an edit tries to store a recording setting the
+ * count-in workflow does not implement (anything except Off / 1 bar / 2 bars).
+ */
+export class InvalidRecordingSettingError extends RangeError {
+  constructor(message: string) {
+    super(message);
+    this.name = 'InvalidRecordingSettingError';
+  }
+}
 
 export const updateProjectMetadataInProjectState = (
   state: ProjectState,
@@ -247,6 +264,25 @@ export const setSevenEightGroupingInProjectState = (
   const current = state.meta.sevenEightGrouping;
   if (current === grouping) return state;
   return updateProjectMetadataInProjectState(state, { sevenEightGrouping: grouping as ProjectMetadata['sevenEightGrouping'] });
+};
+
+/**
+ * Phase 1K — set the recording count-in length (0 = Off, 1 bar, 2 bars).
+ *
+ * Recording preference only: the value never touches notes, clips or timing
+ * data. Returns the SAME state object when the setting is already active (no
+ * history entry), and throws `InvalidRecordingSettingError` for anything that
+ * is not 0, 1 or 2.
+ */
+export const setRecordingCountInBarsInProjectState = (
+  state: ProjectState,
+  bars: unknown
+): ProjectState => {
+  if (!isCountInBars(bars)) {
+    assertSupportedMeterUpdates({ countInBars: bars as ProjectMetadata['countInBars'] });
+  }
+  if (state.meta.countInBars === bars) return state;
+  return updateProjectMetadataInProjectState(state, { countInBars: bars as CountInBars });
 };
 
 /** History label for a meter edit, e.g. "Change time signature to 7/8". */
@@ -381,7 +417,7 @@ export const getFxUpdateLabel = (updates: Partial<FxSlot>): string => {
 };
 
 export const isContinuousMetaUpdate = (updates: Partial<ProjectMetadata>): boolean => {
-  if ('name' in updates || 'timeSignature' in updates || 'sevenEightGrouping' in updates) {
+  if ('name' in updates || 'timeSignature' in updates || 'sevenEightGrouping' in updates || 'countInBars' in updates) {
     return false;
   }
   return 'swing' in updates || 'bpm' in updates;
@@ -393,6 +429,7 @@ export const getMetaUpdateLabel = (updates: Partial<ProjectMetadata>): string =>
   if ('name' in updates) return 'Rename project';
   if ('timeSignature' in updates) return 'Change time signature';
   if ('sevenEightGrouping' in updates) return 'Change 7/8 accent grouping';
+  if ('countInBars' in updates) return 'Change recording count-in';
   return 'Update project settings';
 };
 

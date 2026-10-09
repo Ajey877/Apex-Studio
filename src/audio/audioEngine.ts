@@ -1,5 +1,7 @@
 import { beatsPerBar, stepsPerBar, stepsToBeats, beatsToSeconds, SIXTEENTH_STEPS_PER_BEAT, LEGACY_TIME_SIGNATURE, resolveProjectTimeSignature, type TimeSignature } from '../music/musicalTime';
 import { DEFAULT_SEVEN_EIGHT_GROUPING, isSevenEightGrouping, resolveMeterPulseLayout, resolveMetronomeClickLevel, type MeterPulseLayout, type SevenEightGrouping } from '../music/meterPulse';
+import { captureBarNumbers, planCountInCapturePosition, resolveCountInBars, type CountInBars } from '../music/countIn';
+import { CountInCancelledError, CountInScheduler, type CountInClickHandle, type CountInResult } from './countInScheduler';
 import { scheduleMetronomeClick } from './metronomeClick';
 import { arpStepSeconds, resolveArpNoteDurationSteps, resolveArpRateSteps } from './noteGate';
 
@@ -442,6 +444,26 @@ export function noteOnsetOffsetSteps(start: unknown, currentStep: number): numbe
   const offsetSteps = start - currentStep;
   return offsetSteps >= 0 && offsetSteps < 1 ? offsetSteps : null;
 }
+
+/**
+ * Phase 1K — what a finished count-in promises the recorder.
+ *
+ * `captureTime` is the audio-clock moment `MediaRecorder` must start at;
+ * `captureBar`/`clipStartBar` are the musical position that moment corresponds
+ * to, so the take can be placed on the playlist at the exact bar recording
+ * began on. Cancelling the count-in rejects with `CountInCancelledError` and
+ * no capture must happen at all — that is what keeps count-in clicks (and any
+ * pre-roll) out of the recorded take.
+ */
+export interface RecordingCountInResult extends CountInResult {
+  readonly bars: CountInBars;
+  /** 1-based transport bar where capture begins. */
+  readonly captureBar: number;
+  /** 0-based playlist `startBar` the recorded clip must be placed at. */
+  readonly clipStartBar: number;
+}
+
+export { CountInCancelledError };
 
 class AudioEngine {
   public isOfflineRendering = false;
@@ -3343,6 +3365,17 @@ class AudioEngine {
   private metronomePulseLayout: MeterPulseLayout | null = null;
   /** Phase 1J: clicks scheduled ahead of the audio clock, cancelled on stop/seek/pause. */
   private activeMetronomeClicks: Set<OscillatorNode> = new Set();
+  /**
+   * Phase 1K — recording count-in.
+   *
+   * `countInBars` is the persisted project setting (0 = Off, 1, 2). The
+   * scheduler owns its click oscillators in its own handle list (NOT in
+   * `activeMetronomeClicks`): count-in clicks are an explicit recording
+   * affordance and must keep sounding even when the metronome toggle is off,
+   * while stop/pause/seek cancel them through `cancelRecordingCountIn()`.
+   */
+  private countInBars: CountInBars = 0;
+  private countInScheduler: CountInScheduler | null = null;
   private isPlaying: boolean = false;
   private timerId: ReturnType<typeof setTimeout> | null = null;
   private currentStep: number = 0;
@@ -3366,6 +3399,10 @@ class AudioEngine {
     if (this.transport) {
       this.transport.setBpm(this.bpm);
     }
+    // Phase 1K: a tempo change re-times the remaining count-in clicks in
+    // place — the musical capture position is unchanged, only its wall-clock
+    // moment moves. Stale scheduled clicks are stopped inside the scheduler.
+    this.countInScheduler?.retime(this.bpm);
   }
 
   /**
@@ -3385,6 +3422,10 @@ class AudioEngine {
     if (this.transport) {
       this.transport.setTimeSignature(resolved);
     }
+    // Phase 1K: "N bars" of count-in no longer describes the same musical
+    // length after a meter change, so the count-in restarts under the new
+    // bar grid from the change point (its waiting promise survives).
+    this.countInScheduler?.restart(this.getMetronomePulseLayout());
   }
 
   /** The meter the runtime currently plays with (always a resolved value). */
@@ -3432,6 +3473,10 @@ class AudioEngine {
     if (resolved === this.sevenEightGrouping) return;
     this.sevenEightGrouping = resolved;
     this.metronomePulseLayout = null;
+    // Phase 1K: the accent grouping is part of the count-in's click pattern.
+    // Same meter → pending clicks keep their times and only their accents
+    // update (the capture offset never moves with an accent grouping).
+    this.countInScheduler?.regroup(this.getMetronomePulseLayout());
   }
 
   public getSevenEightGrouping(): SevenEightGrouping {
@@ -3457,6 +3502,122 @@ class AudioEngine {
       try { osc.disconnect(); } catch (_) { /* already disconnected */ }
     }
     this.activeMetronomeClicks.clear();
+  }
+
+  // --- Phase 1K: recording count-in / pre-roll -----------------------------
+
+  /**
+   * Phase 1K — the recording count-in length in bars: 0 (Off), 1 or 2.
+   * Unknown values resolve to Off (see `resolveCountInBars`).
+   */
+  public setCountInBars(bars: CountInBars | number | undefined): void {
+    if (this.shouldBlockLiveMutation()) return;
+    this.countInBars = resolveCountInBars({ countInBars: bars });
+  }
+
+  public getCountInBars(): CountInBars {
+    return this.countInBars;
+  }
+
+  /** True while a count-in is counting down to its capture moment. */
+  public isCountInRunning(): boolean {
+    return this.countInScheduler?.isRunning ?? false;
+  }
+
+  /**
+   * Phase 1K — runs the recording count-in and resolves exactly when capture
+   * must begin.
+   *
+   * The count-in clicks `bars` full bars of the ACTIVE meter's pulse layout
+   * (project tempo, time signature and 7/8 accent grouping) starting from the
+   * next bar line of the transport grid. The resolved `captureBar` /
+   * `clipStartBar` describe the musical position capture begins on, so the
+   * recorded take can be placed at exactly that bar.
+   *
+   * With `bars = 0` (or the project setting Off) this resolves at the current
+   * position and schedules no clicks — the pre-Phase-1K immediate start.
+   *
+   * Lifecycle guarantees:
+   *   - a second call while a count-in is running THROWS instead of scheduling
+   *     a duplicate click set;
+   *   - `stop()`, `pause()`, `seek()` and `cancelRecordingCountIn()` reject the
+   *     waiting promise with `CountInCancelledError` and silence every pending
+   *     click (no stale timers, no late clicks, no capture offset);
+   *   - a tempo change re-times the remaining clicks in place; a meter or
+   *     grouping change restarts the count-in under the new layout. Either
+   *     way the promise still resolves one full count-in after the audible
+   *     clicks, so `captureBar` is correct when capture begins.
+   *   - count-in clicks are pure audio events: no note, step or pattern data
+   *     is written, and the caller must not start `MediaRecorder` before this
+   *     promise resolves (which is what keeps clicks out of the recorded take).
+   */
+  public beginRecordingCountIn(bars?: CountInBars | number): Promise<RecordingCountInResult> {
+    if (this.shouldBlockLiveMutation()) {
+      return Promise.reject(new Error('Recording is unavailable while an offline render is running'));
+    }
+    const resolvedBars = resolveCountInBars({ countInBars: bars ?? this.countInBars });
+    if (!this.ctx) this.init();
+    const ctx = this.ctx;
+    if (!ctx) return Promise.reject(new Error('Audio context unavailable for the recording count-in'));
+    if (ctx.state === 'suspended') void ctx.resume();
+    const plan = planCountInCapturePosition(this.transportPositionBeats(), this.meter, resolvedBars);
+    const scheduler = this.ensureCountInScheduler();
+    // Throws synchronously when a count-in already runs — a double-pressed
+    // Record button must never schedule a second click set.
+    const started = scheduler.start({
+      bars: resolvedBars,
+      layout: this.getMetronomePulseLayout(),
+      bpm: this.bpm,
+      startBeat: plan.startBeat,
+    });
+    return started.then(result => {
+      // Bar numbers are derived at resolve time so a restart (meter change)
+      // during the count-in reports the capture position that actually
+      // happened, not the one planned before the change.
+      const barsInfo = captureBarNumbers(result.captureBeat, result.schedule.layout.meter);
+      return {
+        ...result,
+        bars: resolvedBars,
+        captureBar: barsInfo.captureBar,
+        clipStartBar: barsInfo.clipStartBar,
+      };
+    });
+  }
+
+  /**
+   * Phase 1K — aborts an active count-in: pending clicks are silenced and the
+   * waiting recorder promise rejects with `CountInCancelledError` (no take).
+   */
+  public cancelRecordingCountIn(): void {
+    this.countInScheduler?.cancel();
+  }
+
+  private ensureCountInScheduler(): CountInScheduler {
+    if (this.countInScheduler) return this.countInScheduler;
+    const scheduleTimer = (fn: () => void, delayMs: number): unknown =>
+      typeof window !== 'undefined' ? window.setTimeout(fn, delayMs) : setTimeout(fn, delayMs);
+    const clearTimer = (handle: unknown): void => {
+      if (typeof window !== 'undefined') window.clearTimeout(handle as number);
+      else clearTimeout(handle as ReturnType<typeof setTimeout>);
+    };
+    this.countInScheduler = new CountInScheduler({
+      now: () => this.ctx?.currentTime ?? 0,
+      scheduleClick: (time, level) => {
+        const context = this.ctx;
+        if (!context) throw new Error('Audio context unavailable for the count-in click');
+        return scheduleMetronomeClick(context, this.masterGain || context.destination, time, level);
+      },
+      setTimer: scheduleTimer,
+      clearTimer,
+    });
+    return this.countInScheduler;
+  }
+
+  /** Musical position of the transport in quarter beats (0 when never played). */
+  private transportPositionBeats(): number {
+    const state = this.transport?.getState();
+    if (!state) return 0;
+    return (state.positionSeconds * this.bpm) / 60;
   }
 
   /**
@@ -4035,6 +4196,9 @@ class AudioEngine {
 
  public stop() {
   if (this.shouldBlockLiveMutation()) return;
+  // Phase 1K: a stop aborts any count-in — its capture moment no longer
+  // exists and every pending click must be silenced.
+  this.cancelRecordingCountIn();
   this.isPlaying = false;
   this.playbackGeneration++;
   this.stopMasterMeasurementPump();
@@ -4062,7 +4226,12 @@ class AudioEngine {
    * from here. Transport actions never touch project data.
    */
   public pause(): void {
-    if (this.shouldBlockLiveMutation() || !this.isPlaying || !this.transport) return;
+    if (this.shouldBlockLiveMutation()) return;
+    // Phase 1K: pausing freezes the musical position the count-in is counting
+    // toward, so the count-in aborts exactly like a stop (pending clicks
+    // silenced, waiting recorder cancelled).
+    this.cancelRecordingCountIn();
+    if (!this.isPlaying || !this.transport) return;
     this.playbackGeneration++;
     this.stopActivePlaybackAudio();
     this.transport.pause();
@@ -4084,9 +4253,10 @@ class AudioEngine {
    */
   public seek(positionSeconds: number): void {
     if (this.shouldBlockLiveMutation()) return;
+    // Phase 1K: a seek aborts any in-flight count-in.
+    this.cancelRecordingCountIn();
     const transport = this.transport;
     if (!transport || !this.ctx) return;
-
     const boundedPosition = this.boundSeekPosition(positionSeconds);
 
     if (this.isPlaying) {
@@ -4278,6 +4448,9 @@ class AudioEngine {
 
   /** Song Mode reached its real end: halt the take exactly on the end position. */
   private handleSongEnd(): void {
+    // Phase 1K: the arrangement ended — any count-in would capture past the
+    // song's end at a stale offset.
+    this.cancelRecordingCountIn();
     this.playbackGeneration++;
     this.stopActivePlaybackAudio();
     this.isPlaying = false;

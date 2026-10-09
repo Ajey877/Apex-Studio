@@ -28,6 +28,8 @@ export interface LiveEngineResynchronizationPort {
   setTimeSignature(meter: readonly [number, number] | undefined): void;
   /** Phase 1J: 7/8 metronome accent grouping (optional for narrow test ports). */
   setSevenEightGrouping?(grouping: string | undefined): void;
+  /** Phase 1K: recording count-in length (optional for narrow test ports). */
+  setCountInBars?(bars: number | undefined): void;
   setSwing(swing: number): void;
   setMetronome(enabled: boolean): void;
   setGrossBeatState(state: GrossBeatState): void;
@@ -64,6 +66,9 @@ export function resynchronizeLiveEngineFromProjectState(
   // actual bar size (resolved to the legacy 4/4 grid when unsupported).
   engine.setTimeSignature(state.meta.timeSignature);
   engine.setSevenEightGrouping?.(state.meta.sevenEightGrouping);
+  // Phase 1K: the recording count-in setting travels with the rest of the
+  // project runtime state (post-render resync included).
+  engine.setCountInBars?.(state.meta.countInBars);
   engine.setSwing(state.meta.swing);
   engine.setMetronome(options.metronome);
   // Phase 79: Gross Beat state is project-owned. Any path that republishes

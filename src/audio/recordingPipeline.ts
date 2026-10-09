@@ -34,6 +34,15 @@ export const validateRecordingTargetTrack = (tracks: PlaylistTrack[], targetTrac
   return track;
 };
 
+/**
+ * Phase 1F: recording bar timing derives from the resolved project meter — a
+ * 3/4 bar lasts 3 beats (1.5 s at 120 BPM), not 4. Missing/unsupported meters
+ * resolve to the legacy 4/4 bar, exactly like the rest of the runtime.
+ *
+ * Phase 1K: `startBar` places the take at the musical bar capture actually
+ * began on (the count-in's `clipStartBar`). The default 0 keeps the historic
+ * "record onto bar 1" behaviour for callers without a count-in plan.
+ */
 export const createRecordingPlaylistClip = (
   recording: AudioRecording,
   registration: RecordingBufferRegistration,
@@ -41,7 +50,8 @@ export const createRecordingPlaylistClip = (
   targetTrackIndex: number,
   bpm: number,
   id = `rec-clip-${Date.now()}`,
-  meter: TimeSignature = LEGACY_TIME_SIGNATURE
+  meter: TimeSignature = LEGACY_TIME_SIGNATURE,
+  startBar = 0
 ): PlaylistClip => {
   if (!recording.audioBlob || recording.audioBlob.size === 0) throw new Error('The recording contains no audio data');
   if (registration.id !== getRecordingAudioBufferId(recording.id)) throw new Error('Recording audio buffer registration does not match the recording');
@@ -53,11 +63,12 @@ export const createRecordingPlaylistClip = (
 
   validateRecordingTargetTrack(tracks, targetTrackIndex);
   const lengthBars = getRecordingLengthBars(registration.duration, bpm, meter);
+  const safeStartBar = Number.isFinite(startBar) && startBar > 0 ? Math.floor(startBar) : 0;
 
   return {
     id,
     trackIndex: targetTrackIndex,
-    startBar: 0,
+    startBar: safeStartBar,
     lengthBars,
     type: 'audio',
     audioBufferId: registration.id,
