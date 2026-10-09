@@ -14,9 +14,11 @@ import type {
   VocalTunerSettings
 } from '../types/daw';
 import { DEFAULT_GROSS_BEAT_STATE } from './projectState';
-import { isRuntimeSupportedMeter } from '../music/musicalTime';
-import { formatTimeSignature, isSameTimeSignature, isSevenEightGrouping } from '../music/meterPulse';
+import { isRuntimeSupportedMeter, resolveProjectTimeSignature } from '../music/musicalTime';
+import { formatTimeSignature, isSameTimeSignature, isSevenEightGrouping, resolveSevenEightGrouping } from '../music/meterPulse';
 import { isCountInBars, type CountInBars } from '../music/countIn';
+import { isPunchRecordingSettings, isSamePunchRecording, resolvePunchRecording, validatePunchRecording, type PunchRecordingSettings } from '../music/punchRecording';
+import { getProjectTimelineBars } from './playlistTimeline';
 
 /**
  * Authoritative runtime mutation boundary for ProjectState.
@@ -196,6 +198,11 @@ const assertSupportedMeterUpdates = (updates: Partial<ProjectMetadata>): void =>
       `Unsupported recording count-in ${String(updates.countInBars)}: use 0 (Off), 1 or 2 bars.`
     );
   }
+  if ('punchRecording' in updates && !isPunchRecordingSettings(updates.punchRecording)) {
+    throw new InvalidRecordingSettingError(
+      'Unsupported punch recording range: it needs an enabled flag and 1-based punch-in and punch-out bar/beat positions.'
+    );
+  }
 };
 
 /**
@@ -283,6 +290,51 @@ export const setRecordingCountInBarsInProjectState = (
   }
   if (state.meta.countInBars === bars) return state;
   return updateProjectMetadataInProjectState(state, { countInBars: bars as CountInBars });
+};
+
+/**
+ * Phase 1L — set the punch-in / punch-out recording window.
+ *
+ * Recording preference only: it never touches notes, clips or timeline length.
+ * The window is validated against the project's own resolved meter, 7/8
+ * grouping and arrangement length at the mutation boundary, so the document can
+ * never hold a window the runtime would refuse to record (a malformed bar/beat,
+ * or punch-out at or before punch-in). A punch-out beyond the arrangement end
+ * is accepted deliberately — the defined take behaviour truncates the take at
+ * the end of the project.
+ *
+ * Returns the SAME state object when nothing actually changed (no history
+ * entry), and throws `InvalidRecordingSettingError` otherwise.
+ */
+export const setPunchRecordingInProjectState = (
+  state: ProjectState,
+  settings: unknown
+): ProjectState => {
+  if (!isPunchRecordingSettings(settings)) {
+    assertSupportedMeterUpdates({ punchRecording: settings as ProjectMetadata['punchRecording'] });
+  }
+  const next = settings as PunchRecordingSettings;
+  const validation = validatePunchRecording(next, {
+    meter: resolveProjectTimeSignature(state.meta),
+    grouping: resolveSevenEightGrouping(state.meta),
+    totalBars: getProjectTimelineBars(state),
+  });
+  if (!validation.valid) {
+    throw new InvalidRecordingSettingError(validation.issues.map(issue => issue.message).join(' '));
+  }
+  const current = resolvePunchRecording(state.meta);
+  const stored = state.meta.punchRecording;
+  if (isPunchRecordingSettings(stored) && isSamePunchRecording(stored, next)) return state;
+  if (stored === undefined && !next.enabled && isSamePunchRecording(current, next)) return state;
+  return updateProjectMetadataInProjectState(state, {
+    punchRecording: {
+      enabled: next.enabled,
+      inBar: next.inBar,
+      inBeat: next.inBeat,
+      outBar: next.outBar,
+      outBeat: next.outBeat,
+    },
+  });
 };
 
 /** History label for a meter edit, e.g. "Change time signature to 7/8". */
@@ -417,7 +469,7 @@ export const getFxUpdateLabel = (updates: Partial<FxSlot>): string => {
 };
 
 export const isContinuousMetaUpdate = (updates: Partial<ProjectMetadata>): boolean => {
-  if ('name' in updates || 'timeSignature' in updates || 'sevenEightGrouping' in updates || 'countInBars' in updates) {
+  if ('name' in updates || 'timeSignature' in updates || 'sevenEightGrouping' in updates || 'countInBars' in updates || 'punchRecording' in updates) {
     return false;
   }
   return 'swing' in updates || 'bpm' in updates;
@@ -430,6 +482,9 @@ export const getMetaUpdateLabel = (updates: Partial<ProjectMetadata>): string =>
   if ('timeSignature' in updates) return 'Change time signature';
   if ('sevenEightGrouping' in updates) return 'Change 7/8 accent grouping';
   if ('countInBars' in updates) return 'Change recording count-in';
+  if ('punchRecording' in updates) {
+    return updates.punchRecording?.enabled ? 'Change punch recording range' : 'Turn off punch recording';
+  }
   return 'Update project settings';
 };
 

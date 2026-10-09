@@ -1,5 +1,6 @@
 import { PlaylistRulerTicks } from './PlaylistRulerTicks';
 import { resolveSevenEightGrouping } from '../music/meterPulse';
+import { punchRulerSegments, type PunchRangeBeats } from '../music/punchRecording';
 import { barsToBeats, beatsToSeconds, resolveProjectTimeSignature } from '../music/musicalTime';
 import React, { useState, useRef, useEffect } from 'react';
 import { 
@@ -124,6 +125,13 @@ interface PlaylistArrangerProps {
   totalBars: number;
   /** Publishes a new arrangement length through the normal project mutation path (single history entry). */
   onUpdateTotalBars: (totalBars: number) => void;
+  /**
+   * Phase 1L: the active punch-in/punch-out window in absolute quarter beats,
+   * or null when punch recording is off. Drawn on the ruler so the range the
+   * recorder will capture is visible on the timeline. Display only: it never
+   * moves a clip.
+   */
+  punchRegion?: PunchRangeBeats | null;
 }
 
 const BAR_WIDTH = 96;
@@ -207,6 +215,7 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
   isPlaying,
   totalBars,
   onUpdateTotalBars,
+  punchRegion,
   bpm,
   timeSignature,
   sevenEightGrouping
@@ -215,6 +224,11 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
   // arranger. Missing/unsupported values fall back to the legacy 4/4 grid.
   const meter = resolveProjectTimeSignature({ timeSignature });
   const rulerGrouping = resolveSevenEightGrouping({ sevenEightGrouping });
+  // Phase 1L: per-bar geometry of the punch window for the ruler overlay.
+  const punchSegments = punchRegion
+    ? punchRulerSegments(punchRegion, { meter, grouping: rulerGrouping, totalBars })
+    : [];
+  const punchSegmentByBar = new Map(punchSegments.map(segment => [segment.barIndex, segment]));
   const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
   const [selectedPointIndex, setSelectedPointIndex] = useState<number | null>(null);
   const [activeTool, setActiveTool] = useState<'place' | 'cut' | 'delete'>('place');
@@ -1106,6 +1120,25 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
                   {barIdx === 0 && (
                     <span className="text-[7px] text-[var(--apex-text-3)]" data-ruler-meter>{`${meter[0]}/${meter[1]}`}</span>
                   )}
+                  {/* Phase 1L: the punched range, drawn on the ruler. Display
+                      only — it never moves a clip or the playhead. */}
+                  {punchSegmentByBar.has(barIdx) && (() => {
+                    const segment = punchSegmentByBar.get(barIdx)!;
+                    return (
+                      <span
+                        className="pointer-events-none absolute inset-y-0 bg-[var(--apex-accent)]/25 border-x border-[var(--apex-accent)]"
+                        aria-hidden="true"
+                        data-punch-region
+                        data-punch-bar={barIdx + 1}
+                        data-punch-in={segment.containsIn}
+                        data-punch-out={segment.containsOut}
+                        style={{
+                          left: `${(segment.startFraction * 100).toFixed(4)}%`,
+                          width: `${((segment.endFraction - segment.startFraction) * 100).toFixed(4)}%`,
+                        }}
+                      />
+                    );
+                  })()}
                   <PlaylistRulerTicks meter={meter} grouping={rulerGrouping} />
                 </div>
               );

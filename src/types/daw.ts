@@ -609,6 +609,23 @@ export interface ProjectMetadata {
    * `resolveCountInBars`.
    */
   countInBars?: 0 | 1 | 2;
+  /**
+   * Phase 1L: punch-in / punch-out recording window. Optional and additive —
+   * projects saved before Phase 1L omit it and record ordinary takes.
+   *
+   * The window is BAR/BEAT anchored (1-based bar, 1-based metronome pulse, the
+   * transport readout's notation) rather than stored as absolute beats, so it
+   * follows the same bar-anchored policy as playlist clips: a meter change
+   * keeps "bar 9 beat 1" on bar 9 beat 1 and only its length in seconds
+   * changes. See `resolvePunchRecording` / `planPunchCapture`.
+   */
+  punchRecording?: {
+    enabled: boolean;
+    inBar: number;
+    inBeat: number;
+    outBar: number;
+    outBeat: number;
+  };
   swing: number; // 0 - 1.0
   masterVolume: number;
   masterPitch: number;

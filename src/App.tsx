@@ -54,7 +54,7 @@ import {
   describeMissingAudioAssets,
   getMissingAudioAssetsSignature
 } from './state/audioAssetAvailability';
-import { createRecordingPlaylistClip, getRecordingAudioBufferId, validateRecordingTargetTrack } from './audio/recordingPipeline';
+import { createPunchRecordingPlaylistClip, createRecordingPlaylistClip, getRecordingAudioBufferId, trimAudioBufferToSeconds, validateRecordingTargetTrack, type PunchClipPlacement } from './audio/recordingPipeline';
 import { createHistory, type ProjectHistory, resolveSaveShortcut, resolveUndoRedoShortcut } from './state/projectHistory';
 import { KEY_NOTE_MAP, getKeyboardNotePitch } from './state/musicalKeyboard';
 import { fullscreenController } from './state/fullscreen';
@@ -103,10 +103,14 @@ import {
   setProjectTimeSignatureInProjectState,
   setSevenEightGroupingInProjectState,
   setRecordingCountInBarsInProjectState,
+  setPunchRecordingInProjectState,
   getTimeSignatureEditLabel,
   updateGrossBeatInProjectState,
   updateVocalTunerInProjectState
 } from './state/projectMutations';
+import type { PunchRecordingSettings } from './music/punchRecording';
+import { resolvePunchRecording, validatePunchRecording } from './music/punchRecording';
+import { resolveSevenEightGrouping } from './music/meterPulse';
 import { DEFAULT_GROSS_BEAT_STATE } from './state/projectState';
 
 // Component Suite
@@ -554,6 +558,13 @@ export function App() {
   useEffect(() => {
     audioEngine.setCountInBars(projectState.meta.countInBars);
   }, [projectState.meta.countInBars]);
+
+  // Phase 1L: the punch window is published the same way, so the engine arms
+  // exactly the window the document holds (load, undo/redo and project
+  // replacement included). Missing/unknown values resolve to punch off.
+  useEffect(() => {
+    audioEngine.setPunchRecording(projectState.meta.punchRecording);
+  }, [projectState.meta.punchRecording]);
 
   useEffect(() => {
     audioEngine.setSwing(projectState.meta.swing);
@@ -1129,6 +1140,28 @@ export function App() {
     );
   };
 
+  /**
+   * Phase 1L: punch-in / punch-out window, persisted like the count-in. The
+   * mutation boundary validates it against the project's own meter and
+   * timeline, so an invalid window can never reach the document.
+   */
+  const handleSetPunchRecording = (settings: PunchRecordingSettings) => {
+    const current = projectStateRef.current;
+    let next: ProjectState;
+    try {
+      next = setPunchRecordingInProjectState(current, settings);
+    } catch (error) {
+      // The recorder shows the field-level reason; nothing is stored.
+      console.warn('[Apex Studio] Punch recording change rejected.', error);
+      return;
+    }
+    if (next === current) return;
+    mutateProjectState(
+      state => setPunchRecordingInProjectState(state, settings),
+      settings.enabled ? 'Change punch recording range' : 'Turn off punch recording'
+    );
+  };
+
   const handleUpdateChannel = (
     channelId: string,
     updates: Partial<Channel>,
@@ -1501,7 +1534,8 @@ export function App() {
     recording: AudioRecording,
     targetTrackIndex: number,
     recordingProjectGeneration: number,
-    captureStartBar = 0
+    captureStartBar = 0,
+    punchPlacement?: PunchClipPlacement
   ) => {
     if (!isRecordingProjectGenerationCurrent(recordingProjectGeneration, recordingProjectGenerationRef.current)) {
       throw new Error('The recording belongs to a project that has already been replaced');
@@ -1524,6 +1558,25 @@ export function App() {
       throw new Error('The recording belongs to a project that has already been replaced');
     }
     const persistedRecording: AudioRecording = { ...recording, audioBufferId };
+    /**
+     * Phase 1L: a punch take is trimmed to its punched window before the clip is
+     * built. `MediaRecorder` cannot start or stop on a sample, so the encoded
+     * blob normally carries a few milliseconds past punch-out; re-registering
+     * the trimmed buffer through `setSampleBuffer` replaces both the in-memory
+     * playback asset and the persisted one (the installer encodes and stores it
+     * under the same id), so nothing beyond punch-out can play, export or
+     * survive a reload. The clip's `lengthBars` independently bounds playback.
+     */
+    let registration = { id: audioBufferId, buffer: loaded.buffer, peaks: loaded.peaks, duration: loaded.duration };
+    if (punchPlacement) {
+      const trimmed = trimAudioBufferToSeconds(loaded.buffer, punchPlacement.trimSeconds, (channels, length, sampleRate) =>
+        audioEngine.getContext().createBuffer(channels, length, sampleRate));
+      if (trimmed !== loaded.buffer) {
+        audioEngine.setSampleBuffer(audioBufferId, trimmed);
+        await waitForSampleBufferPersistence(audioEngine, audioBufferId);
+        registration = { id: audioBufferId, buffer: trimmed, peaks: loaded.peaks, duration: trimmed.duration };
+      }
+    }
     // AudioEngine has no buffer-removal API; a removed target leaves only this narrow in-memory orphan.
     const currentState = projectStateRef.current;
     if (!isRecordingProjectGenerationCurrent(recordingProjectGeneration, recordingProjectGenerationRef.current)) {
@@ -1536,17 +1589,30 @@ export function App() {
       return;
     }
     const currentTargetTrackIndex = currentState.playlistTracks.findIndex(track => track.id === targetTrackId);
-    const recordingClip = createRecordingPlaylistClip(
-      persistedRecording,
-      { id: audioBufferId, buffer: loaded.buffer, peaks: loaded.peaks, duration: loaded.duration },
-      currentState.playlistTracks,
-      currentTargetTrackIndex,
-      currentState.meta.bpm,
-      `rec-clip-${Date.now()}`,
-      currentState.meta.timeSignature,
-      // Phase 1K: the take lands on the bar capture began on after the count-in.
-      captureStartBar
-    );
+    // A punch take keeps its exact punched geometry (fractional bar, fractional
+    // length). An ordinary take is unchanged: whole-bar rounding from the
+    // measured buffer duration, placed at the count-in capture bar.
+    const recordingClip = punchPlacement
+      ? createPunchRecordingPlaylistClip(
+          persistedRecording,
+          registration,
+          currentState.playlistTracks,
+          currentTargetTrackIndex,
+          punchPlacement,
+          `punch-clip-${Date.now()}`,
+          currentState.totalBars
+        )
+      : createRecordingPlaylistClip(
+          persistedRecording,
+          registration,
+          currentState.playlistTracks,
+          currentTargetTrackIndex,
+          currentState.meta.bpm,
+          `rec-clip-${Date.now()}`,
+          currentState.meta.timeSignature,
+          // Phase 1K: the take lands on the bar capture began on after the count-in.
+          captureStartBar
+        );
     const nextState = {
       ...currentState,
       recordings: [...currentState.recordings, persistedRecording],
@@ -1833,6 +1899,22 @@ export function App() {
    */
   const projectTimelineBars = getProjectTimelineBars(projectState);
 
+  /**
+   * Phase 1L: the punch window in absolute beats, for the playlist ruler
+   * overlay. Derived from the same document the recorder arms from, so the
+   * timeline shows exactly the range that will be captured. Null when punch
+   * recording is off or the stored window is not valid under the active meter.
+   */
+  const punchRegionForRuler = (() => {
+    const settings = resolvePunchRecording(projectState.meta);
+    if (!settings.enabled) return null;
+    return validatePunchRecording(settings, {
+      meter: resolveProjectTimeSignature(projectState.meta),
+      grouping: resolveSevenEightGrouping(projectState.meta),
+      totalBars: projectTimelineBars,
+    }).range;
+  })();
+
   // Phase 8C (P1-11): missing audio is derived from the project itself (hydration
   // flags clips/samples), so it stays accurate across save, reload and recovery
   // without a second source of truth.
@@ -2115,6 +2197,7 @@ export function App() {
             <PlaylistArranger
               totalBars={projectTimelineBars}
               onUpdateTotalBars={handleUpdateTotalBars}
+              punchRegion={punchRegionForRuler}
               tracks={projectState.playlistTracks}
               clips={projectState.playlistClips}
               patterns={projectState.patterns}
@@ -2393,6 +2476,14 @@ export function App() {
         getCurrentProjectGeneration={() => recordingProjectGenerationRef.current}
         countInBars={projectState.meta.countInBars}
         onUpdateCountInBars={handleSetRecordingCountInBars}
+        punchRecording={projectState.meta.punchRecording}
+        onUpdatePunchRecording={handleSetPunchRecording}
+        timeSignature={projectState.meta.timeSignature}
+        sevenEightGrouping={projectState.meta.sevenEightGrouping}
+        totalBars={projectState.totalBars}
+        bpm={projectState.meta.bpm}
+        currentBar={currentBar}
+        currentStep={currentStep}
         onRegisterProjectReplacementHandler={handler => { cancelRecordingForReplacementRef.current = handler; }}
         onClose={() => { setIsAudioRecorderOpen(false); setIsRecording(false); }}
         onSaveRecording={handleSaveRecordingToPlaylist}

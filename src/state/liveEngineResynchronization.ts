@@ -30,6 +30,8 @@ export interface LiveEngineResynchronizationPort {
   setSevenEightGrouping?(grouping: string | undefined): void;
   /** Phase 1K: recording count-in length (optional for narrow test ports). */
   setCountInBars?(bars: number | undefined): void;
+  /** Phase 1L: punch-in/punch-out window (optional for narrow test ports). */
+  setPunchRecording?(settings: unknown): void;
   setSwing(swing: number): void;
   setMetronome(enabled: boolean): void;
   setGrossBeatState(state: GrossBeatState): void;
@@ -69,6 +71,9 @@ export function resynchronizeLiveEngineFromProjectState(
   // Phase 1K: the recording count-in setting travels with the rest of the
   // project runtime state (post-render resync included).
   engine.setCountInBars?.(state.meta.countInBars);
+  // Phase 1L: the punch window is the same kind of recording preference, so it
+  // republishes on the same paths (load, undo/redo, post-offline resync).
+  engine.setPunchRecording?.(state.meta.punchRecording);
   engine.setSwing(state.meta.swing);
   engine.setMetronome(options.metronome);
   // Phase 79: Gross Beat state is project-owned. Any path that republishes
