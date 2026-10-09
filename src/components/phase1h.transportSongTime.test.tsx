@@ -242,12 +242,26 @@ test('Phase 1I: 7/8 displays seven eighth-note beats with two sixteenth subdivis
   assert.equal(barPositionOf({ currentBar: 1, currentStep: 15, meta: meta78 }), '01.1.2');
 });
 
-test('Phase 1I: mechanical 6/8 keeps its existing three quarter-note-beat display', () => {
+test('Phase 1K: 6/8 displays six eighth-note pulses with two sixteenth subdivisions each (supersedes the Phase 1I quarter display)', () => {
   const meta68 = metaWith({ timeSignature: [6, 8] });
-  assert.equal(barPositionOf({ currentBar: 1, currentStep: 0, meta: meta68 }), '01.1.1');
-  assert.equal(barPositionOf({ currentBar: 1, currentStep: 3, meta: meta68 }), '01.1.4');
-  assert.equal(barPositionOf({ currentBar: 1, currentStep: 4, meta: meta68 }), '01.2.1');
-  assert.equal(barPositionOf({ currentBar: 1, currentStep: 8, meta: meta68 }), '01.3.1');
-  assert.equal(barPositionOf({ currentBar: 1, currentStep: 11, meta: meta68 }), '01.3.4');
+  // Phase 1K made the beat display follow the metronome pulse layout: in 6/8
+  // the click is an eighth-note pulse (3+3 accent grouping), so the beat readout
+  // counts eighths 1..6 instead of the Phase 1I mechanical quarter beats.
+  const expected = [
+    '01.1.1', '01.1.2',
+    '01.2.1', '01.2.2',
+    '01.3.1', '01.3.2',
+    '01.4.1', '01.4.2',
+    '01.5.1', '01.5.2',
+    '01.6.1', '01.6.2',
+  ];
+  expected.forEach((position, currentStep) => {
+    assert.equal(
+      barPositionOf({ currentBar: 1, currentStep, meta: meta68 }),
+      position,
+      `6/8 step ${currentStep}`,
+    );
+  });
   assert.equal(barPositionOf({ currentBar: 2, currentStep: 0, meta: meta68 }), '02.1.1');
+  assert.equal(barPositionOf({ currentBar: 1, currentStep: 12, meta: meta68 }), '01.1.1');
 });

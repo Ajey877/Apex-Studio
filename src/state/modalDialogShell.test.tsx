@@ -307,10 +307,12 @@ const MODAL_CASES: ModalCase[] = [
     closeLabel: 'Close audio recorder', overlayClass: OVERLAY_SHELL_PADDED,
     open: React.createElement(AudioRecorderModal, {
       isOpen: true, projectGeneration: 0, getCurrentProjectGeneration: () => 0,
+      countInBars: 0, onUpdateCountInBars: noop,
       onClose: noop, onRegisterProjectReplacementHandler: noop, onSaveRecording: noop,
     }),
     closed: React.createElement(AudioRecorderModal, {
       isOpen: false, projectGeneration: 0, getCurrentProjectGeneration: () => 0,
+      countInBars: 0, onUpdateCountInBars: noop,
       onClose: noop, onRegisterProjectReplacementHandler: noop, onSaveRecording: noop,
     }),
   },

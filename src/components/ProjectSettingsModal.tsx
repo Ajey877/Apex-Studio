@@ -14,6 +14,7 @@ import {
   type MeterPulseLayout,
   type SevenEightGrouping,
 } from '../music/meterPulse';
+import { COUNT_IN_OPTIONS, describeCountInBars, isCountInBars, resolveCountInBars, type CountInBars } from '../music/countIn';
 
 /**
  * Phase 1J — Project Settings: the time-signature selector and the 7/8
@@ -28,6 +29,12 @@ import {
 export interface ProjectSettingsSelectionHandlers {
   onSelectTimeSignature: (meter: [number, number]) => void;
   onSelectSevenEightGrouping: (grouping: SevenEightGrouping) => void;
+  /**
+   * Phase 1K: recording count-in length. Optional so embedders without a
+   * recording workflow keep the Phase 1J dialog unchanged; when provided the
+   * dialog shows the Off / 1 bar / 2 bars selector.
+   */
+  onSelectCountInBars?: (bars: CountInBars) => void;
 }
 
 export type SelectionOutcome =
@@ -69,6 +76,22 @@ export function selectSevenEightGrouping(
   return { status: 'applied', label: value };
 }
 
+/** Phase 1K: pure count-in selector behaviour shared by the dialog and tests. */
+export function selectRecordingCountIn(
+  value: unknown,
+  current: unknown,
+  handlers: Pick<ProjectSettingsSelectionHandlers, 'onSelectCountInBars'>
+): SelectionOutcome {
+  if (!isCountInBars(value)) {
+    return { status: 'rejected', message: `${String(value)} is not a count-in length. Choose Off, 1 bar or 2 bars.` };
+  }
+  if (resolveCountInBars({ countInBars: current }) === value) {
+    return { status: 'unchanged', label: describeCountInBars(value) };
+  }
+  handlers.onSelectCountInBars?.(value);
+  return { status: 'applied', label: describeCountInBars(value) };
+}
+
 const METER_DESCRIPTIONS: Record<string, string> = {
   '4/4': 'Four quarter-note beats',
   '3/4': 'Three quarter-note beats (waltz)',
@@ -100,6 +123,8 @@ export interface ProjectSettingsModalProps extends ProjectSettingsSelectionHandl
   timeSignature: unknown;
   /** The stored `meta.sevenEightGrouping` (optional). */
   sevenEightGrouping: unknown;
+  /** Phase 1K: the stored `meta.countInBars` (optional). */
+  countInBars?: unknown;
   onClose: () => void;
 }
 
@@ -107,8 +132,10 @@ export const ProjectSettingsModal: React.FC<ProjectSettingsModalProps> = ({
   isOpen,
   timeSignature,
   sevenEightGrouping,
+  countInBars,
   onSelectTimeSignature,
   onSelectSevenEightGrouping,
+  onSelectCountInBars,
   onClose,
 }) => {
   const [message, setMessage] = useState<string | null>(null);
@@ -118,6 +145,7 @@ export const ProjectSettingsModal: React.FC<ProjectSettingsModalProps> = ({
   const grouping = resolveSevenEightGrouping({ sevenEightGrouping });
   const activeLayout = resolveMeterPulseLayout(stored.runtime, grouping);
   const isSevenEight = stored.supported && stored.runtime[0] === 7 && stored.runtime[1] === 8;
+  const countInSelection = resolveCountInBars({ countInBars });
 
   const handleMeter = (value: string) => {
     const outcome = selectProjectTimeSignature(value, timeSignature, { onSelectTimeSignature });
@@ -125,6 +153,10 @@ export const ProjectSettingsModal: React.FC<ProjectSettingsModalProps> = ({
   };
   const handleGrouping = (value: string) => {
     const outcome = selectSevenEightGrouping(value, sevenEightGrouping, { onSelectSevenEightGrouping });
+    setMessage(outcome.status === 'rejected' ? outcome.message : null);
+  };
+  const handleCountIn = (value: unknown) => {
+    const outcome = selectRecordingCountIn(value, countInBars, { onSelectCountInBars });
     setMessage(outcome.status === 'rejected' ? outcome.message : null);
   };
 
@@ -200,6 +232,37 @@ export const ProjectSettingsModal: React.FC<ProjectSettingsModalProps> = ({
             </div>
             <p className="mt-2 text-[11px] text-[var(--apex-text-2)]">
               Sets which eighth notes the metronome accents and where the ruler draws group lines. It never moves notes.
+            </p>
+          </fieldset>
+        )}
+
+        {onSelectCountInBars && (
+          <fieldset className="mb-4" data-testid="project-settings-count-in">
+            <legend className="mb-2 text-sm font-semibold">Recording count-in</legend>
+            <div className="grid grid-cols-3 gap-2" role="radiogroup" aria-label="Recording count-in">
+              {COUNT_IN_OPTIONS.map(option => {
+                const checked = countInSelection === option;
+                return (
+                  <label
+                    key={option}
+                    className={`cursor-pointer rounded-lg border p-2.5 transition-colors focus-within:ring-2 focus-within:ring-[var(--apex-state-focus)] ${checked ? 'border-[var(--apex-accent)] bg-[var(--apex-state-selected)]' : 'border-[var(--apex-border)] hover:border-[var(--apex-accent)]'}`}
+                  >
+                    <input
+                      type="radio"
+                      name="project-count-in"
+                      value={option}
+                      checked={checked}
+                      onChange={() => handleCountIn(option)}
+                      className="sr-only"
+                      data-count-in={option}
+                    />
+                    <span className="block font-mono text-sm font-semibold">{describeCountInBars(option)}</span>
+                  </label>
+                );
+              })}
+            </div>
+            <p className="mt-2 text-[11px] text-[var(--apex-text-2)]">
+              Bars of metronome clicks before recording starts, at the project tempo and meter. Count-in clicks are never recorded.
             </p>
           </fieldset>
         )}

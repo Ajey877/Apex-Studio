@@ -1,4 +1,5 @@
 import { beatsPerBar, beatsToSeconds, resolveProjectTimeSignature, SIXTEENTH_STEPS_PER_BEAT } from '../music/musicalTime';
+import { describePulseLayout, resolveMeterPulseLayout, resolveSevenEightGrouping } from '../music/meterPulse';
 import React, { useEffect, useMemo, useState } from 'react';
 import {
   AlertTriangle,
@@ -280,18 +281,35 @@ export const TransportBar: React.FC<TransportBarProps> = ({
     ]
   );
 
-  // Phase 1F/1I: keep the existing quarter-note beat display for 4/4, 3/4,
-  // and mechanical 6/8. In 7/8, display the seven eighth-note beats instead:
-  // each beat spans two sixteenth steps, and its subdivision is 1..2. Wrapping
-  // the beat index prevents a longer absolute pattern loop from showing a
-  // phantom eighth-note beat after the seven-beat bar.
+  // Phase 1F/1I: keep the existing quarter-note beat display for 4/4, 3/4.
+  // Phase 1K: the displayed beat is the METRONOME PULSE of the active meter,
+  // so the readout and the click agree beat-for-beat — quarter pulses (1..4 /
+  // 1..3) in 4/4 and 3/4 with their historical 4-way subdivision, eighth
+  // pulses in 6/8 (1..6) and 7/8 (1..7) with two sixteenth subdivisions.
+  // Wrapping the beat index prevents a longer absolute pattern loop from
+  // showing a phantom pulse after the bar. In 6/8 and 7/8 a beat-group strip
+  // additionally shows the dotted-quarter / selected grouping (3+3, 2+2+3,
+  // 3+2+2, 2+3+2) with the active group highlighted — presentation only; no
+  // stored note or clip position depends on how the display is grouped.
   const resolvedMeter = resolveProjectTimeSignature(meta);
   const meterBeatsPerBar = beatsPerBar(resolvedMeter);
-  const isSevenEight = resolvedMeter[0] === 7 && resolvedMeter[1] === 8;
-  const stepsPerDisplayedBeat = isSevenEight ? SIXTEENTH_STEPS_PER_BEAT / 2 : SIXTEENTH_STEPS_PER_BEAT;
-  const displayedBeatsPerBar = isSevenEight ? 7 : meterBeatsPerBar;
+  const pulseGrouping = resolveSevenEightGrouping(meta);
+  const pulseLayout = resolveMeterPulseLayout(resolvedMeter, pulseGrouping);
+  const stepsPerDisplayedBeat = pulseLayout.stepsPerPulse;
+  const displayedBeatsPerBar = pulseLayout.pulses.length;
   const formattedBeat = (Math.floor(currentStep / stepsPerDisplayedBeat) % displayedBeatsPerBar) + 1;
   const formatted16th = (currentStep % stepsPerDisplayedBeat) + 1;
+  const currentPulseIndex = Math.floor(currentStep / stepsPerDisplayedBeat) % displayedBeatsPerBar;
+  const beatGroupOfPulse = (pulseIndex: number): number => {
+    let pulseCursor = 0;
+    for (let groupIndex = 0; groupIndex < pulseLayout.groups.length; groupIndex++) {
+      pulseCursor += pulseLayout.groups[groupIndex];
+      if (pulseIndex < pulseCursor) return groupIndex;
+    }
+    return 0;
+  };
+  const activeGroupIndex = beatGroupOfPulse(currentPulseIndex);
+  const showBeatGroups = pulseLayout.groups.length > 1;
 
   // Calculate song time string (e.g. 03:24:12)
   // Phase 1H: the Time cell is the wall-clock position of the displayed
@@ -424,6 +442,36 @@ export const TransportBar: React.FC<TransportBarProps> = ({
             <span className="apex-readout-value" title="Bar . beat . step">
               {barPosition}
             </span>
+            {/* Phase 1K: beat-group strip for compound/irregular meters. The
+                pills show the metronome's grouping (6/8 → two dotted-quarter
+                groups of 3 eighths; 7/8 → the selected 2+2+3 / 3+2+2 / 2+3+2)
+                with the group the playhead is in highlighted. 4/4 and 3/4 are
+                unchanged — their quarter beats already are the grouping. */}
+            {showBeatGroups && (
+              <span
+                className="flex items-center gap-0.5 ml-1"
+                data-testid="transport-beat-groups"
+                data-grouping={pulseLayout.groups.join('+')}
+                data-active-group={activeGroupIndex}
+                title={describePulseLayout(pulseLayout)}
+                aria-label={`Beat groups ${pulseLayout.groups.join('+')}, group ${activeGroupIndex + 1} of ${pulseLayout.groups.length}`}
+              >
+                {pulseLayout.groups.map((size, index) => (
+                  <span
+                    key={index}
+                    data-group-index={index}
+                    data-group-size={size}
+                    className={`px-1 rounded-sm font-mono text-[length:var(--apex-type-micro)] leading-4 border ${
+                      index === activeGroupIndex
+                        ? 'border-[var(--apex-accent)] text-[var(--apex-accent)] font-semibold bg-[var(--apex-state-selected)]'
+                        : 'border-[var(--apex-border)] text-[var(--apex-text-3)]'
+                    }`}
+                  >
+                    {size}
+                  </span>
+                ))}
+              </span>
+            )}
           </div>
         </div>
 

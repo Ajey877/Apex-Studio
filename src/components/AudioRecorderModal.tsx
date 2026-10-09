@@ -4,25 +4,40 @@ import { Mic, Square, Pause, Play, Check, X, AlertCircle } from 'lucide-react';
 import { AudioRecording } from '../types/daw';
 import { audioEngine } from '../audio/audioEngine';
 import { RecordingEngine } from '../audio/recordingEngine';
+import { CountInCancelledError } from '../audio/countInScheduler';
+import { COUNT_IN_OPTIONS, describeCountInBars, isCountInBars, resolveCountInBars, type CountInBars } from '../music/countIn';
 import { sessionBlobUrlRegistry } from '../state/sessionBlobUrlRegistry';
 
 interface AudioRecorderModalProps {
   isOpen: boolean;
   projectGeneration: number;
   getCurrentProjectGeneration: () => number;
+  /** Phase 1K: the persisted `ProjectMetadata.countInBars` (0 = Off, 1, 2). */
+  countInBars: unknown;
+  /** Persists a count-in setting change (project history + save). */
+  onUpdateCountInBars: (bars: CountInBars) => void;
   onClose: () => void;
   onRegisterProjectReplacementHandler: (handler: () => Promise<void>) => void;
-  onSaveRecording: (recording: AudioRecording, targetTrackIndex: number, projectGeneration: number) => void | Promise<void>;
+  /**
+   * `captureStartBar` is the 0-based playlist bar audio capture began on after
+   * the count-in (Phase 1K); the take must be placed there so playback lands
+   * on the same musical position. Defaults to 0 (bar 1) when absent.
+   */
+  onSaveRecording: (recording: AudioRecording, targetTrackIndex: number, projectGeneration: number, captureStartBar?: number) => void | Promise<void>;
 }
 
-export const AudioRecorderModal: React.FC<AudioRecorderModalProps> = ({ isOpen, projectGeneration, getCurrentProjectGeneration, onClose, onRegisterProjectReplacementHandler, onSaveRecording }) => {
-  const [recordingState, setRecordingState] = useState<'idle' | 'recording' | 'paused' | 'stopping'>('idle');
+type RecorderUiState = 'idle' | 'counting-in' | 'recording' | 'paused' | 'stopping';
+
+export const AudioRecorderModal: React.FC<AudioRecorderModalProps> = ({ isOpen, projectGeneration, getCurrentProjectGeneration, countInBars, onUpdateCountInBars, onClose, onRegisterProjectReplacementHandler, onSaveRecording }) => {
+  const [recordingState, setRecordingState] = useState<RecorderUiState>('idle');
   const [recordSeconds, setRecordSeconds] = useState(0);
   const [inputLevel, setInputLevel] = useState(0);
   const [targetTrack, setTargetTrack] = useState(4);
   const [recordedTake, setRecordedTake] = useState<AudioRecording | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isApplying, setIsApplying] = useState(false);
+  /** Phase 1K: the musical bar capture began on (0-based playlist bar). */
+  const [captureStartBar, setCaptureStartBar] = useState(0);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const engineRef = useRef<RecordingEngine | null>(null);
   const recordingProjectGenerationRef = useRef(projectGeneration);
@@ -45,6 +60,9 @@ export const AudioRecorderModal: React.FC<AudioRecorderModalProps> = ({ isOpen, 
   }, [recordedTake]);
 
   const cancelForProjectReplacement = React.useCallback(async () => {
+    // Phase 1K: abort any count-in first — its pending promise rejects with
+    // CountInCancelledError and the start flow below never reaches capture.
+    audioEngine.cancelRecordingCountIn();
     const cancellation = engineRef.current?.cancel();
     if (cancellation) await cancellation.catch(() => undefined);
     const take = recordedTakeRef.current;
@@ -100,6 +118,9 @@ export const AudioRecorderModal: React.FC<AudioRecorderModalProps> = ({ isOpen, 
 
   useEffect(() => {
     if (!isOpen) {
+      // Phase 1K: closing during a count-in aborts it before capture — no
+      // clicks can end up inside a take that never should have started.
+      audioEngine.cancelRecordingCountIn();
       // Cancellation is intentionally rejected by RecordingEngine so callers can
       // distinguish it from a successful recording. Modal teardown is an expected
       // cancellation path, so consume that rejection here to avoid an unhandled
@@ -116,11 +137,34 @@ export const AudioRecorderModal: React.FC<AudioRecorderModalProps> = ({ isOpen, 
     }
   }, [isOpen]);
 
+  /**
+   * Phase 1K: count-in first, capture second.
+   *
+   * When the count-in is 1 or 2 bars, `audioEngine.beginRecordingCountIn`
+   * clicks the active meter's pulses at the project tempo (including the 7/8
+   * accent grouping) and resolves exactly at the planned capture moment.
+   * `RecordingEngine.start()` — the only path that opens the microphone and
+   * MediaRecorder — runs strictly AFTER that, which is what prevents count-in
+   * clicks from being recorded as audio. No note/step data is ever written by
+   * the count-in, so nothing can be "recorded as notes" either. The resolved
+   * `clipStartBar` is kept so the take is placed at the bar capture began on.
+   */
   const handleStart = async () => {
     try {
       setError(null);
       setRecordedTake(null);
       recordingProjectGenerationRef.current = projectGeneration;
+      const bars = resolveCountInBars({ countInBars });
+      if (bars > 0) {
+        setRecordingState('counting-in');
+        const countIn = await audioEngine.beginRecordingCountIn(bars);
+        if (recordingProjectGenerationRef.current !== getCurrentProjectGeneration()) {
+          throw new Error('The recording was cancelled because the project was replaced');
+        }
+        setCaptureStartBar(countIn.clipStartBar);
+      } else {
+        setCaptureStartBar(0);
+      }
       await engineRef.current!.start();
       if (recordingProjectGenerationRef.current !== getCurrentProjectGeneration()) {
         await engineRef.current!.cancel().catch(() => undefined);
@@ -129,8 +173,18 @@ export const AudioRecorderModal: React.FC<AudioRecorderModalProps> = ({ isOpen, 
       setRecordingState('recording');
     } catch (err) {
       setRecordingState('idle');
+      if (err instanceof CountInCancelledError) {
+        // A deliberate abort (Stop, close, seek, project replacement): no take
+        // exists and the count-in clicks were silenced. Nothing to report.
+        return;
+      }
       setError(err instanceof Error ? err.message : 'Unable to start audio recording');
     }
+  };
+
+  /** Phase 1K: aborts an in-progress count-in without capturing anything. */
+  const handleCancelCountIn = () => {
+    audioEngine.cancelRecordingCountIn();
   };
 
   const handlePauseResume = () => {
@@ -167,7 +221,9 @@ export const AudioRecorderModal: React.FC<AudioRecorderModalProps> = ({ isOpen, 
     try {
       setError(null);
       setIsApplying(true);
-      await onSaveRecording(recordedTake, targetTrack, recordingProjectGenerationRef.current);
+      // Phase 1K: the take is placed at the bar capture actually began on
+      // (after the count-in), not blindly on bar 1.
+      await onSaveRecording(recordedTake, targetTrack, recordingProjectGenerationRef.current, captureStartBar);
       // Ownership was transferred to the project by onSaveRecording.
       setRecordedTake(null);
       onClose();
@@ -197,11 +253,38 @@ export const AudioRecorderModal: React.FC<AudioRecorderModalProps> = ({ isOpen, 
           <div className="bg-[#0a0a0b] border border-[#333336] rounded-lg p-4 flex flex-col items-center justify-center space-y-2">
             <div className="text-2xl font-mono font-bold text-white flex items-center gap-2">{(recordingState === 'recording' || recordingState === 'paused') && <div className="w-3 h-3 bg-[#ff0000] rounded-full animate-pulse" />}<span>{formatTime(recordSeconds)}</span></div>
             <canvas ref={canvasRef} width={360} height={50} className="w-full h-12 bg-[#121214] rounded border border-[#222225]" />
-            <div className="w-full flex items-center justify-between text-[10px] text-[#777] font-mono"><span>INPUT PEAK: {Math.round(inputLevel * 100)}%</span><span className={(recordingState === 'recording' || recordingState === 'paused') ? 'text-[#ff6e00] font-bold' : ''}>STATUS: {recordingState.toUpperCase()}</span></div>
+            <div className="w-full flex items-center justify-between text-[10px] text-[#777] font-mono"><span>INPUT PEAK: {Math.round(inputLevel * 100)}%</span><span className={(recordingState === 'recording' || recordingState === 'paused' || recordingState === 'counting-in') ? 'text-[#ff6e00] font-bold' : ''}>STATUS: {recordingState === 'counting-in' ? 'COUNT-IN' : recordingState.toUpperCase()}</span></div>
           </div>
           {error && <div className="flex items-start gap-2 p-3 bg-red-950/30 border border-red-800/50 rounded-lg text-xs text-red-200"><AlertCircle className="w-4 h-4 shrink-0 mt-0.5" /><span>{error}</span></div>}
+          {/* Phase 1K: recording count-in setting — Off / 1 bar / 2 bars. The
+              choice is persisted with the project and shared with the engine:
+              the count-in clicks the active meter's pulses at project tempo. */}
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-[10px] text-[#777] font-bold uppercase tracking-wider">Count-in</span>
+            <div className="flex items-center gap-1" role="radiogroup" aria-label="Recording count-in length">
+              {COUNT_IN_OPTIONS.map(option => (
+                <button
+                  key={option}
+                  type="button"
+                  role="radio"
+                  aria-checked={resolveCountInBars({ countInBars }) === option}
+                  disabled={recordingState !== 'idle' || isApplying}
+                  onClick={() => onUpdateCountInBars(option)}
+                  className={`px-2.5 py-1 rounded text-[10px] font-bold transition border disabled:opacity-40 ${
+                    resolveCountInBars({ countInBars }) === option
+                      ? 'bg-[#ff6e00] text-black border-[#ff6e00]'
+                      : 'bg-[#1a1a1d] text-[#b0b0b0] border-[#333336] hover:border-[#ff6e00]'
+                  }`}
+                  data-count-in={option}
+                >
+                  {describeCountInBars(option)}
+                </button>
+              ))}
+            </div>
+          </div>
           <div className="flex items-center justify-center gap-3">
             {recordingState === 'idle' && !recordedTake && <button onClick={handleStart} className="flex items-center gap-2 px-6 py-2.5 bg-[#ff6e00] hover:bg-[#ff7d1a] text-black font-bold text-sm rounded shadow-lg transition active:scale-95"><div className="w-3 h-3 bg-black rounded-full" />START RECORDING</button>}
+            {recordingState === 'counting-in' && <><span className="text-xs text-[#ff6e00] font-bold font-mono">COUNT-IN · {describeCountInBars(resolveCountInBars({ countInBars }))}</span><button onClick={handleCancelCountIn} className="flex items-center gap-2 px-5 py-2.5 bg-[#222225] hover:bg-[#2d2d30] text-white font-bold text-sm rounded border border-[#333336] transition"><X className="w-4 h-4" />CANCEL</button></>}
             {(recordingState === 'recording' || recordingState === 'paused') && <><button onClick={handlePauseResume} className="flex items-center gap-2 px-5 py-2.5 bg-[#222225] hover:bg-[#2d2d30] text-white font-bold text-sm rounded border border-[#333336] transition">{recordingState === 'recording' ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4" />}{recordingState === 'recording' ? 'PAUSE' : 'RESUME'}</button><button onClick={handleStop} className="flex items-center gap-2 px-6 py-2.5 bg-[#ff0000] hover:bg-red-600 text-white font-bold text-sm rounded shadow-lg transition active:scale-95"><Square className="w-4 h-4 fill-current" />STOP & SAVE</button></>}
             {recordingState === 'stopping' && <span className="text-xs text-[#777]">Finalizing recording…</span>}
           </div>

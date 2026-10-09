@@ -102,6 +102,7 @@ import {
   updateProjectMetadataInProjectState,
   setProjectTimeSignatureInProjectState,
   setSevenEightGroupingInProjectState,
+  setRecordingCountInBarsInProjectState,
   getTimeSignatureEditLabel,
   updateGrossBeatInProjectState,
   updateVocalTunerInProjectState
@@ -547,6 +548,12 @@ export function App() {
   useEffect(() => {
     audioEngine.setSevenEightGrouping(projectState.meta.sevenEightGrouping);
   }, [projectState.meta.sevenEightGrouping]);
+
+  // Phase 1K: the recording count-in length is project data published like the
+  // meter and grouping. Missing/unknown values resolve to Off in the engine.
+  useEffect(() => {
+    audioEngine.setCountInBars(projectState.meta.countInBars);
+  }, [projectState.meta.countInBars]);
 
   useEffect(() => {
     audioEngine.setSwing(projectState.meta.swing);
@@ -1112,6 +1119,16 @@ export function App() {
     );
   };
 
+  /** Phase 1K: recording count-in setting (Off / 1 bar / 2 bars), persisted. */
+  const handleSetRecordingCountInBars = (bars: 0 | 1 | 2) => {
+    const current = projectStateRef.current;
+    if (setRecordingCountInBarsInProjectState(current, bars) === current) return;
+    mutateProjectState(
+      state => setRecordingCountInBarsInProjectState(state, bars),
+      'Change recording count-in'
+    );
+  };
+
   const handleUpdateChannel = (
     channelId: string,
     updates: Partial<Channel>,
@@ -1483,7 +1500,8 @@ export function App() {
   const handleSaveRecordingToPlaylist = async (
     recording: AudioRecording,
     targetTrackIndex: number,
-    recordingProjectGeneration: number
+    recordingProjectGeneration: number,
+    captureStartBar = 0
   ) => {
     if (!isRecordingProjectGenerationCurrent(recordingProjectGeneration, recordingProjectGenerationRef.current)) {
       throw new Error('The recording belongs to a project that has already been replaced');
@@ -1525,7 +1543,9 @@ export function App() {
       currentTargetTrackIndex,
       currentState.meta.bpm,
       `rec-clip-${Date.now()}`,
-      currentState.meta.timeSignature
+      currentState.meta.timeSignature,
+      // Phase 1K: the take lands on the bar capture began on after the count-in.
+      captureStartBar
     );
     const nextState = {
       ...currentState,
@@ -2086,6 +2106,8 @@ export function App() {
               patternLengthSteps={selectedPatternLengthSteps}
               bpm={projectState.meta.bpm}
               onCreateChannelFromMidiImport={handleCreateChannelFromMidiImport}
+              timeSignature={projectState.meta.timeSignature}
+              sevenEightGrouping={projectState.meta.sevenEightGrouping}
             />
           )}
 
@@ -2342,8 +2364,10 @@ export function App() {
         isOpen={isProjectSettingsOpen}
         timeSignature={projectState.meta.timeSignature}
         sevenEightGrouping={projectState.meta.sevenEightGrouping}
+        countInBars={projectState.meta.countInBars}
         onSelectTimeSignature={handleSetTimeSignature}
         onSelectSevenEightGrouping={handleSetSevenEightGrouping}
+        onSelectCountInBars={handleSetRecordingCountInBars}
         onClose={() => setIsProjectSettingsOpen(false)}
       />
       <MidiControllerModal isOpen={isMidiModalOpen} onClose={() => setIsMidiModalOpen(false)} channels={projectState.channels} mixerTracks={projectState.mixerTracks} midiMappings={projectState.midiMappings || []} onUpdateMidiMappings={(mappings) => mutateProjectState(curr => updateMidiMappingsInProjectState(curr, mappings), 'Update MIDI mappings')} activeChannel={selectedChannel} />
@@ -2367,6 +2391,8 @@ export function App() {
         isOpen={isAudioRecorderOpen}
         projectGeneration={recordingProjectGenerationRef.current}
         getCurrentProjectGeneration={() => recordingProjectGenerationRef.current}
+        countInBars={projectState.meta.countInBars}
+        onUpdateCountInBars={handleSetRecordingCountInBars}
         onRegisterProjectReplacementHandler={handler => { cancelRecordingForReplacementRef.current = handler; }}
         onClose={() => { setIsAudioRecorderOpen(false); setIsRecording(false); }}
         onSaveRecording={handleSaveRecordingToPlaylist}

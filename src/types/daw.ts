@@ -602,6 +602,13 @@ export interface ProjectMetadata {
    * to '2+2+3' (see `resolveSevenEightGrouping`). Ignored in other meters.
    */
   sevenEightGrouping?: '2+2+3' | '3+2+2' | '2+3+2';
+  /**
+   * Phase 1K: recording count-in length in bars — 0 (Off), 1 or 2. Optional
+   * and additive — projects saved before Phase 1K omit it and resolve to 0
+   * (recording starts immediately, the pre-Phase-1K behaviour). See
+   * `resolveCountInBars`.
+   */
+  countInBars?: 0 | 1 | 2;
   swing: number; // 0 - 1.0
   masterVolume: number;
   masterPitch: number;
