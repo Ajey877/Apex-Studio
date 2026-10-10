@@ -20,6 +20,7 @@ mkdirSync(app, { recursive: true });
 cpSync(join(spikeRoot, 'electron', 'main.cjs'), join(app, 'main.cjs'));
 cpSync(join(spikeRoot, 'web'), join(app, 'web'), { recursive: true });
 cpSync(join(spikeRoot, 'dsp'), join(app, 'dsp'), { recursive: true });
+cpSync(join(spikeRoot, 'fixtures'), join(app, 'fixtures'), { recursive: true });
 writeFileSync(join(app, 'package.json'), JSON.stringify({
   name: 'apex-audioworklet-wasm-spike-app',
   productName: 'ApexSpike',
@@ -36,7 +37,7 @@ writeFileSync(join(app, 'package.json'), JSON.stringify({
     asar: true,
     npmRebuild: false,
     directories: { output: '../electron-dist' },
-    files: ['main.cjs', 'web/**/*', 'dsp/**/*', 'package.json'],
+    files: ['main.cjs', 'web/**/*', 'dsp/**/*', 'fixtures/**/*', 'package.json'],
     win: { target: 'dir' },
     linux: { target: 'dir' },
   },

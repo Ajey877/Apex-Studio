@@ -62,7 +62,8 @@ for (const mode of modes) {
     && capData.secondRoundAfterDispose.created === 0);
   const followup = report && report.followup;
   const followupPass = !!(followup && followup.engineParity && followup.engineParity.pass
-    && followup.offlineWorkerPrototype && followup.offlineWorkerPrototype.pass);
+    && followup.offlineWorkerPrototype && followup.offlineWorkerPrototype.pass
+    && followup.multitrackProject && followup.multitrackProject.pass);
   let pass;
   let verdict;
   if (!report) {
@@ -92,7 +93,8 @@ for (const mode of modes) {
     pass = h.pass && cspAllowsWasm && followupPass;
     verdict = h.results.map(r => `${r.pass ? 'PASS' : 'FAIL'} ${r.name}`).join(', ')
       + `; file:// CSP allows WASM=${cspAllowsWasm}; engineParity=${!!(followup && followup.engineParity && followup.engineParity.pass)}`
-      + `; offlineWorker=${!!(followup && followup.offlineWorkerPrototype && followup.offlineWorkerPrototype.pass)}`;
+      + `; offlineWorker=${!!(followup && followup.offlineWorkerPrototype && followup.offlineWorkerPrototype.pass)}`
+      + `; multitrackProject=${!!(followup && followup.multitrackProject && followup.multitrackProject.pass)}`;
   }
   if (h) {
     for (const r of h.results) {
@@ -128,6 +130,29 @@ for (const mode of modes) {
             engineInstances: followup.offlineWorkerPrototype.data && followup.offlineWorkerPrototype.data.finalInfo && followup.offlineWorkerPrototype.data.finalInfo.engineInstances,
             memoryBytes: followup.offlineWorkerPrototype.data && followup.offlineWorkerPrototype.data.finalInfo && followup.offlineWorkerPrototype.data.finalInfo.memoryBytes,
           },
+          multitrackProject: followup.multitrackProject ? {
+            pass: followup.multitrackProject.pass,
+            fixture: followup.multitrackProject.fixture && {
+              pass: followup.multitrackProject.fixture.pass,
+              trackIds: followup.multitrackProject.fixture.fixture && followup.multitrackProject.fixture.fixture.trackIds,
+              maxAbsDiff: followup.multitrackProject.fixture.comparisons && followup.multitrackProject.fixture.comparisons.maxAbsDiff,
+              worklet: followup.multitrackProject.fixture.live && {
+                engineInstances: followup.multitrackProject.fixture.live.engineInstances,
+                wasmMemoryBytes: followup.multitrackProject.fixture.live.wasmMemoryBytes,
+                slotsInUse: followup.multitrackProject.fixture.live.slotsInUse,
+                frameDiscontinuities: followup.multitrackProject.fixture.live.frameDiscontinuities,
+                missedDeadlines: followup.multitrackProject.fixture.live.missedDeadlines,
+              },
+            },
+            offline: followup.multitrackProject.offline && {
+              pass: followup.multitrackProject.offline.pass,
+              jobs: followup.multitrackProject.offline.jobsCompleted,
+              memoryBytes: followup.multitrackProject.offline.wasmMemoryBytesMax,
+              hashCount: followup.multitrackProject.offline.hashes && followup.multitrackProject.offline.hashes.distinctRepeatedExportHashes,
+              batchMs: followup.multitrackProject.offline.performance && followup.multitrackProject.offline.performance.batchMs,
+            },
+            cancellation: followup.multitrackProject.cancellation && followup.multitrackProject.cancellation.pass,
+          } : null,
           pass: followupPass,
         } : null,
         failed: h ? h.results.filter(r => !r.pass).map(r => r.name) : null,

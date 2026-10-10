@@ -30,6 +30,12 @@ enforces this). Findings and the recommendation: [`REPORT.md`](./REPORT.md).
 | `web/repro.mjs` | Follow-up: minimal probes for the WASM memory budget (no audio) |
 | `web/investigation.mjs`, `web/wasm-probe-worker.js` | Follow-up: design comparison, churn, offline-render, reclaim and CSP-matrix experiments |
 | `tests/browser/investigation.spec.mjs` | Follow-up: codified investigation (`[must]` requirements, `[char]` browser characterisation); see REPORT.md §12 |
+| `fixtures/representative-project.mjs` | Synthetic 2-bar, 48-event fixture: two generated sample tracks, two simple synth tracks, four independent routes/sends, two buses and automation. It is not an Apex-saved project. |
+| `web/project-model.mjs` | Bounded clip/event scheduling and deterministic sample/triangle/saw source generation for the fixture. |
+| `web/project-processor.js` | Project-level live AudioWorklet: one shared engine, one slot per track, inserts, fader automation, pan, routing, bus effect, master mix and timing probes. |
+| `web/project-render-core.mjs`, `web/project-export-worker.js` | Project scheduler/mixer and long-lived Worker: repeated WASM-backed exports, PCM16 WAV generation, cooperative cancellation and memory counters. |
+| `web/project-render-reference.mjs`, `web/project-prototype.mjs` | Scalar-JS comparison renderer and browser/Electron prototype test entrypoints. The reference shares fixture scheduling/source generation but independently renders the DSP/mix path. |
+| `tests/node/project-render.test.mjs`, `tests/browser/project-prototype.spec.mjs` | Bounded project correctness, repeated export, cancellation/recovery and live engine acceptance checks; see REPORT.md §14. |
 | `.github/workflows/audio-spike.yml` (repo root) | CI workflow (Linux Chromium; Windows Chrome + Edge; Windows Electron unpackaged + packaged). Originally parked here as `ci/audio-spike.yml`; activated by the owner in `7d2600c` |
 
 ## Signal flow
@@ -65,7 +71,10 @@ cd experiments/audioworklet-wasm-spike
 npm ci                       # wabt@1.0.39 (dev-only, Apache-2.0)
 npm run build:wasm           # .wat -> .wasm + web/wasm-bytes.mjs
 npm run check:wasm           # verify committed artifacts are reproducible
-npm run test:node            # Node: numerics, mocked-scope processor, isolation
+npm run test:node            # Node: numerics, mocked-scope processor, isolation + project renderer
+
+# Bounded synthetic project acceptance suite (four project tests; serial)
+node ../../node_modules/@playwright/test/cli.js test --config tests/browser/playwright.config.mjs --project=chromium --grep 'prototype-only representative Apex-style multitrack project'
 
 # Real browsers (one Playwright test per harness test; serial, no retries)
 node ../../node_modules/@playwright/test/cli.js test --config tests/browser/playwright.config.mjs --project=chromium

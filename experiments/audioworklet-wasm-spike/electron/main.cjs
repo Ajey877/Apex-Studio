@@ -150,6 +150,10 @@ app.whenReady().then(async () => {
           catch (err) { out.engineParity = { pass: false, error: String(err && err.message ? err.message : err) }; }
           try { out.offlineWorkerPrototype = await m.offlineWorkerPrototype({ renders: 200, frames: 4800 }); }
           catch (err) { out.offlineWorkerPrototype = { pass: false, error: String(err && err.message ? err.message : err) }; }
+          try {
+            const project = await import(new URL('./project-prototype.mjs', location.href).href);
+            out.multitrackProject = await project.runProjectPrototype({ offlineJobs: 200 });
+          } catch (err) { out.multitrackProject = { pass: false, error: String(err && err.message ? err.message : err) }; }
           return out;
         })
       `, true);
