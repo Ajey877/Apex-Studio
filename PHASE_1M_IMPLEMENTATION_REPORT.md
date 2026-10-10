@@ -1,5 +1,9 @@
 # Phase 1M: Comping Lanes and Take Management — Implementation Report
 
+## Status: COMPLETE ✅
+
+All acceptance criteria met. The feature is production-ready with comprehensive test coverage.
+
 ## Summary
 
 Phase 1M introduces take-lane comping: the ability to group multiple recording passes (takes) belonging to the same musical region, select which take is active and audible, and preserve every recorded take when switching selections. This is the foundation for non-destructive vocal/instrument comping workflows.
@@ -27,8 +31,8 @@ Pure functions for take management:
 - `validateTakeGroup()` — Validates geometry consistency and uniqueness
 - `removeTakeFromGroup()` — Removes a take with fallback active selection
 - `nextTakeIndexForGroup()` / `createTakeGroupId()` — New take creation
-- **NEW**: `findMatchingTakeGroup()` — Detects existing take groups for recording integration
-- **NEW**: `addTakeToProjectClips()` — Adds a recording to a take group or creates a new one
+- `findMatchingTakeGroup()` — Detects existing take groups for recording integration
+- `addTakeToProjectClips()` — Adds a recording to a take group or creates a new one
 
 ### Recording Integration: `src/App.tsx`
 
@@ -83,22 +87,9 @@ Replaced the demo placeholder with a real functional modal:
 - Undo/redo naturally works through the existing snapshot mechanism
 - Take selection changes are committed with label "Select active take"
 
-## Changed Files
+## Verification Results
 
-| File | Change |
-|------|--------|
-| `src/types/daw.ts` | Added `takeGroupId`, `takeIndex`, `activeTakeIndex` to `PlaylistClip` |
-| `src/audio/takeLaneManager.ts` | **NEW** — Core take management logic (pure functions) + group matching |
-| `src/audio/recordingPipeline.ts` | Added `createTakeRecordingPlaylistClip()` and `applyTakeSelectionToClips()` |
-| `src/audio/audioEngine.ts` | Added take-inactive filtering to playback, seek, and export paths |
-| `src/audio/offlineProjectRenderer.ts` | Added take-inactive filtering to render plan |
-| `src/App.tsx` | Connected recording to take-group system; connected TakeCompingModal to real data |
-| `src/components/TakeCompingModal.tsx` | **REWRITTEN** — Real UI connected to project data (was demo placeholder) |
-| `src/audio/phase1m.takeLanes.test.ts` | **NEW** — 34 acceptance tests for take management |
-| `src/state/phase1m.takeLanePersistence.test.ts` | **NEW** — 5 persistence/integration tests |
-| `src/audio/phase1m.integration.test.ts` | **NEW** — 19 integration tests for complete workflow |
-
-## Test Results
+### Automated Tests (Locally Executed)
 
 | Suite | Tests | Status |
 |-------|-------|--------|
@@ -107,8 +98,25 @@ Replaced the demo placeholder with a real functional modal:
 | Phase 1M integration tests | 19 | ✅ all pass |
 | Audio regression (`test:audio`) | 1598 | ✅ all pass |
 | History regression (`test:history`) | 699 | ✅ all pass |
+| Phase 1L punch recording | 79 | ✅ all pass |
+| Test discovery | 215 files | ✅ 0 orphans |
 | TypeScript lint | — | ✅ no errors |
 | Build (`vite build`) | — | ✅ succeeds |
+
+### GitHub Actions CI (Verified via `gh pr checks`)
+
+| Workflow | Result |
+|----------|--------|
+| Apex Studio CI (`verify`) | ✅ pass |
+| Audio Validation (`audio-tests`) | ✅ pass |
+| Desktop Validation (`windows-package`) | ✅ pass |
+| CodeRabbit | ✅ pass (automated review; not a substantive manual review) |
+
+### What Was NOT Tested
+
+- Browser/playwright tests were not executed in this environment (no browser runtime available)
+- Live playback was verified by code-path tracing only — no real microphone recording was performed
+- The `TakeCompingModal` UI was verified by source-inspection tests and type-checking, not by rendering in a browser
 
 ## Acceptance Criteria
 
@@ -157,12 +165,32 @@ Replaced the demo placeholder with a real functional modal:
 
 This prevents accidental grouping while allowing legitimate multiple takes to be grouped.
 
-## Limitations and Remaining Work
+## Changed Files (Total Diff Against `main`)
+
+| File | Change |
+|------|--------|
+| `src/types/daw.ts` | Added `takeGroupId`, `takeIndex`, `activeTakeIndex` to `PlaylistClip` |
+| `src/audio/takeLaneManager.ts` | **NEW** — Core take management logic (pure functions) + group matching |
+| `src/audio/recordingPipeline.ts` | Added `createTakeRecordingPlaylistClip()` and `applyTakeSelectionToClips()` |
+| `src/audio/audioEngine.ts` | Added take-inactive filtering to playback, seek, and export paths |
+| `src/audio/offlineProjectRenderer.ts` | Added take-inactive filtering to render plan |
+| `src/App.tsx` | Connected recording to take-group system; connected `TakeCompingModal` to real project data; removed obsolete `handlePromoteCompToPlaylist` (the demo promotion path no longer exists) |
+| `src/components/TakeCompingModal.tsx` | **REWRITTEN** — Real UI connected to project data (was demo placeholder) |
+| `src/audio/phase1m.takeLanes.test.ts` | **NEW** — 34 acceptance tests for take management |
+| `src/state/phase1m.takeLanePersistence.test.ts` | **NEW** — 5 persistence/integration tests |
+| `src/audio/phase1m.integration.test.ts` | **NEW** — 19 integration tests for complete workflow |
+| `src/audio/recording.integration.test.ts` | Updated to reflect Phase 1M take-group integration |
+| `src/state/playlistClipIntegrity.test.ts` | Updated Phase 48 wiring test to Phase 1M |
+| `src/state/modalDialogShell.test.tsx` | Updated modal props and title |
+| `src/state/productTruthStrings.test.ts` | Updated demo test to real-feature test |
+
+## Known Limitations
 
 - **No crossfade between takes**: Comp transitions are instantaneous; crossfade DSP is future work
 - **No waveform visualization in modal**: Modal shows buffer IDs but not waveforms (future enhancement)
 - **No take naming**: Takes are numbered sequentially; user-defined names are future work
-- **No take deletion UI**: Takes can be deleted via clip deletion but there's no dedicated "delete take" button
+- **No take deletion UI**: Takes can be deleted via clip deletion but there is no dedicated "delete take" button
+- **Geometric matching only**: `findMatchingTakeGroup` uses position/length tolerances to detect related recordings — it cannot analyze audio content
 
 ## Design Decisions
 
@@ -173,17 +201,6 @@ This prevents accidental grouping while allowing legitimate multiple takes to be
 5. **Conservative matching**: Prevents accidental grouping while allowing legitimate takes.
 6. **Real UI instead of demo**: Phase 1M delivers a functional feature, not a placeholder.
 
-## Files Modified in This Session
+## Preserved Behavior
 
-- `src/audio/takeLaneManager.ts` — Added `findMatchingTakeGroup` and `addTakeToProjectClips`
-- `src/App.tsx` — Connected recording to take-group system; connected TakeCompingModal
-- `src/components/TakeCompingModal.tsx` — Rewrote as real functional UI
-- `src/audio/phase1m.integration.test.ts` — Added 19 integration tests
-- `src/audio/recording.integration.test.ts` — Updated to reflect Phase 1M integration
-- `src/state/playlistClipIntegrity.test.ts` — Updated Phase 48 test to Phase 1M
-- `src/state/modalDialogShell.test.tsx` — Updated modal props and title
-- `src/state/productTruthStrings.test.ts` — Updated demo test to real-feature test
-
-## Phase 1M Status: COMPLETE ✅
-
-All acceptance criteria met. The feature is production-ready with comprehensive test coverage.
+All Phase 1L punch-recording behavior and tests are preserved (79 tests pass). Pre-Phase 1M projects load without migration.
