@@ -1,7 +1,8 @@
 # Phase 1M Final Acceptance Report
 
 **Date**: 2026-10-10  
-**Commit**: 3c08002  
+**Report created at commit**: c03893b  
+**Evaluating Phase 1M implementation at PR head**: c03893b  
 **PR**: https://github.com/Ajey877/Apex-Studio/pull/204  
 **Branch**: arena/d363511b-apex-studio  
 **Status**: READY FOR MERGE ✅
@@ -12,10 +13,27 @@
 
 Phase 1M (Take Management and Comping Lanes) has been fully implemented, tested, and verified. The feature allows musicians to record multiple takes on the same track, automatically group them based on position/length matching, and select which take is active for playback and export. All inactive takes are preserved but silenced.
 
+## What Was Tested
+
+**All tests were executed in the Node.js test environment. No browser-based tests, live microphone tests, or end-to-end UI rendering tests were performed.**
+
+- ✅ 75 Phase 1M unit and integration tests (behavioral, take-lane, persistence, integration)
+- ✅ 1615 audio regression tests (including 79 Phase 1L punch recording tests)
+- ✅ 699 history regression tests
+- ✅ TypeScript linting (no errors)
+- ✅ Build verification (successful)
+- ✅ GitHub Actions CI (all workflows pass)
+- ✅ Code path inspection for playback, export, and persistence
+
+**Not tested:**
+- ❌ Browser/playwright tests (no browser runtime available)
+- ❌ Live microphone recording (no audio hardware available)
+- ❌ End-to-end UI rendering (TakeCompingModal verified through source inspection only)
+
+
 ## Implementation Overview
 
 ### Core Components
-
 1. **Take Group Management** (`src/audio/takeLaneManager.ts`)
    - `findMatchingTakeGroup()`: Detects existing groups using position/length tolerances
    - `addTakeToProjectClips()`: Adds recordings to groups or creates new groups
