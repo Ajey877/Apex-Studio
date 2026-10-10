@@ -183,11 +183,16 @@ describe('Phase 52 — truthful not-applied states', () => {
     assert.ok(!/Phase-Locked Resampling Active/i.test(source));
   });
 
-  it('Take Comping is labelled as a demo and keeps its safe refusal', () => {
+  it('Phase 1M: Take Comping is a real feature connected to project data', () => {
     const source = read('src/components/TakeCompingModal.tsx');
-    assert.match(source, /DEMO|PROTOTYPE|INCOMPLETE/i);
-    assert.ok(source.includes('no recorded audio asset'), 'the Phase 48 refusal must be preserved');
-    assert.ok(!/Equal-Power Crossfade Algorithm Active/i.test(source));
+    // The modal now receives real playlist clips from project state
+    assert.ok(source.includes('playlistClips: PlaylistClip[]'), 'the modal must accept real clips');
+    // It uses the take manager to resolve groups
+    assert.ok(source.includes('getTakeGroupIds'), 'the modal must use the take manager');
+    // It allows selecting the active take
+    assert.ok(source.includes('onSelectActiveTake'), 'the modal must expose take selection');
+    // No demo labels
+    assert.ok(!/DEMO|PROTOTYPE|INCOMPLETE/i.test(source), 'the modal is no longer a demo');
   });
 
   it('Warp processor describes repitch only', () => {

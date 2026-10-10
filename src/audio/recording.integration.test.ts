@@ -23,7 +23,10 @@ describe('recording to playlist integration', () => {
       /let registration = \{ id: audioBufferId, buffer: loaded\.buffer, peaks: loaded\.peaks, duration: loaded\.duration \};[\s\S]*createRecordingPlaylistClip\(\s*persistedRecording,\s*registration,\s*currentState\.playlistTracks,\s*currentTargetTrackIndex,\s*currentState\.meta\.bpm/
     );
     assert.match(source, /recordings: \[\.\.\.currentState\.recordings, persistedRecording\]/);
-    assert.match(source, /playlistClips: \[\.\.\.currentState\.playlistClips, recordingClip\]/);
+    // Phase 1M: recordings are now routed through the take-group system
+    assert.match(source, /findMatchingTakeGroup\(/);
+    assert.match(source, /addTakeToProjectClips\(/);
+    assert.match(source, /playlistClips: updatedClips/);
 
     // Phase 1L: the only re-registration a punch take may perform is the
     // trimmed buffer, and it must be persisted through AudioEngine before the

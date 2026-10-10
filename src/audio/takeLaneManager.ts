@@ -266,3 +266,94 @@ export const removeTakeFromGroup = (
   }
   return result;
 };
+
+// --- Phase 1M: take-group matching for recording ----------------------------
+
+/**
+ * Finds an existing take group that a new recording at the given track/position
+ * should join. Returns the `takeGroupId` of the matching group, or `undefined`
+ * if no group matches.
+ *
+ * Matching criteria (all must hold):
+ *   - Same `trackIndex`
+ *   - `startBar` is within 0.5 bars of the group's representative start
+ *   - `lengthBars` is within 50% of the group's representative length
+ *
+ * The tolerance prevents unrelated recordings from accidentally joining a
+ * group while allowing punch takes that differ by a few milliseconds of
+ * rounding to group correctly.
+ */
+export const findMatchingTakeGroup = (
+  clips: readonly PlaylistClip[],
+  trackIndex: number,
+  startBar: number,
+  lengthBars: number
+): string | undefined => {
+  const groups = new Map<string, PlaylistClip[]>();
+  for (const clip of clips) {
+    if (!clip.takeGroupId) continue;
+    const list = groups.get(clip.takeGroupId);
+    if (list) list.push(clip);
+    else groups.set(clip.takeGroupId, [clip]);
+  }
+
+  for (const [groupId, groupClips] of groups) {
+    // All clips in a group share the same track/startBar/lengthBars
+    const ref = groupClips[0];
+    if (ref.trackIndex !== trackIndex) continue;
+    if (Math.abs(ref.startBar - startBar) > 0.5) continue;
+    if (lengthBars > 0 && ref.lengthBars > 0) {
+      const ratio = lengthBars / ref.lengthBars;
+      if (ratio < 0.5 || ratio > 1.5) continue;
+    }
+    return groupId;
+  }
+
+  return undefined;
+};
+
+/**
+ * Converts ordinary recording clips into take-group clips. Given an existing
+ * clip array and a new take clip that should belong to a take group, this
+ * function:
+ *
+ * 1. If `takeGroupId` is provided, adds the new clip to that group and
+ *    updates `activeTakeIndex` on every clip in the group.
+ * 2. If `takeGroupId` is undefined, creates a new group with the provided
+ *    clips' matching geometry.
+ *
+ * Returns the full clip array with take-group fields applied.
+ */
+export const addTakeToProjectClips = (
+  clips: readonly PlaylistClip[],
+  newTakeClip: PlaylistClip,
+  takeGroupId: string | undefined
+): PlaylistClip[] => {
+  if (takeGroupId) {
+    // Join existing group
+    const nextIndex = nextTakeIndexForGroup(clips, takeGroupId);
+    const taggedClip: PlaylistClip = {
+      ...newTakeClip,
+      takeGroupId,
+      takeIndex: nextIndex,
+      activeTakeIndex: nextIndex, // new take is active by default
+    };
+    // Update activeTakeIndex on all existing group members
+    const updated = clips.map(clip => {
+      if (clip.takeGroupId !== takeGroupId) return clip;
+      if (clip.activeTakeIndex === nextIndex) return clip;
+      return { ...clip, activeTakeIndex: nextIndex };
+    });
+    return [...updated, taggedClip];
+  }
+
+  // New group
+  const groupId = createTakeGroupId(newTakeClip.trackIndex, Math.floor(newTakeClip.startBar));
+  const taggedClip: PlaylistClip = {
+    ...newTakeClip,
+    takeGroupId: groupId,
+    takeIndex: 0,
+    activeTakeIndex: 0,
+  };
+  return [...clips, taggedClip];
+};
