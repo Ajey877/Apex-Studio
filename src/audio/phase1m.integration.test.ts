@@ -31,7 +31,8 @@ describe('Phase 1M: Integration Tests', () => {
       const source = read('audio/takeLaneManager.ts');
       assert.ok(source.includes('findMatchingTakeGroup'), 'must export group matching function');
       assert.ok(source.includes('trackIndex !== trackIndex'), 'must check track match');
-      assert.ok(source.includes('Math.abs(ref.startBar - startBar) > 0.5'), 'must check position tolerance');
+      assert.ok(source.includes('START_BAR_TOLERANCE'), 'must check position tolerance via constant');
+      assert.ok(source.includes('LENGTH_BAR_TOLERANCE'), 'must check length tolerance via constant');
     });
   });
 

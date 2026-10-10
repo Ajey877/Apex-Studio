@@ -167,39 +167,60 @@ describe('Phase 1M: Recording Integration - Real Behavior', () => {
       assert.notEqual(clips[1].takeGroupId, groupId1, 'should be in different groups');
     });
 
-    it('recordings within 0.5 bars still join (tolerance)', () => {
+    it('recordings within 0.1 bars join (floating-point tolerance for punch takes)', () => {
       let clips: PlaylistClip[] = [];
       
-      // First recording at bar 4.0
+      // First recording at bar 4.0 (punch take with fractional start)
       const rec1 = makeClip({ id: 'rec-1', trackIndex: 0, startBar: 4.0, lengthBars: 2 });
       let group = findMatchingTakeGroup(clips, rec1.trackIndex, rec1.startBar, rec1.lengthBars);
       clips = addTakeToProjectClips(clips, rec1, group);
       const groupId = clips[0].takeGroupId!;
       
-      // Second recording at bar 4.3 (within tolerance)
-      const rec2 = makeClip({ id: 'rec-2', trackIndex: 0, startBar: 4.3, lengthBars: 2 });
+      // Second recording at bar 4.05 (within 0.1 tolerance — floating-point noise)
+      const rec2 = makeClip({ id: 'rec-2', trackIndex: 0, startBar: 4.05, lengthBars: 2 });
       group = findMatchingTakeGroup(clips, rec2.trackIndex, rec2.startBar, rec2.lengthBars);
-      assert.equal(group, groupId, 'recording within tolerance should match');
+      assert.equal(group, groupId, 'recording within 0.1 tolerance should match');
     });
 
-    it('recordings beyond 0.5 bars do not join', () => {
+    it('recordings 0.3 bars apart do NOT join (distinct recordings stay independent)', () => {
       let clips: PlaylistClip[] = [];
       
       // First recording at bar 4.0
       const rec1 = makeClip({ id: 'rec-1', trackIndex: 0, startBar: 4.0, lengthBars: 2 });
       let group = findMatchingTakeGroup(clips, rec1.trackIndex, rec1.startBar, rec1.lengthBars);
       clips = addTakeToProjectClips(clips, rec1, group);
-      const groupId = clips[0].takeGroupId!;
+      const groupId1 = clips[0].takeGroupId!;
       
-      // Second recording at bar 4.6 (beyond tolerance)
-      const rec2 = makeClip({ id: 'rec-2', trackIndex: 0, startBar: 4.6, lengthBars: 2 });
+      // Second recording at bar 4.3 (0.3 bars apart — distinct musical phrase)
+      const rec2 = makeClip({ id: 'rec-2', trackIndex: 0, startBar: 4.3, lengthBars: 2 });
       group = findMatchingTakeGroup(clips, rec2.trackIndex, rec2.startBar, rec2.lengthBars);
-      assert.equal(group, undefined, 'recording beyond tolerance should not match');
+      assert.equal(group, undefined, 'recording 0.3 bars apart should NOT match — distinct recordings must stay independent');
+      
+      clips = addTakeToProjectClips(clips, rec2, group);
+      assert.notEqual(clips[1].takeGroupId, groupId1, 'should be in separate groups');
+    });
+
+    it('recordings 1 full bar apart do not join', () => {
+      let clips: PlaylistClip[] = [];
+      
+      // First recording at bar 4
+      const rec1 = makeClip({ id: 'rec-1', trackIndex: 0, startBar: 4, lengthBars: 2 });
+      let group = findMatchingTakeGroup(clips, rec1.trackIndex, rec1.startBar, rec1.lengthBars);
+      clips = addTakeToProjectClips(clips, rec1, group);
+      const groupId1 = clips[0].takeGroupId!;
+      
+      // Second recording at bar 5 (1 full bar apart — ordinary recording at next bar)
+      const rec2 = makeClip({ id: 'rec-2', trackIndex: 0, startBar: 5, lengthBars: 2 });
+      group = findMatchingTakeGroup(clips, rec2.trackIndex, rec2.startBar, rec2.lengthBars);
+      assert.equal(group, undefined, 'recording 1 bar apart should not match');
+      
+      clips = addTakeToProjectClips(clips, rec2, group);
+      assert.notEqual(clips[1].takeGroupId, groupId1, 'should be in separate groups');
     });
   });
 
   describe('Recordings with different lengths', () => {
-    it('recordings with similar lengths (within 50%) join', () => {
+    it('recordings with lengths within 1 bar join (ceiling rounding tolerance)', () => {
       let clips: PlaylistClip[] = [];
       
       // First recording with length 2
@@ -208,13 +229,13 @@ describe('Phase 1M: Recording Integration - Real Behavior', () => {
       clips = addTakeToProjectClips(clips, rec1, group);
       const groupId = clips[0].takeGroupId!;
       
-      // Second recording with length 2.5 (within 50%)
-      const rec2 = makeClip({ id: 'rec-2', trackIndex: 0, startBar: 0, lengthBars: 2.5 });
+      // Second recording with length 3 (1 bar difference — within ceiling rounding tolerance)
+      const rec2 = makeClip({ id: 'rec-2', trackIndex: 0, startBar: 0, lengthBars: 3 });
       group = findMatchingTakeGroup(clips, rec2.trackIndex, rec2.startBar, rec2.lengthBars);
-      assert.equal(group, groupId, 'recording with similar length should match');
+      assert.equal(group, groupId, 'recording within 1 bar length tolerance should match');
     });
 
-    it('recordings with very different lengths do not join', () => {
+    it('recordings with lengths differing by more than 1 bar do not join', () => {
       let clips: PlaylistClip[] = [];
       
       // First recording with length 2
@@ -223,10 +244,38 @@ describe('Phase 1M: Recording Integration - Real Behavior', () => {
       clips = addTakeToProjectClips(clips, rec1, group);
       const groupId = clips[0].takeGroupId!;
       
-      // Second recording with length 4 (100% different, beyond tolerance)
+      // Second recording with length 4 (2 bars difference — beyond tolerance)
       const rec2 = makeClip({ id: 'rec-2', trackIndex: 0, startBar: 0, lengthBars: 4 });
       group = findMatchingTakeGroup(clips, rec2.trackIndex, rec2.startBar, rec2.lengthBars);
-      assert.equal(group, undefined, 'recording with very different length should not match');
+      assert.equal(group, undefined, 'recording with length difference > 1 bar should not match');
+    });
+
+    it('a short recording cannot silently join a long group and become inaudible', () => {
+      let clips: PlaylistClip[] = [];
+      
+      // First: a 4-bar recording creates a group
+      const rec1 = makeClip({ id: 'rec-1', trackIndex: 0, startBar: 0, lengthBars: 4, audioBufferId: 'buf-long' });
+      let group = findMatchingTakeGroup(clips, rec1.trackIndex, rec1.startBar, rec1.lengthBars);
+      clips = addTakeToProjectClips(clips, rec1, group);
+      const groupId = clips[0].takeGroupId!;
+      
+      // Second: a 1-bar recording at the same position (very different length)
+      const rec2 = makeClip({ id: 'rec-2', trackIndex: 0, startBar: 0, lengthBars: 1, audioBufferId: 'buf-short' });
+      group = findMatchingTakeGroup(clips, rec2.trackIndex, rec2.startBar, rec2.lengthBars);
+      
+      // The short recording must NOT join the long group
+      assert.equal(group, undefined, 'short recording must not join long group — would silence unrelated audio');
+      
+      // If it did join, the short take (index 1) would become active and the long take would be silenced
+      // This is the exact false-positive scenario we must prevent
+      clips = addTakeToProjectClips(clips, rec2, group);
+      assert.notEqual(clips[1].takeGroupId, groupId, 'short recording must be in its own group');
+      
+      // Verify both recordings remain audible in their own groups
+      assert.equal(clips[0].audioBufferId, 'buf-long');
+      assert.equal(clips[1].audioBufferId, 'buf-short');
+      const inaudible = resolveInaudibleTakeClipIds(clips);
+      assert.equal(inaudible.size, 0, 'neither recording should be silenced when in separate groups');
     });
   });
 
@@ -400,6 +449,324 @@ describe('Phase 1M: Recording Integration - Real Behavior', () => {
       const inaudible = resolveInaudibleTakeClipIds(clips);
       assert.equal(inaudible.size, 1, 'only 1 take should be inaudible');
       assert.ok(inaudible.has('rec-2'));
+    });
+  });
+});
+
+// --- Phase 1M: Take-group matching safety regression -------------------------
+// These tests verify that the matching rule prevents false-positive grouping
+// that could silently silence unrelated recordings.
+
+describe('Phase 1M: Take-Group Matching Safety', () => {
+  describe('Genuine repeated takes still group correctly', () => {
+    it('ordinary recordings at the same integer bar join correctly', () => {
+      let clips: PlaylistClip[] = [];
+      
+      // First take: ordinary recording at bar 4 (integer from Math.floor)
+      const rec1 = makeClip({ id: 'rec-1', trackIndex: 0, startBar: 4, lengthBars: 4 });
+      let group = findMatchingTakeGroup(clips, rec1.trackIndex, rec1.startBar, rec1.lengthBars);
+      clips = addTakeToProjectClips(clips, rec1, group);
+      const groupId = clips[0].takeGroupId!;
+      
+      // Second take: same position, same length (genuine repeated take)
+      const rec2 = makeClip({ id: 'rec-2', trackIndex: 0, startBar: 4, lengthBars: 4 });
+      group = findMatchingTakeGroup(clips, rec2.trackIndex, rec2.startBar, rec2.lengthBars);
+      assert.equal(group, groupId, 'genuine repeated take should join the group');
+    });
+
+    it('ordinary recordings with ±1 bar length difference join (ceiling rounding)', () => {
+      let clips: PlaylistClip[] = [];
+      
+      // First take: 2 bars (e.g., 3.1 seconds at 120 BPM → ceil(1.55) = 2)
+      const rec1 = makeClip({ id: 'rec-1', trackIndex: 0, startBar: 0, lengthBars: 2 });
+      let group = findMatchingTakeGroup(clips, rec1.trackIndex, rec1.startBar, rec1.lengthBars);
+      clips = addTakeToProjectClips(clips, rec1, group);
+      const groupId = clips[0].takeGroupId!;
+      
+      // Second take: 3 bars (e.g., 4.1 seconds at 120 BPM → ceil(2.05) = 3)
+      const rec2 = makeClip({ id: 'rec-2', trackIndex: 0, startBar: 0, lengthBars: 3 });
+      group = findMatchingTakeGroup(clips, rec2.trackIndex, rec2.startBar, rec2.lengthBars);
+      assert.equal(group, groupId, 'takes with ±1 bar length difference should join (ceiling rounding tolerance)');
+    });
+
+    it('punch recordings with fractional startBar join correctly', () => {
+      let clips: PlaylistClip[] = [];
+      
+      // First punch take: fractional start from punch plan
+      const rec1 = makeClip({ id: 'rec-1', trackIndex: 0, startBar: 4.75, lengthBars: 2.5 });
+      let group = findMatchingTakeGroup(clips, rec1.trackIndex, rec1.startBar, rec1.lengthBars);
+      clips = addTakeToProjectClips(clips, rec1, group);
+      const groupId = clips[0].takeGroupId!;
+      
+      // Second punch take: same fractional position (from same punch plan)
+      const rec2 = makeClip({ id: 'rec-2', trackIndex: 0, startBar: 4.75, lengthBars: 2.5 });
+      group = findMatchingTakeGroup(clips, rec2.trackIndex, rec2.startBar, rec2.lengthBars);
+      assert.equal(group, groupId, 'punch takes at same fractional position should join');
+    });
+
+    it('punch recordings with tiny floating-point differences join', () => {
+      let clips: PlaylistClip[] = [];
+      
+      // First punch take
+      const rec1 = makeClip({ id: 'rec-1', trackIndex: 0, startBar: 4.333333, lengthBars: 2.666667 });
+      let group = findMatchingTakeGroup(clips, rec1.trackIndex, rec1.startBar, rec1.lengthBars);
+      clips = addTakeToProjectClips(clips, rec1, group);
+      const groupId = clips[0].takeGroupId!;
+      
+      // Second punch take: tiny floating-point noise (e.g., from BPM calculation)
+      const rec2 = makeClip({ id: 'rec-2', trackIndex: 0, startBar: 4.333340, lengthBars: 2.666670 });
+      group = findMatchingTakeGroup(clips, rec2.trackIndex, rec2.startBar, rec2.lengthBars);
+      assert.equal(group, groupId, 'punch takes with tiny floating-point differences should join');
+    });
+  });
+
+  describe('Distinct nearby recordings remain independent', () => {
+    it('recordings 0.2 bars apart do NOT join', () => {
+      let clips: PlaylistClip[] = [];
+      
+      const rec1 = makeClip({ id: 'rec-1', trackIndex: 0, startBar: 4.0, lengthBars: 2 });
+      let group = findMatchingTakeGroup(clips, rec1.trackIndex, rec1.startBar, rec1.lengthBars);
+      clips = addTakeToProjectClips(clips, rec1, group);
+      const groupId1 = clips[0].takeGroupId!;
+      
+      const rec2 = makeClip({ id: 'rec-2', trackIndex: 0, startBar: 4.2, lengthBars: 2 });
+      group = findMatchingTakeGroup(clips, rec2.trackIndex, rec2.startBar, rec2.lengthBars);
+      assert.equal(group, undefined, 'recordings 0.2 bars apart must NOT join');
+      
+      clips = addTakeToProjectClips(clips, rec2, group);
+      assert.notEqual(clips[1].takeGroupId, groupId1, 'must be in separate groups');
+    });
+
+    it('recordings on the same track at different bars remain separate', () => {
+      let clips: PlaylistClip[] = [];
+      
+      // Recording at bar 0
+      const rec1 = makeClip({ id: 'rec-1', trackIndex: 0, startBar: 0, lengthBars: 4 });
+      let group = findMatchingTakeGroup(clips, rec1.trackIndex, rec1.startBar, rec1.lengthBars);
+      clips = addTakeToProjectClips(clips, rec1, group);
+      const groupId1 = clips[0].takeGroupId!;
+      
+      // Recording at bar 8 (different musical section)
+      const rec2 = makeClip({ id: 'rec-2', trackIndex: 0, startBar: 8, lengthBars: 4 });
+      group = findMatchingTakeGroup(clips, rec2.trackIndex, rec2.startBar, rec2.lengthBars);
+      assert.equal(group, undefined, 'recordings at different bars must NOT join');
+      
+      clips = addTakeToProjectClips(clips, rec2, group);
+      assert.notEqual(clips[1].takeGroupId, groupId1, 'must be in separate groups');
+    });
+  });
+
+  describe('Significantly different lengths do not accidentally join', () => {
+    it('a 1-bar recording does not join a 4-bar group', () => {
+      let clips: PlaylistClip[] = [];
+      
+      const rec1 = makeClip({ id: 'rec-1', trackIndex: 0, startBar: 0, lengthBars: 4 });
+      let group = findMatchingTakeGroup(clips, rec1.trackIndex, rec1.startBar, rec1.lengthBars);
+      clips = addTakeToProjectClips(clips, rec1, group);
+      const groupId1 = clips[0].takeGroupId!;
+      
+      const rec2 = makeClip({ id: 'rec-2', trackIndex: 0, startBar: 0, lengthBars: 1 });
+      group = findMatchingTakeGroup(clips, rec2.trackIndex, rec2.startBar, rec2.lengthBars);
+      assert.equal(group, undefined, '1-bar recording must NOT join 4-bar group');
+      
+      clips = addTakeToProjectClips(clips, rec2, group);
+      assert.notEqual(clips[1].takeGroupId, groupId1, 'must be in separate groups');
+    });
+
+    it('a 10-bar recording does not join a 2-bar group', () => {
+      let clips: PlaylistClip[] = [];
+      
+      const rec1 = makeClip({ id: 'rec-1', trackIndex: 0, startBar: 0, lengthBars: 2 });
+      let group = findMatchingTakeGroup(clips, rec1.trackIndex, rec1.startBar, rec1.lengthBars);
+      clips = addTakeToProjectClips(clips, rec1, group);
+      const groupId1 = clips[0].takeGroupId!;
+      
+      const rec2 = makeClip({ id: 'rec-2', trackIndex: 0, startBar: 0, lengthBars: 10 });
+      group = findMatchingTakeGroup(clips, rec2.trackIndex, rec2.startBar, rec2.lengthBars);
+      assert.equal(group, undefined, '10-bar recording must NOT join 2-bar group');
+      
+      clips = addTakeToProjectClips(clips, rec2, group);
+      assert.notEqual(clips[1].takeGroupId, groupId1, 'must be in separate groups');
+    });
+  });
+
+  describe('False match cannot silently make unrelated clip inaudible', () => {
+    it('unrelated recordings remain audible even when nearby', () => {
+      let clips: PlaylistClip[] = [];
+      
+      // First recording: a 4-bar phrase at bar 0
+      const rec1 = makeClip({ id: 'rec-1', trackIndex: 0, startBar: 0, lengthBars: 4, audioBufferId: 'buf-1' });
+      let group = findMatchingTakeGroup(clips, rec1.trackIndex, rec1.startBar, rec1.lengthBars);
+      clips = addTakeToProjectClips(clips, rec1, group);
+      
+      // Second recording: a different phrase at bar 0.5 (close but distinct)
+      const rec2 = makeClip({ id: 'rec-2', trackIndex: 0, startBar: 0.5, lengthBars: 4, audioBufferId: 'buf-2' });
+      group = findMatchingTakeGroup(clips, rec2.trackIndex, rec2.startBar, rec2.lengthBars);
+      clips = addTakeToProjectClips(clips, rec2, group);
+      
+      // Both recordings must be audible (in separate groups)
+      const inaudible = resolveInaudibleTakeClipIds(clips);
+      assert.equal(inaudible.size, 0, 'neither recording should be silenced');
+      assert.equal(isTakeAudible(clips[0], clips), true, 'first recording must be audible');
+      assert.equal(isTakeAudible(clips[1], clips), true, 'second recording must be audible');
+    });
+
+    it('adding a new recording never silences an existing independent group', () => {
+      let clips: PlaylistClip[] = [];
+      
+      // Create a take group at bar 0
+      const rec1 = makeClip({ id: 'rec-1', trackIndex: 0, startBar: 0, lengthBars: 4, audioBufferId: 'buf-1' });
+      let group = findMatchingTakeGroup(clips, rec1.trackIndex, rec1.startBar, rec1.lengthBars);
+      clips = addTakeToProjectClips(clips, rec1, group);
+      const groupId1 = clips[0].takeGroupId!;
+      
+      // Add a second take to the same group
+      const rec2 = makeClip({ id: 'rec-2', trackIndex: 0, startBar: 0, lengthBars: 4, audioBufferId: 'buf-2' });
+      group = findMatchingTakeGroup(clips, rec2.trackIndex, rec2.startBar, rec2.lengthBars);
+      clips = addTakeToProjectClips(clips, rec2, group);
+      
+      // Now add a completely different recording at bar 10
+      const rec3 = makeClip({ id: 'rec-3', trackIndex: 0, startBar: 10, lengthBars: 4, audioBufferId: 'buf-3' });
+      group = findMatchingTakeGroup(clips, rec3.trackIndex, rec3.startBar, rec3.lengthBars);
+      clips = addTakeToProjectClips(clips, rec3, group);
+      
+      // The existing group must remain intact and unaffected
+      assert.equal(clips[2].takeGroupId !== groupId1, true, 'new recording must be in its own group');
+      
+      // The existing group's active take (rec-2) must still be audible
+      assert.equal(isTakeAudible(clips[1], clips), true, 'existing active take must remain audible');
+      
+      // The new recording must also be audible (it's the only take in its group)
+      assert.equal(isTakeAudible(clips[2], clips), true, 'new recording must be audible');
+    });
+  });
+
+  describe('Existing take groups remain independent', () => {
+    it('multiple groups at different positions coexist without interference', () => {
+      let clips: PlaylistClip[] = [];
+      
+      // Group 1 at bar 0
+      const rec1 = makeClip({ id: 'rec-1', trackIndex: 0, startBar: 0, lengthBars: 4 });
+      let group = findMatchingTakeGroup(clips, rec1.trackIndex, rec1.startBar, rec1.lengthBars);
+      clips = addTakeToProjectClips(clips, rec1, group);
+      const groupId1 = clips[0].takeGroupId!;
+      
+      // Group 2 at bar 8
+      const rec2 = makeClip({ id: 'rec-2', trackIndex: 0, startBar: 8, lengthBars: 4 });
+      group = findMatchingTakeGroup(clips, rec2.trackIndex, rec2.startBar, rec2.lengthBars);
+      clips = addTakeToProjectClips(clips, rec2, group);
+      const groupId2 = clips[1].takeGroupId!;
+      
+      // Group 3 at bar 16
+      const rec3 = makeClip({ id: 'rec-3', trackIndex: 0, startBar: 16, lengthBars: 4 });
+      group = findMatchingTakeGroup(clips, rec3.trackIndex, rec3.startBar, rec3.lengthBars);
+      clips = addTakeToProjectClips(clips, rec3, group);
+      const groupId3 = clips[2].takeGroupId!;
+      
+      // All groups must be independent
+      assert.notEqual(groupId1, groupId2, 'groups at different positions must be independent');
+      assert.notEqual(groupId2, groupId3, 'groups at different positions must be independent');
+      assert.notEqual(groupId1, groupId3, 'groups at different positions must be independent');
+      
+      // All recordings must be audible (each is the only take in its group)
+      const inaudible = resolveInaudibleTakeClipIds(clips);
+      assert.equal(inaudible.size, 0, 'all recordings must be audible');
+    });
+
+    it('adding a take to one group does not affect other groups', () => {
+      let clips: PlaylistClip[] = [];
+      
+      // Create group 1 at bar 0
+      const rec1 = makeClip({ id: 'rec-1', trackIndex: 0, startBar: 0, lengthBars: 4 });
+      let group = findMatchingTakeGroup(clips, rec1.trackIndex, rec1.startBar, rec1.lengthBars);
+      clips = addTakeToProjectClips(clips, rec1, group);
+      const groupId1 = clips[0].takeGroupId!;
+      
+      // Create group 2 at bar 8
+      const rec2 = makeClip({ id: 'rec-2', trackIndex: 0, startBar: 8, lengthBars: 4 });
+      group = findMatchingTakeGroup(clips, rec2.trackIndex, rec2.startBar, rec2.lengthBars);
+      clips = addTakeToProjectClips(clips, rec2, group);
+      const groupId2 = clips[1].takeGroupId!;
+      
+      // Add a second take to group 1
+      const rec3 = makeClip({ id: 'rec-3', trackIndex: 0, startBar: 0, lengthBars: 4 });
+      group = findMatchingTakeGroup(clips, rec3.trackIndex, rec3.startBar, rec3.lengthBars);
+      assert.equal(group, groupId1, 'should match group 1');
+      clips = addTakeToProjectClips(clips, rec3, group);
+      
+      // Group 2 must remain unaffected
+      assert.equal(clips[1].takeGroupId, groupId2, 'group 2 must remain intact');
+      assert.equal(clips[1].activeTakeIndex, 0, 'group 2 active take must remain 0');
+      
+      // Group 1 should now have 2 takes
+      const group1Clips = clips.filter(c => c.takeGroupId === groupId1);
+      assert.equal(group1Clips.length, 2, 'group 1 should have 2 takes');
+    });
+  });
+
+  describe('Phase 1L punch-recording behavior remains intact', () => {
+    it('punch recordings with identical geometry join correctly', () => {
+      let clips: PlaylistClip[] = [];
+      
+      // First punch take: exact geometry from punch plan
+      const punchStartBar = 4.333;
+      const punchLengthBars = 2.667;
+      
+      const rec1 = makeClip({ 
+        id: 'punch-1', 
+        trackIndex: 0, 
+        startBar: punchStartBar, 
+        lengthBars: punchLengthBars,
+        audioBufferId: 'punch-buf-1'
+      });
+      let group = findMatchingTakeGroup(clips, rec1.trackIndex, rec1.startBar, rec1.lengthBars);
+      clips = addTakeToProjectClips(clips, rec1, group);
+      const groupId = clips[0].takeGroupId!;
+      
+      // Second punch take: same geometry (from same punch plan)
+      const rec2 = makeClip({ 
+        id: 'punch-2', 
+        trackIndex: 0, 
+        startBar: punchStartBar, 
+        lengthBars: punchLengthBars,
+        audioBufferId: 'punch-buf-2'
+      });
+      group = findMatchingTakeGroup(clips, rec2.trackIndex, rec2.startBar, rec2.lengthBars);
+      assert.equal(group, groupId, 'punch takes with identical geometry should join');
+      
+      clips = addTakeToProjectClips(clips, rec2, group);
+      assert.equal(clips.length, 2, 'should have 2 takes');
+      assert.equal(clips[1].takeGroupId, groupId, 'second punch take should join the group');
+    });
+
+    it('punch recordings at different positions remain separate', () => {
+      let clips: PlaylistClip[] = [];
+      
+      // Punch take at bar 4.333
+      const rec1 = makeClip({ 
+        id: 'punch-1', 
+        trackIndex: 0, 
+        startBar: 4.333, 
+        lengthBars: 2.667,
+        audioBufferId: 'punch-buf-1'
+      });
+      let group = findMatchingTakeGroup(clips, rec1.trackIndex, rec1.startBar, rec1.lengthBars);
+      clips = addTakeToProjectClips(clips, rec1, group);
+      const groupId1 = clips[0].takeGroupId!;
+      
+      // Punch take at bar 12.5 (different punch position)
+      const rec2 = makeClip({ 
+        id: 'punch-2', 
+        trackIndex: 0, 
+        startBar: 12.5, 
+        lengthBars: 2.667,
+        audioBufferId: 'punch-buf-2'
+      });
+      group = findMatchingTakeGroup(clips, rec2.trackIndex, rec2.startBar, rec2.lengthBars);
+      assert.equal(group, undefined, 'punch takes at different positions must NOT join');
+      
+      clips = addTakeToProjectClips(clips, rec2, group);
+      assert.notEqual(clips[1].takeGroupId, groupId1, 'must be in separate groups');
     });
   });
 });

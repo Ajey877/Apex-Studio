@@ -167,12 +167,21 @@ export const nextTakeIndexForGroup = (clips: readonly PlaylistClip[], takeGroupI
 };
 
 /**
- * Generates a deterministic take group ID from the track and position so that
- * multiple recordings at the same location are automatically grouped.
+ * Counter to ensure unique group IDs even when multiple groups are created
+ * within the same millisecond. This prevents timestamp collisions when
+ * recordings at different positions are created in quick succession.
+ */
+let groupCounter = 0;
+
+/**
+ * Generates a unique take group ID. Uses track index, start bar, and a
+ * monotonic counter to ensure uniqueness even when multiple groups are
+ * created in the same millisecond.
  */
 export const createTakeGroupId = (trackIndex: number, startBar: number, timestamp?: number): string => {
   const ts = timestamp ?? Date.now();
-  return `take-group-t${trackIndex}-b${startBar}-${ts}`;
+  const counter = groupCounter++;
+  return `take-group-t${trackIndex}-b${startBar}-${ts}-${counter}`;
 };
 
 /**
@@ -288,18 +297,47 @@ export const removeTakeFromGroup = (
 // --- Phase 1M: take-group matching for recording ----------------------------
 
 /**
+ * Tolerance for start-position matching (bars). Ordinary recordings produce
+ * integer startBar values via `Math.floor(captureStartBar)`, so legitimate
+ * repeated takes at the same position have exactly the same integer start.
+ * Punch recordings derive startBar from the same `PunchClipPlacement` plan,
+ * so they also match exactly. The 0.1-bar tolerance (≈ 30 ms at 120 BPM)
+ * guards against floating-point noise without admitting recordings half a
+ * bar apart.
+ */
+const START_BAR_TOLERANCE = 0.1;
+
+/**
+ * Tolerance for length matching (bars, absolute). Ordinary recordings round
+ * up via `Math.ceil(duration / secondsPerBar)`, so two takes of the same
+ * musical phrase can differ by at most 1 bar due to ceiling rounding. Punch
+ * recordings share the same planned length. The 1-bar absolute tolerance
+ * admits ceiling rounding while preventing a 2-bar recording from joining
+ * a 4-bar group — a ratio-based check would allow that (ratio 2.0 is close
+ * to the old 1.5 threshold, and at small lengths the ratio is very noisy).
+ */
+const LENGTH_BAR_TOLERANCE = 1;
+
+/**
  * Finds an existing take group that a new recording at the given track/position
  * should join. Returns the `takeGroupId` of the matching group, or `undefined`
  * if no group matches.
  *
  * Matching criteria (all must hold):
  *   - Same `trackIndex`
- *   - `startBar` is within 0.5 bars of the group's representative start
- *   - `lengthBars` is within 50% of the group's representative length
+ *   - `|startBar difference| ≤ ${START_BAR_TOLERANCE} bars`
+ *   - `|lengthBars difference| ≤ ${LENGTH_BAR_TOLERANCE} bars`
  *
- * The tolerance prevents unrelated recordings from accidentally joining a
- * group while allowing punch takes that differ by a few milliseconds of
- * rounding to group correctly.
+ * These tolerances are tight enough to prevent unrelated recordings from
+ * silently joining a group (which would silence them via take-inactive
+ * filtering) while generous enough for ceiling rounding on ordinary takes
+ * and floating-point noise on punch takes.
+ *
+ * Why not a ratio-based length check: at short lengths (1–2 bars) the ratio
+ * is extremely noisy — a 1-bar take and a 1.4-bar take have ratio 1.4,
+ * which looks "close" but represents fundamentally different musical content.
+ * An absolute tolerance of 1 bar correctly admits ceiling rounding while
+ * rejecting gross mismatches regardless of the base length.
  */
 export const findMatchingTakeGroup = (
   clips: readonly PlaylistClip[],
@@ -319,11 +357,8 @@ export const findMatchingTakeGroup = (
     // All clips in a group share the same track/startBar/lengthBars
     const ref = groupClips[0];
     if (ref.trackIndex !== trackIndex) continue;
-    if (Math.abs(ref.startBar - startBar) > 0.5) continue;
-    if (lengthBars > 0 && ref.lengthBars > 0) {
-      const ratio = lengthBars / ref.lengthBars;
-      if (ratio < 0.5 || ratio > 1.5) continue;
-    }
+    if (Math.abs(ref.startBar - startBar) > START_BAR_TOLERANCE) continue;
+    if (Math.abs(ref.lengthBars - lengthBars) > LENGTH_BAR_TOLERANCE) continue;
     return groupId;
   }
 
