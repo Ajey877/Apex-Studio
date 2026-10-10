@@ -84,6 +84,32 @@ test.describe('prototype-only representative Apex-style multitrack project', () 
     expect(result.disposed.after.slotsInUse).toBe(0);
   });
 
+  test('[must] live Worklet and Worker float outputs agree over the full project', async ({ page }, testInfo) => {
+    test.setTimeout(60_000);
+    const errors = await openPrototype(page);
+    const result = await run(page, 'runLiveOfflineConsistency');
+    await save(testInfo, 'live-offline-consistency', result);
+    console.log(`[${testInfo.project.name}] live/offline consistency: ${JSON.stringify({
+      pass: result.pass,
+      maxAbsDiff: result.maxAbsDiff,
+      tolerance: result.tolerance,
+      liveVsOffline: result.liveVsOffline,
+      offlineVsReference: result.offlineVsReference,
+      wasm: result.wasm,
+      worker: result.worker,
+      playbackStats: result.live.playbackStats,
+      disposedSlots: result.live.disposedSlots,
+    })}`);
+    expect(errors).toEqual([]);
+    expect(result.pass).toBe(true);
+    expect(result.maxAbsDiff).toBeLessThanOrEqual(1e-6);
+    expect(result.liveVsOffline.left.maxAbsDiff).toBeLessThanOrEqual(1e-6);
+    expect(result.liveVsOffline.right.maxAbsDiff).toBeLessThanOrEqual(1e-6);
+    expect(result.wasm.workerMemoryBytes).toBe(131072);
+    expect(result.wasm.liveMemoryBytes).toBe(131072);
+    expect(result.live.disposedSlots).toBe(0);
+  });
+
   test('[must] long-lived Worker completes 200 full fixture exports with stable memory and deterministic WAV output', async ({ page }, testInfo) => {
     test.setTimeout(300_000);
     const errors = await openPrototype(page);

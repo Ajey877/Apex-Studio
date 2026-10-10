@@ -5,7 +5,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { REPRESENTATIVE_PROJECT } from '../../fixtures/representative-project.mjs';
 import { compileProject, renderProjectSources } from '../../web/project-model.mjs';
-import { createProjectRenderer, decodeWav16Bit, encodeWav16Bit, hashBytes32, ProjectRenderCancelledError } from '../../web/project-render-core.mjs';
+import { createProjectRenderer, decodeWav16Bit, encodeWav16Bit, hashBytes32, interleaveFloat32Stereo, ProjectRenderCancelledError } from '../../web/project-render-core.mjs';
 import { maxAbsDifference, renderProjectReference, summarizeStereo } from '../../web/project-render-reference.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -114,6 +114,12 @@ test('PCM16 WAV encoder writes a valid stereo file within declared quantization 
   assert.equal(decoded.sampleRate, 48000);
   assert.ok(maxAbsDifference(decoded.left, reference.master.left).maxAbsDiff <= PCM_TOLERANCE);
   assert.ok(maxAbsDifference(decoded.right, reference.master.right).maxAbsDiff <= PCM_TOLERANCE);
+});
+
+test('float32 PCM interleave preserves independent stereo channel samples', () => {
+  const interleaved = interleaveFloat32Stereo({ left: Float32Array.from([-1, 0.25, 0]), right: Float32Array.from([1, -0.25, 0.5]) });
+  assert.deepEqual([...interleaved], [-1, 1, 0.25, -0.25, 0, 0.5]);
+  assert.throws(() => interleaveFloat32Stereo({ left: Float32Array.of(1), right: Float32Array.of() }), /matching/);
 });
 
 test('project validation rejects unsupported route targets and invalid schedule controls', () => {

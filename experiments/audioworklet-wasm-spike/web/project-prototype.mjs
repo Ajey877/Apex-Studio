@@ -92,6 +92,62 @@ export async function runLiveParameterChange(project = REPRESENTATIVE_PROJECT) {
   };
 }
 
+export async function runLiveOfflineConsistency(project = REPRESENTATIVE_PROJECT) {
+  const compiled = compileProject(project);
+  const reference = renderProjectReference(project, { captureStems: false });
+  const live = await runLiveProject(project, { captureFrames: compiled.totalFrames });
+  const worker = makeProjectWorker();
+  try {
+    worker.postMessage({ type: 'init' });
+    const ready = await waitWorkerMessage(worker, msg => msg.type === 'ready' || msg.type === 'error');
+    if (ready.type !== 'ready') throw new Error(`Worker init failed: ${ready.message}`);
+    const jobId = 'live-offline-consistency';
+    worker.postMessage({ type: 'render-project', jobId, project, includeWav: true, includeFloatPcm: true, yieldEveryBlocks: 512 });
+    const rendered = await waitWorkerMessage(worker, msg => msg.jobId === jobId && ['exported', 'error', 'cancelled'].includes(msg.type), 120_000);
+    if (rendered.type !== 'exported' || !(rendered.output.floatPcm instanceof ArrayBuffer)) throw new Error(`Worker float export failed: ${rendered.message || rendered.type}`);
+    const interleaved = new Float32Array(rendered.output.floatPcm);
+    if (interleaved.length !== compiled.totalFrames * 2 || rendered.output.frames !== compiled.totalFrames) throw new Error('live/offline PCM frame count mismatch');
+    const offlineLeft = new Float32Array(compiled.totalFrames);
+    const offlineRight = new Float32Array(compiled.totalFrames);
+    for (let frame = 0; frame < compiled.totalFrames; frame++) {
+      offlineLeft[frame] = interleaved[frame * 2];
+      offlineRight[frame] = interleaved[frame * 2 + 1];
+    }
+    const liveVsOffline = {
+      left: maxAbsDifference(live.capture.master.left, offlineLeft),
+      right: maxAbsDifference(live.capture.master.right, offlineRight),
+    };
+    const offlineVsReference = {
+      left: maxAbsDifference(offlineLeft, reference.master.left),
+      right: maxAbsDifference(offlineRight, reference.master.right),
+    };
+    const liveVsReference = {
+      left: maxAbsDifference(live.capture.master.left, reference.master.left),
+      right: maxAbsDifference(live.capture.master.right, reference.master.right),
+    };
+    const maximum = Math.max(liveVsOffline.left.maxAbsDiff, liveVsOffline.right.maxAbsDiff,
+      offlineVsReference.left.maxAbsDiff, offlineVsReference.right.maxAbsDiff,
+      liveVsReference.left.maxAbsDiff, liveVsReference.right.maxAbsDiff);
+    const pass = maximum <= FLOAT_TOLERANCE && rendered.memory.engineInstances === 1
+      && rendered.memory.memoryBytes === 131072 && live.info.wasmMemoryBytes === 131072
+      && live.disposed.after.slotsInUse === 0;
+    return {
+      pass,
+      fixture: reference.info,
+      tolerance: FLOAT_TOLERANCE,
+      maxAbsDiff: maximum,
+      liveVsOffline,
+      offlineVsReference,
+      liveVsReference,
+      wasm: { workerInstances: 1, workerEngineInstances: rendered.memory.engineInstances, workerMemoryBytes: rendered.memory.memoryBytes, liveEngineInstances: live.info.engineInstances, liveMemoryBytes: live.info.wasmMemoryBytes },
+      worker: { wavBytes: rendered.output.bytes, floatPcmBytes: rendered.output.floatPcmBytes, hash32: rendered.output.hash32, renderMs: rendered.metrics.coreRenderMs },
+      live: { worklet: live.info, playbackStats: live.audioContext.playbackStats, wallElapsedMs: live.audioContext.wallElapsedMs, disposedSlots: live.disposed.after.slotsInUse },
+    };
+  } finally {
+    await disposeAndTerminate(worker);
+  }
+}
+
 export async function runOfflineProjectBatch({ renders = 200, project = REPRESENTATIVE_PROJECT } = {}) {
   if (!Number.isInteger(renders) || renders < 1 || renders > 500) throw new RangeError('renders must be an integer from 1 to 500');
   const compiled = compileProject(project);
@@ -261,12 +317,14 @@ export async function runOfflineCancellationRecovery(project = REPRESENTATIVE_PR
 export async function runProjectPrototype({ offlineJobs = 200 } = {}) {
   const fixture = await runLiveProjectParity();
   const parameterChange = await runLiveParameterChange();
+  const liveOffline = await runLiveOfflineConsistency();
   const offline = await runOfflineProjectBatch({ renders: offlineJobs });
   const cancellation = await runOfflineCancellationRecovery();
   return {
-    pass: fixture.pass && parameterChange.pass && offline.pass && cancellation.pass,
+    pass: fixture.pass && parameterChange.pass && liveOffline.pass && offline.pass && cancellation.pass,
     fixture,
     parameterChange,
+    liveOffline,
     offline,
     cancellation,
     limitations: projectLimitations(),

@@ -252,6 +252,14 @@ export function encodeWav16Bit(stereo, sampleRate) {
   return bytes;
 }
 
+export function interleaveFloat32Stereo(stereo) {
+  const frames = stereo.left.length;
+  if (!frames || stereo.right.length !== frames) throw new RangeError('float PCM output requires matching non-empty stereo channels');
+  const interleaved = new Float32Array(frames * 2);
+  for (let i = 0; i < frames; i++) { interleaved[i * 2] = stereo.left[i]; interleaved[i * 2 + 1] = stereo.right[i]; }
+  return interleaved;
+}
+
 export function decodeWav16Bit(bytes) {
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   if (bytes.byteLength < 44 || readAscii(view, 0, 4) !== 'RIFF' || readAscii(view, 8, 4) !== 'WAVE' || readAscii(view, 36, 4) !== 'data') {

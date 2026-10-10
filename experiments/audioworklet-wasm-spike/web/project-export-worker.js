@@ -2,7 +2,7 @@
 // Scheduling, synthetic sample/instrument sources, per-track WASM inserts,
 // fader automation, routing, bus processing, cancellation and PCM-WAV writing
 // are implemented. This is not the production Apex project exporter.
-import { createProjectRenderer, encodeWav16Bit, hashBytes32, ProjectRenderCancelledError } from './project-render-core.mjs';
+import { createProjectRenderer, encodeWav16Bit, hashBytes32, interleaveFloat32Stereo, ProjectRenderCancelledError } from './project-render-core.mjs';
 import { wasmBytes } from './wasm-engine-bytes.mjs';
 import { REPRESENTATIVE_PROJECT } from '../fixtures/representative-project.mjs';
 
@@ -68,6 +68,7 @@ async function renderProjectJob(message) {
     const wavStartedAt = performance.now();
     const wav = encodeWav16Bit(result.master, result.info.sampleRate);
     const wavEncodeMs = performance.now() - wavStartedAt;
+    const floatPcm = message.includeFloatPcm === true ? interleaveFloat32Stereo(result.master) : null;
     const outputHash32 = hashBytes32(wav);
     const exportElapsedMs = performance.now() - exportStartedAt;
     const info = renderer.snapshot();
@@ -82,13 +83,17 @@ async function renderProjectJob(message) {
         hash32: outputHash32,
         peak: Math.max(peak(result.master.left), peak(result.master.right)),
         nonFinite: countNonFinite(result.master.left) + countNonFinite(result.master.right),
+        floatPcmBytes: floatPcm ? floatPcm.byteLength : 0,
         wavBytes: message.includeWav === true ? wav.buffer : undefined,
+        floatPcm: floatPcm ? floatPcm.buffer : undefined,
       },
       metrics: { ...result.metrics, coreRenderMs: result.metrics.elapsedMs, wavEncodeMs, exportElapsedMs },
       memory: info,
     };
-    if (message.includeWav === true) self.postMessage(response, [wav.buffer]);
-    else self.postMessage(response);
+    const transfer = [];
+    if (message.includeWav === true) transfer.push(wav.buffer);
+    if (floatPcm) transfer.push(floatPcm.buffer);
+    self.postMessage(response, transfer);
   } catch (error) {
     if (error instanceof ProjectRenderCancelledError || error?.name === 'ProjectRenderCancelledError') {
       self.postMessage({ type: 'cancelled', jobId, memory: renderer.snapshot() });
