@@ -17,17 +17,19 @@ Worker and regression coverage. All session follow-up changes are confined to
   reference stream, not bit-exact. One-unit bank and individual engine outputs
   remain bit-exact (§13). Do not repeat the older unqualified “bank is bit-exact”
   claim for multi-unit mixing.
-* The shared-engine/bank prototype **was** exercised in both unpackaged and
-  asar-packaged Electron by the current PR CI run #38054717669: engine parity,
-  slot release, bank golden, 128/512-unit comparisons, and offline-retention probes
-  are reported in §13. At 512 units, the bank node completed 100% of blocks with
-  0 underruns in both packaged modes, while engine-nodes rendered 95–96% with
-  775–1,016 underruns. These are CI measurements, not hardware readiness evidence.
+* The shared-engine/bank prototype **was** exercised in unpackaged and asar Electron
+  in current PR CI run #38055574687: engine parity, slot release, bank golden,
+  128/512-unit comparisons, and offline-retention probes passed (§13). At 512 units,
+  engine-bank rendered 100% with 0 underruns; in the same Windows browser run,
+  engine-nodes rendered only 72–83% with 1,327–1,412 underruns. An earlier Electron
+  run showed 95–96% / 775–1,016 for engine-nodes, while the latest Electron run
+  rendered 100%. These are variable hosted-CI observations, not hardware-readiness
+  evidence.
 * The new local long-lived Worker PCM prototype and the 16-unit bank tolerance
-  assertion were not part of that CI run. Local Electron could not be installed or
+  assertion were not part of PR CI. Local Electron could not be installed or
   launched, so these latest Worker/bank-test edits are **NOT RUN** in Electron.
 * PR #205 is on a different branch (`arena/96cb2a8b-apex-studio`) and currently at
-  `243ae88052fc21c187d6ee1415070a82c6cd605e`; run #38054717669 is green on that PR
+  `ed0a79217cb455d87704b1c6ff02ee68687b81a5`; run #38055574687 is green on that PR
   head, not on this fixed session branch and not for the local Worker changes.
 
 **Untested:** full browser suite / installed Chrome and Edge for the new Worker
@@ -35,7 +37,7 @@ changes, Worker integration in packaged/unpackaged Electron, physical-device aud
 and complete offline graph/export semantics. These are **NOT RUN**. The
 representative Windows laptop remains **NOT RUN**.
 
-Date: 2026-10-10 · PR #205 latest inspected head: `243ae88052fc21c187d6ee1415070a82c6cd605e` · session branch: `arena/724da208-apex-studio`
+Date: 2026-10-10 · PR #205 latest inspected head: `ed0a79217cb455d87704b1c6ff02ee68687b81a5` · session branch: `arena/724da208-apex-studio`
 
 ---
 
@@ -198,12 +200,12 @@ the sandbox lacks the Playwright Chromium headless-shell binary (§6c).
 | Linux bundled Chromium, run #38051848530 | **RAN — job SUCCESS** | Includes the original 11-case project plus `investigation.spec.mjs`; check-run annotations expose probe, lifecycle, design-comparison and CSP results (§12.6) |
 | **Google Chrome stable — Windows**, headed | **RAN — 50 tests passed in run #38051848530** | Chrome 154.0.8037.58, Windows x64. Original 11 tests + 39 investigation tests; 15 s compare at 16/64/128/256/512 units across per-node, engine-nodes and engine-bank layouts. Per-node 128/256 allocation failure reproduced (§12.6). |
 | **Microsoft Edge stable — Windows**, headed | **RAN — 50 tests passed in run #38051848530** | Edge 153.0.4234.48, Windows x64. Same test matrix and defaults; per-node 128/256 allocation failure reproduced (§12.6). |
-| **Electron 43.4.1 — Windows, unpackaged spike app** | **RAN — SUCCESS** in run #38054717669 on PR head `243ae88052fc21c187d6ee1415070a82c6cd605e` | Existing shared-engine/bank parity, 128/512 comparisons, offline-retention probes, and CSP modes ran. At 512 units, engine-bank: 100% rendered / 0 underruns; engine-nodes: 96% / 1,016 underruns. Offline retention: per-node 7, engine-nodes/bank 123; after exhaustion 0, after reload 123. |
-| **Electron 43.4.1 — Windows, packaged asar spike app** | **RAN — SUCCESS** in run #38054717669 on PR head `243ae88052fc21c187d6ee1415070a82c6cd605e` | Existing shared-engine/bank parity, 128/512 comparisons, offline-retention probes, and CSP modes ran. At 512 units, engine-bank: 100% rendered / 0 underruns; engine-nodes: 95% / 775 underruns. Offline retention: per-node 7, engine-nodes/bank 124; after exhaustion 0, after reload 124. |
-| **Packaged production-app CSP probe** | **RAN — SUCCESS** in run #38054717669 | The Windows probe loaded `app.asar/dist/index.html`; strict production CSP blocked inline script and WASM compile/module/instantiate. This was a packaged production build probe, not the Worker prototype. |
+| **Electron 43.4.1 — Windows, unpackaged spike app** | **RAN — SUCCESS** in run #38055574687 on PR head `ed0a79217cb455d87704b1c6ff02ee68687b81a5` | Shared-engine/bank parity, 128/512 comparisons, offline-retention probes, and CSP modes ran. At 512 units, engine-nodes and engine-bank both rendered 100% with 0 underruns in this run (earlier run #380547 had engine-nodes at 96% / 1,016 underruns). Offline retention: per-node 7, engine-nodes/bank 124; after exhaustion 0, after reload 124. |
+| **Electron 43.4.1 — Windows, packaged asar spike app** | **RAN — SUCCESS** in run #38055574687 on PR head `ed0a79217cb455d87704b1c6ff02ee68687b81a5` | Shared-engine/bank parity, 128/512 comparisons, offline-retention probes, and CSP modes ran. At 512 units, engine-nodes and engine-bank both rendered 100% with 0 underruns in this run (earlier run #380547 had engine-nodes at 95% / 775 underruns). Offline retention: per-node 7, engine-nodes/bank 123; after exhaustion 0, after reload 123. |
+| **Packaged production-app CSP probe** | **RAN — SUCCESS** in runs #38054717669 and #38055574687 | The Windows probe loaded `app.asar/dist/index.html`; strict production CSP blocked inline script and WASM compile/module/instantiate. The newer run reported `memoryCap: 123`. This was a packaged production build probe, not the Worker prototype. |
 | **Electron — new local Worker integration** | **NOT RUN** | The local `offlineWorkerPrototype` and new 16-unit bank precision assertion were not in PR CI. Local Electron was unavailable; no new Electron launch occurred. |
 | Representative mid-range Windows laptop / physical device | **NOT RUN** | CI measurements are not a hardware baseline. Instructions in README “Local benchmark”. |
-| PR #205 current checks, head `243ae88052fc21c187d6ee1415070a82c6cd605e` | **ALL PASS** | Run #38054717669: `verify`, `audio-tests`, `windows-package`, Audio Spike Linux Chromium, Windows Chrome/Edge, and Windows Electron all succeeded. It validates that PR head, including its existing engine/bank Electron tests; it does **not** include the local offline Worker / 16-unit bank precision edits on the separate session branch. |
+| PR #205 current checks, head `ed0a79217cb455d87704b1c6ff02ee68687b81a5` | **ALL PASS** | Run #38055574687: `verify`, `audio-tests`, `windows-package`, Audio Spike Linux Chromium, Windows Chrome/Edge, and Windows Electron all succeeded. It validates the PR head, including existing engine/bank Electron tests; it does **not** include the local offline Worker / 16-unit bank precision edits on the separate session branch. |
 
 ### Run history and scope
 
@@ -220,12 +222,13 @@ WASM memories before those live intervals start.
 
 Electron run #38053541244 emitted compact annotations for the spike harness in both
 packaging modes: the `file://` hook handled 9/9 responses, `production` blocked WASM,
-and `production-wasm` allowed it. The current PR run #38054717669 on head `243ae`
-also tested the existing shared-engine/bank layout, engine parity, 128/512-unit
-comparisons, and OfflineAudioContext retention in unpackaged and packaged modes; its
-actual production-app package CSP probe blocked WASM. The CI run validates the code
-at that PR head, not the local Worker prototype or local 16-unit bank tolerance
-assertion on this separate session branch.
+and `production-wasm` allowed it. Runs #38054717669 (`243ae`) and #38055574687
+(current head `ed0a792`) also tested the existing shared-engine/bank layout, engine
+parity, 128/512-unit comparisons, and OfflineAudioContext retention in unpackaged
+and packaged modes; each included a packaged production-app CSP probe that blocked
+WASM. The latest current-head run #38055574687 validates PR code only, not the local
+Worker prototype or local 16-unit bank tolerance assertion on this separate session
+branch.
 
 ### Logs, annotations and artifacts
 
@@ -294,7 +297,7 @@ observed one-ULP rounding difference is not bit-exact and must not be represente
 | Bounded follow-up browser cases in headless Chromium 153 | PASS — 5/5 targeted tests | 200-job module Worker; engine/bank parity; offline-render retention; expected per-node x128 and x256 failures. Full spike browser suite was **NOT RUN** for these edits. |
 | Root production regressions rerun against the earlier worktree (`lint`, `verify:desktop`, `test:audio` 1643/1643, `test:history` 699/699, `build`) | PASS locally (historical) |
 | Root Playwright browser suite | **NOT RUN**: prior attempt was blocked before launch by missing Chromium headless-shell. The bounded spike tests used a separate sandbox Chromium; that does not validate the root browser suite. |
-| Existing shared-engine/bank and offline-retention Electron tests | **RAN — PASS** in both packaging modes on PR head `243ae`; the new Worker and 16-unit bank-tolerance additions remain **NOT RUN** in Electron (§13). |
+| Existing shared-engine/bank and offline-retention Electron tests | **RAN — PASS** in both packaging modes on current PR head `ed0a792`; the new Worker and 16-unit bank-tolerance additions remain **NOT RUN** in Electron (§13). |
 | Production `dist/` contains no spike code | PASS (earlier isolation test) |
 
 ### 6d. CSP (Electron production policy, served over HTTP in Chromium)
@@ -307,7 +310,7 @@ observed one-ULP rounding difference is not bit-exact and must not be represente
 
 The full HTTP matrix (7 policies × main thread, worklet, engine worklet and
 dedicated Worker) is in §12.4 and was repeated in Windows Chrome/Edge (§12.6).
-Electron 43.4.1 annotations from runs #38053541244 and #38054717669 show the
+Electron 43.4.1 annotations from runs #38053541244 and #38055574687 show the
 spike-only `file://` header hook handled 9/9 responses: `production` blocked
 main-thread/worklet WASM, and `production-wasm` allowed both. The latest run also
 probed the packaged production app; strict CSP blocked inline script and WASM
@@ -345,7 +348,7 @@ comparison at 16–512 units is in §12.3.
 1. **Strict CSP behavior is confirmed in the packaged production build, but CSP relaxation remains an owner decision.**
    The HTTP Chromium matrix shows that `script-src 'self'` blocks WASM and adding
    `'wasm-unsafe-eval'` permits it without permitting JavaScript `eval` (§12.4,
-   §12.6). Electron 43.4.1 CI annotations from runs #38053541244 and #38054717669
+   §12.6). Electron 43.4.1 CI annotations from runs #38053541244 and #38055574687
    show the spike's `onHeadersReceived` hook handled 9/9 `file://` responses in both
    unpackaged and asar-packaged modes: copied `production` CSP blocked main-thread
    and worklet WASM; `production-wasm` allowed both. The latest run also loaded the
@@ -357,10 +360,11 @@ comparison at 16–512 units is in §12.3.
    Per-block timing falls back to `Date.now()` at 1 ms resolution. Means over
    thousands of blocks are statistically sound, but single-block overrun detection
    is coarse. `AudioContext.playbackStats` provides an independent underrun counter;
-   it was present in Windows Chrome 154, Edge 153, and Electron 43.4.1 CI results
-   (the current Electron comparison annotations report 775–1,016 underruns for
-   engine-nodes at 512 units). These counters come from hosted/fake audio output,
-   not a physical device.
+   it was present in Windows Chrome 154, Edge 153, and Electron 43.4.1 CI results.
+   Electron run #380547 reported 775–1,016 engine-node underruns at 512 units, while
+   #380555 reported zero; the latest Windows browser run reported 1,327–1,412 for
+   engine-nodes at 512. The variation is itself a warning, and all counters come
+   from hosted/fake audio output, not a physical device.
 3. **Initialisation failure at instance index #125: cause strongly supported by
    Linux and Windows browser execution (follow-up, §12.1, §12.6).** With one WASM
    instance per AudioWorkletNode, 128/256/512-unit attempts fail during setup at
@@ -419,14 +423,13 @@ comparison at 16–512 units is in §12.3.
 4. `fetch()` of the `.wasm` file works over HTTP. Over `file://` it is NOT RUN.
    Embedding the bytes avoids the question.
 5. Worklet module loading from `file://` (unpackaged Electron) and from inside
-   `app.asar` (packaged spike app) worked under `csp=none`. The current PR run
-   #38054717669 exercised the existing shared-engine/bank parity, 128/512-unit
-   comparisons, and OfflineAudioContext retention in both modes (§13). The `production`
-   CSP hook was enforced on 9/9 file responses; the test-only `production-wasm`
-   policy allowed WASM. A separate packaged production-app probe confirmed that the
-   strict CSP blocks inline script and WASM. The new long-lived offline Worker and
-   16-unit bank precision regression added on the session branch were **NOT RUN** in
-   Electron.
+   `app.asar` (packaged spike app) worked under `csp=none`. PR run #38055574687
+   exercised the existing shared-engine/bank parity, 128/512-unit comparisons, and
+   OfflineAudioContext retention in both modes (§13). The `production` CSP hook was
+   enforced on 9/9 file responses; the test-only `production-wasm` policy allowed
+   WASM. A separate packaged production-app probe confirmed that strict CSP blocks
+   inline script and WASM. The new long-lived offline Worker and 16-unit bank
+   precision regression added on the session branch were **NOT RUN** in Electron.
 6. Production forces `force-wave-audio` (WaveOut) on Windows. Its latency and
    dropout behaviour with AudioWorklet are unmeasured, and the Electron runner keeps
    that switch so the CI numbers reflect production.
@@ -457,13 +460,13 @@ appropriate; do not start Phase 1.** The current PR head and checks are tracked 
 
 **Why not PROCEED:**
 * **Windows confirms the allocation risk, not a complete production design.** The
-  per-node 128/256 tests fail at 124–125 memories in both Windows Chrome and Edge.
-  The engine layouts initialize through 512 units with one memory, but the 15-second
-  comparison is not a physical-device benchmark. At 512 `engine-nodes`, Chrome
-  reported 97% rendered blocks and 393 browser underruns; `engine-bank` reported
-  100% and zero in that run. These measurements are runner-specific, and the green
-  comparison test asserts initialization, memory use and slot release—not audio
-  health (§12.6).
+  per-node 128/256 tests fail at 124–125 memories in Windows Chrome and Edge. The
+  engine layouts initialize through 512 units with one memory, but the 15-second
+  comparison is not a physical-device benchmark. In latest run #380555, 512-unit
+  `engine-nodes` rendered 83% in Chrome (1,412 underruns) and 72% in Edge (1,327);
+  `engine-bank` rendered 100% with no underruns, though it had 3 over-budget blocks.
+  Earlier runs varied substantially. These runner-specific comparisons assert
+  initialization, memory use and slot release—not audio health (§12.6, §13).
 * **Offline rendering retains WASM memories** in local Chromium and Windows Chrome /
   Edge. Repeated offline renders exhausted the page after 7 per-node or about 124–125
   engine-node/bank renders; after exhaustion no new WASM could be created until
@@ -472,7 +475,7 @@ appropriate; do not start Phase 1.** The current PR head and checks are tracked 
   `OfflineAudioContext` and integrates no complete export graph; the retention risk
   is therefore reduced only as a candidate, not resolved.
 * **Production Electron CSP is confirmed to block WASM in the tested packaged build.**
-  Current CI run #38054717669 measured the spike-only replica in both packaging
+  Current CI run #38055574687 measured the spike-only replica in both packaging
   modes and also probed the packaged production app: strict CSP blocked inline
   scripts and WASM compile/module/instantiate. The Electron documentation disagrees
   with the header-hook behavior, and the `production-wasm` allowance was tested only
@@ -742,7 +745,7 @@ For each, the response-header hook handled 9/9 `file://` responses; the copied
 `production-wasm` allowed both. This contradicts Electron v43.4.1's
 [security tutorial](https://github.com/electron/electron/blob/v43.4.1/docs/tutorial/security.md#csp-meta-tag),
 which says header CSP is not possible for `file://` and recommends a `<meta>` tag or
-custom protocol. The latest PR run #38054717669 also probed the packaged production
+custom protocol. The latest PR run #38055574687 also probed the packaged production
 build at `app.asar/dist/index.html` and recorded inline-script and WASM CSP blocks
 (§13). The current production policy therefore was exercised in that packaged CI
 build; the long-lived Worker and 16-unit bank-precision additions remain **NOT RUN**
@@ -866,9 +869,9 @@ modes (Electron 43.4.1, Chrome 150.0.7871.224, V8 15.0.245.28-electron.0):
 
 This run is measured evidence for the **spike-only Electron replica** and does not
 itself test the Apex executable; its CSP observation conflicts with the Electron
-docs (§12.4). The later current-head run #38054717669 adds engine/bank, offline
-retention and packaged production-app CSP evidence (§13). The long-lived Worker
-prototype and 16-unit bank precision assertion remain **NOT RUN** in Electron. The
+docs (§12.4). Current-head run #38055574687 adds engine/bank, offline retention and
+packaged production-app CSP evidence (§13). The long-lived Worker prototype and
+16-unit bank precision assertion remain **NOT RUN** in Electron. The
 representative-laptop benchmark is **NOT RUN**. No production audio code or CSP
 setting was changed.
 
@@ -881,14 +884,15 @@ setting was changed.
 The follow-up changes are isolated to `experiments/audioworklet-wasm-spike/`. The
 session branch is `arena/724da208-apex-studio`; PR #205 is on the separate
 `arena/96cb2a8b-apex-studio` branch. PR #205's current head is
-`243ae88052fc21c187d6ee1415070a82c6cd605e`. The Actions run
-[#38054717669](https://github.com/Ajey877/Apex-Studio/actions/runs/38054717669)
+`ed0a79217cb455d87704b1c6ff02ee68687b81a5`. The Actions run
+[#38055574687](https://github.com/Ajey877/Apex-Studio/actions/runs/38055574687)
 completed **SUCCESS**: `verify`, `audio-tests`, `windows-package`, Linux Audio Spike,
 Windows Chrome/Edge, and Windows Electron all passed on the PR head. It includes the
 PR branch's existing engine/bank Electron coverage and packaged production CSP probe,
 but not the local offline Worker prototype or local 16-unit bank precision
-assertion. Those local follow-up changes have no CI validation. Prior green run
-#38053541244 is on the older PR head `1800123529b2de3de37af0e67d75ad5217f73ec1`.
+assertion. Those local follow-up changes have no CI validation. The preceding green
+run #38054717669 was on PR head `243ae88052fc21c187d6ee1415070a82c6cd605e`; earlier
+#38053541244 was on `1800123529b2de3de37af0e67d75ad5217f73ec1`.
 
 No production audio-engine file, production CSP, or workflow was changed. No PR was
 created or merged, and Phase 1 was not started.
@@ -949,35 +953,40 @@ regression assertions for the known failure, not success of the per-node design.
 
 ### Shared-engine, bank and offline-retention results in Electron CI
 
-The current PR run #38054717669 (head `243ae88052fc21c187d6ee1415070a82c6cd605e`)
+The latest PR run #38055574687 (head `ed0a79217cb455d87704b1c6ff02ee68687b81a5`)
 ran Electron 43.4.1 / Chrome 150.0.7871.224 in both unpackaged and asar-packaged
-modes. Source: check-run `114220706772` annotations. This validates the engine/bank
+modes. Source: check-run `114223207904` annotations. It validated the engine/bank
 prototype on that PR head; the Worker prototype added on the separate session branch
-is not present in those annotations.
+is not present in those annotations. Prior run #38054717669 on head `243ae` showed
+more variable 512-unit results, summarized below as historical comparison evidence.
 
 | Probe | Unpackaged | Packaged asar |
 |---|---|---|
 | Shared-engine parity / slot release | **PASS**; shared engine, distinct slots, individual golden/reference parity, slot release; one-unit bank golden | **PASS**; same checks |
-| x128 layout comparison | Per-node fails at 123; engine-nodes and engine-bank initialize with 1 memory and render 100% | Per-node fails at 124; engine-nodes and engine-bank initialize with 1 memory and render 100% |
-| x512 engine-nodes | 38.3% quantum, 96% rendered, 8 lag events, **1,016 underruns** | 37.8% quantum, 95% rendered, 10 lag events, **775 underruns** |
-| x512 engine-bank | 31.2% quantum, 100% rendered, 0 overrun/lag/underrun | 29.6% quantum, 100% rendered, 0 overrun/lag/underrun |
-| Offline-context retention | per-node 7; engine-nodes/bank 123; after exhaustion 0; after reload 123 | per-node 7; engine-nodes/bank 124; after exhaustion 0; after reload 124 |
-| `csp=none` allocation probe | 105 successes, next allocation fails; second-after-dispose 0 | 104 successes, next allocation fails; second-after-dispose 0 |
+| x128 layout comparison | Per-node fails at 124; engine-nodes and engine-bank initialize with 1 memory and render 100% | Per-node fails at 123; engine-nodes and engine-bank initialize with 1 memory and render 100% |
+| x512 engine-nodes | 32.0% quantum, 100% rendered, 0 lag/underruns in latest run | 32.3% quantum, 100% rendered, 0 lag/underruns in latest run |
+| x512 engine-bank | 24.7% quantum, 100% rendered, 0 underruns | 24.7% quantum, 100% rendered, 0 underruns |
+| Offline-context retention | per-node 7; engine-nodes/bank 124; after exhaustion 0; after reload 124 | per-node 7; engine-nodes/bank 123; after exhaustion 0; after reload 123 |
+| `csp=none` allocation probe | 104 successes, next allocation fails; second-after-dispose 0 | 105 successes, next allocation fails; second-after-dispose 0 |
 | CSP `production` / `production-wasm` | Hook saw 9/9 `file://`; production blocks main/worklet WASM; production-wasm allows both | Same |
 
-At x512, bank-node loading had materially fewer observed underruns than
-engine-nodes in both runs, but these are short CI hosted-runner results, not a
-physical audio benchmark. The unpackaged investigation annotation reports
-`churnPerNode: 123/1000` while the packaged run reports `1000/1000`; the difference
-is unexplained and should not be silently treated as equivalent lifecycle results.
+The latest Electron run rendered all x512 cases at 100%, but earlier run #380547
+showed engine-nodes at 95–96% with 775–1,016 underruns while engine-bank remained
+at 100% with none. In the latest Windows browser run #380555, engine-nodes fell to
+83% / 1,412 underruns in Chrome and 72% / 1,327 in Edge; engine-bank rendered 100%
+with no underruns (3 over-budget blocks). This variance across hosted runs is a
+finding, not a stable performance guarantee or a physical-device benchmark. The
+unpackaged Electron churn annotation was 123/1000 in #380547 but 1000/1000 in
+#380555; packaged was 1000/1000 in both. Record the discrepancy rather than
+assuming deterministic lifecycle behavior.
 
-A separate packaged production-app CSP probe in the same run opened
+A packaged production-app CSP probe in the latest run opened
 `app.asar/dist/index.html`: `metaCsp=false`, inline script blocked, CSP violations
 reported for `script-src` / `wasm-eval`, and WASM compile, synchronous module
-compilation, and instantiation blocked. The probe also reported `AudioWorkletNode`
-available and `memoryCap: 124`. This confirms strict CSP behavior for the tested
-packaged build, while the Electron docs still disagree with the observed header-hook
-behavior. It does not test the new offline Worker under CSP.
+compilation, and instantiation blocked. The probe reported `AudioWorkletNode`
+available and `memoryCap: 123` (run #380547 reported 124). This confirms strict CSP
+behavior for the tested packaged build, while Electron docs still disagree with the
+observed header-hook behavior. It does not test the new offline Worker under CSP.
 
 ### Validation performed on these local changes
 
@@ -988,14 +997,14 @@ behavior. It does not test the new offline Worker under CSP.
 | JavaScript syntax checks (`node --check` on modified/new `.mjs`, `.js`, `.cjs`) | **PASS** | Parse/syntax only; no Electron launch |
 | Targeted Playwright, `--project=chromium` | **PASS — 5/5** | Worker 200-job parity (1), engine/bank parity (1), offline retention (1), per-node allocation x128/x256 (2) |
 | Full spike Playwright matrix, installed Chrome/Edge, root browser suite | **NOT RUN** for these changes | Only the five listed Chromium cases were run; CI green jobs are for other commits |
-| New local Electron Worker / 16-unit bank precision assertion | **NOT RUN locally** | The existing shared-engine/bank Electron path was exercised on PR head `243ae` in run #38054717669 (see above). The new Worker prototype and 16-unit tolerance assertion are absent from that run. Local Electron executable was absent; `npm rebuild electron` did not produce it, and installer fetch failed with `TypeError: fetch failed`. No local Electron app launched; no `DISPLAY`, `xvfb-run`, or `Xvfb` is available. |
+| New local Electron Worker / 16-unit bank precision assertion | **NOT RUN locally** | The existing shared-engine/bank Electron path was exercised on PR head `ed0a792` in run #38055574687 (see above). The new Worker prototype and 16-unit tolerance assertion are absent from that run. Local Electron executable was absent; `npm rebuild electron` did not produce it, and installer fetch failed with `TypeError: fetch failed`. No local Electron app launched; no `DISPLAY`, `xvfb-run`, or `Xvfb` is available. |
 | Representative physical audio device / Windows laptop | **NOT RUN** | The local browser uses headless Chromium and software/fake audio; no hardware performance evidence. |
 
 Earlier Electron 43.4.1 run #38053541244 tested the CSP/allocation harness and
 reported 105 allocations before failure in both packaging modes, plus 9/9 CSP-hook
-calls. The later current-head run #38054717669 adds the shared-engine/bank and
-OfflineAudioContext retention coverage summarized above. Neither run contains the
-local long-lived offline Worker or the 16-unit bank precision assertion.
+calls. Runs #38054717669 and #38055574687 include the shared-engine/bank and
+OfflineAudioContext retention coverage summarized above. Neither contains the local
+long-lived offline Worker or the 16-unit bank precision assertion.
 
 ### Current risks and recommendation
 
