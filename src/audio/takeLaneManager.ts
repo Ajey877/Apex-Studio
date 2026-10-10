@@ -91,28 +91,46 @@ export const resolveInaudibleTakeClipIds = (clips: readonly PlaylistClip[]): Set
 /**
  * Selects a specific take as active within its group. Updates `activeTakeIndex`
  * on every clip in the group so the selection is consistent regardless of
- * which clip is inspected. Returns a new clip array; inactive takes are
+ * which take is inspected. Returns a new clip array; inactive takes are
  * preserved unchanged (non-destructive).
+ *
+ * Throws an error if:
+ * - takeIndex is not a non-negative integer
+ * - the specified take group doesn't exist
+ * - no take in the group has the requested takeIndex
  */
 export const selectActiveTake = (
   clips: readonly PlaylistClip[],
   takeGroupId: string,
   takeIndex: number
 ): PlaylistClip[] => {
+  // Validate takeIndex is a non-negative integer
   if (!Number.isInteger(takeIndex) || takeIndex < 0) {
     throw new Error('Take index must be a non-negative integer');
   }
-  let groupFound = false;
-  const result = clips.map(clip => {
+
+  // Find all clips in the specified group
+  const groupClips = clips.filter(c => c.takeGroupId === takeGroupId);
+  if (groupClips.length === 0) {
+    throw new Error(`No take group found with id "${takeGroupId}"`);
+  }
+
+  // Validate that the requested takeIndex actually exists in this group
+  const hasTakeWithIndex = groupClips.some(c => c.takeIndex === takeIndex);
+  if (!hasTakeWithIndex) {
+    const existingIndices = groupClips.map(c => c.takeIndex ?? 0).sort((a, b) => a - b);
+    throw new Error(
+      `Take index ${takeIndex} does not exist in group "${takeGroupId}". ` +
+      `Existing take indices: [${existingIndices.join(', ')}]`
+    );
+  }
+
+  // Update activeTakeIndex on all clips in the group
+  return clips.map(clip => {
     if (clip.takeGroupId !== takeGroupId) return clip;
-    groupFound = true;
     if (clip.activeTakeIndex === takeIndex) return clip;
     return { ...clip, activeTakeIndex: takeIndex };
   });
-  if (!groupFound) {
-    throw new Error(`No take group found with id "${takeGroupId}"`);
-  }
-  return result;
 };
 
 /**
