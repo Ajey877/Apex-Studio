@@ -5,9 +5,10 @@
 // mechanism as the production electron.cjs, runs the in-page harness, writes a
 // JSON report and exits. It does not load or touch the production app.
 //
-//   electron electron/main.cjs --csp=none|production|production-wasm --suite=default|csp --out=<file>
+//   electron electron/main.cjs --csp=none|production|production-wasm --suite=default|csp|investigation --out=<file>
 //
-// Env: SPIKE_INSTANCES, SPIKE_SECONDS (sustained load), SPIKE_ELECTRON_HIDDEN=1
+// Env: SPIKE_INSTANCES, SPIKE_SECONDS (sustained load), SPIKE_ELECTRON_HIDDEN=1,
+//      SPIKE_COMPARE_SECONDS, SPIKE_ELECTRON_COMPARE (investigation suite)
 const { app, BrowserWindow, session } = require('electron');
 const fs = require('fs');
 const path = require('path');
@@ -74,10 +75,42 @@ function finish(code) {
   setTimeout(() => app.exit(code), 50);
 }
 
+const WATCHDOG_MS = suite === 'investigation' ? 900_000 : 300_000;
 const watchdog = setTimeout(() => {
-  report.error = 'watchdog timeout (300 s)';
+  report.error = `watchdog timeout (${WATCHDOG_MS / 1000} s)`;
   finish(3);
-}, 300_000);
+}, WATCHDOG_MS);
+
+// Follow-up investigation inside Electron. Every step starts from a FRESH
+// document (loadFile) because offline worklet scopes keep their WASM memory until
+// the document goes away, and main-thread probe garbage blocks worklet
+// allocations (REPORT §12.2). Steps run in order; results are characterisation.
+const { investigationSteps } = require('./investigation-steps.cjs');
+
+async function runInvestigation(win) {
+  // Main-thread garbage from a previous document (same renderer isolate) blocks
+  // new WASM memories until a full GC runs, so every fresh step is preceded by a
+  // DevTools-protocol GC (no V8 flags, so the runtime config stays as production).
+  const dbg = win.webContents.debugger;
+  let gcAvailable = false;
+  try { dbg.attach('1.3'); gcAvailable = true; } catch (err) { console.log(`[spike-electron] debugger attach failed: ${err && err.message}`); }
+  const collectGarbage = async () => { if (!gcAvailable) return false; try { await dbg.sendCommand('HeapProfiler.collectGarbage'); return true; } catch { return false; } };
+  const out = { startedAt: new Date().toISOString(), gcBetweenSteps: gcAvailable ? 'CDP HeapProfiler.collectGarbage after each fresh load' : 'unavailable', steps: {} };
+  report.investigation = out;
+  for (const step of investigationSteps({ instances, env: process.env })) {
+    const t0 = Date.now();
+    try {
+      if (step.fresh) { await win.loadFile(webIndex); await collectGarbage(); }
+      const value = await win.webContents.executeJavaScript(step.js, true);
+      out.steps[step.id] = { ok: true, ms: Date.now() - t0, value };
+    } catch (err) {
+      out.steps[step.id] = { ok: false, ms: Date.now() - t0, error: `${err && err.name}: ${err && err.message}` };
+    }
+    console.log(`[spike-electron] investigation ${step.id}: ${out.steps[step.id].ok ? 'ran' : 'ERROR ' + out.steps[step.id].error} (${out.steps[step.id].ms} ms)`);
+    if (report.renderer.gone) break;
+  }
+  out.finishedAt = new Date().toISOString();
+}
 
 app.whenReady().then(async () => {
   if (CSP) {
@@ -120,6 +153,13 @@ app.whenReady().then(async () => {
   win.webContents.on('did-fail-load', (_e, code, desc, url) => {
     report.renderer.loadFailure = { code, desc, url };
   });
+
+  if (suite === 'investigation') {
+    try { await runInvestigation(win); } catch (err) { report.error = `${err && err.name}: ${err && err.message}`; }
+    clearTimeout(watchdog);
+    finish(report.investigation ? 0 : 2);
+    return;
+  }
 
   try {
     await win.loadFile(webIndex);
