@@ -24,11 +24,13 @@ enforces this). Findings and the recommendation: [`REPORT.md`](./REPORT.md).
 | `server/serve.mjs`, `server/csp.mjs` | Static server; `/csp-none/`, `/csp-production/`, `/csp-production-wasm/` prefixes plus investigation-only variants (`csp-split-*` give worklet/worker scripts a different policy from the document) |
 | `tests/node/` | Node tests: WASM numerics, mocked-scope processor logic, isolation guards |
 | `tests/browser/` | Playwright config + spec (projects `chromium`, `chrome`, `msedge`) |
-| `electron/` | Electron runner replicating production switches/sandbox/CSP; packaging stager |
+| `electron/` | Electron runner replicating production switches/sandbox/CSP (modes `none`, `production`, `production-wasm`, non-gating `investigation`); packaging stager; `investigation-steps.cjs` (Electron investigation step list); `probe-production-app.mjs` (packages the **unmodified** production app into `results/prod-app` and probes its CSP/WASM over the DevTools protocol; runs automatically in the packaged step on Windows, `SPIKE_PROD_PROBE=0` to skip) |
 | `dsp/gain_biquad_engine.wat` / `.wasm` | Follow-up: **single-engine** kernel (ABI v2): one instance/memory per audio thread, 1024 gain→biquad slots, same arithmetic (bit-exact) |
 | `web/engine-processor.js` | Follow-up: processors `apex-spike-engine-unit` (one node per unit, shared engine) and `apex-spike-engine-bank` (one node, N units); deterministic slot release on dispose/fault |
 | `web/repro.mjs` | Follow-up: minimal probes for the WASM memory budget (no audio) |
 | `web/investigation.mjs`, `web/wasm-probe-worker.js` | Follow-up: design comparison, churn, offline-render, reclaim and CSP-matrix experiments |
+| `tests/browser/production-probe-method.spec.mjs` | `[must]` method check: DevTools-evaluated probes see a page's CSP for WASM and inline scripts like page scripts (but `eval` is exempt) |
+| `tests/browser/electron-steps.spec.mjs` | Opt-in (`SPIKE_ELECTRON_STEPS=1`): runs the Electron investigation steps in a browser to validate them |
 | `tests/browser/investigation.spec.mjs` | Follow-up: codified investigation (`[must]` requirements, `[char]` browser characterisation); see REPORT.md §12 |
 | `.github/workflows/audio-spike.yml` (repo root) | CI workflow (Linux Chromium; Windows Chrome + Edge; Windows Electron unpackaged + packaged). Originally parked here as `ci/audio-spike.yml`; activated by the owner in `7d2600c` |
 
