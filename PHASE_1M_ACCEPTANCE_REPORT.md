@@ -17,8 +17,8 @@ Phase 1M (Take Management and Comping Lanes) has been fully implemented, tested,
 
 **All tests were executed in the Node.js test environment. No browser-based tests, live microphone tests, or end-to-end UI rendering tests were performed.**
 
-- ✅ 75 Phase 1M unit and integration tests (behavioral, take-lane, persistence, integration)
-- ✅ 1615 audio regression tests (including 79 Phase 1L punch recording tests)
+- ✅ 103 Phase 1M unit and integration tests (behavioral, take-lane, persistence, integration, boundary)
+- ✅ 1643 audio regression tests (including 79 Phase 1L punch recording tests)
 - ✅ 699 history regression tests
 - ✅ TypeScript linting (no errors)
 - ✅ Build verification (successful)
@@ -180,13 +180,13 @@ Tests integration with other systems:
 - Punch trim happens before take-group assignment
 - Ordinary clips without takeGroupId work normally
 
-**Total Phase 1M Tests**: 75 tests, all passing ✅
+**Total Phase 1M Tests**: 103 tests, all passing ✅
 
 ### Regression Test Suites (All Pass ✅)
 
 #### Audio Tests
 **Command**: `npm run test:audio`  
-**Result**: 1615 tests pass ✅
+**Result**: 1643 tests pass ✅
 
 Includes all Phase 1M tests plus:
 - Audio engine tests
@@ -405,8 +405,8 @@ These are documented in the implementation report and are not blockers for Phase
 ## Final Verification
 
 ### Test Summary
-- **Phase 1M tests**: 75/75 pass ✅
-- **Audio regression**: 1615/1615 pass ✅
+- **Phase 1M tests**: 103/103 pass ✅
+- **Audio regression**: 1643/1643 pass ✅
 - **History regression**: 699/699 pass ✅
 - **TypeScript lint**: No errors ✅
 - **Build**: Successful ✅
@@ -432,8 +432,8 @@ These are documented in the implementation report and are not blockers for Phase
 **READY FOR MERGE** ✅
 
 Phase 1M is complete, fully tested, and ready for production use. All acceptance criteria have been met, all tests pass, and the feature has been verified through:
-- 75 Phase 1M tests (behavioral, unit, persistence, integration)
-- 1615 audio regression tests
+- 103 Phase 1M tests (behavioral, unit, persistence, integration, boundary)
+- 1643 audio regression tests
 - 699 history regression tests
 - TypeScript linting
 - Build verification
@@ -455,8 +455,8 @@ The implementation is solid, well-tested, and documented. The fix to `selectActi
 
 ### Test Results
 ```
-Phase 1M tests: 75/75 pass
-Audio tests: 1615/1615 pass
+Phase 1M tests: 103/103 pass
+Audio tests: 1643/1643 pass
 History tests: 699/699 pass
 Lint: no errors
 Build: successful

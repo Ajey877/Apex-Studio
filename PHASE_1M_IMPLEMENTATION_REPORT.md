@@ -93,10 +93,12 @@ Replaced the demo placeholder with a real functional modal:
 
 | Suite | Tests | Status |
 |-------|-------|--------|
+| Phase 1M behavioral tests | 45 | ✅ all pass |
 | Phase 1M take-lane tests | 34 | ✅ all pass |
 | Phase 1M persistence tests | 5 | ✅ all pass |
 | Phase 1M integration tests | 19 | ✅ all pass |
-| Audio regression (`test:audio`) | 1598 | ✅ all pass |
+| **Total Phase 1M tests** | **103** | **✅ all pass** |
+| Audio regression (`test:audio`) | 1643 | ✅ all pass |
 | History regression (`test:history`) | 699 | ✅ all pass |
 | Phase 1L punch recording | 79 | ✅ all pass |
 | Test discovery | 215 files | ✅ 0 orphans |
@@ -176,6 +178,7 @@ This prevents accidental grouping while allowing legitimate multiple takes to be
 | `src/audio/offlineProjectRenderer.ts` | Added take-inactive filtering to render plan |
 | `src/App.tsx` | Connected recording to take-group system; connected `TakeCompingModal` to real project data; removed obsolete `handlePromoteCompToPlaylist` (the demo promotion path no longer exists) |
 | `src/components/TakeCompingModal.tsx` | **REWRITTEN** — Real UI connected to project data (was demo placeholder) |
+| `src/audio/phase1m.behavioral.test.ts` | **NEW** — 45 behavioral tests (safety + boundary) |
 | `src/audio/phase1m.takeLanes.test.ts` | **NEW** — 34 acceptance tests for take management |
 | `src/state/phase1m.takeLanePersistence.test.ts` | **NEW** — 5 persistence/integration tests |
 | `src/audio/phase1m.integration.test.ts` | **NEW** — 19 integration tests for complete workflow |

@@ -186,8 +186,13 @@ export const createTakeGroupId = (trackIndex: number, startBar: number, timestam
 
 /**
  * Validates that a take group is well-formed: all clips share the same
- * geometry (trackIndex, startBar, lengthBars), have unique takeIndex values,
- * and the active take index references an existing take.
+ * track and have geometry within the matching tolerances (startBar within
+ * START_BAR_TOLERANCE bars, lengthBars within LENGTH_BAR_TOLERANCE bars of
+ * the first clip), have unique takeIndex values, and the active take index
+ * references an existing take.
+ *
+ * The geometry tolerances match `findMatchingTakeGroup` so that groups
+ * formed by the matching function are always considered valid.
  */
 export const validateTakeGroup = (
   clips: readonly PlaylistClip[],
@@ -201,17 +206,17 @@ export const validateTakeGroup = (
     return { valid: false, issues };
   }
 
-  // Check geometry consistency
+  // Check geometry consistency using the same tolerances as findMatchingTakeGroup
   const ref = groupClips[0];
   for (const clip of groupClips.slice(1)) {
     if (clip.trackIndex !== ref.trackIndex) {
       issues.push(`Take group "${takeGroupId}" has clips on different tracks`);
     }
-    if (clip.startBar !== ref.startBar) {
-      issues.push(`Take group "${takeGroupId}" has clips at different start positions`);
+    if (Math.abs(clip.startBar - ref.startBar) > START_BAR_TOLERANCE) {
+      issues.push(`Take group "${takeGroupId}" has clips at different start positions (difference > ${START_BAR_TOLERANCE} bars)`);
     }
-    if (clip.lengthBars !== ref.lengthBars) {
-      issues.push(`Take group "${takeGroupId}" has clips with different lengths`);
+    if (Math.abs(clip.lengthBars - ref.lengthBars) > LENGTH_BAR_TOLERANCE) {
+      issues.push(`Take group "${takeGroupId}" has clips with different lengths (difference > ${LENGTH_BAR_TOLERANCE} bars)`);
     }
   }
 

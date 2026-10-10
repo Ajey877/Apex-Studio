@@ -15,6 +15,7 @@ import {
   resolveInaudibleTakeClipIds,
   selectActiveTake,
   getTakeGroupClips,
+  validateTakeGroup,
 } from './takeLaneManager';
 import type { PlaylistClip } from '../types/daw';
 
@@ -767,6 +768,159 @@ describe('Phase 1M: Take-Group Matching Safety', () => {
       
       clips = addTakeToProjectClips(clips, rec2, group);
       assert.notEqual(clips[1].takeGroupId, groupId1, 'must be in separate groups');
+    });
+  });
+});
+
+// --- Phase 1M: validateTakeGroup tolerance boundary tests ----------------------
+// These tests verify that validateTakeGroup uses the same tolerances as
+// findMatchingTakeGroup, so groups formed by matching are always valid.
+
+describe('Phase 1M: validateTakeGroup Tolerance Boundaries', () => {
+  describe('Groups within tolerance are valid', () => {
+    it('exact match is valid', () => {
+      const clips: PlaylistClip[] = [
+        makeClip({ id: 'take-0', trackIndex: 0, startBar: 4.0, lengthBars: 2.0, takeGroupId: 'g1', takeIndex: 0 }),
+        makeClip({ id: 'take-1', trackIndex: 0, startBar: 4.0, lengthBars: 2.0, takeGroupId: 'g1', takeIndex: 1 }),
+      ];
+      const result = validateTakeGroup(clips, 'g1');
+      assert.equal(result.valid, true, 'exact match should be valid');
+      assert.equal(result.issues.length, 0, 'no issues expected');
+    });
+
+    it('startBar within 0.1 bars is valid', () => {
+      const clips: PlaylistClip[] = [
+        makeClip({ id: 'take-0', trackIndex: 0, startBar: 4.0, lengthBars: 2.0, takeGroupId: 'g1', takeIndex: 0 }),
+        makeClip({ id: 'take-1', trackIndex: 0, startBar: 4.05, lengthBars: 2.0, takeGroupId: 'g1', takeIndex: 1 }),
+      ];
+      const result = validateTakeGroup(clips, 'g1');
+      assert.equal(result.valid, true, 'startBar difference of 0.05 should be valid (within 0.1 tolerance)');
+      assert.equal(result.issues.length, 0, 'no issues expected');
+    });
+
+    it('startBar at exactly 0.1 bars is valid', () => {
+      const clips: PlaylistClip[] = [
+        makeClip({ id: 'take-0', trackIndex: 0, startBar: 4.0, lengthBars: 2.0, takeGroupId: 'g1', takeIndex: 0 }),
+        makeClip({ id: 'take-1', trackIndex: 0, startBar: 4.1, lengthBars: 2.0, takeGroupId: 'g1', takeIndex: 1 }),
+      ];
+      const result = validateTakeGroup(clips, 'g1');
+      assert.equal(result.valid, true, 'startBar difference of exactly 0.1 should be valid (boundary)');
+      assert.equal(result.issues.length, 0, 'no issues expected');
+    });
+
+    it('lengthBars within 1 bar is valid', () => {
+      const clips: PlaylistClip[] = [
+        makeClip({ id: 'take-0', trackIndex: 0, startBar: 4.0, lengthBars: 2.0, takeGroupId: 'g1', takeIndex: 0 }),
+        makeClip({ id: 'take-1', trackIndex: 0, startBar: 4.0, lengthBars: 2.5, takeGroupId: 'g1', takeIndex: 1 }),
+      ];
+      const result = validateTakeGroup(clips, 'g1');
+      assert.equal(result.valid, true, 'lengthBars difference of 0.5 should be valid (within 1.0 tolerance)');
+      assert.equal(result.issues.length, 0, 'no issues expected');
+    });
+
+    it('lengthBars at exactly 1 bar is valid', () => {
+      const clips: PlaylistClip[] = [
+        makeClip({ id: 'take-0', trackIndex: 0, startBar: 4.0, lengthBars: 2.0, takeGroupId: 'g1', takeIndex: 0 }),
+        makeClip({ id: 'take-1', trackIndex: 0, startBar: 4.0, lengthBars: 3.0, takeGroupId: 'g1', takeIndex: 1 }),
+      ];
+      const result = validateTakeGroup(clips, 'g1');
+      assert.equal(result.valid, true, 'lengthBars difference of exactly 1.0 should be valid (boundary)');
+      assert.equal(result.issues.length, 0, 'no issues expected');
+    });
+
+    it('combined startBar and lengthBars within tolerance is valid', () => {
+      const clips: PlaylistClip[] = [
+        makeClip({ id: 'take-0', trackIndex: 0, startBar: 4.0, lengthBars: 2.0, takeGroupId: 'g1', takeIndex: 0 }),
+        makeClip({ id: 'take-1', trackIndex: 0, startBar: 4.08, lengthBars: 2.8, takeGroupId: 'g1', takeIndex: 1 }),
+      ];
+      const result = validateTakeGroup(clips, 'g1');
+      assert.equal(result.valid, true, 'both startBar (0.08) and lengthBars (0.8) within tolerance should be valid');
+      assert.equal(result.issues.length, 0, 'no issues expected');
+    });
+  });
+
+  describe('Groups outside tolerance are invalid', () => {
+    it('startBar difference > 0.1 bars is invalid', () => {
+      const clips: PlaylistClip[] = [
+        makeClip({ id: 'take-0', trackIndex: 0, startBar: 4.0, lengthBars: 2.0, takeGroupId: 'g1', takeIndex: 0 }),
+        makeClip({ id: 'take-1', trackIndex: 0, startBar: 4.11, lengthBars: 2.0, takeGroupId: 'g1', takeIndex: 1 }),
+      ];
+      const result = validateTakeGroup(clips, 'g1');
+      assert.equal(result.valid, false, 'startBar difference of 0.11 should be invalid');
+      assert.ok(result.issues.some(i => i.includes('start positions')), 'should report start position issue');
+    });
+
+    it('lengthBars difference > 1 bar is invalid', () => {
+      const clips: PlaylistClip[] = [
+        makeClip({ id: 'take-0', trackIndex: 0, startBar: 4.0, lengthBars: 2.0, takeGroupId: 'g1', takeIndex: 0 }),
+        makeClip({ id: 'take-1', trackIndex: 0, startBar: 4.0, lengthBars: 3.1, takeGroupId: 'g1', takeIndex: 1 }),
+      ];
+      const result = validateTakeGroup(clips, 'g1');
+      assert.equal(result.valid, false, 'lengthBars difference of 1.1 should be invalid');
+      assert.ok(result.issues.some(i => i.includes('lengths')), 'should report length issue');
+    });
+
+    it('different trackIndex is invalid', () => {
+      const clips: PlaylistClip[] = [
+        makeClip({ id: 'take-0', trackIndex: 0, startBar: 4.0, lengthBars: 2.0, takeGroupId: 'g1', takeIndex: 0 }),
+        makeClip({ id: 'take-1', trackIndex: 1, startBar: 4.0, lengthBars: 2.0, takeGroupId: 'g1', takeIndex: 1 }),
+      ];
+      const result = validateTakeGroup(clips, 'g1');
+      assert.equal(result.valid, false, 'different trackIndex should be invalid');
+      assert.ok(result.issues.some(i => i.includes('different tracks')), 'should report track issue');
+    });
+
+    it('combined startBar and lengthBars outside tolerance is invalid', () => {
+      const clips: PlaylistClip[] = [
+        makeClip({ id: 'take-0', trackIndex: 0, startBar: 4.0, lengthBars: 2.0, takeGroupId: 'g1', takeIndex: 0 }),
+        makeClip({ id: 'take-1', trackIndex: 0, startBar: 4.2, lengthBars: 3.5, takeGroupId: 'g1', takeIndex: 1 }),
+      ];
+      const result = validateTakeGroup(clips, 'g1');
+      assert.equal(result.valid, false, 'both startBar (0.2) and lengthBars (1.5) outside tolerance should be invalid');
+      assert.ok(result.issues.some(i => i.includes('start positions')), 'should report start position issue');
+      assert.ok(result.issues.some(i => i.includes('lengths')), 'should report length issue');
+    });
+  });
+
+  describe('Groups formed by findMatchingTakeGroup are always valid', () => {
+    it('grouped recordings pass validation', () => {
+      let clips: PlaylistClip[] = [];
+      
+      // First recording creates a group
+      const rec1 = makeClip({ id: 'rec-1', trackIndex: 0, startBar: 4.0, lengthBars: 2.0, audioBufferId: 'buf-1' });
+      let group = findMatchingTakeGroup(clips, rec1.trackIndex, rec1.startBar, rec1.lengthBars);
+      clips = addTakeToProjectClips(clips, rec1, group);
+      
+      // Second recording within tolerance joins the group
+      const rec2 = makeClip({ id: 'rec-2', trackIndex: 0, startBar: 4.05, lengthBars: 2.5, audioBufferId: 'buf-2' });
+      group = findMatchingTakeGroup(clips, rec2.trackIndex, rec2.startBar, rec2.lengthBars);
+      clips = addTakeToProjectClips(clips, rec2, group);
+      
+      // Validate the group
+      const groupId = clips[0].takeGroupId!;
+      const result = validateTakeGroup(clips, groupId);
+      assert.equal(result.valid, true, 'group formed by findMatchingTakeGroup should be valid');
+      assert.equal(result.issues.length, 0, 'no issues expected');
+    });
+
+    it('punch recordings within tolerance pass validation', () => {
+      let clips: PlaylistClip[] = [];
+      
+      // First punch recording
+      const rec1 = makeClip({ id: 'punch-1', trackIndex: 0, startBar: 4.333, lengthBars: 2.667, audioBufferId: 'buf-1' });
+      let group = findMatchingTakeGroup(clips, rec1.trackIndex, rec1.startBar, rec1.lengthBars);
+      clips = addTakeToProjectClips(clips, rec1, group);
+      
+      // Second punch recording with tiny floating-point difference
+      const rec2 = makeClip({ id: 'punch-2', trackIndex: 0, startBar: 4.340, lengthBars: 2.670, audioBufferId: 'buf-2' });
+      group = findMatchingTakeGroup(clips, rec2.trackIndex, rec2.startBar, rec2.lengthBars);
+      clips = addTakeToProjectClips(clips, rec2, group);
+      
+      // Validate the group
+      const groupId = clips[0].takeGroupId!;
+      const result = validateTakeGroup(clips, groupId);
+      assert.equal(result.valid, true, 'punch group within tolerance should be valid');
+      assert.equal(result.issues.length, 0, 'no issues expected');
     });
   });
 });
