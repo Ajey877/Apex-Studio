@@ -35,7 +35,7 @@ for (const f of readdirSync(dir).filter(f => f.endsWith('.json') && !f.includes(
     rows.push(`| ${source} | ${r.name} | ${r.kind} | ${r.pass ? 'PASS' : `**FAIL**: ${failed.join('; ')}`} |`);
     if (r.name === 'sustained-live' && r.data && r.data.aggregate) {
       const a = r.data.aggregate;
-      perf.push(`| ${source} | sustained-live ${r.data.instances} inst × ${r.data.seconds}s | cpu ${fmt(a.cpuFractionOfQuantum * 100, 2)}% of quantum; worst block ${a.worstProcMaxMs} ms (${a.clock}); overruns ${a.overBudgetBlocks}; dropouts ${a.lagExceedances} (max lag ${fmt(a.maxLagMs, 1)} ms); blocks ${a.blocksPerInstance}/${a.expectedBlocks}; baseLatency ${fmt(r.data.context.baseLatency, 4)} s, outputLatency ${fmt(r.data.context.outputLatency, 4)} s |`);
+      perf.push(`| ${source} | sustained-live ${r.data.instances} inst × ${r.data.seconds}s | cpu ${fmt(a.cpuFractionOfQuantum * 100, 2)}% of quantum; worst block ${a.worstProcMaxMs} ms (${a.clock}); overruns ${a.overBudgetBlocks}; dropouts ${a.lagExceedances} (max lag ${fmt(a.maxLagMs, 1)} ms); blocks ${a.blocksPerInstance}/${a.expectedBlocks}; baseLatency ${fmt(r.data.context.baseLatency, 4)} s, outputLatency ${fmt(r.data.context.outputLatency, 4)} s; browser playbackStats underruns: ${r.data.context.playbackStats ? r.data.context.playbackStats.underrunEvents : 'API not exposed'} |`);
     }
     if (r.name === 'kernel-benchmark' && r.data && r.data.worklet && r.data.worklet.ok) {
       const w = r.data.worklet;
@@ -43,6 +43,10 @@ for (const f of readdirSync(dir).filter(f => f.endsWith('.json') && !f.includes(
     }
     if (r.name === 'offline-throughput' && r.data && r.data.worklet) {
       perf.push(`| ${source} | offline-throughput ${r.data.instances} inst | worklet ${fmt(r.data.worklet.realtimeFactor, 1)}× realtime vs native Gain+Biquad ${fmt(r.data.nativeGainBiquad.realtimeFactor, 1)}× |`);
+    }
+    if (r.name === 'instance-capacity' && r.data) {
+      const d = r.data;
+      perf.push(`| ${source} | instance-capacity | first round: ${d.firstRound.created} instances${d.firstRound.failure ? ` then ${d.firstRound.failure.error && d.firstRound.failure.error.name}: ${d.firstRound.failure.error && d.firstRound.failure.error.message}` : ' (no failure up to ' + d.maxAttempted + ')'}; after dispose + 2 s: ${d.secondRoundAfterDispose.created} |`);
     }
     if (r.name === 'csp-probe') {
       const d = r.data;

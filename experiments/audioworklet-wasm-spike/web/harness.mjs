@@ -440,17 +440,55 @@ export async function sustainedLive({ instances = 16, seconds = 20, lagThreshold
   checks.push(check(`no detected dropouts (render lag never > ${lagThresholdMs} ms)`, agg.lagExceedances === 0, { lagExceedances: agg.lagExceedances, maxLagMs: agg.maxLagMs }));
   checks.push(check('no processing overruns (no block exceeded the quantum budget)', agg.overBudgetBlocks === 0, { overBudgetBlocks: agg.overBudgetBlocks, worstProcMaxMs: agg.worstProcMaxMs, clock: agg.clock }));
   checks.push(check(`total worklet DSP time <= ${cpuBudgetFraction * 100}% of quantum budget`, agg.cpuFractionOfQuantum <= cpuBudgetFraction, agg.cpuFractionOfQuantum));
+  if (info.playbackStats && typeof info.playbackStats.underrunEvents === 'number') {
+    // Independent, browser-reported signal (Chromium AudioContext.playbackStats), cumulative for the context.
+    checks.push(check('browser playbackStats reports 0 underrun events', info.playbackStats.underrunEvents === 0, info.playbackStats));
+  }
   checks.push(check('no non-finite output, kernel errors or frame discontinuities', agg.nonFiniteOut === 0 && agg.kernelErrors === 0 && agg.frameDiscontinuities === 0, { nonFinite: agg.nonFiniteOut, kernelErrors: agg.kernelErrors, discontinuities: agg.frameDiscontinuities }));
   return result('sustained-live', 'performance', checks, {
     instances, seconds, lagThresholdMs, cpuBudgetFraction, budgetMsPerQuantum: budgetMs, wallMs, audioMs, mainTicks, context: info, aggregate: agg,
   });
 }
 
+/**
+ * Characterisation: how many WASM-backed processors can exist at once in one
+ * renderer process, and are slots released after dispose (without forcing GC)?
+ * Each WASM instance owns one linear memory; Chromium's V8 sandbox confines all
+ * of them to a fixed virtual-address cage. Runs LAST in a suite because it
+ * deliberately exhausts that space for the page.
+ */
+export async function instanceCapacity({ max = 400 } = {}) {
+  const ctx = new OfflineAudioContext(2, 128, TV.sampleRate);
+  const round = async () => {
+    const handles = [];
+    let failure = null;
+    for (let i = 0; i < max; i++) {
+      const gf = await createGainFilter(ctx, { workletUrl: WORKLET_URL, wasmBytes: wasmBytes(), params: PARAMS });
+      if (!gf.ok) { failure = { at: i, stage: gf.stage, error: gf.error }; break; }
+      handles.push(gf);
+    }
+    const created = handles.length;
+    for (const h of handles) await h.dispose();
+    return { created, failure };
+  };
+  const first = await round();
+  await sleep(2000); // give the engine a chance to collect disposed processors (no forced GC)
+  const second = await round();
+  return result('instance-capacity', 'capability', [
+    check('characterisation completed without crashing the page', true),
+  ], {
+    maxAttempted: max,
+    firstRound: first,
+    secondRoundAfterDispose: second,
+    note: 'One WebAssembly.Instance (and linear memory) per AudioWorkletNode. A cap here means the production design must host many DSP units inside one WASM instance per audio thread.',
+  });
+}
+
 const SUITES = {
-  default: ['capabilities', 'parityWasmDirect', 'parityWorkletOffline', 'liveLifecycle', 'failureModes', 'kernelBenchmark', 'offlineThroughput', 'sustainedLive'],
+  default: ['capabilities', 'parityWasmDirect', 'parityWorkletOffline', 'liveLifecycle', 'failureModes', 'kernelBenchmark', 'offlineThroughput', 'sustainedLive', 'instanceCapacity'],
   csp: ['capabilities', 'cspProbe'],
 };
-const TESTS = { capabilities, parityWasmDirect, parityWorkletOffline, liveLifecycle, failureModes, cspProbe, kernelBenchmark, offlineThroughput, sustainedLive };
+const TESTS = { capabilities, parityWasmDirect, parityWorkletOffline, liveLifecycle, failureModes, cspProbe, kernelBenchmark, offlineThroughput, sustainedLive, instanceCapacity };
 
 /** Run a named suite (or explicit list). Never throws; failures are reported per test. */
 export async function runAll(options = {}) {

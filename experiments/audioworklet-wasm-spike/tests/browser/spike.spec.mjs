@@ -39,6 +39,7 @@ const cases = [
   ['kernel-benchmark', 'kernelBenchmark', {}],
   ['offline-throughput', 'offlineThroughput', { offlineThroughput: { instances, seconds: 30 } }],
   ['sustained-live', 'sustainedLive', { sustainedLive: { instances, seconds } }],
+  ['instance-capacity', 'instanceCapacity', {}],
 ];
 
 for (const [label, harnessName, options] of cases) {
