@@ -1,26 +1,27 @@
 # Pre-Phase 1 spike report — shared AudioWorklet + WebAssembly DSP
 
 **Status (follow-up revision):** spike stopped with the evidence available.
-The owner activated the spike CI workflow (`7d2600c`). **Windows Chrome, Windows Edge
-and Windows Electron (unpackaged and packaged) have now RUN on GitHub `windows-latest`
-CI, and every step passed in 2 runs** (§5). Those runs cover the *original* spike
-suite. I could not retrieve their detailed numbers from this sandbox. CI VMs are not
-the laptop baseline. **No cross-platform validation of the follow-up findings is
-claimed**: everything in §12 is local Linux Chromium 153 unless §12.5 says otherwise.
+The owner activated the spike CI workflow (`7d2600c`). The follow-up results below
+have **run on GitHub `windows-latest` CI**: Windows Chrome 154.0.8037.58, Windows Edge
+153.0.4234.48, and Electron 43.4.1 (Chromium 150) unpackaged and packaged. Linux CI
+Chromium also ran. Numbers come from check-run annotations (§12.5). CI VMs are not
+the representative laptop (NOT RUN). The single-engine layout and the offline
+retention were **not** tested inside Electron.
 
-* The instance-#125 failure is now **explained**. Every `WebAssembly.Memory` reserves a
-  fixed 8 GiB of address space inside V8's 1 TiB per-process sandbox, so a renderer
-  can hold about 125 live WASM memories (§8.3, §12.1). This is confirmed by minimal
-  reproduction and matches V8 source constants.
-* A **single-engine layout** (one WASM memory per audio thread, many units in a slot
-  table) **removes the live initialisation failure in tests**: 16–512 units
-  initialised in 3 of 3 runs with one memory (§12.3). Bit-exact parity is preserved.
+* **#125 explained.** Every `WebAssembly.Memory` reserves a fixed 8 GiB inside V8's
+  1 TiB per-process sandbox. The cap is 124–125 memories on Linux Chromium and on
+  Windows Chrome and Edge, and **104 in Electron 43** (§8.3, §12.1, §12.5).
+* **The single-engine layout removes the live initialisation failure in tests.**
+  16–512 units initialised with one memory on Linux (3 local runs plus CI) and on
+  Windows Chrome and Edge (1 run each). Bit-exact parity holds everywhere (§12.3,
+  §12.5).
 * **New blocker, not fixed by the engine layout:** each `OfflineAudioContext` keeps
-  its worklet's WASM memory until the page is reloaded. After about 124 offline
-  renders in one document, *no* WebAssembly can be created anywhere in that page
-  (§12.2).
+  its worklet's WASM memory until the page reloads. After 124–125 offline renders,
+  *no* WebAssembly can be created in that page. Confirmed on Linux Chromium and on
+  Windows Chrome and Edge (§12.2, §12.5).
 * **CSP:** the exact requirement is `'wasm-unsafe-eval'` in `script-src` (§12.4). The
-  production CSP was not changed.
+  production-style CSP **is enforced over `file://`** in Electron 43, and blocks WASM
+  there (§12.5). The production CSP was not changed.
 
 **Recommendation: REVISE** (§10).
 
@@ -172,11 +173,11 @@ Production regression commands run (repo root): `npm run verify:desktop`, `npm r
 |---|---|---|
 | Node.js (WASM numerics, mocked-scope processor, isolation) | **RAN locally — 18 passed** (original run); follow-up run **26 passed, 0 skipped** (the 18 original + 5 engine + 3 investigation) | Node v22.22.3, Linux x86-64 sandbox |
 | Chromium, headless, Linux (dev sandbox) | **RAN locally — 11 passed** (original `spike.spec.mjs`, at the default 16-instance load; the 128-instance sweep FAILED, §7 and §8.3). Follow-up run: **50 passed** (the same 11 + 39 in `investigation.spec.mjs`), plus 2 extra repeats of the 15 design-comparison tests (30 passed) | Chromium 153.0.8010.0 (from the `@sparticuz/chromium` 153.0.0 npm build, installed in `/tmp` and not added to the repo), Playwright 1.63.0, 2 vCPU / 3 GB VM, kernel 6.1, no audio hardware (Chromium fake audio output) |
-| **Google Chrome — Windows** (installed stable, headed, `windows-latest`) | **RAN in CI — step PASSED, 2 runs** (`38051166108` on `7d2600c`, `38051170797` on `f122952`), original 11-test `spike.spec.mjs` | Step took 40 s. Pass implies all 11 tests passed: Playwright exits non-zero on any failure, on "no tests found" or on a missing channel, with 0 retries. Browser version and numbers **not retrieved** (see below) |
-| **Microsoft Edge — Windows** (same) | **RAN in CI — step PASSED, 2 runs** (same runs) | Step took 38 s. Same caveats |
-| **Electron 43.4.1 — Windows, unpackaged** | **RAN in CI — step PASSED, 2 runs** | Pass implies: `csp=none` full default suite passed; `csp=production-wasm` CSP probe + worklet parity passed; `csp=production` is **characterisation only** (passes whenever the probe runs), so **whether the production CSP is enforced over `file://` is still unknown to me** |
-| **Electron 43.4.1 — Windows, packaged (asar)** | **RAN in CI — step PASSED, 2 runs** | Same criteria as unpackaged, with the app packaged by electron-builder `--dir` (asar) |
-| Bundled Chromium on Linux CI | **RAN in CI — step PASSED, 2 runs** | — |
+| **Google Chrome 154.0.8037.58 — Windows** (installed stable, headed, `windows-latest`) | **RAN in CI — PASSED, 3 runs.** Original 11-test `spike.spec.mjs`: runs `38051166108` (`7d2600c`) and `38051170797` (`f122952`). Original + 39-test `investigation.spec.mjs`: run `38051848530` (`b86d47d`) | A pass means every test passed: Playwright exits non-zero on any failure, on "no tests found" or on a missing channel, with 0 retries. Follow-up numbers come from annotations (§12.5). Per-test perf numbers of the original suite were **not retrieved** |
+| **Microsoft Edge 153.0.4234.48 — Windows** (same) | **RAN in CI — PASSED, 3 runs** (same runs, same specs) | Same caveats; follow-up numbers in §12.5 |
+| **Electron 43.4.1 (Chromium 150.0.7871.224) — Windows, unpackaged** | **RAN in CI — PASSED, 4 runs** (the 3 above + `38053287106` on `4d67046`, which published annotations) | `csp=none` full default suite passed, memory cap **104**. Production CSP via `onHeadersReceived` **is enforced over `file://`** (hook fired 9/9, `eval` blocked, WASM blocked); `'wasm-unsafe-eval'` allows main-thread and worklet WASM with parity (§12.5). Engine layouts and offline retention **not run in Electron** |
+| **Electron 43.4.1 — Windows, packaged (asar)** | **RAN in CI — PASSED, 4 runs** | Same as unpackaged, with the app packaged by electron-builder `--dir` (asar): cap 104, CSP enforced 9/9, same WASM results |
+| Bundled Chromium 153.0.8010.12 on Linux CI | **RAN in CI — PASSED, 4 runs** (`investigation.spec.mjs` included from `b86d47d`) | — |
 | Representative mid-range Windows laptop | **NOT RUN** | No access. Instructions in README "Local benchmark" |
 | Existing production CI on PR #205 | **RAN — PASS** | `verify` (CI), `audio-tests` (Audio Validation), `windows-package` (Windows build + package + packaged smoke) |
 
@@ -190,12 +191,11 @@ modify the workflow, because the app still cannot push workflow changes.
 **What I could and could not read:** job and step status and timing, and check-run
 annotations, are readable through `api.github.com`. **Artifacts and job logs are
 not**: both redirect to `*.blob.core.windows.net`, which this sandbox cannot reach.
-So I can state *that* the steps passed and *which* assertions that implies. I can't
-state browser versions, the Windows `instance-capacity` count, performance figures,
-or whether the packaged CSP is enforced. Those are in the run's **Summary** page and
-artifacts on GitHub (Actions → "Audio Spike (AudioWorklet + WASM, experimental)" →
-run → Summary). To make key numbers readable without artifacts, the follow-up's
-`investigation.spec.mjs` emits compact `::notice` annotations in CI (§12.5).
+To make key numbers readable anyway, `investigation.spec.mjs` and
+`electron/run-electron.mjs` emit compact `::notice` annotations in CI. These are the
+sole source of the Windows numbers in §12.5. Full per-test output of the original
+suite stays in the run's **Summary** page and artifacts on GitHub, which I could not
+read.
 
 ---
 
@@ -250,10 +250,12 @@ Tolerance: max \|diff\| ≤ **1e-6** (about −120 dBFS). Observed: **bit-exact*
 | Same plus `'wasm-unsafe-eval'` | allowed | allowed (bit-exact parity) | OK; `eval` still blocked |
 
 The full follow-up matrix (7 policies × main thread, worklet, engine worklet and
-dedicated Worker) is in §12.4. Whether the packaged app enforces this CSP over
-`file://` today is **NOT RUN**. Electron's own documentation says header-delivered
-CSP cannot be used for `file://` (§12.4). The Electron runner records it
-(`headerHook.fileUrlCalls`).
+dedicated Worker) is in §12.4, and it is identical on Windows Chrome and Edge. In
+**Electron 43.4.1 on Windows CI**, unpackaged and packaged, the spike's replica of the
+production mechanism (`session.defaultSession.webRequest.onHeadersReceived` +
+`file://`) **applied the header to 9 of 9 `file://` responses**. CSP was enforced
+(`eval` blocked), the production policy **blocked** main-thread and worklet WASM, and
+`'wasm-unsafe-eval'` allowed both (§12.5).
 
 ---
 
@@ -289,8 +291,9 @@ comparison at 16–512 units is in §12.3.
    Per-block timing falls back to `Date.now()` at 1 ms resolution. Means over
    thousands of blocks are statistically sound, but single-block overrun detection
    is coarse. Chromium's `AudioContext.playbackStats` (exposed in 153) provides an
-   independent underrun counter. Availability in stable Chrome, Edge and Electron 43
-   is NOT RUN.
+   independent underrun counter. In CI it is **exposed in Windows Chrome 154,
+   Edge 153 and Electron 43**: the emitters print `na`/`n/a` when it is absent, and
+   all three reported numeric underrun counts (§12.5).
 3. **Initialisation failure at instance index #125: cause identified (follow-up, §12.1).**
    With one WASM instance per AudioWorkletNode, instance index #125 (the 126th)
    fails every time with `RangeError: WebAssembly.Instance(): Out of memory: Cannot
@@ -373,11 +376,10 @@ fine for a proof but not for real DSP.
 This replaces the previous revision's REVISE rationale with the follow-up evidence (§12).
 
 **Why not PROCEED:**
-* **The follow-up findings are not yet validated on Windows.** The original suite
-  passed on Windows Chrome, Edge and Electron (unpackaged and packaged) in CI
-  (2 runs, §5). The memory-budget, offline-retention, engine and CSP-matrix results
-  in §12 come from local Linux Chromium (Windows CI status: §12.5). CI VMs are also
-  not the representative laptop.
+* **The offline-retention blocker is confirmed on Windows Chrome and Edge** (§12.5).
+  It is untested in Electron, and Electron's memory cap is lower (104).
+* **No laptop baseline:** all Windows numbers come from CI VMs (1 run of the
+  follow-up per browser). The representative-laptop benchmark is NOT RUN.
 * **Offline rendering with WASM in an AudioWorklet leaks one memory per
   `OfflineAudioContext` for the life of the document** (§12.2). Every layout tested,
   including both single-engine variants, stops after about 124 offline renders. After
@@ -385,16 +387,19 @@ This replaces the previous revision's REVISE rationale with the follow-up eviden
   reload. An export, bounce or freeze path built on per-render `OfflineAudioContext`
   + worklet WASM is therefore not reliable. The engine layout does not fix this.
 * **One AudioWorkletNode per unit does not scale on CPU.** With 512 engine-backed
-  nodes the run collapsed (72–82% of blocks rendered, about 1500 underruns) in 3 of 3
-  runs. The same 512 units in **one** bank node rendered 100% (§12.3).
-* The production CSP blocks WASM (exact fix known, §12.4). Whether that CSP is even
-  in effect for packaged `file://` loading is NOT RUN; Electron's documentation
-  suggests it may not be.
+  nodes, the local VM collapsed in 3 of 3 runs (72–82% of blocks rendered, about
+  1500 underruns). Windows Chrome CI degraded (97% rendered, 393 underruns). The same
+  512 units in **one** bank node rendered 100% with 0 underruns everywhere (§12.3,
+  §12.5).
+* The production CSP blocks WASM, including over `file://` in Electron 43, as shown in
+  the spike's replica (§12.5). The exact fix is known (§12.4) and is the owner's
+  security decision.
 
 **Why not REJECT:**
 * The #125 cause is understood and has a tested remedy for live playback. One
-  engine per audio thread initialised 16–512 units with one memory in 3 of 3 runs,
-  leaving 123–124 memories free.
+  engine per audio thread initialised 16–512 units with one memory, leaving 123–124
+  memories free. This held on Linux (3 local runs plus CI) and on Windows Chrome and
+  Edge (CI).
 * Parity holds bit-exactly through the shared engine, both standalone and with three
   units in one worklet.
 * The offline problem has plausible mitigations that keep the *same WASM kernel*
@@ -407,20 +412,21 @@ This replaces the previous revision's REVISE rationale with the follow-up eviden
    AudioWorklet WASM memory per render. Candidates: a long-lived Worker or the main
    thread reusing one engine instance, or one shared imported memory. Then repeat
    the 200-render test.
-3. **Windows:** activate the parked workflow (web-UI steps in §5). Confirm the memory
-   cap (`instance-capacity` / investigation probes), the offline retention, and the
-   CSP behaviour on Windows Chrome, Edge and Electron (unpackaged and packaged).
-   Then run the README benchmark on the representative laptop.
-4. **CSP decision** by the owner (§12.4). Also check whether the packaged CSP is
-   currently enforced over `file://`.
+3. **Electron coverage of the follow-up:** run the engine layouts and the
+   offline-render test inside Electron (unpackaged and packaged). Electron's cap is
+   lower (104), and its offline behaviour is untested. Then run the README benchmark
+   on the representative laptop.
+4. **CSP decision** by the owner: add `'wasm-unsafe-eval'` to `script-src` (§12.4).
+   It is enforced over `file://` in Electron 43 (§12.5), so without it WASM will not
+   run in the packaged app.
 5. Choose and licence-review a real WASM toolchain.
 
 ## 11. Remaining risks before migrating any production DSP
 
 * Per-renderer WASM memory budget of about 125 memories (8 GiB reservation each in
   a 1 TiB sandbox), shared by every isolate in the renderer, including any
-  third-party WASM such as decoders. Mechanism confirmed locally; Windows NOT RUN
-  (§8.3, §12.1).
+  third-party WASM such as decoders. Confirmed on Linux and on Windows Chrome and
+  Edge (124–125); **104 in Electron 43** (§8.3, §12.1, §12.5).
 * `OfflineAudioContext` worklet scopes keep their WASM memories until document
   teardown (§12.2). Unreferenced memories in one isolate are not reclaimed by an
   allocation failure in another isolate (§12.2).
@@ -447,7 +453,7 @@ Every case ran in a **fresh browser context**, which here means a fresh renderer
 process. Codified in `tests/browser/investigation.spec.mjs`: `[must]` tests are
 requirements, `[char]` tests characterise current browser behaviour. Raw JSON is
 written to `results/*-investigation-*.json` (git-ignored). The summary comes from
-`scripts/summarize-results.mjs`. **Windows: NOT RUN.**
+`scripts/summarize-results.mjs`. **Windows and CI results for the same tests: §12.5.**
 
 ### 12.1 Minimal reproduction: what is limited
 
@@ -473,9 +479,9 @@ written to `results/*-investigation-*.json` (git-ignored). The summary comes fro
 
 **Confirmed:** each live wasm32 memory costs one 8 GiB reservation from a 1 TiB
 per-process pool (see §8.3 for the V8 source references).
-**Hypothesis, not tested:** Windows desktop Chrome, Edge and Electron behave the
-same. The V8 source uses the same 1 TiB sandbox branch for Windows x64, but Electron
-build flags and Windows behaviour are NOT RUN.
+**Windows (§12.5):** Windows Chrome and Edge show the same caps, 124–125 (memory64:
+62). Electron 43 caps at **104**. Why Electron is lower (other reservations in its
+renderer's sandbox, or a different configuration) is **not established**.
 
 ### 12.2 Lifecycle: when are memories released?
 
@@ -588,22 +594,82 @@ response, a single `script-src` change covers both. Putting it in `default-src` 
 nothing, because the explicit `script-src` takes precedence. `'unsafe-eval'` also
 works but re-enables `eval`/`new Function`, so it is not recommended.
 
-**Documentation, not executed:** Electron's security tutorial (electron/electron
-`main` @ `04449e98`, 2026-10-10) says header-delivered CSP "is not possible to use …
-when loading a resource using the `file://` protocol", and recommends a `<meta>` tag
-or a custom protocol. The packaged Apex app loads `file://…/dist/index.html`, and
-`index.html` has no CSP `<meta>` tag. **If the documentation is accurate, the
-packaged app's production CSP may not be enforced today.** In that case WASM would
-not actually be blocked, and neither would anything else the policy is meant to
-block. This is a production security question outside this spike. It is NOT RUN; the
-parked Electron job records `headerHook.fileUrlCalls` and `cspActive` to settle it.
-No production file was changed.
+**Electron `file://`: documentation vs execution.** Electron's security tutorial
+(electron/electron `main` @ `04449e98`) says header-delivered CSP "is not possible
+to use … when loading a resource using the `file://` protocol". **Execution
+contradicts that for this mechanism in Electron 43.4.1.** In Windows CI the spike's
+replica of `electron.cjs` (same `onHeadersReceived` hook, same policy string, page
+loaded from `file://`, unpackaged and packaged asar) saw the hook fire for 9 of 9
+`file://` responses. CSP was enforced (`eval` blocked) and WASM was blocked until
+`'wasm-unsafe-eval'` was added (§12.5). This is strong evidence that the packaged
+production app enforces its CSP too. The production app itself was not run with
+these probes. No production file was changed.
 
-### 12.5 Windows / Linux CI status of the follow-up tests
+### 12.5 Windows and Linux CI results of the follow-up tests
 
-Pushing this follow-up triggers the owner-activated workflow. Its existing Playwright
-steps run `investigation.spec.mjs` on Linux bundled Chromium and on Windows Chrome
-and Edge. The Electron job runs the original harness only. The spec emits compact
-`::notice` annotations (env, probes, flags, lifecycle, offline-renders,
-engine-parity, compare, csp), readable through the check-runs API. **Status at this
-commit: pending.** Results are recorded below only once they have actually run.
+Source: workflow "Audio Spike (AudioWorklet + WASM, experimental)", activated by the
+owner. Run `38051848530` on commit `b86d47d`: all 3 jobs and every step passed;
+Windows Chrome step 4 min 30 s, Edge 4 min 26 s, Linux 4 min 6 s. Electron facts come
+from run `38053287106` on `4d67046`; that job passed. Values are copied verbatim from
+check-run annotations. Artifacts and logs were not reachable from the sandbox. Each
+cell is **1 CI run**, on `windows-latest` / `ubuntu-latest` VMs with no physical audio
+device. The `investigation.spec.mjs` assertions passed in every browser, so every
+`[must]` and `[char]` expectation in §12 held on Windows Chrome and Edge.
+
+| Item | Linux CI Chromium 153.0.8010.12 | **Windows Chrome 154.0.8037.58** | **Windows Edge 153.0.4234.48** |
+|---|---|---|---|
+| `Memory({initial:1})` cap | 125 | **125** | **125** |
+| instances with own memory | 125 | 125 | 124 |
+| memory64 cap | 62 | 62 | 62 |
+| 1000 memory-less / 1000 sharing one memory | 1000 / 1000 | 1000 / 1000 | 1000 / 1000 |
+| `--wasm-enforce-bounds-checks` changes cap | no (125/125) | no (125/125) | no (125/125) |
+| Reclaim: offline unrendered / +gc / rendered / realtime close | 24 / 25 / 24 / 125 | 25 / 24 / 24 / 124 | 25 / 25 / 24 / 124 |
+| Cross-isolate: worklet blocked until main-thread GC | yes | yes | yes |
+| Churn 10 × 100, all 3 layouts | 1000/1000 each | 1000/1000 each | 1000/1000 each |
+| Workers terminate (200) / realtime open-close (150) | 200 / 150 | 200 / 150 | 200 / 150 |
+| **Offline renders: per-node / engine-nodes / engine-bank** | 7 / 124 / 124 | **7 / 125 / 125** | **7 / 124 / 124** |
+| After exhaustion → after reload | 0 → 124 | 0 → 125 | 0 → 124 |
+| Engine parity (shared slots, bank, slot release) | all true | all true | all true |
+| CSP matrix (eval, main, worklet, engine, Worker) | identical to §12.4 | identical to §12.4 | identical to §12.4 |
+
+Design comparison (15 s live, 1 run per cell). Format: DSP % of quantum / rendered
+% / browser underruns. Overruns were 0 in every Windows cell. Lag > 50 ms events were
+0 except where noted.
+
+| Design × units | Linux CI | Windows Chrome | Windows Edge |
+|---|---|---|---|
+| per-node 16 | 1.1 / 100 / 0 | 1.0 / 100 / 0 | 1.3 / 100 / 0 |
+| per-node 64 | 4.7 / 100 / 0 | 4.6 / 100 / 0 | 4.9 / 100 / 0 |
+| per-node 128 / 256 / 512 | **init FAIL at #124 / #124 / #125** | **init FAIL at #124 / #124 / #125** | **init FAIL at #124 / #125 / #125** |
+| engine-nodes 16 | 1.1 / 100 / 0 | 1.1 / 100 / 0 | 1.1 / 100 / 0 |
+| engine-nodes 128 | 8.2 / 100 / 0 | 8.5 / 100 / 0 | 8.5 / 100 / 0 |
+| engine-nodes 256 | 16.4 / 100 / 0 | 17.7 / 100 / 0 | 17.1 / 100 / 0 |
+| engine-nodes 512 | 33.5 / 100 / 0 | **35.7 / 97 / 393** (10 lag events) | 33.7 / 100 / 0 |
+| engine-bank 16 | 0.9 / 100 / 0 | 0.9 / 100 / 0 | 0.9 / 100 / 0 |
+| engine-bank 128 | 6.1 / 100 / 0 | 6.2 / 100 / 0 | 6.1 / 100 / 0 |
+| engine-bank 256 | 12.2 / 100 / 0 | 12.5 / 100 / 0 | 12.7 / 100 / 0 |
+| engine-bank 512 | 24.7 / 100 / 0 | 24.7 / 100 / 0 | 26.7 / 100 / 0 |
+
+Every engine cell initialised with **1 WASM memory**, leaving 123–124 memories of
+headroom. Engine-nodes 64 and engine-bank 64 were also clean everywhere (3.0–4.3%).
+
+**Electron 43.4.1** (Chromium 150.0.7871.224, V8 15.0.245.28-electron.0), Windows CI.
+This is the original harness plus the CSP probe; the investigation spec does not run
+in Electron.
+
+| Item | Unpackaged (`file://`) | Packaged (asar) |
+|---|---|---|
+| Default suite (`csp=none`) | PASS (no failed tests) | PASS (no failed tests) |
+| Memory cap (`instance-capacity`) | **104**, then the same RangeError; 0 after dispose (unrendered offline context, §8.3) | **104**; 0 after dispose |
+| Sustained 16 instances | 0.88% of quantum, 0 overruns, 0 dropouts, 0 underruns | 1.06%, 0 / 0 / 0 |
+| Production CSP via `onHeadersReceived`: header-hook `file://` calls | **9 of 9** | **9 of 9** |
+| CSP enforced (`eval` blocked) | **yes** | **yes** |
+| Production CSP: main-thread / worklet WASM | **BLOCKED / BLOCKED** | **BLOCKED / BLOCKED** |
+| + `'wasm-unsafe-eval'`: main-thread / worklet WASM, parity | allowed / allowed, PASS | allowed / allowed, PASS |
+
+**Not covered by any run:**
+* the engine layouts inside Electron;
+* offline-render retention inside Electron;
+* the representative laptop;
+* real audio devices, including WaveOut via `force-wave-audio`;
+* repeated Windows runs for variance.
