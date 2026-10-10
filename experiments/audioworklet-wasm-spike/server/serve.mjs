@@ -6,6 +6,9 @@
 //   /csp-none/...              no CSP header
 //   /csp-production/...        the exact CSP string from electron.cjs (packaged app)
 //   /csp-production-wasm/...   the same plus 'wasm-unsafe-eval' in script-src
+//   further investigation-only variants: see CSP_MODES in server/csp.mjs (the
+//   csp-split-* modes give worklet/worker script responses a different policy
+//   from the document).
 // Any other path is served without CSP.
 //
 //   node server/serve.mjs [--port 4173] [--host 127.0.0.1]
@@ -13,7 +16,7 @@ import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { dirname, extname, join, normalize, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { CSP_MODES } from './csp.mjs';
+import { CSP_MODES, cspFor } from './csp.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const arg = (name, dflt) => {
@@ -35,10 +38,10 @@ const TYPES = {
 const server = createServer(async (req, res) => {
   const url = new URL(req.url, 'http://localhost');
   let path = decodeURIComponent(url.pathname);
-  let csp = null;
+  let mode = null;
   const m = path.match(/^\/(csp-[a-z-]+)(\/.*)$/);
   if (m && Object.hasOwn(CSP_MODES, m[1])) {
-    csp = CSP_MODES[m[1]];
+    mode = m[1];
     path = m[2];
   }
   if (path === '/' || path.endsWith('/')) path += 'index.html';
@@ -47,6 +50,7 @@ const server = createServer(async (req, res) => {
   try {
     const body = await readFile(file);
     const headers = { 'Content-Type': TYPES[extname(file)] || 'application/octet-stream', 'Cache-Control': 'no-store' };
+    const csp = mode ? cspFor(mode, file) : null;
     if (csp) headers['Content-Security-Policy'] = csp;
     res.writeHead(200, headers).end(body);
   } catch {

@@ -21,11 +21,16 @@ enforces this). Findings and the recommendation: [`REPORT.md`](./REPORT.md).
 | `web/golden.mjs` | SHA-256 of the **JS reference** output (golden value) |
 | `web/harness.mjs` | In-page test suite shared by Playwright and Electron |
 | `web/index.html`, `web/ui.mjs` | Manual harness page (local benchmarks on real hardware) |
-| `server/serve.mjs`, `server/csp.mjs` | Static server; `/csp-none/`, `/csp-production/`, `/csp-production-wasm/` prefixes |
+| `server/serve.mjs`, `server/csp.mjs` | Static server; `/csp-none/`, `/csp-production/`, `/csp-production-wasm/` prefixes plus investigation-only variants (`csp-split-*` give worklet/worker scripts a different policy from the document) |
 | `tests/node/` | Node tests: WASM numerics, mocked-scope processor logic, isolation guards |
 | `tests/browser/` | Playwright config + spec (projects `chromium`, `chrome`, `msedge`) |
 | `electron/` | Electron runner replicating production switches/sandbox/CSP; packaging stager |
-| `ci/audio-spike.yml` | CI workflow (Linux Chromium; Windows Chrome + Edge; Windows Electron unpackaged + packaged). Belongs in `.github/workflows/`; see REPORT.md for why it is parked here |
+| `dsp/gain_biquad_engine.wat` / `.wasm` | Follow-up: **single-engine** kernel (ABI v2): one instance/memory per audio thread, 1024 gain→biquad slots, same arithmetic (bit-exact) |
+| `web/engine-processor.js` | Follow-up: processors `apex-spike-engine-unit` (one node per unit, shared engine) and `apex-spike-engine-bank` (one node, N units); deterministic slot release on dispose/fault |
+| `web/repro.mjs` | Follow-up: minimal probes for the WASM memory budget (no audio) |
+| `web/investigation.mjs`, `web/wasm-probe-worker.js` | Follow-up: design comparison, churn, offline-render, reclaim and CSP-matrix experiments |
+| `tests/browser/investigation.spec.mjs` | Follow-up: codified investigation (`[must]` requirements, `[char]` browser characterisation); see REPORT.md §12 |
+| `.github/workflows/audio-spike.yml` (repo root) | CI workflow (Linux Chromium; Windows Chrome + Edge; Windows Electron unpackaged + packaged). Originally parked here as `ci/audio-spike.yml`; activated by the owner in `7d2600c` |
 
 ## Signal flow
 
@@ -95,7 +100,13 @@ numbers are not the agreed baseline. On the target mid-range laptop:
 4. For Electron: `set SPIKE_SECONDS=300` then `node electron/run-electron.mjs`
    (and `--packaged` after packaging). This uses production's switches,
    including `force-wave-audio`.
-5. Record laptop model, CPU, RAM, Windows build, audio device, and browser
+5. Design comparison on real hardware (per-node vs single-engine layouts,
+   16–512 units, 15 s each; ~5 min per browser), from the spike directory:
+   `set SPIKE_HEADED=1` then
+   `node ../../node_modules/@playwright/test/cli.js test --config tests/browser/playwright.config.mjs --project=chrome tests/browser/investigation.spec.mjs`
+   (and `--project=msedge`). Optional: `set SPIKE_COMPARE_SECONDS=60`.
+   `node scripts/summarize-results.mjs` prints the tables.
+6. Record laptop model, CPU, RAM, Windows build, audio device, and browser
    versions alongside the JSON files.
 
 Pass criteria per run (also enforced by the harness): 0 detected dropouts
