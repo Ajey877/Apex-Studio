@@ -1,43 +1,33 @@
 # Pre-Phase 1 spike report — shared AudioWorklet + WebAssembly DSP
 
-**Status (bounded follow-up, 2026-10-10):** the spike remains stopped before Phase 1;
-**Recommendation: REVISE** (§10). This update adds a prototype-only serial offline
-Worker and regression coverage. All session follow-up changes are confined to
-`experiments/audioworklet-wasm-spike/`; no production audio code or CSP was changed.
+**Status (bounded follow-ups, 2026-10-10):** the spike remains stopped before Phase 1;
+**Recommendation: REVISE** (§10, §14). The follow-ups add the serial offline Worker
+and a synthetic four-track live/offline project prototype. All changes remain under
+`experiments/audioworklet-wasm-spike/`; production audio, CSP and CI workflows are
+unchanged.
 
-* `npm run check:wasm`, `npm run test:node` (**28/28**) and JavaScript syntax checks
-  pass. Five targeted Linux Chromium 153 browser cases pass: 200-job Worker parity,
-  shared-engine/bank parity, offline-context retention, and expected per-node
-  allocation failures at 128/256 units (§13).
-* The Worker reuses one fixed 128 KiB WASM memory for 200 serial kernel jobs with
-  bit-exact reference output. This is **not** a complete offline graph/export path.
-  The separate `OfflineAudioContext` regression still reproduces retention after
-  7 per-node or 124 shared-engine renders (§13).
-* A 16-unit bank's Float32 average is within `1.1920928955078125e-7` of the single
-  reference stream, not bit-exact. One-unit bank and individual engine outputs
-  remain bit-exact (§13). Do not repeat the older unqualified “bank is bit-exact”
-  claim for multi-unit mixing.
-* The shared-engine/bank prototype **was** exercised in unpackaged and asar Electron
-  in current PR CI run #38055574687: engine parity, slot release, bank golden,
-  128/512-unit comparisons, and offline-retention probes passed (§13). At 512 units,
-  engine-bank rendered 100% with 0 underruns; in the same Windows browser run,
-  engine-nodes rendered only 72–83% with 1,327–1,412 underruns. An earlier Electron
-  run showed 95–96% / 775–1,016 for engine-nodes, while the latest Electron run
-  rendered 100%. These are variable hosted-CI observations, not hardware-readiness
-  evidence.
-* The new local long-lived Worker PCM prototype and the 16-unit bank tolerance
-  assertion were not part of PR CI. Local Electron could not be installed or
-  launched, so these latest Worker/bank-test edits are **NOT RUN** in Electron.
-* PR #205 is on a different branch (`arena/96cb2a8b-apex-studio`) and currently at
-  `ed0a79217cb455d87704b1c6ff02ee68687b81a5`; run #38055574687 is green on that PR
-  head, not on this fixed session branch and not for the local Worker changes.
+* On implementation commit `1e725c009eb73f561eca44815d2d4fc07045fe07`,
+  `npm run check:wasm`, `npm run test:node` (**36/36**), syntax checks and all five
+  targeted bundled-Chromium project tests pass. The Worker completed 200 full
+  4.25-second fixture exports with one fixed 131,072-byte WASM memory (§14).
+* The four-track/two-bus live Worklet output, Worker float output, stems and buses
+  match the scalar reference within `1e-6`; live/offline master outputs were also
+  directly compared. A live fader update affected only its addressed track. This
+  remains a synthetic graph, not the production Apex project/export path (§14).
+* Stable Chrome and Edge test bodies are **NOT RUN** (all five launches per browser
+  stopped because their binaries are absent). Unpackaged/packaged Electron is
+  **NOT RUN** (binary acquisition failed and no packaged app is staged). Physical
+  Windows hardware is **NOT RUN**. No result is inferred from PR #205.
+* PR #205 remains on `arena/96cb2a8b-apex-studio`, head
+  `ed0a79217cb455d87704b1c6ff02ee68687b81a5`; its run #38055574687 covers the
+  earlier shared-engine/bank prototype, not this four-track Worker/Worklet code.
 
-**Untested:** full browser suite / installed Chrome and Edge for the new Worker
-changes, Worker integration in packaged/unpackaged Electron, physical-device audio,
-and complete offline graph/export semantics. These are **NOT RUN**. The
-representative Windows laptop remains **NOT RUN**.
+**Untested:** actual Apex project serialization and production instrument/effect
+semantics, save/load, actual-app CSP, Chrome/Edge on Windows, Worker/Worklet in both
+Electron packaging modes, and representative physical Windows-laptop audio.
+These remain **NOT RUN**. Detailed scope and decision gates are in §14.
 
-Date: 2026-10-10 · PR #205 latest inspected head: `ed0a79217cb455d87704b1c6ff02ee68687b81a5` · session branch: `arena/724da208-apex-studio`
+Date: 2026-10-10 · Tested implementation commit: `1e725c009eb73f561eca44815d2d4fc07045fe07` · PR #205 inspected head: `ed0a79217cb455d87704b1c6ff02ee68687b81a5` · session branch: `arena/724da208-apex-studio`
 
 ---
 
@@ -1024,3 +1014,159 @@ and packaged Electron execution of the shared-engine/bank and Worker prototypes,
 confirmation on the production app's actual CSP path, current-branch CI for the
 follow-up changes, and a representative hardware audio-health run. All unrun items
 remain explicitly **NOT RUN**.
+
+---
+
+## 14. Bounded synthetic multi-track live/offline prototype (2026-10-10)
+
+### Scope and exact source snapshot
+
+Implementation and test code are in `1e725c009eb73f561eca44815d2d4fc07045fe07`
+on the fixed session branch. This is a prototype-only model; it does not read,
+serialize or export an Apex Studio project. It changes no production audio code,
+CSP or workflow. No PR was created or merged.
+
+### Representative fixture and supported semantics
+
+`fixtures/representative-project.mjs` defines a deterministic 48 kHz, 120 BPM,
+4/4, two-bar fixture with a 250 ms tail: **204,000 frames / 4.25 seconds**, four
+independent tracks and **48 clip events**. Kick and closed-hat use generated
+one-shot sample-like sources; bass and chord/pad use simple saw/triangle note
+voices. Tracks have distinct scheduled inputs, ADSR/release, low-pass/gain inserts,
+independent fader automation and pan, two buses (`rhythm`, `music`), static sends,
+bus gains/drives, and a master gain.
+
+Implemented stage order is **source scheduling → per-track WASM gain+biquad →
+sample-rate fader automation → pan → track-to-bus routing → bus gain+soft clip →
+master sum/gain → stereo PCM16 WAV**. The live Worklet accepts four distinct mono
+AudioBuffer inputs and captures per-track, per-bus and master output. The live test
+harness schedules pre-rendered deterministic fixture buffers; its source scheduler
+is not Apex's production transport. The Worker performs clip/note scheduling and
+source generation during each export, routes the tracks, applies the same supported
+DSP stages, and encodes a WAV in memory. It is one long-lived module Worker and one
+ABI-v2 engine for the serial batch.
+
+The JavaScript reference uses the same fixture schedule/source model (so event
+content is shared) but independently filters and mixes in scalar JS. This validates
+WASM DSP, track/bus mixing, routing and stage order against a defined reference;
+it does not independently validate production project parsing or instrument
+implementation. Supported DSP is limited to one gain+biquad insert per track,
+linear track-fader automation, static pan/sends, bus gain and a simple rational soft
+clip. Missing/mocked: saved `.apex` state, project save/load, production
+instruments/sample decoding, real effect/plugin state or chains, automation beyond
+track volume, tempo changes, sidechains, latency compensation, clip warp, mastering,
+application export integration, file I/O, and production error/lifecycle policy.
+This is **not** a complete DAW export path.
+
+### Results on implementation commit `1e725c009eb73f561eca44815d2d4fc07045fe07`
+
+Executed from `experiments/audioworklet-wasm-spike/` on the implementation commit:
+
+```text
+npm run check:wasm
+npm run test:node
+find web tests electron scripts server fixtures -type f \
+  \( -name '*.mjs' -o -name '*.js' -o -name '*.cjs' \) -print0 | xargs -0 -r -n1 node --check
+node ../../node_modules/@playwright/test/cli.js test --config tests/browser/playwright.config.mjs --project=chromium --grep 'prototype-only representative Apex-style multitrack project'
+```
+
+Availability attempts (both browser commands exit before any test body; Electron
+commands do not reach app launch):
+
+```text
+node ../../node_modules/@playwright/test/cli.js test --config tests/browser/playwright.config.mjs --project=chrome --grep 'prototype-only representative Apex-style multitrack project'
+node ../../node_modules/@playwright/test/cli.js test --config tests/browser/playwright.config.mjs --project=msedge --grep 'prototype-only representative Apex-style multitrack project'
+node electron/run-electron.mjs
+node electron/run-electron.mjs --packaged
+```
+
+| Test | Result and measurements |
+|---|---|
+| `npm run check:wasm` | **PASS**; 681-byte v1 and 815-byte ABI-v2 WASM rebuilds match committed binaries. |
+| `npm run test:node` | **36/36 PASS**, 0 failures/skips. Includes fixture scheduling/release, independent reference, effect-order sensitivity, 12 serial full-project exports, slot/memory reuse, cancellation recovery, WAV/float interleave validation and project validation. |
+| JavaScript syntax checks | **PASS**; command above checks `.mjs`, `.js` and `.cjs` under `web/`, `tests/`, `electron/`, `scripts/`, `server/`, and `fixtures/`. |
+| Targeted Playwright on bundled Chromium | **5/5 PASS**; `project-prototype.spec.mjs`, Linux Chromium 153.0.8010.0 / Playwright 1.63.0 / Node 22.22.3, 2 vCPU / 3 GB sandbox, software/fake audio. Covers live routing/effect order, parameter update, direct live/offline float parity, 200 Worker exports, and cancellation/recovery. Not a full browser-suite run. |
+| Chrome stable / Edge stable | **NOT RUN**. Exact commands used the same config/grep with `--project=chrome` then `--project=msedge`. All five test launches per project failed before the body because `/opt/google/chrome/chrome` and `/opt/microsoft/msedge/msedge` are absent; **0 test bodies ran**. No result is inferred from older PR CI. |
+| Electron unpackaged / packaged asar | **NOT RUN**: `node electron/run-electron.mjs` could not acquire Electron (`TypeError: fetch failed`), no executable launched; `node electron/run-electron.mjs --packaged` found no staged app. The test harness/stager includes the fixture and project suite, but neither mode executed. |
+| Representative Windows laptop / physical output | **NOT RUN**. |
+
+**Live Worklet:** four slots, one engine instance, fixed **131,072-byte** WASM
+memory. Across **204,000 captured frames**, maximum absolute difference against
+the JS reference was **2.9802322387695312e-8** (acceptance tolerance `1e-6`); track
+stems, buses and master were compared. The alternate ordering (fader automation
+before, rather than after, the biquad) differed by `7.674098014831543e-6`, making
+the order test observable. A live bass fader update from `0.78` to `0.12` was
+acknowledged at project frame **34,048** (requested near frame 33,600); the bass
+region RMS fell to **0.153846** of its unchanged baseline while the hat stem stayed
+bit-exact. All four slots were returned on dispose.
+
+The direct **live Worklet vs Worker Float32 master** comparison passed: maximum
+absolute difference **2.9802322387695312e-8** across both channels and all frames,
+within `1e-6`; each side also matched the JS reference to the same maximum. The
+Worker transferred 1,632,000 bytes of interleaved float PCM for this one-off
+consistency case, plus a valid 816,044-byte WAV. Both live and offline DSP used one
+engine and 131,072-byte WASM memory; live slots returned to zero.
+
+In this Chromium run, the 4.25 s capture took **4,423 ms** wall time. Worklet
+processing averaged **0.126 ms/block**, observed p95/p99 **1 ms**, max **1 ms**,
+with a 2.667 ms quantum budget, **0** over-budget blocks, **0** frame discontinuities
+during the scheduled project interval, and **0** `playbackStats` underruns. There
+was **one 1,024-frame startup discontinuity before the scheduled project start**;
+it is classified separately, not hidden. Worklet timing used `Date.now()` (1 ms
+resolution in this runtime), so the percentile figures are coarse and are not
+hardware/audio-health evidence.
+
+**Long-lived Worker:** **200/200** full fixture exports completed sequentially in
+one Worker. Each produced 204,000 frames and an **816,044-byte** PCM16 stereo WAV;
+200 outputs total **163,208,800 bytes**. The Worker reported one engine and a fixed
+**131,072-byte** WASM memory at every snapshot, with no growth across jobs. The
+non-cryptographic 32-bit output checksum was stable (`02b3d4af`) across all 200
+files. Total batch time was **16,091.8 ms** (**12.43 exports/s**, **52.82×** audio
+real time). Per-export core render p50/p95/max: **69.5 / 82.5 / 122.8 ms**; WAV
+encode: **7.8 / 9.2 / 15.6 ms**; end-to-end Worker export: **78.2 / 92.2 / 140.9 ms**.
+
+Decoded first-export output differed from the scalar-reference PCM by at most
+**1.5273690223693848e-5**, within the declared PCM16 tolerance
+`1/32767 + 1e-7 = 3.0618509475997195e-5`, with zero non-finite samples. **18 PCM16
+samples differ from reference quantization; the WAV bytes/hash are not bit-exact**
+(reference hash `aee78fca`, Worker hash `02b3d4af`). The difference is within one
+16-bit quantization step; repeat outputs are mutually stable. Do not describe the
+WAV as bit-exact. Cancellation at **2,048/204,000 frames** was acknowledged; a
+subsequent full export in the same Worker succeeded with the same fixed WASM memory
+and passed the same numerical tolerance. Browser `performance.memory` used-heap
+was 23.1 MB before/after (total heap 26 MB); this is the **renderer** heap, not a
+measurement of Worker JS heap or total process RSS. Explicit Worker/engine/memory
+counters are the basis for the fixed-WASM-memory claim.
+
+The performance figures are from one hosted-style Linux sandbox with fake output,
+not repeated physical-device trials. Older PR #205 CI checks are on separate head
+`ed0a79217cb455d87704b1c6ff02ee68687b81a5` and do not contain this fixture, Worker,
+or Worklet.
+
+### What remains before any physical Windows-laptop test
+
+First build a project fixture from an actual saved Apex project and map its real
+track/instrument/effect/automation semantics into the isolated prototype; compare
+live and offline outputs and retain a production-equivalent reference. Then execute
+the exact candidate in installed Windows Chrome and Edge and in Electron 43.4.1,
+unpackaged and asar-packaged, under the separately reviewed CSP test policy. For the
+hardware run, record laptop model/CPU/RAM, Windows and browser/Electron versions,
+physical audio device/backend (including production WaveOut setting), supported
+track/voice load `N_target`, sample rate and buffer size. Capture loopback audio,
+underrun/xrun counters and p99 DSP time for three 30-minute `N_target` runs and one
+10-minute 1.5× stress run at 48 kHz / 128 frames. The agreed target gate is zero
+audible gaps/underruns/frame discontinuities/crashes, p99 DSP below 50% of the
+2.667 ms quantum and no block at/over one quantum; stress must not crash or grow
+memory unboundedly. This entire hardware step is **NOT RUN**.
+
+### Decision
+
+**REVISE. Do not integrate into production and do not start Phase 1.** The synthetic
+prototype supports a four-track shared live engine and repeated Worker exports for
+its limited fixture; it does not resolve actual Apex project semantics, browser and
+Electron validation, production CSP approval, or physical audio health. The exact
+next decision is only whether to fund one more isolated prototype using a real saved
+Apex project and production-equivalent graph, followed by the Chrome/Edge/Electron
+and representative-laptop gates above. If those gates cannot be met, reject this
+architecture rather than treating the synthetic fixture or passing Chromium tests
+as approval.
