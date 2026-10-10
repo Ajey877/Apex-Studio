@@ -79,6 +79,32 @@ for (const mode of modes) {
     }
   }
   console.log(`[spike-electron] ${tag} csp=${mode}: ${pass ? 'PASS' : 'FAIL'} — ${verdict}`);
+  if (process.env.GITHUB_ACTIONS === 'true') {
+    // Compact key facts as a GitHub annotation (readable via the check-runs API
+    // even when artifacts/logs are not). Never affects pass/fail.
+    try {
+      const find = n => h && h.results.find(r => r.name === n);
+      const cap = find('instance-capacity');
+      const sus = find('sustained-live');
+      const d = probe ? probe.data : null;
+      const facts = {
+        pass,
+        versions: report && report.versions && { electron: report.versions.electron, chrome: report.versions.chrome, v8: report.versions.v8 },
+        packaged: report && report.packaged,
+        headerHook: report && report.headerHook && { installed: report.headerHook.installed, calls: report.headerHook.calls, fileUrlCalls: report.headerHook.fileUrlCalls },
+        cspEnforced: d ? d.cspActive : null,
+        mainThreadWasm: d ? !!(d.mainThreadWasm && d.mainThreadWasm.ok) : null,
+        workletWasm: d ? !!(d.workletWasm && d.workletWasm.ok) : null,
+        capacity: cap && cap.data ? { first: cap.data.firstRound.created, firstError: cap.data.firstRound.failure && cap.data.firstRound.failure.error && cap.data.firstRound.failure.error.message, secondAfterDispose: cap.data.secondRoundAfterDispose.created } : null,
+        sustained16: sus && sus.data && sus.data.aggregate ? { pass: sus.pass, cpuPct: Math.round(sus.data.aggregate.cpuFractionOfQuantum * 1e4) / 100, overruns: sus.data.aggregate.overBudgetBlocks, dropouts: sus.data.aggregate.lagExceedances, underruns: sus.data.context && sus.data.context.playbackStats ? sus.data.context.playbackStats.underrunEvents : 'n/a' } : null,
+        failed: h ? h.results.filter(r => !r.pass).map(r => r.name) : null,
+      };
+      const msg = JSON.stringify(facts).replace(/%/g, '%25').replace(/\r/g, '%0D').replace(/\n/g, '%0A');
+      console.log(`::notice title=spike-electron ${tag} csp=${mode}::${msg}`);
+    } catch (err) {
+      console.log(`::notice title=spike-electron ${tag} csp=${mode}::annotation failed: ${String(err && err.message).replace(/[\r\n%]/g, ' ')}`);
+    }
+  }
   summary.modes[mode] = { pass, verdict, seconds: Math.round((Date.now() - t0) / 1000), versions: report && report.versions && { electron: report.versions.electron, chrome: report.versions.chrome, v8: report.versions.v8 }, platform: report && `${report.platform}-${report.arch} ${report.osRelease}`, cpu: report && report.cpus };
   if (!pass) failed = true;
 }
