@@ -456,13 +456,13 @@ const MODAL_CASES: ModalCase[] = [
   },
   {
     name: 'Take Comping', file: 'TakeCompingModal.tsx', modalId: 'fl-take-comping-modal',
-    titleId: 'fl-take-comping-modal-title', titleText: 'STACKED MULTI-TAKE SWIPE COMPING STUDIO',
+    titleId: 'fl-take-comping-modal-title', titleText: 'TAKE COMPING',
     closeLabel: 'Close take comping', overlayClass: OVERLAY_STUDIO,
     open: React.createElement(TakeCompingModal, {
-      isOpen: true, onClose: noop, onPromoteCompToPlaylist: noop,
+      isOpen: true, onClose: noop, playlistClips: [], onSelectActiveTake: noop,
     }),
     closed: React.createElement(TakeCompingModal, {
-      isOpen: false, onClose: noop, onPromoteCompToPlaylist: noop,
+      isOpen: false, onClose: noop, playlistClips: [], onSelectActiveTake: noop,
     }),
   },
   {

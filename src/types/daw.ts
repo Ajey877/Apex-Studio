@@ -407,6 +407,14 @@ export interface PlaylistClip {
     label?: string;
   };
   automationPoints?: AutomationPoint[];
+  // Phase 1M: take-grouping fields for comping lanes. Clips sharing the same
+  // `takeGroupId` are alternative recording passes over the same musical region.
+  // Only the clip whose `takeIndex` matches the group's `activeTakeIndex`
+  // (resolved by `resolveActiveTakeIndex`) is audible; inactive takes are
+  // preserved but silent. Clips without `takeGroupId` are ordinary clips.
+  takeGroupId?: string;
+  takeIndex?: number;
+  activeTakeIndex?: number;
 }
 
 export interface MultibandBandSettings {

@@ -1,5 +1,6 @@
 import { beatsPerBar, beatsToSeconds, SIXTEENTH_STEPS_PER_BEAT, LEGACY_TIME_SIGNATURE } from '../music/musicalTime';
 import { Channel, PlaylistClip } from '../types/daw';
+import { resolveInaudibleTakeClipIds } from './takeLaneManager';
 
 export interface OfflineProjectRendererOptions {
   channels: Channel[];
@@ -76,9 +77,11 @@ export function getOfflineRenderPlan(clips: PlaylistClip[], bpm: number, totalBa
   const safeBpm = Number.isFinite(bpm) && bpm > 0 ? bpm : 120;
   const secondsPerBar = beatsToSeconds(beatsPerBar(LEGACY_TIME_SIGNATURE), safeBpm);
   const limit = Math.max(0, totalBars) * secondsPerBar;
+  // Phase 1M: inactive takes are excluded from the render plan.
+  const inaudibleTakes = resolveInaudibleTakeClipIds(clips);
 
   return clips
-    .filter(clip => !clip.mute)
+    .filter(clip => !clip.mute && !inaudibleTakes.has(clip.id))
     .map(clip => ({
       clipId: clip.id,
       type: clip.type,

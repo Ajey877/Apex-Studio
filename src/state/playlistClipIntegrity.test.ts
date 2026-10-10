@@ -357,18 +357,15 @@ test('Phase 48 wiring: App gates handleUpdateClips through the publication decis
   assert.match(handleUpdateClips, /setSaveError\(describeRejectedPlaylistAudioClips\(/);
 });
 
-test('Phase 48 wiring: App gates the take-comping promotion path', () => {
+test('Phase 1M wiring: TakeCompingModal receives real project data', () => {
   const source = readSource('../App.tsx');
 
-  assert.match(source, /isPublishablePlaylistClip\(/);
-  const promote = source.slice(
-    source.indexOf('handlePromoteCompToPlaylist'),
-    source.indexOf('// --- Computer Keypad'),
-  );
-  assert.notEqual(promote.indexOf('isPublishablePlaylistClip('), -1);
-
-  const gateIndex = promote.indexOf('isPublishablePlaylistClip(');
-  const publishIndex = promote.indexOf('updatePlaylistProjectState(');
-  assert.ok(gateIndex < publishIndex, 'an invalid promoted clip must never reach project state');
-  assert.match(promote, /setSaveError\(describeRejectedPlaylistAudioClips\(/);
+  // The modal now receives actual playlist clips from project state
+  assert.match(source, /playlistClips=\{projectState\.playlistClips\}/);
+  // And a callback to update the active take selection
+  assert.match(source, /onSelectActiveTake=/);
+  // The selection goes through the take manager
+  assert.match(source, /selectActiveTake\(/);
+  // And is persisted through history
+  assert.match(source, /commitPlaylistHistory\(nextState, 'Select active take'\)/);
 });

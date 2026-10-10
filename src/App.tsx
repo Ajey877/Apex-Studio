@@ -55,6 +55,7 @@ import {
   getMissingAudioAssetsSignature
 } from './state/audioAssetAvailability';
 import { createPunchRecordingPlaylistClip, createRecordingPlaylistClip, getRecordingAudioBufferId, trimAudioBufferToSeconds, validateRecordingTargetTrack, type PunchClipPlacement } from './audio/recordingPipeline';
+import { findMatchingTakeGroup, addTakeToProjectClips, selectActiveTake } from './audio/takeLaneManager';
 import { createHistory, type ProjectHistory, resolveSaveShortcut, resolveUndoRedoShortcut } from './state/projectHistory';
 import { KEY_NOTE_MAP, getKeyboardNotePitch } from './state/musicalKeyboard';
 import { fullscreenController } from './state/fullscreen';
@@ -1516,18 +1517,6 @@ export function App() {
    * project state or history; the refusal is reported through the existing
    * save-error surface. Nothing here fabricates audio or a buffer id.
    */
-  const handlePromoteCompToPlaylist = (newClip: PlaylistClip) => {
-    if (!isPublishablePlaylistClip(newClip)) {
-      setSaveError(describeRejectedPlaylistAudioClips([newClip]));
-      return;
-    }
-    const nextState = {
-      ...projectStateRef.current,
-      playlistClips: [...projectStateRef.current.playlistClips, newClip]
-    };
-    updatePlaylistProjectState(nextState);
-    commitPlaylistHistory(nextState, 'Promote comp to playlist');
-  };
 
   // --- Phase 6D: Recording -> decode -> register -> playlist clip ---
   const handleSaveRecordingToPlaylist = async (
@@ -1613,10 +1602,26 @@ export function App() {
           // Phase 1K: the take lands on the bar capture began on after the count-in.
           captureStartBar
         );
+    
+    // Phase 1M: Check if this recording should join an existing take group
+    const matchingGroupId = findMatchingTakeGroup(
+      currentState.playlistClips,
+      currentTargetTrackIndex,
+      recordingClip.startBar,
+      recordingClip.lengthBars
+    );
+    
+    // Add the clip to the project, grouping it with existing takes if applicable
+    const updatedClips = addTakeToProjectClips(
+      currentState.playlistClips,
+      recordingClip,
+      matchingGroupId
+    );
+    
     const nextState = {
       ...currentState,
       recordings: [...currentState.recordings, persistedRecording],
-      playlistClips: [...currentState.playlistClips, recordingClip],
+      playlistClips: updatedClips,
       meta: { ...currentState.meta, updated: Date.now() }
     };
     if (!isRecordingProjectGenerationCurrent(recordingProjectGeneration, recordingProjectGenerationRef.current)) {
@@ -2492,7 +2497,17 @@ export function App() {
       <MidiLearnModal isOpen={isMidiLearnOpen} onClose={() => setIsMidiLearnOpen(false)} midiMappings={projectState.midiMappings || []} onUpdateMidiMappings={(mappings) => mutateProjectState(curr => updateMidiMappingsInProjectState(curr, mappings), 'Update MIDI mappings')} channels={projectState.channels} mixerTracks={projectState.mixerTracks} connectedDevices={projectState.connectedMidiDevices || []} isMidiLearnActive={isMidiLearnActive} onToggleMidiLearn={(active) => setIsMidiLearnActive(active)} />
       <MultiZoneSamplerModal isOpen={isMultiZoneSamplerOpen} onClose={() => setIsMultiZoneSamplerOpen(false)} channels={projectState.channels} sampleLibrary={projectState.sampleLibrary || []} onUpdateChannel={handleUpdateChannel} />
       <WavetableSynthModal isOpen={isWavetableSynthOpen} onClose={() => setIsWavetableSynthOpen(false)} channels={projectState.channels} onUpdateChannel={handleUpdateChannel} />
-      <TakeCompingModal isOpen={isTakeCompingOpen} onClose={() => setIsTakeCompingOpen(false)} onPromoteCompToPlaylist={handlePromoteCompToPlaylist} />
+      <TakeCompingModal
+        isOpen={isTakeCompingOpen}
+        onClose={() => setIsTakeCompingOpen(false)}
+        playlistClips={projectState.playlistClips}
+        onSelectActiveTake={(groupId, takeIndex) => {
+          const updatedClips = selectActiveTake(projectStateRef.current.playlistClips, groupId, takeIndex);
+          const nextState = { ...projectStateRef.current, playlistClips: updatedClips };
+          updatePlaylistProjectState(nextState);
+          commitPlaylistHistory(nextState, 'Select active take');
+        }}
+      />
       <SidechainRoutingModal isOpen={isSidechainOpen} onClose={() => setIsSidechainOpen(false)} mixerTracks={projectState.mixerTracks} onUpdateMixerTracks={(tracks) => mutateProjectState(curr => ({ ...curr, mixerTracks: tracks }), 'Update mixer routing')} />
       <PolyphonicEditorModal isOpen={isPolyphonicEditorOpen} onClose={() => setIsPolyphonicEditorOpen(false)} />
       <DesktopAppModal isOpen={isDesktopAppOpen} onClose={() => setIsDesktopAppOpen(false)} />
