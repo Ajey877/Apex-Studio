@@ -1,0 +1,22 @@
+{
+  "name": "apex-audioworklet-wasm-spike",
+  "private": true,
+  "version": "0.0.0-spike",
+  "description": "EXPERIMENTAL Pre-Phase 1 architecture proof: AudioWorklet + WebAssembly DSP. Not part of the production app.",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build:wasm": "node scripts/build-wasm.mjs",
+    "check:wasm": "node scripts/build-wasm.mjs --check",
+    "test:node": "node --test \"tests/node/*.test.mjs\"",
+    "test:browser": "npx playwright test --config tests/browser/playwright.config.mjs",
+    "test:electron": "node electron/run-electron.mjs",
+    "serve": "node server/serve.mjs"
+  },
+  "devDependencies": {
+    "wabt": "1.0.39"
+  }
+}
