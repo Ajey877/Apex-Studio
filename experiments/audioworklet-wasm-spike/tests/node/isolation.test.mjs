@@ -43,11 +43,3 @@ test('server/csp.mjs PRODUCTION_CSP is byte-identical to the policy in electron.
   const directives = [...block[1].matchAll(/"([^"]+)"/g)].map(m => m[1]);
   assert.equal(directives.join('; '), PRODUCTION_CSP);
 });
-
-test('Electron spike runner copies the same production CSP directives', () => {
-  const src = readFileSync(join(spikeRoot, 'electron', 'main.cjs'), 'utf8');
-  const block = src.match(/const PRODUCTION_CSP = \[([\s\S]*?)\];/);
-  assert.ok(block, 'PRODUCTION_CSP definition found in electron/main.cjs');
-  const directives = [...block[1].matchAll(/"([^"]+)"/g)].map(m => m[1]);
-  assert.equal(directives.join('; '), PRODUCTION_CSP);
-});

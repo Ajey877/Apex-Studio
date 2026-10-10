@@ -12,7 +12,6 @@
     "build:wasm": "node scripts/build-wasm.mjs",
     "check:wasm": "node scripts/build-wasm.mjs --check",
     "test:node": "node --test \"tests/node/*.test.mjs\"",
-    "test:shared-engine": "node --test tests/node/shared-engine.test.mjs",
     "test:browser": "npx playwright test --config tests/browser/playwright.config.mjs",
     "test:electron": "node electron/run-electron.mjs",
     "serve": "node server/serve.mjs"

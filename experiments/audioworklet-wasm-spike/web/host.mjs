@@ -35,15 +35,17 @@ export function detectSupport(env = globalThis) {
   return result;
 }
 
-const moduleLoads = new WeakMap(); // BaseAudioContext -> Promise<void>
+const moduleLoads = new WeakMap(); // BaseAudioContext -> Map<url, Promise<void>>
 
 function loadWorkletModule(ctx, url) {
-  let p = moduleLoads.get(ctx);
+  let perCtx = moduleLoads.get(ctx);
+  if (!perCtx) { perCtx = new Map(); moduleLoads.set(ctx, perCtx); }
+  let p = perCtx.get(url);
   if (!p) {
     p = ctx.audioWorklet.addModule(url);
-    moduleLoads.set(ctx, p);
+    perCtx.set(url, p);
     // Allow a retry after failure instead of caching the rejection forever.
-    p.catch(() => moduleLoads.delete(ctx));
+    p.catch(() => perCtx.delete(url));
   }
   return p;
 }
@@ -56,10 +58,14 @@ function errorInfo(err) {
 /**
  * @param {BaseAudioContext} ctx
  * @param {{ workletUrl: string|URL, wasmBytes: Uint8Array, params: {gain:number, coefficients:object},
- *           initTimeoutMs?: number, lagThresholdMs?: number, env?: object }} options
+ *           initTimeoutMs?: number, lagThresholdMs?: number, env?: object,
+ *           processorName?: string, processorOptions?: object }} options
+ *   processorName / processorOptions are spike-investigation hooks for the
+ *   single-engine variants (web/engine-processor.js). Defaults keep the
+ *   original per-node processor and options unchanged.
  */
 export async function createGainFilter(ctx, options) {
-  const { workletUrl, wasmBytes, params, initTimeoutMs = 5000, lagThresholdMs = 50, env = globalThis } = options;
+  const { workletUrl, wasmBytes, params, initTimeoutMs = 5000, lagThresholdMs = 50, env = globalThis, processorName = PROCESSOR_NAME, processorOptions = {} } = options;
   const support = detectSupport(env);
   if (!support.supported) return { ok: false, stage: 'unsupported', reason: support.reason, support };
 
@@ -71,14 +77,14 @@ export async function createGainFilter(ctx, options) {
 
   let node;
   try {
-    node = new env.AudioWorkletNode(ctx, PROCESSOR_NAME, {
+    node = new env.AudioWorkletNode(ctx, processorName, {
       numberOfInputs: 1,
       numberOfOutputs: 1,
       outputChannelCount: [2],
       channelCount: 2,
       channelCountMode: 'explicit',
       channelInterpretation: 'speakers',
-      processorOptions: { wasmBytes: wasmBytes.slice(), params, lagThresholdMs },
+      processorOptions: { ...processorOptions, wasmBytes: wasmBytes.slice(), params, lagThresholdMs },
     });
   } catch (err) {
     return { ok: false, stage: 'node-construct', reason: 'AudioWorkletNode construction failed', error: errorInfo(err) };
@@ -124,6 +130,7 @@ export async function createGainFilter(ctx, options) {
       stage: 'wasm-init',
       reason: 'Processor failed to initialise WebAssembly',
       error: { name: ready.name || 'Error', message: ready.message || ready.type },
+      detail: ready,
     };
   }
 
@@ -153,6 +160,8 @@ export async function createGainFilter(ctx, options) {
     get disposed() { return disposed; },
     onFault(cb) { faultListeners.add(cb); return () => faultListeners.delete(cb); },
     getStats: () => request({ type: 'get-stats' }, 'stats'),
+    /** Single-engine processors only; per-node processors never reply (resolves {type:'timeout'}). */
+    engineInfo: () => request({ type: 'engine-info' }, 'engine-info', 1000),
     resetStats: () => request({ type: 'reset-stats' }, 'stats-reset'),
     benchmark: blocks => request({ type: 'benchmark', blocks }, 'benchmark-result', 30000),
     setParams: p => request({ type: 'set-params', params: p }, 'params-applied'),

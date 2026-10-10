@@ -176,3 +176,27 @@ export function wasmProcessDirect(exportsObj, input, gain, c, blockSize = RENDER
   }
   return out;
 }
+
+/**
+ * Run ONE slot of the single-engine kernel (dsp/gain_biquad_engine.wat, ABI v2)
+ * directly, in render-quantum-sized blocks. Works in Node and on a page's main thread.
+ */
+export function engineProcessDirect(ex, input, gain, c, slot = 0, blockSize = RENDER_QUANTUM) {
+  if (ex.configure_slot(slot, gain, c.b0, c.b1, c.b2, c.a1, c.a2) !== 0) throw new Error('configure_slot rejected parameters');
+  if (ex.reset_slot(slot) !== 0) throw new Error('reset_slot rejected slot');
+  const max = ex.max_frames();
+  const inView = new Float32Array(ex.memory.buffer, ex.input_ptr(), max);
+  const outView = new Float32Array(ex.memory.buffer, ex.output_ptr(), max);
+  const out = input.map(ch => new Float32Array(ch.length));
+  const frames = input[0].length;
+  for (let start = 0; start < frames; start += blockSize) {
+    const n = Math.min(blockSize, frames - start);
+    for (let ch = 0; ch < input.length; ch++) {
+      inView.set(input[ch].subarray(start, start + n));
+      const rc = ex.process_slot(slot, ch, n);
+      if (rc !== 0) throw new Error(`process_slot returned ${rc}`);
+      out[ch].set(outView.subarray(0, n), start);
+    }
+  }
+  return out;
+}
