@@ -39,6 +39,7 @@ test.afterAll(async ({}, testInfo) => {
   if (NOTES.flags) emit('flags', NOTES.flags);
   emit('lifecycle', { reclaim: NOTES.reclaim, crossIsolate: NOTES.crossIsolate, escape: NOTES.escape, churn: NOTES.churn });
   if (NOTES.offline) emit('offline-renders', NOTES.offline);
+  if (NOTES.offlineWorker) emit('offline-worker', NOTES.offlineWorker);
   if (NOTES.parity) emit('engine-parity', NOTES.parity);
   emit('compare', NOTES.compare.join(' | '));
   emit('csp', NOTES.csp);
@@ -155,7 +156,7 @@ test.describe('2. worklet lifecycle: when are per-node memories reclaimed?', () 
     });
   }
 
-  test('[char] repeated OfflineAudioContext renders exhaust the budget for EVERY layout (one memory per offline worklet scope is retained)', async ({ page }, testInfo) => {
+  test('[regression] repeated OfflineAudioContext renders retain one WASM memory per worklet scope until reload', async ({ page }, testInfo) => {
     const errors = await open(page);
     const out = {};
     out['per-node'] = await inv(page, 'offlineRenders', { design: 'per-node', renders: 40, units: 16 });
@@ -183,7 +184,31 @@ test.describe('2. worklet lifecycle: when are per-node memories reclaimed?', () 
     expect(out.afterReload.created).toBeGreaterThanOrEqual(110);
   });
 
-  test('[char] cross-isolate: unreferenced main-thread memories block worklet allocation until a MAIN-thread GC runs', async ({ playwright }, testInfo) => {
+  test('[regression] long-lived Worker reuses one WASM engine for 200 offline PCM jobs', async ({ page }, testInfo) => {
+    const errors = await open(page);
+    const r = await inv(page, 'offlineWorkerPrototype', { renders: 200, frames: 4800 });
+    await save(testInfo, 'offline-worker-prototype', r);
+    note('offlineWorker', {
+      pass: r.pass,
+      renders: r.data.rendersCompleted,
+      exactJobs: r.data.exactJobs,
+      maxAbsDiff: r.data.maxAbsDiff,
+      engineInstances: r.data.finalInfo && r.data.finalInfo.engineInstances,
+      memoryBytes: r.data.finalInfo && r.data.finalInfo.memoryBytes,
+      scope: r.data.scope,
+    });
+    console.log(`[${testInfo.project.name}] offline Worker prototype: ${JSON.stringify(NOTES.offlineWorker)}`);
+    expect(errors).toEqual([]);
+    expect(r.pass).toBe(true);
+    expect(r.data.rendersCompleted).toBe(200);
+    expect(r.data.exactJobs).toBe(200);
+    expect(r.data.finalInfo.engineInstances).toBe(1);
+    expect(r.data.finalInfo.memoryBytes).toBe(131072);
+    expect(r.data.finalInfo.renderJobs).toBe(200);
+    expect(r.data.offlineAudioContextsCreated).toBe(0);
+  });
+
+  test('[regression] cross-isolate: unreferenced main-thread memories block worklet allocation until a MAIN-thread GC runs', async ({ playwright }, testInfo) => {
     const b = await launchWithJsFlags(playwright, testInfo, '--expose-gc');
     const page = await (await b.newContext({ baseURL: testInfo.project.use.baseURL })).newPage();
     await open(page);
@@ -254,19 +279,19 @@ test.describe('2. worklet lifecycle: when are per-node memories reclaimed?', () 
 
 // ---------------------------------------------------------------------------
 test.describe('3. single-engine layouts', () => {
-  test('[must] engine parity in a real AudioWorklet: shared slots bit-exact, bank bit-exact, slots released on dispose', async ({ page }, testInfo) => {
+  test('[must] engine parity in a real AudioWorklet: shared slots exact, 16-unit bank within tolerance, slots released on dispose', async ({ page }, testInfo) => {
     const errors = await open(page);
     const r = await inv(page, 'engineParity');
     await save(testInfo, 'engine-parity', r);
     note('parity', r.checks);
     console.log(`[${testInfo.project.name}] engine parity: ${JSON.stringify(r.checks)}`);
     expect(errors).toEqual([]);
-    expect(r.checks).toEqual({ sharedEngine: true, distinctSlots: true, unit0Golden: true, unit1MatchesItsOwnReference: true, unit2Golden: true, slotsReleasedOnDispose: true, bankGolden: true });
+    expect(r.checks).toEqual({ sharedEngine: true, distinctSlots: true, unit0Golden: true, unit1MatchesItsOwnReference: true, unit2Golden: true, slotsReleasedOnDispose: true, bankSixteenUnitsShareOneEngine: true, bankSixteenUnitsWithinTolerance: true, bankOneUnitGolden: true, bankSlotsReleasedOnDispose: true });
   });
 
   for (const design of ['per-node', 'engine-nodes', 'engine-bank']) {
     for (const count of COUNTS) {
-      test(`[char] compare ${design} x ${count} units (${compareSeconds}s live)`, async ({ page, browser }, testInfo) => {
+      test(`${design === 'per-node' ? '[regression]' : '[char]'} compare ${design} x ${count} units (${compareSeconds}s live)`, async ({ page, browser }, testInfo) => {
         const errors = await open(page);
         const rssBaseline = await rendererRssMB(browser);
         let rssPeak = rssBaseline;
@@ -283,8 +308,14 @@ test.describe('3. single-engine layouts', () => {
           + (s ? `live cpu ${(s.cpuFractionOfQuantum * 100).toFixed(2)}% rendered ${(s.renderedFraction * 100).toFixed(1)}% overruns ${s.overBudgetBlocks} lag>50ms ${s.lagExceedances} underruns ${s.playbackStats && s.playbackStats.underrunEvents} healthy ${s.healthy}` : 'live NOT RUN (init failed)'));
         expect(errors).toEqual([]);
         if (design === 'per-node') {
-          // Characterisation of the original layout: init succeeds below the ~125 memory budget only.
+          // Regression guard: large per-node setups must still expose the confirmed
+          // bounded-allocation failure rather than silently misreporting success.
           expect(r.init.ok).toBe(count < 120);
+          if (count >= 128) {
+            expect(r.init.failure.stage).toBe('wasm-init');
+            expect(r.init.unitsReady).toBeGreaterThanOrEqual(100);
+            expect(r.init.unitsReady).toBeLessThan(140);
+          }
         } else {
           // [must] for the engine layouts: initialization succeeds at every tested count with ONE memory.
           expect(r.init.ok).toBe(true);

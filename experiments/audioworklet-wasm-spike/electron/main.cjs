@@ -136,6 +136,27 @@ app.whenReady().then(async () => {
   } catch (err) {
     report.error = `${err && err.name}: ${err && err.message}`;
   }
+
+  // Follow-up regression suite: exercise the shared engine (including a 16-unit
+  // bank node) and the prototype long-lived offline Worker in both unpackaged and
+  // asar-packaged Electron. Run only under the test policy that explicitly allows
+  // WASM; never change the production policy to make the prototype pass.
+  if (cspMode === 'production-wasm' && report.harness) {
+    try {
+      report.followup = await win.webContents.executeJavaScript(`
+        import(new URL('./investigation.mjs', location.href).href).then(async m => {
+          const out = {};
+          try { out.engineParity = await m.engineParity(); }
+          catch (err) { out.engineParity = { pass: false, error: String(err && err.message ? err.message : err) }; }
+          try { out.offlineWorkerPrototype = await m.offlineWorkerPrototype({ renders: 200, frames: 4800 }); }
+          catch (err) { out.offlineWorkerPrototype = { pass: false, error: String(err && err.message ? err.message : err) }; }
+          return out;
+        })
+      `, true);
+    } catch (err) {
+      report.followup = { error: `${err && err.name}: ${err && err.message}` };
+    }
+  }
   clearTimeout(watchdog);
   // The runner decides pass/fail per mode; see run-electron.mjs.
   finish(report.harness ? 0 : 2);

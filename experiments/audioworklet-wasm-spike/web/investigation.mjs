@@ -26,6 +26,8 @@ const PARAMS = { gain: TV.gain, coefficients: TV.coefficients };
 const PER_NODE_URL = new URL('./gain-filter-processor.js', import.meta.url);
 const ENGINE_URL = new URL('./engine-processor.js', import.meta.url);
 const sleep = ms => new Promise(r => setTimeout(r, ms));
+const check = (name, pass, detail) => ({ name, pass: !!pass, detail });
+const result = (name, kind, checks, data = {}) => ({ name, kind, pass: checks.length > 0 && checks.every(c => c.pass), checks, data });
 const GiB = 1024 ** 3;
 /** V8 reservation per wasm32 memory with guard regions (kFullGuardSize32, src/objects/backing-store.cc). */
 const RESERVATION_PER_MEMORY = 8 * GiB;
@@ -138,21 +140,43 @@ export async function engineParity() {
   const finals = [];
   for (const h of handles) finals.push(await h.dispose());
 
-  // Bank processor with a single unit must also reproduce the golden output.
+  // Exercise a 16-slot bank; averaging identical units introduces Float32 summation rounding.
   const ctx2 = new OfflineAudioContext(2, TV.frames, TV.sampleRate);
   const buf2 = ctx2.createBuffer(2, TV.frames, TV.sampleRate);
   input.forEach((ch, i) => buf2.copyToChannel(ch, i));
   const src2 = ctx2.createBufferSource();
   src2.buffer = buf2;
+  const bankUnits = 16;
   const bank = await createGainFilter(ctx2, {
-    workletUrl: ENGINE_URL, wasmBytes: engineBytes(), params: PARAMS, processorName: 'apex-spike-engine-bank', processorOptions: { units: 1 },
+    workletUrl: ENGINE_URL, wasmBytes: engineBytes(), params: PARAMS, processorName: 'apex-spike-engine-bank', processorOptions: { units: bankUnits },
   });
   if (!bank.ok) return { pass: false, error: bank };
+  const bankInfo = await bank.engineInfo();
   src2.connect(bank.node).connect(ctx2.destination);
   src2.start(0);
   const r2 = await ctx2.startRendering();
-  const bankSha = await sha256OfChannels([new Float32Array(r2.getChannelData(0)), new Float32Array(r2.getChannelData(1))]);
-  await bank.dispose();
+  const bankOut = [new Float32Array(r2.getChannelData(0)), new Float32Array(r2.getChannelData(1))];
+  const bankReference = input.map(ch => referenceProcess(ch, PARAMS.gain, PARAMS.coefficients));
+  const bankComparison = bankOut.map((ch, i) => compareBuffers(ch, bankReference[i]));
+  const bankMaxAbsDiff = Math.max(...bankComparison.map(c => c.maxAbsDiff));
+  const bankFinal = await bank.dispose();
+
+  // Preserve the bit-exact one-unit bank check separately; 16-way summation uses
+  // Float32 accumulation and is therefore compared with the documented tolerance.
+  const ctx3 = new OfflineAudioContext(2, TV.frames, TV.sampleRate);
+  const buf3 = ctx3.createBuffer(2, TV.frames, TV.sampleRate);
+  input.forEach((ch, i) => buf3.copyToChannel(ch, i));
+  const src3 = ctx3.createBufferSource();
+  src3.buffer = buf3;
+  const bankOne = await createGainFilter(ctx3, {
+    workletUrl: ENGINE_URL, wasmBytes: engineBytes(), params: PARAMS, processorName: 'apex-spike-engine-bank', processorOptions: { units: 1 },
+  });
+  if (!bankOne.ok) return { pass: false, error: bankOne };
+  src3.connect(bankOne.node).connect(ctx3.destination);
+  src3.start(0);
+  const r3 = await ctx3.startRendering();
+  const bankOneSha = await sha256OfChannels([new Float32Array(r3.getChannelData(0)), new Float32Array(r3.getChannelData(1))]);
+  await bankOne.dispose();
 
   const checks = {
     sharedEngine: info.engineInstancesInScope === 1 && info.liveSlots === 3,
@@ -161,9 +185,12 @@ export async function engineParity() {
     unit1MatchesItsOwnReference: units[1].maxAbsDiff === 0,
     unit2Golden: units[2].sha256 === REFERENCE_SHA256 && units[2].maxAbsDiff === 0,
     slotsReleasedOnDispose: finals[2].afterRelease && finals[2].afterRelease.liveSlots === 0,
-    bankGolden: bankSha === REFERENCE_SHA256,
+    bankSixteenUnitsShareOneEngine: bank.ready.units === bankUnits && bankInfo.engineInstancesInScope === 1 && bankInfo.liveSlots === bankUnits,
+    bankSixteenUnitsWithinTolerance: bankMaxAbsDiff <= TV.tolerance && bankComparison.every(c => c.nonFinite === 0),
+    bankOneUnitGolden: bankOneSha === REFERENCE_SHA256,
+    bankSlotsReleasedOnDispose: bankFinal.afterRelease && bankFinal.afterRelease.liveSlots === 0,
   };
-  return { pass: Object.values(checks).every(Boolean), checks, engineInfo: info, units, bankSha, golden: REFERENCE_SHA256 };
+  return { pass: Object.values(checks).every(Boolean), checks, engineInfo: info, units, bankInfo, bankComparison, bankMaxAbsDiff, bankUnits, bankOneSha, golden: REFERENCE_SHA256 };
 }
 
 // ---------------------------------------------------------------------------
@@ -280,6 +307,94 @@ export async function offlineRenders({ design, renders = 40, units = 16, frames 
 }
 
 // ---------------------------------------------------------------------------
+// Prototype-only offline path: reuse one engine instance in a long-lived Worker.
+// This processes PCM jobs, not a complete OfflineAudioContext/export graph.
+
+export async function offlineWorkerPrototype({ renders = 200, frames = 4800 } = {}) {
+  let worker;
+  let nextId = 0;
+  let completed = 0;
+  let exactJobs = 0;
+  let maxAbsDiff = 0;
+  let firstInfo = null;
+  let lastInfo = null;
+  let failure = null;
+  const params = [
+    PARAMS,
+    { gain: 0.53, coefficients: biquadLowpass(2300, 0.82, TV.sampleRate) },
+  ];
+  const input = generateTestSignal(frames, TV.channels);
+  const references = params.map(p => input.map(ch => referenceProcess(ch, p.gain, p.coefficients)));
+  const checks = [];
+
+  const request = (payload, transfer = []) => new Promise((resolve, reject) => {
+    if (!worker) { reject(new Error('worker is not available')); return; }
+    const id = ++nextId;
+    const finish = (fn, value) => {
+      clearTimeout(timer);
+      worker.removeEventListener('message', onMessage);
+      worker.removeEventListener('error', onError);
+      fn(value);
+    };
+    const onMessage = event => {
+      if (!event.data || event.data.id !== id) return;
+      if (event.data.type === 'error') finish(reject, new Error(`${event.data.name}: ${event.data.message}`));
+      else finish(resolve, event.data);
+    };
+    const onError = event => finish(reject, new Error(event.message || 'offline Worker failed'));
+    const timer = setTimeout(() => finish(reject, new Error(`offline Worker timed out on ${payload.type}`)), 15000);
+    worker.addEventListener('message', onMessage);
+    worker.addEventListener('error', onError);
+    try { worker.postMessage({ ...payload, id }, transfer); }
+    catch (error) { finish(reject, error); }
+  });
+
+  try {
+    worker = new Worker(new URL('./offline-engine-worker.js', import.meta.url), { type: 'module' });
+    const bytes = engineBytes();
+    const ready = await request({ type: 'init', wasmBytes: bytes }, [bytes.buffer]);
+    firstInfo = ready.info;
+    for (let i = 0; i < renders; i++) {
+      const p = params[i % params.length];
+      const channels = input.map(ch => new Float32Array(ch));
+      const response = await request({ type: 'render', channels, params: p }, channels.map(ch => ch.buffer));
+      completed++;
+      lastInfo = response.info;
+      const expected = references[i % references.length];
+      const diffs = response.channels.map((ch, index) => compareBuffers(ch, expected[index]));
+      const jobMax = Math.max(...diffs.map(d => d.maxAbsDiff));
+      maxAbsDiff = Math.max(maxAbsDiff, jobMax);
+      if (diffs.every(d => d.maxAbsDiff === 0 && d.nonFinite === 0)) exactJobs++;
+    }
+    const stats = await request({ type: 'stats' });
+    lastInfo = stats.info;
+    checks.push(check('module Worker initializes one shared engine', ready.type === 'ready' && firstInfo.engineInstances === 1, firstInfo));
+    checks.push(check('all serial render jobs match their independent JS references bit-exactly', completed === renders && exactJobs === renders && maxAbsDiff === 0, { completed, renders, exactJobs, maxAbsDiff }));
+    checks.push(check('one fixed WASM memory is reused for the whole batch', firstInfo.memoryBytes === 131072 && lastInfo.memoryBytes === firstInfo.memoryBytes && lastInfo.memoryBytesAtStart === firstInfo.memoryBytes, { first: firstInfo.memoryBytes, last: lastInfo.memoryBytes, memoryBytesAtStart: lastInfo.memoryBytesAtStart }));
+    checks.push(check('worker reports exactly one engine and one completed job per request', lastInfo.engineInstances === 1 && lastInfo.renderJobs === renders, { engineInstances: lastInfo.engineInstances, renderJobs: lastInfo.renderJobs, expected: renders }));
+  } catch (error) {
+    failure = `${error && error.name ? error.name : 'Error'}: ${error && error.message ? error.message : error}`;
+    checks.push(check('offline Worker prototype completed without error', false, failure));
+  } finally {
+    if (worker) worker.terminate();
+  }
+
+  return result('offline-worker-prototype', 'offline-prototype', checks, {
+    rendersRequested: renders,
+    rendersCompleted: completed,
+    exactJobs,
+    maxAbsDiff,
+    framesPerJob: frames,
+    firstInfo,
+    finalInfo: lastInfo,
+    offlineAudioContextsCreated: 0,
+    workerTerminatedAfterBatch: !!worker,
+    failure,
+    scope: 'prototype kernel processing only; no full offline audio graph/export integration',
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Worklet-lifecycle reclamation scenarios (per-node layout, 100 instances)
 
 export async function reclaimScenario({ scenario, count = 100 } = {}) {
@@ -336,4 +451,4 @@ export async function cspMatrix() {
   document.removeEventListener('securitypolicyviolation', onViolation);
   return { evalBlocked, newFunctionBlocked, mainThread, workletPerNode, workletEngine, worker, violations };
 }
-globalThis.apexInvestigation = { createUnits, engineParity, designCompare, churn, offlineRenders, reclaimScenario, cspMatrix };
+globalThis.apexInvestigation = { createUnits, engineParity, designCompare, churn, offlineRenders, offlineWorkerPrototype, reclaimScenario, cspMatrix };
