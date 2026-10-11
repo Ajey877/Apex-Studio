@@ -30,6 +30,10 @@ should not be described as if they were.
 
 ### 1. Legacy modal bodies — 1,569 hardcoded literals across 25 components
 
+> **UI-03B status:** `MasteringSuiteModal.tsx` (the largest offender below) has since been
+> migrated to the semantic token system, canvas included — see
+> `UI03B_MASTERING_SUITE_THEME_REPORT.md`. The remaining 24 bodies are unchanged.
+
 Each of these files paints its own body with literals (`bg-[#18181b]`, `bg-[#141416]`,
 `border-[#2a2a2d]`, `text-[#888]`, …). The compatibility layer in `index.css` only remaps the
 subset of names it knows about, and several of the literals in use are not in that subset at
