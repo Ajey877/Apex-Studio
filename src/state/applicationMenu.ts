@@ -49,6 +49,8 @@ export type ApplicationMenuCommandId =
   | 'view.inspector'
   | 'view.densityCompact'
   | 'view.densityComfy'
+  // UI-03A: Settings owns the appearance (Light/Dark) preference.
+  | 'view.settings'
   | 'view.fullscreen'
   // Project — existing Hub, the currently unreachable statistics modal, and the
   // always-visible tempo field.
@@ -127,6 +129,7 @@ export const APPLICATION_MENU_COMMANDS: Readonly<Record<ApplicationMenuCommandId
   'view.inspector': { label: 'Inspector' },
   'view.densityCompact': { label: 'Compact', accelerator: '' },
   'view.densityComfy': { label: 'Comfortable', accelerator: '' },
+  'view.settings': { label: 'Settings…' },
   'view.fullscreen': { label: 'Fullscreen' },
 
   'project.hub': { label: 'Project Hub…' },
@@ -202,6 +205,8 @@ export const APPLICATION_MENUS: readonly ApplicationMenu[] = [
       separator,
       command('view.densityCompact', APPLICATION_MENU_COMMANDS['view.densityCompact']),
       command('view.densityComfy', APPLICATION_MENU_COMMANDS['view.densityComfy']),
+      separator,
+      command('view.settings', APPLICATION_MENU_COMMANDS['view.settings']),
       separator,
       command('view.fullscreen', APPLICATION_MENU_COMMANDS['view.fullscreen']),
     ],

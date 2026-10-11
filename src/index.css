@@ -1,8 +1,13 @@
 @import "tailwindcss";
 
 /* Apex Studio Phase 0: Midnight Aurora design system. */
+/* Native chrome (scrollbars, form controls, the default canvas) follows the
+   active theme, not the file. The scoped rules further down are the real
+   authority; this fallback is reached only before the pre-paint script has set
+   `data-theme`, so it can never disagree with a live Light selection. */
+:root:not([data-theme]) { color-scheme: dark; }
+
 :root {
-  color-scheme: dark;
   --apex-bg: #11131a;
   --apex-surface: #191c25;
   --apex-surface-2: #202430;
@@ -10,7 +15,10 @@
   --apex-border: #2b3040;
   --apex-text: #f4f5f8;
   --apex-text-2: #aeb5c4;
-  --apex-text-3: #737c8f;
+  /* UI-03A: the muted step must stay AA-legible on the *lightest* dark surface
+     it lands on (--apex-surface-3), not only on the page background. The old
+     #737c8f measured 3.37:1 there; #8b95a8 measures 4.69:1. */
+  --apex-text-3: #8b95a8;
   --apex-accent: #9b8afb;
   --apex-accent-strong: #b2a5ff;
   --apex-cyan: #67d9ff;
@@ -44,21 +52,34 @@
 /* Map the old black/orange utility palette into the new visual identity.
    UI 1C: this layer now exists for the parts of the app that have not been
    converted yet. The shell (transport, view ribbon, tool overflow) no longer
-   depends on it and uses the tokens below instead. */
+   depends on it and uses the tokens below instead.
+
+   UI-03A: every rule in this layer must resolve through a semantic token.
+   A literal here is dark-only by construction: the `!important` on these
+   selectors outranks the utility class it replaces, so a hardcoded value would
+   stay dark even after the theme flips, which is exactly how modal chrome, panel
+   overlays and muted labels became unreadable in Light. Several legacy names were
+   missing from this layer altogether and now resolve through the same surface
+   scale instead of falling through to their literal. */
 .bg-\[\#0a0a0b\] { background-color: var(--apex-bg) !important; }
-.bg-\[\#121214\] { background-color: #151821 !important; }
+.bg-\[\#121214\] { background-color: var(--apex-canvas) !important; }
 .bg-\[\#141416\], .bg-\[\#1a1a1d\] { background-color: var(--apex-surface) !important; }
-.bg-\[\#1e1e20\] { background-color: #161a23 !important; }
-.bg-\[\#18181c\] { background-color: #1c202b !important; }
+.bg-\[\#1e1e20\] { background-color: var(--apex-panel-header) !important; }
+.bg-\[\#18181c\] { background-color: var(--apex-panel-header) !important; }
 .bg-\[\#222225\], .bg-\[\#252525\] { background-color: var(--apex-surface-2) !important; }
 .bg-\[\#2d2d30\] { background-color: var(--apex-surface-3) !important; }
+.bg-\[\#1c1c20\] { background-color: var(--apex-surface) !important; }
+.bg-\[\#202024\] { background-color: var(--apex-surface-2) !important; }
+.bg-\[\#242428\], .bg-\[\#2a2a2e\] { background-color: var(--apex-surface-3) !important; }
 
 .border-\[\#222225\], .border-\[\#26262a\], .border-\[\#28282e\], .border-\[\#2e2e34\], .border-\[\#333336\] {
   border-color: var(--apex-border) !important;
 }
+.border-\[\#2a2a2e\], .border-\[\#282830\], .border-\[\#333\] { border-color: var(--apex-border) !important; }
 .text-\[\#b0b0b0\] { color: var(--apex-text-2) !important; }
 .text-\[\#777\] { color: var(--apex-text-3) !important; }
-.text-\[\#888\] { color: #858da0 !important; }
+.text-\[\#888\] { color: var(--apex-text-2) !important; }
+.text-\[\#666\], .text-\[\#555\], .text-\[\#444\] { color: var(--apex-text-3) !important; }
 .bg-\[\#ff6e00\] { background-color: var(--apex-accent) !important; }
 .text-\[\#ff6e00\] { color: var(--apex-accent) !important; }
 .border-\[\#ff6e00\] { border-color: var(--apex-accent) !important; }
@@ -67,6 +88,14 @@
 [class*="border-[#ff6e00]/"] { border-color: color-mix(in srgb, var(--apex-accent) 48%, transparent) !important; }
 [class*="hover:bg-[#ff7d1a]"]:hover { background-color: var(--apex-accent-strong) !important; }
 [class*="hover:border-[#ff6e00]"]:hover { border-color: var(--apex-accent-strong) !important; }
+/* Selected/active surfaces in the not-yet-migrated modals paint their label with
+   near-black for the legacy mid-tone orange. Midnight Aurora's accent is much
+   lighter, so the same literal measured 3.9:1 against it in Dark (light-theme
+   accent gives 7.4:1). The label follows the theme's on-accent colour instead. */
+.bg-\[\#ff6e00\] .text-black,
+.bg-\[\#ff6e00\] .text-\[\#000\],
+.bg-\[\#ff6e00\].text-black,
+.bg-\[\#ff6e00\].text-\[\#000\] { color: var(--apex-state-playing-fg) !important; }
 .text-\[\#00bcd4\], .text-\[\#00e5ff\] { color: var(--apex-cyan) !important; }
 .bg-\[\#ff0000\] { background-color: var(--apex-danger) !important; }
 .text-\[\#00ff00\], .text-\[\#00ff88\] { color: var(--apex-success) !important; }
@@ -85,9 +114,20 @@
 }
 button { min-height: 30px; }
 button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible {
-  outline: 2px solid color-mix(in srgb, var(--apex-accent) 75%, transparent);
+  /* UI-03A: a keyboard-focus ring has to be visible on every surface in every
+     theme. `--apex-state-focus` is opaque in both palettes (5.2:1 against the
+     light canvas, 7.0:1 against the dark panel), so the previous 75%-alpha
+     violet wash is gone. */
+  outline: 2px solid var(--apex-state-focus);
   outline-offset: 2px;
 }
+
+/* UI-03A — native form controls carry the theme accent instead of the runtime
+   default (a saturated blue that belongs to neither palette). Range inputs and
+   checkboxes are what the application actually uses, and several not-yet-migrated
+   modals still hand-pick a per-control `accent-[#…]` literal on top of this, so
+   the declaration stays deliberately low-specificity. */
+input[type="range"], input[type="checkbox"], progress { accent-color: var(--apex-accent); }
 
 .custom-scrollbar::-webkit-scrollbar { width: 7px; height: 7px; }
 .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
@@ -280,8 +320,8 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   --apex-type-label: 11px;
   --apex-type-body: 12px;
   --apex-type-emphasis: 13px;
-  /* AA-safe secondary text for chrome (5.9:1 on the transport surface). */
-  --apex-text-muted: #8b95a8;
+  /* AA-safe secondary text for chrome (5.6:1 on the lightest panel surface). */
+  --apex-text-muted: #9aa4b6;
 
   /* Compact control radius, distinct from the modal radius scale. */
   --apex-radius-control: 6px;
@@ -295,7 +335,9 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   --apex-border: #c9d0dc;
   --apex-text: #18202d;
   --apex-text-2: #465267;
-  --apex-text-3: #68758a;
+  /* UI-03A: --apex-text-3 must clear AA on the darkest light surface
+     (--apex-chrome-inset, #e3e8f0) where the status bar and readouts sit. */
+  --apex-text-3: #5b6879;
   --apex-accent: #6552ce;
   --apex-accent-strong: #5140b8;
   --apex-cyan: #087da8;
@@ -1170,8 +1212,15 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
    tokens above: no new palette, no gradients, no neon, no specificity escapes.
    =========================================================================== */
 :root {
-  /* A neutral dark scrim remains legible and consistent over both theme palettes. */
+  /* Dark scrim for the dark palette. Light overrides this below: a near-black
+     wash over a light canvas reads as a hard blackout rather than a dim, so each
+     theme gets the scrim that keeps the dialog panel clearly separated. */
   --apex-modal-overlay: rgba(5, 7, 12, 0.66);
+}
+
+:root[data-theme="light"] {
+  /* 4.1:1 between the white dialog panel and the dimmed canvas behind it. */
+  --apex-modal-overlay: rgba(24, 32, 45, 0.55);
 }
 
 /* Modal overlay primitive: owns the scrim for every Step 4 dialog. */

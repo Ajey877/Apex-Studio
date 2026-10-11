@@ -241,7 +241,11 @@ const MODAL_CASES: ModalCase[] = [
   {
     name: 'Appearance Settings', file: 'AppearanceSettingsModal.tsx', modalId: 'appearance-settings-modal',
     titleId: 'appearance-settings-modal-title', titleText: 'Settings',
-    closeLabel: 'Close Settings', overlayClass: 'fixed inset-0 z-[70] flex items-center justify-center bg-black/60 p-4',
+    // UI-03A: the dialog keeps its own layout and stacking classes, but the scrim
+    // itself now comes from the shared `--apex-modal-overlay` token (via
+    // `.apex-modal-overlay`) instead of a per-dialog `bg-black/60`, so it can dim
+    // correctly in the light palette.
+    closeLabel: 'Close Settings', overlayClass: 'fixed inset-0 z-[70] flex items-center justify-center p-4',
     open: React.createElement(AppearanceSettingsModal, { isOpen: true, mode: 'dark', onChange: noop, onClose: noop }),
     closed: React.createElement(AppearanceSettingsModal, { isOpen: false, mode: 'dark', onChange: noop, onClose: noop }),
   },

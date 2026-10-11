@@ -156,7 +156,7 @@ export const ApplicationMenuBarView: React.FC<ApplicationMenuBarViewProps> = ({
       role="menubar"
       aria-label="Application"
       aria-orientation="horizontal"
-      className="relative z-40 h-[30px] shrink-0 select-none bg-[#0a0a0b] border-b border-[#333336] flex items-stretch px-1 text-[11px] text-[#b0b0b0]"
+      className="relative z-40 h-[30px] shrink-0 select-none bg-[var(--apex-chrome-menu)] border-b border-[var(--apex-border)] flex items-stretch px-1 text-[11px] text-[var(--apex-text-2)]"
     >
       {APPLICATION_MENUS.map((menu, index) => {
         const isOpen = openMenu === menu.id;
@@ -177,8 +177,8 @@ export const ApplicationMenuBarView: React.FC<ApplicationMenuBarViewProps> = ({
               onKeyDown={event => handleTriggerKeyDown(event, menu.id)}
               className={`px-2.5 h-full inline-flex items-center transition-colors cursor-pointer ${
                 isOpen
-                  ? 'bg-[#2d2d30] text-white'
-                  : 'hover:bg-[#1a1a1d] hover:text-white focus-visible:bg-[#1a1a1d] focus-visible:text-white'
+                  ? 'bg-[var(--apex-state-selected)] text-[var(--apex-text)]'
+                  : 'hover:bg-[var(--apex-state-hover)] hover:text-[var(--apex-text)] focus-visible:bg-[var(--apex-state-hover)] focus-visible:text-[var(--apex-text)]'
               }`}
             >
               {menu.label}
@@ -189,7 +189,7 @@ export const ApplicationMenuBarView: React.FC<ApplicationMenuBarViewProps> = ({
                 id={getApplicationMenuDropdownId(menu.id)}
                 role="menu"
                 aria-labelledby={getApplicationMenuTriggerId(menu.id)}
-                className="absolute left-0 top-full z-50 min-w-[19rem] py-1 bg-[#1a1a1d] border border-[#333336] rounded-b-md shadow-2xl"
+                className="absolute left-0 top-full z-50 min-w-[19rem] py-1 bg-[var(--apex-surface)] border border-[var(--apex-border)] rounded-b-md shadow-2xl"
               >
                 {menu.items.map((row, rowIndex) => {
                   if (row.kind === 'separator') {
@@ -197,7 +197,7 @@ export const ApplicationMenuBarView: React.FC<ApplicationMenuBarViewProps> = ({
                       <div
                         key={`separator-${rowIndex}`}
                         role="separator"
-                        className="my-1 h-px bg-[#333336]"
+                        className="my-1 h-px bg-[var(--apex-border)]"
                       />
                     );
                   }
@@ -225,16 +225,16 @@ export const ApplicationMenuBarView: React.FC<ApplicationMenuBarViewProps> = ({
                       onKeyDown={event => handleRowKeyDown(event, menu, id)}
                       className={`w-full px-3 py-1 flex items-center gap-3 text-left transition-colors ${
                         enabled
-                          ? 'text-[#b0b0b0] hover:bg-[#2d2d30] hover:text-white cursor-pointer'
-                          : 'text-[#555] cursor-default'
+                          ? 'text-[var(--apex-text-2)] hover:bg-[var(--apex-state-hover)] hover:text-[var(--apex-text)] cursor-pointer'
+                          : 'text-[var(--apex-state-disabled)] cursor-default'
                       }`}
                     >
-                      <span className="w-3 shrink-0 text-[#ff6e00] text-[10px]">
+                      <span className="w-3 shrink-0 text-[var(--apex-accent)] text-[10px]">
                         {isCheckable && checked ? '✓' : ''}
                       </span>
                       <span className="flex-1 truncate">{label}</span>
                       {accelerator && (
-                        <kbd className="shrink-0 font-mono text-[9px] text-[#777] border border-[#333336] rounded px-1 py-px">
+                        <kbd className="shrink-0 font-mono text-[9px] text-[var(--apex-text-3)] border border-[var(--apex-border)] rounded px-1 py-px">
                           {accelerator}
                         </kbd>
                       )}

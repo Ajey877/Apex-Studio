@@ -86,8 +86,18 @@ test('workspace theme selection applies before paint and persists outside projec
   assert.ok(bootstrapIndex >= 0, 'the pre-React bootstrap restores the theme preference');
   assert.ok(bootstrapIndex < html.indexOf('<div id="root"></div>'), 'the bootstrap runs before the React root');
   assert.match(html, /document\.documentElement\.dataset\.theme=localStorage\.getItem\('apex:theme'\)==='light'\?'light':'dark'/);
-  assert.match(app, /useLayoutEffect\(\(\) => \{\s*document\.documentElement\.dataset\.theme = themeMode;/);
-  assert.match(app, /writeThemePreference\(themeMode\)/);
+  // UI-03A: the root palette and the stored preference are committed together,
+  // pre-paint. The guarantee pinned here is unchanged — the theme reaches
+  // <html data-theme> in a layout effect (never a passive one) and the preference
+  // is written on every change — but it now travels through one seam so the App,
+  // the pre-paint bootstrap and the tests cannot drift apart.
+  assert.match(app, /useLayoutEffect\(\(\) => \{\s*commitThemeSelection\(themeMode\);/);
+  assert.match(themeState, /export const commitThemeSelection = \(/);
+  assert.match(
+    themeState,
+    /const applied = applyThemeToDocument\(mode, doc\);\s*writeThemePreference\(applied\);/,
+    'the commit applies the palette before it persists the preference'
+  );
   assert.match(themeState, /window\.localStorage\.getItem\(THEME_STORAGE_KEY\)/);
   assert.match(themeState, /window\.localStorage\.setItem\(THEME_STORAGE_KEY, mode\)/);
   assert.doesNotMatch(themeState, /audioEngine|ProjectState|serializeProject/i);
