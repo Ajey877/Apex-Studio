@@ -140,7 +140,11 @@ test('UI-04 keeps track, pad, waveform and VU colors intentional', () => {
 
   assert.match(drumSampler, /const PAD_COLORS = \[/);
   assert.match(channelRack, /style=\{\{ color: ch\.color \|\| 'var\(--apex-text\)' \}\}/);
-  assert.match(mixer, /linear-gradient\(to top, #00ff00 60%, #ff6e00 85%, #ff0000 100%\)/);
+  // UI-03C: the VU gradient moved into the Mixer palette seam. Dark must still
+  // produce the exact shipped gradient, and the Mixer must draw through the seam.
+  const mixerTheme = read('src/components/mixerTheme.ts');
+  assert.match(mixerTheme, /levelLow: '#00ff00',\n\s*levelMid: '#ff6e00',\n\s*levelHigh: '#ff0000'/);
+  assert.match(mixer, /background: palette\.meterGradient/);
   assert.match(playlist, /color: '#00ff88'/, 'dropped audio clips keep their intentional waveform identity');
   assert.match(slicer, /bg-\[var\(--apex-state-selected\)\]/, 'sample-slicer waveforms retain the light accent wash');
   assert.match(sampleManager, /isInsideTrim \? 'bg-\[var\(--apex-accent\)\]'/, 'trimmed sample waveform bars retain the accent color');

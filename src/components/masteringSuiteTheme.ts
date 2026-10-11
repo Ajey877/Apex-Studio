@@ -121,81 +121,11 @@ export interface MasteringSuitePalette {
   readonly correlationOutOfPhase: string;
 }
 
-/**
- * Structural document view: just what the seam needs. The real `document`
- * satisfies it, and tests supply fakes without a DOM library.
- */
-export interface MasteringSuiteThemeDocument {
-  readonly documentElement?:
-    | { dataset?: Record<string, string | undefined> | null; appendChild?: (node: unknown) => unknown }
-    | null
-    | undefined;
-  readonly defaultView?:
-    | {
-        getComputedStyle?:
-          | ((element: unknown) => {
-              getPropertyValue?: (name: string) => unknown;
-              backgroundColor?: string;
-            } | null)
-          | undefined;
-      }
-    | null
-    | undefined;
-  readonly createElement?: ((tag: string) => ThemeProbeElement) | undefined;
-}
+import { readCanvasToken, type CanvasThemeDocument, type ThemeProbeElement } from './canvasThemeTokens';
 
-/** The hidden probe element used to resolve token references to real colours. */
-export interface ThemeProbeElement {
-  style: { display?: string; backgroundColor?: string };
-  remove?: () => void;
-}
-
-const readRawToken = (doc: MasteringSuiteThemeDocument | null, token: string): string => {
-  try {
-    const root = doc?.documentElement;
-    const compute = doc?.defaultView?.getComputedStyle;
-    if (!root || typeof compute !== 'function') return '';
-    const value = compute(root)?.getPropertyValue?.(token);
-    return typeof value === 'string' ? value.trim() : '';
-  } catch {
-    return '';
-  }
-};
-
-/**
- * Resolves a semantic token to a concrete colour the canvas can paint with.
- *
- * Custom properties are returned *as declared*: a token built from
- * `color-mix(... var(--apex-...) ...)` keeps its `var()` references, and a
- * canvas context cannot resolve those — assigning such a string to
- * `fillStyle` is silently ignored. Dark's `--apex-chrome-inset` is exactly
- * such a token. When the declared value still carries references, the token
- * is painted onto a hidden probe element and read back through a normal
- * (fully resolved) computed property. Plain hex/rgb tokens take the fast
- * path and never touch the DOM.
- */
-const readToken = (
-  doc: MasteringSuiteThemeDocument | null,
-  token: string,
-  fallback: string
-): string => {
-  const raw = readRawToken(doc, token);
-  if (raw.length === 0) return fallback;
-  if (!raw.includes('var(') && !raw.includes('color-mix(')) return raw;
-  try {
-    if (!doc || typeof doc.createElement !== 'function') return fallback;
-    const probe = doc.createElement('div');
-    probe.style.display = 'none';
-    probe.style.backgroundColor = `var(${token})`;
-    doc.documentElement?.appendChild?.(probe);
-    const resolved = doc.defaultView?.getComputedStyle?.(probe)?.backgroundColor ?? '';
-    if (typeof probe.remove === 'function') probe.remove();
-    const text = typeof resolved === 'string' ? resolved.trim() : '';
-    return text.length > 0 ? text : fallback;
-  } catch {
-    return fallback;
-  }
-};
+/** Structural document view kept under its UI-03B name for existing callers. */
+export type MasteringSuiteThemeDocument = CanvasThemeDocument;
+export type { ThemeProbeElement };
 
 const buildPalette = (
   doc: MasteringSuiteThemeDocument | null,
@@ -204,11 +134,11 @@ const buildPalette = (
   const signal = MASTERING_SIGNAL_COLORS[mode];
   return {
     mode,
-    scopeBackground: readToken(doc, MASTERING_CANVAS_CHROME_TOKENS.scopeBackground, CHROME_FALLBACKS.scopeBackground),
-    gridLine: readToken(doc, MASTERING_CANVAS_CHROME_TOKENS.gridLine, CHROME_FALLBACKS.gridLine),
-    gridLineStrong: readToken(doc, MASTERING_CANVAS_CHROME_TOKENS.gridLineStrong, CHROME_FALLBACKS.gridLineStrong),
-    axisLabel: readToken(doc, MASTERING_CANVAS_CHROME_TOKENS.axisLabel, CHROME_FALLBACKS.axisLabel),
-    idleSignal: readToken(doc, MASTERING_CANVAS_CHROME_TOKENS.idleSignal, CHROME_FALLBACKS.idleSignal),
+    scopeBackground: readCanvasToken(doc, MASTERING_CANVAS_CHROME_TOKENS.scopeBackground, CHROME_FALLBACKS.scopeBackground),
+    gridLine: readCanvasToken(doc, MASTERING_CANVAS_CHROME_TOKENS.gridLine, CHROME_FALLBACKS.gridLine),
+    gridLineStrong: readCanvasToken(doc, MASTERING_CANVAS_CHROME_TOKENS.gridLineStrong, CHROME_FALLBACKS.gridLineStrong),
+    axisLabel: readCanvasToken(doc, MASTERING_CANVAS_CHROME_TOKENS.axisLabel, CHROME_FALLBACKS.axisLabel),
+    idleSignal: readCanvasToken(doc, MASTERING_CANVAS_CHROME_TOKENS.idleSignal, CHROME_FALLBACKS.idleSignal),
     bands: MASTERING_BAND_ACCENTS[mode],
     spectrumStops: signal.spectrumStops,
     correlationCoherent: signal.correlationCoherent,

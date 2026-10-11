@@ -70,7 +70,7 @@ const ParamSlider: React.FC<{
 }> = ({ label, value, min, max, step, unit, onChange, onInteractionStart, onInteractionEnd, dragLabel }) => {
   const decimals = step >= 1 ? 0 : step >= 0.1 ? 1 : step >= 0.01 ? 2 : 3;
   return (
-    <div className="flex items-center justify-between text-[9px] text-[#777]">
+    <div className="flex items-center justify-between text-[9px] text-[var(--apex-text-3)]">
       <span className="uppercase tracking-wider">{label}</span>
       <input
         type="range"
@@ -82,9 +82,9 @@ const ParamSlider: React.FC<{
         onPointerDown={() => onInteractionStart?.(dragLabel ?? `Change ${label}`)}
         onPointerUp={() => onInteractionEnd?.(dragLabel ?? `Change ${label}`)}
         onBlur={() => onInteractionEnd?.(dragLabel ?? `Change ${label}`)}
-        className="w-20 h-1 accent-[#ff6e00] bg-[#121214] rounded"
+        className="w-20 h-1 accent-[var(--apex-accent)] bg-[var(--apex-chrome-inset)] rounded"
       />
-      <span className="font-mono text-[#ff6e00] w-12 text-right">
+      <span className="font-mono text-[var(--apex-accent)] w-12 text-right">
         {Number.isFinite(value) ? formatValue(value, { decimals, suffix: unit }) : '—'}
       </span>
     </div>
@@ -103,8 +103,8 @@ const EQParamRow: React.FC<{
   const gain = Number(slot.params[`${band}Gain`]) || 0;
   const q = Number(slot.params[`${band}Q`]) || 1;
   return (
-    <div className="bg-[#1a1a1d] rounded p-1.5 flex flex-col gap-1">
-      <div className="text-[9px] uppercase text-[#aaa] tracking-wider">{bandLabel}</div>
+    <div className="bg-[var(--apex-surface)] rounded p-1.5 flex flex-col gap-1">
+      <div className="text-[9px] uppercase text-[var(--apex-text-2)] tracking-wider">{bandLabel}</div>
       <ParamSlider
         label="Freq"
         value={freq}
@@ -160,9 +160,9 @@ export const FxParameterControls: React.FC<FxParameterControlsProps> = ({
   const params = family?.parameters ?? [];
 
   return (
-    <div className="flex flex-col gap-1.5 border-t border-[#2a2a2d] pt-1.5 mt-1.5">
+    <div className="flex flex-col gap-1.5 border-t border-[var(--apex-border)] pt-1.5 mt-1.5">
       {/* Wet/Dry Mix — always present, every slot has it. */}
-      <div className="flex items-center justify-between text-[9px] text-[#777]">
+      <div className="flex items-center justify-between text-[9px] text-[var(--apex-text-3)]">
         <span className="uppercase tracking-wider">Wet/Dry</span>
         <input
           type="range"
@@ -174,9 +174,9 @@ export const FxParameterControls: React.FC<FxParameterControlsProps> = ({
           onPointerDown={() => onInteractionStart?.('Change effect mix')}
           onPointerUp={() => onInteractionEnd?.('Change effect mix')}
           onBlur={() => onInteractionEnd?.('Change effect mix')}
-          className="w-20 h-1 accent-[#ff6e00] bg-[#121214] rounded"
+          className="w-20 h-1 accent-[var(--apex-accent)] bg-[var(--apex-chrome-inset)] rounded"
         />
-        <span className="font-mono text-[#ff6e00] w-12 text-right">{Math.round(slot.mix * 100)}%</span>
+        <span className="font-mono text-[var(--apex-accent)] w-12 text-right">{Math.round(slot.mix * 100)}%</span>
       </div>
 
       {slot.type === 'equalizer' && (
@@ -188,31 +188,31 @@ export const FxParameterControls: React.FC<FxParameterControlsProps> = ({
       )}
 
       {slot.type === 'compressor' && (
-        <div className="flex flex-col gap-1 bg-[#1a1a1d] rounded p-1.5">
+        <div className="flex flex-col gap-1 bg-[var(--apex-surface)] rounded p-1.5">
           <CompressorRows slot={slot} onChange={updateParam} />
         </div>
       )}
 
       {slot.type === 'delay' && (
-        <div className="flex flex-col gap-1 bg-[#1a1a1d] rounded p-1.5">
+        <div className="flex flex-col gap-1 bg-[var(--apex-surface)] rounded p-1.5">
           <DelayRows slot={slot} onChange={updateParam} />
         </div>
       )}
 
       {slot.type === 'limiter' && (
-        <div className="flex flex-col gap-1 bg-[#1a1a1d] rounded p-1.5">
+        <div className="flex flex-col gap-1 bg-[var(--apex-surface)] rounded p-1.5">
           <LimiterRows slot={slot} onChange={updateParam} />
         </div>
       )}
 
       {slot.type === 'reverb' && (
-        <div className="text-[9px] text-[#666] italic">
+        <div className="text-[9px] text-[var(--apex-text-3)] italic">
           Convolver reverb — only the wet/dry mix is editable in this phase.
         </div>
       )}
 
       {(slot.type === 'distortion' || slot.type === 'bitcrusher' || slot.type === 'tape_saturation' || slot.type === 'chorus') && (
-        <div className="text-[9px] text-[#666] italic">
+        <div className="text-[9px] text-[var(--apex-text-3)] italic">
           {`${slot.type.replace('_', ' ')}`} parameters are baked into the curve / LFO at chain construction; no live parameter editing in this phase.
         </div>
       )}
@@ -222,7 +222,7 @@ export const FxParameterControls: React.FC<FxParameterControlsProps> = ({
           rejects new families without contract entries, so this fallback
           is just defensive. */}
       {family === null && slot.type !== 'reverb' && (
-        <div className="text-[9px] text-[#a44] italic">
+        <div className="text-[9px] text-[var(--apex-danger)] italic">
           {`Slot type "${slot.type}" has no Phase 80 contract entry — wet/dry mix is the only editable parameter.`}
         </div>
       )}
