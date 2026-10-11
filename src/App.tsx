@@ -76,7 +76,7 @@ import {
 } from './state/playlistClipIntegrity';
 import { synchronizeBeforeRuntimePublication } from './state/runtimeStatePublication';
 import { resynchronizeLiveEngineFromProjectState } from './state/liveEngineResynchronization';
-import { readThemePreference, writeThemePreference, type ThemeMode } from './state/theme';
+import { commitThemeSelection, readThemePreference, type ThemeMode } from './state/theme';
 import {
   ContinuousHistoryBatcher,
   addCollabCommentInProjectState,
@@ -375,6 +375,11 @@ export function App() {
   const [isMasterMacrosOpen, setIsMasterMacrosOpen] = useState(false);
   const [isProjectZipOpen, setIsProjectZipOpen] = useState(false);
   const [isAppearanceSettingsOpen, setIsAppearanceSettingsOpen] = useState(false);
+  // UI-03A: `readThemePreference` is total — blocked storage, a null storage
+  // object and an unrecognised stored value all resolve to the default dark
+  // theme — so this initial state can never throw before the app renders. The
+  // pre-paint script in index.html has already written the same value to
+  // <html data-theme>, which is what keeps the first frame consistent with it.
   const [themeMode, setThemeMode] = useState<ThemeMode>(() => readThemePreference());
 
   // --- Collab State ---
@@ -392,10 +397,13 @@ export function App() {
 
   // UI-02: persist workspace layout preferences independently of project data
   useEffect(() => { writeWorkspaceLayoutPreference(WORKSPACE_LAYOUT_KEYS.density, density); }, [density]);
-  useEffect(() => { writeThemePreference(themeMode); }, [themeMode]);
-  // Apply the root palette before paint so a saved Light preference never flashes the dark defaults.
+  // UI-03A: one pre-paint commit for the theme. It writes the root palette and
+  // the stored preference together, before the browser paints, so a saved Light
+  // preference neither flashes the dark defaults nor waits for a passive effect.
+  // Storage failures are swallowed inside the commit; the in-memory mode and the
+  // document attribute stay authoritative for the session.
   useLayoutEffect(() => {
-    document.documentElement.dataset.theme = themeMode;
+    commitThemeSelection(themeMode);
   }, [themeMode]);
   useEffect(() => { writeWorkspaceLayoutPreference(WORKSPACE_LAYOUT_KEYS.browserWidth, String(browserExpandedWidth)); }, [browserExpandedWidth]);
   useEffect(() => { writeWorkspaceLayoutPreference(WORKSPACE_LAYOUT_KEYS.inspectorWidth, String(inspectorExpandedWidth)); }, [inspectorExpandedWidth]);
@@ -1718,6 +1726,10 @@ export function App() {
     openMidiDevices: () => setIsMidiModalOpen(true),
     openMidiLearn: () => setIsMidiLearnOpen(true),
     openKeyboardShortcuts: () => setIsHotkeysOpen(true),
+
+    // UI-03A: one Settings entry point, reachable from the header control, the
+    // sidebar control and the View menu.
+    openSettings: () => setIsAppearanceSettingsOpen(true),
 
     // projectHistoryVersion is read so the menu re-renders with fresh history
     // state exactly like the existing Playlist undo/redo wiring does.

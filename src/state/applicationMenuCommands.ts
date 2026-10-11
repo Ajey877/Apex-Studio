@@ -27,6 +27,8 @@ export interface ApplicationMenuCommandDeps {
   toggleBrowser: () => void;
   toggleInspector?: () => void;
   setDensity?: (density: 'compact' | 'comfy') => void;
+  /** UI-03A: the Settings surface, which owns the Light/Dark appearance choice. */
+  openSettings: () => void;
   toggleFullscreen: () => void;
 
   openProjectHub: () => void;
@@ -180,6 +182,9 @@ const runCommand = (id: ApplicationMenuCommandId, deps: ApplicationMenuCommandDe
       return;
     case 'view.densityComfy':
       deps.setDensity?.('comfy');
+      return;
+    case 'view.settings':
+      deps.openSettings();
       return;
     case 'view.fullscreen':
       void deps.toggleFullscreen();
