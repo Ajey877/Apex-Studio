@@ -15,6 +15,7 @@ import { MixerTrack, FxSlot, FxType } from '../types/daw';
 import { audioEngine } from '../audio/audioEngine';
 import { MixerRoutingGraph } from '../audio/mixerRouting';
 import { FxParameterControls } from './fxParameterControls';
+import { MIXER_LEVEL_STOPS, readMixerPalette, trackIdentityLabelColor, useMixerPalette } from './mixerTheme';
 
 export const applyMixerRoutingSelection = (
   tracks: MixerTrack[],
@@ -143,6 +144,10 @@ export const Mixer: React.FC<MixerProps> = ({
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const masterFaderCanvasRef = useRef<HTMLCanvasElement | null>(null);
 
+  // Re-renders on theme change so the meter gradient and track-name colours
+  // follow the document theme immediately (the canvas reads the palette per frame).
+  const palette = useMixerPalette();
+
   const selectedTrack = tracks.find(t => t.id === selectedTrackId) || tracks[0];
 
   const handleRoutingChange = (trackId: number, targetId: number) => {
@@ -244,12 +249,16 @@ export const Mixer: React.FC<MixerProps> = ({
       setTrackPeaks(peaks);
 
       // 2. Master Spectrum Analyzer (Top Bar)
+      // The palette is read every frame (cached per document + mode), so a
+      // theme flip repaints on the next frame without reloading the Mixer.
+      const livePalette = readMixerPalette();
       if (canvasRef.current) {
         const canvas = canvasRef.current;
         const ctx = canvas.getContext('2d');
         if (ctx) {
           audioEngine.getMasterFrequencyData(freqData);
-          ctx.clearRect(0, 0, canvas.width, canvas.height);
+          ctx.fillStyle = livePalette.canvasBackground;
+          ctx.fillRect(0, 0, canvas.width, canvas.height);
 
           const barWidth = (canvas.width / 64) - 1;
           for (let i = 0; i < 64; i++) {
@@ -257,9 +266,9 @@ export const Mixer: React.FC<MixerProps> = ({
             const barHeight = (val / 255) * canvas.height;
 
             const grad = ctx.createLinearGradient(0, canvas.height, 0, 0);
-            grad.addColorStop(0, '#00ff00');
-            grad.addColorStop(0.6, '#ff6e00');
-            grad.addColorStop(1, '#ff0000');
+            grad.addColorStop(0, livePalette.signal.levelLow);
+            grad.addColorStop(MIXER_LEVEL_STOPS.canvasMid, livePalette.signal.levelMid);
+            grad.addColorStop(1, livePalette.signal.levelHigh);
 
             ctx.fillStyle = grad;
             ctx.fillRect(i * (barWidth + 1), canvas.height - barHeight, barWidth, barHeight);
@@ -278,7 +287,7 @@ export const Mixer: React.FC<MixerProps> = ({
           for (let i = 0; i < barCount; i++) {
             const val = isPlaying ? (freqData[i * 4] || 0) : 0;
             const barH = (val / 255) * faderCanvas.height;
-            faderCtx.fillStyle = 'rgba(0, 255, 136, 0.25)';
+            faderCtx.fillStyle = livePalette.signal.spectrumBackdrop;
             faderCtx.fillRect(i * barW, faderCanvas.height - barH, barW - 1, barH);
           }
         }
@@ -370,7 +379,7 @@ export const Mixer: React.FC<MixerProps> = ({
 
                   <span 
                     className="text-[11px] font-bold truncate max-w-full px-1 text-[var(--apex-text)]"
-                    style={{ color: isSelected ? 'var(--apex-accent)' : track.color || 'var(--apex-text)' }}
+                    style={{ color: isSelected ? 'var(--apex-accent)' : track.color ? trackIdentityLabelColor(track.color, palette.mode, palette.stripSurfaces) : 'var(--apex-text)' }}
                   >
                     {track.name}
                   </span>
@@ -404,7 +413,7 @@ export const Mixer: React.FC<MixerProps> = ({
                       className="w-full rounded-full transition-all duration-75"
                       style={{
                         height: `${Math.min(100, peak * 100)}%`,
-                        background: 'linear-gradient(to top, #00ff00 60%, #ff6e00 85%, #ff0000 100%)'
+                        background: palette.meterGradient
                       }}
                     />
                   </div>
@@ -592,7 +601,7 @@ export const Mixer: React.FC<MixerProps> = ({
               <div className="bg-[var(--apex-panel)] border border-[var(--apex-border)] rounded p-2 text-[10px] space-y-1.5">
                 <div className="flex items-center justify-between">
                   <span className="font-bold text-[var(--apex-text)] flex items-center gap-1">
-                    <span className="w-2 h-2 bg-[#7e57c2] rounded-full" />
+                    <span className="w-2 h-2 bg-[var(--apex-aux)] rounded-full" />
                     <span>AUX SENDS (POST-FADER)</span>
                   </span>
                   <div className="flex items-center gap-1">
@@ -600,7 +609,7 @@ export const Mixer: React.FC<MixerProps> = ({
                     {onCreateAuxReturn && (
                       <button
                         onClick={onCreateAuxReturn}
-                        className="px-1 py-0.5 bg-[#7e57c2]/15 hover:bg-[#7e57c2]/30 text-[#7e57c2] rounded text-[7px] font-bold border border-[#7e57c2]/30 transition"
+                        className="px-1 py-0.5 bg-[color-mix(in_srgb,var(--apex-aux)_15%,transparent)] hover:bg-[color-mix(in_srgb,var(--apex-aux)_30%,transparent)] text-[var(--apex-aux-text)] rounded text-[7px] font-bold border border-[color-mix(in_srgb,var(--apex-aux)_30%,transparent)] transition"
                         title="Create new aux return track"
                       >
                         + RETURN
@@ -648,9 +657,9 @@ export const Mixer: React.FC<MixerProps> = ({
                         onPointerDown={() => onInteractionStart?.('Change aux send')}
                         onPointerUp={() => onInteractionEnd?.('Change aux send')}
                         onChange={(e) => handleAuxSendAmountChange(selectedTrack.id, idx, parseFloat(e.target.value))}
-                        className="w-20 h-1 accent-[#7e57c2] bg-[var(--apex-chrome-inset)] rounded"
+                        className="w-20 h-1 accent-[var(--apex-aux)] bg-[var(--apex-chrome-inset)] rounded"
                       />
-                      <span className="font-mono text-[#7e57c2] text-[9px] min-w-[28px] text-right">{Math.round(send.amount * 100)}%</span>
+                      <span className="font-mono text-[var(--apex-aux-text)] text-[9px] min-w-[28px] text-right">{Math.round(send.amount * 100)}%</span>
                     </div>
                   </div>
                 ))}
@@ -658,7 +667,7 @@ export const Mixer: React.FC<MixerProps> = ({
                 {(selectedTrack.auxSends?.length ?? 0) < 2 && (
                   <button
                     onClick={() => handleAddAuxSend(selectedTrack.id)}
-                    className="w-full py-1 text-[9px] font-bold rounded border border-dashed border-[var(--apex-border)] hover:border-[#7e57c2]/50 text-[var(--apex-text-3)] hover:text-[#7e57c2] transition"
+                    className="w-full py-1 text-[9px] font-bold rounded border border-dashed border-[var(--apex-border)] hover:border-[color-mix(in_srgb,var(--apex-aux)_50%,transparent)] text-[var(--apex-text-3)] hover:text-[var(--apex-aux-text)] transition"
                   >
                     + Add Post-Fader Send
                   </button>
