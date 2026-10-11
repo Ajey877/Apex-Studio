@@ -82,10 +82,24 @@ interface CanvasProbe {
 
 const probeGoniometer = (page: Page): Promise<CanvasProbe> =>
   page.evaluate(() => {
+    // Computed colours come back as `rgb(...)` for plain channels but as
+    // `color(srgb ...)` (0..1 floats) when they were resolved through
+    // color-mix — Chromium picks the notation, so handle both.
     const parse = (value: string): [number, number, number] => {
-      const match = /rgba?\(([^)]+)\)/.exec(value);
-      const parts = (match?.[1] ?? '0,0,0').split(',').map((part) => parseFloat(part));
-      return [parts[0], parts[1], parts[2]];
+      const rgb = /rgba?\(([^)]+)\)/.exec(value);
+      if (rgb) {
+        const parts = rgb[1].split(',').map((part) => parseFloat(part));
+        return [parts[0], parts[1], parts[2]];
+      }
+      const srgb = /color\(srgb\s+([\d.eE+-]+)\s+([\d.eE+-]+)\s+([\d.eE+-]+)/.exec(value);
+      if (srgb) {
+        return [
+          parseFloat(srgb[1]) * 255,
+          parseFloat(srgb[2]) * 255,
+          parseFloat(srgb[3]) * 255,
+        ];
+      }
+      return [0, 0, 0];
     };
     // Scoped to the mastering dialog so no other surface's canvas can match.
     const dialog = document

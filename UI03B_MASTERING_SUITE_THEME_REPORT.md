@@ -126,7 +126,14 @@ browser spec is picked up by the existing Playwright configuration.
 | `npm run test:audio` (mastering DSP, export, persistence) | ✅ 1676/1676 |
 | `npm run test:metering` | ✅ 78/78 |
 | Playwright discovery (`--list`) | ✅ 24 tests in 3 files, incl. the 5 new ones |
-| Playwright execution | ⚠️ **not runnable in this sandbox**: no Chromium binary is installed and the sandbox network policy blocks the Playwright browser CDN. The repo's documented fallback (`scripts/realOfflineRenderNode.mjs`) passed 9/9. CI installs Chromium (`npx playwright install --with-deps chromium`) and will execute the full browser battery, including the new spec and its screenshots. No screenshot or browser-pass claim is made for this sandbox. |
+| Playwright execution (real Chromium) | ✅ **24/24 locally**: the sandbox cannot reach the Playwright browser CDN, but the repo's `playwright.config.ts` supports a custom binary at `/tmp/chromium`, which was satisfied from the npm-bundled `@sparticuz/chromium` 153 (same major as the pinned Chrome-for-Testing). All 5 new mastering-suite tests pass in a real browser, alongside the pre-existing `themeRuntime` and `realOfflineRender` suites. CI additionally exercises the same battery with its own Chromium install. |
+
+Dark and Light screenshots (`assets/screenshots/ui03b-mastering-*.png`, captured by the
+spec during the real-browser run and visually inspected) show: Dark retains the exact
+Midnight Aurora identity including the literal band accents; Light is a deliberate light
+DAW surface — white panel, light cards and scopes, readable text steps, same hue-per-band
+identities — with no inverted-screenshot artefacts, no dark leftovers and no unreadable
+readout in either theme.
 
 ## Remaining theme work (out of scope here, unchanged by this phase)
 
