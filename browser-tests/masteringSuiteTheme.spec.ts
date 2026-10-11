@@ -56,6 +56,23 @@ const switchThemeViaSettings = async (page: Page, mode: 'dark' | 'light') => {
   await expect(settings).toBeHidden();
 };
 
+/**
+ * Commits the theme at the document level — exactly the DOM effect
+ * `commitThemeSelection` produces — without needing to reach the Settings
+ * dialog. Required while the mastering suite is open: its scrim is a
+ * full-viewport `fixed inset-0` overlay, so nothing behind it is clickable.
+ * The Settings flow itself is covered by `themeRuntime.spec.ts`.
+ */
+const flipDocumentTheme = (page: Page, mode: 'dark' | 'light') =>
+  page.evaluate((value) => {
+    try {
+      window.localStorage.setItem('apex:theme', value);
+    } catch {
+      /* the page under test handles storage failures itself */
+    }
+    document.documentElement.dataset.theme = value;
+  }, mode);
+
 interface CanvasProbe {
   /** Corner pixel of the goniometer: the seam's scope background fill. */
   corner: [number, number, number];
@@ -165,9 +182,12 @@ test('switching themes while the suite is open repaints DOM and canvas without a
     .locator('input[data-control-id="lowCrossFreq"]')
     .evaluate((el: HTMLInputElement) => el.value);
 
-  await switchThemeViaSettings(page, 'light');
+  // The suite's scrim covers the viewport, so Settings is not reachable while
+  // it is open; commit the flip at the document level instead (same DOM write
+  // the Settings flow produces — see flipDocumentTheme).
+  await flipDocumentTheme(page, 'light');
 
-  // The suite stayed open underneath Settings; the flip repaints it in place.
+  // The suite stayed open through the flip and repaints in place.
   await expect(masteringDialog(page)).toBeVisible();
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
   await expect
@@ -242,12 +262,15 @@ test('band identity accents survive in both themes', async ({ page }) => {
   expect(await bandColor('mid')).toBe('rgb(0, 255, 136)');
   expect(await bandColor('high')).toBe('rgb(0, 229, 255)');
 
-  // Same identities in Light: identical hues, darkened for legibility.
+  // Same identities in Light: identical hues, darkened for legibility. The
+  // suite closes first because its scrim would cover the Settings dialog.
+  await masteringDialog(page).locator('button[aria-label="Close mastering suite"]').click();
+  await expect(masteringDialog(page)).toBeHidden();
   await switchThemeViaSettings(page, 'light');
-  await expect(masteringDialog(page)).toBeVisible();
-  await expect
-    .poll(async () => bandColor('low'), { timeout: 5000 })
-    .toBe('rgb(138, 92, 0)');
+  await openMasteringSuite(page);
+  await masteringDialog(page).locator('button:has-text("3-Band Multiband Dynamics")').click();
+  await expect(masteringDialog(page).locator('[data-band-accent="low"]')).toBeVisible();
+  expect(await bandColor('low')).toBe('rgb(138, 92, 0)');
   expect(await bandColor('mid')).toBe('rgb(12, 122, 74)');
   expect(await bandColor('high')).toBe('rgb(0, 100, 128)');
 });
