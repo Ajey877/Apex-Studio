@@ -493,3 +493,153 @@ describe('Phase 89 — mastering processor truth (MOCK-ONLY labels for coverage)
     assert.ok(true, 'mock-only coverage noted — see masteringProcessor.test.ts for graph-wiring via fakes');
   });
 });
+
+/**
+ * Phase 90 — signal-level proof for the controls the UI can now reach.
+ *
+ * What this harness can and cannot prove, stated plainly:
+ *
+ *  - The crossover frequencies and per-band solo/mute are REAL signal effects
+ *    here. They are implemented with `BiquadFilterNode` and `GainNode`, both of
+ *    which `web-audio-engine` actually processes, so the renders below are real
+ *    filtered/summed audio.
+ *  - Per-band attack/knee/release and the maximizer release drive
+ *    `DynamicsCompressorNode` parameters. `web-audio-engine`'s compressor is a
+ *    documented pass-through (`impl/dsp/DynamicsCompressorNode.js` copies input
+ *    to output and `reduction` throws NOT YET IMPLEMENTED), so no Node render
+ *    can show a compressor responding. Those four controls are verified at the
+ *    AudioParam boundary in `masteringControls.test.ts`, against the real
+ *    `MasteringProcessor.setState`. The pinning test below fails loudly if the
+ *    polyfill ever grows a working compressor, which is the cue to add the
+ *    signal-level attack/knee cases here too.
+ */
+describe('Phase 90 — crossover and band solo/mute are real signal effects (REAL OfflineAudioContext)', () => {
+  /** Compression-free, unity-width baseline so only the control under test moves. */
+  const flatState: MasteringSuiteState = {
+    ...DEFAULT_MASTERING_SUITE_STATE,
+    enabled: true,
+    stereoSpread: 1,
+    maximizerThreshold: 0,
+    maximizerCeiling: 0,
+    lowBand: { ...DEFAULT_MASTERING_SUITE_STATE.lowBand, threshold: 0, ratio: 1, gain: 0 },
+    midBand: { ...DEFAULT_MASTERING_SUITE_STATE.midBand, threshold: 0, ratio: 1, gain: 0 },
+    highBand: { ...DEFAULT_MASTERING_SUITE_STATE.highBand, threshold: 0, ratio: 1, gain: 0 },
+  };
+
+  /** RMS over the settled part of the render, skipping filter start-up. */
+  const settledRms = (buf: AudioBuffer): number => rms(buf.getChannelData(0).subarray(2400));
+
+  const db = (v: number): number => 20 * Math.log10(v);
+
+  it('moving the low crossover moves a tone between the low and mid bands', async () => {
+    // Low band carries +6 dB, mid and high are flat, so whichever band owns the
+    // tone decides the level by exactly that 6 dB.
+    const state = { ...flatState, lowBand: { ...flatState.lowBand, gain: 6 } };
+
+    const inLowBand = settledRms(await renderWithMastering({ ...state, lowCrossFreq: 500 }, { freq: 300, duration: 0.3, gain: 0.2 }));
+    const inMidBand = settledRms(await renderWithMastering({ ...state, lowCrossFreq: 80 }, { freq: 300, duration: 0.3, gain: 0.2 }));
+    const unityReference = settledRms(await renderWithMastering(flatState, { freq: 300, duration: 0.3, gain: 0.2 }));
+
+    const ratioDb = db(inLowBand) - db(inMidBand);
+    assert.ok(ratioDb > 4.5 && ratioDb < 9, `300 Hz should move by roughly the 6 dB band offset, got ${ratioDb.toFixed(2)} dB`);
+    // And each side lands where its band's gain says it should.
+    assert.ok(Math.abs(db(inMidBand) - db(unityReference)) < 1.5, 'with the crossover at 80 Hz, 300 Hz sits in the flat mid band');
+    assert.ok(Math.abs(db(inLowBand) - db(unityReference) - 6) < 2, 'with the crossover at 500 Hz, 300 Hz sits in the +6 dB low band');
+  });
+
+  it('moving the high crossover moves a tone between the mid and high bands', async () => {
+    const state = { ...flatState, highBand: { ...flatState.highBand, gain: 6 } };
+
+    const inHighBand = settledRms(await renderWithMastering({ ...state, highCrossFreq: 1800 }, { freq: 8000, duration: 0.3, gain: 0.2 }));
+    const inMidBand = settledRms(await renderWithMastering({ ...state, highCrossFreq: 16000 }, { freq: 8000, duration: 0.3, gain: 0.2 }));
+    const unityReference = settledRms(await renderWithMastering(flatState, { freq: 8000, duration: 0.3, gain: 0.2 }));
+
+    const ratioDb = db(inHighBand) - db(inMidBand);
+    assert.ok(ratioDb > 4.5 && ratioDb < 9.5, `8 kHz should move by roughly the 6 dB band offset, got ${ratioDb.toFixed(2)} dB`);
+    assert.ok(Math.abs(db(inMidBand) - db(unityReference)) < 1.5, 'with the crossover at 16 kHz, 8 kHz sits in the flat mid band');
+    assert.ok(Math.abs(db(inHighBand) - db(unityReference) - 6) < 2, 'with the crossover at 1.8 kHz, 8 kHz sits in the +6 dB high band');
+  });
+
+  it('keeps the output finite when a project stores the crossovers inverted', async () => {
+    // normalizeMasteringSuiteState allows lowCrossFreq above highCrossFreq; the
+    // processor is responsible for keeping the splits ordered. Whatever it does,
+    // it must not produce NaN or silence the master.
+    const out = await renderWithMastering({ ...flatState, lowCrossFreq: 900, highCrossFreq: 600 }, { freq: 300, duration: 0.25, gain: 0.2 });
+    const ch = out.getChannelData(0);
+    assert.ok(ch.every(Number.isFinite), 'inverted crossovers must not produce NaN or Infinity');
+    assert.ok(settledRms(out) > 1e-4, 'inverted crossovers must not silence the master bus');
+  });
+
+  it('muting the low band removes low content and leaves the high band alone', async () => {
+    const state = { ...flatState, lowBand: { ...flatState.lowBand, gain: 6 } };
+    const muted = { ...state, lowBand: { ...state.lowBand, mute: true } };
+
+    const lowBefore = settledRms(await renderWithMastering(state, { freq: 80, duration: 0.3, gain: 0.2 }));
+    const lowAfter = settledRms(await renderWithMastering(muted, { freq: 80, duration: 0.3, gain: 0.2 }));
+    assert.ok(lowAfter < lowBefore * 0.3, `muting the low band must drop 80 Hz, ${lowBefore} -> ${lowAfter}`);
+
+    // The same mute must not touch content that lives in another band.
+    const highBefore = settledRms(await renderWithMastering(state, { freq: 8000, duration: 0.3, gain: 0.2 }));
+    const highAfter = settledRms(await renderWithMastering(muted, { freq: 8000, duration: 0.3, gain: 0.2 }));
+    assert.ok(Math.abs(highAfter - highBefore) / highBefore < 0.01, 'muting the low band must not alter 8 kHz');
+  });
+
+  it('soloing a band silences the bands that are not soloed', async () => {
+    const state = { ...flatState, lowBand: { ...flatState.lowBand, gain: 6 } };
+
+    const soloHigh = { ...state, highBand: { ...state.highBand, solo: true } };
+    const lowWithSoloHigh = settledRms(await renderWithMastering(soloHigh, { freq: 80, duration: 0.3, gain: 0.2 }));
+    const lowUnsoloed = settledRms(await renderWithMastering(state, { freq: 80, duration: 0.3, gain: 0.2 }));
+    assert.ok(lowWithSoloHigh < lowUnsoloed * 0.01, `soloing the high band must silence 80 Hz, got ${lowWithSoloHigh}`);
+
+    const soloLow = { ...state, lowBand: { ...state.lowBand, solo: true } };
+    const highWithSoloLow = settledRms(await renderWithMastering(soloLow, { freq: 8000, duration: 0.3, gain: 0.2 }));
+    const highUnsoloed = settledRms(await renderWithMastering(state, { freq: 8000, duration: 0.3, gain: 0.2 }));
+    assert.ok(highWithSoloLow < highUnsoloed * 0.01, `soloing the low band must silence 8 kHz, got ${highWithSoloLow}`);
+
+    // The soloed band itself keeps playing.
+    const lowSoloed = settledRms(await renderWithMastering(soloLow, { freq: 80, duration: 0.3, gain: 0.2 }));
+    assert.ok(lowSoloed > lowUnsoloed * 0.5, 'the soloed low band stays audible');
+  });
+
+  it('keeps a band silent when it is both soloed and muted', async () => {
+    const state = {
+      ...flatState,
+      lowBand: { ...flatState.lowBand, gain: 6, solo: true, mute: true },
+    };
+    const level = settledRms(await renderWithMastering(state, { freq: 80, duration: 0.3, gain: 0.2 }));
+    assert.ok(level < 1e-3, 'mute must win over solo, as the processor audible rule requires');
+  });
+
+  it('two soloed bands both stay audible, matching the processor anySolo rule', async () => {
+    const state = {
+      ...flatState,
+      lowBand: { ...flatState.lowBand, gain: 6, solo: true },
+      highBand: { ...flatState.highBand, solo: true },
+    };
+    const low = settledRms(await renderWithMastering(state, { freq: 80, duration: 0.3, gain: 0.2 }));
+    const high = settledRms(await renderWithMastering(state, { freq: 8000, duration: 0.3, gain: 0.2 }));
+    const mid = settledRms(await renderWithMastering(state, { freq: 1000, duration: 0.3, gain: 0.2 }));
+    const midAlone = settledRms(await renderWithMastering(flatState, { freq: 1000, duration: 0.3, gain: 0.2 }));
+    assert.ok(low > 1e-3, 'the soloed low band is audible');
+    assert.ok(high > 1e-3, 'the soloed high band is audible');
+    // The mid band is muted by the solo, but 1 kHz still receives crossover skirt
+    // leakage from the two soloed bands (12 dB/oct, so roughly 13% remains). The
+    // assertion is that the mid contribution is gone, not that the bus is empty.
+    assert.ok(mid < midAlone * 0.25, `the unsoloed mid band must be removed at 1 kHz, ratio ${(mid / midAlone).toFixed(3)}`);
+  });
+
+  it('pins the harness limitation: this polyfill compressor is a pass-through', async () => {
+    // Not a product assertion — a guard on what this file can prove. If
+    // web-audio-engine ever implements DynamicsCompressorNode, this fails and
+    // the attack/knee/release cases above must be added as real signal tests.
+    const loud = { ...flatState, lowBand: { ...flatState.lowBand, threshold: -60, ratio: 20, knee: 0 } };
+    const quiet = { ...flatState, lowBand: { ...flatState.lowBand, threshold: 0, ratio: 1, knee: 40 } };
+    const a = settledRms(await renderWithMastering(loud, { freq: 300, duration: 0.3, gain: 0.2 }));
+    const b = settledRms(await renderWithMastering(quiet, { freq: 300, duration: 0.3, gain: 0.2 }));
+    assert.ok(
+      Math.abs(db(a) - db(b)) < 0.5,
+      'expected the polyfill compressor to be inert; if this fails, add real attack/knee/release signal tests'
+    );
+  });
+});

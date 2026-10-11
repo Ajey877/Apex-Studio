@@ -104,7 +104,12 @@ describe('Phase 52 — README matches the implementation', () => {
     // The surfaces the README is contracted to disclose. Each must be named
     // *and* named as something other than production DSP — a bare mention is
     // not a disclosure.
-    for (const surface of [/Vocal Tuner/i, /Warp Processor/i, /Take Comping/i, /Wavetable Synth/i, /Polyphonic Blob Editor/i]) {
+    //
+    // Take Comping and the Mastering Suite are deliberately absent: both are
+    // wired into the engine, so requiring a "not production DSP" wording for
+    // them would force the README to stay wrong. They are guarded positively in
+    // the tests below instead.
+    for (const surface of [/Vocal Tuner/i, /Warp Processor/i, /Wavetable Synth/i, /Polyphonic Blob Editor/i]) {
       const mentions = lines.filter((line) => surface.test(line));
       assert.ok(
         mentions.length > 0,
@@ -125,8 +130,9 @@ describe('Phase 52 — README matches the implementation', () => {
     );
 
     // A prototype surface must never be upgraded to a shipped status in the
-    // capability table.
-    for (const surface of [/Vocal Tuner/i, /Warp Processor/i, /Wavetable/i, /Take comping/i, /Polyphonic/i]) {
+    // capability table. Take Comping is excluded because it is no longer a
+    // prototype surface — see the take-comping scope test below.
+    for (const surface of [/Vocal Tuner/i, /Warp Processor/i, /Wavetable/i, /Polyphonic/i]) {
       for (const line of lines) {
         if (!surface.test(line)) continue;
         assert.ok(
@@ -135,6 +141,48 @@ describe('Phase 52 — README matches the implementation', () => {
         );
       }
     }
+  });
+
+  it('describes the mastering processing path it actually applies, not a stale "not applied"', () => {
+    // The processors are installed in both the live AudioContext and the
+    // OfflineAudioContext used for export (audioEngine.ts), so the old claim
+    // that they were never applied to the master bus was simply false.
+    assert.match(readme, /Mastering Suite processing path/i);
+    assert.match(readme, /are applied to the master bus/i);
+    assert.doesNotMatch(
+      readme,
+      /mastering processors are \*\*not applied\*\*/i,
+      'the README must not keep the stale claim that mastering processors are not applied'
+    );
+    // The corrected description still has to name the real limitations rather
+    // than trading one overclaim for another.
+    assert.match(readme, /not\*\* a true-peak lookahead limiter|not a true-peak lookahead limiter/i);
+    assert.match(readme, /metering reference only/i);
+    assert.match(readme, /no\s+gain-reduction metering/i);
+    // And it must describe the controls the suite really exposes.
+    assert.match(readme, /attack, release, knee, solo and mute/i);
+  });
+
+  it('describes take comping as connected to real take groups, without calling it a demo', () => {
+    // TakeCompingModal reads projectState.playlistClips, resolves groups through
+    // takeLaneManager, and the engine silences inactive takes in live playback
+    // (audioEngine.ts) and offline export (offlineProjectRenderer.ts).
+    assert.match(readme, /Take comping scope/i);
+    assert.match(readme, /recorded take groups that exist in the project/i);
+    assert.match(readme, /silenced in both live playback and offline export/i);
+
+    const compingLines = readme.split('\n').filter((line) => /take comping/i.test(line));
+    assert.ok(compingLines.length > 0, 'the README must still document take comping');
+    for (const line of compingLines) {
+      assert.doesNotMatch(
+        line,
+        /prototype|placeholder|demo\b/i,
+        `take comping is wired to project data and must not be described as a demo: "${line.trim()}"`
+      );
+    }
+    // Honesty about scope is kept by naming what it does not do.
+    assert.match(readme, /does not\s+split a take into regions/i);
+    assert.match(readme, /does not\s+crossfade/i);
   });
 
   it('keeps its unfinished-feature disclosure and makes no marketing overclaim', () => {

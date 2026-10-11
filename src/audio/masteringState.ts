@@ -16,22 +16,55 @@ export const DEFAULT_MASTERING_SUITE_STATE: MasteringSuiteState = {
   maximizerLookahead: true,
 };
 
+/**
+ * Clamp bounds applied to every mastering value at the document boundary.
+ *
+ * These are deliberately *wider* than the ranges the Mastering Suite UI offers:
+ * a project file may legally hold a value outside what a slider can reach
+ * (an older build, a hand-edited document, a future control), and normalizing
+ * must not silently rewrite it. Exposed as data so the UI layer can prove its
+ * own ranges sit inside these bounds instead of restating the numbers.
+ */
+export const MASTERING_NORMALIZATION_BOUNDS = {
+  lufsTarget: { min: -24, max: -6 },
+  lowCrossFreq: { min: 40, max: 1000 },
+  highCrossFreq: { min: 500, max: 18000 },
+  band: {
+    threshold: { min: -48, max: 0 },
+    ratio: { min: 1, max: 20 },
+    attack: { min: 0.1, max: 500 },
+    release: { min: 1, max: 2000 },
+    gain: { min: -12, max: 12 },
+    knee: { min: 0, max: 40 },
+  },
+  stereoSpread: { min: 0, max: 2 },
+  monoSubFreq: { min: 20, max: 500 },
+  maximizerThreshold: { min: -12, max: 0 },
+  maximizerCeiling: { min: -1, max: 0 },
+  maximizerRelease: { min: 10, max: 500 },
+} as const;
+
 const finite = (value: unknown, fallback: number, min: number, max: number): number =>
   typeof value === 'number' && Number.isFinite(value) ? Math.max(min, Math.min(max, value)) : fallback;
+
+/** Clamp against a named bound so the call sites cannot drift from the table. */
+const bounded = (value: unknown, fallback: number, bound: { min: number; max: number }): number =>
+  finite(value, fallback, bound.min, bound.max);
 
 const bool = (value: unknown, fallback: boolean): boolean =>
   typeof value === 'boolean' ? value : fallback;
 
 function normalizeBand(value: unknown, fallback: MultibandBandSettings): MultibandBandSettings {
   const candidate = value && typeof value === 'object' ? value as Partial<MultibandBandSettings> : {};
+  const bounds = MASTERING_NORMALIZATION_BOUNDS.band;
   return {
     enabled: bool(candidate.enabled, fallback.enabled),
-    threshold: finite(candidate.threshold, fallback.threshold, -48, 0),
-    ratio: finite(candidate.ratio, fallback.ratio, 1, 20),
-    attack: finite(candidate.attack, fallback.attack, 0.1, 500),
-    release: finite(candidate.release, fallback.release, 1, 2000),
-    gain: finite(candidate.gain, fallback.gain, -12, 12),
-    knee: finite(candidate.knee, fallback.knee, 0, 40),
+    threshold: bounded(candidate.threshold, fallback.threshold, bounds.threshold),
+    ratio: bounded(candidate.ratio, fallback.ratio, bounds.ratio),
+    attack: bounded(candidate.attack, fallback.attack, bounds.attack),
+    release: bounded(candidate.release, fallback.release, bounds.release),
+    gain: bounded(candidate.gain, fallback.gain, bounds.gain),
+    knee: bounded(candidate.knee, fallback.knee, bounds.knee),
     solo: bool(candidate.solo, fallback.solo),
     mute: bool(candidate.mute, fallback.mute),
   };
@@ -41,19 +74,20 @@ function normalizeBand(value: unknown, fallback: MultibandBandSettings): Multiba
 export function normalizeMasteringSuiteState(value: unknown): MasteringSuiteState {
   const candidate = value && typeof value === 'object' ? value as Partial<MasteringSuiteState> : {};
   const fallback = DEFAULT_MASTERING_SUITE_STATE;
+  const bounds = MASTERING_NORMALIZATION_BOUNDS;
   return {
     enabled: bool(candidate.enabled, fallback.enabled),
-    lufsTarget: finite(candidate.lufsTarget, fallback.lufsTarget, -24, -6),
-    lowCrossFreq: finite(candidate.lowCrossFreq, fallback.lowCrossFreq, 40, 1000),
-    highCrossFreq: finite(candidate.highCrossFreq, fallback.highCrossFreq, 500, 18000),
+    lufsTarget: bounded(candidate.lufsTarget, fallback.lufsTarget, bounds.lufsTarget),
+    lowCrossFreq: bounded(candidate.lowCrossFreq, fallback.lowCrossFreq, bounds.lowCrossFreq),
+    highCrossFreq: bounded(candidate.highCrossFreq, fallback.highCrossFreq, bounds.highCrossFreq),
     lowBand: normalizeBand(candidate.lowBand, fallback.lowBand),
     midBand: normalizeBand(candidate.midBand, fallback.midBand),
     highBand: normalizeBand(candidate.highBand, fallback.highBand),
-    stereoSpread: finite(candidate.stereoSpread, fallback.stereoSpread, 0, 2),
-    monoSubFreq: finite(candidate.monoSubFreq, fallback.monoSubFreq, 20, 500),
-    maximizerThreshold: finite(candidate.maximizerThreshold, fallback.maximizerThreshold, -12, 0),
-    maximizerCeiling: finite(candidate.maximizerCeiling, fallback.maximizerCeiling, -1, 0),
-    maximizerRelease: finite(candidate.maximizerRelease, fallback.maximizerRelease, 10, 500),
+    stereoSpread: bounded(candidate.stereoSpread, fallback.stereoSpread, bounds.stereoSpread),
+    monoSubFreq: bounded(candidate.monoSubFreq, fallback.monoSubFreq, bounds.monoSubFreq),
+    maximizerThreshold: bounded(candidate.maximizerThreshold, fallback.maximizerThreshold, bounds.maximizerThreshold),
+    maximizerCeiling: bounded(candidate.maximizerCeiling, fallback.maximizerCeiling, bounds.maximizerCeiling),
+    maximizerRelease: bounded(candidate.maximizerRelease, fallback.maximizerRelease, bounds.maximizerRelease),
     maximizerLookahead: bool(candidate.maximizerLookahead, fallback.maximizerLookahead),
   };
 }
