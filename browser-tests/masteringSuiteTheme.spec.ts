@@ -87,7 +87,11 @@ const probeGoniometer = (page: Page): Promise<CanvasProbe> =>
       const parts = (match?.[1] ?? '0,0,0').split(',').map((part) => parseFloat(part));
       return [parts[0], parts[1], parts[2]];
     };
-    const canvas = document.querySelector<HTMLCanvasElement>('canvas[width="280"]');
+    // Scoped to the mastering dialog so no other surface's canvas can match.
+    const dialog = document
+      .getElementById('mastering-suite-modal-title')
+      ?.closest('[role="dialog"]');
+    const canvas = dialog?.querySelector<HTMLCanvasElement>('canvas[width="280"]') ?? null;
     if (!canvas) throw new Error('goniometer canvas not rendered');
     const ctx = canvas.getContext('2d');
     if (!ctx) throw new Error('goniometer has no 2d context');
@@ -178,9 +182,16 @@ test('switching themes while the suite is open repaints DOM and canvas without a
   await openMasteringSuite(page);
   const darkProbe = await probeGoniometer(page);
   const darkPanel = await panelBackground(page);
-  const crossoverBefore = await page
+
+  // Sample a stored control from the multiband tab, then return to metering:
+  // the goniometer canvas only exists there, and it is what the repaint probe
+  // below reads.
+  await masteringDialog(page).locator('button:has-text("3-Band Multiband Dynamics")').click();
+  const crossoverBefore = await masteringDialog(page)
     .locator('input[data-control-id="lowCrossFreq"]')
     .evaluate((el: HTMLInputElement) => el.value);
+  await masteringDialog(page).locator('button:has-text("LUFS Loudness & Peak")').click();
+  await page.waitForTimeout(600);
 
   // The suite's scrim covers the viewport, so Settings is not reachable while
   // it is open; commit the flip at the document level instead (same DOM write
@@ -208,7 +219,8 @@ test('switching themes while the suite is open repaints DOM and canvas without a
   expect(pixelsClose(lightProbe.corner, darkProbe.corner)).toBe(false);
 
   // Mastering parameters and the stored project are untouched by a display flip.
-  const crossoverAfter = await page
+  await masteringDialog(page).locator('button:has-text("3-Band Multiband Dynamics")').click();
+  const crossoverAfter = await masteringDialog(page)
     .locator('input[data-control-id="lowCrossFreq"]')
     .evaluate((el: HTMLInputElement) => el.value);
   expect(crossoverAfter).toBe(crossoverBefore);
