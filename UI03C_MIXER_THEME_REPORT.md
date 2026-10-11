@@ -191,3 +191,5 @@ The add-send button's idle label is `--apex-text-3` (already AA, 5.64 Dark / 5.6
 | `npm run test:metering` / `test:shell` / `test:effects` / `test:truth` | ✅ all pass |
 | `npm run test:desktop-permissions` / `verify:desktop` | ✅ pass |
 | `npx playwright test` (all specs, real Chromium) | ✅ **31/31** (24 original + 5 Mixer theme + 2 aux contrast) |
+
+**CI (PR #209, commit `fd31f6d`):** `verify` ✅, `audio-tests` ✅, `windows-package` ✅, CodeRabbit ✅.
