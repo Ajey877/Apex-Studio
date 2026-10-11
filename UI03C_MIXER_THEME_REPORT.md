@@ -117,7 +117,7 @@ Browser: a real Chromium 153 (from the npm-published `@sparticuz/chromium`, extr
 
 ### CI
 
-The workflows run `npm install --legacy-peer-deps`, `build`, `lint`, `test:audio`, `test:history`, `verify:desktop`, `npx playwright test`, and Windows-only `package:win`, `package:win:dir` and `smoke:win`. All cross-platform steps were run locally and pass. The Windows packaging and smoke steps need a Windows runner and were **not** run here. The PR's GitHub checks are the authority for those.
+The workflows run `npm install --legacy-peer-deps`, `build`, `lint`, `test:audio`, `test:history`, `verify:desktop`, `npx playwright test`, and Windows-only `package:win`, `package:win:dir` and `smoke:win`. All cross-platform steps were run locally and pass. The Windows packaging and smoke steps need a Windows runner and were **not** run here. GitHub Actions on PR #209 (commit `64424b8`): `verify` ✅, `audio-tests` ✅, `windows-package` ✅ (this covers the Windows packaging and smoke steps that were not run locally). CodeRabbit ✅.
 
 ## Screenshots
 
