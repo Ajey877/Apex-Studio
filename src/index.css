@@ -24,6 +24,9 @@
   --apex-cyan: #67d9ff;
   /* UI-03C: aux-send identity. Dark keeps the shipped Mixer violet. */
   --apex-aux: #7e57c2;
+  /* UI-03C-fix: aux-send TEXT foreground. Same hue as --apex-aux, lightened so
+     text clears 4.5:1 on every Dark aux surface (incl. the hover wash). */
+  --apex-aux-text: #af96d9;
   --apex-gold: #ffb86b;
   --apex-danger: #ff5f6d;
   --apex-success: #62d7a4;
@@ -345,6 +348,7 @@ input[type="range"], input[type="checkbox"], progress { accent-color: var(--apex
   --apex-cyan: #087da8;
   /* UI-03C: darker violet so aux-send labels clear AA on light strip surfaces. */
   --apex-aux: #5b3aa8;
+  --apex-aux-text: #5b3aa8;
   --apex-gold: #9a5d00;
   --apex-danger: #bd2638;
   --apex-success: #14734e;

@@ -238,3 +238,103 @@ test('switching theme does not change mixer state, levels, routing or the stored
   expect(await mixerSnapshot(page)).toEqual(beforeMixer);
   expect(await persistedState(page)).toEqual(beforeStorage);
 });
+
+/**
+ * UI-03C-fix — aux-send TEXT contrast in a real browser.
+ *
+ * Selects a track, adds a post-fader send through the normal UI, then measures
+ * every element whose text foreground is `--apex-aux-text` against the colour it
+ * actually sits on: the element's own translucent wash (the RETURN button) is
+ * alpha-composited over its opaque ancestors. Hover is measured too, because the
+ * RETURN wash is stronger on hover.
+ */
+const auxTextContrast = (page: Page) =>
+  page.evaluate(() => {
+    type Rgba = [number, number, number, number];
+    const parse = (value: string): Rgba | null => {
+      const srgb = /color\(srgb\s+([\d.eE+-]+)\s+([\d.eE+-]+)\s+([\d.eE+-]+)(?:\s*\/\s*([\d.eE+-]+))?\)/.exec(value);
+      if (srgb) {
+        return [parseFloat(srgb[1]) * 255, parseFloat(srgb[2]) * 255, parseFloat(srgb[3]) * 255, srgb[4] === undefined ? 1 : parseFloat(srgb[4])];
+      }
+      const rgb = /rgba?\(([^)]+)\)/.exec(value);
+      if (rgb) {
+        const p = rgb[1].split(/[,\s/]+/).filter(Boolean).map((x) => parseFloat(x));
+        return [p[0], p[1], p[2], p.length > 3 ? p[3] : 1];
+      }
+      return null;
+    };
+    const luminance = ([r, g, b]: number[]) => {
+      const [R, G, B] = [r, g, b].map((c) => {
+        const v = c / 255;
+        return v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4;
+      });
+      return 0.2126 * R + 0.7152 * G + 0.0722 * B;
+    };
+    /** Composites the element's translucent layers over the first opaque ancestor. */
+    const effectiveBackground = (el: HTMLElement): [number, number, number] => {
+      const layers: Rgba[] = [];
+      for (let node: HTMLElement | null = el; node; node = node.parentElement) {
+        const color = parse(getComputedStyle(node).backgroundColor);
+        if (color && color[3] > 0) layers.push(color);
+        if (color && color[3] >= 1) break;
+      }
+      const deepest = layers[layers.length - 1];
+      let base: [number, number, number] = deepest ? [deepest[0], deepest[1], deepest[2]] : [255, 255, 255];
+      for (let i = layers.length - 2; i >= 0; i -= 1) {
+        const [r, g, b, a] = layers[i];
+        base = [r * a + base[0] * (1 - a), g * a + base[1] * (1 - a), b * a + base[2] * (1 - a)];
+      }
+      return base;
+    };
+    const measure = (label: string, el: HTMLElement) => {
+      const text = parse(getComputedStyle(el).color);
+      if (!text) throw new Error(`${label}: unreadable text colour`);
+      const bg = effectiveBackground(el);
+      const [hi, lo] = [luminance([text[0], text[1], text[2]]), luminance(bg)].sort((a, b) => b - a);
+      return { label, ratio: (hi + 0.05) / (lo + 0.05), text: getComputedStyle(el).color };
+    };
+    const root = document.getElementById('fl-mixer-console');
+    if (!root) throw new Error('mixer not rendered');
+    const readout = [...root.querySelectorAll<HTMLElement>('[class*="text-[var(--apex-aux-text)]"]')];
+    return {
+      count: readout.length,
+      rows: readout.map((el, index) => measure(`${index}:${el.textContent?.trim() ?? ''}`, el)),
+      returnButton: root.querySelector<HTMLElement>('button[title="Create new aux return track"]'),
+    };
+  });
+
+const auxTextUnderTheme = async (page: Page, mode: 'dark' | 'light') => {
+  await THEME_SET(mode)(page);
+  await page.goto(APP_URL);
+  await waitForApp(page);
+  await openMixer(page);
+  // The strip centre is the fader (it stops click propagation); the label area selects the track.
+  await page.locator('#mixer-strip-1').click({ position: { x: 12, y: 40 } });
+  await page.locator('#fl-mixer-console button:has-text("+ Add Post-Fader Send")').click();
+  await expect(page.locator('#fl-mixer-console span:has-text("%")').first()).toBeVisible();
+  return page;
+};
+
+for (const mode of ['dark', 'light'] as const) {
+  test(`aux-send text reaches 4.5:1 on its real background in ${mode}, idle and on hover`, async ({ page }) => {
+    await auxTextUnderTheme(page, mode);
+
+    const idle = await auxTextContrast(page);
+    expect(idle.count, 'aux text elements rendered').toBeGreaterThanOrEqual(2);
+    console.log(`[aux-contrast ${mode} idle]`, JSON.stringify(idle.rows.map((r) => [r.label, r.text, Number(r.ratio.toFixed(2))])));
+    for (const row of idle.rows) {
+      expect(row.ratio, `${mode} idle ${row.label} (${row.text})`).toBeGreaterThanOrEqual(4.5);
+    }
+    expect(idle.returnButton, 'RETURN button rendered').not.toBeNull();
+
+    await page.locator('#fl-mixer-console button[title="Create new aux return track"]').hover();
+    await page.waitForTimeout(250);
+    const hover = await auxTextContrast(page);
+    console.log(`[aux-contrast ${mode} hover]`, JSON.stringify(hover.rows.map((r) => [r.label, r.text, Number(r.ratio.toFixed(2))])));
+    for (const row of hover.rows) {
+      expect(row.ratio, `${mode} hover ${row.label} (${row.text})`).toBeGreaterThanOrEqual(4.5);
+    }
+
+    await page.locator('#fl-mixer-console').screenshot({ path: `assets/screenshots/ui03c-aux-${mode}.png` });
+  });
+}

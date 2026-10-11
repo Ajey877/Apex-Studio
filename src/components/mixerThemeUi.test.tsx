@@ -150,6 +150,41 @@ describe('Mixer renders coherently in Dark and Light (UI-03C)', () => {
   });
 });
 
+describe('Aux-send decoration vs text foreground in rendered markup (UI-03C-fix)', () => {
+  /** The full opening `<span|button|input ...>` tag that contains `needle`. */
+  const tagWith = (markup: string, needle: string): string | undefined =>
+    [...markup.matchAll(/<(span|button|input)\b[^>]*>/g)].map((m) => m[0]).find((tag) => tag.includes(needle));
+
+  for (const mode of ['dark', 'light'] as const) {
+    it(`${mode}: the identity dot and slider keep --apex-aux; every aux text uses --apex-aux-text`, () => {
+      const markup = renderMixer(mode);
+
+      // Decorative identity: the dot beside "AUX SENDS" and the send slider accent.
+      assert.ok(markup.includes('<span class="w-2 h-2 bg-[var(--apex-aux)] rounded-full"></span>'), `${mode}: identity dot`);
+      assert.ok(tagWith(markup, 'accent-[var(--apex-aux)]'), `${mode}: slider accent`);
+
+      // Text foreground: the RETURN button, the send readout and the add-send hover.
+      const returnButton = tagWith(markup, 'title="Create new aux return track"');
+      assert.ok(returnButton, `${mode}: RETURN button rendered`);
+      assert.match(returnButton!, /text-\[var\(--apex-aux-text\)\]/, `${mode}: RETURN label foreground`);
+      const readout = markup.match(/<span class="[^"]*text-\[var\(--apex-aux-text\)\][^"]*">\d+%<\/span>/);
+      assert.ok(readout, `${mode}: send % readout uses the text token`);
+      assert.match(markup, /hover:text-\[var\(--apex-aux-text\)\]/, `${mode}: add-send hover text`);
+
+      // No text may fall back to the decorative token: that colour is the failing 3:1 one.
+      assert.doesNotMatch(markup, /text-\[var\(--apex-aux\)\]/, `${mode}: no text on the decorative token`);
+      assert.doesNotMatch(markup, /hover:text-\[var\(--apex-aux\)\]/, `${mode}: no hover text on the decorative token`);
+    });
+  }
+
+  it('the decorative and text tokens are the same classes in both themes (only values differ)', () => {
+    const dark = renderMixer('dark');
+    const light = renderMixer('light');
+    const classesOf = (markup: string) => classAttributes(markup).filter((c) => c.includes('apex-aux'));
+    assert.deepEqual(classesOf(light), classesOf(dark));
+  });
+});
+
 describe('Mixer source guards (UI-03C)', () => {
   const mixerSource = readFileSync('src/components/Mixer.tsx', 'utf8');
 

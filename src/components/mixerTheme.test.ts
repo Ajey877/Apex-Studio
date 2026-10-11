@@ -22,6 +22,8 @@ import type { CanvasThemeDocument } from './canvasThemeTokens';
 
 import { hexToRgb, LIGHT_TOKENS, DARK_TOKENS, makeThemeDocument as makeDocument } from './themeTestDocument';
 
+const TOKENS_BY_MODE = { dark: DARK_TOKENS, light: LIGHT_TOKENS } as const;
+
 const TRACK_COLORS = ['#00ff88', '#ff6e00', '#00e5ff', '#ffaa00', '#7e57c2', '#ff0055', '#ffffff'];
 
 describe('Mixer palette seam (UI-03C)', () => {
@@ -156,15 +158,77 @@ describe('Mixer track identity colours (UI-03C)', () => {
   });
 });
 
-describe('Aux-send identity token (UI-03C)', () => {
-  it('Dark keeps the shipped Mixer violet exactly', () => {
-    assert.equal(DARK_TOKENS['--apex-aux'], '#7e57c2');
+/**
+ * Resolves a surface token to RGB the way the cascade does for the tokens the
+ * aux-send text sits on: `var()` aliases are followed, and the Dark
+ * `--apex-chrome-inset` formula `color-mix(in srgb, #000 P%, X)` is applied.
+ */
+const resolveSurface = (tokens: Record<string, string>, name: string): [number, number, number] => {
+  const value = tokens[name];
+  assert.ok(value, `token ${name} is declared`);
+  const ref = /^var\((--[\w-]+)\)$/.exec(value.trim());
+  if (ref) return resolveSurface(tokens, ref[1]);
+  const mixed = /^color-mix\(in srgb, #000000 (\d+)%, (.+)\)$/.exec(value.trim());
+  if (mixed) {
+    const inner = resolveSurface(tokens, /var\((--[\w-]+)\)/.exec(mixed[2])![1]);
+    const keep = 1 - Number(mixed[1]) / 100;
+    return inner.map((c) => c * keep) as [number, number, number];
+  }
+  return hexToRgb(value);
+};
+
+/** `color-mix(in srgb, fg A%, transparent)` composited over an opaque background. */
+const composite = (fg: [number, number, number], bg: [number, number, number], alpha: number): [number, number, number] =>
+  fg.map((c, i) => c * alpha + bg[i] * (1 - alpha)) as [number, number, number];
+
+/** Backgrounds the aux-send TEXT labels actually sit on in the Mixer. */
+const auxTextBackgrounds = (tokens: Record<string, string>) => {
+  const panel = resolveSurface(tokens, '--apex-panel');
+  const aux = hexToRgb(tokens['--apex-aux']);
+  return {
+    'aux section (--apex-panel)': panel,
+    'send card (--apex-surface-2)': resolveSurface(tokens, '--apex-surface-2'),
+    'FX rack (--apex-chrome-inset)': resolveSurface(tokens, '--apex-chrome-inset'),
+    'strip canvas (--apex-canvas)': resolveSurface(tokens, '--apex-canvas'),
+    '+ RETURN idle (aux 15% over panel)': composite(aux, panel, 0.15),
+    '+ RETURN hover (aux 30% over panel)': composite(aux, panel, 0.3),
+  };
+};
+
+describe('Aux-send identity and text tokens (UI-03C-fix)', () => {
+  it('Dark keeps the shipped violet for decoration, and a lighter same-hue text token', () => {
+    assert.equal(DARK_TOKENS['--apex-aux'], '#7e57c2', 'decorative identity unchanged');
+    assert.equal(DARK_TOKENS['--apex-aux-text'], '#af96d9');
+    const hueOf = (hex: string) => {
+      const [r, g, b] = hexToRgb(hex).map((c) => c / 255);
+      const max = Math.max(r, g, b), min = Math.min(r, g, b), d = max - min;
+      const h = max === r ? (g - b) / d : max === g ? (b - r) / d + 2 : (r - g) / d + 4;
+      return (h * 60 + 360) % 360;
+    };
+    const drift = Math.abs(hueOf(DARK_TOKENS['--apex-aux']) - hueOf(DARK_TOKENS['--apex-aux-text']));
+    assert.ok(Math.min(drift, 360 - drift) <= 2, `same hue (drift ${drift.toFixed(2)}°)`);
   });
 
-  it('Light aux labels clear AA on the light strip and panel surfaces', () => {
-    const aux = hexToRgb(LIGHT_TOKENS['--apex-aux']);
-    for (const token of ['--apex-surface-2', '--apex-panel', '--apex-canvas']) {
-      assert.ok(contrastRatio(aux, hexToRgb(LIGHT_TOKENS[token])) >= 4.5, `--apex-aux on ${token}`);
-    }
+  it('Light text token is the same violet as the decoration (Light behaviour unchanged)', () => {
+    assert.equal(LIGHT_TOKENS['--apex-aux'], '#5b3aa8');
+    assert.equal(LIGHT_TOKENS['--apex-aux-text'], '#5b3aa8');
+  });
+
+  for (const mode of ['dark', 'light'] as const) {
+    it(`${mode}: aux-send text reaches 4.5:1 on every real aux text background`, () => {
+      const tokens = TOKENS_BY_MODE[mode];
+      const text = hexToRgb(tokens['--apex-aux-text']);
+      for (const [label, bg] of Object.entries(auxTextBackgrounds(tokens))) {
+        const ratio = contrastRatio(text, bg);
+        assert.ok(ratio >= 4.5, `${mode} aux text on ${label}: ${ratio.toFixed(2)}:1`);
+      }
+    });
+  }
+
+  it('the defect is real: the decorative violet alone fails 4.5:1 on Dark text backgrounds', () => {
+    const decorative = hexToRgb(DARK_TOKENS['--apex-aux']);
+    const failing = Object.entries(auxTextBackgrounds(DARK_TOKENS))
+      .filter(([, bg]) => contrastRatio(decorative, bg) < 4.5);
+    assert.equal(failing.length, Object.keys(auxTextBackgrounds(DARK_TOKENS)).length, 'every Dark aux text background failed before the fix');
   });
 });

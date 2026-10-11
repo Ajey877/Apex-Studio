@@ -609,7 +609,7 @@ export const Mixer: React.FC<MixerProps> = ({
                     {onCreateAuxReturn && (
                       <button
                         onClick={onCreateAuxReturn}
-                        className="px-1 py-0.5 bg-[color-mix(in_srgb,var(--apex-aux)_15%,transparent)] hover:bg-[color-mix(in_srgb,var(--apex-aux)_30%,transparent)] text-[var(--apex-aux)] rounded text-[7px] font-bold border border-[color-mix(in_srgb,var(--apex-aux)_30%,transparent)] transition"
+                        className="px-1 py-0.5 bg-[color-mix(in_srgb,var(--apex-aux)_15%,transparent)] hover:bg-[color-mix(in_srgb,var(--apex-aux)_30%,transparent)] text-[var(--apex-aux-text)] rounded text-[7px] font-bold border border-[color-mix(in_srgb,var(--apex-aux)_30%,transparent)] transition"
                         title="Create new aux return track"
                       >
                         + RETURN
@@ -659,7 +659,7 @@ export const Mixer: React.FC<MixerProps> = ({
                         onChange={(e) => handleAuxSendAmountChange(selectedTrack.id, idx, parseFloat(e.target.value))}
                         className="w-20 h-1 accent-[var(--apex-aux)] bg-[var(--apex-chrome-inset)] rounded"
                       />
-                      <span className="font-mono text-[var(--apex-aux)] text-[9px] min-w-[28px] text-right">{Math.round(send.amount * 100)}%</span>
+                      <span className="font-mono text-[var(--apex-aux-text)] text-[9px] min-w-[28px] text-right">{Math.round(send.amount * 100)}%</span>
                     </div>
                   </div>
                 ))}
@@ -667,7 +667,7 @@ export const Mixer: React.FC<MixerProps> = ({
                 {(selectedTrack.auxSends?.length ?? 0) < 2 && (
                   <button
                     onClick={() => handleAddAuxSend(selectedTrack.id)}
-                    className="w-full py-1 text-[9px] font-bold rounded border border-dashed border-[var(--apex-border)] hover:border-[color-mix(in_srgb,var(--apex-aux)_50%,transparent)] text-[var(--apex-text-3)] hover:text-[var(--apex-aux)] transition"
+                    className="w-full py-1 text-[9px] font-bold rounded border border-dashed border-[var(--apex-border)] hover:border-[color-mix(in_srgb,var(--apex-aux)_50%,transparent)] text-[var(--apex-text-3)] hover:text-[var(--apex-aux-text)] transition"
                   >
                     + Add Post-Fader Send
                   </button>

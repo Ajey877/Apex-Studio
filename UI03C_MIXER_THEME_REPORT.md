@@ -129,7 +129,7 @@ Inspected visually: Dark is unchanged in identity (the aux violet, track colours
 
 ## Remaining Mixer defects and limitations
 
-1. **Dark aux-send violet is ≈3:1** against the Dark strip surface (`#7e57c2` on `#202430`). That is below AA for the 7–9 px send labels. It is kept deliberately for Dark identity and was not changed in this phase. A future Dark-only lightening of `--apex-aux` would be a visible identity change and needs a design decision.
+1. ~~**Dark aux-send violet is ≈3:1**~~ — **resolved by the UI-03C-fix correction below.** The decorative `--apex-aux` is unchanged; aux-send text now uses `--apex-aux-text`.
 2. **Live meter colours in Light are verified by contrast, not by a screenshot under playback**, because the sandbox has no audio output to drive the meters.
 3. **The 7-band EQ rack overflows** its card to the right in both themes (the EQ band columns are clipped at the rack edge). This is layout, pre-existing, and outside a colour migration; it was not changed.
 4. **Scope of the FX rack.** `FxParameterControls.tsx` (used only by the Mixer's FX slots) was migrated in this phase: its 17 literal classes now use the existing tokens. The Dark capture was re-inspected after the change and is visually unchanged. Other modal bodies listed in UI-03A remain out of scope.
@@ -139,3 +139,55 @@ Inspected visually: Dark is unchanged in identity (the aux violet, track colours
 ## Next phase
 
 Not started, as instructed.
+
+
+---
+
+## Correction: aux-send text contrast (UI-03C-fix)
+
+**Defect:** the Dark aux-send violet `#7e57c2` was used for both decoration and text. Measured against the real Dark text backgrounds it was 2.83–3.26:1 idle and 2.40:1 on the `+ RETURN` hover wash, below WCAG AA 4.5:1 for the 7–9 px labels.
+
+**Fix (text only; decoration unchanged):**
+
+| Token | Dark | Light | Used for |
+| --- | --- | --- | --- |
+| `--apex-aux` (decoration, unchanged in role) | `#7e57c2` (exact shipped violet) | `#5b3aa8` | aux identity dot, send slider accent, RETURN/add-send borders and washes |
+| `--apex-aux-text` (new, text foreground) | `#af96d9` (same hue, drift 0.5°; lightness 0.55 → 0.72) | `#5b3aa8` (= `--apex-aux`, unchanged Light behaviour) | `+ RETURN` label, send `%` readout, add-send hover text |
+
+`#af96d9` was picked as the lightest-margin same-hue value that clears 4.5:1 on every Dark aux text background (min 4.87:1 at the hover wash, versus 4.51:1 for the bare threshold).
+
+**Measured contrast — real browser (computed colour vs. alpha-composited background, `browser-tests/mixerTheme.spec.ts`):**
+
+| Theme | Label | State | Text | Ratio |
+| --- | --- | --- | --- | --- |
+| Dark | `+ RETURN` | idle (15% wash over panel) | `rgb(175,150,217)` | **5.77** |
+| Dark | `+ RETURN` | hover (30% wash over panel) | `rgb(175,150,217)` | **4.88** |
+| Dark | send `%` readout | on send card (`--apex-surface-2`) | `rgb(175,150,217)` | **6.04** |
+| Light | `+ RETURN` | idle | `rgb(91,58,168)` | **6.30** |
+| Light | `+ RETURN` | hover | `rgb(91,58,168)` | **4.83** |
+| Light | send `%` readout | on send card | `rgb(91,58,168)` | **7.42** |
+
+The add-send button's idle label is `--apex-text-3` (already AA, 5.64 Dark / 5.67 Light); its violet appears only on hover, over the plain aux panel, which is covered by the token test below.
+
+**Token-level test (`mixerTheme.test.ts`, values read from `src/index.css`):** `--apex-aux-text` ≥ 4.5:1 on each real aux text background in both themes: aux section (`--apex-panel`), send card (`--apex-surface-2`), FX rack (`--apex-chrome-inset`, resolved through its `color-mix` formula), strip canvas, and the RETURN idle and hover composites. A negative test locks the defect: the old decorative violet fails on every Dark text background.
+
+**Negative control (proof the browser test discriminates):** with `--apex-aux-text` temporarily set back to `#7e57c2`, the Dark browser test fails with `Expected >= 4.5, Received 2.84` on the `+ RETURN` label. The value was then restored and the test passes.
+
+**Markup test (`mixerThemeUi.test.tsx`, Dark and Light):** the identity dot renders `bg-[var(--apex-aux)]`; the slider accent uses `--apex-aux`; the RETURN label, the `%` readout and the add-send hover use `--apex-aux-text`; no text class anywhere in the markup uses `text-[var(--apex-aux)]` or `hover:text-[var(--apex-aux)]`. The decorative aux classes are identical across themes.
+
+**Unchanged:** audio, routing, send amounts and their clamping, aux-send handlers, state, project persistence, and all other Mixer styling. The diff to `Mixer.tsx` is three class-name substitutions on text elements.
+
+**Changed files (this correction):** `src/index.css` (one new token in each palette), `src/components/Mixer.tsx` (three text classes), `src/components/mixerTheme.test.ts` (aux-text contrast tests), `src/components/mixerThemeUi.test.tsx` (decoration vs text markup test), `browser-tests/mixerTheme.spec.ts` (real-browser aux contrast tests, Dark and Light, idle and hover), `assets/screenshots/ui03c-aux-dark.png` and `ui03c-aux-light.png` (new evidence), this report.
+
+**Validation (actual, this sandbox, after the correction):**
+
+| Check | Result |
+| --- | --- |
+| `npm run lint` | ✅ pass |
+| `npm run build` | ✅ pass |
+| `npm run verify:test-discovery` | ✅ pass, 0 orphaned |
+| `npm run test:history` | ✅ 782/782 (was 776) |
+| `npm run test:audio` | ✅ 1676/1676 |
+| `npm run test:metering` / `test:shell` / `test:effects` / `test:truth` | ✅ all pass |
+| `npm run test:desktop-permissions` / `verify:desktop` | ✅ pass |
+| `npx playwright test` (all specs, real Chromium) | ✅ **31/31** (24 original + 5 Mixer theme + 2 aux contrast) |
