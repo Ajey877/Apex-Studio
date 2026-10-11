@@ -42,14 +42,23 @@ const THEME_SET = (mode: 'dark' | 'light') => (page: Page) =>
  * the recorded value is the palette the very first frame is painted with. A
  * `null` here means nothing had chosen a palette yet — the flash this phase
  * removes.
+ *
+ * `rootCaptured` is a separate flag on purpose. `atRootInsert === null` cannot be
+ * used as the "not captured yet" sentinel, because `null` is also a legitimate
+ * observation: with the pre-paint bootstrap missing, the attribute really is
+ * unset when the root is parsed, and a later React `useLayoutEffect` would then
+ * overwrite that first `null` with the correct theme and conceal the regression.
  */
 const RECORD_THEME_AT_ROOT = (page: Page) =>
   page.addInitScript(() => {
-    const probe = { atRootInsert: null as string | null, seen: [] as string[] };
+    const probe = { atRootInsert: null as string | null, rootCaptured: false, seen: [] as string[] };
     (window as unknown as { __themeProbe: typeof probe }).__themeProbe = probe;
     const note = () => {
       const value = document.documentElement?.dataset.theme ?? null;
-      if (probe.atRootInsert === null && document.getElementById('root')) probe.atRootInsert = value;
+      if (!probe.rootCaptured && document.getElementById('root')) {
+        probe.atRootInsert = value;
+        probe.rootCaptured = true;
+      }
       if (value !== null && probe.seen[probe.seen.length - 1] !== value) probe.seen.push(value);
     };
     // Observing the Document node survives the parser replacing documentElement.
@@ -61,6 +70,15 @@ const RECORD_THEME_AT_ROOT = (page: Page) =>
     });
     note();
   });
+
+/** Reads the probe the helper above installs. */
+const readThemeProbe = (page: Page) =>
+  page.evaluate(
+    () =>
+      (window as unknown as {
+        __themeProbe: { atRootInsert: string | null; rootCaptured: boolean; seen: string[] };
+      }).__themeProbe
+  );
 
 const waitForApp = async (page: Page) => {
   await page.waitForSelector('#root > *', { state: 'attached' });
@@ -80,11 +98,11 @@ test('the stored theme is on the document before React renders its first commit'
   await page.goto(APP_URL);
   await waitForApp(page);
 
-  const probe = await page.evaluate(
-    () => (window as unknown as { __themeProbe: { atRootInsert: string | null; seen: string[] } }).__themeProbe
-  );
+  const probe = await readThemeProbe(page);
+  expect(probe.rootCaptured).toBe(true);
   // The React root is parsed after the inline bootstrap, so the palette is already
-  // decided by the time the root node exists. Remove the bootstrap and this is null.
+  // decided by the time the root node exists. Without the bootstrap this is null —
+  // see the dedicated regression test below, which proves it cannot be concealed.
   expect(probe.atRootInsert).toBe('light');
   // Nothing ever repainted the document with the other theme along the way.
   expect(probe.seen).toEqual(['light']);
@@ -98,14 +116,61 @@ test('the dark default is applied the same way when nothing is stored', async ({
   await RECORD_THEME_AT_ROOT(page);
   await page.goto(APP_URL);
   await waitForApp(page);
-  const probe = await page.evaluate(
-    () => (window as unknown as { __themeProbe: { atRootInsert: string | null; seen: string[] } }).__themeProbe
-  );
+  const probe = await readThemeProbe(page);
+  expect(probe.rootCaptured).toBe(true);
   expect(probe.atRootInsert).toBe('dark');
   expect(probe.seen).toEqual(['dark']);
   const theme = await readTheme(page);
   expect(theme.attr).toBe('dark');
   expect(theme.colorScheme).toBe('dark');
+});
+
+/**
+ * Regression guard for the probe itself.
+ *
+ * The pre-paint bootstrap is a real production mechanism, so this test removes it
+ * rather than mocking the observation: the dev server's own document is served
+ * back with that one inline script stripped, and everything else — React, the
+ * theme state module, the layout effect — stays exactly as it ships.
+ *
+ * With a correct probe, the first observation (nothing had chosen a palette when
+ * the root was parsed) survives as `null` even though React reaches the right
+ * palette moments later in a layout effect. With the previous sentinel bug,
+ * `atRootInsert === null` was indistinguishable from "not captured yet", the
+ * later `light` update overwrote it, and this test would have reported the
+ * pre-paint guarantee as satisfied when it was not.
+ */
+test('a missing pre-paint bootstrap cannot be concealed by the React layout effect', async ({ page, request }) => {
+  await THEME_SET('light')(page);
+  await RECORD_THEME_AT_ROOT(page);
+
+  const response = await request.get(`${APP_URL}/`);
+  const html = await response.text();
+  const withoutBootstrap = html.replace(/<script>try\{document\.documentElement\.dataset\.theme[\s\S]*?<\/script>/, '');
+  // If the script ever moves or is renamed, fail loudly here instead of silently
+  // asserting nothing about the pre-paint path.
+  expect(withoutBootstrap).not.toBe(html);
+  expect(withoutBootstrap).not.toContain('documentElement.dataset.theme');
+
+  await page.route(`${APP_URL}/`, route =>
+    route.fulfill({ status: 200, contentType: 'text/html', body: withoutBootstrap })
+  );
+
+  await page.goto(APP_URL);
+  await waitForApp(page);
+
+  const probe = await readThemeProbe(page);
+  // React still lands on the stored preference, in a layout effect, with no flash
+  // of the other theme — the app-level behaviour is not what is under test here.
+  expect(probe.seen).toContain('light');
+  expect(probe.seen).not.toContain('dark');
+  expect((await readTheme(page)).attr).toBe('light');
+
+  // The probe must not let that later update stand in for the missing pre-paint
+  // step: the root's first observation was "no palette chosen yet", and it stays
+  // that way.
+  expect(probe.rootCaptured).toBe(true);
+  expect(probe.atRootInsert).toBeNull();
 });
 
 test('switching to Light in Settings applies immediately, persists and spares the project', async ({ page }) => {
