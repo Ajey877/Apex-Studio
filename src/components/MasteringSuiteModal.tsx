@@ -17,6 +17,19 @@ import {
 } from 'lucide-react';
 import { MasteringSuiteState, MultibandBandSettings, MasterMeasurementSnapshot } from '../types/daw';
 import { audioEngine } from '../audio/audioEngine';
+import {
+  MASTERING_CONTROL_RANGES,
+  applyMasteringControlChange,
+  bandRangeLabel,
+  formatFrequencyHz,
+  isBandAudible,
+  resolveCrossoverFrequencies,
+  toggleBandMute,
+  toggleBandSolo,
+} from '../audio/masteringControls';
+import type { MasteringBandKey, MasteringControlRange } from '../audio/masteringControls';
+
+export type MasteringSuiteTab = 'metering' | 'multiband' | 'imager' | 'maximizer';
 
 interface MasteringSuiteModalProps {
   isOpen: boolean;
@@ -24,6 +37,12 @@ interface MasteringSuiteModalProps {
   masteringState: MasteringSuiteState;
   onUpdateMasteringState: (state: MasteringSuiteState) => void;
   isPlaying: boolean;
+  /**
+   * Tab shown on mount. Optional and defaulted so existing call sites are
+   * unaffected; it exists so the control bindings can be rendered and asserted
+   * without a DOM to click through.
+   */
+  initialTab?: MasteringSuiteTab;
 }
 
 /**
@@ -49,6 +68,246 @@ const MasteringPathStatus = ({ label, enabled }: { label: string; enabled: boole
     <span className="text-[10px] text-[#777] whitespace-nowrap">{enabled ? 'LIVE + OFFLINE PATH' : 'DRY SIGNAL PATH'}</span>
   </div>
 );
+
+/**
+ * Phase 90 — a labelled range control for a mastering setting.
+ *
+ * `min`/`max`/`step` come from `MASTERING_CONTROL_RANGES`, the same table the
+ * tests read, so the rendered control cannot advertise a range the state layer
+ * does not honour. `controlId` is written to the DOM as `data-control-id` so a
+ * binding test can find the control without depending on layout or copy.
+ */
+const MasteringControlSlider = ({
+  controlId,
+  label,
+  value,
+  range,
+  accentClass,
+  formatValue,
+  onValue,
+}: {
+  controlId: string;
+  label: string;
+  value: number;
+  range: MasteringControlRange;
+  /** Full Tailwind class: dynamic class fragments are not extracted by the build. */
+  accentClass: string;
+  formatValue: (value: number) => string;
+  onValue: (raw: string) => void;
+}) => (
+  <div>
+    <div className="flex justify-between text-[11px] text-[#888] mb-1">
+      <span>{label}</span>
+      <span className="font-mono text-white">{formatValue(value)}</span>
+    </div>
+    <input
+      type="range"
+      data-control-id={controlId}
+      aria-label={label}
+      min={range.min}
+      max={range.max}
+      step={range.step}
+      value={value}
+      onChange={(e) => onValue(e.target.value)}
+      className={`w-full ${accentClass}`}
+    />
+  </div>
+);
+
+/** Solo/Mute pair for one band. Shows the state that will actually be heard. */
+const MasteringBandSwitches = ({
+  band,
+  audible,
+  solo,
+  mute,
+  onToggleSolo,
+  onToggleMute,
+}: {
+  band: MasteringBandKey;
+  audible: boolean;
+  solo: boolean;
+  mute: boolean;
+  onToggleSolo: () => void;
+  onToggleMute: () => void;
+}) => (
+  <div className="flex items-center gap-1.5">
+    <button
+      type="button"
+      data-control-id={`${band}.solo`}
+      aria-label={`Solo ${band} band`}
+      aria-pressed={solo}
+      onClick={onToggleSolo}
+      className={`flex-1 px-2 py-1 rounded text-[10px] font-bold uppercase tracking-wider border transition ${
+        solo
+          ? 'bg-[#ffaa00] text-black border-[#ffaa00]'
+          : 'bg-[#101014] text-[#888] border-[#28282b] hover:border-[#ffaa00]'
+      }`}
+    >
+      Solo
+    </button>
+    <button
+      type="button"
+      data-control-id={`${band}.mute`}
+      aria-label={`Mute ${band} band`}
+      aria-pressed={mute}
+      onClick={onToggleMute}
+      className={`flex-1 px-2 py-1 rounded text-[10px] font-bold uppercase tracking-wider border transition ${
+        mute
+          ? 'bg-[#ff0055] text-black border-[#ff0055]'
+          : 'bg-[#101014] text-[#888] border-[#28282b] hover:border-[#ff0055]'
+      }`}
+    >
+      Mute
+    </button>
+    <span className="text-[9px] font-mono text-[#666] whitespace-nowrap">
+      {audible ? 'AUDIBLE' : 'SILENCED'}
+    </span>
+  </div>
+);
+
+/** Per-band presentation. The three cards are identical apart from these values. */
+interface BandCardConfig {
+  band: MasteringBandKey;
+  title: string;
+  dotClass: string;
+  valueClass: string;
+  accentClass: string;
+  grLabel: string;
+}
+
+const BAND_CARDS: readonly BandCardConfig[] = [
+  { band: 'lowBand', title: 'LOW BAND', dotClass: 'bg-[#ffaa00]', valueClass: 'text-[#ffaa00]', accentClass: 'accent-[#ffaa00]', grLabel: 'GR (Low)' },
+  { band: 'midBand', title: 'MID BAND', dotClass: 'bg-[#00ff88]', valueClass: 'text-[#00ff88]', accentClass: 'accent-[#00ff88]', grLabel: 'GR (Mid)' },
+  { band: 'highBand', title: 'HIGH BAND', dotClass: 'bg-[#00e5ff]', valueClass: 'text-[#00e5ff]', accentClass: 'accent-[#00e5ff]', grLabel: 'GR (High)' },
+];
+
+/**
+ * One multiband strip: the compressor controls plus the band's solo/mute.
+ *
+ * The frequency range in the header is derived from the live crossover values
+ * rather than written out, so moving a crossover updates every band label that
+ * depends on it.
+ */
+const MasteringBandCard = ({
+  config,
+  state,
+  rangeLabel,
+  onUpdate,
+}: {
+  config: BandCardConfig;
+  state: MasteringSuiteState;
+  rangeLabel: string;
+  onUpdate: (next: MasteringSuiteState) => void;
+}) => {
+  const band = state[config.band];
+  const gainText = band.gain > 0 ? `+${band.gain}` : `${band.gain}`;
+  const apply = (target: `${MasteringBandKey}.attack` | `${MasteringBandKey}.release` | `${MasteringBandKey}.knee`) =>
+    (raw: string) => onUpdate(applyMasteringControlChange(state, target, raw));
+
+  return (
+    <div className="bg-[#18181d] border border-[#282830] rounded-xl p-3 flex flex-col gap-3">
+      <div className="flex items-center justify-between border-b border-[#282830] pb-2">
+        <div className="flex items-center gap-1.5">
+          <div className={`w-2 h-2 rounded-full ${config.dotClass}`} />
+          <span className="text-xs font-bold text-white">{config.title} ({rangeLabel})</span>
+        </div>
+        <span className={`text-[10px] font-mono ${config.valueClass}`}>{gainText} dB</span>
+      </div>
+
+      <div className="space-y-2 text-xs">
+        <div>
+          <div className="flex justify-between text-[11px] text-[#888] mb-1">
+            <span>Threshold</span>
+            <span className="font-mono text-white">{band.threshold} dB</span>
+          </div>
+          <input
+            type="range" min="-48" max="0" step="1"
+            data-control-id={`${config.band}.threshold`}
+            aria-label={`Threshold ${config.band} band`}
+            value={band.threshold}
+            onChange={(e) => onUpdate({ ...state, [config.band]: { ...band, threshold: Number(e.target.value) } })}
+            className={`w-full ${config.accentClass}`}
+          />
+        </div>
+
+        <div>
+          <div className="flex justify-between text-[11px] text-[#888] mb-1">
+            <span>Gain Makeup</span>
+            <span className="font-mono text-white">{band.gain} dB</span>
+          </div>
+          <input
+            type="range" min="-12" max="12" step="0.5"
+            data-control-id={`${config.band}.gain`}
+            aria-label={`Gain makeup ${config.band} band`}
+            value={band.gain}
+            onChange={(e) => onUpdate({ ...state, [config.band]: { ...band, gain: Number(e.target.value) } })}
+            className={`w-full ${config.accentClass}`}
+          />
+        </div>
+
+        <div>
+          <div className="flex justify-between text-[11px] text-[#888] mb-1">
+            <span>Compression Ratio</span>
+            <span className="font-mono text-white">{band.ratio}:1</span>
+          </div>
+          <input
+            type="range" min="1" max="12" step="0.5"
+            data-control-id={`${config.band}.ratio`}
+            aria-label={`Compression ratio ${config.band} band`}
+            value={band.ratio}
+            onChange={(e) => onUpdate({ ...state, [config.band]: { ...band, ratio: Number(e.target.value) } })}
+            className={`w-full ${config.accentClass}`}
+          />
+        </div>
+
+        <MasteringControlSlider
+          controlId={`${config.band}.attack`}
+          label="Attack"
+          value={band.attack}
+          range={MASTERING_CONTROL_RANGES.bandAttack}
+          accentClass={config.accentClass}
+          formatValue={(v) => `${v} ms`}
+          onValue={apply(`${config.band}.attack`)}
+        />
+
+        <MasteringControlSlider
+          controlId={`${config.band}.release`}
+          label="Release"
+          value={band.release}
+          range={MASTERING_CONTROL_RANGES.bandRelease}
+          accentClass={config.accentClass}
+          formatValue={(v) => `${v} ms`}
+          onValue={apply(`${config.band}.release`)}
+        />
+
+        <MasteringControlSlider
+          controlId={`${config.band}.knee`}
+          label="Knee"
+          value={band.knee}
+          range={MASTERING_CONTROL_RANGES.bandKnee}
+          accentClass={config.accentClass}
+          formatValue={(v) => `${v} dB`}
+          onValue={apply(`${config.band}.knee`)}
+        />
+
+        <MasteringBandSwitches
+          band={config.band}
+          audible={isBandAudible(state, config.band)}
+          solo={band.solo}
+          mute={band.mute}
+          onToggleSolo={() => onUpdate(toggleBandSolo(state, config.band))}
+          onToggleMute={() => onUpdate(toggleBandMute(state, config.band))}
+        />
+      </div>
+
+      {/* Reduction Meter */}
+      <div className="bg-[#0a0a0c] p-2 rounded border border-[#222] flex items-center justify-between text-[10px] font-mono">
+        <span className="text-[#888]">{config.grLabel}</span>
+        <span className="text-[#666]">NOT MEASURED — compressor in path, no GR metering</span>
+      </div>
+    </div>
+  );
+};
 
 const MASTERING_PRESETS = [
   {
@@ -114,9 +373,10 @@ export const MasteringSuiteModal: React.FC<MasteringSuiteModalProps> = ({
   onClose,
   masteringState,
   onUpdateMasteringState,
-  isPlaying
+  isPlaying,
+  initialTab = 'metering'
 }) => {
-  const [activeTab, setActiveTab] = useState<'metering' | 'multiband' | 'imager' | 'maximizer'>('metering');
+  const [activeTab, setActiveTab] = useState<MasteringSuiteTab>(initialTab);
   // No seed values: `null` is the honest "nothing has been measured yet" state,
   // and every readout below has to handle it. The default object this replaces
   // carried a plausible integrated LUFS figure, a reassuring peak and a wide
@@ -300,6 +560,11 @@ export const MasteringSuiteModal: React.FC<MasteringSuiteModalProps> = ({
   const integratedLufs = measurement?.integratedLufs ?? null;
   const lufsTargetValue = masteringState.lufsTarget ?? -14.0;
   const lufsDelta = integratedLufs === null ? null : integratedLufs - lufsTargetValue;
+  // The crossover frequencies the processor will actually configure, after its
+  // 100 Hz separation guard and Nyquist cap. Band headers and the crossover
+  // readout use this, so the UI describes the filters in use rather than the
+  // raw stored numbers.
+  const crossover = resolveCrossoverFrequencies(masteringState);
   // The gate every status readout shares: a verdict may only exist when the
   // measurement it refers to exists.
   const isMeasured = measurement?.availability === 'measured';
@@ -629,206 +894,58 @@ export const MasteringSuiteModal: React.FC<MasteringSuiteModalProps> = ({
               <div className="md:col-span-3">
                 <MasteringPathStatus label="3-BAND MULTIBAND COMPRESSOR" enabled={masteringState.enabled} />
               </div>
-              {/* Low Band */}
-              <div className="bg-[#18181d] border border-[#282830] rounded-xl p-3 flex flex-col gap-3">
+
+              {/*
+                Band crossover. These two filters decide which band owns which
+                frequencies, so the band headers below are derived from them
+                instead of carrying a hard-coded range.
+              */}
+              <div className="md:col-span-3 bg-[#18181d] border border-[#282830] rounded-xl p-3 flex flex-col gap-2">
                 <div className="flex items-center justify-between border-b border-[#282830] pb-2">
-                  <div className="flex items-center gap-1.5">
-                    <div className="w-2 h-2 rounded-full bg-[#ffaa00]" />
-                    <span className="text-xs font-bold text-white">LOW BAND (20 - 150 Hz)</span>
-                  </div>
-                  <span className="text-[10px] font-mono text-[#ffaa00]">{masteringState.lowBand.gain > 0 ? `+${masteringState.lowBand.gain}` : masteringState.lowBand.gain} dB</span>
+                  <span className="text-xs font-bold text-white flex items-center gap-1.5">
+                    <Layers className="w-3.5 h-3.5 text-[#ff6e00]" />
+                    BAND CROSSOVER
+                  </span>
+                  <span className="text-[10px] font-mono text-[#888]">
+                    LOW {formatFrequencyHz(crossover.lowCrossHz)} · HIGH {formatFrequencyHz(crossover.highCrossHz)}
+                  </span>
                 </div>
-
-                <div className="space-y-2 text-xs">
-                  <div>
-                    <div className="flex justify-between text-[11px] text-[#888] mb-1">
-                      <span>Threshold</span>
-                      <span className="font-mono text-white">{masteringState.lowBand.threshold} dB</span>
-                    </div>
-                    <input 
-                      type="range" min="-48" max="0" step="1" 
-                      value={masteringState.lowBand.threshold}
-                      onChange={(e) => onUpdateMasteringState({
-                        ...masteringState,
-                        lowBand: { ...masteringState.lowBand, threshold: Number(e.target.value) }
-                      })}
-                      className="w-full accent-[#ffaa00]"
-                    />
-                  </div>
-
-                  <div>
-                    <div className="flex justify-between text-[11px] text-[#888] mb-1">
-                      <span>Gain Makeup</span>
-                      <span className="font-mono text-white">{masteringState.lowBand.gain} dB</span>
-                    </div>
-                    <input 
-                      type="range" min="-12" max="12" step="0.5" 
-                      value={masteringState.lowBand.gain}
-                      onChange={(e) => onUpdateMasteringState({
-                        ...masteringState,
-                        lowBand: { ...masteringState.lowBand, gain: Number(e.target.value) }
-                      })}
-                      className="w-full accent-[#ffaa00]"
-                    />
-                  </div>
-
-                  <div>
-                    <div className="flex justify-between text-[11px] text-[#888] mb-1">
-                      <span>Compression Ratio</span>
-                      <span className="font-mono text-white">{masteringState.lowBand.ratio}:1</span>
-                    </div>
-                    <input 
-                      type="range" min="1" max="12" step="0.5" 
-                      value={masteringState.lowBand.ratio}
-                      onChange={(e) => onUpdateMasteringState({
-                        ...masteringState,
-                        lowBand: { ...masteringState.lowBand, ratio: Number(e.target.value) }
-                      })}
-                      className="w-full accent-[#ffaa00]"
-                    />
-                  </div>
-                </div>
-
-                {/* Reduction Meter */}
-                <div className="bg-[#0a0a0c] p-2 rounded border border-[#222] flex items-center justify-between text-[10px] font-mono">
-                  <span className="text-[#888]">GR (Low)</span>
-                  <span className="text-[#666]">NOT MEASURED — compressor in path, no GR metering</span>
+                <p className="text-[10px] text-[#888]">
+                  Second-order biquad splits at the default Q of 1. The three bands are summed after their
+                  compressors, so a crossover is where adjacent bands overlap, not a unity-sum alignment. The
+                  processor holds the low split at least 100 Hz below the high split and caps both below Nyquist.
+                </p>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <MasteringControlSlider
+                    controlId="lowCrossFreq"
+                    label="Low Crossover"
+                    value={masteringState.lowCrossFreq}
+                    range={MASTERING_CONTROL_RANGES.lowCrossFreq}
+                    accentClass="accent-[#ff6e00]"
+                    formatValue={(v) => formatFrequencyHz(v)}
+                    onValue={(raw) => onUpdateMasteringState(applyMasteringControlChange(masteringState, 'lowCrossFreq', raw))}
+                  />
+                  <MasteringControlSlider
+                    controlId="highCrossFreq"
+                    label="High Crossover"
+                    value={masteringState.highCrossFreq}
+                    range={MASTERING_CONTROL_RANGES.highCrossFreq}
+                    accentClass="accent-[#ff6e00]"
+                    formatValue={(v) => formatFrequencyHz(v)}
+                    onValue={(raw) => onUpdateMasteringState(applyMasteringControlChange(masteringState, 'highCrossFreq', raw))}
+                  />
                 </div>
               </div>
 
-              {/* Mid Band */}
-              <div className="bg-[#18181d] border border-[#282830] rounded-xl p-3 flex flex-col gap-3">
-                <div className="flex items-center justify-between border-b border-[#282830] pb-2">
-                  <div className="flex items-center gap-1.5">
-                    <div className="w-2 h-2 rounded-full bg-[#00ff88]" />
-                    <span className="text-xs font-bold text-white">MID BAND (150Hz - 3.5kHz)</span>
-                  </div>
-                  <span className="text-[10px] font-mono text-[#00ff88]">{masteringState.midBand.gain > 0 ? `+${masteringState.midBand.gain}` : masteringState.midBand.gain} dB</span>
-                </div>
-
-                <div className="space-y-2 text-xs">
-                  <div>
-                    <div className="flex justify-between text-[11px] text-[#888] mb-1">
-                      <span>Threshold</span>
-                      <span className="font-mono text-white">{masteringState.midBand.threshold} dB</span>
-                    </div>
-                    <input 
-                      type="range" min="-48" max="0" step="1" 
-                      value={masteringState.midBand.threshold}
-                      onChange={(e) => onUpdateMasteringState({
-                        ...masteringState,
-                        midBand: { ...masteringState.midBand, threshold: Number(e.target.value) }
-                      })}
-                      className="w-full accent-[#00ff88]"
-                    />
-                  </div>
-
-                  <div>
-                    <div className="flex justify-between text-[11px] text-[#888] mb-1">
-                      <span>Gain Makeup</span>
-                      <span className="font-mono text-white">{masteringState.midBand.gain} dB</span>
-                    </div>
-                    <input 
-                      type="range" min="-12" max="12" step="0.5" 
-                      value={masteringState.midBand.gain}
-                      onChange={(e) => onUpdateMasteringState({
-                        ...masteringState,
-                        midBand: { ...masteringState.midBand, gain: Number(e.target.value) }
-                      })}
-                      className="w-full accent-[#00ff88]"
-                    />
-                  </div>
-
-                  <div>
-                    <div className="flex justify-between text-[11px] text-[#888] mb-1">
-                      <span>Compression Ratio</span>
-                      <span className="font-mono text-white">{masteringState.midBand.ratio}:1</span>
-                    </div>
-                    <input 
-                      type="range" min="1" max="12" step="0.5" 
-                      value={masteringState.midBand.ratio}
-                      onChange={(e) => onUpdateMasteringState({
-                        ...masteringState,
-                        midBand: { ...masteringState.midBand, ratio: Number(e.target.value) }
-                      })}
-                      className="w-full accent-[#00ff88]"
-                    />
-                  </div>
-                </div>
-
-                {/* Reduction Meter */}
-                <div className="bg-[#0a0a0c] p-2 rounded border border-[#222] flex items-center justify-between text-[10px] font-mono">
-                  <span className="text-[#888]">GR (Mid)</span>
-                  <span className="text-[#666]">NOT MEASURED — compressor in path, no GR metering</span>
-                </div>
-              </div>
-
-              {/* High Band */}
-              <div className="bg-[#18181d] border border-[#282830] rounded-xl p-3 flex flex-col gap-3">
-                <div className="flex items-center justify-between border-b border-[#282830] pb-2">
-                  <div className="flex items-center gap-1.5">
-                    <div className="w-2 h-2 rounded-full bg-[#00e5ff]" />
-                    <span className="text-xs font-bold text-white">HIGH BAND (3.5k - 20kHz)</span>
-                  </div>
-                  <span className="text-[10px] font-mono text-[#00e5ff]">{masteringState.highBand.gain > 0 ? `+${masteringState.highBand.gain}` : masteringState.highBand.gain} dB</span>
-                </div>
-
-                <div className="space-y-2 text-xs">
-                  <div>
-                    <div className="flex justify-between text-[11px] text-[#888] mb-1">
-                      <span>Threshold</span>
-                      <span className="font-mono text-white">{masteringState.highBand.threshold} dB</span>
-                    </div>
-                    <input 
-                      type="range" min="-48" max="0" step="1" 
-                      value={masteringState.highBand.threshold}
-                      onChange={(e) => onUpdateMasteringState({
-                        ...masteringState,
-                        highBand: { ...masteringState.highBand, threshold: Number(e.target.value) }
-                      })}
-                      className="w-full accent-[#00e5ff]"
-                    />
-                  </div>
-
-                  <div>
-                    <div className="flex justify-between text-[11px] text-[#888] mb-1">
-                      <span>Gain Makeup</span>
-                      <span className="font-mono text-white">{masteringState.highBand.gain} dB</span>
-                    </div>
-                    <input 
-                      type="range" min="-12" max="12" step="0.5" 
-                      value={masteringState.highBand.gain}
-                      onChange={(e) => onUpdateMasteringState({
-                        ...masteringState,
-                        highBand: { ...masteringState.highBand, gain: Number(e.target.value) }
-                      })}
-                      className="w-full accent-[#00e5ff]"
-                    />
-                  </div>
-
-                  <div>
-                    <div className="flex justify-between text-[11px] text-[#888] mb-1">
-                      <span>Compression Ratio</span>
-                      <span className="font-mono text-white">{masteringState.highBand.ratio}:1</span>
-                    </div>
-                    <input 
-                      type="range" min="1" max="12" step="0.5" 
-                      value={masteringState.highBand.ratio}
-                      onChange={(e) => onUpdateMasteringState({
-                        ...masteringState,
-                        highBand: { ...masteringState.highBand, ratio: Number(e.target.value) }
-                      })}
-                      className="w-full accent-[#00e5ff]"
-                    />
-                  </div>
-                </div>
-
-                {/* Reduction Meter */}
-                <div className="bg-[#0a0a0c] p-2 rounded border border-[#222] flex items-center justify-between text-[10px] font-mono">
-                  <span className="text-[#888]">GR (High)</span>
-                  <span className="text-[#666]">NOT MEASURED — compressor in path, no GR metering</span>
-                </div>
-              </div>
+              {BAND_CARDS.map((config) => (
+                <MasteringBandCard
+                  key={config.band}
+                  config={config}
+                  state={masteringState}
+                  rangeLabel={bandRangeLabel(masteringState, config.band)}
+                  onUpdate={onUpdateMasteringState}
+                />
+              ))}
             </div>
           )}
 
@@ -920,6 +1037,20 @@ export const MasteringSuiteModal: React.FC<MasteringSuiteModalProps> = ({
                       className="w-full accent-[#00ff88]"
                     />
                   </div>
+
+                  <MasteringControlSlider
+                    controlId="maximizerRelease"
+                    label="Release"
+                    value={masteringState.maximizerRelease}
+                    range={MASTERING_CONTROL_RANGES.maximizerRelease}
+                    accentClass="accent-[#ff0055]"
+                    formatValue={(v) => `${v} ms`}
+                    onValue={(raw) => onUpdateMasteringState(applyMasteringControlChange(masteringState, 'maximizerRelease', raw))}
+                  />
+                  <p className="text-[10px] text-[#666] leading-tight">
+                    Recovery time of the maximizer compressor after a peak. Short values hold the ceiling tighter and
+                    can pump; long values breathe but let transients through. This is compressor release, not lookahead.
+                  </p>
                 </div>
               </div>
 

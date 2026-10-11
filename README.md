@@ -129,7 +129,9 @@ Shape sounds with two oscillators, filters and modulation.
 | **Mixer** | Work across mixer tracks with volume, pan, routing, metering and insert effects (EQ, reverb, delay, compression, limiter). |
 | **Synth** | Shape sounds with dual oscillators, filters, ADSR and modulation controls. |
 | **Recording** | Capture audio and place recorded takes into the project. |
+| **Take Comping** | Pick the active take in each recorded take group; the takes you do not select are silenced in playback and export. |
 | **FX** | Use EQ, reverb, delay, compression and time/volume-style effects. |
+| **Mastering Suite** | Process the master bus with a 3-band multiband compressor, stereo imager and maximizer, alongside gated loudness and true-peak metering. |
 | **Export** | Render WAV, export Standard MIDI, and create project/stem packages. |
 
 ---
@@ -313,10 +315,47 @@ The surfaces below are **in the app but not wired into the audio engine yet**, a
 |---|---|
 | **Vocal Tuner** | Settings are saved with the project but **not applied** — there is no pitch detection or pitch correction in the signal path. |
 | **Warp Processor** | Applies **pitch and playback rate** to an audio clip. Length-preserving time-stretch is **not implemented**, so pitch rides with the rate. |
-| **Take Comping** | **Prototype / demo.** Shows placeholder takes; it never invents audio, and promoting a comp needs recorded assets that exist. |
 | **Wavetable Synth** | **Preview surface.** The channel keeps playing with its dual-oscillator subtractive synth; there is no wavetable engine behind this window yet. |
 | **Polyphonic Blob Editor** | **Prototype.** Displays sample blobs; it does not analyse, import or play back project audio. |
-| **Mastering Suite** | Loudness and true-peak **metering is live**. The mastering processors are **not applied** to the master bus. |
+
+### Mastering Suite processing path
+
+The mastering processors **are applied to the master bus**. The same `MasteringProcessor`
+graph is installed in the live `AudioContext` and in the `OfflineAudioContext` used for
+export, so playback and rendered files follow the same settings. Bypassing the suite is a
+literal dry path rather than a no-op setting.
+
+What is in the signal path:
+
+- **3-band multiband compressor** — low/mid/high crossovers (low 80–500 Hz, high 1.8–16 kHz),
+  and per band: threshold, ratio, makeup gain, attack, release, knee, solo and mute.
+- **Stereo imager** — width multiplier plus a sub-bass mono collapse below a set frequency.
+- **Maximizer** — threshold (drive), release, and a brickwall ceiling.
+
+Known limitations, stated here and in the suite's own UI:
+
+- The maximizer is a fast-attack compressor followed by a 4× oversampled hard clip. It is
+  **not** a true-peak lookahead limiter: there is no delay buffer, and the "lookahead"
+  setting only switches the compressor attack between 1 ms and 5 ms.
+- The **LUFS target is a metering reference only**. It is displayed next to the measured
+  integrated loudness; it does not apply automatic gain.
+- Loudness, true-peak and stereo metering measure the master bus, but there is **no
+  gain-reduction metering** — the per-band GR readouts say `NOT MEASURED` because nothing
+  measures them yet.
+- The crossover splits are 12 dB/octave biquads summed after their compressors, not a
+  unity-sum alignment, so bands overlap at the crossover points.
+
+### Take comping scope
+
+Take comping works on **recorded take groups that exist in the project**. The comping window
+lists every take group, shows which take is currently active, and lets you select a different
+one. The selection is written to the project, is undoable, and the audio engine honours it:
+takes that are not active are silenced in both live playback and offline export. Nothing is
+deleted when you switch takes.
+
+Its scope is whole-take selection. It does not split a take into regions, and it does not
+crossfade between takes, so it is comping by take rather than comping by phrase. It also never
+creates audio: a project with no recorded takes has no take groups to show.
 
 ### Local collaboration and sync status
 
