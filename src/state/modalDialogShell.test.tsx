@@ -490,7 +490,11 @@ const MODAL_CASES: ModalCase[] = [
   {
     name: 'Vocal Tuner', file: 'VocalTunerModal.tsx', modalId: 'fl-vocal-tuner-modal',
     titleId: 'fl-vocal-tuner-modal-title', titleText: 'AUTO-PITCH & VOCAL TUNER',
-    closeLabel: 'Close vocal tuner', overlayClass: OVERLAY_STUDIO,
+    // UI-03H: the dead `bg-black/85 backdrop-blur-md` scrim is removed; ModalFrame
+    // supplies the themed `apex-modal-overlay` and the modal keeps its flex/
+    // centering classes only. This matches the UI-03B/C/D/E/F/G pattern.
+    closeLabel: 'Close vocal tuner',
+    overlayClass: 'apex-modal-overlay fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 select-none',
     open: React.createElement(VocalTunerModal, {
       isOpen: true, onClose: noop, vocalTunerSettings: vocalTunerFixture,
       onUpdateVocalTuner: noop, channels,
