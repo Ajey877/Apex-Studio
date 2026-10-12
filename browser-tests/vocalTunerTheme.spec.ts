@@ -170,6 +170,8 @@ const measureDialogText = (page: Page) =>
       if (text) measure(el, text);
     });
     dialog.querySelectorAll('select').forEach((el) => {
+      // A closed <select> paints its selected option text on the element
+      // itself, not on the child <option> nodes; measure the <select> only.
       const field = el as HTMLSelectElement;
       const text = field.selectedOptions[0]?.textContent ?? '';
       if (text.trim()) measure(el, text.trim());
