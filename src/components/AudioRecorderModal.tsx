@@ -22,6 +22,7 @@ import {
   type PunchRecordingSettings,
 } from '../music/punchRecording';
 import { sessionBlobUrlRegistry } from '../state/sessionBlobUrlRegistry';
+import { readRecorderPalette } from './audioRecorderTheme';
 
 interface AudioRecorderModalProps {
   isOpen: boolean;
@@ -177,10 +178,14 @@ export const AudioRecorderModal: React.FC<AudioRecorderModalProps> = ({ isOpen, 
         if (canvas) {
           const context = canvas.getContext('2d');
           if (context) {
+            // UI-03F: the palette is read on every frame, so a theme flip is
+            // picked up on the next frame. Canvas draw commands cannot read CSS
+            // custom properties, which is why the colours come from the seam.
+            const palette = readRecorderPalette();
             context.clearRect(0, 0, canvas.width, canvas.height);
-            context.fillStyle = '#0a0a0b';
+            context.fillStyle = palette.canvasBackground;
             context.fillRect(0, 0, canvas.width, canvas.height);
-            context.strokeStyle = '#ff6e00';
+            context.strokeStyle = palette.signal.wave;
             context.lineWidth = 2;
             context.beginPath();
             const mid = canvas.height / 2;
@@ -422,24 +427,24 @@ export const AudioRecorderModal: React.FC<AudioRecorderModalProps> = ({ isOpen, 
       : recordingState.toUpperCase();
 
   return (
-    <ModalFrame id="audio-recorder-modal" labelledBy="audio-recorder-modal-title" onClose={onClose} className="fixed inset-0 bg-black/85 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-      <div className="bg-[#141416] border border-[#333336] rounded-xl w-full max-w-lg shadow-2xl overflow-hidden text-[#b0b0b0]">
-        <div className="px-5 py-3.5 bg-[#1a1a1d] border-b border-[#333336] flex items-center justify-between">
-          <div className="flex items-center space-x-2.5"><div className="w-7 h-7 bg-[#ff6e00]/15 border border-[#ff6e00]/30 rounded flex items-center justify-center"><Mic className="w-4 h-4 text-[#ff6e00]" /></div><div><h3 id="audio-recorder-modal-title" className="font-bold text-sm text-white tracking-tight">AUDIO RECORDER</h3><p className="text-[10px] text-[#777]">Real microphone / line-in capture</p></div></div>
-          <button onClick={onClose} aria-label="Close audio recorder" disabled={recordingState === 'stopping' || isApplying} className="p-1 rounded hover:bg-[#2d2d30] text-[#777] hover:text-white transition disabled:opacity-40"><X className="w-4 h-4" /></button>
+    <ModalFrame id="audio-recorder-modal" labelledBy="audio-recorder-modal-title" onClose={onClose} className="fixed inset-0 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+      <div className="bg-[var(--apex-surface)] border border-[var(--apex-border)] rounded-xl w-full max-w-lg shadow-2xl overflow-hidden text-[var(--apex-text-2)]">
+        <div className="px-5 py-3.5 bg-[var(--apex-surface)] border-b border-[var(--apex-border)] flex items-center justify-between">
+          <div className="flex items-center space-x-2.5"><div className="w-7 h-7 bg-[var(--apex-state-selected)] border border-[var(--apex-state-selected-border)] rounded flex items-center justify-center"><Mic className="w-4 h-4 text-[var(--apex-accent)]" /></div><div><h3 id="audio-recorder-modal-title" className="font-bold text-sm text-[var(--apex-text)] tracking-tight">AUDIO RECORDER</h3><p className="text-[10px] text-[var(--apex-text-3)]">Real microphone / line-in capture</p></div></div>
+          <button onClick={onClose} aria-label="Close audio recorder" disabled={recordingState === 'stopping' || isApplying} className="p-1 rounded hover:bg-[var(--apex-surface-3)] text-[var(--apex-text-3)] hover:text-[var(--apex-text)] transition disabled:opacity-40"><X className="w-4 h-4" /></button>
         </div>
         <div className="p-5 space-y-4">
-          <div className="bg-[#0a0a0b] border border-[#333336] rounded-lg p-4 flex flex-col items-center justify-center space-y-2">
-            <div className="text-2xl font-mono font-bold text-white flex items-center gap-2">{(recordingState === 'recording' || recordingState === 'paused') && <div className="w-3 h-3 bg-[#ff0000] rounded-full animate-pulse" />}<span>{formatTime(recordSeconds)}</span></div>
-            <canvas ref={canvasRef} width={360} height={50} className="w-full h-12 bg-[#121214] rounded border border-[#222225]" />
-            <div className="w-full flex items-center justify-between text-[10px] text-[#777] font-mono"><span>INPUT PEAK: {Math.round(inputLevel * 100)}%</span><span data-recorder-status={statusLabel} className={(recordingState === 'recording' || recordingState === 'paused' || recordingState === 'counting-in') ? 'text-[#ff6e00] font-bold' : ''}>STATUS: {statusLabel}</span></div>
+          <div className="bg-[var(--apex-bg)] border border-[var(--apex-border)] rounded-lg p-4 flex flex-col items-center justify-center space-y-2">
+            <div className="text-2xl font-mono font-bold text-[var(--apex-text)] flex items-center gap-2">{(recordingState === 'recording' || recordingState === 'paused') && <div className="w-3 h-3 bg-[var(--apex-state-recording)] rounded-full animate-pulse" />}<span>{formatTime(recordSeconds)}</span></div>
+            <canvas ref={canvasRef} width={360} height={50} className="w-full h-12 bg-[var(--apex-canvas)] rounded border border-[var(--apex-border)]" />
+            <div className="w-full flex items-center justify-between text-[10px] text-[var(--apex-text-3)] font-mono"><span>INPUT PEAK: {Math.round(inputLevel * 100)}%</span><span data-recorder-status={statusLabel} className={(recordingState === 'recording' || recordingState === 'paused' || recordingState === 'counting-in') ? 'text-[var(--apex-accent)] font-bold' : ''}>STATUS: {statusLabel}</span></div>
           </div>
-          {error && <div className="flex items-start gap-2 p-3 bg-red-950/30 border border-red-800/50 rounded-lg text-xs text-red-200"><AlertCircle className="w-4 h-4 shrink-0 mt-0.5" /><span>{error}</span></div>}
+          {error && <div className="flex items-start gap-2 p-3 bg-[color-mix(in_srgb,var(--apex-danger)_14%,transparent)] border border-[color-mix(in_srgb,var(--apex-danger)_50%,transparent)] rounded-lg text-xs text-[color-mix(in_srgb,var(--apex-danger)_70%,var(--apex-text))]"><AlertCircle className="w-4 h-4 shrink-0 mt-0.5" /><span>{error}</span></div>}
           {/* Phase 1K: recording count-in setting — Off / 1 bar / 2 bars. The
               choice is persisted with the project and shared with the engine:
               the count-in clicks the active meter's pulses at project tempo. */}
           <div className="flex items-center justify-between gap-2">
-            <span className="text-[10px] text-[#777] font-bold uppercase tracking-wider">Count-in</span>
+            <span className="text-[10px] text-[var(--apex-text-3)] font-bold uppercase tracking-wider">Count-in</span>
             <div className="flex items-center gap-1" role="radiogroup" aria-label="Recording count-in length">
               {COUNT_IN_OPTIONS.map(option => (
                 <button
@@ -451,8 +456,8 @@ export const AudioRecorderModal: React.FC<AudioRecorderModalProps> = ({ isOpen, 
                   onClick={() => onUpdateCountInBars(option)}
                   className={`px-2.5 py-1 rounded text-[10px] font-bold transition border disabled:opacity-40 ${
                     resolveCountInBars({ countInBars }) === option
-                      ? 'bg-[#ff6e00] text-black border-[#ff6e00]'
-                      : 'bg-[#1a1a1d] text-[#b0b0b0] border-[#333336] hover:border-[#ff6e00]'
+                      ? 'bg-[var(--apex-accent)] text-[var(--apex-state-playing-fg)] border-[var(--apex-accent)]'
+                      : 'bg-[var(--apex-surface)] text-[var(--apex-text-2)] border-[var(--apex-border)] hover:border-[var(--apex-accent)]'
                   }`}
                   data-count-in={option}
                 >
@@ -465,9 +470,9 @@ export const AudioRecorderModal: React.FC<AudioRecorderModalProps> = ({ isOpen, 
               anchored (the transport readout's notation) and is the pre-roll's
               target: capture starts at punch-in and stops at punch-out. */}
           {onUpdatePunchRecording && (
-            <div className="rounded-lg border border-[#333336] bg-[#101012] p-3 space-y-2.5" data-testid="audio-recorder-punch">
+            <div className="rounded-lg border border-[var(--apex-border)] bg-[var(--apex-bg)] p-3 space-y-2.5" data-testid="audio-recorder-punch">
               <div className="flex items-center justify-between gap-2">
-                <span className="flex items-center gap-1.5 text-[10px] text-[#777] font-bold uppercase tracking-wider">
+                <span className="flex items-center gap-1.5 text-[10px] text-[var(--apex-text-3)] font-bold uppercase tracking-wider">
                   <Crosshair className="w-3.5 h-3.5" />Punch recording
                 </span>
                 <button
@@ -480,8 +485,8 @@ export const AudioRecorderModal: React.FC<AudioRecorderModalProps> = ({ isOpen, 
                   data-punch-enabled={punchDraft.enabled}
                   className={`px-2.5 py-1 rounded text-[10px] font-bold transition border disabled:opacity-40 ${
                     punchDraft.enabled
-                      ? 'bg-[#ff6e00] text-black border-[#ff6e00]'
-                      : 'bg-[#1a1a1d] text-[#b0b0b0] border-[#333336] hover:border-[#ff6e00]'
+                      ? 'bg-[var(--apex-accent)] text-[var(--apex-state-playing-fg)] border-[var(--apex-accent)]'
+                      : 'bg-[var(--apex-surface)] text-[var(--apex-text-2)] border-[var(--apex-border)] hover:border-[var(--apex-accent)]'
                   }`}
                 >
                   {punchDraft.enabled ? 'ON' : 'OFF'}
@@ -491,8 +496,8 @@ export const AudioRecorderModal: React.FC<AudioRecorderModalProps> = ({ isOpen, 
                 <>
                   {(['in', 'out'] as const).map(endpoint => (
                     <div key={endpoint} className="flex items-center gap-1.5" data-punch-endpoint={endpoint}>
-                      <span className="text-[10px] text-[#777] w-12 uppercase tracking-wider">{endpoint}</span>
-                      <label className="flex items-center gap-1 text-[10px] text-[#777]">
+                      <span className="text-[10px] text-[var(--apex-text-3)] w-12 uppercase tracking-wider">{endpoint}</span>
+                      <label className="flex items-center gap-1 text-[10px] text-[var(--apex-text-3)]">
                         BAR
                         <input
                           type="number"
@@ -506,10 +511,10 @@ export const AudioRecorderModal: React.FC<AudioRecorderModalProps> = ({ isOpen, 
                             Math.max(1, Math.floor(Number(event.target.value)) || 1),
                             endpoint === 'in' ? punchDraft.inBeat : punchDraft.outBeat
                           )}
-                          className="w-14 bg-[#121214] text-white text-xs px-1.5 py-1 rounded border border-[#333336] focus:outline-none disabled:opacity-50 font-mono"
+                          className="w-14 bg-[var(--apex-canvas)] text-[var(--apex-text)] text-xs px-1.5 py-1 rounded border border-[var(--apex-border)] focus:outline-none disabled:opacity-50 font-mono"
                         />
                       </label>
-                      <label className="flex items-center gap-1 text-[10px] text-[#777]">
+                      <label className="flex items-center gap-1 text-[10px] text-[var(--apex-text-3)]">
                         BEAT
                         <input
                           type="number"
@@ -524,10 +529,10 @@ export const AudioRecorderModal: React.FC<AudioRecorderModalProps> = ({ isOpen, 
                             endpoint === 'in' ? punchDraft.inBar : punchDraft.outBar,
                             Math.max(1, Math.floor(Number(event.target.value)) || 1)
                           )}
-                          className="w-12 bg-[#121214] text-white text-xs px-1.5 py-1 rounded border border-[#333336] focus:outline-none disabled:opacity-50 font-mono"
+                          className="w-12 bg-[var(--apex-canvas)] text-[var(--apex-text)] text-xs px-1.5 py-1 rounded border border-[var(--apex-border)] focus:outline-none disabled:opacity-50 font-mono"
                         />
                       </label>
-                      <span className="text-[10px] font-mono text-[#ff6e00]" data-punch-position={endpoint}>
+                      <span className="text-[10px] font-mono text-[var(--apex-accent)]" data-punch-position={endpoint}>
                         {formatPunchPosition(endpoint === 'in'
                           ? { bar: punchDraft.inBar, beat: punchDraft.inBeat }
                           : { bar: punchDraft.outBar, beat: punchDraft.outBeat })}
@@ -536,7 +541,7 @@ export const AudioRecorderModal: React.FC<AudioRecorderModalProps> = ({ isOpen, 
                         type="button"
                         disabled={recordingState !== 'idle' || isApplying}
                         onClick={() => setPunchEndpointAtPlayhead(endpoint)}
-                        className="px-1.5 py-0.5 rounded text-[9px] font-bold border border-[#333336] bg-[#1a1a1d] hover:border-[#ff6e00] transition disabled:opacity-40"
+                        className="px-1.5 py-0.5 rounded text-[9px] font-bold border border-[var(--apex-border)] bg-[var(--apex-surface)] hover:border-[var(--apex-accent)] transition disabled:opacity-40"
                       >
                         PLAYHEAD
                       </button>
@@ -546,60 +551,60 @@ export const AudioRecorderModal: React.FC<AudioRecorderModalProps> = ({ isOpen, 
                       cell per punched bar, so the length is readable at a glance. */}
                   {punchValidation.range && (
                     <div
-                      className="flex items-stretch h-6 bg-[#0a0a0b] rounded overflow-hidden border border-[#222225]"
+                      className="flex items-stretch h-6 bg-[var(--apex-bg)] rounded overflow-hidden border border-[var(--apex-border)]"
                       data-punch-range-preview
                       data-punch-bars={punchedBars}
                       aria-hidden="true"
                     >
                       {Array.from({ length: punchedBars }).map((_, index) => (
-                        <div key={index} className="flex-1 h-full bg-[#ff6e00]/35 border-r border-[#ff6e00]/25 last:border-r-0" />
+                        <div key={index} className="flex-1 h-full bg-[var(--apex-state-selected)] border-r border-[var(--apex-state-selected-border)] last:border-r-0" />
                       ))}
                     </div>
                   )}
-                  <div className="text-[10px] font-mono text-[#b0b0b0] space-y-1">
+                  <div className="text-[10px] font-mono text-[var(--apex-text-2)] space-y-1">
                     <div data-punch-summary>{punchPlan ? describePunchWindow(punchPlan) : 'Set a valid punch range'}</div>
-                    <div className="text-[#777]" data-punch-preroll>
+                    <div className="text-[var(--apex-text-3)]" data-punch-preroll>
                       {resolveCountInBars({ countInBars }) > 0
                         ? `Pre-roll: ${describeCountInBars(resolveCountInBars({ countInBars }))} of clicks before punch-in — never recorded.`
                         : 'Pre-roll: off — capture starts immediately at punch-in.'}
                     </div>
                   </div>
                   {punchValidation.issues.map(issue => (
-                    <p key={issue.message} role="alert" className="text-[10px] text-red-300" data-punch-issue={issue.field}>{issue.message}</p>
+                    <p key={issue.message} role="alert" className="text-[10px] text-[color-mix(in_srgb,var(--apex-danger)_70%,var(--apex-text))]" data-punch-issue={issue.field}>{issue.message}</p>
                   ))}
                   {punchValidation.valid && punchValidation.warnings.map(warning => (
-                    <p key={warning.message} className="text-[10px] text-[#d97706]" data-punch-warning={warning.field}>{warning.message}</p>
+                    <p key={warning.message} className="text-[10px] text-[var(--apex-gold)]" data-punch-warning={warning.field}>{warning.message}</p>
                   ))}
                   {punchPlan?.truncatedAtProjectEnd && (
-                    <p className="text-[10px] text-[#d97706]" data-punch-truncated>The take stops at the end of the arrangement.</p>
+                    <p className="text-[10px] text-[var(--apex-gold)]" data-punch-truncated>The take stops at the end of the arrangement.</p>
                   )}
                   {punchPlan?.preRollBeforeTimeline && (
-                    <p className="text-[10px] text-[#777]" data-punch-preroll-early>
+                    <p className="text-[10px] text-[var(--apex-text-3)]" data-punch-preroll-early>
                       Punch-in is closer to bar 1 than the count-in is long: the pre-roll starts before the arrangement and capture still begins at punch-in.
                     </p>
                   )}
                 </>
               ) : (
-                <p className="text-[10px] text-[#777]">Off — recording runs until you press Stop, exactly as before.</p>
+                <p className="text-[10px] text-[var(--apex-text-3)]">Off — recording runs until you press Stop, exactly as before.</p>
               )}
             </div>
           )}
           <div className="flex items-center justify-center gap-3">
-            {recordingState === 'idle' && !recordedTake && <button onClick={handleStart} className="flex items-center gap-2 px-6 py-2.5 bg-[#ff6e00] hover:bg-[#ff7d1a] text-black font-bold text-sm rounded shadow-lg transition active:scale-95"><div className="w-3 h-3 bg-black rounded-full" />{punchDraft.enabled ? 'PUNCH RECORD' : 'START RECORDING'}</button>}
-            {recordingState === 'counting-in' && <><span className="text-xs text-[#ff6e00] font-bold font-mono">COUNT-IN · {describeCountInBars(resolveCountInBars({ countInBars }))}</span><button onClick={handleCancelCountIn} className="flex items-center gap-2 px-5 py-2.5 bg-[#222225] hover:bg-[#2d2d30] text-white font-bold text-sm rounded border border-[#333336] transition"><X className="w-4 h-4" />CANCEL</button></>}
-            {(recordingState === 'recording' || recordingState === 'paused') && <><button onClick={handlePauseResume} disabled={punchDraft.enabled} className="flex items-center gap-2 px-5 py-2.5 bg-[#222225] hover:bg-[#2d2d30] text-white font-bold text-sm rounded border border-[#333336] transition disabled:opacity-40" title={punchDraft.enabled ? 'A punch take has a fixed length and cannot be paused' : undefined}>{recordingState === 'recording' ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4" />}{recordingState === 'recording' ? 'PAUSE' : 'RESUME'}</button><button onClick={handleStop} className="flex items-center gap-2 px-6 py-2.5 bg-[#ff0000] hover:bg-red-600 text-white font-bold text-sm rounded shadow-lg transition active:scale-95"><Square className="w-4 h-4 fill-current" />STOP & SAVE</button></>}
-            {recordingState === 'stopping' && <span className="text-xs text-[#777]">Finalizing recording…</span>}
+            {recordingState === 'idle' && !recordedTake && <button onClick={handleStart} className="flex items-center gap-2 px-6 py-2.5 bg-[var(--apex-accent)] hover:bg-[var(--apex-accent-strong)] text-[var(--apex-state-playing-fg)] font-bold text-sm rounded shadow-lg transition active:scale-95"><div className="w-3 h-3 bg-[var(--apex-state-playing-fg)] rounded-full" />{punchDraft.enabled ? 'PUNCH RECORD' : 'START RECORDING'}</button>}
+            {recordingState === 'counting-in' && <><span className="text-xs text-[var(--apex-accent)] font-bold font-mono">COUNT-IN · {describeCountInBars(resolveCountInBars({ countInBars }))}</span><button onClick={handleCancelCountIn} className="flex items-center gap-2 px-5 py-2.5 bg-[var(--apex-surface-2)] hover:bg-[var(--apex-surface-3)] text-[var(--apex-text)] font-bold text-sm rounded border border-[var(--apex-border)] transition"><X className="w-4 h-4" />CANCEL</button></>}
+            {(recordingState === 'recording' || recordingState === 'paused') && <><button onClick={handlePauseResume} disabled={punchDraft.enabled} className="flex items-center gap-2 px-5 py-2.5 bg-[var(--apex-surface-2)] hover:bg-[var(--apex-surface-3)] text-[var(--apex-text)] font-bold text-sm rounded border border-[var(--apex-border)] transition disabled:opacity-40" title={punchDraft.enabled ? 'A punch take has a fixed length and cannot be paused' : undefined}>{recordingState === 'recording' ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4" />}{recordingState === 'recording' ? 'PAUSE' : 'RESUME'}</button><button onClick={handleStop} className="flex items-center gap-2 px-6 py-2.5 bg-[var(--apex-state-recording)] hover:opacity-80 text-[var(--apex-state-recording-fg)] font-bold text-sm rounded shadow-lg transition active:scale-95"><Square className="w-4 h-4 fill-current" />STOP & SAVE</button></>}
+            {recordingState === 'stopping' && <span className="text-xs text-[var(--apex-text-3)]">Finalizing recording…</span>}
           </div>
-          {recordedTake && <div className="p-3 bg-[#1a1a1d] border border-[#ff6e00]/50 rounded-lg space-y-3">
-            <div className="flex items-center justify-between text-xs"><span className="font-bold text-white">RECORDED TAKE</span><span className="text-[#ff6e00] font-mono font-bold">{recordedTake.durationSeconds.toFixed(2)}s</span></div>
+          {recordedTake && <div className="p-3 bg-[var(--apex-surface)] border border-[var(--apex-state-selected-border)] rounded-lg space-y-3">
+            <div className="flex items-center justify-between text-xs"><span className="font-bold text-[var(--apex-text)]">RECORDED TAKE</span><span className="text-[var(--apex-accent)] font-mono font-bold">{recordedTake.durationSeconds.toFixed(2)}s</span></div>
             {punchPlacementRef.current && (
-              <div className="text-[10px] font-mono text-[#b0b0b0]" data-punch-take-placement>
+              <div className="text-[10px] font-mono text-[var(--apex-text-2)]" data-punch-take-placement>
                 PUNCH TAKE · starts at bar {(punchPlacementRef.current.startBar + 1).toFixed(2)} · {punchPlacementRef.current.lengthBars.toFixed(2)} bars long
               </div>
             )}
-            <div className="flex items-center justify-between text-xs"><span className="text-[#777]">Insert onto Track Lane:</span><select value={targetTrack} onChange={e => setTargetTrack(Number(e.target.value))} disabled={isApplying} className="bg-[#121214] text-white text-xs px-2.5 py-1 rounded border border-[#333336] focus:outline-none disabled:opacity-50"><option value={0}>Track 1 (Drums)</option><option value={1}>Track 2 (Bass)</option><option value={2}>Track 3 (Synths)</option><option value={3}>Track 4 (Melody)</option><option value={4}>Track 5 (Lead Vocals)</option><option value={5}>Track 6 (Backing Vocals)</option></select></div>
-            <div className="h-8 flex items-end gap-px bg-[#0a0a0b] rounded px-1 overflow-hidden">{recordedTake.waveform.slice(0, 128).map((value, index) => <div key={index} className="flex-1 bg-[#ff6e00]" style={{ height: `${Math.max(2, value * 100)}%` }} />)}</div>
-            <button onClick={handleApplyToPlaylist} disabled={isApplying} className="w-full py-2 bg-[#ff6e00] hover:bg-[#ff7d1a] text-black font-bold text-xs rounded transition flex items-center justify-center gap-1.5 disabled:opacity-50 disabled:cursor-wait"><Check className="w-4 h-4" />{isApplying ? 'PLACING TAKE…' : 'PLACE TAKE ON PLAYLIST'}</button>
+            <div className="flex items-center justify-between text-xs"><span className="text-[var(--apex-text-3)]">Insert onto Track Lane:</span><select value={targetTrack} onChange={e => setTargetTrack(Number(e.target.value))} disabled={isApplying} className="bg-[var(--apex-canvas)] text-[var(--apex-text)] text-xs px-2.5 py-1 rounded border border-[var(--apex-border)] focus:outline-none disabled:opacity-50"><option value={0}>Track 1 (Drums)</option><option value={1}>Track 2 (Bass)</option><option value={2}>Track 3 (Synths)</option><option value={3}>Track 4 (Melody)</option><option value={4}>Track 5 (Lead Vocals)</option><option value={5}>Track 6 (Backing Vocals)</option></select></div>
+            <div className="h-8 flex items-end gap-px bg-[var(--apex-bg)] rounded px-1 overflow-hidden">{recordedTake.waveform.slice(0, 128).map((value, index) => <div key={index} className="flex-1 bg-[var(--apex-accent)]" style={{ height: `${Math.max(2, value * 100)}%` }} />)}</div>
+            <button onClick={handleApplyToPlaylist} disabled={isApplying} className="w-full py-2 bg-[var(--apex-accent)] hover:bg-[var(--apex-accent-strong)] text-[var(--apex-state-playing-fg)] font-bold text-xs rounded transition flex items-center justify-center gap-1.5 disabled:opacity-50 disabled:cursor-wait"><Check className="w-4 h-4" />{isApplying ? 'PLACING TAKE…' : 'PLACE TAKE ON PLAYLIST'}</button>
           </div>}
         </div>
       </div>
