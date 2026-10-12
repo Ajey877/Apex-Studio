@@ -21,6 +21,7 @@ import {
   publishEqBandsToTrack,
   readEqBandsFromTrack,
 } from './parametricEqBands';
+import { readEqPalette } from './parametricEqTheme';
 
 interface ParametricEqModalProps {
   isOpen: boolean;
@@ -58,6 +59,20 @@ export const ParametricEqModal: React.FC<ParametricEqModalProps> = ({
     setBands(next);
   };
 
+  /**
+   * UI-03G: the band-card swatch is a DOM surface, so unlike the canvas it
+   * cannot re-read the palette on every animation frame. Subscribe to the theme
+   * attribute instead, so a flip repaints the swatch through the same
+   * `bandFill` mapping the canvas uses. Disconnected on unmount.
+   */
+  const [, setThemeGeneration] = useState(0);
+  useEffect(() => {
+    if (typeof document === 'undefined') return;
+    const observer = new MutationObserver(() => setThemeGeneration((generation) => generation + 1));
+    observer.observe(document.documentElement, { attributeFilter: ['data-theme'] });
+    return () => observer.disconnect();
+  }, []);
+
   // Re-read the track's published bands whenever the modal is opened on it, so
   // the editor always shows the values the engine is actually using.
   useEffect(() => {
@@ -82,15 +97,21 @@ export const ParametricEqModal: React.FC<ParametricEqModalProps> = ({
       const width = canvas.width;
       const height = canvas.height;
 
+      // UI-03G: the palette is read on every frame, so a theme flip is picked up
+      // on the next frame. Canvas draw commands cannot read CSS custom
+      // properties, which is why the colours come from the seam.
+      const palette = readEqPalette();
+      const graph = palette.graph;
+
       // 1. Background Fill
-      ctx.fillStyle = '#101014';
+      ctx.fillStyle = palette.canvasBackground;
       ctx.fillRect(0, 0, width, height);
 
       // 2. Frequency Grid Lines (20Hz, 50Hz, 100Hz, 500Hz, 1kHz, 5kHz, 10kHz, 20kHz)
       const freqs = [20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000];
-      ctx.strokeStyle = '#222228';
+      ctx.strokeStyle = palette.gridLine;
       ctx.lineWidth = 1;
-      ctx.fillStyle = '#555560';
+      ctx.fillStyle = palette.axisLabel;
       ctx.font = '10px monospace';
 
       freqs.forEach(f => {
@@ -107,7 +128,7 @@ export const ParametricEqModal: React.FC<ParametricEqModalProps> = ({
       const dBs = [12, 6, 0, -6, -12];
       dBs.forEach(db => {
         const y = dbToY(db, height);
-        ctx.strokeStyle = db === 0 ? '#383842' : '#1e1e24';
+        ctx.strokeStyle = db === 0 ? palette.gridLineStrong : palette.gridLine;
         ctx.beginPath();
         ctx.moveTo(0, y);
         ctx.lineTo(width, y);
@@ -116,7 +137,7 @@ export const ParametricEqModal: React.FC<ParametricEqModalProps> = ({
       });
 
       // 4. Live Audio Spectrum Fill
-      ctx.fillStyle = 'rgba(255, 110, 0, 0.15)';
+      ctx.fillStyle = graph.spectrum;
       ctx.beginPath();
       ctx.moveTo(0, height);
       for (let i = 0; i < freqData.length; i++) {
@@ -130,7 +151,7 @@ export const ParametricEqModal: React.FC<ParametricEqModalProps> = ({
       ctx.fill();
 
       // 5. Calculate Composite EQ Response Curve
-      ctx.strokeStyle = '#ff6e00';
+      ctx.strokeStyle = graph.curve;
       ctx.lineWidth = 2.5;
       ctx.beginPath();
 
@@ -168,8 +189,11 @@ export const ParametricEqModal: React.FC<ParametricEqModalProps> = ({
         const y = dbToY(b.gain, height);
         const isSelected = b.id === selectedBandId;
 
-        ctx.fillStyle = b.color;
-        ctx.strokeStyle = isSelected ? '#ffffff' : '#000000';
+        // The node fill is the DISPLAY colour for `b.color` — the stored value
+        // is project data and is never rewritten. The band card's swatch reads
+        // the same mapping, so the node and its card cannot disagree.
+        ctx.fillStyle = palette.bandFill(b.color);
+        ctx.strokeStyle = isSelected ? graph.nodeOutlineSelected : graph.nodeOutline;
         ctx.lineWidth = isSelected ? 2.5 : 1.5;
 
         ctx.beginPath();
@@ -178,7 +202,7 @@ export const ParametricEqModal: React.FC<ParametricEqModalProps> = ({
         ctx.stroke();
 
         // Node ID Text
-        ctx.fillStyle = '#ffffff';
+        ctx.fillStyle = graph.nodeLabel;
         ctx.font = 'bold 9px sans-serif';
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
@@ -282,31 +306,34 @@ export const ParametricEqModal: React.FC<ParametricEqModalProps> = ({
 
   if (!isOpen) return null;
 
+  // Read after the early return: this is a plain (cached) lookup, not a hook.
+  const eqPalette = readEqPalette();
+
   return (
     <ModalFrame
       id="parametric-eq-modal-overlay"
       labelledBy="parametric-eq-modal-title"
       onClose={onClose}
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4 animate-in fade-in"
+      className="fixed inset-0 z-50 flex items-center justify-center backdrop-blur-sm p-4 animate-in fade-in"
     >
       <div 
         id="parametric-eq-modal-container"
-        className="bg-[#18181b] border border-[#333336] rounded-xl w-full max-w-4xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh]"
+        className="bg-[var(--apex-surface)] border border-[var(--apex-border)] rounded-xl w-full max-w-4xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh]"
       >
         {/* Header */}
-        <div className="flex items-center justify-between px-6 py-4 border-b border-[#2a2a2d] bg-[#141416]">
+        <div className="flex items-center justify-between px-6 py-4 border-b border-[var(--apex-border)] bg-[var(--apex-panel-header)]">
           <div className="flex items-center space-x-3">
-            <div className="w-9 h-9 rounded-lg bg-[#ff6e00]/10 border border-[#ff6e00]/30 flex items-center justify-center text-[#ff6e00]">
+            <div className="w-9 h-9 rounded-lg bg-[var(--apex-state-selected)] border border-[var(--apex-state-selected-border)] flex items-center justify-center text-[var(--apex-accent)]">
               <Activity className="w-5 h-5" />
             </div>
             <div>
-              <h2 id="parametric-eq-modal-title" className="text-base font-bold text-white flex items-center space-x-2">
+              <h2 id="parametric-eq-modal-title" className="text-base font-bold text-[var(--apex-text)] flex items-center space-x-2">
                 <span>3-Band EQ — Dynamic Equalizer</span>
-                <span className="text-[10px] px-2 py-0.5 rounded bg-[#ff6e00]/20 text-[#ff851b] font-mono font-medium border border-[#ff6e00]/30">
+                <span className="text-[10px] px-2 py-0.5 rounded bg-[var(--apex-surface-3)] text-[var(--apex-accent)] font-mono font-medium border border-[var(--apex-border)]">
                   Track: {mixerTrack.name}
                 </span>
               </h2>
-              <p className="text-xs text-[#888]">
+              <p className="text-xs text-[var(--apex-text-2)]">
                 Mastering-grade surgical frequency sculpting with live FFT spectrum response
               </p>
             </div>
@@ -315,7 +342,7 @@ export const ParametricEqModal: React.FC<ParametricEqModalProps> = ({
             id="close-parametric-eq-btn"
             onClick={onClose}
             aria-label="Close parametric EQ"
-            className="text-[#888] hover:text-white p-1.5 rounded-lg hover:bg-[#27272a] transition-colors"
+            className="text-[var(--apex-text-2)] hover:text-[var(--apex-text)] p-1.5 rounded-lg hover:bg-[var(--apex-surface-3)] transition-colors"
           >
             <X className="w-5 h-5" />
           </button>
@@ -324,17 +351,17 @@ export const ParametricEqModal: React.FC<ParametricEqModalProps> = ({
         {/* Content Body */}
         <div className="p-6 space-y-5 overflow-y-auto flex-1 custom-scrollbar">
           {/* Preset Selector */}
-          <div className="flex items-center justify-between bg-[#202024] p-3 rounded-lg border border-[#2e2e32]">
-            <div className="flex items-center space-x-2 text-xs text-[#888]">
-              <Sparkles className="w-4 h-4 text-[#ff6e00]" />
-              <span className="font-semibold text-white">Studio Mastering Profiles:</span>
+          <div className="flex items-center justify-between bg-[var(--apex-surface-2)] p-3 rounded-lg border border-[var(--apex-border)]">
+            <div className="flex items-center space-x-2 text-xs text-[var(--apex-text-2)]">
+              <Sparkles className="w-4 h-4 text-[var(--apex-accent)]" />
+              <span className="font-semibold text-[var(--apex-text)]">Studio Mastering Profiles:</span>
             </div>
             <div className="flex items-center space-x-2">
               {EQ_PRESETS.map((p, idx) => (
                 <button
                   key={idx}
                   onClick={() => applyPreset(p)}
-                  className="px-2.5 py-1 text-[11px] font-semibold bg-[#2a2a2e] hover:bg-[#333] text-white rounded border border-[#3e3e44] transition-colors"
+                  className="px-2.5 py-1 text-[11px] font-semibold bg-[var(--apex-surface-3)] hover:bg-[var(--apex-border)] text-[var(--apex-text)] rounded border border-[var(--apex-border)] transition-colors"
                 >
                   {p.name}
                 </button>
@@ -343,7 +370,7 @@ export const ParametricEqModal: React.FC<ParametricEqModalProps> = ({
           </div>
 
           {/* Interactive EQ Canvas */}
-          <div className="relative rounded-xl border border-[#2e2e32] overflow-hidden bg-[#101014] shadow-inner">
+          <div className="relative rounded-xl border border-[var(--apex-border)] overflow-hidden bg-[var(--apex-canvas)] shadow-inner">
             <canvas
               ref={canvasRef}
               width={800}
@@ -364,16 +391,16 @@ export const ParametricEqModal: React.FC<ParametricEqModalProps> = ({
                 onClick={() => setSelectedBandId(b.id)}
                 className={`p-2.5 rounded-lg border flex flex-col items-center space-y-1 transition-all ${
                   b.id === selectedBandId
-                    ? 'bg-[#28282e] border-[#ff6e00] shadow-md'
-                    : 'bg-[#1c1c20] border-[#2e2e32] hover:bg-[#222226]'
+                    ? 'bg-[var(--apex-surface-3)] border-[var(--apex-accent)] shadow-md'
+                    : 'bg-[var(--apex-surface)] border-[var(--apex-border)] hover:bg-[var(--apex-surface-2)]'
                 }`}
               >
                 <div className="flex items-center space-x-1.5">
-                  <span className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: b.color }}></span>
-                  <span className="text-xs font-bold text-white">Band {b.id}</span>
+                  <span className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: eqPalette.bandFill(b.color) }}></span>
+                  <span className="text-xs font-bold text-[var(--apex-text)]">Band {b.id}</span>
                 </div>
-                <span className="text-[10px] text-[#888] font-mono">{b.frequency >= 1000 ? `${(b.frequency / 1000).toFixed(1)}k` : `${b.frequency}`} Hz</span>
-                <span className={`text-[10px] font-bold ${b.gain > 0 ? 'text-[#2ecc71]' : b.gain < 0 ? 'text-[#e74c3c]' : 'text-[#888]'}`}>
+                <span className="text-[10px] text-[var(--apex-text-2)] font-mono">{b.frequency >= 1000 ? `${(b.frequency / 1000).toFixed(1)}k` : `${b.frequency}`} Hz</span>
+                <span className={`text-[10px] font-bold ${b.gain > 0 ? 'text-[var(--apex-success)]' : b.gain < 0 ? 'text-[var(--apex-danger)]' : 'text-[var(--apex-text-2)]'}`}>
                   {b.gain > 0 ? `+${b.gain}` : `${b.gain}`} dB
                 </span>
               </button>
@@ -382,21 +409,21 @@ export const ParametricEqModal: React.FC<ParametricEqModalProps> = ({
 
           {/* Precision Parameter Controls for Selected Band */}
           {currentBand && (
-            <div className="p-4 bg-[#202024] rounded-xl border border-[#2e2e32] grid grid-cols-1 md:grid-cols-4 gap-4 items-center">
+            <div className="p-4 bg-[var(--apex-surface-2)] rounded-xl border border-[var(--apex-border)] grid grid-cols-1 md:grid-cols-4 gap-4 items-center">
               {/* Type — fixed per stage: these are the three filters the insert builds. */}
               <div className="space-y-1">
-                <label className="text-[10px] font-bold text-[#888] uppercase tracking-wider block">Filter Type</label>
-                <div className="w-full bg-[#18181b] border border-[#333336] rounded-lg px-3 py-1.5 text-xs text-white capitalize font-semibold">
+                <label className="text-[10px] font-bold text-[var(--apex-text-2)] uppercase tracking-wider block">Filter Type</label>
+                <div className="w-full bg-[var(--apex-canvas)] border border-[var(--apex-border)] rounded-lg px-3 py-1.5 text-xs text-[var(--apex-text)] capitalize font-semibold">
                   {EQ_BAND_SPECS.find(spec => spec.role === (currentBand.id === 1 ? 'low' : currentBand.id === 2 ? 'mid' : 'high'))?.label ?? 'Band'}
                 </div>
-                <span className="text-[9px] text-[#666] block">Fixed by the insert's signal chain.</span>
+                <span className="text-[9px] text-[var(--apex-text-3)] block">Fixed by the insert's signal chain.</span>
               </div>
 
               {/* Frequency */}
               <div className="space-y-1">
-                <div className="flex justify-between text-[10px] font-bold text-[#888] uppercase">
+                <div className="flex justify-between text-[10px] font-bold text-[var(--apex-text-2)] uppercase">
                   <span>Frequency</span>
-                  <span className="text-white font-mono">{currentBand.frequency} Hz</span>
+                  <span className="text-[var(--apex-text)] font-mono">{currentBand.frequency} Hz</span>
                 </div>
                 <input
                   type="range"
@@ -407,15 +434,15 @@ export const ParametricEqModal: React.FC<ParametricEqModalProps> = ({
                     const f = Number(e.target.value);
                     commitBands(prev => prev.map(b => (b.id === currentBand.id ? { ...b, frequency: f } : b)));
                   }}
-                  className="w-full accent-[#ff6e00] h-1.5 bg-[#333] rounded-lg cursor-pointer"
+                  className="w-full accent-[var(--apex-accent)] h-1.5 bg-[var(--apex-surface-3)] rounded-lg cursor-pointer"
                 />
               </div>
 
               {/* Gain */}
               <div className="space-y-1">
-                <div className="flex justify-between text-[10px] font-bold text-[#888] uppercase">
+                <div className="flex justify-between text-[10px] font-bold text-[var(--apex-text-2)] uppercase">
                   <span>Gain (dB)</span>
-                  <span className="text-white font-mono">{currentBand.gain} dB</span>
+                  <span className="text-[var(--apex-text)] font-mono">{currentBand.gain} dB</span>
                 </div>
                 <input
                   type="range"
@@ -427,15 +454,15 @@ export const ParametricEqModal: React.FC<ParametricEqModalProps> = ({
                     const g = Number(e.target.value);
                     commitBands(prev => prev.map(b => (b.id === currentBand.id ? { ...b, gain: g } : b)));
                   }}
-                  className="w-full accent-[#ff6e00] h-1.5 bg-[#333] rounded-lg cursor-pointer"
+                  className="w-full accent-[var(--apex-accent)] h-1.5 bg-[var(--apex-surface-3)] rounded-lg cursor-pointer"
                 />
               </div>
 
               {/* Bandwidth / Q */}
               <div className="space-y-1">
-                <div className="flex justify-between text-[10px] font-bold text-[#888] uppercase">
+                <div className="flex justify-between text-[10px] font-bold text-[var(--apex-text-2)] uppercase">
                   <span>Bandwidth (Q)</span>
-                  <span className="text-white font-mono">{currentBand.q}</span>
+                  <span className="text-[var(--apex-text)] font-mono">{currentBand.q}</span>
                 </div>
                 <input
                   type="range"
@@ -447,7 +474,7 @@ export const ParametricEqModal: React.FC<ParametricEqModalProps> = ({
                     const qVal = Number(e.target.value);
                     commitBands(prev => prev.map(b => (b.id === currentBand.id ? { ...b, q: qVal } : b)));
                   }}
-                  className="w-full accent-[#ff6e00] h-1.5 bg-[#333] rounded-lg cursor-pointer"
+                  className="w-full accent-[var(--apex-accent)] h-1.5 bg-[var(--apex-surface-3)] rounded-lg cursor-pointer"
                 />
               </div>
             </div>
@@ -455,17 +482,17 @@ export const ParametricEqModal: React.FC<ParametricEqModalProps> = ({
         </div>
 
         {/* Footer */}
-        <div className="flex items-center justify-between px-6 py-3 border-t border-[#2a2a2d] bg-[#141416] text-xs text-[#888]">
+        <div className="flex items-center justify-between px-6 py-3 border-t border-[var(--apex-border)] bg-[var(--apex-panel-header)] text-xs text-[var(--apex-text-2)]">
           <button
             onClick={() => commitBands(createFlatEqBands())}
-            className="flex items-center space-x-1.5 text-xs text-[#888] hover:text-white"
+            className="flex items-center space-x-1.5 text-xs text-[var(--apex-text-2)] hover:text-[var(--apex-text)]"
           >
             <RotateCcw className="w-3.5 h-3.5" />
             <span>Reset to Flat Linear Response</span>
           </button>
           <button
             onClick={onClose}
-            className="px-4 py-1.5 bg-[#ff6e00] hover:bg-[#ff851b] text-white font-bold rounded-lg transition-colors"
+            className="px-4 py-1.5 bg-[var(--apex-accent)] hover:bg-[var(--apex-accent-strong)] text-[var(--apex-state-playing-fg)] font-bold rounded-lg transition-colors"
           >
             Done
           </button>
