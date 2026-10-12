@@ -59,6 +59,20 @@ export const ParametricEqModal: React.FC<ParametricEqModalProps> = ({
     setBands(next);
   };
 
+  /**
+   * UI-03G: the band-card swatch is a DOM surface, so unlike the canvas it
+   * cannot re-read the palette on every animation frame. Subscribe to the theme
+   * attribute instead, so a flip repaints the swatch through the same
+   * `bandFill` mapping the canvas uses. Disconnected on unmount.
+   */
+  const [, setThemeGeneration] = useState(0);
+  useEffect(() => {
+    if (typeof document === 'undefined') return;
+    const observer = new MutationObserver(() => setThemeGeneration((generation) => generation + 1));
+    observer.observe(document.documentElement, { attributeFilter: ['data-theme'] });
+    return () => observer.disconnect();
+  }, []);
+
   // Re-read the track's published bands whenever the modal is opened on it, so
   // the editor always shows the values the engine is actually using.
   useEffect(() => {
@@ -175,9 +189,10 @@ export const ParametricEqModal: React.FC<ParametricEqModalProps> = ({
         const y = dbToY(b.gain, height);
         const isSelected = b.id === selectedBandId;
 
-        // The node fill is `b.color` — project-owned band identity from
-        // parametricEqBands, the same colour the band card's swatch shows.
-        ctx.fillStyle = b.color;
+        // The node fill is the DISPLAY colour for `b.color` — the stored value
+        // is project data and is never rewritten. The band card's swatch reads
+        // the same mapping, so the node and its card cannot disagree.
+        ctx.fillStyle = palette.bandFill(b.color);
         ctx.strokeStyle = isSelected ? graph.nodeOutlineSelected : graph.nodeOutline;
         ctx.lineWidth = isSelected ? 2.5 : 1.5;
 
@@ -291,6 +306,9 @@ export const ParametricEqModal: React.FC<ParametricEqModalProps> = ({
 
   if (!isOpen) return null;
 
+  // Read after the early return: this is a plain (cached) lookup, not a hook.
+  const eqPalette = readEqPalette();
+
   return (
     <ModalFrame
       id="parametric-eq-modal-overlay"
@@ -378,7 +396,7 @@ export const ParametricEqModal: React.FC<ParametricEqModalProps> = ({
                 }`}
               >
                 <div className="flex items-center space-x-1.5">
-                  <span className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: b.color }}></span>
+                  <span className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: eqPalette.bandFill(b.color) }}></span>
                   <span className="text-xs font-bold text-[var(--apex-text)]">Band {b.id}</span>
                 </div>
                 <span className="text-[10px] text-[var(--apex-text-2)] font-mono">{b.frequency >= 1000 ? `${(b.frequency / 1000).toFixed(1)}k` : `${b.frequency}`} Hz</span>

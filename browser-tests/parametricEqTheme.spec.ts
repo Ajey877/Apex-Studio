@@ -24,6 +24,19 @@ const DARK_GRID = [36, 41, 54]; // #242936 = --apex-grid-line (dark)
 const LIGHT_GRID = [229, 233, 240]; // #e5e9f0 = --apex-grid-line (light)
 const DARK_CURVE = [255, 110, 0]; // #ff6e00 = the shipped Dark response curve
 const LIGHT_CURVE = [154, 93, 0]; // #9a5d00 = Light --apex-gold
+// Band identity colours. Dark paints the stored value; Light paints the seam's
+// display mapping (EQ_BAND_DISPLAY_COLORS), because the stored colours measure
+// 2.63 / 1.94 / 2.91:1 on the Light canvas.
+const BAND_STORED = [
+  [230, 126, 34], // #e67e22 low shelf
+  [46, 204, 113], // #2ecc71 mid bell
+  [52, 152, 219], // #3498db high shelf
+];
+const BAND_LIGHT = [
+  [194, 97, 71], // #c26147
+  [31, 138, 77], // #1f8a4d
+  [34, 127, 190], // #227fbe
+];
 const DARK_SCRIM = 'rgba(5, 7, 12, 0.66)'; // --apex-modal-overlay (dark)
 const LIGHT_SCRIM = 'rgba(24, 32, 45, 0.55)'; // --apex-modal-overlay (light)
 
@@ -82,8 +95,8 @@ const flipDocumentTheme = (page: Page, mode: 'dark' | 'light') =>
  * stroke and the grid lines are antialiased, so both are counted with a small
  * tolerance around their exact token value.
  */
-const canvasPalette = (page: Page, colours: { curve: number[]; grid: number[] }) =>
-  page.evaluate(({ curve, grid }) => {
+const canvasPalette = (page: Page, colours: { curve: number[]; grid: number[]; bands?: number[][] }) =>
+  page.evaluate(({ curve, grid, bands }) => {
     const canvas = document.querySelector<HTMLCanvasElement>('#parametric-eq-modal-overlay canvas');
     if (!canvas) throw new Error('EQ canvas not rendered');
     const ctx = canvas.getContext('2d');
@@ -96,11 +109,15 @@ const canvasPalette = (page: Page, colours: { curve: number[]; grid: number[] })
     const counts = new Map<string, number>();
     let curveCount = 0;
     let gridCount = 0;
+    const bandCounts = (bands ?? []).map(() => 0);
     for (let i = 0; i < data.length; i += 4) {
       const key = `${data[i]},${data[i + 1]},${data[i + 2]}`;
       counts.set(key, (counts.get(key) ?? 0) + 1);
       if (near(i, curve, 8)) curveCount += 1;
       if (near(i, grid, 6)) gridCount += 1;
+      (bands ?? []).forEach((band, index) => {
+        if (near(i, band, 6)) bandCounts[index] += 1;
+      });
     }
     let top = '';
     let topCount = 0;
@@ -116,8 +133,28 @@ const canvasPalette = (page: Page, colours: { curve: number[]; grid: number[] })
       topCount,
       curveCount,
       gridCount,
+      bandCounts,
     };
   }, colours);
+
+/**
+ * The other theme's grid must be ABSENT, but "absent" cannot mean a literal zero
+ * pixel count. A +/-6 tolerance box around one theme's `--apex-grid-line` also
+ * catches antialiased edge pixels of the other theme's node rings, which this
+ * phase introduced: Dark's white selected ring contributes 1 px inside the Light
+ * grid box (measured at (234, 235, 235)), and Light's `--apex-text` ring is only
+ * dRGB(12, 9, 9) from Dark's `#242936`, contributing 9 px. A grid that was really
+ * painted would contribute thousands (this theme's own grid measures ~5.2-5.5k),
+ * so requiring at least a 100x difference is a far stronger control than zero and
+ * cannot be tripped by antialiasing.
+ */
+const expectOtherGridAbsent = (mode: string, other: number, own: number) => {
+  expect(own, `${mode}: this theme's grid is painted`).toBeGreaterThan(1000);
+  expect(
+    other,
+    `${mode}: the other theme's grid is absent (measured ${other} vs ${own} of this theme's)`
+  ).toBeLessThan(own / 100);
+};
 
 /**
  * Every visible text node in the dialog, with the contrast of its computed
@@ -287,17 +324,38 @@ test.describe('UI-03G Parametric EQ theme', () => {
       const ownGrid = mode === 'dark' ? DARK_GRID : LIGHT_GRID;
       const otherGrid = mode === 'dark' ? LIGHT_GRID : DARK_GRID;
 
-      const report = await canvasPalette(page, { curve: ownCurve, grid: ownGrid });
-      console.log(`[UI-03G] ${mode} canvas: top rgb(${report.top}) x${report.topCount}/${report.total}, curve px ${report.curveCount}, grid px ${report.gridCount}`);
+      const ownBands = mode === 'dark' ? BAND_STORED : BAND_LIGHT;
+      const otherBands = mode === 'dark' ? BAND_LIGHT : BAND_STORED;
+      const report = await canvasPalette(page, { curve: ownCurve, grid: ownGrid, bands: ownBands });
+      console.log(`[UI-03G] ${mode} canvas: top rgb(${report.top}) x${report.topCount}/${report.total}, curve px ${report.curveCount}, grid px ${report.gridCount}, band px ${JSON.stringify(report.bandCounts)}`);
       expect(report.top, 'the canvas background is this theme\'s --apex-canvas').toEqual(own);
       expect(report.topCount / report.total).toBeGreaterThan(0.9);
       expect(report.curveCount, 'the response curve is painted in this theme\'s colour').toBeGreaterThan(0);
       expect(report.gridCount, 'the frequency/dB grid is painted from this theme\'s grid token').toBeGreaterThan(0);
 
-      const otherReport = await canvasPalette(page, { curve: otherCurve, grid: otherGrid });
+      // Every band node is painted, in this theme's display colour. The nodes
+      // are small (measured 36-92 px each), so this needs a real lower bound
+      // rather than "> 0" to be meaningful.
+      report.bandCounts.forEach((count, index) => {
+        expect(count, `${mode}: band ${index + 1} node is painted in this theme's display colour`).toBeGreaterThan(20);
+      });
+
+      const otherReport = await canvasPalette(page, { curve: otherCurve, grid: otherGrid, bands: otherBands });
       expect(otherReport.top).not.toEqual(other);
       expect(otherReport.curveCount, 'the other theme\'s curve colour is absent').toBe(0);
-      expect(otherReport.gridCount, 'the other theme\'s grid colour is absent').toBe(0);
+      expectOtherGridAbsent(mode, otherReport.gridCount, report.gridCount);
+      // Only the Light direction is asserted absent, because that is the
+      // regression this mapping fixes: the stored colours painted on the Light
+      // canvas (2.63 / 1.94 / 2.91:1). The Dark direction is deliberately not
+      // asserted: Light's mid display colour #1f8a4d lies almost exactly on the
+      // blend path from #2ecc71 to the Dark canvas, so the Dark node's
+      // antialiased rim passes through it and contributes ~2 px. That is an
+      // edge artifact, not a wrong-theme fill.
+      if (mode === 'light') {
+        otherReport.bandCounts.forEach((count, index) => {
+          expect(count, `the stored band ${index + 1} colour is no longer painted on the Light canvas`).toBe(0);
+        });
+      }
     });
 
     test(`${mode}: editing a band keeps every control at AA and republishes`, async ({ page }) => {
@@ -339,10 +397,14 @@ test.describe('UI-03G Parametric EQ theme', () => {
     expect(report.top, 'the canvas is repainted in Light with no reload').toEqual(LIGHT_CANVAS);
     expect(report.curveCount).toBeGreaterThan(0);
     expect(report.gridCount).toBeGreaterThan(0);
-    const stale = await canvasPalette(page, { curve: DARK_CURVE, grid: DARK_GRID });
+    const stale = await canvasPalette(page, { curve: DARK_CURVE, grid: DARK_GRID, bands: BAND_STORED });
     expect(stale.curveCount, 'no stale Dark curve after the flip').toBe(0);
-    expect(stale.gridCount, 'no stale Dark grid after the flip').toBe(0);
+    expectOtherGridAbsent('after the flip', stale.gridCount, report.gridCount);
     expect(stale.top, 'no stale Dark background after the flip').not.toEqual(DARK_CANVAS);
+    // Light is the direction where absence is provable, so the flip check uses it.
+    stale.bandCounts.forEach((count, index) => {
+      expect(count, `no stale stored band ${index + 1} colour after the flip to Light`).toBe(0);
+    });
 
     await flipDocumentTheme(page, 'dark');
     await page.waitForTimeout(250);

@@ -18,6 +18,7 @@ import { describe, it } from 'node:test';
 import { EQ_BAND_SPECS } from './parametricEqBands';
 import {
   EQ_AXIS_LABEL_TOKEN,
+  EQ_BAND_DISPLAY_COLORS,
   EQ_CANVAS_TOKEN,
   EQ_GRID_STRONG_TOKEN,
   EQ_GRID_TOKEN,
@@ -41,6 +42,31 @@ const contrast = (a: string, b: string): number => {
 };
 
 const BAND_FILLS = EQ_BAND_SPECS.map((spec) => spec.color);
+
+/**
+ * CIE76 colour difference. Contrast ratio cannot express "these two bands are
+ * distinguishable": darkening all three to the same contrast floor equalises
+ * their luminance, so what separates them is hue, and dE is the metric that
+ * measures it. A difference above ~20 is plainly visible.
+ */
+const lab = (hex: string): [number, number, number] => {
+  const [r, g, b] = hexToRgb(hex).map((c) => {
+    const v = c / 255;
+    return v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4;
+  });
+  const x = (r * 0.4124 + g * 0.3576 + b * 0.1805) / 0.95047;
+  const y = r * 0.2126 + g * 0.7152 + b * 0.0722;
+  const z = (r * 0.0193 + g * 0.1192 + b * 0.9505) / 1.08883;
+  const f = (t: number) => (t > 0.008856 ? t ** (1 / 3) : 7.787 * t + 16 / 116);
+  const [fx, fy, fz] = [f(x), f(y), f(z)];
+  return [116 * fy - 16, 500 * (fx - fy), 200 * (fy - fz)];
+};
+
+const deltaE = (a: string, b: string): number => {
+  const [la, aa, ba] = lab(a);
+  const [lb, ab, bb] = lab(b);
+  return Math.hypot(la - lb, aa - ab, ba - bb);
+};
 
 describe('Parametric EQ palette seam (UI-03G)', () => {
   it('resolves the graph chrome from the active theme tokens', () => {
@@ -159,11 +185,80 @@ describe('Parametric EQ palette seam (UI-03G)', () => {
     assert.equal(light.graph.nodeOutline, LIGHT_TOKENS['--apex-text']);
   });
 
-  it('leaves the band fills alone: they are project data, not theme tokens', () => {
-    // The node fill is `band.color` from EQ_BAND_SPECS, which the band cards
-    // render as a swatch from the same field. The seam must not own it.
-    const seam = JSON.stringify(readEqPalette(makeDocument('dark')));
-    for (const fill of BAND_FILLS) assert.ok(!seam.includes(fill), `${fill} must not be in the seam`);
+  it('leaves Dark band fills exactly as stored: the stored colours already clear 3:1 there', () => {
+    const dark = readEqPalette(makeDocument('dark'));
+    for (const fill of BAND_FILLS) {
+      assert.equal(dark.bandFill(fill), fill, `${fill} is painted unchanged in Dark`);
+      assert.ok(contrast(fill, dark.canvasBackground) >= 3);
+    }
+    assert.deepEqual(EQ_BAND_DISPLAY_COLORS.dark, {}, 'Dark carries no display mapping');
+  });
+
+  it('maps every stored band colour to a Light display colour that clears 3:1 on the Light canvas', () => {
+    const light = readEqPalette(makeDocument('light'));
+    for (const fill of BAND_FILLS) {
+      const shown = light.bandFill(fill);
+      assert.notEqual(shown, fill, `${fill} must be mapped in Light`);
+      const ratio = contrast(shown, light.canvasBackground);
+      assert.ok(ratio >= 3, `light display ${shown} for ${fill} on ${light.canvasBackground} = ${ratio.toFixed(2)}:1`);
+      // A flip that reaches one surface a frame early must not hide a band.
+      const onDark = readEqPalette(makeDocument('dark'));
+      assert.ok(contrast(shown, onDark.canvasBackground) >= 3, `${shown} also clears 3:1 on the Dark canvas`);
+    }
+  });
+
+  it('the shipped Light canvas would have rejected all three stored band colours', () => {
+    // The regression this mapping fixes: on the Light canvas the stored colours
+    // measure 2.63 / 1.94 / 2.91:1 — all under the 3:1 non-text floor.
+    for (const fill of BAND_FILLS) {
+      assert.ok(contrast(fill, LIGHT_TOKENS['--apex-canvas']) < 3, `${fill} is below 3:1 on the Light canvas`);
+    }
+  });
+
+  it('keeps the three Light band colours clearly distinguishable from each other', () => {
+    const light = readEqPalette(makeDocument('light'));
+    const shown = BAND_FILLS.map((fill) => light.bandFill(fill));
+    assert.equal(new Set(shown).size, 3, 'the three map to three distinct colours');
+    for (let i = 0; i < shown.length; i += 1) {
+      for (let j = i + 1; j < shown.length; j += 1) {
+        const distance = deltaE(shown[i], shown[j]);
+        assert.ok(distance >= 20, `${shown[i]} vs ${shown[j]} dE ${distance.toFixed(1)} is not a clear difference`);
+      }
+    }
+  });
+
+  it('keeps every Light band colour distinguishable from the Light response curve', () => {
+    const light = readEqPalette(makeDocument('light'));
+    for (const fill of BAND_FILLS) {
+      const distance = deltaE(light.bandFill(fill), light.graph.curve);
+      assert.ok(distance >= 20, `${light.bandFill(fill)} is only dE ${distance.toFixed(1)} from the curve ${light.graph.curve}`);
+    }
+    // Context for that floor: the shipped Dark pairing is dE 19.5.
+    assert.ok(deltaE('#e67e22', '#ff6e00') < 20);
+  });
+
+  it('falls through any colour it does not know, so a legacy band can never vanish', () => {
+    for (const mode of ['dark', 'light'] as const) {
+      const palette = readEqPalette(makeDocument(mode));
+      assert.equal(palette.bandFill('#123456'), '#123456');
+      assert.equal(palette.bandFill('rebeccapurple'), 'rebeccapurple');
+      assert.equal(palette.bandFill(''), '');
+    }
+  });
+
+  it('matches stored colours case-insensitively (project files are hand-editable JSON)', () => {
+    const light = readEqPalette(makeDocument('light'));
+    assert.equal(light.bandFill('#E67E22'), light.bandFill('#e67e22'));
+    assert.equal(light.bandFill('#2ECC71'), EQ_BAND_DISPLAY_COLORS.light['#2ecc71']);
+  });
+
+  it('the mapping follows the theme, and never rewrites the stored value', () => {
+    const doc = makeDocument('dark');
+    const stored = BAND_FILLS[1];
+    assert.equal(readEqPalette(doc).bandFill(stored), stored);
+    (doc as unknown as { documentElement: { dataset: { theme: string } } }).documentElement.dataset.theme = 'light';
+    assert.equal(readEqPalette(doc).bandFill(stored), EQ_BAND_DISPLAY_COLORS.light[stored]);
+    assert.equal(stored, '#2ecc71', 'the stored colour is untouched');
   });
 
   it('never serves a stale palette after a theme flip', () => {

@@ -95,10 +95,36 @@ describe('Parametric EQ theme markup (UI-03G)', () => {
     assert.ok(classes.includes('text-[var(--apex-success)]'), 'positive gain uses --apex-success');
     assert.ok(classes.includes('text-[var(--apex-danger)]'), 'negative gain uses --apex-danger');
     assert.ok(classes.includes('text-[var(--apex-text-2)]'), 'a flat gain uses secondary text');
-    // The band swatch is data, not theme: it keeps the stored band colour.
+  });
+
+  it('paints both band surfaces from the one display mapping, and never the raw stored colour', () => {
+    // The canvas node and the band card's swatch must agree, so both go through
+    // the seam's `bandFill`. Painting `b.color` directly on either surface would
+    // let the node and its card disagree after a theme flip.
+    assert.match(source, /ctx\.fillStyle = palette\.bandFill\(b\.color\)/, 'the canvas node reads the mapping');
+    assert.match(source, /style=\{\{ backgroundColor: eqPalette\.bandFill\(b\.color\) \}\}/, 'the swatch reads the same mapping');
+    assert.doesNotMatch(source, /ctx\.fillStyle = b\.color/, 'the node never paints the raw stored colour');
+    assert.doesNotMatch(source, /backgroundColor: b\.color/, 'the swatch never paints the raw stored colour');
+  });
+
+  it('repaints the swatch when the theme flips, and disconnects the observer', () => {
+    // The canvas re-reads the palette every frame, but a DOM swatch cannot, so
+    // the modal subscribes to the theme attribute the settings switch writes.
+    assert.match(source, /new MutationObserver\(\(\) => setThemeGeneration/, 'a theme mutation re-renders the modal');
+    assert.match(source, /observer\.observe\(document\.documentElement, \{ attributeFilter: \['data-theme'\] \}\)/, 'it watches the theme attribute');
+    assert.match(source, /return \(\) => observer\.disconnect\(\)/, 'the observer is cleaned up');
+  });
+
+  it('renders the swatches through the seam: with no document they fall back to the stored colours', () => {
+    // renderToStaticMarkup has no document, so the seam takes its Dark fallback,
+    // where the mapping is the identity — the markup must therefore carry the
+    // stored band colours, proving the swatch value comes from the seam.
+    const markup = render();
     for (const spec of EQ_BAND_SPECS) {
-      assert.ok(source.includes('style={{ backgroundColor: b.color }}'), 'the swatch reads band.color');
-      assert.ok(spec.color.length > 0);
+      assert.ok(
+        markup.includes(`background-color:${spec.color}`) || markup.includes(`background-color: ${spec.color}`),
+        `swatch renders ${spec.color} from the seam`
+      );
     }
   });
 
@@ -155,9 +181,11 @@ describe('Parametric EQ theme markup (UI-03G)', () => {
     assert.match(source, /ctx\.strokeStyle = graph\.curve/, 'the response curve comes from the seam');
     assert.match(source, /ctx\.strokeStyle = isSelected \? graph\.nodeOutlineSelected : graph\.nodeOutline/, 'the node rings come from the seam');
     assert.match(source, /ctx\.fillStyle = graph\.nodeLabel/, 'the node number comes from the seam');
-    assert.match(source, /ctx\.fillStyle = b\.color/, 'the node fill stays the stored band colour');
     assert.match(source, /if \(animFrameRef\.current\) cancelAnimationFrame\(animFrameRef\.current\)/, 'the animation loop is cancelled on cleanup');
-    assert.doesNotMatch(source, /new MutationObserver/, 'no observer is attached: the per-frame read already follows the theme');
+    // The canvas itself needs no observer: the per-frame read already follows
+    // the theme. The one observer in the file exists for the DOM swatch, and is
+    // asserted separately above.
+    assert.equal(source.match(/new MutationObserver/g)?.length, 1, 'exactly one observer, and it serves the swatch');
   });
 
   it('contains no colour literal, white/black utility or palette utility in the component source', () => {
