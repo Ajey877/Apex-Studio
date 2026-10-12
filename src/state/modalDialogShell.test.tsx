@@ -496,7 +496,11 @@ const MODAL_CASES: ModalCase[] = [
   {
     name: 'Wavetable Synth', file: 'WavetableSynthModal.tsx', modalId: 'fl-wavetable-synth-modal',
     titleId: 'fl-wavetable-synth-modal-title', titleText: 'ADVANCED SYNTH PREVIEW (WAVETABLE NOT IMPLEMENTED)',
-    closeLabel: 'Close wavetable synth', overlayClass: OVERLAY_STUDIO,
+    // UI-03D: the scrim now comes from the shared `--apex-modal-overlay` token
+    // (via `.apex-modal-overlay`), not a per-dialog `bg-black/85`, so the preview
+    // dims correctly in the light palette. Same change as the Settings dialog.
+    closeLabel: 'Close wavetable synth',
+    overlayClass: 'fixed inset-0 apex-modal-overlay backdrop-blur-md z-50 flex items-center justify-center p-3 sm:p-4 select-none',
     open: React.createElement(WavetableSynthModal, {
       isOpen: true, onClose: noop, channels, onUpdateChannel: noop,
     }),

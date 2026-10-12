@@ -22,6 +22,10 @@
   --apex-accent: #9b8afb;
   --apex-accent-strong: #b2a5ff;
   --apex-cyan: #67d9ff;
+  /* UI-03D: cyan TEXT foreground for the Wavetable preview. Dark equals the
+     decorative --apex-cyan, so Dark text is unchanged; Light darkens the same hue
+     (196deg) so small labels clear 4.5:1 on the light panel and its cyan washes. */
+  --apex-cyan-text: #67d9ff;
   /* UI-03C: aux-send identity. Dark keeps the shipped Mixer violet. */
   --apex-aux: #7e57c2;
   /* UI-03C-fix: aux-send TEXT foreground. Same hue as --apex-aux, lightened so
@@ -346,6 +350,7 @@ input[type="range"], input[type="checkbox"], progress { accent-color: var(--apex
   --apex-accent: #6552ce;
   --apex-accent-strong: #5140b8;
   --apex-cyan: #087da8;
+  --apex-cyan-text: #065775;
   /* UI-03C: darker violet so aux-send labels clear AA on light strip surfaces. */
   --apex-aux: #5b3aa8;
   --apex-aux-text: #5b3aa8;
