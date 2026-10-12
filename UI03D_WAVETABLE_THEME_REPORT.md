@@ -83,7 +83,7 @@ Visual check: `assets/screenshots/ui03d-wavetable-dark.png` and `ui03d-wavetable
 
 Dark is not pixel-identical. The chrome moves to the Midnight Aurora tokens, as the Mixer and Mastering migrations did:
 
-- Modal scrim: literal `bg-black/85` becomes `--apex-modal-overlay` (Dark `rgba(5,7,12,0.66)`), a lighter scrim.
+- Modal scrim: no rendered change. `ModalFrame` already applied `--apex-modal-overlay` on `main`, and the unlayered token rule overrides the legacy `bg-black/85` utility, so the scrim is the same as before this PR in both themes (Dark `rgba(5,7,12,0.66)`, Light `rgba(24,32,45,0.55)`). The `bg-black/85` class string is removed as dead code. Verified by a runtime probe of computed style and rendered pixels on the `main` and PR builds.
 - Waterfall background: literal `#0a0a0d` becomes `--apex-canvas` (`#151821`).
 - Dialog panel: `#121215` becomes `--apex-surface` (`#191c25`). Other card and header surfaces move to their tokens.
 - Primary button hover: `#33edff` becomes the solid token `--apex-cyan-strong` (Dark `#71efff`). This is the same pixel the old `brightness-110` produced on `#67d9ff` (measured `113,239,255`), so the visible Dark hover is unchanged.
