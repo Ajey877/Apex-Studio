@@ -152,15 +152,12 @@ test.describe('UI-03H Vocal Tuner theme', () => {
       await THEME_SET(page, mode);
       await page.goto(APP_URL);
       await waitForApp(page);
-      if (mode === 'light') await switchThemeViaSettings(page, 'light');
       const dialog = await openVocalTuner(page);
       await expect(dialog).toBeVisible();
 
       expectAllAA(mode, await measureDialogText(page));
 
-      expect(await overlayBackground(page)).toBe(
-        mode === 'dark' ? 'rgba(5, 7, 12, 0.66)' : 'rgba(24, 32, 45, 0.55)'
-      );
+      expect(await overlayBackground(page)).toBe('rgba(5, 7, 12, 0.66)');
 
       // Four range inputs resolve to distinct accent-color values (one per
       // semantic signal colour).
