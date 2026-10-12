@@ -308,7 +308,13 @@ const MODAL_CASES: ModalCase[] = [
   {
     name: 'Audio Recorder', file: 'AudioRecorderModal.tsx', modalId: 'audio-recorder-modal',
     titleId: 'audio-recorder-modal-title', titleText: 'AUDIO RECORDER',
-    closeLabel: 'Close audio recorder', overlayClass: OVERLAY_SHELL_PADDED,
+    // UI-03F: the scrim is the shared `--apex-modal-overlay` token, applied by
+    // ModalFrame's `apex-modal-overlay` class (prepended to the rendered class
+    // string). The dead `bg-black/85` utility is removed from the modal's own
+    // class string; the rendered scrim is unchanged because the unlayered token
+    // rule already overrode it.
+    closeLabel: 'Close audio recorder',
+    overlayClass: 'apex-modal-overlay fixed inset-0 backdrop-blur-sm z-50 flex items-center justify-center p-4',
     open: React.createElement(AudioRecorderModal, {
       isOpen: true, projectGeneration: 0, getCurrentProjectGeneration: () => 0,
       countInBars: 0, onUpdateCountInBars: noop,
