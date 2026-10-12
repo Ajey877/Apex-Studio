@@ -33,5 +33,9 @@ test.describe('UI-03H Vocal Tuner theme', () => {
 
     // ENABLED badge is visible when enabled.
     await expect(dialog.locator('text=ENABLED (NOT APPLIED)')).toBeVisible();
+
+    // Overlay scrim is the themed token.
+    const overlay = page.locator('#fl-vocal-tuner-modal');
+    await expect(overlay).toHaveCSS('background-color', 'rgba(5, 7, 12, 0.66)');
   });
 });
