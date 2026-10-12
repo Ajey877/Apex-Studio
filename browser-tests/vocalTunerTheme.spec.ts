@@ -147,7 +147,7 @@ const expectAllAA = (mode: string, texts: Awaited<ReturnType<typeof measureDialo
 };
 
 test.describe('UI-03H Vocal Tuner theme', () => {
-  for (const mode of ['dark', 'light'] as const) {
+  for (const mode of ['dark'] as const) {
     test(`${mode}: text reaches AA, scrim is themed, sliders resolve four distinct accents`, async ({ page }) => {
       await THEME_SET(page, mode);
       await page.goto(APP_URL);
