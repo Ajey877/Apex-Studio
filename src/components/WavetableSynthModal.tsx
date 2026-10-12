@@ -169,7 +169,7 @@ export const WavetableSynthModal: React.FC<WavetableSynthModalProps> = ({
           <div className="flex items-center gap-2">
             <button
               onClick={handleAudition}
-              className="px-3 py-1 bg-[var(--apex-cyan)] hover:brightness-110 text-[var(--apex-state-playing-fg)] font-bold text-xs rounded transition flex items-center gap-1.5 shadow"
+              className="px-3 py-1 bg-[var(--apex-cyan)] hover:bg-[var(--apex-cyan-strong)] text-[var(--apex-state-playing-fg)] font-bold text-xs rounded transition flex items-center gap-1.5 shadow"
             >
               <Play className="w-3.5 h-3.5" />
               <span>Audition C3</span>
@@ -345,7 +345,7 @@ export const WavetableSynthModal: React.FC<WavetableSynthModalProps> = ({
           <span className="text-[10px] text-[var(--apex-text-3)]">Preview only: this window does not change how the channel sounds</span>
           <button
             onClick={onClose}
-            className="px-4 py-1.5 bg-[var(--apex-cyan)] hover:brightness-110 text-[var(--apex-state-playing-fg)] font-bold rounded transition shadow"
+            className="px-4 py-1.5 bg-[var(--apex-cyan)] hover:bg-[var(--apex-cyan-strong)] text-[var(--apex-state-playing-fg)] font-bold rounded transition shadow"
           >
             Close Preview
           </button>

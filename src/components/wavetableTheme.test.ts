@@ -118,6 +118,24 @@ describe('Wavetable palette seam (UI-03D)', () => {
     }
   });
 
+  it('keeps the primary-button label at AA on the rest and hover fills in both themes', () => {
+    // Button label: --apex-state-playing-fg. Rest fill: --apex-cyan. Hover fill:
+    // --apex-cyan-strong (a solid token, not a brightness filter). Values come
+    // from the real src/index.css. The browser suite measures the composited pixels.
+    for (const [mode, tokens] of [['dark', DARK_TOKENS], ['light', LIGHT_TOKENS]] as const) {
+      const label = hexToRgb(tokens['--apex-state-playing-fg']);
+      for (const fill of ['--apex-cyan', '--apex-cyan-strong'] as const) {
+        const ratio = contrast(label, hexToRgb(tokens[fill]));
+        assert.ok(ratio >= 4.5, `${mode} button label on ${fill} ${tokens[fill]}: ${ratio.toFixed(2)}:1`);
+      }
+    }
+  });
+
+  it('keeps the hover fill distinct from the rest fill in both themes', () => {
+    assert.notEqual(LIGHT_TOKENS['--apex-cyan-strong'], LIGHT_TOKENS['--apex-cyan']);
+    assert.notEqual(DARK_TOKENS['--apex-cyan-strong'], DARK_TOKENS['--apex-cyan']);
+  });
+
   it('keeps Dark cyan text identical to the decorative Dark cyan', () => {
     assert.equal(DARK_TOKENS['--apex-cyan-text'], DARK_TOKENS['--apex-cyan']);
   });

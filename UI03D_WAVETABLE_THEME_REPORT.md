@@ -33,9 +33,9 @@ Root cause: the legacy compatibility layer in `index.css` maps `bg-[#18181c]` an
 
 | Layer | File | What it proves |
 | --- | --- | --- |
-| Unit (seam) | `src/components/wavetableTheme.test.ts` (13 tests) | Background follows the theme token; Dark signal colours are the exact literals; Dark frame strings are byte-identical to the legacy output; the Light selected frame is ≥3:1 on the canvas; the strongest Light inactive frame is ≥3:1 once composited; Light cyan text is ≥4.5:1 on every surface including the washes; Dark cyan text equals the decorative Dark cyan; no-DOM and missing-token fallbacks; no stale palette after a flip; cache identity. |
-| Unit (markup) | `src/components/wavetableThemeUi.test.tsx` (7 tests) | Full dialog renders; no colour literal or white/black utility in any class attribute; chrome uses the expected `var(--apex-…)` tokens; overlay uses the shared scrim; the draw loop paints from the seam; component source has no hex literal; preview-only truth copy unchanged. |
-| Real browser | `browser-tests/wavetableTheme.spec.ts` (5 tests) | For Dark and Light: every visible text node in the dialog reaches AA against its composited background (47 nodes each); the canvas corner pixel equals the theme background; the exact selected-frame RGB appears in the bitmap. A live theme flip repaints the open canvas with no reload. Reopening after a Settings switch shows the current palette. Visible text and control count are identical across themes. |
+| Unit (seam) | `src/components/wavetableTheme.test.ts` (15 tests) | Background follows the theme token; Dark signal colours are the exact literals; Dark frame strings are byte-identical to the legacy output; the Light selected frame is ≥3:1 on the canvas; the strongest Light inactive frame is ≥3:1 once composited; Light cyan text is ≥4.5:1 on every surface including the washes; Dark cyan text equals the decorative Dark cyan; no-DOM and missing-token fallbacks; no stale palette after a flip; cache identity; the button label is ≥4.5:1 on the rest and hover fills in both themes; the Light hover fill differs from rest. |
+| Unit (markup) | `src/components/wavetableThemeUi.test.tsx` (8 tests) | Full dialog renders; no colour literal or white/black utility in any class attribute; chrome uses the expected `var(--apex-…)` tokens; both primary buttons use the solid `hover:bg-[var(--apex-cyan-strong)]` fill and no `hover:brightness-` filter; overlay uses the shared scrim; the draw loop paints from the seam; component source has no hex literal; preview-only truth copy unchanged. |
+| Real browser | `browser-tests/wavetableTheme.spec.ts` (7 tests) | For Dark and Light: every visible text node in the dialog reaches AA against its composited background (47 nodes each); the canvas corner pixel equals the theme background; the exact selected-frame RGB appears in the bitmap. For Dark and Light: both primary buttons reach ≥4.5:1 at rest, on hover, and on keyboard focus (`:focus-visible`), with the hover fill verified to differ from rest and no `filter`/`opacity` compositing on the element or its ancestors. A live theme flip repaints the open canvas with no reload. Reopening after a Settings switch shows the current palette. Visible text and control count are identical across themes. |
 
 ## Results (actual, this sandbox)
 
@@ -46,9 +46,24 @@ Browser text contrast after the change:
 | Dark | 47 | **5.13:1** | "Preview curve only — no audio is generated from it." |
 | Light | 47 | **4.66:1** | "Audition C3" (white on Light cyan) |
 
+Primary buttons ("Audition C3" and "Close Preview"), measured in the browser against the composited fill. Hover ratios are from the rendered pixel, not from computed styles:
+
+| Theme | State | Fill | Text | Ratio |
+| --- | --- | --- | --- | --- |
+| Dark | Rest | `#67d9ff` | `#0d0f16` | **11.80:1** |
+| Dark | Hover | `#71efff` | `#0d0f16` | **14.12:1** |
+| Dark | Focus | `#67d9ff` | `#0d0f16` | **11.80:1** |
+| Light | Rest | `#087da8` | `#ffffff` | **4.66:1** |
+| Light | Hover | `#07749c` | `#ffffff` | **5.27:1** |
+| Light | Focus | `#087da8` | `#ffffff` | **4.66:1** |
+
+Before the fix, Light hover was `brightness(1.1)` on `#087da8`. The rendered pixel was `9,138,185`, which is **3.93:1** and fails AA. Computed `background-color` stayed at `#087da8` throughout, so a style-only measurement could not see the failure. The fix uses a solid hover token (see Dark-theme deltas and the Light change below) and the browser test now asserts the composited result.
+
+Negative control for the button test: with Light `--apex-cyan-strong` set to `#0a8ac0`, the hover measured **3.88:1** and the test failed. With `#07749c` restored, it passes.
+
 Before the `--apex-cyan-text` token, 8 Light elements failed. All of them were cyan text, and the failures went away when the token was added. The Light AA test was then run as a **negative control**: with `--apex-cyan-text` set back to the decorative `#087da8`, the test failed. With the real value restored, it passed.
 
-Validation (`/home/user/tools/final.log`, final run after all edits):
+Validation (`/home/user/tools/fix-validate.log`, full run after the PR #210 contrast fix):
 
 | Check | Result |
 | --- | --- |
@@ -60,7 +75,7 @@ Validation (`/home/user/tools/final.log`, final run after all edits):
 | `npm run test:metering` / `test:shell` / `test:effects` / `test:truth` / `test:desktop-permissions` | ✅ pass |
 | `npm run test:playlist-geometry` | ❌ fails **6/6, identically on the untouched base branch** (pre-existing; not caused by this change) |
 | `npm run build` | ✅ pass |
-| `npx playwright test` | ✅ **36/36** (31 existing + 5 new Wavetable) |
+| `npx playwright test` | ✅ **38/38** (31 existing + 7 Wavetable: 5 original, plus 2 primary-button tests, one per theme) |
 
 Visual check: `assets/screenshots/ui03d-wavetable-dark.png` and `ui03d-wavetable-light.png` were captured from the real browser and reviewed. Both themes read clearly.
 
@@ -71,9 +86,14 @@ Dark is not pixel-identical. The chrome moves to the Midnight Aurora tokens, as 
 - Modal scrim: literal `bg-black/85` becomes `--apex-modal-overlay` (Dark `rgba(5,7,12,0.66)`), a lighter scrim.
 - Waterfall background: literal `#0a0a0d` becomes `--apex-canvas` (`#151821`).
 - Dialog panel: `#121215` becomes `--apex-surface` (`#191c25`). Other card and header surfaces move to their tokens.
-- Primary button hover: `#33edff` becomes `brightness-110`.
+- Primary button hover: `#33edff` becomes the solid token `--apex-cyan-strong` (Dark `#71efff`). This is the same pixel the old `brightness-110` produced on `#67d9ff` (measured `113,239,255`), so the visible Dark hover is unchanged.
 
 Unchanged in Dark: the waveform stroke and selected-frame colours (exact literals, verified byte-for-byte in unit tests), all text colours that already passed AA, and every label, control, and state.
+
+## Light-theme deltas (deliberate, please review)
+
+- **Primary button label changes from black to white.** On `main` the "Audition C3" and "Close Preview" labels were `text-black` (`#000`) on the cyan fill. They now use `--apex-state-playing-fg`, which is `#ffffff` in Light (`#0d0f16` in Dark, unchanged). The old black was a hard-coded literal; the label now uses the theme's text-on-cyan token, which is white in Light. White on `#087da8` is 4.66:1 at rest, and 5.27:1 on the Light hover fill.
+- Light hover fill: `#07749c` (`--apex-cyan-strong`), a darker cyan. Light cyan text and the rest fill are unchanged.
 
 ## Behaviour explicitly untouched
 
@@ -81,7 +101,7 @@ Audio, the audition path (`audioEngine.playNote`), channel updates, preset handl
 
 ## Known limitations
 
-1. **Faint depth frames are decorative and below 3:1.** The inactive waterfall frames fade toward the back. The faintest is about 1.3:1 in Dark and about 1.5:1 in Light. The selected frame and the strongest inactive frames carry the information, and those meet the non-text threshold. I did not raise the faintest frames, because that would change the depth effect.
+1. **Faint depth frames are decorative and below 3:1.** The inactive waterfall frames fade toward the back. The faintest composited frame is about **1.4:1 in Dark** (1.39:1) and about **1.5:1 in Light** (1.49:1). These are decorative measurements, computed from the stroke alpha over the canvas. **No test asserts them.** The selected frame and the strongest inactive frames carry the information, and those meet the non-text threshold. I did not raise the faintest frames, because that would change the depth effect.
 2. **Canvas repaint is verified by pixels, not by eye during playback.** The preview produces no audio, so there is nothing to drive the waveform beyond its own animation.
 3. **Other canvas modals are not migrated** (`AudioRecorderModal`, `AudioSlicerModal`, `ParametricEqModal`).
 4. **Windows packaging and the packaged runtime smoke test were not run locally.** They run in CI.

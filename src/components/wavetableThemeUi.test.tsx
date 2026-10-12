@@ -63,6 +63,15 @@ describe('Wavetable preview theme markup (UI-03D)', () => {
     }
   });
 
+  it('gives both primary buttons a solid AA hover fill, not a brightness filter', () => {
+    assert.equal(
+      source.match(/hover:bg-\[var\(--apex-cyan-strong\)\]/g)?.length,
+      2,
+      'Audition C3 and Close Preview both use the cyan-strong hover fill'
+    );
+    assert.doesNotMatch(source, /hover:brightness-/, 'brightness hover filters are gone');
+  });
+
   it('uses the shared modal scrim token for the overlay', () => {
     assert.match(source, /apex-modal-overlay/, 'overlay uses the shared scrim token');
     assert.doesNotMatch(source, /bg-black\//, 'no hardcoded black scrim');

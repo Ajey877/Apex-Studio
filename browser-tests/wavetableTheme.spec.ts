@@ -102,13 +102,14 @@ const pixelsClose = (actual: number[], expected: number[], tolerance = 3) =>
   actual.every((channel, index) => Math.abs(channel - expected[index]) <= tolerance);
 
 /**
- * Every visible text node in the dialog, with the contrast of its computed
- * colour against the colour painted behind it. The background is composited
- * from the nearest opaque ancestor outward, so translucent washes (hover,
- * `bg-…/10`) are measured as they are actually displayed.
+ * Every visible text node in the dialog (or in the element matched by `scope`),
+ * with the contrast of its computed colour against the colour painted behind
+ * it. The background is composited from the nearest opaque ancestor outward,
+ * so translucent washes (hover, `bg-…/10`) are measured as they are displayed.
  */
-const measureDialogText = (page: Page) =>
-  page.evaluate(() => {
+const measureDialogText = (page: Page, scope: string | null = null) =>
+  page.evaluate((scopeSelector: string | null) => {
+    const root = scopeSelector ? document.querySelector(scopeSelector) : null;
     type RGBA = [number, number, number, number];
     const parse = (value: string): RGBA | null => {
       const legacy = /^rgba?\(([^)]+)\)$/.exec(value.trim());
@@ -181,10 +182,10 @@ const measureDialogText = (page: Page) =>
       return (Math.max(la, lb) + 0.05) / (Math.min(la, lb) + 0.05);
     };
 
-    const dialog = document.querySelector('[role="dialog"]:has(#fl-wavetable-synth-modal-title)');
+    const dialog = root ?? document.querySelector('[role="dialog"]:has(#fl-wavetable-synth-modal-title)');
     if (!dialog) throw new Error('wavetable dialog not rendered');
     const results: Array<{ text: string; ratio: number; fontSize: number; bold: boolean; color: string; background: string }> = [];
-    dialog.querySelectorAll('*').forEach((el) => {
+    [...(root ? [root] : []), ...dialog.querySelectorAll('*')].forEach((el) => {
       const text = [...el.childNodes]
         .filter((n) => n.nodeType === Node.TEXT_NODE)
         .map((n) => (n.textContent ?? '').trim())
@@ -208,7 +209,26 @@ const measureDialogText = (page: Page) =>
       });
     });
     return results;
-  });
+  }, scope);
+
+/**
+ * Computed `filter` and `opacity` on the element and its ancestors, up to the
+ * dialog. A non-neutral value is painted on top of the computed colours, so a
+ * measurement taken from computed styles would not reflect what is on screen.
+ * This guard is what made the earlier hover defect invisible to that method.
+ */
+const compositingGuards = (page: Page, scope: string) =>
+  page.evaluate((selector: string) => {
+    const out: string[] = [];
+    let node: Element | null = document.querySelector(selector);
+    while (node && node.getAttribute('role') !== 'dialog') {
+      const cs = getComputedStyle(node);
+      if (cs.filter !== 'none') out.push(`filter ${cs.filter} on <${node.tagName.toLowerCase()}>`);
+      if (cs.opacity !== '1') out.push(`opacity ${cs.opacity} on <${node.tagName.toLowerCase()}>`);
+      node = node.parentElement;
+    }
+    return out;
+  }, scope);
 
 const requiredRatio = (entry: { fontSize: number; bold: boolean }) =>
   entry.fontSize >= 24 || (entry.bold && entry.fontSize >= 18.66) ? 3 : 4.5;
@@ -238,6 +258,59 @@ test.describe('UI-03D Wavetable preview theme', () => {
       expect(await countExactPixels(page, current)).toBeGreaterThan(0);
 
       await wavetableDialog(page).screenshot({ path: `assets/screenshots/ui03d-wavetable-${mode}.png` });
+    });
+  }
+
+  for (const mode of ['dark', 'light'] as const) {
+    test(`${mode}: primary buttons keep AA text in rest, hover and keyboard-focus states`, async ({ page }) => {
+      await THEME_SET(page, mode);
+      await page.goto(APP_URL);
+      await waitForApp(page);
+      if (mode === 'light') await switchThemeViaSettings(page, 'light');
+      const dialog = await openWavetable(page);
+
+      const buttons = ['Audition C3', 'Close Preview'] as const;
+      for (const name of buttons) {
+        const locator = dialog.locator(`button:has-text("${name}")`);
+        await expect(locator).toHaveCount(1);
+        const probeId = `ui03d-${mode}-${name.replace(/\W+/g, '-').toLowerCase()}`;
+        await locator.evaluate((el, id) => el.setAttribute('data-ui03d-probe', id), probeId);
+        const scope = `[data-ui03d-probe="${probeId}"]`;
+
+        const measure = async (state: 'rest' | 'hover' | 'focus') => {
+          const entries = await measureDialogText(page, scope);
+          const entry = entries.find((t) => t.text.includes(name));
+          expect(entry, `${name} text measured in ${state}`).toBeDefined();
+          const background = await locator.evaluate((el) => getComputedStyle(el).backgroundColor);
+          const guards = await compositingGuards(page, scope);
+          console.log(`[UI-03D] ${mode} "${name}" ${state}: ${entry!.ratio}:1 (text ${entry!.color}, bg ${background})`);
+          expect(guards, `${name} ${state}: compositing must be neutral`).toEqual([]);
+          expect(
+            entry!.ratio,
+            `${mode} "${name}" ${state} text ${entry!.color} on ${background}: ${entry!.ratio}:1`
+          ).toBeGreaterThanOrEqual(4.5);
+          return { ratio: entry!.ratio, background };
+        };
+
+        await page.mouse.move(0, 0);
+        await page.waitForTimeout(400);
+        const rest = await measure('rest');
+
+        await locator.hover();
+        await page.waitForTimeout(400);
+        const hover = await measure('hover');
+        // The hover rule must actually apply in this browser, not just be declared.
+        expect(hover.background, `${name} hover changes the fill`).not.toBe(rest.background);
+
+        await page.mouse.move(0, 0);
+        await page.waitForTimeout(400);
+        await page.keyboard.press('Shift');
+        await locator.focus();
+        await page.waitForTimeout(300);
+        expect(await locator.evaluate((el) => el.matches(':focus-visible')), `${name} shows focus-visible`).toBe(true);
+        const focus = await measure('focus');
+        expect(focus.background, `${name} focus leaves the fill unchanged`).toBe(rest.background);
+      }
     });
   }
 
