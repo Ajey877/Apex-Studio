@@ -323,7 +323,12 @@ const MODAL_CASES: ModalCase[] = [
   {
     name: 'Audio Slicer', file: 'AudioSlicerModal.tsx', modalId: 'audio-slicer-modal',
     titleId: 'audio-slicer-modal-title', titleText: 'SAMPLE TRANSIENT SLICER & CHOPPER',
-    closeLabel: 'Close audio slicer', overlayClass: OVERLAY_STUDIO,
+    // UI-03E: the scrim is the shared `--apex-modal-overlay` token, applied by
+    // ModalFrame's `apex-modal-overlay` class. The rendered scrim is unchanged
+    // from main: the unlayered token rule already overrode the legacy
+    // `bg-black/85` utility, which is dead and removed from this class string.
+    closeLabel: 'Close audio slicer',
+    overlayClass: 'fixed inset-0 apex-modal-overlay backdrop-blur-md z-50 flex items-center justify-center p-3 sm:p-4 select-none',
     open: React.createElement(AudioSlicerModal, {
       isOpen: true, onClose: noop, channels, onUpdateChannel: noop,
     }),
