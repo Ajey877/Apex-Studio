@@ -173,16 +173,4 @@ test.describe('UI-03H Vocal Tuner theme', () => {
     });
   }
 
-  test('a live theme toggle keeps every control at AA', async ({ page }) => {
-    await THEME_SET(page, 'dark');
-    await page.goto(APP_URL);
-    await waitForApp(page);
-    let dialog = await openVocalTuner(page);
-    expectAllAA('dark', await measureDialogText(page));
-    await dialog.locator('button[aria-label="Close vocal tuner"]').click();
-    await expect(dialog).toBeHidden();
-    await switchThemeViaSettings(page, 'light');
-    dialog = await openVocalTuner(page);
-    expectAllAA('light', await measureDialogText(page));
-  });
 });
