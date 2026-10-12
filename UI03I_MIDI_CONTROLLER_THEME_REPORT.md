@@ -43,7 +43,7 @@ The eight MPC-pad colors are instrument identities, not chrome. The note-on, not
 | Production CSS token check | **Pass** — panel, selection, success, natural-key, border, text, and alert token utilities are emitted |
 | `npx playwright test browser-tests/midiControllerTheme.spec.ts` | **Pass** — 2/2 tests, Chromium 153 (Dark + Light) |
 | Git whitespace check | **Pass** — `git diff --check` |
-| GitHub CI | To be verified against the exact final PR head before merge recommendation |
+| GitHub CI | **Pass** — Apex Studio CI (`verify`), Audio Validation (`audio-tests`), Desktop Validation (`windows-package`), and CodeRabbit. The final PR-head check is also reported in the session summary. |
 
 The production build retains the repository’s existing Vite notice that the main JavaScript chunk is larger than 500 kB after minification; this migration does not change application architecture or chunking.
 
@@ -55,7 +55,7 @@ The production build retains the repository’s existing Vite notice that the ma
 
 ## Remaining planned UI-03 modal order
 
-1. `MidiControllerModal` — UI-03I — implementation and local validation complete in this PR; CI/review/merge pending.
+1. `MidiControllerModal` — UI-03I — implementation and local validation complete; PR CI passes; awaiting review/merge.
 2. `GrossBeatModal`
 3. `ArpeggiatorModal`
 4. `MidiLearnModal`
