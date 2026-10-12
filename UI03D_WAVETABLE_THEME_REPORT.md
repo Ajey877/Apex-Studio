@@ -34,8 +34,8 @@ Root cause: the legacy compatibility layer in `index.css` maps `bg-[#18181c]` an
 | Layer | File | What it proves |
 | --- | --- | --- |
 | Unit (seam) | `src/components/wavetableTheme.test.ts` (15 tests) | Background follows the theme token; Dark signal colours are the exact literals; Dark frame strings are byte-identical to the legacy output; the Light selected frame is ≥3:1 on the canvas; the strongest Light inactive frame is ≥3:1 once composited; Light cyan text is ≥4.5:1 on every surface including the washes; Dark cyan text equals the decorative Dark cyan; no-DOM and missing-token fallbacks; no stale palette after a flip; cache identity; the button label is ≥4.5:1 on the rest and hover fills in both themes; the Light hover fill differs from rest. |
-| Unit (markup) | `src/components/wavetableThemeUi.test.tsx` (8 tests) | Full dialog renders; no colour literal or white/black utility in any class attribute; chrome uses the expected `var(--apex-…)` tokens; both primary buttons use the solid `hover:bg-[var(--apex-cyan-strong)]` fill and no `hover:brightness-` filter; overlay uses the shared scrim; the draw loop paints from the seam; component source has no hex literal; preview-only truth copy unchanged. |
-| Real browser | `browser-tests/wavetableTheme.spec.ts` (7 tests) | For Dark and Light: every visible text node in the dialog reaches AA against its composited background (47 nodes each); the canvas corner pixel equals the theme background; the exact selected-frame RGB appears in the bitmap. For Dark and Light: both primary buttons reach ≥4.5:1 at rest, on hover, and on keyboard focus (`:focus-visible`), with the hover fill verified to differ from rest and no `filter`/`opacity` compositing on the element or its ancestors. A live theme flip repaints the open canvas with no reload. Reopening after a Settings switch shows the current palette. Visible text and control count are identical across themes. |
+| Unit (markup) | `src/components/wavetableThemeUi.test.tsx` (9 tests) | Full dialog renders; no colour literal or white/black utility in any class attribute; chrome uses the expected `var(--apex-…)` tokens; both primary buttons use the solid `hover:bg-[var(--apex-cyan-strong)]` fill and no `hover:brightness-` filter; status-toast text carries no translucent `playing-fg` alpha; overlay uses the shared scrim; the draw loop paints from the seam; component source has no hex literal; preview-only truth copy unchanged. |
+| Real browser | `browser-tests/wavetableTheme.spec.ts` (9 tests) | For Dark and Light: every visible text node in the dialog reaches AA against its composited background (47 nodes each); the canvas corner pixel equals the theme background; the exact selected-frame RGB appears in the bitmap. For Dark and Light: both primary buttons reach ≥4.5:1 at rest, on hover, and on keyboard focus (`:focus-visible`), with the hover fill verified to differ from rest and no `filter`/`opacity` compositing on the element or its ancestors. For Dark and Light: clicking Audition C3 shows the status toast, and its message and ✕ dismiss glyph both reach ≥4.5:1 against the toast fill. The ✕ still closes the toast. A live theme flip repaints the open canvas with no reload. Reopening after a Settings switch shows the current palette. Visible text and control count are identical across themes. |
 
 ## Results (actual, this sandbox)
 
@@ -61,21 +61,30 @@ Before the fix, Light hover was `brightness(1.1)` on `#087da8`. The rendered pix
 
 Negative control for the button test: with Light `--apex-cyan-strong` set to `#0a8ac0`, the hover measured **3.88:1** and the test failed. With `#07749c` restored, it passes.
 
+Status toast (Audition C3 click, measured within the toast's 2-second window), against the composited toast fill:
+
+| Theme | Text | Fill | Ratio |
+| --- | --- | --- | --- |
+| Dark | message and ✕ `#0d0f16` | `#67d9ff` | **11.80:1** |
+| Light | message and ✕ `#ffffff` (full strength) | `#087da8` | **4.66:1** |
+
+Before this change, the Light ✕ was `#ffffff` at 80% alpha, which measured **3.56:1** and failed AA. The toast's ✕ used `text-[var(--apex-state-playing-fg)]/80`, and that was the only translucent `playing-fg` text. The alpha is removed. The browser test was run as a **negative control** with the alpha restored: the Light ✕ measured 3.56:1 and the test failed. Dark measured 7.63:1 with the alpha, so only Light regressed. The alpha is now removed and the test passes.
+
 Before the `--apex-cyan-text` token, 8 Light elements failed. All of them were cyan text, and the failures went away when the token was added. The Light AA test was then run as a **negative control**: with `--apex-cyan-text` set back to the decorative `#087da8`, the test failed. With the real value restored, it passed.
 
-Validation (`/home/user/tools/fix-validate.log`, full run after the PR #210 contrast fix):
+Validation (`/home/user/tools/targeted-fix-validate.log`, full run after the toast contrast and documentation fixes):
 
 | Check | Result |
 | --- | --- |
 | `npm run lint` (`tsc --noEmit`) | ✅ pass |
 | `npm run verify:test-discovery` | ✅ pass |
 | `npm run verify:desktop` | ✅ pass |
-| `npm run test:history` (includes the 11 + 7 new tests) | ✅ pass |
+| `npm run test:history` (includes the Wavetable unit tests, 15 + 9) | ✅ pass |
 | `npm run test:audio` | ✅ pass |
 | `npm run test:metering` / `test:shell` / `test:effects` / `test:truth` / `test:desktop-permissions` | ✅ pass |
-| `npm run test:playlist-geometry` | ❌ fails **6/6, identically on the untouched base branch** (pre-existing; not caused by this change) |
+| `npm run test:playlist-geometry` | ❌ fails **6/6** on both `main` and this branch. Cause: Playwright's default browser is not installed in this sandbox (`Executable doesn't exist`), so the test never reaches its assertions. This is an environment limit, not a geometry failure. CI does not run this script. Not run as passing. |
 | `npm run build` | ✅ pass |
-| `npx playwright test` | ✅ **38/38** (31 existing + 7 Wavetable: 5 original, plus 2 primary-button tests, one per theme) |
+| `npx playwright test` | ✅ **40/40** (31 existing + 9 Wavetable: 5 original, plus 2 primary-button tests and 2 status-toast tests, one per theme each) |
 
 Visual check: `assets/screenshots/ui03d-wavetable-dark.png` and `ui03d-wavetable-light.png` were captured from the real browser and reviewed. Both themes read clearly.
 
@@ -86,14 +95,16 @@ Dark is not pixel-identical. The chrome moves to the Midnight Aurora tokens, as 
 - Modal scrim: no rendered change. `ModalFrame` already applied `--apex-modal-overlay` on `main`, and the unlayered token rule overrides the legacy `bg-black/85` utility, so the scrim is the same as before this PR in both themes (Dark `rgba(5,7,12,0.66)`, Light `rgba(24,32,45,0.55)`). The `bg-black/85` class string is removed as dead code. Verified by a runtime probe of computed style and rendered pixels on the `main` and PR builds.
 - Waterfall background: literal `#0a0a0d` becomes `--apex-canvas` (`#151821`).
 - Dialog panel: `#121215` becomes `--apex-surface` (`#191c25`). Other card and header surfaces move to their tokens.
-- Primary button hover: `#33edff` becomes the solid token `--apex-cyan-strong` (Dark `#71efff`). This is the same pixel the old `brightness-110` produced on `#67d9ff` (measured `113,239,255`), so the visible Dark hover is unchanged.
+- Primary buttons ("Audition C3", "Close Preview") change fill and label. On `main` both used rest `#00e5ff`, hover `#33edff`, and a black label (`#000`). Dark is now rest `#67d9ff` (`--apex-cyan`), hover `#71efff` (`--apex-cyan-strong`), and label `#0d0f16`. The Dark hover is therefore **not** unchanged from `main`. It is lighter than `#33edff`. `#71efff` is the same pixel the intermediate `brightness-110` hover produced on `#67d9ff` (measured `113,239,255`).
+- Status toast: on `main` the background was `#00e5ff`. Dark is now `#67d9ff` (`--apex-cyan`), with label `#0d0f16` and the ✕ at full strength.
 
-Unchanged in Dark: the waveform stroke and selected-frame colours (exact literals, verified byte-for-byte in unit tests), all text colours that already passed AA, and every label, control, and state.
+Unchanged in Dark: the waveform stroke and selected-frame colours (exact literals, verified byte-for-byte in unit tests), and the text colours that already passed AA. The primary-button and toast fills listed above do change.
 
 ## Light-theme deltas (deliberate, please review)
 
 - **Primary button label changes from black to white.** On `main` the "Audition C3" and "Close Preview" labels were `text-black` (`#000`) on the cyan fill. They now use `--apex-state-playing-fg`, which is `#ffffff` in Light (`#0d0f16` in Dark, unchanged). The old black was a hard-coded literal; the label now uses the theme's text-on-cyan token, which is white in Light. White on `#087da8` is 4.66:1 at rest, and 5.27:1 on the Light hover fill.
-- Light hover fill: `#07749c` (`--apex-cyan-strong`), a darker cyan. Light cyan text and the rest fill are unchanged.
+- Light primary-button rest fill changes from `#00e5ff` (`main`) to `#087da8` (`--apex-cyan`). Light hover fill is `#07749c` (`--apex-cyan-strong`). On `main` the hover was `#33edff`.
+- Light status-toast background changes from `#00e5ff` (`main`) to `#087da8`. Its label and ✕ are white (`main`: black), and the ✕ is now full strength, not 80%.
 
 ## Behaviour explicitly untouched
 

@@ -314,6 +314,42 @@ test.describe('UI-03D Wavetable preview theme', () => {
     });
   }
 
+  for (const mode of ['dark', 'light'] as const) {
+    test(`${mode}: the Audition status toast and its dismiss glyph keep AA contrast`, async ({ page }) => {
+      await THEME_SET(page, mode);
+      await page.goto(APP_URL);
+      await waitForApp(page);
+      if (mode === 'light') await switchThemeViaSettings(page, 'light');
+      const dialog = await openWavetable(page);
+
+      // The toast is transient (auto-dismiss after 2 s), so measure it right after it appears.
+      await dialog.locator('button:has-text("Audition C3")').click();
+      const toast = dialog.locator('div.shadow-md:has(button)');
+      await expect(toast).toBeVisible();
+      const probeId = `ui03d-${mode}-toast`;
+      await toast.evaluate((el, id) => el.setAttribute('data-ui03d-probe', id), probeId);
+      const scope = `[data-ui03d-probe="${probeId}"]`;
+
+      const entries = await measureDialogText(page, scope);
+      const message = entries.find((t) => t.text.includes('Previewing the channel synth'));
+      const dismiss = entries.find((t) => t.text === '✕');
+      expect(message, 'toast message measured').toBeDefined();
+      expect(dismiss, 'toast dismiss glyph measured').toBeDefined();
+      console.log(`[UI-03D] ${mode} toast message: ${message!.ratio}:1 (text ${message!.color}); dismiss ✕: ${dismiss!.ratio}:1 (text ${dismiss!.color})`);
+      expect(message!.ratio, `${mode} toast message ${message!.color}: ${message!.ratio}:1`).toBeGreaterThanOrEqual(4.5);
+      expect(dismiss!.ratio, `${mode} toast dismiss ✕ ${dismiss!.color}: ${dismiss!.ratio}:1`).toBeGreaterThanOrEqual(4.5);
+
+      const dismissButton = toast.locator('button');
+      await dismissButton.evaluate((el, id) => el.setAttribute('data-ui03d-probe', id), `${probeId}-x`);
+      const guards = await compositingGuards(page, `[data-ui03d-probe="${probeId}-x"]`);
+      expect(guards, 'dismiss glyph: compositing must be neutral').toEqual([]);
+
+      // The dismiss handler is unchanged: the glyph still closes the toast.
+      await dismissButton.click();
+      await expect(toast).toBeHidden();
+    });
+  }
+
   test('a theme flip repaints the open canvas with no reload', async ({ page }) => {
     await THEME_SET(page, 'dark');
     await page.goto(APP_URL);

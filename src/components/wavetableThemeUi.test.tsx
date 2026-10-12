@@ -72,6 +72,14 @@ describe('Wavetable preview theme markup (UI-03D)', () => {
     assert.doesNotMatch(source, /hover:brightness-/, 'brightness hover filters are gone');
   });
 
+  it('keeps toast text at full strength: no translucent playing-fg text (dismiss glyph included)', () => {
+    assert.doesNotMatch(
+      source,
+      /text-\[var\(--apex-state-playing-fg\)\]\/\d/,
+      'toast text on the cyan fill must not be alpha-blended; the dismiss glyph reached only 3.56:1 at 80%'
+    );
+  });
+
   it('uses the shared modal scrim token for the overlay', () => {
     assert.match(source, /apex-modal-overlay/, 'overlay uses the shared scrim token');
     assert.doesNotMatch(source, /bg-black\//, 'no hardcoded black scrim');

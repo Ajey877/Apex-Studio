@@ -192,7 +192,7 @@ export const WavetableSynthModal: React.FC<WavetableSynthModalProps> = ({
               <Sparkles className="w-4 h-4" />
               <span>{statusMessage}</span>
             </div>
-            <button onClick={() => setStatusMessage(null)} className="text-[var(--apex-state-playing-fg)]/80 hover:text-[var(--apex-state-playing-fg)]">✕</button>
+            <button onClick={() => setStatusMessage(null)} className="text-[var(--apex-state-playing-fg)] hover:text-[var(--apex-state-playing-fg)]">✕</button>
           </div>
         )}
 
