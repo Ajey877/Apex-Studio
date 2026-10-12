@@ -496,7 +496,12 @@ const MODAL_CASES: ModalCase[] = [
   {
     name: 'Wavetable Synth', file: 'WavetableSynthModal.tsx', modalId: 'fl-wavetable-synth-modal',
     titleId: 'fl-wavetable-synth-modal-title', titleText: 'ADVANCED SYNTH PREVIEW (WAVETABLE NOT IMPLEMENTED)',
-    closeLabel: 'Close wavetable synth', overlayClass: OVERLAY_STUDIO,
+    // UI-03D: the scrim is the shared `--apex-modal-overlay` token, applied by
+    // ModalFrame's `apex-modal-overlay` class. The rendered scrim is unchanged
+    // from main: the unlayered token rule already overrode the legacy
+    // `bg-black/85` utility, which is dead and removed from this class string.
+    closeLabel: 'Close wavetable synth',
+    overlayClass: 'fixed inset-0 apex-modal-overlay backdrop-blur-md z-50 flex items-center justify-center p-3 sm:p-4 select-none',
     open: React.createElement(WavetableSynthModal, {
       isOpen: true, onClose: noop, channels, onUpdateChannel: noop,
     }),

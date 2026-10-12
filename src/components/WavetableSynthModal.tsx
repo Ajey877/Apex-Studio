@@ -16,6 +16,7 @@ import {
 } from 'lucide-react';
 import { Channel } from '../types/daw';
 import { audioEngine } from '../audio/audioEngine';
+import { readWavetablePalette, waveFrameStroke } from './wavetableTheme';
 
 interface WavetableSynthModalProps {
   isOpen: boolean;
@@ -63,13 +64,14 @@ export const WavetableSynthModal: React.FC<WavetableSynthModalProps> = ({
       if (!canvas) return;
       const ctx = canvas.getContext('2d');
       if (!ctx) return;
+      const palette = readWavetablePalette();
 
       const width = canvas.width;
       const height = canvas.height;
       ctx.clearRect(0, 0, width, height);
 
       // Background gradient
-      ctx.fillStyle = '#0a0a0d';
+      ctx.fillStyle = palette.canvasBackground;
       ctx.fillRect(0, 0, width, height);
 
       // Draw 16 cascading wavetable frames in pseudo-3D
@@ -82,9 +84,9 @@ export const WavetableSynthModal: React.FC<WavetableSynthModalProps> = ({
         const frameWidth = width - 180;
 
         ctx.beginPath();
-        ctx.strokeStyle = isCurrent 
-          ? '#ff6e00' 
-          : `rgba(0, 229, 255, ${0.15 + (1 - frameProgress) * 0.4})`;
+        ctx.strokeStyle = isCurrent
+          ? palette.signal.current
+          : waveFrameStroke(palette.signal, frameProgress);
         ctx.lineWidth = isCurrent ? 2.5 : 1;
 
         for (let x = 0; x <= frameWidth; x += 3) {
@@ -145,29 +147,29 @@ export const WavetableSynthModal: React.FC<WavetableSynthModalProps> = ({
   };
 
   return (
-    <ModalFrame id="fl-wavetable-synth-modal" labelledBy="fl-wavetable-synth-modal-title" onClose={onClose} className="fixed inset-0 bg-black/85 backdrop-blur-md z-50 flex items-center justify-center p-3 sm:p-4 select-none">
-      <div className="bg-[#121215] border border-[#00e5ff]/40 rounded-xl w-full max-w-4xl shadow-2xl overflow-hidden text-[#b0b0b0] flex flex-col max-h-[92vh]">
+    <ModalFrame id="fl-wavetable-synth-modal" labelledBy="fl-wavetable-synth-modal-title" onClose={onClose} className="fixed inset-0 apex-modal-overlay backdrop-blur-md z-50 flex items-center justify-center p-3 sm:p-4 select-none">
+      <div className="bg-[var(--apex-surface)] border border-[var(--apex-cyan)]/40 rounded-xl w-full max-w-4xl shadow-2xl overflow-hidden text-[var(--apex-text-2)] flex flex-col max-h-[92vh]">
         {/* Header */}
-        <div className="px-5 py-3.5 bg-[#18181c] border-b border-[#2e2e34] flex items-center justify-between">
+        <div className="px-5 py-3.5 bg-[var(--apex-panel-header)] border-b border-[var(--apex-border)] flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-[#00e5ff] to-[#0077ff] flex items-center justify-center text-black shadow-md font-bold">
+            <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-[var(--apex-cyan)] to-[var(--apex-accent)] flex items-center justify-center text-[var(--apex-state-playing-fg)] shadow-md font-bold">
               <Waves className="w-5 h-5" />
             </div>
             <div>
               <div className="flex items-center gap-2">
-                <h2 id="fl-wavetable-synth-modal-title" className="text-sm font-bold text-white tracking-wide">ADVANCED SYNTH PREVIEW (WAVETABLE NOT IMPLEMENTED)</h2>
-                <span className="px-1.5 py-0.5 rounded text-[9px] font-mono font-bold bg-[#00e5ff]/20 text-[#00e5ff] border border-[#00e5ff]/40">
+                <h2 id="fl-wavetable-synth-modal-title" className="text-sm font-bold text-[var(--apex-text)] tracking-wide">ADVANCED SYNTH PREVIEW (WAVETABLE NOT IMPLEMENTED)</h2>
+                <span className="px-1.5 py-0.5 rounded text-[9px] font-mono font-bold bg-[var(--apex-cyan)]/20 text-[var(--apex-cyan-text)] border border-[var(--apex-cyan)]/40">
                   PREVIEW ONLY
                 </span>
               </div>
-              <p className="text-[10px] text-[#777]">Preview surface. The selected channel plays with its existing subtractive synth; no wavetable engine exists yet.</p>
+              <p className="text-[10px] text-[var(--apex-text-3)]">Preview surface. The selected channel plays with its existing subtractive synth; no wavetable engine exists yet.</p>
             </div>
           </div>
 
           <div className="flex items-center gap-2">
             <button
               onClick={handleAudition}
-              className="px-3 py-1 bg-[#00e5ff] hover:bg-[#33edff] text-black font-bold text-xs rounded transition flex items-center gap-1.5 shadow"
+              className="px-3 py-1 bg-[var(--apex-cyan)] hover:bg-[var(--apex-cyan-strong)] text-[var(--apex-state-playing-fg)] font-bold text-xs rounded transition flex items-center gap-1.5 shadow"
             >
               <Play className="w-3.5 h-3.5" />
               <span>Audition C3</span>
@@ -176,7 +178,7 @@ export const WavetableSynthModal: React.FC<WavetableSynthModalProps> = ({
             <button
               onClick={onClose}
               aria-label="Close wavetable synth"
-              className="text-[#777] hover:text-white p-1 rounded hover:bg-[#222226] transition"
+              className="text-[var(--apex-text-3)] hover:text-[var(--apex-text)] p-1 rounded hover:bg-[var(--apex-surface-2)] transition"
             >
               <X className="w-5 h-5" />
             </button>
@@ -185,46 +187,46 @@ export const WavetableSynthModal: React.FC<WavetableSynthModalProps> = ({
 
         {/* Status Toast */}
         {statusMessage && (
-          <div className="bg-[#00e5ff] text-black font-bold text-xs px-4 py-1.5 flex items-center justify-between shadow-md">
+          <div className="bg-[var(--apex-cyan)] text-[var(--apex-state-playing-fg)] font-bold text-xs px-4 py-1.5 flex items-center justify-between shadow-md">
             <div className="flex items-center gap-1.5">
               <Sparkles className="w-4 h-4" />
               <span>{statusMessage}</span>
             </div>
-            <button onClick={() => setStatusMessage(null)} className="text-black/80 hover:text-black">✕</button>
+            <button onClick={() => setStatusMessage(null)} className="text-[var(--apex-state-playing-fg)] hover:text-[var(--apex-state-playing-fg)]">✕</button>
           </div>
         )}
 
         {/* Modal Body */}
         <div className="p-5 overflow-y-auto custom-scrollbar space-y-4">
-          <div className="bg-[#0a0a0c] border border-[#ffaa00]/40 rounded-lg px-3 py-2 flex items-center justify-between gap-2">
-            <span className="text-[10px] font-mono font-bold text-[#ffaa00] uppercase tracking-wider">
+          <div className="bg-[var(--apex-bg)] border border-[var(--apex-gold)]/40 rounded-lg px-3 py-2 flex items-center justify-between gap-2">
+            <span className="text-[10px] font-mono font-bold text-[var(--apex-gold)] uppercase tracking-wider">
               NOT APPLIED — NO WAVETABLE OSCILLATOR IN THE ENGINE
             </span>
-            <span className="text-[10px] text-[#777] whitespace-nowrap">CHANNEL USES ITS SUBTRACTIVE SYNTH</span>
+            <span className="text-[10px] text-[var(--apex-text-3)] whitespace-nowrap">CHANNEL USES ITS SUBTRACTIVE SYNTH</span>
           </div>
 
           {/* 3D Waterfall Display */}
-          <div className="bg-[#0b0b0d] p-3 rounded-xl border border-[#26262a] flex flex-col gap-2">
+          <div className="bg-[var(--apex-bg)] p-3 rounded-xl border border-[var(--apex-border)] flex flex-col gap-2">
             <div className="flex items-center justify-between text-xs">
-              <span className="font-bold text-white flex items-center gap-1.5">
-                <Radio className="w-3.5 h-3.5 text-[#00e5ff]" />
+              <span className="font-bold text-[var(--apex-text)] flex items-center gap-1.5">
+                <Radio className="w-3.5 h-3.5 text-[var(--apex-cyan)]" />
                 <span>3D WAVETABLE WATERFALL OSCILLOGRAM</span>
               </span>
-              <span className="text-[10px] font-mono text-[#00e5ff]">
+              <span className="text-[10px] font-mono text-[var(--apex-cyan-text)]">
                 FRAME {(morphPosition * 15).toFixed(0)} / 16 (preview)
               </span>
             </div>
 
-            <canvas ref={canvas3DRef} width={760} height={200} className="w-full h-48 rounded-lg bg-[#08080a] border border-[#202025]" />
+            <canvas ref={canvas3DRef} width={760} height={200} className="w-full h-48 rounded-lg bg-[var(--apex-canvas)] border border-[var(--apex-border)]" />
           </div>
 
           {/* Wavetable Controls Matrix */}
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
             {/* Morph Position */}
-            <div className="bg-[#18181c] p-3 rounded-xl border border-[#28282e] space-y-2">
-              <div className="flex justify-between text-xs text-white font-bold">
+            <div className="bg-[var(--apex-surface-2)] p-3 rounded-xl border border-[var(--apex-border)] space-y-2">
+              <div className="flex justify-between text-xs text-[var(--apex-text)] font-bold">
                 <span>WAVETABLE MORPH (WT POS)</span>
-                <span className="text-[#00e5ff] font-mono">{Math.round(morphPosition * 100)}%</span>
+                <span className="text-[var(--apex-cyan-text)] font-mono">{Math.round(morphPosition * 100)}%</span>
               </div>
               <input
                 type="range"
@@ -233,21 +235,21 @@ export const WavetableSynthModal: React.FC<WavetableSynthModalProps> = ({
                 step="0.01"
                 value={morphPosition}
                 onChange={(e) => setMorphPosition(Number(e.target.value))}
-                className="w-full accent-[#00e5ff]"
+                className="w-full accent-[var(--apex-cyan)]"
               />
-              <p className="text-[10px] text-[#777]">Preview curve only — no audio is generated from it.</p>
+              <p className="text-[10px] text-[var(--apex-text-3)]">Preview curve only — no audio is generated from it.</p>
             </div>
 
             {/* Spectral Warp Mode */}
-            <div className="bg-[#18181c] p-3 rounded-xl border border-[#28282e] space-y-2">
-              <div className="flex justify-between text-xs text-white font-bold">
+            <div className="bg-[var(--apex-surface-2)] p-3 rounded-xl border border-[var(--apex-border)] space-y-2">
+              <div className="flex justify-between text-xs text-[var(--apex-text)] font-bold">
                 <span>SPECTRAL WARP MODE</span>
-                <span className="text-[#ff6e00] font-mono uppercase">{warpMode}</span>
+                <span className="text-[var(--apex-accent)] font-mono uppercase">{warpMode}</span>
               </div>
               <select
                 value={warpMode}
                 onChange={(e) => setWarpMode(e.target.value as any)}
-                className="w-full bg-[#121214] text-white text-xs p-1.5 rounded border border-[#333336]"
+                className="w-full bg-[var(--apex-surface)] text-[var(--apex-text)] text-xs p-1.5 rounded border border-[var(--apex-border)]"
               >
                 <option value="none">None (Pure Wavetable)</option>
                 <option value="pwm">Pulse Width Modulation (PWM)</option>
@@ -264,15 +266,15 @@ export const WavetableSynthModal: React.FC<WavetableSynthModalProps> = ({
                 step="0.01"
                 value={warpAmount}
                 onChange={(e) => setWarpAmount(Number(e.target.value))}
-                className="w-full accent-[#ff6e00]"
+                className="w-full accent-[var(--apex-accent)]"
               />
             </div>
 
             {/* Hyper Unison */}
-            <div className="bg-[#18181c] p-3 rounded-xl border border-[#28282e] space-y-2">
-              <div className="flex justify-between text-xs text-white font-bold">
+            <div className="bg-[var(--apex-surface-2)] p-3 rounded-xl border border-[var(--apex-border)] space-y-2">
+              <div className="flex justify-between text-xs text-[var(--apex-text)] font-bold">
                 <span>UNISON VOICES (ENGINE MAX 7)</span>
-                <span className="text-[#00ff88] font-mono">{unisonVoices} Voices</span>
+                <span className="text-[var(--apex-success)] font-mono">{unisonVoices} Voices</span>
               </div>
               <input
                 type="range"
@@ -281,9 +283,9 @@ export const WavetableSynthModal: React.FC<WavetableSynthModalProps> = ({
                 step="1"
                 value={unisonVoices}
                 onChange={(e) => setUnisonVoices(Number(e.target.value))}
-                className="w-full accent-[#00ff88]"
+                className="w-full accent-[var(--apex-success)]"
               />
-              <div className="flex justify-between text-[10px] text-[#777]">
+              <div className="flex justify-between text-[10px] text-[var(--apex-text-3)]">
                 <span>Detune: {(unisonDetune * 100).toFixed(0)}%</span>
                 <span>Spread: {(unisonSpread * 100).toFixed(0)}%</span>
               </div>
@@ -291,14 +293,14 @@ export const WavetableSynthModal: React.FC<WavetableSynthModalProps> = ({
           </div>
 
           {/* Additive Harmonic Series Bars */}
-          <div className="bg-[#18181c] p-3 rounded-xl border border-[#28282e] space-y-2">
-            <span className="text-xs font-bold text-white block uppercase tracking-wider">
+          <div className="bg-[var(--apex-surface-2)] p-3 rounded-xl border border-[var(--apex-border)] space-y-2">
+            <span className="text-xs font-bold text-[var(--apex-text)] block uppercase tracking-wider">
               ADDITIVE HARMONIC SERIES (PARTIALS 1 - 8)
             </span>
             <div className="grid grid-cols-8 gap-2">
               {harmonics.map((hVal, idx) => (
-                <div key={idx} className="flex flex-col items-center gap-1 bg-[#121214] p-2 rounded border border-[#26262a]">
-                  <span className="text-[9px] font-mono text-[#777]">H{idx + 1}</span>
+                <div key={idx} className="flex flex-col items-center gap-1 bg-[var(--apex-surface)] p-2 rounded border border-[var(--apex-border)]">
+                  <span className="text-[9px] font-mono text-[var(--apex-text-3)]">H{idx + 1}</span>
                   <input
                     type="range"
                     min="0"
@@ -310,17 +312,17 @@ export const WavetableSynthModal: React.FC<WavetableSynthModalProps> = ({
                       next[idx] = Number(e.target.value);
                       setHarmonics(next);
                     }}
-                    className="w-full accent-[#00e5ff] h-16 [writing-mode:vertical-lr] [direction:rtl]"
+                    className="w-full accent-[var(--apex-cyan)] h-16 [writing-mode:vertical-lr] [direction:rtl]"
                   />
-                  <span className="text-[9px] font-mono text-white">{(hVal * 100).toFixed(0)}%</span>
+                  <span className="text-[9px] font-mono text-[var(--apex-text)]">{(hVal * 100).toFixed(0)}%</span>
                 </div>
               ))}
             </div>
           </div>
 
           {/* Presets Grid */}
-          <div className="bg-[#141418] p-3 rounded-xl border border-[#28282e] space-y-2">
-            <span className="text-xs font-bold text-white block uppercase tracking-wider">
+          <div className="bg-[var(--apex-surface)] p-3 rounded-xl border border-[var(--apex-border)] space-y-2">
+            <span className="text-xs font-bold text-[var(--apex-text)] block uppercase tracking-wider">
               PREVIEW PRESETS (CURVE SHAPES ONLY)
             </span>
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
@@ -328,10 +330,10 @@ export const WavetableSynthModal: React.FC<WavetableSynthModalProps> = ({
                 <button
                   key={idx}
                   onClick={() => handleApplyPreset(p)}
-                  className="p-2.5 rounded-lg bg-[#1a1a1f] hover:bg-[#25252e] border border-[#333] hover:border-[#00e5ff] text-left transition flex items-center justify-between group"
+                  className="p-2.5 rounded-lg bg-[var(--apex-surface-2)] hover:bg-[var(--apex-surface-3)] border border-[var(--apex-border)] hover:border-[var(--apex-cyan)] text-left transition flex items-center justify-between group"
                 >
-                  <span className="text-xs font-bold text-white group-hover:text-[#00e5ff] transition">{p.name}</span>
-                  <span className="text-[9px] font-mono text-[#00e5ff] bg-[#00e5ff]/10 px-1.5 py-0.5 rounded uppercase">{p.warpMode}</span>
+                  <span className="text-xs font-bold text-[var(--apex-text)] group-hover:text-[var(--apex-cyan-text)] transition">{p.name}</span>
+                  <span className="text-[9px] font-mono text-[var(--apex-cyan-text)] bg-[var(--apex-cyan)]/10 px-1.5 py-0.5 rounded uppercase">{p.warpMode}</span>
                 </button>
               ))}
             </div>
@@ -339,11 +341,11 @@ export const WavetableSynthModal: React.FC<WavetableSynthModalProps> = ({
         </div>
 
         {/* Footer */}
-        <div className="px-5 py-3.5 bg-[#18181c] border-t border-[#2e2e34] flex items-center justify-between text-xs">
-          <span className="text-[10px] text-[#666]">Preview only: this window does not change how the channel sounds</span>
+        <div className="px-5 py-3.5 bg-[var(--apex-panel-header)] border-t border-[var(--apex-border)] flex items-center justify-between text-xs">
+          <span className="text-[10px] text-[var(--apex-text-3)]">Preview only: this window does not change how the channel sounds</span>
           <button
             onClick={onClose}
-            className="px-4 py-1.5 bg-[#00e5ff] hover:bg-[#33edff] text-black font-bold rounded transition shadow"
+            className="px-4 py-1.5 bg-[var(--apex-cyan)] hover:bg-[var(--apex-cyan-strong)] text-[var(--apex-state-playing-fg)] font-bold rounded transition shadow"
           >
             Close Preview
           </button>
