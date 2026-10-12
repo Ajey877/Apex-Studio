@@ -200,7 +200,7 @@ const OVERLAY_SHELL = 'fixed inset-0 bg-black/85 backdrop-blur-sm z-50 flex item
 const OVERLAY_SHELL_PADDED = 'fixed inset-0 bg-black/85 backdrop-blur-sm z-50 flex items-center justify-center p-4';
 const OVERLAY_STUDIO = 'fixed inset-0 bg-black/85 backdrop-blur-md z-50 flex items-center justify-center p-3 sm:p-4 select-none';
 const OVERLAY_FLOATING = 'fixed inset-0 z-50 flex items-center justify-center p-3 bg-black/80 backdrop-blur-md animate-fade-in select-none';
-const OVERLAY_HUB = 'fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4 animate-in fade-in';
+const OVERLAY_HUB = 'fixed inset-0 z-50 flex items-center justify-center backdrop-blur-sm p-4 animate-in fade-in';
 
 const MODAL_CASES: ModalCase[] = [
   {
@@ -267,7 +267,9 @@ const MODAL_CASES: ModalCase[] = [
   {
     name: 'MIDI Controller', file: 'MidiControllerModal.tsx', modalId: 'midi-controller-modal-overlay',
     titleId: 'midi-controller-modal-title', titleText: 'Hardware MIDI & Controller Hub',
-    closeLabel: 'Close MIDI controller', overlayClass: OVERLAY_HUB,
+    closeLabel: 'Close MIDI controller',
+    // UI-03I: the dark `bg-black/80` is removed; ModalFrame supplies the themed scrim.
+    overlayClass: OVERLAY_HUB,
     open: React.createElement(MidiControllerModal, {
       isOpen: true, onClose: noop, channels, mixerTracks,
       midiMappings: DEFAULT_PROJECT.midiMappings, onUpdateMidiMappings: noop,
@@ -425,8 +427,7 @@ const MODAL_CASES: ModalCase[] = [
     // ModalFrame's `apex-modal-overlay` class (prepended to the rendered class
     // string). The dead `bg-black/80` utility is removed from the modal's own
     // class string; the rendered scrim is unchanged because the unlayered token
-    // rule already overrode it. The entry no longer shares OVERLAY_HUB, which
-    // still describes the untouched MIDI Controller modal.
+    // rule already overrode it. The entry keeps its own explicit contract.
     closeLabel: 'Close parametric EQ',
     overlayClass: 'apex-modal-overlay fixed inset-0 z-50 flex items-center justify-center backdrop-blur-sm p-4 animate-in fade-in',
     open: React.createElement(ParametricEqModal, {

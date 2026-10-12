@@ -32,7 +32,20 @@ should not be described as if they were.
 
 > **UI-03B status:** `MasteringSuiteModal.tsx` (the largest offender below) has since been
 > migrated to the semantic token system, canvas included — see
-> `UI03B_MASTERING_SUITE_THEME_REPORT.md`. The remaining 24 bodies are unchanged.
+> `UI03B_MASTERING_SUITE_THEME_REPORT.md`. The "remaining 24 bodies" wording records the
+> UI-03B snapshot only; UI-03C through UI-03H have since migrated additional planned surfaces.
+>
+> **Current migration status — main @ `f9ff0e67da34361a39a2f02054c333f3ecc58491` (PR #214):**
+> UI-03B Mastering Suite, UI-03C Mixer, UI-03D Wavetable Synth, UI-03E Audio Slicer,
+> UI-03F Audio Recorder, UI-03G Parametric EQ, and UI-03H Vocal Tuner are merged. Their
+> individual reports remain the implementation and validation evidence.
+>
+> **Remaining planned modal order:** UI-03I `MidiControllerModal` (implementation in the
+> current branch; not yet merged), then `GrossBeatModal`, `ArpeggiatorModal`,
+> `MidiLearnModal`, `MasterMacroRackModal`, `MultiZoneSamplerModal`, `PolyphonicEditorModal`,
+> `SidechainRoutingModal`, `TakeCompingModal`, `WarpAudioProcessorModal`, `CollaborationModal`,
+> `HotkeysModal`, `AnalyticsModal`, `OrientationLockModal`, and `DesktopAppModal`. The order
+> follows the verified UI-03 migration plan; completed or already-tokenised modals are excluded.
 
 Each of these files paints its own body with literals (`bg-[#18181b]`, `bg-[#141416]`,
 `border-[#2a2a2d]`, `text-[#888]`, …). The compatibility layer in `index.css` only remaps the
