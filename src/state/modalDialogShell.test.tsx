@@ -421,7 +421,14 @@ const MODAL_CASES: ModalCase[] = [
   {
     name: 'Parametric EQ', file: 'ParametricEqModal.tsx', modalId: 'parametric-eq-modal-overlay',
     titleId: 'parametric-eq-modal-title', titleText: '3-Band EQ — Dynamic Equalizer',
-    closeLabel: 'Close parametric EQ', overlayClass: OVERLAY_HUB,
+    // UI-03G: the scrim is the shared `--apex-modal-overlay` token, applied by
+    // ModalFrame's `apex-modal-overlay` class (prepended to the rendered class
+    // string). The dead `bg-black/80` utility is removed from the modal's own
+    // class string; the rendered scrim is unchanged because the unlayered token
+    // rule already overrode it. The entry no longer shares OVERLAY_HUB, which
+    // still describes the untouched MIDI Controller modal.
+    closeLabel: 'Close parametric EQ',
+    overlayClass: 'apex-modal-overlay fixed inset-0 z-50 flex items-center justify-center backdrop-blur-sm p-4 animate-in fade-in',
     open: React.createElement(ParametricEqModal, {
       isOpen: true, onClose: noop, mixerTrack: firstMixerTrack, onUpdateTrack: noop,
     }),
