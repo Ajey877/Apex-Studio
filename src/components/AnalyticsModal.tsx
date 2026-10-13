@@ -138,30 +138,45 @@ export const AnalyticsModal: React.FC<AnalyticsModalProps> = ({
     saveError
   };
   const backupStatus = describeOfflineBackupStatus(backupState);
-  const backupTone = backupState.saveError || backupState.error
-    ? 'text-[#ff6b6b]'
-    : backupState.loading
-      ? 'text-[#777]'
-      : 'text-[#00ff00]';
+  const backupTone =
+    backupState.saveError || backupState.error ? 'text-[var(--apex-danger)]' : backupState.loading ? 'text-[var(--apex-text-3)]' : 'text-[var(--apex-success)]';
 
   return (
-    <ModalFrame id="analytics-modal" labelledBy="analytics-modal-title" onClose={onClose} className="fixed inset-0 bg-black/85 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-      <div className="bg-[#141416] border border-[#333336] rounded-xl w-full max-w-lg shadow-2xl overflow-hidden text-[#b0b0b0]">
+    // UI-03O: the statistics panel is fully themed through the existing
+    // `--apex-*` tokens. Its metric identity (tile, tile glyph, the two numeric
+    // read-outs, the clock inset) stays on `--apex-accent` — the token the UI-1C
+    // compatibility layer already resolved these `#ff6e00` literals to, so the
+    // rendered identity hue is unchanged. Genuine status stays semantic: the
+    // FLOW STATE badge is `--apex-success`, and the backup row is `--apex-danger`
+    // on a failed or unreadable store, `--apex-text-3` while reading and
+    // `--apex-success` only for real records. `text-[#ff6b6b]` was never covered
+    // by the compatibility layer, so the failure row previously painted a raw
+    // near-white red in Light; it now follows the theme. The dead `bg-black/85`
+    // scrim is gone: ModalFrame supplies `--apex-modal-overlay`.
+    <ModalFrame
+      id="analytics-modal"
+      labelledBy="analytics-modal-title"
+      onClose={onClose}
+      className="fixed inset-0 backdrop-blur-sm z-50 flex items-center justify-center p-4"
+    >
+      <div className="bg-[var(--apex-surface)] border border-[var(--apex-border)] rounded-xl w-full max-w-lg shadow-2xl overflow-hidden text-[var(--apex-text-2)]">
         {/* Header */}
-        <div className="px-5 py-3.5 bg-[#1a1a1d] border-b border-[#333336] flex items-center justify-between">
+        <div className="px-5 py-3.5 bg-[var(--apex-panel-header)] border-b border-[var(--apex-border)] flex items-center justify-between">
           <div className="flex items-center space-x-2.5">
-            <div className="w-7 h-7 bg-[#ff6e00]/15 border border-[#ff6e00]/30 rounded flex items-center justify-center">
-              <BarChart2 className="w-4 h-4 text-[#ff6e00]" />
+            <div className="w-7 h-7 bg-[color-mix(in_srgb,var(--apex-accent)_16%,transparent)] border border-[color-mix(in_srgb,var(--apex-accent)_48%,transparent)] rounded flex items-center justify-center">
+              <BarChart2 className="w-4 h-4 text-[var(--apex-accent)]" />
             </div>
             <div>
-              <h3 id="analytics-modal-title" className="font-bold text-sm text-white tracking-tight">STUDIO TELEMETRY & PRODUCTION METRICS</h3>
-              <p className="text-[10px] text-[#777]">Time Tracking, Arranger Density & Performance Stats</p>
+              <h3 id="analytics-modal-title" className="font-bold text-sm text-[var(--apex-text)] tracking-tight">
+                STUDIO TELEMETRY & PRODUCTION METRICS
+              </h3>
+              <p className="text-[10px] text-[var(--apex-text-3)]">Time Tracking, Arranger Density & Performance Stats</p>
             </div>
           </div>
           <button 
             onClick={onClose} 
             aria-label="Close analytics"
-            className="p-1 rounded hover:bg-[#2d2d30] text-[#777] hover:text-white transition"
+            className="p-1 rounded hover:bg-[var(--apex-state-hover)] text-[var(--apex-text-3)] hover:text-[var(--apex-text)] transition"
           >
             <X className="w-4 h-4" />
           </button>
@@ -170,20 +185,23 @@ export const AnalyticsModal: React.FC<AnalyticsModalProps> = ({
         {/* Body */}
         <div className="p-5 space-y-4">
           {/* Main Stopwatch Banner */}
-          <div className="bg-[#1a1a1d] border border-[#333336] rounded-lg p-4 flex items-center justify-between">
+          <div className="bg-[var(--apex-surface-2)] border border-[var(--apex-border)] rounded-lg p-4 flex items-center justify-between">
             <div className="flex items-center space-x-3">
-              <div className="p-3 bg-[#ff6e00]/15 text-[#ff6e00] rounded-lg border border-[#ff6e00]/30">
+              <div className="p-3 bg-[color-mix(in_srgb,var(--apex-accent)_16%,transparent)] text-[var(--apex-accent)] rounded-lg border border-[color-mix(in_srgb,var(--apex-accent)_48%,transparent)]">
                 <Clock className="w-6 h-6 animate-spin-slow" />
               </div>
               <div>
-                <span className="text-[10px] uppercase font-bold text-[#777] tracking-wider">Recorded Studio Session Time</span>
-                <div className="text-2xl font-mono font-bold text-white">
-                  {sessionSeconds ?? 'Not recorded'}
-                </div>
+                <span className="text-[10px] uppercase font-bold text-[var(--apex-text-3)] tracking-wider">Recorded Studio Session Time</span>
+                <div className="text-2xl font-mono font-bold text-[var(--apex-text)]">{sessionSeconds ?? 'Not recorded'}</div>
               </div>
             </div>
             <div className="text-right">
-              <span className="text-[10px] text-[#00ff00] font-bold bg-[#00ff00]/15 px-2 py-0.5 rounded border border-[#00ff00]/40">
+              {/* UI-03O: the FLOW STATE badge keeps its green identity on the
+                  success wash and border; the label follows `--apex-text`.
+                  Measured in Chromium, the legacy success-on-success-wash
+                  combination is 4.32:1 in Light (the 10px bold label's AA floor
+                  is 4.5:1) and 6.11:1 in Dark, so one label token serves both. */}
+              <span className="text-[10px] text-[var(--apex-text)] font-bold bg-[color-mix(in_srgb,var(--apex-success)_16%,transparent)] px-2 py-0.5 rounded border border-[color-mix(in_srgb,var(--apex-success)_48%,transparent)]">
                 FLOW STATE
               </span>
             </div>
@@ -191,35 +209,35 @@ export const AnalyticsModal: React.FC<AnalyticsModalProps> = ({
 
           {/* Grid Stats */}
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
-            <div className="bg-[#1a1a1d] border border-[#333336] p-3 rounded-lg">
-              <span className="text-[10px] text-[#777]">Total Notes</span>
-              <div className="text-lg font-bold text-[#ff6e00] font-mono">{totalNotes}</div>
+            <div className="bg-[var(--apex-surface-2)] border border-[var(--apex-border)] p-3 rounded-lg">
+              <span className="text-[10px] text-[var(--apex-text-3)]">Total Notes</span>
+              <div className="text-lg font-bold text-[var(--apex-accent)] font-mono">{totalNotes}</div>
             </div>
-            <div className="bg-[#1a1a1d] border border-[#333336] p-3 rounded-lg">
-              <span className="text-[10px] text-[#777]">Active Channels</span>
-              <div className="text-lg font-bold text-white font-mono">{activeChannelsCount}</div>
+            <div className="bg-[var(--apex-surface-2)] border border-[var(--apex-border)] p-3 rounded-lg">
+              <span className="text-[10px] text-[var(--apex-text-3)]">Active Channels</span>
+              <div className="text-lg font-bold text-[var(--apex-text)] font-mono">{activeChannelsCount}</div>
             </div>
-            <div className="bg-[#1a1a1d] border border-[#333336] p-3 rounded-lg">
-              <span className="text-[10px] text-[#777]">Arranged Clips</span>
-              <div className="text-lg font-bold text-white font-mono">{activeClipsCount}</div>
+            <div className="bg-[var(--apex-surface-2)] border border-[var(--apex-border)] p-3 rounded-lg">
+              <span className="text-[10px] text-[var(--apex-text-3)]">Arranged Clips</span>
+              <div className="text-lg font-bold text-[var(--apex-text)] font-mono">{activeClipsCount}</div>
             </div>
-            <div className="bg-[#1a1a1d] border border-[#333336] p-3 rounded-lg">
-              <span className="text-[10px] text-[#777]">Project BPM</span>
-              <div className="text-lg font-bold text-[#ff6e00] font-mono">{meta.bpm}</div>
+            <div className="bg-[var(--apex-surface-2)] border border-[var(--apex-border)] p-3 rounded-lg">
+              <span className="text-[10px] text-[var(--apex-text-3)]">Project BPM</span>
+              <div className="text-lg font-bold text-[var(--apex-accent)] font-mono">{meta.bpm}</div>
             </div>
           </div>
 
           {/* Project Details */}
-          <div className="bg-[#1a1a1d] border border-[#333336] p-3 rounded-lg space-y-1.5 text-xs">
-            <div className="flex justify-between text-[#777]">
+          <div className="bg-[var(--apex-surface-2)] border border-[var(--apex-border)] p-3 rounded-lg space-y-1.5 text-xs">
+            <div className="flex justify-between text-[var(--apex-text-3)]">
               <span>Project ID:</span>
-              <span className="font-mono text-white">{meta.id}</span>
+              <span className="font-mono text-[var(--apex-text)]">{meta.id}</span>
             </div>
-            <div className="flex justify-between text-[#777]">
+            <div className="flex justify-between text-[var(--apex-text-3)]">
               <span>Project Format Version:</span>
-              <span className="font-mono text-white">{meta.version ? `v${meta.version}` : 'Unknown'}</span>
+              <span className="font-mono text-[var(--apex-text)]">{meta.version ? `v${meta.version}` : 'Unknown'}</span>
             </div>
-            <div className="flex justify-between text-[#777]">
+            <div className="flex justify-between text-[var(--apex-text-3)]">
               <span>Offline Backup Status:</span>
               <span className={`font-mono ${backupTone}`}>{backupStatus}</span>
             </div>
