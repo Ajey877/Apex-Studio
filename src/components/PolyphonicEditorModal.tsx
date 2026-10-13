@@ -206,7 +206,7 @@ export const PolyphonicEditorModal: React.FC<PolyphonicEditorModalProps> = ({
               <Sparkles className="w-4 h-4" />
               <span>{statusMessage}</span>
             </div>
-            <button onClick={() => setStatusMessage(null)} aria-label="Dismiss status message" className="text-[color-mix(in_srgb,var(--apex-state-playing-fg)_78%,transparent)] hover:text-[var(--apex-state-playing-fg)]">✕</button>
+            <button onClick={() => setStatusMessage(null)} aria-label="Dismiss status message" className="text-[var(--apex-state-playing-fg)] hover:text-[var(--apex-state-playing-fg)]">✕</button>
           </div>
         )}
 
@@ -216,7 +216,9 @@ export const PolyphonicEditorModal: React.FC<PolyphonicEditorModalProps> = ({
             <span className="text-[10px] font-mono font-bold text-[var(--apex-text)] uppercase tracking-wider">
               NOT APPLIED — PROTOTYPE, NO AUDIO ANALYSIS OR EDITING
             </span>
-            <span className="text-[10px] text-[var(--apex-text-3)] whitespace-nowrap">SAMPLE BLOBS ONLY</span>
+            {/* --apex-text-2, not -3: the qualifier measures 4.17:1 in Dark on
+                the gold wash at -3 and 6.11:1 at -2. */}
+            <span className="text-[10px] text-[var(--apex-text-2)] whitespace-nowrap">SAMPLE BLOBS ONLY</span>
           </div>
 
           {/* Prototype blob timeline */}

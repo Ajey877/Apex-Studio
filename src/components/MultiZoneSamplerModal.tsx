@@ -186,7 +186,7 @@ export const MultiZoneSamplerModal: React.FC<MultiZoneSamplerModalProps> = ({
               <Sparkles className="w-4 h-4" />
               <span>{statusMessage}</span>
             </div>
-            <button onClick={() => setStatusMessage(null)} aria-label="Dismiss status message" className="text-[color-mix(in_srgb,var(--apex-state-playing-fg)_78%,transparent)] hover:text-[var(--apex-state-playing-fg)]">✕</button>
+            <button onClick={() => setStatusMessage(null)} aria-label="Dismiss status message" className="text-[var(--apex-state-playing-fg)] hover:text-[var(--apex-state-playing-fg)]">✕</button>
           </div>
         )}
 

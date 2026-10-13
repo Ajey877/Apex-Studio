@@ -234,6 +234,20 @@ describe('Multi-Zone Sampler theme markup (UI-03M)', () => {
     assert.match(code, /aria-label=\{`Delete zone \$\{selectedZone\.name\}`\}/,
       'the icon-only delete control gained an accessible name');
     includes(code, 'aria-label="Dismiss status message"', 'the toast dismiss control is named');
+    // The \u2715 is text, so it needs 4.5:1 on the gold fill. A washed idle glyph
+    // (78% of the on-colour) measures 3.92:1 in Light; full opacity measures
+    // 11.23:1 Dark and 5.33:1 Light, matching WavetableSynthModal and
+    // AudioSlicerModal.
+    includes(
+      code,
+      'className="text-[var(--apex-state-playing-fg)] hover:text-[var(--apex-state-playing-fg)]"',
+      'the toast dismiss glyph is the full on-colour in both states',
+    );
+    assert.doesNotMatch(
+      code,
+      /color-mix\(in_srgb,var\(--apex-state-playing-fg\)_\d+%,transparent\)/,
+      'the on-colour is never washed below AA',
+    );
   });
 
   it('keeps zone editing, audition and persistence wiring intact', () => {

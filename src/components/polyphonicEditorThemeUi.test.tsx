@@ -276,8 +276,37 @@ describe('Polyphonic Blob Editor theme markup (UI-03M)', () => {
       'the quantize amount state is unchanged');
   });
 
-  it('names the icon-only toast dismiss control', () => {
+  it('names the icon-only toast dismiss control and keeps it at AA on the toast fill', () => {
     includes(code, 'aria-label="Dismiss status message"', 'the toast dismiss control is named');
+    // The \u2715 is text, so it needs 4.5:1 on the success fill. A washed idle
+    // glyph (78% of the on-colour) measures 4.24:1 in Light; full opacity
+    // measures 10.73:1 Dark and 5.85:1 Light. This matches the convention
+    // WavetableSynthModal and AudioSlicerModal already ship.
+    includes(
+      code,
+      'className="text-[var(--apex-state-playing-fg)] hover:text-[var(--apex-state-playing-fg)]"',
+      'the toast dismiss glyph is the full on-colour in both states',
+    );
+    assert.doesNotMatch(
+      code,
+      /color-mix\(in_srgb,var\(--apex-state-playing-fg\)_\d+%,transparent\)/,
+      'the on-colour is never washed below AA',
+    );
+  });
+
+  it('keeps the NOT-APPLIED banner qualifier at AA on the gold wash', () => {
+    // --apex-text-3 measures 4.17:1 in Dark on the 14% gold wash; -2 measures
+    // 6.11:1 Dark and 6.51:1 Light.
+    includes(
+      code,
+      'text-[10px] text-[var(--apex-text-2)] whitespace-nowrap">SAMPLE BLOBS ONLY',
+      'the banner qualifier uses the AA text scale',
+    );
+    includes(
+      code,
+      'font-mono font-bold text-[var(--apex-text)] uppercase tracking-wider',
+      'the NOT-APPLIED statement itself uses the strongest text token',
+    );
   });
 
   it('uses ModalFrame’s themed scrim and keeps the overlay geometry', () => {

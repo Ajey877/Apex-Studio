@@ -390,7 +390,11 @@ test.describe('UI-03M Multi-Zone Sampler theme', () => {
       await expectAaContrast(toast, 'status toast text');
       const dismiss = toast.locator('button');
       await expect(dismiss).toHaveAttribute('aria-label', 'Dismiss status message');
-      await expectColor(fgOf(dismiss), { ...expected.onAccent, a: 0.78 }, 'toast dismiss idle');
+      // Full-opacity on-colour in both states, matching WavetableSynthModal and
+      // AudioSlicerModal. A washed idle glyph (78% of the on-colour) measures
+      // 3.92:1 on the Light gold fill and cannot clear AA, and the ✕ is text.
+      await expectColor(fgOf(dismiss), expected.onAccent, 'toast dismiss idle');
+      await expectAaContrast(dismiss, 'toast dismiss glyph');
       await dismiss.hover();
       await expectColor(fgOf(dismiss), expected.onAccent, 'toast dismiss hovered');
 
@@ -462,7 +466,11 @@ test.describe('UI-03M Multi-Zone Sampler theme', () => {
       const ranges = inspector.locator('input[type="range"]');
       await expect(ranges).toHaveCount(3);
       expect(
-        await ranges.evaluateAll((elements) => elements.map((e) => [e.min, e.max, e.value])),
+        await ranges.evaluateAll((elements) =>
+          elements.map((element) => {
+            const input = element as HTMLInputElement;
+            return [input.min, input.max, input.value];
+          })),
         'low clamps under high, high clamps over low, root stays inside the zone',
       ).toEqual([['0', '72', '60'], ['60', '127', '72'], ['60', '72', '60']]);
 
@@ -509,7 +517,11 @@ test.describe('UI-03M Multi-Zone Sampler theme', () => {
       await expect(labels.nth(0)).toContainText('C3 (48)');
       await expect(zoneRange).toHaveText('C3C5');
       expect(
-        await ranges.evaluateAll((elements) => elements.map((e) => [e.min, e.max, e.value])),
+        await ranges.evaluateAll((elements) =>
+          elements.map((element) => {
+            const input = element as HTMLInputElement;
+            return [input.min, input.max, input.value];
+          })),
         'the other two ranges re-clamp around the new low key',
       ).toEqual([['0', '72', '48'], ['48', '127', '72'], ['48', '72', '60']]);
       // 48/127 = 37.7953%, (72 - 48 + 1)/127 = 19.685%.
