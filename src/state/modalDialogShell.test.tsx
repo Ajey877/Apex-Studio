@@ -461,7 +461,11 @@ const MODAL_CASES: ModalCase[] = [
   {
     name: 'Arpeggiator', file: 'ArpeggiatorModal.tsx', modalId: null,
     titleId: 'arpeggiator-modal-title', titleText: `${firstChannel.name} ARPEGGIATOR`,
-    closeLabel: 'Close arpeggiator', overlayClass: OVERLAY_FLOATING,
+    // UI-03K: the dead dark scrim fill is removed; ModalFrame supplies the
+    // themed `apex-modal-overlay` and the modal keeps its blur, fade and
+    // layout classes. This matches the UI-03B/C/D/E/F/G/J pattern.
+    closeLabel: 'Close arpeggiator',
+    overlayClass: 'apex-modal-overlay fixed inset-0 z-50 flex items-center justify-center p-3 backdrop-blur-md animate-fade-in select-none',
     open: React.createElement(ArpeggiatorModal, {
       isOpen: true, onClose: noop, channel: firstChannel, onUpdateChannel: noop, bpm: 128,
     }),
