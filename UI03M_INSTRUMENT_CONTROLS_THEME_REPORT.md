@@ -313,7 +313,8 @@ Notes carried forward for those batches: `HotkeysModal` exports `HOTKEY_GROUPS`,
 | --- | --- |
 | Base (`main`) | `d4309d5b144e436573545effacb7a52691813eac` |
 | Branch | `arena/14f5cfa4-apex-studio` |
-| Commits | `0ad9894` (components + unit suites) → `2fdb976` (browser specs + hover fix) → final (contrast fixes + this report) |
+| Commits | `0ad9894` components + unit suites → `2fdb976` browser specs + §3.1 hover fix → `7ceb857` §3.2/§3.3 contrast fixes + this report → one docs-only commit finalising this table |
+| Gates re-run after the last code change | All twelve, on `7ceb857`. Only this report changed afterwards, which no gate reads; `lint` and `verify:test-discovery` were additionally re-confirmed on the final commit |
 | Files changed vs `main` | 11 (3 components, 3 new unit suites, 2 new browser specs, `modalDialogShell.test.tsx`, `package.json`, this report) |
 | `git diff --check` | clean |
 | Binary / lockfile / screenshot changes in the diff | **none** |
