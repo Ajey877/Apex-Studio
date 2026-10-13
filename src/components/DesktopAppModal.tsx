@@ -336,29 +336,54 @@ For ultra-low latency (< 5ms) when recording MIDI or vocals:
   };
 
   return (
-    <ModalFrame id="fl-desktop-app-modal" labelledBy="fl-desktop-app-modal-title" onClose={onClose} className="fixed inset-0 bg-black/85 backdrop-blur-md z-50 flex items-center justify-center p-3 sm:p-4 select-none">
-      <div className="bg-[#121215] border border-[#ff6e00]/40 rounded-xl w-full max-w-4xl shadow-2xl overflow-hidden text-[#b0b0b0] flex flex-col max-h-[92vh]">
+    // UI-03O: every chrome surface, border, text step and interaction state is
+    // themed through the existing `--apex-*` tokens. The desktop-app identity
+    // (header tile, readiness badge, active tab, status toast, both CTAs and the
+    // footer action) resolves `--apex-accent` / `--apex-accent-strong`, the token
+    // the UI-1C compatibility layer already resolved these `#ff6e00` literals to,
+    // so the warm-orange identity family is now one coherent accent family instead
+    // of a violet-plus-raw-amber mix. The per-card glyph triad keeps its distinct
+    // meanings on `--apex-success`, `--apex-cyan-text` and `--apex-gold`, and the
+    // colour-depth sub-label keeps `--apex-aux-text`. The dead `bg-black/85` scrim is gone:
+    // ModalFrame supplies the shared themed `--apex-modal-overlay`. The toast
+    // dismiss glyph gains the accessible name it never had.
+    <ModalFrame
+      id="fl-desktop-app-modal"
+      labelledBy="fl-desktop-app-modal-title"
+      onClose={onClose}
+      className="fixed inset-0 backdrop-blur-md z-50 flex items-center justify-center p-3 sm:p-4 select-none"
+    >
+      <div className="bg-[var(--apex-surface)] border border-[color-mix(in_srgb,var(--apex-accent)_48%,transparent)] rounded-xl w-full max-w-4xl shadow-2xl overflow-hidden text-[var(--apex-text-2)] flex flex-col max-h-[92vh]">
         {/* Header */}
-        <div className="px-5 py-3.5 bg-[#18181c] border-b border-[#2e2e34] flex items-center justify-between">
+        <div className="px-5 py-3.5 bg-[var(--apex-panel-header)] border-b border-[var(--apex-border)] flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-[#ff6e00] to-[#ffaa00] flex items-center justify-center text-black shadow-md font-bold">
+            <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-[var(--apex-accent)] to-[var(--apex-accent-strong)] flex items-center justify-center text-[var(--apex-state-playing-fg)] shadow-md font-bold">
               <Monitor className="w-5 h-5" />
             </div>
             <div>
               <div className="flex items-center gap-2">
-                <h2 id="fl-desktop-app-modal-title" className="text-sm font-bold text-white tracking-wide">WINDOWS .EXE & DESKTOP SUITE</h2>
-                <span className="px-1.5 py-0.5 rounded text-[9px] font-mono font-bold bg-[#ff6e00]/20 text-[#ff6e00] border border-[#ff6e00]/40">
+                <h2 id="fl-desktop-app-modal-title" className="text-sm font-bold text-[var(--apex-text)] tracking-wide">
+                  WINDOWS .EXE & DESKTOP SUITE
+                </h2>
+                {/* UI-03O: the readiness badge keeps its accent wash and edge;
+                    the label follows `--apex-text` because the accent-on-accent-wash
+                    combination measures 3.90:1 in Light and 4.23:1 in
+                    Dark, both below the 4.5:1 AA floor for a 9px bold label
+                    (UI-03L precedent). */}
+                <span className="px-1.5 py-0.5 rounded text-[9px] font-mono font-bold bg-[color-mix(in_srgb,var(--apex-accent)_16%,transparent)] text-[var(--apex-text)] border border-[color-mix(in_srgb,var(--apex-accent)_48%,transparent)]">
                   WINDOWS 10 / 11 NATIVE
                 </span>
               </div>
-              <p className="text-[10px] text-[#777]">Run Apex Studio as an independent desktop application with dedicated process priority and low-latency audio</p>
+              <p className="text-[10px] text-[var(--apex-text-3)]">
+                Run Apex Studio as an independent desktop application with dedicated process priority and low-latency audio
+              </p>
             </div>
           </div>
 
           <button
             onClick={onClose}
             aria-label="Close desktop app"
-            className="text-[#777] hover:text-white p-1 rounded hover:bg-[#222226] transition"
+            className="text-[var(--apex-text-3)] hover:text-[var(--apex-text)] p-1 rounded hover:bg-[var(--apex-state-hover)] transition"
           >
             <X className="w-5 h-5" />
           </button>
@@ -366,23 +391,29 @@ For ultra-low latency (< 5ms) when recording MIDI or vocals:
 
         {/* Status Toast */}
         {statusMessage && (
-          <div className="bg-[#ff6e00] text-black font-bold text-xs px-4 py-1.5 flex items-center justify-between shadow-md">
+          <div className="bg-[var(--apex-accent)] text-[var(--apex-state-playing-fg)] font-bold text-xs px-4 py-1.5 flex items-center justify-between shadow-md">
             <div className="flex items-center gap-1.5">
               <Sparkles className="w-4 h-4" />
               <span>{statusMessage}</span>
             </div>
-            <button onClick={() => setStatusMessage(null)} className="text-black/80 hover:text-black">✕</button>
+            <button
+              onClick={() => setStatusMessage(null)}
+              aria-label="Dismiss status message"
+              className="text-[var(--apex-state-playing-fg)] hover:text-[var(--apex-state-playing-fg)]"
+            >
+              ✕
+            </button>
           </div>
         )}
 
         {/* Tab Navigation */}
-        <div className="flex border-b border-[#26262a] bg-[#141418] px-5 pt-2 gap-2 text-xs overflow-x-auto no-scrollbar">
+        <div className="flex border-b border-[var(--apex-border)] bg-[var(--apex-canvas)] px-5 pt-2 gap-2 text-xs overflow-x-auto no-scrollbar">
           <button
             onClick={() => setActiveTab('windows_exe')}
             className={`pb-2 px-3 font-bold border-b-2 transition flex items-center gap-1.5 whitespace-nowrap ${
               activeTab === 'windows_exe'
-                ? 'border-[#ff6e00] text-[#ff6e00]'
-                : 'border-transparent text-[#777] hover:text-white'
+                ? 'border-[var(--apex-accent)] text-[var(--apex-accent)]'
+                : 'border-transparent text-[var(--apex-text-3)] hover:text-[var(--apex-text)]'
             }`}
           >
             <HardDrive className="w-3.5 h-3.5" />
@@ -393,8 +424,8 @@ For ultra-low latency (< 5ms) when recording MIDI or vocals:
             onClick={() => setActiveTab('pwa')}
             className={`pb-2 px-3 font-bold border-b-2 transition flex items-center gap-1.5 whitespace-nowrap ${
               activeTab === 'pwa'
-                ? 'border-[#ff6e00] text-[#ff6e00]'
-                : 'border-transparent text-[#777] hover:text-white'
+                ? 'border-[var(--apex-accent)] text-[var(--apex-accent)]'
+                : 'border-transparent text-[var(--apex-text-3)] hover:text-[var(--apex-text)]'
             }`}
           >
             <Laptop className="w-3.5 h-3.5" />
@@ -405,8 +436,8 @@ For ultra-low latency (< 5ms) when recording MIDI or vocals:
             onClick={() => setActiveTab('resolution')}
             className={`pb-2 px-3 font-bold border-b-2 transition flex items-center gap-1.5 whitespace-nowrap ${
               activeTab === 'resolution'
-                ? 'border-[#ff6e00] text-[#ff6e00]'
-                : 'border-transparent text-[#777] hover:text-white'
+                ? 'border-[var(--apex-accent)] text-[var(--apex-accent)]'
+                : 'border-transparent text-[var(--apex-text-3)] hover:text-[var(--apex-text)]'
             }`}
           >
             <Layers className="w-3.5 h-3.5" />
@@ -417,8 +448,8 @@ For ultra-low latency (< 5ms) when recording MIDI or vocals:
             onClick={() => setActiveTab('electron')}
             className={`pb-2 px-3 font-bold border-b-2 transition flex items-center gap-1.5 whitespace-nowrap ${
               activeTab === 'electron'
-                ? 'border-[#ff6e00] text-[#ff6e00]'
-                : 'border-transparent text-[#777] hover:text-white'
+                ? 'border-[var(--apex-accent)] text-[var(--apex-accent)]'
+                : 'border-transparent text-[var(--apex-text-3)] hover:text-[var(--apex-text)]'
             }`}
           >
             <Terminal className="w-3.5 h-3.5" />
@@ -431,14 +462,16 @@ For ultra-low latency (< 5ms) when recording MIDI or vocals:
           {activeTab === 'windows_exe' && (
             <div className="space-y-4">
               {/* Primary 1-Click Windows .EXE Package Download Card */}
-              <div className="bg-gradient-to-br from-[#1b1914] to-[#121215] p-4 rounded-xl border border-[#ffaa00]/40 space-y-3 shadow-lg">
+              <div className="bg-[var(--apex-surface-2)] p-4 rounded-xl border border-[color-mix(in_srgb,var(--apex-accent)_48%,transparent)] space-y-3 shadow-lg">
                 <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                   <div>
-                    <span className="px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-[#ffaa00]/20 text-[#ffaa00] border border-[#ffaa00]/40 inline-block mb-1">
+                    {/* UI-03O: same rule as the readiness badge — the wash and
+                        edge carry the accent identity, the label stays AA-legible. */}
+                    <span className="px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-[color-mix(in_srgb,var(--apex-accent)_16%,transparent)] text-[var(--apex-text)] border border-[color-mix(in_srgb,var(--apex-accent)_48%,transparent)] inline-block mb-1">
                       READY-TO-USE WINDOWS SUITE
                     </span>
-                    <h3 className="text-sm font-bold text-white">Download Windows Standalone .EXE & Launcher Bundle</h3>
-                    <p className="text-xs text-[#888] pt-0.5">
+                    <h3 className="text-sm font-bold text-[var(--apex-text)]">Download Windows Standalone .EXE & Launcher Bundle</h3>
+                    <p className="text-xs text-[var(--apex-text-2)] pt-0.5">
                       Contains 1-click Windows batch launcher, PowerShell `.exe` compiler, and native Electron desktop runner.
                     </p>
                   </div>
@@ -446,49 +479,62 @@ For ultra-low latency (< 5ms) when recording MIDI or vocals:
                   <button
                     onClick={generateWindowsZipBundle}
                     disabled={isDownloadingZip}
-                    className="px-5 py-2.5 bg-gradient-to-r from-[#ffaa00] to-[#ff6600] hover:opacity-90 text-black font-bold rounded-lg shadow-lg flex items-center justify-center gap-2 text-xs transition whitespace-nowrap active:scale-95"
+                    className="px-5 py-2.5 bg-[var(--apex-accent)] hover:bg-[var(--apex-accent-strong)] text-[var(--apex-state-playing-fg)] font-bold rounded-lg shadow-lg flex items-center justify-center gap-2 text-xs transition whitespace-nowrap active:scale-95"
                   >
                     <Download className="w-4 h-4" />
                     <span>{isDownloadingZip ? 'Packaging Windows Bundle...' : 'Download Windows .EXE Bundle (.ZIP)'}</span>
                   </button>
                 </div>
 
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 pt-2 border-t border-[#2a2a30]">
-                  <div className="bg-[#121215] p-2.5 rounded border border-[#25252a] space-y-1">
-                    <div className="flex items-center gap-1.5 text-white font-bold text-[11px]">
-                      <Play className="w-3.5 h-3.5 text-[#00ff88]" />
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 pt-2 border-t border-[var(--apex-border)]">
+                  <div className="bg-[var(--apex-canvas)] p-2.5 rounded border border-[var(--apex-border)] space-y-1">
+                    <div className="flex items-center gap-1.5 text-[var(--apex-text)] font-bold text-[11px]">
+                      <Play className="w-3.5 h-3.5 text-[var(--apex-success)]" />
                       <span>1-Click Batch Runner</span>
                     </div>
-                    <p className="text-[10px] text-[#777]">Double-click <code className="text-[#ffaa00]">ApexStudio-Windows-Launcher.bat</code> to launch instantly.</p>
+                    <p className="text-[10px] text-[var(--apex-text-3)]">
+                      Double-click <code className="text-[var(--apex-gold)]">ApexStudio-Windows-Launcher.bat</code> to launch instantly.
+                    </p>
                   </div>
 
-                  <div className="bg-[#121215] p-2.5 rounded border border-[#25252a] space-y-1">
-                    <div className="flex items-center gap-1.5 text-white font-bold text-[11px]">
-                      <FileCode className="w-3.5 h-3.5 text-[#00e5ff]" />
+                  <div className="bg-[var(--apex-canvas)] p-2.5 rounded border border-[var(--apex-border)] space-y-1">
+                    <div className="flex items-center gap-1.5 text-[var(--apex-text)] font-bold text-[11px]">
+                      <FileCode className="w-3.5 h-3.5 text-[var(--apex-cyan-text)]" />
                       <span>PowerShell .EXE Builder</span>
                     </div>
-                    <p className="text-[10px] text-[#777]">Run <code className="text-[#00e5ff]">Build-Windows-EXE.ps1</code> to compile your own <code className="text-white">Setup.exe</code>.</p>
+                    <p className="text-[10px] text-[var(--apex-text-3)]">
+                      Run <code className="text-[var(--apex-cyan-text)]">Build-Windows-EXE.ps1</code> to compile your own{' '}
+                      <code className="text-[var(--apex-text)]">Setup.exe</code>.
+                    </p>
                   </div>
 
-                  <div className="bg-[#121215] p-2.5 rounded border border-[#25252a] space-y-1">
-                    <div className="flex items-center gap-1.5 text-white font-bold text-[11px]">
-                      <ShieldCheck className="w-3.5 h-3.5 text-[#ffaa00]" />
+                  <div className="bg-[var(--apex-canvas)] p-2.5 rounded border border-[var(--apex-border)] space-y-1">
+                    <div className="flex items-center gap-1.5 text-[var(--apex-text)] font-bold text-[11px]">
+                      <ShieldCheck className="w-3.5 h-3.5 text-[var(--apex-gold)]" />
                       <span>Low-Latency Audio Mode</span>
                     </div>
-                    <p className="text-[10px] text-[#777]">Exclusive Windows WASAPI/DirectSound priority without background audio throttling.</p>
+                    <p className="text-[10px] text-[var(--apex-text-3)]">Exclusive Windows WASAPI/DirectSound priority without background audio throttling.</p>
                   </div>
                 </div>
               </div>
 
               {/* Windows Step-by-Step Instructions */}
-              <div className="bg-[#18181c] p-4 rounded-xl border border-[#28282e] space-y-2.5">
-                <span className="text-xs font-bold text-white uppercase block tracking-wider">
-                  How to Use on Any Windows PC (Windows 10 / 11)
-                </span>
-                <ol className="space-y-2 text-[11px] text-[#aaa] list-decimal list-inside">
-                  <li>Click <strong className="text-white">"Download Windows .EXE Bundle (.ZIP)"</strong> above and extract the zip archive on your computer.</li>
-                  <li>Double-click <code className="text-[#ffaa00] bg-[#121214] px-1.5 py-0.5 rounded">ApexStudio-Windows-Launcher.bat</code> to run the DAW in a standalone borderless desktop window.</li>
-                  <li>To compile a standard Windows Installer <code className="text-[#00e5ff] bg-[#121214] px-1.5 py-0.5 rounded">Apex Studio DAW Setup.exe</code>, right-click <code className="text-[#00e5ff]">Build-Windows-EXE.ps1</code> and choose <em>"Run with PowerShell"</em>.</li>
+              <div className="bg-[var(--apex-surface-2)] p-4 rounded-xl border border-[var(--apex-border)] space-y-2.5">
+                <span className="text-xs font-bold text-[var(--apex-text)] uppercase block tracking-wider">How to Use on Any Windows PC (Windows 10 / 11)</span>
+                <ol className="space-y-2 text-[11px] text-[var(--apex-text-2)] list-decimal list-inside">
+                  <li>
+                    Click <strong className="text-[var(--apex-text)]">"Download Windows .EXE Bundle (.ZIP)"</strong> above and extract the zip archive on your
+                    computer.
+                  </li>
+                  <li>
+                    Double-click <code className="text-[var(--apex-gold)] bg-[var(--apex-canvas)] px-1.5 py-0.5 rounded">ApexStudio-Windows-Launcher.bat</code>{' '}
+                    to run the DAW in a standalone borderless desktop window.
+                  </li>
+                  <li>
+                    To compile a standard Windows Installer{' '}
+                    <code className="text-[var(--apex-cyan-text)] bg-[var(--apex-canvas)] px-1.5 py-0.5 rounded">Apex Studio DAW Setup.exe</code>, right-click{' '}
+                    <code className="text-[var(--apex-cyan-text)]">Build-Windows-EXE.ps1</code> and choose <em>"Run with PowerShell"</em>.
+                  </li>
                   <li>The installer will automatically create Start Menu and Desktop shortcuts for you!</li>
                 </ol>
               </div>
@@ -497,16 +543,17 @@ For ultra-low latency (< 5ms) when recording MIDI or vocals:
 
           {activeTab === 'pwa' && (
             <div className="space-y-4">
-              <div className="bg-[#18181c] p-4 rounded-xl border border-[#2e2e34] flex flex-col md:flex-row items-center justify-between gap-4">
+              <div className="bg-[var(--apex-surface-2)] p-4 rounded-xl border border-[var(--apex-border)] flex flex-col md:flex-row items-center justify-between gap-4">
                 <div className="space-y-1.5">
-                  <h3 className="text-sm font-bold text-white flex items-center gap-2">
-                    <ShieldCheck className="w-4 h-4 text-[#00ff88]" />
+                  <h3 className="text-sm font-bold text-[var(--apex-text)] flex items-center gap-2">
+                    <ShieldCheck className="w-4 h-4 text-[var(--apex-success)]" />
                     <span>Install as Dedicated Windowed Desktop Program</span>
                   </h3>
-                  <p className="text-xs text-[#888]">
-                    Removes all browser tabs, bookmarks, and search bars. Launches straight from your Windows Taskbar, Start Menu, or Desktop with offline caching.
+                  <p className="text-xs text-[var(--apex-text-2)]">
+                    Removes all browser tabs, bookmarks, and search bars. Launches straight from your Windows Taskbar, Start Menu, or Desktop with offline
+                    caching.
                   </p>
-                  <ul className="text-[11px] text-[#aaa] space-y-1 list-disc list-inside pt-1">
+                  <ul className="text-[11px] text-[var(--apex-text-2)] space-y-1 list-disc list-inside pt-1">
                     <li>Zero background audio throttling (continuous sound when app is unfocused)</li>
                     <li>Exclusive WebMIDI hardware port binding & low-latency AudioContext</li>
                     <li>Persistent IndexedDB offline project caching</li>
@@ -515,7 +562,7 @@ For ultra-low latency (< 5ms) when recording MIDI or vocals:
 
                 <button
                   onClick={handleInstallPwa}
-                  className="px-5 py-2.5 bg-gradient-to-r from-[#ff6e00] to-[#ffaa00] hover:from-[#ff7d1a] hover:to-[#ffbb22] text-black font-bold rounded-lg shadow-lg flex items-center gap-2 text-xs transition whitespace-nowrap"
+                  className="px-5 py-2.5 bg-[var(--apex-accent)] hover:bg-[var(--apex-accent-strong)] text-[var(--apex-state-playing-fg)] font-bold rounded-lg shadow-lg flex items-center gap-2 text-xs transition whitespace-nowrap"
                 >
                   <Download className="w-4 h-4" />
                   <span>Install Desktop Program</span>
@@ -524,9 +571,9 @@ For ultra-low latency (< 5ms) when recording MIDI or vocals:
 
               {/* Offline Engine Readiness */}
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
-                <div className="bg-[#141418] p-3 rounded-lg border border-[#26262a] space-y-1">
-                  <span className="text-[10px] text-[#777] font-bold block">AUDIO ENGINE LATENCY</span>
-                  <span className="text-[#00ff88] font-mono text-sm font-bold">
+                <div className="bg-[var(--apex-canvas)] p-3 rounded-lg border border-[var(--apex-border)] space-y-1">
+                  <span className="text-[10px] text-[var(--apex-text-3)] font-bold block">AUDIO ENGINE LATENCY</span>
+                  <span className="text-[var(--apex-success)] font-mono text-sm font-bold">
                     {audioEngineInfo
                       ? [
                           `base ${formatMs(audioEngineInfo.baseLatencySeconds) ?? 'not reported'}`,
@@ -534,25 +581,25 @@ For ultra-low latency (< 5ms) when recording MIDI or vocals:
                         ].join(' / ')
                       : 'ENGINE NOT STARTED'}
                   </span>
-                  <p className="text-[10px] text-[#666]">
+                  <p className="text-[10px] text-[var(--apex-text-3)]">
                     {audioEngineInfo
                       ? `Render quantum ${audioEngineInfo.renderQuantumSamples} frames (${(audioEngineInfo.renderQuantumSeconds * 1000).toFixed(2)}ms) at ${(audioEngineInfo.sampleRate / 1000).toFixed(1)}kHz, read from AudioContext.baseLatency / outputLatency.`
                       : 'Latency is read from AudioContext.baseLatency / outputLatency once the audio engine exists.'}
                   </p>
                 </div>
 
-                <div className="bg-[#141418] p-3 rounded-lg border border-[#26262a] space-y-1">
-                  <span className="text-[10px] text-[#777] font-bold block">LOCAL STORAGE CACHE</span>
-                  <span className="text-[#00e5ff] font-mono text-sm font-bold">Unlimited IndexedDB</span>
-                  <p className="text-[10px] text-[#666]">Custom audio samples & recorded audio preserved</p>
+                <div className="bg-[var(--apex-canvas)] p-3 rounded-lg border border-[var(--apex-border)] space-y-1">
+                  <span className="text-[10px] text-[var(--apex-text-3)] font-bold block">LOCAL STORAGE CACHE</span>
+                  <span className="text-[var(--apex-cyan-text)] font-mono text-sm font-bold">Unlimited IndexedDB</span>
+                  <p className="text-[10px] text-[var(--apex-text-3)]">Custom audio samples & recorded audio preserved</p>
                 </div>
 
-                <div className="bg-[#141418] p-3 rounded-lg border border-[#26262a] space-y-1">
-                  <span className="text-[10px] text-[#777] font-bold block">AUDIO THREADING</span>
-                  <span className="text-[#ffaa00] font-mono text-sm font-bold">Web Audio graph thread</span>
-                  <p className="text-[10px] text-[#666]">
-                    Node processing runs on the browser audio thread while voices are scheduled from the main thread.
-                    No AudioWorklet processor is used by the engine today.
+                <div className="bg-[var(--apex-canvas)] p-3 rounded-lg border border-[var(--apex-border)] space-y-1">
+                  <span className="text-[10px] text-[var(--apex-text-3)] font-bold block">AUDIO THREADING</span>
+                  <span className="text-[var(--apex-gold)] font-mono text-sm font-bold">Web Audio graph thread</span>
+                  <p className="text-[10px] text-[var(--apex-text-3)]">
+                    Node processing runs on the browser audio thread while voices are scheduled from the main thread. No AudioWorklet processor is used by the
+                    engine today.
                   </p>
                 </div>
               </div>
@@ -561,63 +608,81 @@ For ultra-low latency (< 5ms) when recording MIDI or vocals:
 
           {activeTab === 'resolution' && (
             <div className="space-y-3">
-              <span className="text-xs font-bold text-white block uppercase tracking-wider">
+              <span className="text-xs font-bold text-[var(--apex-text)] block uppercase tracking-wider">
                 DESKTOP RESOLUTION & UI COMPATIBILITY DIAGNOSTICS
               </span>
 
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 text-xs">
-                <div className="bg-[#18181c] p-3 rounded-lg border border-[#28282e]">
-                  <span className="text-[10px] text-[#777] block font-bold">VIEWPORT SIZE</span>
-                  <span className="text-white font-mono text-sm font-bold">{screenInfo.width} × {screenInfo.height}</span>
-                  <span className="text-[9px] text-[#00ff88] block">Fully Responsive</span>
+                <div className="bg-[var(--apex-surface-2)] p-3 rounded-lg border border-[var(--apex-border)]">
+                  <span className="text-[10px] text-[var(--apex-text-3)] block font-bold">VIEWPORT SIZE</span>
+                  <span className="text-[var(--apex-text)] font-mono text-sm font-bold">
+                    {screenInfo.width} × {screenInfo.height}
+                  </span>
+                  <span className="text-[9px] text-[var(--apex-success)] block">Fully Responsive</span>
                 </div>
 
-                <div className="bg-[#18181c] p-3 rounded-lg border border-[#28282e]">
-                  <span className="text-[10px] text-[#777] block font-bold">MONITOR DISPLAY</span>
-                  <span className="text-white font-mono text-sm font-bold">{screenInfo.screenWidth} × {screenInfo.screenHeight}</span>
-                  <span className="text-[9px] text-[#00e5ff] block">Native Windows Display</span>
+                <div className="bg-[var(--apex-surface-2)] p-3 rounded-lg border border-[var(--apex-border)]">
+                  <span className="text-[10px] text-[var(--apex-text-3)] block font-bold">MONITOR DISPLAY</span>
+                  <span className="text-[var(--apex-text)] font-mono text-sm font-bold">
+                    {screenInfo.screenWidth} × {screenInfo.screenHeight}
+                  </span>
+                  <span className="text-[9px] text-[var(--apex-cyan-text)] block">Native Windows Display</span>
                 </div>
 
-                <div className="bg-[#18181c] p-3 rounded-lg border border-[#28282e]">
-                  <span className="text-[10px] text-[#777] block font-bold">DPI SCALE RATIO</span>
-                  <span className="text-white font-mono text-sm font-bold">{screenInfo.pixelRatio}x ({Math.round(screenInfo.pixelRatio * 100)}%)</span>
-                  <span className="text-[9px] text-[#ffaa00] block">Vector Hi-DPI Crisp</span>
+                <div className="bg-[var(--apex-surface-2)] p-3 rounded-lg border border-[var(--apex-border)]">
+                  <span className="text-[10px] text-[var(--apex-text-3)] block font-bold">DPI SCALE RATIO</span>
+                  <span className="text-[var(--apex-text)] font-mono text-sm font-bold">
+                    {screenInfo.pixelRatio}x ({Math.round(screenInfo.pixelRatio * 100)}%)
+                  </span>
+                  <span className="text-[9px] text-[var(--apex-gold)] block">Vector Hi-DPI Crisp</span>
                 </div>
 
-                <div className="bg-[#18181c] p-3 rounded-lg border border-[#28282e]">
-                  <span className="text-[10px] text-[#777] block font-bold">COLOR DEPTH</span>
-                  <span className="text-white font-mono text-sm font-bold">{screenInfo.colorDepth}-bit sRGB</span>
-                  <span className="text-[9px] text-[#a855f7] block">Studio Visual Spectrum</span>
+                <div className="bg-[var(--apex-surface-2)] p-3 rounded-lg border border-[var(--apex-border)]">
+                  <span className="text-[10px] text-[var(--apex-text-3)] block font-bold">COLOR DEPTH</span>
+                  <span className="text-[var(--apex-text)] font-mono text-sm font-bold">{screenInfo.colorDepth}-bit sRGB</span>
+                  <span className="text-[9px] text-[var(--apex-aux-text)] block">Studio Visual Spectrum</span>
                 </div>
               </div>
 
               {/* Supported Desktop Resolutions Grid */}
-              <div className="bg-[#18181c] p-3.5 rounded-lg border border-[#28282e] space-y-2">
-                <span className="text-[11px] font-bold text-zinc-300 block">Verified Desktop Compatibility Standards:</span>
+              <div className="bg-[var(--apex-surface-2)] p-3.5 rounded-lg border border-[var(--apex-border)] space-y-2">
+                <span className="text-[11px] font-bold text-[var(--apex-text-2)] block">Verified Desktop Compatibility Standards:</span>
                 <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2 text-[11px]">
-                  <div className="flex items-center gap-2 text-zinc-300 bg-[#121214] p-2 rounded border border-[#222]">
-                    <Check className="w-3.5 h-3.5 text-[#00ff88]" />
-                    <span><strong>1366 × 768</strong> (Compact Laptops)</span>
+                  <div className="flex items-center gap-2 text-[var(--apex-text-2)] bg-[var(--apex-canvas)] p-2 rounded border border-[var(--apex-border)]">
+                    <Check className="w-3.5 h-3.5 text-[var(--apex-success)]" />
+                    <span>
+                      <strong>1366 × 768</strong> (Compact Laptops)
+                    </span>
                   </div>
-                  <div className="flex items-center gap-2 text-zinc-300 bg-[#121214] p-2 rounded border border-[#222]">
-                    <Check className="w-3.5 h-3.5 text-[#00ff88]" />
-                    <span><strong>1920 × 1080</strong> (Full HD Standard)</span>
+                  <div className="flex items-center gap-2 text-[var(--apex-text-2)] bg-[var(--apex-canvas)] p-2 rounded border border-[var(--apex-border)]">
+                    <Check className="w-3.5 h-3.5 text-[var(--apex-success)]" />
+                    <span>
+                      <strong>1920 × 1080</strong> (Full HD Standard)
+                    </span>
                   </div>
-                  <div className="flex items-center gap-2 text-zinc-300 bg-[#121214] p-2 rounded border border-[#222]">
-                    <Check className="w-3.5 h-3.5 text-[#00ff88]" />
-                    <span><strong>2560 × 1440</strong> (2K QHD Gaming)</span>
+                  <div className="flex items-center gap-2 text-[var(--apex-text-2)] bg-[var(--apex-canvas)] p-2 rounded border border-[var(--apex-border)]">
+                    <Check className="w-3.5 h-3.5 text-[var(--apex-success)]" />
+                    <span>
+                      <strong>2560 × 1440</strong> (2K QHD Gaming)
+                    </span>
                   </div>
-                  <div className="flex items-center gap-2 text-zinc-300 bg-[#121214] p-2 rounded border border-[#222]">
-                    <Check className="w-3.5 h-3.5 text-[#00ff88]" />
-                    <span><strong>3840 × 2160</strong> (4K Ultra HD)</span>
+                  <div className="flex items-center gap-2 text-[var(--apex-text-2)] bg-[var(--apex-canvas)] p-2 rounded border border-[var(--apex-border)]">
+                    <Check className="w-3.5 h-3.5 text-[var(--apex-success)]" />
+                    <span>
+                      <strong>3840 × 2160</strong> (4K Ultra HD)
+                    </span>
                   </div>
-                  <div className="flex items-center gap-2 text-zinc-300 bg-[#121214] p-2 rounded border border-[#222]">
-                    <Check className="w-3.5 h-3.5 text-[#00ff88]" />
-                    <span><strong>21:9 / 32:9</strong> (Ultra-Wide Screens)</span>
+                  <div className="flex items-center gap-2 text-[var(--apex-text-2)] bg-[var(--apex-canvas)] p-2 rounded border border-[var(--apex-border)]">
+                    <Check className="w-3.5 h-3.5 text-[var(--apex-success)]" />
+                    <span>
+                      <strong>21:9 / 32:9</strong> (Ultra-Wide Screens)
+                    </span>
                   </div>
-                  <div className="flex items-center gap-2 text-zinc-300 bg-[#121214] p-2 rounded border border-[#222]">
-                    <Check className="w-3.5 h-3.5 text-[#00ff88]" />
-                    <span><strong>50% Window Snap</strong> (Split Screen)</span>
+                  <div className="flex items-center gap-2 text-[var(--apex-text-2)] bg-[var(--apex-canvas)] p-2 rounded border border-[var(--apex-border)]">
+                    <Check className="w-3.5 h-3.5 text-[var(--apex-success)]" />
+                    <span>
+                      <strong>50% Window Snap</strong> (Split Screen)
+                    </span>
                   </div>
                 </div>
               </div>
@@ -628,39 +693,41 @@ For ultra-low latency (< 5ms) when recording MIDI or vocals:
             <div className="space-y-3">
               <div className="flex items-center justify-between">
                 <div>
-                  <h3 className="text-xs font-bold text-white">CLI EXECUTABLE BUILD COMMANDS (ELECTRON BUILDER)</h3>
-                  <p className="text-[10px] text-[#777]">Run these commands to package into a standalone Windows `.exe` (NSIS installer or portable binary)</p>
+                  <h3 className="text-xs font-bold text-[var(--apex-text)]">CLI EXECUTABLE BUILD COMMANDS (ELECTRON BUILDER)</h3>
+                  <p className="text-[10px] text-[var(--apex-text-3)]">
+                    Run these commands to package into a standalone Windows `.exe` (NSIS installer or portable binary)
+                  </p>
                 </div>
 
                 <button
                   onClick={handleCopyScript}
-                  className="px-3 py-1 bg-[#222228] hover:bg-[#2d2d35] text-white border border-[#444] text-xs font-bold rounded flex items-center gap-1.5 transition"
+                  className="px-3 py-1 bg-[var(--apex-surface-3)] hover:bg-[color-mix(in_srgb,var(--apex-surface-3)_85%,var(--apex-text))] text-[var(--apex-text)] border border-[var(--apex-border)] text-xs font-bold rounded flex items-center gap-1.5 transition"
                 >
-                  {copiedScript ? <Check className="w-3.5 h-3.5 text-[#00ff88]" /> : <Copy className="w-3.5 h-3.5" />}
+                  {copiedScript ? <Check className="w-3.5 h-3.5 text-[var(--apex-success)]" /> : <Copy className="w-3.5 h-3.5" />}
                   <span>{copiedScript ? 'Copied!' : 'Copy Commands'}</span>
                 </button>
               </div>
 
-              <div className="bg-[#0b0b0d] p-3 rounded-lg border border-[#222226] font-mono text-[11px] text-[#a0a0a0] overflow-x-auto space-y-2">
-                <div className="text-[#00ff88] font-bold"># 1. Install packaging tools:</div>
-                <div className="text-white">npm install electron electron-builder --save-dev</div>
+              <div className="bg-[var(--apex-canvas)] p-3 rounded-lg border border-[var(--apex-border)] font-mono text-[11px] text-[var(--apex-text-2)] overflow-x-auto space-y-2">
+                <div className="text-[var(--apex-success)] font-bold"># 1. Install packaging tools:</div>
+                <div className="text-[var(--apex-text)]">npm install electron electron-builder --save-dev</div>
 
-                <div className="text-[#00e5ff] font-bold pt-2"># 2. Compile Windows .exe Installer:</div>
-                <div className="text-white">npx electron-builder --win --x64</div>
+                <div className="text-[var(--apex-cyan-text)] font-bold pt-2"># 2. Compile Windows .exe Installer:</div>
+                <div className="text-[var(--apex-text)]">npx electron-builder --win --x64</div>
 
-                <div className="text-[#ffaa00] font-bold pt-2"># 3. Compile Portable Single-File .exe:</div>
-                <div className="text-white">npx electron-builder --win portable</div>
+                <div className="text-[var(--apex-gold)] font-bold pt-2"># 3. Compile Portable Single-File .exe:</div>
+                <div className="text-[var(--apex-text)]">npx electron-builder --win portable</div>
               </div>
             </div>
           )}
         </div>
 
         {/* Footer */}
-        <div className="px-5 py-3.5 bg-[#18181c] border-t border-[#2e2e34] flex items-center justify-between text-xs">
-          <span className="text-[10px] text-[#666]">Direct Hardware Driver & Web Audio Subsystem Connected</span>
+        <div className="px-5 py-3.5 bg-[var(--apex-panel-header)] border-t border-[var(--apex-border)] flex items-center justify-between text-xs">
+          <span className="text-[10px] text-[var(--apex-text-3)]">Direct Hardware Driver & Web Audio Subsystem Connected</span>
           <button
             onClick={onClose}
-            className="px-4 py-1.5 bg-[#ff6e00] hover:bg-[#ff7d1a] text-black font-bold rounded transition shadow"
+            className="px-4 py-1.5 bg-[var(--apex-accent)] hover:bg-[var(--apex-accent-strong)] text-[var(--apex-state-playing-fg)] font-bold rounded transition shadow"
           >
             Close
           </button>

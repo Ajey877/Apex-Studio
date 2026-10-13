@@ -74,23 +74,37 @@ export const HotkeysModal: React.FC<HotkeysModalProps> = ({ isOpen, onClose }) =
   if (!isOpen) return null;
 
   return (
-    <ModalFrame id="hotkeys-modal" labelledBy="hotkeys-modal-title" onClose={onClose} className="fixed inset-0 bg-black/85 backdrop-blur-sm z-50 flex items-center justify-center p-3 sm:p-4">
-      <div className="bg-[#141416] border border-[#333336] rounded-xl w-full max-w-2xl shadow-2xl overflow-hidden text-[#b0b0b0] max-h-[90vh] flex flex-col">
+    // UI-03O: the shortcut sheet is fully themed through the existing
+    // `--apex-*` tokens. Its accent identity (tile, tile glyph, category
+    // headings, tip glyph, Got it CTA) stays on `--apex-accent` — the token the
+    // UI-1C compatibility layer already resolved these `#ff6e00` literals to, so
+    // the rendered identity hue is unchanged. Rows, group cards, kbd chips and
+    // the neutral text scale follow the shared surface/text steps, and the dead
+    // `bg-black/85` scrim is gone: ModalFrame supplies `--apex-modal-overlay`.
+    <ModalFrame
+      id="hotkeys-modal"
+      labelledBy="hotkeys-modal-title"
+      onClose={onClose}
+      className="fixed inset-0 backdrop-blur-sm z-50 flex items-center justify-center p-3 sm:p-4"
+    >
+      <div className="bg-[var(--apex-surface)] border border-[var(--apex-border)] rounded-xl w-full max-w-2xl shadow-2xl overflow-hidden text-[var(--apex-text-2)] max-h-[90vh] flex flex-col">
         {/* Header */}
-        <div className="px-4 sm:px-5 py-3 bg-[#1a1a1d] border-b border-[#333336] flex items-center justify-between shrink-0">
+        <div className="px-4 sm:px-5 py-3 bg-[var(--apex-panel-header)] border-b border-[var(--apex-border)] flex items-center justify-between shrink-0">
           <div className="flex items-center space-x-2.5">
-            <div className="w-7 h-7 bg-[#ff6e00]/15 border border-[#ff6e00]/30 rounded flex items-center justify-center">
-              <Keyboard className="w-4 h-4 text-[#ff6e00]" />
+            <div className="w-7 h-7 bg-[color-mix(in_srgb,var(--apex-accent)_16%,transparent)] border border-[color-mix(in_srgb,var(--apex-accent)_48%,transparent)] rounded flex items-center justify-center">
+              <Keyboard className="w-4 h-4 text-[var(--apex-accent)]" />
             </div>
             <div>
-              <h3 id="hotkeys-modal-title" className="font-bold text-sm text-white tracking-tight">STUDIO KEYBOARD SHORTCUTS & HOTKEYS</h3>
-              <p className="text-[10px] text-[#777]">Desktop & Hardware Controller Keybindings</p>
+              <h3 id="hotkeys-modal-title" className="font-bold text-sm text-[var(--apex-text)] tracking-tight">
+                STUDIO KEYBOARD SHORTCUTS & HOTKEYS
+              </h3>
+              <p className="text-[10px] text-[var(--apex-text-3)]">Desktop & Hardware Controller Keybindings</p>
             </div>
           </div>
           <button 
             onClick={onClose} 
             aria-label="Close hotkeys"
-            className="p-1 rounded hover:bg-[#2d2d30] text-[#777] hover:text-white transition"
+            className="p-1 rounded hover:bg-[var(--apex-state-hover)] text-[var(--apex-text-3)] hover:text-[var(--apex-text)] transition"
           >
             <X className="w-4 h-4" />
           </button>
@@ -100,15 +114,15 @@ export const HotkeysModal: React.FC<HotkeysModalProps> = ({ isOpen, onClose }) =
         <div className="p-4 sm:p-5 space-y-4 overflow-y-auto custom-scrollbar flex-1">
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             {HOTKEY_GROUPS.map((group, gIdx) => (
-              <div key={gIdx} className="bg-[#1a1a1d] border border-[#333336] rounded-lg p-3 space-y-2">
-                <div className="text-[10px] font-bold uppercase tracking-wider text-[#ff6e00] border-b border-[#333336] pb-1">
+              <div key={gIdx} className="bg-[var(--apex-surface-2)] border border-[var(--apex-border)] rounded-lg p-3 space-y-2">
+                <div className="text-[10px] font-bold uppercase tracking-wider text-[var(--apex-accent)] border-b border-[var(--apex-border)] pb-1">
                   {group.category}
                 </div>
                 <div className="space-y-1.5">
                   {group.items.map((item, iIdx) => (
                     <div key={iIdx} className="flex items-center justify-between text-[11px]">
-                      <span className="text-[#b0b0b0]">{item.desc}</span>
-                      <kbd className="px-2 py-0.5 bg-[#121214] border border-[#333336] rounded text-white font-mono text-[10px] font-semibold">
+                      <span className="text-[var(--apex-text-2)]">{item.desc}</span>
+                      <kbd className="px-2 py-0.5 bg-[var(--apex-canvas)] border border-[var(--apex-border)] rounded text-[var(--apex-text)] font-mono text-[10px] font-semibold">
                         {item.key}
                       </kbd>
                     </div>
@@ -118,14 +132,14 @@ export const HotkeysModal: React.FC<HotkeysModalProps> = ({ isOpen, onClose }) =
             ))}
           </div>
 
-          <div className="p-3 bg-[#121214] border border-[#333336] rounded-lg flex items-center justify-between text-xs">
-            <div className="flex items-center space-x-2 text-[#777]">
-              <Command className="w-4 h-4 text-[#ff6e00]" />
+          <div className="p-3 bg-[var(--apex-canvas)] border border-[var(--apex-border)] rounded-lg flex items-center justify-between text-xs">
+            <div className="flex items-center space-x-2 text-[var(--apex-text-3)]">
+              <Command className="w-4 h-4 text-[var(--apex-accent)]" />
               <span>Tip: All shortcuts are active globally without taking focus away from knobs.</span>
             </div>
             <button
               onClick={onClose}
-              className="px-3 py-1 bg-[#ff6e00] hover:bg-[#ff7d1a] text-black font-bold text-xs rounded transition"
+              className="px-3 py-1 bg-[var(--apex-accent)] hover:bg-[var(--apex-accent-strong)] text-[var(--apex-state-playing-fg)] font-bold text-xs rounded transition"
             >
               Got it
             </button>

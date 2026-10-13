@@ -206,7 +206,11 @@ const MODAL_CASES: ModalCase[] = [
   {
     name: 'Hotkeys', file: 'HotkeysModal.tsx', modalId: 'hotkeys-modal',
     titleId: 'hotkeys-modal-title', titleText: 'STUDIO KEYBOARD SHORTCUTS & HOTKEYS',
-    closeLabel: 'Close hotkeys', overlayClass: OVERLAY_SHELL,
+    // UI-03O: the scrim is the shared `--apex-modal-overlay` token, applied by
+    // ModalFrame's prepended `apex-modal-overlay` class. The dead `bg-black/85`
+    // utility is removed from the modal's own class string.
+    closeLabel: 'Close hotkeys',
+    overlayClass: 'apex-modal-overlay fixed inset-0 backdrop-blur-sm z-50 flex items-center justify-center p-3 sm:p-4',
     open: React.createElement(HotkeysModal, { isOpen: true, onClose: noop }),
     closed: React.createElement(HotkeysModal, { isOpen: false, onClose: noop }),
   },
@@ -284,7 +288,10 @@ const MODAL_CASES: ModalCase[] = [
   {
     name: 'Analytics', file: 'AnalyticsModal.tsx', modalId: 'analytics-modal',
     titleId: 'analytics-modal-title', titleText: 'STUDIO TELEMETRY & PRODUCTION METRICS',
-    closeLabel: 'Close analytics', overlayClass: OVERLAY_SHELL_PADDED,
+    // UI-03O: as above — the themed token supplies the scrim; the modal's own
+    // class string no longer carries the dead dark fill.
+    closeLabel: 'Close analytics',
+    overlayClass: 'apex-modal-overlay fixed inset-0 backdrop-blur-sm z-50 flex items-center justify-center p-4',
     open: React.createElement(AnalyticsModal, {
       isOpen: true, onClose: noop, meta: DEFAULT_PROJECT.meta, channels,
       clips: DEFAULT_PROJECT.playlistClips,
@@ -297,7 +304,8 @@ const MODAL_CASES: ModalCase[] = [
   {
     name: 'Collaboration', file: 'CollaborationModal.tsx', modalId: 'collab-modal',
     titleId: 'collab-modal-title', titleText: 'STUDIO NOTES & COLLABORATION',
-    closeLabel: 'Close collaboration', overlayClass: OVERLAY_SHELL_PADDED,
+    closeLabel: 'Close collaboration',
+    overlayClass: 'apex-modal-overlay fixed inset-0 backdrop-blur-sm z-50 flex items-center justify-center p-4',
     open: React.createElement(CollaborationModal, {
       isOpen: true, onClose: noop, comments: [], collaborators: [],
       onAddComment: noop, onToggleResolveComment: noop,
@@ -347,7 +355,10 @@ const MODAL_CASES: ModalCase[] = [
   {
     name: 'Desktop App', file: 'DesktopAppModal.tsx', modalId: 'fl-desktop-app-modal',
     titleId: 'fl-desktop-app-modal-title', titleText: 'WINDOWS .EXE & DESKTOP SUITE',
-    closeLabel: 'Close desktop app', overlayClass: OVERLAY_STUDIO,
+    closeLabel: 'Close desktop app',
+    // UI-03O: the shared frame now carries this overlay; the modal's own class
+    // string keeps its blur/geometry without the dead dark fill.
+    overlayClass: 'apex-modal-overlay fixed inset-0 backdrop-blur-md z-50 flex items-center justify-center p-3 sm:p-4 select-none',
     open: React.createElement(DesktopAppModal, { isOpen: true, onClose: noop }),
     closed: React.createElement(DesktopAppModal, { isOpen: false, onClose: noop }),
   },
