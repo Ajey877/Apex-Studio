@@ -70,7 +70,7 @@ Two deliberate surface choices, both driven by measurement rather than taste:
 This batch had to separate three genuinely different kinds of colour. Each decision is pinned by a test.
 
 **(a) `macro.color` — persisted project data → preserved byte-for-byte.**
-`ProjectState.macroKnobs[].color` is a validated, saved field (`isMacroKnob`, `projectState.ts:499`). It is the same category UI-03A lists under *Explicitly preserved (not defects)* alongside `ch.color` and `DrumSamplerPanel`'s `PAD_COLORS`, and `ChannelRack.tsx:536` still paints `ch.color` directly today. It therefore survives unchanged on the value arc (`stroke={macro.color}`), the selected-card border, the range `accentColor`, and the mapping swatch — and `DEFAULT_MACRO_KNOBS` plus the add-macro rotation keep their exact `#ff6e00 / #00ff88 / #00e5ff / #a855f7 / #ffaa00` literals. The browser spec asserts `stroke="#ff6e00"` and `#ffaa00` on a newly created knob **in both themes**.
+`ProjectState.macroKnobs[].color` is a validated, saved field (`isMacroKnob`, `projectState.ts:499-500`). It is the same category UI-03A lists under *Explicitly preserved (not defects)* alongside `ch.color` and `DrumSamplerPanel`'s `PAD_COLORS`, and `ChannelRack.tsx:536` still paints `ch.color` directly today. It therefore survives unchanged on the value arc (`stroke={macro.color}`), the selected-card border, the range `accentColor`, and the mapping swatch — and `DEFAULT_MACRO_KNOBS` plus the add-macro rotation keep their exact `#ff6e00 / #00ff88 / #00e5ff / #a855f7 / #ffaa00` literals. The browser spec asserts `stroke="#ff6e00"` and `#ffaa00` on a newly created knob **in both themes**.
 
 It is, however, **no longer painted as 10px text**. Measured on `--apex-surface-3`, the five stored hues as text give:
 
@@ -233,7 +233,7 @@ Each migrated file was normalised against its `d4309d5` baseline by stripping JS
 
 ## 6. Validation (all executed in this run, on the final code)
 
-Nothing below is inherited from an earlier run or from the UI-03L report. The suites invalidated by the §3.2/§3.3 fixes were re-run to completion afterwards.
+Nothing below is inherited from an earlier run or from the UI-03L report. Every gate was re-run end-to-end **on the exact committed tree `7ceb857`** after the §3.2/§3.3 fixes and after the §6.1 negative-control restores, so no result depends on a state that has since been edited. `npm run lint` is `tsc --noEmit`; there is no ESLint configuration in this repository.
 
 | Gate | Command | Result |
 | --- | --- | --- |
@@ -247,9 +247,9 @@ Nothing below is inherited from an earlier run or from the UI-03L report. The su
 | Truthfulness | `npm run test:truth` | **98/98 PASS** |
 | History / publication / theme UI | `npm run test:history` | **972/972 PASS**, 83 suites (was 936; **+36**) |
 | Audio / DSP / state | `npm run test:audio` | **1676/1676 PASS**, 353 suites — unchanged, as expected for a presentation-only batch |
-| **Full real-browser suite** | `npx playwright test` | **73 passed (3.6m)**, 0 failed (was 69; **+4**) |
+| **Full real-browser suite** | `npx playwright test` | **73 passed (3.7m)**, 0 failed, 0 flaky (was 69; **+4**) |
 | New per-component browser specs | `masterMacroRackTheme.spec.ts`, `multiZoneSamplerTheme.spec.ts` | **4/4 PASS** (2 each × Dark/Light) |
-| Production build | `npm run build` | **PASS**, exit 0 — CSS 109.87 kB (gzip 17.26 kB), JS 1203.72 kB |
+| Production build | `npm run build` | **PASS**, exit 0 — CSS 110.34 kB (gzip 17.34 kB), JS 1203.65 kB (gzip 318.94 kB) |
 | Production CSS emission | scan of `dist/assets/index-*.css` | **PASS** — 25/25 expected token utilities present |
 | Whitespace / conflict markers | `git diff --check` | **clean** |
 
@@ -274,7 +274,7 @@ After restoring all three, the four suites were re-run to **64/64 green** (36 ne
 ### 6.2 Unrelated changes caught and reverted
 
 - **`package-lock.json`** was rewritten by the environment's `npm install --legacy-peer-deps` (203 lines of `@electron/windows-sign` and peer-optional entries removed). It is not part of this migration and was reverted with `git checkout --`; the final diff contains no lockfile change.
-- **`assets/screenshots/*.png`** — the full browser suite rewrites `ui03b-mastering-light-after-live-switch.png`, `ui03c-aux-dark.png`, `ui03c-aux-light.png` and `ui03e-audio-slicer-light.png` through font/render nondeterminism in this sandbox. None belongs to a Batch-1 spec; all four were reverted with `git checkout -- assets/screenshots/` and the working tree confirmed clean before committing.
+- **`assets/screenshots/*.png`** — the full browser suite rewrites four committed PNGs through font/render nondeterminism in this sandbox (`ui03b-mastering-light-after-live-switch.png`, `ui03c-aux-dark.png`, `ui03c-aux-light.png`, and `ui03e-audio-slicer-dark.png` or `-light.png` depending on the run). None belongs to a Batch-1 spec. They were reverted with `git checkout -- assets/screenshots/` after every full-suite run, including the final one, and the working tree was confirmed clean before each commit. **The committed diff contains no binary change.**
 
 ### 6.3 Environment note
 
@@ -307,7 +307,22 @@ Notes carried forward for those batches: `HotkeysModal` exports `HOTKEY_GROUPS`,
 
 ---
 
-## 9. Merge recommendation
+## 9. Final validated state
+
+| Item | Value |
+| --- | --- |
+| Base (`main`) | `d4309d5b144e436573545effacb7a52691813eac` |
+| Branch | `arena/14f5cfa4-apex-studio` |
+| Commits | `0ad9894` (components + unit suites) → `2fdb976` (browser specs + hover fix) → final (contrast fixes + this report) |
+| Files changed vs `main` | 11 (3 components, 3 new unit suites, 2 new browser specs, `modalDialogShell.test.tsx`, `package.json`, this report) |
+| `git diff --check` | clean |
+| Binary / lockfile / screenshot changes in the diff | **none** |
+| New design tokens | **0** |
+| Global CSS changes | **0** |
+
+---
+
+## 10. Merge recommendation
 
 **Recommend merging.** All eleven validation gates pass on the final code, including the full 73-case real-browser suite in both themes and a clean production build. The change is presentation-only, proved mechanically in §5, with three real defects fixed (§3.1–3.3), two findings deliberately left alone with stated WCAG reasoning (§3.4), zero new design tokens, zero global-CSS changes, and no weakening of any existing assertion. `test:audio` is unchanged at 1676/1676 and `test:truth` at 98/98, which is the expected signature of a migration that touched no DSP and no truth copy.
 
