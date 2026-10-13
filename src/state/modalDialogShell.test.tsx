@@ -354,7 +354,10 @@ const MODAL_CASES: ModalCase[] = [
   {
     name: 'Gross Beat', file: 'GrossBeatModal.tsx', modalId: 'gross-beat-modal',
     titleId: 'gross-beat-modal-title', titleText: 'MASTER GATE',
-    closeLabel: 'Close Gross Beat', overlayClass: OVERLAY_STUDIO,
+    closeLabel: 'Close Gross Beat',
+    // UI-03J: ModalFrame supplies the themed scrim; Gross Beat keeps its blur
+    // and layout classes without the redundant dark-only fill.
+    overlayClass: 'fixed inset-0 backdrop-blur-md z-50 flex items-center justify-center p-3 sm:p-4 select-none',
     open: React.createElement(GrossBeatModal, {
       isOpen: true, onClose: noop, currentStep: 0, isPlaying: false,
       grossBeatState: DEFAULT_GROSS_BEAT_STATE, onUpdateGrossBeat: noop,

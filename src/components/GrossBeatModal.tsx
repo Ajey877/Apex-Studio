@@ -93,22 +93,22 @@ export const GrossBeatModal: React.FC<GrossBeatModalProps> = ({
   const closedGainPercent = Math.round(resolveGrossBeatClosedGain(grossBeatState.mix) * 100);
 
   return (
-    <ModalFrame id="gross-beat-modal" labelledBy="gross-beat-modal-title" onClose={onClose} className="fixed inset-0 bg-black/85 backdrop-blur-md z-50 flex items-center justify-center p-3 sm:p-4 select-none">
-      <div className="bg-[#121214] border border-[#2e2e32] rounded-xl w-full max-w-2xl shadow-2xl overflow-hidden text-[#b0b0b0] flex flex-col max-h-[92vh]">
+    <ModalFrame id="gross-beat-modal" labelledBy="gross-beat-modal-title" onClose={onClose} className="fixed inset-0 backdrop-blur-md z-50 flex items-center justify-center p-3 sm:p-4 select-none">
+      <div className="bg-[var(--apex-surface)] border border-[var(--apex-border)] rounded-xl w-full max-w-2xl shadow-[var(--apex-shadow)] overflow-hidden text-[var(--apex-text-2)] flex flex-col max-h-[92vh]">
         {/* Modal Top Header */}
-        <div className="px-5 py-3.5 bg-[#18181b] border-b border-[#2e2e32] flex items-center justify-between">
+        <div className="px-5 py-3.5 bg-[var(--apex-panel-header)] border-b border-[var(--apex-border)] flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-[#ff6e00] to-[#ff9e40] flex items-center justify-center text-black shadow-md">
+            <div className="w-8 h-8 rounded-lg bg-[var(--apex-gold)] flex items-center justify-center text-[var(--apex-state-playing-fg)] shadow-md">
               <Waves className="w-5 h-5" />
             </div>
             <div>
               <div className="flex items-center gap-2">
-                <h2 id="gross-beat-modal-title" className="text-sm font-bold text-white tracking-wide">MASTER GATE</h2>
-                <span className="px-1.5 py-0.5 rounded text-[9px] font-mono font-bold bg-[#ff6e00]/20 text-[#ff6e00] border border-[#ff6e00]/40">
+                <h2 id="gross-beat-modal-title" className="text-sm font-bold text-[var(--apex-text)] tracking-wide">MASTER GATE</h2>
+                <span className="px-1.5 py-0.5 rounded text-[9px] font-mono font-bold bg-[color-mix(in_srgb,var(--apex-gold)_20%,transparent)] text-[var(--apex-gold)] border border-[color-mix(in_srgb,var(--apex-gold)_40%,transparent)]">
                   AMPLITUDE GATE
                 </span>
               </div>
-              <p className="text-[10px] text-[#777]">Sixteen-step amplitude gate on the master bus</p>
+              <p className="text-[10px] text-[var(--apex-text-3)]">Sixteen-step amplitude gate on the master bus</p>
             </div>
           </div>
 
@@ -118,8 +118,8 @@ export const GrossBeatModal: React.FC<GrossBeatModalProps> = ({
               onClick={handleTogglePower}
               className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition shadow-sm ${
                 grossBeatState.enabled
-                  ? 'bg-[#ff6e00] text-black hover:bg-[#ff8526]'
-                  : 'bg-[#222225] text-[#777] hover:text-white border border-[#333]'
+                  ? 'bg-[var(--apex-success)] text-[var(--apex-state-playing-fg)] hover:bg-[color-mix(in_srgb,var(--apex-success)_86%,var(--apex-text))]'
+                  : 'bg-[var(--apex-surface-3)] text-[var(--apex-text-3)] hover:text-[var(--apex-text)] hover:bg-[var(--apex-state-hover)] border border-[var(--apex-border)]'
               }`}
             >
               <Power className="w-3.5 h-3.5" />
@@ -129,7 +129,7 @@ export const GrossBeatModal: React.FC<GrossBeatModalProps> = ({
             <button
               onClick={onClose}
               aria-label="Close Gross Beat"
-              className="text-[#777] hover:text-white p-1 rounded hover:bg-[#222225] transition"
+              className="text-[var(--apex-text-3)] hover:text-[var(--apex-text)] p-1 rounded hover:bg-[var(--apex-surface-3)] transition"
             >
               <X className="w-5 h-5" />
             </button>
@@ -140,12 +140,12 @@ export const GrossBeatModal: React.FC<GrossBeatModalProps> = ({
         <div className="p-5 overflow-y-auto custom-scrollbar space-y-5">
 
           {/* Truth disclosure: what the gate does, and what it does not do. */}
-          <div className="bg-[#18181b] p-3 rounded-lg border border-[#28282b] space-y-1">
-            <p className="text-[11px] text-[#b0b0b0]">
+          <div className="bg-[var(--apex-surface-2)] p-3 rounded-lg border border-[var(--apex-border)] space-y-1">
+            <p className="text-[11px] text-[var(--apex-text-2)]">
               16-step gate on the master bus, live and in export.
             </p>
-            <p className="text-[10px] text-[#777] leading-relaxed">
-              <span className="font-bold text-[#ff6e00]">NOT APPLIED:</span> no time-stretch, pitch-shift,
+            <p className="text-[10px] text-[var(--apex-text-3)] leading-relaxed">
+              <span className="font-bold text-[var(--apex-gold)]">NOT APPLIED:</span> no time-stretch, pitch-shift,
               half-time or tape processing &mdash; the engine gates gain on the steps below and nothing else.
             </p>
           </div>
@@ -153,10 +153,10 @@ export const GrossBeatModal: React.FC<GrossBeatModalProps> = ({
           {/* Main Controls Header Row */}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             {/* Gate Depth */}
-            <div className="bg-[#18181b] p-3 rounded-lg border border-[#28282b] flex flex-col justify-between">
+            <div className="bg-[var(--apex-surface-2)] p-3 rounded-lg border border-[var(--apex-border)] flex flex-col justify-between">
               <div className="flex items-center justify-between text-xs mb-1.5">
-                <span className="text-[#888] font-bold text-[10px] uppercase">GATE DEPTH</span>
-                <span className="font-mono text-[#ff6e00] font-bold text-xs">{Math.round(grossBeatState.mix * 100)}%</span>
+                <span className="text-[var(--apex-text-2)] font-bold text-[10px] uppercase">GATE DEPTH</span>
+                <span className="font-mono text-[var(--apex-gold)] font-bold text-xs">{Math.round(grossBeatState.mix * 100)}%</span>
               </div>
               <input
                 type="range"
@@ -165,30 +165,30 @@ export const GrossBeatModal: React.FC<GrossBeatModalProps> = ({
                 step="0.05"
                 value={grossBeatState.mix}
                 onChange={(e) => handleMixChange(parseFloat(e.target.value))}
-                className="w-full h-1.5 accent-[#ff6e00] bg-[#121214] rounded cursor-pointer"
+                className="w-full h-1.5 accent-[var(--apex-gold)] bg-[var(--apex-chrome-inset)] rounded cursor-pointer"
               />
-              <div className="flex justify-between text-[9px] text-[#555] mt-1 font-mono">
+              <div className="flex justify-between text-[9px] text-[var(--apex-text-3)] mt-1 font-mono">
                 <span>0% open</span>
                 <span>100% full chop</span>
               </div>
-              <div className="text-[9px] text-[#777] mt-1 font-mono">
+              <div className="text-[9px] text-[var(--apex-text-3)] mt-1 font-mono">
                 Closed steps: {closedGainPercent}% gain
               </div>
             </div>
 
             {/* Master Brake Trigger */}
-            <div className="bg-[#18181b] p-3 rounded-lg border border-[#28282b] flex flex-col justify-between">
-              <div className="flex items-center justify-between text-[10px] text-[#888] font-bold uppercase mb-1">
+            <div className="bg-[var(--apex-surface-2)] p-3 rounded-lg border border-[var(--apex-border)] flex flex-col justify-between">
+              <div className="flex items-center justify-between text-[10px] text-[var(--apex-text-2)] font-bold uppercase mb-1">
                 <span>MASTER BRAKE</span>
-                <span className="text-white font-mono">{brakeDuration}ms</span>
+                <span className="text-[var(--apex-text)] font-mono">{brakeDuration}ms</span>
               </div>
               <div className="flex items-center gap-2">
                 <button
                   onClick={handleTriggerBrake}
                   className={`flex-1 py-1.5 rounded-lg text-xs font-bold flex items-center justify-center gap-1.5 transition ${
                     isBraking
-                      ? 'bg-red-500 text-white animate-pulse'
-                      : 'bg-[#222225] hover:bg-[#ff6e00] hover:text-black text-white border border-[#333336]'
+                      ? 'bg-[var(--apex-danger)] text-[var(--apex-state-recording-fg)] animate-pulse'
+                      : 'bg-[var(--apex-surface-3)] hover:bg-[color-mix(in_srgb,var(--apex-gold)_82%,var(--apex-text))] hover:text-[var(--apex-state-playing-fg)] text-[var(--apex-text)] border border-[var(--apex-border)]'
                   }`}
                 >
                   <Disc className={`w-3.5 h-3.5 ${isBraking ? 'animate-spin' : ''}`} />
@@ -197,14 +197,14 @@ export const GrossBeatModal: React.FC<GrossBeatModalProps> = ({
                 <select
                   value={brakeDuration}
                   onChange={(e) => setBrakeDuration(parseInt(e.target.value))}
-                  className="bg-[#121214] text-white text-[10px] font-mono px-2 py-1.5 rounded border border-[#333336] focus:outline-none"
+                  className="bg-[var(--apex-surface)] text-[var(--apex-text)] text-[10px] font-mono px-2 py-1.5 rounded border border-[var(--apex-border)] focus:outline-none"
                 >
                   {BRAKE_DURATIONS.map((duration) => (
                     <option key={duration} value={duration}>{duration}ms</option>
                   ))}
                 </select>
               </div>
-              <div className="text-[9px] text-[#555] mt-1 font-mono">
+              <div className="text-[9px] text-[var(--apex-text-3)] mt-1 font-mono">
                 Master gain fade to silence and back &mdash; not a tape or turntable stop.
               </div>
             </div>
@@ -213,11 +213,11 @@ export const GrossBeatModal: React.FC<GrossBeatModalProps> = ({
           {/* Preset Styles Section */}
           <div className="space-y-2">
             <div className="flex items-center justify-between text-xs">
-              <span className="text-white font-bold text-xs flex items-center gap-1.5">
-                <Sliders className="w-3.5 h-3.5 text-[#ff6e00]" />
+              <span className="text-[var(--apex-text)] font-bold text-xs flex items-center gap-1.5">
+                <Sliders className="w-3.5 h-3.5 text-[var(--apex-gold)]" />
                 <span>GATE PATTERN PRESETS</span>
               </span>
-              <span className="text-[10px] text-[#777]">Click to load a pattern</span>
+              <span className="text-[10px] text-[var(--apex-text-3)]">Click to load a pattern</span>
             </div>
 
             <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
@@ -229,15 +229,15 @@ export const GrossBeatModal: React.FC<GrossBeatModalProps> = ({
                     onClick={() => handlePresetSelect(p.id)}
                     className={`p-2.5 rounded-lg border text-left transition flex flex-col justify-between ${
                       isActive
-                        ? 'bg-[#1e1710] border-[#ff6e00] text-white shadow-md'
-                        : 'bg-[#18181b] border-[#28282b] text-[#999] hover:text-white hover:border-[#3e3e42]'
+                        ? 'bg-[color-mix(in_srgb,var(--apex-gold)_14%,var(--apex-surface-2))] border-[var(--apex-gold)] text-[var(--apex-text)] shadow-md'
+                        : 'bg-[var(--apex-surface-2)] border-[var(--apex-border)] text-[var(--apex-text-2)] hover:text-[var(--apex-text)] hover:bg-[var(--apex-surface-3)] hover:border-[var(--apex-state-selected-border)]'
                     }`}
                   >
                     <div className="flex items-center justify-between w-full">
-                      <span className="font-bold text-xs text-white">{p.name}</span>
-                      {isActive && <span className="w-2 h-2 rounded-full bg-[#ff6e00]"></span>}
+                      <span className="font-bold text-xs text-[var(--apex-text)]">{p.name}</span>
+                      {isActive && <span className="w-2 h-2 rounded-full bg-[var(--apex-gold)]"></span>}
                     </div>
-                    <span className="text-[10px] text-[#666] mt-1">{p.desc}</span>
+                    <span className="text-[10px] text-[var(--apex-text-3)] mt-1">{p.desc}</span>
                   </button>
                 );
               })}
@@ -245,11 +245,11 @@ export const GrossBeatModal: React.FC<GrossBeatModalProps> = ({
           </div>
 
           {/* 16-Step Interactive Amplitude Gate Grid */}
-          <div className="bg-[#18181b] p-4 rounded-xl border border-[#28282b] space-y-3">
+          <div className="bg-[var(--apex-surface-2)] p-4 rounded-xl border border-[var(--apex-border)] space-y-3">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
-                <span className="text-xs font-bold text-white">16-STEP AMPLITUDE GATE GRID</span>
-                <span className="text-[10px] font-mono text-[#777]">1/16 beat grid</span>
+                <span className="text-xs font-bold text-[var(--apex-text)]">16-STEP AMPLITUDE GATE GRID</span>
+                <span className="text-[10px] font-mono text-[var(--apex-text-3)]">1/16 beat grid</span>
               </div>
               <div className="flex items-center gap-2">
                 <button
@@ -257,7 +257,7 @@ export const GrossBeatModal: React.FC<GrossBeatModalProps> = ({
                     setActivePresetId(null);
                     publish({ gateSteps: grossBeatAllOpenSteps() });
                   }}
-                  className="px-2 py-0.5 rounded text-[9px] bg-[#222225] text-[#888] hover:text-white"
+                  className="px-2 py-0.5 rounded text-[9px] bg-[var(--apex-surface-3)] text-[var(--apex-text-2)] hover:text-[var(--apex-text)]"
                 >
                   All Open
                 </button>
@@ -266,7 +266,7 @@ export const GrossBeatModal: React.FC<GrossBeatModalProps> = ({
                     setActivePresetId(null);
                     publish({ gateSteps: grossBeatState.gateSteps.map(s => !s) });
                   }}
-                  className="px-2 py-0.5 rounded text-[9px] bg-[#222225] text-[#888] hover:text-white"
+                  className="px-2 py-0.5 rounded text-[9px] bg-[var(--apex-surface-3)] text-[var(--apex-text-2)] hover:text-[var(--apex-text)]"
                 >
                   Invert
                 </button>
@@ -274,7 +274,7 @@ export const GrossBeatModal: React.FC<GrossBeatModalProps> = ({
             </div>
 
             {/* 16 Step Buttons */}
-            <div className="grid grid-cols-16 gap-1 sm:gap-1.5 h-20 items-end bg-[#0e0e10] p-2 rounded-lg border border-[#222225]">
+            <div className="grid grid-cols-16 gap-1 sm:gap-1.5 h-20 items-end bg-[var(--apex-chrome-inset)] p-2 rounded-lg border border-[var(--apex-border)]">
               {grossBeatState.gateSteps.map((isActive, idx) => {
                 const isCurrent = isPlaying && currentStep === idx;
                 const isBeatStart = idx % 4 === 0;
@@ -284,12 +284,12 @@ export const GrossBeatModal: React.FC<GrossBeatModalProps> = ({
                     key={idx}
                     onClick={() => handleStepToggle(idx)}
                     className={`h-full flex flex-col justify-end cursor-pointer rounded transition group relative ${
-                      isBeatStart ? 'border-l border-[#333338]' : ''
+                      isBeatStart ? 'border-l border-[var(--apex-grid-line-strong)]' : ''
                     }`}
                   >
                     {/* Playhead Marker */}
                     {isCurrent && (
-                      <div className="absolute -top-1.5 left-1/2 -translate-x-1/2 w-1.5 h-1.5 rounded-full bg-white animate-ping"></div>
+                      <div className="absolute -top-1.5 left-1/2 -translate-x-1/2 w-1.5 h-1.5 rounded-full bg-[var(--apex-state-playing)] animate-ping"></div>
                     )}
 
                     {/* Step Height Bar */}
@@ -297,21 +297,21 @@ export const GrossBeatModal: React.FC<GrossBeatModalProps> = ({
                       className={`w-full rounded-t transition-all ${
                         isActive
                           ? isCurrent
-                            ? 'bg-white h-full shadow-lg'
-                            : 'bg-[#ff6e00] hover:bg-[#ff8c33] h-full shadow'
-                          : 'bg-[#222225] hover:bg-[#333338] h-3'
+                            ? 'bg-[var(--apex-state-playing)] h-full shadow-lg'
+                            : 'bg-[var(--apex-gold)] hover:bg-[color-mix(in_srgb,var(--apex-gold)_82%,var(--apex-text))] h-full shadow'
+                          : 'bg-[var(--apex-surface-3)] hover:bg-[var(--apex-state-hover)] h-3'
                       }`}
                     />
 
                     {/* Step Index Label */}
-                    <span className={`text-[8px] font-mono text-center mt-1 ${isCurrent ? 'text-white font-bold' : 'text-[#555]'}`}>
+                    <span className={`text-[8px] font-mono text-center mt-1 ${isCurrent ? 'text-[var(--apex-state-playing)] font-bold' : 'text-[var(--apex-text-3)]'}`}>
                       {idx + 1}
                     </span>
                   </div>
                 );
               })}
             </div>
-            <div className="flex items-center justify-between text-[9px] text-[#666] font-mono">
+            <div className="flex items-center justify-between text-[9px] text-[var(--apex-text-3)] font-mono">
               <span>Beat 1 (1-4)</span>
               <span>Beat 2 (5-8)</span>
               <span>Beat 3 (9-12)</span>
@@ -321,14 +321,14 @@ export const GrossBeatModal: React.FC<GrossBeatModalProps> = ({
         </div>
 
         {/* Modal Footer */}
-        <div className="px-5 py-3 bg-[#18181b] border-t border-[#2e2e32] flex items-center justify-between text-xs">
-          <div className="flex items-center gap-2 text-[#777]">
-            <Waves className="w-3.5 h-3.5 text-[#ff6e00]" />
+        <div className="px-5 py-3 bg-[var(--apex-panel-header)] border-t border-[var(--apex-border)] flex items-center justify-between text-xs">
+          <div className="flex items-center gap-2 text-[var(--apex-text-3)]">
+            <Waves className="w-3.5 h-3.5 text-[var(--apex-gold)]" />
             <span>Master Bus Amplitude Gate</span>
           </div>
           <button
             onClick={onClose}
-            className="px-4 py-1.5 bg-[#ff6e00] hover:bg-[#ff8526] text-black font-bold text-xs rounded transition shadow"
+            className="px-4 py-1.5 bg-[var(--apex-gold)] hover:bg-[color-mix(in_srgb,var(--apex-gold)_86%,var(--apex-text))] text-[var(--apex-state-playing-fg)] font-bold text-xs rounded transition shadow"
           >
             Apply &amp; Close
           </button>
