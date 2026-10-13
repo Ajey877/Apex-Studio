@@ -217,8 +217,13 @@ describe('Master Macro Rack theme markup (UI-03M)', () => {
     assert.match(source, /accentColor: macro\.color/, 'the rotary slider keeps the stored identity colour');
     assert.match(
       source,
-      /borderColor: isSelected \? macro\.color : 'var\(--apex-border\)'/,
-      'the selected card keeps the stored colour and the idle card uses a token',
+      /style=\{isSelected \? \{ borderColor: macro\.color \} : undefined\}/,
+      'only the selected card paints the stored identity colour inline',
+    );
+    assert.match(
+      code,
+      /border-\[var\(--apex-border\)\] hover:border-\[var\(--apex-grid-line-strong\)\]/,
+      'the idle card takes its border from tokens, so its hover lift actually paints',
     );
     assert.match(
       source,

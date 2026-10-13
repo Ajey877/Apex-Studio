@@ -173,9 +173,17 @@ export const MasterMacroRackModal: React.FC<MasterMacroRackModalProps> = ({
                 <div
                   key={macro.id}
                   onClick={() => setSelectedMacroId(macro.id)}
-                  style={{ borderColor: isSelected ? macro.color : 'var(--apex-border)' }}
+                  // UI-03M fix: the inline `borderColor` used to be set on every
+                  // card, which silently beat the `hover:border-*` class — the
+                  // unselected card's hover feedback has never worked. The inline
+                  // style now carries only the selected card's persisted identity
+                  // colour; the idle card takes its border from tokens, so the
+                  // hover lift actually paints in both themes.
+                  style={isSelected ? { borderColor: macro.color } : undefined}
                   className={`p-3.5 rounded-xl border-2 cursor-pointer transition flex flex-col items-center justify-between text-center space-y-3 ${
-                    isSelected ? 'bg-[var(--apex-surface-3)] ring-2 ring-[var(--apex-accent-strong)] shadow-lg' : 'bg-[var(--apex-surface-2)] hover:border-[var(--apex-grid-line-strong)]'
+                    isSelected
+                      ? 'bg-[var(--apex-surface-3)] ring-2 ring-[var(--apex-accent-strong)] shadow-lg'
+                      : 'bg-[var(--apex-surface-2)] border-[var(--apex-border)] hover:border-[var(--apex-grid-line-strong)]'
                   }`}
                 >
                   <div className="w-full flex items-center justify-between text-[10px] font-bold font-mono">
