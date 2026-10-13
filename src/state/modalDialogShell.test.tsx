@@ -370,7 +370,11 @@ const MODAL_CASES: ModalCase[] = [
   {
     name: 'Master Macro Rack', file: 'MasterMacroRackModal.tsx', modalId: 'fl-master-macro-modal',
     titleId: 'fl-master-macro-modal-title', titleText: 'MASTER MACRO PERFORMANCE RACK',
-    closeLabel: 'Close macro rack', overlayClass: OVERLAY_STUDIO,
+    // UI-03M: the dead `bg-black/85` fill is removed; ModalFrame supplies the
+    // shared themed `apex-modal-overlay` scrim and the modal keeps its
+    // flex/centering/blur classes only. Same pattern as UI-03B..L.
+    closeLabel: 'Close macro rack',
+    overlayClass: 'apex-modal-overlay fixed inset-0 backdrop-blur-md z-50 flex items-center justify-center p-3 sm:p-4 select-none',
     open: React.createElement(MasterMacroRackModal, {
       isOpen: true, onClose: noop, mixerTracks, channels,
       macroKnobs: DEFAULT_PROJECT.macroKnobs ?? [], onUpdateMacros: noop,
@@ -419,7 +423,9 @@ const MODAL_CASES: ModalCase[] = [
   {
     name: 'Multi-Zone Sampler', file: 'MultiZoneSamplerModal.tsx', modalId: 'fl-multizone-sampler-modal',
     titleId: 'fl-multizone-sampler-modal-title', titleText: 'APEX MULTI-SAMPLE KEYMAPPER',
-    closeLabel: 'Close multi-zone sampler', overlayClass: OVERLAY_STUDIO,
+    // UI-03M: shared themed scrim, as above.
+    closeLabel: 'Close multi-zone sampler',
+    overlayClass: 'apex-modal-overlay fixed inset-0 backdrop-blur-md z-50 flex items-center justify-center p-3 sm:p-4 select-none',
     open: React.createElement(MultiZoneSamplerModal, {
       isOpen: true, onClose: noop, channels,
       sampleLibrary: DEFAULT_PROJECT.sampleLibrary ?? [], onUpdateChannel: noop,
@@ -449,7 +455,9 @@ const MODAL_CASES: ModalCase[] = [
   {
     name: 'Polyphonic Editor', file: 'PolyphonicEditorModal.tsx', modalId: 'fl-polyphonic-editor-modal',
     titleId: 'fl-polyphonic-editor-modal-title', titleText: 'POLYPHONIC AUDIO BLOB EDITOR (PROTOTYPE)',
-    closeLabel: 'Close polyphonic editor', overlayClass: OVERLAY_STUDIO,
+    // UI-03M: shared themed scrim, as above.
+    closeLabel: 'Close polyphonic editor',
+    overlayClass: 'apex-modal-overlay fixed inset-0 backdrop-blur-md z-50 flex items-center justify-center p-3 sm:p-4 select-none',
     open: React.createElement(PolyphonicEditorModal, { isOpen: true, onClose: noop }),
     closed: React.createElement(PolyphonicEditorModal, { isOpen: false, onClose: noop }),
   },
