@@ -251,11 +251,11 @@ export const MidiLearnModal: React.FC<MidiLearnModalProps> = ({
           - the MIDI Learn accent (armed state, primary bind CTA, CC identity)
             resolves through `--apex-accent`, exactly as the sibling
             MidiControllerModal MIDI Learn tab does, and exactly as the legacy
-            compatibility layer already resolved that legacy orange literal here;
+            compatibility layer already resolved that legacy orange literal;
           - connected-hardware readiness stays green through `--apex-success`;
           - destructive clear/delete stays red through `--apex-danger`.
-        The dead dark-only scrim fill is removed; ModalFrame
-        supplies the shared themed `--apex-modal-overlay` scrim.
+        The dead dark-only scrim fill is removed; ModalFrame supplies the
+        shared themed `--apex-modal-overlay` scrim.
       */}
       <div className="bg-[var(--apex-surface)] border border-[var(--apex-border)] rounded-xl w-full max-w-3xl shadow-2xl overflow-hidden text-[var(--apex-text-2)] flex flex-col max-h-[92vh]">
         {/* Header */}
@@ -267,14 +267,16 @@ export const MidiLearnModal: React.FC<MidiLearnModalProps> = ({
             <div>
               <div className="flex items-center gap-2">
                 <h2 id="fl-midi-learn-modal-title" className="text-sm font-bold text-[var(--apex-text)] tracking-wide">MIDI CONTROLLER LEARN & MAPPING</h2>
+                {/*
+                  The armed badge keeps its accent wash, accent border and pulse,
+                  but its label uses --apex-text rather than --apex-accent:
+                  accent-on-accent-wash measures 4.23:1 (Dark) and 3.90:1 (Light)
+                  over the header band, below the AA floor this 9px bold label
+                  needs, while --apex-text measures 10.97:1 and 11.09:1.
+                */}
                 <span className={`px-1.5 py-0.5 rounded text-[9px] font-mono font-bold border ${
                   isMidiLearnActive 
-                    ? // The armed badge keeps its accent wash, accent border and pulse, but the
-                    // label uses --apex-text: accent-on-accent-wash measures 4.23:1
-                    // (Dark) and 3.90:1 (Light) over the header band, below the AA
-                    // floor this 9px bold label needs. --apex-text measures 10.97:1
-                    // and 11.09:1, so the armed state stays readable in both themes.
-                    'bg-[color-mix(in_srgb,var(--apex-accent)_16%,transparent)] text-[var(--apex-text)] border-[color-mix(in_srgb,var(--apex-accent)_48%,transparent)] animate-pulse' 
+                    ? 'bg-[color-mix(in_srgb,var(--apex-accent)_16%,transparent)] text-[var(--apex-text)] border-[color-mix(in_srgb,var(--apex-accent)_48%,transparent)] animate-pulse'
                     : 'bg-[var(--apex-surface-3)] text-[var(--apex-text-3)] border-[var(--apex-border)]'
                 }`}>
                   {isMidiLearnActive ? 'LEARN ACTIVE' : 'STANDBY'}
@@ -289,7 +291,7 @@ export const MidiLearnModal: React.FC<MidiLearnModalProps> = ({
               onClick={() => onToggleMidiLearn(!isMidiLearnActive)}
               className={`px-3 py-1 rounded text-xs font-bold transition flex items-center gap-1.5 ${
                 isMidiLearnActive 
-                  ? 'bg-[var(--apex-accent)] text-[var(--apex-state-playing-fg)] shadow-lg animate-pulse' 
+                  ? 'bg-[var(--apex-accent)] text-[var(--apex-state-playing-fg)] shadow-lg animate-pulse'
                   : 'bg-[var(--apex-surface-3)] text-[var(--apex-text-2)] hover:text-[var(--apex-text)] border border-[var(--apex-border)]'
               }`}
             >

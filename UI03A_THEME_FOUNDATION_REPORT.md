@@ -35,18 +35,18 @@ should not be described as if they were.
 > `UI03B_MASTERING_SUITE_THEME_REPORT.md`. The "remaining 24 bodies" wording records the
 > UI-03B snapshot only; UI-03C through UI-03H have since migrated additional planned surfaces.
 >
-> **Current migration status — main @ `e9b799ba766f9c5546e980109ca7a6e14064c90a` (PR #216, UI-03J):**
+> **Current migration status — main @ `1591432a830cf1419f09c22c244bcf8bd0610116` (PR #217, UI-03K):**
 > UI-03B Mastering Suite, UI-03C Mixer, UI-03D Wavetable Synth, UI-03E Audio Slicer,
 > UI-03F Audio Recorder, UI-03G Parametric EQ, UI-03H Vocal Tuner, UI-03I MIDI Controller,
-> and UI-03J Gross Beat are merged. Their individual reports remain the implementation and
-> validation evidence.
+> UI-03J Gross Beat, and UI-03K Arpeggiator are merged. Their individual reports remain the
+> implementation and validation evidence.
 >
-> **UI-03K status:** the `ArpeggiatorModal` theme migration is implemented on the current
+> **UI-03L status:** the `MidiLearnModal` theme migration is implemented on the current
 > Arena session branch; its dedicated PR is pending review/merge. The implementation report
 > records the exact scope and validation for this phase.
 >
-> **Remaining planned modal order:** UI-03K `ArpeggiatorModal` (implementation in the current
-> branch; PR pending review), then `MidiLearnModal`, `MasterMacroRackModal`,
+> **Remaining planned modal order:** UI-03L `MidiLearnModal` (implementation in the current
+> branch; PR pending review), then `MasterMacroRackModal`,
 > `MultiZoneSamplerModal`, `PolyphonicEditorModal`, `SidechainRoutingModal`, `TakeCompingModal`,
 > `WarpAudioProcessorModal`, `CollaborationModal`, `HotkeysModal`, `AnalyticsModal`,
 > `OrientationLockModal`, and `DesktopAppModal`. The order follows the verified UI-03
