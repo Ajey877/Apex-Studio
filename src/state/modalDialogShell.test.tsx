@@ -490,7 +490,9 @@ const MODAL_CASES: ModalCase[] = [
   {
     name: 'Sidechain Routing', file: 'SidechainRoutingModal.tsx', modalId: 'fl-sidechain-routing-modal',
     titleId: 'fl-sidechain-routing-modal-title', titleText: 'DYNAMIC SIDECHAIN DUCKING & MODULATION MATRIX',
-    closeLabel: 'Close sidechain routing', overlayClass: OVERLAY_STUDIO,
+    // UI-03N: shared themed scrim, as above.
+    closeLabel: 'Close sidechain routing',
+    overlayClass: 'apex-modal-overlay fixed inset-0 backdrop-blur-md z-50 flex items-center justify-center p-3 sm:p-4 select-none',
     open: React.createElement(SidechainRoutingModal, {
       isOpen: true, onClose: noop, mixerTracks, onUpdateMixerTracks: noop,
     }),
@@ -501,7 +503,9 @@ const MODAL_CASES: ModalCase[] = [
   {
     name: 'Take Comping', file: 'TakeCompingModal.tsx', modalId: 'fl-take-comping-modal',
     titleId: 'fl-take-comping-modal-title', titleText: 'TAKE COMPING',
-    closeLabel: 'Close take comping', overlayClass: OVERLAY_STUDIO,
+    // UI-03N: shared themed scrim, as above.
+    closeLabel: 'Close take comping',
+    overlayClass: 'apex-modal-overlay fixed inset-0 backdrop-blur-md z-50 flex items-center justify-center p-3 sm:p-4 select-none',
     open: React.createElement(TakeCompingModal, {
       isOpen: true, onClose: noop, playlistClips: [], onSelectActiveTake: noop,
     }),
@@ -529,7 +533,9 @@ const MODAL_CASES: ModalCase[] = [
   {
     name: 'Warp Processor', file: 'WarpAudioProcessorModal.tsx', modalId: 'fl-warp-processor-modal',
     titleId: 'fl-warp-processor-modal-title', titleText: 'AUDIO CLIP PITCH & PLAYBACK RATE',
-    closeLabel: 'Close warp processor', overlayClass: OVERLAY_STUDIO,
+    // UI-03N: shared themed scrim, as above.
+    closeLabel: 'Close warp processor',
+    overlayClass: 'apex-modal-overlay fixed inset-0 backdrop-blur-md z-50 flex items-center justify-center p-3 sm:p-4 select-none',
     open: React.createElement(WarpAudioProcessorModal, {
       isOpen: true, onClose: noop, clips: [], selectedClipId: null, onUpdateClip: noop,
     }),
