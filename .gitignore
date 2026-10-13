@@ -9,3 +9,4 @@ coverage/
 !.env.example
 server.js
 playwright-report/
+test-results/

@@ -396,7 +396,13 @@ const MODAL_CASES: ModalCase[] = [
   {
     name: 'MIDI Learn', file: 'MidiLearnModal.tsx', modalId: 'fl-midi-learn-modal',
     titleId: 'fl-midi-learn-modal-title', titleText: 'MIDI CONTROLLER LEARN & MAPPING',
-    closeLabel: 'Close MIDI learn', overlayClass: OVERLAY_STUDIO,
+    // UI-03L: the scrim is the shared `--apex-modal-overlay` token, applied by
+    // ModalFrame's `apex-modal-overlay` class (prepended to the rendered class
+    // string). The dead `bg-black/85` utility is removed from the modal's own
+    // class string; the rendered scrim is unchanged because the unlayered token
+    // rule already overrode it. The entry keeps its own explicit contract.
+    closeLabel: 'Close MIDI learn',
+    overlayClass: 'apex-modal-overlay fixed inset-0 backdrop-blur-md z-50 flex items-center justify-center p-3 sm:p-4 select-none',
     open: React.createElement(MidiLearnModal, {
       isOpen: true, onClose: noop, midiMappings: DEFAULT_PROJECT.midiMappings,
       onUpdateMidiMappings: noop, channels, mixerTracks,

@@ -241,26 +241,48 @@ export const MidiLearnModal: React.FC<MidiLearnModalProps> = ({
   if (!isOpen) return null;
 
   return (
-    <ModalFrame id="fl-midi-learn-modal" labelledBy="fl-midi-learn-modal-title" onClose={onClose} className="fixed inset-0 bg-black/85 backdrop-blur-md z-50 flex items-center justify-center p-3 sm:p-4 select-none">
-      <div className="bg-[#121214] border border-[#2e2e32] rounded-xl w-full max-w-3xl shadow-2xl overflow-hidden text-[#b0b0b0] flex flex-col max-h-[92vh]">
+    <ModalFrame id="fl-midi-learn-modal" labelledBy="fl-midi-learn-modal-title" onClose={onClose} className="fixed inset-0 backdrop-blur-md z-50 flex items-center justify-center p-3 sm:p-4 select-none">
+      {/*
+        UI-03L: presentation-only migration onto the existing `--apex-*` semantic
+        tokens. This modal is DOM-rendered (no canvas), so its chrome follows the
+        active palette directly and needs no palette seam or theme observer.
+
+        Three color families carry meaning and keep it in both themes:
+          - the MIDI Learn accent (armed state, primary bind CTA, CC identity)
+            resolves through `--apex-accent`, exactly as the sibling
+            MidiControllerModal MIDI Learn tab does, and exactly as the legacy
+            compatibility layer already resolved that legacy orange literal;
+          - connected-hardware readiness stays green through `--apex-success`;
+          - destructive clear/delete stays red through `--apex-danger`.
+        The dead dark-only scrim fill is removed; ModalFrame supplies the
+        shared themed `--apex-modal-overlay` scrim.
+      */}
+      <div className="bg-[var(--apex-surface)] border border-[var(--apex-border)] rounded-xl w-full max-w-3xl shadow-2xl overflow-hidden text-[var(--apex-text-2)] flex flex-col max-h-[92vh]">
         {/* Header */}
-        <div className="px-5 py-3.5 bg-[#18181b] border-b border-[#2e2e32] flex items-center justify-between">
+        <div className="px-5 py-3.5 bg-[var(--apex-panel-header)] border-b border-[var(--apex-border)] flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-[#ff6e00] to-[#ffaa00] flex items-center justify-center text-black shadow-md">
+            <div className="w-8 h-8 rounded-lg bg-[var(--apex-accent)] flex items-center justify-center text-[var(--apex-state-playing-fg)] shadow-md">
               <Sliders className="w-5 h-5" />
             </div>
             <div>
               <div className="flex items-center gap-2">
-                <h2 id="fl-midi-learn-modal-title" className="text-sm font-bold text-white tracking-wide">MIDI CONTROLLER LEARN & MAPPING</h2>
+                <h2 id="fl-midi-learn-modal-title" className="text-sm font-bold text-[var(--apex-text)] tracking-wide">MIDI CONTROLLER LEARN & MAPPING</h2>
+                {/*
+                  The armed badge keeps its accent wash, accent border and pulse,
+                  but its label uses --apex-text rather than --apex-accent:
+                  accent-on-accent-wash measures 4.23:1 (Dark) and 3.90:1 (Light)
+                  over the header band, below the AA floor this 9px bold label
+                  needs, while --apex-text measures 10.97:1 and 11.09:1.
+                */}
                 <span className={`px-1.5 py-0.5 rounded text-[9px] font-mono font-bold border ${
                   isMidiLearnActive 
-                    ? 'bg-[#ff6e00]/20 text-[#ff6e00] border-[#ff6e00]/40 animate-pulse' 
-                    : 'bg-[#333]/20 text-[#777] border-[#444]'
+                    ? 'bg-[color-mix(in_srgb,var(--apex-accent)_16%,transparent)] text-[var(--apex-text)] border-[color-mix(in_srgb,var(--apex-accent)_48%,transparent)] animate-pulse'
+                    : 'bg-[var(--apex-surface-3)] text-[var(--apex-text-3)] border-[var(--apex-border)]'
                 }`}>
                   {isMidiLearnActive ? 'LEARN ACTIVE' : 'STANDBY'}
                 </span>
               </div>
-              <p className="text-[10px] text-[#777]">Map physical MIDI knobs, faders, and pads to DAW controls</p>
+              <p className="text-[10px] text-[var(--apex-text-3)]">Map physical MIDI knobs, faders, and pads to DAW controls</p>
             </div>
           </div>
 
@@ -269,8 +291,8 @@ export const MidiLearnModal: React.FC<MidiLearnModalProps> = ({
               onClick={() => onToggleMidiLearn(!isMidiLearnActive)}
               className={`px-3 py-1 rounded text-xs font-bold transition flex items-center gap-1.5 ${
                 isMidiLearnActive 
-                  ? 'bg-[#ff6e00] text-black shadow-lg animate-pulse' 
-                  : 'bg-[#222225] text-[#888] hover:text-white border border-[#333]'
+                  ? 'bg-[var(--apex-accent)] text-[var(--apex-state-playing-fg)] shadow-lg animate-pulse'
+                  : 'bg-[var(--apex-surface-3)] text-[var(--apex-text-2)] hover:text-[var(--apex-text)] border border-[var(--apex-border)]'
               }`}
             >
               <Zap className="w-3.5 h-3.5" />
@@ -280,7 +302,7 @@ export const MidiLearnModal: React.FC<MidiLearnModalProps> = ({
             <button
               onClick={onClose}
               aria-label="Close MIDI learn"
-              className="text-[#777] hover:text-white p-1 rounded hover:bg-[#222225] transition"
+              className="text-[var(--apex-text-3)] hover:text-[var(--apex-text)] p-1 rounded hover:bg-[var(--apex-state-hover)] transition"
             >
               <X className="w-5 h-5" />
             </button>
@@ -289,72 +311,72 @@ export const MidiLearnModal: React.FC<MidiLearnModalProps> = ({
 
         {/* Status Toast */}
         {statusMessage && (
-          <div className="bg-[#ff6e00] text-black font-bold text-xs px-4 py-1.5 flex items-center justify-between shadow-md">
+          <div className="bg-[var(--apex-accent)] text-[var(--apex-state-playing-fg)] font-bold text-xs px-4 py-1.5 flex items-center justify-between shadow-md">
             <div className="flex items-center gap-1.5">
               <Sparkles className="w-4 h-4" />
               <span>{statusMessage}</span>
             </div>
-            <button onClick={() => setStatusMessage(null)} className="text-black/80 hover:text-black">✕</button>
+            <button onClick={() => setStatusMessage(null)} className="opacity-70 hover:opacity-100 transition">✕</button>
           </div>
         )}
 
         {/* Modal Body */}
         <div className="p-5 overflow-y-auto custom-scrollbar space-y-4">
           {/* Connected WebMIDI Devices */}
-          <div className="bg-[#18181b] p-3 rounded-lg border border-[#28282b]">
-            <span className="text-[10px] text-[#888] font-bold uppercase tracking-wider block mb-1.5">CONNECTED HARDWARE CONTROLLERS</span>
+          <div className="bg-[var(--apex-surface-2)] p-3 rounded-lg border border-[var(--apex-border)]">
+            <span className="text-[10px] text-[var(--apex-text-2)] font-bold uppercase tracking-wider block mb-1.5">CONNECTED HARDWARE CONTROLLERS</span>
             {connectedDevices.length > 0 ? (
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                 {connectedDevices.map(d => (
-                  <div key={d.id} className="bg-[#121214] p-2 rounded border border-[#2e2e32] flex items-center gap-2">
-                    <Keyboard className="w-4 h-4 text-[#00ff88]" />
+                  <div key={d.id} className="bg-[var(--apex-canvas)] p-2 rounded border border-[var(--apex-border)] flex items-center gap-2">
+                    <Keyboard className="w-4 h-4 text-[var(--apex-success)]" />
                     <div className="flex flex-col min-w-0">
-                      <span className="text-xs font-bold text-white truncate">{d.name}</span>
-                      <span className="text-[9px] text-[#777] font-mono">{d.manufacturer || 'Generic USB MIDI'} ({d.state})</span>
+                      <span className="text-xs font-bold text-[var(--apex-text)] truncate">{d.name}</span>
+                      <span className="text-[9px] text-[var(--apex-text-3)] font-mono">{d.manufacturer || 'Generic USB MIDI'} ({d.state})</span>
                     </div>
                   </div>
                 ))}
               </div>
             ) : (
-              <div className="bg-[#121214] p-3 rounded border border-[#28282b] flex items-center justify-between">
+              <div className="bg-[var(--apex-canvas)] p-3 rounded border border-[var(--apex-border)] flex items-center justify-between">
                 <div className="flex items-center gap-2">
-                  <Cpu className="w-4 h-4 text-[#ff6e00]" />
-                  <span className="text-xs text-[#aaa]">WebMIDI ready. Plug in any USB MIDI keyboard or DJ controller.</span>
+                  <Cpu className="w-4 h-4 text-[var(--apex-accent)]" />
+                  <span className="text-xs text-[var(--apex-text-2)]">WebMIDI ready. Plug in any USB MIDI keyboard or DJ controller.</span>
                 </div>
-                <span className="text-[9px] font-mono text-[#666]">Auto-Detecting</span>
+                <span className="text-[9px] font-mono text-[var(--apex-text-3)]">Auto-Detecting</span>
               </div>
             )}
           </div>
 
           {isMidiLearnActive && (
-            <div className="bg-[#ff6e00]/10 border border-[#ff6e00]/50 rounded-lg p-3 flex items-center gap-2 animate-pulse">
-              <Radio className="w-4 h-4 text-[#ff6e00]" />
-              <span className="text-xs text-white font-bold">
+            <div className="bg-[color-mix(in_srgb,var(--apex-accent)_16%,transparent)] border border-[color-mix(in_srgb,var(--apex-accent)_48%,transparent)] rounded-lg p-3 flex items-center gap-2 animate-pulse">
+              <Radio className="w-4 h-4 text-[var(--apex-accent)]" />
+              <span className="text-xs text-[var(--apex-text)] font-bold">
                 Waiting for a MIDI CC — move a knob or fader to bind it to the selected target.
               </span>
             </div>
           )}
 
           {/* Quick Manual Bind Form */}
-          <div className="bg-[#18181b] p-3 rounded-lg border border-[#28282b] space-y-2">
-            <span className="text-[10px] text-[#888] font-bold uppercase tracking-wider block">QUICK PARAMETER BIND</span>
+          <div className="bg-[var(--apex-surface-2)] p-3 rounded-lg border border-[var(--apex-border)] space-y-2">
+            <span className="text-[10px] text-[var(--apex-text-2)] font-bold uppercase tracking-wider block">QUICK PARAMETER BIND</span>
             <div className="grid grid-cols-1 sm:grid-cols-4 gap-2">
               {/* CC Number */}
               <div>
-                <label className="text-[9px] text-[#777] font-mono block mb-0.5">MIDI CC #</label>
+                <label className="text-[9px] text-[var(--apex-text-3)] font-mono block mb-0.5">MIDI CC #</label>
                 <input
                   type="number"
                   min="0"
                   max="127"
                   value={manualCc}
                   onChange={(e) => setManualCc(parseInt(e.target.value) || 0)}
-                  className="w-full bg-[#121214] text-white text-xs px-2 py-1.5 rounded border border-[#333336] font-mono"
+                  className="w-full bg-[var(--apex-canvas)] text-[var(--apex-text)] text-xs px-2 py-1.5 rounded border border-[var(--apex-border)] font-mono"
                 />
               </div>
 
               {/* Target Type */}
               <div>
-                <label className="text-[9px] text-[#777] font-mono block mb-0.5">TARGET CONTROL</label>
+                <label className="text-[9px] text-[var(--apex-text-3)] font-mono block mb-0.5">TARGET CONTROL</label>
                 <select
                   value={selectedTargetType}
                   onChange={(e) => {
@@ -372,7 +394,7 @@ export const MidiLearnModal: React.FC<MidiLearnModalProps> = ({
                       normalizeMidiLearnTargetSelection(nextType, selectedTargetId, channels, mixerTracks).targetId
                     );
                   }}
-                  className="w-full bg-[#121214] text-white text-xs px-2 py-1.5 rounded border border-[#333336]"
+                  className="w-full bg-[var(--apex-canvas)] text-[var(--apex-text)] text-xs px-2 py-1.5 rounded border border-[var(--apex-border)]"
                 >
                   <option value="master_vol">Master Out Volume</option>
                   <option value="channel_vol">Channel Volume Fader</option>
@@ -386,7 +408,7 @@ export const MidiLearnModal: React.FC<MidiLearnModalProps> = ({
 
               {/* Target Item / Track (or FX slot, for the Phase 81 FX binder) */}
               <div>
-                <label className="text-[9px] text-[#777] font-mono block mb-0.5">
+                <label className="text-[9px] text-[var(--apex-text-3)] font-mono block mb-0.5">
                   {isFxSlotParamUiTarget(selectedTargetType) ? 'ASSIGN TO FX SLOT' : 'ASSIGN TO TRACK'}
                 </label>
                 {isFxSlotParamUiTarget(selectedTargetType) ? (
@@ -397,7 +419,7 @@ export const MidiLearnModal: React.FC<MidiLearnModalProps> = ({
                       setFxSlotTargetId(nextSlot);
                       setFxParamId(allFxParamOptions.find(option => option.targetId === nextSlot)?.paramId ?? '');
                     }}
-                    className="w-full bg-[#121214] text-white text-xs px-2 py-1.5 rounded border border-[#333336]"
+                    className="w-full bg-[var(--apex-canvas)] text-[var(--apex-text)] text-xs px-2 py-1.5 rounded border border-[var(--apex-border)]"
                   >
                     {fxSlotOptions.length === 0 && <option value="">No effect slots</option>}
                     {fxSlotOptions.map(option => (
@@ -408,7 +430,7 @@ export const MidiLearnModal: React.FC<MidiLearnModalProps> = ({
                   <select
                     value={selectedTargetId}
                     onChange={(e) => setSelectedTargetId(e.target.value)}
-                    className="w-full bg-[#121214] text-white text-xs px-2 py-1.5 rounded border border-[#333336]"
+                    className="w-full bg-[var(--apex-canvas)] text-[var(--apex-text)] text-xs px-2 py-1.5 rounded border border-[var(--apex-border)]"
                   >
                     {isChannelScopedMidiTarget(selectedTargetType) ? (
                       channels.map(c => (
@@ -428,11 +450,11 @@ export const MidiLearnModal: React.FC<MidiLearnModalProps> = ({
                   shows the DSP range the 0-127 byte is mapped across. */}
               {isFxSlotParamUiTarget(selectedTargetType) && (
                 <div>
-                  <label className="text-[9px] text-[#777] font-mono block mb-0.5">FX PARAMETER</label>
+                  <label className="text-[9px] text-[var(--apex-text-3)] font-mono block mb-0.5">FX PARAMETER</label>
                   <select
                     value={fxParamId}
                     onChange={(e) => setFxParamId(e.target.value)}
-                    className="w-full bg-[#121214] text-white text-xs px-2 py-1.5 rounded border border-[#333336]"
+                    className="w-full bg-[var(--apex-canvas)] text-[var(--apex-text)] text-xs px-2 py-1.5 rounded border border-[var(--apex-border)]"
                   >
                     {fxParamOptions.length === 0 && <option value="">No contract parameter</option>}
                     {fxParamOptions.map(option => (
@@ -448,7 +470,7 @@ export const MidiLearnModal: React.FC<MidiLearnModalProps> = ({
               <div className="flex items-end">
                 <button
                   onClick={handleAddMapping}
-                  className="w-full py-1.5 bg-[#ff6e00] hover:bg-[#ff7d1a] text-black font-bold text-xs rounded transition flex items-center justify-center gap-1 shadow"
+                  className="w-full py-1.5 bg-[var(--apex-accent)] hover:bg-[var(--apex-accent-strong)] text-[var(--apex-state-playing-fg)] font-bold text-xs rounded transition flex items-center justify-center gap-1 shadow"
                 >
                   <Plus className="w-3.5 h-3.5" />
                   <span>Bind CC</span>
@@ -460,14 +482,14 @@ export const MidiLearnModal: React.FC<MidiLearnModalProps> = ({
           {/* Active Mappings Table */}
           <div className="space-y-2">
             <div className="flex items-center justify-between text-xs">
-              <span className="text-white font-bold flex items-center gap-1.5">
-                <Sliders className="w-3.5 h-3.5 text-[#ff6e00]" />
+              <span className="text-[var(--apex-text)] font-bold flex items-center gap-1.5">
+                <Sliders className="w-3.5 h-3.5 text-[var(--apex-accent)]" />
                 <span>ACTIVE MIDI CC BINDINGS ({midiMappings.length})</span>
               </span>
               {midiMappings.length > 0 && (
                 <button
                   onClick={handleClearAll}
-                  className="text-[10px] text-red-400 hover:text-red-300 transition"
+                  className="text-[10px] text-[var(--apex-danger)] hover:text-[color-mix(in_srgb,var(--apex-danger)_78%,var(--apex-text))] transition"
                 >
                   Clear All
                 </button>
@@ -475,10 +497,10 @@ export const MidiLearnModal: React.FC<MidiLearnModalProps> = ({
             </div>
 
             {midiMappings.length === 0 ? (
-              <div className="bg-[#18181b] p-6 rounded-lg border border-dashed border-[#2e2e32] text-center space-y-2">
-                <Sliders className="w-8 h-8 text-[#555] mx-auto" />
-                <p className="text-xs text-[#888]">No MIDI CC bindings active yet.</p>
-                <p className="text-[10px] text-[#666]">
+              <div className="bg-[var(--apex-surface-2)] p-6 rounded-lg border border-dashed border-[var(--apex-border)] text-center space-y-2">
+                <Sliders className="w-8 h-8 text-[var(--apex-text-3)] mx-auto" />
+                <p className="text-xs text-[var(--apex-text-2)]">No MIDI CC bindings active yet.</p>
+                <p className="text-[10px] text-[var(--apex-text-3)]">
                   Click <strong>START MIDI LEARN</strong> above, or bind a knob manually.
                 </p>
               </div>
@@ -487,15 +509,15 @@ export const MidiLearnModal: React.FC<MidiLearnModalProps> = ({
                 {midiMappings.map(m => (
                   <div
                     key={m.ccNumber}
-                    className="bg-[#18181b] p-2.5 rounded-lg border border-[#28282b] flex items-center justify-between"
+                    className="bg-[var(--apex-surface-2)] p-2.5 rounded-lg border border-[var(--apex-border)] flex items-center justify-between"
                   >
                     <div className="flex items-center gap-3">
-                      <div className="w-9 h-7 rounded bg-[#222225] border border-[#333338] flex items-center justify-center font-mono font-bold text-xs text-[#ff6e00]">
+                      <div className="w-9 h-7 rounded bg-[var(--apex-surface-3)] border border-[var(--apex-border)] flex items-center justify-center font-mono font-bold text-xs text-[var(--apex-accent)]">
                         CC {m.ccNumber}
                       </div>
                       <div className="flex flex-col">
-                        <span className="text-xs font-bold text-white">{m.paramName || m.targetType}</span>
-                        <span className="text-[9px] text-[#777] font-mono">
+                        <span className="text-xs font-bold text-[var(--apex-text)]">{m.paramName || m.targetType}</span>
+                        <span className="text-[9px] text-[var(--apex-text-3)] font-mono">
                           Target: {m.targetType} | ID: {m.targetId}
                         </span>
                       </div>
@@ -503,7 +525,8 @@ export const MidiLearnModal: React.FC<MidiLearnModalProps> = ({
 
                     <button
                       onClick={() => handleDelete(m.ccNumber)}
-                      className="p-1.5 text-[#777] hover:text-red-400 rounded hover:bg-[#222225] transition"
+                      aria-label={`Remove MIDI CC ${m.ccNumber} binding`}
+                      className="p-1.5 text-[var(--apex-text-3)] hover:text-[var(--apex-danger)] rounded hover:bg-[var(--apex-state-hover)] transition"
                     >
                       <Trash2 className="w-3.5 h-3.5" />
                     </button>
@@ -515,11 +538,11 @@ export const MidiLearnModal: React.FC<MidiLearnModalProps> = ({
         </div>
 
         {/* Footer */}
-        <div className="px-5 py-3.5 bg-[#18181b] border-t border-[#2e2e32] flex items-center justify-between text-xs">
-          <span className="text-[10px] text-[#666]">Standard MIDI CC: 1=ModWheel, 7=Volume, 10=Pan, 11=Expression, 71=Resonance, 74=Cutoff</span>
+        <div className="px-5 py-3.5 bg-[var(--apex-panel-header)] border-t border-[var(--apex-border)] flex items-center justify-between text-xs">
+          <span className="text-[10px] text-[var(--apex-text-3)]">Standard MIDI CC: 1=ModWheel, 7=Volume, 10=Pan, 11=Expression, 71=Resonance, 74=Cutoff</span>
           <button
             onClick={onClose}
-            className="px-4 py-1.5 bg-[#222225] hover:bg-[#333338] text-white font-bold rounded transition"
+            className="px-4 py-1.5 bg-[var(--apex-surface-3)] hover:bg-[color-mix(in_srgb,var(--apex-surface-3)_85%,var(--apex-text))] text-[var(--apex-text)] font-bold rounded transition"
           >
             Done
           </button>
