@@ -269,7 +269,12 @@ export const MidiLearnModal: React.FC<MidiLearnModalProps> = ({
                 <h2 id="fl-midi-learn-modal-title" className="text-sm font-bold text-[var(--apex-text)] tracking-wide">MIDI CONTROLLER LEARN & MAPPING</h2>
                 <span className={`px-1.5 py-0.5 rounded text-[9px] font-mono font-bold border ${
                   isMidiLearnActive 
-                    ? 'bg-[color-mix(in_srgb,var(--apex-accent)_16%,transparent)] text-[var(--apex-accent)] border-[color-mix(in_srgb,var(--apex-accent)_48%,transparent)] animate-pulse' 
+                    ? // The armed badge keeps its accent wash, accent border and pulse, but the
+                    // label uses --apex-text: accent-on-accent-wash measures 4.23:1
+                    // (Dark) and 3.90:1 (Light) over the header band, below the AA
+                    // floor this 9px bold label needs. --apex-text measures 10.97:1
+                    // and 11.09:1, so the armed state stays readable in both themes.
+                    'bg-[color-mix(in_srgb,var(--apex-accent)_16%,transparent)] text-[var(--apex-text)] border-[color-mix(in_srgb,var(--apex-accent)_48%,transparent)] animate-pulse' 
                     : 'bg-[var(--apex-surface-3)] text-[var(--apex-text-3)] border-[var(--apex-border)]'
                 }`}>
                   {isMidiLearnActive ? 'LEARN ACTIVE' : 'STANDBY'}
@@ -505,7 +510,7 @@ export const MidiLearnModal: React.FC<MidiLearnModalProps> = ({
                     className="bg-[var(--apex-surface-2)] p-2.5 rounded-lg border border-[var(--apex-border)] flex items-center justify-between"
                   >
                     <div className="flex items-center gap-3">
-                      <div className="w-9 h-7 rounded bg-[var(--apex-chrome-inset)] border border-[var(--apex-border)] flex items-center justify-center font-mono font-bold text-xs text-[var(--apex-accent)]">
+                      <div className="w-9 h-7 rounded bg-[var(--apex-surface-3)] border border-[var(--apex-border)] flex items-center justify-center font-mono font-bold text-xs text-[var(--apex-accent)]">
                         CC {m.ccNumber}
                       </div>
                       <div className="flex flex-col">
