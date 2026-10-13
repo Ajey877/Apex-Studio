@@ -1,0 +1,334 @@
+/**
+ * UI-03N — Warp Audio Processor theme contract.
+ *
+ * `WarpAudioProcessorModal` is DOM-rendered with no canvas, so every chrome
+ * surface follows the active palette through the existing `--apex-*` tokens;
+ * no palette seam or theme observer is required.
+ *
+ * Three colour families are deliberately treated differently:
+ *
+ *   - **Chrome** (panel, header/footer bands, target card, control insets,
+ *     banners, borders, hover, the secondary Cancel button) resolves through
+ *     semantic tokens.
+ *   - **Identity and read-out colours are the modal's audio-state vocabulary**:
+ *     the green processor identity stays on `--apex-success` (tile, panel
+ *     edge, target read-out, behaviour summary, pitch read-out, primary CTAs,
+ *     toast), the playback-rate read-out keeps cyan on `--apex-cyan-text`,
+ *     and the NOTHING-SELECTED / NO-CLIP / LENGTH-NOT-PRESERVED qualifiers
+ *     keep their warning amber on `--apex-gold`.
+ *   - **The auditioning-state fill** moves from a fixed `bg-white` to
+ *     `--apex-text` with `--apex-state-playing-fg` on-colour: the same
+ *     high-contrast "preview is running" reading in both palettes, instead of
+ *     a white fill that would stay white in Light.
+ *
+ * Warp target resolution (`resolveWarpTarget`, `isWarpTargetReady`,
+ * `warpTargetMessage`, `WARP_BEHAVIOUR_SUMMARY`) is owned by
+ * `src/components/warpClipTarget.ts` and its suites; this file pins the
+ * presentation contract plus the wiring the modal itself owns, across all
+ * three target states (ready, no-selection, unsupported-type).
+ */
+import assert from 'node:assert/strict';
+import { describe, it } from 'node:test';
+import { readFileSync } from 'node:fs';
+import React from 'react';
+import { renderToStaticMarkup } from 'react-dom/server';
+import { WarpAudioProcessorModal } from './WarpAudioProcessorModal';
+import { WARP_BEHAVIOUR_SUMMARY } from './warpClipTarget';
+import type { PlaylistClip } from '../types/daw';
+
+const source = readFileSync('src/components/WarpAudioProcessorModal.tsx', 'utf8');
+
+/**
+ * Source with comments stripped. Literal assertions run against this, so prose
+ * *about* a legacy literal (this migration's own explanatory comment names the
+ * dead black scrim) can neither satisfy nor trip them.
+ */
+const code = source
+  .replace(/\/\*[\s\S]*?\*\//g, '')
+  .replace(/(^|[^:'"])\/\/.*$/gm, '$1');
+const noop = (): void => {};
+
+/** Every class string in the source, including the ternary branches that the
+    first render never paints (auditioning fill, ready target read-out). */
+const sourceClassNames = (text: string): string[] => {
+  const out: string[] = [];
+  for (const match of text.matchAll(/className=(?:\"([^\"]*)\"|\{`([^`]*)`\}|\{'([^']*)'\})/g)) {
+    out.push(match[1] ?? match[2] ?? match[3] ?? '');
+  }
+  // The ternary branches inside a template className are covered by the raw
+  // string above; the single-quoted literals inside them are matched too.
+  for (const match of text.matchAll(/'([^']*(?:bg|text|border|ring|accent)-\[[^']*)'/g)) {
+    out.push(match[1]);
+  }
+  return out;
+};
+
+/** Any colour that cannot follow the theme: a literal, a fixed palette
+    utility, or a Tailwind named-palette class. */
+const UNTHEMED_CLASS =
+  /#[0-9a-f]{3,8}\b|\b(?:text|bg|border|accent|from|to|via|fill|ring)-\[#|\b(?:text|bg|border|fill|ring)-(?:white|black)\b|bg-black(?:\/\d+)?\b|rgba?\(|\b(?:text|bg|border|ring)-(?:red|amber|green|gray|zinc|neutral|orange|yellow|emerald|cyan|violet|purple|slate)-\d/i;
+
+const readyClip: PlaylistClip = {
+  id: 'clip-warp',
+  trackIndex: 2,
+  startBar: 4,
+  lengthBars: 2,
+  type: 'audio',
+  color: '#00ff88',
+  name: 'Bass Drop',
+  audioBufferId: 'buf-111111111111',
+  pitchShiftSemitones: 3,
+  timeStretchRate: 1.5,
+};
+
+const patternClip: PlaylistClip = {
+  id: 'clip-pattern',
+  trackIndex: 0,
+  startBar: 0,
+  lengthBars: 4,
+  type: 'pattern',
+  channelId: 'ch-kick',
+  color: '#ff5722',
+  name: 'Kick Pattern',
+};
+
+interface RenderOverrides {
+  clips?: PlaylistClip[];
+  selectedClipId?: string | null;
+  isOpen?: boolean;
+}
+
+const render = (mode: 'dark' | 'light', overrides: RenderOverrides = {}): string =>
+  renderToStaticMarkup(
+    React.createElement(
+      'div',
+      { 'data-theme': mode },
+      React.createElement(WarpAudioProcessorModal, {
+        isOpen: overrides.isOpen ?? true,
+        onClose: noop,
+        clips: overrides.clips ?? [],
+        selectedClipId: overrides.selectedClipId ?? null,
+        onUpdateClip: noop,
+      }),
+    ),
+  );
+
+const classAttributes = (markup: string): string[] =>
+  [...markup.matchAll(/class="([^"]*)"/g)].map((match) => match[1]);
+
+/** The class string carries `disabled:opacity-40`, so disabled-ness must be
+    read from the boolean attribute (`disabled=""`), not a substring. */
+const hasDisabledAttr = (tag: string): boolean => /(^|\s)disabled(=""|\s|>)/.test(tag);
+
+const includes = (haystack: string, needle: string, message: string): void =>
+  assert.ok(haystack.includes(needle), `${message}\n  expected to find: ${needle}`);
+
+describe('Warp Audio Processor theme markup (UI-03N)', () => {
+  for (const mode of ['dark', 'light'] as const) {
+    it(`renders the no-selection state with semantic theme classes in ${mode}`, () => {
+      const markup = render(mode, { clips: [readyClip], selectedClipId: null });
+      assert.match(markup, new RegExp(`data-theme="${mode}"`));
+      includes(markup, 'id="fl-warp-processor-modal"', 'the overlay keeps its id');
+      includes(markup, 'role="dialog"', 'the overlay is a dialog');
+      includes(markup, 'aria-modal="true"', 'the dialog is modal');
+      includes(markup, 'aria-labelledby="fl-warp-processor-modal-title"', 'the dialog is named by its title');
+      includes(markup, 'AUDIO CLIP PITCH &amp; PLAYBACK RATE', 'the title text is unchanged');
+      includes(markup, '>REPITCH — LENGTH NOT PRESERVED<', 'the repitch qualifier badge renders');
+      includes(markup, '>No audio clip selected<', 'the no-selection subtitle renders');
+      includes(markup, 'aria-label="Close warp processor"', 'the close control keeps its accessible name');
+      includes(markup, '>Preview Clip<', 'the preview action renders');
+      includes(markup, '>NOTHING SELECTED<', 'the target read-out reports the empty selection');
+      includes(markup, '>NO AUDIO CLIP TO WARP<', 'the blocker banner renders');
+      includes(markup, 'PITCH AND RATE ONLY — LENGTH IS NOT PRESERVED', 'the behaviour banner is unchanged');
+      includes(markup, '>NO LENGTH-PRESERVING STRETCH<', 'the banner qualifier is unchanged');
+      includes(markup, 'Applies to live playback and WAV export', 'the footer note is unchanged');
+      includes(markup, '>Cancel<', 'the cancel action renders');
+      includes(markup, '>Apply to Clip<', 'the apply action renders');
+
+      // No actionable target: the banner carries the module message and both
+      // sliders plus both primary actions are disabled.
+      includes(markup, 'Select an audio clip in the Playlist Arranger first', 'the blocker message comes from warpClipTarget');
+      const ranges = [...markup.matchAll(/<input[^>]*type="range"[^>]*>/g)].map((m) => m[0]);
+      assert.equal(ranges.length, 2, 'the pitch and rate sliders render');
+      assert.ok(hasDisabledAttr(ranges[0]), 'the pitch slider is disabled without a target');
+      assert.ok(hasDisabledAttr(ranges[1]), 'the rate slider is disabled without a target');
+      assert.ok(ranges[0].includes('min="-24"') && ranges[0].includes('max="24"'), 'the pitch range is unchanged');
+      assert.ok(ranges[1].includes('min="0.25"') && ranges[1].includes('max="3.0"') && ranges[1].includes('step="0.05"'), 'the rate range is unchanged');
+      includes(markup, '>0 st<', 'the pitch read-out reports the default');
+      includes(markup, '>1.00x<', 'the rate read-out reports the default');
+    });
+
+    it(`renders the ready-target state with the stored values in ${mode}`, () => {
+      const markup = render(mode, { clips: [readyClip], selectedClipId: 'clip-warp' });
+      includes(markup, 'Editing &quot;Bass Drop&quot;', 'the subtitle names the selected clip');
+      includes(markup, 'Bass Drop · bar 4 · 2 bars', 'the target read-out reports name, bar and length');
+      assert.ok(!markup.includes('NOTHING SELECTED'), 'the empty-selection read-out is gone');
+      assert.ok(!markup.includes('NO AUDIO CLIP TO WARP'), 'the blocker banner is gone');
+      includes(markup, '>+3 st<', 'the pitch read-out shows the stored semitone offset');
+      includes(markup, '>1.50x<', 'the rate read-out shows the stored stretch rate');
+      const ranges = [...markup.matchAll(/<input[^>]*type="range"[^>]*>/g)].map((m) => m[0]);
+      assert.ok(!hasDisabledAttr(ranges[0]), 'the pitch slider is enabled for an audio clip');
+      assert.ok(!hasDisabledAttr(ranges[1]), 'the rate slider is enabled for an audio clip');
+    });
+
+    it(`renders the unsupported-type state for a pattern clip in ${mode}`, () => {
+      const markup = render(mode, { clips: [patternClip], selectedClipId: 'clip-pattern' });
+      // An un-actionable target has no `targetClip`, so the subtitle falls
+      // back to the no-selection wording; the clip name appears in the
+      // blocker message instead.
+      includes(markup, '>No audio clip selected<', 'the subtitle reports no actionable target');
+      includes(markup, 'NOTHING SELECTED', 'an un-actionable target reports nothing selected');
+      includes(markup, 'NO AUDIO CLIP TO WARP', 'the blocker banner renders for a pattern clip');
+      includes(
+        markup,
+        'is a pattern clip. Pitch and playback-rate warping is applied to audio clips only',
+        'the blocker message explains why the pattern clip is un-actionable',
+      );
+      const ranges = [...markup.matchAll(/<input[^>]*type="range"[^>]*>/g)].map((m) => m[0]);
+      assert.ok(hasDisabledAttr(ranges[0]) && hasDisabledAttr(ranges[1]), 'the sliders stay disabled for a pattern clip');
+    });
+  }
+
+  it('carries no fixed chrome palette in any rendered state of either theme', () => {
+    const states: ReadonlyArray<[string, RenderOverrides]> = [
+      ['no-selection', { clips: [readyClip], selectedClipId: null }],
+      ['ready', { clips: [readyClip], selectedClipId: 'clip-warp' }],
+      ['unsupported-type', { clips: [patternClip], selectedClipId: 'clip-pattern' }],
+    ];
+    for (const mode of ['dark', 'light'] as const) {
+      for (const [label, overrides] of states) {
+        const offenders = classAttributes(render(mode, overrides)).filter((value) => UNTHEMED_CLASS.test(value));
+        assert.deepEqual(offenders, [], `${mode} ${label} renders an unthemed class`);
+      }
+    }
+  });
+
+  it('carries no fixed palette in any className in the source, including the auditioning branch', () => {
+    const names = sourceClassNames(code);
+    assert.ok(names.length > 12, `expected the full class surface, found ${names.length}`);
+    const offenders = names.filter((value) => UNTHEMED_CLASS.test(value));
+    assert.deepEqual(offenders, [], 'a className in the source still carries a fixed palette');
+    assert.doesNotMatch(code, /rgba?\(/, 'no rgb()/rgba() literal remains in the component code');
+    assert.doesNotMatch(code, /bg-black/, 'the redundant dark overlay fill is gone');
+  });
+
+  it('keeps the green identity, the cyan rate read-out and the gold qualifiers', () => {
+    assert.match(source, /bg-\[var\(--apex-success\)\]/, 'the identity tile and primary CTAs use the success token');
+    assert.match(
+      source,
+      /border-\[color-mix\(in_srgb,var\(--apex-success\)_40%,transparent\)\]/,
+      'the panel edge keeps a success wash',
+    );
+    assert.match(source, /text-\[var\(--apex-success\)\]/, 'the target read-out, behaviour summary and pitch read-out keep their green meaning');
+    assert.match(source, /text-\[var\(--apex-cyan-text\)\]/, 'the playback-rate read-out keeps its cyan meaning');
+    assert.match(source, /text-\[var\(--apex-gold\)\]/, 'the selection and blocker qualifiers keep their amber warning meaning');
+    assert.match(
+      source,
+      /border-\[color-mix\(in_srgb,var\(--apex-gold\)_40%,transparent\)\]/,
+      'the warning banners keep a gold edge',
+    );
+    assert.match(
+      source,
+      /bg-\[color-mix\(in_srgb,var\(--apex-gold\)_20%,transparent\)\]/,
+      'the repitch badge keeps a gold wash',
+    );
+    assert.match(source, /var\(--apex-state-playing-fg\)/, 'filled controls use a theme-safe on-colour');
+    assert.match(
+      source,
+      /hover:bg-\[color-mix\(in_srgb,var\(--apex-success\)_82%,var\(--apex-text\)\)\]/,
+      'the green CTAs keep a themed hover step',
+    );
+    assert.match(
+      source,
+      /isAuditioning \? 'bg-\[var\(--apex-text\)\]' : 'bg-\[var\(--apex-success\)\] hover:bg-\[color-mix\(in_srgb,var\(--apex-success\)_82%,var\(--apex-text\)\)\]'/,
+      'the auditioning state swaps to a theme-aware fill instead of fixed white',
+    );
+    assert.match(
+      source,
+      /bg-\[var\(--apex-surface-3\)\] hover:bg-\[color-mix\(in_srgb,var\(--apex-surface-3\)_85%,var\(--apex-text\)\)\] text-\[var\(--apex-text\)\]/,
+      'the secondary Cancel button uses a themed surface step',
+    );
+  });
+
+  it('uses existing semantic tokens for surfaces, text and borders', () => {
+    for (const token of [
+      '--apex-surface',
+      '--apex-surface-2',
+      '--apex-surface-3',
+      '--apex-panel-header',
+      '--apex-canvas',
+      '--apex-border',
+      '--apex-text',
+      '--apex-text-2',
+      '--apex-text-3',
+      '--apex-state-hover',
+      '--apex-state-playing-fg',
+    ]) {
+      assert.ok(source.includes(`var(${token})`), `warp processor chrome consumes ${token}`);
+    }
+  });
+
+  it('keeps the real-buffer audition path and the apply payload intact', () => {
+    assert.match(
+      code,
+      /if \(!targetClip\?\.audioBufferId\) \{\s*setStatusMessage\('This clip has no loaded audio to audition\.'\);/,
+      'an audio-less clip still gets the no-audio message',
+    );
+    assert.match(code, /const buffer = audioEngine\.getSampleBuffer\(targetClip\.audioBufferId\);/, 'the audition reads the clip’s real buffer');
+    assert.match(
+      code,
+      /source\.playbackRate\.value = stretchRate;\s*source\.detune\.value = pitchSemitones \* 100;/,
+      'the audition applies the shown rate and pitch to the buffer source',
+    );
+    assert.match(
+      code,
+      /const previewSeconds = Math\.min\(buffer\.duration \/ Math\.max\(0\.05, stretchRate\), 4\);/,
+      'the audition keeps its 4 second ceiling',
+    );
+    assert.match(
+      code,
+      /onUpdateClip\(\{\s*\.\.\.targetClip,\s*pitchShiftSemitones: pitchSemitones,\s*timeStretchRate: stretchRate\s*\}\);/,
+      'apply publishes exactly the two warp fields over the stored clip',
+    );
+    assert.match(
+      code,
+      /setStatusMessage\(`Applied pitch \$\{pitchSemitones > 0 \? '\+' : ''\}\$\{pitchSemitones\} st and \$\{stretchRate\.toFixed\(2\)\}x rate to "\$\{targetClip\.name\}"\.`\);/,
+      'the apply toast keeps its exact wording',
+    );
+    assert.match(
+      code,
+      /setPitchSemitones\(targetClip\?\.pitchShiftSemitones \?\? 0\);\s*setStretchRate\(targetClip\?\.timeStretchRate \?\? 1\.0\);/,
+      'the controls re-seed from the target clip when the modal opens',
+    );
+    assert.match(code, /setStatusMessage\('Previewing the clip’s own audio at the pitch and rate above \(mixer inserts bypassed\).'\);/, 'the preview toast keeps its exact wording');
+  });
+
+  it('states repitch truth and makes no stretch-capability claim', () => {
+    assert.match(source, /REPITCH|playback rate|playback-rate/i, 'the repitch wording survives');
+    assert.doesNotMatch(code, /granular|formant|transient warp|time-stretch/i, 'no unsupported warp technology is claimed');
+    assert.match(code, /WARP_BEHAVIOUR_SUMMARY/, 'the behaviour summary is read from the shared module');
+    includes(render('light', { clips: [readyClip], selectedClipId: 'clip-warp' }), WARP_BEHAVIOUR_SUMMARY, 'the summary text renders verbatim');
+  });
+
+  it('uses ModalFrame’s themed scrim and keeps the overlay geometry', () => {
+    const markup = render('light', { clips: [readyClip], selectedClipId: null });
+    assert.match(
+      markup,
+      /class="apex-modal-overlay fixed inset-0 backdrop-blur-md z-50 flex items-center justify-center p-3 sm:p-4 select-none"/,
+      'the shared themed scrim replaces the dead bg-black/85 fill',
+    );
+  });
+
+  it('renders nothing while closed', () => {
+    const closed = renderToStaticMarkup(
+      React.createElement(WarpAudioProcessorModal, {
+        isOpen: false,
+        onClose: noop,
+        clips: [readyClip],
+        selectedClipId: 'clip-warp',
+        onUpdateClip: noop,
+      }),
+    );
+    assert.equal(closed, '');
+  });
+});

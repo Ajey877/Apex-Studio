@@ -106,22 +106,36 @@ export const WarpAudioProcessorModal: React.FC<WarpAudioProcessorModalProps> = (
   };
 
   return (
-    <ModalFrame id="fl-warp-processor-modal" labelledBy="fl-warp-processor-modal-title" onClose={onClose} className="fixed inset-0 bg-black/85 backdrop-blur-md z-50 flex items-center justify-center p-3 sm:p-4 select-none">
-      <div className="bg-[#121215] border border-[#00ff88]/40 rounded-xl w-full max-w-4xl shadow-2xl overflow-hidden text-[#b0b0b0] flex flex-col max-h-[92vh]">
+    <ModalFrame id="fl-warp-processor-modal" labelledBy="fl-warp-processor-modal-title" onClose={onClose} className="fixed inset-0 backdrop-blur-md z-50 flex items-center justify-center p-3 sm:p-4 select-none">
+      {/* UI-03N: every chrome surface, border, text and interaction state below
+          consumes the existing `--apex-*` semantic tokens. The processor's
+          green identity (tile, panel edge, target read-out, behaviour summary,
+          pitch read-out and the primary CTAs) stays on `--apex-success`, the
+          playback-rate read-out keeps cyan on `--apex-cyan-text`, and the
+          NOT-SELECTED / NO-CLIP / LENGTH-NOT-PRESERVED qualifiers keep their
+          warning amber on `--apex-gold`. The dead `bg-black/85` scrim is gone
+          — ModalFrame supplies the shared themed `--apex-modal-overlay`.
+
+          The auditioning state fill moves from a fixed `bg-white` to
+          `--apex-text` with `--apex-state-playing-fg` on-colour, which keeps
+          the high-contrast "preview is running" reading in both palettes
+          (near-black on near-white in Dark, near-white on near-black in
+          Light) instead of a white fill that stays white in Light. */}
+      <div className="bg-[var(--apex-surface)] border border-[color-mix(in_srgb,var(--apex-success)_40%,transparent)] rounded-xl w-full max-w-4xl shadow-2xl overflow-hidden text-[var(--apex-text-2)] flex flex-col max-h-[92vh]">
         {/* Header */}
-        <div className="px-5 py-3.5 bg-[#18181c] border-b border-[#2e2e34] flex items-center justify-between">
+        <div className="px-5 py-3.5 bg-[var(--apex-panel-header)] border-b border-[var(--apex-border)] flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-[#00ff88] to-[#00aa55] flex items-center justify-center text-black shadow-md font-bold">
+            <div className="w-8 h-8 rounded-lg bg-[var(--apex-success)] flex items-center justify-center text-[var(--apex-state-playing-fg)] shadow-md font-bold">
               <Zap className="w-5 h-5" />
             </div>
             <div>
               <div className="flex items-center gap-2">
-                <h2 id="fl-warp-processor-modal-title" className="text-sm font-bold text-white tracking-wide">AUDIO CLIP PITCH &amp; PLAYBACK RATE</h2>
-                <span className="px-1.5 py-0.5 rounded text-[9px] font-mono font-bold bg-[#ffaa00]/20 text-[#ffaa00] border border-[#ffaa00]/40">
+                <h2 id="fl-warp-processor-modal-title" className="text-sm font-bold text-[var(--apex-text)] tracking-wide">AUDIO CLIP PITCH &amp; PLAYBACK RATE</h2>
+                <span className="px-1.5 py-0.5 rounded text-[9px] font-mono font-bold bg-[color-mix(in_srgb,var(--apex-gold)_20%,transparent)] text-[var(--apex-text)] border border-[color-mix(in_srgb,var(--apex-gold)_40%,transparent)]">
                   REPITCH — LENGTH NOT PRESERVED
                 </span>
               </div>
-              <p className="text-[10px] text-[#777]">
+              <p className="text-[10px] text-[var(--apex-text-3)]">
                 {targetClip ? `Editing "${targetClip.name}"` : 'No audio clip selected'}
               </p>
             </div>
@@ -131,8 +145,8 @@ export const WarpAudioProcessorModal: React.FC<WarpAudioProcessorModalProps> = (
             <button
               onClick={handleAuditionWarp}
               disabled={!targetClip}
-              className={`px-3 py-1 text-black font-bold text-xs rounded transition flex items-center gap-1.5 shadow disabled:opacity-40 ${
-                isAuditioning ? 'bg-white' : 'bg-[#00ff88] hover:bg-[#33ff9f]'
+              className={`px-3 py-1 text-[var(--apex-state-playing-fg)] font-bold text-xs rounded transition flex items-center gap-1.5 shadow disabled:opacity-40 ${
+                isAuditioning ? 'bg-[var(--apex-text)]' : 'bg-[var(--apex-success)] hover:bg-[color-mix(in_srgb,var(--apex-success)_82%,var(--apex-text))]'
               }`}
             >
               <Play className="w-3.5 h-3.5" />
@@ -142,7 +156,7 @@ export const WarpAudioProcessorModal: React.FC<WarpAudioProcessorModalProps> = (
             <button
               onClick={onClose}
               aria-label="Close warp processor"
-              className="text-[#777] hover:text-white p-1 rounded hover:bg-[#222226] transition"
+              className="text-[var(--apex-text-3)] hover:text-[var(--apex-text)] p-1 rounded hover:bg-[var(--apex-state-hover)] transition"
             >
               <X className="w-5 h-5" />
             </button>
@@ -151,61 +165,61 @@ export const WarpAudioProcessorModal: React.FC<WarpAudioProcessorModalProps> = (
 
         {/* Toast */}
         {statusMessage && (
-          <div className="bg-[#00ff88] text-black font-bold text-xs px-4 py-1.5 flex items-center justify-between shadow-md">
+          <div className="bg-[var(--apex-success)] text-[var(--apex-state-playing-fg)] font-bold text-xs px-4 py-1.5 flex items-center justify-between shadow-md">
             <div className="flex items-center gap-1.5">
               <Sparkles className="w-4 h-4" />
               <span>{statusMessage}</span>
             </div>
-            <button onClick={() => setStatusMessage(null)} className="text-black/80 hover:text-black">✕</button>
+            <button onClick={() => setStatusMessage(null)} aria-label="Dismiss status message" className="text-[var(--apex-state-playing-fg)] hover:text-[var(--apex-state-playing-fg)]">✕</button>
           </div>
         )}
 
         {/* Modal Body */}
         <div className="p-5 overflow-y-auto custom-scrollbar space-y-4">
           {/* Target: the clip this tool will actually change. */}
-          <div className="bg-[#18181c] p-3 rounded-xl border border-[#28282e]">
+          <div className="bg-[var(--apex-surface-2)] p-3 rounded-xl border border-[var(--apex-border)]">
             <div className="flex items-center justify-between text-xs">
-              <span className="text-white font-bold uppercase tracking-wider">TARGET CLIP</span>
+              <span className="text-[var(--apex-text)] font-bold uppercase tracking-wider">TARGET CLIP</span>
               {targetClip ? (
-                <span className="text-[10px] font-mono text-[#00ff88]">
+                <span className="text-[10px] font-mono text-[var(--apex-success)]">
                   {targetClip.name} · bar {targetClip.startBar} · {targetClip.lengthBars} bar{targetClip.lengthBars === 1 ? '' : 's'}
                 </span>
               ) : (
-                <span className="text-[10px] font-mono text-[#ffaa00]">NOTHING SELECTED</span>
+                <span className="text-[10px] font-mono text-[var(--apex-gold)]">NOTHING SELECTED</span>
               )}
             </div>
           </div>
 
           {!targetClip && (
-            <div className="bg-[#0a0a0c] border border-[#ffaa00]/40 rounded-xl px-4 py-3">
-              <span className="text-[11px] font-mono font-bold text-[#ffaa00] uppercase tracking-wider block mb-1">
+            <div className="bg-[var(--apex-canvas)] border border-[color-mix(in_srgb,var(--apex-gold)_40%,transparent)] rounded-xl px-4 py-3">
+              <span className="text-[11px] font-mono font-bold text-[var(--apex-gold)] uppercase tracking-wider block mb-1">
                 NO AUDIO CLIP TO WARP
               </span>
-              <span className="text-[11px] text-[#888]">{blocker}</span>
+              <span className="text-[11px] text-[var(--apex-text-2)]">{blocker}</span>
             </div>
           )}
 
           {/* What is and is not implemented. */}
-          <div className="bg-[#0a0a0c] border border-[#ffaa00]/40 rounded-lg px-3 py-2 flex items-center justify-between gap-2">
-            <span className="text-[10px] font-mono font-bold text-[#ffaa00] uppercase tracking-wider">
+          <div className="bg-[var(--apex-canvas)] border border-[color-mix(in_srgb,var(--apex-gold)_40%,transparent)] rounded-lg px-3 py-2 flex items-center justify-between gap-2">
+            <span className="text-[10px] font-mono font-bold text-[var(--apex-gold)] uppercase tracking-wider">
               PITCH AND RATE ONLY — LENGTH IS NOT PRESERVED
             </span>
-            <span className="text-[10px] text-[#777] whitespace-nowrap">NO LENGTH-PRESERVING STRETCH</span>
+            <span className="text-[10px] text-[var(--apex-text-3)] whitespace-nowrap">NO LENGTH-PRESERVING STRETCH</span>
           </div>
 
           {/* Implemented controls */}
-          <div className="bg-[#18181c] p-4 rounded-xl border border-[#28282e] space-y-4">
+          <div className="bg-[var(--apex-surface-2)] p-4 rounded-xl border border-[var(--apex-border)] space-y-4">
             <div className="flex items-center justify-between">
-              <span className="text-xs font-bold text-white uppercase">PITCH &amp; SPEED (APPLIED TO THIS CLIP)</span>
-              <span className="text-[10px] font-mono text-[#00ff88]">{WARP_BEHAVIOUR_SUMMARY}</span>
+              <span className="text-xs font-bold text-[var(--apex-text)] uppercase">PITCH &amp; SPEED (APPLIED TO THIS CLIP)</span>
+              <span className="text-[10px] font-mono text-[var(--apex-success)]">{WARP_BEHAVIOUR_SUMMARY}</span>
             </div>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
               {/* Pitch Shift */}
-              <div className="bg-[#121214] p-3 rounded-lg border border-[#242428] space-y-1.5">
+              <div className="bg-[var(--apex-canvas)] p-3 rounded-lg border border-[var(--apex-border)] space-y-1.5">
                 <div className="flex justify-between text-xs">
-                  <span className="text-white font-bold">PITCH OFFSET</span>
-                  <span className="text-[#00ff88] font-mono font-bold">{pitchSemitones > 0 ? `+${pitchSemitones}` : pitchSemitones} st</span>
+                  <span className="text-[var(--apex-text)] font-bold">PITCH OFFSET</span>
+                  <span className="text-[var(--apex-success)] font-mono font-bold">{pitchSemitones > 0 ? `+${pitchSemitones}` : pitchSemitones} st</span>
                 </div>
                 <input
                   type="range"
@@ -214,16 +228,16 @@ export const WarpAudioProcessorModal: React.FC<WarpAudioProcessorModalProps> = (
                   value={pitchSemitones}
                   disabled={!targetClip}
                   onChange={(e) => setPitchSemitones(Number(e.target.value))}
-                  className="w-full accent-[#00ff88] disabled:opacity-40"
+                  className="w-full accent-[var(--apex-success)] disabled:opacity-40"
                 />
-                <span className="text-[9px] text-[#666] block">Detunes the clip without changing its length.</span>
+                <span className="text-[9px] text-[var(--apex-text-3)] block">Detunes the clip without changing its length.</span>
               </div>
 
               {/* Stretch Rate */}
-              <div className="bg-[#121214] p-3 rounded-lg border border-[#242428] space-y-1.5">
+              <div className="bg-[var(--apex-canvas)] p-3 rounded-lg border border-[var(--apex-border)] space-y-1.5">
                 <div className="flex justify-between text-xs">
-                  <span className="text-white font-bold">PLAYBACK RATE</span>
-                  <span className="text-[#00e5ff] font-mono font-bold">{stretchRate.toFixed(2)}x</span>
+                  <span className="text-[var(--apex-text)] font-bold">PLAYBACK RATE</span>
+                  <span className="text-[var(--apex-cyan-text)] font-mono font-bold">{stretchRate.toFixed(2)}x</span>
                 </div>
                 <input
                   type="range"
@@ -233,9 +247,9 @@ export const WarpAudioProcessorModal: React.FC<WarpAudioProcessorModalProps> = (
                   value={stretchRate}
                   disabled={!targetClip}
                   onChange={(e) => setStretchRate(Number(e.target.value))}
-                  className="w-full accent-[#00e5ff] disabled:opacity-40"
+                  className="w-full accent-[var(--apex-cyan)] disabled:opacity-40"
                 />
-                <span className="text-[9px] text-[#666] block">
+                <span className="text-[9px] text-[var(--apex-text-3)] block">
                   Speeds the clip up or slows it down. Pitch rides with the rate: slower is lower.
                 </span>
               </div>
@@ -244,21 +258,21 @@ export const WarpAudioProcessorModal: React.FC<WarpAudioProcessorModalProps> = (
         </div>
 
         {/* Footer */}
-        <div className="px-5 py-3.5 bg-[#18181c] border-t border-[#2e2e34] flex items-center justify-between text-xs">
-          <span className="text-[10px] text-[#666]">
+        <div className="px-5 py-3.5 bg-[var(--apex-panel-header)] border-t border-[var(--apex-border)] flex items-center justify-between text-xs">
+          <span className="text-[10px] text-[var(--apex-text-3)]">
             Applies to live playback and WAV export
           </span>
           <div className="flex items-center gap-2">
             <button
               onClick={onClose}
-              className="px-3 py-1.5 bg-[#25252a] hover:bg-[#333338] text-white rounded font-bold transition"
+              className="px-3 py-1.5 bg-[var(--apex-surface-3)] hover:bg-[color-mix(in_srgb,var(--apex-surface-3)_85%,var(--apex-text))] text-[var(--apex-text)] font-bold rounded transition"
             >
               Cancel
             </button>
             <button
               onClick={handleApplyWarp}
               disabled={!targetClip}
-              className="px-4 py-1.5 bg-[#00ff88] hover:bg-[#33ff9f] disabled:opacity-40 disabled:hover:bg-[#00ff88] text-black font-bold rounded transition shadow flex items-center gap-1.5"
+              className="px-4 py-1.5 bg-[var(--apex-success)] hover:bg-[color-mix(in_srgb,var(--apex-success)_82%,var(--apex-text))] disabled:opacity-40 disabled:hover:bg-[var(--apex-success)] text-[var(--apex-state-playing-fg)] font-bold rounded transition shadow flex items-center gap-1.5"
             >
               <Check className="w-4 h-4" />
               <span>Apply to Clip</span>
