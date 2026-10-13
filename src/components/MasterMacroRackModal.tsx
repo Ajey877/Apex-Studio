@@ -108,29 +108,46 @@ export const MasterMacroRackModal: React.FC<MasterMacroRackModalProps> = ({
   };
 
   return (
-    <ModalFrame id="fl-master-macro-modal" labelledBy="fl-master-macro-modal-title" onClose={onClose} className="fixed inset-0 bg-black/85 backdrop-blur-md z-50 flex items-center justify-center p-3 sm:p-4 select-none">
-      <div className="bg-[#121215] border border-[#00ff88]/40 rounded-xl w-full max-w-4xl shadow-2xl overflow-hidden text-[#b0b0b0] flex flex-col max-h-[92vh]">
+    <ModalFrame id="fl-master-macro-modal" labelledBy="fl-master-macro-modal-title" onClose={onClose} className="fixed inset-0 backdrop-blur-md z-50 flex items-center justify-center p-3 sm:p-4 select-none">
+      {/* UI-03M: every chrome surface, border, text and interaction state below
+          consumes the existing `--apex-*` semantic tokens. The rack's green
+          identity is kept through `--apex-success` (the token the compatibility
+          layer already resolved `#00ff88` text to), the curve chip's cyan
+          readout through `--apex-cyan-text`, and the mapping MAX ceiling stays
+          green. The dead `bg-black/85` scrim is gone — ModalFrame supplies the
+          shared themed `--apex-modal-overlay`.
+
+          `macro.color` is *persisted project data* (`ProjectState.macroKnobs[].color`),
+          the same category UI-03A explicitly preserves for `ch.color` and
+          `PAD_COLORS`, so it is left exactly as stored and still paints the
+          value arc, the selected-card border, the range accent and the mapping
+          swatch. It is no longer used as a 10px text colour: a stored neon
+          identity hue cannot clear AA on the Light palette (`#00e5ff` on
+          `--apex-surface-3` measures 1.30:1), so those two labels use
+          `--apex-text`. Selection additionally carries a themed
+          `--apex-accent-strong` ring, so it never depends on a data colour. */}
+      <div className="bg-[var(--apex-surface)] border border-[color-mix(in_srgb,var(--apex-success)_40%,transparent)] rounded-xl w-full max-w-4xl shadow-2xl overflow-hidden text-[var(--apex-text-2)] flex flex-col max-h-[92vh]">
         {/* Header */}
-        <div className="px-5 py-3.5 bg-[#18181c] border-b border-[#2e2e34] flex items-center justify-between">
+        <div className="px-5 py-3.5 bg-[var(--apex-panel-header)] border-b border-[var(--apex-border)] flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-[#00ff88] to-[#00aa55] flex items-center justify-center text-black shadow-md font-bold">
+            <div className="w-8 h-8 rounded-lg bg-[var(--apex-success)] flex items-center justify-center text-[var(--apex-state-playing-fg)] shadow-md font-bold">
               <Sliders className="w-5 h-5" />
             </div>
             <div>
               <div className="flex items-center gap-2">
-                <h2 id="fl-master-macro-modal-title" className="text-sm font-bold text-white tracking-wide">MASTER MACRO PERFORMANCE RACK</h2>
-                <span className="px-1.5 py-0.5 rounded text-[9px] font-mono font-bold bg-[#00ff88]/20 text-[#00ff88] border border-[#00ff88]/40">
+                <h2 id="fl-master-macro-modal-title" className="text-sm font-bold text-[var(--apex-text)] tracking-wide">MASTER MACRO PERFORMANCE RACK</h2>
+                <span className="px-1.5 py-0.5 rounded text-[9px] font-mono font-bold bg-[color-mix(in_srgb,var(--apex-success)_20%,transparent)] text-[var(--apex-text)] border border-[color-mix(in_srgb,var(--apex-success)_40%,transparent)]">
                   MULTI-TARGET MATRIX
                 </span>
               </div>
-              <p className="text-[10px] text-[#777]">Map single rotary macro controllers to multiple filter cutoffs, wet levels, and dynamic sweeps</p>
+              <p className="text-[10px] text-[var(--apex-text-3)]">Map single rotary macro controllers to multiple filter cutoffs, wet levels, and dynamic sweeps</p>
             </div>
           </div>
 
           <div className="flex items-center gap-2">
             <button
               onClick={handleAddMacro}
-              className="px-3 py-1 bg-[#00ff88] hover:bg-[#33ff9f] text-black font-bold text-xs rounded transition flex items-center gap-1.5 shadow"
+              className="px-3 py-1 bg-[var(--apex-success)] hover:bg-[color-mix(in_srgb,var(--apex-success)_82%,var(--apex-text))] text-[var(--apex-state-playing-fg)] font-bold text-xs rounded transition flex items-center gap-1.5 shadow"
             >
               <Plus className="w-3.5 h-3.5" />
               <span>Add Macro</span>
@@ -139,7 +156,7 @@ export const MasterMacroRackModal: React.FC<MasterMacroRackModalProps> = ({
             <button
               onClick={onClose}
               aria-label="Close macro rack"
-              className="text-[#777] hover:text-white p-1 rounded hover:bg-[#222226] transition"
+              className="text-[var(--apex-text-3)] hover:text-[var(--apex-text)] p-1 rounded hover:bg-[var(--apex-state-hover)] transition"
             >
               <X className="w-5 h-5" />
             </button>
@@ -156,21 +173,21 @@ export const MasterMacroRackModal: React.FC<MasterMacroRackModalProps> = ({
                 <div
                   key={macro.id}
                   onClick={() => setSelectedMacroId(macro.id)}
-                  style={{ borderColor: isSelected ? macro.color : '#28282e' }}
+                  style={{ borderColor: isSelected ? macro.color : 'var(--apex-border)' }}
                   className={`p-3.5 rounded-xl border-2 cursor-pointer transition flex flex-col items-center justify-between text-center space-y-3 ${
-                    isSelected ? 'bg-[#18181f] ring-2 ring-white/10 shadow-lg' : 'bg-[#141417] hover:border-[#444]'
+                    isSelected ? 'bg-[var(--apex-surface-3)] ring-2 ring-[var(--apex-accent-strong)] shadow-lg' : 'bg-[var(--apex-surface-2)] hover:border-[var(--apex-grid-line-strong)]'
                   }`}
                 >
                   <div className="w-full flex items-center justify-between text-[10px] font-bold font-mono">
-                    <span style={{ color: macro.color }}>{macro.mappings.length} MAPPINGS</span>
-                    <span className="text-white">{(macro.value * 100).toFixed(0)}%</span>
+                    <span className="text-[var(--apex-text-3)]">{macro.mappings.length} MAPPINGS</span>
+                    <span className="text-[var(--apex-text)]">{(macro.value * 100).toFixed(0)}%</span>
                   </div>
 
                   {/* Circular Rotary Slider Knob */}
                   <div className="relative w-20 h-20 flex items-center justify-center">
                     <svg className="w-full h-full -rotate-90" viewBox="0 0 36 36">
                       <path
-                        className="text-[#25252b]"
+                        className="text-[var(--apex-grid-line-strong)]"
                         strokeWidth="3.5"
                         stroke="currentColor"
                         fill="none"
@@ -185,7 +202,7 @@ export const MasterMacroRackModal: React.FC<MasterMacroRackModalProps> = ({
                         d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831"
                       />
                     </svg>
-                    <span className="absolute text-xs font-mono font-bold text-white">
+                    <span className="absolute text-xs font-mono font-bold text-[var(--apex-text)]">
                       {(macro.value * 100).toFixed(0)}
                     </span>
                   </div>
@@ -201,7 +218,7 @@ export const MasterMacroRackModal: React.FC<MasterMacroRackModalProps> = ({
                     style={{ accentColor: macro.color }}
                   />
 
-                  <span className="text-[11px] font-bold text-white tracking-wide truncate w-full">
+                  <span className="text-[11px] font-bold text-[var(--apex-text)] tracking-wide truncate w-full">
                     {macro.name}
                   </span>
                 </div>
@@ -211,14 +228,14 @@ export const MasterMacroRackModal: React.FC<MasterMacroRackModalProps> = ({
 
           {/* Macro Mapping Matrix List for Selected Knob */}
           {currentMacro && (
-            <div className="bg-[#18181c] p-4 rounded-xl border border-[#28282e] space-y-3">
+            <div className="bg-[var(--apex-panel-header)] p-4 rounded-xl border border-[var(--apex-border)] space-y-3">
               <div className="flex items-center justify-between">
                 <div>
-                  <span className="text-xs font-bold text-white uppercase flex items-center gap-1.5">
-                    <Settings className="w-3.5 h-3.5 text-[#00ff88]" />
-                    <span>MAPPED DESTINATIONS FOR: <strong style={{ color: currentMacro.color }}>{currentMacro.name}</strong></span>
+                  <span className="text-xs font-bold text-[var(--apex-text)] uppercase flex items-center gap-1.5">
+                    <Settings className="w-3.5 h-3.5 text-[var(--apex-success)]" />
+                    <span>MAPPED DESTINATIONS FOR: <strong className="text-[var(--apex-text)]">{currentMacro.name}</strong></span>
                   </span>
-                  <span className="text-[10px] text-[#777]">Controls all targets below proportionally with custom curves</span>
+                  <span className="text-[10px] text-[var(--apex-text-3)]">Controls all targets below proportionally with custom curves</span>
                 </div>
               </div>
 
@@ -226,18 +243,18 @@ export const MasterMacroRackModal: React.FC<MasterMacroRackModalProps> = ({
                 {currentMacro.mappings.map((mapping, idx) => (
                   <div
                     key={idx}
-                    className="bg-[#121214] p-3 rounded-lg border border-[#26262a] flex flex-wrap items-center justify-between gap-3 text-xs"
+                    className="bg-[var(--apex-canvas)] p-3 rounded-lg border border-[var(--apex-border)] flex flex-wrap items-center justify-between gap-3 text-xs"
                   >
                     <div className="flex items-center gap-2">
                       <div className="w-2 h-2 rounded-full" style={{ backgroundColor: currentMacro.color }} />
-                      <span className="font-bold text-white uppercase">{mapping.targetType.replace('_', ' ')}</span>
-                      <span className="text-[10px] font-mono text-[#888]">→ Track #{mapping.targetId}</span>
+                      <span className="font-bold text-[var(--apex-text)] uppercase">{mapping.targetType.replace('_', ' ')}</span>
+                      <span className="text-[10px] font-mono text-[var(--apex-text-3)]">→ Track #{mapping.targetId}</span>
                     </div>
 
                     <div className="flex items-center gap-3 font-mono text-[10px]">
-                      <span className="text-[#888]">MIN: <strong className="text-white">{mapping.min}</strong></span>
-                      <span className="text-[#888]">MAX: <strong className="text-[#00ff88]">{mapping.max}</strong></span>
-                      <span className="px-1.5 py-0.5 rounded bg-[#222] text-[#00e5ff] uppercase font-bold">
+                      <span className="text-[var(--apex-text-3)]">MIN: <strong className="text-[var(--apex-text)]">{mapping.min}</strong></span>
+                      <span className="text-[var(--apex-text-3)]">MAX: <strong className="text-[var(--apex-success)]">{mapping.max}</strong></span>
+                      <span className="px-1.5 py-0.5 rounded bg-[var(--apex-surface-3)] text-[var(--apex-cyan-text)] uppercase font-bold">
                         {mapping.curve || 'linear'}
                       </span>
                     </div>
@@ -249,11 +266,11 @@ export const MasterMacroRackModal: React.FC<MasterMacroRackModalProps> = ({
         </div>
 
         {/* Footer */}
-        <div className="px-5 py-3.5 bg-[#18181c] border-t border-[#2e2e34] flex items-center justify-between text-xs">
-          <span className="text-[10px] text-[#666]">Macro Automation Dispatcher Active</span>
+        <div className="px-5 py-3.5 bg-[var(--apex-panel-header)] border-t border-[var(--apex-border)] flex items-center justify-between text-xs">
+          <span className="text-[10px] text-[var(--apex-text-3)]">Macro Automation Dispatcher Active</span>
           <button
             onClick={onClose}
-            className="px-4 py-1.5 bg-[#00ff88] hover:bg-[#33ff9f] text-black font-bold rounded transition shadow flex items-center gap-1.5"
+            className="px-4 py-1.5 bg-[var(--apex-success)] hover:bg-[color-mix(in_srgb,var(--apex-success)_82%,var(--apex-text))] text-[var(--apex-state-playing-fg)] font-bold rounded transition shadow flex items-center gap-1.5"
           >
             <Check className="w-4 h-4" />
             <span>Done</span>
