@@ -1,4 +1,4 @@
-import { beatsPerBar, stepsPerBar, stepsToBeats, beatsToSeconds, SIXTEENTH_STEPS_PER_BEAT, LEGACY_TIME_SIGNATURE, resolveProjectTimeSignature, type TimeSignature } from '../music/musicalTime';
+import { beatsPerBar, stepsPerBar, stepsToBeats, beatsToSeconds, secondsToBeats, SIXTEENTH_STEPS_PER_BEAT, LEGACY_TIME_SIGNATURE, resolveProjectTimeSignature, type TimeSignature } from '../music/musicalTime';
 import { DEFAULT_SEVEN_EIGHT_GROUPING, isSevenEightGrouping, resolveMeterPulseLayout, resolveMetronomeClickLevel, type MeterPulseLayout, type SevenEightGrouping } from '../music/meterPulse';
 import { captureBarNumbers, planCountInCapturePosition, resolveCountInBars, type CountInBars } from '../music/countIn';
 import { CountInCancelledError, CountInScheduler, type CountInClickHandle, type CountInResult } from './countInScheduler';
@@ -82,12 +82,15 @@ const isLegacyMeter = (meter: TimeSignature): boolean => meter[0] === 4 && meter
 export { isRackChannelAudible };
 
 export type MidiEventPayload = {
-  type: 'noteOn' | 'noteOff' | 'cc' | 'pitchBend';
+  type: 'noteOn' | 'noteOff' | 'cc' | 'pitchBend' | 'deviceState';
   note?: number;
   velocity?: number;
   cc?: number;
   value?: number;
   midiChannel?: number;
+  /** For `deviceState` events: the Web MIDI port state (`connected`/`disconnected`). */
+  deviceState?: string;
+  deviceId?: string;
 };
 
 export interface InternalMidiMessageEvent {
@@ -2708,6 +2711,34 @@ class AudioEngine {
       }
     }
     return devices;
+  }
+
+  /**
+   * The recording clock: the AudioContext transport's continuous position,
+   * converted to sixteenth steps through the engine's current (project)
+   * tempo. MIDI recording samples this at message arrival — never from a
+   * React render or a UI handler — so captured timing follows the same
+   * clock that schedules playback.
+   */
+  public getTransportMusicalPosition(): {
+    bpm: number;
+    playing: boolean;
+    positionSeconds: number;
+    positionSteps: number;
+    step: number;
+    bar: number;
+  } {
+    const bpm = Number.isFinite(this.bpm) && this.bpm > 0 ? this.bpm : 120;
+    const state = this.transport?.getState();
+    const positionSeconds = state ? Math.max(0, state.positionSeconds) : 0;
+    return {
+      bpm,
+      playing: state?.playing ?? false,
+      positionSeconds,
+      positionSteps: secondsToBeats(positionSeconds, bpm) * SIXTEENTH_STEPS_PER_BEAT,
+      step: state?.step ?? 0,
+      bar: state?.bar ?? 1,
+    };
   }
 
   public addMidiListener(listener: (e: MidiEventPayload) => void) {
