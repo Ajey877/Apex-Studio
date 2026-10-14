@@ -32,6 +32,7 @@ import {
 import { audioEngine, type MidiEventPayload, type PlaybackStateUpdate } from './audio/audioEngine';
 import { MidiCcMappingRuntime, MidiNoteInputRuntime, isRackChannelAudible } from './audio/midiMappingRuntime';
 import { MidiPerformanceRecorder, appendRecordedNotesToChannelInProjectState } from './audio/midiRecording';
+import { VirtualMidiInputBridge } from './audio/virtualMidiInput';
 import { 
   DEFAULT_PROJECT, 
   createDefaultMixerTracks, 
@@ -198,6 +199,19 @@ export function App() {
   if (midiRecorderRef.current === null) {
     midiRecorderRef.current = new MidiPerformanceRecorder({
       createNoteId: sequence => `midi-rec-${Date.now()}-${midiNoteIdCounterRef.current++}-${sequence}`,
+    });
+  }
+  // Live instrument monitor for the virtual-input bridge (the same runtime the
+  // hardware path drives). Populated inside the MIDI effect below.
+  const midiNoteRuntimeRef = useRef<MidiNoteInputRuntime | null>(null);
+  // Shared virtual-input bridge: routes on-screen note controls through the same
+  // normalized event path the recorder consumes. Lazily created once.
+  const virtualMidiInputRef = useRef<VirtualMidiInputBridge | null>(null);
+  if (virtualMidiInputRef.current === null) {
+    virtualMidiInputRef.current = new VirtualMidiInputBridge({
+      getLiveMonitor: () => midiNoteRuntimeRef.current,
+      getRecorder: () => midiRecorderRef.current,
+      getClock: () => audioEngine.getTransportMusicalPosition(),
     });
   }
   const finalizeMidiRecordingRef = useRef<(() => void) | null>(null);
@@ -1008,6 +1022,9 @@ export function App() {
       },
     });
 
+    // Expose the live monitor to the virtual-input bridge (created once above).
+    midiNoteRuntimeRef.current = midiNoteRuntime;
+
     const handleMidiMessage = (event: MidiEventPayload) => {
       if (event.type === 'deviceState') {
         if (event.deviceState === 'disconnected') {
@@ -1034,6 +1051,7 @@ export function App() {
     return () => {
       midiRecorderRef.current?.cancel();
       midiNoteRuntime.releaseAllNotes();
+      midiNoteRuntimeRef.current = null;
       audioEngine.removeMidiListener(handleMidiMessage);
     };
   }, []);
@@ -2327,6 +2345,7 @@ export function App() {
               midiRecordingTargetLabel={midiRecordingTargetLabel ?? `${selectedChannel.name} · ${getSelectedPattern(projectState)?.name ?? 'Pattern'}`}
               midiRecordedNoteCount={midiRecordedNoteCount}
               onToggleMidiRecording={handleToggleMidiRecording}
+              virtualMidiInput={virtualMidiInputRef.current ?? undefined}
               onCreateChannelFromMidiImport={handleCreateChannelFromMidiImport}
               timeSignature={projectState.meta.timeSignature}
               sevenEightGrouping={projectState.meta.sevenEightGrouping}

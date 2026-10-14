@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { 
   Pencil, 
   Paintbrush, 
@@ -25,6 +25,7 @@ import {
 } from 'lucide-react';
 import { Channel, Note, MusicalScale, ChordStampType } from '../types/daw';
 import { audioEngine } from '../audio/audioEngine';
+import type { VirtualMidiInputBridge } from '../audio/virtualMidiInput';
 import { MidiParser } from '../utils/midiParser';
 import { quantizeDurationSteps } from '../music/noteDurationPolicy';
 import { resolveProjectTimeSignature } from '../music/musicalTime';
@@ -154,6 +155,13 @@ interface PianoRollProps {
   midiRecordingTargetLabel?: string;
   midiRecordedNoteCount?: number;
   onToggleMidiRecording?: () => void;
+  /**
+   * Virtual-input bridge. When supplied, the on-screen piano keys route their
+   * note-on/note-off through the same normalized event path the hardware MIDI
+   * recorder consumes, so a take captures them. When absent (e.g. isolated
+   * tests) the keys fall back to the legacy direct audition. Always optional.
+   */
+  virtualMidiInput?: VirtualMidiInputBridge;
 }
 
 /**
@@ -247,7 +255,8 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
   midiRecordingActive,
   midiRecordingTargetLabel,
   midiRecordedNoteCount,
-  onToggleMidiRecording
+  onToggleMidiRecording,
+  virtualMidiInput
 }) => {
   const [currentTool, setCurrentTool] = useState<ToolType>('select');
   const [rootKey, setRootKey] = useState<number>(0); // C
@@ -350,15 +359,76 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
     return scaleOffsets.includes(relPitch);
   };
 
-  const handleAuditionKey = (pitch: number) => {
-    audioEngine.playNote(channel, {
-      id: `aud-${pitch}`,
-      pitch,
-      start: 0,
-      duration: 1.5,
-      velocity: 0.9
-    });
-  };
+  // Virtual piano-key pointer tracking. Each active pointer (mouse button, touch
+  // contact, pen) is mapped to the pitch it is holding so release/cancel always
+  // resolves to the right note — even when several keys are held at once.
+  const activeAuditionPointers = useRef<Map<number, { pitch: number; midiChannel: number }>>(
+    new Map(),
+  );
+  const AUDITION_VELOCITY = 0.9;
+  const AUDITION_MIDI_CHANNEL = 1;
+
+  // Routes a key press through the virtual-input bridge (live monitor + recorder
+  // when armed) — or, with no bridge present, the legacy direct audition. Used by
+  // both the key's pointer handler and the window safety-net below.
+  const auditionNoteOn = useCallback(
+    (pitch: number, pointerId: number) => {
+      if (activeAuditionPointers.current.has(pointerId)) return; // already down
+      activeAuditionPointers.current.set(pointerId, {
+        pitch,
+        midiChannel: AUDITION_MIDI_CHANNEL,
+      });
+      if (virtualMidiInput) {
+        virtualMidiInput.noteOn(pitch, {
+          velocity: AUDITION_VELOCITY,
+          midiChannel: AUDITION_MIDI_CHANNEL,
+        });
+      } else {
+        // Legacy fallback kept for isolated tests: a fixed 1.5-step audition blip.
+        audioEngine.playNote(channel, {
+          id: `aud-${pitch}`,
+          pitch,
+          start: 0,
+          duration: 1.5,
+          velocity: AUDITION_VELOCITY,
+        });
+      }
+    },
+    [virtualMidiInput, channel],
+  );
+
+  const auditionNoteOff = useCallback(
+    (pointerId: number) => {
+      const entry = activeAuditionPointers.current.get(pointerId);
+      if (!entry) return; // only release notes this editor opened
+      activeAuditionPointers.current.delete(pointerId);
+      if (virtualMidiInput) {
+        virtualMidiInput.noteOff(entry.pitch, { midiChannel: entry.midiChannel });
+      }
+    },
+    [virtualMidiInput],
+  );
+
+  // Safety net: release a held key if its pointer is released/cancelled anywhere
+  // (pointer capture can fail on synthetic events, or the release lands outside
+  // the key). Keyed by pointerId so a multi-touch release never cuts a sibling
+  // key that is still held. Also releases everything on unmount to avoid stuck
+  // voices/notes if the editor is closed mid-hold.
+  useEffect(() => {
+    if (!virtualMidiInput) return;
+    const release = (pointerId: number) => auditionNoteOff(pointerId);
+    const onPointerUp = (event: PointerEvent) => release(event.pointerId);
+    const onPointerCancel = (event: PointerEvent) => release(event.pointerId);
+    window.addEventListener('pointerup', onPointerUp);
+    window.addEventListener('pointercancel', onPointerCancel);
+    return () => {
+      window.removeEventListener('pointerup', onPointerUp);
+      window.removeEventListener('pointercancel', onPointerCancel);
+      for (const pointerId of [...activeAuditionPointers.current.keys()]) {
+        auditionNoteOff(pointerId);
+      }
+    };
+  }, [virtualMidiInput, auditionNoteOff]);
 
   const handleGridClick = (pitch: number, step: number) => {
     if (didMarqueeDragRef.current) {
@@ -1448,11 +1518,20 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
               <button
                 key={pitch}
                 id={`piano-key-${pitch}`}
-                onMouseDown={() => handleAuditionKey(pitch)}
-                onTouchStart={(e) => {
+                onPointerDown={(e) => {
                   e.preventDefault();
-                  handleAuditionKey(pitch);
+                  // Capture the pointer so drag-off-then-release still routes the
+                  // release back to this key (when the browser supports it).
+                  try {
+                    e.currentTarget.setPointerCapture(e.pointerId);
+                  } catch {
+                    /* capture unsupported for this pointer; window net still releases */
+                  }
+                  auditionNoteOn(pitch, e.pointerId);
                 }}
+                onPointerUp={(e) => auditionNoteOff(e.pointerId)}
+                onPointerCancel={(e) => auditionNoteOff(e.pointerId)}
+                style={{ touchAction: 'none' }}
                 className={`h-6 border-b flex items-center justify-between px-1.5 text-[9px] font-mono font-bold transition active:bg-[var(--apex-accent)] active:text-[var(--apex-state-playing-fg)] select-none relative ${
                   isBlack
                     ? 'bg-[var(--apex-piano-key-accidental)] text-[var(--apex-text-3)] border-[var(--apex-grid-line)] hover:bg-[var(--apex-state-hover)]'

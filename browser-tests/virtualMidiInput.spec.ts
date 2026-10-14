@@ -1,0 +1,198 @@
+/**
+ * Virtual MIDI input bridge — phone-sized browser workflow test.
+ *
+ * A user with NO physical/Web-MIDI hardware records a performance using the
+ * on-screen Piano Roll virtual piano keys. The keys route note-on/note-off
+ * through the shared `VirtualMidiInputBridge` into the SAME normalized event
+ * path the hardware recorder consumes, so an armed take captures them.
+ *
+ * This is the real UI path (React pointer handlers -> bridge -> live monitor +
+ * `MidiPerformanceRecorder`, stamped from the AudioContext transport). The
+ * existing midiRecording.spec.ts covers the simulated-hardware path; here we
+ * exercise the virtual-keyboard path specifically.
+ *
+ * Timing is real-time (not pinned to a fake clock), so we assert pitch exactly
+ * and assert structural timing properties (notes are placed inside the pattern,
+ * have positive duration, and are ordered by press time) rather than exact step
+ * numbers.
+ *
+ * Viewport: a phone-sized LANDSCAPE window (844×390). Apex Studio is
+ * landscape-only and shows a full-screen `#fl-orientation-lock-overlay` portrait
+ * lock on narrow/portrait touch viewports; using a landscape phone viewport
+ * honours that production contract instead of disabling it. Touch/pointer
+ * interactions are preserved via pointer events with `pointerType: 'touch'`.
+ */
+import { expect, test, type Page } from '@playwright/test';
+
+const APP_URL = 'http://localhost:3000';
+
+const openPianoRoll = async (page: Page): Promise<void> => {
+  // Landscape phone viewport: width > height and >= 768 keeps the app out of its
+  // portrait orientation-lock state, so nothing intercepts navigation clicks.
+  await page.setViewportSize({ width: 844, height: 390 });
+  await page.goto(APP_URL);
+  await page.waitForSelector('#root > *', { state: 'attached' });
+  // The orientation lock must be absent before we interact (it is a full-screen
+  // overlay that would otherwise intercept pointer events).
+  await expect(page.locator('#fl-orientation-lock-overlay')).toHaveCount(0);
+  await page.waitForTimeout(400);
+  await page.locator('#nav-piano-roll').click();
+  await page.waitForSelector('#piano-key-60', { state: 'visible' });
+};
+
+const armRecording = async (page: Page): Promise<void> => {
+  const toggle = page.getByTestId('midi-record-toggle');
+  await expect(toggle).toBeVisible();
+  await expect(toggle).toHaveAttribute('aria-pressed', 'false');
+  await toggle.click();
+  await expect(toggle).toHaveAttribute('aria-pressed', 'true');
+};
+
+const stopRecording = async (page: Page): Promise<void> => {
+  const toggle = page.getByTestId('midi-record-toggle');
+  await toggle.click();
+  await expect(toggle).toHaveAttribute('aria-pressed', 'false');
+};
+
+// Press a virtual key for `holdMs` using a fresh pointer id, then release it.
+const tapKey = async (
+  page: Page,
+  pitch: number,
+  holdMs: number,
+  pointerId: number,
+): Promise<void> => {
+  const sel = `#piano-key-${pitch}`;
+  // Ensure the key is in the scrollable strip's viewport before dispatching.
+  await page.locator(sel).scrollIntoViewIfNeeded();
+  await page.dispatchEvent(sel, 'pointerdown', {
+    pointerId,
+    pointerType: 'touch',
+    isPrimary: true,
+    button: 0,
+    bubbles: true,
+  });
+  await page.waitForTimeout(holdMs);
+  await page.dispatchEvent(sel, 'pointerup', {
+    pointerId,
+    pointerType: 'touch',
+    isPrimary: true,
+    button: 0,
+    bubbles: true,
+  });
+};
+
+const recordedBlocks = (page: Page) => page.locator('[id^="note-block-midi-rec-"]');
+
+interface RecordedNote {
+  id: string;
+  name: string;
+  left: number;
+  width: number;
+}
+
+// Returns the recorded note blocks with their rendered position/size, sorted by
+// start position (left). Sorting explicitly avoids depending on DOM/render order.
+const recordedNotes = async (page: Page): Promise<RecordedNote[]> => {
+  const data = await recordedBlocks(page).evaluateAll((els) =>
+    els.map((el) => {
+      const e = el as HTMLElement;
+      return {
+        id: e.id,
+        name: (e.textContent ?? '').trim(),
+        left: parseFloat(e.style.left) || 0,
+        width: parseFloat(e.style.width) || 0,
+      };
+    }),
+  );
+  return data.sort((a, b) => a.left - b.left);
+};
+
+// Reads the note name a key renders. The key button also renders a decorative
+// root dot (an empty first span) and an "OCT" tag for C notes, so pick the
+// first non-empty, non-"OCT" span rather than the first span blindly.
+const keyName = (page: Page, pitch: number): Promise<string> =>
+  page
+    .locator(`#piano-key-${pitch}`)
+    .evaluate((el) => {
+      const texts = [...el.querySelectorAll('span')]
+        .map((s) => (s.textContent ?? '').trim())
+        .filter((t) => t.length > 0 && t !== 'OCT');
+      return texts[0] ?? '';
+    });
+
+test.describe('Virtual piano keyboard recording (phone viewport)', () => {
+  test('armed take captures tapped virtual keys with the correct pitches', async ({ page }) => {
+    await openPianoRoll(page);
+    await armRecording(page);
+
+    // Press C4 then E4 (distinct pitches), each held briefly.
+    await tapKey(page, 60, 300, 1);
+    await page.waitForTimeout(120);
+    await tapKey(page, 64, 300, 2);
+
+    await stopRecording(page);
+
+    const blocks = recordedBlocks(page);
+    await expect(blocks).toHaveCount(2);
+
+    const notes = await recordedNotes(page);
+    const name60 = await keyName(page, 60);
+    const name64 = await keyName(page, 64);
+
+    // Pitches are deterministic: the take recorded exactly the two keys pressed.
+    expect(new Set(notes.map((n) => n.name))).toEqual(new Set([name60, name64]));
+
+    // Structural timing: both notes sit inside the pattern with a real gate.
+    for (const n of notes) {
+      expect(n.left).toBeGreaterThanOrEqual(0);
+      expect(n.width).toBeGreaterThan(0);
+    }
+    // C4 was pressed before E4, so its start is no later than E4's (ties allowed).
+    const c4 = notes.find((n) => n.name === name60)!;
+    const e4 = notes.find((n) => n.name === name64)!;
+    expect(c4.left).toBeLessThanOrEqual(e4.left);
+  });
+
+  test('simultaneous keys record two overlapping notes with no stuck voices', async ({ page }) => {
+    await openPianoRoll(page);
+    await armRecording(page);
+
+    // Hold two keys at once (different pointer ids), then release together.
+    const sel60 = '#piano-key-60';
+    const sel64 = '#piano-key-64';
+    await page.locator(sel60).scrollIntoViewIfNeeded();
+    await page.locator(sel64).scrollIntoViewIfNeeded();
+    await page.dispatchEvent(sel60, 'pointerdown', { pointerId: 1, pointerType: 'touch', isPrimary: true, button: 0, bubbles: true });
+    await page.dispatchEvent(sel64, 'pointerdown', { pointerId: 2, pointerType: 'touch', isPrimary: true, button: 0, bubbles: true });
+    await page.waitForTimeout(300);
+    await page.dispatchEvent(sel60, 'pointerup', { pointerId: 1, pointerType: 'touch', isPrimary: true, button: 0, bubbles: true });
+    await page.dispatchEvent(sel64, 'pointerup', { pointerId: 2, pointerType: 'touch', isPrimary: true, button: 0, bubbles: true });
+
+    await stopRecording(page);
+
+    const blocks = recordedBlocks(page);
+    // Exactly two notes: no stuck/duplicate voice from the chord.
+    await expect(blocks).toHaveCount(2);
+
+    const notes = await recordedNotes(page);
+    const name60 = await keyName(page, 60);
+    const name64 = await keyName(page, 64);
+    expect(new Set(notes.map((n) => n.name))).toEqual(new Set([name60, name64]));
+
+    // Overlap: the two starts are within one note's gate (both held together).
+    expect(Math.abs(notes[0].left - notes[1].left)).toBeLessThanOrEqual(
+      Math.max(notes[0].width, notes[1].width),
+    );
+  });
+
+  test('virtual keys do NOT record anything unless the take is armed', async ({ page }) => {
+    await openPianoRoll(page);
+    // No arming: just tap keys.
+    await tapKey(page, 60, 200, 1);
+    await tapKey(page, 64, 200, 2);
+    await page.waitForTimeout(200);
+
+    // No recorded note blocks exist without an armed take.
+    await expect(recordedBlocks(page)).toHaveCount(0);
+  });
+});
