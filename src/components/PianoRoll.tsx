@@ -144,6 +144,16 @@ interface PianoRollProps {
   timeSignature?: [number, number];
   /** Phase 1K: `ProjectMetadata.sevenEightGrouping` for 7/8 group lines. */
   sevenEightGrouping?: string;
+  /**
+   * MIDI performance recording: whether a take is running, the explicit
+   * `Channel · Pattern` target it records into (the current selection before
+   * a take starts, the captured target while one runs), and how many notes
+   * the running take has captured. The toggle starts/stops the take.
+   */
+  midiRecordingActive?: boolean;
+  midiRecordingTargetLabel?: string;
+  midiRecordedNoteCount?: number;
+  onToggleMidiRecording?: () => void;
 }
 
 /**
@@ -233,7 +243,11 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
   bpm,
   onCreateChannelFromMidiImport,
   timeSignature,
-  sevenEightGrouping
+  sevenEightGrouping,
+  midiRecordingActive,
+  midiRecordingTargetLabel,
+  midiRecordedNoteCount,
+  onToggleMidiRecording
 }) => {
   const [currentTool, setCurrentTool] = useState<ToolType>('select');
   const [rootKey, setRootKey] = useState<number>(0); // C
@@ -1195,6 +1209,38 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
               ))}
             </select>
           </div>
+
+          <div className="h-4 w-px bg-[var(--apex-border)]" />
+
+          {/* MIDI performance recording into this channel / selected pattern */}
+          {onToggleMidiRecording && (
+            <div className="flex items-center gap-1.5 shrink-0">
+              <button
+                type="button"
+                id="piano-midi-record-btn"
+                data-testid="midi-record-toggle"
+                onClick={onToggleMidiRecording}
+                aria-pressed={Boolean(midiRecordingActive)}
+                aria-label={midiRecordingActive ? 'Stop MIDI recording' : 'Record MIDI performance into the selected pattern'}
+                title={midiRecordingActive ? 'Stop MIDI recording and write the take into the Piano Roll' : 'Record a MIDI keyboard performance into the selected pattern'}
+                className={`flex items-center gap-1 px-2 py-1 rounded text-[10px] font-bold border transition ${
+                  midiRecordingActive
+                    ? 'bg-[var(--apex-danger)] text-[var(--apex-state-playing-fg)] border-[var(--apex-danger)]'
+                    : 'bg-[var(--apex-surface-2)] hover:bg-[var(--apex-state-hover)] text-[var(--apex-text-2)] hover:text-[var(--apex-text)] border-[var(--apex-border)]'
+                }`}
+              >
+                <CircleDot className="w-3 h-3" />
+                <span>{midiRecordingActive ? `Stop MIDI Rec${midiRecordedNoteCount ? ` (${midiRecordedNoteCount})` : ''}` : 'MIDI Rec'}</span>
+              </button>
+              <span
+                data-testid="midi-record-target"
+                className="text-[10px] font-semibold text-[var(--apex-text-3)] whitespace-nowrap"
+                title="Recording target: channel and pattern"
+              >
+                → {midiRecordingTargetLabel}
+              </span>
+            </div>
+          )}
 
           <div className="h-4 w-px bg-[var(--apex-border)]" />
 

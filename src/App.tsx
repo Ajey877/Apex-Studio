@@ -31,6 +31,7 @@ import {
 } from './types/daw';
 import { audioEngine, type MidiEventPayload, type PlaybackStateUpdate } from './audio/audioEngine';
 import { MidiCcMappingRuntime, MidiNoteInputRuntime, isRackChannelAudible } from './audio/midiMappingRuntime';
+import { MidiPerformanceRecorder, appendRecordedNotesToChannelInProjectState } from './audio/midiRecording';
 import { 
   DEFAULT_PROJECT, 
   createDefaultMixerTracks, 
@@ -41,6 +42,7 @@ import { deleteChannelFromProjectState, normalizeProjectState } from './state/pr
 import { reapplyMacroRackOnHydration } from './state/macroMappings';
 import {
   DEFAULT_PATTERN_LENGTH_STEPS,
+  getSelectedPattern,
   getSelectedPatternLengthSteps,
   setPatternLengthStepsInProjectState
 } from './state/patternLength';
@@ -189,6 +191,21 @@ export function App() {
   const [playMode, setPlayMode] = useState<PlayMode>('pat');
   const [isPlaying, setIsPlaying] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
+  // MIDI performance recording (Piano Roll): the recorder instance is the
+  // source of truth for an in-flight take; React state only mirrors it for UI.
+  const midiRecorderRef = useRef<MidiPerformanceRecorder | null>(null);
+  const midiNoteIdCounterRef = useRef(0);
+  if (midiRecorderRef.current === null) {
+    midiRecorderRef.current = new MidiPerformanceRecorder({
+      createNoteId: sequence => `midi-rec-${Date.now()}-${midiNoteIdCounterRef.current++}-${sequence}`,
+    });
+  }
+  const finalizeMidiRecordingRef = useRef<(() => void) | null>(null);
+  const cancelMidiRecordingRef = useRef<(() => void) | null>(null);
+  const toggleMidiRecordingRef = useRef<(() => void) | null>(null);
+  const [isMidiRecording, setIsMidiRecording] = useState(false);
+  const [midiRecordingTargetLabel, setMidiRecordingTargetLabel] = useState<string | null>(null);
+  const [midiRecordedNoteCount, setMidiRecordedNoteCount] = useState(0);
   const [currentStep, setCurrentStep] = useState(0);
   const [currentBar, setCurrentBar] = useState(1);
   const [metronome, setMetronome] = useState(false);
@@ -647,6 +664,9 @@ export function App() {
 
   const handleStop = () => {
     if (audioEngine.isOfflineRenderLeaseHeld()) return;
+    // Stopping the transport finalizes any MIDI take at the pre-stop
+    // position, committing its notes before the playhead resets.
+    finalizeMidiRecordingRef.current?.();
     audioEngine.stop();
     setIsPlaying(false);
     setCurrentStep(0);
@@ -875,6 +895,84 @@ export function App() {
   }, [selectedChannelId]);
 
   /**
+   * MIDI performance recording into the Piano Roll.
+   *
+   * A take targets the channel and pattern selected when recording starts
+   * (shown in the Piano Roll before and during the take). Events are stamped
+   * with the engine's AudioContext transport position at message arrival and
+   * committed — on stop, transport stop, or device disconnect — as ONE
+   * history entry of real `Channel.notes`, so the take undoes/redoes as a
+   * unit and persists like any Piano Roll edit. Live monitoring stays with
+   * `MidiNoteInputRuntime`; this recorder only captures.
+   */
+  const finishMidiRecording = useCallback(() => {
+    const recorder = midiRecorderRef.current;
+    if (!recorder || !recorder.isRecording) return;
+    const target = recorder.activeTarget;
+    const notes = recorder.stop(audioEngine.getTransportMusicalPosition());
+    setIsMidiRecording(false);
+    setMidiRecordingTargetLabel(null);
+    setMidiRecordedNoteCount(0);
+    if (target && notes.length > 0) {
+      mutateProjectStateRef.current(
+        current => appendRecordedNotesToChannelInProjectState(current, target.channelId, notes),
+        'Record MIDI performance',
+      );
+    }
+  }, []);
+
+  const cancelMidiRecording = useCallback(() => {
+    midiRecorderRef.current?.cancel();
+    setIsMidiRecording(false);
+    setMidiRecordingTargetLabel(null);
+    setMidiRecordedNoteCount(0);
+  }, []);
+
+  // Not memoized: it must call the current render's handleTogglePlay/project
+  // snapshot when starting the transport. The ref below republishes it.
+  const toggleMidiRecording = () => {
+    if (audioEngine.isOfflineRenderLeaseHeld()) return;
+    const recorder = midiRecorderRef.current;
+    if (!recorder) return;
+    if (recorder.isRecording) {
+      finishMidiRecording();
+      return;
+    }
+    const state = projectStateRef.current;
+    const channel = state.channels.find(c => c.id === selectedChannelIdRef.current) ?? state.channels[0];
+    const pattern = getSelectedPattern(state);
+    if (!channel || !pattern) return;
+    const started = recorder.start(
+      {
+        channelId: channel.id,
+        patternId: pattern.id,
+        patternLengthSteps: getSelectedPatternLengthSteps(state),
+        bpm: state.meta.bpm,
+      },
+      audioEngine.getTransportMusicalPosition(),
+    );
+    if (!started) return;
+    setMidiRecordingTargetLabel(`${channel.name} · ${pattern.name}`);
+    setMidiRecordedNoteCount(0);
+    setIsMidiRecording(true);
+    // Recording is timed by the running transport: start Pattern playback
+    // when the transport is stopped/paused so positions actually advance.
+    if (!audioEngine.getTransportMusicalPosition().playing) {
+      handleTogglePlay();
+    }
+  };
+
+  useEffect(() => {
+    finalizeMidiRecordingRef.current = finishMidiRecording;
+    cancelMidiRecordingRef.current = cancelMidiRecording;
+    toggleMidiRecordingRef.current = toggleMidiRecording;
+  }, [finishMidiRecording, cancelMidiRecording, toggleMidiRecording]);
+
+  const handleToggleMidiRecording = useCallback(() => {
+    toggleMidiRecordingRef.current?.();
+  }, []);
+
+  /**
    * Phase 46 & Phase 61: make saved MIDI CC mappings control their targets and
    * route hardware MIDI `noteOn`/`noteOff` messages to the active Channel Rack
    * instrument.
@@ -911,12 +1009,30 @@ export function App() {
     });
 
     const handleMidiMessage = (event: MidiEventPayload) => {
+      if (event.type === 'deviceState') {
+        if (event.deviceState === 'disconnected') {
+          // Finalize the take at the disconnect position (held gates are
+          // closed, not left open) and release every live voice so nothing
+          // sustains from a keyboard that is no longer connected.
+          finalizeMidiRecordingRef.current?.();
+          midiNoteRuntime.releaseAllNotes();
+        }
+        return;
+      }
       midiNoteRuntime.handleMidiEvent(event);
+      // Capture alongside live monitoring, stamped with the AudioContext
+      // transport position at message arrival (never render/handler time).
+      const recorder = midiRecorderRef.current;
+      if (recorder?.isRecording) {
+        recorder.handleMidiEvent(event, audioEngine.getTransportMusicalPosition());
+        setMidiRecordedNoteCount(recorder.capturedNoteCount);
+      }
       midiMappingRuntime.handleMidiEvent(event);
     };
 
     audioEngine.addMidiListener(handleMidiMessage);
     return () => {
+      midiRecorderRef.current?.cancel();
       midiNoteRuntime.releaseAllNotes();
       audioEngine.removeMidiListener(handleMidiMessage);
     };
@@ -1008,6 +1124,9 @@ export function App() {
       async () => {
         recordingProjectGenerationRef.current = nextRecordingProjectGeneration(recordingProjectGenerationRef.current);
         await cancelRecordingForReplacementRef.current?.();
+        // An in-flight MIDI take belongs to the outgoing project: discard it
+        // rather than committing its notes into the replacement.
+        cancelMidiRecordingRef.current?.();
         handleStop();
         try {
           const previousProjectState = projectStateRef.current;
@@ -2204,6 +2323,10 @@ export function App() {
               isPlaying={isPlaying}
               patternLengthSteps={selectedPatternLengthSteps}
               bpm={projectState.meta.bpm}
+              midiRecordingActive={isMidiRecording}
+              midiRecordingTargetLabel={midiRecordingTargetLabel ?? `${selectedChannel.name} · ${getSelectedPattern(projectState)?.name ?? 'Pattern'}`}
+              midiRecordedNoteCount={midiRecordedNoteCount}
+              onToggleMidiRecording={handleToggleMidiRecording}
               onCreateChannelFromMidiImport={handleCreateChannelFromMidiImport}
               timeSignature={projectState.meta.timeSignature}
               sevenEightGrouping={projectState.meta.sevenEightGrouping}

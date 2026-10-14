@@ -199,5 +199,42 @@ try {
   pass(`Phase 1I: real 7/8 render + bounce audible (duration=${rendered.duration.toFixed(2)}s, max=${Math.max(renderStats.max, bounceStats.max).toFixed(4)})`);
 } catch(e){ fail('Phase 1I: real 7/8 render and bounce', e); }
 
+// 10. MIDI-recorded performance -> committed Piano Roll notes -> offline export
+// The recorder is fed the same normalized events the engine's MIDI listener
+// dispatches, stamped with deterministic transport steps (120 BPM: 0.125 s
+// per 16th step). The committed channel must render audibly, and a control
+// channel that received no recorded notes must stay silent — proving the
+// recorded gates, not the harness, produce the audio.
+try {
+  audioEngine.setTimeSignature([4,4]);
+  const { MidiPerformanceRecorder, appendRecordedNotesToChannelInProjectState, transportPositionToSteps } = await import('../src/audio/midiRecording.ts');
+  const recorder = new MidiPerformanceRecorder({ createNoteId: s => `node-rec-${s}` });
+  const at = s => ({ positionSteps: transportPositionToSteps(s, 120) });
+  recorder.start({ channelId: 'ch-rec', patternId: 'pat-1', patternLengthSteps: 16, bpm: 120 }, at(0));
+  recorder.handleMidiEvent({ type: 'noteOn', note: 60, velocity: 100 / 127, midiChannel: 1 }, at(0));
+  recorder.handleMidiEvent({ type: 'noteOn', note: 64, velocity: 80 / 127, midiChannel: 1 }, at(0.25));
+  recorder.handleMidiEvent({ type: 'noteOff', note: 60, midiChannel: 1 }, at(0.5));
+  recorder.handleMidiEvent({ type: 'noteOff', note: 64, midiChannel: 1 }, at(0.75));
+  const recordedNotes = recorder.stop(at(0.75));
+  assert(recordedNotes.length === 2, `expected 2 recorded notes, got ${recordedNotes.length}`);
+  assert(recordedNotes[0].start === 0 && recordedNotes[0].duration === 4, `note 1 timing ${JSON.stringify(recordedNotes[0])}`);
+  assert(recordedNotes[1].start === 2 && recordedNotes[1].duration === 4, `note 2 timing ${JSON.stringify(recordedNotes[1])}`);
+
+  const baseChannel = { id:'ch-rec', name:'Recorded Synth', color:'#10b981', instrumentType:'minisynth', mixerTrackId:1, volume:0.9, pan:0, pitch:0, mute:false, solo:false, steps:Array(16).fill(false), notes:[], synthParams: baseSynthParams };
+  const projectLike = { channels: [baseChannel], patterns: [{ id:'pat-1', name:'Pattern 1', color:'#fff', lengthSteps:16 }], selectedPatternId: 'pat-1' };
+  const committed = appendRecordedNotesToChannelInProjectState(projectLike, 'ch-rec', recordedNotes);
+  const recordedChannel = committed.channels[0];
+  assert(recordedChannel.notes.length === 2, 'recorded notes were not committed to the channel');
+
+  const clip = { id:'clip-rec', trackIndex:0, startBar:0, lengthBars:1, type:'pattern', channelId:'ch-rec', color:'#10b981', name:'Recorded Clip' };
+  const withNotes = await audioEngine.renderTimelineOffline([recordedChannel],[clip],mixerTracks,120,1,48000,false,'song',undefined,undefined,4);
+  const silent = await audioEngine.renderTimelineOffline([baseChannel],[clip],mixerTracks,120,1,48000,false,'song',undefined,undefined,4);
+  const sWith = stats(withNotes); const sSilent = stats(silent);
+  assert(sWith.finite, 'recorded render contains non-finite samples');
+  assert(sWith.max > 1e-4, `recorded notes should render audibly, max=${sWith.max}`);
+  assert(sSilent.max < 1e-4, `control channel without recorded notes should be silent, max=${sSilent.max}`);
+  pass(`MIDI recording: recorded performance exports audibly (max=${sWith.max.toFixed(4)}, control=${sSilent.max.toFixed(6)})`);
+} catch(e){ fail('MIDI recording: recorded performance exports audibly', e); }
+
 console.log(`\n=== Results: ${passed} passed, ${failed} failed ===`);
 if (failed>0) process.exit(1);
