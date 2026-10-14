@@ -152,10 +152,15 @@ No project-schema, audio/DSP, transport, or unrelated-UI changes.
   routing to live monitor vs recorder, velocity/channel preservation, clock
   stamping, simultaneous notes, retrigger, cancellation/`releaseAll`,
   ignored note-off, recorder-disabled gate, and null-port safety.
-- **Playwright (`browser-tests/virtualMidiInput.spec.ts`, phone viewport
-  390×844):** arm MIDI Rec, tap/release virtual keys, stop, assert the **correct
-  pitches** appear (not just the count) plus structural timing; simultaneous
-  chord test; and a "no recording unless armed" test.
+- **Playwright (`browser-tests/virtualMidiInput.spec.ts`, phone **landscape**
+  viewport 844×390):** arm MIDI Rec, tap/release virtual keys, stop, assert the
+  **correct pitches** appear (not just the count) plus structural timing;
+  simultaneous chord test; and a "no recording unless armed" test. The landscape
+  viewport is required: Apex Studio is landscape-only and renders a full-screen
+  `#fl-orientation-lock-overlay` on narrow/portrait touch viewports, which would
+  intercept pointer events. The test asserts the overlay is absent (not disabled)
+  before interacting, and keeps touch/pointer (`pointerType: 'touch'`)
+  interactions intact.
 
 ### CI gates executed locally
 

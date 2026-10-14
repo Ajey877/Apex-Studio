@@ -15,16 +15,27 @@
  * and assert structural timing properties (notes are placed inside the pattern,
  * have positive duration, and are ordered by press time) rather than exact step
  * numbers.
+ *
+ * Viewport: a phone-sized LANDSCAPE window (844×390). Apex Studio is
+ * landscape-only and shows a full-screen `#fl-orientation-lock-overlay` portrait
+ * lock on narrow/portrait touch viewports; using a landscape phone viewport
+ * honours that production contract instead of disabling it. Touch/pointer
+ * interactions are preserved via pointer events with `pointerType: 'touch'`.
  */
 import { expect, test, type Page } from '@playwright/test';
 
 const APP_URL = 'http://localhost:3000';
 
 const openPianoRoll = async (page: Page): Promise<void> => {
-  await page.setViewportSize({ width: 390, height: 844 }); // phone-sized viewport
+  // Landscape phone viewport: width > height and >= 768 keeps the app out of its
+  // portrait orientation-lock state, so nothing intercepts navigation clicks.
+  await page.setViewportSize({ width: 844, height: 390 });
   await page.goto(APP_URL);
   await page.waitForSelector('#root > *', { state: 'attached' });
-  await page.waitForTimeout(800);
+  // The orientation lock must be absent before we interact (it is a full-screen
+  // overlay that would otherwise intercept pointer events).
+  await expect(page.locator('#fl-orientation-lock-overlay')).toHaveCount(0);
+  await page.waitForTimeout(400);
   await page.locator('#nav-piano-roll').click();
   await page.waitForSelector('#piano-key-60', { state: 'visible' });
 };
@@ -51,6 +62,8 @@ const tapKey = async (
   pointerId: number,
 ): Promise<void> => {
   const sel = `#piano-key-${pitch}`;
+  // Ensure the key is in the scrollable strip's viewport before dispatching.
+  await page.locator(sel).scrollIntoViewIfNeeded();
   await page.dispatchEvent(sel, 'pointerdown', {
     pointerId,
     pointerType: 'touch',
@@ -124,6 +137,8 @@ test.describe('Virtual piano keyboard recording (phone viewport)', () => {
     // Hold two keys at once (different pointer ids), then release together.
     const sel60 = '#piano-key-60';
     const sel64 = '#piano-key-64';
+    await page.locator(sel60).scrollIntoViewIfNeeded();
+    await page.locator(sel64).scrollIntoViewIfNeeded();
     await page.dispatchEvent(sel60, 'pointerdown', { pointerId: 1, pointerType: 'touch', isPrimary: true, button: 0, bubbles: true });
     await page.dispatchEvent(sel64, 'pointerdown', { pointerId: 2, pointerType: 'touch', isPrimary: true, button: 0, bubbles: true });
     await page.waitForTimeout(300);
