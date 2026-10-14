@@ -67,7 +67,19 @@ export const DrumSamplerPanel: React.FC<DrumSamplerPanelProps> = ({ channel, sam
           <button key={pad.id} type="button" onClick={() => { setSelectedId(pad.id); trigger(pad); }}
             className={`aspect-square rounded-lg border p-2 flex flex-col justify-between text-left transition ${selected?.id === pad.id ? 'border-[var(--apex-accent)] ring-2 ring-[var(--apex-accent)]' : 'border-[var(--apex-border)]'} bg-[var(--apex-surface-2)] hover:bg-[var(--apex-state-hover)]`}>
             <span className="text-[9px] font-bold text-[var(--apex-text)] truncate">{pad.name || `Pad ${index + 1}`}</span>
-            <span className="text-[8px] font-mono" style={{ color: PAD_COLORS[index % PAD_COLORS.length] }}>MIDI {pad.note}</span>
+            <span
+              data-testid={`drum-midi-label-${pad.note}`}
+              data-midi-note={pad.note}
+              className="inline-flex items-center gap-1 text-[8px] font-mono text-[var(--apex-text)]"
+            >
+              <span
+                aria-hidden="true"
+                data-pad-identity-color={PAD_COLORS[index % PAD_COLORS.length]}
+                className="inline-block h-2 w-2 shrink-0 rounded-[2px] border border-[var(--apex-text-3)]"
+                style={{ backgroundColor: PAD_COLORS[index % PAD_COLORS.length] }}
+              />
+              MIDI {pad.note}
+            </span>
             <span className="text-[8px] text-[var(--apex-text-3)] truncate">{sampleLibrary.find(s => s.id === pad.sampleId)?.name || 'Empty'}</span>
           </button>
         ))}

@@ -547,10 +547,10 @@ export const MidiControllerModal: React.FC<MidiControllerModalProps> = ({
                   logs.map((log) => (
                     <div key={log.id} className="flex items-center space-x-3 py-1 px-2 hover:bg-[var(--apex-state-hover)] rounded border-b border-[var(--apex-border)]">
                       <span className="text-[var(--apex-text-3)] text-[10px] w-20">{log.time}</span>
-                      <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold uppercase ${
-                        log.type === 'noteOn' ? 'bg-[color-mix(in_srgb,var(--apex-success)_20%,transparent)] text-[var(--apex-success)]' :
-                        log.type === 'noteOff' ? 'bg-[color-mix(in_srgb,var(--apex-danger)_20%,transparent)] text-[var(--apex-danger)]' :
-                        log.type === 'cc' ? 'bg-[color-mix(in_srgb,var(--apex-cyan)_20%,transparent)] text-[var(--apex-cyan-text)]' : 'bg-[color-mix(in_srgb,var(--apex-gold)_20%,transparent)] text-[var(--apex-gold)]'
+                      <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold uppercase text-[var(--apex-text)] ${
+                        log.type === 'noteOn' ? 'bg-[color-mix(in_srgb,var(--apex-success)_20%,transparent)]' :
+                        log.type === 'noteOff' ? 'bg-[color-mix(in_srgb,var(--apex-danger)_20%,transparent)]' :
+                        log.type === 'cc' ? 'bg-[color-mix(in_srgb,var(--apex-cyan)_20%,transparent)]' : 'bg-[color-mix(in_srgb,var(--apex-gold)_20%,transparent)]'
                       }`}>
                         {log.type}
                       </span>

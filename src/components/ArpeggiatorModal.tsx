@@ -108,7 +108,7 @@ export const ArpeggiatorModal: React.FC<ArpeggiatorModalProps> = ({
               <div className="flex items-center gap-2">
                 <h2 id="arpeggiator-modal-title" className="text-sm font-bold text-[var(--apex-text)] uppercase">{channel.name} ARPEGGIATOR</h2>
                 <span className={`text-[10px] px-1.5 py-0.5 rounded font-mono font-bold ${
-                  arpState.enabled ? 'bg-[color-mix(in_srgb,var(--apex-success)_20%,transparent)] text-[var(--apex-success)] border border-[color-mix(in_srgb,var(--apex-success)_40%,transparent)]' : 'bg-[var(--apex-surface-3)] text-[var(--apex-text-3)]'
+                  arpState.enabled ? 'bg-[color-mix(in_srgb,var(--apex-success)_20%,transparent)] text-[var(--apex-text)] border border-[color-mix(in_srgb,var(--apex-success)_40%,transparent)]' : 'bg-[var(--apex-surface-3)] text-[var(--apex-text-3)]'
                 }`}>
                   {arpState.enabled ? 'ENABLED' : 'DISABLED'}
                 </span>

@@ -690,7 +690,7 @@ export const MasteringSuiteModal: React.FC<MasteringSuiteModalProps> = ({
               title={masteringState.enabled ? "Bypass master processing" : "Enable master processing"}
               aria-label={masteringState.enabled ? "Bypass master processing" : "Enable master processing"}
               onClick={() => onUpdateMasteringState({ ...masteringState, enabled: !masteringState.enabled })}
-              className={`px-3 py-1 text-xs font-bold rounded flex items-center gap-1.5 border ${masteringState.enabled ? 'bg-[color-mix(in_srgb,var(--apex-success)_16%,transparent)] text-[var(--apex-success)] border-[color-mix(in_srgb,var(--apex-success)_45%,transparent)]' : 'bg-[var(--apex-surface-3)] text-[var(--apex-gold)] border-[color-mix(in_srgb,var(--apex-gold)_45%,transparent)]'}`}
+              className={`px-3 py-1 text-xs font-bold rounded flex items-center gap-1.5 border text-[var(--apex-text)] ${masteringState.enabled ? 'bg-[color-mix(in_srgb,var(--apex-success)_16%,transparent)] border-[color-mix(in_srgb,var(--apex-success)_45%,transparent)]' : 'bg-[var(--apex-surface-3)] border-[color-mix(in_srgb,var(--apex-gold)_45%,transparent)]'}`}
             >
               <ShieldCheck className="w-3.5 h-3.5" />
               <span>MASTER CHAIN: {masteringState.enabled ? "ACTIVE DSP" : "BYPASSED"}</span>

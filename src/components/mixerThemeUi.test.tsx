@@ -5,7 +5,7 @@
  * 1. Both themes render the full console (strips, FX rack, sends, sidechain).
  * 2. Class attributes carry no colour literals — neutral chrome is tokenised.
  * 3. The intentional signal colours are exact in Dark and legible in Light.
- * 4. Track identity colours are unchanged in Dark and legible in Light.
+ * 4. Track identity colours remain in project data; rendered labels clear AA in both themes.
  * 5. Switching theme changes presentation only: the rendered text, controls
  *    and values are identical, and the inputs' props are never mutated.
  * 6. The canvas draw loop reads the palette per frame (source-level guard; the
@@ -85,7 +85,7 @@ afterEach(() => {
   delete (globalThis as { document?: unknown }).document;
 });
 
-describe('Mixer renders coherently in Dark and Light (UI-03C)', () => {
+describe('Mixer renders coherently in Dark and Light (UI-03C/UI-03S)', () => {
   it('both themes render the full console: strips, FX rack, sends and sidechain', () => {
     for (const mode of ['dark', 'light'] as const) {
       const markup = renderMixer(mode);
@@ -117,14 +117,22 @@ describe('Mixer renders coherently in Dark and Light (UI-03C)', () => {
     assert.ok(!light.includes('#00ff00'), 'the bright Dark green must not appear in Light');
   });
 
-  it('track identity: Dark keeps the stored colour; Light only adjusts names that fail AA', () => {
+  it('track identity: both themes adjust only rendered names that fail AA', () => {
     const dark = renderMixer('dark');
     const light = renderMixer('light');
-    assert.ok(dark.includes('color:#00ff88'), 'Dark Hi-Hats name keeps its identity colour');
-    assert.ok(dark.includes('color:#00e5ff'), 'Dark Lead Pluck name keeps its identity colour');
-    const adjusted = trackIdentityLabelColor('#00ff88', 'light', lightSurfaces);
-    assert.ok(light.includes(`color:${adjusted}`), 'Light Hi-Hats name uses the legible variant');
-    assert.ok(!light.includes('color:#00ff88'), 'the illegible Light name colour is gone');
+    assert.ok(dark.includes('color:#00ff88'), 'Dark Hi-Hats name keeps its already-legible identity hue');
+    assert.ok(dark.includes('color:#00e5ff'), 'Dark Lead Pluck name keeps its already-legible identity hue');
+    const adjustedLight = trackIdentityLabelColor('#00ff88', 'light', lightSurfaces);
+    assert.ok(light.includes(`color:${adjustedLight}`), 'Light Hi-Hats name uses the legible variant');
+    assert.ok(!light.includes('color:#00ff88'), 'the low-contrast Light label colour is not painted');
+    const darkSurfaces = readMixerStripSurfaces(makeThemeDocument('dark'));
+    const adjustedDark = trackIdentityLabelColor('#9c27b0', 'dark', darkSurfaces);
+    assert.ok(adjustedDark !== '#9c27b0', 'Dark purple changes only when needed for AA');
+    const darkWithLowContrast = renderMixer('dark', [
+      ...fixtureTracks(),
+      { ...fixtureTracks()[3], id: 4, name: 'Bass/Sub', color: '#9c27b0' },
+    ]);
+    assert.ok(darkWithLowContrast.includes(`color:${adjustedDark}`), 'Dark Bass/Sub label uses its legible variant');
     // A colour that already clears AA on Light is left exactly as stored.
     const legible = renderMixer('light', fixtureTracks().map((t) => (t.id === 2 ? { ...t, color: '#14734e' } : t)));
     assert.ok(legible.includes('color:#14734e'));

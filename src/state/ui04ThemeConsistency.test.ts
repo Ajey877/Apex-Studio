@@ -148,7 +148,9 @@ test('UI-04 keeps track, pad, waveform and VU colors intentional', () => {
   const sampleManager = read('src/components/SampleManagerModal.tsx');
 
   assert.match(drumSampler, /const PAD_COLORS = \[/);
-  assert.match(channelRack, /style=\{\{ color: ch\.color \|\| 'var\(--apex-text\)' \}\}/);
+  assert.match(channelRack, /data-identity-color=\{ch\.color\}/);
+  assert.match(channelRack, /style=\{\{ backgroundColor: ch\.color \|\| 'var\(--apex-text\)' \}\}/);
+  assert.match(channelRack, /text-\[var\(--apex-text\)\]/);
   // UI-03C: the VU gradient moved into the Mixer palette seam. Dark must still
   // produce the exact shipped gradient, and the Mixer must draw through the seam.
   const mixerTheme = read('src/components/mixerTheme.ts');

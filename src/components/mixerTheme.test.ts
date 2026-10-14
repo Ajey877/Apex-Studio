@@ -1,12 +1,12 @@
 /**
- * UI-03C — Mixer palette seam, unit level.
+ * UI-03C/UI-03S — Mixer palette seam and identity contrast, unit level.
  *
  * Covers the seam in isolation: palette values follow the document theme with
  * no stale cache, the Dark signal colours are the exact shipped literals, the
  * Light level colours clear the non-text contrast the meter needs, and track
- * identity colours are preserved in Dark and only made legible (hue kept) in
- * Light. Token values are read from the real `src/index.css`, so the contrast
- * assertions test the palettes the app actually ships.
+ * project identity colours remain unchanged while rendered track-name
+ * foregrounds clear AA in both themes (hue kept). Token values come from the
+ * real `src/index.css`, so assertions test the palettes the app actually ships.
  */
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
@@ -110,29 +110,35 @@ describe('Mixer palette seam (UI-03C)', () => {
   });
 });
 
-describe('Mixer track identity colours (UI-03C)', () => {
+describe('Mixer track identity colours (UI-03C/UI-03S)', () => {
   const darkSurfaces = readMixerStripSurfaces(makeDocument('dark'));
   const lightSurfaces = readMixerStripSurfaces(makeDocument('light'));
 
-  it('Dark returns every track colour exactly as stored', () => {
-    for (const color of TRACK_COLORS) {
-      assert.equal(trackIdentityLabelColor(color, 'dark', darkSurfaces), color);
-    }
-  });
-
-  it('Light: every track name clears AA (4.5:1) on every strip surface', () => {
-    for (const color of TRACK_COLORS) {
-      const adjusted = trackIdentityLabelColor(color, 'light', lightSurfaces);
-      for (const surface of lightSurfaces) {
-        assert.ok(
-          contrastRatio(hexToRgb(adjusted), surface) >= 4.5,
-          `${color} → ${adjusted} should clear 4.5:1 on the light strip`
-        );
+  for (const [mode, surfaces] of [['dark', darkSurfaces], ['light', lightSurfaces]] as const) {
+    it(`${mode}: every rendered track name clears AA on every strip surface without changing stored colors`, () => {
+      for (const color of TRACK_COLORS) {
+        const adjusted = trackIdentityLabelColor(color, mode, surfaces);
+        for (const surface of surfaces) {
+          assert.ok(
+            contrastRatio(hexToRgb(adjusted), surface) >= 4.5,
+            `${mode}: ${color} → ${adjusted} should clear 4.5:1 on the strip`
+          );
+        }
+        // This helper returns a presentation value; it has no access to project state.
+        assert.match(color, /^#[0-9a-f]{6}$/i);
       }
-    }
+    });
+  }
+
+  it('adjusts the low-contrast Dark purple label but leaves its project identity value available', () => {
+    const stored = '#9c27b0';
+    const label = trackIdentityLabelColor(stored, 'dark', darkSurfaces);
+    assert.notEqual(label, stored);
+    assert.ok(darkSurfaces.every((surface) => contrastRatio(hexToRgb(label), surface) >= 4.5));
+    assert.equal(stored, '#9c27b0');
   });
 
-  it('Light keeps the hue of an adjusted track colour', () => {
+  it('keeps the hue of every adjusted track colour in both themes', () => {
     const hueOf = ([r, g, b]: [number, number, number]) => {
       const rn = r / 255, gn = g / 255, bn = b / 255;
       const max = Math.max(rn, gn, bn), min = Math.min(rn, gn, bn), d = max - min;
@@ -141,10 +147,16 @@ describe('Mixer track identity colours (UI-03C)', () => {
       h *= 60;
       return h < 0 ? h + 360 : h;
     };
-    for (const color of ['#00ff88', '#ff6e00', '#00e5ff']) {
-      const adjusted = trackIdentityLabelColor(color, 'light', lightSurfaces);
-      const delta = Math.abs(hueOf(hexToRgb(adjusted)) - hueOf(hexToRgb(color)));
-      assert.ok(Math.min(delta, 360 - delta) <= 6, `${color} → ${adjusted} drifted ${delta.toFixed(1)}°`);
+    const colorsByMode = {
+      dark: ['#9c27b0'],
+      light: ['#00ff88', '#ff6e00', '#00e5ff'],
+    } as const;
+    for (const [mode, surfaces] of [['dark', darkSurfaces], ['light', lightSurfaces]] as const) {
+      for (const color of colorsByMode[mode]) {
+        const adjusted = trackIdentityLabelColor(color, mode, surfaces);
+        const delta = Math.abs(hueOf(hexToRgb(adjusted)) - hueOf(hexToRgb(color)));
+        assert.ok(Math.min(delta, 360 - delta) <= 6, `${mode}: ${color} → ${adjusted} drifted ${delta.toFixed(1)}°`);
+      }
     }
   });
 

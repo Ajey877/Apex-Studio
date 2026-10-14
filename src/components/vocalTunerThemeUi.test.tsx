@@ -154,7 +154,7 @@ describe('Vocal Tuner theme markup (UI-03H)', () => {
     assert.match(source, /text-\[var\(--apex-aux-text\)\]/, 'humanize readout uses aux-text');
   });
 
-  it('uses the enabled-state success token (not hardcoded #00ff88) for the ON button and ENABLED badge', () => {
+  it('keeps the ON button semantic and the ENABLED badge readable over its success wash', () => {
     assert.match(
       source,
       /\? 'bg-\[var\(--apex-success\)\] text-\[var\(--apex-state-playing-fg\)\] shadow-md'/,
@@ -162,8 +162,8 @@ describe('Vocal Tuner theme markup (UI-03H)', () => {
     );
     assert.match(
       source,
-      /bg-\[color-mix\(in_srgb,var\(--apex-success\)_20%,transparent\)\] text-\[var\(--apex-success\)\] border-\[color-mix\(in_srgb,var\(--apex-success\)_40%,transparent\)\]/,
-      'the ENABLED badge uses a 20% success wash with a 40% success border'
+      /bg-\[color-mix\(in_srgb,var\(--apex-success\)_20%,transparent\)\] text-\[var\(--apex-text\)\] border-\[color-mix\(in_srgb,var\(--apex-success\)_40%,transparent\)\]/,
+      'the ENABLED badge uses the neutral text token over its 20% success wash and keeps the 40% success border'
     );
   });
 

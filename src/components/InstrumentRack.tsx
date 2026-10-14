@@ -146,8 +146,18 @@ export const InstrumentRack: React.FC<InstrumentRackProps> = ({
         {/* Active Instrument Title */}
         <div className="flex items-center gap-2">
           <Cpu className="w-3.5 h-3.5 text-[var(--apex-accent)]" />
-          <span className="text-[10px] font-bold text-[var(--apex-text)] uppercase tracking-wider">
-            INSTRUMENT: <span style={{ color: channel.color || 'var(--apex-text)' }}>{channel.name}</span>
+          <span className="text-[10px] font-bold text-[var(--apex-text)] uppercase tracking-wider inline-flex items-center gap-1.5">
+            INSTRUMENT:
+            <span className="inline-flex min-w-0 items-center gap-1.5">
+              <span
+                aria-hidden="true"
+                data-testid="instrument-identity-marker"
+                data-identity-color={channel.color}
+                className="inline-block h-2.5 w-2.5 shrink-0 rounded-[2px] border border-[var(--apex-text-3)]"
+                style={{ backgroundColor: channel.color || 'var(--apex-text)' }}
+              />
+              <span data-testid="instrument-name" className="truncate text-[var(--apex-text)]">{channel.name}</span>
+            </span>
           </span>
 
           <select

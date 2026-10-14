@@ -9,11 +9,9 @@
  * `--apex-danger` (#ff5f6d Dark / #bd2638 Light), the same token the delete
  * affordances elsewhere already use — so this only unifies an existing meaning.
  *
- * The rack's remaining colour literals are channel-identity data: the colour each
- * `Channel` stores (`#ff5722`…`#9c27b0`), painted verbatim as the selector dot,
- * the step-cell accents and the mixer-strip stripe. UI-03A §“Explicitly
- * preserved” keeps those as project data, and they are pinned here by set so the
- * allowance cannot quietly grow.
+ * Channel identity colours remain project data and are painted verbatim in a
+ * separate swatch; label foregrounds use theme text tokens. The identity values
+ * are pinned here by set so a palette change cannot silently rewrite the data.
  *
  * Live pixels and the hover state are measured in
  * `browser-tests/channelRackTheme.spec.ts`.
@@ -77,7 +75,7 @@ const contrastRatio = (foreground: string, background: string): number => {
   return (Math.max(first, second) + 0.05) / (Math.min(first, second) + 0.05);
 };
 
-describe('Channel Rack residual theme migration (UI-03P)', () => {
+describe('Channel Rack theme migration and identity contrast (UI-03P/UI-03S)', () => {
   it('renders the rack with every channel row and the pattern lane', () => {
     const markup = render();
     assert.match(markup, /id="fl-channel-rack"/);
@@ -114,8 +112,8 @@ describe('Channel Rack residual theme migration (UI-03P)', () => {
     assert.deepEqual(offenders, []);
   });
 
-  it('keeps the channel-identity hues as stored data', () => {
-    // Every channel colour in the fixture reaches the markup as an inline paint.
+  it('keeps the channel-identity hues as stored data in separate swatches', () => {
+    // Every channel colour in the fixture reaches the markup as a swatch paint.
     const markup = render();
     for (const channel of DEFAULT_PROJECT.channels) {
       assert.ok(
@@ -123,7 +121,8 @@ describe('Channel Rack residual theme migration (UI-03P)', () => {
         `expected ${channel.color} (${channel.name}) to be painted`
       );
     }
-    assert.match(code, /ch\.color/);
+    assert.match(code, /data-identity-color=\{ch\.color\}/);
+    assert.match(code, /text-\[var\(--apex-text\)\]/);
   });
 
   it('keeps the rack behaviour the migration must not touch', () => {
