@@ -82,12 +82,30 @@ const tapKey = async (
 };
 
 const recordedBlocks = (page: Page) => page.locator('[id^="note-block-midi-rec-"]');
-const blockLeftPx = (page: Page, id: string): Promise<number> =>
-  page.locator(`#${id}`).evaluate((el) => parseFloat((el as HTMLElement).style.left) || 0);
-const blockWidthPx = (page: Page, id: string): Promise<number> =>
-  page.locator(`#${id}`).evaluate((el) => parseFloat((el as HTMLElement).style.width) || 0);
-const blockName = (page: Page, id: string): Promise<string> =>
-  page.locator(`#${id}`).evaluate((el) => (el.textContent ?? '').trim());
+
+interface RecordedNote {
+  id: string;
+  name: string;
+  left: number;
+  width: number;
+}
+
+// Returns the recorded note blocks with their rendered position/size, sorted by
+// start position (left). Sorting explicitly avoids depending on DOM/render order.
+const recordedNotes = async (page: Page): Promise<RecordedNote[]> => {
+  const data = await recordedBlocks(page).evaluateAll((els) =>
+    els.map((el) => {
+      const e = el as HTMLElement;
+      return {
+        id: e.id,
+        name: (e.textContent ?? '').trim(),
+        left: parseFloat(e.style.left) || 0,
+        width: parseFloat(e.style.width) || 0,
+      };
+    }),
+  );
+  return data.sort((a, b) => a.left - b.left);
+};
 
 // Reads the note name a key renders. The key button also renders a decorative
 // root dot (an empty first span) and an "OCT" tag for C notes, so pick the
@@ -117,23 +135,22 @@ test.describe('Virtual piano keyboard recording (phone viewport)', () => {
     const blocks = recordedBlocks(page);
     await expect(blocks).toHaveCount(2);
 
-    const ids = await blocks.evaluateAll((els) => els.map((el) => el.id));
-    const names = new Set(await Promise.all(ids.map((id) => blockName(page, id))));
+    const notes = await recordedNotes(page);
+    const name60 = await keyName(page, 60);
+    const name64 = await keyName(page, 64);
 
     // Pitches are deterministic: the take recorded exactly the two keys pressed.
-    const expectedNames = new Set([await keyName(page, 60), await keyName(page, 64)]);
-    expect(names).toEqual(expectedNames);
+    expect(new Set(notes.map((n) => n.name))).toEqual(new Set([name60, name64]));
 
     // Structural timing: both notes sit inside the pattern with a real gate.
-    for (const id of ids) {
-      expect(await blockLeftPx(page, id)).toBeGreaterThanOrEqual(0);
-      expect(await blockWidthPx(page, id)).toBeGreaterThan(0);
+    for (const n of notes) {
+      expect(n.left).toBeGreaterThanOrEqual(0);
+      expect(n.width).toBeGreaterThan(0);
     }
-    // And they are ordered by press time (C4 started before E4).
-    const [firstId, secondId] = ids;
-    expect(await blockLeftPx(page, firstId)).toBeLessThanOrEqual(
-      await blockLeftPx(page, secondId),
-    );
+    // C4 was pressed before E4, so its start is no later than E4's (ties allowed).
+    const c4 = notes.find((n) => n.name === name60)!;
+    const e4 = notes.find((n) => n.name === name64)!;
+    expect(c4.left).toBeLessThanOrEqual(e4.left);
   });
 
   test('simultaneous keys record two overlapping notes with no stuck voices', async ({ page }) => {
@@ -157,15 +174,14 @@ test.describe('Virtual piano keyboard recording (phone viewport)', () => {
     // Exactly two notes: no stuck/duplicate voice from the chord.
     await expect(blocks).toHaveCount(2);
 
-    const ids = await blocks.evaluateAll((els) => els.map((el) => el.id));
-    const names = new Set(await Promise.all(ids.map((id) => blockName(page, id))));
-    const expectedNames = new Set([await keyName(page, 60), await keyName(page, 64)]);
-    expect(names).toEqual(expectedNames);
+    const notes = await recordedNotes(page);
+    const name60 = await keyName(page, 60);
+    const name64 = await keyName(page, 64);
+    expect(new Set(notes.map((n) => n.name))).toEqual(new Set([name60, name64]));
 
-    // Overlap: the two starts are within a short window (both held together).
-    const lefts = await Promise.all(ids.map((id) => blockLeftPx(page, id)));
-    expect(Math.abs(lefts[0] - lefts[1])).toBeLessThanOrEqual(
-      await blockWidthPx(page, ids[0]),
+    // Overlap: the two starts are within one note's gate (both held together).
+    expect(Math.abs(notes[0].left - notes[1].left)).toBeLessThanOrEqual(
+      Math.max(notes[0].width, notes[1].width),
     );
   });
 
