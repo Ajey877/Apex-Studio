@@ -326,7 +326,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, chann
     // silently discard the export while the render keeps running — the frame
     // refuses Escape (and the close control is disabled) instead of pretending
     // the dialog closed.
-    <ModalFrame id="export-modal" labelledBy="export-modal-title" onClose={onClose} dismissible={!isRendering} className="fixed inset-0 bg-black/85 backdrop-blur-sm z-50 flex items-center justify-center p-3 sm:p-4">
+    <ModalFrame id="export-modal" labelledBy="export-modal-title" onClose={onClose} dismissible={!isRendering} className="fixed inset-0 backdrop-blur-sm z-50 flex items-center justify-center p-3 sm:p-4">
       <div className="bg-[var(--apex-panel)] border border-[var(--apex-border)] rounded-xl w-full max-w-lg shadow-2xl overflow-hidden text-[var(--apex-text-2)] max-h-[90vh] flex flex-col">
         <div className="px-4 sm:px-5 py-3 bg-[var(--apex-panel-header)] border-b border-[var(--apex-border)] flex items-center justify-between shrink-0">
           <div>

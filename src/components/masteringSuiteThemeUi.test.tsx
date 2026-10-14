@@ -109,7 +109,9 @@ describe('UI-03B — the Mastering Suite opens in both themes', () => {
       const markup = renderTab('metering');
       const rootTag = markup.slice(0, markup.indexOf('>') + 1);
       assert.ok(rootTag.includes('apex-modal-overlay'), 'the themed scrim primitive must be wired');
-      assert.ok(rootTag.includes('bg-black/80'), 'the overlay classes stay verbatim for the frame contract');
+      // UI-03Q: the dead `bg-black/80` fill is removed from the modal's own
+      // class string; the primitive's themed scrim owns the overlay.
+      assert.ok(!rootTag.includes('bg-black'), 'the dead dark scrim fill is gone');
     });
   });
 });

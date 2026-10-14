@@ -196,7 +196,11 @@ interface ModalCase {
   closed: React.ReactElement;
 }
 
-const OVERLAY_SHELL = 'fixed inset-0 bg-black/85 backdrop-blur-sm z-50 flex items-center justify-center p-3 sm:p-4';
+// UI-03Q: Export and Project Manager were the last framed dialogs still
+// carrying a dead `bg-black/85` fill on top of ModalFrame's themed
+// `apex-modal-overlay` scrim. The fill is gone; the rendered overlay is the
+// primitive's class plus the modal's own layout classes, as with Hotkeys.
+const OVERLAY_SHELL = 'apex-modal-overlay fixed inset-0 backdrop-blur-sm z-50 flex items-center justify-center p-3 sm:p-4';
 const OVERLAY_SHELL_PADDED = 'fixed inset-0 bg-black/85 backdrop-blur-sm z-50 flex items-center justify-center p-4';
 /**
  * UI-03P: the Project Bundle Zip modal was the last overlay still carrying its
@@ -205,7 +209,9 @@ const OVERLAY_SHELL_PADDED = 'fixed inset-0 bg-black/85 backdrop-blur-sm z-50 fl
  * the other studio modals above — the rest of the frame is verbatim.
  */
 const OVERLAY_STUDIO = 'fixed inset-0 backdrop-blur-md z-50 flex items-center justify-center p-3 sm:p-4 select-none';
-const OVERLAY_FLOATING = 'fixed inset-0 z-50 flex items-center justify-center p-3 bg-black/80 backdrop-blur-md animate-fade-in select-none';
+// UI-03Q: Sample Manager and Mastering Suite likewise drop the dead
+// `bg-black/80` fill; ModalFrame supplies the themed scrim.
+const OVERLAY_FLOATING = 'apex-modal-overlay fixed inset-0 z-50 flex items-center justify-center p-3 backdrop-blur-md animate-fade-in select-none';
 const OVERLAY_HUB = 'fixed inset-0 z-50 flex items-center justify-center backdrop-blur-sm p-4 animate-in fade-in';
 
 const MODAL_CASES: ModalCase[] = [
