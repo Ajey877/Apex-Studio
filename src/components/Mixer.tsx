@@ -461,7 +461,7 @@ export const Mixer: React.FC<MixerProps> = ({
               {onOpenParametricEq && (
                 <button
                   onClick={() => onOpenParametricEq(selectedTrack)}
-                  className="px-1.5 py-0.5 bg-[color-mix(in_srgb,var(--apex-cyan)_15%,transparent)] hover:bg-[color-mix(in_srgb,var(--apex-cyan)_30%,transparent)] text-[var(--apex-cyan)] rounded text-[9px] font-mono border border-[color-mix(in_srgb,var(--apex-cyan)_30%,transparent)] transition"
+                  className="px-1.5 py-0.5 bg-[color-mix(in_srgb,var(--apex-cyan)_15%,transparent)] hover:bg-[color-mix(in_srgb,var(--apex-cyan)_30%,transparent)] text-[var(--apex-cyan-text)] rounded text-[9px] font-mono border border-[color-mix(in_srgb,var(--apex-cyan)_30%,transparent)] transition"
                   title="Open 3-Band EQ Interface"
                 >
                   EQ

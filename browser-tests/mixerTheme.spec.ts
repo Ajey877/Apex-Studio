@@ -1,15 +1,16 @@
 import { expect, test, type Page } from '@playwright/test';
+import { hasTranslucentBackgroundLayer, measureTextContrast } from './themeContrast';
 
 /** Matches the URL the existing browser suite and `webServer` config both use. */
 const APP_URL = 'http://localhost:3000';
 
 /**
- * UI-03C — the Mixer in both themes, verified against a real browser.
+ * UI-03C/UI-03S — Mixer theme behavior and targeted contrast, verified in Chromium.
  *
  * What the DOM tests cannot prove: the Mixer opens in Dark and Light; the
  * master FFT canvas repaints its background when the theme flips without a
  * reload; reopening the Mixer after a switch shows the current palette, not a
- * stale one; track identity names stay legible in Light; and nothing about the
+ * stale one; track identity names stay legible in both themes; and nothing about the
  * mixer state or the stored project changes across a theme switch.
  *
  * The FFT canvas paints its own background each frame (the palette's
@@ -144,11 +145,14 @@ test('the Mixer opens in Dark with the dark canvas palette', async ({ page }) =>
 
   expect(await page.locator('html').getAttribute('data-theme')).toBe('dark');
   expect(pixelsClose(await probeFftCorner(page), DARK_CANVAS)).toBe(true);
-  // Dark keeps the shipped identity: the Hi-Hats name is its stored colour.
+  // The rendered names preserve their track hues while clearing AA against the active strips.
   const names = await trackNameContrast(page);
   expect(names.length).toBeGreaterThan(0);
+  for (const entry of names) {
+    expect(entry.ratio, `${entry.name} (${entry.color}) on Dark`).toBeGreaterThanOrEqual(4.5);
+  }
 
-  await page.screenshot({ path: 'assets/screenshots/ui03c-mixer-dark.png' });
+  await page.screenshot({ path: 'assets/screenshots/ui03s-mixer-dark.png' });
   expect(errors).toEqual([]);
 });
 
@@ -168,9 +172,44 @@ test('the Mixer opens in Light, and track names clear AA on the light strips', a
     expect(entry.ratio, `${entry.name} (${entry.color})`).toBeGreaterThanOrEqual(4.5);
   }
 
-  await page.screenshot({ path: 'assets/screenshots/ui03c-mixer-light.png' });
+  await page.screenshot({ path: 'assets/screenshots/ui03s-mixer-light.png' });
   expect(errors).toEqual([]);
 });
+
+for (const mode of ['dark', 'light'] as const) {
+  test(`${mode}: Mixer EQ text clears AA over its real rest and hover washes`, async ({ page }) => {
+    await THEME_SET(mode)(page);
+    await page.goto(APP_URL);
+    await waitForApp(page);
+    await openMixer(page);
+
+    const eq = page.locator('#fl-mixer-console button[title="Open 3-Band EQ Interface"]');
+    await expect(eq).toBeVisible();
+    const rest = await measureTextContrast(eq);
+    expect(hasTranslucentBackgroundLayer(rest.backgroundLayers), 'EQ rest fill is alpha-composited').toBe(true);
+    expect(rest.ratio, `${mode} EQ rest`).toBeGreaterThanOrEqual(4.5);
+
+    await page.waitForTimeout(200); // let the resting fill settle before hover
+    await eq.hover();
+    let hover = await measureTextContrast(eq);
+    let previousHoverBackground = hover.background;
+    await expect
+      .poll(async () => {
+        hover = await measureTextContrast(eq);
+        const stable = hover.background === previousHoverBackground;
+        previousHoverBackground = hover.background;
+        return hover.background !== rest.background && stable && hasTranslucentBackgroundLayer(hover.backgroundLayers);
+      }, { message: `${mode} EQ hover wash reaches a stable composited fill`, timeout: 3_000, intervals: [50] })
+      .toBe(true);
+    expect(hover.background, `${mode} EQ hover fill differs from rest`).not.toBe(rest.background);
+    expect(hasTranslucentBackgroundLayer(hover.backgroundLayers), 'EQ hover fill is alpha-composited').toBe(true);
+    expect(hover.ratio, `${mode} EQ hover`).toBeGreaterThanOrEqual(4.5);
+
+    await page.mouse.move(0, 0);
+    await page.waitForTimeout(200);
+    await page.screenshot({ path: `assets/screenshots/ui03s-mixer-eq-${mode}.png` });
+  });
+}
 
 test('flipping the theme while the Mixer is open repaints its canvas without a reload', async ({ page }) => {
   await THEME_SET('dark')(page);
@@ -189,7 +228,19 @@ test('flipping the theme while the Mixer is open repaints its canvas without a r
     .poll(async () => pixelsClose(await probeFftCorner(page), LIGHT_CANVAS), { timeout: 2000 })
     .toBe(true);
   expect(await page.evaluate(() => (window as unknown as { __noReloadMarker?: string }).__noReloadMarker)).toBe('alive');
-  await page.screenshot({ path: 'assets/screenshots/ui03c-mixer-light-after-live-switch.png' });
+  const lightStripSurface = await page.evaluate(() => {
+    const probe = document.createElement('div');
+    probe.style.backgroundColor = 'var(--apex-surface-2)';
+    document.body.appendChild(probe);
+    const color = getComputedStyle(probe).backgroundColor;
+    probe.remove();
+    return color;
+  });
+  await expect
+    .poll(async () => page.locator('#mixer-strip-1').evaluate((strip) => getComputedStyle(strip).backgroundColor))
+    .toBe(lightStripSurface);
+  await page.waitForTimeout(200); // settle the remaining themed chrome before the evidence capture
+  await page.screenshot({ path: 'assets/screenshots/ui03s-mixer-light-after-live-switch.png' });
 });
 
 test('reopening the Mixer after a theme change shows the current palette, not a stale one', async ({ page }) => {

@@ -1,15 +1,17 @@
 /**
- * UI-03P — Channel Rack residual migration, measured in a real Chromium.
+ * UI-03P/UI-03S — Channel Rack hover and contrast regressions, measured in Chromium.
  *
  * The rack's last chrome literals were the two destructive hovers: **CLR** and
  * the per-row delete control used Tailwind's `hover:text-red-400`, which is not a
  * theme token — it stayed the same red in Light and did not match the danger hue
  * the rest of the app uses. This spec hovers both controls in both palettes and
  * measures the resolved colour against the row surface, plus the AA floor for the
- * label. The rack's channel-identity hues (stored on each `Channel`) are asserted
- * to stay exactly as stored, because those are project data, not chrome.
+ * label. Channel names use a semantic foreground; the raw per-channel identity
+ * hues remain stored data and are preserved in a separate swatch with a
+ * contrasting outline. Both the labels and markers are measured in Chromium.
  */
 import { expect, test, type Locator, type Page } from '@playwright/test';
+import { measureTextContrast } from './themeContrast';
 
 const APP_URL = 'http://localhost:3000';
 
@@ -134,24 +136,42 @@ for (const mode of ['dark', 'light'] as const) {
       expect(colourDistance(hovered!, legacyRed), `${control.label} no longer paints red-400`).toBeGreaterThan(4);
     }
 
-    // Channel identity is data: each row paints the colour stored on the Channel
-    // (`style={{ color: ch.color }}`), verbatim, in both palettes.
-    const identity = await page.evaluate(() => {
-      const root = document.getElementById('fl-channel-rack');
-      if (!root) return [];
-      return [...root.querySelectorAll<HTMLElement>('[style*="color:"]')].map((element) => ({
-        inline: element.getAttribute('style') ?? '',
-        resolved: getComputedStyle(element).color,
+    // Labels use theme text; each original project identity value remains a
+    // separate, verbatim swatch. The swatch outline is the non-text indicator.
+    const names = root.locator('button[data-testid^="channel-name-"]');
+    const identities = root.locator('[data-testid^="channel-identity-"]');
+    await expect(names).toHaveCount(await identities.count());
+    for (let index = 0; index < await names.count(); index += 1) {
+      const name = names.nth(index);
+      const marker = identities.nth(index);
+      const labelContrast = await measureTextContrast(name);
+      expect(labelContrast.ratio, `${mode} ${await name.innerText()} label`).toBeGreaterThanOrEqual(4.5);
+      const identity = await marker.evaluate((element) => ({
+        stored: element.getAttribute('data-identity-color') ?? '',
+        painted: getComputedStyle(element).backgroundColor,
+        outline: getComputedStyle(element).borderTopColor,
+        rowBackground: getComputedStyle(element.closest('[id^="channel-row-"]')!).backgroundColor,
       }));
-    });
-    expect(identity.length, 'channel identity colours rendered').toBeGreaterThan(0);
-    for (const entry of identity) {
-      const stored = /color:\s*([^;"]+)/.exec(entry.inline)?.[1]?.trim() ?? '';
-      if (!/^#[0-9a-f]{6}$/i.test(stored)) continue;
-      expect(colourDistance(requireColor(entry.resolved, stored), requireColor(stored, stored)), `stored hue ${stored} painted verbatim`).toBeLessThanOrEqual(1);
+      expect(identity.stored).toMatch(/^#[0-9a-f]{6}$/i);
+      expect(colourDistance(requireColor(identity.painted, identity.stored), requireColor(identity.stored, identity.stored)), `stored hue ${identity.stored} preserved`).toBeLessThanOrEqual(1);
+      expect(contrastRatio(requireColor(identity.outline, 'identity outline'), requireColor(identity.rowBackground, 'channel row')), `${mode} identity marker outline`).toBeGreaterThanOrEqual(3);
     }
 
-    await page.screenshot({ path: `assets/screenshots/ui03p-channel-rack-${mode}.png` });
+    const firstName = names.first();
+    const rest = await measureTextContrast(firstName);
+    await firstName.hover();
+    let hovered = await measureTextContrast(firstName);
+    await expect
+      .poll(async () => {
+        hovered = await measureTextContrast(firstName);
+        return hovered.foreground !== rest.foreground && hovered.ratio >= 4.5;
+      }, { message: `${mode} channel-name hover remains a visible, readable feedback state`, timeout: 2_000, intervals: [50] })
+      .toBe(true);
+    expect(hovered.ratio, `${mode} hovered channel name`).toBeGreaterThanOrEqual(4.5);
+
+    await page.mouse.move(0, 0);
+    await page.waitForTimeout(250);
+    await page.screenshot({ path: `assets/screenshots/ui03s-channel-rack-${mode}.png` });
     expect(errors).toEqual([]);
   });
 }
@@ -165,6 +185,7 @@ test('a theme flip repaints the rack with no reload and no channel mutation', as
   await clear.hover();
 
   const channelsBefore = await page.evaluate(() => document.getElementById('fl-channel-rack')?.innerHTML ?? '');
+  const projectBeforeTheme = await page.evaluate(() => window.localStorage.getItem('apex:project'));
   await page.evaluate(() => {
     (window as unknown as { __ui03pMarker: string }).__ui03pMarker = 'alive';
     window.localStorage.setItem('apex:theme', 'light');
@@ -180,4 +201,5 @@ test('a theme flip repaints the rack with no reload and no channel mutation', as
     .toBeLessThanOrEqual(2);
   expect(await page.evaluate(() => (window as unknown as { __ui03pMarker?: string }).__ui03pMarker)).toBe('alive');
   expect(await page.evaluate(() => document.getElementById('fl-channel-rack')?.innerHTML ?? '')).toEqual(channelsBefore);
+  expect(await page.evaluate(() => window.localStorage.getItem('apex:project'))).toBe(projectBeforeTheme);
 });

@@ -138,7 +138,7 @@ export const VocalTunerModal: React.FC<VocalTunerModalProps> = ({
                 <h2 id="fl-vocal-tuner-modal-title" className="text-sm font-bold text-[var(--apex-text)] tracking-wide">AUTO-PITCH &amp; VOCAL TUNER</h2>
                 <span className={`px-1.5 py-0.5 rounded text-[9px] font-mono font-bold border ${
                   vocalTunerSettings.enabled 
-                    ? 'bg-[color-mix(in_srgb,var(--apex-success)_20%,transparent)] text-[var(--apex-success)] border-[color-mix(in_srgb,var(--apex-success)_40%,transparent)]' 
+                    ? 'bg-[color-mix(in_srgb,var(--apex-success)_20%,transparent)] text-[var(--apex-text)] border-[color-mix(in_srgb,var(--apex-success)_40%,transparent)]'
                     : 'bg-[var(--apex-state-hover)] text-[var(--apex-text-3)] border-[var(--apex-border)]'
                 }`}>
                   {vocalTunerSettings.enabled ? 'ENABLED (NOT APPLIED)' : 'DISABLED'}

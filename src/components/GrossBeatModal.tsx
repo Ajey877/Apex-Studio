@@ -104,7 +104,7 @@ export const GrossBeatModal: React.FC<GrossBeatModalProps> = ({
             <div>
               <div className="flex items-center gap-2">
                 <h2 id="gross-beat-modal-title" className="text-sm font-bold text-[var(--apex-text)] tracking-wide">MASTER GATE</h2>
-                <span className="px-1.5 py-0.5 rounded text-[9px] font-mono font-bold bg-[color-mix(in_srgb,var(--apex-gold)_20%,transparent)] text-[var(--apex-gold)] border border-[color-mix(in_srgb,var(--apex-gold)_40%,transparent)]">
+                <span className="px-1.5 py-0.5 rounded text-[9px] font-mono font-bold bg-[color-mix(in_srgb,var(--apex-gold)_20%,transparent)] text-[var(--apex-text)] border border-[color-mix(in_srgb,var(--apex-gold)_40%,transparent)]">
                   AMPLITUDE GATE
                 </span>
               </div>

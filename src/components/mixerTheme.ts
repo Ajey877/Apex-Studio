@@ -3,7 +3,7 @@ import { normalizeThemeMode, type ThemeMode } from '../state/theme';
 import { readCanvasToken, type CanvasThemeDocument } from './canvasThemeTokens';
 
 /**
- * UI-03C — Mixer theme seam.
+ * UI-03C/UI-03S — Mixer theme seam and targeted identity contrast.
  *
  * The Mixer paints two canvases (master FFT strip and the master-fader spectrum
  * backdrop) and uses a few inline colours (the VU meter gradient and the
@@ -23,9 +23,10 @@ import { readCanvasToken, type CanvasThemeDocument } from './canvasThemeTokens';
  *    danger values with the same green → orange → red order, because the bright
  *    Dark greens measure ~1.2:1 against the light meter track (see the report).
  *
- * 3. Track identity colours are preserved. In Dark they are used verbatim. In
- *    Light a name is only darkened, keeping its hue, when it would otherwise
- *    fall below WCAG AA (4.5:1) on the light strip surfaces.
+ * 3. Track identity colours are preserved in project data. The Mixer adjusts
+ *    only the rendered track-name foreground, in either theme when needed,
+ *    moving the colour's HSL lightness the smallest amount that clears WCAG AA
+ *    (4.5:1) on every strip surface while keeping its hue and saturation.
  */
 
 /** Semantic tokens the canvas chrome reads from the active document theme. */
@@ -193,28 +194,34 @@ const hslToRgb = ([h, s, l]: [number, number, number]): [number, number, number]
 /**
  * Track-name colour for the Mixer strip.
  *
- * - Dark: returns the track colour exactly as stored (identity preserved).
- * - Light: returns it unchanged when it already clears AA on every strip
- *   surface; otherwise lowers its HSL lightness (hue and saturation kept)
- *   until it does. Unparseable values are returned untouched.
+ * Returns the track colour unchanged when it already clears AA on every strip
+ * surface. Otherwise, adjusts only HSL lightness by the smallest amount that
+ * clears AA in either theme (hue and saturation remain stable). The project
+ * value is never rewritten. Unparseable values are returned untouched.
  */
 export const trackIdentityLabelColor = (
   color: string,
   mode: ThemeMode,
   surfaces: ReadonlyArray<[number, number, number]>
 ): string => {
-  if (mode !== 'light') return color;
   const rgb = parseHex(color);
   if (!rgb) return color;
   const clears = (candidate: [number, number, number]) =>
     surfaces.every((surface) => contrastRatio(candidate, surface) >= WCAG_AA);
   if (clears(rgb)) return color;
   const [h, s, l] = rgbToHsl(rgb);
-  let lightness = l;
-  for (let step = 0; step < 100; step += 1) {
-    lightness = Math.max(0, lightness - 0.01);
-    const candidate = hslToRgb([h, s, lightness]).map((c) => Math.round(c)) as [number, number, number];
-    if (clears(candidate)) return toHex(candidate);
+  // Prefer the direction appropriate to the active palette if both sides are
+  // equally close; the surfaces, rather than the mode alone, decide whether a
+  // lighter or darker foreground is actually required.
+  const preferredDirection = mode === 'dark' ? 1 : -1;
+  for (let step = 1; step <= 1000; step += 1) {
+    const delta = step / 1000;
+    const directions = [preferredDirection, -preferredDirection] as const;
+    for (const direction of directions) {
+      const lightness = Math.max(0, Math.min(1, l + delta * direction));
+      const candidate = hslToRgb([h, s, lightness]).map((c) => Math.round(c)) as [number, number, number];
+      if (clears(candidate)) return toHex(candidate);
+    }
   }
   return '#000000';
 };

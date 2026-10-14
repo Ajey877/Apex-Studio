@@ -526,17 +526,24 @@ export const ChannelRack: React.FC<ChannelRackProps> = ({
               </div>
 
               {/* Channel Name & Quick Actions */}
-              <div className="w-32 md:w-44 flex items-center justify-between shrink-0">
+              <div className="w-52 md:w-64 flex items-center justify-between shrink-0">
                 <button
                   onClick={(e) => {
                     e.stopPropagation();
                     onOpenInstrument(ch.id);
                   }}
-                  className="text-left font-bold text-xs truncate max-w-[120px] transition hover:text-[var(--apex-text)] uppercase tracking-tight"
-                  style={{ color: ch.color || 'var(--apex-text)' }}
+                  data-testid={`channel-name-${ch.id}`}
+                  className="inline-flex min-w-0 max-w-[120px] flex-1 items-center gap-1 text-left font-bold text-xs text-[var(--apex-text)] transition hover:text-[var(--apex-accent)] uppercase tracking-tight"
                   title="Click to open Instrument Synth Rack"
                 >
-                  {ch.name}
+                  <span
+                    aria-hidden="true"
+                    data-testid={`channel-identity-${ch.id}`}
+                    data-identity-color={ch.color}
+                    className="h-2.5 w-2.5 shrink-0 rounded-[2px] border border-[var(--apex-text-3)]"
+                    style={{ backgroundColor: ch.color || 'var(--apex-text)' }}
+                  />
+                  <span className="min-w-0 flex-1 truncate">{ch.name}</span>
                 </button>
 
                 <div className="flex items-center gap-1">
