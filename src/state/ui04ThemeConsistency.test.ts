@@ -50,6 +50,10 @@ const THEMED_SURFACES = [
   'src/components/ProjectManagerModal.tsx',
   'src/components/ExportModal.tsx',
   'src/components/ProjectReplaceConfirmModal.tsx',
+  // UI-03P: the last legacy modal and the full-screen error fallback join the
+  // list, so the neutral-legacy guard covers them too.
+  'src/components/ProjectBundleZipModal.tsx',
+  'src/components/AppErrorBoundary.tsx',
 ];
 
 test('UI-04 defines shared dark and light surface, state, grid and piano-key tokens', () => {
@@ -145,7 +149,13 @@ test('UI-04 keeps track, pad, waveform and VU colors intentional', () => {
   const mixerTheme = read('src/components/mixerTheme.ts');
   assert.match(mixerTheme, /levelLow: '#00ff00',\n\s*levelMid: '#ff6e00',\n\s*levelHigh: '#ff0000'/);
   assert.match(mixer, /background: palette\.meterGradient/);
-  assert.match(playlist, /color: '#00ff88'/, 'dropped audio clips keep their intentional waveform identity');
+  // UI-03P: the dropped-audio identity moved behind one named constant so the
+  // clip colour, its border, its label and the waveform bars cannot drift apart.
+  assert.match(
+    playlist,
+    /const AUDIO_CLIP_SIGNAL_COLOR = '#00ff88';/,
+    'dropped audio clips keep their intentional waveform identity'
+  );
   assert.match(slicer, /bg-\[var\(--apex-state-selected\)\]/, 'sample-slicer waveforms retain the light accent wash');
   assert.match(sampleManager, /isInsideTrim \? 'bg-\[var\(--apex-accent\)\]'/, 'trimmed sample waveform bars retain the accent color');
   assert.match(sampleManager, /shadow-\[0_0_8px_var\(--apex-success\)\]/);

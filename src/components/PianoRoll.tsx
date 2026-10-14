@@ -1259,7 +1259,7 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
 
           {/* Chord Stamp & Voicing */}
           <div className="flex items-center gap-1.5 text-[11px] bg-[var(--apex-chrome-inset)] px-2 py-0.5 rounded border border-[var(--apex-border)]">
-            <span className="text-[var(--apex-cyan)] font-bold text-[10px]">STAMP:</span>
+            <span className="text-[var(--apex-cyan-text)] font-bold text-[10px]">STAMP:</span>
             <select
               value={selectedChordStamp}
               onChange={(e) => setSelectedChordStamp(Number(e.target.value))}
@@ -1288,7 +1288,7 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
           {/* Strum Chords Button */}
           <button
             onClick={handleStrumNotes}
-            className="flex items-center gap-1 px-2 py-1 bg-[var(--apex-surface-2)] hover:bg-[var(--apex-state-hover)] text-[var(--apex-cyan)] hover:text-[var(--apex-text)] rounded text-[10px] font-semibold border border-[#00bcd4]/30 transition shadow-sm"
+            className="flex items-center gap-1 px-2 py-1 bg-[var(--apex-surface-2)] hover:bg-[var(--apex-state-hover)] text-[var(--apex-cyan-text)] hover:text-[var(--apex-text)] rounded text-[10px] font-semibold border border-[color-mix(in_srgb,var(--apex-cyan)_30%,transparent)] transition shadow-sm"
             title="Strum chord notes with micro-timing offset"
           >
             <Music className="w-3 h-3" />
@@ -1298,7 +1298,7 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
           {/* Extract Root Bassline */}
           <button
             onClick={handleExtractBassline}
-            className="flex items-center gap-1 px-2 py-1 bg-[var(--apex-surface-2)] hover:bg-[var(--apex-state-hover)] text-[var(--apex-gold)] hover:text-[var(--apex-text)] rounded text-[10px] font-bold border border-[#ff9800]/40 transition shadow-sm"
+            className="flex items-center gap-1 px-2 py-1 bg-[var(--apex-surface-2)] hover:bg-[var(--apex-state-hover)] text-[var(--apex-gold)] hover:text-[var(--apex-text)] rounded text-[10px] font-bold border border-[color-mix(in_srgb,var(--apex-gold)_40%,transparent)] transition shadow-sm"
             title="Auto-extract lowest root notes to 808/Bassline channel"
           >
             <Zap className="w-3 h-3 text-[var(--apex-accent)]" />
@@ -1310,7 +1310,7 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
             onClick={() => setShowGhostNotes(!showGhostNotes)}
             className={`flex items-center gap-1 px-2 py-1 rounded text-[10px] font-semibold border transition ${
               showGhostNotes
-                ? 'bg-[var(--apex-surface-3)] text-[var(--apex-success)] border-[#2ecc71]/40'
+                ? 'bg-[var(--apex-surface-3)] text-[var(--apex-success)] border-[color-mix(in_srgb,var(--apex-success)_40%,transparent)]'
                 : 'bg-[var(--apex-chrome-inset)] text-[var(--apex-text-3)] border-[var(--apex-border)]'
             }`}
             title="Toggle Ghost Notes from other channels"
@@ -1344,7 +1344,7 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
 
           {/* MIDI Import (.mid) */}
           <label
-            className="flex items-center gap-1 px-2 py-1 bg-[var(--apex-surface-2)] hover:bg-[var(--apex-state-hover)] text-[var(--apex-cyan)] hover:text-[var(--apex-text)] rounded text-[10px] font-semibold border border-[#00bcd4]/30 transition cursor-pointer"
+            className="flex items-center gap-1 px-2 py-1 bg-[var(--apex-surface-2)] hover:bg-[var(--apex-state-hover)] text-[var(--apex-cyan-text)] hover:text-[var(--apex-text)] rounded text-[10px] font-semibold border border-[color-mix(in_srgb,var(--apex-cyan)_30%,transparent)] transition cursor-pointer"
             title="Import Standard MIDI File (.mid)"
           >
             <Upload className="w-3 h-3" />
@@ -1360,7 +1360,7 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
           {/* MIDI Export (.mid) */}
           <button
             onClick={handleExportMidi}
-            className="flex items-center gap-1 px-2 py-1 bg-[var(--apex-surface-2)] hover:bg-[var(--apex-state-hover)] text-[var(--apex-success)] hover:text-[var(--apex-text)] rounded text-[10px] font-semibold border border-[#2ecc71]/30 transition"
+            className="flex items-center gap-1 px-2 py-1 bg-[var(--apex-surface-2)] hover:bg-[var(--apex-state-hover)] text-[var(--apex-success)] hover:text-[var(--apex-text)] rounded text-[10px] font-semibold border border-[color-mix(in_srgb,var(--apex-success)_30%,transparent)] transition"
             title="Export Channel Notes to Standard MIDI File (.mid)"
           >
             <Download className="w-3 h-3" />
@@ -1569,7 +1569,7 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
                           role="separator"
                           aria-label="Resize note start"
                           onPointerDown={(e) => beginResize(e, n, 'left')}
-                          className="absolute left-0 top-0 bottom-0 w-2 cursor-ew-resize hover:bg-black/20 z-20"
+                          className="absolute left-0 top-0 bottom-0 w-2 cursor-ew-resize hover:bg-[color-mix(in_srgb,var(--apex-state-playing-fg)_20%,transparent)] z-20"
                           style={{ touchAction: 'none' }}
                         />
 
@@ -1580,10 +1580,10 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
                           role="separator"
                           aria-label="Resize note end"
                           onPointerDown={(e) => beginResize(e, n, 'right')}
-                          className="absolute right-0 top-0 bottom-0 w-2.5 cursor-ew-resize hover:bg-black/20 flex items-center justify-center z-20"
+                          className="absolute right-0 top-0 bottom-0 w-2.5 cursor-ew-resize hover:bg-[color-mix(in_srgb,var(--apex-state-playing-fg)_20%,transparent)] flex items-center justify-center z-20"
                           style={{ touchAction: 'none' }}
                         >
-                          <div className="w-0.5 h-3 bg-black/40 rounded-xs pointer-events-none" />
+                          <div className="w-0.5 h-3 bg-[color-mix(in_srgb,var(--apex-state-playing-fg)_40%,transparent)] rounded-xs pointer-events-none" />
                         </div>
                       </div>
                     );
