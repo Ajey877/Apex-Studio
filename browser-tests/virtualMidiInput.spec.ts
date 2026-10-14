@@ -89,12 +89,18 @@ const blockWidthPx = (page: Page, id: string): Promise<number> =>
 const blockName = (page: Page, id: string): Promise<string> =>
   page.locator(`#${id}`).evaluate((el) => (el.textContent ?? '').trim());
 
+// Reads the note name a key renders. The key button also renders a decorative
+// root dot (an empty first span) and an "OCT" tag for C notes, so pick the
+// first non-empty, non-"OCT" span rather than the first span blindly.
 const keyName = (page: Page, pitch: number): Promise<string> =>
   page
     .locator(`#piano-key-${pitch}`)
-    .locator('span')
-    .first()
-    .innerText();
+    .evaluate((el) => {
+      const texts = [...el.querySelectorAll('span')]
+        .map((s) => (s.textContent ?? '').trim())
+        .filter((t) => t.length > 0 && t !== 'OCT');
+      return texts[0] ?? '';
+    });
 
 test.describe('Virtual piano keyboard recording (phone viewport)', () => {
   test('armed take captures tapped virtual keys with the correct pitches', async ({ page }) => {
