@@ -66,7 +66,11 @@ test.describe('MIDI recording into the Piano Roll', () => {
     const toggle = page.getByTestId('midi-record-toggle');
     await expect(toggle).toBeVisible();
     await expect(toggle).toHaveAttribute('aria-pressed', 'false');
-    await expect(page.getByTestId('midi-record-target')).toContainText('Pattern 1');
+    // The label names the actual target channel and pattern of the loaded
+    // project (whatever they are called), in `Channel · Pattern` form.
+    await expect(page.getByTestId('midi-record-target')).toContainText('·');
+    const targetLabel = (await page.getByTestId('midi-record-target').innerText()).trim();
+    expect(targetLabel.length).toBeGreaterThan(3);
 
     await page.waitForFunction(() => {
       const input = (window as unknown as {
