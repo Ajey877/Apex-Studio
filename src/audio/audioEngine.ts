@@ -68,6 +68,7 @@ import {
   resolveFxSlot,
 } from './fxParameterControl';
 import { resolveFxParameterSpec } from './fxParameterContract';
+import { audioBufferToWav } from './wavEncoder';
 
 // Phase 1F: the legacy 4/4 grid (LEGACY_TIME_SIGNATURE) remains the DEFAULT
 // for the pure resolvers below — missing/unsupported project meters must keep
@@ -3350,65 +3351,7 @@ class AudioEngine {
 
   // AudioBuffer to Lossless WAV encoder with IEEE Float or PCM Header
   private audioBufferToWav(buffer: AudioBuffer, bitDepth: 16 | 24 | 32): Blob {
-    const numChannels = buffer.numberOfChannels;
-    const sampleRate = buffer.sampleRate;
-    const format = bitDepth === 32 ? 3 : 1; // 3 = IEEE Float, 1 = PCM
-    const bytesPerSample = bitDepth / 8;
-    const blockAlign = numChannels * bytesPerSample;
-
-    const dataLength = buffer.length * blockAlign;
-    const bufferLength = 44 + dataLength;
-    const arrayBuffer = new ArrayBuffer(bufferLength);
-    const view = new DataView(arrayBuffer);
-
-    // RIFF identifier
-    this.writeString(view, 0, 'RIFF');
-    view.setUint32(4, 36 + dataLength, true);
-    this.writeString(view, 8, 'WAVE');
-    this.writeString(view, 12, 'fmt ');
-    view.setUint32(16, 16, true);
-    view.setUint16(20, format, true);
-    view.setUint16(22, numChannels, true);
-    view.setUint32(24, sampleRate, true);
-    view.setUint32(28, sampleRate * blockAlign, true);
-    view.setUint16(32, blockAlign, true);
-    view.setUint16(34, bitDepth, true);
-    this.writeString(view, 36, 'data');
-    view.setUint32(40, dataLength, true);
-
-    // Interleave left and right channels
-    const left = buffer.getChannelData(0);
-    const right = numChannels > 1 ? buffer.getChannelData(1) : left;
-
-    let offset = 44;
-    for (let i = 0; i < buffer.length; i++) {
-      for (let ch = 0; ch < numChannels; ch++) {
-        const sample = ch === 0 ? left[i] : right[i];
-        const clamped = Math.max(-1, Math.min(1, sample));
-
-        if (bitDepth === 16) {
-          view.setInt16(offset, clamped < 0 ? clamped * 0x8000 : clamped * 0x7fff, true);
-          offset += 2;
-        } else if (bitDepth === 24) {
-          const val = clamped < 0 ? clamped * 0x800000 : clamped * 0x7fffff;
-          view.setUint8(offset, val & 0xff);
-          view.setUint8(offset + 1, (val >> 8) & 0xff);
-          view.setUint8(offset + 2, (val >> 16) & 0xff);
-          offset += 3;
-        } else {
-          view.setFloat32(offset, clamped, true);
-          offset += 4;
-        }
-      }
-    }
-
-    return new Blob([view], { type: 'audio/wav' });
-  }
-
-  private writeString(view: DataView, offset: number, string: string) {
-    for (let i = 0; i < string.length; i++) {
-      view.setUint8(offset + i, string.charCodeAt(i));
-    }
+    return audioBufferToWav(buffer, bitDepth);
   }
 
   // --- Transport & Sequencer Loop ---
