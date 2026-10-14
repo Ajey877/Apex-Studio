@@ -1,17 +1,15 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
 /**
  * UI-03A — theme-foundation guards.
  *
- * These assertions cover the parts of Lighting/Dark that are pure CSS facts and
- * therefore cheap to protect: which theme owns `color-scheme`, whether the legacy
- * compatibility layer can still smuggle a dark literal into a Light session, and
- * whether the four semantic text steps are actually readable on every surface
- * they are painted on.
+ * These assertions cover pure CSS facts that are cheap to protect: which theme
+ * owns `color-scheme`, whether the retired compatibility mapping has any live
+ * source consumers, and whether semantic text is readable on every surface.
  *
  * The live behaviour (pre-paint, persistence, switching) is covered by
  * `theme.test.ts` and by the real-browser suite in `browser-tests/`.
@@ -105,6 +103,30 @@ const SURFACES = [
   '--apex-canvas',
 ] as const;
 
+// The 44 selector entries removed with UI-1C. Matching source utilities here
+// (rather than preserving the old CSS) makes a future consumer force a token
+// migration before another compatibility mapping can be added.
+const LEGACY_COMPATIBILITY_COLORS = [
+  '0a0a0b', '121214', '141416', '1a1a1d', '1e1e20', '18181c',
+  '222225', '252525', '2d2d30', '1c1c20', '202024', '242428', '2a2a2e',
+  '26262a', '28282e', '2e2e34', '333336', '282830', '333',
+  'b0b0b0', '777', '888', '666', '555', '444',
+  'ff6e00', 'ff7d1a', '00bcd4', '00e5ff', '000', 'ff0000', '00ff00', '00ff88',
+] as const;
+const LEGACY_COMPATIBILITY_UTILITY = new RegExp(
+  `(?:hover:)?(?:bg|text|border)-\\[#(?:${LEGACY_COMPATIBILITY_COLORS.join('|')})\\]`,
+  'i'
+);
+const SOURCE_EXTENSIONS = new Set(['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.css', '.html']);
+
+const productionSources = (directory: string): string[] => readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
+  const absolutePath = path.join(directory, entry.name);
+  if (entry.isDirectory()) return productionSources(absolutePath);
+  if (!entry.isFile() || !SOURCE_EXTENSIONS.has(path.extname(entry.name).toLowerCase())) return [];
+  if (entry.name.includes('.test.') || entry.name.includes('.spec.')) return [];
+  return [absolutePath];
+});
+
 test('color-scheme follows the active theme instead of being forced dark', () => {
   const css = indexCss();
   // No bare `:root { color-scheme: dark }`: that is what kept native controls dark
@@ -123,29 +145,40 @@ test('color-scheme follows the active theme instead of being forced dark', () =>
   assert.match(css, /:root:not\(\[data-theme\]\)\s*\{\s*color-scheme:\s*dark;\s*\}/);
 });
 
-test('the legacy compatibility layer resolves every colour through a semantic token', () => {
+test('the dead UI-1C compatibility layer is retired with no remaining source consumers', () => {
   const css = indexCss();
-  const start = css.indexOf('/* Map the old black/orange utility palette');
-  const end = css.indexOf('#fl-transport-bar {', start);
-  assert.ok(start >= 0 && end > start, 'the legacy compatibility layer must be present');
-  const layer = css.slice(start, end);
-  // Selector names legitimately contain the old hex (`.bg-\[\#18181c\]`); what must
-  // never appear again is a literal on the value side, which is dark-only because
-  // these rules win with `!important`.
-  const literalValues = [
-    ...layer.matchAll(/(?:background-color|color|border-color|background)\s*:\s*([^;!]+)/g),
-  ]
-    .map(match => match[1].trim())
-    .filter(value => /#[0-9a-f]{3,8}\b/i.test(value) && !value.includes('color-mix'));
-  assert.deepEqual(literalValues, [], 'legacy utilities must map onto tokens, not literals');
-  assert.ok(
-    layer.includes('background-color: var(--apex-panel-header)'),
-    'the panel-band literal is the defect being fixed'
+  assert.equal(
+    css.includes('/* Map the old black/orange utility palette'),
+    false,
+    'the compatibility mapping must stay retired'
   );
-  assert.equal(layer.includes('#1c202b'), false, 'the dark-only panel literal must be gone');
-  assert.equal(layer.includes('#151821'), false, 'the dark-only canvas literal must be gone');
-  assert.equal(layer.includes('#858da0'), false, 'the dark-only muted literal must be gone');
-  assert.equal(layer.includes('#161a23'), false, 'the dead panel literal must be gone');
+  assert.doesNotMatch(
+    css,
+    /\[class\*="(?:bg|text|border)-\[#ff(?:6e00|7d1a)\]/,
+    'the old partial-match accent overrides must stay retired'
+  );
+
+  const sourceFiles = [
+    ...productionSources(path.join(repoRoot, 'src')),
+    ...productionSources(path.join(repoRoot, 'scripts')),
+    path.join(repoRoot, 'index.html'),
+  ];
+  const liveConsumers: string[] = [];
+  for (const sourcePath of sourceFiles) {
+    const source = readFileSync(sourcePath, 'utf8');
+    const utility = source.match(LEGACY_COMPATIBILITY_UTILITY);
+    if (utility) liveConsumers.push(`${path.relative(repoRoot, sourcePath)}: ${utility[0]}`);
+    assert.equal(
+      /(?:bg|text|border)-\[\$\{/.test(source),
+      false,
+      `${path.relative(repoRoot, sourcePath)} must not construct arbitrary legacy colour utilities dynamically`
+    );
+  }
+  assert.deepEqual(
+    liveConsumers,
+    [],
+    'production source must use semantic tokens rather than classes formerly remapped by UI-1C'
+  );
 });
 
 test('every semantic text step reaches AA on every surface in both themes', () => {
