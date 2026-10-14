@@ -36,7 +36,7 @@ export const ProjectReplaceConfirmModal: React.FC<ProjectReplaceConfirmModalProp
       role="alertdialog"
       aria-modal="true"
       aria-labelledby="project-replace-confirm-title"
-      className="fixed inset-0 bg-black/80 backdrop-blur-sm z-[60] flex items-center justify-center p-3 sm:p-4"
+      className="apex-modal-overlay fixed inset-0 backdrop-blur-sm z-[60] flex items-center justify-center p-3 sm:p-4"
     >
       <div className="bg-[var(--apex-panel)] border border-[var(--apex-state-selected-border)] rounded-xl w-full max-w-md shadow-2xl overflow-hidden text-[var(--apex-text-2)]">
         <div className="px-4 py-3 bg-[var(--apex-panel-header)] border-b border-[var(--apex-border)] flex items-center justify-between">

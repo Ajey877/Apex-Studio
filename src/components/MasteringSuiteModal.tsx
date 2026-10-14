@@ -662,7 +662,7 @@ export const MasteringSuiteModal: React.FC<MasteringSuiteModalProps> = ({
   };
 
   return (
-    <ModalFrame labelledBy="mastering-suite-modal-title" onClose={onClose} className="fixed inset-0 z-50 flex items-center justify-center p-3 bg-black/80 backdrop-blur-md animate-fade-in select-none">
+    <ModalFrame labelledBy="mastering-suite-modal-title" onClose={onClose} className="fixed inset-0 z-50 flex items-center justify-center p-3 backdrop-blur-md animate-fade-in select-none">
       <div className="bg-[var(--apex-surface)] border border-[var(--apex-border)] rounded-xl w-full max-w-4xl max-h-[90vh] flex flex-col shadow-[var(--apex-shadow)] overflow-hidden text-[var(--apex-text-2)]">
         {/* Header */}
         <div className="bg-[var(--apex-panel-header)] border-b border-[var(--apex-border)] px-4 py-3 flex items-center justify-between">

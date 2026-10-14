@@ -54,6 +54,11 @@ const THEMED_SURFACES = [
   // list, so the neutral-legacy guard covers them too.
   'src/components/ProjectBundleZipModal.tsx',
   'src/components/AppErrorBoundary.tsx',
+  // UI-03Q: the last literal scrims are gone, so the project-settings and
+  // replace-confirm dialogs join the guard too.
+  'src/components/ProjectSettingsModal.tsx',
+  'src/components/ProjectReplaceConfirmModal.tsx',
+  'src/components/MasteringSuiteModal.tsx',
 ];
 
 test('UI-04 defines shared dark and light surface, state, grid and piano-key tokens', () => {

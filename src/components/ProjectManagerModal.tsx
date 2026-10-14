@@ -120,7 +120,7 @@ export const ProjectManagerModal: React.FC<ProjectManagerModalProps> = ({ isOpen
   };
 
   return (
-    <ModalFrame id="project-manager-modal" labelledBy="project-manager-modal-title" onClose={onClose} className="fixed inset-0 bg-black/85 backdrop-blur-sm z-50 flex items-center justify-center p-3 sm:p-4">
+    <ModalFrame id="project-manager-modal" labelledBy="project-manager-modal-title" onClose={onClose} className="fixed inset-0 backdrop-blur-sm z-50 flex items-center justify-center p-3 sm:p-4">
       <div className="bg-[var(--apex-panel)] border border-[var(--apex-border)] rounded-xl w-full max-w-2xl shadow-2xl overflow-hidden text-[var(--apex-text-2)] max-h-[90vh] flex flex-col">
         <div className="px-4 sm:px-5 py-3 bg-[var(--apex-panel-header)] border-b border-[var(--apex-border)] flex items-center justify-between shrink-0">
           <div className="flex items-center space-x-2.5">

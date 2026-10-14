@@ -165,7 +165,7 @@ export const ProjectSettingsModal: React.FC<ProjectSettingsModalProps> = ({
       id="project-settings-modal"
       labelledBy="project-settings-modal-title"
       onClose={onClose}
-      className="fixed inset-0 z-[70] flex items-center justify-center bg-black/60 p-4"
+      className="fixed inset-0 z-[70] flex items-center justify-center p-4"
     >
       <div className="apex-dialog w-[min(92vw,34rem)] border border-[var(--apex-border)] bg-[var(--apex-surface)] p-5 text-[var(--apex-text)]">
         <div className="mb-4 flex items-start justify-between gap-4">
@@ -187,7 +187,7 @@ export const ProjectSettingsModal: React.FC<ProjectSettingsModalProps> = ({
         </div>
 
         {!stored.supported && (
-          <p role="alert" className="mb-3 rounded-md border border-[var(--apex-warning,#d97706)] p-2 text-xs">
+          <p role="alert" className="mb-3 rounded-md border border-[var(--apex-gold)] p-2 text-xs">
             This project stores an unsupported time signature ({stored.label}); it plays as 4/4. Choose a supported meter to replace it.
           </p>
         )}
