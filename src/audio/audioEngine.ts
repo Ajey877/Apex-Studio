@@ -511,15 +511,32 @@ class AudioEngine {
   private masterAnalyser: AnalyserNode | null = null;
   private grossBeatNode: GainNode | null = null;
   /**
-   * Phase 45 master metering tap. `masterAnalyser` above stays exactly where
-   * it was (it down-mixes to mono, which is fine for the spectrum the mixer
-   * already reads); the splitter below is what makes an independent L/R
-   * measurement possible. Both analysers are leaves, mirroring the working
-   * per-channel analyser, so nothing about the audible graph changes.
+   * Phase 45 master metering tap. The splitter below is fed from the master
+   * *output* node — `masteringProcessor.output` when the mastering stage exists,
+   * otherwise `grossBeatNode` — so the independent L/R measurement is taken
+   * after every stage of the master chain, which is what
+   * `getMasterLoudnessMetrics` promises its callers.
+   *
+   * `masterAnalyser` above stays exactly where it was (it down-mixes to mono,
+   * which is fine for the spectrum the mixer already reads); the splitter below
+   * is what makes an independent L/R measurement possible. The L/R analysers are
+   * leaves, mirroring the working per-channel analyser, so nothing about the
+   * audible graph changes.
    */
   private masterSplitter: ChannelSplitterNode | null = null;
   private masterAnalyserL: AnalyserNode | null = null;
   private masterAnalyserR: AnalyserNode | null = null;
+  /**
+   * The node the measurement splitter is currently hanging off — the master
+   * output (`masteringProcessor.output`, or `grossBeatNode` when no mastering
+   * stage exists).
+   *
+   * A splitter's own `disconnect()` clears only what the splitter *feeds*; it
+   * cannot remove the edge that feeds the splitter. Disposal therefore has to
+   * disconnect this node from the splitter explicitly, otherwise every rebuild
+   * leaves the master output feeding a discarded splitter.
+   */
+  private masterMeasurementSource: AudioNode | null = null;
   private loudnessMeter: LoudnessMeter | null = null;
   private truePeakMeter: TruePeakMeter | null = null;
   private stereoFieldMeter: StereoFieldMeter | null = null;
@@ -5269,8 +5286,28 @@ class AudioEngine {
     this.masterAnalyserL = analyserL;
     this.masterAnalyserR = analyserR;
 
-    if (this.grossBeatNode) {
-      this.grossBeatNode.connect(splitter);
+    // Phase 90: measure the master output, not an interior node of the master
+    // chain. The mastering processor was introduced after this tap was written,
+    // and the tap kept hanging off `grossBeatNode`, which is the processor's
+    // *input*. `getMasterLoudnessMetrics` documents its readings as coming from
+    // "samples that actually passed the master output", and the maximizer's
+    // ceiling is only verifiable against a post-processor reading, so a
+    // pre-processor tap made the gated loudness, true peak and stereo field
+    // describe a signal the user never hears whenever mastering is enabled.
+    //
+    // The tap now follows the same master-output node that feeds the destination
+    // above: `masteringProcessor.output` when the stage is present, and the
+    // pre-processor node when it is not. This is measurement wiring only — the
+    // audible path is untouched, and both analysers remain leaves with no path
+    // back into the graph, so there is no parallel output, gain change, or
+    // feedback. `disposeMasterMeasurementTap()` clears the edge on every
+    // `createMasterMeasurementTap` call and on shutdown.
+    const masterOutputNode: AudioNode | null = this.masteringProcessor
+      ? this.masteringProcessor.output
+      : this.grossBeatNode;
+    if (masterOutputNode) {
+      this.masterMeasurementSource = masterOutputNode;
+      masterOutputNode.connect(splitter);
       splitter.connect(analyserL, 0);
       splitter.connect(analyserR, 1);
     }
@@ -5284,12 +5321,21 @@ class AudioEngine {
   }
 
   private disposeMasterMeasurementTap(): void {
+    const splitter = this.masterSplitter;
+    const source = this.masterMeasurementSource;
+    // Detach the tap's *incoming* edge first. `splitter.disconnect()` below only
+    // clears what the splitter feeds; without this the master output would keep
+    // feeding every splitter this method has ever retired.
+    if (splitter && source) {
+      try { source.disconnect(splitter); } catch (_) { /* already detached */ }
+    }
     try { this.masterSplitter?.disconnect(); } catch (_) { /* already torn down */ }
     try { this.masterAnalyserL?.disconnect(); } catch (_) { /* already torn down */ }
     try { this.masterAnalyserR?.disconnect(); } catch (_) { /* already torn down */ }
     this.masterSplitter = null;
     this.masterAnalyserL = null;
     this.masterAnalyserR = null;
+    this.masterMeasurementSource = null;
     this.measurementScratch = null;
   }
 
