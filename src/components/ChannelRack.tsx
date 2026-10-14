@@ -606,7 +606,7 @@ export const ChannelRack: React.FC<ChannelRackProps> = ({
                       e.stopPropagation();
                       handleClearSteps(ch);
                     }}
-                    className="px-1 py-0.5 bg-[var(--apex-surface-2)] hover:bg-[var(--apex-state-hover)] text-[var(--apex-text-3)] hover:text-red-400 rounded text-[8px] font-mono"
+                    className="px-1 py-0.5 bg-[var(--apex-surface-2)] hover:bg-[var(--apex-state-hover)] text-[var(--apex-text-3)] hover:text-[var(--apex-danger)] rounded text-[8px] font-mono"
                     title="Clear steps"
                   >
                     CLR
@@ -617,7 +617,7 @@ export const ChannelRack: React.FC<ChannelRackProps> = ({
                       onDeleteChannel(ch.id);
                     }}
                     disabled={channels.length <= 1}
-                    className="px-1 py-0.5 bg-[var(--apex-surface-2)] hover:bg-[var(--apex-state-hover)] text-[var(--apex-text-3)] hover:text-red-400 rounded disabled:opacity-30 disabled:cursor-not-allowed flex items-center justify-center"
+                    className="px-1 py-0.5 bg-[var(--apex-surface-2)] hover:bg-[var(--apex-state-hover)] text-[var(--apex-text-3)] hover:text-[var(--apex-danger)] rounded disabled:opacity-30 disabled:cursor-not-allowed flex items-center justify-center"
                     title={
                       channels.length <= 1
                         ? 'Cannot delete the last channel'

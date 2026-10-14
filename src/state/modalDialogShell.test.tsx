@@ -198,7 +198,13 @@ interface ModalCase {
 
 const OVERLAY_SHELL = 'fixed inset-0 bg-black/85 backdrop-blur-sm z-50 flex items-center justify-center p-3 sm:p-4';
 const OVERLAY_SHELL_PADDED = 'fixed inset-0 bg-black/85 backdrop-blur-sm z-50 flex items-center justify-center p-4';
-const OVERLAY_STUDIO = 'fixed inset-0 bg-black/85 backdrop-blur-md z-50 flex items-center justify-center p-3 sm:p-4 select-none';
+/**
+ * UI-03P: the Project Bundle Zip modal was the last overlay still carrying its
+ * own opaque `bg-black/85` fill on top of the `apex-modal-overlay` primitive.
+ * The fill is gone and the primitive's theme-aware scrim owns it, exactly like
+ * the other studio modals above — the rest of the frame is verbatim.
+ */
+const OVERLAY_STUDIO = 'fixed inset-0 backdrop-blur-md z-50 flex items-center justify-center p-3 sm:p-4 select-none';
 const OVERLAY_FLOATING = 'fixed inset-0 z-50 flex items-center justify-center p-3 bg-black/80 backdrop-blur-md animate-fade-in select-none';
 const OVERLAY_HUB = 'fixed inset-0 z-50 flex items-center justify-center backdrop-blur-sm p-4 animate-in fade-in';
 

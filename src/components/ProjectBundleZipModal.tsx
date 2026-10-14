@@ -195,67 +195,67 @@ Engine: Apex Studio Digital Audio Workstation
   };
 
   return (
-    <ModalFrame id="fl-project-zip-modal" labelledBy="fl-project-zip-modal-title" onClose={onClose} className="fixed inset-0 bg-black/85 backdrop-blur-md z-50 flex items-center justify-center p-3 sm:p-4 select-none">
-      <div className="bg-[#121215] border border-[#ffaa00]/40 rounded-xl w-full max-w-2xl shadow-2xl overflow-hidden text-[#b0b0b0] flex flex-col max-h-[92vh]">
-        <div className="px-5 py-3.5 bg-[#18181c] border-b border-[#2e2e34] flex items-center justify-between">
+    <ModalFrame id="fl-project-zip-modal" labelledBy="fl-project-zip-modal-title" onClose={onClose} className="fixed inset-0 backdrop-blur-md z-50 flex items-center justify-center p-3 sm:p-4 select-none">
+      <div className="bg-[var(--apex-surface)] border border-[color-mix(in_srgb,var(--apex-accent)_48%,transparent)] rounded-xl w-full max-w-2xl shadow-2xl overflow-hidden text-[var(--apex-text-2)] flex flex-col max-h-[92vh]">
+        <div className="px-5 py-3.5 bg-[var(--apex-panel-header)] border-b border-[var(--apex-border)] flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-[#ffaa00] to-[#ff6600] flex items-center justify-center text-black shadow-md font-bold"><FolderArchive className="w-5 h-5" /></div>
+            <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-[var(--apex-accent)] to-[var(--apex-accent-strong)] flex items-center justify-center text-[var(--apex-state-playing-fg)] shadow-md font-bold"><FolderArchive className="w-5 h-5" /></div>
             <div>
               <div className="flex items-center gap-2">
-                <h2 id="fl-project-zip-modal-title" className="text-sm font-bold text-white tracking-wide">PROJECT ZIP ARCHIVE BUNDLER</h2>
-                <span className="px-1.5 py-0.5 rounded text-[9px] font-mono font-bold bg-[#ffaa00]/20 text-[#ffaa00] border border-[#ffaa00]/40">PORTABLE .ZIP</span>
+                <h2 id="fl-project-zip-modal-title" className="text-sm font-bold text-[var(--apex-text)] tracking-wide">PROJECT ZIP ARCHIVE BUNDLER</h2>
+                <span className="px-1.5 py-0.5 rounded text-[9px] font-mono font-bold bg-[color-mix(in_srgb,var(--apex-accent)_16%,transparent)] text-[var(--apex-text)] border border-[color-mix(in_srgb,var(--apex-accent)_48%,transparent)]">PORTABLE .ZIP</span>
               </div>
-              <p className="text-[10px] text-[#777]">Portable ZIP = project state + audio assets (complete portable archive)</p>
+              <p className="text-[10px] text-[var(--apex-text-3)]">Portable ZIP = project state + audio assets (complete portable archive)</p>
             </div>
           </div>
-          <button onClick={onClose} aria-label="Close project bundler" className="text-[#777] hover:text-white p-1 rounded hover:bg-[#222226] transition"><X className="w-5 h-5" /></button>
+          <button onClick={onClose} aria-label="Close project bundler" className="text-[var(--apex-text-3)] hover:text-[var(--apex-text)] p-1 rounded hover:bg-[var(--apex-state-hover)] transition"><X className="w-5 h-5" /></button>
         </div>
 
         {statusMessage && (
-          <div className="bg-[#ffaa00] text-black font-bold text-xs px-4 py-1.5 flex items-center justify-between shadow-md">
+          <div className="bg-[var(--apex-accent)] text-[var(--apex-state-playing-fg)] font-bold text-xs px-4 py-1.5 flex items-center justify-between shadow-md">
             <div className="flex items-center gap-1.5"><Sparkles className="w-4 h-4" /><span>{statusMessage}</span></div>
-            <button onClick={() => setStatusMessage(null)} className="text-black/80 hover:text-black">✕</button>
+            <button onClick={() => setStatusMessage(null)} aria-label="Dismiss status message" className="text-[color-mix(in_srgb,var(--apex-state-playing-fg)_80%,transparent)] hover:text-[var(--apex-state-playing-fg)]">✕</button>
           </div>
         )}
 
         <div className="p-5 overflow-y-auto custom-scrollbar space-y-4 text-xs">
-          <div className="bg-[#18181c] p-4 rounded-xl border border-[#28282e] space-y-3">
-            <span className="text-xs font-bold text-white uppercase block">EXPORT COMPLETE PROJECT ZIP</span>
-            <p className="text-[11px] text-[#777]">Portable ZIP bundle = project state + audio assets. Use this format to share sessions with all audio across computers.</p>
+          <div className="bg-[var(--apex-surface-2)] p-4 rounded-xl border border-[var(--apex-border)] space-y-3">
+            <span className="text-xs font-bold text-[var(--apex-text)] uppercase block">EXPORT COMPLETE PROJECT ZIP</span>
+            <p className="text-[11px] text-[var(--apex-text-3)]">Portable ZIP bundle = project state + audio assets. Use this format to share sessions with all audio across computers.</p>
             <div className="space-y-2">
               <div>
-                <label className="text-[10px] text-[#888] font-bold block mb-1">ARCHIVE FILE NAME</label>
-                <input type="text" value={bundleName} onChange={(e) => setBundleName(e.target.value)} className="w-full bg-[#121214] text-white px-3 py-1.5 rounded border border-[#333] font-mono text-xs focus:border-[#ffaa00] focus:outline-none" />
+                <label className="text-[10px] text-[var(--apex-text-2)] font-bold block mb-1">ARCHIVE FILE NAME</label>
+                <input type="text" value={bundleName} onChange={(e) => setBundleName(e.target.value)} className="w-full bg-[var(--apex-canvas)] text-[var(--apex-text)] px-3 py-1.5 rounded border border-[var(--apex-border)] font-mono text-xs focus:border-[var(--apex-accent)] focus:outline-none" />
               </div>
               <div className="grid grid-cols-2 gap-2 pt-1">
-                <label className="flex items-center gap-2 cursor-pointer bg-[#121214] p-2 rounded border border-[#26262a]">
-                  <input type="checkbox" checked={includeMidiFiles} onChange={(e) => setIncludeMidiFiles(e.target.checked)} className="accent-[#ffaa00]" />
-                  <span className="text-white font-bold text-[11px]">Include Pattern JSONs</span>
+                <label className="flex items-center gap-2 cursor-pointer bg-[var(--apex-canvas)] p-2 rounded border border-[var(--apex-border)]">
+                  <input type="checkbox" checked={includeMidiFiles} onChange={(e) => setIncludeMidiFiles(e.target.checked)} className="accent-[var(--apex-accent)]" />
+                  <span className="text-[var(--apex-text)] font-bold text-[11px]">Include Pattern JSONs</span>
                 </label>
-                <label className="flex items-center gap-2 cursor-pointer bg-[#121214] p-2 rounded border border-[#26262a]">
-                  <input type="checkbox" checked={includeSamples} onChange={(e) => setIncludeSamples(e.target.checked)} className="accent-[#ffaa00]" />
-                  <span className="text-white font-bold text-[11px]">Include Audio Assets</span>
+                <label className="flex items-center gap-2 cursor-pointer bg-[var(--apex-canvas)] p-2 rounded border border-[var(--apex-border)]">
+                  <input type="checkbox" checked={includeSamples} onChange={(e) => setIncludeSamples(e.target.checked)} className="accent-[var(--apex-accent)]" />
+                  <span className="text-[var(--apex-text)] font-bold text-[11px]">Include Audio Assets</span>
                 </label>
               </div>
             </div>
-            <button onClick={handleExportZip} disabled={isExporting} className="w-full py-2 bg-gradient-to-r from-[#ffaa00] to-[#ff7700] hover:opacity-90 disabled:opacity-50 text-black font-bold rounded-lg transition shadow flex items-center justify-center gap-2">
+            <button onClick={handleExportZip} disabled={isExporting} className="w-full py-2 bg-gradient-to-r from-[var(--apex-accent)] to-[var(--apex-accent-strong)] hover:opacity-90 disabled:opacity-50 text-[var(--apex-state-playing-fg)] font-bold rounded-lg transition shadow flex items-center justify-center gap-2">
               <Download className="w-4 h-4" /><span>{isExporting ? 'Packaging Audio + Project...' : 'Download Portable .ZIP Bundle'}</span>
             </button>
           </div>
 
-          <div className="bg-[#18181c] p-4 rounded-xl border border-[#28282e] space-y-3">
-            <span className="text-xs font-bold text-white uppercase block">IMPORT EXISTING PROJECT ZIP</span>
-            <p className="text-[11px] text-[#777]">Restore project state and unpack bundled audio assets into local storage for canonical session hydration.</p>
-            <button onClick={() => fileInputRef.current?.click()} disabled={isImporting} className="w-full py-2 bg-[#25252a] hover:bg-[#333338] disabled:opacity-50 text-white border border-[#444] font-bold rounded-lg transition shadow flex items-center justify-center gap-2">
-              <Upload className="w-4 h-4 text-[#ffaa00]" /><span>{isImporting ? 'Unpacking Archive...' : 'Choose .ZIP File to Import'}</span>
+          <div className="bg-[var(--apex-surface-2)] p-4 rounded-xl border border-[var(--apex-border)] space-y-3">
+            <span className="text-xs font-bold text-[var(--apex-text)] uppercase block">IMPORT EXISTING PROJECT ZIP</span>
+            <p className="text-[11px] text-[var(--apex-text-3)]">Restore project state and unpack bundled audio assets into local storage for canonical session hydration.</p>
+            <button onClick={() => fileInputRef.current?.click()} disabled={isImporting} className="w-full py-2 bg-[var(--apex-surface-3)] hover:bg-[var(--apex-state-hover)] disabled:opacity-50 text-[var(--apex-text)] border border-[var(--apex-border)] font-bold rounded-lg transition shadow flex items-center justify-center gap-2">
+              <Upload className="w-4 h-4 text-[var(--apex-accent)]" /><span>{isImporting ? 'Unpacking Archive...' : 'Choose .ZIP File to Import'}</span>
             </button>
             <input type="file" ref={fileInputRef} onChange={handleImportZip} accept=".zip,application/zip" className="hidden" />
           </div>
         </div>
 
-        <div className="px-5 py-3 bg-[#18181c] border-t border-[#2e2e34] flex items-center justify-between text-xs">
-          <span className="text-[10px] text-[#666]">Apex Studio Portable Bundle v2</span>
-          <button onClick={onClose} className="px-4 py-1.5 bg-[#25252a] hover:bg-[#333338] text-white font-bold rounded transition">Close</button>
+        <div className="px-5 py-3 bg-[var(--apex-panel-header)] border-t border-[var(--apex-border)] flex items-center justify-between text-xs">
+          <span className="text-[10px] text-[var(--apex-text-3)]">Apex Studio Portable Bundle v2</span>
+          <button onClick={onClose} className="px-4 py-1.5 bg-[var(--apex-surface-3)] hover:bg-[var(--apex-state-hover)] text-[var(--apex-text)] font-bold rounded transition">Close</button>
         </div>
       </div>
     </ModalFrame>

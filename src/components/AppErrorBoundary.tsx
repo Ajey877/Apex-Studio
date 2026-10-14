@@ -1,5 +1,14 @@
 import React, { Component, type ErrorInfo, type ReactNode } from 'react';
 
+/**
+ * UI-03P: the last full-screen surface that was still painted with literals.
+ *
+ * The fallback renders when a child throws, which can happen before any modal
+ * or panel mounts, so it may not be the *focused* surface — but the palette is
+ * already decided on `<html data-theme>` by the pre-paint bootstrap, so every
+ * `--apex-*` token resolves and the fallback follows the active theme instead of
+ * staying black in Light.
+ */
 interface AppErrorBoundaryProps {
   children: ReactNode;
 }
@@ -41,17 +50,17 @@ export class AppErrorBoundary extends Component<AppErrorBoundaryProps, AppErrorB
     if (!this.state.hasError) return this.children;
 
     return (
-      <main className="min-h-screen bg-black px-6 py-12 text-white">
-        <section className="mx-auto max-w-xl rounded-xl border border-white/10 bg-white/5 p-8 shadow-xl">
-          <p className="mb-2 text-xs font-semibold uppercase tracking-[0.2em] text-white/50">
+      <main className="min-h-screen bg-[var(--apex-bg)] px-6 py-12 text-[var(--apex-text)]">
+        <section className="mx-auto max-w-xl rounded-xl border border-[var(--apex-border)] bg-[var(--apex-surface)] p-8 shadow-xl">
+          <p className="mb-2 text-xs font-semibold uppercase tracking-[0.2em] text-[var(--apex-text-3)]">
             Apex Studio
           </p>
           <h1 className="text-2xl font-semibold">Apex Studio could not load this view.</h1>
-          <p className="mt-3 text-sm leading-6 text-white/70">
+          <p className="mt-3 text-sm leading-6 text-[var(--apex-text-2)]">
             The application hit an unexpected error. Reload Apex Studio to try again.
           </p>
           {this.state.errorMessage && (
-            <details className="mt-5 rounded-lg bg-black/30 p-3 text-xs text-white/50">
+            <details className="mt-5 rounded-lg bg-[var(--apex-canvas)] p-3 text-xs text-[var(--apex-text-3)]">
               <summary className="cursor-pointer">Technical details</summary>
               <pre className="mt-2 whitespace-pre-wrap break-words">{this.state.errorMessage}</pre>
             </details>
@@ -59,7 +68,7 @@ export class AppErrorBoundary extends Component<AppErrorBoundaryProps, AppErrorB
           <button
             type="button"
             onClick={this.handleReload}
-            className="mt-6 rounded-lg bg-white px-4 py-2 text-sm font-semibold text-black transition hover:bg-white/90"
+            className="mt-6 rounded-lg bg-[var(--apex-accent)] px-4 py-2 text-sm font-semibold text-[var(--apex-state-playing-fg)] transition hover:bg-[var(--apex-accent-strong)]"
           >
             Reload Apex Studio
           </button>
