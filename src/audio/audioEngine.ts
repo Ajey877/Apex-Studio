@@ -2299,9 +2299,20 @@ class AudioEngine {
       if (slot) slot.mix = bounded;
     }
     const now = this.ctx?.currentTime ?? 0;
-    // Phase 81: use the native slot-effect map rather than the bootstrap registry.
-    const effect = this.__fxSlotEffectMaps.get(trackId)?.get(slotId);
-    if (!effect) return false;
+    // Phase 81: use the native slot-effect map; fall back to the live registry
+    // if the chain hasn't been rebuilt yet (e.g. in tests that set up the bootstrap).
+    let effect = this.__fxSlotEffectMaps.get(trackId)?.get(slotId);
+    if (!effect) {
+      const registry = (this as unknown as {
+        __liveFxChainRegistry?: {
+          applyLiveMix(trackId: number, slotId: string, mix: number, currentTime: number): boolean;
+        };
+      }).__liveFxChainRegistry;
+      if (registry?.applyLiveMix) {
+        return registry.applyLiveMix(trackId, slotId, bounded, now);
+      }
+      return false;
+    }
     try {
       effect.setParameter('mix', bounded, now);
       return true;
@@ -2346,9 +2357,26 @@ class AudioEngine {
       }
     }
     const now = this.ctx?.currentTime ?? 0;
-    // Phase 81: use the native slot-effect map rather than the bootstrap registry.
-    const effect = this.__fxSlotEffectMaps.get(trackId)?.get(slotId);
-    if (!effect) return false;
+    // Phase 81: use the native slot-effect map; fall back to the live registry
+    // if the chain hasn't been rebuilt yet (e.g. in tests that set up the bootstrap).
+    let effect = this.__fxSlotEffectMaps.get(trackId)?.get(slotId);
+    if (!effect) {
+      const registry = (this as unknown as {
+        __liveFxChainRegistry?: {
+          applyLiveParameter(
+            trackId: number,
+            slotId: string,
+            paramName: string,
+            value: number,
+            currentTime: number,
+          ): boolean;
+        };
+      }).__liveFxChainRegistry;
+      if (registry?.applyLiveParameter) {
+        return registry.applyLiveParameter(trackId, slotId, paramName, value, now);
+      }
+      return false;
+    }
     try {
       // Phase 80: translate the slot-param name (the contract surface)
       // to the AudioEffect param name. EQ does this internally via
