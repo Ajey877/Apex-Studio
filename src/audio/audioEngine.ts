@@ -1504,6 +1504,11 @@ class AudioEngine {
       const effect = createEffect(ctx, slot, undefined);
       if (!effect) return;
 
+      // The factory returns composite effects with distinct input/output nodes.
+      // Register that boundary so getChainEnd routes the processed signal
+      // (including the WetDryEffect output) to the next slot or channel panner.
+      setChainEnd(effect.input, effect.output);
+
       // Track the effect keyed by slot.id for live updates.
       // The WetDry wrapper (or inner effect) is what setParameter operates on.
       slotEffectsMap.set(slot.id, effect);
