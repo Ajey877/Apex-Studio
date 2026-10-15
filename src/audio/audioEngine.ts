@@ -62,7 +62,7 @@ import {
 import { isRackChannelAudible } from './midiMappingRuntime';
 import { derivePlaylistLaneMutes, isClipLaneMuted } from './playlistLaneMutes';
 import { isFxParamLiveUpdatableByName } from './fxLiveSync';
-import { createEffect } from './liveFxChainHardening';
+import { createEffect, translateSlotParamToFxName } from './liveFxChainHardening';
 import type { AudioEffect } from './effects/AudioEffect';
 import {
   fxTargetIdBelongsToTrack,
@@ -2208,16 +2208,11 @@ class AudioEngine {
           if (slot) {
             // Offline renders consume slot.mix at chain construction time. Update
             // the slot's mix so the next export rebuild (or next offline take)
-            // observes the automated value. Live playback updates the running
-            // WetDry via the patch registry, when installed, so the user hears
-            // the change without a chain rebuild.
+            // observes the automated value. The running chain's WetDry wrapper
+            // takes the same value through the engine's own slot-effect map
+            // (Fix 5), so the user hears the change without a chain rebuild.
             slot.mix = fxMixFromNormalized(value);
-            const registry = (this as unknown as {
-              __liveFxChainRegistry?: {
-                applyLiveMix(trackId: number, slotId: string, mix: number, currentTime: number): boolean;
-              };
-            }).__liveFxChainRegistry;
-            registry?.applyLiveMix(trackId, slotId, slot.mix, now);
+            this.applyLiveFxSlotParamToRunningChain(trackId, slotId, 'mix', slot.mix, now);
           }
         }
       }
@@ -2236,22 +2231,20 @@ class AudioEngine {
       const trk = mixerTracks.find(t => t.id === update.trackId);
       const slot = trk?.fxSlots.find(s => s.id === update.slotId);
       if (!trk || !slot) return;
-      const registry = this.getLiveFxChainRegistry();
       if (update.isMix) {
         // Same destination as the legacy `fx_mix` target: `FxSlot.mix`, owned
         // by the WetDry wrapper. Writing it here keeps the offline rebuild and
         // the live AudioParam on one value.
         slot.mix = update.value;
-        registry?.applyLiveMix(update.trackId, update.slotId, update.value, now);
+        this.applyLiveFxSlotParamToRunningChain(update.trackId, update.slotId, 'mix', update.value, now);
         return;
       }
       // The contract id (`'time'`, `'threshold'`, …) is what `FxSlot.params`
-      // stores and what the live registry accepts; the registry owns the
-      // slot-param -> AudioParam rename (delay `time` -> `delayTime`, EQ bands
-      // -> `frequency`/`gain`/`q`). Resolving the AudioParam name here instead
-      // would fork that table.
+      // stores; the single live-apply path owns the slot-param -> AudioParam
+      // rename (delay `time` -> `delayTime`, EQ bands -> `frequency`/`gain`/`q`).
+      // Resolving the AudioParam name here instead would fork that table.
       slot.params = { ...slot.params, [update.paramId]: update.value };
-      registry?.applyLiveParameter(update.trackId, update.slotId, update.paramId, update.value, now);
+      this.applyLiveFxSlotParamToRunningChain(update.trackId, update.slotId, update.paramId, update.value, now);
     } else if (target.type === 'mixer_send1' || target.type === 'mixer_send2') {
       const trackId = Number(target.targetId);
       const idx = target.type === 'mixer_send1' ? 0 : 1;
@@ -2294,6 +2287,59 @@ class AudioEngine {
   }
 
   /**
+   * Audio Integrity Fix 5: apply one slot parameter (or the slot's wet/dry
+   * `mix`) to the chain that is currently rendering, without rebuilding it.
+   *
+   * The engine's own `__fxSlotEffectMaps` — populated by the production
+   * `rebuildTrackFxChain` from the unified `createEffect` factory — is the
+   * authority. PR #230 removed the `installLiveFxChainHardening` bootstrap from
+   * `src/main.tsx`, so the legacy `__liveFxChainRegistry` no longer exists in
+   * the shipped app; a caller that read only that registry silently turned every
+   * automated FX value into a project-state-only write (the UI slider, the
+   * automation lane and the export agreed, the running take did not). The
+   * registry stays as a fallback for a caller that still installs the patch —
+   * the Phase 80/81 suites do — so both configurations reach the same
+   * AudioParams.
+   *
+   * The slot-param name is translated with the shared table in
+   * `liveFxChainHardening`, so a contract id (`'time'`, `'lowFreq'`, …) lands on
+   * the AudioParam the AudioEffect actually accepts (`'delayTime'`, …) instead
+   * of throwing and losing the update.
+   *
+   * Returns `true` only when the running chain took the value; `false` means the
+   * caller must fall back to a rebuild (no live chain, bypassed slot, unknown
+   * slot id, or a value the effect rejected).
+   */
+  private applyLiveFxSlotParamToRunningChain(
+    trackId: number,
+    slotId: string,
+    paramName: string,
+    value: number,
+    now: number,
+  ): boolean {
+    if (!Number.isFinite(value)) return false;
+    if (typeof paramName !== 'string' || !paramName.trim()) return false;
+
+    const effect = this.__fxSlotEffectMaps.get(trackId)?.get(slotId);
+    if (effect) {
+      try {
+        effect.setParameter(translateSlotParamToFxName(effect, paramName), value, now);
+        return true;
+      } catch (_) {
+        // An unknown name or an out-of-range value is rejected by the effect;
+        // fall through to the legacy registry (present only when the Phase 80
+        // patch is installed) before reporting the miss to the caller.
+      }
+    }
+
+    const registry = this.getLiveFxChainRegistry();
+    if (!registry) return false;
+    return paramName === 'mix'
+      ? registry.applyLiveMix(trackId, slotId, value, now)
+      : registry.applyLiveParameter(trackId, slotId, paramName, value, now);
+  }
+
+  /**
    * Phase 10B: Apply a slot.mix change to the live WetDry wrapper without
    * tearing down the active chain. Returns true when the patch supplied an
    * updated live WetDry, false when the caller must rebuild the chain (e.g.
@@ -2310,26 +2356,9 @@ class AudioEngine {
       if (slot) slot.mix = bounded;
     }
     const now = this.ctx?.currentTime ?? 0;
-    // Phase 81: use the native slot-effect map; fall back to the live registry
-    // if the chain hasn't been rebuilt yet (e.g. in tests that set up the bootstrap).
-    let effect = this.__fxSlotEffectMaps.get(trackId)?.get(slotId);
-    if (!effect) {
-      const registry = (this as unknown as {
-        __liveFxChainRegistry?: {
-          applyLiveMix(trackId: number, slotId: string, mix: number, currentTime: number): boolean;
-        };
-      }).__liveFxChainRegistry;
-      if (registry?.applyLiveMix) {
-        return registry.applyLiveMix(trackId, slotId, bounded, now);
-      }
-      return false;
-    }
-    try {
-      effect.setParameter('mix', bounded, now);
-      return true;
-    } catch (_) {
-      return false;
-    }
+    // Fix 5: the engine's own slot-effect map is the authority; the legacy
+    // bootstrap registry is only a fallback for a caller that installed it.
+    return this.applyLiveFxSlotParamToRunningChain(trackId, slotId, 'mix', bounded, now);
   }
 
   /**
@@ -2368,40 +2397,11 @@ class AudioEngine {
       }
     }
     const now = this.ctx?.currentTime ?? 0;
-    // Phase 81: use the native slot-effect map; fall back to the live registry
-    // if the chain hasn't been rebuilt yet (e.g. in tests that set up the bootstrap).
-    let effect = this.__fxSlotEffectMaps.get(trackId)?.get(slotId);
-    if (!effect) {
-      const registry = (this as unknown as {
-        __liveFxChainRegistry?: {
-          applyLiveParameter(
-            trackId: number,
-            slotId: string,
-            paramName: string,
-            value: number,
-            currentTime: number,
-          ): boolean;
-        };
-      }).__liveFxChainRegistry;
-      if (registry?.applyLiveParameter) {
-        return registry.applyLiveParameter(trackId, slotId, paramName, value, now);
-      }
-      return false;
-    }
-    try {
-      // Phase 80: translate the slot-param name (the contract surface)
-      // to the AudioEffect param name. EQ does this internally via
-      // CompositeEffect.paramRoutes; other families rely on a direct name match,
-      // except delay which stores `time` in the slot but consumes `delayTime`
-      // on the DelayEffect contract. The translate table is the single source of
-      // truth for slot-param → AudioParam renames; it is the registry-side mirror
-      // of fxParameterContract.ts (the contract test pins parity).
-      const translated = (effect as any).translateSlotParamToFxName?.(effect, paramName) || paramName;
-      effect.setParameter(translated, value, now);
-      return true;
-    } catch (_) {
-      return false;
-    }
+    // Fix 5: same single live-apply path as setFxSlotMix — the native
+    // slot-effect map first, then the legacy bootstrap registry. The shared
+    // translate table inside the helper is what makes the contract's `time`
+    // reach the DelayEffect's `delayTime` AudioParam.
+    return this.applyLiveFxSlotParamToRunningChain(trackId, slotId, paramName, value, now);
   }
 
   public stopNote(voiceId: string) {
@@ -2828,6 +2828,16 @@ class AudioEngine {
         liveSampleBuffersDuringOfflineRender: this.liveSampleBuffersDuringOfflineRender,
         liveProjectSampleBufferIdsDuringOfflineRender: this.liveProjectSampleBufferIdsDuringOfflineRender,
         liveSessionSampleBufferIdsDuringOfflineRender: this.liveSessionSampleBufferIdsDuringOfflineRender,
+        // Fix 5: the per-track slot-effect registry names the *live* chain when
+        // the engine is idle, but the render rebuilds every chain against the
+        // OfflineAudioContext (Phase 81's correction in the now-uninstalled
+        // hardening patch kept the two apart for exactly this reason). Without
+        // snapshotting the live registry here, the map would later name
+        // AudioParams that belong to a finished render, and every live FX update
+        // would be written into dead nodes and reported as applied. The copy is
+        // shallow on purpose: a rebuild replaces a track's inner map, so the
+        // captured inner maps keep naming the live effects.
+        __fxSlotEffectMaps: new Map(this.__fxSlotEffectMaps),
       };
       if (previous.transport && previous.transportWasPlaying) {
         transportToResume = previous.transport;
@@ -3042,6 +3052,9 @@ class AudioEngine {
         this.liveSampleBuffersDuringOfflineRender = previous.liveSampleBuffersDuringOfflineRender;
         this.liveProjectSampleBufferIdsDuringOfflineRender = previous.liveProjectSampleBufferIdsDuringOfflineRender;
         this.liveSessionSampleBufferIdsDuringOfflineRender = previous.liveSessionSampleBufferIdsDuringOfflineRender;
+        // Fix 5: hand the slot-effect registry back to the live chain, so a live
+        // parameter/mix update after an export reaches the take the user hears.
+        this.__fxSlotEffectMaps = previous.__fxSlotEffectMaps;
       }
     } finally {
       this.offlineRenderLeaseHeld = false;
@@ -4008,12 +4021,7 @@ class AudioEngine {
       const projectSlot = projectTrack.fxSlots.find(slot => slot.id === slotId);
       if (!activeSlot || !projectSlot) return;
       activeSlot.mix = projectSlot.mix;
-      const registry = (this as unknown as {
-        __liveFxChainRegistry?: {
-          applyLiveMix(trackId: number, slotId: string, mix: number, currentTime: number): boolean;
-        };
-      }).__liveFxChainRegistry;
-      registry?.applyLiveMix(trackId, slotId, projectSlot.mix, now);
+      this.applyLiveFxSlotParamToRunningChain(trackId, slotId, 'mix', projectSlot.mix, now);
       return;
     }
 
@@ -4037,16 +4045,15 @@ class AudioEngine {
       // matches simply rejects the value at the AudioEffect and stays untouched.
       const spec = resolveFxParameterSpec(projectSlot.type, paramId);
       if (!spec) return;
-      const registry = this.getLiveFxChainRegistry();
       if (spec.id === 'mix') {
         activeSlot.mix = projectSlot.mix;
-        registry?.applyLiveMix(lookup.track.id, activeSlot.id, activeSlot.mix, now);
+        this.applyLiveFxSlotParamToRunningChain(lookup.track.id, activeSlot.id, 'mix', activeSlot.mix, now);
         return;
       }
       const stored = projectSlot.params?.[paramId];
       const restored = typeof stored === 'number' && Number.isFinite(stored) ? stored : spec.default;
       activeSlot.params = { ...activeSlot.params, [paramId]: restored };
-      registry?.applyLiveParameter(lookup.track.id, activeSlot.id, paramId, restored, now);
+      this.applyLiveFxSlotParamToRunningChain(lookup.track.id, activeSlot.id, paramId, restored, now);
       return;
     }
 
@@ -4185,16 +4192,10 @@ class AudioEngine {
             : { onlyLiveUpdatableChanged: false, mixChanges: [], paramChanges: [] };
           if (diff.onlyLiveUpdatableChanged) {
             const now = this.ctx?.currentTime ?? 0;
-            const registry = (this as unknown as {
-              __liveFxChainRegistry?: {
-                applyLiveMix(trackId: number, slotId: string, mix: number, currentTime: number): boolean;
-                applyLiveParameter(trackId: number, slotId: string, paramName: string, value: number, currentTime: number): boolean;
-              };
-            }).__liveFxChainRegistry;
             for (const change of diff.mixChanges) {
               const slot = nextTrack.fxSlots.find(s => s.id === change.slotId);
               if (slot) slot.mix = change.mix;
-              const updated = registry?.applyLiveMix(nextTrack.id, change.slotId, change.mix, now);
+              const updated = this.applyLiveFxSlotParamToRunningChain(nextTrack.id, change.slotId, 'mix', change.mix, now);
               if (!updated && !this.isOfflineRendering) {
                 this.updateMixerTrack(nextTrack);
                 break;
@@ -4205,7 +4206,7 @@ class AudioEngine {
               if (slot) {
                 slot.params = { ...slot.params, [change.paramName]: change.value };
               }
-              const updated = registry?.applyLiveParameter(nextTrack.id, change.slotId, change.paramName, change.value, now);
+              const updated = this.applyLiveFxSlotParamToRunningChain(nextTrack.id, change.slotId, change.paramName, change.value, now);
               if (!updated && !this.isOfflineRendering) {
                 // Live chain rejected the value (out-of-range, unknown
                 // name) — the project state has already been updated so

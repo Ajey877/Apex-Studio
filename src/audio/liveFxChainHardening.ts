@@ -85,7 +85,7 @@ const installed = new WeakSet<object>();
  * AudioEffect.setParameter switch only recognises `delayTime`. The
  * translate is a no-op for every other case.
  */
-function translateSlotParamToFxName(effect: AudioEffect, slotParamName: string): string {
+export function translateSlotParamToFxName(effect: AudioEffect, slotParamName: string): string {
   // Only the WetDryEffect wrapping a DelayEffect needs the translate;
   // we identify it by the inner effect's `name` field.
   const inner = (effect as unknown as { instance?: { name?: string } }).instance
