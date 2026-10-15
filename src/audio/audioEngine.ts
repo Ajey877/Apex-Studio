@@ -1501,7 +1501,11 @@ class AudioEngine {
     track.fxSlots.forEach(slot => {
       if (!slot.enabled) return;
 
-      const effect = createEffect(ctx, slot, undefined);
+      // Offline renders must reuse the seeded impulse prepared by
+      // renderTimelineOffline so repeated exports are byte-identical.
+      // getOfflineReverbImpulseResponse() returns undefined outside an
+      // offline render, so the live path keeps its per-chain impulse.
+      const effect = createEffect(ctx, slot, this.getOfflineReverbImpulseResponse());
       if (!effect) return;
 
       // The factory returns composite effects with distinct input/output nodes.
@@ -1550,7 +1554,9 @@ class AudioEngine {
     // This eliminates the duplicated implementation and ensures live playback,
     // offline rendering, and tests all share the same FX graph with consistent
     // wet/dry handling, reverb tail, and live parameter support.
-    const effect = createEffect(ctx, slot, undefined);
+    // Same offline-impulse plumbing as rebuildTrackFxChain: the getter only
+    // yields the seeded impulse while an offline render is running.
+    const effect = createEffect(ctx, slot, this.getOfflineReverbImpulseResponse());
     if (!effect) return null;
     // CompositeEffect.input is the AudioNode that rebuildTrackFxChain expects.
     // The effect already owns its output chain via setChainEnd inside createEffect,

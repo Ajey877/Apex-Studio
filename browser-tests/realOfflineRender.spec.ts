@@ -380,6 +380,71 @@ test.describe('Production AudioEngine offline export path (real browser)', () =>
     expect(result.wetMax).not.toBeCloseTo(result.dryMax, 2);
   });
 
+  test('repeated send-to-return reverb renders are deterministic (seeded offline impulse)', async ({ page }) => {
+    await page.goto('http://localhost:3000');
+    const result = await page.evaluate(async () => {
+      // @ts-ignore
+      const mod: any = await import('/src/audio/audioEngine.ts');
+      const engine = mod.audioEngine;
+      const channel = {
+        id: 'ch-test',
+        name: 'Test Synth',
+        color: '#7e57c2',
+        instrumentType: 'minisynth' as const,
+        mixerTrackId: 1,
+        volume: 0.9,
+        pan: 0,
+        pitch: 0,
+        mute: false,
+        solo: false,
+        steps: Array(16).fill(false),
+        notes: [{ id: 'n1', pitch: 60, start: 0, duration: 4, velocity: 0.9 }],
+        synthParams: engine.getDefaultSynthParams ? engine.getDefaultSynthParams() : {},
+      };
+      const clip = { id: 'clip-1', trackIndex: 0, startBar: 0, lengthBars: 1, type: 'pattern' as const, channelId: 'ch-test', color: '#7e57c2', name: 'Test Clip' };
+      const wetTracks = [
+        { id: 0, name: 'Master', color: '#3b82f6', volume: 1, pan: 0, mute: false, solo: false, peakL: 0, peakR: 0, fxSlots: [] },
+        { id: 1, name: 'Wet Source', color: '#7e57c2', volume: 1, pan: 0, mute: false, solo: false, peakL: 0, peakR: 0, fxSlots: [], auxSends: [{ targetId: 8, amount: 0.8 }] },
+        { id: 8, name: 'Reverb Return', color: '#7e57c2', volume: 0.85, pan: 0, mute: false, solo: false, peakL: 0, peakR: 0, isAux: true, fxSlots: [{ id: 'fx-8-verb', type: 'reverb', name: 'Studio Reverb', enabled: true, mix: 1.0, params: { roomSize: 0.7, decay: 2.2 } }] },
+      ];
+      const dryTracks = [
+        { id: 0, name: 'Master', color: '#3b82f6', volume: 1, pan: 0, mute: false, solo: false, peakL: 0, peakR: 0, fxSlots: [] },
+        { id: 1, name: 'Dry Source', color: '#7e57c2', volume: 1, pan: 0, mute: false, solo: false, peakL: 0, peakR: 0, fxSlots: [], auxSends: [] },
+        { id: 8, name: 'Reverb Return', color: '#7e57c2', volume: 0.85, pan: 0, mute: false, solo: false, peakL: 0, peakR: 0, isAux: true, fxSlots: [{ id: 'fx-8-verb', type: 'reverb', name: 'Studio Reverb', enabled: true, mix: 1.0, params: { roomSize: 0.7, decay: 2.2 } }] },
+      ];
+      const dry: AudioBuffer = await engine.renderTimelineOffline([channel], [clip], dryTracks, 120, 1, 44100, true);
+      const wetA: AudioBuffer = await engine.renderTimelineOffline([channel], [clip], wetTracks, 120, 1, 44100, true);
+      const wetB: AudioBuffer = await engine.renderTimelineOffline([channel], [clip], wetTracks, 120, 1, 44100, true);
+      const compare = (a: AudioBuffer, b: AudioBuffer) => {
+        const a0 = a.getChannelData(0);
+        const b0 = b.getChannelData(0);
+        let maxDiff = 0;
+        const len = Math.min(a0.length, b0.length);
+        for (let i = 0; i < len; i++) {
+          const diff = Math.abs(a0[i] - b0[i]);
+          if (diff > maxDiff) maxDiff = diff;
+        }
+        return maxDiff;
+      };
+      const a0 = wetA.getChannelData(0);
+      let wetMax = 0; for (let i = 0; i < a0.length; i++) { const v = Math.abs(a0[i]); if (v > wetMax) wetMax = v; }
+      return {
+        repeatMaxDiff: compare(wetA, wetB),
+        wetVsDryMaxDiff: compare(wetA, dry),
+        wetMax,
+      };
+    });
+    // The reverb must actually be present (guards against vacuous silence)…
+    expect(result.wetMax).toBeGreaterThan(1e-4);
+    expect(result.wetVsDryMaxDiff, `reverb should cause measurable wet difference but maxDiff=${result.wetVsDryMaxDiff}`).toBeGreaterThan(1e-4);
+    // …and two exports of the same project must render consistently, which
+    // requires the seeded offline impulse on the native FX path. Threshold
+    // is 1e-4: Chromium's convolver leaves ~3.5e-6 of float noise between
+    // identical renders (measured), while a random per-render impulse
+    // diverges at ~0.27 — so 1e-4 separates the two by orders of magnitude.
+    expect(result.repeatMaxDiff, `repeated offline reverb renders diverged: maxDiff=${result.repeatMaxDiff}`).toBeLessThan(1e-4);
+  });
+
   test('missing buffer for unmuted audio clip throws descriptive error', async ({ page }) => {
     await page.goto('http://localhost:3000');
     const result = await page.evaluate(async () => {

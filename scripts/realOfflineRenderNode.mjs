@@ -146,6 +146,38 @@ try {
   pass(`production: FX param diff (maxDiff=${maxDiff.toFixed(5)} energy=${diffEnergy.toFixed(5)})`);
 } catch(e){ fail('production: FX diff', e); }
 
+// 6b. Offline reverb determinism (Audio Integrity Fix 4): repeated renders of
+// the same project must be sample-identical, which requires the seeded
+// offline impulse on the native FX path; the wet render must also differ
+// from dry so the determinism check cannot pass vacuously.
+try {
+  const ch = { id:'ch-test', name:'Test Synth', color:'#7e57c2', instrumentType:'minisynth', mixerTrackId:1, volume:0.9, pan:0, pitch:0, mute:false, solo:false, steps:Array(16).fill(false), notes:[{id:'n1', pitch:60, start:0, duration:4, velocity:0.9}], synthParams: baseSynthParams };
+  const clip = { id:'clip-1', trackIndex:0, startBar:0, lengthBars:1, type:'pattern', channelId:'ch-test', color:'#7e57c2', name:'Test Clip' };
+  // Send -> return topology, mirroring browser-tests/realOfflineRender.spec.ts.
+  const verbSlot = { id:'fx-8-verb', type:'reverb', name:'Studio Reverb', enabled:true, mix:1.0, params:{ roomSize:0.7, decay:2.2 } };
+  const dryTracks = [
+    { id:0, name:'Master', color:'#3b82f6', volume:1, pan:0, mute:false, solo:false, peakL:0, peakR:0, fxSlots:[] },
+    { id:1, name:'Dry Source', color:'#7e57c2', volume:1, pan:0, mute:false, solo:false, peakL:0, peakR:0, fxSlots:[], auxSends:[] },
+    { id:8, name:'Reverb Return', color:'#7e57c2', volume:0.85, pan:0, mute:false, solo:false, peakL:0, peakR:0, isAux:true, fxSlots:[verbSlot] },
+  ];
+  const wetTracks = [
+    { id:0, name:'Master', color:'#3b82f6', volume:1, pan:0, mute:false, solo:false, peakL:0, peakR:0, fxSlots:[] },
+    { id:1, name:'Wet Source', color:'#7e57c2', volume:1, pan:0, mute:false, solo:false, peakL:0, peakR:0, fxSlots:[], auxSends:[{ targetId:8, amount:0.8 }] },
+    { id:8, name:'Reverb Return', color:'#7e57c2', volume:0.85, pan:0, mute:false, solo:false, peakL:0, peakR:0, isAux:true, fxSlots:[verbSlot] },
+  ];
+  const dry = await audioEngine.renderTimelineOffline([ch],[clip],dryTracks,120,1,48000,true);
+  const wetA = await audioEngine.renderTimelineOffline([ch],[clip],wetTracks,120,1,48000,true);
+  const wetB = await audioEngine.renderTimelineOffline([ch],[clip],wetTracks,120,1,48000,true);
+  const maxDiffOf = (a, b) => { const a0=a.getChannelData(0), b0=b.getChannelData(0); let m=0; for(let i=0;i<Math.min(a0.length,b0.length);i++) m=Math.max(m, Math.abs(a0[i]-b0[i])); return m; };
+  const sWet = stats(wetA);
+  assert(sWet.max>1e-4, `wet render should be audible got ${sWet.max}`);
+  const wetVsDry = maxDiffOf(wetA, dry);
+  assert(wetVsDry>1e-4, `reverb should differ from dry, maxDiff ${wetVsDry}`);
+  const repeatDiff = maxDiffOf(wetA, wetB);
+  assert(repeatDiff<1e-6, `repeated offline reverb renders diverged, maxDiff ${repeatDiff}`);
+  pass(`production: offline reverb deterministic (repeat maxDiff=${repeatDiff.toExponential(2)} wetVsDry=${wetVsDry.toFixed(5)})`);
+} catch(e){ fail('production: offline reverb deterministic', e); }
+
 // 7. Missing buffer throws descriptive
 try {
   const ch = { id:'ch-audio', name:'Audio Ch', color:'#f59e0b', instrumentType:'sampler', mixerTrackId:1, volume:0.9, pan:0, pitch:0, mute:false, solo:false, steps:Array(16).fill(false), notes:[], synthParams:{} };
