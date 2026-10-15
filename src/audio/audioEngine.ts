@@ -62,6 +62,8 @@ import {
 import { isRackChannelAudible } from './midiMappingRuntime';
 import { derivePlaylistLaneMutes, isClipLaneMuted } from './playlistLaneMutes';
 import { isFxParamLiveUpdatableByName } from './fxLiveSync';
+import { createEffect } from './liveFxChainHardening';
+import type { AudioEffect } from './effects/AudioEffect';
 import {
   fxTargetIdBelongsToTrack,
   resolveFxParameterUpdate,
@@ -552,6 +554,13 @@ class AudioEngine {
   private channelPanners: Map<string, ChannelPannerEntry> = new Map();
   private mixerRoutingAdapter: MixerRoutingAdapter | null = null;
   private mixerRoutingChannelMap: Map<number, MixerChannel> | null = null;
+
+  /** Phase 81: per-track slot-effect maps, populated by rebuildTrackFxChain.
+   * Keys are track IDs, values are Maps of slot.id → AudioEffect (the WetDry wrapper
+   * or inner effect). Used by native live parameter/mix update paths, making
+   * installLiveFxChainHardening a no-op when the engine has been initialized.
+   */
+  private __fxSlotEffectMaps: Map<number, Map<string, AudioEffect>> = new Map();
 
   private grossBeatState: GrossBeatState = {
     enabled: false,
@@ -1480,12 +1489,33 @@ class AudioEngine {
     channel.fxNodes.forEach(node => node.disconnect());
     channel.fxNodes = [];
 
+    // Phase 81: clear previous slot-effect maps for this track
+    this.__fxSlotEffectMaps.delete(track.id);
+
     let currentSource: AudioNode = channel.input;
 
+    // Build the chain and populate the slot-effect maps.
+    // We call createEffect directly so we have access to the full effect object
+    // for the live parameter/mix update registry.
+    const slotEffectsMap = new Map<string, AudioEffect>();
     track.fxSlots.forEach(slot => {
       if (!slot.enabled) return;
 
-      const fxNode = this.createFxNode(slot);
+      const effect = createEffect(ctx, slot, undefined);
+      if (!effect) return;
+
+      // The factory returns composite effects with distinct input/output nodes.
+      // Register that boundary so getChainEnd routes the processed signal
+      // (including the WetDryEffect output) to the next slot or channel panner.
+      setChainEnd(effect.input, effect.output);
+
+      // Track the effect keyed by slot.id for live updates.
+      // The WetDry wrapper (or inner effect) is what setParameter operates on.
+      slotEffectsMap.set(slot.id, effect);
+
+      if (!slot.enabled) return;
+
+      const fxNode = effect.input;
       if (fxNode) {
         currentSource.connect(fxNode);
         const chainEnd = getChainEnd(fxNode);
@@ -1494,6 +1524,9 @@ class AudioEngine {
         if (chainEnd !== fxNode) channel.fxNodes.push(chainEnd);
       }
     });
+
+    // Store the map for this track in the native registry.
+    this.__fxSlotEffectMaps.set(track.id, slotEffectsMap);
 
     currentSource.connect(channel.panner);
   }
@@ -1513,142 +1546,16 @@ class AudioEngine {
   private createFxNode(slot: FxSlot): AudioNode | null {
     if (!this.ctx) return null;
     const ctx = this.ctx;
-
-    switch (slot.type) {
-      case 'equalizer': {
-        // 3-band EQ: Lowshelf, Peaking, Highshelf
-        const low = ctx.createBiquadFilter();
-        low.type = 'lowshelf';
-        low.frequency.value = Number(slot.params.lowFreq || 120);
-        low.gain.value = Number(slot.params.lowGain || 0);
-
-        const mid = ctx.createBiquadFilter();
-        mid.type = 'peaking';
-        mid.frequency.value = Number(slot.params.midFreq || 1200);
-        mid.gain.value = Number(slot.params.midGain || 0);
-        mid.Q.value = Number(slot.params.midQ || 1.2);
-
-        const high = ctx.createBiquadFilter();
-        high.type = 'highshelf';
-        high.frequency.value = Number(slot.params.highFreq || 6500);
-        high.gain.value = Number(slot.params.highGain || 0);
-
-        low.connect(mid);
-        mid.connect(high);
-
-        // Return container wrapper object
-        setChainEnd(low, high);
-        return low;
-      }
-      case 'distortion': {
-        const waveshaper = ctx.createWaveShaper();
-        const drive = Number(slot.params.drive || 20);
-        const curve = new Float32Array(512);
-        const deg = Math.PI / 180;
-        const k = typeof drive === 'number' ? drive : 20;
-        for (let i = 0; i < 512; ++i) {
-          const x = (i * 2) / 512 - 1;
-          curve[i] = ((3 + k) * x * 20 * deg) / (Math.PI + k * Math.abs(x));
-        }
-        waveshaper.curve = curve;
-        waveshaper.oversample = '4x';
-        return waveshaper;
-      }
-      case 'compressor': {
-        const comp = ctx.createDynamicsCompressor();
-        comp.threshold.value = Number(slot.params.threshold || -18);
-        comp.knee.value = Number(slot.params.knee || 24);
-        comp.ratio.value = Number(slot.params.ratio || 4);
-        comp.attack.value = Number(slot.params.attack || 0.005);
-        comp.release.value = Number(slot.params.release || 0.15);
-        return comp;
-      }
-      case 'delay': {
-        const delay = ctx.createDelay();
-        delay.delayTime.value = Number(slot.params.time || 0.35);
-        const feedback = ctx.createGain();
-        feedback.gain.value = Number(slot.params.feedback || 0.45);
-        delay.connect(feedback);
-        feedback.connect(delay);
-        return delay;
-      }
-      case 'reverb': {
-        const convolver = ctx.createConvolver();
-        const impulse = this.impulseResponses.get('default');
-        if (impulse) {
-          convolver.buffer = impulse;
-        }
-        return convolver;
-      }
-      case 'bitcrusher': {
-        const waveshaper = ctx.createWaveShaper();
-        const bits = Number(slot.params.bits || 4);
-        const steps = Math.pow(2, bits);
-        const curve = new Float32Array(512);
-        for (let i = 0; i < 512; i++) {
-          const x = (i * 2) / 512 - 1;
-          curve[i] = Math.round(x * steps) / steps;
-        }
-        waveshaper.curve = curve;
-        return waveshaper;
-      }
-      case 'limiter': {
-        const limiter = ctx.createDynamicsCompressor();
-        limiter.threshold.value = -0.5;
-        limiter.ratio.value = 20;
-        limiter.attack.value = 0.001;
-        limiter.release.value = 0.05;
-        return limiter;
-      }
-      case 'tape_saturation': {
-        // Vintage Analog Tape & Tube Saturation Unit
-        const drive = Number(slot.params.drive || 35);
-        const warmth = Number(slot.params.warmth || 0.8);
-        const flutter = Number(slot.params.flutter || 0.001);
-
-        const shaper = ctx.createWaveShaper();
-        const curve = new Float32Array(1024);
-        const k = drive * 0.1;
-        for (let i = 0; i < 1024; i++) {
-          const x = (i * 2) / 1024 - 1;
-          // Soft asymmetric saturation curve mimicking triode tube & analog tape compression
-          curve[i] = Math.tanh(x * (1 + k)) * (1 - 0.1 * Math.sin(Math.PI * x));
-        }
-        shaper.curve = curve;
-        shaper.oversample = '4x';
-
-        // Tape head warmth filter (soft roll-off above 16kHz)
-        const filter = ctx.createBiquadFilter();
-        filter.type = 'lowpass';
-        filter.frequency.value = 16000 - (warmth * 4000);
-        filter.Q.value = 0.7;
-
-        shaper.connect(filter);
-        setChainEnd(shaper, filter);
-        return shaper;
-      }
-      case 'chorus': {
-        // Phase 10C-B: defensive parity with liveFxChainHardening.createEffect.
-        // The hardening patch installed at app init already routes both live
-        // and offline FX chains through that factory, so `createFxNode` is
-        // currently a dead path. Wiring chorus here guarantees the legacy
-        // single-switch factory can never silently drop a chorus slot if a
-        // future refactor bypasses the patch (or if the patch is uninstalled
-        // for any reason). The full wet/dry wrapping matches the live path so
-        // a slot.mix change and the chorus modulation behavior are identical
-        // between the two factories.
-        const rate = Math.max(0.05, Math.min(20, Number(slot.params.rate ?? 1.2) || 1.2));
-        const delaySec = Math.max(0.005, Math.min(0.08, Number(slot.params.delay ?? 0.02) || 0.02));
-        const depthSec = Math.max(0, Math.min(Math.min(0.02, delaySec), Number(slot.params.depth ?? 0.003) || 0));
-        const mix = Math.max(0, Math.min(1, Number(slot.mix) || 0));
-        const chorus = new ChorusEffect(ctx, slot.id, rate, depthSec, delaySec, 1);
-        const wrapper = new WetDryEffect(ctx, chorus, mix);
-        setChainEnd(wrapper.input, wrapper.output);
-        return wrapper.input;
-      }
-      default:
-        return null;
-    }
+    // Use the authoritative FX-chain factory from liveFxChainHardening.
+    // This eliminates the duplicated implementation and ensures live playback,
+    // offline rendering, and tests all share the same FX graph with consistent
+    // wet/dry handling, reverb tail, and live parameter support.
+    const effect = createEffect(ctx, slot, undefined);
+    if (!effect) return null;
+    // CompositeEffect.input is the AudioNode that rebuildTrackFxChain expects.
+    // The effect already owns its output chain via setChainEnd inside createEffect,
+    // so we return the input node and let the caller wire it through getChainEnd.
+    return effect.input;
   }
 
   // Instrument sound triggers
@@ -2397,12 +2304,26 @@ class AudioEngine {
       if (slot) slot.mix = bounded;
     }
     const now = this.ctx?.currentTime ?? 0;
-    const registry = (this as unknown as {
-      __liveFxChainRegistry?: {
-        applyLiveMix(trackId: number, slotId: string, mix: number, currentTime: number): boolean;
-      };
-    }).__liveFxChainRegistry;
-    return registry?.applyLiveMix(trackId, slotId, bounded, now) ?? false;
+    // Phase 81: use the native slot-effect map; fall back to the live registry
+    // if the chain hasn't been rebuilt yet (e.g. in tests that set up the bootstrap).
+    let effect = this.__fxSlotEffectMaps.get(trackId)?.get(slotId);
+    if (!effect) {
+      const registry = (this as unknown as {
+        __liveFxChainRegistry?: {
+          applyLiveMix(trackId: number, slotId: string, mix: number, currentTime: number): boolean;
+        };
+      }).__liveFxChainRegistry;
+      if (registry?.applyLiveMix) {
+        return registry.applyLiveMix(trackId, slotId, bounded, now);
+      }
+      return false;
+    }
+    try {
+      effect.setParameter('mix', bounded, now);
+      return true;
+    } catch (_) {
+      return false;
+    }
   }
 
   /**
@@ -2441,18 +2362,40 @@ class AudioEngine {
       }
     }
     const now = this.ctx?.currentTime ?? 0;
-    const registry = (this as unknown as {
-      __liveFxChainRegistry?: {
-        applyLiveParameter(
-          trackId: number,
-          slotId: string,
-          paramName: string,
-          value: number,
-          currentTime: number,
-        ): boolean;
-      };
-    }).__liveFxChainRegistry;
-    return registry?.applyLiveParameter(trackId, slotId, paramName, value, now) ?? false;
+    // Phase 81: use the native slot-effect map; fall back to the live registry
+    // if the chain hasn't been rebuilt yet (e.g. in tests that set up the bootstrap).
+    let effect = this.__fxSlotEffectMaps.get(trackId)?.get(slotId);
+    if (!effect) {
+      const registry = (this as unknown as {
+        __liveFxChainRegistry?: {
+          applyLiveParameter(
+            trackId: number,
+            slotId: string,
+            paramName: string,
+            value: number,
+            currentTime: number,
+          ): boolean;
+        };
+      }).__liveFxChainRegistry;
+      if (registry?.applyLiveParameter) {
+        return registry.applyLiveParameter(trackId, slotId, paramName, value, now);
+      }
+      return false;
+    }
+    try {
+      // Phase 80: translate the slot-param name (the contract surface)
+      // to the AudioEffect param name. EQ does this internally via
+      // CompositeEffect.paramRoutes; other families rely on a direct name match,
+      // except delay which stores `time` in the slot but consumes `delayTime`
+      // on the DelayEffect contract. The translate table is the single source of
+      // truth for slot-param → AudioParam renames; it is the registry-side mirror
+      // of fxParameterContract.ts (the contract test pins parity).
+      const translated = (effect as any).translateSlotParamToFxName?.(effect, paramName) || paramName;
+      effect.setParameter(translated, value, now);
+      return true;
+    } catch (_) {
+      return false;
+    }
   }
 
   public stopNote(voiceId: string) {

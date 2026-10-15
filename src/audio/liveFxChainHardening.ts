@@ -222,7 +222,7 @@ function createReverb(ctx: AudioContext, slot: FxSlot, offlineImpulse?: AudioBuf
   return new CompositeEffect(`${slot.id}-reverb`, 'Reverb', convolver, convolver, [convolver]);
 }
 
-function createEffect(ctx: AudioContext, slot: FxSlot, offlineReverbImpulse?: AudioBuffer): AudioEffect | null {
+export function createEffect(ctx: AudioContext, slot: FxSlot, offlineReverbImpulse?: AudioBuffer): AudioEffect | null {
   const mix = mixFor(slot);
 
   switch (slot.type) {
