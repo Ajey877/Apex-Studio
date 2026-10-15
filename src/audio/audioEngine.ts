@@ -63,6 +63,7 @@ import { isRackChannelAudible } from './midiMappingRuntime';
 import { derivePlaylistLaneMutes, isClipLaneMuted } from './playlistLaneMutes';
 import { isFxParamLiveUpdatableByName } from './fxLiveSync';
 import { createEffect } from './liveFxChainHardening';
+import type { AudioEffect } from './effects/AudioEffect';
 import {
   fxTargetIdBelongsToTrack,
   resolveFxParameterUpdate,
