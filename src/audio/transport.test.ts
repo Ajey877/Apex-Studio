@@ -140,10 +140,11 @@ describe('AudioClockTransport', () => {
       { step: 1, audioTime: 0.125 },
     ]);
 
-    // A tempo change must preserve the already-scheduled step and place the
-    // first unscheduled step one new step-duration after that committed event.
+    // Change tempo while the scheduler is still ahead of the audio clock.
+    // The event already committed at 0.125s must stay unchanged. At 60 BPM,
+    // the next step belongs at 0.375s (one new 0.25s step after that event).
     transport.setBpm(60);
-    fakeContext.currentTime = 0.4;
+    fakeContext.currentTime = 0.04;
     const afterTempoChange = timers.shift();
     assert.ok(afterTempoChange);
     afterTempoChange();
