@@ -284,7 +284,10 @@ export interface LiveFxChainHandle {
  *
  * Lookup is by (trackId, slotId). An entry is registered when
  * `rebuildTrackFxChain` constructs the chain for a track, and cleared on
- * `removeMixerChannel` or the next rebuild of that track.
+ * `removeMixerChannel` or the next rebuild of that track. On an engine that owns
+ * its FX lifecycle natively (`AudioEngine.__fxSlotEffectMaps`) the lookup reads
+ * that map instead: the native `rebuildTrackFxChain` / `removeMixerChannel` are
+ * then the writers, and the legacy index stays empty.
  *
  * The lookup is context-aware: while the engine is rendering offline it names
  * the chain built for that render, and at every other time it names the live
@@ -347,6 +350,30 @@ function boundedMix(mix: number): number {
   return Math.max(0, Math.min(1, mix));
 }
 
+/**
+ * True when `engine` already owns its own FX-chain lifecycle.
+ *
+ * The native `AudioEngine` builds its chains itself and registers them in
+ * `__fxSlotEffectMaps`, which is the authoritative owner of the whole FX
+ * lifecycle: `rebuildTrackFxChain` disposes the chain a rebuild retires (and
+ * what a failed build created), `removeMixerChannel` invalidates and disposes
+ * the effects of the channel it drops, and the live setters refuse to answer
+ * "applied" for an entry the engine has outlived.
+ *
+ * Every one of those guarantees is void the moment this module's own
+ * `rebuildTrackFxChain` / `removeMixerChannel` run instead: the native registry
+ * would stop being populated, its dispose/invalidate/rollback handling would
+ * stop running, and two independent effect tables would disagree about which
+ * chain is the one rendering.
+ *
+ * The installer therefore only supplies its own lifecycle handling to an engine
+ * that has none — every non-`AudioEngine` caller, including the Phase 80/81
+ * fixtures. The parameter-delivery registry below is installed either way.
+ */
+function engineOwnsNativeFxLifecycle(engine: AudioEngineLike): boolean {
+  return (engine as unknown as { __fxSlotEffectMaps?: unknown }).__fxSlotEffectMaps instanceof Map;
+}
+
 export function installLiveFxChainHardening(engine: AudioEngineLike): void {
   if (installed.has(engine as object)) return;
   installed.add(engine as object);
@@ -380,8 +407,22 @@ export function installLiveFxChainHardening(engine: AudioEngineLike): void {
       ));
   };
 
+  /**
+   * The chain the native engine is rendering with, when it owns one.
+   *
+   * `AudioEngine` keeps its own per-track slot index and maintains it across the
+   * whole lifecycle, so it — not the legacy index built below — is the table a
+   * lookup must read for that engine. Both are keyed `(trackId, slotId)` and
+   * hold the very `AudioEffect` the shared factory returned, so every
+   * parameter-delivery helper reaches the same AudioParams either way.
+   */
+  const nativeSlotIndexFor = (trackId: number): Map<string, AudioEffect> | undefined =>
+    (engine as unknown as { __fxSlotEffectMaps?: Map<number, Map<string, AudioEffect>> })
+      .__fxSlotEffectMaps?.get(trackId);
+
   const slotIndexFor = (trackId: number): Map<string, AudioEffect> | undefined =>
-    (isOfflineRenderContext() ? offlineSlotIndexByTrack : slotIndexByTrack).get(trackId);
+    nativeSlotIndexFor(trackId)
+    ?? (isOfflineRenderContext() ? offlineSlotIndexByTrack : slotIndexByTrack).get(trackId);
 
   const registry: LiveFxChainRegistry = {
     getChain(trackId: number) {
@@ -424,6 +465,14 @@ export function installLiveFxChainHardening(engine: AudioEngineLike): void {
   };
   // Expose the registry on the engine for the audio engine and tests.
   (engine as unknown as { __liveFxChainRegistry: LiveFxChainRegistry }).__liveFxChainRegistry = registry;
+
+  // FX lifecycle ownership: an engine that already owns its FX-chain lifecycle
+  // keeps it. Taking `rebuildTrackFxChain` / `removeMixerChannel` over would
+  // silently move the FX-map lifecycle guarantees out of the native engine and
+  // into this module, and leave two effect tables claiming the same chain. The
+  // registry above is all that engine needs: it reads through to the native
+  // index, so parameter delivery is unchanged.
+  if (engineOwnsNativeFxLifecycle(engine)) return;
 
   engine.rebuildTrackFxChain = function rebuildTrackFxChain(track: MixerTrack): void {
     const rawCtx = (this as any).ctx;
