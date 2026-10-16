@@ -114,6 +114,52 @@ describe('AudioClockTransport', () => {
     transport.setBpm(5000);
     assert.equal(transport.getState().bpm, 999);
   });
+
+  it('keeps tempo-change scheduling continuous after an old-tempo look-ahead event', () => {
+    const fakeContext = new FakeAudioContext();
+    const transport = new AudioClockTransport(fakeContext as unknown as AudioContext, {
+      lookAheadSeconds: 0.1,
+      scheduleIntervalMs: 25,
+    });
+    const events: Array<{ step: number; audioTime: number }> = [];
+    transport.setCallbacks({
+      onStep: (step, _bar, audioTime) => events.push({ step, audioTime }),
+    });
+
+    transport.start();
+    assert.deepEqual(events, [{ step: 0, audioTime: 0 }]);
+
+    // At t=0.03, pump the scheduler through its look-ahead window. Step 1
+    // is now committed at the old tempo (0.125s), but step 2 is not scheduled.
+    fakeContext.currentTime = 0.03;
+    const scheduled = timers.shift();
+    assert.ok(scheduled);
+    scheduled();
+    assert.deepEqual(events, [
+      { step: 0, audioTime: 0 },
+      { step: 1, audioTime: 0.125 },
+    ]);
+
+    // A tempo change must preserve the already-scheduled step and place the
+    // first unscheduled step one new step-duration after that committed event.
+    transport.setBpm(60);
+    fakeContext.currentTime = 0.4;
+    const afterTempoChange = timers.shift();
+    assert.ok(afterTempoChange);
+    afterTempoChange();
+
+    assert.deepEqual(events.slice(0, 2), [
+      { step: 0, audioTime: 0 },
+      { step: 1, audioTime: 0.125 },
+    ]);
+    assert.equal(events[2].step, 2);
+    assert.ok(
+      Math.abs(events[2].audioTime - 0.375) < 1e-9,
+      `expected first unscheduled 60-BPM step at 0.375s, got ${events[2].audioTime}s`,
+    );
+    assert.ok(events.every((event, index) => index === 0 || event.audioTime > events[index - 1].audioTime),
+      'scheduled event times must remain strictly increasing');
+  });
 });
 
 describe('AudioClockTransport pause and resume', () => {
