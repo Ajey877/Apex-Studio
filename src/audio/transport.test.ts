@@ -144,7 +144,9 @@ describe('AudioClockTransport', () => {
     // The event already committed at 0.125s must stay unchanged. At 60 BPM,
     // the next step belongs at 0.375s (one new 0.25s step after that event).
     transport.setBpm(60);
-    fakeContext.currentTime = 0.04;
+    // Advance only until the new event at 0.375s enters the look-ahead
+    // window; do not run the scheduler after that event would be in the past.
+    fakeContext.currentTime = 0.28;
     const afterTempoChange = timers.shift();
     assert.ok(afterTempoChange);
     afterTempoChange();
