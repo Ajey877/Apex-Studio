@@ -1586,9 +1586,43 @@ class AudioEngine {
       throw error;
     }
 
-    if (mayReleasePrevious) this.disposeFxSlotEffects(previousEffects?.values());
+    // FX-map lifecycle safety (review follow-up): the chain is not a
+    // replacement until its tail is wired into the channel. That last connect is
+    // the one call here that can fail on a node the engine no longer owns (a
+    // real context answers `InvalidAccessError`/`InvalidStateError` when the
+    // target belongs to another or a closed context), so the retired chain must
+    // still be intact when it does: disposing before this line would leave the
+    // track with neither the old chain nor the new one.
+    try {
+      currentSource.connect(channel.panner);
+    } catch (error) {
+      // Release exactly what this build created, drop the half-wired chain from
+      // the channel, and re-bypass it so a failed tail connection cannot mute
+      // the track. The retired chain is deliberately *not* disposed — it is the
+      // one thing this rebuild did not manage to replace.
+      this.disposeFxSlotEffects(createdEffects);
+      try {
+        channel.input.disconnect();
+      } catch (_) {}
+      channel.fxNodes = [];
+      try {
+        channel.input.connect(channel.panner);
+      } catch (_) {}
+      // Hand the retired chain's effects back to the registry rather than
+      // discarding the only references to them: they are disconnected (so
+      // `fxSlotEntryStaleness` refuses to write to them and releases them the
+      // moment a caller touches one) but they are still *owned*, which is what
+      // keeps a modulator that survived a failed replacement from running
+      // unowned forever.
+      if (previousEffects && previousEffects.size > 0) {
+        this.__fxSlotEffectMaps.set(track.id, previousEffects);
+      }
+      throw error;
+    }
 
-    currentSource.connect(channel.panner);
+    // The replacement is fully connected and installed; only now may the
+    // retired chain be released.
+    if (mayReleasePrevious) this.disposeFxSlotEffects(previousEffects?.values());
 
     // Store the map for this track in the native registry.
     if (slotEffectsMap.size > 0) this.__fxSlotEffectMaps.set(track.id, slotEffectsMap);
@@ -1647,15 +1681,32 @@ class AudioEngine {
    * FX-map lifecycle safety: drop the entries of a track whose chain can no
    * longer be written to, so a caller is told to rebuild instead of being told
    * an obsolete effect took the value.
+   *
+   * Review follow-up: the effects are released *before* their references go.
+   * An entry that has just been classified stale can never be reached again,
+   * and `disconnect()` is not enough — only `dispose()` stops the modulator
+   * oscillators that `ChorusEffect` and the tape composite start during
+   * construction, so invalidating without disposal traded a wrong "applied"
+   * answer for a permanently running oscillator.
+   *
+   * Disposal is scoped to exactly what is invalidated: the remaining slots of
+   * the same track (still wired into the running chain) and every other track
+   * are left alone — during an offline render the live take lives in its own
+   * registry, so it is never reachable from here — and one throwing
+   * `dispose()` cannot strand its siblings (`disposeFxSlotEffects`).
    */
   private invalidateFxSlotEntries(trackId: number, slotId?: string): void {
     if (slotId === undefined) {
+      const obsoleteEffects = this.__fxSlotEffectMaps.get(trackId);
       this.__fxSlotEffectMaps.delete(trackId);
+      this.disposeFxSlotEffects(obsoleteEffects?.values());
       return;
     }
     const slotEffects = this.__fxSlotEffectMaps.get(trackId);
     if (!slotEffects) return;
+    const obsoleteEffect = slotEffects.get(slotId);
     slotEffects.delete(slotId);
+    if (obsoleteEffect) this.disposeFxSlotEffects([obsoleteEffect]);
     if (slotEffects.size === 0) this.__fxSlotEffectMaps.delete(trackId);
   }
 
