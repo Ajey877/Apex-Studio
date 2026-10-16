@@ -26,6 +26,8 @@ export class AudioClockTransport {
   private readonly scheduleIntervalMs: number;
   private timerId: number | null = null;
   private nextEventTime = 0;
+  /** Absolute musical step assigned to the next scheduled event. */
+  private nextAbsoluteStep = 0;
   private clockOrigin = 0;
   private state: TransportState = {
     bpm: 120,
@@ -74,16 +76,19 @@ export class AudioClockTransport {
     this.updatePositionFromClock();
     const previousStepSeconds = this.stepDurationSeconds;
     const positionSteps = this.state.positionSeconds / previousStepSeconds;
-    const pendingSteps = (this.nextEventTime - this.clockOrigin) / previousStepSeconds;
     const lastScheduledTime = this.nextEventTime - previousStepSeconds;
     this.state.bpm = Math.min(999, Math.max(20, bpm));
     const nextStepSeconds = this.stepDurationSeconds;
     this.state.positionSeconds = positionSteps * nextStepSeconds;
     if (this.state.playing) {
       this.clockOrigin = this.context.currentTime - this.state.positionSeconds;
+      // Already-scheduled look-ahead events keep their original audio times.
+      // Continue the unscheduled musical grid one new-tempo step after the
+      // last committed event, rather than preserving the old time-derived
+      // offset (which can shift the next event and its step index).
       this.nextEventTime = Math.max(
-        this.clockOrigin + pendingSteps * nextStepSeconds,
-        lastScheduledTime + 1e-6,
+        lastScheduledTime + nextStepSeconds,
+        this.context.currentTime + 1e-6,
       );
     }
     this.updateMusicalPosition(this.state.positionSeconds);
@@ -149,6 +154,7 @@ export class AudioClockTransport {
     const now = this.context.currentTime;
     this.clockOrigin = now - this.state.positionSeconds;
     this.nextEventTime = now;
+    this.nextAbsoluteStep = Math.floor(this.state.positionSeconds / this.stepDurationSeconds + 1e-9);
     this.state.playing = true;
     this.schedule();
     this.emitState();
@@ -183,6 +189,7 @@ export class AudioClockTransport {
     if (this.state.playing) {
       this.clockOrigin = this.context.currentTime - next;
       this.nextEventTime = this.context.currentTime + 0.005;
+      this.nextAbsoluteStep = Math.floor(next / this.stepDurationSeconds + 1e-9);
     }
     this.emitState();
   }
@@ -202,8 +209,7 @@ export class AudioClockTransport {
     if (!this.state.playing) return;
     const horizon = this.context.currentTime + this.lookAheadSeconds;
     while (this.nextEventTime <= horizon) {
-      const position = Math.max(0, this.nextEventTime - this.clockOrigin);
-      const absoluteStep = Math.floor(position / this.stepDurationSeconds + 1e-9);
+      const absoluteStep = this.nextAbsoluteStep;
       if (this.songEndSteps !== null && absoluteStep >= this.songEndSteps) {
         this.finishAtSongEnd();
         return;
@@ -214,6 +220,7 @@ export class AudioClockTransport {
         this.nextEventTime,
       );
       this.nextEventTime += this.stepDurationSeconds;
+      this.nextAbsoluteStep += 1;
     }
     this.updatePositionFromClock();
     this.emitState();
