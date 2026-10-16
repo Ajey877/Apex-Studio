@@ -70,14 +70,16 @@ class FakeParam {
 
 /**
  * When armed, every `FakeNode.connect(target)` whose target is `poisonedConnect.target`
- * throws. `connect()` is looked up on the prototype, so nodes created *during* a
- * call under test are covered too — that is what lets a test fail the *last*
- * connection a chain build makes (the tail -> channel panner edge), which is a
- * real `InvalidAccessError`/`InvalidStateError` shape in a browser.
+ * throws — once per queued message, then the arm disarms so the *next* edge to
+ * the same target succeeds. `connect()` is looked up on the prototype, so nodes
+ * created *during* a call under test are covered too: that is what lets a test
+ * fail the last connection a chain build makes (its tail -> channel panner edge),
+ * which is the `InvalidAccessError`/`InvalidStateError` shape a real browser
+ * produces for a node from another or a closed context.
  */
-let poisonedConnect: { target: unknown; message: string; once: boolean } | null = null;
-const poisonConnectTo = (target: unknown, message: string, once = true): void => {
-  poisonedConnect = { target, message, once };
+let poisonedConnect: { target: unknown; messages: string[] } | null = null;
+const poisonConnectTo = (target: unknown, message: string | string[]): void => {
+  poisonedConnect = { target, messages: Array.isArray(message) ? [...message] : [message] };
 };
 
 class FakeNode {
@@ -89,6 +91,7 @@ class FakeNode {
   context: FakeContext | null = null;
   connectCalls = 0;
   incomingCalls = 0;
+  failedConnects = 0;
   disconnectCalls = 0;
   startCalls = 0;
   stopCalls = 0;
@@ -113,9 +116,10 @@ class FakeNode {
   smoothingTimeConstant = 0;
   connect(target?: unknown): void {
     if (poisonedConnect && target === poisonedConnect.target) {
-      const message = poisonedConnect.message;
-      if (poisonedConnect.once) poisonedConnect = null;
-      throw new Error(message);
+      this.failedConnects += 1;
+      const message = poisonedConnect.messages.shift();
+      if (poisonedConnect.messages.length === 0) poisonedConnect = null;
+      throw new Error(message ?? 'simulated connect failure');
     }
     this.connectCalls += 1;
     if (target instanceof FakeNode) target.incomingCalls += 1;
@@ -1200,7 +1204,7 @@ describe('FX-LIFECYCLE 9: a stale entry is disposed as it is invalidated (mocked
 describe('FX-LIFECYCLE 10: the retired chain survives until the replacement is fully connected (mocked lifecycle)', () => {
   const chorusSlot = (): FxSlot => makeSlot('fx-chorus', 'chorus', { rate: 3.1, depth: 0.004, delay: 0.02 }, 0.7);
 
-  it('a failing tail connection releases the new chain, restores the bypass and keeps the retired chain alive', () => {
+  it('a failing tail connection rewires the retired chain and releases only the new one', () => {
     const previous = registeredEffect(1, 'fx-chorus');
     const previousTape = registeredEffect(1, 'fx-tape');
     const previousSpy = spyDispose(previous);
@@ -1208,6 +1212,7 @@ describe('FX-LIFECYCLE 10: the retired chain survives until the replacement is f
     const channel = mixerChannel(1);
     const panner = channel.panner as FakeNode;
     const nodesBefore = liveCtx.createdNodes.length;
+    const modulatorsBefore = liveCtx.unstoppedModulators().length;
     const pannerIncomingBefore = panner.incomingCalls;
 
     // Fail the last connection the build makes: chain tail -> channel panner.
@@ -1219,37 +1224,42 @@ describe('FX-LIFECYCLE 10: the retired chain survives until the replacement is f
       'the original error must reach the caller unchanged',
     );
 
+    // The half-built chain is released — modulators included — not orphaned.
     const createdModulators = liveCtx.createdNodes.slice(nodesBefore).filter(node => node.startCalls > 0);
     assert.equal(createdModulators.length >= 1, true, 'setup: the failed build did start a modulator of its own');
     assert.equal(createdModulators.every(node => node.stopCalls >= 1), true,
       'the half-installed chain must be disposed — modulators included — instead of being dropped unreferenced');
 
-    assert.equal(previousSpy.calls, 0, 'the retired chain may not be disposed by a rebuild that did not finish connecting');
+    // The retired chain is neither disposed by an unfinished replacement nor left
+    // disconnected-but-owned: it is put back, so nothing runs unowned.
+    assert.equal(previousSpy.calls, 0, 'a rebuild that never connected its replacement may not dispose the retired chain');
     assert.equal(isDisposed(innerEffect(previous)), false);
-    assert.equal(previousTapeSpy.calls, 0, '…and neither may its sibling');
-    assert.equal(isDisposed(innerEffect(previousTape)), false);
-
-    assert.equal(channel.fxNodes.length, 0, 'the incomplete chain must not stay wired onto the channel');
+    assert.equal(isDisposed(innerEffect(previousTape)), false, '…and the rollback must be all-or-nothing, not half a chain');
+    assert.equal(channel.fxNodes.includes((previous as any).input), true,
+      'the retired chain must be wired back onto the channel');
     assert.equal(panner.incomingCalls, pannerIncomingBefore + 1,
-      'a direct input -> panner bypass must be attempted so the failed rebuild cannot mute the track');
-
-    // The retired chain is handed back to the registry so its modulators stay
-    // owned rather than lost; being off the chain, it can never report a
-    // successful write, and the first caller that touches one releases it.
+      'its tail must be connected to the panner again, so the track is not muted');
     assert.equal(sameObject(registeredEffect(1, 'fx-chorus'), previous), true,
-      'the retired effects stay owned, not orphaned');
-    assert.equal(sameObject(registeredEffect(1, 'fx-tape'), previousTape), true,
-      '…both of them, and still the very same instances');
-    assert.equal(engine.setFxSlotParameter(1, 'fx-chorus', 'rate', 6), false,
-      'a live write must be refused and the unreferenced chain released');
-    assert.equal(previousSpy.calls, 1, '…which happens on that first touch, rather than never');
-    assert.equal(engine.__fxSlotEffectMaps.has(1), true, 'the sibling entry survives until it is touched too');
-    assert.equal(engine.setFxSlotMix(1, 'fx-tape', 0.4), false);
-    assert.equal(previousTapeSpy.calls, 1, 'and it is disposed on the same terms');
-    assert.equal(engine.__fxSlotEffectMaps.has(1), false, 'once nothing is left, the track entry goes');
+      'and the registry must own exactly those restored effects');
+
+    // Restored and wired means live: writes are accepted again, not refused.
+    assert.equal(engine.setFxSlotParameter(1, 'fx-chorus', 'rate', 6), true,
+      'the restored chain is the running chain, so a live write must be applied');
+    assert.equal(innerEffect(previous).lfo.frequency.value, 6, '…and land on its AudioParam');
+    assert.equal(previousSpy.calls, 0, 'a write into the restored chain must not dispose it');
+
+    // No modulator is left running that nothing owns any more.
+    assert.equal(liveCtx.unstoppedModulators().length, modulatorsBefore,
+      'every still-running modulator after the failure must belong to the restored chain');
+
+    // Ownership is intact, so a later removal releases it normally.
+    engine.removeMixerChannel(1);
+    assert.equal(previousSpy.calls, 1, 'the restored chain is disposed by the next lifecycle event that retires it');
+    assert.equal(previousTapeSpy.calls, 1);
+    assert.equal(liveCtx.unstoppedModulators().length, 0, 'and no modulator of this track survives it');
   });
 
-  it('a single-slot chain that cannot reach the panner leaves the channel bypassed and registers nothing new', () => {
+  it('an empty chain whose bypass fails still leaves the retired chain wired and owned', () => {
     const channel = mixerChannel(2);
     const panner = channel.panner as FakeNode;
     const delay = registeredEffect(2, 'fx-delay');
@@ -1261,15 +1271,55 @@ describe('FX-LIFECYCLE 10: the retired chain survives until the replacement is f
     // An empty chain connects `channel.input` straight to the panner: the very
     // last call of the build.
     poisonConnectTo(panner, 'simulated bypass connect failure');
-    assert.throws(() => engine.rebuildTrackFxChain(makeTrack(2, [])), /simulated bypass connect failure/);
+    assert.throws(() => engine.rebuildTrackFxChain(makeTrack(2, [])), /simulated bypass connect failure/,
+      'the caller must still learn that the rebuild did not happen');
 
-    assert.equal(channel.fxNodes.length, 0, 'nothing may be left claimed by the channel');
     assert.equal(delaySpy.calls, 0, 'clearing a track of its slots must not dispose the chain it had');
-    assert.equal(delayTime.writes.length, writesBefore, 'and no write may reach the retired effect');
+    assert.equal(delayTime.writes.length, writesBefore, '…and no write may reach the retired effect either');
     assert.equal(panner.incomingCalls, pannerIncomingBefore + 1,
-      'the retry inside the rollback must re-establish the direct bypass, so a failed rebuild cannot leave the track muted — and it must not escape a second error');
-    assert.equal(engine.setFxSlotParameter(2, 'fx-delay', 'time', 0.9), false,
-      'the retired chain is owned but off the mix, so the caller must rebuild');
+      'the rollback reconnects the retired chain’s tail, so the track keeps playing');
+    assert.equal(sameObject(registeredEffect(2, 'fx-delay'), delay), true,
+      'the retired chain stays owned by the registry, never orphaned');
+    assert.equal(channel.fxNodes.length > 0, true, '…and is still listed on the channel');
+
+    // Because it is wired again, it is live again.
+    assert.equal(engine.setFxSlotParameter(2, 'fx-delay', 'time', 0.9), true,
+      'a restored chain accepts writes rather than being reported as stale');
+    assert.equal(delayTime.value, 0.9);
+  });
+
+  it('when the rollback itself cannot reconnect, the retired chain is released rather than retained unusable', () => {
+    const previous = registeredEffect(1, 'fx-chorus');
+    const previousTape = registeredEffect(1, 'fx-tape');
+    const previousSpy = spyDispose(previous);
+    const previousTapeSpy = spyDispose(previousTape);
+    const channel = mixerChannel(1);
+    const panner = channel.panner as FakeNode;
+    const nodesBefore = liveCtx.createdNodes.length;
+
+    // Every edge into the panner fails: the tail, the rollback, and the bypass.
+    poisonConnectTo(panner, [
+      'simulated tail connect failure',
+      'simulated rollback connect failure',
+      'simulated bypass connect failure',
+    ]);
+
+    assert.throws(
+      () => engine.rebuildTrackFxChain(makeTrack(1, [chorusSlot()])),
+      /simulated tail connect failure/,
+      'a failing rollback must not mask the original error',
+    );
+
+    const createdModulators = liveCtx.createdNodes.slice(nodesBefore).filter(node => node.startCalls > 0);
+    assert.equal(createdModulators.every(node => node.stopCalls >= 1), true, 'the new chain is still disposed');
+    assert.equal(previousSpy.calls, 1, 'with nothing wired anywhere, the retired effects can no longer be used — they are released');
+    assert.equal(previousTapeSpy.calls, 1, '…both of them');
+    assert.equal(isDisposed(innerEffect(previous)), true);
+    assert.equal(engine.__fxSlotEffectMaps.has(1), false, 'and the entry goes with them, so nothing is retained-but-unusable');
+    assert.equal(channel.fxNodes.length, 0, 'the channel keeps no wiring for a chain that was never installed');
+    assert.equal(liveCtx.unstoppedModulators().length, 0,
+      'this outcome must be deterministic: after it, no modulator of the track is left running');
+    assert.equal(engine.setFxSlotParameter(1, 'fx-chorus', 'rate', 5), false, 'and the setters report a rebuild');
   });
 
   it('recovers: once the connection works, the next rebuild installs and retires correctly', () => {

@@ -1512,6 +1512,9 @@ class AudioEngine {
     // a live take owns are never the render's to release.
     const previousEffects = this.__fxSlotEffectMaps.get(track.id);
     const mayReleasePrevious = !this.isOfflineRendering;
+    // The node list of that chain, in wiring order, so a replacement that fails
+    // can be rolled back to it instead of leaving it disconnected but owned.
+    const previousFxNodes = channel.fxNodes.slice();
 
     // Disconnect existing FX (best-effort: one node refusing to let go must not
     // abort the rebuild of the rest of the chain).
@@ -1596,26 +1599,40 @@ class AudioEngine {
     try {
       currentSource.connect(channel.panner);
     } catch (error) {
-      // Release exactly what this build created, drop the half-wired chain from
-      // the channel, and re-bypass it so a failed tail connection cannot mute
-      // the track. The retired chain is deliberately *not* disposed — it is the
-      // one thing this rebuild did not manage to replace.
+      // The replacement cannot complete, so it never becomes the running chain:
+      // release exactly what this build created — its modulators included — and
+      // take its half-wired nodes off the channel.
       this.disposeFxSlotEffects(createdEffects);
       try {
         channel.input.disconnect();
       } catch (_) {}
       channel.fxNodes = [];
-      try {
-        channel.input.connect(channel.panner);
-      } catch (_) {}
-      // Hand the retired chain's effects back to the registry rather than
-      // discarding the only references to them: they are disconnected (so
-      // `fxSlotEntryStaleness` refuses to write to them and releases them the
-      // moment a caller touches one) but they are still *owned*, which is what
-      // keeps a modulator that survived a failed replacement from running
-      // unowned forever.
-      if (previousEffects && previousEffects.size > 0) {
-        this.__fxSlotEffectMaps.set(track.id, previousEffects);
+      // Then put the retired chain back, rather than leaving it disconnected but
+      // registered: an entry nobody touches again is a started oscillator
+      // running indefinitely with no owner that could ever release it. Restoring
+      // is preferred over disposing here because this failure is environmental
+      // (a node the context will not accept), not a corrupt slot — the chain the
+      // user was hearing is still perfectly usable.
+      const restored = previousFxNodes.length > 0
+        && this.restoreFxChainNodes(channel, previousFxNodes);
+      if (restored) {
+        if (previousEffects && previousEffects.size > 0) {
+          this.__fxSlotEffectMaps.set(track.id, previousEffects);
+        }
+      } else {
+        // Restoration is impossible (nothing to re-wire, or the same broken edge
+        // rejected it too), so the outcome is deterministic: keep the direct
+        // bypass so the track is not muted, and dispose the effects that can no
+        // longer reach the mix instead of leaving them owned-but-unusable.
+        this.__fxSlotEffectMaps.delete(track.id);
+        if (mayReleasePrevious) this.disposeFxSlotEffects(previousEffects?.values());
+        try {
+          channel.input.connect(channel.panner);
+        } catch (_) {
+          // Swallowed on purpose: the original connection failure below is the
+          // caller's signal, and a channel that cannot wire its own bypass has
+          // already reported that by failing the rebuild.
+        }
       }
       throw error;
     }
@@ -1647,6 +1664,50 @@ class AudioEngine {
         // Intentionally swallowed — see above. The remaining effects are still
         // disposed, and the caller has already detached the channel wiring.
       }
+    }
+  }
+
+  /**
+   * FX-map lifecycle safety: re-wire a channel with the node list of the chain it
+   * just retired, so a replacement that failed to connect does not strand that
+   * chain disconnected-but-owned (or its modulators running with nobody left to
+   * release them).
+   *
+   * `fxNodes` is written by `rebuildTrackFxChain` as `[…, effect.input, chainEnd?]`
+   * in signal order, with the same list `getChainEnd` resolved while building, so
+   * replaying it reproduces the graph exactly: the previous source (the channel
+   * input to begin with) connects to each entry, and an entry that is only
+   * recorded because it is the tail of the effect before it is used as a source,
+   * never as a target.
+   *
+   * Best-effort by contract: any rejection during the re-wire leaves the channel
+   * fully detached and reports `false`, which makes the caller's fallback
+   * (bypass + release) the only remaining state. A channel that ends up restored
+   * is reported `true` only once its tail reaches the panner again.
+   */
+  private restoreFxChainNodes(channel: MixerChannel, nodes: AudioNode[]): boolean {
+    let source: AudioNode = channel.input;
+    try {
+      for (let index = 0; index < nodes.length; index += 1) {
+        const node = nodes[index]!;
+        source.connect(node);
+        const chainEnd = getChainEnd(node);
+        source = chainEnd;
+        // Skip an entry that is the tail of the effect just wired: it is a
+        // source, not a second target.
+        if (chainEnd !== node && nodes[index + 1] === chainEnd) index += 1;
+      }
+      source.connect(channel.panner);
+      channel.fxNodes = nodes;
+      return true;
+    } catch (_) {
+      // Never leave a part-restored chain behind: it would be audible, unwired
+      // and unregistered at the same time.
+      channel.fxNodes = [];
+      try {
+        channel.input.disconnect();
+      } catch (_) {}
+      return false;
     }
   }
 
