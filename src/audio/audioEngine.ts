@@ -697,6 +697,14 @@ class AudioEngine {
       return;
     }
 
+    // FX-map lifecycle safety: reaching this line with a context already on the
+    // engine means that context is `closed`. Every mixer channel, panner, FX
+    // effect and registry entry still describes nodes of that dead context;
+    // `getOrCreateMixerChannel` would hand them out again and a live FX update
+    // would be written into nodes that can no longer render — and reported as a
+    // success. Discard them before the new context takes over.
+    if (this.ctx) this.invalidateContextBoundAudioState();
+
     const AudioContextClass = window.AudioContext || (window as unknown as WindowWithWebKitAudio).webkitAudioContext;
     this.ctx = new AudioContextClass({ latencyHint: 'interactive' });
 
@@ -1027,6 +1035,17 @@ class AudioEngine {
         }
       }
     }
+
+    // FX-map lifecycle safety: the FX-map entries for this track name effects
+    // this channel owns. `disconnect()` on the channel's nodes only detaches
+    // them — a chorus/tape modulator oscillator that the factory already
+    // `start()`ed keeps running until the effect itself is disposed, and a
+    // surviving registry entry would keep advertising that dead chain to the
+    // live parameter/mix setters. Invalidate first (so a concurrent lookup
+    // cannot resolve it), then release the effects best-effort.
+    const ownedEffects = this.__fxSlotEffectMaps.get(trackId);
+    this.__fxSlotEffectMaps.delete(trackId);
+    this.disposeFxSlotEffects(ownedEffects?.values());
 
     this.mixerChannels.delete(trackId);
   }
@@ -1484,12 +1503,34 @@ class AudioEngine {
     const ctx = this.ctx;
     const channel = this.getOrCreateMixerChannel(track.id);
 
-    // Disconnect existing FX
-    channel.input.disconnect();
-    channel.fxNodes.forEach(node => node.disconnect());
+    // FX-map lifecycle safety: capture the effects this track's previous chain
+    // owned *before* the teardown, because that is the only reference to them
+    // once the registry entry is cleared. `disconnect()` alone would leave a
+    // started modulator running forever, so a retired chain is disposed.
+    // An offline render must be excluded from that rule: while a render is
+    // running, the chains being (re)built belong to the render, and the entries
+    // a live take owns are never the render's to release.
+    const previousEffects = this.__fxSlotEffectMaps.get(track.id);
+    const mayReleasePrevious = !this.isOfflineRendering;
+    // The node list of that chain, in wiring order, so a replacement that fails
+    // can be rolled back to it instead of leaving it disconnected but owned.
+    const previousFxNodes = channel.fxNodes.slice();
+
+    // Disconnect existing FX (best-effort: one node refusing to let go must not
+    // abort the rebuild of the rest of the chain).
+    try {
+      channel.input.disconnect();
+    } catch (_) {}
+    channel.fxNodes.forEach(node => {
+      try {
+        node.disconnect();
+      } catch (_) {}
+    });
     channel.fxNodes = [];
 
-    // Phase 81: clear previous slot-effect maps for this track
+    // Clear this track's slot-effect entries up front. A build that fails
+    // halfway must not leave the registry naming effects that never became a
+    // chain — the live setters report success on anything the registry holds.
     this.__fxSlotEffectMaps.delete(track.id);
 
     let currentSource: AudioNode = channel.input;
@@ -1498,41 +1539,254 @@ class AudioEngine {
     // We call createEffect directly so we have access to the full effect object
     // for the live parameter/mix update registry.
     const slotEffectsMap = new Map<string, AudioEffect>();
-    track.fxSlots.forEach(slot => {
-      if (!slot.enabled) return;
+    const createdEffects: AudioEffect[] = [];
+    try {
+      track.fxSlots.forEach(slot => {
+        if (!slot.enabled) return;
 
-      // Offline renders must reuse the seeded impulse prepared by
-      // renderTimelineOffline so repeated exports are byte-identical.
-      // getOfflineReverbImpulseResponse() returns undefined outside an
-      // offline render, so the live path keeps its per-chain impulse.
-      const effect = createEffect(ctx, slot, this.getOfflineReverbImpulseResponse());
-      if (!effect) return;
+        // Offline renders must reuse the seeded impulse prepared by
+        // renderTimelineOffline so repeated exports are byte-identical.
+        // getOfflineReverbImpulseResponse() returns undefined outside an
+        // offline render, so the live path keeps its per-chain impulse.
+        const effect = createEffect(ctx, slot, this.getOfflineReverbImpulseResponse());
+        if (!effect) return;
 
-      // The factory returns composite effects with distinct input/output nodes.
-      // Register that boundary so getChainEnd routes the processed signal
-      // (including the WetDryEffect output) to the next slot or channel panner.
-      setChainEnd(effect.input, effect.output);
+        // The factory returns composite effects with distinct input/output nodes.
+        // Register that boundary so getChainEnd routes the processed signal
+        // (including the WetDryEffect output) to the next slot or channel panner.
+        setChainEnd(effect.input, effect.output);
 
-      // Track the effect keyed by slot.id for live updates.
-      // The WetDry wrapper (or inner effect) is what setParameter operates on.
-      slotEffectsMap.set(slot.id, effect);
+        // Track the effect keyed by slot.id for live updates.
+        // The WetDry wrapper (or inner effect) is what setParameter operates on.
+        slotEffectsMap.set(slot.id, effect);
+        createdEffects.push(effect);
 
-      if (!slot.enabled) return;
+        const fxNode = effect.input;
+        if (fxNode) {
+          currentSource.connect(fxNode);
+          const chainEnd = getChainEnd(fxNode);
+          currentSource = chainEnd;
+          channel.fxNodes.push(fxNode);
+          if (chainEnd !== fxNode) channel.fxNodes.push(chainEnd);
+        }
+      });
+    } catch (error) {
+      // The factory rejects a slot it cannot build (a persisted `mix` outside
+      // [0, 1] is the reachable case), which leaves the slots before it
+      // constructed and connected. Release exactly what this build created,
+      // plus the chain it retired, and re-bypass the channel so a half-built
+      // chain can neither keep modulating nor mute the track. The error is
+      // rethrown: the caller must not be told a chain exists when it does not.
+      this.disposeFxSlotEffects(createdEffects);
+      if (mayReleasePrevious) this.disposeFxSlotEffects(previousEffects?.values());
+      try {
+        channel.input.disconnect();
+      } catch (_) {}
+      channel.fxNodes = [];
+      try {
+        channel.input.connect(channel.panner);
+      } catch (_) {}
+      throw error;
+    }
 
-      const fxNode = effect.input;
-      if (fxNode) {
-        currentSource.connect(fxNode);
-        const chainEnd = getChainEnd(fxNode);
-        currentSource = chainEnd;
-        channel.fxNodes.push(fxNode);
-        if (chainEnd !== fxNode) channel.fxNodes.push(chainEnd);
+    // FX-map lifecycle safety (review follow-up): the chain is not a
+    // replacement until its tail is wired into the channel. That last connect is
+    // the one call here that can fail on a node the engine no longer owns (a
+    // real context answers `InvalidAccessError`/`InvalidStateError` when the
+    // target belongs to another or a closed context), so the retired chain must
+    // still be intact when it does: disposing before this line would leave the
+    // track with neither the old chain nor the new one.
+    try {
+      currentSource.connect(channel.panner);
+    } catch (error) {
+      // The replacement cannot complete, so it never becomes the running chain:
+      // release exactly what this build created — its modulators included — and
+      // take its half-wired nodes off the channel.
+      this.disposeFxSlotEffects(createdEffects);
+      try {
+        channel.input.disconnect();
+      } catch (_) {}
+      channel.fxNodes = [];
+      // Then put the retired chain back, rather than leaving it disconnected but
+      // registered: an entry nobody touches again is a started oscillator
+      // running indefinitely with no owner that could ever release it. Restoring
+      // is preferred over disposing here because this failure is environmental
+      // (a node the context will not accept), not a corrupt slot — the chain the
+      // user was hearing is still perfectly usable.
+      const restored = previousFxNodes.length > 0
+        && this.restoreFxChainNodes(channel, previousFxNodes);
+      if (restored) {
+        if (previousEffects && previousEffects.size > 0) {
+          this.__fxSlotEffectMaps.set(track.id, previousEffects);
+        }
+      } else {
+        // Restoration is impossible (nothing to re-wire, or the same broken edge
+        // rejected it too), so the outcome is deterministic: keep the direct
+        // bypass so the track is not muted, and dispose the effects that can no
+        // longer reach the mix instead of leaving them owned-but-unusable.
+        this.__fxSlotEffectMaps.delete(track.id);
+        if (mayReleasePrevious) this.disposeFxSlotEffects(previousEffects?.values());
+        try {
+          channel.input.connect(channel.panner);
+        } catch (_) {
+          // Swallowed on purpose: the original connection failure below is the
+          // caller's signal, and a channel that cannot wire its own bypass has
+          // already reported that by failing the rebuild.
+        }
       }
-    });
+      throw error;
+    }
+
+    // The replacement is fully connected and installed; only now may the
+    // retired chain be released.
+    if (mayReleasePrevious) this.disposeFxSlotEffects(previousEffects?.values());
 
     // Store the map for this track in the native registry.
-    this.__fxSlotEffectMaps.set(track.id, slotEffectsMap);
+    if (slotEffectsMap.size > 0) this.__fxSlotEffectMaps.set(track.id, slotEffectsMap);
+  }
 
-    currentSource.connect(channel.panner);
+  /**
+   * FX-map lifecycle safety: release effects the native registry owned.
+   *
+   * Best-effort by design: disposal is the only call that stops the modulator
+   * oscillators `ChorusEffect` and the tape composite start, so one effect
+   * refusing to die (a node that is already gone, a context that closed under
+   * it) must never strand the other effects of the same chain. Each effect
+   * guards its own teardown, so an error here cannot leave that effect
+   * half-disposed in a way the next attempt would corrupt.
+   */
+  private disposeFxSlotEffects(effects: Iterable<AudioEffect> | undefined): void {
+    if (!effects) return;
+    for (const effect of effects) {
+      try {
+        effect.dispose();
+      } catch (_) {
+        // Intentionally swallowed — see above. The remaining effects are still
+        // disposed, and the caller has already detached the channel wiring.
+      }
+    }
+  }
+
+  /**
+   * FX-map lifecycle safety: re-wire a channel with the node list of the chain it
+   * just retired, so a replacement that failed to connect does not strand that
+   * chain disconnected-but-owned (or its modulators running with nobody left to
+   * release them).
+   *
+   * `fxNodes` is written by `rebuildTrackFxChain` as `[…, effect.input, chainEnd?]`
+   * in signal order, with the same list `getChainEnd` resolved while building, so
+   * replaying it reproduces the graph exactly: the previous source (the channel
+   * input to begin with) connects to each entry, and an entry that is only
+   * recorded because it is the tail of the effect before it is used as a source,
+   * never as a target.
+   *
+   * Best-effort by contract: any rejection during the re-wire leaves the channel
+   * fully detached and reports `false`, which makes the caller's fallback
+   * (bypass + release) the only remaining state. A channel that ends up restored
+   * is reported `true` only once its tail reaches the panner again.
+   */
+  private restoreFxChainNodes(channel: MixerChannel, nodes: AudioNode[]): boolean {
+    let source: AudioNode = channel.input;
+    try {
+      for (let index = 0; index < nodes.length; index += 1) {
+        const node = nodes[index]!;
+        source.connect(node);
+        const chainEnd = getChainEnd(node);
+        source = chainEnd;
+        // Skip an entry that is the tail of the effect just wired: it is a
+        // source, not a second target.
+        if (chainEnd !== node && nodes[index + 1] === chainEnd) index += 1;
+      }
+      source.connect(channel.panner);
+      channel.fxNodes = nodes;
+      return true;
+    } catch (_) {
+      // Never leave a part-restored chain behind: it would be audible, unwired
+      // and unregistered at the same time.
+      channel.fxNodes = [];
+      try {
+        channel.input.disconnect();
+      } catch (_) {}
+      return false;
+    }
+  }
+
+  /**
+   * FX-map lifecycle safety: is a registry entry still naming the chain the
+   * engine renders with?
+   *
+   * - `'track'` — nothing on this track's chain can be reached any more: its
+   *   mixer channel is gone (a removal that did not come through
+   *   `removeMixerChannel`), or the effect's nodes belong to a different
+   *   `BaseAudioContext` than the engine is currently using (a closed context
+   *   replaced by `init()`, or a finished offline render). Every slot entry of
+   *   that track is obsolete.
+   * - `'slot'` — the chain is live but this slot's node is no longer wired in
+   *   (bypassed or replaced), so only that entry goes.
+   * - `null` — the entry is current and may be written to.
+   *
+   * `AudioNode.context` is undefined on the lightweight contexts the engine
+   * tests install, so the context rule only applies when both sides expose one
+   * (a real `BaseAudioContext` always does).
+   */
+  private fxSlotEntryStaleness(trackId: number, effect: AudioEffect): 'track' | 'slot' | null {
+    const channel = this.mixerChannels.get(trackId);
+    if (!channel) return 'track';
+    const effectContext = (effect.input as { context?: BaseAudioContext } | undefined)?.context;
+    if (effectContext && this.ctx && effectContext !== (this.ctx as unknown as BaseAudioContext)) return 'track';
+    if (!channel.fxNodes.includes(effect.input)) return 'slot';
+    return null;
+  }
+
+  /**
+   * FX-map lifecycle safety: drop the entries of a track whose chain can no
+   * longer be written to, so a caller is told to rebuild instead of being told
+   * an obsolete effect took the value.
+   *
+   * Review follow-up: the effects are released *before* their references go.
+   * An entry that has just been classified stale can never be reached again,
+   * and `disconnect()` is not enough — only `dispose()` stops the modulator
+   * oscillators that `ChorusEffect` and the tape composite start during
+   * construction, so invalidating without disposal traded a wrong "applied"
+   * answer for a permanently running oscillator.
+   *
+   * Disposal is scoped to exactly what is invalidated: the remaining slots of
+   * the same track (still wired into the running chain) and every other track
+   * are left alone — during an offline render the live take lives in its own
+   * registry, so it is never reachable from here — and one throwing
+   * `dispose()` cannot strand its siblings (`disposeFxSlotEffects`).
+   */
+  private invalidateFxSlotEntries(trackId: number, slotId?: string): void {
+    if (slotId === undefined) {
+      const obsoleteEffects = this.__fxSlotEffectMaps.get(trackId);
+      this.__fxSlotEffectMaps.delete(trackId);
+      this.disposeFxSlotEffects(obsoleteEffects?.values());
+      return;
+    }
+    const slotEffects = this.__fxSlotEffectMaps.get(trackId);
+    if (!slotEffects) return;
+    const obsoleteEffect = slotEffects.get(slotId);
+    slotEffects.delete(slotId);
+    if (obsoleteEffect) this.disposeFxSlotEffects([obsoleteEffect]);
+    if (slotEffects.size === 0) this.__fxSlotEffectMaps.delete(trackId);
+  }
+
+  /**
+   * FX-map lifecycle safety: discard every node and effect bound to a context
+   * the engine has left behind. Called by `init()` when it is about to replace
+   * a closed context; on a first boot (no previous context) it is never reached.
+   */
+  private invalidateContextBoundAudioState(): void {
+    for (const [, slotEffects] of this.__fxSlotEffectMaps) {
+      this.disposeFxSlotEffects(slotEffects.values());
+    }
+    this.__fxSlotEffectMaps = new Map();
+    this.mixerChannels = new Map();
+    this.channelPanners = new Map();
+    // The routing adapter holds a reference to the discarded channel map, so it
+    // is rebuilt lazily against the new context (`ensureMixerRoutingAdapter`).
+    this.mixerRoutingAdapter = null;
+    this.mixerRoutingChannelMap = null;
   }
 
   /**
@@ -2308,7 +2562,10 @@ class AudioEngine {
    *
    * Returns `true` only when the running chain took the value; `false` means the
    * caller must fall back to a rebuild (no live chain, bypassed slot, unknown
-   * slot id, or a value the effect rejected).
+   * slot id, a value the effect rejected, or an entry the engine has outlived —
+   * FX-map lifecycle safety invalidates a registry entry whose channel is gone or
+   * whose nodes belong to another `BaseAudioContext`, rather than reporting a
+   * write into an obsolete effect as applied).
    */
   private applyLiveFxSlotParamToRunningChain(
     trackId: number,
@@ -2320,15 +2577,29 @@ class AudioEngine {
     if (!Number.isFinite(value)) return false;
     if (typeof paramName !== 'string' || !paramName.trim()) return false;
 
-    const effect = this.__fxSlotEffectMaps.get(trackId)?.get(slotId);
+    const slotEffects = this.__fxSlotEffectMaps.get(trackId);
+    const effect = slotEffects?.get(slotId);
     if (effect) {
-      try {
-        effect.setParameter(translateSlotParamToFxName(effect, paramName), value, now);
-        return true;
-      } catch (_) {
-        // An unknown name or an out-of-range value is rejected by the effect;
-        // fall through to the legacy registry (present only when the Phase 80
-        // patch is installed) before reporting the miss to the caller.
+      // FX-map lifecycle safety: the map is only authoritative while it names
+      // the chain that is actually rendering. An entry whose channel is gone or
+      // whose nodes belong to another context (a closed one, or a finished
+      // offline render) must never answer "applied" — that reply is what tells
+      // the caller to skip the rebuild, and the insert would silently stop
+      // following the lane for the rest of the take.
+      const staleness = this.fxSlotEntryStaleness(trackId, effect);
+      if (staleness === 'track') {
+        this.invalidateFxSlotEntries(trackId);
+      } else if (staleness === 'slot') {
+        this.invalidateFxSlotEntries(trackId, slotId);
+      } else {
+        try {
+          effect.setParameter(translateSlotParamToFxName(effect, paramName), value, now);
+          return true;
+        } catch (_) {
+          // An unknown name or an out-of-range value is rejected by the effect;
+          // fall through to the legacy registry (present only when the Phase 80
+          // patch is installed) before reporting the miss to the caller.
+        }
       }
     }
 
@@ -2828,16 +3099,14 @@ class AudioEngine {
         liveSampleBuffersDuringOfflineRender: this.liveSampleBuffersDuringOfflineRender,
         liveProjectSampleBufferIdsDuringOfflineRender: this.liveProjectSampleBufferIdsDuringOfflineRender,
         liveSessionSampleBufferIdsDuringOfflineRender: this.liveSessionSampleBufferIdsDuringOfflineRender,
-        // Fix 5: the per-track slot-effect registry names the *live* chain when
-        // the engine is idle, but the render rebuilds every chain against the
-        // OfflineAudioContext (Phase 81's correction in the now-uninstalled
-        // hardening patch kept the two apart for exactly this reason). Without
-        // snapshotting the live registry here, the map would later name
-        // AudioParams that belong to a finished render, and every live FX update
-        // would be written into dead nodes and reported as applied. The copy is
-        // shallow on purpose: a rebuild replaces a track's inner map, so the
-        // captured inner maps keep naming the live effects.
-        __fxSlotEffectMaps: new Map(this.__fxSlotEffectMaps),
+        // Fix 5 + FX-map lifecycle safety: the per-track slot-effect registry
+        // names the *live* chain, and the render now builds its chains against
+        // its own registry (see the isolation below), so the live map is
+        // captured and handed back untouched. Before that isolation existed
+        // this had to be a shallow copy: the render's rebuilds wrote their own
+        // effects into the live map, which would later name AudioParams of a
+        // finished render and report every live FX update as applied.
+        __fxSlotEffectMaps: this.__fxSlotEffectMaps,
       };
       if (previous.transport && previous.transportWasPlaying) {
         transportToResume = previous.transport;
@@ -2899,6 +3168,14 @@ class AudioEngine {
           this.mixerRoutingAdapter = null;
           this.mixerRoutingChannelMap = null;
           this.impulseResponses = new Map();
+          // FX-map lifecycle safety: the render owns its own slot-effect
+          // registry, for the same reason it owns its own mixer channels.
+          // `rebuildTrackFxChain` registers whatever it builds, so without this
+          // the offline chains would be written into the *live* map — and a
+          // rebuild that releases the chain it retires would then dispose the
+          // live take's effects. The captured live map is handed back in the
+          // `finally` below, for a successful and a failed render alike.
+          this.__fxSlotEffectMaps = new Map();
           this.activeVoices = new Map();
           this.activeVoiceChannelVolumes = new Map();
           this.activeDrumPadVoices = new Map();
