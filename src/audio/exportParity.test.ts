@@ -1,7 +1,6 @@
 import { describe, it, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { audioEngine } from './audioEngine';
-import { installLiveFxChainHardening } from './liveFxChainHardening';
 import type { Channel, PlaylistClip, PlaylistTrack, MixerTrack } from '../types/daw';
 
 // --- Web Audio Mock Classes ---
@@ -727,8 +726,6 @@ describe('Phase 10A: Playlist lane-mute parity for offline export', () => {
   });
 
   it('production offline FX factory assigns identical non-zero impulses to the actual reverb convolvers', async () => {
-    installLiveFxChainHardening(audioEngine);
-
     const mixerTracksWithReverb = baseMixerTracks.map(mixerTrack => mixerTrack.id === 1
       ? {
           ...mixerTrack,

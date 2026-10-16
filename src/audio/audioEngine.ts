@@ -555,10 +555,19 @@ class AudioEngine {
   private mixerRoutingAdapter: MixerRoutingAdapter | null = null;
   private mixerRoutingChannelMap: Map<number, MixerChannel> | null = null;
 
-  /** Phase 81: per-track slot-effect maps, populated by rebuildTrackFxChain.
-   * Keys are track IDs, values are Maps of slot.id → AudioEffect (the WetDry wrapper
-   * or inner effect). Used by native live parameter/mix update paths, making
-   * installLiveFxChainHardening a no-op when the engine has been initialized.
+  /**
+   * Phase 81: per-track slot-effect maps, populated by `rebuildTrackFxChain`.
+   * Keys are track IDs, values are Maps of slot.id → AudioEffect (the WetDry
+   * wrapper or inner effect).
+   *
+   * This map is the single owner of the FX-chain lifecycle, not a cache that
+   * something else may also own: `rebuildTrackFxChain` and
+   * `removeMixerChannel` are its only writers, and the native live
+   * parameter/mix update paths read it before anything else. The legacy
+   * `installLiveFxChainHardening` detects it and installs its parameter-delivery
+   * registry *without* replacing either lifecycle method — the registry then
+   * reads through to this map, so a caller that installs the patch reaches the
+   * same AudioParams without moving the lifecycle out of this class.
    */
   private __fxSlotEffectMaps: Map<number, Map<string, AudioEffect>> = new Map();
 

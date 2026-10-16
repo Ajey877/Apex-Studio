@@ -1,7 +1,6 @@
 import { describe, it, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { audioEngine } from './audioEngine';
-import { installLiveFxChainHardening } from './liveFxChainHardening';
 import { createDefaultProjectState } from '../state/projectState';
 import { updateMacroRackInProjectState } from '../state/projectMutations';
 import { resolveMacroRack } from '../state/macroMappings';
@@ -276,9 +275,6 @@ beforeEach(() => {
   engine.projectOwnedSampleBufferIds = new Set();
   engine.sessionSampleBufferIds = new Set();
 
-  // main.tsx installs the production live/offline FX factory at app init; the
-  // macro wet/feedback targets are only observable through it.
-  installLiveFxChainHardening(audioEngine);
   (globalThis as any).OfflineAudioContext = FakeOfflineAudioContext;
   engine.buildReverbImpulse = () => undefined;
   engine.startMasterMeasurementPump = () => undefined;
