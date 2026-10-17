@@ -134,38 +134,41 @@ describe('AudioClockTransport', () => {
     });
 
     transport.start();
-    assert.deepEqual(events, [{ step: 0, audioTime: 0 }]);
+    assert.deepEqual(events, [{ step: 0, audioTime: START_LEAD_SECONDS }]);
 
-    // At t=0.03, pump the scheduler through its look-ahead window. Step 1
-    // is now committed at the old tempo (0.125s), but step 2 is not scheduled.
-    fakeContext.currentTime = 0.03;
+    // The take's timeline begins one start lead after `start()`, so the pump
+    // instant that sits the same distance into the music is offset by that
+    // lead. At this point step 1 is committed at the old tempo (one lead
+    // after 0.125s), but step 2 is not scheduled yet.
+    fakeContext.currentTime = 0.03 + START_LEAD_SECONDS;
     const scheduled = timers.shift();
     assert.ok(scheduled);
     scheduled();
     assert.deepEqual(events, [
-      { step: 0, audioTime: 0 },
-      { step: 1, audioTime: 0.125 },
+      { step: 0, audioTime: START_LEAD_SECONDS },
+      { step: 1, audioTime: 0.125 + START_LEAD_SECONDS },
     ]);
 
     // Change tempo while the scheduler is still ahead of the audio clock.
-    // The event already committed at 0.125s must stay unchanged. At 60 BPM,
-    // the next step belongs at 0.375s (one new 0.25s step after that event).
+    // The event already committed at 0.125s + lead must stay unchanged. At
+    // 60 BPM, the next step belongs at 0.375s + lead (one new 0.25s step
+    // after that event).
     transport.setBpm(60);
-    // Advance only until the new event at 0.375s enters the look-ahead
+    // Advance only until the new event at 0.375s + lead enters the look-ahead
     // window; do not run the scheduler after that event would be in the past.
-    fakeContext.currentTime = 0.28;
+    fakeContext.currentTime = 0.28 + START_LEAD_SECONDS;
     const afterTempoChange = timers.shift();
     assert.ok(afterTempoChange);
     afterTempoChange();
 
     assert.deepEqual(events.slice(0, 2), [
-      { step: 0, audioTime: 0 },
-      { step: 1, audioTime: 0.125 },
+      { step: 0, audioTime: START_LEAD_SECONDS },
+      { step: 1, audioTime: 0.125 + START_LEAD_SECONDS },
     ]);
     assert.equal(events[2].step, 2);
     assert.ok(
-      Math.abs(events[2].audioTime - 0.375) < 1e-9,
-      `expected first unscheduled 60-BPM step at 0.375s, got ${events[2].audioTime}s`,
+      Math.abs(events[2].audioTime - (0.375 + START_LEAD_SECONDS)) < 1e-9,
+      `expected first unscheduled 60-BPM step at 0.375s + lead, got ${events[2].audioTime}s`,
     );
     assert.ok(events.every((event, index) => index === 0 || event.audioTime > events[index - 1].audioTime),
       'scheduled event times must remain strictly increasing');
