@@ -1,0 +1,469 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Stage B verification rig</title>
+</head>
+<body>
+<p>Stage B verification rig — ScriptProcessor capture, structural onset matching.</p>
+<!-- cache-busting tag is injected per tree by the harness -->
+<script src="/scratch-rig/bundle-transport.js?tree=baseline"></script>
+<script src="/scratch-rig/bundle-offline.js?tree=baseline"></script>
+<script>
+(function () {
+  'use strict';
+
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  /* ---------------------------------------------------------------- capture */
+
+  /**
+   * ScriptProcessorNode tap. AudioWorkletNode is non-functional in this
+   * Chromium build (process() never fires), so capture uses the deprecated
+   * ScriptProcessor. On a known impulse train this is sample-exact.
+   */
+  class Tap {
+    constructor(ctx, bufferSize) {
+      this.ctx = ctx;
+      this.bufferSize = bufferSize;
+      this.chunks = [];
+      this.playbackTimes = [];
+      this.armed = false;
+      const node = ctx.createScriptProcessor(bufferSize, 1, 1);
+      node.onaudioprocess = (e) => {
+        if (!this.armed) return;
+        this.chunks.push(new Float32Array(e.inputBuffer.getChannelData(0)));
+        this.playbackTimes.push(e.playbackTime);
+      };
+      this.node = node;
+    }
+    arm() { this.chunks = []; this.playbackTimes = []; this.armed = true; }
+    disarm() { this.armed = false; }
+    attach(source) {
+      // The tap must be inserted in the signal path: source -> tap -> sink.
+      // ScriptProcessor only pulls when connected onward, so a zero-gain sink
+      // keeps the graph running without adding sound to the master bus.
+      if (source) { try { source.connect(this.node); } catch (_) { /* already wired */ } }
+      const sink = this.ctx.createGain();
+      sink.gain.value = 0;
+      this.node.connect(sink);
+      sink.connect(this.ctx.destination);
+    }
+    detach() { try { this.node.disconnect(); } catch (_) { /* noop */ } }
+  }
+
+  /**
+   * Coverage / capture-integrity report. `playbackTime` is only used as a
+   * dropout detector here (it jitters whole quanta, so it is never used to
+   * place onsets); onset placement comes from the sample stream itself.
+   */
+  function coverage(tap, sr) {
+    const n = tap.chunks.length;
+    let total = 0;
+    for (const c of tap.chunks) total += c.length;
+    const bufDur = tap.bufferSize / sr;
+    let dropped = 0, maxJit = 0, sumJit = 0, cnt = 0;
+    for (let i = 1; i < tap.playbackTimes.length; i += 1) {
+      const dt = tap.playbackTimes[i] - tap.playbackTimes[i - 1];
+      if (dt > bufDur * 1.5) dropped += 1;
+      const jit = Math.abs(dt - bufDur) * sr / 128;
+      if (jit > maxJit) maxJit = jit;
+      sumJit += jit; cnt += 1;
+    }
+    return {
+      chunkCount: n,
+      totalSamples: total,
+      expectedStepSamples: tap.bufferSize,
+      meanStepSamples: n > 1 ? (total - tap.chunks[n - 1].length) / (n - 1) : null,
+      droppedBuffers: dropped,
+      ptJitterQuantaMax: cnt ? maxJit : null,
+      ptJitterQuantaMean: cnt ? sumJit / cnt : null,
+    };
+  }
+
+  /* ----------------------------------------------------------- onset scanner */
+
+  /**
+   * Hysteresis onset detector.
+   *
+   * A fixed hold-off swallows the very burst we need to measure, and
+   * instantaneous re-arming fragments one burst into dozens of onsets. The
+   * workable rule is sustained-quiet re-arming: after an onset, the signal
+   * must stay below LO for a full 10 ms before another onset is accepted.
+   */
+  function scanOnsets(tap, sr) {
+    const HI = 0.2;     // burst amplitude is 0.8
+    const LO = 0.05;
+    const QUIET = Math.round(0.010 * sr);
+    const onsets = [];
+    let armed = true, quietRun = 0, idx = 0;
+    for (let c = 0; c < tap.chunks.length; c += 1) {
+      const d = tap.chunks[c];
+      for (let i = 0; i < d.length; i += 1, idx += 1) {
+        const a = Math.abs(d[i]);
+        if (armed && a >= HI) { onsets.push({ sample: idx }); armed = false; quietRun = 0; }
+        else if (!armed) {
+          if (a < LO) { quietRun += 1; if (quietRun >= QUIET) armed = true; }
+          else quietRun = 0;
+        }
+      }
+    }
+    return onsets;
+  }
+
+  /**
+   * One 1000 Hz burst. Every burst used for a comparison shares this exact
+   * waveform: mixing burst frequencies injects ~1 quantum of detection bias.
+   */
+  function scheduleBurst(ctx, bus, when, freq, dur) {
+    const osc = ctx.createOscillator();
+    const g = ctx.createGain();
+    osc.frequency.value = freq;
+    g.gain.setValueAtTime(0, when);
+    g.gain.linearRampToValueAtTime(0.8, when + 0.001);
+    g.gain.setValueAtTime(0.8, when + Math.max(0.002, dur - 0.005));
+    g.gain.linearRampToValueAtTime(0, when + dur);
+    osc.connect(g);
+    g.connect(bus);
+    osc.start(when);
+    osc.stop(when + dur + 0.01);
+    return { osc, g };
+  }
+
+  /* --------------------------------------------------------------- gapProof */
+
+  /** Ground truth: a known impulse train. Proves the capture stream itself. */
+  async function runGapProof(ctx, bus, tap, opts) {
+    const sr = ctx.sampleRate;
+    const step = opts.bufferSize || 4096;
+    const n = opts.impulseCount || 10;
+    const t0 = ctx.currentTime + 0.3;
+    for (let k = 0; k < n; k += 1) scheduleBurst(ctx, bus, t0 + (k * step) / sr, 1000, 0.01);
+    tap.arm();
+    await sleep(300 + ((n * step) / sr) * 1000 + 500);
+    tap.disarm();
+    const cov = coverage(tap, sr);
+    const onsets = scanOnsets(tap, sr);
+    let maxAbs = 0;
+    for (let i = 1; i < onsets.length; i += 1) {
+      maxAbs = Math.max(maxAbs, Math.abs((onsets[i].sample - onsets[i - 1].sample) - step));
+    }
+    return {
+      sampleRate: sr, impulseCount: n, detected: onsets.length,
+      maxAbsSpacingErrorSamples: maxAbs, coverage: cov,
+      onsetSamples: onsets.map((o) => o.sample),
+    };
+  }
+
+  /* ------------------------------------------------------------- bare fixture */
+
+  /**
+   * Bare production transport. Five IDENTICAL 1000 Hz bursts go into one
+   * captured stream, so the reference is waveform-matched and the unknown
+   * stream-start constant cancels exactly:
+   *   lateness(X) = (sample(X) - sample(Nref)) / sr - (S(X) - S(Nref))
+   *
+   *   N0      transport step 0 — zero look-ahead on baseline (the suspect)
+   *   Nsmall0 S0 + 50 ms   (control)
+   *   Nsmall1 S0 + 100 ms  (control)
+   *   Nref    S0 + 500 ms  (anchor / control)
+   *   N8      transport step 8 — normal look-ahead (control)
+   */
+  async function runBare(ctx, bus, tap, opts) {
+    const { bpm, lateStep, refDelay, smallDelays } = opts;
+    const sr = ctx.sampleRate;
+    const q = 128 / sr;
+    const stepDur = 60 / bpm / 4;
+
+    const transport = new window.AudioClockTransport(ctx);
+    transport.setBpm(bpm);
+    transport.setMode('pat');
+    transport.setPatternLoopSteps(16);
+    transport.setSongEndSteps(undefined);
+
+    let S0 = null, Sref = null, Slate = null, Ssmalls = null, jsWorkMs = null;
+    transport.setCallbacks({
+      onStep: (step, bar, audioTime) => {
+        if (step === 0 && S0 === null) {
+          const t0 = performance.now();
+          S0 = audioTime;
+          scheduleBurst(ctx, bus, audioTime, 1000, 0.03);
+          Sref = audioTime + refDelay;
+          scheduleBurst(ctx, bus, Sref, 1000, 0.03);
+          if (Array.isArray(smallDelays)) {
+            Ssmalls = smallDelays.map((d) => {
+              const t = audioTime + d;
+              scheduleBurst(ctx, bus, t, 1000, 0.03);
+              return t;
+            });
+          }
+          jsWorkMs = performance.now() - t0;
+        } else if (step === lateStep && Slate === null && S0 !== null) {
+          Slate = audioTime;
+          scheduleBurst(ctx, bus, audioTime, 1000, 0.03);
+        }
+      },
+    });
+
+    tap.arm();
+    await sleep(80);
+    const tCall = ctx.currentTime;
+    transport.start();
+    const tAfterStart = ctx.currentTime;
+
+    const runEnd = (S0 !== null ? S0 : tCall) + lateStep * stepDur + 0.5;
+    for (;;) {
+      const remaining = runEnd - ctx.currentTime;
+      if (remaining <= 0.02) break;
+      await sleep(Math.max(4, Math.min(50, remaining * 1000 * 0.5)));
+    }
+    await sleep(300);
+    transport.stop(true);
+    transport.dispose();
+    tap.disarm();
+
+    const cov = coverage(tap, sr);
+    const onsets = scanOnsets(tap, sr);
+
+    const labels = ['N0'];
+    const delays = [0];
+    if (Array.isArray(Ssmalls)) {
+      for (let k = 0; k < Ssmalls.length; k += 1) { labels.push('Nsmall' + k); delays.push(Ssmalls[k] - S0); }
+    }
+    labels.push('Nref'); delays.push(Sref === null ? null : Sref - S0);
+    labels.push('N8'); delays.push(Slate === null ? null : Slate - S0);
+    const anchor = delays.length - 2;
+    const expectedCount = delays.length;
+    const valid = onsets.length === expectedCount && delays.every((d) => d !== null);
+
+    const rel = (k) => {
+      if (!valid || !onsets[k] || delays[k] === null) return null;
+      const seconds = (onsets[k].sample - onsets[anchor].sample) / sr - (delays[k] - delays[anchor]);
+      return {
+        label: labels[k], delayFromStart: delays[k], onsetSample: onsets[k].sample,
+        latenessVsRefSeconds: seconds, latenessVsRefQuanta: seconds / q, latenessVsRefSamples: seconds * sr,
+      };
+    };
+
+    let maxSpacingErrorSamples = null;
+    if (onsets.length > 1) {
+      maxSpacingErrorSamples = 0;
+      for (let k = 1; k < Math.min(onsets.length, expectedCount); k += 1) {
+        const expected = (delays[k] - delays[k - 1]) * sr;
+        const actual = onsets[k].sample - onsets[k - 1].sample;
+        maxSpacingErrorSamples = Math.max(maxSpacingErrorSamples, Math.abs(actual - expected));
+      }
+    }
+
+    const byLabel = {};
+    for (let k = 0; k < expectedCount; k += 1) byLabel[labels[k]] = rel(k);
+
+    return {
+      sampleRate: sr, quantumSeconds: q, tCall, tAfterStart,
+      startCallCostSeconds: tAfterStart - tCall,
+      scheduledStep0: S0, scheduledRef: Sref, scheduledLate: Slate,
+      jsWorkMs, capture: cov, streamSamples: cov.totalSamples,
+      onsetCount: onsets.length, expectedOnsetCount: expectedCount, valid,
+      maxSpacingErrorSamples, onsetSamples: onsets.map((o) => o.sample),
+      labels, delays, results: byLabel,
+    };
+  }
+
+  /* ----------------------------------------------------------- engine fixture */
+
+  /**
+   * Full production engine: audioEngine.play() builds the live take and the
+   * production onStep -> triggerCurrentStep() path fires the first note.
+   *
+   * Three audible events: engine step 0 (synth voice), an injected 1000 Hz
+   * reference burst, and engine step 8 (synth voice). N0 and N8 are the SAME
+   * synth voice so waveform-detection bias cancels, and the Nref anchor
+   * cancels algebraically — the reported statistic is the N0 - N8 differential.
+   */
+  async function runEngine(ctx, tap, opts) {
+    const { bpm, lateStep, refDelay } = opts;
+    const sr = ctx.sampleRate;
+    const q = 128 / sr;
+    const stepDur = 60 / bpm / 4;
+    const AE = window.audioEngine;
+
+    const synthParams = AE.getDefaultSynthParams ? AE.getDefaultSynthParams() : {};
+    const steps = new Array(16).fill(false);
+    steps[0] = true; steps[lateStep] = true;
+    const channel = {
+      id: 'ch-verify', name: 'Verify Synth', color: '#10b981',
+      instrumentType: 'minisynth', mixerTrackId: 1, volume: 0.9, pan: 0, pitch: 0,
+      mute: false, solo: false, steps, notes: [], synthParams,
+    };
+    const mixerTracks = [
+      { id: 0, name: 'Master', color: '#3b82f6', volume: 1, pan: 0, mute: false, solo: false, fxSlots: [], peakL: 0, peakR: 0 },
+      { id: 1, name: 'Ch1', color: '#10b981', volume: 1, pan: 0, mute: false, solo: false, fxSlots: [], peakL: 0, peakR: 0 },
+    ];
+
+    AE.setBpm(bpm); AE.setSwing(0); AE.setMetronome(false);
+
+    let S0 = null;
+    const triggerTimes = [];
+    let tPlayMs = null, tPlayClock = null;
+    let schedMs = null, doneMs = null, doneClockDelta = null, headroomAtDone = null;
+    const origTrigger = AE.triggerCurrentStep.bind(AE);
+    AE.triggerCurrentStep = function (audioTime) {
+      const isFirst = (S0 === null && audioTime !== undefined);
+      if (audioTime !== undefined) triggerTimes.push(audioTime);
+      if (isFirst) {
+        S0 = audioTime;
+        schedMs = performance.now() - tPlayMs;
+        scheduleBurst(ctx, AE.masterGain, audioTime + refDelay, 1000, 0.03);
+      }
+      const out = origTrigger(audioTime);
+      if (isFirst) {
+        doneMs = performance.now() - tPlayMs;
+        doneClockDelta = ctx.currentTime - tPlayClock;
+        headroomAtDone = audioTime - ctx.currentTime;
+      }
+      return out;
+    };
+
+    AE.stop();
+    tap.arm();
+    await sleep(80);
+
+    const tCall = ctx.currentTime;
+    tPlayMs = performance.now();
+    tPlayClock = ctx.currentTime;
+    AE.play([channel], [], 'pat', undefined, mixerTracks, 16, undefined);
+    const tAfterStart = ctx.currentTime;
+
+    const runEnd = (S0 !== null ? S0 : tCall) + lateStep * stepDur + 0.5;
+    for (;;) {
+      const remaining = runEnd - ctx.currentTime;
+      if (remaining <= 0.02) break;
+      await sleep(Math.max(4, Math.min(50, remaining * 1000 * 0.5)));
+    }
+    await sleep(300);
+    AE.stop();
+    AE.triggerCurrentStep = origTrigger;
+    tap.disarm();
+
+    const cov = coverage(tap, sr);
+    const onsets = scanOnsets(tap, sr);
+    const Sref = S0 === null ? null : S0 + refDelay;
+    const Slate = (() => {
+      if (S0 === null) return null;
+      const target = lateStep * stepDur;
+      let best = null;
+      for (const t of triggerTimes) {
+        const d = t - S0;
+        if (d < target - 1e-6) continue;
+        if (best === null || d - target < best - target) best = d;
+      }
+      return best === null ? null : S0 + best;
+    })();
+
+    const labels = ['N0', 'Nref', 'N8'];
+    const delays = [0, refDelay, Slate === null ? null : Slate - S0];
+    const anchor = 1;
+    const expectedCount = 3;
+    const valid = S0 !== null && onsets.length === expectedCount && delays.every((d) => d !== null);
+
+    const rel = (k) => {
+      if (!valid || !onsets[k]) return null;
+      const seconds = (onsets[k].sample - onsets[anchor].sample) / sr - (delays[k] - delays[anchor]);
+      return {
+        label: labels[k], delayFromStart: delays[k], onsetSample: onsets[k].sample,
+        latenessVsRefSeconds: seconds, latenessVsRefQuanta: seconds / q, latenessVsRefSamples: seconds * sr,
+      };
+    };
+
+    let maxSpacingErrorSamples = null;
+    if (onsets.length > 1) {
+      maxSpacingErrorSamples = 0;
+      for (let k = 1; k < Math.min(onsets.length, expectedCount); k += 1) {
+        const expected = (delays[k] - delays[k - 1]) * sr;
+        const actual = onsets[k].sample - onsets[k - 1].sample;
+        maxSpacingErrorSamples = Math.max(maxSpacingErrorSamples, Math.abs(actual - expected));
+      }
+    }
+
+    const byLabel = {};
+    for (let k = 0; k < expectedCount; k += 1) byLabel[labels[k]] = rel(k);
+
+    return {
+      sampleRate: sr, quantumSeconds: q, tCall, tAfterStart,
+      startCallCostSeconds: tAfterStart - tCall,
+      scheduledStep0: S0, scheduledRef: Sref, scheduledLate: Slate,
+      perf: { schedMs, doneMs, doneClockDelta, headroomAtDone },
+      triggerCount: triggerTimes.length,
+      capture: cov, streamSamples: cov.totalSamples,
+      onsetCount: onsets.length, expectedOnsetCount: expectedCount, valid,
+      maxSpacingErrorSamples, onsetSamples: onsets.map((o) => o.sample),
+      labels, delays, results: byLabel,
+    };
+  }
+
+  /* ------------------------------------------------------------------- driver */
+
+  async function runCondition(cond) {
+    const sr = cond.sampleRate || 44100;
+    const bufferSize = cond.bufferSize || 4096;
+    const out = [];
+
+    if (cond.kind === 'gapProof') {
+      const ctx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: sr });
+      const bus = ctx.createGain(); bus.gain.value = 1; bus.connect(ctx.destination);
+      const tap = new Tap(ctx, bufferSize); tap.attach(bus);
+      for (let i = 0; i < (cond.repeats || 3); i += 1) out.push(await runGapProof(ctx, bus, tap, cond));
+      tap.detach(); await ctx.close();
+      return out;
+    }
+
+    if (cond.mode === 'bare') {
+      let ctx = null, bus = null;
+      for (let i = 0; i < cond.runs; i += 1) {
+        if (cond.contextMode === 'fresh' || ctx === null) {
+          if (ctx) { await ctx.close(); }
+          ctx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: sr });
+          bus = ctx.createGain(); bus.gain.value = 1; bus.connect(ctx.destination);
+        }
+        const tap = new Tap(ctx, bufferSize); tap.attach(bus);
+        const r = await runBare(ctx, bus, tap, cond);
+        r.runIndex = i; out.push(r);
+        tap.detach();
+      }
+      if (ctx) await ctx.close();
+      return { config: cond, createdContexts: cond.contextMode, sampleRate: sr, bufferSize, results: out };
+    }
+
+    if (cond.mode === 'engine') {
+      const AE = window.audioEngine;
+      // init() is what creates masterGain; getContext() on its own builds a
+      // context WITHOUT it, and play() then skips init() (ctx already set),
+      // leaving mixer-channel creation to connect into a null master bus.
+      AE.init();
+      for (let i = 0; i < cond.runs; i += 1) {
+        const ctx = AE.getContext();
+        if (!ctx) throw new Error('cannot reach engine AudioContext');
+        // Tap the engine's own master bus — the production signal path.
+        const tap = new Tap(ctx, bufferSize); tap.attach(AE.masterGain);
+        const r = await runEngine(ctx, tap, cond);
+        r.runIndex = i; out.push(r);
+        tap.detach();
+      }
+      return { config: cond, createdContexts: 'engine-owned', sampleRate: sr, bufferSize, results: out };
+    }
+    throw new Error('unknown mode ' + cond.mode);
+  }
+
+  window.runRig = async function (conditions) {
+    const out = {};
+    for (const cond of conditions) {
+      out[cond.label] = { config: cond, data: await runCondition(cond) };
+    }
+    return out;
+  };
+
+  window.__rigReady = true;
+})();
+</script>
+</body>
+</html>
