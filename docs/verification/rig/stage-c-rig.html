@@ -1,0 +1,401 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Stage C pattern-length verification rig</title>
+  <script src="/bundle-engine.js?campaign=stage-c"></script>
+</head>
+<body>
+<p>Stage C read-only capture harness — production audioEngine.play(), no in-condition reference burst.</p>
+<script>
+(() => {
+  'use strict';
+
+  const EXPECTED_SAMPLE_RATE = 44100;
+  const BUFFER_SIZE = 4096;
+  const BPM = 120;
+  const EVENT_STEPS = [0, 8];
+  const STEP_SECONDS = 60 / BPM / 4;
+  const EXPECTED_LEAD_SECONDS = Number(window.__STAGE_C_START_LEAD_SECONDS__);
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  const clone = (value) => JSON.parse(JSON.stringify(value));
+  let initialized = false;
+  let sharedSynthParams = null;
+
+  /**
+   * Stage B capture path, unchanged: ScriptProcessorNode in the master-bus
+   * signal path, then a zero-gain sink to keep the graph pulled. The tap is
+   * attached identically for the 16- and 32-step runs.
+   */
+  class Tap {
+    constructor(ctx, bufferSize) {
+      this.ctx = ctx;
+      this.bufferSize = bufferSize;
+      this.chunks = [];
+      this.playbackTimes = [];
+      this.armed = false;
+      this.node = ctx.createScriptProcessor(bufferSize, 1, 1);
+      this.node.onaudioprocess = (event) => {
+        if (!this.armed) return;
+        this.chunks.push(new Float32Array(event.inputBuffer.getChannelData(0)));
+        this.playbackTimes.push(event.playbackTime);
+      };
+      this.sink = null;
+    }
+    arm() {
+      this.chunks = [];
+      this.playbackTimes = [];
+      this.armed = true;
+    }
+    disarm() { this.armed = false; }
+    attach(source) {
+      source.connect(this.node);
+      this.sink = this.ctx.createGain();
+      this.sink.gain.value = 0;
+      this.node.connect(this.sink);
+      this.sink.connect(this.ctx.destination);
+    }
+    detach() {
+      try { this.node.disconnect(); } catch (_) { /* already detached */ }
+      if (this.sink) {
+        try { this.sink.disconnect(); } catch (_) { /* already detached */ }
+      }
+    }
+  }
+
+  /** Stage B coverage calculations, retained to keep the capture check fixed. */
+  function coverage(tap, sampleRate) {
+    const chunkCount = tap.chunks.length;
+    let totalSamples = 0;
+    let minChunkSamples = Infinity;
+    let maxChunkSamples = 0;
+    for (const chunk of tap.chunks) {
+      totalSamples += chunk.length;
+      minChunkSamples = Math.min(minChunkSamples, chunk.length);
+      maxChunkSamples = Math.max(maxChunkSamples, chunk.length);
+    }
+    const bufferDuration = tap.bufferSize / sampleRate;
+    let droppedBuffers = 0;
+    let ptJitterQuantaMax = 0;
+    let ptJitterQuantaSum = 0;
+    let jitterCount = 0;
+    for (let i = 1; i < tap.playbackTimes.length; i += 1) {
+      const delta = tap.playbackTimes[i] - tap.playbackTimes[i - 1];
+      if (delta > bufferDuration * 1.5) droppedBuffers += 1;
+      const jitterQuanta = Math.abs(delta - bufferDuration) * sampleRate / 128;
+      ptJitterQuantaMax = Math.max(ptJitterQuantaMax, jitterQuanta);
+      ptJitterQuantaSum += jitterQuanta;
+      jitterCount += 1;
+    }
+    return {
+      chunkCount,
+      totalSamples,
+      expectedStepSamples: tap.bufferSize,
+      meanStepSamples: chunkCount > 1
+        ? (totalSamples - tap.chunks[chunkCount - 1].length) / (chunkCount - 1)
+        : null,
+      minChunkSamples: chunkCount ? minChunkSamples : null,
+      maxChunkSamples: chunkCount ? maxChunkSamples : null,
+      chunkLengthsConsistent: chunkCount > 0 && minChunkSamples === tap.bufferSize && maxChunkSamples === tap.bufferSize,
+      droppedBuffers,
+      ptJitterQuantaMax: jitterCount ? ptJitterQuantaMax : null,
+      ptJitterQuantaMean: jitterCount ? ptJitterQuantaSum / jitterCount : null,
+    };
+  }
+
+  /** Same hysteresis onset detector and thresholds as the Stage B rig. */
+  function scanOnsets(tap, sampleRate) {
+    const HI = 0.2;
+    const LO = 0.05;
+    const QUIET = Math.round(0.010 * sampleRate);
+    const onsets = [];
+    let armed = true;
+    let quietRun = 0;
+    let sampleIndex = 0;
+    for (let chunkIndex = 0; chunkIndex < tap.chunks.length; chunkIndex += 1) {
+      const data = tap.chunks[chunkIndex];
+      for (let i = 0; i < data.length; i += 1, sampleIndex += 1) {
+        const amplitude = Math.abs(data[i]);
+        if (armed && amplitude >= HI) {
+          onsets.push({ sample: sampleIndex });
+          armed = false;
+          quietRun = 0;
+        } else if (!armed) {
+          if (amplitude < LO) {
+            quietRun += 1;
+            if (quietRun >= QUIET) armed = true;
+          } else {
+            quietRun = 0;
+          }
+        }
+      }
+    }
+    return onsets;
+  }
+
+  async function initializeEngine() {
+    const engine = window.audioEngine;
+    if (!engine) throw new Error('production audioEngine bundle did not initialize');
+    engine.init();
+    const ctx = engine.getContext();
+    if (ctx.state === 'suspended') await ctx.resume();
+    if (!initialized) {
+      engine.setBpm(BPM);
+      engine.setSwing(0);
+      engine.setMetronome(false);
+      engine.setGrossBeatState({ enabled: false });
+      sharedSynthParams = clone(engine.getDefaultSynthParams());
+      initialized = true;
+    }
+    return { engine, ctx };
+  }
+
+  window.stageCGetInfo = async () => {
+    const { engine, ctx } = await initializeEngine();
+    return {
+      sourceCommit: window.__STAGE_C_SOURCE_COMMIT__ || null,
+      startLeadSeconds: EXPECTED_LEAD_SECONDS,
+      sampleRate: ctx.sampleRate,
+      contextState: ctx.state,
+      contextBaseLatency: Number.isFinite(ctx.baseLatency) ? ctx.baseLatency : null,
+      contextOutputLatency: Number.isFinite(ctx.outputLatency) ? ctx.outputLatency : null,
+      userAgent: navigator.userAgent,
+      engineSettings: {
+        bpm: BPM,
+        mode: 'pat',
+        swing: 0,
+        metronome: false,
+        grossBeat: engine.getGrossBeatState(),
+        sampleRate: ctx.sampleRate,
+        captureBufferSamples: BUFFER_SIZE,
+        renderQuantumSamples: 128,
+      },
+      channelFixture: {
+        id: 'stage-c-synth',
+        name: 'Stage C Controlled Synth',
+        instrumentType: 'minisynth',
+        mixerTrackId: 1,
+        volume: 0.9,
+        pan: 0,
+        pitchSemitones: 0,
+        mute: false,
+        solo: false,
+        eventSteps: EVENT_STEPS,
+        sequencerPitchMidi: 60,
+        sequencerVelocity: 0.9,
+        notes: [],
+        synthParams: clone(sharedSynthParams),
+      },
+      mixerFixture: [
+        { id: 0, name: 'Master', volume: 1, pan: 0, mute: false, solo: false, fxSlots: [] },
+        { id: 1, name: 'Ch1', volume: 1, pan: 0, mute: false, solo: false, fxSlots: [] },
+      ],
+      captureMethod: {
+        tap: 'AudioEngine masterGain -> ScriptProcessorNode -> zero-gain sink -> AudioContext.destination',
+        detector: 'Stage B hysteresis scanner; HI=0.2, LO=0.05, quiet re-arm=10 ms',
+        bufferSize: BUFFER_SIZE,
+        referenceBurstInConditions: false,
+      },
+    };
+  };
+
+  window.stageCRunCondition = async (request) => {
+    const patternLengthSteps = Number(request.patternLengthSteps);
+    if (patternLengthSteps !== 16 && patternLengthSteps !== 32) {
+      throw new Error(`unsupported pattern length: ${patternLengthSteps}`);
+    }
+    const { engine, ctx } = await initializeEngine();
+    const sampleRate = ctx.sampleRate;
+    const tap = new Tap(ctx, BUFFER_SIZE);
+    tap.attach(engine.masterGain);
+
+    const channelSteps = new Array(patternLengthSteps).fill(false);
+    for (const step of EVENT_STEPS) channelSteps[step] = true;
+    const channel = {
+      id: 'stage-c-synth',
+      name: 'Stage C Controlled Synth',
+      color: '#10b981',
+      instrumentType: 'minisynth',
+      mixerTrackId: 1,
+      volume: 0.9,
+      pan: 0,
+      pitch: 0,
+      mute: false,
+      solo: false,
+      steps: channelSteps,
+      notes: [],
+      synthParams: clone(sharedSynthParams),
+    };
+    const mixerTracks = [
+      { id: 0, name: 'Master', color: '#3b82f6', volume: 1, pan: 0, mute: false, solo: false, fxSlots: [], peakL: 0, peakR: 0 },
+      { id: 1, name: 'Ch1', color: '#10b981', volume: 1, pan: 0, mute: false, solo: false, fxSlots: [], peakL: 0, peakR: 0 },
+    ];
+
+    const triggerEvents = [];
+    const originalTrigger = engine.triggerCurrentStep;
+    if (typeof originalTrigger !== 'function') {
+      tap.detach();
+      throw new Error('production triggerCurrentStep hook is unavailable');
+    }
+    const originalBound = originalTrigger.bind(engine);
+    engine.triggerCurrentStep = function (audioTime) {
+      const step = engine.currentStep;
+      const bar = engine.currentBar;
+      const entryPerformanceMs = performance.now();
+      const contextTimeAtEntry = ctx.currentTime;
+      const output = originalBound(audioTime);
+      const exitPerformanceMs = performance.now();
+      triggerEvents.push({
+        step,
+        bar,
+        audioTime,
+        contextTimeAtEntry,
+        entryPerformanceMs,
+        exitPerformanceMs,
+        triggerBuildMs: exitPerformanceMs - entryPerformanceMs,
+      });
+      return output;
+    };
+
+    let result;
+    const startedAtUtc = new Date().toISOString();
+    const wallStartMs = performance.now();
+    try {
+      // Retain the established reset/arming order for every run.
+      engine.stop();
+      tap.arm();
+      await sleep(80);
+      const tCall = ctx.currentTime;
+      const playCallPerformanceMs = performance.now();
+      const tAfterStart = (() => {
+        engine.play([channel], [], 'pat', undefined, mixerTracks, patternLengthSteps, undefined);
+        return ctx.currentTime;
+      })();
+      const step0Event = triggerEvents.find((event) => event.step === 0);
+      const targetEnd = (step0Event ? step0Event.audioTime : tCall + EXPECTED_LEAD_SECONDS)
+        + EVENT_STEPS[1] * STEP_SECONDS + 0.5;
+      const wallDeadline = performance.now() + 15000;
+      for (;;) {
+        const remaining = targetEnd - ctx.currentTime;
+        if (remaining <= 0.02) break;
+        if (performance.now() > wallDeadline) throw new Error('AudioContext did not advance before the run timeout');
+        await sleep(Math.max(4, Math.min(50, remaining * 1000 * 0.5)));
+      }
+      await sleep(300);
+      engine.stop();
+      tap.disarm();
+
+      const capture = coverage(tap, sampleRate);
+      const onsets = scanOnsets(tap, sampleRate);
+      const step0Events = triggerEvents.filter((event) => event.step === EVENT_STEPS[0]);
+      const step8Events = triggerEvents.filter((event) => event.step === EVENT_STEPS[1]);
+      const scheduledStep0 = step0Events.length === 1 ? step0Events[0].audioTime : null;
+      const scheduledStep8 = step8Events.length === 1 ? step8Events[0].audioTime : null;
+      const scheduledGapSeconds = scheduledStep0 !== null && scheduledStep8 !== null
+        ? scheduledStep8 - scheduledStep0
+        : null;
+      const observedGapSamples = onsets.length >= 2 ? onsets[1].sample - onsets[0].sample : null;
+      const scheduledGapSamples = scheduledGapSeconds === null ? null : scheduledGapSeconds * sampleRate;
+      // N0-N8: relative first-note lateness minus step-8 lateness. The
+      // unknown capture origin and matched voice onset threshold cancel; no
+      // reference burst is scheduled in either pattern-length condition.
+      const n0MinusN8ResidualSamples = observedGapSamples === null || scheduledGapSamples === null
+        ? null
+        : scheduledGapSamples - observedGapSamples;
+      const n0MinusN8ResidualMs = n0MinusN8ResidualSamples === null
+        ? null
+        : (n0MinusN8ResidualSamples / sampleRate) * 1000;
+      const startOffsetMs = scheduledStep0 === null ? null : (scheduledStep0 - tCall) * 1000;
+      const startLeadGatePass = startOffsetMs !== null
+        && Math.abs(startOffsetMs - EXPECTED_LEAD_SECONDS * 1000) < 1.0;
+      const scheduleGapPass = scheduledGapSeconds !== null
+        && Math.abs(scheduledGapSeconds - 1.0) <= 1 / sampleRate;
+      const chunkStepPass = capture.meanStepSamples !== null
+        && Math.abs(capture.meanStepSamples - BUFFER_SIZE) < 0.5
+        && capture.chunkLengthsConsistent;
+      const exclusionReasons = [];
+      if (sampleRate !== EXPECTED_SAMPLE_RATE) exclusionReasons.push('sample_rate_mismatch');
+      if (step0Events.length !== 1) exclusionReasons.push('step0_trigger_count_mismatch');
+      if (step8Events.length !== 1) exclusionReasons.push('step8_trigger_count_mismatch');
+      if (onsets.length !== 2) exclusionReasons.push('onset_count_mismatch');
+      if (capture.droppedBuffers !== 0) exclusionReasons.push('dropped_capture_buffer');
+      if (!chunkStepPass) exclusionReasons.push('capture_chunk_integrity_mismatch');
+
+      result = {
+        sourceCommitMarker: window.__STAGE_C_SOURCE_COMMIT__ || null,
+        sequenceIndex: Number(request.sequenceIndex),
+        roundIndex: Number(request.roundIndex),
+        orderPosition: Number(request.orderPosition),
+        patternLengthSteps,
+        startedAtUtc,
+        endedAtUtc: new Date().toISOString(),
+        durationWallMs: performance.now() - wallStartMs,
+        sampleRate,
+        bufferSize: BUFFER_SIZE,
+        quantumSamples: 128,
+        quantumMs: (128 / sampleRate) * 1000,
+        bpm: BPM,
+        stepSeconds: STEP_SECONDS,
+        eventSteps: EVENT_STEPS,
+        tCall,
+        tAfterStart,
+        startCallCostSeconds: tAfterStart - tCall,
+        scheduledStep0,
+        scheduledStep8,
+        scheduledGapSeconds,
+        scheduledGapSamples,
+        scheduledGridErrorMs: scheduledGapSeconds === null ? null : (scheduledGapSeconds - 1.0) * 1000,
+        observedGapSamples,
+        n0MinusN8ResidualSamples,
+        n0MinusN8ResidualMs,
+        startOffsetMs,
+        startLeadGatePass,
+        scheduleGapPass,
+        performance: {
+          playCallPreparationMs: step0Events.length === 1
+            ? step0Events[0].entryPerformanceMs - playCallPerformanceMs
+            : null,
+          step0TriggerBuildMs: step0Events.length === 1 ? step0Events[0].triggerBuildMs : null,
+          step8TriggerBuildMs: step8Events.length === 1 ? step8Events[0].triggerBuildMs : null,
+          step0HeadroomAtCallbackMs: step0Events.length === 1
+            ? (step0Events[0].audioTime - step0Events[0].contextTimeAtEntry) * 1000
+            : null,
+        },
+        step0TriggerCount: step0Events.length,
+        step8TriggerCount: step8Events.length,
+        triggerCount: triggerEvents.length,
+        triggerEvents,
+        capture,
+        onsetCount: onsets.length,
+        expectedOnsetCount: 2,
+        onsetSamples: onsets.map((onset) => onset.sample),
+        exclusionReasons,
+        valid: exclusionReasons.length === 0,
+        inConditionReferenceBurstCount: 0,
+        channelInput: {
+          id: channel.id,
+          instrumentType: channel.instrumentType,
+          mixerTrackId: channel.mixerTrackId,
+          volume: channel.volume,
+          pan: channel.pan,
+          pitchSemitones: channel.pitch,
+          eventSteps: EVENT_STEPS,
+          patternStorageLength: channel.steps.length,
+          activeSteps: channel.steps.flatMap((active, index) => active ? [index] : []),
+          notesCount: channel.notes.length,
+          synthParams: clone(channel.synthParams),
+        },
+      };
+    } finally {
+      engine.triggerCurrentStep = originalTrigger;
+      tap.disarm();
+      tap.detach();
+    }
+    return result;
+  };
+
+  window.__stageCRigReady = true;
+})();
+</script>
+</body>
+</html>
