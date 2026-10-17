@@ -7,8 +7,8 @@
 <body>
 <p>Stage B verification rig — ScriptProcessor capture, structural onset matching.</p>
 <!-- cache-busting tag is injected per tree by the harness -->
-<script src="/scratch-rig/bundle-transport.js?tree=baseline"></script>
-<script src="/scratch-rig/bundle-offline.js?tree=baseline"></script>
+<script src="/scratch-rig/bundle-transport.js?tree=fixed"></script>
+<script src="/scratch-rig/bundle-offline.js?tree=fixed"></script>
 <script>
 (function () {
   'use strict';
@@ -313,7 +313,7 @@
       if (isFirst) {
         S0 = audioTime;
         schedMs = performance.now() - tPlayMs;
-        scheduleBurst(ctx, AE.masterGain, audioTime + refDelay, 1000, 0.03);
+        if (!opts.noRef) scheduleBurst(ctx, AE.masterGain, audioTime + refDelay, 1000, 0.03);
       }
       const out = origTrigger(audioTime);
       if (isFirst) {
@@ -360,10 +360,12 @@
       return best === null ? null : S0 + best;
     })();
 
-    const labels = ['N0', 'Nref', 'N8'];
-    const delays = [0, refDelay, Slate === null ? null : Slate - S0];
-    const anchor = 1;
-    const expectedCount = 3;
+    const noRef = !!opts.noRef;
+    const labels = noRef ? ['N0', 'N8'] : ['N0', 'Nref', 'N8'];
+    const delays = noRef ? [0, Slate === null ? null : Slate - S0]
+                         : [0, refDelay, Slate === null ? null : Slate - S0];
+    const anchor = noRef ? 1 : 1;
+    const expectedCount = noRef ? 2 : 3;
     const valid = S0 !== null && onsets.length === expectedCount && delays.every((d) => d !== null);
 
     const rel = (k) => {
@@ -401,6 +403,201 @@
     };
   }
 
+
+
+  /**
+   * Engine grid probe. Enables a ladder of steps (default 0,2,4,6,8) so every
+   * audible event is the SAME synth voice at the SAME pitch — a waveform-
+   * matched set. Mapping the k-th detected onset to the k-th triggered step
+   * then separates two possibilities:
+   *   (a) step 0 alone is displaced, while the rest of the grid is exact;
+   *   (b) the whole engine grid carries quantum jitter.
+   */
+  async function runEngineGrid(ctx, tap, opts) {
+    const { bpm, refDelay } = opts;
+    const ladder = opts.ladder || [0, 8, 16, 24];
+    const patternSteps = opts.patternSteps || 32;
+    const sr = ctx.sampleRate;
+    const q = 128 / sr;
+    const AE = window.audioEngine;
+
+    const synthParams = AE.getDefaultSynthParams ? AE.getDefaultSynthParams() : {};
+    const steps = new Array(16).fill(false);
+    for (const s of ladder) steps[s] = true;
+    const channel = {
+      id: 'ch-grid', name: 'Grid Synth', color: '#10b981',
+      instrumentType: 'minisynth', mixerTrackId: 1, volume: 0.9, pan: 0, pitch: 0,
+      mute: false, solo: false, steps, notes: [], synthParams,
+    };
+    const mixerTracks = [
+      { id: 0, name: 'Master', color: '#3b82f6', volume: 1, pan: 0, mute: false, solo: false, fxSlots: [], peakL: 0, peakR: 0 },
+      { id: 1, name: 'Ch1', color: '#10b981', volume: 1, pan: 0, mute: false, solo: false, fxSlots: [], peakL: 0, peakR: 0 },
+    ];
+
+    AE.setBpm(bpm); AE.setSwing(0); AE.setMetronome(false);
+
+    const triggerTimes = [];
+    let tPlayMs = null;
+    let doneMs0 = null, headroom0 = null;
+    const origTrigger = AE.triggerCurrentStep.bind(AE);
+    AE.triggerCurrentStep = function (audioTime) {
+      if (audioTime !== undefined) triggerTimes.push(audioTime);
+      const out = origTrigger(audioTime);
+      if (triggerTimes.length === 1) {
+        doneMs0 = performance.now() - tPlayMs;
+        headroom0 = audioTime - ctx.currentTime;
+      }
+      return out;
+    };
+
+    AE.stop();
+    tap.arm();
+    await sleep(80);
+    const tCall = ctx.currentTime;
+    tPlayMs = performance.now();
+    AE.play([channel], [], 'pat', undefined, mixerTracks, patternSteps, undefined);
+    const tAfterStart = ctx.currentTime;
+
+    const last = ladder[ladder.length - 1];
+    const runEnd = (triggerTimes.length ? triggerTimes[0] : tCall) + last * (60 / bpm / 4) + 0.5;
+    for (;;) {
+      const remaining = runEnd - ctx.currentTime;
+      if (remaining <= 0.02) break;
+      await sleep(Math.max(4, Math.min(50, remaining * 1000 * 0.5)));
+    }
+    await sleep(300);
+    AE.stop();
+    AE.triggerCurrentStep = origTrigger;
+    tap.disarm();
+
+    const cov = coverage(tap, sr);
+    const onsets = scanOnsets(tap, sr);
+    const n = Math.min(onsets.length, triggerTimes.length, ladder.length);
+    const rows = [];
+    for (let k = 0; k < n; k += 1) {
+      // triggerTimes holds EVERY step the transport fires, not just the ladder
+      // events: the engine calls triggerCurrentStep for all 32 steps. The k-th
+      // ladder event is therefore at triggerTimes[ladder[k]].
+      const ti = ladder[k] !== undefined ? triggerTimes[ladder[k]] : undefined;
+      rows.push({ k, step: ladder[k] ?? null, onsetSample: onsets[k].sample,
+                  schedTime: ti });
+    }
+    // interval error between consecutive events, in samples
+    const intervals = [];
+    for (let k = 1; k < n; k += 1) {
+      const expS = (rows[k].schedTime - rows[k - 1].schedTime) * sr;
+      intervals.push({ k, expected: expS, actual: rows[k].onsetSample - rows[k - 1].onsetSample,
+                       error: (rows[k].onsetSample - rows[k - 1].onsetSample) - expS });
+    }
+    // least-squares fit through events 1..n-1, extrapolated back to event 0
+    let step0Residual = null, gridSlope = null;
+    if (n >= 3) {
+      const xs = [], ys = [];
+      for (let k = 1; k < n; k += 1) {
+        xs.push((rows[k].schedTime - rows[0].schedTime) * sr);
+        ys.push(rows[k].onsetSample - rows[0].onsetSample);
+      }
+      const mx = xs.reduce((a, b) => a + b, 0) / xs.length;
+      const my = ys.reduce((a, b) => a + b, 0) / ys.length;
+      let num = 0, den = 0;
+      for (let i = 0; i < xs.length; i += 1) { num += (xs[i] - mx) * (ys[i] - my); den += (xs[i] - mx) ** 2; }
+      gridSlope = den ? num / den : null;
+      const intercept = my - gridSlope * mx;
+      // residual of event 0 against the line fitted to the later grid
+      step0Residual = intercept;   // predicted y at x=0 is the intercept; onset_0 - onset_0 = 0
+    }
+    return {
+      sampleRate: sr, quantum: q, ladder, tCall, tAfterStart,
+      scheduledStep0: triggerTimes.length ? triggerTimes[0] : null,
+      leadMs: triggerTimes.length ? (triggerTimes[0] - tCall) * 1000 : null,
+      perf: { doneMs0, headroom0 },
+      triggerCount: triggerTimes.length, detected: onsets.length,
+      coverage: cov, rows, intervals, gridSlope, step0Residual,
+    };
+  }
+
+  /* ---------------------------------------------------------- Stage C probe */
+
+  /**
+   * Clock granularity: how finely does ctx.currentTime advance?
+   * If currentTime only moves in 128-sample steps, a scheduler reading it has
+   * up to one quantum of uncertainty no matter how large the lead is.
+   */
+  async function probeClock(ctx, sr) {
+    const seen = [];
+    const t0 = performance.now();
+    let last = ctx.currentTime;
+    seen.push({ wallMs: 0, t: last });
+    while (performance.now() - t0 < 120) {
+      const c = ctx.currentTime;
+      if (c !== last) { seen.push({ wallMs: performance.now() - t0, t: c }); last = c; }
+    }
+    const steps = [];
+    for (let i = 1; i < seen.length; i += 1) steps.push((seen[i].t - seen[i - 1].t) * sr);
+    const uniq = [...new Set(steps.map((s) => Math.round(s * 100) / 100))].sort((a, b) => a - b);
+    return {
+      updates: seen.length - 1,
+      stepSamplesDistinct: uniq.slice(0, 12),
+      stepSamplesMin: steps.length ? Math.min(...steps) : null,
+      stepSamplesMax: steps.length ? Math.max(...steps) : null,
+      stepSamplesMean: steps.length ? steps.reduce((a, b) => a + b, 0) / steps.length : null,
+    };
+  }
+
+  /**
+   * Sub-quantum phase sweep. M IDENTICAL bursts, directly scheduled (no
+   * transport) with a generous 200 ms lead, spaced so that the sub-quantum
+   * phase of each successive burst walks across a full quantum.
+   *
+   * If sources start sample-accurately, the measured spacing error is ~0 for
+   * every burst regardless of phase. If they snap to 128-frame boundaries, the
+   * error traces a sawtooth against phase with amplitude up to one quantum.
+   */
+  async function probeSweep(ctx, bus, tap, opts) {
+    const sr = ctx.sampleRate;
+    const spacing = opts.spacing ?? 0.05;
+    const lead = 0.2;
+    const M = opts.bursts ?? 26;
+    const base = ctx.currentTime + lead;
+    // Optional decoy: one burst fired well before the measured sequence. If the
+    // -128-sample offset belongs to "the first event in a cold graph" rather
+    // than to burst 0 of the sequence, the decoy absorbs it and the measured
+    // sequence becomes exact.
+    if (opts.decoy) scheduleBurst(ctx, bus, base - 0.15, 1000, 0.01);
+    for (let k = 0; k < M; k += 1) scheduleBurst(ctx, bus, base + k * spacing, 1000, 0.01);
+    tap.arm();
+    await sleep((lead + M * spacing + 0.5) * 1000);
+    tap.disarm();
+    const cov = coverage(tap, sr);
+    let onsets = scanOnsets(tap, sr);
+    let decoyOnset = null;
+    if (opts.decoy && onsets.length > M) { decoyOnset = onsets[0]; onsets = onsets.slice(1); }
+    const spacingSamples = spacing * sr;
+    // phase is referenced to burst 0, so it is exact even though the absolute
+    // stream-start offset is unknown
+    const rows = [];
+    for (let k = 1; k < onsets.length; k += 1) {
+      const rel = k * spacingSamples;
+      rows.push({
+        k,
+        phaseSamples: rel - Math.floor(rel / 128) * 128,
+        spacingError: (onsets[k].sample - onsets[0].sample) - rel,
+      });
+    }
+    return { sampleRate: sr, detected: onsets.length, bursts: M, spacingSamples,
+             decoy: !!opts.decoy, decoyOnset: decoyOnset ? decoyOnset.sample : null,
+             firstOnset: onsets.length ? onsets[0].sample : null,
+             coverage: cov, rows };
+  }
+
+  async function runProbe(ctx, bus, tap, opts) {
+    return {
+      clock: await probeClock(ctx, ctx.sampleRate),
+      sweepDirect: await probeSweep(ctx, bus, tap, opts),
+      sweepDecoy: await probeSweep(ctx, bus, tap, Object.assign({}, opts, { decoy: true })),
+    };
+  }
+
   /* ------------------------------------------------------------------- driver */
 
   async function runCondition(cond) {
@@ -413,6 +610,27 @@
       const bus = ctx.createGain(); bus.gain.value = 1; bus.connect(ctx.destination);
       const tap = new Tap(ctx, bufferSize); tap.attach(bus);
       for (let i = 0; i < (cond.repeats || 3); i += 1) out.push(await runGapProof(ctx, bus, tap, cond));
+      tap.detach(); await ctx.close();
+      return out;
+    }
+
+
+    if (cond.mode === 'engineGrid') {
+      const AE = window.audioEngine;
+      AE.init();
+      const ctx = AE.getContext();
+      const tap = new Tap(ctx, bufferSize); tap.attach(AE.masterGain);
+      const out = [];
+      for (let i = 0; i < cond.runs; i += 1) out.push(await runEngineGrid(ctx, tap, cond));
+      tap.detach();
+      return { config: cond, results: out };
+    }
+    if (cond.mode === 'probe') {
+      const ctx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: sr });
+      const bus = ctx.createGain(); bus.gain.value = 1; bus.connect(ctx.destination);
+      const tap = new Tap(ctx, bufferSize); tap.attach(bus);
+      const out = [];
+      for (let i = 0; i < (cond.repeats || 3); i += 1) out.push(await runProbe(ctx, bus, tap, cond));
       tap.detach(); await ctx.close();
       return out;
     }
