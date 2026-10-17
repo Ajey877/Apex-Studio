@@ -231,7 +231,7 @@ describe('Phase 52 — truthful not-applied states', () => {
       'the GR label must remain paired with an explicit unavailable state until real measurement exists'
     );
     for (const band of ['Low', 'Mid', 'High']) {
-      assert.ok(source.includes(\`grLabel: 'GR (\${band})'\`), \`the \${band.toLowerCase()} band label must remain identified as a GR meter\`);
+      assert.ok(source.includes("grLabel: 'GR (" + band + ")'"), 'the ' + band.toLowerCase() + ' band label must remain identified as a GR meter');
     }
   });
 
