@@ -9,7 +9,7 @@
  */
 import { afterEach, beforeEach, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { AudioClockTransport } from './transport';
+import { AudioClockTransport, START_LEAD_SECONDS } from './transport';
 import { audioEngine, resolvePatternLoopLengthSteps } from './audioEngine';
 import { serializeProjectState } from '../state/projectPersistence';
 import { createDefaultProjectState, normalizeProjectState } from '../state/projectState';
@@ -188,9 +188,14 @@ const startTake = (options: {
  * running every pending transport timer at each step boundary.
  */
 const pumpSteps = (fakeCtx: FakeAudioContext, steps: number): void => {
-  const startTick = Math.round(fakeCtx.currentTime / STEP_SECONDS_AT_120_BPM);
+  // A take's timeline begins one start lead after `play()`, so the clock is
+  // offset by that lead: pumping N steps then means N steps of MUSIC have
+  // elapsed, which is what every positional assertion below is written in
+  // terms of. Absolute scheduled audio times still carry the lead and are
+  // asserted as `musicalTime + START_LEAD_SECONDS`.
+  const startTick = Math.round((fakeCtx.currentTime - START_LEAD_SECONDS) / STEP_SECONDS_AT_120_BPM);
   for (let tick = startTick; tick <= startTick + steps; tick += 1) {
-    fakeCtx.currentTime = tick * STEP_SECONDS_AT_120_BPM;
+    fakeCtx.currentTime = START_LEAD_SECONDS + tick * STEP_SECONDS_AT_120_BPM;
     const pending = timers;
     timers = [];
     for (const callback of pending) callback();
@@ -227,7 +232,7 @@ describe('Pattern Mode loop boundary', () => {
     pumpSteps(fakeCtx, 33);
 
     assert.deepEqual(stepsOf(triggered), [0, 15, 0, 15, 0]);
-    assertCloseTo(triggered[2].time, 16 * STEP_SECONDS_AT_120_BPM);
+    assertCloseTo(triggered[2].time, 16 * STEP_SECONDS_AT_120_BPM + START_LEAD_SECONDS);
   });
 
   it('C: a 32-step pattern reaches step 16', () => {
@@ -239,7 +244,7 @@ describe('Pattern Mode loop boundary', () => {
     pumpSteps(fakeCtx, 16);
 
     assert.deepEqual(stepsOf(triggered), [0, 15, 16]);
-    assertCloseTo(triggered[2].time, 16 * STEP_SECONDS_AT_120_BPM);
+    assertCloseTo(triggered[2].time, 16 * STEP_SECONDS_AT_120_BPM + START_LEAD_SECONDS);
   });
 
   it('D: a 32-step pattern reaches step 31', () => {
@@ -251,7 +256,7 @@ describe('Pattern Mode loop boundary', () => {
     pumpSteps(fakeCtx, 31);
 
     assert.deepEqual(stepsOf(triggered), [0, 15, 16, 31]);
-    assertCloseTo(triggered[3].time, 31 * STEP_SECONDS_AT_120_BPM);
+    assertCloseTo(triggered[3].time, 31 * STEP_SECONDS_AT_120_BPM + START_LEAD_SECONDS);
   });
 
   it('E: a 32-step pattern wraps from step 31 back to step 0', () => {
@@ -264,7 +269,7 @@ describe('Pattern Mode loop boundary', () => {
 
     assert.deepEqual(stepsOf(triggered), [0, 15, 16, 31, 0, 15, 16]);
     assert.equal(triggered[4].step, 0);
-    assertCloseTo(triggered[4].time, 32 * STEP_SECONDS_AT_120_BPM);
+    assertCloseTo(triggered[4].time, 32 * STEP_SECONDS_AT_120_BPM + START_LEAD_SECONDS);
   });
 
   it('F: an event that exists only on step 16 triggers exactly once per loop', () => {
@@ -276,7 +281,7 @@ describe('Pattern Mode loop boundary', () => {
     pumpSteps(fakeCtx, 16);
 
     assert.deepEqual(stepsOf(triggered), [16]);
-    assertCloseTo(triggered[0].time, 16 * STEP_SECONDS_AT_120_BPM);
+    assertCloseTo(triggered[0].time, 16 * STEP_SECONDS_AT_120_BPM + START_LEAD_SECONDS);
   });
 
   it('G: an event that exists only on step 31 triggers exactly once per loop', () => {
@@ -288,7 +293,7 @@ describe('Pattern Mode loop boundary', () => {
     pumpSteps(fakeCtx, 47);
 
     assert.deepEqual(stepsOf(triggered), [31]);
-    assertCloseTo(triggered[0].time, 31 * STEP_SECONDS_AT_120_BPM);
+    assertCloseTo(triggered[0].time, 31 * STEP_SECONDS_AT_120_BPM + START_LEAD_SECONDS);
   });
 
   it('H: no duplicate or missing trigger at the 15 -> 16 boundary', () => {
@@ -420,7 +425,7 @@ describe('Pattern Mode playback snapshot and live synchronization (Phase 9A)', (
     // Step 20 was unreachable while the take looped at 16 steps; the live edit
     // moved the loop boundary so it now plays inside the running take.
     assert.deepEqual(stepsOf(triggered), [0, 4, 20]);
-    assertCloseTo(triggered[2].time, 20 * STEP_SECONDS_AT_120_BPM);
+    assertCloseTo(triggered[2].time, 20 * STEP_SECONDS_AT_120_BPM + START_LEAD_SECONDS);
     // Reported position passes step 15 without wrapping, proving the loop is 32 long.
     assert.equal(transport.getState().step, 24);
   });

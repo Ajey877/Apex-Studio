@@ -14,7 +14,7 @@
  */
 import { afterEach, beforeEach, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { AudioClockTransport } from './transport';
+import { AudioClockTransport, START_LEAD_SECONDS } from './transport';
 import { audioEngine } from './audioEngine';
 import type { Channel, PlaylistClip } from '../types/daw';
 
@@ -268,9 +268,14 @@ const startTake = (options: {
 
 /** Advances the fake clock `steps` step boundaries, pumping transport timers. */
 const pumpSteps = (fakeCtx: FakeAudioContext, steps: number): void => {
-  const startTick = Math.round(fakeCtx.currentTime / STEP_SECONDS_AT_120_BPM);
+  // A take's timeline begins one start lead after `play()`, so the clock is
+  // offset by that lead: pumping N steps then means N steps of MUSIC have
+  // elapsed, which is what every positional assertion below is written in
+  // terms of. Absolute scheduled audio times still carry the lead and are
+  // asserted as `musicalTime + START_LEAD_SECONDS`.
+  const startTick = Math.round((fakeCtx.currentTime - START_LEAD_SECONDS) / STEP_SECONDS_AT_120_BPM);
   for (let tick = startTick; tick <= startTick + steps; tick += 1) {
-    fakeCtx.currentTime = tick * STEP_SECONDS_AT_120_BPM;
+    fakeCtx.currentTime = START_LEAD_SECONDS + tick * STEP_SECONDS_AT_120_BPM;
     const pending = timers;
     timers = [];
     for (const callback of pending) callback();
@@ -292,7 +297,8 @@ describe('Phase 1F TEST A/M — 4/4 runtime unchanged', () => {
     pumpSteps(take.fakeCtx, 20);
     const first = take.triggered[0];
     assert.ok(first, 'the clip must trigger');
-    assert.ok(closeTo(first.time, 2.0), `startBar 1 at ${first.time}s, expected 2.0s (16 steps)`);
+    // The first scheduled audio of a live take carries the transport start lead.
+    assert.ok(closeTo(first.time, 2.0 + START_LEAD_SECONDS), `startBar 1 at ${first.time}s, expected 2.0s (16 steps) plus the start lead`);
   });
 
   it('TEST M: a 4/4 arrangement ends after 16 steps per bar', () => {
@@ -381,7 +387,7 @@ describe('Phase 1F TEST E — 3/4 pattern loop', () => {
 
     const stepZeroHits = take.triggered.filter(hit => hit.step === 0);
     assert.equal(stepZeroHits.length, 2, 'step 0 must trigger on both passes');
-    assert.ok(closeTo(stepZeroHits[1].time, 12 * STEP_SECONDS_AT_120_BPM), 'second pass starts at step 12');
+    assert.ok(closeTo(stepZeroHits[1].time, 12 * STEP_SECONDS_AT_120_BPM + START_LEAD_SECONDS), 'second pass starts at step 12');
   });
 });
 
@@ -396,8 +402,8 @@ describe('Phase 1F TEST F — Song mode uses 12-step bars in 3/4', () => {
 
     pumpSteps(take.fakeCtx, 26);
     assert.equal(take.triggered.length, 2, `expected 2 triggers, got ${take.triggered.length}`);
-    assert.ok(closeTo(take.triggered[0].time, 5 * STEP_SECONDS_AT_120_BPM), 'first hit at step 5');
-    assert.ok(closeTo(take.triggered[1].time, 17 * STEP_SECONDS_AT_120_BPM), 'second hit at step 17 (5 + 12), not 21 (5 + 16)');
+    assert.ok(closeTo(take.triggered[0].time, 5 * STEP_SECONDS_AT_120_BPM + START_LEAD_SECONDS), 'first hit at step 5');
+    assert.ok(closeTo(take.triggered[1].time, 17 * STEP_SECONDS_AT_120_BPM + START_LEAD_SECONDS), 'second hit at step 17 (5 + 12), not 21 (5 + 16)');
 
     const state = take.transport.getState();
     assert.equal(state.playing, false, 'the arrangement ends after 2 bars');
@@ -417,7 +423,7 @@ describe('Phase 1F TEST I — playlist positioning in 3/4', () => {
     pumpSteps(take.fakeCtx, 26);
     assert.ok(take.triggered.length >= 1, 'the clip must trigger');
     assert.ok(
-      closeTo(take.triggered[0].time, 1.5),
+      closeTo(take.triggered[0].time, 1.5 + START_LEAD_SECONDS),
       `startBar 1 triggered at ${take.triggered[0].time}s, expected 1.5s (12 steps)`
     );
   });
@@ -552,7 +558,7 @@ describe('Phase 1I — 7/8 runs on a 14-step bar', () => {
     assert.equal(take.transport.getState().playing, false, 'the one-bar song ends after 14 sixteenth steps');
     assert.ok(closeTo(take.transport.getState().positionSeconds, 1.75), 'one 7/8 bar lasts 1.75 s at 120 BPM');
     assert.deepEqual(take.reported[13], { step: 13, bar: 1 });
-    assert.ok(take.triggered.some(hit => hit.step === 13 && closeTo(hit.time, 13 * STEP_SECONDS_AT_120_BPM)));
+    assert.ok(take.triggered.some(hit => hit.step === 13 && closeTo(hit.time, 13 * STEP_SECONDS_AT_120_BPM + START_LEAD_SECONDS)));
   });
 
   it('offline render and bounce both preserve the 14-step 1.75 s bar', async () => {
@@ -592,7 +598,7 @@ describe('Phase 1F TEST P — note tails never expand the musical loop extent', 
     pumpSteps(take.fakeCtx, 33);
     const tailHits = take.triggered.filter(hit => hit.step === 15.75);
     assert.equal(tailHits.length, 2, 'the onset fires once per loop pass');
-    assert.ok(closeTo(tailHits[1].time, 31.75 * STEP_SECONDS_AT_120_BPM), 'second pass at step 31.75, not 47.75 (a doubled loop)');
+    assert.ok(closeTo(tailHits[1].time, 31.75 * STEP_SECONDS_AT_120_BPM + START_LEAD_SECONDS), 'second pass at step 31.75, not 47.75 (a doubled loop)');
   });
 
   it('3/4: a tail crossing the 12-step bar line does not double the loop', () => {
@@ -604,7 +610,7 @@ describe('Phase 1F TEST P — note tails never expand the musical loop extent', 
     pumpSteps(take.fakeCtx, 25);
     const tailHits = take.triggered.filter(hit => hit.step === 11.75);
     assert.equal(tailHits.length, 2, 'the onset fires once per loop pass');
-    assert.ok(closeTo(tailHits[1].time, 23.75 * STEP_SECONDS_AT_120_BPM), 'second pass at step 23.75, not 27.75 (a 16-step loop)');
+    assert.ok(closeTo(tailHits[1].time, 23.75 * STEP_SECONDS_AT_120_BPM + START_LEAD_SECONDS), 'second pass at step 23.75, not 27.75 (a 16-step loop)');
   });
 });
 

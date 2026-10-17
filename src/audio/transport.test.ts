@@ -1,6 +1,6 @@
 import { describe, it, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { AudioClockTransport } from './transport';
+import { AudioClockTransport, START_LEAD_SECONDS } from './transport';
 
 class FakeAudioContext {
   private _currentTime = 0;
@@ -50,7 +50,10 @@ describe('AudioClockTransport', () => {
 
     transport.start();
     assert.equal(events.length, 1);
-    assert.deepEqual(events[0], { step: 0, bar: 1, audioTime: 0 });
+    // The first step is scheduled one start lead in the future so it reaches the
+    // audio thread with the same margin every later step gets. Step identity,
+    // bar and the step grid itself are unaffected.
+    assert.deepEqual(events[0], { step: 0, bar: 1, audioTime: START_LEAD_SECONDS });
 
     fakeContext.currentTime = 0.13;
     const scheduled = timers.shift();
@@ -60,7 +63,9 @@ describe('AudioClockTransport', () => {
     assert.equal(events.length, 2);
     assert.equal(events[1].step, 1);
     assert.equal(events[1].bar, 1);
-    assert.ok(Math.abs(events[1].audioTime - 0.125) < 1e-9);
+    assert.ok(Math.abs(events[1].audioTime - (0.125 + START_LEAD_SECONDS)) < 1e-9);
+    // The step-to-step interval is the contract; the lead only shifts the origin.
+    assert.ok(Math.abs(events[1].audioTime - events[0].audioTime - 0.125) < 1e-9);
   });
 
   it('keeps musical position continuous when BPM changes while playing', () => {
@@ -69,7 +74,9 @@ describe('AudioClockTransport', () => {
     const transport = new AudioClockTransport(context);
 
     transport.start();
-    fakeContext.currentTime = 1.5;
+    // The take's timeline begins one start lead after `start()`, so 1.5 s of
+    // MUSIC has elapsed at this clock instant — not 1.5 s of wall clock.
+    fakeContext.currentTime = 1.5 + START_LEAD_SECONDS;
     transport.setBpm(60);
 
     // Phase 1J: the musical position (step 12 = 3 beats at 120 BPM) survives
@@ -177,7 +184,10 @@ describe('AudioClockTransport pause and resume', () => {
     transport.setCallbacks({ onStep: (step) => events.push(step) });
 
     transport.start();
-    fakeContext.currentTime = 0.5;
+    // Advance to 0.5 s of played music: the take started one start lead after
+    // `start()` was called, so the clock must run that much further for the
+    // transport to report the same musical position.
+    fakeContext.currentTime = 0.5 + START_LEAD_SECONDS;
     const scheduled = timers.shift();
     assert.ok(scheduled);
     scheduled();

@@ -12,7 +12,7 @@
  */
 import { afterEach, beforeEach, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { AudioClockTransport } from './transport';
+import { AudioClockTransport, START_LEAD_SECONDS } from './transport';
 import { audioEngine } from './audioEngine';
 import { createHistory } from '../state/projectHistory';
 import { serializeProjectState } from '../state/projectPersistence';
@@ -305,9 +305,14 @@ const startSongTake = (options: {
  * running every pending transport timer at each step boundary.
  */
 const pumpSteps = (fakeCtx: FakeAudioContext, steps: number): void => {
-  const startTick = Math.round(fakeCtx.currentTime / STEP_SECONDS_AT_120_BPM);
+  // A take's timeline begins one start lead after `play()`, so the clock is
+  // offset by that lead: pumping N steps then means N steps of MUSIC have
+  // elapsed, which is what every positional assertion below is written in
+  // terms of. Absolute scheduled audio times still carry the lead and are
+  // asserted as `musicalTime + START_LEAD_SECONDS`.
+  const startTick = Math.round((fakeCtx.currentTime - START_LEAD_SECONDS) / STEP_SECONDS_AT_120_BPM);
   for (let tick = startTick; tick <= startTick + steps; tick += 1) {
-    fakeCtx.currentTime = tick * STEP_SECONDS_AT_120_BPM;
+    fakeCtx.currentTime = START_LEAD_SECONDS + tick * STEP_SECONDS_AT_120_BPM;
     const pending = timers;
     timers = [];
     for (const callback of pending) callback();
@@ -534,7 +539,10 @@ describe('Playlist lane mute — live during Song Mode', () => {
     const starts = startsForClip(take);
     // Exactly one new source: clip-b restarted from the paused position; clip-a stays silent.
     assert.equal(starts.length, 3);
-    assert.ok(Math.abs(starts[2].offset - 1.0) < 1e-6, `expected offset ~1.0, got ${starts[2].offset}`);
+    // The resumed take starts one lead later, so the spanning clip restarts one
+    // lead before the paused position and is back in sync with the grid when the
+    // resumed music reaches it.
+    assert.ok(Math.abs(starts[2].offset - (1.0 - START_LEAD_SECONDS)) < 1e-6, `expected offset ~1.0, got ${starts[2].offset}`);
   });
 });
 
