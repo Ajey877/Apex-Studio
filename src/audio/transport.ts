@@ -19,11 +19,28 @@ export interface TransportCallbacks {
   onSongEnd?: () => void;
 }
 
+/**
+ * Scheduling lead applied when the transport starts, so the first step of a take
+ * reaches the audio thread with the same safety margin every later step already
+ * gets. Without it `start()` scheduled step 0 at `ctx.currentTime` itself — zero
+ * look-ahead — and the audio thread had already passed that instant by the time
+ * the step's nodes were created, so the first step of every take sounded late
+ * (Stage A measured 0.11 ms – 8.48 ms of lateness in the production play path,
+ * while every step scheduled inside the look-ahead window was exact).
+ *
+ * 0.03 s matches `DEFAULT_LEAD_SECONDS` in `countInScheduler.ts`, which solves
+ * the identical problem ("so the first click never lands in the past") for
+ * count-in clicks.
+ */
+export const START_LEAD_SECONDS = 0.03;
+
 /** Audio-clock transport: musical position follows AudioContext time. */
 export class AudioClockTransport {
   private readonly context: AudioContext;
   private readonly lookAheadSeconds: number;
   private readonly scheduleIntervalMs: number;
+  /** Start lead, clamped so it can never fall outside the look-ahead window. */
+  private readonly startLeadSeconds: number;
   private timerId: number | null = null;
   private nextEventTime = 0;
   /** Absolute musical step assigned to the next scheduled event. */
@@ -55,6 +72,11 @@ export class AudioClockTransport {
     this.context = context;
     this.lookAheadSeconds = Math.max(0.025, options.lookAheadSeconds ?? 0.1);
     this.scheduleIntervalMs = Math.max(10, options.scheduleIntervalMs ?? 25);
+    // `start()` schedules synchronously, so a lead at or beyond the look-ahead
+    // horizon would defer step 0 to the next timer tick instead of emitting it
+    // immediately. Keeping the lead strictly inside the window preserves that
+    // existing contract for any configured look-ahead, including the 25 ms floor.
+    this.startLeadSeconds = Math.min(START_LEAD_SECONDS, this.lookAheadSeconds * 0.5);
   }
 
   setCallbacks(callbacks: TransportCallbacks): void { this.callbacks = callbacks; }
@@ -152,8 +174,26 @@ export class AudioClockTransport {
   start(): void {
     if (this.state.playing) return;
     const now = this.context.currentTime;
-    this.clockOrigin = now - this.state.positionSeconds;
-    this.nextEventTime = now;
+    // Anchoring the clock origin and the first event time by the SAME lead keeps
+    // `nextEventTime - clockOrigin === positionSeconds`, so the reported position
+    // (currentTime - clockOrigin) and the event grid stay in lockstep — the
+    // take's timeline simply begins one lead later instead of drifting.
+    //
+    // Step identity is owned by the separate `nextAbsoluteStep` counter, which is
+    // seeded from the start position and is independent of the lead, so the lead
+    // cannot skip, duplicate or mis-number a step. Shifting only `nextEventTime`
+    // (leaving `clockOrigin = now - position`) is what would have been unsafe: it
+    // advances the derived position by a full lead and starts on the wrong step.
+    //
+    // The lead stays strictly inside the look-ahead window (see the constructor)
+    // so `schedule()` still emits step 0 inside `start()` rather than deferring
+    // it to the next timer tick.
+    //
+    // The reported position therefore trails the start position by exactly one
+    // lead until the first step sounds; from that instant onward position and
+    // audio stay in lockstep as before.
+    this.clockOrigin = now + this.startLeadSeconds - this.state.positionSeconds;
+    this.nextEventTime = now + this.startLeadSeconds;
     this.nextAbsoluteStep = Math.floor(this.state.positionSeconds / this.stepDurationSeconds + 1e-9);
     this.state.playing = true;
     this.schedule();

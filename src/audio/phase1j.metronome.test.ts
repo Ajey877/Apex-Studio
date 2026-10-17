@@ -12,7 +12,7 @@
  */
 import { afterEach, beforeEach, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { AudioClockTransport } from './transport';
+import { AudioClockTransport, START_LEAD_SECONDS } from './transport';
 import { audioEngine } from './audioEngine';
 import { METRONOME_CLICK_VOICES } from './metronomeClick';
 import type { Channel } from '../types/daw';
@@ -163,6 +163,13 @@ const runUntil = (take: Take, until: number): void => {
 
 const audible = (take: Take) => take.ctx.oscillators.filter(o => o.audible).sort((a, b) => a.startAt - b.startAt);
 const r = (x: number) => Math.round(x * 1e6) / 1e6;
+/**
+ * Absolute audio time of a click sitting at `musicalTime` on the metronome
+ * grid. The first scheduled step of a take carries the transport's start lead,
+ * so every audible time of a live take is offset by exactly that lead while the
+ * grid spacing, accent pattern and click count stay untouched.
+ */
+const at = (musicalTime: number): number => r(musicalTime + START_LEAD_SECONDS);
 const clickList = (take: Take, before = Infinity) =>
   audible(take).filter(o => o.startAt < before - 1e-9).map(o => [r(o.startAt), o.frequencyHz]);
 
@@ -178,30 +185,30 @@ describe('Phase 1J — metronome follows the authoritative meter and tempo', () 
     const take = startTake({ meter: [4, 4] });
     runUntil(take, 4.2);
     assert.deepEqual(clickList(take, 4), [
-      [0, HI], [0.5, LO], [1, LO], [1.5, LO],
-      [2, HI], [2.5, LO], [3, LO], [3.5, LO],
+      [at(0), HI], [at(0.5), LO], [at(1), LO], [at(1.5), LO],
+      [at(2), HI], [at(2.5), LO], [at(3), LO], [at(3.5), LO],
     ]);
   });
 
   it('3/4 clicks three quarter notes per 1.5 s bar', () => {
     const take = startTake({ meter: [3, 4] });
     runUntil(take, 3.2);
-    assert.deepEqual(clickList(take, 3), [[0, HI], [0.5, LO], [1, LO], [1.5, HI], [2, LO], [2.5, LO]]);
+    assert.deepEqual(clickList(take, 3), [[at(0), HI], [at(0.5), LO], [at(1), LO], [at(1.5), HI], [at(2), LO], [at(2.5), LO]]);
   });
 
   it('6/8 clicks six eighth notes per 1.5 s bar with a 3+3 accent', () => {
     const take = startTake({ meter: [6, 8] });
     runUntil(take, 1.7);
-    assert.deepEqual(clickList(take, 1.6), [[0, HI], [0.25, LO], [0.5, LO], [0.75, MID], [1, LO], [1.25, LO], [1.5, HI]]);
+    assert.deepEqual(clickList(take, 1.6), [[at(0), HI], [at(0.25), LO], [at(0.5), LO], [at(0.75), MID], [at(1), LO], [at(1.25), LO], [at(1.5), HI]]);
   });
 
   it('7/8 clicks seven eighth-note pulses per 1.75 s bar (default 2+2+3)', () => {
     const take = startTake({ meter: [7, 8] });
     runUntil(take, 3.7);
     const bar = [HI, LO, MID, LO, MID, LO, LO];
-    assert.deepEqual(clickList(take, 3.5), [...bar, ...bar].map((f, i) => [r(i * 0.25), f]));
+    assert.deepEqual(clickList(take, 3.5), [...bar, ...bar].map((f, i) => [at(i * 0.25), f]));
     // The second bar's downbeat is exactly 14 sixteenths (1.75 s) after the first.
-    assert.equal(clickList(take)[7][0], 1.75);
+    assert.equal(clickList(take)[7][0], at(1.75));
   });
 
   it('7/8 accent patterns are configurable: 3+2+2 and 2+3+2', () => {
@@ -227,7 +234,7 @@ describe('Phase 1J — metronome follows the authoritative meter and tempo', () 
     const take = startTake({ meter: [7, 8], bpm: 90 });
     runUntil(take, 2.5);
     const times = clickList(take, 2.4).map(c => c[0]);
-    times.forEach((t, i) => assert.ok(Math.abs(t - i / 3) < 1e-6, `click ${i} at ${t}s, expected ${i / 3}s`));
+    times.forEach((t, i) => assert.ok(Math.abs(t - at(i / 3)) < 1e-6, `click ${i} at ${t}s, expected ${at(i / 3)}s`));
     assert.equal(clickList(take)[7][1], HI, 'bar 2 downbeat after 7 eighths');
   });
 
@@ -235,7 +242,7 @@ describe('Phase 1J — metronome follows the authoritative meter and tempo', () 
     const take = startTake({ meter: [4, 4], mode: 'pat', patternLengthSteps: 32 });
     runUntil(take, 4.2);
     const downbeats = clickList(take, 4.1).filter(c => c[1] === HI).map(c => c[0]);
-    assert.deepEqual(downbeats, [0, 2, 4], 'bar 2 of a 2-bar pattern is accented (pre-1J only step 0 was)');
+    assert.deepEqual(downbeats, [at(0), at(2), at(4)], 'bar 2 of a 2-bar pattern is accented (pre-1J only step 0 was)');
   });
 });
 
@@ -303,7 +310,8 @@ describe('Phase 1J — no stale, duplicate or drifting clicks', () => {
     // From here the clicks are 7/8 eighth pulses (0.25 s apart).
     for (let i = 1; i < after.length; i++) assert.ok(Math.abs(after[i].startAt - after[i - 1].startAt - 0.25) < 1e-6);
     // Absolute step 14k is a 7/8 bar line: 3.5 s (step 28) must be a downbeat.
-    const at35 = after.find(o => Math.abs(o.startAt - 3.5) < 1e-6);
+    // The 3.5 s bar line is a grid position, so its audio time carries the lead too.
+    const at35 = after.find(o => Math.abs(o.startAt - at(3.5)) < 1e-6);
     assert.equal(at35?.frequencyHz, HI);
   });
 
@@ -323,6 +331,6 @@ describe('Phase 1J — no stale, duplicate or drifting clicks', () => {
     runUntil(take, 39 * 1.75 + 0.2);
     const downbeats = audible(take).filter(o => o.frequencyHz === HI).map(o => o.startAt);
     assert.equal(downbeats.length, 40);
-    downbeats.forEach((t, i) => assert.ok(Math.abs(t - i * 1.75) < 1e-6, `downbeat ${i + 1} at ${t}`));
+    downbeats.forEach((t, i) => assert.ok(Math.abs(t - at(i * 1.75)) < 1e-6, `downbeat ${i + 1} at ${t}`));
   });
 });

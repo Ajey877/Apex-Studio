@@ -10,7 +10,7 @@
 import { readFileSync } from 'node:fs';
 import { afterEach, beforeEach, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { AudioClockTransport } from './transport';
+import { AudioClockTransport, START_LEAD_SECONDS } from './transport';
 import { audioEngine } from './audioEngine';
 import type { Channel, PlaylistClip } from '../types/daw';
 
@@ -255,9 +255,14 @@ const startTake = (options: {
  * running every pending transport timer at each step boundary.
  */
 const pumpSteps = (fakeCtx: FakeAudioContext, steps: number): void => {
-  const startTick = Math.round(fakeCtx.currentTime / STEP_SECONDS_AT_120_BPM);
+  // A take's timeline begins one start lead after `play()`, so the clock is
+  // offset by that lead: pumping N steps then means N steps of MUSIC have
+  // elapsed, which is what every positional assertion below is written in
+  // terms of. Absolute scheduled audio times still carry the lead and are
+  // asserted as `musicalTime + START_LEAD_SECONDS`.
+  const startTick = Math.round((fakeCtx.currentTime - START_LEAD_SECONDS) / STEP_SECONDS_AT_120_BPM);
   for (let tick = startTick; tick <= startTick + steps; tick += 1) {
-    fakeCtx.currentTime = tick * STEP_SECONDS_AT_120_BPM;
+    fakeCtx.currentTime = START_LEAD_SECONDS + tick * STEP_SECONDS_AT_120_BPM;
     const pending = timers;
     timers = [];
     for (const callback of pending) callback();
@@ -306,7 +311,9 @@ describe('Phase 9E: pause and resume', () => {
     assert.deepEqual(stepsOf(take.triggered), [0, 4, 8]);
     // The resumed grid is continuous: step 8 lands two steps after the resume
     // instant, measured on the same audio clock (not a restart at bar one).
-    assertCloseTo(take.triggered[2].time, resumeTime + 2 * STEP_SECONDS_AT_120_BPM);
+    // The resumed take is a fresh start, so step 8 lands one start lead plus
+    // two steps after the resume instant.
+    assertCloseTo(take.triggered[2].time, resumeTime + START_LEAD_SECONDS + 2 * STEP_SECONDS_AT_120_BPM);
   });
 
   it('pausing mid audio clip resumes the clip from the paused offset', () => {
@@ -325,7 +332,10 @@ describe('Phase 9E: pause and resume', () => {
     take.resume();
     assert.equal(take.fakeCtx.sources.length, 2);
     const resumed = take.fakeCtx.sources[1];
-    assertCloseTo(resumed.startCalls[0].offset, 4 * STEP_SECONDS_AT_120_BPM, 'clip continues from the paused offset');
+    // The resumed timeline begins one start lead after `play()`, so the clip
+    // restarts one lead before the paused position and reaches it as the
+    // resumed music does — the clip and the grid stay in lockstep.
+    assertCloseTo(resumed.startCalls[0].offset, 4 * STEP_SECONDS_AT_120_BPM - START_LEAD_SECONDS, 'clip continues from the paused offset');
 
     // The scheduler never adds a second source for the same clip body.
     pumpSteps(take.fakeCtx, 8);
@@ -342,6 +352,7 @@ describe('Phase 9E: seek', () => {
     pumpSteps(take.fakeCtx, 4);
     assert.deepEqual(stepsOf(take.triggered), [0, 4]);
 
+    const seekTime = take.fakeCtx.currentTime;
     engine.seek(1.0); // 8 steps in
     assert.equal(engine.isPlaying, true);
     assert.equal(engine.currentStep, 8);
@@ -352,8 +363,8 @@ describe('Phase 9E: seek', () => {
     // Steps 5-7 were skipped, 8-12 follow continuously from the seek point.
     assert.deepEqual(stepsOf(take.triggered), [0, 4, 8, 12]);
     // Post-seek audio time is re-based: the first new event fires just after
-    // the seek instant (ctx 0.5 + 5ms scheduler nudge), not on the old grid.
-    assertCloseTo(take.triggered[2].time, 0.505);
+    // the seek instant (5 ms scheduler nudge), not on the old grid.
+    assertCloseTo(take.triggered[2].time, seekTime + 0.005);
     assertCloseTo(take.triggered[3].time - take.triggered[2].time, STEP_SECONDS_AT_120_BPM * 4);
   });
 

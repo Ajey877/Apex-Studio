@@ -4,7 +4,7 @@ import { describe, it } from 'node:test';
 import { createDefaultProjectState } from '../state/projectState';
 import { normalizePatternLengthSteps, getPatternLengthBars } from '../state/patternLength';
 import { resolvePatternLoopLengthSteps, resolvePlayableContentLengthSteps, noteOnsetOffsetSteps } from '../audio/audioEngine';
-import { AudioClockTransport } from '../audio/transport';
+import { AudioClockTransport, START_LEAD_SECONDS } from '../audio/transport';
 import { getOfflineRenderPlan } from '../audio/offlineProjectRenderer';
 import { getRecordingLengthBars } from '../audio/recordingPipeline';
 import { swingOffsetSecondsForStep, swingOffsetTicksForStep } from '../audio/parameterScaling';
@@ -124,7 +124,16 @@ describe('Phase 1A/1I — timing contracts and supported 7/8 MIDI fingerprints',
       transport.setCallbacks({ onStep: (step, bar, time) => events.push([step, bar, time]) });
       transport.start();
       for (let i = 1; i <= 16; i++) { context.currentTime = i * 0.125; pending!(); }
-      assert.deepEqual(events, Array.from({ length: 17 }, (_, i) => [i % 16, Math.floor(i / 16) + 1, i * 0.125]));
+      // Step identity, order and bar are unchanged; every scheduled time carries
+      // the transport's start lead. The expected times are accumulated the same
+      // way the transport advances `nextEventTime`, so the comparison stays exact.
+      const expected: Array<[number, number, number]> = [];
+      let stepTime = START_LEAD_SECONDS;
+      for (let i = 0; i <= 16; i += 1) {
+        expected.push([i % 16, Math.floor(i / 16) + 1, stepTime]);
+        stepTime += 0.125;
+      }
+      assert.deepEqual(events, expected);
       transport.seek(1.5);
       transport.setBpm(60);
       // Phase 1A deliberately left tempo continuity unfixed (step 12 jumped to
