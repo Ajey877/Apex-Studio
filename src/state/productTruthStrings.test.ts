@@ -222,7 +222,17 @@ describe('Phase 52 — truthful not-applied states', () => {
     assert.ok(source.includes('LIVE + OFFLINE PATH'));
     assert.ok(source.includes('BYPASSED'));
     assert.ok(!source.includes('NO PROCESSING IN SIGNAL PATH'));
-    assert.ok(!/\\bGR\\b/.test(source.replace(/NOT MEASURED/g, '')), 'no bare gain-reduction readout');
+    const reductionMeter = source.match(/\{\/\* Reduction Meter \*\/\}([\s\S]*?)\n      <\/div>\n    <\/div>/)?.[1];
+    assert.ok(reductionMeter, 'each band must render the dedicated reduction-meter block');
+    assert.match(reductionMeter, /<span[^>]*>\{config\.grLabel\}<\/span>/);
+    assert.match(
+      reductionMeter,
+      /<span[^>]*>NOT MEASURED — compressor in path, no GR metering<\/span>/,
+      'the GR label must remain paired with an explicit unavailable state until real measurement exists'
+    );
+    for (const band of ['Low', 'Mid', 'High']) {
+      assert.ok(source.includes("grLabel: 'GR (" + band + ")'"), 'the ' + band.toLowerCase() + ' band label must remain identified as a GR meter');
+    }
   });
 
   it('Polyphonic editor declares its demo blobs are not source-audio analysis', () => {
