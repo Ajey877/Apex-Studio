@@ -5,7 +5,7 @@ import JSZip from 'jszip';
 import { ProjectState } from '../types/daw';
 import { normalizeProjectState } from '../state/projectState';
 import { getPersistedAudioClip, persistAudioClip } from '../audio/audioPersistence';
-import { buildBundleAudioAssetPath } from './projectBundleAudioPath';
+import { BundleAudioAssetError, collectBundleAudioAssets } from './projectBundleAudioAssets';
 import { getAudioIdsForProject } from '../state/projectPersistence';
 import type { ProjectReplacementSource } from '../state/projectReplacement';
 
@@ -64,16 +64,19 @@ export const ProjectBundleZipModal: React.FC<ProjectBundleZipModalProps> = ({
       const audioFiles: BundleAudioFile[] = [];
       if (includeSamples) {
         const audioFolder = zip.folder('audio');
-        for (const audioId of getAudioIdsForProject(projectState)) {
-          try {
-            const blob = await getPersistedAudioClip(audioId);
-            if (!blob || blob.size === 0) continue;
-            const path = buildBundleAudioAssetPath(audioId, audioFiles.length);
-            audioFolder?.file(path.replace('audio/', ''), blob);
-            audioFiles.push({ id: audioId, path, mimeType: blob.type || 'application/octet-stream', size: blob.size });
-          } catch (error) {
-            console.warn(`[Apex Studio] Could not package audio asset ${audioId}`, error);
-          }
+        if (!audioFolder) throw new Error('Could not create the ZIP audio folder.');
+        const assets = await collectBundleAudioAssets(
+          getAudioIdsForProject(projectState),
+          getPersistedAudioClip
+        );
+        for (const asset of assets) {
+          audioFolder.file(asset.path.slice('audio/'.length), asset.blob);
+          audioFiles.push({
+            id: asset.id,
+            path: asset.path,
+            mimeType: asset.mimeType,
+            size: asset.size
+          });
         }
       }
 
@@ -138,7 +141,7 @@ Engine: Apex Studio Digital Audio Workstation
     } catch (err) {
       console.error(err);
       setIsExporting(false);
-      setStatusMessage('Error creating project ZIP bundle.');
+      setStatusMessage(err instanceof BundleAudioAssetError ? err.message : 'Error creating project ZIP bundle.');
       setTimeout(() => setStatusMessage(null), 3000);
     }
   };
