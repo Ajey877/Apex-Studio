@@ -4,6 +4,7 @@ import { Download, Upload, Sparkles, FolderArchive, X } from 'lucide-react';
 import JSZip from 'jszip';
 import { ProjectState } from '../types/daw';
 import { normalizeProjectState } from '../state/projectState';
+import { resolvePatternChannelContent } from '../state/patternContent';
 import { getPersistedAudioClip, persistAudioClip } from '../audio/audioPersistence';
 import { BundleAudioAssetError, collectBundleAudioAssets } from './projectBundleAudioAssets';
 import { getAudioIdsForProject } from '../state/projectPersistence';
@@ -110,13 +111,19 @@ Engine: Apex Studio Digital Audio Workstation
             id: pat.id,
             name: pat.name,
             lengthSteps: pat.lengthSteps,
-            channels: projectState.channels.map(ch => ({
-              id: ch.id,
-              name: ch.name,
-              instrumentType: ch.instrumentType,
-              steps: ch.steps,
-              notes: ch.notes
-            }))
+            // Independent patterns: each file carries that pattern's own
+            // content (stored content, or the live channel content for the
+            // selected pattern) instead of the selected pattern's in every file.
+            channels: projectState.channels.map(ch => {
+              const content = resolvePatternChannelContent(pat, ch);
+              return {
+                id: ch.id,
+                name: ch.name,
+                instrumentType: ch.instrumentType,
+                steps: content.steps,
+                notes: content.notes
+              };
+            })
           };
           patternsFolder?.file(`pattern_${idx + 1}_${sanitizeFilePart(pat.name)}.json`, JSON.stringify(patData, null, 2));
         });

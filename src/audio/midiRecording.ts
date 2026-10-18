@@ -51,6 +51,7 @@ import type { MidiEventPayload } from './audioEngine';
 import { secondsToBeats, SIXTEENTH_STEPS_PER_BEAT } from '../music/musicalTime';
 import { MIN_NOTE_DURATION_STEPS } from '../music/noteDurationPolicy';
 import { updateChannelInProjectState } from '../state/projectMutations';
+import { updatePatternChannelContentInProjectState } from '../state/patternContent';
 
 /** The explicit destination of a take, captured when recording starts. */
 export interface MidiRecordingTarget {
@@ -113,20 +114,33 @@ export const transportPositionToSteps = (positionSeconds: number, bpm: number): 
 /**
  * Appends finalized recorded notes to a channel's Piano Roll notes through
  * the project mutation layer. Returns the identical state object when there
- * is nothing to commit (empty take, unknown channel), so callers record no
- * phantom history entry. Existing notes — in this and every other channel —
- * are preserved untouched and in order.
+ * is nothing to commit (empty take, unknown channel or pattern), so callers
+ * record no phantom history entry. Existing notes — in this and every other
+ * channel — are preserved untouched and in order.
+ *
+ * Independent patterns: with `patternId` (the take's target pattern, captured
+ * at take start) the notes land in THAT pattern even when the user selected a
+ * different pattern before the take was finalized — the live channel when it
+ * is still selected, its stored content otherwise. Without it, the notes go to
+ * the live channel content (the selected pattern), the historical contract.
  */
 export const appendRecordedNotesToChannelInProjectState = (
   state: ProjectState,
   channelId: string,
   notes: readonly Note[],
+  patternId?: string,
 ): ProjectState => {
   if (notes.length === 0) return state;
   const channel = state.channels.find(candidate => candidate.id === channelId);
   if (!channel) return state;
+  const recorded = notes.map(note => ({ ...note }));
+  if (patternId !== undefined) {
+    return updatePatternChannelContentInProjectState(state, patternId, channelId, current => ({
+      notes: [...current.notes.map(note => ({ ...note })), ...recorded],
+    }));
+  }
   return updateChannelInProjectState(state, channelId, {
-    notes: [...(channel.notes ?? []), ...notes.map(note => ({ ...note }))],
+    notes: [...(channel.notes ?? []), ...recorded],
   });
 };
 

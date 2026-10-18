@@ -60,7 +60,7 @@ export const PROJECT_STATE_AUDIO_FIELDS: AudioFieldRegistry = {
   'meta.totalEditTimeSeconds': { classification: 'metadata', note: 'Telemetry.' },
 
   // ---- Top-level arrays / scalars ----
-  'patterns':              { classification: 'consumed', consumer: 'audioEngine transport / patternLength', note: 'Sequencer pattern data.' },
+  'patterns':              { classification: 'consumed', consumer: 'audioEngine transport / patternLength; audioEngine.triggerCurrentStep (Song Mode) via state/patternContent', note: 'Sequencer pattern data: declared length, and each non-selected pattern\'s own channel content (`Pattern.channelContent`) that Song Mode pattern clips play.' },
   'selectedPatternId':     { classification: 'metadata', note: 'UI selection.' },
   'sampleLibrary':         { classification: 'consumed', consumer: 'audioEngine.sampleBuffer map', note: 'Sample persistence; engine reads buffers by id.' },
   'samplePacks':           { classification: 'metadata', note: 'Sample-pack catalog metadata.' },

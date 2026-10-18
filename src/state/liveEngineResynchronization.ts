@@ -1,4 +1,4 @@
-import type { Channel, GrossBeatState, MixerTrack, PlaylistClip, PlaylistTrack, ProjectState } from '../types/daw';
+import type { Channel, GrossBeatState, MixerTrack, Pattern, PlaylistClip, PlaylistTrack, ProjectState } from '../types/daw';
 import { getSelectedPatternLengthSteps } from './patternLength';
 import { DEFAULT_GROSS_BEAT_STATE } from './projectState';
 
@@ -43,6 +43,8 @@ export interface LiveEngineResynchronizationPort {
     mixerTracks?: MixerTrack[];
     playlistTracks?: PlaylistTrack[];
     patternLengthSteps?: number;
+    /** Independent patterns: stored pattern content Song Mode clips play. */
+    patterns?: Pattern[];
   }): void;
   updateMixerTrack(track: MixerTrack): void;
   updateChannel(channel: Channel): void;
@@ -95,6 +97,7 @@ export function resynchronizeLiveEngineFromProjectState(
     mixerTracks: state.mixerTracks,
     playlistTracks: state.playlistTracks,
     patternLengthSteps: getSelectedPatternLengthSteps(state),
+    patterns: state.patterns,
   });
 
   if (engine.isPlaybackActive()) return;

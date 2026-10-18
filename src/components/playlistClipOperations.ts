@@ -1,5 +1,5 @@
 import { stepsPerBar, LEGACY_TIME_SIGNATURE, resolveProjectTimeSignature, type TimeSignature } from '../music/musicalTime';
-import type { Channel, PlaylistClip, PlaylistTrack, AutomationPoint, AutomationTargetType } from '../types/daw';
+import type { Channel, Pattern, PlaylistClip, PlaylistTrack, AutomationPoint, AutomationTargetType } from '../types/daw';
 
 export const STEPS_PER_BAR = stepsPerBar(LEGACY_TIME_SIGNATURE);
 export const DEFAULT_GRID_BARS = 0.25;
@@ -666,6 +666,12 @@ export function resolvePlaylistTargetChannel(channels: Channel[], trackIndex: nu
   return channels[trackIndex] ?? channels[0];
 }
 
+/**
+ * A new pattern clip for `channel` on lane `trackIndex`. With `pattern` the clip
+ * plays that pattern's content for the channel (independent patterns); the
+ * playlist passes the selected pattern, so a placed clip always plays what the
+ * Channel Rack showed when it was drawn.
+ */
 export function createPlaylistPatternClip(
   trackIndex: number,
   startBar: number,
@@ -673,7 +679,8 @@ export function createPlaylistPatternClip(
   track?: PlaylistTrack,
   lengthBars = 4,
   id?: string,
-  bounds: PlaylistBounds = {}
+  bounds: PlaylistBounds = {},
+  pattern?: Pick<Pattern, 'id'>
 ): PlaylistClip {
   const clipId = id || `clip-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`;
   const clip: PlaylistClip = {
@@ -683,10 +690,29 @@ export function createPlaylistPatternClip(
     lengthBars,
     type: 'pattern',
     channelId: channel?.id,
+    ...(pattern?.id ? { patternId: pattern.id } : {}),
     color: track?.color || channel?.color || '#ff6e00',
     name: `${track?.name || channel?.name || 'Track'} Block`
   };
   return assertValidPlaylistClip(clip, bounds);
+}
+
+/**
+ * Re-targets a pattern clip at another pattern (same lane, channel, position
+ * and length). Non-pattern clips and unknown patterns are rejected.
+ */
+export function setPlaylistClipPattern(
+  clips: PlaylistClip[],
+  clipId: string,
+  patterns: readonly Pick<Pattern, 'id'>[],
+  patternId: string
+): PlaylistClip[] {
+  const target = clips.find(clip => clip.id === clipId);
+  if (!target) throw new Error(`Clip not found: ${clipId}`);
+  if (target.type !== 'pattern') throw new Error('Only pattern clips play a pattern');
+  if (!patterns.some(pattern => pattern.id === patternId)) throw new Error(`Pattern not found: ${patternId}`);
+  if (target.patternId === patternId) return clips;
+  return clips.map(clip => (clip.id === clipId ? { ...cloneClip(clip), patternId } : clip));
 }
 
 export type PlaylistKeyboardAction = 'delete' | 'duplicate' | 'escape' | 'none';

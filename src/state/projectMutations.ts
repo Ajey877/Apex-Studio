@@ -19,6 +19,7 @@ import { formatTimeSignature, isSameTimeSignature, isSevenEightGrouping, resolve
 import { isCountInBars, type CountInBars } from '../music/countIn';
 import { isPunchRecordingSettings, isSamePunchRecording, resolvePunchRecording, validatePunchRecording, type PunchRecordingSettings } from '../music/punchRecording';
 import { getProjectTimelineBars } from './playlistTimeline';
+import { addEmptyPatternToProjectState } from './patternContent';
 
 /**
  * Authoritative runtime mutation boundary for ProjectState.
@@ -140,14 +141,15 @@ export const updateFxSlotInProjectState = (
   })
 });
 
+/**
+ * Adds a new, EMPTY pattern and selects it. Patterns own their content
+ * (`src/state/patternContent.ts`): the previously selected pattern keeps its
+ * steps and notes, and the new pattern starts blank instead of sharing them.
+ */
 export const addPatternToProjectState = (
   state: ProjectState,
   pattern: Pattern
-): ProjectState => ({
-  ...state,
-  patterns: [...state.patterns, pattern],
-  selectedPatternId: pattern.id
-});
+): ProjectState => addEmptyPatternToProjectState(state, pattern);
 
 /**
  * Updates one pattern by id, leaving every other pattern (and its identity)

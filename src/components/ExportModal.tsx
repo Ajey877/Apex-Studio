@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { ModalFrame } from './ModalFrame';
 import { Download, FolderArchive, Sparkles, X } from 'lucide-react';
 import JSZip from 'jszip';
-import { Channel, PlaylistClip, PlaylistTrack, ProjectMetadata, MixerTrack } from '../types/daw';
+import { Channel, Pattern, PlaylistClip, PlaylistTrack, ProjectMetadata, MixerTrack } from '../types/daw';
 import { audioEngine } from '../audio/audioEngine';
 import { formatProjectSwingPercent } from '../audio/parameterScaling';
 import { audioBufferToWav } from '../audio/wavEncoder';
@@ -49,6 +49,13 @@ interface ExportModalProps {
    * and the WAV-master quality path opt in explicitly.
    */
   includeMixerFx?: boolean;
+  /**
+   * Independent patterns: the project's patterns. Song exports (WAV, stems and
+   * MIDI) play every pattern clip from the pattern it names, exactly like the
+   * live Song Mode scheduler; a Pattern Loop export plays the selected pattern,
+   * whose content is the live channel content.
+   */
+  patterns?: Pattern[];
 }
 
 type ExportFormat = 'wav24' | 'wav16' | 'wav32' | 'midi' | 'stems';
@@ -76,7 +83,7 @@ export const formatAuditionTime = (seconds: number): string => {
   return `${mm}:${ss.toString().padStart(2, '0')}`;
 };
 
-export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, channels, clips, meta, mixerTracks, patternLengthSteps, playlistTracks, includeMixerFx = DEFAULT_INCLUDE_MIXER_FX, totalBars }) => {
+export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, channels, clips, meta, mixerTracks, patternLengthSteps, playlistTracks, includeMixerFx = DEFAULT_INCLUDE_MIXER_FX, totalBars, patterns }) => {
   const [format, setFormat] = useState<ExportFormat>('wav24');
   const [scope, setScope] = useState<ExportScope>('song');
   const [isRendering, setIsRendering] = useState(false);
@@ -186,6 +193,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, chann
           patternLengthSteps,
           totalBars,
           playlistTracks,
+          patterns,
         });
         setDownloadUrl(URL.createObjectURL(midiBlob));
         setRenderProgress(100);
@@ -208,7 +216,8 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, chann
             scope,
             patternLengthSteps,
             playlistTracks,
-            effectiveIncludeMixerFx
+            effectiveIncludeMixerFx,
+            patterns
           );
           const zip = new JSZip();
           const folder = zip.folder(`${meta.name.replace(/\s+/g, '_')}_Stems_BPM${meta.bpm}`);
@@ -252,6 +261,10 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, chann
             // so a muted lane is dropped from the WAV exactly like the live
             // scheduler drops it at the trigger boundary.
             playlistTracks,
+            // Default 4-second floor for very short renders.
+            undefined,
+            // Independent patterns: Song pattern clips play the pattern they name.
+            patterns,
           );
           setRenderProgress(85);
           const wavBlob = audioBufferToWav(renderedBuffer, bitDepth);

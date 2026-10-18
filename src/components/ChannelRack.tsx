@@ -28,7 +28,10 @@ interface ChannelRackProps {
   patterns: Pattern[];
   selectedPatternId: string;
   onSelectPattern: (id: string) => void;
+  /** Adds a new, empty pattern (patterns own their content) and selects it. */
   onAddPattern: () => void;
+  /** Adds an exact copy of the selected pattern and selects it, for variations. */
+  onClonePattern?: () => void;
   /**
    * Writes the selected pattern's declared length (`Pattern.lengthSteps`) through
    * project mutations/history. The rack owns no length state of its own.
@@ -57,6 +60,7 @@ export const ChannelRack: React.FC<ChannelRackProps> = ({
   selectedPatternId,
   onSelectPattern,
   onAddPattern,
+  onClonePattern,
   onUpdatePatternLength,
   selectedChannelId,
   onSelectChannel,
@@ -127,6 +131,7 @@ export const ChannelRack: React.FC<ChannelRackProps> = ({
               <button
                 key={pat.id}
                 id={`pattern-tab-${pat.id}`}
+                aria-pressed={pat.id === selectedPatternId}
                 onClick={() => onSelectPattern(pat.id)}
                 className={`px-2.5 py-0.5 rounded-sm text-[11px] font-bold font-mono transition ${
                   pat.id === selectedPatternId
@@ -141,10 +146,22 @@ export const ChannelRack: React.FC<ChannelRackProps> = ({
               id="add-pattern-btn"
               onClick={onAddPattern}
               className="p-1 text-[var(--apex-text-3)] hover:text-[var(--apex-text)] hover:bg-[var(--apex-state-hover)] rounded transition"
-              title="Add New Pattern"
+              title="Add New Pattern (starts empty)"
+              aria-label="Add new empty pattern"
             >
               <Plus className="w-3 h-3" />
             </button>
+            {onClonePattern && (
+              <button
+                id="clone-pattern-btn"
+                onClick={onClonePattern}
+                className="p-1 text-[var(--apex-text-3)] hover:text-[var(--apex-text)] hover:bg-[var(--apex-state-hover)] rounded transition"
+                title="Clone Pattern (copy the selected pattern's steps and notes)"
+                aria-label="Clone selected pattern"
+              >
+                <Copy className="w-3 h-3" />
+              </button>
+            )}
           </div>
         </div>
 

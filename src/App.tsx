@@ -79,6 +79,7 @@ import {
 } from './state/playlistClipIntegrity';
 import { synchronizeBeforeRuntimePublication } from './state/runtimeStatePublication';
 import { resynchronizeLiveEngineFromProjectState } from './state/liveEngineResynchronization';
+import { clonePatternInProjectState, selectPatternInProjectState } from './state/patternContent';
 import { commitThemeSelection, readThemePreference, type ThemeMode } from './state/theme';
 import {
   ContinuousHistoryBatcher,
@@ -670,7 +671,8 @@ export function App() {
         projectState.selectedPatternId,
         snapshot.mixerTracks,
         selectedPatternLengthSteps,
-        projectState.playlistTracks
+        projectState.playlistTracks,
+        projectState.patterns
       );
       setIsPlaying(true);
     }
@@ -705,7 +707,8 @@ export function App() {
         projectState.selectedPatternId,
         snapshot.mixerTracks,
         selectedPatternLengthSteps,
-        projectState.playlistTracks
+        projectState.playlistTracks,
+        projectState.patterns
       );
     }
   };
@@ -771,7 +774,11 @@ export function App() {
     if (previousPatternLengthSteps !== nextPatternLengthSteps) {
       update.patternLengthSteps = nextPatternLengthSteps;
     }
-    if (update.channels || update.clips || update.mixerTracks || update.playlistTracks || update.patternLengthSteps !== undefined) {
+    // Independent patterns: Song Mode clips play stored pattern content, and a
+    // pattern selection swap moves content between the channels and the
+    // patterns — both travel in this one update.
+    if (previous.patterns !== next.patterns) update.patterns = next.patterns;
+    if (update.channels || update.clips || update.mixerTracks || update.playlistTracks || update.patternLengthSteps !== undefined || update.patterns) {
       audioEngine.synchronizePlaybackState(update);
     }
   }, []);
@@ -839,6 +846,7 @@ export function App() {
         mixerTracks: previous.mixerTracks,
         playlistTracks: previous.playlistTracks,
         patternLengthSteps: getSelectedPatternLengthSteps(previous),
+        patterns: previous.patterns,
       });
     } else {
       previous.mixerTracks.forEach(track => audioEngine.updateMixerTrack(track));
@@ -929,7 +937,9 @@ export function App() {
     setMidiRecordedNoteCount(0);
     if (target && notes.length > 0) {
       mutateProjectStateRef.current(
-        current => appendRecordedNotesToChannelInProjectState(current, target.channelId, notes),
+        // The take belongs to the pattern it started in, even if another
+        // pattern was selected before it was finalized.
+        current => appendRecordedNotesToChannelInProjectState(current, target.channelId, notes, target.patternId),
         'Record MIDI performance',
       );
     }
@@ -1418,6 +1428,46 @@ export function App() {
       curr => addPatternToProjectState(curr, newPat),
       'Add pattern'
     );
+  };
+
+  /**
+   * Clone pattern: a new pattern holding an exact copy of the selected
+   * pattern's steps, notes and length, selected for editing — the starting
+   * point for a variation (verse -> chorus). History-aware like Add pattern.
+   */
+  const handleClonePattern = () => {
+    const current = projectStateRef.current;
+    const source = current.patterns.find(pattern => pattern.id === current.selectedPatternId);
+    if (!source) return;
+    const clone: Pattern = {
+      id: `pat-${current.patterns.length + 1}-${Date.now()}`,
+      name: `${source.name} (copy)`,
+      color: source.color,
+      lengthSteps: source.lengthSteps
+    };
+    mutateProjectState(
+      curr => clonePatternInProjectState(curr, source.id, clone),
+      'Clone pattern'
+    );
+  };
+
+  /**
+   * Selects a pattern for editing and Pattern Mode. Selection is a view change
+   * and stays outside project history (as before), but it is no longer a bare
+   * id write: the outgoing pattern stores its content and the incoming
+   * pattern's content becomes the live channel content, atomically, so no
+   * pattern ever shows or plays another pattern's steps and notes.
+   */
+  const handleSelectPattern = (id: string) => {
+    const previousState = projectStateRef.current;
+    const nextState = selectPatternInProjectState(previousState, id);
+    if (nextState === previousState) return;
+    projectStateRef.current = nextState;
+    setProjectState(nextState);
+    // Pattern Mode plays the selected pattern, so the running take follows the
+    // new content and declared length; Song Mode keeps playing every clip's own
+    // pattern unchanged.
+    synchronizeActivePlayback(previousState, nextState);
   };
 
   /**
@@ -2302,16 +2352,9 @@ export function App() {
               channels={projectState.channels}
               patterns={projectState.patterns}
               selectedPatternId={projectState.selectedPatternId}
-              onSelectPattern={(id) => {
-                const previousState = projectStateRef.current;
-                projectStateRef.current = { ...previousState, selectedPatternId: id };
-                setProjectState(prev => ({ ...prev, selectedPatternId: id }));
-                // Pattern Mode plays the selected pattern, so the running take must
-                // follow the newly selected pattern's declared length (selection is
-                // a view change: it stays outside project history, as before).
-                synchronizeActivePlayback(previousState, projectStateRef.current);
-              }}
+              onSelectPattern={handleSelectPattern}
               onAddPattern={handleAddPattern}
+              onClonePattern={handleClonePattern}
               onUpdatePatternLength={handleUpdatePatternLength}
               selectedChannelId={selectedChannelId}
               onSelectChannel={(id) => setSelectedChannelId(id)}
@@ -2360,6 +2403,8 @@ export function App() {
               tracks={projectState.playlistTracks}
               clips={projectState.playlistClips}
               patterns={projectState.patterns}
+              selectedPatternId={projectState.selectedPatternId}
+              onSelectPattern={handleSelectPattern}
               channels={projectState.channels}
               mixerTracks={projectState.mixerTracks}
               markers={projectState.markers || []}
@@ -2571,7 +2616,7 @@ export function App() {
         clipCount={projectState.playlistClips.length}
       />
 
-      <ExportModal isOpen={isExportOpen} onClose={() => setIsExportOpen(false)} channels={projectState.channels} clips={projectState.playlistClips} mixerTracks={projectState.mixerTracks} meta={projectState.meta} patternLengthSteps={selectedPatternLengthSteps} playlistTracks={projectState.playlistTracks} includeMixerFx={DEFAULT_INCLUDE_MIXER_FX} totalBars={projectTimelineBars} />
+      <ExportModal isOpen={isExportOpen} onClose={() => setIsExportOpen(false)} channels={projectState.channels} clips={projectState.playlistClips} mixerTracks={projectState.mixerTracks} meta={projectState.meta} patternLengthSteps={selectedPatternLengthSteps} playlistTracks={projectState.playlistTracks} includeMixerFx={DEFAULT_INCLUDE_MIXER_FX} totalBars={projectTimelineBars} patterns={projectState.patterns} />
       {/* The single manifest importer, shared by File → Open Project Manifest and the Project Hub. */}
       <input
         id="project-manifest-input"
@@ -2600,7 +2645,7 @@ export function App() {
           );
         }}
       />
-      <AnalyticsModal isOpen={isAnalyticsOpen} onClose={() => setIsAnalyticsOpen(false)} meta={projectState.meta} channels={projectState.channels} clips={projectState.playlistClips} saveError={saveError} />
+      <AnalyticsModal isOpen={isAnalyticsOpen} onClose={() => setIsAnalyticsOpen(false)} meta={projectState.meta} channels={projectState.channels} patterns={projectState.patterns} clips={projectState.playlistClips} saveError={saveError} />
       <HotkeysModal isOpen={isHotkeysOpen} onClose={() => setIsHotkeysOpen(false)} />
       <ProjectSettingsModal
         isOpen={isProjectSettingsOpen}

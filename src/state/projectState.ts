@@ -3,6 +3,7 @@ import type { GrossBeatState, ProjectState, Channel, PlaylistClip } from '../typ
 import { audioEngine } from '../audio/audioEngine';
 import { createDefaultMixerTracks, createDefaultPlaylistTracks } from '../audio/presets';
 import { markAudioClipsMissingBufferId } from './playlistClipIntegrity';
+import { normalizePatternContentModel, removeChannelFromPatternContent } from './patternContent';
 
 /**
  * Phase 79: default Gross Beat gate state used when the persisted project has
@@ -580,10 +581,13 @@ export const normalizeProjectState = (input: unknown): ProjectState => {
     throw new Error('Invalid project file: required project metadata is missing or malformed.');
   }
 
-  return revalidateProjectTimeline({
+  // Independent patterns: sanitize stored pattern content against the final
+  // channel list and repair a selection written without the content swap. This
+  // is lossless for legacy documents (see `normalizePatternContentModel`).
+  return normalizePatternContentModel(revalidateProjectTimeline({
     ...auxNormalized,
     nextMixerTrackId: normalizeNextMixerTrackId(auxNormalized, candidate.nextMixerTrackId)
-  });
+  }));
 };
 
 export interface DeleteChannelResult {
@@ -599,6 +603,7 @@ export interface DeleteChannelResult {
  * - Removes orphaned MixerTrack if no other surviving channel references it (and not Master track 0).
  * - Updates selectedChannelId if deleted channel was selected.
  * - Resets selectedMixerTrackId to 0 if removed mixer track was selected.
+ * - Removes the channel's stored content from every pattern.
  */
 export const deleteChannelFromProjectState = (
   project: ProjectState,
@@ -660,13 +665,15 @@ export const deleteChannelFromProjectState = (
       : project.selectedMixerTrackId;
 
   return {
-    state: {
+    // A deleted channel's content in other patterns goes with it (undo restores
+    // both from the same snapshot).
+    state: removeChannelFromPatternContent({
       ...project,
       channels: remainingChannels,
       mixerTracks: nextMixerTracks,
       selectedChannelId: nextSelectedChannelId,
       selectedMixerTrackId: nextSelectedMixerTrackId
-    },
+    }, channelId),
     deletedChannel: channelToDelete,
     removedMixerTrackId: isTrackStillReferenced ? null : trackId
   };
