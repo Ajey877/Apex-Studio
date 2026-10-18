@@ -150,6 +150,65 @@ describe('sampler renderer', () => {
     assert.ok(Math.abs(ctx3.sources[0].playbackRate.value + 1) < 1e-9);
   });
 
+  it('uses replaced customSample and edited trim, rootPitch, and reverse when sampleZones only has an implicit default full-range zone', () => {
+    for (const defaultZoneId of ['zone-sampler-test', 'zone-default-sampler-test']) {
+      const ctx = new FakeContext();
+      const staleZoneBuffer = { duration: 2 } as AudioBuffer;
+      const updatedCustomBuffer = { duration: 4 } as AudioBuffer;
+      const testChannel = channel({
+        sampleZones: [
+          {
+            id: defaultZoneId,
+            sampleId: 'sample',
+            lowNote: 0,
+            highNote: 127,
+            rootNote: 60,
+            lowVelocity: 0,
+            highVelocity: 127,
+            tuneSemitones: 0,
+          },
+        ],
+        customSample: {
+          id: 'replaced-sample',
+          name: 'Replaced Sample',
+          duration: 4,
+          sampleRate: 44100,
+          channels: 1,
+          waveformPeaks: [0.2, 0.8],
+          trimStart: 0.25,
+          trimEnd: 0.75,
+          rootPitch: 72,
+          reverse: true,
+        },
+      });
+
+      const handle = renderSamplerVoice({
+        channel: testChannel,
+        note: { id: 'n', pitch: 60, start: 0, duration: 1, velocity: 0.8 } as any,
+        time: 0,
+        destination: {} as AudioNode,
+        audioContext: ctx as any,
+        voiceId: `implicit-zone-${defaultZoneId}`,
+        bpm: 120,
+        getSampleBuffer: (id) =>
+          id === 'replaced-sample'
+            ? updatedCustomBuffer
+            : id === 'sample'
+              ? staleZoneBuffer
+              : undefined,
+      });
+
+      assert.ok(handle);
+      const source = ctx.sources[0];
+      assert.equal(source.buffer, updatedCustomBuffer, `expected replaced customSample buffer for ${defaultZoneId}`);
+      assert.ok(
+        Math.abs(source.playbackRate.value + Math.pow(2, (60 - 72) / 12)) < 1e-9,
+        `expected reverse + rootPitch=72 playbackRate for ${defaultZoneId}`,
+      );
+      assert.deepEqual(source.startArgs, [0, 3, 2], `expected trimStart=0.25..trimEnd=0.75 for ${defaultZoneId}`);
+    }
+  });
+
   it('returns no voice when the resolver cannot supply the selected sample', () => {
     const ctx = new FakeContext();
     const result = renderSamplerVoice({

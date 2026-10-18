@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { ModalFrame } from './ModalFrame';
 import { 
   Layers, 
@@ -20,6 +20,7 @@ interface MultiZoneSamplerModalProps {
   isOpen: boolean;
   onClose: () => void;
   channels: Channel[];
+  selectedChannelId?: string;
   sampleLibrary: NonNullable<Channel['customSample']>[];
   onUpdateChannel: (channelId: string, updates: Partial<Channel>) => void;
 }
@@ -60,17 +61,28 @@ export const MultiZoneSamplerModal: React.FC<MultiZoneSamplerModalProps> = ({
   isOpen,
   onClose,
   channels,
+  selectedChannelId: propSelectedChannelId,
   sampleLibrary,
   onUpdateChannel
 }) => {
-  const [selectedChannelId, setSelectedChannelId] = useState<string>(channels[0]?.id || '');
+  const [selectedChannelId, setSelectedChannelId] = useState<string>(propSelectedChannelId || channels[0]?.id || '');
   const [zones, setZones] = useState<KeyZone[]>([]);
+
+  useEffect(() => {
+    if (propSelectedChannelId && channels.some(channel => channel.id === propSelectedChannelId)) {
+      setSelectedChannelId(propSelectedChannelId);
+    } else if (!channels.some(channel => channel.id === selectedChannelId) && channels[0]?.id) {
+      setSelectedChannelId(channels[0].id);
+    }
+  }, [propSelectedChannelId, channels]);
 
   const selectedChannel = channels.find(channel => channel.id === selectedChannelId) || channels[0];
 
+  const stripZoneDecoration = (zone: KeyZone): SampleZone => ((({ name, color, ...z }) => z)(zone));
+
   const commitZones = (updated: KeyZone[]) => {
     setZones(updated);
-    if (selectedChannel) {
+    if (selectedChannel && updated.every(zone => Boolean(stripZoneDecoration(zone).id))) {
       onUpdateChannel(selectedChannel.id, { sampleZones: updated.map(({ name, color, ...zone }) => zone) });
     }
   };
@@ -94,14 +106,24 @@ export const MultiZoneSamplerModal: React.FC<MultiZoneSamplerModalProps> = ({
       };
       setZones([zone]);
       setSelectedZoneId(zone.id);
-      onUpdateChannel(selectedChannel.id, { sampleZones: [((({ name, color, ...z }) => z)(zone))] });
     } else {
       setZones([]);
     }
-  }, [selectedChannelId, selectedChannel?.id, selectedChannel?.customSample?.id, selectedChannel?.sampleZones]);
+  }, [
+    selectedChannelId,
+    selectedChannel?.id,
+    selectedChannel?.customSample?.id,
+    selectedChannel?.customSample?.rootPitch,
+    selectedChannel?.customSample?.trimStart,
+    selectedChannel?.customSample?.trimEnd,
+    selectedChannel?.customSample?.reverse,
+    selectedChannel?.synthParams?.sampleLoop,
+    selectedChannel?.sampleZones,
+  ]);
 
   const [selectedZoneId, setSelectedZoneId] = useState<string>('zone-2');
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
+  const statusTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   if (!isOpen) return null;
 
@@ -122,8 +144,9 @@ export const MultiZoneSamplerModal: React.FC<MultiZoneSamplerModalProps> = ({
     };
     commitZones([...zones, newZone]);
     setSelectedZoneId(newZone.id);
+    if (statusTimerRef.current) clearTimeout(statusTimerRef.current);
     setStatusMessage(`Created new Multi-Sample Zone!`);
-    setTimeout(() => setStatusMessage(null), 3000);
+    statusTimerRef.current = setTimeout(() => setStatusMessage(null), 3000);
   };
 
   const handleDeleteZone = (id: string) => {
@@ -139,8 +162,9 @@ export const MultiZoneSamplerModal: React.FC<MultiZoneSamplerModalProps> = ({
     if (targetChannel) {
       audioEngine.playNote(targetChannel, { id: `zone-aud-${Date.now()}`, pitch: zone.rootNote, start: 0, duration: 2, velocity: 0.9 });
     }
+    if (statusTimerRef.current) clearTimeout(statusTimerRef.current);
     setStatusMessage(`Auditioning ${zone.name} (Root ${midiToNoteName(zone.rootNote)})`);
-    setTimeout(() => setStatusMessage(null), 2000);
+    statusTimerRef.current = setTimeout(() => setStatusMessage(null), 2000);
   };
 
   return (

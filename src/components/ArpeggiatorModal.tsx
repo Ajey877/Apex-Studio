@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { ModalFrame } from './ModalFrame';
 import { 
   Sparkles, 
@@ -62,6 +62,22 @@ export const ArpeggiatorModal: React.FC<ArpeggiatorModalProps> = ({
   };
 
   const [arpState, setArpState] = useState<ArpSettings>(currentArp);
+
+  useEffect(() => {
+    setArpState({
+      enabled: false,
+      mode: 'up',
+      rate: '1/16',
+      octaves: 2,
+      gate: 0.85,
+      swing: 0,
+      strumMs: 15,
+      euclideanSteps: 16,
+      euclideanHits: 5,
+      euclideanRotate: 0,
+      ...(channel.arp || {})
+    });
+  }, [isOpen, channel.id, channel.arp]);
 
   if (!isOpen) return null;
 

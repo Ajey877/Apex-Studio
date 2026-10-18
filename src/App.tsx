@@ -2202,7 +2202,10 @@ export function App() {
         onOpenGrossBeat={() => setIsGrossBeatOpen(true)}
         onOpenSlicer={() => setIsAudioSlicerOpen(true)}
         onOpenMasteringSuite={() => setIsMasteringSuiteOpen(true)}
-        onOpenSampleManager={() => setIsSampleManagerOpen(true)}
+        onOpenSampleManager={() => {
+          setSampleChannelId(selectedChannelId);
+          setIsSampleManagerOpen(true);
+        }}
         onOpenVocalTuner={() => setIsVocalTunerOpen(true)}
         onOpenMidiLearn={() => setIsMidiLearnOpen(true)}
         onOpenMultiZoneSampler={() => setIsMultiZoneSamplerOpen(true)}
@@ -2484,7 +2487,7 @@ export function App() {
                 </div>
                 <div className="flex gap-2">
                   <button onClick={() => setIsAudioRecorderOpen(true)} className="px-3 py-2 bg-[var(--apex-accent)] text-[var(--apex-state-playing-fg)] font-bold text-xs rounded">RECORD</button>
-                  <button onClick={() => setIsSampleManagerOpen(true)} className="px-3 py-2 bg-[var(--apex-success)] text-[var(--apex-state-playing-fg)] font-bold text-xs rounded">SAMPLE LIBRARY</button>
+                  <button onClick={() => { setSampleChannelId(selectedChannelId); setIsSampleManagerOpen(true); }} className="px-3 py-2 bg-[var(--apex-success)] text-[var(--apex-state-playing-fg)] font-bold text-xs rounded">SAMPLE LIBRARY</button>
                   <button onClick={() => setCurrentView('instruments')} className="px-3 py-2 bg-[var(--apex-surface-2)] text-[var(--apex-text)] font-bold text-xs rounded border border-[var(--apex-border)]">INSTRUMENTS</button>
                 </div>
               </div>
@@ -2703,7 +2706,7 @@ export function App() {
       />
       <VocalTunerModal isOpen={isVocalTunerOpen} onClose={() => setIsVocalTunerOpen(false)} vocalTunerSettings={projectState.vocalTuner || { enabled: true, rootKey: 0, scale: 'minor', retuneSpeedMs: 15, formantShift: 0, vibratoDepth: 0.2, humanize: 0.3 }} onUpdateVocalTuner={(settings) => mutateProjectState(curr => updateVocalTunerInProjectState(curr, settings), 'Update vocal tuner')} channels={projectState.channels} />
       <MidiLearnModal isOpen={isMidiLearnOpen} onClose={() => setIsMidiLearnOpen(false)} midiMappings={projectState.midiMappings || []} onUpdateMidiMappings={(mappings) => mutateProjectState(curr => updateMidiMappingsInProjectState(curr, mappings), 'Update MIDI mappings')} channels={projectState.channels} mixerTracks={projectState.mixerTracks} connectedDevices={projectState.connectedMidiDevices || []} isMidiLearnActive={isMidiLearnActive} onToggleMidiLearn={(active) => setIsMidiLearnActive(active)} />
-      <MultiZoneSamplerModal isOpen={isMultiZoneSamplerOpen} onClose={() => setIsMultiZoneSamplerOpen(false)} channels={projectState.channels} sampleLibrary={projectState.sampleLibrary || []} onUpdateChannel={handleUpdateChannel} />
+      <MultiZoneSamplerModal isOpen={isMultiZoneSamplerOpen} onClose={() => setIsMultiZoneSamplerOpen(false)} channels={projectState.channels} selectedChannelId={selectedChannelId} sampleLibrary={projectState.sampleLibrary || []} onUpdateChannel={handleUpdateChannel} />
       <WavetableSynthModal isOpen={isWavetableSynthOpen} onClose={() => setIsWavetableSynthOpen(false)} channels={projectState.channels} onUpdateChannel={handleUpdateChannel} />
       <TakeCompingModal
         isOpen={isTakeCompingOpen}

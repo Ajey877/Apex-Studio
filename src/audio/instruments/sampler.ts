@@ -13,8 +13,19 @@ export const renderSamplerVoice: InstrumentVoiceRenderer = ({
 }) => {
   if (!getSampleBuffer) return;
 
-  const zone = findSampleZone(channel.sampleZones, note);
+  const matchedZone = findSampleZone(channel.sampleZones, note);
   const sample = channel.customSample;
+  const isImplicitDefaultSingleZone =
+    Boolean(matchedZone) &&
+    (channel.sampleZones?.length ?? 0) === 1 &&
+    (matchedZone!.id === `zone-${channel.id}` || matchedZone!.id === `zone-default-${channel.id}`) &&
+    matchedZone!.lowNote === 0 &&
+    matchedZone!.highNote === 127 &&
+    (matchedZone!.lowVelocity ?? 0) === 0 &&
+    (matchedZone!.highVelocity ?? 127) === 127 &&
+    (matchedZone!.tuneSemitones ?? 0) === 0;
+
+  const zone = isImplicitDefaultSingleZone && sample?.id ? undefined : matchedZone;
   const sampleId = zone?.sampleId || sample?.id;
   const buffer = sampleId ? getSampleBuffer(sampleId) : undefined;
 
@@ -26,7 +37,11 @@ export const renderSamplerVoice: InstrumentVoiceRenderer = ({
   // would defeat the fallback and make the promise false.
   if (!buffer) return;
 
-  const rootPitch = zone?.rootNote ?? sample?.rootPitch ?? 60;
+  const rootPitch =
+    zone?.rootNote ??
+    sample?.rootPitch ??
+    (matchedZone?.sampleId === sample?.id ? matchedZone?.rootNote : undefined) ??
+    60;
   const tuneSemitones = zone?.tuneSemitones ?? 0;
   const playbackRate = getSamplePlaybackRate(
     note.pitch,
