@@ -496,6 +496,130 @@ describe('F-1 + F-2: MultiZoneSamplerModal & sampler resolution/history synchron
     });
     assert.deepEqual(multiRequested, ['high-zone-sample'], 'explicit multi-zone mapping must remain intact');
   });
+
+  it('keeps an explicitly user-authored full-range single-zone mapping in MultiZoneSamplerModal authoritative when customSample also exists', () => {
+    const channelSample = makeSample('channel-custom-sample', {
+      duration: 2,
+      rootPitch: 60,
+      trimStart: 0.2,
+      trimEnd: 0.8,
+      reverse: false,
+    });
+    const zoneLibrarySample = makeSample('zone-authored-sample', {
+      duration: 4,
+      rootPitch: 60,
+      trimStart: 0.1,
+      trimEnd: 0.9,
+      reverse: true,
+    });
+
+    let activeChannel: Channel = {
+      ...structuredClone(DEFAULT_PROJECT.channels[0]),
+      id: 'ch-kick',
+      instrumentType: 'sampler',
+      pitch: 0,
+      volume: 1,
+      customSample: channelSample,
+      sampleZones: [],
+      synthParams: {
+        ...structuredClone(DEFAULT_PROJECT.channels[0].synthParams),
+        sampleLoop: true,
+      },
+      notes: [{ id: 'n-zone', pitch: 60, start: 0, duration: 1, velocity: 1 }],
+    };
+
+    const harness = createComponentHarness(MultiZoneSamplerModal, {
+      isOpen: true,
+      onClose: () => {},
+      channels: [activeChannel],
+      selectedChannelId: 'ch-kick',
+      sampleLibrary: [channelSample, zoneLibrarySample],
+      onUpdateChannel: (channelId, updates) => {
+        if (channelId === activeChannel.id) {
+          activeChannel = { ...activeChannel, ...updates };
+        }
+      },
+    });
+
+    // User edits the full-range single zone in MultiZoneSamplerModal by assigning `zone-authored-sample`
+    // and setting rootNote to 48 while keeping the full 0..127 MIDI range.
+    let elements = collectElements(harness.tree);
+    const sampleSelect = elements.find(el => el.type === 'select');
+    assert.ok(sampleSelect, 'sample selector must render in MultiZoneSamplerModal');
+    sampleSelect.props.onChange({ target: { value: zoneLibrarySample.id } });
+    harness.rerender({ channels: [activeChannel] });
+
+    elements = collectElements(harness.tree);
+    const rangeSliders = elements.filter(el => el.type === 'input' && el.props.type === 'range');
+    assert.equal(rangeSliders.length, 3, 'lowNote, highNote, and rootNote sliders must render');
+    rangeSliders[2].props.onChange({ target: { value: '48' } });
+    harness.rerender({ channels: [activeChannel] });
+
+    assert.equal(activeChannel.sampleZones?.length, 1);
+    assert.equal(activeChannel.sampleZones?.[0].lowNote, 0);
+    assert.equal(activeChannel.sampleZones?.[0].highNote, 127);
+    assert.equal(activeChannel.sampleZones?.[0].sampleId, zoneLibrarySample.id);
+    assert.equal(activeChannel.sampleZones?.[0].rootNote, 48);
+
+    const channelBuf = { duration: 2 } as AudioBuffer;
+    const zoneBuf = { duration: 4 } as AudioBuffer;
+    let capturedBuffer: AudioBuffer | null = null;
+    let capturedRate = 0;
+    let capturedLoop = false;
+    let capturedStartArgs: unknown[] = [];
+
+    const fakeCtx = {
+      currentTime: 0,
+      createBufferSource: () => ({
+        get buffer() { return capturedBuffer; },
+        set buffer(val: AudioBuffer | null) { capturedBuffer = val; },
+        get loop() { return capturedLoop; },
+        set loop(val: boolean) { capturedLoop = val; },
+        loopStart: 0,
+        loopEnd: 0,
+        onended: null,
+        playbackRate: { setValueAtTime: (v: number) => { capturedRate = v; } },
+        connect: () => {},
+        start: (...args: unknown[]) => { capturedStartArgs = args; },
+        stop: () => {},
+      }),
+      createGain: () => ({
+        gain: { value: 1, setValueAtTime: () => {}, cancelScheduledValues: () => {}, exponentialRampToValueAtTime: () => {} },
+        connect: () => {},
+      }),
+      createBiquadFilter: () => ({
+        type: 'lowpass',
+        frequency: { setValueAtTime: () => {} },
+        Q: { value: 1 },
+        connect: () => {},
+      }),
+    };
+
+    const handle = renderSamplerVoice({
+      channel: activeChannel,
+      note: activeChannel.notes[0],
+      time: 0,
+      destination: {} as AudioNode,
+      audioContext: fakeCtx as any,
+      voiceId: 'v-authored-single-zone',
+      bpm: 120,
+      getSampleBuffer: (id) =>
+        id === zoneLibrarySample.id ? zoneBuf : id === channelSample.id ? channelBuf : undefined,
+    });
+
+    assert.ok(handle);
+    assert.equal(capturedBuffer, zoneBuf, 'user-authored full-range single zone must play its assigned sample even when customSample exists');
+    assert.ok(
+      Math.abs(capturedRate + Math.pow(2, (60 - 48) / 12)) < 1e-9,
+      'user-authored full-range single zone must apply its rootNote=48 and reverse=true',
+    );
+    assert.equal(capturedLoop, true, 'user-authored full-range single zone must preserve loop setting');
+    assert.deepEqual(
+      capturedStartArgs,
+      [0, 3.6, undefined],
+      'user-authored full-range single zone must apply its trimEnd=0.9 offset',
+    );
+  });
 });
 
 describe('F-1 + F-2: SampleManagerModal lifecycle & hydration synchronization (B)', () => {

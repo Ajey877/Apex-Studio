@@ -1,5 +1,10 @@
 import type { InstrumentVoiceRenderer } from '../instrumentRegistry';
-import { clampSampleRange, findSampleZone, getSamplePlaybackRate } from '../sampleZones';
+import {
+  clampSampleRange,
+  findSampleZone,
+  getSamplePlaybackRate,
+  isImplicitDefaultSingleZone,
+} from '../sampleZones';
 
 export const renderSamplerVoice: InstrumentVoiceRenderer = ({
   channel,
@@ -15,17 +20,10 @@ export const renderSamplerVoice: InstrumentVoiceRenderer = ({
 
   const matchedZone = findSampleZone(channel.sampleZones, note);
   const sample = channel.customSample;
-  const isImplicitDefaultSingleZone =
-    Boolean(matchedZone) &&
-    (channel.sampleZones?.length ?? 0) === 1 &&
-    (matchedZone!.id === `zone-${channel.id}` || matchedZone!.id === `zone-default-${channel.id}`) &&
-    matchedZone!.lowNote === 0 &&
-    matchedZone!.highNote === 127 &&
-    (matchedZone!.lowVelocity ?? 0) === 0 &&
-    (matchedZone!.highVelocity ?? 127) === 127 &&
-    (matchedZone!.tuneSemitones ?? 0) === 0;
+  const isImplicitSingleZone = isImplicitDefaultSingleZone(channel, matchedZone);
 
-  const zone = isImplicitDefaultSingleZone && sample?.id ? undefined : matchedZone;
+  const zone = isImplicitSingleZone && sample?.id ? undefined : matchedZone;
+  const fallbackSample = !zone || zone.sampleId === sample?.id ? sample : undefined;
   const sampleId = zone?.sampleId || sample?.id;
   const buffer = sampleId ? getSampleBuffer(sampleId) : undefined;
 
@@ -39,7 +37,7 @@ export const renderSamplerVoice: InstrumentVoiceRenderer = ({
 
   const rootPitch =
     zone?.rootNote ??
-    sample?.rootPitch ??
+    fallbackSample?.rootPitch ??
     (matchedZone?.sampleId === sample?.id ? matchedZone?.rootNote : undefined) ??
     60;
   const tuneSemitones = zone?.tuneSemitones ?? 0;
@@ -49,7 +47,7 @@ export const renderSamplerVoice: InstrumentVoiceRenderer = ({
     channel.pitch || 0,
     tuneSemitones,
   );
-  const reverse = zone?.reverse ?? sample?.reverse ?? false;
+  const reverse = zone?.reverse ?? fallbackSample?.reverse ?? false;
 
   const source = audioContext.createBufferSource();
   source.buffer = buffer;
@@ -69,8 +67,8 @@ export const renderSamplerVoice: InstrumentVoiceRenderer = ({
   gain.connect(destination);
 
   const { start: trimStartPct, end: trimEndPct } = clampSampleRange(
-    zone?.trimStart ?? sample?.trimStart ?? 0,
-    zone?.trimEnd ?? sample?.trimEnd ?? 1,
+    zone?.trimStart ?? fallbackSample?.trimStart ?? 0,
+    zone?.trimEnd ?? fallbackSample?.trimEnd ?? 1,
   );
   const trimStart = trimStartPct * buffer.duration;
   const trimEnd = trimEndPct * buffer.duration;

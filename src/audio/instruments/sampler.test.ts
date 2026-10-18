@@ -209,6 +209,193 @@ describe('sampler renderer', () => {
     }
   });
 
+  it('keeps an explicitly user-authored full-range single-zone mapping authoritative when customSample also exists', () => {
+    const channelSampleBuffer = { duration: 2 } as AudioBuffer;
+    const explicitZoneBuffer = { duration: 4 } as AudioBuffer;
+
+    // 1. User-authored full-range single zone carrying the modal's `zone-${channel.id}` ID
+    //    and explicit zone settings (sampleId, rootNote, trimStart, trimEnd, reverse, loop).
+    const ctxExplicitSettings = new FakeContext();
+    const channelWithExplicitZoneSettings = channel({
+      sampleZones: [
+        {
+          id: 'zone-sampler-test',
+          sampleId: 'explicit-zone-sample',
+          lowNote: 0,
+          highNote: 127,
+          rootNote: 48,
+          lowVelocity: 0,
+          highVelocity: 127,
+          tuneSemitones: 0,
+          trimStart: 0.1,
+          trimEnd: 0.9,
+          reverse: true,
+          loop: true,
+          loopStart: 0.25,
+          loopEnd: 0.75,
+        },
+      ],
+      customSample: {
+        id: 'channel-sample',
+        name: 'Channel Sample',
+        duration: 2,
+        sampleRate: 44100,
+        channels: 1,
+        waveformPeaks: [0.3, 0.7],
+        trimStart: 0.4,
+        trimEnd: 0.6,
+        rootPitch: 72,
+        reverse: false,
+      },
+    });
+
+    const handleSettings = renderSamplerVoice({
+      channel: channelWithExplicitZoneSettings,
+      note: { id: 'n-explicit-settings', pitch: 60, start: 0, duration: 1, velocity: 0.8 } as any,
+      time: 0,
+      destination: {} as AudioNode,
+      audioContext: ctxExplicitSettings as any,
+      voiceId: 'explicit-single-zone-settings',
+      bpm: 120,
+      getSampleBuffer: (id) =>
+        id === 'explicit-zone-sample'
+          ? explicitZoneBuffer
+          : id === 'channel-sample'
+            ? channelSampleBuffer
+            : undefined,
+    });
+
+    assert.ok(handleSettings);
+    const sourceSettings = ctxExplicitSettings.sources[0];
+    assert.equal(sourceSettings.buffer, explicitZoneBuffer, 'explicit single-zone sampleId must take precedence over customSample');
+    assert.ok(
+      Math.abs(sourceSettings.playbackRate.value + Math.pow(2, (60 - 48) / 12)) < 1e-9,
+      'explicit single-zone rootNote=48 and reverse=true must take precedence over customSample',
+    );
+    assert.equal(sourceSettings.loop, true, 'explicit single-zone loop=true must take precedence over customSample');
+    assert.equal(sourceSettings.loopStart, 1, 'explicit single-zone loopStart must use zone buffer duration');
+    assert.equal(sourceSettings.loopEnd, 3, 'explicit single-zone loopEnd must use zone buffer duration');
+    assert.deepEqual(sourceSettings.startArgs, [0, 3.6, undefined], 'explicit single-zone trimEnd=0.9 offset must apply');
+
+    // 2. User-authored full-range single zone with default geometry/rootNote=60 and userAuthored provenance
+    //    (e.g. user opened MultiZoneSamplerModal and selected a different sampleId on the full-range zone).
+    const ctxProvenance = new FakeContext();
+    const channelWithUserAuthoredFlag = channel({
+      sampleZones: [
+        {
+          id: 'zone-sampler-test',
+          sampleId: 'explicit-zone-sample',
+          lowNote: 0,
+          highNote: 127,
+          rootNote: 60,
+          lowVelocity: 0,
+          highVelocity: 127,
+          tuneSemitones: 0,
+          userAuthored: true,
+        } as any,
+      ],
+      customSample: {
+        id: 'channel-sample',
+        name: 'Channel Sample',
+        duration: 2,
+        sampleRate: 44100,
+        channels: 1,
+        waveformPeaks: [0.3, 0.7],
+        trimStart: 0.25,
+        trimEnd: 0.75,
+        rootPitch: 72,
+        reverse: true,
+      },
+    });
+
+    const handleProvenance = renderSamplerVoice({
+      channel: channelWithUserAuthoredFlag,
+      note: { id: 'n-explicit-provenance', pitch: 60, start: 0, duration: 1, velocity: 0.8 } as any,
+      time: 0,
+      destination: {} as AudioNode,
+      audioContext: ctxProvenance as any,
+      voiceId: 'explicit-single-zone-provenance',
+      bpm: 120,
+      getSampleBuffer: (id) =>
+        id === 'explicit-zone-sample'
+          ? explicitZoneBuffer
+          : id === 'channel-sample'
+            ? channelSampleBuffer
+            : undefined,
+    });
+
+    assert.ok(handleProvenance);
+    const sourceProvenance = ctxProvenance.sources[0];
+    assert.equal(sourceProvenance.buffer, explicitZoneBuffer, 'userAuthored full-range single zone must remain authoritative over customSample');
+    assert.ok(
+      Math.abs(sourceProvenance.playbackRate.value - 1) < 1e-9,
+      'userAuthored zone with different sampleId must use its own rootNote=60 and reverse=false without leaking customSample reverse/rootPitch',
+    );
+    assert.deepEqual(
+      sourceProvenance.startArgs,
+      [0, 0, 4],
+      'userAuthored zone with different sampleId must not inherit customSample trimStart/trimEnd',
+    );
+  });
+
+  it('preserves explicit multi-zone mappings and legacy zone-only playback', () => {
+    const lowZoneBuffer = { duration: 2 } as AudioBuffer;
+    const highZoneBuffer = { duration: 3 } as AudioBuffer;
+    const customBuffer = { duration: 5 } as AudioBuffer;
+    const multiChannel = channel({
+      customSample: {
+        id: 'custom-sample',
+        name: 'Custom Sample',
+        duration: 5,
+        sampleRate: 44100,
+        channels: 1,
+        waveformPeaks: [],
+        rootPitch: 60,
+      },
+      sampleZones: [
+        { id: 'zone-low', sampleId: 'low-sample', lowNote: 0, highNote: 59, rootNote: 48, lowVelocity: 0, highVelocity: 127, tuneSemitones: 0 },
+        { id: 'zone-high', sampleId: 'high-sample', lowNote: 60, highNote: 127, rootNote: 72, lowVelocity: 0, highVelocity: 127, tuneSemitones: 0 },
+      ],
+    });
+
+    const ctxMulti = new FakeContext();
+    const handleMulti = renderSamplerVoice({
+      channel: multiChannel,
+      note: { id: 'n-high', pitch: 72, start: 0, duration: 1, velocity: 0.8 } as any,
+      time: 0,
+      destination: {} as AudioNode,
+      audioContext: ctxMulti as any,
+      voiceId: 'multi-zone',
+      bpm: 120,
+      getSampleBuffer: (id) =>
+        id === 'low-sample' ? lowZoneBuffer : id === 'high-sample' ? highZoneBuffer : customBuffer,
+    });
+    assert.ok(handleMulti);
+    assert.equal(ctxMulti.sources[0].buffer, highZoneBuffer, 'explicit multi-zone mapping must remain unchanged');
+
+    // Legacy zone-only channel (customSample is undefined, even with default zone-${channel.id} ID).
+    const legacyBuffer = { duration: 2.5 } as AudioBuffer;
+    const legacyZoneOnlyChannel = channel({
+      customSample: undefined,
+      sampleZones: [
+        { id: 'zone-sampler-test', sampleId: 'legacy-zone-sample', lowNote: 0, highNote: 127, rootNote: 60, lowVelocity: 0, highVelocity: 127, tuneSemitones: 0 },
+      ],
+    });
+    const ctxLegacy = new FakeContext();
+    const handleLegacy = renderSamplerVoice({
+      channel: legacyZoneOnlyChannel,
+      note: { id: 'n-legacy', pitch: 60, start: 0, duration: 1, velocity: 0.8 } as any,
+      time: 0,
+      destination: {} as AudioNode,
+      audioContext: ctxLegacy as any,
+      voiceId: 'legacy-zone-only',
+      bpm: 120,
+      getSampleBuffer: (id) => (id === 'legacy-zone-sample' ? legacyBuffer : undefined),
+    });
+    assert.ok(handleLegacy);
+    assert.equal(ctxLegacy.sources[0].buffer, legacyBuffer, 'legacy zone-only playback must remain compatible');
+  });
+
   it('returns no voice when the resolver cannot supply the selected sample', () => {
     const ctx = new FakeContext();
     const result = renderSamplerVoice({

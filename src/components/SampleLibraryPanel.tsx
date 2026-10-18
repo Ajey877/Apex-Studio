@@ -73,7 +73,8 @@ export const SampleLibraryPanel: React.FC<SampleLibraryPanelProps> = ({
       trimStart: selected.trimStart,
       trimEnd: selected.trimEnd,
       reverse: selected.reverse,
-      loop: selectedChannel.synthParams.sampleLoop
+      loop: selectedChannel.synthParams.sampleLoop,
+      userAuthored: true
     };
     onUpdateChannel(selectedChannel.id, {
       instrumentType: 'sampler',

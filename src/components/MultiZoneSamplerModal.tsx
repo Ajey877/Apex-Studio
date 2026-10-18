@@ -15,6 +15,7 @@ import {
 } from 'lucide-react';
 import { Channel, SampleZone } from '../types/daw';
 import { audioEngine } from '../audio/audioEngine';
+import { isImplicitDefaultSingleZone } from '../audio/sampleZones';
 
 interface MultiZoneSamplerModalProps {
   isOpen: boolean;
@@ -80,7 +81,8 @@ export const MultiZoneSamplerModal: React.FC<MultiZoneSamplerModalProps> = ({
 
   const stripZoneDecoration = (zone: KeyZone): SampleZone => ((({ name, color, ...z }) => z)(zone));
 
-  const commitZones = (updated: KeyZone[]) => {
+  const commitZones = (rawUpdated: KeyZone[]) => {
+    const updated = rawUpdated.map(zone => ({ ...zone, userAuthored: true }));
     setZones(updated);
     if (selectedChannel && updated.every(zone => Boolean(stripZoneDecoration(zone).id))) {
       onUpdateChannel(selectedChannel.id, { sampleZones: updated.map(({ name, color, ...zone }) => zone) });
@@ -90,7 +92,10 @@ export const MultiZoneSamplerModal: React.FC<MultiZoneSamplerModalProps> = ({
   useEffect(() => {
     if (!selectedChannel) return;
     const persisted = selectedChannel.sampleZones || [];
-    if (persisted.length > 0) {
+    const hasAuthoritativePersistedZones =
+      persisted.length > 0 &&
+      !(selectedChannel.customSample?.id && isImplicitDefaultSingleZone(selectedChannel, persisted[0]));
+    if (hasAuthoritativePersistedZones) {
       const hydrated = persisted.map((zone, index) => ({ ...zone, name: 'Zone ' + (index + 1), color: ZONE_IDENTITY_COLORS[index % ZONE_IDENTITY_COLORS.length] }));
       setZones(hydrated);
       setSelectedZoneId(persisted[0].id);
@@ -391,7 +396,22 @@ export const MultiZoneSamplerModal: React.FC<MultiZoneSamplerModalProps> = ({
                   <select
                     value={selectedZone.sampleId}
                     onChange={(e) => {
-                      const updated = zones.map(z => z.id === selectedZone.id ? { ...z, sampleId: e.target.value } : z);
+                      const pickedSample = sampleLibrary.find(s => s.id === e.target.value);
+                      const updated = zones.map(z =>
+                        z.id === selectedZone.id
+                          ? {
+                              ...z,
+                              sampleId: e.target.value,
+                              ...(pickedSample
+                                ? {
+                                    trimStart: pickedSample.trimStart,
+                                    trimEnd: pickedSample.trimEnd,
+                                    reverse: pickedSample.reverse,
+                                  }
+                                : {}),
+                            }
+                          : z
+                      );
                       commitZones(updated);
                     }}
                     className="w-full bg-[var(--apex-canvas)] text-[var(--apex-text)] p-2 rounded border border-[var(--apex-border)]"
