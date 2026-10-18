@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { renderSamplerVoice } from './sampler';
+import { isImplicitDefaultSingleZone } from '../sampleZones';
+import { normalizeProjectState } from '../../state/projectState';
+import { DEFAULT_PROJECT } from '../presets';
 
 class FakeParam {
   value = 0;
@@ -209,12 +212,36 @@ describe('sampler renderer', () => {
     }
   });
 
-  it('uses replacement customSample when a legacy implicit full-range zone copied non-default rootNote, trim, and reverse from its original sample', () => {
+  it('uses replacement customSample when a legacy implicit full-range zone copied non-default rootNote, trim, and reverse from its known original sample', () => {
     for (const defaultZoneId of ['zone-sampler-test', 'zone-default-sampler-test']) {
       const ctx = new FakeContext();
       const staleOriginalBuffer = { duration: 2 } as AudioBuffer;
       const replacementBuffer = { duration: 4 } as AudioBuffer;
-      const testChannel = channel({
+      const originalSample = {
+        id: 'original-sample',
+        name: 'Original Sample',
+        duration: 2,
+        sampleRate: 44100,
+        channels: 1,
+        waveformPeaks: [0.2, 0.7],
+        trimStart: 0.15,
+        trimEnd: 0.85,
+        rootPitch: 48,
+        reverse: true,
+      };
+      const replacementSample = {
+        id: 'replacement-sample',
+        name: 'Replacement Sample',
+        duration: 4,
+        sampleRate: 44100,
+        channels: 1,
+        waveformPeaks: [0.4, 0.9],
+        trimStart: 0.25,
+        trimEnd: 0.75,
+        rootPitch: 72,
+        reverse: false,
+      };
+      const rawChannel = channel({
         synthParams: {
           filterType: 'lowpass',
           filterCutoff: 18000,
@@ -224,7 +251,7 @@ describe('sampler renderer', () => {
         sampleZones: [
           {
             id: defaultZoneId,
-            sampleId: 'original-sample',
+            sampleId: originalSample.id,
             lowNote: 0,
             highNote: 127,
             rootNote: 48,
@@ -237,19 +264,21 @@ describe('sampler renderer', () => {
             loop: true,
           },
         ],
-        customSample: {
-          id: 'replacement-sample',
-          name: 'Replacement Sample',
-          duration: 4,
-          sampleRate: 44100,
-          channels: 1,
-          waveformPeaks: [0.4, 0.9],
-          trimStart: 0.25,
-          trimEnd: 0.75,
-          rootPitch: 72,
-          reverse: false,
-        },
+        customSample: replacementSample,
       });
+
+      assert.equal(
+        isImplicitDefaultSingleZone(rawChannel, rawChannel.sampleZones?.[0], [originalSample, replacementSample]),
+        true,
+        `expected known original sample in sampleLibrary to confirm legacy implicit zone for ${defaultZoneId}`,
+      );
+
+      const normalized = normalizeProjectState({
+        ...structuredClone(DEFAULT_PROJECT),
+        channels: [rawChannel as any, ...structuredClone(DEFAULT_PROJECT.channels.slice(1))],
+        sampleLibrary: [originalSample, replacementSample],
+      });
+      const testChannel = normalized.channels.find(ch => ch.id === 'sampler-test')!;
 
       const handle = renderSamplerVoice({
         channel: testChannel,
@@ -287,6 +316,173 @@ describe('sampler renderer', () => {
         `expected replacement forward offset=1s (trimStart=0.25 * 4s) for ${defaultZoneId}`,
       );
     }
+  });
+
+  it('does not classify an unflagged full-range zone with an unknown or missing source sample as implicit', () => {
+    const customSample = {
+      id: 'channel-custom-sample',
+      name: 'Channel Custom Sample',
+      duration: 4,
+      sampleRate: 44100,
+      channels: 1,
+      waveformPeaks: [0.3, 0.8],
+      trimStart: 0.25,
+      trimEnd: 0.75,
+      rootPitch: 72,
+      reverse: false,
+    };
+    const customSampleBuffer = { duration: 4 } as AudioBuffer;
+    const zoneBuffer = { duration: 2 } as AudioBuffer;
+
+    // 1. Unflagged generated-ID full-range zone whose sampleId differs from customSample.id,
+    //    whose source sample is absent from sampleLibrary, and whose playback settings
+    //    contain evidence of customization (rootNote=48, trimStart=0.15, trimEnd=0.85, reverse=true).
+    const customizedUnknownSourceChannel = channel({
+      synthParams: {
+        filterType: 'lowpass',
+        filterCutoff: 18000,
+        filterResonance: 1,
+        sampleLoop: true,
+      },
+      sampleZones: [
+        {
+          id: 'zone-sampler-test',
+          sampleId: 'missing-customized-source',
+          lowNote: 0,
+          highNote: 127,
+          rootNote: 48,
+          lowVelocity: 0,
+          highVelocity: 127,
+          tuneSemitones: 0,
+          trimStart: 0.15,
+          trimEnd: 0.85,
+          reverse: true,
+          loop: true,
+        },
+      ],
+      customSample,
+    });
+
+    assert.equal(
+      isImplicitDefaultSingleZone(
+        customizedUnknownSourceChannel,
+        customizedUnknownSourceChannel.sampleZones?.[0],
+        [customSample],
+      ),
+      false,
+      'zone with customized playback settings whose source sample is absent from sampleLibrary must not be classified as implicit',
+    );
+    assert.equal(
+      isImplicitDefaultSingleZone(
+        customizedUnknownSourceChannel,
+        customizedUnknownSourceChannel.sampleZones?.[0],
+      ),
+      false,
+      'standalone check without sampleLibrary must also reject customized playback settings when source sample is unknown',
+    );
+
+    // When the zone's source audio buffer is missing, renderSamplerVoice must return undefined
+    // (preserving missing-audio fallback behavior) rather than substituting customSample.
+    const ctxMissingCustomized = new FakeContext();
+    const missingCustomizedHandle = renderSamplerVoice({
+      channel: customizedUnknownSourceChannel,
+      note: { id: 'n-missing-customized', pitch: 60, start: 0, duration: 1, velocity: 0.8 } as any,
+      time: 0,
+      destination: {} as AudioNode,
+      audioContext: ctxMissingCustomized as any,
+      voiceId: 'missing-customized-source-voice',
+      bpm: 120,
+      getSampleBuffer: (id) => (id === customSample.id ? customSampleBuffer : undefined),
+    });
+    assert.equal(
+      missingCustomizedHandle,
+      undefined,
+      'renderSamplerVoice must not substitute customSample when a customized zone references a missing source sample',
+    );
+    assert.equal(ctxMissingCustomized.sources.length, 0);
+
+    // When the zone's audio buffer IS present in getSampleBuffer (even if absent from sampleLibrary),
+    // renderSamplerVoice must play the zone buffer with the zone's customized playback settings.
+    const ctxPresentCustomized = new FakeContext();
+    const presentCustomizedHandle = renderSamplerVoice({
+      channel: customizedUnknownSourceChannel,
+      note: { id: 'n-present-customized', pitch: 60, start: 0, duration: 1, velocity: 0.8 } as any,
+      time: 0,
+      destination: {} as AudioNode,
+      audioContext: ctxPresentCustomized as any,
+      voiceId: 'present-customized-source-voice',
+      bpm: 120,
+      getSampleBuffer: (id) =>
+        id === 'missing-customized-source'
+          ? zoneBuffer
+          : id === customSample.id
+            ? customSampleBuffer
+            : undefined,
+    });
+    assert.ok(presentCustomizedHandle);
+    assert.equal(
+      ctxPresentCustomized.sources[0].buffer,
+      zoneBuffer,
+      'customized zone with unknown library source must play its own zone buffer when available',
+    );
+    assert.ok(
+      Math.abs(ctxPresentCustomized.sources[0].playbackRate.value + Math.pow(2, (60 - 48) / 12)) < 1e-9,
+      'customized zone must preserve its rootNote=48 and reverse=true',
+    );
+
+    // 2. Unflagged generated-ID full-range zone with generic default settings whose source sample
+    //    is absent from sampleLibrary and missing from getSampleBuffer: do not invent certainty or
+    //    substitute customSample over a missing zone sample.
+    const defaultSettingsMissingSourceChannel = channel({
+      sampleZones: [
+        {
+          id: 'zone-sampler-test',
+          sampleId: 'missing-default-source',
+          lowNote: 0,
+          highNote: 127,
+          rootNote: 60,
+          lowVelocity: 0,
+          highVelocity: 127,
+          tuneSemitones: 0,
+        },
+      ],
+      customSample,
+    });
+
+    assert.equal(
+      isImplicitDefaultSingleZone(
+        defaultSettingsMissingSourceChannel,
+        defaultSettingsMissingSourceChannel.sampleZones?.[0],
+        [customSample],
+      ),
+      false,
+      'zone whose source sample is absent from sampleLibrary must not be classified as implicit when sampleLibrary is provided',
+    );
+
+    const normalizedDefaultMissingSource = normalizeProjectState({
+      ...structuredClone(DEFAULT_PROJECT),
+      channels: [defaultSettingsMissingSourceChannel as any, ...structuredClone(DEFAULT_PROJECT.channels.slice(1))],
+      sampleLibrary: [customSample],
+    });
+    const normalizedDefaultChannel = normalizedDefaultMissingSource.channels.find(ch => ch.id === 'sampler-test')!;
+
+    const ctxMissingDefault = new FakeContext();
+    const missingDefaultHandle = renderSamplerVoice({
+      channel: normalizedDefaultChannel,
+      note: { id: 'n-missing-default', pitch: 60, start: 0, duration: 1, velocity: 0.8 } as any,
+      time: 0,
+      destination: {} as AudioNode,
+      audioContext: ctxMissingDefault as any,
+      voiceId: 'missing-default-source-voice',
+      bpm: 120,
+      getSampleBuffer: (id) => (id === customSample.id ? customSampleBuffer : undefined),
+    });
+    assert.equal(
+      missingDefaultHandle,
+      undefined,
+      'renderSamplerVoice must preserve missing-audio behavior instead of substituting customSample when normalized zone source sample is missing',
+    );
+    assert.equal(ctxMissingDefault.sources.length, 0);
   });
 
   it('keeps an explicitly user-authored full-range single-zone mapping authoritative when customSample also exists', () => {

@@ -529,16 +529,23 @@ export const normalizeProjectState = (input: unknown): ProjectState => {
     channels: (Array.isArray(candidate.channels) ? clone(candidate.channels) : defaults.channels)
       .map(stripObsoleteChannelFields)
       .map(channel => {
-        if (
-          channel.customSample?.id &&
-          channel.sampleZones?.length === 1 &&
-          !channel.sampleZones[0].userAuthored &&
-          !isImplicitDefaultSingleZone(channel, channel.sampleZones[0], normalizedSampleLibrary)
-        ) {
-          return {
-            ...channel,
-            sampleZones: [{ ...channel.sampleZones[0], userAuthored: true }],
-          };
+        if (channel.customSample?.id && channel.sampleZones?.length === 1) {
+          const singleZone = channel.sampleZones[0];
+          if (!singleZone.userAuthored) {
+            if (isImplicitDefaultSingleZone(channel, singleZone, normalizedSampleLibrary)) {
+              if (singleZone.sampleId !== channel.customSample.id) {
+                return {
+                  ...channel,
+                  sampleZones: [],
+                };
+              }
+            } else {
+              return {
+                ...channel,
+                sampleZones: [{ ...singleZone, userAuthored: true }],
+              };
+            }
+          }
         }
         return channel;
       }),

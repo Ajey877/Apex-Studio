@@ -34,26 +34,32 @@ export function isImplicitDefaultSingleZone(
   if ((zone.loop ?? channelLoop) !== channelLoop) return false;
   if (zone.loopStart !== undefined || zone.loopEnd !== undefined) return false;
 
-  if (
-    channel.customSample &&
-    zone.sampleId === channel.customSample.id &&
-    (zone.rootNote ?? 60) !== 60 &&
-    (zone.rootNote ?? 60) !== (channel.customSample.rootPitch ?? 60)
-  ) {
-    return false;
+  const hasDefaultPlaybackSettings =
+    (zone.rootNote ?? 60) === 60 &&
+    (zone.trimStart ?? 0) === 0 &&
+    (zone.trimEnd ?? 1) === 1 &&
+    Boolean(zone.reverse) === false;
+
+  if (channel.customSample && zone.sampleId === channel.customSample.id) {
+    const matchesCustomSample =
+      (zone.rootNote ?? 60) === (channel.customSample.rootPitch ?? 60) &&
+      (zone.trimStart ?? 0) === (channel.customSample.trimStart ?? 0) &&
+      (zone.trimEnd ?? 1) === (channel.customSample.trimEnd ?? 1) &&
+      Boolean(zone.reverse) === Boolean(channel.customSample.reverse);
+    return matchesCustomSample || hasDefaultPlaybackSettings;
   }
 
-  if (sampleLibrary && zone.sampleId !== channel.customSample?.id) {
+  if (sampleLibrary) {
     const librarySample = sampleLibrary.find(sample => sample.id === zone.sampleId);
-    if (librarySample) {
-      if ((zone.rootNote ?? 60) !== (librarySample.rootPitch ?? 60)) return false;
-      if ((zone.trimStart ?? 0) !== (librarySample.trimStart ?? 0)) return false;
-      if ((zone.trimEnd ?? 1) !== (librarySample.trimEnd ?? 1)) return false;
-      if (Boolean(zone.reverse) !== Boolean(librarySample.reverse)) return false;
-    }
+    if (!librarySample) return false;
+    if ((zone.rootNote ?? 60) !== (librarySample.rootPitch ?? 60)) return false;
+    if ((zone.trimStart ?? 0) !== (librarySample.trimStart ?? 0)) return false;
+    if ((zone.trimEnd ?? 1) !== (librarySample.trimEnd ?? 1)) return false;
+    if (Boolean(zone.reverse) !== Boolean(librarySample.reverse)) return false;
+    return true;
   }
 
-  return true;
+  return hasDefaultPlaybackSettings;
 }
 
 export function getSamplePlaybackRate(notePitch: number, rootNote: number, channelPitch = 0, tuneSemitones = 0): number {

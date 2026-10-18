@@ -1032,6 +1032,314 @@ describe('F-1 + F-2: MultiZoneSamplerModal & sampler resolution/history synchron
       'legacy diverged single zone must play with its edited rootNote=60',
     );
   });
+
+  it('preserves unflagged full-range single zones whose source sample is absent from sampleLibrary across normalization, modal hydration, and live/offline playback', async () => {
+    const channelSample = makeSample('channel-custom-sample', {
+      duration: 4,
+      rootPitch: 72,
+      trimStart: 0.25,
+      trimEnd: 0.75,
+      reverse: false,
+    });
+    const baseProject = structuredClone(DEFAULT_PROJECT);
+
+    // Case 1: Zone with customized playback settings (rootNote=48, trimStart=0.15, trimEnd=0.85, reverse=true)
+    // whose source sample ('absent-custom-source') is missing from sampleLibrary.
+    const customizedMissingSourceChannel: Channel = {
+      ...baseProject.channels[0],
+      id: 'ch-kick',
+      instrumentType: 'sampler',
+      pitch: 0,
+      volume: 1,
+      customSample: channelSample,
+      synthParams: {
+        ...baseProject.channels[0].synthParams,
+        sampleLoop: true,
+      },
+      sampleZones: [
+        {
+          id: 'zone-ch-kick',
+          sampleId: 'absent-custom-source',
+          lowNote: 0,
+          highNote: 127,
+          rootNote: 48,
+          lowVelocity: 0,
+          highVelocity: 127,
+          tuneSemitones: 0,
+          trimStart: 0.15,
+          trimEnd: 0.85,
+          reverse: true,
+          loop: true,
+        },
+      ],
+      notes: [{ id: 'n-absent-custom', pitch: 60, start: 0, duration: 1, velocity: 1 }],
+    };
+
+    const normalizedCustomized = normalizeProjectState({
+      ...baseProject,
+      channels: [customizedMissingSourceChannel, ...baseProject.channels.slice(1)],
+      sampleLibrary: [channelSample],
+    });
+    const normCustomizedChannel = normalizedCustomized.channels.find(ch => ch.id === 'ch-kick')!;
+    assert.equal(normCustomizedChannel.sampleZones?.length, 1);
+    assert.equal(normCustomizedChannel.sampleZones?.[0].sampleId, 'absent-custom-source');
+    assert.equal(
+      normCustomizedChannel.sampleZones?.[0].userAuthored,
+      true,
+      'normalizeProjectState must preserve and mark customized zone whose source sample is absent from sampleLibrary',
+    );
+
+    const modalCustomized = createComponentHarness(MultiZoneSamplerModal, {
+      isOpen: true,
+      onClose: () => {},
+      channels: normalizedCustomized.channels,
+      selectedChannelId: 'ch-kick',
+      sampleLibrary: normalizedCustomized.sampleLibrary,
+      onUpdateChannel: () => {},
+    });
+    const customizedSelect = collectElements(modalCustomized.tree).find(el => el.type === 'select');
+    assert.equal(
+      customizedSelect?.props.value,
+      'absent-custom-source',
+      'MultiZoneSamplerModal must preserve zone sampleId instead of substituting customSample when source sample is absent from sampleLibrary',
+    );
+
+    const channelBuf = { duration: 4 } as AudioBuffer;
+    const absentZoneBuf = { duration: 2 } as AudioBuffer;
+    let capturedBuffer: AudioBuffer | null = null;
+    let capturedRate = 0;
+
+    const fakeCtx = {
+      currentTime: 0,
+      createBufferSource: () => ({
+        get buffer() { return capturedBuffer; },
+        set buffer(val: AudioBuffer | null) { capturedBuffer = val; },
+        loop: false,
+        loopStart: 0,
+        loopEnd: 0,
+        onended: null,
+        playbackRate: { setValueAtTime: (v: number) => { capturedRate = v; } },
+        connect: () => {},
+        start: () => {},
+        stop: () => {},
+      }),
+      createGain: () => ({
+        gain: { value: 1, setValueAtTime: () => {}, cancelScheduledValues: () => {}, exponentialRampToValueAtTime: () => {} },
+        connect: () => {},
+      }),
+      createBiquadFilter: () => ({
+        type: 'lowpass',
+        frequency: { setValueAtTime: () => {} },
+        Q: { value: 1 },
+        connect: () => {},
+      }),
+    };
+
+    // When the zone's audio buffer is missing, live renderSamplerVoice must return undefined
+    // rather than substituting channel.customSample.
+    const missingLiveHandle = renderSamplerVoice({
+      channel: normCustomizedChannel,
+      note: normCustomizedChannel.notes[0],
+      time: 0,
+      destination: {} as AudioNode,
+      audioContext: fakeCtx as any,
+      voiceId: 'v-absent-custom-missing',
+      bpm: 120,
+      getSampleBuffer: (id) => (id === channelSample.id ? channelBuf : undefined),
+    });
+    assert.equal(
+      missingLiveHandle,
+      undefined,
+      'live renderSamplerVoice must not substitute customSample when zone source sample is missing',
+    );
+    assert.equal(capturedBuffer, null);
+
+    // When the zone's audio buffer IS available, live renderSamplerVoice must play the zone buffer with its customized settings.
+    const presentLiveHandle = renderSamplerVoice({
+      channel: normCustomizedChannel,
+      note: normCustomizedChannel.notes[0],
+      time: 0,
+      destination: {} as AudioNode,
+      audioContext: fakeCtx as any,
+      voiceId: 'v-absent-custom-present',
+      bpm: 120,
+      getSampleBuffer: (id) =>
+        id === 'absent-custom-source' ? absentZoneBuf : id === channelSample.id ? channelBuf : undefined,
+    });
+    assert.ok(presentLiveHandle);
+    assert.equal(capturedBuffer, absentZoneBuf, 'live renderSamplerVoice must play the zone buffer when available');
+    assert.ok(
+      Math.abs(capturedRate + Math.pow(2, (60 - 48) / 12)) < 1e-9,
+      'live renderSamplerVoice must apply customized zone rootNote=48 and reverse=true',
+    );
+
+    // Case 2: Zone with generic default settings whose source sample ('absent-default-source')
+    // is absent from sampleLibrary — do not invent certainty that it is implicit.
+    const defaultMissingSourceChannel: Channel = {
+      ...baseProject.channels[0],
+      id: 'ch-kick',
+      instrumentType: 'sampler',
+      pitch: 0,
+      volume: 1,
+      customSample: channelSample,
+      sampleZones: [
+        {
+          id: 'zone-ch-kick',
+          sampleId: 'absent-default-source',
+          lowNote: 0,
+          highNote: 127,
+          rootNote: 60,
+          lowVelocity: 0,
+          highVelocity: 127,
+          tuneSemitones: 0,
+        },
+      ],
+      notes: [{ id: 'n-absent-default', pitch: 60, start: 0, duration: 1, velocity: 1 }],
+    };
+
+    const normalizedDefault = normalizeProjectState({
+      ...baseProject,
+      channels: [defaultMissingSourceChannel, ...baseProject.channels.slice(1)],
+      sampleLibrary: [channelSample],
+    });
+    const normDefaultChannel = normalizedDefault.channels.find(ch => ch.id === 'ch-kick')!;
+    assert.equal(normDefaultChannel.sampleZones?.length, 1);
+    assert.equal(normDefaultChannel.sampleZones?.[0].sampleId, 'absent-default-source');
+    assert.equal(
+      normDefaultChannel.sampleZones?.[0].userAuthored,
+      true,
+      'normalizeProjectState must not classify a zone as implicit when its source sample is absent from sampleLibrary',
+    );
+
+    capturedBuffer = null;
+    const missingDefaultHandle = renderSamplerVoice({
+      channel: normDefaultChannel,
+      note: normDefaultChannel.notes[0],
+      time: 0,
+      destination: {} as AudioNode,
+      audioContext: fakeCtx as any,
+      voiceId: 'v-absent-default-missing',
+      bpm: 120,
+      getSampleBuffer: (id) => (id === channelSample.id ? channelBuf : undefined),
+    });
+    assert.equal(
+      missingDefaultHandle,
+      undefined,
+      'renderSamplerVoice must not substitute customSample when an unflagged zone references a missing source sample',
+    );
+    assert.equal(capturedBuffer, null);
+
+    // Offline export path must also agree and never substitute channelSample's buffer when the zone's source buffer is missing.
+    const offlineCreatedSources: Array<{ buffer: AudioBuffer | null }> = [];
+    const origGetSampleBuffer = (audioEngine as any).sampleBuffers;
+    const sampleMap = new Map<string, AudioBuffer>([[channelSample.id, channelBuf]]);
+    const prevOfflineCtx = (globalThis as any).OfflineAudioContext;
+    class StubOfflineAudioContext {
+      currentTime = 0;
+      sampleRate = 44100;
+      length = 44100;
+      numberOfChannels = 2;
+      destination = { connect: () => {} };
+      createGain() {
+        return {
+          gain: { value: 1, setValueAtTime: () => {}, setTargetAtTime: () => {}, linearRampToValueAtTime: () => {}, exponentialRampToValueAtTime: () => {}, cancelScheduledValues: () => {} },
+          connect: () => {},
+          disconnect: () => {},
+        };
+      }
+      createStereoPanner() {
+        return { pan: { value: 0, setValueAtTime: () => {}, setTargetAtTime: () => {} }, connect: () => {}, disconnect: () => {} };
+      }
+      createBiquadFilter() {
+        return {
+          type: 'lowpass',
+          frequency: { value: 18000, setValueAtTime: () => {}, setTargetAtTime: () => {}, linearRampToValueAtTime: () => {}, exponentialRampToValueAtTime: () => {}, cancelScheduledValues: () => {} },
+          Q: { value: 1, setValueAtTime: () => {} },
+          gain: { value: 0, setValueAtTime: () => {} },
+          connect: () => {},
+          disconnect: () => {},
+        };
+      }
+      createDynamicsCompressor() {
+        return { threshold: { value: -24, setValueAtTime: () => {} }, knee: { value: 30, setValueAtTime: () => {} }, ratio: { value: 12, setValueAtTime: () => {} }, attack: { value: 0.003, setValueAtTime: () => {} }, release: { value: 0.25, setValueAtTime: () => {} }, connect: () => {}, disconnect: () => {} };
+      }
+      createWaveShaper() {
+        return { curve: null, oversample: 'none', connect: () => {}, disconnect: () => {} };
+      }
+      createDelay() {
+        return { delayTime: { value: 0, setValueAtTime: () => {} }, connect: () => {}, disconnect: () => {} };
+      }
+      createConvolver() {
+        return { buffer: null, connect: () => {}, disconnect: () => {} };
+      }
+      createAnalyser() {
+        return {
+          fftSize: 256,
+          smoothingTimeConstant: 0.7,
+          connect: () => {},
+          disconnect: () => {},
+          getFloatTimeDomainData: (arr: Float32Array) => arr.fill(0),
+          getByteFrequencyData: (arr: Uint8Array) => arr.fill(0),
+          getByteTimeDomainData: (arr: Uint8Array) => arr.fill(128),
+        };
+      }
+      createConstantSource() {
+        return { offset: { value: 0, setValueAtTime: () => {}, linearRampToValueAtTime: () => {} }, connect: () => {}, disconnect: () => {}, start: () => {}, stop: () => {} };
+      }
+      createOscillator() {
+        return { type: 'sine', frequency: { value: 440, setValueAtTime: () => {} }, detune: { value: 0, setValueAtTime: () => {} }, connect: () => {}, start: () => {}, stop: () => {} };
+      }
+      createBufferSource() {
+        const record = { buffer: null as AudioBuffer | null };
+        offlineCreatedSources.push(record);
+        return {
+          get buffer() { return record.buffer; },
+          set buffer(val: AudioBuffer | null) { record.buffer = val; },
+          loop: false,
+          loopStart: 0,
+          loopEnd: 0,
+          onended: null,
+          playbackRate: { value: 1, setValueAtTime: () => {} },
+          connect: () => {},
+          start: () => {},
+          stop: () => {},
+        };
+      }
+      createBuffer(channels: number, length: number, sampleRate: number) {
+        return {
+          numberOfChannels: channels,
+          length,
+          sampleRate,
+          duration: length / sampleRate,
+          getChannelData: () => new Float32Array(length),
+        };
+      }
+      async startRendering() {
+        return this.createBuffer(2, this.length, this.sampleRate);
+      }
+    }
+    try {
+      (globalThis as any).OfflineAudioContext = StubOfflineAudioContext;
+      (audioEngine as any).sampleBuffers = sampleMap;
+      await audioEngine.renderTimelineOffline(
+        [normCustomizedChannel],
+        [],
+        DEFAULT_PROJECT.mixerTracks,
+        120,
+        1,
+        44100,
+        false,
+        'pattern'
+      );
+    } finally {
+      (audioEngine as any).sampleBuffers = origGetSampleBuffer;
+      (globalThis as any).OfflineAudioContext = prevOfflineCtx;
+    }
+    assert.ok(
+      !offlineCreatedSources.some(src => src.buffer === channelBuf),
+      'offline export must not substitute channel.customSample buffer when the zone references a missing source sample',
+    );
+  });
 });
 
 describe('F-1 + F-2: SampleManagerModal lifecycle & hydration synchronization (B)', () => {
