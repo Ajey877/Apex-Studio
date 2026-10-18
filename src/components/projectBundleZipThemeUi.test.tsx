@@ -229,7 +229,7 @@ describe('Project Bundle Zip modal theme contract (UI-03P)', () => {
     }
     assert.match(code, /format: 'apex-studio-project-bundle'/);
     assert.match(code, /formatVersion: 2/);
-    assert.match(code, /buildBundleAudioAssetPath\(audioId, audioFiles\.length\)/);
+    assert.match(code, /await collectBundleAudioAssets\([\s\S]*?getAudioIdsForProject\(projectState\)[\s\S]*?getPersistedAudioClip/);
     assert.match(code, /if \(key === 'audioBlob' \|\| key === 'blob'\) return undefined;/);
     assert.match(code, /pattern_\$\{idx \+ 1\}_\$\{sanitizeFilePart\(pat\.name\)\}\.json/);
     assert.match(code, /a\.download = `\$\{bundleName\}\.zip`/);
