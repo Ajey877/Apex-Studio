@@ -15,6 +15,7 @@ import {
   FxSlot, 
   PlaylistClip, 
   PlaylistTrack,
+  Pattern,
   SynthParameters,
   AudioRecording,
   GrossBeatState,
@@ -22,6 +23,7 @@ import {
   SidechainSettings
 } from '../types/daw';
 import { AudioClockTransport, TransportState } from './transport';
+import { resolveClipChannelContent, withPatternChannelContent } from '../state/patternContent';
 import {
   GROSS_BEAT_OPEN_GAIN,
   grossBeatAlternatingSteps,
@@ -144,6 +146,14 @@ export interface PlaybackStateUpdate {
    * of waiting for a restart. Song Mode ignores it (bar-grid scheduling).
    */
   patternLengthSteps?: number;
+  /**
+   * Independent patterns: the project's patterns, whose stored
+   * `channelContent` Song Mode pattern clips play (the selected pattern's
+   * content is the live channel content above). A selection change arrives as
+   * one update carrying both `channels` and `patterns`, so the arrangement
+   * never hears a half-swapped state.
+   */
+  patterns?: Pattern[];
 }
 
 export interface MixerChannel {
@@ -3023,6 +3033,7 @@ class AudioEngine {
     patternLengthSteps?: number,
     playlistTracks?: PlaylistTrack[],
     minimumDurationSeconds: number = 4,
+    patterns?: Pattern[],
   ): Promise<AudioBuffer> {
     if (this.offlineRenderLeaseHeld) {
       throw new Error('An offline timeline render is already running.');
@@ -3097,6 +3108,7 @@ class AudioEngine {
         activePlayMode: this.activePlayMode,
         activePatternId: this.activePatternId,
         activePatternLengthSteps: this.activePatternLengthSteps,
+        activePatterns: this.activePatterns,
         currentStep: this.currentStep,
         currentBar: this.currentBar,
         bpm: this.bpm,
@@ -3194,6 +3206,9 @@ class AudioEngine {
           this.activeClipChannelVolumes = new Map();
           this.activeChannels = structuredClone(channels);
           this.activeClips = structuredClone(clips);
+          // Song exports resolve pattern clips through the same stored pattern
+          // content the live scheduler uses.
+          this.activePatterns = structuredClone(patterns ?? []);
           this.refreshInaudibleTakeClipIds();
           this.playbackProjectChannels = structuredClone(channels);
           this.playbackProjectMixerTracks = [];
@@ -3327,6 +3342,7 @@ class AudioEngine {
         this.activePlayMode = previous.activePlayMode;
         this.activePatternId = previous.activePatternId;
         this.activePatternLengthSteps = previous.activePatternLengthSteps;
+        this.activePatterns = previous.activePatterns;
         this.currentStep = previous.currentStep;
         this.currentBar = previous.currentBar;
         this.bpm = previous.bpm;
@@ -3364,7 +3380,8 @@ class AudioEngine {
     bitDepth: 16 | 24 | 32 = 24,
     mixerTracks?: MixerTrack[],
     includeMixerFx: boolean = false,
-    playlistTracks?: PlaylistTrack[]
+    playlistTracks?: PlaylistTrack[],
+    patterns?: Pattern[]
   ): Promise<Blob> {
     const renderedBuffer = await this.renderTimelineOffline(
       channels,
@@ -3377,7 +3394,9 @@ class AudioEngine {
       'song',
       undefined,
       undefined,
-      playlistTracks
+      playlistTracks,
+      undefined,
+      patterns
     );
     return this.audioBufferToWav(renderedBuffer, bitDepth);
   }
@@ -3393,7 +3412,8 @@ class AudioEngine {
     renderScope: OfflineRenderScope = 'song',
     patternLengthSteps?: number,
     playlistTracks?: PlaylistTrack[],
-    includeMixerFx: boolean = false
+    includeMixerFx: boolean = false,
+    patterns?: Pattern[]
   ): Promise<{ stems: Record<string, Blob>; master: Blob }> {
     let mixerTracks: MixerTrack[] = [];
     let bpm = 120;
@@ -3430,7 +3450,9 @@ class AudioEngine {
       renderScope,
       undefined,
       patternLengthSteps,
-      playlistTracks
+      playlistTracks,
+      undefined,
+      patterns
     );
     const master = this.audioBufferToWav(masterBuffer, bitDepth);
 
@@ -3476,7 +3498,9 @@ class AudioEngine {
         renderScope,
         undefined,
         patternLengthSteps,
-        playlistTracks
+        playlistTracks,
+        undefined,
+        patterns
       );
 
       const cleanName = (channel.name || `Channel_${channel.id}`).replace(/[^a-zA-Z0-9_-]/g, '_');
@@ -3565,7 +3589,9 @@ class AudioEngine {
             renderScope,
             undefined,
             patternLengthSteps,
-            playlistTracks
+            playlistTracks,
+            undefined,
+            patterns
           );
           const cleanRetName = (ret.name || `Return_${ret.id}`).replace(/[^a-zA-Z0-9_-]/g, '_');
           stems[`return_${ret.id}_${cleanRetName}.wav`] = this.audioBufferToWav(wetBuffer, bitDepth);
@@ -3615,7 +3641,9 @@ class AudioEngine {
         renderScope,
         undefined,
         patternLengthSteps,
-        playlistTracks
+        playlistTracks,
+        undefined,
+        patterns
       );
 
       const trackNum = trackIdx + 1;
@@ -3697,6 +3725,12 @@ class AudioEngine {
   private activePatternId?: string;
   /** Declared `Pattern.lengthSteps` of the pattern the active take is looping. */
   private activePatternLengthSteps?: number;
+  /**
+   * Patterns of the active take (an isolated clone). Song Mode resolves each
+   * pattern clip's content through them; empty for callers without a pattern
+   * model, in which case every pattern clip plays its channel's live content.
+   */
+  private activePatterns: Pattern[] = [];
 
   public setBpm(bpm: number) {
     if (this.shouldBlockLiveMutation()) return;
@@ -4383,6 +4417,13 @@ class AudioEngine {
       this.activePatternLengthSteps = update.patternLengthSteps;
     }
 
+    // Stored pattern content is replaced as a clone, like the clip schedule, in
+    // the same call as any channel edit (a pattern selection swap moves content
+    // between the two), so the next scheduled step sees one consistent state.
+    if (update.patterns) {
+      this.activePatterns = structuredClone(update.patterns);
+    }
+
     if (update.channels) {
       const now = this.ctx?.currentTime ?? 0;
       const previousChannels = this.activeChannels;
@@ -4563,7 +4604,8 @@ class AudioEngine {
     patternId?: string,
     mixerTracks?: MixerTrack[],
     patternLengthSteps?: number,
-    playlistTracks?: PlaylistTrack[]
+    playlistTracks?: PlaylistTrack[],
+    patterns?: Pattern[]
   ) {
     if (this.shouldBlockLiveMutation()) return;
     if (!this.ctx) this.init();
@@ -4599,6 +4641,7 @@ class AudioEngine {
     this.activePlayMode = mode;
     this.activePatternId = patternId;
     this.activePatternLengthSteps = patternLengthSteps;
+    this.activePatterns = structuredClone(patterns ?? []);
 
     // Apply the current project mixer graph at transport start. Subsequent
     // mixer edits use synchronizePlaybackState and update only the changed
@@ -5060,11 +5103,16 @@ class AudioEngine {
           if (currentGlobalStep >= clipStartStep && currentGlobalStep < clipEndStep) {
             const channel = this.activeChannels.find(c => c.id === clip.channelId);
             if (channel && this.isChannelAudibleInTake(channel) && !this.isPlaylistLaneMuted(clip)) {
-              const loopLength = resolvePlayableContentLengthSteps(channel, undefined, this.meter);
+              // Independent patterns: a clip plays its channel's content in the
+              // pattern it names (the live channel content for the selected
+              // pattern, stored content for any other). The channel itself still
+              // supplies the instrument, level and routing of every voice.
+              const content = resolveClipChannelContent(this.activePatterns, clip, channel);
+              const loopLength = resolvePlayableContentLengthSteps(withPatternChannelContent(channel, content), undefined, this.meter);
               const stepOffset = clip.offsetSteps || 0;
               const relStep = ((currentGlobalStep - clipStartStep + stepOffset) % loopLength + loopLength) % loopLength;
 
-              if (channel.steps && channel.steps[relStep]) {
+              if (content.steps[relStep]) {
                 const defaultPitch = channel.instrumentType === 'drumpad' ? 36 : 60;
                 this.playNote(channel, {
                   id: `song-${channel.id}-${relStep}`,
@@ -5074,14 +5122,12 @@ class AudioEngine {
                   velocity: 0.9
                 }, now, safeBpm);
               }
-              if (channel.notes) {
-                channel.notes.forEach(note => {
-                  const offsetSteps = noteOnsetOffsetSteps(note.start, relStep);
-                  if (offsetSteps !== null) {
-                    this.playNote(channel, note, now + offsetSteps * secondsPerStep, safeBpm);
-                  }
-                });
-              }
+              content.notes.forEach(note => {
+                const offsetSteps = noteOnsetOffsetSteps(note.start, relStep);
+                if (offsetSteps !== null) {
+                  this.playNote(channel, note, now + offsetSteps * secondsPerStep, safeBpm);
+                }
+              });
             }
           }
         } else if (clip.type === 'audio') {

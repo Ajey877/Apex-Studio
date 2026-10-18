@@ -3,6 +3,7 @@ import { PRESET_PROJECTS } from '../audio/presets';
 import { createDefaultProjectState } from './projectState';
 import { sanitizeProjectSnapshot } from './projectHistory';
 import { advancePlaylistAudioProjectGeneration } from './playlistAudioPublication';
+import { resolveSelectionNeutralPatternView } from './patternContent';
 
 /**
  * Phase 8A — destructive project replacement policy.
@@ -47,7 +48,14 @@ let cachedTemplateFingerprints: Set<string> | null = null;
  */
 export const getProjectFingerprint = (state: ProjectState): string => {
   const snapshot = sanitizeProjectSnapshot(state);
-  const { selectedPatternId: _pattern, selectedChannelId: _channel, selectedMixerTrackId: _mixer, ...document } = snapshot;
+  // Selecting a pattern moves content between the channels (the selected
+  // pattern's live content) and `Pattern.channelContent`, so the pattern content
+  // is compared in its selection-neutral form: an untouched demo whose user only
+  // clicked a pattern tab is still the untouched demo.
+  const { selectedPatternId: _pattern, selectedChannelId: _channel, selectedMixerTrackId: _mixer, ...document } = {
+    ...snapshot,
+    ...resolveSelectionNeutralPatternView(snapshot),
+  };
   return JSON.stringify({
     ...document,
     meta: {

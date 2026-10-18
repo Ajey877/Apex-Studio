@@ -2,7 +2,7 @@ import { PlaylistRulerTicks } from './PlaylistRulerTicks';
 import { resolveSevenEightGrouping } from '../music/meterPulse';
 import { punchRulerSegments, type PunchRangeBeats } from '../music/punchRecording';
 import { barsToBeats, beatsToSeconds, resolveProjectTimeSignature } from '../music/musicalTime';
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useMemo } from 'react';
 import { 
   Plus, 
   Layers, 
@@ -27,7 +27,8 @@ import {
 } from 'lucide-react';
 import { PlaylistTrack, PlaylistClip, Pattern, Channel, AutomationTargetType, ArrangementMarker, MixerTrack } from '../types/daw';
 import { audioEngine } from '../audio/audioEngine';
-import { resolvePlaylistBounceTarget } from './playlistBounceTarget';
+import { findLaneBouncePatternClip, resolvePlaylistBounceTarget } from './playlistBounceTarget';
+import { findPatternForClip, resolveClipChannelContent, resolvePatternChannelContent, withPatternChannelContent } from '../state/patternContent';
 import { formatFxParameterRange, listFxSlotOptions } from '../audio/fxParameterControl';
 import {
   buildFxAutomationTarget,
@@ -45,6 +46,7 @@ import {
 import {
   DEFAULT_GRID_BARS,
   createPlaylistPatternClip,
+  setPlaylistClipPattern,
   deletePlaylistClip,
   duplicatePlaylistClip,
   movePlaylistClip,
@@ -81,6 +83,13 @@ interface PlaylistArrangerProps {
   tracks: PlaylistTrack[];
   clips: PlaylistClip[];
   patterns: Pattern[];
+  /**
+   * Independent patterns: the selected pattern is the one a newly drawn pattern
+   * clip plays (and the one the Channel Rack edits). Selecting another pattern
+   * here is the same selection the Channel Rack tabs make.
+   */
+  selectedPatternId?: string;
+  onSelectPattern?: (patternId: string) => void;
   channels: Channel[];
   mixerTracks?: MixerTrack[];
   markers?: ArrangementMarker[];
@@ -216,11 +225,15 @@ const MARKER_KIND_COLORS = {
  * one value — in both palettes, whatever the surrounding surface does.
  */
 const AUDIO_CLIP_SIGNAL_COLOR = '#00ff88';
+/** Pattern clip preview: one cell per step of the first bar of the clip's content. */
+const CLIP_PREVIEW_CELLS = 16;
 
 export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
   tracks,
   clips,
   patterns,
+  selectedPatternId,
+  onSelectPattern,
   channels,
   mixerTracks = [],
   markers = [],
@@ -256,6 +269,38 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
   const punchSegmentByBar = new Map(punchSegments.map(segment => [segment.barIndex, segment]));
   const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
   const [selectedPointIndex, setSelectedPointIndex] = useState<number | null>(null);
+  // Independent patterns: the pattern a newly drawn clip plays, and the name a
+  // placed clip shows for the pattern it plays.
+  const selectedPattern = patterns.find(pattern => pattern.id === selectedPatternId);
+  const patternNameById = new Map(patterns.map(pattern => [pattern.id, pattern.name]));
+  // First-bar preview cells per (pattern, channel) pair: shared by every clip
+  // that plays the same content, and rebuilt only when pattern or channel
+  // content changes — not on every re-render while a clip is dragged.
+  const clipPreviewCache = useMemo(() => new Map<string, boolean[]>(), [patterns, channels]);
+  const resolveClipPreviewCells = (clip: PlaylistClip): boolean[] | undefined => {
+    if (clip.type !== 'pattern') return undefined;
+    const channel = channels.find(candidate => candidate.id === clip.channelId);
+    if (!channel) return undefined;
+    const pattern = findPatternForClip(patterns, clip);
+    const key = `${pattern?.id ?? ''}\u0000${channel.id}`;
+    const cached = clipPreviewCache.get(key);
+    if (cached) return cached;
+    const content = resolvePatternChannelContent(pattern, channel);
+    const cells = Array.from({ length: CLIP_PREVIEW_CELLS }, (_, step) => content.steps[step] === true);
+    for (const note of content.notes) {
+      const step = Math.floor(Number(note?.start));
+      if (Number.isFinite(step) && step >= 0 && step < CLIP_PREVIEW_CELLS) cells[step] = true;
+    }
+    clipPreviewCache.set(key, cells);
+    return cells;
+  };
+  const resolveClipPatternName = (clip: PlaylistClip): string | undefined => {
+    if (clip.type !== 'pattern') return undefined;
+    // A legacy clip that names no pattern plays the live content, which is the
+    // selected pattern's.
+    if (!clip.patternId || !patternNameById.has(clip.patternId)) return selectedPattern?.name;
+    return patternNameById.get(clip.patternId);
+  };
   const [activeTool, setActiveTool] = useState<'place' | 'cut' | 'delete'>('place');
   const [clipTypeToAdd, setClipTypeToAdd] = useState<'pattern' | 'automation'>('pattern');
   const [automationEditorClipId, setAutomationEditorClipId] = useState<string | null>(null);
@@ -321,8 +366,8 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
     // not match its lane order (the factory project is one of them), and an empty
     // lane silently bounced `channels[0]`.
     const target = resolvePlaylistBounceTarget(channels, clips, trackIdx);
-    const channel = target.channelId ? channels.find(c => c.id === target.channelId) : undefined;
-    if (!channel || target.status !== 'ready') {
+    const laneChannel = target.channelId ? channels.find(c => c.id === target.channelId) : undefined;
+    if (!laneChannel || target.status !== 'ready') {
       setStatusMessage(
         target.status === 'empty'
           ? 'Nothing to bounce on this lane.'
@@ -331,6 +376,14 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
       setTimeout(() => setStatusMessage(null), 3000);
       return;
     }
+
+    // Independent patterns: render the lane channel's content in the pattern
+    // its earliest clip plays (the instrument, level and routing stay the
+    // channel's own), not whichever pattern the Channel Rack has selected.
+    const laneClip = findLaneBouncePatternClip(clips, trackIdx, laneChannel.id);
+    const channel = laneClip
+      ? withPatternChannelContent(laneChannel, resolveClipChannelContent(patterns, laneClip, laneChannel))
+      : laneChannel;
 
     setStatusMessage(`Bouncing ${channel.name} into offline Audio Stem...`);
     try {
@@ -718,7 +771,9 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
         tracks[trackIndex],
         DEFAULT_PATTERN_CLIP_LENGTH_BARS,
         undefined,
-        bounds
+        bounds,
+        // Independent patterns: the clip plays the selected pattern's content.
+        selectedPattern
       );
     }
 
@@ -895,6 +950,26 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
               Automation
             </button>
           </div>
+
+          {/* Independent patterns: which pattern a drawn pattern clip plays. */}
+          {clipTypeToAdd === 'pattern' && patterns.length > 0 && (
+            <label className="flex items-center gap-1 bg-[var(--apex-chrome-inset)] border border-[var(--apex-border)] px-1.5 py-0.5 rounded text-[10px] font-semibold text-[var(--apex-text-3)]">
+              <span>Pattern</span>
+              <select
+                id="playlist-pattern-picker"
+                aria-label="Pattern for new clips"
+                value={selectedPattern?.id ?? ''}
+                onChange={(event) => onSelectPattern?.(event.target.value)}
+                disabled={!onSelectPattern}
+                className="bg-[var(--apex-surface-2)] text-[var(--apex-text)] border border-[var(--apex-border)] rounded-sm px-1 py-0.5 text-[10px] font-semibold"
+              >
+                {!selectedPattern && <option value="" disabled>Select pattern</option>}
+                {patterns.map(pattern => (
+                  <option key={pattern.id} value={pattern.id}>{pattern.name}</option>
+                ))}
+              </select>
+            </label>
+          )}
 
           {/* Tools */}
           <div className="flex items-center gap-0.5 bg-[var(--apex-chrome-inset)] border border-[var(--apex-border)] p-0.5 rounded text-xs">
@@ -1293,6 +1368,7 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
                   return (
                     <div
                       key={barIdx}
+                      data-playlist-cell={`${trackIdx}:${barIdx}`}
                       onClick={() => handleGridCellClick(trackIdx, barIdx)}
                       className={`w-24 h-full border-r border-[var(--apex-grid-line)] cursor-pointer transition ${
                         isPlayheadBar ? 'bg-[var(--apex-state-selected)]' : 'hover:bg-[var(--apex-state-hover)]'
@@ -1310,10 +1386,13 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
                   const isAudioMissing = isPlaylistClipAudioUnavailable(clip);
                   const audioMissingDescription = isAudioMissing ? describeMissingAudioClip(clip) : undefined;
                   const isSelected = selectedClipId === clip.id;
+                  const clipPatternName = resolveClipPatternName(clip);
+                  const clipPreviewCells = resolveClipPreviewCells(clip);
 
                   return (
                     <div
                       key={clip.id}
+                      data-clip-id={clip.id}
                       data-audio-unavailable={isAudioMissing ? 'true' : undefined}
                       aria-label={audioMissingDescription}
                       title={audioMissingDescription}
@@ -1378,6 +1457,15 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
                           >
                             {clip.name}
                           </span>
+                          {clipPatternName && (
+                            <span
+                              data-testid={`clip-pattern-${clip.id}`}
+                              title={`Plays pattern: ${clipPatternName}`}
+                              className="truncate shrink min-w-0 px-1 rounded-sm bg-[var(--apex-surface-3)] text-[var(--apex-text-2)] text-[8px] font-semibold"
+                            >
+                              {clipPatternName}
+                            </span>
+                          )}
                           {isAudioMissing && (
                             <span
                               id={`missing-audio-clip-badge-${clip.id}`}
@@ -1492,14 +1580,25 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
                           </div>
                         )
                       ) : (
-                        <div className="flex items-center gap-0.5 h-3 opacity-60 z-10">
-                          {Array.from({ length: 16 }).map((_, i) => (
-                            <div 
-                              key={i} 
-                              className="flex-1 bg-[var(--apex-accent)] rounded-xs"
-                              style={{ height: `${20 + (i % 5) * 15}%` }}
-                            />
-                          ))}
+                        // Independent patterns: the preview draws the first bar
+                        // of the content this clip actually plays (its pattern,
+                        // for its channel), so an empty or different pattern is
+                        // visible at a glance instead of a decorative graphic.
+                        <div
+                          className="flex items-center gap-0.5 h-3 opacity-60 z-10"
+                          data-testid={`clip-steps-${clip.id}`}
+                          data-active-steps={clipPreviewCells?.flatMap((on, index) => (on ? [index] : [])).join(',') ?? ''}
+                        >
+                          {Array.from({ length: CLIP_PREVIEW_CELLS }).map((_, i) => {
+                            const on = clipPreviewCells?.[i] === true;
+                            return (
+                              <div
+                                key={i}
+                                className={`flex-1 rounded-xs ${on ? 'bg-[var(--apex-accent)]' : 'bg-[var(--apex-border)]'}`}
+                                style={{ height: on ? '100%' : '25%' }}
+                              />
+                            );
+                          })}
                         </div>
                       )}
 
@@ -1591,6 +1690,28 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
           </div>
 
           <div className="flex items-center gap-3">
+            {selectedClip.type === 'pattern' && patterns.length > 0 && (
+              <label className="flex items-center gap-1.5 font-mono text-[10px]">
+                <span>Pattern:</span>
+                <select
+                  id="selected-clip-pattern"
+                  aria-label="Pattern this clip plays"
+                  value={selectedClip.patternId && patternNameById.has(selectedClip.patternId) ? selectedClip.patternId : (selectedPattern?.id ?? '')}
+                  onChange={(event) => {
+                    try {
+                      onUpdateClips(setPlaylistClipPattern(clips, selectedClip.id, patterns, event.target.value));
+                    } catch (err) {
+                      console.warn('Failed to change the clip pattern', err);
+                    }
+                  }}
+                  className="bg-[var(--apex-surface-2)] text-[var(--apex-text)] border border-[var(--apex-border)] rounded px-1 py-0.5 text-[10px]"
+                >
+                  {patterns.map(pattern => (
+                    <option key={pattern.id} value={pattern.id}>{pattern.name}</option>
+                  ))}
+                </select>
+              </label>
+            )}
             {selectedClip.type === 'audio' && (
               <div className="flex items-center gap-2 font-mono text-[10px]">
                 <span>Fade In: <strong>{selectedClip.fadeInBars || 0}B</strong></span>

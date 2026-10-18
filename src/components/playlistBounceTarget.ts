@@ -59,3 +59,29 @@ export function resolvePlaylistBounceTarget(
 
   return { status: 'ready', channelId: primary.id, channelIds, startBar };
 }
+
+/**
+ * Independent patterns — WHICH content a lane bounce renders.
+ *
+ * A pattern clip plays its channel's content in the pattern it names, so the
+ * bounced stem must render that pattern's content, not whatever pattern happens
+ * to be selected in the Channel Rack. The earliest pattern clip of the bounced
+ * channel on the lane decides (the same "earliest content" rule that picks the
+ * channel and the anchor bar above). Returns `undefined` when the lane holds no
+ * pattern clip for the channel.
+ */
+export function findLaneBouncePatternClip(
+  clips: PlaylistClip[],
+  laneIndex: number,
+  channelId: string,
+): PlaylistClip | undefined {
+  if (!Number.isFinite(laneIndex)) return undefined;
+  const lane = Math.floor(laneIndex);
+  return (Array.isArray(clips) ? clips : [])
+    .filter(clip => clip
+      && clip.type === 'pattern'
+      && clip.channelId === channelId
+      && Number.isFinite(clip.trackIndex)
+      && Math.floor(clip.trackIndex) === lane)
+    .sort((a, b) => (a.startBar ?? 0) - (b.startBar ?? 0))[0];
+}

@@ -83,9 +83,12 @@ export const getSelectedPatternLengthSteps = (state: ProjectState): number =>
  *   and Pattern export ignore it because the declared Pattern length is
  *   authoritative. Extending (or undoing) reveals the data again.
  *
- * This is the only non-destructive choice in the current model: channels are
- * Channel-scoped and shared by patterns, so changing one Pattern must never erase
- * channel data another pattern or undo state may still need.
+ * This is the non-destructive choice: a length change is a view of the
+ * pattern's content, never an edit of it, so shortening a pattern must never
+ * erase data that extending it (or undo) would reveal again. Since patterns own
+ * their content (`state/patternContent.ts`), the live `Channel.steps` /
+ * `Channel.notes` written here are the SELECTED pattern's content; other
+ * patterns' content is untouched by construction.
  *
  * Pure and idempotent: an unknown pattern id, or a length already in effect,
  * returns the state object unchanged so history records no phantom entry.

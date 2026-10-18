@@ -379,7 +379,13 @@ export interface PlaylistClip {
   startBar: number; // Start in bars (1 bar = 16 steps)
   lengthBars: number; // Duration in bars
   type: 'pattern' | 'audio' | 'automation';
-  patternId?: string; // If type is pattern
+  /**
+   * Pattern clips: the pattern whose content (for `channelId`) the clip plays.
+   * New clips are stamped with the selected pattern; legacy clips are stamped
+   * with the pattern that was selected when the project was migrated. A clip
+   * without one plays the live channel content (pre-migration behaviour).
+   */
+  patternId?: string;
   channelId?: string;
   audioBufferId?: string;
   audioName?: string;
@@ -532,11 +538,31 @@ export interface PlaylistTrack {
   armedForRecord?: boolean;
 }
 
+/**
+ * One channel's sequencer content inside one pattern: its step-sequencer cells
+ * and its piano-roll notes. Same shapes as `Channel.steps` / `Channel.notes`.
+ */
+export interface PatternChannelContent {
+  channelId: string;
+  steps: boolean[];
+  notes: Note[];
+}
+
 export interface Pattern {
   id: string;
   name: string;
   color: string;
   lengthSteps: number; // usually 16, 32, or 64
+  /**
+   * Independent patterns: what each channel holds in this pattern while the
+   * pattern is NOT the selected one. The selected pattern never carries this
+   * field — its content is the live `Channel.steps` / `Channel.notes` that the
+   * Channel Rack and Piano Roll edit. A channel without an entry is empty in
+   * this pattern. Owned by `src/state/patternContent.ts`; every selection change
+   * goes through `selectPatternInProjectState`, which moves content between the
+   * two places atomically.
+   */
+  channelContent?: PatternChannelContent[];
 }
 
 export interface FxSlot {

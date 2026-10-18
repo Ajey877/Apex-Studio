@@ -11,7 +11,8 @@ import {
   CheckCircle,
   TrendingUp
 } from 'lucide-react';
-import { Channel, PlaylistClip, ProjectMetadata } from '../types/daw';
+import { Channel, Pattern, PlaylistClip, ProjectMetadata } from '../types/daw';
+import { countProjectNotes } from '../state/patternContent';
 import { listProjectBackups, type ProjectBackupSummary } from '../state/projectBackup';
 
 interface AnalyticsModalProps {
@@ -19,6 +20,11 @@ interface AnalyticsModalProps {
   onClose: () => void;
   meta: ProjectMetadata;
   channels: Channel[];
+  /**
+   * Independent patterns: every pattern's stored notes count toward the total,
+   * not only the selected pattern's live channel notes.
+   */
+  patterns?: Pattern[];
   clips: PlaylistClip[];
   /**
    * Phase 68 F4: the real save state the persistence layer reports
@@ -96,6 +102,7 @@ export const AnalyticsModal: React.FC<AnalyticsModalProps> = ({
   onClose,
   meta,
   channels,
+  patterns = [],
   clips,
   saveError
 }) => {
@@ -126,7 +133,7 @@ export const AnalyticsModal: React.FC<AnalyticsModalProps> = ({
 
   if (!isOpen) return null;
 
-  const totalNotes = channels.reduce((acc, ch) => acc + (ch.notes?.length || 0), 0);
+  const totalNotes = countProjectNotes(patterns, channels);
   const activeChannelsCount = channels.filter(c => !c.mute).length;
   const activeClipsCount = clips.length;
 

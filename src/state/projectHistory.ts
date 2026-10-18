@@ -19,6 +19,14 @@ export interface ProjectHistory {
   undo(): ProjectHistory;
   redo(): ProjectHistory;
   reset(state: ProjectState): ProjectHistory;
+  /**
+   * Re-expresses the present WITHOUT recording an undo step: past and future
+   * are kept and nothing is pushed. Only for a document change that is not an
+   * edit — selecting a pattern swaps which pattern's content is live — so the
+   * next commit is recorded against the state the user actually sees.
+   * A semantically equal state returns this history unchanged.
+   */
+  replacePresent(state: ProjectState): ProjectHistory;
 }
 
 /**
@@ -98,6 +106,11 @@ const createHistoryState = (
     },
     reset(state) {
       return createHistory(state, maxEntries);
+    },
+    replacePresent(state) {
+      const nextSnapshot = sanitizeProjectSnapshot(state);
+      if (areSemanticallyEqual(snapshot, nextSnapshot)) return this;
+      return createHistoryState(nextSnapshot, safePast, safeFuture, maxEntries);
     }
   };
 };

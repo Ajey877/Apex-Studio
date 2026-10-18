@@ -123,9 +123,9 @@ Shape sounds with two oscillators, filters and modulation.
 
 | 🎹 Workspace | What it does |
 |---|---|
-| **Channel Rack** | Build patterns with step sequencing, swing, velocity and MIDI learn. |
+| **Channel Rack** | Build independent patterns — each pattern keeps its own steps and notes for every channel — with step sequencing, swing, velocity and MIDI learn. Add an empty pattern or clone one to start a variation. |
 | **Piano Roll** | Create polyphonic melodies, edit note length and velocity, use scales/chords and quantization tools. |
-| **Playlist Arranger** | Arrange patterns and audio clips across multiple lanes, including automation. |
+| **Playlist Arranger** | Arrange patterns and audio clips across multiple lanes, including automation. Each pattern clip plays the pattern it names, live and in every export. |
 | **Mixer** | Work across mixer tracks with volume, pan, routing, metering and insert effects (EQ, reverb, delay, compression, limiter). |
 | **Synth** | Shape sounds with dual oscillators, filters, ADSR and modulation controls. |
 | **Recording** | Capture audio and place recorded takes into the project. |
@@ -223,7 +223,7 @@ Open **Piano Roll**, draw notes, adjust their length and velocity, and use the a
 
 ### 3. 🧩 Build the arrangement
 
-Open **Playlist Arranger**, switch between pattern/song workflow as needed, and place patterns or audio clips on the timeline.
+Open **Playlist Arranger**, choose a pattern in the toolbar's **Pattern** picker, and place it on a lane — or place audio clips. Switch between pattern/song workflow as needed.
 
 **Shortcut:** `F5` or `3`
 
@@ -356,6 +356,34 @@ deleted when you switch takes.
 Its scope is whole-take selection. It does not split a take into regions, and it does not
 crossfade between takes, so it is comping by take rather than comping by phrase. It also never
 creates audio: a project with no recorded takes has no take groups to show.
+
+### Patterns scope
+
+Every pattern owns its own content: each channel's step-sequencer cells and Piano Roll notes
+belong to the pattern they were written in. **Add pattern** creates an empty pattern,
+**Clone pattern** copies the selected one for a variation, and editing a pattern never changes
+another one. A playlist pattern clip plays its lane channel's content in the pattern the clip
+names (shown on the clip, together with a preview of its first bar), and the same resolution is
+used by live Song Mode, WAV and stem export, Standard MIDI export and Bounce-In-Place. A MIDI
+take is written into the pattern that was selected when recording started.
+
+Selecting a pattern is a view change, not an undo step. Undo returns to the project exactly as
+it was just before the undone change — including the pattern that was selected at that moment —
+and Redo is its exact inverse, so undoing an edit never jumps back to a pattern that was
+selected before it.
+
+Projects saved before patterns were independent open unchanged — every pattern still shows the
+content it showed before. The first pattern operation (selecting, adding or cloning a pattern)
+gives each pattern its own copy of that content and keeps every placed clip playing what it
+played, so nothing audible changes.
+
+Its current scope:
+
+- Pattern clips are **per channel lane**: a clip plays one channel's part of a pattern. There
+  is no single clip that plays every channel of a pattern at once.
+- Patterns can be added, cloned and selected; there is **no delete or rename** for patterns yet.
+- In Song Mode a clip loops its content's own length (as before), not the pattern's declared
+  16/32-step length, which governs Pattern Mode and the Pattern Loop export.
 
 ### Local collaboration and sync status
 

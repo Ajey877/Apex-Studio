@@ -1,6 +1,6 @@
 import { stepsPerBar, stepsToBeats, beatsToMidiTicks, bpmToMicrosecondsPerQuarter, DEFAULT_MIDI_PPQ, LEGACY_TIME_SIGNATURE, resolveProjectTimeSignature, type TimeSignature } from '../music/musicalTime';
 import { MIN_MIDI_NOTE_OFF_DELTA_TICKS } from '../music/noteDurationPolicy';
-import type { Channel, PlaylistClip, PlaylistTrack, ProjectMetadata } from '../types/daw';
+import type { Channel, Pattern, PlaylistClip, PlaylistTrack, ProjectMetadata } from '../types/daw';
 import { normalizePatternLengthSteps } from '../state/patternLength';
 import {
   resolvePatternLoopLengthSteps,
@@ -9,6 +9,7 @@ import {
 import { isRackChannelAudible } from '../audio/midiMappingRuntime';
 import { swingOffsetTicksForStep } from '../audio/parameterScaling';
 import { derivePlaylistLaneMutes, isClipLaneMuted } from '../audio/playlistLaneMutes';
+import { resolveClipChannelContent, withPatternChannelContent } from '../state/patternContent';
 
 export type ExportScope = 'song' | 'pattern';
 
@@ -33,6 +34,13 @@ export interface MidiExportOptions {
   totalBars?: number;
   /** Playlist lane rows; muted rows are dropped exactly like the WAV renderer. */
   playlistTracks?: PlaylistTrack[];
+  /**
+   * Independent patterns: the project's patterns. A Song export writes each
+   * pattern clip from its channel's content in the pattern the clip names —
+   * the same resolution the live scheduler and the WAV renderer use. Omitted,
+   * every clip writes its channel's live content (the historical contract).
+   */
+  patterns?: Pattern[];
 }
 
 /**
@@ -220,6 +228,8 @@ interface MidiTrackContext {
   /** Advertised render window in ticks; nothing at or past it is written. */
   windowTicks: number;
   laneMutes: Set<number>;
+  /** Patterns whose stored content Song-scope pattern clips resolve through. */
+  patterns?: readonly Pattern[];
 }
 
 /**
@@ -316,20 +326,22 @@ function buildMidiTrack(
       }
     }
   } else {
-    // Song Mode: each clip plays the channel's content on its own loop length and
-    // its own `offsetSteps` trim, from the clip's start bar to its end bar.
-    const loopLength = Math.max(1, resolvePlayableContentLengthSteps(channel, undefined, resolvedMeter));
+    // Song Mode: each clip plays its channel's content in the pattern the clip
+    // names (independent patterns), on that content's own loop length and the
+    // clip's own `offsetSteps` trim, from the clip's start bar to its end bar.
     const stepsBar = stepsPerBarFor(resolvedMeter);
     for (const clip of clips) {
       if (clip.type !== 'pattern' || clip.mute || clip.channelId !== channel.id) continue;
       if (context && isClipLaneMuted(clip, context.laneMutes)) continue;
+      const clipChannel = withPatternChannelContent(channel, resolveClipChannelContent(context?.patterns, clip, channel));
+      const loopLength = Math.max(1, resolvePlayableContentLengthSteps(clipChannel, undefined, resolvedMeter));
       const startStep = Math.round(clip.startBar * stepsBar);
       const endStep = startStep + Math.round(clip.lengthBars * stepsBar);
       const offsetSteps = Math.max(0, Math.round(Number(clip.offsetSteps) || 0));
-      for (const relStep of channelContentSteps(channel, loopLength)) {
+      for (const relStep of channelContentSteps(clipChannel, loopLength)) {
         const phase = ((relStep - offsetSteps) % loopLength + loopLength) % loopLength;
         for (let step = startStep + phase; step < endStep; step += loopLength) {
-          for (const content of contentEventsAtStep(channel, relStep)) emitAtStep(step, content);
+          for (const content of contentEventsAtStep(clipChannel, relStep)) emitAtStep(step, content);
         }
       }
     }
@@ -370,6 +382,7 @@ export function buildStandardMidiFile(
     patternLoopSteps: resolvePatternLoopLengthSteps(channels, options.patternLengthSteps, resolvedMeter),
     windowTicks,
     laneMutes: derivePlaylistLaneMutes(options.playlistTracks),
+    patterns: options.patterns,
   };
 
   // Phase 68 F3: one audibility contract for the whole application. The live
