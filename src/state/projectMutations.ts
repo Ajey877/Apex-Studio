@@ -45,16 +45,13 @@ export const updateChannelInProjectState = (
       'customSample' in updates &&
       !('sampleZones' in updates) &&
       nextChannel.customSample?.id &&
+      ch.customSample?.id &&
       ch.sampleZones?.length === 1 &&
-      !ch.sampleZones[0].userAuthored
+      !ch.sampleZones[0].userAuthored &&
+      ch.sampleZones[0].sampleId === ch.customSample.id &&
+      isImplicitDefaultSingleZone(ch, ch.sampleZones[0], state.sampleLibrary || [])
     ) {
-      const knownSamples =
-        ch.customSample && !(state.sampleLibrary || []).some(s => s.id === ch.customSample!.id)
-          ? [...(state.sampleLibrary || []), ch.customSample]
-          : state.sampleLibrary || [];
-      if (isImplicitDefaultSingleZone(ch, ch.sampleZones[0], knownSamples)) {
-        nextChannel.sampleZones = [];
-      }
+      nextChannel.sampleZones = [];
     }
     return nextChannel;
   })

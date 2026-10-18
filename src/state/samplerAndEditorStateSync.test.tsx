@@ -670,14 +670,29 @@ describe('F-1 + F-2: MultiZoneSamplerModal & sampler resolution/history synchron
       notes: [{ id: 'n-legacy-replace', pitch: 60, start: 0, duration: 1, velocity: 1 }],
     };
 
-    let state: ProjectState = normalizeProjectState({
+    const initialNormalized: ProjectState = normalizeProjectState({
       ...baseProject,
       channels: [legacyChannel, ...baseProject.channels.slice(1)],
       sampleLibrary: [originalSample, replacementSample],
     });
-    state = updateChannelInProjectState(state, 'ch-kick', {
+    let history = createHistory(initialNormalized);
+    let state: ProjectState = updateChannelInProjectState(initialNormalized, 'ch-kick', {
       customSample: replacementSample,
     });
+    history = history.commit(state, 'Replace sample');
+
+    // Undo / Redo across customSample replacement on a confirmed legacy implicit zone:
+    assert.equal(history.canUndo, true, 'undo must be available after replacing customSample');
+    const undoneHistory = history.undo();
+    const undoneChannel = undoneHistory.present.channels.find(ch => ch.id === 'ch-kick')!;
+    assert.equal(undoneChannel.customSample?.id, originalSample.id, 'undo must restore original customSample');
+    assert.equal(undoneChannel.sampleZones?.length, 1, 'undo must restore pre-replacement implicit zone snapshot');
+    assert.equal(undoneChannel.sampleZones?.[0].sampleId, originalSample.id);
+
+    const redoneHistory = undoneHistory.redo();
+    const redoneChannel = redoneHistory.present.channels.find(ch => ch.id === 'ch-kick')!;
+    assert.equal(redoneChannel.customSample?.id, replacementSample.id, 'redo must restore replacement customSample');
+    assert.equal(redoneChannel.sampleZones?.length, 0, 'redo must clear the confirmed legacy implicit zone');
 
     const updatedChannel = state.channels.find(ch => ch.id === 'ch-kick')!;
     const origBuf = { duration: 2 } as AudioBuffer;
@@ -873,6 +888,241 @@ describe('F-1 + F-2: MultiZoneSamplerModal & sampler resolution/history synchron
       offlineCreatedSources[0].startArgs,
       [0, 1, undefined],
       'offline export must apply replacement trimStart=0.25 with loop=true',
+    );
+  });
+
+  it('preserves an unflagged generated-ID full-range single zone whose sampleId differs from customSample.id even when its source exists in sampleLibrary with matching playback settings across normalization, live playback, modal hydration, and offline export', async () => {
+    const channelSample = makeSample('channel-sample-match-test', {
+      duration: 2,
+      rootPitch: 72,
+      trimStart: 0.25,
+      trimEnd: 0.75,
+      reverse: false,
+    });
+    const libraryZoneSample = makeSample('library-zone-match-test', {
+      duration: 4,
+      rootPitch: 48,
+      trimStart: 0.15,
+      trimEnd: 0.85,
+      reverse: true,
+    });
+
+    const baseProject = structuredClone(DEFAULT_PROJECT);
+    const legacyExplicitZoneChannel: Channel = {
+      ...baseProject.channels[0],
+      id: 'ch-kick',
+      instrumentType: 'sampler',
+      pitch: 0,
+      volume: 1,
+      customSample: channelSample,
+      synthParams: {
+        ...baseProject.channels[0].synthParams,
+        sampleLoop: true,
+      },
+      // Legacy zone where user selected libraryZoneSample in MultiZoneSamplerModal before userAuthored existed
+      sampleZones: [
+        {
+          id: 'zone-ch-kick',
+          sampleId: libraryZoneSample.id,
+          lowNote: 0,
+          highNote: 127,
+          rootNote: 48,
+          lowVelocity: 0,
+          highVelocity: 127,
+          tuneSemitones: 0,
+          trimStart: 0.15,
+          trimEnd: 0.85,
+          reverse: true,
+          loop: true,
+        },
+      ],
+      notes: [{ id: 'n-library-match-sync', pitch: 60, start: 0, duration: 1, velocity: 1 }],
+    };
+
+    const state: ProjectState = normalizeProjectState({
+      ...baseProject,
+      channels: [legacyExplicitZoneChannel, ...baseProject.channels.slice(1)],
+      sampleLibrary: [channelSample, libraryZoneSample],
+    });
+    const normalizedChannel = state.channels.find(ch => ch.id === 'ch-kick')!;
+    assert.equal(
+      normalizedChannel.sampleZones?.length,
+      1,
+      'normalizeProjectState must preserve an unflagged generated-ID full-range single zone whose sampleId differs from customSample.id',
+    );
+    assert.equal(normalizedChannel.sampleZones?.[0].sampleId, libraryZoneSample.id);
+    assert.equal(normalizedChannel.sampleZones?.[0].userAuthored, true);
+
+    const channelBuf = { duration: 2 } as AudioBuffer;
+    const zoneBuf = { duration: 4 } as AudioBuffer;
+    let capturedBuffer: AudioBuffer | null = null;
+    let capturedRate = 0;
+
+    const fakeCtx = {
+      currentTime: 0,
+      createBufferSource: () => ({
+        get buffer() { return capturedBuffer; },
+        set buffer(val: AudioBuffer | null) { capturedBuffer = val; },
+        loop: false,
+        loopStart: 0,
+        loopEnd: 0,
+        onended: null,
+        playbackRate: { setValueAtTime: (v: number) => { capturedRate = v; } },
+        connect: () => {},
+        start: () => {},
+        stop: () => {},
+      }),
+      createGain: () => ({
+        gain: { value: 1, setValueAtTime: () => {}, cancelScheduledValues: () => {}, exponentialRampToValueAtTime: () => {} },
+        connect: () => {},
+      }),
+      createBiquadFilter: () => ({
+        type: 'lowpass',
+        frequency: { setValueAtTime: () => {} },
+        Q: { value: 1 },
+        connect: () => {},
+      }),
+    };
+
+    const handle = renderSamplerVoice({
+      channel: normalizedChannel,
+      note: normalizedChannel.notes[0],
+      time: 0,
+      destination: {} as AudioNode,
+      audioContext: fakeCtx as any,
+      voiceId: 'v-library-match-sync',
+      bpm: 120,
+      getSampleBuffer: (id) =>
+        id === libraryZoneSample.id ? zoneBuf : id === channelSample.id ? channelBuf : undefined,
+    });
+    assert.ok(handle);
+    assert.equal(capturedBuffer, zoneBuf, 'live playback must use preserved zone sample buffer');
+    assert.ok(
+      Math.abs(capturedRate + Math.pow(2, (60 - 48) / 12)) < 1e-9,
+      'live playback must preserve zone rootNote=48 and reverse=true',
+    );
+
+    const modalHarness = createComponentHarness(MultiZoneSamplerModal, {
+      isOpen: true,
+      onClose: () => {},
+      channels: state.channels,
+      selectedChannelId: 'ch-kick',
+      sampleLibrary: state.sampleLibrary,
+      onUpdateChannel: () => {},
+    });
+    const modalElements = collectElements(modalHarness.tree);
+    const sampleSelect = modalElements.find(el => el.type === 'select');
+    assert.equal(
+      sampleSelect?.props.value,
+      libraryZoneSample.id,
+      'MultiZoneSamplerModal must hydrate from the preserved zone sampleId',
+    );
+
+    const offlineCreatedSources: Array<{ buffer: AudioBuffer | null; rate: number }> = [];
+    const origGetSampleBuffer = (audioEngine as any).sampleBuffers;
+    const sampleMap = new Map<string, AudioBuffer>([
+      [channelSample.id, channelBuf],
+      [libraryZoneSample.id, zoneBuf],
+    ]);
+    const prevOfflineCtx = (globalThis as any).OfflineAudioContext;
+    class StubOfflineAudioContext {
+      currentTime = 0;
+      sampleRate = 44100;
+      length = 44100;
+      numberOfChannels = 2;
+      destination = { connect: () => {} };
+      createGain() {
+        return {
+          gain: { value: 1, setValueAtTime: () => {}, setTargetAtTime: () => {}, linearRampToValueAtTime: () => {}, exponentialRampToValueAtTime: () => {}, cancelScheduledValues: () => {} },
+          connect: () => {},
+          disconnect: () => {},
+        };
+      }
+      createStereoPanner() {
+        return { pan: { value: 0, setValueAtTime: () => {}, setTargetAtTime: () => {} }, connect: () => {}, disconnect: () => {} };
+      }
+      createBiquadFilter() {
+        return { type: 'lowpass', frequency: { value: 18000, setValueAtTime: () => {}, setTargetAtTime: () => {}, linearRampToValueAtTime: () => {}, exponentialRampToValueAtTime: () => {}, cancelScheduledValues: () => {} }, Q: { value: 1, setValueAtTime: () => {} }, gain: { value: 0, setValueAtTime: () => {} }, connect: () => {}, disconnect: () => {} };
+      }
+      createDynamicsCompressor() {
+        return { threshold: { value: -24, setValueAtTime: () => {} }, knee: { value: 30, setValueAtTime: () => {} }, ratio: { value: 12, setValueAtTime: () => {} }, attack: { value: 0.003, setValueAtTime: () => {} }, release: { value: 0.25, setValueAtTime: () => {} }, connect: () => {}, disconnect: () => {} };
+      }
+      createWaveShaper() {
+        return { curve: null, oversample: 'none', connect: () => {}, disconnect: () => {} };
+      }
+      createDelay() {
+        return { delayTime: { value: 0, setValueAtTime: () => {} }, connect: () => {}, disconnect: () => {} };
+      }
+      createConvolver() {
+        return { buffer: null, connect: () => {}, disconnect: () => {} };
+      }
+      createAnalyser() {
+        return {
+          fftSize: 256,
+          smoothingTimeConstant: 0.7,
+          connect: () => {},
+          disconnect: () => {},
+          getFloatTimeDomainData: (arr: Float32Array) => arr.fill(0),
+          getByteFrequencyData: (arr: Uint8Array) => arr.fill(0),
+          getByteTimeDomainData: (arr: Uint8Array) => arr.fill(128),
+        };
+      }
+      createConstantSource() {
+        return { offset: { value: 0, setValueAtTime: () => {}, linearRampToValueAtTime: () => {} }, connect: () => {}, disconnect: () => {}, start: () => {}, stop: () => {} };
+      }
+      createOscillator() {
+        return { type: 'sine', frequency: { value: 440, setValueAtTime: () => {} }, detune: { value: 0, setValueAtTime: () => {} }, connect: () => {}, start: () => {}, stop: () => {} };
+      }
+      createBufferSource() {
+        const record = { buffer: null as AudioBuffer | null, rate: 1 };
+        offlineCreatedSources.push(record);
+        return {
+          get buffer() { return record.buffer; },
+          set buffer(val: AudioBuffer | null) { record.buffer = val; },
+          loop: false,
+          loopStart: 0,
+          loopEnd: 0,
+          onended: null,
+          playbackRate: { value: 1, setValueAtTime: (v: number) => { record.rate = v; } },
+          connect: () => {},
+          start: () => {},
+          stop: () => {},
+        };
+      }
+      createBuffer(channels: number, length: number, sampleRate: number) {
+        return {
+          numberOfChannels: channels,
+          length,
+          sampleRate,
+          duration: length / sampleRate,
+          getChannelData: () => new Float32Array(length),
+        };
+      }
+      async startRendering() {
+        return this.createBuffer(2, this.length, this.sampleRate);
+      }
+    }
+    try {
+      (globalThis as any).OfflineAudioContext = StubOfflineAudioContext;
+      (audioEngine as any).sampleBuffers = sampleMap;
+      await audioEngine.renderTimelineOffline(
+        [normalizedChannel],
+        [],
+        DEFAULT_PROJECT.mixerTracks,
+        120,
+        1,
+        44100,
+        false,
+        'pattern'
+      );
+    } finally {
+      (audioEngine as any).sampleBuffers = origGetSampleBuffer;
+      (globalThis as any).OfflineAudioContext = prevOfflineCtx;
+    }
+    assert.ok(offlineCreatedSources.length >= 1);
+    assert.ok(
+      offlineCreatedSources.every(src => src.buffer === zoneBuf),
+      'offline export must use the preserved zone sample buffer',
     );
   });
 

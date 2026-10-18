@@ -531,20 +531,11 @@ export const normalizeProjectState = (input: unknown): ProjectState => {
       .map(channel => {
         if (channel.customSample?.id && channel.sampleZones?.length === 1) {
           const singleZone = channel.sampleZones[0];
-          if (!singleZone.userAuthored) {
-            if (isImplicitDefaultSingleZone(channel, singleZone, normalizedSampleLibrary)) {
-              if (singleZone.sampleId !== channel.customSample.id) {
-                return {
-                  ...channel,
-                  sampleZones: [],
-                };
-              }
-            } else {
-              return {
-                ...channel,
-                sampleZones: [{ ...singleZone, userAuthored: true }],
-              };
-            }
+          if (!singleZone.userAuthored && !isImplicitDefaultSingleZone(channel, singleZone, normalizedSampleLibrary)) {
+            return {
+              ...channel,
+              sampleZones: [{ ...singleZone, userAuthored: true }],
+            };
           }
         }
         return channel;

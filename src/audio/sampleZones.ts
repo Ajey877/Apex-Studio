@@ -50,13 +50,7 @@ export function isImplicitDefaultSingleZone(
   }
 
   if (sampleLibrary) {
-    const librarySample = sampleLibrary.find(sample => sample.id === zone.sampleId);
-    if (!librarySample) return false;
-    if ((zone.rootNote ?? 60) !== (librarySample.rootPitch ?? 60)) return false;
-    if ((zone.trimStart ?? 0) !== (librarySample.trimStart ?? 0)) return false;
-    if ((zone.trimEnd ?? 1) !== (librarySample.trimEnd ?? 1)) return false;
-    if (Boolean(zone.reverse) !== Boolean(librarySample.reverse)) return false;
-    return true;
+    return false;
   }
 
   return hasDefaultPlaybackSettings;

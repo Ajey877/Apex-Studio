@@ -3,6 +3,7 @@ import { describe, it } from 'node:test';
 import { renderSamplerVoice } from './sampler';
 import { isImplicitDefaultSingleZone } from '../sampleZones';
 import { normalizeProjectState } from '../../state/projectState';
+import { updateChannelInProjectState } from '../../state/projectMutations';
 import { DEFAULT_PROJECT } from '../presets';
 
 class FakeParam {
@@ -264,21 +265,24 @@ describe('sampler renderer', () => {
             loop: true,
           },
         ],
-        customSample: replacementSample,
+        customSample: originalSample,
       });
 
       assert.equal(
         isImplicitDefaultSingleZone(rawChannel, rawChannel.sampleZones?.[0], [originalSample, replacementSample]),
         true,
-        `expected known original sample in sampleLibrary to confirm legacy implicit zone for ${defaultZoneId}`,
+        `expected zone matching channel.customSample (${defaultZoneId}) to be confirmed as a legacy implicit zone`,
       );
 
-      const normalized = normalizeProjectState({
+      let state = normalizeProjectState({
         ...structuredClone(DEFAULT_PROJECT),
         channels: [rawChannel as any, ...structuredClone(DEFAULT_PROJECT.channels.slice(1))],
         sampleLibrary: [originalSample, replacementSample],
       });
-      const testChannel = normalized.channels.find(ch => ch.id === 'sampler-test')!;
+      state = updateChannelInProjectState(state, 'sampler-test', {
+        customSample: replacementSample,
+      });
+      const testChannel = state.channels.find(ch => ch.id === 'sampler-test')!;
 
       const handle = renderSamplerVoice({
         channel: testChannel,
@@ -316,6 +320,111 @@ describe('sampler renderer', () => {
         `expected replacement forward offset=1s (trimStart=0.25 * 4s) for ${defaultZoneId}`,
       );
     }
+  });
+
+  it('preserves an unflagged generated-ID full-range single zone whose sampleId differs from customSample.id even when its source exists in sampleLibrary with matching playback settings', () => {
+    const channelSample = {
+      id: 'channel-sample',
+      name: 'Channel Sample',
+      duration: 2,
+      sampleRate: 44100,
+      channels: 1,
+      waveformPeaks: [0.2, 0.7],
+      trimStart: 0.25,
+      trimEnd: 0.75,
+      rootPitch: 72,
+      reverse: false,
+    };
+    const libraryZoneSample = {
+      id: 'library-zone-sample',
+      name: 'Library Zone Sample',
+      duration: 4,
+      sampleRate: 44100,
+      channels: 1,
+      waveformPeaks: [0.4, 0.9],
+      trimStart: 0.15,
+      trimEnd: 0.85,
+      rootPitch: 48,
+      reverse: true,
+    };
+    const channelSampleBuffer = { duration: 2 } as AudioBuffer;
+    const libraryZoneBuffer = { duration: 4 } as AudioBuffer;
+
+    const rawChannel = channel({
+      synthParams: {
+        filterType: 'lowpass',
+        filterCutoff: 18000,
+        filterResonance: 1,
+        sampleLoop: true,
+      },
+      sampleZones: [
+        {
+          id: 'zone-sampler-test',
+          sampleId: libraryZoneSample.id,
+          lowNote: 0,
+          highNote: 127,
+          rootNote: 48,
+          lowVelocity: 0,
+          highVelocity: 127,
+          tuneSemitones: 0,
+          trimStart: 0.15,
+          trimEnd: 0.85,
+          reverse: true,
+          loop: true,
+        },
+      ],
+      customSample: channelSample,
+    });
+
+    assert.equal(
+      isImplicitDefaultSingleZone(rawChannel, rawChannel.sampleZones?.[0], [channelSample, libraryZoneSample]),
+      false,
+      'matching library sample settings must not classify a zone as implicit when zone.sampleId differs from channel.customSample.id',
+    );
+
+    const normalized = normalizeProjectState({
+      ...structuredClone(DEFAULT_PROJECT),
+      channels: [rawChannel as any, ...structuredClone(DEFAULT_PROJECT.channels.slice(1))],
+      sampleLibrary: [channelSample, libraryZoneSample],
+    });
+    const normalizedChannel = normalized.channels.find(ch => ch.id === 'sampler-test')!;
+
+    assert.equal(
+      normalizedChannel.sampleZones?.length,
+      1,
+      'normalizeProjectState must not clear an unflagged single zone whose sampleId differs from customSample.id',
+    );
+    assert.equal(normalizedChannel.sampleZones?.[0].sampleId, libraryZoneSample.id);
+    assert.equal(normalizedChannel.sampleZones?.[0].userAuthored, true);
+
+    const ctx = new FakeContext();
+    const handle = renderSamplerVoice({
+      channel: normalizedChannel,
+      note: { id: 'n-library-match', pitch: 60, start: 0, duration: 1, velocity: 0.8 } as any,
+      time: 0,
+      destination: {} as AudioNode,
+      audioContext: ctx as any,
+      voiceId: 'library-matching-zone-voice',
+      bpm: 120,
+      getSampleBuffer: (id) =>
+        id === libraryZoneSample.id
+          ? libraryZoneBuffer
+          : id === channelSample.id
+            ? channelSampleBuffer
+            : undefined,
+    });
+
+    assert.ok(handle);
+    const source = ctx.sources[0];
+    assert.equal(
+      source.buffer,
+      libraryZoneBuffer,
+      'renderSamplerVoice must play the preserved zone sample rather than channel.customSample',
+    );
+    assert.ok(
+      Math.abs(source.playbackRate.value + Math.pow(2, (60 - 48) / 12)) < 1e-9,
+      'renderSamplerVoice must preserve the zone rootNote=48 and reverse=true',
+    );
   });
 
   it('does not classify an unflagged full-range zone with an unknown or missing source sample as implicit', () => {
