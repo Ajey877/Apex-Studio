@@ -1,4 +1,4 @@
-import type { Channel, Note, SampleZone } from '../types/daw';
+import type { Channel, CustomSampleData, Note, SampleZone } from '../types/daw';
 
 export function findSampleZone(zones: SampleZone[] | undefined, note: Note): SampleZone | undefined {
   if (!zones?.length) return undefined;
@@ -14,6 +14,7 @@ export function findSampleZone(zones: SampleZone[] | undefined, note: Note): Sam
 export function isImplicitDefaultSingleZone(
   channel: Pick<Channel, 'id' | 'sampleZones' | 'customSample' | 'synthParams'>,
   zone: SampleZone | undefined = channel.sampleZones?.[0],
+  sampleLibrary?: ReadonlyArray<CustomSampleData>,
 ): boolean {
   if (!zone || (channel.sampleZones?.length ?? 0) !== 1) return false;
   if (zone.userAuthored) return false;
@@ -29,12 +30,29 @@ export function isImplicitDefaultSingleZone(
   ) {
     return false;
   }
-  if ((zone.rootNote ?? 60) !== 60) return false;
-  if ((zone.trimStart ?? 0) !== 0 || (zone.trimEnd ?? 1) !== 1) return false;
-  if (Boolean(zone.reverse) !== false) return false;
   const channelLoop = Boolean(channel.synthParams?.sampleLoop);
   if ((zone.loop ?? channelLoop) !== channelLoop) return false;
   if (zone.loopStart !== undefined || zone.loopEnd !== undefined) return false;
+
+  if (
+    channel.customSample &&
+    zone.sampleId === channel.customSample.id &&
+    (zone.rootNote ?? 60) !== 60 &&
+    (zone.rootNote ?? 60) !== (channel.customSample.rootPitch ?? 60)
+  ) {
+    return false;
+  }
+
+  if (sampleLibrary && zone.sampleId !== channel.customSample?.id) {
+    const librarySample = sampleLibrary.find(sample => sample.id === zone.sampleId);
+    if (librarySample) {
+      if ((zone.rootNote ?? 60) !== (librarySample.rootPitch ?? 60)) return false;
+      if ((zone.trimStart ?? 0) !== (librarySample.trimStart ?? 0)) return false;
+      if ((zone.trimEnd ?? 1) !== (librarySample.trimEnd ?? 1)) return false;
+      if (Boolean(zone.reverse) !== Boolean(librarySample.reverse)) return false;
+    }
+  }
+
   return true;
 }
 

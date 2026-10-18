@@ -94,7 +94,7 @@ export const MultiZoneSamplerModal: React.FC<MultiZoneSamplerModalProps> = ({
     const persisted = selectedChannel.sampleZones || [];
     const hasAuthoritativePersistedZones =
       persisted.length > 0 &&
-      !(selectedChannel.customSample?.id && isImplicitDefaultSingleZone(selectedChannel, persisted[0]));
+      !(selectedChannel.customSample?.id && isImplicitDefaultSingleZone(selectedChannel, persisted[0], sampleLibrary));
     if (hasAuthoritativePersistedZones) {
       const hydrated = persisted.map((zone, index) => ({ ...zone, name: 'Zone ' + (index + 1), color: ZONE_IDENTITY_COLORS[index % ZONE_IDENTITY_COLORS.length] }));
       setZones(hydrated);

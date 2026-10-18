@@ -209,6 +209,86 @@ describe('sampler renderer', () => {
     }
   });
 
+  it('uses replacement customSample when a legacy implicit full-range zone copied non-default rootNote, trim, and reverse from its original sample', () => {
+    for (const defaultZoneId of ['zone-sampler-test', 'zone-default-sampler-test']) {
+      const ctx = new FakeContext();
+      const staleOriginalBuffer = { duration: 2 } as AudioBuffer;
+      const replacementBuffer = { duration: 4 } as AudioBuffer;
+      const testChannel = channel({
+        synthParams: {
+          filterType: 'lowpass',
+          filterCutoff: 18000,
+          filterResonance: 1,
+          sampleLoop: true,
+        },
+        sampleZones: [
+          {
+            id: defaultZoneId,
+            sampleId: 'original-sample',
+            lowNote: 0,
+            highNote: 127,
+            rootNote: 48,
+            lowVelocity: 0,
+            highVelocity: 127,
+            tuneSemitones: 0,
+            trimStart: 0.15,
+            trimEnd: 0.85,
+            reverse: true,
+            loop: true,
+          },
+        ],
+        customSample: {
+          id: 'replacement-sample',
+          name: 'Replacement Sample',
+          duration: 4,
+          sampleRate: 44100,
+          channels: 1,
+          waveformPeaks: [0.4, 0.9],
+          trimStart: 0.25,
+          trimEnd: 0.75,
+          rootPitch: 72,
+          reverse: false,
+        },
+      });
+
+      const handle = renderSamplerVoice({
+        channel: testChannel,
+        note: { id: 'n-legacy-nondefault', pitch: 60, start: 0, duration: 1, velocity: 0.8 } as any,
+        time: 0,
+        destination: {} as AudioNode,
+        audioContext: ctx as any,
+        voiceId: `legacy-nondefault-${defaultZoneId}`,
+        bpm: 120,
+        getSampleBuffer: (id) =>
+          id === 'replacement-sample'
+            ? replacementBuffer
+            : id === 'original-sample'
+              ? staleOriginalBuffer
+              : undefined,
+      });
+
+      assert.ok(handle);
+      const source = ctx.sources[0];
+      assert.equal(
+        source.buffer,
+        replacementBuffer,
+        `legacy implicit zone with non-default copied sample settings must yield to replacement customSample for ${defaultZoneId}`,
+      );
+      assert.ok(
+        Math.abs(source.playbackRate.value - Math.pow(2, (60 - 72) / 12)) < 1e-9,
+        `expected forward playbackRate with replacement rootPitch=72 for ${defaultZoneId}`,
+      );
+      assert.equal(source.loop, true, `expected channel sampleLoop=true for ${defaultZoneId}`);
+      assert.equal(source.loopStart, 1, `expected replacement trimStart=0.25 * 4s for ${defaultZoneId}`);
+      assert.equal(source.loopEnd, 3, `expected replacement trimEnd=0.75 * 4s for ${defaultZoneId}`);
+      assert.deepEqual(
+        source.startArgs,
+        [0, 1, undefined],
+        `expected replacement forward offset=1s (trimStart=0.25 * 4s) for ${defaultZoneId}`,
+      );
+    }
+  });
+
   it('keeps an explicitly user-authored full-range single-zone mapping authoritative when customSample also exists', () => {
     const channelSampleBuffer = { duration: 2 } as AudioBuffer;
     const explicitZoneBuffer = { duration: 4 } as AudioBuffer;

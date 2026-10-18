@@ -2,6 +2,7 @@ import { DEFAULT_MASTERING_SUITE_STATE, normalizeMasteringSuiteState } from '../
 import type { GrossBeatState, ProjectState, Channel, PlaylistClip } from '../types/daw';
 import { audioEngine } from '../audio/audioEngine';
 import { createDefaultMixerTracks, createDefaultPlaylistTracks } from '../audio/presets';
+import { isImplicitDefaultSingleZone } from '../audio/sampleZones';
 import { markAudioClipsMissingBufferId } from './playlistClipIntegrity';
 import { normalizePatternContentModel, removeChannelFromPatternContent } from './patternContent';
 
@@ -507,6 +508,12 @@ export const normalizeProjectState = (input: unknown): ProjectState => {
     throw new Error('Invalid project file: vocal tuner settings are malformed.');
   }
 
+  const normalizedSampleLibrary = Array.isArray(candidate.sampleLibrary)
+    ? clone(candidate.sampleLibrary)
+    : clone((Array.isArray(candidate.channels) ? candidate.channels : defaults.channels)
+      .map(channel => channel.customSample)
+      .filter((sample): sample is NonNullable<typeof sample> => Boolean(sample?.id)));
+
   const normalized: ProjectState = {
     ...defaults,
     ...candidate,
@@ -515,16 +522,26 @@ export const normalizeProjectState = (input: unknown): ProjectState => {
       ...(candidate.meta as Partial<ProjectState['meta']> | undefined)
     },
     patterns: Array.isArray(candidate.patterns) ? clone(candidate.patterns) : defaults.patterns,
-    sampleLibrary: Array.isArray(candidate.sampleLibrary)
-      ? clone(candidate.sampleLibrary)
-      : clone((Array.isArray(candidate.channels) ? candidate.channels : defaults.channels)
-        .map(channel => channel.customSample)
-        .filter((sample): sample is NonNullable<typeof sample> => Boolean(sample?.id))),
+    sampleLibrary: normalizedSampleLibrary,
     // Phase 79 backward-compat: strip obsolete `unisonSpread` from every
     // channel's synthParams if an older project saved it. The field was never
     // consumed by any DSP and must not round-trip back out on the next save.
     channels: (Array.isArray(candidate.channels) ? clone(candidate.channels) : defaults.channels)
-      .map(stripObsoleteChannelFields),
+      .map(stripObsoleteChannelFields)
+      .map(channel => {
+        if (
+          channel.customSample?.id &&
+          channel.sampleZones?.length === 1 &&
+          !channel.sampleZones[0].userAuthored &&
+          !isImplicitDefaultSingleZone(channel, channel.sampleZones[0], normalizedSampleLibrary)
+        ) {
+          return {
+            ...channel,
+            sampleZones: [{ ...channel.sampleZones[0], userAuthored: true }],
+          };
+        }
+        return channel;
+      }),
     playlistTracks: Array.isArray(candidate.playlistTracks) ? clone(candidate.playlistTracks) : defaults.playlistTracks,
     // Phase 48 legacy recovery: an audio clip that reached persistence without
     // an `audioBufferId` (an older build could publish one) is silent, blocks
