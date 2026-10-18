@@ -5,6 +5,7 @@ import JSZip from 'jszip';
 import { ProjectState } from '../types/daw';
 import { normalizeProjectState } from '../state/projectState';
 import { getPersistedAudioClip, persistAudioClip } from '../audio/audioPersistence';
+import { buildBundleAudioAssetPath } from './projectBundleAudioPath';
 import { getAudioIdsForProject } from '../state/projectPersistence';
 import type { ProjectReplacementSource } from '../state/projectReplacement';
 
@@ -67,7 +68,7 @@ export const ProjectBundleZipModal: React.FC<ProjectBundleZipModalProps> = ({
           try {
             const blob = await getPersistedAudioClip(audioId);
             if (!blob || blob.size === 0) continue;
-            const path = `audio/${sanitizeFilePart(audioId)}.bin`;
+            const path = buildBundleAudioAssetPath(audioId, audioFiles.length);
             audioFolder?.file(path.replace('audio/', ''), blob);
             audioFiles.push({ id: audioId, path, mimeType: blob.type || 'application/octet-stream', size: blob.size });
           } catch (error) {

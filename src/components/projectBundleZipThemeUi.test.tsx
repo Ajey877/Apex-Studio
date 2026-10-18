@@ -37,6 +37,7 @@ import { readFileSync } from 'node:fs';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { ProjectBundleZipModal } from './ProjectBundleZipModal';
+import { buildBundleAudioAssetPath } from './projectBundleAudioPath';
 import { DEFAULT_PROJECT } from '../audio/presets';
 import { DARK_TOKENS, LIGHT_TOKENS, hexToRgb } from './themeTestDocument';
 
@@ -80,6 +81,20 @@ const contrastRatio = (foreground: string, background: string): number => {
   const second = luminance(hexToRgb(background));
   return (Math.max(first, second) + 0.05) / (Math.min(first, second) + 0.05);
 };
+
+describe('project bundle audio archive paths', () => {
+  it('keeps distinct audio IDs on distinct ZIP paths, including sanitized and truncated collisions', () => {
+    const ids = [
+      'take/one',
+      'take_one',
+      `${'x'.repeat(120)}a`,
+      `${'x'.repeat(120)}b`
+    ];
+    const paths = ids.map((id, index) => buildBundleAudioAssetPath(id, index));
+
+    assert.equal(new Set(paths).size, ids.length);
+  });
+});
 
 describe('Project Bundle Zip modal theme contract (UI-03P)', () => {
   it('renders the full modal: title, badge, both cards, both actions and the footer', () => {
@@ -154,6 +169,7 @@ describe('Project Bundle Zip modal theme contract (UI-03P)', () => {
     }
     assert.match(code, /format: 'apex-studio-project-bundle'/);
     assert.match(code, /formatVersion: 2/);
+    assert.match(code, /buildBundleAudioAssetPath\(audioId, audioFiles\.length\)/);
     assert.match(code, /if \(key === 'audioBlob' \|\| key === 'blob'\) return undefined;/);
     assert.match(code, /pattern_\$\{idx \+ 1\}_\$\{sanitizeFilePart\(pat\.name\)\}\.json/);
     assert.match(code, /a\.download = `\$\{bundleName\}\.zip`/);
