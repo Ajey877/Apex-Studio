@@ -38,6 +38,7 @@ import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { ProjectBundleZipModal } from './ProjectBundleZipModal';
 import { buildBundleAudioAssetPath } from './projectBundleAudioPath';
+import { BundleAudioAssetError, collectBundleAudioAssets } from './projectBundleAudioAssets';
 import { DEFAULT_PROJECT } from '../audio/presets';
 import { DARK_TOKENS, LIGHT_TOKENS, hexToRgb } from './themeTestDocument';
 
@@ -94,6 +95,65 @@ describe('project bundle audio archive paths', () => {
 
     assert.equal(new Set(paths).size, ids.length);
   });
+});
+
+describe('portable bundle audio collection', () => {
+  it('preserves each audio ID, blob, MIME type and unique manifest path', async () => {
+    const ids = ['take/one', 'take_one', `${'x'.repeat(120)}a`, `${'x'.repeat(120)}b`];
+    const blobs = new Map<string, Blob>(ids.map((id) => [id, new Blob([`audio:${id}`], { type: 'audio/wav' })] as const));
+    const assets = await collectBundleAudioAssets(ids, async (id) => blobs.get(id));
+
+    assert.deepEqual(assets.map((asset) => asset.id), ids);
+    assert.equal(new Set(assets.map((asset) => asset.path)).size, ids.length);
+    for (const asset of assets) {
+      assert.equal(asset.blob, blobs.get(asset.id));
+      assert.equal(asset.mimeType, 'audio/wav');
+      assert.equal(asset.size, asset.blob.size);
+      assert.ok(asset.path.startsWith('audio/'));
+    }
+  });
+
+  it('aborts the whole collection when a required asset is missing or empty', async () => {
+    for (const missingBlob of [undefined, new Blob([])]) {
+      const readIds: string[] = [];
+      await assert.rejects(
+        () => collectBundleAudioAssets(['present', 'missing', 'later'], async (id) => {
+          readIds.push(id);
+          return id === 'missing' ? missingBlob : new Blob(['audio']);
+        }),
+        (error: unknown) => {
+          assert.ok(error instanceof BundleAudioAssetError);
+          assert.equal(error.audioId, 'missing');
+          assert.match(error.message, /cannot export a complete bundle/i);
+          return true;
+        }
+      );
+      assert.deepEqual(readIds, ['present', 'missing'], 'collection must stop at the first unavailable asset');
+    }
+  });
+
+  it('reports unreadable assets and does not return a partial collection', async () => {
+    await assert.rejects(
+      () => collectBundleAudioAssets(['read-error', 'later'], async (id) => {
+        if (id === 'read-error') throw new Error('IndexedDB unavailable');
+        return new Blob(['audio']);
+      }),
+      (error: unknown) => {
+        assert.ok(error instanceof BundleAudioAssetError);
+        assert.equal(error.audioId, 'read-error');
+        assert.match(error.message, /could not be read from local storage/);
+        return true;
+      }
+    );
+  });
+});
+
+it('fails closed before ZIP generation or download when required audio cannot be collected', () => {
+  assert.match(code, /await collectBundleAudioAssets/);
+  assert.match(code, /err instanceof BundleAudioAssetError \? err\.message/);
+  const collectionIndex = code.indexOf('await collectBundleAudioAssets');
+  assert.ok(collectionIndex >= 0 && code.indexOf('zip.generateAsync') > collectionIndex);
+  assert.ok(collectionIndex >= 0 && code.indexOf('a.click()') > collectionIndex);
 });
 
 describe('Project Bundle Zip modal theme contract (UI-03P)', () => {
@@ -169,7 +229,7 @@ describe('Project Bundle Zip modal theme contract (UI-03P)', () => {
     }
     assert.match(code, /format: 'apex-studio-project-bundle'/);
     assert.match(code, /formatVersion: 2/);
-    assert.match(code, /buildBundleAudioAssetPath\(audioId, audioFiles\.length\)/);
+    assert.match(code, /await collectBundleAudioAssets\([\s\S]*?getAudioIdsForProject\(projectState\)[\s\S]*?getPersistedAudioClip/);
     assert.match(code, /if \(key === 'audioBlob' \|\| key === 'blob'\) return undefined;/);
     assert.match(code, /pattern_\$\{idx \+ 1\}_\$\{sanitizeFilePart\(pat\.name\)\}\.json/);
     assert.match(code, /a\.download = `\$\{bundleName\}\.zip`/);
