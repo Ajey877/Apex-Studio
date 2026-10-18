@@ -14,10 +14,17 @@
  *   AC5  legacy (shared-content) documents load and round-trip unchanged, and
  *        become independent — content preserved — at the first pattern operation;
  *   AC6  save/reload, undo/redo and channel deletion keep every pattern exact;
- *   AC7  a MIDI take lands in the pattern it started in.
+ *   AC7  a MIDI take lands in the pattern it started in;
+ *   AC10 selecting a pattern is never an undo step: Undo/Redo of an edit made
+ *        after a selection keep that pattern selected and restore its content.
+ *
+ * Numbering follows docs/verification/INDEPENDENT_PATTERNS_REPORT.md: AC8
+ * (playback/export) and AC9 (Playlist) are covered by
+ * src/audio/independentPatternsPlayback.test.ts and the Playwright specs.
  */
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 
 import type { Channel, Note, Pattern, PlaylistClip, ProjectState } from '../types/daw';
 import {
@@ -30,12 +37,13 @@ import {
   removeChannelFromPatternContent,
   resolveClipChannelContent,
   resolvePatternChannelContent,
+  selectPatternInHistory,
   selectPatternInProjectState,
 } from './patternContent';
 import { createDefaultProjectState, deleteChannelFromProjectState, normalizeProjectState } from './projectState';
 import { addPatternToProjectState, updateChannelInProjectState } from './projectMutations';
 import { serializeProjectState } from './projectPersistence';
-import { createHistory } from './projectHistory';
+import { createHistory, type ProjectHistory } from './projectHistory';
 import { getProjectFingerprint, isPristineProject } from './projectReplacement';
 import { toggleChannelStep } from '../components/channelRackOperations';
 import { appendRecordedNotesToChannelInProjectState } from '../audio/midiRecording';
@@ -463,5 +471,196 @@ describe('Project-level views stay truthful', () => {
     edited = toggle(edited, edited.channels[0].id, 1);
     edited = selectPatternInProjectState(edited, demo.patterns[0].id);
     assert.equal(isPristineProject(edited), false);
+  });
+});
+
+describe('AC10: pattern selection is never an undo step (review follow-up)', () => {
+  /**
+   * The App's history protocol, driven with the same production functions
+   * App.tsx uses: `live` is what the user sees (projectStateRef), `history` is
+   * project history. An edit commits the live state; undo/redo publish the
+   * history's present; a selection swaps the live content AND re-expresses the
+   * present (`selectPatternInHistory`) without recording a step.
+   *
+   * Reproduced defect (PR #243 head 7e53c86, also present on main for the bare
+   * id write): the selection bypassed history, so the next edit was recorded
+   * against the pre-selection snapshot. Undoing an edit made in Pattern 2
+   * jumped back to Pattern 1, and a no-op commit after a selection (a click on
+   * a playlist clip) recorded an undo step whose only effect was to switch the
+   * pattern back. Every pattern's content was restored correctly throughout.
+   */
+  interface Session { live: ProjectState; history: ProjectHistory }
+  const start = (state: ProjectState): Session => ({ live: state, history: createHistory(state) });
+  const select = (session: Session, patternId: string): Session => ({
+    live: selectPatternInProjectState(session.live, patternId),
+    history: selectPatternInHistory(session.history, patternId),
+  });
+  const edit = (session: Session, updater: (state: ProjectState) => ProjectState, label: string): Session => {
+    const live = updater(session.live);
+    return { live, history: session.history.commit(live, label) };
+  };
+  const undo = (session: Session): Session => {
+    const history = session.history.undo();
+    return { live: history.present, history };
+  };
+  const redo = (session: Session): Session => {
+    const history = session.history.redo();
+    return { live: history.present, history };
+  };
+
+  const demo = (): ProjectState => structuredClone(DEFAULT_PROJECT);
+  const groove = activeSteps(channelById(DEFAULT_PROJECT, 'ch-kick').steps);
+  const kickOf = (state: ProjectState, patternId: string): number[] => contentOf(state, patternId, 'ch-kick').steps;
+  const shownKick = (state: ProjectState): number[] => activeSteps(channelById(state, 'ch-kick').steps);
+
+  it('selecting a pattern records no undo step, and the present follows the selection', () => {
+    let session = edit(start(demo()), state => toggle(state, 'ch-kick', 2), 'Edit steps');
+    const before = session.history;
+    session = select(session, 'pat-2');
+
+    assert.equal(session.history.past.length, before.past.length);
+    assert.equal(session.history.future.length, before.future.length);
+    assert.equal(session.history.canUndo, before.canUndo);
+    assert.equal(session.history.present.selectedPatternId, 'pat-2');
+    // The present now IS what the user sees, so a no-op commit (pointer-up on
+    // a playlist clip) records nothing: no selection-only undo step.
+    assert.equal(session.history.commit(session.live, 'Playlist interaction'), session.history);
+    // Re-selecting the selected pattern, or an unknown id, is a no-op.
+    assert.equal(selectPatternInHistory(session.history, 'pat-2'), session.history);
+    assert.equal(selectPatternInHistory(session.history, 'missing'), session.history);
+  });
+
+  it('Select Pattern 2 -> edit steps -> Undo -> Redo keeps Pattern 2 selected and restores every pattern', () => {
+    let session = select(start(demo()), 'pat-2');
+    session = edit(session, state => toggle(state, 'ch-kick', groove[0]), 'Edit steps');
+    const edited = groove.slice(1);
+    assert.deepEqual(shownKick(session.live), edited);
+
+    session = undo(session);
+    assert.equal(session.live.selectedPatternId, 'pat-2', 'Undo keeps Pattern 2 selected');
+    assert.deepEqual(shownKick(session.live), groove, 'Pattern 2 shows its restored content');
+    assert.deepEqual(kickOf(session.live, 'pat-1'), groove);
+    assert.deepEqual(kickOf(session.live, 'pat-3'), groove);
+
+    session = redo(session);
+    assert.equal(session.live.selectedPatternId, 'pat-2', 'Redo keeps Pattern 2 selected');
+    assert.deepEqual(shownKick(session.live), edited, 'Pattern 2 shows its edit again');
+    assert.deepEqual(kickOf(session.live, 'pat-1'), groove);
+    assert.deepEqual(kickOf(session.live, 'pat-3'), groove);
+  });
+
+  it('the same holds for Piano Roll notes', () => {
+    const originalNotes = channelById(DEFAULT_PROJECT, 'ch-kick').notes.map(n => `${n.pitch}@${n.start}`);
+    let session = select(start(demo()), 'pat-2');
+    session = edit(session, state => updateChannelInProjectState(state, 'ch-kick', {
+      notes: [...channelById(state, 'ch-kick').notes, note('drawn', 72, 15)],
+    }), 'Edit notes');
+    const drawnNotes = [...originalNotes, '72@15'];
+
+    session = undo(session);
+    assert.equal(session.live.selectedPatternId, 'pat-2');
+    assert.deepEqual(channelById(session.live, 'ch-kick').notes.map(n => `${n.pitch}@${n.start}`), originalNotes);
+    session = redo(session);
+    assert.equal(session.live.selectedPatternId, 'pat-2');
+    assert.deepEqual(channelById(session.live, 'ch-kick').notes.map(n => `${n.pitch}@${n.start}`), drawnNotes);
+    assert.deepEqual(contentOf(session.live, 'pat-1', 'ch-kick').notes, originalNotes, 'Pattern 1 notes untouched');
+  });
+
+  it('undo after switching patterns shows the pattern the undone edit was made in; redo is its exact inverse', () => {
+    let session = select(start(demo()), 'pat-2');
+    session = edit(session, state => toggle(state, 'ch-kick', groove[0]), 'Edit steps'); // Pattern 2 edit
+    session = select(session, 'pat-1');
+    session = edit(session, state => toggle(state, 'ch-kick', 2), 'Edit steps'); // Main Groove edit
+    const pattern2Edited = groove.slice(1);
+    const grooveEdited = [...groove, 2].sort((a, b) => a - b);
+
+    // Undo the Main Groove edit: Main Groove stays on screen with its content restored.
+    session = undo(session);
+    assert.equal(session.live.selectedPatternId, 'pat-1');
+    assert.deepEqual(shownKick(session.live), groove);
+    assert.deepEqual(kickOf(session.live, 'pat-2'), pattern2Edited);
+
+    // Undo the Pattern 2 edit: the view moves to Pattern 2, where that edit was made.
+    session = undo(session);
+    assert.equal(session.live.selectedPatternId, 'pat-2');
+    assert.deepEqual(shownKick(session.live), groove);
+    assert.deepEqual(kickOf(session.live, 'pat-1'), groove);
+
+    // Redo walks back exactly: Pattern 2's edit returns in the view the user
+    // undid it from (Main Groove), then the Main Groove edit returns.
+    session = redo(session);
+    assert.equal(session.live.selectedPatternId, 'pat-1');
+    assert.deepEqual(kickOf(session.live, 'pat-2'), pattern2Edited);
+    assert.deepEqual(shownKick(session.live), groove);
+    session = redo(session);
+    assert.equal(session.live.selectedPatternId, 'pat-1');
+    assert.deepEqual(shownKick(session.live), grooveEdited);
+    assert.deepEqual(kickOf(session.live, 'pat-2'), pattern2Edited);
+    assert.deepEqual(kickOf(session.live, 'pat-3'), groove);
+  });
+
+  it('a selection between Undo and Redo keeps the redo stack and every pattern exact', () => {
+    let session = select(start(demo()), 'pat-2');
+    session = edit(session, state => toggle(state, 'ch-kick', groove[0]), 'Edit steps');
+    session = undo(session);
+    session = select(session, 'pat-3');
+    assert.equal(session.history.canRedo, true, 'selecting is not an edit, so redo survives');
+
+    // Redo shows the redone edit's own pattern...
+    session = redo(session);
+    assert.equal(session.live.selectedPatternId, 'pat-2');
+    assert.deepEqual(shownKick(session.live), groove.slice(1));
+    assert.deepEqual(kickOf(session.live, 'pat-3'), groove);
+    // ...and undoing it again returns to the pattern selected before the Redo.
+    session = undo(session);
+    assert.equal(session.live.selectedPatternId, 'pat-3');
+    assert.deepEqual(kickOf(session.live, 'pat-2'), groove);
+    assert.deepEqual(kickOf(session.live, 'pat-1'), groove);
+  });
+
+  it('a change still waiting for its own commit is not absorbed into the present', () => {
+    // An open playlist drag publishes live state and commits on pointer-up.
+    let session = start(demo());
+    const originalStart = session.live.playlistClips.find(clip => clip.id === 'clip-1')!.startBar;
+    session = {
+      live: {
+        ...session.live,
+        playlistClips: session.live.playlistClips.map(clip => (clip.id === 'clip-1' ? { ...clip, startBar: originalStart + 2 } : clip)),
+      },
+      history: session.history,
+    };
+    session = select(session, 'pat-2');
+    assert.equal(session.history.present.playlistClips.find(clip => clip.id === 'clip-1')!.startBar, originalStart);
+
+    const committed = session.history.commit(session.live, 'Playlist interaction');
+    assert.equal(committed.past.length, 1, 'the drag keeps its own undo step');
+    const undone = committed.undo();
+    assert.equal(undone.present.selectedPatternId, 'pat-2', 'undoing the drag keeps the selection');
+    assert.equal(undone.present.playlistClips.find(clip => clip.id === 'clip-1')!.startBar, originalStart);
+  });
+
+  it('contrast: a selection that bypasses history is undone with the next edit (the reproduced defect)', () => {
+    const bypass = (session: Session, patternId: string): Session => ({
+      live: selectPatternInProjectState(session.live, patternId),
+      history: session.history,
+    });
+    const edited = edit(bypass(start(demo()), 'pat-2'), state => toggle(state, 'ch-kick', groove[0]), 'Edit steps');
+    assert.equal(undo(edited).live.selectedPatternId, 'pat-1', 'Undo jumps back to Pattern 1');
+
+    const selected = bypass(start(demo()), 'pat-2');
+    const clicked = selected.history.commit(selected.live, 'Playlist interaction');
+    assert.equal(clicked.past.length, 1, 'a no-op commit records a selection-only step');
+    assert.equal(clicked.undo().present.selectedPatternId, 'pat-1');
+  });
+
+  it('App routes pattern selection through selectPatternInHistory after flushing pending continuous edits', () => {
+    const source = readFileSync(new URL('../App.tsx', import.meta.url), 'utf8');
+    const begin = source.indexOf('const handleSelectPattern = ');
+    assert.ok(begin > 0, 'handleSelectPattern exists');
+    const body = source.slice(begin, source.indexOf('\n  };', begin));
+    const flush = body.indexOf('continuousBatcherRef.current.flush()');
+    const reexpress = body.indexOf('projectHistoryRef.current = selectPatternInHistory(projectHistoryRef.current, id)');
+    assert.ok(flush > 0, 'a continuous edit pending in the outgoing pattern is committed first');
+    assert.ok(reexpress > flush, 'the history present takes the same swap, after the flush');
   });
 });

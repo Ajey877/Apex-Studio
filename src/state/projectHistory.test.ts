@@ -246,3 +246,40 @@ test('recording references remain usable after undo and redo', () => {
   assert.equal(redone.present.recordings[0].audioBufferId, 'recording-buffer-1');
   assert.equal(redone.present.playlistClips[0].audioBufferId, 'recording-buffer-1');
 });
+
+test('replacePresent re-expresses the present without recording an undo step', () => {
+  // past = [0], present = 1, future = [2]
+  const history = createHistory(makeState(0))
+    .commit(makeState(1), 'Edit 1')
+    .commit(makeState(2), 'Edit 2')
+    .undo();
+
+  const replaced = history.replacePresent(makeState(11));
+  assert.equal(replaced.present.meta.name, 'Project 11');
+  assert.equal(replaced.past.length, 1, 'nothing is pushed onto past');
+  assert.equal(replaced.future.length, 1, 'redo history is kept');
+  assert.equal(replaced.canUndo, true);
+  assert.equal(replaced.canRedo, true);
+  assert.equal(replaced.past[0].state.meta.name, 'Project 0');
+  assert.equal(replaced.past[0].label, 'Edit 1');
+  assert.equal(replaced.future[0].state.meta.name, 'Project 2');
+  assert.equal(replaced.future[0].label, 'Edit 2');
+
+  // Undo and redo walk the same entries as before...
+  assert.equal(replaced.undo().present.meta.name, 'Project 0');
+  const redone = replaced.redo();
+  assert.equal(redone.present.meta.name, 'Project 2');
+  // ...and undoing that redo returns to the re-expressed present.
+  assert.equal(redone.undo().present.meta.name, 'Project 11');
+
+  // A semantically equal present (only the transient timestamp differs) is a no-op.
+  const same = structuredClone(replaced.present);
+  same.meta.updated = 999;
+  assert.equal(replaced.replacePresent(same), replaced);
+
+  // The stored present is an independent snapshot, like every history entry.
+  const source = makeState(12);
+  const withTwelve = replaced.replacePresent(source);
+  source.channels[0].notes[0].pitch = 0;
+  assert.equal(withTwelve.present.channels[0].notes[0].pitch, 72);
+});

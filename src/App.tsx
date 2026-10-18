@@ -79,7 +79,7 @@ import {
 } from './state/playlistClipIntegrity';
 import { synchronizeBeforeRuntimePublication } from './state/runtimeStatePublication';
 import { resynchronizeLiveEngineFromProjectState } from './state/liveEngineResynchronization';
-import { clonePatternInProjectState, selectPatternInProjectState } from './state/patternContent';
+import { clonePatternInProjectState, selectPatternInHistory, selectPatternInProjectState } from './state/patternContent';
 import { commitThemeSelection, readThemePreference, type ThemeMode } from './state/theme';
 import {
   ContinuousHistoryBatcher,
@@ -1452,18 +1452,27 @@ export function App() {
   };
 
   /**
-   * Selects a pattern for editing and Pattern Mode. Selection is a view change
-   * and stays outside project history (as before), but it is no longer a bare
-   * id write: the outgoing pattern stores its content and the incoming
-   * pattern's content becomes the live channel content, atomically, so no
-   * pattern ever shows or plays another pattern's steps and notes.
+   * Selects a pattern for editing and Pattern Mode. Selection is a view change,
+   * never an undo step, but it is no longer a bare id write: the outgoing
+   * pattern stores its content and the incoming pattern's content becomes the
+   * live channel content, atomically, so no pattern ever shows or plays another
+   * pattern's steps and notes.
+   *
+   * History's present takes the same swap without recording a step, so the next
+   * edit is recorded against what the user sees: undoing it keeps this pattern
+   * selected, and no later no-op commit can record a selection-only undo step.
    */
   const handleSelectPattern = (id: string) => {
     const previousState = projectStateRef.current;
     const nextState = selectPatternInProjectState(previousState, id);
     if (nextState === previousState) return;
+    // A continuous edit still inside its debounce window was made in the
+    // outgoing pattern: commit it first, so the batcher can never publish its
+    // pre-swap state as history's present after the swap.
+    continuousBatcherRef.current.flush();
     projectStateRef.current = nextState;
     setProjectState(nextState);
+    projectHistoryRef.current = selectPatternInHistory(projectHistoryRef.current, id);
     // Pattern Mode plays the selected pattern, so the running take follows the
     // new content and declared length; Song Mode keeps playing every clip's own
     // pattern unchanged.

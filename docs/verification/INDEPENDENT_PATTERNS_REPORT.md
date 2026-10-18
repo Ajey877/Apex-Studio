@@ -57,6 +57,7 @@ deliberate constraint of the length work; this milestone lifts it.
 | AC7 | A MIDI take lands in the pattern it started in | `patternContent.test.ts` AC7 |
 | AC8 | Song Mode, WAV, stems and MIDI play each clip's own pattern | `independentPatternsPlayback.test.ts`; Playwright production-renderer test |
 | AC9 | Playlist: pick the pattern for new clips, see and change a clip's pattern | Playwright "drawn clips play the selected pattern…" |
+| AC10 | Selecting a pattern is never an undo step; Undo/Redo of an edit keep the pattern it was made in and restore its exact content | `patternContent.test.ts` AC10; `projectHistory.test.ts` "replacePresent…"; Playwright "Pattern selection is not an undo step" (4 specs) — see *Review follow-up* |
 
 ### Regression tests fail on the pre-fix code
 
@@ -89,12 +90,84 @@ One minisynth channel (sine), arrangement Verse (C4) | Chorus (C5) | Empty, 120 
 | `renderProjectStems`, `renderProjectToWav` | forward `patterns` to every render |
 | `buildStandardMidiFile` | Song scope writes each clip from its pattern (`options.patterns`) |
 | Bounce-In-Place | renders the pattern the lane's earliest clip plays |
-| App | pattern selection uses the swap; Clone pattern; patterns published to the engine on play, live sync, undo/redo and post-render resync; MIDI take targets its pattern |
+| App | pattern selection uses the swap, and history's present takes the same swap without an undo step (`selectPatternInHistory`); Clone pattern; patterns published to the engine on play, live sync, undo/redo and post-render resync; MIDI take targets its pattern |
 | Channel Rack | Add pattern = empty pattern; **Clone pattern** button; `aria-pressed` on pattern tabs |
 | Playlist | **Pattern** picker for new clips; pattern name badge and a first-bar preview of the real content on each pattern clip; pattern selector in the selected-clip inspector |
 | Channel deletion | removes the channel's stored content from every pattern |
 | Project fingerprint (replacement guard) | compares pattern content in a selection-neutral form, so clicking a pattern tab is not "work" |
 | Statistics / project bundle | Total Notes counts every pattern; each `patterns/*.json` file carries its own pattern's content |
+
+## Review follow-up — pattern selection and undo/redo
+
+**Suspected issue (independent review):** `handleSelectPattern` updated `projectStateRef`
+and React state but not project history's present, so later edits were committed against
+the pre-selection snapshot.
+
+**Reproduced — yes.** `ProjectHistory.commit` pushes its own stored present onto `past`, and
+selection never touched it. Real Chromium, shipped demo, PR head `7e53c86`. Kick steps are
+0-based; the content column is the autosaved document, resolved per pattern:
+
+| Step | PR head `7e53c86` — shown | Document (every pattern) | With fix — shown |
+|---|---|---|---|
+| Select Pattern 2 (Melody & Pluck), toggle kick step 0 off | Melody & Pluck · `6 10` | P1 `0 6 10` · P2 `6 10` · P3 `0 6 10` | Melody & Pluck · `6 10` |
+| **Undo** | **Main Groove** · `0 6 10` | P2 restored to `0 6 10` — correct | **Melody & Pluck** · `0 6 10` |
+| **Redo** | Melody & Pluck · `6 10` | P2 `6 10` — correct | Melody & Pluck · `6 10` |
+| Edit P2, select Main Groove, toggle kick step 2 on, **Undo** | **Melody & Pluck** · `6 10` — the undo is hidden | Main Groove restored to `0 6 10` — correct | **Main Groove** · `0 6 10` |
+| Select Pattern 2, then click a playlist clip without moving it | Undo **enabled** | unchanged | Undo disabled |
+| …then **Ctrl+Z** | selection reverts to **Main Groove** (a selection-only undo step) | unchanged | Melody & Pluck stays |
+
+- **Data integrity was never broken.** In every trace, before and after the fix, every
+  pattern's stored steps and notes were exact after every Undo and Redo: commits store full
+  snapshots, and each restored snapshot is a state that really existed.
+- **The defect is what Undo shows and records.**
+  - Undo restored the selection from *before* the last pattern switch. With independent
+    content, the jump lands on a different pattern, which hides the undone edit, so a user
+    is invited to press Undo again.
+  - A no-op commit after a switch (pointer-up on a playlist clip) recorded a selection-only
+    undo step. That contradicts the documented intent: "selection is a view change, outside
+    history".
+- **Pre-existing on `main`.** The same trace against `5b2e568` reproduces both symptoms,
+  because the old bare `selectedPatternId` write also bypassed history. There, the shared
+  content made the jump visually harmless; independent patterns made it misleading.
+
+**Intended behaviour (now pinned by tests):**
+
+1. Selecting a pattern never records an undo step, directly or through a later no-op commit.
+2. Undo returns the project to exactly how it was just before the undone change (an edit, or
+   a Redo). That includes the pattern selected at that moment, never a selection that
+   predates it. For an edit, that is the pattern it was made in.
+3. Redo is the exact inverse of that Undo. A selection made between them keeps the redo
+   stack: Redo shows the redone edit's own pattern, and undoing it again returns to the
+   pattern selected before the Redo.
+4. Every pattern's content is exact throughout.
+
+**Fix — narrow; the history architecture is unchanged:**
+
+- `ProjectHistory.replacePresent(state)`: re-expresses the present without pushing an entry.
+  Past and future are kept; a semantically equal state is a no-op.
+- `selectPatternInHistory(history, id)` in `patternContent.ts`: applies the *same* swap to the
+  history's present. The swap is applied to the present rather than copied from the live
+  state, so a change still awaiting its own commit (an open playlist drag) keeps its own
+  undo step.
+- `handleSelectPattern`:
+  - flushes a pending continuous edit first, which belongs to the outgoing pattern;
+  - then swaps the live state and history's present together.
+- `commit`, `undo`, `redo`, labels, the 50-entry limit and every other caller are untouched.
+- **Cost:** a pattern-tab click now re-snapshots history the way one edit commit already does.
+  - Median of 15, demo project, full 50-entry history, this 2-CPU sandbox: 67.7 ms per
+    selection versus 69.2 ms per commit.
+  - Both were measured while a browser suite was running, so the absolute values are
+    inflated; the point is that the two costs match.
+  - The cost is the history module's existing per-operation snapshotting, which is left
+    unchanged here.
+
+**Regression evidence:**
+
+| Test | On `7e53c86` | With fix |
+|---|---|---|
+| Playwright "Pattern selection is not an undo step" (4 specs: steps, Piano Roll notes, switch-then-undo, selection-only step) | 4 / 4 fail | 4 / 4 pass |
+| `patternContent.test.ts` AC10 (8 tests, incl. a contrast test pinning the defect mechanism and an App wiring check) | cannot load (`selectPatternInHistory` missing) | 8 / 8 pass |
+| `projectHistory.test.ts` "replacePresent re-expresses the present without recording an undo step" | fails (`replacePresent` missing) | passes |
 
 ## Limitations (not addressed here)
 

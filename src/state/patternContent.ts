@@ -1,4 +1,5 @@
 import type { Channel, Note, Pattern, PatternChannelContent, PlaylistClip, ProjectState } from '../types/daw';
+import type { ProjectHistory } from './projectHistory';
 
 /**
  * Independent patterns — the single owner of pattern-scoped sequencer content.
@@ -319,6 +320,26 @@ export const selectPatternInProjectState = (state: ProjectState, patternId: stri
     channels: loadContentIntoChannels(base.channels, target.channelContent),
     selectedPatternId: patternId,
   };
+};
+
+/**
+ * Pattern selection in project history. Selecting is a view change and never
+ * an undo step, but the swap rewrites document fields (which pattern's content
+ * is live), so history's present must take the same swap. Otherwise the next
+ * edit is recorded against the pre-selection snapshot: undoing it jumps back
+ * to the previously selected pattern — whose different content hides the
+ * undo — and a no-op commit (pointer-up on a playlist clip) records an undo
+ * step whose only effect is to switch the pattern back.
+ *
+ * The swap is applied to the present itself rather than copied from the live
+ * state, so a change still waiting for its own commit (an open playlist drag)
+ * stays out of the present and keeps its own undo step. Past and future are
+ * untouched: undoing an edit returns to the pattern it was made in, and redo
+ * is the exact inverse of the undo.
+ */
+export const selectPatternInHistory = (history: ProjectHistory, patternId: string): ProjectHistory => {
+  const present = selectPatternInProjectState(history.present, patternId);
+  return present === history.present ? history : history.replacePresent(present);
 };
 
 /** Stores the live content on the selected pattern (used before another pattern takes over the channels). */

@@ -367,6 +367,11 @@ names (shown on the clip, together with a preview of its first bar), and the sam
 used by live Song Mode, WAV and stem export, Standard MIDI export and Bounce-In-Place. A MIDI
 take is written into the pattern that was selected when recording started.
 
+Selecting a pattern is a view change, not an undo step. Undo returns to the project exactly as
+it was just before the undone change — including the pattern that was selected at that moment —
+and Redo is its exact inverse, so undoing an edit never jumps back to a pattern that was
+selected before it.
+
 Projects saved before patterns were independent open unchanged — every pattern still shows the
 content it showed before. The first pattern operation (selecting, adding or cloning a pattern)
 gives each pattern its own copy of that content and keeps every placed clip playing what it

@@ -17,6 +17,10 @@ import { expect, test, type Locator, type Page } from '@playwright/test';
  *  3. Audio: the production offline renderer (the same scheduler as live Song
  *     Mode) renders a Verse | Chorus | Empty arrangement of ONE channel as three
  *     audibly different bars, in a real OfflineAudioContext.
+ *  4. History: selecting a pattern is a view change, never an undo step. Undo
+ *     and Redo of an edit made after a selection keep that pattern selected and
+ *     restore its exact content, and no later no-op commit (a click on a
+ *     playlist clip) can record a selection-only undo step.
  */
 
 const APP_URL = 'http://localhost:3000';
@@ -125,6 +129,158 @@ test.describe('Independent patterns in the Channel Rack', () => {
     await expect(patternTabs(page)).toHaveCount(3);
     await selectTab(page, 'Main Groove');
     expect(await activeStepIds(page)).toContain('step-ch-kick-0');
+  });
+});
+
+/**
+ * Review follow-up — pattern selection and undo/redo.
+ *
+ * Reproduced against PR #243 head 7e53c86: selecting a pattern swapped the live
+ * content but left project history's present at the pre-selection snapshot, so
+ * the next edit was committed against it. Undoing an edit made in Pattern 2
+ * jumped back to Pattern 1 (whose different content then hid the undo), and a
+ * plain click on a playlist clip after a selection recorded an undo step whose
+ * only effect was to switch the pattern back.
+ */
+const expectSelectedPattern = async (page: Page, label: string): Promise<void> => {
+  const tab = patternTabs(page).filter({ hasText: new RegExp(`^${label}$`, 'i') });
+  await expect(tab, `${label} is the selected pattern`).toHaveAttribute('aria-pressed', 'true');
+  await expect(patternTabs(page).and(page.locator('[aria-pressed="true"]'))).toHaveCount(1);
+};
+
+const noteBlockIds = async (page: Page): Promise<string[]> =>
+  page.locator('#piano-roll-container [id^="note-block-"]').evaluateAll(nodes => nodes.map(node => node.id).sort());
+
+test.describe('Pattern selection is not an undo step', () => {
+  test('Select Pattern 2 -> edit steps -> Undo -> Redo keeps Pattern 2 selected and restores its content', async ({ page }) => {
+    await page.goto(APP_URL);
+    await openRack(page);
+    await expectSelectedPattern(page, 'Main Groove');
+    const mainGroove = await activeStepIds(page);
+    expect(mainGroove).toContain('step-ch-kick-0');
+
+    // 1. Select Pattern 2 (the demo's "Melody & Pluck").
+    await selectTab(page, 'Melody & Pluck');
+    const pattern2Before = await activeStepIds(page);
+
+    // 2. Edit its steps.
+    await rack(page).locator('#step-ch-kick-0').click();
+    const pattern2Edited = pattern2Before.filter(id => id !== 'step-ch-kick-0');
+    await expect.poll(() => activeStepIds(page)).toEqual(pattern2Edited);
+
+    // 3. Undo: Pattern 2 stays selected and gets its pre-edit content back.
+    await page.keyboard.press('Control+z');
+    await expectSelectedPattern(page, 'Melody & Pluck');
+    await expect.poll(() => activeStepIds(page)).toEqual(pattern2Before);
+
+    // 4. Redo: Pattern 2 stays selected and gets its edit back.
+    await page.keyboard.press('Control+Shift+z');
+    await expectSelectedPattern(page, 'Melody & Pluck');
+    await expect.poll(() => activeStepIds(page)).toEqual(pattern2Edited);
+
+    // Data integrity: Pattern 1 never changed, Pattern 2 keeps its edit.
+    await selectTab(page, 'Main Groove');
+    expect(await activeStepIds(page)).toEqual(mainGroove);
+    await selectTab(page, 'Melody & Pluck');
+    expect(await activeStepIds(page)).toEqual(pattern2Edited);
+  });
+
+  test('Select Pattern 2 -> draw a Piano Roll note -> Undo -> Redo keeps Pattern 2 selected and restores its notes', async ({ page }) => {
+    await page.goto(APP_URL);
+    await openRack(page);
+    await selectTab(page, 'Melody & Pluck');
+
+    await page.locator('#nav-piano-roll').click();
+    const roll = page.locator('#piano-roll-container');
+    await expect(roll).toBeVisible();
+    const target = page.getByTestId('midi-record-target');
+    await expect(target).toContainText('Melody & Pluck');
+    const notesBefore = await noteBlockIds(page);
+
+    await roll.getByTitle('Draw Note (Pencil)').click();
+    await roll.locator('div.cursor-pointer[data-step="15"]').first().click();
+    await expect.poll(async () => (await noteBlockIds(page)).length).toBe(notesBefore.length + 1);
+    const notesDrawn = await noteBlockIds(page);
+
+    await page.keyboard.press('Control+z');
+    await expect(target, 'Undo keeps the edited pattern selected').toContainText('Melody & Pluck');
+    await expect.poll(() => noteBlockIds(page)).toEqual(notesBefore);
+
+    await page.keyboard.press('Control+Shift+z');
+    await expect(target, 'Redo keeps the edited pattern selected').toContainText('Melody & Pluck');
+    await expect.poll(() => noteBlockIds(page)).toEqual(notesDrawn);
+
+    // Data integrity: Main Groove's notes never changed; Pattern 2 keeps the note.
+    await openRack(page);
+    await selectTab(page, 'Main Groove');
+    await page.locator('#nav-piano-roll').click();
+    await expect(target).toContainText('Main Groove');
+    expect(await noteBlockIds(page)).toEqual(notesBefore);
+    await openRack(page);
+    await selectTab(page, 'Melody & Pluck');
+    await page.locator('#nav-piano-roll').click();
+    await expect(target).toContainText('Melody & Pluck');
+    expect(await noteBlockIds(page)).toEqual(notesDrawn);
+  });
+
+  test('undo after switching patterns shows the pattern the undone edit was made in', async ({ page }) => {
+    await page.goto(APP_URL);
+    await openRack(page);
+    const mainGroove = await activeStepIds(page);
+
+    // Give Pattern 2 its own content (an undoable edit made in Pattern 2)...
+    await selectTab(page, 'Melody & Pluck');
+    await rack(page).locator('#step-ch-kick-0').click();
+    const pattern2Edited = mainGroove.filter(id => id !== 'step-ch-kick-0');
+    await expect.poll(() => activeStepIds(page)).toEqual(pattern2Edited);
+
+    // ...then switch to Main Groove and edit it.
+    await selectTab(page, 'Main Groove');
+    expect(await activeStepIds(page)).toEqual(mainGroove);
+    const offStep = ['step-ch-kick-1', 'step-ch-kick-2', 'step-ch-kick-3', 'step-ch-kick-5'].find(id => !mainGroove.includes(id));
+    expect(offStep, 'the demo kick has an empty step to fill').toBeTruthy();
+    await rack(page).locator(`#${offStep}`).click();
+    const mainEdited = [...mainGroove, offStep as string].sort();
+    await expect.poll(async () => (await activeStepIds(page)).sort()).toEqual(mainEdited);
+
+    // Undo reverts the Main Groove edit and shows Main Groove, not Pattern 2.
+    await page.keyboard.press('Control+z');
+    await expectSelectedPattern(page, 'Main Groove');
+    await expect.poll(() => activeStepIds(page)).toEqual(mainGroove);
+
+    await page.keyboard.press('Control+Shift+z');
+    await expectSelectedPattern(page, 'Main Groove');
+    await expect.poll(async () => (await activeStepIds(page)).sort()).toEqual(mainEdited);
+
+    // Pattern 2 kept its own edit throughout.
+    await selectTab(page, 'Melody & Pluck');
+    expect(await activeStepIds(page)).toEqual(pattern2Edited);
+  });
+
+  test('a selection never becomes an undo step of its own', async ({ page }) => {
+    await page.goto(APP_URL);
+    await openRack(page);
+    await selectTab(page, 'Melody & Pluck');
+
+    await page.locator('#nav-playlist').click();
+    const arranger = page.locator('#fl-playlist-arranger');
+    await expect(arranger).toBeVisible();
+    const undoButton = arranger.getByTitle('Undo playlist edit');
+    const picker = arranger.locator('#playlist-pattern-picker');
+    await expect(picker.locator('option:checked')).toHaveText('Melody & Pluck');
+    await expect(undoButton, 'a fresh project has nothing to undo').toBeDisabled();
+
+    // Select a demo clip without moving it: a playlist interaction that changes nothing.
+    await arranger.locator('[data-clip-id="clip-1"]').click();
+    await expect(undoButton, 'clicking a clip after a selection records no undo step').toBeDisabled();
+
+    // Pattern selection from the playlist picker is not undoable either.
+    await picker.selectOption({ label: 'Hi-Hat Rolls' });
+    await expect(picker.locator('option:checked')).toHaveText('Hi-Hat Rolls');
+    await arranger.locator('[data-clip-id="clip-1"]').click();
+    await expect(undoButton).toBeDisabled();
+    await page.keyboard.press('Control+z');
+    await expect(picker.locator('option:checked'), 'Undo never reverts a selection on its own').toHaveText('Hi-Hat Rolls');
   });
 });
 
