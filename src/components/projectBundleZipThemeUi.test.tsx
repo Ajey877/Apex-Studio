@@ -100,7 +100,7 @@ describe('project bundle audio archive paths', () => {
 describe('portable bundle audio collection', () => {
   it('preserves each audio ID, blob, MIME type and unique manifest path', async () => {
     const ids = ['take/one', 'take_one', `${'x'.repeat(120)}a`, `${'x'.repeat(120)}b`];
-    const blobs = new Map(ids.map((id) => [id, new Blob([`audio:${id}`], { type: 'audio/wav' })]));
+    const blobs = new Map<string, Blob>(ids.map((id) => [id, new Blob([`audio:${id}`], { type: 'audio/wav' })] as const));
     const assets = await collectBundleAudioAssets(ids, async (id) => blobs.get(id));
 
     assert.deepEqual(assets.map((asset) => asset.id), ids);
