@@ -26,9 +26,9 @@ import {
   AlertTriangle
 } from 'lucide-react';
 import { PlaylistTrack, PlaylistClip, Pattern, Channel, AutomationTargetType, ArrangementMarker, MixerTrack } from '../types/daw';
-import { audioEngine } from '../audio/audioEngine';
+import { audioEngine, resolvePlaylistClipLoopLengthSteps } from '../audio/audioEngine';
 import { findLaneBouncePatternClip, resolvePlaylistBounceTarget } from './playlistBounceTarget';
-import { findPatternForClip, resolveClipChannelContent, resolvePatternChannelContent, withPatternChannelContent } from '../state/patternContent';
+import { isFullPatternPlaylistClip, resolvePlaylistClipChannels, findPatternForClip, resolveClipChannelContent, resolvePatternChannelContent, withPatternChannelContent } from '../state/patternContent';
 import { formatFxParameterRange, listFxSlotOptions } from '../audio/fxParameterControl';
 import {
   buildFxAutomationTarget,
@@ -45,7 +45,7 @@ import {
 } from '../state/audioAssetAvailability';
 import {
   DEFAULT_GRID_BARS,
-  createPlaylistPatternClip,
+  createFullPatternPlaylistClip,
   setPlaylistClipPattern,
   deletePlaylistClip,
   duplicatePlaylistClip,
@@ -279,17 +279,19 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
   const clipPreviewCache = useMemo(() => new Map<string, boolean[]>(), [patterns, channels]);
   const resolveClipPreviewCells = (clip: PlaylistClip): boolean[] | undefined => {
     if (clip.type !== 'pattern') return undefined;
-    const channel = channels.find(candidate => candidate.id === clip.channelId);
-    if (!channel) return undefined;
+    const clipChannels = resolvePlaylistClipChannels(patterns, clip, channels);
     const pattern = findPatternForClip(patterns, clip);
-    const key = `${pattern?.id ?? ''}\u0000${channel.id}`;
+    const key = `${pattern?.id ?? ''}\u0000${isFullPatternPlaylistClip(clip) ? 'all' : clip.channelId}`;
     const cached = clipPreviewCache.get(key);
     if (cached) return cached;
-    const content = resolvePatternChannelContent(pattern, channel);
-    const cells = Array.from({ length: CLIP_PREVIEW_CELLS }, (_, step) => content.steps[step] === true);
-    for (const note of content.notes) {
-      const step = Math.floor(Number(note?.start));
-      if (Number.isFinite(step) && step >= 0 && step < CLIP_PREVIEW_CELLS) cells[step] = true;
+    const cells = new Array<boolean>(CLIP_PREVIEW_CELLS).fill(false);
+    for (const channel of clipChannels) {
+      const content = resolvePatternChannelContent(pattern, channel);
+      content.steps.slice(0, CLIP_PREVIEW_CELLS).forEach((on, step) => { if (on) cells[step] = true; });
+      for (const note of content.notes) {
+        const step = Math.floor(Number(note?.start));
+        if (Number.isFinite(step) && step >= 0 && step < CLIP_PREVIEW_CELLS) cells[step] = true;
+      }
     }
     clipPreviewCache.set(key, cells);
     return cells;
@@ -298,7 +300,7 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
     if (clip.type !== 'pattern') return undefined;
     // A legacy clip that names no pattern plays the live content, which is the
     // selected pattern's.
-    if (!clip.patternId || !patternNameById.has(clip.patternId)) return selectedPattern?.name;
+    if (!clip.patternId || !patternNameById.has(clip.patternId)) return isFullPatternPlaylistClip(clip) ? 'Missing pattern' : selectedPattern?.name;
     return patternNameById.get(clip.patternId);
   };
   const [activeTool, setActiveTool] = useState<'place' | 'cut' | 'delete'>('place');
@@ -360,7 +362,37 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
     onUpdateTracks(updated);
   };
 
+  const bounceInputs = useMemo(() => ({ channels, clips, patterns, mixerTracks, tracks, bpm, timeSignature }),
+    [channels, clips, patterns, mixerTracks, tracks, bpm, timeSignature]);
+  const bounceInputsRef = useRef<typeof bounceInputs | null>(bounceInputs);
+  bounceInputsRef.current = bounceInputs;
+  useEffect(() => () => { bounceInputsRef.current = null; }, []);
+
   const handleBounceTrack = async (trackIdx: number) => {
+    const requestedInputs = bounceInputsRef.current;
+    if (clips.some(c => c.trackIndex === trackIdx && isFullPatternPlaylistClip(c))) {
+      setStatusMessage('Bouncing whole-pattern lane with all instruments...');
+      try {
+        const { buffer, waveform, startBar, lengthBars } = await audioEngine.bouncePlaylistLaneToAudioClip(
+          channels, clips, patterns, mixerTracks, tracks, trackIdx, bpm
+        );
+        if (!requestedInputs || requestedInputs !== bounceInputsRef.current) {
+          setStatusMessage('Bounce discarded because the project or arrangement changed.');
+          return;
+        }
+        const id = `bounced-lane-${Date.now()}`;
+        audioEngine.setSampleBuffer(id, buffer);
+        onUpdateClips([...clips, {
+          id, trackIndex: trackIdx, startBar, lengthBars, type: 'audio', audioBufferId: id,
+          audioMixerTrackId: 0, audioWaveform: waveform, color: AUDIO_CLIP_SIGNAL_COLOR,
+          name: `${tracks[trackIdx]?.name || 'Pattern lane'} [Stem]`,
+        }]);
+        setStatusMessage('Whole-pattern lane bounced. Source clips kept; mute them to audition the bounce alone.');
+      } catch (error) {
+        setStatusMessage(error instanceof Error ? `Bounce failed: ${error.message}` : 'Bounce failed.');
+      }
+      return;
+    }
     // Phase 64: the lane decides the channel. Using the lane index as a channel
     // index bounced the wrong instrument on any project whose channel list does
     // not match its lane order (the factory project is one of them), and an empty
@@ -726,7 +758,7 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
     // Phase 54: both branches below place a 4-bar clip at the clicked bar, so
     // both must resolve that bar against the timeline before publishing. This
     // is the path that could previously create a clip ending at bar 35 on a
-    // 32-bar timeline: the pattern branch called `createPlaylistPatternClip`
+    // 32-bar timeline: the historical pattern branch called `createPlaylistPatternClip`
     // without `bounds` (so `assertValidPlaylistClip` skipped its timeline
     // check) and the automation branch never validated at all.
     const targetChannel = resolvePlaylistTargetChannel(channels, trackIndex);
@@ -764,16 +796,18 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
       // flagged by the missing-audio surfaces, and a hard blocker for WAV and
       // stem export. Playlist audio is only ever created by a path that owns a
       // real buffer — drag/drop, recording, or bounce-in-place.
-      newClip = createPlaylistPatternClip(
+      if (!selectedPattern) {
+        setStatusMessage('Select a pattern before drawing a pattern clip.');
+        return;
+      }
+      newClip = createFullPatternPlaylistClip(
         trackIndex,
         clampStartBarToTimeline(barIndex, DEFAULT_PATTERN_CLIP_LENGTH_BARS, bounds),
-        targetChannel,
+        selectedPattern,
         tracks[trackIndex],
         DEFAULT_PATTERN_CLIP_LENGTH_BARS,
         undefined,
-        bounds,
-        // Independent patterns: the clip plays the selected pattern's content.
-        selectedPattern
+        bounds
       );
     }
 
@@ -954,7 +988,7 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
           {/* Independent patterns: which pattern a drawn pattern clip plays. */}
           {clipTypeToAdd === 'pattern' && patterns.length > 0 && (
             <label className="flex items-center gap-1 bg-[var(--apex-chrome-inset)] border border-[var(--apex-border)] px-1.5 py-0.5 rounded text-[10px] font-semibold text-[var(--apex-text-3)]">
-              <span>Pattern</span>
+              <span>Whole pattern</span>
               <select
                 id="playlist-pattern-picker"
                 aria-label="Pattern for new clips"
@@ -1393,6 +1427,7 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
                     <div
                       key={clip.id}
                       data-clip-id={clip.id}
+                      data-pattern-scope={clip.type === 'pattern' ? (isFullPatternPlaylistClip(clip) ? 'all' : 'channel') : undefined}
                       data-audio-unavailable={isAudioMissing ? 'true' : undefined}
                       aria-label={audioMissingDescription}
                       title={audioMissingDescription}
@@ -1455,15 +1490,15 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
                             className={`truncate ${isAuto ? 'text-[var(--apex-cyan-text)]' : isAudioMissing ? 'text-[var(--apex-danger)]' : isAudio ? '' : 'text-[var(--apex-text)]'}`}
                             style={!isAuto && !isAudioMissing && isAudio ? { color: AUDIO_CLIP_SIGNAL_COLOR } : undefined}
                           >
-                            {clip.name}
+                            {isFullPatternPlaylistClip(clip) ? clipPatternName : clip.name}
                           </span>
                           {clipPatternName && (
                             <span
                               data-testid={`clip-pattern-${clip.id}`}
-                              title={`Plays pattern: ${clipPatternName}`}
+                              title={isFullPatternPlaylistClip(clip) ? `Whole pattern: ${clipPatternName} • all instruments • shared declared loop` : `Channel clip: ${clipPatternName}`}
                               className="truncate shrink min-w-0 px-1 rounded-sm bg-[var(--apex-surface-3)] text-[var(--apex-text-2)] text-[8px] font-semibold"
                             >
-                              {clipPatternName}
+                              {isFullPatternPlaylistClip(clip) ? 'All instruments' : clipPatternName}
                             </span>
                           )}
                           {isAudioMissing && (
@@ -1582,7 +1617,7 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
                       ) : (
                         // Independent patterns: the preview draws the first bar
                         // of the content this clip actually plays (its pattern,
-                        // for its channel), so an empty or different pattern is
+                        // across all instruments or its legacy channel), so an empty or different pattern is
                         // visible at a glance instead of a decorative graphic.
                         <div
                           className="flex items-center gap-0.5 h-3 opacity-60 z-10"
@@ -1692,11 +1727,11 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
           <div className="flex items-center gap-3">
             {selectedClip.type === 'pattern' && patterns.length > 0 && (
               <label className="flex items-center gap-1.5 font-mono text-[10px]">
-                <span>Pattern:</span>
+                <span>{isFullPatternPlaylistClip(selectedClip) ? 'All instruments • Pattern:' : 'Channel clip • Pattern:'}</span>
                 <select
                   id="selected-clip-pattern"
                   aria-label="Pattern this clip plays"
-                  value={selectedClip.patternId && patternNameById.has(selectedClip.patternId) ? selectedClip.patternId : (selectedPattern?.id ?? '')}
+                  value={selectedClip.patternId && patternNameById.has(selectedClip.patternId) ? selectedClip.patternId : (isFullPatternPlaylistClip(selectedClip) ? '' : (selectedPattern?.id ?? ''))}
                   onChange={(event) => {
                     try {
                       onUpdateClips(setPlaylistClipPattern(clips, selectedClip.id, patterns, event.target.value));
@@ -1706,11 +1741,17 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
                   }}
                   className="bg-[var(--apex-surface-2)] text-[var(--apex-text)] border border-[var(--apex-border)] rounded px-1 py-0.5 text-[10px]"
                 >
+                  {isFullPatternPlaylistClip(selectedClip) && !findPatternForClip(patterns, selectedClip) && <option value="" disabled>Missing pattern (silent)</option>}
                   {patterns.map(pattern => (
                     <option key={pattern.id} value={pattern.id}>{pattern.name}</option>
                   ))}
                 </select>
               </label>
+            )}
+            {isFullPatternPlaylistClip(selectedClip) && findPatternForClip(patterns, selectedClip) && (
+              <span className="text-[10px] text-[var(--apex-text-3)]" title="The declared pattern loop repeats to fill this clip. Trimming advances the source offset; resizing never stretches notes.">
+                Loop {resolvePlaylistClipLoopLengthSteps(patterns, selectedClip, channels[0], meter)} steps • Offset {selectedClip.offsetSteps ?? 0} steps
+              </span>
             )}
             {selectedClip.type === 'audio' && (
               <div className="flex items-center gap-2 font-mono text-[10px]">

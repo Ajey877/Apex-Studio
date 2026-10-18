@@ -311,7 +311,8 @@ test.describe('Independent patterns in the Playlist', () => {
     );
     expect(newClipId).toBeTruthy();
     const badge = arranger.locator(`[data-testid="clip-pattern-${newClipId}"]`);
-    await expect(badge).toHaveText('Pattern 4');
+    await expect(badge).toHaveText('All instruments');
+    await expect(badge).toHaveAttribute('title', /Whole pattern: Pattern 4/);
     // The clip preview draws the content the clip plays: Pattern 4 is still
     // empty, while the demo kick clip shows Main Groove's kick hits.
     const newPreview = arranger.locator(`[data-testid="clip-steps-${newClipId}"]`);
@@ -322,17 +323,17 @@ test.describe('Independent patterns in the Playlist', () => {
     // Choosing another pattern in the picker changes what the NEXT clip plays.
     await picker.selectOption({ label: 'Hi-Hat Rolls' });
     await expect(picker.locator('option:checked')).toHaveText('Hi-Hat Rolls');
-    await expect(badge, 'an existing clip keeps its pattern').toHaveText('Pattern 4');
+    await expect(badge, 'an existing clip keeps its pattern').toHaveAttribute('title', /Whole pattern: Pattern 4/);
 
     // Re-target the drawn clip from the selected-clip inspector.
     await arranger.locator(`[data-clip-id="${newClipId}"]`).click();
     const clipPattern = page.locator('#selected-clip-pattern');
     await expect(clipPattern.locator('option:checked')).toHaveText('Pattern 4');
     await clipPattern.selectOption({ label: 'Melody & Pluck' });
-    await expect(badge).toHaveText('Melody & Pluck');
+    await expect(badge).toHaveAttribute('title', /Whole pattern: Melody & Pluck/);
     // Melody & Pluck holds the demo's (migrated) content, so the re-targeted clip
     // now previews the same kick hits as the demo kick clip.
-    await expect(newPreview).toHaveAttribute('data-active-steps', demoKickSteps ?? '');
+    await expect(newPreview).toHaveAttribute('data-active-steps', Array.from({ length: 16 }, (_, i) => i).join(','));
   });
 });
 

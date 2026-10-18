@@ -73,8 +73,8 @@ test('Phase 54: the grid-click producer passes real timeline bounds', () => {
   );
   assert.match(
     arranger,
-    /createPlaylistPatternClip\(/,
-    'the pattern branch must still go through createPlaylistPatternClip',
+    /createFullPatternPlaylistClip\(/,
+    'the pattern branch must go through the full-pattern constructor',
   );
   assert.match(
     arranger,

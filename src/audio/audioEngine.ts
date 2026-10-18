@@ -23,7 +23,7 @@ import {
   SidechainSettings
 } from '../types/daw';
 import { AudioClockTransport, TransportState } from './transport';
-import { resolveClipChannelContent, withPatternChannelContent } from '../state/patternContent';
+import { findPatternForClip, isFullPatternPlaylistClip, resolvePlaylistClipChannels, resolveClipChannelContent, withPatternChannelContent } from '../state/patternContent';
 import {
   GROSS_BEAT_OPEN_GAIN,
   grossBeatAlternatingSteps,
@@ -72,6 +72,7 @@ import {
   resolveFxSlot,
 } from './fxParameterControl';
 import { resolveFxParameterSpec } from './fxParameterContract';
+import { fullPatternEventsInWindow } from './fullPatternSchedule';
 import { audioBufferToWav } from './wavEncoder';
 
 // Phase 1F: the legacy 4/4 grid (LEGACY_TIME_SIGNATURE) remains the DEFAULT
@@ -444,6 +445,21 @@ export function resolvePatternLoopLengthSteps(
   return loopLengthSteps;
 }
 
+/** Shared clip loop policy for Song scheduling and MIDI. Legacy loops remain content-derived. */
+export function resolvePlaylistClipLoopLengthSteps(
+  patterns: readonly Pattern[] | undefined,
+  clip: PlaylistClip,
+  channel: Channel,
+  meter: TimeSignature = LEGACY_TIME_SIGNATURE
+): number {
+  if (isFullPatternPlaylistClip(clip)) {
+    return resolvePatternLoopLengthSteps([], findPatternForClip(patterns, clip)?.lengthSteps, meter);
+  }
+  return resolvePlayableContentLengthSteps(
+    withPatternChannelContent(channel, resolveClipChannelContent(patterns, clip, channel)), undefined, meter
+  );
+}
+
 /**
  * Fractional `Note.start` onsets are real project data: Piano Roll chord
  * stamping writes a per-note strum offset in fractional steps, "Strum Chords"
@@ -512,6 +528,7 @@ export interface PunchRecordingSession {
 class AudioEngine {
   public isOfflineRendering = false;
   private offlineRenderLeaseHeld = false;
+  private renderingPreMaster = false;
   private offlineRenderCompleteCallback: (() => void) | null = null;
   private offlineRenderOperationDepth = 0;
   private liveSampleBuffersDuringOfflineRender: Map<string, AudioBuffer> | null = null;
@@ -2404,6 +2421,8 @@ class AudioEngine {
   ) {
     if (this.shouldBlockLiveMutation() || !this.ctx) return;
     const now = atTime ?? this.ctx.currentTime;
+    if (this.renderingPreMaster && (target.type === 'master_vol' ||
+      (!target.type.startsWith('channel_') && String(target.targetId).split('/')[0] === '0'))) return;
 
     if (target.type === 'master_vol') {
       if (this.masterGain) {
@@ -3034,6 +3053,7 @@ class AudioEngine {
     playlistTracks?: PlaylistTrack[],
     minimumDurationSeconds: number = 4,
     patterns?: Pattern[],
+    outputStage: 'master' | 'pre-master' = 'master',
   ): Promise<AudioBuffer> {
     if (this.offlineRenderLeaseHeld) {
       throw new Error('An offline timeline render is already running.');
@@ -3079,6 +3099,7 @@ class AudioEngine {
       }
 
       const previous = {
+        renderingPreMaster: this.renderingPreMaster,
         ctx: this.ctx,
         liveCtx: this.liveCtx,
         transport: this.transport,
@@ -3161,6 +3182,7 @@ class AudioEngine {
       this.liveCtx = previous.ctx;
       try {
         this.withOfflineRenderOperation(() => {
+          this.renderingPreMaster = outputStage === 'pre-master';
           this.ctx = offlineCtx as unknown as AudioContext;
           this.transport = null;
           this.masterGain = offlineCtx.createGain();
@@ -3173,7 +3195,7 @@ class AudioEngine {
             typeof (offlineCtx as any).createChannelMerger === 'function' &&
             typeof (offlineCtx as any).createDynamicsCompressor === 'function' &&
             typeof (offlineCtx as any).createWaveShaper === 'function';
-          this.masteringProcessor = offlineSupportsMasteringDsp
+          this.masteringProcessor = offlineSupportsMasteringDsp && outputStage !== 'pre-master'
             ? new MasteringProcessor(offlineCtx as unknown as AudioContext, this.masteringState)
             : null;
           this.masterGain.connect(this.grossBeatNode);
@@ -3247,7 +3269,8 @@ class AudioEngine {
         // internal caller that omits the argument gets the bounded graph rather
         // than an accidental full one. See
         // src/audio/phase81.offlineExportFxAutomation.test.ts.
-        const tracks = [...mixerTracks].sort((a, b) => a.id - b.id);
+        const tracks = mixerTracks.map(track => outputStage === 'pre-master' && track.id === 0
+          ? { ...track, volume: 1, pan: 0, mute: false, solo: false, fxSlots: [] } : track).sort((a, b) => a.id - b.id);
         const renderTracks = includeMixerFx
           ? tracks
           : tracks.map(track => ({ ...track, fxSlots: [] }));
@@ -3311,6 +3334,7 @@ class AudioEngine {
         return renderedBuffer;
       } finally {
         this.isOfflineRendering = false;
+        this.renderingPreMaster = previous.renderingPreMaster;
         this.liveCtx = previous.liveCtx;
         this.ctx = previous.ctx;
         this.transport = previous.transport;
@@ -3467,7 +3491,7 @@ class AudioEngine {
         if (this.isClipPlaylistLaneMuted(clip, stemLaneMutes)) return false;
         if (this.isClipTakeInactive(clip)) return false;
         if (clip.type === 'pattern') {
-          return clip.channelId === channel.id;
+          return resolvePlaylistClipChannels(patterns, clip, channels).some(c => c.id === channel.id);
         }
         if (clip.type === 'audio') {
           return clip.channelId === channel.id;
@@ -3534,7 +3558,10 @@ class AudioEngine {
           if (clip.mute) return false;
           if (this.isClipPlaylistLaneMuted(clip, stemLaneMutes)) return false;
           if (this.isClipTakeInactive(clip)) return false;
-          if (clip.type === 'pattern' || clip.type === 'audio') {
+          if (clip.type === 'pattern') {
+            return resolvePlaylistClipChannels(patterns, clip, channels).some(c => sourceChannelIds.has(c.id));
+          }
+          if (clip.type === 'audio') {
             return !!clip.channelId && sourceChannelIds.has(clip.channelId);
           }
           if (clip.type === 'automation' && clip.automationTarget) {
@@ -5044,7 +5071,7 @@ class AudioEngine {
     // Phase 57: 16-step amplitude gate on the master bus. The gain comes from
     // the shared resolver so the live transport and the offline/export
     // renderer (which both call this method) stay behaviourally identical.
-    if (this.grossBeatState.enabled && this.grossBeatNode) {
+    if (this.grossBeatState.enabled && this.grossBeatNode && !this.renderingPreMaster) {
       const targetGain = resolveGrossBeatGateGain(this.grossBeatState, this.currentStep);
       this.grossBeatNode.gain.cancelScheduledValues(now);
       this.grossBeatNode.gain.setTargetAtTime(targetGain, now, 0.012);
@@ -5097,18 +5124,25 @@ class AudioEngine {
 
       this.activeClips.forEach(clip => {
         if (clip.type === 'pattern') {
+          if (clip.mute || this.isPlaylistLaneMuted(clip)) return;
           const clipStartStep = clip.startBar * stepsBar;
           const clipEndStep = clipStartStep + (clip.lengthBars * stepsBar);
 
-          if (currentGlobalStep >= clipStartStep && currentGlobalStep < clipEndStep) {
-            const channel = this.activeChannels.find(c => c.id === clip.channelId);
-            if (channel && this.isChannelAudibleInTake(channel) && !this.isPlaylistLaneMuted(clip)) {
+          if ((isFullPatternPlaylistClip(clip) ? currentGlobalStep + 1 > clipStartStep : currentGlobalStep >= clipStartStep) && currentGlobalStep < clipEndStep) {
+            for (const channel of resolvePlaylistClipChannels(this.activePatterns, clip, this.activeChannels)) {
+              if (!this.isChannelAudibleInTake(channel)) continue;
               // Independent patterns: a clip plays its channel's content in the
               // pattern it names (the live channel content for the selected
               // pattern, stored content for any other). The channel itself still
               // supplies the instrument, level and routing of every voice.
               const content = resolveClipChannelContent(this.activePatterns, clip, channel);
-              const loopLength = resolvePlayableContentLengthSteps(withPatternChannelContent(channel, content), undefined, this.meter);
+              const loopLength = resolvePlaylistClipLoopLengthSteps(this.activePatterns, clip, channel, this.meter);
+              if (isFullPatternPlaylistClip(clip)) {
+                for (const event of fullPatternEventsInWindow(channel, content, clip, loopLength, stepsBar, currentGlobalStep, currentGlobalStep + 1)) {
+                  this.playNote(channel, event.note, now + (event.step - currentGlobalStep) * secondsPerStep, safeBpm);
+                }
+                continue;
+              }
               const stepOffset = clip.offsetSteps || 0;
               const relStep = ((currentGlobalStep - clipStartStep + stepOffset) % loopLength + loopLength) % loopLength;
 
@@ -5226,6 +5260,8 @@ class AudioEngine {
       }
     }
 
+    if (clip.audioMixerTrackId === 0 && !clipChannel) mixerTrackId = 0;
+
     const effectiveBaseVolume = baseGain > 1e-4 ? baseGain : 1.0;
     const peakGain = Math.max(0.0001, effectiveBaseVolume);
     gainNode.gain.setValueAtTime(0.0001, t0);
@@ -5286,6 +5322,42 @@ class AudioEngine {
       this.activeClipSources.delete(source);
       this.activeClipSourceLanes.delete(source);
     }, { once: true });
+  }
+
+  /** Render a whole-pattern lane's actual window, before the shared master stage.
+   * Automation keeps its absolute phase; source clips remain (bounce is additive).
+   */
+  public async bouncePlaylistLaneToAudioClip(
+    channels: Channel[], clips: PlaylistClip[], patterns: Pattern[], mixerTracks: MixerTrack[],
+    playlistTracks: PlaylistTrack[], laneIndex: number, bpm: number
+  ): Promise<{ buffer: AudioBuffer; waveform: number[]; startBar: number; lengthBars: number }> {
+    const safeBpm = Math.max(20, Math.min(300, Number(bpm) || 120));
+    const secondsPerBar = this.secondsPerBarAt(safeBpm);
+    const material = clips.filter(c => c.trackIndex === laneIndex && c.type !== 'automation'
+      && Number.isFinite(c.startBar) && c.startBar >= 0 && Number.isFinite(c.lengthBars) && c.lengthBars > 0);
+    if (!material.length) throw new Error('Nothing to bounce on this lane.');
+    const startBar = Math.min(...material.map(c => c.startBar));
+    const endBar = Math.max(...material.map(c => c.startBar + c.lengthBars));
+    const lengthBars = endBar - startBar;
+    const schedule = clips.filter(c => c.trackIndex === laneIndex || c.type === 'automation');
+    // Schedule in absolute time first: fractional lane starts must inherit the
+    // same swing grid and automation history as Song playback. Crop only PCM.
+    const rendered = await this.renderTimelineOffline(channels, schedule, mixerTracks, safeBpm, endBar,
+      undefined, true, 'song', undefined, undefined, playlistTracks, 0, patterns, 'pre-master');
+    const startFrame = Math.round(startBar * secondsPerBar * rendered.sampleRate);
+    const frameCount = Math.min(rendered.length - startFrame, Math.round(lengthBars * secondsPerBar * rendered.sampleRate));
+    const buffer = this.getContext().createBuffer(rendered.numberOfChannels, frameCount, rendered.sampleRate);
+    for (let ch = 0; ch < buffer.numberOfChannels; ch++) {
+      buffer.getChannelData(ch).set(rendered.getChannelData(ch).subarray(startFrame, startFrame + frameCount));
+    }
+    const left = buffer.getChannelData(0);
+    const waveform = Array.from({ length: 32 }, (_, index) => {
+      let peak = 0;
+      const end = Math.floor((index + 1) * left.length / 32);
+      for (let i = Math.floor(index * left.length / 32); i < end; i++) peak = Math.max(peak, Math.abs(left[i]));
+      return Math.min(1, peak);
+    });
+    return { buffer, waveform, startBar, lengthBars };
   }
 
   /**

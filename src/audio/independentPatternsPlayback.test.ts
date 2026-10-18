@@ -21,7 +21,7 @@ import { MidiParser } from '../utils/midiParser';
 import { createDefaultProjectState } from '../state/projectState';
 import { addEmptyPatternToProjectState, selectPatternInProjectState } from '../state/patternContent';
 import { updateChannelInProjectState } from '../state/projectMutations';
-import type { Channel, MixerTrack, Note, PlaylistClip, ProjectState } from '../types/daw';
+import type { Channel, MixerTrack, Note, PlaylistClip, PlaylistTrack, ProjectState } from '../types/daw';
 
 class FakeAudioContext {
   private _currentTime = 0;
@@ -127,7 +127,7 @@ const arrangement = (): PlaylistClip[] => [clip('c1', 0, 'pat-1'), clip('c2', 1,
 
 interface Trigger { bar: number; step: number; pitch: number }
 
-const startTake = (state: ProjectState, clips: PlaylistClip[], mode: 'pat' | 'song', withPatterns = true) => {
+const startTake = (state: ProjectState, clips: PlaylistClip[], mode: 'pat' | 'song', withPatterns = true, playlistTracks?: PlaylistTrack[]) => {
   timers = [];
   const fakeCtx = new FakeAudioContext();
   engine.ctx = fakeCtx;
@@ -148,7 +148,7 @@ const startTake = (state: ProjectState, clips: PlaylistClip[], mode: 'pat' | 'so
     state.selectedPatternId,
     [],
     16,
-    undefined,
+    playlistTracks,
     withPatterns ? state.patterns : undefined,
   );
   return { fakeCtx, triggered };
@@ -340,5 +340,115 @@ describe('Standard MIDI export writes each clip from its own pattern', () => {
       patterns: state.patterns,
     });
     assert.deepEqual(await decodeLead(blob), ['72@4', '72@20', '72@36', '72@52']);
+  });
+});
+
+// Full-pattern milestone: written before the engine fan-out implementation.
+describe('Full-pattern playlist clips (explicit opt-in)', () => {
+  const trio = (): ProjectState => {
+    const state = buildProject();
+    state.channels = [
+      { ...state.channels[0], id: 'kick', name: 'Kick', instrumentType: 'drumpad', mixerTrackId: 1, steps: [true, ...Array(15).fill(false)], notes: [] },
+      { ...state.channels[0], id: 'snare', name: 'Snare', instrumentType: 'drumpad', mixerTrackId: 2, steps: Array(16).fill(false), notes: [note('snare', 38, 4)] },
+      { ...state.channels[0], id: 'melody', name: 'Melody', mixerTrackId: 5, steps: Array(32).fill(false), notes: [note('melody', 67, 8), note('hidden', 79, 24)] },
+    ];
+    state.patterns = [{ id: 'pat-1', name: 'Trio', color: '#fff', lengthSteps: 16 }, {
+      id: 'pat-2', name: 'Variation', color: '#fff', lengthSteps: 32,
+      channelContent: state.channels.map(c => ({ channelId: c.id, steps: [], notes: [note(c.id + '-variation', 72, 16)] })),
+    }];
+    return state;
+  };
+  const full = (overrides: Partial<PlaylistClip> = {}): PlaylistClip => ({
+    ...clip('whole', 0, 'pat-1'), channelId: undefined, patternScope: 'all', ...overrides,
+  });
+
+  it('one clip schedules kick, snare and melody, with one declared loop (not each channel extent)', () => {
+    const state = trio();
+    const { fakeCtx, triggered } = startTake(state, [full({ lengthBars: 2 })], 'song');
+    pumpSteps(fakeCtx, 31);
+    assert.deepEqual(summarize(triggered), ['bar1:36@0', 'bar1:38@4', 'bar1:67@8', 'bar2:36@0', 'bar2:38@4', 'bar2:67@8']);
+  });
+
+  it('different pattern references use distinct content and declared lengths', () => {
+    const { fakeCtx, triggered } = startTake(trio(), [full(), full({ id: 'variation', startBar: 1, lengthBars: 2, patternId: 'pat-2' })], 'song');
+    pumpSteps(fakeCtx, 47);
+    assert.deepEqual(summarize(triggered), ['bar1:36@0', 'bar1:38@4', 'bar1:67@8', 'bar3:72@16', 'bar3:72@16', 'bar3:72@16']);
+  });
+
+  it('missing references and old unbound clips never fan out into live content', () => {
+    const { fakeCtx, triggered } = startTake(trio(), [full({ patternId: 'missing' }), full({ id: 'unbound', patternScope: undefined, startBar: 1 })], 'song');
+    pumpSteps(fakeCtx, 31);
+    assert.deepEqual(triggered, []);
+  });
+
+  it('channel mute/solo and clip mute gate the same fan-out as lane mute', () => {
+    const state = trio();
+    state.channels[1].solo = true;
+    const { fakeCtx, triggered } = startTake(state, [full(), full({ id: 'muted', startBar: 1, mute: true })], 'song');
+    pumpSteps(fakeCtx, 31);
+    assert.deepEqual(summarize(triggered), ['bar1:38@4']);
+  });
+
+  it('lane mute gates every instrument without muting a neighboring full-pattern clip', () => {
+    const state = trio();
+    const tracks = state.playlistTracks.map((t, i) => ({ ...t, mute: i === 0 }));
+    const { fakeCtx, triggered } = startTake(state, [full(), full({ id: 'neighbor', startBar: 1, trackIndex: 1 })], 'song', true, tracks);
+    pumpSteps(fakeCtx, 31);
+    assert.deepEqual(summarize(triggered), ['bar2:36@0', 'bar2:38@4', 'bar2:67@8']);
+  });
+
+  it('selection swaps during a full-pattern take do not replace the referenced content', () => {
+    const state = trio();
+    const { fakeCtx, triggered } = startTake(state, [full({ lengthBars: 2 })], 'song');
+    pumpSteps(fakeCtx, 10);
+    const swapped = selectPatternInProjectState(state, 'pat-2');
+    engine.synchronizePlaybackState({ channels: swapped.channels, patterns: swapped.patterns });
+    pumpSteps(fakeCtx, 21);
+    assert.deepEqual(summarize(triggered), ['bar1:36@0', 'bar1:38@4', 'bar1:67@8', 'bar2:36@0', 'bar2:38@4', 'bar2:67@8']);
+  });
+
+  it('legacy per-channel clips retain content-extent repetition, including hidden pattern steps', () => {
+    const { fakeCtx, triggered } = startTake(trio(), [{ ...full({ lengthBars: 2 }), patternScope: undefined, channelId: 'melody' }], 'song');
+    pumpSteps(fakeCtx, 31);
+    assert.deepEqual(summarize(triggered), ['bar1:67@8', 'bar2:79@24']);
+  });
+
+  it('edited full clips play their preserved phases after move, trim, duplicate and retarget', async () => {
+    const ops = await import('../components/playlistClipOperations');
+    const state = trio();
+    const trimmed = ops.resizePlaylistClipLeft(full({ lengthBars: 2 }), .5);
+    const moved = ops.movePlaylistClip(trimmed, 1, 2);
+    const duplicate = ops.duplicatePlaylistClip(moved, 'copy', 3, 3);
+    const retargeted = ops.setPlaylistClipPattern([duplicate], 'copy', state.patterns, 'pat-2')[0];
+    const { fakeCtx, triggered } = startTake(state, [moved, retargeted], 'song');
+    pumpSteps(fakeCtx, 71);
+    assert.deepEqual(summarize(triggered), ['bar2:67@8', 'bar2:36@0', 'bar2:38@4', 'bar3:67@8', 'bar4:72@16', 'bar4:72@16', 'bar4:72@16']);
+    const midi = await MidiParser.parseMidiFile(await buildStandardMidiFile(state.channels, [moved, retargeted], state.meta, { patterns: state.patterns }).arrayBuffer());
+    assert.deepEqual(midi.map(t => t.notes.map(n => n.startStep)), [[24,56], [28,56], [16,32,56]]);
+    assert.equal(moved.offsetSteps, 8);
+    assert.equal(retargeted.offsetSteps, 8);
+  });
+
+  it('MIDI contains every channel and the same unified wrap/offset', async () => {
+    const state = trio();
+    const tracks = await MidiParser.parseMidiFile(await buildStandardMidiFile(state.channels, [full({ lengthBars: 2, offsetSteps: 4 })], state.meta, { patterns: state.patterns }).arrayBuffer());
+    assert.deepEqual(tracks.map(t => [t.name, t.notes.map(n => [n.pitch, n.startStep])]), [
+      ['Kick', [[36, 12], [36, 28]]], ['Snare', [[38, 0], [38, 16]]], ['Melody', [[67, 4], [67, 20]]],
+    ]);
+  });
+
+  it('offline master and each isolated stem schedule full-pattern material', async () => {
+    (globalThis as any).OfflineAudioContext = FakeOfflineAudioContext;
+    engine.ctx = null;
+    engine.updateMixerTrack = () => undefined;
+    const calls: string[] = [];
+    engine.playNote = (ch: Channel, n: Note) => calls.push(`${ch.id}:${n.pitch}@${n.start}`);
+    const encode = engine.audioBufferToWav;
+    engine.audioBufferToWav = () => new Blob([]);
+    try {
+      const state = trio();
+      await engine.renderProjectStems(state.channels, [full()], [], 120, 1, 24, 'song', undefined, undefined, false, state.patterns);
+      assert.deepEqual(calls, ['kick:36@0', 'snare:38@4', 'melody:67@8', 'kick:36@0', 'snare:38@4', 'melody:67@8']);
+    } finally { engine.audioBufferToWav = encode; }
   });
 });

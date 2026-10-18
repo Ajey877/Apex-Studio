@@ -4,12 +4,13 @@ import type { Channel, Pattern, PlaylistClip, PlaylistTrack, ProjectMetadata } f
 import { normalizePatternLengthSteps } from '../state/patternLength';
 import {
   resolvePatternLoopLengthSteps,
-  resolvePlayableContentLengthSteps,
+  resolvePlaylistClipLoopLengthSteps,
 } from '../audio/audioEngine';
 import { isRackChannelAudible } from '../audio/midiMappingRuntime';
 import { swingOffsetTicksForStep } from '../audio/parameterScaling';
 import { derivePlaylistLaneMutes, isClipLaneMuted } from '../audio/playlistLaneMutes';
-import { resolveClipChannelContent, withPatternChannelContent } from '../state/patternContent';
+import { fullPatternEventsInWindow } from '../audio/fullPatternSchedule';
+import { isFullPatternPlaylistClip, resolvePlaylistClipChannels, resolveClipChannelContent, withPatternChannelContent } from '../state/patternContent';
 
 export type ExportScope = 'song' | 'pattern';
 
@@ -230,6 +231,7 @@ interface MidiTrackContext {
   laneMutes: Set<number>;
   /** Patterns whose stored content Song-scope pattern clips resolve through. */
   patterns?: readonly Pattern[];
+  channels: readonly Channel[];
 }
 
 /**
@@ -331,10 +333,16 @@ function buildMidiTrack(
     // clip's own `offsetSteps` trim, from the clip's start bar to its end bar.
     const stepsBar = stepsPerBarFor(resolvedMeter);
     for (const clip of clips) {
-      if (clip.type !== 'pattern' || clip.mute || clip.channelId !== channel.id) continue;
+      if (clip.type !== 'pattern' || clip.mute || !resolvePlaylistClipChannels(context?.patterns, clip, context?.channels ?? [channel]).some(c => c.id === channel.id)) continue;
       if (context && isClipLaneMuted(clip, context.laneMutes)) continue;
       const clipChannel = withPatternChannelContent(channel, resolveClipChannelContent(context?.patterns, clip, channel));
-      const loopLength = Math.max(1, resolvePlayableContentLengthSteps(clipChannel, undefined, resolvedMeter));
+      const loopLength = Math.max(1, resolvePlaylistClipLoopLengthSteps(context?.patterns, clip, channel, resolvedMeter));
+      if (isFullPatternPlaylistClip(clip)) {
+        for (const event of fullPatternEventsInWindow(channel, clipChannel, clip, loopLength, stepsBar, 0, windowTicks / TICKS_PER_STEP)) {
+          emitAtStep(event.step, { relStep: event.note.start, pitch: event.note.pitch, durationSteps: event.note.duration, velocity: event.note.velocity });
+        }
+        continue;
+      }
       const startStep = Math.round(clip.startBar * stepsBar);
       const endStep = startStep + Math.round(clip.lengthBars * stepsBar);
       const offsetSteps = Math.max(0, Math.round(Number(clip.offsetSteps) || 0));
@@ -383,6 +391,7 @@ export function buildStandardMidiFile(
     windowTicks,
     laneMutes: derivePlaylistLaneMutes(options.playlistTracks),
     patterns: options.patterns,
+    channels,
   };
 
   // Phase 68 F3: one audibility contract for the whole application. The live

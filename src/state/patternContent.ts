@@ -113,6 +113,22 @@ export const resolveClipChannelContent = (
   channel: Pick<Channel, 'id' | 'steps' | 'notes'>
 ): ResolvedPatternContent => resolvePatternChannelContent(findPatternForClip(patterns, clip), channel);
 
+/** Explicit opt-in only: no legacy clip is reinterpreted as a whole pattern. */
+export const isFullPatternPlaylistClip = (
+  clip: Pick<PlaylistClip, 'type' | 'patternScope'>
+): boolean => clip.type === 'pattern' && clip.patternScope === 'all';
+
+/** Channels a clip triggers. Missing full-pattern references are silent, never live-content fallback. */
+export const resolvePlaylistClipChannels = (
+  patterns: readonly Pattern[] | undefined,
+  clip: PlaylistClip,
+  channels: readonly Channel[]
+): readonly Channel[] => {
+  if (clip.type !== 'pattern') return [];
+  if (isFullPatternPlaylistClip(clip)) return findPatternForClip(patterns, clip) ? channels : [];
+  return channels.filter(channel => channel.id === clip.channelId);
+};
+
 /**
  * A read-only channel view whose `steps` / `notes` are `content`. Every other
  * field (instrument, volume, routing...) is the channel's own, so a view can be
@@ -278,7 +294,7 @@ export const ensureIndependentPatterns = (state: ProjectState): ProjectState => 
   const clips = Array.isArray(base.playlistClips) ? base.playlistClips : [];
   const nextClips = pinId
     ? clips.map(clip => {
-        if (!clip || clip.type !== 'pattern' || (clip.patternId && knownIds.has(clip.patternId))) return clip;
+        if (!clip || clip.type !== 'pattern' || isFullPatternPlaylistClip(clip) || (clip.patternId && knownIds.has(clip.patternId))) return clip;
         clipsChanged = true;
         return { ...clip, patternId: pinId };
       })
@@ -476,7 +492,7 @@ export const countProjectNotes = (patterns: readonly Pattern[], channels: readon
 /** Pattern clip as the selection-neutral view describes it: by the content it plays. */
 export type SelectionNeutralClip =
   | PlaylistClip
-  | (Omit<PlaylistClip, 'patternId'> & { playsContent: { steps: boolean[]; notes: Note[] } | null });
+  | (Omit<PlaylistClip, 'patternId'> & { patternId?: string; playsContent: { steps: boolean[]; notes: Note[] } | PatternChannelContent[] | null });
 
 export interface SelectionNeutralPatternView {
   patterns: Array<Omit<Pattern, 'channelContent'> & { content: PatternChannelContent[] }>;
@@ -514,6 +530,12 @@ export const resolveSelectionNeutralPatternView = (state: ProjectState): Selecti
     playlistClips: clips.map((clip): SelectionNeutralClip => {
       if (clip?.type !== 'pattern') return clip;
       const { patternId: _patternId, ...rest } = clip;
+      if (isFullPatternPlaylistClip(clip)) {
+        return { ...rest, patternId: clip.patternId, playsContent: resolvePlaylistClipChannels(patterns, clip, channels).map(channel => {
+          const content = resolveClipChannelContent(patterns, clip, channel);
+          return { channelId: channel.id, steps: copySteps(content.steps), notes: copyNotes(content.notes) };
+        }) };
+      }
       const channel = channels.find(candidate => candidate.id === clip.channelId);
       const content = channel ? resolveClipChannelContent(patterns, clip, channel) : undefined;
       return {
