@@ -380,14 +380,19 @@ export interface PlaylistClip {
   lengthBars: number; // Duration in bars
   type: 'pattern' | 'audio' | 'automation';
   /**
-   * Pattern clips: the pattern whose content (for `channelId`) the clip plays.
+   * Pattern clips: the pattern whose content the clip plays (all channels when
+   * `patternScope` is all, otherwise only `channelId`).
    * New clips are stamped with the selected pattern; legacy clips are stamped
    * with the pattern that was selected when the project was migrated. A clip
    * without one plays the live channel content (pre-migration behaviour).
    */
   patternId?: string;
+  /** Explicit full-pattern opt-in. Absent = historical per-channel behavior, even without channelId. */
+  patternScope?: 'all';
   channelId?: string;
   audioBufferId?: string;
+  /** Explicit route for pre-master lane bounces; absent preserves channel/lane routing. */
+  audioMixerTrackId?: 0;
   audioName?: string;
   audioWaveform?: number[]; // Normalized peaks for rendering
   audioUnavailable?: boolean;

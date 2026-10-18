@@ -664,3 +664,52 @@ describe('AC10: pattern selection is never an undo step (review follow-up)', () 
     assert.ok(reexpress > flush, 'the history present takes the same swap, after the flush');
   });
 });
+
+describe('Full-pattern references survive editing, history and persistence', () => {
+  it('move, resize, split, duplicate and retarget preserve explicit scope and source phase', async () => {
+    const ops = await import('../components/playlistClipOperations');
+    let state = clonePatternInProjectState(baseState(), 'pat-1', pattern('variation'));
+    state = toggle(state, 'ch-1', 3);
+    const original = ops.createFullPatternPlaylistClip(3, 2, patternById(state, 'pat-1'), undefined, 4, 'whole');
+    const moved = ops.movePlaylistClip(original, 5, 1);
+    const trimmed = ops.resizePlaylistClipLeft(moved, 5.5);
+    assert.equal(trimmed.offsetSteps, 8);
+    const extended = ops.resizePlaylistClipRight(trimmed, 10);
+    const copy = ops.duplicatePlaylistClip(extended, 'copy', 12, 2);
+    const [left, right] = ops.splitPlaylistClip(copy, 13);
+    const retargeted = ops.setPlaylistClipPattern([right], right.id, state.patterns, 'variation')[0];
+    assert.equal(retargeted.patternScope, 'all');
+    assert.equal(retargeted.channelId, undefined);
+    assert.equal(retargeted.offsetSteps, 24);
+    assert.equal(retargeted.patternId, 'variation');
+    assert.equal(left.patternId, 'pat-1');
+    assert.equal(original.startBar, 2);
+    assert.equal(original.offsetSteps, undefined);
+    const saved = { ...state, playlistClips: [original, retargeted] };
+    const history = createHistory(state).commit(saved, 'Place full clips');
+    assert.deepEqual(history.undo().redo().present.playlistClips, JSON.parse(JSON.stringify(saved.playlistClips)));
+    const reloaded = normalizeProjectState(JSON.parse(serializeProjectState(saved)).state);
+    assert.deepEqual(reloaded.playlistClips, JSON.parse(JSON.stringify(saved.playlistClips)));
+    assert.deepEqual(reloaded.patterns, saved.patterns);
+    assert.deepEqual(contentOf(reloaded, 'pat-1', 'ch-1').steps, [0, 4, 8, 12]);
+    assert.deepEqual(contentOf(reloaded, 'variation', 'ch-1').steps, [0, 3, 4, 8, 12]);
+  });
+
+  it('retargeting a full clip is real work even if patterns currently have identical content', async () => {
+    const { createFullPatternPlaylistClip } = await import('../components/playlistClipOperations');
+    const state = clonePatternInProjectState(baseState(), 'pat-1', pattern('clone'));
+    state.playlistClips = [createFullPatternPlaylistClip(0, 0, patternById(state, 'pat-1'))];
+    const retargeted = { ...state, playlistClips: setPlaylistClipPattern(state.playlistClips, state.playlistClips[0].id, state.patterns, 'clone') };
+    assert.notEqual(getProjectFingerprint(state), getProjectFingerprint(retargeted));
+  });
+
+  it('replacement fingerprints include all channels played by a full clip', async () => {
+    const { createFullPatternPlaylistClip } = await import('../components/playlistClipOperations');
+    const state = baseState();
+    state.playlistClips = [createFullPatternPlaylistClip(0, 0, state.patterns[0])];
+    const changed = updateChannelInProjectState(state, 'ch-2', { notes: [note('new', 74, 2)] });
+    assert.notEqual(getProjectFingerprint(state), getProjectFingerprint(changed));
+    assert.equal(getProjectFingerprint(selectPatternInProjectState(addPatternToProjectState(state, pattern('second')), 'pat-1')),
+      getProjectFingerprint(addPatternToProjectState(state, pattern('second'))));
+  });
+});

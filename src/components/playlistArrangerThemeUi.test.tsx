@@ -224,8 +224,8 @@ describe('Playlist Arranger residual theme migration (UI-03P)', () => {
     assert.equal(occurrences('background-color:#00ff88'), 32, 'one bar per waveform slot');
 
     assert.match(code, /const AUDIO_CLIP_SIGNAL_COLOR = '#00ff88';/);
-    assert.equal((code.match(/AUDIO_CLIP_SIGNAL_COLOR/g) ?? []).length, 6, 'constant, two creation paths, border, label, bars');
-    assert.equal((code.match(/color: AUDIO_CLIP_SIGNAL_COLOR/g) ?? []).length, 3, 'the stored clip colour on both creation paths, plus the label');
+    assert.equal((code.match(/AUDIO_CLIP_SIGNAL_COLOR/g) ?? []).length, 7, 'constant, three creation paths (including whole-pattern lane bounce), border, label, bars');
+    assert.equal((code.match(/color: AUDIO_CLIP_SIGNAL_COLOR/g) ?? []).length, 4, 'the stored clip colour on three creation paths, plus the label');
     assert.match(code, /: 'bg-\[#002b1a\]\/90 hover:bg-\[#003d24\]'/);
     assert.equal((code.match(/text-white/g) ?? []).length, 2, 'both IN/OUT labels of the media scrim');
   });

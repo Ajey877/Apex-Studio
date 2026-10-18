@@ -671,6 +671,11 @@ export function resolvePlaylistTargetChannel(channels: Channel[], trackIndex: nu
  * plays that pattern's content for the channel (independent patterns); the
  * playlist passes the selected pattern, so a placed clip always plays what the
  * Channel Rack showed when it was drawn.
+ *
+ * This is the HISTORICAL per-channel constructor. It is retained for legacy
+ * project compatibility, undo/redo of older clips, and tests. New user
+ * placements should use `createFullPatternPlaylistClip` so one clip triggers
+ * the whole pattern together (FL Studio behaviour).
  */
 export function createPlaylistPatternClip(
   trackIndex: number,
@@ -693,6 +698,32 @@ export function createPlaylistPatternClip(
     ...(pattern?.id ? { patternId: pattern.id } : {}),
     color: track?.color || channel?.color || '#ff6e00',
     name: `${track?.name || channel?.name || 'Track'} Block`
+  };
+  return assertValidPlaylistClip(clip, bounds);
+}
+
+/** New user placement: whole pattern, explicitly marked; four-bar window retained. */
+export function createFullPatternPlaylistClip(
+  trackIndex: number,
+  startBar: number,
+  pattern: Pick<Pattern, 'id' | 'name' | 'color'>,
+  track?: PlaylistTrack,
+  lengthBars = 4,
+  id?: string,
+  bounds: PlaylistBounds = {}
+): PlaylistClip {
+  if (!pattern?.id) throw new Error('Full-pattern clips require a patternId');
+  const clipId = id || `clip-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`;
+  const clip: PlaylistClip = {
+    id: clipId,
+    trackIndex,
+    startBar,
+    lengthBars,
+    type: 'pattern',
+    patternId: pattern.id,
+    patternScope: 'all',
+    color: pattern.color || track?.color || '#ff6e00',
+    name: pattern.name || 'Pattern Block'
   };
   return assertValidPlaylistClip(clip, bounds);
 }

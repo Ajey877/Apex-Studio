@@ -41,6 +41,8 @@ export interface AudioFieldRegistry {
 }
 
 export const PROJECT_STATE_AUDIO_FIELDS: AudioFieldRegistry = {
+  'playlistClips[].patternScope': { classification: 'consumed', consumer: 'audioEngine.ts:resolvePlaylistClipLoopLengthSteps / state/patternContent', note: 'Explicit all-channel pattern scheduling, absent preserves legacy clips.' },
+  'playlistClips[].audioMixerTrackId': { classification: 'consumed', consumer: 'audioEngine.ts:playAudioClipWithFades', note: 'Pre-master lane bounces return to Master instead of a second lane insert pass.' },
   // ---- ProjectMetadata ----
   'meta.bpm':              { classification: 'consumed', consumer: 'audioEngine.ts:setBpm / transport', note: 'Drives transport tempo.' },
   'meta.swing':            { classification: 'consumed', consumer: 'audioEngine.ts:setSwing / swingOffsetSecondsForStep', note: 'Shifts every off-step.' },
