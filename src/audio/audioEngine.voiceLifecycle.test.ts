@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { afterEach, beforeEach, describe, it } from 'node:test';
 import { audioEngine } from './audioEngine';
+import { MidiNoteInputRuntime } from './midiMappingRuntime';
 import { createDefaultProjectState } from '../state/projectState';
 import type { Channel, Note } from '../types/daw';
 
@@ -72,6 +73,9 @@ const SAVED_KEYS = [
   'rebaseAutomationAtPosition',
   'sampleBuffers',
   'instrumentRegistry',
+  'channelPanners',
+  'midiAccess',
+  'midiListeners',
 ];
 
 const makeChannel = (id: string, instrumentType: Channel['instrumentType']): Channel => {
@@ -185,6 +189,93 @@ describe('Phase 22 standalone voice lifecycle integration', () => {
 
     source.onended?.();
     assert.equal(engine.activeVoices.size, 0);
+  });
+
+  it('releases a looped sampler voice when a Web MIDI input disconnects', async () => {
+    const originalNavigatorDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+    const previousChannelPanners = engine.channelPanners;
+    engine.channelPanners = new Map();
+
+    const channel = makeChannel('sampler-disconnect', 'sampler');
+    channel.sampleZones = [{
+      id: 'disconnect-loop-zone',
+      sampleId: 'disconnect-loop-sample',
+      lowNote: 0,
+      highNote: 127,
+      rootNote: 60,
+      lowVelocity: 0,
+      highVelocity: 127,
+      tuneSemitones: 0,
+      loop: true,
+    }];
+    const buffer = { duration: 2 } as AudioBuffer;
+    engine.sampleBuffers.set('disconnect-loop-sample', buffer);
+
+    const input = {
+      id: 'looped-sampler-keyboard',
+      type: 'input' as const,
+      state: 'connected' as 'connected' | 'disconnected',
+      onmidimessage: null as null | ((event: { data: Uint8Array }) => void),
+    };
+    const access = {
+      inputs: new Map([[input.id, input]]),
+      outputs: new Map(),
+      onstatechange: null as null | ((event: { port: typeof input }) => void),
+    };
+    Object.defineProperty(globalThis, 'navigator', {
+      configurable: true,
+      value: { requestMIDIAccess: async () => access } as unknown as Navigator,
+    });
+
+    const projectState = {
+      ...createDefaultProjectState(),
+      channels: [channel],
+      selectedChannelId: channel.id,
+    };
+    const noteRuntime = new MidiNoteInputRuntime({
+      getProjectState: () => projectState,
+      getSelectedChannelId: () => channel.id,
+      playNote: (targetChannel, note, startTime, bpm, midiChannel) =>
+        audioEngine.playNote(targetChannel, note, startTime, bpm, midiChannel),
+      stopChannelNote: (channelId, pitch, midiChannel) =>
+        audioEngine.stopChannelNote(channelId, pitch, midiChannel),
+    });
+    const listener = (event: import('./audioEngine').MidiEventPayload) => {
+      if (event.type === 'deviceState') {
+        if (event.deviceState === 'disconnected') noteRuntime.releaseAllNotes();
+        return;
+      }
+      noteRuntime.handleMidiEvent(event);
+    };
+    audioEngine.addMidiListener(listener);
+
+    try {
+      await audioEngine.initMidi();
+      assert.ok(input.onmidimessage, 'the input port must be attached before playing');
+      input.onmidimessage({ data: new Uint8Array([0x90, 60, 100]) });
+
+      const source = (engine.ctx as FakeAudioContext).bufferSources[0];
+      assert.ok(source, 'MIDI note-on must reach the production sampler renderer');
+      assert.equal(source.loop, true, 'fixture must exercise an indefinitely looped sample');
+      assert.deepEqual(source.startArgs, [0, 0, undefined]);
+      assert.equal(source.stopCalls, 0);
+      assert.equal(engine.activeVoices.size, 1);
+
+      input.state = 'disconnected';
+      assert.ok(access.onstatechange, 'initMidi must subscribe to Web MIDI state changes');
+      access.onstatechange({ port: input });
+
+      assert.equal(source.stopCalls, 1, 'disconnect cleanup must stop the looped AudioBufferSourceNode');
+      assert.equal(engine.activeVoices.size, 0, 'the active sampler voice must be removed');
+    } finally {
+      audioEngine.removeMidiListener(listener);
+      if (originalNavigatorDescriptor) {
+        Object.defineProperty(globalThis, 'navigator', originalNavigatorDescriptor);
+      } else {
+        Reflect.deleteProperty(globalThis, 'navigator');
+      }
+      engine.channelPanners = previousChannelPanners;
+    }
   });
 
   it('preserves sampler-without-sample fallback to subtractive synthesis', () => {

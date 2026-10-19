@@ -641,6 +641,8 @@ class AudioEngine {
   // MIDI
   private midiAccess: MIDIAccess | null = null;
   private midiListeners: ((e: MidiEventPayload) => void)[] = [];
+  /** Input IDs already reported disconnected; cleared when that port reconnects. */
+  private readonly disconnectedMidiInputIds = new Set<string>();
 
   constructor() {
     // All built-in voices now enter through one registry boundary. The voice
@@ -2937,8 +2939,28 @@ class AudioEngine {
         };
 
         attachInputs();
-        this.midiAccess.onstatechange = () => {
+        this.midiAccess.onstatechange = event => {
+          // Keep the existing reattachment behavior for every port transition;
+          // only a MIDI *input* disconnect should end an armed MIDI take or
+          // release the notes its live monitor is holding.
           attachInputs();
+          const port = event.port;
+          if (!port || port.type !== 'input') return;
+          if (port.state === 'connected') {
+            this.disconnectedMidiInputIds.delete(port.id);
+            return;
+          }
+          if (port.state !== 'disconnected' || this.disconnectedMidiInputIds.has(port.id)) return;
+
+          // Web MIDI may deliver a repeated state notification for the same
+          // disconnect. Emit once, then allow a later real disconnect after a
+          // reconnect (which clears the ID above).
+          this.disconnectedMidiInputIds.add(port.id);
+          this.midiListeners.forEach(listener => listener({
+            type: 'deviceState',
+            deviceState: 'disconnected',
+            deviceId: port.id,
+          }));
         };
       }
     } catch (err) {
