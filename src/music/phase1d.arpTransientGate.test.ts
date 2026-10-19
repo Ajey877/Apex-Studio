@@ -62,7 +62,7 @@ import {
   quantizeDurationSteps,
 } from './noteDurationPolicy';
 
-const readSourceText = (path: string): string => readFileSync(path, 'utf8').replace(/\r\n/g, '\n');
+const readSourceText = (path: string, encoding: 'utf8' = 'utf8'): string => readFileSync(path, encoding).replace(/\r\n/g, '\n');
 
 const REPO_ROOT = fileURLToPath(new URL('../../', import.meta.url));
 const NOTE_GATE_FILE = 'src/audio/noteGate.ts';
