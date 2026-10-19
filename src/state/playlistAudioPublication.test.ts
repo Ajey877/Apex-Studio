@@ -140,7 +140,7 @@ const loadProductionHandleUpdateClips = () => {
   const appSource = readFileSync(
     fileURLToPath(new URL('../App.tsx', import.meta.url)),
     'utf8',
-  );
+  ).replace(/\r\n/g, '\n');
   const match = appSource.match(
     /const handleUpdateClips = \(incomingClips: PlaylistClip\[\]\) => \{([\s\S]*?)\n  \};\n\n  const handleUpdateMarkers/
   );

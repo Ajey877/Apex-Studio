@@ -42,6 +42,8 @@ import { resolveArpNoteDurationSteps, resolveArpRateSteps } from '../audio/noteG
 import type { Channel, Note } from '../types/daw';
 import type { DurationPolicyLayer } from './noteDurationPolicy';
 
+const readSourceText = (path: string, encoding: 'utf8' = 'utf8'): string => readFileSync(path, encoding).replace(/\r\n/g, '\n');
+
 const REPO_ROOT = fileURLToPath(new URL('../../', import.meta.url));
 
 // ---------------------------------------------------------------------------
@@ -133,7 +135,7 @@ const endsMidStatement = (line: string): boolean => {
 export const scanDurationAuthoritySites = (root: string): DurationAuthoritySite[] => {
   const sites: DurationAuthoritySite[] = [];
   for (const absolute of listProductionSources(root)) {
-    const raw = readFileSync(absolute, 'utf8').split('\n');
+    const raw = readSourceText(absolute, 'utf8').split('\n');
     const code = raw.map(stripComments);
     const file = relative(root, absolute).split(sep).join('/');
 
@@ -479,7 +481,7 @@ export const auditDurationPolicy = async (options: AuditOptions): Promise<void> 
       failures.push(`"${layer.id}" points at ${layer.file}, which does not exist`);
       continue;
     }
-    const source = readFileSync(absolute, 'utf8');
+    const source = readSourceText(absolute, 'utf8');
     for (const symbol of layer.symbols) {
       if (!source.includes(symbol)) failures.push(`"${layer.id}" declares symbol "${symbol}", absent from ${layer.file}`);
     }
@@ -573,7 +575,7 @@ let mutationCounter = 0;
 const mutatedPolicyModule = async (mutate: (source: string) => string): Promise<typeof import('./noteDurationPolicy')> => {
   const dir = makeTempDir(`policy${mutationCounter++}`);
   mkdirSync(join(dir, 'music'), { recursive: true });
-  const original = readFileSync(join(REPO_ROOT, 'src/music/noteDurationPolicy.ts'), 'utf8');
+  const original = readSourceText(join(REPO_ROOT, 'src/music/noteDurationPolicy.ts'), 'utf8');
   const mutated = mutate(original);
   assert.notEqual(mutated, original, 'the mutation did not change the policy source');
   writeFileSync(join(dir, 'music/noteDurationPolicy.ts'), mutated);
@@ -743,7 +745,7 @@ describe('Phase 1D — the MIDI 0.5-step floor cannot come back silently', () =>
     const dir = makeTempDir('midifloor');
     cpSync(join(REPO_ROOT, 'src'), join(dir, 'src'), { recursive: true });
     const target = join(dir, 'src/utils/midiParser.ts');
-    const source = readFileSync(target, 'utf8');
+    const source = readSourceText(target, 'utf8');
     const restored = source
       .replace(/minNoteDurationTicks\(ticksPerStep\)/g, 'ticksPerStep / 2')
       .replace(/midiTicksToDurationSteps\(durTicks, ticksPerStep\)/g, 'Math.max(0.5, Math.round((durTicks / ticksPerStep) * 4) / 4)');
@@ -768,7 +770,7 @@ describe('Phase 1D — the MIDI 0.5-step floor cannot come back silently', () =>
     const dir = makeTempDir('quantize');
     cpSync(join(REPO_ROOT, 'src'), join(dir, 'src'), { recursive: true });
     const target = join(dir, 'src/components/PianoRoll.tsx');
-    const source = readFileSync(target, 'utf8');
+    const source = readSourceText(target, 'utf8');
     const restored = source.replace('duration: quantizeDurationSteps(n.duration)', 'duration: Math.max(1, Math.round(n.duration))');
     assert.notEqual(restored, source, 'the mutation must change the quantize handler');
     writeFileSync(target, restored);
@@ -791,7 +793,7 @@ describe('Phase 1D — the MIDI 0.5-step floor cannot come back silently', () =>
     const dir = makeTempDir('editfloor');
     cpSync(join(REPO_ROOT, 'src'), join(dir, 'src'), { recursive: true });
     const target = join(dir, 'src/components/pianoRollOperations.ts');
-    const source = readFileSync(target, 'utf8');
+    const source = readSourceText(target, 'utf8');
     const restored = source.replace(
       'export const DEFAULT_MIN_NOTE_DURATION = MIN_NOTE_DURATION_STEPS;',
       'export const DEFAULT_MIN_NOTE_DURATION = 0.25;',
@@ -817,13 +819,13 @@ describe('Phase 1D — the MIDI 0.5-step floor cannot come back silently', () =>
 describe('Phase 1D — the two policy systems stay separate', () => {
   it('the instrument gate policy does not import the duration policy', () => {
     for (const file of ['src/audio/instrumentGatePolicy.ts', 'src/audio/noteGate.ts']) {
-      const source = readFileSync(join(REPO_ROOT, file), 'utf8');
+      const source = readSourceText(join(REPO_ROOT, file), 'utf8');
       assert.ok(!source.includes('noteDurationPolicy'), `${file} must not consume the duration policy`);
     }
   });
 
   it('the duration policy does not import or restate the gate policy', () => {
-    const source = readFileSync(join(REPO_ROOT, 'src/music/noteDurationPolicy.ts'), 'utf8');
+    const source = readSourceText(join(REPO_ROOT, 'src/music/noteDurationPolicy.ts'), 'utf8');
     // The inventory names the gate layers, so the module mentions them in prose.
     // What it must never do is import them or restate their seconds arithmetic.
     for (const forbidden of ['GATE_SECONDS_PER_STEP_AT_60BPM', 'characterFactor', 'from \'./noteGate\'', 'instrumentGatePolicy\'']) {
@@ -834,7 +836,7 @@ describe('Phase 1D — the two policy systems stay separate', () => {
   });
 
   it('gate fallback steps are untouched by this phase', () => {
-    const source = readFileSync(join(REPO_ROOT, 'src/audio/instrumentGatePolicy.ts'), 'utf8');
+    const source = readSourceText(join(REPO_ROOT, 'src/audio/instrumentGatePolicy.ts'), 'utf8');
     const fallbacks = [...source.matchAll(/fallbackSteps:\s*([0-9.]+)/g)].map(match => Number(match[1]));
     assert.equal(fallbacks.length, 18, 'the 18 duration-gated instruments each declare a fallback');
     assert.equal(Math.min(...fallbacks), 1);
