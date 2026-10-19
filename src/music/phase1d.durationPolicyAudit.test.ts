@@ -42,7 +42,7 @@ import { resolveArpNoteDurationSteps, resolveArpRateSteps } from '../audio/noteG
 import type { Channel, Note } from '../types/daw';
 import type { DurationPolicyLayer } from './noteDurationPolicy';
 
-const readSourceText = (path: string): string => readFileSync(path, 'utf8').replace(/\r\n/g, '\n');
+const readSourceText = (path: string, encoding: 'utf8' = 'utf8'): string => readFileSync(path, encoding).replace(/\r\n/g, '\n');
 
 const REPO_ROOT = fileURLToPath(new URL('../../', import.meta.url));
 
