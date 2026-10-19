@@ -17,7 +17,7 @@ Build beats, write melodies, arrange tracks, record audio, shape your mix, and e
 
 <br />
 
-[🚀 **Download Apex Studio v1.2.1**](https://github.com/Ajey877/Apex-Studio/releases/tag/v1.2.1) · [📖 **Documentation**](#-getting-started) · [🐛 **Report a Bug**](https://github.com/Ajey877/Apex-Studio/issues/new/choose) · [💡 **Request an Improvement**](https://github.com/Ajey877/Apex-Studio/issues/new/choose)
+[🚀 **Download Apex Studio v1.2.2**](https://github.com/Ajey877/Apex-Studio/releases/tag/v1.2.2) · [📖 **Documentation**](#-getting-started) · [🐛 **Report a Bug**](https://github.com/Ajey877/Apex-Studio/issues/new/choose) · [💡 **Request an Improvement**](https://github.com/Ajey877/Apex-Studio/issues/new/choose)
 
 </div>
 
@@ -49,7 +49,7 @@ It brings the main parts of a music-production workflow into one application —
        EXPORT
 ```
 
-**v1.2.1** is a reliability-focused release centered on the complete music-production loop: create, edit, arrange, record, mix, save, reopen, and export. It includes hardened audio playback/rendering, project persistence and recovery, export validation, and Windows packaging/runtime validation.
+**v1.2.2** builds on v1.2.1 with rate-aware audio-clip seek/resume timing, safer auxiliary-send routing when a channel is removed while its shared mixer destination remains, and full-pattern Playlist clips that play every instrument in a referenced pattern together. Existing per-channel clips retain their previous behavior.
 
 ---
 
@@ -125,7 +125,7 @@ Shape sounds with two oscillators, filters and modulation.
 |---|---|
 | **Channel Rack** | Build independent patterns — each pattern keeps its own steps and notes for every channel — with step sequencing, swing, velocity and MIDI learn. Add an empty pattern or clone one to start a variation. |
 | **Piano Roll** | Create polyphonic melodies, edit note length and velocity, use scales/chords and quantization tools. |
-| **Playlist Arranger** | Arrange patterns and audio clips across multiple lanes, including automation. Each pattern clip plays the pattern it names, live and in every export. |
+| **Playlist Arranger** | Arrange patterns and audio clips across multiple lanes, including automation. New pattern placements can play every instrument in the referenced pattern together; legacy per-channel clips retain their original behavior. Live playback, WAV/stems and Standard MIDI share the pattern/clip scheduling rules. |
 | **Mixer** | Work across mixer tracks with volume, pan, routing, metering and insert effects (EQ, reverb, delay, compression, limiter). |
 | **Synth** | Shape sounds with dual oscillators, filters, ADSR and modulation controls. |
 | **Recording** | Capture audio and place recorded takes into the project. |
@@ -164,7 +164,7 @@ The project can be packaged as a Windows installer or portable executable throug
 
 Download the latest release from GitHub:
 
-**👉 [Download Apex Studio v1.2.1](https://github.com/Ajey877/Apex-Studio/releases/tag/v1.2.1)**
+**👉 [Download Apex Studio v1.2.2](https://github.com/Ajey877/Apex-Studio/releases/tag/v1.2.2)**
 
 The release workflow builds Windows packages including:
 
@@ -273,7 +273,7 @@ Render your finished work as WAV, export Standard MIDI, or create project/stem p
 
 Apex Studio is being developed with automated checks and real-runtime validation around the parts that matter most to a DAW: audio behavior, project state, desktop configuration, production builds, persistence, and export.
 
-The v1.2.1 release was validated through:
+Automated release validation covers:
 
 - ✅ TypeScript compilation
 - ✅ Audio regression and persistence tests
@@ -362,10 +362,11 @@ creates audio: a project with no recorded takes has no take groups to show.
 Every pattern owns its own content: each channel's step-sequencer cells and Piano Roll notes
 belong to the pattern they were written in. **Add pattern** creates an empty pattern,
 **Clone pattern** copies the selected one for a variation, and editing a pattern never changes
-another one. A playlist pattern clip plays its lane channel's content in the pattern the clip
-names (shown on the clip, together with a preview of its first bar), and the same resolution is
-used by live Song Mode, WAV and stem export, Standard MIDI export and Bounce-In-Place. A MIDI
-take is written into the pattern that was selected when recording started.
+another one. A playlist pattern clip resolves content from the pattern it names. New Draw
+placements are explicitly marked as full-pattern clips and play all channels together through
+each channel's own instrument and mixer routing; legacy clips retain channel-only behavior. The
+same resolution is used by live Song Mode, WAV and stem export, Standard MIDI export and
+Bounce-In-Place. A MIDI take is written into the pattern that was selected when recording started.
 
 Selecting a pattern is a view change, not an undo step. Undo returns to the project exactly as
 it was just before the undone change — including the pattern that was selected at that moment —
@@ -377,13 +378,13 @@ content it showed before. The first pattern operation (selecting, adding or clon
 gives each pattern its own copy of that content and keeps every placed clip playing what it
 played, so nothing audible changes.
 
-Its current scope:
+Current scope and compatibility:
 
-- Pattern clips are **per channel lane**: a clip plays one channel's part of a pattern. There
-  is no single clip that plays every channel of a pattern at once.
+- **New Draw placements are full-pattern clips** (`patternScope: "all"`): one clip triggers every channel's content from the referenced pattern, each through its own instrument and mixer route. The clip uses one shared loop from the pattern's declared length. The Playlist retains its four-bar placement window; resizing right repeats content, while trimming left or splitting advances the source offset instead of stretching notes.
+- **Legacy per-channel clips remain per-channel.** The explicit scope marker prevents older/demo clips from being reinterpreted; they keep their channel-specific, content-derived loop. A missing pattern reference on a full-pattern clip is silent and visibly identified rather than falling back to the currently selected pattern.
+- Full-pattern clips are scheduled consistently in live Song Mode and WAV/stem/Standard MIDI export. MIDI preserves note events and timing; it does not reproduce rendered audio/DSP timbre or automation curves.
 - Patterns can be added, cloned and selected; there is **no delete or rename** for patterns yet.
-- In Song Mode a clip loops its content's own length (as before), not the pattern's declared
-  16/32-step length, which governs Pattern Mode and the Pattern Loop export.
+- Pattern Mode and Pattern Loop export use the pattern's declared length. In Song Mode, new full-pattern clips use that shared declared loop; legacy channel clips preserve their previous content-derived loop behavior.
 
 ### Local collaboration and sync status
 
@@ -438,11 +439,11 @@ If Apex Studio is useful to you, **a GitHub star helps the project get discovere
 
 ## 📈 Version
 
-**Current release: `v1.2.1`**
+**Current release: `v1.2.2`**
 
-v1.2.1 focuses on release parity and real-world DAW reliability: audio transport and rendering, mixer/FX behavior, project persistence and recovery, missing-audio handling, export/stem integrity, and Windows runtime validation.
+v1.2.2 adds full-pattern Playlist clips across all instruments, rate-aware audio-clip seek/resume timing, and preservation of auxiliary sends to surviving shared mixer destinations when a channel is removed. Legacy per-channel clips keep their existing behavior.
 
-See the [release page](https://github.com/Ajey877/Apex-Studio/releases/tag/v1.2.1) for the downloadable Windows build and release information.
+See the [v1.2.2 release page](https://github.com/Ajey877/Apex-Studio/releases/tag/v1.2.2) for the Windows installer and portable build.
 
 ---
 
@@ -456,8 +457,8 @@ Apex Studio is licensed under the **MIT License**. See [`LICENSE`](LICENSE) for 
 
 ### 🎛️ Make music. Keep it local. Keep creating.
 
-**Apex Studio — v1.2.1**
+**Apex Studio — v1.2.2**
 
-[⬇️ Download](https://github.com/Ajey877/Apex-Studio/releases/tag/v1.2.1) · [⭐ Star on GitHub](https://github.com/Ajey877/Apex-Studio) · [🐛 Report an issue](https://github.com/Ajey877/Apex-Studio/issues/new/choose)
+[⬇️ Download](https://github.com/Ajey877/Apex-Studio/releases/tag/v1.2.2) · [⭐ Star on GitHub](https://github.com/Ajey877/Apex-Studio) · [🐛 Report an issue](https://github.com/Ajey877/Apex-Studio/issues/new/choose)
 
 </div>
