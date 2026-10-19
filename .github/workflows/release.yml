@@ -5,6 +5,11 @@ on:
     tags:
       - 'v*'
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Optional existing vX.Y.Z tag to publish from the selected branch"
+        required: false
+        type: string
 
 permissions:
   contents: write
@@ -17,6 +22,74 @@ jobs:
     steps:
       - name: Checkout Source Code
         uses: actions/checkout@v4
+
+      - name: Validate manually selected release tag
+        if: github.event_name == 'workflow_dispatch' && inputs.release_tag != ''
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          $tag = $env:RELEASE_TAG
+          if ($tag -notmatch '^v\d+\.\d+\.\d+
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install Project Dependencies
+        run: npm install --legacy-peer-deps
+
+      - name: Desktop security configuration
+        run: npm run verify:desktop
+
+      - name: TypeScript check
+        run: npm run lint
+
+      - name: Audio regression tests
+        run: npm run test:audio
+
+      - name: History regression tests
+        run: npm run test:history
+
+      - name: Compile Optimized Web Bundle
+        run: npm run build
+
+      - name: Package Standalone Windows Executable (.exe)
+        run: npm run package:win
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create GitHub Release & Upload Assets
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.release_tag != '')
+        with:
+          tag_name: ${{ inputs.release_tag || github.ref_name }}
+          name: "Apex Studio DAW ${{ inputs.release_tag || github.ref_name }}"
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          body: |
+            # Apex Studio DAW ${{ inputs.release_tag || github.ref_name }}
+
+            Official Windows release of Apex Studio DAW.
+
+            Automated regression validation covers core audio transport, project persistence/recovery, offline rendering/export, production builds, and packaged Windows startup. These checks do not replace device-specific listening or hardware MIDI acceptance.
+
+            ## Downloads
+            Windows installer and portable executable files are attached below as release assets.
+
+            ## Notes
+            - Windows x64
+            - Electron 43.4.1
+            - Unsigned Windows binaries may show the normal Windows SmartScreen warning.
+          files: |
+            dist-electron/*.exe
+            dist-electron/*.zip
+            dist-electron/*.blockmap
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+) { throw "Release tag must match vX.Y.Z; got '$tag'." }
+          git ls-remote --exit-code --tags origin "refs/tags/$tag" | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "Release tag '$tag' does not exist on origin." }
 
       - name: Setup Node.js Environment
         uses: actions/setup-node@v4
