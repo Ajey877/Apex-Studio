@@ -74,8 +74,15 @@ describe('Channel deletion lifecycle — ProjectState', () => {
     assert.equal(result.state.mixerTracks.some(t => t.id === 0), true);
   });
 
-  it('preserves MixerTrack when another surviving channel shares the same mixerTrackId', () => {
+  it('preserves a shared MixerTrack and its incoming aux sends when a channel is deleted', () => {
     const project = createDefaultProjectState();
+    project.selectedMixerTrackId = 2;
+    project.mixerTracks[1].routingTargetId = 2;
+    project.mixerTracks[1].auxSends = [
+      { targetId: 2, amount: 0.37 },
+      { targetId: 3, amount: 0.64 },
+    ];
+    const originalMixerTracks = structuredClone(project.mixerTracks);
     // Add ch-3 that also routes to mixerTrackId: 2
     const sharedChannel: Channel = {
       ...project.channels[1],
@@ -96,8 +103,16 @@ describe('Channel deletion lifecycle — ProjectState', () => {
     assert.equal(result.state.channels.some(c => c.id === 'ch-2'), false);
     assert.equal(result.state.channels.some(c => c.id === 'ch-3'), true);
 
-    // Mixer track 2 is preserved
+    // Mixer track 2 and its incoming sends are preserved, including send amounts.
     assert.equal(result.state.mixerTracks.some(t => t.id === 2), true);
+    assert.deepEqual(result.state.mixerTracks.find(t => t.id === 1)?.auxSends, [
+      { targetId: 2, amount: 0.37 },
+      { targetId: 3, amount: 0.64 },
+    ]);
+    assert.equal(result.state.mixerTracks.find(t => t.id === 1)?.routingTargetId, 2);
+    assert.equal(result.state.selectedMixerTrackId, 2);
+    assert.deepEqual(result.state.mixerTracks, originalMixerTracks);
+    assert.deepEqual(project.mixerTracks, originalMixerTracks);
   });
 
   it('never removes Master track 0 even if a channel was routed to Master', () => {
