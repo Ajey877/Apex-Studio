@@ -24,20 +24,58 @@ const installSimulatedMidiDevice = async (page: Page): Promise<void> => {
       id: 'midi-recording-test-input',
       name: 'Recording Test Keyboard',
       manufacturer: 'Apex Studio test fixture',
-      state: 'connected',
+      type: 'input' as const,
+      state: 'connected' as 'connected' | 'disconnected',
+      onmidimessage: null as null | ((event: { data: Uint8Array }) => void),
+    };
+    const output = {
+      id: 'midi-recording-test-output',
+      name: 'Recording Test Output',
+      type: 'output' as const,
+      state: 'connected' as 'connected' | 'disconnected',
       onmidimessage: null as null | ((event: { data: Uint8Array }) => void),
     };
     const access = {
       inputs: new Map([[input.id, input]]),
-      outputs: new Map(),
-      onstatechange: null as null | (() => void),
+      outputs: new Map([[output.id, output]]),
+      onstatechange: null as null | ((event: { port: typeof input | typeof output }) => void),
     };
     Object.defineProperty(navigator, 'requestMIDIAccess', {
       configurable: true,
       value: async () => access,
     });
-    (window as unknown as { __midiRecordingInput: typeof input }).__midiRecordingInput = input;
+    const target = window as unknown as {
+      __midiRecordingInput: typeof input;
+      __midiRecordingOutput: typeof output;
+      __midiRecordingAccess: typeof access;
+    };
+    target.__midiRecordingInput = input;
+    target.__midiRecordingOutput = output;
+    target.__midiRecordingAccess = access;
   });
+};
+
+const changeMidiPortState = async (
+  page: Page,
+  portType: 'input' | 'output',
+  state: 'connected' | 'disconnected',
+): Promise<void> => {
+  await page.evaluate(({ portType: nextType, state: nextState }) => {
+    const target = window as unknown as {
+      __midiRecordingInput: { state: 'connected' | 'disconnected'; onmidimessage: unknown };
+      __midiRecordingOutput: { state: 'connected' | 'disconnected' };
+      __midiRecordingAccess: {
+        onstatechange: ((event: { port: unknown }) => void) | null;
+      };
+    };
+    const port = nextType === 'input' ? target.__midiRecordingInput : target.__midiRecordingOutput;
+    port.state = nextState;
+    if (!target.__midiRecordingAccess.onstatechange) throw new Error('simulated MIDI access has no state-change listener');
+    target.__midiRecordingAccess.onstatechange({ port });
+    if (nextType === 'input' && nextState === 'disconnected') {
+      target.__midiRecordingInput.onmidimessage = null;
+    }
+  }, { portType, state });
 };
 
 const sendMidi = async (page: Page, bytes: number[][]): Promise<void> => {
@@ -98,5 +136,77 @@ test.describe('MIDI recording into the Piano Roll', () => {
 
     // The notes are ordinary editable Piano Roll data: select one.
     await recordedBlocks.first().click();
+  });
+
+  test('input disconnect finalizes a held note once, releases it, and reconnects cleanly', async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 960 });
+    await installSimulatedMidiDevice(page);
+    await page.goto(APP_URL);
+    await page.waitForSelector('#root > *', { state: 'attached' });
+    await page.waitForTimeout(1200);
+    await page.locator('#nav-piano-roll').click();
+
+    const toggle = page.getByTestId('midi-record-toggle');
+    const target = page.getByTestId('midi-record-target');
+    await expect(toggle).toBeVisible();
+    const originalTarget = (await target.innerText()).trim();
+    await page.waitForFunction(() => {
+      const windowWithMidi = window as unknown as {
+        __midiRecordingInput?: { onmidimessage: unknown };
+        __midiRecordingAccess?: { onstatechange: unknown };
+      };
+      return Boolean(windowWithMidi.__midiRecordingInput?.onmidimessage && windowWithMidi.__midiRecordingAccess?.onstatechange);
+    });
+
+    const recordedBlocks = page.locator('[id^="note-block-midi-rec-"]');
+    await toggle.click();
+    await expect(toggle).toHaveAttribute('aria-pressed', 'true');
+    await sendMidi(page, [[0x90, 60, 100]]); // C4 on; deliberately no note-off
+    await page.waitForTimeout(350);
+
+    // An output disconnect is unrelated: it must not end the active input take.
+    await changeMidiPortState(page, 'output', 'disconnected');
+    await expect(toggle).toHaveAttribute('aria-pressed', 'true');
+    await expect(recordedBlocks).toHaveCount(0);
+
+    // The input disconnect is the capture boundary. The open gate must be
+    // committed to the original selected channel/pattern immediately.
+    await changeMidiPortState(page, 'input', 'disconnected');
+    await expect(toggle).toHaveAttribute('aria-pressed', 'false');
+    await expect(recordedBlocks).toHaveCount(1);
+    await expect(target).toContainText(originalTarget);
+    const widthAtDisconnect = await recordedBlocks.first().evaluate(element =>
+      Number.parseFloat((element as HTMLElement).style.width),
+    );
+    expect(widthAtDisconnect).toBeGreaterThan(16);
+
+    // The take is finalized at disconnect, not at some later user action: its
+    // rendered gate width is immutable while the transport continues running.
+    await page.waitForTimeout(650);
+    const widthAfterDelay = await recordedBlocks.first().evaluate(element =>
+      Number.parseFloat((element as HTMLElement).style.width),
+    );
+    expect(widthAfterDelay).toBe(widthAtDisconnect);
+
+    // A duplicate notification for the same disconnected state cannot commit
+    // another note. Reconnection reattaches the input for a fresh performance.
+    await changeMidiPortState(page, 'input', 'disconnected');
+    await expect(recordedBlocks).toHaveCount(1);
+    await changeMidiPortState(page, 'input', 'connected');
+    await page.waitForFunction(() => {
+      const input = (window as unknown as {
+        __midiRecordingInput?: { onmidimessage: unknown };
+      }).__midiRecordingInput;
+      return Boolean(input?.onmidimessage);
+    });
+
+    await toggle.click();
+    await expect(toggle).toHaveAttribute('aria-pressed', 'true');
+    await sendMidi(page, [[0x90, 64, 90]]); // E4 on after reconnect
+    await page.waitForTimeout(300);
+    await sendMidi(page, [[0x80, 64, 0]]);
+    await toggle.click(); // ordinary manual stop still finalizes correctly
+    await expect(toggle).toHaveAttribute('aria-pressed', 'false');
+    await expect(recordedBlocks).toHaveCount(2);
   });
 });
