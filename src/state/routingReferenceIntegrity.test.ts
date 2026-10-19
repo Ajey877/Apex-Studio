@@ -26,16 +26,31 @@ test('invalid routing destinations normalize safely to Master', () => {
   assert.equal(normalized.mixerTracks.find(track => track.id === 1)?.routingTargetId, 0);
 });
 
-test('deleting a mixer destination clears dependent routes', () => {
+test('deleting an orphaned mixer destination removes incoming aux sends and redirects dependent routes', () => {
   const project = createDefaultProjectState();
   project.mixerTracks[1].routingTargetId = 2;
-  project.mixerTracks.push({ ...project.mixerTracks[1], id: 8, name: 'Unrelated Bus', routingTargetId: 1 });
+  project.mixerTracks[1].auxSends = [
+    { targetId: 2, amount: 0.37 },
+    { targetId: 3, amount: 0.64 },
+  ];
+  project.mixerTracks[4].routingTargetId = 3;
+  project.mixerTracks[4].auxSends = [{ targetId: 2, amount: 0.58 }];
+  const originalMixerTracks = structuredClone(project.mixerTracks);
 
   const result = deleteChannelFromProjectState(project, 'ch-2');
 
   assert.equal(result.removedMixerTrackId, 2);
   assert.equal(result.state.mixerTracks.some(track => track.id === 2), false);
-  assert.equal(result.state.mixerTracks.find(track => track.id === 1)?.routingTargetId, 0);
+  const sourceTrack = result.state.mixerTracks.find(track => track.id === 1);
+  assert.ok(sourceTrack);
+  assert.equal(sourceTrack.routingTargetId, 0);
+  assert.deepEqual(sourceTrack.auxSends, [{ targetId: 3, amount: 0.64 }]);
+
+  const otherSourceTrack = result.state.mixerTracks.find(track => track.id === 4);
+  assert.ok(otherSourceTrack);
+  assert.equal(otherSourceTrack.auxSends, undefined);
+  assert.equal(otherSourceTrack.routingTargetId, 3);
+  assert.deepEqual(project.mixerTracks, originalMixerTracks);
 });
 
 test('unrelated routes remain unchanged when a destination is deleted', () => {
