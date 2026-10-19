@@ -31,7 +31,8 @@ import {
 } from './types/daw';
 import { audioEngine, type MidiEventPayload, type PlaybackStateUpdate } from './audio/audioEngine';
 import { MidiCcMappingRuntime, MidiNoteInputRuntime, isRackChannelAudible } from './audio/midiMappingRuntime';
-import { MidiPerformanceRecorder, appendRecordedNotesToChannelInProjectState } from './audio/midiRecording';
+import { MidiPerformanceRecorder, appendRecordedNotesToChannelInProjectState, type MidiRecordingClock } from './audio/midiRecording';
+import { finishMidiTake, type FinishMidiTakeOptions } from './audio/midiTakeBoundary';
 import { VirtualMidiInputBridge } from './audio/virtualMidiInput';
 import { 
   DEFAULT_PROJECT, 
@@ -215,7 +216,11 @@ export function App() {
       getClock: () => audioEngine.getTransportMusicalPosition(),
     });
   }
-  const finalizeMidiRecordingRef = useRef<(() => void) | null>(null);
+  // Transport-boundary finalizer (pause/seek/mode switch/stop/Song end/device
+  // disconnect): closes the active take at the pre-boundary clock and releases
+  // held live-monitor notes. Handlers defined before the MIDI section reach
+  // the current finalizer through this ref.
+  const finalizeMidiRecordingRef = useRef<((clock?: MidiRecordingClock) => void) | null>(null);
   const cancelMidiRecordingRef = useRef<(() => void) | null>(null);
   const toggleMidiRecordingRef = useRef<(() => void) | null>(null);
   const [isMidiRecording, setIsMidiRecording] = useState(false);
@@ -642,6 +647,17 @@ export function App() {
     return () => audioEngine.setTransportStateCallback(null);
   }, []);
 
+  // Natural Song end is the one transport boundary the App does not initiate:
+  // the engine reports the arrangement endpoint synchronously, before its
+  // Song-end teardown, so an active MIDI take closes exactly on the end
+  // instead of spanning the halt (and a later restart from the top).
+  useEffect(() => {
+    audioEngine.setSongEndCallback((position) => {
+      finalizeMidiRecordingRef.current?.(position);
+    });
+    return () => audioEngine.setSongEndCallback(null);
+  }, []);
+
   // --- Transport Controls ---
   // Pattern Mode loops over the selected pattern's declared length (16/32/64).
   // `Pattern.lengthSteps` is the single source of truth: the Channel Rack grid,
@@ -651,6 +667,11 @@ export function App() {
   const handleTogglePlay = () => {
     if (audioEngine.isOfflineRenderLeaseHeld()) return;
     if (isPlaying) {
+      // A take never spans a pause: close it at the position playback pauses
+      // (held gates end here, live voices release) before pausing. Resuming
+      // later does not reopen it — the Play branch below creates no boundary
+      // and also revives no old take.
+      finalizeMidiRecordingRef.current?.();
       // Real pause: the transport keeps its position, scheduled audio is
       // cancelled, and Play resumes from the paused position.
       audioEngine.pause();
@@ -681,7 +702,8 @@ export function App() {
   const handleStop = () => {
     if (audioEngine.isOfflineRenderLeaseHeld()) return;
     // Stopping the transport finalizes any MIDI take at the pre-stop
-    // position, committing its notes before the playhead resets.
+    // position through the shared boundary path, committing its notes and
+    // releasing held live voices before the playhead resets.
     finalizeMidiRecordingRef.current?.();
     audioEngine.stop();
     setIsPlaying(false);
@@ -691,6 +713,10 @@ export function App() {
 
   const handleTogglePlayMode = () => {
     if (audioEngine.isOfflineRenderLeaseHeld()) return;
+    // A take never spans a playback-mode change: finalize at the old
+    // transport position (original channel/pattern target intact) before the
+    // switch stops and restarts playback in the new mode.
+    finalizeMidiRecordingRef.current?.();
     const nextMode: PlayMode = playMode === 'pat' ? 'song' : 'pat';
     setPlayMode(nextMode);
     if (isPlaying) {
@@ -922,28 +948,55 @@ export function App() {
    * A take targets the channel and pattern selected when recording starts
    * (shown in the Piano Roll before and during the take). Events are stamped
    * with the engine's AudioContext transport position at message arrival and
-   * committed — on stop, transport stop, or device disconnect — as ONE
-   * history entry of real `Channel.notes`, so the take undoes/redoes as a
-   * unit and persists like any Piano Roll edit. Live monitoring stays with
-   * `MidiNoteInputRuntime`; this recorder only captures.
+   * committed as ONE history entry of real `Channel.notes`, so the take
+   * undoes/redoes as a unit and persists like any Piano Roll edit. A take
+   * never spans a transport discontinuity: pause, ruler seek, playback-mode
+   * switch, natural Song end, manual Stop and device disconnect all finalize
+   * it at the pre-boundary position through `finishMidiTake` (see
+   * `finalizeMidiTakeAtBoundary` below), as does stopping from the record
+   * toggle. Live monitoring stays with `MidiNoteInputRuntime`; this
+   * recorder only captures.
    */
-  const finishMidiRecording = useCallback(() => {
-    const recorder = midiRecorderRef.current;
-    if (!recorder || !recorder.isRecording) return;
-    const target = recorder.activeTarget;
-    const notes = recorder.stop(audioEngine.getTransportMusicalPosition());
-    setIsMidiRecording(false);
-    setMidiRecordingTargetLabel(null);
-    setMidiRecordedNoteCount(0);
-    if (target && notes.length > 0) {
-      mutateProjectStateRef.current(
-        // The take belongs to the pattern it started in, even if another
-        // pattern was selected before it was finalized.
-        current => appendRecordedNotesToChannelInProjectState(current, target.channelId, notes, target.patternId),
-        'Record MIDI performance',
-      );
-    }
+  const finishMidiRecording = useCallback((options?: FinishMidiTakeOptions) => {
+    finishMidiTake(
+      {
+        getRecorder: () => midiRecorderRef.current,
+        getClock: () => audioEngine.getTransportMusicalPosition(),
+        commitTake: (target, notes) => {
+          mutateProjectStateRef.current(
+            // The take belongs to the pattern it started in, even if another
+            // pattern was selected before it was finalized.
+            current => appendRecordedNotesToChannelInProjectState(current, target.channelId, notes, target.patternId),
+            'Record MIDI performance',
+          );
+        },
+        releaseHeldNotes: () => {
+          virtualMidiInputRef.current?.releaseAll();
+          midiNoteRuntimeRef.current?.releaseAllNotes();
+        },
+        onTakeEnded: () => {
+          setIsMidiRecording(false);
+          setMidiRecordingTargetLabel(null);
+          setMidiRecordedNoteCount(0);
+        },
+      },
+      options,
+    );
   }, []);
+
+  /**
+   * Transport-boundary ending shared by pause, ruler seek, mode switch,
+   * manual Stop, natural Song end and device disconnect: finalize the take
+   * at the pre-boundary position (the caller invokes this *before* moving
+   * the playhead, or passes the boundary clock explicitly as Song end does)
+   * and release held live-monitor notes so no stale voice or held-note
+   * bookkeeping survives the engine tearing the take's audio down. A manual
+   * stop from the record toggle uses `finishMidiRecording` without the
+   * release, leaving a still-held key sounding until its own note-off.
+   */
+  const finalizeMidiTakeAtBoundary = useCallback((clock?: MidiRecordingClock) => {
+    finishMidiRecording({ clock, releaseHeldNotes: true });
+  }, [finishMidiRecording]);
 
   const cancelMidiRecording = useCallback(() => {
     midiRecorderRef.current?.cancel();
@@ -987,10 +1040,10 @@ export function App() {
   };
 
   useEffect(() => {
-    finalizeMidiRecordingRef.current = finishMidiRecording;
+    finalizeMidiRecordingRef.current = finalizeMidiTakeAtBoundary;
     cancelMidiRecordingRef.current = cancelMidiRecording;
     toggleMidiRecordingRef.current = toggleMidiRecording;
-  }, [finishMidiRecording, cancelMidiRecording, toggleMidiRecording]);
+  }, [finalizeMidiTakeAtBoundary, cancelMidiRecording, toggleMidiRecording]);
 
   const handleToggleMidiRecording = useCallback(() => {
     toggleMidiRecordingRef.current?.();
@@ -1038,11 +1091,11 @@ export function App() {
     const handleMidiMessage = (event: MidiEventPayload) => {
       if (event.type === 'deviceState') {
         if (event.deviceState === 'disconnected') {
-          // Finalize the take at the disconnect position (held gates are
-          // closed, not left open) and release every live voice so nothing
-          // sustains from a keyboard that is no longer connected.
+          // The shared boundary path finalizes the take at the disconnect
+          // position (held gates are closed, not left open) and releases
+          // every live voice so nothing sustains from a keyboard that is no
+          // longer connected.
           finalizeMidiRecordingRef.current?.();
-          midiNoteRuntime.releaseAllNotes();
         }
         return;
       }
@@ -2432,6 +2485,12 @@ export function App() {
               onRedo={handleRedo}
               onSelectedClipIdChange={setSelectedPlaylistClipId}
               onSeekToBar={(bar) => {
+                // A take never spans a position jump: finalize at the old
+                // position before the playhead moves, so held gates end here
+                // and events at the new position cannot join the closed take.
+                // (Scrubbing fires this per bar; only the first call finds a
+                // take to finalize.)
+                finalizeMidiRecordingRef.current?.();
                 // Real transport seek: works stopped, paused and playing. While
                 // playing it cancels audio scheduled for the old position and
                 // restarts any playlist audio clip the new position lands in.
