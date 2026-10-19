@@ -5304,9 +5304,7 @@ class AudioEngine {
     if (clip.pitchShiftSemitones) {
       source.detune.setValueAtTime(clip.pitchShiftSemitones * 100, startTime);
     }
-    if (clip.timeStretchRate) {
-      source.playbackRate.setValueAtTime(clip.timeStretchRate, startTime);
-    }
+    source.playbackRate.setValueAtTime(rate, startTime);
 
     const gainNode = this.ctx.createGain();
 

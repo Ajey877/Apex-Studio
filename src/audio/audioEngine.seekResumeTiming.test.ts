@@ -417,3 +417,114 @@ describe('playAudioClipWithFades timing integrity', () => {
     assertClose(src.scheduledStopAt!, 11.0, 1e-9);
   });
 });
+
+describe('playback rate normalization', () => {
+  it('valid rates 0.5, 1 and 2 configure the source correctly', () => {
+    const buf = { duration: 10 } as AudioBuffer;
+    engine.sampleBuffers = new Map([['buf1', buf]]);
+    const ch = makeChannel('ch1');
+    engine.activeChannels = [ch];
+    for (const rate of [0.5, 1, 2]) {
+      (fakeCtx.sources as FakeBufferSource[]).length = 0;
+      const clip = makeAudioClip({ id: `c-${rate}`, audioBufferId: 'buf1', lengthBars: 2, timeStretchRate: rate });
+      callPlayAudioClip(clip, 10, 0);
+      assert.equal(fakeCtx.sources.length, 1, `source for rate ${rate}`);
+      const src = fakeCtx.sources[0];
+      assertClose(src.playbackRate.value, rate, 1e-9, `playbackRate ${rate}`);
+      // sanity: offset 0 duration == clipDuration*rate
+      assertClose(src.startOffset!, 0, 1e-9);
+      assertClose(src.startDuration!, 4 * rate, 1e-9);
+    }
+  });
+
+  it('negative rate falls back to 1', () => {
+    const buf = { duration: 10 } as AudioBuffer;
+    engine.sampleBuffers = new Map([['buf1', buf]]);
+    const ch = makeChannel('ch1');
+    engine.activeChannels = [ch];
+    const clip = makeAudioClip({ id: 'c-neg', audioBufferId: 'buf1', lengthBars: 2, timeStretchRate: -2 as any });
+    callPlayAudioClip(clip, 10, 0);
+    assert.equal(fakeCtx.sources.length, 1);
+    const src = fakeCtx.sources[0];
+    assertClose(src.playbackRate.value, 1, 1e-9, 'negative rate must fallback to 1');
+  });
+
+  it('positive infinity falls back to 1', () => {
+    const buf = { duration: 10 } as AudioBuffer;
+    engine.sampleBuffers = new Map([['buf1', buf]]);
+    const ch = makeChannel('ch1');
+    engine.activeChannels = [ch];
+    const clip = makeAudioClip({ id: 'c-inf', audioBufferId: 'buf1', lengthBars: 2, timeStretchRate: Infinity as any });
+    callPlayAudioClip(clip, 10, 0);
+    assert.equal(fakeCtx.sources.length, 1);
+    const src = fakeCtx.sources[0];
+    assertClose(src.playbackRate.value, 1, 1e-9, 'Infinity must fallback to 1');
+    assert.ok(Number.isFinite(src.playbackRate.value), 'rate must be finite');
+  });
+
+  it('negative infinity falls back to 1', () => {
+    const buf = { duration: 10 } as AudioBuffer;
+    engine.sampleBuffers = new Map([['buf1', buf]]);
+    const ch = makeChannel('ch1');
+    engine.activeChannels = [ch];
+    const clip = makeAudioClip({ id: 'c-ninf', audioBufferId: 'buf1', lengthBars: 2, timeStretchRate: -Infinity as any });
+    callPlayAudioClip(clip, 10, 0);
+    assert.equal(fakeCtx.sources.length, 1);
+    const src = fakeCtx.sources[0];
+    assertClose(src.playbackRate.value, 1, 1e-9, '-Infinity must fallback to 1');
+    assert.ok(Number.isFinite(src.playbackRate.value));
+  });
+
+  it('NaN, zero and missing rate do not result in an invalid source rate', () => {
+    const buf = { duration: 10 } as AudioBuffer;
+    engine.sampleBuffers = new Map([['buf1', buf]]);
+    const ch = makeChannel('ch1');
+    engine.activeChannels = [ch];
+    const cases: Array<{ label: string; rate: any }> = [
+      { label: 'NaN', rate: NaN },
+      { label: 'zero', rate: 0 },
+      { label: 'missing', rate: undefined },
+    ];
+    for (const { label, rate } of cases) {
+      (fakeCtx.sources as FakeBufferSource[]).length = 0;
+      const opts: any = { id: `c-${label}`, audioBufferId: 'buf1', lengthBars: 2 };
+      if (rate !== undefined) opts.timeStretchRate = rate;
+      const clip = makeAudioClip(opts);
+      callPlayAudioClip(clip, 10, 0);
+      assert.equal(fakeCtx.sources.length, 1, `source for ${label}`);
+      const src = fakeCtx.sources[0];
+      assert.ok(Number.isFinite(src.playbackRate.value), `${label} playbackRate must be finite`);
+      assertClose(src.playbackRate.value, 1, 1e-9, `${label} must fallback to 1`);
+      // duration should be based on fallback rate 1
+      assertClose(src.startDuration!, 4, 1e-9, `${label} duration with fallback`);
+    }
+  });
+
+  it('invalid-rate fallback produces consistent offset, duration and stop scheduling', () => {
+    const buf = { duration: 10 } as AudioBuffer;
+    engine.sampleBuffers = new Map([['buf1', buf]]);
+    const ch = makeChannel('ch1');
+    engine.activeChannels = [ch];
+    // Negative rate with seek: should behave exactly like rate 1
+    const clipInvalid = makeAudioClip({ id: 'c-invalid', audioBufferId: 'buf1', lengthBars: 2, timeStretchRate: -1 as any });
+    callPlayAudioClip(clipInvalid, 10, 1.0);
+    assert.equal(fakeCtx.sources.length, 1);
+    const srcInvalid = fakeCtx.sources[0];
+    assertClose(srcInvalid.playbackRate.value, 1, 1e-9);
+    assertClose(srcInvalid.startOffset!, 1, 1e-9, 'offset with fallback rate 1');
+    assertClose(srcInvalid.startDuration!, 3, 1e-9, 'duration with fallback rate 1');
+    assertClose(srcInvalid.scheduledStopAt!, 13, 1e-9, 'stop with fallback rate 1');
+
+    // Infinity with trim+seek should also fallback consistently
+    (fakeCtx.sources as FakeBufferSource[]).length = 0;
+    const clipInf = makeAudioClip({ id: 'c-inf2', audioBufferId: 'buf1', lengthBars: 2, timeStretchRate: Infinity as any, offsetSteps: 8 });
+    callPlayAudioClip(clipInf, 10, 1.0);
+    assert.equal(fakeCtx.sources.length, 1);
+    const srcInf = fakeCtx.sources[0];
+    assertClose(srcInf.playbackRate.value, 1, 1e-9);
+    // trim 1s + elapsed 1s =2s timeline -> buffer 2s at rate 1
+    assertClose(srcInf.startOffset!, 2, 1e-9);
+    assertClose(srcInf.startDuration!, 3, 1e-9);
+    assertClose(srcInf.scheduledStopAt!, 13, 1e-9);
+  });
+});
