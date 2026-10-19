@@ -16,7 +16,7 @@ import path from 'node:path';
  */
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
-const read = (relative: string) => readFileSync(path.join(repoRoot, relative), 'utf8');
+const read = (relative: string) => readFileSync(path.join(repoRoot, relative), 'utf8').replace(/\r\n/g, '\n');
 
 const appSource = () => read('src/App.tsx');
 const uiAuditCss = () => read('src/uiAudit.css');

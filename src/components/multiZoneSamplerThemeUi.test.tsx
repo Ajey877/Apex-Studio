@@ -32,7 +32,7 @@ import { MultiZoneSamplerModal } from './MultiZoneSamplerModal';
 import { DEFAULT_PROJECT } from '../audio/presets';
 import type { Channel, CustomSampleData } from '../types/daw';
 
-const source = readFileSync('src/components/MultiZoneSamplerModal.tsx', 'utf8');
+const source = readFileSync('src/components/MultiZoneSamplerModal.tsx', 'utf8').replace(/\r\n/g, '\n');
 
 /** Source with comments stripped, so prose about a legacy literal cannot
     satisfy or trip a literal assertion. */

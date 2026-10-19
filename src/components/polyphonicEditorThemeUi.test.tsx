@@ -28,7 +28,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { PolyphonicEditorModal, polyphonicBlobAuditionNote } from './PolyphonicEditorModal';
 import type { PolyphonicBlob } from '../types/daw';
 
-const source = readFileSync('src/components/PolyphonicEditorModal.tsx', 'utf8');
+const source = readFileSync('src/components/PolyphonicEditorModal.tsx', 'utf8').replace(/\r\n/g, '\n');
 
 /** Source with comments stripped, so prose about a legacy literal cannot
     satisfy or trip a literal assertion. */

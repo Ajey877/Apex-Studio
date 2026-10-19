@@ -30,7 +30,7 @@ import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { OrientationLockModal } from './OrientationLockModal';
 
-const source = readFileSync('src/components/OrientationLockModal.tsx', 'utf8');
+const source = readFileSync('src/components/OrientationLockModal.tsx', 'utf8').replace(/\r\n/g, '\n');
 
 const code = source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:'"])\/\/.*$/gm, '$1');
 

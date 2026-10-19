@@ -6,7 +6,8 @@ import path from 'node:path';
 
 const root = path.resolve(fileURLToPath(new URL('../../', import.meta.url)));
 
-const read = (relative: string): string => readFileSync(path.resolve(root, relative), 'utf8');
+const readSourceText = (file: string): string => readFileSync(file, 'utf8').replace(/\r\n/g, '\n');
+const read = (relative: string): string => readSourceText(path.resolve(root, relative));
 
 /** Every user-facing source file that can carry a product claim. */
 const sourceFiles = (): string[] => {
@@ -38,7 +39,7 @@ const THIRD_PARTY_CLAIMS: ReadonlyArray<{ brand: string; reason: string }> = [
 describe('Phase 52 — product naming', () => {
   it('does not brand unimplemented features with third-party product names', () => {
     for (const file of sourceFiles()) {
-      const source = readFileSync(file, 'utf8');
+      const source = readSourceText(file);
       for (const { brand, reason } of THIRD_PARTY_CLAIMS) {
         assert.ok(
           !source.includes(brand),
@@ -50,7 +51,7 @@ describe('Phase 52 — product naming', () => {
 
   it('does not make legal claims about licensing or certification', () => {
     for (const file of sourceFiles()) {
-      const source = readFileSync(file, 'utf8');
+      const source = readSourceText(file);
       assert.ok(
         !/licensed (by|from)|certified|trademark of|official(ly)? (licen|certif)/i.test(source),
         `${path.relative(root, file)} must not assert a legal or certification claim`
@@ -209,7 +210,7 @@ describe('Phase 52 — README matches the implementation', () => {
       'README must not claim AI/ML capability the product does not have'
     );
     for (const file of sourceFiles()) {
-      const source = readFileSync(file, 'utf8');
+      const source = readSourceText(file);
       assert.ok(!/AI Smart|AI-powered|AI generated/i.test(source), `${path.relative(root, file)} must not claim AI`);
     }
   });
