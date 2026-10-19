@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { ModalFrame } from './ModalFrame';
 import { 
   Sliders, 
@@ -42,7 +42,7 @@ const DEFAULT_MACRO_KNOBS: MasterMacroKnob[] = [
     value: 0.5,
     color: '#00ff88',
     mappings: [
-      { targetType: 'channel_volume', targetId: 'bass', min: 0.4, max: 1.0, curve: 'linear' },
+      { targetType: 'channel_volume', targetId: 'ch-808', min: 0.4, max: 1.0, curve: 'linear' },
       { targetType: 'filter_cutoff', targetId: 2, min: 60, max: 800, curve: 'exponential' }
     ]
   },
@@ -78,6 +78,14 @@ export const MasterMacroRackModal: React.FC<MasterMacroRackModalProps> = ({
   const [macros, setMacros] = useState<MasterMacroKnob[]>(macroKnobs.length > 0 ? macroKnobs : DEFAULT_MACRO_KNOBS);
   const [selectedMacroId, setSelectedMacroId] = useState<string>(macros[0]?.id || 'macro-1');
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
+
+  useEffect(() => {
+    const nextMacros = macroKnobs.length > 0 ? macroKnobs : DEFAULT_MACRO_KNOBS;
+    setMacros(nextMacros);
+    setSelectedMacroId(prev =>
+      nextMacros.some(m => m.id === prev) ? prev : (nextMacros[0]?.id || 'macro-1')
+    );
+  }, [macroKnobs, isOpen]);
 
   if (!isOpen) return null;
 

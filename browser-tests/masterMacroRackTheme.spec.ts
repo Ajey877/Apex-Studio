@@ -434,7 +434,7 @@ test.describe('UI-03M Master Macro Rack theme', () => {
       await expect(matrix).toContainText('MAPPED DESTINATIONS FOR:');
       await expect(matrix).toContainText('SUB CRUSH & TENSION');
       await expect(matrix.locator('.space-y-2 > div').first()).toContainText('channel volume');
-      await expect(matrix.locator('.space-y-2 > div').first()).toContainText('→ Track #bass');
+      await expect(matrix.locator('.space-y-2 > div').first()).toContainText('→ Track #ch-808');
 
       // ---- Interaction: hover feedback on an idle card ----
       // This was dead before UI-03M: an inline `borderColor` on every card beat

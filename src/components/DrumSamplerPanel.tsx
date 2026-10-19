@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { Drum, Play, Volume2 } from 'lucide-react';
 import type { Channel, CustomSampleData, DrumPad } from '../types/daw';
 import { audioEngine } from '../audio/audioEngine';
@@ -27,9 +27,20 @@ const createPads = (channel: Channel): DrumPad[] => {
 };
 
 export const DrumSamplerPanel: React.FC<DrumSamplerPanelProps> = ({ channel, sampleLibrary, onUpdateChannel }) => {
-  const initialPads = useMemo(() => createPads(channel), [channel.id]);
+  const initialPads = useMemo(
+    () => createPads(channel),
+    [channel.id, channel.drumPads, channel.customSample?.id]
+  );
   const [pads, setPads] = useState<DrumPad[]>(initialPads);
   const [selectedId, setSelectedId] = useState(initialPads[0]?.id || '');
+
+  useEffect(() => {
+    setPads(initialPads);
+    setSelectedId(prev =>
+      initialPads.some(pad => pad.id === prev) ? prev : (initialPads[0]?.id || '')
+    );
+  }, [initialPads]);
+
   const selected = pads.find(pad => pad.id === selectedId) || pads[0];
 
   const commit = (next: DrumPad[]) => {
@@ -43,13 +54,21 @@ export const DrumSamplerPanel: React.FC<DrumSamplerPanelProps> = ({ channel, sam
   };
 
   const trigger = (pad: DrumPad) => {
-    audioEngine.playNote(channel, {
-      id: `drum-pad-${pad.id}-${Date.now()}`,
-      pitch: pad.note,
-      start: 0,
-      duration: 1,
-      velocity: 1
-    });
+    const currentPads = pads.map(candidate => candidate.id === pad.id ? pad : candidate);
+    audioEngine.playNote(
+      {
+        ...channel,
+        instrumentType: 'drumpad',
+        drumPads: currentPads
+      },
+      {
+        id: `drum-pad-${pad.id}-${Date.now()}`,
+        pitch: pad.note,
+        start: 0,
+        duration: 1,
+        velocity: 1
+      }
+    );
   };
 
   return (

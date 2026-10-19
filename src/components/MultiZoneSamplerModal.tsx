@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { ModalFrame } from './ModalFrame';
 import { 
   Layers, 
@@ -15,11 +15,13 @@ import {
 } from 'lucide-react';
 import { Channel, SampleZone } from '../types/daw';
 import { audioEngine } from '../audio/audioEngine';
+import { isImplicitDefaultSingleZone } from '../audio/sampleZones';
 
 interface MultiZoneSamplerModalProps {
   isOpen: boolean;
   onClose: () => void;
   channels: Channel[];
+  selectedChannelId?: string;
   sampleLibrary: NonNullable<Channel['customSample']>[];
   onUpdateChannel: (channelId: string, updates: Partial<Channel>) => void;
 }
@@ -60,17 +62,29 @@ export const MultiZoneSamplerModal: React.FC<MultiZoneSamplerModalProps> = ({
   isOpen,
   onClose,
   channels,
+  selectedChannelId: propSelectedChannelId,
   sampleLibrary,
   onUpdateChannel
 }) => {
-  const [selectedChannelId, setSelectedChannelId] = useState<string>(channels[0]?.id || '');
+  const [selectedChannelId, setSelectedChannelId] = useState<string>(propSelectedChannelId || channels[0]?.id || '');
   const [zones, setZones] = useState<KeyZone[]>([]);
+
+  useEffect(() => {
+    if (propSelectedChannelId && channels.some(channel => channel.id === propSelectedChannelId)) {
+      setSelectedChannelId(propSelectedChannelId);
+    } else if (!channels.some(channel => channel.id === selectedChannelId) && channels[0]?.id) {
+      setSelectedChannelId(channels[0].id);
+    }
+  }, [propSelectedChannelId, channels]);
 
   const selectedChannel = channels.find(channel => channel.id === selectedChannelId) || channels[0];
 
-  const commitZones = (updated: KeyZone[]) => {
+  const stripZoneDecoration = (zone: KeyZone): SampleZone => ((({ name, color, ...z }) => z)(zone));
+
+  const commitZones = (rawUpdated: KeyZone[]) => {
+    const updated = rawUpdated.map(zone => ({ ...zone, userAuthored: true }));
     setZones(updated);
-    if (selectedChannel) {
+    if (selectedChannel && updated.every(zone => Boolean(stripZoneDecoration(zone).id))) {
       onUpdateChannel(selectedChannel.id, { sampleZones: updated.map(({ name, color, ...zone }) => zone) });
     }
   };
@@ -78,7 +92,10 @@ export const MultiZoneSamplerModal: React.FC<MultiZoneSamplerModalProps> = ({
   useEffect(() => {
     if (!selectedChannel) return;
     const persisted = selectedChannel.sampleZones || [];
-    if (persisted.length > 0) {
+    const hasAuthoritativePersistedZones =
+      persisted.length > 0 &&
+      !(selectedChannel.customSample?.id && isImplicitDefaultSingleZone(selectedChannel, persisted[0], sampleLibrary));
+    if (hasAuthoritativePersistedZones) {
       const hydrated = persisted.map((zone, index) => ({ ...zone, name: 'Zone ' + (index + 1), color: ZONE_IDENTITY_COLORS[index % ZONE_IDENTITY_COLORS.length] }));
       setZones(hydrated);
       setSelectedZoneId(persisted[0].id);
@@ -94,14 +111,24 @@ export const MultiZoneSamplerModal: React.FC<MultiZoneSamplerModalProps> = ({
       };
       setZones([zone]);
       setSelectedZoneId(zone.id);
-      onUpdateChannel(selectedChannel.id, { sampleZones: [((({ name, color, ...z }) => z)(zone))] });
     } else {
       setZones([]);
     }
-  }, [selectedChannelId, selectedChannel?.id, selectedChannel?.customSample?.id, selectedChannel?.sampleZones]);
+  }, [
+    selectedChannelId,
+    selectedChannel?.id,
+    selectedChannel?.customSample?.id,
+    selectedChannel?.customSample?.rootPitch,
+    selectedChannel?.customSample?.trimStart,
+    selectedChannel?.customSample?.trimEnd,
+    selectedChannel?.customSample?.reverse,
+    selectedChannel?.synthParams?.sampleLoop,
+    selectedChannel?.sampleZones,
+  ]);
 
   const [selectedZoneId, setSelectedZoneId] = useState<string>('zone-2');
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
+  const statusTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   if (!isOpen) return null;
 
@@ -122,8 +149,9 @@ export const MultiZoneSamplerModal: React.FC<MultiZoneSamplerModalProps> = ({
     };
     commitZones([...zones, newZone]);
     setSelectedZoneId(newZone.id);
+    if (statusTimerRef.current) clearTimeout(statusTimerRef.current);
     setStatusMessage(`Created new Multi-Sample Zone!`);
-    setTimeout(() => setStatusMessage(null), 3000);
+    statusTimerRef.current = setTimeout(() => setStatusMessage(null), 3000);
   };
 
   const handleDeleteZone = (id: string) => {
@@ -139,8 +167,9 @@ export const MultiZoneSamplerModal: React.FC<MultiZoneSamplerModalProps> = ({
     if (targetChannel) {
       audioEngine.playNote(targetChannel, { id: `zone-aud-${Date.now()}`, pitch: zone.rootNote, start: 0, duration: 2, velocity: 0.9 });
     }
+    if (statusTimerRef.current) clearTimeout(statusTimerRef.current);
     setStatusMessage(`Auditioning ${zone.name} (Root ${midiToNoteName(zone.rootNote)})`);
-    setTimeout(() => setStatusMessage(null), 2000);
+    statusTimerRef.current = setTimeout(() => setStatusMessage(null), 2000);
   };
 
   return (
@@ -367,7 +396,22 @@ export const MultiZoneSamplerModal: React.FC<MultiZoneSamplerModalProps> = ({
                   <select
                     value={selectedZone.sampleId}
                     onChange={(e) => {
-                      const updated = zones.map(z => z.id === selectedZone.id ? { ...z, sampleId: e.target.value } : z);
+                      const pickedSample = sampleLibrary.find(s => s.id === e.target.value);
+                      const updated = zones.map(z =>
+                        z.id === selectedZone.id
+                          ? {
+                              ...z,
+                              sampleId: e.target.value,
+                              ...(pickedSample
+                                ? {
+                                    trimStart: pickedSample.trimStart,
+                                    trimEnd: pickedSample.trimEnd,
+                                    reverse: pickedSample.reverse,
+                                  }
+                                : {}),
+                            }
+                          : z
+                      );
                       commitZones(updated);
                     }}
                     className="w-full bg-[var(--apex-canvas)] text-[var(--apex-text)] p-2 rounded border border-[var(--apex-border)]"

@@ -238,6 +238,7 @@ export interface SampleZone {
   loop?: boolean;
   loopStart?: number;
   loopEnd?: number;
+  userAuthored?: boolean;
 }
 
 export interface CustomSampleData {

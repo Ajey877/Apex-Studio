@@ -1,4 +1,4 @@
-import type { Note, SampleZone } from '../types/daw';
+import type { Channel, CustomSampleData, Note, SampleZone } from '../types/daw';
 
 export function findSampleZone(zones: SampleZone[] | undefined, note: Note): SampleZone | undefined {
   if (!zones?.length) return undefined;
@@ -9,6 +9,51 @@ export function findSampleZone(zones: SampleZone[] | undefined, note: Note): Sam
     velocity >= zone.lowVelocity &&
     velocity <= zone.highVelocity
   );
+}
+
+export function isImplicitDefaultSingleZone(
+  channel: Pick<Channel, 'id' | 'sampleZones' | 'customSample' | 'synthParams'>,
+  zone: SampleZone | undefined = channel.sampleZones?.[0],
+  sampleLibrary?: ReadonlyArray<CustomSampleData>,
+): boolean {
+  if (!zone || (channel.sampleZones?.length ?? 0) !== 1) return false;
+  if (zone.userAuthored) return false;
+  if (zone.id !== `zone-${channel.id}` && zone.id !== `zone-default-${channel.id}`) {
+    return false;
+  }
+  if (
+    zone.lowNote !== 0 ||
+    zone.highNote !== 127 ||
+    (zone.lowVelocity ?? 0) !== 0 ||
+    (zone.highVelocity ?? 127) !== 127 ||
+    (zone.tuneSemitones ?? 0) !== 0
+  ) {
+    return false;
+  }
+  const channelLoop = Boolean(channel.synthParams?.sampleLoop);
+  if ((zone.loop ?? channelLoop) !== channelLoop) return false;
+  if (zone.loopStart !== undefined || zone.loopEnd !== undefined) return false;
+
+  const hasDefaultPlaybackSettings =
+    (zone.rootNote ?? 60) === 60 &&
+    (zone.trimStart ?? 0) === 0 &&
+    (zone.trimEnd ?? 1) === 1 &&
+    Boolean(zone.reverse) === false;
+
+  if (channel.customSample && zone.sampleId === channel.customSample.id) {
+    const matchesCustomSample =
+      (zone.rootNote ?? 60) === (channel.customSample.rootPitch ?? 60) &&
+      (zone.trimStart ?? 0) === (channel.customSample.trimStart ?? 0) &&
+      (zone.trimEnd ?? 1) === (channel.customSample.trimEnd ?? 1) &&
+      Boolean(zone.reverse) === Boolean(channel.customSample.reverse);
+    return matchesCustomSample || hasDefaultPlaybackSettings;
+  }
+
+  if (sampleLibrary) {
+    return false;
+  }
+
+  return hasDefaultPlaybackSettings;
 }
 
 export function getSamplePlaybackRate(notePitch: number, rootNote: number, channelPitch = 0, tuneSemitones = 0): number {

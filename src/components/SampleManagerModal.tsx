@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { ModalFrame } from './ModalFrame';
 import { 
   Upload, 
@@ -51,11 +51,66 @@ export const SampleManagerModal: React.FC<SampleManagerModalProps> = ({
   const [targetChannelId, setTargetChannelId] = useState<string>(selectedChannel?.id || channels[0]?.id || '');
   const [isLoading, setIsLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const [trimStart, setTrimStart] = useState<number>(0);
-  const [trimEnd, setTrimEnd] = useState<number>(1.0);
-  const [rootPitch, setRootPitch] = useState<number>(60);
-  const [reverseSample, setReverseSample] = useState(false);
+  const [trimStart, setTrimStart] = useState<number>(selectedChannel?.customSample?.trimStart ?? 0);
+  const [trimEnd, setTrimEnd] = useState<number>(selectedChannel?.customSample?.trimEnd ?? 1.0);
+  const [rootPitch, setRootPitch] = useState<number>(selectedChannel?.customSample?.rootPitch ?? 60);
+  const [reverseSample, setReverseSample] = useState(Boolean(selectedChannel?.customSample?.reverse));
+  const [hasPendingSampleSelection, setHasPendingSampleSelection] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+
+  const applySampleToControls = (sample: CustomSampleData | null) => {
+    setCurrentSample(sample);
+    setTrimStart(sample?.trimStart ?? 0);
+    setTrimEnd(sample?.trimEnd ?? 1.0);
+    setRootPitch(sample?.rootPitch ?? 60);
+    setReverseSample(Boolean(sample?.reverse));
+  };
+
+  useEffect(() => {
+    const nextTargetId =
+      (selectedChannel?.id && channels.some(ch => ch.id === selectedChannel.id)
+        ? selectedChannel.id
+        : channels[0]?.id) ||
+      selectedChannel?.id ||
+      '';
+    const nextTargetChannel = channels.find(ch => ch.id === nextTargetId) || selectedChannel;
+    setTargetChannelId(nextTargetId);
+    applySampleToControls(nextTargetChannel?.customSample || null);
+    setHasPendingSampleSelection(false);
+    setErrorMessage(null);
+  }, [isOpen, selectedChannel?.id, selectedChannel?.customSample]);
+
+  useEffect(() => {
+    if (!channels.some(ch => ch.id === targetChannelId) && (selectedChannel?.id || channels[0]?.id)) {
+      const fallbackId = selectedChannel?.id || channels[0]?.id || '';
+      const fallbackChannel = channels.find(ch => ch.id === fallbackId) || selectedChannel;
+      setTargetChannelId(fallbackId);
+      if (!hasPendingSampleSelection) {
+        applySampleToControls(fallbackChannel?.customSample || null);
+      }
+      return;
+    }
+    if (!currentSample) {
+      const targetCh = channels.find(ch => ch.id === targetChannelId) || selectedChannel;
+      if (targetCh?.customSample && !hasPendingSampleSelection) {
+        applySampleToControls(targetCh.customSample);
+      }
+      return;
+    }
+    const targetCh = channels.find(ch => ch.id === targetChannelId) || selectedChannel;
+    const updatedFromChannel = targetCh?.customSample?.id === currentSample.id ? targetCh.customSample : undefined;
+    const updatedFromLibrary = sampleLibrary.find(s => s.id === currentSample.id);
+    const authoritative = updatedFromChannel || updatedFromLibrary;
+    if (authoritative && authoritative !== currentSample) {
+      setCurrentSample(authoritative);
+      if (!hasPendingSampleSelection && updatedFromChannel) {
+        setTrimStart(updatedFromChannel.trimStart ?? 0);
+        setTrimEnd(updatedFromChannel.trimEnd ?? 1.0);
+        setRootPitch(updatedFromChannel.rootPitch ?? 60);
+        setReverseSample(Boolean(updatedFromChannel.reverse));
+      }
+    }
+  }, [channels, sampleLibrary, targetChannelId, selectedChannel, currentSample, hasPendingSampleSelection]);
 
   if (!isOpen) return null;
 
@@ -74,10 +129,12 @@ export const SampleManagerModal: React.FC<SampleManagerModalProps> = ({
       }
 
       setCurrentSample(result.sample);
+      setHasPendingSampleSelection(true);
       onSampleImported(result.sample);
       setTrimStart(0);
       setTrimEnd(1.0);
       setRootPitch(60);
+      setReverseSample(false);
     } catch (err) {
       console.error('Error decoding audio sample:', err);
       setCurrentSample(null);
@@ -94,18 +151,20 @@ export const SampleManagerModal: React.FC<SampleManagerModalProps> = ({
     }
   };
 
+  const activeTargetChannel = channels.find(ch => ch.id === targetChannelId) || selectedChannel;
+
   // Phase 8C (P1-11): the selected channel's sample exists in the project but its
   // persisted audio could not be restored. It must not be presented as healthy.
   const isCurrentSampleUnavailable = isSampleAudioUnavailable(currentSample);
   const unavailableSampleDescription = currentSample && isCurrentSampleUnavailable
-    ? describeMissingAudioSample(currentSample, selectedChannel?.name)
+    ? describeMissingAudioSample(currentSample, activeTargetChannel?.name)
     : undefined;
 
   const handleAudition = () => {
     if (!currentSample || isCurrentSampleUnavailable) return;
     const dummyNote = { id: 'audition', pitch: rootPitch, start: 0, duration: 1.5, velocity: 0.9 };
     const tempChannel: Channel = {
-      ...selectedChannel,
+      ...(activeTargetChannel || selectedChannel),
       customSample: {
         ...currentSample,
         trimStart,
@@ -213,6 +272,7 @@ export const SampleManagerModal: React.FC<SampleManagerModalProps> = ({
                 {sampleLibrary.map(sample => (
                   <button key={sample.id} type="button" onClick={() => {
                     setCurrentSample(sample);
+                    setHasPendingSampleSelection(true);
                     setTrimStart(sample.trimStart ?? 0);
                     setTrimEnd(sample.trimEnd ?? 1);
                     setRootPitch(sample.rootPitch ?? 60);
@@ -372,7 +432,14 @@ export const SampleManagerModal: React.FC<SampleManagerModalProps> = ({
                   <span className="text-xs text-[var(--apex-text-muted)]">Target Channel:</span>
                   <select
                     value={targetChannelId}
-                    onChange={(e) => setTargetChannelId(e.target.value)}
+                    onChange={(e) => {
+                      const nextChannelId = e.target.value;
+                      setTargetChannelId(nextChannelId);
+                      const nextChannel = channels.find(ch => ch.id === nextChannelId);
+                      if (!hasPendingSampleSelection && nextChannel?.customSample) {
+                        applySampleToControls(nextChannel.customSample);
+                      }
+                    }}
                     className="bg-[var(--apex-canvas)] border border-[var(--apex-border)] text-[var(--apex-text)] text-xs rounded p-1.5 font-bold"
                   >
                     {channels.map(ch => (

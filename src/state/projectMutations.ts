@@ -20,6 +20,7 @@ import { isCountInBars, type CountInBars } from '../music/countIn';
 import { isPunchRecordingSettings, isSamePunchRecording, resolvePunchRecording, validatePunchRecording, type PunchRecordingSettings } from '../music/punchRecording';
 import { getProjectTimelineBars } from './playlistTimeline';
 import { addEmptyPatternToProjectState } from './patternContent';
+import { isImplicitDefaultSingleZone } from '../audio/sampleZones';
 
 /**
  * Authoritative runtime mutation boundary for ProjectState.
@@ -37,7 +38,23 @@ export const updateChannelInProjectState = (
   updates: Partial<Channel>
 ): ProjectState => ({
   ...state,
-  channels: state.channels.map(ch => (ch.id === channelId ? { ...ch, ...updates } : ch))
+  channels: state.channels.map(ch => {
+    if (ch.id !== channelId) return ch;
+    const nextChannel: Channel = { ...ch, ...updates };
+    if (
+      'customSample' in updates &&
+      !('sampleZones' in updates) &&
+      nextChannel.customSample?.id &&
+      ch.customSample?.id &&
+      ch.sampleZones?.length === 1 &&
+      !ch.sampleZones[0].userAuthored &&
+      ch.sampleZones[0].sampleId === ch.customSample.id &&
+      isImplicitDefaultSingleZone(ch, ch.sampleZones[0], state.sampleLibrary || [])
+    ) {
+      nextChannel.sampleZones = [];
+    }
+    return nextChannel;
+  })
 });
 
 export const updateMixerTrackInProjectState = (
