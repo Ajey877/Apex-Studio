@@ -61,7 +61,7 @@ import {
 import { createPunchRecordingPlaylistClip, createRecordingPlaylistClip, getRecordingAudioBufferId, trimAudioBufferToSeconds, validateRecordingTargetTrack, type PunchClipPlacement } from './audio/recordingPipeline';
 import { findMatchingTakeGroup, addTakeToProjectClips, selectActiveTake } from './audio/takeLaneManager';
 import { createHistory, type ProjectHistory, resolveSaveShortcut, resolveUndoRedoShortcut } from './state/projectHistory';
-import { KEY_NOTE_MAP, getKeyboardNotePitch } from './state/musicalKeyboard';
+import { KEY_NOTE_MAP, MusicalKeyboardHeldNotes, getKeyboardNotePitch } from './state/musicalKeyboard';
 import { fullscreenController } from './state/fullscreen';
 import { createNewSessionRequest } from './state/newSession';
 import { getProjectTimelineBars, setTimelineBarsInProjectState } from './state/playlistTimeline';
@@ -215,6 +215,15 @@ export function App() {
       getRecorder: () => midiRecorderRef.current,
       getClock: () => audioEngine.getTransportMusicalPosition(),
     });
+  }
+  // Computer-keyboard (QWERTY/numpad) note lifecycle: the global key handler
+  // delegates press/release to this tracker, which stores the pitch resolved
+  // at keydown per physical key code and speaks note-on/off to the bridge
+  // above — so keyboard playing is live-monitored and recorded through the
+  // same transport-stamped path as hardware and on-screen keys.
+  const heldKeyboardNotesRef = useRef<MusicalKeyboardHeldNotes | null>(null);
+  if (heldKeyboardNotesRef.current === null) {
+    heldKeyboardNotesRef.current = new MusicalKeyboardHeldNotes(() => virtualMidiInputRef.current);
   }
   // Transport-boundary finalizer (pause/seek/mode switch/stop/Song end/device
   // disconnect): closes the active take at the pre-boundary clock and releases
@@ -972,6 +981,10 @@ export function App() {
         },
         releaseHeldNotes: () => {
           virtualMidiInputRef.current?.releaseAll();
+          // The bridge release above already sent the note-offs; drop the
+          // computer-keyboard tracker's bookkeeping so a later physical
+          // keyup cannot emit a duplicate note-off.
+          heldKeyboardNotesRef.current?.forgetAll();
           midiNoteRuntimeRef.current?.releaseAllNotes();
         },
         onTakeEnded: () => {
@@ -2014,7 +2027,23 @@ export function App() {
   }, [handleMenuCommand]);
 
   const [keyboardOctave, setKeyboardOctave] = useState<number>(0);
-  const activeHeldKeysRef = useRef<Set<string>>(new Set());
+
+  // Lost-keyup safety: if the window loses focus while musical keys are held
+  // (or the shell unmounts mid-hold), release every computer-keyboard note
+  // through the bridge so no voice or recorded gate is left stuck. This is a
+  // mount-once effect on purpose: the shortcut effect below re-subscribes
+  // whenever project/octave state changes, and its cleanup must never cut a
+  // note that is still physically held.
+  useEffect(() => {
+    const releaseHeldKeyboardNotes = () => {
+      heldKeyboardNotesRef.current?.releaseAll();
+    };
+    window.addEventListener('blur', releaseHeldKeyboardNotes);
+    return () => {
+      window.removeEventListener('blur', releaseHeldKeyboardNotes);
+      releaseHeldKeyboardNotes();
+    };
+  }, []);
 
   // --- Keyboard Shortcuts & Global Hotkeys ---
   useEffect(() => {
@@ -2124,28 +2153,19 @@ export function App() {
         return;
       }
 
+      // Musical keys route through the shared virtual-input bridge (live
+      // monitor + armed recorder), never a direct fixed-duration audition.
+      // The tracker dedupes held keys and stores this keydown pitch against
+      // the physical code, so the matching keyup releases the exact note
+      // even after a Z/X octave change.
       const notePitch = isModifier ? null : getKeyboardNotePitch(e.code, keyboardOctave);
-      if (notePitch !== null && !activeHeldKeysRef.current.has(e.code) && !e.repeat) {
-        activeHeldKeysRef.current.add(e.code);
-        const pitch = notePitch;
-
-        const currentChan = projectState.channels.find(c => c.id === selectedChannelId) || projectState.channels[0];
-        if (currentChan && isRackChannelAudible(currentChan, projectState.channels)) {
-          audioEngine.playNote(currentChan, {
-            id: `key-${e.code}-${Date.now()}`,
-            pitch,
-            start: 0,
-            duration: 1.2,
-            velocity: 0.95
-          });
-        }
+      if (notePitch !== null && !e.repeat) {
+        heldKeyboardNotesRef.current?.press(e.code, notePitch);
       }
     };
 
     const handleKeyUp = (e: KeyboardEvent) => {
-      if (activeHeldKeysRef.current.has(e.code)) {
-        activeHeldKeysRef.current.delete(e.code);
-      }
+      heldKeyboardNotesRef.current?.release(e.code);
     };
 
     window.addEventListener('keydown', handleKeyDown);
