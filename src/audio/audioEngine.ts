@@ -5266,10 +5266,6 @@ class AudioEngine {
 
     const safeBpm = Number.isFinite(this.bpm) && this.bpm > 0 ? this.bpm : 120;
     const secondsPerStep = beatsToSeconds(stepsToBeats(1), safeBpm);
-    const offsetSeconds =
-      Math.max(0, (clip.offsetSteps || 0) * secondsPerStep) + Math.max(0, positionOffsetSeconds);
-
-    if (offsetSeconds >= buf.duration) return;
 
     // Phase 1F: a clip's bar length converts through the resolved project
     // meter, so a 3/4 audio clip lasts 12 steps (not 16) per declared bar.
@@ -5277,12 +5273,29 @@ class AudioEngine {
     if (!Number.isFinite(clipDurationSec) || clipDurationSec <= 0.0005) return;
 
     const rate = Number.isFinite(clip.timeStretchRate) && (clip.timeStretchRate ?? 1) > 0 ? (clip.timeStretchRate ?? 1) : 1;
-    const playDurationBufferSec = clipDurationSec * rate;
-    const actualDurationBufferSec = Math.min(buf.duration - offsetSeconds, playDurationBufferSec);
-    if (actualDurationBufferSec <= 0) return;
 
-    const effectiveDuration = Math.min(clipDurationSec, actualDurationBufferSec / rate);
-    if (effectiveDuration <= 0.0005) return;
+    // Distinguish timeline time (clip/transport position) from buffer time (source content).
+    // Trim and seek offsets are timeline quantities; they must be scaled by the playback
+    // rate to obtain the source-buffer offset. The remaining audible duration is the
+    // smaller of the clip's remaining timeline window and the remaining buffer content.
+    const trimOffsetTimelineSec = Math.max(0, (clip.offsetSteps || 0) * secondsPerStep);
+    const elapsedTimelineSec = Math.max(0, positionOffsetSeconds);
+
+    const totalOffsetTimelineSec = trimOffsetTimelineSec + elapsedTimelineSec;
+    const bufferOffsetSec = totalOffsetTimelineSec * rate;
+
+    if (!Number.isFinite(bufferOffsetSec) || bufferOffsetSec >= buf.duration) return;
+
+    const remainingTimelineSec = clipDurationSec - elapsedTimelineSec;
+    if (!Number.isFinite(remainingTimelineSec) || remainingTimelineSec <= 0.0005) return;
+
+    const remainingBufferSec = remainingTimelineSec * rate;
+    const availableBufferSec = buf.duration - bufferOffsetSec;
+    const actualDurationBufferSec = Math.min(availableBufferSec, remainingBufferSec);
+    if (!Number.isFinite(actualDurationBufferSec) || actualDurationBufferSec <= 0) return;
+
+    const effectiveDuration = actualDurationBufferSec / rate;
+    if (!Number.isFinite(effectiveDuration) || effectiveDuration <= 0.0005) return;
 
     const source = this.ctx.createBufferSource();
     source.buffer = buf;
@@ -5291,9 +5304,7 @@ class AudioEngine {
     if (clip.pitchShiftSemitones) {
       source.detune.setValueAtTime(clip.pitchShiftSemitones * 100, startTime);
     }
-    if (clip.timeStretchRate) {
-      source.playbackRate.setValueAtTime(clip.timeStretchRate, startTime);
-    }
+    source.playbackRate.setValueAtTime(rate, startTime);
 
     const gainNode = this.ctx.createGain();
 
@@ -5377,7 +5388,7 @@ class AudioEngine {
       gainNode.connect(clipDestination ?? mixer.input);
     }
 
-    source.start(startTime, offsetSeconds, actualDurationBufferSec);
+    source.start(startTime, bufferOffsetSec, actualDurationBufferSec);
     source.stop(startTime + effectiveDuration);
 
     // Keep the take's playlist audio under transport control: pause, seek and
