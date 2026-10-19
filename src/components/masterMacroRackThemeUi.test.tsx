@@ -34,7 +34,7 @@ import { MasterMacroRackModal } from './MasterMacroRackModal';
 import { DEFAULT_PROJECT } from '../audio/presets';
 import type { Channel, MasterMacroKnob, MixerTrack } from '../types/daw';
 
-const source = readFileSync('src/components/MasterMacroRackModal.tsx', 'utf8');
+const source = readFileSync('src/components/MasterMacroRackModal.tsx', 'utf8').replace(/\r\n/g, '\n');
 
 /**
  * Source with comments stripped. Literal assertions run against this, so prose
