@@ -102,6 +102,18 @@ export interface InternalMidiMessageEvent {
   data: Uint8Array | number[];
 }
 
+/**
+ * The arrangement endpoint reported to the Song-end callback: the transport's
+ * continuous position at the moment Song Mode halts on its real end, in both
+ * seconds and sixteenth steps, so the project owner can close time-based
+ * captures (e.g. a MIDI take) exactly on the end instead of sampling a
+ * playhead that a later restart may already have moved.
+ */
+export interface SongEndPosition {
+  positionSeconds: number;
+  positionSteps: number;
+}
+
 interface WindowWithWebKitAudio extends Window {
   OfflineAudioContext?: typeof OfflineAudioContext;
   webkitAudioContext?: typeof AudioContext;
@@ -3764,6 +3776,7 @@ class AudioEngine {
   private currentBar: number = 1;
   private stepCallback: ((step: number, bar: number) => void) | null = null;
   private transportStateCallback: ((state: Readonly<TransportState>) => void) | null = null;
+  private songEndCallback: ((position: SongEndPosition) => void) | null = null;
   private activeChannels: Channel[] = [];
   private activeClips: PlaylistClip[] = [];
   private activeMixerTracks: MixerTrack[] = [];
@@ -4235,6 +4248,33 @@ class AudioEngine {
 
   public setTransportStateCallback(cb: ((state: Readonly<TransportState>) => void) | null) {
     this.transportStateCallback = cb;
+  }
+
+  /**
+   * Registers the natural Song-end notification. It fires synchronously from
+   * `handleSongEnd` *before* any Song-end teardown (voice stops, playing
+   * flip, transport-state emission), carrying the arrangement endpoint the
+   * transport halted on. The engine owns no project state, so it only
+   * reports the boundary; the callback's owner (App) decides what to close
+   * out at that position — e.g. finalizing a MIDI take so a note held
+   * through the end stops at the endpoint instead of spanning the halt (and
+   * a later restart-from-top) with a backward-jumping clock. Pattern Mode
+   * loops forever and never fires it; manual stop/pause/seek are App-driven
+   * and do not fire it either.
+   */
+  public setSongEndCallback(cb: ((position: SongEndPosition) => void) | null) {
+    this.songEndCallback = cb;
+  }
+
+  private notifySongEnd(position: SongEndPosition): void {
+    const callback = this.songEndCallback;
+    if (!callback) return;
+    try {
+      callback(position);
+    } catch (error) {
+      // A failing boundary handler must not abort the Song-end teardown.
+      console.error('[Apex Studio] Song-end handler failed', error);
+    }
   }
 
   /**
@@ -5041,6 +5081,13 @@ class AudioEngine {
 
   /** Song Mode reached its real end: halt the take exactly on the end position. */
   private handleSongEnd(): void {
+    // The transport has already halted on the arrangement endpoint, so the
+    // musical position sampled now IS the end. Report it before any teardown
+    // below: the project owner closes position-timed captures (a MIDI take
+    // holding a note through the end) at exactly this position, which no
+    // later state update could recover once playback restarts from the top.
+    const { positionSeconds, positionSteps } = this.getTransportMusicalPosition();
+    this.notifySongEnd({ positionSeconds, positionSteps });
     // Phase 1K: the arrangement ended — any count-in would capture past the
     // song's end at a stale offset.
     this.cancelRecordingCountIn();

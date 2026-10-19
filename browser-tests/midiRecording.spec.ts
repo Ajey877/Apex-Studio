@@ -1,6 +1,15 @@
 /**
  * MIDI performance recording — browser workflow test.
  *
+ * The second describe block pins transport-boundary integrity through the
+ * real UI: Pause, Pattern/Song mode switch, playlist ruler seek and
+ * transport Stop each close an active take immediately (record toggle
+ * releases, the held gate becomes an ordinary note block whose width never
+ * changes again, and later events cannot join the closed take). Exact step
+ * positions for every boundary — including natural Song end, which needs a
+ * seeded arrangement to reach quickly in a browser — are pinned
+ * deterministically in src/audio/midiTransportBoundary.test.ts.
+ *
  * A deterministic SIMULATED Web MIDI input (the same fixture pattern as
  * midiControllerContrast.spec.ts) feeds raw note bytes through the app's
  * real production path: engine `handleMidiMessage` -> listener stream ->
@@ -208,5 +217,108 @@ test.describe('MIDI recording into the Piano Roll', () => {
     await toggle.click(); // ordinary manual stop still finalizes correctly
     await expect(toggle).toHaveAttribute('aria-pressed', 'false');
     await expect(recordedBlocks).toHaveCount(2);
+  });
+});
+
+test.describe('MIDI takes end at transport boundaries', () => {
+  // Opens the Piano Roll, arms a take, and holds C4 down. Returns the record
+  // toggle and the recorded-block locator for boundary assertions.
+  const armTakeWithHeldNote = async (page: Page) => {
+    await page.setViewportSize({ width: 1440, height: 960 });
+    await installSimulatedMidiDevice(page);
+    await page.goto(APP_URL);
+    await page.waitForSelector('#root > *', { state: 'attached' });
+    await page.waitForTimeout(1200);
+    await page.locator('#nav-piano-roll').click();
+    const toggle = page.getByTestId('midi-record-toggle');
+    await expect(toggle).toBeVisible();
+    await page.waitForFunction(() => {
+      const input = (window as unknown as {
+        __midiRecordingInput?: { onmidimessage: unknown };
+      }).__midiRecordingInput;
+      return Boolean(input?.onmidimessage);
+    });
+    const recordedBlocks = page.locator('[id^="note-block-midi-rec-"]');
+    await toggle.click();
+    await expect(toggle).toHaveAttribute('aria-pressed', 'true');
+    await sendMidi(page, [[0x90, 60, 100]]); // C4 on; deliberately held
+    await page.waitForTimeout(400);
+    return { toggle, recordedBlocks };
+  };
+
+  const blockWidth = async (recordedBlocks: ReturnType<Page['locator']>): Promise<number> =>
+    recordedBlocks.first().evaluate(element =>
+      Number.parseFloat((element as HTMLElement).style.width),
+    );
+
+  // After a boundary the closed take is immutable: the physical key release
+  // and fresh notes (monitored live, but no take is armed) change nothing.
+  const expectClosedTakeImmutable = async (
+    page: Page,
+    recordedBlocks: ReturnType<Page['locator']>,
+  ): Promise<void> => {
+    const widthAtBoundary = await blockWidth(recordedBlocks);
+    expect(widthAtBoundary).toBeGreaterThan(16);
+    await sendMidi(page, [[0x80, 60, 0]]); // late release of the held key
+    await sendMidi(page, [[0x90, 64, 90]]); // a new note after the boundary
+    await page.waitForTimeout(300);
+    await sendMidi(page, [[0x80, 64, 0]]);
+    await expect(recordedBlocks).toHaveCount(1);
+    expect(await blockWidth(recordedBlocks)).toBe(widthAtBoundary);
+  };
+
+  test('pause closes the held gate and resuming does not continue the take', async ({ page }) => {
+    const { toggle, recordedBlocks } = await armTakeWithHeldNote(page);
+
+    const playButton = page.locator('#fl-play-btn');
+    await expect(playButton).toHaveAttribute('aria-label', 'Pause');
+    await playButton.click(); // pause at the held note
+
+    await expect(toggle).toHaveAttribute('aria-pressed', 'false');
+    await expect(recordedBlocks).toHaveCount(1);
+    await expect(playButton).toHaveAttribute('aria-label', 'Play');
+
+    await playButton.click(); // resume: no take is armed anymore
+    await expect(playButton).toHaveAttribute('aria-label', 'Pause');
+    await expectClosedTakeImmutable(page, recordedBlocks);
+    await expect(toggle).toHaveAttribute('aria-pressed', 'false');
+  });
+
+  test('Pattern/Song mode switch closes the take before restarting playback', async ({ page }) => {
+    const { toggle, recordedBlocks } = await armTakeWithHeldNote(page);
+
+    const modeToggle = page.locator('#fl-playmode-toggle');
+    await expect(modeToggle).toHaveAttribute('data-mode', 'pat');
+    await modeToggle.click();
+
+    await expect(modeToggle).toHaveAttribute('data-mode', 'song');
+    await expect(toggle).toHaveAttribute('aria-pressed', 'false');
+    await expect(recordedBlocks).toHaveCount(1);
+    await expectClosedTakeImmutable(page, recordedBlocks);
+  });
+
+  test('playlist ruler seek closes the take at the pre-seek position', async ({ page }) => {
+    const { toggle, recordedBlocks } = await armTakeWithHeldNote(page);
+
+    await page.locator('#nav-playlist').click();
+    await page.getByText('BAR 5', { exact: true }).click(); // seek far from bar 1
+    await page.locator('#nav-piano-roll').click();
+
+    await expect(toggle).toHaveAttribute('aria-pressed', 'false');
+    await expect(recordedBlocks).toHaveCount(1);
+    await expectClosedTakeImmutable(page, recordedBlocks);
+  });
+
+  test('transport Stop still finalizes the held note exactly once', async ({ page }) => {
+    const { toggle, recordedBlocks } = await armTakeWithHeldNote(page);
+
+    await page.locator('#fl-stop-btn').click();
+    await expect(toggle).toHaveAttribute('aria-pressed', 'false');
+    await expect(recordedBlocks).toHaveCount(1);
+
+    // Stopping again cannot commit the take a second time.
+    await page.locator('#fl-stop-btn').click();
+    await expect(recordedBlocks).toHaveCount(1);
+    await expectClosedTakeImmutable(page, recordedBlocks);
   });
 });
