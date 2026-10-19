@@ -62,6 +62,8 @@ import {
   quantizeDurationSteps,
 } from './noteDurationPolicy';
 
+const readSourceText = (path: string): string => readFileSync(path, 'utf8').replace(/\r\n/g, '\n');
+
 const REPO_ROOT = fileURLToPath(new URL('../../', import.meta.url));
 const NOTE_GATE_FILE = 'src/audio/noteGate.ts';
 const ARP_LAYER_ID = 'gate.arp-transient-duration';
@@ -210,7 +212,7 @@ describe('Phase 1D H3 — a clamp or a grid snap cannot be introduced silently',
   });
 
   it('noteGate.ts still declares no musical floor of its own', () => {
-    const source = readFileSync(join(REPO_ROOT, NOTE_GATE_FILE), 'utf8');
+    const source = readSourceText(join(REPO_ROOT, NOTE_GATE_FILE), 'utf8');
     for (const forbidden of [
       'noteDurationPolicy',
       'quantizeDurationSteps',
@@ -242,7 +244,7 @@ describe('Phase 1D H4 — the inventory declares the arp layer as transient and 
     for (const expected of ['noteDurationPolicy', 'quantizeDurationSteps', 'MIN_NOTE_DURATION_STEPS', 'Math.max(0.25']) {
       assert.ok(forbidden.includes(expected), `forbiddenAnchors must include ${expected}`);
     }
-    const source = readFileSync(join(REPO_ROOT, NOTE_GATE_FILE), 'utf8');
+    const source = readSourceText(join(REPO_ROOT, NOTE_GATE_FILE), 'utf8');
     for (const anchor of forbidden) {
       assert.ok(!source.includes(anchor), `tripwire "${anchor}" must not be present today`);
     }
@@ -250,7 +252,7 @@ describe('Phase 1D H4 — the inventory declares the arp layer as transient and 
 
   it('the declared anchors are still present in the production source', () => {
     const layer = arpLayer();
-    const source = readFileSync(join(REPO_ROOT, NOTE_GATE_FILE), 'utf8');
+    const source = readSourceText(join(REPO_ROOT, NOTE_GATE_FILE), 'utf8');
     for (const anchor of layer.anchors) {
       assert.ok(source.includes(anchor), `anchor "${anchor}" is gone from ${NOTE_GATE_FILE}`);
     }
@@ -260,8 +262,8 @@ describe('Phase 1D H4 — the inventory declares the arp layer as transient and 
   });
 
   it('the gate module and the duration policy still do not import each other', () => {
-    const gate = readFileSync(join(REPO_ROOT, NOTE_GATE_FILE), 'utf8');
-    const policy = readFileSync(join(REPO_ROOT, 'src/music/noteDurationPolicy.ts'), 'utf8');
+    const gate = readSourceText(join(REPO_ROOT, NOTE_GATE_FILE), 'utf8');
+    const policy = readSourceText(join(REPO_ROOT, 'src/music/noteDurationPolicy.ts'), 'utf8');
     assert.ok(!gate.includes('noteDurationPolicy'), 'the gate must stay independent of the musical policy');
     const policyImports = [...policy.matchAll(/^import\s[^;]*?from\s*'([^']+)'/gm)].map(match => match[1]);
     assert.deepEqual(policyImports, ['./musicalTime'], 'the policy still builds on canonical musical time alone');
@@ -295,7 +297,7 @@ const mutatedNoteGate = async (label: string, mutate: (source: string) => string
   const dir = makeTempDir(label);
   cpSync(join(REPO_ROOT, 'src'), join(dir, 'src'), { recursive: true });
   const target = join(dir, NOTE_GATE_FILE);
-  const original = readFileSync(target, 'utf8');
+  const original = readSourceText(target, 'utf8');
   assert.ok(original.includes(REAL_HELPER), 'the real helper text moved; update REAL_HELPER');
   const mutated = mutate(original);
   assert.notEqual(mutated, original, 'the mutation did not change the gate source');
