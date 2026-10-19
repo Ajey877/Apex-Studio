@@ -647,14 +647,7 @@ export const deleteChannelFromProjectState = (
     trackId === MASTER_MIXER_TRACK_ID || remainingChannels.some(ch => ch.mixerTrackId === trackId);
 
   const nextMixerTracks = isTrackStillReferenced
-    ? project.mixerTracks.map(t => {
-        // Even when the deleted track itself is retained (shared), other tracks
-        // that sent to it via aux must not retain a stale target.
-        if (!t.auxSends) return t;
-        const filtered = t.auxSends.filter(s => s.targetId !== trackId);
-        if (filtered.length === t.auxSends.length) return t;
-        return { ...t, auxSends: filtered.length === 0 ? undefined : filtered };
-      })
+    ? project.mixerTracks
     : project.mixerTracks
       .filter(t => t.id !== trackId)
       .map(t => {
