@@ -12,7 +12,7 @@ import { DEFAULT_PROJECT } from '../audio/presets';
 import { audioEngine } from '../audio/audioEngine';
 import { renderSamplerVoice } from '../audio/instruments/sampler';
 import { findSampleZone } from '../audio/sampleZones';
-import { createHistory } from './projectHistory';
+import { createHistory, sanitizeProjectSnapshot } from './projectHistory';
 import { updateChannelInProjectState, updateMacroRackInProjectState } from './projectMutations';
 import { normalizeProjectState } from './projectState';
 import { hydrateProjectAudio } from './projectPersistence';
@@ -2980,5 +2980,365 @@ describe('F-3: sample assignment clears stale generated sampler seed zones (F)',
     );
     assert.deepEqual(repeatedZones[0], splitSnapshot, 'the repeat action must not disturb the authored split');
     assert.equal(history.past.length, undoEntriesBefore, 'a no-op assignment must not add an undo entry');
+  });
+});
+
+/**
+ * F-2 — persisted modals must synchronize on *content*, not on object identity.
+ *
+ * `ProjectHistory` stores sanitized snapshots (`sanitizeProjectSnapshot`), so
+ * every undo/redo publishes a freshly JSON-cloned project: every channel, every
+ * `customSample` and every `arp` object arrives with a new identity even when the
+ * undone edit happened somewhere else entirely (a mixer move, a playlist clip,
+ * another channel). `App.tsx` publishes `history.present` unchanged to every
+ * always-mounted modal, so identity-keyed synchronization effects fire on any
+ * unrelated undo/redo.
+ *
+ * Both effects below reset a *draft* (Sample Manager pending library selection
+ * and unsaved trim edits; Arpeggiator unsaved arp edits). Identity-keyed resets
+ * therefore silently discard the user's in-progress work — and in the Sample
+ * Manager case the next "Assign to Channel" then commits the reverted sample to
+ * the project, i.e. a wrong-data mutation rather than a cosmetic glitch.
+ *
+ * These tests drive the real components through app-shaped publications and
+ * assert the rendered state *and* the resulting project document.
+ */
+describe('F-2: modal drafts survive unrelated project publications (G)', () => {
+  const rangeInputsOf = (tree: React.ReactNode) =>
+    collectElements(tree).filter(el => el.type === 'input' && el.props.type === 'range');
+  const selectInputsOf = (tree: React.ReactNode) =>
+    collectElements(tree).filter(el => el.type === 'select');
+  // The editor panel is the only place that shows the *loaded* sample; the
+  // library list always renders every sample name, so text alone is ambiguous.
+  const sampleEditorOf = (tree: React.ReactNode) =>
+    collectElements(tree).find(el => el.props.id === 'sample-manager-sample-panel');
+  const sampleEditorText = (tree: React.ReactNode) => sampleEditorOf(tree)?.text ?? '';
+
+  it('SampleManagerModal keeps the pending library sample and unsaved trim edits across an unrelated undo/redo publication, then assigns that sample exactly once', () => {
+    const kickSample = makeSample('sm-kick', { trimStart: 0.1, trimEnd: 0.8, rootPitch: 48, reverse: false });
+    const hatSample = makeSample('sm-hat', { trimStart: 0.25, trimEnd: 0.55, rootPitch: 60, reverse: false });
+    const snareSample = makeSample('sm-snare', { trimStart: 0.2, trimEnd: 0.7, rootPitch: 55, reverse: false });
+    const base = structuredClone(DEFAULT_PROJECT);
+    const project: ProjectState = {
+      ...base,
+      sampleLibrary: [kickSample, hatSample, snareSample],
+      channels: base.channels.map((ch, index) =>
+        index === 0
+          ? { ...structuredClone(ch), id: 'ch-alpha', name: 'Alpha Ch', customSample: kickSample }
+          : index === 1
+            ? { ...structuredClone(ch), id: 'ch-beta', name: 'Beta Ch', customSample: hatSample }
+            : structuredClone(ch)
+      ),
+    };
+    let history = createHistory(project);
+    const assignments: Array<{ channelId: string; sample: CustomSampleData }> = [];
+    const channelById = (id: string) => history.present.channels.find(ch => ch.id === id)!;
+
+    // App.tsx: onAssignSampleToChannel -> handleUpdateChannel(channelId, { customSample }).
+    const assignSample = (channelId: string, sample: CustomSampleData) => {
+      assignments.push({ channelId, sample });
+      history = history.commit(
+        updateChannelInProjectState(history.present, channelId, { customSample: sample }),
+        'Assign sample',
+      );
+    };
+
+    const harness = createComponentHarness(SampleManagerModal, {
+      isOpen: false,
+      onClose: () => {},
+      channels: history.present.channels,
+      selectedChannel: channelById('ch-alpha'),
+      sampleLibrary: history.present.sampleLibrary || [],
+      onSampleImported: () => {},
+      onCreateChannelFromSample: () => {},
+      onAssignSampleToChannel: assignSample,
+    });
+
+    harness.rerender({ isOpen: true });
+    let ranges = rangeInputsOf(harness.tree);
+    let selects = selectInputsOf(harness.tree);
+    assert.equal(selects[1].props.value, 'ch-alpha', 'the modal opens on the selected channel');
+    assert.equal(ranges[0].props.value, 0.1);
+    assert.equal(ranges[1].props.value, 0.8);
+
+    // Pick the library snare as the pending sample, then adjust the end trim.
+    const snareButton = collectElements(harness.tree).find(
+      el => el.type === 'button' && el.text.includes('Sample sm-snare'),
+    );
+    assert.ok(snareButton, 'the library must expose the snare sample');
+    snareButton.props.onClick();
+    harness.rerender();
+    ranges = rangeInputsOf(harness.tree);
+    assert.equal(ranges[0].props.value, 0.2, 'picking a library sample loads its trim');
+    assert.equal(ranges[1].props.value, 0.7);
+    ranges[1].props.onChange({ target: { value: '0.35' } });
+    harness.rerender();
+    assert.equal(rangeInputsOf(harness.tree)[1].props.value, 0.35);
+
+    const undoDepthBeforePublication = history.past.length;
+
+    // An edit elsewhere in the project (a mixer move on the other channel)
+    // followed by the app's snapshot publication. `mutateProjectState` then
+    // `handleUndo` publish `history.present`, which re-creates every identity
+    // while leaving ch-alpha's sample content untouched.
+    history = history.commit(
+      updateChannelInProjectState(history.present, 'ch-beta', { volume: 0.42 }),
+      'Change volume',
+    );
+    const published = sanitizeProjectSnapshot(history.present);
+    assert.notEqual(
+      published.channels.find(ch => ch.id === 'ch-alpha')!.customSample,
+      kickSample,
+      'the published snapshot is a fresh object graph (same reason App re-renders the modal)',
+    );
+
+    harness.rerender({
+      channels: published.channels,
+      selectedChannel: published.channels.find(ch => ch.id === 'ch-alpha')!,
+      sampleLibrary: published.sampleLibrary || [],
+    });
+
+    // The draft must survive: still the snare, still the edited end trim.
+    assert.ok(
+      sampleEditorText(harness.tree).includes('Sample sm-snare'),
+      'an unrelated project publication must not revert the pending library sample',
+    );
+    ranges = rangeInputsOf(harness.tree);
+    selects = selectInputsOf(harness.tree);
+    assert.equal(ranges[0].props.value, 0.2, 'trimStart must stay on the pending sample');
+    assert.equal(ranges[1].props.value, 0.35, 'an unsaved trim edit must not be discarded by an unrelated publication');
+    assert.equal(selects[0].props.value, 55, 'rootPitch must stay on the pending sample');
+    assert.equal(selects[1].props.value, 'ch-alpha', 'the destination channel must not change');
+
+    const assignButton = collectElements(harness.tree).find(
+      el => el.type === 'button' && el.text.includes('Assign to Channel'),
+    );
+    assert.ok(assignButton);
+    assignButton.props.onClick();
+
+    assert.equal(assignments.length, 1, 'assigning is exactly one explicit mutation');
+    assert.equal(assignments[0].channelId, 'ch-alpha', 'the assignment must target the channel shown in the modal');
+    assert.equal(assignments[0].sample.id, 'sm-snare', 'the assignment must commit the sample the user picked, not a reverted one');
+    assert.equal(assignments[0].sample.trimEnd, 0.35, 'the committed sample must carry the user’s trim edit');
+    assert.equal(channelById('ch-alpha').customSample?.id, 'sm-snare');
+    assert.equal(channelById('ch-alpha').customSample?.trimEnd, 0.35);
+    assert.equal(channelById('ch-beta').customSample?.id, 'sm-hat', 'the previously displayed channel must never be overwritten');
+    assert.equal(history.past.length, undoDepthBeforePublication + 2, 'only the unrelated edit and the explicit assignment add history');
+
+    // The explicit assignment stays exactly one undoable entry.
+    history = history.undo();
+    assert.equal(channelById('ch-alpha').customSample?.id, 'sm-kick', 'undo must restore the sample the assignment replaced');
+    assert.equal(channelById('ch-beta').customSample?.id, 'sm-hat');
+    history = history.redo();
+    assert.equal(channelById('ch-alpha').customSample?.id, 'sm-snare');
+    assert.equal(channelById('ch-alpha').customSample?.trimEnd, 0.35);
+    assert.equal(history.future.length, 0);
+
+    // A genuine project replacement that changes ch-alpha's sample must still
+    // resynchronize the controls, and must not assign anything by itself.
+    const replacedSample = makeSample('sm-replaced', { trimStart: 0.3, trimEnd: 0.6, rootPitch: 36, reverse: true });
+    const replacement = sanitizeProjectSnapshot({
+      ...history.present,
+      sampleLibrary: [...(history.present.sampleLibrary || []), replacedSample],
+      channels: history.present.channels.map(ch =>
+        ch.id === 'ch-alpha' ? { ...ch, customSample: replacedSample } : ch,
+      ),
+    });
+    harness.rerender({
+      channels: replacement.channels,
+      selectedChannel: replacement.channels.find(ch => ch.id === 'ch-alpha')!,
+      sampleLibrary: replacement.sampleLibrary || [],
+      isOpen: true,
+    });
+
+    ranges = rangeInputsOf(harness.tree);
+    selects = selectInputsOf(harness.tree);
+    assert.equal(ranges[0].props.value, 0.3, 'a replaced project sample must resynchronize the modal');
+    assert.equal(ranges[1].props.value, 0.6);
+    assert.equal(selects[0].props.value, 36);
+    assert.equal(assignments.length, 1, 'synchronizing after a project replacement must not assign anything');
+  });
+
+  it('SampleManagerModal clears the editor when the mounted modal is switched to a channel that has no sample', () => {
+    const kickSample = makeSample('switch-kick', { trimStart: 0.1, trimEnd: 0.8, rootPitch: 48 });
+    const base = structuredClone(DEFAULT_PROJECT);
+    const samplerChannel: Channel = {
+      ...structuredClone(base.channels[0]),
+      id: 'ch-sampler',
+      name: 'Sampler Ch',
+      instrumentType: 'sampler',
+      customSample: kickSample,
+    };
+    const synthChannel: Channel = {
+      ...structuredClone(base.channels[1]),
+      id: 'ch-synth',
+      name: 'Synth Ch',
+      instrumentType: 'minisynth',
+      customSample: undefined,
+    };
+    const assignments: Array<{ channelId: string; sample: CustomSampleData }> = [];
+    const channels = [samplerChannel, synthChannel];
+    const harness = createComponentHarness(SampleManagerModal, {
+      isOpen: true,
+      onClose: () => {},
+      channels,
+      selectedChannel: samplerChannel,
+      sampleLibrary: [kickSample],
+      onSampleImported: () => {},
+      onCreateChannelFromSample: () => {},
+      onAssignSampleToChannel: (channelId, sample) => assignments.push({ channelId, sample }),
+    });
+
+    assert.ok(sampleEditorText(harness.tree).includes('Sample switch-kick'));
+
+    // Same mounted component, new selected channel without any sample.
+    harness.rerender({ selectedChannel: synthChannel, channels: [...channels] });
+
+    const text = collectText(harness.tree);
+    assert.ok(
+      text.includes('No custom sample loaded yet'),
+      'switching to a channel without a sample must clear the previous channel’s sample from the editor',
+    );
+    assert.equal(sampleEditorOf(harness.tree), undefined, 'the previous channel’s sample editor must not stay mounted');
+    assert.equal(rangeInputsOf(harness.tree).length, 0, 'no stale trim sliders may remain for a sample-less channel');
+    const assignButton = collectElements(harness.tree).find(
+      el => el.type === 'button' && el.text.includes('Assign to Channel'),
+    );
+    assert.equal(assignButton, undefined, 'there is nothing to assign, so no stale Assign action may be offered');
+    assert.equal(assignments.length, 0);
+
+    // Switching back must show the sampler channel's real sample again.
+    harness.rerender({ selectedChannel: samplerChannel, channels: [...channels] });
+    assert.ok(
+      sampleEditorText(harness.tree).includes('Sample switch-kick'),
+      'switching back must restore the channel sample',
+    );
+    assert.equal(assignments.length, 0);
+  });
+
+  it('ArpeggiatorModal keeps unsaved arp edits across an unrelated undo/redo publication, resynchronizes on a real arp change, and saves once to the shown channel', () => {
+    const leadArp = {
+      enabled: true,
+      mode: 'down',
+      rate: '1/8',
+      octaves: 3,
+      gate: 0.65,
+      swing: 0,
+      strumMs: 22,
+      euclideanSteps: 16,
+      euclideanHits: 5,
+      euclideanRotate: 0,
+    } as const;
+    const bassArp = {
+      enabled: false,
+      mode: 'euclidean',
+      rate: '1/16',
+      octaves: 1,
+      gate: 0.9,
+      swing: 0,
+      strumMs: 10,
+      euclideanSteps: 12,
+      euclideanHits: 7,
+      euclideanRotate: 2,
+    } as const;
+    const base = structuredClone(DEFAULT_PROJECT);
+    const project: ProjectState = {
+      ...base,
+      channels: base.channels.map((ch, index) =>
+        index === 0
+          ? { ...structuredClone(ch), id: 'arp-lead', name: 'Lead Ch', arp: { ...leadArp } }
+          : index === 1
+            ? { ...structuredClone(ch), id: 'arp-bass', name: 'Bass Ch', arp: { ...bassArp } }
+            : structuredClone(ch)
+      ),
+    };
+    let history = createHistory(project);
+    const savedChannels: Channel[] = [];
+    const leadChannel = () => history.present.channels.find(ch => ch.id === 'arp-lead')!;
+
+    const harness = createComponentHarness(ArpeggiatorModal, {
+      isOpen: true,
+      onClose: () => {},
+      channel: leadChannel(),
+      onUpdateChannel: updated => savedChannels.push(updated),
+      bpm: 140,
+    });
+
+    assert.ok(collectText(harness.tree).includes('3 Oct'));
+    const octaveSlider = rangeInputsOf(harness.tree)[0];
+    assert.ok(octaveSlider, 'the octave slider must render');
+    octaveSlider.props.onChange({ target: { value: '4' } });
+    harness.rerender();
+    assert.ok(collectText(harness.tree).includes('4 Oct'), 'the local draft edit is visible');
+
+    const undoDepthBeforePublication = history.past.length;
+
+    // Unrelated edit on the other channel + app-shaped snapshot publication.
+    history = history.commit(
+      updateChannelInProjectState(history.present, 'arp-bass', { volume: 0.31 }),
+      'Change volume',
+    );
+    const published = sanitizeProjectSnapshot(history.present);
+    assert.notEqual(
+      published.channels.find(ch => ch.id === 'arp-lead')!.arp,
+      leadChannel().arp,
+      'publication re-creates the arp object identity',
+    );
+    harness.rerender({ channel: published.channels.find(ch => ch.id === 'arp-lead')!, isOpen: true });
+
+    assert.ok(
+      collectText(harness.tree).includes('4 Oct'),
+      'an unrelated undo/redo publication must not silently discard the unsaved arp edit',
+    );
+    assert.equal(savedChannels.length, 0, 'rendering a publication must not save arp settings');
+    assert.equal(history.past.length, undoDepthBeforePublication + 1);
+
+    // An external change that really targets this channel's arp (undo of an arp
+    // save, project load) must still resynchronize the draft.
+    history = history.commit(
+      updateChannelInProjectState(history.present, 'arp-lead', {
+        arp: { ...leadArp, enabled: false, octaves: 2 },
+      }),
+      'Update arp',
+    );
+    const arpChanged = sanitizeProjectSnapshot(history.present);
+    harness.rerender({ channel: arpChanged.channels.find(ch => ch.id === 'arp-lead')!, isOpen: true });
+    assert.ok(collectText(harness.tree).includes('2 Oct'), 'a genuine arp change must resynchronize the modal');
+    assert.ok(collectText(harness.tree).includes('DISABLED'));
+    assert.equal(savedChannels.length, 0, 'resynchronizing must not save');
+
+    const saveButton = collectElements(harness.tree).find(
+      el => el.type === 'button' && el.text.includes('Save Arp Settings'),
+    );
+    assert.ok(saveButton);
+    saveButton.props.onClick();
+    assert.equal(savedChannels.length, 1, 'saving is exactly one explicit mutation');
+    assert.equal(savedChannels[0].id, 'arp-lead', 'the save must target the channel shown in the modal');
+    assert.equal(savedChannels[0].arp?.octaves, 2);
+    assert.equal(savedChannels[0].arp?.enabled, false);
+
+    // Switching the mounted modal to the other channel must show that channel
+    // and must never write to it on render.
+    harness.rerender({ channel: leadChannel() && history.present.channels.find(ch => ch.id === 'arp-bass')!, isOpen: true });
+    assert.ok(collectText(harness.tree).includes('1 Oct'), 'a channel switch must resynchronize the modal');
+    assert.ok(collectText(harness.tree).includes('E(7, 12)'));
+    assert.equal(savedChannels.length, 1, 'switching channels must not save');
+
+    // Project replacement: App bumps the document generation, so a new document
+    // drops the draft even when the shown channel's settings are byte-identical.
+    const draftSlider = rangeInputsOf(harness.tree)[0];
+    draftSlider.props.onChange({ target: { value: '3' } });
+    harness.rerender();
+    assert.ok(collectText(harness.tree).includes('3 Oct'), 'the second draft edit is visible');
+
+    const replacement = sanitizeProjectSnapshot({ ...history.present });
+    const replacementBass = replacement.channels.find(ch => ch.id === 'arp-bass')!;
+    assert.equal(replacementBass.arp?.octaves, 1, 'the replacement carries identical persisted settings');
+    harness.rerender({ channel: replacementBass, isOpen: true, projectGeneration: 1 });
+    assert.ok(
+      collectText(harness.tree).includes('1 Oct'),
+      'a replaced project must resynchronize the modal even when the stored settings are identical',
+    );
+    assert.equal(savedChannels.length, 1, 'a project replacement must not save arp settings');
   });
 });
