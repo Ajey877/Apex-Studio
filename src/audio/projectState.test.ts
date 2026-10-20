@@ -136,9 +136,16 @@ describe('Preset immutability and project isolation', () => {
   const expectedLoaded = (preset: (typeof PRESET_PROJECTS)[number]) =>
     declared(normalizeProjectState(structuredClone(preset.state)));
 
+  // A genuinely detached snapshot of a preset's canonical catalog state.
+  // `structuredClone` breaks every reference into the live catalog, so an
+  // in-place mutation taken after the snapshot is detectable by deep
+  // comparison (unlike `catalogOf`, which retains live references).
+  const snapshotCatalog = (preset: (typeof PRESET_PROJECTS)[number]) =>
+    structuredClone(preset.state);
+
   it('instantiating a preset gives independent nested state (no shared references)', () => {
     const preset = PRESET_PROJECTS[0];
-    const catalogBefore = catalogOf(preset);
+    const catalogBefore = snapshotCatalog(preset);
     const loaded = normalizeProjectState(preset.state);
 
     assert.notEqual(loaded, preset.state);
@@ -153,13 +160,13 @@ describe('Preset immutability and project isolation', () => {
 
     // Declared content survives the load unchanged on the copy.
     assert.deepEqual(declared(loaded), expectedLoaded(preset));
-    // The catalog itself is not altered by instantiation.
-    assert.deepEqual(catalogOf(preset), catalogBefore);
+    // The catalog itself is not altered by instantiation (detached comparison).
+    assert.deepEqual(structuredClone(preset.state), catalogBefore);
   });
 
   it('editing notes in an instantiated preset does not mutate the canonical definition', () => {
     const preset = PRESET_PROJECTS[0];
-    const catalogBefore = catalogOf(preset);
+    const catalogBefore = snapshotCatalog(preset);
     const loaded = normalizeProjectState(preset.state);
 
     const kick = loaded.channels.find(ch => ch.id === 'ch-kick')!;
@@ -170,8 +177,8 @@ describe('Preset immutability and project isolation', () => {
     });
 
     assert.equal(edited.channels.find(ch => ch.id === 'ch-kick')!.notes.length, before + 1);
-    // Canonical definition untouched.
-    assert.deepEqual(catalogOf(preset), catalogBefore);
+    // Canonical definition untouched (detached comparison).
+    assert.deepEqual(structuredClone(preset.state), catalogBefore);
     assert.equal(preset.state.channels.find(ch => ch.id === 'ch-kick')!.notes.length, before);
     assert.equal(
       preset.state.channels.find(ch => ch.id === 'ch-kick')!.notes.some((n: { id: string }) => n.id === 'n-edit'),
@@ -181,7 +188,7 @@ describe('Preset immutability and project isolation', () => {
 
   it('editing steps in an instantiated preset does not mutate the canonical definition', () => {
     const preset = PRESET_PROJECTS[0];
-    const catalogBefore = catalogOf(preset);
+    const catalogBefore = snapshotCatalog(preset);
     const loaded = normalizeProjectState(preset.state);
 
     const kick = loaded.channels.find(ch => ch.id === 'ch-kick')!;
@@ -190,25 +197,25 @@ describe('Preset immutability and project isolation', () => {
     const edited = updateChannelInProjectState(loaded, 'ch-kick', { steps: editedSteps });
     assert.equal(edited.channels.find(ch => ch.id === 'ch-kick')!.steps[0], false);
 
-    assert.deepEqual(catalogOf(preset), catalogBefore);
+    assert.deepEqual(structuredClone(preset.state), catalogBefore);
     assert.equal(preset.state.channels.find(ch => ch.id === 'ch-kick')!.steps[0], true);
   });
 
   it('editing pattern length in an instantiated preset does not mutate the canonical definition', () => {
     const preset = PRESET_PROJECTS[0];
-    const catalogBefore = catalogOf(preset);
+    const catalogBefore = snapshotCatalog(preset);
     const loaded = normalizeProjectState(preset.state);
 
     const edited = updatePatternInProjectState(loaded, 'pat-1', { lengthSteps: 32 });
     assert.equal(edited.patterns.find(p => p.id === 'pat-1')!.lengthSteps, 32);
 
-    assert.deepEqual(catalogOf(preset), catalogBefore);
+    assert.deepEqual(structuredClone(preset.state), catalogBefore);
     assert.equal(preset.state.patterns.find(p => p.id === 'pat-1')!.lengthSteps, 16);
   });
 
   it('reloading the same preset after an earlier session edit yields pristine content', () => {
     const preset = PRESET_PROJECTS[0];
-    const catalogBefore = catalogOf(preset);
+    const catalogBefore = snapshotCatalog(preset);
 
     const loaded = normalizeProjectState(preset.state);
     const edited = updateChannelInProjectState(loaded, 'ch-kick', {
@@ -218,12 +225,12 @@ describe('Preset immutability and project isolation', () => {
 
     const reloaded = normalizeProjectState(preset.state);
     assert.deepEqual(declared(reloaded), expectedLoaded(preset));
-    assert.deepEqual(catalogOf(preset), catalogBefore);
+    assert.deepEqual(structuredClone(preset.state), catalogBefore);
   });
 
   it('undo/redo over a preset edit does not mutate the preset catalog', () => {
     const preset = PRESET_PROJECTS[0];
-    const catalogBefore = catalogOf(preset);
+    const catalogBefore = snapshotCatalog(preset);
     const loaded = normalizeProjectState(preset.state);
 
     let history = createHistory(loaded);
@@ -238,11 +245,11 @@ describe('Preset immutability and project isolation', () => {
     assert.equal(redone.present.channels.find(ch => ch.id === 'ch-kick')!.notes.some((n: { id: string }) => n.id === 'n-edit'), true);
     assert.equal(undone.present.channels.find(ch => ch.id === 'ch-kick')!.notes.some((n: { id: string }) => n.id === 'n-edit'), false);
 
-    assert.deepEqual(catalogOf(preset), catalogBefore);
+    assert.deepEqual(structuredClone(preset.state), catalogBefore);
   });
 
   it('all shipped presets instantiate independently of the catalog and each other', () => {
-    const catalogBefore = PRESET_PROJECTS.map(catalogOf);
+    const snapshots = PRESET_PROJECTS.map(snapshotCatalog);
     const expected = PRESET_PROJECTS.map(expectedLoaded);
     const loaded = PRESET_PROJECTS.map(preset => normalizeProjectState(preset.state));
 
@@ -254,25 +261,37 @@ describe('Preset immutability and project isolation', () => {
       assert.deepEqual(declared(state), expected[index]);
     });
     PRESET_PROJECTS.forEach((preset, index) =>
-      assert.deepEqual(catalogOf(preset), catalogBefore[index])
+      assert.deepEqual(structuredClone(preset.state), snapshots[index])
     );
   });
 
-  it('replacing the project then loading a preset carries no earlier mutations into the preset', () => {
+  it('an edited session does not leak into a subsequently loaded preset catalog', () => {
     const presetA = PRESET_PROJECTS[0];
     const presetB = PRESET_PROJECTS[1];
-    const catalogBeforeB = catalogOf(presetB);
+    const catalogBeforeA = snapshotCatalog(presetA);
+    const catalogBeforeB = snapshotCatalog(presetB);
 
     const sessionA = normalizeProjectState(presetA.state);
     const editedA = updateChannelInProjectState(sessionA, 'ch-kick', {
       notes: [...sessionA.channels.find(ch => ch.id === 'ch-kick')!.notes, { id: 'n-edit', pitch: 99, start: 0, duration: 1, velocity: 1.0 }],
     });
 
-    // Project replacement into a fresh session, then loading preset B.
+    // The edit genuinely took effect on the instantiated session.
+    assert.equal(
+      editedA.channels.find(ch => ch.id === 'ch-kick')!.notes.some((n: { id: string }) => n.id === 'n-edit'),
+      true
+    );
+
+    // Loading preset B afterwards yields pristine content.
     const loadedB = normalizeProjectState(presetB.state);
     assert.deepEqual(declared(loadedB), expectedLoaded(presetB));
-    assert.deepEqual(catalogOf(presetB), catalogBeforeB);
-    // The edited session A never leaked into B's catalog.
+
+    // Neither catalog was mutated by the edited session or by loading B
+    // (detached comparison, so in-place mutation would be detected).
+    assert.deepEqual(structuredClone(presetA.state), catalogBeforeA);
+    assert.deepEqual(structuredClone(presetB.state), catalogBeforeB);
+
+    // Loaded B is pristine: its kick-equivalent channel keeps its single note.
     assert.equal(presetB.state.channels.find(ch => ch.id === 'ch-sw-kick')!.notes.length, 1);
   });
 });
