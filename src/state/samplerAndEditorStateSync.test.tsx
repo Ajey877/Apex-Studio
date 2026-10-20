@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import React from 'react';
 import { MultiZoneSamplerModal } from '../components/MultiZoneSamplerModal';
 import { SampleManagerModal } from '../components/SampleManagerModal';
+import { SampleLibraryPanel } from '../components/SampleLibraryPanel';
 import { DrumSamplerPanel } from '../components/DrumSamplerPanel';
 import { ArpeggiatorModal } from '../components/ArpeggiatorModal';
 import { MasterMacroRackModal } from '../components/MasterMacroRackModal';
@@ -2852,5 +2853,132 @@ describe('F-3: sample assignment clears stale generated sampler seed zones (F)',
     assert.equal(replaced.sampleZones?.[1].rootNote, 60, 'the edited root note must be preserved');
     assert.equal(replaced.sampleZones?.[0].sampleId, splitSample.id);
     assert.equal(replaced.sampleZones?.[2].sampleId, 'library-other');
+  });
+
+  it('the MULTISAMPLER library action drops a legacy generated seed, preserves authored splits, and assigns the selected sample', () => {
+    const seedSample = makeSample('library-seed-a', {
+      duration: 2,
+      rootPitch: 48,
+      trimStart: 0.15,
+      trimEnd: 0.85,
+      reverse: true,
+    });
+    const splitSample = makeSample('library-split-b', { duration: 1, rootPitch: 60 });
+    const assignedSample = makeSample('library-assigned-c', {
+      duration: 3,
+      rootPitch: 72,
+      trimStart: 0.2,
+      trimEnd: 0.7,
+    });
+
+    // v1.2.2 shape: the untouched full-range projection of customSample was
+    // persisted (and stamped userAuthored) next to a real authored split.
+    const seedZone: SampleZone = seededFullRangeZone('ch-kick', seedSample, { userAuthored: true });
+    const splitZone: SampleZone = {
+      id: 'zone-1712345678905',
+      sampleId: splitSample.id,
+      lowNote: 60,
+      highNote: 72,
+      rootNote: 60,
+      lowVelocity: 0,
+      highVelocity: 127,
+      tuneSemitones: 0,
+      userAuthored: true,
+    };
+    const splitSnapshot = structuredClone(splitZone);
+    const project = makeProject(
+      {
+        customSample: seedSample,
+        synthParams: { ...structuredClone(DEFAULT_PROJECT.channels[0].synthParams), sampleLoop: false },
+        sampleZones: [{ ...seedZone }, { ...splitZone }],
+        notes: [],
+      },
+      [seedSample, splitSample, assignedSample],
+    );
+
+    let history = createHistory(project);
+    const channelFor = (): Channel => history.present.channels.find(ch => ch.id === 'ch-kick')!;
+    const library = [seedSample, splitSample, assignedSample];
+
+    // The panel is a real component: select the third library card, then press
+    // the MULTISAMPLER action; both are the rendered controls, not helpers.
+    const harness = createComponentHarness(SampleLibraryPanel, {
+      samples: library,
+      packs: [],
+      selectedChannel: channelFor(),
+      onUpdateSample: () => {},
+      onUpdatePacks: () => {},
+      onUpdateChannel: (channelId: string, updates: Partial<Channel>) => {
+        history = history.commit(
+          updateChannelInProjectState(history.present, channelId, updates),
+          'Update channel',
+        );
+      },
+    });
+
+    const assignedCard = collectElements(harness.tree).find(
+      element => element.type === 'button' && element.text.includes(assignedSample.name)
+    );
+    assert.ok(assignedCard, 'the third library sample must render a selectable card');
+    assignedCard.props.onClick();
+    harness.rerender();
+
+    const multiSamplerButton = collectElements(harness.tree).find(
+      element => element.type === 'button' && element.text.includes('MULTISAMPLER')
+    );
+    assert.ok(multiSamplerButton, 'the MULTISAMPLER action must render for the selected sample');
+    multiSamplerButton.props.onClick();
+    harness.rerender({ selectedChannel: channelFor() });
+
+    const assignedChannel = channelFor();
+    const zones = assignedChannel.sampleZones || [];
+
+    assert.ok(
+      !zones.some(zone => zone.id === seedZone.id),
+      'the stale generated full-range seed must be removed by the library-assignment path'
+    );
+    assert.deepEqual(zones[0], splitSnapshot, 'the authored split must be preserved exactly');
+    assert.equal(zones.length, 2, 'only the authored split and the new library zone may remain');
+    assert.equal(zones[1].id, `zone-${assignedSample.id}-library`);
+    assert.equal(zones[1].sampleId, assignedSample.id, 'the selected library sample must own the new zone');
+    assert.equal(zones[1].userAuthored, true);
+    assert.equal(assignedChannel.customSample?.id, assignedSample.id, 'the selected library sample must be assigned to the channel');
+
+    const insideSplit: Note = { id: 'library-note-inside', pitch: 65, start: 0, duration: 1, velocity: 1 };
+    const outsideSplit: Note = { id: 'library-note-outside', pitch: 30, start: 0, duration: 1, velocity: 1 };
+    assert.equal(findSampleZone(zones, insideSplit)?.id, splitZone.id, 'keys inside the split must resolve to the split');
+    assert.equal(
+      findSampleZone(zones, outsideSplit)?.id,
+      `zone-${assignedSample.id}-library`,
+      'keys outside the split must resolve to the newly assigned sample'
+    );
+
+    const buffers: Record<string, AudioBuffer> = {
+      [seedSample.id]: { duration: 2 } as AudioBuffer,
+      [splitSample.id]: { duration: 1 } as AudioBuffer,
+      [assignedSample.id]: { duration: 3 } as AudioBuffer,
+    };
+    assert.equal(renderSampleId(assignedChannel, 65, buffers), splitSample.id, 'the split keeps its own sample on playback');
+    assert.equal(renderSampleId(assignedChannel, 30, buffers), assignedSample.id, 'the assigned sample plays outside the split');
+
+    // Re-assigning the sample that is already mapped must not append a second
+    // zone or create an undo entry: the panel keeps the existing mapping.
+    const undoEntriesBefore = history.past.length;
+    const repeatButton = collectElements(harness.tree).find(
+      element => element.type === 'button' && element.text.includes('MULTISAMPLER')
+    );
+    assert.ok(repeatButton);
+    repeatButton.props.onClick();
+    harness.rerender({ selectedChannel: channelFor() });
+
+    const repeatedZones = channelFor().sampleZones || [];
+    assert.equal(repeatedZones.length, 2, 'an already-mapped sample must not add a duplicate zone');
+    assert.equal(
+      repeatedZones.filter(zone => zone.sampleId === assignedSample.id).length,
+      1,
+      'exactly one zone may map the assigned sample'
+    );
+    assert.deepEqual(repeatedZones[0], splitSnapshot, 'the repeat action must not disturb the authored split');
+    assert.equal(history.past.length, undoEntriesBefore, 'a no-op assignment must not add an undo entry');
   });
 });
