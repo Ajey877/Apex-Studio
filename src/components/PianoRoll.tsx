@@ -108,11 +108,32 @@ type NoteInteraction =
       originY: number;
     };
 
+interface VelocityPointerInteraction {
+  pointerId: number;
+  channelId: string;
+  lastClientX: number;
+  lastClientY: number;
+  captureTarget: HTMLDivElement;
+}
+
+interface VelocityHitTarget {
+  noteId: string;
+  cellRect: DOMRect;
+}
+
+const VELOCITY_HISTORY_LABEL = 'Edit note velocities';
+
 interface PianoRollProps {
   channel: Channel;
   allChannels: Channel[];
   onSelectChannel: (channelId: string) => void;
-  onUpdateChannel: (channelId: string, updates: Partial<Channel>) => void;
+  onUpdateChannel: (
+    channelId: string,
+    updates: Partial<Channel>,
+    options?: { isContinuous?: boolean }
+  ) => void;
+  onInteractionStart?: (label?: string) => void;
+  onInteractionEnd?: (label?: string) => void;
   currentStep: number;
   isPlaying: boolean;
   /**
@@ -245,6 +266,8 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
   allChannels,
   onSelectChannel,
   onUpdateChannel,
+  onInteractionStart,
+  onInteractionEnd,
   currentStep,
   isPlaying,
   patternLengthSteps,
@@ -317,6 +340,8 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
   const marqueeRef = useRef<MarqueeInteraction | null>(null);
   const didMarqueeDragRef = useRef(false);
   const gridRef = useRef<HTMLDivElement>(null);
+  const velocityLaneRef = useRef<HTMLDivElement>(null);
+  const velocityInteractionRef = useRef<VelocityPointerInteraction | null>(null);
 
   // Pitch range C2 (36) to C6 (84) = 49 keys
   const minPitch = DEFAULT_MIN_PITCH;
@@ -327,6 +352,18 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
   }
 
   const notes = channel.notes || [];
+  // Pointer handlers read current project data/callbacks through refs so a drag
+  // remains attached to stable note ids across the rerenders it publishes.
+  const notesRef = useRef(notes);
+  notesRef.current = notes;
+  const channelIdRef = useRef(channel.id);
+  channelIdRef.current = channel.id;
+  const onUpdateChannelRef = useRef(onUpdateChannel);
+  onUpdateChannelRef.current = onUpdateChannel;
+  const onInteractionStartRef = useRef(onInteractionStart);
+  onInteractionStartRef.current = onInteractionStart;
+  const onInteractionEndRef = useRef(onInteractionEnd);
+  onInteractionEndRef.current = onInteractionEnd;
 
   const bounds: NoteBounds = {
     minPitch,
@@ -1246,11 +1283,192 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
     e.target.value = '';
   };
 
-  const handleVelocityChange = (noteId: string, newVel: number) => {
-    const clamped = Math.max(0.05, Math.min(1.0, newVel));
-    const newNotes = notes.map(n => (n.id === noteId ? { ...n, velocity: clamped } : n));
-    onUpdateChannel(channel.id, { notes: newNotes });
+  const findVelocityTargetByNoteId = (noteId: string): VelocityHitTarget | null => {
+    const lane = velocityLaneRef.current;
+    if (!lane) return null;
+
+    const stalk = [...lane.querySelectorAll<HTMLElement>('[data-velocity-note-id]')]
+      .find(element => element.dataset.velocityNoteId === noteId);
+    const cell = stalk?.closest<HTMLElement>('[data-velocity-step]');
+    if (!stalk || !cell) return null;
+    return { noteId, cellRect: cell.getBoundingClientRect() };
   };
+
+  const findVelocityTargetAtPointer = (clientX: number, clientY: number): VelocityHitTarget | null => {
+    const lane = velocityLaneRef.current;
+    if (!lane) return null;
+
+    const laneRect = lane.getBoundingClientRect();
+    if (
+      clientX < laneRect.left || clientX >= laneRect.right ||
+      clientY < laneRect.top || clientY > laneRect.bottom
+    ) {
+      return null;
+    }
+
+    const cell = [...lane.querySelectorAll<HTMLElement>('[data-velocity-step]')]
+      .find(element => {
+        const rect = element.getBoundingClientRect();
+        return clientX >= rect.left && clientX < rect.right;
+      });
+    if (!cell) return null;
+
+    const stalks = [...cell.querySelectorAll<HTMLElement>('[data-velocity-note-id]')];
+    if (stalks.length === 0) return null;
+    const stalk = stalks.reduce((nearest, candidate) => {
+      const nearestRect = nearest.getBoundingClientRect();
+      const candidateRect = candidate.getBoundingClientRect();
+      return Math.abs(candidateRect.left + candidateRect.width / 2 - clientX) <
+        Math.abs(nearestRect.left + nearestRect.width / 2 - clientX)
+        ? candidate
+        : nearest;
+    });
+    const noteId = stalk.dataset.velocityNoteId;
+    if (!noteId) return null;
+    return { noteId, cellRect: cell.getBoundingClientRect() };
+  };
+
+  const updateVelocityForPointer = (
+    active: VelocityPointerInteraction,
+    noteId: string,
+    clientY: number,
+    cellRect: DOMRect
+  ) => {
+    if (active.channelId !== channelIdRef.current || cellRect.height <= 0) return;
+
+    const newVelocity = Math.max(0.05, Math.min(1, (cellRect.bottom - clientY) / cellRect.height));
+    const currentNotes = notesRef.current;
+    const currentNote = currentNotes.find(note => note.id === noteId);
+    if (!currentNote || currentNote.velocity === newVelocity) return;
+
+    const newNotes = currentNotes.map(note =>
+      note.id === noteId ? { ...note, velocity: newVelocity } : note
+    );
+    // Publish each live value through the normal project/audio synchronization
+    // path, while the App's existing continuous-history batcher groups this
+    // pointer gesture into exactly one undoable edit.
+    onUpdateChannelRef.current(active.channelId, { notes: newNotes }, { isContinuous: true });
+    notesRef.current = newNotes;
+  };
+
+  const finishVelocityInteraction = () => {
+    const active = velocityInteractionRef.current;
+    if (!active) return;
+
+    // Clear first: release can dispatch lostpointercapture, and cleanup must be
+    // idempotent across pointerup, cancel, blur, capture loss and unmount.
+    velocityInteractionRef.current = null;
+    try {
+      if (active.captureTarget.hasPointerCapture(active.pointerId)) {
+        active.captureTarget.releasePointerCapture(active.pointerId);
+      }
+    } catch {
+      // The lane may already be detached or the browser may have released capture.
+    }
+    onInteractionEndRef.current?.(VELOCITY_HISTORY_LABEL);
+  };
+
+  const updateVelocityInteraction = (event: PointerEvent) => {
+    const active = velocityInteractionRef.current;
+    if (!active || active.pointerId !== event.pointerId) return;
+    if (active.channelId !== channelIdRef.current) {
+      finishVelocityInteraction();
+      return;
+    }
+    // A scroll can move notes under a stationary pointer. Do not retarget on
+    // scroll/capture noise unless the user actually moved the pointer.
+    if (event.clientX === active.lastClientX && event.clientY === active.lastClientY) return;
+
+    active.lastClientX = event.clientX;
+    active.lastClientY = event.clientY;
+    const target = findVelocityTargetAtPointer(event.clientX, event.clientY);
+    if (target) updateVelocityForPointer(active, target.noteId, event.clientY, target.cellRect);
+  };
+
+  const updateVelocityInteractionRef = useRef(updateVelocityInteraction);
+  updateVelocityInteractionRef.current = updateVelocityInteraction;
+  const finishVelocityInteractionRef = useRef(finishVelocityInteraction);
+  finishVelocityInteractionRef.current = finishVelocityInteraction;
+
+  const beginVelocityInteraction = (event: React.PointerEvent<HTMLDivElement>, noteId: string) => {
+    if (event.button !== 0) return;
+    if (velocityInteractionRef.current) {
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+    const lane = velocityLaneRef.current;
+    const target = findVelocityTargetByNoteId(noteId);
+    if (!lane || !target || channel.id !== channelIdRef.current) return;
+
+    const active: VelocityPointerInteraction = {
+      pointerId: event.pointerId,
+      channelId: channel.id,
+      lastClientX: event.clientX,
+      lastClientY: event.clientY,
+      captureTarget: lane
+    };
+    velocityInteractionRef.current = active;
+    try {
+      lane.setPointerCapture(event.pointerId);
+    } catch {
+      // Window listeners remain the safety net when capture is unsupported.
+    }
+    onInteractionStartRef.current?.(VELOCITY_HISTORY_LABEL);
+    updateVelocityForPointer(active, noteId, event.clientY, target.cellRect);
+  };
+
+  useEffect(() => {
+    const handlePointerMove = (event: PointerEvent) => updateVelocityInteractionRef.current(event);
+    const handlePointerUp = (event: PointerEvent) => {
+      const active = velocityInteractionRef.current;
+      if (!active || active.pointerId !== event.pointerId) return;
+      // Usually pointermove already delivered the final coordinates. This covers
+      // a release at a new point without retargeting after a stationary scroll.
+      if (event.clientX !== active.lastClientX || event.clientY !== active.lastClientY) {
+        updateVelocityInteractionRef.current(event);
+      }
+      finishVelocityInteractionRef.current();
+    };
+    const handlePointerCancel = (event: PointerEvent) => {
+      if (velocityInteractionRef.current?.pointerId === event.pointerId) {
+        finishVelocityInteractionRef.current();
+      }
+    };
+    const handleLostPointerCapture = (event: PointerEvent) => {
+      if (velocityInteractionRef.current?.pointerId === event.pointerId) {
+        finishVelocityInteractionRef.current();
+      }
+    };
+    const handleWindowBlur = () => finishVelocityInteractionRef.current();
+
+    window.addEventListener('pointermove', handlePointerMove);
+    window.addEventListener('pointerup', handlePointerUp);
+    window.addEventListener('pointercancel', handlePointerCancel);
+    window.addEventListener('lostpointercapture', handleLostPointerCapture);
+    window.addEventListener('blur', handleWindowBlur);
+    return () => {
+      window.removeEventListener('pointermove', handlePointerMove);
+      window.removeEventListener('pointerup', handlePointerUp);
+      window.removeEventListener('pointercancel', handlePointerCancel);
+      window.removeEventListener('lostpointercapture', handleLostPointerCapture);
+      window.removeEventListener('blur', handleWindowBlur);
+      finishVelocityInteractionRef.current();
+    };
+  }, []);
+
+  // A channel switch or closing the drawer ends the captured interaction before
+  // its note controls disappear, so later pointer events cannot edit a new lane.
+  useEffect(() => {
+    return () => {
+      if (velocityInteractionRef.current?.channelId === channel.id) {
+        finishVelocityInteractionRef.current();
+      }
+    };
+  }, [channel.id, showVelocityDrawer]);
 
   // Other channels' notes for Ghost Channel rendering
   const ghostNotes = showGhostNotes
@@ -1720,12 +1938,17 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
 
           {/* Velocity Stalks Editor Drawer */}
           {showVelocityDrawer && (
-            <div className="h-20 bg-[var(--apex-panel)] border-t border-[var(--apex-border)] min-w-[896px] sticky bottom-0 z-20 flex flex-col">
+            <div className="h-20 shrink-0 bg-[var(--apex-panel)] border-t border-[var(--apex-border)] min-w-[896px] sticky bottom-0 z-20 flex flex-col">
               <div className="px-3 py-1 bg-[var(--apex-panel-header)] border-b border-[var(--apex-border)] flex items-center justify-between text-[9px] text-[var(--apex-text-muted)]">
                 <span className="font-bold uppercase tracking-wider text-[var(--apex-text)]">Note Velocity Stalks (Dynamics)</span>
                 <span>Click & drag stalk heights to adjust loudness</span>
               </div>
-              <div className="flex-1 relative flex">
+              <div
+                ref={velocityLaneRef}
+                data-testid="piano-roll-velocity-lane"
+                style={{ touchAction: 'none' }}
+                className="flex-1 relative flex"
+              >
                 {Array.from({ length: totalSteps }).map((_, stepIdx) => {
                   const deco = stepDecoration(stepIdx);
                   const stepNotes = displayNotes.filter(n => Math.floor(n.start) === stepIdx);
@@ -1734,6 +1957,7 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
                     <div
                       key={`vel-${stepIdx}`}
                       data-step={stepIdx}
+                      data-velocity-step={stepIdx}
                       data-line-strength={deco.strength}
                       className={`w-7 h-full border-r relative flex items-end justify-center pb-1 ${
                         deco.strength === 'none' || (deco.strength === 'pulse' && !gridModel.legacyQuarterDecoration)
@@ -1747,17 +1971,10 @@ export const PianoRoll: React.FC<PianoRollProps> = ({
                         return (
                           <div
                             key={`vel-stalk-${n.id}`}
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              const rect = e.currentTarget.parentElement?.getBoundingClientRect();
-                              if (rect) {
-                                const clickY = e.clientY - rect.top;
-                                const newVel = (rect.height - clickY) / rect.height;
-                                handleVelocityChange(n.id, newVel);
-                              }
-                            }}
+                            data-velocity-note-id={n.id}
+                            onPointerDown={(event) => beginVelocityInteraction(event, n.id)}
                             className="w-2 bg-[var(--apex-accent)] hover:bg-[var(--apex-accent-strong)] rounded-t cursor-ns-resize transition-all relative group"
-                            style={{ height: `${velHeight}%` }}
+                            style={{ height: `${velHeight}%`, touchAction: 'none' }}
                           >
                             <span className="hidden group-hover:block absolute -top-5 left-1/2 -translate-x-1/2 bg-[var(--apex-panel)] border border-[var(--apex-border)] px-1 rounded text-[8px] text-[var(--apex-text)] font-mono z-30">
                               {Math.round((n.velocity || 0.8) * 127)}

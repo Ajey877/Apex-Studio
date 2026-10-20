@@ -172,7 +172,7 @@ describe('Piano Roll residual theme migration (UI-03P)', () => {
       /const handleClearAllNotes/,
       /const handleImportMidi/,
       /const handleExportMidi/,
-      /const handleVelocityChange/,
+      /const beginVelocityInteraction/,
       /midiNoteToName|getNoteName/,
       /channel\.color/
     ]) {

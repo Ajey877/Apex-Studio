@@ -2465,6 +2465,8 @@ export function App() {
               allChannels={projectState.channels}
               onSelectChannel={(id) => setSelectedChannelId(id)}
               onUpdateChannel={handleUpdateChannel}
+              onInteractionStart={handleContinuousInteractionStart}
+              onInteractionEnd={handleContinuousInteractionEnd}
               currentStep={currentStep}
               isPlaying={isPlaying}
               patternLengthSteps={selectedPatternLengthSteps}
