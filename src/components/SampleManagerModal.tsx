@@ -33,7 +33,40 @@ interface SampleManagerModalProps {
   onSampleImported: (sample: CustomSampleData) => void;
   onAssignSampleToChannel: (channelId: string, sample: CustomSampleData) => void;
   onCreateChannelFromSample: (sample: CustomSampleData) => void;
+  /**
+   * Identifies the *document* the open editor belongs to. App bumps it through
+   * `handleLoadProjectState` on every project replacement (load, bundle import,
+   * New Session), so a replaced project always drops a pending draft.
+   */
+  projectGeneration?: number;
 }
+
+/**
+ * Identity-free signature of the sample data this editor displays.
+ *
+ * `ProjectHistory` publishes sanitized snapshots, so undo/redo (and every other
+ * commit routed through the store) re-creates `channel.customSample` with a new
+ * object identity even when the sample is unchanged. Keying the editor reset on
+ * identity discarded a pending library selection and its unsaved trim edits on
+ * an unrelated undo, so the next "Assign to Channel" was built from a mixed
+ * state. Only real content changes may reset the draft.
+ */
+const sampleStateSignature = (sample?: CustomSampleData | null): string => {
+  if (!sample) return 'none';
+  return JSON.stringify([
+    sample.id,
+    sample.name,
+    sample.url ?? null,
+    sample.duration,
+    sample.sampleRate,
+    sample.trimStart ?? null,
+    sample.trimEnd ?? null,
+    sample.rootPitch ?? null,
+    sample.reverse ?? null,
+    sample.normalize ?? null,
+    sample.audioUnavailable ?? null
+  ]);
+};
 
 
 
@@ -45,7 +78,8 @@ export const SampleManagerModal: React.FC<SampleManagerModalProps> = ({
   sampleLibrary,
   onSampleImported,
   onAssignSampleToChannel,
-  onCreateChannelFromSample
+  onCreateChannelFromSample,
+  projectGeneration = 0
 }) => {
   const [currentSample, setCurrentSample] = useState<CustomSampleData | null>(selectedChannel?.customSample || null);
   const [targetChannelId, setTargetChannelId] = useState<string>(selectedChannel?.id || channels[0]?.id || '');
@@ -66,7 +100,20 @@ export const SampleManagerModal: React.FC<SampleManagerModalProps> = ({
     setReverseSample(Boolean(sample?.reverse));
   };
 
+  // Reset identity: the document, whether the editor is open, its target
+  // channel, and the persisted sample content. Re-renders that only re-publish
+  // the same project data (undo/redo of an unrelated edit) keep the draft.
+  const channelSyncKey = [
+    projectGeneration,
+    isOpen ? 'open' : 'closed',
+    selectedChannel?.id ?? '',
+    sampleStateSignature(selectedChannel?.customSample)
+  ].join('|');
+  const lastChannelSyncKeyRef = useRef<string | null>(null);
+
   useEffect(() => {
+    if (lastChannelSyncKeyRef.current === channelSyncKey) return;
+    lastChannelSyncKeyRef.current = channelSyncKey;
     const nextTargetId =
       (selectedChannel?.id && channels.some(ch => ch.id === selectedChannel.id)
         ? selectedChannel.id
@@ -78,7 +125,7 @@ export const SampleManagerModal: React.FC<SampleManagerModalProps> = ({
     applySampleToControls(nextTargetChannel?.customSample || null);
     setHasPendingSampleSelection(false);
     setErrorMessage(null);
-  }, [isOpen, selectedChannel?.id, selectedChannel?.customSample]);
+  }, [channelSyncKey, channels, selectedChannel]);
 
   useEffect(() => {
     if (!channels.some(ch => ch.id === targetChannelId) && (selectedChannel?.id || channels[0]?.id)) {

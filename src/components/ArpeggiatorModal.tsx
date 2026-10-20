@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { ModalFrame } from './ModalFrame';
 import { 
   Sparkles, 
@@ -21,6 +21,13 @@ interface ArpeggiatorModalProps {
   channel: Channel;
   onUpdateChannel: (channel: Channel) => void;
   bpm: number;
+  /**
+   * Identifies the *document* the open editor belongs to. App bumps it through
+   * `handleLoadProjectState` on every project replacement (load, bundle import,
+   * New Session), so a replaced project always drops a draft even when the new
+   * channel happens to carry identical settings.
+   */
+  projectGeneration?: number;
 }
 
 const ARP_MODES = [
@@ -41,43 +48,76 @@ const ARP_RATES = [
   { id: '1/16t', label: '1/16 Triplet' }
 ];
 
+const DEFAULT_ARP_SETTINGS: ArpSettings = {
+  enabled: false,
+  mode: 'up',
+  rate: '1/16',
+  octaves: 2,
+  gate: 0.85,
+  swing: 0,
+  strumMs: 15,
+  euclideanSteps: 16,
+  euclideanHits: 5,
+  euclideanRotate: 0
+};
+
+const normalizeArpSettings = (arp?: ArpSettings | null): ArpSettings => ({
+  ...DEFAULT_ARP_SETTINGS,
+  ...(arp || {})
+});
+
+/**
+ * Identity-free signature of everything this editor reads from the project.
+ *
+ * `ProjectHistory` publishes sanitized snapshots, so undo/redo (and any other
+ * commit routed through the store) re-creates `channel.arp` with a new object
+ * identity even when the settings are unchanged. Keying the draft reset on
+ * identity therefore discarded unsaved arp edits on an unrelated undo. The
+ * settings themselves, not the reference, decide whether the editor is out of
+ * date.
+ */
+const arpSettingsSignature = (arp?: ArpSettings | null): string => {
+  const settings = normalizeArpSettings(arp);
+  return JSON.stringify([
+    settings.enabled,
+    settings.mode,
+    settings.rate,
+    settings.octaves,
+    settings.gate,
+    settings.swing,
+    settings.strumMs,
+    settings.euclideanSteps ?? null,
+    settings.euclideanHits ?? null,
+    settings.euclideanRotate ?? null
+  ]);
+};
+
 export const ArpeggiatorModal: React.FC<ArpeggiatorModalProps> = ({
   isOpen,
   onClose,
   channel,
   onUpdateChannel,
-  bpm
+  bpm,
+  projectGeneration = 0
 }) => {
-  const currentArp: ArpSettings = channel.arp || {
-    enabled: false,
-    mode: 'up',
-    rate: '1/16',
-    octaves: 2,
-    gate: 0.85,
-    swing: 0,
-    strumMs: 15,
-    euclideanSteps: 16,
-    euclideanHits: 5,
-    euclideanRotate: 0
-  };
+  const [arpState, setArpState] = useState<ArpSettings>(() => normalizeArpSettings(channel.arp));
 
-  const [arpState, setArpState] = useState<ArpSettings>(currentArp);
+  // Draft reset identity: the document, whether the editor is open, its target
+  // channel, and the persisted settings. Re-renders that merely re-publish the
+  // same project data keep the user's in-progress edits.
+  const syncKey = [
+    projectGeneration,
+    isOpen ? 'open' : 'closed',
+    channel.id,
+    arpSettingsSignature(channel.arp)
+  ].join('|');
+  const lastSyncKeyRef = useRef<string | null>(null);
 
   useEffect(() => {
-    setArpState({
-      enabled: false,
-      mode: 'up',
-      rate: '1/16',
-      octaves: 2,
-      gate: 0.85,
-      swing: 0,
-      strumMs: 15,
-      euclideanSteps: 16,
-      euclideanHits: 5,
-      euclideanRotate: 0,
-      ...(channel.arp || {})
-    });
-  }, [isOpen, channel.id, channel.arp]);
+    if (lastSyncKeyRef.current === syncKey) return;
+    lastSyncKeyRef.current = syncKey;
+    setArpState(normalizeArpSettings(channel.arp));
+  }, [syncKey, channel.arp]);
 
   if (!isOpen) return null;
 
