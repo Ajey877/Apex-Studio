@@ -10,6 +10,7 @@ import { MasterMacroRackModal } from '../components/MasterMacroRackModal';
 import { DEFAULT_PROJECT } from '../audio/presets';
 import { audioEngine } from '../audio/audioEngine';
 import { renderSamplerVoice } from '../audio/instruments/sampler';
+import { findSampleZone } from '../audio/sampleZones';
 import { createHistory } from './projectHistory';
 import { updateChannelInProjectState, updateMacroRackInProjectState } from './projectMutations';
 import { normalizeProjectState } from './projectState';
@@ -280,6 +281,307 @@ describe('F-1 + F-2: MultiZoneSamplerModal & sampler resolution/history synchron
 
     history = history.redo();
     assert.equal(history.present.channels[0].volume, 0.5, 'Redo must restore the undone volume edit');
+  });
+
+  it('does not turn the untouched auto-seeded default zone into authored project data, so Add Zone Split stays audible and customSample reassignment still takes effect', async () => {
+    const sampleA = makeSample('seed-a', { rootPitch: 60 });
+    const sampleB = makeSample('seed-b', { rootPitch: 60 });
+    const bufferA = { duration: 2, sampleTag: 'a' } as unknown as AudioBuffer;
+    const bufferB = { duration: 2, sampleTag: 'b' } as unknown as AudioBuffer;
+    const notes: Note[] = [
+      { id: 'note-in-split', pitch: 65, start: 0, duration: 1, velocity: 1 },
+      { id: 'note-outside-split', pitch: 30, start: 4, duration: 1, velocity: 1 },
+    ];
+    let project: ProjectState = {
+      ...structuredClone(DEFAULT_PROJECT),
+      sampleLibrary: [sampleA, sampleB],
+      channels: DEFAULT_PROJECT.channels.map((ch, idx) =>
+        idx === 0
+          ? { ...structuredClone(ch), id: 'ch-kick', instrumentType: 'sampler', customSample: sampleA, sampleZones: [], notes }
+          : structuredClone(ch)
+      ),
+    };
+    let history = createHistory(project);
+
+    const handleUpdateChannel = (channelId: string, updates: Partial<Channel>) => {
+      project = updateChannelInProjectState(history.present, channelId, updates);
+      history = history.commit(project, 'Update channel');
+    };
+
+    const harness = createComponentHarness(MultiZoneSamplerModal, {
+      isOpen: true,
+      onClose: () => {},
+      channels: history.present.channels,
+      selectedChannelId: 'ch-kick',
+      sampleLibrary: history.present.sampleLibrary,
+      onUpdateChannel: handleUpdateChannel,
+    });
+
+    const addZoneButton = collectElements(harness.tree).find(
+      el => el.type === 'button' && el.text.includes('Add Zone Split')
+    );
+    assert.ok(addZoneButton, 'Add Zone Split must be available for a sampler channel');
+    addZoneButton.props.onClick();
+    harness.rerender({ channels: history.present.channels });
+
+    const splitChannel = history.present.channels.find(ch => ch.id === 'ch-kick')!;
+    const splitZones = splitChannel.sampleZones || [];
+    assert.equal(
+      splitZones.length,
+      1,
+      'the untouched auto-seeded default zone is a view of customSample and must not be persisted as authored zone data'
+    );
+    assert.notEqual(splitZones[0].id, 'zone-ch-kick', 'the added zone must be a real authored split');
+    assert.equal(splitZones[0].userAuthored, true);
+    assert.equal(splitZones[0].sampleId, sampleA.id);
+    assert.equal(splitZones[0].lowNote, 60);
+    assert.equal(splitZones[0].highNote, 72);
+    assert.equal(
+      findSampleZone(splitZones, notes[0])?.id,
+      splitZones[0].id,
+      'the new split must resolve for its own key range'
+    );
+
+    const renderAt = (channel: Channel, pitch: number): AudioBuffer | null => {
+      let captured: AudioBuffer | null = null;
+      const ctx = {
+        currentTime: 0,
+        createBufferSource: () => ({
+          get buffer() { return captured; },
+          set buffer(value: AudioBuffer | null) { captured = value; },
+          playbackRate: { setValueAtTime: () => {} },
+          loop: false,
+          loopStart: 0,
+          loopEnd: 0,
+          onended: null,
+          connect: () => {},
+          start: () => {},
+          stop: () => {},
+        }),
+        createGain: () => ({
+          gain: { value: 1, setValueAtTime: () => {}, cancelScheduledValues: () => {}, exponentialRampToValueAtTime: () => {} },
+          connect: () => {},
+        }),
+        createBiquadFilter: () => ({
+          type: 'lowpass',
+          frequency: { setValueAtTime: () => {} },
+          Q: { value: 1 },
+          connect: () => {},
+        }),
+      };
+      renderSamplerVoice({
+        channel,
+        note: { id: `render-${pitch}`, pitch, start: 0, duration: 1, velocity: 0.8 },
+        time: 0,
+        destination: {} as AudioNode,
+        audioContext: ctx as any,
+        voiceId: `render-${pitch}`,
+        bpm: 120,
+        getSampleBuffer: (id) => (id === sampleA.id ? bufferA : id === sampleB.id ? bufferB : undefined),
+      });
+      return captured;
+    };
+
+    assert.equal(renderAt(splitChannel, 65), bufferA, 'the split range must play its zone sample');
+    assert.equal(renderAt(splitChannel, 30), bufferA, 'keys outside the split must keep the channel sample');
+
+    // SampleManager assigns another sample through the same project-state boundary.
+    const reassigned = updateChannelInProjectState(history.present, 'ch-kick', { customSample: sampleB });
+    history = history.commit(reassigned, 'Assign sample');
+    const reassignedChannel = history.present.channels.find(ch => ch.id === 'ch-kick')!;
+    assert.equal(reassignedChannel.customSample?.id, sampleB.id);
+    assert.deepEqual(reassignedChannel.sampleZones, splitZones, 'the authored split must survive the reassignment');
+    assert.equal(renderAt(reassignedChannel, 65), bufferA, 'the authored split must keep playing its own sample');
+    assert.equal(renderAt(reassignedChannel, 30), bufferB, 'customSample reassignment must take effect outside the split');
+    assert.equal(renderAt(reassignedChannel, 90), bufferB);
+
+    // Undo/Redo publish the same document to playback.
+    const undone = history.undo();
+    const undoneChannel = undone.present.channels.find(ch => ch.id === 'ch-kick')!;
+    assert.equal(undoneChannel.customSample?.id, sampleA.id);
+    assert.deepEqual(undoneChannel.sampleZones, splitZones);
+    const redone = undone.redo();
+    assert.equal(redone.present.channels.find(ch => ch.id === 'ch-kick')!.customSample?.id, sampleB.id);
+
+    // Offline export must resolve the same key map as live playback.
+    const offlineBuffers: AudioBuffer[] = [];
+    const prevOfflineCtx = (globalThis as any).OfflineAudioContext;
+    const engine = audioEngine as any;
+    const prevSampleBuffers = engine.sampleBuffers;
+    class CapturingOfflineContext {
+      currentTime = 0;
+      sampleRate = 44100;
+      length = 44100;
+      numberOfChannels = 2;
+      destination = { connect: () => {} };
+      createGain() { return { gain: { value: 1, setValueAtTime: () => {}, setTargetAtTime: () => {}, linearRampToValueAtTime: () => {}, exponentialRampToValueAtTime: () => {}, cancelScheduledValues: () => {} }, connect: () => {}, disconnect: () => {} }; }
+      createStereoPanner() { return { pan: { value: 0, setValueAtTime: () => {}, setTargetAtTime: () => {} }, connect: () => {}, disconnect: () => {} }; }
+      createBiquadFilter() { return { type: 'lowpass', frequency: { value: 18000, setValueAtTime: () => {}, setTargetAtTime: () => {}, exponentialRampToValueAtTime: () => {} }, Q: { value: 1, setValueAtTime: () => {} }, gain: { value: 0, setValueAtTime: () => {} }, connect: () => {}, disconnect: () => {} }; }
+      createDynamicsCompressor() { return { threshold: { value: -24, setValueAtTime: () => {} }, knee: { value: 30, setValueAtTime: () => {} }, ratio: { value: 12, setValueAtTime: () => {} }, attack: { value: 0.003, setValueAtTime: () => {} }, release: { value: 0.25, setValueAtTime: () => {} }, reduction: 0, connect: () => {}, disconnect: () => {} }; }
+      createWaveShaper() { return { curve: null, oversample: 'none', connect: () => {}, disconnect: () => {} }; }
+      createDelay() { return { delayTime: { value: 0, setValueAtTime: () => {} }, connect: () => {}, disconnect: () => {} }; }
+      createConvolver() { return { buffer: null, normalize: true, connect: () => {}, disconnect: () => {} }; }
+      createAnalyser() { return { fftSize: 256, smoothingTimeConstant: 0.7, connect: () => {}, disconnect: () => {}, getFloatTimeDomainData: (arr: Float32Array) => arr.fill(0), getByteFrequencyData: (arr: Uint8Array) => arr.fill(0), getByteTimeDomainData: (arr: Uint8Array) => arr.fill(128) }; }
+      createConstantSource() { return { offset: { value: 0, setValueAtTime: () => {}, linearRampToValueAtTime: () => {} }, connect: () => {}, disconnect: () => {}, start: () => {}, stop: () => {} }; }
+      createOscillator() { return { type: 'sine', frequency: { value: 440, setValueAtTime: () => {} }, detune: { value: 0, setValueAtTime: () => {} }, connect: () => {}, disconnect: () => {}, start: () => {}, stop: () => {} }; }
+      createBufferSource() {
+        return {
+          get buffer() { return null; },
+          set buffer(value: AudioBuffer | null) { if (value) offlineBuffers.push(value); },
+          loop: false,
+          loopStart: 0,
+          loopEnd: 0,
+          onended: null,
+          playbackRate: { value: 1, setValueAtTime: () => {} },
+          connect: () => {},
+          disconnect: () => {},
+          start: () => {},
+          stop: () => {},
+        };
+      }
+      createBuffer(channels: number, length: number, sampleRate: number) {
+        return {
+          numberOfChannels: channels,
+          length,
+          sampleRate,
+          duration: length / sampleRate,
+          getChannelData: () => new Float32Array(length),
+          copyFromChannel: () => {},
+          copyToChannel: () => {},
+        } as unknown as AudioBuffer;
+      }
+      async startRendering() {
+        return this.createBuffer(2, this.length, this.sampleRate);
+      }
+    }
+    try {
+      (globalThis as any).OfflineAudioContext = CapturingOfflineContext;
+      engine.sampleBuffers = new Map<string, AudioBuffer>([[sampleA.id, bufferA], [sampleB.id, bufferB]]);
+      await audioEngine.renderTimelineOffline(
+        [reassignedChannel],
+        [],
+        DEFAULT_PROJECT.mixerTracks,
+        120,
+        1,
+        44100,
+        false,
+        'pattern'
+      );
+    } finally {
+      engine.sampleBuffers = prevSampleBuffers;
+      (globalThis as any).OfflineAudioContext = prevOfflineCtx;
+    }
+    assert.ok(offlineBuffers.includes(bufferA), 'offline export must use the split zone sample');
+    assert.ok(offlineBuffers.includes(bufferB), 'offline export must use the reassigned customSample outside the split');
+  });
+
+  it('persists an edited seed zone as authored data and lets the last authored zone be deleted back to customSample', () => {
+    const sampleA = makeSample('seed-edit-a', { rootPitch: 60 });
+    const sampleB = makeSample('seed-edit-b', { rootPitch: 60 });
+    const bufferA = { duration: 2, sampleTag: 'edit-a' } as unknown as AudioBuffer;
+    const bufferB = { duration: 2, sampleTag: 'edit-b' } as unknown as AudioBuffer;
+    let project: ProjectState = {
+      ...structuredClone(DEFAULT_PROJECT),
+      sampleLibrary: [sampleA, sampleB],
+      channels: DEFAULT_PROJECT.channels.map((ch, idx) =>
+        idx === 0
+          ? { ...structuredClone(ch), id: 'ch-kick', instrumentType: 'sampler', customSample: sampleA, sampleZones: [] }
+          : structuredClone(ch)
+      ),
+    };
+    let history = createHistory(project);
+    const handleUpdateChannel = (channelId: string, updates: Partial<Channel>) => {
+      project = updateChannelInProjectState(history.present, channelId, updates);
+      history = history.commit(project, 'Update channel');
+    };
+    const harness = createComponentHarness(MultiZoneSamplerModal, {
+      isOpen: true,
+      onClose: () => {},
+      channels: history.present.channels,
+      selectedChannelId: 'ch-kick',
+      sampleLibrary: history.present.sampleLibrary,
+      onUpdateChannel: handleUpdateChannel,
+    });
+
+    // Editing the seed makes it real authored data (rootNote 48, still full range).
+    let rangeSliders = collectElements(harness.tree).filter(el => el.type === 'input' && el.props.type === 'range');
+    assert.equal(rangeSliders.length, 3);
+    rangeSliders[2].props.onChange({ target: { value: '48' } });
+    harness.rerender({ channels: history.present.channels });
+
+    let channel = history.present.channels.find(ch => ch.id === 'ch-kick')!;
+    assert.equal(channel.sampleZones?.length, 1);
+    assert.equal(channel.sampleZones?.[0].userAuthored, true, 'an edited seed must be published as authored data');
+    assert.equal(channel.sampleZones?.[0].rootNote, 48);
+    assert.equal(channel.sampleZones?.[0].lowNote, 0);
+    assert.equal(channel.sampleZones?.[0].highNote, 127);
+
+    // A later customSample assignment must not discard the authored edit.
+    project = updateChannelInProjectState(history.present, 'ch-kick', { customSample: sampleB });
+    history = history.commit(project, 'Assign sample');
+    harness.rerender({ channels: history.present.channels });
+    channel = history.present.channels.find(ch => ch.id === 'ch-kick')!;
+    assert.equal(channel.customSample?.id, sampleB.id);
+    assert.equal(channel.sampleZones?.length, 1);
+    assert.equal(channel.sampleZones?.[0].sampleId, sampleA.id);
+    assert.equal(channel.sampleZones?.[0].rootNote, 48);
+
+    // Deleting the last authored zone returns the channel to its body sample.
+    const deleteButton = collectElements(harness.tree).find(
+      el => el.type === 'button' && typeof el.props['aria-label'] === 'string' && el.props['aria-label'].startsWith('Delete zone ')
+    );
+    assert.ok(deleteButton, 'the authored zone must be deletable');
+    deleteButton.props.onClick();
+    harness.rerender({ channels: history.present.channels });
+
+    channel = history.present.channels.find(ch => ch.id === 'ch-kick')!;
+    assert.deepEqual(channel.sampleZones, [], 'deleting the last authored zone must clear the key map');
+    assert.equal(channel.customSample?.id, sampleB.id, 'deleting a zone must not discard the assigned sample');
+
+    let captured: AudioBuffer | null = null;
+    const ctx = {
+      currentTime: 0,
+      createBufferSource: () => ({
+        get buffer() { return captured; },
+        set buffer(value: AudioBuffer | null) { captured = value; },
+        playbackRate: { setValueAtTime: () => {} },
+        loop: false,
+        loopStart: 0,
+        loopEnd: 0,
+        onended: null,
+        connect: () => {},
+        start: () => {},
+        stop: () => {},
+      }),
+      createGain: () => ({
+        gain: { value: 1, setValueAtTime: () => {}, cancelScheduledValues: () => {}, exponentialRampToValueAtTime: () => {} },
+        connect: () => {},
+      }),
+      createBiquadFilter: () => ({
+        type: 'lowpass',
+        frequency: { setValueAtTime: () => {} },
+        Q: { value: 1 },
+        connect: () => {},
+      }),
+    };
+    renderSamplerVoice({
+      channel,
+      note: { id: 'after-delete', pitch: 60, start: 0, duration: 1, velocity: 0.8 },
+      time: 0,
+      destination: {} as AudioNode,
+      audioContext: ctx as any,
+      voiceId: 'after-delete',
+      bpm: 120,
+      getSampleBuffer: (id) => (id === sampleA.id ? bufferA : id === sampleB.id ? bufferB : undefined),
+    });
+    assert.equal(captured, bufferB, 'after the key map is cleared the channel body sample must play again');
+
+    const undone = history.undo();
+    assert.equal(
+      undone.present.channels.find(ch => ch.id === 'ch-kick')!.sampleZones?.[0].sampleId,
+      sampleA.id,
+      'undo must restore the deleted authored zone'
+    );
   });
 
   it('replacing customSample and editing trim/rootPitch/reverse affects played and offline-exported audio while preserving explicit multi-zone splits', async () => {

@@ -58,6 +58,63 @@ function midiToNoteName(midi: number): string {
   return `${name}${octave}`;
 }
 
+/**
+ * The editable view of a channel that carries a `customSample` but no authored
+ * key map. This zone is *not* project data: it is the full-range projection of
+ * the channel's sample, and playback resolves that sample from `customSample`
+ * directly (`isImplicitDefaultSingleZone` / `updateChannelInProjectState`).
+ */
+const buildSeedZone = (channel: Channel): KeyZone | null => {
+  const sample = channel.customSample;
+  if (!sample?.id) return null;
+  return {
+    id: 'zone-' + channel.id,
+    name: sample.name || 'Sample Zone',
+    lowNote: 0,
+    highNote: 127,
+    rootNote: sample.rootPitch ?? 60,
+    lowVelocity: 0,
+    highVelocity: 127,
+    sampleId: sample.id,
+    tuneSemitones: 0,
+    trimStart: sample.trimStart,
+    trimEnd: sample.trimEnd,
+    reverse: sample.reverse,
+    loop: channel.synthParams.sampleLoop,
+    color: ZONE_IDENTITY_COLORS[0],
+  };
+};
+
+/**
+ * True when the zone is still the untouched seed above.
+ *
+ * Persisting that seed as `userAuthored` would turn a view of `customSample`
+ * into an explicit full-range mapping: it shadows every zone added after it
+ * (`findSampleZone` is first-match) and it survives later sample assignment
+ * (the mutation boundary only clears a *single* implicit zone), so the
+ * channel would keep playing the old sample no matter what the user selects.
+ * Zone names/colours are deliberately ignored: they are UI decoration and are
+ * stripped before publication.
+ */
+const isUntouchedImplicitSeedZone = (zone: KeyZone, channel: Channel | undefined): boolean => {
+  const sample = channel?.customSample;
+  if (!channel || !sample?.id) return false;
+  if (zone.userAuthored) return false;
+  if (zone.id !== `zone-${channel.id}` || zone.sampleId !== sample.id) return false;
+  return (
+    zone.lowNote === 0 &&
+    zone.highNote === 127 &&
+    (zone.lowVelocity ?? 0) === 0 &&
+    (zone.highVelocity ?? 127) === 127 &&
+    (zone.tuneSemitones ?? 0) === 0 &&
+    zone.rootNote === (sample.rootPitch ?? 60) &&
+    (zone.trimStart ?? 0) === (sample.trimStart ?? 0) &&
+    (zone.trimEnd ?? 1) === (sample.trimEnd ?? 1) &&
+    Boolean(zone.reverse) === Boolean(sample.reverse) &&
+    Boolean(zone.loop) === Boolean(channel.synthParams?.sampleLoop)
+  );
+};
+
 export const MultiZoneSamplerModal: React.FC<MultiZoneSamplerModalProps> = ({
   isOpen,
   onClose,
@@ -82,11 +139,23 @@ export const MultiZoneSamplerModal: React.FC<MultiZoneSamplerModalProps> = ({
   const stripZoneDecoration = (zone: KeyZone): SampleZone => ((({ name, color, ...z }) => z)(zone));
 
   const commitZones = (rawUpdated: KeyZone[]) => {
-    const updated = rawUpdated.map(zone => ({ ...zone, userAuthored: true }));
+    if (!selectedChannel) return;
+    // Only zones the user actually authored are project data. The untouched
+    // seed stays a local view of `customSample`, so adding a split (or any
+    // other zone edit) cannot pin the current sample into the key map.
+    const updated = rawUpdated.map(zone =>
+      isUntouchedImplicitSeedZone(zone, selectedChannel) ? zone : { ...zone, userAuthored: true }
+    );
     setZones(updated);
-    if (selectedChannel && updated.every(zone => Boolean(stripZoneDecoration(zone).id))) {
-      onUpdateChannel(selectedChannel.id, { sampleZones: updated.map(({ name, color, ...zone }) => zone) });
+    const persisted = updated.filter(zone => !isUntouchedImplicitSeedZone(zone, selectedChannel));
+    const hadPersistedZones = (selectedChannel.sampleZones?.length ?? 0) > 0;
+    // Nothing to publish when the channel has no authored zones and never had
+    // any: writing `sampleZones: []` would be a no-op history-wise, but keeping
+    // the mutation boundary quiet matches the "no automatic edits" contract.
+    if ((persisted.length === 0 && !hadPersistedZones) || !persisted.every(zone => Boolean(stripZoneDecoration(zone).id))) {
+      return;
     }
+    onUpdateChannel(selectedChannel.id, { sampleZones: persisted.map(({ name, color, ...zone }) => zone) });
   };
 
   useEffect(() => {
@@ -100,15 +169,7 @@ export const MultiZoneSamplerModal: React.FC<MultiZoneSamplerModalProps> = ({
       setZones(hydrated);
       setSelectedZoneId(persisted[0].id);
     } else if (selectedChannel.customSample?.id) {
-      const zone: KeyZone = {
-        id: 'zone-' + selectedChannel.id,
-        name: selectedChannel.customSample.name || 'Sample Zone',
-        lowNote: 0, highNote: 127, rootNote: selectedChannel.customSample.rootPitch ?? 60,
-        lowVelocity: 0, highVelocity: 127, sampleId: selectedChannel.customSample.id, tuneSemitones: 0,
-        trimStart: selectedChannel.customSample.trimStart, trimEnd: selectedChannel.customSample.trimEnd,
-        reverse: selectedChannel.customSample.reverse, loop: selectedChannel.synthParams.sampleLoop,
-        color: ZONE_IDENTITY_COLORS[0]
-      };
+      const zone = buildSeedZone(selectedChannel)!;
       setZones([zone]);
       setSelectedZoneId(zone.id);
     } else {
@@ -155,10 +216,22 @@ export const MultiZoneSamplerModal: React.FC<MultiZoneSamplerModalProps> = ({
   };
 
   const handleDeleteZone = (id: string) => {
-    if (zones.length <= 1) return;
-    commitZones(zones.filter(z => z.id !== id));
+    const remaining = zones.filter(z => z.id !== id);
+    // The untouched seed is a view of `customSample`, so it cannot be removed.
+    // An authored zone can be: deleting the last one returns the channel to its
+    // body sample. A channel with no `customSample` keeps the Phase 1M rule
+    // that the last zone is not deletable — there would be nothing left to play.
+    const canFallBackToCustomSample = Boolean(selectedChannel?.customSample?.id);
+    if (
+      remaining.length === 0 &&
+      (!canFallBackToCustomSample ||
+        zones.every(zone => Boolean(selectedChannel && isUntouchedImplicitSeedZone(zone, selectedChannel))))
+    ) {
+      return;
+    }
+    commitZones(remaining);
     if (selectedZoneId === id) {
-      setSelectedZoneId(zones[0].id);
+      setSelectedZoneId(remaining[0]?.id || '');
     }
   };
 
