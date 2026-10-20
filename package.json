@@ -18,7 +18,7 @@
     "package:win:dir": "vite build && electron-builder --win --x64 --dir --publish never",
     "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true}); require('fs').rmSync('server.js',{force:true})\"",
     "lint": "tsc --noEmit",
-    "test:pianoroll": "tsx --test src/components/pianoRollOperations.test.ts src/components/phase66.pianoRollMidiTempo.test.ts src/components/phase66.multiTrackMidiImport.test.ts",
+    "test:pianoroll": "tsx --test src/components/pianoRollOperations.test.ts src/components/pianoRollVelocityInteraction.test.ts src/components/phase66.pianoRollMidiTempo.test.ts src/components/phase66.multiTrackMidiImport.test.ts",
     "test:playlist-geometry": "node --test tests/playlistGeometry.test.mjs",
     "test:timing": "tsx --test src/music/*.test.ts",
     "test:audio": "node scripts/verify-test-discovery.mjs && tsx --test src/music/*.test.ts src/audio/*.test.ts src/audio/automation/*.test.ts src/audio/effects/*.test.ts src/audio/instruments/*.test.ts src/state/patternLength.test.ts src/state/macroMappings.test.ts src/state/projectPersistence.test.ts src/state/projectRecovery.test.ts src/state/samplePackPersistence.test.ts src/state/playlistAudioPublication.test.ts src/state/phase66.postRenderResync.test.ts src/state/playlistClipIntegrity.test.ts src/state/playlistClipIntegrityPhase49.test.ts src/phase4Lifecycle.test.ts src/utils/*.test.ts src/components/phase66.pianoRollMidiTempo.test.ts src/components/phase66.multiTrackMidiImport.test.ts",
