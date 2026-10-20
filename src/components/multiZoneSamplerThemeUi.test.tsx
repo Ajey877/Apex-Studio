@@ -210,7 +210,7 @@ describe('Multi-Zone Sampler theme markup (UI-03M)', () => {
     assert.match(code, /color: ZONE_IDENTITY_COLORS\[0\]/, 'the derived single zone takes the first hue');
     assert.match(code, /color: ZONE_IDENTITY_COLORS\[3\]/, 'a new zone takes the fourth hue');
     // The palette is decoration: it is stripped before anything is published.
-    assert.match(code, /onUpdateChannel\(selectedChannel\.id, \{ sampleZones: updated\.map\(\(\{ name, color, \.\.\.zone \}\) => zone\) \}\)/,
+    assert.match(code, /onUpdateChannel\(selectedChannel\.id, \{ sampleZones: persisted\.map\(\(\{ name, color, \.\.\.zone \}\) => zone\) \}\)/,
       'publishing strips the local name and colour');
     assert.match(code, /\(\(\(\{ name, color, \.\.\.z \}\) => z\)\(zone\)\)/,
       'the derived-zone publish also strips the local name and colour');
@@ -255,12 +255,16 @@ describe('Multi-Zone Sampler theme markup (UI-03M)', () => {
       'hydration reads the persisted zones first');
     assert.match(code, /\} else if \(selectedChannel\.customSample\?\.id\) \{/,
       'a channel sample with no zones still derives one full-range zone');
-    assert.match(code, /rootNote: selectedChannel\.customSample\.rootPitch \?\? 60/,
+    assert.match(code, /rootNote: sample\.rootPitch \?\? 60/,
       'the derived zone keeps the stored root pitch');
     assert.match(code, /onUpdateChannel\(selectedChannel\.id, \{ sampleZones:/,
       'every zone edit publishes through onUpdateChannel');
-    assert.match(code, /if \(zones\.length <= 1\) return;/,
-      'the last zone cannot be deleted');
+    assert.match(code, /const remaining = zones\.filter\(z => z\.id !== id\);/,
+      'deleting a zone derives the surviving zone list');
+    assert.match(code, /zones\.every\(zone => Boolean\(selectedChannel && isUntouchedImplicitSeedZone\(zone, selectedChannel\)\)\)/,
+      'only the untouched implicit seed is protected from deletion');
+    assert.match(code, /const canFallBackToCustomSample = Boolean\(selectedChannel\?\.customSample\?\.id\);/,
+      'a channel with no body sample keeps its last zone');
     assert.match(code, /audioEngine\.playNote\(targetChannel, \{ id: `zone-aud-\$\{Date\.now\(\)\}`, pitch: zone\.rootNote, start: 0, duration: 2, velocity: 0\.9 \}\);/,
       'audition still plays the zone root through the real engine');
     assert.match(code, /lowNote: Number\(e\.target\.value\)/, 'the low-key slider still writes lowNote');
