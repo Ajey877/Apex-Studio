@@ -334,6 +334,7 @@ test('real-time AudioContext capture versus production offline export', async ({
     outputs.push(await captureAndExport('delay-B-feedback-0.6+master-bypass', delayB, stateBypass));
     outputs.push(await captureAndExport('audio-clip+master-bypass', undefined, stateBypass, 'master', audioClipProject));
     outputs.push(await captureAndExport('dry+mastering', undefined, mastered));
+    outputs.push(await captureAndExport('dry+default-mastering', undefined, masteringDefaults));
     outputs.push(await captureAndExport('dry+mastering-repeat', undefined, mastered));
     for (const silenceMs of [30, 100]) {
       const offsetSteps = (silenceMs / 1000) / (60 / bpm / 4);
@@ -398,9 +399,11 @@ test('real-time AudioContext capture versus production offline export', async ({
   // Confirm the tested FX/mastering settings change live output rather than
   // allowing two silent or identical branches to satisfy parity checks.
   const byName = Object.fromEntries(results.scenarios.map(result => [result.name, result]));
-  const masteringFirstEvent = byName['dry+mastering'].eventWindows[0];
-  const masteringFirstEventLevelDifferenceDb = 20 * Math.log10(masteringFirstEvent.liveRms / masteringFirstEvent.exportRms);
-  expect(Math.abs(masteringFirstEventLevelDifferenceDb), 'first mastered event level must match after event-local alignment').toBeLessThanOrEqual(0.25);
+  for (const name of ['dry+mastering', 'dry+default-mastering']) {
+    const masteringFirstEvent = byName[name].eventWindows[0];
+    const masteringFirstEventLevelDifferenceDb = 20 * Math.log10(masteringFirstEvent.liveRms / masteringFirstEvent.exportRms);
+    expect(Math.abs(masteringFirstEventLevelDifferenceDb), `${name}: first mastered event level must match after event-local alignment`).toBeLessThanOrEqual(0.25);
+  }
   expect(Math.abs(byName['delay-A+master-bypass'].liveRms - byName['delay-disabled+master-bypass'].liveRms)).toBeGreaterThan(1e-3);
   expect(Math.abs(byName['delay-B-feedback-0.6+master-bypass'].liveRms - byName['delay-A+master-bypass'].liveRms)).toBeGreaterThan(1e-3);
   expect(Math.abs(byName['dry+mastering'].liveRms - byName['dry+master-bypass'].liveRms)).toBeGreaterThan(1e-3);
