@@ -139,7 +139,10 @@ export const MultiZoneSamplerModal: React.FC<MultiZoneSamplerModalProps> = ({
   const stripZoneDecoration = (zone: KeyZone): SampleZone => ((({ name, color, ...z }) => z)(zone));
 
   const commitZones = (rawUpdated: KeyZone[]) => {
-    if (!selectedChannel) return;
+    // The only writer to project state is an explicit edit in the open modal.
+    // Hydration below is local-state only; this guard keeps that invariant if a
+    // future effect or handler ever calls into `commitZones` while closed.
+    if (!isOpen || !selectedChannel) return;
     // Only zones the user actually authored are project data. The untouched
     // seed stays a local view of `customSample`, so adding a split (or any
     // other zone edit) cannot pin the current sample into the key map.

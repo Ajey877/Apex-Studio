@@ -16,7 +16,7 @@ import { updateChannelInProjectState, updateMacroRackInProjectState } from './pr
 import { normalizeProjectState } from './projectState';
 import { hydrateProjectAudio } from './projectPersistence';
 import { resolveMacroRack } from './macroMappings';
-import type { Channel, CustomSampleData, DrumPad, MasterMacroKnob, Note, ProjectState } from '../types/daw';
+import type { Channel, CustomSampleData, DrumPad, MasterMacroKnob, Note, ProjectState, SampleZone } from '../types/daw';
 
 /**
  * Lightweight stateful React 19 hook harness for Node tests.
@@ -2307,5 +2307,550 @@ describe('F-1 + F-2: MasterMacroRackModal hydration, Undo/Redo & valid default t
     );
     assert.equal(unknownResolution.parameters.length, 0);
     assert.equal(unknownResolution.unresolved.length, 1);
+  });
+});
+
+/**
+ * F-3 — a generated seed zone must not outlive the sample it projects.
+ *
+ * `MultiZoneSamplerModal` derives a full-range view of `customSample` as local
+ * UI state (PR #256). Builds up to v1.2.2, however, persisted that view once
+ * any zone was edited, and stamped it `userAuthored: true`. The mutation
+ * boundary only dropped a *single* unflagged implicit zone, so an upgraded
+ * project kept a 0-127 zone for the old sample at the head of `sampleZones`.
+ * `findSampleZone` is first-match, so assigning a new sample left every key
+ * playing the old one while the channel displayed the new one.
+ *
+ * These tests drive the real assignment boundary (the same call App.tsx makes
+ * from SampleManagerModal) and assert the rendered/live/exported result, not
+ * only the stored shape.
+ */
+describe('F-3: sample assignment clears stale generated sampler seed zones (F)', () => {
+  const renderSampleId = (
+    channel: Channel,
+    pitch: number,
+    buffers: Record<string, AudioBuffer>,
+  ): string | undefined => {
+    let captured: AudioBuffer | null = null;
+    const ctx = {
+      currentTime: 0,
+      createBufferSource: () => ({
+        get buffer() { return captured; },
+        set buffer(value: AudioBuffer | null) { captured = value; },
+        playbackRate: { setValueAtTime: () => {} },
+        loop: false,
+        loopStart: 0,
+        loopEnd: 0,
+        onended: null,
+        connect: () => {},
+        start: () => {},
+        stop: () => {},
+      }),
+      createGain: () => ({
+        gain: { value: 1, setValueAtTime: () => {}, cancelScheduledValues: () => {}, exponentialRampToValueAtTime: () => {} },
+        connect: () => {},
+      }),
+      createBiquadFilter: () => ({
+        type: 'lowpass',
+        frequency: { setValueAtTime: () => {} },
+        Q: { value: 1 },
+        connect: () => {},
+      }),
+    };
+    const handle = renderSamplerVoice({
+      channel,
+      note: { id: `probe-${pitch}`, pitch, start: 0, duration: 1, velocity: 0.8 } as Note,
+      time: 0,
+      destination: {} as AudioNode,
+      audioContext: ctx as any,
+      voiceId: `probe-${pitch}`,
+      bpm: 120,
+      getSampleBuffer: id => buffers[id],
+    });
+    if (!handle) return undefined;
+    return Object.keys(buffers).find(id => buffers[id] === captured);
+  };
+
+  const seededFullRangeZone = (
+    channelId: string,
+    sample: CustomSampleData,
+    overrides: Partial<SampleZone> = {},
+  ): SampleZone => ({
+    id: `zone-${channelId}`,
+    sampleId: sample.id,
+    lowNote: 0,
+    highNote: 127,
+    rootNote: sample.rootPitch ?? 60,
+    lowVelocity: 0,
+    highVelocity: 127,
+    tuneSemitones: 0,
+    trimStart: sample.trimStart,
+    trimEnd: sample.trimEnd,
+    reverse: sample.reverse,
+    ...overrides,
+  });
+
+  const makeProject = (
+    channel: Partial<Channel>,
+    library: CustomSampleData[],
+  ): ProjectState => {
+    const base = structuredClone(DEFAULT_PROJECT);
+    return {
+      ...base,
+      sampleLibrary: library,
+      channels: base.channels.map((ch, index) =>
+        index === 0 ? { ...structuredClone(ch), ...channel, id: 'ch-kick', name: 'Kick', instrumentType: 'sampler' } : structuredClone(ch)
+      ),
+    };
+  };
+
+  it('drops a v1.2.2 authored-stamped seeded full-range zone on sample replacement while keeping authored splits, live and offline', async () => {
+    const originalSample = makeSample('legacy-seed-original', {
+      duration: 2,
+      rootPitch: 48,
+      trimStart: 0.15,
+      trimEnd: 0.85,
+      reverse: true,
+    });
+    const replacementSample = makeSample('legacy-seed-replacement', {
+      duration: 4,
+      rootPitch: 72,
+      trimStart: 0.25,
+      trimEnd: 0.75,
+      reverse: false,
+    });
+    const splitSample = makeSample('legacy-seed-split', { duration: 1, rootPitch: 60 });
+
+    // Exactly what v1.2.2 persisted after the user added one split: the
+    // untouched full-range projection of `customSample` plus the new zone, both
+    // stamped `userAuthored: true` by that build's `commitZones`.
+    const seededZone: SampleZone = seededFullRangeZone('ch-kick', originalSample, { userAuthored: true });
+    const splitZone: SampleZone = {
+      id: 'zone-1712345678901',
+      sampleId: splitSample.id,
+      lowNote: 60,
+      highNote: 72,
+      rootNote: 60,
+      lowVelocity: 0,
+      highVelocity: 127,
+      tuneSemitones: 0,
+      userAuthored: true,
+    };
+
+    const project = makeProject(
+      {
+        customSample: originalSample,
+        synthParams: { ...structuredClone(DEFAULT_PROJECT.channels[0].synthParams), sampleLoop: false },
+        sampleZones: [{ ...seededZone }, { ...splitZone }],
+        notes: [
+          { id: 'n-outside-split', pitch: 30, start: 0, duration: 1, velocity: 1 },
+          { id: 'n-inside-split', pitch: 65, start: 4, duration: 1, velocity: 1 },
+        ],
+      },
+      [originalSample, replacementSample, splitSample],
+    );
+
+    let history = createHistory(project);
+    const loadedChannel = history.present.channels.find(ch => ch.id === 'ch-kick')!;
+    assert.deepEqual(
+      loadedChannel.sampleZones?.map(zone => zone.id),
+      ['zone-ch-kick', splitZone.id],
+      'the legacy seeded zone must be present before the fix runs',
+    );
+
+    // App.tsx: onAssignSampleToChannel -> handleUpdateChannel -> this boundary.
+    const assigned = updateChannelInProjectState(history.present, 'ch-kick', {
+      customSample: replacementSample,
+    });
+    history = history.commit(assigned, 'Assign sample');
+    const replaced = history.present.channels.find(ch => ch.id === 'ch-kick')!;
+
+    assert.equal(replaced.customSample?.id, replacementSample.id);
+    assert.deepEqual(
+      replaced.sampleZones?.map(zone => zone.id),
+      [splitZone.id],
+      'the stale seeded full-range zone must be dropped and the authored split kept',
+    );
+    assert.equal(replaced.sampleZones?.[0].sampleId, splitSample.id);
+
+    const originalBuffer = { duration: 2 } as AudioBuffer;
+    const replacementBuffer = { duration: 4 } as AudioBuffer;
+    const splitBuffer = { duration: 1 } as AudioBuffer;
+    const buffers: Record<string, AudioBuffer> = {
+      [originalSample.id]: originalBuffer,
+      [replacementSample.id]: replacementBuffer,
+      [splitSample.id]: splitBuffer,
+    };
+
+    assert.equal(renderSampleId(replaced, 30, buffers), replacementSample.id, 'keys outside the split must play the new sample');
+    assert.equal(renderSampleId(replaced, 65, buffers), splitSample.id, 'the authored split must keep selecting its own sample');
+    assert.equal(renderSampleId(replaced, 90, buffers), replacementSample.id);
+
+    // Offline export consumes the same document and must resolve the same key map.
+    const offlineCreatedSources: Array<{ buffer: AudioBuffer | null }> = [];
+    const previousSampleBuffers = (audioEngine as any).sampleBuffers;
+    const previousOfflineContext = (globalThis as any).OfflineAudioContext;
+    class StubOfflineAudioContext {
+      currentTime = 0;
+      sampleRate = 44100;
+      length = 44100;
+      numberOfChannels = 2;
+      destination = { connect: () => {} };
+      createGain() {
+        return {
+          gain: { value: 1, setValueAtTime: () => {}, setTargetAtTime: () => {}, linearRampToValueAtTime: () => {}, exponentialRampToValueAtTime: () => {}, cancelScheduledValues: () => {} },
+          connect: () => {},
+          disconnect: () => {},
+        };
+      }
+      createStereoPanner() {
+        return { pan: { value: 0, setValueAtTime: () => {}, setTargetAtTime: () => {} }, connect: () => {}, disconnect: () => {} };
+      }
+      createBiquadFilter() {
+        return { type: 'lowpass', frequency: { value: 18000, setValueAtTime: () => {}, setTargetAtTime: () => {} }, Q: { value: 1, setValueAtTime: () => {} }, gain: { value: 0, setValueAtTime: () => {} }, connect: () => {}, disconnect: () => {} };
+      }
+      createDynamicsCompressor() {
+        return { threshold: { value: -24, setValueAtTime: () => {} }, knee: { value: 30, setValueAtTime: () => {} }, ratio: { value: 12, setValueAtTime: () => {} }, attack: { value: 0.003, setValueAtTime: () => {} }, release: { value: 0.25, setValueAtTime: () => {} }, connect: () => {}, disconnect: () => {} };
+      }
+      createWaveShaper() {
+        return { curve: null, oversample: 'none', connect: () => {}, disconnect: () => {} };
+      }
+      createDelay() {
+        return { delayTime: { value: 0, setValueAtTime: () => {} }, connect: () => {}, disconnect: () => {} };
+      }
+      createConvolver() {
+        return { buffer: null, connect: () => {}, disconnect: () => {} };
+      }
+      createAnalyser() {
+        return {
+          fftSize: 256,
+          smoothingTimeConstant: 0.7,
+          connect: () => {},
+          disconnect: () => {},
+          getFloatTimeDomainData: (arr: Float32Array) => arr.fill(0),
+          getByteFrequencyData: (arr: Uint8Array) => arr.fill(0),
+          getByteTimeDomainData: (arr: Uint8Array) => arr.fill(128),
+        };
+      }
+      createConstantSource() {
+        return { offset: { value: 0, setValueAtTime: () => {}, linearRampToValueAtTime: () => {} }, connect: () => {}, disconnect: () => {}, start: () => {}, stop: () => {} };
+      }
+      createOscillator() {
+        return { type: 'sine', frequency: { value: 440, setValueAtTime: () => {} }, detune: { value: 0, setValueAtTime: () => {} }, connect: () => {}, start: () => {}, stop: () => {} };
+      }
+      createBufferSource() {
+        const record = { buffer: null as AudioBuffer | null };
+        offlineCreatedSources.push(record);
+        return {
+          get buffer() { return record.buffer; },
+          set buffer(value: AudioBuffer | null) { record.buffer = value; },
+          loop: false,
+          loopStart: 0,
+          loopEnd: 0,
+          onended: null,
+          playbackRate: { value: 1, setValueAtTime: () => {} },
+          connect: () => {},
+          start: () => {},
+          stop: () => {},
+        };
+      }
+      createBuffer(channels: number, length: number, sampleRate: number) {
+        return {
+          numberOfChannels: channels,
+          length,
+          sampleRate,
+          duration: length / sampleRate,
+          getChannelData: () => new Float32Array(length),
+        };
+      }
+      async startRendering() {
+        return this.createBuffer(2, this.length, this.sampleRate);
+      }
+    }
+    try {
+      (globalThis as any).OfflineAudioContext = StubOfflineAudioContext;
+      (audioEngine as any).sampleBuffers = new Map<string, AudioBuffer>([
+        [originalSample.id, originalBuffer],
+        [replacementSample.id, replacementBuffer],
+        [splitSample.id, splitBuffer],
+      ]);
+      await audioEngine.renderTimelineOffline(
+        [replaced],
+        [],
+        DEFAULT_PROJECT.mixerTracks,
+        120,
+        1,
+        44100,
+        false,
+        'pattern',
+      );
+    } finally {
+      (audioEngine as any).sampleBuffers = previousSampleBuffers;
+      (globalThis as any).OfflineAudioContext = previousOfflineContext;
+    }
+    const offlineBuffers = offlineCreatedSources.map(source => source.buffer);
+    const offlineSampleIds = new Set(
+      offlineBuffers.map(buffer =>
+        buffer === replacementBuffer ? replacementSample.id : buffer === splitBuffer ? splitSample.id : buffer === originalBuffer ? originalSample.id : 'unknown'
+      )
+    );
+    assert.ok(offlineBuffers.length > 0, 'the offline render must produce at least one sampler voice');
+    assert.ok(offlineSampleIds.has(replacementSample.id), 'offline export must render the replacement sample');
+    assert.ok(offlineSampleIds.has(splitSample.id), 'offline export must render the authored split sample');
+    assert.ok(!offlineSampleIds.has(originalSample.id), 'offline export must not render the stale seeded sample');
+    assert.ok(!offlineSampleIds.has('unknown'), 'offline export must resolve every source through the key map');
+
+    // Undo restores the pre-assignment document (legacy seed included); redo
+    // re-applies the replacement without resurrecting the seed.
+    const undone = history.undo();
+    const undoneChannel = undone.present.channels.find(ch => ch.id === 'ch-kick')!;
+    assert.equal(undoneChannel.customSample?.id, originalSample.id);
+    assert.deepEqual(undoneChannel.sampleZones?.map(zone => zone.id), ['zone-ch-kick', splitZone.id]);
+    const redone = undone.redo();
+    const redoneChannel = redone.present.channels.find(ch => ch.id === 'ch-kick')!;
+    assert.equal(redoneChannel.customSample?.id, replacementSample.id);
+    assert.deepEqual(redoneChannel.sampleZones?.map(zone => zone.id), [splitZone.id]);
+  });
+
+  it('clears the generated full-range view when the assigned sample is removed, without touching authored splits', () => {
+    const sample = makeSample('clear-sample', { duration: 2, rootPitch: 60, trimStart: 0, trimEnd: 1 });
+    const splitSample = makeSample('clear-split-sample', { duration: 1, rootPitch: 60 });
+    const splitZone: SampleZone = {
+      id: 'zone-1712345678902',
+      sampleId: splitSample.id,
+      lowNote: 60,
+      highNote: 72,
+      rootNote: 60,
+      lowVelocity: 0,
+      highVelocity: 127,
+      tuneSemitones: 0,
+      userAuthored: true,
+    };
+    const project = makeProject(
+      {
+        customSample: sample,
+        sampleZones: [seededFullRangeZone('ch-kick', sample), { ...splitZone }],
+        notes: [],
+      },
+      [sample, splitSample],
+    );
+
+    let history = createHistory(project);
+    assert.equal(history.present.channels.find(ch => ch.id === 'ch-kick')!.sampleZones?.length, 2);
+
+    const cleared = updateChannelInProjectState(history.present, 'ch-kick', { customSample: undefined });
+    history = history.commit(cleared, 'Clear sample');
+    const clearedChannel = history.present.channels.find(ch => ch.id === 'ch-kick')!;
+
+    assert.equal(clearedChannel.customSample, undefined);
+    assert.deepEqual(
+      clearedChannel.sampleZones?.map(zone => zone.id),
+      [splitZone.id],
+      'the generated view of the removed sample must not be resurrected',
+    );
+
+    const buffers: Record<string, AudioBuffer> = {
+      [sample.id]: { duration: 2 } as AudioBuffer,
+      [splitSample.id]: { duration: 1 } as AudioBuffer,
+    };
+    assert.equal(
+      renderSampleId(clearedChannel, 30, buffers),
+      undefined,
+      'with no body sample and no zone covering the key there is nothing to play',
+    );
+    assert.equal(renderSampleId(clearedChannel, 65, buffers), splitSample.id, 'authored splits stay playable');
+
+    const undone = history.undo();
+    const restored = undone.present.channels.find(ch => ch.id === 'ch-kick')!;
+    assert.equal(restored.customSample?.id, sample.id);
+    assert.equal(restored.sampleZones?.length, 2, 'undo restores the cleared generated view');
+  });
+
+  it('cannot write while closed across prop changes, and an edit after a channel switch lands only on the newly selected channel', () => {
+    const sampleA = makeSample('switch-sample-a', { rootPitch: 60 });
+    const sampleB = makeSample('switch-sample-b', { rootPitch: 64 });
+    const otherZone: SampleZone = {
+      id: 'zone-1712345678903',
+      sampleId: sampleB.id,
+      lowNote: 48,
+      highNote: 72,
+      rootNote: 60,
+      lowVelocity: 0,
+      highVelocity: 127,
+      tuneSemitones: 0,
+      userAuthored: true,
+    };
+    const base = structuredClone(DEFAULT_PROJECT);
+    const project: ProjectState = {
+      ...base,
+      sampleLibrary: [sampleA, sampleB],
+      channels: base.channels.map((ch, index) =>
+        index === 0
+          ? { ...structuredClone(ch), id: 'ch-a', name: 'A', instrumentType: 'sampler', customSample: sampleA, sampleZones: [] }
+          : index === 1
+            ? { ...structuredClone(ch), id: 'ch-b', name: 'B', instrumentType: 'sampler', customSample: sampleB, sampleZones: [] }
+            : structuredClone(ch)
+      ),
+    };
+    let history = createHistory(project);
+    let mutationCalls = 0;
+    const handleUpdateChannel = (channelId: string, updates: Partial<Channel>) => {
+      mutationCalls += 1;
+      history = history.commit(updateChannelInProjectState(history.present, channelId, updates), 'Update channel');
+    };
+
+    const harness = createComponentHarness(MultiZoneSamplerModal, {
+      isOpen: false,
+      onClose: () => {},
+      channels: history.present.channels,
+      selectedChannelId: 'ch-a',
+      sampleLibrary: history.present.sampleLibrary,
+      onUpdateChannel: handleUpdateChannel,
+    });
+
+    // Prop churn while closed: new channel objects, a different selection and a
+    // new library on every pass. Mounting/rendering must stay read-only.
+    const churnedChannels = history.present.channels.map(ch =>
+      ch.id === 'ch-b' ? { ...ch, sampleZones: [{ ...otherZone }], volume: 0.31 } : ch
+    );
+    harness.rerender({ channels: churnedChannels, selectedChannelId: 'ch-b', sampleLibrary: [sampleA, sampleB] });
+    harness.rerender({ isOpen: false, channels: history.present.channels, selectedChannelId: 'ch-a' });
+    harness.rerender({ isOpen: false, channels: churnedChannels, selectedChannelId: 'ch-b' });
+
+    assert.equal(mutationCalls, 0, 'a closed modal must never call onUpdateChannel');
+    assert.equal(history.canUndo, false, 'a closed modal must never push an undo entry');
+    assert.deepEqual(history.present.channels.find(ch => ch.id === 'ch-a')!.sampleZones, []);
+    assert.deepEqual(history.present.channels.find(ch => ch.id === 'ch-b')!.sampleZones, []);
+
+    // Open, switch to ch-b and add a split. Only ch-b may change, and the new
+    // zone must take ch-b's sample — never ch-a's still-hydrated modal state.
+    harness.rerender({ isOpen: true, channels: history.present.channels, selectedChannelId: 'ch-b', sampleLibrary: history.present.sampleLibrary });
+    const addZoneButton = collectElements(harness.tree).find(
+      element => element.type === 'button' && element.text.includes('Add Zone Split')
+    );
+    assert.ok(addZoneButton, 'Add Zone Split must be available');
+    addZoneButton.props.onClick();
+    harness.rerender({ channels: history.present.channels });
+
+    assert.equal(mutationCalls, 1, 'one explicit edit must produce exactly one channel mutation');
+    const channelA = history.present.channels.find(ch => ch.id === 'ch-a')!;
+    const channelB = history.present.channels.find(ch => ch.id === 'ch-b')!;
+    assert.deepEqual(channelA.sampleZones, [], 'the previously selected channel must not receive the edit');
+    assert.equal(channelB.sampleZones?.length, 1);
+    assert.equal(channelB.sampleZones?.[0].sampleId, sampleB.id, 'the new zone must resolve to the newly selected channel sample');
+    assert.equal(channelB.sampleZones?.[0].userAuthored, true);
+
+    // Undo/redo around that explicit edit restores and re-applies it.
+    const undone = history.undo();
+    assert.deepEqual(undone.present.channels.find(ch => ch.id === 'ch-b')!.sampleZones, []);
+    const redone = undone.redo();
+    assert.equal(redone.present.channels.find(ch => ch.id === 'ch-b')!.sampleZones?.length, 1);
+    assert.equal(
+      redone.present.channels.find(ch => ch.id === 'ch-a')!.sampleZones?.length ?? 0,
+      0,
+      'redo must not leak a zone onto the other channel',
+    );
+  });
+
+  it('assigns through the SampleManagerModal callback without mutating on mount and clears the stale seed', () => {
+    const sampleA = makeSample('manager-sample-a', { rootPitch: 60 });
+    const sampleB = makeSample('manager-sample-b', { rootPitch: 72 });
+    const legacySeed = seededFullRangeZone('ch-kick', sampleA, { userAuthored: true });
+    const project = makeProject({ customSample: sampleA, sampleZones: [legacySeed] }, [sampleA, sampleB]);
+
+    let history = createHistory(project);
+    let assignmentCalls = 0;
+    const assignSample = (channelId: string, sample: CustomSampleData) => {
+      assignmentCalls += 1;
+      // App.tsx wires this to handleUpdateChannel(channelId, { customSample }).
+      history = history.commit(
+        updateChannelInProjectState(history.present, channelId, { customSample: sample }),
+        'Assign sample',
+      );
+    };
+
+    const harness = createComponentHarness(SampleManagerModal, {
+      isOpen: false,
+      onClose: () => {},
+      channels: history.present.channels,
+      selectedChannel: history.present.channels.find(ch => ch.id === 'ch-kick')!,
+      sampleLibrary: history.present.sampleLibrary || [],
+      onSampleImported: () => {},
+      onCreateChannelFromSample: () => {},
+      onAssignSampleToChannel: assignSample,
+    });
+
+    harness.rerender({ isOpen: false, channels: history.present.channels, sampleLibrary: [sampleA, sampleB] });
+    harness.rerender({ isOpen: false, selectedChannel: history.present.channels.find(ch => ch.id === 'ch-kick')! });
+    assert.equal(assignmentCalls, 0, 'a closed SampleManagerModal must not assign anything');
+    assert.equal(history.canUndo, false);
+
+    harness.rerender({ isOpen: true });
+    assert.equal(assignmentCalls, 0, 'opening SampleManagerModal must not assign anything');
+    assert.equal(history.canUndo, false);
+
+    // The modal calls this prop from handleAssign with the confirmed sample.
+    harness.props.onAssignSampleToChannel('ch-kick', sampleB);
+    const assigned = history.present.channels.find(ch => ch.id === 'ch-kick')!;
+    assert.equal(assigned.customSample?.id, sampleB.id);
+    assert.deepEqual(assigned.sampleZones, [], 'SampleManager assignment must not keep the stale seed');
+    assert.equal(assignmentCalls, 1);
+    assert.equal(history.canUndo, true);
+
+    const undone = history.undo();
+    assert.equal(undone.present.channels.find(ch => ch.id === 'ch-kick')!.sampleZones?.length, 1, 'undo restores the pre-assignment document');
+    const redone = undone.redo();
+    assert.deepEqual(redone.present.channels.find(ch => ch.id === 'ch-kick')!.sampleZones, []);
+  });
+
+  it('preserves authored zones whose content diverges from the body sample when the sample is replaced', () => {
+    const sampleA = makeSample('authored-sample-a', { rootPitch: 48, trimStart: 0.1, trimEnd: 0.9 });
+    const sampleB = makeSample('authored-sample-b', { rootPitch: 72 });
+    const splitSample = makeSample('authored-split-sample', { rootPitch: 60 });
+    const splitZone: SampleZone = {
+      id: 'zone-1712345678904',
+      sampleId: splitSample.id,
+      lowNote: 60,
+      highNote: 72,
+      rootNote: 60,
+      lowVelocity: 0,
+      highVelocity: 127,
+      tuneSemitones: 0,
+      userAuthored: true,
+    };
+    // Same generated id, but the user edited the root note: this is real data.
+    const editedSeedZone: SampleZone = seededFullRangeZone('ch-kick', sampleA, { rootNote: 60, userAuthored: true });
+    const libraryZone: SampleZone = {
+      id: 'zone-other-library',
+      sampleId: 'library-other',
+      lowNote: 24,
+      highNote: 36,
+      rootNote: 24,
+      lowVelocity: 0,
+      highVelocity: 127,
+      tuneSemitones: 0,
+      userAuthored: true,
+    };
+    const project = makeProject(
+      {
+        customSample: sampleA,
+        sampleZones: [{ ...splitZone }, { ...editedSeedZone }, { ...libraryZone }],
+        notes: [],
+      },
+      [sampleA, sampleB, splitSample],
+    );
+
+    const replaced = updateChannelInProjectState(createHistory(project).present, 'ch-kick', {
+      customSample: sampleB,
+    }).channels.find(ch => ch.id === 'ch-kick')!;
+
+    assert.deepEqual(
+      replaced.sampleZones?.map(zone => zone.id),
+      [splitZone.id, 'zone-ch-kick', 'zone-other-library'],
+      'authored zones must survive a sample replacement untouched',
+    );
+    assert.equal(replaced.sampleZones?.[1].rootNote, 60, 'the edited root note must be preserved');
+    assert.equal(replaced.sampleZones?.[0].sampleId, splitSample.id);
+    assert.equal(replaced.sampleZones?.[2].sampleId, 'library-other');
   });
 });
