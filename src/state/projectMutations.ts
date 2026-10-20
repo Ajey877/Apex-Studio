@@ -20,7 +20,7 @@ import { isCountInBars, type CountInBars } from '../music/countIn';
 import { isPunchRecordingSettings, isSamePunchRecording, resolvePunchRecording, validatePunchRecording, type PunchRecordingSettings } from '../music/punchRecording';
 import { getProjectTimelineBars } from './playlistTimeline';
 import { addEmptyPatternToProjectState } from './patternContent';
-import { isImplicitDefaultSingleZone } from '../audio/sampleZones';
+import { isSupersededGeneratedSeedZone } from '../audio/sampleZones';
 
 /**
  * Authoritative runtime mutation boundary for ProjectState.
@@ -41,17 +41,21 @@ export const updateChannelInProjectState = (
   channels: state.channels.map(ch => {
     if (ch.id !== channelId) return ch;
     const nextChannel: Channel = { ...ch, ...updates };
-    if (
-      'customSample' in updates &&
-      !('sampleZones' in updates) &&
-      nextChannel.customSample?.id &&
-      ch.customSample?.id &&
-      ch.sampleZones?.length === 1 &&
-      !ch.sampleZones[0].userAuthored &&
-      ch.sampleZones[0].sampleId === ch.customSample.id &&
-      isImplicitDefaultSingleZone(ch, ch.sampleZones[0], state.sampleLibrary || [])
-    ) {
-      nextChannel.sampleZones = [];
+    // A generated full-range view of the body sample must never survive a
+    // `customSample` change: `findSampleZone` resolves first-match, so a stale
+    // 0-127 seed shadows the new sample (and every authored split after it).
+    // This covered only a single implicit zone before, which missed the two
+    // shapes an upgraded v1.2.2 project can carry: a legacy seed stamped
+    // `userAuthored: true`, and such a seed sitting next to authored splits.
+    // Only seed identities whose content still mirrors the previous sample are
+    // dropped; authored key maps are preserved.
+    if ('customSample' in updates && !('sampleZones' in updates) && ch.sampleZones?.length) {
+      const retainedZones = ch.sampleZones.filter(
+        zone => !isSupersededGeneratedSeedZone(ch, zone, state.sampleLibrary || [])
+      );
+      if (retainedZones.length !== ch.sampleZones.length) {
+        nextChannel.sampleZones = retainedZones;
+      }
     }
     return nextChannel;
   })

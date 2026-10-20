@@ -9,6 +9,7 @@ import {
   sampleMatchesFilters,
   updateSampleMetadata
 } from '../audio/sampleLibrary';
+import { isSupersededGeneratedSeedZone } from '../audio/sampleZones';
 
 interface SampleLibraryPanelProps {
   samples: CustomSampleData[];
@@ -60,7 +61,13 @@ export const SampleLibraryPanel: React.FC<SampleLibraryPanelProps> = ({
 
   const assignToMulti = () => {
     if (!selected || selected.audioUnavailable) return;
-    const existing = selectedChannel.sampleZones?.length ? selectedChannel.sampleZones : [];
+    // This path publishes `sampleZones` itself, so the mutation boundary's
+    // body-sample cleanup does not run. Drop a stale generated full-range view
+    // of the channel's current sample before appending the new zone; without
+    // this it would stay first in `findSampleZone` and shadow the assignment.
+    const existing = (selectedChannel.sampleZones || []).filter(
+      zone => !isSupersededGeneratedSeedZone(selectedChannel, zone, samples)
+    );
     const zone = {
       id: `zone-${selected.id}-library`,
       sampleId: selected.id,
