@@ -84,6 +84,14 @@ import { audioBufferToWav } from './wavEncoder';
 /** True when the meter is the legacy 4/4 grid. */
 const isLegacyMeter = (meter: TimeSignature): boolean => meter[0] === 4 && meter[1] === 4;
 
+// A freshly-created OfflineAudioContext otherwise schedules its first source at
+// frame zero. Real-time playback gives the master graph an initialization lead
+// before the transport's first note; the live capture experiment measured a
+// mastering-only first-event transient that disappeared after 100 ms of silence.
+// This lead-in lets the offline mastering graph settle and is trimmed from the
+// returned AudioBuffer so project timing and export duration remain unchanged.
+const OFFLINE_MASTERING_PREROLL_SECONDS = 0.1;
+
 export { isRackChannelAudible };
 
 export type MidiEventPayload = {
@@ -3200,6 +3208,7 @@ class AudioEngine {
         Math.max(1, totalBars) * beatsPerBar(this.meter) * beatsToSeconds(1, safeBpm),
       );
       const renderSampleRate = sampleRate ?? previous.ctx?.sampleRate ?? 44100;
+      const outputFrameCount = Math.ceil(renderSampleRate * totalDurationSeconds);
       const OfflineContextClass =
         (typeof window !== 'undefined' && (window as unknown as WindowWithWebKitAudio).OfflineAudioContext) ||
         (typeof window !== 'undefined' && (window as unknown as WindowWithWebKitAudio).webkitOfflineAudioContext) ||
@@ -3207,9 +3216,17 @@ class AudioEngine {
       if (!OfflineContextClass) {
         throw new Error('OfflineAudioContext is unavailable in this environment.');
       }
+      const offlineContextPrototype = (OfflineContextClass as any).prototype;
+      const offlineSupportsMasteringDsp = [
+        'createChannelSplitter', 'createChannelMerger', 'createDynamicsCompressor', 'createWaveShaper',
+      ].every(method => typeof offlineContextPrototype?.[method] === 'function');
+      const masteringPrerollSeconds = outputStage === 'master' && this.masteringState.enabled && offlineSupportsMasteringDsp
+        ? OFFLINE_MASTERING_PREROLL_SECONDS
+        : 0;
+      const prerollFrameCount = Math.ceil(renderSampleRate * masteringPrerollSeconds);
       const offlineCtx = new OfflineContextClass(
         2,
-        Math.ceil(renderSampleRate * totalDurationSeconds),
+        outputFrameCount + prerollFrameCount,
         renderSampleRate,
       );
       this.isOfflineRendering = true;
@@ -3352,7 +3369,7 @@ class AudioEngine {
             : 0;
           const audioTime = globalStep * secondsPerStep + swingOffsetSeconds;
           if (audioTime >= totalDurationSeconds) break;
-          this.withOfflineRenderOperation(() => this.triggerCurrentStep(audioTime));
+          this.withOfflineRenderOperation(() => this.triggerCurrentStep(audioTime + masteringPrerollSeconds));
           if ((globalStep + 1) % 4 === 0 || globalStep === totalSteps - 1) {
             const scheduleProgress = scheduleStartProgress + Math.round(((globalStep + 1) / totalSteps) * (scheduleEndProgress - scheduleStartProgress));
             onProgress?.(scheduleProgress, `Scheduling ${renderScope === 'pattern' ? 'pattern' : 'song'} audio (${globalStep + 1}/${totalSteps} steps)...`);
@@ -3364,8 +3381,18 @@ class AudioEngine {
         }
         onProgress?.(70, `Rendering offline audio (${totalDurationSeconds.toFixed(2)}s)...`);
         const renderedBuffer = await offlineCtx.startRendering();
+        let outputBuffer = renderedBuffer;
+        if (prerollFrameCount > 0) {
+          // Remove the processor warm-up so consumers still receive samples for
+          // the exact project timeline, with no leading silence or duration change.
+          outputBuffer = offlineCtx.createBuffer(2, outputFrameCount, renderSampleRate);
+          for (let channelIndex = 0; channelIndex < outputBuffer.numberOfChannels; channelIndex += 1) {
+            const source = renderedBuffer.getChannelData(channelIndex);
+            outputBuffer.copyToChannel(source.subarray(prerollFrameCount, prerollFrameCount + outputFrameCount), channelIndex);
+          }
+        }
         onProgress?.(85, 'Offline render complete. Encoding WAV...');
-        return renderedBuffer;
+        return outputBuffer;
       } finally {
         this.isOfflineRendering = false;
         this.renderingPreMaster = previous.renderingPreMaster;
