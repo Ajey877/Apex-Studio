@@ -23,6 +23,9 @@
  *   - `isTakeAudible()` returns true only for the active take in its group,
  *     and true for any clip that is not part of a take group.
  *   - `selectActiveTake()` updates the active take for every clip in a group.
+ *   - `orderClipsForTakeRendering()` derives the Playlist's visual paint order
+ *     from the same state: within each take group the active take sorts last
+ *     (painted topmost) without reordering the persisted clip array.
  */
 import type { PlaylistClip } from '../types/daw';
 
@@ -86,6 +89,59 @@ export const resolveInaudibleTakeClipIds = (clips: readonly PlaylistClip[]): Set
     }
   }
   return inaudible;
+};
+
+/**
+ * Derives the Playlist's *visual* rendering order from the current clip/take
+ * state, without mutating the input array or the persisted
+ * `projectState.playlistClips`.
+ *
+ * Playlist clip nodes are absolutely positioned siblings painted in DOM
+ * order, and every take of a group occupies the same timeline region — so a
+ * group-mate that renders later covers the active take, even when that
+ * group-mate is silenced. This function makes the active take the last (i.e.
+ * topmost) rendered clip *among the clips of its own take group*:
+ *
+ *   - Each take group keeps exactly the array slots it already occupies; only
+ *     the clips inside those slots are rearranged (active take last, inactive
+ *     takes first in their existing relative order — a stable, deterministic
+ *     order for the inactive takes).
+ *   - Ordinary clips (no `takeGroupId`) and clips of other groups keep their
+ *     exact positions, so unrelated ordering is fully preserved.
+ *   - Clip objects are reused by reference: nothing is cloned, reordered in
+ *     place, or written back — the caller receives a new array and the input
+ *     (persisted project data) is untouched.
+ *
+ * Because the order is derived from `activeTakeIndex`/`takeIndex` on every
+ * call, selecting another take, undo/redo, or loading a project updates the
+ * visual stacking immediately with no extra bookkeeping.
+ */
+export const orderClipsForTakeRendering = (clips: readonly PlaylistClip[]): PlaylistClip[] => {
+  // Collect the array slots occupied by each take group.
+  const slotsByGroup = new Map<string, number[]>();
+  for (let i = 0; i < clips.length; i += 1) {
+    const groupId = clips[i].takeGroupId;
+    if (!groupId) continue;
+    const slots = slotsByGroup.get(groupId);
+    if (slots) slots.push(i);
+    else slotsByGroup.set(groupId, [i]);
+  }
+
+  const ordered: PlaylistClip[] = [...clips];
+  for (const [groupId, slots] of slotsByGroup) {
+    // A lone take has no group-mate to stack against.
+    if (slots.length < 2) continue;
+    const groupClips = slots.map(i => clips[i]);
+    const activeIndex = resolveActiveTakeIndex(groupClips, groupId);
+    const isActiveTake = (clip: PlaylistClip): boolean =>
+      activeIndex !== null && (typeof clip.takeIndex === 'number' ? clip.takeIndex : 0) === activeIndex;
+    // Filter preserves relative order, so inactive takes stay stable; the
+    // active take moves to the end of its group's slot set = painted on top.
+    // If no clip matches a (corrupt) activeTakeIndex, nothing moves.
+    const reordered = [...groupClips.filter(c => !isActiveTake(c)), ...groupClips.filter(isActiveTake)];
+    slots.forEach((slot, k) => { ordered[slot] = reordered[k]; });
+  }
+  return ordered;
 };
 
 /**
