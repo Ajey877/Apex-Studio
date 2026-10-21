@@ -1,10 +1,21 @@
 # Post-readiness duplicate-frame isolation — not reproduced, cause unresolved
 
 > **Documentation handoff:** recovered from the original untracked report for
-> [draft PR #267](https://github.com/Ajey877/Apex-Studio/pull/267). Investigation
+> [PR #267](https://github.com/Ajey877/Apex-Studio/pull/267), merged into `main`
+> on 2026-10-21 after synchronization with `main` @ `25ac8e4` and revalidation.
+> Investigation
 > outcomes and refs below describe the completed diagnostic phase, not a new run.
 > Earlier phases: [local readiness](../readiness/REPORT.md) and
 > [132-capture hosted verification](../readiness/HOSTED-REPORT.md). The gate remains closed.
+>
+> **Correction (2026-10-21, merge finalization):** the job-status tally in
+> "Tests, changes and remaining limits" originally read "five jobs failed final
+> experiment status, three succeeded". Re-verification against the GitHub run
+> [39566258125](https://github.com/Ajey877/Apex-Studio/actions/runs/39566258125)
+> job metadata (and the fidelity tables in this report, which show exactly four
+> browser/mode combinations containing failures) established the actual outcome:
+> **four** isolation jobs failed and **four** succeeded. Only the tally sentence
+> was corrected; no measurement, table, artifact or investigation outcome changed.
 
 ## Verdict
 
@@ -245,7 +256,8 @@ hosted artifacts. No raw PCM was added to Git.
 - Four local short-mode smoke tests passed after fixing a newly introduced trace
   helper/MessageEvent name collision; the initial timeout raw run remains retained.
 - Hosted tests: 240 cases, no retry, **215 exact-fidelity passes / 25 failures**;
-  five jobs failed final experiment status, three succeeded. All uploads succeeded.
+  four jobs failed final experiment status (chrome lead, chrome immediate,
+  playwright no-ready, playwright immediate), four succeeded. All uploads succeeded.
 - Independent Python checks agreed on all 240 fidelity classifications and
   archive hashes; no post-ready frame discontinuity was found by either analyzer.
 - Production files and original realtimeExportParity regression unchanged.
