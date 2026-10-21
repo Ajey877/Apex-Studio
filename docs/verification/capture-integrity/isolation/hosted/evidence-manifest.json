@@ -1,0 +1,471 @@
+{
+  "historicalFailure": {
+    "path": "originals/capture-playwright-39562499637-1/diagnostic-results/readiness/39562499637-chromium-workload-2-73c39967-ab8c-4d9e-a1c9-c6a74b68023b.json.gz",
+    "rawSha256": "0e8e6e0e1c2b83490af257aa76d2ae93b9141230a2b964847632c9fa6cd2ca48",
+    "runId": "39562499637-chromium-workload-2-73c39967-ab8c-4d9e-a1c9-c6a74b68023b",
+    "window": {
+      "runId": "39562499637-chromium-workload-2-73c39967-ab8c-4d9e-a1c9-c6a74b68023b",
+      "startFrame": 16273,
+      "sourceStartFrame": 20683,
+      "sourceFrames": 132300,
+      "endFrame": 159598,
+      "scheduledAtFrame": 5248,
+      "readyEndFrame": 5120
+    },
+    "markers": [
+      {
+        "kind": "ready",
+        "runId": "39562499637-chromium-workload-2-73c39967-ab8c-4d9e-a1c9-c6a74b68023b",
+        "sequence": 32,
+        "frame": 4992,
+        "endFrame": 5120,
+        "streak": 32,
+        "required": 32,
+        "sampleRate": 44100,
+        "mainContextState": "running",
+        "arrivalTime": 96.89999999999418
+      },
+      {
+        "kind": "armed",
+        "runId": "39562499637-chromium-workload-2-73c39967-ab8c-4d9e-a1c9-c6a74b68023b",
+        "frame": 5248,
+        "tooLate": false,
+        "startFrame": 16273,
+        "sourceStartFrame": 20683,
+        "sourceFrames": 132300,
+        "endFrame": 159598,
+        "scheduledAtFrame": 5248,
+        "readyEndFrame": 5120,
+        "mainContextState": "running",
+        "arrivalTime": 97.09999999997672
+      },
+      {
+        "kind": "end",
+        "runId": "39562499637-chromium-workload-2-73c39967-ab8c-4d9e-a1c9-c6a74b68023b",
+        "frame": 159488,
+        "quantum": 128,
+        "blocks": 1240,
+        "endFrame": 159598,
+        "mainContextState": "running",
+        "arrivalTime": 3596.899999999994
+      }
+    ],
+    "samePcm": true,
+    "records": [
+      {
+        "kind": "block",
+        "runId": "39562499637-chromium-workload-2-73c39967-ab8c-4d9e-a1c9-c6a74b68023b",
+        "sequence": 31,
+        "frame": 4864,
+        "frameAfterCopy": 4864,
+        "sampleRate": 44100,
+        "quantum": 128,
+        "inputChannels": 1,
+        "inputLengths": [
+          128
+        ],
+        "outputChannels": 1,
+        "outputLengths": [
+          128
+        ],
+        "previousEnd": 4864,
+        "contiguous": true,
+        "streak": 31,
+        "processorState": "warming",
+        "checksum": 1299645893,
+        "mainContextState": "running",
+        "arrivalTime": 96.89999999999418,
+        "pcmSha256": "076a27c79e5ace2a3d47f9dd2e83e4ff6ea8872b3c2218f66c92b89b55f36560",
+        "allZero": true
+      },
+      {
+        "kind": "block",
+        "runId": "39562499637-chromium-workload-2-73c39967-ab8c-4d9e-a1c9-c6a74b68023b",
+        "sequence": 32,
+        "frame": 4992,
+        "frameAfterCopy": 4992,
+        "sampleRate": 44100,
+        "quantum": 128,
+        "inputChannels": 1,
+        "inputLengths": [
+          128
+        ],
+        "outputChannels": 1,
+        "outputLengths": [
+          128
+        ],
+        "previousEnd": 4992,
+        "contiguous": true,
+        "streak": 32,
+        "processorState": "warming",
+        "checksum": 1299645893,
+        "mainContextState": "running",
+        "arrivalTime": 96.89999999999418,
+        "pcmSha256": "076a27c79e5ace2a3d47f9dd2e83e4ff6ea8872b3c2218f66c92b89b55f36560",
+        "allZero": true
+      },
+      {
+        "kind": "block",
+        "runId": "39562499637-chromium-workload-2-73c39967-ab8c-4d9e-a1c9-c6a74b68023b",
+        "sequence": 33,
+        "frame": 5120,
+        "frameAfterCopy": 5120,
+        "sampleRate": 44100,
+        "quantum": 128,
+        "inputChannels": 1,
+        "inputLengths": [
+          128
+        ],
+        "outputChannels": 1,
+        "outputLengths": [
+          128
+        ],
+        "previousEnd": 5120,
+        "contiguous": true,
+        "streak": 33,
+        "processorState": "ready",
+        "checksum": 1299645893,
+        "mainContextState": "running",
+        "arrivalTime": 96.89999999999418,
+        "pcmSha256": "076a27c79e5ace2a3d47f9dd2e83e4ff6ea8872b3c2218f66c92b89b55f36560",
+        "allZero": true
+      },
+      {
+        "kind": "block",
+        "runId": "39562499637-chromium-workload-2-73c39967-ab8c-4d9e-a1c9-c6a74b68023b",
+        "sequence": 34,
+        "frame": 5248,
+        "frameAfterCopy": 5248,
+        "sampleRate": 44100,
+        "quantum": 128,
+        "inputChannels": 1,
+        "inputLengths": [
+          128
+        ],
+        "outputChannels": 1,
+        "outputLengths": [
+          128
+        ],
+        "previousEnd": 5248,
+        "contiguous": true,
+        "streak": 34,
+        "processorState": "ready",
+        "checksum": 1299645893,
+        "mainContextState": "running",
+        "arrivalTime": 96.89999999999418,
+        "pcmSha256": "076a27c79e5ace2a3d47f9dd2e83e4ff6ea8872b3c2218f66c92b89b55f36560",
+        "allZero": true
+      },
+      {
+        "kind": "block",
+        "runId": "39562499637-chromium-workload-2-73c39967-ab8c-4d9e-a1c9-c6a74b68023b",
+        "sequence": 35,
+        "frame": 5248,
+        "frameAfterCopy": 5248,
+        "sampleRate": 44100,
+        "quantum": 128,
+        "inputChannels": 1,
+        "inputLengths": [
+          128
+        ],
+        "outputChannels": 1,
+        "outputLengths": [
+          128
+        ],
+        "previousEnd": 5376,
+        "contiguous": false,
+        "streak": 1,
+        "processorState": "armed",
+        "checksum": 1299645893,
+        "mainContextState": "running",
+        "arrivalTime": 106.89999999999418,
+        "pcmSha256": "076a27c79e5ace2a3d47f9dd2e83e4ff6ea8872b3c2218f66c92b89b55f36560",
+        "allZero": true
+      },
+      {
+        "kind": "block",
+        "runId": "39562499637-chromium-workload-2-73c39967-ab8c-4d9e-a1c9-c6a74b68023b",
+        "sequence": 36,
+        "frame": 5504,
+        "frameAfterCopy": 5504,
+        "sampleRate": 44100,
+        "quantum": 128,
+        "inputChannels": 1,
+        "inputLengths": [
+          128
+        ],
+        "outputChannels": 1,
+        "outputLengths": [
+          128
+        ],
+        "previousEnd": 5376,
+        "contiguous": false,
+        "streak": 1,
+        "processorState": "armed",
+        "checksum": 1299645893,
+        "mainContextState": "running",
+        "arrivalTime": 106.89999999999418,
+        "pcmSha256": "076a27c79e5ace2a3d47f9dd2e83e4ff6ea8872b3c2218f66c92b89b55f36560",
+        "allZero": true
+      },
+      {
+        "kind": "block",
+        "runId": "39562499637-chromium-workload-2-73c39967-ab8c-4d9e-a1c9-c6a74b68023b",
+        "sequence": 37,
+        "frame": 5632,
+        "frameAfterCopy": 5632,
+        "sampleRate": 44100,
+        "quantum": 128,
+        "inputChannels": 1,
+        "inputLengths": [
+          128
+        ],
+        "outputChannels": 1,
+        "outputLengths": [
+          128
+        ],
+        "previousEnd": 5632,
+        "contiguous": true,
+        "streak": 2,
+        "processorState": "armed",
+        "checksum": 1299645893,
+        "mainContextState": "running",
+        "arrivalTime": 106.89999999999418,
+        "pcmSha256": "076a27c79e5ace2a3d47f9dd2e83e4ff6ea8872b3c2218f66c92b89b55f36560",
+        "allZero": true
+      }
+    ]
+  },
+  "environments": [
+    {
+      "path": "isolation-evidence/isolation-chrome-generated-39566258125/diagnostic-isolation/environment.txt",
+      "text": "Linux runnervmxehtw 7.0.0-1017-azure #17~24.04.1-Ubuntu SMP PREEMPT Thu Sep 24 18:46:57 UTC 2026 x86_64 x86_64 x86_64 GNU/Linux\nPRETTY_NAME=\"Ubuntu 24.04.5 LTS\"\nNAME=\"Ubuntu\"\nVERSION_ID=\"24.04\"\nVERSION=\"24.04.5 LTS (Noble Numbat)\"\nVERSION_CODENAME=noble\nID=ubuntu\nID_LIKE=debian\nHOME_URL=\"https://www.ubuntu.com/\"\nSUPPORT_URL=\"https://help.ubuntu.com/\"\nBUG_REPORT_URL=\"https://bugs.launchpad.net/ubuntu/\"\nPRIVACY_POLICY_URL=\"https://www.ubuntu.com/legal/terms-and-policies/privacy-policy\"\nUBUNTU_CODENAME=noble\nLOGO=ubuntu-logo\nimage=ubuntu24/20261018.339.1\nv22.23.3\nVersion 1.63.0\nGoogle Chrome 155.0.8059.84 \n"
+    },
+    {
+      "path": "isolation-evidence/isolation-chrome-immediate-39566258125/diagnostic-isolation/environment.txt",
+      "text": "Linux runnervm8k3b6 6.17.0-1022-azure #22-Ubuntu SMP Mon Jul 27 17:24:03 UTC 2026 x86_64 x86_64 x86_64 GNU/Linux\nPRETTY_NAME=\"Ubuntu 24.04.5 LTS\"\nNAME=\"Ubuntu\"\nVERSION_ID=\"24.04\"\nVERSION=\"24.04.5 LTS (Noble Numbat)\"\nVERSION_CODENAME=noble\nID=ubuntu\nID_LIKE=debian\nHOME_URL=\"https://www.ubuntu.com/\"\nSUPPORT_URL=\"https://help.ubuntu.com/\"\nBUG_REPORT_URL=\"https://bugs.launchpad.net/ubuntu/\"\nPRIVACY_POLICY_URL=\"https://www.ubuntu.com/legal/terms-and-policies/privacy-policy\"\nUBUNTU_CODENAME=noble\nLOGO=ubuntu-logo\nimage=ubuntu24/20261012.334.1\nv22.23.3\nVersion 1.63.0\nGoogle Chrome 155.0.8059.39 \n"
+    },
+    {
+      "path": "isolation-evidence/isolation-chrome-lead-39566258125/diagnostic-isolation/environment.txt",
+      "text": "Linux runnervm8k3b6 6.17.0-1022-azure #22-Ubuntu SMP Mon Jul 27 17:24:03 UTC 2026 x86_64 x86_64 x86_64 GNU/Linux\nPRETTY_NAME=\"Ubuntu 24.04.5 LTS\"\nNAME=\"Ubuntu\"\nVERSION_ID=\"24.04\"\nVERSION=\"24.04.5 LTS (Noble Numbat)\"\nVERSION_CODENAME=noble\nID=ubuntu\nID_LIKE=debian\nHOME_URL=\"https://www.ubuntu.com/\"\nSUPPORT_URL=\"https://help.ubuntu.com/\"\nBUG_REPORT_URL=\"https://bugs.launchpad.net/ubuntu/\"\nPRIVACY_POLICY_URL=\"https://www.ubuntu.com/legal/terms-and-policies/privacy-policy\"\nUBUNTU_CODENAME=noble\nLOGO=ubuntu-logo\nimage=ubuntu24/20261012.334.1\nv22.23.3\nVersion 1.63.0\nGoogle Chrome 155.0.8059.39 \n"
+    },
+    {
+      "path": "isolation-evidence/isolation-chrome-no-ready-39566258125/diagnostic-isolation/environment.txt",
+      "text": "Linux runnervm8k3b6 6.17.0-1022-azure #22-Ubuntu SMP Mon Jul 27 17:24:03 UTC 2026 x86_64 x86_64 x86_64 GNU/Linux\nPRETTY_NAME=\"Ubuntu 24.04.5 LTS\"\nNAME=\"Ubuntu\"\nVERSION_ID=\"24.04\"\nVERSION=\"24.04.5 LTS (Noble Numbat)\"\nVERSION_CODENAME=noble\nID=ubuntu\nID_LIKE=debian\nHOME_URL=\"https://www.ubuntu.com/\"\nSUPPORT_URL=\"https://help.ubuntu.com/\"\nBUG_REPORT_URL=\"https://bugs.launchpad.net/ubuntu/\"\nPRIVACY_POLICY_URL=\"https://www.ubuntu.com/legal/terms-and-policies/privacy-policy\"\nUBUNTU_CODENAME=noble\nLOGO=ubuntu-logo\nimage=ubuntu24/20261012.334.1\nv22.23.3\nVersion 1.63.0\nGoogle Chrome 155.0.8059.39 \n"
+    },
+    {
+      "path": "isolation-evidence/isolation-playwright-generated-39566258125/diagnostic-isolation/environment.txt",
+      "text": "Linux runnervmxehtw 7.0.0-1017-azure #17~24.04.1-Ubuntu SMP PREEMPT Thu Sep 24 18:46:57 UTC 2026 x86_64 x86_64 x86_64 GNU/Linux\nPRETTY_NAME=\"Ubuntu 24.04.5 LTS\"\nNAME=\"Ubuntu\"\nVERSION_ID=\"24.04\"\nVERSION=\"24.04.5 LTS (Noble Numbat)\"\nVERSION_CODENAME=noble\nID=ubuntu\nID_LIKE=debian\nHOME_URL=\"https://www.ubuntu.com/\"\nSUPPORT_URL=\"https://help.ubuntu.com/\"\nBUG_REPORT_URL=\"https://bugs.launchpad.net/ubuntu/\"\nPRIVACY_POLICY_URL=\"https://www.ubuntu.com/legal/terms-and-policies/privacy-policy\"\nUBUNTU_CODENAME=noble\nLOGO=ubuntu-logo\nimage=ubuntu24/20261018.339.1\nv22.23.3\nVersion 1.63.0\nGoogle Chrome 155.0.8059.84 \n"
+    },
+    {
+      "path": "isolation-evidence/isolation-playwright-immediate-39566258125/diagnostic-isolation/environment.txt",
+      "text": "Linux runnervm8k3b6 6.17.0-1022-azure #22-Ubuntu SMP Mon Jul 27 17:24:03 UTC 2026 x86_64 x86_64 x86_64 GNU/Linux\nPRETTY_NAME=\"Ubuntu 24.04.5 LTS\"\nNAME=\"Ubuntu\"\nVERSION_ID=\"24.04\"\nVERSION=\"24.04.5 LTS (Noble Numbat)\"\nVERSION_CODENAME=noble\nID=ubuntu\nID_LIKE=debian\nHOME_URL=\"https://www.ubuntu.com/\"\nSUPPORT_URL=\"https://help.ubuntu.com/\"\nBUG_REPORT_URL=\"https://bugs.launchpad.net/ubuntu/\"\nPRIVACY_POLICY_URL=\"https://www.ubuntu.com/legal/terms-and-policies/privacy-policy\"\nUBUNTU_CODENAME=noble\nLOGO=ubuntu-logo\nimage=ubuntu24/20261012.334.1\nv22.23.3\nVersion 1.63.0\nGoogle Chrome 155.0.8059.39 \n"
+    },
+    {
+      "path": "isolation-evidence/isolation-playwright-lead-39566258125/diagnostic-isolation/environment.txt",
+      "text": "Linux runnervm8k3b6 6.17.0-1022-azure #22-Ubuntu SMP Mon Jul 27 17:24:03 UTC 2026 x86_64 x86_64 x86_64 GNU/Linux\nPRETTY_NAME=\"Ubuntu 24.04.5 LTS\"\nNAME=\"Ubuntu\"\nVERSION_ID=\"24.04\"\nVERSION=\"24.04.5 LTS (Noble Numbat)\"\nVERSION_CODENAME=noble\nID=ubuntu\nID_LIKE=debian\nHOME_URL=\"https://www.ubuntu.com/\"\nSUPPORT_URL=\"https://help.ubuntu.com/\"\nBUG_REPORT_URL=\"https://bugs.launchpad.net/ubuntu/\"\nPRIVACY_POLICY_URL=\"https://www.ubuntu.com/legal/terms-and-policies/privacy-policy\"\nUBUNTU_CODENAME=noble\nLOGO=ubuntu-logo\nimage=ubuntu24/20261012.334.1\nv22.23.3\nVersion 1.63.0\nGoogle Chrome 155.0.8059.39 \n"
+    },
+    {
+      "path": "isolation-evidence/isolation-playwright-no-ready-39566258125/diagnostic-isolation/environment.txt",
+      "text": "Linux runnervmxehtw 7.0.0-1017-azure #17~24.04.1-Ubuntu SMP PREEMPT Thu Sep 24 18:46:57 UTC 2026 x86_64 x86_64 x86_64 GNU/Linux\nPRETTY_NAME=\"Ubuntu 24.04.5 LTS\"\nNAME=\"Ubuntu\"\nVERSION_ID=\"24.04\"\nVERSION=\"24.04.5 LTS (Noble Numbat)\"\nVERSION_CODENAME=noble\nID=ubuntu\nID_LIKE=debian\nHOME_URL=\"https://www.ubuntu.com/\"\nSUPPORT_URL=\"https://help.ubuntu.com/\"\nBUG_REPORT_URL=\"https://bugs.launchpad.net/ubuntu/\"\nPRIVACY_POLICY_URL=\"https://www.ubuntu.com/legal/terms-and-policies/privacy-policy\"\nUBUNTU_CODENAME=noble\nLOGO=ubuntu-logo\nimage=ubuntu24/20261018.339.1\nv22.23.3\nVersion 1.63.0\nGoogle Chrome 155.0.8059.84 \n"
+    },
+    {
+      "path": "originals/capture-chrome-39562499637-1/diagnostic-results/environment.txt",
+      "text": "Linux runnervm8k3b6 6.17.0-1022-azure #22-Ubuntu SMP Mon Jul 27 17:24:03 UTC 2026 x86_64 x86_64 x86_64 GNU/Linux\nPRETTY_NAME=\"Ubuntu 24.04.5 LTS\"\nNAME=\"Ubuntu\"\nVERSION_ID=\"24.04\"\nVERSION=\"24.04.5 LTS (Noble Numbat)\"\nVERSION_CODENAME=noble\nID=ubuntu\nID_LIKE=debian\nHOME_URL=\"https://www.ubuntu.com/\"\nSUPPORT_URL=\"https://help.ubuntu.com/\"\nBUG_REPORT_URL=\"https://bugs.launchpad.net/ubuntu/\"\nPRIVACY_POLICY_URL=\"https://www.ubuntu.com/legal/terms-and-policies/privacy-policy\"\nUBUNTU_CODENAME=noble\nLOGO=ubuntu-logo\nv22.23.3\n10.9.9\nVersion 1.63.0\nGoogle Chrome 155.0.8059.39 \n/home/runner/.cache/ms-playwright/chromium-1243/chrome-linux64/chrome\n"
+    },
+    {
+      "path": "originals/capture-playwright-39562499637-1/diagnostic-results/environment.txt",
+      "text": "Linux runnervm8k3b6 6.17.0-1022-azure #22-Ubuntu SMP Mon Jul 27 17:24:03 UTC 2026 x86_64 x86_64 x86_64 GNU/Linux\nPRETTY_NAME=\"Ubuntu 24.04.5 LTS\"\nNAME=\"Ubuntu\"\nVERSION_ID=\"24.04\"\nVERSION=\"24.04.5 LTS (Noble Numbat)\"\nVERSION_CODENAME=noble\nID=ubuntu\nID_LIKE=debian\nHOME_URL=\"https://www.ubuntu.com/\"\nSUPPORT_URL=\"https://help.ubuntu.com/\"\nBUG_REPORT_URL=\"https://bugs.launchpad.net/ubuntu/\"\nPRIVACY_POLICY_URL=\"https://www.ubuntu.com/legal/terms-and-policies/privacy-policy\"\nUBUNTU_CODENAME=noble\nLOGO=ubuntu-logo\nv22.23.3\n10.9.9\nVersion 1.63.0\nGoogle Chrome 155.0.8059.39 \n/home/runner/.cache/ms-playwright/chromium-1243/chrome-linux64/chrome\n"
+    }
+  ],
+  "captureArtifacts": {
+    "total_count": 8,
+    "artifacts": [
+      {
+        "id": 12330605814,
+        "node_id": "MDg6QXJ0aWZhY3QxMjMzMDYwNTgxNA==",
+        "name": "isolation-chrome-lead-39566258125",
+        "size_in_bytes": 27731192,
+        "url": "https://api.github.com/repos/Ajey877/Apex-Studio/actions/artifacts/12330605814",
+        "archive_download_url": "https://api.github.com/repos/Ajey877/Apex-Studio/actions/artifacts/12330605814/zip",
+        "expired": false,
+        "digest": "sha256:8404f70cf9af21940e259cdd744b70574fc9be9460d85f09fbc4c336bd738acb",
+        "created_at": "2026-10-21T08:06:36Z",
+        "updated_at": "2026-10-21T08:06:36Z",
+        "expires_at": "2026-11-20T08:06:35Z",
+        "workflow_run": {
+          "id": 39566258125,
+          "repository_id": 1340752134,
+          "head_repository_id": 1340752134,
+          "head_branch": "arena/44489220-apex-studio",
+          "head_sha": "4b7cbcfa13c620768f9bfeff62dc378930367053"
+        }
+      },
+      {
+        "id": 12330461701,
+        "node_id": "MDg6QXJ0aWZhY3QxMjMzMDQ2MTcwMQ==",
+        "name": "isolation-chrome-immediate-39566258125",
+        "size_in_bytes": 27600837,
+        "url": "https://api.github.com/repos/Ajey877/Apex-Studio/actions/artifacts/12330461701",
+        "archive_download_url": "https://api.github.com/repos/Ajey877/Apex-Studio/actions/artifacts/12330461701/zip",
+        "expired": false,
+        "digest": "sha256:1a86fc6b32ae88f7f64a39329f2edd0324177d01b710e2bd61ec1c49bdc981c3",
+        "created_at": "2026-10-21T08:07:00Z",
+        "updated_at": "2026-10-21T08:07:00Z",
+        "expires_at": "2026-11-20T08:06:57Z",
+        "workflow_run": {
+          "id": 39566258125,
+          "repository_id": 1340752134,
+          "head_repository_id": 1340752134,
+          "head_branch": "arena/44489220-apex-studio",
+          "head_sha": "4b7cbcfa13c620768f9bfeff62dc378930367053"
+        }
+      },
+      {
+        "id": 12330257450,
+        "node_id": "MDg6QXJ0aWZhY3QxMjMzMDI1NzQ1MA==",
+        "name": "isolation-chrome-no-ready-39566258125",
+        "size_in_bytes": 27691256,
+        "url": "https://api.github.com/repos/Ajey877/Apex-Studio/actions/artifacts/12330257450",
+        "archive_download_url": "https://api.github.com/repos/Ajey877/Apex-Studio/actions/artifacts/12330257450/zip",
+        "expired": false,
+        "digest": "sha256:9f8cc3e41505d4b607c6f29bf30605625bc785eb67f4b49125372e8dce045de5",
+        "created_at": "2026-10-21T08:07:17Z",
+        "updated_at": "2026-10-21T08:07:17Z",
+        "expires_at": "2026-11-20T08:07:16Z",
+        "workflow_run": {
+          "id": 39566258125,
+          "repository_id": 1340752134,
+          "head_repository_id": 1340752134,
+          "head_branch": "arena/44489220-apex-studio",
+          "head_sha": "4b7cbcfa13c620768f9bfeff62dc378930367053"
+        }
+      },
+      {
+        "id": 12330086843,
+        "node_id": "MDg6QXJ0aWZhY3QxMjMzMDA4Njg0Mw==",
+        "name": "isolation-playwright-immediate-39566258125",
+        "size_in_bytes": 27610589,
+        "url": "https://api.github.com/repos/Ajey877/Apex-Studio/actions/artifacts/12330086843",
+        "archive_download_url": "https://api.github.com/repos/Ajey877/Apex-Studio/actions/artifacts/12330086843/zip",
+        "expired": false,
+        "digest": "sha256:9b475f6deb0e7d7801d51526820c121b0a47dc49000c09b06fa035e0913f9d82",
+        "created_at": "2026-10-21T08:07:02Z",
+        "updated_at": "2026-10-21T08:07:02Z",
+        "expires_at": "2026-11-20T08:07:00Z",
+        "workflow_run": {
+          "id": 39566258125,
+          "repository_id": 1340752134,
+          "head_repository_id": 1340752134,
+          "head_branch": "arena/44489220-apex-studio",
+          "head_sha": "4b7cbcfa13c620768f9bfeff62dc378930367053"
+        }
+      },
+      {
+        "id": 12330061903,
+        "node_id": "MDg6QXJ0aWZhY3QxMjMzMDA2MTkwMw==",
+        "name": "isolation-chrome-generated-39566258125",
+        "size_in_bytes": 30470368,
+        "url": "https://api.github.com/repos/Ajey877/Apex-Studio/actions/artifacts/12330061903",
+        "archive_download_url": "https://api.github.com/repos/Ajey877/Apex-Studio/actions/artifacts/12330061903/zip",
+        "expired": false,
+        "digest": "sha256:015b69a86c47a808ff4054e43e4d9f910f01d0b4844384b65cf7bc5bdfc0ca62",
+        "created_at": "2026-10-21T08:07:23Z",
+        "updated_at": "2026-10-21T08:07:23Z",
+        "expires_at": "2026-11-20T08:07:22Z",
+        "workflow_run": {
+          "id": 39566258125,
+          "repository_id": 1340752134,
+          "head_repository_id": 1340752134,
+          "head_branch": "arena/44489220-apex-studio",
+          "head_sha": "4b7cbcfa13c620768f9bfeff62dc378930367053"
+        }
+      },
+      {
+        "id": 12329923112,
+        "node_id": "MDg6QXJ0aWZhY3QxMjMyOTkyMzExMg==",
+        "name": "isolation-playwright-generated-39566258125",
+        "size_in_bytes": 30437824,
+        "url": "https://api.github.com/repos/Ajey877/Apex-Studio/actions/artifacts/12329923112",
+        "archive_download_url": "https://api.github.com/repos/Ajey877/Apex-Studio/actions/artifacts/12329923112/zip",
+        "expired": false,
+        "digest": "sha256:57e2e987d8c85f106080495cf7fd13b7236a8e31629f5d65915de05897f078fd",
+        "created_at": "2026-10-21T08:07:22Z",
+        "updated_at": "2026-10-21T08:07:22Z",
+        "expires_at": "2026-11-20T08:07:19Z",
+        "workflow_run": {
+          "id": 39566258125,
+          "repository_id": 1340752134,
+          "head_repository_id": 1340752134,
+          "head_branch": "arena/44489220-apex-studio",
+          "head_sha": "4b7cbcfa13c620768f9bfeff62dc378930367053"
+        }
+      },
+      {
+        "id": 12329678591,
+        "node_id": "MDg6QXJ0aWZhY3QxMjMyOTY3ODU5MQ==",
+        "name": "isolation-playwright-lead-39566258125",
+        "size_in_bytes": 27764408,
+        "url": "https://api.github.com/repos/Ajey877/Apex-Studio/actions/artifacts/12329678591",
+        "archive_download_url": "https://api.github.com/repos/Ajey877/Apex-Studio/actions/artifacts/12329678591/zip",
+        "expired": false,
+        "digest": "sha256:613beeeee7b25df6e502c04f3dc3cfc8e19a7872e70da61038ed81a100829510",
+        "created_at": "2026-10-21T08:07:07Z",
+        "updated_at": "2026-10-21T08:07:07Z",
+        "expires_at": "2026-11-20T08:07:05Z",
+        "workflow_run": {
+          "id": 39566258125,
+          "repository_id": 1340752134,
+          "head_repository_id": 1340752134,
+          "head_branch": "arena/44489220-apex-studio",
+          "head_sha": "4b7cbcfa13c620768f9bfeff62dc378930367053"
+        }
+      },
+      {
+        "id": 12329368831,
+        "node_id": "MDg6QXJ0aWZhY3QxMjMyOTM2ODgzMQ==",
+        "name": "isolation-playwright-no-ready-39566258125",
+        "size_in_bytes": 27656664,
+        "url": "https://api.github.com/repos/Ajey877/Apex-Studio/actions/artifacts/12329368831",
+        "archive_download_url": "https://api.github.com/repos/Ajey877/Apex-Studio/actions/artifacts/12329368831/zip",
+        "expired": false,
+        "digest": "sha256:0257a614378d85d4a8ebdb97018d4f0bcb6805c1312274ceb617f97160e6e3fb",
+        "created_at": "2026-10-21T08:06:25Z",
+        "updated_at": "2026-10-21T08:06:25Z",
+        "expires_at": "2026-11-20T08:06:23Z",
+        "workflow_run": {
+          "id": 39566258125,
+          "repository_id": 1340752134,
+          "head_repository_id": 1340752134,
+          "head_branch": "arena/44489220-apex-studio",
+          "head_sha": "4b7cbcfa13c620768f9bfeff62dc378930367053"
+        }
+      }
+    ]
+  },
+  "historyArtifacts": {
+    "total_count": 1,
+    "artifacts": [
+      {
+        "id": 12330238061,
+        "node_id": "MDg6QXJ0aWZhY3QxMjMzMDIzODA2MQ==",
+        "name": "original-duplicate-and-runner-metadata-39567197925",
+        "size_in_bytes": 1583,
+        "url": "https://api.github.com/repos/Ajey877/Apex-Studio/actions/artifacts/12330238061",
+        "archive_download_url": "https://api.github.com/repos/Ajey877/Apex-Studio/actions/artifacts/12330238061/zip",
+        "expired": false,
+        "digest": "sha256:1fa627ffb231ea80f47a0e616c7c190c4d82823ee3f332f4e805b0df588439ec",
+        "created_at": "2026-10-21T08:10:03Z",
+        "updated_at": "2026-10-21T08:10:03Z",
+        "expires_at": "2026-11-20T08:10:02Z",
+        "workflow_run": {
+          "id": 39567197925,
+          "repository_id": 1340752134,
+          "head_repository_id": 1340752134,
+          "head_branch": "arena/44489220-apex-studio",
+          "head_sha": "5c7ff6b08e914e088f13c3adcc855c2567959bdf"
+        }
+      }
+    ]
+  }
+}

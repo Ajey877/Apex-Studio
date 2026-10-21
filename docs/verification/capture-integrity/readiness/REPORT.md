@@ -1,5 +1,12 @@
 # Clean-host verification / readiness contract — blocked at GitHub authorization
 
+> **Historical local-readiness report.** The authorization blocker below describes
+> the original local phase, not the current status. Continue with the
+> [132-capture hosted verification](HOSTED-REPORT.md), then the
+> [240-trial isolation report](../isolation/REPORT.md). These later experiments
+> did not establish a root cause or approve capture/automation parity. The
+> documentation is being handed off through draft PR #267; no merge is authorized.
+
 ## Outcome
 
 **Hosted verification has NOT occurred. The automation-parity gate remains closed.**
