@@ -9,7 +9,7 @@ function fixture(startupGap = false) {
     inputChannels: 1, inputLengths: [4], mainContextState: 'running', pcm: [0, 0, 0, 0] }));
   return { runId: id, requiredQuanta: 2, sampleRate: 40, sourceFrames: 0, wrongRunIds: 0,
     aliasCount: 0, changedBlocks: 0, checksumFailures: 0, error: null,
-    records, window: { startFrame: 17, sourceStartFrame: 20, sourceFrames: 0, endFrame: 28, scheduledAtFrame: 13 },
+    records, window: { startFrame: 17, sourceStartFrame: 20, sourceFrames: 0, endFrame: 28, scheduledAtFrame: 16 },
     markers: [ { kind: 'ready', runId: id, sequence: 2, endFrame: 16, required: 2, streak: 2, sampleRate: 40, mainContextState: 'running' },
       { kind: 'armed', runId: id, frame: 16, tooLate: false },
       { kind: 'end', runId: id, blocks: 6, frame: 24, quantum: 4, endFrame: 28 } ] };
