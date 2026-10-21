@@ -67,6 +67,11 @@ jobs:
         run: |
           printf 'legacy=%s\nreadiness=%s\n' '${{ steps.legacy.outcome }}' '${{ steps.readiness.outcome }}' > diagnostic-results/outcomes.txt
           echo 'Startup anomalies are reported separately; a valid post-readiness window does not certify the legacy stream.' >> "$GITHUB_STEP_SUMMARY"
+      - name: Publish compact per-run evidence through check annotations
+        if: always()
+        run: |
+          python3 docs/verification/capture-integrity/readiness/publish-summaries.py diagnostic-results
+          python3 docs/verification/capture-integrity/readiness/publish-summaries.py docs/verification/capture-integrity/evidence
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -76,3 +81,30 @@ jobs:
             diagnostic-results/
             docs/verification/capture-integrity/evidence/
             test-results/
+
+  inspect-first-run:
+    if: github.ref == 'refs/heads/arena/44489220-apex-studio'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          run-id: 39562499637
+          path: downloaded-first-run
+      - name: Independently verify original raw samples and frame metadata
+        run: |
+          mkdir -p inspected-results
+          python3 docs/verification/capture-integrity/readiness/verify-hosted.py downloaded-first-run inspected-results/independent-ledger.json
+          python3 docs/verification/capture-integrity/readiness/publish-summaries.py downloaded-first-run inspected-results/independent-ledger.json
+          python3 docs/verification/capture-integrity/readiness/publish-summaries.py downloaded-first-run
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: first-run-independent-analysis-${{ github.run_id }}
+          retention-days: 30
+          path: inspected-results/
