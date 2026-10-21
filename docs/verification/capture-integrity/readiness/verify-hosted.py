@@ -13,11 +13,18 @@ def source(n):
 for path in sorted(root.rglob('*.json.gz')):
     raw=path.read_bytes(); run=json.loads(gzip.decompress(raw)); records=run['records']
     is_ready=run.get('protocol')=='readiness-v2'
+    generated=run.get('mode')=='generated'
     w=run['window'] if is_ready else run
     markers=run.get('markers',run.get('messages',[]))
     ready=next((m for m in markers if m['kind']=='ready'),None)
     armed=next((m for m in markers if m['kind']=='armed'),None)
     end=next((m for m in markers if m['kind']=='end'),None)
+    if w is None:
+        results.append({'file':str(path.relative_to(root)), 'mode':run.get('mode'), 'runId':run.get('runId'),
+          'protocol':run.get('protocol'), 'rawSha256':hashlib.sha256(raw).hexdigest(),
+          'measurementIntegrity':False,'sourceFidelity':False,'error':run.get('error','missing-window'),
+          'blocks':len(records),'inspectionError':'No scheduled measurement window; raw startup records retained'})
+        continue
     begin,finish=w['startFrame'],w['endFrame']; scheduled=w['sourceStartFrame']; expected=source(run['sourceFrames'])
     seen=bytearray(finish-begin); selected=array.array('f',[0])*(finish-begin)
     checksum_errors=sequence_errors=layout_errors=duplicates=conflicts=conflicting_blocks=0
@@ -44,11 +51,14 @@ for path in sorted(root.rglob('*.json.gz')):
                 duplicates+=1; conflicts+=selected[k]!=sample
             seen[k]=1; selected[k]=sample
             si=frame-scheduled; reference=expected[si] if 0<=si<len(expected) else 0
+            if generated:
+                x=(frame ^ 0x7135ace1)&0xffffffff; x^=(x<<13)&0xffffffff; x^=x>>17; x^=(x<<5)&0xffffffff; x&=0xffffffff
+                reference=array.array('f',[(x/4294967296-.5)*.5])[0]
             error=abs(sample-reference)
             if error and first_error is None: first_error={'frame':frame,'sequence':r['sequence'],'sourceIndex':si,'actual':sample,'expected':reference,'error':error}
             if not math.isfinite(error): nonfinite+=1
             max_error=max(max_error,error); square+=error*error; compared+=1
-            if not 0<=si<len(expected): silence_peak=max(silence_peak,abs(sample))
+            if not generated and not 0<=si<len(expected): silence_peak=max(silence_peak,abs(sample))
     missing=seen.count(0)
     proof=records[ready['sequence']-31:ready['sequence']+1] if ready else []
     readiness=bool(ready and ready['required']==32 and ready['streak']>=32 and len(proof)==32 and all(b['frame']==a['frame']+a['quantum'] for a,b in zip(proof,proof[1:])) and ready['endFrame']==proof[-1]['frame']+proof[-1]['quantum']) if is_ready else None
@@ -61,8 +71,8 @@ for path in sorted(root.rglob('*.json.gz')):
         id_errors+=sum(m['runId']!=run['runId'] for m in markers)
         integrity &= id_errors==0
     summary=json.loads(path.with_name(path.name.replace('.json.gz','.summary.json')).read_text())
-    hash_matches=summary.get('rawSha256',hashlib.sha256(raw).hexdigest())==hashlib.sha256(raw).hexdigest()
-    results.append({'file':str(path.relative_to(root)), 'protocol':'readiness-v2' if is_ready else 'legacy', 'runId':run.get('runId'),
+    hash_matches=(summary['rawSha256']==hashlib.sha256(raw).hexdigest()) if 'rawSha256' in summary else None
+    results.append({'file':str(path.relative_to(root)), 'protocol':'readiness-v2' if is_ready else 'legacy', 'runId':run.get('runId'),'mode':run.get('mode'),
         'browserVersion':run['browserVersion'],'playwrightVersion':run.get('playwrightVersion'), 'environment':run['environment'],
         'rawSha256':hashlib.sha256(raw).hexdigest(),'rawHashMatchesSummary':hash_matches,'blocks':len(records),'quantumSizes':sorted({r['quantum'] for r in records}),
         'startFrame':begin,'endFrame':finish,'sourceStartFrame':scheduled,'sourceFrames':len(expected),'expectedSamples':len(seen),'comparedSamples':compared,
@@ -71,5 +81,5 @@ for path in sorted(root.rglob('*.json.gz')):
         'missing':missing,'duplicates':duplicates,'conflicts':conflicts,'conflictingTimestampBlocks':conflicting_blocks,
         'checksumErrors':checksum_errors,'sequenceErrors':sequence_errors,'layoutErrors':layout_errors,'runIdErrors':id_errors,
         'aliasCount':run['aliasCount'],'changedBlocks':run['changedBlocks'],'checksumFailuresReported':run['checksumFailures'],
-        'firstPcmError':first_error,'archivedTestPassed':summary['passed']})
+        'firstPcmError':first_error,'archivedTestPassed':summary.get('passed',summary.get('baselineContractPass'))})
 output.write_text(json.dumps(results,indent=2)); print(f'Independently verified {len(results)} raw captures -> {output}')
