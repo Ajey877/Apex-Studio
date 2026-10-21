@@ -5,7 +5,7 @@ Raw PCM remains in workflow artifacts. No summary is treated as a pass without
 its reported integrity/fidelity outcomes. One notice per protocol/browser keeps
 annotation count small; failures and startup anomalies are not suppressed.
 """
-import hashlib, json, pathlib, sys
+import hashlib, json, os, pathlib, sys
 root=pathlib.Path(sys.argv[1])
 if len(sys.argv)>2:
     rows=json.loads(pathlib.Path(sys.argv[2]).read_text())
@@ -46,11 +46,17 @@ for r in rows:
 payload=json.dumps(compact,separators=(',',':'))
 digest=hashlib.sha256(payload.encode()).hexdigest()
 chunks=[payload[i:i+1800] for i in range(0,len(payload),1800)]
+# Actions retains at most ten notice annotations per step. The workflow
+# publishes four disjoint ranges and a separate environment step.
+assert len(chunks) <= 40, 'Payload needs an additional explicit annotation step'
+first=int(os.environ.get('PART_START','0'))
+last=int(os.environ.get('PART_END','10'))
 for i,text in enumerate(chunks):
+    if not first <= i < last: continue
     envelope=json.dumps({'sha256':digest,'part':i,'parts':len(chunks),'text':text},separators=(',',':'))
     assert len(envelope.encode()) < 4096
     message=envelope.replace('%','%25').replace('\r','%0D').replace('\n','%0A')
     print(f'::notice title=Capture payload {digest[:12]} part {i}::{message}')
-for path in root.rglob('environment.txt'):
+for path in (root.rglob('environment.txt') if os.environ.get('PUBLISH_ENV') == '1' else []):
     message=path.read_text().replace('%','%25').replace('\r','%0D').replace('\n','%0A')
     print(f'::notice title=Capture environment::{message}')

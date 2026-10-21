@@ -67,11 +67,6 @@ jobs:
         run: |
           printf 'legacy=%s\nreadiness=%s\n' '${{ steps.legacy.outcome }}' '${{ steps.readiness.outcome }}' > diagnostic-results/outcomes.txt
           echo 'Startup anomalies are reported separately; a valid post-readiness window does not certify the legacy stream.' >> "$GITHUB_STEP_SUMMARY"
-      - name: Publish compact per-run evidence through check annotations
-        if: always()
-        run: |
-          python3 docs/verification/capture-integrity/readiness/publish-summaries.py diagnostic-results
-          python3 docs/verification/capture-integrity/readiness/publish-summaries.py docs/verification/capture-integrity/evidence
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -104,7 +99,32 @@ jobs:
         run: |
           mkdir -p inspected-results
           python3 docs/verification/capture-integrity/readiness/verify-hosted.py downloaded-source-run inspected-results/independent-ledger.json
-          python3 docs/verification/capture-integrity/readiness/publish-summaries.py downloaded-source-run inspected-results/independent-ledger.json
+      - name: Publish verified evidence parts 0 through 9
+        env:
+          PART_START: '0'
+          PART_END: '10'
+        run: python3 docs/verification/capture-integrity/readiness/publish-summaries.py downloaded-source-run inspected-results/independent-ledger.json
+      - name: Publish verified evidence parts 10 through 19
+        env:
+          PART_START: '10'
+          PART_END: '20'
+        run: python3 docs/verification/capture-integrity/readiness/publish-summaries.py downloaded-source-run inspected-results/independent-ledger.json
+      - name: Publish verified evidence parts 20 through 29
+        env:
+          PART_START: '20'
+          PART_END: '30'
+        run: python3 docs/verification/capture-integrity/readiness/publish-summaries.py downloaded-source-run inspected-results/independent-ledger.json
+      - name: Publish verified evidence parts 30 through 39
+        env:
+          PART_START: '30'
+          PART_END: '40'
+        run: python3 docs/verification/capture-integrity/readiness/publish-summaries.py downloaded-source-run inspected-results/independent-ledger.json
+      - name: Publish original capture host environments
+        env:
+          PART_START: '99999'
+          PART_END: '99999'
+          PUBLISH_ENV: '1'
+        run: python3 docs/verification/capture-integrity/readiness/publish-summaries.py downloaded-source-run inspected-results/independent-ledger.json
       - uses: actions/upload-artifact@v4
         if: always()
         with:
