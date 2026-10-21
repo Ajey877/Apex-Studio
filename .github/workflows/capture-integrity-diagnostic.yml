@@ -78,7 +78,7 @@ jobs:
             test-results/
 
   inspect-first-run:
-    if: github.ref == 'refs/heads/arena/44489220-apex-studio' && !contains(github.event.head_commit.message, '[isolation]')
+    if: github.ref == 'refs/heads/arena/44489220-apex-studio' && !contains(github.event.head_commit.message, '[isolation]') && !contains(github.event.head_commit.message, '[isolation-inspect]')
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     strategy:
@@ -212,3 +212,35 @@ jobs:
       - name: Preserve failing experiment status
         if: always()
         run: test '${{ steps.experiment.outcome }}' = success
+
+  isolation-history:
+    if: github.ref == 'refs/heads/arena/44489220-apex-studio' && contains(github.event.head_commit.message, '[isolation-inspect]')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          run-id: 39562499637
+          path: originals
+      - uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          run-id: 39566258125
+          path: isolation-evidence
+      - name: Inspect original duplicate without replaying or replacing it
+        run: |
+          mkdir -p combined
+          mv originals combined/
+          mv isolation-evidence combined/
+          python3 docs/verification/capture-integrity/isolation/inspect-history.py combined
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: original-duplicate-and-runner-metadata-${{ github.run_id }}
+          path: inspection-results/
+          retention-days: 30
