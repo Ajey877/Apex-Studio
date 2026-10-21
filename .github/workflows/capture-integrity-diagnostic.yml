@@ -10,7 +10,7 @@ permissions:
   contents: read
 jobs:
   capture:
-    if: github.ref == 'refs/heads/arena/44489220-apex-studio'
+    if: github.ref == 'refs/heads/arena/44489220-apex-studio' && !contains(github.event.head_commit.message, '[inspect-only]')
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     strategy:
@@ -86,6 +86,10 @@ jobs:
     if: github.ref == 'refs/heads/arena/44489220-apex-studio'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        source-run: ['39562499637', '39563380457']
     permissions:
       contents: read
       actions: read
@@ -94,17 +98,16 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           github-token: ${{ github.token }}
-          run-id: 39562499637
-          path: downloaded-first-run
+          run-id: ${{ matrix.source-run }}
+          path: downloaded-source-run
       - name: Independently verify original raw samples and frame metadata
         run: |
           mkdir -p inspected-results
-          python3 docs/verification/capture-integrity/readiness/verify-hosted.py downloaded-first-run inspected-results/independent-ledger.json
-          python3 docs/verification/capture-integrity/readiness/publish-summaries.py downloaded-first-run inspected-results/independent-ledger.json
-          python3 docs/verification/capture-integrity/readiness/publish-summaries.py downloaded-first-run
+          python3 docs/verification/capture-integrity/readiness/verify-hosted.py downloaded-source-run inspected-results/independent-ledger.json
+          python3 docs/verification/capture-integrity/readiness/publish-summaries.py downloaded-source-run inspected-results/independent-ledger.json
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: first-run-independent-analysis-${{ github.run_id }}
+          name: independent-analysis-${{ matrix.source-run }}-${{ github.run_id }}
           retention-days: 30
           path: inspected-results/

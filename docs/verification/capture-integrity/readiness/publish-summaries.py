@@ -5,7 +5,7 @@ Raw PCM remains in workflow artifacts. No summary is treated as a pass without
 its reported integrity/fidelity outcomes. One notice per protocol/browser keeps
 annotation count small; failures and startup anomalies are not suppressed.
 """
-import json, pathlib, sys
+import hashlib, json, pathlib, sys
 root=pathlib.Path(sys.argv[1])
 if len(sys.argv)>2:
     rows=json.loads(pathlib.Path(sys.argv[2]).read_text())
@@ -27,14 +27,30 @@ else:
             'compared':r.get('compared',r.get('comparedSamples')), 'quantumSizes':r['quantumSizes'],
             'ready':r.get('ready'),'armed':r.get('armed'),'window':r.get('window'), 'environment':r['environment'],
             'rawSha256':r.get('rawSha256')})
-groups={}
-for r in rows: groups.setdefault((r['protocol'],r['browserVersion']),[]).append(r)
-for (protocol,browser), records in groups.items():
-    # Chunk if needed: do not truncate any run or first-failure detail.
-    for start in range(0,len(records),9):
-        message=json.dumps(records[start:start+9],separators=(',',':'))
-        message=message.replace('%','%25').replace('\r','%0D').replace('\n','%0A')
-        print(f'::notice title=Capture evidence {protocol} {browser} chunk {start//9}::{message}')
+# GitHub silently truncates individual notice messages at 4096 characters.
+# Preserve compact full-run metrics in hash-verified, reconstructible fragments.
+compact=[]
+for r in rows:
+    if 'archivedTestPassed' in r:
+        compact.append({k:r.get(k) for k in [
+            'file','protocol','browserVersion','playwrightVersion','rawSha256','rawHashMatchesSummary',
+            'blocks','quantumSizes','startFrame','endFrame','sourceStartFrame','sourceFrames',
+            'expectedSamples','comparedSamples','anomalies','readiness','measurementIntegrity','sourceFidelity',
+            'maxAbsError','rmsError','silenceMax','missing','duplicates','conflicts','conflictingTimestampBlocks',
+            'checksumErrors','sequenceErrors','layoutErrors','runIdErrors','aliasCount','changedBlocks',
+            'checksumFailuresReported','nonfiniteSamples','firstPcmError','archivedTestPassed'
+        ]})
+    else:
+        # This is the existing test summary, not independent raw verification.
+        compact.append(r)
+payload=json.dumps(compact,separators=(',',':'))
+digest=hashlib.sha256(payload.encode()).hexdigest()
+chunks=[payload[i:i+1800] for i in range(0,len(payload),1800)]
+for i,text in enumerate(chunks):
+    envelope=json.dumps({'sha256':digest,'part':i,'parts':len(chunks),'text':text},separators=(',',':'))
+    assert len(envelope.encode()) < 4096
+    message=envelope.replace('%','%25').replace('\r','%0D').replace('\n','%0A')
+    print(f'::notice title=Capture payload {digest[:12]} part {i}::{message}')
 for path in root.rglob('environment.txt'):
     message=path.read_text().replace('%','%25').replace('\r','%0D').replace('\n','%0A')
     print(f'::notice title=Capture environment::{message}')
