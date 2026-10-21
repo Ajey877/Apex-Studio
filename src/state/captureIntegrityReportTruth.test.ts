@@ -22,7 +22,10 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
 const DOC_ROOT = 'docs/verification/capture-integrity';
-const read = (relative: string): string => readFileSync(`${DOC_ROOT}/${relative}`, 'utf8');
+/** Line-ending agnostic reader — the repo convention for source-inspection tests
+    (see productTruthStrings.test.ts): Windows runners check text files out with
+    CRLF, which must not change what the parsers below see. */
+const read = (relative: string): string => readFileSync(`${DOC_ROOT}/${relative}`, 'utf8').replace(/\r\n/g, '\n');
 
 const isolationReport = read('isolation/REPORT.md');
 const readinessHostedReport = read('readiness/HOSTED-REPORT.md');
