@@ -1,0 +1,246 @@
+name: Capture integrity diagnostic (opt-in)
+on:
+  push:
+    branches: ['arena/44489220-apex-studio']
+    paths:
+      - '.github/workflows/capture-integrity-diagnostic.yml'
+      - 'docs/verification/capture-integrity/**'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  capture:
+    if: github.ref == 'refs/heads/arena/44489220-apex-studio' && !contains(github.event.head_commit.message, '[inspect-only]') && !contains(github.event.head_commit.message, '[isolation]')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        browser: [playwright, chrome]
+    env:
+      CI: 'true'
+      ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - name: Install locked Playwright Chromium
+        run: npx playwright install --with-deps chromium
+      - name: Record host and actual browser installation
+        run: |
+          mkdir -p diagnostic-results
+          { uname -a; cat /etc/os-release; node --version; npm --version; npx playwright --version; google-chrome --version || true; } > diagnostic-results/environment.txt
+          node --input-type=module -e "import {chromium} from 'playwright'; import fs from 'node:fs'; const p=chromium.executablePath(); fs.appendFileSync('diagnostic-results/environment.txt', p+'\n');" 
+          sha256sum package-lock.json docs/verification/capture-integrity/capture.ts > diagnostic-results/source-checksums.txt
+      - name: Choose second installed browser
+        if: matrix.browser == 'chrome'
+        run: |
+          test -x /usr/bin/google-chrome
+          echo 'CAPTURE_CHROMIUM=/usr/bin/google-chrome' >> "$GITHUB_ENV"
+          echo 'CAPTURE_SYSTEM_CHROME=1' >> "$GITHUB_ENV"
+      - name: Integrity unit tests
+        run: node --import tsx --test docs/verification/capture-integrity/integrity.test.ts docs/verification/capture-integrity/readiness/integrity.test.ts
+      - name: Original standalone protocol (two complete fresh-context rounds)
+        id: legacy
+        continue-on-error: true
+        shell: bash
+        run: |
+          status=0
+          for round in 1 2; do
+            CAPTURE_BATCH="hosted-${{ matrix.browser }}-$round" npx playwright test --config docs/verification/capture-integrity/playwright.config.ts > "diagnostic-results/legacy-$round.log" 2>&1 || status=1
+          done
+          exit "$status"
+      - name: Ready-acknowledged protocol (five repetitions per workload)
+        id: readiness
+        env:
+          CAPTURE_REPEATS: '5'
+          READINESS_RESULTS: diagnostic-results/readiness
+        run: npx playwright test --config docs/verification/capture-integrity/readiness/playwright.config.ts > diagnostic-results/readiness.log 2>&1
+      - name: Lint and build (test-only branch)
+        if: always()
+        run: npm run lint && npm run build
+      - name: Record separate outcomes
+        if: always()
+        run: |
+          printf 'legacy=%s\nreadiness=%s\n' '${{ steps.legacy.outcome }}' '${{ steps.readiness.outcome }}' > diagnostic-results/outcomes.txt
+          echo 'Startup anomalies are reported separately; a valid post-readiness window does not certify the legacy stream.' >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: capture-${{ matrix.browser }}-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 30
+          path: |
+            diagnostic-results/
+            docs/verification/capture-integrity/evidence/
+            test-results/
+
+  inspect-first-run:
+    if: github.ref == 'refs/heads/arena/44489220-apex-studio' && !contains(github.event.head_commit.message, '[isolation]') && !contains(github.event.head_commit.message, '[isolation-inspect]')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        source-run: ['39562499637', '39563380457']
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ matrix.source-run }}
+          path: downloaded-source-run
+      - name: Independently verify original raw samples and frame metadata
+        run: |
+          mkdir -p inspected-results
+          python3 docs/verification/capture-integrity/readiness/verify-hosted.py downloaded-source-run inspected-results/independent-ledger.json
+      - name: Publish verified evidence parts 0 through 9
+        env:
+          PART_START: '0'
+          PART_END: '10'
+        run: python3 docs/verification/capture-integrity/readiness/publish-summaries.py downloaded-source-run inspected-results/independent-ledger.json
+      - name: Publish verified evidence parts 10 through 19
+        env:
+          PART_START: '10'
+          PART_END: '20'
+        run: python3 docs/verification/capture-integrity/readiness/publish-summaries.py downloaded-source-run inspected-results/independent-ledger.json
+      - name: Publish verified evidence parts 20 through 29
+        env:
+          PART_START: '20'
+          PART_END: '30'
+        run: python3 docs/verification/capture-integrity/readiness/publish-summaries.py downloaded-source-run inspected-results/independent-ledger.json
+      - name: Publish verified evidence parts 30 through 39
+        env:
+          PART_START: '30'
+          PART_END: '40'
+        run: python3 docs/verification/capture-integrity/readiness/publish-summaries.py downloaded-source-run inspected-results/independent-ledger.json
+      - name: Publish original capture host environments
+        env:
+          PART_START: '99999'
+          PART_END: '99999'
+          PUBLISH_ENV: '1'
+        run: python3 docs/verification/capture-integrity/readiness/publish-summaries.py downloaded-source-run inspected-results/independent-ledger.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: independent-analysis-${{ matrix.source-run }}-${{ github.run_id }}
+          retention-days: 30
+          path: inspected-results/
+
+  isolation:
+    if: github.ref == 'refs/heads/arena/44489220-apex-studio' && contains(github.event.head_commit.message, '[isolation]')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        browser: [playwright, chrome]
+        mode: [lead, no-ready, immediate, generated]
+    env:
+      CI: 'true'
+      ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+      ISOLATION_MODE: ${{ matrix.mode }}
+      ISOLATION_RESULTS: diagnostic-isolation
+      CAPTURE_REPEATS: '10'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - name: Record runner image and browser installation
+        run: |
+          mkdir -p diagnostic-isolation
+          { uname -a; cat /etc/os-release; echo "image=$ImageOS/$ImageVersion"; node --version; npx playwright --version; google-chrome --version; } > diagnostic-isolation/environment.txt
+      - name: Select runner Chrome
+        if: matrix.browser == 'chrome'
+        run: |
+          test -x /usr/bin/google-chrome
+          echo 'CAPTURE_CHROMIUM=/usr/bin/google-chrome' >> "$GITHUB_ENV"
+          echo 'CAPTURE_SYSTEM_CHROME=1' >> "$GITHUB_ENV"
+      - name: Existing integrity assertions
+        run: node --import tsx --test docs/verification/capture-integrity/integrity.test.ts docs/verification/capture-integrity/readiness/integrity.test.ts docs/verification/capture-integrity/isolation/analyze.test.ts
+      - name: Thirty fresh-context diagnostic trials
+        id: experiment
+        continue-on-error: true
+        run: npx playwright test --config docs/verification/capture-integrity/isolation/playwright.config.ts > diagnostic-isolation/playwright.log 2>&1
+      - name: Independently inspect archived samples and frame progression
+        if: always()
+        run: python3 docs/verification/capture-integrity/readiness/verify-hosted.py diagnostic-isolation diagnostic-isolation/independent.json
+      - name: Publish lossless evidence parts 0-9
+        if: always()
+        env:
+          PART_START: '0'
+          PART_END: '10'
+        run: python3 docs/verification/capture-integrity/isolation/publish.py diagnostic-isolation
+      - name: Publish lossless evidence parts 10-19
+        if: always()
+        env:
+          PART_START: '10'
+          PART_END: '20'
+        run: python3 docs/verification/capture-integrity/isolation/publish.py diagnostic-isolation
+      - name: Publish lossless evidence parts 20-29
+        if: always()
+        env:
+          PART_START: '20'
+          PART_END: '30'
+        run: python3 docs/verification/capture-integrity/isolation/publish.py diagnostic-isolation
+      - name: Publish lossless evidence parts 30-39
+        if: always()
+        env:
+          PART_START: '30'
+          PART_END: '40'
+        run: python3 docs/verification/capture-integrity/isolation/publish.py diagnostic-isolation
+      - name: Lint and build
+        if: always()
+        run: npm run lint && npm run build
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: isolation-${{ matrix.browser }}-${{ matrix.mode }}-${{ github.run_id }}
+          retention-days: 30
+          path: |
+            diagnostic-isolation/
+            test-results/
+      - name: Preserve failing experiment status
+        if: always()
+        run: test '${{ steps.experiment.outcome }}' = success
+
+  isolation-history:
+    if: github.ref == 'refs/heads/arena/44489220-apex-studio' && contains(github.event.head_commit.message, '[isolation-inspect]')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          run-id: 39562499637
+          path: originals
+      - uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          run-id: 39566258125
+          path: isolation-evidence
+      - name: Inspect original duplicate without replaying or replacing it
+        run: |
+          mkdir -p combined
+          mv originals combined/
+          mv isolation-evidence combined/
+          python3 docs/verification/capture-integrity/isolation/inspect-history.py combined
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: original-duplicate-and-runner-metadata-${{ github.run_id }}
+          path: inspection-results/
+          retention-days: 30

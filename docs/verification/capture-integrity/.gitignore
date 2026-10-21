@@ -1,0 +1,3 @@
+# Raw diagnostic captures are preserved locally / uploaded as CI artifacts.
+evidence/
+readiness/results/
