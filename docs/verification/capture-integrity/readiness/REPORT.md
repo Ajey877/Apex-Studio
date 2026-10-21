@@ -5,7 +5,10 @@
 > [132-capture hosted verification](HOSTED-REPORT.md), then the
 > [240-trial isolation report](../isolation/REPORT.md). These later experiments
 > did not establish a root cause or approve capture/automation parity. The
-> documentation is being handed off through draft PR #267; no merge is authorized.
+> documentation was handed off through PR #267, which was synchronized with
+> `main` @ `25ac8e4`, revalidated and merged on 2026-10-21 under an explicit
+> finishing mandate. The investigation findings and the closed automation-parity
+> gate are unchanged by that merge.
 
 ## Outcome
 
