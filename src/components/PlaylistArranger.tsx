@@ -27,6 +27,7 @@ import {
 } from 'lucide-react';
 import { PlaylistTrack, PlaylistClip, Pattern, Channel, AutomationTargetType, ArrangementMarker, MixerTrack } from '../types/daw';
 import { audioEngine, resolvePlaylistClipLoopLengthSteps } from '../audio/audioEngine';
+import { orderClipsForTakeRendering } from '../audio/takeLaneManager';
 import { findLaneBouncePatternClip, resolvePlaylistBounceTarget } from './playlistBounceTarget';
 import { isFullPatternPlaylistClip, resolvePlaylistClipChannels, findPatternForClip, resolveClipChannelContent, resolvePatternChannelContent, withPatternChannelContent } from '../state/patternContent';
 import { formatFxParameterRange, listFxSlotOptions } from '../audio/fxParameterControl';
@@ -314,6 +315,19 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
   // Always-current ref so updateInteraction never closes over a stale clips array.
   const clipsRef = useRef(clips);
   clipsRef.current = clips;
+  /**
+   * Take-group paint order (Phase 1M): clip nodes are absolutely positioned
+   * siblings painted in DOM order and every take of a group covers the same
+   * timeline region, so rendering the persisted array order as-is lets a
+   * silenced later-recorded take visually cover the active take the musician
+   * just selected. `orderClipsForTakeRendering` derives the visual order from
+   * the current take state — the active take of each group renders last
+   * (topmost) among its own group-mates — without touching `clips` itself, so
+   * persisted project data, drag/undo flows, and playback scheduling are
+   * unaffected. Being derived per `clips` identity, selecting another take,
+   * undo/redo, or loading a project restacks the paint order immediately.
+   */
+  const clipsInPaintOrder = useMemo(() => orderClipsForTakeRendering(clips), [clips]);
   const didMoveRef = useRef(false);
   const lastScrubBarRef = useRef<number>(1);
   const rulerContainerRef = useRef<HTMLDivElement | null>(null);
@@ -1411,8 +1425,11 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
                   );
                 })}
 
-                {/* Clips in this track row */}
-                {clips.filter(c => c.trackIndex === trackIdx).map((clip) => {
+                {/* Clips in this track row, in derived paint order: within a
+                    take group the active take renders last so it stacks on top
+                    of its silenced group-mates; persisted array order is never
+                    reordered for this. */}
+                {clipsInPaintOrder.filter(c => c.trackIndex === trackIdx).map((clip) => {
                   const isAuto = clip.type === 'automation';
                   const isAudio = clip.type === 'audio';
                   // Phase 8C (P1-11): audio hydration flagged this clip's asset as
