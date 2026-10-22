@@ -215,6 +215,10 @@ test.describe('UI-03N Warp Audio Processor theme', () => {
       // modal opens — the fit-to-tempo target read-out must equal it (one
       // project tempo, no duplicated setting inside the modal).
       const transportBpm = await page.locator('#fl-bpm-input').inputValue();
+      // Phase 7C: the transport's RESOLVED meter (data-meter is written from
+      // the same resolveProjectTimeSignature authority the engine plays) — the
+      // fit-to-length panel's grid read-out must show exactly this meter.
+      const transportMeter = await page.locator('#fl-meter-readout').getAttribute('data-meter');
 
       const dialog = await openWarpProcessor(page);
       await expect(dialog).toHaveAttribute('role', 'dialog');
@@ -415,7 +419,10 @@ test.describe('UI-03N Warp Audio Processor theme', () => {
       await expect(stretchCard).toContainText('No beat detection is performed');
       const fitInput = stretchCard.locator('#fl-warp-fit-source-bpm');
       await expect(fitInput).toBeDisabled();
-      const fitCommit = stretchCard.locator('button:has-text("Render & Commit Fit")');
+      // getByRole with an EXACT accessible name — Phase 7C added a distinct
+      // "Render & Commit Fit to Length" CTA whose label contains this one as a
+      // substring, so a plain :has-text would now match both buttons.
+      const fitCommit = stretchCard.getByRole('button', { name: 'Render & Commit Fit', exact: true });
       await expect(fitCommit).toBeDisabled();
       await expect(fitCommit).toHaveCSS('opacity', '0.4');
       await expectColor(bgOf(fitCommit), expected.success, 'fit commit CTA fill');
@@ -426,6 +433,33 @@ test.describe('UI-03N Warp Audio Processor theme', () => {
       await expect(fitTargetReadout).toBeVisible();
       const readoutBpm = parseFloat((await fitTargetReadout.textContent()) ?? '');
       expect(readoutBpm).toBeCloseTo(parseFloat(transportBpm), 6);
+
+      // ---- Phase 7C: fit-to-musical-length panel — authoritative grid, honest, disabled ----
+      await expect(stretchCard).toContainText('FIT TO MUSICAL LENGTH');
+      await expect(stretchCard).toContainText('refused honestly — never silently shifted');
+      const fitLenBars = stretchCard.locator('#fl-warp-fit-length-bars');
+      const fitLenBeats = stretchCard.locator('#fl-warp-fit-length-beats');
+      await expect(fitLenBars).toBeDisabled();
+      await expect(fitLenBeats).toBeDisabled();
+      await expect(fitLenBeats).toHaveAttribute('step', '0.25');
+      const fitLenCommit = stretchCard.getByRole('button', { name: 'Render & Commit Fit to Length', exact: true });
+      await expect(fitLenCommit).toBeDisabled();
+      await expect(fitLenCommit).toHaveCSS('opacity', '0.4');
+      await expectColor(bgOf(fitLenCommit), expected.success, 'fit-to-length commit CTA fill');
+      await expectColor(fgOf(fitLenCommit), expected.onAccent, 'fit-to-length commit CTA on-colour');
+      // The authoritative-grid proof: the panel's PROJECT read-out equals the
+      // transport BPM AND the transport's resolved meter captured before the
+      // modal opened — one project grid, no duplicated setting inside the
+      // modal and no hardcoded 4/4 assumption.
+      const fitGridReadout = stretchCard.locator('#fl-warp-fit-length-project-grid');
+      await expect(fitGridReadout).toBeVisible();
+      const gridText = ((await fitGridReadout.textContent()) ?? '').trim();
+      const gridMatch = /^(\d+(?:\.\d+)?) BPM · (\d+\/\d+)$/.exec(gridText);
+      expect(gridMatch, `grid read-out "${gridText}"`).not.toBeNull();
+      expect(parseFloat(gridMatch?.[1] ?? '')).toBeCloseTo(parseFloat(transportBpm), 6);
+      expect(gridMatch?.[2]).toBe(transportMeter);
+      // Without a selected clip the preview honestly asks for one.
+      await expect(stretchCard.locator('#fl-warp-fit-length-preview')).toContainText('SELECT AN AUDIO CLIP TO PREVIEW THE FIT');
 
       const footerNote = footer.locator('span').first();
       await expect(footerNote).toHaveText('Applies to live playback and WAV export');
@@ -483,9 +517,15 @@ test.describe('UI-03N Warp Audio Processor theme', () => {
       // disabled for a pattern clip, and so does its commit CTA.
       await expect(reopened.locator('input[type="range"]').nth(2)).toBeDisabled();
       await expect(reopened.locator('button:has-text("Render & Commit Stretch")')).toBeDisabled();
-      // Phase 7B: the fit-to-tempo input and its commit CTA stay disabled too.
+      // Phase 7B: the fit-to-tempo input and its commit CTA stay disabled too
+      // (exact accessible names — 7C's longer CTA label contains this one).
       await expect(reopened.locator('#fl-warp-fit-source-bpm')).toBeDisabled();
-      await expect(reopened.locator('button:has-text("Render & Commit Fit")')).toBeDisabled();
+      await expect(reopened.getByRole('button', { name: 'Render & Commit Fit', exact: true })).toBeDisabled();
+      // Phase 7C: the fit-to-length inputs and their distinct CTA stay disabled
+      // for a pattern clip — the exact-length operation is audio-only too.
+      await expect(reopened.locator('#fl-warp-fit-length-bars')).toBeDisabled();
+      await expect(reopened.locator('#fl-warp-fit-length-beats')).toBeDisabled();
+      await expect(reopened.getByRole('button', { name: 'Render & Commit Fit to Length', exact: true })).toBeDisabled();
 
       await page.keyboard.press('Escape');
       await expect(reopened).toHaveCount(0);
