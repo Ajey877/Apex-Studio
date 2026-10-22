@@ -22,10 +22,23 @@
  *     a white fill that would stay white in Light.
  *
  * Warp target resolution (`resolveWarpTarget`, `isWarpTargetReady`,
- * `warpTargetMessage`, `WARP_BEHAVIOUR_SUMMARY`) is owned by
- * `src/components/warpClipTarget.ts` and its suites; this file pins the
- * presentation contract plus the wiring the modal itself owns, across all
- * three target states (ready, no-selection, unsupported-type).
+ * `warpTargetMessage`, `WARP_BEHAVIOUR_SUMMARY`, `STRETCH_BEHAVIOUR_SUMMARY`)
+ * is owned by `src/components/warpClipTarget.ts` and its suites; this file
+ * pins the presentation contract plus the wiring the modal itself owns, across
+ * all three target states (ready, no-selection, unsupported-type).
+ *
+ * Phase 7A truth-contract evolution: this suite used to pin the modal's
+ * honest *incapability* statements ('PITCH AND RATE ONLY — LENGTH IS NOT
+ * PRESERVED', 'NO LENGTH-PRESERVING STRETCH') and forbade any stretch
+ * wording, because no length-preserving stretch existed. That capability has
+ * now shipped (WSOLA render/commit, proven by src/audio/wsolaTimeStretch and
+ * warpTimeStretchCommit suites), so those pins are replaced by equally strict
+ * pins of the NEW truth: the banner states what each processor really does,
+ * the stretch section names its algorithm (WSOLA) and supported range
+ * (0.25×–4.00×), the commit publishes only a committed clip, and the code
+ * still may not claim technologies that are not implemented (élastique-style
+ * proprietary algorithms, formant processing, transient preservation,
+ * granular synthesis, phase vocoder).
  */
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
@@ -33,7 +46,7 @@ import { readFileSync } from 'node:fs';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { WarpAudioProcessorModal } from './WarpAudioProcessorModal';
-import { WARP_BEHAVIOUR_SUMMARY } from './warpClipTarget';
+import { STRETCH_BEHAVIOUR_SUMMARY, WARP_BEHAVIOUR_SUMMARY } from './warpClipTarget';
 import type { PlaylistClip } from '../types/daw';
 
 const source = readFileSync('src/components/WarpAudioProcessorModal.tsx', 'utf8');
@@ -134,28 +147,34 @@ describe('Warp Audio Processor theme markup (UI-03N)', () => {
       includes(markup, 'aria-labelledby="fl-warp-processor-modal-title"', 'the dialog is named by its title');
       includes(markup, 'AUDIO CLIP PITCH &amp; PLAYBACK RATE', 'the title text is unchanged');
       includes(markup, '>REPITCH — LENGTH NOT PRESERVED<', 'the repitch qualifier badge renders');
+      includes(markup, '>WSOLA — PITCH-PRESERVING STRETCH<', 'the shipped-stretch qualifier badge renders');
       includes(markup, '>No audio clip selected<', 'the no-selection subtitle renders');
       includes(markup, 'aria-label="Close warp processor"', 'the close control keeps its accessible name');
       includes(markup, '>Preview Clip<', 'the preview action renders');
       includes(markup, '>NOTHING SELECTED<', 'the target read-out reports the empty selection');
       includes(markup, '>NO AUDIO CLIP TO WARP<', 'the blocker banner renders');
-      includes(markup, 'PITCH AND RATE ONLY — LENGTH IS NOT PRESERVED', 'the behaviour banner is unchanged');
-      includes(markup, '>NO LENGTH-PRESERVING STRETCH<', 'the banner qualifier is unchanged');
+      includes(markup, 'REPITCH CHANGES PITCH AND LENGTH TOGETHER — WSOLA STRETCH PRESERVES PITCH', 'the behaviour banner states both shipped truths');
+      includes(markup, '>STRETCH COMMITS A NEW AUDIO ASSET · ORIGINAL KEPT FOR UNDO<', 'the banner qualifier states the commit semantics');
       includes(markup, 'Applies to live playback and WAV export', 'the footer note is unchanged');
       includes(markup, '>Cancel<', 'the cancel action renders');
       includes(markup, '>Apply to Clip<', 'the apply action renders');
+      includes(markup, '>Render &amp; Commit Stretch<', 'the stretch commit action renders');
+      includes(markup, 'SUPPORTED 0.25×–4.00×', 'the stretch section states its supported ratio range');
 
-      // No actionable target: the banner carries the module message and both
-      // sliders plus both primary actions are disabled.
+      // No actionable target: the banner carries the module message and all
+      // three sliders plus the primary actions are disabled.
       includes(markup, 'Select an audio clip in the Playlist Arranger first', 'the blocker message comes from warpClipTarget');
       const ranges = [...markup.matchAll(/<input[^>]*type="range"[^>]*>/g)].map((m) => m[0]);
-      assert.equal(ranges.length, 2, 'the pitch and rate sliders render');
+      assert.equal(ranges.length, 3, 'the pitch, rate and stretch-ratio sliders render');
       assert.ok(hasDisabledAttr(ranges[0]), 'the pitch slider is disabled without a target');
       assert.ok(hasDisabledAttr(ranges[1]), 'the rate slider is disabled without a target');
+      assert.ok(hasDisabledAttr(ranges[2]), 'the stretch-ratio slider is disabled without a target');
       assert.ok(ranges[0].includes('min="-24"') && ranges[0].includes('max="24"'), 'the pitch range is unchanged');
       assert.ok(ranges[1].includes('min="0.25"') && ranges[1].includes('max="3.0"') && ranges[1].includes('step="0.05"'), 'the rate range is unchanged');
+      assert.ok(ranges[2].includes('min="0.25"') && ranges[2].includes('max="4.0"') && ranges[2].includes('step="0.01"'), 'the stretch ratio is bounded to the supported WSOLA range');
       includes(markup, '>0 st<', 'the pitch read-out reports the default');
       includes(markup, '>1.00x<', 'the rate read-out reports the default');
+      includes(markup, '>1.00×<', 'the stretch-ratio read-out reports the default');
     });
 
     it(`renders the ready-target state with the stored values in ${mode}`, () => {
@@ -169,6 +188,12 @@ describe('Warp Audio Processor theme markup (UI-03N)', () => {
       const ranges = [...markup.matchAll(/<input[^>]*type="range"[^>]*>/g)].map((m) => m[0]);
       assert.ok(!hasDisabledAttr(ranges[0]), 'the pitch slider is enabled for an audio clip');
       assert.ok(!hasDisabledAttr(ranges[1]), 'the rate slider is enabled for an audio clip');
+      assert.ok(!hasDisabledAttr(ranges[2]), 'the stretch-ratio slider is enabled for an audio clip');
+      // The plan read-out shows the exact consequence BEFORE any commit: at the
+      // default 1.00× a 2-bar clip stays 2 bars. (No engine buffer exists in
+      // this render, so the read-out honestly omits the audio-duration part.)
+      includes(markup, '1.00× · 2 → 2 bars', 'the stretch plan states ratio and resulting bar length up front');
+      includes(markup, STRETCH_BEHAVIOUR_SUMMARY, 'the stretch summary renders verbatim from the shared module');
     });
 
     it(`renders the unsupported-type state for a pattern clip in ${mode}`, () => {
@@ -185,7 +210,10 @@ describe('Warp Audio Processor theme markup (UI-03N)', () => {
         'the blocker message explains why the pattern clip is un-actionable',
       );
       const ranges = [...markup.matchAll(/<input[^>]*type="range"[^>]*>/g)].map((m) => m[0]);
-      assert.ok(hasDisabledAttr(ranges[0]) && hasDisabledAttr(ranges[1]), 'the sliders stay disabled for a pattern clip');
+      assert.ok(
+        hasDisabledAttr(ranges[0]) && hasDisabledAttr(ranges[1]) && hasDisabledAttr(ranges[2]),
+        'all sliders stay disabled for a pattern clip'
+      );
     });
   }
 
@@ -303,11 +331,31 @@ describe('Warp Audio Processor theme markup (UI-03N)', () => {
     assert.match(code, /setStatusMessage\('Previewing the clip’s own audio at the pitch and rate above \(mixer inserts bypassed\).'\);/, 'the preview toast keeps its exact wording');
   });
 
-  it('states repitch truth and makes no stretch-capability claim', () => {
+  it('states repitch truth and the shipped WSOLA stretch truth — and claims no unimplemented technology', () => {
     assert.match(source, /REPITCH|playback rate|playback-rate/i, 'the repitch wording survives');
-    assert.doesNotMatch(code, /granular|formant|transient warp|time-stretch/i, 'no unsupported warp technology is claimed');
-    assert.match(code, /WARP_BEHAVIOUR_SUMMARY/, 'the behaviour summary is read from the shared module');
-    includes(render('light', { clips: [readyClip], selectedClipId: 'clip-warp' }), WARP_BEHAVIOUR_SUMMARY, 'the summary text renders verbatim');
+    // The stretch capability is real now, so the claim pins flip: the code MUST
+    // name the algorithm that is actually implemented (WSOLA) and MUST NOT name
+    // technologies that are not (proprietary élastique-style algorithms,
+    // formant processing, transient preservation, granular synthesis, phase
+    // vocoder). This replaces the old blanket no-stretch-wording guard.
+    assert.match(code, /WSOLA/, 'the stretch section names the implemented algorithm');
+    assert.doesNotMatch(
+      code,
+      /elastique|élastique|formant|granular|transient preserv|phase vocoder/i,
+      'no unimplemented warp technology is claimed'
+    );
+    assert.match(code, /WARP_BEHAVIOUR_SUMMARY/, 'the repitch behaviour summary is read from the shared module');
+    assert.match(code, /STRETCH_BEHAVIOUR_SUMMARY/, 'the stretch behaviour summary is read from the shared module');
+    // Commit wiring honesty: the real pipeline is invoked, its typed errors are
+    // surfaced, and only a committed clip is published — never a fake success.
+    assert.match(code, /commitWarpTimeStretch\(targetClip, wsolaRatio,/, 'the commit calls the tested render/commit pipeline');
+    assert.match(code, /onUpdateClip\(result\.clip\);/, 'only the committed clip is published');
+    assert.match(code, /error instanceof WarpTimeStretchError/, 'typed pipeline failures are surfaced honestly');
+    assert.match(code, /waitForSampleBufferPersistence/, 'the commit waits for asset durability before publishing');
+    assert.match(code, /hydrateAudioClip/, 'an out-of-memory source is recovered through the persisted-asset hydration path');
+    const readyMarkup = render('light', { clips: [readyClip], selectedClipId: 'clip-warp' });
+    includes(readyMarkup, WARP_BEHAVIOUR_SUMMARY, 'the repitch summary text renders verbatim');
+    includes(readyMarkup, STRETCH_BEHAVIOUR_SUMMARY, 'the stretch summary text renders verbatim');
   });
 
   it('uses ModalFrame’s themed scrim and keeps the overlay geometry', () => {

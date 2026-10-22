@@ -254,10 +254,17 @@ describe('Phase 52 — truthful not-applied states', () => {
     assert.ok(!/DEMO|PROTOTYPE|INCOMPLETE/i.test(source), 'the modal is no longer a demo');
   });
 
-  it('Warp processor describes repitch only', () => {
+  it('Warp processor names only processors it really implements', () => {
     const source = read('src/components/WarpAudioProcessorModal.tsx');
     assert.match(source, /REPITCH|playback rate|playback-rate/i);
-    assert.ok(!/granular|formant|transient warp|time-stretch/i.test(source));
+    // Phase 7A truth-contract evolution: this guard used to forbid ANY
+    // stretch wording because no length-preserving stretch existed. The
+    // capability has now shipped — a WSOLA render/commit proven by
+    // src/audio/wsolaTimeStretch.test.ts and warpTimeStretchCommit.test.ts —
+    // so the modal must NAME the implemented algorithm, and technologies that
+    // are not implemented must still never be claimed.
+    assert.match(source, /WSOLA/);
+    assert.ok(!/elastique|élastique|granular|formant|transient warp|transient preserv|phase vocoder/i.test(source));
   });
 
   it('Wavetable surface stops claiming a wavetable oscillator', () => {

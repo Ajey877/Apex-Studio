@@ -67,10 +67,21 @@ export const warpTargetMessage = (resolution: WarpTargetResolution): string => {
 };
 
 /**
- * What the Warp processor actually does to an audio clip. Stated here so the
- * modal, the transport tooltip and the regression tests all agree on one
- * description instead of paraphrasing it in three places.
+ * What the Warp processor's Repitch controls actually do to an audio clip.
+ * Stated here so the modal, the transport tooltip and the regression tests all
+ * agree on one description instead of paraphrasing it in three places.
  */
 export const WARP_BEHAVIOUR_SUMMARY =
   'Pitch and playback-rate adjustment on the selected audio clip (resampler-style repitch). ' +
   'Pitch and speed move together, as on a tape or sampler.';
+
+/**
+ * Phase 7A: what the Warp processor's pitch-preserving stretch actually does.
+ * Same single-source-of-truth rule as `WARP_BEHAVIOUR_SUMMARY`: the modal and
+ * the regression tests must agree on this description, and it must never claim
+ * more than the shipped WSOLA render/commit does (no proprietary-algorithm
+ * names, no transient-preservation or formant claims, no real-time promise).
+ */
+export const STRETCH_BEHAVIOUR_SUMMARY =
+  'WSOLA render/commit: stretches the selected clip to a new duration while preserving pitch, ' +
+  'within 0.25×–4.00× (best 0.5×–2.0×). Commits processed audio as a new asset; the original is kept for undo.';
