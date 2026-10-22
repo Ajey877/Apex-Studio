@@ -480,6 +480,42 @@ describe('Warp Audio Processor theme markup (UI-03N)', () => {
     }
   });
 
+  it('Phase 7D: the stretch strategy selector renders as an explicit, honest, themed choice with classic WSOLA as the default', () => {
+    for (const mode of ['dark', 'light'] as const) {
+      const markup = render(mode, { clips: [readyClip], selectedClipId: 'clip-warp' });
+      // The selector exists as a labelled group with two stable-id buttons.
+      includes(markup, 'role="group"', 'the strategy selector is a group');
+      includes(markup, 'aria-label="Stretch strategy"', 'the group is accessibly named');
+      includes(markup, 'id="fl-warp-stretch-strategy-wsola"', 'the classic strategy button has a stable id');
+      includes(markup, 'id="fl-warp-stretch-strategy-transient"', 'the transient strategy button has a stable id');
+      includes(markup, '>CLASSIC WSOLA<', 'the classic option renders');
+      includes(markup, '>TRANSIENT-AWARE<', 'the transient option renders');
+      // DEFAULT is classic WSOLA, pressed-state honest, and the note states
+      // the classic limitations without claiming anything it does not do.
+      includes(markup, 'id="fl-warp-stretch-strategy-wsola" type="button" aria-pressed="true"', 'classic is the default selection');
+      includes(markup, 'id="fl-warp-stretch-strategy-transient" type="button" aria-pressed="false"', 'transient is not selected by default');
+      includes(markup, 'id="fl-warp-stretch-strategy-note"', 'the strategy note renders');
+      includes(markup, 'Classic WSOLA: best for tonal and sustained material', 'the default note describes the classic mode honestly');
+      includes(markup, 'makes no transient-handling claim', 'the classic mode claims no transient handling');
+    }
+    // The transient-mode copy (rendered after the user switches) states the
+    // measured improvement, the identical-render fallback and the edge
+    // limitation — checked in source because static markup renders the
+    // default state only.
+    assert.match(code, /anchors detected attacks so drum\/percussion timing stays tight/i, 'the transient note states the measured improvement');
+    assert.match(code, /renders identically to classic WSOLA/i, 'the no-attack fallback is stated honestly');
+    assert.match(code, /keep classic treatment/i, 'the clip-edge limitation is stated honestly');
+    // The strategy is an EXPLICIT user choice, never automatic, and flows
+    // into every commit workflow through the tested pipeline parameter.
+    assert.match(code, /const \[stretchStrategy, setStretchStrategy\] = useState<WarpStretchStrategy>\('wsola'\);/, 'the strategy is modal-internal state defaulting to wsola');
+    assert.match(code, /\}, stretchStrategy\);/, 'the selected strategy is passed to the tested commit pipeline');
+    assert.doesNotMatch(code, /auto(?:matically)?\s+(?:select|choose|switch)\w*\s+(?:the\s+)?(?:strategy|transient)/i, 'the strategy is never chosen automatically');
+    // Themed chrome only: the selector buttons use semantic tokens.
+    const selectorTag = code.match(/id="fl-warp-stretch-strategy-transient"[\s\S]{0,600}?className=\{`([^`]*)`\}/);
+    assert.ok(selectorTag, 'the transient button carries a template className');
+    assert.doesNotMatch(selectorTag[1], UNTHEMED_CLASS, 'the selector follows the theme');
+  });
+
   it('uses ModalFrame’s themed scrim and keeps the overlay geometry', () => {
     const markup = render('light', { clips: [readyClip], selectedClipId: null });
     assert.match(
