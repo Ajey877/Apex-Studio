@@ -547,7 +547,7 @@ export const WarpAudioProcessorModal: React.FC<WarpAudioProcessorModalProps> = (
                     aria-pressed={stretchStrategy === 'wsola'}
                     disabled={!targetClip || isCommittingStretch}
                     onClick={() => setStretchStrategy('wsola')}
-                    className={`px-2.5 py-1 rounded text-[10px] font-mono font-bold border transition disabled:opacity-40 ${
+                    className={`px-2.5 py-1 rounded text-[10px] font-bold border transition disabled:opacity-40 ${
                       stretchStrategy === 'wsola'
                         ? 'bg-[var(--apex-success)] text-[var(--apex-state-playing-fg)] border-[var(--apex-success)]'
                         : 'bg-[var(--apex-surface-2)] text-[var(--apex-text-2)] border-[var(--apex-border)] hover:text-[var(--apex-text)]'
@@ -561,7 +561,7 @@ export const WarpAudioProcessorModal: React.FC<WarpAudioProcessorModalProps> = (
                     aria-pressed={stretchStrategy === 'transient'}
                     disabled={!targetClip || isCommittingStretch}
                     onClick={() => setStretchStrategy('transient')}
-                    className={`px-2.5 py-1 rounded text-[10px] font-mono font-bold border transition disabled:opacity-40 ${
+                    className={`px-2.5 py-1 rounded text-[10px] font-bold border transition disabled:opacity-40 ${
                       stretchStrategy === 'transient'
                         ? 'bg-[var(--apex-success)] text-[var(--apex-state-playing-fg)] border-[var(--apex-success)]'
                         : 'bg-[var(--apex-surface-2)] text-[var(--apex-text-2)] border-[var(--apex-border)] hover:text-[var(--apex-text)]'
