@@ -545,7 +545,7 @@ export const WarpAudioProcessorModal: React.FC<WarpAudioProcessorModalProps> = (
                     id="fl-warp-stretch-strategy-wsola"
                     type="button"
                     aria-pressed={stretchStrategy === 'wsola'}
-                    disabled={isCommittingStretch}
+                    disabled={!targetClip || isCommittingStretch}
                     onClick={() => setStretchStrategy('wsola')}
                     className={`px-2.5 py-1 rounded text-[10px] font-mono font-bold border transition disabled:opacity-40 ${
                       stretchStrategy === 'wsola'
@@ -559,7 +559,7 @@ export const WarpAudioProcessorModal: React.FC<WarpAudioProcessorModalProps> = (
                     id="fl-warp-stretch-strategy-transient"
                     type="button"
                     aria-pressed={stretchStrategy === 'transient'}
-                    disabled={isCommittingStretch}
+                    disabled={!targetClip || isCommittingStretch}
                     onClick={() => setStretchStrategy('transient')}
                     className={`px-2.5 py-1 rounded text-[10px] font-mono font-bold border transition disabled:opacity-40 ${
                       stretchStrategy === 'transient'

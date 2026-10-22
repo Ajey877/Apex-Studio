@@ -498,6 +498,12 @@ describe('Warp Audio Processor theme markup (UI-03N)', () => {
       includes(markup, 'Classic WSOLA: best for tonal and sustained material', 'the default note describes the classic mode honestly');
       includes(markup, 'makes no transient-handling claim', 'the classic mode claims no transient handling');
     }
+    // No-clip state: the strategy buttons are disabled exactly like every
+    // other actionable control, so the pinned browser focus trap
+    // (Close → Tab → Cancel) is unchanged when nothing is selected.
+    const emptyMarkup = render('dark', { clips: [readyClip], selectedClipId: null });
+    includes(emptyMarkup, 'id="fl-warp-stretch-strategy-wsola" type="button" aria-pressed="true" disabled=""', 'the classic button is disabled with no clip selected');
+    includes(emptyMarkup, 'id="fl-warp-stretch-strategy-transient" type="button" aria-pressed="false" disabled=""', 'the transient button is disabled with no clip selected');
     // The transient-mode copy (rendered after the user switches) states the
     // measured improvement, the identical-render fallback and the edge
     // limitation — checked in source because static markup renders the
