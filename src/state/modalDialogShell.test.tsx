@@ -560,10 +560,10 @@ const MODAL_CASES: ModalCase[] = [
     closeLabel: 'Close warp processor',
     overlayClass: 'apex-modal-overlay fixed inset-0 backdrop-blur-md z-50 flex items-center justify-center p-3 sm:p-4 select-none',
     open: React.createElement(WarpAudioProcessorModal, {
-      isOpen: true, onClose: noop, clips: [], selectedClipId: null, onUpdateClip: noop,
+      isOpen: true, onClose: noop, clips: [], selectedClipId: null, onUpdateClip: noop, projectBpm: 120,
     }),
     closed: React.createElement(WarpAudioProcessorModal, {
-      isOpen: false, onClose: noop, clips: [], selectedClipId: null, onUpdateClip: noop,
+      isOpen: false, onClose: noop, clips: [], selectedClipId: null, onUpdateClip: noop, projectBpm: 120,
     }),
   },
   {

@@ -10,6 +10,7 @@ import {
   WSOLA_MIN_RATIO,
   WarpTimeStretchError,
   commitWarpTimeStretch,
+  computeFitToTempoRatio,
   describeWarpStretchPlan,
 } from '../audio/warpTimeStretchCommit';
 import {
@@ -31,6 +32,13 @@ interface WarpAudioProcessorModalProps {
   clips: PlaylistClip[];
   selectedClipId: string | null;
   onUpdateClip?: (clip: PlaylistClip) => void;
+  /**
+   * Phase 7B: the project's authoritative tempo (`projectState.meta.bpm` in
+   * the App). Fit to Project Tempo reads its TARGET from here — the modal
+   * keeps no independent BPM setting of its own, so the fit can never drift
+   * from the transport's tempo.
+   */
+  projectBpm: number;
 }
 
 export const WarpAudioProcessorModal: React.FC<WarpAudioProcessorModalProps> = ({
@@ -38,7 +46,8 @@ export const WarpAudioProcessorModal: React.FC<WarpAudioProcessorModalProps> = (
   onClose,
   clips,
   selectedClipId,
-  onUpdateClip
+  onUpdateClip,
+  projectBpm
 }) => {
   const target = resolveWarpTarget(clips, selectedClipId);
   const targetClip = isWarpTargetReady(target) ? target.clip : null;
@@ -51,6 +60,9 @@ export const WarpAudioProcessorModal: React.FC<WarpAudioProcessorModalProps> = (
   // Phase 7A: WSOLA pitch-preserving stretch — ratio + in-flight commit guard.
   const [wsolaRatio, setWsolaRatio] = useState<number>(1.0);
   const [isCommittingStretch, setIsCommittingStretch] = useState<boolean>(false);
+  // Phase 7B: user-entered source tempo for Fit to Project Tempo. Kept as raw
+  // input text so invalid entries can be reported instead of silently coerced.
+  const [sourceBpmText, setSourceBpmText] = useState<string>('');
 
   // The modal stays mounted between openings, so re-seed the controls whenever
   // it opens or the target clip changes. Without this the sliders would keep
@@ -60,6 +72,7 @@ export const WarpAudioProcessorModal: React.FC<WarpAudioProcessorModalProps> = (
     setPitchSemitones(targetClip?.pitchShiftSemitones ?? 0);
     setStretchRate(targetClip?.timeStretchRate ?? 1.0);
     setWsolaRatio(1.0);
+    setSourceBpmText('');
   }, [isOpen, targetClip?.id]);
 
   if (!isOpen) return null;
@@ -120,7 +133,9 @@ export const WarpAudioProcessorModal: React.FC<WarpAudioProcessorModalProps> = (
   };
 
   /**
-   * Phase 7A: Render & Commit — the first real pitch-preserving time stretch.
+   * Phase 7A/7B: the ONE render/commit path for WSOLA stretches. Both the
+   * manual ratio button and Fit to Project Tempo route through here, so both
+   * share the same guarantees:
    *
    * This is NOT another setting: `commitWarpTimeStretch` resolves the selected
    * clip's real source PCM (engine memory, then the persisted project store),
@@ -133,18 +148,19 @@ export const WarpAudioProcessorModal: React.FC<WarpAudioProcessorModalProps> = (
    *
    * Every refusal (no source audio, unavailable asset, unsupported ratio,
    * persistence failure) surfaces its typed, honest reason here and changes
-   * nothing. Success is only reported after the asset is committed.
+   * nothing. Success is only reported after the asset is committed, and the
+   * in-flight guard makes duplicate commits impossible while one is running.
    */
-  const handleCommitTimeStretch = async () => {
+  const commitWsolaRender = async (ratio: number, operation: string, successLabel: string) => {
     if (!targetClip || !onUpdateClip || isCommittingStretch) return;
     if (!targetClip.audioBufferId) {
       setStatusMessage('This clip has no source audio asset — there is nothing to stretch.');
       return;
     }
     setIsCommittingStretch(true);
-    setStatusMessage(`Rendering ${wsolaRatio.toFixed(2)}× pitch-preserving stretch (WSOLA)…`);
+    setStatusMessage(`Rendering ${operation} — ${ratio.toFixed(2)}× pitch-preserving WSOLA stretch…`);
     try {
-      const result = await commitWarpTimeStretch(targetClip, wsolaRatio, {
+      const result = await commitWarpTimeStretch(targetClip, ratio, {
         getSourceBuffer: id => audioEngine.getSampleBuffer(id),
         hydrateSource: id => hydrateAudioClip(audioEngine, id),
         registerAsset: (id, buffer) => audioEngine.setSampleBuffer(id, buffer),
@@ -154,7 +170,7 @@ export const WarpAudioProcessorModal: React.FC<WarpAudioProcessorModalProps> = (
       });
       onUpdateClip(result.clip);
       setStatusMessage(
-        `Committed ${wsolaRatio.toFixed(2)}× pitch-preserving stretch: "${targetClip.name}" now references ${result.stretchedBuffer.duration.toFixed(2)} s of processed audio. The original asset is untouched — Undo restores it.`
+        `Committed ${successLabel}: "${targetClip.name}" now references ${result.stretchedBuffer.duration.toFixed(2)} s of processed audio. The original asset is untouched — Undo restores it.`
       );
       setTimeout(() => {
         onClose();
@@ -170,6 +186,66 @@ export const WarpAudioProcessorModal: React.FC<WarpAudioProcessorModalProps> = (
       setIsCommittingStretch(false);
     }
   };
+
+  const handleCommitTimeStretch = () =>
+    commitWsolaRender(wsolaRatio, 'stretch', `${wsolaRatio.toFixed(2)}× pitch-preserving stretch`);
+
+  /**
+   * Phase 7B: Fit to Project Tempo. The target tempo is the project's
+   * authoritative BPM (the `projectBpm` prop — `projectState.meta.bpm`, the
+   * same value the transport shows); the source tempo is ENTERED BY THE USER.
+   * No beat detection is performed and no tempo is ever guessed. The ratio
+   * r = sourceBpm / projectBpm commits through the same WSOLA pipeline as the
+   * manual control — including its bounds refusal (never clamped) and its
+   * durability/undo guarantees.
+   */
+  const handleCommitFitToTempo = () => {
+    if (!targetClip || !onUpdateClip || isCommittingStretch) return;
+    let fitRatio: number;
+    try {
+      fitRatio = computeFitToTempoRatio(sourceBpmText, projectBpm);
+    } catch (error) {
+      setStatusMessage(
+        error instanceof WarpTimeStretchError
+          ? error.message
+          : `Fit to tempo failed (${error instanceof Error ? error.message : String(error)}). The clip was not changed.`
+      );
+      return;
+    }
+    const sourceLabel = Number(sourceBpmText.trim());
+    void commitWsolaRender(
+      fitRatio,
+      `fit to project tempo (${sourceLabel} → ${projectBpm} BPM)`,
+      `fit-to-tempo ${fitRatio.toFixed(2)}× (${sourceLabel} → ${projectBpm} BPM)`
+    );
+  };
+
+  /**
+   * Live, honest preview of the fit BEFORE committing: empty input reports
+   * itself, invalid input shows the typed refusal text inline, and a valid
+   * input shows the exact plan (ratio, bars and audio duration) that the
+   * commit will produce — computed with the same functions the commit uses,
+   * so preview and committed result cannot disagree.
+   */
+  const fitPreview = ((): { kind: 'empty' } | { kind: 'error'; message: string } | { kind: 'ready'; ratio: number; plan: string } => {
+    if (!sourceBpmText.trim()) return { kind: 'empty' };
+    try {
+      const ratio = computeFitToTempoRatio(sourceBpmText, projectBpm);
+      const plan = targetClip
+        ? describeWarpStretchPlan(
+            targetClip,
+            ratio,
+            targetClip.audioBufferId ? audioEngine.getSampleBuffer(targetClip.audioBufferId) : undefined
+          )
+        : `${ratio.toFixed(2)}×`;
+      return { kind: 'ready', ratio, plan };
+    } catch (error) {
+      return {
+        kind: 'error',
+        message: error instanceof WarpTimeStretchError ? error.message : 'Enter the source tempo as a positive BPM number.',
+      };
+    }
+  })();
 
   return (
     <ModalFrame id="fl-warp-processor-modal" labelledBy="fl-warp-processor-modal-title" onClose={onClose} className="fixed inset-0 backdrop-blur-md z-50 flex items-center justify-center p-3 sm:p-4 select-none">
@@ -379,6 +455,73 @@ export const WarpAudioProcessorModal: React.FC<WarpAudioProcessorModalProps> = (
               <Check className="w-4 h-4" />
               <span>{isCommittingStretch ? 'Rendering & Committing…' : 'Render & Commit Stretch'}</span>
             </button>
+
+            {/* Phase 7B: Fit to Project Tempo — the same WSOLA commit, with the
+                ratio derived from tempos instead of dialled by hand. */}
+            <div className="border-t border-[var(--apex-border)] pt-3 space-y-2">
+              <div className="flex items-center justify-between">
+                <span className="text-[11px] font-bold text-[var(--apex-text)] uppercase tracking-wider">
+                  FIT TO PROJECT TEMPO
+                </span>
+                <span className="text-[10px] font-mono text-[var(--apex-text-3)]">
+                  ratio = source BPM ÷ project BPM
+                </span>
+              </div>
+
+              <div className="bg-[var(--apex-canvas)] p-3 rounded-lg border border-[var(--apex-border)] space-y-2 text-xs">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="flex items-center gap-2">
+                    <label htmlFor="fl-warp-fit-source-bpm" className="text-[var(--apex-text)] font-bold">
+                      SOURCE BPM
+                    </label>
+                    <input
+                      id="fl-warp-fit-source-bpm"
+                      type="number"
+                      min="1"
+                      max="999"
+                      step="0.01"
+                      placeholder="e.g. 90"
+                      value={sourceBpmText}
+                      disabled={!targetClip || isCommittingStretch}
+                      onChange={(e) => setSourceBpmText(e.target.value)}
+                      className="w-24 px-2 py-1 rounded bg-[var(--apex-surface-2)] border border-[var(--apex-border)] text-[var(--apex-text)] font-mono text-xs disabled:opacity-40"
+                    />
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-[var(--apex-text)] font-bold">PROJECT BPM</span>
+                    <span className="text-[var(--apex-success)] font-mono font-bold">{projectBpm.toFixed(2)} BPM</span>
+                  </div>
+                </div>
+
+                <div className="text-[10px] font-mono">
+                  {fitPreview.kind === 'empty' && (
+                    <span className="text-[var(--apex-text-3)]">ENTER SOURCE BPM TO PREVIEW THE FIT</span>
+                  )}
+                  {fitPreview.kind === 'error' && (
+                    <span className="text-[var(--apex-gold)]">{fitPreview.message}</span>
+                  )}
+                  {fitPreview.kind === 'ready' && (
+                    <span className="text-[var(--apex-text-2)]">{fitPreview.plan}</span>
+                  )}
+                </div>
+
+                <span className="text-[9px] text-[var(--apex-text-3)] block">
+                  Enter the tempo the audio was recorded at — from its sample details, its origin project, or by
+                  tapping it out. No beat detection is performed and nothing is guessed. The fit bakes the stretch
+                  into a NEW audio asset: changing the project tempo later does not reprocess it. WSOLA can smear
+                  transients — percussive material has a narrower quality envelope (best 0.5×–2.0×).
+                </span>
+              </div>
+
+              <button
+                onClick={handleCommitFitToTempo}
+                disabled={!targetClip || isCommittingStretch}
+                className="px-4 py-1.5 bg-[var(--apex-success)] hover:bg-[color-mix(in_srgb,var(--apex-success)_82%,var(--apex-text))] disabled:opacity-40 disabled:hover:bg-[var(--apex-success)] text-[var(--apex-state-playing-fg)] font-bold rounded transition shadow flex items-center gap-1.5 text-xs"
+              >
+                <Check className="w-4 h-4" />
+                <span>{isCommittingStretch ? 'Rendering & Committing…' : 'Render & Commit Fit'}</span>
+              </button>
+            </div>
           </div>
         </div>
 

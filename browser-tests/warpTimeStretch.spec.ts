@@ -182,4 +182,108 @@ test.describe('Phase 7A: WSOLA pitch-preserving stretch (real browser audio)', (
     expect(result.processedResident).toBe(true);
     expect(result.originalPersistedSize).toBeGreaterThan(40000);
   });
+
+  test('Phase 7B: fits audio to the LIVE project tempo (transport BPM) and refuses out-of-bounds fits', async ({ page }) => {
+    await page.goto('http://localhost:3000');
+    await page.waitForTimeout(2000);
+    // The authoritative project tempo, read from the live transport UI — the
+    // same value the App feeds the Warp modal as its fit target.
+    const transportBpm = parseFloat(await page.locator('#fl-bpm-input').inputValue());
+    expect(Number.isFinite(transportBpm)).toBe(true);
+    expect(transportBpm).toBeGreaterThan(0);
+
+    const result = await page.evaluate(async ({ SR, transportBpm }) => {
+      // @ts-ignore — browser-side imports of Vite-served production modules
+      const engineMod: any = await import('/src/audio/audioEngine.ts');
+      // @ts-ignore
+      const commitMod: any = await import('/src/audio/warpTimeStretchCommit.ts');
+      // @ts-ignore
+      const persistMod: any = await import('/src/audio/audioPersistence.ts');
+      // @ts-ignore
+      const bufferPersistMod: any = await import('/src/audio/sampleBufferPersistence.ts');
+      const engine = engineMod.audioEngine;
+      if (!bufferPersistMod.getSampleBufferPersistenceController(engine)) {
+        bufferPersistMod.installSampleBufferPersistence(engine);
+      }
+
+      // Fit computation on the live tempo: source = 3/4 of the project tempo
+      // → ratio 0.75 (audio shorter after the fit).
+      const sourceBpm = Math.round(transportBpm * 0.75 * 100) / 100;
+      const ratio: number = commitMod.computeFitToTempoRatio(String(sourceBpm), transportBpm);
+
+      // Out-of-bounds refusal: 0.1× is below the 0.25× WSOLA floor for ANY
+      // positive project tempo — must throw typed, never clamp.
+      let refusal: { failure: string; message: string } | null = null;
+      try {
+        commitMod.computeFitToTempoRatio(String(transportBpm * 0.1), transportBpm);
+      } catch (error: any) {
+        refusal = { failure: String(error?.failure ?? ''), message: String(error?.message ?? '') };
+      }
+
+      // Real commit of the fit through the production pipeline.
+      const ctx = engine.getContext();
+      const srcBuf: AudioBuffer = ctx.createBuffer(2, Math.round(0.75 * SR), SR);
+      for (let ch = 0; ch < 2; ch += 1) {
+        const data = srcBuf.getChannelData(ch);
+        for (let i = 0; i < data.length; i += 1) data[i] = 0.8 * Math.sin((2 * Math.PI * 220 * i) / SR);
+      }
+      const sourceId = `spec-fit-src-${Date.now()}`;
+      engine.setSampleBuffer(sourceId, srcBuf);
+      await bufferPersistMod.waitForSampleBufferPersistence(engine, sourceId);
+
+      const clip = {
+        id: 'spec-fit-clip',
+        trackIndex: 0,
+        startBar: 2,
+        lengthBars: 0.375,
+        type: 'audio',
+        audioBufferId: sourceId,
+        name: 'Spec Fit Tone',
+        color: '#00ff88',
+      };
+
+      const commit = await commitMod.commitWarpTimeStretch(clip, ratio, {
+        getSourceBuffer: (id: string) => engine.getSampleBuffer(id),
+        hydrateSource: (id: string) => persistMod.hydrateAudioClip(engine, id),
+        registerAsset: (id: string, b: AudioBuffer) => engine.setSampleBuffer(id, b),
+        waitForAsset: (id: string) => bufferPersistMod.waitForSampleBufferPersistence(engine, id),
+        createBuffer: (c: number, l: number, s: number) => engine.getContext().createBuffer(c, l, s),
+        now: () => Date.now(),
+      });
+
+      const persistedBlob: Blob | null = await persistMod.getPersistedAudioClip(commit.stretchedAssetId);
+      return {
+        ratio,
+        sourceBpm,
+        refusalFailure: refusal ? refusal.failure : null,
+        refusalMessage: refusal ? refusal.message : null,
+        lengthBars: commit.clip.lengthBars as number,
+        startBar: commit.clip.startBar as number,
+        srcLen: srcBuf.length,
+        newLen: commit.stretchedBuffer.length,
+        clipReferencesNewAsset: commit.clip.audioBufferId === commit.stretchedAssetId,
+        newAssetIsNotSource: commit.stretchedAssetId !== sourceId,
+        sourceIntact: engine.getSampleBuffer(sourceId) === srcBuf,
+        persistedSize: persistedBlob ? persistedBlob.size : 0,
+      };
+    }, { SR, transportBpm });
+
+    // The fit ratio equals source ÷ project exactly (the source BPM field is
+    // 2-decimal, so the ideal 0.75 holds within that rounding), and the
+    // committed clip scales its length by precisely that ratio with the start
+    // bar preserved.
+    expect(result.ratio).toBeCloseTo(result.sourceBpm / transportBpm, 12);
+    expect(result.ratio).toBeCloseTo(0.75, 3);
+    expect(result.lengthBars).toBeCloseTo(0.375 * result.ratio, 10);
+    expect(result.startBar).toBe(2);
+    expect(result.newLen).toBe(Math.ceil(result.srcLen * result.ratio));
+    expect(result.clipReferencesNewAsset).toBe(true);
+    expect(result.newAssetIsNotSource).toBe(true);
+    expect(result.sourceIntact).toBe(true);
+    // Durable write in the real browser store (~0.56 s stereo float WAV).
+    expect(result.persistedSize).toBeGreaterThan(50000);
+    // Out-of-bounds fits are refused with the typed, actionable error.
+    expect(result.refusalFailure).toBe('ratio-out-of-range');
+    expect(result.refusalMessage ?? '').toContain('never silently clamped');
+  });
 });

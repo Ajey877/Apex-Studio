@@ -38,6 +38,7 @@ import {
   WarpTimeStretchError,
   buildWarpStretchAssetId,
   commitWarpTimeStretch,
+  computeFitToTempoRatio,
   describeWarpStretchPlan,
 } from './warpTimeStretchCommit';
 
@@ -431,5 +432,231 @@ describe('Phase 7A: committed stretch in real offline export', () => {
       `stretched window is decisively audible where the original was silent (${stretchedLate.toFixed(4)} vs ${originalLate.toFixed(6)})`
     );
     assert.ok(rms(stretchedOut, 1.1, 1.9) < 1e-3, 'render respects the committed clip end (no unbounded bleed)');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 7B — Fit to Project Tempo.
+// ---------------------------------------------------------------------------
+
+/** Dominant frequency via autocorrelation (same estimator as the DSP suite). */
+const dominantFrequency = (data: Float32Array, from: number, to: number): number => {
+  const n = to - from;
+  const minLag = Math.floor(SR / 1000);
+  const maxLag = Math.min(Math.floor(SR / 60), Math.floor(n / 2));
+  let bestLag = minLag;
+  let bestScore = -Infinity;
+  for (let lag = minLag; lag <= maxLag; lag += 1) {
+    let sum = 0;
+    for (let i = 0; i < n - lag; i += 2) sum += data[from + i] * data[from + i + lag];
+    if (sum > bestScore) {
+      bestScore = sum;
+      bestLag = lag;
+    }
+  }
+  return SR / bestLag;
+};
+
+describe('Phase 7B: fit-to-tempo ratio computation (r = sourceBpm / projectBpm)', () => {
+  it('derives the canonical cases exactly: 90→120 shortens, 120→120 is identity, 120→90 lengthens', () => {
+    assert.equal(computeFitToTempoRatio(90, 120), 0.75, '90 BPM audio into a 120 BPM project → 0.75×');
+    assert.equal(computeFitToTempoRatio(120, 120), 1, 'equal tempos → identity');
+    assert.equal(computeFitToTempoRatio(120, 90), 4 / 3, '120 BPM audio into a 90 BPM project → 4/3×');
+    assert.equal(computeFitToTempoRatio(140, 70), 2);
+    assert.equal(computeFitToTempoRatio('90', 120), 0.75, 'string input from the BPM field is accepted');
+    assert.equal(computeFitToTempoRatio('  90.0  ', 120), 0.75, 'surrounding whitespace is trimmed');
+  });
+
+  it('accepts the supported boundaries exactly and refuses just beyond them — never silently clamped', () => {
+    assert.equal(computeFitToTempoRatio(30, 120), 0.25, 'lower WSOLA boundary is supported');
+    assert.equal(computeFitToTempoRatio(480, 120), 4.0, 'upper WSOLA boundary is supported');
+    for (const [source, project] of [[29.9, 120], [481, 120], [60, 250], [250, 60]] as const) {
+      assert.throws(
+        () => computeFitToTempoRatio(source, project),
+        (error: unknown) => {
+          if (!(error instanceof WarpTimeStretchError) || error.failure !== 'ratio-out-of-range') return false;
+          // Actionable: names both tempos, the needed ratio and the no-clamp rule.
+          return (
+            error.message.includes(`${source} BPM`) &&
+            error.message.includes(`${project} BPM`) &&
+            /never silently clamped/.test(error.message) &&
+            /0\.25×–4\.0×|0\.25×–4×/.test(error.message)
+          );
+        },
+        `fit ${source} → ${project} must be refused with an actionable message`
+      );
+    }
+  });
+
+  it('rejects invalid, zero and non-finite source tempos with a typed, honest error', () => {
+    for (const bad of ['', '   ', 'abc', '90bpm', '0', '-90', 0, -90, Number.NaN, Infinity, -Infinity]) {
+      assert.throws(
+        () => computeFitToTempoRatio(bad as string | number, 120),
+        (error: unknown) =>
+          error instanceof WarpTimeStretchError &&
+          error.failure === 'invalid-source-bpm' &&
+          /no beat detection/i.test(error.message) &&
+          /positive BPM/.test(error.message),
+        `source ${JSON.stringify(bad)}`
+      );
+    }
+  });
+
+  it('rejects unusable project tempos with a typed error (the authoritative value must be valid)', () => {
+    for (const bad of [0, -120, Number.NaN, Infinity]) {
+      assert.throws(
+        () => computeFitToTempoRatio(90, bad),
+        (error: unknown) => error instanceof WarpTimeStretchError && error.failure === 'invalid-project-bpm',
+        `project ${String(bad)}`
+      );
+    }
+  });
+});
+
+describe('Phase 7B: fit-to-tempo commit through the shared WSOLA pipeline', () => {
+  const makeFitClip = (): PlaylistClip => ({ ...makeClip(), lengthBars: 0.375 });
+
+  const seedFitWorld = (): { world: FakeWorld; source: AudioBuffer; sourceSnapshot: Float32Array[] } => {
+    const world = makeWorld();
+    const source = makeToneBuffer(0.75);
+    world.store.set(SOURCE_ID, source);
+    world.persisted.set(SOURCE_ID, source);
+    return { world, source, sourceSnapshot: snapshotBuffer(source) };
+  };
+
+  it('commits 90 → 120 BPM as a 0.75× fit: scaled length, new durable asset, untouched source, repitch intact', async () => {
+    const { world, source, sourceSnapshot } = seedFitWorld();
+    const clip = makeFitClip();
+    const ratio = computeFitToTempoRatio('90', 120);
+    assert.equal(ratio, 0.75);
+
+    const result = await commitWarpTimeStretch(clip, ratio, makeDeps(world));
+
+    assert.notEqual(result.stretchedAssetId, SOURCE_ID);
+    assert.ok(result.stretchedAssetId.startsWith('wsola-stretch-clip-1-'));
+    assert.equal(result.clip.audioBufferId, result.stretchedAssetId);
+    assert.equal(result.clip.lengthBars, 0.28125, 'clip length scales by the fit ratio (0.375 × 0.75)');
+    assert.equal(result.clip.startBar, 4, 'arrangement position never moves');
+    assert.equal(result.clip.timeStretchRate, 1.2, 'Repitch fields keep their legacy meaning');
+    assert.equal(result.clip.pitchShiftSemitones, -3);
+    assert.equal(result.stretchedBuffer.length, Math.ceil(source.length * 0.75), 'exact WSOLA output length');
+    assert.equal(world.persisted.has(result.stretchedAssetId), true, 'the fitted asset is durable');
+    assertBuffersIdentical(world.store.get(SOURCE_ID)!, sourceSnapshot);
+  });
+
+  it('the previewed plan and the committed result agree exactly (ratio, bars and duration)', async () => {
+    const { world, source } = seedFitWorld();
+    const clip = makeFitClip();
+    const ratio = computeFitToTempoRatio(90, 120);
+
+    // What the modal shows BEFORE committing…
+    const plan = describeWarpStretchPlan(clip, ratio, source);
+    // …must equal what the commit actually produces.
+    const result = await commitWarpTimeStretch(clip, ratio, makeDeps(world));
+
+    assert.match(plan, /0\.75×/);
+    assert.match(plan, /0\.375 → 0\.28125 bars/);
+    assert.match(plan, /0\.75 s → 0\.56 s/);
+    assert.equal(result.clip.lengthBars, 0.28125, 'committed bar length equals the previewed target');
+    assert.equal(
+      result.stretchedBuffer.duration.toFixed(2),
+      '0.56',
+      'committed audio duration equals the previewed target duration'
+    );
+  });
+
+  it('preserves the dominant pitch through the 0.75× fit (real PCM autocorrelation, ±2 %)', async () => {
+    const { world } = seedFitWorld();
+    const result = await commitWarpTimeStretch(makeFitClip(), computeFitToTempoRatio(90, 120), makeDeps(world));
+    const out = result.stretchedBuffer.getChannelData(0);
+    const from = Math.floor(out.length * 0.25);
+    const f0 = dominantFrequency(out, from, Math.min(out.length, from + 16384));
+    assert.ok(
+      Math.abs(f0 - 220) / 220 <= 0.02,
+      `pitch preserved through the fit — measured ${f0.toFixed(2)} Hz`
+    );
+  });
+
+  it('undo/redo and save/load keep the fit asset references exact', async () => {
+    const { world, sourceSnapshot } = seedFitWorld();
+    const before = makeFitClip();
+    const result = await commitWarpTimeStretch(before, computeFitToTempoRatio(90, 120), makeDeps(world));
+    const processedSnapshot = snapshotBuffer(result.stretchedBuffer);
+
+    const history: PlaylistClip[][] = [[before], [result.clip]];
+    const undone = history[0][0];
+    assert.equal(undone.audioBufferId, SOURCE_ID, 'undo restores the original audio reference');
+    assert.equal(undone.lengthBars, 0.375);
+    assertBuffersIdentical(world.store.get(SOURCE_ID)!, sourceSnapshot);
+    const redone = history[1][0];
+    assert.equal(redone.audioBufferId, result.stretchedAssetId, 'redo restores the processed reference');
+    assertBuffersIdentical(world.store.get(result.stretchedAssetId)!, processedSnapshot);
+
+    const state = { playlistClips: [result.clip], recordings: [] } as unknown as ProjectState;
+    const parsed = JSON.parse(serializeProjectState(state)) as { state?: unknown };
+    const ids = getAudioIdsForProject(normalizeProjectState(parsed.state ?? parsed));
+    assert.ok(ids.includes(result.stretchedAssetId), 'the saved project carries the fitted asset');
+    assert.ok(!ids.includes(SOURCE_ID), 'the committed clip no longer references the source asset');
+  });
+
+  it('refuses a fit whose ratio is out of bounds BEFORE touching any asset', async () => {
+    const { world } = seedFitWorld();
+    const registersBefore = world.registerCalls.length;
+    await assert.rejects(
+      async () => {
+        const ratio = computeFitToTempoRatio(20, 120); // 0.166… — below 0.25×
+        await commitWarpTimeStretch(makeFitClip(), ratio, makeDeps(world));
+      },
+      (error: unknown) => error instanceof WarpTimeStretchError && error.failure === 'ratio-out-of-range'
+    );
+    assert.equal(world.registerCalls.length, registersBefore, 'nothing registered on refusal');
+  });
+});
+
+describe('Phase 7B: fitted clip in real offline export', () => {
+  before(() => {
+    (globalThis as any).OfflineAudioContext = RealOfflineAudioContext;
+    engine.setMasteringState({ ...DEFAULT_MASTERING_SUITE_STATE, enabled: false });
+  });
+
+  it('the fitted 0.75× clip hard-ends where its processed audio ends — the region the original still fills goes silent', async () => {
+    const world = makeWorld();
+    const source = makeToneBuffer(0.75);
+    world.store.set(SOURCE_ID, source);
+    world.persisted.set(SOURCE_ID, source);
+    const clip = makeClip();
+    clip.lengthBars = 0.375; // 0.75 s window at 120 BPM — exactly the source length
+    const result = await commitWarpTimeStretch(clip, computeFitToTempoRatio(90, 120), makeDeps(world));
+
+    audioEngine.setSampleBuffer(SOURCE_ID, source);
+    audioEngine.setSampleBuffer(result.stretchedAssetId, result.stretchedBuffer);
+
+    // Same isolation as the Phase 7A export proof: rate 1, no detune, and the
+    // fixtures' window-matched fades so the polyfill renders the envelope
+    // continuously (web-audio-engine drops a held automation segment; real
+    // browsers render both envelopes — covered by the browser specs).
+    const isolate = (c: PlaylistClip): PlaylistClip => ({
+      ...c,
+      startBar: 0,
+      trackIndex: 0,
+      timeStretchRate: 1,
+      pitchShiftSemitones: 0,
+    });
+
+    const originalRender = await renderSong(isolate(clip));
+    const fitRender = await renderSong(isolate(result.clip));
+    const originalOut = originalRender.getChannelData(0);
+    const fitOut = fitRender.getChannelData(0);
+
+    // Both clips play real audio inside the fitted window.
+    assert.ok(rms(originalOut, 0.30, 0.40) > 0.03, 'original clip audible mid-window');
+    assert.ok(rms(fitOut, 0.30, 0.40) > 0.03, 'fitted clip audible mid-window (processed PCM exports)');
+
+    // Separation: the original still plays at 0.62–0.70 s (its 0.75 s window),
+    // while the fitted clip's committed audio hard-ended at 0.5625 s.
+    const originalLate = rms(originalOut, 0.62, 0.70);
+    const fitLate = rms(fitOut, 0.62, 0.70);
+    assert.ok(originalLate > 1e-4, `original still audible late in its window (${originalLate.toExponential(2)})`);
+    assert.ok(fitLate < 1e-6, `fitted clip is hard-silent past its committed end (${fitLate.toExponential(2)})`);
   });
 });
