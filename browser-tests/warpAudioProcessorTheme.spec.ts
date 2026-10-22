@@ -419,9 +419,10 @@ test.describe('UI-03N Warp Audio Processor theme', () => {
       await expect(stretchCard).toContainText('No beat detection is performed');
       const fitInput = stretchCard.locator('#fl-warp-fit-source-bpm');
       await expect(fitInput).toBeDisabled();
-      // :text-is (exact) — Phase 7C added a distinct "Render & Commit Fit to
-      // Length" CTA whose label contains this one as a substring.
-      const fitCommit = stretchCard.locator('button:text-is("Render & Commit Fit")');
+      // getByRole with an EXACT accessible name — Phase 7C added a distinct
+      // "Render & Commit Fit to Length" CTA whose label contains this one as a
+      // substring, so a plain :has-text would now match both buttons.
+      const fitCommit = stretchCard.getByRole('button', { name: 'Render & Commit Fit', exact: true });
       await expect(fitCommit).toBeDisabled();
       await expect(fitCommit).toHaveCSS('opacity', '0.4');
       await expectColor(bgOf(fitCommit), expected.success, 'fit commit CTA fill');
@@ -441,7 +442,7 @@ test.describe('UI-03N Warp Audio Processor theme', () => {
       await expect(fitLenBars).toBeDisabled();
       await expect(fitLenBeats).toBeDisabled();
       await expect(fitLenBeats).toHaveAttribute('step', '0.25');
-      const fitLenCommit = stretchCard.locator('button:text-is("Render & Commit Fit to Length")');
+      const fitLenCommit = stretchCard.getByRole('button', { name: 'Render & Commit Fit to Length', exact: true });
       await expect(fitLenCommit).toBeDisabled();
       await expect(fitLenCommit).toHaveCSS('opacity', '0.4');
       await expectColor(bgOf(fitLenCommit), expected.success, 'fit-to-length commit CTA fill');
@@ -516,14 +517,15 @@ test.describe('UI-03N Warp Audio Processor theme', () => {
       // disabled for a pattern clip, and so does its commit CTA.
       await expect(reopened.locator('input[type="range"]').nth(2)).toBeDisabled();
       await expect(reopened.locator('button:has-text("Render & Commit Stretch")')).toBeDisabled();
-      // Phase 7B: the fit-to-tempo input and its commit CTA stay disabled too.
+      // Phase 7B: the fit-to-tempo input and its commit CTA stay disabled too
+      // (exact accessible names — 7C's longer CTA label contains this one).
       await expect(reopened.locator('#fl-warp-fit-source-bpm')).toBeDisabled();
-      await expect(reopened.locator('button:text-is("Render & Commit Fit")')).toBeDisabled();
+      await expect(reopened.getByRole('button', { name: 'Render & Commit Fit', exact: true })).toBeDisabled();
       // Phase 7C: the fit-to-length inputs and their distinct CTA stay disabled
       // for a pattern clip — the exact-length operation is audio-only too.
       await expect(reopened.locator('#fl-warp-fit-length-bars')).toBeDisabled();
       await expect(reopened.locator('#fl-warp-fit-length-beats')).toBeDisabled();
-      await expect(reopened.locator('button:text-is("Render & Commit Fit to Length")')).toBeDisabled();
+      await expect(reopened.getByRole('button', { name: 'Render & Commit Fit to Length', exact: true })).toBeDisabled();
 
       await page.keyboard.press('Escape');
       await expect(reopened).toHaveCount(0);
