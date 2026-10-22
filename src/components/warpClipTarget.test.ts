@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import type { PlaylistClip } from '../types/daw';
 import {
+  STRETCH_BEHAVIOUR_SUMMARY,
   WARP_BEHAVIOUR_SUMMARY,
   isWarpTargetReady,
   resolveWarpTarget,
@@ -77,5 +78,23 @@ describe('Phase 52 — Warp clip target', () => {
     assert.ok(!/elastique/i.test(WARP_BEHAVIOUR_SUMMARY));
     assert.ok(!/granular/i.test(WARP_BEHAVIOUR_SUMMARY));
     assert.ok(!/time-stretch/i.test(WARP_BEHAVIOUR_SUMMARY));
+  });
+
+  it('describes the shipped Phase 7A stretch truthfully (WSOLA, range, commit semantics)', () => {
+    // The stretch summary must name the algorithm that is actually implemented
+    // (WSOLA — proven by src/audio/wsolaTimeStretch.test.ts), state its
+    // supported ratio range, and describe the render/commit asset semantics.
+    // It must never claim proprietary or unimplemented technologies.
+    assert.ok(STRETCH_BEHAVIOUR_SUMMARY.length > 0);
+    assert.ok(/WSOLA/.test(STRETCH_BEHAVIOUR_SUMMARY), 'names the implemented algorithm');
+    assert.ok(/preserving pitch/i.test(STRETCH_BEHAVIOUR_SUMMARY), 'states the pitch-preserving capability');
+    assert.ok(/0\.25×–4\.00×/.test(STRETCH_BEHAVIOUR_SUMMARY), 'states the supported ratio range');
+    assert.ok(/render\/commit/i.test(STRETCH_BEHAVIOUR_SUMMARY), 'states that this is a render/commit operation');
+    assert.ok(/new asset/i.test(STRETCH_BEHAVIOUR_SUMMARY) && /undo/i.test(STRETCH_BEHAVIOUR_SUMMARY), 'states the asset and undo semantics');
+    assert.ok(!/elastique|élastique/i.test(STRETCH_BEHAVIOUR_SUMMARY));
+    assert.ok(!/granular/i.test(STRETCH_BEHAVIOUR_SUMMARY));
+    assert.ok(!/formant/i.test(STRETCH_BEHAVIOUR_SUMMARY));
+    assert.ok(!/transient/i.test(STRETCH_BEHAVIOUR_SUMMARY), 'no transient-preservation claim');
+    assert.ok(!/real-?time/i.test(STRETCH_BEHAVIOUR_SUMMARY), 'no real-time promise');
   });
 });

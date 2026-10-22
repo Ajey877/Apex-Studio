@@ -146,7 +146,7 @@ export const TRANSPORT_TOOL_GROUPS: readonly TransportToolGroupSpec[] = [
       {
         id: 'fl-warp-processor-btn',
         label: 'Warp modes',
-        title: 'Audio clip pitch and playback rate',
+        title: 'Audio clip pitch, playback rate and WSOLA pitch-preserving time stretch',
         icon: Timer,
         handler: 'warp',
       },

@@ -31,7 +31,11 @@
  *   - the green identity (tile, panel edge, behaviour summary, pitch
  *     read-out) and the gold warning qualifiers;
  *   - the disabled, honest un-actionable states (NOTHING SELECTED,
- *     NO AUDIO CLIP TO WARP, PITCH AND RATE ONLY — LENGTH IS NOT PRESERVED);
+ *     NO AUDIO CLIP TO WARP, REPITCH CHANGES PITCH AND LENGTH TOGETHER —
+ *     WSOLA STRETCH PRESERVES PITCH);
+ *   - Phase 7A: the shipped WSOLA stretch card (named algorithm, supported
+ *     0.25×–4.00× range, disabled commit CTA without a target) themed with
+ *     the same token contract as the repitch controls;
  *   - the theme-aware auditioning-state fill contract (no fixed `bg-white`);
  *   - Escape and the focus contract, including that the disabled preview
  *     button is skipped by the focus trap.
@@ -283,6 +287,13 @@ test.describe('UI-03N Warp Audio Processor theme', () => {
       await expectColor(borderTopOf(badge), { ...expected.gold, a: 0.4 }, 'repitch badge edge');
       await expectColor(fgOf(badge), expected.text, 'repitch badge text');
       await expectAaContrast(badge, 'repitch badge text');
+      // Phase 7A: the shipped-stretch badge states the new capability truth.
+      const stretchBadge = header.locator('span.font-mono').nth(1);
+      await expect(stretchBadge).toHaveText('WSOLA — PITCH-PRESERVING STRETCH');
+      await expectColor(bgOf(stretchBadge), { ...expected.success, a: 0.2 }, 'stretch badge wash');
+      await expectColor(borderTopOf(stretchBadge), { ...expected.success, a: 0.4 }, 'stretch badge edge');
+      await expectColor(fgOf(stretchBadge), expected.text, 'stretch badge text');
+      await expectAaContrast(stretchBadge, 'stretch badge text');
 
       await expectColor(fgOf(dialog.locator('#fl-warp-processor-modal-title')), expected.text, 'title');
       await expectAaContrast(dialog.locator('#fl-warp-processor-modal-title'), 'title');
@@ -324,17 +335,19 @@ test.describe('UI-03N Warp Audio Processor theme', () => {
       await expect(noClipBanner).toContainText('Select an audio clip in the Playlist Arranger first');
       await expectAaContrast(noClipBanner.locator('span').nth(1), 'no-clip banner message');
 
-      // ---- The behaviour banner: what the tool does and does not do ----
-      const behaviourBanner = body.locator('text=PITCH AND RATE ONLY — LENGTH IS NOT PRESERVED').locator('..');
+      // ---- The behaviour banner: what each processor really does ----
+      const behaviourBanner = body.locator('text=REPITCH CHANGES PITCH AND LENGTH TOGETHER — WSOLA STRETCH PRESERVES PITCH').locator('..');
       await expectColor(bgOf(behaviourBanner), expected.canvas, 'behaviour banner surface');
       await expectColor(borderTopOf(behaviourBanner), { ...expected.gold, a: 0.4 }, 'behaviour banner edge');
       await expectAaContrast(behaviourBanner.locator('span').first(), 'behaviour banner statement');
-      const qualifier = behaviourBanner.locator('text=NO LENGTH-PRESERVING STRETCH');
+      const qualifier = behaviourBanner.locator('text=STRETCH COMMITS A NEW AUDIO ASSET · ORIGINAL KEPT FOR UNDO');
       await expectColor(fgOf(qualifier), expected.text3, 'behaviour banner qualifier');
       await expectAaContrast(qualifier, 'behaviour banner qualifier');
 
       // ---- The control card: green pitch read-out, cyan rate read-out ----
-      const controlCard = body.locator(':scope > div').last();
+      // (The Phase 7A stretch card is the body's last child; the repitch
+      // control card is the one before it.)
+      const controlCard = body.locator(':scope > div').nth(-2);
       await expectColor(bgOf(controlCard), expected.surface2, 'control card surface');
       await expect(controlCard).toContainText('PITCH & SPEED (APPLIED TO THIS CLIP)');
       const behaviourSummary = controlCard.locator(':scope > div:first-child span.font-mono');
@@ -366,6 +379,31 @@ test.describe('UI-03N Warp Audio Processor theme', () => {
       await expect(rateRange).toHaveAttribute('min', '0.25');
       await expect(rateRange).toHaveAttribute('max', '3.0');
       await expect(rateRange).toHaveAttribute('step', '0.05');
+
+      // ---- Phase 7A stretch card: shipped WSOLA truth, same token contract ----
+      const stretchCard = body.locator(':scope > div').last();
+      await expectColor(bgOf(stretchCard), expected.surface2, 'stretch card surface');
+      await expectColor(borderTopOf(stretchCard), expected.border, 'stretch card border');
+      await expect(stretchCard).toContainText('TIME STRETCH — PITCH PRESERVED (WSOLA)');
+      const stretchSummary = stretchCard.locator(':scope > div:first-child span.font-mono');
+      await expect(stretchSummary).toContainText('WSOLA render/commit');
+      await expectColor(fgOf(stretchSummary), expected.success, 'stretch summary keeps its green meaning');
+      await expectAaContrast(stretchSummary, 'stretch summary');
+      await expect(stretchCard).toContainText('SUPPORTED 0.25×–4.00×');
+      const stretchValue = stretchCard.locator('.font-mono.font-bold').first();
+      await expect(stretchValue).toHaveText('1.00×');
+      await expectColor(fgOf(stretchValue), expected.success, 'stretch ratio read-out keeps its green meaning');
+      await expectAaContrast(stretchValue, 'stretch ratio read-out');
+      const stretchRange = stretchCard.locator('input[type="range"]');
+      await expect(stretchRange).toBeDisabled();
+      await expect(stretchRange).toHaveAttribute('min', '0.25');
+      await expect(stretchRange).toHaveAttribute('max', '4.0');
+      await expect(stretchRange).toHaveAttribute('step', '0.01');
+      const commitStretch = stretchCard.locator('button:has-text("Render & Commit Stretch")');
+      await expect(commitStretch).toBeDisabled();
+      await expect(commitStretch).toHaveCSS('opacity', '0.4');
+      await expectColor(bgOf(commitStretch), expected.success, 'stretch commit CTA fill');
+      await expectColor(fgOf(commitStretch), expected.onAccent, 'stretch commit CTA on-colour');
 
       const footerNote = footer.locator('span').first();
       await expect(footerNote).toHaveText('Applies to live playback and WAV export');
@@ -419,6 +457,10 @@ test.describe('UI-03N Warp Audio Processor theme', () => {
       const reopenedInsets = reopened.locator('.custom-scrollbar .grid > div');
       await expect(reopenedInsets.nth(0).locator('input[type="range"]')).toBeDisabled();
       await expect(reopenedInsets.nth(1).locator('input[type="range"]')).toBeDisabled();
+      // Phase 7A: the stretch-ratio slider (the dialog's third range) stays
+      // disabled for a pattern clip, and so does its commit CTA.
+      await expect(reopened.locator('input[type="range"]').nth(2)).toBeDisabled();
+      await expect(reopened.locator('button:has-text("Render & Commit Stretch")')).toBeDisabled();
 
       await page.keyboard.press('Escape');
       await expect(reopened).toHaveCount(0);

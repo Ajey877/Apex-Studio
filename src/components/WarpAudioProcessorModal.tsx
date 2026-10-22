@@ -1,9 +1,19 @@
 import React, { useEffect, useState } from 'react';
 import { ModalFrame } from './ModalFrame';
-import { Zap, X, Sparkles, Play, Check } from 'lucide-react';
+import { Zap, X, Sparkles, Play, Check, Waves } from 'lucide-react';
 import { PlaylistClip } from '../types/daw';
 import { audioEngine } from '../audio/audioEngine';
+import { hydrateAudioClip } from '../audio/audioPersistence';
+import { waitForSampleBufferPersistence } from '../audio/sampleBufferPersistence';
 import {
+  WSOLA_MAX_RATIO,
+  WSOLA_MIN_RATIO,
+  WarpTimeStretchError,
+  commitWarpTimeStretch,
+  describeWarpStretchPlan,
+} from '../audio/warpTimeStretchCommit';
+import {
+  STRETCH_BEHAVIOUR_SUMMARY,
   WARP_BEHAVIOUR_SUMMARY,
   isWarpTargetReady,
   resolveWarpTarget,
@@ -38,6 +48,9 @@ export const WarpAudioProcessorModal: React.FC<WarpAudioProcessorModalProps> = (
   const [stretchRate, setStretchRate] = useState<number>(targetClip?.timeStretchRate || 1.0);
   const [isAuditioning, setIsAuditioning] = useState<boolean>(false);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
+  // Phase 7A: WSOLA pitch-preserving stretch — ratio + in-flight commit guard.
+  const [wsolaRatio, setWsolaRatio] = useState<number>(1.0);
+  const [isCommittingStretch, setIsCommittingStretch] = useState<boolean>(false);
 
   // The modal stays mounted between openings, so re-seed the controls whenever
   // it opens or the target clip changes. Without this the sliders would keep
@@ -46,6 +59,7 @@ export const WarpAudioProcessorModal: React.FC<WarpAudioProcessorModalProps> = (
     if (!isOpen) return;
     setPitchSemitones(targetClip?.pitchShiftSemitones ?? 0);
     setStretchRate(targetClip?.timeStretchRate ?? 1.0);
+    setWsolaRatio(1.0);
   }, [isOpen, targetClip?.id]);
 
   if (!isOpen) return null;
@@ -105,6 +119,58 @@ export const WarpAudioProcessorModal: React.FC<WarpAudioProcessorModalProps> = (
     }, 1000);
   };
 
+  /**
+   * Phase 7A: Render & Commit — the first real pitch-preserving time stretch.
+   *
+   * This is NOT another setting: `commitWarpTimeStretch` resolves the selected
+   * clip's real source PCM (engine memory, then the persisted project store),
+   * renders it through WSOLA into new processed audio, registers that audio as
+   * a NEW durable asset (the original asset is never touched, so undo always
+   * has somewhere to go home to), waits for the asset write to settle, and only
+   * then hands the updated clip to `onUpdateClip` — the same path the Apply
+   * button uses, so the commit lands in project history and undo/redo restores
+   * the previous clip AND its previous audio reference.
+   *
+   * Every refusal (no source audio, unavailable asset, unsupported ratio,
+   * persistence failure) surfaces its typed, honest reason here and changes
+   * nothing. Success is only reported after the asset is committed.
+   */
+  const handleCommitTimeStretch = async () => {
+    if (!targetClip || !onUpdateClip || isCommittingStretch) return;
+    if (!targetClip.audioBufferId) {
+      setStatusMessage('This clip has no source audio asset — there is nothing to stretch.');
+      return;
+    }
+    setIsCommittingStretch(true);
+    setStatusMessage(`Rendering ${wsolaRatio.toFixed(2)}× pitch-preserving stretch (WSOLA)…`);
+    try {
+      const result = await commitWarpTimeStretch(targetClip, wsolaRatio, {
+        getSourceBuffer: id => audioEngine.getSampleBuffer(id),
+        hydrateSource: id => hydrateAudioClip(audioEngine, id),
+        registerAsset: (id, buffer) => audioEngine.setSampleBuffer(id, buffer),
+        waitForAsset: id => waitForSampleBufferPersistence(audioEngine, id),
+        createBuffer: (channels, length, sampleRate) => audioEngine.getContext().createBuffer(channels, length, sampleRate),
+        now: () => Date.now(),
+      });
+      onUpdateClip(result.clip);
+      setStatusMessage(
+        `Committed ${wsolaRatio.toFixed(2)}× pitch-preserving stretch: "${targetClip.name}" now references ${result.stretchedBuffer.duration.toFixed(2)} s of processed audio. The original asset is untouched — Undo restores it.`
+      );
+      setTimeout(() => {
+        onClose();
+      }, 2500);
+    } catch (error) {
+      // Errors stay visible until dismissed — no auto-clear, no fake success.
+      setStatusMessage(
+        error instanceof WarpTimeStretchError
+          ? error.message
+          : `Stretch failed (${error instanceof Error ? error.message : String(error)}). The clip was not changed.`
+      );
+    } finally {
+      setIsCommittingStretch(false);
+    }
+  };
+
   return (
     <ModalFrame id="fl-warp-processor-modal" labelledBy="fl-warp-processor-modal-title" onClose={onClose} className="fixed inset-0 backdrop-blur-md z-50 flex items-center justify-center p-3 sm:p-4 select-none">
       {/* UI-03N: every chrome surface, border, text and interaction state below
@@ -133,6 +199,9 @@ export const WarpAudioProcessorModal: React.FC<WarpAudioProcessorModalProps> = (
                 <h2 id="fl-warp-processor-modal-title" className="text-sm font-bold text-[var(--apex-text)] tracking-wide">AUDIO CLIP PITCH &amp; PLAYBACK RATE</h2>
                 <span className="px-1.5 py-0.5 rounded text-[9px] font-mono font-bold bg-[color-mix(in_srgb,var(--apex-gold)_20%,transparent)] text-[var(--apex-text)] border border-[color-mix(in_srgb,var(--apex-gold)_40%,transparent)]">
                   REPITCH — LENGTH NOT PRESERVED
+                </span>
+                <span className="px-1.5 py-0.5 rounded text-[9px] font-mono font-bold bg-[color-mix(in_srgb,var(--apex-success)_20%,transparent)] text-[var(--apex-text)] border border-[color-mix(in_srgb,var(--apex-success)_40%,transparent)]">
+                  WSOLA — PITCH-PRESERVING STRETCH
                 </span>
               </div>
               <p className="text-[10px] text-[var(--apex-text-3)]">
@@ -199,12 +268,12 @@ export const WarpAudioProcessorModal: React.FC<WarpAudioProcessorModalProps> = (
             </div>
           )}
 
-          {/* What is and is not implemented. */}
+          {/* What each processor does — the honest capability banner. */}
           <div className="bg-[var(--apex-canvas)] border border-[color-mix(in_srgb,var(--apex-gold)_40%,transparent)] rounded-lg px-3 py-2 flex items-center justify-between gap-2">
             <span className="text-[10px] font-mono font-bold text-[var(--apex-gold)] uppercase tracking-wider">
-              PITCH AND RATE ONLY — LENGTH IS NOT PRESERVED
+              REPITCH CHANGES PITCH AND LENGTH TOGETHER — WSOLA STRETCH PRESERVES PITCH
             </span>
-            <span className="text-[10px] text-[var(--apex-text-3)] whitespace-nowrap">NO LENGTH-PRESERVING STRETCH</span>
+            <span className="text-[10px] text-[var(--apex-text-3)] whitespace-nowrap">STRETCH COMMITS A NEW AUDIO ASSET · ORIGINAL KEPT FOR UNDO</span>
           </div>
 
           {/* Implemented controls */}
@@ -255,6 +324,62 @@ export const WarpAudioProcessorModal: React.FC<WarpAudioProcessorModalProps> = (
               </div>
             </div>
           </div>
+
+          {/* Phase 7A: pitch-preserving time stretch — WSOLA render & commit. */}
+          <div className="bg-[var(--apex-surface-2)] p-4 rounded-xl border border-[var(--apex-border)] space-y-3">
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-bold text-[var(--apex-text)] uppercase flex items-center gap-1.5">
+                <Waves className="w-3.5 h-3.5 text-[var(--apex-success)]" />
+                TIME STRETCH — PITCH PRESERVED (WSOLA)
+              </span>
+              <span className="text-[10px] font-mono text-[var(--apex-success)]">{STRETCH_BEHAVIOUR_SUMMARY}</span>
+            </div>
+
+            <div className="bg-[var(--apex-canvas)] p-3 rounded-lg border border-[var(--apex-border)] space-y-1.5 text-xs">
+              <div className="flex justify-between text-xs">
+                <span className="text-[var(--apex-text)] font-bold">STRETCH RATIO</span>
+                <span className="text-[var(--apex-success)] font-mono font-bold">{wsolaRatio.toFixed(2)}×</span>
+              </div>
+              <input
+                type="range"
+                min="0.25"
+                max="4.0"
+                step="0.01"
+                value={wsolaRatio}
+                disabled={!targetClip || isCommittingStretch}
+                onChange={(e) => setWsolaRatio(Number(e.target.value))}
+                className="w-full accent-[var(--apex-success)] disabled:opacity-40"
+              />
+              <div className="flex items-center justify-between gap-2 text-[10px] font-mono">
+                <span className="text-[var(--apex-text-3)] whitespace-nowrap">
+                  SUPPORTED {WSOLA_MIN_RATIO.toFixed(2)}×–{WSOLA_MAX_RATIO.toFixed(2)}×
+                </span>
+                <span className="text-[var(--apex-text-2)] text-right">
+                  {targetClip
+                    ? describeWarpStretchPlan(
+                        targetClip,
+                        wsolaRatio,
+                        targetClip.audioBufferId ? audioEngine.getSampleBuffer(targetClip.audioBufferId) : undefined
+                      )
+                    : '—'}
+                </span>
+              </div>
+              <span className="text-[9px] text-[var(--apex-text-3)] block">
+                Renders new audio with the pitch preserved, then commits it as a new project asset.
+                The original audio is kept — Undo restores the clip and its original reference.
+                The Repitch controls above are not changed by this operation.
+              </span>
+            </div>
+
+            <button
+              onClick={handleCommitTimeStretch}
+              disabled={!targetClip || isCommittingStretch}
+              className="px-4 py-1.5 bg-[var(--apex-success)] hover:bg-[color-mix(in_srgb,var(--apex-success)_82%,var(--apex-text))] disabled:opacity-40 disabled:hover:bg-[var(--apex-success)] text-[var(--apex-state-playing-fg)] font-bold rounded transition shadow flex items-center gap-1.5 text-xs"
+            >
+              <Check className="w-4 h-4" />
+              <span>{isCommittingStretch ? 'Rendering & Committing…' : 'Render & Commit Stretch'}</span>
+            </button>
+          </div>
         </div>
 
         {/* Footer */}
@@ -271,7 +396,7 @@ export const WarpAudioProcessorModal: React.FC<WarpAudioProcessorModalProps> = (
             </button>
             <button
               onClick={handleApplyWarp}
-              disabled={!targetClip}
+              disabled={!targetClip || isCommittingStretch}
               className="px-4 py-1.5 bg-[var(--apex-success)] hover:bg-[color-mix(in_srgb,var(--apex-success)_82%,var(--apex-text))] disabled:opacity-40 disabled:hover:bg-[var(--apex-success)] text-[var(--apex-state-playing-fg)] font-bold rounded transition shadow flex items-center gap-1.5"
             >
               <Check className="w-4 h-4" />
