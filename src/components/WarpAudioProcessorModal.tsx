@@ -10,9 +10,16 @@ import {
   WSOLA_MIN_RATIO,
   WarpTimeStretchError,
   commitWarpTimeStretch,
+  commitWarpTimeStretchToLength,
   computeFitToTempoRatio,
+  describeFitToLengthPlan,
+  describeFitToLengthTarget,
   describeWarpStretchPlan,
+  formatBars,
+  type FitToLengthContext,
+  type FitToLengthTarget,
 } from '../audio/warpTimeStretchCommit';
+import { beatsPerBar, resolveProjectTimeSignature } from '../music/musicalTime';
 import {
   STRETCH_BEHAVIOUR_SUMMARY,
   WARP_BEHAVIOUR_SUMMARY,
@@ -39,6 +46,15 @@ interface WarpAudioProcessorModalProps {
    * from the transport's tempo.
    */
   projectBpm: number;
+  /**
+   * Phase 7C: the project's authoritative time signature
+   * (`projectState.meta.timeSignature` in the App). Fit to Musical Length
+   * resolves it through the SAME `resolveProjectTimeSignature` authority the
+   * transport/engine use — the modal never assumes 4/4 and offers no
+   * independent meter setting, so the fit can never drift from the grid the
+   * project actually plays on.
+   */
+  timeSignature: unknown;
 }
 
 export const WarpAudioProcessorModal: React.FC<WarpAudioProcessorModalProps> = ({
@@ -47,7 +63,8 @@ export const WarpAudioProcessorModal: React.FC<WarpAudioProcessorModalProps> = (
   clips,
   selectedClipId,
   onUpdateClip,
-  projectBpm
+  projectBpm,
+  timeSignature
 }) => {
   const target = resolveWarpTarget(clips, selectedClipId);
   const targetClip = isWarpTargetReady(target) ? target.clip : null;
@@ -63,6 +80,22 @@ export const WarpAudioProcessorModal: React.FC<WarpAudioProcessorModalProps> = (
   // Phase 7B: user-entered source tempo for Fit to Project Tempo. Kept as raw
   // input text so invalid entries can be reported instead of silently coerced.
   const [sourceBpmText, setSourceBpmText] = useState<string>('');
+  // Phase 7C: the desired musical length in bars + quarter-note beats. Kept as
+  // raw input text so invalid entries are reported instead of silently coerced.
+  const [fitLenBarsText, setFitLenBarsText] = useState<string>('1');
+  const [fitLenBeatsText, setFitLenBeatsText] = useState<string>('0');
+
+  // The project's authoritative tempo + meter for Fit to Musical Length. Both
+  // come from project state — they are deliberately NOT editable here.
+  const fitCtx: FitToLengthContext = { bpm: projectBpm, timeSignature };
+  const fitResolvedMeter = resolveProjectTimeSignature({ timeSignature });
+  const fitMeterBeats = beatsPerBar(fitResolvedMeter);
+  // The parsed target: empty bars are invalid (reported inline), empty beats
+  // mean "whole bars only".
+  const fitTarget: FitToLengthTarget = {
+    bars: fitLenBarsText.trim() === '' ? Number.NaN : Number(fitLenBarsText),
+    beats: fitLenBeatsText.trim() === '' ? 0 : Number(fitLenBeatsText),
+  };
 
   // The modal stays mounted between openings, so re-seed the controls whenever
   // it opens or the target clip changes. Without this the sliders would keep
@@ -73,6 +106,8 @@ export const WarpAudioProcessorModal: React.FC<WarpAudioProcessorModalProps> = (
     setStretchRate(targetClip?.timeStretchRate ?? 1.0);
     setWsolaRatio(1.0);
     setSourceBpmText('');
+    setFitLenBarsText('1');
+    setFitLenBeatsText('0');
   }, [isOpen, targetClip?.id]);
 
   if (!isOpen) return null;
@@ -246,6 +281,81 @@ export const WarpAudioProcessorModal: React.FC<WarpAudioProcessorModalProps> = (
       };
     }
   })();
+
+  /**
+   * Phase 7C: live, honest preview of the musical-length fit BEFORE committing.
+   * It shows the EXACT intended destination (target bars → seconds at the
+   * project's authoritative tempo + meter) and, when the clip's real source
+   * PCM is resident, the full plan — required WSOLA ratio, processed-audio
+   * duration and whether the fit is SUPPORTED — computed with the SAME
+   * `computeFitToLengthPlan` the commit uses, so preview and committed result
+   * cannot disagree. Unsupported clips (offsets, trims, detune, take groups)
+   * and out-of-range ratios surface their typed refusal inline; nothing is
+   * ever clamped or guessed. When the source is not loaded yet, the preview
+   * says so honestly instead of fabricating a ratio.
+   */
+  const fitLengthPreview = ((): { kind: 'no-clip' } | { kind: 'no-source'; destination: string } | { kind: 'error'; message: string } | { kind: 'ready'; plan: string } => {
+    if (!targetClip) return { kind: 'no-clip' };
+    try {
+      const destination = describeFitToLengthTarget(fitTarget, fitCtx);
+      const buffer = targetClip.audioBufferId ? audioEngine.getSampleBuffer(targetClip.audioBufferId) : null;
+      if (!buffer) return { kind: 'no-source', destination };
+      return { kind: 'ready', plan: describeFitToLengthPlan(targetClip, fitTarget, fitCtx, buffer.duration) };
+    } catch (error) {
+      return {
+        kind: 'error',
+        message: error instanceof WarpTimeStretchError ? error.message : 'Enter the target length in whole bars and beats (e.g. 2 bars + 1.5 beats).',
+      };
+    }
+  })();
+
+  /**
+   * Phase 7C: Fit to Musical Length. The destination (bars + quarter-note
+   * beats) is entered by the user; the tempo and meter are the project's
+   * AUTHORITATIVE values (`projectBpm` / `timeSignature` props — never
+   * editable here, never assumed 4/4). `commitWarpTimeStretchToLength` runs
+   * the SAME durable pipeline as the ratio and tempo fits — real source PCM →
+   * WSOLA render → NEW unique asset → persistence awaited → only then publish
+   * the clip with `lengthBars` set to the EXACT target — and refuses, with a
+   * typed actionable message and zero mutation, anything that could not land
+   * exactly on the requested destination (offsets, trims, detune, take
+   * groups, out-of-range ratios).
+   */
+  const handleCommitFitToLength = async () => {
+    if (!targetClip || !onUpdateClip || isCommittingStretch) return;
+    if (!targetClip.audioBufferId) {
+      setStatusMessage('This clip has no source audio asset — there is nothing to fit.');
+      return;
+    }
+    setIsCommittingStretch(true);
+    setStatusMessage('Rendering fit to musical length — deriving the exact WSOLA ratio from the project tempo, meter and real source audio…');
+    try {
+      const result = await commitWarpTimeStretchToLength(targetClip, fitTarget, fitCtx, {
+        getSourceBuffer: id => audioEngine.getSampleBuffer(id),
+        hydrateSource: id => hydrateAudioClip(audioEngine, id),
+        registerAsset: (id, buffer) => audioEngine.setSampleBuffer(id, buffer),
+        waitForAsset: id => waitForSampleBufferPersistence(audioEngine, id),
+        createBuffer: (channels, length, sampleRate) => audioEngine.getContext().createBuffer(channels, length, sampleRate),
+        now: () => Date.now(),
+      });
+      onUpdateClip(result.clip);
+      setStatusMessage(
+        `Committed fit to musical length: "${targetClip.name}" now occupies exactly ${formatBars(result.clip.lengthBars)} bars (${result.plan.targetWindowSeconds.toFixed(2)} s at ${projectBpm.toFixed(2)} BPM ${result.plan.resolvedMeter[0]}/${result.plan.resolvedMeter[1]}) with ${result.stretchedBuffer.duration.toFixed(2)} s of processed audio. The audio length is baked into the new asset — the original is untouched and Undo restores it.`
+      );
+      setTimeout(() => {
+        onClose();
+      }, 2500);
+    } catch (error) {
+      // Errors stay visible until dismissed — no auto-clear, no fake success.
+      setStatusMessage(
+        error instanceof WarpTimeStretchError
+          ? error.message
+          : `Fit to length failed (${error instanceof Error ? error.message : String(error)}). The clip was not changed.`
+      );
+    } finally {
+      setIsCommittingStretch(false);
+    }
+  };
 
   return (
     <ModalFrame id="fl-warp-processor-modal" labelledBy="fl-warp-processor-modal-title" onClose={onClose} className="fixed inset-0 backdrop-blur-md z-50 flex items-center justify-center p-3 sm:p-4 select-none">
@@ -520,6 +630,100 @@ export const WarpAudioProcessorModal: React.FC<WarpAudioProcessorModalProps> = (
               >
                 <Check className="w-4 h-4" />
                 <span>{isCommittingStretch ? 'Rendering & Committing…' : 'Render & Commit Fit'}</span>
+              </button>
+            </div>
+
+            {/* Phase 7C: Fit to Musical Length — a clearly distinct operation:
+                the destination is an exact bars+beats length under the
+                project's authoritative tempo and meter (both read from
+                project state, never editable here, never assumed 4/4). */}
+            <div className="border-t border-[var(--apex-border)] pt-3 space-y-2">
+              <div className="flex items-center justify-between">
+                <span className="text-[11px] font-bold text-[var(--apex-text)] uppercase tracking-wider">
+                  FIT TO MUSICAL LENGTH
+                </span>
+                <span className="text-[10px] font-mono text-[var(--apex-text-3)]">
+                  ratio = target seconds ÷ source seconds
+                </span>
+              </div>
+
+              <div className="bg-[var(--apex-canvas)] p-3 rounded-lg border border-[var(--apex-border)] space-y-2 text-xs">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="flex items-center gap-2">
+                    <label htmlFor="fl-warp-fit-length-bars" className="text-[var(--apex-text)] font-bold">
+                      BARS
+                    </label>
+                    <input
+                      id="fl-warp-fit-length-bars"
+                      type="number"
+                      min="0"
+                      step="1"
+                      placeholder="2"
+                      value={fitLenBarsText}
+                      disabled={!targetClip || isCommittingStretch}
+                      onChange={(e) => setFitLenBarsText(e.target.value)}
+                      className="w-20 px-2 py-1 rounded bg-[var(--apex-surface-2)] border border-[var(--apex-border)] text-[var(--apex-text)] font-mono text-xs disabled:opacity-40"
+                    />
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <label htmlFor="fl-warp-fit-length-beats" className="text-[var(--apex-text)] font-bold">
+                      BEATS
+                    </label>
+                    <input
+                      id="fl-warp-fit-length-beats"
+                      type="number"
+                      min="0"
+                      step="0.25"
+                      placeholder="0"
+                      value={fitLenBeatsText}
+                      disabled={!targetClip || isCommittingStretch}
+                      onChange={(e) => setFitLenBeatsText(e.target.value)}
+                      className="w-20 px-2 py-1 rounded bg-[var(--apex-surface-2)] border border-[var(--apex-border)] text-[var(--apex-text)] font-mono text-xs disabled:opacity-40"
+                    />
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-[var(--apex-text)] font-bold">PROJECT</span>
+                    <span id="fl-warp-fit-length-project-grid" className="text-[var(--apex-success)] font-mono font-bold">
+                      {projectBpm.toFixed(2)} BPM · {fitResolvedMeter[0]}/{fitResolvedMeter[1]}
+                    </span>
+                  </div>
+                </div>
+
+                <div id="fl-warp-fit-length-preview" className="text-[10px] font-mono">
+                  {fitLengthPreview.kind === 'no-clip' && (
+                    <span className="text-[var(--apex-text-3)]">SELECT AN AUDIO CLIP TO PREVIEW THE FIT</span>
+                  )}
+                  {fitLengthPreview.kind === 'error' && (
+                    <span className="text-[var(--apex-gold)]">{fitLengthPreview.message}</span>
+                  )}
+                  {fitLengthPreview.kind === 'no-source' && (
+                    <span className="text-[var(--apex-text-2)]">
+                      {fitLengthPreview.destination} · source audio not loaded — the ratio is computed from the real source at commit time
+                    </span>
+                  )}
+                  {fitLengthPreview.kind === 'ready' && (
+                    <span className="text-[var(--apex-text-2)]">{fitLengthPreview.plan}</span>
+                  )}
+                </div>
+
+                <span className="text-[9px] text-[var(--apex-text-3)] block">
+                  Stretches the clip's audio so it occupies EXACTLY the length entered — bars plus quarter-note beats
+                  (beats stay below {fitMeterBeats}, one bar of {fitResolvedMeter[0]}/{fitResolvedMeter[1]}) — at the
+                  project's tempo and meter. The clip's start position and fades are kept; the audio is baked into a
+                  NEW asset, so changing the project tempo later does not reprocess it. The required ratio is never
+                  silently clamped: clips with offsets, trims, detune or take groups, and fits outside the supported
+                  WSOLA range, are refused honestly — never silently shifted.
+                </span>
+              </div>
+
+              <button
+                id="fl-warp-fit-length-commit"
+                onClick={handleCommitFitToLength}
+                disabled={!targetClip || isCommittingStretch}
+                className="px-4 py-1.5 bg-[var(--apex-success)] hover:bg-[color-mix(in_srgb,var(--apex-success)_82%,var(--apex-text))] disabled:opacity-40 disabled:hover:bg-[var(--apex-success)] text-[var(--apex-state-playing-fg)] font-bold rounded transition shadow flex items-center gap-1.5 text-xs"
+              >
+                <Check className="w-4 h-4" />
+                <span>{isCommittingStretch ? 'Rendering & Committing…' : 'Render & Commit Fit to Length'}</span>
               </button>
             </div>
           </div>

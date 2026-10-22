@@ -286,4 +286,148 @@ test.describe('Phase 7A: WSOLA pitch-preserving stretch (real browser audio)', (
     expect(result.refusalFailure).toBe('ratio-out-of-range');
     expect(result.refusalMessage ?? '').toContain('never silently clamped');
   });
+
+  test('Phase 7C: fits audio to an EXACT musical length of the LIVE project grid (transport BPM + resolved meter)', async ({ page }) => {
+    await page.goto('http://localhost:3000');
+    await page.waitForTimeout(2000);
+    // The authoritative project grid, read from the live transport UI — the
+    // same values the App feeds the Warp modal (bpm input + resolved meter).
+    const transportBpm = parseFloat(await page.locator('#fl-bpm-input').inputValue());
+    const transportMeter = (await page.locator('#fl-meter-readout').getAttribute('data-meter')) ?? '';
+    expect(Number.isFinite(transportBpm)).toBe(true);
+    expect(transportBpm).toBeGreaterThan(0);
+    expect(transportMeter).toMatch(/^\d+\/\d+$/);
+
+    const result = await page.evaluate(async ({ SR, transportBpm, transportMeter }) => {
+      // @ts-ignore — browser-side imports of Vite-served production modules
+      const engineMod: any = await import('/src/audio/audioEngine.ts');
+      // @ts-ignore
+      const commitMod: any = await import('/src/audio/warpTimeStretchCommit.ts');
+      // @ts-ignore
+      const persistMod: any = await import('/src/audio/audioPersistence.ts');
+      // @ts-ignore
+      const bufferPersistMod: any = await import('/src/audio/sampleBufferPersistence.ts');
+      const engine = engineMod.audioEngine;
+      if (!bufferPersistMod.getSampleBufferPersistenceController(engine)) {
+        bufferPersistMod.installSampleBufferPersistence(engine);
+      }
+
+      // The live grid from the authoritative values — the same math the modal
+      // and pipeline perform (beats are quarter notes).
+      const meterParts = transportMeter.split('/').map(Number);
+      const beatsPerBar = (meterParts[0] * 4) / meterParts[1];
+      const secondsPerBar = (beatsPerBar * 60) / transportBpm;
+
+      // 0.5 s of real audio. One bar fits inside the WSOLA bounds at the
+      // fresh-app grid (128 BPM 4/4 → 3.75×); slower live tempos fall back to
+      // a half-bar target so the spec never depends on a hardcoded ratio.
+      const sourceSeconds = 0.5;
+      const target = secondsPerBar / sourceSeconds <= 4
+        ? { bars: 1, beats: 0 }
+        : { bars: 0, beats: beatsPerBar / 2 };
+      const targetSeconds = target.bars * secondsPerBar + (target.beats * 60) / transportBpm;
+
+      const ctx = engine.getContext();
+      const srcBuf: AudioBuffer = ctx.createBuffer(2, Math.round(sourceSeconds * SR), SR);
+      for (let ch = 0; ch < 2; ch += 1) {
+        const data = srcBuf.getChannelData(ch);
+        for (let i = 0; i < data.length; i += 1) data[i] = 0.8 * Math.sin((2 * Math.PI * 220 * i) / SR);
+      }
+      const sourceId = `spec-lenfit-src-${Date.now()}`;
+      engine.setSampleBuffer(sourceId, srcBuf);
+      await bufferPersistMod.waitForSampleBufferPersistence(engine, sourceId);
+
+      const clip = {
+        id: 'spec-lenfit-clip',
+        trackIndex: 0,
+        startBar: 2,
+        // The clip window consumes exactly the source (whole-buffer heard).
+        lengthBars: sourceSeconds / secondsPerBar,
+        type: 'audio',
+        audioBufferId: sourceId,
+        name: 'Spec Length Fit',
+        color: '#00ff88',
+      };
+      const fitCtx = { bpm: transportBpm, timeSignature: meterParts };
+      const deps = {
+        getSourceBuffer: (id: string) => engine.getSampleBuffer(id),
+        hydrateSource: (id: string) => persistMod.hydrateAudioClip(engine, id),
+        registerAsset: (id: string, b: AudioBuffer) => engine.setSampleBuffer(id, b),
+        waitForAsset: (id: string) => bufferPersistMod.waitForSampleBufferPersistence(engine, id),
+        createBuffer: (c: number, l: number, s: number) => engine.getContext().createBuffer(c, l, s),
+        now: () => Date.now(),
+      };
+
+      const commit = await commitMod.commitWarpTimeStretchToLength(clip, target, fitCtx, deps);
+
+      // Refusals must be typed and change nothing.
+      let rangeRefusal: { failure: string; message: string } | null = null;
+      try {
+        // 15 bars needs ≥ 7.2× at ANY project tempo — always out of range.
+        await commitMod.commitWarpTimeStretchToLength({ ...clip, id: 'spec-lenfit-refused' }, { bars: 15, beats: 0 }, fitCtx, deps);
+      } catch (error: any) {
+        rangeRefusal = { failure: String(error?.failure ?? ''), message: String(error?.message ?? '') };
+      }
+      let offsetRefusal: { failure: string; message: string } | null = null;
+      try {
+        await commitMod.commitWarpTimeStretchToLength({ ...clip, offsetSteps: 2 }, target, fitCtx, deps);
+      } catch (error: any) {
+        offsetRefusal = { failure: String(error?.failure ?? ''), message: String(error?.message ?? '') };
+      }
+
+      const persistedBlob: Blob | null = await persistMod.getPersistedAudioClip(commit.stretchedAssetId);
+      const originalBlob: Blob | null = await persistMod.getPersistedAudioClip(sourceId);
+      const planMeter = (commit.plan.resolvedMeter as number[]).join('/');
+      const newId = commit.stretchedAssetId as string;
+      return {
+        target,
+        targetSeconds,
+        ratio: commit.plan.ratio as number,
+        planWindow: commit.plan.targetWindowSeconds as number,
+        planMeter,
+        lengthBars: commit.clip.lengthBars as number,
+        startBar: commit.clip.startBar as number,
+        srcLen: srcBuf.length,
+        newLen: commit.stretchedBuffer.length,
+        newDuration: commit.stretchedBuffer.duration,
+        newId,
+        sourceId,
+        clipReferencesNewAsset: commit.clip.audioBufferId === newId,
+        sourceIntact: engine.getSampleBuffer(sourceId) === srcBuf,
+        persistedSize: persistedBlob ? persistedBlob.size : 0,
+        originalPersistedSize: originalBlob ? originalBlob.size : 0,
+        rangeRefusal,
+        offsetRefusal,
+      };
+    }, { SR, transportBpm, transportMeter });
+
+    // The committed clip occupies EXACTLY the requested musical destination
+    // under the live meter — bars + beats/beatsPerBar, no drift.
+    const [meterNum, meterDen] = transportMeter.split('/').map(Number);
+    const meterBeats = (meterNum * 4) / meterDen;
+    expect(result.lengthBars).toBeCloseTo(result.target.bars + result.target.beats / meterBeats, 12);
+    // The plan used the transport's resolved meter and window exactly.
+    expect(result.planMeter).toBe(transportMeter);
+    expect(result.planWindow).toBeCloseTo(result.targetSeconds, 9);
+    // ratio = intended output duration ÷ ACTUAL source duration (0.5 s).
+    expect(result.ratio).toBeCloseTo(result.targetSeconds / 0.5, 9);
+    // Real processed PCM: exact WSOLA frame count, and its duration fills the
+    // target window within one output frame.
+    expect(result.newLen).toBe(Math.ceil(result.srcLen * result.ratio));
+    expect(Math.abs(result.newDuration - result.targetSeconds)).toBeLessThanOrEqual(1 / SR);
+    // startBar is unchanged; a NEW durable asset backs the clip; source intact.
+    expect(result.startBar).toBe(2);
+    expect(result.newId.startsWith('wsola-stretch-spec-lenfit-clip-')).toBe(true);
+    expect(result.newId).not.toBe(result.sourceId);
+    expect(result.clipReferencesNewAsset).toBe(true);
+    expect(result.sourceIntact).toBe(true);
+    // Durable write in the real browser store (≥1.875 s stereo float WAV at
+    // the fresh-app grid ≈ 660 kB — anything near that proves a real write).
+    expect(result.persistedSize).toBeGreaterThan(100000);
+    expect(result.originalPersistedSize).toBeGreaterThan(40000);
+    // Refusals are typed, actionable and never clamp.
+    expect(result.rangeRefusal?.failure).toBe('ratio-out-of-range');
+    expect(result.rangeRefusal?.message ?? '').toContain('never silently clamped');
+    expect(result.offsetRefusal?.failure).toBe('unsupported-offset');
+  });
 });

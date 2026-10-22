@@ -111,6 +111,8 @@ interface RenderOverrides {
   isOpen?: boolean;
   /** Phase 7B: the authoritative project tempo the App feeds the modal. */
   projectBpm?: number;
+  /** Phase 7C: the authoritative project meter the App feeds the modal. */
+  timeSignature?: [number, number];
 }
 
 const render = (mode: 'dark' | 'light', overrides: RenderOverrides = {}): string =>
@@ -125,6 +127,7 @@ const render = (mode: 'dark' | 'light', overrides: RenderOverrides = {}): string
         selectedClipId: overrides.selectedClipId ?? null,
         onUpdateClip: noop,
         projectBpm: overrides.projectBpm ?? 120,
+        timeSignature: overrides.timeSignature ?? [4, 4],
       }),
     ),
   );
@@ -417,6 +420,66 @@ describe('Warp Audio Processor theme markup (UI-03N)', () => {
     assert.match(code, /const commitWsolaRender = async \(ratio: number, operation: string, successLabel: string\) => \{\s*if \(!targetClip \|\| !onUpdateClip \|\| isCommittingStretch\) return;/, 'the shared commit helper refuses while a commit is in flight');
   });
 
+  it('Phase 7C: fit-to-length reads tempo AND meter from authoritative state and commits through the tested exact-length pipeline', () => {
+    // The dedicated pipeline is invoked with the authoritative context — never
+    // a locally invented tempo, meter or ratio.
+    assert.match(code, /commitWarpTimeStretchToLength\(targetClip, fitTarget, fitCtx,/, 'the length fit calls the tested exact-length pipeline');
+    assert.match(code, /timeSignature: unknown;/, 'the modal requires the project meter as a prop');
+    assert.match(code, /const fitCtx: FitToLengthContext = \{ bpm: projectBpm, timeSignature \};/, 'the fit context is built ONLY from the authoritative props');
+    assert.match(code, /resolveProjectTimeSignature\(\{ timeSignature \}\)/, 'the displayed meter resolves through the single runtime authority');
+    // Preview and commit share the tested pure computation — they cannot disagree.
+    assert.match(code, /describeFitToLengthPlan\(targetClip, fitTarget, fitCtx, buffer\.duration\)/, 'the ready preview comes from the same plan computation the commit uses');
+    assert.match(code, /describeFitToLengthTarget\(fitTarget, fitCtx\)/, 'the destination preview comes from the tested resolver');
+    // No duplicated editable tempo/meter settings: the project grid is a
+    // read-out span and the only inputs in the panel are the target length.
+    assert.match(code, /<span id="fl-warp-fit-length-project-grid"/, 'the authoritative tempo+meter render as a read-out, not an input');
+    assert.doesNotMatch(code, /id="fl-warp-fit-length-(?:bpm|meter|time-signature)"/, 'no editable tempo or meter duplicates the project state');
+    // The App must feed the modal the authoritative meter as well as the tempo.
+    const appSource = readFileSync('src/App.tsx', 'utf8');
+    assert.match(
+      appSource,
+      /<WarpAudioProcessorModal[\s\S]{0,500}?timeSignature=\{projectState\.meta\.timeSignature\}/,
+      'the App wires timeSignature from the authoritative project state'
+    );
+    // Honesty: refusals are stated, ratios are never clamped, and success names
+    // the exact committed length.
+    assert.match(code, /refused honestly — never silently shifted/i, 'the refusal truth is stated');
+    assert.match(code, /never\s+silently clamped/i, 'the no-clamping truth is stated');
+    assert.match(code, /now occupies exactly \$\{formatBars\(result\.clip\.lengthBars\)\} bars/, 'the success message names the exact committed length');
+    // Duplicate-commit protection on the third entry point.
+    assert.match(code, /const handleCommitFitToLength = async \(\) => \{\s*if \(!targetClip \|\| !onUpdateClip \|\| isCommittingStretch\) return;/, 'the length-fit handler refuses while a commit is in flight');
+    // The error branch of the preview renders the typed refusal inline.
+    assert.match(code, /fitLengthPreview\.kind === 'error'/, 'invalid targets and refusals surface inline before any commit');
+  });
+
+  it('Phase 7C: the length-fit panel renders the meter-aware destination in both themes', () => {
+    for (const mode of ['dark', 'light'] as const) {
+      // A 4/4 project at 120 BPM.
+      const m44 = render(mode, { clips: [readyClip], selectedClipId: 'clip-warp', projectBpm: 120, timeSignature: [4, 4] });
+      includes(m44, 'FIT TO MUSICAL LENGTH', 'the operation is clearly and distinctly named');
+      includes(m44, '120.00 BPM · 4/4', 'the authoritative grid renders as a read-out');
+      includes(m44, 'beats stay below 4', 'the beat limit follows the meter, not a hardcoded 4/4');
+      includes(m44, 'Render &amp; Commit Fit to Length', 'the commit CTA is labelled');
+      assert.match(m44, /id="fl-warp-fit-length-bars"[^>]*type="number"/, 'the bars input renders');
+      assert.match(m44, /id="fl-warp-fit-length-beats"[^>]*step="0\.25"/, 'the beats input renders with a practical quarter-beat step');
+      assert.match(m44, /id="fl-warp-fit-length-commit"/, 'the commit button is browser-testable');
+      // Without a resident buffer the preview is honest about where the ratio
+      // will come from — never a fabricated number.
+      includes(m44, 'the ratio is computed from the real source at commit time', 'the unloaded-source preview stays honest');
+
+      // A 3/4 project at 90 BPM — the panel must follow the authoritative meter.
+      const m34 = render(mode, { clips: [readyClip], selectedClipId: 'clip-warp', projectBpm: 90, timeSignature: [3, 4] });
+      includes(m34, '90.00 BPM · 3/4', 'a non-4/4 project renders its real grid');
+      includes(m34, 'beats stay below 3', 'the beat limit follows 3/4');
+      includes(m34, 'one bar of 3/4', 'the bar reference follows 3/4');
+
+      // An unsupported stored meter resolves to the same grid the runtime
+      // plays — the transport’s resolution authority, never a silent guess.
+      const m54 = render(mode, { clips: [readyClip], selectedClipId: 'clip-warp', projectBpm: 120, timeSignature: [5, 4] });
+      includes(m54, '120.00 BPM · 4/4', 'an unsupported stored meter shows the resolved runtime grid');
+    }
+  });
+
   it('uses ModalFrame’s themed scrim and keeps the overlay geometry', () => {
     const markup = render('light', { clips: [readyClip], selectedClipId: null });
     assert.match(
@@ -435,6 +498,7 @@ describe('Warp Audio Processor theme markup (UI-03N)', () => {
         selectedClipId: 'clip-warp',
         onUpdateClip: noop,
         projectBpm: 120,
+        timeSignature: [4, 4],
       }),
     );
     assert.equal(closed, '');
