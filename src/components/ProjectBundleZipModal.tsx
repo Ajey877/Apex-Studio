@@ -7,6 +7,7 @@ import { normalizeProjectState } from '../state/projectState';
 import { resolvePatternChannelContent } from '../state/patternContent';
 import { getPersistedAudioClip, persistAudioClip } from '../audio/audioPersistence';
 import { BundleAudioAssetError, collectBundleAudioAssets } from './projectBundleAudioAssets';
+import { BundleImportError, planBundleAudioImport } from './projectBundleImport';
 import { getAudioIdsForProject } from '../state/projectPersistence';
 import type { ProjectReplacementSource } from '../state/projectReplacement';
 
@@ -170,16 +171,25 @@ Engine: Apex Studio Digital Audio Workstation
       const bundleManifestFile = zip.file('bundle_manifest.json');
       let restoredAudioCount = 0;
       if (bundleManifestFile) {
-        const bundleManifest = JSON.parse(await bundleManifestFile.async('string')) as { format?: string; formatVersion?: number; audioFiles?: BundleAudioFile[] };
+        let bundleManifest: { format?: string; formatVersion?: number; audioFiles?: unknown };
+        try {
+          bundleManifest = JSON.parse(await bundleManifestFile.async('string')) as { format?: string; formatVersion?: number; audioFiles?: unknown };
+        } catch {
+          throw new BundleImportError('malformed-audio-manifest', 'Import failed — bundle_manifest.json is not valid JSON.');
+        }
         if (bundleManifest.format === 'apex-studio-project-bundle' && Array.isArray(bundleManifest.audioFiles)) {
-          for (const audioFile of bundleManifest.audioFiles) {
-            const entry = zip.file(audioFile.path);
-            if (!entry || !audioFile.id) continue;
-            const rawBlob = await entry.async('blob');
-            const typedBlob = rawBlob.type ? rawBlob : new Blob([rawBlob], { type: audioFile.mimeType || 'application/octet-stream' });
+          // Phase 6B (issue #56): validate every declared entry and read every
+          // payload BEFORE any storage write. The plan is all-or-nothing, so a
+          // rejected archive can never overwrite existing audio (even when the
+          // replacement is cancelled) and can never half-restore a project.
+          const importPlan = await planBundleAudioImport(bundleManifest.audioFiles, zip, getPersistedAudioClip);
+          for (const audioFile of importPlan.assetsToPersist) {
+            const typedBlob = audioFile.blob.type ? audioFile.blob : new Blob([audioFile.blob], { type: audioFile.mimeType || 'application/octet-stream' });
             await persistAudioClip(audioFile.id, typedBlob);
             restoredAudioCount += 1;
           }
+          // Assets already stored byte-identically need no rewrite but ARE restored.
+          restoredAudioCount += importPlan.alreadyStoredIds.length;
         }
       }
 
@@ -198,7 +208,7 @@ Engine: Apex Studio Digital Audio Workstation
     } catch (err) {
       console.error(err);
       setIsImporting(false);
-      setStatusMessage('Error unpacking ZIP archive. Please ensure it contains a valid Apex Studio bundle.');
+      setStatusMessage(err instanceof BundleImportError ? err.message : 'Error unpacking ZIP archive. Please ensure it contains a valid Apex Studio bundle.');
       setTimeout(() => setStatusMessage(null), 4000);
     } finally {
       if (fileInputRef.current) fileInputRef.current.value = '';
