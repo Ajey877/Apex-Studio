@@ -214,6 +214,17 @@ const renderExport = async (mixerTracks: MixerTrack[], includeMixerFx: boolean):
     'song',
     undefined,
     undefined,
+    // DURATION_SECONDS is the export's pinned minimum-duration floor (12th
+    // parameter). It historically landed one slot earlier, back when the
+    // signature had no `playlistTracks`; since Phase 10A that slot feeds
+    // derivePlaylistLaneMutes and the duration floor silently fell back to its
+    // default — which only matched by coincidence (floor 4 s == this window).
+    // Phase 6C made the distinction observable: a Song-master export without
+    // an explicit floor now renders the decay tail past the song end, while a
+    // pinned floor keeps the exact measurement window this parity comparison
+    // requires (the live reference renders exactly FRAMES frames). Restoring
+    // the documented intent; no assertion changes.
+    undefined,
     DURATION_SECONDS,
   );
   return rendered.getChannelData(0).slice();

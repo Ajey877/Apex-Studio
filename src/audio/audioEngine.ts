@@ -92,6 +92,53 @@ const isLegacyMeter = (meter: TimeSignature): boolean => meter[0] === 4 && meter
 // returned AudioBuffer so project timing and export duration remain unchanged.
 const OFFLINE_MASTERING_PREROLL_SECONDS = 0.1;
 
+// Phase 6C (issue #56): a Song-master export renders this much extra timeline
+// past the song end so the release/reverb/delay remainder of the final musical
+// events can decay naturally instead of being hard-truncated at the song
+// boundary (the FL Studio "leave remainder" behavior). The rendered tail is
+// trimmed back to the actual decay point (see resolveOfflineTailFrameCount),
+// so exports grow only by the tail the user can hear. Bounded by design:
+// feedback networks that would ring longer than this are still cut, but only
+// after 4 s of decay instead of at the exact song boundary.
+const OFFLINE_RENDER_TAIL_SECONDS = 4;
+// −80 dBFS. The instrument release envelopes ramp to 1e-4 and digital silence
+// is exactly 0, so the scan finds the true end of the audible remainder.
+const OFFLINE_TAIL_SILENCE_THRESHOLD = 1e-4;
+// Kept past the last audible sample so the cut never lands mid-decay.
+const OFFLINE_TAIL_TRIM_MARGIN_FRAMES = 512;
+
+/**
+ * Frame count for the returned Song-master export: the song window plus the
+ * rendered tail trimmed back to where the audio decayed to silence. Never
+ * shorter than the song window (the export always covers the full project
+ * timeline) and never longer than song window + rendered tail cap. Pure
+ * function of the rendered PCM so repeated exports stay byte-identical.
+ */
+const resolveOfflineTailFrameCount = (
+  renderedBuffer: AudioBuffer,
+  prerollFrameCount: number,
+  songFrameCount: number,
+  tailFrameCount: number,
+): number => {
+  const contentEndFrame = prerollFrameCount + songFrameCount + tailFrameCount;
+  let lastAudibleFrame = -1;
+  for (let channelIndex = 0; channelIndex < renderedBuffer.numberOfChannels; channelIndex += 1) {
+    const data = renderedBuffer.getChannelData(channelIndex);
+    for (let frame = contentEndFrame - 1; frame >= prerollFrameCount; frame -= 1) {
+      if (Math.abs(data[frame]) > OFFLINE_TAIL_SILENCE_THRESHOLD) {
+        if (frame > lastAudibleFrame) lastAudibleFrame = frame;
+        break;
+      }
+    }
+  }
+  if (lastAudibleFrame < 0) return songFrameCount;
+  const audibleContentFrames = lastAudibleFrame - prerollFrameCount + 1;
+  return Math.min(
+    songFrameCount + tailFrameCount,
+    Math.max(songFrameCount, audibleContentFrames + OFFLINE_TAIL_TRIM_MARGIN_FRAMES),
+  );
+};
+
 export { isRackChannelAudible };
 
 export type MidiEventPayload = {
@@ -3093,7 +3140,13 @@ class AudioEngine {
     onProgress?: OfflineRenderProgress,
     patternLengthSteps?: number,
     playlistTracks?: PlaylistTrack[],
-    minimumDurationSeconds: number = 4,
+    /**
+     * Duration floor for the render window. Callers that pin an explicit value
+     * (bounce-in-place, parity measurement) get exactly that window; Song-master
+     * exports that leave it undefined additionally render a bounded decay tail
+     * past the song end (Phase 6C, see OFFLINE_RENDER_TAIL_SECONDS).
+     */
+    minimumDurationSeconds?: number,
     patterns?: Pattern[],
     outputStage: 'master' | 'pre-master' = 'master',
   ): Promise<AudioBuffer> {
@@ -3224,9 +3277,26 @@ class AudioEngine {
         ? OFFLINE_MASTERING_PREROLL_SECONDS
         : 0;
       const prerollFrameCount = Math.ceil(renderSampleRate * masteringPrerollSeconds);
+      // Phase 6C: the Song-master export tail (see OFFLINE_RENDER_TAIL_SECONDS).
+      // Gated off for Pattern-scope renders (loop material must stay exactly
+      // bar-aligned), pre-master renders (bounce crops its own PCM window) and
+      // any caller that pinned an explicit duration floor. Trimming rebuilds
+      // the render output, so — exactly like the mastering preroll above — the
+      // tail requires a full Web Audio context; lightweight contexts that
+      // intentionally omit parts of the API (see the documented degradation
+      // contract in liveFxMapLifecycle.test.ts) keep the historic
+      // exact-window behaviour.
+      const offlineSupportsTailTrim =
+        offlineSupportsMasteringDsp &&
+        typeof offlineContextPrototype?.createBuffer === 'function';
+      const tailExtensionSeconds =
+        renderScope === 'song' && outputStage === 'master' && minimumDurationSeconds === undefined && offlineSupportsTailTrim
+          ? OFFLINE_RENDER_TAIL_SECONDS
+          : 0;
+      const tailFrameCount = Math.ceil(renderSampleRate * tailExtensionSeconds);
       const offlineCtx = new OfflineContextClass(
         2,
-        outputFrameCount + prerollFrameCount,
+        outputFrameCount + prerollFrameCount + tailFrameCount,
         renderSampleRate,
       );
       this.isOfflineRendering = true;
@@ -3382,13 +3452,20 @@ class AudioEngine {
         onProgress?.(70, `Rendering offline audio (${totalDurationSeconds.toFixed(2)}s)...`);
         const renderedBuffer = await offlineCtx.startRendering();
         let outputBuffer = renderedBuffer;
-        if (prerollFrameCount > 0) {
-          // Remove the processor warm-up so consumers still receive samples for
-          // the exact project timeline, with no leading silence or duration change.
-          outputBuffer = offlineCtx.createBuffer(2, outputFrameCount, renderSampleRate);
+        // Rendered content past the mastering preroll: the song window plus,
+        // for Song-master exports, the bounded tail region (Phase 6C).
+        const renderedContentFrameCount = outputFrameCount + tailFrameCount;
+        const finalContentFrameCount = tailFrameCount > 0
+          ? resolveOfflineTailFrameCount(renderedBuffer, prerollFrameCount, outputFrameCount, tailFrameCount)
+          : renderedContentFrameCount;
+        if (prerollFrameCount > 0 || finalContentFrameCount !== renderedContentFrameCount) {
+          // Remove the processor warm-up (and any silent remainder of the tail
+          // region) so consumers receive samples for the exact project timeline
+          // plus its natural decay, with no leading silence.
+          outputBuffer = offlineCtx.createBuffer(2, finalContentFrameCount, renderSampleRate);
           for (let channelIndex = 0; channelIndex < outputBuffer.numberOfChannels; channelIndex += 1) {
             const source = renderedBuffer.getChannelData(channelIndex);
-            outputBuffer.copyToChannel(source.subarray(prerollFrameCount, prerollFrameCount + outputFrameCount), channelIndex);
+            outputBuffer.copyToChannel(source.subarray(prerollFrameCount, prerollFrameCount + finalContentFrameCount), channelIndex);
           }
         }
         onProgress?.(85, 'Offline render complete. Encoding WAV...');
