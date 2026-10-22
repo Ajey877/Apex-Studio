@@ -430,4 +430,127 @@ test.describe('Phase 7A: WSOLA pitch-preserving stretch (real browser audio)', (
     expect(result.rangeRefusal?.message ?? '').toContain('never silently clamped');
     expect(result.offsetRefusal?.failure).toBe('unsupported-offset');
   });
+  test('Phase 7D: the transient-aware strategy commits REAL TAW PCM under a taw-stretch asset while the WSOLA default stays byte-identical', async ({ page }) => {
+    await page.goto('http://localhost:3000');
+    await page.waitForTimeout(2000);
+
+    const result = await page.evaluate(async ({ SR }) => {
+      // @ts-ignore — browser-side imports of Vite-served production modules
+      const engineMod: any = await import('/src/audio/audioEngine.ts');
+      // @ts-ignore
+      const commitMod: any = await import('/src/audio/warpTimeStretchCommit.ts');
+      // @ts-ignore
+      const persistMod: any = await import('/src/audio/audioPersistence.ts');
+      // @ts-ignore
+      const bufferPersistMod: any = await import('/src/audio/sampleBufferPersistence.ts');
+      // @ts-ignore
+      const tawMod: any = await import('/src/audio/transientAwareStretch.ts');
+      // @ts-ignore
+      const wsolaMod: any = await import('/src/audio/wsolaTimeStretch.ts');
+      const engine = engineMod.audioEngine;
+      if (!bufferPersistMod.getSampleBufferPersistenceController(engine)) {
+        bufferPersistMod.installSampleBufferPersistence(engine);
+      }
+
+      // 0.5 s of REAL transient material: deterministic noise floor plus a
+      // sharp decaying click at 0.25 s — the browser renders both strategies
+      // over real PCM, no mocks, no silence.
+      const ctx = engine.getContext();
+      const srcBuf: AudioBuffer = ctx.createBuffer(2, Math.round(0.5 * SR), SR);
+      let seed = 20260122 >>> 0;
+      const noise = (): number => {
+        seed = (seed * 1664525 + 1013904223) >>> 0;
+        return (seed / 0xffffffff) * 2 - 1;
+      };
+      for (let ch = 0; ch < 2; ch += 1) {
+        const data = srcBuf.getChannelData(ch);
+        for (let i = 0; i < data.length; i += 1) data[i] = 0.12 * noise();
+        const at = Math.round(0.25 * SR);
+        for (let i = 0; i < Math.round(0.02 * SR); i += 1) {
+          data[at + i] += 0.9 * Math.exp(-i / Math.round(0.003 * SR)) * (i % 2 === 0 ? 1 : -1);
+        }
+      }
+      const sourceId = `spec-taw-src-${Date.now()}`;
+      engine.setSampleBuffer(sourceId, srcBuf);
+      await bufferPersistMod.waitForSampleBufferPersistence(engine, sourceId);
+
+      const deps = {
+        getSourceBuffer: (id: string) => engine.getSampleBuffer(id),
+        hydrateSource: (id: string) => persistMod.hydrateAudioClip(engine, id),
+        registerAsset: (id: string, b: AudioBuffer) => engine.setSampleBuffer(id, b),
+        waitForAsset: (id: string) => bufferPersistMod.waitForSampleBufferPersistence(engine, id),
+        createBuffer: (c: number, l: number, s: number) => engine.getContext().createBuffer(c, l, s),
+        now: () => Date.now(),
+      };
+      const ratio = 2;
+      const mkClip = (id: string) => ({
+        id,
+        trackIndex: 0,
+        startBar: 2,
+        lengthBars: 0.25,
+        type: 'audio',
+        audioBufferId: sourceId,
+        name: 'Spec TAW',
+        color: '#00ff88',
+      });
+
+      // Default commit (no strategy argument) — the pre-7D path.
+      const wsolaCommit = await commitMod.commitWarpTimeStretch(mkClip('spec-taw-wsola'), ratio, deps);
+      // Explicit transient-aware commit — same pipeline, user-selected strategy.
+      const tawCommit = await commitMod.commitWarpTimeStretch(mkClip('spec-taw-transient'), ratio, deps, 'transient');
+
+      // Reference renders straight from the DSP modules (browser Float math).
+      const channels = [srcBuf.getChannelData(0), srcBuf.getChannelData(1)];
+      const tawRef = tawMod.tawStretchChannels(channels, ratio);
+      const wsolaRef = wsolaMod.wsolaStretchAudioBuffer(srcBuf, ratio, deps.createBuffer);
+
+      const firstDiff = (a: Float32Array, b: Float32Array): number => {
+        for (let i = 0; i < Math.min(a.length, b.length); i += 1) if (a[i] !== b[i]) return i;
+        return a.length === b.length ? -1 : Math.min(a.length, b.length);
+      };
+
+      const tawBlob: Blob | null = await persistMod.getPersistedAudioClip(tawCommit.stretchedAssetId);
+      const wsolaBlob: Blob | null = await persistMod.getPersistedAudioClip(wsolaCommit.stretchedAssetId);
+      return {
+        wsolaId: wsolaCommit.stretchedAssetId as string,
+        wsolaStrategy: wsolaCommit.strategy as string,
+        tawId: tawCommit.stretchedAssetId as string,
+        tawStrategy: tawCommit.strategy as string,
+        srcLen: srcBuf.length,
+        tawLen: tawCommit.stretchedBuffer.length as number,
+        wsolaLen: wsolaCommit.stretchedBuffer.length as number,
+        tawMatchesRef: firstDiff(tawCommit.stretchedBuffer.getChannelData(0), tawRef.channels[0]) === -1,
+        tawDiffersFromWsola: firstDiff(tawCommit.stretchedBuffer.getChannelData(0), wsolaCommit.stretchedBuffer.getChannelData(0)) >= 0,
+        wsolaMatchesRef: firstDiff(wsolaCommit.stretchedBuffer.getChannelData(0), wsolaRef.getChannelData(0)) === -1,
+        tawLengthBars: tawCommit.clip.lengthBars as number,
+        tawClipReferencesNewAsset: tawCommit.clip.audioBufferId === tawCommit.stretchedAssetId,
+        sourceIntact: engine.getSampleBuffer(sourceId) === srcBuf,
+        tawPersistedSize: tawBlob ? tawBlob.size : 0,
+        wsolaPersistedSize: wsolaBlob ? wsolaBlob.size : 0,
+      };
+    }, { SR });
+
+    // Strategy self-documents in the result and the asset identity.
+    expect(result.wsolaStrategy).toBe('wsola');
+    expect(result.wsolaId.startsWith('wsola-stretch-spec-taw-wsola-')).toBe(true);
+    expect(result.tawStrategy).toBe('transient');
+    expect(result.tawId.startsWith('taw-stretch-spec-taw-transient-')).toBe(true);
+    // Real processed PCM in the live browser: exact frames for both, the TAW
+    // commit equals the browser's own TAW render and DIFFERS from the WSOLA
+    // render (a relabeled WSOLA would fail here), while the default commit
+    // stays byte-identical to the Phase 7A renderer.
+    expect(result.tawLen).toBe(Math.ceil(result.srcLen * 2));
+    expect(result.wsolaLen).toBe(result.tawLen);
+    expect(result.tawMatchesRef).toBe(true);
+    expect(result.tawDiffersFromWsola).toBe(true);
+    expect(result.wsolaMatchesRef).toBe(true);
+    // Same clip contract: scaled length, new asset reference, source intact.
+    expect(result.tawLengthBars).toBeCloseTo(0.5, 12);
+    expect(result.tawClipReferencesNewAsset).toBe(true);
+    expect(result.sourceIntact).toBe(true);
+    // BOTH processed assets are durable in the real browser store
+    // (~1 s stereo float WAV ≈ 350 kB — anything near that proves real writes).
+    expect(result.tawPersistedSize).toBeGreaterThan(50000);
+    expect(result.wsolaPersistedSize).toBeGreaterThan(50000);
+  });
 });

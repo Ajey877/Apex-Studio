@@ -47,6 +47,21 @@
  * ratio control — same durability gate, same asset-identity and undo
  * guarantees — so the stretch is baked into the new asset: later project
  * tempo changes do not reprocess it.
+ *
+ * PHASE 7D — STRETCH STRATEGY
+ * Every commit path takes an optional `strategy: WarpStretchStrategy`
+ * ('wsola' | 'transient', default 'wsola'):
+ * - 'wsola' renders through the Phase 7A `wsolaStretchAudioBuffer` —
+ *   byte-identical to every pre-7D commit, asset ids keep the
+ *   'wsola-stretch-' prefix. The compatibility baseline, always available.
+ * - 'transient' renders through the Phase 7D transient-anchored WSOLA
+ *   (`transientAwareStretch.ts`) — measurably tighter attack timing and
+ *   dramatically less pre-echo on drums/percussion/transient-rich material —
+ *   and commits under the distinct 'taw-stretch-' asset-id prefix.
+ * The strategy is chosen EXPLICITLY by the user in the Warp processor; it is
+ * never selected automatically, and 'wsola' never claims transient
+ * preservation. Same pipeline guarantees for both: new unique durable asset,
+ * original untouched, publish only after persistence, typed honest failures.
  */
 import type { PlaylistClip } from '../types/daw';
 import {
@@ -62,8 +77,14 @@ import {
   computeStretchWaveformPeaks,
   wsolaStretchAudioBuffer,
 } from './wsolaTimeStretch';
+import {
+  TransientAwareStretchError,
+  tawStretchAudioBuffer,
+  type WarpStretchStrategy,
+} from './transientAwareStretch';
 
 export { WSOLA_MAX_RATIO, WSOLA_MIN_RATIO };
+export type { WarpStretchStrategy };
 
 export type WarpStretchFailure =
   | 'unsupported-clip'
@@ -392,21 +413,31 @@ export interface WarpTimeStretchCommit {
   /** The processed PCM, for callers that want to audition or verify it. */
   stretchedBuffer: AudioBuffer;
   ratio: number;
+  /** Which renderer produced `stretchedBuffer` ('wsola' unless the caller
+   *  explicitly selected the transient-aware strategy). */
+  strategy: WarpStretchStrategy;
 }
 
 const STRETCH_ASSET_PREFIX = 'wsola-stretch';
+const TAW_STRETCH_ASSET_PREFIX = 'taw-stretch';
+
+/** Asset-id prefix for a strategy: committed assets self-document their renderer. */
+export const warpStretchAssetPrefix = (strategy: WarpStretchStrategy): string =>
+  strategy === 'transient' ? TAW_STRETCH_ASSET_PREFIX : STRETCH_ASSET_PREFIX;
 
 /**
  * Unique, collision-guarded id for the processed asset. The original id is
  * never reused: overwriting the source would destroy undo and the "never
- * overwrite the original asset" guarantee.
+ * overwrite the original asset" guarantee. The default strategy keeps every
+ * pre-7D id format byte-identical ('wsola-stretch-…').
  */
 export const buildWarpStretchAssetId = (
   clipId: string,
   now: number,
-  isTaken: (id: string) => boolean
+  isTaken: (id: string) => boolean,
+  strategy: WarpStretchStrategy = 'wsola'
 ): string => {
-  const base = `${STRETCH_ASSET_PREFIX}-${clipId}-${now}`;
+  const base = `${warpStretchAssetPrefix(strategy)}-${clipId}-${now}`;
   if (!isTaken(base)) return base;
   // A same-millisecond recommit must not clobber an existing asset.
   for (let suffix = 2; suffix < 10000; suffix += 1) {
@@ -428,7 +459,8 @@ export const buildWarpStretchAssetId = (
 export const commitWarpTimeStretch = async (
   clip: PlaylistClip,
   ratio: number,
-  deps: WarpTimeStretchDeps
+  deps: WarpTimeStretchDeps,
+  strategy: WarpStretchStrategy = 'wsola'
 ): Promise<WarpTimeStretchCommit> => {
   if (!clip || clip.type !== 'audio') {
     throw new WarpTimeStretchError(
@@ -459,7 +491,7 @@ export const commitWarpTimeStretch = async (
   const source = await resolveStretchSource(clip.audioBufferId, deps);
   // Relative-ratio semantics (Phase 7A/7B): the clip keeps consuming the same
   // fraction of its audio, so its window scales with the ratio.
-  return renderAndCommitStretchedClip(clip, source, ratio, clip.lengthBars * ratio, deps);
+  return renderAndCommitStretchedClip(clip, source, ratio, clip.lengthBars * ratio, deps, strategy);
 };
 
 /**
@@ -496,25 +528,31 @@ const renderAndCommitStretchedClip = async (
   source: AudioBuffer,
   ratio: number,
   committedLengthBars: number,
-  deps: WarpTimeStretchDeps
+  deps: WarpTimeStretchDeps,
+  strategy: WarpStretchStrategy = 'wsola'
 ): Promise<WarpTimeStretchCommit> => {
   const sourceAssetId = clip.audioBufferId as string;
 
-  // Render the processed PCM. WSOLA typed errors are re-wrapped with the
-  // commit-level failure but keep their honest message.
+  // Render the processed PCM with the strategy the caller EXPLICITLY selected
+  // (default 'wsola' = the Phase 7A path, byte-identical to every pre-7D
+  // commit). Renderer typed errors are re-wrapped with the commit-level
+  // failure but keep their honest message.
   let stretched: AudioBuffer;
   try {
-    stretched = wsolaStretchAudioBuffer(source, ratio, deps.createBuffer);
+    stretched = strategy === 'transient'
+      ? tawStretchAudioBuffer(source, ratio, deps.createBuffer)
+      : wsolaStretchAudioBuffer(source, ratio, deps.createBuffer);
   } catch (error) {
-    if (error instanceof WsolaTimeStretchError) {
+    if (error instanceof WsolaTimeStretchError || error instanceof TransientAwareStretchError) {
       throw new WarpTimeStretchError('stretch-failed', error.message);
     }
     throw error;
   }
 
   // Register under a NEW id and wait for persistence before publishing state:
-  // the same durability gate the recording/bounce commit paths enforce.
-  const stretchedAssetId = buildWarpStretchAssetId(clip.id, deps.now(), id => Boolean(deps.getSourceBuffer(id)));
+  // the same durability gate the recording/bounce commit paths enforce. The
+  // prefix documents which renderer produced the asset.
+  const stretchedAssetId = buildWarpStretchAssetId(clip.id, deps.now(), id => Boolean(deps.getSourceBuffer(id)), strategy);
   try {
     deps.registerAsset(stretchedAssetId, stretched);
     await deps.waitForAsset(stretchedAssetId);
@@ -539,7 +577,7 @@ const renderAndCommitStretchedClip = async (
     // deliberately untouched — Repitch keeps its existing meaning.
   };
 
-  return { clip: stretchedClip, sourceAssetId, stretchedAssetId, stretchedBuffer: stretched, ratio };
+  return { clip: stretchedClip, sourceAssetId, stretchedAssetId, stretchedBuffer: stretched, ratio, strategy };
 };
 
 export interface WarpTimeStretchToLengthCommit extends WarpTimeStretchCommit {
@@ -559,7 +597,8 @@ export const commitWarpTimeStretchToLength = async (
   clip: PlaylistClip,
   target: FitToLengthTarget,
   ctx: FitToLengthContext,
-  deps: WarpTimeStretchDeps
+  deps: WarpTimeStretchDeps,
+  strategy: WarpStretchStrategy = 'wsola'
 ): Promise<WarpTimeStretchToLengthCommit> => {
   if (!clip || clip.type !== 'audio') {
     throw new WarpTimeStretchError(
@@ -580,7 +619,7 @@ export const commitWarpTimeStretchToLength = async (
   // fitness (offset/trim/pitch/take) against the REAL source duration, and
   // derives the exact ratio — all before anything is rendered or registered.
   const plan = computeFitToLengthPlan(clip, target, ctx, source.duration);
-  const commit = await renderAndCommitStretchedClip(clip, source, plan.ratio, plan.targetLengthBars, deps);
+  const commit = await renderAndCommitStretchedClip(clip, source, plan.ratio, plan.targetLengthBars, deps, strategy);
   return { ...commit, plan };
 };
 

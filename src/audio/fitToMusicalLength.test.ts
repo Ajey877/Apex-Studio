@@ -50,6 +50,8 @@ import {
   type FitToLengthContext,
   type FitToLengthTarget,
 } from './warpTimeStretchCommit';
+import { tawStretchAudioBuffer } from './transientAwareStretch';
+import { wsolaStretchAudioBuffer } from './wsolaTimeStretch';
 
 const RealOfflineAudioContext = (RealWebAudio as unknown as {
   OfflineAudioContext: typeof OfflineAudioContext;
@@ -707,5 +709,92 @@ describe('Phase 7C: fitted clip in real offline export', () => {
     assert.ok(Math.abs(result.stretchedBuffer.duration - 4) <= 1 / SR, 'the processed PCM lasts exactly the target window');
     // …and the render hard-stops at the window end — the export honours the exact length.
     assert.ok(rms(fittedOut, 4.1, 5.9) < 1e-4, 'nothing renders past the fitted 2-bar window');
+  });
+});
+
+
+// ---------------------------------------------------------------------------
+// Phase 7D: the fit-to-length workflow honors the EXPLICITLY selected stretch
+// strategy — same exact-destination semantics, same durability guarantees,
+// distinct 'taw-stretch-' asset identity, and the default stays byte-identical
+// to every pre-7D fit.
+// ---------------------------------------------------------------------------
+
+describe('Phase 7D: fit-to-length strategy selection', () => {
+  /** Deterministic transient source (noise floor + sharp click at 0.35 s) so
+   *  TAW and WSOLA renders provably differ on the fitted ratio. */
+  const makeTransientSource = (): AudioBuffer => {
+    const buffer = ctx.createBuffer(2, Math.round(0.75 * SR), SR);
+    let s = 77007 >>> 0;
+    const noise = (): number => {
+      s = (s * 1664525 + 1013904223) >>> 0;
+      return (s / 0xffffffff) * 2 - 1;
+    };
+    for (let ch = 0; ch < 2; ch += 1) {
+      const data = buffer.getChannelData(ch);
+      for (let i = 0; i < data.length; i += 1) data[i] = 0.12 * noise();
+      const at = Math.round(0.35 * SR);
+      for (let i = 0; i < Math.round(0.02 * SR) && at + i < data.length; i += 1) {
+        data[at + i] += 0.9 * Math.exp(-i / Math.round(0.003 * SR)) * (i % 2 === 0 ? 1 : -1);
+      }
+    }
+    return buffer;
+  };
+
+  it('fits to the exact musical length through the transient-aware render when selected', async () => {
+    const source = makeTransientSource();
+    const { world, sourceSnapshot } = seedWorld(source);
+    // 0.75 s source, default clip window 0.5 bars = 1 s ≥ source ⇒ fitting to
+    // 1 bar + 2 beats (1.5 bars = 3 s at 120 BPM 4/4) needs ratio 3/0.75 = 4×
+    // — the supported upper boundary, exact destination.
+    const clip = makeFitClip();
+
+    const result = await commitWarpTimeStretchToLength(clip, { bars: 1, beats: 2 }, CTX_4_4_120, makeDeps(world), 'transient');
+
+    assert.equal(result.strategy, 'transient');
+    assert.ok(result.stretchedAssetId.startsWith('taw-stretch-'), `fit asset id: ${result.stretchedAssetId}`);
+    // Exact destination semantics are strategy-independent.
+    assert.equal(result.clip.lengthBars, 1.5);
+    assert.equal(result.plan.targetWindowSeconds, 3);
+    assert.equal(result.plan.ratio, 4);
+    assert.equal(result.stretchedBuffer.length, Math.ceil(source.length * result.ratio));
+    // Durability: persisted before publish; original untouched for undo.
+    assert.deepEqual(world.waitCalls, [result.stretchedAssetId]);
+    assert.ok(world.persisted.has(result.stretchedAssetId));
+    for (let ch = 0; ch < 2; ch += 1) {
+      const now = world.store.get(SOURCE_ID)!.getChannelData(ch);
+      for (let i = 0; i < now.length; i += 1) assert.equal(now[i], sourceSnapshot[ch][i], `source ch${ch} sample ${i}`);
+    }
+    // Real TAW PCM — equals the direct transient-aware render and differs
+    // from the WSOLA render of the same source at the same ratio.
+    const expected = tawStretchAudioBuffer(source, result.ratio, (ch, len, sr) => ctx.createBuffer(ch, len, sr));
+    for (let ch = 0; ch < 2; ch += 1) {
+      const got = result.stretchedBuffer.getChannelData(ch);
+      const want = expected.getChannelData(ch);
+      for (let i = 0; i < want.length; i += 1) assert.equal(got[i], want[i], `taw pcm ch${ch} sample ${i}`);
+    }
+    const wsolaRender = wsolaStretchAudioBuffer(source, result.ratio, (ch, len, sr) => ctx.createBuffer(ch, len, sr));
+    let differs = false;
+    const tawData = result.stretchedBuffer.getChannelData(0);
+    const wsolaData = wsolaRender.getChannelData(0);
+    for (let i = 0; i < tawData.length && !differs; i += 1) differs = tawData[i] !== wsolaData[i];
+    assert.ok(differs, 'the fitted transient render must differ from a WSOLA fit of the same source');
+  });
+
+  it('keeps the default fit byte-identical to the pre-7D WSOLA fit', async () => {
+    const source = makeTransientSource();
+    const worldA = seedWorld(source).world;
+    const worldB = seedWorld(source).world;
+    const clip = makeFitClip();
+
+    const implicit = await commitWarpTimeStretchToLength(clip, { bars: 1, beats: 2 }, CTX_4_4_120, makeDeps(worldA));
+    const explicit = await commitWarpTimeStretchToLength(clip, { bars: 1, beats: 2 }, CTX_4_4_120, makeDeps(worldB), 'wsola');
+
+    assert.equal(implicit.strategy, 'wsola');
+    assert.ok(implicit.stretchedAssetId.startsWith('wsola-stretch-'));
+    assert.equal(explicit.stretchedAssetId, implicit.stretchedAssetId);
+    const a = implicit.stretchedBuffer.getChannelData(0);
+    const b = explicit.stretchedBuffer.getChannelData(0);
+    for (let i = 0; i < a.length; i += 1) assert.equal(a[i], b[i], `default fit pcm sample ${i}`);
   });
 });

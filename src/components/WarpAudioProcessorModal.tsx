@@ -18,6 +18,7 @@ import {
   formatBars,
   type FitToLengthContext,
   type FitToLengthTarget,
+  type WarpStretchStrategy,
 } from '../audio/warpTimeStretchCommit';
 import { beatsPerBar, resolveProjectTimeSignature } from '../music/musicalTime';
 import {
@@ -77,6 +78,13 @@ export const WarpAudioProcessorModal: React.FC<WarpAudioProcessorModalProps> = (
   // Phase 7A: WSOLA pitch-preserving stretch — ratio + in-flight commit guard.
   const [wsolaRatio, setWsolaRatio] = useState<number>(1.0);
   const [isCommittingStretch, setIsCommittingStretch] = useState<boolean>(false);
+  // Phase 7D: which renderer the user EXPLICITLY selects for the next stretch
+  // commit (all three workflows). 'wsola' is the Phase 7A classic and the
+  // default — nothing changes for users who never touch this. 'transient'
+  // renders through the transient-anchored WSOLA (TAW), which measurably
+  // tightens drum/percussion attack timing and cuts pre-echo. The choice is
+  // never made automatically and never claimed for the classic path.
+  const [stretchStrategy, setStretchStrategy] = useState<WarpStretchStrategy>('wsola');
   // Phase 7B: user-entered source tempo for Fit to Project Tempo. Kept as raw
   // input text so invalid entries can be reported instead of silently coerced.
   const [sourceBpmText, setSourceBpmText] = useState<string>('');
@@ -105,6 +113,7 @@ export const WarpAudioProcessorModal: React.FC<WarpAudioProcessorModalProps> = (
     setPitchSemitones(targetClip?.pitchShiftSemitones ?? 0);
     setStretchRate(targetClip?.timeStretchRate ?? 1.0);
     setWsolaRatio(1.0);
+    setStretchStrategy('wsola');
     setSourceBpmText('');
     setFitLenBarsText('1');
     setFitLenBeatsText('0');
@@ -193,7 +202,8 @@ export const WarpAudioProcessorModal: React.FC<WarpAudioProcessorModalProps> = (
       return;
     }
     setIsCommittingStretch(true);
-    setStatusMessage(`Rendering ${operation} — ${ratio.toFixed(2)}× pitch-preserving WSOLA stretch…`);
+    const strategyLabel = stretchStrategy === 'transient' ? 'transient-anchored (TAW)' : 'WSOLA';
+    setStatusMessage(`Rendering ${operation} — ${ratio.toFixed(2)}× pitch-preserving ${strategyLabel} stretch…`);
     try {
       const result = await commitWarpTimeStretch(targetClip, ratio, {
         getSourceBuffer: id => audioEngine.getSampleBuffer(id),
@@ -202,10 +212,10 @@ export const WarpAudioProcessorModal: React.FC<WarpAudioProcessorModalProps> = (
         waitForAsset: id => waitForSampleBufferPersistence(audioEngine, id),
         createBuffer: (channels, length, sampleRate) => audioEngine.getContext().createBuffer(channels, length, sampleRate),
         now: () => Date.now(),
-      });
+      }, stretchStrategy);
       onUpdateClip(result.clip);
       setStatusMessage(
-        `Committed ${successLabel}: "${targetClip.name}" now references ${result.stretchedBuffer.duration.toFixed(2)} s of processed audio. The original asset is untouched — Undo restores it.`
+        `Committed ${successLabel} (${result.strategy === 'transient' ? 'transient-aware' : 'WSOLA'} render): "${targetClip.name}" now references ${result.stretchedBuffer.duration.toFixed(2)} s of processed audio. The original asset is untouched — Undo restores it.`
       );
       setTimeout(() => {
         onClose();
@@ -328,7 +338,8 @@ export const WarpAudioProcessorModal: React.FC<WarpAudioProcessorModalProps> = (
       return;
     }
     setIsCommittingStretch(true);
-    setStatusMessage('Rendering fit to musical length — deriving the exact WSOLA ratio from the project tempo, meter and real source audio…');
+    const strategyLabel = stretchStrategy === 'transient' ? 'transient-anchored (TAW)' : 'WSOLA';
+    setStatusMessage(`Rendering fit to musical length — deriving the exact ${strategyLabel} ratio from the project tempo, meter and real source audio…`);
     try {
       const result = await commitWarpTimeStretchToLength(targetClip, fitTarget, fitCtx, {
         getSourceBuffer: id => audioEngine.getSampleBuffer(id),
@@ -337,10 +348,10 @@ export const WarpAudioProcessorModal: React.FC<WarpAudioProcessorModalProps> = (
         waitForAsset: id => waitForSampleBufferPersistence(audioEngine, id),
         createBuffer: (channels, length, sampleRate) => audioEngine.getContext().createBuffer(channels, length, sampleRate),
         now: () => Date.now(),
-      });
+      }, stretchStrategy);
       onUpdateClip(result.clip);
       setStatusMessage(
-        `Committed fit to musical length: "${targetClip.name}" now occupies exactly ${formatBars(result.clip.lengthBars)} bars (${result.plan.targetWindowSeconds.toFixed(2)} s at ${projectBpm.toFixed(2)} BPM ${result.plan.resolvedMeter[0]}/${result.plan.resolvedMeter[1]}) with ${result.stretchedBuffer.duration.toFixed(2)} s of processed audio. The audio length is baked into the new asset — the original is untouched and Undo restores it.`
+        `Committed fit to musical length (${result.strategy === 'transient' ? 'transient-aware' : 'WSOLA'} render): "${targetClip.name}" now occupies exactly ${formatBars(result.clip.lengthBars)} bars (${result.plan.targetWindowSeconds.toFixed(2)} s at ${projectBpm.toFixed(2)} BPM ${result.plan.resolvedMeter[0]}/${result.plan.resolvedMeter[1]}) with ${result.stretchedBuffer.duration.toFixed(2)} s of processed audio. The audio length is baked into the new asset — the original is untouched and Undo restores it.`
       );
       setTimeout(() => {
         onClose();
@@ -519,6 +530,52 @@ export const WarpAudioProcessorModal: React.FC<WarpAudioProcessorModalProps> = (
                 TIME STRETCH — PITCH PRESERVED (WSOLA)
               </span>
               <span className="text-[10px] font-mono text-[var(--apex-success)]">{STRETCH_BEHAVIOUR_SUMMARY}</span>
+            </div>
+
+            {/* Phase 7D: stretch strategy — an EXPLICIT user choice for every
+                commit workflow below (manual ratio, fit to tempo, fit to
+                musical length). Classic WSOLA stays the default and never
+                claims transient handling; the transient-aware option states
+                honestly what it improves and what it does not. */}
+            <div className="bg-[var(--apex-canvas)] p-3 rounded-lg border border-[var(--apex-border)] space-y-1.5" role="group" aria-label="Stretch strategy">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-xs text-[var(--apex-text)] font-bold">STRETCH STRATEGY</span>
+                <div className="flex items-center gap-1">
+                  <button
+                    id="fl-warp-stretch-strategy-wsola"
+                    type="button"
+                    aria-pressed={stretchStrategy === 'wsola'}
+                    disabled={!targetClip || isCommittingStretch}
+                    onClick={() => setStretchStrategy('wsola')}
+                    className={`px-2.5 py-1 rounded text-[10px] font-bold border transition disabled:opacity-40 ${
+                      stretchStrategy === 'wsola'
+                        ? 'bg-[var(--apex-success)] text-[var(--apex-state-playing-fg)] border-[var(--apex-success)]'
+                        : 'bg-[var(--apex-surface-2)] text-[var(--apex-text-2)] border-[var(--apex-border)] hover:text-[var(--apex-text)]'
+                    }`}
+                  >
+                    CLASSIC WSOLA
+                  </button>
+                  <button
+                    id="fl-warp-stretch-strategy-transient"
+                    type="button"
+                    aria-pressed={stretchStrategy === 'transient'}
+                    disabled={!targetClip || isCommittingStretch}
+                    onClick={() => setStretchStrategy('transient')}
+                    className={`px-2.5 py-1 rounded text-[10px] font-bold border transition disabled:opacity-40 ${
+                      stretchStrategy === 'transient'
+                        ? 'bg-[var(--apex-success)] text-[var(--apex-state-playing-fg)] border-[var(--apex-success)]'
+                        : 'bg-[var(--apex-surface-2)] text-[var(--apex-text-2)] border-[var(--apex-border)] hover:text-[var(--apex-text)]'
+                    }`}
+                  >
+                    TRANSIENT-AWARE
+                  </button>
+                </div>
+              </div>
+              <span id="fl-warp-stretch-strategy-note" className="text-[9px] text-[var(--apex-text-3)] block">
+                {stretchStrategy === 'wsola'
+                  ? 'Classic WSOLA: best for tonal and sustained material. Attacks (drums, percussion) can smear — measured timing errors up to ~30 ms and audible pre-echo at some ratios. This mode does not anchor attacks and makes no transient-handling claim.'
+                  : 'Transient-aware (TAW): anchors detected attacks so drum/percussion timing stays tight (measured ≤ ~7 ms worst-case on test loops vs ≤ ~69 ms classic) with far less pre-echo. Material with no detectable attacks renders identically to classic WSOLA. Attacks within ~23 ms of the clip start/end keep classic treatment.'}
+              </span>
             </div>
 
             <div className="bg-[var(--apex-canvas)] p-3 rounded-lg border border-[var(--apex-border)] space-y-1.5 text-xs">

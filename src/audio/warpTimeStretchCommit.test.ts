@@ -40,7 +40,10 @@ import {
   commitWarpTimeStretch,
   computeFitToTempoRatio,
   describeWarpStretchPlan,
+  warpStretchAssetPrefix,
 } from './warpTimeStretchCommit';
+import { tawStretchAudioBuffer } from './transientAwareStretch';
+import { wsolaStretchAudioBuffer } from './wsolaTimeStretch';
 
 const RealOfflineAudioContext = (RealWebAudio as unknown as {
   OfflineAudioContext: typeof OfflineAudioContext;
@@ -658,5 +661,137 @@ describe('Phase 7B: fitted clip in real offline export', () => {
     const fitLate = rms(fitOut, 0.62, 0.70);
     assert.ok(originalLate > 1e-4, `original still audible late in its window (${originalLate.toExponential(2)})`);
     assert.ok(fitLate < 1e-6, `fitted clip is hard-silent past its committed end (${fitLate.toExponential(2)})`);
+  });
+});
+
+
+// ---------------------------------------------------------------------------
+// Phase 7D: stretch strategy plumbing — 'wsola' (default, byte-identical to
+// every pre-7D commit) vs the EXPLICITLY selected 'transient' (TAW) render,
+// with the same durability/undo/asset-identity guarantees for both.
+// ---------------------------------------------------------------------------
+
+/** Deterministic transient source: a noise floor with one sharp decaying
+ *  click at 0.25 s — real attack content, so TAW and WSOLA renders provably
+ *  differ (a tone source would hit the documented graceful path instead). */
+const makeTransientBuffer = (seconds = 0.5): AudioBuffer => {
+  const buffer = ctx.createBuffer(2, Math.round(seconds * SR), SR);
+  let s = 20260122 >>> 0;
+  const noise = (): number => {
+    s = (s * 1664525 + 1013904223) >>> 0;
+    return (s / 0xffffffff) * 2 - 1;
+  };
+  for (let ch = 0; ch < 2; ch += 1) {
+    const data = buffer.getChannelData(ch);
+    for (let i = 0; i < data.length; i += 1) data[i] = 0.12 * noise();
+    const at = Math.round(0.25 * SR);
+    for (let i = 0; i < Math.round(0.02 * SR) && at + i < data.length; i += 1) {
+      data[at + i] += 0.9 * Math.exp(-i / Math.round(0.003 * SR)) * (i % 2 === 0 ? 1 : -1);
+    }
+  }
+  return buffer;
+};
+
+const seedTransientWorld = (): { world: FakeWorld; source: AudioBuffer; sourceSnapshot: Float32Array[] } => {
+  const world = makeWorld();
+  const source = makeTransientBuffer(0.5);
+  world.store.set(SOURCE_ID, source);
+  world.persisted.set(SOURCE_ID, source);
+  return { world, source, sourceSnapshot: snapshotBuffer(source) };
+};
+
+describe('Phase 7D: stretch strategy through the commit pipeline', () => {
+  it('keeps the pre-7D behavior byte-identical when no strategy is given (default wsola)', async () => {
+    const { world, source, sourceSnapshot } = seedTransientWorld();
+    const clip = makeClip();
+
+    const result = await commitWarpTimeStretch(clip, 2.0, makeDeps(world));
+
+    assert.equal(result.strategy, 'wsola');
+    assert.ok(result.stretchedAssetId.startsWith('wsola-stretch-'), `asset id keeps the 7A prefix: ${result.stretchedAssetId}`);
+    // PCM equals a direct Phase 7A WSOLA render of the same source — the
+    // plumbing changed nothing for the default path.
+    const expected = wsolaStretchAudioBuffer(source, 2.0, (ch, len, sr) => ctx.createBuffer(ch, len, sr));
+    assertBuffersIdentical(result.stretchedBuffer, snapshotBuffer(expected));
+    assertBuffersIdentical(world.store.get(SOURCE_ID)!, sourceSnapshot);
+
+    // An explicit 'wsola' selection renders the same PCM under the same prefix.
+    const world2 = seedTransientWorld().world;
+    const explicit = await commitWarpTimeStretch(makeClip(), 2.0, makeDeps(world2), 'wsola');
+    assert.equal(explicit.strategy, 'wsola');
+    assert.ok(explicit.stretchedAssetId.startsWith('wsola-stretch-'));
+    assertBuffersIdentical(explicit.stretchedBuffer, snapshotBuffer(result.stretchedBuffer));
+  });
+
+  it('commits the transient-aware render under a distinct taw-stretch asset with the same durability guarantees', async () => {
+    const { world, source, sourceSnapshot } = seedTransientWorld();
+    const clip = makeClip();
+
+    const result = await commitWarpTimeStretch(clip, 2.0, makeDeps(world), 'transient');
+
+    // Distinct strategy + distinct asset identity ('taw-stretch-' prefix):
+    // processed assets self-document their renderer and never collide with
+    // wsola assets.
+    assert.equal(result.strategy, 'transient');
+    assert.ok(result.stretchedAssetId.startsWith('taw-stretch-'), `transient asset id: ${result.stretchedAssetId}`);
+    assert.notEqual(result.stretchedAssetId, SOURCE_ID);
+
+    // Same pipeline guarantees: registered AND persisted before return,
+    // original asset bit-identical (undo can always go home).
+    assert.deepEqual(world.registerCalls, [result.stretchedAssetId]);
+    assert.deepEqual(world.waitCalls, [result.stretchedAssetId], 'durability gate awaited before publishing');
+    assert.ok(world.persisted.has(result.stretchedAssetId));
+    assertBuffersIdentical(world.store.get(SOURCE_ID)!, sourceSnapshot);
+
+    // Real TAW PCM: equals a direct transient-aware render of the source,
+    // exact frames, and provably NOT the WSOLA render (pipeline-level
+    // replacement guard — relabeling WSOLA as 'transient' fails here).
+    const expectedTaw = tawStretchAudioBuffer(source, 2.0, (ch, len, sr) => ctx.createBuffer(ch, len, sr));
+    assertBuffersIdentical(result.stretchedBuffer, snapshotBuffer(expectedTaw));
+    assert.equal(result.stretchedBuffer.length, Math.ceil((SR / 2) * 2));
+    const wsolaRender = wsolaStretchAudioBuffer(source, 2.0, (ch, len, sr) => ctx.createBuffer(ch, len, sr));
+    const tawData = result.stretchedBuffer.getChannelData(0);
+    const wsolaData = wsolaRender.getChannelData(0);
+    let differs = false;
+    for (let i = 0; i < tawData.length && !differs; i += 1) differs = tawData[i] !== wsolaData[i];
+    assert.ok(differs, 'transient render must differ from the WSOLA render on transient material');
+
+    // Clip geometry matches the WSOLA contract exactly: length scales by the
+    // ratio, arrangement position and repitch fields do not move.
+    assert.equal(result.clip.audioBufferId, result.stretchedAssetId);
+    assert.equal(result.clip.lengthBars, 0.5);
+    assert.equal(result.clip.startBar, 4);
+    assert.equal(result.clip.timeStretchRate, 1.2);
+    assert.equal(result.clip.pitchShiftSemitones, -3);
+    assert.equal(result.clip.warpMode, 'repitch');
+    assert.ok(Array.isArray(result.clip.audioWaveform) && result.clip.audioWaveform!.length === 64);
+  });
+
+  it('refuses to publish a transient-strategy commit whose persistence fails (typed, honest, zero mutation)', async () => {
+    const { world, sourceSnapshot } = seedTransientWorld();
+    world.failPersistence = true;
+
+    await assert.rejects(
+      () => commitWarpTimeStretch(makeClip(), 2.0, makeDeps(world), 'transient'),
+      (error: unknown) => error instanceof WarpTimeStretchError && error.failure === 'persist-failed'
+    );
+    // The asset was registered and awaited, but the failure surfaced before
+    // any clip publication — and the source is untouched.
+    assert.equal(world.registerCalls.length, 1);
+    assert.equal(world.waitCalls.length, 1);
+    assertBuffersIdentical(world.store.get(SOURCE_ID)!, sourceSnapshot);
+  });
+
+  it('builds strategy-specific asset ids with the collision suffix intact', () => {
+    assert.equal(buildWarpStretchAssetId('clip-1', FIXED_NOW, () => false), `wsola-stretch-clip-1-${FIXED_NOW}`);
+    assert.equal(buildWarpStretchAssetId('clip-1', FIXED_NOW, () => false, 'wsola'), `wsola-stretch-clip-1-${FIXED_NOW}`);
+    assert.equal(buildWarpStretchAssetId('clip-1', FIXED_NOW, () => false, 'transient'), `taw-stretch-clip-1-${FIXED_NOW}`);
+    const taken = new Set([`taw-stretch-clip-1-${FIXED_NOW}`, `taw-stretch-clip-1-${FIXED_NOW}-2`]);
+    assert.equal(
+      buildWarpStretchAssetId('clip-1', FIXED_NOW, id => taken.has(id), 'transient'),
+      `taw-stretch-clip-1-${FIXED_NOW}-3`
+    );
+    assert.equal(warpStretchAssetPrefix('wsola'), 'wsola-stretch');
+    assert.equal(warpStretchAssetPrefix('transient'), 'taw-stretch');
   });
 });
