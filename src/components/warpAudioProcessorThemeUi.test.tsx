@@ -109,6 +109,8 @@ interface RenderOverrides {
   clips?: PlaylistClip[];
   selectedClipId?: string | null;
   isOpen?: boolean;
+  /** Phase 7B: the authoritative project tempo the App feeds the modal. */
+  projectBpm?: number;
 }
 
 const render = (mode: 'dark' | 'light', overrides: RenderOverrides = {}): string =>
@@ -122,6 +124,7 @@ const render = (mode: 'dark' | 'light', overrides: RenderOverrides = {}): string
         clips: overrides.clips ?? [],
         selectedClipId: overrides.selectedClipId ?? null,
         onUpdateClip: noop,
+        projectBpm: overrides.projectBpm ?? 120,
       }),
     ),
   );
@@ -160,6 +163,25 @@ describe('Warp Audio Processor theme markup (UI-03N)', () => {
       includes(markup, '>Apply to Clip<', 'the apply action renders');
       includes(markup, '>Render &amp; Commit Stretch<', 'the stretch commit action renders');
       includes(markup, 'SUPPORTED 0.25×–4.00×', 'the stretch section states its supported ratio range');
+      // Phase 7B: Fit to Project Tempo renders inside the stretch card, driven
+      // by the authoritative projectBpm prop, disabled without a target.
+      includes(markup, '>FIT TO PROJECT TEMPO<', 'the fit-to-tempo workflow renders');
+      includes(markup, 'ratio = source BPM ÷ project BPM', 'the fit formula is stated openly');
+      includes(markup, '>SOURCE BPM<', 'the source tempo field is labelled');
+      includes(markup, 'id="fl-warp-fit-source-bpm"', 'the source tempo input has a stable id');
+      includes(markup, '>120.00 BPM<', 'the target tempo read-out renders the projectBpm prop value');
+      includes(markup, '>ENTER SOURCE BPM TO PREVIEW THE FIT<', 'the fit preview starts in its honest empty state');
+      includes(markup, '>Render &amp; Commit Fit<', 'the fit commit action renders');
+      includes(markup, 'No beat detection is performed', 'the fit panel never claims automatic detection');
+      includes(markup, 'does not reprocess', 'the fit panel states the stretch is baked into the new asset');
+      includes(markup, 'smear transients', 'the fit panel keeps the WSOLA transient-smearing limitation honest');
+      const fitInput = markup.match(/<input[^>]*id="fl-warp-fit-source-bpm"[^>]*>/);
+      assert.ok(fitInput, 'the fit source-BPM input renders');
+      assert.ok(fitInput![0].includes('type="number"'), 'the source tempo is a numeric field');
+      assert.ok(hasDisabledAttr(fitInput![0]), 'the fit input is disabled without a target');
+      const fitButton = markup.match(/<button[^>]*>(?:(?!<button)[\s\S])*?Render &amp; Commit Fit[\s\S]*?<\/button>/);
+      assert.ok(fitButton, 'the fit commit button renders');
+      assert.ok(hasDisabledAttr(fitButton![0]), 'the fit commit button is disabled without a target');
 
       // No actionable target: the banner carries the module message and all
       // three sliders plus the primary actions are disabled.
@@ -194,6 +216,12 @@ describe('Warp Audio Processor theme markup (UI-03N)', () => {
       // this render, so the read-out honestly omits the audio-duration part.)
       includes(markup, '1.00× · 2 → 2 bars', 'the stretch plan states ratio and resulting bar length up front');
       includes(markup, STRETCH_BEHAVIOUR_SUMMARY, 'the stretch summary renders verbatim from the shared module');
+      // Phase 7B: the fit target tempo renders exactly the authoritative prop —
+      // no duplicated, stale or engine-side BPM setting inside the modal.
+      includes(markup, '>120.00 BPM<', 'the fit target renders the projectBpm prop (120)');
+      const retuned = render(mode, { clips: [readyClip], selectedClipId: 'clip-warp', projectBpm: 140 });
+      includes(retuned, '>140.00 BPM<', 'a different authoritative tempo renders verbatim');
+      assert.ok(!retuned.includes('>120.00 BPM<'), 'the modal keeps no stale BPM of its own');
     });
 
     it(`renders the unsupported-type state for a pattern clip in ${mode}`, () => {
@@ -214,6 +242,10 @@ describe('Warp Audio Processor theme markup (UI-03N)', () => {
         hasDisabledAttr(ranges[0]) && hasDisabledAttr(ranges[1]) && hasDisabledAttr(ranges[2]),
         'all sliders stay disabled for a pattern clip'
       );
+      const fitInput = markup.match(/<input[^>]*id="fl-warp-fit-source-bpm"[^>]*>/);
+      assert.ok(fitInput && hasDisabledAttr(fitInput[0]), 'the fit source-BPM input stays disabled for a pattern clip');
+      const fitButton = markup.match(/<button[^>]*>(?:(?!<button)[\s\S])*?Render &amp; Commit Fit[\s\S]*?<\/button>/);
+      assert.ok(fitButton && hasDisabledAttr(fitButton[0]), 'the fit commit stays disabled for a pattern clip');
     });
   }
 
@@ -348,7 +380,11 @@ describe('Warp Audio Processor theme markup (UI-03N)', () => {
     assert.match(code, /STRETCH_BEHAVIOUR_SUMMARY/, 'the stretch behaviour summary is read from the shared module');
     // Commit wiring honesty: the real pipeline is invoked, its typed errors are
     // surfaced, and only a committed clip is published — never a fake success.
-    assert.match(code, /commitWarpTimeStretch\(targetClip, wsolaRatio,/, 'the commit calls the tested render/commit pipeline');
+    // Phase 7B: both the manual ratio and the fit workflow route through ONE
+    // shared commit helper, so both carry identical guarantees.
+    assert.match(code, /commitWarpTimeStretch\(targetClip, ratio,/, 'the shared commit helper calls the tested render/commit pipeline');
+    assert.match(code, /commitWsolaRender\(wsolaRatio, 'stretch'/, 'the manual ratio button routes through the shared helper');
+    assert.match(code, /commitWsolaRender\(\s*fitRatio,/, 'the fit-to-tempo button routes through the same shared helper');
     assert.match(code, /onUpdateClip\(result\.clip\);/, 'only the committed clip is published');
     assert.match(code, /error instanceof WarpTimeStretchError/, 'typed pipeline failures are surfaced honestly');
     assert.match(code, /waitForSampleBufferPersistence/, 'the commit waits for asset durability before publishing');
@@ -356,6 +392,29 @@ describe('Warp Audio Processor theme markup (UI-03N)', () => {
     const readyMarkup = render('light', { clips: [readyClip], selectedClipId: 'clip-warp' });
     includes(readyMarkup, WARP_BEHAVIOUR_SUMMARY, 'the repitch summary text renders verbatim');
     includes(readyMarkup, STRETCH_BEHAVIOUR_SUMMARY, 'the stretch summary text renders verbatim');
+  });
+
+  it('Phase 7B: fit-to-tempo states the user-entered-source truth and reads the target from authoritative state', () => {
+    // The fit uses the tested pure computation with the prop-fed project BPM —
+    // never an engine-side or locally duplicated tempo.
+    assert.match(code, /computeFitToTempoRatio\(sourceBpmText, projectBpm\)/, 'the fit ratio comes from the tested computation on the authoritative prop');
+    assert.match(code, /projectBpm: number;/, 'the modal requires the project tempo as a prop');
+    // No automatic-detection claim may exist; the disclaimer must.
+    assert.match(code, /No beat detection is performed/, 'the no-detection disclaimer is required text');
+    assert.doesNotMatch(code, /automatically detect|auto-?detect|detects the tempo|detects the BPM/i, 'no automatic BPM-detection claim');
+    // The bake-into-asset truth: later tempo changes do not reprocess the asset.
+    assert.match(code, /changing the project tempo later does not reprocess it/i, 'the baked-asset semantics are stated');
+    // The App must feed the modal the authoritative project tempo.
+    const appSource = readFileSync('src/App.tsx', 'utf8');
+    assert.match(
+      appSource,
+      /<WarpAudioProcessorModal[\s\S]{0,400}?projectBpm=\{projectState\.meta\.bpm\}/,
+      'the App wires projectBpm from the authoritative project state'
+    );
+    // Duplicate-commit protection: both commit entry points guard on the
+    // in-flight flag before doing any work.
+    assert.match(code, /const handleCommitFitToTempo = \(\) => \{\s*if \(!targetClip \|\| !onUpdateClip \|\| isCommittingStretch\) return;/, 'the fit handler refuses while a commit is in flight');
+    assert.match(code, /const commitWsolaRender = async \(ratio: number, operation: string, successLabel: string\) => \{\s*if \(!targetClip \|\| !onUpdateClip \|\| isCommittingStretch\) return;/, 'the shared commit helper refuses while a commit is in flight');
   });
 
   it('uses ModalFrame’s themed scrim and keeps the overlay geometry', () => {
@@ -375,6 +434,7 @@ describe('Warp Audio Processor theme markup (UI-03N)', () => {
         clips: [readyClip],
         selectedClipId: 'clip-warp',
         onUpdateClip: noop,
+        projectBpm: 120,
       }),
     );
     assert.equal(closed, '');

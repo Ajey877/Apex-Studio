@@ -36,6 +36,17 @@
  * duration × ratio. The clip therefore consumes exactly the same FRACTION of
  * its audio as before the stretch (a clip trimmed to half its source stays
  * trimmed to half), and its position in the arrangement never moves.
+ *
+ * PHASE 7B — FIT TO PROJECT TEMPO
+ * `computeFitToTempoRatio(sourceBpm, projectBpm)` derives the ratio for the
+ * same pipeline: r = Bs / Bt, with the source tempo ENTERED BY THE USER (no
+ * beat detection, no guessing) and the project tempo read from the
+ * authoritative project state by the caller. Ratios outside the supported
+ * WSOLA bounds are refused with an actionable typed error, never clamped.
+ * The fit commits through `commitWarpTimeStretch` exactly like the manual
+ * ratio control — same durability gate, same asset-identity and undo
+ * guarantees — so the stretch is baked into the new asset: later project
+ * tempo changes do not reprocess it.
  */
 import type { PlaylistClip } from '../types/daw';
 import {
@@ -54,7 +65,9 @@ export type WarpStretchFailure =
   | 'source-unavailable'
   | 'ratio-out-of-range'
   | 'stretch-failed'
-  | 'persist-failed';
+  | 'persist-failed'
+  | 'invalid-source-bpm'
+  | 'invalid-project-bpm';
 
 /** Typed commit failure so the UI can surface honest, specific messages. */
 export class WarpTimeStretchError extends Error {
@@ -65,6 +78,54 @@ export class WarpTimeStretchError extends Error {
     this.failure = failure;
   }
 }
+
+/**
+ * Phase 7B: Fit to Project Tempo — the ratio computation, isolated and pure.
+ *
+ * For a positive source tempo `Bs` (the BPM the audio was recorded at, ENTERED
+ * BY THE USER — this tool performs no beat detection and never guesses) and
+ * the project's authoritative tempo `Bt`, the WSOLA output/input duration
+ * ratio is:
+ *
+ *     r = Bs / Bt
+ *
+ * 90 BPM audio fitted to a 120 BPM project → r = 0.75 (the output is
+ * shorter); 120 → 90 → r = 4/3 (longer); equal tempos → r = 1 (identity).
+ * Pitch is preserved by the WSOLA render that consumes this ratio through the
+ * exact same `commitWarpTimeStretch` pipeline as the manual ratio control.
+ *
+ * The result must land inside the supported WSOLA bounds (0.25×–4.0×); a
+ * computed ratio outside them is REFUSED with an actionable typed message —
+ * never silently clamped, because a clamped fit would misrepresent the tempo
+ * relationship the user asked for.
+ *
+ * The stretch is baked into the new audio asset: changing the project tempo
+ * afterwards does NOT reprocess the committed audio.
+ */
+export const computeFitToTempoRatio = (sourceBpmInput: string | number, projectBpm: number): number => {
+  const trimmed = typeof sourceBpmInput === 'string' ? sourceBpmInput.trim() : sourceBpmInput;
+  const sourceBpm = typeof trimmed === 'string' ? Number(trimmed) : trimmed;
+  if (trimmed === '' || typeof sourceBpm !== 'number' || !Number.isFinite(sourceBpm) || sourceBpm <= 0) {
+    throw new WarpTimeStretchError(
+      'invalid-source-bpm',
+      `Enter the tempo the source audio was recorded at as a positive BPM number — "${String(sourceBpmInput).trim() || '(empty)'}" is not usable. This tool performs no beat detection and never guesses a tempo.`
+    );
+  }
+  if (typeof projectBpm !== 'number' || !Number.isFinite(projectBpm) || projectBpm <= 0) {
+    throw new WarpTimeStretchError(
+      'invalid-project-bpm',
+      `The project tempo (${String(projectBpm)}) is not a usable positive BPM — set a valid project tempo before fitting.`
+    );
+  }
+  const ratio = sourceBpm / projectBpm;
+  if (ratio < WSOLA_MIN_RATIO || ratio > WSOLA_MAX_RATIO) {
+    throw new WarpTimeStretchError(
+      'ratio-out-of-range',
+      `Fitting ${sourceBpm} BPM audio to a ${projectBpm} BPM project needs ${ratio.toFixed(3)}× — outside the supported ${WSOLA_MIN_RATIO}×–${WSOLA_MAX_RATIO}× WSOLA range. Nothing was committed; the ratio is never silently clamped.`
+    );
+  }
+  return ratio;
+};
 
 /**
  * Everything the pipeline touches about the running app, injected so the
@@ -233,7 +294,13 @@ export const describeWarpStretchPlan = (
   return `${ratio.toFixed(2)}× · ${bars}`;
 };
 
+/**
+ * Bar read-out at micro-bar precision (6 decimals). Phase 7B raised this from
+ * 3 decimals so the preview can never disagree with the committed
+ * `lengthBars`: the plan displays the exact same product the commit stores
+ * (e.g. 0.375 × 0.75 = 0.28125 bars), with float noise rounded away.
+ */
 const formatBars = (bars: number): string => {
-  const rounded = Math.round(bars * 1000) / 1000;
-  return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(3).replace(/0+$/, '').replace(/\.$/, '');
+  const rounded = Math.round(bars * 1e6) / 1e6;
+  return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(6).replace(/0+$/, '').replace(/\.$/, '');
 };

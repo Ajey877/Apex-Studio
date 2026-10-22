@@ -211,6 +211,11 @@ test.describe('UI-03N Warp Audio Processor theme', () => {
       await page.waitForSelector('#root > *', { state: 'attached' });
       await expect(page.locator('html')).toHaveAttribute('data-theme', mode);
 
+      // Phase 7B: capture the transport's authoritative project BPM BEFORE the
+      // modal opens — the fit-to-tempo target read-out must equal it (one
+      // project tempo, no duplicated setting inside the modal).
+      const transportBpm = await page.locator('#fl-bpm-input').inputValue();
+
       const dialog = await openWarpProcessor(page);
       await expect(dialog).toHaveAttribute('role', 'dialog');
       await expect(dialog).toHaveAttribute('aria-modal', 'true');
@@ -405,6 +410,23 @@ test.describe('UI-03N Warp Audio Processor theme', () => {
       await expectColor(bgOf(commitStretch), expected.success, 'stretch commit CTA fill');
       await expectColor(fgOf(commitStretch), expected.onAccent, 'stretch commit CTA on-colour');
 
+      // ---- Phase 7B: fit-to-tempo panel — honest, disabled, authoritative ----
+      await expect(stretchCard).toContainText('FIT TO PROJECT TEMPO');
+      await expect(stretchCard).toContainText('No beat detection is performed');
+      const fitInput = stretchCard.locator('#fl-warp-fit-source-bpm');
+      await expect(fitInput).toBeDisabled();
+      const fitCommit = stretchCard.locator('button:has-text("Render & Commit Fit")');
+      await expect(fitCommit).toBeDisabled();
+      await expect(fitCommit).toHaveCSS('opacity', '0.4');
+      await expectColor(bgOf(fitCommit), expected.success, 'fit commit CTA fill');
+      await expectColor(fgOf(fitCommit), expected.onAccent, 'fit commit CTA on-colour');
+      // The authoritative-tempo proof: the modal's PROJECT BPM read-out equals
+      // the transport BPM captured before the modal opened.
+      const fitTargetReadout = stretchCard.locator('span.font-mono.font-bold', { hasText: /^\d+(?:\.\d+)? BPM$/ }).last();
+      await expect(fitTargetReadout).toBeVisible();
+      const readoutBpm = parseFloat((await fitTargetReadout.textContent()) ?? '');
+      expect(readoutBpm).toBeCloseTo(parseFloat(transportBpm), 6);
+
       const footerNote = footer.locator('span').first();
       await expect(footerNote).toHaveText('Applies to live playback and WAV export');
       await expectColor(fgOf(footerNote), expected.text3, 'footer note');
@@ -461,6 +483,9 @@ test.describe('UI-03N Warp Audio Processor theme', () => {
       // disabled for a pattern clip, and so does its commit CTA.
       await expect(reopened.locator('input[type="range"]').nth(2)).toBeDisabled();
       await expect(reopened.locator('button:has-text("Render & Commit Stretch")')).toBeDisabled();
+      // Phase 7B: the fit-to-tempo input and its commit CTA stay disabled too.
+      await expect(reopened.locator('#fl-warp-fit-source-bpm')).toBeDisabled();
+      await expect(reopened.locator('button:has-text("Render & Commit Fit")')).toBeDisabled();
 
       await page.keyboard.press('Escape');
       await expect(reopened).toHaveCount(0);
