@@ -568,7 +568,7 @@ const MODAL_CASES: ModalCase[] = [
   },
   {
     name: 'Wavetable Synth', file: 'WavetableSynthModal.tsx', modalId: 'fl-wavetable-synth-modal',
-    titleId: 'fl-wavetable-synth-modal-title', titleText: 'ADVANCED SYNTH PREVIEW (WAVETABLE NOT IMPLEMENTED)',
+    titleId: 'fl-wavetable-synth-modal-title', titleText: 'WAVETABLE SYNTH',
     // UI-03D: the scrim is the shared `--apex-modal-overlay` token, applied by
     // ModalFrame's `apex-modal-overlay` class. The rendered scrim is unchanged
     // from main: the unlayered token rule already overrode the legacy

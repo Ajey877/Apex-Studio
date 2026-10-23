@@ -30,9 +30,8 @@ import {
   resolveGateSeconds,
   type GateSeconds,
 } from './noteGate';
-import {
-  renderSubtractiveSynthVoice,
-} from './instruments/subtractiveSynth';
+import { renderSubtractiveSynthVoice } from './instruments/subtractiveSynth';
+import { renderWavetableVoice } from './instruments/wavetableSynth';
 import {
   renderAcid303Voice,
   renderReeseBassVoice,
@@ -136,7 +135,7 @@ interface GateCase {
 /** character / fallback mirror the production wiring in audioEngine.ts. */
 const GATE_CASES: GateCase[] = [
   { instrumentType: 'minisynth', render: renderSubtractiveSynthVoice, character: GATE_CHARACTER.neutral, fallbackSteps: 1 },
-  { instrumentType: 'wavetable', render: renderSubtractiveSynthVoice, character: GATE_CHARACTER.neutral, fallbackSteps: 1 },
+  { instrumentType: 'wavetable', render: renderWavetableVoice, character: GATE_CHARACTER.neutral, fallbackSteps: 1 },
   { instrumentType: 'acid_303', render: renderAcid303Voice, character: GATE_CHARACTER.neutral, fallbackSteps: 1 },
   { instrumentType: 'chiptune_8bit', render: renderChiptuneVoice, character: GATE_CHARACTER.percussive, fallbackSteps: 1 },
   { instrumentType: 'reese_bass', render: renderReeseBassVoice, character: GATE_CHARACTER.firm, fallbackSteps: 2 },

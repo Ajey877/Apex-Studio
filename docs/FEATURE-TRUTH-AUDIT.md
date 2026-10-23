@@ -6,6 +6,13 @@
 **Audit date:** 2026-10-02
 **Scope:** READ-ONLY. No production code, test, branch, PR or merge was created or modified.
 
+> **Superseded in part (Phase 8B, 2026-10-23):** §4.5 below is a snapshot of the
+> code as it was on 2026-10-02. The wavetable instrument now ships: `wavetable`
+> dispatches to `renderWavetableVoice` (`src/audio/instruments/wavetableSynth.ts`),
+> the single-cycle tables live in `src/audio/wavetableTables.ts`, settings persist
+> on `Channel.wavetable`, and the modal writes through channel state. The rest of
+> this audit remains a historical record and is not updated by that change.
+
 ---
 
 ## Audit method

@@ -112,7 +112,7 @@ export const TRANSPORT_TOOL_GROUPS: readonly TransportToolGroupSpec[] = [
       {
         id: 'fl-wavetable-btn',
         label: 'Wavetable synth',
-        title: 'Synth preview surface (wavetable engine not implemented)',
+        title: 'Wavetable synth: six-frame morphing table, real unison and warp',
         icon: AudioWaveform,
         handler: 'wavetable',
       },
