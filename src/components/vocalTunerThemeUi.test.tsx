@@ -29,7 +29,7 @@ import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { VocalTunerModal } from './VocalTunerModal';
 import { DEFAULT_PROJECT } from '../audio/presets';
-import type { VocalTunerSettings } from '../types/daw';
+import type { PlaylistClip, VocalTunerSettings } from '../types/daw';
 
 const noop = (): void => {};
 
@@ -205,13 +205,104 @@ describe('Vocal Tuner theme markup (UI-03H)', () => {
   it('keeps the Phase 52 truth copy and the NOT APPLIED banners intact', () => {
     const markup = render();
     assert.match(markup, /NO MEASURED PITCH/);
-    assert.match(markup, /This build does not analyse audio/);
+    // Phase 8A replaced "This build does not analyse audio" — the build now
+    // DOES analyse audio, offline, through the explicit correction workflow.
+    // The honest default-state copy says nothing is measured until the user
+    // analyses the selected clip, and no live analysis runs in the signal path.
+    assert.match(markup, /Nothing is measured until you analyse the selected clip/);
     assert.match(markup, /NOT APPLIED/);
     assert.match(markup, /PITCH DETECTION UNAVAILABLE/);
     // Preset names and label copy must survive.
     assert.match(markup, /Transparent Vocal Glue/);
     assert.match(markup, /Micro-variation preserve/);
     assert.match(markup, /LFO Pitch Modulation/);
+  });
+
+  // -------------------------------------------------------------------------
+  // Phase 8A: the offline pitch-correction workflow markup and honesty pins.
+  // -------------------------------------------------------------------------
+
+  const vocalClip: PlaylistClip = {
+    id: 'vocal-clip-a',
+    trackIndex: 1,
+    startBar: 1,
+    lengthBars: 1,
+    type: 'audio',
+    audioBufferId: 'vocal-src-a',
+    color: '#8b5cf6',
+    name: 'Lead Vocal',
+  } as PlaylistClip;
+
+  const renderWithClip = (selected: string | null, overrideSettings: Partial<VocalTunerSettings> = {}): string =>
+    renderToStaticMarkup(
+      React.createElement(VocalTunerModal, {
+        isOpen: true,
+        onClose: noop,
+        vocalTunerSettings: { ...settings, ...overrideSettings },
+        onUpdateVocalTuner: noop,
+        channels: DEFAULT_PROJECT.channels,
+        clips: [vocalClip],
+        selectedClipId: selected,
+        onUpdateClip: noop,
+      })
+    );
+
+  describe('Phase 8A — offline correction workflow', () => {
+    it('renders the correction section with honest explicit-action copy and stable ids', () => {
+      const markup = renderWithClip('vocal-clip-a');
+      assert.match(markup, /OFFLINE PITCH CORRECTION — ANALYSE &amp; RENDER\/COMMIT/);
+      assert.match(markup, /EXPLICIT OFFLINE ACTION · NO PROCESSING IN SIGNAL PATH/);
+      assert.match(markup, /id="fl-vocal-correction-target"/);
+      assert.match(markup, /id="fl-vocal-correction-analyse"/);
+      assert.match(markup, /id="fl-vocal-correction-preview-original"/);
+      assert.match(markup, /id="fl-vocal-correction-preview-corrected"/);
+      assert.match(markup, /id="fl-vocal-correction-commit"/);
+      assert.match(markup, /Lead Vocal/, 'the selected clip is identified by name');
+      // Without an analysis there is no plan and no measured numbers.
+      assert.match(markup, /PITCH DETECTION UNAVAILABLE/);
+      assert.doesNotMatch(markup, /id="fl-vocal-correction-plan"/);
+      // The commit CTA is disabled until a real analysis exists.
+      assert.match(markup, /id="fl-vocal-correction-commit"[^>]*disabled=""/);
+      // Honest limitations copy in the default state.
+      assert.match(markup, /correction never happens automatically/);
+      assert.match(markup, /no live pitch processing in the signal path/);
+      // The stored-intent fieldset keeps its NOT APPLIED contract.
+      assert.match(markup, /NOT APPLIED — STORED INTENT/);
+      assert.match(markup, /AUTO-PITCH: NOT APPLIED — NO PROCESSING IN SIGNAL PATH/);
+    });
+
+    it('keeps exactly four range inputs and a themed surface with or without a selected clip', () => {
+      for (const selected of ['vocal-clip-a', null]) {
+        const markup = renderWithClip(selected);
+        const ranges = markup.match(/type="range"/g) ?? [];
+        assert.equal(ranges.length, 4, 'retune + formant + vibrato + humanize — no new sliders');
+        const offenders = classAttributes(markup).filter((cls) => UNTHEMED.test(cls));
+        assert.deepEqual(offenders, [], 'correction-section classes must use semantic tokens only');
+      }
+      const noSelection = renderWithClip(null);
+      assert.match(noSelection, /Select an audio clip in the Playlist Arranger first/);
+      assert.match(noSelection, /id="fl-vocal-correction-analyse"[^>]*disabled=""/);
+    });
+
+    it('wires the real pipeline in code: analysis, plan, real-PCM preview and durable commit', () => {
+      // The modal must call the production analysis/commit modules — a
+      // settings-only or fabricated workflow would not reference them at all.
+      assert.match(source, /analyseVocalCorrectionSource\(/);
+      assert.match(source, /commitVocalPitchCorrection\(/);
+      assert.match(source, /describeVocalCorrectionPlan\(/);
+      // "Preview Corrected" plays the ACTUAL rendered PCM.
+      assert.match(source, /vocalCorrectAudioBuffer\(/);
+      // The target is the SELECTED playlist clip, resolved (never a default).
+      assert.match(source, /resolveWarpTarget\(clips \?\? \[\], selectedClipId \?\? null\)/);
+      // The corrected clip publishes through the caller's history path.
+      assert.match(source, /onUpdateClip\(result\.clip\)/);
+      // A clip/settings change invalidates any previous analysis.
+      assert.match(source, /\}, \[selectedClipId, vocalTunerSettings, clips\]\);/);
+      // No automatic correction: the commit handler requires a prior analysis.
+      assert.match(source, /if \(!targetClip \|\| busy \|\| !analysis\) return;/);
+      // The persisted enabled flag never triggers processing.
+      assert.doesNotMatch(source, /vocalTunerSettings\.enabled[^)]*commit/i);
+    });
   });
 
   it('renders nothing while closed', () => {

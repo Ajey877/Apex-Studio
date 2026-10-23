@@ -126,7 +126,7 @@ export const TRANSPORT_TOOL_GROUPS: readonly TransportToolGroupSpec[] = [
       {
         id: 'fl-vocal-tuner-btn',
         label: 'Vocal tuner',
-        title: 'Vocal tuner settings (not applied to audio in this build)',
+        title: 'Vocal tuner — offline pitch correction (analyse & commit the selected audio clip); no live processing',
         icon: MicVocal,
         handler: 'vocalTuner',
       },
