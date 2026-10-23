@@ -522,7 +522,22 @@ export interface MasteringSuiteState {
   maximizerThreshold: number; // dB (-12 to 0)
   maximizerCeiling: number; // dB (-1.0 to 0.0)
   maximizerRelease: number; // ms (10 to 500)
+  /**
+   * Phase 9B legacy flag. Before 9B this selected a compressor attack (1 ms vs
+   * 5 ms) and produced no delay. It now selects the lookahead **mode** of the
+   * real true-peak limiter: `true` = the documented default lookahead (5 ms),
+   * `false` = direct (0 ms, causal detection). Migrated documents that carry
+   * only this flag keep exactly that meaning — see
+   * `resolveLimiterLookaheadMs()` in `src/audio/masteringLimiter.ts`.
+   */
   maximizerLookahead: boolean;
+  /**
+   * Phase 9B — limiter lookahead in milliseconds (0…20). When present it takes
+   * precedence over `maximizerLookahead`; when absent (pre-9B documents) the
+   * boolean above is the migration source. Persisted with the project so a
+   * chosen mode survives save/load.
+   */
+  maximizerLookaheadMs?: number;
   // Metering Targets
   lufsTarget: number; // -14 for Spotify / Youtube, -9 for Club / Beatport
 }

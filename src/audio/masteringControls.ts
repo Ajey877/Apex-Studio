@@ -53,6 +53,16 @@ export const MASTERING_CONTROL_RANGES = {
   bandKnee: { min: 0, max: 12, step: 0.5, unit: 'dB' },
   /** Maximizer release. Stored in ms, handed to the node in seconds. */
   maximizerRelease: { min: 20, max: 300, step: 5, unit: 'ms' },
+  /**
+   * Phase 9B — lookahead delay of the true-peak limiter, in ms.
+   *
+   * 0 means *direct* (causal: the limiter only reacts to peaks it has already
+   * seen). Every other value is a real delay buffer: the limiter inspects that
+   * many milliseconds of upcoming audio before it emits anything, so it can be
+   * fully ducked when a transient arrives. The same value is the master chain's
+   * added latency while mastering is enabled.
+   */
+  maximizerLookaheadMs: { min: 0, max: 20, step: 1, unit: 'ms' },
 } as const satisfies Record<string, MasteringControlRange>;
 
 export type MasteringControlId = keyof typeof MASTERING_CONTROL_RANGES;
@@ -96,6 +106,7 @@ export const MASTERING_CONTROL_TARGETS: readonly MasteringControlTarget[] = [
   'highCrossFreq',
   ...BAND_KEYS.flatMap((band) => BAND_FIELDS.map((field) => `${band}.${field}` as MasteringControlTarget)),
   'maximizerRelease',
+  'maximizerLookaheadMs',
 ];
 
 /**
@@ -142,6 +153,13 @@ export function applyMasteringControlChange(
 
   const parsed = parseMasteringControlTarget(target);
   if (parsed.kind === 'global') {
+    if (parsed.control === 'maximizerLookaheadMs') {
+      // The ms value *is* the mode; the legacy boolean is kept in sync so a
+      // project written here still means the same thing to an older reader
+      // (true = 5 ms lookahead, false = direct).
+      if (state.maximizerLookaheadMs === value && state.maximizerLookahead === value > 0) return state;
+      return { ...state, maximizerLookaheadMs: value, maximizerLookahead: value > 0 };
+    }
     const control = parsed.control as 'lowCrossFreq' | 'highCrossFreq' | 'maximizerRelease';
     if (state[control] === value) return state;
     return { ...state, [control]: value };
@@ -232,6 +250,7 @@ export function masteringControlLabel(target: MasteringControlTarget): string {
   if (parsed.kind === 'global') {
     if (parsed.control === 'lowCrossFreq') return 'Low Crossover';
     if (parsed.control === 'highCrossFreq') return 'High Crossover';
+    if (parsed.control === 'maximizerLookaheadMs') return 'Lookahead';
     return 'Release';
   }
   const field = parsed.field === 'attack' ? 'Attack' : parsed.field === 'release' ? 'Release' : 'Knee';

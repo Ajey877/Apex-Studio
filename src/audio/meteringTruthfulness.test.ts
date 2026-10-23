@@ -278,7 +278,20 @@ describe('Phase 45: mastering surface presents only measured values', () => {
     assert.doesNotMatch(MODAL_SOURCE, /Math\.random/, 'no random telemetry');
     assert.match(MODAL_SOURCE, /useState<MasterMeasurementSnapshot \| null>\(null\)/, 'measurement state must start empty');
     assert.match(MODAL_SOURCE, /audioEngine\.getMasterFrequencyData\(/, 'the spectrum must reuse the real analyser');
-    assert.doesNotMatch(MODAL_SOURCE, /ReductionDb/, 'no fabricated gain-reduction readouts');
+    // Phase 9B replaced the old blanket ban on gain-reduction text with real
+    // measurement: the limiter reports what it applied. The rule that survives
+    // is that no readout may be printed without a measurement behind it.
+    assert.doesNotMatch(MODAL_SOURCE, /reductionDb:\s*-?\d/, 'no hard-coded gain-reduction values');
+    assert.match(
+      MODAL_SOURCE,
+      /limiterStatus\?\.measured && limiterStatus\.reductionDb !== null/,
+      'gain reduction must be gated on a real measurement',
+    );
+    assert.match(
+      MODAL_SOURCE,
+      /: 'NOT MEASURED'\}/,
+      'the unmeasured branch must say NOT MEASURED',
+    );
   });
 
   it('drops the claims the code cannot support', () => {

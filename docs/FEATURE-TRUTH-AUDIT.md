@@ -210,6 +210,18 @@ in the UI renders `—` / `NOT MEASURED` when its value is null.
 ### 3.1 Mastering Suite — **PARTIAL**
 *(metering = REAL, processing = STATE-ONLY)*
 
+> **Current state (Phase 9B, 2026-10).** The table below is the historical audit and is
+> left as written. Processing is no longer state-only: `MasteringProcessor` runs in
+> both the live master graph and the offline render, and the master chain now ends in a
+> real lookahead true-peak limiter (`src/audio/masteringLimiter.ts`, `AudioWorklet`,
+> 5 ms default, 0–20 ms configurable, ceiling 0…−1 dBFS) with measured gain reduction.
+> The parameters are project-owned and persisted, and `maximizerLookahead` is
+> superseded by the persisted `maximizerLookaheadMs` (with migration). The remaining
+> gaps are: per-band gain reduction is still unmeasured, `lufsTarget` is still a
+> metering reference only, the detector is 4×/12-tap (not a mastering-grade ISP meter),
+> and the master chain's pre-existing group delay is not trimmed because it is shared
+> with live monitoring. See `docs/MASTERING-LIMITER.md` for the measured evidence.
+
 | | |
 |---|---|
 | **Files** | `src/components/MasteringSuiteModal.tsx` (996 lines), `src/audio/masterBus.ts`, `src/audio/mixerMasterGraph.ts`, `src/App.tsx:220` |
