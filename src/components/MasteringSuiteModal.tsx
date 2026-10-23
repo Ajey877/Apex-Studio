@@ -17,6 +17,7 @@ import {
 } from 'lucide-react';
 import { MasteringSuiteState, MultibandBandSettings, MasterMeasurementSnapshot } from '../types/daw';
 import { audioEngine } from '../audio/audioEngine';
+import type { MasteringLimiterStatus } from '../audio/masteringProcessor';
 import {
   MASTERING_CONTROL_RANGES,
   applyMasteringControlChange,
@@ -347,7 +348,7 @@ const MasteringBandCard = ({
       {/* Reduction Meter */}
       <div className="bg-[var(--apex-chrome-inset)] p-2 rounded border border-[var(--apex-border)] flex items-center justify-between text-[10px] font-mono">
         <span className="text-[var(--apex-text-2)]">{config.grLabel}</span>
-        <span className="text-[var(--apex-text-3)]">NOT MEASURED — compressor in path, no GR metering</span>
+        <span className="text-[var(--apex-text-3)]">NOT MEASURED — per-band GR has no metering (limiter GR is on the Maximizer tab)</span>
       </div>
     </div>
   );
@@ -428,6 +429,10 @@ export const MasteringSuiteModal: React.FC<MasteringSuiteModalProps> = ({
   // sample of audio existed.
   const [measurement, setMeasurement] = useState<MasterMeasurementSnapshot | null>(null);
   const measurementRef = useRef<MasterMeasurementSnapshot | null>(null);
+  // Phase 9B — the limiter's own state and measured gain reduction. `null` until
+  // the engine has reported anything, so the readout can say "not measured"
+  // instead of showing a fabricated 0 dB.
+  const [limiterStatus, setLimiterStatus] = useState<MasteringLimiterStatus | null>(null);
   const spectrumDataRef = useRef<Uint8Array | null>(null);
 
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -451,6 +456,7 @@ export const MasteringSuiteModal: React.FC<MasteringSuiteModalProps> = ({
       const next = audioEngine.getMasterLoudnessMetrics();
       measurementRef.current = next;
       setMeasurement(next);
+      setLimiterStatus(audioEngine.getMasteringLimiterStatus());
       drawMasterSpectrum();
       drawGoniometer();
       animId = requestAnimationFrame(update);
@@ -1121,28 +1127,79 @@ export const MasteringSuiteModal: React.FC<MasteringSuiteModalProps> = ({
                     onValue={(raw) => onUpdateMasteringState(applyMasteringControlChange(masteringState, 'maximizerRelease', raw))}
                   />
                   <p className="text-[10px] text-[var(--apex-text-3)] leading-tight">
-                    Recovery time of the maximizer compressor after a peak. Short values hold the ceiling tighter and
-                    can pump; long values breathe but let transients through. This is compressor release, not lookahead.
+                    Recovery time after a peak, used by both the maximizer compressor and the true-peak limiter.
+                    Short values hold the ceiling tighter and can pump; long values breathe but let transient
+                    energy through. Release is not lookahead — the lookahead delay is its own control below.
                   </p>
                 </div>
               </div>
 
-              <div className="bg-[var(--apex-surface-2)] border border-[var(--apex-border)] rounded-xl p-4 flex flex-col justify-between">
+              <div className="bg-[var(--apex-surface-2)] border border-[var(--apex-border)] rounded-xl p-4 flex flex-col gap-3">
                 <div>
-                  <span className="text-xs font-bold text-[var(--apex-text)]">INTER-SAMPLE PEAK MEASUREMENT</span>
+                  <span className="text-xs font-bold text-[var(--apex-text)]">LOOKAHEAD TRUE-PEAK LIMITER</span>
                   <p className="text-[11px] text-[var(--apex-text-2)] mt-1">
-                    The TRUE PEAK readout on the metering tab reconstructs the waveform at
-                    {measurement?.oversampleFactor ? ` ${measurement.oversampleFactor}x ` : ' '} oversampling and reports the measured
-                    inter-sample maximum. It measures only: nothing here limits, delays or protects the signal.
+                    A lookahead buffer inspects the upcoming signal, so the limiter is already ducked when a peak
+                    arrives. Inter-sample peaks are detected with a {limiterStatus?.oversample ?? 4}×
+                    oversampled reconstruction of the waveform, and reduction is measured on the audio thread.
                   </p>
                 </div>
-                <div className="bg-[var(--apex-chrome-inset)] p-2.5 rounded border border-[var(--apex-border)] flex flex-col gap-1 text-xs font-mono">
-                  <div className="flex items-center justify-between">
-                    <span className="text-[var(--apex-text-2)]">Lookahead / Latency</span>
-                    <span className="text-[var(--apex-text-3)] font-bold">No delay — attack 1 ms on / 5 ms off</span>
+
+                <MasteringControlSlider
+                  controlId="maximizerLookaheadMs"
+                  label="Lookahead"
+                  value={masteringState.maximizerLookaheadMs ?? 5}
+                  range={MASTERING_CONTROL_RANGES.maximizerLookaheadMs}
+                  accentColor="var(--apex-accent)"
+                  formatValue={(v) => (v === 0 ? '0 ms (direct)' : `${v} ms`)}
+                  onValue={(raw) => onUpdateMasteringState(applyMasteringControlChange(masteringState, 'maximizerLookaheadMs', raw))}
+                />
+
+                <div className="bg-[var(--apex-chrome-inset)] p-2.5 rounded border border-[var(--apex-border)] flex flex-col gap-1 text-[11px] font-mono">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-[var(--apex-text-2)]">Limiter</span>
+                    <span className={`font-bold ${limiterStatus?.active ? 'text-[var(--apex-success)]' : 'text-[var(--apex-text-3)]'}`}>
+                      {!limiterStatus
+                        ? 'WAITING FOR ENGINE'
+                        : limiterStatus.active
+                          ? 'ACTIVE — LOOKAHEAD LIMITER'
+                          : limiterStatus.available
+                            ? 'BYPASSED (DRY SIGNAL)'
+                            : 'FALLBACK — HARD PEAK GUARD'}
+                    </span>
                   </div>
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-[var(--apex-text-2)]">Delay</span>
+                    <span className="text-[var(--apex-text)] font-bold">
+                      {!limiterStatus
+                        ? '—'
+                        : limiterStatus.available
+                          ? limiterStatus.lookaheadMs === 0
+                            ? '0 ms — direct (no lookahead)'
+                            : `${limiterStatus.lookaheadMs} ms — ${limiterStatus.latencySamples} samples`
+                          : '0 ms — no delay buffer'}
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-[var(--apex-text-2)]">Gain reduction (measured)</span>
+                    <span className="text-[var(--apex-text)] font-bold">
+                      {limiterStatus?.measured && limiterStatus.reductionDb !== null
+                        ? `${limiterStatus.reductionDb.toFixed(1)} dB${limiterStatus.peakReductionDb !== null && limiterStatus.peakReductionDb > limiterStatus.reductionDb + 0.05 ? ` (peak ${limiterStatus.peakReductionDb.toFixed(1)} dB)` : ''}`
+                        : 'NOT MEASURED'}
+                    </span>
+                  </div>
+                  {(masteringState.maximizerLookaheadMs ?? 5) === 0 && (
+                    <p className="text-[10px] text-[var(--apex-gold)] leading-tight">
+                      Direct mode caps every emitted sample at the ceiling, but it cannot see a peak before it
+                      arrives: abrupt transients can overshoot the ceiling in the reconstructed waveform by up to
+                      about 1 dB. Choose a lookahead above 0 ms to hold the inter-sample ceiling too.
+                    </p>
+                  )}
                   <p className="text-[10px] text-[var(--apex-text-3)] leading-tight">
-                    Maximizer is DynamicsCompressor (ratio 20) + 4× oversampled WaveShaper hard clip — no true-peak lookahead buffer.
+                    {limiterStatus && !limiterStatus.available
+                      ? limiterStatus.fallbackReason === 'module-load-failed'
+                        ? 'The limiter AudioWorklet module could not be loaded in this context, so the chain runs its documented fallback: the maximizer compressor plus a 4× oversampled hard peak guard at the ceiling. That guard looks at sample peaks only and adds no delay — it is not a true-peak limiter.'
+                        : 'This context has no AudioWorklet support, so the chain runs its documented fallback: the maximizer compressor plus a 4× oversampled hard peak guard at the ceiling. That guard looks at sample peaks only and adds no delay — it is not a true-peak limiter.'
+                      : 'Delay values are the master chain latency the lookahead buffer adds; exports trim exactly that amount so a render is not shifted. Gain reduction is the dB the limiter applied in the last reporting window, measured from the audio thread — not an estimate.'}
                   </p>
                 </div>
               </div>

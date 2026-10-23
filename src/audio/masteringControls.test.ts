@@ -9,6 +9,7 @@ import {
   formatFrequencyHz,
   getMasteringControlRange,
   isBandAudible,
+  masteringControlLabel,
   parseMasteringControlTarget,
   resolveCrossoverFrequencies,
   toggleBandMute,
@@ -99,11 +100,12 @@ describe('Phase 90 — control ranges agree with state normalization', () => {
     lowCrossFreq: MASTERING_NORMALIZATION_BOUNDS.lowCrossFreq,
     highCrossFreq: MASTERING_NORMALIZATION_BOUNDS.highCrossFreq,
     maximizerRelease: MASTERING_NORMALIZATION_BOUNDS.maximizerRelease,
+    maximizerLookaheadMs: MASTERING_NORMALIZATION_BOUNDS.maximizerLookaheadMs,
   } as const;
 
   it('offers no slider range wider than the document format accepts', () => {
     for (const [control, range] of Object.entries(MASTERING_CONTROL_RANGES)) {
-      const bound = control === 'lowCrossFreq' || control === 'highCrossFreq' || control === 'maximizerRelease'
+      const bound = control === 'lowCrossFreq' || control === 'highCrossFreq' || control === 'maximizerRelease' || control === 'maximizerLookaheadMs'
         ? GLOBAL_TO_BOUND[control as keyof typeof GLOBAL_TO_BOUND]
         : MASTERING_NORMALIZATION_BOUNDS.band[control.replace('band', '').toLowerCase() as 'attack' | 'release' | 'knee'];
       assert.ok(
@@ -123,6 +125,7 @@ describe('Phase 90 — control ranges agree with state normalization', () => {
       ['lowCrossFreq', s.lowCrossFreq],
       ['highCrossFreq', s.highCrossFreq],
       ['maximizerRelease', s.maximizerRelease],
+      ['maximizerLookaheadMs', s.maximizerLookaheadMs ?? 5],
     ];
     for (const band of ['lowBand', 'midBand', 'highBand'] as const) {
       cases.push([`${band}.attack`, s[band].attack]);
@@ -144,6 +147,7 @@ describe('Phase 90 — control ranges agree with state normalization', () => {
       'highCrossFreq',
       'lowBand.attack', 'lowBand.knee', 'lowBand.release',
       'lowCrossFreq',
+      'maximizerLookaheadMs',
       'maximizerRelease',
       'midBand.attack', 'midBand.knee', 'midBand.release',
     ].sort());
@@ -173,6 +177,8 @@ describe('Phase 90 — control ranges agree with state normalization', () => {
     assert.equal(getMasteringControlRange('midBand.release').unit, 'ms');
     assert.equal(getMasteringControlRange('highBand.knee').unit, 'dB');
     assert.equal(getMasteringControlRange('maximizerRelease').unit, 'ms');
+    assert.equal(getMasteringControlRange('maximizerLookaheadMs').unit, 'ms');
+    assert.equal(masteringControlLabel('maximizerLookaheadMs'), 'Lookahead');
   });
 });
 

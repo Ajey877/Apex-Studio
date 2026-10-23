@@ -339,18 +339,29 @@ What is in the signal path:
 - **3-band multiband compressor** — low/mid/high crossovers (low 80–500 Hz, high 1.8–16 kHz),
   and per band: threshold, ratio, makeup gain, attack, release, knee, solo and mute.
 - **Stereo imager** — width multiplier plus a sub-bass mono collapse below a set frequency.
-- **Maximizer** — threshold (drive), release, and a brickwall ceiling.
+- **Maximizer** — threshold (drive) and release into a 20:1 compressor (fixed 3 ms attack).
+- **Lookahead true-peak limiter** — an `AudioWorklet` that examines the upcoming
+  5 ms (configurable 0–20 ms) of audio, detects inter-sample peaks with a 4×
+  oversampled reconstruction of the waveform, and holds `maximizerCeiling`. Its gain
+  reduction is measured on the audio thread and shown in the suite. See
+  [`docs/MASTERING-LIMITER.md`](docs/MASTERING-LIMITER.md).
 
 Known limitations, stated here and in the suite's own UI:
 
-- The maximizer is a fast-attack compressor followed by a 4× oversampled hard clip. It is
-  **not** a true-peak lookahead limiter: there is no delay buffer, and the "lookahead"
-  setting only switches the compressor attack between 1 ms and 5 ms.
+- The limiter adds its lookahead as latency while the suite is enabled (5 ms by
+  default). Exports trim exactly that amount, so a render is not shifted; live playback
+  is delayed by it, which is what lookahead means. If the platform has no `AudioWorklet`
+  (or the module fails to load) the chain says so and falls back to the older
+  4× oversampled hard peak guard, which is **sample-peak only and not a true-peak
+  limiter**.
+- The limiter's detector is a 4×/12-tap interpolator and applies gain at the base rate;
+  it is a real limiter, not a mastering-grade oversampled ISP limiter. No listening test
+  backs any claim about how it sounds.
 - The **LUFS target is a metering reference only**. It is displayed next to the measured
   integrated loudness; it does not apply automatic gain.
-- Loudness, true-peak and stereo metering measure the master bus, but there is **no
-  gain-reduction metering** — the per-band GR readouts say `NOT MEASURED` because nothing
-  measures them yet.
+- Loudness, true-peak and stereo metering measure the master bus. The limiter's gain
+  reduction is measured; the **per-band** GR readouts still say `NOT MEASURED` because
+  nothing measures them yet.
 - The crossover splits are 12 dB/octave biquads summed after their compressors, not a
   unity-sum alignment, so bands overlap at the crossover points.
 

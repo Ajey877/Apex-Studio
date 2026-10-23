@@ -114,6 +114,18 @@ test('real-time AudioContext capture versus production offline export', async ({
       // The production transport exposes its audio-clock origin in this test
       // fixture; this is the actual scheduled t=0, after graph setup time.
       const transportOriginFrame = Math.round(e.transport.clockOrigin * sr);
+      // Phase 9B: the master chain ends in a lookahead limiter. Live monitoring
+      // carries its lookahead delay (that is what a lookahead buffer *is*),
+      // while the offline render trims exactly that many frames so an export
+      // stays on the project timeline and its duration is unchanged. The live
+      // capture is therefore exactly `latencySamples` behind the export; the
+      // alignment below compensates that engine-reported, documented delay
+      // instead of loosening the tolerance.
+      // A pre-master capture is tapped *before* the mastering stage, so it never
+      // carries the limiter's delay.
+      const limiterLatencyFrames = outputStage === 'pre-master'
+        ? 0
+        : e.getMasteringLimiterStatus().latencySamples;
       const realtimeStart = liveCtx.currentTime;
       while (liveCtx.currentTime < realtimeStart + requestedDuration + 0.35) {
         await new Promise(resolve => setTimeout(resolve, 20));
@@ -162,9 +174,9 @@ test('real-time AudioContext capture versus production offline export', async ({
       // Align against the transport's actual AudioContext clock origin, then
       // permit only ±4 ms for sample/block boundary uncertainty. This is much
       // smaller than the 500 ms note spacing and cannot hide a missing event.
-      const expectedOffset = transportOriginFrame - playFrame;
+      const expectedOffset = transportOriginFrame - playFrame + limiterLatencyFrames;
       const liveStartOffsetFrames = expectedOffset;
-      const search = Math.round(0.004 * sr);
+      const search = Math.round(0.004 * sr) + limiterLatencyFrames;
       const scoreLength = Math.min(Math.round(0.8 * sr), exportL.length, livePlayback.length - expectedOffset - search);
       let bestOffset = expectedOffset;
       let bestScore = -Infinity;
@@ -199,7 +211,7 @@ test('real-time AudioContext capture versus production offline export', async ({
       const eventWindows = (project.events ?? []).map(note => {
         const start = Math.round(note.start * (60 / bpm / 4) * sr);
         const end = Math.min(exportL.length, start + Math.round(0.1 * sr));
-        const eventSearch = Math.round(0.005 * sr);
+        const eventSearch = Math.round(0.005 * sr) + limiterLatencyFrames;
         let eventLag = 0, eventCorr = -Infinity;
         for (let lag = -eventSearch; lag <= eventSearch; lag += 8) {
           let dot = 0, aa = 0, bb = 0;
@@ -209,6 +221,31 @@ test('real-time AudioContext capture versus production offline export', async ({
           }
           const corr = dot / Math.sqrt(Math.max(1e-30, aa * bb));
           if (corr > eventCorr) { eventCorr = corr; eventLag = lag; }
+        }
+        // Raw-sample correlation at an onset is dominated by the shape of the
+        // attack: the lookahead limiter reshapes it, so the peak correlation can
+        // land a few ms away even when the event itself is in the right place.
+        // The 1 ms energy envelope is insensitive to that shape and pins the
+        // event timing far more tightly, so timing is asserted on the envelope
+        // and the waveform correlation is reported for diagnosis.
+        const hop = Math.max(1, Math.round(0.001 * sr));
+        let envelopeLag = 0, envelopeScore = -Infinity;
+        for (let lag = -eventSearch; lag <= eventSearch; lag += hop) {
+          let dotE = 0, aaE = 0, bbE = 0;
+          for (let i = start; i + hop <= end; i += hop) {
+            let ea = 0, eb = 0;
+            for (let k = 0; k < hop; k += 1) {
+              const a = exportL[i + k];
+              const b = livePlayback[bestOffset + i + k + lag] ?? 0;
+              ea += a * a;
+              eb += b * b;
+            }
+            ea = Math.sqrt(ea / hop);
+            eb = Math.sqrt(eb / hop);
+            dotE += ea * eb; aaE += ea * ea; bbE += eb * eb;
+          }
+          const score = dotE / Math.sqrt(Math.max(1e-30, aaE * bbE));
+          if (score > envelopeScore) { envelopeScore = score; envelopeLag = lag; }
         }
         let exp = 0, live = 0, dot = 0, diffSq = 0, windowMax = 0;
         for (let i = start; i < end; i += 1) {
@@ -223,6 +260,8 @@ test('real-time AudioContext capture versus production offline export', async ({
           step: note.start, exportRms: Math.sqrt(exp / Math.max(1, end - start)),
           liveRms: Math.sqrt(live / Math.max(1, end - start)),
           eventLagMs: eventLag * 1000 / sr,
+          envelopeLagMs: envelopeLag * 1000 / sr,
+          envelopeScore,
           corr: dot / Math.sqrt(Math.max(1e-30, exp * live)),
           relativeRmsError: Math.sqrt(diffSq / Math.max(1, end - start)) / Math.max(1e-12, Math.sqrt(exp / Math.max(1, end - start))),
           maxAbsDifference: windowMax,
@@ -290,6 +329,10 @@ test('real-time AudioContext capture versus production offline export', async ({
         exportFrames: exported.length, exportDuration: exported.duration,
         liveFrames: livePlayback.length, alignedSamples: count,
         liveStartOffsetFrames, alignOffsetFrames: bestOffset,
+        limiterLatencyFrames, limiterLatencyMs: limiterLatencyFrames * 1000 / sr,
+        // What the scenario actually configured, rather than a guess from its name.
+        masteringEnabled: !!masteringState.enabled,
+        outputStage,
         residualFromExpectedMs: (bestOffset - expectedOffset) * 1000 / sr,
         normalizedCorrelation: bestScore,
         livePeak: peak(livePlayback), exportPeak: peak(exportL),
@@ -391,10 +434,29 @@ test('real-time AudioContext capture versus production offline export', async ({
     expect(result.livePeak).toBeLessThanOrEqual(1);
     expect(result.exportPeak).toBeLessThanOrEqual(1);
     expect(result.eventWindows).toHaveLength(result.eventCount);
-    expect(result.eventWindows.every(window => Math.abs(window.eventLagMs) <= 5)).toBe(true);
+    // The documented lookahead latency is compensated in `bestOffset` (asserted
+    // against the engine-reported value through `residualFromExpectedMs`), so
+    // each event must land where the compensated alignment puts it. Timing is
+    // measured on the 1 ms energy envelope, which a limiter's attack shaping
+    // cannot move. The band is the same 5 ms this check always used, but it now
+    // runs on a measurement that is not dominated by transient shape.
+    expect(result.eventWindows.every(window => Math.abs(window.envelopeLagMs) <= 5)).toBe(true);
+    expect(result.eventWindows.every(window => window.envelopeScore > 0.9)).toBe(true);
     const expectedEventCount = result.name === 'audio-clip+master-bypass' ? 1 : 4;
     expect(result.eventWindows.length).toBe(expectedEventCount);
     expect(result.eventWindows.every(window => window.exportRms > 1e-3 && window.liveRms > 1e-3)).toBe(true);
+  }
+  // The compensated delay is the documented lookahead, and it is zero when the
+  // suite is bypassed: live playback is not silently shifted.
+  for (const result of results.scenarios) {
+    const masteringActive = result.masteringEnabled && result.outputStage === 'master';
+    if (masteringActive) {
+      expect(result.limiterLatencyFrames, `${result.name}: mastering chain must report its lookahead`).toBeGreaterThan(0);
+      expect(result.limiterLatencyMs, `${result.name}: lookahead must stay within the documented maximum`).toBeLessThanOrEqual(20);
+    } else {
+      // Bypassed / pre-master paths are not delayed, so nothing is compensated.
+      expect(result.limiterLatencyFrames, `${result.name}: a path without the master limiter must not claim a delay`).toBe(0);
+    }
   }
   // Confirm the tested FX/mastering settings change live output rather than
   // allowing two silent or identical branches to satisfy parity checks.

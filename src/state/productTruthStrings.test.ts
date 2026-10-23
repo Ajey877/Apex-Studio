@@ -158,10 +158,13 @@ describe('Phase 52 — README matches the implementation', () => {
       'the README must not keep the stale claim that mastering processors are not applied'
     );
     // The corrected description still has to name the real limitations rather
-    // than trading one overclaim for another.
-    assert.match(readme, /not\*\* a true-peak lookahead limiter|not a true-peak lookahead limiter/i);
+    // than trading one overclaim for another. Phase 9B changed *which*
+    // limitations those are: the limiter is real now, but the fallback, the
+    // detector's resolution and the unmeasured parts must all still be stated.
+    assert.match(readme, /Lookahead true-peak limiter/i, 'the limiter must be described');
+    assert.match(readme, /sample-peak only and not a true-peak\s+limiter/i, 'the fallback must not be called a limiter');
     assert.match(readme, /metering reference only/i);
-    assert.match(readme, /no\s+gain-reduction metering/i);
+    assert.match(readme, /per-band\*\* GR readouts still say `NOT MEASURED`/i, 'per-band GR must stay marked unmeasured');
     // And it must describe the controls the suite really exposes.
     assert.match(readme, /attack, release, knee, solo and mute/i);
   });
@@ -228,10 +231,13 @@ describe('Phase 52 — truthful not-applied states', () => {
     const reductionMeter = source.match(/\{\/\* Reduction Meter \*\/\}([\s\S]*?)\n      <\/div>\n    <\/div>/)?.[1];
     assert.ok(reductionMeter, 'each band must render the dedicated reduction-meter block');
     assert.match(reductionMeter, /<span[^>]*>\{config\.grLabel\}<\/span>/);
+    // Phase 9B measures the *limiter's* gain reduction, not the per-band
+    // compressors'. The band rows therefore keep an explicit unavailable state
+    // instead of borrowing the limiter's number.
     assert.match(
       reductionMeter,
-      /<span[^>]*>NOT MEASURED — compressor in path, no GR metering<\/span>/,
-      'the GR label must remain paired with an explicit unavailable state until real measurement exists'
+      /<span[^>]*>NOT MEASURED — per-band GR has no metering[^<]*<\/span>/,
+      'the per-band GR label must remain paired with an explicit unavailable state'
     );
     for (const band of ['Low', 'Mid', 'High']) {
       assert.ok(source.includes("grLabel: 'GR (" + band + ")'"), 'the ' + band.toLowerCase() + ' band label must remain identified as a GR meter');

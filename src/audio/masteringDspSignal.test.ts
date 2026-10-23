@@ -1,4 +1,5 @@
 import { describe, it } from 'node:test';
+import { readFileSync } from 'node:fs';
 import assert from 'node:assert/strict';
 import * as Engine from 'web-audio-engine';
 import { MasteringProcessor } from './masteringProcessor';
@@ -281,22 +282,54 @@ describe('Phase 89 — mastering DSP signal verification (REAL OfflineAudioConte
     assert.ok(energy < 1e-12, `energy ${energy}`);
   });
 
-  it('maximizerLookahead is not a true delay — attack 1ms vs 5ms only, no added latency', async () => {
-    // Verify source truth: processor sets attack 0.001 vs 0.005, but no DelayNode in graph
-    const procSource = await import('./masteringProcessor').then(m => m.MasteringProcessor.toString());
-    // The processor should not contain DelayNode or delay
-    assert.ok(!/DelayNode|createDelay/.test(procSource), 'no DelayNode for lookahead');
-    // Attack difference is visible in rendered transient but not a delay
-    const stateOff: MasteringSuiteState = { ...DEFAULT_MASTERING_SUITE_STATE, enabled: true, maximizerLookahead: false, maximizerThreshold: -12 };
-    const stateOn: MasteringSuiteState = { ...stateOff, maximizerLookahead: true };
-    // Use a transient: short burst at start
+  it('lookahead is the limiter delay, and a context without AudioWorklet admits it has none', async () => {
+    // This harness has no AudioWorklet, so `MasteringProcessor` runs its
+    // documented fallback: the maximizer compressor followed by the legacy 4x
+    // oversampled hard peak guard at the ceiling. The lookahead setting is then
+    // reported as unavailable instead of pretending a delay buffer exists, and
+    // — because the fallback has no delay line — it cannot shift the signal.
+    const ctx = new RealOffline(2, 4800, 48000);
+    const state: MasteringSuiteState = {
+      ...DEFAULT_MASTERING_SUITE_STATE,
+      enabled: true,
+      maximizerLookahead: true,
+      maximizerLookaheadMs: 20,
+    };
+    const processor = new MasteringProcessor(ctx as unknown as AudioContext, state);
+    const ready = await processor.loadLimiterModule();
+    processor.installLimiter(ready);
+    const status = processor.getLimiterStatus();
+    assert.equal(ready, false, 'the fallback harness cannot load an AudioWorklet module');
+    assert.equal(status.available, false, 'no limiter claim without a worklet');
+    assert.equal(status.active, false, 'the fallback is not reported as an active limiter');
+    assert.equal(status.fallbackReason, 'worklet-unavailable');
+    assert.equal(status.lookaheadMs, 20, 'the requested lookahead is still reported');
+    assert.equal(status.latencySamples, 0, 'and the fallback honestly reports no delay');
+    assert.equal(processor.getLimiterLatencySeconds(), 0);
+    processor.dispose();
+
+    // The old 1 ms / 5 ms compressor-attack mapping is gone: the maximizer's
+    // attack is a fixed 3 ms and the lookahead selector no longer reaches it.
+    // (Read the file text: the transpiler rewrites numeric literals.)
+    const procSource = readFileSync(new URL('./masteringProcessor.ts', import.meta.url), 'utf8');
+    assert.ok(
+      /this\.maximizer\.attack\.setValueAtTime\(0\.003/.test(procSource),
+      'fixed 3 ms maximizer attack',
+    );
+    // Every attack assignment in the processor is the fixed 3 ms one — the
+    // legacy 1 ms branch must not survive anywhere.
+    const attackLines = procSource.split('\n').filter(line => /\.attack\.setValueAtTime|attackTime|attack:/.test(line));
+    assert.ok(attackLines.length > 0, 'the maximizer attack is still configured');
+    for (const line of attackLines) {
+      assert.ok(!/0\.001|maximizerLookahead/.test(line), `legacy attack mapping still present: ${line.trim()}`);
+    }
+
+    // Changing the lookahead in the fallback changes nothing audible.
+    const stateOff: MasteringSuiteState = { ...state, maximizerLookahead: false, maximizerLookaheadMs: 0, maximizerThreshold: -12 };
+    const stateOn: MasteringSuiteState = { ...stateOff, maximizerLookahead: true, maximizerLookaheadMs: 20 };
     const outOff = await renderWithMastering(stateOff, { freq: 2000, gain: 1.0, duration: 0.1 });
     const outOn = await renderWithMastering(stateOn, { freq: 2000, gain: 1.0, duration: 0.1 });
-    // They should differ slightly due to attack time, but not be delayed (first samples should still be near zero both)
-    const diff = maxDiff(outOff.getChannelData(0).slice(0, 100), outOn.getChannelData(0).slice(0, 100));
-    // Not testing exact value, just that there is a measurable difference but both start silent
-    assert.ok(outOff.getChannelData(0)[0] === 0 || Math.abs(outOff.getChannelData(0)[0]) < 1e-6, 'no initial delay');
-    assert.ok(diff >= 0, 'attack change yields some difference or at least runs');
+    assert.equal(maxDiff(outOff.getChannelData(0), outOn.getChannelData(0)), 0, 'fallback lookahead must not add a delay it does not have');
   });
 
   it('parameter changes between renders affect output deterministically', async () => {

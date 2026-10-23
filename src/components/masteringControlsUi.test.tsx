@@ -76,7 +76,7 @@ describe('Phase 90 — every exposed mastering control renders with its real ran
   const maximizer = controlsIn(render(CUSTOM_STATE, 'maximizer'));
   const all = new Map([...multiband, ...maximizer]);
 
-  it('renders all twelve Phase 90 controls', () => {
+  it('renders every exposed control (Phase 90 set + the Phase 9B lookahead)', () => {
     for (const target of MASTERING_CONTROL_TARGETS) {
       assert.ok(all.has(target), `no control rendered for ${target}`);
       assert.equal(all.get(target)?.type, 'range', `${target} must be a range input`);
@@ -90,7 +90,7 @@ describe('Phase 90 — every exposed mastering control renders with its real ran
 
   it('advertises min/max/step from MASTERING_CONTROL_RANGES, never its own numbers', () => {
     for (const target of MASTERING_CONTROL_TARGETS) {
-      const range = (target === 'lowCrossFreq' || target === 'highCrossFreq' || target === 'maximizerRelease'
+      const range = (target === 'lowCrossFreq' || target === 'highCrossFreq' || target === 'maximizerRelease' || target === 'maximizerLookaheadMs'
         ? MASTERING_CONTROL_RANGES[target]
         : MASTERING_CONTROL_RANGES[
             target.endsWith('.attack') ? 'bandAttack' : target.endsWith('.release') ? 'bandRelease' : 'bandKnee'
@@ -107,6 +107,7 @@ describe('Phase 90 — every exposed mastering control renders with its real ran
       lowCrossFreq: CUSTOM_STATE.lowCrossFreq,
       highCrossFreq: CUSTOM_STATE.highCrossFreq,
       maximizerRelease: CUSTOM_STATE.maximizerRelease,
+      maximizerLookaheadMs: CUSTOM_STATE.maximizerLookaheadMs ?? 5,
       'lowBand.attack': CUSTOM_STATE.lowBand.attack,
       'lowBand.release': CUSTOM_STATE.lowBand.release,
       'lowBand.knee': CUSTOM_STATE.lowBand.knee,
@@ -191,9 +192,38 @@ describe('Phase 90 — the maximizer tab exposes release without overclaiming', 
     assert.ok(markup.includes('True Peak Ceiling'));
   });
 
-  it('keeps the honest lookahead disclosure intact', () => {
-    assert.ok(markup.includes('No delay — attack 1 ms on / 5 ms off'), 'the lookahead limitation must stay disclosed');
-    assert.ok(markup.includes('no true-peak lookahead buffer'));
-    assert.ok(markup.includes('This is compressor release, not lookahead'), 'the new control must not read as a lookahead limiter');
+  it('states the real lookahead delay and the measured gain reduction', () => {
+    // The old copy claimed "No delay — attack 1 ms on / 5 ms off" and "no
+    // true-peak lookahead buffer"; both were true of the pre-Phase 9B chain and
+    // are false now, so they must be gone rather than kept as folklore.
+    assert.ok(!markup.includes('No delay — attack 1 ms on / 5 ms off'));
+    assert.ok(!markup.includes('no true-peak lookahead buffer'));
+    assert.ok(!markup.includes('This is compressor release, not lookahead'));
+    assert.ok(markup.includes('LOOKAHEAD TRUE-PEAK LIMITER'));
+    assert.ok(markup.includes('Lookahead'));
+    assert.ok(markup.includes('inter-sample'));
+  });
+
+  it('renders the lookahead control with the range the state layer honours', () => {
+    const value = CUSTOM_STATE.maximizerLookaheadMs ?? 5;
+    const control = controlsIn(markup).get('maximizerLookaheadMs')!;
+    assert.equal(Number(control.min), 0, '0 ms is the documented direct mode');
+    assert.equal(Number(control.max), 20);
+    assert.equal(Number(control.value), value);
+  });
+
+  it('reports gain reduction honestly before anything has been measured', () => {
+    // Nothing has been rendered through the engine in this static render, so the
+    // panel must say so instead of printing a confident 0.0 dB.
+    assert.ok(markup.includes('NOT MEASURED'), 'unmeasured GR must be labelled');
+    assert.ok(markup.includes('WAITING FOR ENGINE'), 'the limiter state must not be assumed');
+  });
+
+  it('keeps per-band gain reduction marked as unmeasured', () => {
+    const bands = render(CUSTOM_STATE, 'multiband');
+    assert.ok(
+      /NOT MEASURED — per-band GR has no metering/.test(bands),
+      'per-band GR is still not metered and must not borrow the limiter reading',
+    );
   });
 });

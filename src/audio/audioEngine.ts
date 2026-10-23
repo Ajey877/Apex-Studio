@@ -34,7 +34,8 @@ import { TruePeakMeter } from './truePeak';
 import { StereoFieldMeter, computeMidSideVectors } from './stereoMeasurement';
 import { createMeasurementWindowPlanner, MeasurementWindowPlanner } from './masterMeasurementStream';
 import { DEFAULT_MASTERING_SUITE_STATE, normalizeMasteringSuiteState } from './masteringState';
-import { MasteringProcessor } from './masteringProcessor';
+import { MasteringProcessor, type MasteringLimiterStatus } from './masteringProcessor';
+import { resolveLimiterLatencySamples } from './masteringLimiter';
 import type { AudioLatencyMetrics, MasterMeasurementSnapshot } from '../types/daw';
 import { ChorusEffect } from './effects/ChorusEffect';
 import { WetDryEffect } from './effects/WetDryEffect';
@@ -128,15 +129,21 @@ const OFFLINE_TAIL_TRIM_MARGIN_FRAMES = 512;
  */
 const resolveOfflineTailFrameCount = (
   renderedBuffer: AudioBuffer,
-  prerollFrameCount: number,
+  /**
+   * First frame of project content in the rendered buffer. Before Phase 9B this
+   * was exactly the mastering preroll; it is now the preroll **plus the real
+   * limiter latency**, so the scan measures the exported timeline rather than
+   * the delay the limiter added to it.
+   */
+  contentStartFrame: number,
   songFrameCount: number,
   tailFrameCount: number,
 ): number => {
-  const contentEndFrame = prerollFrameCount + songFrameCount + tailFrameCount;
+  const contentEndFrame = contentStartFrame + songFrameCount + tailFrameCount;
   let lastAudibleFrame = -1;
   for (let channelIndex = 0; channelIndex < renderedBuffer.numberOfChannels; channelIndex += 1) {
     const data = renderedBuffer.getChannelData(channelIndex);
-    for (let frame = contentEndFrame - 1; frame >= prerollFrameCount; frame -= 1) {
+    for (let frame = contentEndFrame - 1; frame >= contentStartFrame; frame -= 1) {
       if (Math.abs(data[frame]) > OFFLINE_TAIL_SILENCE_THRESHOLD) {
         if (frame > lastAudibleFrame) lastAudibleFrame = frame;
         break;
@@ -144,7 +151,7 @@ const resolveOfflineTailFrameCount = (
     }
   }
   if (lastAudibleFrame < 0) return songFrameCount;
-  const audibleContentFrames = lastAudibleFrame - prerollFrameCount + 1;
+  const audibleContentFrames = lastAudibleFrame - contentStartFrame + 1;
   return Math.min(
     songFrameCount + tailFrameCount,
     Math.max(songFrameCount, audibleContentFrames + OFFLINE_TAIL_TRIM_MARGIN_FRAMES),
@@ -903,6 +910,11 @@ class AudioEngine {
     }
     this.masterAnalyser.connect(this.ctx.destination);
     this.createMasterMeasurementTap(this.ctx);
+
+    // Phase 9B: load the lookahead limiter into this context. Asynchronous (an
+    // AudioWorklet module), so the first few milliseconds of a take run through
+    // the documented fallback; the limiter is spliced in as soon as it is ready.
+    if (this.masteringProcessor) void this.prepareMasteringLimiter(this.masteringProcessor);
 
     // Build default reverb impulse response
     this.buildReverbImpulse(2.5, 2.0);
@@ -3702,10 +3714,18 @@ class AudioEngine {
       const offlineSupportsMasteringDsp = [
         'createChannelSplitter', 'createChannelMerger', 'createDynamicsCompressor', 'createWaveShaper',
       ].every(method => typeof offlineContextPrototype?.[method] === 'function');
-      const masteringPrerollSeconds = outputStage === 'master' && this.masteringState.enabled && offlineSupportsMasteringDsp
-        ? OFFLINE_MASTERING_PREROLL_SECONDS
-        : 0;
+      const offlineMasteringStageActive = outputStage === 'master' && this.masteringState.enabled && offlineSupportsMasteringDsp;
+      const masteringPrerollSeconds = offlineMasteringStageActive ? OFFLINE_MASTERING_PREROLL_SECONDS : 0;
       const prerollFrameCount = Math.ceil(renderSampleRate * masteringPrerollSeconds);
+      // Phase 9B: the lookahead limiter delays the master by its lookahead, so
+      // the render reserves that many frames past the song window (flushing the
+      // delay line's tail) and trims them from the front after rendering. The
+      // reservation is computed from the configured mode; the *actual* installed
+      // latency is re-read after the worklet loads, so a fallback render trims
+      // only what it really delayed.
+      const reservedLimiterFrames = offlineMasteringStageActive
+        ? resolveLimiterLatencySamples(this.masteringState, renderSampleRate)
+        : 0;
       // Phase 6C: the Song-master export tail (see OFFLINE_RENDER_TAIL_SECONDS).
       // Gated off for Pattern-scope renders (loop material must stay exactly
       // bar-aligned), pre-master renders (bounce crops its own PCM window) and
@@ -3725,7 +3745,7 @@ class AudioEngine {
       const tailFrameCount = Math.ceil(renderSampleRate * tailExtensionSeconds);
       const offlineCtx = new OfflineContextClass(
         2,
-        outputFrameCount + prerollFrameCount + tailFrameCount,
+        outputFrameCount + prerollFrameCount + reservedLimiterFrames + tailFrameCount,
         renderSampleRate,
       );
       this.isOfflineRendering = true;
@@ -3844,6 +3864,12 @@ class AudioEngine {
           for (const track of renderTracks) if (track.id !== 0) this.updateMixerTrack(track);
           this.syncMixerRouting(renderTracks);
         });
+        // Phase 9B: the limiter must be in the graph before `startRendering()`,
+        // and its real latency drives the export alignment below.
+        if (offlineMasteringStageActive) await this.prepareMasteringLimiter(this.masteringProcessor);
+        const limiterLatencyFrames = this.masteringProcessor
+          ? Math.min(reservedLimiterFrames, this.masteringProcessor.getLimiterLatencySamples())
+          : 0;
         // Phase 9A: load/attach the detector module in this render's own
         // context BEFORE any step is scheduled, so a level-detected sidechain
         // is part of the graph `startRendering()` captures. Without this the
@@ -3886,20 +3912,35 @@ class AudioEngine {
         onProgress?.(70, `Rendering offline audio (${totalDurationSeconds.toFixed(2)}s)...`);
         const renderedBuffer = await offlineCtx.startRendering();
         let outputBuffer = renderedBuffer;
-        // Rendered content past the mastering preroll: the song window plus,
-        // for Song-master exports, the bounded tail region (Phase 6C).
+        // Rendered content past the mastering preroll AND the limiter's
+        // lookahead: the song window plus, for Song-master exports, the bounded
+        // tail region (Phase 6C). Trimming by the measured latency is what keeps
+        // an export aligned with the project timeline — the delay buffer must not
+        // shift the rendered song later.
+        const contentStartFrame = prerollFrameCount + limiterLatencyFrames;
         const renderedContentFrameCount = outputFrameCount + tailFrameCount;
         const finalContentFrameCount = tailFrameCount > 0
-          ? resolveOfflineTailFrameCount(renderedBuffer, prerollFrameCount, outputFrameCount, tailFrameCount)
+          ? resolveOfflineTailFrameCount(renderedBuffer, contentStartFrame, outputFrameCount, tailFrameCount)
           : renderedContentFrameCount;
-        if (prerollFrameCount > 0 || finalContentFrameCount !== renderedContentFrameCount) {
-          // Remove the processor warm-up (and any silent remainder of the tail
-          // region) so consumers receive samples for the exact project timeline
-          // plus its natural decay, with no leading silence.
+        const availableFrames = Math.max(0, renderedBuffer.length - contentStartFrame);
+        const copyFrameCount = Math.min(finalContentFrameCount, availableFrames);
+        if (contentStartFrame > 0 || finalContentFrameCount !== renderedContentFrameCount) {
+          // Remove the processor warm-up, the limiter's delay and any silent
+          // remainder of the tail region so consumers receive samples for the
+          // exact project timeline plus its natural decay, with no leading
+          // silence and no latency offset.
           outputBuffer = offlineCtx.createBuffer(2, finalContentFrameCount, renderSampleRate);
           for (let channelIndex = 0; channelIndex < outputBuffer.numberOfChannels; channelIndex += 1) {
             const source = renderedBuffer.getChannelData(channelIndex);
-            outputBuffer.copyToChannel(source.subarray(prerollFrameCount, prerollFrameCount + finalContentFrameCount), channelIndex);
+            outputBuffer.copyToChannel(source.subarray(contentStartFrame, contentStartFrame + copyFrameCount), channelIndex);
+          }
+          if (copyFrameCount < finalContentFrameCount) {
+            // The render ran out of frames (a fallback with less latency than
+            // reserved). Pad with silence rather than misreporting the duration.
+            for (let channelIndex = 0; channelIndex < outputBuffer.numberOfChannels; channelIndex += 1) {
+              const target = outputBuffer.getChannelData(channelIndex);
+              target.fill(0, copyFrameCount);
+            }
           }
         }
         onProgress?.(85, 'Offline render complete. Encoding WAV...');
@@ -4770,18 +4811,64 @@ class AudioEngine {
   }
 
   /**
-   * Phase 79: apply `ProjectMetadata.masterVolume` to the master bus gain.
-   * This was previously a persisted-but-inert value (documented as such in
-   * midiMappingRuntime). Wiring it here is a one-line setTargetAtTime — no
-   * new DSP, just the same master-gain automation already uses — so it
-   * satisfies "wire if trivial".
+   * Phase 9B — installs the lookahead limiter for `processor`.
+   *
+   * The module load is asynchronous and touches no node; the graph splice happens
+   * afterwards inside `withOfflineRenderOperation`, because an offline render
+   * fences every live mutation until it is wrapped. If the processor was
+   * replaced while the module loaded (a new context, or the render finished) the
+   * result is dropped: a worklet node belongs to exactly one context.
    */
+  private async prepareMasteringLimiter(processor: MasteringProcessor | null): Promise<void> {
+    if (!processor) return;
+    let ready = false;
+    try {
+      ready = await processor.loadLimiterModule();
+    } catch {
+      ready = false;
+    }
+    if (this.masteringProcessor !== processor) return;
+    this.withOfflineRenderOperation(() => processor.installLimiter(ready));
+  }
+
+  /**
+   * Measured limiter state for the mastering UI.
+   *
+   * `measured: false` until the audio thread has actually reported a gain, so
+   * the panel can say "not measured" instead of printing a plausible 0 dB.
+   */
+  public getMasteringLimiterStatus(): MasteringLimiterStatus {
+    const processor = this.masteringProcessor;
+    if (!processor) {
+      return {
+        available: false,
+        active: false,
+        lookaheadMs: 0,
+        latencySamples: 0,
+        reductionDb: null,
+        peakReductionDb: null,
+        measured: false,
+        oversample: 4,
+        ceilingDb: this.masteringState.maximizerCeiling,
+        fallbackReason: 'worklet-unavailable',
+      };
+    }
+    return processor.getLimiterStatus();
+  }
+
   /** Phase 89: keep the live and offline master processors synchronized with project state. */
   public setMasteringState(state: MasteringSuiteState): void {
     this.masteringState = normalizeMasteringSuiteState(state);
     if (!this.isOfflineRendering) this.masteringProcessor?.setState(this.masteringState);
   }
 
+  /**
+   * Phase 79: apply `ProjectMetadata.masterVolume` to the master bus gain.
+   * This was previously a persisted-but-inert value (documented as such in
+   * midiMappingRuntime). Wiring it here is a one-line setTargetAtTime — no
+   * new DSP, just the same master-gain automation already uses — so it
+   * satisfies "wire if trivial".
+   */
   public setMasterVolume(linearGain: number) {
     if (this.shouldBlockLiveMutation() || !this.ctx || !this.masterGain) return;
     const clamped = Math.max(0, Math.min(1.5, linearGain));

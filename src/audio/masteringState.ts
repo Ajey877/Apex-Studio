@@ -1,4 +1,8 @@
 import type { MasteringSuiteState, MultibandBandSettings } from '../types/daw';
+import {
+  MASTERING_LIMITER_DEFAULT_LOOKAHEAD_MS,
+  MASTERING_LIMITER_MAX_LOOKAHEAD_MS,
+} from './masteringLimiter';
 
 export const DEFAULT_MASTERING_SUITE_STATE: MasteringSuiteState = {
   enabled: true,
@@ -14,6 +18,10 @@ export const DEFAULT_MASTERING_SUITE_STATE: MasteringSuiteState = {
   maximizerCeiling: -0.2,
   maximizerRelease: 80,
   maximizerLookahead: true,
+  // Phase 9B: the migrated default. 5 ms is long enough for the detector to
+  // duck a transient before it is emitted at every supported sample rate, and
+  // short enough that live monitoring latency stays imperceptible.
+  maximizerLookaheadMs: MASTERING_LIMITER_DEFAULT_LOOKAHEAD_MS,
 };
 
 /**
@@ -42,6 +50,7 @@ export const MASTERING_NORMALIZATION_BOUNDS = {
   maximizerThreshold: { min: -12, max: 0 },
   maximizerCeiling: { min: -1, max: 0 },
   maximizerRelease: { min: 10, max: 500 },
+  maximizerLookaheadMs: { min: 0, max: MASTERING_LIMITER_MAX_LOOKAHEAD_MS },
 } as const;
 
 const finite = (value: unknown, fallback: number, min: number, max: number): number =>
@@ -89,5 +98,15 @@ export function normalizeMasteringSuiteState(value: unknown): MasteringSuiteStat
     maximizerCeiling: bounded(candidate.maximizerCeiling, fallback.maximizerCeiling, bounds.maximizerCeiling),
     maximizerRelease: bounded(candidate.maximizerRelease, fallback.maximizerRelease, bounds.maximizerRelease),
     maximizerLookahead: bool(candidate.maximizerLookahead, fallback.maximizerLookahead),
+    // Phase 9B migration: a document written before this field existed keeps the
+    // boolean's meaning (true → documented 5 ms lookahead, false → 0 ms direct)
+    // and is then written out explicitly, so the choice is stable from here on.
+    maximizerLookaheadMs: bounded(
+      candidate.maximizerLookaheadMs,
+      typeof candidate.maximizerLookaheadMs === 'number' || candidate.maximizerLookahead === undefined
+        ? fallback.maximizerLookaheadMs
+        : (bool(candidate.maximizerLookahead, true) ? MASTERING_LIMITER_DEFAULT_LOOKAHEAD_MS : 0),
+      bounds.maximizerLookaheadMs,
+    ),
   };
 }
