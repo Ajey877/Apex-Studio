@@ -6,6 +6,7 @@ import { isImplicitDefaultSingleZone } from '../audio/sampleZones';
 import { markAudioClipsMissingBufferId } from './playlistClipIntegrity';
 import { normalizePatternContentModel, removeChannelFromPatternContent } from './patternContent';
 import { normalizeWavetableParameters } from '../audio/wavetableTables';
+import { normalizeSidechainSettings } from '../audio/sidechainCompression';
 
 /**
  * Phase 79: default Gross Beat gate state used when the persisted project has
@@ -291,7 +292,11 @@ function stripObsoleteMixerTrackFields<T extends { stereoWidth?: unknown; sidech
     delete sc.lowFreqOnly;
     delete sc.highPassFilterHz;
     delete sc.gainReductionDb;
-    next.sidechain = sc as T['sidechain'];
+    // Phase 9A: clamp what survives and make the mode explicit. A document
+    // written before Phase 9A has no `mode`, so it normalizes to
+    // 'note-trigger' — its audio response is unchanged rather than silently
+    // becoming level-detected.
+    next.sidechain = normalizeSidechainSettings(sc);
   }
   return next as T;
 }

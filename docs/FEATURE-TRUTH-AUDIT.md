@@ -307,6 +307,22 @@ turntable behaviour.
 
 ### 3.3 Sidechain — **PARTIAL**
 
+> **Current-state note (Phase 9A, post-audit).** Everything below describes the
+> pre-9A implementation and is kept as the historical audit record. As of Phase
+> 9A a real level detector exists: `src/audio/sidechainDetectorWorklet.ts` runs
+> an AudioWorklet peak detector on the source track's post-fader output and
+> drives the destination's `duckingGain` AudioParam through threshold and ratio,
+> with attack/release smoothing, in live playback and in `OfflineAudioContext`
+> renders alike. `SidechainSettings` gained an explicit
+> `mode: 'note-trigger' | 'level-detected'` plus `thresholdDb` and `ratio`;
+> pre-9A documents normalize to `note-trigger`, so their audio response is
+> unchanged. The modal's simulated `sin()` meter is gone — it now displays the
+> reduction the audio thread actually applied. The legacy note-triggered
+> envelope described below is still available and still implements exactly what
+> this table says. Per-track stems and bounce-in-place render a single track in
+> isolation, so a level-detected source that is not part of that render produces
+> no ducking there; the full mix export does carry it.
+
 | | |
 |---|---|
 | **Files** | `src/components/SidechainRoutingModal.tsx`, `src/audio/audioEngine.ts:1179-1197`, `audioEngine.ts:631-640, 711, 966` |
