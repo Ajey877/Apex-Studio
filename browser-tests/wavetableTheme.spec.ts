@@ -269,7 +269,7 @@ test.describe('UI-03D Wavetable preview theme', () => {
       if (mode === 'light') await switchThemeViaSettings(page, 'light');
       const dialog = await openWavetable(page);
 
-      const buttons = ['Audition C3', 'Close Preview'] as const;
+      const buttons = ['Audition C4', 'Close'] as const;
       for (const name of buttons) {
         const locator = dialog.locator(`button:has-text("${name}")`);
         await expect(locator).toHaveCount(1);
@@ -323,7 +323,7 @@ test.describe('UI-03D Wavetable preview theme', () => {
       const dialog = await openWavetable(page);
 
       // The toast is transient (auto-dismiss after 2 s), so measure it right after it appears.
-      await dialog.locator('button:has-text("Audition C3")').click();
+      await dialog.locator('button:has-text("Audition C4")').click();
       const toast = dialog.locator('div.shadow-md:has(button)');
       await expect(toast).toBeVisible();
       const probeId = `ui03d-${mode}-toast`;
@@ -331,7 +331,7 @@ test.describe('UI-03D Wavetable preview theme', () => {
       const scope = `[data-ui03d-probe="${probeId}"]`;
 
       const entries = await measureDialogText(page, scope);
-      const message = entries.find((t) => t.text.includes('Previewing the channel synth'));
+      const message = entries.find((t) => t.text.includes('Auditioning'));
       const dismiss = entries.find((t) => t.text === '✕');
       expect(message, 'toast message measured').toBeDefined();
       expect(dismiss, 'toast dismiss glyph measured').toBeDefined();

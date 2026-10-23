@@ -283,7 +283,7 @@ export const WavetableSynthModal: React.FC<WavetableSynthModalProps> = ({
                 >
                   WAVETABLE SYNTH
                 </h2>
-                <span className="px-1.5 py-0.5 rounded text-[9px] font-mono font-bold bg-[var(--apex-success)]/20 text-[var(--apex-success)] border border-[var(--apex-success)]/40">
+                <span className="px-1.5 py-0.5 rounded text-[9px] font-mono font-bold bg-[var(--apex-success)]/20 text-[var(--apex-text)] border border-[var(--apex-success)]/40">
                   WT ENGINE
                 </span>
               </div>
