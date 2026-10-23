@@ -127,7 +127,7 @@ Shape sounds with two oscillators, filters and modulation.
 | **Piano Roll** | Create polyphonic melodies, edit note length and velocity, use scales/chords and quantization tools. |
 | **Playlist Arranger** | Arrange patterns and audio clips across multiple lanes, including automation. Each pattern clip plays the pattern it names, live and in every export. |
 | **Mixer** | Work across mixer tracks with volume, pan, routing, metering and insert effects (EQ, reverb, delay, compression, limiter). |
-| **Synth** | Shape sounds with dual oscillators, filters, ADSR and modulation controls. |
+| **Synth** | Shape sounds with the dual-oscillator subtractive synth, filters, ADSR and modulation controls, or switch the channel to the wavetable instrument: a six-frame morphing table with table warp, H1–H8 partial gains and up to 7 detuned unison voices. |
 | **Recording** | Capture audio and place recorded takes into the project. |
 | **Take Comping** | Pick the active take in each recorded take group; the takes you do not select are silenced in playback and export. |
 | **FX** | Use EQ, reverb, delay, compression and time/volume-style effects. |
@@ -315,8 +315,16 @@ The surfaces below are **in the app but not wired into the audio engine yet**, a
 |---|---|
 | **Vocal Tuner** | The live signal path applies **no** pitch processing, and the ON/OFF toggle only stores intent. Phase 8A adds an explicit **offline** workflow: it analyses the selected audio clip's real pitch (YIN, monophonic material, fundamentals E2–B5) and its Render & Commit action writes pitch-corrected PCM toward the chosen key/scale as a new durable asset (the original is kept for undo). Formant shift, vibrato and humanize remain stored intent — **not applied**. |
 | **Warp Processor** | Applies **pitch and playback rate** to an audio clip. Length-preserving time-stretch is **not implemented**, so pitch rides with the rate. |
-| **Wavetable Synth** | **Preview surface.** The channel keeps playing with its dual-oscillator subtractive synth; there is no wavetable engine behind this window yet. |
 | **Polyphonic Blob Editor** | **Prototype.** Displays sample blobs; it does not analyse, import or play back project audio. |
+
+The **Wavetable Synth** is *not* on that list: it is a real instrument. The `wavetable`
+instrument renders a band-limited single-cycle table (64 partials) through
+`PeriodicWave` oscillators, with morph across six phase-aligned frames, PWM /
+phase-bend / hard-sync table warp, H1–H8 partial gains, and 1–7 detuned unison
+voices with optional stereo spread. Settings live on the channel, so playback,
+undo/redo, save/reopen and WAV export all use the same table. Not implemented:
+per-sample warp automation, FM/mirror warps, and oversampled output (the cycle
+is band-limited to 64 partials and is not oversampled at extreme pitches).
 
 ### Mastering Suite processing path
 

@@ -268,5 +268,48 @@ try {
   pass(`MIDI recording: recorded performance exports audibly (max=${sWith.max.toFixed(4)}, control=${sSilent.max.toFixed(6)})`);
 } catch(e){ fail('MIDI recording: recorded performance exports audibly', e); }
 
+// 11. Phase 8B — the wavetable instrument through the production exporter.
+// `wavetable` must dispatch to `renderWavetableVoice` (not the subtractive
+// fallback), produce audible finite audio, and follow the persisted table: two
+// morph endpoints of the same channel must render measurably different PCM.
+try {
+  const wavetableParams = (patch) => ({
+    morph: 0,
+    harmonics: [1, 0.7, 0.5, 0.35, 0.25, 0.18, 0.12, 0.08],
+    warpMode: 'none',
+    warpAmount: 0,
+    unisonVoices: 3,
+    unisonDetuneCents: 8,
+    unisonSpread: 0.4,
+    ...patch,
+  });
+  const wtChannel = (params) => ({
+    id: 'ch-wt', name: 'WT', color: '#00e5ff', instrumentType: 'wavetable', mixerTrackId: 1,
+    volume: 0.9, pan: 0, pitch: 0, mute: false, solo: false, steps: Array(16).fill(false),
+    synthParams: baseSynthParams,
+    notes: [
+      { id: 'wt-n1', pitch: 60, start: 0, duration: 4, velocity: 0.9 },
+      { id: 'wt-n2', pitch: 67, start: 8, duration: 4, velocity: 0.9 },
+    ],
+    wavetable: params,
+  });
+  const wtClip = { id: 'clip-wt', trackIndex: 0, startBar: 0, lengthBars: 1, type: 'pattern', channelId: 'ch-wt', color: '#00e5ff', name: 'WT Clip' };
+  const renderWt = (params) => audioEngine.renderTimelineOffline(
+    [wtChannel(params)], [wtClip], mixerTracks, 120, 1, 48000, false, 'song',
+  );
+  const sineFrame = stats(await renderWt(wavetableParams({ morph: 0 })));
+  const metallicFrame = stats(await renderWt(wavetableParams({ morph: 1, warpMode: 'sync', warpAmount: 0.7 })));
+  const mixed = await renderWt(wavetableParams({ morph: 1, warpMode: 'sync', warpAmount: 0.7 }));
+  const control = await renderWt(wavetableParams({ morph: 0 }));
+  const a = mixed.getChannelData(0);
+  const b = control.getChannelData(0);
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff = Math.max(diff, Math.abs(a[i] - b[i]));
+  assert(sineFrame.finite && metallicFrame.finite, 'wavetable export contains non-finite samples');
+  assert(sineFrame.max > 1e-3, `wavetable export should be audible, max=${sineFrame.max}`);
+  assert(diff > 1e-3, `morph/warp should change the exported PCM, maxDiff=${diff}`);
+  pass(`wavetable export: audible (max=${sineFrame.max.toFixed(4)}), morph+warp change PCM (diff=${diff.toFixed(4)})`);
+} catch(e){ fail('wavetable export: audible and morph-sensitive', e); }
+
 console.log(`\n=== Results: ${passed} passed, ${failed} failed ===`);
 if (failed>0) process.exit(1);

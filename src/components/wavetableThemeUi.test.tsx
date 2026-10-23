@@ -22,7 +22,13 @@ import type { Channel } from '../types/daw';
 
 const noop = (): void => {};
 
-const channels = [{ id: 'ch-1', name: 'Lead', color: '#00e5ff' }] as unknown as Channel[];
+const channels = [{
+  id: 'ch-1',
+  name: 'Lead',
+  color: '#00e5ff',
+  instrumentType: 'wavetable',
+  synthParams: {},
+}] as unknown as Channel[];
 
 const render = () =>
   renderToStaticMarkup(
@@ -31,6 +37,7 @@ const render = () =>
       onClose: noop,
       channels,
       onUpdateChannel: noop,
+      selectedChannelId: 'ch-1',
     })
   );
 
@@ -43,10 +50,13 @@ describe('Wavetable preview theme markup (UI-03D)', () => {
   it('renders the full dialog', () => {
     const markup = render();
     assert.match(markup, /id="fl-wavetable-synth-modal-title"/);
-    assert.match(markup, /ADVANCED SYNTH PREVIEW \(WAVETABLE NOT IMPLEMENTED\)/);
+    assert.match(markup, /WAVETABLE SYNTH/);
+    assert.match(markup, /WT ENGINE/);
     assert.match(markup, /<canvas/);
     assert.match(markup, /WAVETABLE MORPH \(WT POS\)/);
-    assert.match(markup, /Close Preview/);
+    assert.match(markup, /TABLE WARP/);
+    assert.match(markup, /PARTIAL GAINS/);
+    assert.match(markup, />Close</);
   });
 
   it('carries no colour literal or white/black utility in any class attribute', () => {
@@ -67,7 +77,7 @@ describe('Wavetable preview theme markup (UI-03D)', () => {
     assert.equal(
       source.match(/hover:bg-\[var\(--apex-cyan-strong\)\]/g)?.length,
       2,
-      'Audition C3 and Close Preview both use the cyan-strong hover fill'
+      'Audition C4 and Close both use the cyan-strong hover fill'
     );
     assert.doesNotMatch(source, /hover:brightness-/, 'brightness hover filters are gone');
   });
@@ -97,9 +107,31 @@ describe('Wavetable preview theme markup (UI-03D)', () => {
     assert.doesNotMatch(source, /rgba\(0, 229, 255/, 'the legacy waveform literal is gone from the component');
   });
 
-  it('keeps the preview-only truth copy unchanged', () => {
+  it('states that the rendered settings are the live engine state', () => {
     const markup = render();
-    assert.match(markup, /Preview only: this window does not change how the channel sounds/);
-    assert.match(markup, /NOT APPLIED — NO WAVETABLE OSCILLATOR IN THE ENGINE/);
+    assert.match(markup, /PLAYING THESE SETTINGS/);
+    assert.match(markup, /LIVE \+ EXPORT/);
+    assert.doesNotMatch(markup, /Preview only: this window does not change how the channel sounds/);
+    assert.doesNotMatch(markup, /NOT APPLIED — NO WAVETABLE OSCILLATOR IN THE ENGINE/);
+  });
+
+  it('offers only the warp modes the table engine implements', () => {
+    const markup = render();
+    for (const supported of [
+      'None (table morph only)',
+      'Pulse-width difference (PWM)',
+      'Phase bend',
+      'Hard sync (table read)',
+    ]) {
+      assert.ok(markup.includes(supported), `warp menu offers ${supported}`);
+    }
+    assert.doesNotMatch(markup, /FM from Sub Osc/);
+    assert.doesNotMatch(markup, /Spectral Mirror/);
+  });
+
+  it('draws the generated cycles, not a decorative formula', () => {
+    assert.match(source, /buildWavetableSamples/);
+    assert.ok(!/harmonics\.forEach/.test(source), 'the old per-harmonic display formula is gone');
+    assert.match(source, /WAVETABLE_FRAME_LABELS/);
   });
 });

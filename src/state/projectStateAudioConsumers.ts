@@ -67,6 +67,17 @@ export const PROJECT_STATE_AUDIO_FIELDS: AudioFieldRegistry = {
   'sampleLibrary':         { classification: 'consumed', consumer: 'audioEngine.sampleBuffer map', note: 'Sample persistence; engine reads buffers by id.' },
   'samplePacks':           { classification: 'metadata', note: 'Sample-pack catalog metadata.' },
   'channels':              { classification: 'consumed', consumer: 'audioEngine channel graph', note: 'Channel voices/parameters drive the mixer.' },
+  // ---- Phase 8B wavetable instrument (Channel.wavetable) ----
+  // Every leaf below is read by renderWavetableVoice through
+  // audio/wavetableTables.ts, in live playback and offline export alike.
+  'channels[].wavetable':              { classification: 'consumed', consumer: 'audio/wavetableTables.ts + audio/instruments/wavetableSynth.ts', note: 'Phase 8B wavetable settings; absent on pre-8B projects, where DEFAULT_WAVETABLE_PARAMETERS apply.' },
+  'channels[].wavetable.morph':        { classification: 'consumed', consumer: 'wavetableTables.morphFrameAmplitudes', note: 'Interpolates the six waveform frames that build the oscillator table.' },
+  'channels[].wavetable.harmonics':    { classification: 'consumed', consumer: 'wavetableTables.buildWavetableShape', note: 'Scales partials 1–8 of the generated cycle before band limiting.' },
+  'channels[].wavetable.warpMode':     { classification: 'consumed', consumer: 'wavetableTables.warpSource', note: 'Selects none/pwm/bend/sync; unsupported modes never reach the engine.' },
+  'channels[].wavetable.warpAmount':   { classification: 'consumed', consumer: 'wavetableTables.warpSource', note: 'Depth of the selected warp mode.' },
+  'channels[].wavetable.unisonVoices': { classification: 'consumed', consumer: 'instruments/wavetableSynth.ts', note: 'Number of bounded (max 7) unison oscillators per note.' },
+  'channels[].wavetable.unisonDetuneCents': { classification: 'consumed', consumer: 'instruments/wavetableSynth.ts', note: 'Half-spread of unison detune in cents.' },
+  'channels[].wavetable.unisonSpread': { classification: 'consumed', consumer: 'instruments/wavetableSynth.ts', note: 'Per-voice StereoPanner spread when the context supports panners.' },
   'selectedChannelId':     { classification: 'metadata', note: 'UI selection.' },
   'playlistTracks':        { classification: 'consumed', consumer: 'audioEngine playlist scheduler', note: 'Lanes for clip placement + lane mute.' },
   'playlistClips':         { classification: 'consumed', consumer: 'audioEngine playlist scheduler', note: 'Clip triggers drive playback.' },
@@ -125,8 +136,6 @@ export const STRIPPED_INERT_FIELDS: ReadonlyArray<string> = [
   'lowFreqOnly',     // on SidechainSettings — UI-only toggle, no crossover DSP
   'highPassFilterHz',// on SidechainSettings — UI-only slider, no detector filter
   'gainReductionDb', // on SidechainSettings — phantom readout, zero writers
-  // Channel/synth ghosts
-  'unisonSpread',    // on Channel.synthParams — UI-only wavetable preview control
   // Mixer-track ghost
   'stereoWidth',     // on MixerTrack — no StereoPanner width automation
   // Clip ghost

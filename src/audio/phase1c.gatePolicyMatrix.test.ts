@@ -171,7 +171,9 @@ describe('Phase 1C — a same-renderer pair must not disagree on policy', () => 
     assert.equal(getGatePolicy('fm_bell'), 'FIXED_ENVELOPE');
   });
 
-  it('minisynth and wavetable share renderSubtractiveSynthVoice and both gate', () => {
+  it('minisynth and wavetable both gate their notes to the notated length', () => {
+    // Phase 8B moved wavetable onto its own renderer; both still resolve the
+    // gate with the neutral 1.0x character, so the policy is unchanged.
     assert.equal(getGatePolicy('minisynth'), 'DURATION_GATED');
     assert.equal(getGatePolicy('wavetable'), 'DURATION_GATED');
   });

@@ -2788,7 +2788,13 @@ export function App() {
       <VocalTunerModal isOpen={isVocalTunerOpen} onClose={() => setIsVocalTunerOpen(false)} vocalTunerSettings={projectState.vocalTuner || { enabled: true, rootKey: 0, scale: 'minor', retuneSpeedMs: 15, formantShift: 0, vibratoDepth: 0.2, humanize: 0.3 }} onUpdateVocalTuner={(settings) => mutateProjectState(curr => updateVocalTunerInProjectState(curr, settings), 'Update vocal tuner')} channels={projectState.channels} clips={projectState.playlistClips} selectedClipId={selectedPlaylistClipId} onUpdateClip={(updatedClip) => { const nextState = { ...projectStateRef.current, playlistClips: projectStateRef.current.playlistClips.map(c => c.id === updatedClip.id ? updatedClip : c) }; updatePlaylistProjectState(nextState); commitPlaylistHistory(nextState, 'Correct vocal pitch'); }} />
       <MidiLearnModal isOpen={isMidiLearnOpen} onClose={() => setIsMidiLearnOpen(false)} midiMappings={projectState.midiMappings || []} onUpdateMidiMappings={(mappings) => mutateProjectState(curr => updateMidiMappingsInProjectState(curr, mappings), 'Update MIDI mappings')} channels={projectState.channels} mixerTracks={projectState.mixerTracks} connectedDevices={projectState.connectedMidiDevices || []} isMidiLearnActive={isMidiLearnActive} onToggleMidiLearn={(active) => setIsMidiLearnActive(active)} />
       <MultiZoneSamplerModal isOpen={isMultiZoneSamplerOpen} onClose={() => setIsMultiZoneSamplerOpen(false)} channels={projectState.channels} selectedChannelId={selectedChannelId} sampleLibrary={projectState.sampleLibrary || []} onUpdateChannel={handleUpdateChannel} />
-      <WavetableSynthModal isOpen={isWavetableSynthOpen} onClose={() => setIsWavetableSynthOpen(false)} channels={projectState.channels} onUpdateChannel={handleUpdateChannel} />
+      <WavetableSynthModal
+        isOpen={isWavetableSynthOpen}
+        onClose={() => setIsWavetableSynthOpen(false)}
+        channels={projectState.channels}
+        onUpdateChannel={handleUpdateChannel}
+        selectedChannelId={selectedChannelId}
+      />
       <TakeCompingModal
         isOpen={isTakeCompingOpen}
         onClose={() => setIsTakeCompingOpen(false)}

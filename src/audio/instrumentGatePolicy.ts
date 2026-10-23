@@ -188,7 +188,9 @@ export const INSTRUMENT_GATE_POLICY: Readonly<Record<InstrumentType, InstrumentG
     policy: 'DURATION_GATED',
     character: 'neutral',
     fallbackSteps: 1,
-    reason: 'Shares renderSubtractiveSynthVoice with minisynth, so it inherits the exact-length 1.0x gate.',
+    reason:
+      'renderWavetableVoice resolves its gate with the same neutral 1.0x character as the ' +
+      'subtractive voice, so a wavetable note lasts exactly its notated length.',
   },
 
   // ---- FIXED_ENVELOPE: Note.duration is intentionally inaudible ----------

@@ -63,25 +63,25 @@ describe('Phase 52 — product naming', () => {
 describe('Phase 52 — README matches the implementation', () => {
   const readme = read('README.md');
 
-  it('does not claim wavetable oscillators the engine does not have', () => {
+  it('describes the wavetable engine that actually ships, with its limits', () => {
+    // Phase 8B: the engine really renders a wavetable instrument now, so the
+    // README names the implementation (single-cycle table, PeriodicWave,
+    // morph, warp, unison) and still states the parts that are not
+    // implemented instead of implying a full-blown synth.
+    assert.match(readme, /single-cycle table/i);
+    assert.match(readme, /PeriodicWave/i);
+    assert.match(readme, /morph/i);
+    assert.match(readme, /unison/i);
+    assert.match(readme, /Not implemented:/i);
     assert.ok(
-      !/wavetable oscillator/i.test(readme),
-      'the README must not claim wavetable oscillators; the engine has no PeriodicWave'
+      !/alias-free|studio-grade/i.test(readme),
+      'the README must not claim alias-free or studio-grade behaviour'
     );
   });
 
-  it('describes the synth with the oscillators it actually builds', () => {
-    // The honest wording is "dual-oscillator subtractive synth". The invariant
-    // is that the README names the voice the engine really builds (two standard
-    // oscillators, subtractive) and says outright that no wavetable engine
-    // exists, instead of implying one ships.
+  it('describes the subtractive synth with the oscillators it actually builds', () => {
     assert.match(readme, /dual[- ]oscillator/i);
     assert.match(readme, /subtractive/i);
-    assert.match(
-      readme,
-      /no wavetable engine|not implemented in engine/i,
-      'README must deny a wavetable engine rather than implying one is present'
-    );
   });
 
   it('keeps the working capabilities it already documented', () => {
@@ -110,7 +110,9 @@ describe('Phase 52 — README matches the implementation', () => {
     // wired into the engine, so requiring a "not production DSP" wording for
     // them would force the README to stay wrong. They are guarded positively in
     // the tests below instead.
-    for (const surface of [/Vocal Tuner/i, /Warp Processor/i, /Wavetable Synth/i, /Polyphonic Blob Editor/i]) {
+    // Phase 8B removed Wavetable Synth from this list: the engine now renders
+    // it, so requiring "not production DSP" wording would keep the README wrong.
+    for (const surface of [/Vocal Tuner/i, /Warp Processor/i, /Polyphonic Blob Editor/i]) {
       const mentions = lines.filter((line) => surface.test(line));
       assert.ok(
         mentions.length > 0,
@@ -133,7 +135,7 @@ describe('Phase 52 — README matches the implementation', () => {
     // A prototype surface must never be upgraded to a shipped status in the
     // capability table. Take Comping is excluded because it is no longer a
     // prototype surface — see the take-comping scope test below.
-    for (const surface of [/Vocal Tuner/i, /Warp Processor/i, /Wavetable/i, /Polyphonic/i]) {
+    for (const surface of [/Vocal Tuner/i, /Warp Processor/i, /Polyphonic/i]) {
       for (const line of lines) {
         if (!surface.test(line)) continue;
         assert.ok(
@@ -267,11 +269,17 @@ describe('Phase 52 — truthful not-applied states', () => {
     assert.ok(!/elastique|élastique|granular|formant|transient warp|transient preserv|phase vocoder/i.test(source));
   });
 
-  it('Wavetable surface stops claiming a wavetable oscillator', () => {
+  it('Wavetable surface claims only what the wavetable engine implements', () => {
     const source = read('src/components/WavetableSynthModal.tsx');
-    assert.ok(!/256-FRAME/i.test(source));
+    assert.ok(!/256-FRAME/i.test(source), 'the MVP has six frames, not 256');
+    assert.ok(!/PREVIEW ONLY/i.test(source), 'the surface is no longer a preview');
+    assert.ok(!/NOT IMPLEMENTED/i.test(source), 'the engine now exists');
     assert.ok(!/Real-time Wavetable Osc Routing active/i.test(source));
-    assert.match(source, /NOT APPLIED|PREVIEW|not (yet )?wired|subtractive/i);
+    // Not implemented and must not be advertised.
+    assert.ok(!/\bFM\b/.test(source), 'no FM warp is offered');
+    assert.ok(!/mirror/i.test(source), 'no spectral-mirror warp is offered');
+    assert.match(source, /TABLE WARP/);
+    assert.match(source, /PARTIAL GAINS/);
   });
 
   it('Vocal Tuner states that no pitch processing is applied', () => {
