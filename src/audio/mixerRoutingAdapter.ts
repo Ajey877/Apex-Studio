@@ -16,6 +16,16 @@ export interface MixerAudioNodePair {
    * allowed to break a route change.
    */
   meterTap?: AudioNode;
+  /**
+   * Phase 9A — additional leaf taps that must survive a rebuild.
+   *
+   * The level-detected sidechain detector listens to the source track's
+   * post-fader output. Like `meterTap` it is a leaf (its output only drives a
+   * gain AudioParam), so a routing rebuild has to re-attach it after clearing
+   * the output's edges. Without this the detector would go deaf on the first
+   * routing edit and the destination would stop ducking.
+   */
+  taps?: AudioNode[];
 }
 
 /**
@@ -160,6 +170,17 @@ export class MixerRoutingAdapter {
         pair.output.connect(pair.meterTap);
       } catch {
         // A detached tap only costs metering accuracy for that strip.
+      }
+    }
+    for (const pair of this.nodes.values()) {
+      if (!pair.taps || pair.taps.length === 0) continue;
+      for (const tap of pair.taps) {
+        try {
+          pair.output.connect(tap);
+        } catch {
+          // A detached detector tap only costs that route its ducking; the
+          // engine re-syncs detectors on the next mixer update.
+        }
       }
     }
   }

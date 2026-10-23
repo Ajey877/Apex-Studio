@@ -521,16 +521,19 @@ export const Mixer: React.FC<MixerProps> = ({
                   <button
                     onClick={() => {
                       const cur = selectedTrack.sidechain?.enabled;
-                      // Phase 79: only emit the sidechain fields the engine
-                      // actually consumes (enabled/source/amount/attack/release).
-                      // threshold / lowFreqOnly / highPassFilterHz were UI-only
-                      // and were never wired to DSP — they are stripped.
+                      // Phase 9A: preserve the stored route, including its mode.
+                      // A track with no route yet starts in the legacy
+                      // note-triggered mode, which is what pre-9A documents
+                      // resolve to.
                       const newSidechain = {
                         enabled: !cur,
                         sourceTrackId: selectedTrack.sidechain?.sourceTrackId ?? 1,
                         amount: selectedTrack.sidechain?.amount ?? 0.75,
                         attackMs: selectedTrack.sidechain?.attackMs ?? 5,
                         releaseMs: selectedTrack.sidechain?.releaseMs ?? 140,
+                        mode: selectedTrack.sidechain?.mode ?? 'note-trigger',
+                        thresholdDb: selectedTrack.sidechain?.thresholdDb ?? -18,
+                        ratio: selectedTrack.sidechain?.ratio ?? 4,
                       };
                       onUpdateTrack(selectedTrack.id, { sidechain: newSidechain });
                       audioEngine.updateMixerTrack({ ...selectedTrack, sidechain: newSidechain });
@@ -589,7 +592,9 @@ export const Mixer: React.FC<MixerProps> = ({
                     </div>
 
                     <div className="text-[9px] text-[var(--apex-text-3)] italic pt-0.5">
-                      Note-triggered envelope — no level detector.
+                      {selectedTrack.sidechain.mode === 'level-detected'
+                        ? `Level-detected: source audio above ${Math.round(selectedTrack.sidechain.thresholdDb ?? -18)} dBFS drives the ducking gain.`
+                        : 'Note-triggered envelope — no level detector.'}
                     </div>
                   </div>
                 )}

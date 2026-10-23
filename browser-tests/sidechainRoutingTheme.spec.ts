@@ -289,7 +289,7 @@ test.describe('UI-03N Sidechain Routing theme', () => {
       await expectNonTextContrast(bgOf(tile), expected.header, 'identity tile against the header band');
 
       const badge = header.locator('span.font-mono').first();
-      await expect(badge).toHaveText('PEAK DUCK DSP');
+      await expect(badge).toHaveText('NOTE-TRIGGER DSP');
       await expectColor(bgOf(badge), { ...expected.gold, a: 0.2 }, 'identity badge wash');
       await expectColor(borderTopOf(badge), { ...expected.gold, a: 0.4 }, 'identity badge edge');
       // The label is theme text, not the identity hue: a same-hue label on its
@@ -303,7 +303,7 @@ test.describe('UI-03N Sidechain Routing theme', () => {
       await expectColor(fgOf(subtitle), expected.text3, 'subtitle');
       await expectAaContrast(subtitle, 'subtitle');
       const footerNote = footer.locator('span').first();
-      await expect(footerNote).toHaveText('Ducking is triggered by notes on the source track (no level detector)');
+      await expect(footerNote).toHaveText('Note-triggered ducking (legacy): each note on the source track fires a fixed envelope. No audio level is measured.');
       await expectColor(fgOf(footerNote), expected.text3, 'footer note');
       await expectAaContrast(footerNote, 'footer note');
 
@@ -349,42 +349,57 @@ test.describe('UI-03N Sidechain Routing theme', () => {
       expect(successInGradient, 'the meter gradient keeps its green floor').toBe(true);
       expect(goldInGradient, 'the meter gradient keeps its amber middle').toBe(true);
       expect(dangerInGradient, 'the meter gradient keeps its red ceiling').toBe(true);
-      const meterLabel = flowCard.locator('text=preview ~');
+      const meterLabel = flowCard.locator('[data-testid="sidechain-measured-reduction"]');
+      // No detector is attached in note-triggered mode: the read-out says so
+      // instead of animating a value that is not being applied.
+      await expect(meterLabel).toHaveText('no measurement');
       await expectColor(fgOf(meterLabel), expected.gold, 'meter read-out keeps the amber meaning');
       await expectAaContrast(meterLabel, 'meter read-out');
+      await expect(flowCard.locator('[data-testid="sidechain-meter-caption"]'))
+        .toHaveText('note-triggered — no level measurement');
       const meterTrack = flowCard.locator('.w-20');
       await expectColor(bgOf(meterTrack), expected.gridStrong, 'meter track');
 
-      // ---- The three Phase-79 parameter cards ----
+      // ---- The five implemented parameter cards (Phase 9A) ----
       const cards = body.locator('.grid > div');
-      await expect(cards).toHaveCount(3);
-      await expect(cards.nth(0)).toContainText('DUCKING AMOUNT');
-      await expect(cards.nth(1)).toContainText('ATTACK SPEED');
-      await expect(cards.nth(2)).toContainText('RELEASE (RECOVERY)');
-      for (let i = 0; i < 3; i += 1) {
+      await expect(cards).toHaveCount(5);
+      await expect(cards.nth(0)).toContainText('DETECTOR THRESHOLD');
+      await expect(cards.nth(1)).toContainText('RATIO');
+      await expect(cards.nth(2)).toContainText('DUCK DEPTH');
+      await expect(cards.nth(3)).toContainText('ATTACK SPEED');
+      await expect(cards.nth(4)).toContainText('RELEASE (RECOVERY)');
+      for (let i = 0; i < 5; i += 1) {
         await expectColor(bgOf(cards.nth(i)), expected.surface2, `parameter card ${i + 1} surface`);
       }
-      const duckValue = cards.nth(0).locator('.font-mono');
+      const thresholdValue = cards.nth(0).locator('.font-mono');
+      await expect(thresholdValue).toHaveText('-18 dBFS');
+      await expectColor(fgOf(thresholdValue), expected.gold, 'threshold read-out keeps the amber meaning');
+      await expectAaContrast(thresholdValue, 'threshold read-out');
+      const duckValue = cards.nth(2).locator('.font-mono');
       await expect(duckValue).toHaveText('85%');
       await expectColor(fgOf(duckValue), expected.gold, 'ducking depth read-out keeps the amber meaning');
       await expectAaContrast(duckValue, 'ducking depth read-out');
-      const attackValue = cards.nth(1).locator('.font-mono');
+      const attackValue = cards.nth(3).locator('.font-mono');
       await expect(attackValue).toHaveText('5 ms');
       await expectColor(fgOf(attackValue), expected.success, 'attack read-out keeps its green meaning');
       await expectAaContrast(attackValue, 'attack read-out');
-      const releaseValue = cards.nth(2).locator('.font-mono');
+      const releaseValue = cards.nth(4).locator('.font-mono');
       await expect(releaseValue).toHaveText('120 ms');
       await expectColor(fgOf(releaseValue), expected.cyanText, 'release read-out keeps its cyan meaning');
       await expectAaContrast(releaseValue, 'release read-out');
 
-      const duckRange = cards.nth(0).locator('input[type="range"]');
+      const duckRange = cards.nth(2).locator('input[type="range"]');
       await expect(duckRange).toHaveAttribute('min', '0');
       await expect(duckRange).toHaveAttribute('max', '1');
       await expect(duckRange).toHaveAttribute('step', '0.01');
+      await expect(cards.nth(0).locator('input[type="range"]')).toHaveAttribute('min', '-60');
+      await expect(cards.nth(0).locator('input[type="range"]')).toHaveAttribute('max', '0');
       await expect(cards.nth(1).locator('input[type="range"]')).toHaveAttribute('min', '1');
-      await expect(cards.nth(1).locator('input[type="range"]')).toHaveAttribute('max', '50');
-      await expect(cards.nth(2).locator('input[type="range"]')).toHaveAttribute('min', '20');
-      await expect(cards.nth(2).locator('input[type="range"]')).toHaveAttribute('max', '500');
+      await expect(cards.nth(1).locator('input[type="range"]')).toHaveAttribute('max', '20');
+      await expect(cards.nth(3).locator('input[type="range"]')).toHaveAttribute('min', '1');
+      await expect(cards.nth(3).locator('input[type="range"]')).toHaveAttribute('max', '50');
+      await expect(cards.nth(4).locator('input[type="range"]')).toHaveAttribute('min', '20');
+      await expect(cards.nth(4).locator('input[type="range"]')).toHaveAttribute('max', '500');
 
       // ---- CTAs ----
       const audition = header.locator('button:has-text("Audition Pump")');
@@ -405,7 +420,7 @@ test.describe('UI-03N Sidechain Routing theme', () => {
       // ---- Interaction: the routing matrix still publishes the exact payload ----
       await apply.click();
       const toast = panel.locator(':scope > div').nth(1);
-      await expect(toast).toContainText('Applied Sidechain Ducking to Snares & Claps (Source: Kick / 808)');
+      await expect(toast).toContainText('Applied note-triggered sidechain ducking to Snares & Claps (Source: Kick / 808)');
       await expectColor(bgOf(toast), expected.gold, 'status toast fill');
       await expectColor(fgOf(toast), expected.onAccent, 'status toast text');
       await expectAaContrast(toast.locator('span'), 'status toast text');
@@ -417,14 +432,14 @@ test.describe('UI-03N Sidechain Routing theme', () => {
 
       // ---- Interaction: the sliders still drive the read-outs ----
       await duckRange.fill('0.5');
-      await expect(cards.nth(0).locator('.font-mono')).toHaveText('50%');
-      await cards.nth(1).locator('input[type="range"]').fill('25');
-      await expect(cards.nth(1).locator('.font-mono')).toHaveText('25 ms');
+      await expect(cards.nth(2).locator('.font-mono')).toHaveText('50%');
+      await cards.nth(3).locator('input[type="range"]').fill('25');
+      await expect(cards.nth(3).locator('.font-mono')).toHaveText('25 ms');
 
       // ---- Interaction: the source select still re-points the toast ----
       await selects.first().selectOption('0');
       await apply.click();
-      await expect(panel.locator(':scope > div').nth(1)).toContainText('Applied Sidechain Ducking to Snares & Claps (Source: Master)');
+      await expect(panel.locator(':scope > div').nth(1)).toContainText('Applied note-triggered sidechain ducking to Snares & Claps (Source: Master)');
 
       await page.keyboard.press('Escape');
       await expect(dialog).toHaveCount(0);
@@ -436,7 +451,7 @@ test.describe('UI-03N Sidechain Routing theme', () => {
       const reopened = await openSidechain(page);
       await expectColor(bgOf(reopened.locator(':scope > div')), expected.panel, 'reopened panel surface');
       await expect(reopened.locator('select').first()).toHaveValue('0');
-      await expect(reopened.locator('.grid > div').nth(0).locator('.font-mono')).toHaveText('50%');
+      await expect(reopened.locator('.grid > div').nth(2).locator('.font-mono')).toHaveText('50%');
 
       // ---- Keyboard: initial focus, tab order and the shared focus ring ----
       const activeText = (): Promise<string> => page.evaluate(() =>

@@ -93,7 +93,7 @@ Write melodies, chords and detailed note performances.
 <img src="assets/screenshots/mixer.jpg" alt="Apex Studio Mixer" width="100%">
 
 ### 🎚️ Mixer
-Balance channels, route audio and shape your mix.
+Balance channels, route audio and shape your mix — including level-detected sidechain ducking.
 
 </td>
 <td width="50%">
@@ -126,7 +126,7 @@ Shape sounds with two oscillators, filters and modulation.
 | **Channel Rack** | Build independent patterns — each pattern keeps its own steps and notes for every channel — with step sequencing, swing, velocity and MIDI learn. Add an empty pattern or clone one to start a variation. |
 | **Piano Roll** | Create polyphonic melodies, edit note length and velocity, use scales/chords and quantization tools. |
 | **Playlist Arranger** | Arrange patterns and audio clips across multiple lanes, including automation. Each pattern clip plays the pattern it names, live and in every export. |
-| **Mixer** | Work across mixer tracks with volume, pan, routing, metering and insert effects (EQ, reverb, delay, compression, limiter). |
+| **Mixer** | Work across mixer tracks with volume, pan, routing, metering and insert effects (EQ, reverb, delay, compression, limiter), plus sidechain ducking: a real audio-thread level detector (threshold, ratio, attack/release) driven by another track's post-fader output, or the legacy note-triggered envelope. See [docs/SIDECHAIN.md](docs/SIDECHAIN.md) for the detector tap point, curve, ranges and which render paths carry it. |
 | **Synth** | Shape sounds with the dual-oscillator subtractive synth, filters, ADSR and modulation controls, or switch the channel to the wavetable instrument: a six-frame morphing table with table warp, H1–H8 partial gains and up to 7 detuned unison voices. |
 | **Recording** | Capture audio and place recorded takes into the project. |
 | **Take Comping** | Pick the active take in each recorded take group; the takes you do not select are silenced in playback and export. |

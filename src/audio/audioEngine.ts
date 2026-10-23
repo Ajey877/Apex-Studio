@@ -75,6 +75,17 @@ import {
 import { resolveFxParameterSpec } from './fxParameterContract';
 import { fullPatternEventsInWindow } from './fullPatternSchedule';
 import { audioBufferToWav } from './wavEncoder';
+import {
+  SIDECHAIN_DETECTOR_PROCESSOR,
+  SIDECHAIN_DETECTOR_SOURCE,
+} from './sidechainDetectorWorklet';
+import {
+  SIDECHAIN_MODE_LEVEL_DETECTED,
+  amountToMaxReductionDb,
+  hasSidechainFeedbackCycle,
+  normalizeSidechainSettings,
+  resolveSidechainMode,
+} from './sidechainCompression';
 
 // Phase 1F: the legacy 4/4 grid (LEGACY_TIME_SIGNATURE) remains the DEFAULT
 // for the pure resolvers below — missing/unsupported project meters must keep
@@ -246,6 +257,43 @@ export interface MixerChannel {
    * after a bus rebuild without leaking. The map key is the target track id.
    */
   auxSendGains?: Map<number, GainNode>;
+  /**
+   * Phase 9A — leaf taps that must survive a routing rebuild, in addition to
+   * `meterTap`. `MixerRoutingAdapter` clears every edge out of `output` when it
+   * re-routes a bus, so the level-detected sidechain detector (which listens to
+   * the source track's post-fader output) is registered here and re-attached
+   * exactly like the metering analyser. Taps are leaves: reconnecting them never
+   * changes the audible routing.
+   */
+  taps?: AudioNode[];
+  /** Phase 9A — the attached level detector, absent in note-triggered mode. */
+  sidechainDetector?: SidechainDetectorHandle;
+}
+
+/**
+ * Phase 9A — live handle for one destination channel's level detector.
+ *
+ * `node` is an `AudioWorkletNode` fed from the source channel's post-fader
+ * output. Its single mono output is the computed ducking gain, wired through a
+ * unity `control` gain into `duckingGain.gain`. The intrinsic value of that
+ * AudioParam is 0 while a detector is attached, so the destination is
+ * attenuated by exactly the detected envelope.
+ */
+export interface SidechainDetectorHandle {
+  node: AudioWorkletNode;
+  /** Unity control gain between the worklet output and the ducking AudioParam. */
+  control: GainNode;
+  sourceTrackId: number;
+  connectedParam: AudioParam;
+  /** The AudioNode whose output feeds the detector, so teardown can drop the edge. */
+  sourceOutput: AudioNode;
+}
+
+export interface SidechainDetectorSnapshot {
+  trackId: number;
+  sourceTrackId: number;
+  /** Last measured gain reduction in dB, reported by the audio thread. */
+  reductionDb: number;
 }
 
 export interface ChannelPannerEntry {
@@ -646,6 +694,19 @@ class AudioEngine {
   private measurementTimerId: ReturnType<typeof setInterval> | null = null;
   private measurementScratch: { left: Float32Array; right: Float32Array } | null = null;
   private mixerChannels: Map<number, MixerChannel> = new Map();
+  /**
+   * Phase 9A — one worklet-module load per AudioContext. Live playback and each
+   * offline render own their own context, so the module is loaded per context
+   * and the promise is cached here; a failed load is cached as `false` (the
+   * engine then runs with no detector rather than pretending to duck).
+   */
+  private sidechainWorkletLoads = new WeakMap<BaseAudioContext, Promise<boolean>>();
+  /** Phase 9A — last measured gain reduction per destination track, in dB. */
+  private sidechainReductionDb = new Map<number, number>();
+  /** Phase 9A — UI meter subscribers for genuinely measured detector output. */
+  private sidechainReductionListeners = new Set<(snapshot: SidechainDetectorSnapshot) => void>();
+  /** Guards one-time warnings when a detector cannot be created. */
+  private sidechainDetectorWarningIssued = false;
   private channelPanners: Map<string, ChannelPannerEntry> = new Map();
   private mixerRoutingAdapter: MixerRoutingAdapter | null = null;
   private mixerRoutingChannelMap: Map<number, MixerChannel> | null = null;
@@ -857,6 +918,11 @@ class AudioEngine {
 
     // Init Web MIDI
     this.initMidi();
+
+    // Phase 9A: a project restored with a level-detected sidechain must get its
+    // detector on this fresh context. The load is asynchronous (AudioWorklet),
+    // and the request is a no-op when no level-detected route exists.
+    this.requestSidechainDetectorSync();
   }
 
   public getContext(): AudioContext {
@@ -1153,7 +1219,17 @@ class AudioEngine {
     this.__fxSlotEffectMaps.delete(trackId);
     this.disposeFxSlotEffects(ownedEffects?.values());
 
+    // Phase 9A: the channel's detector listens to another track's output and
+    // drives this channel's gain; drop it before the nodes go away. Any other
+    // channel that used this track as its source must also detach.
+    this.detachSidechainDetector(trackId, channel);
     this.mixerChannels.delete(trackId);
+    for (const [otherId, otherChannel] of this.mixerChannels) {
+      if (otherChannel.sidechainDetector && otherChannel.sidechainDetector.sourceTrackId === trackId) {
+        this.detachSidechainDetector(otherId, otherChannel);
+      }
+    }
+    this.requestSidechainDetectorSync();
   }
 
   private clampChannelPan(pan: unknown): number {
@@ -1362,7 +1438,10 @@ class AudioEngine {
     const channel = this.getOrCreateMixerChannel(track.id);
     if (!this.ctx) return;
 
-    channel.sidechain = track.sidechain;
+    // Phase 9A: clamp/complete the settings before they reach any AudioParam.
+    // A pre-9A project has no `mode`, so it resolves to note-trigger and keeps
+    // its historic audio response.
+    channel.sidechain = normalizeSidechainSettings(track.sidechain);
 
     const now = this.ctx.currentTime;
     const targetVol = track.mute ? 0 : track.volume;
@@ -1375,6 +1454,9 @@ class AudioEngine {
     // Update FX chain if any
     this.rebuildTrackFxChain(track);
     this.applyMixerTrackRouting(track);
+    // Phase 9A: attach/refresh/detach the level detector for this change. The
+    // offline render awaits `attachSidechainDetectors()` explicitly instead.
+    this.requestSidechainDetectorSync();
   }
 
   private ensureMixerRoutingAdapter(): MixerRoutingAdapter {
@@ -1430,6 +1512,9 @@ class AudioEngine {
     this.restoreAuxSendConnections();
     // Phase 88: sync all aux sends after bus topology is stable
     this.syncAllAuxSends(tracks);
+    // Phase 9A: routing changes can add/remove a feedback cycle and can clear
+    // the detector's tap edge, so re-evaluate every detector.
+    this.requestSidechainDetectorSync();
   }
 
   // Phase 88: aux send graph — post-fader GainNode per send
@@ -2311,13 +2396,356 @@ class AudioEngine {
     }
   }
 
-  // Dynamic Sidechain Ducking Processor (Kick to Bass / Lead ducking)
+  // ---------------------------------------------------------------------------
+  // Phase 9A — level-detected sidechain (AudioWorklet detector)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Subscribes to measured detector output. The callback receives the gain
+   * reduction the audio thread actually applied — this is what the routing
+   * modal's meter displays, so the meter can never show a value that is not
+   * being applied.
+   */
+  public onSidechainReduction(listener: (snapshot: SidechainDetectorSnapshot) => void): () => void {
+    this.sidechainReductionListeners.add(listener);
+    return () => {
+      this.sidechainReductionListeners.delete(listener);
+    };
+  }
+
+  /** Last measured gain reduction (dB) for a destination track. */
+  public getSidechainReductionDb(trackId: number): number {
+    return this.sidechainReductionDb.get(trackId) ?? 0;
+  }
+
+  /** Introspection for tests/UI: is a real detector attached to this track? */
+  public hasSidechainDetector(trackId: number): boolean {
+    return !!this.mixerChannels.get(trackId)?.sidechainDetector;
+  }
+
+  private publishSidechainReduction(trackId: number, sourceTrackId: number, reductionDb: number): void {
+    this.sidechainReductionDb.set(trackId, reductionDb);
+    if (this.sidechainReductionListeners.size === 0) return;
+    const snapshot: SidechainDetectorSnapshot = { trackId, sourceTrackId, reductionDb };
+    for (const listener of [...this.sidechainReductionListeners]) {
+      try {
+        listener(snapshot);
+      } catch {
+        // A broken meter subscriber must never take the audio graph down.
+      }
+    }
+  }
+
+  /**
+   * Loads the detector processor into `ctx` once. A missing/blocked
+   * `audioWorklet` (or a Node test double) resolves `false`, which the caller
+   * treats as "no detector": the destination keeps unity gain rather than
+   * silently ducking with a fake envelope.
+   */
+  private ensureSidechainWorkletModule(ctx: BaseAudioContext): Promise<boolean> {
+    const cached = this.sidechainWorkletLoads.get(ctx);
+    if (cached) return cached;
+
+    const worklet = (ctx as unknown as {
+      audioWorklet?: { addModule?: (url: string) => Promise<void> };
+    }).audioWorklet;
+    const canLoad =
+      !!worklet &&
+      typeof worklet.addModule === 'function' &&
+      typeof Blob !== 'undefined' &&
+      typeof URL !== 'undefined' &&
+      typeof URL.createObjectURL === 'function';
+
+    if (!canLoad) {
+      const unsupported = Promise.resolve(false);
+      this.sidechainWorkletLoads.set(ctx, unsupported);
+      return unsupported;
+    }
+
+    const load = (async () => {
+      let moduleUrl: string | null = null;
+      try {
+        moduleUrl = URL.createObjectURL(new Blob([SIDECHAIN_DETECTOR_SOURCE], { type: 'application/javascript' }));
+        await worklet!.addModule!(moduleUrl);
+        return true;
+      } catch (error) {
+        if (!this.sidechainDetectorWarningIssued) {
+          this.sidechainDetectorWarningIssued = true;
+          console.warn(
+            '[Apex Studio] Level-detected sidechain detector could not be loaded; ducking is bypassed and the destination keeps unity gain.',
+            error,
+          );
+        }
+        return false;
+      } finally {
+        if (moduleUrl) {
+          try {
+            URL.revokeObjectURL(moduleUrl);
+          } catch {
+            // Revocation is best effort; the module is already loaded.
+          }
+        }
+      }
+    })();
+    this.sidechainWorkletLoads.set(ctx, load);
+    return load;
+  }
+
+  /**
+   * Attaches/updates/detaches detectors for the current context.
+   *
+   * Must be awaited by the offline renderer before `startRendering()`, because
+   * an `OfflineAudioContext` renders the graph it has at start time and
+   * `addModule` is asynchronous. Live callers use `requestSidechainDetectorSync`
+   * (fire-and-forget) and therefore start with unity gain for a few frames.
+   */
+  public async attachSidechainDetectors(): Promise<void> {
+    const ctx = this.ctx;
+    if (!ctx) return;
+    // Nothing to do for a project that only uses (or has no) note-triggered
+    // sidechains: do not pay the AudioWorklet module load on every export.
+    const wantsDetector = [...this.mixerChannels.values()].some(
+      channel => !!channel.sidechainDetector || (
+        !!channel.sidechain && channel.sidechain.enabled && resolveSidechainMode(channel.sidechain) === SIDECHAIN_MODE_LEVEL_DETECTED
+      ),
+    );
+    if (!wantsDetector) {
+      this.detachAllSidechainDetectors();
+      return;
+    }
+    const ready = await this.ensureSidechainWorkletModule(ctx as unknown as BaseAudioContext);
+    // The context changed while loading (render finished, live context swapped):
+    // those channels belong to a different graph and must not be touched.
+    if (this.ctx !== ctx) return;
+    const apply = () => {
+      if (!ready) {
+        this.detachAllSidechainDetectors();
+        return;
+      }
+      this.syncSidechainDetectors();
+    };
+    if (this.shouldBlockLiveMutation()) this.withOfflineRenderOperation(apply);
+    else apply();
+  }
+
+  /** Fire-and-forget variant for live mixer mutations. */
+  private requestSidechainDetectorSync(): void {
+    if (!this.ctx || this.isOfflineRendering) return;
+    const channels = [...this.mixerChannels.values()];
+    const wantsLevel = channels.some(
+      channel => !!channel.sidechain && channel.sidechain.enabled && resolveSidechainMode(channel.sidechain) === SIDECHAIN_MODE_LEVEL_DETECTED,
+    );
+    const hasDetector = channels.some(channel => !!channel.sidechainDetector);
+    if (!wantsLevel) {
+      // Switching back to note-trigger must detach synchronously, so a stale
+      // detector cannot keep driving the gain (and cannot keep the AudioParam's
+      // intrinsic value at 0, which would mute the channel forever).
+      if (hasDetector) {
+        const detach = () => this.syncSidechainDetectors();
+        if (this.shouldBlockLiveMutation()) this.withOfflineRenderOperation(detach);
+        else detach();
+      }
+      return;
+    }
+    void this.attachSidechainDetectors().catch(() => {});
+  }
+
+  /**
+   * Resolves which track's post-fader output a destination's detector should
+   * listen to, or `null` when the route must not exist. Refusals are
+   * deliberate: a self-route, a missing source, a disabled route, note-trigger
+   * mode, or a route that would close a feedback loop through the destination
+   * all leave the destination at unity gain.
+   */
+  private resolveSidechainDetectorSource(trackId: number, settings: SidechainSettings | undefined): number | null {
+    if (!settings || !settings.enabled) return null;
+    if (resolveSidechainMode(settings) !== SIDECHAIN_MODE_LEVEL_DETECTED) return null;
+    const sourceTrackId = settings.sourceTrackId;
+    if (!Number.isInteger(sourceTrackId) || sourceTrackId === trackId) return null;
+    if (!this.mixerChannels.has(sourceTrackId)) return null;
+    const edges: Array<{ trackId: number; targetId: number }> = (this.mixerRoutingAdapter?.getRoutes() ?? [])
+      .map(route => ({ trackId: route.trackId, targetId: route.targetId }));
+    // Post-fader aux sends are audio edges too: they can carry the destination's
+    // signal back into the source just like a mixer route.
+    for (const [auxSourceId, channel] of this.mixerChannels) {
+      for (const auxTargetId of channel.auxSendGains?.keys() ?? []) {
+        edges.push({ trackId: auxSourceId, targetId: auxTargetId });
+      }
+    }
+    if (hasSidechainFeedbackCycle(edges, sourceTrackId, trackId)) return null;
+    return sourceTrackId;
+  }
+
+  private applySidechainDetectorParameters(
+    handle: SidechainDetectorHandle,
+    settings: SidechainSettings,
+    time: number,
+  ): void {
+    const setParam = (name: string, value: number) => {
+      const param = handle.node.parameters?.get?.(name);
+      if (!param) return;
+      try {
+        param.setValueAtTime(value, time);
+      } catch {
+        param.value = value;
+      }
+    };
+    setParam('thresholdDb', settings.thresholdDb ?? -18);
+    setParam('ratio', settings.ratio ?? 4);
+    setParam('maxReductionDb', amountToMaxReductionDb(settings.amount));
+    setParam('attackMs', settings.attackMs ?? 5);
+    setParam('releaseMs', settings.releaseMs ?? 140);
+  }
+
+  private createSidechainDetector(
+    trackId: number,
+    channel: MixerChannel,
+    sourceTrackId: number,
+    settings: SidechainSettings,
+    time: number,
+  ): void {
+    const ctx = this.ctx;
+    const sourceChannel = this.mixerChannels.get(sourceTrackId);
+    if (!ctx || !sourceChannel || typeof AudioWorkletNode === 'undefined') return;
+    try {
+      const node = new AudioWorkletNode(ctx as unknown as BaseAudioContext, SIDECHAIN_DETECTOR_PROCESSOR, {
+        numberOfInputs: 1,
+        numberOfOutputs: 1,
+        outputChannelCount: [1],
+      });
+      const control = ctx.createGain();
+      control.gain.value = 1;
+      const duckParam = channel.duckingGain.gain;
+      // The detector now owns the gain: its control signal is summed into the
+      // AudioParam, so the intrinsic value must be 0 for the output to be the
+      // detected gain itself rather than 1 + gain.
+      duckParam.cancelScheduledValues(time);
+      duckParam.setValueAtTime(0, time);
+
+      sourceChannel.output.connect(node);
+      node.connect(control);
+      control.connect(duckParam);
+
+      const handle: SidechainDetectorHandle = {
+        node,
+        control,
+        sourceTrackId,
+        connectedParam: duckParam,
+        sourceOutput: sourceChannel.output,
+      };
+      node.port.onmessage = (event: MessageEvent) => {
+        // Ignore messages from a detector that has already been replaced.
+        if (channel.sidechainDetector !== handle) return;
+        const payload = event.data as { reductionDb?: unknown } | null;
+        const reductionDb = typeof payload?.reductionDb === 'number' && Number.isFinite(payload.reductionDb)
+          ? Math.max(0, Math.min(48, payload.reductionDb))
+          : 0;
+        this.publishSidechainReduction(trackId, sourceTrackId, reductionDb);
+      };
+
+      channel.taps = [...(channel.taps ?? []), node];
+      channel.sidechainDetector = handle;
+      this.applySidechainDetectorParameters(handle, settings, time);
+    } catch (error) {
+      // Fail safe: no detector, no ducking, and never leave the destination
+      // gain latched at 0.
+      if (!this.sidechainDetectorWarningIssued) {
+        this.sidechainDetectorWarningIssued = true;
+        console.warn('[Apex Studio] Level-detected sidechain detector could not be created; the destination keeps unity gain.', error);
+      }
+      try {
+        channel.duckingGain.gain.cancelScheduledValues(time);
+        channel.duckingGain.gain.setValueAtTime(1, time);
+      } catch {
+        // Nothing else to restore.
+      }
+    }
+  }
+
+  /** Tears one detector down and restores the channel's unity attenuation. */
+  private detachSidechainDetector(trackId: number, channel: MixerChannel, time?: number): void {
+    const handle = channel.sidechainDetector;
+    if (!handle) return;
+    channel.sidechainDetector = undefined;
+    if (channel.taps) channel.taps = channel.taps.filter(tap => tap !== handle.node);
+    try {
+      handle.node.port.onmessage = null;
+    } catch {
+      // A closed port cannot be reassigned; teardown continues.
+    }
+    try {
+      handle.sourceOutput.disconnect(handle.node);
+    } catch {
+      // The edge may already be gone after a routing rebuild.
+    }
+    try {
+      handle.node.disconnect();
+    } catch {
+      // Already disconnected.
+    }
+    try {
+      handle.control.disconnect();
+    } catch {
+      // Already disconnected.
+    }
+    try {
+      handle.node.port.close();
+    } catch {
+      // Port already closed / unavailable in this environment.
+    }
+    try {
+      const now = time ?? this.ctx?.currentTime ?? 0;
+      handle.connectedParam.cancelScheduledValues(now);
+      handle.connectedParam.setValueAtTime(1, now);
+    } catch {
+      // A finished offline context rejects automation; it is being discarded.
+    }
+    this.publishSidechainReduction(trackId, handle.sourceTrackId, 0);
+  }
+
+  private detachAllSidechainDetectors(channels: Map<number, MixerChannel> = this.mixerChannels): void {
+    for (const [trackId, channel] of channels) {
+      if (channel.sidechainDetector) this.detachSidechainDetector(trackId, channel);
+    }
+  }
+
+  private syncSidechainDetectors(): void {
+    const ctx = this.ctx;
+    if (!ctx) return;
+    const time = ctx.currentTime;
+    for (const [trackId, channel] of this.mixerChannels) {
+      if (!channel.duckingGain) continue;
+      const settings = channel.sidechain;
+      const desiredSource = this.resolveSidechainDetectorSource(trackId, settings);
+      if (channel.sidechainDetector && (desiredSource === null || channel.sidechainDetector.sourceTrackId !== desiredSource)) {
+        this.detachSidechainDetector(trackId, channel, time);
+      }
+      if (desiredSource === null || !settings) continue;
+      if (!channel.sidechainDetector) {
+        this.createSidechainDetector(trackId, channel, desiredSource, settings, time);
+      } else if (channel.sidechainDetector.sourceTrackId !== desiredSource) {
+        // Cannot happen after the detach above, but keeps the invariant explicit.
+        this.detachSidechainDetector(trackId, channel, time);
+        this.createSidechainDetector(trackId, channel, desiredSource, settings, time);
+      } else {
+        this.applySidechainDetectorParameters(channel.sidechainDetector, settings, time);
+      }
+    }
+  }
+
+  // Dynamic Sidechain Ducking Processor (Kick to Bass / Lead ducking).
+  //
+  // Phase 9A: this is the LEGACY note-triggered envelope. It is skipped
+  // entirely for level-detected destinations, whose gain is owned by the
+  // detector's control signal (scheduling ramps on that AudioParam would fight
+  // the detector and break the measured envelope).
   public triggerSidechainDucking(sourceTrackId: number, time: number) {
     if (this.shouldBlockLiveMutation() || !this.ctx) return;
 
     this.mixerChannels.forEach((targetChannel, targetId) => {
       if (targetId === sourceTrackId) return;
       if (targetChannel.sidechain && targetChannel.sidechain.enabled && targetChannel.sidechain.sourceTrackId === sourceTrackId) {
+        if (resolveSidechainMode(targetChannel.sidechain) === SIDECHAIN_MODE_LEVEL_DETECTED) return;
         const duckAmount = targetChannel.sidechain.amount ?? 0.75;
         const attackSec = (targetChannel.sidechain.attackMs ?? 5) / 1000;
         const releaseSec = (targetChannel.sidechain.releaseMs ?? 140) / 1000;
@@ -3416,6 +3844,11 @@ class AudioEngine {
           for (const track of renderTracks) if (track.id !== 0) this.updateMixerTrack(track);
           this.syncMixerRouting(renderTracks);
         });
+        // Phase 9A: load/attach the detector module in this render's own
+        // context BEFORE any step is scheduled, so a level-detected sidechain
+        // is part of the graph `startRendering()` captures. Without this the
+        // export would silently render without ducking.
+        await this.attachSidechainDetectors();
         const totalSteps = Math.ceil(totalDurationSeconds / secondsPerStep);
         // A Pattern Loop export must wrap at the same boundary as Pattern Mode
         // playback, otherwise steps beyond the first bar render silence. Song
@@ -3478,6 +3911,11 @@ class AudioEngine {
         this.ctx = previous.ctx;
         this.transport = previous.transport;
         if (this.masteringProcessor && this.masteringProcessor !== previous.masteringProcessor) this.masteringProcessor.dispose();
+        // Phase 9A: the render's detector handles name worklet nodes in the
+        // finished offline context. Close their ports and drop the taps before
+        // the channel map is replaced, so a repeated export cannot accumulate
+        // detectors. The live channels are then re-synced to the live graph.
+        this.detachAllSidechainDetectors(this.mixerChannels);
         this.masteringProcessor = previous.masteringProcessor;
         this.masteringProcessor?.setState(this.masteringState);
         this.masterGain = previous.masterGain;
@@ -3520,6 +3958,9 @@ class AudioEngine {
         // Fix 5: hand the slot-effect registry back to the live chain, so a live
         // parameter/mix update after an export reaches the take the user hears.
         this.__fxSlotEffectMaps = previous.__fxSlotEffectMaps;
+        // Phase 9A: the live channels were detached from this render's graph the
+        // whole time; re-attach their detectors against the restored context.
+        this.requestSidechainDetectorSync();
       }
     } finally {
       this.offlineRenderLeaseHeld = false;

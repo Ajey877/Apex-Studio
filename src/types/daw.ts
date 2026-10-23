@@ -72,6 +72,20 @@ export interface GrossBeatState {
   gateSteps: boolean[]; // 16 steps
 }
 
+/**
+ * Phase 9A — how a sidechain ducks its destination.
+ *
+ * - `note-trigger`: legacy behaviour. A note on the source track schedules a
+ *   fixed envelope; no audio is analysed.
+ * - `level-detected`: an AudioWorklet peak detector reads the source track's
+ *   post-fader output and drives the destination gain through `thresholdDb`
+ *   and `ratio`. Works identically in playback and offline export.
+ *
+ * Documents written before Phase 9A carry no `mode`; `normalizeProjectState()`
+ * resolves them to `note-trigger` so their audio response is unchanged.
+ */
+export type SidechainMode = 'note-trigger' | 'level-detected';
+
 export interface SidechainSettings {
   enabled: boolean;
   sourceTrackId: number; // Mixer track ID of trigger (e.g. 1 for Kick)
@@ -87,9 +101,22 @@ export interface SidechainSettings {
    */
   /** @deprecated Obsolete Phase 79 — persisted from an inert UI control; stripped on load. */
   threshold?: number;
-  amount: number; // 0 to 1.0 (ducking depth)
+  amount: number; // 0 to 1.0 (ducking depth, shared by both modes)
   attackMs: number; // 1 to 50 ms
   releaseMs: number; // 20 to 500 ms
+  /**
+   * Phase 9A — explicit mode. Optional only for pre-9A documents and callers
+   * that construct a legacy payload; the engine treats `undefined` exactly as
+   * `note-trigger`.
+   */
+  mode?: SidechainMode;
+  /**
+   * Phase 9A — level-detected mode only: detector threshold in dBFS
+   * (-60 … 0). Signals below it cause no ducking.
+   */
+  thresholdDb?: number;
+  /** Phase 9A — level-detected mode only: compressor ratio (1 … 20). */
+  ratio?: number;
   /** @deprecated Obsolete Phase 79 — persisted from an inert UI control; stripped on load. */
   lowFreqOnly?: boolean;
   /** @deprecated Obsolete Phase 79 — persisted from an inert UI control; stripped on load. */
