@@ -309,13 +309,14 @@ Features that are not production-ready are not presented as finished just for th
 ### Feature status
 
 The table in [Built for the actual workflow](#-built-for-the-actual-workflow) lists capabilities that run end to end.
-The surfaces below are **in the app but not wired into the audio engine yet**, and they say so in their own UI:
+The surfaces below are **in the app but not wired into the audio engine yet**, and they say so in their own UI.
+(Audio to MIDI is *not* on this list: it writes real notes into real patterns, though it does not process the live signal path.)
 
 | Surface | Status |
 |---|---|
 | **Vocal Tuner** | The live signal path applies **no** pitch processing, and the ON/OFF toggle only stores intent. Phase 8A adds an explicit **offline** workflow: it analyses the selected audio clip's real pitch (YIN, monophonic material, fundamentals E2–B5) and its Render & Commit action writes pitch-corrected PCM toward the chosen key/scale as a new durable asset (the original is kept for undo). Formant shift, vibrato and humanize remain stored intent — **not applied**. |
-| **Warp Processor** | Applies **pitch and playback rate** to an audio clip. Length-preserving time-stretch is **not implemented**, so pitch rides with the rate. |
-| **Polyphonic Blob Editor** | **Prototype.** Displays sample blobs; it does not analyse, import or play back project audio. |
+| **Warp Processor** | Applies **pitch and playback rate** to an audio clip (Repitch: pitch rides with the rate). Its separate stretch action renders **real length-preserving WSOLA** (or transient-anchored TAW) PCM and commits it as a new durable asset, so the stretch survives reopen and export; the original asset is kept for undo. Not implemented: elastic/phase-vocoder stretching beyond the supported WSOLA ratio range, and beat detection — Fit-to-tempo needs the source tempo entered by the user. |
+| **Audio to MIDI** | Transcribes the **selected audio clip's real PCM** into editable MIDI notes (shared YIN detector, monophonic material only, fundamentals 75–1000 Hz ≈ E2–B5). It analyses, shows a reviewable preview with measured confidence, and writes notes only on an explicit commit — into a new pattern by default, as one undo step. Silence, noise, unstable pitch, clips shorter than 0.25 s and **polyphonic material (chords) are refused with a reason**; there is no chord or source separation and harmonics are never reported as extra notes. |
 
 The **Wavetable Synth** is *not* on that list: it is a real instrument. The `wavetable`
 instrument renders a band-limited single-cycle table (64 partials) through

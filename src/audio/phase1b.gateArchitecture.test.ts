@@ -52,8 +52,6 @@ import {
 import { renderIndependentPluckVoice } from './instruments/independentPluck';
 import { audioEngine } from './audioEngine';
 import { createDefaultProjectState } from '../state/projectState';
-import { polyphonicBlobAuditionNote } from '../components/PolyphonicEditorModal';
-import type { PolyphonicBlob } from '../types/daw';
 
 // ---------------------------------------------------------------------------
 // Recording fake Web Audio graph
@@ -545,34 +543,5 @@ describe('Phase 1B D — live and offline production paths agree on gate semanti
         assert.equal(entry.bpm, bpm, `expected project BPM ${bpm}, saw ${entry.bpm}`);
       }
     }
-  });
-});
-
-describe('Phase 1B E — Polyphonic Editor preview uses steps, not beats', () => {
-  it('passes durationSteps straight through to the steps-based Note.duration', () => {
-    const blob: PolyphonicBlob = {
-      id: 'blob-x', originalPitch: 60, targetPitch: 64, startStep: 0, durationSteps: 4,
-      amplitude: 0.9, formantShift: 0, pitchDriftAmount: 0, vibratoDepth: 0, color: '#fff',
-    };
-    const auditionNote = polyphonicBlobAuditionNote(blob);
-    assert.equal(
-      auditionNote.duration,
-      4,
-      'durationSteps/4 was the defect: both fields are sixteenth-note steps, so ' +
-      'no conversion is allowed (a 4-step blob was auditioning as a 1-beat note)',
-    );
-  });
-
-  it('keeps the preview gate proportional to the blob length', () => {
-    const gateFor = (durationSteps: number): number => {
-      const blob: PolyphonicBlob = {
-        id: 'b', originalPitch: 60, targetPitch: 60, startStep: 0, durationSteps,
-        amplitude: 1, formantShift: 0, pitchDriftAmount: 0, vibratoDepth: 0, color: '#fff',
-      };
-      return polyphonicBlobAuditionNote(blob).duration;
-    };
-    assert.equal(gateFor(8) / gateFor(4), 2);
-    assert.equal(gateFor(4) / gateFor(2), 2);
-    assert.equal(gateFor(1), 1);
   });
 });

@@ -6,6 +6,7 @@ import {
   Blocks,
   ChevronDown,
   Disc3,
+  FileMusic,
   FolderArchive,
   Gauge,
   GitBranch,
@@ -48,6 +49,7 @@ export interface TransportToolHandlers {
   wavetable?: () => void;
   keymap?: () => void;
   vocalTuner?: () => void;
+  audioToMidi?: () => void;
   timeFx?: () => void;
   warp?: () => void;
   slicer?: () => void;
@@ -136,6 +138,13 @@ export const TRANSPORT_TOOL_GROUPS: readonly TransportToolGroupSpec[] = [
     id: 'time',
     label: 'Time & audio',
     items: [
+      {
+        id: 'fl-audio-to-midi-btn',
+        label: 'Audio to MIDI',
+        title: 'Transcribe the selected audio clip into editable MIDI notes (monophonic material)',
+        icon: FileMusic,
+        handler: 'audioToMidi',
+      },
       {
         id: 'fl-gross-beat-btn',
         label: 'Master Gate',

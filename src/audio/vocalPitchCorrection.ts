@@ -79,26 +79,49 @@
  */
 import type { MusicalScale } from '../types/daw';
 import { isMusicalScale, scaleIntervals } from '../music/scalePresets';
+import {
+  PITCH_F0_MAX_HZ,
+  PITCH_F0_MIN_HZ,
+  PITCH_ANALYSIS_HOP,
+  PITCH_ANALYSIS_WINDOW,
+  PITCH_MIN_SOURCE_FRAMES,
+  PITCH_RMS_FLOOR,
+  PITCH_RMS_RELATIVE_FLOOR,
+  PITCH_STABILITY_TOLERANCE,
+  PITCH_YIN_THRESHOLD,
+  PitchDetectionError,
+  detectPitchFrames,
+  frequencyToMidi,
+  midiToNoteName,
+  monoDownmix,
+  validatePitchSource,
+} from './pitchDetection';
 
 // ---------------------------------------------------------------------------
 // Documented constants (pinned by tests)
 // ---------------------------------------------------------------------------
 
 /** Supported fundamental-frequency range (≈ E2–B5). */
-export const VOCAL_F0_MIN_HZ = 75;
-export const VOCAL_F0_MAX_HZ = 1000;
+/**
+ * Phase 8C: the detector, framing, RMS gate and stability filter live in
+ * `pitchDetection.ts` so the vocal tuner and Audio-to-MIDI share ONE YIN
+ * implementation. These names are kept as aliases because they are the
+ * published contract of this module (tests, commit pipeline, UI).
+ */
+export const VOCAL_F0_MIN_HZ = PITCH_F0_MIN_HZ;
+export const VOCAL_F0_MAX_HZ = PITCH_F0_MAX_HZ;
 /** Documented pitch-correction envelope: ±2 semitones. */
 export const VOCAL_MAX_CORRECTION_CENTS = 200;
 /** Frames within this distance of their target need (and get) no correction. */
 export const VOCAL_IN_TUNE_DEADZONE_CENTS = 5;
 /** Sources shorter than this cannot be analysed honestly (typed refusal). */
-export const VOCAL_MIN_SOURCE_FRAMES = 2048;
+export const VOCAL_MIN_SOURCE_FRAMES = PITCH_MIN_SOURCE_FRAMES;
 /** Analysis / synthesis hop in samples (~2.9 ms at 44.1 kHz). */
-export const VOCAL_ANALYSIS_HOP = 128;
+export const VOCAL_ANALYSIS_HOP = PITCH_ANALYSIS_HOP;
 /** YIN window and grain length in samples (~34.8 ms at 44.1 kHz). */
-export const VOCAL_ANALYSIS_WINDOW = 1536;
+export const VOCAL_ANALYSIS_WINDOW = PITCH_ANALYSIS_WINDOW;
 /** YIN absolute threshold on the cumulative-mean normalized difference. */
-export const VOCAL_YIN_THRESHOLD = 0.12;
+export const VOCAL_YIN_THRESHOLD = PITCH_YIN_THRESHOLD;
 /** Crossfade length (samples) between corrected and untouched regions. */
 export const VOCAL_CROSSFADE_SAMPLES = 384;
 /** Edge fade (samples): buffer ends stay original. */
@@ -107,10 +130,10 @@ export const VOCAL_EDGE_FADE_SAMPLES = 512;
 export const VOCAL_MIN_RETUNE_MS = 0;
 export const VOCAL_MAX_RETUNE_MS = 80;
 /** Per-frame RMS gate: absolute floor and fraction of the loudest frame. */
-export const VOCAL_RMS_FLOOR = 1e-4;
-export const VOCAL_RMS_RELATIVE_FLOOR = 0.02;
+export const VOCAL_RMS_FLOOR = PITCH_RMS_FLOOR;
+export const VOCAL_RMS_RELATIVE_FLOOR = PITCH_RMS_RELATIVE_FLOOR;
 /** Median stability filter: ±3 % over ±2 neighbouring voiced frames. */
-export const VOCAL_STABILITY_TOLERANCE = 0.03;
+export const VOCAL_STABILITY_TOLERANCE = PITCH_STABILITY_TOLERANCE;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -284,147 +307,31 @@ export const nearestScaleMidi = (
   return { midi: bestMidi, cents: (bestMidi - midi) * 100 };
 };
 
-/** Human-readable note name for an integer MIDI number (C4 = 60). */
-export const midiToNoteName = (midi: number): string => {
-  const rounded = Math.round(midi);
-  const pc = ((rounded % 12) + 12) % 12;
-  const octave = Math.floor(rounded / 12) - 1;
-  return `${NOTE_NAMES[pc]}${octave}`;
-};
-
-const freqToMidi = (f: number): number => 69 + 12 * Math.log2(f / 440);
+/** Human-readable note name — the shared helper, re-exported for this module's API. */
+export { midiToNoteName };
 
 // ---------------------------------------------------------------------------
 // Source validation
 // ---------------------------------------------------------------------------
 
-const validateSource = (channels: readonly Float32Array[], sampleRate: number): void => {
-  if (!Array.isArray(channels) || channels.length === 0) {
-    throw new VocalPitchCorrectionError('unsupported-source', 'Pitch correction needs at least one audio channel.');
-  }
-  if (typeof sampleRate !== 'number' || !Number.isFinite(sampleRate) || sampleRate <= 0) {
-    throw new VocalPitchCorrectionError('unsupported-source', `Sample rate ${String(sampleRate)} is not usable.`);
-  }
-  const length = channels[0].length;
-  for (const data of channels) {
-    if (!(data instanceof Float32Array)) {
-      throw new VocalPitchCorrectionError('unsupported-source', 'Pitch correction needs Float32Array channel data.');
-    }
-    if (data.length !== length) {
-      throw new VocalPitchCorrectionError('unsupported-source', 'All channels must have the same length.');
-    }
-  }
-  if (length < VOCAL_MIN_SOURCE_FRAMES) {
-    throw new VocalPitchCorrectionError(
-      'unsupported-source',
-      `The source is ${length} frames — shorter than the ${VOCAL_MIN_SOURCE_FRAMES}-frame minimum a honest pitch analysis needs. Nothing was processed.`
-    );
-  }
-};
-
-// ---------------------------------------------------------------------------
-// YIN F0 detection
-// ---------------------------------------------------------------------------
-
-interface YinResult {
-  f0: number;
-  confidence: number;
-}
-
 /**
- * One YIN measurement over `x[start .. start+VOCAL_ANALYSIS_WINDOW)`.
- * Textbook cumulative-mean normalized difference with absolute threshold,
- * first-dip selection, local-minimum walk and parabolic interpolation.
- * Returns null when no dip below the threshold exists inside the τ range
- * that maps into [VOCAL_F0_MIN_HZ, VOCAL_F0_MAX_HZ].
+ * Phase 8C: the source checks are the shared detector's. Their typed
+ * `unsupported-source` failure is translated to this module's own error so the
+ * vocal-tuner contract (and its messages) is unchanged.
  */
-const yinMeasure = (
-  x: Float64Array,
-  start: number,
-  sampleRate: number,
-  tauMin: number,
-  tauMax: number,
-  diff: Float64Array,
-  cmnd: Float64Array
-): YinResult | null => {
-  const W = VOCAL_ANALYSIS_WINDOW;
-  const terms = W - tauMax; // integration terms per lag
-
-  // Difference function for every lag 1..tauMax (the cumulative mean needs
-  // the small lags even though only [tauMin, tauMax] can be selected).
-  for (let tau = 1; tau <= tauMax; tau += 1) {
-    let sum = 0;
-    for (let j = 0; j < terms; j += 1) {
-      const delta = x[start + j] - x[start + j + tau];
-      sum += delta * delta;
+const validateSource = (channels: readonly Float32Array[], sampleRate: number): void => {
+  try {
+    validatePitchSource(channels, sampleRate);
+    return;
+  } catch (error) {
+    if (error instanceof PitchDetectionError) {
+      throw new VocalPitchCorrectionError('unsupported-source', error.message.replace(
+        'Pitch analysis needs',
+        'Pitch correction needs'
+      ));
     }
-    diff[tau] = sum;
+    throw error;
   }
-
-  // Cumulative-mean normalized difference.
-  cmnd[0] = 1;
-  let running = 0;
-  for (let tau = 1; tau <= tauMax; tau += 1) {
-    running += diff[tau];
-    cmnd[tau] = running > 0 ? (diff[tau] * tau) / running : 1;
-  }
-
-  // First dip below the absolute threshold, walked to its local minimum.
-  let best = -1;
-  for (let tau = tauMin; tau <= tauMax; tau += 1) {
-    if (cmnd[tau] < VOCAL_YIN_THRESHOLD) {
-      let walked = tau;
-      while (walked + 1 <= tauMax && cmnd[walked + 1] < cmnd[walked]) walked += 1;
-      best = walked;
-      break;
-    }
-  }
-  if (best < 0) return null;
-
-  // Subharmonic artefact guard: any integer multiple of a true period also
-  // zeroes the difference function, so a tone ABOVE the supported range can
-  // dip at τ = 2·T0 and masquerade as an in-range note an octave lower. If
-  // the half-lag is an equally good or better dip and maps above
-  // VOCAL_F0_MAX_HZ, the frame is honestly unvoiced — never re-pitched to a
-  // fabricated subharmonic. (In-range detections are never overridden: for a
-  // real periodic tone the half-period difference is large, so this guard
-  // cannot misfire on the supported range.)
-  const halfLag = Math.round(best / 2);
-  if (halfLag >= 2 && cmnd[halfLag] <= cmnd[best] && sampleRate / halfLag > VOCAL_F0_MAX_HZ) {
-    return null;
-  }
-
-  // Parabolic interpolation around the dip.
-  let tauStar = best;
-  if (best > 1 && best < tauMax) {
-    const s0 = cmnd[best - 1];
-    const s1 = cmnd[best];
-    const s2 = cmnd[best + 1];
-    const denom = s0 - 2 * s1 + s2;
-    if (Math.abs(denom) > 1e-15) {
-      const adjustment = (0.5 * (s0 - s2)) / denom;
-      if (Math.abs(adjustment) <= 1) tauStar = best + adjustment;
-    }
-  }
-  const f0 = sampleRate / tauStar;
-  if (!Number.isFinite(f0) || f0 < VOCAL_F0_MIN_HZ || f0 > VOCAL_F0_MAX_HZ) return null;
-  const confidence = Math.max(0, Math.min(1, 1 - cmnd[best]));
-  return { f0, confidence };
-};
-
-// ---------------------------------------------------------------------------
-// Analysis
-// ---------------------------------------------------------------------------
-
-/** Mono downmix used for every shared decision (stereo-safe by construction). */
-const monoDownmix = (channels: readonly Float32Array[]): Float64Array => {
-  const length = channels[0].length;
-  const mono = new Float64Array(length);
-  const scale = 1 / channels.length;
-  for (const data of channels) {
-    for (let i = 0; i < length; i += 1) mono[i] += data[i] * scale;
-  }
-  return mono;
 };
 
 /**
@@ -440,63 +347,12 @@ export const analyseVocalPitch = (
   const settings = validateVocalCorrectionSettings(settingsCandidate);
   validateSource(channels, sampleRate);
 
-  const mono = monoDownmix(channels);
-  const N = mono.length;
-  const W = VOCAL_ANALYSIS_WINDOW;
-  const HOP = VOCAL_ANALYSIS_HOP;
-  const frameCount = Math.max(0, Math.floor((N - W) / HOP) + 1);
-
-  const tauMin = Math.max(2, Math.floor(sampleRate / VOCAL_F0_MAX_HZ));
-  const tauMax = Math.min(Math.ceil(sampleRate / VOCAL_F0_MIN_HZ), W - 64);
-
-  const diff = new Float64Array(tauMax + 2);
-  const cmnd = new Float64Array(tauMax + 2);
-
-  // Pass 1: raw YIN measurement + per-frame RMS.
-  const rawF0 = new Float64Array(frameCount); // 0 = none
-  const rawConfidence = new Float64Array(frameCount);
-  const rawVoiced = new Uint8Array(frameCount);
-  const frameRms = new Float64Array(frameCount);
-  let maxFrameRms = 0;
-  for (let i = 0; i < frameCount; i += 1) {
-    const start = i * HOP;
-    let sumSquares = 0;
-    for (let j = 0; j < W; j += 1) {
-      const s = mono[start + j];
-      sumSquares += s * s;
-    }
-    const rmsValue = Math.sqrt(sumSquares / W);
-    frameRms[i] = rmsValue;
-    if (rmsValue > maxFrameRms) maxFrameRms = rmsValue;
-  }
-  const rmsGate = Math.max(VOCAL_RMS_FLOOR, VOCAL_RMS_RELATIVE_FLOOR * maxFrameRms);
-  for (let i = 0; i < frameCount; i += 1) {
-    if (frameRms[i] < rmsGate) continue; // silence / floor: never pitched
-    const measured = yinMeasure(mono, i * HOP, sampleRate, tauMin, tauMax, diff, cmnd);
-    if (measured) {
-      rawF0[i] = measured.f0;
-      rawConfidence[i] = measured.confidence;
-      rawVoiced[i] = 1;
-    }
-  }
-
-  // Pass 2: ±3 % median stability over ±2 neighbouring raw-voiced frames.
-  const STABILITY_NEIGHBOURS = 2;
-  const voiced = new Uint8Array(frameCount);
-  const windowBuffer: number[] = [];
-  for (let i = 0; i < frameCount; i += 1) {
-    if (!rawVoiced[i]) continue;
-    windowBuffer.length = 0;
-    for (let k = i - STABILITY_NEIGHBOURS; k <= i + STABILITY_NEIGHBOURS; k += 1) {
-      if (k >= 0 && k < frameCount && rawVoiced[k]) windowBuffer.push(rawF0[k]);
-    }
-    windowBuffer.sort((a, b) => a - b);
-    const mid = windowBuffer.length >> 1;
-    const med = windowBuffer.length % 2
-      ? windowBuffer[mid]
-      : 0.5 * (windowBuffer[mid - 1] + windowBuffer[mid]);
-    if (Math.abs(rawF0[i] - med) <= VOCAL_STABILITY_TOLERANCE * med) voiced[i] = 1;
-  }
+  // Passes 1–2 (YIN measurement, RMS gating and the ±3 % median stability
+  // filter) are the shared detector's; this module only maps its frames onto
+  // the selected key/scale and drives the correction renderer.
+  const detection = detectPitchFrames(channels, sampleRate);
+  const frameCount = detection.frameCount;
+  const HOP = detection.hopSamples;
 
   // Pass 3: scale mapping + retune-speed smoothing of the corrected contour.
   const frames: VocalPitchFrame[] = new Array(frameCount);
@@ -514,13 +370,14 @@ export const analyseVocalPitch = (
   let previousActive = false;
 
   for (let i = 0; i < frameCount; i += 1) {
-    const isVoiced = voiced[i] === 1;
+    const detected = detection.frames[i];
+    const isVoiced = detected.voiced;
     if (isVoiced) {
       voicedFrameCount += 1;
-      voicedF0.push(rawF0[i]);
+      voicedF0.push(detected.f0Hz as number);
     }
-    const f0Hz = isVoiced ? rawF0[i] : null;
-    const measuredMidi = f0Hz === null ? null : freqToMidi(f0Hz);
+    const f0Hz = isVoiced ? (detected.f0Hz as number) : null;
+    const measuredMidi = f0Hz === null ? null : frequencyToMidi(f0Hz);
     const target = measuredMidi === null ? null : nearestScaleMidi(measuredMidi, settings.rootKey, settings.scale);
     const centsToTarget = target === null ? null : target.cents;
 
@@ -548,7 +405,7 @@ export const analyseVocalPitch = (
       index: i,
       timeSeconds: (i * HOP) / sampleRate,
       f0Hz,
-      confidence: isVoiced ? rawConfidence[i] : 0,
+      confidence: isVoiced ? detected.confidence : 0,
       voiced: isVoiced,
       measuredMidi,
       targetMidi: target === null ? null : target.midi,
@@ -593,7 +450,7 @@ export const summariseVocalCorrection = (
 ): VocalCorrectionSummary => {
   const settings = validateVocalCorrectionSettings(settingsCandidate);
   const median = analysis.medianF0Hz;
-  const medianMidi = median === null ? null : freqToMidi(median);
+  const medianMidi = median === null ? null : frequencyToMidi(median);
   const target = medianMidi === null ? null : nearestScaleMidi(medianMidi, settings.rootKey, settings.scale);
   return {
     voicedRatio: analysis.voicedRatio,

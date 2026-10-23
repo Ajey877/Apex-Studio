@@ -528,6 +528,16 @@ exact defect class Phase 45 eliminated from the metering surfaces; it survives h
 
 ### 4.3 Polyphonic / ARA / Melodyne-style Editor — **UI/PROTOTYPE**
 
+> **Phase 8C update (superseded):** this prototype has been **removed**. The
+> Polyphonic Blob Editor surface is gone from the app (`PolyphonicEditorModal.tsx`
+> deleted) and replaced by **Audio to MIDI** (`src/components/AudioToMidiModal.tsx`,
+> `src/audio/audioToMidi.ts`, `src/state/audioToMidiCommit.ts`), which analyses the
+> selected audio clip's real PCM with the shared YIN detector and commits real
+> project notes through the existing history path. The recording below is kept as
+> the historical defect that motivated the replacement. Audio to MIDI does **not**
+> transcribe polyphonic material: chords, noise and unstable pitch are refused with
+> a typed reason and nothing is written.
+
 | | |
 |---|---|
 | **File** | `src/components/PolyphonicEditorModal.tsx` (356 lines) |
@@ -633,7 +643,7 @@ functionality.
 | # | Claim | Where | Reality | Risk | Severity |
 |---|---|---|---|---|---|
 | **M1** | `"Élastique 3.4.1 Resampling Kernel Ready"` | `WarpAudioProcessorModal.tsx:306` | No time-stretch engine exists. Only `AudioBufferSourceNode.playbackRate` (repitch). No third-party or first-party resampler in the repo. | **Legal + External** — `Élastique` is a zplane development product name; also a version-specific performance claim. | **S2** |
-| **M2** | Title `"MELODYNE / ARA2 POLYPHONIC AUDIO BLOB EDITOR"`; footer `"Direct ARA2 Phase-Locked Resampling Active"` | `PolyphonicEditorModal.tsx:124, 344` | Hard-coded blobs, no audio input, no pitch detection, "Apply" closes the modal. | **Legal + External** — `Melodyne` and `ARA2` are Celemony trademarks; ARA2 is also a specific host-plugin API that is not implemented. | **S2** |
+| ~~**M2**~~ | ~~Title `"MELODYNE / ARA2 POLYPHONIC AUDIO BLOB EDITOR"`; footer `"Direct ARA2 Phase-Locked Resampling Active"`~~ | ~~`PolyphonicEditorModal.tsx:124, 344`~~ | **Resolved in Phase 8C:** the demo surface and its trademarked claims were deleted. The replacement, `AudioToMidiModal`, makes only measured claims about the selected clip's real PCM (monophonic only; polyphonic material refused). | **Legal + External** — no third-party name and no ARA2 claim remains. | **S2 → closed** |
 | **M3** | README: *"Shape sounds with **dual wavetable oscillators**"* | `README.md` feature table | No `createPeriodicWave` anywhere; the `wavetable` type is the subtractive synth with two standard oscillators. | **External** — verifiably false product claim. | **S2** |
 | **M4** | `"Real-time lookahead sidechain dynamic envelope active"` | `SidechainRoutingModal.tsx:321` | Fixed envelope triggered by note events; no detector, no lookahead, `threshold`/`lowFreqOnly`/`highPassFilterHz` inert. | **External** | **S3** |
 | **M5** | Tools tooltip *"Mastering suite — LUFS metering, **multiband processing and limiter**"* | `TransportToolsMenu.tsx:180-186` | No multiband, no limiter, no EQ on the master bus. Master path = 2 gain nodes + 2 analysers. **Contradicts the modal's own honest disclosure.** | **Internal + External** | **S2** |
@@ -966,8 +976,8 @@ Small, real, and user-visible:
 | `timeStretchRate` = `playbackRate` | `audioEngine.ts:3086, 3101` |
 | Vocal tuner simulated pitch | `VocalTunerModal.tsx:120-142` |
 | Vocal tuner has no audio consumer | grep of `src/audio/*.ts` → none |
-| Polyphonic hardcoded blobs | `PolyphonicEditorModal.tsx:26-33` |
-| Polyphonic "Apply" = `onClose` | `PolyphonicEditorModal.tsx:347-352` |
+| ~~Polyphonic hardcoded blobs~~ | **Removed in Phase 8C** — `AudioToMidiModal.tsx` + `src/audio/audioToMidi.ts` analyse real PCM |
+| ~~Polyphonic "Apply" = `onClose`~~ | **Removed in Phase 8C** — the commit writes real pattern notes via `src/state/audioToMidiCommit.ts` |
 | Take comping promotion refused | `TakeCompingModal.tsx:115-131` |
 | Take comping "AI" string | `TakeCompingModal.tsx:93` |
 | No `createPeriodicWave` in codebase | grep `src/audio/` → zero |

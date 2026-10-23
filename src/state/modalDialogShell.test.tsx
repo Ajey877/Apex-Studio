@@ -41,7 +41,7 @@ import { MidiControllerModal } from '../components/MidiControllerModal';
 import { MidiLearnModal } from '../components/MidiLearnModal';
 import { MultiZoneSamplerModal } from '../components/MultiZoneSamplerModal';
 import { ParametricEqModal } from '../components/ParametricEqModal';
-import { PolyphonicEditorModal } from '../components/PolyphonicEditorModal';
+import { AudioToMidiModal } from '../components/AudioToMidiModal';
 import { ProjectBundleZipModal } from '../components/ProjectBundleZipModal';
 import { ProjectManagerModal } from '../components/ProjectManagerModal';
 import { ProjectReplaceConfirmModal } from '../components/ProjectReplaceConfirmModal';
@@ -476,13 +476,13 @@ const MODAL_CASES: ModalCase[] = [
     }),
   },
   {
-    name: 'Polyphonic Editor', file: 'PolyphonicEditorModal.tsx', modalId: 'fl-polyphonic-editor-modal',
-    titleId: 'fl-polyphonic-editor-modal-title', titleText: 'POLYPHONIC AUDIO BLOB EDITOR (PROTOTYPE)',
+    name: 'Audio to MIDI', file: 'AudioToMidiModal.tsx', modalId: 'fl-audio-to-midi-modal',
+    titleId: 'fl-audio-to-midi-modal-title', titleText: 'AUDIO TO MIDI',
     // UI-03M: shared themed scrim, as above.
-    closeLabel: 'Close polyphonic editor',
+    closeLabel: 'Close audio to MIDI',
     overlayClass: 'apex-modal-overlay fixed inset-0 backdrop-blur-md z-50 flex items-center justify-center p-3 sm:p-4 select-none',
-    open: React.createElement(PolyphonicEditorModal, { isOpen: true, onClose: noop }),
-    closed: React.createElement(PolyphonicEditorModal, { isOpen: false, onClose: noop }),
+    open: React.createElement(AudioToMidiModal, { isOpen: true, onClose: noop }),
+    closed: React.createElement(AudioToMidiModal, { isOpen: false, onClose: noop }),
   },
   {
     name: 'Project Bundle Zip', file: 'ProjectBundleZipModal.tsx', modalId: 'fl-project-zip-modal',

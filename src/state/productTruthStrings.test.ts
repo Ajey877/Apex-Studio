@@ -112,7 +112,7 @@ describe('Phase 52 — README matches the implementation', () => {
     // the tests below instead.
     // Phase 8B removed Wavetable Synth from this list: the engine now renders
     // it, so requiring "not production DSP" wording would keep the README wrong.
-    for (const surface of [/Vocal Tuner/i, /Warp Processor/i, /Polyphonic Blob Editor/i]) {
+    for (const surface of [/Vocal Tuner/i, /Warp Processor/i]) {
       const mentions = lines.filter((line) => surface.test(line));
       assert.ok(
         mentions.length > 0,
@@ -135,7 +135,7 @@ describe('Phase 52 — README matches the implementation', () => {
     // A prototype surface must never be upgraded to a shipped status in the
     // capability table. Take Comping is excluded because it is no longer a
     // prototype surface — see the take-comping scope test below.
-    for (const surface of [/Vocal Tuner/i, /Warp Processor/i, /Polyphonic/i]) {
+    for (const surface of [/Vocal Tuner/i, /Warp Processor/i]) {
       for (const line of lines) {
         if (!surface.test(line)) continue;
         assert.ok(
@@ -238,10 +238,26 @@ describe('Phase 52 — truthful not-applied states', () => {
     }
   });
 
-  it('Polyphonic editor declares its demo blobs are not source-audio analysis', () => {
-    const source = read('src/components/PolyphonicEditorModal.tsx');
-    assert.match(source, /NOT APPLIED|PROTOTYPE|DEMO/i);
-    assert.ok(!/Phase-Locked Resampling Active/i.test(source));
+  it('Audio to MIDI is described as real monophonic analysis, never as polyphonic transcription', () => {
+    const source = read('src/components/AudioToMidiModal.tsx');
+    // It really analyses the selected clip's PCM through the shared detector.
+    assert.match(source, /analyseSelectedClipForMidi/);
+    assert.match(source, /monophonic/i);
+    // The old prototype's demo data and its false claims are gone.
+    assert.ok(!/INITIAL_BLOBS|DEMO BLOBS|PolyphonicBlob|Phase-Locked/i.test(source));
+    // The README states the same boundary instead of advertising polyphony.
+    const doc = read('README.md');
+    assert.match(doc, /Audio.to.MIDI/i);
+    const lines = doc.split('\n').filter((line) => /Audio.to.MIDI/i.test(line));
+    assert.ok(
+      lines.some((line) => /monophonic/i.test(line)),
+      'README must state that Audio to MIDI is monophonic-only'
+    );
+    assert.ok(
+      lines.some((line) => /refus/i.test(line)),
+      'README must state that polyphonic material is refused rather than guessed'
+    );
+    assert.ok(!/Polyphonic Blob Editor/i.test(doc), 'the removed blob prototype must not remain in the README');
   });
 
   it('Phase 1M: Take Comping is a real feature connected to project data', () => {
