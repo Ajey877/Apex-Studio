@@ -138,12 +138,14 @@ const installFixture = async (page: import('@playwright/test').Page) => {
 
       if (sourceKind === 'audioClip') {
         // A sustained 110 Hz tone as an audio clip on the source lane, with no
-        // note events anywhere on the source track.
-        const liveCtx = e.getContext();
-        const buffer = liveCtx.createBuffer(1, Math.floor(liveCtx.sampleRate * 1.9), liveCtx.sampleRate);
+        // note events anywhere on the source track. The buffer is built on a
+        // throwaway OfflineAudioContext so this fixture never touches the live
+        // engine context.
+        const bufferCtx = new OfflineAudioContext(1, Math.floor(44100 * 1.9), 44100);
+        const buffer = bufferCtx.createBuffer(1, bufferCtx.length, bufferCtx.sampleRate);
         const channelData = buffer.getChannelData(0);
         for (let i = 0; i < channelData.length; i += 1) {
-          channelData[i] = 0.6 * Math.sin((2 * Math.PI * 110 * i) / liveCtx.sampleRate);
+          channelData[i] = 0.6 * Math.sin((2 * Math.PI * 110 * i) / bufferCtx.sampleRate);
         }
         sampleBuffers.set('sc-source-clip', buffer);
         channels = [
