@@ -43,6 +43,7 @@ import { MixerRoutingAdapter } from './mixerRoutingAdapter';
 import { buildDryStemMixerTracks, buildWetStemMixerTracks, getDirectAuxSendSourceIds, getUpstreamMixerTrackIds } from './auxStemRouting';
 import { renderIndependentPluckVoice } from './instruments/independentPluck';
 import { renderSubtractiveSynthVoice } from './instruments/subtractiveSynth';
+import { renderWavetableVoice } from './instruments/wavetableSynth';
 import { renderFmSynthVoice } from './instruments/fmSynth';
 import { renderSamplerVoice } from './instruments/sampler';
 import { renderDrumPadVoice } from './instruments/drumPad';
@@ -739,7 +740,7 @@ class AudioEngine {
       chiptune_8bit: renderChiptuneVoice,
       independent_pluck: renderIndependentPluckVoice,
       minisynth: renderSubtractiveSynthVoice,
-      wavetable: renderSubtractiveSynthVoice,
+      wavetable: renderWavetableVoice,
       sampler: renderSamplerVoice,
     }, renderSubtractiveSynthVoice);
   }

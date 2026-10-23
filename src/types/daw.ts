@@ -308,12 +308,53 @@ export interface Channel {
   stepVelocities?: number[];
   notes: Note[]; // Notes for piano roll
   synthParams: SynthParameters;
+  /**
+   * Phase 8B — persisted wavetable instrument settings. Optional so every
+   * project saved before the engine existed still loads; absent (or malformed)
+   * values resolve to `DEFAULT_WAVETABLE_PARAMETERS` in
+   * `src/audio/wavetableTables.ts`. Only the `wavetable` instrument reads it.
+   */
+  wavetable?: WavetableParameters;
   sampleUrl?: string;
   sampleName?: string;
   customSample?: CustomSampleData;
   sampleZones?: SampleZone[];
   drumPads?: DrumPad[];
   arp?: ArpSettings;
+}
+
+/**
+ * Phase 8B — supported wavetable warp modes.
+ *
+ * Every mode below is implemented by `src/audio/wavetableTables.ts` before the
+ * table reaches the oscillator. There are deliberately no FM / mirror entries:
+ * this MVP does not implement them, so the UI must not offer them.
+ */
+export type WavetableWarpMode = 'none' | 'pwm' | 'bend' | 'sync';
+
+/**
+ * Phase 8B — persisted wavetable instrument settings.
+ *
+ * These values are read by `renderWavetableVoice` (the `wavetable` instrument
+ * renderer) in both live playback and offline export, and drawn by the
+ * wavetable modal from the same table builder, so the display visualises the
+ * sound that is actually generated. The modal never owns this state: it reads
+ * the selected channel and writes through `onUpdateChannel`.
+ */
+export interface WavetableParameters {
+  /** Position across the frame table, 0 – 1. 0 is frame 0, 1 is the last frame. */
+  morph: number;
+  /** Gain of partials 1–8 applied after morph/warp, 0 – 1 each. */
+  harmonics: number[];
+  warpMode: WavetableWarpMode;
+  /** 0 – 1; meaning depends on `warpMode`. */
+  warpAmount: number;
+  /** Unison voices, 1 – 7 (bounded so a note can never allocate unbounded voices). */
+  unisonVoices: number;
+  /** Half-spread of unison detune in cents, 0 – 50. */
+  unisonDetuneCents: number;
+  /** Unison stereo spread, 0 – 1. 0 keeps the voice mono. */
+  unisonSpread: number;
 }
 
 export interface SynthParameters {
@@ -342,11 +383,9 @@ export interface SynthParameters {
   lfoDepth: number; // 0 - 1.0
   lfoTarget: 'pitch' | 'filter' | 'volume' | 'none';
 
-  // Wavetable & Unison (preview-only modal controls; not in DSP. Phase 79:
-  // unisonSpread dropped — was persisted into synthParams but no consumer
-  // ever read it. Voices/Detune kept on the type because the wavetable
-  // modal's local UI state and future wavetable phases may reference them;
-  // they are preview-only and not read by any audio engine consumer today.)
+  // Subtractive (MiniSynth) unison. Read by `renderSubtractiveSynthVoice`.
+  // Wavetable unison lives on `Channel.wavetable` (Phase 8B) so the two
+  // instruments never overwrite each other's settings.
   unisonVoices?: number; // 1 to 7 voices
   unisonDetune?: number; // 0 to 50 cents
 

@@ -5,6 +5,7 @@ import { createDefaultMixerTracks, createDefaultPlaylistTracks } from '../audio/
 import { isImplicitDefaultSingleZone } from '../audio/sampleZones';
 import { markAudioClipsMissingBufferId } from './playlistClipIntegrity';
 import { normalizePatternContentModel, removeChannelFromPatternContent } from './patternContent';
+import { normalizeWavetableParameters } from '../audio/wavetableTables';
 
 /**
  * Phase 79: default Gross Beat gate state used when the persisted project has
@@ -61,6 +62,23 @@ function stripObsoleteChannelFields<C extends { synthParams?: Record<string, unk
   }
   if (!cleaned) return channel;
   return { ...channel, synthParams: cleaned as C['synthParams'] };
+}
+
+/**
+ * Phase 8B — channel wavetable settings.
+ *
+ * A project saved before the wavetable engine existed simply has no
+ * `wavetable` field; it stays absent and the renderer/UI resolve
+ * `DEFAULT_WAVETABLE_PARAMETERS`, so old documents load unchanged. When the
+ * field is present it is clamped to engine bounds here, at the persistence
+ * boundary, so a hand-edited or corrupt document can never produce an
+ * out-of-range morph, more than seven unison voices or non-finite values.
+ */
+function normalizeChannelWavetable<
+  C extends { wavetable?: unknown; instrumentType?: string }
+>(channel: C): C {
+  if (!('wavetable' in channel) || channel.wavetable === undefined) return channel;
+  return { ...channel, wavetable: normalizeWavetableParameters(channel.wavetable) };
 }
 
 // Obsolete fields on mixer tracks (stereoWidth, inert sidechain fields).
@@ -528,6 +546,7 @@ export const normalizeProjectState = (input: unknown): ProjectState => {
     // consumed by any DSP and must not round-trip back out on the next save.
     channels: (Array.isArray(candidate.channels) ? clone(candidate.channels) : defaults.channels)
       .map(stripObsoleteChannelFields)
+      .map(normalizeChannelWavetable)
       .map(channel => {
         if (channel.customSample?.id && channel.sampleZones?.length === 1) {
           const singleZone = channel.sampleZones[0];

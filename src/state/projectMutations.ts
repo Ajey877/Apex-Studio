@@ -435,6 +435,14 @@ export const isContinuousChannelUpdate = (updates: Partial<Channel>): boolean =>
   if ('synthParams' in updates && updates.synthParams) {
     return Object.keys(updates.synthParams).length <= 2;
   }
+  // Phase 8B: wavetable controls are continuous edits. A slider drag publishes
+  // one param object per change; treating each as a discrete history entry
+  // would flood undo with one step per pixel. Loading a preset or switching the
+  // channel's instrument also sends `instrumentType`, which the guard above
+  // already routes to a single discrete history entry.
+  if ('wavetable' in updates && updates.wavetable) {
+    return !('instrumentType' in updates) && Object.keys(updates).length <= 2;
+  }
   return 'volume' in updates || 'pan' in updates || 'pitch' in updates;
 };
 
@@ -448,6 +456,9 @@ export const getChannelUpdateLabel = (updates: Partial<Channel>): string => {
   if ('pitch' in updates) return 'Change channel pitch';
   if ('customSample' in updates) return 'Assign sample';
   if ('synthParams' in updates) {
+    return isContinuousChannelUpdate(updates) ? 'Change synth parameter' : 'Apply synth preset';
+  }
+  if ('wavetable' in updates) {
     return isContinuousChannelUpdate(updates) ? 'Change synth parameter' : 'Apply synth preset';
   }
   return 'Update channel';
