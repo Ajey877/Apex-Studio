@@ -7,6 +7,14 @@ import { PunchCancelledError, PunchCaptureWindow, type PunchWindowResult } from 
 import { scheduleMetronomeClick } from './metronomeClick';
 import { arpStepSeconds, resolveArpNoteDurationSteps, resolveArpRateSteps } from './noteGate';
 import { resolveInaudibleTakeClipIds } from './takeLaneManager';
+import {
+  createEqualPowerFadeCurve,
+  resolveBlockingCompIssues,
+  resolveTakeCompPlan,
+  UNBOUNDED_COMP_MATERIAL,
+  type TakeCompMaterial,
+  type TakeCompSegment,
+} from './takeCompRegions';
 
 import { 
   Channel, 
@@ -3612,6 +3620,13 @@ class AudioEngine {
       // Phase 10A: lane-muted clips are silently dropped, so their missing
       // buffers must not fail the export — only audible clips are validated.
       // Phase 1M: inactive takes are silently dropped like muted-lane clips.
+      // Phase 10A: a comp phrase whose take audio could not be restored blocks the
+      // export exactly like an absent audible clip does — a WAV with a silent
+      // hole where the comp names a phrase would be a misleading result.
+      const blockingCompIssues = resolveBlockingCompIssues(clips);
+      if (blockingCompIssues.length > 0) {
+        throw new Error(blockingCompIssues.map(issue => issue.message).join(' '));
+      }
       const offlineInaudibleTakes = resolveInaudibleTakeClipIds(clips);
       for (const clip of clips) {
         if (clip.type === 'audio' && !clip.mute && !this.isClipPlaylistLaneMuted(clip, offlineLaneMutes) && !offlineInaudibleTakes.has(clip.id)) {
@@ -5884,12 +5899,154 @@ class AudioEngine {
   }
 
   /**
+   * Phase 10A — the material a take really has, in timeline bars, so a crossfade
+   * can be bounded instead of inventing silence.
+   *
+   * `leadInBars` is the take's `offsetSteps` trim (how much source sits before
+   * the group's first sample); `totalBars` is `Buffer.duration / playbackRate`
+   * expressed in project bars. A take whose buffer is not loaded yet reports
+   * `UNBOUNDED_COMP_MATERIAL`, which lets the plan stay material-agnostic — the
+   * scheduler still truncates by `Buffer.duration`, and the export path already
+   * refuses to render a project with a missing audible buffer.
+   */
+  private takeCompMaterialFor(clip: PlaylistClip): TakeCompMaterial {
+    const buffer = clip.audioBufferId ? this.sampleBuffers.get(clip.audioBufferId) : null;
+    if (!buffer || !Number.isFinite(buffer.duration) || buffer.duration <= 0) {
+      return UNBOUNDED_COMP_MATERIAL;
+    }
+    const safeBpm = Number.isFinite(this.bpm) && this.bpm > 0 ? this.bpm : 120;
+    const secondsPerBar = this.secondsPerBarAt(safeBpm);
+    if (!(secondsPerBar > 0)) return UNBOUNDED_COMP_MATERIAL;
+    const rate = Number.isFinite(clip.timeStretchRate) && (clip.timeStretchRate ?? 1) > 0
+      ? (clip.timeStretchRate ?? 1)
+      : 1;
+    const stepsBar = this.currentStepsPerBar;
+    const leadInBars = Math.max(0, (clip.offsetSteps || 0) / stepsBar);
+    return {
+      leadInBars,
+      totalBars: (buffer.duration / rate) / secondsPerBar,
+    };
+  }
+
+  /**
+   * Phase 10A — the comp segments this clip supplies, or `null` when the group
+   * has no comp regions (Phase 1M whole-take behaviour, untouched).
+   */
+  private resolveCompSegmentsForClip(clip: PlaylistClip): TakeCompSegment[] | null {
+    if (!clip.takeGroupId) return null;
+    const plan = resolveTakeCompPlan({
+      clips: this.activeClips,
+      takeGroupId: clip.takeGroupId,
+      takeMaterial: takeClip => this.takeCompMaterialFor(takeClip),
+    });
+    if (!plan) return null;
+    return plan.segments.filter(segment => segment.takeClipId === clip.id);
+  }
+
+  /**
+   * Phase 10A — schedules a take group's assembled comp.
+   *
+   * Every segment is a window of one take clip expressed in the clip's own
+   * timeline terms (start bar, length, `offsetSteps` trim, fades), so it runs
+   * through exactly the same source/offset/rate/fade pipeline a plain audio clip
+   * uses. Nothing here renders audio on its own: live playback, seek/resume,
+   * bounce and WAV/stem export all reach this through
+   * `playAudioClipWithFades`.
+   *
+   * `positionOffsetSeconds` is how far into the clip the transport already is
+   * (0 at the start-bar trigger). On a seek only the segment that contains the
+   * position is started, from the correct offset, with its crossfade shortened
+   * by however much of it has already elapsed.
+   */
+  private scheduleCompClipSegments(
+    clip: PlaylistClip,
+    segments: readonly TakeCompSegment[],
+    startTime: number,
+    positionOffsetSeconds: number,
+  ): void {
+    const safeBpm = Number.isFinite(this.bpm) && this.bpm > 0 ? this.bpm : 120;
+    const secondsPerBar = this.secondsPerBarAt(safeBpm);
+    const stepsBar = this.currentStepsPerBar;
+    if (!(secondsPerBar > 0)) return;
+    const elapsedBars = Math.max(0, positionOffsetSeconds) / secondsPerBar;
+
+    for (const segment of segments) {
+      // Seeking: only the segment the playhead is inside sounds, and it starts
+      // at the playhead rather than at its own downbeat.
+      if (elapsedBars > 0) {
+        const inside = elapsedBars >= segment.startBar && elapsedBars < segment.endBar;
+        if (!inside) continue;
+      }
+      const consumedBars = Math.max(0, elapsedBars - segment.startBar);
+      // A fresh trigger schedules every phrase at its own place on the timeline,
+      // so the two takes in a comp are real consecutive sources. A seek starts
+      // the phrase the playhead is inside immediately, from the offset it had
+      // already reached.
+      const segmentStartTime = elapsedBars > 0
+        ? startTime
+        : startTime + segment.startBar * secondsPerBar;
+      const remainingBars = segment.endBar - segment.startBar - consumedBars;
+      if (!(remainingBars > 0)) continue;
+
+      const crossfadeInBars = Math.max(0, segment.fadeInBars - consumedBars);
+      const segmentClip: PlaylistClip = {
+        ...clip,
+        startBar: clip.startBar + segment.startBar + consumedBars,
+        lengthBars: remainingBars,
+        // The segment's leading edge is `segment.startBar` bars into the take,
+        // on top of whatever trim the take clip itself carries.
+        offsetSteps: (clip.offsetSteps || 0) + (segment.startBar + consumedBars) * stepsBar,
+        // Clip-level fades only frame the assembled performance's outer edges;
+        // inside the comp the equal-power crossfades own both sides.
+        fadeInBars: segment.usesClipFadeIn ? clip.fadeInBars ?? 0 : 0,
+        fadeOutBars: segment.usesClipFadeOut ? clip.fadeOutBars ?? 0 : 0,
+      };
+
+      this.scheduleClipSource(
+        segmentClip,
+        segmentStartTime,
+        0,
+        {
+          fadeInSec: segment.usesClipFadeIn ? undefined : crossfadeInBars * secondsPerBar,
+          fadeOutSec: segment.usesClipFadeOut ? undefined : segment.fadeOutBars * secondsPerBar,
+        },
+      );
+    }
+  }
+
+  /**
    * `positionOffsetSeconds` is how far into the clip the transport position
    * already is when the source is (re)started — 0 for the normal start-bar
    * trigger, and `position - clipStart` for seek/resume re-triggers. The
    * clip's own `offsetSteps` trim is applied first, so both compose.
+   *
+   * Phase 10A: a clip that belongs to a take group carrying comp regions is
+   * scheduled as its segments instead of as one whole source.
    */
   private playAudioClipWithFades(clip: PlaylistClip, startTime: number, positionOffsetSeconds = 0) {
+    const compSegments = this.resolveCompSegmentsForClip(clip);
+    if (compSegments) {
+      this.scheduleCompClipSegments(clip, compSegments, startTime, positionOffsetSeconds);
+      return;
+    }
+    this.scheduleClipSource(clip, startTime, positionOffsetSeconds);
+  }
+
+  /**
+   * Starts one source for `clip` — the single-source path every audio clip has
+   * always used, and the per-segment path a comp region reuses.
+   *
+   * `envelope` pins a side's fade explicitly (in seconds, equal-power) instead
+   * of deriving it from the clip's `fadeInBars`/`fadeOutBars`. An explicit `0`
+   * still applies the 2 ms click guard, because a hard start on a non-zero
+   * sample is a click, not an edit.
+   */
+  private scheduleClipSource(
+    clip: PlaylistClip,
+    startTime: number,
+    positionOffsetSeconds = 0,
+    envelope?: { fadeInSec?: number; fadeOutSec?: number },
+  ) {
     if (!this.ctx) return;
     if (!this.isAudioClipChannelAudible(clip)) return;
     const buf = clip.audioBufferId ? this.sampleBuffers.get(clip.audioBufferId) : null;
@@ -5944,12 +6101,20 @@ class AudioEngine {
     // Safe fade envelope calculation: in and out cannot invert or exceed half duration
     const maxFade = effectiveDuration / 2;
     const secondsPerBar = this.secondsPerBarAt(safeBpm);
-    const requestedFadeIn = Math.max(0, (clip.fadeInBars || 0) * secondsPerBar);
-    const requestedFadeOut = Math.max(0, (clip.fadeOutBars || 0) * secondsPerBar);
+    const requestedFadeIn = envelope?.fadeInSec !== undefined
+      ? Math.max(0, envelope.fadeInSec)
+      : Math.max(0, (clip.fadeInBars || 0) * secondsPerBar);
+    const requestedFadeOut = envelope?.fadeOutSec !== undefined
+      ? Math.max(0, envelope.fadeOutSec)
+      : Math.max(0, (clip.fadeOutBars || 0) * secondsPerBar);
 
     const minMicroFade = Math.min(0.002, maxFade);
     const fadeInSec = Math.min(maxFade, requestedFadeIn > 0 ? requestedFadeIn : minMicroFade);
     const fadeOutSec = Math.min(maxFade, requestedFadeOut > 0 ? requestedFadeOut : minMicroFade);
+    // Phase 10A: a comp crossfade is an equal-power blend, so each side of the
+    // seam follows sin/cos instead of the clip fade's exponential dB ramp.
+    const equalPowerIn = envelope?.fadeInSec !== undefined;
+    const equalPowerOut = envelope?.fadeOutSec !== undefined;
 
     const t0 = startTime;
     const t1 = startTime + fadeInSec;
@@ -5977,19 +6142,31 @@ class AudioEngine {
 
     const effectiveBaseVolume = baseGain > 1e-4 ? baseGain : 1.0;
     const peakGain = Math.max(0.0001, effectiveBaseVolume);
-    gainNode.gain.setValueAtTime(0.0001, t0);
-    if (fadeInSec > 0.0001) {
+    if (equalPowerIn && fadeInSec > 0.0001) {
+      gainNode.gain.setValueAtTime(0, t0);
+      gainNode.gain.setValueCurveAtTime(createEqualPowerFadeCurve('in', peakGain), t0, fadeInSec);
+    } else if (fadeInSec > 0.0001) {
+      gainNode.gain.setValueAtTime(0.0001, t0);
       gainNode.gain.exponentialRampToValueAtTime(peakGain, t1);
     } else {
       gainNode.gain.setValueAtTime(peakGain, t0);
     }
 
-    if (t2 > t1) {
+    // The fade-out curve sits at [t2, t3], so no other event may be scheduled
+    // there. Without an equal-power fade-out the value must still be pinned back
+    // to peak at t2: otherwise the exponential ramp below would interpolate all
+    // the way from the previous event (the fade-in curve) and the phrase would
+    // keep decaying for its whole length.
+    if (t2 > t1 && !equalPowerOut) {
       gainNode.gain.setValueAtTime(peakGain, t2);
     }
 
     if (fadeOutSec > 0.0001 && t3 > t2) {
-      gainNode.gain.exponentialRampToValueAtTime(0.0001, t3);
+      if (equalPowerOut) {
+        gainNode.gain.setValueCurveAtTime(createEqualPowerFadeCurve('out', peakGain), t2, fadeOutSec);
+      } else {
+        gainNode.gain.exponentialRampToValueAtTime(0.0001, t3);
+      }
     }
 
     source.connect(gainNode);
