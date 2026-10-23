@@ -155,6 +155,8 @@ export const DURATION_POLICY_ROLES = [
   'FALLBACK',
   /** Copies a duration between representations without changing it. */
   'PASS_THROUGH',
+  /** Converts a measured (non-step) duration onto the project's step grid. */
+  'DURATION_LEGALIZER',
   /** Turns steps into audible seconds — owned by the separate gate policy. */
   'AUDIBLE_GATE_SEPARATE_POLICY',
   /** A duration-shaped number that is not `Note.duration` at all. */
@@ -384,18 +386,21 @@ export const DURATION_ALTERING_LAYERS: readonly DurationPolicyLayer[] = Object.f
     anchors: ['const requestedMinimumDuration'],
   },
   {
-    id: 'polyphonic.blob-audition',
-    file: 'src/components/PolyphonicEditorModal.tsx',
-    symbols: ['polyphonicBlobAuditionNote', 'handleSplitBlob'],
-    role: 'PASS_THROUGH',
+    id: 'audio-to-midi.commit',
+    file: 'src/state/audioToMidiCommit.ts',
+    symbols: ['toProjectNotes', 'audioToMidiNewPatternLengthSteps'],
+    role: 'DURATION_LEGALIZER',
     domain: 'note-steps',
-    consumesPolicy: false,
-    declaredMinimum: null,
-    behavior: 'Auditions a vocal blob with its own step length, and splits a blob longer than two steps in half.',
+    consumesPolicy: true,
+    declaredMinimum: 0.25,
+    behavior:
+      'Converts transcribed note lengths into project notes on the duration grid and sizes a new destination pattern ' +
+      'from the transcription extent.',
     reason:
-      'Blob lengths are already step values, so the audition note passes them through (Phase 1B fixed a stray ' +
-      'division here). The split refuses blobs of two steps or less, so neither half can fall below the minimum.',
-    anchors: ['duration: blob.durationSteps', 'target.durationSteps <= 2'],
+      'Audio-to-MIDI measures lengths in seconds and must hand the Piano Roll legal step values, so it consumes the ' +
+      'shared policy rather than exporting a second minimum. Appending offsets the placed notes by whole grid steps, ' +
+      'which is also policy arithmetic.',
+    anchors: ['duration: quantizeDurationSteps(note.durationSteps)', 'audioToMidiNewPatternLengthSteps'],
   },
   {
     id: 'gate.note-gate',

@@ -74,6 +74,7 @@ const allToolHandlers: Required<TransportToolHandlers> = {
   wavetable: () => {},
   keymap: () => {},
   vocalTuner: () => {},
+  audioToMidi: () => {},
   timeFx: () => {},
   warp: () => {},
   slicer: () => {},
@@ -132,7 +133,7 @@ const baseProps: TransportBarProps = {
   onOpenWavetableSynth: () => {},
   onOpenTakeComping: () => {},
   onOpenSidechain: () => {},
-  onOpenPolyphonicEditor: () => {},
+  onOpenAudioToMidi: () => {},
   onOpenDesktopApp: () => {},
   onOpenWarpProcessor: () => {},
   onOpenMasterMacros: () => {},
@@ -316,7 +317,7 @@ test('the overflow menu exposes every secondary tool id', () => {
   for (const id of TRANSPORT_TOOL_IDS) {
     assert.ok(html.includes(`id="${id}"`), `${id} must be reachable from the overflow menu`);
   }
-  assert.equal(TRANSPORT_TOOL_IDS.length, 16);
+  assert.equal(TRANSPORT_TOOL_IDS.length, 17);
 });
 
 test('the core set plus the overflow menu still covers every tool that shipped before', () => {

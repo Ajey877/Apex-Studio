@@ -80,7 +80,8 @@ import {
 } from './state/playlistClipIntegrity';
 import { synchronizeBeforeRuntimePublication } from './state/runtimeStatePublication';
 import { resynchronizeLiveEngineFromProjectState } from './state/liveEngineResynchronization';
-import { clonePatternInProjectState, selectPatternInHistory, selectPatternInProjectState } from './state/patternContent';
+import { addEmptyPatternToProjectState, clonePatternInProjectState, selectPatternInHistory, selectPatternInProjectState } from './state/patternContent';
+import { audioToMidiNewPatternLengthSteps, commitAudioToMidiNotes } from './state/audioToMidiCommit';
 import { commitThemeSelection, readThemePreference, type ThemeMode } from './state/theme';
 import {
   ContinuousHistoryBatcher,
@@ -154,7 +155,7 @@ import { MultiZoneSamplerModal } from './components/MultiZoneSamplerModal';
 import { WavetableSynthModal } from './components/WavetableSynthModal';
 import { TakeCompingModal } from './components/TakeCompingModal';
 import { SidechainRoutingModal } from './components/SidechainRoutingModal';
-import { PolyphonicEditorModal } from './components/PolyphonicEditorModal';
+import { AudioToMidiModal, type AudioToMidiCommitRequest, type AudioToMidiCommitOutcome } from './components/AudioToMidiModal';
 import { DesktopAppModal } from './components/DesktopAppModal';
 import { WarpAudioProcessorModal } from './components/WarpAudioProcessorModal';
 import { DEFAULT_INCLUDE_MIXER_FX } from './components/exportMixerFxPreference';
@@ -415,7 +416,7 @@ export function App() {
   const [isWavetableSynthOpen, setIsWavetableSynthOpen] = useState(false);
   const [isTakeCompingOpen, setIsTakeCompingOpen] = useState(false);
   const [isSidechainOpen, setIsSidechainOpen] = useState(false);
-  const [isPolyphonicEditorOpen, setIsPolyphonicEditorOpen] = useState(false);
+  const [isAudioToMidiOpen, setIsAudioToMidiOpen] = useState(false);
   const [isDesktopAppOpen, setIsDesktopAppOpen] = useState(false);
   const [isWarpProcessorOpen, setIsWarpProcessorOpen] = useState(false);
   const [isMasterMacrosOpen, setIsMasterMacrosOpen] = useState(false);
@@ -1481,6 +1482,77 @@ export function App() {
     }
   };
 
+  /**
+   * Phase 8C — Audio-to-MIDI commit.
+   *
+   * The transcription is previewed in the modal (pure analysis, no mutation).
+   * This is the only path that writes it: the notes go through
+   * `commitAudioToMidiNotes` (which resolves whether the destination pattern's
+   * content lives on the live channel or in `Pattern.channelContent`) inside
+   * `mutateProjectState`, so the whole transcription is ONE undoable history
+   * step and is autosaved by the existing project writer.
+   *
+   * The default destination is a NEW pattern (`patternId === null`): creating it
+   * also selects it, so the Piano Roll shows exactly what was written and the
+   * previously selected pattern keeps its content untouched.
+   */
+  const handleCommitAudioToMidi = (request: AudioToMidiCommitRequest): AudioToMidiCommitOutcome => {
+    const current = projectStateRef.current;
+    const channel = current.channels.find(candidate => candidate.id === request.channelId);
+    if (!channel) {
+      return { ok: false, message: 'That channel is no longer in the project, so nothing was written.' };
+    }
+    const clip = current.playlistClips.find(candidate => candidate.id === selectedPlaylistClipId);
+    const newPatternId = request.patternId ? null : `pat-${current.patterns.length + 1}-${Date.now()}`;
+    const newPatternName = `Audio to MIDI — ${clip?.name ?? 'clip'}`;
+    const patternId = request.patternId ?? newPatternId ?? '';
+    const patternName = request.patternId
+      ? current.patterns.find(candidate => candidate.id === request.patternId)?.name ?? 'pattern'
+      : newPatternName;
+    // Assigned once, by the updater that actually ran. `mutateProjectState`
+    // invokes it synchronously, and it returns the very state it published.
+    let written: number | null = null;
+    try {
+      mutateProjectState(state => {
+        const base = newPatternId
+          ? addEmptyPatternToProjectState(state, {
+              id: newPatternId,
+              name: newPatternName,
+              color: '#00e5ff',
+              lengthSteps: audioToMidiNewPatternLengthSteps(request.notes),
+            })
+          : state;
+        const result = commitAudioToMidiNotes(base, {
+          patternId,
+          channelId: request.channelId,
+          notes: request.notes,
+          mode: request.mode,
+          confirmReplace: request.confirmReplace,
+        });
+        written = result.notesWritten;
+        return result.state;
+      }, 'Audio to MIDI');
+    } catch (error) {
+      return {
+        ok: false,
+        message:
+          error instanceof Error
+            ? `${error.message} Nothing was written.`
+            : `The transcription could not be committed (${String(error)}). Nothing was written.`,
+      };
+    }
+    return {
+      ok: true,
+      patternId,
+      patternName,
+      channelName: channel.name,
+      notesWritten: written ?? request.notes.length,
+      message:
+        `Wrote ${written ?? request.notes.length} note${(written ?? request.notes.length) === 1 ? '' : 's'} from ` +
+        `"${clip?.name ?? 'the selected clip'}" into "${patternName}" / "${channel.name}". One undo step; the project is autosaved.`,
+    };
+  };
+
   const handleAddPattern = () => {
     const current = projectStateRef.current;
     const nextIdx = current.patterns.length + 1;
@@ -2285,7 +2357,7 @@ export function App() {
         onOpenWavetableSynth={() => setIsWavetableSynthOpen(true)}
         onOpenTakeComping={() => setIsTakeCompingOpen(true)}
         onOpenSidechain={() => setIsSidechainOpen(true)}
-        onOpenPolyphonicEditor={() => setIsPolyphonicEditorOpen(true)}
+        onOpenAudioToMidi={() => setIsAudioToMidiOpen(true)}
         onOpenDesktopApp={() => setIsDesktopAppOpen(true)}
         onOpenWarpProcessor={() => setIsWarpProcessorOpen(true)}
         onOpenMasterMacros={() => setIsMasterMacrosOpen(true)}
@@ -2807,7 +2879,19 @@ export function App() {
         }}
       />
       <SidechainRoutingModal isOpen={isSidechainOpen} onClose={() => setIsSidechainOpen(false)} mixerTracks={projectState.mixerTracks} onUpdateMixerTracks={(tracks) => mutateProjectState(curr => ({ ...curr, mixerTracks: tracks }), 'Update mixer routing')} />
-      <PolyphonicEditorModal isOpen={isPolyphonicEditorOpen} onClose={() => setIsPolyphonicEditorOpen(false)} />
+      <AudioToMidiModal
+        isOpen={isAudioToMidiOpen}
+        onClose={() => setIsAudioToMidiOpen(false)}
+        project={projectState}
+        clips={projectState.playlistClips}
+        selectedClipId={selectedPlaylistClipId}
+        onCommitNotes={handleCommitAudioToMidi}
+        onRevealInPianoRoll={(patternId, targetChannelId) => {
+          handleSelectPattern(patternId);
+          setSelectedChannelId(targetChannelId);
+          setCurrentView('piano_roll');
+        }}
+      />
       <DesktopAppModal isOpen={isDesktopAppOpen} onClose={() => setIsDesktopAppOpen(false)} />
       <WarpAudioProcessorModal isOpen={isWarpProcessorOpen} onClose={() => setIsWarpProcessorOpen(false)} clips={projectState.playlistClips} selectedClipId={selectedPlaylistClipId} projectBpm={projectState.meta.bpm} timeSignature={projectState.meta.timeSignature} onUpdateClip={(updatedClip) => { const nextState = { ...projectStateRef.current, playlistClips: projectStateRef.current.playlistClips.map(c => c.id === updatedClip.id ? updatedClip : c) }; updatePlaylistProjectState(nextState); commitPlaylistHistory(nextState, 'Warp audio clip'); }} />
       <MasterMacroRackModal isOpen={isMasterMacrosOpen} onClose={() => setIsMasterMacrosOpen(false)} mixerTracks={projectState.mixerTracks} channels={projectState.channels} macroKnobs={projectState.macroKnobs} onUpdateMacros={(macros) => mutateProjectState(curr => updateMacroRackInProjectState(curr, macros), 'Update macro controls', { isContinuous: true })} />

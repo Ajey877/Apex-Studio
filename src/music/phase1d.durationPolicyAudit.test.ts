@@ -195,7 +195,7 @@ const EXPECTED_INVENTORY: readonly ExpectedLayer[] = Object.freeze([
   { id: 'midi.import-plan', file: 'src/components/pianoRollMidiImport.ts', role: 'PASS_THROUGH', domain: 'note-steps', consumesPolicy: false, declaredMinimum: null, probeExpected: 0.25 },
   { id: 'engine.bass-extraction-fallback', file: 'src/audio/audioEngine.ts', role: 'FALLBACK', domain: 'note-steps', consumesPolicy: false, declaredMinimum: 2 },
   { id: 'engine.offline-render-window', file: 'src/audio/audioEngine.ts', role: 'NON_MUSICAL', domain: 'audio-seconds', consumesPolicy: false, declaredMinimum: null },
-  { id: 'polyphonic.blob-audition', file: 'src/components/PolyphonicEditorModal.tsx', role: 'PASS_THROUGH', domain: 'note-steps', consumesPolicy: false, declaredMinimum: null },
+  { id: 'audio-to-midi.commit', file: 'src/state/audioToMidiCommit.ts', role: 'DURATION_LEGALIZER', domain: 'note-steps', consumesPolicy: true, declaredMinimum: 0.25, probeExpected: 0.25 },
   { id: 'gate.note-gate', file: 'src/audio/noteGate.ts', role: 'AUDIBLE_GATE_SEPARATE_POLICY', domain: 'audio-seconds', consumesPolicy: false, declaredMinimum: null },
   { id: 'gate.arp-transient-duration', file: 'src/audio/noteGate.ts', role: 'AUDIBLE_GATE_SEPARATE_POLICY', domain: 'note-steps', consumesPolicy: false, declaredMinimum: null, probeExpected: 0.05 },
   { id: 'gate.instrument-policy', file: 'src/audio/instrumentGatePolicy.ts', role: 'AUDIBLE_GATE_SEPARATE_POLICY', domain: 'note-steps', consumesPolicy: false, declaredMinimum: 1 },
@@ -236,7 +236,6 @@ const MUST_NOT_FLAG_FILES: readonly string[] = Object.freeze([
   'src/audio/presets.ts',
   'src/audio/recordingPipeline.ts',
   'src/components/PlaylistArranger.tsx',
-  'src/components/PolyphonicEditorModal.tsx',
   'src/components/WarpAudioProcessorModal.tsx',
   'src/components/pianoRollMidiImport.ts',
 ]);

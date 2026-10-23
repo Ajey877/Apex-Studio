@@ -58,7 +58,7 @@ export interface TransportBarProps {
   onOpenWavetableSynth?: () => void;
   onOpenTakeComping?: () => void;
   onOpenSidechain?: () => void;
-  onOpenPolyphonicEditor?: () => void;
+  onOpenAudioToMidi?: () => void;
   onOpenDesktopApp?: () => void;
   onOpenWarpProcessor?: () => void;
   onOpenMasterMacros?: () => void;
@@ -178,6 +178,7 @@ export const TransportBar: React.FC<TransportBarProps> = ({
   onOpenGrossBeat,
   onOpenSlicer,
   onOpenVocalTuner,
+  onOpenAudioToMidi,
   onOpenMidiLearn,
   onOpenMultiZoneSampler,
   onOpenWavetableSynth,
@@ -248,6 +249,7 @@ export const TransportBar: React.FC<TransportBarProps> = ({
         wavetable: onOpenWavetableSynth,
         keymap: onOpenMultiZoneSampler,
         vocalTuner: onOpenVocalTuner,
+        audioToMidi: onOpenAudioToMidi,
         timeFx: onOpenGrossBeat,
         warp: onOpenWarpProcessor,
         slicer: onOpenSlicer,
@@ -266,6 +268,7 @@ export const TransportBar: React.FC<TransportBarProps> = ({
       onOpenWavetableSynth,
       onOpenMultiZoneSampler,
       onOpenVocalTuner,
+      onOpenAudioToMidi,
       onOpenGrossBeat,
       onOpenWarpProcessor,
       onOpenSlicer,
