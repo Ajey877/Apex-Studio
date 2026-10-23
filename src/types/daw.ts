@@ -493,6 +493,35 @@ export interface PlaylistClip {
   takeGroupId?: string;
   takeIndex?: number;
   activeTakeIndex?: number;
+  /**
+   * Phase 10A: phrase-level comp regions for this take group.
+   *
+   * Group state, replicated on every clip of the group (clips are the project's
+   * persistence unit) and canonicalized on load by
+   * `normalizeTakeCompRegionsInClips`. Each region names the `takeIndex` that
+   * sounds inside it, in bars relative to the group's start, plus the equal-power
+   * crossfade joining it to the next region. Absent or empty = the Phase 1M
+   * whole-take behaviour (`activeTakeIndex`).
+   */
+  compRegions?: TakeCompRegion[];
+}
+
+/**
+ * Phase 10A: one phrase of an assembled take comp.
+ *
+ * `startBar` / `lengthBars` are measured in bars *relative to the take group's
+ * start*, so moving or trimming the group moves the comp with it.
+ * `crossfadeBars` is the trailing edge: the equal-power blend into the region
+ * that follows, when that region exists, is adjacent, and names a different
+ * take. It is bounded by half of either neighbouring phrase and by the material
+ * the two takes really have.
+ */
+export interface TakeCompRegion {
+  id: string;
+  startBar: number;
+  lengthBars: number;
+  takeIndex: number;
+  crossfadeBars: number;
 }
 
 export interface MultibandBandSettings {

@@ -28,6 +28,10 @@
  *     (painted topmost) without reordering the persisted clip array.
  */
 import type { PlaylistClip } from '../types/daw';
+import {
+  resolveCanonicalCompRegions,
+  resolveTakeCompRegionAudibility,
+} from './takeCompRegions';
 
 /**
  * Resolves the active take index for a take group. When no explicit selection
@@ -70,6 +74,14 @@ export const isTakeAudible = (clip: PlaylistClip, allClips: readonly PlaylistCli
  */
 export const resolveInaudibleTakeClipIds = (clips: readonly PlaylistClip[]): Set<string> => {
   const inaudible = new Set<string>();
+  // Phase 10A: a group carrying valid comp regions answers audibility per take
+  // clip from the regions, not from `activeTakeIndex` — a take that owns at
+  // least one phrase is audible even when it is not the whole-take selection,
+  // and a take that owns no phrase stays silent even when it is. Groups without
+  // comp regions fall through to the Phase 1M rule unchanged.
+  for (const clipId of resolveTakeCompRegionAudibility(clips)) {
+    inaudible.add(clipId);
+  }
   // Group clips by takeGroupId
   const groups = new Map<string, PlaylistClip[]>();
   for (const clip of clips) {
@@ -78,8 +90,11 @@ export const resolveInaudibleTakeClipIds = (clips: readonly PlaylistClip[]): Set
     if (list) list.push(clip);
     else groups.set(clip.takeGroupId, [clip]);
   }
-  for (const [, groupClips] of groups) {
-    const activeIndex = resolveActiveTakeIndex(groupClips, groupClips[0].takeGroupId!);
+  for (const [groupId, groupClips] of groups) {
+    // Comped groups were answered above; their whole-take selection is not
+    // authoritative while regions exist.
+    if (resolveCanonicalCompRegions(groupClips).regions.length > 0) continue;
+    const activeIndex = resolveActiveTakeIndex(groupClips, groupId);
     if (activeIndex === null) continue;
     for (const clip of groupClips) {
       const clipTakeIndex = typeof clip.takeIndex === 'number' ? clip.takeIndex : 0;

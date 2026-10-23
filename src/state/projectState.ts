@@ -4,6 +4,7 @@ import { audioEngine } from '../audio/audioEngine';
 import { createDefaultMixerTracks, createDefaultPlaylistTracks } from '../audio/presets';
 import { isImplicitDefaultSingleZone } from '../audio/sampleZones';
 import { markAudioClipsMissingBufferId } from './playlistClipIntegrity';
+import { normalizeTakeCompRegionsInClips } from '../audio/takeCompRegions';
 import { normalizePatternContentModel, removeChannelFromPatternContent } from './patternContent';
 import { normalizeWavetableParameters } from '../audio/wavetableTables';
 import { normalizeSidechainSettings } from '../audio/sidechainCompression';
@@ -571,8 +572,10 @@ export const normalizeProjectState = (input: unknown): ProjectState => {
     // badge, banner and remediation text explain it. Never deleted, never
     // given an invented buffer id.
     playlistClips: Array.isArray(candidate.playlistClips)
-      ? markAudioClipsMissingBufferId(clone(candidate.playlistClips) as PlaylistClip[])
-          .map(stripObsoleteClipFields)
+      ? normalizeTakeCompRegionsInClips(
+          markAudioClipsMissingBufferId(clone(candidate.playlistClips) as PlaylistClip[])
+            .map(stripObsoleteClipFields),
+        )
       : defaults.playlistClips,
     mixerTracks: (Array.isArray(candidate.mixerTracks) ? clone(candidate.mixerTracks) : defaults.mixerTracks)
       .map(stripObsoleteMixerTrackFields),

@@ -171,11 +171,19 @@ describe('Phase 52 — README matches the implementation', () => {
 
   it('describes take comping as connected to real take groups, without calling it a demo', () => {
     // TakeCompingModal reads projectState.playlistClips, resolves groups through
-    // takeLaneManager, and the engine silences inactive takes in live playback
-    // (audioEngine.ts) and offline export (offlineProjectRenderer.ts).
+    // takeLaneManager, and the engine silences every take a comp does not use in
+    // live playback (audioEngine.ts) and offline export (offlineProjectRenderer.ts).
     assert.match(readme, /Take comping scope/i);
     assert.match(readme, /recorded take groups that exist in the project/i);
-    assert.match(readme, /silenced in both live playback and offline export/i);
+    assert.match(readme, /silenced in live playback and in export/i);
+    // Phase 10A: the README must describe the phrase model it really ships...
+    assert.match(readme, /Phrase regions \(Phase 10A\)/i);
+    assert.match(readme, /equal-power crossfades/i);
+    assert.match(readme, /\*\*Whole take \(the fallback\)\.\*\*/i);
+    assert.match(readme, /docs\/TAKE-COMPING\.md/, 'the README points at the implementation note');
+    // ...and must not go back to claiming that regions and crossfades do not exist.
+    assert.doesNotMatch(readme, /does not\s+split a take into regions/i);
+    assert.doesNotMatch(readme, /does not\s+crossfade/i);
 
     const compingLines = readme.split('\n').filter((line) => /take comping/i.test(line));
     assert.ok(compingLines.length > 0, 'the README must still document take comping');
@@ -186,9 +194,11 @@ describe('Phase 52 — README matches the implementation', () => {
         `take comping is wired to project data and must not be described as a demo: "${line.trim()}"`
       );
     }
-    // Honesty about scope is kept by naming what it does not do.
-    assert.match(readme, /does not\s+split a take into regions/i);
-    assert.match(readme, /does not\s+crossfade/i);
+    // Honesty about scope is kept by naming what it cannot do: it never creates
+    // audio, a missing asset blocks export, and a stale take reference is dropped.
+    assert.match(readme, /never creates or repairs audio/i);
+    assert.match(readme, /blocks WAV\/stem export/i);
+    assert.match(readme, /take that no longer exists is dropped and reported/i);
   });
 
   it('keeps its unfinished-feature disclosure and makes no marketing overclaim', () => {

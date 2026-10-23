@@ -129,7 +129,7 @@ Shape sounds with two oscillators, filters and modulation.
 | **Mixer** | Work across mixer tracks with volume, pan, routing, metering and insert effects (EQ, reverb, delay, compression, limiter), plus sidechain ducking: a real audio-thread level detector (threshold, ratio, attack/release) driven by another track's post-fader output, or the legacy note-triggered envelope. See [docs/SIDECHAIN.md](docs/SIDECHAIN.md) for the detector tap point, curve, ranges and which render paths carry it. |
 | **Synth** | Shape sounds with the dual-oscillator subtractive synth, filters, ADSR and modulation controls, or switch the channel to the wavetable instrument: a six-frame morphing table with table warp, H1–H8 partial gains and up to 7 detuned unison voices. |
 | **Recording** | Capture audio and place recorded takes into the project. |
-| **Take Comping** | Pick the active take in each recorded take group; the takes you do not select are silenced in playback and export. |
+| **Take Comping** | Comp a performance by phrase: draw regions across a recorded take group, point each phrase at the take that sounded best in it, and let equal-power crossfades join them. Whole-take selection is still there as the fallback. |
 | **FX** | Use EQ, reverb, delay, compression and time/volume-style effects. |
 | **Mastering Suite** | Process the master bus with a 3-band multiband compressor, stereo imager and maximizer, alongside gated loudness and true-peak metering. |
 | **Export** | Render WAV, export Standard MIDI, and create project/stem packages. |
@@ -367,15 +367,55 @@ Known limitations, stated here and in the suite's own UI:
 
 ### Take comping scope
 
-Take comping works on **recorded take groups that exist in the project**. The comping window
-lists every take group, shows which take is currently active, and lets you select a different
-one. The selection is written to the project, is undoable, and the audio engine honours it:
-takes that are not active are silenced in both live playback and offline export. Nothing is
-deleted when you switch takes.
+Take comping works on **recorded take groups that exist in the project**: two or more passes
+over the same track and the same bars. The comping window lists every take group and offers two
+levels of editing.
 
-Its scope is whole-take selection. It does not split a take into regions, and it does not
-crossfade between takes, so it is comping by take rather than comping by phrase. It also never
-creates audio: a project with no recorded takes has no take groups to show.
+**Whole take (the fallback).** Selecting a take makes it the group's `activeTakeIndex`; every
+other take is silenced in live playback and in export. The selection is written to the project,
+is undoable, and never deletes anything. This is exactly the behaviour shipped in Phase 1M, and
+it is what **Revert to whole take** returns to.
+
+**Phrase regions (Phase 10A).** *Start comp* turns the group into an explicit list of phrases.
+Each phrase is a span of the group's own timeline, measured in bars relative to the clip start,
+and names the take that sounds inside it — so one group can play take 1 for bars 1–2 and take 3
+for bars 3–4. Phrases can be split, moved, trimmed and repointed; a phrase can be removed, which
+leaves silence there rather than shifting its neighbours. The phrase list is persisted on the
+project (`PlaylistClip.compRegions`), so it survives save/reopen, undo/redo, project reload and
+every render path.
+
+Boundaries are **real equal-power crossfades**: equal to the phrase's `Crossfade (bar)` value
+(default 1/16 bar), bounded by half of either neighbouring phrase and by the material the two
+takes actually have, and centred on the boundary where both sides can reach into each other.
+Playing `sin(t·π/2)` on the incoming take against `cos(t·π/2)` on the outgoing one keeps the
+summed power constant through the seam — measured, not asserted: the browser suite renders a
+220 Hz take and an 880 Hz take through the production export and finds both tones at the seam at
+≈0.71 of their steady amplitude with the window RMS unchanged to within 0.01 dB. When a take has
+no material to overlap (a phrase that begins on its very first sample and ends on its last), the
+blend collapses to a short guarded fade instead of inventing audio, and the editor says so.
+
+Every edit is auditioned through project state — the same state live playback, WAV export, stem
+export and bounce-in-place read. There is no separate comp preview renderer. *Apply comp*
+commits one undoable edit; *Discard*, or closing the window, restores the persisted comp.
+
+Boundaries worth knowing:
+
+- A comp region is a view of *existing* recorded audio. Comping never creates or repairs audio:
+  a project with no recorded takes has no take groups to show.
+- A phrase naming a take whose audio could not be restored blocks WAV/stem export (the Phase 8B
+  rule) instead of rendering a silent hole; the editor marks the phrase as unavailable.
+- A phrase naming a take that no longer exists is dropped and reported — there is no asset to
+  restore, so the rest of the comp still renders.
+- Clip-level `pitchShiftSemitones`, `timeStretchRate` and `offsetSteps` all still apply per take,
+  because each phrase is scheduled as that take's own window. Takes with different `lengthBars`
+  in one group are clamped to the audio each take really has, and a phrase that would need
+  material past a take's buffer is trimmed (reported in the editor, never silently stretched).
+- `bouncePlaylistLaneToAudioClip` (Bounce-In-Place) and `renderProjectStems` follow the comp
+  automatically because they call the same offline timeline renderer. A bounce of a comped lane
+  therefore flattens the assembled performance — including its crossfades — into a new clip.
+
+The representation, the crossfade law, the validation table and the measured evidence are in
+[`docs/TAKE-COMPING.md`](docs/TAKE-COMPING.md).
 
 ### Patterns scope
 

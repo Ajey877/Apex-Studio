@@ -59,6 +59,7 @@ import {
   getMissingAudioAssetsSignature
 } from './state/audioAssetAvailability';
 import { createPunchRecordingPlaylistClip, createRecordingPlaylistClip, getRecordingAudioBufferId, trimAudioBufferToSeconds, validateRecordingTargetTrack, type PunchClipPlacement } from './audio/recordingPipeline';
+import { applyCompRegionsToClips } from './audio/takeCompRegions';
 import { findMatchingTakeGroup, addTakeToProjectClips, selectActiveTake } from './audio/takeLaneManager';
 import { createHistory, type ProjectHistory, resolveSaveShortcut, resolveUndoRedoShortcut } from './state/projectHistory';
 import { KEY_NOTE_MAP, MusicalKeyboardHeldNotes, getKeyboardNotePitch } from './state/musicalKeyboard';
@@ -2876,6 +2877,22 @@ export function App() {
           const nextState = { ...projectStateRef.current, playlistClips: updatedClips };
           updatePlaylistProjectState(nextState);
           commitPlaylistHistory(nextState, 'Select active take');
+        }}
+        // Phase 10A: auditioning publishes the comp into project state without a
+        // history entry, so the shared engine plays exactly what the editor
+        // shows (and the offline export would render), never a private preview.
+        onAuditionCompRegions={(groupId, regions) => {
+          const nextState = {
+            ...projectStateRef.current,
+            playlistClips: applyCompRegionsToClips(projectStateRef.current.playlistClips, groupId, regions),
+          };
+          updatePlaylistProjectState(nextState);
+        }}
+        onCommitCompRegions={(groupId, regions) => {
+          const updatedClips = applyCompRegionsToClips(projectStateRef.current.playlistClips, groupId, regions);
+          const nextState = { ...projectStateRef.current, playlistClips: updatedClips };
+          updatePlaylistProjectState(nextState);
+          commitPlaylistHistory(nextState, regions === null ? 'Revert take comp' : 'Edit take comp');
         }}
       />
       <SidechainRoutingModal isOpen={isSidechainOpen} onClose={() => setIsSidechainOpen(false)} mixerTracks={projectState.mixerTracks} onUpdateMixerTracks={(tracks) => mutateProjectState(curr => ({ ...curr, mixerTracks: tracks }), 'Update mixer routing')} />
