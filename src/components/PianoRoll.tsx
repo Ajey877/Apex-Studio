@@ -31,6 +31,10 @@ import { quantizeDurationSteps } from '../music/noteDurationPolicy';
 import { resolveProjectTimeSignature } from '../music/musicalTime';
 import { resolveSevenEightGrouping, type SevenEightGrouping } from '../music/meterPulse';
 import { resolvePianoRollGridModel, type PianoRollStepDecoration } from '../music/pianoRollGrid';
+// Phase 8A: the scale table moved to src/music/scalePresets.ts (single source
+// of truth shared with the vocal pitch-correction DSP). Same ids, names,
+// interval sets and order as the historical local list.
+import { SCALE_PRESETS } from '../music/scalePresets';
 import { planMidiImport } from './pianoRollMidiImport';
 import { normalizePatternLengthSteps } from '../state/patternLength';
 import {
@@ -193,23 +197,6 @@ interface PianoRollProps {
 const PIANO_ROLL_MIN_STEPS = 32;
 
 type ToolType = 'draw' | 'paint' | 'slice' | 'erase' | 'select';
-
-const SCALE_PRESETS = [
-  { id: 'minor', name: 'Natural Minor (Aeolian)', notes: [0, 2, 3, 5, 7, 8, 10] },
-  { id: 'major', name: 'Major (Ionian)', notes: [0, 2, 4, 5, 7, 9, 11] },
-  { id: 'harmonic_minor', name: 'Harmonic Minor', notes: [0, 2, 3, 5, 7, 8, 11] },
-  { id: 'melodic_minor', name: 'Melodic Minor', notes: [0, 2, 3, 5, 7, 9, 11] },
-  { id: 'dorian', name: 'Dorian', notes: [0, 2, 3, 5, 7, 9, 10] },
-  { id: 'phrygian', name: 'Phrygian', notes: [0, 1, 3, 5, 7, 8, 10] },
-  { id: 'lydian', name: 'Lydian', notes: [0, 2, 4, 6, 7, 9, 11] },
-  { id: 'mixolydian', name: 'Mixolydian', notes: [0, 2, 4, 5, 7, 9, 10] },
-  { id: 'pentatonic_minor', name: 'Minor Pentatonic', notes: [0, 3, 5, 7, 10] },
-  { id: 'pentatonic_major', name: 'Major Pentatonic', notes: [0, 2, 4, 7, 9] },
-  { id: 'blues', name: 'Blues Scale', notes: [0, 3, 5, 6, 7, 10] },
-  { id: 'japanese_hirajoshi', name: 'Japanese Hirajoshi', notes: [0, 2, 3, 7, 8] },
-  { id: 'arabic_double_harmonic', name: 'Arabic Double Harmonic', notes: [0, 1, 4, 5, 7, 8, 11] },
-  { id: 'whole_tone', name: 'Whole Tone', notes: [0, 2, 4, 6, 8, 10] }
-];
 
 const ROOT_KEYS = [
   { name: 'C', val: 0 },

@@ -313,7 +313,7 @@ The surfaces below are **in the app but not wired into the audio engine yet**, a
 
 | Surface | Status |
 |---|---|
-| **Vocal Tuner** | Settings are saved with the project but **not applied** — there is no pitch detection or pitch correction in the signal path. |
+| **Vocal Tuner** | The live signal path applies **no** pitch processing, and the ON/OFF toggle only stores intent. Phase 8A adds an explicit **offline** workflow: it analyses the selected audio clip's real pitch (YIN, monophonic material, fundamentals E2–B5) and its Render & Commit action writes pitch-corrected PCM toward the chosen key/scale as a new durable asset (the original is kept for undo). Formant shift, vibrato and humanize remain stored intent — **not applied**. |
 | **Warp Processor** | Applies **pitch and playback rate** to an audio clip. Length-preserving time-stretch is **not implemented**, so pitch rides with the rate. |
 | **Wavetable Synth** | **Preview surface.** The channel keeps playing with its dual-oscillator subtractive synth; there is no wavetable engine behind this window yet. |
 | **Polyphonic Blob Editor** | **Prototype.** Displays sample blobs; it does not analyse, import or play back project audio. |
