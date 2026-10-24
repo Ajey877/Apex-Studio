@@ -401,3 +401,13 @@ test('real control-thread underrun stops native sources visibly and a fresh take
   } finally { instance.stop(); await instance.releaseNativeInstruments(); }
   assert.equal(service.sessionCount, 0);
 });
+
+test('project edits during async Play preparation cancel obsolete snapshots instead of starting stale notes/mutes', async () => {
+  const instance = engine();
+  const pending = instance.play([channel], [], 'pat', undefined, tracks, 16);
+  instance.reconcileNativeInstruments([{ ...channel, mute: true, notes: [] }]);
+  await pending;
+  await instance.releaseNativeInstruments();
+  assert.equal(instance.isPlaybackActive(), false);
+  assert.equal(service.sessionCount, 0);
+});

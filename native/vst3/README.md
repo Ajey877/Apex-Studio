@@ -22,7 +22,8 @@
    A missing instrument fails an audible export; no substitute synth is used.
 6. If a load/state/file fails, original project data stays intact. Open Instruments
    to **Retry saved instrument**, add/scan a moved folder and **Relink / restore**
-   the exact class ID, or explicitly replace the instrument (undoable).
+   the exact class ID, **Reset to plugin defaults** for invalid state (undoable),
+   or explicitly replace the instrument.
 
 The web application retains native configuration but explicitly refuses native
 playback/audible native export. Built-in instruments still work in browsers.

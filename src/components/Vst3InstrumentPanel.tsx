@@ -39,13 +39,13 @@ export function Vst3InstrumentPanel({ channel, onUpdateChannel }: {
     setPlugins(result.plugins);
     setErrors(result.errors.map(item => `${item.path}: ${item.error}`));
   }
-  async function select(plugin: Vst3Identity) {
+  async function select(plugin: Vst3Identity, resetState = false) {
     if (!bridge) return;
     if (audioEngine.isPlaybackActive()) throw new Error('Stop transport before selecting/relinking a native instrument.');
     const token = generation.current;
     // Relink by exact class ID and restore original state. A different class
     // is an intentional replacement, explicitly labelled in the UI/history.
-    const state = channel.instrumentType === 'vst3' && channel.vst3?.classId === plugin.classId ? channel.vst3.state : undefined;
+    const state = !resetState && channel.instrumentType === 'vst3' && channel.vst3?.classId === plugin.classId ? channel.vst3.state : undefined;
     const instrument = await bridge.inspect(plugin, state);
     if (generation.current !== token) return; // project/channel changed during native load
     const prepared: Channel = { ...channel, instrumentType: 'vst3', vst3: instrument };
@@ -64,6 +64,7 @@ export function Vst3InstrumentPanel({ channel, onUpdateChannel }: {
           <p className="break-all">{channel.vst3?.path}</p>
           <p>Class: {channel.vst3?.classId} · Channel fader/pan and mixer routing apply. Per-note pan/editor windows are not supported.</p>
           <button disabled={busy} type="button" onClick={() => void run(async () => { await audioEngine.prepareVst3Channel(channel); })}>Retry saved instrument</button>
+          {channel.vst3 && <button disabled={busy} type="button" onClick={() => void run(() => select(channel.vst3!, true))} className="ml-4">Reset to plugin defaults (undoable)</button>}
           <button disabled={busy} type="button" onClick={() => onUpdateChannel(channel.id, { instrumentType: 'minisynth' })} className="ml-4">Use built-in MiniSynth instead (undoable)</button>
         </div>}
         <div className="flex gap-4">

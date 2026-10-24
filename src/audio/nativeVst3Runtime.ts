@@ -250,8 +250,9 @@ export class NativeVst3Runtime {
   volume(id: string, value: number, time: number) { this.sessions.get(id)?.volume(value, time); }
   reconcile(channels: Channel[]) {
     let changed = false;
+    const hasSolo = channels.some(channel => channel.solo);
     for (const [id, session] of this.sessions) {
-      const channel = channels.find(channel => channel.id === id && channel.instrumentType === 'vst3');
+      const channel = channels.find(channel => channel.id === id && channel.instrumentType === 'vst3' && !channel.mute && (!hasSolo || channel.solo));
       if (!channel || session.key !== nativeInstrumentKey(channel)) { this.close(id); changed = true; }
     }
     return changed;

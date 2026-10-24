@@ -19,7 +19,7 @@ console.log(`[Apex Studio smoke] launching ${executable}`);
 const fixture = join(process.cwd(), 'build/native-vst3/VST3/Release/mda-vst3.vst3');
 if (!existsSync(fixture)) throw new Error('Build the real MDA VST3 fixture before packaged smoke');
 const child = spawn(executable, [], {
-  env: { ...process.env, APEX_SMOKE_TEST: '1', APEX_VST3_SMOKE_PLUGIN: fixture },
+  env: { ...process.env, APEX_SMOKE_TEST: '1', APEX_VST3_SMOKE_PLUGIN: fixture, APEX_SMOKE_EVIDENCE: join(process.cwd(), 'build/native-evidence/apex-packaged-smoke.json') },
   stdio: 'inherit',
   windowsHide: true,
 });

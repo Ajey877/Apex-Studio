@@ -661,6 +661,7 @@ class AudioEngine {
   private nativeInstruments = new NativeVst3Runtime();
   private nativeOffline: NativeVst3OfflineRender | null = null;
   private nativePlayGeneration = 0;
+  private nativePreparing = false;
 
   /** Preparation is an explicit async stage; built-in voice scheduling stays synchronous. */
   public async prepareVst3Channel(channel: Channel): Promise<void> {
@@ -672,10 +673,16 @@ class AudioEngine {
   }
   public reconcileNativeInstruments(channels: Channel[]) {
     reconcileVst3Diagnostics(channels);
-    if (!this.shouldBlockLiveMutation() && this.nativeInstruments?.reconcile(channels)) this.nativePlayGeneration++;
+    if (this.shouldBlockLiveMutation()) return;
+    if (this.nativePreparing) {
+      void this.releaseNativeInstruments();
+      this.transport?.stop(false);
+      return;
+    }
+    if (this.nativeInstruments?.reconcile(channels)) this.nativePlayGeneration++;
   }
   public discardPreparedVst3Channel(channel: Channel) { this.nativeInstruments.closeIfMatches(channel); }
-  public releaseNativeInstruments(): Promise<void> { this.nativePlayGeneration++; return this.nativeInstruments?.stop() ?? Promise.resolve(); }
+  public releaseNativeInstruments(): Promise<void> { this.nativePreparing = false; this.nativePlayGeneration++; return this.nativeInstruments?.stop() ?? Promise.resolve(); }
   public async flushNativeLiveForTest() { await this.nativeInstruments.flushLive(); }
 
   public isOfflineRendering = false;
@@ -5401,6 +5408,7 @@ class AudioEngine {
     this.isPlaying = false;
     this.transport?.stop(false);
     const generation = ++this.nativePlayGeneration;
+    this.nativePreparing = true;
     const snapshot = structuredClone(channels);
     return Promise.all(snapshot.filter(channel => nativeChannels.some(native => native.id === channel.id))
       .map(channel => this.prepareVst3Channel(channel).catch(error => {
@@ -5408,9 +5416,11 @@ class AudioEngine {
         throw error;
       }))).then(() => {
         if (generation !== this.nativePlayGeneration) return;
+        this.nativePreparing = false;
         this.startPlayback(snapshot, clips, mode, patternId, mixerTracks, patternLengthSteps, playlistTracks, patterns, true);
       }).catch(error => {
         if (generation !== this.nativePlayGeneration) return;
+        this.nativePreparing = false;
         for (const channel of nativeChannels) reportVst3(channel.id, error instanceof Error ? error.message : String(error));
         void this.nativeInstruments.stop(); this.isPlaying = false; this.transport?.stop(false);
       });
