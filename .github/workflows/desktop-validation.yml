@@ -43,6 +43,9 @@ jobs:
       - name: Validate Windows package
         run: npm run package:win:dir
 
+      - name: Verify production native DAW integration on Windows
+        run: npm run test:vst3-daw
+
       - name: Run packaged Windows runtime smoke test
         run: npm run smoke:win
 

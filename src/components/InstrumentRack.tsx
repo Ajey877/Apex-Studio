@@ -14,6 +14,7 @@ import {
 } from 'lucide-react';
 import { Channel, SynthParameters, InstrumentType } from '../types/daw';
 import { audioEngine } from '../audio/audioEngine';
+import { Vst3InstrumentPanel } from './Vst3InstrumentPanel';
 import { DrumSamplerPanel } from './DrumSamplerPanel';
 
 interface InstrumentRackProps {
@@ -139,8 +140,21 @@ export const InstrumentRack: React.FC<InstrumentRackProps> = ({
     });
   };
 
+  if (channel.instrumentType === 'vst3') return <div id="fl-instrument-rack" className="h-full overflow-auto bg-[var(--apex-canvas)] text-[var(--apex-text)]">
+    <div className="p-3 flex gap-3 items-center"><strong>{channel.name}</strong>
+      <select aria-label="Instrument channel" value={channel.id} onChange={event => onSelectChannel(event.target.value)}>
+        {allChannels.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}
+      </select>
+    </div>
+    <Vst3InstrumentPanel channel={channel} onUpdateChannel={onUpdateChannel} />
+    <div className="p-3 flex gap-2" aria-label="VST3 audition keys">{[60, 62, 64, 65, 67, 69, 71, 72].map(pitch =>
+      <button key={pitch} type="button" className="p-3 border border-[var(--apex-border)]" onClick={() => handleTriggerVirtualKey(pitch)}>Note {pitch}</button>)}</div>
+    <p className="p-3 text-xs">Edit notes in the existing Piano Roll, play the Channel Rack/Playlist, and route this channel in the Mixer. Save/export use the selected plugin state. Native monitoring is buffered, not zero latency.</p>
+  </div>;
+
   return (
     <div id="fl-instrument-rack" className="flex flex-col h-full bg-[var(--apex-canvas)] select-none text-[var(--apex-text-2)]">
+      <Vst3InstrumentPanel channel={channel} onUpdateChannel={onUpdateChannel} />
       {/* Top Bar with Channel Switcher & Preset Selector */}
       <div className="h-9 bg-[var(--apex-panel-header)] border-b border-[var(--apex-border)] flex items-center justify-between px-4 shrink-0 gap-4">
         {/* Active Instrument Title */}

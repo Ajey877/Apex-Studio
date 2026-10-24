@@ -1,4 +1,4 @@
-// Node-side prototype adapter, deliberately NOT exposed by Electron preload.
+// Native helper adapter; only the authorized service is exposed by Electron preload.
 // One OS process per plugin instance. A crash/timeout rejects requests; this is
 // failure containment, not a security sandbox. Plugins retain OS user privileges.
 import { spawn } from 'node:child_process';
@@ -101,7 +101,7 @@ export class NativeVst3Client {
       }
     } else await this.#exited;
   }
-  // External cancellation (project/channel replacement in a future integration).
+  // External cancellation (project/channel/renderer replacement).
   abort() { this.#fail(new Error('VST3 instance cancelled')); }
 }
 
@@ -109,15 +109,21 @@ export class NativeVst3Client {
  * No default/fabricated identities. Failed bundles remain explicit diagnostics.
  * Symlinks are not followed, to avoid cycles and accidental scans outside roots.
  */
-export async function discoverVst3(executable, roots) {
+export async function discoverVst3(executable, roots, { signal, timeoutMs = 10000, scanTimeoutMs = 120000, maxCandidates = 4096 } = {}) {
   const candidates = new Set(), errors = [];
   let visited = 0;
+  const deadline = Date.now() + scanTimeoutMs;
+  function checkCancelled() {
+    if (signal?.aborted) throw new Error('VST3 discovery cancelled');
+    if (Date.now() > deadline) throw new Error('VST3 discovery deadline exceeded; scan fewer folders');
+  }
   async function walk(target, depth = 0) {
+    checkCancelled();
     if (++visited > 100000 || depth > 32) throw new Error('Plugin search exceeds traversal limit');
     const info = await lstat(target);
     if (info.isSymbolicLink()) return;
     if (target.toLowerCase().endsWith('.vst3')) {
-      if (candidates.size >= 4096) throw new Error('Plugin search exceeds 4096 bundle limit');
+      if (candidates.size >= maxCandidates) throw new Error(`Plugin search exceeds ${maxCandidates} bundle limit`);
       candidates.add(target); return;
     }
     if (!info.isDirectory()) return;
@@ -128,18 +134,21 @@ export async function discoverVst3(executable, roots) {
   }
   const plugins = [];
   for (const candidate of [...candidates].sort()) {
-    const helper = new NativeVst3Client(executable);
+    try { checkCancelled(); } catch (error) { errors.push({ path: candidate, error: error.message }); break; }
+    const helper = new NativeVst3Client(executable, { timeoutMs: Math.max(1, Math.min(timeoutMs, deadline - Date.now())) });
+    const abort = () => helper.abort();
+    signal?.addEventListener('abort', abort, { once: true });
     try {
       const response = await helper.request({ command: 'scan', path: candidate });
       plugins.push(...response.plugins.map(plugin => ({ ...plugin, path: candidate })));
     } catch (error) { errors.push({ path: candidate, error: error.message }); }
-    finally { await helper.dispose(); }
+    finally { signal?.removeEventListener('abort', abort); await helper.dispose(); }
   }
   return { plugins, errors };
 }
 
 /** Render an event sequence using the SAME block processor in realtime/offline
- * SDK modes. This is test/prototype rendering, NOT AudioEngine song export.
+ * SDK modes. Independent test reference, NOT the AudioEngine song-export path.
  * Events are absolute sample frames, not wall-clock timers.
  */
 export async function renderNativeSequence(client, { frames, events, bpm = 120, blockSize = 4096 }) {

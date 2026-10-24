@@ -16,8 +16,10 @@ if (!executable || !existsSync(executable)) {
 
 console.log(`[Apex Studio smoke] launching ${executable}`);
 
+const fixture = join(process.cwd(), 'build/native-vst3/VST3/Release/mda-vst3.vst3');
+if (!existsSync(fixture)) throw new Error('Build the real MDA VST3 fixture before packaged smoke');
 const child = spawn(executable, [], {
-  env: { ...process.env, APEX_SMOKE_TEST: '1' },
+  env: { ...process.env, APEX_SMOKE_TEST: '1', APEX_VST3_SMOKE_PLUGIN: fixture },
   stdio: 'inherit',
   windowsHide: true,
 });
@@ -26,7 +28,7 @@ const timeout = setTimeout(() => {
   console.error('[Apex Studio smoke] timed out waiting for packaged app');
   child.kill();
   process.exit(1);
-}, 60_000);
+}, 120_000);
 
 child.on('error', error => {
   clearTimeout(timeout);

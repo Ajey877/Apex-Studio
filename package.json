@@ -14,8 +14,8 @@
     "dev": "vite --port=3000 --host=0.0.0.0",
     "build": "vite build",
     "preview": "vite preview",
-    "package:win": "vite build && electron-builder --win --x64 --publish never",
-    "package:win:dir": "vite build && electron-builder --win --x64 --dir --publish never",
+    "package:win": "npm run native:vst3:build && node scripts/stage-vst3-helper.mjs && vite build && electron-builder --win --x64 --publish never",
+    "package:win:dir": "npm run native:vst3:build && node scripts/stage-vst3-helper.mjs && vite build && electron-builder --win --x64 --dir --publish never",
     "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true}); require('fs').rmSync('server.js',{force:true})\"",
     "lint": "tsc --noEmit",
     "test:pianoroll": "tsx --test src/components/pianoRollOperations.test.ts src/components/pianoRollVelocityInteraction.test.ts src/components/phase66.pianoRollMidiTempo.test.ts src/components/phase66.multiTrackMidiImport.test.ts",
@@ -38,7 +38,8 @@
     "test:browser:playwright": "npx playwright test",
     "test:browser:node": "node --import tsx scripts/realOfflineRenderNode.mjs",
     "native:vst3:build": "node scripts/build-native-vst3.mjs",
-    "test:native-vst3": "node --import tsx --test tests/nativeVst3.test.mjs"
+    "test:native-vst3": "node --import tsx --test tests/nativeVst3.test.mjs",
+    "test:vst3-daw": "node --import tsx --test tests/vst3DawIntegration.test.mjs"
   },
   "build": {
     "appId": "com.apexstudio.daw",
@@ -62,7 +63,19 @@
       "dist/**/*",
       "electron.cjs",
       "preload.cjs",
-      "desktop-permissions.cjs"
+      "desktop-permissions.cjs",
+      "desktop-vst3.cjs",
+      "native/vst3/client.mjs",
+      "native/vst3/service.mjs"
+    ],
+    "extraResources": [
+      {
+        "from": "build/vst3-package",
+        "to": "vst3",
+        "filter": [
+          "**/*"
+        ]
+      }
     ]
   },
   "dependencies": {

@@ -47,6 +47,7 @@ import { resolveLimiterLatencySamples } from './masteringLimiter';
 import type { AudioLatencyMetrics, MasterMeasurementSnapshot } from '../types/daw';
 import { ChorusEffect } from './effects/ChorusEffect';
 import { WetDryEffect } from './effects/WetDryEffect';
+import { NativeVst3Runtime, NativeVst3OfflineRender, reportVst3, reconcileVst3Diagnostics } from './nativeVst3Runtime';
 import { createInstrumentRegistry, InstrumentRegistry, InstrumentVoiceHandle } from './instrumentRegistry';
 import { MixerRoutingAdapter } from './mixerRoutingAdapter';
 import { buildDryStemMixerTracks, buildWetStemMixerTracks, getDirectAuxSendSourceIds, getUpstreamMixerTrackIds } from './auxStemRouting';
@@ -657,6 +658,26 @@ export interface PunchRecordingSession {
 }
 
 class AudioEngine {
+  private nativeInstruments = new NativeVst3Runtime();
+  private nativeOffline: NativeVst3OfflineRender | null = null;
+  private nativePlayGeneration = 0;
+
+  /** Preparation is an explicit async stage; built-in voice scheduling stays synchronous. */
+  public async prepareVst3Channel(channel: Channel): Promise<void> {
+    if (this.shouldBlockLiveMutation()) throw new Error('Wait for the current offline render before loading a VST3 instrument.');
+    this.init();
+    const context = this.getContext();
+    const destination = this.getOrCreateChannelPanner(channel) ?? this.getOrCreateMixerChannel(channel.mixerTrackId).input;
+    await this.nativeInstruments.prepare(channel, context, destination);
+  }
+  public reconcileNativeInstruments(channels: Channel[]) {
+    reconcileVst3Diagnostics(channels);
+    if (!this.shouldBlockLiveMutation() && this.nativeInstruments?.reconcile(channels)) this.nativePlayGeneration++;
+  }
+  public discardPreparedVst3Channel(channel: Channel) { this.nativeInstruments.closeIfMatches(channel); }
+  public releaseNativeInstruments(): Promise<void> { this.nativePlayGeneration++; return this.nativeInstruments?.stop() ?? Promise.resolve(); }
+  public async flushNativeLiveForTest() { await this.nativeInstruments.flushLive(); }
+
   public isOfflineRendering = false;
   private offlineRenderLeaseHeld = false;
   private renderingPreMaster = false;
@@ -794,6 +815,7 @@ class AudioEngine {
     // audio generation so a future external instrument can implement the same
     // contract without another growing instrumentType switch.
     this.instrumentRegistry = createInstrumentRegistry({
+      vst3: (context) => this.nativeOffline ? this.nativeOffline.render(context) : this.nativeInstruments.render(context),
       drumpad: renderDrumPadVoice,
       fmsynth: renderFmSynthVoice,
       fm_bell: renderFmSynthVoice,
@@ -818,7 +840,7 @@ class AudioEngine {
       minisynth: renderSubtractiveSynthVoice,
       wavetable: renderWavetableVoice,
       sampler: renderSamplerVoice,
-    }, renderSubtractiveSynthVoice);
+    }, renderSubtractiveSynthVoice, ['vst3']);
   }
 
   /** True while a timeline render owns the shared engine's mutable audio state. */
@@ -1316,6 +1338,8 @@ class AudioEngine {
       ? time
       : (this.ctx.currentTime ?? 0);
     const clampedVol = Math.max(0, Number.isFinite(volume) ? volume : 0);
+    if (this.nativeOffline) this.nativeOffline.volume(channelId, clampedVol, effectiveTime);
+    else this.nativeInstruments?.volume(channelId, clampedVol, effectiveTime);
 
     if (this.activeVoiceChannelVolumes) {
       for (const entry of this.activeVoiceChannelVolumes.values()) {
@@ -1988,6 +2012,7 @@ class AudioEngine {
    * a closed context; on a first boot (no previous context) it is never reached.
    */
   private invalidateContextBoundAudioState(): void {
+    void this.releaseNativeInstruments();
     for (const [, slotEffects] of this.__fxSlotEffectMaps) {
       this.disposeFxSlotEffects(slotEffects.values());
     }
@@ -2083,6 +2108,25 @@ class AudioEngine {
 
     // Trigger Dynamic Sidechain Ducking on receiving tracks
     this.triggerSidechainDucking(channel.mixerTrackId, time);
+
+    if (this.instrumentRegistry.scope?.(channel.instrumentType) === 'channel') {
+      // Shared polyphonic output: never route the entire native instrument
+      // through the first note's disposable trim/pan nodes.
+      try {
+        const destination = this.getOrCreateChannelPanner(channel, time) ?? mixerChannel.input;
+        const handle = this.instrumentRegistry.get(channel.instrumentType)({
+          channel, note, time, destination, audioContext: this.ctx, voiceId,
+          bpm: this.getRenderBpm(), channelPanApplied: true, midiChannel,
+          onEnded: () => this.activeVoices.delete(voiceId),
+        });
+        if (handle) this.activeVoices.set(voiceId, handle);
+      } catch (error) {
+        reportVst3(channel.id, error instanceof Error ? error.message : String(error));
+        if (this.nativeOffline) throw error; // export must not succeed with missing native audio
+      }
+      return;
+    }
+
 
     let voiceHandle: InstrumentVoiceHandle | void;
     let notePanner: StereoPannerNode | null = null;
@@ -3261,6 +3305,7 @@ class AudioEngine {
 
   public stopChannelVoices(channelId: string): void {
     if (this.shouldBlockLiveMutation()) return;
+    this.nativeInstruments?.close(channelId);
     const prefix = `${channelId}-`;
     for (const [voiceId, voice] of this.activeVoices.entries()) {
       if (voiceId.startsWith(prefix)) {
@@ -3763,6 +3808,7 @@ class AudioEngine {
         outputFrameCount + prerollFrameCount + reservedLimiterFrames + tailFrameCount,
         renderSampleRate,
       );
+      this.nativeOffline = new NativeVst3OfflineRender(offlineCtx, offlineCtx.length);
       this.isOfflineRendering = true;
       this.liveCtx = previous.ctx;
       try {
@@ -3925,6 +3971,7 @@ class AudioEngine {
           }
         }
         onProgress?.(70, `Rendering offline audio (${totalDurationSeconds.toFixed(2)}s)...`);
+        await this.nativeOffline!.flush(safeBpm);
         const renderedBuffer = await offlineCtx.startRendering();
         let outputBuffer = renderedBuffer;
         // Rendered content past the mastering preroll AND the limiter's
@@ -3961,6 +4008,8 @@ class AudioEngine {
         onProgress?.(85, 'Offline render complete. Encoding WAV...');
         return outputBuffer;
       } finally {
+        this.nativeOffline?.dispose();
+        this.nativeOffline = null;
         this.isOfflineRendering = false;
         this.renderingPreMaster = previous.renderingPreMaster;
         this.liveCtx = previous.liveCtx;
@@ -5162,6 +5211,7 @@ class AudioEngine {
     }
 
     if (update.channels) {
+      this.nativeInstruments?.reconcile(update.channels);
       const now = this.ctx?.currentTime ?? 0;
       const previousChannels = this.activeChannels;
       const previouslyAudibleIds = new Set(
@@ -5335,6 +5385,33 @@ class AudioEngine {
   }
 
   public play(
+    channels: Channel[], clips: PlaylistClip[], mode: 'pat' | 'song', patternId?: string,
+    mixerTracks?: MixerTrack[], patternLengthSteps?: number, playlistTracks?: PlaylistTrack[], patterns?: Pattern[],
+  ): void | Promise<void> {
+    if (this.shouldBlockLiveMutation()) return;
+    const hasSolo = channels.some(channel => channel.solo);
+    const nativeChannels = channels.filter(channel => channel.instrumentType === 'vst3' && !channel.mute && (!hasSolo || channel.solo));
+    if (nativeChannels.length === 0) {
+      return this.startPlayback(channels, clips, mode, patternId, mixerTracks, patternLengthSteps, playlistTracks, patterns);
+    }
+    // Do not reset the transport position: preparation replaces a take, not a
+    // user Stop action. Keep built-in Play/Pause/seek semantics intact.
+    this.stopActivePlaybackAudio();
+    this.isPlaying = false;
+    this.transport?.stop(false);
+    const generation = ++this.nativePlayGeneration;
+    const snapshot = structuredClone(channels);
+    return Promise.all(snapshot.filter(channel => nativeChannels.some(native => native.id === channel.id))
+      .map(channel => this.prepareVst3Channel(channel).catch(error => {
+        if (generation === this.nativePlayGeneration) reportVst3(channel.id, error instanceof Error ? error.message : String(error));
+        throw error;
+      }))).then(() => {
+        if (generation !== this.nativePlayGeneration) return;
+        this.startPlayback(snapshot, clips, mode, patternId, mixerTracks, patternLengthSteps, playlistTracks, patterns, true);
+      }).catch(() => { if (generation === this.nativePlayGeneration) { void this.nativeInstruments.stop(); this.isPlaying = false; this.transport?.stop(false); } });
+  }
+
+  private startPlayback(
     channels: Channel[],
     clips: PlaylistClip[],
     mode: 'pat' | 'song',
@@ -5342,7 +5419,8 @@ class AudioEngine {
     mixerTracks?: MixerTrack[],
     patternLengthSteps?: number,
     playlistTracks?: PlaylistTrack[],
-    patterns?: Pattern[]
+    patterns?: Pattern[],
+    preserveNative = false,
   ) {
     if (this.shouldBlockLiveMutation()) return;
     if (!this.ctx) this.init();
@@ -5354,7 +5432,7 @@ class AudioEngine {
     // transport position: Stop already resets it to bar one, Pause keeps it,
     // so Play resumes from wherever the playhead currently is.
     this.playbackGeneration++;
-    this.stopActivePlaybackAudio();
+    this.stopActivePlaybackAudio(preserveNative);
     if (this.timerId) {
       clearTimeout(this.timerId);
       this.timerId = null;
@@ -5557,7 +5635,8 @@ class AudioEngine {
   }
 
   /** Stops every playlist clip source and note voice of the active take. */
-  private stopActivePlaybackAudio(): void {
+  private stopActivePlaybackAudio(preserveNative = false): void {
+    if (!preserveNative) this.releaseNativeInstruments();
     for (const source of Array.from(this.activeClipSources)) {
       try { source.stop(); } catch (_) { /* already inactive */ }
       this.cleanupClipChannelVolume(source);

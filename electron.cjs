@@ -1,5 +1,6 @@
-const { app, BrowserWindow, shell, session } = require('electron');
+const { app, BrowserWindow, shell, session, ipcMain, dialog } = require('electron');
 const path = require('path');
+const { registerVst3 } = require('./desktop-vst3.cjs');
 const { canRequestPermission, canCheckPermission } = require('./desktop-permissions.cjs');
 
 // Chromium audio switches must be registered before app readiness.
@@ -9,6 +10,7 @@ app.commandLine.appendSwitch('force-wave-audio');
 
 // Enforce Chromium renderer sandboxing application-wide.
 app.enableSandbox();
+if (process.env.APEX_SMOKE_TEST === '1') app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
 
 const DEV_URL = 'http://localhost:3000';
 const isAllowedNavigation = (url, isDev) => {
@@ -29,6 +31,8 @@ const openExternalUrl = (url) => {
 
 let mainWindow = null;
 
+registerVst3({ app, ipcMain, dialog, getWindow: () => mainWindow });
+
 function createWindow() {
   const isDev = process.env.NODE_ENV === 'development' || !app.isPackaged;
 
@@ -42,6 +46,7 @@ function createWindow() {
     autoHideMenuBar: true,
     titleBarStyle: 'default',
     webPreferences: {
+      additionalArguments: process.env.APEX_SMOKE_TEST === '1' ? ['--apex-smoke-test'] : [],
       nodeIntegration: false,
       contextIsolation: true,
       sandbox: true,
@@ -103,11 +108,15 @@ function createWindow() {
     mainWindow.webContents.on('did-finish-load', async () => {
       try {
         const result = await mainWindow.webContents.executeJavaScript(`
-          (() => {
+          (async () => {
             const bodyReady = document.readyState === 'complete' && !!document.body;
             const indexedDbReady = typeof indexedDB !== 'undefined';
             const audioReady = typeof AudioContext !== 'undefined' || typeof webkitAudioContext !== 'undefined';
-            return { bodyReady, indexedDbReady, audioReady, title: document.title };
+            const deadline = Date.now() + 10000;
+            while (!window.__apexVst3Smoke && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10));
+            if (!window.__apexVst3Smoke) throw new Error('Production native smoke entry did not initialize');
+            const vst3 = await window.__apexVst3Smoke;
+            return { bodyReady, indexedDbReady, audioReady, vst3, title: document.title };
           })()
         `);
         console.log('[Apex Studio smoke] runtime checks:', JSON.stringify(result));

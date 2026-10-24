@@ -1,96 +1,154 @@
-# Native VST3 instrument host — integration prototype, not a shipped feature
+# Native VST3 instruments in Apex Studio (Windows x64 desktop)
 
-**Apex cannot yet select or play a VST3 instrument as a project channel.** This
-change implements and tests a real native host, not the requested production
-vertical slice. No plugin UI, preload API, project schema, or fallback synth was
-added. The helper is intentionally **not in the desktop package**. Web and
-built-in instrument behavior are unchanged.
+## Use the delivered channel workflow
 
-## Run the real instrument tests
+1. Install a trusted Windows x64 VST3 instrument. Open **Instruments**, select an
+   existing channel, expand **VST3 instruments — desktop only**, add its folder
+   (the standard Common Files/VST3 location is included), and scan.
+2. Stop transport, then **Load** an actual discovered instrument. Factory class
+   ID/name/vendor/version and the supported native state are captured before
+   publishing the selection. The channel owns one shared polyphonic instance.
+3. Write notes in the existing Piano Roll/Channel Rack or arrange pattern clips
+   in the Playlist. Play transport, use audition keys, or send existing hardware
+   MIDI. Hardware notes hold until their actual note-off. Channel fader/pan,
+   mixer fader/pan, supported insert FX/routing and master apply to native PCM.
+4. Save/reopen the normal Apex project. Only identity and supported state are
+   serialized—not executable handles, generated buffers or plugin binaries.
+   Undo/redo preserves configuration. No native editor/parameter mutation UI is
+   offered, so the captured selection state remains authoritative for saves.
+5. Export through the existing production song/pattern/bounce/export workflow.
+   A separate native session renders scheduler MIDI into the actual offline
+   channel/mixer graph **before** `OfflineAudioContext.startRendering()`.
+   A missing instrument fails an audible export; no substitute synth is used.
+6. If a load/state/file fails, original project data stays intact. Open Instruments
+   to **Retry saved instrument**, add/scan a moved folder and **Relink / restore**
+   the exact class ID, or explicitly replace the instrument (undoable).
 
-Requirements: Node 22, Git, CMake >= 3.25; Windows x64 with Visual Studio 2022 or newer C++
-build tools and Windows SDK, or Linux x64 with GCC and Ninja. No audio device,
-commercial plugin, VSTGUI, JACK, Electron download or paid service is required.
+The web application retains native configuration but explicitly refuses native
+playback/audible native export. Built-in instruments still work in browsers.
+Loading third-party code is desktop-only; it is not browser WebAssembly.
+
+## Reproduce real native and production-DAW tests
+
+Requirements: Node 22, Git, CMake >= 3.25; Windows x64 with installed Visual Studio
+C++ build tools/Windows SDK, or Linux x64 with GCC and Ninja for automated DSP
+verification. No commercial plugin, paid service or committed plugin binary.
 
 ```sh
 npm ci --legacy-peer-deps --ignore-scripts
 npm run native:vst3:build
 npm run test:native-vst3
+npm run test:vst3-daw
+npm run test:audio
+npm run test:history
+npm run test:browser:node
+npm run lint
+npm run verify:desktop
+npm run build
 ```
 
-If CMake isn't on PATH, set the `CMAKE` environment variable to its executable.
-For example, on this Linux verification environment:
-`CMAKE=/home/user/.local/bin/cmake npm run native:vst3:build`.
-Everything downloaded/generated is under the existing gitignored `build/` tree.
-A missing native build **fails** the dedicated tests; they never silently skip.
-Normal web/package builds do not fetch or compile native dependencies.
+Set `CMAKE` if necessary (e.g. `/home/user/.local/bin/cmake`). Dependencies and
+all generated evidence live under gitignored `build/`. Missing native builds
+fail the dedicated tests rather than silently skipping.
 
-Outputs under `build/native-evidence/`:
+`test:vst3-daw` uses the real service/helper and real SDK MDA instrument, the
+**production AudioEngine/InstrumentRegistry/AudioClockTransport**, actual Web
+Audio DSP and context.destination, production offline rendering, serializer,
+normalizer, channel mutation and undo/redo. Independent native PCM references
+must match live-graph and song-export samples. Other assertions cover fractional
+onsets, pitch/velocity, overlapping notes/note-off, held MIDI, live gain/pan,
+mixer/FX/master, missing/invalid state, browser refusal, ownership/queue bounds,
+async-start cancellation, repeated replacement/cleanup, helper crash/hang and
+retry. The non-audio fault executable is used ONLY for failure rejection.
 
-- `mda-jx10-{16,24,32}.wav`: real MDA JX10 PCM, encoded with Apex's production
-  `audioBufferToWav` function. These are test exports, **not Apex song exports**.
-- `metrics.json`: plugin factory identity, measured signal comparisons and PCM
-  digest. There is no signal generator in the helper or test adapter.
-- `plugin-state.json`: factory identity, actual component state stream and edited
-  parameter IDs/values. This is a prototype state file, **not a saved Apex project**.
+Generated production evidence in `build/native-evidence/`:
 
-The native CI workflow builds/runs these tests on Windows and Linux and uploads
-these outputs with third-party notices. Listening to a WAV demonstrates the
-plugin's native DSP, **not live playback through the Apex transport**.
+- `apex-song-vst3-{16,24,32}.wav`: actual production song exports at 48 kHz.
+- `apex-song-metrics.json`: intended note frame 108000; audible JX10 onset
+  108014 (native envelope), native-reference difference RMS **0**, released RMS
+  **0**. This includes bar-1 Playlist placement plus step-2 Piano Roll onset.
+- `apex-live-vst3.wav`, `apex-live-metrics.json`: production transport/live output
+  graph; 30 ms transport lead, audible onset 1454, overlapping voice RMS
+  ~0.0963, released RMS **0**, native-reference difference RMS **0**.
+- `apex-vst3-project.json`: actual serialized project configuration/state.
+- Earlier `mda-jx10-*`/`metrics.json` are independent native-host reference tests,
+  **not** production song or device-playback proof.
 
-## Architecture implemented
+Node live tests use RenderingAudioContext to drive the genuine Web Audio graph
+on a reproducible clock. They do not prove physical speaker/interface latency.
 
-`NativeVst3Client` asynchronously launches one standalone helper process per
-instrument instance. No Node addon or Electron ABI dependency: the target
-Electron version remains 43.4.1, Windows package architecture remains x64. The
-C++ executable uses the official SDK's module loader, factory, `PlugProvider`,
-component, controller, audio processor, event queues and parameter queues.
+### Windows packaging and genuine Electron smoke
 
-- `discoverVst3(executable, roots)` recursively scans explicitly supplied paths.
-  Each `.vst3` bundle is opened in a separate helper. Only factory audio classes
-  with an `Instrument` subcategory are returned, with actual class ID, name,
-  vendor/version and bundle path. Missing roots and broken bundles retain
-  explicit diagnostics. Symlinks aren't followed; traversal/candidate limits
-  prevent unbounded scans. No fabricated discovery results.
-- `open` resolves **exactly** the requested class ID, initializes and connects
-  component/controller, selects event bus 0 and mono/stereo main output 0,
-  configures float32 processing and activates the instance. No first-class or
-  built-in-instrument substitution. Mono output is copied to both channels.
-- `process` sends bounded batches of sample-offset note-on/off events (pitch,
-  MIDI channel, velocity, stable note ID), normalized parameter changes keyed by
-  VST `ParamID`, and transport sample position/tempo/meter. One persistent plugin
-  instance handles polyphony across batches. It returns the plugin's actual PCM
-  and honors output silence flags. Invalid/nonfinite results fail explicitly.
-- Both VST `kRealtime` and `kOffline` modes use this processor. Tests compare their
-  PCM across different batch sizes. `kRealtime` here does **not** mean device
-  streaming, AudioWorklet integration or low-latency performance has been tested.
-- `snapshot` preserves supported component/controller `IBStream` bytes and
-  explicit parameter overrides. Unedited controller defaults are not sent back
-  as DSP changes: the MDA mapped pitch-bend controller's default differs from
-  the processor's actual initialized value. Restore rejects wrong identities,
-  schemas, absent parameter IDs, corrupt streams or plugin API failures.
-- Normal close disconnects/terminates plugin objects before unloading the
-  module. Partial initialization/process/restore errors invalidate the instance.
-  Parent-side queue bounds, response size validation, deadlines, cancellation,
-  EOF and process-exit handling ensure requests reject instead of returning
-  fabricated audio. Tests cover cancellation, abrupt helper exit, malformed
-  frames and hangs using a separate **non-audio** IPC fault executable.
+On Windows, with Electron installed (`npm ci --legacy-peer-deps`):
 
-Protocol: newline-delimited JSON requests; responses contain little-endian
-32-bit JSON length and PCM byte length, UTF-8 JSON, then planar stereo float32.
-Batches are 1–16384 frames; the sequence-render utility defaults to 4096. No
-blocking IPC and no per-sample cross-process messages. This is a bounded
-prototype pipe protocol, **not yet a realtime audio transport**.
+```sh
+npm run package:win:dir
+npm run test:vst3-daw
+npm run smoke:win
+```
 
-### Isolation and security
+Packaging builds the pinned native helper, statically links the MSVC CRT, stages
+it and licenses outside ASAR at `resources/vst3/`, and includes only the narrow
+main/preload service/adapter files. Missing helper staging fails packaging. The
+MDA test plugin is NOT distributed in the application.
 
-Only the helper loads third-party native code. An exited/hung helper is detected
-and killed/reaped without terminating the Node parent in the fault tests. This
-is **not an OS sandbox**: plugin code has the user's filesystem/process/network
-privileges, may spawn children, write stdout and break framing, or destabilize
-the system. Fault injection tests exercise helper failures, not arbitrary hostile
-plugins or verified Windows Electron crash isolation. Do not scan untrusted
-plugins. No security claim beyond the tested process boundary is made.
+The existing packaged smoke now supplies the external real MDA test bundle via
+main-process launch environment, and requires **real packaged preload IPC**,
+genuine discovery/load/native PCM, production Chromium live master-graph signal,
+production offline song timing, state reopen equality and missing-plugin refusal.
+It does not generate test-only replacement audio. Its entry is gated by the
+existing smoke launch flag; ordinary sessions expose no test entry/API.
+The Native VST3 and Desktop Validation workflows run these on Windows; native
+DSP and deterministic DAW integration also run on Linux. Inspect final-head CI
+for results—test source alone is not a claimed passing Windows run.
+
+## Async architecture and explicit limits
+
+- Registry adds optional **channel ownership**, preserving synchronous built-in
+  voice dispatch. `playSingleVoice` dispatches native before per-note disposable
+  gain/pan nodes. Native PCM flows through one channel gain into the same channel
+  panner/mixer/master, never a parallel output or per-note frozen instrument.
+- `play()` prepares native channels asynchronously before starting transport;
+  built-in-only playback stays synchronous. No awaiting native IPC in the
+  scheduler/audio callback. A control-thread producer schedules finite 1024-frame
+  AudioBufferSource batches, targeting 50 ms buffered audio with a 5 ms pump.
+  The audio thread only consumes already scheduled Web Audio buffers.
+- One process request in flight per instance; max four live batches per pump,
+  8 live channels, 16 total helpers including exports/loading/closing, 1024 held
+  voices/channel, 8192 queued live events, 4096 events/native batch. MIDI remains
+  sample-offset pitch/channel/velocity/note-ID note-on/off on the existing model.
+- Direct monitoring starts with 40 ms lead plus buffered/device latency. The
+  diagnostic reports buffered input delay; **not zero latency**. Late scheduled
+  MIDI or >5 ms late PCM/underrun stops native audio with a visible diagnostic;
+  sub-5 ms late PCM is trimmed, never replayed/time-shifted.
+- Helpers have a 2 s operation deadline and bounded protocol frames/queues.
+  Scans are limited to 256 bundles/30 s, approved real paths, no followed
+  symlinks. At most two scans; duplicate owner scans are rejected. Main-frame
+  IPC authorizes paths/ownership; renderer never chooses executable/raw command.
+- Stop, replacement, context closure, renderer navigation/crash/destruction and
+  app exit cancel/close owned resources. Disposed generations cannot play late
+  PCM. Note release cleanup is bounded at 10 s; unusually long tails may be cut.
+- Offline preparation is capped at **128 MiB native PCM across channels** (roughly
+  5.8 minutes for one stereo channel at 48 kHz; fewer with multiple channels).
+  Oversized exports fail explicitly; no silent/truncated export. Exports still
+  use the existing isolated render lease, scheduler and mixer contracts.
+- First slice supports x64 VST3 instruments with mono/stereo main output and
+  **zero reported processing latency**. Other latency is rejected pending proper
+  delay compensation. Plugins taking >2 s per operation are rejected.
+- No VST2/AU/CLAP, native effects rack, plugin editor windows, parameter-edit UI,
+  per-note native pan, arbitrary-bus layouts or broad plugin certification.
+  Native transport context is per-session; tempo-synchronized plugin internal
+  sequencers/seek-position synchronization beyond scheduled MIDI are not claimed.
+  Windows x64/MDA is the reproducible acceptance fixture; other plugins may vary.
+
+### Isolation is not a security sandbox
+
+Each plugin loads only in its helper, not Electron's renderer/main address space.
+Abrupt exits, malformed protocol, hangs and cancellation reject/kill/reap helper
+requests. Plugin code nevertheless has the user's OS privileges and can write
+files, spawn children or attack the system. No hostile-plugin security guarantee
+or physical-device listening/latency certification is claimed. Scan/load trusted
+plugins only. No fallback oscillator or external service is used.
 
 ## Pinned SDK, fixture and licensing
 
@@ -106,9 +164,8 @@ plugins. No security claim beyond the tested process boundary is made.
 - The pinned SDK and its required components use MIT, as do JSON and the MDA
   examples. Full notices are retained in `licenses/`; the examples retain Paul
   Kellett's attribution. This does not confer Steinberg trademark/logo rights or
-  a license to distribute users' plugins. Future packaging must ship the helper
-  outside ASAR, include its notices and Windows runtime dependencies, and build
-  matching architectures. No third-party plugin binaries are checked in.
+  a license to distribute users' plugins. Windows packaging ships the x64 helper outside ASAR with these notices
+  and a statically linked MSVC runtime. No third-party plugin binaries are checked in.
 
 **Fixture correction:** the pinned MDA `SampleAccurateBaseProcessor` consumes an
 input event at a 16-frame slice boundary in the preceding slice (`<=`); the
@@ -127,63 +184,3 @@ special case or a replacement oscillator. Tests explicitly check onsets at 0,
 JX10 and Piano instruments; DSP assertions use JX10 and Piano as independent
 instruments, plus silence, held/released notes, pitch, velocity and filter
 parameter negative controls.
-
-## Integration decision gate: exact boundary and smallest remaining change
-
-The native SDK is viable; this work does **not** establish that VST3 hosting is
-impossible. It stops short of enabling an unsafe or misleading production path.
-The missing component is an asynchronous, channel-owned PCM bridge:
-
-1. `src/audio/instrumentRegistry.ts`: `InstrumentVoiceRenderer` returns
-   `InstrumentVoiceHandle | void` **synchronously**. The registry falls back for
-   unknown types. `AudioEngine.playSingleVoice` calls it synchronously, rejects a
-   Promise as an invalid handle, and owns note-specific gain/pan cleanup. A
-   polyphonic VST instance instead has one shared channel audio output and many
-   MIDI voices. Returning a Promise, routing a whole instance through the first
-   note's disposable gain node, or falling back to MiniSynth is incorrect.
-2. `src/audio/transport.ts`: the scheduler has a 100ms lookahead and short start
-   lead. `AudioEngine.play` and the hardware-MIDI `playNote` path cannot await an
-   IPC round trip. Waiting in the callback will not give the AudioContext native
-   PCM and risks missed deadlines. Pipe tests don't prove realtime scheduling.
-3. `AudioEngine.renderTimelineOffline` temporarily swaps in its isolated offline
-   context under a render lease, calls the **same synchronous** step/registry
-   scheduling path and then `startRendering()`. An async renderer can return PCM
-   after scheduling/rendering has finished, producing a misleading silent export.
-   `offlineProjectRenderer.ts` is **not** the production export entry point.
-4. `src/types/daw.ts`, `state/projectState.ts`, `state/projectPersistence.ts` and
-   `state/projectHistory.ts` currently own serializable channels/history snapshots;
-   `audio/audioPersistence.ts` and `sampleBufferPersistence.ts` separately own
-   audio assets. Native process handles must never enter snapshots or audio-asset
-   garbage collection. Snapshot capture must precede save/history publication;
-   missing-plugin metadata/state must remain intact for relink/retry. No new
-   native state has been written into these contracts yet.
-5. `midiRecording.ts` already records the existing fractional-step `Note` model;
-   instrument renderers resolve its gate using project BPM. Keep that model and
-   registry. Extend the registry with a channel-level native session lifecycle,
-   separate from synchronous built-in note voices, rather than inventing a
-   second piano roll or a detached demo transport.
-
-The smallest safe follow-up is: a typed desktop-only bridge for asynchronous
-session preparation/state capture; a channel-owned AudioWorklet PCM FIFO with
-bounded batched delivery, generation fencing, underrun diagnostics and measured
-latency; and an explicit async native preparation/flush stage **before** the
-production offline context renders. Route both through existing channel mixer
-inputs, preserving sends/FX, tempo, seeking, mute/solo and render leases. Tie
-session disposal/cancellation to project/channel replacement and undo/redo. Only
-then add validated persisted identity/state plus a relink UI, and only then ship
-plugin selection. Shared-memory rings (with explicit cross-origin isolation) or
-transferred batches need benchmarking in the packaged Electron environment.
-Migrating the entire mixer/device backend to native is viable but much larger;
-per-note frozen buffers lose shared-instance/held-note semantics and are not an
-acceptable substitute. None of these alternatives is claimed implemented here.
-
-### Acceptance status
-
-Native prototype discovery/load, MIDI/pitch/velocity/note-off DSP, polyphony,
-state-file reload, explicit failures/retry and resource-failure handling are
-implemented and tested. **Unmet:** production user-configured path UI, VST3
-channel selection, registry/Piano Roll live playback, hardware-MIDI monitoring,
-physical-device playback, native instrument participation in Apex song/stem
-export, Apex project/history state integration and relink UI, packaged-helper
-integration and packaged Electron/native end-to-end tests. Existing regression
-checks do not turn these unmet criteria into passes.

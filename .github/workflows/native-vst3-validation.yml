@@ -1,4 +1,4 @@
-name: Native VST3 Prototype Validation
+name: Native VST3 Validation
 
 on:
   pull_request:
@@ -27,8 +27,8 @@ jobs:
         run: npm ci --legacy-peer-deps --ignore-scripts
       - name: Fetch pinned SDK and build helper plus real test instrument
         run: npm run native:vst3:build
-      - name: Verify real plugin DSP, state, failure handling and WAV encoding
-        run: npm run test:native-vst3
+      - name: Verify native DSP and production live/export/state integration
+        run: npm run test:native-vst3 && npm run test:vst3-daw
       - name: Upload measured evidence (not a desktop playback claim)
         if: always()
         uses: actions/upload-artifact@v4
