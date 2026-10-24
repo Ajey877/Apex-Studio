@@ -205,6 +205,7 @@ export interface AutomationPoint {
 }
 
 export type AutomationTargetType = 
+  | 'vst3_param'
   | 'channel_vol' 
   | 'channel_pan' 
   | 'channel_filter_cutoff' 
@@ -487,6 +488,7 @@ export interface PlaylistClip {
     targetId: string | number; // channel id or mixer track id
     paramName?: string;
     label?: string;
+    native?: { path: string; classId: string; automationId: string | null; parameterId: number };
   };
   automationPoints?: AutomationPoint[];
   // Phase 1M: take-grouping fields for comping lanes. Clips sharing the same

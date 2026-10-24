@@ -522,3 +522,178 @@ test('failed/stale/cancelled native parameter transactions do not publish, clean
   finally { await instance.releaseNativeInstruments(); }
   assert.equal(service.sessionCount, 0);
 });
+
+// Playlist automation: positive evidence always uses the pinned real MDA and
+// production engine. No test-only oscillator, PCM, or automation renderer.
+const { nativeTarget } = await import('../src/audio/nativeVst3Automation.ts');
+const automationMetadata = await bridge.describe(instrument);
+const vcf = automationMetadata.parameters.find(p => p.id === 6);
+assert.equal(vcf.name, 'VCF Freq');
+const automationChannel = { ...channel, vst3: { ...instrument, automationId: 'mda-automation-instance-a' },
+  notes: [{ id: 'automation-held', pitch: 60, start: 0, duration: 16, velocity: .8 }] };
+const automationPattern = { ...clip, startBar: 0 };
+const automationClip = { id: 'vcf-automation', type: 'automation', trackIndex: 1, startBar: 0, lengthBars: 1,
+  name: 'VCF Freq', color: '#fff', automationTarget: nativeTarget(automationChannel, vcf),
+  automationPoints: [{ x: 0, y: .9 }, { x: 1, y: .05 }] };
+async function automationExport(clips = [automationClip], ch = automationChannel) { return exportSong(ch, tracks, [automationPattern, ...clips]); }
+async function automationLive(clips = [automationClip], ch = automationChannel, action) {
+  const instance = engine();
+  try {
+    await instance.play([ch], [automationPattern, ...clips], 'song', undefined, tracks);
+    await advanceLive(instance, .6);
+    if (action) await action(instance);
+    await advanceLive(instance, .65);
+    assert.ok(!getVst3Diagnostics().some(d => d.channelId === ch.id && /underrun|deadline/.test(d.message)));
+    return instance.getContext().exportAsAudioData().channelData[0].slice();
+  } finally { instance.stop(); await instance.releaseNativeInstruments(); }
+}
+
+test('Playlist VCF automation changes actual live graph and production export; independent native reference and deterministic negative controls', async () => {
+  const original = JSON.stringify(automationChannel);
+  const livePlain = await automationLive([]), liveCurve = await automationLive();
+  const liveDifference = difference(livePlain, liveCurve);
+  assert.ok(liveDifference > .001, `automated actual live graph PCM RMS difference ${liveDifference}`);
+  const dry = (await automationExport([])).getChannelData(0), rendered = (await automationExport()).getChannelData(0);
+  const exportDifference = difference(dry, rendered);
+  assert.ok(exportDifference > .001);
+  assert.equal(difference(rendered, (await automationExport()).getChannelData(0)), 0);
+  const unrelated = { ...automationClip, automationTarget: { ...automationClip.automationTarget, targetId: 'different-channel' } };
+  assert.equal(difference(dry, (await automationExport([unrelated])).getChannelData(0)), 0);
+  assert.equal(difference(livePlain, await automationLive([unrelated])), 0);
+  const replaced = { ...automationChannel, vst3: { ...automationChannel.vst3, automationId: 'replacement' } };
+  assert.equal(difference(dry, (await automationExport([automationClip], replaced)).getChannelData(0)), 0);
+
+  // Independent reference: linear algebra/absolute sample positions below,
+  // deliberately NOT the production curve evaluator or timeline planner.
+  const native = new NativeVst3Client(executable), expected = new Float32Array(rate * 4);
+  try {
+    await native.open(plugin, { state: instrument.state, sampleRate: rate });
+    for (let cursor = 0; cursor < expected.length; cursor += 1024) {
+      const frames = Math.min(1024, expected.length - cursor), midi = [];
+      if (cursor === 0) midi.push({ offset: 0, type: 'on', pitch: 60, noteId: 1, velocity: .8 });
+      if (cursor <= 96000 && cursor + frames > 96000) midi.push({ offset: 96000 - cursor, type: 'off', pitch: 60, noteId: 1 });
+      const changes = [];
+      for (let offset = 0; offset < frames; offset += 128) changes.push({ id: 6, offset, value: .9 + (.05 - .9) * Math.min(1, (cursor + offset) / 96000) });
+      const { samples } = await native.process(frames, midi, changes, 120);
+      expected.set(samples.subarray(0, frames), cursor);
+    }
+  } finally { await native.dispose(); }
+  const referenceDifference = difference(rendered, expected);
+  assert.ok(referenceDifference < 1e-6, `independent actual processor reference ${referenceDifference}`);
+  assert.equal(JSON.stringify(automationChannel), original, 'automation never rewrites saved base parameters');
+  assert.equal(service.sessionCount, 0);
+  const metrics = { plugin: plugin.name, classId: plugin.classId, parameterId: 6, liveDifferenceRms: liveDifference,
+    exportDifferenceRms: exportDifference, independentNativeReferenceDifferenceRms: referenceDifference,
+    repeatedExportDifferenceRms: 0, wrongChannelDifferenceRms: 0, replacementDifferenceRms: 0,
+    gridFrames: 128, processingBlockFrames: 1024, sampleRate: rate,
+    precision: 'Queue offsets retained; MDA consumes last value per process block. Not a sample-accurate DSP claim.' };
+  await writeFile(path.join(evidence, 'apex-vst3-automation-metrics.json'), JSON.stringify(metrics, null, 2));
+  console.log('VST3_AUTOMATION_PCM_PROOF', JSON.stringify(metrics));
+});
+
+test('constant VCF curve equals explicit fixed setting in live and production export; persisted history/reopen restore exact automated PCM', async () => {
+  const constant = { ...automationClip, automationPoints: [{ x: 0, y: .05 }, { x: 1, y: .05 }] };
+  const fixed = { ...automationChannel, vst3: { ...automationChannel.vst3,
+    state: { ...instrument.state, parameters: [...instrument.state.parameters.filter(p => p.id !== 6), { id: 6, value: .05 }] } } };
+  const a = (await automationExport([constant])).getChannelData(0), b = (await automationExport([], fixed)).getChannelData(0);
+  assert.ok(difference(a, b) < 1e-6, `constant/fixed export ${difference(a, b)}`);
+  assert.ok(difference(await automationLive([constant]), await automationLive([], fixed)) < 1e-6);
+  const project = { ...createDefaultProjectState(), channels: [automationChannel], playlistClips: [automationPattern], mixerTracks: tracks };
+  const h = createHistory(project).commit({ ...project, playlistClips: [automationPattern, automationClip] }, 'Create VCF automation');
+  const reopened = normalizeProjectState(JSON.parse(serializeProjectState(h.present)).state);
+  const renderProject = p => exportSong(p.channels[0], p.mixerTracks, p.playlistClips);
+  const automated = (await renderProject(h.present)).getChannelData(0);
+  assert.ok(difference(automated, (await renderProject(h.undo().present)).getChannelData(0)) > .001);
+  assert.equal(difference(automated, (await renderProject(h.undo().redo().present)).getChannelData(0)), 0);
+  assert.equal(difference(automated, (await renderProject(reopened)).getChannelData(0)), 0);
+});
+
+test('native timed queue validates multiple points, ownership, malformed offsets/values/IDs and leaves saved state intact', async () => {
+  const opened = await service.open(instrument, rate, 'offline', 'automation-owner');
+  try {
+    const points = [{ id: 6, value: .2, offset: 0 }, { id: 6, value: .2, offset: 12 }, { id: 6, value: .8, offset: 300 }];
+    await assert.rejects(service.process(opened.id, 1024, [], 120, 'wrong-owner', points), /another renderer/);
+    for (const bad of [[{ id: 6, value: .2, offset: 1024 }], [{ id: 6, value: .2, offset: -1 }], [{ id: 6, value: NaN, offset: 0 }],
+      [{ id: 999999, value: .2, offset: 0 }], [points[2], points[0]]]) {
+      await assert.rejects(service.process(opened.id, 1024, [], 120, 'automation-owner', bad), /Invalid|Unknown/);
+    }
+    await service.process(opened.id, 1024, [], 120, 'automation-owner', points);
+    const saved = await service.parameters(opened.id, [{ id: 14, value: 0 }], 'automation-owner');
+    assert.ok(Math.abs(saved.find(p => p.id === 6).currentValue - vcf.currentValue) < 1e-7, 'runtime curve must not overwrite base controller values');
+  } finally { await service.closeOwner('automation-owner'); }
+  const bad = { ...automationClip, automationPoints: [{ x: 0, y: NaN }, { x: 1, y: .2 }] };
+  await assert.rejects(automationExport([bad]), /Invalid VST3 automation curve/);
+  const unknown = { ...automationClip, automationTarget: { ...automationClip.automationTarget,
+    native: { ...automationClip.automationTarget.native, parameterId: 999999 } } };
+  await assert.rejects(automationExport([unknown]), /unavailable/);
+  assert.equal(service.sessionCount, 0);
+});
+
+test('actual transport seeks/restarts re-prepare native automation without stale PCM; clip end latches and muted lanes do not automate', async () => {
+  const instance = engine();
+  const observed = [];
+  const processNative = service.process.bind(service);
+  service.process = (...args) => { if (args[5]?.some(p => p.offset !== undefined)) observed.push(args[5]); return processNative(...args); };
+  const shortNote = { ...automationChannel, notes: [{ id: 'seek-notes', pitch: 60, start: 0, duration: 1, velocity: .8 },
+    { id: 'seek-later', pitch: 64, start: 8, duration: 1, velocity: .8 }] };
+  try {
+    await instance.play([shortNote], [automationPattern, automationClip], 'song', undefined, tracks);
+    await advanceLive(instance, .3);
+    const saved = JSON.stringify(shortNote);
+    observed.length = 0;
+    instance.seek(1);
+    // The native seek intentionally uses the existing async Play preparation.
+    for (let i = 0; i < 200 && !instance.isPlaybackActive(); i++) await new Promise(r => setTimeout(r, 2));
+    assert.ok(instance.isPlaybackActive());
+    await advanceLive(instance, .2);
+    assert.ok(Math.abs(observed[0][0].value - .475) < 1e-12, 'seek evaluates the curve at the new musical position');
+    assert.ok(rms(instance.getContext().exportAsAudioData().channelData[0], Math.ceil(.4 * rate)) > .00001);
+    observed.length = 0;
+    instance.seek(0); // loop-like discontinuity: no prior pass queues survive
+    for (let i = 0; i < 200 && !instance.isPlaybackActive(); i++) await new Promise(r => setTimeout(r, 2));
+    await advanceLive(instance, .25);
+    assert.equal(observed[0][0].value, .9, 'rewind clears previous-pass automation');
+    instance.stop(); await instance.releaseNativeInstruments();
+    const stoppedAt = instance.getContext().currentTime;
+    await advanceLive(instance, .1);
+    assert.equal(rms(instance.getContext().exportAsAudioData().channelData[0], Math.ceil(stoppedAt * rate)), 0);
+    assert.equal(service.sessionCount, 0);
+    await instance.play([shortNote], [automationPattern, automationClip], 'song', undefined, tracks);
+    await advanceLive(instance, .2);
+    assert.equal(JSON.stringify(shortNote), saved);
+  } finally { service.process = processNative; instance.stop(); await instance.releaseNativeInstruments(); }
+  const earlyEnd = { ...automationClip, lengthBars: .125,
+    automationPoints: [{ x: 0, y: .05 }, { x: 1, y: .05 }] };
+  const fullConstant = { ...earlyEnd, lengthBars: 1 };
+  assert.equal(difference((await automationExport([earlyEnd])).getChannelData(0), (await automationExport([fullConstant])).getChannelData(0)), 0);
+  assert.equal(difference(await automationLive([earlyEnd]), await automationLive([fullConstant])), 0);
+  const muted = { ...automationClip, mute: true };
+  assert.equal(difference((await automationExport([muted])).getChannelData(0), (await automationExport([])).getChannelData(0)), 0);
+});
+
+
+test('two simultaneous real native instances: automation changes only the addressed channel PCM', async () => {
+  const left = { ...automationChannel, pan: -1 };
+  const right = { ...automationChannel, id: 'native-isolated-right', pan: 1,
+    vst3: { ...automationChannel.vst3, automationId: 'isolated-right' }, notes: [{ ...automationChannel.notes[0], pitch: 72 }] };
+  const patterns = [automationPattern, { ...automationPattern, id: 'right-pattern', channelId: right.id }];
+  const render = async withAutomation => {
+    const e = engine();
+    return e.renderTimelineOffline([left, right], [...patterns, ...(withAutomation ? [automationClip] : [])], tracks, 120, 1, rate, true, 'song', undefined, undefined, undefined, 0);
+  };
+  const plain = await render(false), automated = await render(true);
+  assert.ok(difference(plain.getChannelData(0), automated.getChannelData(0)) > .001);
+  assert.equal(difference(plain.getChannelData(1), automated.getChannelData(1)), 0);
+  const live = async withAutomation => {
+    const e = engine();
+    try {
+      await e.play([left, right], [...patterns, ...(withAutomation ? [automationClip] : [])], 'song', undefined, tracks);
+      await advanceLive(e, 1);
+      return e.getContext().exportAsAudioData().channelData.map(c => c.slice());
+    } finally { e.stop(); await e.releaseNativeInstruments(); }
+  };
+  const livePlain = await live(false), liveAutomated = await live(true);
+  assert.ok(difference(livePlain[0], liveAutomated[0]) > .001);
+  assert.equal(difference(livePlain[1], liveAutomated[1]), 0);
+  assert.equal(service.sessionCount, 0);
+});

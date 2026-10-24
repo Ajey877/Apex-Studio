@@ -1,3 +1,5 @@
+import { nativeTargetMatches } from '../audio/nativeVst3Automation';
+import { Vst3AutomationTargetPicker } from './Vst3AutomationTargetPicker';
 import { PlaylistRulerTicks } from './PlaylistRulerTicks';
 import { resolveSevenEightGrouping } from '../music/meterPulse';
 import { punchRulerSegments, type PunchRangeBeats } from '../music/punchRecording';
@@ -1522,6 +1524,9 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
                               {isFullPatternPlaylistClip(clip) ? 'All instruments' : clipPatternName}
                             </span>
                           )}
+                          {isAuto && clip.automationTarget?.type === 'vst3_param' && !channels.some(c => nativeTargetMatches(clip.automationTarget!, c)) && (
+                            <span role="status" className="text-[var(--apex-danger)] text-[8px]">Unavailable VST3 target</span>
+                          )}
                           {isAudioMissing && (
                             <span
                               id={`missing-audio-clip-badge-${clip.id}`}
@@ -1864,6 +1869,7 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
           <div className="flex flex-wrap items-center gap-2">
             <span className="text-[var(--apex-text-muted)]">Target:</span>
             <select
+              aria-label="Automation target type"
               value={activeAutomationClip.automationTarget?.type || 'channel_filter_cutoff'}
               onChange={(e) => {
                 const newType = e.target.value as AutomationTargetType;
@@ -1875,6 +1881,8 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
                   targetId = currChan?.id || '';
                   const paramLabel = newType === 'channel_filter_cutoff' ? 'Filter Cutoff' : newType === 'channel_vol' ? 'Volume' : 'Pan';
                   label = `${currChan?.name || 'Channel'} ${paramLabel}`;
+                } else if (newType === 'vst3_param') {
+                  targetId = ''; label = 'VST3 parameter — choose and associate a target';
                 } else if (newType.startsWith('mixer_')) {
                   const currTrk = mixerTracks.find(t => t.id === Number(activeAutomationClip.automationTarget?.targetId)) || mixerTracks[1] || mixerTracks[0];
                   targetId = currTrk ? currTrk.id : 1;
@@ -1908,11 +1916,17 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
               <option value="channel_pan">Channel Panning (L/R)</option>
               <option value="mixer_vol">Mixer Insert Volume</option>
               <option value="mixer_pan">Mixer Insert Panning</option>
+              <option value="vst3_param">Native VST3 Parameter</option>
               <option value="fx_param">FX Slot Parameter</option>
               <option value="fx_mix">FX Slot Wet/Dry Mix</option>
               <option value="master_vol">Master Out Volume</option>
             </select>
 
+            {activeAutomationClip.automationTarget?.type === 'vst3_param' && <Vst3AutomationTargetPicker
+              key={activeAutomationClip.id}
+              channels={channels} target={activeAutomationClip.automationTarget}
+              onBind={target => onUpdateClips(clips.map(c => c.id === activeAutomationClip.id ? updatePlaylistAutomationTarget(c, target) : c))}
+            />}
             {/* Contextual Target Entity Selector */}
             {(activeAutomationClip.automationTarget?.type || 'channel_filter_cutoff').startsWith('channel_') && (
               <select

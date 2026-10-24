@@ -164,6 +164,9 @@ test('production desktop smoke algorithm saves edited state and reopens actual A
   await page.locator('#nav-instruments').waitFor();
   await page.evaluate(() => { (window as any).desktopApp.smokeReopen = true; });
   const reopened = await smoke();
+  expect(reopened.automationPcmChecksum).toBe(saved.automationPcmChecksum);
+  expect(reopened.automationStateChecksum).toBe(saved.automationStateChecksum);
+  expect(reopened.automationExportDifferenceRms).toBeGreaterThan(.001);
   expect(reopened.pcmChecksum).toBe(saved.pcmChecksum);
   expect(reopened.savedStateChecksum).toBe(saved.savedStateChecksum);
   expect(reopened.parameterValue).toBe(.05);
@@ -229,4 +232,58 @@ test('genuine labeled MDA list uses controller choices and applies its selected 
   expect(await stored(page)).toEqual(original);
   await editor.getByRole('button', { name: 'Apply parameter changes', exact: true }).click();
   await expect.poll(async () => (await stored(page)).state.parameters.find(p => p.id === glide.id)?.value).toBe(choice.value);
+});
+
+test('Playlist creates genuine VST3 target, existing node editor is undoable, persisted curve drives real production PCM after reload', async ({ page }) => {
+  await setup(page);
+  await page.locator('#nav-playlist').click();
+  const root = page.locator('#fl-playlist-arranger');
+  await root.getByRole('button', { name: 'Automation', exact: true }).first().click();
+  await root.locator('div.h-16').last().locator(':scope > div.w-24').first().click();
+  await root.getByRole('combobox', { name: 'Automation target type' }).selectOption('vst3_param');
+  const picker = root.getByLabel('Native VST3 automation target', { exact: true });
+  await expect(picker.getByRole('combobox', { name: 'VST3 automation parameter', exact: true })).toBeEnabled();
+  await picker.getByRole('combobox', { name: 'VST3 automation parameter', exact: true }).selectOption('6');
+  await picker.getByRole('button', { name: 'Associate VST3 parameter' }).click();
+  await expect(picker).toContainText('Target available.');
+  const saved = () => page.evaluate(async () => {
+    // @ts-ignore real production IndexedDB record
+    const { getPersistedProjectStateRecord } = await import('/src/audio/audioPersistence.ts');
+    return JSON.parse(await getPersistedProjectStateRecord()).state;
+  });
+  await expect.poll(async () => (await saved()).playlistClips.find(c => c.type === 'automation')?.automationTarget?.native?.parameterId).toBe(6);
+  const initial = await saved(), auto = initial.playlistClips.find(c => c.type === 'automation');
+  expect(auto.automationTarget.native.classId).toBe(initial.channels[0].vst3.classId);
+  expect(auto.automationTarget.native.path).toBe(initial.channels[0].vst3.path);
+  await root.getByRole('button', { name: '+ Add Node', exact: true }).click();
+  await expect.poll(async () => (await saved()).playlistClips.find(c => c.type === 'automation').automationPoints.length).toBe(4);
+  await page.getByRole('menuitem', { name: 'Edit', exact: true }).click();
+  await page.getByRole('menuitem', { name: /^Undo/ }).click();
+  await expect.poll(async () => (await saved()).playlistClips.find(c => c.type === 'automation').automationPoints.length).toBe(3);
+  await page.getByRole('menuitem', { name: 'Edit', exact: true }).click();
+  await page.getByRole('menuitem', { name: /^Redo/ }).click();
+  await expect.poll(async () => (await saved()).playlistClips.find(c => c.type === 'automation').automationPoints.length).toBe(4);
+  const beforeReload = (await saved()).playlistClips;
+  await page.reload(); await page.locator('#nav-playlist').click();
+  expect((await saved()).playlistClips).toEqual(beforeReload);
+  const proof = await page.evaluate(async () => {
+    // @ts-ignore real production modules
+    const { audioEngine } = await import('/src/audio/audioEngine.ts');
+    // @ts-ignore
+    const { getPersistedProjectStateRecord } = await import('/src/audio/audioPersistence.ts');
+    const s = JSON.parse(await getPersistedProjectStateRecord()).state;
+    const channel = { ...s.channels[0], notes: [{ id: 'held-auto', pitch: 60, start: 0, duration: 8, velocity: .8 }], volume: 1, pan: 0, mute: false, solo: false };
+    const pattern = { id: 'auto-proof-pattern', type: 'pattern', channelId: channel.id, startBar: 0, lengthBars: 1, trackIndex: 0, color: '#fff', name: 'Real MDA' };
+    const auto = s.playlistClips.find(c => c.type === 'automation');
+    audioEngine.setMasteringState({ enabled: false });
+    const render = clips => audioEngine.renderTimelineOffline([channel], [pattern, ...clips], s.mixerTracks, 120, 1, 48000, true, 'song', undefined, undefined, undefined, .5);
+    const reference = (await render([])).getChannelData(0), changed = (await render([auto])).getChannelData(0);
+    const repeated = (await render([auto])).getChannelData(0);
+    let difference = 0, repeat = 0;
+    for (let i = 0; i < reference.length; i++) { difference += (reference[i] - changed[i]) ** 2; repeat += (repeated[i] - changed[i]) ** 2; }
+    return { differenceRms: Math.sqrt(difference / reference.length), repeatDifferenceRms: Math.sqrt(repeat / reference.length) };
+  });
+  expect(proof.differenceRms).toBeGreaterThan(.001);
+  expect(proof.repeatDifferenceRms).toBe(0);
+  console.log('PLAYLIST_NATIVE_AUTOMATION_UI_PCM_PROOF', JSON.stringify(proof));
 });

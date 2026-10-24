@@ -17,7 +17,7 @@ Only install plugins you trust: process isolation contains crashes but is **not 
 
 ## Delivered scope
 
-This adds a generic parameter editor, not native plugin GUI windows. No universal VST3 compatibility, complete parameter automation lanes, plugin delay compensation, physical output-latency improvements, or physical-device testing is claimed. Existing zero-reported-latency, mono/stereo, x64 instrument-only restrictions remain. Plugins requiring unsupported restart/reinitialization behavior may reject editing. No AI functionality, effects-rack expansion or new runtime dependency is included.
+This adds a generic parameter editor, not native plugin GUI windows. See [Playlist VST3 automation](VST3-AUTOMATION.md) for the bounded, genuine-parameter automation workflow. No universal VST3 compatibility, sample-accurate parameter DSP, plugin delay compensation, physical output-latency improvements, or physical-device testing is claimed. Existing zero-reported-latency, mono/stereo, x64 instrument-only restrictions remain. Plugins requiring unsupported restart/reinitialization behavior may reject editing. No AI functionality, effects-rack expansion or new runtime dependency is included.
 
 ## Implementation and validation map
 

@@ -1,5 +1,6 @@
+import { interpolateCurve } from '../audio/automation/curve';
 import { stepsPerBar, LEGACY_TIME_SIGNATURE, resolveProjectTimeSignature, type TimeSignature } from '../music/musicalTime';
-import type { Channel, Pattern, PlaylistClip, PlaylistTrack, AutomationPoint, AutomationTargetType } from '../types/daw';
+import type { Channel, Pattern, PlaylistClip, PlaylistTrack, AutomationPoint } from '../types/daw';
 
 export const STEPS_PER_BAR = stepsPerBar(LEGACY_TIME_SIGNATURE);
 export const DEFAULT_GRID_BARS = 0.25;
@@ -40,7 +41,7 @@ const cloneClip = (clip: PlaylistClip): PlaylistClip => ({
   // one clip leak into the other).
   // Phase 79: spatialAudio was dropped from PlaylistClip (no DSP consumer),
   // so the clone no longer needs to copy it.
-  automationTarget: clip.automationTarget ? { ...clip.automationTarget } : undefined,
+  automationTarget: clip.automationTarget ? { ...clip.automationTarget, ...(clip.automationTarget.native ? { native: { ...clip.automationTarget.native } } : {}) } : undefined,
   automationPoints: clip.automationPoints?.map(point => ({ ...point })),
 });
 
@@ -52,37 +53,15 @@ const clampUnit = (value: number): number => Math.max(0, Math.min(1, value));
 /**
  * Pure evaluator for a normalized automation envelope.
  *
- * This deliberately mirrors audioEngine.interpolateAutomationCurve so that
+ * This shares the evaluator with audioEngine.interpolateAutomationCurve so that
  * editing operations (split remapping in particular) sample the envelope
  * exactly the way Song Mode playback does: tension lives on the point that
  * opens a segment (positive = ease-in / exponential, negative = ease-out /
  * logarithmic), and the first / last values are held outside the outermost
- * points. Keep the two in sync; the automation test-suite cross-checks them.
+ * points. Editing, playback and native export use the same implementation.
  */
 export function evaluateAutomationEnvelope(points: AutomationPoint[], relX: number): number {
-  if (!Array.isArray(points) || points.length === 0) return 0.5;
-  if (points.length === 1) return points[0].y;
-
-  const sorted = [...points].sort((a, b) => a.x - b.x);
-  if (relX <= sorted[0].x) return sorted[0].y;
-  if (relX >= sorted[sorted.length - 1].x) return sorted[sorted.length - 1].y;
-
-  for (let i = 0; i < sorted.length - 1; i++) {
-    const p1 = sorted[i];
-    const p2 = sorted[i + 1];
-    if (relX >= p1.x && relX <= p2.x) {
-      const segT = (relX - p1.x) / (p2.x - p1.x);
-      const tension = p1.tension || 0;
-      let curvedT = segT;
-      if (tension > 0) {
-        curvedT = Math.pow(segT, 1 + tension * 2);
-      } else if (tension < 0) {
-        curvedT = 1 - Math.pow(1 - segT, 1 + Math.abs(tension) * 2);
-      }
-      return p1.y + (p2.y - p1.y) * curvedT;
-    }
-  }
-  return 0.5;
+  return interpolateCurve(points, relX);
 }
 
 /**
@@ -629,12 +608,7 @@ export function resolveAddNodePosition(points: AutomationPoint[]): { x: number; 
 
 export function updatePlaylistAutomationTarget(
   clip: PlaylistClip,
-  target: {
-    type: AutomationTargetType;
-    targetId: string | number;
-    paramName?: string;
-    label?: string;
-  }
+  target: NonNullable<PlaylistClip['automationTarget']>
 ): PlaylistClip {
   if (clip.type !== 'automation') {
     throw new Error('Target updates require an automation clip');

@@ -269,3 +269,37 @@ test('parameter request timeout/crash/malformed helper responses reject all work
   }
   await withClient(async client => { await client.parameters([{ id: 6, value: .2 }]); });
 });
+
+test('native timed process validates offsets/IDs before processing; invalid batches invalidate the instance', async () => {
+  const changes = [{ id: 6, value: .2, offset: 0 }, { id: 6, value: .2, offset: 64 }, { id: 6, value: .8, offset: 512 }];
+  for (const bad of [changes.map(p => ({ ...p, offset: -1 })), [{ id: 6, value: .1, offset: 1024 }],
+    [{ id: 6, value: .2, offset: 0 }, { id: 6, value: .3, offset: 0 }], [{ id: 999999, value: .3, offset: 0 }], [{ id: 6, value: 2, offset: 0 }]]) {
+    await withClient(async client => {
+      await assert.rejects(client.process(1024, [], bad));
+      await assert.rejects(client.snapshot(), /No plugin instance/);
+    });
+  }
+  await withClient(async client => {
+    const before = await client.snapshot();
+    await client.process(1024, [], changes);
+    assert.deepEqual((await client.snapshot()).parameters, before.parameters, 'runtime points do not rewrite controller base');
+  });
+});
+
+test('timed process timeout/crash/cancel reaps helper and cannot publish another batch', async () => {
+  for (const mode of ['hang', 'crash', 'malformed']) {
+    const client = new NativeVst3Client(fault, { timeoutMs: 50 });
+    try {
+      await assert.rejects(client.request({ command: mode, frames: 1024, parameters: [{ id: 6, value: .1, offset: 100 }] }));
+      await assert.rejects(client.process(1024, [], [{ id: 6, value: .2, offset: 0 }]));
+    } finally { await client.dispose(); }
+  }
+});
+
+test('external cancellation rejects in-flight and queued timed process work', async () => {
+  const client = new NativeVst3Client(fault, { timeoutMs: 500 });
+  const pending = client.request({ command: 'hang', parameters: [{ id: 6, value: .1, offset: 0 }] });
+  const queued = client.process(1024, [], [{ id: 6, value: .2, offset: 0 }]);
+  client.abort();
+  await assert.rejects(pending); await assert.rejects(queued); await client.dispose();
+});

@@ -57,7 +57,7 @@ export function Vst3InstrumentPanel({ channel, onUpdateChannel, onEditParameters
     // Relink by exact class ID and restore original state. A different class
     // is an intentional replacement, explicitly labelled in the UI/history.
     const state = !resetState && channel.instrumentType === 'vst3' && channel.vst3?.classId === plugin.classId ? channel.vst3.state : undefined;
-    const instrument = await bridge.inspect(plugin, state);
+    const instrument = { ...await bridge.inspect(plugin, state), automationId: crypto.randomUUID() };
     if (generation.current !== token) return; // project/channel changed during native load
     const prepared: Channel = { ...channel, instrumentType: 'vst3', vst3: instrument };
     await audioEngine.prepareVst3Channel(prepared);

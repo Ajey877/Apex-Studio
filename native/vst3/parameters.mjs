@@ -30,3 +30,21 @@ export function validateParameterChanges(changes, parameters) {
     return { id: change.id, value: change.value };
   });
 }
+
+/** Process-only timed points. Manual/persisted edits keep the strict unique-ID
+ * contract above. Per-ID offsets must increase; repeated values are legal. */
+export function validateProcessParameters(changes, parameters, frames) {
+  if (!Array.isArray(changes) || changes.length > 4096) throw new Error('Invalid VST3 automation batch');
+  if (!changes.length) return [];
+  if (changes.every(p => p && !Object.hasOwn(p, 'offset'))) return validateParameterChanges(changes, parameters);
+  const last = new Map(), metadata = new Map(parameters.map(p => [p.id, p]));
+  return changes.map(p => {
+    if (!p || Object.keys(p).length !== 3 || !Number.isInteger(p.offset) || p.offset < 0 || p.offset >= frames ||
+        p.offset <= (last.get(p.id) ?? -1)) throw new Error('Invalid or unordered VST3 automation offset');
+    const info = metadata.get(p.id);
+    const [validated] = validateParameterChanges([{ id: p.id, value: p.value }], info ? [info] : []);
+    if (!(info.flags & 1) || ((info.flags & 8) && !info.choices?.some(c => c.value === p.value))) throw new Error('VST3 parameter is not automatable');
+    last.set(p.id, p.offset);
+    return { ...validated, offset: p.offset };
+  });
+}

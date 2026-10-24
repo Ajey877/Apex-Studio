@@ -15,6 +15,8 @@ export interface Vst3State {
 }
 export interface Vst3Instrument extends Vst3Identity {
   state: Vst3State;
+  /** New UI loads/relinks get a fresh binding; manual parameter edits preserve it. */
+  automationId?: string;
 }
 export interface Vst3Event {
   offset: number;
@@ -30,6 +32,7 @@ export interface Vst3Parameter {
   choices?: Array<{ value: number; label: string }>;
 }
 export interface Vst3ParameterMetadata { parameters: Vst3Parameter[]; controllerAvailable: boolean }
+export type Vst3ParameterPoint = { id: number; value: number; offset?: number };
 export type Vst3ParameterChange = { id: number; value: number };
 export type Vst3ParameterEditorCommit = (channel: import('../types/daw').Channel, changes: Vst3ParameterChange[], signal: AbortSignal) => Promise<void>;
 /** Narrow async desktop boundary. Never exposes ipcRenderer, paths to executables or raw host commands. */
@@ -40,8 +43,8 @@ export interface Vst3Bridge {
   inspect(plugin: Vst3Identity, state?: Vst3State): Promise<Vst3Instrument>;
   describe(instrument: Vst3Instrument): Promise<Vst3ParameterMetadata>;
   parameters(id: string, changes: Vst3ParameterChange[]): Promise<Vst3Parameter[]>;
-  open(instrument: Vst3Instrument, sampleRate: number, mode: 'realtime' | 'offline'): Promise<{ id: string; latencySamples: number }>;
-  process(id: string, frames: number, events: Vst3Event[], bpm: number, parameters?: Vst3ParameterChange[]): Promise<Float32Array>;
+  open(instrument: Vst3Instrument, sampleRate: number, mode: 'realtime' | 'offline'): Promise<{ id: string; latencySamples: number; parameters?: Vst3Parameter[] }>;
+  process(id: string, frames: number, events: Vst3Event[], bpm: number, parameters?: Vst3ParameterPoint[]): Promise<Float32Array>;
   close(id: string): Promise<void>;
 }
 export function getVst3Bridge(): Vst3Bridge | undefined {
