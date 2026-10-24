@@ -23,9 +23,19 @@ import {
   AudioToMidiError,
   type AudioToMidiAnalysis,
   type AudioToMidiOptions,
+  type ClipTimelinePlan,
   type TranscribedMidiNote,
 } from '../audio/audioToMidi';
-import { analyseSelectedClipForMidi } from '../audio/audioToMidiSource';
+import {
+  analyseSelectedClipForMidi,
+  analyseSelectedClipForPolyphonicMidi,
+} from '../audio/audioToMidiSource';
+import {
+  POLY_MAX_VOICES,
+  POLY_MAX_MIDI,
+  POLY_MIN_MIDI,
+  type PolyphonicAnalysis,
+} from '../audio/polyphonicTranscription';
 import {
   AudioToMidiCommitError,
   audioToMidiNewPatternLengthSteps,
@@ -52,15 +62,33 @@ import { resolveWarpTarget, type WarpTargetResolution } from './warpClipTarget';
  *     App's existing history path (`mutateProjectState` → one undo step, autosaved);
  *  4. lets the user open the destination in the Piano Roll to edit and hear it.
  *
- * HONEST BOUNDARIES, stated in the UI and enforced by the DSP module:
- *  - monophonic, clearly voiced melodic material with fundamentals in 75–1000 Hz;
- *  - silence, noise, unreliable pitch, clips that are too short, out-of-range
- *    material and polyphonic material (chords) are REFUSED with a reason;
- *  - harmonics are never reported as extra notes, and no chord or source
- *    separation is attempted anywhere;
+ * TWO EXPLICIT MODES (Phase 10B)
+ * The user picks the analysis mode before analysing, and the panel always states
+ * which one produced the verdict:
+ *  - MONOPHONIC (default) — one voice, the shared YIN detector, 75–1000 Hz.
+ *    Unchanged behaviour, including its `polyphonic-suspected` refusal.
+ *  - POLYPHONIC — up to 4 simultaneous fundamentals in C2–C6 (MIDI 36–84), the
+ *    multi-pitch analyzer in `polyphonicTranscription.ts`. Notes carry measured
+ *    confidence (from the share of the spectrum they explain) and measured
+ *    velocity; dense, inharmonic or over-4-voice material is REFUSED.
+ *
+ * HONEST BOUNDARIES, stated in the UI and enforced by the DSP modules:
+ *  - monophonic: clearly voiced melodic material, fundamentals 75–1000 Hz;
+ *  - polyphonic: clear tonal chords / melody-over-bass, C2–C6, at most 4 voices,
+ *    no source separation, and adjacent semitones in one register can merge;
+ *  - silence, noise, unreliable pitch, clips that are too short/wrong range and
+ *    unsupported polyphony are REFUSED with a reason, never guessed;
  *  - a refusal leaves the project untouched, and the default destination is a
  *    NEW pattern, so an existing part can never be overwritten by accident.
  */
+
+/** Which analysis produced the panel's verdict. Monophonic is the default. */
+export type AudioToMidiAnalysisMode = 'monophonic' | 'polyphonic';
+
+/** A completed analysis, tagged with the mode that produced it. */
+type AnalysisReview =
+  | { mode: 'monophonic'; analysis: AudioToMidiAnalysis; plan: ClipTimelinePlan | null }
+  | { mode: 'polyphonic'; analysis: PolyphonicAnalysis; plan: ClipTimelinePlan | null };
 
 /** Where a confirmed transcription goes. */
 export interface AudioToMidiCommitRequest {
@@ -122,11 +150,35 @@ const targetMessage = (resolution: WarpTargetResolution): string => {
   }
 };
 
-/** Playback facts the review panel shows, straight from the analysis plan. */
-const describeWindow = (analysis: AudioToMidiAnalysis): string => {
-  if (!analysis.plan) return '—';
-  const plan = analysis.plan;
+/** Playback facts the review panel shows, straight from the resolved plan. */
+const describeWindow = (plan: ClipTimelinePlan | null): string => {
+  if (!plan) return '—';
   return `${plan.sourceOffsetSeconds.toFixed(2)} s into the source, ${plan.sourceWindowSeconds.toFixed(2)} s of source → ${plan.timelineSeconds.toFixed(2)} s on the timeline`;
+};
+
+/** The mode badge: what actually produced the notes below. */
+const MODE_BADGE: Record<AudioToMidiAnalysisMode, string> = {
+  monophonic: 'MONOPHONIC · REAL PCM',
+  polyphonic: 'POLYPHONIC · REAL PCM',
+};
+
+/** Per-mode statements of what is supported, shown next to the mode switch. */
+const MODE_SUMMARY: Record<AudioToMidiAnalysisMode, string> = {
+  monophonic: 'One voice at a time (YIN), 75–1000 Hz. Chords are refused.',
+  polyphonic: `Up to ${POLY_MAX_VOICES} simultaneous notes, C2–C6 (MIDI ${POLY_MIN_MIDI}–${POLY_MAX_MIDI}). Chords and melody-over-bass only.`,
+};
+
+/** The measured pitch span of a set of notes, or an honest dash. */
+const analysisRangeLabel = (notes: readonly { midi: number }[]): string => {
+  if (notes.length === 0) return '—';
+  const pitches = notes.map(note => note.midi);
+  return `${midiName(Math.min(...pitches))}–${midiName(Math.max(...pitches))}`;
+};
+
+const MODE_LIMITS: Record<AudioToMidiAnalysisMode, string> = {
+  monophonic:
+    'Monophonic, clearly voiced melodic material, fundamentals 75–1000 Hz (≈ E2–B5). The clip\'s real trim offset, pitch shift and playback rate are compensated, so notes land where they sound. Silence, noise, unstable pitch, clips shorter than 0.25 s and polyphonic material (chords) are refused with a reason and never guessed. No chord or source separation, no harmonic-as-note inflation.',
+  polyphonic: `Polyphonic tonal material: up to ${POLY_MAX_VOICES} simultaneous fundamentals in C2–C6 (MIDI ${POLY_MIN_MIDI}–${POLY_MAX_MIDI}). Harmonics are explained by the note that produced them and are never reported as extra notes. Confidence and velocity are measured from the spectrum (confidence is the share of the spectrum a note explains, mapped through a documented curve), not guessed. Dense mixes, drums, bells/inharmonic material and more than ${POLY_MAX_VOICES} voices are refused with a reason; two fundamentals about a semitone apart in one register can merge; a note sharing its fundamental with a much louder note can be missed. No source separation and no instrument identification. The clip's real trim offset, pitch shift and playback rate are compensated.`,
 };
 
 export const AudioToMidiModal: React.FC<AudioToMidiModalProps> = ({
@@ -140,7 +192,9 @@ export const AudioToMidiModal: React.FC<AudioToMidiModalProps> = ({
 }) => {
   const [minNoteSteps, setMinNoteSteps] = useState<number>(AUDIO_TO_MIDI_DEFAULT_MIN_NOTE_STEPS);
   const [quantizeSteps, setQuantizeSteps] = useState<number>(AUDIO_TO_MIDI_DEFAULT_QUANTIZE_STEPS);
-  const [analysis, setAnalysis] = useState<AudioToMidiAnalysis | null>(null);
+  /** Monophonic stays the default: the existing behaviour is never a surprise. */
+  const [analysisMode, setAnalysisMode] = useState<AudioToMidiAnalysisMode>('monophonic');
+  const [review, setReview] = useState<AnalysisReview | null>(null);
   const [analysedClipId, setAnalysedClipId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isAnalysing, setIsAnalysing] = useState(false);
@@ -162,11 +216,11 @@ export const AudioToMidiModal: React.FC<AudioToMidiModalProps> = ({
   // what the panel shows must always describe the audio and settings a commit
   // would really use.
   useEffect(() => {
-    setAnalysis(null);
+    setReview(null);
     setAnalysedClipId(null);
     setError(null);
     setCommitted(null);
-  }, [selectedClipId, minNoteSteps, quantizeSteps]);
+  }, [selectedClipId, minNoteSteps, quantizeSteps, analysisMode]);
 
   // Reopening the surface starts clean: a commit report from a previous visit
   // must never read as if it had just happened.
@@ -195,8 +249,11 @@ export const AudioToMidiModal: React.FC<AudioToMidiModalProps> = ({
     [minNoteSteps, quantizeSteps]
   );
 
-  const accepted = analysis?.status === 'ok' && analysis.notes.length > 0;
-  const previewNotes = useMemo(() => (accepted ? analysis!.notes : []), [accepted, analysis]);
+  const accepted = review?.analysis.status === 'ok' && review.analysis.notes.length > 0;
+  const previewNotes = useMemo<TranscribedMidiNote[]>(
+    () => (accepted && review ? review.analysis.notes : []),
+    [accepted, review]
+  );
   const destinationPattern = destination === NEW_PATTERN_OPTION
     ? null
     : patterns.find(pattern => pattern.id === destination) ?? null;
@@ -253,14 +310,25 @@ export const AudioToMidiModal: React.FC<AudioToMidiModalProps> = ({
     if (!clip || !timing || isAnalysing) return;
     setIsAnalysing(true);
     setError(null);
-    setAnalysis(null);
+    setReview(null);
     setCommitted(null);
+    const deps = {
+      getSourceBuffer: (id: string) => audioEngine.getSampleBuffer(id),
+      hydrateSource: (id: string) => hydrateAudioClip(audioEngine, id),
+    };
     try {
-      const { analysis: result } = await analyseSelectedClipForMidi(clip, timing, options, {
-        getSourceBuffer: id => audioEngine.getSampleBuffer(id),
-        hydrateSource: id => hydrateAudioClip(audioEngine, id),
-      });
-      setAnalysis(result);
+      if (analysisMode === 'polyphonic') {
+        const { analysis: result, plan } = await analyseSelectedClipForPolyphonicMidi(
+          clip,
+          timing,
+          options,
+          deps
+        );
+        setReview({ mode: 'polyphonic', analysis: result, plan });
+      } else {
+        const { analysis: result } = await analyseSelectedClipForMidi(clip, timing, options, deps);
+        setReview({ mode: 'monophonic', analysis: result, plan: result.plan });
+      }
       setAnalysedClipId(clip.id);
     } catch (caught) {
       if (caught instanceof AudioToMidiError) {
@@ -287,7 +355,7 @@ export const AudioToMidiModal: React.FC<AudioToMidiModalProps> = ({
     });
     if (outcome.ok) {
       setCommitted(outcome);
-      setAnalysis(null);
+      setReview(null);
       setAnalysedClipId(null);
     } else {
       setCommitted(null);
@@ -296,7 +364,7 @@ export const AudioToMidiModal: React.FC<AudioToMidiModalProps> = ({
   };
 
   const handleDiscard = (): void => {
-    setAnalysis(null);
+    setReview(null);
     setAnalysedClipId(null);
     setError(null);
   };
@@ -328,8 +396,11 @@ export const AudioToMidiModal: React.FC<AudioToMidiModalProps> = ({
                 <h2 id="fl-audio-to-midi-modal-title" className="text-sm font-bold text-[var(--apex-text)] tracking-wide">
                   AUDIO TO MIDI
                 </h2>
-                <span className="px-1.5 py-0.5 rounded text-[9px] font-mono font-bold bg-[color-mix(in_srgb,var(--apex-success)_20%,transparent)] text-[var(--apex-text)] border border-[color-mix(in_srgb,var(--apex-success)_40%,transparent)]">
-                  MONOPHONIC · REAL PCM
+                <span
+                  className="px-1.5 py-0.5 rounded text-[9px] font-mono font-bold bg-[color-mix(in_srgb,var(--apex-success)_20%,transparent)] text-[var(--apex-text)] border border-[color-mix(in_srgb,var(--apex-success)_40%,transparent)]"
+                  data-testid="atm-mode-badge"
+                >
+                  {MODE_BADGE[analysisMode]}
                 </span>
               </div>
               <p className="text-[10px] text-[var(--apex-text-3)]">
@@ -368,6 +439,32 @@ export const AudioToMidiModal: React.FC<AudioToMidiModalProps> = ({
                 <div className="text-[10px] text-[var(--apex-text-3)]">{targetMessage(target)}</div>
               )}
             </div>
+
+            <fieldset className="text-[10px] text-[var(--apex-text-3)] flex flex-col gap-1">
+              <legend className="text-[10px] text-[var(--apex-text-3)]">ANALYSIS MODE</legend>
+              <div className="flex items-center gap-3 text-[11px] text-[var(--apex-text-2)]">
+                <label className="flex items-center gap-1.5">
+                  <input
+                    type="radio"
+                    name="atm-analysis-mode"
+                    aria-label="Monophonic analysis mode"
+                    checked={analysisMode === 'monophonic'}
+                    onChange={() => setAnalysisMode('monophonic')}
+                  />
+                  Monophonic
+                </label>
+                <label className="flex items-center gap-1.5">
+                  <input
+                    type="radio"
+                    name="atm-analysis-mode"
+                    aria-label="Polyphonic analysis mode"
+                    checked={analysisMode === 'polyphonic'}
+                    onChange={() => setAnalysisMode('polyphonic')}
+                  />
+                  Polyphonic
+                </label>
+              </div>
+            </fieldset>
 
             <label className="text-[10px] text-[var(--apex-text-3)] flex flex-col gap-1">
               MIN NOTE
@@ -408,10 +505,17 @@ export const AudioToMidiModal: React.FC<AudioToMidiModalProps> = ({
               <Sparkles className="w-3.5 h-3.5" />
               <span>{isAnalysing ? 'Analysing real PCM…' : 'Analyse clip'}</span>
             </button>
+
+            <div
+              className="w-full text-[10px] text-[var(--apex-text-3)]"
+              data-testid="atm-mode-summary"
+            >
+              {MODE_SUMMARY[analysisMode]}
+            </div>
           </div>
 
           {/* Verdict / preview */}
-          {analysis && (
+          {review && (
             <div className="bg-[var(--apex-canvas)] border border-[var(--apex-border)] rounded-xl p-3 space-y-2">
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2">
@@ -423,40 +527,67 @@ export const AudioToMidiModal: React.FC<AudioToMidiModalProps> = ({
                     className="px-1.5 py-0.5 rounded text-[9px] font-mono font-bold border border-[var(--apex-border)] text-[var(--apex-text-3)]"
                     data-testid="atm-verdict"
                   >
-                    {analysis.status.toUpperCase()}
-                    {analysis.refusal ? ` · ${analysis.refusal}` : ''}
+                    {MODE_BADGE[review.mode].split(' ·')[0]} · {review.analysis.status.toUpperCase()}
+                    {review.analysis.refusal ? ` · ${review.analysis.refusal}` : ''}
                   </span>
                 </div>
-                <span className="text-[10px] text-[var(--apex-text-3)]">{describeWindow(analysis)}</span>
+                <span className="text-[10px] text-[var(--apex-text-3)]">{describeWindow(review.plan)}</span>
               </div>
 
               <p className="text-[11px] text-[var(--apex-text-2)]" data-testid="atm-message">
-                {analysis.status === 'ok'
-                  ? `Real YIN analysis of the selected clip (${analysis.settings.quantizeSteps}-step grid, ${analysis.settings.minNoteSteps}-step minimum). Note lengths are quantized to the project grid; edit them in the Piano Roll after committing.`
-                  : analysis.message}
+                {review.analysis.status === 'ok'
+                  ? review.mode === 'polyphonic'
+                    ? `Real multi-pitch analysis of the selected clip (${review.analysis.notes.length} notes, up to ${POLY_MAX_VOICES} simultaneous, ${percent(review.analysis.stats.explainedShare)} of the spectral peaks explained; ${minNoteSteps}-step minimum, ${quantizeSteps}-step grid). Note lengths are quantized to the project grid; edit them in the Piano Roll after committing.`
+                    : `Real YIN analysis of the selected clip (${review.analysis.settings.quantizeSteps}-step grid, ${review.analysis.settings.minNoteSteps}-step minimum). Note lengths are quantized to the project grid; edit them in the Piano Roll after committing.`
+                  : review.analysis.message}
               </p>
 
-              {analysis.stats && (
+              {review.mode === 'monophonic' && review.analysis.stats && (
                 <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-[10px]">
                   <div className="bg-[var(--apex-surface)] rounded p-1.5 border border-[var(--apex-border)]">
                     <div className="text-[var(--apex-text-3)]">VOICED</div>
-                    <div className="font-mono font-bold text-[var(--apex-text)]">{percent(analysis.stats.voicedRatio)}</div>
+                    <div className="font-mono font-bold text-[var(--apex-text)]">{percent(review.analysis.stats.voicedRatio)}</div>
                   </div>
                   <div className="bg-[var(--apex-surface)] rounded p-1.5 border border-[var(--apex-border)]">
                     <div className="text-[var(--apex-text-3)]">CONFIDENCE</div>
-                    <div className="font-mono font-bold text-[var(--apex-text)]">{percent(analysis.stats.medianConfidence)}</div>
+                    <div className="font-mono font-bold text-[var(--apex-text)]">{percent(review.analysis.stats.medianConfidence)}</div>
                   </div>
                   <div className="bg-[var(--apex-surface)] rounded p-1.5 border border-[var(--apex-border)]">
                     <div className="text-[var(--apex-text-3)]">RANGE</div>
                     <div className="font-mono font-bold text-[var(--apex-text)]">
-                      {analysis.stats.lowestMidi === null || analysis.stats.highestMidi === null
+                      {review.analysis.stats.lowestMidi === null || review.analysis.stats.highestMidi === null
                         ? '—'
-                        : `${midiName(analysis.stats.lowestMidi)}–${midiName(analysis.stats.highestMidi)}`}
+                        : `${midiName(review.analysis.stats.lowestMidi)}–${midiName(review.analysis.stats.highestMidi)}`}
                     </div>
                   </div>
                   <div className="bg-[var(--apex-surface)] rounded p-1.5 border border-[var(--apex-border)]">
                     <div className="text-[var(--apex-text-3)]">HARMONIC</div>
-                    <div className="font-mono font-bold text-[var(--apex-text)]">{percent(analysis.stats.medianHarmonicRatio)}</div>
+                    <div className="font-mono font-bold text-[var(--apex-text)]">{percent(review.analysis.stats.medianHarmonicRatio)}</div>
+                  </div>
+                </div>
+              )}
+
+              {review.mode === 'polyphonic' && review.analysis.stats && (
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-[10px]" data-testid="atm-poly-stats">
+                  <div className="bg-[var(--apex-surface)] rounded p-1.5 border border-[var(--apex-border)]">
+                    <div className="text-[var(--apex-text-3)]">PITCHED FRAMES</div>
+                    <div className="font-mono font-bold text-[var(--apex-text)]">{percent(review.analysis.stats.pitchedRatio)}</div>
+                  </div>
+                  <div className="bg-[var(--apex-surface)] rounded p-1.5 border border-[var(--apex-border)]">
+                    <div className="text-[var(--apex-text-3)]">PEAK VOICES</div>
+                    <div className="font-mono font-bold text-[var(--apex-text)]">
+                      {review.analysis.stats.maxSimultaneousVoices} / {POLY_MAX_VOICES} voices
+                    </div>
+                  </div>
+                  <div className="bg-[var(--apex-surface)] rounded p-1.5 border border-[var(--apex-border)]">
+                    <div className="text-[var(--apex-text-3)]">PEAKS EXPLAINED</div>
+                    <div className="font-mono font-bold text-[var(--apex-text)]">{percent(review.analysis.stats.explainedShare)}</div>
+                  </div>
+                  <div className="bg-[var(--apex-surface)] rounded p-1.5 border border-[var(--apex-border)]">
+                    <div className="text-[var(--apex-text-3)]">RANGE</div>
+                    <div className="font-mono font-bold text-[var(--apex-text)]">
+                      {analysisRangeLabel(review.analysis.notes)}
+                    </div>
                   </div>
                 </div>
               )}
@@ -569,6 +700,19 @@ export const AudioToMidiModal: React.FC<AudioToMidiModalProps> = ({
                 </label>
               </div>
 
+              {/* A drum pad has no pitches. Saying so here is the difference
+                  between "the transcription was wrong" and "you chose a kit". */}
+              {destinationChannel?.instrumentType === 'drumpad' && (
+                <p
+                  data-testid="atm-channel-hint"
+                  className="text-[10px] text-[var(--apex-gold)] leading-snug"
+                >
+                  {destinationChannel.name} is a drum pad: transcribed pitches will
+                  trigger drum pads, not the notes reviewed above. Pick a pitched
+                  instrument channel to hear the transcription.
+                </p>
+              )}
+
               {destinationPattern && (
                 <div className="space-y-1.5">
                   <div className="flex items-center gap-4 text-[11px] text-[var(--apex-text-2)]">
@@ -665,11 +809,8 @@ export const AudioToMidiModal: React.FC<AudioToMidiModalProps> = ({
           {/* Boundaries */}
           <div className="text-[10px] text-[var(--apex-text-3)] border-t border-[var(--apex-border)] pt-2 flex items-start gap-1.5">
             <Gauge className="w-3.5 h-3.5 shrink-0 mt-0.5" />
-            <span>
-              Monophonic, clearly voiced melodic material, fundamentals 75–1000 Hz (≈ E2–B5). The clip's real trim
-              offset, pitch shift and playback rate are compensated, so notes land where they sound. Silence, noise,
-              unstable pitch, clips shorter than 0.25 s and polyphonic material (chords) are refused with a reason and
-              never guessed. No chord or source separation, no harmonic-as-note inflation.{' '}
+            <span data-testid="atm-limits">
+              {MODE_LIMITS[analysisMode]}{' '}
               {analysedClipId ? `Analysed clip: ${analysedClipId}.` : ''}
             </span>
           </div>

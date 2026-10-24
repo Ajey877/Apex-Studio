@@ -196,6 +196,7 @@ const EXPECTED_INVENTORY: readonly ExpectedLayer[] = Object.freeze([
   { id: 'engine.bass-extraction-fallback', file: 'src/audio/audioEngine.ts', role: 'FALLBACK', domain: 'note-steps', consumesPolicy: false, declaredMinimum: 2 },
   { id: 'engine.offline-render-window', file: 'src/audio/audioEngine.ts', role: 'NON_MUSICAL', domain: 'audio-seconds', consumesPolicy: false, declaredMinimum: null },
   { id: 'audio-to-midi.commit', file: 'src/state/audioToMidiCommit.ts', role: 'DURATION_LEGALIZER', domain: 'note-steps', consumesPolicy: true, declaredMinimum: 0.25, probeExpected: 0.25 },
+  { id: 'polyphonic-transcription.note-timing', file: 'src/audio/polyphonicTranscription.ts', role: 'DURATION_LEGALIZER', domain: 'note-steps', consumesPolicy: true, declaredMinimum: 0.25, probeExpected: 0.25 },
   { id: 'gate.note-gate', file: 'src/audio/noteGate.ts', role: 'AUDIBLE_GATE_SEPARATE_POLICY', domain: 'audio-seconds', consumesPolicy: false, declaredMinimum: null },
   { id: 'gate.arp-transient-duration', file: 'src/audio/noteGate.ts', role: 'AUDIBLE_GATE_SEPARATE_POLICY', domain: 'note-steps', consumesPolicy: false, declaredMinimum: null, probeExpected: 0.05 },
   { id: 'gate.instrument-policy', file: 'src/audio/instrumentGatePolicy.ts', role: 'AUDIBLE_GATE_SEPARATE_POLICY', domain: 'note-steps', consumesPolicy: false, declaredMinimum: 1 },
@@ -213,6 +214,7 @@ const EXPECTED_SCANNED_SITES: readonly string[] = Object.freeze([
   'src/components/pianoRollOperations.ts::resizeNoteLeft',
   'src/components/pianoRollOperations.ts::resizeNoteRight',
   'src/components/pianoRollOperations.ts::validateNote',
+  'src/audio/polyphonicTranscription.ts::legalizePolyphonicTiming',
   'src/music/noteDurationPolicy.ts::MIN_NOTE_DURATION_STEPS',
   'src/music/noteDurationPolicy.ts::minNoteDurationTicks',
   'src/utils/exportUtils.ts::contentEventsAtStep',
@@ -404,6 +406,29 @@ const LAYER_PROBES: Readonly<Record<string, () => number | Promise<number>>> = O
   // the musical minimum is the POINT — this probe exists so that clamping or
   // snapping the helper to the note-duration policy fails the audit.
   'gate.arp-transient-duration': () => resolveArpNoteDurationSteps(resolveArpRateSteps('1/32'), 0.1),
+  // Phase 10B: the polyphonic transcription mode's own timing legaliser. A
+  // zero-width measured run must still come out at the shared policy minimum.
+  'polyphonic-transcription.note-timing': async () => {
+    const { legalizePolyphonicTiming } = await import('../audio/polyphonicTranscription');
+    const notes = legalizePolyphonicTiming(
+      [
+        {
+          midi: 60,
+          midiFloat: 60,
+          startSeconds: 0.5,
+          endSeconds: 0.5,
+          confidence: 0.6,
+          cents: 0,
+          amplitude: 1,
+          share: 0.4,
+          frameCount: 6,
+        },
+      ],
+      { playbackRate: 1, pitchOffsetSemitones: 0, stepsPerSecond: 8, timelineSeconds: 2 },
+      { minNoteSteps: 0.25, quantizeSteps: 0.25 },
+    );
+    return notes[0]?.durationSteps ?? 0;
+  },
 });
 
 // ---------------------------------------------------------------------------
