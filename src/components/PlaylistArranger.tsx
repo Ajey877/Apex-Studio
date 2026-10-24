@@ -111,6 +111,7 @@ interface PlaylistArrangerProps {
    * stays owned by this component; this is a notification only.
    */
   onSelectedClipIdChange?: (clipId: string | null) => void;
+  onOpenAudioEditor?: (clipId: string) => void;
   currentBar: number;
   isPlaying: boolean;
   /** Project tempo (`meta.bpm`); Bounce-In-Place renders stems at this tempo and imported audio is sized to it. */
@@ -250,6 +251,7 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
   onAddTrack,
   onSeekToBar,
   onSelectedClipIdChange,
+  onOpenAudioEditor,
   currentBar,
   isPlaying,
   totalBars,
@@ -956,6 +958,8 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
             <span className="hidden sm:inline">PLAYLIST SONG ARRANGER</span>
           </div>
 
+          {onOpenAudioEditor && <button type="button" className="px-2 py-1 rounded border border-[var(--apex-border)] text-xs disabled:opacity-40" disabled={selectedClip?.type !== 'audio'}
+            title="Select an audio clip (including a recording) to edit its actual waveform" onClick={() => selectedClip && onOpenAudioEditor(selectedClip.id)}>Open in Audio Editor</button>}
           {/* Playlist History */}
           <div className="flex items-center gap-0.5 bg-[var(--apex-chrome-inset)] border border-[var(--apex-border)] p-0.5 rounded text-xs">
             <button
@@ -1484,7 +1488,7 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
                       }}
                       style={{
                         left: `${clip.startBar * 96}px`,
-                        width: `${clip.lengthBars * 96 - 4}px`,
+                        width: `${Math.max(1, clip.lengthBars * 96 - 4)}px`,
                         /* The dropped-audio signal border (UI-03A §“Explicitly
                            preserved”): painted from the same constant as the
                            waveform bars and the clip label. */

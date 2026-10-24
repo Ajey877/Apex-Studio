@@ -324,6 +324,11 @@ export interface AudioReconciliationResult {
   removedIds: string[];
 }
 
+/** Retained undo/redo audio must remain playable in memory as well as durable in storage. */
+export const getHistoryAudioIds = (history: NonNullable<AudioReconciliationOptions['history']>): string[] =>
+  [...new Set([history.present, ...history.past.map(entry => entry.state), ...history.future.map(entry => entry.state)]
+    .flatMap(getAudioIdsForProject))];
+
 /**
  * Reconciles persisted audio assets against the active project state (and optional history states).
  * - Preserves any asset referenced by the active project, additional states, or history past/future.

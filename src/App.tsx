@@ -48,7 +48,7 @@ import {
   getSelectedPatternLengthSteps,
   setPatternLengthStepsInProjectState
 } from './state/patternLength';
-import { getAudioIdsForProject, hydrateProjectAudio, persistProjectState, restorePersistedProjectState, saveAndReconcileProjectState } from './state/projectPersistence';
+import { getHistoryAudioIds, getAudioIdsForProject, hydrateProjectAudio, persistProjectState, restorePersistedProjectState, saveAndReconcileProjectState } from './state/projectPersistence';
 import { ProjectBackupError, backupProjectBeforeReplacement } from './state/projectBackup';
 import { getSampleBufferPersistenceController, waitForSampleBufferPersistence } from './audio/sampleBufferPersistence';
 import { getProjectSessionBlobUrls, replaceProjectSessionBlobUrls, sessionBlobUrlRegistry } from './state/sessionBlobUrlRegistry';
@@ -159,6 +159,8 @@ import { TakeCompingModal } from './components/TakeCompingModal';
 import { SidechainRoutingModal } from './components/SidechainRoutingModal';
 import { AudioToMidiModal, type AudioToMidiCommitRequest, type AudioToMidiCommitOutcome } from './components/AudioToMidiModal';
 import { DesktopAppModal } from './components/DesktopAppModal';
+import { WaveformEditorModal } from './components/WaveformEditorModal';
+import { commitWaveformSession, isWaveformSessionCurrent, publishWaveformClip } from './audio/waveformEditorCommit';
 import { WarpAudioProcessorModal } from './components/WarpAudioProcessorModal';
 import { DEFAULT_INCLUDE_MIXER_FX } from './components/exportMixerFxPreference';
 import { MasterMacroRackModal } from './components/MasterMacroRackModal';
@@ -420,6 +422,8 @@ export function App() {
   const [isSidechainOpen, setIsSidechainOpen] = useState(false);
   const [isAudioToMidiOpen, setIsAudioToMidiOpen] = useState(false);
   const [isDesktopAppOpen, setIsDesktopAppOpen] = useState(false);
+  const [audioEditorClipId, setAudioEditorClipId] = useState<string | null>(null);
+  const [audioEditorNotice, setAudioEditorNotice] = useState('');
   const [isWarpProcessorOpen, setIsWarpProcessorOpen] = useState(false);
   const [isMasterMacrosOpen, setIsMasterMacrosOpen] = useState(false);
   const [isProjectZipOpen, setIsProjectZipOpen] = useState(false);
@@ -523,7 +527,7 @@ export function App() {
         await persistProjectState(stateToSave);
       }
 
-      audioEngine.setProjectSampleBufferOwnership(getAudioIdsForProject(stateToSave));
+      audioEngine.setProjectSampleBufferOwnership(new Set([...getAudioIdsForProject(stateToSave), ...getHistoryAudioIds(projectHistoryRef.current)]));
       if (projectStateRef.current === stateToSave) {
         hasUnsavedChangesRef.current = false;
       }
@@ -1220,6 +1224,8 @@ export function App() {
         ? () => backupProjectBeforeReplacement(projectStateRef.current, { reason: 'replace' }).then(() => undefined)
         : undefined,
       async () => {
+        setAudioEditorClipId(null);
+        setAudioEditorNotice('');
         recordingProjectGenerationRef.current = nextRecordingProjectGeneration(recordingProjectGenerationRef.current);
         await cancelRecordingForReplacementRef.current?.();
         // An in-flight MIDI take belongs to the outgoing project: discard it
@@ -2374,6 +2380,7 @@ export function App() {
       />
 
       <Vst3StatusBanner />
+      {audioEditorNotice && <div role="status" className="p-2 text-xs bg-[var(--apex-panel)] text-[var(--apex-text)]">{audioEditorNotice} <button onClick={() => setAudioEditorNotice('')}>Dismiss</button></div>}
       {saveError && (
         <div
           id="save-failure-banner"
@@ -2583,6 +2590,7 @@ export function App() {
               onUndo={handleUndo}
               onRedo={handleRedo}
               onSelectedClipIdChange={setSelectedPlaylistClipId}
+              onOpenAudioEditor={id => { if (audioEngine.isOfflineRenderLeaseHeld()) return; audioEngine.pause(); setAudioEditorClipId(id); }}
               onSeekToBar={(bar) => {
                 // A take never spans a position jump: finalize at the old
                 // position before the playhead moves, so held gates end here
@@ -2914,6 +2922,32 @@ export function App() {
         }}
       />
       <DesktopAppModal isOpen={isDesktopAppOpen} onClose={() => setIsDesktopAppOpen(false)} />
+      {audioEditorClipId && projectState.playlistClips.find(clip => clip.id === audioEditorClipId) && <WaveformEditorModal
+        key={`${recordingProjectGenerationRef.current}:${audioEditorClipId}`}
+        clip={projectState.playlistClips.find(clip => clip.id === audioEditorClipId)!}
+        bpm={projectState.meta.bpm} timeSignature={projectState.meta.timeSignature}
+        onClose={() => setAudioEditorClipId(null)}
+        onCommit={async (session, buffer, signal) => {
+          await commitWaveformSession(session, buffer, audioEngine, {
+            signal, isCurrent: () => isWaveformSessionCurrent(session, projectStateRef.current),
+            publish: clip => {
+              continuousBatcherRef.current.flush();
+              const current = projectStateRef.current;
+              const next = publishWaveformClip(current, session, clip);
+              // Allocate/validate history before any project publication, so a
+              // rejected snapshot cannot leave a dangling new asset reference.
+              const history = projectHistoryRef.current.commit(next, 'Edit waveform audio');
+              synchronizeBeforeRuntimePublication(current, next, synchronizeRuntimeState, published => {
+                projectHistoryRef.current = history;
+                projectStateRef.current = published;
+                setProjectState(published);
+                setProjectHistoryVersion(version => version + 1);
+              }, restoreRuntimeState);
+            },
+          });
+          setAudioEditorNotice(`Waveform edit committed to "${session.clip.name}" as a new durable asset. Project Undo restores the original; Redo restores the edited PCM.`);
+          setAudioEditorClipId(null);
+        }} />}
       <WarpAudioProcessorModal isOpen={isWarpProcessorOpen} onClose={() => setIsWarpProcessorOpen(false)} clips={projectState.playlistClips} selectedClipId={selectedPlaylistClipId} projectBpm={projectState.meta.bpm} timeSignature={projectState.meta.timeSignature} onUpdateClip={(updatedClip) => { const nextState = { ...projectStateRef.current, playlistClips: projectStateRef.current.playlistClips.map(c => c.id === updatedClip.id ? updatedClip : c) }; updatePlaylistProjectState(nextState); commitPlaylistHistory(nextState, 'Warp audio clip'); }} />
       <MasterMacroRackModal isOpen={isMasterMacrosOpen} onClose={() => setIsMasterMacrosOpen(false)} mixerTracks={projectState.mixerTracks} channels={projectState.channels} macroKnobs={projectState.macroKnobs} onUpdateMacros={(macros) => mutateProjectState(curr => updateMacroRackInProjectState(curr, macros), 'Update macro controls', { isContinuous: true })} />
       <ProjectBundleZipModal isOpen={isProjectZipOpen} onClose={() => setIsProjectZipOpen(false)} projectState={projectState} onLoadProjectState={handleLoadProjectState} />

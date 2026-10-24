@@ -1025,6 +1025,13 @@ class AudioEngine {
     if (!this.getLiveProjectSampleBufferIds().has(id)) this.getLiveSessionSampleBufferIds().add(id);
   }
 
+  /** Discard only a newly allocated, never-published editor asset. Shared/project assets are protected. */
+  public discardUnpublishedSampleBuffer(id: string, expected: AudioBuffer): void {
+    const buffers = this.getLiveSampleBufferStore();
+    if (buffers.get(id) !== expected || this.getLiveProjectSampleBufferIds().has(id)) return;
+    buffers.delete(id); this.getLiveSessionSampleBufferIds().delete(id);
+  }
+
   /**
    * Establishes the active project's ownership boundary without clearing
    * legitimate session-only buffers. Outgoing project-owned buffers are
