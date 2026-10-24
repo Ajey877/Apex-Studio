@@ -1,6 +1,7 @@
+import { NativeAutomationTimeline } from './nativeVst3Automation';
 import { withVst3Parameters } from './nativeVst3Parameters';
-import type { Vst3Instrument, Vst3ParameterChange } from './nativeVst3Types';
-import type { Channel } from '../types/daw';
+import type { Vst3Instrument, Vst3ParameterChange, Vst3Parameter, Vst3ParameterPoint } from './nativeVst3Types';
+import type { Channel, PlaylistClip } from '../types/daw';
 import type { InstrumentVoiceContext, InstrumentVoiceHandle } from './instrumentRegistry';
 import { resolveGateSeconds } from './noteGate';
 import { assertVst3Instrument, getVst3Bridge, type Vst3Bridge, type Vst3Event } from './nativeVst3Types';
@@ -75,8 +76,11 @@ class LiveVst3Session {
   private cursor = 0;
   private nextId = 1;
   private bpm = 120;
+  private metadata: Vst3Parameter[] = [];
+  private base = new Map<number, number>();
+  private automated = new Set<number>();
   private lastEventTime = 0;
-  constructor(private bridge: Vst3Bridge, readonly context: BaseAudioContext, channel: Channel, destination: AudioNode) {
+  constructor(private bridge: Vst3Bridge, readonly context: BaseAudioContext, private channel: Channel, destination: AudioNode, private automation: NativeAutomationTimeline) {
     assertVst3Instrument(channel.vst3);
     this.key = nativeInstrumentKey(channel);
     this.destination = destination;
@@ -86,6 +90,8 @@ class LiveVst3Session {
     this.ready = bridge.open(channel.vst3, context.sampleRate, 'realtime').then(async result => {
       if (this.disposed) { await bridge.close(result.id); throw new Error('VST3 load cancelled'); }
       this.id = result.id;
+      this.metadata = result.parameters ?? [];
+      for (const p of this.metadata) if (p.currentValue !== null) this.base.set(p.id, p.currentValue);
     });
     // ready is also awaited by preparation; this handler prevents an unhandled
     // rejection when a project is replaced during a lazy MIDI-monitoring load.
@@ -93,6 +99,7 @@ class LiveVst3Session {
   }
   update(channel: Channel, destination: AudioNode, time = this.context.currentTime) {
     if (destination !== this.destination) { this.gain.disconnect(); this.gain.connect(destination); this.destination = destination; }
+    this.channel = channel;
     this.volume(channel.volume, time);
   }
   volume(value: number, time: number) { this.gain.gain.setValueAtTime(Math.max(0, value), time); }
@@ -180,7 +187,8 @@ class LiveVst3Session {
           events.push({ ...item.event, offset: frame - this.cursor });
         }
         events.sort((a, b) => a.offset - b.offset || (a.type === b.type ? 0 : a.type === 'off' ? -1 : 1));
-        const samples = await this.bridge.process(this.id, BLOCK, events, this.bpm, changes);
+        const parameters: Vst3ParameterPoint[] = changes ?? this.automation.points(this.channel, this.metadata, this.base, this.automated, audioTime, BLOCK, this.context.sampleRate);
+        const samples = await this.bridge.process(this.id, BLOCK, events, this.bpm, parameters);
         if (this.disposed) break; // generation fencing: late PCM is NEVER played
         if (audioTime < this.context.currentTime - 0.005) throw new Error('VST3 PCM arrived after its audio deadline; audio stopped.');
         const source = this.context.createBufferSource();
@@ -213,6 +221,7 @@ class LiveVst3Session {
       check();
       // Reconciliation sees the acknowledged native configuration, not a stale
       // key that would close the instance and interrupt the currently held note.
+      for (const change of changes) this.base.set(change.id, change.value);
       this.key = nativeInstrumentKey({ ...channel, vst3: instrument });
       publish(instrument);
       return instrument;
@@ -246,6 +255,15 @@ class LiveVst3Session {
 
 export class NativeVst3Runtime {
   private sessions = new Map<string, LiveVst3Session>();
+  private automation = new NativeAutomationTimeline();
+  timeline(clips: PlaylistClip[], secondsPerBar: number, time: number, position: number) {
+    try { this.automation.set(clips, secondsPerBar); this.automation.clock(time, position); return true; }
+    catch (error) {
+      for (const clip of clips) if (clip.automationTarget?.type === 'vst3_param') reportVst3(String(clip.automationTarget.targetId), String((error as Error).message));
+      void this.stop(); // fail closed; no stale buffers or queues remain audible
+      return false;
+    }
+  }
   private closing = new Set<Promise<void>>();
   private disposeSession(session: LiveVst3Session): Promise<void> {
     const closing = session.dispose();
@@ -259,7 +277,7 @@ export class NativeVst3Runtime {
     if (session && (session.disposed || session.context !== context || session.key !== nativeInstrumentKey(channel))) { this.disposeSession(session); this.sessions.delete(channel.id); session = undefined; }
     if (!session) {
       if (this.sessions.size >= 8) throw new Error('At most 8 live VST3 instrument channels are supported');
-      session = new LiveVst3Session(bridgeOrThrow(this.getBridge()), context, channel, destination);
+      session = new LiveVst3Session(bridgeOrThrow(this.getBridge()), context, channel, destination, this.automation);
       this.sessions.set(channel.id, session);
     }
     session.update(channel, destination, time);
@@ -289,7 +307,7 @@ export class NativeVst3Runtime {
   }
   closeIfMatches(channel: Channel) { if (this.sessions.get(channel.id)?.key === nativeInstrumentKey(channel)) this.close(channel.id); }
   close(id: string) { const session = this.sessions.get(id); if (session) this.disposeSession(session); this.sessions.delete(id); }
-  async stop(): Promise<void> { for (const session of this.sessions.values()) this.disposeSession(session); this.sessions.clear(); await Promise.all([...this.closing]); }
+  async stop(): Promise<void> { this.automation.clear(); for (const session of this.sessions.values()) this.disposeSession(session); this.sessions.clear(); await Promise.all([...this.closing]); }
   /** Deterministic control-thread pump for real audio integration tests. */
   async flushLive() { await Promise.all([...this.sessions].map(([id, session]) => session.pump(id))); }
 }
@@ -301,6 +319,10 @@ export class NativeVst3Runtime {
 export class NativeVst3OfflineRender {
   private channels = new Map<string, { channel: Channel; gain: GainNode; events: Array<Vst3Event & { frame: number }> }>();
   private nextId = 1;
+  private automation = new NativeAutomationTimeline();
+  timeline(clips: PlaylistClip[], secondsPerBar: number, preroll: number) {
+    this.automation.set(clips, secondsPerBar); this.automation.clock(preroll, 0);
+  }
   constructor(private context: BaseAudioContext, private frames: number, private bridge = getVst3Bridge()) {}
   render(context: InstrumentVoiceContext): InstrumentVoiceHandle {
     assertVst3Instrument(context.channel.vst3);
@@ -327,17 +349,21 @@ export class NativeVst3OfflineRender {
   async flush(bpm: number) {
     const bridge = this.channels.size ? bridgeOrThrow(this.bridge) : this.bridge;
     for (const entry of this.channels.values()) {
-      const { id } = await bridge!.open(entry.channel.vst3!, this.context.sampleRate, 'offline');
+      const { id, parameters = [] } = await bridge!.open(entry.channel.vst3!, this.context.sampleRate, 'offline');
+      const base = new Map(parameters.filter(p => p.currentValue !== null).map(p => [p.id, p.currentValue!]));
+      const automated = new Set<number>();
       try {
         entry.events.sort((a, b) => a.frame - b.frame || (a.type === b.type ? 0 : a.type === 'off' ? -1 : 1));
         let eventIndex = 0;
-        for (let cursor = 0; cursor < this.frames; cursor += 16384) {
-          const frames = Math.min(16384, this.frames - cursor), events: Vst3Event[] = [];
+        const blockSize = this.automation.hasChannel(entry.channel) ? BLOCK : 16384;
+        for (let cursor = 0; cursor < this.frames; cursor += blockSize) {
+          const frames = Math.min(blockSize, this.frames - cursor), events: Vst3Event[] = [];
           while (eventIndex < entry.events.length && entry.events[eventIndex].frame < cursor + frames) {
             const { frame, ...event } = entry.events[eventIndex++];
             if (frame >= cursor) events.push({ ...event, offset: frame - cursor });
           }
-          const samples = await bridge!.process(id, frames, events, bpm);
+          const points = this.automation.points(entry.channel, parameters, base, automated, cursor / this.context.sampleRate, frames, this.context.sampleRate);
+          const samples = await bridge!.process(id, frames, events, bpm, points);
           const source = this.context.createBufferSource();
           source.buffer = pcmBuffer(this.context, samples, frames);
           source.connect(entry.gain);

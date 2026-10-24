@@ -48,7 +48,7 @@ export function Vst3ParameterEditor({ channel, onCommit, cancellation }: { chann
   };
   return <section aria-label="VST3 parameter editor" className="space-y-2 border border-[var(--apex-border)] p-3 rounded">
     <h3 className="font-semibold">Native instrument parameters</h3>
-    <p>Values are normalized 0–1, not invented physical ranges. Continuous gestures stage a draft; Apply commits one undoable batch. Existing buffered audio may play for about 50 ms before the change is heard.</p>
+    <p>Values are normalized 0–1, not invented physical ranges. These are controller/base values; active Playlist automation takes precedence without rewriting them. Continuous gestures stage a draft; Apply commits one undoable batch. Existing buffered audio may play for about 50 ms before the change is heard.</p>
     <label>Search parameters <input className={control} type="search" value={search} onChange={e => { setSearch(e.target.value); setPage(0); }} /></label>
     <p>{visible.length} matching parameters · page {currentPage + 1} / {pages}</p>
     <fieldset disabled={busy || !available} className="space-y-2">
@@ -56,7 +56,7 @@ export function Vst3ParameterEditor({ channel, onCommit, cancellation }: { chann
         const value = draft[p.id] ?? p.currentValue, name = p.name || `Unnamed parameter #${p.id}`;
         return <div key={p.id} className="border-b border-[var(--apex-border)] pb-2">
           <label htmlFor={`vst3-param-${p.id}`}>{name} · ID {p.id}</label>
-          <p>{p.shortTitle && `Short title: ${p.shortTitle}. `}{p.units && `Plugin units: ${p.units}. `}Normalized: {value === null ? 'unavailable' : value.toFixed(5)} · default {p.defaultValue.toFixed(5)}{p.flags & 1 ? ' · automatable (plugin flag; no arrangement lanes)' : ''}{p.flags & 65536 ? ' · bypass' : ''}</p>
+          <p>{p.shortTitle && `Short title: ${p.shortTitle}. `}{p.units && `Plugin units: ${p.units}. `}Normalized: {value === null ? 'unavailable' : value.toFixed(5)} · default {p.defaultValue.toFixed(5)}{p.flags & 1 ? ' · automatable (plugin flag; choose Native VST3 Parameter in a Playlist automation clip)' : ''}{p.flags & 65536 ? ' · bypass' : ''}</p>
           {p.flags & 32768 ? <p>Program change requires reinitialization; use Reset/relink outside this editor.</p> : p.flags & 2 ? <p>Read-only</p> : (p.flags & 8) && !p.choices ? <p>List choices unavailable; editing disabled.</p> : value === null ? <p>Current value unavailable; editing disabled.</p> : p.choices ?
             <select className={control} id={`vst3-param-${p.id}`} value={value} onChange={e => stage(p, Number(e.target.value))}>
               {!p.choices.some(c => c.value === value) && <option value={value}>Current normalized value {value}</option>}

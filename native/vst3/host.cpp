@@ -229,9 +229,9 @@ public:
     }
     if (state.contains("parameters")) applyParameters(state.at("parameters"));
   }
-  void applyParameters(const json& changes, bool live = false) {
+  void applyParameters(const json& changes, bool live = false, int32 frames = -1) {
     require(changes.is_array() && changes.size() <= 4096, "Invalid parameter list");
-    std::set<ParamID> seen;
+    std::map<ParamID, int32> seen;
     // Validate the entire batch before touching controller/processor state.
     for (const auto& change : changes) {
       require(change.is_object() && change.contains("id") && change.contains("value"), "Invalid parameter change");
@@ -239,11 +239,24 @@ public:
       auto raw = change.at("id").get<int64_t>();
       require(raw >= 0 && raw <= UINT32_MAX, "Parameter ID out of range");
       auto id = static_cast<ParamID>(raw);
-      require(seen.insert(id).second, "Duplicate parameter ID");
+      const bool timed = change.contains("offset");
+      const auto offset = timed ? integer(change, "offset", 0, std::max(0, frames - 1)) : 0;
+      require(!timed || frames > 0, "Automation requires a nonempty process block");
+      require(!seen.count(id) || (timed && offset > seen[id]), "Duplicate or unordered parameter point");
+      seen[id] = offset;
       require(parameterIds.count(id), "Saved parameter ID no longer exists: " + std::to_string(id));
       require(!readOnlyIds.count(id), "Cannot restore a read-only parameter");
       real(change, "value", 0, 1);
-      if (live) for (const auto& info : parameterInfo) {
+      if (live || frames >= 0) for (const auto& info : parameterInfo) {
+        if (id == info.id && timed) require(info.flags & ParameterInfo::kCanAutomate, "Parameter cannot automate");
+        if (id == info.id && timed && (info.flags & ParameterInfo::kIsList)) {
+          const auto list = metadata();
+          auto item = std::find_if(list.begin(), list.end(), [id](const json& p) { return p.at("id") == id; });
+          require(item != list.end() && item->contains("choices"), "List choices unavailable");
+          bool valid = false;
+          for (const auto& c : item->at("choices")) if (c.at("value") == change.at("value")) valid = true;
+          require(valid, "Invalid list automation value");
+        }
         if (id == info.id) require(!(info.flags & (ParameterInfo::kIsHidden | ParameterInfo::kIsProgramChange)), "Hidden/program-change parameter is not live editable");
       }
     }
@@ -258,7 +271,10 @@ public:
       int32 queueIndex = 0, pointIndex = 0;
       auto* queue = parameters.addParameterData(id, queueIndex);
       require(queue != nullptr, "Parameter queue full");
-      checked(queue->addPoint(0, value, pointIndex), "Cannot queue parameter");
+      const bool timed = change.contains("offset");
+      const auto offset = timed ? integer(change, "offset", 0, frames - 1) : 0;
+      checked(queue->addPoint(offset, value, pointIndex), "Cannot queue parameter");
+      if (timed) continue; // Runtime automation never overwrites saved base/controller state.
       checked(controller->setParamNormalized(id, value), "Controller rejected parameter");
       const auto accepted = controller->getParamNormalized(id);
       require(std::isfinite(accepted) && std::abs(accepted - value) <= 1e-7, "Controller did not accept the requested normalized value");
@@ -316,7 +332,7 @@ public:
       }
       checked(events.addEvent(event), "Event queue full");
     }
-    if (request.contains("parameters")) applyParameters(request.at("parameters"), flush);
+    if (request.contains("parameters")) applyParameters(request.at("parameters"), flush, flush ? -1 : frames);
     for (int32 bus = 0; bus < data.numOutputs; ++bus) {
       data.outputs[bus].silenceFlags = 0;
       for (int32 ch = 0; ch < data.outputs[bus].numChannels; ++ch)

@@ -1,6 +1,6 @@
 // Privileged main-process service shared by Electron and real integration tests.
 // This is a process boundary, NOT a security sandbox for untrusted plugins.
-import { validateMetadata, validateParameterChanges } from './parameters.mjs';
+import { validateMetadata, validateParameterChanges, validateProcessParameters } from './parameters.mjs';
 import { realpath } from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -86,7 +86,7 @@ export class Vst3Service {
         !Number.isFinite(event.velocity ?? 0) || (event.velocity ?? 0) < 0 || (event.velocity ?? 0) > 1) throw new Error('Invalid VST3 MIDI event');
       return { offset: event.offset, type: event.type, pitch: event.pitch, noteId: event.noteId, channel: event.channel ?? 0, velocity: event.velocity ?? 0 };
     });
-    const changes = Array.isArray(parameters) && parameters.length === 0 ? [] : validateParameterChanges(parameters, session.parameters);
+    const changes = validateProcessParameters(parameters, session.parameters, frames);
     session.processing = true;
     try { return (await session.client.process(frames, midi, changes, bpm)).samples; }
     catch (error) { await this.close(id, owner); throw error; }

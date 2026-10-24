@@ -1,3 +1,4 @@
+import { nativeTarget } from './nativeVst3Automation';
 // Executed ONLY by the existing packaged-runtime smoke launch flag. This calls
 // the production engine/registry/export path, not an alternate WAV renderer.
 import { audioEngine } from './audioEngine';
@@ -26,11 +27,14 @@ export async function runDesktopVst3Smoke() {
   };
   const mixer = [0, 1].map(id => ({ id, name: 'Smoke insert', color: '#fff', volume: 1, pan: 0, mute: false, solo: false, fxSlots: [], peakL: 0, peakR: 0 })) as MixerTrack[];
   const clip: PlaylistClip = { id: 'native-smoke-clip', trackIndex: 0, startBar: 0, lengthBars: 1, type: 'pattern', channelId: channel.id, name: 'Native smoke', color: '#fff' };
+  let savedAutomation: PlaylistClip | undefined;
   const reopening = (globalThis as unknown as { desktopApp?: { smokeReopen?: boolean } }).desktopApp?.smokeReopen === true;
   if (reopening) {
     const saved = await restorePersistedProjectState(instance, createDefaultProjectState());
     if (!saved.restored || saved.recovered || saved.state.channels[0]?.instrumentType !== 'vst3') throw new Error('Native project did not reopen from the real current-project IndexedDB record');
     channel = saved.state.channels[0];
+    savedAutomation = saved.state.playlistClips.find(c => c.automationTarget?.type === 'vst3_param');
+    if (!savedAutomation) throw new Error('Native automation lane did not survive application restart');
     if (channel.vst3?.classId !== plugin.classId) throw new Error('Reopened project selected the wrong native class');
   }
   function digest(bytes: Uint8Array): string {
@@ -48,6 +52,11 @@ export async function runDesktopVst3Smoke() {
     if (channel.vst3?.state.parameters.find(p => p.id === 6)?.value !== .05) throw new Error('Edited native parameter did not survive application restart');
     const metadata = await bridge.describe(channel.vst3);
     if (Math.abs((metadata.parameters.find(p => p.id === 6)?.currentValue ?? -1) - .05) > 1e-7) throw new Error('Packaged native controller did not restore the edited value');
+    const frequency = metadata.parameters.find(p => p.id === 6)!;
+    const automation: PlaylistClip = savedAutomation ?? { id: 'packaged-vcf-automation', type: 'automation', trackIndex: 1,
+      startBar: 0, lengthBars: 1, name: 'VCF automation', color: '#fff', automationTarget: nativeTarget(channel, frequency),
+      automationPoints: [{ x: 0, y: .9 }, { x: 1, y: .05 }] };
+    const automated = await instance.renderTimelineOffline([channel], [clip, automation], mixer, 120, 1, 48000, true, 'song', undefined, undefined, undefined, .5);
     const output = await render(channel);
     const samples = output.getChannelData(0);
     let differenceSum = 0;
@@ -55,12 +64,19 @@ export async function runDesktopVst3Smoke() {
     for (let i = 0; i < samples.length; i++) differenceSum += (samples[i] - before[i]) ** 2;
     const parameterExportDifferenceRms = Math.sqrt(differenceSum / samples.length);
     if (parameterExportDifferenceRms < .001) throw new Error('Packaged parameter edit did not alter real production PCM');
+    const automatedPcm = automated.getChannelData(0);
+    let automationDifference = 0;
+    for (let i = 0; i < samples.length; i++) automationDifference += (automatedPcm[i] - samples[i]) ** 2;
+    const automationExportDifferenceRms = Math.sqrt(automationDifference / samples.length);
+    if (automationExportDifferenceRms < .001) throw new Error('Packaged Playlist automation did not affect real native export');
+    const automationPcmChecksum = digest(new Uint8Array(automatedPcm.buffer, automatedPcm.byteOffset, automatedPcm.byteLength));
+    const automationStateChecksum = digest(new TextEncoder().encode(JSON.stringify(automation)));
     const onsetFrame = samples.findIndex(value => Math.abs(value) > 1e-7);
     let sum = 0;
     for (const value of samples) sum += value * value;
     const rms = Math.sqrt(sum / samples.length);
     if (onsetFrame < 6000 || onsetFrame > 6064 || rms < 0.001) throw new Error(`Packaged production export failed: onset=${onsetFrame}, rms=${rms}`);
-    const json = serializeProjectState({ ...createDefaultProjectState(), channels: [channel], mixerTracks: mixer, playlistClips: [clip] });
+    const json = serializeProjectState({ ...createDefaultProjectState(), channels: [channel], mixerTracks: mixer, playlistClips: [clip, automation] });
     const restored = normalizeProjectState(JSON.parse(json).state).channels[0];
     const reopened = await render(restored);
     const after = reopened.getChannelData(0);
@@ -85,9 +101,9 @@ export async function runDesktopVst3Smoke() {
     if (reopening && !document.body.textContent?.includes(channel.name)) throw new Error('The actual Apex application UI did not restore the saved native channel');
     if (!reopening) {
       const project = createDefaultProjectState();
-      await persistProjectState({ ...project, meta: { ...project.meta, bpm: 120 }, selectedChannelId: channel.id, channels: [channel], mixerTracks: mixer, playlistClips: [clip] });
+      await persistProjectState({ ...project, meta: { ...project.meta, bpm: 120 }, selectedChannelId: channel.id, channels: [channel], mixerTracks: mixer, playlistClips: [clip, automation] });
     }
-    return { parameterValue: .05, parameterExportDifferenceRms, plugin: plugin.name, classId: plugin.classId, onsetFrame, rms, livePeak, stateReopenEqual: true, missingRejected: rejected,
+    return { automationExportDifferenceRms, automationPcmChecksum, automationStateChecksum, parameterValue: .05, parameterExportDifferenceRms, plugin: plugin.name, classId: plugin.classId, onsetFrame, rms, livePeak, stateReopenEqual: true, missingRejected: rejected,
       applicationStage: reopening ? 'reopened-from-indexeddb-after-process-exit' : 'saved-to-production-indexeddb',
       uiRestored: reopening ? true : undefined,
       pcmChecksum: digest(new Uint8Array(samples.buffer, samples.byteOffset, samples.byteLength)),

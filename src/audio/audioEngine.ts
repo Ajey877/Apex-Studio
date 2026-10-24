@@ -1,3 +1,4 @@
+import { interpolateCurve } from './automation/curve';
 import { beatsPerBar, stepsPerBar, stepsToBeats, beatsToSeconds, secondsToBeats, SIXTEENTH_STEPS_PER_BEAT, LEGACY_TIME_SIGNATURE, resolveProjectTimeSignature, type TimeSignature } from '../music/musicalTime';
 import { DEFAULT_SEVEN_EIGHT_GROUPING, isSevenEightGrouping, resolveMeterPulseLayout, resolveMetronomeClickLevel, type MeterPulseLayout, type SevenEightGrouping } from '../music/meterPulse';
 import { captureBarNumbers, planCountInCapturePosition, resolveCountInBars, type CountInBars } from '../music/countIn';
@@ -2969,30 +2970,7 @@ class AudioEngine {
 
   // Automation Evaluator
   public interpolateAutomationCurve(points: { x: number; y: number; tension?: number }[], relX: number): number {
-    if (!points || points.length === 0) return 0.5;
-    if (points.length === 1) return points[0].y;
-
-    const sorted = [...points].sort((a, b) => a.x - b.x);
-    if (relX <= sorted[0].x) return sorted[0].y;
-    if (relX >= sorted[sorted.length - 1].x) return sorted[sorted.length - 1].y;
-
-    for (let i = 0; i < sorted.length - 1; i++) {
-      const p1 = sorted[i];
-      const p2 = sorted[i + 1];
-      if (relX >= p1.x && relX <= p2.x) {
-        const segT = (relX - p1.x) / (p2.x - p1.x);
-        // Linear or ease
-        const tension = p1.tension || 0;
-        let curvedT = segT;
-        if (tension > 0) {
-          curvedT = Math.pow(segT, 1 + tension * 2);
-        } else if (tension < 0) {
-          curvedT = 1 - Math.pow(1 - segT, 1 + Math.abs(tension) * 2);
-        }
-        return p1.y + (p2.y - p1.y) * curvedT;
-      }
-    }
-    return 0.5;
+    return interpolateCurve(points, relX);
   }
 
   public applyAutomationValue(
@@ -3992,6 +3970,7 @@ class AudioEngine {
           }
         }
         onProgress?.(70, `Rendering offline audio (${totalDurationSeconds.toFixed(2)}s)...`);
+        this.nativeOffline!.timeline(renderScope === 'song' ? this.activeClips.filter(c => !this.isPlaylistLaneMuted(c)) : [], this.secondsPerBarAt(safeBpm), masteringPrerollSeconds);
         await this.nativeOffline!.flush(safeBpm);
         const renderedBuffer = await offlineCtx.startRendering();
         let outputBuffer = renderedBuffer;
@@ -4465,6 +4444,7 @@ class AudioEngine {
    * model, in which case every pattern clip plays its channel's live content.
    */
   private activePatterns: Pattern[] = [];
+  private playbackPlaylistTracks: PlaylistTrack[] = [];
 
   public setBpm(bpm: number) {
     if (this.shouldBlockLiveMutation()) return;
@@ -5035,7 +5015,7 @@ class AudioEngine {
   private getAutomationTargetKey(clip: PlaylistClip): string | null {
     if (clip.type !== 'automation' || !clip.automationTarget) return null;
     const target = clip.automationTarget;
-    return `${target.type}:${String(target.targetId)}:${target.paramName ?? ''}`;
+    return `${target.type}:${String(target.targetId)}:${target.paramName ?? ''}:${target.type === 'vst3_param' ? JSON.stringify(target.native) : ''}`;
   }
 
   private isAutomationClipActiveAtCurrentPosition(clip: PlaylistClip): boolean {
@@ -5367,6 +5347,7 @@ class AudioEngine {
     }
 
     if (update.playlistTracks) {
+      this.playbackPlaylistTracks = structuredClone(update.playlistTracks);
       const previousMutes = this.playlistLaneMutes;
       const nextMutes = this.derivePlaylistLaneMutes(update.playlistTracks);
       const newlyMutedLanes = new Set<number>();
@@ -5479,6 +5460,7 @@ class AudioEngine {
     this.activeClips = playbackSnapshot.clips;
     this.refreshInaudibleTakeClipIds();
     this.activeMixerTracks = playbackSnapshot.mixerTracks;
+    this.playbackPlaylistTracks = structuredClone(playlistTracks ?? []);
     this.playlistLaneMutes = this.derivePlaylistLaneMutes(playlistTracks);
     this.playbackProjectChannels = structuredClone(playbackSnapshot.channels);
     this.playbackProjectMixerTracks = structuredClone(playbackSnapshot.mixerTracks);
@@ -5645,14 +5627,24 @@ class AudioEngine {
     const transport = this.transport;
     if (!transport || !this.ctx) return;
     const boundedPosition = this.boundSeekPosition(positionSeconds);
+    // A seek starts a new measurement session, including async native seeks.
+    this.resetMasterMeasurement();
+    if (this.isPlaying && this.activeChannels.some(c => c.instrumentType === 'vst3')) {
+      // Native seek is an asynchronous re-prepare, just like Play. Never race a
+      // newly opened helper against the ordinary 5 ms seek deadline, or retain
+      // queued PCM/parameter events from the old timeline position.
+      this.stopActivePlaybackAudio();
+      this.isPlaying = false; transport.stop(false); transport.seek(boundedPosition);
+      this.syncEnginePositionFromTransport();
+      void this.play(this.playbackProjectChannels, this.activeClips, this.activePlayMode, this.activePatternId,
+        this.playbackProjectMixerTracks, this.activePatternLengthSteps, this.playbackPlaylistTracks, this.activePatterns);
+      return;
+    }
 
     if (this.isPlaying) {
       this.stopActivePlaybackAudio();
     }
     transport.seek(boundedPosition);
-    // A seek jumps the programme position: discard the session rather than
-    // average two unrelated positions into one "integrated" figure.
-    this.resetMasterMeasurement();
     this.syncEnginePositionFromTransport();
 
     if (this.isPlaying) {
@@ -5874,6 +5866,15 @@ class AudioEngine {
     const safeBpm = Number.isFinite(this.bpm) && this.bpm > 0 ? this.bpm : 120;
     const secondsPerStep = beatsToSeconds(stepsToBeats(1), safeBpm);
 
+    // Native automation is evaluated by the bounded PCM producer, not by
+    // project mutation or asynchronous editor writes on each sequencer step.
+    if (!this.isOfflineRendering && this.activeChannels.some(c => c.instrumentType === 'vst3')) {
+      const timelineStep = (this.currentBar - 1) * this.currentStepsPerBar + this.currentStep;
+      const unswung = now - (this.currentStep % 2 === 1 ? swingOffsetSecondsForStep(this.swing, secondsPerStep) : 0);
+      if (!this.nativeInstruments.timeline(this.activePlayMode === 'song' ? this.activeClips.filter(c => !this.isPlaylistLaneMuted(c)) : [],
+        this.secondsPerBarAt(safeBpm), unswung, timelineStep * secondsPerStep)) return;
+    }
+
     // Phase 1J: the click grid comes from the resolved project meter and the
     // authoritative transport step — quarter pulses in 4/4 and 3/4, eighth
     // pulses in 6/8 (3+3) and 7/8 (configurable grouping) — instead of a
@@ -5937,7 +5938,7 @@ class AudioEngine {
 
       // 1. Evaluate automation clips at current bar & step
       this.activeClips.forEach(clip => {
-        if (clip.type === 'automation' && !clip.mute && !this.isPlaylistLaneMuted(clip) && clip.automationTarget && clip.automationPoints && clip.automationPoints.length >= 2) {
+        if (clip.type === 'automation' && !clip.mute && !this.isPlaylistLaneMuted(clip) && clip.automationTarget && clip.automationTarget.type !== 'vst3_param' && clip.automationPoints && clip.automationPoints.length >= 2) {
           const currentTotalBar = barIdx + (this.currentStep / stepsBar);
           if (currentTotalBar >= clip.startBar && currentTotalBar <= clip.startBar + clip.lengthBars) {
             const relX = (currentTotalBar - clip.startBar) / clip.lengthBars;

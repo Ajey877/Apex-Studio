@@ -142,7 +142,7 @@ for results—test source alone is not a claimed passing Windows run.
 - First slice supports x64 VST3 instruments with mono/stereo main output and
   **zero reported processing latency**. Other latency is rejected pending proper
   delay compensation. Plugins taking >2 s per operation are rejected.
-- No VST2/AU/CLAP, native effects rack, plugin editor windows, full parameter automation lanes,
+- No VST2/AU/CLAP, native effects rack, plugin editor windows, sample-accurate parameter DSP automation,
   per-note native pan, arbitrary-bus layouts or broad plugin certification.
   Native transport context is per-session; tempo-synchronized plugin internal
   sequencers/seek-position synchronization beyond scheduled MIDI are not claimed.
@@ -237,3 +237,6 @@ and production App/engine; it is not proof of Electron authorization. The packag
 Windows smoke separately exercises the actual preload/main bridge and reopens
 edited state in a genuinely separate application process. Negative metadata UI
 fixtures and protocol-fault tests are identified as such, never PCM evidence.
+
+Playlist parameter automation now uses the same native process queues and production
+export path. See [VST3 automation workflow, architecture and timing limits](../../docs/VST3-AUTOMATION.md).
