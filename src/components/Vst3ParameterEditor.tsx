@@ -57,7 +57,7 @@ export function Vst3ParameterEditor({ channel, onCommit, cancellation }: { chann
         return <div key={p.id} className="border-b border-[var(--apex-border)] pb-2">
           <label htmlFor={`vst3-param-${p.id}`}>{name} · ID {p.id}</label>
           <p>{p.shortTitle && `Short title: ${p.shortTitle}. `}{p.units && `Plugin units: ${p.units}. `}Normalized: {value === null ? 'unavailable' : value.toFixed(5)} · default {p.defaultValue.toFixed(5)}{p.flags & 1 ? ' · automatable (plugin flag; no arrangement lanes)' : ''}{p.flags & 65536 ? ' · bypass' : ''}</p>
-          {p.flags & 32768 ? <p>Program change requires reinitialization; use Reset/relink outside this editor.</p> : p.flags & 2 ? <p>Read-only</p> : value === null ? <p>Current value unavailable; editing disabled.</p> : p.choices ?
+          {p.flags & 32768 ? <p>Program change requires reinitialization; use Reset/relink outside this editor.</p> : p.flags & 2 ? <p>Read-only</p> : (p.flags & 8) && !p.choices ? <p>List choices unavailable; editing disabled.</p> : value === null ? <p>Current value unavailable; editing disabled.</p> : p.choices ?
             <select className={control} id={`vst3-param-${p.id}`} value={value} onChange={e => stage(p, Number(e.target.value))}>
               {!p.choices.some(c => c.value === value) && <option value={value}>Current normalized value {value}</option>}
               {p.choices.map(c => <option key={c.value} value={c.value}>{c.label}</option>)}

@@ -20,6 +20,11 @@ async function setup(page: Page, contract?: string) {
       const p = { id: 6, name: 'Contract read-only', shortTitle: '', units: '', defaultValue: .5, currentValue: .4, flags: 2, stepCount: 0 };
       if (contract === 'absent') return { controllerAvailable: false, parameters: [] };
       if (contract === 'error') throw new Error('Metadata query failed');
+      if (contract === 'list-missing' || contract === 'list-invalid') return {
+        controllerAvailable: true,
+        parameters: [{ ...p, name: 'Contract unlabeled list', flags: 9, stepCount: 2, currentValue: .5,
+          ...(contract === 'list-invalid' ? { choices: [{ value: 0, label: 'Incomplete choice table' }] } : {}) }],
+      };
       return { controllerAvailable: true, parameters: [p, { ...p, id: 7, name: 'Contract hidden', flags: 16 }, ...Array.from({ length: 70 }, (_, i) => ({ ...p, id: 100 + i, name: `Contract writable ${i}`, flags: 1 }))] };
     }
     switch (method) {
@@ -181,4 +186,47 @@ for (const action of ['close panel', 'reset', 'replace']) test(`pending real edi
   else if (action === 'replace') await expect(page.getByRole('region', { name: 'VST3 parameter editor', exact: true })).toHaveCount(0);
   else await expect.poll(() => service.sessionCount).toBe(0);
   expect((await stored(page)).state.parameters).toEqual(original.state.parameters);
+});
+
+
+// Negative metadata contract fixtures: not positive native audio evidence.
+for (const contract of ['list-missing', 'list-invalid']) test(`list metadata safety: ${contract} cannot stage or apply a write`, async ({ page }) => {
+  const editor = await setup(page, contract), original = await stored(page);
+  if (contract === 'list-missing') {
+    await expect(editor).toContainText('Contract unlabeled list');
+    await expect(editor).toContainText('Normalized: 0.50000');
+    await expect(editor).toContainText('List choices unavailable; editing disabled.');
+    await editor.getByRole('searchbox').fill('unlabeled');
+    await expect(editor).toContainText('1 matching parameters');
+  } else {
+    // Keep the shared metadata validation fail-closed, not silently accept bad labels.
+    await expect(editor.getByRole('alert')).toContainText('Invalid VST3 parameter choices');
+  }
+  await expect(editor.getByRole('slider')).toHaveCount(0);
+  await expect(editor.getByRole('combobox')).toHaveCount(0);
+  await expect(editor.getByRole('button', { name: 'Apply parameter changes', exact: true })).toBeDisabled();
+  await expect(editor.getByRole('button', { name: 'Discard parameter draft', exact: true })).toBeDisabled();
+  expect(editedCount).toBe(0);
+  expect(await stored(page)).toEqual(original);
+});
+
+test('genuine labeled MDA list uses controller choices and applies its selected normalized value', async ({ page }) => {
+  const editor = await setup(page), original = await stored(page);
+  const metadata = await service.describe(original);
+  const glide = metadata.parameters.find(p => p.name === 'Glide');
+  expect(glide.flags & 8).toBe(8);
+  expect(glide.stepCount).toBeGreaterThan(0);
+  expect(glide.choices.length).toBe(glide.stepCount + 1);
+  await editor.getByRole('searchbox').fill('Glide');
+  const selector = editor.getByRole('combobox', { name: /^Glide · ID / });
+  await expect(selector).toBeVisible();
+  await expect(editor.getByRole('slider')).toHaveCount(0);
+  for (const choice of glide.choices) {
+    await expect(selector.getByRole('option', { name: choice.label, exact: true })).toHaveAttribute('value', String(choice.value));
+  }
+  const choice = glide.choices.find(c => c.value !== glide.currentValue);
+  await selector.selectOption(String(choice.value));
+  expect(await stored(page)).toEqual(original);
+  await editor.getByRole('button', { name: 'Apply parameter changes', exact: true }).click();
+  await expect.poll(async () => (await stored(page)).state.parameters.find(p => p.id === glide.id)?.value).toBe(choice.value);
 });
