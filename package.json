@@ -36,7 +36,9 @@
     "test:truth": "tsx --test src/components/audioSlicerSource.test.ts src/components/warpClipTarget.test.ts src/components/parametricEqPublication.test.ts src/components/vocalTunerTruthfulness.test.tsx src/components/vocalTunerThemeUi.test.tsx src/state/productTruthStrings.test.ts src/components/grossBeatTruth.test.tsx src/components/phase70.collaborationTruth.test.tsx src/components/phase68.projectStatisticsTruthfulness.test.tsx",
     "test:browser": "node scripts/run-browser-tests.mjs",
     "test:browser:playwright": "npx playwright test",
-    "test:browser:node": "node --import tsx scripts/realOfflineRenderNode.mjs"
+    "test:browser:node": "node --import tsx scripts/realOfflineRenderNode.mjs",
+    "native:vst3:build": "node scripts/build-native-vst3.mjs",
+    "test:native-vst3": "node --import tsx --test tests/nativeVst3.test.mjs"
   },
   "build": {
     "appId": "com.apexstudio.daw",
