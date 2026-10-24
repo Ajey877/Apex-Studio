@@ -24,14 +24,24 @@ export interface Vst3Event {
   noteId: number;
   channel?: number;
 }
+export interface Vst3Parameter {
+  id: number; name: string; shortTitle: string; units: string;
+  defaultValue: number; currentValue: number | null; flags: number; stepCount: number;
+  choices?: Array<{ value: number; label: string }>;
+}
+export interface Vst3ParameterMetadata { parameters: Vst3Parameter[]; controllerAvailable: boolean }
+export type Vst3ParameterChange = { id: number; value: number };
+export type Vst3ParameterEditorCommit = (channel: import('../types/daw').Channel, changes: Vst3ParameterChange[], signal: AbortSignal) => Promise<void>;
 /** Narrow async desktop boundary. Never exposes ipcRenderer, paths to executables or raw host commands. */
 export interface Vst3Bridge {
   paths(): Promise<string[]>;
   choosePath(): Promise<string[] | null>;
   discover(): Promise<{ plugins: Vst3Identity[]; errors: Array<{ path: string; error: string }> }>;
   inspect(plugin: Vst3Identity, state?: Vst3State): Promise<Vst3Instrument>;
+  describe(instrument: Vst3Instrument): Promise<Vst3ParameterMetadata>;
+  parameters(id: string, changes: Vst3ParameterChange[]): Promise<Vst3Parameter[]>;
   open(instrument: Vst3Instrument, sampleRate: number, mode: 'realtime' | 'offline'): Promise<{ id: string; latencySamples: number }>;
-  process(id: string, frames: number, events: Vst3Event[], bpm: number): Promise<Float32Array>;
+  process(id: string, frames: number, events: Vst3Event[], bpm: number, parameters?: Vst3ParameterChange[]): Promise<Float32Array>;
   close(id: string): Promise<void>;
 }
 export function getVst3Bridge(): Vst3Bridge | undefined {
@@ -41,7 +51,7 @@ export function assertVst3Instrument(value: unknown): asserts value is Vst3Instr
   const plugin = value as Vst3Instrument | undefined;
   if (!plugin || typeof plugin.path !== 'string' || !/^[A-F0-9]{32}$/.test(plugin.classId ?? '') ||
     !plugin.state || plugin.state.schema !== 1 || plugin.state.classId !== plugin.classId ||
-    !Array.isArray(plugin.state.parameters)) {
+    (plugin.state.parameters !== undefined && !Array.isArray(plugin.state.parameters))) {
     throw new Error('VST3 identity/state is missing or invalid. Original project data is retained; relink the instrument or retry.');
   }
 }

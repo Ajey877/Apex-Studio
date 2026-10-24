@@ -57,7 +57,9 @@ function registerVst3({ app, ipcMain, dialog, getWindow }) {
   handle('discover', (context, owner) => context.service.discover(owner));
   handle('inspect', (context, owner, plugin, state) => context.service.inspect(plugin, state, owner));
   handle('open', (context, owner, instrument, rate, mode) => context.service.open(instrument, rate, mode, owner));
-  handle('process', (context, owner, id, frames, events, bpm) => context.service.process(id, frames, events, bpm, owner));
+  handle('describe', (context, owner, instrument) => context.service.describe(instrument, owner));
+  handle('parameters', (context, owner, id, changes) => context.service.parameters(id, changes, owner));
+  handle('process', (context, owner, id, frames, events, bpm, parameters) => context.service.process(id, frames, events, bpm, owner, parameters));
   handle('close', (context, owner, id) => context.service.close(id, owner));
   app.on('web-contents-created', (_event, contents) => {
     const close = () => { void ready.then(({ service }) => service.closeOwner(String(contents.id))).catch(() => {}); };

@@ -47,6 +47,7 @@ import { resolveLimiterLatencySamples } from './masteringLimiter';
 import type { AudioLatencyMetrics, MasterMeasurementSnapshot } from '../types/daw';
 import { ChorusEffect } from './effects/ChorusEffect';
 import { WetDryEffect } from './effects/WetDryEffect';
+import type { Vst3Instrument, Vst3ParameterChange } from './nativeVst3Types';
 import { NativeVst3Runtime, NativeVst3OfflineRender, reportVst3, reconcileVst3Diagnostics } from './nativeVst3Runtime';
 import { createInstrumentRegistry, InstrumentRegistry, InstrumentVoiceHandle } from './instrumentRegistry';
 import { MixerRoutingAdapter } from './mixerRoutingAdapter';
@@ -670,6 +671,12 @@ class AudioEngine {
     const context = this.getContext();
     const destination = this.getOrCreateChannelPanner(channel) ?? this.getOrCreateMixerChannel(channel.mixerTrackId).input;
     await this.nativeInstruments.prepare(channel, context, destination);
+  }
+  public async editVst3Parameters(channel: Channel, changes: Vst3ParameterChange[], isCurrent: () => boolean, publish: (instrument: Vst3Instrument) => void) {
+    if (this.shouldBlockLiveMutation() || this.nativePreparing) throw new Error('Wait for offline rendering/native playback preparation before editing native parameters.');
+    this.init();
+    const destination = this.getOrCreateChannelPanner(channel) ?? this.getOrCreateMixerChannel(channel.mixerTrackId).input;
+    return this.nativeInstruments.edit(channel, changes, this.getContext(), destination, isCurrent, publish);
   }
   public reconcileNativeInstruments(channels: Channel[]) {
     reconcileVst3Diagnostics(channels);

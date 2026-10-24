@@ -1408,6 +1408,17 @@ export function App() {
     );
   };
 
+  const handleEditVst3Parameters: import('./audio/nativeVst3Types').Vst3ParameterEditorCommit = async (channel, changes, signal) => {
+    const generation = recordingProjectGenerationRef.current;
+    const isCurrent = () => !signal.aborted && generation === recordingProjectGenerationRef.current &&
+      selectedChannelIdRef.current === channel.id && projectStateRef.current.channels.some(c => c.id === channel.id && c.instrumentType === 'vst3' && c.vst3 === channel.vst3);
+    if (!isCurrent()) throw new Error('VST3 parameter edit is stale; reopen the selected instrument.');
+    await audioEngine.editVst3Parameters(channel, changes, isCurrent, instrument => {
+      if (!isCurrent()) throw new Error('VST3 parameter edit cancelled');
+      mutateProjectState(current => updateChannelInProjectState(current, channel.id, { vst3: instrument }), 'Edit VST3 parameters');
+    });
+  };
+
   /**
    * Phase 66 F3-B: a Standard MIDI File may hold several note-bearing tracks.
    * The track that lands in the channel being edited is written by the Piano
@@ -2638,8 +2649,9 @@ export function App() {
             <InstrumentRack
               channel={selectedChannel}
               allChannels={projectState.channels}
-              onSelectChannel={(id) => setSelectedChannelId(id)}
+              onSelectChannel={(id) => { selectedChannelIdRef.current = id; setSelectedChannelId(id); }}
               onUpdateChannel={handleUpdateChannel}
+              onEditVst3Parameters={handleEditVst3Parameters}
               sampleLibrary={projectState.sampleLibrary || []}
             />
           )}

@@ -21,6 +21,7 @@ interface InstrumentRackProps {
   channel: Channel;
   allChannels: Channel[];
   onSelectChannel: (channelId: string) => void;
+  onEditVst3Parameters?: import('../audio/nativeVst3Types').Vst3ParameterEditorCommit;
   onUpdateChannel: (channelId: string, updates: Partial<Channel>) => void;
   sampleLibrary: NonNullable<Channel['customSample']>[];
 }
@@ -113,6 +114,7 @@ export const InstrumentRack: React.FC<InstrumentRackProps> = ({
   allChannels,
   onSelectChannel,
   onUpdateChannel,
+  onEditVst3Parameters,
   sampleLibrary
 }) => {
   const p = channel.synthParams || audioEngine.getDefaultSynthParams();
@@ -146,7 +148,7 @@ export const InstrumentRack: React.FC<InstrumentRackProps> = ({
         {allChannels.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}
       </select>
     </div>
-    <Vst3InstrumentPanel channel={channel} onUpdateChannel={onUpdateChannel} />
+    <Vst3InstrumentPanel channel={channel} onUpdateChannel={onUpdateChannel} onEditParameters={onEditVst3Parameters} />
     <div className="p-3 flex gap-2" aria-label="VST3 audition keys">{[60, 62, 64, 65, 67, 69, 71, 72].map(pitch =>
       <button key={pitch} type="button" className="p-3 border border-[var(--apex-border)]" onClick={() => handleTriggerVirtualKey(pitch)}>Note {pitch}</button>)}</div>
     <p className="p-3 text-xs">Edit notes in the existing Piano Roll, play the Channel Rack/Playlist, and route this channel in the Mixer. Save/export use the selected plugin state. Native monitoring is buffered, not zero latency.</p>
@@ -154,7 +156,7 @@ export const InstrumentRack: React.FC<InstrumentRackProps> = ({
 
   return (
     <div id="fl-instrument-rack" className="flex flex-col h-full bg-[var(--apex-canvas)] select-none text-[var(--apex-text-2)]">
-      <Vst3InstrumentPanel channel={channel} onUpdateChannel={onUpdateChannel} />
+      <Vst3InstrumentPanel channel={channel} onUpdateChannel={onUpdateChannel} onEditParameters={onEditVst3Parameters} />
       {/* Top Bar with Channel Switcher & Preset Selector */}
       <div className="h-9 bg-[var(--apex-panel-header)] border-b border-[var(--apex-border)] flex items-center justify-between px-4 shrink-0 gap-4">
         {/* Active Instrument Title */}

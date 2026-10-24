@@ -29,6 +29,10 @@ jobs:
         run: npm run native:vst3:build
       - name: Verify native DSP and production live/export/state integration
         run: npm run test:native-vst3 && npm run test:vst3-daw
+      - name: Install Chromium for real native parameter UI regression
+        run: npx playwright install --with-deps chromium
+      - name: Native parameter controls through actual App, service, MDA and production export
+        run: npm run test:vst3-browser
       - name: Upload measured evidence (not a desktop playback claim)
         if: always()
         uses: actions/upload-artifact@v4

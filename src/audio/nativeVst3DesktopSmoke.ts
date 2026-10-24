@@ -40,8 +40,21 @@ export async function runDesktopVst3Smoke() {
   }
   const render = (value: Channel) => instance.renderTimelineOffline([value], [clip], mixer, 120, 1, 48000, true, 'song', undefined, undefined, undefined, 0.5);
   try {
+    const reference = await render({ ...channel, vst3: instrument });
+    if (!reopening) {
+      await instance.editVst3Parameters(channel, [{ id: 6, value: .05 }], () => true, vst3 => { channel = { ...channel, vst3 }; });
+      await instance.releaseNativeInstruments();
+    }
+    if (channel.vst3?.state.parameters.find(p => p.id === 6)?.value !== .05) throw new Error('Edited native parameter did not survive application restart');
+    const metadata = await bridge.describe(channel.vst3);
+    if (Math.abs((metadata.parameters.find(p => p.id === 6)?.currentValue ?? -1) - .05) > 1e-7) throw new Error('Packaged native controller did not restore the edited value');
     const output = await render(channel);
     const samples = output.getChannelData(0);
+    let differenceSum = 0;
+    const before = reference.getChannelData(0);
+    for (let i = 0; i < samples.length; i++) differenceSum += (samples[i] - before[i]) ** 2;
+    const parameterExportDifferenceRms = Math.sqrt(differenceSum / samples.length);
+    if (parameterExportDifferenceRms < .001) throw new Error('Packaged parameter edit did not alter real production PCM');
     const onsetFrame = samples.findIndex(value => Math.abs(value) > 1e-7);
     let sum = 0;
     for (const value of samples) sum += value * value;
@@ -72,9 +85,9 @@ export async function runDesktopVst3Smoke() {
     if (reopening && !document.body.textContent?.includes(channel.name)) throw new Error('The actual Apex application UI did not restore the saved native channel');
     if (!reopening) {
       const project = createDefaultProjectState();
-      await persistProjectState({ ...project, meta: { ...project.meta, bpm: 120 }, channels: [channel], mixerTracks: mixer, playlistClips: [clip] });
+      await persistProjectState({ ...project, meta: { ...project.meta, bpm: 120 }, selectedChannelId: channel.id, channels: [channel], mixerTracks: mixer, playlistClips: [clip] });
     }
-    return { plugin: plugin.name, classId: plugin.classId, onsetFrame, rms, livePeak, stateReopenEqual: true, missingRejected: rejected,
+    return { parameterValue: .05, parameterExportDifferenceRms, plugin: plugin.name, classId: plugin.classId, onsetFrame, rms, livePeak, stateReopenEqual: true, missingRejected: rejected,
       applicationStage: reopening ? 'reopened-from-indexeddb-after-process-exit' : 'saved-to-production-indexeddb',
       uiRestored: reopening ? true : undefined,
       pcmChecksum: digest(new Uint8Array(samples.buffer, samples.byteOffset, samples.byteLength)),

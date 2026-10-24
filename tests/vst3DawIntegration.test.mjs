@@ -18,7 +18,8 @@ const service = new Vst3Service(executable, [root]);
 const bridge = {
   paths: async () => [root], choosePath: async () => null,
   discover: () => service.discover(), inspect: (...args) => service.inspect(...args),
-  open: (...args) => service.open(...args), process: (...args) => service.process(...args), close: (...args) => service.close(...args),
+  describe: (...args) => service.describe(...args), parameters: (...args) => service.parameters(...args),
+  open: (...args) => service.open(...args), process: (id, frames, events, bpm, parameters) => service.process(id, frames, events, bpm, 'local', parameters), close: (...args) => service.close(...args),
 };
 globalThis.desktopApp = { isDesktop: true, vst3: bridge };
 globalThis.window = globalThis;
@@ -346,7 +347,8 @@ test('real abrupt helper failure and deadline through production export preserve
   // This executable NEVER supplies audio. Success evidence always uses the
   // genuine native host; the fixture is exclusively for crash/hang rejection.
   globalThis.desktopApp.vst3 = { ...bridge,
-    open: (...args) => failingService.open(...args), process: (...args) => failingService.process(...args), close: (...args) => failingService.close(...args),
+    describe: (...args) => service.describe(...args), parameters: (...args) => service.parameters(...args),
+  open: (...args) => failingService.open(...args), process: (...args) => failingService.process(...args), close: (...args) => failingService.close(...args),
   };
   try {
     for (const condition of ['crash', 'hang']) {
@@ -409,5 +411,114 @@ test('project edits during async Play preparation cancel obsolete snapshots inst
   await pending;
   await instance.releaseNativeInstruments();
   assert.equal(instance.isPlaybackActive(), false);
+  assert.equal(service.sessionCount, 0);
+});
+
+test('real privileged parameter service forwards metadata, authorizes owners, bounds writes and excludes processing races', async () => {
+  const metadata = await service.describe(instrument, 'parameter-owner');
+  assert.equal(metadata.controllerAvailable, true);
+  assert.ok(metadata.parameters.some(p => p.name === 'VCF Freq' && p.id === 6));
+  assert.equal(service.sessionCount, 0);
+  const opened = await service.open(instrument, rate, 'realtime', 'parameter-owner');
+  try {
+    await assert.rejects(service.parameters(opened.id, [{ id: 6, value: .1 }], 'other-owner'), /another renderer/);
+    await assert.rejects(service.parameters(opened.id, [{ id: 6, value: NaN }], 'parameter-owner'), /Invalid/);
+    const processing = service.process(opened.id, 1024, [], 120, 'parameter-owner');
+    await assert.rejects(service.parameters(opened.id, [{ id: 6, value: .1 }], 'parameter-owner'), /Concurrent/);
+    await processing;
+    const editing = service.parameters(opened.id, [{ id: 6, value: .1 }], 'parameter-owner');
+    await assert.rejects(service.process(opened.id, 1024, [], 120, 'parameter-owner'), /Concurrent/);
+    assert.ok(Math.abs((await editing).find(p => p.id === 6).currentValue - .1) < 1e-7);
+  } finally { await service.closeOwner('parameter-owner'); }
+  assert.equal(service.sessionCount, 0);
+});
+
+test('parameter edit changes a held real live voice, saved production export, and exact undo/redo/reopen sound', async () => {
+  const metadata = await bridge.describe(instrument), frequency = metadata.parameters.find(p => p.name === 'VCF Freq');
+  assert.equal(frequency.id, 6);
+  const original = { ...channel, notes: [{ id: 'held-param', pitch: 60, start: 0, duration: 16, velocity: .8 }] };
+  async function live(value, configured = original) {
+    const instance = engine(); let edited = configured;
+    try {
+      await instance.play([configured], [], 'pat', undefined, tracks, 16);
+      await advanceLive(instance, .25);
+      if (value !== undefined) {
+        const count = service.sessionCount;
+        await instance.editVst3Parameters(configured, [{ id: frequency.id, value }], () => true, vst3 => {
+          edited = { ...configured, vst3 };
+          instance.reconcileNativeInstruments([edited]);
+        });
+        assert.equal(service.sessionCount, count, 'editing must retain the running native instance/held note');
+      }
+      await advanceLive(instance, .75);
+      return { pcm: instance.getContext().exportAsAudioData().channelData[0].slice(), edited };
+    } finally { instance.stop(); await instance.releaseNativeInstruments(); }
+  }
+  const baseline = await live(), unchanged = await live(frequency.currentValue), changed = await live(.05);
+  const controlDifference = difference(baseline.pcm, unchanged.pcm);
+  assert.ok(controlDifference < 1e-6, `unchanged parameter should not change PCM: ${controlDifference}`);
+  const liveDifference = difference(baseline.pcm.subarray(24000, 44000), changed.pcm.subarray(24000, 44000));
+  assert.ok(liveDifference > .001, `real held-note edit difference RMS ${liveDifference}`);
+  assert.ok(rms(changed.pcm, 24000, 44000) > .00001);
+  const initial = { ...createDefaultProjectState(), channels: [original], mixerTracks: tracks, playlistClips: [clip] };
+  const history = createHistory(initial).commit(updateChannelInProjectState(initial, original.id, { vst3: changed.edited.vst3 }), 'Edit VST3 parameters');
+  assert.equal(history.past.length, 1);
+  const dry = await exportSong(original), wet = await exportSong(changed.edited);
+  const offlineDifference = difference(dry.getChannelData(0), wet.getChannelData(0));
+  assert.ok(offlineDifference > .001);
+  const renderState = state => exportSong(state.channels[0]);
+  const undo = await renderState(history.undo().present), redo = await renderState(history.undo().redo().present);
+  const reopened = await renderState(normalizeProjectState(JSON.parse(serializeProjectState(history.present)).state));
+  assert.equal(difference(undo.getChannelData(0), dry.getChannelData(0)), 0);
+  assert.equal(difference(redo.getChannelData(0), wet.getChannelData(0)), 0);
+  assert.equal(difference(reopened.getChannelData(0), wet.getChannelData(0)), 0);
+  const liveUndo = await live(undefined, history.undo().present.channels[0]);
+  const liveRedo = await live(undefined, history.undo().redo().present.channels[0]);
+  const liveReload = await live(undefined, normalizeProjectState(JSON.parse(serializeProjectState(history.present)).state).channels[0]);
+  assert.equal(difference(liveUndo.pcm, baseline.pcm), 0);
+  assert.equal(difference(liveRedo.pcm, liveReload.pcm), 0);
+  assert.ok(difference(liveRedo.pcm.subarray(24000, 44000), baseline.pcm.subarray(24000, 44000)) > .001);
+  // Independently restored native client reference through the same real SDK,
+  // compared against production song export, not another test-only oscillator.
+  const client = new NativeVst3Client(executable);
+  try {
+    await client.open(plugin, { state: changed.edited.vst3.state, sampleRate: rate });
+    const [ref] = await renderNativeSequence(client, { frames: wet.length, events: [
+      { frame: 96000, type: 'on', pitch: 60, noteId: 1, velocity: .8 },
+      { frame: 192000 - 1, type: 'off', pitch: 60, noteId: 1 },
+    ] });
+    assert.ok(difference(ref.subarray(98000, 150000), wet.getChannelData(0).subarray(98000, 150000)) < 1e-6);
+  } finally { await client.dispose(); }
+  const metrics = { plugin: plugin.name, parameter: frequency.name, id: frequency.id, sampleRate: rate,
+    referenceValue: frequency.currentValue, editedValue: .05, liveComparedFrames: [24000, 44000],
+    liveReferenceRms: rms(baseline.pcm, 24000, 44000), liveEditedRms: rms(changed.pcm, 24000, 44000),
+    liveDifferenceRms: liveDifference, unchangedDifferenceRms: controlDifference,
+    offlineComparedFrames: [0, dry.length], offlineDifferenceRms: offlineDifference,
+    undoDifferenceRms: 0, redoDifferenceRms: 0, reopenDifferenceRms: 0, liveUndoDifferenceRms: 0, liveRedoReloadDifferenceRms: 0 };
+  await writeFile(path.join(evidence, 'apex-parameter-metrics.json'), JSON.stringify(metrics, null, 2));
+  console.log('NATIVE_PARAMETER_PCM_PROOF', JSON.stringify(metrics));
+  if (process.env.GITHUB_ACTIONS) console.log(`::notice title=Real VST3 parameter live and export proof::${JSON.stringify(metrics)}`);
+  assert.equal(service.sessionCount, 0);
+});
+
+test('failed/stale/cancelled native parameter transactions do not publish, clean up and permit retry', async () => {
+  for (const mode of ['invalid', 'stale', 'late-cancel', 'publish-failure', 'stop']) {
+    const instance = engine(); let published = false, current = true;
+    const parameters = bridge.parameters;
+    if (mode === 'late-cancel') bridge.parameters = async (...args) => { const result = await parameters(...args); current = false; return result; };
+    try {
+      const updating = instance.editVst3Parameters(channel, [{ id: mode === 'invalid' ? 0xffffffff : 6, value: .1 }], () => current, () => {
+        if (mode === 'publish-failure') throw new Error('Publication rejected');
+        published = true;
+      });
+      if (mode === 'stale') current = false;
+      if (mode === 'stop') await instance.releaseNativeInstruments();
+      await assert.rejects(updating);
+      assert.equal(published, false); assert.equal(channel.vst3, instrument);
+    } finally { bridge.parameters = parameters; instance.stop(); await instance.releaseNativeInstruments(); }
+  }
+  const instance = engine();
+  try { await instance.editVst3Parameters(channel, [{ id: 6, value: .1 }], () => true, () => {}); }
+  finally { await instance.releaseNativeInstruments(); }
   assert.equal(service.sessionCount, 0);
 });

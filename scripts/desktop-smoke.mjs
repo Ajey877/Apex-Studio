@@ -38,7 +38,7 @@ async function launch(reopening) {
 try {
   const saved = await launch(false);
   const reopened = await launch(true);
-  for (const field of ['classId', 'onsetFrame', 'rms', 'pcmChecksum', 'savedStateChecksum']) {
+  for (const field of ['classId', 'onsetFrame', 'rms', 'pcmChecksum', 'savedStateChecksum', 'parameterValue', 'parameterExportDifferenceRms']) {
     assert.equal(reopened.vst3[field], saved.vst3[field], `Actual application restart changed ${field}`);
   }
   assert.equal(reopened.vst3.uiRestored, true);

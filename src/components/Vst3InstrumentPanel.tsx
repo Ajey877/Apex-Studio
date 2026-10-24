@@ -1,3 +1,5 @@
+import { Vst3ParameterEditor } from './Vst3ParameterEditor';
+import type { Vst3ParameterEditorCommit } from '../audio/nativeVst3Types';
 import React, { useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import type { Channel } from '../types/daw';
 import { audioEngine } from '../audio/audioEngine';
@@ -13,7 +15,8 @@ export function Vst3StatusBanner() {
   </div>;
 }
 
-export function Vst3InstrumentPanel({ channel, onUpdateChannel }: {
+export function Vst3InstrumentPanel({ channel, onUpdateChannel, onEditParameters }: {
+  onEditParameters?: Vst3ParameterEditorCommit;
   channel: Channel; onUpdateChannel: (id: string, updates: Partial<Channel>) => void;
 }) {
   const bridge = getVst3Bridge();
@@ -23,6 +26,13 @@ export function Vst3InstrumentPanel({ channel, onUpdateChannel }: {
   const [errors, setErrors] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   const generation = useRef(0);
+  const parameterCancellation = useRef(new AbortController());
+  const [parameterEpoch, setParameterEpoch] = useState(0);
+  const invalidateParameterEdits = () => {
+    parameterCancellation.current.abort();
+    parameterCancellation.current = new AbortController();
+    setParameterEpoch(value => value + 1);
+  };
   useEffect(() => { generation.current++; return () => { generation.current++; }; }, [channel]);
   const diagnostics = useSyncExternalStore(subscribeVst3Diagnostics, getVst3Diagnostics, getVst3Diagnostics);
   const diagnostic = diagnostics.find(item => item.channelId === channel.id);
@@ -42,6 +52,7 @@ export function Vst3InstrumentPanel({ channel, onUpdateChannel }: {
   async function select(plugin: Vst3Identity, resetState = false) {
     if (!bridge) return;
     if (audioEngine.isPlaybackActive()) throw new Error('Stop transport before selecting/relinking a native instrument.');
+    invalidateParameterEdits();
     const token = generation.current;
     // Relink by exact class ID and restore original state. A different class
     // is an intentional replacement, explicitly labelled in the UI/history.
@@ -55,7 +66,7 @@ export function Vst3InstrumentPanel({ channel, onUpdateChannel }: {
     reportVst3(channel.id, 'VST3 ready (loaded on this channel)');
   }
   return <section aria-label="VST3 instrument hosting" className="p-3 space-y-2 border-b border-[var(--apex-border)] text-xs text-[var(--apex-text)] bg-[var(--apex-panel)]">
-    <button type="button" onClick={() => setExpanded(value => !value)} aria-expanded={expanded} className="font-semibold">VST3 instruments — desktop only</button>
+    <button type="button" onClick={() => { if (expanded) invalidateParameterEdits(); setExpanded(value => !value); }} aria-expanded={expanded} className="font-semibold">VST3 instruments — desktop only</button>
     {expanded && <>
       {!bridge ? <p>Native VST3 hosting requires the Windows desktop application. Saved plugin identity/state is preserved in the browser; native playback/export is unavailable.</p> : <>
         <p>Third-party plugins run native code with your user privileges, not in a security sandbox. Load only plugins you trust.</p>
@@ -63,10 +74,11 @@ export function Vst3InstrumentPanel({ channel, onUpdateChannel }: {
           <strong>{channel.vst3?.name || 'Unresolved VST3 instrument'}</strong>
           <p className="break-all">{channel.vst3?.path}</p>
           <p>Class: {channel.vst3?.classId} · Channel fader/pan and mixer routing apply. Per-note pan/editor windows are not supported.</p>
-          <button disabled={busy} type="button" onClick={() => void run(async () => { await audioEngine.prepareVst3Channel(channel); })}>Retry saved instrument</button>
+          <button disabled={busy} type="button" onClick={() => void run(async () => { invalidateParameterEdits(); await audioEngine.prepareVst3Channel(channel); })}>Retry saved instrument</button>
           {channel.vst3 && <button disabled={busy} type="button" onClick={() => void run(() => select(channel.vst3!, true))} className="ml-4">Reset to plugin defaults (undoable)</button>}
-          <button disabled={busy} type="button" onClick={() => onUpdateChannel(channel.id, { instrumentType: 'minisynth' })} className="ml-4">Use built-in MiniSynth instead (undoable)</button>
+          <button disabled={busy} type="button" onClick={() => { invalidateParameterEdits(); onUpdateChannel(channel.id, { instrumentType: 'minisynth' }); }} className="ml-4">Use built-in MiniSynth instead (undoable)</button>
         </div>}
+        {channel.instrumentType === 'vst3' && channel.vst3 && onEditParameters && <Vst3ParameterEditor key={`${channel.id}:${parameterEpoch}`} channel={channel} onCommit={onEditParameters} cancellation={parameterCancellation.current.signal} />}
         <div className="flex gap-4">
           <button disabled={busy} type="button" onClick={() => void run(async () => { if (await bridge.choosePath()) await scan(); })}>Add VST3 folder…</button>
           <button disabled={busy} type="button" onClick={() => void run(scan)}>Scan configured folders</button>

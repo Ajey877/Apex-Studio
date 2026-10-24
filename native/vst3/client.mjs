@@ -85,6 +85,7 @@ export class NativeVst3Client {
     return this.request({ command: 'open', path: plugin.path, classId: plugin.classId, sampleRate, mode,
       ...(state === undefined ? {} : { state }) });
   }
+  async parameters(changes) { return (await this.request({ command: 'parameters', parameters: changes })).parameters; }
   async snapshot() { return (await this.request({ command: 'snapshot' })).state; }
   process(frames, events = [], parameters = [], bpm = 120) {
     return this.request({ command: 'process', frames, events, parameters, bpm });
