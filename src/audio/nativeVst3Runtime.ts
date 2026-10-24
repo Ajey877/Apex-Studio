@@ -1,3 +1,5 @@
+import { withVst3Parameters } from './nativeVst3Parameters';
+import type { Vst3Instrument, Vst3ParameterChange } from './nativeVst3Types';
 import type { Channel } from '../types/daw';
 import type { InstrumentVoiceContext, InstrumentVoiceHandle } from './instrumentRegistry';
 import { resolveGateSeconds } from './noteGate';
@@ -54,7 +56,8 @@ interface QueuedEvent { time: number; input: boolean; inputTime?: number; event:
  * thread stalls can underrun: they fail/stop visibly rather than replay stale PCM.
  */
 class LiveVst3Session {
-  readonly key: string;
+  key: string;
+  private editing = false;
   readonly ready: Promise<void>;
   disposed = false;
   private closed: Promise<void> = Promise.resolve();
@@ -140,21 +143,22 @@ class LiveVst3Session {
     return { stop: (time = this.context.currentTime) => release(time) };
   }
   pump(channelId: string): Promise<void> {
+    if (this.editing) return Promise.resolve();
     if (this.pumping) return this.pendingPump;
     this.pendingPump = this.produce(channelId);
     return this.pendingPump;
   }
-  private async produce(channelId: string): Promise<void> {
+  private async produce(channelId: string, changes?: Vst3ParameterChange[]): Promise<void> {
     if (this.disposed || this.pumping || !this.id || !this.started) return;
     this.pumping = true;
     clearTimeout(this.timer);
     try {
       if (this.context.state === 'closed') throw new Error('VST3 audio context closed; retry the instrument.');
       // Bound work per turn. Never drain an unbounded native queue or block UI.
-      for (let batch = 0; batch < 4 && !this.disposed; ++batch) {
+      for (let batch = 0; batch < (changes ? 1 : 4) && !this.disposed && (!this.editing || changes); ++batch) {
         const now = this.context.currentTime;
         const audioTime = this.epoch + this.cursor / this.context.sampleRate;
-        if (this.cursor > 0 && audioTime >= now + BUFFER_SECONDS) break;
+        if (!changes && this.cursor > 0 && audioTime >= now + BUFFER_SECONDS) break;
         if (audioTime < now - 0.005) throw new Error('VST3 audio underrun: native/IPC/UI missed its buffer deadline. Audio stopped; retry playback.');
         const end = this.cursor + BLOCK;
         this.queue.sort((a, b) => a.time - b.time || (a.event.type === b.event.type ? 0 : a.event.type === 'off' ? -1 : 1));
@@ -176,7 +180,7 @@ class LiveVst3Session {
           events.push({ ...item.event, offset: frame - this.cursor });
         }
         events.sort((a, b) => a.offset - b.offset || (a.type === b.type ? 0 : a.type === 'off' ? -1 : 1));
-        const samples = await this.bridge.process(this.id, BLOCK, events, this.bpm);
+        const samples = await this.bridge.process(this.id, BLOCK, events, this.bpm, changes);
         if (this.disposed) break; // generation fencing: late PCM is NEVER played
         if (audioTime < this.context.currentTime - 0.005) throw new Error('VST3 PCM arrived after its audio deadline; audio stopped.');
         const source = this.context.createBufferSource();
@@ -194,6 +198,28 @@ class LiveVst3Session {
     finally {
       this.pumping = false;
       if (!this.disposed) this.timer = setTimeout(() => { void this.pump(channelId); }, 5);
+    }
+  }
+  async edit(channel: Channel, changes: Vst3ParameterChange[], isCurrent: () => boolean, publish: (instrument: Vst3Instrument) => void) {
+    if (this.editing) throw new Error('A VST3 parameter edit is already pending');
+    this.editing = true;
+    const check = () => { if (this.disposed || !isCurrent()) throw new Error('VST3 parameter edit cancelled or stale'); };
+    try {
+      check();
+      const instrument = withVst3Parameters(channel.vst3!, changes);
+      await this.ready; await this.pendingPump; check();
+      if (this.started) await this.produce(channel.id, changes);
+      else await this.bridge.parameters(this.id!, changes);
+      check();
+      // Reconciliation sees the acknowledged native configuration, not a stale
+      // key that would close the instance and interrupt the currently held note.
+      this.key = nativeInstrumentKey({ ...channel, vst3: instrument });
+      publish(instrument);
+      return instrument;
+    } catch (error) { this.fail(channel.id, error); throw error; }
+    finally {
+      this.editing = false;
+      if (this.started && !this.disposed) this.timer = setTimeout(() => { void this.pump(channel.id); }, 0);
     }
   }
   private fail(channelId: string, error: unknown) {
@@ -243,6 +269,10 @@ export class NativeVst3Runtime {
     const session = this.session(channel, context, destination);
     try { await session.ready; if (session.disposed || this.sessions.get(channel.id) !== session) throw new Error('VST3 load cancelled'); reportVst3(channel.id, 'VST3 ready'); }
     catch (error) { this.disposeSession(session); if (this.sessions.get(channel.id) === session) this.sessions.delete(channel.id); throw error; }
+  }
+  async edit(channel: Channel, changes: Vst3ParameterChange[], context: BaseAudioContext, destination: AudioNode, isCurrent: () => boolean, publish: (instrument: Vst3Instrument) => void) {
+    const session = this.session(channel, context, destination);
+    return session.edit(channel, changes, isCurrent, publish);
   }
   render(context: InstrumentVoiceContext): InstrumentVoiceHandle {
     return this.session(context.channel, context.audioContext, context.destination, context.time).note(context);

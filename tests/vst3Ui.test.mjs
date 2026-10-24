@@ -1,4 +1,5 @@
 import test from 'node:test';
+import { readFileSync } from 'node:fs';
 import assert from 'node:assert/strict';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
@@ -37,4 +38,13 @@ test('native failures stay visible, but diagnostics for removed/replaced non-nat
   assert.match(renderToStaticMarkup(React.createElement(Vst3StatusBanner)), /Saved instrument data is retained/);
   reconcileVst3Diagnostics([{ ...channel, instrumentType: 'minisynth' }]);
   assert.equal(renderToStaticMarkup(React.createElement(Vst3StatusBanner)), '');
+});
+
+
+test('packaging includes every module required by the privileged parameter bridge', () => {
+  const pkg = JSON.parse(readFileSync('package.json', 'utf8'));
+  for (const file of ['desktop-vst3.cjs', 'native/vst3/client.mjs', 'native/vst3/service.mjs', 'native/vst3/parameters.mjs']) assert.ok(pkg.build.files.includes(file), `Missing packaged module ${file}`);
+  const preload = readFileSync('preload.cjs', 'utf8'), main = readFileSync('desktop-vst3.cjs', 'utf8');
+  for (const operation of ['describe', 'parameters']) { assert.ok(preload.includes(`vst3:${operation}`)); assert.ok(main.includes(`handle('${operation}'`)); }
+  assert.ok(main.includes("VST3 IPC denied for untrusted frame"));
 });

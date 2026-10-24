@@ -231,3 +231,41 @@ test('cancellation rejects queued work; fresh helper can reload preserved state'
     assert.ok(rms(audio) > 0.001);
   }, { state: releaseState });
 });
+
+test('genuine metadata forwards current/default, units, steps and real enum labels; zero-frame edits reach DSP and snapshots', async () => {
+  await withClient(async (client, info) => {
+    assert.equal(info.controllerAvailable, true);
+    const p = info.parameters.find(p => p.name === 'VCF Freq');
+    assert.ok(p && p.flags & 1); assert.equal(p.units, '%'); assert.equal(p.stepCount, 0);
+    assert.equal(typeof p.shortTitle, 'string'); assert.ok(p.currentValue >= 0 && p.currentValue <= 1);
+    const list = info.parameters.find(p => p.name === 'Glide');
+    assert.ok(list.choices.some(c => c.label === 'Poly')); assert.equal(list.choices.length, list.stepCount + 1);
+    const updated = await client.parameters([{ id: p.id, value: 0.1 }]);
+    assert.ok(Math.abs(updated.find(item => item.id === p.id).currentValue - .1) < 1e-7);
+    const state = await client.snapshot(); assert.equal(state.parameters.find(item => item.id === p.id).value, .1);
+    await withClient(async (_other, reopened) => {
+      assert.ok(Math.abs(reopened.parameters.find(item => item.id === p.id).currentValue - .1) < 1e-7);
+    }, { state });
+  });
+});
+
+test('native parameter flush rejects malformed, duplicate, unknown, oversized and out-of-range batches; fresh retry works', async () => {
+  const bad = [null, {}, Array(4097).fill({ id: 6, value: .1 }), [{ id: 6, value: .1 }, { id: 6, value: .2 }],
+    [{ id: -1, value: .1 }], [{ id: 2 ** 32, value: .1 }], [{ id: 6.5, value: .1 }], [{ id: 0xffffffff, value: .1 }],
+    [{ id: 6, value: NaN }], [{ id: 6, value: Infinity }], [{ id: 6, value: -.1 }], [{ id: 6, value: 1.1 }],
+    [{ id: 1886548852, value: .5 }]];
+  for (const changes of bad) await withClient(async client => { await assert.rejects(client.parameters(changes)); });
+  await withClient(async client => { await client.parameters([{ id: 6, value: .2 }]); });
+});
+
+test('parameter request timeout/crash/malformed helper responses reject all work, dispose and allow real-plugin retry', async () => {
+  for (const mode of ['hang', 'crash', 'malformed']) {
+    // Protocol fault fixture is negative-only; never supplies positive PCM.
+    const client = new NativeVst3Client(fault, { timeoutMs: 50 });
+    try {
+      await assert.rejects(client.parameters([{ id: mode, value: .1 }]));
+      await assert.rejects(client.parameters([{ id: 6, value: .2 }]));
+    } finally { await client.dispose(); }
+  }
+  await withClient(async client => { await client.parameters([{ id: 6, value: .2 }]); });
+});

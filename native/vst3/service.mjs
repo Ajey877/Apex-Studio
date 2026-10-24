@@ -1,5 +1,6 @@
 // Privileged main-process service shared by Electron and real integration tests.
 // This is a process boundary, NOT a security sandbox for untrusted plugins.
+import { validateMetadata, validateParameterChanges } from './parameters.mjs';
 import { realpath } from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -60,9 +61,10 @@ export class Vst3Service {
       // Nonzero plugin latency needs explicit delay compensation; fail honestly
       // rather than exporting time-shifted audio in this first slice.
       if (opened.plugin.latencySamples !== 0) throw new Error(`VST3 instrument reports ${opened.plugin.latencySamples} samples of latency; this slice supports zero-reported-latency instruments only.`);
+      const parameters = validateMetadata(opened.plugin.parameters, opened.plugin.controllerAvailable);
       const id = randomUUID();
-      this.#sessions.set(id, { client, owner, processing: false });
-      return { id, latencySamples: opened.plugin.latencySamples };
+      this.#sessions.set(id, { client, owner, processing: false, parameters });
+      return { id, latencySamples: opened.plugin.latencySamples, parameters, controllerAvailable: opened.plugin.controllerAvailable };
     } catch (error) { if (client) await client.dispose().catch(() => {}); throw error; }
     finally { if (client) this.#loading.delete(client); this.#pending--; }
   }
@@ -71,7 +73,7 @@ export class Vst3Service {
     if (!session || session.owner !== owner) throw new Error('VST3 session is closed or belongs to another renderer');
     return session;
   }
-  async process(id, frames, events, bpm, owner = 'local') {
+  async process(id, frames, events, bpm, owner = 'local', parameters = []) {
     const session = this.#session(id, owner);
     if (session.processing) throw new Error('Concurrent VST3 processing request rejected');
     if (!Number.isInteger(frames) || frames < 1 || frames > 16384 || !Array.isArray(events) || events.length > 4096) throw new Error('VST3 batch exceeds bounds');
@@ -84,9 +86,33 @@ export class Vst3Service {
         !Number.isFinite(event.velocity ?? 0) || (event.velocity ?? 0) < 0 || (event.velocity ?? 0) > 1) throw new Error('Invalid VST3 MIDI event');
       return { offset: event.offset, type: event.type, pitch: event.pitch, noteId: event.noteId, channel: event.channel ?? 0, velocity: event.velocity ?? 0 };
     });
+    const changes = Array.isArray(parameters) && parameters.length === 0 ? [] : validateParameterChanges(parameters, session.parameters);
     session.processing = true;
-    try { return (await session.client.process(frames, midi, [], bpm)).samples; }
+    try { return (await session.client.process(frames, midi, changes, bpm)).samples; }
     catch (error) { await this.close(id, owner); throw error; }
+    finally { session.processing = false; }
+  }
+  async describe(instrument, owner = 'local') {
+    const opened = await this.open(instrument, 48000, 'offline', owner);
+    try { return { parameters: opened.parameters, controllerAvailable: opened.controllerAvailable }; }
+    finally { await this.close(opened.id, owner); }
+  }
+  async parameters(id, changes, owner = 'local') {
+    const session = this.#session(id, owner);
+    if (session.processing) throw new Error('Concurrent VST3 parameter/process request rejected');
+    const validated = validateParameterChanges(changes, session.parameters);
+    session.processing = true;
+    try {
+      const metadata = await session.client.parameters(validated);
+      // A missing/invalid controller response is never acknowledged as a successful edit.
+      session.parameters = validateMetadata(metadata, true);
+      for (const change of validated) {
+        const p = session.parameters.find(p => p.id === change.id);
+        if (!p || p.currentValue === null || Math.abs(p.currentValue - change.value) > 1e-7) throw new Error('VST3 controller did not accept the requested value');
+      }
+      if (this.#sessions.get(id) !== session) throw new Error('VST3 edit cancelled');
+      return session.parameters;
+    } catch (error) { await this.close(id, owner); throw error; }
     finally { session.processing = false; }
   }
   async inspect(plugin, state, owner = 'local') {

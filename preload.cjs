@@ -14,7 +14,9 @@ contextBridge.exposeInMainWorld('desktopApp', {
     discover: () => ipcRenderer.invoke('vst3:discover'),
     inspect: (plugin, state) => ipcRenderer.invoke('vst3:inspect', plugin, state),
     open: (instrument, rate, mode) => ipcRenderer.invoke('vst3:open', instrument, rate, mode),
-    process: (id, frames, events, bpm) => ipcRenderer.invoke('vst3:process', id, frames, events, bpm),
+    describe: (instrument) => ipcRenderer.invoke('vst3:describe', instrument),
+    parameters: (id, changes) => ipcRenderer.invoke('vst3:parameters', id, changes),
+    process: (id, frames, events, bpm, parameters) => ipcRenderer.invoke('vst3:process', id, frames, events, bpm, parameters),
     close: (id) => ipcRenderer.invoke('vst3:close', id),
   },
   send: (channel, data) => {

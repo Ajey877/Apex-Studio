@@ -95,6 +95,7 @@ class Instance {
   EventList outputEvents{4096};
   ParameterChanges parameters{4096};
   ParameterChanges outputParameters{4096};
+  std::vector<ParameterInfo> parameterInfo;
   std::set<ParamID> parameterIds;
   std::set<ParamID> readOnlyIds;
   std::map<ParamID, ParamValue> overrides;
@@ -155,16 +156,16 @@ public:
     mode = modeName == "offline" ? kOffline : kRealtime;
     ProcessSetup setup{mode, kSample32, kMaxBlock, sampleRate};
     checked(processor->setupProcessing(setup), "setupProcessing failed");
-    json paramInfo = json::array();
     if (controller) {
-      require(controller->getParameterCount() <= 4096, "Too many plugin parameters");
-      for (int32 i = 0; i < controller->getParameterCount(); ++i) {
+      const auto count = controller->getParameterCount();
+      require(count >= 0 && count <= 4096, "Too many plugin parameters");
+      for (int32 i = 0; i < count; ++i) {
         ParameterInfo info{};
         checked(controller->getParameterInfo(i, info), "Cannot query plugin parameter");
-        parameterIds.insert(info.id);
+        require(parameterIds.insert(info.id).second, "Duplicate plugin parameter ID");
+        require(std::isfinite(info.defaultNormalizedValue) && info.defaultNormalizedValue >= 0 && info.defaultNormalizedValue <= 1 && info.stepCount >= 0, "Invalid plugin parameter metadata");
+        parameterInfo.push_back(info);
         if (info.flags & ParameterInfo::kIsReadOnly) readOnlyIds.insert(info.id);
-        paramInfo.push_back({{"id", info.id}, {"name", StringConvert::convert(info.title)},
-          {"defaultValue", info.defaultNormalizedValue}, {"flags", info.flags}});
       }
     }
     if (request.contains("state")) restore(request.at("state"));
@@ -179,9 +180,34 @@ public:
     data.prepare(*component, kMaxBlock, kSample32);
     checked(component->setActive(true), "setActive failed"); active = true;
     checked(processor->setProcessing(true), "setProcessing failed"); processing = true;
-    result["parameters"] = paramInfo;
+    result["parameters"] = metadata();
+    result["controllerAvailable"] = bool(controller);
     result["latencySamples"] = processor->getLatencySamples();
     result["tailSamples"] = processor->getTailSamples();
+    return result;
+  }
+  json metadata() {
+    json result = json::array();
+    int choiceBudget = 4096;
+    for (const auto& info : parameterInfo) {
+      auto current = controller->getParamNormalized(info.id);
+      json item{{"id", info.id}, {"name", StringConvert::convert(info.title)},
+        {"shortTitle", StringConvert::convert(info.shortTitle)}, {"units", StringConvert::convert(info.units)},
+        {"defaultValue", info.defaultNormalizedValue}, {"flags", info.flags}, {"stepCount", info.stepCount},
+        {"currentValue", std::isfinite(current) && current >= 0 && current <= 1 ? json(current) : json(nullptr)}};
+      // Only genuine controller labels; never synthesize enumeration names.
+      if ((info.flags & ParameterInfo::kIsList) && info.stepCount > 0 && info.stepCount <= 127 && choiceBudget >= info.stepCount + 1) {
+        json choices = json::array();
+        for (int32 step = 0; step <= info.stepCount; ++step) {
+          String128 label{};
+          auto value = double(step) / info.stepCount;
+          if (controller->getParamStringByValue(info.id, value, label) != kResultOk || !label[0]) { choices.clear(); break; }
+          choices.push_back({{"value", value}, {"label", StringConvert::convert(label)}});
+        }
+        if (!choices.empty()) { choiceBudget -= choices.size(); item["choices"] = choices; }
+      }
+      result.push_back(item);
+    }
     return result;
   }
   void restore(const json& state) {
@@ -203,8 +229,24 @@ public:
     }
     if (state.contains("parameters")) applyParameters(state.at("parameters"));
   }
-  void applyParameters(const json& changes) {
+  void applyParameters(const json& changes, bool live = false) {
     require(changes.is_array() && changes.size() <= 4096, "Invalid parameter list");
+    std::set<ParamID> seen;
+    // Validate the entire batch before touching controller/processor state.
+    for (const auto& change : changes) {
+      require(change.is_object() && change.contains("id") && change.contains("value"), "Invalid parameter change");
+      require(change.at("id").is_number_integer(), "Parameter ID must be an integer");
+      auto raw = change.at("id").get<int64_t>();
+      require(raw >= 0 && raw <= UINT32_MAX, "Parameter ID out of range");
+      auto id = static_cast<ParamID>(raw);
+      require(seen.insert(id).second, "Duplicate parameter ID");
+      require(parameterIds.count(id), "Saved parameter ID no longer exists: " + std::to_string(id));
+      require(!readOnlyIds.count(id), "Cannot restore a read-only parameter");
+      real(change, "value", 0, 1);
+      if (live) for (const auto& info : parameterInfo) {
+        if (id == info.id) require(!(info.flags & (ParameterInfo::kIsHidden | ParameterInfo::kIsProgramChange)), "Hidden/program-change parameter is not live editable");
+      }
+    }
     for (const auto& change : changes) {
       require(change.at("id").is_number_unsigned() || change.at("id").is_number_integer(), "Parameter ID must be an integer");
       auto rawId = change.at("id").get<int64_t>();
@@ -218,6 +260,8 @@ public:
       require(queue != nullptr, "Parameter queue full");
       checked(queue->addPoint(0, value, pointIndex), "Cannot queue parameter");
       checked(controller->setParamNormalized(id, value), "Controller rejected parameter");
+      const auto accepted = controller->getParamNormalized(id);
+      require(std::isfinite(accepted) && std::abs(accepted - value) <= 1e-7, "Controller did not accept the requested normalized value");
       overrides[id] = value;
     }
   }
@@ -242,9 +286,9 @@ public:
     checked(processor->setProcessing(true), "Cannot resume after state capture"); processing = true;
     return state;
   }
-  std::vector<float> process(const json& request) {
+  std::vector<float> process(const json& request, bool flush = false) {
     require(processing, "Plugin processing is suspended; reopen instance");
-    const int frames = integer(request, "frames", 1, kMaxBlock);
+    const int frames = integer(request, "frames", flush ? 0 : 1, kMaxBlock);
     auto inputEvents = request.value("events", json::array());
     require(inputEvents.is_array() && inputEvents.size() <= 4096, "Too many events in block");
     events.clear(); outputEvents.clear(); outputParameters.clearQueue();
@@ -272,7 +316,7 @@ public:
       }
       checked(events.addEvent(event), "Event queue full");
     }
-    if (request.contains("parameters")) applyParameters(request.at("parameters"));
+    if (request.contains("parameters")) applyParameters(request.at("parameters"), flush);
     for (int32 bus = 0; bus < data.numOutputs; ++bus) {
       data.outputs[bus].silenceFlags = 0;
       for (int32 ch = 0; ch < data.outputs[bus].numChannels; ++ch)
@@ -293,7 +337,9 @@ public:
     data.inputParameterChanges = &parameters; data.outputParameterChanges = &outputParameters;
     data.processContext = &context;
     checked(processor->process(data), "Plugin process failed");
-    parameters.clearQueue();
+    // Retain a zero-sample flush for the next audible block too: some SDK
+    // processors recalculate coefficients only while processing samples.
+    if (frames > 0) parameters.clearQueue();
     std::vector<float> pcm(frames * 2);
     const auto& output = data.outputs[0];
     for (int ch = 0; ch < 2; ++ch) {
@@ -359,6 +405,12 @@ int main() {
         require(bool(instance), "No plugin instance loaded");
         auto pcm = instance->process(request);
         reply({{"ok", true}, {"frames", pcm.size() / 2}, {"channels", 2}}, pcm);
+      } else if (command == "parameters") {
+        require(bool(instance), "No plugin instance loaded");
+        // VST3 zero-sample parameter flush: do not advance the audio cursor or
+        // lose an audible block. A rejecting plugin fails closed, never succeeds silently.
+        instance->process({{"frames", 0}, {"events", json::array()}, {"bpm", 120}, {"parameters", request.at("parameters")}}, true);
+        reply({{"ok", true}, {"parameters", instance->metadata()}});
       } else if (command == "snapshot") {
         require(bool(instance), "No plugin instance loaded");
         reply({{"ok", true}, {"state", instance->snapshot()}});

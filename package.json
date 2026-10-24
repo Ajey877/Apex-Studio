@@ -39,6 +39,7 @@
     "test:browser:node": "node --import tsx scripts/realOfflineRenderNode.mjs",
     "native:vst3:build": "node scripts/build-native-vst3.mjs",
     "test:native-vst3": "node --import tsx --test tests/nativeVst3.test.mjs",
+    "test:vst3-browser": "playwright test --config=playwright.native.config.ts",
     "test:vst3-daw": "node --import tsx --test tests/vst3DawIntegration.test.mjs tests/vst3Ui.test.mjs"
   },
   "build": {
@@ -66,7 +67,8 @@
       "desktop-permissions.cjs",
       "desktop-vst3.cjs",
       "native/vst3/client.mjs",
-      "native/vst3/service.mjs"
+      "native/vst3/service.mjs",
+      "native/vst3/parameters.mjs"
     ],
     "extraResources": [
       {

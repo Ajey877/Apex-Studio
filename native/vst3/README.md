@@ -14,8 +14,10 @@
    mixer fader/pan, supported insert FX/routing and master apply to native PCM.
 4. Save/reopen the normal Apex project. Only identity and supported state are
    serialized—not executable handles, generated buffers or plugin binaries.
-   Undo/redo preserves configuration. No native editor/parameter mutation UI is
-   offered, so the captured selection state remains authoritative for saves.
+   Undo/redo preserves configuration. The generic parameter editor stages real
+   writable values, then Apply commits an acknowledged native batch and one
+   project history action. Original component/controller streams are preserved;
+   explicit overrides are replayed after them. See [parameter guide](../../docs/VST3-PARAMETERS.md).
 5. Export through the existing production song/pattern/bounce/export workflow.
    A separate native session renders scheduler MIDI into the actual offline
    channel/mixer graph **before** `OfflineAudioContext.startRendering()`.
@@ -140,7 +142,7 @@ for results—test source alone is not a claimed passing Windows run.
 - First slice supports x64 VST3 instruments with mono/stereo main output and
   **zero reported processing latency**. Other latency is rejected pending proper
   delay compensation. Plugins taking >2 s per operation are rejected.
-- No VST2/AU/CLAP, native effects rack, plugin editor windows, parameter-edit UI,
+- No VST2/AU/CLAP, native effects rack, plugin editor windows, full parameter automation lanes,
   per-note native pan, arbitrary-bus layouts or broad plugin certification.
   Native transport context is per-session; tempo-synchronized plugin internal
   sequencers/seek-position synchronization beyond scheduled MIDI are not claimed.
@@ -189,3 +191,49 @@ special case or a replacement oscillator. Tests explicitly check onsets at 0,
 JX10 and Piano instruments; DSP assertions use JX10 and Piano as independent
 instruments, plus silence, held/released notes, pitch, velocity and filter
 parameter negative controls.
+
+
+## Generic parameter control contract (Issue #285)
+
+`open` now forwards bounded genuine metadata; `describe` opens/restores a temporary
+owned instance, returns validated metadata, then closes it. Names, short titles,
+units, defaults, current normalized values, flags and step counts come from the
+controller. A missing controller is explicit; invalid current values become
+unavailable, not invented defaults. List choices require actual controller labels,
+at most 128 choices per parameter and 4096 total labels. At most 4096 parameter
+IDs / 4 MiB metadata are accepted, with duplicate IDs rejected.
+
+During active playback, an edit waits for the current producer block and submits
+changes **in the next actual PCM process block**, keeping MIDI ordering and the
+held native voice. Only successful processing and scheduling can publish the new
+configuration. Idle edits use a zero-sample processor flush; the host retains its
+parameter queues for the next audible block too. This matters for the pinned MDA
+sample-accurate processor, which otherwise accepts a zero-sample update without
+recalculating audible coefficients. No generated block is thrown away or cursor
+advanced by the idle flush.
+
+The service excludes simultaneous process/parameter requests; the runtime
+serializes its own producer and edits. IDs must be known uint32 integers and
+values finite normalized [0,1]; duplicates, read-only, hidden, and program-change
+writes are refused. Program changes can alter other parameters and require a
+separate initialization/preset transaction, so this editor does not claim them.
+Invalid native requests invalidate their instance; service preflight rejection
+leaves a valid instance intact. Existing owner/origin/frame checks, limits,
+2-second operation timeout, kill/reap and retry containment remain in force.
+
+App checks abort, document generation, selected channel and the exact saved
+instrument reference before publication through `mutateProjectState` /
+`updateChannelInProjectState`. The immutable override list contains **only edits**;
+metadata defaults are never copied wholesale. Old states with missing/empty
+parameter overrides remain loadable. Undo/Redo is the existing native configuration
+replacement path: it clears held notes and the restored instance is used on next
+Play/audition, not a claim of sample-continuous history scrubbing.
+
+`npm run test:vst3-browser` is an explicit native-required Chromium gate (no skip
+when the helper is missing). It runs after building the real fixture on both
+Windows and Linux in Native VST3 Validation, separately from the ordinary browser
+suite. Its test-only transport uses the real privileged service, native DLL/SO
+and production App/engine; it is not proof of Electron authorization. The packaged
+Windows smoke separately exercises the actual preload/main bridge and reopens
+edited state in a genuinely separate application process. Negative metadata UI
+fixtures and protocol-fault tests are identified as such, never PCM evidence.
