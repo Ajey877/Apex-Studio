@@ -110,7 +110,16 @@ test('4096-node curve is prepared once; block interpolation never reads/copies/s
   const t = timeline([dense]); reads = 0;
   t.set([dense], 2); // engine's repeated immutable step snapshot: no reprepare
   assert.equal(reads, 0);
-  const work = workCounters(), output = t.points(channel, [parameter], base, new Set(), 0, 1024, 48000, work);
+  const work = workCounters();
+  const originalSort = Array.prototype.sort;
+  let sorts = 0;
+  let output: ReturnType<NativeAutomationTimeline['points']>;
+  // Independent counter: catches copying/sorting prepared curves too, not only
+  // source-array reads or self-reported work metrics. This call is synchronous.
+  Array.prototype.sort = function(...args) { sorts++; return originalSort.apply(this, args); };
+  try { output = t.points(channel, [parameter], base, new Set(), 0, 1024, 48000, work); }
+  finally { Array.prototype.sort = originalSort; }
+  assert.equal(sorts, 2, 'one bounded clock-event sort and one shared offset sort, no interpolation sorts');
   assert.equal(reads, 0);
   assert.equal(work.offsetSorts, 1);
   assert.equal(work.candidateOffsets, 1024);
