@@ -19,3 +19,15 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+Additional attributions from the pinned single_include/nlohmann/json.hpp
+(all marked SPDX-License-Identifier: MIT in that distribution):
+
+Copyright (c) 2013-2023 Niels Lohmann <https://nlohmann.me>
+Copyright (c) 2008-2009 Björn Hoehrmann <bjoern@hoehrmann.de>
+Copyright (c) 2009 Florian Loitsch <https://florian.loitsch.com/>
+Copyright (c) 2016-2021 Evan Nemerson <evan@nemerson.com>
+Copyright (c) 2018 The Abseil Authors
+
+The above MIT permission and warranty disclaimer apply to these incorporated
+portions as provided by the pinned JSON header.
