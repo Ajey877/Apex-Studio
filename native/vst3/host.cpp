@@ -23,6 +23,7 @@
 #include <vector>
 #ifdef _WIN32
 #include <windows.h>
+#include <objbase.h>
 #include <fcntl.h>
 #include <io.h>
 #endif
