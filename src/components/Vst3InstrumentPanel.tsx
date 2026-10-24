@@ -67,7 +67,7 @@ export function Vst3InstrumentPanel({ channel, onUpdateChannel }: {
           <button disabled={busy} type="button" onClick={() => onUpdateChannel(channel.id, { instrumentType: 'minisynth' })} className="ml-4">Use built-in MiniSynth instead (undoable)</button>
         </div>}
         <div className="flex gap-4">
-          <button disabled={busy} type="button" onClick={() => void run(async () => { await bridge.choosePath(); await scan(); })}>Add VST3 folder…</button>
+          <button disabled={busy} type="button" onClick={() => void run(async () => { if (await bridge.choosePath()) await scan(); })}>Add VST3 folder…</button>
           <button disabled={busy} type="button" onClick={() => void run(scan)}>Scan configured folders</button>
         </div>
         {paths.map(path => <p key={path} className="break-all text-[var(--apex-text-3)]">{path}</p>)}

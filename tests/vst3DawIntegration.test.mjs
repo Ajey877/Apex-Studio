@@ -363,3 +363,41 @@ test('real abrupt helper failure and deadline through production export preserve
   } finally { globalThis.desktopApp.vst3 = bridge; await failingService.dispose(); }
   assert.ok(rms((await exportSong()).getChannelData(0)) > 0.01);
 });
+
+test('closed live contexts are replaced before native preparation without cancelling the new take', async () => {
+  const instance = engine();
+  try {
+    await instance.prepareVst3Channel(channel);
+    const previous = instance.getContext();
+    await previous.close();
+    await instance.play([{ ...channel, notes: [{ id: 'reopen', pitch: 60, start: 0, duration: 2, velocity: 0.8 }] }], [], 'pat', undefined, tracks, 16);
+    assert.notEqual(instance.getContext(), previous);
+    assert.equal(instance.isPlaybackActive(), true);
+    await advanceLive(instance, 0.2);
+    assert.ok(rms(instance.getContext().exportAsAudioData().channelData[0]) > 0.001);
+  } finally { instance.stop(); await instance.releaseNativeInstruments(); }
+  assert.equal(service.sessionCount, 0);
+});
+
+test('real control-thread underrun stops native sources visibly and a fresh take recovers without stale PCM', async () => {
+  const instance = engine();
+  try {
+    const native = { ...channel, notes: [{ id: 'underrun', pitch: 60, start: 0, duration: 8, velocity: 0.8 }] };
+    const original = JSON.stringify(native);
+    await instance.play([native], [], 'pat', undefined, tracks, 16);
+    await instance.flushNativeLiveForTest();
+    instance.getContext().processTo(0.3); // real missed producer deadlines, not a fake bridge
+    await instance.flushNativeLiveForTest();
+    assert.match(getVst3Diagnostics().find(item => item.channelId === native.id)?.message ?? '', /underrun/);
+    const position = instance.getContext().currentTime;
+    await advanceLive(instance, 0.1);
+    assert.equal(rms(instance.getContext().exportAsAudioData().channelData[0], Math.ceil(position * rate)), 0);
+    assert.equal(JSON.stringify(native), original);
+    instance.stop();
+    await instance.releaseNativeInstruments();
+    await instance.play([native], [], 'pat', undefined, tracks, 16);
+    await advanceLive(instance, 0.2);
+    assert.ok(!/underrun/.test(getVst3Diagnostics().find(item => item.channelId === native.id)?.message ?? ''));
+  } finally { instance.stop(); await instance.releaseNativeInstruments(); }
+  assert.equal(service.sessionCount, 0);
+});

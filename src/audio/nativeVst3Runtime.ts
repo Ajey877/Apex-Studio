@@ -9,7 +9,7 @@ const listeners = new Set<() => void>();
 export const getVst3Diagnostics = () => diagnostics;
 export const subscribeVst3Diagnostics = (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener); }; };
 export function reportVst3(channelId: string, message: string, inputLatencyMs?: number) {
-  diagnostics = [...diagnostics.filter(item => item.channelId !== channelId).slice(-31), { channelId, message, inputLatencyMs }].slice(-16);
+  diagnostics = [...diagnostics.filter(item => item.channelId !== channelId), { channelId, message, inputLatencyMs }].slice(-16);
   listeners.forEach(listener => listener());
 }
 export function reconcileVst3Diagnostics(channels: Channel[]) {
@@ -20,7 +20,16 @@ function bridgeOrThrow(bridge?: Vst3Bridge): Vst3Bridge {
   if (!bridge) throw new Error('VST3 instruments require the Windows desktop application. Plugin identity/state is retained in this project.');
   return bridge;
 }
-export const nativeInstrumentKey = (channel: Channel) => JSON.stringify(channel.vst3);
+// Project configurations are immutable snapshots. Avoid repeatedly serializing
+// up-to-MiB state streams on the realtime control/scheduler path.
+const configurationKeys = new WeakMap<object, string>();
+export const nativeInstrumentKey = (channel: Channel): string => {
+  const instrument = channel.vst3;
+  if (!instrument || typeof instrument !== 'object') return JSON.stringify(instrument);
+  let key = configurationKeys.get(instrument);
+  if (key === undefined) { key = JSON.stringify(instrument); configurationKeys.set(instrument, key); }
+  return key;
+};
 const clamp = (n: number, low: number, high: number) => Math.max(low, Math.min(high, n));
 const MAX_EVENTS = 8192;
 const BLOCK = 1024;

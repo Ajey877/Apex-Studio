@@ -5397,6 +5397,7 @@ class AudioEngine {
     // Do not reset the transport position: preparation replaces a take, not a
     // user Stop action. Keep built-in Play/Pause/seek semantics intact.
     this.stopActivePlaybackAudio();
+    this.init(); // Replacing a closed context must precede this take's generation.
     this.isPlaying = false;
     this.transport?.stop(false);
     const generation = ++this.nativePlayGeneration;
@@ -5408,7 +5409,11 @@ class AudioEngine {
       }))).then(() => {
         if (generation !== this.nativePlayGeneration) return;
         this.startPlayback(snapshot, clips, mode, patternId, mixerTracks, patternLengthSteps, playlistTracks, patterns, true);
-      }).catch(() => { if (generation === this.nativePlayGeneration) { void this.nativeInstruments.stop(); this.isPlaying = false; this.transport?.stop(false); } });
+      }).catch(error => {
+        if (generation !== this.nativePlayGeneration) return;
+        for (const channel of nativeChannels) reportVst3(channel.id, error instanceof Error ? error.message : String(error));
+        void this.nativeInstruments.stop(); this.isPlaying = false; this.transport?.stop(false);
+      });
   }
 
   private startPlayback(

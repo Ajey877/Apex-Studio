@@ -23,11 +23,22 @@ function registerVst3({ app, ipcMain, dialog, getWindow }) {
     const service = new Vst3Service(executable, roots);
     return { service, preferences, roots };
   })();
+  const isTrustedUrl = value => {
+    try {
+      const url = new URL(value);
+      if (process.env.NODE_ENV === 'development' || !app.isPackaged) {
+        return url.origin === new URL(process.env.ELECTRON_START_URL || 'http://localhost:3000').origin;
+      }
+      url.hash = ''; url.search = '';
+      const expected = pathToFileURL(path.join(__dirname, 'dist/index.html')).href;
+      return process.platform === 'win32' ? url.href.toLowerCase() === expected.toLowerCase() : url.href === expected;
+    } catch { return false; }
+  };
   const handle = (operation, fn) => ipcMain.handle(`vst3:${operation}`, async (event, ...args) => {
     const win = getWindow();
-    if (!win || event.sender !== win.webContents || event.senderFrame !== event.sender.mainFrame) throw new Error('VST3 IPC denied for untrusted frame');
+    if (!win || event.sender !== win.webContents || event.senderFrame !== event.sender.mainFrame || !isTrustedUrl(event.senderFrame.url)) throw new Error('VST3 IPC denied for untrusted frame');
     const context = await ready;
-    if (getWindow() !== win || win.isDestroyed() || event.senderFrame !== win.webContents.mainFrame) throw new Error('VST3 renderer closed during request');
+    if (getWindow() !== win || win.isDestroyed() || event.senderFrame !== win.webContents.mainFrame || !isTrustedUrl(event.senderFrame.url)) throw new Error('VST3 renderer closed during request');
     return fn(context, String(event.sender.id), ...args);
   });
   handle('paths', context => [...context.roots]);
