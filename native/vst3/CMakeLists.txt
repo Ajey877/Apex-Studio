@@ -19,7 +19,9 @@ set(SMTG_CREATE_PLUGIN_LINK OFF CACHE BOOL "" FORCE)
 if(NOT VST3_SDK_ROOT OR NOT JSON_ROOT)
   message(FATAL_ERROR "Run node scripts/setup-native-vst3.mjs first; pass VST3_SDK_ROOT and JSON_ROOT")
 endif()
-add_subdirectory("${VST3_SDK_ROOT}" "${CMAKE_BINARY_DIR}/sdk" EXCLUDE_FROM_ALL)
+# Keep SDK targets in the top-level VS solution so explicit --target builds
+# resolve their subdirectory .vcxproj files on Windows as well as Ninja.
+add_subdirectory("${VST3_SDK_ROOT}" "${CMAKE_BINARY_DIR}/sdk")
 set(SDK_ROOT "${VST3_SDK_ROOT}")
 set(vstsdk_VERSION 3.8.0)
 add_executable(apex-vst3-host host.cpp
