@@ -95,3 +95,167 @@ test('tempo/meter bar duration, delayed entry, overlap precedence and explicit l
   assert.ok(nativeTargetMatches(nativeTarget(old, parameter), old));
   assert.equal(nativeTargetMatches(nativeTarget(old, parameter), channel), false);
 });
+
+// Performance contracts: synthetic metadata is used only for scheduler work
+// counts. Positive native PCM proofs remain the MDA integration gate.
+const workCounters = () => ({ clockRecords: 0, clockSegments: 0, boundaryVisits: 0, boundaryComparisons: 0, offsetSorts: 0,
+  candidateOffsets: 0, evaluations: 0, winnerComparisons: 0, curveComparisons: 0, outputPoints: 0 });
+
+test('4096-node curve is prepared once; block interpolation never reads/copies/sorts source nodes', () => {
+  let reads = 0;
+  const points = Array.from({ length: 4096 }, (_, i) => ({
+    get x() { reads++; return i / 4095; }, get y() { reads++; return i / 4095; }, tension: i % 2 ? -.2 : .3,
+  }));
+  const dense = { ...clip, lengthBars: 1024 / 96000, automationPoints: points };
+  const t = timeline([dense]); reads = 0;
+  t.set([dense], 2); // engine's repeated immutable step snapshot: no reprepare
+  assert.equal(reads, 0);
+  const work = workCounters(), output = t.points(channel, [parameter], base, new Set(), 0, 1024, 48000, work);
+  assert.equal(reads, 0);
+  assert.equal(work.offsetSorts, 1);
+  assert.equal(work.candidateOffsets, 1024);
+  assert.equal(work.evaluations, 1024);
+  assert.ok(work.curveComparisons <= 12 * work.evaluations);
+  assert.ok(work.boundaryVisits <= 4096);
+  for (const p of output) assert.equal(p.value, interpolateCurve(points, (p.offset! / 48000 / 2) / dense.lengthBars));
+  const moved = { ...dense, startBar: 1 };
+  t.set([moved], 2); // genuine update recompiles from new immutable snapshot
+  assert.equal(t.points(channel, [parameter], base, new Set(), 0, 1024, 48000)[0].value, .9);
+});
+
+test('maximum 128 clips / 4096 nodes are indexed by channel, exact binding and parameter', () => {
+  const channels = Array.from({ length: 4 }, (_, i) => ({ ...channel, id: `stress-${i}` }));
+  const metadata = Array.from({ length: 4 }, (_, i) => ({ ...parameter, id: i }));
+  const clips = Array.from({ length: 128 }, (_, i) => ({ ...clip, id: `stress-${i}`,
+    automationTarget: nativeTarget(channels[i % 4], metadata[(i >>> 2) % 4]),
+    automationPoints: Array.from({ length: 32 }, (_, j) => ({ x: j / 31, y: j / 31 })),
+  }));
+  const t = timeline(clips), work = workCounters();
+  const out = t.points(channels[0], metadata, new Map(), new Set(), 0, 1024, 48000, work);
+  assert.equal(new Set(out.map(p => p.id)).size, 4);
+  assert.equal(work.offsetSorts, 1);
+  assert.equal(work.evaluations, 4 * work.candidateOffsets);
+  assert.ok(work.boundaryVisits <= 32 * 32, 'unrelated channels do not contribute nodes');
+  assert.ok(work.winnerComparisons <= work.evaluations * 5);
+  assert.ok(work.curveComparisons <= work.evaluations * 5);
+  assert.deepEqual(t.points({ ...channels[0], vst3: { ...channel.vst3!, automationId: 'stale' } }, metadata, base, new Set(), 0, 1024, 48000), []);
+  assert.throws(() => t.set([...clips, clips[0]], 2), /Invalid/);
+  assert.throws(() => t.set([...clips.slice(1), { ...clips[0], automationPoints: [...clips[0].automationPoints, { x: 1, y: 0 }] }], 2), /Invalid/);
+  assert.deepEqual(t.points(channels[0], metadata, new Map(), new Set(), 0, 1024, 48000), out, 'failed preparation is atomic');
+});
+
+test('128 parameters with dense constant curves are legal even when candidates × parameters exceeds 4096', () => {
+  const metadata = Array.from({ length: 128 }, (_, id) => ({ ...parameter, id }));
+  const clips = metadata.map(p => ({ ...clip, id: `constant-${p.id}`, lengthBars: 1024 / 96000,
+    automationTarget: nativeTarget(channel, p),
+    automationPoints: Array.from({ length: 32 }, (_, i) => ({ x: (i + p.id / 128) / 32, y: .3 })),
+  }));
+  const t = timeline(clips), work = workCounters();
+  const start = performance.now();
+  const out = t.points(channel, metadata, new Map(), new Set(), 0, 1024, 48000, work);
+  console.log('NATIVE_AUTOMATION_MAX_VALID_WORK', JSON.stringify({ ...work, diagnosticMs: performance.now() - start }));
+  assert.equal(out.length, 128);
+  assert.equal(work.offsetSorts, 1);
+  assert.ok(work.candidateOffsets <= 1024);
+  assert.equal(work.evaluations, work.candidateOffsets * 128);
+  assert.ok(work.winnerComparisons <= work.evaluations * 2);
+  assert.ok(work.curveComparisons <= work.evaluations * 5);
+  out.forEach(p => { assert.equal(p.offset, 0); assert.equal(p.value, .3); });
+});
+
+test('excessive varying schedule fails at the 4097th changed value without growing output or publishing previous IDs', () => {
+  const metadata = Array.from({ length: 128 }, (_, id) => ({ ...parameter, id }));
+  const clips = metadata.map(p => ({ ...clip, id: `varying-${p.id}`, lengthBars: 1024 / 96000,
+    automationTarget: nativeTarget(channel, p),
+    automationPoints: Array.from({ length: 32 }, (_, i) => ({ x: (i + p.id / 128) / 32, y: i / 31 })),
+  }));
+  const t = timeline(clips), work = workCounters(), previous = new Set([127]);
+  assert.throws(() => t.points(channel, metadata, new Map(), previous, 0, 1024, 48000, work), /point limit/);
+  assert.equal(work.outputPoints, 4096);
+  // Endpoint holds can coalesce: bound evaluations too, not just array size.
+  assert.ok(work.evaluations < 6 * 1024);
+  assert.ok(work.candidateOffsets <= 1024);
+  assert.deepEqual(previous, new Set([127]));
+  assert.throws(() => t.points(channel, metadata, new Map(), previous, 0, 16384, 48000, work), /point limit/);
+  assert.equal(work.outputPoints, 4096);
+  assert.ok(work.candidateOffsets <= 16384);
+  assert.deepEqual(previous, new Set([127]));
+  assert.throws(() => t.points(channel, metadata, new Map(), previous, 0, 16385, 48000, work), /Invalid.*block/);
+  assert.equal(work.candidateOffsets, 0);
+});
+
+test('old clock history cannot add phantom boundary offsets; only applicable mapping and current discontinuity are expanded', () => {
+  const dense = { ...clip, startBar: 50, lengthBars: .01,
+    automationPoints: Array.from({ length: 4096 }, (_, i) => ({ x: i / 4095, y: i / 4095 })),
+  };
+  const t = timeline([dense]);
+  // Every historical mapping would project these boundaries into the same block
+  // in the old implementation, despite being obsolete long before that block.
+  for (let i = 1; i < 1000; i++) t.clock(i / 1000, i / 1000 + i * 1e-5);
+  t.clock(1, 20);
+  const work = workCounters();
+  const out = t.points(channel, [parameter], base, new Set(), 100, 1024, 48000, work);
+  assert.equal(work.clockRecords, 128);
+  assert.equal(work.clockSegments, 1);
+  assert.equal(work.boundaryVisits, 0);
+  assert.equal(work.candidateOffsets, 8);
+  assert.deepEqual(out, [{ id: 6, value: 1, offset: 0 }]);
+  const reset = timeline(); reset.clock(10, .5); reset.clock(10.01, 0);
+  const fresh = new NativeAutomationTimeline(); fresh.set([clip], 2); fresh.clock(10, .5); fresh.clock(10.01, 0);
+  const a = reset.points(channel, [parameter], base, new Set(), 10, 1024, 48000, work);
+  assert.equal(work.clockSegments, 2);
+  assert.deepEqual(a, fresh.points(channel, [parameter], base, new Set(), 10, 1024, 48000));
+  assert.equal(a.find(p => p.offset === 480)?.value, .1);
+});
+
+test('prepared overlap/end tie precedence and sorted interpolation exactly match the original evaluator', async () => {
+  const { interpolateSortedCurve } = await import('./automation/curve');
+  const points = Array.from({ length: 100 }, (_, i) => ({ x: i / 99, y: (i * 31 % 100) / 100, tension: (i % 3 - 1) * .37 }));
+  for (let i = 0; i <= 1000; i++) assert.equal(interpolateSortedCurve(points, i / 1000), interpolateCurve(points, i / 1000));
+  points.forEach(p => assert.equal(interpolateSortedCurve(points, p.x), interpolateCurve(points, p.x)));
+  const clips = [
+    { ...clip, id: 'under', lengthBars: 2 },
+    { ...clip, id: 'over', lengthBars: .5, automationPoints: [{ x: 0, y: .8 }, { x: 1, y: .8 }] },
+    { ...clip, id: 'later', startBar: 1.5, lengthBars: .25 },
+  ];
+  const t = timeline(clips);
+  for (const bar of [0, .499999, .5, .500001, 1, 1.5, 1.75, 1.9999, 2, 3]) {
+    let latest = -Infinity, expected = parameter.currentValue;
+    for (const c of clips) {
+      if (bar < c.startBar) continue;
+      const event = Math.min(bar, c.startBar + c.lengthBars);
+      if (event >= latest) { latest = event; expected = interpolateCurve(c.automationPoints!, Math.min(1, (bar - c.startBar) / c.lengthBars)); }
+    }
+    assert.equal(t.points(channel, [parameter], base, new Set(), bar * 2, 1, 48000)[0].value, expected);
+  }
+});
+
+
+test('dense sub-sample boundaries across 128 in-block wraps visit frame buckets, not nodes × clocks', () => {
+  const dense = { ...clip, lengthBars: 4 / 96000,
+    automationPoints: Array.from({ length: 4096 }, (_, i) => ({ x: i / 4095, y: .3 })),
+  };
+  const t = new NativeAutomationTimeline(); t.set([dense], 2);
+  for (let i = 0; i < 128; i++) t.clock(i * 8 / 48000, 0);
+  const work = workCounters();
+  const out = t.points(channel, [parameter], base, new Set(), 0, 1024, 48000, work);
+  assert.equal(work.clockSegments, 128);
+  assert.ok(work.boundaryVisits <= 1024 + 2 * 128);
+  assert.ok(work.boundaryComparisons <= work.boundaryVisits * 12);
+  assert.ok(work.candidateOffsets <= 1024);
+  assert.equal(out.length, 1); assert.equal(out[0].value, .3);
+});
+
+test('clock span filtering keeps actual boundaries and stepped/list outputs through tempo/rewind discontinuities', () => {
+  const stepped = { ...parameter, flags: 9, stepCount: 2, choices: [{ value: 0, label: 'A' }, { value: .5, label: 'B' }, { value: 1, label: 'C' }] };
+  const c = { ...clip, lengthBars: .01, automationPoints: [{ x: 0, y: 0 }, { x: 1, y: 1 }] };
+  const t = timeline([c]); t.clock(.01, 0); t.clock(.02, .005);
+  const out = t.points(channel, [stepped], base, new Set(), .01, 1024, 48000);
+  assert.deepEqual(out, t.points(channel, [stepped], base, new Set(), .01, 1024, 48000));
+  assert.equal(out[0].value, 0);
+  out.forEach(p => { assert.ok(stepped.choices.some(c => c.value === p.value)); assert.ok(Number.isInteger(p.offset)); });
+  for (let i = 1; i < out.length; i++) assert.ok(out[i].offset! > out[i - 1].offset!);
+  // A future mapping must not project its curve nodes backwards into this block.
+  const future = timeline([c]); future.clock(10, 0);
+  assert.deepEqual(future.points(channel, [stepped], base, new Set(), 0, 1024, 48000), timeline([c]).points(channel, [stepped], base, new Set(), 0, 1024, 48000));
+});

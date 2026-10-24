@@ -101,3 +101,55 @@ Playlist creation/association/node Undo/Redo/IndexedDB reload and production PCM
 Windows packaged smoke also saves the curve through real preload IPC and verifies
 its state, changed native export and exact PCM checksum after a separate app
 process exits/restarts. CI must pass that step before claiming packaged proof.
+
+## PR #287 scheduler performance hardening
+
+The original producer sorted/copied an envelope on each parameter/offset query,
+scanned all matching lanes for every parameter, and projected every retained clock
+origin into every block. Its output-size check ran after allocation. With C clips,
+N nodes, P parameter IDs, H historical clocks and U candidate frames, this included
+O(H*N + P*U*(H+C+N log N)) work and potentially P*U output objects before rejection.
+At the pre-hardening head, a 4,096-node/1,024-frame contract took ~96 ms and 1,025
+sort calls. A dense 128-parameter/4,096-node case took ~394 ms and 131,200 sorts
+before rejecting. These are local cold diagnostics, not timing acceptance limits.
+
+The prepared implementation changes only the scheduler and adds a sorted-curve
+helper; built-in/legacy interpolation (including unsorted/duplicate inputs) remains
+unchanged. Native curves were already required to be strictly increasing:
+
+- Update-time validation/copy, target binding/ParamID indexing, sorted boundary
+  indexes and precomputed overlap winners (including exact-endpoint tie precedence).
+  Existing immutable engine snapshots are compared by clip reference so repeated
+  step callbacks do not reprepare an unchanged timeline. In-place mutation of a
+  published project snapshot is not supported by the existing project contract.
+- Preparation is O(N log N + C²) worst case, outside the PCM producer; limits remain
+  C<=128 and N<=4,096. Preparation is transactional; invalid updates do not publish
+  a partial plan. Flat, identical-value lanes have a safe precompiled uniform path.
+- A block scans at most the existing 128 clock records once, retains its most recent
+  applicable mapping, and expands only actual in-block discontinuities. No global
+  destructive clock pruning: another channel's producer may still need an older
+  position. Historical origins cannot introduce phantom curve offsets.
+- Boundary queries binary-search only current clock spans. Nodes rounding to the
+  same sample bucket are skipped together, exactly as the old candidate Set
+  deduplicated them. Genuine distinct-frame points are not discarded. Boundary
+  bucket visits are bounded by block frames plus span edges, not H*N.
+- One ordered candidate array and one clock/bar conversion per block, shared by
+  all addressed parameters. No unrelated channel/binding or parameter lane scans.
+  Overlap winners and the winning curve's segment use binary searches; exact-node
+  interpolation retains the original arithmetic/tension semantics.
+- For F frames, K current mappings, B<=N+2C boundary positions, U<=F candidates and
+  P addressed IDs, producer work is O(H log H + (F+K) log B + U log U + P*U*(log C+
+  log N)), plus metadata indexing. Removed targets reset once, not U times.
+  Live F remains 1,024; validated general F is at most 16,384. No curve copy/sort
+  occurs in interpolation. Candidate/position storage is O(F), output at most 4,096
+  objects. The limit is checked before each changed-value allocation; failed
+  schedules do not update the previous-ID state or reach native processing.
+  Do not reject merely on P*U: repeated/stepped values can legitimately coalesce.
+
+The same diagnostic cases after optimization took ~6 ms each and two bounded sorts
+(clock events and shared offsets), not per-parameter/per-query sorts. Tests assert
+algorithmic limits, maximum clip/node counts, dense single curves, multiple target
+bindings, 128 in-block wraps, stale history, exact overlap ties, interpolation,
+stepped choices, candidate deduplication and incremental rejection. Optional work
+counters are test diagnostics only, not persisted state or production telemetry.
+Real MDA live/export, target isolation, history and restart gates remain required.

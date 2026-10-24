@@ -24,3 +24,30 @@ export function interpolateCurve(points: { x: number; y: number; tension?: numbe
       }
     }
     return 0.5;}
+
+
+/** Native curves are validated strictly increasing and copied at timeline update.
+ * Lower-bound search deliberately uses the preceding segment at an exact interior
+ * node, just like the legacy evaluator (including floating-point arithmetic).
+ * Built-in/legacy unsorted or duplicate-point behavior above is unchanged.
+ */
+export function interpolateSortedCurve(
+  points: readonly { x: number; y: number; tension?: number }[], relX: number,
+  work?: { curveComparisons: number },
+): number {
+  if (!points.length) return 0.5;
+  if (relX <= points[0].x) return points[0].y;
+  if (relX >= points[points.length - 1].x) return points[points.length - 1].y;
+  let lo = 1, hi = points.length - 1;
+  while (lo < hi) {
+    if (work) work.curveComparisons++;
+    const mid = (lo + hi) >>> 1;
+    if (points[mid].x < relX) lo = mid + 1; else hi = mid;
+  }
+  const p1 = points[lo - 1], p2 = points[lo];
+  const segT = (relX - p1.x) / (p2.x - p1.x), tension = p1.tension || 0;
+  let curvedT = segT;
+  if (tension > 0) curvedT = Math.pow(segT, 1 + tension * 2);
+  else if (tension < 0) curvedT = 1 - Math.pow(1 - segT, 1 + Math.abs(tension) * 2);
+  return p1.y + (p2.y - p1.y) * curvedT;
+}
