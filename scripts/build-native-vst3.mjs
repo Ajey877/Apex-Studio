@@ -20,7 +20,9 @@ function run(command, args) {
 }
 run(process.execPath, ['scripts/setup-native-vst3.mjs']);
 const cmake = process.env.CMAKE ?? 'cmake';
-const generator = process.platform === 'win32' ? ['-G', 'Visual Studio 17 2022', '-A', 'x64'] : ['-G', 'Ninja'];
+// Let CMake select the installed Visual Studio generation (windows-latest
+// can move beyond VS2022); never pin to a toolchain absent from the runner.
+const generator = process.platform === 'win32' ? ['-A', 'x64'] : ['-G', 'Ninja'];
 run(cmake, ['-S', 'native/vst3', '-B', 'build/native-vst3', ...generator, '-DCMAKE_BUILD_TYPE=Release',
   `-DVST3_SDK_ROOT=${path.resolve('build/native-deps/vst3sdk')}`,
   `-DJSON_ROOT=${path.resolve('build/native-deps/json')}`]);

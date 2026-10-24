@@ -8,7 +8,7 @@ built-in instrument behavior are unchanged.
 
 ## Run the real instrument tests
 
-Requirements: Node 22, Git, CMake >= 3.25; Windows x64 with Visual Studio 2022 C++
+Requirements: Node 22, Git, CMake >= 3.25; Windows x64 with Visual Studio 2022 or newer C++
 build tools and Windows SDK, or Linux x64 with GCC and Ninja. No audio device,
 commercial plugin, VSTGUI, JACK, Electron download or paid service is required.
 
