@@ -8,9 +8,10 @@
  *
  *  - every surface follows the active palette through `--apex-*` tokens;
  *  - the shared ModalFrame scrim and dialog semantics are intact;
- *  - the copy states the real boundary — monophonic material only, polyphonic
- *    sources refused, preview never writes — instead of claiming what the DSP
- *    does not do;
+ *  - both analysis modes are selectable, and the copy states each one's real
+ *    boundary (monophonic: single voice; polyphonic: C2–C6, up to 4 voices, no
+ *    source separation) plus the non-mutating preview guarantee — instead of
+ *    claiming what the DSP does not do;
  *  - the entry point is reachable from the transport tools menu;
  *  - there is no demo blob data left anywhere in the component.
  */
@@ -59,7 +60,10 @@ describe('Audio to MIDI theme markup (Phase 8C)', () => {
       includes(markup, 'aria-labelledby="fl-audio-to-midi-modal-title"', 'the dialog is named by its title');
       includes(markup, 'aria-label="Close audio to MIDI"', 'the close control has an accessible name');
       includes(markup, '>AUDIO TO MIDI<', 'the title renders');
-      includes(markup, 'MONOPHONIC · REAL PCM', 'the badge states the real boundary');
+      includes(markup, 'MONOPHONIC · REAL PCM', 'the badge names the default mode');
+      includes(markup, 'aria-label="Monophonic analysis mode"', 'the monophonic mode is selectable');
+      includes(markup, 'aria-label="Polyphonic analysis mode"', 'the polyphonic mode is selectable');
+      includes(markup, 'ANALYSIS MODE', 'the mode control is labelled');
       includes(markup, '>Analyse clip<', 'the analysis action renders');
       includes(markup, 'aria-label="Minimum note length"', 'the minimum-length control renders');
       includes(markup, 'aria-label="Quantize note starts and lengths"', 'the quantize control renders');
@@ -107,9 +111,10 @@ describe('Audio to MIDI theme markup (Phase 8C)', () => {
     assert.match(code, /text-\[var\(--apex-state-playing-fg\)\]/, 'filled controls use a theme-safe on-colour');
   });
 
-  it('states the real boundaries and never claims polyphonic transcription', () => {
+  it('states each mode’s real boundaries and never over-claims', () => {
     const markup = render('dark');
     includes(markup, 'review first, commit explicitly', 'the subtitle keeps the explicit-commit promise');
+    // Default mode = monophonic, with its existing boundary statement intact.
     includes(
       markup,
       'Monophonic, clearly voiced melodic material, fundamentals 75–1000 Hz',
@@ -118,9 +123,17 @@ describe('Audio to MIDI theme markup (Phase 8C)', () => {
     includes(
       markup,
       'polyphonic material (chords) are refused with a reason and',
-      'the boundary text refuses polyphonic material',
+      'the monophonic boundary refuses polyphonic material',
     );
     includes(markup, 'No chord or source separation', 'the boundary text refuses chord separation');
+    // The polyphonic mode's limits are stated in the component (and rendered once
+    // it is selected): range, voice cap and the honest failure modes.
+    includes(code, 'POLYPHONIC · REAL PCM', 'the polyphonic badge names the mode truthfully');
+    includes(code, 'up to ${POLY_MAX_VOICES} simultaneous fundamentals in C2–C6', 'the polyphonic range and voice cap are stated');
+    includes(code, 'bells/inharmonic material and more than ${POLY_MAX_VOICES} voices are refused', 'the polyphonic refusals are stated');
+    includes(code, 'two fundamentals about a semitone apart in one register can merge', 'the merge limit is stated');
+    includes(code, 'No source separation and no instrument identification', 'polyphonic mode refuses source separation too');
+    includes(code, 'confidence is the share of the spectrum a note explains', 'confidence is described as a measurement');
     includes(
       markup,
       'Analysis and preview never change the project; only the explicit commit writes notes, as one undoable step.',
@@ -147,7 +160,9 @@ describe('Audio to MIDI theme markup (Phase 8C)', () => {
   });
 
   it('analyses real PCM through the shared pipeline and the project history path', () => {
-    assert.match(code, /analyseSelectedClipForMidi\(/, 'the modal runs the real analysis module');
+    assert.match(code, /analyseSelectedClipForMidi\(/, 'the modal runs the real monophonic module');
+    assert.match(code, /analyseSelectedClipForPolyphonicMidi\(/, 'the modal runs the real polyphonic module');
+    assert.match(code, /analysisMode === 'polyphonic'/, 'the selected mode decides which analyzer runs');
     assert.match(code, /audioEngine\.getSampleBuffer\(id\)/, 'the real asset lookup is used');
     assert.match(code, /hydrateAudioClip\(audioEngine, id\)/, 'the persisted-asset fallback is used');
     assert.match(code, /onCommitNotes\(\{/, 'the commit goes through the injected App handler');

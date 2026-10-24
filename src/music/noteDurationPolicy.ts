@@ -403,6 +403,30 @@ export const DURATION_ALTERING_LAYERS: readonly DurationPolicyLayer[] = Object.f
     anchors: ['duration: quantizeDurationSteps(note.durationSteps)', 'audioToMidiNewPatternLengthSteps'],
   },
   {
+    id: 'polyphonic-transcription.note-timing',
+    file: 'src/audio/polyphonicTranscription.ts',
+    symbols: ['legalizePolyphonicTiming', 'quantizeDurationSteps', 'MIN_NOTE_DURATION_STEPS'],
+    role: 'DURATION_LEGALIZER',
+    domain: 'note-steps',
+    consumesPolicy: true,
+    declaredMinimum: 0.25,
+    behavior:
+      'Converts polyphonic note runs measured in seconds into project steps: quantize the edges to the caller grid, ' +
+      'raise the length to the caller minimum, then hand it to `quantizeDurationSteps`. Overlapping notes of one ' +
+      'pitch are merged before they reach the project.',
+    reason:
+      'Phase 10B. A second transcription mode must not invent a second minimum length or a second duration grid, so it ' +
+      'consumes exactly the same policy as monophonic Audio-to-MIDI and the Piano Roll. Declared so the audit sees the ' +
+      'new authority rather than reporting it as unowned arithmetic.',
+    // Anchors are stored without an assignment prefix: this file is itself
+    // scanned for duration arithmetic, and an anchor shaped like a real
+    // assignment would be reported as an undeclared site here.
+    anchors: [
+      'quantizeDurationSteps(Math.max(options.minNoteSteps, endStep - startStep))',
+      'quantizeDurationSteps(mergedEnd - previous.startStep)',
+    ],
+  },
+  {
     id: 'gate.note-gate',
     file: 'src/audio/noteGate.ts',
     symbols: ['resolveGateSeconds', 'DEFAULT_GATE_FALLBACK_STEPS'],

@@ -20,6 +20,14 @@ import {
   type AudioToMidiOptions,
   type AudioToMidiTimingContext,
 } from './audioToMidi';
+import {
+  analyseAudioClipForPolyphonicMidi,
+  type PolyphonicClipAnalysis,
+} from './polyphonicAudioToMidi';
+import type { PolyphonicAnalysis } from './polyphonicTranscription';
+
+export { analyseAudioClipForPolyphonicMidi };
+export type { PolyphonicClipAnalysis };
 
 export interface AudioToMidiSourceDeps {
   /** In-memory lookup (`audioEngine.getSampleBuffer`). */
@@ -90,4 +98,29 @@ export const analyseSelectedClipForMidi = async (
   const sourceBuffer = await resolveAudioToMidiSource(clip, deps);
   const analysis = analyseAudioClipForMidi(clip, sourceBuffer, timing, options);
   return { analysis, sourceBuffer };
+};
+
+/** What the review panel needs: the analysis, its plan and the samples behind it. */
+export interface PolyphonicClipAnalysisResult extends PolyphonicClipAnalysis {
+  sourceBuffer: AudioBuffer;
+}
+
+/**
+ * Phase 10B — the polyphonic mode's real-PCM entry point.
+ *
+ * Resolves the selected clip's actual samples with the same two-step lookup the
+ * monophonic mode uses (engine memory, then the persisted asset store) and hands
+ * the *audible window* to the polyphonic analyzer. It is a separate function on
+ * purpose: selecting the mode is the only way to reach it, and no code path can
+ * fall into multi-pitch analysis while the user asked for monophonic.
+ */
+export const analyseSelectedClipForPolyphonicMidi = async (
+  clip: PlaylistClip,
+  timing: AudioToMidiTimingContext,
+  options: AudioToMidiOptions | null | undefined,
+  deps: AudioToMidiSourceDeps
+): Promise<PolyphonicClipAnalysisResult> => {
+  const sourceBuffer = await resolveAudioToMidiSource(clip, deps);
+  const result = analyseAudioClipForPolyphonicMidi(clip, sourceBuffer, timing, options);
+  return { ...result, sourceBuffer };
 };
