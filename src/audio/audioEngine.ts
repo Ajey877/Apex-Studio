@@ -5992,15 +5992,18 @@ class AudioEngine {
           }
         } else if (clip.type === 'audio') {
           const clipStartStep = clip.startBar * stepsBar;
+          // Audio placements need not land on integer sixteenths (e.g. a
+          // quarter-bar in 7/8 is 3.5 steps). Schedule once in the half-open
+          // step window, retaining the fractional onset in both live and export.
+          const onsetOffsetSteps = clipStartStep - currentGlobalStep;
           if (
-            currentGlobalStep === clipStartStep &&
+            onsetOffsetSteps >= 0 && onsetOffsetSteps < 1 &&
             !clip.mute &&
             !this.isPlaylistLaneMuted(clip) &&
             !this.isClipTakeInactive(clip) &&
             this.isAudioClipChannelAudible(clip)
           ) {
-            // Trigger audio clip at its start bar
-            this.playAudioClipWithFades(clip, now);
+            this.playAudioClipWithFades(clip, now + onsetOffsetSteps * secondsPerStep);
           }
         }
       });
