@@ -96,7 +96,11 @@ MDA test plugin is NOT distributed in the application.
 The existing packaged smoke now supplies the external real MDA test bundle via
 main-process launch environment, and requires **real packaged preload IPC**,
 genuine discovery/load/native PCM, production Chromium live master-graph signal,
-production offline song timing, state reopen equality and missing-plugin refusal.
+production offline song timing and missing-plugin refusal. It saves via the
+production IndexedDB writer into an isolated profile, exits the application,
+then launches a second process and requires the actual UI to restore the native
+channel. Native identity/state and exported PCM checksums must match across the
+application restart. The real user profile is never modified.
 It does not generate test-only replacement audio. Its entry is gated by the
 existing smoke launch flag; ordinary sessions expose no test entry/API.
 The Native VST3 and Desktop Validation workflows run these on Windows; native

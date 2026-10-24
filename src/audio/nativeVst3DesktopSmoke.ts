@@ -5,7 +5,7 @@ import { DEFAULT_MASTERING_SUITE_STATE } from './masteringState';
 import { getVst3Bridge } from './nativeVst3Types';
 import { getVst3Diagnostics } from './nativeVst3Runtime';
 import { createDefaultProjectState, normalizeProjectState } from '../state/projectState';
-import { serializeProjectState } from '../state/projectPersistence';
+import { persistProjectState, restorePersistedProjectState, serializeProjectState } from '../state/projectPersistence';
 import type { Channel, MixerTrack, PlaylistClip } from '../types/daw';
 
 export async function runDesktopVst3Smoke() {
@@ -19,13 +19,25 @@ export async function runDesktopVst3Smoke() {
   const instance = new (audioEngine.constructor as { new(): typeof audioEngine })();
   instance.setMasteringState({ ...DEFAULT_MASTERING_SUITE_STATE, enabled: false });
   instance.setBpm(120);
-  const channel: Channel = {
+  let channel: Channel = {
     ...createDefaultProjectState().channels[0], id: 'packaged-native', name: 'Real packaged MDA JX10',
     instrumentType: 'vst3', vst3: instrument, volume: 1, pan: 0, pitch: 0, mute: false, solo: false, mixerTrackId: 1,
     steps: Array(16).fill(false), notes: [{ id: 'native-smoke-note', pitch: 60, start: 1, duration: 1, velocity: 0.8 }],
   };
   const mixer = [0, 1].map(id => ({ id, name: 'Smoke insert', color: '#fff', volume: 1, pan: 0, mute: false, solo: false, fxSlots: [], peakL: 0, peakR: 0 })) as MixerTrack[];
   const clip: PlaylistClip = { id: 'native-smoke-clip', trackIndex: 0, startBar: 0, lengthBars: 1, type: 'pattern', channelId: channel.id, name: 'Native smoke', color: '#fff' };
+  const reopening = (globalThis as unknown as { desktopApp?: { smokeReopen?: boolean } }).desktopApp?.smokeReopen === true;
+  if (reopening) {
+    const saved = await restorePersistedProjectState(instance, createDefaultProjectState());
+    if (!saved.restored || saved.recovered || saved.state.channels[0]?.instrumentType !== 'vst3') throw new Error('Native project did not reopen from the real current-project IndexedDB record');
+    channel = saved.state.channels[0];
+    if (channel.vst3?.classId !== plugin.classId) throw new Error('Reopened project selected the wrong native class');
+  }
+  function digest(bytes: Uint8Array): string {
+    let value = 2166136261;
+    for (const byte of bytes) value = Math.imul(value ^ byte, 16777619) >>> 0;
+    return value.toString(16).padStart(8, '0');
+  }
   const render = (value: Channel) => instance.renderTimelineOffline([value], [clip], mixer, 120, 1, 48000, true, 'song', undefined, undefined, undefined, 0.5);
   try {
     const output = await render(channel);
@@ -57,7 +69,16 @@ export async function runDesktopVst3Smoke() {
     }
     const errors = getVst3Diagnostics().filter(item => item.channelId === channel.id && !item.message.startsWith('VST3 ready') && !item.message.startsWith('VST3 active'));
     if (livePeak < 0.001 || errors.length) throw new Error(`Packaged live graph failed: peak=${livePeak}, diagnostics=${JSON.stringify(errors)}`);
+    if (reopening && !document.body.textContent?.includes(channel.name)) throw new Error('The actual Apex application UI did not restore the saved native channel');
+    if (!reopening) {
+      const project = createDefaultProjectState();
+      await persistProjectState({ ...project, meta: { ...project.meta, bpm: 120 }, channels: [channel], mixerTracks: mixer, playlistClips: [clip] });
+    }
     return { plugin: plugin.name, classId: plugin.classId, onsetFrame, rms, livePeak, stateReopenEqual: true, missingRejected: rejected,
+      applicationStage: reopening ? 'reopened-from-indexeddb-after-process-exit' : 'saved-to-production-indexeddb',
+      uiRestored: reopening ? true : undefined,
+      pcmChecksum: digest(new Uint8Array(samples.buffer, samples.byteOffset, samples.byteLength)),
+      savedStateChecksum: digest(new TextEncoder().encode(JSON.stringify(channel.vst3))),
       proof: 'Packaged helper + real preload IPC + AudioClockTransport/live master graph + production song export (Chromium Web Audio); not physical-device listening' };
   } finally {
     instance.stop();

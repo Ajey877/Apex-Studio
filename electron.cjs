@@ -30,6 +30,8 @@ const openExternalUrl = (url) => {
   }
 };
 
+if (process.env.APEX_SMOKE_TEST === '1' && process.env.APEX_SMOKE_USER_DATA) app.setPath('userData', process.env.APEX_SMOKE_USER_DATA);
+
 let mainWindow = null;
 
 registerVst3({ app, ipcMain, dialog, getWindow: () => mainWindow });
@@ -47,7 +49,7 @@ function createWindow() {
     autoHideMenuBar: true,
     titleBarStyle: 'default',
     webPreferences: {
-      additionalArguments: process.env.APEX_SMOKE_TEST === '1' ? ['--apex-smoke-test'] : [],
+      additionalArguments: process.env.APEX_SMOKE_TEST === '1' ? ['--apex-smoke-test', ...(process.env.APEX_SMOKE_REOPEN === '1' ? ['--apex-smoke-reopen'] : [])] : [],
       nodeIntegration: false,
       contextIsolation: true,
       sandbox: true,

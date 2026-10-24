@@ -4,6 +4,7 @@ const { contextBridge, ipcRenderer } = require('electron');
 contextBridge.exposeInMainWorld('desktopApp', {
   isDesktop: true,
   smokeTest: process.argv.includes('--apex-smoke-test'),
+  smokeReopen: process.argv.includes('--apex-smoke-reopen'),
   platform: process.platform,
   arch: process.arch,
   version: '2.4.0',
