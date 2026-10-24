@@ -128,6 +128,7 @@ import { ChannelRack } from './components/ChannelRack';
 import { PianoRoll } from './components/PianoRoll';
 import { PlaylistArranger } from './components/PlaylistArranger';
 import { Mixer } from './components/Mixer';
+import { Vst3StatusBanner } from './components/Vst3InstrumentPanel';
 import { InstrumentRack } from './components/InstrumentRack';
 import { SampleSlicerPanel } from './components/SampleSlicerPanel';
 import { SampleLibraryPanel } from './components/SampleLibraryPanel';
@@ -821,6 +822,7 @@ export function App() {
   }, []);
 
   const synchronizeRuntimeState = useCallback((previous: ProjectState, next: ProjectState) => {
+    audioEngine.reconcileNativeInstruments(next.channels);
     synchronizeActivePlayback(previous, next);
     // Phase 79: Gross Beat state lives in ProjectState; push any change to the
     // engine immediately so the master gate follows undo/redo/load/preset edits.
@@ -1224,6 +1226,7 @@ export function App() {
         // rather than committing its notes into the replacement.
         cancelMidiRecordingRef.current?.();
         handleStop();
+        audioEngine.releaseNativeInstruments();
         try {
           const previousProjectState = projectStateRef.current;
           const hydrated = await hydrateProjectAudio(normalized, audioEngine);
@@ -2370,6 +2373,7 @@ export function App() {
         bpmInputRef={bpmInputRef}
       />
 
+      <Vst3StatusBanner />
       {saveError && (
         <div
           id="save-failure-banner"

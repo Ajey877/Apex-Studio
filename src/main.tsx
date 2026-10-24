@@ -17,3 +17,11 @@ createRoot(document.getElementById('root')!).render(
     </AppErrorBoundary>
   </StrictMode>,
 );
+
+// Do not expose a test API during ordinary desktop/browser sessions. The flag
+// comes from main-process launch arguments, never a renderer-selected plugin.
+const smokeWindow = globalThis as unknown as { desktopApp?: { smokeTest?: boolean }; __apexVst3Smoke?: Promise<unknown> };
+if (smokeWindow.desktopApp?.smokeTest) {
+  smokeWindow.__apexVst3Smoke = import('./audio/nativeVst3DesktopSmoke').then(module => module.runDesktopVst3Smoke());
+  smokeWindow.__apexVst3Smoke.catch(() => {}); // main awaits and reports failures
+}

@@ -8,6 +8,7 @@ export interface InstrumentVoiceContext {
   /** The active live or OfflineAudioContext used for this render. */
   audioContext: BaseAudioContext;
   voiceId: string;
+  midiChannel?: number;
   /**
    * The authoritative project/transport tempo for this render, in BPM.
    *
@@ -35,11 +36,14 @@ export type InstrumentVoiceRenderer = (context: InstrumentVoiceContext) => Instr
 export interface InstrumentRegistry {
   get(instrumentType: InstrumentType): InstrumentVoiceRenderer;
   has(instrumentType: InstrumentType): boolean;
+  /** Channel renderers own a shared polyphonic output, not disposable per-note nodes. */
+  scope?(instrumentType: InstrumentType): 'voice' | 'channel';
 }
 
 export const createInstrumentRegistry = (
   renderers: Partial<Record<InstrumentType, InstrumentVoiceRenderer>>,
   fallback: InstrumentVoiceRenderer,
+  channelOwned: readonly InstrumentType[] = [],
 ): InstrumentRegistry => {
   const registry = new Map<InstrumentType, InstrumentVoiceRenderer>();
 
@@ -52,5 +56,6 @@ export const createInstrumentRegistry = (
   return {
     get: (instrumentType: InstrumentType) => registry.get(instrumentType) ?? fallback,
     has: (instrumentType: InstrumentType) => registry.has(instrumentType),
+    scope: (instrumentType: InstrumentType) => channelOwned.includes(instrumentType) ? 'channel' : 'voice',
   };
 };

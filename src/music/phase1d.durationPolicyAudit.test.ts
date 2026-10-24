@@ -862,7 +862,7 @@ describe('Phase 1D — the two policy systems stay separate', () => {
   it('gate fallback steps are untouched by this phase', () => {
     const source = readSourceText(join(REPO_ROOT, 'src/audio/instrumentGatePolicy.ts'), 'utf8');
     const fallbacks = [...source.matchAll(/fallbackSteps:\s*([0-9.]+)/g)].map(match => Number(match[1]));
-    assert.equal(fallbacks.length, 18, 'the 18 duration-gated instruments each declare a fallback');
+    assert.equal(fallbacks.length, 19, 'the 18 built-ins plus native notated notes each declare a fallback');
     assert.equal(Math.min(...fallbacks), 1);
     assert.equal(Math.max(...fallbacks), 2);
   });

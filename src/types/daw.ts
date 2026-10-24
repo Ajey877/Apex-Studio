@@ -1,3 +1,4 @@
+import type { Vst3Instrument } from '../audio/nativeVst3Types';
 export type ViewMode = 
   | 'channel_rack' 
   | 'piano_roll' 
@@ -13,6 +14,7 @@ export type ViewMode =
 export type PlayMode = 'pat' | 'song';
 
 export type InstrumentType = 
+  | 'vst3'
   | 'minisynth' 
   | 'fmsynth' 
   | 'drumpad' 
@@ -325,6 +327,8 @@ export interface Channel {
   name: string;
   color: string;
   instrumentType: InstrumentType;
+  /** Desktop-only instrument configuration. Retain verbatim for missing-plugin recovery. */
+  vst3?: Vst3Instrument;
   mixerTrackId: number; // 0 = Master, 1-8 = Inserts
   volume: number; // 0 - 1.0
   pan: number; // -1.0 to 1.0

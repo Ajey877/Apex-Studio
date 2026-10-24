@@ -81,6 +81,8 @@ export interface InstrumentGatePolicyEntry {
  * same invariant at runtime for the test suite.
  */
 export const INSTRUMENT_GATE_POLICY: Readonly<Record<InstrumentType, InstrumentGatePolicyEntry>> = Object.freeze({
+  vst3: { policy: 'DURATION_GATED', character: 'neutral', fallbackSteps: 1,
+    reason: 'Native note-off follows the exact notated duration; hardware MIDI holds until explicit release.' },
   // ---- DURATION_GATED: renderer calls resolveGateSeconds ----------------
   acid_303: {
     policy: 'DURATION_GATED',

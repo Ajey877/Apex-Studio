@@ -1,5 +1,7 @@
-const { app, BrowserWindow, shell, session } = require('electron');
+const { app, BrowserWindow, shell, session, ipcMain, dialog } = require('electron');
 const path = require('path');
+const fs = require('node:fs');
+const { registerVst3 } = require('./desktop-vst3.cjs');
 const { canRequestPermission, canCheckPermission } = require('./desktop-permissions.cjs');
 
 // Chromium audio switches must be registered before app readiness.
@@ -9,6 +11,7 @@ app.commandLine.appendSwitch('force-wave-audio');
 
 // Enforce Chromium renderer sandboxing application-wide.
 app.enableSandbox();
+if (process.env.APEX_SMOKE_TEST === '1') app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
 
 const DEV_URL = 'http://localhost:3000';
 const isAllowedNavigation = (url, isDev) => {
@@ -27,7 +30,11 @@ const openExternalUrl = (url) => {
   }
 };
 
+if (process.env.APEX_SMOKE_TEST === '1' && process.env.APEX_SMOKE_USER_DATA) app.setPath('userData', process.env.APEX_SMOKE_USER_DATA);
+
 let mainWindow = null;
+
+registerVst3({ app, ipcMain, dialog, getWindow: () => mainWindow });
 
 function createWindow() {
   const isDev = process.env.NODE_ENV === 'development' || !app.isPackaged;
@@ -42,6 +49,7 @@ function createWindow() {
     autoHideMenuBar: true,
     titleBarStyle: 'default',
     webPreferences: {
+      additionalArguments: process.env.APEX_SMOKE_TEST === '1' ? ['--apex-smoke-test', ...(process.env.APEX_SMOKE_REOPEN === '1' ? ['--apex-smoke-reopen'] : [])] : [],
       nodeIntegration: false,
       contextIsolation: true,
       sandbox: true,
@@ -83,6 +91,7 @@ function createWindow() {
       if (smokeFinished) return;
       smokeFinished = true;
       if (reason) console.log('[Apex Studio smoke]', reason);
+      if (exitCode !== 0 && process.env.GITHUB_ACTIONS) console.log(`::error title=Packaged runtime smoke failed::${String(reason).replaceAll('%', '%25').replaceAll('\r', '%0D').replaceAll('\n', '%0A')}`);
       setTimeout(() => app.exit(exitCode), 50);
     };
 
@@ -103,11 +112,15 @@ function createWindow() {
     mainWindow.webContents.on('did-finish-load', async () => {
       try {
         const result = await mainWindow.webContents.executeJavaScript(`
-          (() => {
+          (async () => {
             const bodyReady = document.readyState === 'complete' && !!document.body;
             const indexedDbReady = typeof indexedDB !== 'undefined';
             const audioReady = typeof AudioContext !== 'undefined' || typeof webkitAudioContext !== 'undefined';
-            return { bodyReady, indexedDbReady, audioReady, title: document.title };
+            const deadline = Date.now() + 10000;
+            while (!window.__apexVst3Smoke && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10));
+            if (!window.__apexVst3Smoke) throw new Error('Production native smoke entry did not initialize');
+            const vst3 = await window.__apexVst3Smoke;
+            return { bodyReady, indexedDbReady, audioReady, vst3, title: document.title };
           })()
         `);
         console.log('[Apex Studio smoke] runtime checks:', JSON.stringify(result));
@@ -115,6 +128,11 @@ function createWindow() {
           finishSmoke(1, 'required packaged runtime capabilities are unavailable');
           return;
         }
+        if (process.env.APEX_SMOKE_EVIDENCE) {
+          fs.mkdirSync(path.dirname(process.env.APEX_SMOKE_EVIDENCE), { recursive: true });
+          fs.writeFileSync(process.env.APEX_SMOKE_EVIDENCE, JSON.stringify(result, null, 2));
+        }
+        if (process.env.GITHUB_ACTIONS) console.log(`::notice title=Packaged VST3 live and production export proof::${JSON.stringify(result.vst3)}`);
         finishSmoke(0, `packaged renderer loaded successfully: ${result.title}`);
       } catch (error) {
         finishSmoke(1, `runtime check failed: ${error instanceof Error ? error.message : String(error)}`);

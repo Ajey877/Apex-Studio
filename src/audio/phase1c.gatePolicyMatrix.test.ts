@@ -52,6 +52,7 @@ const EXPECTED_INSTRUMENTS = [
   'sub_808',
   'supersaw_lead',
   'vox_choir',
+  'vst3',
   'wavetable',
 ] as const;
 
@@ -62,18 +63,18 @@ const readRegistryKeys = (): string[] => {
   const source = readFileSync(new URL('./audioEngine.ts', import.meta.url), 'utf8');
   const call = source.indexOf('createInstrumentRegistry({');
   assert.notEqual(call, -1, 'audioEngine.ts must still build the registry inline');
-  const body = source.slice(call, source.indexOf('renderSubtractiveSynthVoice);', call));
+  const body = source.slice(call, source.indexOf('}, renderSubtractiveSynthVoice', call));
   return Array.from(body.matchAll(/^\s{6}([a-z0-9_]+):/gm), match => match[1]);
 };
 
 describe('Phase 1C — gate policy matrix covers every instrument', () => {
-  it('declares exactly the 24 instrument types', () => {
+  it('declares exactly the 24 built-in types plus VST3', () => {
     assert.deepEqual(
       [...INSTRUMENT_GATE_POLICY_KEYS].sort(),
       [...EXPECTED_INSTRUMENTS].sort(),
       'the policy matrix must cover every instrument type and nothing else',
     );
-    assert.equal(INSTRUMENT_GATE_POLICY_KEYS.length, 24);
+    assert.equal(INSTRUMENT_GATE_POLICY_KEYS.length, 25);
   });
 
   it('OMITS NO INSTRUMENT — omitting one fails the suite', () => {
@@ -125,13 +126,13 @@ describe('Phase 1C — policy classification is asserted against literal expecta
     'acid_303', 'ambient_pad', 'chiptune_8bit', 'cinematic_brass', 'grand_piano',
     'hammond_organ', 'harpsichord', 'independent_pluck', 'minisynth', 'nylon_guitar',
     'reese_bass', 'rhodes_epiano', 'slap_bass', 'strings_ensemble', 'sub_808',
-    'supersaw_lead', 'vox_choir', 'wavetable',
+    'supersaw_lead', 'vox_choir', 'vst3', 'wavetable',
   ];
   const FIXED_ENVELOPE = ['fmsynth', 'fm_bell', 'pizzicato_strings', 'marimba_bell'];
   const SAMPLE_LENGTH = ['sampler', 'drumpad'];
 
-  it('duration-gated set is exactly the 18 Phase 1B fixed renderers', () => {
-    assert.equal(DURATION_GATED.length, 18);
+  it('duration-gated set is the 18 Phase 1B renderers plus notated VST3 notes', () => {
+    assert.equal(DURATION_GATED.length, 19);
     assert.deepEqual([...INSTRUMENT_GATE_POLICY_KEYS].filter(
       k => getGatePolicy(k) === 'DURATION_GATED',
     ).sort(), [...DURATION_GATED].sort());
@@ -150,8 +151,8 @@ describe('Phase 1C — policy classification is asserted against literal expecta
     ).sort(), [...SAMPLE_LENGTH].sort());
   });
 
-  it('the three policies partition all 24 instruments', () => {
-    assert.equal(DURATION_GATED.length + FIXED_ENVELOPE.length + SAMPLE_LENGTH.length, 24);
+  it('the three policies partition all 25 instruments', () => {
+    assert.equal(DURATION_GATED.length + FIXED_ENVELOPE.length + SAMPLE_LENGTH.length, 25);
   });
 });
 
