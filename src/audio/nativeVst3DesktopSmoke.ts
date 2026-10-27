@@ -273,8 +273,13 @@ async function captureLiveMixerRun(instance: typeof audioEngine, channels: Chann
   for (const trackId of [1, 2]) taps.set(trackId, await attachMixerCapture(instance, trackId));
   const smokeApi = (globalThis as any).desktopApp?.vst3;
   if (typeof smokeApi?.smokeTimingSnapshot !== 'function') throw new Error('Smoke-only production IPC timing snapshot is unavailable');
+  const controlSource = context.createOscillator();
+  const controlGain = context.createGain();
+  controlSource.type = 'sine'; controlSource.frequency.value = 440; controlGain.gain.value = 0.1;
+  controlSource.connect(controlGain); controlGain.connect(instance.getOrCreateMixerChannel(2).input);
   await instance.play(channels, [], 'pat', undefined, mixer, 16);
   await context.resume();
+  controlSource.start(context.currentTime);
   await new Promise(resolve => setTimeout(resolve, 200));
   const runtimeStart = getNativeVst3MixerEffectSmokeTiming().length;
   const ipcBefore = await smokeApi.smokeTimingSnapshot();
@@ -286,6 +291,8 @@ async function captureLiveMixerRun(instance: typeof audioEngine, channels: Chann
   const playbackActiveAtEnd = instance.isPlaybackActive();
   const stopRequestedAtRendererMs = performance.now();
   instance.stop();
+  controlSource.stop(context.currentTime);
+  controlSource.disconnect(); controlGain.disconnect();
   const immediateEnd = performance.now() + 160;
   while (performance.now() < immediateEnd) await new Promise(resolve => setTimeout(resolve, 8));
   const immediateEndContextFrame = Math.round(context.currentTime * context.sampleRate);
@@ -373,9 +380,6 @@ async function runPackagedMixerAcceptance(instance: typeof audioEngine) {
     { ...source, id: 'packaged-mixer-target', name: 'Packaged Mixer VST3 target', instrumentType: 'minisynth', vst3: undefined,
       mixerTrackId: 1, volume: 1, pan: 0, mute: false, solo: false, steps: Array(16).fill(false),
       notes: [{ id: 'packaged-mixer-target-note', pitch: 60, start: 0, duration: 16, velocity: 0.8 }] },
-    { ...source, id: 'packaged-mixer-control', name: 'Packaged Mixer unaffected control', instrumentType: 'minisynth', vst3: undefined,
-      mixerTrackId: 2, volume: 1, pan: 0, mute: false, solo: false, steps: Array(16).fill(false),
-      notes: [{ id: 'packaged-mixer-control-note', pitch: 67, start: 0, duration: 16, velocity: 0.8 }] },
   ];
   const tracks: MixerTrack[] = [0, 1, 2].map(id => ({ id, name: `Packaged smoke track ${id}`, color: '#fff',
     volume: 1, pan: 0, mute: false, solo: false, fxSlots: [], peakL: 0, peakR: 0 }));
@@ -408,6 +412,7 @@ async function runPackagedMixerAcceptance(instance: typeof audioEngine) {
     .map(([label, result]) => [label, { timing: result.timing, timingSamples: correlatedTimingSamples(result).slice(0, 16) }])));
   const alignmentWindow = Math.round(0.5 * orderA.sampleRate);
   const orderDifference = compareMixerRuns(orderA, orderB, 1, alignmentWindow, 'order reversal');
+  const controlDifference = compareMixerRuns(orderA, orderB, 2, alignmentWindow, 'control-track isolation');
   const controlRmsDifference = Math.abs(orderA.trackRms['2'] - orderB.trackRms['2']);
   const processedVsBypass = compareMixerRuns(delayProcessed, delayPassThrough, 1, alignmentWindow, 'processed vs native bypass');
   const bypassVsRemoved = compareMixerRuns(delayPassThrough, removed, 1, alignmentWindow, 'native bypass vs removed insert');
@@ -417,7 +422,9 @@ async function runPackagedMixerAcceptance(instance: typeof audioEngine) {
     throw new Error(`Packaged Mixer live track PCM was silent or disappeared after removal/restart: ${JSON.stringify({ orderA: orderA.trackRms, orderB: orderB.trackRms, delayProcessed: delayProcessed.trackRms, delayPassThrough: delayPassThrough.trackRms, removed: removed.trackRms })}; bounded timing evidence=${acceptanceTimingEvidence}`);
   }
   if (orderDifference.rmsDifference <= 1e-4) throw new Error(`Reversing the production Mixer VST3 order did not change target PCM: ${JSON.stringify(orderDifference)}; bounded timing evidence=${acceptanceTimingEvidence}`);
-  if (controlRmsDifference > controlTolerance) throw new Error(`Mixer effect order changed the unaffected control-track RMS beyond tolerance ${controlTolerance}: ${JSON.stringify({ controlRmsDifference, controlTrackRms: { orderA: orderA.trackRms['2'], orderB: orderB.trackRms['2'] } })}; bounded timing evidence=${acceptanceTimingEvidence}`);
+  if (controlRmsDifference > controlTolerance || controlDifference.rmsDifference > controlTolerance) {
+    throw new Error(`Mixer effect order changed unaffected control-track PCM beyond tolerance ${controlTolerance}: ${JSON.stringify({ controlRmsDifference, alignedPcmDifferenceRms: controlDifference.rmsDifference, controlTrackRms: { orderA: orderA.trackRms['2'], orderB: orderB.trackRms['2'] } })}; bounded timing evidence=${acceptanceTimingEvidence}`);
+  }
   if (processedVsBypass.rmsDifference <= 1e-4) throw new Error(`Native MDA bypass and processed live output were indistinguishable: ${JSON.stringify(processedVsBypass)}; bounded timing evidence=${acceptanceTimingEvidence}`);
   if (bypassVsRemoved.rmsDifference > bypassOutputTolerance) throw new Error(`MDA Fb Mix=0 bypass did not match the no-insert production Mixer signal within tolerance ${bypassOutputTolerance}: ${JSON.stringify(bypassVsRemoved)}; bounded timing evidence=${acceptanceTimingEvidence}`);
   if (Math.abs(processedVsBypass.normalizedLagFrames) > 256) throw new Error(`Delay bypass and processed runs did not align after their shared ${VST3_FX_PIPELINE_FRAMES}-frame pipeline: ${JSON.stringify(processedVsBypass)}; bounded timing evidence=${acceptanceTimingEvidence}`);
@@ -437,8 +444,9 @@ async function runPackagedMixerAcceptance(instance: typeof audioEngine) {
     latencyCompensation: 'Not provided. Tracks with different counts of native Mixer inserts are not sample-aligned; each insert contributes the declared fixed 2048-frame live pipeline.',
     priorPlaywrightBridgeReference: { approximatelyMs: 28, measurement: 'test-only page.exposeFunction bridge; separate from this production IPC/preload/helper measurement' },
     orderDifferenceRms: orderDifference.rmsDifference, orderOffsetFrames: orderDifference.normalizedLagFrames,
-    controlTrackRmsDifference: controlRmsDifference, controlTrackRms: { orderA: orderA.trackRms['2'], orderB: orderB.trackRms['2'] },
-    controlTrackIsolationMethod: 'Compare measured RMS across independent live captures; oscillator phase is not a control-isolation invariant.',
+    controlTrackRmsDifference: controlRmsDifference, controlTrackPcmDifferenceRms: controlDifference.rmsDifference,
+    controlTrackRms: { orderA: orderA.trackRms['2'], orderB: orderB.trackRms['2'] },
+    controlTrackIsolationMethod: 'A smoke-only 440 Hz oscillator is routed through the production track-2 input; compare aligned live track PCM and RMS across effect-order captures.',
     controlIsolationToleranceRms: controlTolerance,
     bypassVsProcessedDifferenceRms: processedVsBypass.rmsDifference,
     bypassVsProcessedLagAfterRunStartNormalizationFrames: processedVsBypass.normalizedLagFrames,
