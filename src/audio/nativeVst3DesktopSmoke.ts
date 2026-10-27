@@ -276,26 +276,32 @@ async function captureLiveMixerRun(instance: typeof audioEngine, channels: Chann
   for (const trackId of [1, 2]) taps.set(trackId, await attachMixerCapture(instance, trackId));
   const smokeApi = (globalThis as any).desktopApp?.vst3;
   if (typeof smokeApi?.smokeTimingSnapshot !== 'function') throw new Error('Smoke-only production IPC timing snapshot is unavailable');
+  const targetSource = context.createOscillator();
+  const targetGain = context.createGain();
   const controlSource = context.createOscillator();
   const controlGain = context.createGain();
-  controlSource.type = 'sine'; controlSource.frequency.value = 440; controlGain.gain.value = 0.1;
+  targetSource.type = 'sine'; targetSource.frequency.value = 375; targetGain.gain.value = 0.1;
+  controlSource.type = 'sine'; controlSource.frequency.value = 750; controlGain.gain.value = 0.1;
+  targetSource.connect(targetGain); targetGain.connect(instance.getOrCreateMixerChannel(1).input);
   controlSource.connect(controlGain); controlGain.connect(instance.getOrCreateMixerChannel(2).input);
   await instance.play(channels, [], 'pat', undefined, mixer, 16);
   await context.resume();
-  controlSource.start(context.currentTime);
-  await new Promise(resolve => setTimeout(resolve, 200));
+  const sourceStartTime = context.currentTime + 0.05;
+  const sourceStartContextFrame = Math.round(sourceStartTime * context.sampleRate);
+  targetSource.start(sourceStartTime); controlSource.start(sourceStartTime);
+  await new Promise(resolve => setTimeout(resolve, 300));
   const runtimeStart = getNativeVst3MixerEffectSmokeTiming().length;
   const ipcBefore = await smokeApi.smokeTimingSnapshot();
   const startedAt = performance.now();
-  const startedContextFrame = Math.round(context.currentTime * context.sampleRate);
+  const startedContextFrame = sourceStartContextFrame + Math.round(0.25 * context.sampleRate);
   await new Promise(resolve => setTimeout(resolve, durationMs));
   const stoppedAt = performance.now();
   const stoppedContextFrame = Math.round(context.currentTime * context.sampleRate);
   const playbackActiveAtEnd = instance.isPlaybackActive();
   const stopRequestedAtRendererMs = performance.now();
   instance.stop();
-  controlSource.stop(context.currentTime);
-  controlSource.disconnect(); controlGain.disconnect();
+  targetSource.stop(context.currentTime); controlSource.stop(context.currentTime);
+  targetSource.disconnect(); targetGain.disconnect(); controlSource.disconnect(); controlGain.disconnect();
   const immediateEnd = performance.now() + 160;
   while (performance.now() < immediateEnd) await new Promise(resolve => setTimeout(resolve, 8));
   const immediateEndContextFrame = Math.round(context.currentTime * context.sampleRate);
@@ -378,12 +384,7 @@ async function runPackagedMixerAcceptance(instance: typeof audioEngine) {
     parameters: [...delay.state.parameters.filter(parameter => parameter.id !== feedbackMix.id), { id: feedbackMix.id, value: 0 }],
   });
 
-  const source = createDefaultProjectState().channels[0]!;
-  const channels: Channel[] = [
-    { ...source, id: 'packaged-mixer-target', name: 'Packaged Mixer VST3 target', instrumentType: 'minisynth', vst3: undefined,
-      mixerTrackId: 1, volume: 1, pan: 0, mute: false, solo: false, steps: Array(16).fill(false),
-      notes: [{ id: 'packaged-mixer-target-note', pitch: 60, start: 0, duration: 16, velocity: 0.8 }] },
-  ];
+  const channels: Channel[] = [];
   const tracks: MixerTrack[] = [0, 1, 2].map(id => ({ id, name: `Packaged smoke track ${id}`, color: '#fff',
     volume: 1, pan: 0, mute: false, solo: false, fxSlots: [], peakL: 0, peakR: 0 }));
   const makeSlot = (id: string, effect: Vst3Effect): FxSlot => ({ id, type: 'vst3', name: effect.name,
@@ -449,7 +450,7 @@ async function runPackagedMixerAcceptance(instance: typeof audioEngine) {
     orderDifferenceRms: orderDifference.rmsDifference, orderOffsetFrames: orderDifference.normalizedLagFrames,
     controlTrackRmsDifference: controlRmsDifference, controlTrackPcmDifferenceRms: controlDifference.rmsDifference,
     controlTrackRms: { orderA: orderA.trackRms['2'], orderB: orderB.trackRms['2'] },
-    controlTrackIsolationMethod: 'A smoke-only 440 Hz oscillator is routed through the production track-2 input; compare aligned live track PCM and RMS across effect-order captures.',
+    controlTrackIsolationMethod: 'A smoke-only 750 Hz oscillator is routed through the production track-2 input; compare aligned live track PCM and RMS across effect-order captures.',
     controlIsolationToleranceRms: controlTolerance,
     bypassVsProcessedDifferenceRms: processedVsBypass.rmsDifference,
     bypassVsProcessedLagAfterRunStartNormalizationFrames: processedVsBypass.normalizedLagFrames,
@@ -462,7 +463,7 @@ async function runPackagedMixerAcceptance(instance: typeof audioEngine) {
     timingSamples: { orderA: correlatedTimingSamples(orderA), orderB: correlatedTimingSamples(orderB),
       delayProcessed: correlatedTimingSamples(delayProcessed), delayBypassed: correlatedTimingSamples(delayPassThrough),
       cleanupAfterRemoval: correlatedTimingSamples(removed) },
-    proof: 'Packaged Electron production AudioWorklet → authorized main IPC → native VST3 helper → production preload → worklet PCM, captured from production Mixer analysers; no exposeFunction processing bridge.'
+    proof: 'Packaged Electron production AudioWorklet → authorized main IPC → native VST3 helper → production preload → worklet PCM, captured from production Mixer analysers. Smoke-only 375/750 Hz oscillators provide deterministic track inputs; no exposeFunction processing bridge.'
   };
 }
 
