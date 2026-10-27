@@ -130,15 +130,29 @@ function summarizeMixerTiming(events: ReturnType<typeof getNativeVst3MixerEffect
   const requestEvents = new Map(events.filter(event => event.event === 'renderer-request-received' && typeof event.requestId === 'string').map(event => [event.requestId!, event]));
   const bridgeStarts = new Map(events.filter(event => event.event === 'renderer-bridge-call-start' && typeof event.requestId === 'string').map(event => [event.requestId!, event]));
   const stopCancellationWindowMs = VST3_FX_BLOCK_FRAMES * 1000 / sampleRate + 2;
-  const stopCancelledRequestIds = new Set<string>();
+  const nativeCancelledAtStopRequestIds = new Set<string>();
+  const rendererDiscardedAtStopRequestIds = new Set<string>();
+  const unexpectedDisposalDiscardRequestIds = new Set<string>();
   for (const [requestId, timing] of main) {
     const start = bridgeStarts.get(requestId);
     const ageAtStopMs = stopRequestedAtRendererMs - Number(start?.bridgeCallStartedAt);
     if (timing.error === 'VST3 instance cancelled' && !rendererResponses.has(requestId) &&
         Number.isFinite(ageAtStopMs) && ageAtStopMs >= 0 && ageAtStopMs <= stopCancellationWindowMs) {
-      stopCancelledRequestIds.add(requestId);
+      nativeCancelledAtStopRequestIds.add(requestId);
     }
   }
+  for (const event of events.filter(event => event.event === 'result-discarded-after-disposal' && typeof event.requestId === 'string')) {
+    const start = bridgeStarts.get(event.requestId!);
+    const ageAtStopMs = stopRequestedAtRendererMs - Number(start?.bridgeCallStartedAt);
+    const responseAgeMs = Number(event.rendererAtMs) - stopRequestedAtRendererMs;
+    if (Number.isFinite(ageAtStopMs) && ageAtStopMs >= 0 && ageAtStopMs <= stopCancellationWindowMs &&
+        Number.isFinite(responseAgeMs) && responseAgeMs >= 0 && responseAgeMs <= stopCancellationWindowMs) {
+      rendererDiscardedAtStopRequestIds.add(event.requestId!);
+    } else {
+      unexpectedDisposalDiscardRequestIds.add(event.requestId!);
+    }
+  }
+  const stopCancelledRequestIds = new Set([...nativeCancelledAtStopRequestIds, ...rendererDiscardedAtStopRequestIds]);
   const workletReceiptMs: number[] = [], rendererDispatchMs: number[] = [], rendererQueueWaitMs: number[] = [];
   const rendererBridgeRoundTripMs: number[] = [], preloadIpcRttMs: number[] = [], mainDispatchMs: number[] = [], helperServiceMs: number[] = [];
   const scheduledOutputSlackMs: number[] = [];
@@ -167,7 +181,7 @@ function summarizeMixerTiming(events: ReturnType<typeof getNativeVst3MixerEffect
   const cancellationServiceMs: number[] = [];
   for (const [requestId, timing] of main) {
     if (Number.isFinite(timing.nativeServiceCallMs)) {
-      if (stopCancelledRequestIds.has(requestId)) cancellationServiceMs.push(timing.nativeServiceCallMs);
+      if (nativeCancelledAtStopRequestIds.has(requestId)) cancellationServiceMs.push(timing.nativeServiceCallMs);
       else if (!timing.error) helperServiceMs.push(timing.nativeServiceCallMs);
     }
     const dispatchMs = Number(timing.serviceStartAtMainMs) - Number(timing.ipcReceivedAtMainMs);
@@ -180,6 +194,9 @@ function summarizeMixerTiming(events: ReturnType<typeof getNativeVst3MixerEffect
     blockPeriodMs: VST3_FX_BLOCK_FRAMES * 1000 / sampleRate,
     captureDurationMs, processingBlocks: blocks, acceptedWorkletResults: acceptedResults,
     submittedBlocks: submissions.size, cancelledAtStopBlocks: stopCancelledRequestIds.size,
+    nativeCancelledAtStopBlocks: nativeCancelledAtStopRequestIds.size,
+    rendererDiscardedAtStopBlocks: rendererDiscardedAtStopRequestIds.size,
+    unexpectedDisposalDiscards: [...unexpectedDisposalDiscardRequestIds],
     stopCancellationWindowMs, stopCancellationServiceCall: distribution(cancellationServiceMs),
     throughputBlocksPerSecond: captureDurationMs > 0 ? blocks * 1000 / captureDurationMs : 0,
     workletSubmissionToReceipt: distribution(workletReceiptMs),
@@ -194,7 +211,7 @@ function summarizeMixerTiming(events: ReturnType<typeof getNativeVst3MixerEffect
     missedDeadlines, requestCount: submissions.size,
     profileEventCount: events.length,
     requestFailures: [...main].filter(([requestId, event]: [string, any]) => !!event.error && !stopCancelledRequestIds.has(requestId)).map(([, event]: [string, any]) => event.error),
-    unexpectedStopCancellations: [...main].filter(([requestId, event]: [string, any]) => event.error === 'VST3 instance cancelled' && !stopCancelledRequestIds.has(requestId)).map(([requestId]: [string, any]) => requestId),
+    unexpectedStopCancellations: [...main].filter(([requestId, event]: [string, any]) => event.error === 'VST3 instance cancelled' && !nativeCancelledAtStopRequestIds.has(requestId)).map(([requestId]: [string, any]) => requestId),
     missingMainResponses: [...submissions.keys()].filter(requestId => !main.has(requestId)).length,
     missingWorkletResults: [...submissions.keys()].filter(requestId => !results.has(requestId) && !stopCancelledRequestIds.has(requestId)).length,
     rendererResponseCount: rendererResponses.size,
@@ -308,9 +325,9 @@ function assertPackagedMixerRun(run: any, label: string) {
   if (run.sampleRate !== 48000) fail(`expected the packaged AudioContext at 48 kHz, got ${run.sampleRate}`);
   if (!run.playbackActiveAtEnd) fail(`production Mixer transport stopped during capture; diagnostics=${JSON.stringify(run.diagnostics)}`);
   if (timing.requestCount < 10 || timing.acceptedWorkletResults + timing.cancelledAtStopBlocks !== timing.requestCount ||
-      timing.processingBlocks !== timing.acceptedWorkletResults || timing.cancelledAtStopBlocks > 2 ||
+      timing.processingBlocks + timing.nativeCancelledAtStopBlocks !== timing.requestCount || timing.cancelledAtStopBlocks > 2 ||
       timing.missingMainResponses !== 0 || timing.missingWorkletResults !== 0 ||
-      timing.requestFailures.length !== 0 || timing.unexpectedStopCancellations.length !== 0) {
+      timing.requestFailures.length !== 0 || timing.unexpectedStopCancellations.length !== 0 || timing.unexpectedDisposalDiscards.length !== 0) {
     fail(`production worklet/IPC/helper response correlation failed (only the final in-flight request per insert may be canceled by explicit stop): ${JSON.stringify(timing)}`);
   }
   if (timing.missedDeadlines !== 0) fail(`production Mixer deadline failure(s): ${JSON.stringify(timing)}`);
