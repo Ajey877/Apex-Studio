@@ -2,6 +2,7 @@ import { test, expect, type Page } from '@playwright/test';
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { Vst3Service } from '../native/vst3/service.mjs';
+import { VST3_FX_PIPELINE_FRAMES } from '../src/audio/nativeVst3EffectRuntime';
 
 const build = path.resolve('build/native-vst3');
 const hostName = process.platform === 'win32' ? 'apex-vst3-host.exe' : 'apex-vst3-host';
@@ -20,7 +21,7 @@ async function setupProject(page: Page) {
       case 'describeEffect': return service.describeEffect(args[0], 'mixer-browser');
       case 'open': return service.open(args[0], args[1], args[2], 'mixer-browser', args[3] ?? 'instrument');
       case 'parameters': return service.parameters(args[0], args[1], 'mixer-browser');
-      case 'processAudio': return service.processAudio(args[0], args[1], args[2], args[3], 'mixer-browser', args[4] ?? []);
+      case 'processAudio': { const bytes = Buffer.from(args[2], 'base64'); const input = new Float32Array(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength)); const output = await service.processAudio(args[0], args[1], input, args[3], 'mixer-browser', args[4] ?? []); return Buffer.from(output.buffer, output.byteOffset, output.byteLength).toString('base64'); }
       case 'close': return service.close(args[0], 'mixer-browser');
       default: throw new Error(`Unauthorized Mixer-effect test operation: ${method}`);
     }
@@ -33,7 +34,17 @@ async function setupProject(page: Page) {
       describeEffect: (...args: any[]) => call('describeEffect', ...args),
       open: (...args: any[]) => call('open', ...args),
       parameters: (...args: any[]) => call('parameters', ...args),
-      processAudio: async (...args: any[]) => new Float32Array(await call('processAudio', ...args)),
+      processAudio: async (...args: any[]) => {
+        const input = args[2] as Float32Array;
+        const bytes = new Uint8Array(input.buffer, input.byteOffset, input.byteLength);
+        let binary = '';
+        for (let offset = 0; offset < bytes.length; offset += 0x4000) binary += String.fromCharCode(...bytes.subarray(offset, Math.min(offset + 0x4000, bytes.length)));
+        const encoded = await call('processAudio', args[0], args[1], btoa(binary), args[3], args[4]);
+        const decoded = atob(encoded);
+        const output = new Uint8Array(decoded.length);
+        for (let i = 0; i < decoded.length; i++) output[i] = decoded.charCodeAt(i);
+        return new Float32Array(output.buffer);
+      },
       close: id => call('close', id),
     } };
   });
@@ -59,7 +70,8 @@ async function setupProject(page: Page) {
   });
   await page.reload();
   await page.locator('#nav-mixer').click();
-  await page.locator('#mixer-strip-1').click();
+  await page.locator('#mixer-strip-1').getByText('INS 1', { exact: true }).click();
+  await expect(page.getByText('FX SLOTS (KICK / 808)', { exact: true })).toBeVisible();
 }
 
 async function addEffect(page: Page, name: string) {
@@ -88,6 +100,7 @@ async function captureProductionMixer(page: Page) {
     // @ts-ignore read the actual persisted project snapshot
     const { getPersistedProjectStateRecord } = await import('/src/audio/audioPersistence.ts');
     const state = JSON.parse(await getPersistedProjectStateRecord()).state;
+    audioEngine.init();
     audioEngine.setMasteringState({ ...DEFAULT_MASTERING_SUITE_STATE, enabled: false });
     audioEngine.setBpm(120);
     const context = audioEngine.getContext();
@@ -131,19 +144,20 @@ async function captureProductionMixer(page: Page) {
   });
 }
 
-async function compareCapture(page: Page, leftId: string, rightId: string, trackId: string) {
-  return page.evaluate(({ leftId, rightId, trackId }) => {
+async function compareCapture(page: Page, leftId: string, rightId: string, trackId: string, rightOffsetFrames = 0) {
+  return page.evaluate(({ leftId, rightId, trackId, rightOffsetFrames }) => {
     const store = (window as any).__nativeMixerFxCaptures;
     const left = store?.[leftId]?.[trackId]?.pcm as Float32Array[] | undefined;
     const right = store?.[rightId]?.[trackId]?.pcm as Float32Array[] | undefined;
     if (!left || !right) throw new Error('PCM capture was not retained in the browser test page');
     const a = left.flatMap(block => Array.from(block)), b = right.flatMap(block => Array.from(block));
-    const count = Math.min(a.length, b.length);
+    const offsetSamples = rightOffsetFrames * 2;
+    const count = Math.min(a.length, b.length - offsetSamples);
     let sum = 0;
-    for (let index = 0; index < count; index++) sum += (a[index]! - b[index]!) ** 2;
+    for (let index = 0; index < count; index++) sum += (a[index]! - b[index + offsetSamples]!) ** 2;
     delete store[leftId]; delete store[rightId];
     return count ? Math.sqrt(sum / count) : 0;
-  }, { leftId, rightId, trackId });
+  }, { leftId, rightId, trackId, rightOffsetFrames });
 }
 
 test('actual Mixer UI -> MDA inserts -> AudioEngine live capture, track isolation, order, bypass, persistence and undo/redo', async ({ page }) => {
@@ -151,6 +165,7 @@ test('actual Mixer UI -> MDA inserts -> AudioEngine live capture, track isolatio
   await setupProject(page);
   await addEffect(page, 'mda Delay');
   await addEffect(page, 'mda RezFilter');
+  await expect.poll(async () => (await persisted(page)).mixerTracks.find((track: any) => track.id === 1).fxSlots.map((slot: any) => slot.vst3Effect?.name)).toEqual(['mda Delay', 'mda RezFilter']);
   const initial = await persisted(page);
   let slots = initial.mixerTracks.find((track: any) => track.id === 1).fxSlots;
   expect(slots.map((slot: any) => slot.vst3Effect?.name)).toEqual(['mda Delay', 'mda RezFilter']);
@@ -165,12 +180,12 @@ test('actual Mixer UI -> MDA inserts -> AudioEngine live capture, track isolatio
     expect.objectContaining({ id: 0, value: 0.08 }), expect.objectContaining({ id: 4, value: 0.9 }),
   ]));
 
-  await page.getByRole('slider', { name: 'Freq · mda RezFilter' }).fill('0.12');
+  await page.getByRole('slider', { name: 'Freq · mda RezFilter', exact: true }).fill('0.12');
   await page.getByRole('button', { name: 'Apply native parameters' }).nth(1).click();
   await expect.poll(async () => (await persisted(page)).mixerTracks.find((track: any) => track.id === 1).fxSlots[1].vst3Effect.state.parameters.some((parameter: any) => parameter.id === 0 && parameter.value === 0.12)).toBe(true);
 
   // A parameter gesture is one project-history operation and survives Undo/Redo.
-  await page.getByRole('slider', { name: 'Freq · mda RezFilter' }).fill('0.2');
+  await page.getByRole('slider', { name: 'Freq · mda RezFilter', exact: true }).fill('0.2');
   await page.getByRole('button', { name: 'Apply native parameters' }).nth(1).click();
   await expect.poll(async () => (await persisted(page)).mixerTracks.find((track: any) => track.id === 1).fxSlots[1].vst3Effect.state.parameters.find((parameter: any) => parameter.id === 0)?.value).toBe(0.2);
   await page.getByRole('menuitem', { name: 'Edit', exact: true }).click();
@@ -182,7 +197,8 @@ test('actual Mixer UI -> MDA inserts -> AudioEngine live capture, track isolatio
 
   await page.reload();
   await page.locator('#nav-mixer').click();
-  await page.locator('#mixer-strip-1').click();
+  await page.locator('#mixer-strip-1').getByText('INS 1', { exact: true }).click();
+  await expect(page.getByText('FX SLOTS (KICK / 808)', { exact: true })).toBeVisible();
   slots = (await persisted(page)).mixerTracks.find((track: any) => track.id === 1).fxSlots;
   expect(slots.map((slot: any) => slot.vst3Effect?.name)).toEqual(['mda Delay', 'mda RezFilter']);
   expect(slots[0].vst3Effect.state.parameters).toEqual(expect.arrayContaining([
@@ -202,15 +218,16 @@ test('actual Mixer UI -> MDA inserts -> AudioEngine live capture, track isolatio
   expect(orderA.tracks['2']!.rms).toBeGreaterThan(1e-4);
   expect(controlRmsDifference).toBeLessThan(Math.max(0.005, orderA.tracks['2']!.rms * 0.15));
 
-  // Native plugin bypass and Mixer-slot bypass keep the same two-node FIFO; the
-  // two captured signals can be compared without hiding the declared latency.
+  // Plugin bypass keeps both native FIFOs. Mixer-slot bypass removes the Delay
+  // node, so align the shorter capture by exactly its declared fixed pipeline
+  // buffer; this comparison does not claim inter-track compensation.
   const delayBypass = page.getByRole('slider', { name: 'Bypass · mda Delay' });
   await delayBypass.fill('1');
   await page.getByRole('button', { name: 'Apply native parameters' }).nth(1).click();
   const pluginBypass = await captureProductionMixer(page);
   await page.getByRole('button', { name: 'Bypass mda Delay' }).click();
   const slotBypass = await captureProductionMixer(page);
-  const bypassDifference = await compareCapture(page, pluginBypass.captureId, slotBypass.captureId, '1');
+  const bypassDifference = await compareCapture(page, pluginBypass.captureId, slotBypass.captureId, '1', VST3_FX_PIPELINE_FRAMES);
   expect(bypassDifference).toBeLessThan(Math.max(0.02, pluginBypass.tracks['1']!.rms * 0.25));
 
   // Exercise the actual WAV production path, then decode the emitted WAV back

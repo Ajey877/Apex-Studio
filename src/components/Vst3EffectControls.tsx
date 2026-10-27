@@ -4,6 +4,16 @@ import { getVst3Bridge } from '../audio/nativeVst3Types';
 import { validateMetadata } from '../../native/vst3/parameters.mjs';
 
 const field = 'rounded border border-[var(--apex-border)] bg-[var(--apex-surface-2)] px-2 py-1 text-[10px] disabled:opacity-40';
+const effectDiscoveryInFlight = new WeakMap<object, Promise<Awaited<ReturnType<NonNullable<ReturnType<typeof getVst3Bridge>>['discoverEffects']>>>>();
+function discoverEffectsOnce(bridge: NonNullable<ReturnType<typeof getVst3Bridge>>) {
+  const existing = effectDiscoveryInFlight.get(bridge);
+  if (existing) return existing;
+  const pending = bridge.discoverEffects();
+  effectDiscoveryInFlight.set(bridge, pending);
+  const clear = () => { if (effectDiscoveryInFlight.get(bridge) === pending) effectDiscoveryInFlight.delete(bridge); };
+  void pending.then(clear, clear);
+  return pending;
+}
 
 export function Vst3EffectPicker({ onChoose, onCancel }: {
   onChoose: (effect: Vst3Effect) => void;
@@ -18,7 +28,7 @@ export function Vst3EffectPicker({ onChoose, onCancel }: {
     if (!bridge) { setBusy(false); setStatus('VST3 effects require the desktop application.'); return; }
     setBusy(true); setStatus('Scanning authorized VST3 folders…');
     try {
-      const result = await bridge.discoverEffects();
+      const result = await discoverEffectsOnce(bridge);
       if (!active()) return;
       setPlugins(result.plugins); setErrors(result.errors);
       setStatus(result.plugins.length ? `${result.plugins.length} genuine VST3 effects found.` : 'No compatible VST3 effects found.');
