@@ -121,12 +121,24 @@ function distribution(values: number[]) {
   return { count: sorted.length, medianMs: percentile(0.5), p95Ms: percentile(0.95), maxMs: sorted[sorted.length - 1]! };
 }
 
-function summarizeMixerTiming(events: ReturnType<typeof getNativeVst3MixerEffectSmokeTiming>, ipc: any, sampleRate: number, captureDurationMs: number) {
+function summarizeMixerTiming(events: ReturnType<typeof getNativeVst3MixerEffectSmokeTiming>, ipc: any, sampleRate: number, captureDurationMs: number, stopRequestedAtRendererMs: number) {
   const submissions = new Map(events.filter(event => event.event === 'worklet-submit' && typeof event.requestId === 'string').map(event => [event.requestId!, event]));
   const results = new Map(events.filter(event => event.event === 'worklet-result' && typeof event.requestId === 'string').map(event => [event.requestId!, event]));
   const rendererResponses = new Map(events.filter(event => event.event === 'renderer-bridge-response' && typeof event.requestId === 'string').map(event => [event.requestId!, event]));
   const preload = new Map<string, any>((ipc?.preload ?? []).map((event: any) => [event.requestId, event]));
   const main = new Map<string, any>((ipc?.main?.processAudio ?? []).map((event: any) => [event.requestId, event]));
+  const requestEvents = new Map(events.filter(event => event.event === 'renderer-request-received' && typeof event.requestId === 'string').map(event => [event.requestId!, event]));
+  const bridgeStarts = new Map(events.filter(event => event.event === 'renderer-bridge-call-start' && typeof event.requestId === 'string').map(event => [event.requestId!, event]));
+  const stopCancellationWindowMs = VST3_FX_BLOCK_FRAMES * 1000 / sampleRate + 2;
+  const stopCancelledRequestIds = new Set<string>();
+  for (const [requestId, timing] of main) {
+    const start = bridgeStarts.get(requestId);
+    const ageAtStopMs = stopRequestedAtRendererMs - Number(start?.bridgeCallStartedAt);
+    if (timing.error === 'VST3 instance cancelled' && !rendererResponses.has(requestId) &&
+        Number.isFinite(ageAtStopMs) && ageAtStopMs >= 0 && ageAtStopMs <= stopCancellationWindowMs) {
+      stopCancelledRequestIds.add(requestId);
+    }
+  }
   const workletReceiptMs: number[] = [], rendererDispatchMs: number[] = [], rendererQueueWaitMs: number[] = [];
   const rendererBridgeRoundTripMs: number[] = [], preloadIpcRttMs: number[] = [], mainDispatchMs: number[] = [], helperServiceMs: number[] = [];
   const scheduledOutputSlackMs: number[] = [];
@@ -142,8 +154,6 @@ function summarizeMixerTiming(events: ReturnType<typeof getNativeVst3MixerEffect
     if (Number.isFinite(slack)) scheduledOutputSlackMs.push(slack);
     if (Number(result.receivedOutputFrame) > Number(result.dueOutputFrame)) missedDeadlines++;
   }
-  const requestEvents = new Map(events.filter(event => event.event === 'renderer-request-received' && typeof event.requestId === 'string').map(event => [event.requestId!, event]));
-  const bridgeStarts = new Map(events.filter(event => event.event === 'renderer-bridge-call-start' && typeof event.requestId === 'string').map(event => [event.requestId!, event]));
   for (const [requestId, request] of requestEvents) {
     const contextFrames = Number(request.requestReceivedContextFrame) - Number(request.submittedContextFrame);
     if (Number.isFinite(contextFrames) && contextFrames >= 0) rendererDispatchMs.push(contextFrames * 1000 / sampleRate);
@@ -154,17 +164,23 @@ function summarizeMixerTiming(events: ReturnType<typeof getNativeVst3MixerEffect
   }
   for (const event of events) if (event.event === 'renderer-bridge-response' && Number.isFinite(Number(event.bridgeRoundTripMs))) rendererBridgeRoundTripMs.push(Number(event.bridgeRoundTripMs));
   for (const timing of preload.values()) if (Number.isFinite(timing.rendererIpcRttMs)) preloadIpcRttMs.push(timing.rendererIpcRttMs);
-  for (const timing of main.values()) {
-    if (Number.isFinite(timing.nativeServiceCallMs)) helperServiceMs.push(timing.nativeServiceCallMs);
+  const cancellationServiceMs: number[] = [];
+  for (const [requestId, timing] of main) {
+    if (Number.isFinite(timing.nativeServiceCallMs)) {
+      if (stopCancelledRequestIds.has(requestId)) cancellationServiceMs.push(timing.nativeServiceCallMs);
+      else if (!timing.error) helperServiceMs.push(timing.nativeServiceCallMs);
+    }
     const dispatchMs = Number(timing.serviceStartAtMainMs) - Number(timing.ipcReceivedAtMainMs);
     if (Number.isFinite(dispatchMs) && dispatchMs >= 0) mainDispatchMs.push(dispatchMs);
   }
   const queueDepths = [...requestEvents.values()].map(event => Number(event.queueDepth)).filter(Number.isFinite);
-  const blocks = main.size;
+  const blocks = [...main.values()].filter((event: any) => !event.error).length;
   return {
     blockFrames: VST3_FX_BLOCK_FRAMES, pipelineFramesPerEffect: VST3_FX_PIPELINE_FRAMES,
     blockPeriodMs: VST3_FX_BLOCK_FRAMES * 1000 / sampleRate,
     captureDurationMs, processingBlocks: blocks, acceptedWorkletResults: acceptedResults,
+    submittedBlocks: submissions.size, cancelledAtStopBlocks: stopCancelledRequestIds.size,
+    stopCancellationWindowMs, stopCancellationServiceCall: distribution(cancellationServiceMs),
     throughputBlocksPerSecond: captureDurationMs > 0 ? blocks * 1000 / captureDurationMs : 0,
     workletSubmissionToReceipt: distribution(workletReceiptMs),
     rendererAudioDispatch: distribution(rendererDispatchMs), rendererSerializedQueueWait: distribution(rendererQueueWaitMs),
@@ -177,9 +193,10 @@ function summarizeMixerTiming(events: ReturnType<typeof getNativeVst3MixerEffect
     nativeServiceSessionCountAfterCleanup: ipc?.main?.nativeServiceSessionCount ?? -1,
     missedDeadlines, requestCount: submissions.size,
     profileEventCount: events.length,
-    requestFailures: [...main.values()].filter((event: any) => !!event.error).map((event: any) => event.error),
+    requestFailures: [...main].filter(([requestId, event]: [string, any]) => !!event.error && !stopCancelledRequestIds.has(requestId)).map(([, event]: [string, any]) => event.error),
+    unexpectedStopCancellations: [...main].filter(([requestId, event]: [string, any]) => event.error === 'VST3 instance cancelled' && !stopCancelledRequestIds.has(requestId)).map(([requestId]: [string, any]) => requestId),
     missingMainResponses: [...submissions.keys()].filter(requestId => !main.has(requestId)).length,
-    missingWorkletResults: [...submissions.keys()].filter(requestId => !results.has(requestId)).length,
+    missingWorkletResults: [...submissions.keys()].filter(requestId => !results.has(requestId) && !stopCancelledRequestIds.has(requestId)).length,
     rendererResponseCount: rendererResponses.size,
   };
 }
@@ -249,6 +266,7 @@ async function captureLiveMixerRun(instance: typeof audioEngine, channels: Chann
   const stoppedAt = performance.now();
   const stoppedContextFrame = Math.round(context.currentTime * context.sampleRate);
   const playbackActiveAtEnd = instance.isPlaybackActive();
+  const stopRequestedAtRendererMs = performance.now();
   instance.stop();
   const immediateEnd = performance.now() + 160;
   while (performance.now() < immediateEnd) await new Promise(resolve => setTimeout(resolve, 8));
@@ -276,7 +294,7 @@ async function captureLiveMixerRun(instance: typeof audioEngine, channels: Chann
     processAudio: ipcAfter.main.processAudio.slice(ipcBefore.main.processAudio.length) } };
   const duration = stoppedAt - startedAt;
   const sampleRate = context.sampleRate;
-  const timing = summarizeMixerTiming(runtimeEvents, ipc, sampleRate, duration);
+  const timing = summarizeMixerTiming(runtimeEvents, ipc, sampleRate, duration, stopRequestedAtRendererMs);
   return { pcm, tailRms, sampleRate, durationMs: duration, startedContextFrame, stoppedContextFrame, playbackActiveAtEnd,
     trackRms: Object.fromEntries([...pcm].map(([trackId, audio]) => [trackId, audio.rms])),
     diagnostics: getVst3MixerEffectDiagnostics(), timing, runtimeEvents, ipc };
@@ -289,9 +307,11 @@ function assertPackagedMixerRun(run: any, label: string) {
   const fail = (reason: string) => { throw new Error(`${label}: ${reason}; bounded production timing evidence=${evidence}`); };
   if (run.sampleRate !== 48000) fail(`expected the packaged AudioContext at 48 kHz, got ${run.sampleRate}`);
   if (!run.playbackActiveAtEnd) fail(`production Mixer transport stopped during capture; diagnostics=${JSON.stringify(run.diagnostics)}`);
-  if (timing.requestCount < 10 || timing.acceptedWorkletResults !== timing.requestCount ||
-      timing.missingMainResponses !== 0 || timing.missingWorkletResults !== 0 || timing.requestFailures.length !== 0) {
-    fail(`production worklet/IPC/helper response correlation failed: ${JSON.stringify(timing)}`);
+  if (timing.requestCount < 10 || timing.acceptedWorkletResults + timing.cancelledAtStopBlocks !== timing.requestCount ||
+      timing.processingBlocks !== timing.acceptedWorkletResults || timing.cancelledAtStopBlocks > 2 ||
+      timing.missingMainResponses !== 0 || timing.missingWorkletResults !== 0 ||
+      timing.requestFailures.length !== 0 || timing.unexpectedStopCancellations.length !== 0) {
+    fail(`production worklet/IPC/helper response correlation failed (only the final in-flight request per insert may be canceled by explicit stop): ${JSON.stringify(timing)}`);
   }
   if (timing.missedDeadlines !== 0) fail(`production Mixer deadline failure(s): ${JSON.stringify(timing)}`);
   if (timing.maxConcurrentCallsPerEffect > 1 || timing.maxPerInstanceQueueDepth > 1) {
