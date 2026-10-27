@@ -11,6 +11,16 @@ function registerVst3({ app, ipcMain, dialog, getWindow }) {
   let maximumConcurrentProcessAudioCalls = 0;
   const activeCallsByEffect = new Map();
   let maximumConcurrentCallsPerEffect = 0;
+  const pcmRms = value => {
+    if (!value || typeof value.length !== 'number' || value.length === 0) return null;
+    let square = 0;
+    for (let index = 0; index < value.length; index++) {
+      const sample = Number(value[index]);
+      if (!Number.isFinite(sample)) return null;
+      square += sample * sample;
+    }
+    return Math.sqrt(square / value.length);
+  };
   const readProfile = value => {
     if (!smokeTimingEnabled || !value || typeof value !== 'object' ||
       typeof value.requestId !== 'string' || value.requestId.length > 180 ||
@@ -98,6 +108,7 @@ function registerVst3({ app, ipcMain, dialog, getWindow }) {
       if (smokeProcessAudioTimings.length < 8192) smokeProcessAudioTimings.push({
         ...profile, frames, ipcReceivedAtMainMs: ipcTiming?.ipcReceivedAtMainMs ?? serviceStartAtMainMs,
         serviceStartAtMainMs, serviceCompletedAtMainMs, nativeServiceCallMs: serviceCompletedAtMainMs - serviceStartAtMainMs,
+        nativeInputRms: pcmRms(audio), nativeOutputRms: pcmRms(pcm),
         activeProcessAudioCallsAtStart: activeAtStart, activeCallsForEffectAtStart: activeForEffectAtStart, error: null,
       });
       return pcm;
@@ -106,6 +117,7 @@ function registerVst3({ app, ipcMain, dialog, getWindow }) {
       if (smokeProcessAudioTimings.length < 8192) smokeProcessAudioTimings.push({
         ...profile, frames, ipcReceivedAtMainMs: ipcTiming?.ipcReceivedAtMainMs ?? serviceStartAtMainMs,
         serviceStartAtMainMs, serviceCompletedAtMainMs, nativeServiceCallMs: serviceCompletedAtMainMs - serviceStartAtMainMs,
+        nativeInputRms: pcmRms(audio), nativeOutputRms: null,
         activeProcessAudioCallsAtStart: activeAtStart, activeCallsForEffectAtStart: activeForEffectAtStart,
         error: error instanceof Error ? error.message : String(error),
       });

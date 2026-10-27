@@ -216,7 +216,8 @@ function summarizeMixerTiming(events: ReturnType<typeof getNativeVst3MixerEffect
       rendererReceivedAtMs: received?.requestReceivedAt, rendererBridgeStartedAtMs: bridgeStart?.bridgeCallStartedAt,
       preloadInvokedAtMs: preloadRecord?.invokeStartedAt, preloadReturnedAtMs: preloadRecord?.responseReceivedAt,
       mainReceivedAtMs: mainRecord?.ipcReceivedAtMainMs, nativeStartedAtMs: mainRecord?.serviceStartAtMainMs,
-      nativeCompletedAtMs: mainRecord?.serviceCompletedAtMainMs, mainError: mainRecord?.error,
+      nativeCompletedAtMs: mainRecord?.serviceCompletedAtMainMs,
+      nativeInputRms: mainRecord?.nativeInputRms, nativeOutputRms: mainRecord?.nativeOutputRms, mainError: mainRecord?.error,
       rendererResponseAtMs: rendererResponse?.bridgeResponseAt, workletResultAtMs: result?.rendererAtMs,
       workletAccepted: result?.accepted, stopAck: stopAck ? { sequence: stopAck.sequence, reason: stopAck.reason } : null,
       stopCancellation: stopCancel ? { stage: stopCancel.cancellationStage, reason: stopCancel.reason } : null,
@@ -313,6 +314,7 @@ function correlatedTimingSamples(run: any) {
     Object.assign(sampleFor(event.requestId), {
       mainIpcReceivedAtMs: event.ipcReceivedAtMainMs, mainNativeServiceStartedAtMs: event.serviceStartAtMainMs,
       mainNativeServiceCompletedAtMs: event.serviceCompletedAtMainMs, nativeServiceCallMs: event.nativeServiceCallMs,
+      nativeServiceInputRms: event.nativeInputRms, nativeServiceOutputRms: event.nativeOutputRms,
       concurrentCallsForEffectAtStart: event.activeCallsForEffectAtStart, nativeServiceError: event.error,
     });
   }
@@ -466,11 +468,17 @@ async function runPackagedMixerAcceptance(instance: typeof audioEngine) {
   const acceptanceTimingEvidence = JSON.stringify(Object.fromEntries(Object.entries({ orderA, orderB, delayProcessed, delayPassThrough, removed })
     .map(([label, result]) => [label, { timing: result.timing, timingSamples: correlatedTimingSamples(result).slice(0, 16) }])));
   const alignmentWindow = Math.round(0.5 * orderA.sampleRate);
-  const orderDifference = compareMixerRuns(orderA, orderB, 1, alignmentWindow, 'order reversal');
-  const controlDifference = compareMixerRuns(orderA, orderB, 2, alignmentWindow, 'control-track isolation', 'run-frame');
+  let orderDifference: ReturnType<typeof compareMixerRuns>, controlDifference: ReturnType<typeof compareMixerRuns>;
+  let processedVsBypass: ReturnType<typeof compareMixerRuns>, bypassVsRemoved: ReturnType<typeof compareMixerRuns>;
+  try {
+    orderDifference = compareMixerRuns(orderA, orderB, 1, alignmentWindow, 'order reversal');
+    controlDifference = compareMixerRuns(orderA, orderB, 2, alignmentWindow, 'control-track isolation', 'run-frame');
+    processedVsBypass = compareMixerRuns(delayProcessed, delayPassThrough, 1, alignmentWindow, 'processed vs native bypass');
+    bypassVsRemoved = compareMixerRuns(delayPassThrough, removed, 1, alignmentWindow, 'native bypass vs removed insert');
+  } catch (error) {
+    throw new Error(`${error instanceof Error ? error.message : String(error)}; per-request input/output and timing evidence=${acceptanceTimingEvidence}`);
+  }
   const controlRmsDifference = Math.abs(orderA.trackRms['2'] - orderB.trackRms['2']);
-  const processedVsBypass = compareMixerRuns(delayProcessed, delayPassThrough, 1, alignmentWindow, 'processed vs native bypass');
-  const bypassVsRemoved = compareMixerRuns(delayPassThrough, removed, 1, alignmentWindow, 'native bypass vs removed insert');
   const controlTolerance = Math.max(0.005, orderA.trackRms['2'] * 0.15);
   const bypassOutputTolerance = Math.max(0.005, delayPassThrough.trackRms['1'] * 0.15);
   if ([orderA, orderB, delayProcessed, delayPassThrough, removed].some(result => result.trackRms['1'] <= 0.001 || result.trackRms['2'] <= 0.001)) {
