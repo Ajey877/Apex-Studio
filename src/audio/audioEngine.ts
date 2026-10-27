@@ -927,6 +927,17 @@ class AudioEngine {
     }
   }
 
+  private createAudioContext(): AudioContext {
+    const AudioContextClass = window.AudioContext || (window as unknown as WindowWithWebKitAudio).webkitAudioContext;
+    const options: AudioContextOptions = { latencyHint: 'interactive' };
+    // The explicit packaged smoke launch pins the realtime measurement to the
+    // requested 48 kHz reference; ordinary sessions continue using the device default.
+    if ((globalThis as typeof globalThis & { desktopApp?: { smokeTest?: boolean } }).desktopApp?.smokeTest === true) {
+      options.sampleRate = 48000;
+    }
+    return new AudioContextClass(options);
+  }
+
   public init() {
     if (this.shouldBlockLiveMutation() || this.isOfflineRendering) return;
     const isOffline = this.ctx && (typeof (this.ctx as any).startRendering === 'function' || (typeof OfflineAudioContext !== 'undefined' && this.ctx instanceof OfflineAudioContext));
@@ -945,8 +956,7 @@ class AudioEngine {
     // success. Discard them before the new context takes over.
     if (this.ctx) this.invalidateContextBoundAudioState();
 
-    const AudioContextClass = window.AudioContext || (window as unknown as WindowWithWebKitAudio).webkitAudioContext;
-    this.ctx = new AudioContextClass({ latencyHint: 'interactive' });
+    this.ctx = this.createAudioContext();
 
     // Master bus with the master amplitude gate
     this.masterGain = this.ctx.createGain();
@@ -1012,8 +1022,7 @@ class AudioEngine {
       return this.ctx;
     }
     if (!this.ctx) {
-      const AudioContextClass = window.AudioContext || (window as unknown as WindowWithWebKitAudio).webkitAudioContext;
-      this.ctx = new AudioContextClass({ latencyHint: 'interactive' });
+      this.ctx = this.createAudioContext();
     }
     const isOffline = typeof (this.ctx as any).startRendering === 'function' || (typeof OfflineAudioContext !== 'undefined' && this.ctx instanceof OfflineAudioContext);
     if (!isOffline && this.ctx.state === 'suspended') {
