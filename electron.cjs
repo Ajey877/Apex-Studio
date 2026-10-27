@@ -87,6 +87,15 @@ function createWindow() {
 
   if (process.env.APEX_SMOKE_TEST === '1') {
     let smokeFinished = false;
+    const describeSmokeError = error => {
+      if (!error || typeof error !== 'object') return String(error);
+      const name = typeof error.name === 'string' ? error.name : 'Error';
+      const message = typeof error.message === 'string' ? error.message : '';
+      const stack = typeof error.stack === 'string' ? error.stack : '';
+      if (message || stack) return `${name}: ${message}${stack ? `\n${stack}` : ''}`;
+      try { return JSON.stringify(error, Object.getOwnPropertyNames(error)); }
+      catch { return Object.prototype.toString.call(error); }
+    };
     const finishSmoke = (exitCode, reason) => {
       if (smokeFinished) return;
       smokeFinished = true;
@@ -138,7 +147,7 @@ function createWindow() {
         if (process.env.GITHUB_ACTIONS) console.log(`::notice title=Packaged VST3 live and production export proof::${JSON.stringify(vst3LogSummary)}`);
         finishSmoke(0, `packaged renderer loaded successfully: ${result.title}`);
       } catch (error) {
-        finishSmoke(1, `runtime check failed: ${error instanceof Error ? error.message : String(error)}`);
+        finishSmoke(1, `runtime check failed: ${describeSmokeError(error)}`);
       }
     });
   }
