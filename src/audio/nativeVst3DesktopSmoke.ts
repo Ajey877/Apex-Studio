@@ -69,7 +69,7 @@ function toPlanarPcm(blocks: MixerCaptureBlock[], startFrame = -Infinity, endFra
   return { left, right, frames, rms: samples ? Math.sqrt(square / samples) : 0, startFrame: selected[0]?.frame ?? null };
 }
 
-function findPcmAlignment(reference: PlanarPcm, candidate: PlanarPcm, maximumOffsetFrames: number): number {
+function findPcmAlignment(reference: PlanarPcm, candidate: PlanarPcm, maximumOffsetFrames: number, label: string): number {
   let bestOffset = 0, bestScore = -Infinity;
   const stride = 32, lagStep = 32;
   for (let offset = -maximumOffsetFrames; offset <= maximumOffsetFrames; offset += lagStep) {
@@ -85,7 +85,7 @@ function findPcmAlignment(reference: PlanarPcm, candidate: PlanarPcm, maximumOff
     const score = dot / Math.sqrt(Math.max(1e-30, refEnergy * candidateEnergy));
     if (score > bestScore) { bestScore = score; bestOffset = offset; }
   }
-  if (bestScore < 0.2) throw new Error(`Packaged Mixer PCM could not be aligned deterministically (correlation=${bestScore})`);
+  if (bestScore < 0.2) throw new Error(`${label} Mixer PCM could not be aligned deterministically (correlation=${bestScore}, referenceRms=${reference.rms}, candidateRms=${candidate.rms})`);
   return bestOffset;
 }
 
@@ -103,11 +103,11 @@ function alignedDifference(reference: PlanarPcm, candidate: PlanarPcm, offsetFra
     referenceRms: frames ? Math.sqrt(energy / (frames * 2)) : 0 };
 }
 
-function compareMixerRuns(reference: any, candidate: any, trackId: number, maximumOffsetFrames: number) {
+function compareMixerRuns(reference: any, candidate: any, trackId: number, maximumOffsetFrames: number, label: string) {
   const left = reference.pcm.get(trackId) as PlanarPcm | undefined;
   const right = candidate.pcm.get(trackId) as PlanarPcm | undefined;
   if (!left || !right || left.startFrame === null || right.startFrame === null) throw new Error(`Packaged Mixer capture missing track ${trackId} PCM`);
-  const offsetFrames = findPcmAlignment(left, right, maximumOffsetFrames);
+  const offsetFrames = findPcmAlignment(left, right, maximumOffsetFrames, `${label}, track ${trackId}`);
   const difference = alignedDifference(left, right, offsetFrames);
   const playbackStartDeltaFrames = candidate.startedContextFrame - reference.startedContextFrame;
   const normalizedLagFrames = right.startFrame + offsetFrames - left.startFrame - playbackStartDeltaFrames;
@@ -406,10 +406,10 @@ async function runPackagedMixerAcceptance(instance: typeof audioEngine) {
   const acceptanceTimingEvidence = JSON.stringify(Object.fromEntries(Object.entries({ orderA, orderB, delayProcessed, delayPassThrough, removed })
     .map(([label, result]) => [label, { timing: result.timing, timingSamples: correlatedTimingSamples(result).slice(0, 16) }])));
   const alignmentWindow = Math.round(0.5 * orderA.sampleRate);
-  const orderDifference = compareMixerRuns(orderA, orderB, 1, alignmentWindow);
+  const orderDifference = compareMixerRuns(orderA, orderB, 1, alignmentWindow, 'order reversal');
   const controlRmsDifference = Math.abs(orderA.trackRms['2'] - orderB.trackRms['2']);
-  const processedVsBypass = compareMixerRuns(delayProcessed, delayPassThrough, 1, alignmentWindow);
-  const bypassVsRemoved = compareMixerRuns(delayPassThrough, removed, 1, alignmentWindow);
+  const processedVsBypass = compareMixerRuns(delayProcessed, delayPassThrough, 1, alignmentWindow, 'processed vs native bypass');
+  const bypassVsRemoved = compareMixerRuns(delayPassThrough, removed, 1, alignmentWindow, 'native bypass vs removed insert');
   const controlTolerance = Math.max(0.005, orderA.trackRms['2'] * 0.15);
   const bypassOutputTolerance = Math.max(0.005, delayPassThrough.trackRms['1'] * 0.15);
   if ([orderA, orderB, delayProcessed, delayPassThrough, removed].some(result => result.trackRms['1'] <= 0.001 || result.trackRms['2'] <= 0.001)) {
