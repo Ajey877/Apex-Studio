@@ -127,15 +127,34 @@ function createWindow() {
             const audioReady = typeof AudioContext !== 'undefined' || typeof webkitAudioContext !== 'undefined';
             const deadline = Date.now() + 10000;
             while (!window.__apexVst3Smoke && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10));
-            if (!window.__apexVst3Smoke) throw new Error('Production native smoke entry did not initialize');
-            const vst3 = await window.__apexVst3Smoke;
-            return { bodyReady, indexedDbReady, audioReady, vst3, title: document.title };
+            try {
+              if (!window.__apexVst3Smoke) throw new Error('Production native smoke entry did not initialize');
+              const vst3 = await window.__apexVst3Smoke;
+              return { bodyReady, indexedDbReady, audioReady, vst3, title: document.title };
+            } catch (error) {
+              let detail;
+              if (error && typeof error === 'object') {
+                const message = typeof error.message === 'string' ? error.message : '';
+                const stack = typeof error.stack === 'string' ? error.stack : '';
+                try { detail = message || stack ? (error.name || 'Error') + ': ' + message + (stack ? '\n' + stack : '') : JSON.stringify(error, Object.getOwnPropertyNames(error)); }
+                catch { detail = String(error); }
+              } else detail = String(error);
+              return { bodyReady, indexedDbReady, audioReady, title: document.title, smokeError: String(detail || 'Unknown packaged smoke failure').slice(0, 40000) };
+            }
           })()
         `);
         const vst3LogSummary = result.vst3?.mixerEffects
           ? { ...result.vst3, mixerEffects: { ...result.vst3.mixerEffects, timingSamples: undefined } }
           : result.vst3;
         console.log('[Apex Studio smoke] runtime checks:', JSON.stringify({ ...result, vst3: vst3LogSummary }));
+        if (result.smokeError) {
+          if (process.env.APEX_SMOKE_EVIDENCE) {
+            fs.mkdirSync(path.dirname(process.env.APEX_SMOKE_EVIDENCE), { recursive: true });
+            fs.writeFileSync(process.env.APEX_SMOKE_EVIDENCE, JSON.stringify(result, null, 2));
+          }
+          finishSmoke(1, `runtime check failed: ${result.smokeError}`);
+          return;
+        }
         if (!result.bodyReady || !result.indexedDbReady || !result.audioReady) {
           finishSmoke(1, 'required packaged runtime capabilities are unavailable');
           return;
