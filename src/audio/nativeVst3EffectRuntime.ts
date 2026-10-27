@@ -106,7 +106,7 @@ class ApexVst3FxProcessor extends AudioWorkletProcessor {
       const processed = this.ready.get(sequence);
       const dry = this.dryReady.get(sequence);
       if (!processed || !dry) {
-        this.fail('Native effect output was not ready at its scheduled audio frame; playback stopped rather than using dry or stale audio.');
+        this.fail('Native effect output was not ready at its scheduled audio frame; playback stopped rather than using dry or stale audio. Sequence ' + sequence + ', source frame ' + sourceFrame + ', due output frame ' + (this.delayFrames + sequence * this.blockFrames) + ', current output frame ' + (this.outputFrame + i) + ', pending sequence ' + this.pending + '.');
         break;
       }
       out[0][i] = this.bypass ? dry[offset] : processed[offset];

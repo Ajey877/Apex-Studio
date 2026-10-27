@@ -92,7 +92,7 @@ async function persisted(page: Page) {
 }
 
 async function captureProductionMixer(page: Page) {
-  return page.evaluate(async () => {
+  const captured = await page.evaluate(async () => {
     // @ts-ignore actual application AudioEngine singleton
     const { audioEngine } = await import('/src/audio/audioEngine.ts');
     // @ts-ignore actual mastering state
@@ -142,6 +142,12 @@ async function captureProductionMixer(page: Page) {
     store[captureId] = output;
     return { captureId, tracks: Object.fromEntries(Object.entries(output).map(([id, value]) => [id, { rms: value.rms, frames: value.frames }])) };
   });
+  // The test starts/stops AudioEngine directly to tap its real Mixer analysers.
+  // Synchronize App's transport state through its actual Stop control so Mixer
+  // edit controls are enabled before subsequent assertions/gestures.
+  await page.getByRole('button', { name: 'Stop', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Play', exact: true })).toBeVisible();
+  return captured;
 }
 
 async function compareCapture(page: Page, leftId: string, rightId: string, trackId: string, rightOffsetFrames = 0) {
@@ -206,30 +212,6 @@ test('actual Mixer UI -> MDA inserts -> AudioEngine live capture, track isolatio
   ]));
   expect(slots[1].vst3Effect.state.parameters.find((parameter: any) => parameter.id === 0)?.value).toBe(0.2);
 
-  const orderA = await captureProductionMixer(page);
-  await page.getByTitle('Move effect earlier in chain').last().click();
-  await expect.poll(async () => (await persisted(page)).mixerTracks.find((track: any) => track.id === 1).fxSlots.map((slot: any) => slot.vst3Effect.name)).toEqual(['mda RezFilter', 'mda Delay']);
-  const orderB = await captureProductionMixer(page);
-  const track1OrderDifference = await compareCapture(page, orderA.captureId, orderB.captureId, '1');
-  expect(orderA.tracks['1']!.rms).toBeGreaterThan(1e-4);
-  expect(orderB.tracks['1']!.rms).toBeGreaterThan(1e-4);
-  expect(track1OrderDifference).toBeGreaterThan(1e-4);
-  const controlRmsDifference = Math.abs(orderA.tracks['2']!.rms - orderB.tracks['2']!.rms);
-  expect(orderA.tracks['2']!.rms).toBeGreaterThan(1e-4);
-  expect(controlRmsDifference).toBeLessThan(Math.max(0.005, orderA.tracks['2']!.rms * 0.15));
-
-  // Plugin bypass keeps both native FIFOs. Mixer-slot bypass removes the Delay
-  // node, so align the shorter capture by exactly its declared fixed pipeline
-  // buffer; this comparison does not claim inter-track compensation.
-  const delayBypass = page.getByRole('slider', { name: 'Bypass · mda Delay' });
-  await delayBypass.fill('1');
-  await page.getByRole('button', { name: 'Apply native parameters' }).nth(1).click();
-  const pluginBypass = await captureProductionMixer(page);
-  await page.getByRole('button', { name: 'Bypass mda Delay' }).click();
-  const slotBypass = await captureProductionMixer(page);
-  const bypassDifference = await compareCapture(page, pluginBypass.captureId, slotBypass.captureId, '1', VST3_FX_PIPELINE_FRAMES);
-  expect(bypassDifference).toBeLessThan(Math.max(0.02, pluginBypass.tracks['1']!.rms * 0.25));
-
   // Exercise the actual WAV production path, then decode the emitted WAV back
   // to PCM and compare it against the explicit dry-export choice.
   const exportProof = await page.evaluate(async () => {
@@ -285,6 +267,35 @@ test('actual Mixer UI -> MDA inserts -> AudioEngine live capture, track isolatio
   }, path.join(fixtureRoot, 'missing-native-mixer-effect.vst3'));
   expect(missingPluginFailure.message).toContain('VST3 plugin missing');
   expect(missingPluginFailure.savedPathUnchanged).toBe(true);
+
+  console.log('NATIVE_MIXER_EXPORT_AND_FAILURE_PROOF', JSON.stringify({ exportProof, missingPluginFailure }));
+
+  const orderA = await captureProductionMixer(page);
+  const rezFilterCard = page.getByRole('button', { name: 'Bypass mda RezFilter', exact: true }).locator('xpath=../../..');
+  const moveRezFilterEarlier = rezFilterCard.getByTitle('Move effect earlier in chain');
+  await expect(moveRezFilterEarlier).toBeEnabled();
+  await moveRezFilterEarlier.click();
+  await expect.poll(async () => (await persisted(page)).mixerTracks.find((track: any) => track.id === 1).fxSlots.map((slot: any) => slot.vst3Effect.name)).toEqual(['mda RezFilter', 'mda Delay']);
+  const orderB = await captureProductionMixer(page);
+  const track1OrderDifference = await compareCapture(page, orderA.captureId, orderB.captureId, '1');
+  expect(orderA.tracks['1']!.rms).toBeGreaterThan(1e-4);
+  expect(orderB.tracks['1']!.rms).toBeGreaterThan(1e-4);
+  expect(track1OrderDifference).toBeGreaterThan(1e-4);
+  const controlRmsDifference = Math.abs(orderA.tracks['2']!.rms - orderB.tracks['2']!.rms);
+  expect(orderA.tracks['2']!.rms).toBeGreaterThan(1e-4);
+  expect(controlRmsDifference).toBeLessThan(Math.max(0.005, orderA.tracks['2']!.rms * 0.15));
+
+  // Plugin bypass keeps both native FIFOs. Mixer-slot bypass removes the Delay
+  // node, so align the shorter capture by exactly its declared fixed pipeline
+  // buffer; this comparison does not claim inter-track compensation.
+  const delayBypass = page.getByRole('slider', { name: 'Bypass · mda Delay' });
+  await delayBypass.fill('1');
+  await page.getByRole('button', { name: 'Apply native parameters' }).nth(1).click();
+  const pluginBypass = await captureProductionMixer(page);
+  await page.getByRole('button', { name: 'Bypass mda Delay' }).click();
+  const slotBypass = await captureProductionMixer(page);
+  const bypassDifference = await compareCapture(page, pluginBypass.captureId, slotBypass.captureId, '1', VST3_FX_PIPELINE_FRAMES);
+  expect(bypassDifference).toBeLessThan(Math.max(0.02, pluginBypass.tracks['1']!.rms * 0.25));
 
   const proof = {
     plugins: ['mda Delay', 'mda RezFilter'],
