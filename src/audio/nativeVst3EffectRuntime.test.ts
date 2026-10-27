@@ -115,10 +115,22 @@ test('Mixer worklet does not consume its fixed pipeline delay before the first i
   assert.equal(processMessages(processor).length, 1);
 });
 
+test('Mixer worklet processes absent input as zero PCM after startup to preserve block sequencing', () => {
+  const { processor, next, sendResult } = createWorklet();
+  for (let i = 0; i < VST3_FX_BLOCK_FRAMES / 128; i++) next();
+  sendResult(0);
+  for (let i = 0; i < VST3_FX_BLOCK_FRAMES / 128; i++) next(false);
+  assert.equal(processor.failed, false);
+  assert.deepEqual(processMessages(processor).map((message: any) => message.sequence), [0, 1]);
+  assert.equal(processor.pending, 1);
+  assert.equal(processor.outputFrame, VST3_FX_PIPELINE_FRAMES);
+});
+
 test('Mixer worklet reports an output deadline miss when no matching processed PCM is ready at its due frame', () => {
   const { processor, next } = createWorklet();
   for (let i = 0; i < VST3_FX_BLOCK_FRAMES / 128; i++) next();
-  while (processor.outputFrame < VST3_FX_PIPELINE_FRAMES) next(false);
+  // Simulate the output cursor reaching the scheduled due frame before a result arrives.
+  processor.outputFrame = VST3_FX_PIPELINE_FRAMES;
   next(false);
   assert.equal(processor.failed, true);
   assert.equal(profileMessages(processor, 'deadline-miss').length, 1);

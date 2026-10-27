@@ -66,6 +66,7 @@ class ApexVst3FxProcessor extends AudioWorkletProcessor {
     this.delayFrames = ${VST3_FX_PIPELINE_FRAMES};
     this.left = new Float32Array(this.blockFrames);
     this.right = new Float32Array(this.blockFrames);
+    this.silentInput = new Float32Array(128);
     this.fill = 0;
     this.inputFrame = 0;
     this.outputFrame = 0;
@@ -107,7 +108,7 @@ class ApexVst3FxProcessor extends AudioWorkletProcessor {
     for (const channel of out) channel.fill(0);
     if (this.failed) return true;
     const input = inputs[0];
-    const left = input?.[0], right = input?.[1] || left;
+    let left = input?.[0], right = input?.[1] || left;
     // The processor can be constructed well before playback connects its first
     // source. Do not burn the fixed pipeline delay on pre-roll silence: anchor
     // its frame timeline to the first actual input quantum instead.
@@ -115,6 +116,10 @@ class ApexVst3FxProcessor extends AudioWorkletProcessor {
       if (!left || !right) return true;
       this.nodeStartContextFrame = currentFrame;
     }
+    // Once active, disconnected/ended sources are timeline silence, not a gap
+    // in the 1024-frame request stream. Reuse one zero quantum (no RT allocation)
+    // so plugin tails drain and output sequence/deadline accounting stays exact.
+    if (!left || !right) left = right = this.silentInput;
     if (left && right) {
       for (let i = 0; i < left.length; i++) {
         this.left[this.fill] = left[i];
