@@ -106,9 +106,9 @@ async function captureProductionMixer(page: Page) {
     const context = audioEngine.getContext();
     await context.resume();
     const source = `class ApexMixerAcceptanceCapture extends AudioWorkletProcessor {
-      constructor(){super();this.left=new Float32Array(1024);this.right=new Float32Array(1024);this.fill=0;}
+      constructor(){super();this.left=new Float32Array(1024);this.right=new Float32Array(1024);this.fill=0;this.capture=false;this.port.onmessage=event=>{this.capture=event.data==='start';};}
       process(inputs,outputs){const input=inputs[0],out=outputs[0];if(out)for(const channel of out)channel.fill(0);
-        const l=input&&input[0],r=input&&(input[1]||input[0]);if(!l||!r)return true;
+        if(!this.capture)return true;const l=input&&input[0],r=input&&(input[1]||input[0]);if(!l||!r)return true;
         for(let i=0;i<l.length;i++){this.left[this.fill]=l[i];this.right[this.fill]=r[i];if(++this.fill===1024){const pcm=new Float32Array(2048);pcm.set(this.left);pcm.set(this.right,1024);this.port.postMessage(pcm,[pcm.buffer]);this.fill=0;}}
         return true;}
     } registerProcessor('apex-mixer-acceptance-capture',ApexMixerAcceptanceCapture);`;
@@ -125,7 +125,10 @@ async function captureProductionMixer(page: Page) {
       captures.set(trackId, { blocks, node, silent });
     }
     await audioEngine.play(state.channels, [], 'pat', undefined, state.mixerTracks, 16);
+    for (const capture of captures.values()) capture.node.port.postMessage('start');
     await new Promise(resolve => setTimeout(resolve, 1800));
+    for (const capture of captures.values()) capture.node.port.postMessage('stop');
+    await new Promise(resolve => setTimeout(resolve, 20));
     audioEngine.stop();
     await audioEngine.releaseNativeInstruments();
     await new Promise(resolve => setTimeout(resolve, 80));
