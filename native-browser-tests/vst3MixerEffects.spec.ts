@@ -61,7 +61,7 @@ async function setupProject(page: Page) {
       ...source, id, name, instrumentType: 'minisynth', mixerTrackId, volume: 1, pan: 0, mute: false, solo: false,
       steps: Array(16).fill(false), notes: [{ id: `${id}-note`, pitch, start: 0, duration, velocity: 0.8 }],
     });
-    state.channels = [makeChannel('mixer-fx-target', 'VST3 target signal', 1, 60, 8), makeChannel('mixer-fx-isolation', 'Unprocessed control signal', 2, 67, 16)];
+    state.channels = [makeChannel('mixer-fx-target', 'VST3 target signal', 1, 60, 16), makeChannel('mixer-fx-isolation', 'Unprocessed control signal', 2, 67, 16)];
     state.mixerTracks = state.mixerTracks.map((track: any) => ({ ...track,
       volume: 1, pan: 0, mute: false, solo: false, fxSlots: [], routingTargetId: 0, auxSends: undefined,
     }));
@@ -125,6 +125,7 @@ async function captureProductionMixer(page: Page) {
       captures.set(trackId, { blocks, node, silent });
     }
     await audioEngine.play(state.channels, [], 'pat', undefined, state.mixerTracks, 16);
+    await new Promise(resolve => setTimeout(resolve, 200));
     const playbackActiveAtCaptureStart = audioEngine.isPlaybackActive();
     for (const capture of captures.values()) capture.node.port.postMessage('start');
     await new Promise(resolve => setTimeout(resolve, 1800));

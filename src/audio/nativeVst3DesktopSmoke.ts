@@ -271,12 +271,13 @@ async function captureLiveMixerRun(instance: typeof audioEngine, channels: Chann
   await context.resume();
   const taps = new Map<number, MixerCapture>();
   for (const trackId of [1, 2]) taps.set(trackId, await attachMixerCapture(instance, trackId));
-  const runtimeStart = getNativeVst3MixerEffectSmokeTiming().length;
   const smokeApi = (globalThis as any).desktopApp?.vst3;
   if (typeof smokeApi?.smokeTimingSnapshot !== 'function') throw new Error('Smoke-only production IPC timing snapshot is unavailable');
-  const ipcBefore = await smokeApi.smokeTimingSnapshot();
   await instance.play(channels, [], 'pat', undefined, mixer, 16);
   await context.resume();
+  await new Promise(resolve => setTimeout(resolve, 200));
+  const runtimeStart = getNativeVst3MixerEffectSmokeTiming().length;
+  const ipcBefore = await smokeApi.smokeTimingSnapshot();
   const startedAt = performance.now();
   const startedContextFrame = Math.round(context.currentTime * context.sampleRate);
   await new Promise(resolve => setTimeout(resolve, durationMs));
@@ -371,7 +372,7 @@ async function runPackagedMixerAcceptance(instance: typeof audioEngine) {
   const channels: Channel[] = [
     { ...source, id: 'packaged-mixer-target', name: 'Packaged Mixer VST3 target', instrumentType: 'minisynth', vst3: undefined,
       mixerTrackId: 1, volume: 1, pan: 0, mute: false, solo: false, steps: Array(16).fill(false),
-      notes: [{ id: 'packaged-mixer-target-note', pitch: 60, start: 0, duration: 8, velocity: 0.8 }] },
+      notes: [{ id: 'packaged-mixer-target-note', pitch: 60, start: 0, duration: 16, velocity: 0.8 }] },
     { ...source, id: 'packaged-mixer-control', name: 'Packaged Mixer unaffected control', instrumentType: 'minisynth', vst3: undefined,
       mixerTrackId: 2, volume: 1, pan: 0, mute: false, solo: false, steps: Array(16).fill(false),
       notes: [{ id: 'packaged-mixer-control-note', pitch: 67, start: 0, duration: 16, velocity: 0.8 }] },
