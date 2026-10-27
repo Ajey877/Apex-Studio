@@ -2,7 +2,6 @@ import { test, expect, type Page } from '@playwright/test';
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { Vst3Service } from '../native/vst3/service.mjs';
-import { VST3_FX_PIPELINE_FRAMES } from '../src/audio/nativeVst3EffectRuntime';
 
 const build = path.resolve('build/native-vst3');
 const hostName = process.platform === 'win32' ? 'apex-vst3-host.exe' : 'apex-vst3-host';
@@ -10,6 +9,7 @@ const executable = [path.join(build, 'bin', hostName), path.join(build, 'bin/Rel
 if (!executable) throw new Error('Build the native helper and redistributable MDA VST3 fixtures before Mixer-effect browser tests');
 const fixtureRoot = path.join(build, 'VST3/Release');
 let service: Vst3Service;
+// This spec owns actual UI/state/history and offline export integration. Live Mixer PCM and timing are accepted only in the packaged Electron smoke through production IPC/preload.
 test.beforeEach(() => { service = new Vst3Service(executable!, [fixtureRoot]); });
 test.afterEach(async () => { await service.dispose(); });
 
@@ -91,90 +91,7 @@ async function persisted(page: Page) {
   });
 }
 
-async function captureProductionMixer(page: Page) {
-  const captured = await page.evaluate(async () => {
-    // @ts-ignore actual application AudioEngine singleton
-    const { audioEngine } = await import('/src/audio/audioEngine.ts');
-    // @ts-ignore actual mastering state
-    const { DEFAULT_MASTERING_SUITE_STATE } = await import('/src/audio/masteringState.ts');
-    // @ts-ignore read the actual persisted project snapshot
-    const { getPersistedProjectStateRecord } = await import('/src/audio/audioPersistence.ts');
-    const state = JSON.parse(await getPersistedProjectStateRecord()).state;
-    audioEngine.init();
-    audioEngine.setMasteringState({ ...DEFAULT_MASTERING_SUITE_STATE, enabled: false });
-    audioEngine.setBpm(120);
-    const context = audioEngine.getContext();
-    await context.resume();
-    const source = `class ApexMixerAcceptanceCapture extends AudioWorkletProcessor {
-      constructor(){super();this.left=new Float32Array(1024);this.right=new Float32Array(1024);this.fill=0;this.capture=false;this.port.onmessage=event=>{this.capture=event.data==='start';};}
-      process(inputs,outputs){const input=inputs[0],out=outputs[0];if(out)for(const channel of out)channel.fill(0);
-        if(!this.capture)return true;const l=input&&input[0],r=input&&(input[1]||input[0]);if(!l||!r)return true;
-        for(let i=0;i<l.length;i++){this.left[this.fill]=l[i];this.right[this.fill]=r[i];if(++this.fill===1024){const pcm=new Float32Array(2048);pcm.set(this.left);pcm.set(this.right,1024);this.port.postMessage(pcm,[pcm.buffer]);this.fill=0;}}
-        return true;}
-    } registerProcessor('apex-mixer-acceptance-capture',ApexMixerAcceptanceCapture);`;
-    const url = URL.createObjectURL(new Blob([source], { type: 'application/javascript' }));
-    try { await context.audioWorklet.addModule(url); } finally { URL.revokeObjectURL(url); }
-    const captures = new Map<number, { blocks: Float32Array[]; node: AudioWorkletNode; silent: GainNode }>();
-    for (const trackId of [1, 2]) {
-      const mixer = audioEngine.getOrCreateMixerChannel(trackId);
-      const node = new AudioWorkletNode(context, 'apex-mixer-acceptance-capture', { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [2], channelCount: 2, channelCountMode: 'explicit' });
-      const blocks: Float32Array[] = [];
-      node.port.onmessage = event => { if (event.data instanceof Float32Array) blocks.push(event.data); };
-      const silent = context.createGain(); silent.gain.value = 0;
-      mixer.analyser.connect(node); node.connect(silent); silent.connect(context.destination);
-      captures.set(trackId, { blocks, node, silent });
-    }
-    await audioEngine.play(state.channels, [], 'pat', undefined, state.mixerTracks, 16);
-    await new Promise(resolve => setTimeout(resolve, 200));
-    const playbackActiveAtCaptureStart = audioEngine.isPlaybackActive();
-    for (const capture of captures.values()) capture.node.port.postMessage('start');
-    await new Promise(resolve => setTimeout(resolve, 1800));
-    for (const capture of captures.values()) capture.node.port.postMessage('stop');
-    await new Promise(resolve => setTimeout(resolve, 20));
-    audioEngine.stop();
-    await audioEngine.releaseNativeInstruments();
-    await new Promise(resolve => setTimeout(resolve, 80));
-    const output: Record<string, { rms: number; frames: number; pcm: Float32Array[] }> = {};
-    for (const [trackId, capture] of captures) {
-      capture.node.port.close(); capture.node.disconnect(); capture.silent.disconnect();
-      const samples = capture.blocks;
-      let square = 0, count = 0;
-      for (const block of samples) for (const sample of block) { square += sample * sample; count++; }
-      output[String(trackId)] = { rms: count ? Math.sqrt(square / count) : 0, frames: count / 2, pcm: samples };
-    }
-    // @ts-ignore inspect diagnostics from the production Mixer effect runtime
-    const { getVst3MixerEffectDiagnostics } = await import('/src/audio/nativeVst3EffectRuntime.ts');
-    const captureId = crypto.randomUUID();
-    const store = (window as any).__nativeMixerFxCaptures ??= {};
-    store[captureId] = output;
-    return { captureId, playbackActiveAtCaptureStart, mixerDiagnostics: getVst3MixerEffectDiagnostics(),
-      tracks: Object.fromEntries(Object.entries(output).map(([id, value]) => [id, { rms: value.rms, frames: value.frames }])) };
-  });
-  // The test starts/stops AudioEngine directly to tap its real Mixer analysers.
-  // Synchronize App's transport state through its actual Stop control so Mixer
-  // edit controls are enabled before subsequent assertions/gestures.
-  await page.getByRole('button', { name: 'Stop', exact: true }).click();
-  await expect(page.getByRole('button', { name: 'Play', exact: true })).toBeVisible();
-  return captured;
-}
-
-async function compareCapture(page: Page, leftId: string, rightId: string, trackId: string, rightOffsetFrames = 0) {
-  return page.evaluate(({ leftId, rightId, trackId, rightOffsetFrames }) => {
-    const store = (window as any).__nativeMixerFxCaptures;
-    const left = store?.[leftId]?.[trackId]?.pcm as Float32Array[] | undefined;
-    const right = store?.[rightId]?.[trackId]?.pcm as Float32Array[] | undefined;
-    if (!left || !right) throw new Error('PCM capture was not retained in the browser test page');
-    const a = left.flatMap(block => Array.from(block)), b = right.flatMap(block => Array.from(block));
-    const offsetSamples = rightOffsetFrames * 2;
-    const count = Math.min(a.length, b.length - offsetSamples);
-    let sum = 0;
-    for (let index = 0; index < count; index++) sum += (a[index]! - b[index + offsetSamples]!) ** 2;
-    delete store[leftId]; delete store[rightId];
-    return count ? Math.sqrt(sum / count) : 0;
-  }, { leftId, rightId, trackId, rightOffsetFrames });
-}
-
-test('actual Mixer UI -> MDA inserts -> AudioEngine live capture, track isolation, order, bypass, persistence and undo/redo', async ({ page }) => {
+test('actual Mixer UI -> MDA inserts -> order/persistence, undo/redo, production export and missing-plugin safety', async ({ page }) => {
   test.setTimeout(120000);
   await setupProject(page);
   await addEffect(page, 'mda Delay');
@@ -278,41 +195,50 @@ test('actual Mixer UI -> MDA inserts -> AudioEngine live capture, track isolatio
 
   console.log('NATIVE_MIXER_EXPORT_AND_FAILURE_PROOF', JSON.stringify({ exportProof, missingPluginFailure }));
 
-  const orderA = await captureProductionMixer(page);
+  const originalOrder = ['mda Delay', 'mda RezFilter'];
   const rezFilterCard = page.getByRole('button', { name: 'Bypass mda RezFilter', exact: true }).locator('xpath=../../..');
   const moveRezFilterEarlier = rezFilterCard.getByTitle('Move effect earlier in chain');
   await expect(moveRezFilterEarlier).toBeEnabled();
   await moveRezFilterEarlier.click();
-  await expect.poll(async () => (await persisted(page)).mixerTracks.find((track: any) => track.id === 1).fxSlots.map((slot: any) => slot.vst3Effect.name)).toEqual(['mda RezFilter', 'mda Delay']);
-  const orderB = await captureProductionMixer(page);
-  expect(orderA.tracks['1']!.rms, `order A production capture: ${JSON.stringify(orderA)}`).toBeGreaterThan(1e-4);
-  expect(orderB.tracks['1']!.rms, `order B production capture: ${JSON.stringify(orderB)}`).toBeGreaterThan(1e-4);
-  const track1OrderDifference = await compareCapture(page, orderA.captureId, orderB.captureId, '1');
-  expect(track1OrderDifference).toBeGreaterThan(1e-4);
-  const controlRmsDifference = Math.abs(orderA.tracks['2']!.rms - orderB.tracks['2']!.rms);
-  expect(orderA.tracks['2']!.rms, `control capture: ${JSON.stringify(orderA)}`).toBeGreaterThan(1e-4);
-  expect(controlRmsDifference).toBeLessThan(Math.max(0.005, orderA.tracks['2']!.rms * 0.15));
+  const reversedOrder = ['mda RezFilter', 'mda Delay'];
+  await expect.poll(async () => (await persisted(page)).mixerTracks.find((track: any) => track.id === 1).fxSlots.map((slot: any) => slot.vst3Effect.name)).toEqual(reversedOrder);
+  await page.getByRole('menuitem', { name: 'Edit', exact: true }).click();
+  await page.getByRole('menuitem', { name: /^Undo/ }).click();
+  await expect.poll(async () => (await persisted(page)).mixerTracks.find((track: any) => track.id === 1).fxSlots.map((slot: any) => slot.vst3Effect.name)).toEqual(originalOrder);
+  await page.getByRole('menuitem', { name: 'Edit', exact: true }).click();
+  await page.getByRole('menuitem', { name: /^Redo/ }).click();
+  await expect.poll(async () => (await persisted(page)).mixerTracks.find((track: any) => track.id === 1).fxSlots.map((slot: any) => slot.vst3Effect.name)).toEqual(reversedOrder);
 
-  // Plugin bypass keeps both native FIFOs. Mixer-slot bypass removes the Delay
-  // node, so align the shorter capture by exactly its declared fixed pipeline
-  // buffer; this comparison does not claim inter-track compensation.
+  // Browser assertions intentionally stop at UI/state/history and offline WAV
+  // export. Real-time PCM/order/isolation/bypass/deadline/stop-restart acceptance
+  // is owned by the packaged Electron smoke through production preload IPC.
   const delayBypass = page.getByRole('slider', { name: 'Bypass · mda Delay' });
   await delayBypass.fill('1');
   await page.getByRole('button', { name: 'Apply native parameters' }).nth(1).click();
-  const pluginBypass = await captureProductionMixer(page);
+  await expect.poll(async () => (await persisted(page)).mixerTracks.find((track: any) => track.id === 1).fxSlots
+    .find((slot: any) => slot.vst3Effect.name === 'mda Delay').vst3Effect.state.parameters.find((p: any) => p.id === 4)?.value).toBe(0);
   await page.getByRole('button', { name: 'Bypass mda Delay' }).click();
-  const slotBypass = await captureProductionMixer(page);
-  const bypassDifference = await compareCapture(page, pluginBypass.captureId, slotBypass.captureId, '1', VST3_FX_PIPELINE_FRAMES);
-  expect(bypassDifference).toBeLessThan(Math.max(0.02, pluginBypass.tracks['1']!.rms * 0.25));
+  await expect.poll(async () => (await persisted(page)).mixerTracks.find((track: any) => track.id === 1).fxSlots
+    .find((slot: any) => slot.vst3Effect.name === 'mda Delay').enabled).toBe(false);
+  await page.getByRole('menuitem', { name: 'Edit', exact: true }).click();
+  await page.getByRole('menuitem', { name: /^Undo/ }).click();
+  await expect.poll(async () => (await persisted(page)).mixerTracks.find((track: any) => track.id === 1).fxSlots
+    .find((slot: any) => slot.vst3Effect.name === 'mda Delay').enabled).toBe(true);
+  await page.getByRole('menuitem', { name: 'Edit', exact: true }).click();
+  await page.getByRole('menuitem', { name: /^Redo/ }).click();
+  await expect.poll(async () => (await persisted(page)).mixerTracks.find((track: any) => track.id === 1).fxSlots
+    .find((slot: any) => slot.vst3Effect.name === 'mda Delay').enabled).toBe(false);
+  await page.reload();
+  const reloaded = await persisted(page);
+  const reloadedTrack = reloaded.mixerTracks.find((track: any) => track.id === 1);
+  expect(reloadedTrack.fxSlots.map((slot: any) => slot.vst3Effect.name)).toEqual(reversedOrder);
+  expect(reloadedTrack.fxSlots.find((slot: any) => slot.vst3Effect.name === 'mda Delay').enabled).toBe(false);
 
   const proof = {
     plugins: ['mda Delay', 'mda RezFilter'],
-    liveOrderDifferenceRms: track1OrderDifference,
-    unaffectedTrackRmsBefore: orderA.tracks['2']!.rms,
-    unaffectedTrackRmsAfter: orderB.tracks['2']!.rms,
-    bypassDifferenceRms: bypassDifference,
-    savedParametersAndUndoRedoReopen: true,
-    capture: 'production AudioClockTransport and live Mixer track AnalyserNode tapped by a test-only PCM AudioWorklet; input is scheduled project MiniSynth note data',
+    savedOrderUndoRedoReload: { originalOrder, reversedOrder, exact: reloadedTrack.fxSlots.map((slot: any) => slot.vst3Effect.name) },
+    bypassParameterAndSlotStateUndoRedoReload: true,
+    browserScope: 'Actual Mixer UI/plugin discovery/parameter persistence/history plus production WAV export only; no live-path performance claim from page.exposeFunction.',
     processedProductionWav: exportProof,
     missingPluginExportFailure: missingPluginFailure,
   };

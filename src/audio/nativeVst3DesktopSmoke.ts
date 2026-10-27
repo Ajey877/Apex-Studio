@@ -121,39 +121,44 @@ function distribution(values: number[]) {
   return { count: sorted.length, medianMs: percentile(0.5), p95Ms: percentile(0.95), maxMs: sorted[sorted.length - 1]! };
 }
 
-function summarizeMixerTiming(events: ReturnType<typeof getNativeVst3MixerEffectSmokeTiming>, ipc: any, sampleRate: number, captureDurationMs: number, stopRequestedAtRendererMs: number) {
-  const submissions = new Map(events.filter(event => event.event === 'worklet-submit' && typeof event.requestId === 'string').map(event => [event.requestId!, event]));
+function summarizeMixerTiming(events: ReturnType<typeof getNativeVst3MixerEffectSmokeTiming>, ipc: any, sampleRate: number, captureDurationMs: number, captureStartRendererMs: number, captureEndRendererMs: number, stopRequestedAtRendererMs: number) {
+  const allSubmissions = new Map(events.filter(event => event.event === 'worklet-submit' && typeof event.requestId === 'string')
+    .map(event => [event.requestId!, event]));
+  const submissions = new Map([...allSubmissions].filter(([, event]) =>
+    Number.isFinite(Number(event.rendererAtMs)) && Number(event.rendererAtMs) >= captureStartRendererMs &&
+    Number(event.rendererAtMs) < captureEndRendererMs));
   const isMeasuredRequest = (requestId: unknown): requestId is string => typeof requestId === 'string' && submissions.has(requestId);
-  const results = new Map(events.filter(event => event.event === 'worklet-result' && isMeasuredRequest(event.requestId)).map(event => [event.requestId!, event]));
-  const rendererResponses = new Map(events.filter(event => event.event === 'renderer-bridge-response' && isMeasuredRequest(event.requestId)).map(event => [event.requestId!, event]));
-  const preload = new Map<string, any>((ipc?.preload ?? []).filter((event: any) => isMeasuredRequest(event.requestId)).map((event: any) => [event.requestId, event]));
-  const main = new Map<string, any>((ipc?.main?.processAudio ?? []).filter((event: any) => isMeasuredRequest(event.requestId)).map((event: any) => [event.requestId, event]));
+  const mapByRequestId = (records: Array<Record<string, any>> | undefined) => new Map((records ?? [])
+    .filter(record => typeof record.requestId === 'string').map(record => [record.requestId, record]));
+  const allResults = mapByRequestId(events.filter(event => event.event === 'worklet-result'));
+  const results = new Map([...allResults].filter(([id]) => isMeasuredRequest(id)));
+  const allRendererResponses = mapByRequestId(events.filter(event => event.event === 'renderer-bridge-response'));
+  const rendererResponses = new Map([...allRendererResponses].filter(([id]) => isMeasuredRequest(id)));
+  const allPreload = mapByRequestId(ipc?.preload);
+  const preload = new Map([...allPreload].filter(([id]) => isMeasuredRequest(id)));
+  const allMain = mapByRequestId(ipc?.main?.processAudio);
+  const main = new Map([...allMain].filter(([id]) => isMeasuredRequest(id)));
   const requestEvents = new Map(events.filter(event => event.event === 'renderer-request-received' && isMeasuredRequest(event.requestId)).map(event => [event.requestId!, event]));
-  const bridgeStarts = new Map(events.filter(event => event.event === 'renderer-bridge-call-start' && isMeasuredRequest(event.requestId)).map(event => [event.requestId!, event]));
+  const allBridgeStarts = new Map(events.filter(event => event.event === 'renderer-bridge-call-start' && typeof event.requestId === 'string').map(event => [event.requestId!, event]));
+  const bridgeStarts = new Map([...allBridgeStarts].filter(([id]) => isMeasuredRequest(id)));
+  const stopAcks = new Map(events.filter(event => event.event === 'worklet-stop-ack' && event.cancelled === true && event.reason === 'explicit-stop' && typeof event.requestId === 'string')
+    .map(event => [event.requestId!, event]));
+  const rendererStopCancellations = new Map(events.filter(event => event.event === 'renderer-request-cancelled-at-stop' && typeof event.requestId === 'string')
+    .map(event => [event.requestId!, event]));
   const stopCancellationWindowMs = VST3_FX_BLOCK_FRAMES * 1000 / sampleRate + 2;
   const nativeCancelledAtStopRequestIds = new Set<string>();
-  const rendererDiscardedAtStopRequestIds = new Set<string>();
-  const unexpectedDisposalDiscardRequestIds = new Set<string>();
-  for (const [requestId, timing] of main) {
-    const start = bridgeStarts.get(requestId);
+  for (const [requestId, timing] of allMain) {
+    const start = allBridgeStarts.get(requestId);
     const ageAtStopMs = stopRequestedAtRendererMs - Number(start?.bridgeCallStartedAt);
-    if (timing.error === 'VST3 instance cancelled' && !rendererResponses.has(requestId) &&
-        Number.isFinite(ageAtStopMs) && ageAtStopMs >= 0 && ageAtStopMs <= stopCancellationWindowMs) {
+    if (timing.error === 'VST3 instance cancelled' && Number.isFinite(ageAtStopMs) &&
+        ageAtStopMs >= 0 && ageAtStopMs <= stopCancellationWindowMs && stopAcks.has(requestId)) {
       nativeCancelledAtStopRequestIds.add(requestId);
     }
   }
-  for (const event of events.filter(event => event.event === 'result-discarded-after-disposal' && isMeasuredRequest(event.requestId))) {
-    const start = bridgeStarts.get(event.requestId!);
-    const ageAtStopMs = stopRequestedAtRendererMs - Number(start?.bridgeCallStartedAt);
-    const responseAgeMs = Number(event.rendererAtMs) - stopRequestedAtRendererMs;
-    if (Number.isFinite(ageAtStopMs) && ageAtStopMs >= 0 && ageAtStopMs <= stopCancellationWindowMs &&
-        Number.isFinite(responseAgeMs) && responseAgeMs >= 0 && responseAgeMs <= stopCancellationWindowMs) {
-      rendererDiscardedAtStopRequestIds.add(event.requestId!);
-    } else {
-      unexpectedDisposalDiscardRequestIds.add(event.requestId!);
-    }
-  }
-  const stopCancelledRequestIds = new Set([...nativeCancelledAtStopRequestIds, ...rendererDiscardedAtStopRequestIds]);
+  const workletCancelledAtStopRequestIds = new Set(stopAcks.keys());
+  const rendererDiscardedAtStopRequestIds = new Set([...rendererStopCancellations]
+    .filter(([requestId]) => stopAcks.has(requestId)).map(([requestId]) => requestId));
+  const stopCancelledRequestIds = new Set([...workletCancelledAtStopRequestIds, ...nativeCancelledAtStopRequestIds, ...rendererDiscardedAtStopRequestIds]);
   const workletReceiptMs: number[] = [], rendererDispatchMs: number[] = [], rendererQueueWaitMs: number[] = [];
   const rendererBridgeRoundTripMs: number[] = [], preloadIpcRttMs: number[] = [], mainDispatchMs: number[] = [], helperServiceMs: number[] = [];
   const scheduledOutputSlackMs: number[] = [];
@@ -190,14 +195,52 @@ function summarizeMixerTiming(events: ReturnType<typeof getNativeVst3MixerEffect
   }
   const queueDepths = [...requestEvents.values()].map(event => Number(event.queueDepth)).filter(Number.isFinite);
   const blocks = [...main.values()].filter((event: any) => !event.error).length;
+  const stopAckTimeouts = events.filter(event => event.event === 'renderer-stop-ack-timeout' && event.reason === 'explicit-stop').length;
+  const lifecycleFor = (requestId: string, submit: Record<string, any>) => {
+    const result = allResults.get(requestId), mainRecord = allMain.get(requestId), preloadRecord = allPreload.get(requestId);
+    const rendererResponse = allRendererResponses.get(requestId), stopAck = stopAcks.get(requestId), stopCancel = rendererStopCancellations.get(requestId);
+    const received = events.find(event => event.event === 'renderer-request-received' && event.requestId === requestId);
+    const bridgeStart = events.find(event => event.event === 'renderer-bridge-call-start' && event.requestId === requestId);
+    const phase = Number(submit.rendererAtMs) < captureStartRendererMs ? 'before-capture' :
+      Number(submit.rendererAtMs) >= captureEndRendererMs ? 'stop-boundary' : 'measured-capture';
+    const complete = mainRecord && !mainRecord.error && preloadRecord && rendererResponse && result?.accepted === true;
+    return {
+      requestId, sequence: submit.sequence, trackId: submit.trackId, slotId: submit.slotId, phase,
+      rendererSubmitAtMs: submit.rendererAtMs, inputBlockStartContextFrame: submit.inputBlockStartContextFrame,
+      dueContextFrame: submit.dueContextFrame,
+      rendererReceivedAtMs: received?.requestReceivedAt, rendererBridgeStartedAtMs: bridgeStart?.bridgeCallStartedAt,
+      preloadInvokedAtMs: preloadRecord?.invokeStartedAt, preloadReturnedAtMs: preloadRecord?.responseReceivedAt,
+      mainReceivedAtMs: mainRecord?.ipcReceivedAtMainMs, nativeStartedAtMs: mainRecord?.serviceStartAtMainMs,
+      nativeCompletedAtMs: mainRecord?.serviceCompletedAtMainMs, mainError: mainRecord?.error,
+      rendererResponseAtMs: rendererResponse?.bridgeResponseAt, workletResultAtMs: result?.rendererAtMs,
+      workletAccepted: result?.accepted, stopAck: stopAck ? { sequence: stopAck.sequence, reason: stopAck.reason } : null,
+      stopCancellation: stopCancel ? { stage: stopCancel.cancellationStage, reason: stopCancel.reason } : null,
+      accounted: !!complete || (!!stopAck && (!mainRecord?.error || nativeCancelledAtStopRequestIds.has(requestId))),
+    };
+  };
+  const allLifecycle = [...allSubmissions].map(([id, submit]) => lifecycleFor(id, submit));
+  const unaccountedRequests = allLifecycle.filter(item => !item.accounted);
+  const preCaptureRequests = allLifecycle.filter(item => item.phase === 'before-capture');
+  const teardownRequests = allLifecycle.filter(item => item.phase === 'stop-boundary');
+  const measuredIds = new Set(submissions.keys());
+  const measuredAckIds = new Set([...stopAcks.keys()].filter(id => measuredIds.has(id)));
+  const measuredRuntimeCancelledBeforeNative = [...measuredAckIds].filter(id => !main.has(id)).length;
+  const teardownIds = new Set(teardownRequests.map(item => item.requestId));
+  const teardownCancelledBlocks = [...stopAcks.keys()].filter(id => teardownIds.has(id)).length;
   return {
     blockFrames: VST3_FX_BLOCK_FRAMES, pipelineFramesPerEffect: VST3_FX_PIPELINE_FRAMES,
     blockPeriodMs: VST3_FX_BLOCK_FRAMES * 1000 / sampleRate,
-    captureDurationMs, processingBlocks: blocks, acceptedWorkletResults: acceptedResults,
-    submittedBlocks: submissions.size, cancelledAtStopBlocks: stopCancelledRequestIds.size,
-    nativeCancelledAtStopBlocks: nativeCancelledAtStopRequestIds.size,
-    rendererDiscardedAtStopBlocks: rendererDiscardedAtStopRequestIds.size,
-    unexpectedDisposalDiscards: [...unexpectedDisposalDiscardRequestIds],
+    captureDurationMs, captureStartRendererMs, captureEndRendererMs,
+    processingBlocks: blocks, acceptedWorkletResults: acceptedResults,
+    submittedBlocks: submissions.size, cancelledAtStopBlocks: measuredAckIds.size,
+    measuredCancelledBeforeNativeBlocks: measuredRuntimeCancelledBeforeNative,
+    nativeCancelledAtStopBlocks: [...nativeCancelledAtStopRequestIds].filter(id => measuredIds.has(id)).length,
+    rendererDiscardedAtStopBlocks: [...rendererDiscardedAtStopRequestIds].filter(id => measuredIds.has(id)).length,
+    preCaptureSubmittedBlocks: preCaptureRequests.length, preCaptureRequests,
+    teardownSubmittedBlocks: teardownRequests.length, teardownCancelledAtStopBlocks: teardownCancelledBlocks,
+    stopAcknowledgementTimeouts: stopAckTimeouts,
+    unaccountedRequestCount: unaccountedRequests.length, unaccountedRequests,
+    teardownRequests,
     stopCancellationWindowMs, stopCancellationServiceCall: distribution(cancellationServiceMs),
     throughputBlocksPerSecond: captureDurationMs > 0 ? blocks * 1000 / captureDurationMs : 0,
     workletSubmissionToReceipt: distribution(workletReceiptMs),
@@ -210,18 +253,20 @@ function summarizeMixerTiming(events: ReturnType<typeof getNativeVst3MixerEffect
     maxConcurrentCallsPerEffect: ipc?.main?.maximumConcurrentCallsPerEffect ?? 0,
     nativeServiceSessionCountAfterCleanup: ipc?.main?.nativeServiceSessionCount ?? -1,
     missedDeadlines, requestCount: submissions.size,
-    profileEventCount: events.filter(event => event.requestId === undefined || isMeasuredRequest(event.requestId)).length,
-    requestFailures: [...main].filter(([requestId, event]: [string, any]) => !!event.error && !stopCancelledRequestIds.has(requestId)).map(([, event]: [string, any]) => event.error),
-    unexpectedStopCancellations: [...main].filter(([requestId, event]: [string, any]) => event.error === 'VST3 instance cancelled' && !nativeCancelledAtStopRequestIds.has(requestId)).map(([requestId]: [string, any]) => requestId),
-    missingMainResponses: [...submissions.keys()].filter(requestId => !main.has(requestId)).length,
-    missingWorkletResults: [...submissions.keys()].filter(requestId => !results.has(requestId) && !stopCancelledRequestIds.has(requestId)).length,
+    profileEventCount: events.filter(event => event.requestId === undefined || allSubmissions.has(event.requestId)).length,
+    requestFailures: [...main].filter(([, event]: [string, any]) => !!event.error && !nativeCancelledAtStopRequestIds.has(event.requestId)).map(([, event]: [string, any]) => event.error),
+    unexpectedStopCancellations: [...main].filter(([requestId, event]: [string, any]) => event.error === 'VST3 instance cancelled' && !stopAcks.has(requestId)).map(([requestId]: [string, any]) => requestId),
+    missingMainResponses: [...submissions.keys()].filter(requestId => !main.has(requestId) && !stopAcks.has(requestId)).length,
+    missingWorkletResults: [...submissions.keys()].filter(requestId => !results.has(requestId) && !stopAcks.has(requestId)).length,
     rendererResponseCount: rendererResponses.size,
   };
 }
 
 function correlatedTimingSamples(run: any) {
   const measuredRequestIds = new Set((run.runtimeEvents as Array<Record<string, any>>)
-    .filter(event => event.event === 'worklet-submit' && typeof event.requestId === 'string').map(event => event.requestId));
+    .filter(event => event.event === 'worklet-submit' && typeof event.requestId === 'string' &&
+      Number.isFinite(Number(event.rendererAtMs)) && Number(event.rendererAtMs) >= run.captureStartRendererMs &&
+      Number(event.rendererAtMs) < run.captureEndRendererMs).map(event => event.requestId));
   const samples = new Map<string, Record<string, unknown>>();
   const sampleFor = (requestId: string) => {
     let sample = samples.get(requestId);
@@ -291,7 +336,7 @@ async function captureLiveMixerRun(instance: typeof audioEngine, channels: Chann
   targetSource.start(sourceStartTime); controlSource.start(sourceStartTime);
   await new Promise(resolve => setTimeout(resolve, 300));
   const runtimeStart = getNativeVst3MixerEffectSmokeTiming().length;
-  const ipcBefore = await smokeApi.smokeTimingSnapshot();
+  await smokeApi.smokeTimingSnapshot(); // warm the authorized timing IPC before the measured window
   const startedAt = performance.now();
   const startedContextFrame = sourceStartContextFrame + Math.round(0.25 * context.sampleRate);
   await new Promise(resolve => setTimeout(resolve, durationMs));
@@ -324,12 +369,12 @@ async function captureLiveMixerRun(instance: typeof audioEngine, channels: Chann
   }
   const ipcAfter = await smokeApi.smokeTimingSnapshot();
   const runtimeEvents = getNativeVst3MixerEffectSmokeTiming().slice(runtimeStart);
-  const ipc = { preload: ipcAfter.preload.slice(ipcBefore.preload.length), main: { ...ipcAfter.main,
-    processAudio: ipcAfter.main.processAudio.slice(ipcBefore.main.processAudio.length) } };
+  const ipc = ipcAfter;
   const duration = stoppedAt - startedAt;
   const sampleRate = context.sampleRate;
-  const timing = summarizeMixerTiming(runtimeEvents, ipc, sampleRate, duration, stopRequestedAtRendererMs);
-  return { pcm, tailRms, sampleRate, durationMs: duration, startedContextFrame, stoppedContextFrame, playbackActiveAtEnd,
+  const timing = summarizeMixerTiming(runtimeEvents, ipc, sampleRate, duration, startedAt, stoppedAt, stopRequestedAtRendererMs);
+  return { pcm, tailRms, sampleRate, durationMs: duration, captureStartRendererMs: startedAt,
+    captureEndRendererMs: stoppedAt, startedContextFrame, stoppedContextFrame, playbackActiveAtEnd,
     trackRms: Object.fromEntries([...pcm].map(([trackId, audio]) => [trackId, audio.rms])),
     diagnostics: getVst3MixerEffectDiagnostics(), timing, runtimeEvents, ipc };
 }
@@ -342,10 +387,11 @@ function assertPackagedMixerRun(run: any, label: string) {
   if (run.sampleRate !== 48000) fail(`expected the packaged AudioContext at 48 kHz, got ${run.sampleRate}`);
   if (!run.playbackActiveAtEnd) fail(`production Mixer transport stopped during capture; diagnostics=${JSON.stringify(run.diagnostics)}`);
   if (timing.requestCount < 10 || timing.acceptedWorkletResults + timing.cancelledAtStopBlocks !== timing.requestCount ||
-      timing.processingBlocks + timing.nativeCancelledAtStopBlocks !== timing.requestCount || timing.cancelledAtStopBlocks > 2 ||
-      timing.missingMainResponses !== 0 || timing.missingWorkletResults !== 0 ||
-      timing.requestFailures.length !== 0 || timing.unexpectedStopCancellations.length !== 0 || timing.unexpectedDisposalDiscards.length !== 0) {
-    fail(`production worklet/IPC/helper response correlation failed (only the final in-flight request per insert may be canceled by explicit stop): ${JSON.stringify(timing)}`);
+      timing.processingBlocks + timing.nativeCancelledAtStopBlocks + timing.measuredCancelledBeforeNativeBlocks !== timing.requestCount ||
+      timing.cancelledAtStopBlocks > 2 || timing.teardownCancelledAtStopBlocks > 2 || timing.stopAcknowledgementTimeouts !== 0 ||
+      timing.unaccountedRequestCount !== 0 || timing.missingMainResponses !== 0 || timing.missingWorkletResults !== 0 ||
+      timing.requestFailures.length !== 0 || timing.unexpectedStopCancellations.length !== 0) {
+    fail(`production request lifecycle did not resolve each submission or receive an explicit, sequence-matched stop acknowledgement: ${JSON.stringify(timing)}`);
   }
   if (timing.missedDeadlines !== 0) fail(`production Mixer deadline failure(s): ${JSON.stringify(timing)}`);
   if (timing.maxConcurrentCallsPerEffect > 1 || timing.maxPerInstanceQueueDepth > 1) {

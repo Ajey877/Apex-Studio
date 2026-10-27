@@ -78,8 +78,18 @@ class ApexVst3FxProcessor extends AudioWorkletProcessor {
     this.dryReady = new Map();
     this.bypass = false;
     this.failed = false;
+    this.stopped = false;
     this.port.onmessage = event => {
       const message = event.data;
+      if (message?.type === 'stop') {
+        const sequence = this.pending >= 0 ? this.pending : null;
+        this.pending = -1;
+        this.stopped = true;
+        this.ready.clear();
+        this.dryReady.clear();
+        this.port.postMessage({ type: 'stop-ack', sequence, reason: message.reason || 'dispose' });
+        return;
+      }
       if (message?.type === 'bypass') { this.bypass = !!message.value; return; }
       if (message?.type === 'failure') { this.failed = true; return; }
       if (message?.type !== 'result') return;
@@ -106,7 +116,7 @@ class ApexVst3FxProcessor extends AudioWorkletProcessor {
     const out = outputs[0];
     if (!out || out.length < 2) return true;
     for (const channel of out) channel.fill(0);
-    if (this.failed) return true;
+    if (this.failed || this.stopped) return true;
     const input = inputs[0];
     let left = input?.[0], right = input?.[1] || left;
     // The processor can be constructed well before playback connects its first
@@ -214,7 +224,13 @@ interface PreparedEffect {
   tail: Promise<void>;
   queueDepth: number;
   disposed: boolean;
+  stopping: boolean;
+  stopReason?: string;
   faulted: boolean;
+  stopAckResolve?: (ack: { sequence: number | null; reason: string }) => void;
+  stopAckPromise?: Promise<{ sequence: number | null; reason: string }>;
+  stopCancelledSequences: Set<number>;
+  disposal?: Promise<void>;
 }
 const runtimeKey = (trackId: number, slotId: string) => `${trackId}:${slotId}`;
 const effectConfigurationKeys = new WeakMap<object, string>();
@@ -233,20 +249,20 @@ export class NativeVst3EffectRuntime {
 
   nodeFor(trackId: number, slotId: string, context: BaseAudioContext, effect?: Vst3Effect): AudioWorkletNode | undefined {
     const entry = this.prepared.get(runtimeKey(trackId, slotId));
-    if (!entry || entry.trackId !== trackId || entry.context !== context || entry.disposed ||
+    if (!entry || entry.trackId !== trackId || entry.context !== context || entry.disposed || entry.stopping ||
         (effect && entry.configuration !== effectKey(effect))) return undefined;
     return entry.node;
   }
 
   isPrepared(trackId: number, slotId: string, context: BaseAudioContext, effect?: Vst3Effect): boolean {
     const entry = this.prepared.get(runtimeKey(trackId, slotId));
-    return !!entry && entry.trackId === trackId && entry.context === context && !entry.disposed && !entry.faulted &&
+    return !!entry && entry.trackId === trackId && entry.context === context && !entry.disposed && !entry.stopping && !entry.faulted &&
       (!effect || entry.configuration === effectKey(effect));
   }
 
   setBypassed(trackId: number, slotId: string, bypassed: boolean) {
     const entry = this.prepared.get(runtimeKey(trackId, slotId));
-    if (entry && entry.trackId === trackId && !entry.disposed) entry.node.port.postMessage({ type: 'bypass', value: bypassed });
+    if (entry && entry.trackId === trackId && !entry.disposed && !entry.stopping) entry.node.port.postMessage({ type: 'bypass', value: bypassed });
   }
 
   async prepareTracks(tracks: MixerTrack[], context: BaseAudioContext): Promise<void> {
@@ -279,11 +295,21 @@ export class NativeVst3EffectRuntime {
     const entry: PreparedEffect = {
       trackId, slotId: slot.id, configuration: effectKey(slot.vst3Effect), effect: structuredClone(slot.vst3Effect), context, bridge, node,
       runtimeId: profileEnabled ? crypto.randomUUID() : undefined, profileEnabled,
-      tail: Promise.resolve(), queueDepth: 0, disposed: false, faulted: false, ready: Promise.resolve(),
+      tail: Promise.resolve(), queueDepth: 0, disposed: false, stopping: false, faulted: false,
+      stopCancelledSequences: new Set(), ready: Promise.resolve(),
     };
     this.prepared.set(runtimeKey(trackId, slot.id), entry);
     node.port.onmessage = event => {
       const message = event.data;
+      if (message?.type === 'stop-ack') {
+        const sequence = Number.isInteger(message.sequence) ? message.sequence as number : null;
+        recordMixerFxSmokeEvent({ event: 'worklet-stop-ack', trackId, slotId: slot.id,
+          ...(sequence === null ? {} : { sequence, requestId: `${entry.runtimeId}:${sequence}` }),
+          cancelled: sequence !== null, reason: String(message.reason || 'dispose') });
+        entry.stopAckResolve?.({ sequence, reason: String(message.reason || 'dispose') });
+        entry.stopAckResolve = undefined;
+        return;
+      }
       if (message?.type === 'profile') {
         const sequence = Number.isInteger(message.sequence) ? message.sequence : undefined;
         recordMixerFxSmokeEvent({ ...message, trackId, slotId: slot.id,
@@ -298,6 +324,13 @@ export class NativeVst3EffectRuntime {
       }
       const sequence = message.sequence;
       const requestId = entry.runtimeId ? `${entry.runtimeId}:${sequence}` : '';
+      if (entry.stopping) {
+        entry.stopCancelledSequences.add(sequence);
+        recordMixerFxSmokeEvent({ event: 'renderer-request-cancelled-at-stop', trackId, slotId: slot.id,
+          requestId, sequence, cancellationStage: 'before-native-service', reason: entry.stopReason ?? 'explicit-stop',
+          workletStopAckPending: true });
+        return;
+      }
       const input = message.samples;
       const submitted = message.timing ?? {};
       const queueDepth = entry.profileEnabled ? ++entry.queueDepth : 0;
@@ -308,7 +341,16 @@ export class NativeVst3EffectRuntime {
           requestReceivedAt, requestReceivedContextFrame, queueDepth, ...submitted });
       }
       const operation = entry.tail.then(async () => {
-        if (entry.disposed || entry.faulted || !entry.sessionId) throw new Error('Native effect processing cancelled.');
+        if (entry.disposed || entry.stopping || entry.faulted || !entry.sessionId) {
+          if (entry.stopping || entry.disposed) {
+            entry.stopCancelledSequences.add(sequence);
+            recordMixerFxSmokeEvent({ event: 'renderer-request-cancelled-at-stop', trackId, slotId: slot.id,
+              requestId, sequence, cancellationStage: 'before-native-service', reason: entry.stopReason ?? 'explicit-stop',
+              workletStopAckPending: true });
+            return;
+          }
+          throw new Error('Native effect processing cancelled.');
+        }
         const bridgeCallStartedAt = entry.profileEnabled ? performance.now() : 0;
         if (entry.profileEnabled) recordMixerFxSmokeEvent({ event: 'renderer-bridge-call-start', trackId, slotId: slot.id, requestId, sequence,
           bridgeCallStartedAt, queueDepth, ...submitted });
@@ -320,7 +362,18 @@ export class NativeVst3EffectRuntime {
           dueOutputFrame: submitted.dueOutputFrame,
           sampleRate: context.sampleRate,
         } : undefined;
-        const samples = await bridge.processAudio(entry.sessionId, VST3_FX_BLOCK_FRAMES, input, 120, [], profile);
+        let samples: Float32Array;
+        try { samples = await bridge.processAudio(entry.sessionId, VST3_FX_BLOCK_FRAMES, input, 120, [], profile); }
+        catch (error) {
+          if (entry.stopping || entry.disposed) {
+            entry.stopCancelledSequences.add(sequence);
+            recordMixerFxSmokeEvent({ event: 'renderer-request-cancelled-at-stop', trackId, slotId: slot.id,
+              requestId, sequence, cancellationStage: 'native-service-cancelled', reason: entry.stopReason ?? 'explicit-stop',
+              error: error instanceof Error ? error.message : String(error) });
+            return;
+          }
+          throw error;
+        }
         const bridgeResponseAt = entry.profileEnabled ? performance.now() : 0;
         if (entry.profileEnabled) {
           const bridgeResponseContextFrame = Math.round((context as AudioContext).currentTime * context.sampleRate);
@@ -328,8 +381,13 @@ export class NativeVst3EffectRuntime {
             bridgeCallStartedAt, bridgeResponseAt, bridgeRoundTripMs: bridgeResponseAt - bridgeCallStartedAt,
             bridgeResponseContextFrame, queueDepth, ...submitted });
         }
-        if (entry.disposed || entry.faulted) {
-          if (entry.profileEnabled) recordMixerFxSmokeEvent({ event: 'result-discarded-after-disposal', trackId, slotId: slot.id, requestId, sequence });
+        if (entry.stopping || entry.disposed || entry.faulted) {
+          if (entry.stopping || entry.disposed) {
+            entry.stopCancelledSequences.add(sequence);
+            recordMixerFxSmokeEvent({ event: 'renderer-request-cancelled-at-stop', trackId, slotId: slot.id,
+              requestId, sequence, cancellationStage: 'result-after-stop', reason: entry.stopReason ?? 'explicit-stop' });
+            return;
+          }
           throw new Error('Native effect processing cancelled.');
         }
         if (!(samples instanceof Float32Array) || samples.length !== VST3_FX_BLOCK_FRAMES * 2 || samples.some(value => !Number.isFinite(value))) {
@@ -337,7 +395,16 @@ export class NativeVst3EffectRuntime {
         }
         node.port.postMessage({ type: 'result', sequence, samples }, [samples.buffer]);
       });
-      entry.tail = operation.catch(error => { this.fail(entry, error instanceof Error ? error.message : String(error)); })
+      entry.tail = operation.catch(error => {
+        if (entry.stopping || entry.disposed) {
+          entry.stopCancelledSequences.add(sequence);
+          recordMixerFxSmokeEvent({ event: 'renderer-request-cancelled-at-stop', trackId, slotId: slot.id,
+            requestId, sequence, cancellationStage: 'renderer-rejection', reason: entry.stopReason ?? 'explicit-stop',
+            error: error instanceof Error ? error.message : String(error) });
+          return;
+        }
+        this.fail(entry, error instanceof Error ? error.message : String(error));
+      })
         .finally(() => { if (entry.profileEnabled) entry.queueDepth = Math.max(0, entry.queueDepth - 1); });
     };
     node.onprocessorerror = () => this.fail(entry, 'Native effect AudioWorklet processor failed.');
@@ -354,7 +421,7 @@ export class NativeVst3EffectRuntime {
   }
 
   private fail(entry: PreparedEffect, message: string) {
-    if (entry.disposed || entry.faulted) return;
+    if (entry.disposed || entry.stopping || entry.faulted) return;
     entry.faulted = true;
     entry.node.port.postMessage({ type: 'failure' });
     reportVst3MixerEffect(entry.trackId, entry.slotId, message);
@@ -382,21 +449,46 @@ export class NativeVst3EffectRuntime {
     }
   }
 
-  private disposeEntry(entry: PreparedEffect): Promise<void> {
+  private disposeEntry(entry: PreparedEffect, reason = 'dispose'): Promise<void> {
+    if (entry.disposal) return entry.disposal;
     if (entry.disposed) return Promise.resolve();
-    entry.disposed = true;
-    entry.node.port.onmessage = null;
-    entry.node.port.postMessage({ type: 'failure' });
-    entry.node.port.close();
-    try { entry.node.disconnect(); } catch { /* context may already be closed */ }
-    const sessionId = entry.sessionId;
-    entry.sessionId = undefined;
-    const closeSession = sessionId ? entry.bridge.close(sessionId).catch(() => {}) : undefined;
+    entry.stopping = true;
+    entry.stopReason = reason;
     const closing = (async () => {
-      if (closeSession) await closeSession;
+      // The worklet may already have posted a process message when explicit
+      // stop begins. Keep its message handler alive until its stop ACK has
+      // crossed the same MessagePort, so a pending sequence is either handled
+      // or explicitly acknowledged as cancelled before this port is closed.
+      entry.stopAckPromise = new Promise(resolve => { entry.stopAckResolve = resolve; });
+      try {
+        entry.node.port.postMessage({ type: 'stop', reason });
+        let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+        const timeout = new Promise<never>((_, reject) => { timeoutHandle = setTimeout(() => reject(new Error('AudioWorklet stop acknowledgement timed out')), 250); });
+        let ack: { sequence: number | null; reason: string };
+        try { ack = await Promise.race([entry.stopAckPromise, timeout]); }
+        finally { if (timeoutHandle !== undefined) clearTimeout(timeoutHandle); }
+        if (ack.sequence !== null) entry.stopCancelledSequences.add(ack.sequence);
+        recordMixerFxSmokeEvent({ event: 'renderer-stop-acknowledged', trackId: entry.trackId, slotId: entry.slotId,
+          ...(ack.sequence === null ? {} : { sequence: ack.sequence, requestId: `${entry.runtimeId}:${ack.sequence}` }),
+          cancelled: ack.sequence !== null, reason: ack.reason });
+      } catch (error) {
+        recordMixerFxSmokeEvent({ event: 'renderer-stop-ack-timeout', trackId: entry.trackId, slotId: entry.slotId,
+          reason, error: error instanceof Error ? error.message : String(error) });
+      } finally {
+        entry.stopAckResolve = undefined;
+        entry.disposed = true;
+      }
+      entry.node.port.onmessage = null;
+      entry.node.port.postMessage({ type: 'failure' });
+      entry.node.port.close();
+      try { entry.node.disconnect(); } catch { /* context may already be closed */ }
+      const sessionId = entry.sessionId;
+      entry.sessionId = undefined;
+      if (sessionId) await entry.bridge.close(sessionId).catch(() => {});
       try { await entry.tail; } catch { /* the operation reports its own failure */ }
       if (!sessionId) await entry.ready.catch(() => {});
     })();
+    entry.disposal = closing;
     this.closing.add(closing);
     void closing.finally(() => this.closing.delete(closing));
     return closing;
@@ -405,7 +497,7 @@ export class NativeVst3EffectRuntime {
   async stop(): Promise<void> {
     const entries = [...this.prepared.values()];
     this.prepared.clear();
-    await Promise.all([...entries.map(entry => this.disposeEntry(entry)), ...this.closing]);
+    await Promise.all([...entries.map(entry => this.disposeEntry(entry, 'explicit-stop')), ...this.closing]);
   }
 }
 

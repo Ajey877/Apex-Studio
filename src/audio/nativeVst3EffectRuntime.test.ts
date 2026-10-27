@@ -138,12 +138,32 @@ test('Mixer worklet reports an output deadline miss when no matching processed P
   assert.ok(processor.dryReady.size <= 1);
 });
 
+test('Mixer worklet explicitly acknowledges and fences its pending sequence when stop arrives', () => {
+  const { processor, next } = createWorklet();
+  for (let i = 0; i < VST3_FX_BLOCK_FRAMES / 128; i++) next();
+  assert.deepEqual(processMessages(processor).map((message: any) => message.sequence), [0]);
+  processor.port.onmessage!({ data: { type: 'stop', reason: 'explicit-stop' } });
+  const ack = processor.port.sent.at(-1);
+  assert.equal(ack.type, 'stop-ack');
+  assert.equal(ack.sequence, 0);
+  assert.equal(ack.reason, 'explicit-stop');
+  const before = processMessages(processor).length;
+  for (let i = 0; i < 24; i++) next();
+  assert.equal(processMessages(processor).length, before, 'stopped worklet cannot submit later blocks');
+});
+
 test('Mixer runtime disposal discards a delayed response, closes its helper, and a fresh take recovers', async () => {
   const originalNode = (globalThis as any).AudioWorkletNode;
   const nodes: any[] = [];
   class FakeAudioWorkletNode {
     port = { onmessage: null as ((event: { data: any }) => void) | null, sent: [] as any[], closed: false,
-      postMessage(message: any) { this.sent.push(message); }, close() { this.closed = true; } };
+      stopSequence: null as number | null,
+      postMessage: (message: any) => {
+        this.port.sent.push(message);
+        if (message?.type === 'stop') queueMicrotask(() => this.port.onmessage?.({ data: {
+          type: 'stop-ack', sequence: this.port.stopSequence, reason: message.reason,
+        } }));
+      }, close() { this.closed = true; } };
     onprocessorerror: (() => void) | null = null;
     disconnected = false;
     constructor(_context: any, _name: string, _options: any) { nodes.push(this); }
@@ -171,11 +191,15 @@ test('Mixer runtime disposal discards a delayed response, closes its helper, and
     firstNode.port.onmessage!({ data: { type: 'process', sequence: 0, samples: new Float32Array(2048) } });
     await tick();
     assert.ok(delayedResolve, 'one real production-runtime helper request was started');
+    firstNode.port.stopSequence = 0;
     const stop = runtime.stop();
-    assert.equal(firstNode.port.closed, true);
-    assert.equal(firstNode.disconnected, true);
+    await tick();
+    assert.ok(firstNode.port.sent.some((message: any) => message.type === 'stop'));
+    assert.equal(firstNode.port.closed, true, 'port closes after the worklet acknowledges stop');
     delayedResolve!(new Float32Array(2048).fill(0.75));
     await stop;
+    assert.equal(firstNode.port.closed, true);
+    assert.equal(firstNode.disconnected, true);
     assert.ok(closed.includes('session-1'));
     assert.equal(firstNode.port.sent.some((message: any) => message.type === 'result'), false, 'disposed runtime cannot post stale PCM');
 
@@ -187,6 +211,85 @@ test('Mixer runtime disposal discards a delayed response, closes its helper, and
     assert.ok(recoveredNode.port.sent.some((message: any) => message.type === 'result'));
     await runtime.stop();
     assert.ok(closed.includes('session-2'));
+  } finally {
+    await runtime.stop();
+    (globalThis as any).AudioWorkletNode = originalNode;
+  }
+});
+
+
+test('stop acknowledges an in-flight block per effect; late session replies cannot contaminate restarted instances', async () => {
+  const originalNode = (globalThis as any).AudioWorkletNode;
+  const nodes: any[] = [];
+  class FakeAudioWorkletNode {
+    port = { onmessage: null as ((event: { data: any }) => void) | null, sent: [] as any[], closed: false,
+      stopSequence: null as number | null,
+      postMessage: (message: any) => {
+        this.port.sent.push(message);
+        if (message?.type === 'stop') queueMicrotask(() => this.port.onmessage?.({ data: {
+          type: 'stop-ack', sequence: this.port.stopSequence, reason: message.reason,
+        } }));
+      }, close() { this.closed = true; } };
+    onprocessorerror: (() => void) | null = null;
+    disconnected = false;
+    constructor(_context: any, _name: string, _options: any) { nodes.push(this); }
+    disconnect() { this.disconnected = true; }
+  }
+  (globalThis as any).AudioWorkletNode = FakeAudioWorkletNode;
+  let nextSession = 0;
+  const closed: string[] = [];
+  const pending = new Map<string, (pcm: Float32Array) => void>();
+  const bridge: Vst3Bridge = {
+    paths: async () => [], choosePath: async () => null,
+    discover: async () => ({ plugins: [], errors: [] }), discoverEffects: async () => ({ plugins: [], errors: [] }),
+    inspect: async () => { throw new Error('unused'); }, inspectEffect: async () => { throw new Error('unused'); },
+    describeEffect: async () => ({ parameters: [], controllerAvailable: false }), describe: async () => ({ parameters: [], controllerAvailable: false }),
+    parameters: async () => [], open: async () => ({ id: `session-${++nextSession}`, latencySamples: 0 }),
+    process: async () => new Float32Array(),
+    processAudio: async (id: string) => {
+      if (id === 'session-1' || id === 'session-2') return new Promise<Float32Array>(resolve => { pending.set(id, resolve); });
+      return new Float32Array(VST3_FX_BLOCK_FRAMES * 2).fill(id === 'session-3' ? 0.3 : 0.4);
+    },
+    close: async id => { closed.push(id); },
+  };
+  const secondTrack: MixerTrack = { ...track, id: 2, name: 'Second', fxSlots: [{ ...slot, id: 'fx-second' }] };
+  const context: any = { sampleRate: 48000, currentTime: 0, state: 'running', audioWorklet: { addModule: async () => {} } };
+  const runtime = new NativeVst3EffectRuntime(() => {}, () => bridge);
+  try {
+    await runtime.prepareTracks([track, secondTrack], context);
+    const [oldA, oldB] = nodes;
+    oldA.port.stopSequence = 0; oldB.port.stopSequence = 0;
+    oldA.port.onmessage!({ data: { type: 'process', sequence: 0, samples: new Float32Array(VST3_FX_BLOCK_FRAMES * 2) } });
+    await tick();
+    assert.equal(pending.size, 1, 'first effect reached its in-flight service request');
+    const stopping = runtime.stop();
+    // Simulate the process message already queued behind worklet-submit when
+    // stop starts. The stop handshake must drain/classify it before closing the
+    // MessagePort instead of silently dropping it before main IPC.
+    oldB.port.onmessage!({ data: { type: 'process', sequence: 0, samples: new Float32Array(VST3_FX_BLOCK_FRAMES * 2) } });
+    await tick();
+    assert.equal(pending.size, 1, 'queued second-effect request is cancelled before native IPC');
+    assert.deepEqual(closed.sort(), ['session-1', 'session-2']);
+    assert.deepEqual([oldA, oldB].map(node => node.port.sent.some((message: any) => message.type === 'stop')), [true, true]);
+    pending.get('session-1')!(new Float32Array(VST3_FX_BLOCK_FRAMES * 2).fill(0.9));
+    await stopping;
+    assert.ok([oldA, oldB].every(node => node.port.closed && node.disconnected));
+    assert.ok([oldA, oldB].every(node => !node.port.sent.some((message: any) => message.type === 'result')),
+      'late results from the explicitly stopped sessions never reach a worklet');
+
+    await runtime.prepareTracks([track, secondTrack], context);
+    const [freshA, freshB] = nodes.slice(2);
+    for (const node of [freshA, freshB]) node.port.onmessage!({
+      data: { type: 'process', sequence: 0, samples: new Float32Array(VST3_FX_BLOCK_FRAMES * 2) },
+    });
+    await tick(); await tick();
+    const resultA = freshA.port.sent.find((message: any) => message.type === 'result');
+    const resultB = freshB.port.sent.find((message: any) => message.type === 'result');
+    assert.ok(Math.abs(resultA.samples[0] - 0.3) < 1e-6, 'the first restarted effect received only its own session PCM');
+    assert.ok(Math.abs(resultB.samples[0] - 0.4) < 1e-6, 'the second restarted effect received only its own session PCM');
+    assert.ok(closed.every(id => id === 'session-1' || id === 'session-2'));
+    await runtime.stop();
+    assert.deepEqual(closed.sort(), ['session-1', 'session-2', 'session-3', 'session-4']);
   } finally {
     await runtime.stop();
     (globalThis as any).AudioWorkletNode = originalNode;
