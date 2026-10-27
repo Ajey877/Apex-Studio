@@ -212,11 +212,9 @@ test('actual Mixer UI -> MDA inserts -> order/persistence, undo/redo, production
   // Browser assertions intentionally stop at UI/state/history and offline WAV
   // export. Real-time PCM/order/isolation/bypass/deadline/stop-restart acceptance
   // is owned by the packaged Electron smoke through production preload IPC.
-  const delayBypass = page.getByRole('slider', { name: 'Bypass · mda Delay' });
-  await delayBypass.fill('1');
-  await page.getByRole('button', { name: 'Apply native parameters' }).nth(1).click();
-  await expect.poll(async () => (await persisted(page)).mixerTracks.find((track: any) => track.id === 1).fxSlots
-    .find((slot: any) => slot.vst3Effect.name === 'mda Delay').vst3Effect.state.parameters.find((p: any) => p.id === 4)?.value).toBe(0);
+  // Slot bypass is a project-level enabled flag, distinct from native plugin
+  // parameters. Native parameter persistence is covered above; exercise the
+  // actual Mixer bypass control and its history/persistence here.
   await page.getByRole('button', { name: 'Bypass mda Delay' }).click();
   await expect.poll(async () => (await persisted(page)).mixerTracks.find((track: any) => track.id === 1).fxSlots
     .find((slot: any) => slot.vst3Effect.name === 'mda Delay').enabled).toBe(false);

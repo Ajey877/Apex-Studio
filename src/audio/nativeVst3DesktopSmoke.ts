@@ -103,15 +103,20 @@ function alignedDifference(reference: PlanarPcm, candidate: PlanarPcm, offsetFra
     referenceRms: frames ? Math.sqrt(energy / (frames * 2)) : 0 };
 }
 
-function compareMixerRuns(reference: any, candidate: any, trackId: number, maximumOffsetFrames: number, label: string) {
+function compareMixerRuns(reference: any, candidate: any, trackId: number, maximumOffsetFrames: number, label: string, alignment: 'correlation' | 'run-frame' = 'correlation') {
   const left = reference.pcm.get(trackId) as PlanarPcm | undefined;
   const right = candidate.pcm.get(trackId) as PlanarPcm | undefined;
   if (!left || !right || left.startFrame === null || right.startFrame === null) throw new Error(`Packaged Mixer capture missing track ${trackId} PCM`);
-  const offsetFrames = findPcmAlignment(left, right, maximumOffsetFrames, `${label}, track ${trackId}`);
-  const difference = alignedDifference(left, right, offsetFrames);
   const playbackStartDeltaFrames = candidate.startedContextFrame - reference.startedContextFrame;
+  // The unaffected control is a phase-reset AudioOscillatorNode scheduled at a
+  // recorded AudioContext frame. Align it by that known frame clock rather than
+  // cross-correlating a pure tone (which is ambiguous at quarter-cycle offsets).
+  const offsetFrames = alignment === 'run-frame'
+    ? left.startFrame + playbackStartDeltaFrames - right.startFrame
+    : findPcmAlignment(left, right, maximumOffsetFrames, `${label}, track ${trackId}`);
+  const difference = alignedDifference(left, right, offsetFrames);
   const normalizedLagFrames = right.startFrame + offsetFrames - left.startFrame - playbackStartDeltaFrames;
-  return { ...difference, offsetFrames, normalizedLagFrames };
+  return { ...difference, offsetFrames, normalizedLagFrames, alignment };
 }
 
 function distribution(values: number[]) {
@@ -462,7 +467,7 @@ async function runPackagedMixerAcceptance(instance: typeof audioEngine) {
     .map(([label, result]) => [label, { timing: result.timing, timingSamples: correlatedTimingSamples(result).slice(0, 16) }])));
   const alignmentWindow = Math.round(0.5 * orderA.sampleRate);
   const orderDifference = compareMixerRuns(orderA, orderB, 1, alignmentWindow, 'order reversal');
-  const controlDifference = compareMixerRuns(orderA, orderB, 2, alignmentWindow, 'control-track isolation');
+  const controlDifference = compareMixerRuns(orderA, orderB, 2, alignmentWindow, 'control-track isolation', 'run-frame');
   const controlRmsDifference = Math.abs(orderA.trackRms['2'] - orderB.trackRms['2']);
   const processedVsBypass = compareMixerRuns(delayProcessed, delayPassThrough, 1, alignmentWindow, 'processed vs native bypass');
   const bypassVsRemoved = compareMixerRuns(delayPassThrough, removed, 1, alignmentWindow, 'native bypass vs removed insert');
