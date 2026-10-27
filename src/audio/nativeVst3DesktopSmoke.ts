@@ -85,7 +85,7 @@ function findPcmAlignment(reference: PlanarPcm, candidate: PlanarPcm, maximumOff
     const score = dot / Math.sqrt(Math.max(1e-30, refEnergy * candidateEnergy));
     if (score > bestScore) { bestScore = score; bestOffset = offset; }
   }
-  if (bestScore < 0.2) throw new Error(`Packaged control-track PCM could not be aligned deterministically (correlation=${bestScore})`);
+  if (bestScore < 0.2) throw new Error(`Packaged Mixer PCM could not be aligned deterministically (correlation=${bestScore})`);
   return bestOffset;
 }
 
@@ -407,7 +407,6 @@ async function runPackagedMixerAcceptance(instance: typeof audioEngine) {
     .map(([label, result]) => [label, { timing: result.timing, timingSamples: correlatedTimingSamples(result).slice(0, 16) }])));
   const alignmentWindow = Math.round(0.5 * orderA.sampleRate);
   const orderDifference = compareMixerRuns(orderA, orderB, 1, alignmentWindow);
-  const controlDifference = compareMixerRuns(orderA, orderB, 2, alignmentWindow);
   const controlRmsDifference = Math.abs(orderA.trackRms['2'] - orderB.trackRms['2']);
   const processedVsBypass = compareMixerRuns(delayProcessed, delayPassThrough, 1, alignmentWindow);
   const bypassVsRemoved = compareMixerRuns(delayPassThrough, removed, 1, alignmentWindow);
@@ -417,7 +416,7 @@ async function runPackagedMixerAcceptance(instance: typeof audioEngine) {
     throw new Error(`Packaged Mixer live track PCM was silent or disappeared after removal/restart: ${JSON.stringify({ orderA: orderA.trackRms, orderB: orderB.trackRms, delayProcessed: delayProcessed.trackRms, delayPassThrough: delayPassThrough.trackRms, removed: removed.trackRms })}; bounded timing evidence=${acceptanceTimingEvidence}`);
   }
   if (orderDifference.rmsDifference <= 1e-4) throw new Error(`Reversing the production Mixer VST3 order did not change target PCM: ${JSON.stringify(orderDifference)}; bounded timing evidence=${acceptanceTimingEvidence}`);
-  if (controlRmsDifference > controlTolerance) throw new Error(`Mixer effect order changed the unaffected control-track RMS beyond tolerance ${controlTolerance}: ${JSON.stringify({ controlRmsDifference, controlDifference })}; bounded timing evidence=${acceptanceTimingEvidence}`);
+  if (controlRmsDifference > controlTolerance) throw new Error(`Mixer effect order changed the unaffected control-track RMS beyond tolerance ${controlTolerance}: ${JSON.stringify({ controlRmsDifference, controlTrackRms: { orderA: orderA.trackRms['2'], orderB: orderB.trackRms['2'] } })}; bounded timing evidence=${acceptanceTimingEvidence}`);
   if (processedVsBypass.rmsDifference <= 1e-4) throw new Error(`Native MDA bypass and processed live output were indistinguishable: ${JSON.stringify(processedVsBypass)}; bounded timing evidence=${acceptanceTimingEvidence}`);
   if (bypassVsRemoved.rmsDifference > bypassOutputTolerance) throw new Error(`MDA Fb Mix=0 bypass did not match the no-insert production Mixer signal within tolerance ${bypassOutputTolerance}: ${JSON.stringify(bypassVsRemoved)}; bounded timing evidence=${acceptanceTimingEvidence}`);
   if (Math.abs(processedVsBypass.normalizedLagFrames) > 256) throw new Error(`Delay bypass and processed runs did not align after their shared ${VST3_FX_PIPELINE_FRAMES}-frame pipeline: ${JSON.stringify(processedVsBypass)}; bounded timing evidence=${acceptanceTimingEvidence}`);
@@ -437,14 +436,15 @@ async function runPackagedMixerAcceptance(instance: typeof audioEngine) {
     latencyCompensation: 'Not provided. Tracks with different counts of native Mixer inserts are not sample-aligned; each insert contributes the declared fixed 2048-frame live pipeline.',
     priorPlaywrightBridgeReference: { approximatelyMs: 28, measurement: 'test-only page.exposeFunction bridge; separate from this production IPC/preload/helper measurement' },
     orderDifferenceRms: orderDifference.rmsDifference, orderOffsetFrames: orderDifference.normalizedLagFrames,
-    controlTrackRmsDifference: controlRmsDifference, controlTrackAlignedPcmDifferenceRms: controlDifference.rmsDifference,
+    controlTrackRmsDifference: controlRmsDifference, controlTrackRms: { orderA: orderA.trackRms['2'], orderB: orderB.trackRms['2'] },
+    controlTrackIsolationMethod: 'Compare measured RMS across independent live captures; oscillator phase is not a control-isolation invariant.',
     controlIsolationToleranceRms: controlTolerance,
     bypassVsProcessedDifferenceRms: processedVsBypass.rmsDifference,
     bypassVsProcessedLagAfterRunStartNormalizationFrames: processedVsBypass.normalizedLagFrames,
     bypassVsRemovedDifferenceRms: bypassVsRemoved.rmsDifference, bypassVsRemovedToleranceRms: bypassOutputTolerance,
     bypassVsRemovedLagAfterRunStartNormalizationFrames: bypassVsRemoved.normalizedLagFrames,
     targetTrackRms: { processed: delayProcessed.trackRms['1'], bypass: delayPassThrough.trackRms['1'], removed: removed.trackRms['1'] },
-    controlTrackRms: orderA.trackRms['2'], settledTailRms: Object.fromEntries(Object.entries(runs).map(([label, result]) => [label, result.tailRms])),
+    settledTailRms: Object.fromEntries(Object.entries(runs).map(([label, result]) => [label, result.tailRms])),
     timing: { orderA: orderA.timing, orderB: orderB.timing, delayProcessed: delayProcessed.timing, delayBypassed: delayPassThrough.timing,
       cleanupAfterRemoval: removed.timing },
     timingSamples: { orderA: correlatedTimingSamples(orderA), orderB: correlatedTimingSamples(orderB),
