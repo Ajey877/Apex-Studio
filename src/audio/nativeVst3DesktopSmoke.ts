@@ -282,10 +282,10 @@ async function captureLiveMixerRun(instance: typeof audioEngine, channels: Chann
   const controlGain = context.createGain();
   targetSource.type = 'sine'; targetSource.frequency.value = 375; targetGain.gain.value = 0.1;
   controlSource.type = 'sine'; controlSource.frequency.value = 750; controlGain.gain.value = 0.1;
-  targetSource.connect(targetGain); targetGain.connect(instance.getOrCreateMixerChannel(1).input);
-  controlSource.connect(controlGain); controlGain.connect(instance.getOrCreateMixerChannel(2).input);
   await instance.play(channels, [], 'pat', undefined, mixer, 16);
   await context.resume();
+  targetSource.connect(targetGain); targetGain.connect(instance.getOrCreateMixerChannel(1).input);
+  controlSource.connect(controlGain); controlGain.connect(instance.getOrCreateMixerChannel(2).input);
   const sourceStartTime = context.currentTime + 0.05;
   const sourceStartContextFrame = Math.round(sourceStartTime * context.sampleRate);
   targetSource.start(sourceStartTime); controlSource.start(sourceStartTime);
