@@ -104,11 +104,17 @@ class ApexVst3FxProcessor extends AudioWorkletProcessor {
   process(inputs, outputs) {
     const out = outputs[0];
     if (!out || out.length < 2) return true;
-    if (this.nodeStartContextFrame === null) this.nodeStartContextFrame = currentFrame;
     for (const channel of out) channel.fill(0);
     if (this.failed) return true;
     const input = inputs[0];
     const left = input?.[0], right = input?.[1] || left;
+    // The processor can be constructed well before playback connects its first
+    // source. Do not burn the fixed pipeline delay on pre-roll silence: anchor
+    // its frame timeline to the first actual input quantum instead.
+    if (this.nodeStartContextFrame === null) {
+      if (!left || !right) return true;
+      this.nodeStartContextFrame = currentFrame;
+    }
     if (left && right) {
       for (let i = 0; i < left.length; i++) {
         this.left[this.fill] = left[i];

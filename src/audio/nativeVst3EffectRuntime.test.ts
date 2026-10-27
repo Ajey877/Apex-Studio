@@ -24,11 +24,13 @@ function createWorklet() {
   };
   runInNewContext(VST3_FX_WORKLET_SOURCE, sandbox);
   const processor = new sandbox.Processor({ processorOptions: { profileEnabled: true } });
+  let contextFrame = 0;
   const next = (withInput = true) => {
     const left = new Float32Array(128), right = new Float32Array(128);
     if (withInput) { left.fill(0.25); right.fill(-0.25); }
     const output = [new Float32Array(128), new Float32Array(128)];
-    sandbox.currentFrame = processor.outputFrame;
+    sandbox.currentFrame = contextFrame;
+    contextFrame += 128;
     processor.process(withInput ? [[left, right]] : [[]], [output]);
     return output;
   };
@@ -98,6 +100,19 @@ test('Mixer worklet bounds a saturated request queue and fails closed instead of
   assert.ok(output[1].every((sample: number) => sample === 0));
   assert.ok(processor.ready.size <= 1);
   assert.ok(processor.dryReady.size <= 1);
+});
+
+test('Mixer worklet does not consume its fixed pipeline delay before the first input is connected', () => {
+  const { processor, next } = createWorklet();
+  for (let i = 0; i < 24; i++) next(false);
+  assert.equal(processor.outputFrame, 0);
+  assert.equal(processor.nodeStartContextFrame, null);
+  assert.equal(processMessages(processor).length, 0);
+  for (let i = 0; i < VST3_FX_BLOCK_FRAMES / 128; i++) next();
+  assert.equal(processor.failed, false);
+  assert.equal(processor.nodeStartContextFrame, 24 * 128);
+  assert.equal(processor.outputFrame, VST3_FX_BLOCK_FRAMES);
+  assert.equal(processMessages(processor).length, 1);
 });
 
 test('Mixer worklet reports an output deadline miss when no matching processed PCM is ready at its due frame', () => {
