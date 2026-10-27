@@ -300,12 +300,15 @@ function correlatedTimingSamples(run: any) {
 }
 
 function createDeterministicMixerInput(context: AudioContext): AudioBuffer {
-  const buffer = context.createBuffer(1, context.sampleRate * 4, context.sampleRate);
-  const samples = buffer.getChannelData(0);
+  // Keep the control signal explicitly stereo so the comparison isolates the
+  // insert's declared latency, not StereoPannerNode's mono-to-stereo pan law.
+  const buffer = context.createBuffer(2, context.sampleRate * 4, context.sampleRate);
+  const left = buffer.getChannelData(0), right = buffer.getChannelData(1);
   let state = 0x6d2b79f5;
-  for (let frame = 0; frame < samples.length; frame++) {
+  for (let frame = 0; frame < left.length; frame++) {
     state ^= state << 13; state ^= state >>> 17; state ^= state << 5;
-    samples[frame] = ((state >>> 0) / 0x80000000 - 1) * 0.1;
+    const sample = ((state >>> 0) / 0x80000000 - 1) * 0.1;
+    left[frame] = sample; right[frame] = sample;
   }
   return buffer;
 }
@@ -511,7 +514,7 @@ async function runPackagedMixerAcceptance(instance: typeof audioEngine) {
     timingSamples: { orderA: correlatedTimingSamples(orderA), orderB: correlatedTimingSamples(orderB),
       delayProcessed: correlatedTimingSamples(delayProcessed), delayBypassed: correlatedTimingSamples(delayPassThrough),
       cleanupAfterRemoval: correlatedTimingSamples(removed) },
-    proof: 'Packaged Electron production AudioWorklet → authorized main IPC → native VST3 helper → production preload → worklet PCM, captured from production Mixer analysers. Smoke-only deterministic broadband target input and phase-reset 750 Hz control input; run-relative alignment uses captured AudioContext frames, with the declared 2048-frame one-insert offset tested directly; no exposeFunction processing bridge.'
+    proof: 'Packaged Electron production AudioWorklet → authorized main IPC → native VST3 helper → production preload → worklet PCM, captured from production Mixer analysers. Smoke-only deterministic broadband stereo target input isolates insert latency from mono pan law; a phase-reset 750 Hz control input checks track isolation. Run-relative alignment uses captured AudioContext frames with the declared 2048-frame one-insert offset tested directly; no exposeFunction processing bridge.'
   };
 }
 
