@@ -123,12 +123,13 @@ function distribution(values: number[]) {
 
 function summarizeMixerTiming(events: ReturnType<typeof getNativeVst3MixerEffectSmokeTiming>, ipc: any, sampleRate: number, captureDurationMs: number, stopRequestedAtRendererMs: number) {
   const submissions = new Map(events.filter(event => event.event === 'worklet-submit' && typeof event.requestId === 'string').map(event => [event.requestId!, event]));
-  const results = new Map(events.filter(event => event.event === 'worklet-result' && typeof event.requestId === 'string').map(event => [event.requestId!, event]));
-  const rendererResponses = new Map(events.filter(event => event.event === 'renderer-bridge-response' && typeof event.requestId === 'string').map(event => [event.requestId!, event]));
-  const preload = new Map<string, any>((ipc?.preload ?? []).map((event: any) => [event.requestId, event]));
-  const main = new Map<string, any>((ipc?.main?.processAudio ?? []).map((event: any) => [event.requestId, event]));
-  const requestEvents = new Map(events.filter(event => event.event === 'renderer-request-received' && typeof event.requestId === 'string').map(event => [event.requestId!, event]));
-  const bridgeStarts = new Map(events.filter(event => event.event === 'renderer-bridge-call-start' && typeof event.requestId === 'string').map(event => [event.requestId!, event]));
+  const isMeasuredRequest = (requestId: unknown): requestId is string => typeof requestId === 'string' && submissions.has(requestId);
+  const results = new Map(events.filter(event => event.event === 'worklet-result' && isMeasuredRequest(event.requestId)).map(event => [event.requestId!, event]));
+  const rendererResponses = new Map(events.filter(event => event.event === 'renderer-bridge-response' && isMeasuredRequest(event.requestId)).map(event => [event.requestId!, event]));
+  const preload = new Map<string, any>((ipc?.preload ?? []).filter((event: any) => isMeasuredRequest(event.requestId)).map((event: any) => [event.requestId, event]));
+  const main = new Map<string, any>((ipc?.main?.processAudio ?? []).filter((event: any) => isMeasuredRequest(event.requestId)).map((event: any) => [event.requestId, event]));
+  const requestEvents = new Map(events.filter(event => event.event === 'renderer-request-received' && isMeasuredRequest(event.requestId)).map(event => [event.requestId!, event]));
+  const bridgeStarts = new Map(events.filter(event => event.event === 'renderer-bridge-call-start' && isMeasuredRequest(event.requestId)).map(event => [event.requestId!, event]));
   const stopCancellationWindowMs = VST3_FX_BLOCK_FRAMES * 1000 / sampleRate + 2;
   const nativeCancelledAtStopRequestIds = new Set<string>();
   const rendererDiscardedAtStopRequestIds = new Set<string>();
@@ -141,7 +142,7 @@ function summarizeMixerTiming(events: ReturnType<typeof getNativeVst3MixerEffect
       nativeCancelledAtStopRequestIds.add(requestId);
     }
   }
-  for (const event of events.filter(event => event.event === 'result-discarded-after-disposal' && typeof event.requestId === 'string')) {
+  for (const event of events.filter(event => event.event === 'result-discarded-after-disposal' && isMeasuredRequest(event.requestId))) {
     const start = bridgeStarts.get(event.requestId!);
     const ageAtStopMs = stopRequestedAtRendererMs - Number(start?.bridgeCallStartedAt);
     const responseAgeMs = Number(event.rendererAtMs) - stopRequestedAtRendererMs;
@@ -176,7 +177,7 @@ function summarizeMixerTiming(events: ReturnType<typeof getNativeVst3MixerEffect
       rendererQueueWaitMs.push(Number(start.bridgeCallStartedAt) - Number(request.requestReceivedAt));
     }
   }
-  for (const event of events) if (event.event === 'renderer-bridge-response' && Number.isFinite(Number(event.bridgeRoundTripMs))) rendererBridgeRoundTripMs.push(Number(event.bridgeRoundTripMs));
+  for (const event of events) if (event.event === 'renderer-bridge-response' && isMeasuredRequest(event.requestId) && Number.isFinite(Number(event.bridgeRoundTripMs))) rendererBridgeRoundTripMs.push(Number(event.bridgeRoundTripMs));
   for (const timing of preload.values()) if (Number.isFinite(timing.rendererIpcRttMs)) preloadIpcRttMs.push(timing.rendererIpcRttMs);
   const cancellationServiceMs: number[] = [];
   for (const [requestId, timing] of main) {
@@ -209,7 +210,7 @@ function summarizeMixerTiming(events: ReturnType<typeof getNativeVst3MixerEffect
     maxConcurrentCallsPerEffect: ipc?.main?.maximumConcurrentCallsPerEffect ?? 0,
     nativeServiceSessionCountAfterCleanup: ipc?.main?.nativeServiceSessionCount ?? -1,
     missedDeadlines, requestCount: submissions.size,
-    profileEventCount: events.length,
+    profileEventCount: events.filter(event => event.requestId === undefined || isMeasuredRequest(event.requestId)).length,
     requestFailures: [...main].filter(([requestId, event]: [string, any]) => !!event.error && !stopCancelledRequestIds.has(requestId)).map(([, event]: [string, any]) => event.error),
     unexpectedStopCancellations: [...main].filter(([requestId, event]: [string, any]) => event.error === 'VST3 instance cancelled' && !nativeCancelledAtStopRequestIds.has(requestId)).map(([requestId]: [string, any]) => requestId),
     missingMainResponses: [...submissions.keys()].filter(requestId => !main.has(requestId)).length,
@@ -219,6 +220,8 @@ function summarizeMixerTiming(events: ReturnType<typeof getNativeVst3MixerEffect
 }
 
 function correlatedTimingSamples(run: any) {
+  const measuredRequestIds = new Set((run.runtimeEvents as Array<Record<string, any>>)
+    .filter(event => event.event === 'worklet-submit' && typeof event.requestId === 'string').map(event => event.requestId));
   const samples = new Map<string, Record<string, unknown>>();
   const sampleFor = (requestId: string) => {
     let sample = samples.get(requestId);
@@ -226,7 +229,7 @@ function correlatedTimingSamples(run: any) {
     return sample;
   };
   for (const event of run.runtimeEvents as Array<Record<string, any>>) {
-    if (typeof event.requestId !== 'string') continue;
+    if (typeof event.requestId !== 'string' || !measuredRequestIds.has(event.requestId)) continue;
     const sample = sampleFor(event.requestId);
     if (event.event === 'worklet-submit') Object.assign(sample, {
       inputBlockStartContextFrame: event.inputBlockStartContextFrame,
@@ -249,14 +252,14 @@ function correlatedTimingSamples(run: any) {
     });
   }
   for (const event of run.ipc.preload as Array<Record<string, any>>) {
-    if (typeof event.requestId !== 'string') continue;
+    if (typeof event.requestId !== 'string' || !measuredRequestIds.has(event.requestId)) continue;
     Object.assign(sampleFor(event.requestId), {
       preloadInvokeStartedAtMs: event.invokeStartedAt, preloadResponseReceivedAtMs: event.responseReceivedAt,
       rendererIpcRoundTripMs: event.rendererIpcRttMs,
     });
   }
   for (const event of run.ipc.main.processAudio as Array<Record<string, any>>) {
-    if (typeof event.requestId !== 'string') continue;
+    if (typeof event.requestId !== 'string' || !measuredRequestIds.has(event.requestId)) continue;
     Object.assign(sampleFor(event.requestId), {
       mainIpcReceivedAtMs: event.ipcReceivedAtMainMs, mainNativeServiceStartedAtMs: event.serviceStartAtMainMs,
       mainNativeServiceCompletedAtMs: event.serviceCompletedAtMainMs, nativeServiceCallMs: event.nativeServiceCallMs,
