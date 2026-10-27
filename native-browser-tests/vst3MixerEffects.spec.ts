@@ -57,11 +57,11 @@ async function setupProject(page: Page) {
     const { persistProjectState } = await import('/src/state/projectPersistence.ts');
     const state = createDefaultProjectState();
     const source = state.channels[0];
-    const makeChannel = (id: string, name: string, mixerTrackId: number, pitch: number) => ({
+    const makeChannel = (id: string, name: string, mixerTrackId: number, pitch: number, duration: number) => ({
       ...source, id, name, instrumentType: 'minisynth', mixerTrackId, volume: 1, pan: 0, mute: false, solo: false,
-      steps: Array(16).fill(false), notes: [{ id: `${id}-note`, pitch, start: 0, duration: 8, velocity: 0.8 }],
+      steps: Array(16).fill(false), notes: [{ id: `${id}-note`, pitch, start: 0, duration, velocity: 0.8 }],
     });
-    state.channels = [makeChannel('mixer-fx-target', 'VST3 target signal', 1, 60), makeChannel('mixer-fx-isolation', 'Unprocessed control signal', 2, 67)];
+    state.channels = [makeChannel('mixer-fx-target', 'VST3 target signal', 1, 60, 8), makeChannel('mixer-fx-isolation', 'Unprocessed control signal', 2, 67, 16)];
     state.mixerTracks = state.mixerTracks.map((track: any) => ({ ...track,
       volume: 1, pan: 0, mute: false, solo: false, fxSlots: [], routingTargetId: 0, auxSends: undefined,
     }));

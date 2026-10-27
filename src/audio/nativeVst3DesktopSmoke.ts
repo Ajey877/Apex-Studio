@@ -374,7 +374,7 @@ async function runPackagedMixerAcceptance(instance: typeof audioEngine) {
       notes: [{ id: 'packaged-mixer-target-note', pitch: 60, start: 0, duration: 8, velocity: 0.8 }] },
     { ...source, id: 'packaged-mixer-control', name: 'Packaged Mixer unaffected control', instrumentType: 'minisynth', vst3: undefined,
       mixerTrackId: 2, volume: 1, pan: 0, mute: false, solo: false, steps: Array(16).fill(false),
-      notes: [{ id: 'packaged-mixer-control-note', pitch: 67, start: 0, duration: 8, velocity: 0.8 }] },
+      notes: [{ id: 'packaged-mixer-control-note', pitch: 67, start: 0, duration: 16, velocity: 0.8 }] },
   ];
   const tracks: MixerTrack[] = [0, 1, 2].map(id => ({ id, name: `Packaged smoke track ${id}`, color: '#fff',
     volume: 1, pan: 0, mute: false, solo: false, fxSlots: [], peakL: 0, peakR: 0 }));
