@@ -38,13 +38,24 @@ async function launch(reopening) {
 try {
   const saved = await launch(false);
   const reopened = await launch(true);
+  for (const [label, result] of [['save process', saved], ['reopen process', reopened]]) {
+    const mixer = result.vst3?.mixerEffects;
+    assert.equal(mixer?.status, 'passed', `${label} did not complete packaged production Mixer-effect acceptance`);
+    for (const [runName, timing] of Object.entries(mixer.timing)) {
+      assert.equal(timing.missedDeadlines, 0, `${label} ${runName} reported a Mixer deadline miss`);
+      assert.equal(timing.nativeServiceSessionCountAfterCleanup, 0, `${label} ${runName} leaked native helper sessions`);
+    }
+  }
   for (const field of ['classId', 'onsetFrame', 'rms', 'pcmChecksum', 'savedStateChecksum', 'parameterValue', 'parameterExportDifferenceRms', 'automationPcmChecksum', 'automationStateChecksum', 'automationExportDifferenceRms']) {
     assert.equal(reopened.vst3[field], saved.vst3[field], `Actual application restart changed ${field}`);
   }
   assert.equal(reopened.vst3.uiRestored, true);
   writeFileSync(join(evidence, 'apex-packaged-smoke.json'), JSON.stringify({ saved, reopened, applicationRestartEqual: true }, null, 2));
   console.log('[Apex Studio smoke] packaged live/export/save/application-restart smoke passed');
-  if (process.env.GITHUB_ACTIONS) console.log(`::notice title=Packaged VST3 application restart proof::${JSON.stringify({ applicationRestartEqual: true, ...reopened.vst3 })}`);
+  if (process.env.GITHUB_ACTIONS) {
+    const { timingSamples: _samples, ...mixerSummary } = reopened.vst3.mixerEffects;
+    console.log(`::notice title=Packaged VST3 application restart proof::${JSON.stringify({ applicationRestartEqual: true, ...reopened.vst3, mixerEffects: mixerSummary })}`);
+  }
   rmSync(profile, { recursive: true, force: true });
 } catch (error) {
   console.error('[Apex Studio smoke]', error);

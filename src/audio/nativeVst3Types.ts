@@ -38,6 +38,18 @@ export interface Vst3Parameter {
 export interface Vst3ParameterMetadata { parameters: Vst3Parameter[]; controllerAvailable: boolean }
 export type Vst3ParameterPoint = { id: number; value: number; offset?: number };
 export type Vst3ParameterChange = { id: number; value: number };
+/** Smoke-only correlation metadata; the production IPC payload remains PCM plus validated settings. */
+export interface Vst3AudioProcessProfile {
+  requestId: string;
+  trackId: number;
+  slotId: string;
+  sequence: number;
+  inputBlockStartContextFrame: number;
+  submittedContextFrame: number;
+  submittedOutputFrame: number;
+  dueOutputFrame: number;
+  sampleRate: number;
+}
 export type Vst3ParameterEditorCommit = (channel: import('../types/daw').Channel, changes: Vst3ParameterChange[], signal: AbortSignal) => Promise<void>;
 /** Narrow async desktop boundary. Never exposes ipcRenderer, paths to executables or raw host commands. */
 export interface Vst3Bridge {
@@ -52,7 +64,7 @@ export interface Vst3Bridge {
   parameters(id: string, changes: Vst3ParameterChange[]): Promise<Vst3Parameter[]>;
   open(instrument: Vst3Instrument | Vst3Effect, sampleRate: number, mode: 'realtime' | 'offline', kind?: 'instrument' | 'effect'): Promise<{ id: string; latencySamples: number; parameters?: Vst3Parameter[] }>;
   process(id: string, frames: number, events: Vst3Event[], bpm: number, parameters?: Vst3ParameterPoint[]): Promise<Float32Array>;
-  processAudio(id: string, frames: number, audio: Float32Array, bpm: number, parameters?: Vst3ParameterPoint[]): Promise<Float32Array>;
+  processAudio(id: string, frames: number, audio: Float32Array, bpm: number, parameters?: Vst3ParameterPoint[], profile?: Vst3AudioProcessProfile): Promise<Float32Array>;
   close(id: string): Promise<void>;
 }
 export function getVst3Bridge(): Vst3Bridge | undefined {

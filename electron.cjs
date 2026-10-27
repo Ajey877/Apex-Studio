@@ -123,7 +123,10 @@ function createWindow() {
             return { bodyReady, indexedDbReady, audioReady, vst3, title: document.title };
           })()
         `);
-        console.log('[Apex Studio smoke] runtime checks:', JSON.stringify(result));
+        const vst3LogSummary = result.vst3?.mixerEffects
+          ? { ...result.vst3, mixerEffects: { ...result.vst3.mixerEffects, timingSamples: undefined } }
+          : result.vst3;
+        console.log('[Apex Studio smoke] runtime checks:', JSON.stringify({ ...result, vst3: vst3LogSummary }));
         if (!result.bodyReady || !result.indexedDbReady || !result.audioReady) {
           finishSmoke(1, 'required packaged runtime capabilities are unavailable');
           return;
@@ -132,7 +135,7 @@ function createWindow() {
           fs.mkdirSync(path.dirname(process.env.APEX_SMOKE_EVIDENCE), { recursive: true });
           fs.writeFileSync(process.env.APEX_SMOKE_EVIDENCE, JSON.stringify(result, null, 2));
         }
-        if (process.env.GITHUB_ACTIONS) console.log(`::notice title=Packaged VST3 live and production export proof::${JSON.stringify(result.vst3)}`);
+        if (process.env.GITHUB_ACTIONS) console.log(`::notice title=Packaged VST3 live and production export proof::${JSON.stringify(vst3LogSummary)}`);
         finishSmoke(0, `packaged renderer loaded successfully: ${result.title}`);
       } catch (error) {
         finishSmoke(1, `runtime check failed: ${error instanceof Error ? error.message : String(error)}`);

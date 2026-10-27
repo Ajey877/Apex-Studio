@@ -1,5 +1,5 @@
 import type { FxSlot, MixerTrack } from '../types/daw';
-import type { Vst3Effect, Vst3ParameterChange, Vst3Parameter, Vst3Bridge } from './nativeVst3Types';
+import type { Vst3Effect, Vst3ParameterChange, Vst3Parameter, Vst3Bridge, Vst3AudioProcessProfile } from './nativeVst3Types';
 import { assertVst3Effect, getVst3Bridge } from './nativeVst3Types';
 
 export interface Vst3MixerEffectDiagnostic {
@@ -27,6 +27,27 @@ function clearDiagnostic(trackId: number, slotId: string) {
   if (next.length !== diagnostics.length) { diagnostics = next; listeners.forEach(listener => listener()); }
 }
 
+export interface NativeVst3MixerEffectSmokeEvent {
+  event: string;
+  trackId?: number;
+  slotId?: string;
+  requestId?: string;
+  sequence?: number;
+  [key: string]: unknown;
+}
+const smokeTimingEvents: NativeVst3MixerEffectSmokeEvent[] = [];
+const mixerFxSmokeEnabled = () => (globalThis as any).desktopApp?.smokeTest === true;
+function recordMixerFxSmokeEvent(event: NativeVst3MixerEffectSmokeEvent) {
+  if (!mixerFxSmokeEnabled()) return;
+  if (smokeTimingEvents.length < 8192) smokeTimingEvents.push({ ...event, rendererAtMs: performance.now() });
+}
+export function resetNativeVst3MixerEffectSmokeTiming() {
+  if (mixerFxSmokeEnabled()) smokeTimingEvents.length = 0;
+}
+export function getNativeVst3MixerEffectSmokeTiming(): NativeVst3MixerEffectSmokeEvent[] {
+  return mixerFxSmokeEnabled() ? smokeTimingEvents.slice() : [];
+}
+
 export const VST3_FX_BLOCK_FRAMES = 1024;
 export const VST3_FX_PIPELINE_FRAMES = VST3_FX_BLOCK_FRAMES * 2;
 
@@ -39,7 +60,7 @@ export const VST3_FX_PIPELINE_FRAMES = VST3_FX_BLOCK_FRAMES * 2;
  */
 export const VST3_FX_WORKLET_SOURCE = `
 class ApexVst3FxProcessor extends AudioWorkletProcessor {
-  constructor() {
+  constructor(options) {
     super();
     this.blockFrames = ${VST3_FX_BLOCK_FRAMES};
     this.delayFrames = ${VST3_FX_PIPELINE_FRAMES};
@@ -48,6 +69,8 @@ class ApexVst3FxProcessor extends AudioWorkletProcessor {
     this.fill = 0;
     this.inputFrame = 0;
     this.outputFrame = 0;
+    this.nodeStartContextFrame = null;
+    this.profileEnabled = !!options.processorOptions?.profileEnabled;
     this.sequence = 0;
     this.pending = -1;
     this.ready = new Map();
@@ -58,8 +81,14 @@ class ApexVst3FxProcessor extends AudioWorkletProcessor {
       const message = event.data;
       if (message?.type === 'bypass') { this.bypass = !!message.value; return; }
       if (message?.type === 'failure') { this.failed = true; return; }
-      if (message?.type !== 'result' || this.failed || message.sequence !== this.pending ||
-          !(message.samples instanceof Float32Array) || message.samples.length !== this.blockFrames * 2) return;
+      if (message?.type !== 'result') return;
+      const valid = !this.failed && message.sequence === this.pending &&
+        message.samples instanceof Float32Array && message.samples.length === this.blockFrames * 2;
+      if (this.profileEnabled) this.port.postMessage({ type: 'profile', event: 'worklet-result', sequence: message.sequence,
+        accepted: valid, pendingSequence: this.pending, receivedOutputFrame: this.outputFrame,
+        dueOutputFrame: Number.isInteger(message.sequence) ? this.delayFrames + message.sequence * this.blockFrames : null,
+        reason: valid ? null : (this.failed ? 'after-failure' : 'stale-duplicate-or-malformed') });
+      if (!valid) return;
       this.pending = -1;
       this.ready.set(message.sequence, message.samples);
       if (this.ready.size > 2 || this.dryReady.size > 2) this.fail('Native effect output queue exceeded its two-block bound.');
@@ -75,6 +104,7 @@ class ApexVst3FxProcessor extends AudioWorkletProcessor {
   process(inputs, outputs) {
     const out = outputs[0];
     if (!out || out.length < 2) return true;
+    if (this.nodeStartContextFrame === null) this.nodeStartContextFrame = currentFrame;
     for (const channel of out) channel.fill(0);
     if (this.failed) return true;
     const input = inputs[0];
@@ -85,14 +115,27 @@ class ApexVst3FxProcessor extends AudioWorkletProcessor {
         this.right[this.fill] = right[i];
         this.fill++;
         if (this.fill === this.blockFrames) {
-          if (this.pending !== -1) { this.fail('Native effect missed its real-time processing deadline; playback stopped rather than replaying stale PCM.'); break; }
+          if (this.pending !== -1) {
+            if (this.profileEnabled) this.port.postMessage({ type: 'profile', event: 'pending-deadline-miss', sequence: this.pending,
+              nextSequence: this.sequence, inputContextFrame: currentFrame + i, currentOutputFrame: this.outputFrame,
+              dueOutputFrame: this.delayFrames + this.pending * this.blockFrames });
+            this.fail('Native effect missed its real-time processing deadline; playback stopped rather than replaying stale PCM.');
+            break;
+          }
           const samples = new Float32Array(this.blockFrames * 2);
           samples.set(this.left, 0);
           samples.set(this.right, this.blockFrames);
           const sequence = this.sequence++;
+          const inputBlockStartContextFrame = currentFrame + i + 1 - this.blockFrames;
+          const submittedContextFrame = currentFrame + i + 1;
+          const submittedOutputFrame = this.outputFrame + i + 1;
+          const dueOutputFrame = this.delayFrames + sequence * this.blockFrames;
+          const timing = { sequence, inputBlockStartContextFrame, submittedContextFrame, submittedOutputFrame,
+            dueOutputFrame, dueContextFrame: this.nodeStartContextFrame + dueOutputFrame };
           this.dryReady.set(sequence, samples.slice());
           this.pending = sequence;
-          this.port.postMessage({ type: 'process', sequence, samples }, [samples.buffer]);
+          if (this.profileEnabled) this.port.postMessage({ type: 'profile', event: 'worklet-submit', ...timing });
+          this.port.postMessage({ type: 'process', sequence, samples, ...(this.profileEnabled ? { timing } : {}) }, [samples.buffer]);
           this.fill = 0;
         }
       }
@@ -106,7 +149,12 @@ class ApexVst3FxProcessor extends AudioWorkletProcessor {
       const processed = this.ready.get(sequence);
       const dry = this.dryReady.get(sequence);
       if (!processed || !dry) {
-        this.fail('Native effect output was not ready at its scheduled audio frame; playback stopped rather than using dry or stale audio. Sequence ' + sequence + ', source frame ' + sourceFrame + ', due output frame ' + (this.delayFrames + sequence * this.blockFrames) + ', current output frame ' + (this.outputFrame + i) + ', pending sequence ' + this.pending + '.');
+        const dueOutputFrame = this.delayFrames + sequence * this.blockFrames;
+        const currentOutputFrame = this.outputFrame + i;
+        if (this.profileEnabled) this.port.postMessage({ type: 'profile', event: 'deadline-miss', sequence, sourceFrame,
+          dueOutputFrame, currentOutputFrame, pendingSequence: this.pending, readySequences: Array.from(this.ready.keys()),
+          drySequences: Array.from(this.dryReady.keys()) });
+        this.fail('Native effect output was not ready at its scheduled audio frame; playback stopped rather than using dry or stale audio. Sequence ' + sequence + ', source frame ' + sourceFrame + ', due output frame ' + dueOutputFrame + ', current output frame ' + currentOutputFrame + ', pending sequence ' + this.pending + '.');
         break;
       }
       out[0][i] = this.bypass ? dry[offset] : processed[offset];
@@ -149,8 +197,11 @@ interface PreparedEffect {
   bridge: Vst3Bridge;
   node: AudioWorkletNode;
   sessionId?: string;
+  runtimeId?: string;
+  profileEnabled: boolean;
   ready: Promise<void>;
   tail: Promise<void>;
+  queueDepth: number;
   disposed: boolean;
   faulted: boolean;
 }
@@ -209,16 +260,25 @@ export class NativeVst3EffectRuntime {
   private async prepareOne(trackId: number, slot: FxSlot, context: BaseAudioContext, bridge: Vst3Bridge) {
     if (!slot.vst3Effect) throw new Error(`Mixer track ${trackId}, slot ${slot.id}: VST3 effect identity/state is missing; relink the effect. No dry substitute was installed.`);
     assertVst3Effect(slot.vst3Effect);
+    const profileEnabled = mixerFxSmokeEnabled();
     const node = new AudioWorkletNode(context as AudioContext, 'apex-vst3-mixer-effect', {
       numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [2], channelCount: 2, channelCountMode: 'explicit', channelInterpretation: 'speakers',
+      processorOptions: { profileEnabled },
     });
     const entry: PreparedEffect = {
       trackId, slotId: slot.id, configuration: effectKey(slot.vst3Effect), effect: structuredClone(slot.vst3Effect), context, bridge, node,
-      tail: Promise.resolve(), disposed: false, faulted: false, ready: Promise.resolve(),
+      runtimeId: profileEnabled ? crypto.randomUUID() : undefined, profileEnabled,
+      tail: Promise.resolve(), queueDepth: 0, disposed: false, faulted: false, ready: Promise.resolve(),
     };
     this.prepared.set(runtimeKey(trackId, slot.id), entry);
     node.port.onmessage = event => {
       const message = event.data;
+      if (message?.type === 'profile') {
+        const sequence = Number.isInteger(message.sequence) ? message.sequence : undefined;
+        recordMixerFxSmokeEvent({ ...message, trackId, slotId: slot.id,
+          ...(sequence === undefined ? {} : { requestId: `${entry.runtimeId}:${sequence}` }) });
+        return;
+      }
       if (message?.type === 'failure') { this.fail(entry, String(message.reason || 'Native effect worklet failed.')); return; }
       if (message?.type !== 'process' || entry.disposed || entry.faulted || !Number.isInteger(message.sequence) ||
           !(message.samples instanceof Float32Array) || message.samples.length !== VST3_FX_BLOCK_FRAMES * 2) {
@@ -226,17 +286,48 @@ export class NativeVst3EffectRuntime {
         return;
       }
       const sequence = message.sequence;
+      const requestId = entry.runtimeId ? `${entry.runtimeId}:${sequence}` : '';
       const input = message.samples;
+      const submitted = message.timing ?? {};
+      const queueDepth = entry.profileEnabled ? ++entry.queueDepth : 0;
+      const requestReceivedAt = entry.profileEnabled ? performance.now() : 0;
+      if (entry.profileEnabled) {
+        const requestReceivedContextFrame = Math.round((context as AudioContext).currentTime * context.sampleRate);
+        recordMixerFxSmokeEvent({ event: 'renderer-request-received', trackId, slotId: slot.id, requestId, sequence,
+          requestReceivedAt, requestReceivedContextFrame, queueDepth, ...submitted });
+      }
       const operation = entry.tail.then(async () => {
         if (entry.disposed || entry.faulted || !entry.sessionId) throw new Error('Native effect processing cancelled.');
-        const samples = await bridge.processAudio(entry.sessionId, VST3_FX_BLOCK_FRAMES, input, 120);
-        if (entry.disposed || entry.faulted) throw new Error('Native effect processing cancelled.');
+        const bridgeCallStartedAt = entry.profileEnabled ? performance.now() : 0;
+        if (entry.profileEnabled) recordMixerFxSmokeEvent({ event: 'renderer-bridge-call-start', trackId, slotId: slot.id, requestId, sequence,
+          bridgeCallStartedAt, queueDepth, ...submitted });
+        const profile: Vst3AudioProcessProfile | undefined = entry.profileEnabled ? {
+          requestId, trackId, slotId: slot.id, sequence,
+          inputBlockStartContextFrame: submitted.inputBlockStartContextFrame,
+          submittedContextFrame: submitted.submittedContextFrame,
+          submittedOutputFrame: submitted.submittedOutputFrame,
+          dueOutputFrame: submitted.dueOutputFrame,
+          sampleRate: context.sampleRate,
+        } : undefined;
+        const samples = await bridge.processAudio(entry.sessionId, VST3_FX_BLOCK_FRAMES, input, 120, [], profile);
+        const bridgeResponseAt = entry.profileEnabled ? performance.now() : 0;
+        if (entry.profileEnabled) {
+          const bridgeResponseContextFrame = Math.round((context as AudioContext).currentTime * context.sampleRate);
+          recordMixerFxSmokeEvent({ event: 'renderer-bridge-response', trackId, slotId: slot.id, requestId, sequence,
+            bridgeCallStartedAt, bridgeResponseAt, bridgeRoundTripMs: bridgeResponseAt - bridgeCallStartedAt,
+            bridgeResponseContextFrame, queueDepth, ...submitted });
+        }
+        if (entry.disposed || entry.faulted) {
+          if (entry.profileEnabled) recordMixerFxSmokeEvent({ event: 'result-discarded-after-disposal', trackId, slotId: slot.id, requestId, sequence });
+          throw new Error('Native effect processing cancelled.');
+        }
         if (!(samples instanceof Float32Array) || samples.length !== VST3_FX_BLOCK_FRAMES * 2 || samples.some(value => !Number.isFinite(value))) {
           throw new Error('Native effect returned malformed or non-finite PCM.');
         }
         node.port.postMessage({ type: 'result', sequence, samples }, [samples.buffer]);
       });
-      entry.tail = operation.catch(error => { this.fail(entry, error instanceof Error ? error.message : String(error)); });
+      entry.tail = operation.catch(error => { this.fail(entry, error instanceof Error ? error.message : String(error)); })
+        .finally(() => { if (entry.profileEnabled) entry.queueDepth = Math.max(0, entry.queueDepth - 1); });
     };
     node.onprocessorerror = () => this.fail(entry, 'Native effect AudioWorklet processor failed.');
     entry.ready = bridge.open(entry.effect, context.sampleRate, 'realtime', 'effect').then(async opened => {
