@@ -136,7 +136,7 @@ function createWindow() {
               if (error && typeof error === 'object') {
                 const message = typeof error.message === 'string' ? error.message : '';
                 const stack = typeof error.stack === 'string' ? error.stack : '';
-                try { detail = message || stack ? (error.name || 'Error') + ': ' + message + (stack ? '\n' + stack : '') : JSON.stringify(error, Object.getOwnPropertyNames(error)); }
+                try { detail = message || stack ? (error.name || 'Error') + ': ' + message + (stack ? ' | ' + stack : '') : JSON.stringify(error, Object.getOwnPropertyNames(error)); }
                 catch { detail = String(error); }
               } else detail = String(error);
               return { bodyReady, indexedDbReady, audioReady, title: document.title, smokeError: String(detail || 'Unknown packaged smoke failure').slice(0, 40000) };
