@@ -197,7 +197,7 @@ app.whenReady().then(() => {
           'Content-Security-Policy': [
             [
               "default-src 'self'",
-              "script-src 'self'",
+              `script-src 'self'${process.env.APEX_SMOKE_TEST === '1' ? ' blob:' : ''}`, // Smoke-only AudioWorklet capture uses a Blob module; normal sessions stay self-only.
               "style-src 'self' 'unsafe-inline'",
               "img-src 'self' data: blob:",
               "media-src 'self' data: blob:",
