@@ -69,26 +69,6 @@ function toPlanarPcm(blocks: MixerCaptureBlock[], startFrame = -Infinity, endFra
   return { left, right, frames, rms: samples ? Math.sqrt(square / samples) : 0, startFrame: selected[0]?.frame ?? null };
 }
 
-function findPcmAlignment(reference: PlanarPcm, candidate: PlanarPcm, maximumOffsetFrames: number, label: string): number {
-  let bestOffset = 0, bestScore = -Infinity;
-  const stride = 32, lagStep = 32;
-  for (let offset = -maximumOffsetFrames; offset <= maximumOffsetFrames; offset += lagStep) {
-    const refStart = Math.max(0, -offset), candidateStart = Math.max(0, offset);
-    const count = Math.min(reference.frames - refStart, candidate.frames - candidateStart);
-    if (count < 1024) continue;
-    let dot = 0, refEnergy = 0, candidateEnergy = 0;
-    for (let frame = 0; frame < count; frame += stride) {
-      const a = (reference.left[refStart + frame]! + reference.right[refStart + frame]!) * 0.5;
-      const b = (candidate.left[candidateStart + frame]! + candidate.right[candidateStart + frame]!) * 0.5;
-      dot += a * b; refEnergy += a * a; candidateEnergy += b * b;
-    }
-    const score = dot / Math.sqrt(Math.max(1e-30, refEnergy * candidateEnergy));
-    if (score > bestScore) { bestScore = score; bestOffset = offset; }
-  }
-  if (bestScore < 0.2) throw new Error(`${label} Mixer PCM could not be aligned deterministically (correlation=${bestScore}, referenceRms=${reference.rms}, candidateRms=${candidate.rms})`);
-  return bestOffset;
-}
-
 function alignedDifference(reference: PlanarPcm, candidate: PlanarPcm, offsetFrames: number) {
   const refStart = Math.max(0, -offsetFrames), candidateStart = Math.max(0, offsetFrames);
   const frames = Math.min(reference.frames - refStart, candidate.frames - candidateStart);
@@ -103,20 +83,18 @@ function alignedDifference(reference: PlanarPcm, candidate: PlanarPcm, offsetFra
     referenceRms: frames ? Math.sqrt(energy / (frames * 2)) : 0 };
 }
 
-function compareMixerRuns(reference: any, candidate: any, trackId: number, maximumOffsetFrames: number, label: string, alignment: 'correlation' | 'run-frame' = 'correlation') {
+function compareMixerRuns(reference: any, candidate: any, trackId: number, label: string, expectedNormalizedLagFrames = 0) {
   const left = reference.pcm.get(trackId) as PlanarPcm | undefined;
   const right = candidate.pcm.get(trackId) as PlanarPcm | undefined;
-  if (!left || !right || left.startFrame === null || right.startFrame === null) throw new Error(`Packaged Mixer capture missing track ${trackId} PCM`);
+  if (!left || !right || left.startFrame === null || right.startFrame === null) throw new Error(`${label}: packaged Mixer capture missing track ${trackId} PCM`);
   const playbackStartDeltaFrames = candidate.startedContextFrame - reference.startedContextFrame;
-  // The unaffected control is a phase-reset AudioOscillatorNode scheduled at a
-  // recorded AudioContext frame. Align it by that known frame clock rather than
-  // cross-correlating a pure tone (which is ambiguous at quarter-cycle offsets).
-  const offsetFrames = alignment === 'run-frame'
-    ? left.startFrame + playbackStartDeltaFrames - right.startFrame
-    : findPcmAlignment(left, right, maximumOffsetFrames, `${label}, track ${trackId}`);
+  // Align by the absolute AudioWorklet frame stamps and each run's scheduled
+  // input frame. For insert-count comparisons, apply only the declared pipeline
+  // offset. This avoids pure-tone correlation aliases that can hide 2048 frames.
+  const offsetFrames = left.startFrame + playbackStartDeltaFrames + expectedNormalizedLagFrames - right.startFrame;
   const difference = alignedDifference(left, right, offsetFrames);
   const normalizedLagFrames = right.startFrame + offsetFrames - left.startFrame - playbackStartDeltaFrames;
-  return { ...difference, offsetFrames, normalizedLagFrames, alignment };
+  return { ...difference, offsetFrames, normalizedLagFrames, expectedNormalizedLagFrames, alignment: 'captured-context-frames' };
 }
 
 function distribution(values: number[]) {
@@ -321,6 +299,17 @@ function correlatedTimingSamples(run: any) {
   return [...samples.values()].slice(0, 8192);
 }
 
+function createDeterministicMixerInput(context: AudioContext): AudioBuffer {
+  const buffer = context.createBuffer(1, context.sampleRate * 4, context.sampleRate);
+  const samples = buffer.getChannelData(0);
+  let state = 0x6d2b79f5;
+  for (let frame = 0; frame < samples.length; frame++) {
+    state ^= state << 13; state ^= state >>> 17; state ^= state << 5;
+    samples[frame] = ((state >>> 0) / 0x80000000 - 1) * 0.1;
+  }
+  return buffer;
+}
+
 async function captureLiveMixerRun(instance: typeof audioEngine, channels: Channel[], mixer: MixerTrack[], durationMs = 1600) {
   const context = instance.getContext() as AudioContext;
   await context.resume();
@@ -328,11 +317,12 @@ async function captureLiveMixerRun(instance: typeof audioEngine, channels: Chann
   for (const trackId of [1, 2]) taps.set(trackId, await attachMixerCapture(instance, trackId));
   const smokeApi = (globalThis as any).desktopApp?.vst3;
   if (typeof smokeApi?.smokeTimingSnapshot !== 'function') throw new Error('Smoke-only production IPC timing snapshot is unavailable');
-  const targetSource = context.createOscillator();
+  const targetSource = context.createBufferSource();
+  targetSource.buffer = createDeterministicMixerInput(context);
   const targetGain = context.createGain();
   const controlSource = context.createOscillator();
   const controlGain = context.createGain();
-  targetSource.type = 'sine'; targetSource.frequency.value = 375; targetGain.gain.value = 0.1;
+  targetGain.gain.value = 1;
   controlSource.type = 'sine'; controlSource.frequency.value = 750; controlGain.gain.value = 0.1;
   await instance.play(channels, [], 'pat', undefined, mixer, 16);
   await context.resume();
@@ -467,14 +457,13 @@ async function runPackagedMixerAcceptance(instance: typeof audioEngine) {
   const removed = await run(noEffects, 'Mixer effect removal/restart');
   const acceptanceTimingEvidence = JSON.stringify(Object.fromEntries(Object.entries({ orderA, orderB, delayProcessed, delayPassThrough, removed })
     .map(([label, result]) => [label, { timing: result.timing, timingSamples: correlatedTimingSamples(result).slice(0, 16) }])));
-  const alignmentWindow = Math.round(0.5 * orderA.sampleRate);
   let orderDifference: ReturnType<typeof compareMixerRuns>, controlDifference: ReturnType<typeof compareMixerRuns>;
   let processedVsBypass: ReturnType<typeof compareMixerRuns>, bypassVsRemoved: ReturnType<typeof compareMixerRuns>;
   try {
-    orderDifference = compareMixerRuns(orderA, orderB, 1, alignmentWindow, 'order reversal');
-    controlDifference = compareMixerRuns(orderA, orderB, 2, alignmentWindow, 'control-track isolation', 'run-frame');
-    processedVsBypass = compareMixerRuns(delayProcessed, delayPassThrough, 1, alignmentWindow, 'processed vs native bypass');
-    bypassVsRemoved = compareMixerRuns(delayPassThrough, removed, 1, alignmentWindow, 'native bypass vs removed insert');
+    orderDifference = compareMixerRuns(orderA, orderB, 1, 'order reversal');
+    controlDifference = compareMixerRuns(orderA, orderB, 2, 'control-track isolation');
+    processedVsBypass = compareMixerRuns(delayProcessed, delayPassThrough, 1, 'processed vs native bypass');
+    bypassVsRemoved = compareMixerRuns(delayPassThrough, removed, 1, 'native bypass vs removed insert', -VST3_FX_PIPELINE_FRAMES);
   } catch (error) {
     throw new Error(`${error instanceof Error ? error.message : String(error)}; per-request input/output and timing evidence=${acceptanceTimingEvidence}`);
   }
@@ -509,7 +498,7 @@ async function runPackagedMixerAcceptance(instance: typeof audioEngine) {
     orderDifferenceRms: orderDifference.rmsDifference, orderOffsetFrames: orderDifference.normalizedLagFrames,
     controlTrackRmsDifference: controlRmsDifference, controlTrackPcmDifferenceRms: controlDifference.rmsDifference,
     controlTrackRms: { orderA: orderA.trackRms['2'], orderB: orderB.trackRms['2'] },
-    controlTrackIsolationMethod: 'A smoke-only 750 Hz oscillator is routed through the production track-2 input; compare aligned live track PCM and RMS across effect-order captures.',
+    controlTrackIsolationMethod: 'A smoke-only phase-reset 750 Hz oscillator is routed through production track 2; compare PCM at exact AudioWorklet context-frame alignment across effect-order captures.',
     controlIsolationToleranceRms: controlTolerance,
     bypassVsProcessedDifferenceRms: processedVsBypass.rmsDifference,
     bypassVsProcessedLagAfterRunStartNormalizationFrames: processedVsBypass.normalizedLagFrames,
@@ -522,7 +511,7 @@ async function runPackagedMixerAcceptance(instance: typeof audioEngine) {
     timingSamples: { orderA: correlatedTimingSamples(orderA), orderB: correlatedTimingSamples(orderB),
       delayProcessed: correlatedTimingSamples(delayProcessed), delayBypassed: correlatedTimingSamples(delayPassThrough),
       cleanupAfterRemoval: correlatedTimingSamples(removed) },
-    proof: 'Packaged Electron production AudioWorklet → authorized main IPC → native VST3 helper → production preload → worklet PCM, captured from production Mixer analysers. Smoke-only 375/750 Hz oscillators provide deterministic track inputs; no exposeFunction processing bridge.'
+    proof: 'Packaged Electron production AudioWorklet → authorized main IPC → native VST3 helper → production preload → worklet PCM, captured from production Mixer analysers. Smoke-only deterministic broadband target input and phase-reset 750 Hz control input; run-relative alignment uses captured AudioContext frames, with the declared 2048-frame one-insert offset tested directly; no exposeFunction processing bridge.'
   };
 }
 
