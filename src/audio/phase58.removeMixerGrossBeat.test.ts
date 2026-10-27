@@ -51,13 +51,13 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const SRC_ROOT = resolve(__dirname, '..');
 
-// ── Compile-time contract #1: FxType === supported set, without gross_beat ──
+// ── Compile-time contract #1: built-in FxType set excludes VST3 and gross_beat ──
 
 /**
- * The complete mixer FX surface that must remain reachable after Phase 58.
- * `satisfies` proves every entry is still a real `FxType`; the `Covered`
- * assertion below proves the union has no other members — so re-adding
- * `gross_beat` (or any other picker-less type) fails `npm run lint`.
+ * The generic built-in Mixer FX surface that remains reachable after Phase 58.
+ * `vst3` is intentionally represented in FxSlot but offered by its separate
+ * discovery-backed workflow, not this built-in factory/dropdown contract.
+ * `satisfies` and `Covered` keep the built-in set exhaustive.
  */
 const SUPPORTED_MIXER_FX_TYPES = [
   'equalizer',
@@ -69,10 +69,10 @@ const SUPPORTED_MIXER_FX_TYPES = [
   'bitcrusher',
   'limiter',
   'tape_saturation',
-] as const satisfies readonly FxType[];
+] as const satisfies readonly Exclude<FxType, 'vst3'>[];
 
 type Covered<T extends string, U extends string> = [T] extends [U] ? true : false;
-const unionIsCovered: Covered<FxType, (typeof SUPPORTED_MIXER_FX_TYPES)[number]> = true;
+const unionIsCovered: Covered<Exclude<FxType, 'vst3'>, (typeof SUPPORTED_MIXER_FX_TYPES)[number]> = true;
 void unionIsCovered;
 
 // Compile-time contract #2: the removed mixer insert cannot be typed again.
@@ -234,9 +234,8 @@ function makeLiveFixture() {
 
 describe('Phase 58: mixer FX registry no longer carries a Gross Beat insert', () => {
   it('keeps every remaining mixer FX type declared in FxType (runtime mirror of the compile-time check)', () => {
-    // The compile-time `Covered` assertion above is the real contract; this
-    // assertion keeps the list visible to the runtime suite so a deleted
-    // member is reported as a test failure too, not only a lint failure.
+    // The compile-time `Covered` assertion above is the real built-in contract;
+    // this keeps its runtime mirror visible to the suite as well.
     assert.deepEqual(
       [...SUPPORTED_MIXER_FX_TYPES],
       ['equalizer', 'reverb', 'delay', 'distortion', 'compressor', 'chorus', 'bitcrusher', 'limiter', 'tape_saturation'],

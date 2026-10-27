@@ -117,6 +117,23 @@ test('effect order is audible: delay then resonant filter differs from filter th
   assert.ok(difference(delayThenAmbience, ambienceThenDelay) > 1e-4);
 });
 
+test('service exposes genuine effect parameter metadata and captures persisted native controller/component state', async () => {
+  const service = new Vst3Service(executable, [root]);
+  const initial = { schema: 1, classId: delay.classId, parameters: [] };
+  try {
+    const described = await service.describeEffect(delay, 'describe-effect');
+    assert.equal(described.controllerAvailable, true);
+    assert.ok(described.parameters.length > 0);
+    assert.ok(described.parameters.some(parameter => parameter.id === 4));
+    const saved = await service.inspectEffect(delay, { ...initial, parameters: [{ id: 4, value: 0.25 }] }, 'inspect-effect');
+    assert.equal(saved.classId, delay.classId);
+    assert.equal(saved.state.classId, delay.classId);
+    assert.ok(typeof saved.state.component === 'string' && saved.state.component.length > 0);
+    assert.ok(saved.state.controller === undefined || (typeof saved.state.controller === 'string' && saved.state.controller.length > 0));
+    assert.ok(saved.state.parameters.some(parameter => parameter.id === 4 && Math.abs(parameter.value - 0.25) < 1e-7));
+  } finally { await service.dispose(); }
+});
+
 test('service enforces effect identity, owner, stereo bounds and explicit failure without losing retry', async () => {
   const service = new Vst3Service(executable, [root]);
   try {

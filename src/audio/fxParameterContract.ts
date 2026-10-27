@@ -184,6 +184,8 @@ export const FX_PARAMETER_FAMILIES: Readonly<Record<FxType, FxFamilySpec | null>
   tape_saturation: null,
   chorus: null,
   limiter: { fxType: 'limiter', displayName: 'Limiter', parameters: LIMITER_PARAMS },
+  // Native parameter identities/metadata come from the selected VST3 controller.
+  vst3: null,
 };
 
 /**

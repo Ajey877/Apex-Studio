@@ -254,6 +254,7 @@ export function createEffect(ctx: AudioContext, slot: FxSlot, offlineReverbImpul
       return wrapWetDry(ctx, effect, mix);
     }
     case 'bitcrusher': return wrapWetDry(ctx, createNativeWaveShaper(ctx, slot, 'bitcrusher'), mix);
+    case 'vst3': return null; // Native inserts are wired by the VST3 runtime, never fabricated as Web Audio FX.
     case 'limiter': {
       const effect = new LimiterEffect(ctx, slot.id, bounded(numericParam(slot, 'ceiling', -0.3), -12, 0), bounded(numericParam(slot, 'release', 0.08), 0.01, 1), bounded(numericParam(slot, 'drive', 0), -12, 24), 1);
       return wrapWetDry(ctx, effect, mix);

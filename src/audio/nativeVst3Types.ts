@@ -46,6 +46,8 @@ export interface Vst3Bridge {
   discover(): Promise<{ plugins: Vst3Identity[]; errors: Array<{ path: string; error: string }> }>;
   discoverEffects(): Promise<{ plugins: Vst3Identity[]; errors: Array<{ path: string; error: string }> }>;
   inspect(plugin: Vst3Identity, state?: Vst3State): Promise<Vst3Instrument>;
+  inspectEffect(plugin: Vst3Identity, state?: Vst3State): Promise<Vst3Effect>;
+  describeEffect(plugin: Vst3Effect): Promise<Vst3ParameterMetadata>;
   describe(instrument: Vst3Instrument): Promise<Vst3ParameterMetadata>;
   parameters(id: string, changes: Vst3ParameterChange[]): Promise<Vst3Parameter[]>;
   open(instrument: Vst3Instrument | Vst3Effect, sampleRate: number, mode: 'realtime' | 'offline', kind?: 'instrument' | 'effect'): Promise<{ id: string; latencySamples: number; parameters?: Vst3Parameter[] }>;
@@ -62,5 +64,18 @@ export function assertVst3Instrument(value: unknown): asserts value is Vst3Instr
     !plugin.state || plugin.state.schema !== 1 || plugin.state.classId !== plugin.classId ||
     (plugin.state.parameters !== undefined && !Array.isArray(plugin.state.parameters))) {
     throw new Error('VST3 identity/state is missing or invalid. Original project data is retained; relink the instrument or retry.');
+  }
+}
+
+export function assertVst3Effect(value: unknown): asserts value is Vst3Effect {
+  const plugin = value as Vst3Effect | undefined;
+  if (!plugin || typeof plugin.path !== 'string' || !/^[A-F0-9]{32}$/.test(plugin.classId ?? '') ||
+    !plugin.state || plugin.state.schema !== 1 || plugin.state.classId !== plugin.classId ||
+    !Array.isArray(plugin.state.parameters) || plugin.state.parameters.length > 4096 ||
+    plugin.state.parameters.some(parameter => !Number.isInteger(parameter.id) || parameter.id < 0 ||
+      parameter.id > 0xffffffff || !Number.isFinite(parameter.value) || parameter.value < 0 || parameter.value > 1) ||
+    [plugin.state.component, plugin.state.controller].some(state => state !== undefined &&
+      (typeof state !== 'string' || state.length > 2 * 1024 * 1024 || !/^(?:[A-Fa-f0-9]{2})*$/.test(state)))) {
+    throw new Error('VST3 effect identity/state is missing or invalid. Original project data is retained; relink the effect or retry.');
   }
 }

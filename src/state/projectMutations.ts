@@ -130,6 +130,24 @@ export const addFxSlotToProjectState = (
   })
 });
 
+export const moveFxSlotInProjectState = (
+  state: ProjectState,
+  trackId: number,
+  slotId: string,
+  direction: -1 | 1,
+): ProjectState => ({
+  ...state,
+  mixerTracks: state.mixerTracks.map(track => {
+    if (track.id !== trackId) return track;
+    const index = track.fxSlots.findIndex(slot => slot.id === slotId);
+    const target = index + direction;
+    if (index < 0 || target < 0 || target >= track.fxSlots.length) return track;
+    const fxSlots = [...track.fxSlots];
+    [fxSlots[index], fxSlots[target]] = [fxSlots[target]!, fxSlots[index]!];
+    return { ...track, fxSlots };
+  }),
+});
+
 export const deleteFxSlotFromProjectState = (
   state: ProjectState,
   trackId: number,
@@ -494,6 +512,7 @@ export const isContinuousFxUpdate = (updates: Partial<FxSlot>): boolean => {
 };
 
 export const getFxUpdateLabel = (updates: Partial<FxSlot>): string => {
+  if ('vst3Effect' in updates) return 'Edit VST3 effect state';
   if ('enabled' in updates) {
     return updates.enabled ? 'Enable effect' : 'Bypass effect';
   }

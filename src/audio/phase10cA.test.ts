@@ -114,11 +114,10 @@ function track(id: number, fxSlots: FxSlot[]): MixerTrack {
 // ── Test 1: FX picker dropdown completeness ───────────────────────────────
 
 describe('Phase 10C-A: FX picker dropdown completeness', () => {
-  it('includes every FxType value in the Mixer Add-FX dropdown', () => {
-    // The complete list of FxType values the type system allows. Adding a new
-    // member to the union in `src/types/daw.ts` makes this list the source of
-    // truth for the UI honesty contract.
-    const SUPPORTED_FX_TYPES: ReadonlyArray<FxSlot['type']> = [
+  it('includes every built-in FxType value in the Mixer Add-FX dropdown', () => {
+    // Built-in FxTypes are exposed in the generic dropdown. Native VST3 slots
+    // have their own discovery-backed action and must not be fabricated here.
+    const SUPPORTED_FX_TYPES: ReadonlyArray<Exclude<FxSlot['type'], 'vst3'>> = [
       'equalizer',
       'reverb',
       'delay',
@@ -152,6 +151,17 @@ describe('Phase 10C-A: FX picker dropdown completeness', () => {
       `Mixer.tsx Add-FX dropdown is missing FxType value(s): ${missing.join(', ')}. ` +
         `Every value in the FxType union must be reachable from the UI.`,
     );
+  });
+
+  it('offers native VST3 inserts only through the discovery-backed action', () => {
+    const mixerPath = resolve(__dirname, '..', 'components', 'Mixer.tsx');
+    const source = readFileSync(mixerPath, 'utf8');
+    assert.match(source, /Native VST3 Effect/);
+    assert.match(source, /setVst3PickerTarget\(\{ trackId: selectedTrack\.id \}\)/);
+    const startIdx = source.indexOf('Add FX dropdown');
+    const endIdx = source.indexOf('].map((fx) => (', startIdx);
+    assert.ok(startIdx >= 0 && endIdx > startIdx, 'Could not locate the built-in Add-FX dropdown');
+    assert.doesNotMatch(source.slice(startIdx, endIdx), /id:\s*'vst3'/);
   });
 
   it('does not expose unsupported FX types in the dropdown', () => {

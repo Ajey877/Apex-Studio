@@ -109,9 +109,27 @@ export class Vst3Service {
     finally { session.processing = false; }
   }
   async describe(instrument, owner = 'local') {
-    const opened = await this.open(instrument, 48000, 'offline', owner);
+    const opened = await this.open(instrument, 48000, 'offline', owner, 'instrument');
     try { return { parameters: opened.parameters, controllerAvailable: opened.controllerAvailable }; }
     finally { await this.close(opened.id, owner); }
+  }
+  async describeEffect(effect, owner = 'local') {
+    const opened = await this.open(effect, 48000, 'offline', owner, 'effect');
+    try { return { parameters: opened.parameters, controllerAvailable: opened.controllerAvailable }; }
+    finally { await this.close(opened.id, owner); }
+  }
+  async inspectEffect(plugin, state, owner = 'local') {
+    const effect = { ...plugin, ...(state === undefined ? {} : { state }) };
+    const opened = await this.open(effect, 48000, 'offline', owner, 'effect');
+    try {
+      const session = this.#session(opened.id, owner);
+      // Effect parameters are applied at the next actual process block by the
+      // helper. One bounded zero-frame-free sample advances that native state
+      // before the component/controller snapshot is captured.
+      await session.client.processAudio(1, new Float32Array(2));
+      return { path: plugin.path, classId: plugin.classId, name: plugin.name,
+        vendor: plugin.vendor, version: plugin.version, state: await session.client.snapshot() };
+    } finally { await this.close(opened.id, owner); }
   }
   async parameters(id, changes, owner = 'local') {
     const session = this.#session(id, owner);

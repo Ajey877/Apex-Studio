@@ -57,8 +57,10 @@ function registerVst3({ app, ipcMain, dialog, getWindow }) {
   handle('discover', (context, owner) => context.service.discover(owner));
   handle('discoverEffects', (context, owner) => context.service.discover(owner, 'effect'));
   handle('inspect', (context, owner, plugin, state) => context.service.inspect(plugin, state, owner));
+  handle('inspectEffect', (context, owner, plugin, state) => context.service.inspectEffect(plugin, state, owner));
   handle('open', (context, owner, instrument, rate, mode, kind) => context.service.open(instrument, rate, mode, owner, kind));
   handle('describe', (context, owner, instrument) => context.service.describe(instrument, owner));
+  handle('describeEffect', (context, owner, effect) => context.service.describeEffect(effect, owner));
   handle('parameters', (context, owner, id, changes) => context.service.parameters(id, changes, owner));
   handle('process', (context, owner, id, frames, events, bpm, parameters) => context.service.process(id, frames, events, bpm, owner, parameters));
   handle('processAudio', (context, owner, id, frames, audio, bpm, parameters) => context.service.processAudio(id, frames, audio, bpm, owner, parameters));

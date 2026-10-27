@@ -9,13 +9,17 @@ import {
   Disc, 
   Layers, 
   Sparkles,
-  Zap
+  Zap,
+  ChevronUp,
+  ChevronDown
 } from 'lucide-react';
 import { MixerTrack, FxSlot, FxType } from '../types/daw';
 import { audioEngine } from '../audio/audioEngine';
 import { MixerRoutingGraph } from '../audio/mixerRouting';
 import { FxParameterControls } from './fxParameterControls';
 import { MIXER_LEVEL_STOPS, readMixerPalette, trackIdentityLabelColor, useMixerPalette } from './mixerTheme';
+import type { Vst3Effect, Vst3ParameterChange } from '../audio/nativeVst3Types';
+import { Vst3EffectControls, Vst3EffectPicker } from './Vst3EffectControls';
 
 export const applyMixerRoutingSelection = (
   tracks: MixerTrack[],
@@ -102,6 +106,9 @@ interface MixerProps {
   onAddFxSlot: (trackId: number, type: FxType) => void;
   onDeleteFxSlot: (trackId: number, slotId: string) => void;
   onUpdateFxSlot: (trackId: number, slotId: string, updates: Partial<FxSlot>) => void;
+  onAddVst3FxSlot?: (trackId: number, effect: Vst3Effect) => void;
+  onMoveFxSlot?: (trackId: number, slotId: string, direction: -1 | 1) => void;
+  onEditVst3Effect?: (trackId: number, slotId: string, changes: Vst3ParameterChange[]) => Promise<void>;
   isPlaying: boolean;
   onOpenParametricEq?: (track: MixerTrack) => void;
   onInteractionStart?: (label?: string) => void;
@@ -133,6 +140,9 @@ export const Mixer: React.FC<MixerProps> = ({
   onAddFxSlot,
   onDeleteFxSlot,
   onUpdateFxSlot,
+  onAddVst3FxSlot,
+  onMoveFxSlot,
+  onEditVst3Effect,
   isPlaying,
   onOpenParametricEq,
   onInteractionStart,
@@ -140,6 +150,7 @@ export const Mixer: React.FC<MixerProps> = ({
   onCreateAuxReturn
 }) => {
   const [showAddFxMenu, setShowAddFxMenu] = useState(false);
+  const [vst3PickerTarget, setVst3PickerTarget] = useState<{ trackId: number; slotId?: string } | null>(null);
   const [trackPeaks, setTrackPeaks] = useState<number[]>(Array(tracks.length).fill(0));
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const masterFaderCanvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -491,7 +502,7 @@ export const Mixer: React.FC<MixerProps> = ({
                   { id: 'compressor', name: 'Studio Compressor' },
                   { id: 'chorus', name: 'Stereo Chorus' },
                   { id: 'bitcrusher', name: 'Bitcrusher' },
-                  { id: 'limiter', name: 'Transparent Limiter' }
+                  { id: 'limiter', name: 'Transparent Limiter' },
                 ].map((fx) => (
                   <button
                     key={fx.id}
@@ -505,8 +516,28 @@ export const Mixer: React.FC<MixerProps> = ({
                   </button>
                 ))}
               </div>
+              <button
+                disabled={isPlaying}
+                onClick={() => {
+                  setVst3PickerTarget({ trackId: selectedTrack.id });
+                  setShowAddFxMenu(false);
+                }}
+                className="w-full p-1.5 bg-[var(--apex-panel)] hover:bg-[var(--apex-accent-strong)] hover:text-[var(--apex-state-playing-fg)] rounded text-[10px] text-left font-medium transition disabled:opacity-40"
+              >
+                Native VST3 Effect
+              </button>
             </div>
           )}
+
+          {vst3PickerTarget && <Vst3EffectPicker
+            onCancel={() => setVst3PickerTarget(null)}
+            onChoose={effect => {
+              const target = vst3PickerTarget;
+              if (target.slotId) onUpdateFxSlot(target.trackId, target.slotId, { name: effect.name, vst3Effect: effect });
+              else onAddVst3FxSlot?.(target.trackId, effect);
+              setVst3PickerTarget(null);
+            }}
+          />}
 
           {/* FX Slots List */}
           <div className="flex-1 overflow-y-auto custom-scrollbar p-2 space-y-1.5">
@@ -699,6 +730,8 @@ export const Mixer: React.FC<MixerProps> = ({
                   <div className="flex items-center justify-between text-[var(--apex-text)]">
                     <div className="flex items-center gap-1.5 font-bold text-xs truncate">
                       <button
+                        aria-label={slot.enabled ? `Bypass ${slot.name}` : `Enable ${slot.name}`}
+                        title={slot.enabled ? `Bypass ${slot.name}` : `Enable ${slot.name}`}
                         onClick={() => onUpdateFxSlot(selectedTrack.id, slot.id, { enabled: !slot.enabled })}
                         className={`text-xs ${slot.enabled ? 'text-[var(--apex-accent)]' : 'text-[var(--apex-text-3)]'}`}
                       >
@@ -708,9 +741,20 @@ export const Mixer: React.FC<MixerProps> = ({
                     </div>
 
                     <div className="flex items-center gap-1">
+                      {onMoveFxSlot && <>
+                        <button disabled={isPlaying || idx === 0} onClick={() => onMoveFxSlot(selectedTrack.id, slot.id, -1)}
+                          className="text-[var(--apex-text-3)] hover:text-[var(--apex-text)] disabled:opacity-30 p-0.5" title="Move effect earlier in chain">
+                          <ChevronUp className="w-3 h-3" />
+                        </button>
+                        <button disabled={isPlaying || idx + 1 >= selectedTrack.fxSlots.length} onClick={() => onMoveFxSlot(selectedTrack.id, slot.id, 1)}
+                          className="text-[var(--apex-text-3)] hover:text-[var(--apex-text)] disabled:opacity-30 p-0.5" title="Move effect later in chain">
+                          <ChevronDown className="w-3 h-3" />
+                        </button>
+                      </>}
                       <button
+                        disabled={isPlaying && slot.type === 'vst3'}
                         onClick={() => onDeleteFxSlot(selectedTrack.id, slot.id)}
-                        className="text-[var(--apex-text-3)] hover:text-[var(--apex-danger)] p-0.5"
+                        className="text-[var(--apex-text-3)] hover:text-[var(--apex-danger)] disabled:opacity-30 p-0.5"
                         title="Remove FX"
                       >
                         <Trash2 className="w-3 h-3" />
@@ -726,13 +770,18 @@ export const Mixer: React.FC<MixerProps> = ({
                       threshold/ratio/attack/release/knee, delay time +
                       feedback, limiter ceiling/release/drive) to the
                       live AudioParams via the live-bridge registry. */}
-                  <FxParameterControls
+                  {slot.type === 'vst3' ? <Vst3EffectControls
+                    effect={slot.vst3Effect}
+                    disabled={isPlaying}
+                    onRelink={() => setVst3PickerTarget({ trackId: selectedTrack.id, slotId: slot.id })}
+                    onApply={changes => onEditVst3Effect?.(selectedTrack.id, slot.id, changes) ?? Promise.reject(new Error('Native parameter editing is unavailable.'))}
+                  /> : <FxParameterControls
                     slot={slot}
                     trackId={selectedTrack.id}
                     onUpdateFxSlot={onUpdateFxSlot}
                     onInteractionStart={onInteractionStart}
                     onInteractionEnd={onInteractionEnd}
-                  />
+                  />}
                 </div>
               ))
             )}

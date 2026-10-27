@@ -30,6 +30,7 @@ import {
   Pattern,
 } from './types/daw';
 import { audioEngine, type MidiEventPayload, type PlaybackStateUpdate } from './audio/audioEngine';
+import { getVst3Bridge, type Vst3Effect, type Vst3ParameterChange } from './audio/nativeVst3Types';
 import { MidiCcMappingRuntime, MidiNoteInputRuntime, isRackChannelAudible } from './audio/midiMappingRuntime';
 import { MidiPerformanceRecorder, appendRecordedNotesToChannelInProjectState, type MidiRecordingClock } from './audio/midiRecording';
 import { finishMidiTake, type FinishMidiTakeOptions } from './audio/midiTakeBoundary';
@@ -92,6 +93,7 @@ import {
   addPatternToProjectState,
   createLocalCollabComment,
   deleteFxSlotFromProjectState,
+  moveFxSlotInProjectState,
   getChannelUpdateLabel,
   getFxUpdateLabel,
   getMetaUpdateLabel,
@@ -1838,6 +1840,7 @@ export function App() {
   };
 
   const handleAddFxSlot = (trackId: number, type: FxType) => {
+    if (type === 'vst3') return; // Native inserts must be selected through discovery, never fabricated.
     const newSlot: FxSlot = {
       id: `fx-${Date.now()}`,
       type,
@@ -1851,6 +1854,55 @@ export function App() {
       current => addFxSlotToProjectState(current, trackId, newSlot),
       'Add effect'
     );
+  };
+
+  const handleAddVst3FxSlot = (trackId: number, effect: Vst3Effect) => {
+    const slot: FxSlot = {
+      id: `vst3-fx-${crypto.randomUUID()}`,
+      type: 'vst3',
+      name: effect.name,
+      enabled: true,
+      mix: 1,
+      params: {},
+      vst3Effect: effect,
+    };
+    mutateProjectState(current => addFxSlotToProjectState(current, trackId, slot), 'Add VST3 Mixer effect');
+  };
+
+  const handleMoveFxSlot = (trackId: number, slotId: string, direction: -1 | 1) => {
+    mutateProjectState(current => moveFxSlotInProjectState(current, trackId, slotId, direction), 'Reorder Mixer effects');
+  };
+
+  const handleEditVst3Effect = async (trackId: number, slotId: string, changes: Vst3ParameterChange[]) => {
+    if (audioEngine.isPlaybackActive()) throw new Error('Stop playback before editing native Mixer-effect parameters.');
+    const track = projectStateRef.current.mixerTracks.find(candidate => candidate.id === trackId);
+    const slot = track?.fxSlots.find(candidate => candidate.id === slotId);
+    const effect = slot?.vst3Effect;
+    if (!effect || slot?.type !== 'vst3') throw new Error('VST3 effect identity/state is missing; original project data is retained. Relink this slot.');
+    const bridge = getVst3Bridge();
+    if (!bridge) throw new Error('Native VST3 effect editing requires the desktop application.');
+    const originalParameters = effect.state.parameters ?? [];
+    const merged = new Map(originalParameters.map(parameter => [parameter.id, parameter.value]));
+    for (const change of changes) merged.set(change.id, change.value);
+    const parameterState = [...merged].map(([id, value]) => ({ id, value }));
+    const opened = await bridge.open(effect, 48000, 'offline', 'effect');
+    try {
+      await bridge.parameters(opened.id, changes);
+    } finally {
+      await bridge.close(opened.id);
+    }
+    const inspected = await bridge.inspectEffect(effect, { ...effect.state, parameters: parameterState });
+    const updatedEffect: Vst3Effect = {
+      ...inspected,
+      state: { ...inspected.state, parameters: parameterState },
+    };
+    const current = projectStateRef.current.mixerTracks.find(candidate => candidate.id === trackId)
+      ?.fxSlots.find(candidate => candidate.id === slotId);
+    if (!current?.vst3Effect || JSON.stringify(current.vst3Effect) !== JSON.stringify(effect)) {
+      throw new Error('The project/effect changed while the native edit was pending; the stale edit was discarded.');
+    }
+    mutateProjectState(state => updateFxSlotInProjectState(state, trackId, slotId, { vst3Effect: updatedEffect }),
+      'Edit VST3 effect parameters');
   };
 
   const handleDeleteFxSlot = (trackId: number, slotId: string) => {
@@ -2635,6 +2687,9 @@ export function App() {
               onSelectTrack={(id) => setSelectedTrackId(id)}
               onUpdateTrack={handleUpdateMixerTrack}
               onAddFxSlot={handleAddFxSlot}
+              onAddVst3FxSlot={handleAddVst3FxSlot}
+              onMoveFxSlot={handleMoveFxSlot}
+              onEditVst3Effect={handleEditVst3Effect}
               onDeleteFxSlot={handleDeleteFxSlot}
               onUpdateFxSlot={handleUpdateFxSlot}
               isPlaying={isPlaying}
