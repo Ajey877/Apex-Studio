@@ -125,6 +125,7 @@ async function captureProductionMixer(page: Page) {
       captures.set(trackId, { blocks, node, silent });
     }
     await audioEngine.play(state.channels, [], 'pat', undefined, state.mixerTracks, 16);
+    const playbackActiveAtCaptureStart = audioEngine.isPlaybackActive();
     for (const capture of captures.values()) capture.node.port.postMessage('start');
     await new Promise(resolve => setTimeout(resolve, 1800));
     for (const capture of captures.values()) capture.node.port.postMessage('stop');
@@ -140,10 +141,13 @@ async function captureProductionMixer(page: Page) {
       for (const block of samples) for (const sample of block) { square += sample * sample; count++; }
       output[String(trackId)] = { rms: count ? Math.sqrt(square / count) : 0, frames: count / 2, pcm: samples };
     }
+    // @ts-ignore inspect diagnostics from the production Mixer effect runtime
+    const { getVst3MixerEffectDiagnostics } = await import('/src/audio/nativeVst3EffectRuntime.ts');
     const captureId = crypto.randomUUID();
     const store = (window as any).__nativeMixerFxCaptures ??= {};
     store[captureId] = output;
-    return { captureId, tracks: Object.fromEntries(Object.entries(output).map(([id, value]) => [id, { rms: value.rms, frames: value.frames }])) };
+    return { captureId, playbackActiveAtCaptureStart, mixerDiagnostics: getVst3MixerEffectDiagnostics(),
+      tracks: Object.fromEntries(Object.entries(output).map(([id, value]) => [id, { rms: value.rms, frames: value.frames }])) };
   });
   // The test starts/stops AudioEngine directly to tap its real Mixer analysers.
   // Synchronize App's transport state through its actual Stop control so Mixer
@@ -280,12 +284,12 @@ test('actual Mixer UI -> MDA inserts -> AudioEngine live capture, track isolatio
   await moveRezFilterEarlier.click();
   await expect.poll(async () => (await persisted(page)).mixerTracks.find((track: any) => track.id === 1).fxSlots.map((slot: any) => slot.vst3Effect.name)).toEqual(['mda RezFilter', 'mda Delay']);
   const orderB = await captureProductionMixer(page);
+  expect(orderA.tracks['1']!.rms, `order A production capture: ${JSON.stringify(orderA)}`).toBeGreaterThan(1e-4);
+  expect(orderB.tracks['1']!.rms, `order B production capture: ${JSON.stringify(orderB)}`).toBeGreaterThan(1e-4);
   const track1OrderDifference = await compareCapture(page, orderA.captureId, orderB.captureId, '1');
-  expect(orderA.tracks['1']!.rms).toBeGreaterThan(1e-4);
-  expect(orderB.tracks['1']!.rms).toBeGreaterThan(1e-4);
   expect(track1OrderDifference).toBeGreaterThan(1e-4);
   const controlRmsDifference = Math.abs(orderA.tracks['2']!.rms - orderB.tracks['2']!.rms);
-  expect(orderA.tracks['2']!.rms).toBeGreaterThan(1e-4);
+  expect(orderA.tracks['2']!.rms, `control capture: ${JSON.stringify(orderA)}`).toBeGreaterThan(1e-4);
   expect(controlRmsDifference).toBeLessThan(Math.max(0.005, orderA.tracks['2']!.rms * 0.15));
 
   // Plugin bypass keeps both native FIFOs. Mixer-slot bypass removes the Delay
