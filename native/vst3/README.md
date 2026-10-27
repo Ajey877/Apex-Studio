@@ -41,6 +41,7 @@ verification. No commercial plugin, paid service or committed plugin binary.
 npm ci --legacy-peer-deps --ignore-scripts
 npm run native:vst3:build
 npm run test:native-vst3
+npm run test:vst3-effects
 npm run test:vst3-daw
 npm run test:audio
 npm run test:history
@@ -142,8 +143,10 @@ for results—test source alone is not a claimed passing Windows run.
 - First slice supports x64 VST3 instruments with mono/stereo main output and
   **zero reported processing latency**. Other latency is rejected pending proper
   delay compensation. Plugins taking >2 s per operation are rejected.
-- No VST2/AU/CLAP, native effects rack, plugin editor windows, sample-accurate parameter DSP automation,
-  per-note native pan, arbitrary-bus layouts or broad plugin certification.
+- No VST2/AU/CLAP, Mixer-native effect insert chain, plugin editor windows, sample-accurate parameter DSP automation,
+  per-note native pan, arbitrary-bus layouts or broad plugin certification. The separate
+  experimental audio-effect discovery/process IPC is documented below; it is not yet
+  attached to Mixer playback or production export.
   Native transport context is per-session; tempo-synchronized plugin internal
   sequencers/seek-position synchronization beyond scheduled MIDI are not claimed.
   Windows x64/MDA is the reproducible acceptance fixture; other plugins may vary.
@@ -192,6 +195,29 @@ JX10 and Piano instruments; DSP assertions use JX10 and Piano as independent
 instruments, plus silence, held/released notes, pitch, velocity and filter
 parameter negative controls.
 
+
+## Experimental native audio-effect host foundation (not a Mixer feature)
+
+The helper/service now has effect-specific factory discovery (`discoverEffects`),
+explicit effect-class loading, genuine controller metadata/state, and bounded
+planar stereo float32 process calls. The helper rejects instrument classes used
+as effects, event-input effects, extra audio buses, non-stereo main buses,
+non-finite/oversized audio, and plugins reporting nonzero latency. Effect
+parameter writes are retained for the next actual process block; this avoids
+pretending a zero-sample update changed DSP for plugins that ignore it. Plugins
+still run in a separate process, with the same timeouts, ownership/path checks,
+frame validation and teardown as the instrument service.
+
+`npm run test:vst3-effects` builds on the real redistributable SDK MDA effects
+and measures actual output differences for bypass/parameter changes and effect
+ordering; it also verifies state capture/reopen and explicit invalid-class,
+missing-module and malformed-block failures. This is native host/service evidence
+only. Effect sessions are **not yet stored in `FxSlot`, shown in the Mixer, or
+connected to live playback or the production offline render graph**.
+`vst3Effects.test.mjs` chain comparison is a direct host test, not a product
+insert-order test. Do not describe this foundation as an available Mixer effect
+or claim that exports contain VST3 effects. A safe Mixer/DSP/undo integration is
+a required next feature slice.
 
 ## Generic parameter control contract (Issue #285)
 

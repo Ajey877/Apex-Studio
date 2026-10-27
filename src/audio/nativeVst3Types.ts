@@ -18,6 +18,10 @@ export interface Vst3Instrument extends Vst3Identity {
   /** New UI loads/relinks get a fresh binding; manual parameter edits preserve it. */
   automationId?: string;
 }
+/** Configuration for a genuine VST3 audio-effect instance. */
+export interface Vst3Effect extends Vst3Identity {
+  state: Vst3State;
+}
 export interface Vst3Event {
   offset: number;
   type: 'on' | 'off';
@@ -40,11 +44,13 @@ export interface Vst3Bridge {
   paths(): Promise<string[]>;
   choosePath(): Promise<string[] | null>;
   discover(): Promise<{ plugins: Vst3Identity[]; errors: Array<{ path: string; error: string }> }>;
+  discoverEffects(): Promise<{ plugins: Vst3Identity[]; errors: Array<{ path: string; error: string }> }>;
   inspect(plugin: Vst3Identity, state?: Vst3State): Promise<Vst3Instrument>;
   describe(instrument: Vst3Instrument): Promise<Vst3ParameterMetadata>;
   parameters(id: string, changes: Vst3ParameterChange[]): Promise<Vst3Parameter[]>;
-  open(instrument: Vst3Instrument, sampleRate: number, mode: 'realtime' | 'offline'): Promise<{ id: string; latencySamples: number; parameters?: Vst3Parameter[] }>;
+  open(instrument: Vst3Instrument | Vst3Effect, sampleRate: number, mode: 'realtime' | 'offline', kind?: 'instrument' | 'effect'): Promise<{ id: string; latencySamples: number; parameters?: Vst3Parameter[] }>;
   process(id: string, frames: number, events: Vst3Event[], bpm: number, parameters?: Vst3ParameterPoint[]): Promise<Float32Array>;
+  processAudio(id: string, frames: number, audio: Float32Array, bpm: number, parameters?: Vst3ParameterPoint[]): Promise<Float32Array>;
   close(id: string): Promise<void>;
 }
 export function getVst3Bridge(): Vst3Bridge | undefined {

@@ -81,14 +81,22 @@ export class NativeVst3Client {
     this.#tail = operation.catch(() => {});
     return operation;
   }
-  open(plugin, { sampleRate = 48000, mode = 'offline', state } = {}) {
-    return this.request({ command: 'open', path: plugin.path, classId: plugin.classId, sampleRate, mode,
+  open(plugin, { sampleRate = 48000, mode = 'offline', state, kind = 'instrument' } = {}) {
+    if (!['instrument', 'effect'].includes(kind)) throw new Error('Invalid VST3 plugin kind');
+    return this.request({ command: 'open', path: plugin.path, classId: plugin.classId, sampleRate, mode, kind,
       ...(state === undefined ? {} : { state }) });
   }
   async parameters(changes) { return (await this.request({ command: 'parameters', parameters: changes })).parameters; }
   async snapshot() { return (await this.request({ command: 'snapshot' })).state; }
   process(frames, events = [], parameters = [], bpm = 120) {
     return this.request({ command: 'process', frames, events, parameters, bpm });
+  }
+  processAudio(frames, samples, parameters = [], bpm = 120) {
+    if (!Number.isInteger(frames) || frames < 1 || frames > 16384 ||
+      !(samples instanceof Float32Array) || samples.length !== frames * 2 ||
+      samples.some(sample => !Number.isFinite(sample))) throw new Error('Invalid planar stereo VST3 audio block');
+    const bytes = Buffer.from(samples.buffer, samples.byteOffset, samples.byteLength);
+    return this.request({ command: 'process', frames, events: [], parameters, bpm, audio: bytes.toString('base64') });
   }
   async dispose() {
     // Kill rather than waiting on untrusted plugin teardown forever. Destructors
@@ -110,7 +118,8 @@ export class NativeVst3Client {
  * No default/fabricated identities. Failed bundles remain explicit diagnostics.
  * Symlinks are not followed, to avoid cycles and accidental scans outside roots.
  */
-export async function discoverVst3(executable, roots, { signal, timeoutMs = 10000, scanTimeoutMs = 120000, maxCandidates = 4096 } = {}) {
+export async function discoverVst3(executable, roots, { signal, timeoutMs = 10000, scanTimeoutMs = 120000, maxCandidates = 4096, kind = 'instrument' } = {}) {
+  if (!['instrument', 'effect'].includes(kind)) throw new Error('Invalid VST3 discovery kind');
   const candidates = new Set(), errors = [];
   let visited = 0;
   const deadline = Date.now() + scanTimeoutMs;
@@ -140,7 +149,7 @@ export async function discoverVst3(executable, roots, { signal, timeoutMs = 1000
     const abort = () => helper.abort();
     signal?.addEventListener('abort', abort, { once: true });
     try {
-      const response = await helper.request({ command: 'scan', path: candidate });
+      const response = await helper.request({ command: 'scan', path: candidate, kind });
       plugins.push(...response.plugins.map(plugin => ({ ...plugin, path: candidate })));
     } catch (error) { errors.push({ path: candidate, error: error.message }); }
     finally { signal?.removeEventListener('abort', abort); await helper.dispose(); }
