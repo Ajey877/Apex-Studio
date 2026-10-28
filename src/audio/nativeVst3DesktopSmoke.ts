@@ -329,6 +329,23 @@ function nativeServicePcmBySlot(run: any) {
   }));
 }
 
+function compactMixerRunEvidence(run: any) {
+  const nativeStages = [...run.nativeStageCaptures].map(([slotId, capture]: [string, MixerCapture], index: number) => {
+    const onset = firstCapturedOnsetFrame(capture, run.sourceStartContextFrame,
+      run.sourceStartContextFrame + run.sampleRate);
+    return { slotId, expectedRelativeOnsetFrame: 256 + (index + 1) * VST3_FX_PIPELINE_FRAMES,
+      actualRelativeOnsetFrame: onset === null ? null : onset - run.sourceStartContextFrame,
+      pcmRms: run.nativeStageRms[slotId] };
+  });
+  const timing = run.timing;
+  return { trackRms: run.trackRms, nativeStages, nativeServicePcm: nativeServicePcmBySlot(run),
+    timing: { requestCount: timing.requestCount, acceptedWorkletResults: timing.acceptedWorkletResults,
+      missedDeadlines: timing.missedDeadlines, unaccountedRequestCount: timing.unaccountedRequestCount,
+      missingMainResponses: timing.missingMainResponses, missingWorkletResults: timing.missingWorkletResults,
+      maxConcurrentMainServiceCalls: timing.maxConcurrentMainServiceCalls,
+      nativeServiceSessionCountAfterCleanup: timing.nativeServiceSessionCountAfterCleanup } };
+}
+
 function createDeterministicMixerInput(context: AudioContext): AudioBuffer {
   // Keep the control signal explicitly stereo so the comparison isolates the
   // insert's declared latency, not StereoPannerNode's mono-to-stereo pan law.
@@ -588,10 +605,10 @@ async function runPackagedMixerAcceptance(instance: typeof audioEngine) {
     return result;
   };
 
-  const orderA = await run(ordered, 'Mixer order Delay → RezFilter');
-  const orderB = await run(reversed, 'Mixer order RezFilter → Delay');
-  const delayProcessed = await run(delayOnly, 'Mixer processed Delay');
-  const delayPassThrough = await run(delayBypassed, 'Mixer native Delay Fb Mix=0 bypass');
+  const orderA = await run(ordered, 'Mixer order Delay → RezFilter', { includeNativeStages: true });
+  const orderB = await run(reversed, 'Mixer order RezFilter → Delay', { includeNativeStages: true });
+  const delayProcessed = await run(delayOnly, 'Mixer processed Delay', { includeNativeStages: true });
+  const delayPassThrough = await run(delayBypassed, 'Mixer native Delay Fb Mix=0 bypass', { includeNativeStages: true });
   const removed = await run(noEffects, 'Mixer effect removal/restart');
 
   // Known-onset stereo buffers exercise the real per-track → routed master
@@ -680,7 +697,7 @@ async function runPackagedMixerAcceptance(instance: typeof audioEngine) {
     throw new Error(`Dynamic bypass did not occur between the two deterministic source bursts: ${JSON.stringify({ applied: dynamicBypass.bypassUpdateAppliedContextFrame, firstBypassBurstFrame, secondBypassBurstFrame })}`);
   }
   const acceptanceTimingEvidence = JSON.stringify(Object.fromEntries(Object.entries({ orderA, orderB, delayProcessed, delayPassThrough, removed })
-    .map(([label, result]) => [label, { timing: result.timing, timingSamples: correlatedTimingSamples(result).slice(0, 16) }])));
+    .map(([label, result]) => [label, compactMixerRunEvidence(result)])));
   let orderDifference: ReturnType<typeof compareMixerRuns>, controlDifference: ReturnType<typeof compareMixerRuns>;
   let processedVsBypass: ReturnType<typeof compareMixerRuns>, bypassVsRemoved: ReturnType<typeof compareMixerRuns>;
   try {
