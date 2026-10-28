@@ -117,6 +117,120 @@ test('effect order is audible: delay then resonant filter differs from filter th
   assert.ok(difference(delayThenAmbience, ambienceThenDelay) > 1e-4);
 });
 
+test('RezFilter restores component and controller state in order, while normalized overrides reach native DSP', async () => {
+  const service = new Vst3Service(executable, [root]);
+  const requested = [
+    { id: 0, value: 0.8 }, { id: 1, value: 0.25 }, { id: 3, value: 0.5 },
+    { id: 6, value: 0.5 }, { id: 8, value: 0 }, { id: 9, value: 1 },
+  ];
+  const competing = requested.map(change => ({ ...change }));
+  competing.find(change => change.id === 0).value = 0.45;
+  competing.find(change => change.id === 1).value = 0.85;
+  const initial = { schema: 1, classId: rezFilter.classId, parameters: [] };
+  const makeState = (componentState, parameters = []) => ({
+    schema: 1, classId: rezFilter.classId,
+    ...(componentState ? { component: componentState } : {}),
+    parameters,
+  });
+  const makeNoiseBlock = (startFrame, seedState) => {
+    const input = new Float32Array(2048);
+    let state = seedState.value;
+    for (let i = 0; i < 1024; ++i) {
+      if (startFrame + i < 256) continue;
+      state ^= state << 13; state ^= state >>> 17; state ^= state << 5;
+      const sample = ((state >>> 0) / 0x80000000 - 1) * 0.08;
+      input[i] = sample;
+      input[1024 + i] = sample;
+    }
+    seedState.value = state;
+    return input;
+  };
+  const run = async state => {
+    const client = new NativeVst3Client(executable);
+    try {
+      const { plugin: opened } = await client.open(rezFilter, { kind: 'effect', sampleRate, state });
+      const observed = new Map(opened.parameters.map(parameter => [parameter.id, parameter.currentValue]));
+      const blocks = [];
+      const seedState = { value: 0x2c1b3c6d };
+      for (let start = 0; start < 50 * 1024; start += 1024) {
+        const output = (await client.processAudio(1024, makeNoiseBlock(start, seedState))).samples;
+        blocks.push(output);
+      }
+      const snapshot = await client.snapshot();
+      return { observed, blocks, snapshot };
+    } finally { await client.dispose(); }
+  };
+  const inspectComponent = async component => {
+    const auditClient = new NativeVst3Client(executable);
+    try {
+      return (await auditClient.open(rezFilter, {
+        kind: 'effect', sampleRate, state: makeState(component, undefined),
+      })).plugin;
+    } finally { await auditClient.dispose(); }
+  };
+  try {
+    const defaults = await service.inspectEffect(rezFilter, initial, 'rezfilter-state-test');
+    const configured = await service.inspectEffect(rezFilter, { ...defaults.state, parameters: requested }, 'rezfilter-state-test');
+    const defaultParameters = await service.describeEffect(rezFilter, 'rezfilter-state-test');
+    const defaultsById = new Map(defaultParameters.parameters.map(parameter => [parameter.id, parameter.currentValue]));
+    assert.ok(defaults.state.component);
+    assert.ok(configured.state.component);
+    // The pinned MDA controller does not implement getState, so there is no
+    // separate controller stream to restore. The host still restores the
+    // component stream, then calls controller.setComponentState(component).
+    assert.equal(defaults.state.controller, undefined);
+    assert.equal(configured.state.controller, undefined);
+    for (const { id, value } of requested) {
+      assert.ok(configured.state.parameters.some(change => change.id === id && Math.abs(change.value - value) < 1e-6));
+    }
+
+    const defaultComponent = await run(makeState(defaults.state.component));
+    const defaultEffective = await inspectComponent(defaultComponent.snapshot.component);
+    for (const { id } of requested) {
+      assert.ok(Math.abs(defaultEffective.parameters.find(parameter => parameter.id === id).currentValue - defaultsById.get(id)) < 1e-6,
+        `component restore retains default processor parameter ${id}`);
+    }
+
+    // Restore a component snapshot produced by inspectEffect's real first
+    // process and reopen it without a controller stream or normalized patch.
+    // Controller metadata is synchronized from that component state.
+    const componentRestored = await run(makeState(configured.state.component));
+    for (const { id, value } of requested) {
+      assert.ok(Math.abs(componentRestored.observed.get(id) - value) < 1e-6,
+        `controller metadata is synchronized from component parameter ${id}`);
+    }
+    const componentEffective = await inspectComponent(componentRestored.snapshot.component);
+    for (const { id, value } of requested) {
+      assert.ok(Math.abs(componentEffective.parameters.find(parameter => parameter.id === id).currentValue - value) < 1e-6,
+        `component restore preserves effective DSP parameter ${id}`);
+    }
+    const componentPcm = Float32Array.from(componentRestored.blocks.flatMap(block => [...block]));
+    assert.ok(rms(componentPcm) > 1e-4, 'component-restored RezFilter produces nonzero native PCM');
+
+    // Explicit normalized overrides are applied after component restoration.
+    // Use conflicting values so the component snapshot proves which source won.
+    const overridden = await run(makeState(configured.state.component, competing));
+    const effective = await inspectComponent(overridden.snapshot.component);
+    for (const { id, value } of competing) {
+      const activeValue = effective.parameters.find(parameter => parameter.id === id).currentValue;
+      assert.ok(Math.abs(activeValue - value) < 1e-6, `normalized override takes precedence in native DSP parameter ${id}`);
+    }
+    const pcm = Float32Array.from(overridden.blocks.flatMap(block => [...block]));
+    assert.ok(rms(pcm) > 1e-4, 'configured RezFilter output is nonzero for the deterministic known-onset signal');
+    for (let block = 1; block < overridden.blocks.length; ++block) {
+      assert.ok(rms(overridden.blocks[block]) > 1e-5, `configured native output block ${block} is not silent`);
+    }
+    const onset = pcm.findIndex((sample, index) => index < 1024 && Math.abs(sample) >= 1e-6);
+    assert.equal(onset, 256, 'known-onset signal appears in the first native block without extra plugin latency');
+
+    const defaultPcm = Float32Array.from(defaultComponent.blocks.flatMap(block => [...block]));
+    assert.ok(difference(pcm, defaultPcm) > 1e-4,
+      'normalized DSP values measurably control the actual native RezFilter output');
+  } finally {
+    await service.dispose();
+  }
+});
+
 test('service exposes genuine effect parameter metadata and captures persisted native controller/component state', async () => {
   const service = new Vst3Service(executable, [root]);
   const initial = { schema: 1, classId: delay.classId, parameters: [] };

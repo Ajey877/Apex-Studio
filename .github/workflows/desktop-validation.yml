@@ -1,6 +1,7 @@
 name: Desktop Validation
 
 on:
+  workflow_dispatch:
   pull_request:
     branches: [main, phase-5-5-song-mode-verification]
   push:

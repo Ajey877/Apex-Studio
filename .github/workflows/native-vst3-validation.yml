@@ -1,6 +1,7 @@
 name: Native VST3 Validation
 
 on:
+  workflow_dispatch:
   pull_request:
     branches: [main]
   push:
@@ -28,7 +29,7 @@ jobs:
       - name: Fetch pinned SDK and build helper plus real test instrument
         run: npm run native:vst3:build
       - name: Verify native DSP and production live/export/state integration
-        run: npm run test:native-vst3 && npm run test:vst3-daw
+        run: npm run test:native-vst3 && npm run test:vst3-effects && npm run test:vst3-daw
       - name: Install Chromium for real native parameter UI regression
         run: npx playwright install --with-deps chromium
       - name: Native parameter controls through actual App, service, MDA and production export
