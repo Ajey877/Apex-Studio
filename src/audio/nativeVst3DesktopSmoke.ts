@@ -579,7 +579,14 @@ async function runPackagedMixerAcceptance(instance: typeof audioEngine) {
       result.sourceStartContextFrame + expectedRelativeOnsetFrame + VST3_FX_BLOCK_FRAMES * 8);
     if (actualRelativeOnsets.some(frame => frame !== expectedRelativeOnsetFrame) || masterRelativeOnset !== expectedRelativeOnsetFrame ||
         masterSum.comparedSamples < VST3_FX_BLOCK_FRAMES * 2 || masterSum.rmsDifference > 1e-5) {
-      throw new Error(`Production Mixer ${label} alignment failed: expected all three measured taps at source+${expectedRelativeOnsetFrame} frames and master=sum(track1,track2): ${JSON.stringify({ onsets, sourceStartContextFrame: result.sourceStartContextFrame, expectedRelativeOnsetFrame, actualRelativeOnsets, masterRelativeOnset, masterSum })}`);
+      const evidence = { onsets, sourceStartContextFrame: result.sourceStartContextFrame, expectedRelativeOnsetFrame,
+        actualRelativeOnsets, masterRelativeOnset, masterSum, trackRms: result.trackRms, diagnostics: result.diagnostics,
+        timing: result.timing, recentRuntimeEvents: result.runtimeEvents.slice(-40).map((event: any) => ({
+          event: event.event, trackId: event.trackId, slotId: event.slotId, sequence: event.sequence,
+          reason: event.reason, error: event.error, accepted: event.accepted, inputBlockStartContextFrame: event.inputBlockStartContextFrame,
+          dueOutputFrame: event.dueOutputFrame, receivedOutputFrame: event.receivedOutputFrame,
+        })) };
+      throw new Error(`Production Mixer ${label} alignment failed: expected all three measured taps at source+${expectedRelativeOnsetFrame} frames and master=sum(track1,track2): ${JSON.stringify(evidence)}`);
     }
     return { label, expectedPipelineFrames, sourceStartContextFrame: result.sourceStartContextFrame,
       expectedRelativeOnsetFrame, onsetContextFrames: onsets, relativeOnsetFrames: {
