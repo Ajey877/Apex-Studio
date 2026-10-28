@@ -333,9 +333,11 @@ function compactMixerRunEvidence(run: any) {
   const nativeStages = [...run.nativeStageCaptures].map(([slotId, capture]: [string, MixerCapture], index: number) => {
     const onset = firstCapturedOnsetFrame(capture, run.sourceStartContextFrame,
       run.sourceStartContextFrame + run.sampleRate);
-    return { slotId, expectedRelativeOnsetFrame: 256 + (index + 1) * VST3_FX_PIPELINE_FRAMES,
+    const expectedRelativeOnsetFrame = 256 + (index + 1) * VST3_FX_PIPELINE_FRAMES;
+    return { slotId, expectedRelativeOnsetFrame,
       actualRelativeOnsetFrame: onset === null ? null : onset - run.sourceStartContextFrame,
-      pcmRms: run.nativeStageRms[slotId] };
+      pcmRms: run.nativeStageRms[slotId],
+      signal: capturedSignalEvidence(capture, run.sourceStartContextFrame, expectedRelativeOnsetFrame, run.sampleRate) };
   });
   const timing = run.timing;
   return { trackRms: run.trackRms, nativeStages, nativeServicePcm: nativeServicePcmBySlot(run),
@@ -404,6 +406,32 @@ function capturedOnsetInWindow(capture: MixerCapture, startFrame: number, endFra
 
 function firstCapturedOnsetFrame(capture: MixerCapture, startFrame: number, endFrame: number, threshold = 1e-6): number | null {
   return capturedOnsetInWindow(capture, startFrame, endFrame, threshold);
+}
+
+function capturedRmsInWindow(capture: MixerCapture, startFrame: number, endFrame: number) {
+  let square = 0, count = 0;
+  for (const block of capture.blocks) {
+    for (let offset = 0; offset < VST3_FX_BLOCK_FRAMES; offset++) {
+      const frame = block.frame + offset;
+      if (frame < startFrame || frame >= endFrame) continue;
+      const left = block.samples[offset] ?? 0;
+      const right = block.samples[VST3_FX_BLOCK_FRAMES + offset] ?? 0;
+      square += left * left + right * right;
+      count += 2;
+    }
+  }
+  return count ? Math.sqrt(square / count) : 0;
+}
+
+function capturedSignalEvidence(capture: MixerCapture, sourceStartFrame: number, expectedRelativeOnsetFrame: number, sampleRate: number) {
+  const expected = sourceStartFrame + expectedRelativeOnsetFrame;
+  const windowFrames = [VST3_FX_BLOCK_FRAMES, VST3_FX_BLOCK_FRAMES * 4, VST3_FX_BLOCK_FRAMES * 8];
+  return { onsetsByThreshold: Object.fromEntries([1e-12, 1e-9, 1e-6].map(threshold => {
+    const onset = firstCapturedOnsetFrame(capture, sourceStartFrame, sourceStartFrame + sampleRate, threshold);
+    return [String(threshold), onset === null ? null : onset - sourceStartFrame];
+  })),
+  windowRms: windowFrames.map(frames => ({ startRelativeFrame: expected, endRelativeFrame: expected + frames,
+    rms: capturedRmsInWindow(capture, expected, expected + frames) })) };
 }
 
 function compareCapturedMasterToTrackSum(captures: Map<number, MixerCapture>, startFrame: number, endFrame: number) {
@@ -638,18 +666,22 @@ async function runPackagedMixerAcceptance(instance: typeof audioEngine) {
     const nativeStageRows = [...result.nativeStageCaptures].map(([slotId, capture]: [string, MixerCapture], index) => {
       const onset = firstCapturedOnsetFrame(capture, result.sourceStartContextFrame,
         result.sourceStartContextFrame + result.sampleRate);
-      return { slotId, expectedRelativeOnsetFrame: 256 + (index + 1) * VST3_FX_PIPELINE_FRAMES,
+      const expectedRelativeOnsetFrame = 256 + (index + 1) * VST3_FX_PIPELINE_FRAMES;
+      return { slotId, expectedRelativeOnsetFrame,
         actualRelativeOnsetFrame: onset === null ? null : onset - result.sourceStartContextFrame,
-        pcmRms: result.nativeStageRms[slotId] };
+        pcmRms: result.nativeStageRms[slotId],
+        signal: capturedSignalEvidence(capture, result.sourceStartContextFrame, expectedRelativeOnsetFrame, result.sampleRate) };
     });
     const nativeServicePcm = nativeServicePcmBySlot(result);
+    const tapSignalEvidence = Object.fromEntries([0, 1, 2].map(trackId => [trackId,
+      capturedSignalEvidence(result.captures.get(trackId), result.sourceStartContextFrame, expectedRelativeOnsetFrame, result.sampleRate)]));
     const masterSum = compareCapturedMasterToTrackSum(result.captures, result.sourceStartContextFrame + expectedRelativeOnsetFrame,
       result.sourceStartContextFrame + expectedRelativeOnsetFrame + VST3_FX_BLOCK_FRAMES * 8);
     if (actualRelativeOnsets.some(frame => frame !== expectedRelativeOnsetFrame) || masterRelativeOnset !== expectedRelativeOnsetFrame ||
         nativeStageRows.some((stage: any) => stage.actualRelativeOnsetFrame !== stage.expectedRelativeOnsetFrame) ||
         masterSum.comparedSamples < VST3_FX_BLOCK_FRAMES * 2 || masterSum.rmsDifference > 1e-5) {
       const evidence = { onsets, sourceStartContextFrame: result.sourceStartContextFrame, expectedRelativeOnsetFrame,
-        actualRelativeOnsets, masterRelativeOnset, nativeStageRows, nativeServicePcm, masterSum,
+        actualRelativeOnsets, masterRelativeOnset, nativeStageRows, nativeServicePcm, tapSignalEvidence, masterSum,
         trackRms: result.trackRms, diagnostics: result.diagnostics,
         timing: { requestCount: result.timing.requestCount, acceptedWorkletResults: result.timing.acceptedWorkletResults,
           missedDeadlines: result.timing.missedDeadlines, requestFailures: result.timing.requestFailures,
