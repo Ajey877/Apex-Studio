@@ -11,6 +11,7 @@ permissions:
 
 jobs:
   verify:
+    if: github.event_name != 'push' || !contains(github.event.head_commit.message, '[rezfilter-diagnostic]')
     runs-on: ubuntu-latest
 
     steps:

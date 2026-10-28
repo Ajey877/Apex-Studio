@@ -11,6 +11,7 @@ permissions:
 
 jobs:
   native-dsp:
+    if: github.event_name != 'push' || !contains(github.event.head_commit.message, '[rezfilter-diagnostic]')
     name: Native DSP (${{ matrix.os }})
     strategy:
       fail-fast: false
@@ -41,4 +42,44 @@ jobs:
           path: |
             build/native-evidence
             native/vst3/licenses
+          if-no-files-found: warn
+
+  rezfilter-diagnostic:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/arena/1862dfca-apex-studio' && contains(github.event.head_commit.message, '[rezfilter-diagnostic]')
+    name: Isolated RezFilter state test (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install JavaScript test tools (no Electron binary needed)
+        run: npm ci --legacy-peer-deps --ignore-scripts
+      - name: Build the pinned native VST3 helper and MDA fixture
+        run: npm run native:vst3:build
+      - name: Run only the RezFilter state/override test
+        run: node --import tsx --test --test-name-pattern="^RezFilter restores component and controller state in order, while normalized overrides reach native DSP$" tests/vst3Effects.test.mjs
+        env:
+          APEX_REZFILTER_STATE_EVIDENCE: build/native-evidence/rezfilter-state-diagnostic.json
+      - name: Publish bounded same-instance evidence in the job summary
+        if: always()
+        shell: pwsh
+        run: |
+          $evidence = 'build/native-evidence/rezfilter-state-diagnostic.json'
+          if (Test-Path $evidence) {
+            Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value '## RezFilter same-instance block evidence'
+            Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value 'Per-block RMS is planar stereo input/output evidence from each measured helper instance. Controller values are captured immediately before and after each native process call. No component snapshots are taken during measurement.'
+            Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value '```json'
+            Get-Content -Raw $evidence | Add-Content -Path $env:GITHUB_STEP_SUMMARY
+            Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value '```'
+          } else {
+            Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value 'RezFilter evidence file was not produced; inspect the isolated test/build failure.'
+          }
+      - name: Upload bounded diagnostic JSON
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rezfilter-state-diagnostic-${{ github.run_id }}
+          path: build/native-evidence/rezfilter-state-diagnostic.json
           if-no-files-found: warn

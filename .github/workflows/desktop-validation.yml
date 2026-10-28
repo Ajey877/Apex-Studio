@@ -11,6 +11,7 @@ permissions:
 
 jobs:
   windows-package:
+    if: github.event_name != 'push' || !contains(github.event.head_commit.message, '[rezfilter-diagnostic]')
     runs-on: windows-latest
 
     steps:
