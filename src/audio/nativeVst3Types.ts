@@ -48,6 +48,7 @@ export interface Vst3AudioProcessProfile {
   submittedContextFrame: number;
   submittedOutputFrame: number;
   dueOutputFrame: number;
+  dueContextFrame: number;
   sampleRate: number;
 }
 export type Vst3ParameterEditorCommit = (channel: import('../types/daw').Channel, changes: Vst3ParameterChange[], signal: AbortSignal) => Promise<void>;
@@ -62,11 +63,9 @@ export interface Vst3Bridge {
   describeEffect(plugin: Vst3Effect): Promise<Vst3ParameterMetadata>;
   describe(instrument: Vst3Instrument): Promise<Vst3ParameterMetadata>;
   parameters(id: string, changes: Vst3ParameterChange[]): Promise<Vst3Parameter[]>;
-  open(instrument: Vst3Instrument | Vst3Effect, sampleRate: number, mode: 'realtime' | 'offline', kind?: 'instrument' | 'effect'): Promise<{ id: string; latencySamples: number; parameters?: Vst3Parameter[] }>;
+  open(instrument: Vst3Instrument | Vst3Effect, sampleRate: number, mode: 'realtime' | 'offline', kind?: 'instrument' | 'effect', captureFailureEvidence?: boolean): Promise<{ id: string; latencySamples: number; parameters?: Vst3Parameter[]; smokeOpenEvidence?: Record<string, unknown> }>;
   process(id: string, frames: number, events: Vst3Event[], bpm: number, parameters?: Vst3ParameterPoint[]): Promise<Float32Array>;
   processAudio(id: string, frames: number, audio: Float32Array, bpm: number, parameters?: Vst3ParameterPoint[], profile?: Vst3AudioProcessProfile): Promise<Float32Array>;
-  /** Smoke-only snapshot of the already-open native effect instance; not exposed in regular desktop sessions. */
-  smokeEffectSnapshot?(id: string): Promise<Vst3State>;
   close(id: string): Promise<void>;
 }
 export function getVst3Bridge(): Vst3Bridge | undefined {

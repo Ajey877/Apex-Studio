@@ -45,7 +45,7 @@ export class Vst3Service {
     }
     throw new Error('VST3 location is not authorized. Add the plugin folder using the desktop folder chooser, then retry.');
   }
-  async open(instrument, sampleRate, mode, owner = 'local', kind = 'instrument') {
+  async open(instrument, sampleRate, mode, owner = 'local', kind = 'instrument', captureFailureEvidence = false) {
     if (this.#closed || this.sessionCount >= 16) throw new Error('VST3 session limit reached or service closed (maximum 16 including exports)');
     if (!Number.isFinite(sampleRate) || sampleRate < 8000 || sampleRate > 192000 || !['offline', 'realtime'].includes(mode) || !['instrument', 'effect'].includes(kind)) throw new Error('Invalid VST3 processing configuration');
     this.#pending++;
@@ -57,15 +57,22 @@ export class Vst3Service {
       if (this.#closed || this.#ownerTokens.get(owner) !== token) throw new Error('VST3 service/renderer closed during load');
       client = new NativeVst3Client(this.#executable, { timeoutMs: 2000 });
       this.#loading.set(client, owner);
-      const opened = await client.open({ ...instrument, path: pluginPath }, { sampleRate, mode, state: instrument.state, kind });
+      const opened = await client.open({ ...instrument, path: pluginPath }, {
+        sampleRate, mode, state: instrument.state, kind, captureFailureEvidence,
+      });
       if (this.#closed || this.#ownerTokens.get(owner) !== token) throw new Error('VST3 service/renderer closed during load');
       // Nonzero plugin latency needs explicit delay compensation; fail honestly
       // rather than exporting time-shifted audio in this first slice.
       if (opened.plugin.latencySamples !== 0) throw new Error(`VST3 ${kind} reports ${opened.plugin.latencySamples} samples of latency; this host path currently supports zero-reported-latency ${kind}s only.`);
       const parameters = validateMetadata(opened.plugin.parameters, opened.plugin.controllerAvailable);
       const id = randomUUID();
-      this.#sessions.set(id, { client, owner, processing: false, parameters, kind });
-      return { id, latencySamples: opened.plugin.latencySamples, parameters, controllerAvailable: opened.plugin.controllerAvailable };
+      this.#sessions.set(id, { client, owner, processing: false, parameters, kind,
+        classId: instrument.classId, captureFailureEvidence, lastSmokeFailureEvidence: null, lastSmokeProcessEvidence: null });
+      const smokeOpenEvidence = captureFailureEvidence && opened.plugin.smokeOpenEvidence ? {
+        ...opened.plugin.smokeOpenEvidence, helperSessionId: id, helperProcessId: client.pid ?? 0,
+      } : undefined;
+      return { id, latencySamples: opened.plugin.latencySamples, parameters, controllerAvailable: opened.plugin.controllerAvailable,
+        ...(smokeOpenEvidence ? { smokeOpenEvidence } : {}) };
     } catch (error) { if (client) await client.dispose().catch(() => {}); throw error; }
     finally { if (client) this.#loading.delete(client); this.#pending--; }
   }
@@ -94,7 +101,7 @@ export class Vst3Service {
     catch (error) { await this.close(id, owner); throw error; }
     finally { session.processing = false; }
   }
-  async processAudio(id, frames, audio, bpm, owner = 'local', parameters = []) {
+  async processAudio(id, frames, audio, bpm, owner = 'local', parameters = [], failureProfile) {
     const session = this.#session(id, owner);
     if (session.kind !== 'effect') throw new Error('Audio-effect processing requires a VST3 effect session');
     if (session.processing) throw new Error('Concurrent VST3 effect processing request rejected');
@@ -104,9 +111,31 @@ export class Vst3Service {
     if (!Number.isFinite(bpm) || bpm < 20 || bpm > 300) throw new Error('Invalid VST3 tempo');
     const changes = validateProcessParameters(parameters, session.parameters, frames);
     session.processing = true;
-    try { return (await session.client.processAudio(frames, audio, changes, bpm)).samples; }
-    catch (error) { await this.close(id, owner); throw error; }
+    try {
+      const nativeFailureProfile = session.captureFailureEvidence && failureProfile ? {
+        ...failureProfile, serviceSessionId: id, helperPid: session.client.pid ?? 0,
+        runtimeId: String(failureProfile.requestId).split(':')[0], pluginClassId: session.classId,
+      } : undefined;
+      const result = await session.client.processAudio(frames, audio, changes, bpm, nativeFailureProfile);
+      if (result.firstProcessEvidence && !session.lastSmokeProcessEvidence) session.lastSmokeProcessEvidence = {
+        ...result.firstProcessEvidence, helperSessionId: id, helperProcessId: session.client.pid ?? 0,
+      };
+      if (result.failureEvidence) session.lastSmokeFailureEvidence = result.failureEvidence;
+      return result.samples;
+    } catch (error) { await this.close(id, owner); throw error; }
     finally { session.processing = false; }
+  }
+  takeSmokeFailureEvidence(id, owner = 'local') {
+    const session = this.#session(id, owner);
+    const evidence = session.lastSmokeFailureEvidence;
+    session.lastSmokeFailureEvidence = null;
+    return evidence;
+  }
+  takeSmokeProcessEvidence(id, owner = 'local') {
+    const session = this.#session(id, owner);
+    const evidence = session.lastSmokeProcessEvidence;
+    session.lastSmokeProcessEvidence = null;
+    return evidence;
   }
   async describe(instrument, owner = 'local') {
     const opened = await this.open(instrument, 48000, 'offline', owner, 'instrument');
@@ -117,11 +146,6 @@ export class Vst3Service {
     const opened = await this.open(effect, 48000, 'offline', owner, 'effect');
     try { return { parameters: opened.parameters, controllerAvailable: opened.controllerAvailable }; }
     finally { await this.close(opened.id, owner); }
-  }
-  async snapshotEffect(id, owner = 'local') {
-    const session = this.#session(id, owner);
-    if (session.kind !== 'effect' || session.processing) throw new Error('VST3 effect snapshot requires an idle effect session');
-    return session.client.snapshot();
   }
   async inspectEffect(plugin, state, owner = 'local') {
     const effect = { ...plugin, ...(state === undefined ? {} : { state }) };

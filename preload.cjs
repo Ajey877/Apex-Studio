@@ -17,7 +17,8 @@ const desktopApi = {
     discoverEffects: () => ipcRenderer.invoke('vst3:discoverEffects'),
     inspect: (plugin, state) => ipcRenderer.invoke('vst3:inspect', plugin, state),
     inspectEffect: (plugin, state) => ipcRenderer.invoke('vst3:inspectEffect', plugin, state),
-    open: (instrument, rate, mode, kind = 'instrument') => ipcRenderer.invoke('vst3:open', instrument, rate, mode, kind),
+    open: (instrument, rate, mode, kind = 'instrument', captureFailureEvidence = false) =>
+      ipcRenderer.invoke('vst3:open', instrument, rate, mode, kind, smokeTest && captureFailureEvidence),
     describe: (instrument) => ipcRenderer.invoke('vst3:describe', instrument),
     describeEffect: (effect) => ipcRenderer.invoke('vst3:describeEffect', effect),
     parameters: (id, changes) => ipcRenderer.invoke('vst3:parameters', id, changes),
@@ -46,7 +47,6 @@ const desktopApi = {
   }
 };
 if (smokeTest) {
-  desktopApi.vst3.smokeEffectSnapshot = id => ipcRenderer.invoke('vst3:smokeEffectSnapshot', id);
   desktopApi.vst3.smokeTimingSnapshot = async () => ({
     preload: smokeIpcMeasurements.slice(),
     main: await ipcRenderer.invoke('vst3:smokeTimingSnapshot'),

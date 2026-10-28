@@ -42,7 +42,7 @@ function registerVst3({ app, ipcMain, dialog, getWindow }) {
       !Number.isInteger(value.sequence) || value.sequence < 0 ||
       !Number.isFinite(value.inputBlockStartContextFrame) || !Number.isFinite(value.submittedContextFrame) ||
       !Number.isFinite(value.submittedOutputFrame) || !Number.isFinite(value.dueOutputFrame) ||
-      !Number.isFinite(value.sampleRate)) return null;
+      !Number.isFinite(value.dueContextFrame) || !Number.isFinite(value.sampleRate)) return null;
     return value;
   };
   const ready = (async () => {
@@ -101,7 +101,8 @@ function registerVst3({ app, ipcMain, dialog, getWindow }) {
   handle('discoverEffects', (context, owner) => context.service.discover(owner, 'effect'));
   handle('inspect', (context, owner, plugin, state) => context.service.inspect(plugin, state, owner));
   handle('inspectEffect', (context, owner, plugin, state) => context.service.inspectEffect(plugin, state, owner));
-  handle('open', (context, owner, instrument, rate, mode, kind) => context.service.open(instrument, rate, mode, owner, kind));
+  handle('open', (context, owner, instrument, rate, mode, kind, captureFailureEvidence) =>
+    context.service.open(instrument, rate, mode, owner, kind, smokeTimingEnabled && captureFailureEvidence === true));
   handle('describe', (context, owner, instrument) => context.service.describe(instrument, owner));
   handle('describeEffect', (context, owner, effect) => context.service.describeEffect(effect, owner));
   handle('parameters', (context, owner, id, changes) => context.service.parameters(id, changes, owner));
@@ -118,14 +119,22 @@ function registerVst3({ app, ipcMain, dialog, getWindow }) {
     maximumConcurrentCallsPerEffect = Math.max(maximumConcurrentCallsPerEffect, activeForEffectAtStart);
     const inputChannels = stereoPcmMetrics(audio, frames);
     try {
-      const pcm = await context.service.processAudio(id, frames, audio, bpm, owner, parameters);
+      const pcm = await context.service.processAudio(id, frames, audio, bpm, owner, parameters, profile);
+      const nativeProcessEvidence = context.service.takeSmokeProcessEvidence(id, owner);
+      const nativeFailureEvidence = context.service.takeSmokeFailureEvidence(id, owner);
+      const outputChannels = stereoPcmMetrics(pcm, frames);
       const serviceCompletedAtMainMs = performance.now();
       if (smokeProcessAudioTimings.length < 8192) smokeProcessAudioTimings.push({
         ...profile, frames, ipcReceivedAtMainMs: ipcTiming?.ipcReceivedAtMainMs ?? serviceStartAtMainMs,
         serviceStartAtMainMs, serviceCompletedAtMainMs, nativeServiceCallMs: serviceCompletedAtMainMs - serviceStartAtMainMs,
         nativeInputRms: pcmRms(audio), nativeInputLeftRms: inputChannels?.leftRms ?? null,
         nativeInputRightRms: inputChannels?.rightRms ?? null, nativeInputMonoSumRms: inputChannels?.monoSumRms ?? null,
-        nativeInputMonoDifferenceRms: inputChannels?.monoDifferenceRms ?? null, nativeOutputRms: pcmRms(pcm),
+        nativeInputMonoDifferenceRms: inputChannels?.monoDifferenceRms ?? null,
+        nativeOutputRms: pcmRms(pcm), nativeOutputLeftRms: outputChannels?.leftRms ?? null,
+        nativeOutputRightRms: outputChannels?.rightRms ?? null, nativeOutputMonoSumRms: outputChannels?.monoSumRms ?? null,
+        nativeOutputMonoDifferenceRms: outputChannels?.monoDifferenceRms ?? null,
+        nativeProcessEvidence: nativeProcessEvidence ?? null,
+        nativeFailureEvidence: nativeFailureEvidence ?? null, serviceSessionId: id,
         activeProcessAudioCallsAtStart: activeAtStart, activeCallsForEffectAtStart: activeForEffectAtStart, error: null,
       });
       return pcm;
@@ -148,7 +157,6 @@ function registerVst3({ app, ipcMain, dialog, getWindow }) {
     }
   });
   if (smokeTimingEnabled) {
-    handle('smokeEffectSnapshot', (context, owner, id) => context.service.snapshotEffect(id, owner));
     handle('smokeTimingSnapshot', context => ({
       processAudio: smokeProcessAudioTimings.slice(), maximumConcurrentProcessAudioCalls,
       maximumConcurrentCallsPerEffect, activeProcessAudioCalls, nativeServiceSessionCount: context.service.sessionCount,

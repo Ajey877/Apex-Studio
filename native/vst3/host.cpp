@@ -16,8 +16,10 @@
 #include <cmath>
 #include <cstdint>
 #include <iostream>
+#include <iomanip>
 #include <memory>
 #include <map>
+#include <sstream>
 #include <set>
 #include <stdexcept>
 #include <vector>
@@ -71,6 +73,60 @@ std::vector<char> unhex(const std::string& value) {
   std::vector<char> result(value.size() / 2);
   for (size_t i = 0; i < result.size(); ++i) result[i] = static_cast<char>((nibble(value[i * 2]) << 4) | nibble(value[i * 2 + 1]));
   return result;
+}
+json byteFingerprint(const char* data, size_t size) {
+  uint32_t hash = 2166136261u;
+  for (size_t i = 0; i < size; ++i) hash = (hash ^ static_cast<unsigned char>(data[i])) * 16777619u;
+  std::ostringstream checksum;
+  checksum << std::hex << std::setw(8) << std::setfill('0') << hash;
+  return {{"available", true}, {"bytes", size}, {"fnv1a32", checksum.str()}};
+}
+json stateFingerprint(const json& state, const char* key) {
+  if (!state.is_object() || !state.contains(key) || !state.at(key).is_string()) return {{"available", false}, {"bytes", 0}};
+  const auto bytes = unhex(state.at(key).get<std::string>());
+  return byteFingerprint(bytes.data(), bytes.size());
+}
+json stereoMetrics(const std::vector<float>& planar, int frames) {
+  if (frames <= 0 || planar.size() != static_cast<size_t>(frames) * 2) return nullptr;
+  double leftSquares = 0, rightSquares = 0, sumSquares = 0, differenceSquares = 0;
+  for (int frame = 0; frame < frames; ++frame) {
+    const double left = planar[frame], right = planar[frames + frame];
+    leftSquares += left * left; rightSquares += right * right;
+    sumSquares += (left + right) * (left + right);
+    differenceSquares += (left - right) * (left - right);
+  }
+  return {{"leftRms", std::sqrt(leftSquares / frames)}, {"rightRms", std::sqrt(rightSquares / frames)},
+    {"monoSumRms", std::sqrt(sumSquares / frames)}, {"monoDifferenceRms", std::sqrt(differenceSquares / frames)},
+    {"combinedRms", std::sqrt((leftSquares + rightSquares) / (2.0 * frames))}};
+}
+json parameterMapEvidence(const std::map<ParamID, ParamValue>& values) {
+  json result = json::array();
+  size_t count = 0;
+  for (const auto& entry : values) {
+    if (count++ == 64) break;
+    result.push_back({{"id", entry.first}, {"value", entry.second}});
+  }
+  return {{"values", result}, {"truncated", values.size() > 64}};
+}
+json boundedArrayEvidence(const json& values) {
+  json result = json::array();
+  if (!values.is_array()) return {{"values", result}, {"truncated", false}};
+  const size_t count = std::min<size_t>(64, values.size());
+  for (size_t i = 0; i < count; ++i) result.push_back(values[i]);
+  return {{"values", result}, {"truncated", values.size() > count}};
+}
+json boundedRequestProfileEvidence(const json& profile, double sampleRate) {
+  return {{"requestId", profile.value("requestId", std::string())},
+    {"trackId", profile.value("trackId", -1)}, {"slotId", profile.value("slotId", std::string())},
+    {"sequence", profile.value("sequence", -1)},
+    {"inputBlockStartContextFrame", profile.value("inputBlockStartContextFrame", 0.0)},
+    {"submittedContextFrame", profile.value("submittedContextFrame", 0.0)},
+    {"submittedOutputFrame", profile.value("submittedOutputFrame", 0.0)},
+    {"dueOutputFrame", profile.value("dueOutputFrame", 0.0)},
+    {"dueContextFrame", profile.value("dueContextFrame", 0.0)},
+    {"sampleRate", profile.value("sampleRate", sampleRate)},
+    {"serviceSessionId", profile.value("serviceSessionId", std::string())},
+    {"helperPid", profile.value("helperPid", 0)}, {"runtimeId", profile.value("runtimeId", std::string())}};
 }
 bool instrument(const VST3::Hosting::ClassInfo& info) {
   const auto& categories = info.subCategories();
@@ -135,14 +191,31 @@ class Instance {
   std::set<ParamID> readOnlyIds;
   std::map<ParamID, ParamValue> overrides;
   std::map<ParamID, ParamValue> pendingEffectParameters;
+  bool captureFailureEvidence = false;
+  bool failureEvidenceCaptured = false;
+  bool firstProcessObserved = false;
+  json stateApplicationEvidence = json::object();
+  json firstProcessEvidence = nullptr;
+  json failureEvidence = nullptr;
   std::string classId;
   double sampleRate = 48000;
   int mode = kOffline;
   int64_t cursor = 0;
+  uint64_t processedBlocks = 0;
   bool active = false;
   bool processing = false;
   bool isInstrument = true;
 public:
+  json takeFailureEvidence() {
+    json evidence = std::move(failureEvidence);
+    failureEvidence = nullptr;
+    return evidence;
+  }
+  json takeFirstProcessEvidence() {
+    json evidence = std::move(firstProcessEvidence);
+    firstProcessEvidence = nullptr;
+    return evidence;
+  }
   ~Instance() {
     if (processing) processor->setProcessing(false);
     if (active) component->setActive(false);
@@ -168,6 +241,7 @@ public:
       const auto kind = request.value("kind", std::string("instrument"));
       require(kind == "instrument" || kind == "effect", "Unknown VST3 plugin kind");
       isInstrument = kind == "instrument";
+      captureFailureEvidence = !isInstrument && request.value("captureFailureEvidence", false);
       require(isInstrument ? instrument(info) : audioEffect(info), isInstrument ? "Selected class is not a VST3 instrument" : "Selected class is not a VST3 audio effect");
       provider = owned(new PlugProvider(factory, info, true));
       require(provider->initialize(), "Plugin component/controller initialization failed");
@@ -222,22 +296,43 @@ public:
         if (info.flags & ParameterInfo::kIsReadOnly) readOnlyIds.insert(info.id);
       }
     }
+    if (captureFailureEvidence) {
+      const json inputState = request.value("state", json::object());
+      stateApplicationEvidence = {{"classId", classId}, {"stateProvided", request.contains("state")},
+        {"controllerAvailable", bool(controller)}, {"componentStateInput", stateFingerprint(inputState, "component")},
+        {"controllerStateInput", stateFingerprint(inputState, "controller")},
+        {"componentStateApplied", false}, {"controllerComponentStateApplied", false},
+        {"controllerStateApplied", false}, {"normalizedOverridesApplied", json::array()},
+        {"normalizedOverridesTruncated", false}, {"lifecycleOrder", json::array()}, {"errors", json::array()}};
+    }
     if (request.contains("state")) restore(request.at("state"));
     else if (controller) {
       MemoryStream stream;
       if (component->getState(&stream) == kResultOk) {
         stream.seek(0, IBStream::kIBSeekSet, nullptr);
         // Optional for some plugins; required on restore when component state exists.
-        controller->setComponentState(&stream);
+        const auto componentStateResult = controller->setComponentState(&stream);
+        if (captureFailureEvidence) {
+          stateApplicationEvidence["componentStateInput"] = byteFingerprint(stream.getData(), stream.getSize());
+          stateApplicationEvidence["controllerComponentStateResult"] = componentStateResult;
+          stateApplicationEvidence["controllerComponentStateApplied"] = componentStateResult == kResultOk;
+          stateApplicationEvidence["lifecycleOrder"].push_back("controller.setComponentState(default component state)");
+        }
       }
     }
     data.prepare(*component, kMaxBlock, kSample32);
+    if (captureFailureEvidence) stateApplicationEvidence["lifecycleOrder"].push_back("data.prepare");
     checked(component->setActive(true), "setActive failed"); active = true;
+    if (captureFailureEvidence) stateApplicationEvidence["lifecycleOrder"].push_back("component.setActive(true)");
     checked(processor->setProcessing(true), "setProcessing failed"); processing = true;
+    if (captureFailureEvidence) stateApplicationEvidence["lifecycleOrder"].push_back("processor.setProcessing(true)");
     result["parameters"] = metadata();
     result["controllerAvailable"] = bool(controller);
     result["latencySamples"] = processor->getLatencySamples();
     result["tailSamples"] = processor->getTailSamples();
+    if (captureFailureEvidence) result["smokeOpenEvidence"] = {{"schema", 1}, {"pluginClassId", classId},
+      {"processingMode", mode == kRealtime ? "realtime" : "offline"}, {"stateApplication", stateApplicationEvidence},
+      {"stateSnapshot", {{"captured", false}, {"observation", "passive open-time state/application and lifecycle audit; no component snapshot was taken"}}}};
     return result;
   }
   bool isInstrumentKind() const { return isInstrument; }
@@ -271,9 +366,17 @@ public:
       auto bytes = unhex(state.at("component"));
       MemoryStream stream(bytes.data(), bytes.size());
       checked(component->setState(&stream), "Plugin rejected saved component state");
+      if (captureFailureEvidence) {
+        stateApplicationEvidence["componentStateApplied"] = true;
+        stateApplicationEvidence["lifecycleOrder"].push_back("component.setState(saved component state)");
+      }
       if (controller) {
         stream.seek(0, IBStream::kIBSeekSet, nullptr);
         checked(controller->setComponentState(&stream), "Controller rejected saved component state");
+        if (captureFailureEvidence) {
+          stateApplicationEvidence["controllerComponentStateApplied"] = true;
+          stateApplicationEvidence["lifecycleOrder"].push_back("controller.setComponentState(saved component state)");
+        }
       }
     }
     if (state.contains("controller")) {
@@ -281,6 +384,10 @@ public:
       auto bytes = unhex(state.at("controller"));
       MemoryStream stream(bytes.data(), bytes.size());
       checked(controller->setState(&stream), "Plugin rejected saved controller state");
+      if (captureFailureEvidence) {
+        stateApplicationEvidence["controllerStateApplied"] = true;
+        stateApplicationEvidence["lifecycleOrder"].push_back("controller.setState(saved controller state)");
+      }
     }
     if (state.contains("parameters")) applyParameters(state.at("parameters"), false, -1, isInstrument);
   }
@@ -338,6 +445,13 @@ public:
       require(std::isfinite(accepted) && std::abs(accepted - value) <= 1e-7, "Controller did not accept the requested normalized value");
       overrides[id] = value;
       if (!isInstrument) pendingEffectParameters[id] = value;
+      if (captureFailureEvidence && !active && !processing) {
+        if (stateApplicationEvidence["normalizedOverridesApplied"].size() < 64) {
+          stateApplicationEvidence["normalizedOverridesApplied"].push_back({{"id", id}, {"value", value},
+            {"controllerReadback", accepted}, {"queuedForFirstProcess", !isInstrument}});
+          stateApplicationEvidence["lifecycleOrder"].push_back("controller.setParamNormalized(" + std::to_string(id) + ")");
+        } else stateApplicationEvidence["normalizedOverridesTruncated"] = true;
+      }
     }
   }
   json snapshot() {
@@ -400,6 +514,22 @@ public:
         inputAudio = decodePlanarAudio(request.at("audio").get<std::string>(), frames);
       }
     }
+    const uint64_t processBlockIndex = processedBlocks;
+    const int64_t processCursorStart = cursor;
+    const bool diagnosticCandidate = captureFailureEvidence && !failureEvidenceCaptured && !isInstrument && frames > 0;
+    json failureProfile = nullptr;
+    if (diagnosticCandidate) failureProfile = request.value("failureProfile", json::object());
+    const bool validFailureProfile = diagnosticCandidate && failureProfile.is_object() && failureProfile.contains("requestId") &&
+      failureProfile["requestId"].is_string() && failureProfile["requestId"].get<std::string>().size() <= 180 &&
+      failureProfile.contains("slotId") && failureProfile["slotId"].is_string() &&
+      failureProfile["slotId"].get<std::string>().size() <= 128 && failureProfile.contains("trackId") &&
+      failureProfile["trackId"].is_number_integer() && failureProfile.contains("sequence") &&
+      failureProfile["sequence"].is_number_integer() && failureProfile.contains("serviceSessionId") &&
+      failureProfile["serviceSessionId"].is_string() && failureProfile["serviceSessionId"].get<std::string>().size() <= 64;
+    const json pendingParametersBefore = diagnosticCandidate
+      ? (pendingEffectParameters.empty() ? json{{"values", json::array()}, {"truncated", false}} : parameterMapEvidence(pendingEffectParameters))
+      : json(nullptr);
+    json queuedSavedEffectParameters = diagnosticCandidate ? json::array() : json(nullptr);
     if (!isInstrument && frames > 0 && !pendingEffectParameters.empty()) {
       std::set<ParamID> requested;
       if (request.contains("parameters") && request.at("parameters").is_array())
@@ -413,9 +543,26 @@ public:
         auto* queue = parameters.addParameterData(entry.first, queueIndex);
         require(queue != nullptr, "Parameter queue full");
         checked(queue->addPoint(0, entry.second, pointIndex), "Cannot queue saved effect parameter");
+        if (diagnosticCandidate && queuedSavedEffectParameters.size() < 64)
+          queuedSavedEffectParameters.push_back({{"id", entry.first}, {"value", entry.second}});
       }
     }
+    const json requestedProcessParameters = diagnosticCandidate ? request.value("parameters", json::array()) : json::array();
     if (request.contains("parameters")) applyParameters(request.at("parameters"), flush, flush ? -1 : frames);
+    if (captureFailureEvidence && !firstProcessObserved) {
+      firstProcessObserved = true;
+      const json firstRequestProfile = validFailureProfile ? boundedRequestProfileEvidence(failureProfile, sampleRate) : json(nullptr);
+      stateApplicationEvidence["firstProcess"] = {{"blockIndex", processBlockIndex}, {"cursorStart", processCursorStart},
+        {"mode", mode == kRealtime ? "realtime" : "offline"}, {"requestProfile", firstRequestProfile},
+        {"pendingSavedOverridesBefore", pendingParametersBefore},
+        {"queuedSavedOverrides", queuedSavedEffectParameters},
+        {"requestedOverrides", boundedArrayEvidence(requestedProcessParameters)}};
+      stateApplicationEvidence["lifecycleOrder"].push_back("first processor.process after saved parameter queue and request overrides");
+      firstProcessEvidence = {{"schema", 1}, {"pluginClassId", classId}, {"requestProfile", firstRequestProfile},
+        {"frameIndex", processCursorStart}, {"blockIndex", processBlockIndex}, {"frames", frames},
+        {"stateApplication", stateApplicationEvidence},
+        {"stateSnapshot", {{"captured", false}, {"observation", "same-instance passive open/first-process audit; no component snapshot or suspension"}}}};
+    }
     for (int32 bus = 0; bus < data.numOutputs; ++bus) {
       data.outputs[bus].silenceFlags = 0;
       for (int32 ch = 0; ch < data.outputs[bus].numChannels; ++ch)
@@ -442,6 +589,11 @@ public:
     data.inputParameterChanges = &parameters; data.outputParameterChanges = &outputParameters;
     data.processContext = &context;
     checked(processor->process(data), "Plugin process failed");
+    if (captureFailureEvidence && !firstProcessEvidence.is_null()) {
+      stateApplicationEvidence["firstProcess"]["processorCallResult"] = "kResultOk";
+      firstProcessEvidence["processorCallResult"] = "kResultOk";
+      firstProcessEvidence["stateApplication"] = stateApplicationEvidence;
+    }
     // Retain a zero-sample flush for the next audible block too: some SDK
     // processors recalculate coefficients only while processing samples.
     if (frames > 0) {
@@ -457,6 +609,81 @@ public:
         float sample = output.channelBuffers32[source][i];
         require(std::isfinite(sample), "Plugin produced non-finite audio");
         pcm[ch * frames + i] = sample;
+      }
+    }
+    if (captureFailureEvidence) ++processedBlocks;
+    const auto inputPeak = diagnosticCandidate ? std::max_element(inputAudio.begin(), inputAudio.end(),
+      [](float left, float right) { return std::abs(left) < std::abs(right); }) : inputAudio.end();
+    const auto outputPeak = diagnosticCandidate ? std::max_element(pcm.begin(), pcm.end(),
+      [](float left, float right) { return std::abs(left) < std::abs(right); }) : pcm.end();
+    const bool inputMayExceedSilence = inputPeak != inputAudio.end() && std::abs(*inputPeak) > 1e-8f;
+    const bool outputMayBeEffectivelySilent = frames > 0 && outputPeak != pcm.end() &&
+      std::abs(*outputPeak) <= 1e-12 * std::sqrt(2.0 * frames);
+    if (inputMayExceedSilence && outputMayBeEffectivelySilent && validFailureProfile) {
+      const json inputMetrics = stereoMetrics(inputAudio, frames);
+      const json outputMetrics = stereoMetrics(pcm, frames);
+      if (inputMetrics.value("combinedRms", 0.0) > 1e-8 && outputMetrics.value("combinedRms", 0.0) <= 1e-12) {
+        failureEvidenceCaptured = true;
+        try {
+          json controllerReadbacks = json::array();
+          std::string readbackError;
+          if (controller) {
+            try {
+              std::set<ParamID> relevantParameterIds;
+              for (const auto& entry : overrides) { if (relevantParameterIds.size() == 64) break; relevantParameterIds.insert(entry.first); }
+              for (const auto& entry : pendingEffectParameters) { if (relevantParameterIds.size() == 64) break; relevantParameterIds.insert(entry.first); }
+              if (requestedProcessParameters.is_array()) for (const auto& parameter : requestedProcessParameters) {
+                if (relevantParameterIds.size() == 64) break;
+                if (parameter.is_object() && parameter.contains("id") && parameter.at("id").is_number_integer()) {
+                  const auto rawId = parameter.at("id").get<int64_t>();
+                  if (rawId >= 0 && rawId <= UINT32_MAX) relevantParameterIds.insert(static_cast<ParamID>(rawId));
+                }
+              }
+              for (const auto id : relevantParameterIds) {
+                const auto info = std::find_if(parameterInfo.begin(), parameterInfo.end(), [id](const ParameterInfo& parameter) { return parameter.id == id; });
+                if (info == parameterInfo.end()) continue;
+                const auto value = controller->getParamNormalized(id);
+                controllerReadbacks.push_back({{"id", id}, {"name", StringConvert::convert(info->title)},
+                  {"currentValue", std::isfinite(value) && value >= 0 && value <= 1 ? json(value) : json(nullptr)},
+                  {"defaultValue", info->defaultNormalizedValue}, {"flags", info->flags}, {"stepCount", info->stepCount}});
+              }
+            } catch (const std::exception& error) { readbackError = error.what(); }
+          }
+          const json boundedRequestProfile = boundedRequestProfileEvidence(failureProfile, sampleRate);
+          const auto outputSilenceFlags = data.outputs[0].silenceFlags;
+          json processOrder = json::array();
+          if (!queuedSavedEffectParameters.empty()) processOrder.push_back("queue saved normalized overrides");
+          if (!requestedProcessParameters.empty()) processOrder.push_back("apply request parameter overrides");
+          processOrder.push_back("processor.process");
+          failureEvidence = {{"schema", 1}, {"helperSessionId", failureProfile.value("serviceSessionId", std::string())},
+            {"helperProcessId", failureProfile.value("helperPid", 0)}, {"trackId", failureProfile.value("trackId", -1)},
+            {"slotId", failureProfile.value("slotId", std::string())}, {"runtimeInstanceId", failureProfile.value("runtimeId", std::string())},
+            {"requestId", failureProfile.value("requestId", std::string())}, {"sequence", failureProfile.value("sequence", -1)},
+            {"requestProfile", boundedRequestProfile}, {"pluginClassId", classId},
+            {"processingMode", mode == kRealtime ? "realtime" : "offline"},
+            {"frameIndex", processCursorStart}, {"blockIndex", processBlockIndex}, {"frames", frames},
+            {"input", inputMetrics}, {"output", outputMetrics},
+            {"channels", {{"input", data.numInputs > 0 ? data.inputs[0].numChannels : 0},
+              {"output", data.numOutputs > 0 ? data.outputs[0].numChannels : 0}, {"outputSilenceFlags", outputSilenceFlags}}},
+            {"context", {{"sampleRate", sampleRate}, {"bpm", context.tempo}, {"projectTimeSamples", context.projectTimeSamples},
+              {"projectTimeMusic", context.projectTimeMusic}, {"stateFlags", context.state}, {"processMode", data.processMode}}},
+            {"parameters", {{"controllerReadbacksAfterProcess", controllerReadbacks},
+              {"readbackError", readbackError}, {"savedPendingOverridesBeforeBlock", pendingParametersBefore},
+              {"savedOverridesAfterBlock", parameterMapEvidence(overrides)},
+              {"queuedSavedOverridesInBlock", queuedSavedEffectParameters},
+              {"requestOverrides", boundedArrayEvidence(requestedProcessParameters)}}},
+            {"stateApplication", stateApplicationEvidence},
+            {"stateSnapshot", {{"captured", false}, {"observation", "same-instance state input/application audit; no post-failure snapshot taken"},
+              {"reason", "The host snapshot calls setProcessing(false/true); avoid suspending or perturbing the active instance while returning this block."}}},
+            {"lifecycle", {{"active", active}, {"processing", processing}, {"errors", stateApplicationEvidence.value("errors", json::array())}}},
+            {"processOrder", processOrder}, {"processingError", nullptr}, {"parameterSettingError", nullptr}};
+        } catch (const std::exception& error) {
+          failureEvidence = {{"schema", 1}, {"requestId", failureProfile.value("requestId", std::string())},
+            {"sequence", failureProfile.value("sequence", -1)}, {"pluginClassId", classId},
+            {"frameIndex", processCursorStart}, {"blockIndex", processBlockIndex},
+            {"input", inputMetrics}, {"output", outputMetrics}, {"evidenceCaptureError", error.what()},
+            {"stateApplication", stateApplicationEvidence}, {"processingError", nullptr}};
+        }
       }
     }
     cursor += frames;
@@ -515,7 +742,12 @@ int main() {
       } else if (command == "process") {
         require(bool(instance), "No plugin instance loaded");
         auto pcm = instance->process(request);
-        reply({{"ok", true}, {"frames", pcm.size() / 2}, {"channels", 2}}, pcm);
+        json response{{"ok", true}, {"frames", pcm.size() / 2}, {"channels", 2}};
+        const auto firstProcessEvidence = instance->takeFirstProcessEvidence();
+        if (!firstProcessEvidence.is_null()) response["firstProcessEvidence"] = firstProcessEvidence;
+        const auto failureEvidence = instance->takeFailureEvidence();
+        if (!failureEvidence.is_null()) response["failureEvidence"] = failureEvidence;
+        reply(response, pcm);
       } else if (command == "parameters") {
         require(bool(instance), "No plugin instance loaded");
         // Instruments retain the established zero-sample flush contract. Audio

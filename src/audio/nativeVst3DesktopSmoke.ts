@@ -274,7 +274,8 @@ function correlatedTimingSamples(run: any) {
     if (typeof event.requestId !== 'string' || !measuredRequestIds.has(event.requestId)) continue;
     const sample = sampleFor(event.requestId);
     if (event.event === 'worklet-submit') Object.assign(sample, {
-      trackId: event.trackId, slotId: event.slotId,
+      trackId: event.trackId, slotId: event.slotId, sequence: event.sequence,
+      runtimeId: typeof event.requestId === 'string' ? event.requestId.split(':')[0] : undefined,
       inputBlockStartContextFrame: event.inputBlockStartContextFrame,
       rendererSubmissionContextFrame: event.submittedContextFrame,
       submittedOutputFrame: event.submittedOutputFrame, dueOutputFrame: event.dueOutputFrame,
@@ -310,6 +311,11 @@ function correlatedTimingSamples(run: any) {
       nativeServiceInputRightRms: event.nativeInputRightRms, nativeServiceInputMonoSumRms: event.nativeInputMonoSumRms,
       nativeServiceInputMonoDifferenceRms: event.nativeInputMonoDifferenceRms,
       nativeServiceOutputRms: event.nativeOutputRms,
+      nativeServiceOutputLeftRms: event.nativeOutputLeftRms, nativeServiceOutputRightRms: event.nativeOutputRightRms,
+      nativeServiceOutputMonoSumRms: event.nativeOutputMonoSumRms,
+      nativeServiceOutputMonoDifferenceRms: event.nativeOutputMonoDifferenceRms,
+      nativeProcessEvidence: event.nativeProcessEvidence, nativeFailureEvidence: event.nativeFailureEvidence,
+      serviceSessionId: event.serviceSessionId,
       concurrentCallsForEffectAtStart: event.activeCallsForEffectAtStart, nativeServiceError: event.error,
     });
   }
@@ -334,23 +340,94 @@ function nativeServicePcmBySlot(run: any) {
       inputLeftRms: summarize('nativeServiceInputLeftRms'), inputRightRms: summarize('nativeServiceInputRightRms'),
       inputMonoSumRms: summarize('nativeServiceInputMonoSumRms'),
       inputMonoDifferenceRms: summarize('nativeServiceInputMonoDifferenceRms'),
-      outputRms: summarize('nativeServiceOutputRms') }];
+      outputRms: summarize('nativeServiceOutputRms'), outputLeftRms: summarize('nativeServiceOutputLeftRms'),
+      outputRightRms: summarize('nativeServiceOutputRightRms'), outputMonoSumRms: summarize('nativeServiceOutputMonoSumRms'),
+      outputMonoDifferenceRms: summarize('nativeServiceOutputMonoDifferenceRms') }];
+  }));
+}
+
+function nativeSessionEvidence(run: any) {
+  const grouped = new Map<string, Record<string, any>[]>();
+  for (const sample of correlatedTimingSamples(run)) {
+    if (sample.trackId !== 1 || typeof sample.slotId !== 'string') continue;
+    const rows = grouped.get(sample.slotId) ?? [];
+    rows.push(sample);
+    grouped.set(sample.slotId, rows);
+  }
+  return Object.fromEntries([...grouped].map(([slotId, rows]) => {
+    const first = rows[0]!;
+    const openEvent = (run.runtimeEvents as Array<Record<string, any>>).find(event => event.event === 'native-effect-open' &&
+      event.trackId === first.trackId && event.slotId === slotId && event.runtimeId === first.runtimeId &&
+      event.helperSessionId === first.serviceSessionId);
+    const sessionProcessEvents = (run.ipc.main.processAudio as Array<Record<string, any>>)
+      .filter(event => event.serviceSessionId === first.serviceSessionId);
+    const firstProcessEvent = sessionProcessEvents.find(event => event.nativeProcessEvidence);
+    const failureEvent = sessionProcessEvents.find(event => event.nativeFailureEvidence)?.nativeFailureEvidence as Record<string, any> | undefined;
+    return [slotId, { serviceSessionId: first.serviceSessionId, runtimeId: first.runtimeId,
+      helperProcessId: openEvent?.nativeOpenEvidence?.helperProcessId ?? firstProcessEvent?.nativeProcessEvidence?.helperProcessId ?? failureEvent?.helperProcessId ?? null,
+      firstMeasuredRequestId: first.requestId, requestCount: rows.length,
+      failureEvidenceCount: sessionProcessEvents.filter(event => event.nativeFailureEvidence).length,
+      nativeOpenEvidence: openEvent?.nativeOpenEvidence ?? null,
+      firstProcessEvidence: firstProcessEvent?.nativeProcessEvidence ?? null }];
   }));
 }
 
 function nativeEffectOpenEvidence(run: any) {
   const events = (run.runtimeEvents as Array<Record<string, any>>).filter(event => event.event === 'native-effect-open')
-    .map(({ trackId, slotId, runtimeId, classId, parameterEvidence, nativeInstanceEvidence }) => ({
-      trackId, slotId, runtimeId, classId, parameterEvidence, nativeInstanceEvidence,
+    .map(({ trackId, slotId, runtimeId, helperSessionId, classId, parameterEvidence, nativeOpenEvidence }) => ({
+      trackId, slotId, runtimeId, helperSessionId, classId, parameterEvidence, nativeOpenEvidence,
     }));
   if (events.length) return events;
   return (run.diagnostics as Array<Record<string, any>>).flatMap(diagnostic => {
     if (typeof diagnostic.message !== 'string') return [];
-    const match = diagnostic.message.match(/Smoke parameter state: (\{.*\})\.$/);
+    const match = diagnostic.message.match(/Smoke controller parameters at open: (\[.*\])\.$/);
     if (!match) return [];
     try {
-      return [{ trackId: diagnostic.trackId, slotId: diagnostic.slotId, ...JSON.parse(match[1]!) }];
-    } catch { return [{ trackId: diagnostic.trackId, slotId: diagnostic.slotId, invalidEvidence: true }]; }
+      return [{ trackId: diagnostic.trackId, slotId: diagnostic.slotId, parameterEvidence: JSON.parse(match[1]!) }];
+    } catch { return [{ trackId: diagnostic.trackId, slotId: diagnostic.slotId, parameterEvidence: null, invalidEvidence: true }]; }
+  });
+}
+
+function correlatedNativeFailures(run: any) {
+  const openEvents = (run.runtimeEvents as Array<Record<string, any>>).filter(event => event.event === 'native-effect-open');
+  const sessionIds = new Set(openEvents.map(event => event.helperSessionId).filter((id): id is string => typeof id === 'string'));
+  const runtimeIds = new Set((run.runtimeEvents as Array<Record<string, any>>)
+    .filter(event => event.event === 'worklet-submit' && typeof event.requestId === 'string')
+    .map(event => event.requestId.split(':')[0]));
+  const mainRows = (run.ipc.main.processAudio as Array<Record<string, any>>).filter(event =>
+    sessionIds.has(event.serviceSessionId) || (typeof event.requestId === 'string' && runtimeIds.has(event.requestId.split(':')[0])));
+  return mainRows.flatMap(event => {
+    const failure = event.nativeFailureEvidence as Record<string, any> | null;
+    if (!failure) return [];
+    const failureInputFrame = Number(failure.requestProfile?.inputBlockStartContextFrame ?? event.inputBlockStartContextFrame);
+    const sameTrackUpstream = mainRows.filter(candidate => candidate.trackId === event.trackId && candidate.slotId !== event.slotId);
+    const exactUpstream = sameTrackUpstream.filter(candidate => Number(candidate.dueContextFrame) === failureInputFrame);
+    const upstream = (exactUpstream.length ? exactUpstream : sameTrackUpstream.filter(candidate => candidate.sequence === event.sequence))
+      .map(candidate => ({ requestId: candidate.requestId, sequence: candidate.sequence, slotId: candidate.slotId,
+        dueContextFrame: candidate.dueContextFrame, inputRms: candidate.nativeInputRms,
+        outputRms: candidate.nativeOutputRms, outputLeftRms: candidate.nativeOutputLeftRms,
+        outputRightRms: candidate.nativeOutputRightRms, outputMonoSumRms: candidate.nativeOutputMonoSumRms,
+        correlation: Number(candidate.dueContextFrame) === failureInputFrame ? 'upstream-due-frame-equals-failing-input-frame' : 'same-track-sequence-fallback' }));
+    const downstreamFrame = Number(failure.requestProfile?.dueContextFrame ?? event.dueContextFrame);
+    const downstreamWindow = Number.isFinite(downstreamFrame) ? { startContextFrame: downstreamFrame,
+      endContextFrame: downstreamFrame + VST3_FX_BLOCK_FRAMES } : null;
+    return [{ failure,
+      mainRequest: { requestId: event.requestId, sequence: event.sequence, slotId: event.slotId,
+        serviceSessionId: event.serviceSessionId, inputRms: event.nativeInputRms,
+        inputLeftRms: event.nativeInputLeftRms, inputRightRms: event.nativeInputRightRms,
+        inputMonoSumRms: event.nativeInputMonoSumRms, outputRms: event.nativeOutputRms,
+        outputLeftRms: event.nativeOutputLeftRms, outputRightRms: event.nativeOutputRightRms,
+        outputMonoSumRms: event.nativeOutputMonoSumRms, error: event.error },
+      upstreamStageRequests: upstream,
+      downstreamCapture: { window: downstreamWindow,
+        nativeStages: downstreamWindow ? [...run.nativeStageCaptures].map(([slotId, capture]: [string, MixerCapture]) => ({
+          slotId, rms: capturedRmsInWindow(capture, downstreamWindow.startContextFrame, downstreamWindow.endContextFrame),
+        })) : [],
+        tracks: downstreamWindow ? [...run.captures].map(([trackId, capture]: [number, MixerCapture]) => ({
+          trackId, rms: capturedRmsInWindow(capture, downstreamWindow.startContextFrame, downstreamWindow.endContextFrame),
+        })) : [],
+        overallTrackRms: run.trackRms, nativeStageRms: run.nativeStageRms },
+    }];
   });
 }
 
@@ -498,6 +575,7 @@ async function captureLiveMixerRun(instance: typeof audioEngine, channels: Chann
   const targetSource = context.createBufferSource();
   targetSource.buffer = options.inputBuffers?.get(1) ?? createDeterministicMixerInput(context);
   const targetGain = context.createGain();
+  const runtimeStart = getNativeVst3MixerEffectSmokeTiming().length;
   const controlBuffer = options.inputBuffers?.get(2);
   const controlSource: AudioBufferSourceNode | OscillatorNode = controlBuffer
     ? context.createBufferSource() : context.createOscillator();
@@ -529,7 +607,6 @@ async function captureLiveMixerRun(instance: typeof audioEngine, channels: Chann
   const sourceStartContextFrame = Math.round(sourceStartTime * context.sampleRate);
   targetSource.start(sourceStartTime); controlSource.start(sourceStartTime);
   await new Promise(resolve => setTimeout(resolve, 300));
-  const runtimeStart = getNativeVst3MixerEffectSmokeTiming().length;
   await smokeApi.smokeTimingSnapshot(); // warm the authorized timing IPC before the measured window
   const startedAt = performance.now();
   const startedContextFrame = sourceStartContextFrame + Math.round(0.25 * context.sampleRate);
@@ -595,7 +672,8 @@ async function captureLiveMixerRun(instance: typeof audioEngine, channels: Chann
 
 function assertPackagedMixerRun(run: any, label: string) {
   const timing = run.timing;
-  const evidence = JSON.stringify({ timing, timingSamples: correlatedTimingSamples(run).slice(0, 24),
+  const evidence = JSON.stringify({ timing, nativeFailureEvidence: correlatedNativeFailures(run),
+    nativeSessions: nativeSessionEvidence(run), timingSamples: correlatedTimingSamples(run).slice(0, 24),
     diagnostics: run.diagnostics, tailRms: run.tailRms, trackRms: run.trackRms });
   const fail = (reason: string) => { throw new Error(`${label}: ${reason}; bounded production timing evidence=${evidence}`); };
   if (run.sampleRate !== 48000) fail(`expected the packaged AudioContext at 48 kHz, got ${run.sampleRate}`);
@@ -731,14 +809,19 @@ async function runPackagedMixerAcceptance(instance: typeof audioEngine, persiste
   const alignmentOptions = (): MixerCaptureOptions => ({ durationMs: 1050, inputBuffers: onsetInputs(), includeMaster: true, includeNativeStages: true });
   const zeroInsertAlignment = await run(noEffects, 'Mixer onset alignment zero inserts', alignmentOptions());
   const oneInsertAlignment = await run(oneNativeInsert, 'Mixer onset alignment one insert', alignmentOptions());
-  const twoInsertAlignment = await run(twoNativeInserts, 'Mixer onset alignment two inserts', alignmentOptions());
+  const twoInsertAlignments = [await run(twoNativeInserts, 'Mixer onset alignment two inserts attempt 1', alignmentOptions())];
+  for (let attempt = 2; attempt <= 8; attempt++) {
+    twoInsertAlignments.push(await run(twoNativeInserts, `Mixer onset alignment two inserts attempt ${attempt}`, alignmentOptions()));
+  }
   const onsetFramesFor = (result: any) => Object.fromEntries([0, 1, 2].map(trackId => [trackId,
     firstCapturedOnsetFrame(result.captures.get(trackId), result.sourceStartContextFrame,
       result.sourceStartContextFrame + result.sampleRate)]));
   const alignmentRows = [
     { label: 'zero-insert', result: zeroInsertAlignment, expectedPipelineFrames: 0 },
     { label: 'one-insert', result: oneInsertAlignment, expectedPipelineFrames: VST3_FX_PIPELINE_FRAMES },
-    { label: 'two-insert', result: twoInsertAlignment, expectedPipelineFrames: VST3_FX_PIPELINE_FRAMES * 2 },
+    ...twoInsertAlignments.map((result, index) => ({
+      label: `two-insert-attempt-${index + 1}`, result, expectedPipelineFrames: VST3_FX_PIPELINE_FRAMES * 2,
+    })),
   ].map(({ label, result, expectedPipelineFrames }) => {
     const onsets = onsetFramesFor(result);
     const expectedRelativeOnsetFrame = 256 + expectedPipelineFrames;
@@ -759,11 +842,20 @@ async function runPackagedMixerAcceptance(instance: typeof audioEngine, persiste
       capturedSignalEvidence(result.captures.get(trackId), result.sourceStartContextFrame, expectedRelativeOnsetFrame, result.sampleRate)]));
     const masterSum = compareCapturedMasterToTrackSum(result.captures, result.sourceStartContextFrame + expectedRelativeOnsetFrame,
       result.sourceStartContextFrame + expectedRelativeOnsetFrame + VST3_FX_BLOCK_FRAMES * 8);
+    const nativeStageServiceValid = nativeStageRows.every((stage: any) => {
+      const row = nativeServicePcm[stage.slotId];
+      return row?.requests >= 10 && row.inputRms.nonzero === row.requests && row.outputRms.nonzero === row.requests;
+    });
+    const expectedNativeSlots = expectedPipelineFrames === 0 ? [] : expectedPipelineFrames === VST3_FX_PIPELINE_FRAMES
+      ? ['latency-one-delay'] : ['latency-two-delay', 'latency-two-filter'];
+    const nativeStageOrderValid = nativeStageRows.map((stage: any) => stage.slotId).join('|') === expectedNativeSlots.join('|');
     if (actualRelativeOnsets.some(frame => frame !== expectedRelativeOnsetFrame) || masterRelativeOnset !== expectedRelativeOnsetFrame ||
-        nativeStageRows.some((stage: any) => stage.actualRelativeOnsetFrame !== stage.expectedRelativeOnsetFrame) ||
-        masterSum.comparedSamples < VST3_FX_BLOCK_FRAMES * 2 || masterSum.rmsDifference > 1e-5) {
-      const evidence = { onsets, sourceStartContextFrame: result.sourceStartContextFrame, expectedRelativeOnsetFrame,
+        !nativeStageOrderValid || nativeStageRows.some((stage: any) => stage.actualRelativeOnsetFrame !== stage.expectedRelativeOnsetFrame) ||
+        !nativeStageServiceValid || masterSum.comparedSamples < VST3_FX_BLOCK_FRAMES * 2 || masterSum.rmsDifference > 1e-5) {
+      const evidence = { nativeFailureEvidence: correlatedNativeFailures(result), nativeSessions: nativeSessionEvidence(result),
+        onsets, sourceStartContextFrame: result.sourceStartContextFrame, expectedRelativeOnsetFrame,
         actualRelativeOnsets, masterRelativeOnset, nativeStageRows, nativeServicePcm,
+        nativeStageOrderValid, nativeStageServiceValid,
         nativeEffectOpenEvidence: nativeEffectOpenEvidence(result), tapSignalEvidence, masterSum,
         trackRms: result.trackRms, diagnostics: result.diagnostics,
         timing: { requestCount: result.timing.requestCount, acceptedWorkletResults: result.timing.acceptedWorkletResults,
@@ -780,7 +872,8 @@ async function runPackagedMixerAcceptance(instance: typeof audioEngine, persiste
     return { label, expectedPipelineFrames, sourceStartContextFrame: result.sourceStartContextFrame,
       expectedRelativeOnsetFrame, onsetContextFrames: onsets, relativeOnsetFrames: {
         track1: actualRelativeOnsets[0], track2: actualRelativeOnsets[1], master: masterRelativeOnset,
-      }, nativeStageRows, nativeServicePcm,
+      }, nativeStageRows, nativeStageServiceValid, nativeServicePcm, nativeSessions: nativeSessionEvidence(result),
+      nativeFailureEvidence: correlatedNativeFailures(result),
       masterSumPcmDifferenceRms: masterSum.rmsDifference, masterSumComparedSamples: masterSum.comparedSamples };
   });
   let savedProjectReopenEvidence: Record<string, unknown> | undefined;
@@ -811,6 +904,8 @@ async function runPackagedMixerAcceptance(instance: typeof audioEngine, persiste
           stage.slotId !== expectedSlots[index] || stage.actualRelativeOnsetFrame !== stage.expectedRelativeOnsetFrame) ||
         !serviceRequestsValid || masterSum.comparedSamples < VST3_FX_BLOCK_FRAMES * 2 || masterSum.rmsDifference > 1e-5) {
       throw new Error(`Persisted Mixer Delay → RezFilter state failed after separate application reopen: ${JSON.stringify({
+        nativeFailureEvidence: correlatedNativeFailures(reopenedMixer),
+        nativeSessions: nativeSessionEvidence(reopenedMixer),
         expectedRelativeOnsetFrame, relativeOnsets, nativeStageRows, nativeServicePcm,
         restoredState: restoredMixerParameterEvidence,
         nativeEffectOpenEvidence: nativeEffectOpenEvidence(reopenedMixer), masterSum,
@@ -822,6 +917,8 @@ async function runPackagedMixerAcceptance(instance: typeof audioEngine, persiste
     savedProjectReopenEvidence = {
       restoredState: restoredMixerParameterEvidence,
       nativeEffectOpenEvidence: nativeEffectOpenEvidence(reopenedMixer),
+      nativeSessions: nativeSessionEvidence(reopenedMixer),
+      nativeFailureEvidence: correlatedNativeFailures(reopenedMixer),
       sourceStartContextFrame: reopenedMixer.sourceStartContextFrame,
       expectedRelativeOnsetFrame, relativeOnsets, nativeStageRows, nativeServicePcm,
       masterSumPcmDifferenceRms: masterSum.rmsDifference, masterSumComparedSamples: masterSum.comparedSamples,
@@ -900,6 +997,9 @@ async function runPackagedMixerAcceptance(instance: typeof audioEngine, persiste
       savedState: savedProjectReopenEvidence.restoredState,
       openedInstances: savedProjectReopenEvidence.nativeEffectOpenEvidence,
     } : null,
+    twoInsertFreshInstanceAttempts: twoInsertAlignments.map((result, index) => ({ attempt: index + 1,
+      sourceStartContextFrame: result.sourceStartContextFrame, nativeSessions: nativeSessionEvidence(result),
+      failureEvidenceCount: correlatedNativeFailures(result).length })),
     latencyAlignmentRegression: alignmentRows,
     savedProjectReopen: savedProjectReopenEvidence,
     persistedProjectMixerTracks: ordered,

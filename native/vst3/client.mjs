@@ -81,22 +81,24 @@ export class NativeVst3Client {
     this.#tail = operation.catch(() => {});
     return operation;
   }
-  open(plugin, { sampleRate = 48000, mode = 'offline', state, kind = 'instrument' } = {}) {
+  open(plugin, { sampleRate = 48000, mode = 'offline', state, kind = 'instrument', captureFailureEvidence = false } = {}) {
     if (!['instrument', 'effect'].includes(kind)) throw new Error('Invalid VST3 plugin kind');
     return this.request({ command: 'open', path: plugin.path, classId: plugin.classId, sampleRate, mode, kind,
-      ...(state === undefined ? {} : { state }) });
+      ...(state === undefined ? {} : { state }), ...(captureFailureEvidence ? { captureFailureEvidence: true } : {}) });
   }
+  get pid() { return this.#child.pid ?? null; }
   async parameters(changes) { return (await this.request({ command: 'parameters', parameters: changes })).parameters; }
   async snapshot() { return (await this.request({ command: 'snapshot' })).state; }
   process(frames, events = [], parameters = [], bpm = 120) {
     return this.request({ command: 'process', frames, events, parameters, bpm });
   }
-  processAudio(frames, samples, parameters = [], bpm = 120) {
+  processAudio(frames, samples, parameters = [], bpm = 120, failureProfile) {
     if (!Number.isInteger(frames) || frames < 1 || frames > 16384 ||
       !(samples instanceof Float32Array) || samples.length !== frames * 2 ||
       samples.some(sample => !Number.isFinite(sample))) throw new Error('Invalid planar stereo VST3 audio block');
     const bytes = Buffer.from(samples.buffer, samples.byteOffset, samples.byteLength);
-    return this.request({ command: 'process', frames, events: [], parameters, bpm, audio: bytes.toString('base64') });
+    return this.request({ command: 'process', frames, events: [], parameters, bpm, audio: bytes.toString('base64'),
+      ...(failureProfile ? { failureProfile } : {}) });
   }
   async dispose() {
     // Kill rather than waiting on untrusted plugin teardown forever. Destructors

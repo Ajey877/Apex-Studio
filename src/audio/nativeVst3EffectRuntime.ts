@@ -1,5 +1,5 @@
 import type { FxSlot, MixerTrack } from '../types/daw';
-import type { Vst3Effect, Vst3ParameterChange, Vst3Parameter, Vst3Bridge, Vst3AudioProcessProfile, Vst3State } from './nativeVst3Types';
+import type { Vst3Effect, Vst3ParameterChange, Vst3Parameter, Vst3Bridge, Vst3AudioProcessProfile } from './nativeVst3Types';
 import { assertVst3Effect, getVst3Bridge } from './nativeVst3Types';
 
 export interface Vst3MixerEffectDiagnostic {
@@ -46,28 +46,6 @@ export function resetNativeVst3MixerEffectSmokeTiming() {
 }
 export function getNativeVst3MixerEffectSmokeTiming(): NativeVst3MixerEffectSmokeEvent[] {
   return mixerFxSmokeEnabled() ? smokeTimingEvents.slice() : [];
-}
-
-function smokeStateBlobEvidence(value: string | undefined) {
-  if (value === undefined) return null;
-  if (value.length % 2 !== 0 || !/^[A-Fa-f0-9]*$/.test(value)) return { invalid: true };
-  let hash = 2166136261;
-  for (let index = 0; index < value.length; index += 2) {
-    hash = Math.imul(hash ^ Number.parseInt(value.slice(index, index + 2), 16), 16777619) >>> 0;
-  }
-  return { bytes: value.length / 2, checksum: hash.toString(16).padStart(8, '0') };
-}
-
-function smokeNativeInstanceEvidence(state: Vst3State | undefined, requested: Array<{ id: number; value: number }>) {
-  if (!state) return null;
-  return {
-    classId: state.classId,
-    parameters: requested.map(({ id, value }) => ({
-      id, requestedValue: value, nativeSnapshotValue: state.parameters.find(parameter => parameter.id === id)?.value ?? null,
-    })),
-    component: smokeStateBlobEvidence(state.component),
-    controller: smokeStateBlobEvidence(state.controller),
-  };
 }
 
 export const VST3_FX_BLOCK_FRAMES = 1024;
@@ -382,6 +360,7 @@ export class NativeVst3EffectRuntime {
           submittedContextFrame: submitted.submittedContextFrame,
           submittedOutputFrame: submitted.submittedOutputFrame,
           dueOutputFrame: submitted.dueOutputFrame,
+          dueContextFrame: submitted.dueContextFrame,
           sampleRate: context.sampleRate,
         } : undefined;
         let samples: Float32Array;
@@ -430,7 +409,8 @@ export class NativeVst3EffectRuntime {
         .finally(() => { if (entry.profileEnabled) entry.queueDepth = Math.max(0, entry.queueDepth - 1); });
     };
     node.onprocessorerror = () => this.fail(entry, 'Native effect AudioWorklet processor failed.');
-    entry.ready = bridge.open(entry.effect, context.sampleRate, 'realtime', 'effect').then(async opened => {
+    entry.ready = bridge.open(entry.effect, context.sampleRate, 'realtime', 'effect',
+      profileEnabled && entry.effect.name === 'mda RezFilter').then(async opened => {
       if (entry.disposed || this.prepared.get(runtimeKey(trackId, slot.id)) !== entry) { await bridge.close(opened.id); throw new Error('Native effect preparation cancelled.'); }
       if (opened.latencySamples !== 0) { await bridge.close(opened.id); throw new Error(`VST3 effect reports ${opened.latencySamples} samples of latency; nonzero plugin latency is unsupported and is not compensated.`); }
       entry.sessionId = opened.id;
@@ -439,15 +419,11 @@ export class NativeVst3EffectRuntime {
       const controllerParameterEvidence = profileEnabled ? requestedParameters.map(({ id, value }) => ({
         id, requestedValue: value, helperControllerValue: opened.parameters?.find(parameter => parameter.id === id)?.currentValue ?? null,
       })) : undefined;
-      const nativeSnapshot = profileEnabled && bridge.smokeEffectSnapshot
-        ? await bridge.smokeEffectSnapshot(entry.sessionId!) : undefined;
-      const nativeInstanceEvidence = profileEnabled
-        ? smokeNativeInstanceEvidence(nativeSnapshot, requestedParameters) : undefined;
       if (profileEnabled) recordMixerFxSmokeEvent({ event: 'native-effect-open', trackId, slotId: slot.id,
-        runtimeId: entry.runtimeId, classId: entry.effect.classId, parameterEvidence: controllerParameterEvidence,
-        nativeInstanceEvidence });
+        runtimeId: entry.runtimeId, helperSessionId: opened.id, classId: entry.effect.classId,
+        parameterEvidence: controllerParameterEvidence, nativeOpenEvidence: opened.smokeOpenEvidence ?? null });
       reportVst3MixerEffect(trackId, slot.id,
-        `VST3 ready. Fixed live block buffering: ${fixedLatencyMs.toFixed(1)} ms. Track branches are compensated at Mixer summing inputs; plugin-reported latency remains unsupported.${profileEnabled ? ` Smoke parameter state: ${JSON.stringify({ controller: controllerParameterEvidence, activeNativeInstance: nativeInstanceEvidence })}.` : ''}`,
+        `VST3 ready. Fixed live block buffering: ${fixedLatencyMs.toFixed(1)} ms. Track branches are compensated at Mixer summing inputs; plugin-reported latency remains unsupported.${profileEnabled ? ` Smoke controller parameters at open: ${JSON.stringify(controllerParameterEvidence)}.` : ''}`,
         fixedLatencyMs);
     });
     entry.ready.catch(() => {});

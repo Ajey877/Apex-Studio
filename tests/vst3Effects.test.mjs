@@ -117,23 +117,51 @@ test('effect order is audible: delay then resonant filter differs from filter th
   assert.ok(difference(delayThenAmbience, ambienceThenDelay) > 1e-4);
 });
 
-test('an active native effect instance can be snapshotted after real processing without opening a substitute instance', async () => {
+test('smoke-only native failure capture binds zero-output evidence to the exact helper instance and request', async () => {
   const service = new Vst3Service(executable, [root]);
-  const owner = 'active-effect-snapshot-test';
-  const parameters = [
-    { id: 0, value: 0.8 }, { id: 1, value: 0.25 }, { id: 3, value: 0.5 },
-    { id: 6, value: 0.5 }, { id: 8, value: 0 }, { id: 9, value: 1 },
-  ];
-  const opened = await service.open({ ...rezFilter, state: { schema: 1, classId: rezFilter.classId, parameters } },
-    sampleRate, 'realtime', owner, 'effect');
+  const owner = 'native-failure-evidence-test';
+  const profile = sequence => ({ requestId: `diagnostic-runtime:${sequence}`, trackId: 1, slotId: 'diagnostic-delay', sequence,
+    inputBlockStartContextFrame: sequence * 1024, submittedContextFrame: sequence * 1024 + 1024,
+    submittedOutputFrame: sequence * 1024 + 1024, dueOutputFrame: 2048 + sequence * 1024,
+    dueContextFrame: 2048 + sequence * 1024, sampleRate });
+  const silentDelay = { ...delay, state: { schema: 1, classId: delay.classId, parameters: [{ id: 4, value: 1 }] } };
+  const opened = await service.open(silentDelay, sampleRate, 'realtime', owner, 'effect', true);
   try {
-    const output = await service.processAudio(opened.id, 1024, makeAudio(1024), 120, owner);
-    assert.ok(rms(output) > 0, 'the active native session produces known-signal PCM');
-    const snapshot = await service.snapshotEffect(opened.id, owner);
-    assert.equal(snapshot.classId, rezFilter.classId);
-    const values = new Map(snapshot.parameters.map(parameter => [parameter.id, parameter.value]));
-    for (const parameter of parameters) assert.equal(values.get(parameter.id), parameter.value);
-    await assert.rejects(service.snapshotEffect(opened.id, 'different-owner'), /belongs to another renderer/);
+    assert.equal(opened.smokeOpenEvidence.helperSessionId, opened.id);
+    assert.equal(opened.smokeOpenEvidence.helperProcessId > 0, true);
+    assert.equal(opened.smokeOpenEvidence.pluginClassId, delay.classId);
+    assert.equal(opened.smokeOpenEvidence.stateSnapshot.captured, false);
+    assert.ok(opened.smokeOpenEvidence.stateApplication.lifecycleOrder.includes('processor.setProcessing(true)'));
+    const input = makeAudio(1024);
+    const output = await service.processAudio(opened.id, 1024, input, 120, owner, [], profile(0));
+    assert.equal(rms(output), 0, 'the genuine MDA Delay instance returns the selected silent output');
+    const firstProcessEvidence = service.takeSmokeProcessEvidence(opened.id, owner);
+    assert.ok(firstProcessEvidence);
+    assert.equal(firstProcessEvidence.helperSessionId, opened.id);
+    assert.equal(firstProcessEvidence.requestProfile.requestId, 'diagnostic-runtime:0');
+    assert.equal(firstProcessEvidence.processorCallResult, 'kResultOk');
+    assert.ok(firstProcessEvidence.stateApplication.firstProcess.queuedSavedOverrides.some(parameter => parameter.id === 4));
+    assert.equal(firstProcessEvidence.stateSnapshot.captured, false);
+    const evidence = service.takeSmokeFailureEvidence(opened.id, owner);
+    assert.ok(evidence);
+    assert.equal(evidence.helperSessionId, opened.id);
+    assert.equal(evidence.pluginClassId, delay.classId);
+    assert.equal(evidence.slotId, 'diagnostic-delay');
+    assert.equal(evidence.requestId, 'diagnostic-runtime:0');
+    assert.equal(evidence.sequence, 0);
+    assert.ok(evidence.input.leftRms > 0 && evidence.input.rightRms > 0 && evidence.input.monoSumRms > 0);
+    assert.equal(evidence.output.combinedRms, 0);
+    assert.equal(evidence.channels.output, 2);
+    assert.ok(evidence.parameters.controllerReadbacksAfterProcess.some(parameter => parameter.id === 4 && parameter.currentValue === 1));
+    assert.ok(evidence.parameters.savedPendingOverridesBeforeBlock.values.some(parameter => parameter.id === 4 && parameter.value === 1));
+    assert.ok(evidence.stateApplication.normalizedOverridesApplied.some(parameter => parameter.id === 4 && parameter.queuedForFirstProcess));
+    assert.ok(evidence.stateApplication.lifecycleOrder.indexOf('component.setActive(true)') < evidence.stateApplication.lifecycleOrder.indexOf('processor.setProcessing(true)'));
+    assert.equal(evidence.stateSnapshot.captured, false, 'failure capture does not suspend processing for a component snapshot');
+    assert.equal(Object.hasOwn(evidence, 'pcm'), false, 'evidence contains no unbounded PCM data');
+    assert.equal(Object.hasOwn(evidence, 'audio'), false, 'evidence contains no raw audio payload');
+    assert.ok(JSON.stringify(evidence).length < 12_000, 'evidence remains bounded');
+    await service.processAudio(opened.id, 1024, input, 120, owner, [], profile(1));
+    assert.equal(service.takeSmokeFailureEvidence(opened.id, owner), null, 'only the first silent block is recorded per native instance');
   } finally { await service.close(opened.id, owner); }
 });
 
