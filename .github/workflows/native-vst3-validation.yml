@@ -4,7 +4,7 @@ on:
   pull_request:
     branches: [main]
   push:
-    branches: [main]
+    branches: [main, arena/1862dfca-apex-studio]
 
 permissions:
   contents: read
