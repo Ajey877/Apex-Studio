@@ -68,6 +68,35 @@ describe('MixerRoutingAdapter', () => {
     assert.equal(adapter.getRoute(1), 0);
   });
 
+  it('inserts bounded route delay before the destination sum and removes it when latency closes', () => {
+    const { pairs } = createNodes();
+    const source = pairs.get(1)!.output as unknown as FakeAudioNode & { context: any };
+    const destination = new FakeAudioNode();
+    pairs.get(0)!.routingInput = destination as unknown as AudioNode;
+    const delays: Array<{ delayTime: { value: number }; connect(target: FakeAudioNode): void; disconnect(): void; target?: FakeAudioNode; disconnected?: boolean }> = [];
+    source.context = {
+      sampleRate: 48000,
+      createDelay: () => {
+        const node = {
+          delayTime: { value: 0 },
+          connect(target: FakeAudioNode) { this.target = target; },
+          disconnect() { this.disconnected = true; },
+        };
+        delays.push(node);
+        return node;
+      },
+    };
+    const adapter = new MixerRoutingAdapter(pairs);
+    adapter.syncRoutes([{ trackId: 1, targetId: 0 }], new Map([[1, 2048]]));
+    assert.equal(delays[0]!.delayTime.value, 2048 / 48000);
+    assert.equal(delays[0]!.target, destination);
+    assert.equal(source.connections[0], delays[0]);
+
+    adapter.syncRoutes([{ trackId: 1, targetId: 0 }], new Map([[1, 0]]));
+    assert.equal(delays[0]!.disconnected, true);
+    assert.equal(source.connections[0], destination);
+  });
+
   it('restores the previous route when an AudioNode connection fails', () => {
     const { pairs } = createNodes();
     const adapter = new MixerRoutingAdapter(pairs);

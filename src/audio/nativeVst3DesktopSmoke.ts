@@ -11,7 +11,14 @@ import { persistProjectState, restorePersistedProjectState, serializeProjectStat
 import type { Channel, FxSlot, MixerTrack, PlaylistClip } from '../types/daw';
 
 type MixerCaptureBlock = { frame: number; samples: Float32Array };
-type MixerCapture = { blocks: MixerCaptureBlock[]; node: AudioWorkletNode; sink: GainNode };
+type MixerCapture = { blocks: MixerCaptureBlock[]; node: AudioWorkletNode; sink: GainNode; source: AudioNode };
+type MixerCaptureOptions = {
+  durationMs?: number;
+  inputBuffers?: Map<number, AudioBuffer>;
+  includeMaster?: boolean;
+  bypassMixerAfterMs?: number;
+  bypassMixerTracks?: MixerTrack[];
+};
 type PlanarPcm = { left: Float32Array; right: Float32Array; frames: number; rms: number; startFrame: number | null };
 const captureModuleByContext = new WeakMap<BaseAudioContext, Promise<string>>();
 
@@ -51,8 +58,9 @@ async function attachMixerCapture(instance: typeof audioEngine, trackId: number)
   };
   const sink = context.createGain();
   sink.gain.value = 0;
-  mixer.analyser.connect(node); node.connect(sink); sink.connect(context.destination);
-  return { blocks, node, sink };
+  const captureSource = trackId === 0 ? mixer.analyser : instance.getMixerRoutingOutputNode(trackId) ?? mixer.analyser;
+  captureSource.connect(node); node.connect(sink); sink.connect(context.destination);
+  return { blocks, node, sink, source: captureSource };
 }
 
 function toPlanarPcm(blocks: MixerCaptureBlock[], startFrame = -Infinity, endFrame = Infinity): PlanarPcm {
@@ -313,22 +321,94 @@ function createDeterministicMixerInput(context: AudioContext): AudioBuffer {
   return buffer;
 }
 
-async function captureLiveMixerRun(instance: typeof audioEngine, channels: Channel[], mixer: MixerTrack[], durationMs = 1600) {
+function createKnownOnsetInput(context: AudioContext, amplitude: number): AudioBuffer {
+  const onsetFrame = 256;
+  const buffer = context.createBuffer(2, context.sampleRate * 4, context.sampleRate);
+  const left = buffer.getChannelData(0), right = buffer.getChannelData(1);
+  let state = amplitude < 0.06 ? 0x51ed270b : 0x2c1b3c6d;
+  for (let frame = onsetFrame; frame < left.length; frame++) {
+    state ^= state << 13; state ^= state >>> 17; state ^= state << 5;
+    const sample = ((state >>> 0) / 0x80000000 - 1) * amplitude;
+    left[frame] = sample; right[frame] = sample;
+  }
+  return buffer;
+}
+
+function createKnownOnsetBurstInput(context: AudioContext, amplitude: number): AudioBuffer {
+  const buffer = context.createBuffer(2, context.sampleRate * 2, context.sampleRate);
+  const left = buffer.getChannelData(0), right = buffer.getChannelData(1);
+  const burstStarts = [256, 24_000, 48_000];
+  for (let burst = 0; burst < burstStarts.length; burst++) {
+    let state = (amplitude < 0.06 ? 0x51ed270b : 0x2c1b3c6d) ^ Math.imul(burst + 1, 0x9e3779b1);
+    for (let frame = burstStarts[burst]!; frame < burstStarts[burst]! + 256; frame++) {
+      state ^= state << 13; state ^= state >>> 17; state ^= state << 5;
+      const sample = ((state >>> 0) / 0x80000000 - 1) * amplitude;
+      left[frame] = sample; right[frame] = sample;
+    }
+  }
+  return buffer;
+}
+
+function capturedOnsetInWindow(capture: MixerCapture, startFrame: number, endFrame: number, threshold = 1e-6): number | null {
+  for (const block of [...capture.blocks].sort((left, right) => left.frame - right.frame)) {
+    if (block.frame + VST3_FX_BLOCK_FRAMES <= startFrame || block.frame >= endFrame) continue;
+    for (let offset = 0; offset < VST3_FX_BLOCK_FRAMES; offset++) {
+      const frame = block.frame + offset;
+      if (frame < startFrame || frame >= endFrame) continue;
+      const left = block.samples[offset] ?? 0;
+      const right = block.samples[VST3_FX_BLOCK_FRAMES + offset] ?? 0;
+      if (Math.max(Math.abs(left), Math.abs(right)) >= threshold) return frame;
+    }
+  }
+  return null;
+}
+
+function firstCapturedOnsetFrame(capture: MixerCapture, startFrame: number, endFrame: number, threshold = 1e-6): number | null {
+  return capturedOnsetInWindow(capture, startFrame, endFrame, threshold);
+}
+
+function compareCapturedMasterToTrackSum(captures: Map<number, MixerCapture>, startFrame: number, endFrame: number) {
+  const blocksByTrack = new Map([...captures].map(([trackId, capture]) => [trackId,
+    new Map(capture.blocks.map(block => [block.frame, block.samples]))]));
+  const master = blocksByTrack.get(0), leftTrack = blocksByTrack.get(1), rightTrack = blocksByTrack.get(2);
+  if (!master || !leftTrack || !rightTrack) throw new Error('Packaged latency acceptance did not capture master and both source tracks');
+  let sumSquared = 0, count = 0;
+  for (const [frame, masterPcm] of master) {
+    if (frame < startFrame || frame + VST3_FX_BLOCK_FRAMES > endFrame) continue;
+    const pcmA = leftTrack.get(frame), pcmB = rightTrack.get(frame);
+    if (!pcmA || !pcmB) continue;
+    for (let sample = 0; sample < VST3_FX_BLOCK_FRAMES * 2; sample++) {
+      const delta = masterPcm[sample]! - pcmA[sample]! - pcmB[sample]!;
+      sumSquared += delta * delta; count++;
+    }
+  }
+  return { comparedSamples: count, rmsDifference: count ? Math.sqrt(sumSquared / count) : Infinity };
+}
+
+async function captureLiveMixerRun(instance: typeof audioEngine, channels: Channel[], mixer: MixerTrack[], options: MixerCaptureOptions = {}) {
   const context = instance.getContext() as AudioContext;
+  const durationMs = options.durationMs ?? 1600;
   await context.resume();
   const taps = new Map<number, MixerCapture>();
-  for (const trackId of [1, 2]) taps.set(trackId, await attachMixerCapture(instance, trackId));
   const smokeApi = (globalThis as any).desktopApp?.vst3;
   if (typeof smokeApi?.smokeTimingSnapshot !== 'function') throw new Error('Smoke-only production IPC timing snapshot is unavailable');
   const targetSource = context.createBufferSource();
-  targetSource.buffer = createDeterministicMixerInput(context);
+  targetSource.buffer = options.inputBuffers?.get(1) ?? createDeterministicMixerInput(context);
   const targetGain = context.createGain();
-  const controlSource = context.createOscillator();
+  const controlBuffer = options.inputBuffers?.get(2);
+  const controlSource: AudioBufferSourceNode | OscillatorNode = controlBuffer
+    ? context.createBufferSource() : context.createOscillator();
+  if (controlBuffer) (controlSource as AudioBufferSourceNode).buffer = controlBuffer;
+  else {
+    (controlSource as OscillatorNode).type = 'sine';
+    (controlSource as OscillatorNode).frequency.value = 750;
+  }
   const controlGain = context.createGain();
   targetGain.gain.value = 1;
-  controlSource.type = 'sine'; controlSource.frequency.value = 750; controlGain.gain.value = 0.1;
+  controlGain.gain.value = controlBuffer ? 1 : 0.1;
   await instance.play(channels, [], 'pat', undefined, mixer, 16);
   await context.resume();
+  for (const trackId of options.includeMaster ? [0, 1, 2] : [1, 2]) taps.set(trackId, await attachMixerCapture(instance, trackId));
   targetSource.connect(targetGain); targetGain.connect(instance.getOrCreateMixerChannel(1).input);
   controlSource.connect(controlGain); controlGain.connect(instance.getOrCreateMixerChannel(2).input);
   const sourceStartTime = context.currentTime + 0.05;
@@ -339,7 +419,15 @@ async function captureLiveMixerRun(instance: typeof audioEngine, channels: Chann
   await smokeApi.smokeTimingSnapshot(); // warm the authorized timing IPC before the measured window
   const startedAt = performance.now();
   const startedContextFrame = sourceStartContextFrame + Math.round(0.25 * context.sampleRate);
-  await new Promise(resolve => setTimeout(resolve, durationMs));
+  let bypassUpdateAppliedContextFrame: number | null = null;
+  const bypassUpdate = options.bypassMixerTracks && options.bypassMixerAfterMs !== undefined
+    ? new Promise<void>(resolve => setTimeout(() => {
+      instance.synchronizePlaybackState({ mixerTracks: options.bypassMixerTracks! });
+      bypassUpdateAppliedContextFrame = Math.round(context.currentTime * context.sampleRate);
+      resolve();
+    }, options.bypassMixerAfterMs))
+    : Promise.resolve();
+  await Promise.all([new Promise<void>(resolve => setTimeout(resolve, durationMs)), bypassUpdate]);
   const stoppedAt = performance.now();
   const stoppedContextFrame = Math.round(context.currentTime * context.sampleRate);
   const playbackActiveAtEnd = instance.isPlaybackActive();
@@ -365,7 +453,9 @@ async function captureLiveMixerRun(instance: typeof audioEngine, channels: Chann
       immediate: toPlanarPcm(capture.blocks, stoppedContextFrame, immediateEndContextFrame).rms,
       settled: toPlanarPcm(capture.blocks, settledStartContextFrame, settledEndContextFrame).rms,
     };
-    capture.node.port.close(); capture.node.disconnect(); capture.sink.disconnect();
+    capture.node.port.close();
+    try { capture.source.disconnect(capture.node); } catch { /* the source may already have been removed */ }
+    capture.node.disconnect(); capture.sink.disconnect();
   }
   const ipcAfter = await smokeApi.smokeTimingSnapshot();
   const runtimeEvents = getNativeVst3MixerEffectSmokeTiming().slice(runtimeStart);
@@ -374,7 +464,8 @@ async function captureLiveMixerRun(instance: typeof audioEngine, channels: Chann
   const sampleRate = context.sampleRate;
   const timing = summarizeMixerTiming(runtimeEvents, ipc, sampleRate, duration, startedAt, stoppedAt, stopRequestedAtRendererMs);
   return { pcm, tailRms, sampleRate, durationMs: duration, captureStartRendererMs: startedAt,
-    captureEndRendererMs: stoppedAt, startedContextFrame, stoppedContextFrame, playbackActiveAtEnd,
+    captureEndRendererMs: stoppedAt, startedContextFrame, stoppedContextFrame, sourceStartContextFrame,
+    bypassUpdateAppliedContextFrame, playbackActiveAtEnd, captures: taps,
     trackRms: Object.fromEntries([...pcm].map(([trackId, audio]) => [trackId, audio.rms])),
     diagnostics: getVst3MixerEffectDiagnostics(), timing, runtimeEvents, ipc };
 }
@@ -416,6 +507,7 @@ async function runPackagedMixerAcceptance(instance: typeof audioEngine) {
   resetNativeVst3MixerEffectSmokeTiming();
   const bridge = getVst3Bridge();
   if (!bridge) throw new Error('Packaged production VST3 preload bridge missing for Mixer acceptance');
+  const context = instance.getContext() as AudioContext;
   const discovered = await bridge.discoverEffects();
   const delayIdentity = discovered.plugins.find(plugin => plugin.name === 'mda Delay');
   const filterIdentity = discovered.plugins.find(plugin => plugin.name === 'mda RezFilter');
@@ -441,8 +533,8 @@ async function runPackagedMixerAcceptance(instance: typeof audioEngine) {
   const reversed = withSlots([makeSlot('smoke-rezfilter', rezFilter), makeSlot('smoke-delay', delay)]);
   const delayOnly = withSlots([makeSlot('smoke-delay', delay)]);
   const delayBypassed = withSlots([makeSlot('smoke-delay-bypass', bypassDelay)]);
-  const run = async (mixer: MixerTrack[], label: string) => {
-    const result = await captureLiveMixerRun(instance, channels, mixer);
+  const run = async (mixer: MixerTrack[], label: string, options: MixerCaptureOptions = {}) => {
+    const result = await captureLiveMixerRun(instance, channels, mixer, options);
     if (mixer.some(track => track.fxSlots.some(slot => slot.enabled && slot.type === 'vst3'))) assertPackagedMixerRun(result, label);
     else {
       if (!result.playbackActiveAtEnd || result.timing.nativeServiceSessionCountAfterCleanup !== 0 ||
@@ -458,6 +550,70 @@ async function runPackagedMixerAcceptance(instance: typeof audioEngine) {
   const delayProcessed = await run(delayOnly, 'Mixer processed Delay');
   const delayPassThrough = await run(delayBypassed, 'Mixer native Delay Fb Mix=0 bypass');
   const removed = await run(noEffects, 'Mixer effect removal/restart');
+
+  // Known-onset stereo buffers exercise the real per-track → routed master
+  // path. The no-insert, one-insert, and two-insert cases have the same source
+  // onset on tracks 1 and 2; the per-track taps and master tap are read at their
+  // actual AudioWorklet frame stamps, with no comparison-side offset.
+  const onsetInputs = () => new Map([[1, createKnownOnsetInput(context, 0.08)], [2, createKnownOnsetInput(context, 0.035)]]);
+  const oneNativeInsert = withSlots([makeSlot('latency-one-delay', bypassDelay)]);
+  const twoNativeInserts = withSlots([makeSlot('latency-two-delay', bypassDelay), makeSlot('latency-two-filter', rezFilter)]);
+  const alignmentOptions = (): MixerCaptureOptions => ({ durationMs: 1050, inputBuffers: onsetInputs(), includeMaster: true });
+  const zeroInsertAlignment = await run(noEffects, 'Mixer onset alignment zero inserts', alignmentOptions());
+  const oneInsertAlignment = await run(oneNativeInsert, 'Mixer onset alignment one insert', alignmentOptions());
+  const twoInsertAlignment = await run(twoNativeInserts, 'Mixer onset alignment two inserts', alignmentOptions());
+  const onsetFramesFor = (result: any) => Object.fromEntries([0, 1, 2].map(trackId => [trackId,
+    firstCapturedOnsetFrame(result.captures.get(trackId), result.sourceStartContextFrame,
+      result.sourceStartContextFrame + result.sampleRate)]));
+  const alignmentRows = [
+    { label: 'zero-insert', result: zeroInsertAlignment, expectedPipelineFrames: 0 },
+    { label: 'one-insert', result: oneInsertAlignment, expectedPipelineFrames: VST3_FX_PIPELINE_FRAMES },
+    { label: 'two-insert', result: twoInsertAlignment, expectedPipelineFrames: VST3_FX_PIPELINE_FRAMES * 2 },
+  ].map(({ label, result, expectedPipelineFrames }) => {
+    const onsets = onsetFramesFor(result);
+    const expectedRelativeOnsetFrame = 256 + expectedPipelineFrames;
+    const actualRelativeOnsets = [1, 2].map(trackId => onsets[String(trackId)] === null ? null :
+      Number(onsets[String(trackId)]) - result.sourceStartContextFrame);
+    const masterRelativeOnset = onsets['0'] === null ? null : Number(onsets['0']) - result.sourceStartContextFrame;
+    const masterSum = compareCapturedMasterToTrackSum(result.captures, result.sourceStartContextFrame + expectedRelativeOnsetFrame,
+      result.sourceStartContextFrame + expectedRelativeOnsetFrame + VST3_FX_BLOCK_FRAMES * 8);
+    if (actualRelativeOnsets.some(frame => frame !== expectedRelativeOnsetFrame) || masterRelativeOnset !== expectedRelativeOnsetFrame ||
+        masterSum.comparedSamples < VST3_FX_BLOCK_FRAMES * 2 || masterSum.rmsDifference > 1e-5) {
+      throw new Error(`Production Mixer ${label} alignment failed: expected all three measured taps at source+${expectedRelativeOnsetFrame} frames and master=sum(track1,track2): ${JSON.stringify({ onsets, sourceStartContextFrame: result.sourceStartContextFrame, expectedRelativeOnsetFrame, actualRelativeOnsets, masterRelativeOnset, masterSum })}`);
+    }
+    return { label, expectedPipelineFrames, sourceStartContextFrame: result.sourceStartContextFrame,
+      expectedRelativeOnsetFrame, onsetContextFrames: onsets, relativeOnsetFrames: {
+        track1: actualRelativeOnsets[0], track2: actualRelativeOnsets[1], master: masterRelativeOnset,
+      }, masterSumPcmDifferenceRms: masterSum.rmsDifference, masterSumComparedSamples: masterSum.comparedSamples };
+  });
+  const bypassedOneNativeInsert = oneNativeInsert.map(track => track.id === 1
+    ? { ...track, fxSlots: track.fxSlots.map(slot => ({ ...slot, enabled: false })) } : track);
+  const dynamicBypass = await run(oneNativeInsert, 'Mixer live slot bypass retains its prepared pipeline', {
+    durationMs: 1150,
+    inputBuffers: new Map([[1, createKnownOnsetBurstInput(context, 0.08)], [2, createKnownOnsetBurstInput(context, 0.035)]]),
+    includeMaster: true, bypassMixerAfterMs: 80, bypassMixerTracks: bypassedOneNativeInsert,
+  });
+  if (dynamicBypass.bypassUpdateAppliedContextFrame === null) {
+    throw new Error('Packaged live Mixer bypass mutation was not applied during the prepared native pipeline.');
+  }
+  const bypassBurstRows = [256, 24_000, 48_000].map(inputFrame => {
+    const expected = dynamicBypass.sourceStartContextFrame + inputFrame + VST3_FX_PIPELINE_FRAMES;
+    const onsets = Object.fromEntries([0, 1, 2].map(trackId => [trackId, capturedOnsetInWindow(
+      dynamicBypass.captures.get(trackId), expected - 32, expected + VST3_FX_BLOCK_FRAMES)]));
+    const masterSum = compareCapturedMasterToTrackSum(dynamicBypass.captures, expected,
+      expected + VST3_FX_BLOCK_FRAMES * 2);
+    if (Object.values(onsets).some(frame => frame !== expected) || masterSum.rmsDifference > 1e-5) {
+      throw new Error(`Dynamic live bypass changed the prepared pipeline alignment at input frame ${inputFrame}: ${JSON.stringify({ inputFrame, expected, onsets, bypassUpdateAppliedContextFrame: dynamicBypass.bypassUpdateAppliedContextFrame, masterSum })}`);
+    }
+    return { inputFrame, expectedContextFrame: expected, measuredOnsetContextFrames: onsets,
+      masterSumPcmDifferenceRms: masterSum.rmsDifference, masterSumComparedSamples: masterSum.comparedSamples };
+  });
+  const firstBypassBurstFrame = dynamicBypass.sourceStartContextFrame + 256 + VST3_FX_PIPELINE_FRAMES;
+  const secondBypassBurstFrame = dynamicBypass.sourceStartContextFrame + 24_000 + VST3_FX_PIPELINE_FRAMES;
+  if (!(dynamicBypass.bypassUpdateAppliedContextFrame > firstBypassBurstFrame &&
+        dynamicBypass.bypassUpdateAppliedContextFrame < secondBypassBurstFrame)) {
+    throw new Error(`Dynamic bypass did not occur between the two deterministic source bursts: ${JSON.stringify({ applied: dynamicBypass.bypassUpdateAppliedContextFrame, firstBypassBurstFrame, secondBypassBurstFrame })}`);
+  }
   const acceptanceTimingEvidence = JSON.stringify(Object.fromEntries(Object.entries({ orderA, orderB, delayProcessed, delayPassThrough, removed })
     .map(([label, result]) => [label, { timing: result.timing, timingSamples: correlatedTimingSamples(result).slice(0, 16) }])));
   let orderDifference: ReturnType<typeof compareMixerRuns>, controlDifference: ReturnType<typeof compareMixerRuns>;
@@ -496,7 +652,8 @@ async function runPackagedMixerAcceptance(instance: typeof audioEngine) {
     pipelineFramesPerEffect: VST3_FX_PIPELINE_FRAMES,
     pipelineMsPerEffect: VST3_FX_PIPELINE_FRAMES * 1000 / orderA.sampleRate,
     deadlineReference: '1024 frames = 21.33 ms at 48 kHz; existing two-block Mixer pipeline = 2048 frames = 42.67 ms per effect; no delay increase was made.',
-    latencyCompensation: 'Not provided. Tracks with different counts of native Mixer inserts are not sample-aligned; each insert contributes the declared fixed 2048-frame live pipeline.',
+    latencyCompensation: 'Before each Mixer bus FX chain, direct producers and every routed/aux child branch are delayed to the slowest incoming fixed native-bridge path. Each prepared native insert contributes exactly 2048 frames; bypass retains that budget while its prepared worklet remains in the chain. Plugin-reported nonzero latency remains unsupported. Offline rendering sets this live-only compensation budget to zero and processes effects on project frames.',
+    latencyAlignmentRegression: alignmentRows,
     priorPlaywrightBridgeReference: { approximatelyMs: 28, measurement: 'test-only page.exposeFunction bridge; separate from this production IPC/preload/helper measurement' },
     orderDifferenceRms: orderDifference.rmsDifference, orderOffsetFrames: orderDifference.normalizedLagFrames,
     controlTrackRmsDifference: controlRmsDifference, controlTrackPcmDifferenceRms: controlDifference.rmsDifference,
@@ -514,7 +671,7 @@ async function runPackagedMixerAcceptance(instance: typeof audioEngine) {
     timingSamples: { orderA: correlatedTimingSamples(orderA), orderB: correlatedTimingSamples(orderB),
       delayProcessed: correlatedTimingSamples(delayProcessed), delayBypassed: correlatedTimingSamples(delayPassThrough),
       cleanupAfterRemoval: correlatedTimingSamples(removed) },
-    proof: 'Packaged Electron production AudioWorklet → authorized main IPC → native VST3 helper → production preload → worklet PCM, captured from production Mixer analysers. Smoke-only deterministic broadband stereo target input isolates insert latency from mono pan law; a phase-reset 750 Hz control input checks track isolation. Run-relative alignment uses captured AudioContext frames with the declared 2048-frame one-insert offset tested directly; no exposeFunction processing bridge.'
+    proof: 'Packaged Electron production AudioWorklet → authorized main IPC → native VST3 helper → production preload → worklet PCM, captured from per-track and master production Mixer analysers. Deterministic broadband stereo target input preserves the mono-pan-law regression fix. A separate non-periodic known-onset stereo stimulus verifies zero/one/two-insert alignment from actual captured frame positions, with no assertion-side offsets; the master PCM is checked against the exact-frame sum of both track taps. A phase-reset control signal still checks isolation; no exposeFunction processing bridge.'
   };
 }
 

@@ -2,6 +2,8 @@ import { MixerRoute, MixerRouteValidation, MixerRoutingGraph } from './mixerRout
 
 export interface MixerAudioNodePair {
   input: AudioNode;
+  /** Optional summing input used by routed mixer buses; direct sources retain `input`. */
+  routingInput?: AudioNode;
   output: AudioNode;
   /**
    * Phase 64 — optional leaf that must stay fed by `output`.
@@ -38,6 +40,8 @@ export class MixerRoutingAdapter {
   private readonly nodes: Map<number, MixerAudioNodePair>;
   private readonly masterTrackId: number;
   private appliedRoutes: MixerRoute[] = [];
+  private routeDelayFrames = new Map<number, number>();
+  private routeDelayNodes = new Map<number, DelayNode>();
 
   constructor(nodes: Map<number, MixerAudioNodePair>, masterTrackId = 0) {
     if (!nodes.has(masterTrackId)) {
@@ -68,7 +72,7 @@ export class MixerRoutingAdapter {
     }
   }
 
-  syncRoutes(routes: MixerRoute[]): MixerRouteValidation {
+  syncRoutes(routes: MixerRoute[], routeDelayFrames?: ReadonlyMap<number, number>): MixerRouteValidation {
     const nextGraph = new MixerRoutingGraph(this.masterTrackId);
     for (const route of routes) {
       if (route.trackId === this.masterTrackId) continue;
@@ -79,15 +83,29 @@ export class MixerRoutingAdapter {
       if (!validation.valid) return validation;
     }
 
+    const nextRoutes = nextGraph.getRoutes();
+    const currentRoutes = this.graph.getRoutes();
+    const routesUnchanged = nextRoutes.length === currentRoutes.length && nextRoutes.every((route, index) =>
+      route.trackId === currentRoutes[index]?.trackId && route.targetId === currentRoutes[index]?.targetId);
+    const delaysUnchanged = routeDelayFrames === undefined || [...new Set([...this.routeDelayFrames.keys(), ...routeDelayFrames.keys()])]
+      .every(trackId => (this.routeDelayFrames.get(trackId) ?? 0) === (routeDelayFrames.get(trackId) ?? 0));
+    if (routesUnchanged && delaysUnchanged) {
+      this.graph = nextGraph;
+      return { valid: true };
+    }
+
     const previousGraph = this.graph;
     const previousAppliedRoutes = this.appliedRoutes.map(route => ({ ...route }));
+    const previousDelayFrames = this.routeDelayFrames;
     this.graph = nextGraph;
+    if (routeDelayFrames) this.routeDelayFrames = new Map(routeDelayFrames);
     try {
       this.rebuildLiveGraph();
       return { valid: true };
     } catch (error) {
       this.graph = previousGraph;
       this.appliedRoutes = previousAppliedRoutes;
+      this.routeDelayFrames = previousDelayFrames;
       this.rebuildLiveGraph();
       throw error;
     }
@@ -117,11 +135,16 @@ export class MixerRoutingAdapter {
     return this.graph.getRoute(trackId);
   }
 
+  /** The actual branch signal after its current inter-track compensation node. */
+  getRouteOutputNode(trackId: number): AudioNode | undefined {
+    return this.routeDelayNodes.get(trackId) ?? this.nodes.get(trackId)?.output;
+  }
+
   private rebuildLiveGraph(): void {
     const routes = this.graph.getRoutes();
-    const previousRoutes = this.appliedRoutes.map(route => ({ ...route }));
 
     this.disconnectOutputs();
+    this.disconnectRouteDelayNodes();
     this.restoreMeterTaps();
 
     try {
@@ -132,20 +155,33 @@ export class MixerRoutingAdapter {
         if (!source || !target) {
           throw new Error(`Mixer route ${route.trackId} -> ${route.targetId} references an unregistered track.`);
         }
-        source.output.connect(target.input);
+        const frames = this.routeDelayFrames.get(route.trackId) ?? 0;
+        const destination = target.routingInput ?? target.input;
+        if (frames <= 0) {
+          source.output.connect(destination);
+          continue;
+        }
+        const context = source.output.context;
+        const delay = context.createDelay(10);
+        delay.delayTime.value = frames / context.sampleRate;
+        source.output.connect(delay);
+        delay.connect(destination);
+        this.routeDelayNodes.set(route.trackId, delay);
       }
       this.appliedRoutes = routes.map(route => ({ ...route }));
     } catch (error) {
       this.disconnectOutputs();
+      this.disconnectRouteDelayNodes();
       this.restoreMeterTaps();
-      for (const route of previousRoutes) {
-        if (route.trackId === this.masterTrackId) continue;
-        const source = this.nodes.get(route.trackId);
-        const target = this.nodes.get(route.targetId);
-        if (source && target) source.output.connect(target.input);
-      }
       throw error;
     }
+  }
+
+  private disconnectRouteDelayNodes(): void {
+    for (const node of this.routeDelayNodes.values()) {
+      try { node.disconnect(); } catch { /* already detached or closed */ }
+    }
+    this.routeDelayNodes.clear();
   }
 
   /** Clears every edge out of a non-master channel output, ready for re-routing. */

@@ -50,7 +50,8 @@ import { ChorusEffect } from './effects/ChorusEffect';
 import { WetDryEffect } from './effects/WetDryEffect';
 import { assertVst3Effect, getVst3Bridge, type Vst3Effect, type Vst3Instrument, type Vst3ParameterChange } from './nativeVst3Types';
 import { NativeVst3Runtime, NativeVst3OfflineRender, reportVst3, reconcileVst3Diagnostics } from './nativeVst3Runtime';
-import { NativeVst3EffectRuntime, reportVst3MixerEffect } from './nativeVst3EffectRuntime';
+import { NativeVst3EffectRuntime, reportVst3MixerEffect, VST3_FX_PIPELINE_FRAMES } from './nativeVst3EffectRuntime';
+import { computeMixerLatencyCompensation, type MixerLatencyEdge } from './mixerLatencyCompensation';
 import { createInstrumentRegistry, InstrumentRegistry, InstrumentVoiceHandle } from './instrumentRegistry';
 import { MixerRoutingAdapter } from './mixerRoutingAdapter';
 import { buildDryStemMixerTracks, buildWetStemMixerTracks, getDirectAuxSendSourceIds, getUpstreamMixerTrackIds } from './auxStemRouting';
@@ -266,7 +267,14 @@ export interface PlaybackStateUpdate {
 }
 
 export interface MixerChannel {
+  /** Direct producer input; all instruments, clips, and source panners connect here. */
   input: GainNode;
+  /** Summing point for the compensated direct path and routed child tracks. */
+  mixInput: GainNode;
+  /** Per-channel compensation on direct producers before the local FX chain. */
+  directCompensation?: DelayNode;
+  /** Target used by the MixerRoutingAdapter for routed child buses. */
+  routingInput: AudioNode;
   output: GainNode;
   duckingGain: GainNode;
   panner: StereoPannerNode | GainNode;
@@ -286,6 +294,8 @@ export interface MixerChannel {
    * after a bus rebuild without leaking. The map key is the target track id.
    */
   auxSendGains?: Map<number, GainNode>;
+  /** Per-send delay nodes align post-fader aux paths at their destination bus. */
+  auxSendDelays?: Map<number, DelayNode>;
   /**
    * Phase 9A — leaf taps that must survive a routing rebuild, in addition to
    * `meterTap`. `MixerRoutingAdapter` clears every edge out of `output` when it
@@ -1202,6 +1212,7 @@ class AudioEngine {
     }
 
     const input = ctx.createGain();
+    const mixInput = ctx.createGain();
     const output = ctx.createGain();
     const duckingGain = ctx.createGain();
     const panner: StereoPannerNode | GainNode = ctx.createStereoPanner ? ctx.createStereoPanner() : ctx.createGain();
@@ -1209,8 +1220,13 @@ class AudioEngine {
     analyser.fftSize = 256;
     analyser.smoothingTimeConstant = 0.7;
 
-    // Connect input -> panner -> duckingGain -> output -> analyser
-    input.connect(panner);
+    // Direct producers pass through a per-track delay before joining routed
+    // child buses. This lets the graph align every input to a summing bus before
+    // the track's own FX chain is applied.
+    input.connect(mixInput);
+
+    // Connect the FX-chain tail -> panner -> duckingGain -> output -> analyser
+    mixInput.connect(panner);
     panner.connect(duckingGain);
     duckingGain.connect(output);
     output.connect(analyser);
@@ -1221,11 +1237,13 @@ class AudioEngine {
     } else {
       // Insert tracks route to master channel input (track 0)
       const masterChannel = this.getOrCreateMixerChannel(0);
-      output.connect(masterChannel.input);
+      output.connect(masterChannel.routingInput);
     }
 
     const channelObj: MixerChannel = {
       input,
+      mixInput,
+      routingInput: mixInput,
       output,
       duckingGain,
       panner,
@@ -1243,6 +1261,11 @@ class AudioEngine {
     return this.mixerChannels.has(trackId);
   }
 
+  /** Capturable live branch after its edge-level latency compensation. */
+  public getMixerRoutingOutputNode(trackId: number): AudioNode | undefined {
+    return this.mixerRoutingAdapter?.getRouteOutputNode(trackId) ?? this.mixerChannels.get(trackId)?.output;
+  }
+
   public removeMixerChannel(trackId: number): void {
     if (this.shouldBlockLiveMutation()) return;
     if (trackId === 0) return; // Master track must never be disconnected or removed
@@ -1250,9 +1273,9 @@ class AudioEngine {
     const channel = this.mixerChannels.get(trackId);
     if (!channel) return;
 
-    try {
-      channel.input.disconnect();
-    } catch (_) {}
+    try { channel.input.disconnect(); } catch (_) {}
+    try { channel.mixInput.disconnect(); } catch (_) {}
+    try { channel.directCompensation?.disconnect(); } catch (_) {}
 
     channel.fxNodes.forEach(node => {
       try {
@@ -1279,10 +1302,12 @@ class AudioEngine {
 
     // Phase 88: disconnect aux send gains owned by this source
     if (channel.auxSendGains) {
-      for (const gain of channel.auxSendGains.values()) {
-        try { gain.disconnect(); } catch (_) {}
-      }
+      for (const gain of channel.auxSendGains.values()) { try { gain.disconnect(); } catch (_) {} }
       channel.auxSendGains.clear();
+    }
+    if (channel.auxSendDelays) {
+      for (const delay of channel.auxSendDelays.values()) { try { delay.disconnect(); } catch (_) {} }
+      channel.auxSendDelays.clear();
     }
 
     // Phase 88: remove incoming aux sends from other tracks that targeted the deleted track
@@ -1291,6 +1316,8 @@ class AudioEngine {
       const gain = otherChannel.auxSendGains.get(trackId)!;
       try { otherChannel.output.disconnect(gain as unknown as AudioNode); } catch (_) {}
       try { gain.disconnect(); } catch (_) {}
+      try { otherChannel.auxSendDelays?.get(trackId)?.disconnect(); } catch (_) {}
+      otherChannel.auxSendDelays?.delete(trackId);
       otherChannel.auxSendGains.delete(trackId);
     }
 
@@ -1564,22 +1591,141 @@ class AudioEngine {
     return this.mixerRoutingAdapter;
   }
 
+  private setMixerDelayFrames(node: DelayNode | undefined, frames: number): void {
+    if (!node) {
+      if (frames > 0) throw new Error('This AudioContext cannot apply required Mixer latency compensation.');
+      return;
+    }
+    if (!this.ctx) return;
+    const seconds = Math.max(0, frames) / this.ctx.sampleRate;
+    if (Math.abs(node.delayTime.value - seconds) < 1e-12) return;
+    const now = this.ctx.currentTime;
+    try {
+      node.delayTime.cancelScheduledValues(now);
+      node.delayTime.setValueAtTime(seconds, now);
+    } catch {
+      node.delayTime.value = seconds;
+    }
+  }
+
+  private syncDirectMixerCompensation(channel: MixerChannel, frames: number): void {
+    const existing = channel.directCompensation;
+    if (frames <= 0) {
+      if (!existing) return;
+      try { channel.input.disconnect(); } catch (_) {}
+      try { existing.disconnect(); } catch (_) {}
+      channel.directCompensation = undefined;
+      channel.input.connect(channel.mixInput);
+      return;
+    }
+    if (!this.ctx) return;
+    let delay = existing;
+    if (!delay) {
+      if (typeof this.ctx.createDelay !== 'function') throw new Error('This AudioContext cannot apply required Mixer latency compensation.');
+      delay = this.ctx.createDelay(10);
+      if (!delay.delayTime) throw new Error('This AudioContext returned an invalid Mixer compensation delay node.');
+      try { channel.input.disconnect(); } catch (_) {}
+      channel.input.connect(delay);
+      delay.connect(channel.mixInput);
+      channel.directCompensation = delay;
+    }
+    this.setMixerDelayFrames(delay, frames);
+  }
+
+  private syncAuxSendCompensation(source: MixerChannel, target: MixerChannel, targetId: number, frames: number): void {
+    const gain = source.auxSendGains?.get(targetId);
+    if (!gain) return;
+    const existing = source.auxSendDelays?.get(targetId);
+    if (frames <= 0) {
+      if (!existing) return;
+      try { gain.disconnect(existing); } catch (_) {}
+      try { existing.disconnect(); } catch (_) {}
+      source.auxSendDelays?.delete(targetId);
+      gain.connect(target.routingInput);
+      return;
+    }
+    if (!this.ctx) return;
+    let delay = existing;
+    if (!delay) {
+      if (typeof this.ctx.createDelay !== 'function') throw new Error('This AudioContext cannot apply required aux-send latency compensation.');
+      delay = this.ctx.createDelay(10);
+      if (!delay.delayTime) throw new Error('This AudioContext returned an invalid aux-send compensation delay node.');
+      try { gain.disconnect(target.routingInput); } catch (_) {}
+      gain.connect(delay);
+      delay.connect(target.routingInput);
+      this.ensureAuxSendDelaysMap(source).set(targetId, delay);
+    }
+    this.setMixerDelayFrames(delay, frames);
+  }
+
+  /**
+   * Computes the fixed live-bridge latency through the actual mixer DAG. Each
+   * direct source and routed child is delayed at the channel's summing input to
+   * the slowest incoming path, before that channel's native inserts. Offline
+   * rendering deliberately uses a zero bridge budget: native effects are
+   * rendered on the project timeline by the offline helper pass instead.
+   */
+  private applyMixerLatencyCompensation(tracks: readonly MixerTrack[], routes: readonly { trackId: number; targetId: number }[]) {
+    const channelIds = [...this.mixerChannels.keys()];
+    const trackById = new Map(tracks.map(track => [track.id, track]));
+    const knownIds = new Set([...channelIds, ...tracks.map(track => track.id), ...routes.flatMap(route => [route.trackId, route.targetId])]);
+    const edges: MixerLatencyEdge[] = routes.map(route => ({
+      id: `route:${route.trackId}`, sourceTrackId: route.trackId, targetTrackId: route.targetId,
+    }));
+    const auxSendsAreAcyclic = this.validateAuxSendsNoCycle([...tracks]) === null;
+    if (auxSendsAreAcyclic) {
+      for (const track of tracks) for (const send of track.auxSends ?? []) {
+        if (track.id === 0 || send.targetId === 0 || !Number.isInteger(send.targetId) || send.targetId === track.id ||
+            !knownIds.has(track.id) || !knownIds.has(send.targetId)) continue;
+        edges.push({ id: `aux:${track.id}:${send.targetId}`, sourceTrackId: track.id, targetTrackId: send.targetId });
+      }
+    }
+    const context = this.ctx;
+    const compensation = computeMixerLatencyCompensation(knownIds, edges, trackId => {
+      if (this.isOfflineRendering || !context) return 0;
+      const track = trackById.get(trackId);
+      if (!track) return 0;
+      return track.fxSlots.reduce((frames, slot) => frames + (slot.type === 'vst3' &&
+        this.nativeMixerEffects.nodeFor(trackId, slot.id, context, slot.vst3Effect)
+        ? VST3_FX_PIPELINE_FRAMES : 0), 0);
+    });
+
+    for (const [trackId, channel] of this.mixerChannels) {
+      this.syncDirectMixerCompensation(channel, compensation.directInputDelayFrames.get(trackId) ?? 0);
+    }
+    for (const track of tracks) {
+      const source = this.mixerChannels.get(track.id);
+      if (!source) continue;
+      for (const send of track.auxSends ?? []) {
+        const target = this.mixerChannels.get(send.targetId);
+        if (!target) continue;
+        this.syncAuxSendCompensation(source, target, send.targetId,
+          compensation.routeDelayFrames.get(`aux:${track.id}:${send.targetId}`) ?? 0);
+      }
+    }
+    return new Map(routes.map(route => [route.trackId,
+      compensation.routeDelayFrames.get(`route:${route.trackId}`) ?? 0]));
+  }
+
   private applyMixerTrackRouting(track: MixerTrack): void {
     if (track.id === 0) return;
     const adapter = this.ensureMixerRoutingAdapter();
     const existingRoutes = new Map(
       adapter
         .getRoutes()
-        .filter(route => this.mixerChannels.has(route.trackId))
+        .filter(route => route.trackId !== 0 && this.mixerChannels.has(route.trackId))
         .map(route => [route.trackId, route.targetId]),
     );
     for (const trackId of this.mixerChannels.keys()) {
       if (trackId !== 0 && !existingRoutes.has(trackId)) existingRoutes.set(trackId, 0);
     }
     existingRoutes.set(track.id, track.routingTargetId ?? 0);
-    const result = adapter.syncRoutes(
-      [...existingRoutes.entries()].map(([trackId, targetId]) => ({ trackId, targetId })),
-    );
+    const routes = [...existingRoutes.entries()].map(([trackId, targetId]) => ({ trackId, targetId }));
+    const knownTracks = new Map((this.activeMixerTracks.length ? this.activeMixerTracks : this.playbackProjectMixerTracks)
+      .map(item => [item.id, item]));
+    knownTracks.set(track.id, track);
+    const routeDelayFrames = this.applyMixerLatencyCompensation([...knownTracks.values()], routes);
+    const result = adapter.syncRoutes(routes, routeDelayFrames);
     if (!result.valid) {
       console.error('[AudioEngine] Mixer routing update rejected', {
         trackId: track.id,
@@ -1590,6 +1736,7 @@ class AudioEngine {
       // Phase 88: bus rebuild cleared aux taps; restore them and sync this track's sends
       this.restoreAuxSendConnections();
       this.syncAuxSendsForTrack(track);
+      this.applyMixerLatencyCompensation([...knownTracks.values()], routes);
     }
   }
 
@@ -1602,12 +1749,15 @@ class AudioEngine {
     const routes = tracks
       .filter(track => track.id !== 0)
       .map(track => ({ trackId: track.id, targetId: track.routingTargetId ?? 0 }));
-    const result = adapter.syncRoutes(routes);
+    const routeDelayFrames = this.applyMixerLatencyCompensation(tracks, routes);
+    const result = adapter.syncRoutes(routes, routeDelayFrames);
     if (!result.valid) throw new Error(result.reason ?? 'Invalid mixer routing.');
     // Phase 88: bus rebuild cleared output edges including aux taps; restore them
     this.restoreAuxSendConnections();
     // Phase 88: sync all aux sends after bus topology is stable
     this.syncAllAuxSends(tracks);
+    // Newly created send delay nodes now receive their computed arrival budget.
+    this.applyMixerLatencyCompensation(tracks, routes);
     // Phase 9A: routing changes can add/remove a feedback cycle and can clear
     // the detector's tap edge, so re-evaluate every detector.
     this.requestSidechainDetectorSync();
@@ -1622,6 +1772,11 @@ class AudioEngine {
   private ensureAuxSendGainsMap(channel: MixerChannel): Map<number, GainNode> {
     if (!channel.auxSendGains) channel.auxSendGains = new Map<number, GainNode>();
     return channel.auxSendGains;
+  }
+
+  private ensureAuxSendDelaysMap(channel: MixerChannel): Map<number, DelayNode> {
+    if (!channel.auxSendDelays) channel.auxSendDelays = new Map<number, DelayNode>();
+    return channel.auxSendDelays;
   }
 
   /**
@@ -1684,6 +1839,10 @@ class AudioEngine {
         for (const g of ch.auxSendGains.values()) { try { g.disconnect(); } catch (_) {} }
         ch.auxSendGains.clear();
       }
+      if (ch?.auxSendDelays) {
+        for (const delay of ch.auxSendDelays.values()) { try { delay.disconnect(); } catch (_) {} }
+        ch.auxSendDelays.clear();
+      }
       return;
     }
     // Validate no cycle if allTracks provided
@@ -1704,6 +1863,8 @@ class AudioEngine {
       if (!desiredIds.has(targetId)) {
         try { channel.output.disconnect(gain as unknown as AudioNode); } catch (_) {}
         try { gain.disconnect(); } catch (_) {}
+        try { channel.auxSendDelays?.get(targetId)?.disconnect(); } catch (_) {}
+        channel.auxSendDelays?.delete(targetId);
         map.delete(targetId);
       }
     }
@@ -1728,20 +1889,14 @@ class AudioEngine {
         gain = this.ctx.createGain();
         gain.gain.value = clamped;
         map.set(send.targetId, gain);
-        try { channel.output.connect(gain); } catch (_) {}
-        try { gain.connect(targetCh.input); } catch (_) {}
+        try { gain.connect(targetCh.routingInput); } catch (_) {}
       } else {
-        // Update amount
+        // Update amount without rebuilding the route's compensation node.
         const now = this.ctx.currentTime;
-        if (typeof gain.gain.setTargetAtTime === 'function') {
-          gain.gain.setTargetAtTime(clamped, now, 0.02);
-        } else {
-          gain.gain.value = clamped;
-        }
-        // Ensure connections exist (in case bus rebuild cleared output edge)
-        try { channel.output.connect(gain); } catch (_) {}
-        try { gain.connect(targetCh.input); } catch (_) {}
+        if (typeof gain.gain.setTargetAtTime === 'function') gain.gain.setTargetAtTime(clamped, now, 0.02);
+        else gain.gain.value = clamped;
       }
+      try { channel.output.connect(gain); } catch (_) {}
     }
   }
 
@@ -1765,6 +1920,8 @@ class AudioEngine {
       for (const [tid, gain] of [...ch.auxSendGains.entries()]) {
         if (!validIds.has(tid)) {
           try { gain.disconnect(); } catch (_) {}
+          try { ch.auxSendDelays?.get(tid)?.disconnect(); } catch (_) {}
+          ch.auxSendDelays?.delete(tid);
           ch.auxSendGains.delete(tid);
         }
       }
@@ -1802,7 +1959,8 @@ class AudioEngine {
     // The node list of that chain, in wiring order, so a replacement that fails
     // can be rolled back to it instead of leaving it disconnected but owned.
     const previousFxNodes = channel.fxNodes.slice();
-    const hasNativeInsert = track.fxSlots.some(slot => slot.type === 'vst3' && slot.enabled);
+    const hasNativeInsert = track.fxSlots.some(slot => slot.type === 'vst3' &&
+      (slot.enabled || this.nativeMixerEffects.isPrepared(track.id, slot.id, ctx, slot.vst3Effect)));
 
     // A native insert must never disappear into a successful dry rebuild. Mixer
     // graphs can be synchronized before async helper preparation; in that state
@@ -1810,7 +1968,7 @@ class AudioEngine {
     const missingNative = this.nativeVst3OfflineEffectPass ? undefined : track.fxSlots.find(slot => slot.enabled && slot.type === 'vst3' &&
       (!slot.vst3Effect || !this.nativeMixerEffects.nodeFor(track.id, slot.id, ctx, slot.vst3Effect)));
     if (missingNative) {
-      try { channel.input.disconnect(); } catch (_) {}
+      try { channel.mixInput.disconnect(); } catch (_) {}
       for (const node of previousFxNodes) { try { node.disconnect(); } catch (_) {} }
       channel.fxNodes = [];
       this.disposeFxSlotEffects(previousEffects?.values());
@@ -1822,9 +1980,7 @@ class AudioEngine {
 
     // Disconnect existing FX (best-effort: one node refusing to let go must not
     // abort the rebuild of the rest of the chain).
-    try {
-      channel.input.disconnect();
-    } catch (_) {}
+    try { channel.mixInput.disconnect(); } catch (_) {}
     channel.fxNodes.forEach(node => {
       try {
         node.disconnect();
@@ -1837,7 +1993,7 @@ class AudioEngine {
     // chain — the live setters report success on anything the registry holds.
     this.__fxSlotEffectMaps.delete(track.id);
 
-    let currentSource: AudioNode = channel.input;
+    let currentSource: AudioNode = channel.mixInput;
 
     // Build the chain and populate the slot-effect maps.
     // We call createEffect directly so we have access to the full effect object
@@ -1849,7 +2005,6 @@ class AudioEngine {
         if (!slot.enabled && slot.type !== 'vst3') return;
         if (slot.type === 'vst3') {
           const offlinePass = this.nativeVst3OfflineEffectPass;
-          if (!slot.enabled && !offlinePass) return;
           if (offlinePass) {
             const key = mixerFxRuntimeKey(track.id, slot.id);
             if (offlinePass.captureKey === key) {
@@ -1877,7 +2032,12 @@ class AudioEngine {
             return;
           }
           const nativeNode = this.nativeMixerEffects.nodeFor(track.id, slot.id, ctx, slot.vst3Effect);
-          if (!nativeNode) throw new Error(`VST3 Mixer effect ${slot.name} is not prepared; no dry substitute was installed.`);
+          if (!nativeNode) {
+            if (!slot.enabled) return; // A disabled, unprepared slot has no live pipeline to compensate.
+            throw new Error(`VST3 Mixer effect ${slot.name} is not prepared; no dry substitute was installed.`);
+          }
+          // Keep a previously prepared node in-chain when the user bypasses it:
+          // the worklet emits its exact dry block at the same fixed due frame.
           this.nativeMixerEffects.setBypassed(track.id, slot.id, !slot.enabled);
           currentSource.connect(nativeNode);
           currentSource = nativeNode;
@@ -1921,11 +2081,11 @@ class AudioEngine {
       this.disposeFxSlotEffects(createdEffects);
       if (mayReleasePrevious) this.disposeFxSlotEffects(previousEffects?.values());
       try {
-        channel.input.disconnect();
+        channel.mixInput.disconnect();
       } catch (_) {}
       channel.fxNodes = [];
       if (!hasNativeInsert) {
-        try { channel.input.connect(channel.panner); } catch (_) {}
+        try { channel.mixInput.connect(channel.panner); } catch (_) {}
       } else {
         const failedSlot = track.fxSlots.find(slot => slot.type === 'vst3');
         if (failedSlot) reportVst3MixerEffect(track.id, failedSlot.id,
@@ -1948,9 +2108,7 @@ class AudioEngine {
       // release exactly what this build created — its modulators included — and
       // take its half-wired nodes off the channel.
       this.disposeFxSlotEffects(createdEffects);
-      try {
-        channel.input.disconnect();
-      } catch (_) {}
+      try { channel.mixInput.disconnect(); } catch (_) {}
       channel.fxNodes = [];
       // Then put the retired chain back, rather than leaving it disconnected but
       // registered: an entry nobody touches again is a started oscillator
@@ -1973,7 +2131,7 @@ class AudioEngine {
         if (mayReleasePrevious) this.disposeFxSlotEffects(previousEffects?.values());
         if (!hasNativeInsert) {
           try {
-            channel.input.connect(channel.panner);
+            channel.mixInput.connect(channel.panner);
           } catch (_) {
             // Swallowed on purpose: the original connection failure below is the
             // caller's signal, and a channel that cannot wire its own bypass has
@@ -2027,7 +2185,7 @@ class AudioEngine {
    * `fxNodes` is written by `rebuildTrackFxChain` as `[…, effect.input, chainEnd?]`
    * in signal order, with the same list `getChainEnd` resolved while building, so
    * replaying it reproduces the graph exactly: the previous source (the channel
-   * input to begin with) connects to each entry, and an entry that is only
+   * pre-FX summing input to begin with) connects to each entry, and an entry that is only
    * recorded because it is the tail of the effect before it is used as a source,
    * never as a target.
    *
@@ -2037,7 +2195,7 @@ class AudioEngine {
    * is reported `true` only once its tail reaches the panner again.
    */
   private restoreFxChainNodes(channel: MixerChannel, nodes: AudioNode[]): boolean {
-    let source: AudioNode = channel.input;
+    let source: AudioNode = channel.mixInput;
     try {
       for (let index = 0; index < nodes.length; index += 1) {
         const node = nodes[index]!;
@@ -2055,9 +2213,7 @@ class AudioEngine {
       // Never leave a part-restored chain behind: it would be audible, unwired
       // and unregistered at the same time.
       channel.fxNodes = [];
-      try {
-        channel.input.disconnect();
-      } catch (_) {}
+      try { channel.mixInput.disconnect(); } catch (_) {}
       return false;
     }
   }
@@ -5455,6 +5611,16 @@ class AudioEngine {
    * only fields that changed in project state so an in-flight automation value
    * remains active until the next automation event.
    */
+  private nativeMixerLatencyTopology(tracks: readonly MixerTrack[]): string {
+    return JSON.stringify([...tracks].map(track => ({
+      id: track.id, target: track.routingTargetId ?? 0,
+      aux: (track.auxSends ?? []).map(send => send.targetId).sort((left, right) => left - right),
+      nativeSlots: track.fxSlots.filter(slot => slot.type === 'vst3').map(slot => ({
+        id: slot.id, effect: slot.vst3Effect,
+      })),
+    })).sort((left, right) => left.id - right.id));
+  }
+
   public synchronizePlaybackState(update: PlaybackStateUpdate): void {
     if (this.shouldBlockLiveMutation() || !this.isPlaying) return;
 
@@ -5549,10 +5715,14 @@ class AudioEngine {
     if (update.mixerTracks) {
       const nativeEffectNeedsRestart = this.isPlaying && update.mixerTracks.some(track => track.fxSlots.some(slot =>
         slot.enabled && slot.type === 'vst3' && !this.nativeMixerEffects.isPrepared(track.id, slot.id, this.ctx!, slot.vst3Effect)));
-      if (nativeEffectNeedsRestart) {
-        // A new/replaced native instance cannot be loaded into a running graph
-        // synchronously. Stop this take; Play performs async preparation before
-        // the transport starts, rather than allowing a dry/stale slot.
+      const nativeLatencyTopologyChanged = this.isPlaying &&
+        this.nativeMixerLatencyTopology(this.activeMixerTracks) !== this.nativeMixerLatencyTopology(update.mixerTracks);
+      if (nativeEffectNeedsRestart || nativeLatencyTopologyChanged) {
+        // A new/replaced/removed native chain can change the per-bus compensation
+        // graph. Stop before mutating a running DelayNode/FX route so buffered
+        // samples from the old latency topology cannot leak into the new one.
+        // Play prepares the new chain and recomputes compensation before audio
+        // starts; a simple enabled/bypassed toggle keeps the prepared pipeline.
         this.stop();
       }
       const previousProjectById = new Map(this.playbackProjectMixerTracks.map(track => [track.id, track]));

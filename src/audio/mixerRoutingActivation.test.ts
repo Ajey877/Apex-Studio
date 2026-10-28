@@ -246,12 +246,12 @@ describe('Phase 27 mixer routing activation', () => {
       // edges that are not the tap — and the tap must have survived the rebuild.
       const routingTargets = (channel: any) =>
         channel.output.connections.filter((target: FakeNode) => target !== channel.analyser);
-      assert.deepEqual(routingTargets(a), [b.input]);
-      assert.equal(routingTargets(a).includes(master.input), false);
+      assert.deepEqual(routingTargets(a), [b.routingInput]);
+      assert.equal(routingTargets(a).includes(master.routingInput), false);
       assert.ok(a.output.connections.includes(a.analyser), 'insert meter tap survives a routing rebuild');
 
       engine.updateMixerTrack(makeTrack(1, 0));
-      assert.deepEqual(routingTargets(a), [master.input]);
+      assert.deepEqual(routingTargets(a), [master.routingInput]);
       assert.ok(a.output.connections.includes(a.analyser));
     } finally {
       engine.ctx = previousCtx;
@@ -284,17 +284,17 @@ describe('Phase 27 mixer routing activation', () => {
       const ctx = FakeOfflineContext.instances[0];
       assert.ok(ctx);
 
-      // Each mixer channel is created as five nodes:
-      // input, output, duckingGain, panner, analyser.
-      // The offline master bus creates three nodes before the mixer channels.
-      // Track 1 output must feed Track 2 input, Track 2 output -> Track 3 input,
-      // and Track 3 output -> Master input.
-      const masterInput = ctx.nodes[3];
-      const track1Output = ctx.nodes[9];
-      const track2Input = ctx.nodes[13];
-      const track2Output = ctx.nodes[14];
-      const track3Input = ctx.nodes[18];
-      const track3Output = ctx.nodes[19];
+      // The offline master bus creates three nodes before mixer channels. Each
+      // mixer channel then creates input, summing/routing input, output,
+      // duckingGain, panner and analyser.
+      // Track 1 output must feed Track 2's summing input, Track 2 output ->
+      // Track 3's summing input, and Track 3 output -> Master summing input.
+      const masterInput = ctx.nodes[4];
+      const track1Output = ctx.nodes[11];
+      const track2Input = ctx.nodes[16];
+      const track2Output = ctx.nodes[17];
+      const track3Input = ctx.nodes[22];
+      const track3Output = ctx.nodes[23];
 
       // Each strip's analyser is created three nodes after its output
       // (output, duckingGain, panner, analyser). Phase 64 keeps that tap fed

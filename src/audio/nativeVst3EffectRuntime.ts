@@ -413,7 +413,9 @@ export class NativeVst3EffectRuntime {
       if (opened.latencySamples !== 0) { await bridge.close(opened.id); throw new Error(`VST3 effect reports ${opened.latencySamples} samples of latency; nonzero plugin latency is unsupported and is not compensated.`); }
       entry.sessionId = opened.id;
       const fixedLatencyMs = VST3_FX_PIPELINE_FRAMES * 1000 / context.sampleRate;
-      reportVst3MixerEffect(trackId, slot.id, `VST3 ready. Fixed live block buffering: ${fixedLatencyMs.toFixed(1)} ms. No inter-track latency compensation is provided.`, fixedLatencyMs);
+      reportVst3MixerEffect(trackId, slot.id,
+        `VST3 ready. Fixed live block buffering: ${fixedLatencyMs.toFixed(1)} ms. Track branches are compensated at Mixer summing inputs; plugin-reported latency remains unsupported.`,
+        fixedLatencyMs);
     });
     entry.ready.catch(() => {});
     try { await entry.ready; }

@@ -73,6 +73,20 @@ const tick = () => new Promise<void>(resolve => setImmediate(resolve));
   assert.deepEqual(processMessages(processor).map((message: any) => message.sequence), [0, 1], 'requests remain FIFO and sequence-monotone');
 });
 
+test('a prepared bypass keeps its fixed pipeline delay and emits the matching dry block', () => {
+  const { processor, next, sendResult } = createWorklet();
+  for (let i = 0; i < VST3_FX_BLOCK_FRAMES / 128; i++) next();
+  processor.port.onmessage!({ data: { type: 'bypass', value: true } });
+  sendResult(0, 0.75);
+  let output: Float32Array[] = [];
+  for (let i = 0; i < VST3_FX_BLOCK_FRAMES / 128 + 1; i++) output = next();
+  assert.equal(processor.failed, false);
+  assert.equal(output[0][0], 0.25);
+  assert.equal(output[1][0], -0.25);
+  assert.equal(profileMessages(processor, 'worklet-result').at(-1)?.dueOutputFrame, VST3_FX_PIPELINE_FRAMES);
+  assert.equal(processor.outputFrame, VST3_FX_PIPELINE_FRAMES + 128);
+});
+
 test('Mixer worklet rejects stale/out-of-order sequence data without replacing the pending valid response', () => {
   const { processor, next, sendResult } = createWorklet();
   for (let i = 0; i < VST3_FX_BLOCK_FRAMES / 128; i++) next();
