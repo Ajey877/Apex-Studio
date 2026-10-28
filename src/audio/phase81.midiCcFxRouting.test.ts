@@ -249,7 +249,7 @@ const createHarness = (initialState: ProjectState): Harness => {
 };
 
 const SAVED_KEYS = [
-  'ctx', 'masterGain', 'masterAnalyser', 'grossBeatNode', 'mixerChannels', 'channelPanners',
+  'ctx', 'masterGain', 'masterAnalyser', 'grossBeatNode', 'mixerChannels', 'channelPanners', '__fxSlotEffectMaps',
   'activeChannels', 'activeClips', 'activeMixerTracks', 'playbackProjectChannels',
   'playbackProjectMixerTracks', 'isPlaying', 'isOfflineRendering', 'currentBar', 'currentStep',
   'activePlayMode', 'bpm', 'metronome', 'playlistLaneMutes', 'mixerRoutingAdapter',
@@ -277,6 +277,8 @@ const startTake = (state: ProjectState): void => {
   engine.channelPanners = new Map();
   engine.mixerRoutingAdapter = null;
   engine.mixerRoutingChannelMap = null;
+  engine.__fxSlotEffectMaps = new Map();
+  engine.midiListeners = [];
   engine.impulseResponses = new Map();
   engine.activeVoices = new Map();
   engine.activeVoiceChannelVolumes = new Map();
@@ -323,7 +325,8 @@ const allContractParams = (): Array<{ fxType: FxType; paramId: string }> => {
   return pairs;
 };
 
-describe('Phase 81: MIDI CC reaches the real FX parameter setter', () => {
+describe('Phase 81 MIDI CC engine integration', { concurrency: false }, () => {
+describe('Phase 81: MIDI CC reaches the real FX parameter setter', { concurrency: false }, () => {
   it('drives every contract parameter of every family through the engine path', () => {
     let checked = 0;
     for (const { fxType, paramId } of allContractParams()) {
@@ -470,7 +473,7 @@ describe('Phase 81: MIDI CC reaches the real FX parameter setter', () => {
   });
 });
 
-describe('Phase 81: existing MIDI CC behaviour is preserved', () => {
+describe('Phase 81: existing MIDI CC behaviour is preserved', { concurrency: false }, () => {
   it('keeps the shipped preset mapping (bare slot id + mix) working', () => {
     const presetState = structuredClone(PRESET_PROJECTS[0].state);
     startTake(presetState);
@@ -566,7 +569,7 @@ describe('Phase 81: existing MIDI CC behaviour is preserved', () => {
   });
 });
 
-describe('Phase 81: invalid and stale MIDI mappings fail safely', () => {
+describe('Phase 81: invalid and stale MIDI mappings fail safely', { concurrency: false }, () => {
   it('reports a deleted slot, a missing track and a malformed id as unsupported', () => {
     for (const targetId of ['2/fx-gone', '99/fx-comp', '', 'broken/id', 'fx-unknown']) {
       const state = makeProject([
@@ -750,4 +753,5 @@ describe('Phase 81: invalid and stale MIDI mappings fail safely', () => {
       harness.dispose();
     }
   });
+});
 });

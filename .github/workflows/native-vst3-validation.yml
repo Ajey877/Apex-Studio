@@ -32,7 +32,7 @@ jobs:
       - name: Install Chromium for real native parameter UI regression
         run: npx playwright install --with-deps chromium
       - name: Native parameter controls through actual App, service, MDA and production export
-        run: npm run test:vst3-browser
+        run: node scripts/run-native-vst3-browser.mjs
       - name: Upload measured evidence (not a desktop playback claim)
         if: always()
         uses: actions/upload-artifact@v4

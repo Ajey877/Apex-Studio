@@ -41,6 +41,7 @@ verification. No commercial plugin, paid service or committed plugin binary.
 npm ci --legacy-peer-deps --ignore-scripts
 npm run native:vst3:build
 npm run test:native-vst3
+npm run test:vst3-effects
 npm run test:vst3-daw
 npm run test:audio
 npm run test:history
@@ -142,8 +143,10 @@ for results—test source alone is not a claimed passing Windows run.
 - First slice supports x64 VST3 instruments with mono/stereo main output and
   **zero reported processing latency**. Other latency is rejected pending proper
   delay compensation. Plugins taking >2 s per operation are rejected.
-- No VST2/AU/CLAP, native effects rack, plugin editor windows, sample-accurate parameter DSP automation,
-  per-note native pan, arbitrary-bus layouts or broad plugin certification.
+- No VST2/AU/CLAP, Mixer-native effect insert chain, plugin editor windows, sample-accurate parameter DSP automation,
+  per-note native pan, arbitrary-bus layouts or broad plugin certification. The separate
+  experimental audio-effect discovery/process IPC is documented below; it is not yet
+  attached to Mixer playback or production export.
   Native transport context is per-session; tempo-synchronized plugin internal
   sequencers/seek-position synchronization beyond scheduled MIDI are not claimed.
   Windows x64/MDA is the reproducible acceptance fixture; other plugins may vary.
@@ -192,6 +195,82 @@ JX10 and Piano instruments; DSP assertions use JX10 and Piano as independent
 instruments, plus silence, held/released notes, pitch, velocity and filter
 parameter negative controls.
 
+
+## Native Mixer VST3 effects — production integration status
+
+Effect slots are now serializable `FxSlot` values containing a genuine VST3
+identity and bounded plugin state. Mixer discovery/relink, controller parameter
+editing, bypass/removal, chain reordering, project persistence and project
+Undo/Redo use the existing authorized VST3 helper/service boundary. Native code
+still runs only in the helper process, never inside the renderer or audio callback.
+The helper rejects instrument classes used as effects, event-input effects,
+extra audio buses, non-stereo main buses, non-finite/oversized audio, and plugins
+reporting nonzero latency. Effect parameter writes are retained for the next
+actual process block.
+
+The live AudioEngine path prepares effects asynchronously before transport
+start and inserts an AudioWorklet node at each saved Mixer slot in order. Each
+worklet captures 1024 stereo frames and hands them to the main-thread/IPC/helper
+pipeline; no IPC or waiting occurs in `process()`. Two blocks (2048 frames) of
+fixed buffering give the helper one block of processing time. At 48 kHz this is
+42.7 ms **per native insert**, before plugin-reported latency (which must be 0).
+If a processed result is not ready at its scheduled frame, the worklet emits
+silence, reports the failure and stops playback; it never forwards dry audio or
+replays a stale block. Stop/restart and project replacement close owner-scoped
+sessions. **There is no inter-track latency compensation.** A native insert can
+therefore be misaligned against other Mixer tracks; this is reported in the
+Mixer diagnostic and is not claimed to be handled.
+
+Production offline export now routes native Mixer effects through the real
+`renderTimelineOffline`/`renderProjectToWav` pipeline: for each enabled native
+slot, it captures that track's pre-insert stereo PCM from an isolated four-
+channel OfflineAudioContext tap, processes bounded 4096-frame planar blocks in
+the authorized native helper, and injects the resulting AudioBuffer at the
+original timeline offset before the next Mixer slot. Repeating this pass in
+saved slot order means earlier native inserts and built-in FX feed later native
+inserts; the final production render mixes processed tracks through normal
+routing/mastering and the existing WAV encoder. Captures retain the render tail
+for native effect decay; final WAV tail trimming still examines processed output.
+The helper is closed in `finally`, processing/open/layout/latency failures abort
+the export, and no dry/fabricated fallback is installed. At most eight enabled
+inserts and 128 MiB estimated native PCM working memory are accepted; larger
+renders fail before PCM allocation. Nonzero plugin latency is rejected without
+compensation. A pre-master export explicitly rejects a native master-bus slot
+because that existing export stage intentionally omits master processing.
+Turning off `Include Mixer FX` remains the explicit dry-export option.
+
+Code-level offline integration was exercised locally against the redistributable
+MDA RezFilter and the real helper/service via Apex's production
+`renderTimelineOffline` and `renderProjectToWav`: the returned buffer was
+stereo, 192000 frames at 48 kHz, finite, RMS 0.04810 and peak 0.97724. Its
+actual production WAV was 705644 bytes (`RIFF`), and the native render differed
+from the dry render by PCM RMS 0.01540; zero helper sessions remained open. That
+run used `web-audio-engine` rather than Chromium and is a **debug check only**,
+not browser production WAV/PCM acceptance. The authored real-Mixer browser test
+also checks decoded production WAV PCM against a dry render, but did not execute
+because the Playwright Chromium headless-shell binary is absent in this
+workspace. No Windows desktop workflow has been run after these changes.
+
+`npm run test:vst3-effects` uses the real redistributable SDK MDA effects and
+measures actual helper output changes for bypass/parameter changes and effect
+ordering; service state capture/reopen, missing-plugin, unsupported-layout,
+ownership and malformed-block failures are covered. These are native
+host/service tests, not by themselves production Mixer acceptance.
+`native-browser-tests/vst3MixerEffects.spec.ts` is the intended full product
+acceptance path for live PCM, slot order/bypass, track isolation, parameter
+editing, save/reopen, undo/redo and processed WAV PCM; test source is not
+acceptance evidence until a browser run passes.
+
+Live and offline handling have different limits. Offline exports are scheduled
+and awaited outside the real-time callback; their plugin-reported latency must
+be zero. Live effect inserts use a fixed two-block FIFO (2048 frames: 42.7 ms
+at 48 kHz by calculation); this is a design value, not an observed end-to-end
+latency measurement. Live latency has not been measured or compensated, and
+there is no inter-track latency compensation. Do not claim those limits are
+handled. Feature Expansion 01 remains unaccepted until the real Chromium/MDA
+Mixer workflow, missing-plugin/layout product diagnostics, built-in FX/native
+instrument regression coverage, and applicable Windows desktop integration
+workflow pass on this branch.
 
 ## Generic parameter control contract (Issue #285)
 

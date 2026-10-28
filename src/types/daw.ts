@@ -1,4 +1,4 @@
-import type { Vst3Instrument } from '../audio/nativeVst3Types';
+import type { Vst3Effect, Vst3Instrument } from '../audio/nativeVst3Types';
 export type ViewMode = 
   | 'channel_rack' 
   | 'piano_roll' 
@@ -49,7 +49,8 @@ export type FxType =
   | 'chorus' 
   | 'bitcrusher' 
   | 'limiter'
-  | 'tape_saturation';
+  | 'tape_saturation'
+  | 'vst3';
 
 export interface Note {
   id: string;
@@ -694,6 +695,8 @@ export interface FxSlot {
   enabled: boolean;
   mix: number; // Wet/Dry 0 - 1.0
   params: Record<string, number | string | boolean>;
+  /** Present only for a genuine native VST3 audio-effect insert. */
+  vst3Effect?: Vst3Effect;
 }
 
 export interface MixerTrack {

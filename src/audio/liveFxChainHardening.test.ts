@@ -432,8 +432,8 @@ describe('Phase 10C-B: offline-rendering branch of installLiveFxChainHardening',
     void offBefore;
   });
 
-  it('offline: every FxType value builds without throwing (Phase 10C-B)', () => {
-    const FX_TYPES: FxSlot['type'][] = [
+  it('offline: every built-in FxType value builds without throwing (Phase 10C-B)', () => {
+    const FX_TYPES: Exclude<FxSlot['type'], 'vst3'>[] = [
       'equalizer', 'reverb', 'delay', 'distortion', 'compressor',
       'chorus', 'bitcrusher', 'limiter', 'tape_saturation',
     ];

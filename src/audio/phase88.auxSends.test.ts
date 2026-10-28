@@ -177,11 +177,11 @@ describe('Phase 88 — Aux Sends / Return Bussing', () => {
         const gain = ch1.auxSendGains.get(8) as unknown as FakeAudioNode;
         assert.ok(gain.gain, 'gain node has gain');
         assert.equal((gain.gain as any).value, 0.5);
-        // Verify output connects to gain and gain to return input
+        // Verify output connects post-fader to the return's compensated summing input.
         const output = ch1.output as unknown as FakeAudioNode;
         assert.ok(output.connections.includes(gain), 'output -> gain');
-        const retInput = ret8.input as unknown as FakeAudioNode;
-        assert.ok(gain.connections.includes(retInput), 'gain -> return input');
+        const retInput = ret8.routingInput as unknown as FakeAudioNode;
+        assert.ok(gain.connections.includes(retInput), 'gain -> return summing input');
         // Meter tap must still be connected after routing rebuild
         const analyser = ch1.analyser as unknown as FakeAudioNode;
         // After syncMixerRouting, meter tap should be restored; we trigger a bus rebuild

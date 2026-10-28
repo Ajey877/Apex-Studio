@@ -77,9 +77,44 @@ bool instrument(const VST3::Hosting::ClassInfo& info) {
   return info.category() == kVstAudioEffectClass &&
     std::find(categories.begin(), categories.end(), "Instrument") != categories.end();
 }
+bool audioEffect(const VST3::Hosting::ClassInfo& info) {
+  if (info.category() != kVstAudioEffectClass || instrument(info)) return false;
+  const auto& categories = info.subCategories();
+  return std::find(categories.begin(), categories.end(), "Generator") == categories.end() &&
+    std::find(categories.begin(), categories.end(), "Analyzer") == categories.end();
+}
 json identity(const VST3::Hosting::ClassInfo& info) {
   return {{"classId", info.ID().toString()}, {"name", info.name()},
     {"vendor", info.vendor()}, {"version", info.version()}, {"categories", info.subCategories()}};
+}
+std::vector<float> decodePlanarAudio(const std::string& encoded, int frames) {
+  static const std::string alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  require(encoded.size() <= 180000 && encoded.size() % 4 == 0, "Invalid or oversized VST3 audio block");
+  std::vector<unsigned char> bytes;
+  bytes.reserve(encoded.size() / 4 * 3);
+  for (size_t i = 0; i < encoded.size(); i += 4) {
+    uint32_t value = 0;
+    int padding = 0;
+    for (int j = 0; j < 4; ++j) {
+      const char c = encoded[i + j];
+      if (c == '=') { ++padding; value <<= 6; }
+      else {
+        require(padding == 0, "Invalid base64 audio padding");
+        const auto digit = alphabet.find(c);
+        require(digit != std::string::npos, "Invalid base64 audio data");
+        value = (value << 6) | static_cast<uint32_t>(digit);
+      }
+    }
+    require(padding <= 2 && (padding == 0 || i + 4 == encoded.size()), "Invalid base64 audio padding");
+    bytes.push_back(static_cast<unsigned char>((value >> 16) & 255));
+    if (padding < 2) bytes.push_back(static_cast<unsigned char>((value >> 8) & 255));
+    if (padding < 1) bytes.push_back(static_cast<unsigned char>(value & 255));
+  }
+  require(bytes.size() == static_cast<size_t>(frames) * 2 * sizeof(float), "VST3 audio block must contain planar stereo float32 samples");
+  std::vector<float> result(frames * 2);
+  std::memcpy(result.data(), bytes.data(), bytes.size());
+  for (float sample : result) require(std::isfinite(sample), "Non-finite VST3 input audio");
+  return result;
 }
 
 class Instance {
@@ -99,12 +134,14 @@ class Instance {
   std::set<ParamID> parameterIds;
   std::set<ParamID> readOnlyIds;
   std::map<ParamID, ParamValue> overrides;
+  std::map<ParamID, ParamValue> pendingEffectParameters;
   std::string classId;
   double sampleRate = 48000;
   int mode = kOffline;
   int64_t cursor = 0;
   bool active = false;
   bool processing = false;
+  bool isInstrument = true;
 public:
   ~Instance() {
     if (processing) processor->setProcessing(false);
@@ -128,7 +165,10 @@ public:
     json result;
     for (const auto& info : factory.classInfos()) {
       if (info.ID().toString() != classId) continue;
-      require(instrument(info), "Selected class is not a VST3 instrument");
+      const auto kind = request.value("kind", std::string("instrument"));
+      require(kind == "instrument" || kind == "effect", "Unknown VST3 plugin kind");
+      isInstrument = kind == "instrument";
+      require(isInstrument ? instrument(info) : audioEffect(info), isInstrument ? "Selected class is not a VST3 instrument" : "Selected class is not a VST3 audio effect");
       provider = owned(new PlugProvider(factory, info, true));
       require(provider->initialize(), "Plugin component/controller initialization failed");
       result = identity(info);
@@ -140,13 +180,27 @@ public:
     processor = FUnknownPtr<IAudioProcessor>(component);
     require(bool(processor), "Plugin has no IAudioProcessor");
     checked(processor->canProcessSampleSize(kSample32), "Plugin does not support float32 processing");
-    require(component->getBusCount(kAudio, kInput) == 0, "Prototype accepts instruments without audio inputs only");
-    require(component->getBusCount(kAudio, kOutput) >= 1 && component->getBusCount(kEvent, kInput) >= 1,
-      "Instrument requires an audio output and event input");
-    BusInfo bus{};
-    checked(component->getBusInfo(kAudio, kOutput, 0, bus), "Cannot query main output bus");
-    require(bus.busType == kMain && (bus.channelCount == 1 || bus.channelCount == 2), "Only mono/stereo main output supported");
-    for (int32 i = 0; i < component->getBusCount(kAudio, kOutput); ++i)
+    const auto inputBuses = component->getBusCount(kAudio, kInput);
+    const auto outputBuses = component->getBusCount(kAudio, kOutput);
+    if (isInstrument) {
+      require(inputBuses == 0, "Instrument class unexpectedly requires audio input");
+      require(outputBuses >= 1 && component->getBusCount(kEvent, kInput) >= 1,
+        "Instrument requires an audio output and event input");
+      BusInfo bus{};
+      checked(component->getBusInfo(kAudio, kOutput, 0, bus), "Cannot query main output bus");
+      require(bus.busType == kMain && (bus.channelCount == 1 || bus.channelCount == 2), "Only mono/stereo instrument output supported");
+    } else {
+      require(inputBuses == 1 && outputBuses == 1, "Only one-input/one-output VST3 audio effects are supported");
+      BusInfo input{}, output{};
+      checked(component->getBusInfo(kAudio, kInput, 0, input), "Cannot query main input bus");
+      checked(component->getBusInfo(kAudio, kOutput, 0, output), "Cannot query main output bus");
+      require(input.busType == kMain && output.busType == kMain && input.channelCount == 2 && output.channelCount == 2,
+        "Only effects with a stereo main input and stereo main output are supported");
+      require(component->getBusCount(kEvent, kInput) == 0, "VST3 audio effects with event input buses are not supported");
+    }
+    for (int32 i = 0; i < inputBuses; ++i)
+      checked(component->activateBus(kAudio, kInput, i, i == 0), "Cannot configure audio input bus");
+    for (int32 i = 0; i < outputBuses; ++i)
       checked(component->activateBus(kAudio, kOutput, i, i == 0), "Cannot configure audio output bus");
     for (int32 i = 0; i < component->getBusCount(kEvent, kInput); ++i)
       checked(component->activateBus(kEvent, kInput, i, i == 0), "Cannot configure MIDI input bus");
@@ -186,6 +240,7 @@ public:
     result["tailSamples"] = processor->getTailSamples();
     return result;
   }
+  bool isInstrumentKind() const { return isInstrument; }
   json metadata() {
     json result = json::array();
     int choiceBudget = 4096;
@@ -227,9 +282,9 @@ public:
       MemoryStream stream(bytes.data(), bytes.size());
       checked(controller->setState(&stream), "Plugin rejected saved controller state");
     }
-    if (state.contains("parameters")) applyParameters(state.at("parameters"));
+    if (state.contains("parameters")) applyParameters(state.at("parameters"), false, -1, isInstrument);
   }
-  void applyParameters(const json& changes, bool live = false, int32 frames = -1) {
+  void applyParameters(const json& changes, bool live = false, int32 frames = -1, bool enqueue = true) {
     require(changes.is_array() && changes.size() <= 4096, "Invalid parameter list");
     std::map<ParamID, int32> seen;
     // Validate the entire batch before touching controller/processor state.
@@ -268,17 +323,21 @@ public:
       require(parameterIds.count(id) != 0, "Saved parameter ID no longer exists: " + std::to_string(id));
       require(!readOnlyIds.count(id), "Cannot restore a read-only parameter");
       auto value = real(change, "value", 0, 1);
-      int32 queueIndex = 0, pointIndex = 0;
-      auto* queue = parameters.addParameterData(id, queueIndex);
-      require(queue != nullptr, "Parameter queue full");
       const bool timed = change.contains("offset");
-      const auto offset = timed ? integer(change, "offset", 0, frames - 1) : 0;
-      checked(queue->addPoint(offset, value, pointIndex), "Cannot queue parameter");
+      require(enqueue || !timed, "Timed parameter points require an audio process block");
+      if (enqueue) {
+        int32 queueIndex = 0, pointIndex = 0;
+        auto* queue = parameters.addParameterData(id, queueIndex);
+        require(queue != nullptr, "Parameter queue full");
+        const auto offset = timed ? integer(change, "offset", 0, frames - 1) : 0;
+        checked(queue->addPoint(offset, value, pointIndex), "Cannot queue parameter");
+      }
       if (timed) continue; // Runtime automation never overwrites saved base/controller state.
       checked(controller->setParamNormalized(id, value), "Controller rejected parameter");
       const auto accepted = controller->getParamNormalized(id);
       require(std::isfinite(accepted) && std::abs(accepted - value) <= 1e-7, "Controller did not accept the requested normalized value");
       overrides[id] = value;
+      if (!isInstrument) pendingEffectParameters[id] = value;
     }
   }
   json snapshot() {
@@ -308,29 +367,53 @@ public:
     auto inputEvents = request.value("events", json::array());
     require(inputEvents.is_array() && inputEvents.size() <= 4096, "Too many events in block");
     events.clear(); outputEvents.clear(); outputParameters.clearQueue();
-    int lastOffset = -1;
-    for (const auto& item : inputEvents) {
-      Event event{};
-      event.busIndex = 0;
-      event.sampleOffset = integer(item, "offset", 0, frames - 1);
-      require(event.sampleOffset >= lastOffset, "Events must be ordered by sample offset");
-      lastOffset = event.sampleOffset;
-      auto pitch = integer(item, "pitch", 0, 127);
-      auto channel = item.contains("channel") ? integer(item, "channel", 0, 15) : 0;
-      auto noteId = integer(item, "noteId", 0, INT32_MAX);
-      auto type = item.at("type").get<std::string>();
-      if (type == "on") {
-        event.type = Event::kNoteOnEvent;
-        event.noteOn.channel = channel; event.noteOn.pitch = pitch;
-        event.noteOn.velocity = static_cast<float>(real(item, "velocity", 0, 1));
-        event.noteOn.noteId = noteId;
-      } else {
-        require(type == "off", "Unknown MIDI event type");
-        event.type = Event::kNoteOffEvent;
-        event.noteOff.channel = channel; event.noteOff.pitch = pitch;
-        event.noteOff.velocity = 0; event.noteOff.noteId = noteId;
+    std::vector<float> inputAudio;
+    if (isInstrument) {
+      int lastOffset = -1;
+      for (const auto& item : inputEvents) {
+        Event event{};
+        event.busIndex = 0;
+        event.sampleOffset = integer(item, "offset", 0, frames - 1);
+        require(event.sampleOffset >= lastOffset, "Events must be ordered by sample offset");
+        lastOffset = event.sampleOffset;
+        auto pitch = integer(item, "pitch", 0, 127);
+        auto channel = item.contains("channel") ? integer(item, "channel", 0, 15) : 0;
+        auto noteId = integer(item, "noteId", 0, INT32_MAX);
+        auto type = item.at("type").get<std::string>();
+        if (type == "on") {
+          event.type = Event::kNoteOnEvent;
+          event.noteOn.channel = channel; event.noteOn.pitch = pitch;
+          event.noteOn.velocity = static_cast<float>(real(item, "velocity", 0, 1));
+          event.noteOn.noteId = noteId;
+        } else {
+          require(type == "off", "Unknown MIDI event type");
+          event.type = Event::kNoteOffEvent;
+          event.noteOff.channel = channel; event.noteOff.pitch = pitch;
+          event.noteOff.velocity = 0; event.noteOff.noteId = noteId;
+        }
+        checked(events.addEvent(event), "Event queue full");
       }
-      checked(events.addEvent(event), "Event queue full");
+    } else {
+      require(inputEvents.empty(), "MIDI events cannot be sent to a VST3 audio effect");
+      if (frames > 0) {
+        require(request.contains("audio") && request.at("audio").is_string(), "VST3 effect process requires stereo input audio");
+        inputAudio = decodePlanarAudio(request.at("audio").get<std::string>(), frames);
+      }
+    }
+    if (!isInstrument && frames > 0 && !pendingEffectParameters.empty()) {
+      std::set<ParamID> requested;
+      if (request.contains("parameters") && request.at("parameters").is_array())
+        for (const auto& change : request.at("parameters")) if (change.is_object() && change.contains("id") && change.at("id").is_number_integer()) {
+          const auto raw = change.at("id").get<int64_t>();
+          if (raw >= 0 && raw <= UINT32_MAX) requested.insert(static_cast<ParamID>(raw));
+        }
+      for (const auto& entry : pendingEffectParameters) {
+        if (requested.count(entry.first)) continue;
+        int32 queueIndex = 0, pointIndex = 0;
+        auto* queue = parameters.addParameterData(entry.first, queueIndex);
+        require(queue != nullptr, "Parameter queue full");
+        checked(queue->addPoint(0, entry.second, pointIndex), "Cannot queue saved effect parameter");
+      }
     }
     if (request.contains("parameters")) applyParameters(request.at("parameters"), flush, flush ? -1 : frames);
     for (int32 bus = 0; bus < data.numOutputs; ++bus) {
@@ -348,6 +431,12 @@ public:
     context.projectTimeMusic = static_cast<double>(cursor) / sampleRate * context.tempo / 60.;
     context.state = ProcessContext::kPlaying | ProcessContext::kTempoValid |
       ProcessContext::kTimeSigValid | ProcessContext::kProjectTimeMusicValid | ProcessContext::kContTimeValid;
+    if (!isInstrument && frames > 0) {
+      require(data.numInputs == 1 && data.inputs[0].numChannels == 2, "VST3 effect input layout changed after setup");
+      data.inputs[0].silenceFlags = 0;
+      std::copy_n(inputAudio.data(), frames, data.inputs[0].channelBuffers32[0]);
+      std::copy_n(inputAudio.data() + frames, frames, data.inputs[0].channelBuffers32[1]);
+    }
     data.processMode = mode; data.numSamples = frames;
     data.inputEvents = &events; data.outputEvents = &outputEvents;
     data.inputParameterChanges = &parameters; data.outputParameterChanges = &outputParameters;
@@ -355,7 +444,10 @@ public:
     checked(processor->process(data), "Plugin process failed");
     // Retain a zero-sample flush for the next audible block too: some SDK
     // processors recalculate coefficients only while processing samples.
-    if (frames > 0) parameters.clearQueue();
+    if (frames > 0) {
+      parameters.clearQueue();
+      pendingEffectParameters.clear();
+    }
     std::vector<float> pcm(frames * 2);
     const auto& output = data.outputs[0];
     for (int ch = 0; ch < 2; ++ch) {
@@ -409,8 +501,11 @@ int main() {
         std::string error;
         auto module = VST3::Hosting::Module::create(request.at("path").get<std::string>(), error);
         require(bool(module), "Plugin module load failed: " + error);
+        const auto kind = request.value("kind", std::string("instrument"));
+        require(kind == "instrument" || kind == "effect", "Unknown VST3 discovery kind");
         json plugins = json::array();
-        for (const auto& info : module->getFactory().classInfos()) if (instrument(info)) plugins.push_back(identity(info));
+        for (const auto& info : module->getFactory().classInfos())
+          if (kind == "instrument" ? instrument(info) : audioEffect(info)) plugins.push_back(identity(info));
         reply({{"ok", true}, {"plugins", plugins}});
       } else if (command == "open") {
         require(!instance, "Close current instance before opening another");
@@ -423,9 +518,12 @@ int main() {
         reply({{"ok", true}, {"frames", pcm.size() / 2}, {"channels", 2}}, pcm);
       } else if (command == "parameters") {
         require(bool(instance), "No plugin instance loaded");
-        // VST3 zero-sample parameter flush: do not advance the audio cursor or
-        // lose an audible block. A rejecting plugin fails closed, never succeeds silently.
-        instance->process({{"frames", 0}, {"events", json::array()}, {"bpm", 120}, {"parameters", request.at("parameters")}}, true);
+        // Instruments retain the established zero-sample flush contract. Audio
+        // effects defer controller values to the next real audio block because
+        // some processors ignore parameter queues on zero-sample calls.
+        if (instance->isInstrumentKind())
+          instance->process({{"frames", 0}, {"events", json::array()}, {"bpm", 120}, {"parameters", request.at("parameters")}}, true);
+        else instance->applyParameters(request.at("parameters"), false, -1, false);
         reply({{"ok", true}, {"parameters", instance->metadata()}});
       } else if (command == "snapshot") {
         require(bool(instance), "No plugin instance loaded");
