@@ -338,6 +338,13 @@ function nativeServicePcmBySlot(run: any) {
   }));
 }
 
+function nativeEffectOpenEvidence(run: any) {
+  return (run.runtimeEvents as Array<Record<string, any>>).filter(event => event.event === 'native-effect-open')
+    .map(({ trackId, slotId, runtimeId, classId, parameterEvidence }) => ({
+      trackId, slotId, runtimeId, classId, parameterEvidence,
+    }));
+}
+
 function compactMixerRunEvidence(run: any) {
   const nativeStages = [...run.nativeStageCaptures].map(([slotId, capture]: [string, MixerCapture], index: number) => {
     const onset = firstCapturedOnsetFrame(capture, run.sourceStartContextFrame,
@@ -350,6 +357,7 @@ function compactMixerRunEvidence(run: any) {
   });
   const timing = run.timing;
   return { trackRms: run.trackRms, nativeStages, nativeServicePcm: nativeServicePcmBySlot(run),
+    nativeEffectOpenEvidence: nativeEffectOpenEvidence(run),
     timing: { requestCount: timing.requestCount, acceptedWorkletResults: timing.acceptedWorkletResults,
       missedDeadlines: timing.missedDeadlines, unaccountedRequestCount: timing.unaccountedRequestCount,
       missingMainResponses: timing.missingMainResponses, missingWorkletResults: timing.missingWorkletResults,
@@ -793,7 +801,9 @@ async function runPackagedMixerAcceptance(instance: typeof audioEngine, persiste
           stage.slotId !== expectedSlots[index] || stage.actualRelativeOnsetFrame !== stage.expectedRelativeOnsetFrame) ||
         !serviceRequestsValid || masterSum.comparedSamples < VST3_FX_BLOCK_FRAMES * 2 || masterSum.rmsDifference > 1e-5) {
       throw new Error(`Persisted Mixer Delay → RezFilter state failed after separate application reopen: ${JSON.stringify({
-        expectedRelativeOnsetFrame, relativeOnsets, nativeStageRows, nativeServicePcm, masterSum,
+        expectedRelativeOnsetFrame, relativeOnsets, nativeStageRows, nativeServicePcm,
+        restoredState: restoredMixerParameterEvidence,
+        nativeEffectOpenEvidence: nativeEffectOpenEvidence(reopenedMixer), masterSum,
         sourceStartContextFrame: reopenedMixer.sourceStartContextFrame,
         timing: { requestCount: reopenedMixer.timing.requestCount, missedDeadlines: reopenedMixer.timing.missedDeadlines,
           requestFailures: reopenedMixer.timing.requestFailures, nativeServiceSessionCountAfterCleanup: reopenedMixer.timing.nativeServiceSessionCountAfterCleanup },
