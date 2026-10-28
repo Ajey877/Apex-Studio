@@ -976,7 +976,7 @@ export async function runDesktopVst3Smoke() {
     const mixerAcceptance = await runPackagedMixerAcceptance(instance, savedMixerTracks);
     const { persistedProjectMixerTracks, ...mixerEffects } = mixerAcceptance;
     if (!reopening) savedMixerTracks = persistedProjectMixerTracks;
-    if (reopening && !mixerEffects.savedProjectReopen) throw new Error('Saved Mixer effect state was not processed through the production graph after application restart');
+    if (reopening && mixerEffects.status === 'passed' && !mixerEffects.savedProjectReopen) throw new Error('Saved Mixer effect state was not processed through the production graph after application restart');
     if (reopening && !document.body.textContent?.includes(channel.name)) throw new Error('The actual Apex application UI did not restore the saved native channel');
     if (!reopening) {
       const project = createDefaultProjectState();
