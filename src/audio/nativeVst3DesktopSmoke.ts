@@ -18,11 +18,13 @@ type MixerCaptureOptions = {
   includeMaster?: boolean;
   bypassMixerAfterMs?: number;
   bypassMixerTracks?: MixerTrack[];
+  /** Smoke-only taps after each native insert for diagnosing silent stages. */
+  includeNativeStages?: boolean;
 };
 type PlanarPcm = { left: Float32Array; right: Float32Array; frames: number; rms: number; startFrame: number | null };
 const captureModuleByContext = new WeakMap<BaseAudioContext, Promise<string>>();
 
-async function attachMixerCapture(instance: typeof audioEngine, trackId: number): Promise<MixerCapture> {
+async function attachMixerCapture(instance: typeof audioEngine, trackId: number, sourceOverride?: AudioNode): Promise<MixerCapture> {
   const context = instance.getContext() as AudioContext;
   const mixer = instance.getOrCreateMixerChannel(trackId);
   let module = captureModuleByContext.get(context);
@@ -58,7 +60,7 @@ async function attachMixerCapture(instance: typeof audioEngine, trackId: number)
   };
   const sink = context.createGain();
   sink.gain.value = 0;
-  const captureSource = trackId === 0 ? mixer.analyser : instance.getMixerRoutingOutputNode(trackId) ?? mixer.analyser;
+  const captureSource = sourceOverride ?? (trackId === 0 ? mixer.analyser : instance.getMixerRoutingOutputNode(trackId) ?? mixer.analyser);
   captureSource.connect(node); node.connect(sink); sink.connect(context.destination);
   return { blocks, node, sink, source: captureSource };
 }
@@ -269,6 +271,7 @@ function correlatedTimingSamples(run: any) {
     if (typeof event.requestId !== 'string' || !measuredRequestIds.has(event.requestId)) continue;
     const sample = sampleFor(event.requestId);
     if (event.event === 'worklet-submit') Object.assign(sample, {
+      trackId: event.trackId, slotId: event.slotId,
       inputBlockStartContextFrame: event.inputBlockStartContextFrame,
       rendererSubmissionContextFrame: event.submittedContextFrame,
       submittedOutputFrame: event.submittedOutputFrame, dueOutputFrame: event.dueOutputFrame,
@@ -305,6 +308,25 @@ function correlatedTimingSamples(run: any) {
     });
   }
   return [...samples.values()].slice(0, 8192);
+}
+
+function nativeServicePcmBySlot(run: any) {
+  const grouped = new Map<string, Record<string, any>[]>();
+  for (const sample of correlatedTimingSamples(run)) {
+    if (sample.trackId !== 1 || typeof sample.slotId !== 'string') continue;
+    const samples = grouped.get(sample.slotId) ?? [];
+    samples.push(sample);
+    grouped.set(sample.slotId, samples);
+  }
+  return Object.fromEntries([...grouped].map(([slotId, samples]) => {
+    const summarize = (field: string) => {
+      const values = samples.map(sample => Number(sample[field])).filter(Number.isFinite);
+      return { count: values.length, nonzero: values.filter(value => value > 1e-8).length,
+        min: values.length ? Math.min(...values) : null, max: values.length ? Math.max(...values) : null };
+    };
+    return [slotId, { requests: samples.length, inputRms: summarize('nativeServiceInputRms'),
+      outputRms: summarize('nativeServiceOutputRms') }];
+  }));
 }
 
 function createDeterministicMixerInput(context: AudioContext): AudioBuffer {
@@ -390,6 +412,7 @@ async function captureLiveMixerRun(instance: typeof audioEngine, channels: Chann
   const durationMs = options.durationMs ?? 1600;
   await context.resume();
   const taps = new Map<number, MixerCapture>();
+  const nativeStageTaps = new Map<string, MixerCapture>();
   const smokeApi = (globalThis as any).desktopApp?.vst3;
   if (typeof smokeApi?.smokeTimingSnapshot !== 'function') throw new Error('Smoke-only production IPC timing snapshot is unavailable');
   const targetSource = context.createBufferSource();
@@ -409,6 +432,17 @@ async function captureLiveMixerRun(instance: typeof audioEngine, channels: Chann
   await instance.play(channels, [], 'pat', undefined, mixer, 16);
   await context.resume();
   for (const trackId of options.includeMaster ? [0, 1, 2] : [1, 2]) taps.set(trackId, await attachMixerCapture(instance, trackId));
+  if (options.includeNativeStages) {
+    const nativeSlots = mixer.find(track => track.id === 1)?.fxSlots.filter(slot => slot.enabled && slot.type === 'vst3') ?? [];
+    const effectNodes = (instance.getOrCreateMixerChannel(1) as any).fxNodes as AudioNode[];
+    if (effectNodes.length !== nativeSlots.length) {
+      throw new Error(`Smoke-only native-stage tap mapping mismatch: ${effectNodes.length} prepared nodes for ${nativeSlots.length} enabled VST3 slots`);
+    }
+    for (let index = 0; index < nativeSlots.length; index++) {
+      const slot = nativeSlots[index]!;
+      nativeStageTaps.set(slot.id, await attachMixerCapture(instance, 1, effectNodes[index]!));
+    }
+  }
   targetSource.connect(targetGain); targetGain.connect(instance.getOrCreateMixerChannel(1).input);
   controlSource.connect(controlGain); controlGain.connect(instance.getOrCreateMixerChannel(2).input);
   const sourceStartTime = context.currentTime + 0.05;
@@ -457,6 +491,13 @@ async function captureLiveMixerRun(instance: typeof audioEngine, channels: Chann
     try { capture.source.disconnect(capture.node); } catch { /* the source may already have been removed */ }
     capture.node.disconnect(); capture.sink.disconnect();
   }
+  const nativeStagePcm = new Map<string, PlanarPcm>();
+  for (const [slotId, capture] of nativeStageTaps) {
+    nativeStagePcm.set(slotId, toPlanarPcm(capture.blocks, startedContextFrame, stoppedContextFrame));
+    capture.node.port.close();
+    try { capture.source.disconnect(capture.node); } catch { /* the source may already have been removed */ }
+    capture.node.disconnect(); capture.sink.disconnect();
+  }
   const ipcAfter = await smokeApi.smokeTimingSnapshot();
   const runtimeEvents = getNativeVst3MixerEffectSmokeTiming().slice(runtimeStart);
   const ipc = ipcAfter;
@@ -465,8 +506,10 @@ async function captureLiveMixerRun(instance: typeof audioEngine, channels: Chann
   const timing = summarizeMixerTiming(runtimeEvents, ipc, sampleRate, duration, startedAt, stoppedAt, stopRequestedAtRendererMs);
   return { pcm, tailRms, sampleRate, durationMs: duration, captureStartRendererMs: startedAt,
     captureEndRendererMs: stoppedAt, startedContextFrame, stoppedContextFrame, sourceStartContextFrame,
-    bypassUpdateAppliedContextFrame, playbackActiveAtEnd, captures: taps,
+    bypassUpdateAppliedContextFrame, playbackActiveAtEnd, captures: taps, nativeStageCaptures: nativeStageTaps,
+    nativeStagePcm,
     trackRms: Object.fromEntries([...pcm].map(([trackId, audio]) => [trackId, audio.rms])),
+    nativeStageRms: Object.fromEntries([...nativeStagePcm].map(([slotId, audio]) => [slotId, audio.rms])),
     diagnostics: getVst3MixerEffectDiagnostics(), timing, runtimeEvents, ipc };
 }
 
@@ -558,7 +601,7 @@ async function runPackagedMixerAcceptance(instance: typeof audioEngine) {
   const onsetInputs = () => new Map([[1, createKnownOnsetInput(context, 0.08)], [2, createKnownOnsetInput(context, 0.035)]]);
   const oneNativeInsert = withSlots([makeSlot('latency-one-delay', bypassDelay)]);
   const twoNativeInserts = withSlots([makeSlot('latency-two-delay', bypassDelay), makeSlot('latency-two-filter', rezFilter)]);
-  const alignmentOptions = (): MixerCaptureOptions => ({ durationMs: 1050, inputBuffers: onsetInputs(), includeMaster: true });
+  const alignmentOptions = (): MixerCaptureOptions => ({ durationMs: 1050, inputBuffers: onsetInputs(), includeMaster: true, includeNativeStages: true });
   const zeroInsertAlignment = await run(noEffects, 'Mixer onset alignment zero inserts', alignmentOptions());
   const oneInsertAlignment = await run(oneNativeInsert, 'Mixer onset alignment one insert', alignmentOptions());
   const twoInsertAlignment = await run(twoNativeInserts, 'Mixer onset alignment two inserts', alignmentOptions());
@@ -575,23 +618,38 @@ async function runPackagedMixerAcceptance(instance: typeof audioEngine) {
     const actualRelativeOnsets = [1, 2].map(trackId => onsets[String(trackId)] === null ? null :
       Number(onsets[String(trackId)]) - result.sourceStartContextFrame);
     const masterRelativeOnset = onsets['0'] === null ? null : Number(onsets['0']) - result.sourceStartContextFrame;
+    const nativeStageRows = [...result.nativeStageCaptures].map(([slotId, capture]: [string, MixerCapture], index) => {
+      const onset = firstCapturedOnsetFrame(capture, result.sourceStartContextFrame,
+        result.sourceStartContextFrame + result.sampleRate);
+      return { slotId, expectedRelativeOnsetFrame: 256 + (index + 1) * VST3_FX_PIPELINE_FRAMES,
+        actualRelativeOnsetFrame: onset === null ? null : onset - result.sourceStartContextFrame,
+        pcmRms: result.nativeStageRms[slotId] };
+    });
+    const nativeServicePcm = nativeServicePcmBySlot(result);
     const masterSum = compareCapturedMasterToTrackSum(result.captures, result.sourceStartContextFrame + expectedRelativeOnsetFrame,
       result.sourceStartContextFrame + expectedRelativeOnsetFrame + VST3_FX_BLOCK_FRAMES * 8);
     if (actualRelativeOnsets.some(frame => frame !== expectedRelativeOnsetFrame) || masterRelativeOnset !== expectedRelativeOnsetFrame ||
+        nativeStageRows.some((stage: any) => stage.actualRelativeOnsetFrame !== stage.expectedRelativeOnsetFrame) ||
         masterSum.comparedSamples < VST3_FX_BLOCK_FRAMES * 2 || masterSum.rmsDifference > 1e-5) {
       const evidence = { onsets, sourceStartContextFrame: result.sourceStartContextFrame, expectedRelativeOnsetFrame,
-        actualRelativeOnsets, masterRelativeOnset, masterSum, trackRms: result.trackRms, diagnostics: result.diagnostics,
-        timing: result.timing, recentRuntimeEvents: result.runtimeEvents.slice(-40).map((event: any) => ({
+        actualRelativeOnsets, masterRelativeOnset, nativeStageRows, nativeServicePcm, masterSum,
+        trackRms: result.trackRms, diagnostics: result.diagnostics,
+        timing: { requestCount: result.timing.requestCount, acceptedWorkletResults: result.timing.acceptedWorkletResults,
+          missedDeadlines: result.timing.missedDeadlines, requestFailures: result.timing.requestFailures,
+          unaccountedRequestCount: result.timing.unaccountedRequestCount, missingMainResponses: result.timing.missingMainResponses,
+          missingWorkletResults: result.timing.missingWorkletResults, maxConcurrentMainServiceCalls: result.timing.maxConcurrentMainServiceCalls },
+        recentRuntimeEvents: result.runtimeEvents.slice(-12).map((event: any) => ({
           event: event.event, trackId: event.trackId, slotId: event.slotId, sequence: event.sequence,
-          reason: event.reason, error: event.error, accepted: event.accepted, inputBlockStartContextFrame: event.inputBlockStartContextFrame,
+          reason: event.reason, error: event.error, accepted: event.accepted,
           dueOutputFrame: event.dueOutputFrame, receivedOutputFrame: event.receivedOutputFrame,
         })) };
-      throw new Error(`Production Mixer ${label} alignment failed: expected all three measured taps at source+${expectedRelativeOnsetFrame} frames and master=sum(track1,track2): ${JSON.stringify(evidence)}`);
+      throw new Error(`Production Mixer ${label} alignment failed: expected all three measured taps and each native insert output at their calibrated source offsets: ${JSON.stringify(evidence)}`);
     }
     return { label, expectedPipelineFrames, sourceStartContextFrame: result.sourceStartContextFrame,
       expectedRelativeOnsetFrame, onsetContextFrames: onsets, relativeOnsetFrames: {
         track1: actualRelativeOnsets[0], track2: actualRelativeOnsets[1], master: masterRelativeOnset,
-      }, masterSumPcmDifferenceRms: masterSum.rmsDifference, masterSumComparedSamples: masterSum.comparedSamples };
+      }, nativeStageRows, nativeServicePcm,
+      masterSumPcmDifferenceRms: masterSum.rmsDifference, masterSumComparedSamples: masterSum.comparedSamples };
   });
   const bypassedOneNativeInsert = oneNativeInsert.map(track => track.id === 1
     ? { ...track, fxSlots: track.fxSlots.map(slot => ({ ...slot, enabled: false })) } : track);
