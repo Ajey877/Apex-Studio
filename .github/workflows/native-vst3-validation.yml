@@ -58,18 +58,19 @@ jobs:
         run: npm ci --legacy-peer-deps --ignore-scripts
       - name: Build the pinned native VST3 helper and MDA fixture
         run: npm run native:vst3:build
-      - name: Run only the RezFilter state/override test
-        run: node --import tsx --test --test-name-pattern="^RezFilter restores component and controller state in order, while normalized overrides reach native DSP$" tests/vst3Effects.test.mjs
+      - name: Run preceding effect tests, then the historical-path RezFilter test
+        run: node --import tsx --test --test-concurrency=1 --test-name-pattern="^(effect discovery is category-specific and real MDA stereo processing changes/bypasses actual audio|effect parameters, opaque plugin state and reopen retain identical actual DSP output|effect order is audible: delay then resonant filter differs from filter then delay|smoke-only native failure capture binds zero-output evidence to the exact helper instance and request|RezFilter restores component and controller state in order, while normalized overrides reach native DSP)$" tests/vst3Effects.test.mjs
         env:
-          APEX_REZFILTER_STATE_EVIDENCE: build/native-evidence/rezfilter-state-diagnostic.json
-      - name: Publish bounded same-instance evidence in the job summary
+          APEX_REZFILTER_ORIGINAL_PATH: '1'
+          APEX_REZFILTER_ORIGINAL_EVIDENCE: build/native-evidence/rezfilter-original-path.json
+      - name: Publish bounded original-path PCM evidence in the job summary
         if: always()
         shell: pwsh
         run: |
-          $evidence = 'build/native-evidence/rezfilter-state-diagnostic.json'
+          $evidence = 'build/native-evidence/rezfilter-original-path.json'
           if (Test-Path $evidence) {
-            Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value '## RezFilter same-instance block evidence'
-            Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value 'Per-block RMS is planar stereo input/output evidence from each measured helper instance. Controller values are captured immediately before and after each native process call. No component snapshots are taken during measurement.'
+            Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value '## Historical-path RezFilter per-block PCM evidence'
+            Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value 'The measured helper used no capture flags, no failure profiles, and no per-block native controller reads. It retained the historical post-process snapshot and separate component-state reopen. Per-block RMS was computed in JavaScript after the native run.'
             Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value '```json'
             Get-Content -Raw $evidence | Add-Content -Path $env:GITHUB_STEP_SUMMARY
             Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value '```'
@@ -80,6 +81,6 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: rezfilter-state-diagnostic-${{ github.run_id }}
-          path: build/native-evidence/rezfilter-state-diagnostic.json
+          name: rezfilter-original-path-${{ github.run_id }}
+          path: build/native-evidence/rezfilter-original-path.json
           if-no-files-found: warn
