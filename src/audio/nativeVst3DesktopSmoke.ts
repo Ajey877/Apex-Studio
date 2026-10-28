@@ -18,11 +18,13 @@ type MixerCaptureOptions = {
   includeMaster?: boolean;
   bypassMixerAfterMs?: number;
   bypassMixerTracks?: MixerTrack[];
+  /** Smoke-only taps after each native insert for diagnosing silent stages. */
+  includeNativeStages?: boolean;
 };
 type PlanarPcm = { left: Float32Array; right: Float32Array; frames: number; rms: number; startFrame: number | null };
 const captureModuleByContext = new WeakMap<BaseAudioContext, Promise<string>>();
 
-async function attachMixerCapture(instance: typeof audioEngine, trackId: number): Promise<MixerCapture> {
+async function attachMixerCapture(instance: typeof audioEngine, trackId: number, sourceOverride?: AudioNode): Promise<MixerCapture> {
   const context = instance.getContext() as AudioContext;
   const mixer = instance.getOrCreateMixerChannel(trackId);
   let module = captureModuleByContext.get(context);
@@ -58,7 +60,7 @@ async function attachMixerCapture(instance: typeof audioEngine, trackId: number)
   };
   const sink = context.createGain();
   sink.gain.value = 0;
-  const captureSource = trackId === 0 ? mixer.analyser : instance.getMixerRoutingOutputNode(trackId) ?? mixer.analyser;
+  const captureSource = sourceOverride ?? (trackId === 0 ? mixer.analyser : instance.getMixerRoutingOutputNode(trackId) ?? mixer.analyser);
   captureSource.connect(node); node.connect(sink); sink.connect(context.destination);
   return { blocks, node, sink, source: captureSource };
 }
@@ -269,6 +271,7 @@ function correlatedTimingSamples(run: any) {
     if (typeof event.requestId !== 'string' || !measuredRequestIds.has(event.requestId)) continue;
     const sample = sampleFor(event.requestId);
     if (event.event === 'worklet-submit') Object.assign(sample, {
+      trackId: event.trackId, slotId: event.slotId,
       inputBlockStartContextFrame: event.inputBlockStartContextFrame,
       rendererSubmissionContextFrame: event.submittedContextFrame,
       submittedOutputFrame: event.submittedOutputFrame, dueOutputFrame: event.dueOutputFrame,
@@ -305,6 +308,44 @@ function correlatedTimingSamples(run: any) {
     });
   }
   return [...samples.values()].slice(0, 8192);
+}
+
+function nativeServicePcmBySlot(run: any) {
+  const grouped = new Map<string, Record<string, any>[]>();
+  for (const sample of correlatedTimingSamples(run)) {
+    if (sample.trackId !== 1 || typeof sample.slotId !== 'string') continue;
+    const samples = grouped.get(sample.slotId) ?? [];
+    samples.push(sample);
+    grouped.set(sample.slotId, samples);
+  }
+  return Object.fromEntries([...grouped].map(([slotId, samples]) => {
+    const summarize = (field: string) => {
+      const values = samples.map(sample => Number(sample[field])).filter(Number.isFinite);
+      return { count: values.length, nonzero: values.filter(value => value > 1e-8).length,
+        min: values.length ? Math.min(...values) : null, max: values.length ? Math.max(...values) : null };
+    };
+    return [slotId, { requests: samples.length, inputRms: summarize('nativeServiceInputRms'),
+      outputRms: summarize('nativeServiceOutputRms') }];
+  }));
+}
+
+function compactMixerRunEvidence(run: any) {
+  const nativeStages = [...run.nativeStageCaptures].map(([slotId, capture]: [string, MixerCapture], index: number) => {
+    const onset = firstCapturedOnsetFrame(capture, run.sourceStartContextFrame,
+      run.sourceStartContextFrame + run.sampleRate);
+    const expectedRelativeOnsetFrame = 256 + (index + 1) * VST3_FX_PIPELINE_FRAMES;
+    return { slotId, expectedRelativeOnsetFrame,
+      actualRelativeOnsetFrame: onset === null ? null : onset - run.sourceStartContextFrame,
+      pcmRms: run.nativeStageRms[slotId],
+      signal: capturedSignalEvidence(capture, run.sourceStartContextFrame, expectedRelativeOnsetFrame, run.sampleRate) };
+  });
+  const timing = run.timing;
+  return { trackRms: run.trackRms, nativeStages, nativeServicePcm: nativeServicePcmBySlot(run),
+    timing: { requestCount: timing.requestCount, acceptedWorkletResults: timing.acceptedWorkletResults,
+      missedDeadlines: timing.missedDeadlines, unaccountedRequestCount: timing.unaccountedRequestCount,
+      missingMainResponses: timing.missingMainResponses, missingWorkletResults: timing.missingWorkletResults,
+      maxConcurrentMainServiceCalls: timing.maxConcurrentMainServiceCalls,
+      nativeServiceSessionCountAfterCleanup: timing.nativeServiceSessionCountAfterCleanup } };
 }
 
 function createDeterministicMixerInput(context: AudioContext): AudioBuffer {
@@ -367,6 +408,32 @@ function firstCapturedOnsetFrame(capture: MixerCapture, startFrame: number, endF
   return capturedOnsetInWindow(capture, startFrame, endFrame, threshold);
 }
 
+function capturedRmsInWindow(capture: MixerCapture, startFrame: number, endFrame: number) {
+  let square = 0, count = 0;
+  for (const block of capture.blocks) {
+    for (let offset = 0; offset < VST3_FX_BLOCK_FRAMES; offset++) {
+      const frame = block.frame + offset;
+      if (frame < startFrame || frame >= endFrame) continue;
+      const left = block.samples[offset] ?? 0;
+      const right = block.samples[VST3_FX_BLOCK_FRAMES + offset] ?? 0;
+      square += left * left + right * right;
+      count += 2;
+    }
+  }
+  return count ? Math.sqrt(square / count) : 0;
+}
+
+function capturedSignalEvidence(capture: MixerCapture, sourceStartFrame: number, expectedRelativeOnsetFrame: number, sampleRate: number) {
+  const expected = sourceStartFrame + expectedRelativeOnsetFrame;
+  const windowFrames = [VST3_FX_BLOCK_FRAMES, VST3_FX_BLOCK_FRAMES * 4, VST3_FX_BLOCK_FRAMES * 8];
+  return { onsetsByThreshold: Object.fromEntries([1e-12, 1e-9, 1e-6].map(threshold => {
+    const onset = firstCapturedOnsetFrame(capture, sourceStartFrame, sourceStartFrame + sampleRate, threshold);
+    return [String(threshold), onset === null ? null : onset - sourceStartFrame];
+  })),
+  windowRms: windowFrames.map(frames => ({ startRelativeFrame: expected, endRelativeFrame: expected + frames,
+    rms: capturedRmsInWindow(capture, expected, expected + frames) })) };
+}
+
 function compareCapturedMasterToTrackSum(captures: Map<number, MixerCapture>, startFrame: number, endFrame: number) {
   const blocksByTrack = new Map([...captures].map(([trackId, capture]) => [trackId,
     new Map(capture.blocks.map(block => [block.frame, block.samples]))]));
@@ -390,6 +457,7 @@ async function captureLiveMixerRun(instance: typeof audioEngine, channels: Chann
   const durationMs = options.durationMs ?? 1600;
   await context.resume();
   const taps = new Map<number, MixerCapture>();
+  const nativeStageTaps = new Map<string, MixerCapture>();
   const smokeApi = (globalThis as any).desktopApp?.vst3;
   if (typeof smokeApi?.smokeTimingSnapshot !== 'function') throw new Error('Smoke-only production IPC timing snapshot is unavailable');
   const targetSource = context.createBufferSource();
@@ -409,6 +477,17 @@ async function captureLiveMixerRun(instance: typeof audioEngine, channels: Chann
   await instance.play(channels, [], 'pat', undefined, mixer, 16);
   await context.resume();
   for (const trackId of options.includeMaster ? [0, 1, 2] : [1, 2]) taps.set(trackId, await attachMixerCapture(instance, trackId));
+  if (options.includeNativeStages) {
+    const nativeSlots = mixer.find(track => track.id === 1)?.fxSlots.filter(slot => slot.enabled && slot.type === 'vst3') ?? [];
+    const effectNodes = (instance.getOrCreateMixerChannel(1) as any).fxNodes as AudioNode[];
+    if (effectNodes.length !== nativeSlots.length) {
+      throw new Error(`Smoke-only native-stage tap mapping mismatch: ${effectNodes.length} prepared nodes for ${nativeSlots.length} enabled VST3 slots`);
+    }
+    for (let index = 0; index < nativeSlots.length; index++) {
+      const slot = nativeSlots[index]!;
+      nativeStageTaps.set(slot.id, await attachMixerCapture(instance, 1, effectNodes[index]!));
+    }
+  }
   targetSource.connect(targetGain); targetGain.connect(instance.getOrCreateMixerChannel(1).input);
   controlSource.connect(controlGain); controlGain.connect(instance.getOrCreateMixerChannel(2).input);
   const sourceStartTime = context.currentTime + 0.05;
@@ -457,6 +536,13 @@ async function captureLiveMixerRun(instance: typeof audioEngine, channels: Chann
     try { capture.source.disconnect(capture.node); } catch { /* the source may already have been removed */ }
     capture.node.disconnect(); capture.sink.disconnect();
   }
+  const nativeStagePcm = new Map<string, PlanarPcm>();
+  for (const [slotId, capture] of nativeStageTaps) {
+    nativeStagePcm.set(slotId, toPlanarPcm(capture.blocks, startedContextFrame, stoppedContextFrame));
+    capture.node.port.close();
+    try { capture.source.disconnect(capture.node); } catch { /* the source may already have been removed */ }
+    capture.node.disconnect(); capture.sink.disconnect();
+  }
   const ipcAfter = await smokeApi.smokeTimingSnapshot();
   const runtimeEvents = getNativeVst3MixerEffectSmokeTiming().slice(runtimeStart);
   const ipc = ipcAfter;
@@ -465,8 +551,10 @@ async function captureLiveMixerRun(instance: typeof audioEngine, channels: Chann
   const timing = summarizeMixerTiming(runtimeEvents, ipc, sampleRate, duration, startedAt, stoppedAt, stopRequestedAtRendererMs);
   return { pcm, tailRms, sampleRate, durationMs: duration, captureStartRendererMs: startedAt,
     captureEndRendererMs: stoppedAt, startedContextFrame, stoppedContextFrame, sourceStartContextFrame,
-    bypassUpdateAppliedContextFrame, playbackActiveAtEnd, captures: taps,
+    bypassUpdateAppliedContextFrame, playbackActiveAtEnd, captures: taps, nativeStageCaptures: nativeStageTaps,
+    nativeStagePcm,
     trackRms: Object.fromEntries([...pcm].map(([trackId, audio]) => [trackId, audio.rms])),
+    nativeStageRms: Object.fromEntries([...nativeStagePcm].map(([slotId, audio]) => [slotId, audio.rms])),
     diagnostics: getVst3MixerEffectDiagnostics(), timing, runtimeEvents, ipc };
 }
 
@@ -513,7 +601,27 @@ async function runPackagedMixerAcceptance(instance: typeof audioEngine) {
   const filterIdentity = discovered.plugins.find(plugin => plugin.name === 'mda RezFilter');
   if (!delayIdentity || !filterIdentity) throw new Error(`Redistributable MDA Mixer fixtures unavailable through packaged production IPC: ${JSON.stringify(discovered.errors)}`);
   const delay = await bridge.inspectEffect(delayIdentity);
-  const rezFilter = await bridge.inspectEffect(filterIdentity);
+  const inspectedRezFilter = await bridge.inspectEffect(filterIdentity);
+  // The pinned mda RezFilter leaves its LFO phase as processing-instance state.
+  // Its default envelope/LFO modulation can hold the cutoff closed for a
+  // nondeterministic startup interval, which is not native bridge latency. For
+  // onset/ordering acceptance only, disable both modulators and use a fixed,
+  // positive cutoff so the real effect is audibly responsive from its first
+  // processed block. This is a test-fixture state, not a change to user audio.
+  const rezFilterLatencyParameters = [
+    { id: 0, value: 0.8 },  // fixed cutoff above zero
+    { id: 1, value: 0.25 }, // stable, modest resonance
+    { id: 3, value: 0.5 },  // disable envelope-to-filter modulation
+    { id: 6, value: 0.5 },  // disable LFO-to-filter modulation
+    { id: 8, value: 0 },    // disable trigger mode
+    { id: 9, value: 1 },    // keep maximum cutoff above the fixed setting
+  ];
+  const rezFilterParameterMap = new Map<number, { id: number; value: number }>(
+    inspectedRezFilter.state.parameters.map(parameter => [parameter.id, parameter]));
+  for (const parameter of rezFilterLatencyParameters) rezFilterParameterMap.set(parameter.id, parameter);
+  const rezFilter = await bridge.inspectEffect(filterIdentity, {
+    ...inspectedRezFilter.state, parameters: [...rezFilterParameterMap.values()],
+  });
   const delayParameters = await bridge.describeEffect(delay);
   const feedbackMix = delayParameters.parameters.find(parameter => parameter.id === 4 && parameter.name === 'Fb Mix');
   if (!feedbackMix) throw new Error('The pinned mda Delay fixture no longer exposes the verified Fb Mix bypass parameter id 4');
@@ -545,10 +653,10 @@ async function runPackagedMixerAcceptance(instance: typeof audioEngine) {
     return result;
   };
 
-  const orderA = await run(ordered, 'Mixer order Delay → RezFilter');
-  const orderB = await run(reversed, 'Mixer order RezFilter → Delay');
-  const delayProcessed = await run(delayOnly, 'Mixer processed Delay');
-  const delayPassThrough = await run(delayBypassed, 'Mixer native Delay Fb Mix=0 bypass');
+  const orderA = await run(ordered, 'Mixer order Delay → RezFilter', { includeNativeStages: true });
+  const orderB = await run(reversed, 'Mixer order RezFilter → Delay', { includeNativeStages: true });
+  const delayProcessed = await run(delayOnly, 'Mixer processed Delay', { includeNativeStages: true });
+  const delayPassThrough = await run(delayBypassed, 'Mixer native Delay Fb Mix=0 bypass', { includeNativeStages: true });
   const removed = await run(noEffects, 'Mixer effect removal/restart');
 
   // Known-onset stereo buffers exercise the real per-track → routed master
@@ -558,7 +666,7 @@ async function runPackagedMixerAcceptance(instance: typeof audioEngine) {
   const onsetInputs = () => new Map([[1, createKnownOnsetInput(context, 0.08)], [2, createKnownOnsetInput(context, 0.035)]]);
   const oneNativeInsert = withSlots([makeSlot('latency-one-delay', bypassDelay)]);
   const twoNativeInserts = withSlots([makeSlot('latency-two-delay', bypassDelay), makeSlot('latency-two-filter', rezFilter)]);
-  const alignmentOptions = (): MixerCaptureOptions => ({ durationMs: 1050, inputBuffers: onsetInputs(), includeMaster: true });
+  const alignmentOptions = (): MixerCaptureOptions => ({ durationMs: 1050, inputBuffers: onsetInputs(), includeMaster: true, includeNativeStages: true });
   const zeroInsertAlignment = await run(noEffects, 'Mixer onset alignment zero inserts', alignmentOptions());
   const oneInsertAlignment = await run(oneNativeInsert, 'Mixer onset alignment one insert', alignmentOptions());
   const twoInsertAlignment = await run(twoNativeInserts, 'Mixer onset alignment two inserts', alignmentOptions());
@@ -575,23 +683,42 @@ async function runPackagedMixerAcceptance(instance: typeof audioEngine) {
     const actualRelativeOnsets = [1, 2].map(trackId => onsets[String(trackId)] === null ? null :
       Number(onsets[String(trackId)]) - result.sourceStartContextFrame);
     const masterRelativeOnset = onsets['0'] === null ? null : Number(onsets['0']) - result.sourceStartContextFrame;
+    const nativeStageRows = [...result.nativeStageCaptures].map(([slotId, capture]: [string, MixerCapture], index) => {
+      const onset = firstCapturedOnsetFrame(capture, result.sourceStartContextFrame,
+        result.sourceStartContextFrame + result.sampleRate);
+      const expectedRelativeOnsetFrame = 256 + (index + 1) * VST3_FX_PIPELINE_FRAMES;
+      return { slotId, expectedRelativeOnsetFrame,
+        actualRelativeOnsetFrame: onset === null ? null : onset - result.sourceStartContextFrame,
+        pcmRms: result.nativeStageRms[slotId],
+        signal: capturedSignalEvidence(capture, result.sourceStartContextFrame, expectedRelativeOnsetFrame, result.sampleRate) };
+    });
+    const nativeServicePcm = nativeServicePcmBySlot(result);
+    const tapSignalEvidence = Object.fromEntries([0, 1, 2].map(trackId => [trackId,
+      capturedSignalEvidence(result.captures.get(trackId), result.sourceStartContextFrame, expectedRelativeOnsetFrame, result.sampleRate)]));
     const masterSum = compareCapturedMasterToTrackSum(result.captures, result.sourceStartContextFrame + expectedRelativeOnsetFrame,
       result.sourceStartContextFrame + expectedRelativeOnsetFrame + VST3_FX_BLOCK_FRAMES * 8);
     if (actualRelativeOnsets.some(frame => frame !== expectedRelativeOnsetFrame) || masterRelativeOnset !== expectedRelativeOnsetFrame ||
+        nativeStageRows.some((stage: any) => stage.actualRelativeOnsetFrame !== stage.expectedRelativeOnsetFrame) ||
         masterSum.comparedSamples < VST3_FX_BLOCK_FRAMES * 2 || masterSum.rmsDifference > 1e-5) {
       const evidence = { onsets, sourceStartContextFrame: result.sourceStartContextFrame, expectedRelativeOnsetFrame,
-        actualRelativeOnsets, masterRelativeOnset, masterSum, trackRms: result.trackRms, diagnostics: result.diagnostics,
-        timing: result.timing, recentRuntimeEvents: result.runtimeEvents.slice(-40).map((event: any) => ({
+        actualRelativeOnsets, masterRelativeOnset, nativeStageRows, nativeServicePcm, tapSignalEvidence, masterSum,
+        trackRms: result.trackRms, diagnostics: result.diagnostics,
+        timing: { requestCount: result.timing.requestCount, acceptedWorkletResults: result.timing.acceptedWorkletResults,
+          missedDeadlines: result.timing.missedDeadlines, requestFailures: result.timing.requestFailures,
+          unaccountedRequestCount: result.timing.unaccountedRequestCount, missingMainResponses: result.timing.missingMainResponses,
+          missingWorkletResults: result.timing.missingWorkletResults, maxConcurrentMainServiceCalls: result.timing.maxConcurrentMainServiceCalls },
+        recentRuntimeEvents: result.runtimeEvents.slice(-12).map((event: any) => ({
           event: event.event, trackId: event.trackId, slotId: event.slotId, sequence: event.sequence,
-          reason: event.reason, error: event.error, accepted: event.accepted, inputBlockStartContextFrame: event.inputBlockStartContextFrame,
+          reason: event.reason, error: event.error, accepted: event.accepted,
           dueOutputFrame: event.dueOutputFrame, receivedOutputFrame: event.receivedOutputFrame,
         })) };
-      throw new Error(`Production Mixer ${label} alignment failed: expected all three measured taps at source+${expectedRelativeOnsetFrame} frames and master=sum(track1,track2): ${JSON.stringify(evidence)}`);
+      throw new Error(`Production Mixer ${label} alignment failed: expected all three measured taps and each native insert output at their calibrated source offsets: ${JSON.stringify(evidence)}`);
     }
     return { label, expectedPipelineFrames, sourceStartContextFrame: result.sourceStartContextFrame,
       expectedRelativeOnsetFrame, onsetContextFrames: onsets, relativeOnsetFrames: {
         track1: actualRelativeOnsets[0], track2: actualRelativeOnsets[1], master: masterRelativeOnset,
-      }, masterSumPcmDifferenceRms: masterSum.rmsDifference, masterSumComparedSamples: masterSum.comparedSamples };
+      }, nativeStageRows, nativeServicePcm,
+      masterSumPcmDifferenceRms: masterSum.rmsDifference, masterSumComparedSamples: masterSum.comparedSamples };
   });
   const bypassedOneNativeInsert = oneNativeInsert.map(track => track.id === 1
     ? { ...track, fxSlots: track.fxSlots.map(slot => ({ ...slot, enabled: false })) } : track);
@@ -622,7 +749,7 @@ async function runPackagedMixerAcceptance(instance: typeof audioEngine) {
     throw new Error(`Dynamic bypass did not occur between the two deterministic source bursts: ${JSON.stringify({ applied: dynamicBypass.bypassUpdateAppliedContextFrame, firstBypassBurstFrame, secondBypassBurstFrame })}`);
   }
   const acceptanceTimingEvidence = JSON.stringify(Object.fromEntries(Object.entries({ orderA, orderB, delayProcessed, delayPassThrough, removed })
-    .map(([label, result]) => [label, { timing: result.timing, timingSamples: correlatedTimingSamples(result).slice(0, 16) }])));
+    .map(([label, result]) => [label, compactMixerRunEvidence(result)])));
   let orderDifference: ReturnType<typeof compareMixerRuns>, controlDifference: ReturnType<typeof compareMixerRuns>;
   let processedVsBypass: ReturnType<typeof compareMixerRuns>, bypassVsRemoved: ReturnType<typeof compareMixerRuns>;
   try {
@@ -660,6 +787,8 @@ async function runPackagedMixerAcceptance(instance: typeof audioEngine) {
     pipelineMsPerEffect: VST3_FX_PIPELINE_FRAMES * 1000 / orderA.sampleRate,
     deadlineReference: '1024 frames = 21.33 ms at 48 kHz; existing two-block Mixer pipeline = 2048 frames = 42.67 ms per effect; no delay increase was made.',
     latencyCompensation: 'Before each Mixer bus FX chain, direct producers and every routed/aux child branch are delayed to the slowest incoming fixed native-bridge path. Each prepared native insert contributes exactly 2048 frames; bypass retains that budget while its prepared worklet remains in the chain. Plugin-reported nonzero latency remains unsupported. Offline rendering sets this live-only compensation budget to zero and processes effects on project frames.',
+    latencyFixture: { plugin: rezFilter.name, parameters: rezFilterLatencyParameters,
+      reason: 'LFO/envelope modulation disabled and cutoff fixed positive so onset timing measures the bridge pipeline, not variable plugin startup silence.' },
     latencyAlignmentRegression: alignmentRows,
     priorPlaywrightBridgeReference: { approximatelyMs: 28, measurement: 'test-only page.exposeFunction bridge; separate from this production IPC/preload/helper measurement' },
     orderDifferenceRms: orderDifference.rmsDifference, orderOffsetFrames: orderDifference.normalizedLagFrames,
