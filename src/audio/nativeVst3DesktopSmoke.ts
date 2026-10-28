@@ -339,10 +339,19 @@ function nativeServicePcmBySlot(run: any) {
 }
 
 function nativeEffectOpenEvidence(run: any) {
-  return (run.runtimeEvents as Array<Record<string, any>>).filter(event => event.event === 'native-effect-open')
+  const events = (run.runtimeEvents as Array<Record<string, any>>).filter(event => event.event === 'native-effect-open')
     .map(({ trackId, slotId, runtimeId, classId, parameterEvidence, nativeInstanceEvidence }) => ({
       trackId, slotId, runtimeId, classId, parameterEvidence, nativeInstanceEvidence,
     }));
+  if (events.length) return events;
+  return (run.diagnostics as Array<Record<string, any>>).flatMap(diagnostic => {
+    if (typeof diagnostic.message !== 'string') return [];
+    const match = diagnostic.message.match(/Smoke parameter state: (\{.*\})\.$/);
+    if (!match) return [];
+    try {
+      return [{ trackId: diagnostic.trackId, slotId: diagnostic.slotId, ...JSON.parse(match[1]!) }];
+    } catch { return [{ trackId: diagnostic.trackId, slotId: diagnostic.slotId, invalidEvidence: true }]; }
+  });
 }
 
 function compactMixerRunEvidence(run: any) {
