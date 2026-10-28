@@ -117,6 +117,26 @@ test('effect order is audible: delay then resonant filter differs from filter th
   assert.ok(difference(delayThenAmbience, ambienceThenDelay) > 1e-4);
 });
 
+test('an active native effect instance can be snapshotted after real processing without opening a substitute instance', async () => {
+  const service = new Vst3Service(executable, [root]);
+  const owner = 'active-effect-snapshot-test';
+  const parameters = [
+    { id: 0, value: 0.8 }, { id: 1, value: 0.25 }, { id: 3, value: 0.5 },
+    { id: 6, value: 0.5 }, { id: 8, value: 0 }, { id: 9, value: 1 },
+  ];
+  const opened = await service.open({ ...rezFilter, state: { schema: 1, classId: rezFilter.classId, parameters } },
+    sampleRate, 'realtime', owner, 'effect');
+  try {
+    const output = await service.processAudio(opened.id, 1024, makeAudio(1024), 120, owner);
+    assert.ok(rms(output) > 0, 'the active native session produces known-signal PCM');
+    const snapshot = await service.snapshotEffect(opened.id, owner);
+    assert.equal(snapshot.classId, rezFilter.classId);
+    const values = new Map(snapshot.parameters.map(parameter => [parameter.id, parameter.value]));
+    for (const parameter of parameters) assert.equal(values.get(parameter.id), parameter.value);
+    await assert.rejects(service.snapshotEffect(opened.id, 'different-owner'), /belongs to another renderer/);
+  } finally { await service.close(opened.id, owner); }
+});
+
 test('RezFilter restores component and controller state in order, while normalized overrides reach native DSP', async () => {
   const service = new Vst3Service(executable, [root]);
   const requested = [

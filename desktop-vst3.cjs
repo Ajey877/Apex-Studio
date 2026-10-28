@@ -147,10 +147,13 @@ function registerVst3({ app, ipcMain, dialog, getWindow }) {
       if (remaining === 0) activeCallsByEffect.delete(effectKey); else activeCallsByEffect.set(effectKey, remaining);
     }
   });
-  if (smokeTimingEnabled) handle('smokeTimingSnapshot', context => ({
-    processAudio: smokeProcessAudioTimings.slice(), maximumConcurrentProcessAudioCalls,
-    maximumConcurrentCallsPerEffect, activeProcessAudioCalls, nativeServiceSessionCount: context.service.sessionCount,
-  }));
+  if (smokeTimingEnabled) {
+    handle('smokeEffectSnapshot', (context, owner, id) => context.service.snapshotEffect(id, owner));
+    handle('smokeTimingSnapshot', context => ({
+      processAudio: smokeProcessAudioTimings.slice(), maximumConcurrentProcessAudioCalls,
+      maximumConcurrentCallsPerEffect, activeProcessAudioCalls, nativeServiceSessionCount: context.service.sessionCount,
+    }));
+  }
   handle('close', (context, owner, id) => context.service.close(id, owner));
   app.on('web-contents-created', (_event, contents) => {
     const close = () => { void ready.then(({ service }) => service.closeOwner(String(contents.id))).catch(() => {}); };

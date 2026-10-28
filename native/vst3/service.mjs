@@ -118,6 +118,11 @@ export class Vst3Service {
     try { return { parameters: opened.parameters, controllerAvailable: opened.controllerAvailable }; }
     finally { await this.close(opened.id, owner); }
   }
+  async snapshotEffect(id, owner = 'local') {
+    const session = this.#session(id, owner);
+    if (session.kind !== 'effect' || session.processing) throw new Error('VST3 effect snapshot requires an idle effect session');
+    return session.client.snapshot();
+  }
   async inspectEffect(plugin, state, owner = 'local') {
     const effect = { ...plugin, ...(state === undefined ? {} : { state }) };
     const opened = await this.open(effect, 48000, 'offline', owner, 'effect');

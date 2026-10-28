@@ -46,6 +46,7 @@ const desktopApi = {
   }
 };
 if (smokeTest) {
+  desktopApi.vst3.smokeEffectSnapshot = id => ipcRenderer.invoke('vst3:smokeEffectSnapshot', id);
   desktopApi.vst3.smokeTimingSnapshot = async () => ({
     preload: smokeIpcMeasurements.slice(),
     main: await ipcRenderer.invoke('vst3:smokeTimingSnapshot'),

@@ -340,8 +340,8 @@ function nativeServicePcmBySlot(run: any) {
 
 function nativeEffectOpenEvidence(run: any) {
   return (run.runtimeEvents as Array<Record<string, any>>).filter(event => event.event === 'native-effect-open')
-    .map(({ trackId, slotId, runtimeId, classId, parameterEvidence }) => ({
-      trackId, slotId, runtimeId, classId, parameterEvidence,
+    .map(({ trackId, slotId, runtimeId, classId, parameterEvidence, nativeInstanceEvidence }) => ({
+      trackId, slotId, runtimeId, classId, parameterEvidence, nativeInstanceEvidence,
     }));
 }
 
@@ -754,7 +754,8 @@ async function runPackagedMixerAcceptance(instance: typeof audioEngine, persiste
         nativeStageRows.some((stage: any) => stage.actualRelativeOnsetFrame !== stage.expectedRelativeOnsetFrame) ||
         masterSum.comparedSamples < VST3_FX_BLOCK_FRAMES * 2 || masterSum.rmsDifference > 1e-5) {
       const evidence = { onsets, sourceStartContextFrame: result.sourceStartContextFrame, expectedRelativeOnsetFrame,
-        actualRelativeOnsets, masterRelativeOnset, nativeStageRows, nativeServicePcm, tapSignalEvidence, masterSum,
+        actualRelativeOnsets, masterRelativeOnset, nativeStageRows, nativeServicePcm,
+        nativeEffectOpenEvidence: nativeEffectOpenEvidence(result), tapSignalEvidence, masterSum,
         trackRms: result.trackRms, diagnostics: result.diagnostics,
         timing: { requestCount: result.timing.requestCount, acceptedWorkletResults: result.timing.acceptedWorkletResults,
           missedDeadlines: result.timing.missedDeadlines, requestFailures: result.timing.requestFailures,

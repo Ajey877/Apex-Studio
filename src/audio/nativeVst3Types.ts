@@ -65,6 +65,8 @@ export interface Vst3Bridge {
   open(instrument: Vst3Instrument | Vst3Effect, sampleRate: number, mode: 'realtime' | 'offline', kind?: 'instrument' | 'effect'): Promise<{ id: string; latencySamples: number; parameters?: Vst3Parameter[] }>;
   process(id: string, frames: number, events: Vst3Event[], bpm: number, parameters?: Vst3ParameterPoint[]): Promise<Float32Array>;
   processAudio(id: string, frames: number, audio: Float32Array, bpm: number, parameters?: Vst3ParameterPoint[], profile?: Vst3AudioProcessProfile): Promise<Float32Array>;
+  /** Smoke-only snapshot of the already-open native effect instance; not exposed in regular desktop sessions. */
+  smokeEffectSnapshot?(id: string): Promise<Vst3State>;
   close(id: string): Promise<void>;
 }
 export function getVst3Bridge(): Vst3Bridge | undefined {
