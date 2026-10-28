@@ -21,6 +21,20 @@ function registerVst3({ app, ipcMain, dialog, getWindow }) {
     }
     return Math.sqrt(square / value.length);
   };
+  const stereoPcmMetrics = (value, frames) => {
+    if (!value || value.length !== frames * 2) return null;
+    let leftSquare = 0, rightSquare = 0, sumSquare = 0, differenceSquare = 0;
+    for (let index = 0; index < frames; index++) {
+      const left = Number(value[index]), right = Number(value[frames + index]);
+      if (!Number.isFinite(left) || !Number.isFinite(right)) return null;
+      leftSquare += left * left;
+      rightSquare += right * right;
+      sumSquare += (left + right) * (left + right);
+      differenceSquare += (left - right) * (left - right);
+    }
+    return { leftRms: Math.sqrt(leftSquare / frames), rightRms: Math.sqrt(rightSquare / frames),
+      monoSumRms: Math.sqrt(sumSquare / frames), monoDifferenceRms: Math.sqrt(differenceSquare / frames) };
+  };
   const readProfile = value => {
     if (!smokeTimingEnabled || !value || typeof value !== 'object' ||
       typeof value.requestId !== 'string' || value.requestId.length > 180 ||
@@ -102,13 +116,16 @@ function registerVst3({ app, ipcMain, dialog, getWindow }) {
     activeCallsByEffect.set(effectKey, activeForEffectAtStart);
     maximumConcurrentProcessAudioCalls = Math.max(maximumConcurrentProcessAudioCalls, activeAtStart);
     maximumConcurrentCallsPerEffect = Math.max(maximumConcurrentCallsPerEffect, activeForEffectAtStart);
+    const inputChannels = stereoPcmMetrics(audio, frames);
     try {
       const pcm = await context.service.processAudio(id, frames, audio, bpm, owner, parameters);
       const serviceCompletedAtMainMs = performance.now();
       if (smokeProcessAudioTimings.length < 8192) smokeProcessAudioTimings.push({
         ...profile, frames, ipcReceivedAtMainMs: ipcTiming?.ipcReceivedAtMainMs ?? serviceStartAtMainMs,
         serviceStartAtMainMs, serviceCompletedAtMainMs, nativeServiceCallMs: serviceCompletedAtMainMs - serviceStartAtMainMs,
-        nativeInputRms: pcmRms(audio), nativeOutputRms: pcmRms(pcm),
+        nativeInputRms: pcmRms(audio), nativeInputLeftRms: inputChannels?.leftRms ?? null,
+        nativeInputRightRms: inputChannels?.rightRms ?? null, nativeInputMonoSumRms: inputChannels?.monoSumRms ?? null,
+        nativeInputMonoDifferenceRms: inputChannels?.monoDifferenceRms ?? null, nativeOutputRms: pcmRms(pcm),
         activeProcessAudioCallsAtStart: activeAtStart, activeCallsForEffectAtStart: activeForEffectAtStart, error: null,
       });
       return pcm;
@@ -117,7 +134,9 @@ function registerVst3({ app, ipcMain, dialog, getWindow }) {
       if (smokeProcessAudioTimings.length < 8192) smokeProcessAudioTimings.push({
         ...profile, frames, ipcReceivedAtMainMs: ipcTiming?.ipcReceivedAtMainMs ?? serviceStartAtMainMs,
         serviceStartAtMainMs, serviceCompletedAtMainMs, nativeServiceCallMs: serviceCompletedAtMainMs - serviceStartAtMainMs,
-        nativeInputRms: pcmRms(audio), nativeOutputRms: null,
+        nativeInputRms: pcmRms(audio), nativeInputLeftRms: inputChannels?.leftRms ?? null,
+        nativeInputRightRms: inputChannels?.rightRms ?? null, nativeInputMonoSumRms: inputChannels?.monoSumRms ?? null,
+        nativeInputMonoDifferenceRms: inputChannels?.monoDifferenceRms ?? null, nativeOutputRms: null,
         activeProcessAudioCallsAtStart: activeAtStart, activeCallsForEffectAtStart: activeForEffectAtStart,
         error: error instanceof Error ? error.message : String(error),
       });

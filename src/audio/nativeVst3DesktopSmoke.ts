@@ -205,7 +205,10 @@ function summarizeMixerTiming(events: ReturnType<typeof getNativeVst3MixerEffect
       preloadInvokedAtMs: preloadRecord?.invokeStartedAt, preloadReturnedAtMs: preloadRecord?.responseReceivedAt,
       mainReceivedAtMs: mainRecord?.ipcReceivedAtMainMs, nativeStartedAtMs: mainRecord?.serviceStartAtMainMs,
       nativeCompletedAtMs: mainRecord?.serviceCompletedAtMainMs,
-      nativeInputRms: mainRecord?.nativeInputRms, nativeOutputRms: mainRecord?.nativeOutputRms, mainError: mainRecord?.error,
+      nativeInputRms: mainRecord?.nativeInputRms, nativeInputLeftRms: mainRecord?.nativeInputLeftRms,
+      nativeInputRightRms: mainRecord?.nativeInputRightRms, nativeInputMonoSumRms: mainRecord?.nativeInputMonoSumRms,
+      nativeInputMonoDifferenceRms: mainRecord?.nativeInputMonoDifferenceRms,
+      nativeOutputRms: mainRecord?.nativeOutputRms, mainError: mainRecord?.error,
       rendererResponseAtMs: rendererResponse?.bridgeResponseAt, workletResultAtMs: result?.rendererAtMs,
       workletAccepted: result?.accepted, stopAck: stopAck ? { sequence: stopAck.sequence, reason: stopAck.reason } : null,
       stopCancellation: stopCancel ? { stage: stopCancel.cancellationStage, reason: stopCancel.reason } : null,
@@ -303,7 +306,10 @@ function correlatedTimingSamples(run: any) {
     Object.assign(sampleFor(event.requestId), {
       mainIpcReceivedAtMs: event.ipcReceivedAtMainMs, mainNativeServiceStartedAtMs: event.serviceStartAtMainMs,
       mainNativeServiceCompletedAtMs: event.serviceCompletedAtMainMs, nativeServiceCallMs: event.nativeServiceCallMs,
-      nativeServiceInputRms: event.nativeInputRms, nativeServiceOutputRms: event.nativeOutputRms,
+      nativeServiceInputRms: event.nativeInputRms, nativeServiceInputLeftRms: event.nativeInputLeftRms,
+      nativeServiceInputRightRms: event.nativeInputRightRms, nativeServiceInputMonoSumRms: event.nativeInputMonoSumRms,
+      nativeServiceInputMonoDifferenceRms: event.nativeInputMonoDifferenceRms,
+      nativeServiceOutputRms: event.nativeOutputRms,
       concurrentCallsForEffectAtStart: event.activeCallsForEffectAtStart, nativeServiceError: event.error,
     });
   }
@@ -325,6 +331,9 @@ function nativeServicePcmBySlot(run: any) {
         min: values.length ? Math.min(...values) : null, max: values.length ? Math.max(...values) : null };
     };
     return [slotId, { requests: samples.length, inputRms: summarize('nativeServiceInputRms'),
+      inputLeftRms: summarize('nativeServiceInputLeftRms'), inputRightRms: summarize('nativeServiceInputRightRms'),
+      inputMonoSumRms: summarize('nativeServiceInputMonoSumRms'),
+      inputMonoDifferenceRms: summarize('nativeServiceInputMonoDifferenceRms'),
       outputRms: summarize('nativeServiceOutputRms') }];
   }));
 }
