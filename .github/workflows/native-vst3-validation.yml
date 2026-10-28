@@ -59,7 +59,8 @@ jobs:
       - name: Build the pinned native VST3 helper and MDA fixture
         run: npm run native:vst3:build
       - name: Run preceding effect tests, then the historical-path RezFilter test
-        run: node --import tsx --test --test-concurrency=1 --test-name-pattern="^(effect discovery is category-specific and real MDA stereo processing changes/bypasses actual audio|effect parameters, opaque plugin state and reopen retain identical actual DSP output|effect order is audible: delay then resonant filter differs from filter then delay|smoke-only native failure capture binds zero-output evidence to the exact helper instance and request|RezFilter restores component and controller state in order, while normalized overrides reach native DSP)$" tests/vst3Effects.test.mjs
+        run: >-
+          node --import tsx --test --test-concurrency=1 --test-name-pattern="^(effect discovery is category-specific and real MDA stereo processing changes/bypasses actual audio|effect parameters, opaque plugin state and reopen retain identical actual DSP output|effect order is audible: delay then resonant filter differs from filter then delay|smoke-only native failure capture binds zero-output evidence to the exact helper instance and request|RezFilter restores component and controller state in order, while normalized overrides reach native DSP)$" tests/vst3Effects.test.mjs
         env:
           APEX_REZFILTER_ORIGINAL_PATH: '1'
           APEX_REZFILTER_ORIGINAL_EVIDENCE: build/native-evidence/rezfilter-original-path.json
