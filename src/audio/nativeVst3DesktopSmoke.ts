@@ -601,7 +601,27 @@ async function runPackagedMixerAcceptance(instance: typeof audioEngine) {
   const filterIdentity = discovered.plugins.find(plugin => plugin.name === 'mda RezFilter');
   if (!delayIdentity || !filterIdentity) throw new Error(`Redistributable MDA Mixer fixtures unavailable through packaged production IPC: ${JSON.stringify(discovered.errors)}`);
   const delay = await bridge.inspectEffect(delayIdentity);
-  const rezFilter = await bridge.inspectEffect(filterIdentity);
+  const inspectedRezFilter = await bridge.inspectEffect(filterIdentity);
+  // The pinned mda RezFilter leaves its LFO phase as processing-instance state.
+  // Its default envelope/LFO modulation can hold the cutoff closed for a
+  // nondeterministic startup interval, which is not native bridge latency. For
+  // onset/ordering acceptance only, disable both modulators and use a fixed,
+  // positive cutoff so the real effect is audibly responsive from its first
+  // processed block. This is a test-fixture state, not a change to user audio.
+  const rezFilterLatencyParameters = [
+    { id: 0, value: 0.8 },  // fixed cutoff above zero
+    { id: 1, value: 0.25 }, // stable, modest resonance
+    { id: 3, value: 0.5 },  // disable envelope-to-filter modulation
+    { id: 6, value: 0.5 },  // disable LFO-to-filter modulation
+    { id: 8, value: 0 },    // disable trigger mode
+    { id: 9, value: 1 },    // keep maximum cutoff above the fixed setting
+  ];
+  const rezFilterParameterMap = new Map<number, { id: number; value: number }>(
+    inspectedRezFilter.state.parameters.map(parameter => [parameter.id, parameter]));
+  for (const parameter of rezFilterLatencyParameters) rezFilterParameterMap.set(parameter.id, parameter);
+  const rezFilter = await bridge.inspectEffect(filterIdentity, {
+    ...inspectedRezFilter.state, parameters: [...rezFilterParameterMap.values()],
+  });
   const delayParameters = await bridge.describeEffect(delay);
   const feedbackMix = delayParameters.parameters.find(parameter => parameter.id === 4 && parameter.name === 'Fb Mix');
   if (!feedbackMix) throw new Error('The pinned mda Delay fixture no longer exposes the verified Fb Mix bypass parameter id 4');
@@ -767,6 +787,8 @@ async function runPackagedMixerAcceptance(instance: typeof audioEngine) {
     pipelineMsPerEffect: VST3_FX_PIPELINE_FRAMES * 1000 / orderA.sampleRate,
     deadlineReference: '1024 frames = 21.33 ms at 48 kHz; existing two-block Mixer pipeline = 2048 frames = 42.67 ms per effect; no delay increase was made.',
     latencyCompensation: 'Before each Mixer bus FX chain, direct producers and every routed/aux child branch are delayed to the slowest incoming fixed native-bridge path. Each prepared native insert contributes exactly 2048 frames; bypass retains that budget while its prepared worklet remains in the chain. Plugin-reported nonzero latency remains unsupported. Offline rendering sets this live-only compensation budget to zero and processes effects on project frames.',
+    latencyFixture: { plugin: rezFilter.name, parameters: rezFilterLatencyParameters,
+      reason: 'LFO/envelope modulation disabled and cutoff fixed positive so onset timing measures the bridge pipeline, not variable plugin startup silence.' },
     latencyAlignmentRegression: alignmentRows,
     priorPlaywrightBridgeReference: { approximatelyMs: 28, measurement: 'test-only page.exposeFunction bridge; separate from this production IPC/preload/helper measurement' },
     orderDifferenceRms: orderDifference.rmsDifference, orderOffsetFrames: orderDifference.normalizedLagFrames,
