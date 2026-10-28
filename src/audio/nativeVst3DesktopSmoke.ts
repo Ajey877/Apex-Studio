@@ -811,6 +811,7 @@ async function runPackagedMixerAcceptance(instance: typeof audioEngine, persiste
     }
     savedProjectReopenEvidence = {
       restoredState: restoredMixerParameterEvidence,
+      nativeEffectOpenEvidence: nativeEffectOpenEvidence(reopenedMixer),
       sourceStartContextFrame: reopenedMixer.sourceStartContextFrame,
       expectedRelativeOnsetFrame, relativeOnsets, nativeStageRows, nativeServicePcm,
       masterSumPcmDifferenceRms: masterSum.rmsDifference, masterSumComparedSamples: masterSum.comparedSamples,
