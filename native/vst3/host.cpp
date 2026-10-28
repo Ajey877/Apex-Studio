@@ -192,11 +192,17 @@ class Instance {
   std::map<ParamID, ParamValue> overrides;
   std::map<ParamID, ParamValue> pendingEffectParameters;
   bool captureFailureEvidence = false;
+  // Separate opt-in test audit; never enabled by the real-time smoke profile.
+  bool captureBlockAudit = false;
+  uint64_t auditedBlocks = 0;
+  std::set<ParamID> blockAuditParameterIds;
+  bool blockAuditParametersTruncated = false;
   bool failureEvidenceCaptured = false;
   bool firstProcessObserved = false;
   json stateApplicationEvidence = json::object();
   json firstProcessEvidence = nullptr;
   json failureEvidence = nullptr;
+  json blockEvidence = nullptr;
   std::string classId;
   double sampleRate = 48000;
   int mode = kOffline;
@@ -214,6 +220,11 @@ public:
   json takeFirstProcessEvidence() {
     json evidence = std::move(firstProcessEvidence);
     firstProcessEvidence = nullptr;
+    return evidence;
+  }
+  json takeBlockEvidence() {
+    json evidence = std::move(blockEvidence);
+    blockEvidence = nullptr;
     return evidence;
   }
   ~Instance() {
@@ -242,6 +253,7 @@ public:
       require(kind == "instrument" || kind == "effect", "Unknown VST3 plugin kind");
       isInstrument = kind == "instrument";
       captureFailureEvidence = !isInstrument && request.value("captureFailureEvidence", false);
+      captureBlockAudit = captureFailureEvidence && request.value("captureBlockAudit", false);
       require(isInstrument ? instrument(info) : audioEffect(info), isInstrument ? "Selected class is not a VST3 instrument" : "Selected class is not a VST3 audio effect");
       provider = owned(new PlugProvider(factory, info, true));
       require(provider->initialize(), "Plugin component/controller initialization failed");
@@ -295,6 +307,24 @@ public:
         parameterInfo.push_back(info);
         if (info.flags & ParameterInfo::kIsReadOnly) readOnlyIds.insert(info.id);
       }
+    }
+    if (captureBlockAudit && request.contains("diagnosticParameterIds")) {
+      const auto& ids = request.at("diagnosticParameterIds");
+      require(ids.is_array() && ids.size() <= 64, "Invalid native block-audit parameter selection");
+      for (const auto& value : ids) {
+        require(value.is_number_integer(), "Invalid native block-audit parameter ID");
+        const auto rawId = value.get<int64_t>();
+        require(rawId >= 0 && rawId <= UINT32_MAX, "Invalid native block-audit parameter ID");
+        const auto id = static_cast<ParamID>(rawId);
+        require(parameterIds.count(id) != 0, "Unknown native block-audit parameter ID");
+        blockAuditParameterIds.insert(id);
+      }
+    } else if (captureBlockAudit) {
+      for (const auto& info : parameterInfo) {
+        if (blockAuditParameterIds.size() == 64) break;
+        blockAuditParameterIds.insert(info.id);
+      }
+      blockAuditParametersTruncated = parameterInfo.size() > blockAuditParameterIds.size();
     }
     if (captureFailureEvidence) {
       const json inputState = request.value("state", json::object());
@@ -588,7 +618,19 @@ public:
     data.inputEvents = &events; data.outputEvents = &outputEvents;
     data.inputParameterChanges = &parameters; data.outputParameterChanges = &outputParameters;
     data.processContext = &context;
+    const bool auditCurrentBlock = captureBlockAudit && !isInstrument && frames > 0 && auditedBlocks < 64;
+    const std::set<ParamID> auditedParameterIds = auditCurrentBlock ? blockAuditParameterIds : std::set<ParamID>{};
+    auto readAuditedParameters = [&]() {
+      json values = json::array();
+      for (const auto id : auditedParameterIds) {
+        const auto value = controller->getParamNormalized(id);
+        values.push_back({{"id", id}, {"value", std::isfinite(value) && value >= 0 && value <= 1 ? json(value) : json(nullptr)}});
+      }
+      return json{{"values", values}, {"truncated", blockAuditParametersTruncated}};
+    };
+    const json parametersBeforeProcess = auditCurrentBlock ? readAuditedParameters() : json(nullptr);
     checked(processor->process(data), "Plugin process failed");
+    const json parametersAfterProcess = auditCurrentBlock ? readAuditedParameters() : json(nullptr);
     if (captureFailureEvidence && !firstProcessEvidence.is_null()) {
       stateApplicationEvidence["firstProcess"]["processorCallResult"] = "kResultOk";
       firstProcessEvidence["processorCallResult"] = "kResultOk";
@@ -610,6 +652,24 @@ public:
         require(std::isfinite(sample), "Plugin produced non-finite audio");
         pcm[ch * frames + i] = sample;
       }
+    }
+    if (auditCurrentBlock) {
+      json parameterOrder = json::array();
+      if (!queuedSavedEffectParameters.empty()) parameterOrder.push_back("queue saved normalized overrides");
+      if (!requestedProcessParameters.empty()) parameterOrder.push_back("apply request parameter overrides");
+      parameterOrder.push_back("read controller normalized values before processor.process");
+      parameterOrder.push_back("processor.process");
+      parameterOrder.push_back("read controller normalized values after processor.process");
+      blockEvidence = {{"schema", 1}, {"blockIndex", processBlockIndex}, {"frameIndex", processCursorStart}, {"frames", frames},
+        {"processingMode", mode == kRealtime ? "realtime" : "offline"},
+        {"requestProfile", validFailureProfile ? json{{"requestId", failureProfile.value("requestId", std::string())},
+          {"sequence", failureProfile.value("sequence", -1)}, {"slotId", failureProfile.value("slotId", std::string())}} : json(nullptr)},
+        {"input", stereoMetrics(inputAudio, frames)}, {"output", stereoMetrics(pcm, frames)},
+        {"outputSilenceFlags", output.silenceFlags}, {"outputChannels", output.numChannels},
+        {"parameterApplicationOrder", parameterOrder},
+        {"controllerParametersBeforeProcess", parametersBeforeProcess},
+        {"controllerParametersAfterProcess", parametersAfterProcess}};
+      ++auditedBlocks;
     }
     if (captureFailureEvidence) ++processedBlocks;
     const auto inputPeak = diagnosticCandidate ? std::max_element(inputAudio.begin(), inputAudio.end(),
@@ -747,6 +807,8 @@ int main() {
         if (!firstProcessEvidence.is_null()) response["firstProcessEvidence"] = firstProcessEvidence;
         const auto failureEvidence = instance->takeFailureEvidence();
         if (!failureEvidence.is_null()) response["failureEvidence"] = failureEvidence;
+        const auto blockEvidence = instance->takeBlockEvidence();
+        if (!blockEvidence.is_null()) response["blockEvidence"] = blockEvidence;
         reply(response, pcm);
       } else if (command == "parameters") {
         require(bool(instance), "No plugin instance loaded");

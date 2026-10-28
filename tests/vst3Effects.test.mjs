@@ -3,7 +3,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
-import { existsSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { NativeVst3Client, discoverVst3 } from '../native/vst3/client.mjs';
 import { Vst3Service } from '../native/vst3/service.mjs';
 
@@ -193,29 +194,75 @@ test('RezFilter restores component and controller state in order, while normaliz
     seedState.value = state;
     return input;
   };
-  const run = async state => {
+  const diagnosticCases = [];
+  const evidencePath = process.env.APEX_REZFILTER_STATE_EVIDENCE;
+  const saveDiagnostic = () => {
+    if (!evidencePath) return;
+    mkdirSync(path.dirname(evidencePath), { recursive: true });
+    writeFileSync(evidencePath, `${JSON.stringify({
+      schema: 1,
+      test: 'RezFilter restores component and controller state in order, while normalized overrides reach native DSP',
+      pluginClassId: rezFilter.classId,
+      capture: 'passive same-instance per-block native controller readbacks and stereo input/output RMS; no snapshot/suspension during measured blocks',
+      cases: diagnosticCases,
+    })}\n`);
+  };
+  const run = async (caseName, state) => {
     const client = new NativeVst3Client(executable);
+    const helperSessionId = randomUUID();
+    const runtimeId = `rezfilter-state-${randomUUID()}`;
+    const slotId = `rezfilter-${caseName}`;
     try {
-      const { plugin: opened } = await client.open(rezFilter, { kind: 'effect', sampleRate, state });
+      const { plugin: opened } = await client.open(rezFilter, {
+        kind: 'effect', sampleRate, state, captureFailureEvidence: true, captureBlockAudit: true,
+        diagnosticParameterIds: requested.map(({ id }) => id),
+      });
       const observed = new Map(opened.parameters.map(parameter => [parameter.id, parameter.currentValue]));
       const blocks = [];
+      const blockEvidence = [];
+      let firstProcessEvidence = null;
+      let failureEvidence = null;
       const seedState = { value: 0x2c1b3c6d };
       for (let start = 0; start < 50 * 1024; start += 1024) {
-        const output = (await client.processAudio(1024, makeNoiseBlock(start, seedState))).samples;
-        blocks.push(output);
+        const sequence = start / 1024;
+        const requestProfile = {
+          requestId: `${runtimeId}:${sequence}`, trackId: 1, slotId, sequence,
+          inputBlockStartContextFrame: start, submittedContextFrame: start + 1024,
+          submittedOutputFrame: start + 1024, dueOutputFrame: start + 1024, dueContextFrame: start + 1024,
+          sampleRate, serviceSessionId: helperSessionId, helperPid: client.pid, runtimeId,
+        };
+        const result = await client.processAudio(1024, makeNoiseBlock(start, seedState), [], 120, requestProfile);
+        blocks.push(result.samples);
+        if (result.blockEvidence) blockEvidence.push(result.blockEvidence);
+        if (result.firstProcessEvidence) firstProcessEvidence = result.firstProcessEvidence;
+        if (result.failureEvidence) failureEvidence = result.failureEvidence;
       }
-      const snapshot = await client.snapshot();
-      return { observed, blocks, snapshot };
+      return {
+        caseName, helperSessionId, helperProcessId: client.pid, runtimeId, pluginClassId: rezFilter.classId,
+        observed, blocks, blockEvidence, firstProcessEvidence, failureEvidence, openEvidence: opened.smokeOpenEvidence,
+      };
     } finally { await client.dispose(); }
   };
-  const inspectComponent = async component => {
-    const auditClient = new NativeVst3Client(executable);
-    try {
-      return (await auditClient.open(rezFilter, {
-        kind: 'effect', sampleRate, state: makeState(component, undefined),
-      })).plugin;
-    } finally { await auditClient.dispose(); }
+  const recordCase = async (caseName, state) => {
+    const result = await run(caseName, state);
+    const flattened = Float32Array.from(result.blocks.flatMap(block => [...block]));
+    const zeroBlock = result.blockEvidence.find(block => block.output?.combinedRms === 0);
+    const belowPerBlockThreshold = result.blockEvidence.find(block => block.output?.combinedRms <= 1e-5);
+    diagnosticCases.push({
+      caseName, helperSessionId: result.helperSessionId, helperProcessId: result.helperProcessId,
+      runtimeId: result.runtimeId, pluginClassId: result.pluginClassId, openEvidence: result.openEvidence,
+      firstProcessEvidence: result.firstProcessEvidence, failureEvidence: result.failureEvidence,
+      measuredBlockCount: result.blockEvidence.length, aggregateOutputRms: rms(flattened),
+      firstExactZeroOutputBlock: zeroBlock?.blockIndex ?? null,
+      firstOutputBlockAtOrBelowPerBlockThreshold: belowPerBlockThreshold?.blockIndex ?? null,
+      blockEvidence: result.blockEvidence,
+      postRunSnapshot: { captured: false, observation: 'No snapshot was taken; the measured instance was not suspended.' },
+    });
+    saveDiagnostic();
+    return result;
   };
+  const firstBlockControllerValues = (result, key = 'controllerParametersAfterProcess') =>
+    new Map((result.blockEvidence[0]?.[key]?.values ?? []).map(parameter => [parameter.id, parameter.value]));
   try {
     const defaults = await service.inspectEffect(rezFilter, initial, 'rezfilter-state-test');
     const configured = await service.inspectEffect(rezFilter, { ...defaults.state, parameters: requested }, 'rezfilter-state-test');
@@ -232,35 +279,39 @@ test('RezFilter restores component and controller state in order, while normaliz
       assert.ok(configured.state.parameters.some(change => change.id === id && Math.abs(change.value - value) < 1e-6));
     }
 
-    const defaultComponent = await run(makeState(defaults.state.component));
-    const defaultEffective = await inspectComponent(defaultComponent.snapshot.component);
+    await recordCase('fresh-default-state', initial);
+    const defaultComponent = await recordCase('default-component-state-no-overrides', makeState(defaults.state.component));
+    const defaultEffective = firstBlockControllerValues(defaultComponent);
     for (const { id } of requested) {
-      assert.ok(Math.abs(defaultEffective.parameters.find(parameter => parameter.id === id).currentValue - defaultsById.get(id)) < 1e-6,
+      assert.ok(Math.abs(defaultEffective.get(id) - defaultsById.get(id)) < 1e-6,
         `component restore retains default processor parameter ${id}`);
     }
 
-    // Restore a component snapshot produced by inspectEffect's real first
-    // process and reopen it without a controller stream or normalized patch.
-    // Controller metadata is synchronized from that component state.
-    const componentRestored = await run(makeState(configured.state.component));
+    // Restore the configured component state without a normalized patch. Every
+    // parameter readback below comes from the same instance producing these blocks.
+    const componentRestored = await recordCase('configured-component-state-no-normalized-overrides', makeState(configured.state.component));
     for (const { id, value } of requested) {
       assert.ok(Math.abs(componentRestored.observed.get(id) - value) < 1e-6,
         `controller metadata is synchronized from component parameter ${id}`);
     }
-    const componentEffective = await inspectComponent(componentRestored.snapshot.component);
+    const componentEffective = firstBlockControllerValues(componentRestored);
     for (const { id, value } of requested) {
-      assert.ok(Math.abs(componentEffective.parameters.find(parameter => parameter.id === id).currentValue - value) < 1e-6,
+      assert.ok(Math.abs(componentEffective.get(id) - value) < 1e-6,
         `component restore preserves effective DSP parameter ${id}`);
     }
     const componentPcm = Float32Array.from(componentRestored.blocks.flatMap(block => [...block]));
     assert.ok(rms(componentPcm) > 1e-4, 'component-restored RezFilter produces nonzero native PCM');
 
-    // Explicit normalized overrides are applied after component restoration.
-    // Use conflicting values so the component snapshot proves which source won.
-    const overridden = await run(makeState(configured.state.component, competing));
-    const effective = await inspectComponent(overridden.snapshot.component);
+    // Repeat the restored component with its intended normalized parameters,
+    // then with the test's conflicting values. Native readbacks and PCM are
+    // collected from the same helper instance in each case.
+    await recordCase('configured-component-state-with-intended-normalized-overrides',
+      makeState(configured.state.component, requested));
+    const overridden = await recordCase('configured-component-state-with-conflicting-normalized-overrides',
+      makeState(configured.state.component, competing));
+    const effective = firstBlockControllerValues(overridden);
     for (const { id, value } of competing) {
-      const activeValue = effective.parameters.find(parameter => parameter.id === id).currentValue;
+      const activeValue = effective.get(id);
       assert.ok(Math.abs(activeValue - value) < 1e-6, `normalized override takes precedence in native DSP parameter ${id}`);
     }
     const pcm = Float32Array.from(overridden.blocks.flatMap(block => [...block]));

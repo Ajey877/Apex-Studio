@@ -81,10 +81,14 @@ export class NativeVst3Client {
     this.#tail = operation.catch(() => {});
     return operation;
   }
-  open(plugin, { sampleRate = 48000, mode = 'offline', state, kind = 'instrument', captureFailureEvidence = false } = {}) {
+  open(plugin, { sampleRate = 48000, mode = 'offline', state, kind = 'instrument', captureFailureEvidence = false,
+    captureBlockAudit = false, diagnosticParameterIds } = {}) {
     if (!['instrument', 'effect'].includes(kind)) throw new Error('Invalid VST3 plugin kind');
+    const blockAuditEnabled = captureBlockAudit && captureFailureEvidence && kind === 'effect';
     return this.request({ command: 'open', path: plugin.path, classId: plugin.classId, sampleRate, mode, kind,
-      ...(state === undefined ? {} : { state }), ...(captureFailureEvidence ? { captureFailureEvidence: true } : {}) });
+      ...(state === undefined ? {} : { state }), ...(captureFailureEvidence ? { captureFailureEvidence: true } : {}),
+      ...(blockAuditEnabled ? { captureBlockAudit: true } : {}),
+      ...(blockAuditEnabled && diagnosticParameterIds ? { diagnosticParameterIds } : {}) });
   }
   get pid() { return this.#child.pid ?? null; }
   async parameters(changes) { return (await this.request({ command: 'parameters', parameters: changes })).parameters; }
