@@ -444,18 +444,27 @@ function capturedSignalEvidence(capture: MixerCapture, sourceStartFrame: number,
 }
 
 function compareCapturedMasterToTrackSum(captures: Map<number, MixerCapture>, startFrame: number, endFrame: number) {
-  const blocksByTrack = new Map([...captures].map(([trackId, capture]) => [trackId,
-    new Map(capture.blocks.map(block => [block.frame, block.samples]))]));
-  const master = blocksByTrack.get(0), leftTrack = blocksByTrack.get(1), rightTrack = blocksByTrack.get(2);
+  const samplesByTrack = new Map([...captures].map(([trackId, capture]) => {
+    const samples = new Map<number, readonly [number, number]>();
+    for (const block of capture.blocks) {
+      for (let offset = 0; offset < VST3_FX_BLOCK_FRAMES; offset++) {
+        const frame = block.frame + offset;
+        if (frame < startFrame || frame >= endFrame) continue;
+        samples.set(frame, [block.samples[offset]!, block.samples[VST3_FX_BLOCK_FRAMES + offset]!]);
+      }
+    }
+    return [trackId, samples] as const;
+  }));
+  const master = samplesByTrack.get(0), leftTrack = samplesByTrack.get(1), rightTrack = samplesByTrack.get(2);
   if (!master || !leftTrack || !rightTrack) throw new Error('Packaged latency acceptance did not capture master and both source tracks');
   let sumSquared = 0, count = 0;
-  for (const [frame, masterPcm] of master) {
-    if (frame < startFrame || frame + VST3_FX_BLOCK_FRAMES > endFrame) continue;
-    const pcmA = leftTrack.get(frame), pcmB = rightTrack.get(frame);
-    if (!pcmA || !pcmB) continue;
-    for (let sample = 0; sample < VST3_FX_BLOCK_FRAMES * 2; sample++) {
-      const delta = masterPcm[sample]! - pcmA[sample]! - pcmB[sample]!;
-      sumSquared += delta * delta; count++;
+  for (let frame = startFrame; frame < endFrame; frame++) {
+    const masterSample = master.get(frame), leftSample = leftTrack.get(frame), rightSample = rightTrack.get(frame);
+    if (!masterSample || !leftSample || !rightSample) continue;
+    for (let channel = 0; channel < 2; channel++) {
+      const delta = masterSample[channel]! - leftSample[channel]! - rightSample[channel]!;
+      sumSquared += delta * delta;
+      count++;
     }
   }
   return { comparedSamples: count, rmsDifference: count ? Math.sqrt(sumSquared / count) : Infinity };
