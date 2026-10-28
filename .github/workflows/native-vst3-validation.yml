@@ -51,11 +51,43 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
           node-version: 22
       - name: Install JavaScript test tools (no Electron binary needed)
         run: npm ci --legacy-peer-deps --ignore-scripts
+      - name: Materialize and verify the exact historical VST3 host source
+        shell: pwsh
+        env:
+          HISTORICAL_HOST_COMMIT: 47e7f08b81e62a0ab1b5da911c2bc60a553d0518
+          EXPECTED_HOST_BLOB: 45139c90a0fa2dedb03f8a103692f093ea564526
+        run: |
+          git cat-file -e $env:HISTORICAL_HOST_COMMIT
+          if ($LASTEXITCODE -ne 0) { throw "Historical commit $($env:HISTORICAL_HOST_COMMIT) is unavailable after fetch-depth 0." }
+          $verify = @'
+          const fs = require('node:fs');
+          const cp = require('node:child_process');
+          const commit = process.env.HISTORICAL_HOST_COMMIT;
+          const expected = process.env.EXPECTED_HOST_BLOB;
+          const source = cp.execFileSync('git', ['show', `${commit}:native/vst3/host.cpp`]);
+          fs.writeFileSync('native/vst3/host.cpp', source);
+          const actual = cp.execFileSync('git', ['hash-object', '--no-filters', 'native/vst3/host.cpp'], { encoding: 'utf8' }).trim();
+          console.log('Historical host.cpp blob:', actual);
+          if (actual !== expected) {
+            console.error('Expected historical blob:', expected);
+            process.exit(1);
+          }
+          '@
+          $verify | node
+          if ($LASTEXITCODE -ne 0) { throw 'Historical host.cpp blob verification failed.' }
+          $actual = (git hash-object --no-filters native/vst3/host.cpp).Trim()
+          if ($actual -ne $env:EXPECTED_HOST_BLOB) { throw "git hash-object mismatch: $actual" }
+          New-Item -ItemType Directory -Path build/native-evidence -Force | Out-Null
+          Set-Content -Path build/native-evidence/historical-host-source-sha.txt -Value $actual -NoNewline
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "Verified native/vst3/host.cpp blob built: ``$actual``"
+          Write-Output "::notice title=Verified historical native host source::$actual"
       - name: Build the pinned native VST3 helper and MDA fixture
         run: npm run native:vst3:build
       - name: Run preceding effect tests, then the historical-path RezFilter test
@@ -69,19 +101,37 @@ jobs:
         shell: pwsh
         run: |
           $evidence = 'build/native-evidence/rezfilter-original-path.json'
+          $shaFile = 'build/native-evidence/historical-host-source-sha.txt'
+          if (Test-Path $shaFile) {
+            Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "## Historical helper source"
+            Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value ("Built native/vst3/host.cpp blob: ``" + ((Get-Content -Raw $shaFile).Trim()) + "``")
+          }
           if (Test-Path $evidence) {
+            $report = Get-Content -Raw $evidence | ConvertFrom-Json
             Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value '## Historical-path RezFilter per-block PCM evidence'
             Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value 'The measured helper used no capture flags, no failure profiles, and no per-block native controller reads. It retained the historical post-process snapshot and separate component-state reopen. Per-block RMS was computed in JavaScript after the native run.'
+            Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value '| case | blocks | aggregate RMS | first exact-zero block | first <=1e-5 block | onset |'
+            Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value '| --- | --- | --- | --- | --- | --- |'
+            foreach ($case in $report.cases) {
+              $zero = if ($null -eq $case.firstExactZeroOutputBlock) { 'none' } else { $case.firstExactZeroOutputBlock }
+              $below = if ($null -eq $case.firstOutputBlockAtOrBelowExistingThreshold) { 'none' } else { $case.firstOutputBlockAtOrBelowExistingThreshold }
+              Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value ("| $($case.caseName) | $($case.blockCount) | $($case.aggregateOutputRms) | $zero | $below | $($case.onsetPositionInFirstBlockLeftChannel) |")
+              $notice = "case=$($case.caseName) blocks=$($case.blockCount) aggregateOutputRms=$($case.aggregateOutputRms) firstExactZeroOutputBlock=$zero firstAtOrBelow1e-5=$below onset=$($case.onsetPositionInFirstBlockLeftChannel)"
+              Write-Output "::notice title=RezFilter-original-path::$notice"
+            }
             Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value '```json'
             Get-Content -Raw $evidence | Add-Content -Path $env:GITHUB_STEP_SUMMARY
             Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value '```'
           } else {
             Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value 'RezFilter evidence file was not produced; inspect the isolated test/build failure.'
+            Write-Output '::warning title=RezFilter-original-path::No PCM evidence report was produced.'
           }
       - name: Upload bounded diagnostic JSON
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: rezfilter-original-path-${{ github.run_id }}
-          path: build/native-evidence/rezfilter-original-path.json
+          path: |
+            build/native-evidence/rezfilter-original-path.json
+            build/native-evidence/historical-host-source-sha.txt
           if-no-files-found: warn
