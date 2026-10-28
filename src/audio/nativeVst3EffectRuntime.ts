@@ -413,8 +413,14 @@ export class NativeVst3EffectRuntime {
       if (opened.latencySamples !== 0) { await bridge.close(opened.id); throw new Error(`VST3 effect reports ${opened.latencySamples} samples of latency; nonzero plugin latency is unsupported and is not compensated.`); }
       entry.sessionId = opened.id;
       const fixedLatencyMs = VST3_FX_PIPELINE_FRAMES * 1000 / context.sampleRate;
+      const requestedParameters = entry.effect.state.parameters;
+      const controllerParameterEvidence = profileEnabled ? requestedParameters.map(({ id, value }) => ({
+        id, requestedValue: value, helperControllerValue: opened.parameters?.find(parameter => parameter.id === id)?.currentValue ?? null,
+      })) : undefined;
+      if (profileEnabled) recordMixerFxSmokeEvent({ event: 'native-effect-open', trackId, slotId: slot.id,
+        runtimeId: entry.runtimeId, classId: entry.effect.classId, parameterEvidence: controllerParameterEvidence });
       reportVst3MixerEffect(trackId, slot.id,
-        `VST3 ready. Fixed live block buffering: ${fixedLatencyMs.toFixed(1)} ms. Track branches are compensated at Mixer summing inputs; plugin-reported latency remains unsupported.`,
+        `VST3 ready. Fixed live block buffering: ${fixedLatencyMs.toFixed(1)} ms. Track branches are compensated at Mixer summing inputs; plugin-reported latency remains unsupported.${profileEnabled ? ` Smoke parameter state: ${JSON.stringify(controllerParameterEvidence)}.` : ''}`,
         fixedLatencyMs);
     });
     entry.ready.catch(() => {});
