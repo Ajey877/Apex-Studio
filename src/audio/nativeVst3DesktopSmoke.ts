@@ -670,10 +670,105 @@ async function captureLiveMixerRun(instance: typeof audioEngine, channels: Chann
     diagnostics: getVst3MixerEffectDiagnostics(), timing, runtimeEvents, ipc };
 }
 
+function compactNativeSessionAudit(run: any) {
+  const opens = (run.runtimeEvents as Array<Record<string, any>>).filter(event =>
+    event.event === 'native-effect-open' && event.trackId === 1);
+  const samples = correlatedTimingSamples(run);
+  const processEvents = run.ipc.main.processAudio as Array<Record<string, any>>;
+  return Object.fromEntries(opens.map((openEvent: Record<string, any>) => {
+    const slotId = String(openEvent.slotId);
+    const sessionId = openEvent.helperSessionId;
+    const sessionSamples = samples.filter(sample => sample.serviceSessionId === sessionId);
+    const sessionProcessEvents = processEvents.filter(event => event.serviceSessionId === sessionId);
+    const firstProcess = sessionProcessEvents.find(event => event.nativeProcessEvidence)?.nativeProcessEvidence ?? {};
+    const open = openEvent.nativeOpenEvidence ?? {};
+    const audit = open.stateApplication ?? {};
+    const firstAudit = firstProcess.stateApplication?.firstProcess ?? null;
+    return [slotId, { serviceSessionId: sessionId, runtimeId: openEvent.runtimeId,
+      helperProcessId: open.helperProcessId ?? firstProcess.helperProcessId ?? null,
+      requestCount: sessionSamples.length,
+      failureEvidenceCount: sessionProcessEvents.filter(event => event.nativeFailureEvidence).length,
+      openAudit: audit.classId ? { classId: audit.classId, stateProvided: audit.stateProvided,
+        controllerAvailable: audit.controllerAvailable, componentStateInput: audit.componentStateInput,
+        controllerStateInput: audit.controllerStateInput, componentStateApplied: audit.componentStateApplied,
+        controllerComponentStateApplied: audit.controllerComponentStateApplied,
+        controllerStateApplied: audit.controllerStateApplied, normalizedOverridesApplied: audit.normalizedOverridesApplied,
+        lifecycleOrder: audit.lifecycleOrder, errors: audit.errors } : null,
+      firstProcess: firstProcess.pluginClassId ? { requestProfile: firstProcess.requestProfile,
+        frameIndex: firstProcess.frameIndex, blockIndex: firstProcess.blockIndex, frames: firstProcess.frames,
+        processorCallResult: firstProcess.processorCallResult, queueAndOverrides: firstAudit,
+        stateSnapshot: firstProcess.stateSnapshot } : null }];
+  }));
+}
+
+function deadlineRequestEvidence(run: any) {
+  const events = run.runtimeEvents as Array<Record<string, any>>;
+  const ipc = run.ipc;
+  const requestEvidence = (requestId: string) => {
+    const find = (name: string) => events.find(event => event.event === name && event.requestId === requestId);
+    const submit = find('worklet-submit');
+    const received = find('renderer-request-received');
+    const bridgeStart = find('renderer-bridge-call-start');
+    const bridgeResponse = find('renderer-bridge-response');
+    const result = find('worklet-result');
+    const preload = (ipc.preload as Array<Record<string, any>>).find(event => event.requestId === requestId);
+    const main = (ipc.main.processAudio as Array<Record<string, any>>).find(event => event.requestId === requestId);
+    const stopAck = events.find(event => event.event === 'worklet-stop-ack' && event.requestId === requestId);
+    const cancellation = events.find(event => event.event === 'renderer-request-cancelled-at-stop' && event.requestId === requestId);
+    return { requestId, sequence: submit?.sequence, slotId: submit?.slotId,
+      submitAtMs: submit?.rendererAtMs, inputBlockStartContextFrame: submit?.inputBlockStartContextFrame,
+      dueContextFrame: submit?.dueContextFrame,
+      rendererReceivedAtMs: received?.requestReceivedAt, rendererQueueDepth: received?.queueDepth,
+      bridgeStartedAtMs: bridgeStart?.bridgeCallStartedAt, bridgeQueueDepth: bridgeStart?.queueDepth,
+      preloadInvokeAtMs: preload?.invokeStartedAt, preloadResponseAtMs: preload?.responseReceivedAt,
+      preloadRoundTripMs: preload?.rendererIpcRttMs,
+      mainReceivedAtMs: main?.ipcReceivedAtMainMs, nativeStartedAtMs: main?.serviceStartAtMainMs,
+      nativeCompletedAtMs: main?.serviceCompletedAtMainMs, nativeServiceCallMs: main?.nativeServiceCallMs,
+      activeCallsForEffectAtStart: main?.activeCallsForEffectAtStart,
+      inputRms: main?.nativeInputRms, outputRms: main?.nativeOutputRms, mainError: main?.error,
+      bridgeResponseAtMs: bridgeResponse?.bridgeResponseAt, bridgeRoundTripMs: bridgeResponse?.bridgeRoundTripMs,
+      workletResultAtMs: result?.rendererAtMs, workletAccepted: result?.accepted,
+      stopAck: stopAck ? { sequence: stopAck.sequence, reason: stopAck.reason } : null,
+      cancellation: cancellation ? { stage: cancellation.cancellationStage, reason: cancellation.reason } : null };
+  };
+  const misses = events.filter(event => event.event === 'pending-deadline-miss' || event.event === 'deadline-miss');
+  return misses.map(miss => {
+    const requestId = String(miss.requestId ?? '');
+    const runtimeId = requestId.includes(':') ? requestId.slice(0, requestId.lastIndexOf(':')) : '';
+    const sequence = Number(miss.sequence);
+    const relevant = events.filter(event => event.event === 'worklet-submit' && event.slotId === miss.slotId &&
+      event.requestId?.startsWith(`${runtimeId}:`) && Number(event.sequence) >= Math.max(0, sequence - 2) &&
+      Number(event.sequence) <= sequence);
+    const requests = relevant.map(event => requestEvidence(String(event.requestId)));
+    if (requestId && !requests.some(row => row.requestId === requestId)) requests.push(requestEvidence(requestId));
+    return { event: miss.event, trackId: miss.trackId, slotId: miss.slotId, requestId,
+      pendingSequence: miss.sequence, nextSequence: miss.nextSequence,
+      inputContextFrame: miss.inputContextFrame, currentOutputFrame: miss.currentOutputFrame,
+      dueOutputFrame: miss.dueOutputFrame, requests };
+  });
+}
+
 function assertPackagedMixerRun(run: any, label: string) {
   const timing = run.timing;
-  const evidence = JSON.stringify({ timing, nativeFailureEvidence: correlatedNativeFailures(run),
-    nativeSessions: nativeSessionEvidence(run), timingSamples: correlatedTimingSamples(run).slice(0, 24),
+  const failures = correlatedNativeFailures(run);
+  const evidence = JSON.stringify({ nativeFailureEvidence: failures,
+    nativeSessions: compactNativeSessionAudit(run), deadlineRequests: deadlineRequestEvidence(run),
+    nativeServicePcm: nativeServicePcmBySlot(run),
+    timing: { blockPeriodMs: timing.blockPeriodMs, captureDurationMs: timing.captureDurationMs,
+      playbackActiveAtEnd: run.playbackActiveAtEnd, requestCount: timing.requestCount,
+      submittedBlocks: timing.submittedBlocks, processingBlocks: timing.processingBlocks,
+      acceptedWorkletResults: timing.acceptedWorkletResults, missedDeadlines: timing.missedDeadlines,
+      maxPerInstanceQueueDepth: timing.maxPerInstanceQueueDepth, maxConcurrentCallsPerEffect: timing.maxConcurrentCallsPerEffect,
+      maxConcurrentMainServiceCalls: timing.maxConcurrentMainServiceCalls,
+      nativeServiceSessionCountAfterCleanup: timing.nativeServiceSessionCountAfterCleanup,
+      unaccountedRequestCount: timing.unaccountedRequestCount, missingMainResponses: timing.missingMainResponses,
+      missingWorkletResults: timing.missingWorkletResults, requestFailures: timing.requestFailures,
+      unexpectedStopCancellations: timing.unexpectedStopCancellations,
+      preCaptureSubmittedBlocks: timing.preCaptureSubmittedBlocks,
+      workletSubmissionToReceipt: timing.workletSubmissionToReceipt,
+      rendererSerializedQueueWait: timing.rendererSerializedQueueWait,
+      rendererBridgeRoundTrip: timing.rendererBridgeRoundTrip,
+      mainNativeServiceCall: timing.mainNativeServiceCall, scheduledOutputSlack: timing.scheduledOutputSlack },
     diagnostics: run.diagnostics, tailRms: run.tailRms, trackRms: run.trackRms });
   const fail = (reason: string) => { throw new Error(`${label}: ${reason}; bounded production timing evidence=${evidence}`); };
   if (run.sampleRate !== 48000) fail(`expected the packaged AudioContext at 48 kHz, got ${run.sampleRate}`);
@@ -809,10 +904,7 @@ async function runPackagedMixerAcceptance(instance: typeof audioEngine, persiste
   const alignmentOptions = (): MixerCaptureOptions => ({ durationMs: 1050, inputBuffers: onsetInputs(), includeMaster: true, includeNativeStages: true });
   const zeroInsertAlignment = await run(noEffects, 'Mixer onset alignment zero inserts', alignmentOptions());
   const oneInsertAlignment = await run(oneNativeInsert, 'Mixer onset alignment one insert', alignmentOptions());
-  const twoInsertAlignments = [await run(twoNativeInserts, 'Mixer onset alignment two inserts attempt 1', alignmentOptions())];
-  for (let attempt = 2; attempt <= 8; attempt++) {
-    twoInsertAlignments.push(await run(twoNativeInserts, `Mixer onset alignment two inserts attempt ${attempt}`, alignmentOptions()));
-  }
+  const twoInsertAlignments = [await run(twoNativeInserts, 'Mixer isolated onset alignment two inserts attempt 1', alignmentOptions())];
   const onsetFramesFor = (result: any) => Object.fromEntries([0, 1, 2].map(trackId => [trackId,
     firstCapturedOnsetFrame(result.captures.get(trackId), result.sourceStartContextFrame,
       result.sourceStartContextFrame + result.sampleRate)]));
