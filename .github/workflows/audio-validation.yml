@@ -4,7 +4,7 @@ on:
   pull_request:
     branches: [phase-0-foundation-ui, main, phase-5-5-song-mode-verification]
   push:
-    branches: [main, phase-0-foundation-ui, phase-5.5-hardening, phase-5-5-song-mode-verification, phase-11-release-parity-validation]
+    branches: [main, phase-0-foundation-ui, phase-5.5-hardening, phase-5-5-song-mode-verification, phase-11-release-parity-validation, arena/1862dfca-apex-studio]
 
 permissions:
   contents: read

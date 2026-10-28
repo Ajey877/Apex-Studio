@@ -587,7 +587,7 @@ function assertPackagedMixerRun(run: any, label: string) {
   }
 }
 
-async function runPackagedMixerAcceptance(instance: typeof audioEngine) {
+async function runPackagedMixerAcceptance(instance: typeof audioEngine, persistedMixerTracks?: MixerTrack[]) {
   const desktopApi = (globalThis as any).desktopApp;
   if (desktopApi?.smokeTest !== true || typeof desktopApi?.vst3?.smokeTimingSnapshot !== 'function') {
     return { status: 'not-run', reason: 'Mixer production IPC/timing acceptance is restricted to the explicit packaged smoke-test launch.' };
@@ -622,6 +622,33 @@ async function runPackagedMixerAcceptance(instance: typeof audioEngine) {
   const rezFilter = await bridge.inspectEffect(filterIdentity, {
     ...inspectedRezFilter.state, parameters: [...rezFilterParameterMap.values()],
   });
+  let restoredMixerParameterEvidence: Record<string, unknown> | undefined;
+  if (persistedMixerTracks) {
+    const savedTrack = persistedMixerTracks.find(track => track.id === 1);
+    const savedSlots = savedTrack?.fxSlots.filter(slot => slot.type === 'vst3' && slot.enabled) ?? [];
+    const savedFilterSlot = savedSlots.find(slot => slot.id === 'smoke-rezfilter');
+    if (savedSlots.length !== 2 || savedSlots[0]?.id !== 'smoke-delay' || !savedFilterSlot?.vst3Effect ||
+        savedFilterSlot.vst3Effect.classId !== filterIdentity.classId) {
+      throw new Error(`Saved-project Mixer inserts did not reopen in the original Delay → RezFilter order: ${JSON.stringify(savedSlots.map(slot => ({ id: slot.id, classId: slot.vst3Effect?.classId })))}`);
+    }
+    const savedParameters = new Map(savedFilterSlot.vst3Effect.state.parameters.map(parameter => [parameter.id, parameter.value]));
+    for (const { id, value } of rezFilterLatencyParameters) {
+      if (Math.abs((savedParameters.get(id) ?? -1) - value) > 1e-7) {
+        throw new Error(`Saved-project RezFilter normalized state changed for parameter ${id}: ${savedParameters.get(id)}`);
+      }
+    }
+    const restoredMetadata = await bridge.describeEffect(savedFilterSlot.vst3Effect);
+    for (const { id, value } of rezFilterLatencyParameters) {
+      if (Math.abs((restoredMetadata.parameters.find(parameter => parameter.id === id)?.currentValue ?? -1) - value) > 1e-7) {
+        throw new Error(`Saved-project RezFilter controller metadata changed for parameter ${id}`);
+      }
+    }
+    restoredMixerParameterEvidence = {
+      projectTrackId: savedTrack!.id, slotOrder: savedSlots.map(slot => slot.id), classId: savedFilterSlot.vst3Effect.classId,
+      requestedParameters: rezFilterLatencyParameters, restoredControllerValues: Object.fromEntries(
+        rezFilterLatencyParameters.map(({ id }) => [id, restoredMetadata.parameters.find(parameter => parameter.id === id)?.currentValue])),
+    };
+  }
   const delayParameters = await bridge.describeEffect(delay);
   const feedbackMix = delayParameters.parameters.find(parameter => parameter.id === 4 && parameter.name === 'Fb Mix');
   if (!feedbackMix) throw new Error('The pinned mda Delay fixture no longer exposes the verified Fb Mix bypass parameter id 4');
@@ -720,6 +747,47 @@ async function runPackagedMixerAcceptance(instance: typeof audioEngine) {
       }, nativeStageRows, nativeServicePcm,
       masterSumPcmDifferenceRms: masterSum.rmsDifference, masterSumComparedSamples: masterSum.comparedSamples };
   });
+  let savedProjectReopenEvidence: Record<string, unknown> | undefined;
+  if (persistedMixerTracks) {
+    const reopenedMixer = await run(persistedMixerTracks, 'Mixer saved-project reopen after a separate app process', alignmentOptions());
+    const expectedRelativeOnsetFrame = 256 + VST3_FX_PIPELINE_FRAMES * 2;
+    const onsets = onsetFramesFor(reopenedMixer);
+    const relativeOnsets = Object.fromEntries([0, 1, 2].map(trackId => [trackId,
+      onsets[String(trackId)] === null ? null : Number(onsets[String(trackId)]) - reopenedMixer.sourceStartContextFrame]));
+    const nativeStageRows = [...reopenedMixer.nativeStageCaptures].map(([slotId, capture]: [string, MixerCapture], index) => {
+      const onset = firstCapturedOnsetFrame(capture, reopenedMixer.sourceStartContextFrame,
+        reopenedMixer.sourceStartContextFrame + reopenedMixer.sampleRate);
+      return { slotId, expectedRelativeOnsetFrame: 256 + (index + 1) * VST3_FX_PIPELINE_FRAMES,
+        actualRelativeOnsetFrame: onset === null ? null : onset - reopenedMixer.sourceStartContextFrame,
+        pcmRms: reopenedMixer.nativeStageRms[slotId] };
+    });
+    const nativeServicePcm = nativeServicePcmBySlot(reopenedMixer);
+    const expectedSlots = ['smoke-delay', 'smoke-rezfilter'];
+    const serviceRequestsValid = expectedSlots.every(slotId => {
+      const row = nativeServicePcm[slotId];
+      return row?.requests === 50 && row.inputRms.nonzero === row.requests && row.outputRms.nonzero === row.requests;
+    });
+    const masterSum = compareCapturedMasterToTrackSum(reopenedMixer.captures,
+      reopenedMixer.sourceStartContextFrame + expectedRelativeOnsetFrame,
+      reopenedMixer.sourceStartContextFrame + expectedRelativeOnsetFrame + VST3_FX_BLOCK_FRAMES * 8);
+    if (Object.values(relativeOnsets).some(frame => frame !== expectedRelativeOnsetFrame) ||
+        nativeStageRows.length !== 2 || nativeStageRows.some((stage: any, index: number) =>
+          stage.slotId !== expectedSlots[index] || stage.actualRelativeOnsetFrame !== stage.expectedRelativeOnsetFrame) ||
+        !serviceRequestsValid || masterSum.comparedSamples < VST3_FX_BLOCK_FRAMES * 2 || masterSum.rmsDifference > 1e-5) {
+      throw new Error(`Persisted Mixer Delay → RezFilter state failed after separate application reopen: ${JSON.stringify({
+        expectedRelativeOnsetFrame, relativeOnsets, nativeStageRows, nativeServicePcm, masterSum,
+        sourceStartContextFrame: reopenedMixer.sourceStartContextFrame,
+        timing: { requestCount: reopenedMixer.timing.requestCount, missedDeadlines: reopenedMixer.timing.missedDeadlines,
+          requestFailures: reopenedMixer.timing.requestFailures, nativeServiceSessionCountAfterCleanup: reopenedMixer.timing.nativeServiceSessionCountAfterCleanup },
+      })}`);
+    }
+    savedProjectReopenEvidence = {
+      restoredState: restoredMixerParameterEvidence,
+      sourceStartContextFrame: reopenedMixer.sourceStartContextFrame,
+      expectedRelativeOnsetFrame, relativeOnsets, nativeStageRows, nativeServicePcm,
+      masterSumPcmDifferenceRms: masterSum.rmsDifference, masterSumComparedSamples: masterSum.comparedSamples,
+    };
+  }
   const bypassedOneNativeInsert = oneNativeInsert.map(track => track.id === 1
     ? { ...track, fxSlots: track.fxSlots.map(slot => ({ ...slot, enabled: false })) } : track);
   const dynamicBypass = await run(oneNativeInsert, 'Mixer live slot bypass retains its prepared pipeline', {
@@ -790,6 +858,8 @@ async function runPackagedMixerAcceptance(instance: typeof audioEngine) {
     latencyFixture: { plugin: rezFilter.name, parameters: rezFilterLatencyParameters,
       reason: 'LFO/envelope modulation disabled and cutoff fixed positive so onset timing measures the bridge pipeline, not variable plugin startup silence.' },
     latencyAlignmentRegression: alignmentRows,
+    savedProjectReopen: savedProjectReopenEvidence,
+    persistedProjectMixerTracks: ordered,
     priorPlaywrightBridgeReference: { approximatelyMs: 28, measurement: 'test-only page.exposeFunction bridge; separate from this production IPC/preload/helper measurement' },
     orderDifferenceRms: orderDifference.rmsDifference, orderOffsetFrames: orderDifference.normalizedLagFrames,
     controlTrackRmsDifference: controlRmsDifference, controlTrackPcmDifferenceRms: controlDifference.rmsDifference,
@@ -830,6 +900,7 @@ export async function runDesktopVst3Smoke() {
   const mixer = [0, 1].map(id => ({ id, name: 'Smoke insert', color: '#fff', volume: 1, pan: 0, mute: false, solo: false, fxSlots: [], peakL: 0, peakR: 0 })) as MixerTrack[];
   const clip: PlaylistClip = { id: 'native-smoke-clip', trackIndex: 0, startBar: 0, lengthBars: 1, type: 'pattern', channelId: channel.id, name: 'Native smoke', color: '#fff' };
   let savedAutomation: PlaylistClip | undefined;
+  let savedMixerTracks: MixerTrack[] | undefined;
   const reopening = (globalThis as unknown as { desktopApp?: { smokeReopen?: boolean } }).desktopApp?.smokeReopen === true;
   if (reopening) {
     const saved = await restorePersistedProjectState(instance, createDefaultProjectState());
@@ -837,6 +908,8 @@ export async function runDesktopVst3Smoke() {
     channel = saved.state.channels[0];
     savedAutomation = saved.state.playlistClips.find(c => c.automationTarget?.type === 'vst3_param');
     if (!savedAutomation) throw new Error('Native automation lane did not survive application restart');
+    savedMixerTracks = saved.state.mixerTracks;
+    if (!Array.isArray(savedMixerTracks) || savedMixerTracks.length === 0) throw new Error('Saved Mixer effect project did not reopen from the real current-project IndexedDB record');
     if (channel.vst3?.classId !== plugin.classId) throw new Error('Reopened project selected the wrong native class');
   }
   function digest(bytes: Uint8Array): string {
@@ -900,11 +973,14 @@ export async function runDesktopVst3Smoke() {
     }
     const errors = getVst3Diagnostics().filter(item => item.channelId === channel.id && !item.message.startsWith('VST3 ready') && !item.message.startsWith('VST3 active'));
     if (livePeak < 0.001 || errors.length) throw new Error(`Packaged live graph failed: peak=${livePeak}, diagnostics=${JSON.stringify(errors)}`);
-    const mixerEffects = await runPackagedMixerAcceptance(instance);
+    const mixerAcceptance = await runPackagedMixerAcceptance(instance, savedMixerTracks);
+    const { persistedProjectMixerTracks, ...mixerEffects } = mixerAcceptance;
+    if (!reopening) savedMixerTracks = persistedProjectMixerTracks;
+    if (reopening && !mixerEffects.savedProjectReopen) throw new Error('Saved Mixer effect state was not processed through the production graph after application restart');
     if (reopening && !document.body.textContent?.includes(channel.name)) throw new Error('The actual Apex application UI did not restore the saved native channel');
     if (!reopening) {
       const project = createDefaultProjectState();
-      await persistProjectState({ ...project, meta: { ...project.meta, bpm: 120 }, selectedChannelId: channel.id, channels: [channel], mixerTracks: mixer, playlistClips: [clip, automation] });
+      await persistProjectState({ ...project, meta: { ...project.meta, bpm: 120 }, selectedChannelId: channel.id, channels: [channel], mixerTracks: savedMixerTracks ?? mixer, playlistClips: [clip, automation] });
     }
     return { automationExportDifferenceRms, automationPcmChecksum, automationStateChecksum, parameterValue: .05, parameterExportDifferenceRms, plugin: plugin.name, classId: plugin.classId, onsetFrame, rms, livePeak, stateReopenEqual: true, missingRejected: rejected,
       applicationStage: reopening ? 'reopened-from-indexeddb-after-process-exit' : 'saved-to-production-indexeddb',
