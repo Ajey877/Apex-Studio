@@ -886,6 +886,10 @@ async function runPackagedMixerAcceptance(instance: typeof audioEngine, persiste
     latencyCompensation: 'Before each Mixer bus FX chain, direct producers and every routed/aux child branch are delayed to the slowest incoming fixed native-bridge path. Each prepared native insert contributes exactly 2048 frames; bypass retains that budget while its prepared worklet remains in the chain. Plugin-reported nonzero latency remains unsupported. Offline rendering sets this live-only compensation budget to zero and processes effects on project frames.',
     latencyFixture: { plugin: rezFilter.name, parameters: rezFilterLatencyParameters,
       reason: 'LFO/envelope modulation disabled and cutoff fixed positive so onset timing measures the bridge pipeline, not variable plugin startup silence.' },
+    reopenedMixerParameterAudit: savedProjectReopenEvidence ? {
+      savedState: savedProjectReopenEvidence.restoredState,
+      openedInstances: savedProjectReopenEvidence.nativeEffectOpenEvidence,
+    } : null,
     latencyAlignmentRegression: alignmentRows,
     savedProjectReopen: savedProjectReopenEvidence,
     persistedProjectMixerTracks: ordered,
