@@ -5,7 +5,7 @@ import { VST3_FX_BLOCK_FRAMES, VST3_FX_PIPELINE_FRAMES, VST3_FX_WORKLET_SOURCE, 
 import type { FxSlot, MixerTrack } from '../types/daw';
 import type { Vst3Bridge, Vst3Effect } from './nativeVst3Types';
 
-function createWorklet() {
+function createWorklet(processorOptions: Record<string, unknown> = { profileEnabled: true }) {
   const sandbox: any = {
     currentFrame: 0,
     Float32Array,
@@ -15,7 +15,7 @@ function createWorklet() {
     Math,
     AudioWorkletProcessor: class {
       port = {
-        onmessage: null as ((event: { data: any }) => void) | null,
+        onmessage: null as ((event: { data: any; ports?: any[] }) => void) | null,
         sent: [] as any[],
         postMessage(message: any) { this.sent.push(message); },
       };
@@ -23,7 +23,7 @@ function createWorklet() {
     registerProcessor(_name: string, constructor: new (options: any) => any) { sandbox.Processor = constructor; },
   };
   runInNewContext(VST3_FX_WORKLET_SOURCE, sandbox);
-  const processor = new sandbox.Processor({ processorOptions: { profileEnabled: true } });
+  const processor = new sandbox.Processor({ processorOptions });
   let contextFrame = 0;
   const next = (withInput = true) => {
     const left = new Float32Array(128), right = new Float32Array(128);
@@ -304,6 +304,90 @@ test('stop acknowledges an in-flight block per effect; late session replies cann
     assert.ok(closed.every(id => id === 'session-1' || id === 'session-2'));
     await runtime.stop();
     assert.deepEqual(closed.sort(), ['session-1', 'session-2', 'session-3', 'session-4']);
+  } finally {
+    await runtime.stop();
+    (globalThis as any).AudioWorkletNode = originalNode;
+  }
+});
+
+test('Mixer worklet sends process blocks on a bound live port instead of the control port', () => {
+  const { processor, next } = createWorklet({ profileEnabled: true, requireLivePort: true });
+  const livePort = {
+    sent: [] as any[],
+    closed: false,
+    onmessage: null as ((event: { data: any }) => void) | null,
+    postMessage(message: any) { this.sent.push(message); },
+    close() { this.closed = true; },
+  };
+  processor.port.onmessage!({ data: { type: 'live-port' }, ports: [livePort] });
+  for (let i = 0; i < VST3_FX_BLOCK_FRAMES / 128; i++) next();
+  assert.equal(processMessages(processor).length, 0, 'control port must not carry live PCM after bind');
+  assert.deepEqual(livePort.sent.map((message: any) => message.type), ['process']);
+  assert.equal(livePort.sent[0].sequence, 0);
+  const samples = new Float32Array(VST3_FX_BLOCK_FRAMES * 2).fill(0.5);
+  livePort.onmessage!({ data: { type: 'result', sequence: 0, samples } });
+  assert.ok(profileMessages(processor, 'worklet-result').some((message: any) => message.accepted === true));
+  processor.port.onmessage!({ data: { type: 'stop', reason: 'explicit-stop' } });
+  assert.equal(livePort.closed, true);
+});
+
+test('Mixer worklet fails closed when a live port is required but never bound', () => {
+  const { processor, next } = createWorklet({ profileEnabled: true, requireLivePort: true });
+  for (let i = 0; i < VST3_FX_BLOCK_FRAMES / 128; i++) next();
+  assert.equal(processor.failed, true);
+  assert.equal(processMessages(processor).length, 0);
+});
+
+test('Mixer runtime binds a dedicated live audio port and ignores renderer control-port PCM', async () => {
+  const originalNode = (globalThis as any).AudioWorkletNode;
+  const nodes: any[] = [];
+  const binds: Array<{ sessionId: string; trackId: number; slotId: string; port: MessagePort }> = [];
+  class FakeAudioWorkletNode {
+    port = { onmessage: null as ((event: { data: any }) => void) | null, sent: [] as any[], closed: false,
+      postMessage: (message: any) => {
+        this.port.sent.push(message);
+        if (message?.type === 'live-port') queueMicrotask(() => this.port.onmessage?.({ data: { type: 'live-bound' } }));
+        if (message?.type === 'stop') queueMicrotask(() => this.port.onmessage?.({ data: {
+          type: 'stop-ack', sequence: null, reason: message.reason,
+        } }));
+      }, close() { this.closed = true; } };
+    onprocessorerror: (() => void) | null = null;
+    disconnected = false;
+    constructor() { nodes.push(this); }
+    disconnect() { this.disconnected = true; }
+  }
+  (globalThis as any).AudioWorkletNode = FakeAudioWorkletNode;
+  let processAudioCalls = 0;
+  const fatals: string[] = [];
+  const bridge: Vst3Bridge = {
+    paths: async () => [], choosePath: async () => null,
+    discover: async () => ({ plugins: [], errors: [] }), discoverEffects: async () => ({ plugins: [], errors: [] }),
+    inspect: async () => { throw new Error('unused'); }, inspectEffect: async () => { throw new Error('unused'); },
+    describeEffect: async () => ({ parameters: [], controllerAvailable: false }), describe: async () => ({ parameters: [], controllerAvailable: false }),
+    parameters: async () => [], open: async () => ({ id: 'session-live', latencySamples: 0 }),
+    process: async () => new Float32Array(),
+    processAudio: async () => { processAudioCalls++; return new Float32Array(VST3_FX_BLOCK_FRAMES * 2); },
+    close: async () => {},
+    bindLiveAudioPort: (sessionId, trackId, slotId) => {
+      const { port1 } = new MessageChannel();
+      binds.push({ sessionId, trackId, slotId, port: port1 });
+      return port1;
+    },
+    unbindLiveAudioPort: async () => {},
+  };
+  const context: any = { sampleRate: 48000, currentTime: 0, state: 'running', audioWorklet: { addModule: async () => {} } };
+  const runtime = new NativeVst3EffectRuntime((_track, _slot, message) => { fatals.push(message); }, () => bridge);
+  try {
+    await runtime.prepareTracks([track], context);
+    assert.equal(binds.length, 1);
+    assert.equal(binds[0].sessionId, 'session-live');
+    assert.equal(binds[0].trackId, 1);
+    assert.equal(binds[0].slotId, 'fx-test');
+    assert.ok(nodes[0].port.sent.some((message: any) => message.type === 'live-port'));
+    nodes[0].port.onmessage!({ data: { type: 'process', sequence: 0, samples: new Float32Array(VST3_FX_BLOCK_FRAMES * 2) } });
+    await tick();
+    assert.equal(processAudioCalls, 0, 'bound live path must not invoke renderer processAudio');
+    assert.ok(fatals.some(message => /control port after live audio bind/.test(message)));
   } finally {
     await runtime.stop();
     (globalThis as any).AudioWorkletNode = originalNode;

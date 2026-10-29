@@ -69,7 +69,8 @@
       "desktop-vst3.cjs",
       "native/vst3/client.mjs",
       "native/vst3/service.mjs",
-      "native/vst3/parameters.mjs"
+      "native/vst3/parameters.mjs",
+      "native/vst3/liveAudioPort.mjs"
     ],
     "extraResources": [
       {

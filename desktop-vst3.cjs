@@ -1,6 +1,7 @@
 const path = require('node:path');
 const fs = require('node:fs/promises');
 const { pathToFileURL } = require('node:url');
+const { MessageChannelMain } = require('electron');
 
 // Explicit operations only; never accept raw host commands or executable paths
 // from renderer content. The Electron renderer remains sandboxed/isolated.
@@ -33,6 +34,7 @@ function registerVst3({ app, ipcMain, dialog, getWindow }) {
   };
   const ready = (async () => {
     const { Vst3Service } = await import(pathToFileURL(path.join(__dirname, 'native/vst3/service.mjs')).href);
+    const { createLiveAudioPortSession } = await import(pathToFileURL(path.join(__dirname, 'native/vst3/liveAudioPort.mjs')).href);
     const preferences = path.join(app.getPath('userData'), 'vst3-paths.json');
     const defaults = process.platform === 'win32'
       ? [path.join(process.env.CommonProgramFiles || 'C:\\Program Files\\Common Files', 'VST3')] : [];
@@ -47,8 +49,24 @@ function registerVst3({ app, ipcMain, dialog, getWindow }) {
       ? path.join(process.resourcesPath, 'vst3', 'apex-vst3-host.exe')
       : path.join(__dirname, 'build/native-vst3/bin', process.platform === 'win32' ? 'Release/apex-vst3-host.exe' : 'apex-vst3-host');
     const service = new Vst3Service(executable, roots);
-    return { service, preferences, roots };
+    return { service, preferences, roots, createLiveAudioPortSession };
   })();
+  const livePorts = new Map();
+  const disposeLivePort = async (sessionId, owner) => {
+    const live = livePorts.get(sessionId);
+    if (!live) return;
+    if (owner !== undefined && live.owner !== owner) throw new Error('VST3 session is closed or belongs to another renderer');
+    livePorts.delete(sessionId);
+    await live.dispose();
+  };
+  const disposeLivePortsForOwner = owner => {
+    for (const [sessionId, live] of [...livePorts]) {
+      if (live.owner === owner) {
+        livePorts.delete(sessionId);
+        void live.dispose();
+      }
+    }
+  };
   const isTrustedUrl = value => {
     try {
       const url = new URL(value);
@@ -92,7 +110,7 @@ function registerVst3({ app, ipcMain, dialog, getWindow }) {
   handle('describeEffect', (context, owner, effect) => context.service.describeEffect(effect, owner));
   handle('parameters', (context, owner, id, changes) => context.service.parameters(id, changes, owner));
   handle('process', (context, owner, id, frames, events, bpm, parameters) => context.service.process(id, frames, events, bpm, owner, parameters));
-  handle('processAudio', async (context, owner, id, frames, audio, bpm, parameters, rawProfile, ipcTiming) => {
+  const runProcessAudio = async (context, owner, id, frames, audio, bpm, parameters, rawProfile, ipcTiming) => {
     const profile = readProfile(rawProfile);
     if (!profile) return context.service.processAudio(id, frames, audio, bpm, owner, parameters);
     const serviceStartAtMainMs = performance.now();
@@ -127,19 +145,72 @@ function registerVst3({ app, ipcMain, dialog, getWindow }) {
       const remaining = Math.max(0, (activeCallsByEffect.get(effectKey) ?? 1) - 1);
       if (remaining === 0) activeCallsByEffect.delete(effectKey); else activeCallsByEffect.set(effectKey, remaining);
     }
-  });
+  };
+  handle('processAudio', (context, owner, id, frames, audio, bpm, parameters, rawProfile, ipcTiming) =>
+    runProcessAudio(context, owner, id, frames, audio, bpm, parameters, rawProfile, ipcTiming));
   if (smokeTimingEnabled) handle('smokeTimingSnapshot', context => ({
     processAudio: smokeProcessAudioTimings.slice(), maximumConcurrentProcessAudioCalls,
     maximumConcurrentCallsPerEffect, activeProcessAudioCalls, nativeServiceSessionCount: context.service.sessionCount,
   }));
-  handle('close', (context, owner, id) => context.service.close(id, owner));
+  handle('unbindLiveAudioPort', (context, owner, id) => disposeLivePort(id, owner));
+  handle('bindLiveAudioPort', (context, owner, sessionId, trackId, slotId, runtimeId, sampleRate) => {
+    if (typeof sessionId !== 'string' || sessionId.length === 0 || sessionId.length > 128) throw new Error('Invalid live audio session');
+    if (!Number.isInteger(trackId) || typeof slotId !== 'string' || slotId.length === 0 || slotId.length > 128) throw new Error('Invalid live audio identity');
+    if (typeof runtimeId !== 'string' || runtimeId.length === 0 || runtimeId.length > 128) throw new Error('Invalid live audio runtime');
+    if (!Number.isFinite(sampleRate) || sampleRate < 8000 || sampleRate > 192000) throw new Error('Invalid live audio sample rate');
+    context.service.assertSession(sessionId, owner);
+    if (livePorts.has(sessionId)) throw new Error('Live audio port already bound');
+    const win = getWindow();
+    if (!win || win.isDestroyed()) throw new Error('VST3 renderer closed during request');
+    const { port1, port2 } = new MessageChannelMain();
+    const live = context.createLiveAudioPortSession({
+      sessionId, owner, trackId, slotId,
+      processAudio: ({ sequence, samples, timing }) => {
+        const profile = {
+          requestId: `${runtimeId}:${sequence}`,
+          trackId, slotId, sequence, sampleRate,
+          inputBlockStartContextFrame: timing?.inputBlockStartContextFrame,
+          submittedContextFrame: timing?.submittedContextFrame,
+          submittedOutputFrame: timing?.submittedOutputFrame,
+          dueOutputFrame: timing?.dueOutputFrame,
+          dueContextFrame: timing?.dueContextFrame,
+        };
+        return runProcessAudio(context, owner, sessionId, 1024, samples, 120, [], profile, { ipcReceivedAtMainMs: performance.now() });
+      },
+    });
+    try {
+      live.attach(port1);
+      livePorts.set(sessionId, live);
+      win.webContents.postMessage('vst3:liveAudioPort', { sessionId, trackId, slotId }, [port2]);
+    } catch (error) {
+      livePorts.delete(sessionId);
+      void live.dispose();
+      try { port1.close(); } catch { /* already closed */ }
+      try { port2.close(); } catch { /* already closed */ }
+      throw error;
+    }
+  });
+  handle('close', async (context, owner, id) => {
+    await disposeLivePort(id, owner);
+    return context.service.close(id, owner);
+  });
   app.on('web-contents-created', (_event, contents) => {
-    const close = () => { void ready.then(({ service }) => service.closeOwner(String(contents.id))).catch(() => {}); };
+    const close = () => {
+      const owner = String(contents.id);
+      disposeLivePortsForOwner(owner);
+      void ready.then(({ service }) => service.closeOwner(owner)).catch(() => {});
+    };
     contents.on('render-process-gone', close);
     contents.on('destroyed', close);
     contents.on('did-start-navigation', (_e, _url, inPlace, mainFrame) => { if (mainFrame && !inPlace) close(); });
   });
-  app.on('will-quit', () => { void ready.then(({ service }) => service.dispose()).catch(() => {}); });
+  app.on('will-quit', () => {
+    for (const [sessionId, live] of [...livePorts]) {
+      livePorts.delete(sessionId);
+      void live.dispose();
+    }
+    void ready.then(({ service }) => service.dispose()).catch(() => {});
+  });
   // A missing native build should be an actionable plugin error, not prevent
   // existing built-in projects from opening. Import/initialization errors are
   // observed here and still reject any plugin request.
