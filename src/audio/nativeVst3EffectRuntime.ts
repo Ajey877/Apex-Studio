@@ -442,7 +442,7 @@ class ApexVst3FxProcessor extends AudioWorkletProcessor {
             this.fail('Live audio port is not bound.');
             break;
           }
-          dest.postMessage({ type: 'process', sequence, samples, ...(this.profileEnabled ? { timing } : {}) }, [samples.buffer]);
+          dest.postMessage({ type: 'process', sequence, samples, ...(this.profileEnabled ? { timing } : {}) });
           this.fill = 0;
         }
       }
