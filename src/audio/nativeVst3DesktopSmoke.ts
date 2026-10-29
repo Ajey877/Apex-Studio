@@ -4,7 +4,7 @@ import { nativeTarget } from './nativeVst3Automation';
 import { audioEngine } from './audioEngine';
 import { DEFAULT_MASTERING_SUITE_STATE } from './masteringState';
 import { getVst3Bridge, type Vst3Effect } from './nativeVst3Types';
-import { VST3_FX_BLOCK_FRAMES, VST3_FX_PIPELINE_FRAMES, getNativeVst3MixerEffectSmokeTiming, resetNativeVst3MixerEffectSmokeTiming, getVst3MixerEffectDiagnostics } from './nativeVst3EffectRuntime';
+import { VST3_FX_BLOCK_FRAMES, VST3_FX_PIPELINE_FRAMES, getNativeVst3MixerEffectSmokeTiming, getNativeVst3MixerEffectSmokeTimingDropped, resetNativeVst3MixerEffectSmokeTiming, getVst3MixerEffectDiagnostics } from './nativeVst3EffectRuntime';
 import { getVst3Diagnostics } from './nativeVst3Runtime';
 import { createDefaultProjectState, normalizeProjectState } from '../state/projectState';
 import { persistProjectState, restorePersistedProjectState, serializeProjectState } from '../state/projectPersistence';
@@ -256,6 +256,27 @@ function summarizeMixerTiming(events: ReturnType<typeof getNativeVst3MixerEffect
     missingMainResponses: [...submissions.keys()].filter(requestId => !main.has(requestId) && !stopAcks.has(requestId)).length,
     missingWorkletResults: [...submissions.keys()].filter(requestId => !results.has(requestId) && !stopAcks.has(requestId)).length,
     rendererResponseCount: rendererResponses.size,
+    smokeTimingDropped: getNativeVst3MixerEffectSmokeTimingDropped(),
+    rendererResultPosted: events.filter(event => event.event === 'renderer-result-posted').length,
+    rendererResultPostFailed: events.filter(event => event.event === 'renderer-result-post-failed').length,
+    workletStopAcknowledgements: events.filter(event => event.event === 'worklet-stop-ack').map(event => ({
+      slotId: event.slotId, runtimeId: event.runtimeId, sequence: event.sequence ?? null,
+      cancelled: event.cancelled === true, reason: event.reason, requestId: event.requestId ?? null,
+    })),
+    nullSequenceStopAcknowledgements: events.filter(event => event.event === 'worklet-stop-ack' && event.sequence == null).length,
+    rendererStopAckTimeouts: events.filter(event => event.event === 'renderer-stop-ack-timeout').map(event => ({
+      slotId: event.slotId, runtimeId: event.runtimeId, reason: event.reason, error: event.error,
+    })),
+    shutdownEvents: events.filter(event => [
+      'renderer-stop-requested', 'renderer-worklet-stop-posted', 'worklet-stop-received',
+      'worklet-stop-ack', 'renderer-stop-acknowledged', 'renderer-stop-ack-timeout',
+      'renderer-port-closing', 'renderer-port-closed', 'renderer-session-closed', 'renderer-tail-settled',
+    ].includes(String(event.event))).map(event => ({
+      event: event.event, slotId: event.slotId, runtimeId: event.runtimeId, requestId: event.requestId ?? null,
+      sequence: event.sequence ?? null, pendingSequence: event.pendingSequence ?? null,
+      cancelled: event.cancelled, reason: event.reason, stopContextFrame: event.stopContextFrame ?? null,
+      cancelledSequences: event.cancelledSequences ?? null, rendererAtMs: event.rendererAtMs,
+    })),
   };
 }
 
@@ -723,8 +744,27 @@ function deadlineRequestEvidence(run: any) {
     const result = find('worklet-result');
     const preload = (ipc.preload as Array<Record<string, any>>).find(event => event.requestId === requestId);
     const main = (ipc.main.processAudio as Array<Record<string, any>>).find(event => event.requestId === requestId);
+    const resultPosted = find('renderer-result-posted');
+    const resultPostFailed = find('renderer-result-post-failed');
     const stopAck = events.find(event => event.event === 'worklet-stop-ack' && event.requestId === requestId);
     const cancellation = events.find(event => event.event === 'renderer-request-cancelled-at-stop' && event.requestId === requestId);
+    const orderedEvents = events.filter(event => event.requestId === requestId).map(event => ({
+      event: event.event, sequence: event.sequence ?? null, accepted: event.accepted ?? null,
+      reason: event.reason ?? null, cancellationStage: event.cancellationStage ?? null,
+      resultPostedContextFrame: event.resultPostedContextFrame ?? null,
+      bridgeResponseContextFrame: event.bridgeResponseContextFrame ?? null,
+      rendererAtMs: event.rendererAtMs ?? null,
+    }));
+    const expected = ['worklet-submit', 'renderer-request-received', 'renderer-bridge-call-start',
+      'renderer-bridge-response', 'renderer-result-posted', 'worklet-result'];
+    const present = new Set(orderedEvents.map(event => event.event));
+    if (preload) present.add('preload-ipc');
+    if (main) present.add('main-processAudio');
+    const confirmed = ['worklet-submit', 'renderer-request-received', 'preload-ipc', 'renderer-bridge-call-start',
+      'main-processAudio', 'renderer-bridge-response', 'renderer-result-posted', 'worklet-result']
+      .filter(name => present.has(name));
+    const lastConfirmedEvent = confirmed.at(-1) ?? null;
+    const firstMissingEvent = expected.find(name => !present.has(name)) ?? null;
     const submittedContextFrame = submit?.submittedContextFrame ?? received?.submittedContextFrame;
     const dueContextFrame = submit?.dueContextFrame ?? received?.dueContextFrame ?? bridgeResponse?.dueContextFrame;
     const submittedOutputFrame = submit?.submittedOutputFrame ?? received?.submittedOutputFrame;
@@ -770,8 +810,15 @@ function deadlineRequestEvidence(run: any) {
         outputSlackFrames: frameDelta(receivedOutputFrame, result?.dueOutputFrame ?? dueOutputFrame),
         origin: 'audio-worklet-frames',
       },
-      stopAck: stopAck ? { sequence: stopAck.sequence, reason: stopAck.reason } : null,
+      rendererResultPost: resultPosted || resultPostFailed ? {
+        posted: !!resultPosted, failed: !!resultPostFailed, contextFrame: resultPosted?.resultPostedContextFrame ?? null,
+        stopping: resultPosted?.stopping ?? resultPostFailed?.stopping ?? null,
+        disposed: resultPosted?.disposed ?? resultPostFailed?.disposed ?? null,
+        error: resultPostFailed?.error ?? null, origin: 'renderer-process',
+      } : null,
+      stopAck: stopAck ? { sequence: stopAck.sequence ?? null, reason: stopAck.reason, cancelled: stopAck.cancelled === true } : null,
       cancellation: cancellation ? { stage: cancellation.cancellationStage, reason: cancellation.reason } : null,
+      orderedEvents, lastConfirmedEvent, firstMissingEvent,
     };
   };
   const requestGroup = (slotId: unknown, requestId: string, sequence: number) => {
@@ -845,6 +892,10 @@ function compactDeadlineFrameSlack(run: any) {
       outputSlackFrames: request.workletResult.outputSlackFrames,
       accepted: request.workletResult.accepted,
       cancellation: request.cancellation,
+      resultPosted: request.rendererResultPost?.posted ?? false,
+      lastConfirmedEvent: request.lastConfirmedEvent,
+      firstMissingEvent: request.firstMissingEvent,
+      orderedEvents: request.orderedEvents,
     })),
   }));
 }
@@ -870,6 +921,15 @@ function assertPackagedMixerRun(run: any, label: string) {
     rendererSerializedQueueWait: timing.rendererSerializedQueueWait,
     rendererBridgeRoundTrip: timing.rendererBridgeRoundTrip,
     mainNativeServiceCall: timing.mainNativeServiceCall, scheduledOutputSlack: timing.scheduledOutputSlack,
+    smokeTimingDropped: timing.smokeTimingDropped,
+    rendererResultPosted: timing.rendererResultPosted,
+    rendererResultPostFailed: timing.rendererResultPostFailed,
+    nullSequenceStopAcknowledgements: timing.nullSequenceStopAcknowledgements,
+    stopAcknowledgementTimeouts: timing.stopAcknowledgementTimeouts,
+    teardownCancelledAtStopBlocks: timing.teardownCancelledAtStopBlocks,
+    workletStopAcknowledgements: timing.workletStopAcknowledgements,
+    rendererStopAckTimeouts: timing.rendererStopAckTimeouts,
+    shutdownEvents: timing.shutdownEvents,
   };
   const evidence = JSON.stringify({ nativeFailureEvidence: failures,
     nativeSessions: compactNativeSessionAudit(run), deadlineRequests, deadlineFrameSlack, lifecycleCounts,

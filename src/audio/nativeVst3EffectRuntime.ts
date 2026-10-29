@@ -36,16 +36,24 @@ export interface NativeVst3MixerEffectSmokeEvent {
   [key: string]: unknown;
 }
 const smokeTimingEvents: NativeVst3MixerEffectSmokeEvent[] = [];
+const SMOKE_TIMING_EVENT_LIMIT = 65536;
+let smokeTimingDropped = 0;
 const mixerFxSmokeEnabled = () => (globalThis as any).desktopApp?.smokeTest === true;
 function recordMixerFxSmokeEvent(event: NativeVst3MixerEffectSmokeEvent) {
   if (!mixerFxSmokeEnabled()) return;
-  if (smokeTimingEvents.length < 8192) smokeTimingEvents.push({ ...event, rendererAtMs: performance.now() });
+  if (smokeTimingEvents.length < SMOKE_TIMING_EVENT_LIMIT) smokeTimingEvents.push({ ...event, rendererAtMs: performance.now() });
+  else smokeTimingDropped++;
 }
 export function resetNativeVst3MixerEffectSmokeTiming() {
-  if (mixerFxSmokeEnabled()) smokeTimingEvents.length = 0;
+  if (!mixerFxSmokeEnabled()) return;
+  smokeTimingEvents.length = 0;
+  smokeTimingDropped = 0;
 }
 export function getNativeVst3MixerEffectSmokeTiming(): NativeVst3MixerEffectSmokeEvent[] {
   return mixerFxSmokeEnabled() ? smokeTimingEvents.slice() : [];
+}
+export function getNativeVst3MixerEffectSmokeTimingDropped(): number {
+  return mixerFxSmokeEnabled() ? smokeTimingDropped : 0;
 }
 
 export const VST3_FX_BLOCK_FRAMES = 1024;
@@ -83,6 +91,9 @@ class ApexVst3FxProcessor extends AudioWorkletProcessor {
       const message = event.data;
       if (message?.type === 'stop') {
         const sequence = this.pending >= 0 ? this.pending : null;
+        if (this.profileEnabled) this.port.postMessage({ type: 'profile', event: 'worklet-stop-received',
+          sequence, pendingSequence: this.pending, stoppedOutputFrame: this.outputFrame,
+          reason: message.reason || 'dispose' });
         this.pending = -1;
         this.stopped = true;
         this.ready.clear();
@@ -93,12 +104,13 @@ class ApexVst3FxProcessor extends AudioWorkletProcessor {
       if (message?.type === 'bypass') { this.bypass = !!message.value; return; }
       if (message?.type === 'failure') { this.failed = true; return; }
       if (message?.type !== 'result') return;
-      const valid = !this.failed && message.sequence === this.pending &&
+      const afterStop = this.stopped;
+      const valid = !afterStop && !this.failed && message.sequence === this.pending &&
         message.samples instanceof Float32Array && message.samples.length === this.blockFrames * 2;
       if (this.profileEnabled) this.port.postMessage({ type: 'profile', event: 'worklet-result', sequence: message.sequence,
         accepted: valid, pendingSequence: this.pending, receivedOutputFrame: this.outputFrame,
         dueOutputFrame: Number.isInteger(message.sequence) ? this.delayFrames + message.sequence * this.blockFrames : null,
-        reason: valid ? null : (this.failed ? 'after-failure' : 'stale-duplicate-or-malformed') });
+        reason: valid ? null : (afterStop ? 'after-stop' : (this.failed ? 'after-failure' : 'stale-duplicate-or-malformed')) });
       if (!valid) return;
       this.pending = -1;
       this.ready.set(message.sequence, message.samples);
@@ -303,16 +315,17 @@ export class NativeVst3EffectRuntime {
       const message = event.data;
       if (message?.type === 'stop-ack') {
         const sequence = Number.isInteger(message.sequence) ? message.sequence as number : null;
-        recordMixerFxSmokeEvent({ event: 'worklet-stop-ack', trackId, slotId: slot.id,
-          ...(sequence === null ? {} : { sequence, requestId: `${entry.runtimeId}:${sequence}` }),
-          cancelled: sequence !== null, reason: String(message.reason || 'dispose') });
+        recordMixerFxSmokeEvent({ event: 'worklet-stop-ack', trackId, slotId: slot.id, runtimeId: entry.runtimeId,
+          sequence, pendingSequence: sequence, cancelled: sequence !== null,
+          reason: String(message.reason || 'dispose'),
+          ...(sequence === null ? {} : { requestId: `${entry.runtimeId}:${sequence}` }) });
         entry.stopAckResolve?.({ sequence, reason: String(message.reason || 'dispose') });
         entry.stopAckResolve = undefined;
         return;
       }
       if (message?.type === 'profile') {
         const sequence = Number.isInteger(message.sequence) ? message.sequence : undefined;
-        recordMixerFxSmokeEvent({ ...message, trackId, slotId: slot.id,
+        recordMixerFxSmokeEvent({ ...message, trackId, slotId: slot.id, runtimeId: entry.runtimeId,
           ...(sequence === undefined ? {} : { requestId: `${entry.runtimeId}:${sequence}` }) });
         return;
       }
@@ -394,7 +407,20 @@ export class NativeVst3EffectRuntime {
         if (!(samples instanceof Float32Array) || samples.length !== VST3_FX_BLOCK_FRAMES * 2 || samples.some(value => !Number.isFinite(value))) {
           throw new Error('Native effect returned malformed or non-finite PCM.');
         }
-        node.port.postMessage({ type: 'result', sequence, samples }, [samples.buffer]);
+        const resultPostedAt = entry.profileEnabled ? performance.now() : 0;
+        const resultPostedContextFrame = entry.profileEnabled
+          ? Math.round((context as AudioContext).currentTime * context.sampleRate) : null;
+        try {
+          node.port.postMessage({ type: 'result', sequence, samples }, [samples.buffer]);
+        } catch (error) {
+          if (entry.profileEnabled) recordMixerFxSmokeEvent({ event: 'renderer-result-post-failed', trackId, slotId: slot.id,
+            requestId, sequence, runtimeId: entry.runtimeId, stopping: entry.stopping, disposed: entry.disposed,
+            resultPostedAt, resultPostedContextFrame, error: error instanceof Error ? error.message : String(error) });
+          throw error;
+        }
+        if (entry.profileEnabled) recordMixerFxSmokeEvent({ event: 'renderer-result-posted', trackId, slotId: slot.id,
+          requestId, sequence, runtimeId: entry.runtimeId, resultPostedAt, resultPostedContextFrame,
+          stopping: entry.stopping, disposed: entry.disposed, faulted: entry.faulted });
       });
       entry.tail = operation.catch(error => {
         if (entry.stopping || entry.disposed) {
@@ -470,9 +496,17 @@ export class NativeVst3EffectRuntime {
       // stop begins. Keep its message handler alive until its stop ACK has
       // crossed the same MessagePort, so a pending sequence is either handled
       // or explicitly acknowledged as cancelled before this port is closed.
+      const stopContextFrame = () => {
+        try { return Math.round((entry.context as AudioContext).currentTime * entry.context.sampleRate); }
+        catch { return null; }
+      };
+      recordMixerFxSmokeEvent({ event: 'renderer-stop-requested', trackId: entry.trackId, slotId: entry.slotId,
+        runtimeId: entry.runtimeId, reason, stopContextFrame: stopContextFrame() });
       entry.stopAckPromise = new Promise(resolve => { entry.stopAckResolve = resolve; });
       try {
         entry.node.port.postMessage({ type: 'stop', reason });
+        recordMixerFxSmokeEvent({ event: 'renderer-worklet-stop-posted', trackId: entry.trackId, slotId: entry.slotId,
+          runtimeId: entry.runtimeId, reason, stopContextFrame: stopContextFrame() });
         let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
         const timeout = new Promise<never>((_, reject) => { timeoutHandle = setTimeout(() => reject(new Error('AudioWorklet stop acknowledgement timed out')), 250); });
         let ack: { sequence: number | null; reason: string };
@@ -480,23 +514,37 @@ export class NativeVst3EffectRuntime {
         finally { if (timeoutHandle !== undefined) clearTimeout(timeoutHandle); }
         if (ack.sequence !== null) entry.stopCancelledSequences.add(ack.sequence);
         recordMixerFxSmokeEvent({ event: 'renderer-stop-acknowledged', trackId: entry.trackId, slotId: entry.slotId,
-          ...(ack.sequence === null ? {} : { sequence: ack.sequence, requestId: `${entry.runtimeId}:${ack.sequence}` }),
-          cancelled: ack.sequence !== null, reason: ack.reason });
+          runtimeId: entry.runtimeId, sequence: ack.sequence, pendingSequence: ack.sequence,
+          cancelled: ack.sequence !== null, reason: ack.reason, stopContextFrame: stopContextFrame(),
+          ...(ack.sequence === null ? {} : { requestId: `${entry.runtimeId}:${ack.sequence}` }) });
       } catch (error) {
         recordMixerFxSmokeEvent({ event: 'renderer-stop-ack-timeout', trackId: entry.trackId, slotId: entry.slotId,
-          reason, error: error instanceof Error ? error.message : String(error) });
+          runtimeId: entry.runtimeId, reason, stopContextFrame: stopContextFrame(),
+          error: error instanceof Error ? error.message : String(error) });
       } finally {
         entry.stopAckResolve = undefined;
         entry.disposed = true;
       }
+      recordMixerFxSmokeEvent({ event: 'renderer-port-closing', trackId: entry.trackId, slotId: entry.slotId,
+        runtimeId: entry.runtimeId, reason, stopContextFrame: stopContextFrame(),
+        cancelledSequences: [...entry.stopCancelledSequences] });
       entry.node.port.onmessage = null;
       entry.node.port.postMessage({ type: 'failure' });
       entry.node.port.close();
+      recordMixerFxSmokeEvent({ event: 'renderer-port-closed', trackId: entry.trackId, slotId: entry.slotId,
+        runtimeId: entry.runtimeId, reason, stopContextFrame: stopContextFrame() });
       try { entry.node.disconnect(); } catch { /* context may already be closed */ }
       const sessionId = entry.sessionId;
       entry.sessionId = undefined;
-      if (sessionId) await entry.bridge.close(sessionId).catch(() => {});
+      if (sessionId) {
+        await entry.bridge.close(sessionId).catch(() => {});
+        recordMixerFxSmokeEvent({ event: 'renderer-session-closed', trackId: entry.trackId, slotId: entry.slotId,
+          runtimeId: entry.runtimeId, helperSessionId: sessionId, reason, stopContextFrame: stopContextFrame() });
+      }
       try { await entry.tail; } catch { /* the operation reports its own failure */ }
+      recordMixerFxSmokeEvent({ event: 'renderer-tail-settled', trackId: entry.trackId, slotId: entry.slotId,
+        runtimeId: entry.runtimeId, reason, stopContextFrame: stopContextFrame(),
+        cancelledSequences: [...entry.stopCancelledSequences] });
       if (!sessionId) await entry.ready.catch(() => {});
     })();
     entry.disposal = closing;
