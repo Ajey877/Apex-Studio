@@ -484,6 +484,34 @@ export class NativeVst3EffectRuntime {
       if (entry.disposed || this.prepared.get(runtimeKey(trackId, slot.id)) !== entry) { await bridge.close(opened.id); throw new Error('Native effect preparation cancelled.'); }
       if (opened.latencySamples !== 0) { await bridge.close(opened.id); throw new Error(`VST3 effect reports ${opened.latencySamples} samples of latency; nonzero plugin latency is unsupported and is not compensated.`); }
       entry.sessionId = opened.id;
+      if (mixerFxSmokeEnabled()) {
+        const overlay = entry.effect.state.parameters
+          .filter(parameter => Number.isInteger(parameter.id) && parameter.id >= 0 && Number.isFinite(parameter.value) && parameter.value >= 0 && parameter.value <= 1)
+          .map(parameter => ({ id: parameter.id, value: parameter.value }));
+        if (overlay.length) {
+          // inspectEffect primes with 1 silent sample and cannot prove the live
+          // instance is open. Apply the fixture overlay and one audible block on
+          // this session before the worklet binds, matching empty live-port lists
+          // afterwards. Smoke-only; not user audio.
+          await bridge.parameters(opened.id, overlay);
+          const frames = VST3_FX_BLOCK_FRAMES;
+          const priming = new Float32Array(frames * 2);
+          for (let i = 0; i < frames; i++) {
+            const sample = Math.sin(i * 2 * Math.PI * 440 / context.sampleRate) * 0.2;
+            priming[i] = sample;
+            priming[frames + i] = sample;
+          }
+          const primed = await bridge.processAudio(opened.id, frames, priming, 120, overlay);
+          if (entry.effect.name === 'mda RezFilter') {
+            let sum = 0;
+            for (const sample of primed) sum += sample * sample;
+            if (!(Math.sqrt(sum / primed.length) > 0.01)) {
+              await bridge.close(opened.id);
+              throw new Error('Packaged RezFilter live instance stayed silent after overlay priming.');
+            }
+          }
+        }
+      }
       if (typeof bridge.bindLiveAudioPort === 'function') {
         const bound = new Promise<void>((resolve, reject) => {
           const timer = setTimeout(() => reject(new Error('Live audio port bind timed out.')), 2000);
