@@ -166,17 +166,17 @@ test('live-port stop returns while native process is blocked so session close ca
     await gate;
     order.push('process-released');
     return samples;
-  });
+  }, { onStop: () => { order.push('native-close-started'); } });
   try {
     pair.process(0);
     await waitFor(() => order.includes('process-entered'));
     pair.session.stop();
     order.push('stop-returned');
-    order.push('native-close-started');
-    assert.deepEqual(order, ['process-entered', 'stop-returned', 'native-close-started'],
-      'native close/abort must start before the blocked process is released');
+    assert.deepEqual(order, ['process-entered', 'native-close-started', 'stop-returned'],
+      'stop must invoke the close-path callback and return before the blocked process is released');
     assert.equal(pair.session.stopping, true);
     assert.equal(pair.session.disposed, false);
+    assert.equal(order.includes('process-released'), false);
     assert.equal(pair.received.some(message => message.type === 'result'), false);
     release!();
     await pair.session.dispose('explicit-stop');

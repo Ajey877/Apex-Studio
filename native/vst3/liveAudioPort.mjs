@@ -34,7 +34,7 @@ function listen(port, onMessage, onClose) {
 }
 
 export function createLiveAudioPortSession({
-  sessionId, owner, trackId, slotId, processAudio, onFatal = undefined,
+  sessionId, owner, trackId, slotId, processAudio, onFatal = undefined, onStop = undefined,
 }) {
   if (typeof sessionId !== 'string' || sessionId.length === 0 || sessionId.length > 128) throw new Error('Invalid live audio session');
   if (typeof owner !== 'string' || owner.length === 0) throw new Error('Invalid live audio owner');
@@ -111,7 +111,9 @@ export function createLiveAudioPortSession({
     tail = operation.catch(() => {}).finally(() => { pending = Math.max(0, pending - 1); });
   };
   const stop = () => {
+    if (stopping) return;
     stopping = true;
+    onStop?.();
   };
   const dispose = async (_reason = 'dispose') => {
     stop();

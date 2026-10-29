@@ -3,7 +3,7 @@ import { nativeTarget } from './nativeVst3Automation';
 // the production engine/registry/export path, not an alternate WAV renderer.
 import { audioEngine } from './audioEngine';
 import { DEFAULT_MASTERING_SUITE_STATE } from './masteringState';
-import { getVst3Bridge, type Vst3Effect } from './nativeVst3Types';
+import { getVst3Bridge, type Vst3Bridge, type Vst3Effect, type Vst3Identity } from './nativeVst3Types';
 import { VST3_FX_BLOCK_FRAMES, VST3_FX_PIPELINE_FRAMES, getNativeVst3MixerEffectSmokeTiming, resetNativeVst3MixerEffectSmokeTiming, getVst3MixerEffectDiagnostics } from './nativeVst3EffectRuntime';
 import { getVst3Diagnostics } from './nativeVst3Runtime';
 import { createDefaultProjectState, normalizeProjectState } from '../state/projectState';
@@ -649,6 +649,123 @@ function rendererStallRegressionEvidence(run: any) {
   };
 }
 
+/** Packaged Mixer onset fixture: disable MDA RezFilter LFO/envelope and pin a positive cutoff. */
+const PACKAGED_REZFILTER_FIXTURE_PARAMETERS: ReadonlyArray<{ id: number; value: number }> = [
+  { id: 0, value: 0.8 },  // fixed cutoff above zero
+  { id: 1, value: 0.25 }, // stable, modest resonance
+  { id: 3, value: 0.5 },  // disable envelope-to-filter modulation
+  { id: 6, value: 0.5 },  // disable LFO-to-filter modulation
+  { id: 8, value: 0 },    // disable trigger mode
+  { id: 9, value: 1 },    // keep maximum cutoff above the fixed setting
+];
+
+function planarRms(samples: Float32Array): number {
+  let sum = 0;
+  for (const sample of samples) sum += sample * sample;
+  return Math.sqrt(sum / samples.length);
+}
+
+function createPlanarTone(frames: number, sampleRate: number, amplitude = 0.2): Float32Array {
+  const audio = new Float32Array(frames * 2);
+  for (let i = 0; i < frames; i++) {
+    const sample = Math.sin(i * 2 * Math.PI * 440 / sampleRate) * amplitude;
+    audio[i] = sample;
+    audio[frames + i] = sample;
+  }
+  return audio;
+}
+
+function withFixtureParameters(effect: Vst3Effect, parameters: ReadonlyArray<{ id: number; value: number }>): Vst3Effect {
+  return {
+    ...effect,
+    state: { ...effect.state, parameters: parameters.map(parameter => ({ id: parameter.id, value: parameter.value })) },
+  };
+}
+
+async function processRestoredEffect(
+  bridge: Vst3Bridge, effect: Vst3Effect, input: Float32Array, sampleRate: number,
+  parameters: Array<{ id: number; value: number }> = [],
+): Promise<Float32Array> {
+  const frames = input.length / 2;
+  const opened = await bridge.open(effect, sampleRate, 'offline', 'effect');
+  try {
+    return await bridge.processAudio(opened.id, frames, input, 120, parameters);
+  } finally {
+    await bridge.close(opened.id);
+  }
+}
+
+async function inspectVerifiedRezFilterFixture(
+  bridge: Vst3Bridge, identity: Vst3Identity, sampleRate: number,
+): Promise<Vst3Effect> {
+  const overlay = PACKAGED_REZFILTER_FIXTURE_PARAMETERS.map(parameter => ({ id: parameter.id, value: parameter.value }));
+  const overlayState = { schema: 1 as const, classId: identity.classId, parameters: overlay };
+  const tone = createPlanarTone(VST3_FX_BLOCK_FRAMES, sampleRate);
+  const inputRms = planarRms(tone);
+  if (inputRms <= 0.05) throw new Error(`Packaged RezFilter fixture stimulus was silent: rms=${inputRms}`);
+
+  let lastEvidence = '';
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    // Parameters-only inspect: do not round-trip factory component/controller
+    // streams whose LFO/envelope defaults can close the filter. inspectEffect's
+    // 1 silent sample is not an audibility check.
+    const inspected = await bridge.inspectEffect(identity, overlayState);
+    for (const expected of overlay) {
+      const actual = inspected.state.parameters.find(parameter => parameter.id === expected.id);
+      if (!actual || Math.abs(actual.value - expected.value) > 1e-6) {
+        throw new Error(`inspectEffect did not persist RezFilter fixture parameter ${expected.id}=${expected.value}: ${JSON.stringify(inspected.state.parameters)}`);
+      }
+    }
+    const effect = withFixtureParameters(inspected, overlay);
+    // Match the live Mixer: restored snapshot only, empty per-block parameter list.
+    const restored = await processRestoredEffect(bridge, effect, tone, sampleRate, []);
+    const restoredRms = planarRms(restored);
+    if (restoredRms > 0.01) return effect;
+
+    const opened = await bridge.open(effect, sampleRate, 'offline', 'effect');
+    try {
+      await bridge.parameters(opened.id, overlay);
+      const primed = await bridge.processAudio(opened.id, VST3_FX_BLOCK_FRAMES, tone, 120, overlay);
+      lastEvidence = JSON.stringify({ attempt, inputRms, restoredRms, primedRms: planarRms(primed) });
+      if (planarRms(primed) <= 0.01) {
+        throw new Error(`Packaged RezFilter overlay did not open the filter on a real audio block: ${lastEvidence}`);
+      }
+    } finally {
+      await bridge.close(opened.id);
+    }
+  }
+  throw new Error(`Packaged RezFilter inspect/restore stayed silent after verified priming: ${lastEvidence}`);
+}
+
+async function inspectVerifiedDelayBypassFixture(
+  bridge: Vst3Bridge, identity: Vst3Identity, feedbackMixId: number, sampleRate: number,
+): Promise<Vst3Effect> {
+  const overlay = [{ id: feedbackMixId, value: 0 }];
+  const inspected = await bridge.inspectEffect(identity, { schema: 1, classId: identity.classId, parameters: overlay });
+  const effect = withFixtureParameters(inspected, overlay);
+  const tone = createPlanarTone(VST3_FX_BLOCK_FRAMES, sampleRate);
+  const restored = await processRestoredEffect(bridge, effect, tone, sampleRate, []);
+  const restoredRms = planarRms(restored);
+  if (restoredRms <= 0.05) {
+    throw new Error(`Packaged Delay Fb Mix=0 inspect/restore was silent: rms=${restoredRms}`);
+  }
+  return effect;
+}
+
+async function assertDelayThenRezFilterFixtureAudible(
+  bridge: Vst3Bridge, delayEffect: Vst3Effect, rezFilterEffect: Vst3Effect, sampleRate: number, label: string,
+) {
+  const tone = createPlanarTone(VST3_FX_BLOCK_FRAMES, sampleRate);
+  const delayed = await processRestoredEffect(bridge, delayEffect, tone, sampleRate, []);
+  const delayRms = planarRms(delayed);
+  if (delayRms <= 0.01) throw new Error(`${label}: Delay inspect/restore was silent: rms=${delayRms}`);
+  const filtered = await processRestoredEffect(bridge, rezFilterEffect, delayed, sampleRate, []);
+  const filterRms = planarRms(filtered);
+  if (filterRms <= 0.01) {
+    throw new Error(`${label}: Delay→RezFilter inspect/restore was silent with the empty live parameter list: ${JSON.stringify({ delayRms, filterRms })}`);
+  }
+}
+
 async function runPackagedMixerAcceptance(instance: typeof audioEngine) {
   const desktopApi = (globalThis as any).desktopApp;
   if (desktopApi?.smokeTest !== true || typeof desktopApi?.vst3?.smokeTimingSnapshot !== 'function') {
@@ -663,34 +780,24 @@ async function runPackagedMixerAcceptance(instance: typeof audioEngine) {
   const filterIdentity = discovered.plugins.find(plugin => plugin.name === 'mda RezFilter');
   if (!delayIdentity || !filterIdentity) throw new Error(`Redistributable MDA Mixer fixtures unavailable through packaged production IPC: ${JSON.stringify(discovered.errors)}`);
   const delay = await bridge.inspectEffect(delayIdentity);
-  const inspectedRezFilter = await bridge.inspectEffect(filterIdentity);
   // The pinned mda RezFilter leaves its LFO phase as processing-instance state.
   // Its default envelope/LFO modulation can hold the cutoff closed for a
   // nondeterministic startup interval, which is not native bridge latency. For
   // onset/ordering acceptance only, disable both modulators and use a fixed,
   // positive cutoff so the real effect is audibly responsive from its first
-  // processed block. This is a test-fixture state, not a change to user audio.
-  const rezFilterLatencyParameters = [
-    { id: 0, value: 0.8 },  // fixed cutoff above zero
-    { id: 1, value: 0.25 }, // stable, modest resonance
-    { id: 3, value: 0.5 },  // disable envelope-to-filter modulation
-    { id: 6, value: 0.5 },  // disable LFO-to-filter modulation
-    { id: 8, value: 0 },    // disable trigger mode
-    { id: 9, value: 1 },    // keep maximum cutoff above the fixed setting
-  ];
-  const rezFilterParameterMap = new Map<number, { id: number; value: number }>(
-    inspectedRezFilter.state.parameters.map(parameter => [parameter.id, parameter]));
-  for (const parameter of rezFilterLatencyParameters) rezFilterParameterMap.set(parameter.id, parameter);
-  const rezFilter = await bridge.inspectEffect(filterIdentity, {
-    ...inspectedRezFilter.state, parameters: [...rezFilterParameterMap.values()],
-  });
+  // processed block. inspectEffect's 1 silent sample cannot prove that, so the
+  // fixture is reopened and processed with the live Mixer's empty parameter
+  // list before any Mixer capture. This is a test-fixture state, not a change
+  // to user audio.
+  const rezFilterLatencyParameters = PACKAGED_REZFILTER_FIXTURE_PARAMETERS.map(
+    parameter => ({ id: parameter.id, value: parameter.value }));
+  const rezFilter = await inspectVerifiedRezFilterFixture(bridge, filterIdentity, context.sampleRate);
   const delayParameters = await bridge.describeEffect(delay);
   const feedbackMix = delayParameters.parameters.find(parameter => parameter.id === 4 && parameter.name === 'Fb Mix');
   if (!feedbackMix) throw new Error('The pinned mda Delay fixture no longer exposes the verified Fb Mix bypass parameter id 4');
-  const bypassDelay = await bridge.inspectEffect(delayIdentity, {
-    ...delay.state,
-    parameters: [...delay.state.parameters.filter(parameter => parameter.id !== feedbackMix.id), { id: feedbackMix.id, value: 0 }],
-  });
+  const bypassDelay = await inspectVerifiedDelayBypassFixture(bridge, delayIdentity, feedbackMix.id, context.sampleRate);
+  await assertDelayThenRezFilterFixtureAudible(bridge, delay, rezFilter, context.sampleRate, 'processed Delay → RezFilter');
+  await assertDelayThenRezFilterFixtureAudible(bridge, bypassDelay, rezFilter, context.sampleRate, 'Fb Mix=0 Delay → RezFilter');
 
   const channels: Channel[] = [];
   const tracks: MixerTrack[] = [0, 1, 2].map(id => ({ id, name: `Packaged smoke track ${id}`, color: '#fff',
