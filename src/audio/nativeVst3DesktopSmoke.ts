@@ -144,10 +144,17 @@ function summarizeMixerTiming(events: ReturnType<typeof getNativeVst3MixerEffect
   const stopCancellationWindowMs = VST3_FX_BLOCK_FRAMES * 1000 / sampleRate + 2;
   const nativeCancelledAtStopRequestIds = new Set<string>();
   for (const [requestId, timing] of allMain) {
+    if (timing.error !== 'VST3 instance cancelled' || !stopAcks.has(requestId)) continue;
     const start = allBridgeStarts.get(requestId);
-    const ageAtStopMs = stopRequestedAtRendererMs - Number(start?.bridgeCallStartedAt);
-    if (timing.error === 'VST3 instance cancelled' && Number.isFinite(ageAtStopMs) &&
-        ageAtStopMs >= 0 && ageAtStopMs <= stopCancellationWindowMs && stopAcks.has(requestId)) {
+    // Live-port blocks never emit renderer-bridge-call-start. Unbind/close aborts
+    // the helper while stop-ack is already recorded; that is cancelled-at-stop,
+    // not an unaccounted failure.
+    if (!start) {
+      nativeCancelledAtStopRequestIds.add(requestId);
+      continue;
+    }
+    const ageAtStopMs = stopRequestedAtRendererMs - Number(start.bridgeCallStartedAt);
+    if (Number.isFinite(ageAtStopMs) && ageAtStopMs >= 0 && ageAtStopMs <= stopCancellationWindowMs) {
       nativeCancelledAtStopRequestIds.add(requestId);
     }
   }
