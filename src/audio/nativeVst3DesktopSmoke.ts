@@ -701,6 +701,16 @@ function compactNativeSessionAudit(run: any) {
   }));
 }
 
+function frameDelta(from: unknown, to: unknown) {
+  const start = Number(from), end = Number(to);
+  return Number.isFinite(start) && Number.isFinite(end) ? end - start : null;
+}
+
+function sameProcessDeltaMs(from: unknown, to: unknown) {
+  const start = Number(from), end = Number(to);
+  return Number.isFinite(start) && Number.isFinite(end) ? end - start : null;
+}
+
 function deadlineRequestEvidence(run: any) {
   const events = run.runtimeEvents as Array<Record<string, any>>;
   const ipc = run.ipc;
@@ -715,44 +725,129 @@ function deadlineRequestEvidence(run: any) {
     const main = (ipc.main.processAudio as Array<Record<string, any>>).find(event => event.requestId === requestId);
     const stopAck = events.find(event => event.event === 'worklet-stop-ack' && event.requestId === requestId);
     const cancellation = events.find(event => event.event === 'renderer-request-cancelled-at-stop' && event.requestId === requestId);
-    return { requestId, sequence: submit?.sequence, slotId: submit?.slotId,
-      submitAtMs: submit?.rendererAtMs, inputBlockStartContextFrame: submit?.inputBlockStartContextFrame,
-      dueContextFrame: submit?.dueContextFrame,
-      rendererReceivedAtMs: received?.requestReceivedAt, rendererQueueDepth: received?.queueDepth,
-      bridgeStartedAtMs: bridgeStart?.bridgeCallStartedAt, bridgeQueueDepth: bridgeStart?.queueDepth,
-      preloadInvokeAtMs: preload?.invokeStartedAt, preloadResponseAtMs: preload?.responseReceivedAt,
-      preloadRoundTripMs: preload?.rendererIpcRttMs,
-      mainReceivedAtMs: main?.ipcReceivedAtMainMs, nativeStartedAtMs: main?.serviceStartAtMainMs,
-      nativeCompletedAtMs: main?.serviceCompletedAtMainMs, nativeServiceCallMs: main?.nativeServiceCallMs,
-      activeCallsForEffectAtStart: main?.activeCallsForEffectAtStart,
-      inputRms: main?.nativeInputRms, outputRms: main?.nativeOutputRms, mainError: main?.error,
-      bridgeResponseAtMs: bridgeResponse?.bridgeResponseAt, bridgeRoundTripMs: bridgeResponse?.bridgeRoundTripMs,
-      workletResultAtMs: result?.rendererAtMs, workletAccepted: result?.accepted,
+    const submittedContextFrame = submit?.submittedContextFrame ?? received?.submittedContextFrame;
+    const dueContextFrame = submit?.dueContextFrame ?? received?.dueContextFrame ?? bridgeResponse?.dueContextFrame;
+    const submittedOutputFrame = submit?.submittedOutputFrame ?? received?.submittedOutputFrame;
+    const dueOutputFrame = submit?.dueOutputFrame ?? result?.dueOutputFrame;
+    const requestReceivedContextFrame = received?.requestReceivedContextFrame;
+    const bridgeResponseContextFrame = bridgeResponse?.bridgeResponseContextFrame;
+    const receivedOutputFrame = result?.receivedOutputFrame;
+    return {
+      requestId, sequence: submit?.sequence ?? received?.sequence ?? result?.sequence,
+      slotId: submit?.slotId ?? received?.slotId,
+      workletSubmission: {
+        submittedContextFrame, dueContextFrame, submittedOutputFrame, dueOutputFrame,
+        inputBlockStartContextFrame: submit?.inputBlockStartContextFrame ?? received?.inputBlockStartContextFrame,
+      },
+      rendererReceipt: {
+        requestReceivedContextFrame, queueDepth: received?.queueDepth,
+        submitToReceiptFrames: frameDelta(submittedContextFrame, requestReceivedContextFrame),
+        receiptToDueContextFrames: frameDelta(requestReceivedContextFrame, dueContextFrame),
+        origin: 'audio-context-frames',
+      },
+      rendererBridge: {
+        roundTripMs: bridgeResponse?.bridgeRoundTripMs,
+        queueWaitMs: sameProcessDeltaMs(received?.requestReceivedAt, bridgeStart?.bridgeCallStartedAt),
+        responseContextFrame: bridgeResponseContextFrame,
+        responseToDueContextFrames: frameDelta(bridgeResponseContextFrame, dueContextFrame),
+        queueDepth: bridgeStart?.queueDepth ?? received?.queueDepth,
+        origin: 'renderer-process-and-audio-context-frames',
+      },
+      preloadIpc: {
+        roundTripMs: preload?.rendererIpcRttMs,
+        origin: 'preload-process',
+      },
+      mainService: {
+        dispatchMs: sameProcessDeltaMs(main?.ipcReceivedAtMainMs, main?.serviceStartAtMainMs),
+        nativeServiceCallMs: main?.nativeServiceCallMs,
+        activeCallsForEffectAtStart: main?.activeCallsForEffectAtStart,
+        inputRms: main?.nativeInputRms, outputRms: main?.nativeOutputRms, error: main?.error,
+        origin: 'main-process',
+      },
+      workletResult: {
+        receivedOutputFrame, dueOutputFrame: result?.dueOutputFrame ?? dueOutputFrame,
+        accepted: result?.accepted, pendingSequence: result?.pendingSequence,
+        outputSlackFrames: frameDelta(receivedOutputFrame, result?.dueOutputFrame ?? dueOutputFrame),
+        origin: 'audio-worklet-frames',
+      },
       stopAck: stopAck ? { sequence: stopAck.sequence, reason: stopAck.reason } : null,
-      cancellation: cancellation ? { stage: cancellation.cancellationStage, reason: cancellation.reason } : null };
+      cancellation: cancellation ? { stage: cancellation.cancellationStage, reason: cancellation.reason } : null,
+    };
   };
-  const misses = events.filter(event => event.event === 'pending-deadline-miss' || event.event === 'deadline-miss');
-  return misses.map(miss => {
-    const requestId = String(miss.requestId ?? '');
+  const requestGroup = (slotId: unknown, requestId: string, sequence: number) => {
     const runtimeId = requestId.includes(':') ? requestId.slice(0, requestId.lastIndexOf(':')) : '';
-    const sequence = Number(miss.sequence);
-    const relevant = events.filter(event => event.event === 'worklet-submit' && event.slotId === miss.slotId &&
-      event.requestId?.startsWith(`${runtimeId}:`) && Number(event.sequence) >= Math.max(0, sequence - 2) &&
-      Number(event.sequence) <= sequence);
+    const relevant = events.filter(event => event.event === 'worklet-submit' && event.slotId === slotId &&
+      (runtimeId ? event.requestId?.startsWith(`${runtimeId}:`) : true) &&
+      Number(event.sequence) >= Math.max(0, sequence - 2) && Number(event.sequence) <= sequence);
     const requests = relevant.map(event => requestEvidence(String(event.requestId)));
     if (requestId && !requests.some(row => row.requestId === requestId)) requests.push(requestEvidence(requestId));
-    return { event: miss.event, trackId: miss.trackId, slotId: miss.slotId, requestId,
-      pendingSequence: miss.sequence, nextSequence: miss.nextSequence,
-      inputContextFrame: miss.inputContextFrame, currentOutputFrame: miss.currentOutputFrame,
-      dueOutputFrame: miss.dueOutputFrame, requests };
-  });
+    return requests;
+  };
+  const misses = events.filter(event => event.event === 'pending-deadline-miss' || event.event === 'deadline-miss');
+  if (misses.length) {
+    return misses.map(miss => {
+      const requestId = String(miss.requestId ?? '');
+      return { event: miss.event, trackId: miss.trackId, slotId: miss.slotId, requestId,
+        pendingSequence: miss.sequence, nextSequence: miss.nextSequence,
+        inputContextFrame: miss.inputContextFrame, currentOutputFrame: miss.currentOutputFrame,
+        dueOutputFrame: miss.dueOutputFrame, readySequences: miss.readySequences, drySequences: miss.drySequences,
+        requests: requestGroup(miss.slotId, requestId, Number(miss.sequence)) };
+    });
+  }
+  if (run.playbackActiveAtEnd === false) {
+    const submits = events.filter(event => event.event === 'worklet-submit');
+    const bySlot = new Map<string, Array<Record<string, any>>>();
+    for (const event of submits) {
+      const slotId = String(event.slotId ?? '');
+      const list = bySlot.get(slotId) ?? [];
+      list.push(event);
+      bySlot.set(slotId, list);
+    }
+    return [...bySlot].map(([slotId, slotSubmits]) => {
+      const latest = slotSubmits[slotSubmits.length - 1];
+      const requestId = String(latest?.requestId ?? '');
+      return { event: 'transport-stopped-without-deadline-event', trackId: latest?.trackId, slotId, requestId,
+        pendingSequence: latest?.sequence, requests: requestGroup(slotId, requestId, Number(latest?.sequence)) };
+    });
+  }
+  return [];
+}
+
+function compactDeadlineFrameSlack(run: any) {
+  return deadlineRequestEvidence(run).map(miss => ({
+    event: miss.event, slotId: miss.slotId, requestId: miss.requestId, pendingSequence: miss.pendingSequence,
+    requests: miss.requests.map(request => ({
+      requestId: request.requestId, sequence: request.sequence, slotId: request.slotId,
+      submittedContextFrame: request.workletSubmission.submittedContextFrame,
+      dueContextFrame: request.workletSubmission.dueContextFrame,
+      submittedOutputFrame: request.workletSubmission.submittedOutputFrame,
+      dueOutputFrame: request.workletSubmission.dueOutputFrame,
+      requestReceivedContextFrame: request.rendererReceipt.requestReceivedContextFrame,
+      submitToReceiptFrames: request.rendererReceipt.submitToReceiptFrames,
+      receiptToDueContextFrames: request.rendererReceipt.receiptToDueContextFrames,
+      rendererQueueDepth: request.rendererReceipt.queueDepth,
+      bridgeResponseContextFrame: request.rendererBridge.responseContextFrame,
+      bridgeResponseToDueContextFrames: request.rendererBridge.responseToDueContextFrames,
+      rendererQueueWaitMs: request.rendererBridge.queueWaitMs,
+      rendererBridgeRoundTripMs: request.rendererBridge.roundTripMs,
+      preloadRoundTripMs: request.preloadIpc.roundTripMs,
+      mainDispatchMs: request.mainService.dispatchMs,
+      nativeServiceCallMs: request.mainService.nativeServiceCallMs,
+      receivedOutputFrame: request.workletResult.receivedOutputFrame,
+      outputSlackFrames: request.workletResult.outputSlackFrames,
+      accepted: request.workletResult.accepted,
+      cancellation: request.cancellation,
+    })),
+  }));
 }
 
 function assertPackagedMixerRun(run: any, label: string) {
   const timing = run.timing;
   const failures = correlatedNativeFailures(run);
+  const deadlineRequests = deadlineRequestEvidence(run);
+  const deadlineFrameSlack = compactDeadlineFrameSlack(run);
   const evidence = JSON.stringify({ nativeFailureEvidence: failures,
-    nativeSessions: compactNativeSessionAudit(run), deadlineRequests: deadlineRequestEvidence(run),
+    nativeSessions: compactNativeSessionAudit(run), deadlineRequests, deadlineFrameSlack,
     nativeServicePcm: nativeServicePcmBySlot(run),
     timing: { blockPeriodMs: timing.blockPeriodMs, captureDurationMs: timing.captureDurationMs,
       playbackActiveAtEnd: run.playbackActiveAtEnd, requestCount: timing.requestCount,
@@ -770,7 +865,9 @@ function assertPackagedMixerRun(run: any, label: string) {
       rendererBridgeRoundTrip: timing.rendererBridgeRoundTrip,
       mainNativeServiceCall: timing.mainNativeServiceCall, scheduledOutputSlack: timing.scheduledOutputSlack },
     diagnostics: run.diagnostics, tailRms: run.tailRms, trackRms: run.trackRms });
-  const fail = (reason: string) => { throw new Error(`${label}: ${reason}; bounded production timing evidence=${evidence}`); };
+  const fail = (reason: string) => {
+    throw new Error(`${label}: ${reason}; deadlineFrameSlack=${JSON.stringify(deadlineFrameSlack)}; bounded production timing evidence=${evidence}`);
+  };
   if (run.sampleRate !== 48000) fail(`expected the packaged AudioContext at 48 kHz, got ${run.sampleRate}`);
   if (!run.playbackActiveAtEnd) fail(`production Mixer transport stopped during capture; diagnostics=${JSON.stringify(run.diagnostics)}`);
   if (timing.requestCount < 10 || timing.acceptedWorkletResults + timing.cancelledAtStopBlocks !== timing.requestCount ||
@@ -904,7 +1001,10 @@ async function runPackagedMixerAcceptance(instance: typeof audioEngine, persiste
   const alignmentOptions = (): MixerCaptureOptions => ({ durationMs: 1050, inputBuffers: onsetInputs(), includeMaster: true, includeNativeStages: true });
   const zeroInsertAlignment = await run(noEffects, 'Mixer onset alignment zero inserts', alignmentOptions());
   const oneInsertAlignment = await run(oneNativeInsert, 'Mixer onset alignment one insert', alignmentOptions());
-  const twoInsertAlignments = [await run(twoNativeInserts, 'Mixer isolated onset alignment two inserts attempt 1', alignmentOptions())];
+  const twoInsertAlignments = [await run(twoNativeInserts, 'Mixer onset alignment two inserts attempt 1', alignmentOptions())];
+  for (let attempt = 2; attempt <= 8; attempt++) {
+    twoInsertAlignments.push(await run(twoNativeInserts, `Mixer onset alignment two inserts attempt ${attempt}`, alignmentOptions()));
+  }
   const onsetFramesFor = (result: any) => Object.fromEntries([0, 1, 2].map(trackId => [trackId,
     firstCapturedOnsetFrame(result.captures.get(trackId), result.sourceStartContextFrame,
       result.sourceStartContextFrame + result.sampleRate)]));

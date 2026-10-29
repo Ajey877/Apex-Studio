@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   native-dsp:
-    if: github.event_name != 'push' || !contains(github.event.head_commit.message, '[rezfilter-diagnostic]')
+    if: github.event_name != 'push' || (!contains(github.event.head_commit.message, '[rezfilter-diagnostic]') && !contains(github.event.head_commit.message, '[mixer-deadline-diagnostic]'))
     name: Native DSP (${{ matrix.os }})
     strategy:
       fail-fast: false

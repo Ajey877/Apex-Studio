@@ -60,6 +60,24 @@ try {
 } catch (error) {
   console.error('[Apex Studio smoke]', error);
   console.error(`[Apex Studio smoke] failed isolated profile retained at ${profile}`);
-  if (process.env.GITHUB_ACTIONS) console.log(`::error title=Packaged VST3 restart failed::${String(error).replaceAll('%', '%25').replaceAll('\r', '%0D').replaceAll('\n', '%0A')}`);
+  if (process.env.GITHUB_ACTIONS) {
+    const encode = value => String(value).replaceAll('%', '%25').replaceAll('\r', '%0D').replaceAll('\n', '%0A');
+    console.log(`::error title=Packaged VST3 restart failed::${encode(error)}`);
+    for (const name of ['apex-packaged-smoke-save.json', 'apex-packaged-smoke-reopen.json']) {
+      const report = join(evidence, name);
+      if (!existsSync(report)) continue;
+      try {
+        const reportJson = JSON.parse(readFileSync(report, 'utf8'));
+        const message = String(reportJson.smokeError ?? '');
+        const startToken = 'deadlineFrameSlack=';
+        const endToken = '; bounded production timing evidence=';
+        const start = message.indexOf(startToken);
+        const end = start >= 0 ? message.indexOf(endToken, start) : -1;
+        if (start >= 0 && end > start) {
+          console.log(`::notice title=Mixer-deadline-frame-slack::${encode(message.slice(start + startToken.length, end))}`);
+        }
+      } catch { /* keep the original smoke failure; evidence parsing is best-effort */ }
+    }
+  }
   process.exitCode = 1;
 }
