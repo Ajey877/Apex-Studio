@@ -135,7 +135,6 @@ class Instance {
   std::set<ParamID> readOnlyIds;
   std::map<ParamID, ParamValue> overrides;
   std::map<ParamID, ParamValue> pendingEffectParameters;
-  int effectParameterFlushes = 0;
   std::string classId;
   double sampleRate = 48000;
   int mode = kOffline;
@@ -338,10 +337,7 @@ public:
       const auto accepted = controller->getParamNormalized(id);
       require(std::isfinite(accepted) && std::abs(accepted - value) <= 1e-7, "Controller did not accept the requested normalized value");
       overrides[id] = value;
-      if (!isInstrument) {
-        pendingEffectParameters[id] = value;
-        effectParameterFlushes = 0;
-      }
+      if (!isInstrument) pendingEffectParameters[id] = value;
     }
   }
   json snapshot() {
@@ -448,12 +444,9 @@ public:
     checked(processor->process(data), "Plugin process failed");
     // Retain a zero-sample flush for the next audible block too: some SDK
     // processors recalculate coefficients only while processing samples.
-    // Effects keep the overlay queued through a second audible block: MDA-style
-    // processors can ignore the first parameter queue, and clearing pending
-    // after that block would leave DSP at unrestored defaults for the take.
     if (frames > 0) {
       parameters.clearQueue();
-      if (isInstrument || ++effectParameterFlushes >= 2) pendingEffectParameters.clear();
+      pendingEffectParameters.clear();
     }
     std::vector<float> pcm(frames * 2);
     const auto& output = data.outputs[0];
