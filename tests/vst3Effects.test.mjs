@@ -142,6 +142,11 @@ test('inspect/restore of the packaged RezFilter overlay is audible on Delay then
     const delayOpened = await service.open(delayInspected, sampleRate, 'offline', owner, 'effect');
     const filterOpened = await service.open(inspected, sampleRate, 'offline', owner, 'effect');
     try {
+      for (const parameter of overlay) {
+        const actual = filterOpened.parameters.find(entry => entry.id === parameter.id);
+        assert.ok(actual && actual.currentValue !== null && Math.abs(actual.currentValue - parameter.value) < 1e-6,
+          `restored RezFilter controller must hold overlay ${parameter.id}=${parameter.value}, got ${JSON.stringify(actual)}`);
+      }
       const delayed = await service.processAudio(delayOpened.id, 1024, makeAudio(1024), 120, owner, []);
       assert.ok(rms(delayed) > 0.01, `Delay inspect/restore was silent: ${rms(delayed)}`);
       const filtered = await service.processAudio(filterOpened.id, 1024, delayed, 120, owner, []);

@@ -665,6 +665,26 @@ function planarRms(samples: Float32Array): number {
   return Math.sqrt(sum / samples.length);
 }
 
+function planarChannelEvidence(samples: Float32Array): { rms: number; leftRms: number; rightRms: number; midRms: number; frames: number } {
+  const frames = samples.length / 2;
+  let left = 0, right = 0, mid = 0;
+  for (let i = 0; i < frames; i++) {
+    const l = samples[i] ?? 0;
+    const r = samples[frames + i] ?? 0;
+    left += l * l;
+    right += r * r;
+    const m = l + r;
+    mid += m * m;
+  }
+  return {
+    rms: planarRms(samples),
+    leftRms: frames ? Math.sqrt(left / frames) : 0,
+    rightRms: frames ? Math.sqrt(right / frames) : 0,
+    midRms: frames ? Math.sqrt(mid / frames) : 0,
+    frames,
+  };
+}
+
 function createPlanarTone(frames: number, sampleRate: number, amplitude = 0.2): Float32Array {
   const audio = new Float32Array(frames * 2);
   for (let i = 0; i < frames; i++) {
@@ -695,20 +715,32 @@ async function processRestoredEffect(
   }
 }
 
+function overlayCurrentValueMismatches(
+  metadata: Array<{ id: number; currentValue: number | null }> | undefined,
+  overlay: Array<{ id: number; value: number }>,
+) {
+  return overlay.filter(expected => {
+    const actual = metadata?.find(parameter => parameter.id === expected.id);
+    return !actual || actual.currentValue === null || Math.abs(actual.currentValue - expected.value) > 1e-6;
+  });
+}
+
 async function inspectVerifiedRezFilterFixture(
-  bridge: Vst3Bridge, identity: Vst3Identity, sampleRate: number,
+  bridge: Vst3Bridge, identity: Vst3Identity, delayEffect: Vst3Effect,
 ): Promise<Vst3Effect> {
   const overlay = PACKAGED_REZFILTER_FIXTURE_PARAMETERS.map(parameter => ({ id: parameter.id, value: parameter.value }));
   const overlayState = { schema: 1 as const, classId: identity.classId, parameters: overlay };
+  // inspectEffect always opens at 48 kHz. Verify at that rate so restore matches
+  // the snapshot, and keep Delay+RezFilter sessions open together like Mixer.
+  const sampleRate = 48000;
   const tone = createPlanarTone(VST3_FX_BLOCK_FRAMES, sampleRate);
-  const inputRms = planarRms(tone);
-  if (inputRms <= 0.05) throw new Error(`Packaged RezFilter fixture stimulus was silent: rms=${inputRms}`);
+  const input = planarChannelEvidence(tone);
+  if (input.rms <= 0.05 || input.midRms <= 0.05) {
+    throw new Error(`Packaged RezFilter fixture stimulus was silent or mid-cancelled: ${JSON.stringify(input)}`);
+  }
 
   let lastEvidence = '';
-  for (let attempt = 1; attempt <= 2; attempt++) {
-    // Parameters-only inspect: do not round-trip factory component/controller
-    // streams whose LFO/envelope defaults can close the filter. inspectEffect's
-    // 1 silent sample is not an audibility check.
+  for (let attempt = 1; attempt <= 3; attempt++) {
     const inspected = await bridge.inspectEffect(identity, overlayState);
     for (const expected of overlay) {
       const actual = inspected.state.parameters.find(parameter => parameter.id === expected.id);
@@ -717,52 +749,87 @@ async function inspectVerifiedRezFilterFixture(
       }
     }
     const effect = withFixtureParameters(inspected, overlay);
-    // Match the live Mixer: restored snapshot only, empty per-block parameter list.
-    const restored = await processRestoredEffect(bridge, effect, tone, sampleRate, []);
-    const restoredRms = planarRms(restored);
-    if (restoredRms > 0.01) return effect;
-
-    const opened = await bridge.open(effect, sampleRate, 'offline', 'effect');
+    const delayOpened = await bridge.open(delayEffect, sampleRate, 'offline', 'effect');
     try {
-      await bridge.parameters(opened.id, overlay);
-      const primed = await bridge.processAudio(opened.id, VST3_FX_BLOCK_FRAMES, tone, 120, overlay);
-      lastEvidence = JSON.stringify({ attempt, inputRms, restoredRms, primedRms: planarRms(primed) });
-      if (planarRms(primed) <= 0.01) {
-        throw new Error(`Packaged RezFilter overlay did not open the filter on a real audio block: ${lastEvidence}`);
+      const filterOpened = await bridge.open(effect, sampleRate, 'offline', 'effect');
+      try {
+        const mismatches = overlayCurrentValueMismatches(filterOpened.parameters, overlay);
+        if (mismatches.length) await bridge.parameters(filterOpened.id, overlay);
+        const delayed = await bridge.processAudio(delayOpened.id, VST3_FX_BLOCK_FRAMES, tone, 120, []);
+        const delayEvidence = planarChannelEvidence(delayed);
+        if (delayEvidence.rms <= 0.05) {
+          throw new Error(`Packaged Delay inspect/restore was silent: ${JSON.stringify(delayEvidence)}`);
+        }
+        // Empty per-block list matches the live Mixer. Restore pending or an
+        // explicit overlay flush must open the filter on this first audible block.
+        let filtered = await bridge.processAudio(filterOpened.id, VST3_FX_BLOCK_FRAMES, delayed, 120, []);
+        let filterEvidence = planarChannelEvidence(filtered);
+        if (filterEvidence.rms <= 0.01 || filterEvidence.midRms <= 0.01) {
+          await bridge.parameters(filterOpened.id, overlay);
+          filtered = await bridge.processAudio(filterOpened.id, VST3_FX_BLOCK_FRAMES, delayed, 120, overlay);
+          filterEvidence = planarChannelEvidence(filtered);
+        }
+        lastEvidence = JSON.stringify({
+          attempt, input, delayEvidence, filterEvidence,
+          primedController: mismatches.map(parameter => parameter.id),
+        });
+        if (filterEvidence.rms <= 0.01 || filterEvidence.midRms <= 0.01) continue;
+        let silentBlock: number | null = null;
+        for (let block = 0; block < 8; block++) {
+          const nextDelay = await bridge.processAudio(delayOpened.id, VST3_FX_BLOCK_FRAMES, tone, 120, []);
+          const next = await bridge.processAudio(filterOpened.id, VST3_FX_BLOCK_FRAMES, nextDelay, 120, []);
+          const nextEvidence = planarChannelEvidence(next);
+          if (nextEvidence.rms <= 0.01 || nextEvidence.midRms <= 0.01) {
+            silentBlock = block;
+            lastEvidence = JSON.stringify({ attempt, block, delayEvidence: planarChannelEvidence(nextDelay), filterEvidence: nextEvidence });
+            break;
+          }
+        }
+        if (silentBlock !== null) continue;
+        return effect;
+      } finally {
+        await bridge.close(filterOpened.id);
       }
     } finally {
-      await bridge.close(opened.id);
+      await bridge.close(delayOpened.id);
     }
   }
-  throw new Error(`Packaged RezFilter inspect/restore stayed silent after verified priming: ${lastEvidence}`);
+  throw new Error(`Packaged RezFilter Delay→filter inspect/restore stayed silent after verified priming: ${lastEvidence}`);
 }
 
 async function inspectVerifiedDelayBypassFixture(
-  bridge: Vst3Bridge, identity: Vst3Identity, feedbackMixId: number, sampleRate: number,
+  bridge: Vst3Bridge, identity: Vst3Identity, feedbackMixId: number,
 ): Promise<Vst3Effect> {
   const overlay = [{ id: feedbackMixId, value: 0 }];
   const inspected = await bridge.inspectEffect(identity, { schema: 1, classId: identity.classId, parameters: overlay });
   const effect = withFixtureParameters(inspected, overlay);
-  const tone = createPlanarTone(VST3_FX_BLOCK_FRAMES, sampleRate);
-  const restored = await processRestoredEffect(bridge, effect, tone, sampleRate, []);
-  const restoredRms = planarRms(restored);
-  if (restoredRms <= 0.05) {
-    throw new Error(`Packaged Delay Fb Mix=0 inspect/restore was silent: rms=${restoredRms}`);
+  const tone = createPlanarTone(VST3_FX_BLOCK_FRAMES, 48000);
+  const restored = planarChannelEvidence(await processRestoredEffect(bridge, effect, tone, 48000, []));
+  if (restored.rms <= 0.05) {
+    throw new Error(`Packaged Delay Fb Mix=0 inspect/restore was silent: ${JSON.stringify(restored)}`);
   }
   return effect;
 }
 
 async function assertDelayThenRezFilterFixtureAudible(
-  bridge: Vst3Bridge, delayEffect: Vst3Effect, rezFilterEffect: Vst3Effect, sampleRate: number, label: string,
+  bridge: Vst3Bridge, delayEffect: Vst3Effect, rezFilterEffect: Vst3Effect, label: string,
 ) {
+  const sampleRate = 48000;
   const tone = createPlanarTone(VST3_FX_BLOCK_FRAMES, sampleRate);
-  const delayed = await processRestoredEffect(bridge, delayEffect, tone, sampleRate, []);
-  const delayRms = planarRms(delayed);
-  if (delayRms <= 0.01) throw new Error(`${label}: Delay inspect/restore was silent: rms=${delayRms}`);
-  const filtered = await processRestoredEffect(bridge, rezFilterEffect, delayed, sampleRate, []);
-  const filterRms = planarRms(filtered);
-  if (filterRms <= 0.01) {
-    throw new Error(`${label}: Delay→RezFilter inspect/restore was silent with the empty live parameter list: ${JSON.stringify({ delayRms, filterRms })}`);
+  const delayOpened = await bridge.open(delayEffect, sampleRate, 'offline', 'effect');
+  const filterOpened = await bridge.open(rezFilterEffect, sampleRate, 'offline', 'effect');
+  try {
+    const delayed = await bridge.processAudio(delayOpened.id, VST3_FX_BLOCK_FRAMES, tone, 120, []);
+    const delayEvidence = planarChannelEvidence(delayed);
+    if (delayEvidence.rms <= 0.01) throw new Error(`${label}: Delay inspect/restore was silent: ${JSON.stringify(delayEvidence)}`);
+    const filtered = await bridge.processAudio(filterOpened.id, VST3_FX_BLOCK_FRAMES, delayed, 120, []);
+    const filterEvidence = planarChannelEvidence(filtered);
+    if (filterEvidence.rms <= 0.01 || filterEvidence.midRms <= 0.01) {
+      throw new Error(`${label}: Delay→RezFilter inspect/restore was silent with the empty live parameter list: ${JSON.stringify({ delayEvidence, filterEvidence })}`);
+    }
+  } finally {
+    await bridge.close(delayOpened.id);
+    await bridge.close(filterOpened.id);
   }
 }
 
@@ -791,13 +858,12 @@ async function runPackagedMixerAcceptance(instance: typeof audioEngine) {
   // to user audio.
   const rezFilterLatencyParameters = PACKAGED_REZFILTER_FIXTURE_PARAMETERS.map(
     parameter => ({ id: parameter.id, value: parameter.value }));
-  const rezFilter = await inspectVerifiedRezFilterFixture(bridge, filterIdentity, context.sampleRate);
+  const rezFilter = await inspectVerifiedRezFilterFixture(bridge, filterIdentity, delay);
   const delayParameters = await bridge.describeEffect(delay);
   const feedbackMix = delayParameters.parameters.find(parameter => parameter.id === 4 && parameter.name === 'Fb Mix');
   if (!feedbackMix) throw new Error('The pinned mda Delay fixture no longer exposes the verified Fb Mix bypass parameter id 4');
-  const bypassDelay = await inspectVerifiedDelayBypassFixture(bridge, delayIdentity, feedbackMix.id, context.sampleRate);
-  await assertDelayThenRezFilterFixtureAudible(bridge, delay, rezFilter, context.sampleRate, 'processed Delay → RezFilter');
-  await assertDelayThenRezFilterFixtureAudible(bridge, bypassDelay, rezFilter, context.sampleRate, 'Fb Mix=0 Delay → RezFilter');
+  const bypassDelay = await inspectVerifiedDelayBypassFixture(bridge, delayIdentity, feedbackMix.id);
+  await assertDelayThenRezFilterFixtureAudible(bridge, bypassDelay, rezFilter, 'Fb Mix=0 Delay → RezFilter');
 
   const channels: Channel[] = [];
   const tracks: MixerTrack[] = [0, 1, 2].map(id => ({ id, name: `Packaged smoke track ${id}`, color: '#fff',
