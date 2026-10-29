@@ -30,7 +30,7 @@ function listen(port, onMessage, onClose) {
 }
 
 export function createLiveAudioPortSession({
-  sessionId, owner, trackId, slotId, processAudio, onFatal,
+  sessionId, owner, trackId, slotId, processAudio, onFatal = undefined,
 }) {
   if (typeof sessionId !== 'string' || sessionId.length === 0 || sessionId.length > 128) throw new Error('Invalid live audio session');
   if (typeof owner !== 'string' || owner.length === 0) throw new Error('Invalid live audio owner');
