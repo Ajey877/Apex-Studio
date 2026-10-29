@@ -8,6 +8,8 @@ import type { Vst3Bridge, Vst3Effect } from './nativeVst3Types';
 function createWorklet() {
   const sandbox: any = {
     currentFrame: 0,
+    currentTime: 0,
+    sampleRate: 48000,
     Float32Array,
     Map,
     Number,
@@ -30,6 +32,7 @@ function createWorklet() {
     if (withInput) { left.fill(0.25); right.fill(-0.25); }
     const output = [new Float32Array(128), new Float32Array(128)];
     sandbox.currentFrame = contextFrame;
+    sandbox.currentTime = contextFrame / sandbox.sampleRate;
     contextFrame += 128;
     processor.process(withInput ? [[left, right]] : [[]], [output]);
     return output;
@@ -380,6 +383,75 @@ test('smoke stop chronology records result posts and null-sequence acknowledgeme
     assert.ok(events.some(event => event.event === 'renderer-session-closed'));
     assert.ok(events.some(event => event.event === 'renderer-tail-settled'));
     assert.equal(events.some(event => event.event === 'renderer-stop-ack-timeout'), false);
+  } finally {
+    await runtime.stop();
+    (globalThis as any).AudioWorkletNode = originalNode;
+    (globalThis as any).desktopApp = originalDesktop;
+  }
+});
+
+test('worklet submit profiles AudioContext currentTime frames alongside currentFrame', () => {
+  const { processor, next } = createWorklet();
+  for (let i = 0; i < VST3_FX_BLOCK_FRAMES / 128; i++) next();
+  const submit = profileMessages(processor, 'worklet-submit')[0];
+  assert.equal(submit.workletCurrentFrame, VST3_FX_BLOCK_FRAMES - 128);
+  assert.equal(submit.workletCurrentTimeFrame, VST3_FX_BLOCK_FRAMES - 128);
+  assert.equal(submit.submittedContextFrame, VST3_FX_BLOCK_FRAMES);
+});
+
+test('renderer records process arrival before the stopping guard omits request-received', async () => {
+  const originalNode = (globalThis as any).AudioWorkletNode;
+  const originalDesktop = (globalThis as any).desktopApp;
+  (globalThis as any).desktopApp = { smokeTest: true };
+  resetNativeVst3MixerEffectSmokeTiming();
+  const nodes: any[] = [];
+  class FakeAudioWorkletNode {
+    port = { onmessage: null as ((event: { data: any }) => void) | null, sent: [] as any[], closed: false,
+      postMessage: (message: any) => {
+        this.port.sent.push(message);
+        if (message?.type === 'stop') queueMicrotask(() => this.port.onmessage?.({ data: {
+          type: 'stop-ack', sequence: 0, reason: message.reason,
+        } }));
+      }, close() { this.closed = true; } };
+    onprocessorerror: (() => void) | null = null;
+    constructor() { nodes.push(this); }
+    disconnect() {}
+  }
+  (globalThis as any).AudioWorkletNode = FakeAudioWorkletNode;
+  let delayedResolve: ((pcm: Float32Array) => void) | undefined;
+  const bridge: Vst3Bridge = {
+    paths: async () => [], choosePath: async () => null,
+    discover: async () => ({ plugins: [], errors: [] }), discoverEffects: async () => ({ plugins: [], errors: [] }),
+    inspect: async () => { throw new Error('unused'); }, inspectEffect: async () => { throw new Error('unused'); },
+    describeEffect: async () => ({ parameters: [], controllerAvailable: false }), describe: async () => ({ parameters: [], controllerAvailable: false }),
+    parameters: async () => [], open: async () => ({ id: 'session-arrive', latencySamples: 0 }),
+    process: async () => new Float32Array(),
+    processAudio: async () => new Promise<Float32Array>(resolve => { delayedResolve = resolve; }),
+    close: async () => {},
+  };
+  const context: any = { sampleRate: 48000, currentTime: 2, state: 'running', audioWorklet: { addModule: async () => {} } };
+  const runtime = new NativeVst3EffectRuntime(() => {}, () => bridge);
+  try {
+    await runtime.prepareTracks([track], context);
+    const node = nodes[0];
+    node.port.onmessage!({ data: { type: 'process', sequence: 0, samples: new Float32Array(VST3_FX_BLOCK_FRAMES * 2) } });
+    await tick();
+    const stopping = runtime.stop();
+    node.port.onmessage!({ data: { type: 'process', sequence: 14, samples: new Float32Array(VST3_FX_BLOCK_FRAMES * 2) } });
+    delayedResolve?.(new Float32Array(VST3_FX_BLOCK_FRAMES * 2).fill(0.2));
+    await stopping;
+    const events = getNativeVst3MixerEffectSmokeTiming();
+    const arrived = events.filter(event => event.event === 'renderer-process-arrived');
+    assert.equal(arrived.length, 2);
+    assert.equal(arrived[0].stopping, false);
+    assert.equal(arrived[0].sequence, 0);
+    assert.equal(arrived[1].stopping, true);
+    assert.equal(arrived[1].sequence, 14);
+    assert.equal(arrived[1].arrivedContextFrame, 96000);
+    assert.ok(events.some(event => event.event === 'renderer-request-received' && event.sequence === 0));
+    assert.equal(events.some(event => event.event === 'renderer-request-received' && event.sequence === 14), false);
+    assert.ok(events.some(event => event.event === 'renderer-request-cancelled-at-stop' && event.sequence === 14 &&
+      event.cancellationStage === 'before-native-service'));
   } finally {
     await runtime.stop();
     (globalThis as any).AudioWorkletNode = originalNode;

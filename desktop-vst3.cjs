@@ -135,7 +135,8 @@ function registerVst3({ app, ipcMain, dialog, getWindow }) {
         nativeOutputMonoDifferenceRms: outputChannels?.monoDifferenceRms ?? null,
         nativeProcessEvidence: nativeProcessEvidence ?? null,
         nativeFailureEvidence: nativeFailureEvidence ?? null, serviceSessionId: id,
-        activeProcessAudioCallsAtStart: activeAtStart, activeCallsForEffectAtStart: activeForEffectAtStart, error: null,
+        activeProcessAudioCallsAtStart: activeAtStart, activeCallsForEffectAtStart: activeForEffectAtStart,
+        outcome: 'resolved', error: null,
       });
       return pcm;
     } catch (error) {
@@ -147,7 +148,7 @@ function registerVst3({ app, ipcMain, dialog, getWindow }) {
         nativeInputRightRms: inputChannels?.rightRms ?? null, nativeInputMonoSumRms: inputChannels?.monoSumRms ?? null,
         nativeInputMonoDifferenceRms: inputChannels?.monoDifferenceRms ?? null, nativeOutputRms: null,
         activeProcessAudioCallsAtStart: activeAtStart, activeCallsForEffectAtStart: activeForEffectAtStart,
-        error: error instanceof Error ? error.message : String(error),
+        outcome: 'rejected', error: error instanceof Error ? error.message : String(error),
       });
       throw error;
     } finally {

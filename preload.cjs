@@ -26,10 +26,22 @@ const desktopApi = {
     processAudio: async (id, frames, audio, bpm, parameters, profile) => {
       if (!smokeTest || !profile) return ipcRenderer.invoke('vst3:processAudio', id, frames, audio, bpm, parameters);
       const invokeStartedAt = performance.now();
-      const pcm = await ipcRenderer.invoke('vst3:processAudio', id, frames, audio, bpm, parameters, profile);
-      const responseReceivedAt = performance.now();
-      if (smokeIpcMeasurements.length < 8192) smokeIpcMeasurements.push({ ...profile, invokeStartedAt, responseReceivedAt, rendererIpcRttMs: responseReceivedAt - invokeStartedAt });
-      return pcm;
+      try {
+        const pcm = await ipcRenderer.invoke('vst3:processAudio', id, frames, audio, bpm, parameters, profile);
+        const responseReceivedAt = performance.now();
+        if (smokeIpcMeasurements.length < 8192) smokeIpcMeasurements.push({
+          ...profile, invokeStartedAt, responseReceivedAt, rendererIpcRttMs: responseReceivedAt - invokeStartedAt,
+          outcome: 'resolved', error: null,
+        });
+        return pcm;
+      } catch (error) {
+        const responseReceivedAt = performance.now();
+        if (smokeIpcMeasurements.length < 8192) smokeIpcMeasurements.push({
+          ...profile, invokeStartedAt, responseReceivedAt, rendererIpcRttMs: responseReceivedAt - invokeStartedAt,
+          outcome: 'rejected', error: error instanceof Error ? error.message : String(error),
+        });
+        throw error;
+      }
     },
     close: (id) => ipcRenderer.invoke('vst3:close', id),
   },

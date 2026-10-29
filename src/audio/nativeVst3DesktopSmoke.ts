@@ -738,9 +738,11 @@ function deadlineRequestEvidence(run: any) {
   const requestEvidence = (requestId: string) => {
     const find = (name: string) => events.find(event => event.event === name && event.requestId === requestId);
     const submit = find('worklet-submit');
+    const arrived = find('renderer-process-arrived');
     const received = find('renderer-request-received');
     const bridgeStart = find('renderer-bridge-call-start');
     const bridgeResponse = find('renderer-bridge-response');
+    const bridgeRejected = find('renderer-bridge-rejected');
     const result = find('worklet-result');
     const preload = (ipc.preload as Array<Record<string, any>>).find(event => event.requestId === requestId);
     const main = (ipc.main.processAudio as Array<Record<string, any>>).find(event => event.requestId === requestId);
@@ -751,17 +753,21 @@ function deadlineRequestEvidence(run: any) {
     const orderedEvents = events.filter(event => event.requestId === requestId).map(event => ({
       event: event.event, sequence: event.sequence ?? null, accepted: event.accepted ?? null,
       reason: event.reason ?? null, cancellationStage: event.cancellationStage ?? null,
+      stopping: event.stopping ?? null, disposed: event.disposed ?? null,
+      arrivedContextFrame: event.arrivedContextFrame ?? null,
       resultPostedContextFrame: event.resultPostedContextFrame ?? null,
       bridgeResponseContextFrame: event.bridgeResponseContextFrame ?? null,
+      workletCurrentTimeFrame: event.workletCurrentTimeFrame ?? null,
       rendererAtMs: event.rendererAtMs ?? null,
     }));
-    const expected = ['worklet-submit', 'renderer-request-received', 'renderer-bridge-call-start',
+    const expected = ['worklet-submit', 'renderer-process-arrived', 'renderer-request-received', 'renderer-bridge-call-start',
       'renderer-bridge-response', 'renderer-result-posted', 'worklet-result'];
     const present = new Set(orderedEvents.map(event => event.event));
     if (preload) present.add('preload-ipc');
     if (main) present.add('main-processAudio');
-    const confirmed = ['worklet-submit', 'renderer-request-received', 'preload-ipc', 'renderer-bridge-call-start',
-      'main-processAudio', 'renderer-bridge-response', 'renderer-result-posted', 'worklet-result']
+    const confirmed = ['worklet-submit', 'renderer-process-arrived', 'renderer-request-received', 'preload-ipc',
+      'renderer-bridge-call-start', 'main-processAudio', 'renderer-bridge-rejected', 'renderer-bridge-response',
+      'renderer-result-posted', 'worklet-result']
       .filter(name => present.has(name));
     const lastConfirmedEvent = confirmed.at(-1) ?? null;
     const firstMissingEvent = expected.find(name => !present.has(name)) ?? null;
@@ -770,14 +776,26 @@ function deadlineRequestEvidence(run: any) {
     const submittedOutputFrame = submit?.submittedOutputFrame ?? received?.submittedOutputFrame;
     const dueOutputFrame = submit?.dueOutputFrame ?? result?.dueOutputFrame;
     const requestReceivedContextFrame = received?.requestReceivedContextFrame;
-    const bridgeResponseContextFrame = bridgeResponse?.bridgeResponseContextFrame;
+    const arrivedContextFrame = arrived?.arrivedContextFrame;
+    const workletCurrentTimeFrame = submit?.workletCurrentTimeFrame;
+    const workletCurrentFrame = submit?.workletCurrentFrame;
+    const bridgeResponseContextFrame = bridgeResponse?.bridgeResponseContextFrame ?? bridgeRejected?.bridgeResponseContextFrame;
     const receivedOutputFrame = result?.receivedOutputFrame;
     return {
-      requestId, sequence: submit?.sequence ?? received?.sequence ?? result?.sequence,
-      slotId: submit?.slotId ?? received?.slotId,
+      requestId, sequence: submit?.sequence ?? received?.sequence ?? arrived?.sequence ?? result?.sequence,
+      slotId: submit?.slotId ?? received?.slotId ?? arrived?.slotId,
       workletSubmission: {
         submittedContextFrame, dueContextFrame, submittedOutputFrame, dueOutputFrame,
         inputBlockStartContextFrame: submit?.inputBlockStartContextFrame ?? received?.inputBlockStartContextFrame,
+        workletCurrentFrame, workletCurrentTimeFrame,
+      },
+      rendererArrival: {
+        arrivedContextFrame, stopping: arrived?.stopping ?? null, disposed: arrived?.disposed ?? null,
+        faulted: arrived?.faulted ?? null, validSamples: arrived?.validSamples ?? null,
+        submitToArrivalFrames: frameDelta(submittedContextFrame, arrivedContextFrame),
+        workletCurrentTimeToArrivalFrames: frameDelta(workletCurrentTimeFrame, arrivedContextFrame),
+        arrivalToDueContextFrames: frameDelta(arrivedContextFrame, dueContextFrame),
+        origin: 'audio-context-frames',
       },
       rendererReceipt: {
         requestReceivedContextFrame, queueDepth: received?.queueDepth,
@@ -795,15 +813,24 @@ function deadlineRequestEvidence(run: any) {
       },
       preloadIpc: {
         roundTripMs: preload?.rendererIpcRttMs,
+        outcome: preload?.outcome ?? null, error: preload?.error ?? null,
         origin: 'preload-process',
       },
       mainService: {
         dispatchMs: sameProcessDeltaMs(main?.ipcReceivedAtMainMs, main?.serviceStartAtMainMs),
         nativeServiceCallMs: main?.nativeServiceCallMs,
         activeCallsForEffectAtStart: main?.activeCallsForEffectAtStart,
-        inputRms: main?.nativeInputRms, outputRms: main?.nativeOutputRms, error: main?.error,
+        inputRms: main?.nativeInputRms, outputRms: main?.nativeOutputRms,
+        outcome: main?.outcome ?? (main ? (main.error ? 'rejected' : 'resolved') : null),
+        error: main?.error ?? null,
         origin: 'main-process',
       },
+      rendererBridgeReject: bridgeRejected ? {
+        roundTripMs: bridgeRejected.bridgeRoundTripMs, error: bridgeRejected.error ?? null,
+        stopping: bridgeRejected.stopping ?? null, disposed: bridgeRejected.disposed ?? null,
+        responseContextFrame: bridgeRejected.bridgeResponseContextFrame ?? null,
+        origin: 'renderer-process',
+      } : null,
       workletResult: {
         receivedOutputFrame, dueOutputFrame: result?.dueOutputFrame ?? dueOutputFrame,
         accepted: result?.accepted, pendingSequence: result?.pendingSequence,
@@ -837,7 +864,9 @@ function deadlineRequestEvidence(run: any) {
       return { event: miss.event, trackId: miss.trackId, slotId: miss.slotId, requestId,
         pendingSequence: miss.sequence, nextSequence: miss.nextSequence,
         inputContextFrame: miss.inputContextFrame, currentOutputFrame: miss.currentOutputFrame,
-        dueOutputFrame: miss.dueOutputFrame, readySequences: miss.readySequences, drySequences: miss.drySequences,
+        dueOutputFrame: miss.dueOutputFrame, workletCurrentFrame: miss.workletCurrentFrame ?? null,
+        workletCurrentTimeFrame: miss.workletCurrentTimeFrame ?? null,
+        readySequences: miss.readySequences, drySequences: miss.drySequences,
         requests: requestGroup(miss.slotId, requestId, Number(miss.sequence)) };
     });
   }
@@ -869,35 +898,50 @@ function deadlineRequestEvidence(run: any) {
 }
 
 function compactDeadlineFrameSlack(run: any) {
-  return deadlineRequestEvidence(run).map(miss => ({
-    event: miss.event, slotId: miss.slotId, requestId: miss.requestId, pendingSequence: miss.pendingSequence,
-    requests: miss.requests.map(request => ({
-      requestId: request.requestId, sequence: request.sequence, slotId: request.slotId,
-      submittedContextFrame: request.workletSubmission.submittedContextFrame,
-      dueContextFrame: request.workletSubmission.dueContextFrame,
-      submittedOutputFrame: request.workletSubmission.submittedOutputFrame,
-      dueOutputFrame: request.workletSubmission.dueOutputFrame,
-      requestReceivedContextFrame: request.rendererReceipt.requestReceivedContextFrame,
-      submitToReceiptFrames: request.rendererReceipt.submitToReceiptFrames,
-      receiptToDueContextFrames: request.rendererReceipt.receiptToDueContextFrames,
-      rendererQueueDepth: request.rendererReceipt.queueDepth,
-      bridgeResponseContextFrame: request.rendererBridge.responseContextFrame,
-      bridgeResponseToDueContextFrames: request.rendererBridge.responseToDueContextFrames,
-      rendererQueueWaitMs: request.rendererBridge.queueWaitMs,
-      rendererBridgeRoundTripMs: request.rendererBridge.roundTripMs,
-      preloadRoundTripMs: request.preloadIpc.roundTripMs,
-      mainDispatchMs: request.mainService.dispatchMs,
-      nativeServiceCallMs: request.mainService.nativeServiceCallMs,
-      receivedOutputFrame: request.workletResult.receivedOutputFrame,
-      outputSlackFrames: request.workletResult.outputSlackFrames,
-      accepted: request.workletResult.accepted,
-      cancellation: request.cancellation,
-      resultPosted: request.rendererResultPost?.posted ?? false,
-      lastConfirmedEvent: request.lastConfirmedEvent,
-      firstMissingEvent: request.firstMissingEvent,
-      orderedEvents: request.orderedEvents,
-    })),
-  }));
+  return deadlineRequestEvidence(run).map(miss => {
+    const failedId = String(miss.requestId ?? '');
+    const predecessors = miss.requests.filter((request: any) => request.requestId !== failedId).map((request: any) => ({
+      sequence: request.sequence, lastConfirmedEvent: request.lastConfirmedEvent,
+      firstMissingEvent: request.firstMissingEvent, nativeServiceCallMs: request.mainService.nativeServiceCallMs,
+      outputSlackFrames: request.workletResult.outputSlackFrames, accepted: request.workletResult.accepted,
+    }));
+    const failed = miss.requests.find((request: any) => request.requestId === failedId) ?? miss.requests.at(-1);
+    return {
+      event: miss.event, slotId: miss.slotId, requestId: miss.requestId, pendingSequence: miss.pendingSequence,
+      nextSequence: miss.nextSequence, inputContextFrame: miss.inputContextFrame,
+      currentOutputFrame: miss.currentOutputFrame, dueOutputFrame: miss.dueOutputFrame,
+      workletCurrentFrame: miss.workletCurrentFrame, workletCurrentTimeFrame: miss.workletCurrentTimeFrame,
+      predecessors,
+      failed: failed ? {
+        requestId: failed.requestId, sequence: failed.sequence, slotId: failed.slotId,
+        submittedContextFrame: failed.workletSubmission.submittedContextFrame,
+        dueContextFrame: failed.workletSubmission.dueContextFrame,
+        workletCurrentFrame: failed.workletSubmission.workletCurrentFrame,
+        workletCurrentTimeFrame: failed.workletSubmission.workletCurrentTimeFrame,
+        arrivedContextFrame: failed.rendererArrival.arrivedContextFrame,
+        arrivedStopping: failed.rendererArrival.stopping,
+        submitToArrivalFrames: failed.rendererArrival.submitToArrivalFrames,
+        workletCurrentTimeToArrivalFrames: failed.rendererArrival.workletCurrentTimeToArrivalFrames,
+        arrivalToDueContextFrames: failed.rendererArrival.arrivalToDueContextFrames,
+        requestReceivedContextFrame: failed.rendererReceipt.requestReceivedContextFrame,
+        submitToReceiptFrames: failed.rendererReceipt.submitToReceiptFrames,
+        receiptToDueContextFrames: failed.rendererReceipt.receiptToDueContextFrames,
+        rendererQueueWaitMs: failed.rendererBridge.queueWaitMs,
+        rendererBridgeRoundTripMs: failed.rendererBridge.roundTripMs,
+        preloadOutcome: failed.preloadIpc.outcome, preloadError: failed.preloadIpc.error,
+        preloadRoundTripMs: failed.preloadIpc.roundTripMs,
+        mainOutcome: failed.mainService.outcome, mainError: failed.mainService.error,
+        mainDispatchMs: failed.mainService.dispatchMs,
+        nativeServiceCallMs: failed.mainService.nativeServiceCallMs,
+        bridgeRejected: failed.rendererBridgeReject,
+        cancellation: failed.cancellation,
+        resultPosted: failed.rendererResultPost?.posted ?? false,
+        lastConfirmedEvent: failed.lastConfirmedEvent,
+        firstMissingEvent: failed.firstMissingEvent,
+        orderedEvents: failed.orderedEvents,
+      } : null,
+    };
+  });
 }
 
 function assertPackagedMixerRun(run: any, label: string) {
