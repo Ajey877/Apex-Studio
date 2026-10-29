@@ -4,7 +4,7 @@ import { nativeTarget } from './nativeVst3Automation';
 import { audioEngine } from './audioEngine';
 import { DEFAULT_MASTERING_SUITE_STATE } from './masteringState';
 import { getVst3Bridge, type Vst3Effect } from './nativeVst3Types';
-import { VST3_FX_BLOCK_FRAMES, VST3_FX_PIPELINE_FRAMES, getNativeVst3MixerEffectSmokeTiming, getNativeVst3MixerEffectSmokeTimingDropped, resetNativeVst3MixerEffectSmokeTiming, getVst3MixerEffectDiagnostics } from './nativeVst3EffectRuntime';
+import { VST3_FX_BLOCK_FRAMES, VST3_FX_PIPELINE_FRAMES, getNativeVst3MixerEffectSmokeTiming, getNativeVst3MixerEffectSmokeTimingDropped, resetNativeVst3MixerEffectSmokeTiming, getVst3MixerEffectDiagnostics, startNativeVst3RendererLoopMonitor, stopNativeVst3RendererLoopMonitor, correlateNativeVst3RendererLoopArrival } from './nativeVst3EffectRuntime';
 import { getVst3Diagnostics } from './nativeVst3Runtime';
 import { createDefaultProjectState, normalizeProjectState } from '../state/projectState';
 import { persistProjectState, restorePersistedProjectState, serializeProjectState } from '../state/projectPersistence';
@@ -629,17 +629,23 @@ async function captureLiveMixerRun(instance: typeof audioEngine, channels: Chann
   targetSource.start(sourceStartTime); controlSource.start(sourceStartTime);
   await new Promise(resolve => setTimeout(resolve, 300));
   await smokeApi.smokeTimingSnapshot(); // warm the authorized timing IPC before the measured window
+  startNativeVst3RendererLoopMonitor(context);
   const startedAt = performance.now();
   const startedContextFrame = sourceStartContextFrame + Math.round(0.25 * context.sampleRate);
   let bypassUpdateAppliedContextFrame: number | null = null;
-  const bypassUpdate = options.bypassMixerTracks && options.bypassMixerAfterMs !== undefined
-    ? new Promise<void>(resolve => setTimeout(() => {
-      instance.synchronizePlaybackState({ mixerTracks: options.bypassMixerTracks! });
-      bypassUpdateAppliedContextFrame = Math.round(context.currentTime * context.sampleRate);
-      resolve();
-    }, options.bypassMixerAfterMs))
-    : Promise.resolve();
-  await Promise.all([new Promise<void>(resolve => setTimeout(resolve, durationMs)), bypassUpdate]);
+  let rendererLoopMonitor = null as ReturnType<typeof stopNativeVst3RendererLoopMonitor>;
+  try {
+    const bypassUpdate = options.bypassMixerTracks && options.bypassMixerAfterMs !== undefined
+      ? new Promise<void>(resolve => setTimeout(() => {
+        instance.synchronizePlaybackState({ mixerTracks: options.bypassMixerTracks! });
+        bypassUpdateAppliedContextFrame = Math.round(context.currentTime * context.sampleRate);
+        resolve();
+      }, options.bypassMixerAfterMs))
+      : Promise.resolve();
+    await Promise.all([new Promise<void>(resolve => setTimeout(resolve, durationMs)), bypassUpdate]);
+  } finally {
+    rendererLoopMonitor = stopNativeVst3RendererLoopMonitor();
+  }
   const stoppedAt = performance.now();
   const stoppedContextFrame = Math.round(context.currentTime * context.sampleRate);
   const playbackActiveAtEnd = instance.isPlaybackActive();
@@ -685,7 +691,7 @@ async function captureLiveMixerRun(instance: typeof audioEngine, channels: Chann
   return { pcm, tailRms, sampleRate, durationMs: duration, captureStartRendererMs: startedAt,
     captureEndRendererMs: stoppedAt, startedContextFrame, stoppedContextFrame, sourceStartContextFrame,
     bypassUpdateAppliedContextFrame, playbackActiveAtEnd, captures: taps, nativeStageCaptures: nativeStageTaps,
-    nativeStagePcm,
+    nativeStagePcm, rendererLoopMonitor,
     trackRms: Object.fromEntries([...pcm].map(([trackId, audio]) => [trackId, audio.rms])),
     nativeStageRms: Object.fromEntries([...nativeStagePcm].map(([slotId, audio]) => [slotId, audio.rms])),
     diagnostics: getVst3MixerEffectDiagnostics(), timing, runtimeEvents, ipc };
@@ -755,9 +761,11 @@ function deadlineRequestEvidence(run: any) {
       reason: event.reason ?? null, cancellationStage: event.cancellationStage ?? null,
       stopping: event.stopping ?? null, disposed: event.disposed ?? null,
       arrivedContextFrame: event.arrivedContextFrame ?? null,
+      rendererProfileContextFrame: event.rendererProfileContextFrame ?? null,
       resultPostedContextFrame: event.resultPostedContextFrame ?? null,
       bridgeResponseContextFrame: event.bridgeResponseContextFrame ?? null,
       workletCurrentTimeFrame: event.workletCurrentTimeFrame ?? null,
+      precedingHeartbeatDriftMs: event.precedingHeartbeatDriftMs ?? null,
       rendererAtMs: event.rendererAtMs ?? null,
     }));
     const expected = ['worklet-submit', 'renderer-process-arrived', 'renderer-request-received', 'renderer-bridge-call-start',
@@ -789,14 +797,31 @@ function deadlineRequestEvidence(run: any) {
         inputBlockStartContextFrame: submit?.inputBlockStartContextFrame ?? received?.inputBlockStartContextFrame,
         workletCurrentFrame, workletCurrentTimeFrame,
       },
+      rendererProfile: {
+        contextFrame: submit?.rendererProfileContextFrame ?? null,
+        workletCurrentTimeToProfileFrames: frameDelta(workletCurrentTimeFrame, submit?.rendererProfileContextFrame),
+        profileToArrivalFrames: frameDelta(submit?.rendererProfileContextFrame, arrivedContextFrame),
+        precedingHeartbeatDriftMs: submit?.precedingHeartbeatDriftMs ?? null,
+        precedingHeartbeatGapMs: submit?.precedingHeartbeatGapMs ?? null,
+        origin: 'renderer-process-and-audio-context-frames',
+      },
       rendererArrival: {
         arrivedContextFrame, stopping: arrived?.stopping ?? null, disposed: arrived?.disposed ?? null,
         faulted: arrived?.faulted ?? null, validSamples: arrived?.validSamples ?? null,
         submitToArrivalFrames: frameDelta(submittedContextFrame, arrivedContextFrame),
         workletCurrentTimeToArrivalFrames: frameDelta(workletCurrentTimeFrame, arrivedContextFrame),
         arrivalToDueContextFrames: frameDelta(arrivedContextFrame, dueContextFrame),
+        precedingHeartbeatDriftMs: arrived?.precedingHeartbeatDriftMs ?? null,
+        precedingHeartbeatGapMs: arrived?.precedingHeartbeatGapMs ?? null,
+        precedingHeartbeatAtMs: arrived?.precedingHeartbeatAtMs ?? null,
+        precedingHeartbeatContextFrame: arrived?.precedingHeartbeatContextFrame ?? null,
         origin: 'audio-context-frames',
       },
+      rendererLoop: correlateNativeVst3RendererLoopArrival(
+        run.rendererLoopMonitor ?? { last: null, stalls: [], maxDriftMs: 0, heartbeatCount: 0 },
+        Number(arrived?.arrivedAt ?? arrived?.rendererAtMs ?? submit?.rendererAtMs),
+        arrived ?? submit,
+      ),
       rendererReceipt: {
         requestReceivedContextFrame, queueDepth: received?.queueDepth,
         submitToReceiptFrames: frameDelta(submittedContextFrame, requestReceivedContextFrame),
@@ -912,17 +937,33 @@ function compactDeadlineFrameSlack(run: any) {
       currentOutputFrame: miss.currentOutputFrame, dueOutputFrame: miss.dueOutputFrame,
       workletCurrentFrame: miss.workletCurrentFrame, workletCurrentTimeFrame: miss.workletCurrentTimeFrame,
       predecessors,
+      loopMonitor: run.rendererLoopMonitor ? {
+        heartbeatCount: run.rendererLoopMonitor.heartbeatCount, maxDriftMs: run.rendererLoopMonitor.maxDriftMs,
+        maxGapMs: run.rendererLoopMonitor.maxGapMs, delaysOver4ms: run.rendererLoopMonitor.delaysOver4ms,
+        delaysOver8ms: run.rendererLoopMonitor.delaysOver8ms,
+        longTaskCount: run.rendererLoopMonitor.longTasks?.length ?? 0,
+        maxLongTaskMs: (run.rendererLoopMonitor.longTasks ?? []).reduce((max: number, task: any) => Math.max(max, Number(task.durationMs) || 0), 0),
+        stallCount: run.rendererLoopMonitor.stalls?.length ?? 0,
+      } : null,
       failed: failed ? {
         requestId: failed.requestId, sequence: failed.sequence, slotId: failed.slotId,
         submittedContextFrame: failed.workletSubmission.submittedContextFrame,
         dueContextFrame: failed.workletSubmission.dueContextFrame,
         workletCurrentFrame: failed.workletSubmission.workletCurrentFrame,
         workletCurrentTimeFrame: failed.workletSubmission.workletCurrentTimeFrame,
+        rendererProfileContextFrame: failed.rendererProfile.contextFrame,
+        workletCurrentTimeToProfileFrames: failed.rendererProfile.workletCurrentTimeToProfileFrames,
+        profileToArrivalFrames: failed.rendererProfile.profileToArrivalFrames,
         arrivedContextFrame: failed.rendererArrival.arrivedContextFrame,
         arrivedStopping: failed.rendererArrival.stopping,
         submitToArrivalFrames: failed.rendererArrival.submitToArrivalFrames,
         workletCurrentTimeToArrivalFrames: failed.rendererArrival.workletCurrentTimeToArrivalFrames,
         arrivalToDueContextFrames: failed.rendererArrival.arrivalToDueContextFrames,
+        submitHeartbeatDriftMs: failed.rendererProfile.precedingHeartbeatDriftMs,
+        arrivalHeartbeatDriftMs: failed.rendererArrival.precedingHeartbeatDriftMs,
+        arrivalHeartbeatGapMs: failed.rendererArrival.precedingHeartbeatGapMs,
+        loopMaxDriftInWindowMs: failed.rendererLoop.maxDriftInWindowMs,
+        loopStallsNearArrival: failed.rendererLoop.stallsInWindow,
         requestReceivedContextFrame: failed.rendererReceipt.requestReceivedContextFrame,
         submitToReceiptFrames: failed.rendererReceipt.submitToReceiptFrames,
         receiptToDueContextFrames: failed.rendererReceipt.receiptToDueContextFrames,
@@ -974,6 +1015,13 @@ function assertPackagedMixerRun(run: any, label: string) {
     workletStopAcknowledgements: timing.workletStopAcknowledgements,
     rendererStopAckTimeouts: timing.rendererStopAckTimeouts,
     shutdownEvents: timing.shutdownEvents,
+    rendererLoopMonitor: run.rendererLoopMonitor ? {
+      heartbeatCount: run.rendererLoopMonitor.heartbeatCount, maxDriftMs: run.rendererLoopMonitor.maxDriftMs,
+      maxGapMs: run.rendererLoopMonitor.maxGapMs, delaysOver4ms: run.rendererLoopMonitor.delaysOver4ms,
+      delaysOver8ms: run.rendererLoopMonitor.delaysOver8ms,
+      longTaskCount: run.rendererLoopMonitor.longTasks?.length ?? 0,
+      stallCount: run.rendererLoopMonitor.stalls?.length ?? 0,
+    } : null,
   };
   const evidence = JSON.stringify({ nativeFailureEvidence: failures,
     nativeSessions: compactNativeSessionAudit(run), deadlineRequests, deadlineFrameSlack, lifecycleCounts,

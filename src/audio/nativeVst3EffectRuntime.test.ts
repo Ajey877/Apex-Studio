@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { runInNewContext } from 'node:vm';
-import { VST3_FX_BLOCK_FRAMES, VST3_FX_PIPELINE_FRAMES, VST3_FX_WORKLET_SOURCE, NativeVst3EffectRuntime, getNativeVst3MixerEffectSmokeTiming, resetNativeVst3MixerEffectSmokeTiming } from './nativeVst3EffectRuntime';
+import { VST3_FX_BLOCK_FRAMES, VST3_FX_PIPELINE_FRAMES, VST3_FX_WORKLET_SOURCE, NativeVst3EffectRuntime, getNativeVst3MixerEffectSmokeTiming, resetNativeVst3MixerEffectSmokeTiming, startNativeVst3RendererLoopMonitor, stopNativeVst3RendererLoopMonitor, tickNativeVst3RendererLoopMonitorForTest } from './nativeVst3EffectRuntime';
 import type { FxSlot, MixerTrack } from '../types/daw';
 import type { Vst3Bridge, Vst3Effect } from './nativeVst3Types';
 
@@ -453,6 +453,54 @@ test('renderer records process arrival before the stopping guard omits request-r
     assert.ok(events.some(event => event.event === 'renderer-request-cancelled-at-stop' && event.sequence === 14 &&
       event.cancellationStage === 'before-native-service'));
   } finally {
+    await runtime.stop();
+    (globalThis as any).AudioWorkletNode = originalNode;
+    (globalThis as any).desktopApp = originalDesktop;
+  }
+});
+
+test('renderer process arrival attaches the preceding heartbeat without blocking the request path', async () => {
+  const originalNode = (globalThis as any).AudioWorkletNode;
+  const originalDesktop = (globalThis as any).desktopApp;
+  (globalThis as any).desktopApp = { smokeTest: true };
+  resetNativeVst3MixerEffectSmokeTiming();
+  const nodes: any[] = [];
+  class FakeAudioWorkletNode {
+    port = { onmessage: null as ((event: { data: any }) => void) | null, sent: [] as any[],
+      postMessage: (message: any) => this.port.sent.push(message), close() {} };
+    onprocessorerror: (() => void) | null = null;
+    constructor() { nodes.push(this); }
+    disconnect() {}
+  }
+  (globalThis as any).AudioWorkletNode = FakeAudioWorkletNode;
+  const bridge: Vst3Bridge = {
+    paths: async () => [], choosePath: async () => null,
+    discover: async () => ({ plugins: [], errors: [] }), discoverEffects: async () => ({ plugins: [], errors: [] }),
+    inspect: async () => { throw new Error('unused'); }, inspectEffect: async () => { throw new Error('unused'); },
+    describeEffect: async () => ({ parameters: [], controllerAvailable: false }), describe: async () => ({ parameters: [], controllerAvailable: false }),
+    parameters: async () => [], open: async () => ({ id: 'session-loop', latencySamples: 0 }),
+    process: async () => new Float32Array(),
+    processAudio: async () => new Float32Array(VST3_FX_BLOCK_FRAMES * 2).fill(0.2),
+    close: async () => {},
+  };
+  const context: any = { sampleRate: 48000, currentTime: 23, state: 'running', audioWorklet: { addModule: async () => {} } };
+  const runtime = new NativeVst3EffectRuntime(() => {}, () => bridge);
+  try {
+    await runtime.prepareTracks([track], context);
+    startNativeVst3RendererLoopMonitor(context);
+    const live = tickNativeVst3RendererLoopMonitorForTest(performance.now() + 12, 1100928);
+    nodes[0].port.onmessage!({ data: { type: 'profile', event: 'worklet-submit', sequence: 14, workletCurrentTimeFrame: 1100928 } });
+    nodes[0].port.onmessage!({ data: { type: 'process', sequence: 14, samples: new Float32Array(VST3_FX_BLOCK_FRAMES * 2) } });
+    const events = getNativeVst3MixerEffectSmokeTiming();
+    const submit = events.find(event => event.event === 'worklet-submit');
+    const arrived = events.find(event => event.event === 'renderer-process-arrived');
+    assert.equal(submit?.rendererProfileContextFrame, 1104000);
+    assert.equal(arrived?.arrivedContextFrame, 1104000);
+    assert.equal(arrived?.precedingHeartbeatDriftMs, live.driftMs);
+    assert.equal(arrived?.precedingHeartbeatContextFrame, 1100928);
+    assert.notEqual(arrived?.precedingHeartbeatDriftMs, arrived?.arrivedContextFrame);
+  } finally {
+    stopNativeVst3RendererLoopMonitor();
     await runtime.stop();
     (globalThis as any).AudioWorkletNode = originalNode;
     (globalThis as any).desktopApp = originalDesktop;

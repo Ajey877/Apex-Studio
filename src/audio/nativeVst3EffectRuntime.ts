@@ -48,12 +48,194 @@ export function resetNativeVst3MixerEffectSmokeTiming() {
   if (!mixerFxSmokeEnabled()) return;
   smokeTimingEvents.length = 0;
   smokeTimingDropped = 0;
+  stopNativeVst3RendererLoopMonitor();
 }
 export function getNativeVst3MixerEffectSmokeTiming(): NativeVst3MixerEffectSmokeEvent[] {
   return mixerFxSmokeEnabled() ? smokeTimingEvents.slice() : [];
 }
 export function getNativeVst3MixerEffectSmokeTimingDropped(): number {
   return mixerFxSmokeEnabled() ? smokeTimingDropped : 0;
+}
+
+export const RENDERER_LOOP_HEARTBEAT_INTERVAL_MS = 3;
+export const RENDERER_LOOP_STALL_THRESHOLD_MS = 4;
+export const RENDERER_LOOP_STALL_SAMPLE_LIMIT = 64;
+export const RENDERER_LOOP_LONG_TASK_LIMIT = 32;
+const RENDERER_LOOP_STALL_WINDOW_BEFORE_MS = 24;
+const RENDERER_LOOP_STALL_WINDOW_AFTER_MS = 4;
+
+export interface NativeVst3RendererLoopHeartbeat {
+  expectedAtMs: number;
+  actualAtMs: number;
+  driftMs: number;
+  gapMs: number;
+  contextFrame: number | null;
+}
+
+export interface NativeVst3RendererLoopSnapshot {
+  intervalMs: number;
+  startedAtMs: number;
+  stoppedAtMs: number | null;
+  heartbeatCount: number;
+  maxDriftMs: number;
+  maxGapMs: number;
+  delaysOver4ms: number;
+  delaysOver8ms: number;
+  last: NativeVst3RendererLoopHeartbeat | null;
+  stalls: NativeVst3RendererLoopHeartbeat[];
+  longTasks: Array<{ startAtMs: number; durationMs: number }>;
+}
+
+interface NativeVst3RendererLoopState extends NativeVst3RendererLoopSnapshot {
+  nextExpectedAtMs: number;
+  timer: ReturnType<typeof setTimeout> | null;
+  context: BaseAudioContext | null;
+  observer: PerformanceObserver | null;
+}
+
+let rendererLoopMonitor: NativeVst3RendererLoopState | null = null;
+
+function sampleRendererContextFrame(context: BaseAudioContext | null) {
+  try {
+    if (!context) return null;
+    const rate = context.sampleRate;
+    const time = (context as AudioContext).currentTime;
+    if (!Number.isFinite(rate) || !Number.isFinite(time)) return null;
+    return Math.round(time * rate);
+  } catch {
+    return null;
+  }
+}
+
+export function createNativeVst3RendererLoopState(startedAtMs: number, intervalMs = RENDERER_LOOP_HEARTBEAT_INTERVAL_MS): NativeVst3RendererLoopState {
+  return {
+    intervalMs, startedAtMs, stoppedAtMs: null, nextExpectedAtMs: startedAtMs + intervalMs,
+    heartbeatCount: 0, maxDriftMs: 0, maxGapMs: 0, delaysOver4ms: 0, delaysOver8ms: 0,
+    last: null, stalls: [], longTasks: [], timer: null, context: null, observer: null,
+  };
+}
+
+export function applyNativeVst3RendererLoopHeartbeat(
+  state: NativeVst3RendererLoopState,
+  actualAtMs: number,
+  contextFrame: number | null,
+): NativeVst3RendererLoopHeartbeat {
+  const expectedAtMs = state.nextExpectedAtMs;
+  const gapMs = state.last ? actualAtMs - state.last.actualAtMs : actualAtMs - state.startedAtMs;
+  const driftMs = actualAtMs - expectedAtMs;
+  const sample: NativeVst3RendererLoopHeartbeat = { expectedAtMs, actualAtMs, driftMs, gapMs, contextFrame };
+  state.last = sample;
+  state.heartbeatCount++;
+  if (driftMs > state.maxDriftMs) state.maxDriftMs = driftMs;
+  if (gapMs > state.maxGapMs) state.maxGapMs = gapMs;
+  if (driftMs >= RENDERER_LOOP_STALL_THRESHOLD_MS) state.delaysOver4ms++;
+  if (driftMs >= 8) state.delaysOver8ms++;
+  if (driftMs >= RENDERER_LOOP_STALL_THRESHOLD_MS && state.stalls.length < RENDERER_LOOP_STALL_SAMPLE_LIMIT) state.stalls.push(sample);
+  state.nextExpectedAtMs = actualAtMs + state.intervalMs;
+  return sample;
+}
+
+export function selectRendererLoopStallsNear(
+  stalls: readonly NativeVst3RendererLoopHeartbeat[],
+  arrivedAtMs: number,
+  windowBeforeMs = RENDERER_LOOP_STALL_WINDOW_BEFORE_MS,
+  windowAfterMs = RENDERER_LOOP_STALL_WINDOW_AFTER_MS,
+) {
+  return stalls.filter(sample => sample.actualAtMs >= arrivedAtMs - windowBeforeMs && sample.actualAtMs <= arrivedAtMs + windowAfterMs);
+}
+
+export function correlateNativeVst3RendererLoopArrival(
+  snapshot: Pick<NativeVst3RendererLoopSnapshot, 'last' | 'stalls' | 'maxDriftMs' | 'heartbeatCount'>,
+  arrivedAtMs: number,
+  attached?: { precedingHeartbeatDriftMs?: unknown; precedingHeartbeatGapMs?: unknown; precedingHeartbeatAtMs?: unknown; precedingHeartbeatContextFrame?: unknown },
+) {
+  const stallsInWindow = selectRendererLoopStallsNear(snapshot.stalls, arrivedAtMs);
+  const maxDriftInWindowMs = stallsInWindow.reduce((max, sample) => Math.max(max, sample.driftMs), 0);
+  return {
+    precedingHeartbeatDriftMs: Number.isFinite(Number(attached?.precedingHeartbeatDriftMs)) ? Number(attached?.precedingHeartbeatDriftMs) : snapshot.last?.driftMs ?? null,
+    precedingHeartbeatGapMs: Number.isFinite(Number(attached?.precedingHeartbeatGapMs)) ? Number(attached?.precedingHeartbeatGapMs) : snapshot.last?.gapMs ?? null,
+    precedingHeartbeatAtMs: Number.isFinite(Number(attached?.precedingHeartbeatAtMs)) ? Number(attached?.precedingHeartbeatAtMs) : snapshot.last?.actualAtMs ?? null,
+    precedingHeartbeatContextFrame: Number.isFinite(Number(attached?.precedingHeartbeatContextFrame)) ? Number(attached?.precedingHeartbeatContextFrame) : snapshot.last?.contextFrame ?? null,
+    maxDriftInWindowMs, stallCountInWindow: stallsInWindow.length,
+    stallsInWindow: stallsInWindow.map(sample => ({
+      driftMs: sample.driftMs, gapMs: sample.gapMs, contextFrame: sample.contextFrame, actualAtMs: sample.actualAtMs,
+    })),
+    monitorMaxDriftMs: snapshot.maxDriftMs, monitorHeartbeatCount: snapshot.heartbeatCount,
+  };
+}
+
+function snapshotRendererLoopMonitor(state: NativeVst3RendererLoopState): NativeVst3RendererLoopSnapshot {
+  return {
+    intervalMs: state.intervalMs, startedAtMs: state.startedAtMs, stoppedAtMs: state.stoppedAtMs,
+    heartbeatCount: state.heartbeatCount, maxDriftMs: state.maxDriftMs, maxGapMs: state.maxGapMs,
+    delaysOver4ms: state.delaysOver4ms, delaysOver8ms: state.delaysOver8ms, last: state.last,
+    stalls: state.stalls.slice(), longTasks: state.longTasks.slice(),
+  };
+}
+
+function rendererLoopAttachment(context: BaseAudioContext) {
+  const last = rendererLoopMonitor?.last ?? null;
+  return {
+    rendererHandleContextFrame: sampleRendererContextFrame(context),
+    precedingHeartbeatDriftMs: last?.driftMs ?? null,
+    precedingHeartbeatGapMs: last?.gapMs ?? null,
+    precedingHeartbeatAtMs: last?.actualAtMs ?? null,
+    precedingHeartbeatExpectedAtMs: last?.expectedAtMs ?? null,
+    precedingHeartbeatContextFrame: last?.contextFrame ?? null,
+    monitorMaxDriftMs: rendererLoopMonitor?.maxDriftMs ?? null,
+    monitorHeartbeatCount: rendererLoopMonitor?.heartbeatCount ?? null,
+  };
+}
+
+function scheduleRendererLoopHeartbeat(state: NativeVst3RendererLoopState) {
+  state.timer = setTimeout(() => {
+    if (rendererLoopMonitor !== state || state.stoppedAtMs !== null) return;
+    applyNativeVst3RendererLoopHeartbeat(state, performance.now(), sampleRendererContextFrame(state.context));
+    scheduleRendererLoopHeartbeat(state);
+  }, state.intervalMs);
+}
+
+export function startNativeVst3RendererLoopMonitor(context: BaseAudioContext) {
+  if (!mixerFxSmokeEnabled()) return;
+  stopNativeVst3RendererLoopMonitor();
+  const startedAtMs = performance.now();
+  const state = createNativeVst3RendererLoopState(startedAtMs);
+  state.context = context;
+  if (typeof PerformanceObserver === 'function') {
+    try {
+      state.observer = new PerformanceObserver(list => {
+        for (const entry of list.getEntries()) {
+          if (state.longTasks.length >= RENDERER_LOOP_LONG_TASK_LIMIT) break;
+          state.longTasks.push({ startAtMs: entry.startTime, durationMs: entry.duration });
+        }
+      });
+      state.observer.observe({ type: 'longtask', buffered: true } as PerformanceObserverInit);
+    } catch {
+      state.observer = null;
+    }
+  }
+  rendererLoopMonitor = state;
+  scheduleRendererLoopHeartbeat(state);
+}
+
+export function stopNativeVst3RendererLoopMonitor(): NativeVst3RendererLoopSnapshot | null {
+  const state = rendererLoopMonitor;
+  if (!state) return null;
+  if (state.timer !== null) { clearTimeout(state.timer); state.timer = null; }
+  try { state.observer?.disconnect(); } catch { /* observer may already be gone */ }
+  state.observer = null;
+  state.stoppedAtMs = performance.now();
+  rendererLoopMonitor = null;
+  return snapshotRendererLoopMonitor(state);
+}
+
+export function getNativeVst3RendererLoopMonitorSnapshot(): NativeVst3RendererLoopSnapshot | null {
+  return rendererLoopMonitor ? snapshotRendererLoopMonitor(rendererLoopMonitor) : null;
+}
+
+export function tickNativeVst3RendererLoopMonitorForTest(actualAtMs: number, contextFrame: number | null) {
+  if (!rendererLoopMonitor) throw new Error('Renderer loop monitor is not running');
+  return applyNativeVst3RendererLoopHeartbeat(rendererLoopMonitor, actualAtMs, contextFrame);
 }
 
 export const VST3_FX_BLOCK_FRAMES = 1024;
@@ -327,21 +509,40 @@ export class NativeVst3EffectRuntime {
       }
       if (message?.type === 'profile') {
         const sequence = Number.isInteger(message.sequence) ? message.sequence : undefined;
+        const loop = message.event === 'worklet-submit' ? rendererLoopAttachment(context) : null;
         recordMixerFxSmokeEvent({ ...message, trackId, slotId: slot.id, runtimeId: entry.runtimeId,
-          ...(sequence === undefined ? {} : { requestId: `${entry.runtimeId}:${sequence}` }) });
+          ...(sequence === undefined ? {} : { requestId: `${entry.runtimeId}:${sequence}` }),
+          ...(loop ? {
+            rendererProfileContextFrame: loop.rendererHandleContextFrame,
+            precedingHeartbeatDriftMs: loop.precedingHeartbeatDriftMs,
+            precedingHeartbeatGapMs: loop.precedingHeartbeatGapMs,
+            precedingHeartbeatAtMs: loop.precedingHeartbeatAtMs,
+            precedingHeartbeatExpectedAtMs: loop.precedingHeartbeatExpectedAtMs,
+            precedingHeartbeatContextFrame: loop.precedingHeartbeatContextFrame,
+            monitorMaxDriftMs: loop.monitorMaxDriftMs,
+            monitorHeartbeatCount: loop.monitorHeartbeatCount,
+          } : {}) });
         return;
       }
       if (message?.type === 'failure') { this.fail(entry, String(message.reason || 'Native effect worklet failed.')); return; }
       if (message?.type === 'process' && entry.profileEnabled) {
         const arrivedSequence = Number.isInteger(message.sequence) ? message.sequence as number : null;
+        const loop = rendererLoopAttachment(context);
         recordMixerFxSmokeEvent({
           event: 'renderer-process-arrived', trackId, slotId: slot.id, runtimeId: entry.runtimeId,
           sequence: arrivedSequence, requestId: entry.runtimeId && arrivedSequence !== null ? `${entry.runtimeId}:${arrivedSequence}` : '',
           arrivedAt: performance.now(),
-          arrivedContextFrame: Math.round((context as AudioContext).currentTime * context.sampleRate),
+          arrivedContextFrame: loop.rendererHandleContextFrame,
           stopping: entry.stopping, disposed: entry.disposed, faulted: entry.faulted,
           validSequence: Number.isInteger(message.sequence),
           validSamples: message.samples instanceof Float32Array && message.samples.length === VST3_FX_BLOCK_FRAMES * 2,
+          precedingHeartbeatDriftMs: loop.precedingHeartbeatDriftMs,
+          precedingHeartbeatGapMs: loop.precedingHeartbeatGapMs,
+          precedingHeartbeatAtMs: loop.precedingHeartbeatAtMs,
+          precedingHeartbeatExpectedAtMs: loop.precedingHeartbeatExpectedAtMs,
+          precedingHeartbeatContextFrame: loop.precedingHeartbeatContextFrame,
+          monitorMaxDriftMs: loop.monitorMaxDriftMs,
+          monitorHeartbeatCount: loop.monitorHeartbeatCount,
         });
       }
       if (message?.type !== 'process' || entry.disposed || entry.faulted || !Number.isInteger(message.sequence) ||
