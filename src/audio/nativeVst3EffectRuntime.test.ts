@@ -565,8 +565,10 @@ test('Mixer runtime binds a dedicated live audio port and ignores renderer contr
     process: async () => new Float32Array(),
     processAudio: async () => { processAudioCalls++; return new Float32Array(VST3_FX_BLOCK_FRAMES * 2); },
     close: async () => {},
-    bindLiveAudioPort: (sessionId, trackId, slotId, _runtimeId, _sampleRate, port) => {
-      binds.push({ sessionId, trackId, slotId, port });
+    bindLiveAudioPort: (sessionId, trackId, slotId) => {
+      const { port1 } = new MessageChannel();
+      binds.push({ sessionId, trackId, slotId, port: port1 });
+      return port1;
     },
     unbindLiveAudioPort: async () => {},
   };

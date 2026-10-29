@@ -1,6 +1,7 @@
 const path = require('node:path');
 const fs = require('node:fs/promises');
 const { pathToFileURL } = require('node:url');
+const { MessageChannelMain } = require('electron');
 
 // Explicit operations only; never accept raw host commands or executable paths
 // from renderer content. The Electron renderer remains sandboxed/isolated.
@@ -191,58 +192,46 @@ function registerVst3({ app, ipcMain, dialog, getWindow }) {
     });
   }
   handle('unbindLiveAudioPort', (context, owner, id) => disposeLivePort(id, owner));
+  handle('bindLiveAudioPort', (context, owner, sessionId, trackId, slotId, runtimeId, sampleRate) => {
+    if (typeof sessionId !== 'string' || sessionId.length === 0 || sessionId.length > 128) throw new Error('Invalid live audio session');
+    if (!Number.isInteger(trackId) || typeof slotId !== 'string' || slotId.length === 0 || slotId.length > 128) throw new Error('Invalid live audio identity');
+    if (typeof runtimeId !== 'string' || runtimeId.length === 0 || runtimeId.length > 128) throw new Error('Invalid live audio runtime');
+    if (!Number.isFinite(sampleRate) || sampleRate < 8000 || sampleRate > 192000) throw new Error('Invalid live audio sample rate');
+    context.service.assertSession(sessionId, owner);
+    if (livePorts.has(sessionId)) throw new Error('Live audio port already bound');
+    const win = getWindow();
+    if (!win || win.isDestroyed()) throw new Error('VST3 renderer closed during request');
+    const { port1, port2 } = new MessageChannelMain();
+    const live = context.createLiveAudioPortSession({
+      sessionId, owner, trackId, slotId,
+      processAudio: ({ sequence, samples, timing }) => {
+        const profile = {
+          requestId: `${runtimeId}:${sequence}`,
+          trackId, slotId, sequence, sampleRate,
+          inputBlockStartContextFrame: timing?.inputBlockStartContextFrame,
+          submittedContextFrame: timing?.submittedContextFrame,
+          submittedOutputFrame: timing?.submittedOutputFrame,
+          dueOutputFrame: timing?.dueOutputFrame,
+          dueContextFrame: timing?.dueContextFrame,
+        };
+        return runProcessAudio(context, owner, sessionId, 1024, samples, 120, [], profile, { ipcReceivedAtMainMs: performance.now() });
+      },
+    });
+    try {
+      live.attach(port1);
+      livePorts.set(sessionId, live);
+      win.webContents.postMessage('vst3:liveAudioPort', { sessionId, trackId, slotId }, [port2]);
+    } catch (error) {
+      livePorts.delete(sessionId);
+      void live.dispose();
+      try { port1.close(); } catch { /* already closed */ }
+      try { port2.close(); } catch { /* already closed */ }
+      throw error;
+    }
+  });
   handle('close', async (context, owner, id) => {
     await disposeLivePort(id, owner);
     return context.service.close(id, owner);
-  });
-  ipcMain.on('vst3:bindLiveAudioPort', (event, payload) => {
-    const port = event.ports?.[0];
-    const deny = () => { try { port?.close(); } catch { /* already closed */ } };
-    const win = getWindow();
-    if (!win || event.sender !== win.webContents || event.senderFrame !== event.sender.mainFrame || !isTrustedUrl(event.senderFrame.url)) {
-      deny();
-      return;
-    }
-    void (async () => {
-      try {
-        if (!port) throw new Error('Live audio port missing');
-        const sessionId = payload?.sessionId;
-        const trackId = payload?.trackId;
-        const slotId = payload?.slotId;
-        const runtimeId = payload?.runtimeId;
-        const sampleRate = payload?.sampleRate;
-        if (typeof sessionId !== 'string' || sessionId.length === 0 || sessionId.length > 128) throw new Error('Invalid live audio session');
-        if (!Number.isInteger(trackId) || typeof slotId !== 'string' || slotId.length === 0 || slotId.length > 128) throw new Error('Invalid live audio identity');
-        if (typeof runtimeId !== 'string' || runtimeId.length === 0 || runtimeId.length > 128) throw new Error('Invalid live audio runtime');
-        if (!Number.isFinite(sampleRate) || sampleRate < 8000 || sampleRate > 192000) throw new Error('Invalid live audio sample rate');
-        const owner = String(event.sender.id);
-        const context = await ready;
-        if (getWindow() !== win || win.isDestroyed() || event.senderFrame !== win.webContents.mainFrame || !isTrustedUrl(event.senderFrame.url)) {
-          throw new Error('VST3 renderer closed during request');
-        }
-        context.service.assertSession(sessionId, owner);
-        if (livePorts.has(sessionId)) throw new Error('Live audio port already bound');
-        const live = context.createLiveAudioPortSession({
-          sessionId, owner, trackId, slotId,
-          processAudio: ({ sequence, samples, timing }) => {
-            const profile = {
-              requestId: `${runtimeId}:${sequence}`,
-              trackId, slotId, sequence, sampleRate,
-              inputBlockStartContextFrame: timing?.inputBlockStartContextFrame,
-              submittedContextFrame: timing?.submittedContextFrame,
-              submittedOutputFrame: timing?.submittedOutputFrame,
-              dueOutputFrame: timing?.dueOutputFrame,
-              dueContextFrame: timing?.dueContextFrame,
-            };
-            return runProcessAudio(context, owner, sessionId, 1024, samples, 120, [], profile, { ipcReceivedAtMainMs: performance.now() });
-          },
-        });
-        live.attach(port);
-        livePorts.set(sessionId, live);
-      } catch {
-        deny();
-      }
-    })();
   });
   app.on('web-contents-created', (_event, contents) => {
     const close = () => {

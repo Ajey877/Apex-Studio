@@ -495,6 +495,39 @@ async function ensureProcessor(context: BaseAudioContext) {
   await pending;
 }
 
+function receiveLiveAudioPort(
+  bridge: Vst3Bridge, sessionId: string, trackId: number, slotId: string, runtimeId: string, sampleRate: number,
+): Promise<MessagePort> {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (port: MessagePort) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (typeof window !== 'undefined') window.removeEventListener('message', onMessage);
+      resolve(port);
+    };
+    const fail = (error: unknown) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (typeof window !== 'undefined') window.removeEventListener('message', onMessage);
+      reject(error instanceof Error ? error : new Error(String(error)));
+    };
+    const timer = setTimeout(() => fail(new Error('Live audio port bind timed out.')), 2000);
+    const onMessage = (event: MessageEvent) => {
+      if (event.source != null && event.source !== window) return;
+      if (event.data?.type !== 'vst3:liveAudioPort' || event.data.sessionId !== sessionId) return;
+      const port = event.ports?.[0];
+      if (port) finish(port);
+    };
+    if (typeof window !== 'undefined') window.addEventListener('message', onMessage);
+    Promise.resolve(bridge.bindLiveAudioPort!(sessionId, trackId, slotId, runtimeId, sampleRate)).then(returned => {
+      if (returned && typeof returned.postMessage === 'function') finish(returned);
+    }).catch(fail);
+  });
+}
+
 interface PreparedEffect {
   trackId: number;
   slotId: string;
@@ -766,22 +799,15 @@ export class NativeVst3EffectRuntime {
       if (opened.latencySamples !== 0) { await bridge.close(opened.id); throw new Error(`VST3 effect reports ${opened.latencySamples} samples of latency; nonzero plugin latency is unsupported and is not compensated.`); }
       entry.sessionId = opened.id;
       if (typeof bridge.bindLiveAudioPort === 'function') {
-        if (typeof MessageChannel !== 'function') {
-          await bridge.close(opened.id);
-          throw new Error('Dedicated live audio port requires MessageChannel.');
-        }
-        const channel = new MessageChannel();
         const bound = new Promise<void>((resolve, reject) => {
           const timer = setTimeout(() => reject(new Error('Live audio port bind timed out.')), 2000);
           entry.liveBoundResolve = () => { clearTimeout(timer); resolve(); };
         });
         try {
-          node.port.postMessage({ type: 'live-port' }, [channel.port1]);
-          bridge.bindLiveAudioPort(opened.id, trackId, slot.id, entry.runtimeId!, context.sampleRate, channel.port2);
+          const livePort = await receiveLiveAudioPort(bridge, opened.id, trackId, slot.id, entry.runtimeId!, context.sampleRate);
+          node.port.postMessage({ type: 'live-port' }, [livePort]);
           await bound;
         } catch (error) {
-          try { channel.port1.close(); } catch { /* already transferred */ }
-          try { channel.port2.close(); } catch { /* already transferred */ }
           if (typeof bridge.unbindLiveAudioPort === 'function') await bridge.unbindLiveAudioPort(opened.id).catch(() => {});
           await bridge.close(opened.id);
           throw error;
