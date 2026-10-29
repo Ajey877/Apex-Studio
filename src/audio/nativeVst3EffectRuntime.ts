@@ -325,6 +325,8 @@ class ApexVst3FxProcessor extends AudioWorkletProcessor {
     this.outputFrame = 0;
     this.nodeStartContextFrame = null;
     this.profileEnabled = !!options.processorOptions?.profileEnabled;
+    this.requireLivePort = !!options.processorOptions?.requireLivePort;
+    this.livePort = null;
     this.sequence = 0;
     this.pending = -1;
     this.ready = new Map();
@@ -332,22 +334,16 @@ class ApexVst3FxProcessor extends AudioWorkletProcessor {
     this.bypass = false;
     this.failed = false;
     this.stopped = false;
-    this.port.onmessage = event => {
-      const message = event.data;
-      if (message?.type === 'stop') {
-        const sequence = this.pending >= 0 ? this.pending : null;
-        if (this.profileEnabled) this.port.postMessage({ type: 'profile', event: 'worklet-stop-received',
-          sequence, pendingSequence: this.pending, stoppedOutputFrame: this.outputFrame,
-          reason: message.reason || 'dispose' });
-        this.pending = -1;
-        this.stopped = true;
-        this.ready.clear();
-        this.dryReady.clear();
-        this.port.postMessage({ type: 'stop-ack', sequence, reason: message.reason || 'dispose' });
+    const handleLive = message => {
+      if (message?.type === 'bound') { this.port.postMessage({ type: 'live-bound' }); return; }
+      if (message?.type === 'error') { this.fail(String(message.reason || 'Live audio port error.')); return; }
+      if (message?.type === 'cancelled') {
+        if (this.profileEnabled) this.port.postMessage({ type: 'profile', event: 'worklet-result', sequence: message.sequence,
+          accepted: false, pendingSequence: this.pending, receivedOutputFrame: this.outputFrame,
+          dueOutputFrame: Number.isInteger(message.sequence) ? this.delayFrames + message.sequence * this.blockFrames : null,
+          reason: this.stopped ? 'after-stop' : 'cancelled' });
         return;
       }
-      if (message?.type === 'bypass') { this.bypass = !!message.value; return; }
-      if (message?.type === 'failure') { this.failed = true; return; }
       if (message?.type !== 'result') return;
       const afterStop = this.stopped;
       const valid = !afterStop && !this.failed && message.sequence === this.pending &&
@@ -360,6 +356,32 @@ class ApexVst3FxProcessor extends AudioWorkletProcessor {
       this.pending = -1;
       this.ready.set(message.sequence, message.samples);
       if (this.ready.size > 2 || this.dryReady.size > 2) this.fail('Native effect output queue exceeded its two-block bound.');
+    };
+    this.port.onmessage = event => {
+      const message = event.data;
+      if (message?.type === 'live-port') {
+        const next = event.ports && event.ports[0];
+        if (!next) { this.fail('Live audio port missing.'); return; }
+        this.livePort = next;
+        this.livePort.onmessage = liveEvent => handleLive(liveEvent.data);
+        return;
+      }
+      if (message?.type === 'stop') {
+        const sequence = this.pending >= 0 ? this.pending : null;
+        if (this.profileEnabled) this.port.postMessage({ type: 'profile', event: 'worklet-stop-received',
+          sequence, pendingSequence: this.pending, stoppedOutputFrame: this.outputFrame,
+          reason: message.reason || 'dispose' });
+        this.pending = -1;
+        this.stopped = true;
+        this.ready.clear();
+        this.dryReady.clear();
+        if (this.livePort) { try { this.livePort.close(); } catch (e) {} this.livePort = null; }
+        this.port.postMessage({ type: 'stop-ack', sequence, reason: message.reason || 'dispose' });
+        return;
+      }
+      if (message?.type === 'bypass') { this.bypass = !!message.value; return; }
+      if (message?.type === 'failure') { this.failed = true; return; }
+      handleLive(message);
     };
   }
   fail(reason) {
@@ -415,7 +437,12 @@ class ApexVst3FxProcessor extends AudioWorkletProcessor {
           this.dryReady.set(sequence, samples.slice());
           this.pending = sequence;
           if (this.profileEnabled) this.port.postMessage({ type: 'profile', event: 'worklet-submit', ...timing });
-          this.port.postMessage({ type: 'process', sequence, samples, ...(this.profileEnabled ? { timing } : {}) }, [samples.buffer]);
+          const dest = this.livePort || (!this.requireLivePort ? this.port : null);
+          if (!dest) {
+            this.fail('Live audio port is not bound.');
+            break;
+          }
+          dest.postMessage({ type: 'process', sequence, samples, ...(this.profileEnabled ? { timing } : {}) }, [samples.buffer]);
           this.fill = 0;
         }
       }
@@ -479,6 +506,8 @@ interface PreparedEffect {
   sessionId?: string;
   runtimeId?: string;
   profileEnabled: boolean;
+  liveAudioBound: boolean;
+  liveBoundResolve?: () => void;
   ready: Promise<void>;
   tail: Promise<void>;
   queueDepth: number;
@@ -547,19 +576,25 @@ export class NativeVst3EffectRuntime {
     if (!slot.vst3Effect) throw new Error(`Mixer track ${trackId}, slot ${slot.id}: VST3 effect identity/state is missing; relink the effect. No dry substitute was installed.`);
     assertVst3Effect(slot.vst3Effect);
     const profileEnabled = mixerFxSmokeEnabled();
+    const requireLivePort = typeof bridge.bindLiveAudioPort === 'function';
     const node = new AudioWorkletNode(context as AudioContext, 'apex-vst3-mixer-effect', {
       numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [2], channelCount: 2, channelCountMode: 'explicit', channelInterpretation: 'speakers',
-      processorOptions: { profileEnabled },
+      processorOptions: { profileEnabled, requireLivePort },
     });
     const entry: PreparedEffect = {
       trackId, slotId: slot.id, configuration: effectKey(slot.vst3Effect), effect: structuredClone(slot.vst3Effect), context, bridge, node,
-      runtimeId: profileEnabled ? crypto.randomUUID() : undefined, profileEnabled,
+      runtimeId: crypto.randomUUID(), profileEnabled, liveAudioBound: false,
       tail: Promise.resolve(), queueDepth: 0, disposed: false, stopping: false, faulted: false,
       stopCancelledSequences: new Set(), ready: Promise.resolve(),
     };
     this.prepared.set(runtimeKey(trackId, slot.id), entry);
     node.port.onmessage = event => {
       const message = event.data;
+      if (message?.type === 'live-bound') {
+        entry.liveBoundResolve?.();
+        entry.liveBoundResolve = undefined;
+        return;
+      }
       if (message?.type === 'stop-ack') {
         const sequence = Number.isInteger(message.sequence) ? message.sequence as number : null;
         recordMixerFxSmokeEvent({ event: 'worklet-stop-ack', trackId, slotId: slot.id, runtimeId: entry.runtimeId,
@@ -588,6 +623,10 @@ export class NativeVst3EffectRuntime {
         return;
       }
       if (message?.type === 'failure') { this.fail(entry, String(message.reason || 'Native effect worklet failed.')); return; }
+      if (message?.type === 'process' && entry.liveAudioBound) {
+        this.fail(entry, 'Native effect process arrived on the renderer control port after live audio bind.');
+        return;
+      }
       if (message?.type === 'process' && entry.profileEnabled) {
         const arrivedSequence = Number.isInteger(message.sequence) ? message.sequence as number : null;
         const loop = rendererLoopAttachment(context);
@@ -726,6 +765,37 @@ export class NativeVst3EffectRuntime {
       if (entry.disposed || this.prepared.get(runtimeKey(trackId, slot.id)) !== entry) { await bridge.close(opened.id); throw new Error('Native effect preparation cancelled.'); }
       if (opened.latencySamples !== 0) { await bridge.close(opened.id); throw new Error(`VST3 effect reports ${opened.latencySamples} samples of latency; nonzero plugin latency is unsupported and is not compensated.`); }
       entry.sessionId = opened.id;
+      if (typeof bridge.bindLiveAudioPort === 'function') {
+        if (typeof MessageChannel !== 'function') {
+          await bridge.close(opened.id);
+          throw new Error('Dedicated live audio port requires MessageChannel.');
+        }
+        const channel = new MessageChannel();
+        const bound = new Promise<void>((resolve, reject) => {
+          const timer = setTimeout(() => reject(new Error('Live audio port bind timed out.')), 2000);
+          entry.liveBoundResolve = () => { clearTimeout(timer); resolve(); };
+        });
+        try {
+          node.port.postMessage({ type: 'live-port' }, [channel.port1]);
+          bridge.bindLiveAudioPort(opened.id, trackId, slot.id, entry.runtimeId!, context.sampleRate, channel.port2);
+          await bound;
+        } catch (error) {
+          try { channel.port1.close(); } catch { /* already transferred */ }
+          try { channel.port2.close(); } catch { /* already transferred */ }
+          if (typeof bridge.unbindLiveAudioPort === 'function') await bridge.unbindLiveAudioPort(opened.id).catch(() => {});
+          await bridge.close(opened.id);
+          throw error;
+        }
+        if (entry.disposed || this.prepared.get(runtimeKey(trackId, slot.id)) !== entry) {
+          if (typeof bridge.unbindLiveAudioPort === 'function') await bridge.unbindLiveAudioPort(opened.id).catch(() => {});
+          await bridge.close(opened.id);
+          throw new Error('Native effect preparation cancelled.');
+        }
+        entry.liveAudioBound = true;
+      } else if ((globalThis as { desktopApp?: { isDesktop?: boolean } }).desktopApp?.isDesktop === true) {
+        await bridge.close(opened.id);
+        throw new Error('Dedicated live audio port is required in the desktop Mixer.');
+      }
       const fixedLatencyMs = VST3_FX_PIPELINE_FRAMES * 1000 / context.sampleRate;
       const requestedParameters = entry.effect.state.parameters;
       const controllerParameterEvidence = profileEnabled ? requestedParameters.map(({ id, value }) => ({
@@ -823,6 +893,9 @@ export class NativeVst3EffectRuntime {
       const sessionId = entry.sessionId;
       entry.sessionId = undefined;
       if (sessionId) {
+        if (typeof entry.bridge.unbindLiveAudioPort === 'function') {
+          await entry.bridge.unbindLiveAudioPort(sessionId).catch(() => {});
+        }
         await entry.bridge.close(sessionId).catch(() => {});
         recordMixerFxSmokeEvent({ event: 'renderer-session-closed', trackId: entry.trackId, slotId: entry.slotId,
           runtimeId: entry.runtimeId, helperSessionId: sessionId, reason, stopContextFrame: stopContextFrame() });

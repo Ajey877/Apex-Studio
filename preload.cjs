@@ -43,6 +43,15 @@ const desktopApi = {
         throw error;
       }
     },
+    bindLiveAudioPort: (sessionId, trackId, slotId, runtimeId, sampleRate, port) => {
+      if (typeof sessionId !== 'string' || sessionId.length === 0 || sessionId.length > 128) throw new Error('Invalid live audio session');
+      if (!Number.isInteger(trackId) || typeof slotId !== 'string' || slotId.length === 0 || slotId.length > 128) throw new Error('Invalid live audio identity');
+      if (typeof runtimeId !== 'string' || runtimeId.length === 0 || runtimeId.length > 128) throw new Error('Invalid live audio runtime');
+      if (!Number.isFinite(sampleRate) || sampleRate < 8000 || sampleRate > 192000) throw new Error('Invalid live audio sample rate');
+      if (!port) throw new Error('Live audio port missing');
+      ipcRenderer.postMessage('vst3:bindLiveAudioPort', { sessionId, trackId, slotId, runtimeId, sampleRate }, [port]);
+    },
+    unbindLiveAudioPort: (id) => ipcRenderer.invoke('vst3:unbindLiveAudioPort', id),
     close: (id) => ipcRenderer.invoke('vst3:close', id),
   },
   send: (channel, data) => {

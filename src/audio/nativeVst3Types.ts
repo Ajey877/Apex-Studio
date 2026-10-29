@@ -67,6 +67,9 @@ export interface Vst3Bridge {
   process(id: string, frames: number, events: Vst3Event[], bpm: number, parameters?: Vst3ParameterPoint[]): Promise<Float32Array>;
   processAudio(id: string, frames: number, audio: Float32Array, bpm: number, parameters?: Vst3ParameterPoint[], profile?: Vst3AudioProcessProfile): Promise<Float32Array>;
   close(id: string): Promise<void>;
+  /** Handshake only: transfers a dedicated live PCM port bound to this session. */
+  bindLiveAudioPort?(sessionId: string, trackId: number, slotId: string, runtimeId: string, sampleRate: number, port: MessagePort): void;
+  unbindLiveAudioPort?(sessionId: string): Promise<void>;
 }
 export function getVst3Bridge(): Vst3Bridge | undefined {
   return (globalThis as unknown as { desktopApp?: { vst3?: Vst3Bridge } }).desktopApp?.vst3;

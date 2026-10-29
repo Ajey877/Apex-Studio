@@ -20,6 +20,9 @@ type MixerCaptureOptions = {
   bypassMixerTracks?: MixerTrack[];
   /** Smoke-only taps after each native insert for diagnosing silent stages. */
   includeNativeStages?: boolean;
+  /** Test-only renderer UI-thread stall. Never used in production capture. */
+  stallRendererMs?: number;
+  stallRendererAfterMs?: number;
 };
 type PlanarPcm = { left: Float32Array; right: Float32Array; frames: number; rms: number; startFrame: number | null };
 const captureModuleByContext = new WeakMap<BaseAudioContext, Promise<string>>();
@@ -196,7 +199,7 @@ function summarizeMixerTiming(events: ReturnType<typeof getNativeVst3MixerEffect
     const bridgeStart = events.find(event => event.event === 'renderer-bridge-call-start' && event.requestId === requestId);
     const phase = Number(submit.rendererAtMs) < captureStartRendererMs ? 'before-capture' :
       Number(submit.rendererAtMs) >= captureEndRendererMs ? 'stop-boundary' : 'measured-capture';
-    const complete = mainRecord && !mainRecord.error && preloadRecord && rendererResponse && result?.accepted === true;
+    const complete = mainRecord && !mainRecord.error && result?.accepted === true;
     return {
       requestId, sequence: submit.sequence, trackId: submit.trackId, slotId: submit.slotId, phase,
       rendererSubmitAtMs: submit.rendererAtMs, inputBlockStartContextFrame: submit.inputBlockStartContextFrame,
@@ -624,6 +627,7 @@ async function captureLiveMixerRun(instance: typeof audioEngine, channels: Chann
   let bypassUpdateAppliedContextFrame: number | null = null;
   let playbackActiveAtEnd = false, stopRequestedAtRendererMs = 0;
   let sourceStartContextFrame = 0;
+  let rendererStall: { startedAtMs: number; endedAtMs: number; durationMs: number; startFrame: number; endFrame: number } | null = null;
   try {
   await instance.play(channels, [], 'pat', undefined, mixer, 16);
   await context.resume();
@@ -655,7 +659,20 @@ async function captureLiveMixerRun(instance: typeof audioEngine, channels: Chann
         resolve();
       }, options.bypassMixerAfterMs))
       : Promise.resolve();
-    await Promise.all([new Promise<void>(resolve => setTimeout(resolve, durationMs)), bypassUpdate]);
+    const stallRenderer = options.stallRendererMs
+      ? new Promise<void>(resolve => setTimeout(() => {
+        const startedAtMs = performance.now();
+        const startFrame = Math.round(context.currentTime * context.sampleRate);
+        const until = startedAtMs + options.stallRendererMs!;
+        while (performance.now() < until) { /* test-only renderer UI-thread stall */ }
+        rendererStall = {
+          startedAtMs, endedAtMs: performance.now(), durationMs: performance.now() - startedAtMs,
+          startFrame, endFrame: Math.round(context.currentTime * context.sampleRate),
+        };
+        resolve();
+      }, options.stallRendererAfterMs ?? 280))
+      : Promise.resolve();
+    await Promise.all([new Promise<void>(resolve => setTimeout(resolve, durationMs)), bypassUpdate, stallRenderer]);
   stoppedAt = performance.now();
   stoppedContextFrame = Math.round(context.currentTime * context.sampleRate);
   playbackActiveAtEnd = instance.isPlaybackActive();
@@ -710,7 +727,7 @@ async function captureLiveMixerRun(instance: typeof audioEngine, channels: Chann
     trackRms: Object.fromEntries([...pcm].map(([trackId, audio]) => [trackId, audio.rms])),
     nativeStageRms: Object.fromEntries([...nativeStagePcm].map(([slotId, audio]) => [slotId, audio.rms])),
     diagnostics: getVst3MixerEffectDiagnostics(), timing, runtimeEvents, ipc, rendererLoopMonitor, clockCalibration,
-    clockPingsBefore, clockPingsAfter };
+    clockPingsBefore, clockPingsAfter, rendererStall };
 }
 
 function compactNativeSessionAudit(run: any) {
@@ -1125,6 +1142,32 @@ function assertPackagedMixerRun(run: any, label: string) {
   }
 }
 
+function assertRendererStallSurvived(run: any, label: string) {
+  const stall = run.rendererStall;
+  const fail = (reason: string) => {
+    throw new Error(`${label}: ${reason}; stall=${JSON.stringify(stall)}; missedDeadlines=${run.timing?.missedDeadlines}; playbackActiveAtEnd=${run.playbackActiveAtEnd}`);
+  };
+  if (!stall) fail('test-only renderer stall did not run');
+  if (stall.durationMs < 28) fail(`renderer stall lasted ${stall.durationMs} ms, expected at least 28 ms`);
+  const advancedFrames = stall.endFrame - stall.startFrame;
+  if (advancedFrames < Math.round(0.02 * run.sampleRate)) {
+    fail(`AudioContext clock advanced only ${advancedFrames} frames during the renderer stall`);
+  }
+  const events = run.runtimeEvents as Array<Record<string, any>>;
+  const overlapping = events.filter(event => event.event === 'worklet-submit' &&
+    Number(event.submittedContextFrame) >= stall.startFrame && Number(event.submittedContextFrame) <= stall.endFrame);
+  const slots = new Set(overlapping.map(event => event.slotId));
+  if (slots.size < 2) {
+    fail(`renderer stall did not overlap both native inserts; overlappingSlots=${JSON.stringify([...slots])} overlappingSubmits=${overlapping.length}`);
+  }
+  for (const submit of overlapping) {
+    const accepted = events.find(event => event.event === 'worklet-result' && event.requestId === submit.requestId && event.accepted === true);
+    if (!accepted) fail(`live-port result for ${submit.requestId} was not accepted after overlapping the renderer stall`);
+  }
+  if (!run.playbackActiveAtEnd) fail('production Mixer transport stopped during the renderer stall');
+  if (run.timing.missedDeadlines !== 0) fail('production Mixer missed a deadline during the renderer stall');
+}
+
 async function runPackagedMixerAcceptance(instance: typeof audioEngine, persistedMixerTracks?: MixerTrack[]) {
   const desktopApi = (globalThis as any).desktopApp;
   if (desktopApi?.smokeTest !== true || typeof desktopApi?.vst3?.smokeTimingSnapshot !== 'function') {
@@ -1238,6 +1281,10 @@ async function runPackagedMixerAcceptance(instance: typeof audioEngine, persiste
   for (let attempt = 2; attempt <= 8; attempt++) {
     twoInsertAlignments.push(await run(twoNativeInserts, `Mixer onset alignment two inserts attempt ${attempt}`, alignmentOptions()));
   }
+  const stalledTwoInserts = await run(twoNativeInserts, 'Mixer renderer-stall two inserts', {
+    ...alignmentOptions(), stallRendererMs: 30, stallRendererAfterMs: 280,
+  });
+  assertRendererStallSurvived(stalledTwoInserts, 'Mixer renderer-stall two inserts');
   const onsetFramesFor = (result: any) => Object.fromEntries([0, 1, 2].map(trackId => [trackId,
     firstCapturedOnsetFrame(result.captures.get(trackId), result.sourceStartContextFrame,
       result.sourceStartContextFrame + result.sampleRate)]));

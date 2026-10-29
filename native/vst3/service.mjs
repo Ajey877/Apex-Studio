@@ -81,6 +81,7 @@ export class Vst3Service {
     if (!session || session.owner !== owner) throw new Error('VST3 session is closed or belongs to another renderer');
     return session;
   }
+  assertSession(id, owner) { this.#session(id, owner); }
   async process(id, frames, events, bpm, owner = 'local', parameters = []) {
     const session = this.#session(id, owner);
     if (session.kind !== 'instrument') throw new Error('MIDI processing is unavailable for a VST3 audio effect');
