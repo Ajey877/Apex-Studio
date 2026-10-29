@@ -1168,6 +1168,25 @@ function assertRendererStallSurvived(run: any, label: string) {
   if (run.timing.missedDeadlines !== 0) fail('production Mixer missed a deadline during the renderer stall');
 }
 
+function rendererStallRegressionEvidence(run: any) {
+  const stall = run.rendererStall;
+  const events = (run.runtimeEvents as Array<Record<string, any>>) ?? [];
+  const overlapping = events.filter(event => event.event === 'worklet-submit' &&
+    Number(event.submittedContextFrame) >= stall.startFrame && Number(event.submittedContextFrame) <= stall.endFrame);
+  const accepted = overlapping.filter(submit => events.some(event =>
+    event.event === 'worklet-result' && event.requestId === submit.requestId && event.accepted === true));
+  return {
+    durationMs: stall.durationMs,
+    startFrame: stall.startFrame,
+    endFrame: stall.endFrame,
+    overlappingInserts: [...new Set(overlapping.map(event => event.slotId))],
+    overlappingSequences: overlapping.map(event => ({ slotId: event.slotId, sequence: event.sequence, requestId: event.requestId })),
+    acceptedResultCount: accepted.length,
+    missedDeadlines: run.timing.missedDeadlines,
+    playbackActiveAtEnd: run.playbackActiveAtEnd === true,
+  };
+}
+
 async function runPackagedMixerAcceptance(instance: typeof audioEngine, persistedMixerTracks?: MixerTrack[]) {
   const desktopApi = (globalThis as any).desktopApp;
   if (desktopApi?.smokeTest !== true || typeof desktopApi?.vst3?.smokeTimingSnapshot !== 'function') {
@@ -1285,6 +1304,7 @@ async function runPackagedMixerAcceptance(instance: typeof audioEngine, persiste
     ...alignmentOptions(), stallRendererMs: 30, stallRendererAfterMs: 280,
   });
   assertRendererStallSurvived(stalledTwoInserts, 'Mixer renderer-stall two inserts');
+  const rendererStallRegression = rendererStallRegressionEvidence(stalledTwoInserts);
   const onsetFramesFor = (result: any) => Object.fromEntries([0, 1, 2].map(trackId => [trackId,
     firstCapturedOnsetFrame(result.captures.get(trackId), result.sourceStartContextFrame,
       result.sourceStartContextFrame + result.sampleRate)]));
@@ -1473,6 +1493,7 @@ async function runPackagedMixerAcceptance(instance: typeof audioEngine, persiste
       sourceStartContextFrame: result.sourceStartContextFrame, nativeSessions: nativeSessionEvidence(result),
       failureEvidenceCount: correlatedNativeFailures(result).length })),
     latencyAlignmentRegression: alignmentRows,
+    rendererStallRegression,
     savedProjectReopen: savedProjectReopenEvidence,
     persistedProjectMixerTracks: ordered,
     priorPlaywrightBridgeReference: { approximatelyMs: 28, measurement: 'test-only page.exposeFunction bridge; separate from this production IPC/preload/helper measurement' },
