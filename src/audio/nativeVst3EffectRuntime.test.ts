@@ -4,7 +4,7 @@ import { runInNewContext } from 'node:vm';
 import { VST3_FX_BLOCK_FRAMES, VST3_FX_PIPELINE_FRAMES, VST3_FX_WORKLET_SOURCE, NativeVst3EffectRuntime } from './nativeVst3EffectRuntime';
 import { createLiveAudioPortSession } from '../../native/vst3/liveAudioPort.mjs';
 import type { FxSlot, MixerTrack } from '../types/daw';
-import type { Vst3Bridge, Vst3Effect } from './nativeVst3Types';
+import type { Vst3Bridge, Vst3Effect, Vst3ParameterChange } from './nativeVst3Types';
 
 function createWorklet(processorOptions: Record<string, unknown> = { profileEnabled: true }) {
   const sandbox: any = {
@@ -491,5 +491,129 @@ test('Mixer runtime starts native session close before a blocked live-port proce
   } finally {
     await runtime.stop();
     (globalThis as any).AudioWorkletNode = originalNode;
+  }
+});
+
+test('production prepare applies saved parameter overlay before live-port bind without a smoke flag', async () => {
+  const originalNode = (globalThis as any).AudioWorkletNode;
+  const originalDesktop = (globalThis as any).desktopApp;
+  delete (globalThis as any).desktopApp;
+  const nodes: any[] = [];
+  class FakeAudioWorkletNode {
+    port = { onmessage: null as ((event: { data: any }) => void) | null, sent: [] as any[], closed: false,
+      postMessage: (message: any) => {
+        this.port.sent.push(message);
+        if (message?.type === 'live-port') queueMicrotask(() => this.port.onmessage?.({ data: { type: 'live-bound' } }));
+        if (message?.type === 'stop') queueMicrotask(() => this.port.onmessage?.({ data: {
+          type: 'stop-ack', sequence: null, reason: message.reason,
+        } }));
+      }, close() { this.closed = true; } };
+    onprocessorerror: (() => void) | null = null;
+    disconnected = false;
+    constructor() { nodes.push(this); }
+    disconnect() { this.disconnected = true; }
+  }
+  (globalThis as any).AudioWorkletNode = FakeAudioWorkletNode;
+  const overlay = [{ id: 0, value: 0.8 }, { id: 6, value: 0.5 }];
+  const overlayTrack: MixerTrack = { ...track, fxSlots: [{ ...slot, vst3Effect: { ...effect, state: { ...effect.state, parameters: overlay } } }] };
+  const order: string[] = [];
+  const applied: Vst3ParameterChange[][] = [];
+  const binds: string[] = [];
+  const closed: string[] = [];
+  const bridge: Vst3Bridge = {
+    paths: async () => [], choosePath: async () => null,
+    discover: async () => ({ plugins: [], errors: [] }), discoverEffects: async () => ({ plugins: [], errors: [] }),
+    inspect: async () => { throw new Error('unused'); }, inspectEffect: async () => { throw new Error('unused'); },
+    describeEffect: async () => ({ parameters: [], controllerAvailable: false }), describe: async () => ({ parameters: [], controllerAvailable: false }),
+    parameters: async (id, changes) => {
+      order.push('parameters');
+      assert.equal(id, 'session-live');
+      applied.push(changes);
+      return [];
+    },
+    open: async () => { order.push('open'); return { id: 'session-live', latencySamples: 0 }; },
+    process: async () => new Float32Array(),
+    processAudio: async () => { throw new Error('renderer processAudio must not run after live bind'); },
+    close: async id => { closed.push(id); },
+    bindLiveAudioPort: (sessionId, trackId, slotId) => {
+      order.push('bind');
+      binds.push(`${sessionId}:${trackId}:${slotId}`);
+      const { port1 } = new MessageChannel();
+      return port1;
+    },
+    unbindLiveAudioPort: async () => {},
+  };
+  const context: any = { sampleRate: 48000, currentTime: 0, state: 'running', audioWorklet: { addModule: async () => {} } };
+  const runtime = new NativeVst3EffectRuntime(() => {}, () => bridge);
+  try {
+    await runtime.prepareTracks([overlayTrack], context);
+    assert.deepEqual(order, ['open', 'parameters', 'bind']);
+    assert.deepEqual(applied, [overlay]);
+    assert.deepEqual(binds, ['session-live:1:fx-test']);
+    assert.ok(nodes[0].port.sent.some((message: any) => message.type === 'live-port'));
+  } finally {
+    await runtime.stop();
+    assert.ok(closed.includes('session-live'));
+    (globalThis as any).AudioWorkletNode = originalNode;
+    if (originalDesktop === undefined) delete (globalThis as any).desktopApp;
+    else (globalThis as any).desktopApp = originalDesktop;
+  }
+});
+
+test('rejected saved-parameter initialization closes the session without binding a live port', async () => {
+  const originalNode = (globalThis as any).AudioWorkletNode;
+  const originalDesktop = (globalThis as any).desktopApp;
+  delete (globalThis as any).desktopApp;
+  const nodes: any[] = [];
+  class FakeAudioWorkletNode {
+    port = { onmessage: null as ((event: { data: any }) => void) | null, sent: [] as any[], closed: false,
+      postMessage: (message: any) => {
+        this.port.sent.push(message);
+        if (message?.type === 'live-port') queueMicrotask(() => this.port.onmessage?.({ data: { type: 'live-bound' } }));
+        if (message?.type === 'stop') queueMicrotask(() => this.port.onmessage?.({ data: {
+          type: 'stop-ack', sequence: null, reason: message.reason,
+        } }));
+      }, close() { this.closed = true; } };
+    onprocessorerror: (() => void) | null = null;
+    disconnected = false;
+    constructor() { nodes.push(this); }
+    disconnect() { this.disconnected = true; }
+  }
+  (globalThis as any).AudioWorkletNode = FakeAudioWorkletNode;
+  const overlayTrack: MixerTrack = { ...track, fxSlots: [{ ...slot, vst3Effect: { ...effect, state: { ...effect.state, parameters: [{ id: 0, value: 0.8 }] } } }] };
+  const binds: string[] = [];
+  const closed: string[] = [];
+  const bridge: Vst3Bridge = {
+    paths: async () => [], choosePath: async () => null,
+    discover: async () => ({ plugins: [], errors: [] }), discoverEffects: async () => ({ plugins: [], errors: [] }),
+    inspect: async () => { throw new Error('unused'); }, inspectEffect: async () => { throw new Error('unused'); },
+    describeEffect: async () => ({ parameters: [], controllerAvailable: false }), describe: async () => ({ parameters: [], controllerAvailable: false }),
+    parameters: async () => { throw new Error('Controller rejected parameter'); },
+    open: async () => ({ id: 'session-reject', latencySamples: 0 }),
+    process: async () => new Float32Array(),
+    processAudio: async () => { throw new Error('must not process after rejected initialization'); },
+    close: async id => { closed.push(id); },
+    bindLiveAudioPort: (sessionId) => {
+      binds.push(sessionId);
+      const { port1 } = new MessageChannel();
+      return port1;
+    },
+    unbindLiveAudioPort: async () => { throw new Error('unbind must not run when bind never started'); },
+  };
+  const context: any = { sampleRate: 48000, currentTime: 0, state: 'running', audioWorklet: { addModule: async () => {} } };
+  const runtime = new NativeVst3EffectRuntime(() => {}, () => bridge);
+  try {
+    await assert.rejects(runtime.prepareTracks([overlayTrack], context), /Controller rejected parameter/);
+    assert.deepEqual(binds, []);
+    assert.ok(closed.includes('session-reject'));
+    assert.equal(runtime.isPrepared(1, slot.id, context, overlayTrack.fxSlots[0]!.vst3Effect), false);
+    assert.ok(nodes[0].port.closed);
+    assert.equal(nodes[0].disconnected, true);
+    assert.equal(nodes[0].port.sent.some((message: any) => message.type === 'live-port'), false);
+  } finally {
+    await runtime.stop();
+    (globalThis as any).AudioWorkletNode = originalNode;
+    if (originalDesktop === undefined) delete (globalThis as any).desktopApp;
+    else (globalThis as any).desktopApp = originalDesktop;
   }
 });

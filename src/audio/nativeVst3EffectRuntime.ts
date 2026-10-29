@@ -484,15 +484,20 @@ export class NativeVst3EffectRuntime {
       if (entry.disposed || this.prepared.get(runtimeKey(trackId, slot.id)) !== entry) { await bridge.close(opened.id); throw new Error('Native effect preparation cancelled.'); }
       if (opened.latencySamples !== 0) { await bridge.close(opened.id); throw new Error(`VST3 effect reports ${opened.latencySamples} samples of latency; nonzero plugin latency is unsupported and is not compensated.`); }
       entry.sessionId = opened.id;
-      if (mixerFxSmokeEnabled()) {
-        const overlay = entry.effect.state.parameters
-          .filter(parameter => Number.isInteger(parameter.id) && parameter.id >= 0 && Number.isFinite(parameter.value) && parameter.value >= 0 && parameter.value <= 1)
-          .map(parameter => ({ id: parameter.id, value: parameter.value }));
-        // Smoke-only: flush fixture overlay onto this live session before the
-        // worklet binds. Do not process audio here — a realtime process before
-        // live-port bind raced Mixer node wiring. The next live block applies
-        // pending parameters.
-        if (overlay.length) await bridge.parameters(opened.id, overlay);
+      const overlay = entry.effect.state.parameters
+        .filter(parameter => Number.isInteger(parameter.id) && parameter.id >= 0 && Number.isFinite(parameter.value) && parameter.value >= 0 && parameter.value <= 1)
+        .map(parameter => ({ id: parameter.id, value: parameter.value }));
+      // Saved normalized parameters are authoritative overrides over the opaque
+      // component stream (host restore applies them after setState). Flush them
+      // on the opened session before the worklet can process so the first live
+      // block, which sends an empty parameter list, reaches DSP. Not per-block IPC.
+      if (overlay.length) {
+        try { await bridge.parameters(opened.id, overlay); }
+        catch (error) {
+          await bridge.close(opened.id).catch(() => {});
+          entry.sessionId = undefined;
+          throw error;
+        }
       }
       if (typeof bridge.bindLiveAudioPort === 'function') {
         const bound = new Promise<void>((resolve, reject) => {

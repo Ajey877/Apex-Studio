@@ -117,6 +117,46 @@ test('effect order is audible: delay then resonant filter differs from filter th
   assert.ok(difference(delayThenAmbience, ambienceThenDelay) > 1e-4);
 });
 
+test('realtime restore plus saved overlay flush reaches RezFilter DSP on Delay then filter with empty live parameter list', async () => {
+  const overlay = [
+    { id: 0, value: 0.8 },
+    { id: 1, value: 0.25 },
+    { id: 3, value: 0.5 },
+    { id: 6, value: 0.5 },
+    { id: 8, value: 0 },
+    { id: 9, value: 1 },
+  ];
+  const service = new Vst3Service(executable, [root]);
+  const owner = 'rezfilter-realtime-init';
+  try {
+    const inspected = await service.inspectEffect(rezFilter, { schema: 1, classId: rezFilter.classId, parameters: overlay }, owner);
+    const delayInspected = await service.inspectEffect(delay, undefined, owner);
+    const delayOpened = await service.open(delayInspected, sampleRate, 'realtime', owner, 'effect');
+    const defaultOpened = await service.open(rezFilter, sampleRate, 'realtime', owner, 'effect');
+    const filterOpened = await service.open(inspected, sampleRate, 'realtime', owner, 'effect');
+    try {
+      const flushed = await service.parameters(filterOpened.id, overlay, owner);
+      for (const parameter of overlay) {
+        const actual = flushed.find(entry => entry.id === parameter.id);
+        assert.ok(actual && actual.currentValue !== null && Math.abs(actual.currentValue - parameter.value) < 1e-6,
+          `production overlay flush must hold ${parameter.id}=${parameter.value}`);
+      }
+      const delayed = await service.processAudio(delayOpened.id, 1024, makeAudio(1024), 120, owner, []);
+      assert.ok(rms(delayed) > 0.01, `Delay realtime restore was silent: ${rms(delayed)}`);
+      const defaults = await service.processAudio(defaultOpened.id, 1024, delayed, 120, owner, []);
+      const filtered = await service.processAudio(filterOpened.id, 1024, delayed, 120, owner, []);
+      assert.ok(rms(filtered) > 0.01,
+        `Delay→RezFilter realtime overlay was silent with empty live parameter list: delay=${rms(delayed)} filter=${rms(filtered)}`);
+      assert.ok(difference(defaults, filtered) > 1e-4,
+        `normalized overlay must change RezFilter DSP, not only controller metadata: default=${rms(defaults)} overlay=${rms(filtered)}`);
+    } finally {
+      await service.close(delayOpened.id, owner);
+      await service.close(defaultOpened.id, owner);
+      await service.close(filterOpened.id, owner);
+    }
+  } finally { await service.dispose(); }
+});
+
 test('inspect/restore of the packaged RezFilter overlay is audible on Delay then filter with no live parameter list', async () => {
   // Keep this overlay identical to PACKAGED_REZFILTER_FIXTURE_PARAMETERS in
   // src/audio/nativeVst3DesktopSmoke.ts. inspectEffect primes with 1 silent
