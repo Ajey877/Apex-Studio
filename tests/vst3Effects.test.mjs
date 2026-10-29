@@ -117,6 +117,31 @@ test('effect order is audible: delay then resonant filter differs from filter th
   assert.ok(difference(delayThenAmbience, ambienceThenDelay) > 1e-4);
 });
 
+test('realtime RezFilter overlay of dry stereo stays audible across empty live parameter blocks', async () => {
+  const overlay = [
+    { id: 0, value: 0.8 },
+    { id: 1, value: 0.25 },
+    { id: 3, value: 0.5 },
+    { id: 6, value: 0.5 },
+    { id: 8, value: 0 },
+    { id: 9, value: 1 },
+  ];
+  const service = new Vst3Service(executable, [root]);
+  const owner = 'rezfilter-dry-init';
+  const dry = makeAudio(1024);
+  try {
+    const inspected = await service.inspectEffect(rezFilter, { schema: 1, classId: rezFilter.classId, parameters: overlay }, owner);
+    const opened = await service.open(inspected, sampleRate, 'realtime', owner, 'effect');
+    try {
+      await service.parameters(opened.id, overlay, owner);
+      const first = await service.processAudio(opened.id, 1024, dry, 120, owner, []);
+      const second = await service.processAudio(opened.id, 1024, dry, 120, owner, []);
+      assert.ok(rms(second) > 0.01,
+        `RezFilter overlay of dry stereo went silent after the first empty live parameter list: first=${rms(first)} second=${rms(second)}`);
+    } finally { await service.close(opened.id, owner); }
+  } finally { await service.dispose(); }
+});
+
 test('realtime restore plus saved overlay flush reaches RezFilter DSP on Delay then filter with empty live parameter list', async () => {
   const overlay = [
     { id: 0, value: 0.8 },
