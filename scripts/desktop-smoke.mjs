@@ -69,12 +69,16 @@ try {
       try {
         const reportJson = JSON.parse(readFileSync(report, 'utf8'));
         const message = String(reportJson.smokeError ?? '');
-        const startToken = 'deadlineFrameSlack=';
-        const endToken = '; bounded production timing evidence=';
-        const start = message.indexOf(startToken);
-        const end = start >= 0 ? message.indexOf(endToken, start) : -1;
-        if (start >= 0 && end > start) {
-          console.log(`::notice title=Mixer-deadline-frame-slack::${encode(message.slice(start + startToken.length, end))}`);
+        const bounded = message.indexOf('; bounded production timing evidence=');
+        const lifecycleToken = 'lifecycleCounts=';
+        const slackToken = 'deadlineFrameSlack=';
+        const lifecycleStart = message.indexOf(lifecycleToken);
+        const slackStart = message.indexOf(slackToken);
+        if (lifecycleStart >= 0 && slackStart > lifecycleStart) {
+          console.log(`::notice title=Mixer-deadline-lifecycle-counts::${encode(message.slice(lifecycleStart + lifecycleToken.length, slackStart - 2))}`);
+        }
+        if (slackStart >= 0 && bounded > slackStart) {
+          console.log(`::notice title=Mixer-deadline-frame-slack::${encode(message.slice(slackStart + slackToken.length, bounded))}`);
         }
       } catch { /* keep the original smoke failure; evidence parsing is best-effort */ }
     }

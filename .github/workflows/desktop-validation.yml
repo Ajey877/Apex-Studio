@@ -68,6 +68,7 @@ jobs:
             $raw = Get-Content -Raw $file
             $startToken = 'deadlineFrameSlack='
             $endToken = '; bounded production timing evidence='
+            $lifecycleToken = 'lifecycleCounts='
             $message = $raw
             try {
               $parsed = $raw | ConvertFrom-Json
@@ -75,6 +76,15 @@ jobs:
             } catch { }
             $start = $message.IndexOf($startToken)
             $end = if ($start -ge 0) { $message.IndexOf($endToken, $start) } else { -1 }
+            $lifecycleStart = $message.IndexOf($lifecycleToken)
+            if ($lifecycleStart -ge 0 -and $start -gt $lifecycleStart) {
+              $counts = $message.Substring($lifecycleStart + $lifecycleToken.Length, $start - $lifecycleStart - $lifecycleToken.Length - 2)
+              Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value '### Lifecycle counts'
+              Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value '```json'
+              Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value $counts
+              Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value '```'
+              Write-Output ("::notice title=Mixer-deadline-lifecycle-counts::" + $counts.Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A'))
+            }
             if ($start -ge 0 -and $end -gt $start) {
               $payload = $message.Substring($start + $startToken.Length, $end - $start - $startToken.Length)
               Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value 'Frame-based slack is computed from AudioContext/Worklet frames or same-process clocks only.'

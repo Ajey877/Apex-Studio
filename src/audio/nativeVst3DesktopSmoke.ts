@@ -794,6 +794,14 @@ function deadlineRequestEvidence(run: any) {
         requests: requestGroup(miss.slotId, requestId, Number(miss.sequence)) };
     });
   }
+  const unresolved = (run.timing?.unaccountedRequests ?? []).filter((item: any) => typeof item.requestId === 'string');
+  if (unresolved.length) {
+    return unresolved.map((item: any) => ({
+      event: 'unaccounted-request', trackId: item.trackId, slotId: item.slotId, requestId: String(item.requestId),
+      pendingSequence: item.sequence, phase: item.phase,
+      requests: requestGroup(item.slotId, String(item.requestId), Number(item.sequence)),
+    }));
+  }
   if (run.playbackActiveAtEnd === false) {
     const submits = events.filter(event => event.event === 'worklet-submit');
     const bySlot = new Map<string, Array<Record<string, any>>>();
@@ -846,8 +854,25 @@ function assertPackagedMixerRun(run: any, label: string) {
   const failures = correlatedNativeFailures(run);
   const deadlineRequests = deadlineRequestEvidence(run);
   const deadlineFrameSlack = compactDeadlineFrameSlack(run);
+  const lifecycleCounts = {
+    playbackActiveAtEnd: run.playbackActiveAtEnd, requestCount: timing.requestCount,
+    submittedBlocks: timing.submittedBlocks, processingBlocks: timing.processingBlocks,
+    acceptedWorkletResults: timing.acceptedWorkletResults, cancelledAtStopBlocks: timing.cancelledAtStopBlocks,
+    measuredCancelledBeforeNativeBlocks: timing.measuredCancelledBeforeNativeBlocks,
+    nativeCancelledAtStopBlocks: timing.nativeCancelledAtStopBlocks,
+    rendererDiscardedAtStopBlocks: timing.rendererDiscardedAtStopBlocks,
+    missedDeadlines: timing.missedDeadlines, unaccountedRequestCount: timing.unaccountedRequestCount,
+    missingMainResponses: timing.missingMainResponses, missingWorkletResults: timing.missingWorkletResults,
+    requestFailures: timing.requestFailures, unexpectedStopCancellations: timing.unexpectedStopCancellations,
+    maxPerInstanceQueueDepth: timing.maxPerInstanceQueueDepth,
+    maxConcurrentCallsPerEffect: timing.maxConcurrentCallsPerEffect,
+    workletSubmissionToReceipt: timing.workletSubmissionToReceipt,
+    rendererSerializedQueueWait: timing.rendererSerializedQueueWait,
+    rendererBridgeRoundTrip: timing.rendererBridgeRoundTrip,
+    mainNativeServiceCall: timing.mainNativeServiceCall, scheduledOutputSlack: timing.scheduledOutputSlack,
+  };
   const evidence = JSON.stringify({ nativeFailureEvidence: failures,
-    nativeSessions: compactNativeSessionAudit(run), deadlineRequests, deadlineFrameSlack,
+    nativeSessions: compactNativeSessionAudit(run), deadlineRequests, deadlineFrameSlack, lifecycleCounts,
     nativeServicePcm: nativeServicePcmBySlot(run),
     timing: { blockPeriodMs: timing.blockPeriodMs, captureDurationMs: timing.captureDurationMs,
       playbackActiveAtEnd: run.playbackActiveAtEnd, requestCount: timing.requestCount,
@@ -866,7 +891,7 @@ function assertPackagedMixerRun(run: any, label: string) {
       mainNativeServiceCall: timing.mainNativeServiceCall, scheduledOutputSlack: timing.scheduledOutputSlack },
     diagnostics: run.diagnostics, tailRms: run.tailRms, trackRms: run.trackRms });
   const fail = (reason: string) => {
-    throw new Error(`${label}: ${reason}; deadlineFrameSlack=${JSON.stringify(deadlineFrameSlack)}; bounded production timing evidence=${evidence}`);
+    throw new Error(`${label}: ${reason}; lifecycleCounts=${JSON.stringify(lifecycleCounts)}; deadlineFrameSlack=${JSON.stringify(deadlineFrameSlack)}; bounded production timing evidence=${evidence}`);
   };
   if (run.sampleRate !== 48000) fail(`expected the packaged AudioContext at 48 kHz, got ${run.sampleRate}`);
   if (!run.playbackActiveAtEnd) fail(`production Mixer transport stopped during capture; diagnostics=${JSON.stringify(run.diagnostics)}`);
@@ -875,16 +900,16 @@ function assertPackagedMixerRun(run: any, label: string) {
       timing.cancelledAtStopBlocks > 2 || timing.teardownCancelledAtStopBlocks > 2 || timing.stopAcknowledgementTimeouts !== 0 ||
       timing.unaccountedRequestCount !== 0 || timing.missingMainResponses !== 0 || timing.missingWorkletResults !== 0 ||
       timing.requestFailures.length !== 0 || timing.unexpectedStopCancellations.length !== 0) {
-    fail(`production request lifecycle did not resolve each submission or receive an explicit, sequence-matched stop acknowledgement: ${JSON.stringify(timing)}`);
+    fail('production request lifecycle did not resolve each submission or receive an explicit, sequence-matched stop acknowledgement');
   }
-  if (timing.missedDeadlines !== 0) fail(`production Mixer deadline failure(s): ${JSON.stringify(timing)}`);
+  if (timing.missedDeadlines !== 0) fail('production Mixer deadline failure(s)');
   if (timing.maxConcurrentCallsPerEffect > 1 || timing.maxPerInstanceQueueDepth > 1) {
-    fail(`per-effect native helper processing was not serialized/bounded: ${JSON.stringify(timing)}`);
+    fail('per-effect native helper processing was not serialized/bounded');
   }
-  if (timing.nativeServiceSessionCountAfterCleanup !== 0) fail(`native helper sessions leaked after stop/disposal: ${JSON.stringify(timing)}`);
+  if (timing.nativeServiceSessionCountAfterCleanup !== 0) fail('native helper sessions leaked after stop/disposal');
   const blockPeriodMs = VST3_FX_BLOCK_FRAMES * 1000 / run.sampleRate;
   if (timing.workletSubmissionToReceipt.maxMs === null || timing.workletSubmissionToReceipt.maxMs > blockPeriodMs + 1e-6) {
-    fail(`worklet result missed the 21.33 ms 1024-frame scheduling window: ${JSON.stringify(timing.workletSubmissionToReceipt)}`);
+    fail('worklet result missed the 21.33 ms 1024-frame scheduling window');
   }
   for (const trackId of [1, 2]) {
     const tail = run.tailRms[String(trackId)];
