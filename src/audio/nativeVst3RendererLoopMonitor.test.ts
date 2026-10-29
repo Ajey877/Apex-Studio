@@ -3,8 +3,9 @@ import assert from 'node:assert/strict';
 import {
   RENDERER_LOOP_HEARTBEAT_INTERVAL_MS, RENDERER_LOOP_STALL_SAMPLE_LIMIT,
   applyNativeVst3RendererLoopHeartbeat, correlateNativeVst3RendererLoopArrival,
-  createNativeVst3RendererLoopState, getNativeVst3RendererLoopMonitorSnapshot,
-  resetNativeVst3MixerEffectSmokeTiming, selectRendererLoopStallsNear,
+  createNativeVst3RendererLoopState, estimateIpcClockOffset, estimateIpcDirectionalDelay,
+  getNativeVst3RendererLoopMonitorSnapshot, resetNativeVst3MixerEffectSmokeTiming,
+  selectLongTasksOverlapping, selectRendererLoopStallsNear,
   startNativeVst3RendererLoopMonitor, stopNativeVst3RendererLoopMonitor,
   tickNativeVst3RendererLoopMonitorForTest,
 } from './nativeVst3EffectRuntime';
@@ -85,4 +86,80 @@ test('renderer loop monitor starts and stops with the smoke capture lifecycle', 
     stopNativeVst3RendererLoopMonitor();
     (globalThis as any).desktopApp = original;
   }
+});
+
+test('renderer loop stalls recorded before a later capture window remain available', () => {
+  const original = (globalThis as any).desktopApp;
+  const context: any = { currentTime: 0.5, sampleRate: 48000 };
+  try {
+    (globalThis as any).desktopApp = { smokeTest: true };
+    resetNativeVst3MixerEffectSmokeTiming();
+    startNativeVst3RendererLoopMonitor(context);
+    const live = getNativeVst3RendererLoopMonitorSnapshot()!;
+    tickNativeVst3RendererLoopMonitorForTest(live.startedAtMs + 12, 24000);
+    const captureWindowStart = live.startedAtMs + 500;
+    const stopped = stopNativeVst3RendererLoopMonitor()!;
+    assert.equal(stopped.stalls.length, 1);
+    assert.ok(stopped.stalls[0]!.actualAtMs < captureWindowStart);
+    assert.equal(selectRendererLoopStallsNear(stopped.stalls, stopped.stalls[0]!.actualAtMs).length, 1);
+  } finally {
+    stopNativeVst3RendererLoopMonitor();
+    (globalThis as any).desktopApp = original;
+  }
+});
+
+test('long-task overlap uses timestamps, not context frames', () => {
+  const tasks = [
+    { startAtMs: 90, durationMs: 20 },
+    { startAtMs: 400, durationMs: 329 },
+  ];
+  const near = selectLongTasksOverlapping(tasks, 100, 123);
+  assert.deepEqual(near.map(task => task.startAtMs), [90]);
+  assert.equal(selectLongTasksOverlapping(tasks, Number.NaN, 123).length, 0);
+});
+
+test('clock offset uses the lowest-RTT sample and reports uncertainty', () => {
+  const offset = estimateIpcClockOffset([
+    { preloadSentAtMs: 0, mainReceivedAtMs: 20, mainReplyAtMs: 21, preloadReceivedAtMs: 40 },
+    { preloadSentAtMs: 100, mainReceivedAtMs: 100.4, mainReplyAtMs: 100.5, preloadReceivedAtMs: 101 },
+    { preloadSentAtMs: 200, mainReceivedAtMs: Number.NaN, mainReplyAtMs: 201, preloadReceivedAtMs: 202 },
+  ]);
+  assert.equal(offset.sampleCount, 2);
+  assert.equal(offset.rejectedSampleCount, 1);
+  assert.ok(Math.abs((offset.minRttMs ?? 0) - 0.9) < 1e-9);
+  assert.ok(Math.abs((offset.offsetMainMinusPreloadMs ?? 0) - 0) < 0.5);
+  assert.ok((offset.uncertaintyMs ?? 99) < 1);
+  assert.equal(offset.inconclusive, false);
+});
+
+test('missing or inverted clock samples are rejected as inconclusive', () => {
+  const missing = estimateIpcClockOffset([]);
+  assert.equal(missing.inconclusive, true);
+  assert.equal(missing.reason, 'no-valid-samples');
+  const inverted = estimateIpcClockOffset([
+    { preloadSentAtMs: 0, mainReceivedAtMs: 1, mainReplyAtMs: 10, preloadReceivedAtMs: 2 },
+  ]);
+  assert.equal(inverted.sampleCount, 0);
+  assert.equal(inverted.inconclusive, true);
+});
+
+test('directional IPC delay stays inconclusive when uncertainty is too large', () => {
+  const tight = estimateIpcDirectionalDelay({
+    invokeStartedAt: 0, responseReceivedAt: 23.3,
+    ipcReceivedAtMainMs: 20, ipcReplyAtMainMs: 22.83,
+    offsetMainMinusPreloadMs: 0, uncertaintyMs: 0.4,
+  });
+  assert.equal(tight.inconclusive, false);
+  assert.ok(Math.abs((tight.requestLegMs ?? 0) - 20) < 1e-9);
+  assert.ok(Math.abs((tight.responseLegMs ?? 0) - 0.47) < 1e-9);
+  const loose = estimateIpcDirectionalDelay({
+    invokeStartedAt: 0, responseReceivedAt: 23.3,
+    ipcReceivedAtMainMs: 20, ipcReplyAtMainMs: 22.83,
+    offsetMainMinusPreloadMs: 0, uncertaintyMs: 8,
+  });
+  assert.equal(loose.inconclusive, true);
+  assert.equal(loose.reason, 'uncertainty-exceeds-4ms');
+  const missing = estimateIpcDirectionalDelay({ invokeStartedAt: 0, responseReceivedAt: 23.3 });
+  assert.equal(missing.inconclusive, true);
+  assert.equal(missing.reason, 'missing-timestamps-or-offset');
 });

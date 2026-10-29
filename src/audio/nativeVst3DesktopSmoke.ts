@@ -4,7 +4,7 @@ import { nativeTarget } from './nativeVst3Automation';
 import { audioEngine } from './audioEngine';
 import { DEFAULT_MASTERING_SUITE_STATE } from './masteringState';
 import { getVst3Bridge, type Vst3Effect } from './nativeVst3Types';
-import { VST3_FX_BLOCK_FRAMES, VST3_FX_PIPELINE_FRAMES, getNativeVst3MixerEffectSmokeTiming, getNativeVst3MixerEffectSmokeTimingDropped, resetNativeVst3MixerEffectSmokeTiming, getVst3MixerEffectDiagnostics, startNativeVst3RendererLoopMonitor, stopNativeVst3RendererLoopMonitor, correlateNativeVst3RendererLoopArrival } from './nativeVst3EffectRuntime';
+import { VST3_FX_BLOCK_FRAMES, VST3_FX_PIPELINE_FRAMES, getNativeVst3MixerEffectSmokeTiming, getNativeVst3MixerEffectSmokeTimingDropped, resetNativeVst3MixerEffectSmokeTiming, getVst3MixerEffectDiagnostics, startNativeVst3RendererLoopMonitor, stopNativeVst3RendererLoopMonitor, correlateNativeVst3RendererLoopArrival, estimateIpcClockOffset, estimateIpcDirectionalDelay, selectLongTasksOverlapping } from './nativeVst3EffectRuntime';
 import { getVst3Diagnostics } from './nativeVst3Runtime';
 import { createDefaultProjectState, normalizeProjectState } from '../state/projectState';
 import { persistProjectState, restorePersistedProjectState, serializeProjectState } from '../state/projectPersistence';
@@ -608,6 +608,23 @@ async function captureLiveMixerRun(instance: typeof audioEngine, channels: Chann
   const controlGain = context.createGain();
   targetGain.gain.value = 1;
   controlGain.gain.value = controlBuffer ? 1 : 0.1;
+  const collectClockPings = async (count: number) => {
+    if (typeof smokeApi?.smokeClockPing !== 'function') return [];
+    const samples = [];
+    for (let index = 0; index < count; index++) {
+      try { samples.push(await smokeApi.smokeClockPing()); }
+      catch { /* calibration must not fail the production capture */ }
+    }
+    return samples;
+  };
+  const clockPingsBefore = await collectClockPings(8);
+  startNativeVst3RendererLoopMonitor(context);
+  let rendererLoopMonitor = null as ReturnType<typeof stopNativeVst3RendererLoopMonitor>;
+  let startedAt = 0, startedContextFrame = 0, stoppedAt = 0, stoppedContextFrame = 0;
+  let bypassUpdateAppliedContextFrame: number | null = null;
+  let playbackActiveAtEnd = false, stopRequestedAtRendererMs = 0;
+  let sourceStartContextFrame = 0;
+  try {
   await instance.play(channels, [], 'pat', undefined, mixer, 16);
   await context.resume();
   for (const trackId of options.includeMaster ? [0, 1, 2] : [1, 2]) taps.set(trackId, await attachMixerCapture(instance, trackId));
@@ -625,16 +642,12 @@ async function captureLiveMixerRun(instance: typeof audioEngine, channels: Chann
   targetSource.connect(targetGain); targetGain.connect(instance.getOrCreateMixerChannel(1).input);
   controlSource.connect(controlGain); controlGain.connect(instance.getOrCreateMixerChannel(2).input);
   const sourceStartTime = context.currentTime + 0.05;
-  const sourceStartContextFrame = Math.round(sourceStartTime * context.sampleRate);
+  sourceStartContextFrame = Math.round(sourceStartTime * context.sampleRate);
   targetSource.start(sourceStartTime); controlSource.start(sourceStartTime);
   await new Promise(resolve => setTimeout(resolve, 300));
   await smokeApi.smokeTimingSnapshot(); // warm the authorized timing IPC before the measured window
-  startNativeVst3RendererLoopMonitor(context);
-  const startedAt = performance.now();
-  const startedContextFrame = sourceStartContextFrame + Math.round(0.25 * context.sampleRate);
-  let bypassUpdateAppliedContextFrame: number | null = null;
-  let rendererLoopMonitor = null as ReturnType<typeof stopNativeVst3RendererLoopMonitor>;
-  try {
+  startedAt = performance.now();
+  startedContextFrame = sourceStartContextFrame + Math.round(0.25 * context.sampleRate);
     const bypassUpdate = options.bypassMixerTracks && options.bypassMixerAfterMs !== undefined
       ? new Promise<void>(resolve => setTimeout(() => {
         instance.synchronizePlaybackState({ mixerTracks: options.bypassMixerTracks! });
@@ -643,14 +656,14 @@ async function captureLiveMixerRun(instance: typeof audioEngine, channels: Chann
       }, options.bypassMixerAfterMs))
       : Promise.resolve();
     await Promise.all([new Promise<void>(resolve => setTimeout(resolve, durationMs)), bypassUpdate]);
+  stoppedAt = performance.now();
+  stoppedContextFrame = Math.round(context.currentTime * context.sampleRate);
+  playbackActiveAtEnd = instance.isPlaybackActive();
+  stopRequestedAtRendererMs = performance.now();
+  instance.stop();
   } finally {
     rendererLoopMonitor = stopNativeVst3RendererLoopMonitor();
   }
-  const stoppedAt = performance.now();
-  const stoppedContextFrame = Math.round(context.currentTime * context.sampleRate);
-  const playbackActiveAtEnd = instance.isPlaybackActive();
-  const stopRequestedAtRendererMs = performance.now();
-  instance.stop();
   targetSource.stop(context.currentTime); controlSource.stop(context.currentTime);
   targetSource.disconnect(); targetGain.disconnect(); controlSource.disconnect(); controlGain.disconnect();
   const immediateEnd = performance.now() + 160;
@@ -683,6 +696,8 @@ async function captureLiveMixerRun(instance: typeof audioEngine, channels: Chann
     capture.node.disconnect(); capture.sink.disconnect();
   }
   const ipcAfter = await smokeApi.smokeTimingSnapshot();
+  const clockPingsAfter = await collectClockPings(8);
+  const clockCalibration = estimateIpcClockOffset([...clockPingsBefore, ...clockPingsAfter]);
   const runtimeEvents = getNativeVst3MixerEffectSmokeTiming().slice(runtimeStart);
   const ipc = ipcAfter;
   const duration = stoppedAt - startedAt;
@@ -691,10 +706,11 @@ async function captureLiveMixerRun(instance: typeof audioEngine, channels: Chann
   return { pcm, tailRms, sampleRate, durationMs: duration, captureStartRendererMs: startedAt,
     captureEndRendererMs: stoppedAt, startedContextFrame, stoppedContextFrame, sourceStartContextFrame,
     bypassUpdateAppliedContextFrame, playbackActiveAtEnd, captures: taps, nativeStageCaptures: nativeStageTaps,
-    nativeStagePcm, rendererLoopMonitor,
+    nativeStagePcm,
     trackRms: Object.fromEntries([...pcm].map(([trackId, audio]) => [trackId, audio.rms])),
     nativeStageRms: Object.fromEntries([...nativeStagePcm].map(([slotId, audio]) => [slotId, audio.rms])),
-    diagnostics: getVst3MixerEffectDiagnostics(), timing, runtimeEvents, ipc };
+    diagnostics: getVst3MixerEffectDiagnostics(), timing, runtimeEvents, ipc, rendererLoopMonitor, clockCalibration,
+    clockPingsBefore, clockPingsAfter };
 }
 
 function compactNativeSessionAudit(run: any) {
@@ -838,18 +854,41 @@ function deadlineRequestEvidence(run: any) {
       },
       preloadIpc: {
         roundTripMs: preload?.rendererIpcRttMs,
+        invokeStartedAt: preload?.invokeStartedAt ?? null,
+        responseReceivedAt: preload?.responseReceivedAt ?? null,
         outcome: preload?.outcome ?? null, error: preload?.error ?? null,
         origin: 'preload-process',
       },
       mainService: {
         dispatchMs: sameProcessDeltaMs(main?.ipcReceivedAtMainMs, main?.serviceStartAtMainMs),
         nativeServiceCallMs: main?.nativeServiceCallMs,
+        ipcReceivedAtMainMs: main?.ipcReceivedAtMainMs ?? null,
+        ipcReplyAtMainMs: main?.ipcReplyAtMainMs ?? null,
+        serviceStartAtMainMs: main?.serviceStartAtMainMs ?? null,
+        serviceCompletedAtMainMs: main?.serviceCompletedAtMainMs ?? null,
         activeCallsForEffectAtStart: main?.activeCallsForEffectAtStart,
         inputRms: main?.nativeInputRms, outputRms: main?.nativeOutputRms,
         outcome: main?.outcome ?? (main ? (main.error ? 'rejected' : 'resolved') : null),
         error: main?.error ?? null,
         origin: 'main-process',
       },
+      ipcDirectional: estimateIpcDirectionalDelay({
+        invokeStartedAt: preload?.invokeStartedAt, responseReceivedAt: preload?.responseReceivedAt,
+        ipcReceivedAtMainMs: main?.ipcReceivedAtMainMs, ipcReplyAtMainMs: main?.ipcReplyAtMainMs,
+        offsetMainMinusPreloadMs: run.clockCalibration?.offsetMainMinusPreloadMs,
+        uncertaintyMs: run.clockCalibration?.uncertaintyMs,
+      }),
+      monitorCoverage: {
+        startedAtMs: run.rendererLoopMonitor?.startedAtMs ?? null,
+        stoppedAtMs: run.rendererLoopMonitor?.stoppedAtMs ?? null,
+        startedBeforeSubmit: Number.isFinite(Number(run.rendererLoopMonitor?.startedAtMs)) &&
+          Number.isFinite(Number(submit?.rendererAtMs))
+          ? Number(run.rendererLoopMonitor.startedAtMs) <= Number(submit.rendererAtMs) : null,
+      },
+      longTasksNearRequest: selectLongTasksOverlapping(run.rendererLoopMonitor?.longTasks ?? [],
+        Number(preload?.invokeStartedAt ?? submit?.rendererAtMs),
+        Number(preload?.responseReceivedAt ?? arrived?.rendererAtMs ?? submit?.rendererAtMs),
+      ),
       rendererBridgeReject: bridgeRejected ? {
         roundTripMs: bridgeRejected.bridgeRoundTripMs, error: bridgeRejected.error ?? null,
         stopping: bridgeRejected.stopping ?? null, disposed: bridgeRejected.disposed ?? null,
@@ -937,12 +976,18 @@ function compactDeadlineFrameSlack(run: any) {
       currentOutputFrame: miss.currentOutputFrame, dueOutputFrame: miss.dueOutputFrame,
       workletCurrentFrame: miss.workletCurrentFrame, workletCurrentTimeFrame: miss.workletCurrentTimeFrame,
       predecessors,
+      clockCalibration: run.clockCalibration ? {
+        offsetMainMinusPreloadMs: run.clockCalibration.offsetMainMinusPreloadMs,
+        uncertaintyMs: run.clockCalibration.uncertaintyMs, minRttMs: run.clockCalibration.minRttMs,
+        sampleCount: run.clockCalibration.sampleCount, inconclusive: run.clockCalibration.inconclusive,
+        reason: run.clockCalibration.reason,
+      } : null,
       loopMonitor: run.rendererLoopMonitor ? {
         heartbeatCount: run.rendererLoopMonitor.heartbeatCount, maxDriftMs: run.rendererLoopMonitor.maxDriftMs,
         maxGapMs: run.rendererLoopMonitor.maxGapMs, delaysOver4ms: run.rendererLoopMonitor.delaysOver4ms,
         delaysOver8ms: run.rendererLoopMonitor.delaysOver8ms,
+        startedAtMs: run.rendererLoopMonitor.startedAtMs, stoppedAtMs: run.rendererLoopMonitor.stoppedAtMs,
         longTaskCount: run.rendererLoopMonitor.longTasks?.length ?? 0,
-        maxLongTaskMs: (run.rendererLoopMonitor.longTasks ?? []).reduce((max: number, task: any) => Math.max(max, Number(task.durationMs) || 0), 0),
         stallCount: run.rendererLoopMonitor.stalls?.length ?? 0,
       } : null,
       failed: failed ? {
@@ -964,6 +1009,17 @@ function compactDeadlineFrameSlack(run: any) {
         arrivalHeartbeatGapMs: failed.rendererArrival.precedingHeartbeatGapMs,
         loopMaxDriftInWindowMs: failed.rendererLoop.maxDriftInWindowMs,
         loopStallsNearArrival: failed.rendererLoop.stallsInWindow,
+        monitorStartedBeforeSubmit: failed.monitorCoverage.startedBeforeSubmit,
+        longTasksNearRequest: failed.longTasksNearRequest,
+        preloadInvokeStartedAt: failed.preloadIpc.invokeStartedAt,
+        preloadResponseReceivedAt: failed.preloadIpc.responseReceivedAt,
+        mainIpcReceivedAtMs: failed.mainService.ipcReceivedAtMainMs,
+        mainIpcReplyAtMs: failed.mainService.ipcReplyAtMainMs,
+        ipcRequestLegMs: failed.ipcDirectional.requestLegMs,
+        ipcResponseLegMs: failed.ipcDirectional.responseLegMs,
+        ipcDirectionalUncertaintyMs: failed.ipcDirectional.uncertaintyMs,
+        ipcDirectionalInconclusive: failed.ipcDirectional.inconclusive,
+        ipcDirectionalReason: failed.ipcDirectional.reason,
         requestReceivedContextFrame: failed.rendererReceipt.requestReceivedContextFrame,
         submitToReceiptFrames: failed.rendererReceipt.submitToReceiptFrames,
         receiptToDueContextFrames: failed.rendererReceipt.receiptToDueContextFrames,

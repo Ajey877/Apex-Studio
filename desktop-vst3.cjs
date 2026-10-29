@@ -80,7 +80,7 @@ function registerVst3({ app, ipcMain, dialog, getWindow }) {
     if (!win || event.sender !== win.webContents || event.senderFrame !== event.sender.mainFrame || !isTrustedUrl(event.senderFrame.url)) throw new Error('VST3 IPC denied for untrusted frame');
     const context = await ready;
     if (getWindow() !== win || win.isDestroyed() || event.senderFrame !== win.webContents.mainFrame || !isTrustedUrl(event.senderFrame.url)) throw new Error('VST3 renderer closed during request');
-    return operation === 'processAudio'
+    return operation === 'processAudio' || operation === 'smokeClockPing'
       ? fn(context, String(event.sender.id), ...args, { ipcReceivedAtMainMs })
       : fn(context, String(event.sender.id), ...args);
   });
@@ -124,9 +124,11 @@ function registerVst3({ app, ipcMain, dialog, getWindow }) {
       const nativeFailureEvidence = context.service.takeSmokeFailureEvidence(id, owner);
       const outputChannels = stereoPcmMetrics(pcm, frames);
       const serviceCompletedAtMainMs = performance.now();
+      const ipcReplyAtMainMs = performance.now();
       if (smokeProcessAudioTimings.length < 8192) smokeProcessAudioTimings.push({
         ...profile, frames, ipcReceivedAtMainMs: ipcTiming?.ipcReceivedAtMainMs ?? serviceStartAtMainMs,
-        serviceStartAtMainMs, serviceCompletedAtMainMs, nativeServiceCallMs: serviceCompletedAtMainMs - serviceStartAtMainMs,
+        serviceStartAtMainMs, serviceCompletedAtMainMs, ipcReplyAtMainMs,
+        nativeServiceCallMs: serviceCompletedAtMainMs - serviceStartAtMainMs,
         nativeInputRms: pcmRms(audio), nativeInputLeftRms: inputChannels?.leftRms ?? null,
         nativeInputRightRms: inputChannels?.rightRms ?? null, nativeInputMonoSumRms: inputChannels?.monoSumRms ?? null,
         nativeInputMonoDifferenceRms: inputChannels?.monoDifferenceRms ?? null,
@@ -141,9 +143,11 @@ function registerVst3({ app, ipcMain, dialog, getWindow }) {
       return pcm;
     } catch (error) {
       const serviceCompletedAtMainMs = performance.now();
+      const ipcReplyAtMainMs = performance.now();
       if (smokeProcessAudioTimings.length < 8192) smokeProcessAudioTimings.push({
         ...profile, frames, ipcReceivedAtMainMs: ipcTiming?.ipcReceivedAtMainMs ?? serviceStartAtMainMs,
-        serviceStartAtMainMs, serviceCompletedAtMainMs, nativeServiceCallMs: serviceCompletedAtMainMs - serviceStartAtMainMs,
+        serviceStartAtMainMs, serviceCompletedAtMainMs, ipcReplyAtMainMs,
+        nativeServiceCallMs: serviceCompletedAtMainMs - serviceStartAtMainMs,
         nativeInputRms: pcmRms(audio), nativeInputLeftRms: inputChannels?.leftRms ?? null,
         nativeInputRightRms: inputChannels?.rightRms ?? null, nativeInputMonoSumRms: inputChannels?.monoSumRms ?? null,
         nativeInputMonoDifferenceRms: inputChannels?.monoDifferenceRms ?? null, nativeOutputRms: null,
@@ -162,6 +166,10 @@ function registerVst3({ app, ipcMain, dialog, getWindow }) {
       processAudio: smokeProcessAudioTimings.slice(), maximumConcurrentProcessAudioCalls,
       maximumConcurrentCallsPerEffect, activeProcessAudioCalls, nativeServiceSessionCount: context.service.sessionCount,
     }));
+    handle('smokeClockPing', (_context, _owner, ipcTiming) => {
+      const mainReplyAtMs = performance.now();
+      return { mainReceivedAtMs: ipcTiming?.ipcReceivedAtMainMs ?? mainReplyAtMs, mainReplyAtMs };
+    });
   }
   handle('close', (context, owner, id) => context.service.close(id, owner));
   app.on('web-contents-created', (_event, contents) => {

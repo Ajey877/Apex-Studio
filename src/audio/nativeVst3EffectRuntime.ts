@@ -61,8 +61,8 @@ export const RENDERER_LOOP_HEARTBEAT_INTERVAL_MS = 3;
 export const RENDERER_LOOP_STALL_THRESHOLD_MS = 4;
 export const RENDERER_LOOP_STALL_SAMPLE_LIMIT = 64;
 export const RENDERER_LOOP_LONG_TASK_LIMIT = 32;
-const RENDERER_LOOP_STALL_WINDOW_BEFORE_MS = 24;
-const RENDERER_LOOP_STALL_WINDOW_AFTER_MS = 4;
+const RENDERER_LOOP_STALL_WINDOW_BEFORE_MS = 32;
+const RENDERER_LOOP_STALL_WINDOW_AFTER_MS = 32;
 
 export interface NativeVst3RendererLoopHeartbeat {
   expectedAtMs: number;
@@ -144,6 +144,69 @@ export function selectRendererLoopStallsNear(
   return stalls.filter(sample => sample.actualAtMs >= arrivedAtMs - windowBeforeMs && sample.actualAtMs <= arrivedAtMs + windowAfterMs);
 }
 
+export function selectLongTasksOverlapping(
+  tasks: ReadonlyArray<{ startAtMs: number; durationMs: number }>,
+  fromMs: number,
+  toMs: number,
+) {
+  if (!Number.isFinite(fromMs) || !Number.isFinite(toMs)) return [];
+  return tasks.filter(task => Number.isFinite(task.startAtMs) && Number.isFinite(task.durationMs) &&
+    task.startAtMs < toMs && task.startAtMs + task.durationMs > fromMs);
+}
+
+export interface NativeVst3IpcClockSample {
+  preloadSentAtMs: number;
+  mainReceivedAtMs: number;
+  mainReplyAtMs: number;
+  preloadReceivedAtMs: number;
+}
+
+export function estimateIpcClockOffset(samples: readonly NativeVst3IpcClockSample[]) {
+  const analyzed = samples.flatMap(sample => {
+    const t1 = Number(sample.preloadSentAtMs), t2 = Number(sample.mainReceivedAtMs);
+    const t3 = Number(sample.mainReplyAtMs), t4 = Number(sample.preloadReceivedAtMs);
+    if (![t1, t2, t3, t4].every(Number.isFinite) || t4 < t1 || t3 < t2) return [];
+    const lower = t3 - t4, upper = t2 - t1;
+    if (lower > upper) return [];
+    const rttMs = (t4 - t1) - (t3 - t2);
+    if (!Number.isFinite(rttMs) || rttMs < 0) return [];
+    return [{ rttMs, offsetMainMinusPreloadMs: (lower + upper) / 2, uncertaintyMs: (upper - lower) / 2, lowerMs: lower, upperMs: upper }];
+  });
+  if (!analyzed.length) {
+    return {
+      offsetMainMinusPreloadMs: null, uncertaintyMs: null, minRttMs: null, sampleCount: 0,
+      rejectedSampleCount: samples.length, inconclusive: true, reason: 'no-valid-samples',
+    };
+  }
+  const best = analyzed.reduce((current, sample) => sample.rttMs < current.rttMs ? sample : current);
+  return {
+    offsetMainMinusPreloadMs: best.offsetMainMinusPreloadMs, uncertaintyMs: best.uncertaintyMs, minRttMs: best.rttMs,
+    sampleCount: analyzed.length, rejectedSampleCount: samples.length - analyzed.length,
+    inconclusive: best.uncertaintyMs > 4, reason: best.uncertaintyMs > 4 ? 'uncertainty-exceeds-4ms' : null,
+  };
+}
+
+export function estimateIpcDirectionalDelay(input: {
+  invokeStartedAt?: unknown; responseReceivedAt?: unknown;
+  ipcReceivedAtMainMs?: unknown; ipcReplyAtMainMs?: unknown;
+  offsetMainMinusPreloadMs?: unknown; uncertaintyMs?: unknown;
+}) {
+  const t1 = Number(input.invokeStartedAt), t4 = Number(input.responseReceivedAt);
+  const t2 = Number(input.ipcReceivedAtMainMs), t3 = Number(input.ipcReplyAtMainMs);
+  const offset = Number(input.offsetMainMinusPreloadMs), uncertainty = Number(input.uncertaintyMs);
+  if (![t1, t2, t3, t4, offset, uncertainty].every(Number.isFinite)) {
+    return { requestLegMs: null, responseLegMs: null, uncertaintyMs: Number.isFinite(uncertainty) ? uncertainty : null,
+      inconclusive: true, reason: 'missing-timestamps-or-offset' };
+  }
+  const requestLegMs = (t2 - t1) - offset;
+  const responseLegMs = (t4 - t3) + offset;
+  const inconclusive = uncertainty > 4 || requestLegMs < -uncertainty || responseLegMs < -uncertainty;
+  return {
+    requestLegMs, responseLegMs, uncertaintyMs: uncertainty, inconclusive,
+    reason: inconclusive ? (uncertainty > 4 ? 'uncertainty-exceeds-4ms' : 'leg-inconsistent-with-uncertainty') : null,
+  };
+}
+
 export function correlateNativeVst3RendererLoopArrival(
   snapshot: Pick<NativeVst3RendererLoopSnapshot, 'last' | 'stalls' | 'maxDriftMs' | 'heartbeatCount'>,
   arrivedAtMs: number,
@@ -209,7 +272,7 @@ export function startNativeVst3RendererLoopMonitor(context: BaseAudioContext) {
           state.longTasks.push({ startAtMs: entry.startTime, durationMs: entry.duration });
         }
       });
-      state.observer.observe({ type: 'longtask', buffered: true } as PerformanceObserverInit);
+      state.observer.observe({ type: 'longtask', buffered: false } as PerformanceObserverInit);
     } catch {
       state.observer = null;
     }

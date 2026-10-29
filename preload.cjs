@@ -63,5 +63,14 @@ if (smokeTest) {
     preload: smokeIpcMeasurements.slice(),
     main: await ipcRenderer.invoke('vst3:smokeTimingSnapshot'),
   });
+  desktopApi.vst3.smokeClockPing = async () => {
+    const preloadSentAtMs = performance.now();
+    const reply = await ipcRenderer.invoke('vst3:smokeClockPing');
+    const preloadReceivedAtMs = performance.now();
+    return {
+      preloadSentAtMs, preloadReceivedAtMs,
+      mainReceivedAtMs: reply?.mainReceivedAtMs ?? null, mainReplyAtMs: reply?.mainReplyAtMs ?? null,
+    };
+  };
 }
 contextBridge.exposeInMainWorld('desktopApp', desktopApi);
