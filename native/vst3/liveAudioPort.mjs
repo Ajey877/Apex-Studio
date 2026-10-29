@@ -12,20 +12,24 @@ function send(port, message, transfer) {
 }
 
 function listen(port, onMessage, onClose) {
-  if (typeof port.addEventListener === 'function') {
-    port.addEventListener('message', event => onMessage(event.data, event));
-    port.addEventListener('close', () => onClose());
-    if (typeof port.start === 'function') port.start();
-    return;
-  }
+  const deliver = event => {
+    const data = event && typeof event === 'object' && Object.prototype.hasOwnProperty.call(event, 'data')
+      ? event.data : event;
+    onMessage(data, event);
+  };
+  // Electron MessagePortMain is an EventEmitter (`port.on('message', event => event.data)`).
+  // Node/browser MessagePorts expose EventTarget. Prefer the EventEmitter API when
+  // present so main actually receives worklet process messages.
   if (typeof port.on === 'function') {
-    port.on('message', event => onMessage(event.data, event));
+    port.on('message', deliver);
     port.on('close', () => onClose());
-    if (typeof port.start === 'function') port.start();
-    return;
+  } else if (typeof port.addEventListener === 'function') {
+    port.addEventListener('message', deliver);
+    port.addEventListener('close', () => onClose());
+  } else {
+    port.onmessage = deliver;
+    if ('onclose' in port) port.onclose = () => onClose();
   }
-  port.onmessage = event => onMessage(event.data, event);
-  if ('onclose' in port) port.onclose = () => onClose();
   if (typeof port.start === 'function') port.start();
 }
 
