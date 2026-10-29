@@ -110,15 +110,18 @@ export function createLiveAudioPortSession({
     });
     tail = operation.catch(() => {}).finally(() => { pending = Math.max(0, pending - 1); });
   };
-  const dispose = async (_reason = 'dispose') => {
+  const stop = () => {
     stopping = true;
+  };
+  const dispose = async (_reason = 'dispose') => {
+    stop();
     await tail.catch(() => {});
     disposed = true;
     try { port?.close(); } catch { /* already closed */ }
     port = null;
   };
   return {
-    sessionId, owner, trackId, slotId, attach, dispose,
+    sessionId, owner, trackId, slotId, attach, stop, dispose,
     get pending() { return pending; },
     get stopping() { return stopping; },
     get disposed() { return disposed; },

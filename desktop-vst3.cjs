@@ -52,17 +52,21 @@ function registerVst3({ app, ipcMain, dialog, getWindow }) {
     return { service, preferences, roots, createLiveAudioPortSession };
   })();
   const livePorts = new Map();
-  const disposeLivePort = async (sessionId, owner) => {
+  const disposeLivePort = (sessionId, owner) => {
     const live = livePorts.get(sessionId);
     if (!live) return;
     if (owner !== undefined && live.owner !== owner) throw new Error('VST3 session is closed or belongs to another renderer');
     livePorts.delete(sessionId);
-    await live.dispose();
+    // Mark stopping and start teardown, but never wait for an in-flight process
+    // queue here. Native session close/abort must be able to run immediately.
+    live.stop();
+    void live.dispose();
   };
   const disposeLivePortsForOwner = owner => {
     for (const [sessionId, live] of [...livePorts]) {
       if (live.owner === owner) {
         livePorts.delete(sessionId);
+        live.stop();
         void live.dispose();
       }
     }
@@ -152,7 +156,10 @@ function registerVst3({ app, ipcMain, dialog, getWindow }) {
     processAudio: smokeProcessAudioTimings.slice(), maximumConcurrentProcessAudioCalls,
     maximumConcurrentCallsPerEffect, activeProcessAudioCalls, nativeServiceSessionCount: context.service.sessionCount,
   }));
-  handle('unbindLiveAudioPort', (context, owner, id) => disposeLivePort(id, owner));
+  handle('unbindLiveAudioPort', (context, owner, id) => {
+    context.service.assertSession(id, owner);
+    disposeLivePort(id, owner);
+  });
   handle('bindLiveAudioPort', (context, owner, sessionId, trackId, slotId, runtimeId, sampleRate) => {
     if (typeof sessionId !== 'string' || sessionId.length === 0 || sessionId.length > 128) throw new Error('Invalid live audio session');
     if (!Number.isInteger(trackId) || typeof slotId !== 'string' || slotId.length === 0 || slotId.length > 128) throw new Error('Invalid live audio identity');
@@ -191,7 +198,7 @@ function registerVst3({ app, ipcMain, dialog, getWindow }) {
     }
   });
   handle('close', async (context, owner, id) => {
-    await disposeLivePort(id, owner);
+    disposeLivePort(id, owner);
     return context.service.close(id, owner);
   });
   app.on('web-contents-created', (_event, contents) => {
@@ -207,6 +214,7 @@ function registerVst3({ app, ipcMain, dialog, getWindow }) {
   app.on('will-quit', () => {
     for (const [sessionId, live] of [...livePorts]) {
       livePorts.delete(sessionId);
+      live.stop();
       void live.dispose();
     }
     void ready.then(({ service }) => service.dispose()).catch(() => {});

@@ -583,6 +583,8 @@ export class NativeVst3EffectRuntime {
       const sessionId = entry.sessionId;
       entry.sessionId = undefined;
       if (sessionId) {
+        // Unbind must only validate ownership and mark the live port stopping.
+        // It must not wait for an in-flight native process; close/abort starts next.
         if (typeof entry.bridge.unbindLiveAudioPort === 'function') {
           await entry.bridge.unbindLiveAudioPort(sessionId).catch(() => {});
         }

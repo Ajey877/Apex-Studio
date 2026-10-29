@@ -157,6 +157,38 @@ test('live audio port accounts cancelled sequences instead of accepting them', a
   } finally { pair.close(); }
 });
 
+test('live-port stop returns while native process is blocked so session close can abort it', async () => {
+  let release: (() => void) | undefined;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const order: string[] = [];
+  const pair = await openPair(async ({ samples }) => {
+    order.push('process-entered');
+    await gate;
+    order.push('process-released');
+    return samples;
+  });
+  try {
+    pair.process(0);
+    await waitFor(() => order.includes('process-entered'));
+    pair.session.stop();
+    order.push('stop-returned');
+    order.push('native-close-started');
+    assert.deepEqual(order, ['process-entered', 'stop-returned', 'native-close-started'],
+      'native close/abort must start before the blocked process is released');
+    assert.equal(pair.session.stopping, true);
+    assert.equal(pair.session.disposed, false);
+    assert.equal(pair.received.some(message => message.type === 'result'), false);
+    release!();
+    await pair.session.dispose('explicit-stop');
+    await tick(); await tick();
+    assert.equal(pair.session.disposed, true);
+    assert.equal(pair.session.pending, 0);
+    assert.ok(pair.received.some(message => message.type === 'cancelled' && message.sequence === 0 && message.reason === 'explicit-stop'));
+    assert.equal(pair.received.some(message => message.type === 'result'), false,
+      'a late native reply after shutdown must not be posted as success');
+  } finally { pair.close(); }
+});
+
 test('malformed live-port PCM is rejected without a successful result', async () => {
   const fatals: Error[] = [];
   const pair = await openPair(async ({ samples }) => samples, { onFatal: (error: Error) => fatals.push(error) });
