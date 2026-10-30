@@ -12,6 +12,7 @@ permissions:
 jobs:
   windows-package:
     runs-on: windows-latest
+    timeout-minutes: 45
 
     steps:
       - name: Checkout
@@ -69,7 +70,7 @@ jobs:
                   in: t.inputEnergy, out: t.outputEnergy, buf: t.bufferEnergy, flags: t.flaggedSilence,
                   life: t.lifecycle, b0: (t.blocks||[])[0], b1: (t.blocks||[])[1]
                 }]));
-                console.log('::notice title='+file+' attempt '+a.attempt+'::'+JSON.stringify({status:a.status, order:a.order, pcm:a.nativeServicePcm, traces:summary, error:a.error&&String(a.error).slice(0,400)}));
+                console.log('::notice title='+file+' attempt '+a.attempt+'::'+JSON.stringify({status:a.status, order:a.order, classification:a.classification, pcm:a.nativeServicePcm, traces:summary, transportError:a.transportError&&String(a.transportError).slice(0,400)}));
               }
             }
           "

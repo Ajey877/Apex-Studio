@@ -20,6 +20,8 @@ type MixerCaptureOptions = {
   bypassMixerTracks?: MixerTrack[];
   /** Smoke-only taps after each native insert for diagnosing silent stages. */
   includeNativeStages?: boolean;
+  /** Diagnostic-only: extra silent worklet blocks after play() before known-onset source.start. */
+  prerollSilentBlocks?: number;
 };
 type PlanarPcm = { left: Float32Array; right: Float32Array; frames: number; rms: number; startFrame: number | null };
 const captureModuleByContext = new WeakMap<BaseAudioContext, Promise<string>>();
@@ -246,6 +248,17 @@ function summarizeMixerTiming(events: ReturnType<typeof getNativeVst3MixerEffect
     maxConcurrentMainServiceCalls: ipc?.main?.maximumConcurrentProcessAudioCalls ?? 0,
     maxConcurrentCallsPerEffect: ipc?.main?.maximumConcurrentCallsPerEffect ?? 0,
     nativeServiceSessionCountAfterCleanup: ipc?.main?.nativeServiceSessionCount ?? -1,
+    boundaryBlocks: Object.fromEntries([...new Set(allLifecycle.map(item => String(item.slotId ?? '')))].filter(Boolean).map(slotId => [
+      slotId,
+      allLifecycle.filter(item => String(item.slotId) === slotId && item.phase === 'measured-capture').slice(0, 8).map(item => ({
+        sequence: item.sequence, requestId: item.requestId,
+        workletSubmitAtMs: item.rendererSubmitAtMs, ipcReceivedAtMs: item.mainReceivedAtMs,
+        nativeStartedAtMs: item.nativeStartedAtMs, nativeCompletedAtMs: item.nativeCompletedAtMs,
+        nativeInputRms: item.nativeInputRms, nativeOutputRms: item.nativeOutputRms,
+        rendererResponseAtMs: item.rendererResponseAtMs, workletResultAtMs: item.workletResultAtMs,
+        workletAccepted: item.workletAccepted,
+      })),
+    ])),
     missedDeadlines, requestCount: submissions.size,
     profileEventCount: events.filter(event => event.requestId === undefined || allSubmissions.has(event.requestId)).length,
     requestFailures: [...main].filter(([, event]: [string, any]) => !!event.error && !nativeCancelledAtStopRequestIds.has(event.requestId)).map(([, event]: [string, any]) => event.error),
@@ -394,6 +407,42 @@ function first32ProcessTraces(run: any) {
   }));
 }
 
+function classifyTwoInsertAttempt(record: Record<string, unknown>, transportError: string | null) {
+  const pcm = (record.nativeServicePcm ?? {}) as Record<string, any>;
+  const traces = (record.first32 ?? {}) as Record<string, any>;
+  const slotIds = new Set([...Object.keys(pcm), ...Object.keys(traces)]);
+  const inserts: Record<string, any> = {};
+  let silentInsert = false;
+  for (const slotId of slotIds) {
+    const p = pcm[slotId], t = traces[slotId];
+    const inputNonzero = Number(p?.inputRms?.nonzero ?? t?.inputEnergy ?? 0);
+    const outputNonzero = Number(p?.outputRms?.nonzero ?? t?.outputEnergy ?? 0);
+    const bufferNonzero = Number(t?.bufferEnergy ?? outputNonzero);
+    const dsp = inputNonzero > 0 && outputNonzero === 0 ? 'silent-insert'
+      : outputNonzero > 0 ? 'audible' : 'no-input';
+    if (dsp === 'silent-insert') silentInsert = true;
+    inserts[slotId] = {
+      transport: transportError ? 'failed' : 'passed', dsp, inputNonzero, outputNonzero, bufferNonzero,
+      flaggedSilence: t?.flaggedSilence ?? null, sessionId: t?.sessionId ?? null, classId: t?.classId ?? null,
+    };
+  }
+  const transport = transportError ? 'failed' : 'passed';
+  const dsp = silentInsert ? 'silent-insert' : slotIds.size === 0 ? 'no-input' : 'audible';
+  const chain = silentInsert ? 'silent' : slotIds.size === 0 ? 'unknown' : 'audible';
+  const cleanup = Number((record.compact as any)?.timing?.nativeServiceSessionCountAfterCleanup ?? 0) === 0 ? 'passed' : 'failed';
+  const overall = transport === 'passed' && dsp === 'audible' && cleanup === 'passed' ? 'passed' : 'failed';
+  return { transport, dsp, chain, cleanup, overall, inserts, transportError };
+}
+
+async function sha256Pcm(audio: PlanarPcm) {
+  const digest = async (samples: Float32Array) => {
+    const bytes = new Uint8Array(samples.buffer, samples.byteOffset, samples.byteLength);
+    const hash = await crypto.subtle.digest('SHA-256', bytes);
+    return [...new Uint8Array(hash)].map(b => b.toString(16).padStart(2, '0')).join('');
+  };
+  return { frames: audio.frames, left: await digest(audio.left), right: await digest(audio.right) };
+}
+
 function compactMixerRunEvidence(run: any) {
   const nativeStages = [...run.nativeStageCaptures].map(([slotId, capture]: [string, MixerCapture], index: number) => {
     const onset = firstCapturedOnsetFrame(capture, run.sourceStartContextFrame,
@@ -406,11 +455,13 @@ function compactMixerRunEvidence(run: any) {
   });
   const timing = run.timing;
   return { trackRms: run.trackRms, nativeStages, nativeServicePcm: nativeServicePcmBySlot(run),
+    trackPcmSha256: run.trackPcmSha256 ?? null, nativeStagePcmSha256: run.nativeStagePcmSha256 ?? null,
     timing: { requestCount: timing.requestCount, acceptedWorkletResults: timing.acceptedWorkletResults,
       missedDeadlines: timing.missedDeadlines, unaccountedRequestCount: timing.unaccountedRequestCount,
       missingMainResponses: timing.missingMainResponses, missingWorkletResults: timing.missingWorkletResults,
       maxConcurrentMainServiceCalls: timing.maxConcurrentMainServiceCalls,
-      nativeServiceSessionCountAfterCleanup: timing.nativeServiceSessionCountAfterCleanup } };
+      nativeServiceSessionCountAfterCleanup: timing.nativeServiceSessionCountAfterCleanup,
+      boundaryBlocks: timing.boundaryBlocks ?? null } };
 }
 
 function createDeterministicMixerInput(context: AudioContext): AudioBuffer {
@@ -555,7 +606,9 @@ async function captureLiveMixerRun(instance: typeof audioEngine, channels: Chann
   }
   targetSource.connect(targetGain); targetGain.connect(instance.getOrCreateMixerChannel(1).input);
   controlSource.connect(controlGain); controlGain.connect(instance.getOrCreateMixerChannel(2).input);
-  const sourceStartTime = context.currentTime + 0.05;
+  const prerollSilentBlocks = Number.isInteger(options.prerollSilentBlocks) ? Number(options.prerollSilentBlocks) : 0;
+  const prerollSeconds = prerollSilentBlocks > 0 ? prerollSilentBlocks * VST3_FX_BLOCK_FRAMES / context.sampleRate : 0.05;
+  const sourceStartTime = context.currentTime + prerollSeconds;
   const sourceStartContextFrame = Math.round(sourceStartTime * context.sampleRate);
   targetSource.start(sourceStartTime); controlSource.start(sourceStartTime);
   await new Promise(resolve => setTimeout(resolve, 300));
@@ -614,12 +667,15 @@ async function captureLiveMixerRun(instance: typeof audioEngine, channels: Chann
   const duration = stoppedAt - startedAt;
   const sampleRate = context.sampleRate;
   const timing = summarizeMixerTiming(runtimeEvents, ipc, sampleRate, duration, startedAt, stoppedAt, stopRequestedAtRendererMs);
+  const trackPcmSha256 = Object.fromEntries(await Promise.all([...pcm].map(async ([trackId, audio]) => [trackId, await sha256Pcm(audio)])));
+  const nativeStagePcmSha256 = Object.fromEntries(await Promise.all([...nativeStagePcm].map(async ([slotId, audio]) => [slotId, await sha256Pcm(audio)])));
   return { pcm, tailRms, sampleRate, durationMs: duration, captureStartRendererMs: startedAt,
     captureEndRendererMs: stoppedAt, startedContextFrame, stoppedContextFrame, sourceStartContextFrame,
     bypassUpdateAppliedContextFrame, playbackActiveAtEnd, captures: taps, nativeStageCaptures: nativeStageTaps,
     nativeStagePcm,
     trackRms: Object.fromEntries([...pcm].map(([trackId, audio]) => [trackId, audio.rms])),
     nativeStageRms: Object.fromEntries([...nativeStagePcm].map(([slotId, audio]) => [slotId, audio.rms])),
+    trackPcmSha256, nativeStagePcmSha256,
     diagnostics: getVst3MixerEffectDiagnostics(), timing, runtimeEvents, ipc };
 }
 
@@ -737,14 +793,19 @@ async function runPackagedMixerAcceptance(instance: typeof audioEngine) {
   const alignmentOptions = (): MixerCaptureOptions => ({ durationMs: 1050, inputBuffers: onsetInputs(), includeMaster: true, includeNativeStages: true });
   const zeroInsertAlignment = await run(noEffects, 'Mixer onset alignment zero inserts', alignmentOptions());
   const oneInsertAlignment = await run(oneNativeInsert, 'Mixer onset alignment one insert', alignmentOptions());
+  const phase = String((globalThis as any).desktopApp?.vst3?.diagnosticPhase ?? 'attempts');
   const twoInsertAttempts: Array<Record<string, unknown>> = [];
   let twoInsertAlignment: Awaited<ReturnType<typeof captureLiveMixerRun>> | undefined;
-  for (let attempt = 0; attempt < 10; attempt++) {
+  const attemptCount = phase === 'preroll' ? 0 : 20;
+  for (let attempt = 0; attempt < attemptCount; attempt++) {
     const delayFirst = attempt % 2 === 0;
     const mixer = delayFirst ? twoNativeInsertsDelayFirst : twoNativeInsertsFilterFirst;
     const order = delayFirst ? 'Delay→RezFilter' : 'RezFilter→Delay';
     const label = `Mixer onset alignment two inserts attempt ${attempt} ${order}`;
     const result = await captureRun(mixer, alignmentOptions());
+    let transportError: string | null = null;
+    try { assertPackagedMixerRun(result, label); }
+    catch (error) { transportError = error instanceof Error ? error.message : String(error); }
     const record: Record<string, unknown> = {
       attempt, order, label, sampleRate: result.sampleRate,
       identities: result.ipc?.main?.identities ?? null,
@@ -753,41 +814,72 @@ async function runPackagedMixerAcceptance(instance: typeof audioEngine) {
       first32: first32ProcessTraces(result),
       nativeServicePcm: nativeServicePcmBySlot(result),
     };
-    try {
-      assertPackagedMixerRun(result, label);
-      twoInsertAttempts.push({ ...record, status: 'passed' });
-      if (!twoInsertAlignment && delayFirst) twoInsertAlignment = result;
-    } catch (error) {
-      twoInsertAttempts.push({ ...record, status: 'failed', error: error instanceof Error ? error.message : String(error) });
+    const classification = classifyTwoInsertAttempt(record, transportError);
+    twoInsertAttempts.push({ ...record, classification, status: classification.overall, transportError });
+    if (classification.overall === 'passed' && delayFirst && !twoInsertAlignment) twoInsertAlignment = result;
+  }
+  const prerollAttempts: Array<Record<string, unknown>> = [];
+  if (phase === 'preroll') {
+    for (const prerollSilentBlocks of [0, 1, 2, 3, 4, 8, 16, 32]) {
+      for (const delayFirst of [true, false]) {
+        const mixer = delayFirst ? twoNativeInsertsDelayFirst : twoNativeInsertsFilterFirst;
+        const order = delayFirst ? 'Delay→RezFilter' : 'RezFilter→Delay';
+        const label = `preroll ${prerollSilentBlocks} ${order}`;
+        const result = await captureRun(mixer, { ...alignmentOptions(), prerollSilentBlocks });
+        let transportError: string | null = null;
+        try { assertPackagedMixerRun(result, label); }
+        catch (error) { transportError = error instanceof Error ? error.message : String(error); }
+        const record: Record<string, unknown> = {
+          prerollSilentBlocks, order, label, sampleRate: result.sampleRate,
+          identities: result.ipc?.main?.identities ?? null,
+          compact: compactMixerRunEvidence(result),
+          first32: first32ProcessTraces(result),
+          nativeServicePcm: nativeServicePcmBySlot(result),
+        };
+        const classification = classifyTwoInsertAttempt(record, transportError);
+        prerollAttempts.push({ ...record, classification, status: classification.overall, transportError });
+        if (classification.overall === 'passed' && delayFirst && !twoInsertAlignment) twoInsertAlignment = result;
+      }
     }
   }
-  const failedTwoInserts = twoInsertAttempts.filter(attempt => attempt.status === 'failed');
+  const failedTwoInserts = [...twoInsertAttempts, ...prerollAttempts].filter(attempt => attempt.status === 'failed');
   const parityEvidence = {
+    phase,
     plugin: {
       delay: { path: delayIdentity.path, classId: delayIdentity.classId, name: delayIdentity.name, vendor: delayIdentity.vendor, version: delayIdentity.version, ...stateHashes(delay) },
       rezFilter: { path: filterIdentity.path, classId: filterIdentity.classId, name: filterIdentity.name, vendor: filterIdentity.vendor, version: filterIdentity.version, ...stateHashes(rezFilter) },
       bypassDelay: stateHashes(bypassDelay),
     },
-    identities: twoInsertAttempts[0]?.identities ?? null,
+    identities: (twoInsertAttempts[0] ?? prerollAttempts[0])?.identities ?? null,
     twoInsertAttempts,
+    prerollAttempts,
+    summary: {
+      attempts: twoInsertAttempts.length,
+      attemptOverallFailed: twoInsertAttempts.filter(a => a.status === 'failed').length,
+      attemptSilentInsert: twoInsertAttempts.filter(a => (a.classification as any)?.dsp === 'silent-insert').length,
+      preroll: prerollAttempts.length,
+      prerollOverallFailed: prerollAttempts.filter(a => a.status === 'failed').length,
+      prerollSilentInsert: prerollAttempts.filter(a => (a.classification as any)?.dsp === 'silent-insert').length,
+    },
   };
   try { await desktopApi.vst3.smokeWriteEvidence?.(parityEvidence); } catch { /* evidence write is diagnostic-only */ }
   if (!twoInsertAlignment) twoInsertAlignment = await captureRun(twoNativeInsertsDelayFirst, alignmentOptions());
   if (failedTwoInserts.length) {
-    const compactAttempts = twoInsertAttempts.map(attempt => {
+    const compactAttempts = failedTwoInserts.map(attempt => {
       const traces = (attempt.first32 ?? {}) as Record<string, any>;
       return {
-        attempt: attempt.attempt, order: attempt.order, status: attempt.status,
+        attempt: attempt.attempt, prerollSilentBlocks: attempt.prerollSilentBlocks, order: attempt.order,
+        status: attempt.status, classification: attempt.classification,
         identities: attempt.identities, nativeServicePcm: attempt.nativeServicePcm,
         first32: Object.fromEntries(Object.entries(traces).map(([slotId, slot]) => [slotId, {
           sessionId: slot.sessionId, classId: slot.classId, mode: slot.mode, sampleRate: slot.sampleRate,
           lifecycle: slot.lifecycle, inputEnergy: slot.inputEnergy, outputEnergy: slot.outputEnergy,
-          bufferEnergy: slot.bufferEnergy, flaggedSilence: slot.flaggedSilence, blocks: (slot.blocks ?? []).slice(0, 4),
+          bufferEnergy: slot.bufferEnergy, flaggedSilence: slot.flaggedSilence, blocks: (slot.blocks ?? []).slice(0, 2),
         }])),
-        error: attempt.status === 'failed' ? String(attempt.error).slice(0, 800) : undefined,
+        transportError: attempt.transportError ? String(attempt.transportError).slice(0, 400) : undefined,
       };
     });
-    throw new Error(`Packaged two-insert alignment failed ${failedTwoInserts.length}/10 attempts (no retry conversion): ${JSON.stringify(compactAttempts)}`);
+    throw new Error(`Packaged two-insert failed ${failedTwoInserts.length} (silent insert is audio failure; no retry conversion): ${JSON.stringify(compactAttempts)}`);
   }
   const onsetFramesFor = (result: any) => Object.fromEntries([0, 1, 2].map(trackId => [trackId,
     firstCapturedOnsetFrame(result.captures.get(trackId), result.sourceStartContextFrame,

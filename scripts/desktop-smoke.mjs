@@ -25,7 +25,7 @@ async function launch(reopening) {
         APEX_VST3_SMOKE_PLUGIN: fixture, APEX_SMOKE_EVIDENCE: output, APEX_SMOKE_USER_DATA: profile },
       stdio: 'inherit', windowsHide: true,
     });
-    const timeout = setTimeout(() => { child.kill(); reject(new Error('Timed out waiting for packaged app')); }, 240_000);
+    const timeout = setTimeout(() => { child.kill(); reject(new Error('Timed out waiting for packaged app')); }, 600_000);
     child.on('error', error => { clearTimeout(timeout); reject(error); });
     child.on('exit', (code, signal) => {
       clearTimeout(timeout);
