@@ -2,6 +2,7 @@ const { contextBridge, ipcRenderer } = require('electron');
 
 // Expose safe desktop platform APIs to the renderer.
 const smokeTest = process.argv.includes('--apex-smoke-test');
+const diagnosticPhase = process.env.APEX_REZFILTER_PHASE || 'attempts';
 const smokeIpcMeasurements = smokeTest ? [] : null;
 const desktopApi = {
   isDesktop: true,
@@ -79,5 +80,6 @@ if (smokeTest) {
     main: await ipcRenderer.invoke('vst3:smokeTimingSnapshot'),
   });
   desktopApi.vst3.smokeWriteEvidence = payload => ipcRenderer.invoke('vst3:smokeWriteEvidence', payload);
+  desktopApi.vst3.diagnosticPhase = diagnosticPhase;
 }
 contextBridge.exposeInMainWorld('desktopApp', desktopApi);

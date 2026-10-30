@@ -4,7 +4,7 @@ on:
   pull_request:
     branches: [main, phase-5-5-song-mode-verification]
   push:
-    branches: [main, phase-5.5-hardening, phase-5-5-song-mode-verification, phase-11-release-parity-validation, diag/packaged-rezfilter-parity]
+    branches: [main, phase-5.5-hardening, phase-5-5-song-mode-verification, phase-11-release-parity-validation]
 
 permissions:
   contents: read
@@ -12,6 +12,7 @@ permissions:
 jobs:
   windows-package:
     runs-on: windows-latest
+    timeout-minutes: 45
 
     steps:
       - name: Checkout
