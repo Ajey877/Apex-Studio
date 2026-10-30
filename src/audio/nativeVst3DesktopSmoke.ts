@@ -339,6 +339,71 @@ function nativeServicePcmBySlot(run: any) {
   }));
 }
 
+function stateHashes(effect: { classId?: string, state?: { component?: string, controller?: string, parameters?: Array<{ id: number, value: number }> } } | undefined) {
+  const fnv = (text: string) => {
+    let hash = 2166136261;
+    for (let i = 0; i < text.length; i++) hash = Math.imul(hash ^ text.charCodeAt(i), 16777619) >>> 0;
+    return hash.toString(16).padStart(8, '0');
+  };
+  return {
+    classId: effect?.classId ?? null,
+    component: effect?.state?.component ? fnv(effect.state.component) : null,
+    controller: effect?.state?.controller ? fnv(effect.state.controller) : null,
+    overlay: effect?.state?.parameters ?? [],
+  };
+}
+
+function compactProcessBlock(record: any) {
+  const trace = record.processTrace;
+  return {
+    sequence: record.sequence, sessionId: record.sessionId, slotId: record.slotId, trackId: record.trackId,
+    block: trace?.block, cursor: trace?.cursor, frames: trace?.frames ?? record.frames,
+    sampleRate: trace?.sampleRate ?? record.sampleRate, mode: trace?.mode, classId: trace?.classId,
+    silenceFlags: trace?.silenceFlags, pendingWasEmpty: trace?.pendingWasEmpty,
+    queuedParameters: trace?.queuedParameters ?? [], inputChecksum: trace?.inputChecksum,
+    inputRms: trace?.inputRms ?? record.nativeInputRms, inputNonzero: trace?.inputNonzero,
+    outputBufferRms: trace?.outputBufferRms, outputBufferNonzero: trace?.outputBufferNonzero,
+    extractedRms: trace?.extractedRms ?? record.nativeOutputRms, extractedNonzero: trace?.extractedNonzero,
+    lifecycle: trace?.lifecycle,
+  };
+}
+
+function first32ProcessTraces(run: any) {
+  const slotIds = new Set<string>([...run.nativeStageCaptures.keys()]);
+  const records = ((run.ipc?.main?.processAudio ?? []) as Array<any>).filter(record => slotIds.has(record.slotId));
+  const bySlotSession = new Map<string, Map<string, any[]>>();
+  for (const record of records) {
+    const sessions = bySlotSession.get(record.slotId) ?? new Map<string, any[]>();
+    const sessionId = String(record.sessionId ?? 'unknown');
+    const list = sessions.get(sessionId) ?? [];
+    list.push(record);
+    sessions.set(sessionId, list);
+    bySlotSession.set(record.slotId, sessions);
+  }
+  return Object.fromEntries([...bySlotSession].map(([slotId, sessions]) => {
+    let chosen: any[] = [];
+    let latest = -Infinity;
+    for (const list of sessions.values()) {
+      const start = Number(list[0]?.serviceStartAtMainMs ?? -Infinity);
+      if (start >= latest) { latest = start; chosen = list; }
+    }
+    const ordered = [...chosen].sort((a, b) => (a.sequence ?? 0) - (b.sequence ?? 0)).slice(0, 32);
+    return [slotId, {
+      sessionId: ordered[0]?.sessionId ?? null,
+      owner: ordered[0]?.owner ?? null,
+      sampleRate: ordered[0]?.processTrace?.sampleRate ?? ordered[0]?.sampleRate ?? run.sampleRate,
+      mode: ordered[0]?.processTrace?.mode ?? null,
+      classId: ordered[0]?.processTrace?.classId ?? null,
+      lifecycle: ordered[0]?.processTrace?.lifecycle ?? [],
+      inputEnergy: ordered.filter(record => Number(record.processTrace?.inputRms ?? record.nativeInputRms) > 1e-6).length,
+      outputEnergy: ordered.filter(record => Number(record.processTrace?.extractedRms ?? record.nativeOutputRms) > 1e-6).length,
+      bufferEnergy: ordered.filter(record => Number(record.processTrace?.outputBufferRms) > 1e-6).length,
+      flaggedSilence: ordered.filter(record => Number(record.processTrace?.silenceFlags) !== 0).length,
+      blocks: ordered.map(compactProcessBlock),
+    }];
+  }));
+}
+
 function compactMixerRunEvidence(run: any) {
   const nativeStages = [...run.nativeStageCaptures].map(([slotId, capture]: [string, MixerCapture], index: number) => {
     const onset = firstCapturedOnsetFrame(capture, run.sourceStartContextFrame,
@@ -883,8 +948,10 @@ async function runPackagedMixerAcceptance(instance: typeof audioEngine) {
   const reversed = withSlots([makeSlot('smoke-rezfilter', rezFilter), makeSlot('smoke-delay', delay)]);
   const delayOnly = withSlots([makeSlot('smoke-delay', delay)]);
   const delayBypassed = withSlots([makeSlot('smoke-delay-bypass', bypassDelay)]);
+  const captureRun = (mixer: MixerTrack[], options: MixerCaptureOptions = {}) =>
+    captureLiveMixerRun(instance, channels, mixer, options);
   const run = async (mixer: MixerTrack[], label: string, options: MixerCaptureOptions = {}) => {
-    const result = await captureLiveMixerRun(instance, channels, mixer, options);
+    const result = await captureRun(mixer, options);
     if (mixer.some(track => track.fxSlots.some(slot => slot.enabled && slot.type === 'vst3'))) assertPackagedMixerRun(result, label);
     else {
       if (!result.playbackActiveAtEnd || result.timing.nativeServiceSessionCountAfterCleanup !== 0 ||
@@ -907,12 +974,64 @@ async function runPackagedMixerAcceptance(instance: typeof audioEngine) {
   // actual AudioWorklet frame stamps, with no comparison-side offset.
   const onsetInputs = () => new Map([[1, createKnownOnsetInput(context, 0.08)], [2, createKnownOnsetInput(context, 0.035)]]);
   const oneNativeInsert = withSlots([makeSlot('latency-one-delay', bypassDelay)]);
-  const twoNativeInserts = withSlots([makeSlot('latency-two-delay', bypassDelay), makeSlot('latency-two-filter', rezFilter)]);
+  const twoNativeInsertsDelayFirst = withSlots([makeSlot('latency-two-delay', bypassDelay), makeSlot('latency-two-filter', rezFilter)]);
+  const twoNativeInsertsFilterFirst = withSlots([makeSlot('latency-two-filter', rezFilter), makeSlot('latency-two-delay', bypassDelay)]);
   const alignmentOptions = (): MixerCaptureOptions => ({ durationMs: 1050, inputBuffers: onsetInputs(), includeMaster: true, includeNativeStages: true });
   const zeroInsertAlignment = await run(noEffects, 'Mixer onset alignment zero inserts', alignmentOptions());
   const oneInsertAlignment = await run(oneNativeInsert, 'Mixer onset alignment one insert', alignmentOptions());
-  const twoInsertAlignment = await run(twoNativeInserts, 'Mixer onset alignment two inserts', alignmentOptions());
-  const stalledTwoInserts = await run(twoNativeInserts, 'Mixer renderer-stall two inserts', {
+  const twoInsertAttempts: Array<Record<string, unknown>> = [];
+  let twoInsertAlignment: Awaited<ReturnType<typeof captureLiveMixerRun>> | undefined;
+  for (let attempt = 0; attempt < 10; attempt++) {
+    const delayFirst = attempt % 2 === 0;
+    const mixer = delayFirst ? twoNativeInsertsDelayFirst : twoNativeInsertsFilterFirst;
+    const order = delayFirst ? 'Delay→RezFilter' : 'RezFilter→Delay';
+    const label = `Mixer onset alignment two inserts attempt ${attempt} ${order}`;
+    const result = await captureRun(mixer, alignmentOptions());
+    const record: Record<string, unknown> = {
+      attempt, order, label, sampleRate: result.sampleRate,
+      identities: result.ipc?.main?.identities ?? null,
+      delayState: stateHashes(bypassDelay), filterState: stateHashes(rezFilter),
+      compact: compactMixerRunEvidence(result),
+      first32: first32ProcessTraces(result),
+      nativeServicePcm: nativeServicePcmBySlot(result),
+    };
+    try {
+      assertPackagedMixerRun(result, label);
+      twoInsertAttempts.push({ ...record, status: 'passed' });
+      if (!twoInsertAlignment && delayFirst) twoInsertAlignment = result;
+    } catch (error) {
+      twoInsertAttempts.push({ ...record, status: 'failed', error: error instanceof Error ? error.message : String(error) });
+    }
+  }
+  const failedTwoInserts = twoInsertAttempts.filter(attempt => attempt.status === 'failed');
+  const parityEvidence = {
+    plugin: {
+      delay: { path: delayIdentity.path, classId: delayIdentity.classId, name: delayIdentity.name, vendor: delayIdentity.vendor, version: delayIdentity.version, ...stateHashes(delay) },
+      rezFilter: { path: filterIdentity.path, classId: filterIdentity.classId, name: filterIdentity.name, vendor: filterIdentity.vendor, version: filterIdentity.version, ...stateHashes(rezFilter) },
+      bypassDelay: stateHashes(bypassDelay),
+    },
+    identities: twoInsertAttempts[0]?.identities ?? null,
+    twoInsertAttempts,
+  };
+  try { await desktopApi.vst3.smokeWriteEvidence?.(parityEvidence); } catch { /* evidence write is diagnostic-only */ }
+  if (!twoInsertAlignment) twoInsertAlignment = await captureRun(twoNativeInsertsDelayFirst, alignmentOptions());
+  if (failedTwoInserts.length) {
+    const compactAttempts = twoInsertAttempts.map(attempt => {
+      const traces = (attempt.first32 ?? {}) as Record<string, any>;
+      return {
+        attempt: attempt.attempt, order: attempt.order, status: attempt.status,
+        identities: attempt.identities, nativeServicePcm: attempt.nativeServicePcm,
+        first32: Object.fromEntries(Object.entries(traces).map(([slotId, slot]) => [slotId, {
+          sessionId: slot.sessionId, classId: slot.classId, mode: slot.mode, sampleRate: slot.sampleRate,
+          lifecycle: slot.lifecycle, inputEnergy: slot.inputEnergy, outputEnergy: slot.outputEnergy,
+          bufferEnergy: slot.bufferEnergy, flaggedSilence: slot.flaggedSilence, blocks: (slot.blocks ?? []).slice(0, 4),
+        }])),
+        error: attempt.status === 'failed' ? String(attempt.error).slice(0, 800) : undefined,
+      };
+    });
+    throw new Error(`Packaged two-insert alignment failed ${failedTwoInserts.length}/10 attempts (no retry conversion): ${JSON.stringify(compactAttempts)}`);
+  }
+  const stalledTwoInserts = await run(twoNativeInsertsDelayFirst, 'Mixer renderer-stall two inserts', {
     ...alignmentOptions(), stallRendererMs: 30, stallRendererAfterMs: 280,
   });
   assertRendererStallSurvived(stalledTwoInserts, 'Mixer renderer-stall two inserts');
@@ -1037,6 +1156,7 @@ async function runPackagedMixerAcceptance(instance: typeof audioEngine) {
     latencyFixture: { plugin: rezFilter.name, parameters: rezFilterLatencyParameters,
       reason: 'LFO/envelope modulation disabled and cutoff fixed positive so onset timing measures the bridge pipeline, not variable plugin startup silence.' },
     latencyAlignmentRegression: alignmentRows,
+    rezFilterParity: parityEvidence,
     rendererStallRegression,
     priorPlaywrightBridgeReference: { approximatelyMs: 28, measurement: 'test-only page.exposeFunction bridge; separate from this production IPC/preload/helper measurement' },
     orderDifferenceRms: orderDifference.rmsDifference, orderOffsetFrames: orderDifference.normalizedLagFrames,

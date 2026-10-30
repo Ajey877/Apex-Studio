@@ -1,7 +1,33 @@
 const path = require('node:path');
 const fs = require('node:fs/promises');
+const fsSync = require('node:fs');
+const crypto = require('node:crypto');
 const { pathToFileURL } = require('node:url');
 const { MessageChannelMain } = require('electron');
+
+function sha256File(filePath) {
+  if (!filePath || !fsSync.existsSync(filePath) || !fsSync.statSync(filePath).isFile()) return null;
+  return crypto.createHash('sha256').update(fsSync.readFileSync(filePath)).digest('hex');
+}
+function findPluginModule(bundle) {
+  if (!bundle || !fsSync.existsSync(bundle)) return null;
+  const stat = fsSync.statSync(bundle);
+  if (stat.isFile()) return bundle;
+  const stack = [bundle];
+  let best = null, bestSize = -1;
+  while (stack.length) {
+    const dir = stack.pop();
+    for (const entry of fsSync.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) stack.push(full);
+      else if (/\.(vst3|dll|so|dylib)$/i.test(entry.name)) {
+        const size = fsSync.statSync(full).size;
+        if (size > bestSize) { best = full; bestSize = size; }
+      }
+    }
+  }
+  return best;
+}
 
 // Explicit operations only; never accept raw host commands or executable paths
 // from renderer content. The Electron renderer remains sandboxed/isolated.
@@ -125,12 +151,13 @@ function registerVst3({ app, ipcMain, dialog, getWindow }) {
     maximumConcurrentProcessAudioCalls = Math.max(maximumConcurrentProcessAudioCalls, activeAtStart);
     maximumConcurrentCallsPerEffect = Math.max(maximumConcurrentCallsPerEffect, activeForEffectAtStart);
     try {
-      const pcm = await context.service.processAudio(id, frames, audio, bpm, owner, parameters);
+      const pcm = await context.service.processAudio(id, frames, audio, bpm, owner, parameters, true);
+      const processTrace = context.service.lastProcessTrace(id, owner);
       const serviceCompletedAtMainMs = performance.now();
       if (smokeProcessAudioTimings.length < 8192) smokeProcessAudioTimings.push({
-        ...profile, frames, ipcReceivedAtMainMs: ipcTiming?.ipcReceivedAtMainMs ?? serviceStartAtMainMs,
+        ...profile, frames, sessionId: profile.sessionId ?? id, ipcReceivedAtMainMs: ipcTiming?.ipcReceivedAtMainMs ?? serviceStartAtMainMs,
         serviceStartAtMainMs, serviceCompletedAtMainMs, nativeServiceCallMs: serviceCompletedAtMainMs - serviceStartAtMainMs,
-        nativeInputRms: pcmRms(audio), nativeOutputRms: pcmRms(pcm),
+        nativeInputRms: pcmRms(audio), nativeOutputRms: pcmRms(pcm), processTrace,
         activeProcessAudioCallsAtStart: activeAtStart, activeCallsForEffectAtStart: activeForEffectAtStart, error: null,
       });
       return pcm;
@@ -152,10 +179,29 @@ function registerVst3({ app, ipcMain, dialog, getWindow }) {
   };
   handle('processAudio', (context, owner, id, frames, audio, bpm, parameters, rawProfile, ipcTiming) =>
     runProcessAudio(context, owner, id, frames, audio, bpm, parameters, rawProfile, ipcTiming));
-  if (smokeTimingEnabled) handle('smokeTimingSnapshot', context => ({
-    processAudio: smokeProcessAudioTimings.slice(), maximumConcurrentProcessAudioCalls,
-    maximumConcurrentCallsPerEffect, activeProcessAudioCalls, nativeServiceSessionCount: context.service.sessionCount,
-  }));
+  if (smokeTimingEnabled) handle('smokeWriteEvidence', (_context, _owner, payload) => {
+    const dest = process.env.APEX_SMOKE_EVIDENCE;
+    if (!dest || typeof dest !== 'string') return false;
+    const file = dest.replace(/\.json$/i, '') + '-rezfilter-parity.json';
+    fsSync.mkdirSync(path.dirname(file), { recursive: true });
+    fsSync.writeFileSync(file, JSON.stringify(payload));
+    return true;
+  });
+  if (smokeTimingEnabled) handle('smokeTimingSnapshot', context => {
+    const helperPath = app.isPackaged
+      ? path.join(process.resourcesPath, 'vst3', 'apex-vst3-host.exe')
+      : path.join(__dirname, 'build/native-vst3/bin', process.platform === 'win32' ? 'Release/apex-vst3-host.exe' : 'apex-vst3-host');
+    const pluginPath = process.env.APEX_VST3_SMOKE_PLUGIN || null;
+    const pluginModulePath = findPluginModule(pluginPath);
+    return {
+      processAudio: smokeProcessAudioTimings.slice(), maximumConcurrentProcessAudioCalls,
+      maximumConcurrentCallsPerEffect, activeProcessAudioCalls, nativeServiceSessionCount: context.service.sessionCount,
+      identities: {
+        helperPath, helperSha256: sha256File(helperPath),
+        pluginPath, pluginModulePath, pluginModuleSha256: sha256File(pluginModulePath),
+      },
+    };
+  });
   handle('unbindLiveAudioPort', (context, owner, id) => {
     context.service.assertSession(id, owner);
     disposeLivePort(id, owner);
@@ -175,7 +221,7 @@ function registerVst3({ app, ipcMain, dialog, getWindow }) {
       processAudio: ({ sequence, samples, timing }) => {
         const profile = {
           requestId: `${runtimeId}:${sequence}`,
-          trackId, slotId, sequence, sampleRate,
+          sessionId, trackId, slotId, sequence, sampleRate,
           inputBlockStartContextFrame: timing?.inputBlockStartContextFrame,
           submittedContextFrame: timing?.submittedContextFrame,
           submittedOutputFrame: timing?.submittedOutputFrame,

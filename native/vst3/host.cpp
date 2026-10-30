@@ -37,6 +37,41 @@ constexpr size_t kMaxRequest = 8 * 1024 * 1024;
 void require(bool condition, const std::string& message) {
   if (!condition) throw std::runtime_error(message);
 }
+json measurePlanar(const float* samples, int frames) {
+  double square = 0;
+  int nonzero = 0;
+  const int count = frames * 2;
+  for (int i = 0; i < count; ++i) {
+    square += double(samples[i]) * samples[i];
+    if (samples[i] != 0.f) ++nonzero;
+  }
+  return {{"rms", count ? std::sqrt(square / count) : 0.0}, {"nonzero", nonzero}, {"count", count}};
+}
+json measureChannels(float* const* channels, int32 channelCount, int frames) {
+  double square = 0;
+  int nonzero = 0;
+  int count = 0;
+  const int used = std::min(int(channelCount), 2);
+  for (int ch = 0; ch < used; ++ch) {
+    const float* samples = channels[ch];
+    for (int i = 0; i < frames; ++i) {
+      square += double(samples[i]) * samples[i];
+      if (samples[i] != 0.f) ++nonzero;
+      ++count;
+    }
+  }
+  return {{"rms", count ? std::sqrt(square / count) : 0.0}, {"nonzero", nonzero}, {"count", count}};
+}
+uint32_t fnv1a(const float* samples, int count) {
+  uint32_t hash = 2166136261u;
+  const auto* bytes = reinterpret_cast<const unsigned char*>(samples);
+  for (int i = 0; i < count * int(sizeof(float)); ++i) hash = (hash ^ bytes[i]) * 16777619u;
+  return hash;
+}
+struct ProcessResult {
+  std::vector<float> pcm;
+  json trace;
+};
 void checked(tresult result, const std::string& message) {
   require(result == kResultOk, message + " (VST result " + std::to_string(result) + ")");
 }
@@ -139,9 +174,17 @@ class Instance {
   double sampleRate = 48000;
   int mode = kOffline;
   int64_t cursor = 0;
+  int processBlockIndex = 0;
+  json lifecycle = json::array();
   bool active = false;
   bool processing = false;
   bool isInstrument = true;
+  void note(const char* event) {
+    if (lifecycle.size() < 64) lifecycle.push_back({
+      {"event", event}, {"cursor", cursor}, {"active", active}, {"processing", processing},
+      {"sampleRate", sampleRate}, {"mode", mode == kRealtime ? "realtime" : "offline"}
+    });
+  }
 public:
   ~Instance() {
     if (processing) processor->setProcessing(false);
@@ -210,6 +253,7 @@ public:
     mode = modeName == "offline" ? kOffline : kRealtime;
     ProcessSetup setup{mode, kSample32, kMaxBlock, sampleRate};
     checked(processor->setupProcessing(setup), "setupProcessing failed");
+    note("setupProcessing");
     if (controller) {
       const auto count = controller->getParameterCount();
       require(count >= 0 && count <= 4096, "Too many plugin parameters");
@@ -222,7 +266,7 @@ public:
         if (info.flags & ParameterInfo::kIsReadOnly) readOnlyIds.insert(info.id);
       }
     }
-    if (request.contains("state")) restore(request.at("state"));
+    if (request.contains("state")) { restore(request.at("state")); note("restore"); }
     else if (controller) {
       MemoryStream stream;
       if (component->getState(&stream) == kResultOk) {
@@ -232,14 +276,16 @@ public:
       }
     }
     data.prepare(*component, kMaxBlock, kSample32);
-    checked(component->setActive(true), "setActive failed"); active = true;
-    checked(processor->setProcessing(true), "setProcessing failed"); processing = true;
+    checked(component->setActive(true), "setActive failed"); active = true; note("setActive");
+    checked(processor->setProcessing(true), "setProcessing failed"); processing = true; note("setProcessing");
     // Component/controller streams are restored while inactive. Apply saved
     // normalized overrides after activation so the processor's first audible
     // block receives them through the parameter queue (effects) or the
     // already-queued points (instruments). Controller metadata is then read.
-    if (!isInstrument && request.contains("state") && request.at("state").contains("parameters"))
+    if (!isInstrument && request.contains("state") && request.at("state").contains("parameters")) {
       applyParameters(request.at("state").at("parameters"), false, -1, false);
+      note("overlay-after-activate");
+    }
     result["parameters"] = metadata();
     result["controllerAvailable"] = bool(controller);
     result["latencySamples"] = processor->getLatencySamples();
@@ -369,7 +415,7 @@ public:
     checked(processor->setProcessing(true), "Cannot resume after state capture"); processing = true;
     return state;
   }
-  std::vector<float> process(const json& request, bool flush = false) {
+  ProcessResult process(const json& request, bool flush = false) {
     require(processing, "Plugin processing is suspended; reopen instance");
     const int frames = integer(request, "frames", flush ? 0 : 1, kMaxBlock);
     auto inputEvents = request.value("events", json::array());
@@ -408,6 +454,8 @@ public:
         inputAudio = decodePlanarAudio(request.at("audio").get<std::string>(), frames);
       }
     }
+    const bool trace = request.value("trace", false);
+    const bool pendingWasEmpty = pendingEffectParameters.empty();
     if (!isInstrument && frames > 0 && !pendingEffectParameters.empty()) {
       std::set<ParamID> requested;
       if (request.contains("parameters") && request.at("parameters").is_array())
@@ -445,11 +493,27 @@ public:
       std::copy_n(inputAudio.data(), frames, data.inputs[0].channelBuffers32[0]);
       std::copy_n(inputAudio.data() + frames, frames, data.inputs[0].channelBuffers32[1]);
     }
+    json queuedTrace = json::array();
+    if (trace) {
+      for (int32 i = 0; i < parameters.getParameterCount(); ++i) {
+        auto* queue = parameters.getParameterData(i);
+        if (!queue) continue;
+        int32 offset = 0;
+        ParamValue value = 0;
+        const int32 points = queue->getPointCount();
+        if (points > 0 && queue->getPoint(points - 1, offset, value) == kResultTrue)
+          queuedTrace.push_back({{"id", queue->getParameterId()}, {"value", value}, {"points", points}, {"offset", offset}});
+      }
+    }
     data.processMode = mode; data.numSamples = frames;
     data.inputEvents = &events; data.outputEvents = &outputEvents;
     data.inputParameterChanges = &parameters; data.outputParameterChanges = &outputParameters;
     data.processContext = &context;
+    if (trace && processBlockIndex == 0) note("first-process");
     checked(processor->process(data), "Plugin process failed");
+    const auto& output = data.outputs[0];
+    json inputStats = frames > 0 && !inputAudio.empty() ? measurePlanar(inputAudio.data(), frames) : json{{"rms", 0.0}, {"nonzero", 0}, {"count", 0}};
+    json bufferStats = frames > 0 ? measureChannels(output.channelBuffers32, output.numChannels, frames) : json{{"rms", 0.0}, {"nonzero", 0}, {"count", 0}};
     // Retain a zero-sample flush for the next audible block too: some SDK
     // processors recalculate coefficients only while processing samples.
     if (frames > 0) {
@@ -457,7 +521,6 @@ public:
       pendingEffectParameters.clear();
     }
     std::vector<float> pcm(frames * 2);
-    const auto& output = data.outputs[0];
     for (int ch = 0; ch < 2; ++ch) {
       const int source = std::min(ch, output.numChannels - 1);
       // Copy processor buffers even when silenceFlags is set. That flag is a
@@ -470,8 +533,33 @@ public:
         pcm[ch * frames + i] = sample;
       }
     }
+    const int64_t blockCursor = cursor;
     cursor += frames;
-    return pcm;
+    json processTrace;
+    if (trace) {
+      const auto extracted = frames > 0 ? measurePlanar(pcm.data(), frames) : json{{"rms", 0.0}, {"nonzero", 0}, {"count", 0}};
+      processTrace = {
+        {"block", processBlockIndex},
+        {"frames", frames},
+        {"sampleRate", sampleRate},
+        {"mode", mode == kRealtime ? "realtime" : "offline"},
+        {"classId", classId},
+        {"cursor", blockCursor},
+        {"silenceFlags", output.silenceFlags},
+        {"pendingWasEmpty", pendingWasEmpty},
+        {"queuedParameters", queuedTrace},
+        {"inputChecksum", frames > 0 && !inputAudio.empty() ? fnv1a(inputAudio.data(), frames * 2) : 0},
+        {"inputRms", inputStats["rms"]},
+        {"inputNonzero", inputStats["nonzero"]},
+        {"outputBufferRms", bufferStats["rms"]},
+        {"outputBufferNonzero", bufferStats["nonzero"]},
+        {"extractedRms", extracted["rms"]},
+        {"extractedNonzero", extracted["nonzero"]}
+      };
+      if (processBlockIndex == 0) processTrace["lifecycle"] = lifecycle;
+      if (frames > 0) ++processBlockIndex;
+    }
+    return {std::move(pcm), std::move(processTrace)};
   }
 };
 
@@ -525,8 +613,10 @@ int main() {
         reply({{"ok", true}, {"plugin", result}});
       } else if (command == "process") {
         require(bool(instance), "No plugin instance loaded");
-        auto pcm = instance->process(request);
-        reply({{"ok", true}, {"frames", pcm.size() / 2}, {"channels", 2}}, pcm);
+        auto result = instance->process(request);
+        json message{{"ok", true}, {"frames", result.pcm.size() / 2}, {"channels", 2}};
+        if (!result.trace.is_null() && !result.trace.empty()) message["processTrace"] = result.trace;
+        reply(message, result.pcm);
       } else if (command == "parameters") {
         require(bool(instance), "No plugin instance loaded");
         // Instruments retain the established zero-sample flush contract. Audio
