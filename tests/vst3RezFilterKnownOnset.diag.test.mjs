@@ -294,13 +294,28 @@ test('RezFilter known-onset isolation: record processor buffers after process, n
   mkdirSync(evidenceDir, { recursive: true });
   const evidencePath = path.join(evidenceDir, 'rezfilter-known-onset-diag.json');
   writeFileSync(evidencePath, JSON.stringify(evidence, null, 2));
-  console.log(`REZFILTER_KNOWN_ONSET_DIAG sha=${sha} branch=${branch} packagedMatchSilent=${evidence.packagedMatchSilent}`);
-  for (const report of reports) {
+  const briefBlock = trace => trace && ({
+    b: trace.block, cur: trace.cursor, flags: trace.silenceFlags, pending: trace.pendingWasEmpty,
+    q: trace.queuedParameters, inR: trace.inputRms, inN: trace.inputNonzero,
+    bufR: trace.outputBufferRms, bufN: trace.outputBufferNonzero, extR: trace.extractedRms, extN: trace.extractedNonzero,
+  });
+  const briefReport = report => {
     if (report.filter) {
-      console.log(`  ${report.name}: delay in/out ${report.delay.inputEnergy}/${report.delay.outputEnergy} filter in/out ${report.filter.inputEnergy}/${report.filter.outputEnergy} flagged=${report.filter.flaggedSilence} firstQueued=${JSON.stringify(report.filter.firstQueued)}`);
-    } else {
-      console.log(`  ${report.name}: in/out ${report.inputEnergy}/${report.outputEnergy} flagged=${report.flaggedSilence} firstQueued=${JSON.stringify(report.firstQueued)}`);
+      return {
+        name: report.name, delay: { in: report.delay.inputEnergy, out: report.delay.outputEnergy, flagged: report.delay.flaggedSilence, first: report.delay.first16.slice(0, 3).map(briefBlock) },
+        filter: { in: report.filter.inputEnergy, out: report.filter.outputEnergy, flagged: report.filter.flaggedSilence, pending: report.filter.firstPendingWasEmpty, queued: report.filter.firstQueued, first: report.filter.first16.slice(0, 3).map(briefBlock) },
+      };
     }
+    return { name: report.name, in: report.inputEnergy, out: report.outputEnergy, flagged: report.flaggedSilence, pending: report.firstPendingWasEmpty, queued: report.firstQueued, first: report.first16.slice(0, 3).map(briefBlock) };
+  };
+  console.log(`REZFILTER_KNOWN_ONSET_DIAG sha=${sha} branch=${branch} packagedMatchSilent=${evidence.packagedMatchSilent}`);
+  console.log(`::notice title=RezFilter known-onset diag::sha=${sha} branch=${branch} silent=${evidence.packagedMatchSilent} ${JSON.stringify(reports.map(briefReport))}`);
+  for (const report of reports) {
+    const line = report.filter
+      ? `${report.name}: delay in/out ${report.delay.inputEnergy}/${report.delay.outputEnergy} filter in/out ${report.filter.inputEnergy}/${report.filter.outputEnergy} flagged=${report.filter.flaggedSilence} firstQueued=${JSON.stringify(report.filter.firstQueued)}`
+      : `${report.name}: in/out ${report.inputEnergy}/${report.outputEnergy} flagged=${report.flaggedSilence} firstQueued=${JSON.stringify(report.firstQueued)}`;
+    console.log(`  ${line}`);
+    console.log(`::notice title=${report.name}::${line}`);
   }
 
   assert.equal(packagedMatch.delay.sampleRate ?? sampleRate, 48000);

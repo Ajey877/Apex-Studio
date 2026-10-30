@@ -29,6 +29,20 @@ jobs:
         run: npm run native:vst3:build
       - name: Verify native DSP and production live/export/state integration
         run: npm run test:native-vst3 && npm run test:vst3-effects && npm run test:vst3-daw
+      - name: Annotate RezFilter known-onset evidence
+        if: always()
+        run: |
+          node -e "
+            const fs = require('fs');
+            const p = 'build/native-evidence/rezfilter-known-onset-diag.json';
+            if (!fs.existsSync(p)) { console.log('::warning::no rezfilter known-onset evidence'); process.exit(0); }
+            const e = JSON.parse(fs.readFileSync(p, 'utf8'));
+            const brief = t => t && ({b:t.block,flags:t.silenceFlags,pending:t.pendingWasEmpty,q:t.queuedParameters,inR:t.inputRms,inN:t.inputNonzero,bufR:t.outputBufferRms,bufN:t.outputBufferNonzero,extR:t.extractedRms,extN:t.extractedNonzero});
+            const reports = e.reports.map(r => r.filter
+              ? {n:r.name,d:[r.delay.inputEnergy,r.delay.outputEnergy],f:[r.filter.inputEnergy,r.filter.outputEnergy],flag:r.filter.flaggedSilence,q:r.filter.firstQueued,first:r.filter.first16.slice(0,3).map(brief)}
+              : {n:r.name,io:[r.inputEnergy,r.outputEnergy],flag:r.flaggedSilence,q:r.firstQueued,first:r.first16.slice(0,3).map(brief)});
+            console.log('::notice title=RezFilter known-onset evidence::'+JSON.stringify({sha:e.sha,branch:e.branch,silent:e.packagedMatchSilent,reports}));
+          "
       - name: Install Chromium for real native parameter UI regression
         run: npx playwright install --with-deps chromium
       - name: Native parameter controls through actual App, service, MDA and production export
