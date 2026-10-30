@@ -234,6 +234,12 @@ public:
     data.prepare(*component, kMaxBlock, kSample32);
     checked(component->setActive(true), "setActive failed"); active = true;
     checked(processor->setProcessing(true), "setProcessing failed"); processing = true;
+    // Component/controller streams are restored while inactive. Apply saved
+    // normalized overrides after activation so the processor's first audible
+    // block receives them through the parameter queue (effects) or the
+    // already-queued points (instruments). Controller metadata is then read.
+    if (!isInstrument && request.contains("state") && request.at("state").contains("parameters"))
+      applyParameters(request.at("state").at("parameters"), false, -1, false);
     result["parameters"] = metadata();
     result["controllerAvailable"] = bool(controller);
     result["latencySamples"] = processor->getLatencySamples();
@@ -282,7 +288,9 @@ public:
       MemoryStream stream(bytes.data(), bytes.size());
       checked(controller->setState(&stream), "Plugin rejected saved controller state");
     }
-    if (state.contains("parameters")) applyParameters(state.at("parameters"), false, -1, isInstrument);
+    // Instruments keep the established pre-activation queue contract. Effect
+    // overlays are applied after setActive/setProcessing in open().
+    if (isInstrument && state.contains("parameters")) applyParameters(state.at("parameters"), false, -1, true);
   }
   void applyParameters(const json& changes, bool live = false, int32 frames = -1, bool enqueue = true) {
     require(changes.is_array() && changes.size() <= 4096, "Invalid parameter list");
@@ -452,7 +460,10 @@ public:
     const auto& output = data.outputs[0];
     for (int ch = 0; ch < 2; ++ch) {
       const int source = std::min(ch, output.numChannels - 1);
-      if (output.silenceFlags & (uint64_t{1} << source)) continue;
+      // Copy processor buffers even when silenceFlags is set. That flag is a
+      // skip hint; MDA RezFilter's checkSilence samples every 10th frame and
+      // can drop a whole non-silent block. Host-zeroed buffers stay silent
+      // if the processor wrote nothing.
       for (int i = 0; i < frames; ++i) {
         float sample = output.channelBuffers32[source][i];
         require(std::isfinite(sample), "Plugin produced non-finite audio");

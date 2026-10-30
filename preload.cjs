@@ -30,6 +30,34 @@ const desktopApi = {
       if (smokeIpcMeasurements.length < 8192) smokeIpcMeasurements.push({ ...profile, invokeStartedAt, responseReceivedAt, rendererIpcRttMs: responseReceivedAt - invokeStartedAt });
       return pcm;
     },
+    bindLiveAudioPort: (sessionId, trackId, slotId, runtimeId, sampleRate) => {
+      if (typeof sessionId !== 'string' || sessionId.length === 0 || sessionId.length > 128) throw new Error('Invalid live audio session');
+      if (!Number.isInteger(trackId) || typeof slotId !== 'string' || slotId.length === 0 || slotId.length > 128) throw new Error('Invalid live audio identity');
+      if (typeof runtimeId !== 'string' || runtimeId.length === 0 || runtimeId.length > 128) throw new Error('Invalid live audio runtime');
+      if (!Number.isFinite(sampleRate) || sampleRate < 8000 || sampleRate > 192000) throw new Error('Invalid live audio sample rate');
+      return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => {
+          ipcRenderer.removeListener('vst3:liveAudioPort', handler);
+          reject(new Error('Live audio port bind timed out.'));
+        }, 2000);
+        const handler = (event, payload) => {
+          if (payload?.sessionId !== sessionId) return;
+          clearTimeout(timer);
+          ipcRenderer.removeListener('vst3:liveAudioPort', handler);
+          const port = event.ports?.[0];
+          if (!port) { reject(new Error('Live audio port missing')); return; }
+          window.postMessage({ type: 'vst3:liveAudioPort', sessionId, trackId, slotId }, '*', [port]);
+          resolve();
+        };
+        ipcRenderer.on('vst3:liveAudioPort', handler);
+        ipcRenderer.invoke('vst3:bindLiveAudioPort', sessionId, trackId, slotId, runtimeId, sampleRate).catch(error => {
+          clearTimeout(timer);
+          ipcRenderer.removeListener('vst3:liveAudioPort', handler);
+          reject(error);
+        });
+      });
+    },
+    unbindLiveAudioPort: (id) => ipcRenderer.invoke('vst3:unbindLiveAudioPort', id),
     close: (id) => ipcRenderer.invoke('vst3:close', id),
   },
   send: (channel, data) => {

@@ -34,6 +34,17 @@ function makeAudio(frames = 4096) {
   }
   return audio;
 }
+function makeMixerNoise(frames = 1024) {
+  const audio = new Float32Array(frames * 2);
+  let state = 0x6d2b79f5;
+  for (let i = 0; i < frames; i++) {
+    state ^= state << 13; state ^= state >>> 17; state ^= state << 5;
+    const sample = ((state >>> 0) / 0x80000000 - 1) * 0.1;
+    audio[i] = sample;
+    audio[frames + i] = sample;
+  }
+  return audio;
+}
 const rms = audio => Math.sqrt(audio.reduce((sum, sample) => sum + sample * sample, 0) / audio.length);
 const difference = (a, b) => {
   assert.equal(a.length, b.length);
@@ -115,6 +126,210 @@ test('effect order is audible: delay then resonant filter differs from filter th
   assert.ok(rms(delayThenAmbience) > 0);
   assert.ok(rms(ambienceThenDelay) > 0);
   assert.ok(difference(delayThenAmbience, ambienceThenDelay) > 1e-4);
+});
+
+const REZFILTER_OVERLAY = [
+  { id: 0, value: 0.8 },
+  { id: 1, value: 0.25 },
+  { id: 3, value: 0.5 },
+  { id: 6, value: 0.5 },
+  { id: 8, value: 0 },
+  { id: 9, value: 1 },
+];
+
+async function measureRestoredRezFilter(service, inspected, delayEffect, {
+  owner, reverse, mode, reopen,
+}) {
+  const dry = makeMixerNoise(1024);
+  const openPair = async () => {
+    const firstPlugin = reverse ? inspected : delayEffect;
+    const secondPlugin = reverse ? delayEffect : inspected;
+    const first = await service.open(firstPlugin, sampleRate, mode, owner, 'effect');
+    const second = await service.open(secondPlugin, sampleRate, mode, owner, 'effect');
+    return reverse
+      ? { delayOpened: second, filterOpened: first }
+      : { delayOpened: first, filterOpened: second };
+  };
+  let pair = await openPair();
+  try {
+    if (reopen) {
+      await service.close(pair.delayOpened.id, owner);
+      await service.close(pair.filterOpened.id, owner);
+      pair = await openPair();
+    }
+    const flushed = await service.parameters(pair.filterOpened.id, REZFILTER_OVERLAY, owner);
+    const overlayHeld = REZFILTER_OVERLAY.every(parameter => {
+      const actual = flushed.find(entry => entry.id === parameter.id);
+      return actual && actual.currentValue !== null && Math.abs(actual.currentValue - parameter.value) < 1e-6;
+    });
+    const filterInput = reverse ? dry : await service.processAudio(pair.delayOpened.id, 1024, dry, 120, owner, []);
+    const inputs = Array.from({ length: 16 }, () => new Float32Array(filterInput));
+    const outputs = [];
+    for (const block of inputs) outputs.push(await service.processAudio(pair.filterOpened.id, 1024, block, 120, owner, []));
+    const blocks = outputs.map((output, index) => ({
+      index,
+      inputRms: rms(inputs[index]),
+      outputRms: rms(output),
+    }));
+    return {
+      owner, reverse, mode, reopen, overlayHeld,
+      delaySession: pair.delayOpened.id, filterSession: pair.filterOpened.id,
+      delayRms: reverse ? null : rms(filterInput),
+      blocks,
+      silentBlocks: blocks.filter(block => block.inputRms > 0.01 && block.outputRms <= 0.01).map(block => block.index),
+    };
+  } finally {
+    await service.close(pair.delayOpened.id, owner).catch(() => {});
+    await service.close(pair.filterOpened.id, owner).catch(() => {});
+  }
+}
+
+test('realtime restored RezFilter stays audible across 20 varied open/reopen cycles with an empty live parameter list', async () => {
+  const service = new Vst3Service(executable, [root]);
+  const owner = 'rezfilter-restore-cycles';
+  try {
+    const inspected = await service.inspectEffect(rezFilter, { schema: 1, classId: rezFilter.classId, parameters: REZFILTER_OVERLAY }, owner);
+    const delayInspected = await service.inspectEffect(delay, undefined, owner);
+    const outcomes = [];
+    for (let cycle = 0; cycle < 20; cycle++) {
+      const outcome = await measureRestoredRezFilter(service, inspected, delayInspected, {
+        owner: `${owner}-${cycle}`,
+        reverse: cycle % 2 === 1,
+        mode: cycle % 5 === 0 ? 'offline' : 'realtime',
+        reopen: cycle % 4 === 3,
+      });
+      outcomes.push({
+        cycle,
+        reverse: outcome.reverse,
+        mode: outcome.mode,
+        reopen: outcome.reopen,
+        overlayHeld: outcome.overlayHeld,
+        delayRms: outcome.delayRms,
+        firstOutputRms: outcome.blocks[0]?.outputRms ?? null,
+        minOutputRms: Math.min(...outcome.blocks.map(block => block.outputRms)),
+        silentBlocks: outcome.silentBlocks,
+        filterSession: outcome.filterSession,
+      });
+      assert.equal(outcome.overlayHeld, true, `controller overlay lost on cycle ${cycle}: ${JSON.stringify(outcome)}`);
+      assert.deepEqual(outcome.silentBlocks, [], `RezFilter DSP went silent on cycle ${cycle}: ${JSON.stringify(outcomes)}`);
+    }
+    assert.equal(outcomes.length, 20);
+    assert.equal(outcomes.filter(outcome => outcome.reverse).length, 10);
+    assert.ok(outcomes.some(outcome => outcome.reopen));
+    assert.ok(outcomes.some(outcome => outcome.mode === 'offline'));
+    assert.ok(outcomes.filter(outcome => outcome.mode === 'realtime').length >= 16);
+  } finally { await service.dispose(); }
+});
+
+test('realtime RezFilter overlay of dry stereo stays audible across empty live parameter blocks', async () => {
+  const overlay = [
+    { id: 0, value: 0.8 },
+    { id: 1, value: 0.25 },
+    { id: 3, value: 0.5 },
+    { id: 6, value: 0.5 },
+    { id: 8, value: 0 },
+    { id: 9, value: 1 },
+  ];
+  const service = new Vst3Service(executable, [root]);
+  const owner = 'rezfilter-dry-init';
+  const dry = makeAudio(1024);
+  try {
+    const inspected = await service.inspectEffect(rezFilter, { schema: 1, classId: rezFilter.classId, parameters: overlay }, owner);
+    const opened = await service.open(inspected, sampleRate, 'realtime', owner, 'effect');
+    try {
+      await service.parameters(opened.id, overlay, owner);
+      const first = await service.processAudio(opened.id, 1024, dry, 120, owner, []);
+      const second = await service.processAudio(opened.id, 1024, dry, 120, owner, []);
+      assert.ok(rms(second) > 0.01,
+        `RezFilter overlay of dry stereo went silent after the first empty live parameter list: first=${rms(first)} second=${rms(second)}`);
+    } finally { await service.close(opened.id, owner); }
+  } finally { await service.dispose(); }
+});
+
+test('realtime restore plus saved overlay flush reaches RezFilter DSP on Delay then filter with empty live parameter list', async () => {
+  const overlay = [
+    { id: 0, value: 0.8 },
+    { id: 1, value: 0.25 },
+    { id: 3, value: 0.5 },
+    { id: 6, value: 0.5 },
+    { id: 8, value: 0 },
+    { id: 9, value: 1 },
+  ];
+  const service = new Vst3Service(executable, [root]);
+  const owner = 'rezfilter-realtime-init';
+  try {
+    const inspected = await service.inspectEffect(rezFilter, { schema: 1, classId: rezFilter.classId, parameters: overlay }, owner);
+    const delayInspected = await service.inspectEffect(delay, undefined, owner);
+    const delayOpened = await service.open(delayInspected, sampleRate, 'realtime', owner, 'effect');
+    const defaultOpened = await service.open(rezFilter, sampleRate, 'realtime', owner, 'effect');
+    const filterOpened = await service.open(inspected, sampleRate, 'realtime', owner, 'effect');
+    try {
+      const flushed = await service.parameters(filterOpened.id, overlay, owner);
+      for (const parameter of overlay) {
+        const actual = flushed.find(entry => entry.id === parameter.id);
+        assert.ok(actual && actual.currentValue !== null && Math.abs(actual.currentValue - parameter.value) < 1e-6,
+          `production overlay flush must hold ${parameter.id}=${parameter.value}`);
+      }
+      const delayed = await service.processAudio(delayOpened.id, 1024, makeAudio(1024), 120, owner, []);
+      assert.ok(rms(delayed) > 0.01, `Delay realtime restore was silent: ${rms(delayed)}`);
+      const defaults = await service.processAudio(defaultOpened.id, 1024, delayed, 120, owner, []);
+      const filtered = await service.processAudio(filterOpened.id, 1024, delayed, 120, owner, []);
+      assert.ok(rms(filtered) > 0.01,
+        `Delay→RezFilter realtime overlay was silent with empty live parameter list: delay=${rms(delayed)} filter=${rms(filtered)}`);
+      assert.ok(difference(defaults, filtered) > 1e-4,
+        `normalized overlay must change RezFilter DSP, not only controller metadata: default=${rms(defaults)} overlay=${rms(filtered)}`);
+    } finally {
+      await service.close(delayOpened.id, owner);
+      await service.close(defaultOpened.id, owner);
+      await service.close(filterOpened.id, owner);
+    }
+  } finally { await service.dispose(); }
+});
+
+test('inspect/restore of the packaged RezFilter overlay is audible on Delay then filter with no live parameter list', async () => {
+  // Keep this overlay identical to PACKAGED_REZFILTER_FIXTURE_PARAMETERS in
+  // src/audio/nativeVst3DesktopSmoke.ts. inspectEffect primes with 1 silent
+  // sample, which cannot prove audibility; reopen and process a live-sized
+  // block with the empty per-block parameter list the Mixer live port sends.
+  const overlay = [
+    { id: 0, value: 0.8 },
+    { id: 1, value: 0.25 },
+    { id: 3, value: 0.5 },
+    { id: 6, value: 0.5 },
+    { id: 8, value: 0 },
+    { id: 9, value: 1 },
+  ];
+  const service = new Vst3Service(executable, [root]);
+  const owner = 'rezfilter-init';
+  try {
+    const inspected = await service.inspectEffect(rezFilter, { schema: 1, classId: rezFilter.classId, parameters: overlay }, owner);
+    for (const parameter of overlay) {
+      assert.ok(inspected.state.parameters.some(entry => entry.id === parameter.id && Math.abs(entry.value - parameter.value) < 1e-6),
+        `inspectEffect must persist overlay parameter ${parameter.id}`);
+    }
+    const delayInspected = await service.inspectEffect(delay, undefined, owner);
+    const delayOpened = await service.open(delayInspected, sampleRate, 'offline', owner, 'effect');
+    const filterOpened = await service.open(inspected, sampleRate, 'offline', owner, 'effect');
+    try {
+      for (const parameter of overlay) {
+        const actual = filterOpened.parameters.find(entry => entry.id === parameter.id);
+        assert.ok(actual && actual.currentValue !== null && Math.abs(actual.currentValue - parameter.value) < 1e-6,
+          `restored RezFilter controller must hold overlay ${parameter.id}=${parameter.value}, got ${JSON.stringify(actual)}`);
+      }
+      const delayed = await service.processAudio(delayOpened.id, 1024, makeAudio(1024), 120, owner, []);
+      assert.ok(rms(delayed) > 0.01, `Delay inspect/restore was silent: ${rms(delayed)}`);
+      const filtered = await service.processAudio(filterOpened.id, 1024, delayed, 120, owner, []);
+      assert.ok(rms(filtered) > 0.01,
+        `Delay→RezFilter inspect/restore was silent with empty live parameter list: delay=${rms(delayed)} filter=${rms(filtered)}`);
+      for (let block = 0; block < 8; block++) {
+        const next = await service.processAudio(filterOpened.id, 1024, makeAudio(1024), 120, owner, []);
+        assert.ok(rms(next) > 0.01, `RezFilter went silent on restored live block ${block}: ${rms(next)}`);
+      }
+    } finally {
+      await service.close(delayOpened.id, owner);
+      await service.close(filterOpened.id, owner);
+    }
+  } finally { await service.dispose(); }
 });
 
 test('service exposes genuine effect parameter metadata and captures persisted native controller/component state', async () => {

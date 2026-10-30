@@ -59,6 +59,21 @@ if(APEX_BUILD_VST3_FIXTURE)
   list(REMOVE_ITEM mda_sources source/mdaBaseProcessor.cpp)
   set_property(TARGET mda-vst3 PROPERTY SOURCES "${mda_sources}")
   target_sources(mda-vst3 PRIVATE "${CMAKE_BINARY_DIR}/fixture-mdaBaseProcessor.cpp")
+  # MDA RezFilter setActive zeros the delay line but leaves env/phi/LFO
+  # uninitialized. Garbage env with default envelope-to-cutoff makes f<0 for
+  # the whole take (output stays silent). Zero modulators here — this is the
+  # test fixture, not a host workaround, matching the event-boundary patch.
+  file(READ "${mda_dir}/mdaRezFilterProcessor.cpp" mda_rez)
+  string(FIND "${mda_rez}" "buf0=0.f;" rez_offset)
+  if(rez_offset EQUAL -1)
+    message(FATAL_ERROR "Pinned mda RezFilter setActive buffer init no longer matches")
+  endif()
+  string(REPLACE "buf0=0.f;" "env=0.f; env2=0.f; phi=0.f; bufl=0.f; ttrig=0; tatt=0; buf0=0.f;" mda_rez "${mda_rez}")
+  file(WRITE "${CMAKE_BINARY_DIR}/fixture-mdaRezFilterProcessor.cpp" "${mda_rez}")
+  get_target_property(mda_sources mda-vst3 SOURCES)
+  list(REMOVE_ITEM mda_sources source/mdaRezFilterProcessor.cpp)
+  set_property(TARGET mda-vst3 PROPERTY SOURCES "${mda_sources}")
+  target_sources(mda-vst3 PRIVATE "${CMAKE_BINARY_DIR}/fixture-mdaRezFilterProcessor.cpp")
   target_include_directories(mda-vst3 PRIVATE "${mda_dir}")
 endif()
 

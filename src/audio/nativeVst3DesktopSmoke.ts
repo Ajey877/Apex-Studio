@@ -3,7 +3,7 @@ import { nativeTarget } from './nativeVst3Automation';
 // the production engine/registry/export path, not an alternate WAV renderer.
 import { audioEngine } from './audioEngine';
 import { DEFAULT_MASTERING_SUITE_STATE } from './masteringState';
-import { getVst3Bridge, type Vst3Effect } from './nativeVst3Types';
+import { getVst3Bridge, type Vst3Bridge, type Vst3Effect, type Vst3Identity } from './nativeVst3Types';
 import { VST3_FX_BLOCK_FRAMES, VST3_FX_PIPELINE_FRAMES, getNativeVst3MixerEffectSmokeTiming, resetNativeVst3MixerEffectSmokeTiming, getVst3MixerEffectDiagnostics } from './nativeVst3EffectRuntime';
 import { getVst3Diagnostics } from './nativeVst3Runtime';
 import { createDefaultProjectState, normalizeProjectState } from '../state/projectState';
@@ -20,6 +20,9 @@ type MixerCaptureOptions = {
   bypassMixerTracks?: MixerTrack[];
   /** Smoke-only taps after each native insert for diagnosing silent stages. */
   includeNativeStages?: boolean;
+  /** Test-only renderer UI-thread stall. Never used in production capture. */
+  stallRendererMs?: number;
+  stallRendererAfterMs?: number;
 };
 type PlanarPcm = { left: Float32Array; right: Float32Array; frames: number; rms: number; startFrame: number | null };
 const captureModuleByContext = new WeakMap<BaseAudioContext, Promise<string>>();
@@ -141,10 +144,17 @@ function summarizeMixerTiming(events: ReturnType<typeof getNativeVst3MixerEffect
   const stopCancellationWindowMs = VST3_FX_BLOCK_FRAMES * 1000 / sampleRate + 2;
   const nativeCancelledAtStopRequestIds = new Set<string>();
   for (const [requestId, timing] of allMain) {
+    if (timing.error !== 'VST3 instance cancelled' || !stopAcks.has(requestId)) continue;
     const start = allBridgeStarts.get(requestId);
-    const ageAtStopMs = stopRequestedAtRendererMs - Number(start?.bridgeCallStartedAt);
-    if (timing.error === 'VST3 instance cancelled' && Number.isFinite(ageAtStopMs) &&
-        ageAtStopMs >= 0 && ageAtStopMs <= stopCancellationWindowMs && stopAcks.has(requestId)) {
+    // Live-port blocks never emit renderer-bridge-call-start. Unbind/close aborts
+    // the helper while stop-ack is already recorded; that is cancelled-at-stop,
+    // not an unaccounted failure.
+    if (!start) {
+      nativeCancelledAtStopRequestIds.add(requestId);
+      continue;
+    }
+    const ageAtStopMs = stopRequestedAtRendererMs - Number(start.bridgeCallStartedAt);
+    if (Number.isFinite(ageAtStopMs) && ageAtStopMs >= 0 && ageAtStopMs <= stopCancellationWindowMs) {
       nativeCancelledAtStopRequestIds.add(requestId);
     }
   }
@@ -196,7 +206,7 @@ function summarizeMixerTiming(events: ReturnType<typeof getNativeVst3MixerEffect
     const bridgeStart = events.find(event => event.event === 'renderer-bridge-call-start' && event.requestId === requestId);
     const phase = Number(submit.rendererAtMs) < captureStartRendererMs ? 'before-capture' :
       Number(submit.rendererAtMs) >= captureEndRendererMs ? 'stop-boundary' : 'measured-capture';
-    const complete = mainRecord && !mainRecord.error && preloadRecord && rendererResponse && result?.accepted === true;
+    const complete = mainRecord && !mainRecord.error && result?.accepted === true;
     return {
       requestId, sequence: submit.sequence, trackId: submit.trackId, slotId: submit.slotId, phase,
       rendererSubmitAtMs: submit.rendererAtMs, inputBlockStartContextFrame: submit.inputBlockStartContextFrame,
@@ -499,6 +509,7 @@ async function captureLiveMixerRun(instance: typeof audioEngine, channels: Chann
   const startedAt = performance.now();
   const startedContextFrame = sourceStartContextFrame + Math.round(0.25 * context.sampleRate);
   let bypassUpdateAppliedContextFrame: number | null = null;
+  let rendererStall: { startedAtMs: number; endedAtMs: number; durationMs: number; startFrame: number; endFrame: number } | null = null;
   const bypassUpdate = options.bypassMixerTracks && options.bypassMixerAfterMs !== undefined
     ? new Promise<void>(resolve => setTimeout(() => {
       instance.synchronizePlaybackState({ mixerTracks: options.bypassMixerTracks! });
@@ -506,7 +517,20 @@ async function captureLiveMixerRun(instance: typeof audioEngine, channels: Chann
       resolve();
     }, options.bypassMixerAfterMs))
     : Promise.resolve();
-  await Promise.all([new Promise<void>(resolve => setTimeout(resolve, durationMs)), bypassUpdate]);
+  const stallRenderer = options.stallRendererMs
+    ? new Promise<void>(resolve => setTimeout(() => {
+      const startedAtMs = performance.now();
+      const startFrame = Math.round(context.currentTime * context.sampleRate);
+      const until = startedAtMs + options.stallRendererMs!;
+      while (performance.now() < until) { /* test-only renderer UI-thread stall */ }
+      rendererStall = {
+        startedAtMs, endedAtMs: performance.now(), durationMs: performance.now() - startedAtMs,
+        startFrame, endFrame: Math.round(context.currentTime * context.sampleRate),
+      };
+      resolve();
+    }, options.stallRendererAfterMs ?? 280))
+    : Promise.resolve();
+  await Promise.all([new Promise<void>(resolve => setTimeout(resolve, durationMs)), bypassUpdate, stallRenderer]);
   const stoppedAt = performance.now();
   const stoppedContextFrame = Math.round(context.currentTime * context.sampleRate);
   const playbackActiveAtEnd = instance.isPlaybackActive();
@@ -555,7 +579,7 @@ async function captureLiveMixerRun(instance: typeof audioEngine, channels: Chann
     nativeStagePcm,
     trackRms: Object.fromEntries([...pcm].map(([trackId, audio]) => [trackId, audio.rms])),
     nativeStageRms: Object.fromEntries([...nativeStagePcm].map(([slotId, audio]) => [slotId, audio.rms])),
-    diagnostics: getVst3MixerEffectDiagnostics(), timing, runtimeEvents, ipc };
+    diagnostics: getVst3MixerEffectDiagnostics(), timing, runtimeEvents, ipc, rendererStall };
 }
 
 function assertPackagedMixerRun(run: any, label: string) {
@@ -587,6 +611,235 @@ function assertPackagedMixerRun(run: any, label: string) {
   }
 }
 
+function assertRendererStallSurvived(run: any, label: string) {
+  const stall = run.rendererStall;
+  const fail = (reason: string) => {
+    throw new Error(`${label}: ${reason}; stall=${JSON.stringify(stall)}; missedDeadlines=${run.timing?.missedDeadlines}; playbackActiveAtEnd=${run.playbackActiveAtEnd}`);
+  };
+  if (!stall) fail('test-only renderer stall did not run');
+  if (stall.durationMs < 28) fail(`renderer stall lasted ${stall.durationMs} ms, expected at least 28 ms`);
+  const advancedFrames = stall.endFrame - stall.startFrame;
+  if (advancedFrames < Math.round(0.02 * run.sampleRate)) {
+    fail(`AudioContext clock advanced only ${advancedFrames} frames during the renderer stall`);
+  }
+  const events = run.runtimeEvents as Array<Record<string, any>>;
+  const overlapping = events.filter(event => event.event === 'worklet-submit' &&
+    Number(event.submittedContextFrame) >= stall.startFrame && Number(event.submittedContextFrame) <= stall.endFrame);
+  const slots = new Set(overlapping.map(event => event.slotId));
+  if (slots.size < 2) {
+    fail(`renderer stall did not overlap both native inserts; overlappingSlots=${JSON.stringify([...slots])} overlappingSubmits=${overlapping.length}`);
+  }
+  for (const submit of overlapping) {
+    const accepted = events.find(event => event.event === 'worklet-result' && event.requestId === submit.requestId && event.accepted === true);
+    if (!accepted) fail(`live-port result for ${submit.requestId} was not accepted after overlapping the renderer stall`);
+  }
+  if (!run.playbackActiveAtEnd) fail('production Mixer transport stopped during the renderer stall');
+  if (run.timing.missedDeadlines !== 0) fail('production Mixer missed a deadline during the renderer stall');
+}
+
+function rendererStallRegressionEvidence(run: any) {
+  const stall = run.rendererStall;
+  const events = (run.runtimeEvents as Array<Record<string, any>>) ?? [];
+  const overlapping = events.filter(event => event.event === 'worklet-submit' &&
+    Number(event.submittedContextFrame) >= stall.startFrame && Number(event.submittedContextFrame) <= stall.endFrame);
+  const accepted = overlapping.filter(submit => events.some(event =>
+    event.event === 'worklet-result' && event.requestId === submit.requestId && event.accepted === true));
+  return {
+    durationMs: stall.durationMs,
+    startFrame: stall.startFrame,
+    endFrame: stall.endFrame,
+    overlappingInserts: [...new Set(overlapping.map(event => event.slotId))],
+    overlappingSequences: overlapping.map(event => ({ slotId: event.slotId, sequence: event.sequence, requestId: event.requestId })),
+    acceptedResultCount: accepted.length,
+    missedDeadlines: run.timing.missedDeadlines,
+    playbackActiveAtEnd: run.playbackActiveAtEnd === true,
+  };
+}
+
+/** Packaged Mixer onset fixture: disable MDA RezFilter LFO/envelope and pin a positive cutoff. */
+const PACKAGED_REZFILTER_FIXTURE_PARAMETERS: ReadonlyArray<{ id: number; value: number }> = [
+  { id: 0, value: 0.8 },  // fixed cutoff above zero
+  { id: 1, value: 0.25 }, // stable, modest resonance
+  { id: 3, value: 0.5 },  // disable envelope-to-filter modulation
+  { id: 6, value: 0.5 },  // disable LFO-to-filter modulation
+  { id: 8, value: 0 },    // disable trigger mode
+  { id: 9, value: 1 },    // keep maximum cutoff above the fixed setting
+];
+
+function planarRms(samples: Float32Array): number {
+  let sum = 0;
+  for (const sample of samples) sum += sample * sample;
+  return Math.sqrt(sum / samples.length);
+}
+
+function planarChannelEvidence(samples: Float32Array): { rms: number; leftRms: number; rightRms: number; midRms: number; frames: number } {
+  const frames = samples.length / 2;
+  let left = 0, right = 0, mid = 0;
+  for (let i = 0; i < frames; i++) {
+    const l = samples[i] ?? 0;
+    const r = samples[frames + i] ?? 0;
+    left += l * l;
+    right += r * r;
+    const m = l + r;
+    mid += m * m;
+  }
+  return {
+    rms: planarRms(samples),
+    leftRms: frames ? Math.sqrt(left / frames) : 0,
+    rightRms: frames ? Math.sqrt(right / frames) : 0,
+    midRms: frames ? Math.sqrt(mid / frames) : 0,
+    frames,
+  };
+}
+
+function createPlanarTone(frames: number, sampleRate: number, amplitude = 0.2): Float32Array {
+  const audio = new Float32Array(frames * 2);
+  for (let i = 0; i < frames; i++) {
+    const sample = Math.sin(i * 2 * Math.PI * 440 / sampleRate) * amplitude;
+    audio[i] = sample;
+    audio[frames + i] = sample;
+  }
+  return audio;
+}
+
+function withFixtureParameters(effect: Vst3Effect, parameters: ReadonlyArray<{ id: number; value: number }>): Vst3Effect {
+  return {
+    ...effect,
+    state: { ...effect.state, parameters: parameters.map(parameter => ({ id: parameter.id, value: parameter.value })) },
+  };
+}
+
+async function processRestoredEffect(
+  bridge: Vst3Bridge, effect: Vst3Effect, input: Float32Array, sampleRate: number,
+  parameters: Array<{ id: number; value: number }> = [],
+): Promise<Float32Array> {
+  const frames = input.length / 2;
+  const opened = await bridge.open(effect, sampleRate, 'offline', 'effect');
+  try {
+    return await bridge.processAudio(opened.id, frames, input, 120, parameters);
+  } finally {
+    await bridge.close(opened.id);
+  }
+}
+
+function overlayCurrentValueMismatches(
+  metadata: Array<{ id: number; currentValue: number | null }> | undefined,
+  overlay: Array<{ id: number; value: number }>,
+) {
+  return overlay.filter(expected => {
+    const actual = metadata?.find(parameter => parameter.id === expected.id);
+    return !actual || actual.currentValue === null || Math.abs(actual.currentValue - expected.value) > 1e-6;
+  });
+}
+
+async function inspectVerifiedRezFilterFixture(
+  bridge: Vst3Bridge, identity: Vst3Identity, delayEffect: Vst3Effect,
+): Promise<Vst3Effect> {
+  const overlay = PACKAGED_REZFILTER_FIXTURE_PARAMETERS.map(parameter => ({ id: parameter.id, value: parameter.value }));
+  const overlayState = { schema: 1 as const, classId: identity.classId, parameters: overlay };
+  // inspectEffect always opens at 48 kHz. Verify at that rate so restore matches
+  // the snapshot, and keep Delay+RezFilter sessions open together like Mixer.
+  const sampleRate = 48000;
+  const tone = createPlanarTone(VST3_FX_BLOCK_FRAMES, sampleRate);
+  const input = planarChannelEvidence(tone);
+  if (input.rms <= 0.05 || input.midRms <= 0.05) {
+    throw new Error(`Packaged RezFilter fixture stimulus was silent or mid-cancelled: ${JSON.stringify(input)}`);
+  }
+
+  let lastEvidence = '';
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    const inspected = await bridge.inspectEffect(identity, overlayState);
+    for (const expected of overlay) {
+      const actual = inspected.state.parameters.find(parameter => parameter.id === expected.id);
+      if (!actual || Math.abs(actual.value - expected.value) > 1e-6) {
+        throw new Error(`inspectEffect did not persist RezFilter fixture parameter ${expected.id}=${expected.value}: ${JSON.stringify(inspected.state.parameters)}`);
+      }
+    }
+    const effect = withFixtureParameters(inspected, overlay);
+    const delayOpened = await bridge.open(delayEffect, sampleRate, 'offline', 'effect');
+    try {
+      const filterOpened = await bridge.open(effect, sampleRate, 'offline', 'effect');
+      try {
+        const mismatches = overlayCurrentValueMismatches(filterOpened.parameters, overlay);
+        if (mismatches.length) await bridge.parameters(filterOpened.id, overlay);
+        const delayed = await bridge.processAudio(delayOpened.id, VST3_FX_BLOCK_FRAMES, tone, 120, []);
+        const delayEvidence = planarChannelEvidence(delayed);
+        if (delayEvidence.rms <= 0.05) {
+          throw new Error(`Packaged Delay inspect/restore was silent: ${JSON.stringify(delayEvidence)}`);
+        }
+        // Empty per-block list matches the live Mixer. Restore pending or an
+        // explicit overlay flush must open the filter on this first audible block.
+        let filtered = await bridge.processAudio(filterOpened.id, VST3_FX_BLOCK_FRAMES, delayed, 120, []);
+        let filterEvidence = planarChannelEvidence(filtered);
+        if (filterEvidence.rms <= 0.01 || filterEvidence.midRms <= 0.01) {
+          await bridge.parameters(filterOpened.id, overlay);
+          filtered = await bridge.processAudio(filterOpened.id, VST3_FX_BLOCK_FRAMES, delayed, 120, overlay);
+          filterEvidence = planarChannelEvidence(filtered);
+        }
+        lastEvidence = JSON.stringify({
+          attempt, input, delayEvidence, filterEvidence,
+          primedController: mismatches.map(parameter => parameter.id),
+        });
+        if (filterEvidence.rms <= 0.01 || filterEvidence.midRms <= 0.01) continue;
+        let silentBlock: number | null = null;
+        for (let block = 0; block < 8; block++) {
+          const nextDelay = await bridge.processAudio(delayOpened.id, VST3_FX_BLOCK_FRAMES, tone, 120, []);
+          const next = await bridge.processAudio(filterOpened.id, VST3_FX_BLOCK_FRAMES, nextDelay, 120, []);
+          const nextEvidence = planarChannelEvidence(next);
+          if (nextEvidence.rms <= 0.01 || nextEvidence.midRms <= 0.01) {
+            silentBlock = block;
+            lastEvidence = JSON.stringify({ attempt, block, delayEvidence: planarChannelEvidence(nextDelay), filterEvidence: nextEvidence });
+            break;
+          }
+        }
+        if (silentBlock !== null) continue;
+        return effect;
+      } finally {
+        await bridge.close(filterOpened.id);
+      }
+    } finally {
+      await bridge.close(delayOpened.id);
+    }
+  }
+  throw new Error(`Packaged RezFilter Delay→filter inspect/restore stayed silent after verified priming: ${lastEvidence}`);
+}
+
+async function inspectVerifiedDelayBypassFixture(
+  bridge: Vst3Bridge, identity: Vst3Identity, feedbackMixId: number,
+): Promise<Vst3Effect> {
+  const overlay = [{ id: feedbackMixId, value: 0 }];
+  const inspected = await bridge.inspectEffect(identity, { schema: 1, classId: identity.classId, parameters: overlay });
+  const effect = withFixtureParameters(inspected, overlay);
+  const tone = createPlanarTone(VST3_FX_BLOCK_FRAMES, 48000);
+  const restored = planarChannelEvidence(await processRestoredEffect(bridge, effect, tone, 48000, []));
+  if (restored.rms <= 0.05) {
+    throw new Error(`Packaged Delay Fb Mix=0 inspect/restore was silent: ${JSON.stringify(restored)}`);
+  }
+  return effect;
+}
+
+async function assertDelayThenRezFilterFixtureAudible(
+  bridge: Vst3Bridge, delayEffect: Vst3Effect, rezFilterEffect: Vst3Effect, label: string,
+) {
+  const sampleRate = 48000;
+  const tone = createPlanarTone(VST3_FX_BLOCK_FRAMES, sampleRate);
+  const delayOpened = await bridge.open(delayEffect, sampleRate, 'offline', 'effect');
+  const filterOpened = await bridge.open(rezFilterEffect, sampleRate, 'offline', 'effect');
+  try {
+    const delayed = await bridge.processAudio(delayOpened.id, VST3_FX_BLOCK_FRAMES, tone, 120, []);
+    const delayEvidence = planarChannelEvidence(delayed);
+    if (delayEvidence.rms <= 0.01) throw new Error(`${label}: Delay inspect/restore was silent: ${JSON.stringify(delayEvidence)}`);
+    const filtered = await bridge.processAudio(filterOpened.id, VST3_FX_BLOCK_FRAMES, delayed, 120, []);
+    const filterEvidence = planarChannelEvidence(filtered);
+    if (filterEvidence.rms <= 0.01 || filterEvidence.midRms <= 0.01) {
+      throw new Error(`${label}: Delay→RezFilter inspect/restore was silent with the empty live parameter list: ${JSON.stringify({ delayEvidence, filterEvidence })}`);
+    }
+  } finally {
+    await bridge.close(delayOpened.id);
+    await bridge.close(filterOpened.id);
+  }
+}
+
 async function runPackagedMixerAcceptance(instance: typeof audioEngine) {
   const desktopApi = (globalThis as any).desktopApp;
   if (desktopApi?.smokeTest !== true || typeof desktopApi?.vst3?.smokeTimingSnapshot !== 'function') {
@@ -601,34 +854,23 @@ async function runPackagedMixerAcceptance(instance: typeof audioEngine) {
   const filterIdentity = discovered.plugins.find(plugin => plugin.name === 'mda RezFilter');
   if (!delayIdentity || !filterIdentity) throw new Error(`Redistributable MDA Mixer fixtures unavailable through packaged production IPC: ${JSON.stringify(discovered.errors)}`);
   const delay = await bridge.inspectEffect(delayIdentity);
-  const inspectedRezFilter = await bridge.inspectEffect(filterIdentity);
   // The pinned mda RezFilter leaves its LFO phase as processing-instance state.
   // Its default envelope/LFO modulation can hold the cutoff closed for a
   // nondeterministic startup interval, which is not native bridge latency. For
   // onset/ordering acceptance only, disable both modulators and use a fixed,
   // positive cutoff so the real effect is audibly responsive from its first
-  // processed block. This is a test-fixture state, not a change to user audio.
-  const rezFilterLatencyParameters = [
-    { id: 0, value: 0.8 },  // fixed cutoff above zero
-    { id: 1, value: 0.25 }, // stable, modest resonance
-    { id: 3, value: 0.5 },  // disable envelope-to-filter modulation
-    { id: 6, value: 0.5 },  // disable LFO-to-filter modulation
-    { id: 8, value: 0 },    // disable trigger mode
-    { id: 9, value: 1 },    // keep maximum cutoff above the fixed setting
-  ];
-  const rezFilterParameterMap = new Map<number, { id: number; value: number }>(
-    inspectedRezFilter.state.parameters.map(parameter => [parameter.id, parameter]));
-  for (const parameter of rezFilterLatencyParameters) rezFilterParameterMap.set(parameter.id, parameter);
-  const rezFilter = await bridge.inspectEffect(filterIdentity, {
-    ...inspectedRezFilter.state, parameters: [...rezFilterParameterMap.values()],
-  });
+  // processed block. inspectEffect's 1 silent sample cannot prove that, so the
+  // fixture is reopened and processed with the live Mixer's empty parameter
+  // list before any Mixer capture. This is a test-fixture state, not a change
+  // to user audio.
+  const rezFilterLatencyParameters = PACKAGED_REZFILTER_FIXTURE_PARAMETERS.map(
+    parameter => ({ id: parameter.id, value: parameter.value }));
+  const rezFilter = await inspectVerifiedRezFilterFixture(bridge, filterIdentity, delay);
   const delayParameters = await bridge.describeEffect(delay);
   const feedbackMix = delayParameters.parameters.find(parameter => parameter.id === 4 && parameter.name === 'Fb Mix');
   if (!feedbackMix) throw new Error('The pinned mda Delay fixture no longer exposes the verified Fb Mix bypass parameter id 4');
-  const bypassDelay = await bridge.inspectEffect(delayIdentity, {
-    ...delay.state,
-    parameters: [...delay.state.parameters.filter(parameter => parameter.id !== feedbackMix.id), { id: feedbackMix.id, value: 0 }],
-  });
+  const bypassDelay = await inspectVerifiedDelayBypassFixture(bridge, delayIdentity, feedbackMix.id);
+  await assertDelayThenRezFilterFixtureAudible(bridge, bypassDelay, rezFilter, 'Fb Mix=0 Delay → RezFilter');
 
   const channels: Channel[] = [];
   const tracks: MixerTrack[] = [0, 1, 2].map(id => ({ id, name: `Packaged smoke track ${id}`, color: '#fff',
@@ -670,6 +912,11 @@ async function runPackagedMixerAcceptance(instance: typeof audioEngine) {
   const zeroInsertAlignment = await run(noEffects, 'Mixer onset alignment zero inserts', alignmentOptions());
   const oneInsertAlignment = await run(oneNativeInsert, 'Mixer onset alignment one insert', alignmentOptions());
   const twoInsertAlignment = await run(twoNativeInserts, 'Mixer onset alignment two inserts', alignmentOptions());
+  const stalledTwoInserts = await run(twoNativeInserts, 'Mixer renderer-stall two inserts', {
+    ...alignmentOptions(), stallRendererMs: 30, stallRendererAfterMs: 280,
+  });
+  assertRendererStallSurvived(stalledTwoInserts, 'Mixer renderer-stall two inserts');
+  const rendererStallRegression = rendererStallRegressionEvidence(stalledTwoInserts);
   const onsetFramesFor = (result: any) => Object.fromEntries([0, 1, 2].map(trackId => [trackId,
     firstCapturedOnsetFrame(result.captures.get(trackId), result.sourceStartContextFrame,
       result.sourceStartContextFrame + result.sampleRate)]));
@@ -790,6 +1037,7 @@ async function runPackagedMixerAcceptance(instance: typeof audioEngine) {
     latencyFixture: { plugin: rezFilter.name, parameters: rezFilterLatencyParameters,
       reason: 'LFO/envelope modulation disabled and cutoff fixed positive so onset timing measures the bridge pipeline, not variable plugin startup silence.' },
     latencyAlignmentRegression: alignmentRows,
+    rendererStallRegression,
     priorPlaywrightBridgeReference: { approximatelyMs: 28, measurement: 'test-only page.exposeFunction bridge; separate from this production IPC/preload/helper measurement' },
     orderDifferenceRms: orderDifference.rmsDifference, orderOffsetFrames: orderDifference.normalizedLagFrames,
     controlTrackRmsDifference: controlRmsDifference, controlTrackPcmDifferenceRms: controlDifference.rmsDifference,
