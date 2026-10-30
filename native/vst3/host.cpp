@@ -234,6 +234,12 @@ public:
     data.prepare(*component, kMaxBlock, kSample32);
     checked(component->setActive(true), "setActive failed"); active = true;
     checked(processor->setProcessing(true), "setProcessing failed"); processing = true;
+    // Component/controller streams are restored while inactive. Apply saved
+    // normalized overrides after activation so the processor's first audible
+    // block receives them through the parameter queue (effects) or the
+    // already-queued points (instruments). Controller metadata is then read.
+    if (request.contains("state") && request.at("state").contains("parameters"))
+      applyParameters(request.at("state").at("parameters"), false, -1, isInstrument);
     result["parameters"] = metadata();
     result["controllerAvailable"] = bool(controller);
     result["latencySamples"] = processor->getLatencySamples();
@@ -282,7 +288,8 @@ public:
       MemoryStream stream(bytes.data(), bytes.size());
       checked(controller->setState(&stream), "Plugin rejected saved controller state");
     }
-    if (state.contains("parameters")) applyParameters(state.at("parameters"), false, -1, isInstrument);
+    // Normalized overlays are applied after setActive/setProcessing. Activation
+    // may reset runtime DSP; the first real process then queues these values.
   }
   void applyParameters(const json& changes, bool live = false, int32 frames = -1, bool enqueue = true) {
     require(changes.is_array() && changes.size() <= 4096, "Invalid parameter list");
