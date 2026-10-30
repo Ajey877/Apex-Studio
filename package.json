@@ -41,7 +41,7 @@
     "test:native-vst3": "node --import tsx --test tests/nativeVst3.test.mjs",
     "test:vst3-browser": "playwright test --config=playwright.native.config.ts",
     "test:vst3-daw": "node --import tsx --test tests/vst3DawIntegration.test.mjs tests/vst3Ui.test.mjs",
-    "test:vst3-effects": "node --import tsx --test tests/vst3Effects.test.mjs"
+    "test:vst3-effects": "node --import tsx --test tests/vst3Effects.test.mjs tests/vst3RezFilterKnownOnset.diag.test.mjs"
   },
   "build": {
     "appId": "com.apexstudio.daw",
