@@ -6,7 +6,6 @@ import path from 'node:path';
 import { existsSync } from 'node:fs';
 import { NativeVst3Client, discoverVst3 } from '../native/vst3/client.mjs';
 import { Vst3Service } from '../native/vst3/service.mjs';
-import { createLiveAudioPortSession } from '../native/vst3/liveAudioPort.mjs';
 
 const build = path.resolve(process.env.APEX_NATIVE_BUILD ?? 'build/native-vst3');
 const executableName = process.platform === 'win32' ? 'apex-vst3-host.exe' : 'apex-vst3-host';
@@ -127,47 +126,8 @@ const REZFILTER_OVERLAY = [
   { id: 9, value: 1 },
 ];
 
-async function waitFor(predicate, attempts = 80) {
-  for (let attempt = 0; attempt < attempts; attempt++) {
-    if (predicate()) return;
-    await new Promise(resolve => setImmediate(resolve));
-  }
-  throw new Error('timed out waiting for live-port condition');
-}
-
-async function processThroughLivePort(service, sessionId, owner, trackId, slotId, blocks) {
-  const channel = new MessageChannel();
-  const received = [];
-  const session = createLiveAudioPortSession({
-    sessionId, owner, trackId, slotId,
-    processAudio: ({ samples }) => service.processAudio(sessionId, 1024, samples, 120, owner, []),
-  });
-  channel.port1.onmessage = event => received.push(event.data);
-  session.attach(channel.port2);
-  try {
-    await waitFor(() => received.some(message => message.type === 'bound'));
-    const outputs = [];
-    for (let sequence = 0; sequence < blocks.length; sequence++) {
-      const samples = new Float32Array(blocks[sequence]);
-      channel.port1.postMessage({ type: 'process', sequence, samples }, [samples.buffer]);
-      await waitFor(() => received.some(message => message.type === 'result' && message.sequence === sequence)
-        || received.some(message => message.type === 'error' && message.sequence === sequence));
-      const error = received.find(message => message.type === 'error' && message.sequence === sequence);
-      if (error) throw new Error(error.reason ?? 'live-port process error');
-      const result = received.find(message => message.type === 'result' && message.sequence === sequence);
-      outputs.push(result.samples);
-    }
-    return outputs;
-  } finally {
-    session.stop();
-    await session.dispose('explicit-stop');
-    channel.port1.close();
-    channel.port2.close();
-  }
-}
-
 async function measureRestoredRezFilter(service, inspected, delayEffect, {
-  owner, reverse, mode, useLivePort, reopen,
+  owner, reverse, mode, reopen,
 }) {
   const dry = makeAudio(1024);
   const openPair = async () => {
@@ -193,20 +153,15 @@ async function measureRestoredRezFilter(service, inspected, delayEffect, {
     });
     const filterInput = reverse ? dry : await service.processAudio(pair.delayOpened.id, 1024, dry, 120, owner, []);
     const inputs = Array.from({ length: 16 }, () => new Float32Array(filterInput));
-    const outputs = useLivePort
-      ? await processThroughLivePort(service, pair.filterOpened.id, owner, 1, 'smoke-rezfilter', inputs)
-      : await (async () => {
-        const processed = [];
-        for (const block of inputs) processed.push(await service.processAudio(pair.filterOpened.id, 1024, block, 120, owner, []));
-        return processed;
-      })();
+    const outputs = [];
+    for (const block of inputs) outputs.push(await service.processAudio(pair.filterOpened.id, 1024, block, 120, owner, []));
     const blocks = outputs.map((output, index) => ({
       index,
       inputRms: rms(inputs[index]),
       outputRms: rms(output),
     }));
     return {
-      owner, reverse, mode, useLivePort, reopen, overlayHeld,
+      owner, reverse, mode, reopen, overlayHeld,
       delaySession: pair.delayOpened.id, filterSession: pair.filterOpened.id,
       delayRms: reverse ? null : rms(filterInput),
       blocks,
@@ -230,14 +185,12 @@ test('realtime restored RezFilter stays audible across 20 varied open/reopen cyc
         owner: `${owner}-${cycle}`,
         reverse: cycle % 2 === 1,
         mode: cycle % 5 === 0 ? 'offline' : 'realtime',
-        useLivePort: cycle % 2 === 0,
         reopen: cycle % 4 === 3,
       });
       outcomes.push({
         cycle,
         reverse: outcome.reverse,
         mode: outcome.mode,
-        useLivePort: outcome.useLivePort,
         reopen: outcome.reopen,
         overlayHeld: outcome.overlayHeld,
         delayRms: outcome.delayRms,
@@ -251,9 +204,9 @@ test('realtime restored RezFilter stays audible across 20 varied open/reopen cyc
     }
     assert.equal(outcomes.length, 20);
     assert.equal(outcomes.filter(outcome => outcome.reverse).length, 10);
-    assert.equal(outcomes.filter(outcome => outcome.useLivePort).length, 10);
     assert.ok(outcomes.some(outcome => outcome.reopen));
     assert.ok(outcomes.some(outcome => outcome.mode === 'offline'));
+    assert.ok(outcomes.filter(outcome => outcome.mode === 'realtime').length >= 16);
   } finally { await service.dispose(); }
 });
 

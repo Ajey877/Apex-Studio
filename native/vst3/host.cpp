@@ -238,8 +238,8 @@ public:
     // normalized overrides after activation so the processor's first audible
     // block receives them through the parameter queue (effects) or the
     // already-queued points (instruments). Controller metadata is then read.
-    if (request.contains("state") && request.at("state").contains("parameters"))
-      applyParameters(request.at("state").at("parameters"), false, -1, isInstrument);
+    if (!isInstrument && request.contains("state") && request.at("state").contains("parameters"))
+      applyParameters(request.at("state").at("parameters"), false, -1, false);
     result["parameters"] = metadata();
     result["controllerAvailable"] = bool(controller);
     result["latencySamples"] = processor->getLatencySamples();
@@ -288,8 +288,9 @@ public:
       MemoryStream stream(bytes.data(), bytes.size());
       checked(controller->setState(&stream), "Plugin rejected saved controller state");
     }
-    // Normalized overlays are applied after setActive/setProcessing. Activation
-    // may reset runtime DSP; the first real process then queues these values.
+    // Instruments keep the established pre-activation queue contract. Effect
+    // overlays are applied after setActive/setProcessing in open().
+    if (isInstrument && state.contains("parameters")) applyParameters(state.at("parameters"), false, -1, true);
   }
   void applyParameters(const json& changes, bool live = false, int32 frames = -1, bool enqueue = true) {
     require(changes.is_array() && changes.size() <= 4096, "Invalid parameter list");
