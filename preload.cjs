@@ -50,5 +50,6 @@ if (smokeTest) {
     preload: smokeIpcMeasurements.slice(),
     main: await ipcRenderer.invoke('vst3:smokeTimingSnapshot'),
   });
+  desktopApi.vst3.smokeWriteEvidence = payload => ipcRenderer.invoke('vst3:smokeWriteEvidence', payload);
 }
 contextBridge.exposeInMainWorld('desktopApp', desktopApi);

@@ -4,7 +4,7 @@ on:
   pull_request:
     branches: [main, phase-5-5-song-mode-verification]
   push:
-    branches: [main, phase-5.5-hardening, phase-5-5-song-mode-verification, phase-11-release-parity-validation]
+    branches: [main, phase-5.5-hardening, phase-5-5-song-mode-verification, phase-11-release-parity-validation, diag/packaged-rezfilter-parity-main]
 
 permissions:
   contents: read
@@ -48,6 +48,31 @@ jobs:
 
       - name: Run packaged Windows runtime smoke test
         run: npm run smoke:win
+      - name: Annotate packaged RezFilter parity evidence
+        if: always()
+        shell: bash
+        run: |
+          node -e "
+            const fs = require('fs');
+            const path = require('path');
+            const dir = 'build/native-evidence';
+            const files = fs.existsSync(dir) ? fs.readdirSync(dir).filter(f => f.includes('rezfilter-parity')) : [];
+            if (!files.length) { console.log('::warning::no packaged rezfilter parity evidence'); process.exit(0); }
+            for (const file of files) {
+              const e = JSON.parse(fs.readFileSync(path.join(dir, file), 'utf8'));
+              const attempts = e.twoInsertAttempts || [];
+              console.log('::notice title=RezFilter parity identities::'+JSON.stringify({file, identities:e.identities, plugin:e.plugin}));
+              for (const a of attempts) {
+                const traces = a.first32 || {};
+                const summary = Object.fromEntries(Object.entries(traces).map(([slot, t]) => [slot, {
+                  sessionId: t.sessionId, classId: t.classId, mode: t.mode, sr: t.sampleRate,
+                  in: t.inputEnergy, out: t.outputEnergy, buf: t.bufferEnergy, flags: t.flaggedSilence,
+                  life: t.lifecycle, b0: (t.blocks||[])[0], b1: (t.blocks||[])[1]
+                }]));
+                console.log('::notice title='+file+' attempt '+a.attempt+'::'+JSON.stringify({status:a.status, order:a.order, pcm:a.nativeServicePcm, traces:summary, error:a.error&&String(a.error).slice(0,400)}));
+              }
+            }
+          "
 
       - name: Upload measured production VST3 evidence
         if: always()

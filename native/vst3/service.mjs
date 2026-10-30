@@ -94,7 +94,7 @@ export class Vst3Service {
     catch (error) { await this.close(id, owner); throw error; }
     finally { session.processing = false; }
   }
-  async processAudio(id, frames, audio, bpm, owner = 'local', parameters = []) {
+  async processAudio(id, frames, audio, bpm, owner = 'local', parameters = [], trace = false) {
     const session = this.#session(id, owner);
     if (session.kind !== 'effect') throw new Error('Audio-effect processing requires a VST3 effect session');
     if (session.processing) throw new Error('Concurrent VST3 effect processing request rejected');
@@ -104,9 +104,17 @@ export class Vst3Service {
     if (!Number.isFinite(bpm) || bpm < 20 || bpm > 300) throw new Error('Invalid VST3 tempo');
     const changes = validateProcessParameters(parameters, session.parameters, frames);
     session.processing = true;
-    try { return (await session.client.processAudio(frames, audio, changes, bpm)).samples; }
+    try {
+      const reply = await session.client.processAudio(frames, audio, changes, bpm, Boolean(trace));
+      if (trace && reply.processTrace) session.lastTrace = reply.processTrace;
+      else if (!trace) session.lastTrace = undefined;
+      return reply.samples;
+    }
     catch (error) { await this.close(id, owner); throw error; }
     finally { session.processing = false; }
+  }
+  lastProcessTrace(id, owner) {
+    return this.#session(id, owner).lastTrace;
   }
   async describe(instrument, owner = 'local') {
     const opened = await this.open(instrument, 48000, 'offline', owner, 'instrument');

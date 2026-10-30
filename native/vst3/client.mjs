@@ -91,12 +91,12 @@ export class NativeVst3Client {
   process(frames, events = [], parameters = [], bpm = 120) {
     return this.request({ command: 'process', frames, events, parameters, bpm });
   }
-  processAudio(frames, samples, parameters = [], bpm = 120) {
+  processAudio(frames, samples, parameters = [], bpm = 120, trace = false) {
     if (!Number.isInteger(frames) || frames < 1 || frames > 16384 ||
       !(samples instanceof Float32Array) || samples.length !== frames * 2 ||
       samples.some(sample => !Number.isFinite(sample))) throw new Error('Invalid planar stereo VST3 audio block');
     const bytes = Buffer.from(samples.buffer, samples.byteOffset, samples.byteLength);
-    return this.request({ command: 'process', frames, events: [], parameters, bpm, audio: bytes.toString('base64') });
+    return this.request({ command: 'process', frames, events: [], parameters, bpm, audio: bytes.toString('base64'), ...(trace ? { trace: true } : {}) });
   }
   async dispose() {
     // Kill rather than waiting on untrusted plugin teardown forever. Destructors
