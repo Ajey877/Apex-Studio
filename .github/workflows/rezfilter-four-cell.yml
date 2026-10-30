@@ -8,11 +8,46 @@ on:
 permissions:
   contents: read
 
-env:
-  PLUGIN_SHA_CANDIDATE: b1811c4110f8e0e9864dde00bd073d0e95546247d4a0c2284450acfe30674796
-  PLUGIN_SHA_MAIN: f63fec677615cad1d990d9cd7c64428650b72ebbfef95aba9b2e2172f00ca305
-
 jobs:
+  package-app:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - id: candidate
+            ref: diag/packaged-rezfilter-parity
+          - id: main
+            ref: diag/packaged-rezfilter-parity-main
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.ref }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install --legacy-peer-deps
+      - run: npm run lint
+      - run: npm run native:vst3:build
+      - name: Package Windows dir without a second native rebuild
+        run: node scripts/stage-vst3-helper.mjs && npx vite build && npx electron-builder --win --x64 --dir --publish never
+      - name: Record frozen application/helper hashes
+        shell: bash
+        run: |
+          mkdir -p build/native-evidence
+          node scripts/hash-frozen-binaries.mjs build/native-evidence/frozen-manifest.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: frozen-app-${{ matrix.id }}
+          path: dist-electron/win-unpacked
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: frozen-manifest-${{ matrix.id }}
+          path: build/native-evidence/frozen-manifest.json
+          if-no-files-found: error
+
   build-plugin:
     strategy:
       fail-fast: false
@@ -20,144 +55,86 @@ jobs:
         include:
           - id: candidate
             ref: diag/packaged-rezfilter-parity
-            expected: b1811c4110f8e0e9864dde00bd073d0e95546247d4a0c2284450acfe30674796
+            trace: '0'
           - id: main
             ref: diag/packaged-rezfilter-parity-main
-            expected: f63fec677615cad1d990d9cd7c64428650b72ebbfef95aba9b2e2172f00ca305
+            trace: '0'
+          - id: instrumented
+            ref: diag/packaged-rezfilter-parity
+            trace: '1'
     runs-on: windows-latest
     timeout-minutes: 30
     steps:
-      - name: Checkout plugin source
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           ref: ${{ matrix.ref }}
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: 22
-
-      - name: Install dependencies
-        run: npm install --legacy-peer-deps
-
-      - name: Build native VST3 plugin and helper
+      - run: npm install --legacy-peer-deps
+      - name: Build plugin only
+        env:
+          APEX_MDA_REZFILTER_TRACE: ${{ matrix.trace }}
         run: npm run native:vst3:build
-
-      - name: Verify plugin module SHA-256
+      - name: Hash plugin module
         shell: bash
         run: |
-          node -e '
-            const fs = require("fs"), crypto = require("crypto"), path = require("path");
-            function find(bundle) {
-              if (!bundle || !fs.existsSync(bundle)) return null;
-              if (fs.statSync(bundle).isFile()) return bundle;
-              const stack = [bundle];
-              let best = null, bestSize = -1;
-              while (stack.length) {
-                const dir = stack.pop();
-                for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-                  const full = path.join(dir, entry.name);
-                  if (entry.isDirectory()) stack.push(full);
-                  else if (/\.(vst3|dll|so|dylib)$/i.test(entry.name)) {
-                    const size = fs.statSync(full).size;
-                    if (size > bestSize) { best = full; bestSize = size; }
-                  }
-                }
-              }
-              return best;
-            }
-            const bundle = "build/native-vst3/VST3/Release/mda-vst3.vst3";
-            const mod = find(bundle);
-            if (!mod) { console.error("plugin module missing"); process.exit(1); }
-            const hash = crypto.createHash("sha256").update(fs.readFileSync(mod)).digest("hex");
-            const files = [];
-            const stack = [bundle];
-            while (stack.length) {
-              const dir = stack.pop();
-              if (!fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) continue;
-              for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-                const full = path.join(dir, entry.name);
-                if (entry.isDirectory()) stack.push(full);
-                else files.push({ file: full, size: fs.statSync(full).size,
-                  sha256: crypto.createHash("sha256").update(fs.readFileSync(full)).digest("hex") });
-              }
-            }
-            const matched = hash === process.env.EXPECTED;
-            const report = { source: process.env.SOURCE_ID, module: mod, sha256: hash, expected: process.env.EXPECTED, matched, files };
-            console.log("pluginModule " + JSON.stringify(report));
-            console.log("::notice title=plugin " + process.env.SOURCE_ID + " hash::" + JSON.stringify(report));
-            if (!matched) console.log("::error title=plugin " + process.env.SOURCE_ID + " SHA not prior module::rebuilt " + hash + " != expected " + process.env.EXPECTED + "; four-cell continues with this rebuilt module and must not claim prior identity");
-            fs.writeFileSync("plugin-hash.txt", JSON.stringify(report, null, 2));
-            fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, "plugin " + process.env.SOURCE_ID + " " + hash + " matched=" + matched + "\n");
-          '
-        env:
-          EXPECTED: ${{ matrix.expected }}
-          SOURCE_ID: ${{ matrix.id }}
-
-      - name: Upload plugin bundle
-        uses: actions/upload-artifact@v4
+          mkdir -p build/native-evidence
+          node scripts/hash-frozen-binaries.mjs build/native-evidence/plugin-manifest.json
+      - uses: actions/upload-artifact@v4
         with:
           name: mda-vst3-${{ matrix.id }}
           path: build/native-vst3/VST3/Release/mda-vst3.vst3
           if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: plugin-manifest-${{ matrix.id }}
+          path: build/native-evidence/plugin-manifest.json
 
   packaged-cell:
-    needs: build-plugin
+    needs: [package-app, build-plugin]
     strategy:
       fail-fast: false
       matrix:
         include:
           - app: candidate
             plugin: candidate
-            appRef: diag/packaged-rezfilter-parity
-            expectedPlugin: b1811c4110f8e0e9864dde00bd073d0e95546247d4a0c2284450acfe30674796
             phase: attempts
           - app: candidate
             plugin: main
-            appRef: diag/packaged-rezfilter-parity
-            expectedPlugin: f63fec677615cad1d990d9cd7c64428650b72ebbfef95aba9b2e2172f00ca305
             phase: attempts
           - app: main
             plugin: candidate
-            appRef: diag/packaged-rezfilter-parity-main
-            expectedPlugin: b1811c4110f8e0e9864dde00bd073d0e95546247d4a0c2284450acfe30674796
             phase: attempts
           - app: main
             plugin: main
-            appRef: diag/packaged-rezfilter-parity-main
-            expectedPlugin: f63fec677615cad1d990d9cd7c64428650b72ebbfef95aba9b2e2172f00ca305
             phase: attempts
           - app: candidate
-            plugin: candidate
-            appRef: diag/packaged-rezfilter-parity
-            expectedPlugin: b1811c4110f8e0e9864dde00bd073d0e95546247d4a0c2284450acfe30674796
-            phase: preroll
-          - app: candidate
-            plugin: main
-            appRef: diag/packaged-rezfilter-parity
-            expectedPlugin: f63fec677615cad1d990d9cd7c64428650b72ebbfef95aba9b2e2172f00ca305
-            phase: preroll
+            plugin: instrumented
+            phase: attempts
     runs-on: windows-latest
     timeout-minutes: 50
     steps:
-      - name: Checkout application runtime
+      - name: Checkout matching application smoke scripts
         uses: actions/checkout@v4
         with:
-          ref: ${{ matrix.appRef }}
+          ref: ${{ matrix.app == 'main' && 'diag/packaged-rezfilter-parity-main' || 'diag/packaged-rezfilter-parity' }}
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: 22
 
-      - name: Install dependencies
-        run: npm install --legacy-peer-deps
+      - name: Download frozen application
+        uses: actions/download-artifact@v4
+        with:
+          name: frozen-app-${{ matrix.app }}
+          path: dist-electron/win-unpacked
 
-      - name: TypeScript check
-        run: npm run lint
-
-      - name: Build this app helper (and its plugin, which is replaced next)
-        run: npm run native:vst3:build
+      - name: Download frozen app manifest
+        uses: actions/download-artifact@v4
+        with:
+          name: frozen-manifest-${{ matrix.app }}
+          path: frozen-app-manifest
 
       - name: Download swapped plugin
         uses: actions/download-artifact@v4
@@ -165,8 +142,16 @@ jobs:
           name: mda-vst3-${{ matrix.plugin }}
           path: swapped-plugin
 
-      - name: Replace plugin bundle and verify SHA-256
+      - name: Download plugin manifest
+        uses: actions/download-artifact@v4
+        with:
+          name: plugin-manifest-${{ matrix.plugin }}
+          path: frozen-plugin-manifest
+
+      - name: Install frozen plugin and verify helper identity
         shell: bash
+        env:
+          CELL: ${{ matrix.app }}-app-${{ matrix.plugin }}-plugin
         run: |
           node -e '
             const fs = require("fs"), crypto = require("crypto"), path = require("path");
@@ -199,33 +184,38 @@ jobs:
               }
               return best;
             }
+            function sha(file) { return crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex"); }
             const dest = "build/native-vst3/VST3/Release/mda-vst3.vst3";
             const srcRoot = "swapped-plugin";
             const nested = path.join(srcRoot, "mda-vst3.vst3");
-            const src = fs.existsSync(nested) ? nested : srcRoot;
             rm(dest);
-            copy(src, dest);
-            const mod = find(dest);
-            if (!mod) { console.error("swapped plugin module missing"); process.exit(1); }
-            const hash = crypto.createHash("sha256").update(fs.readFileSync(mod)).digest("hex");
-            const matched = hash === process.env.EXPECTED;
-            const report = { cell: process.env.CELL, module: mod, sha256: hash, expected: process.env.EXPECTED, matched };
-            console.log("loadedPluginModule " + JSON.stringify(report));
-            console.log("::notice title=loaded plugin " + process.env.CELL + "::" + JSON.stringify(report));
-            if (!matched) console.log("::error title=loaded plugin not prior SHA::" + process.env.CELL + " " + hash + " != " + process.env.EXPECTED);
-            fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, "loaded " + process.env.CELL + " " + hash + " matched=" + matched + "\n");
+            copy(fs.existsSync(nested) ? nested : srcRoot, dest);
+            const pluginMod = find(dest);
+            const pluginSha = sha(pluginMod);
+            const pluginManifest = JSON.parse(fs.readFileSync("frozen-plugin-manifest/plugin-manifest.json", "utf8"));
+            const appManifest = JSON.parse(fs.readFileSync("frozen-app-manifest/frozen-manifest.json", "utf8"));
+            const helper = "dist-electron/win-unpacked/resources/vst3/apex-vst3-host.exe";
+            if (!fs.existsSync(helper)) { console.error("frozen helper missing"); process.exit(1); }
+            const helperSha = sha(helper);
+            const report = {
+              cell: process.env.CELL, pluginModule: pluginMod, pluginSha, expectedPluginSha: pluginManifest.pluginModuleSha256,
+              pluginMatch: pluginSha === pluginManifest.pluginModuleSha256,
+              helperSha, expectedHelperSha: appManifest.helperSha256,
+              helperMatch: helperSha === appManifest.helperSha256,
+              appExeSha: appManifest.applicationExecutableSha256,
+            };
+            console.log("::notice title=frozen identities " + process.env.CELL + "::" + JSON.stringify(report));
+            if (!report.pluginMatch || !report.helperMatch) {
+              console.log("::error title=frozen identity mismatch::" + JSON.stringify(report));
+              process.exit(1);
+            }
           '
-        env:
-          EXPECTED: ${{ matrix.expectedPlugin }}
-          CELL: ${{ matrix.app }}-app-${{ matrix.plugin }}-plugin-${{ matrix.phase }}
-
-      - name: Package Windows dir without rebuilding native
-        run: node scripts/stage-vst3-helper.mjs && npx vite build && npx electron-builder --win --x64 --dir --publish never
 
       - name: Run packaged Windows runtime smoke test
         env:
           APEX_REZFILTER_PHASE: ${{ matrix.phase }}
-        run: npm run smoke:win
+          APEX_REZFILTER_TRACE: ${{ matrix.plugin == 'instrumented' && 'build/native-evidence/rezfilter-internal.bin' || '' }}
+        run: node scripts/desktop-smoke.mjs
 
       - name: Annotate four-cell evidence
         if: always()
@@ -234,40 +224,29 @@ jobs:
           node -e "
             const fs = require('fs');
             const path = require('path');
-            const cell = 'app=${{ matrix.app }} plugin=${{ matrix.plugin }} phase=${{ matrix.phase }}';
+            const cell = 'app=${{ matrix.app }} plugin=${{ matrix.plugin }}';
             const dir = 'build/native-evidence';
-            const files = fs.existsSync(dir) ? fs.readdirSync(dir).filter(f => f.includes('rezfilter-parity') || f.includes('apex-packaged-smoke')) : [];
+            const files = fs.existsSync(dir) ? fs.readdirSync(dir) : [];
             console.log('::notice title='+cell+' files::'+JSON.stringify(files));
-            if (!files.length) { console.log('::warning::no packaged evidence for '+cell); process.exit(0); }
-            for (const file of files) {
-              const raw = JSON.parse(fs.readFileSync(path.join(dir, file), 'utf8'));
-              const e = raw.vst3?.mixerEffects?.rezFilterParity || raw;
-              const attempts = e.twoInsertAttempts || [];
-              const preroll = e.prerollAttempts || [];
-              const identities = e.identities || raw.identities || null;
-              console.log('::notice title='+cell+' '+file+' identities::'+JSON.stringify({
-                identities, plugin: e.plugin, summary: e.summary, expectedPlugin: '${{ matrix.expectedPlugin }}'
-              }));
-              for (const a of [...attempts, ...preroll]) {
-                const traces = a.first32 || {};
-                const summary = Object.fromEntries(Object.entries(traces).map(([slot, t]) => [slot, {
-                  sessionId: t.sessionId, classId: t.classId, mode: t.mode, sr: t.sampleRate,
-                  in: t.inputEnergy, out: t.outputEnergy, buf: t.bufferEnergy, flags: t.flaggedSilence,
-                  life: t.lifecycle, b0: (t.blocks||[])[0], b1: (t.blocks||[])[1]
-                }]));
-                console.log('::notice title='+cell+' '+file+' a'+String(a.attempt ?? a.prerollSilentBlocks)+'::'+JSON.stringify({
-                  status: a.status, order: a.order, preroll: a.prerollSilentBlocks,
-                  classification: a.classification, pcm: a.nativeServicePcm, traces: summary,
-                  transportError: a.transportError && String(a.transportError).slice(0,400)
-                }));
-              }
+            const independent = files.filter(f => f.includes('independent-phases'));
+            for (const file of independent) {
+              console.log('::notice title='+cell+' independent::'+fs.readFileSync(path.join(dir, file), 'utf8').slice(0, 3900));
             }
+            const parity = files.filter(f => f.includes('rezfilter-parity'));
+            for (const file of parity) {
+              const e = JSON.parse(fs.readFileSync(path.join(dir, file), 'utf8'));
+              const summary = e.summary || e.rezFilterParity?.summary;
+              const identities = e.identities || e.rezFilterParity?.identities;
+              console.log('::notice title='+cell+' summary::'+JSON.stringify({ summary, identities, independent: e.independent, stallError: e.stallError, pcmCorpus: e.pcmCorpus, stateFingerprints: e.stateFingerprints }).slice(0, 3900));
+            }
+            const corpus = files.find(f => f.includes('pcm-corpus')) || (fs.existsSync(path.join(dir, fs.readdirSync(dir).find(n => n.includes('pcm-corpus')) || '')) ? 'pcm' : null);
           "
+          if [ -f build/native-evidence/rezfilter-internal.bin.json ]; then node scripts/decode-rezfilter-trace.mjs build/native-evidence/rezfilter-internal.bin.json; fi
 
       - name: Upload four-cell evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: four-cell-${{ matrix.app }}-app-${{ matrix.plugin }}-plugin-${{ matrix.phase }}
+          name: four-cell-${{ matrix.app }}-app-${{ matrix.plugin }}-plugin
           path: build/native-evidence
           if-no-files-found: warn

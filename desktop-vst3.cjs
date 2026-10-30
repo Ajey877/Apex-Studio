@@ -34,6 +34,84 @@ function findPluginModule(bundle) {
 function registerVst3({ app, ipcMain, dialog, getWindow }) {
   const smokeTimingEnabled = process.env.APEX_SMOKE_TEST === '1';
   const smokeProcessAudioTimings = smokeTimingEnabled ? [] : null;
+  const pcmCorpus = smokeTimingEnabled ? new Map() : null;
+  const CORPUS_MAX_BLOCKS = 128;
+  function copyF32(samples) {
+    if (!(samples instanceof Float32Array)) return null;
+    return Float32Array.from(samples);
+  }
+  function sha256F32(samples) {
+    if (!samples) return null;
+    return crypto.createHash('sha256').update(Buffer.from(samples.buffer, samples.byteOffset, samples.byteLength)).digest('hex');
+  }
+  function recordPcmCorpus(profile, input, output) {
+    if (!pcmCorpus || !profile) return;
+    const sessionId = String(profile.sessionId ?? profile.requestId ?? 'unknown');
+    const slotId = String(profile.slotId ?? '');
+    const key = `${sessionId}:${slotId}`;
+    const inputCopy = copyF32(input);
+    const outputCopy = copyF32(output);
+    const entry = pcmCorpus.get(key) ?? { sessionId, slotId, sampleRate: profile.sampleRate ?? 48000, framesPerBlock: 1024, channels: 2, blocks: [] };
+    if (entry.blocks.length < CORPUS_MAX_BLOCKS && inputCopy) {
+      entry.blocks.push({
+        sequence: profile.sequence ?? entry.blocks.length,
+        inputSha256: sha256F32(inputCopy),
+        outputSha256: sha256F32(outputCopy),
+        inputRms: pcmRms(inputCopy),
+        outputRms: pcmRms(outputCopy),
+        input, output: outputCopy,
+      });
+      // Keep a live reference only for dump; drop after write.
+      entry.blocks[entry.blocks.length - 1].input = inputCopy;
+    }
+    pcmCorpus.set(key, entry);
+  }
+  function dumpPcmCorpus(destJson) {
+    if (!pcmCorpus || !destJson) return null;
+    const dir = destJson.replace(/\.json$/i, '') + '-pcm-corpus';
+    fsSync.mkdirSync(dir, { recursive: true });
+    const sessions = [];
+    let dumpedSilent = 0, dumpedAudible = 0;
+    for (const [key, entry] of pcmCorpus) {
+      const hasherIn = crypto.createHash('sha256');
+      const hasherOut = crypto.createHash('sha256');
+      let silentInsert = false;
+      for (const block of entry.blocks) {
+        if (block.input) hasherIn.update(Buffer.from(block.input.buffer, block.input.byteOffset, block.input.byteLength));
+        if (block.output) hasherOut.update(Buffer.from(block.output.buffer, block.output.byteOffset, block.output.byteLength));
+        if ((block.inputRms ?? 0) > 1e-6 && (block.outputRms ?? 0) === 0) silentInsert = true;
+      }
+      const manifest = {
+        key, sessionId: entry.sessionId, slotId: entry.slotId, sampleRate: entry.sampleRate,
+        framesPerBlock: entry.framesPerBlock, channels: 2, encoding: 'float32-le-planar-or-interleaved-as-received',
+        blockCount: entry.blocks.length, silentInsert,
+        completeInputSha256: hasherIn.digest('hex'), completeOutputSha256: hasherOut.digest('hex'),
+        blocks: entry.blocks.map(block => ({
+          sequence: block.sequence, inputSha256: block.inputSha256, outputSha256: block.outputSha256,
+          inputRms: block.inputRms, outputRms: block.outputRms,
+        })),
+      };
+      const dumpFull = silentInsert && dumpedSilent < 4 || !silentInsert && dumpedAudible < 1;
+      if (dumpFull) {
+        const stem = path.join(dir, key.replace(/[^a-zA-Z0-9._-]/g, '_'));
+        const inputAll = [];
+        const outputAll = [];
+        for (const block of entry.blocks) {
+          if (block.input) inputAll.push(Buffer.from(block.input.buffer, block.input.byteOffset, block.input.byteLength));
+          if (block.output) outputAll.push(Buffer.from(block.output.buffer, block.output.byteOffset, block.output.byteLength));
+        }
+        if (inputAll.length) fsSync.writeFileSync(`${stem}-native-in.f32`, Buffer.concat(inputAll));
+        if (outputAll.length) fsSync.writeFileSync(`${stem}-native-out.f32`, Buffer.concat(outputAll));
+        manifest.replayFiles = { input: `${stem}-native-in.f32`, output: `${stem}-native-out.f32` };
+        if (silentInsert) dumpedSilent += 1; else dumpedAudible += 1;
+      }
+      for (const block of entry.blocks) { block.input = undefined; block.output = undefined; }
+      sessions.push(manifest);
+    }
+    const corpusPath = path.join(dir, 'manifest.json');
+    fsSync.writeFileSync(corpusPath, JSON.stringify({ encoding: 'float32 little-endian', sessions }, null, 2));
+    return { dir, sessionCount: sessions.length, dumpedSilent, dumpedAudible, corpusPath };
+  }
   let activeProcessAudioCalls = 0;
   let maximumConcurrentProcessAudioCalls = 0;
   const activeCallsByEffect = new Map();
@@ -152,6 +230,7 @@ function registerVst3({ app, ipcMain, dialog, getWindow }) {
     maximumConcurrentCallsPerEffect = Math.max(maximumConcurrentCallsPerEffect, activeForEffectAtStart);
     try {
       const pcm = await context.service.processAudio(id, frames, audio, bpm, owner, parameters, true);
+      recordPcmCorpus(profile, audio, pcm);
       const processTrace = context.service.lastProcessTrace(id, owner);
       const serviceCompletedAtMainMs = performance.now();
       if (smokeProcessAudioTimings.length < 8192) smokeProcessAudioTimings.push({
@@ -184,7 +263,8 @@ function registerVst3({ app, ipcMain, dialog, getWindow }) {
     if (!dest || typeof dest !== 'string') return false;
     const file = dest.replace(/\.json$/i, '') + '-rezfilter-parity.json';
     fsSync.mkdirSync(path.dirname(file), { recursive: true });
-    fsSync.writeFileSync(file, JSON.stringify(payload));
+    const corpus = dumpPcmCorpus(dest);
+    fsSync.writeFileSync(file, JSON.stringify({ ...payload, pcmCorpus: corpus }));
     return true;
   });
   if (smokeTimingEnabled) handle('smokeTimingSnapshot', context => {
