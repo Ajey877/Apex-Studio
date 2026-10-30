@@ -12,6 +12,7 @@ const fixture = join(process.cwd(), 'build/native-vst3/VST3/Release/mda-vst3.vst
 if (!existsSync(fixture)) throw new Error('Build the real MDA VST3 fixture before packaged smoke');
 const evidence = join(process.cwd(), 'build/native-evidence');
 mkdirSync(evidence, { recursive: true });
+if (process.env.APEX_REZFILTER_TRACE_DIR) mkdirSync(process.env.APEX_REZFILTER_TRACE_DIR, { recursive: true });
 const profile = mkdtempSync(join(process.cwd(), 'build/vst3-smoke-profile-'));
 function readJson(path) {
   try { return JSON.parse(readFileSync(path, 'utf8')); } catch { return null; }
@@ -25,7 +26,9 @@ async function launch(reopening) {
         APEX_VST3_SMOKE_PLUGIN: fixture, APEX_SMOKE_EVIDENCE: output, APEX_SMOKE_USER_DATA: profile },
       stdio: 'inherit', windowsHide: true,
     });
-    const timeout = setTimeout(() => { child.kill(); resolve({ code: null, signal: 'timeout' }); }, 600_000);
+    const attempts = Number(process.env.APEX_REZFILTER_ATTEMPTS || 20);
+    const timeoutMs = Math.max(600_000, (Number.isFinite(attempts) && attempts > 0 ? attempts : 20) * 45_000 + 180_000);
+    const timeout = setTimeout(() => { child.kill(); resolve({ code: null, signal: 'timeout' }); }, timeoutMs);
     child.on('error', error => { clearTimeout(timeout); resolve({ code: null, signal: String(error) }); });
     child.on('exit', (code, signal) => { clearTimeout(timeout); resolve({ code, signal }); });
   });

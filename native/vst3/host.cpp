@@ -20,13 +20,28 @@
 #include <map>
 #include <set>
 #include <stdexcept>
+#include <string>
 #include <vector>
+#include <cstdio>
+#include <cstdlib>
 #ifdef _WIN32
 #include <windows.h>
 #include <objbase.h>
 #include <fcntl.h>
 #include <io.h>
+#include <process.h>
 #endif
+
+void writeTraceSidecar(const std::string& name, const void* data, size_t size) {
+  const char* dir = std::getenv("APEX_REZFILTER_TRACE_DIR");
+  if (!dir || !dir[0] || !data || !size) return;
+  char path[1024];
+  std::snprintf(path, sizeof(path), "%s/%s", dir, name.c_str());
+  if (FILE* file = std::fopen(path, "wb")) {
+    std::fwrite(data, 1, size, file);
+    std::fclose(file);
+  }
+}
 
 using namespace Steinberg;
 using namespace Steinberg::Vst;
@@ -171,6 +186,7 @@ class Instance {
   std::map<ParamID, ParamValue> overrides;
   std::map<ParamID, ParamValue> pendingEffectParameters;
   std::string classId;
+  std::string diagnosticSessionId;
   double sampleRate = 48000;
   int mode = kOffline;
   int64_t cursor = 0;
@@ -198,6 +214,25 @@ public:
     PluginContextFactory::instance().setPluginContext(nullptr);
   }
   json open(const json& request) {
+    diagnosticSessionId = request.value("diagnosticSessionId", std::string{});
+    if (const char* dir = std::getenv("APEX_REZFILTER_TRACE_DIR")) {
+      char pending[1024];
+      std::snprintf(pending, sizeof(pending), "%s/pending-open.txt", dir);
+      if (FILE* file = std::fopen(pending, "wb")) {
+        std::fprintf(file, "%s\n", diagnosticSessionId.c_str());
+        std::fclose(file);
+      }
+      const auto map = std::string("{\"sessionId\":\"") + diagnosticSessionId + "\",\"pid\":" +
+#ifdef _WIN32
+        std::to_string(_getpid())
+#else
+        std::to_string(0)
+#endif
+        + ",\"classId\":\"" + request.at("classId").get<std::string>() + "\",\"path\":" +
+        json(request.at("path").get<std::string>()).dump() + "}";
+      writeTraceSidecar("host-session-" + (diagnosticSessionId.empty() ? "unknown" : diagnosticSessionId) + ".json",
+        map.data(), map.size());
+    }
     std::string error;
     module = VST3::Hosting::Module::create(request.at("path").get<std::string>(), error);
     require(bool(module), "Plugin module load failed: " + error);
@@ -321,6 +356,9 @@ public:
     require(state.at("classId") == classId && state.at("schema") == 1, "State identity/schema mismatch; refusing to substitute instrument");
     if (state.contains("component")) {
       auto bytes = unhex(state.at("component"));
+      if (!diagnosticSessionId.empty()) {
+        writeTraceSidecar("component-" + diagnosticSessionId + ".bin", bytes.data(), bytes.size());
+      }
       MemoryStream stream(bytes.data(), bytes.size());
       checked(component->setState(&stream), "Plugin rejected saved component state");
       if (controller) {

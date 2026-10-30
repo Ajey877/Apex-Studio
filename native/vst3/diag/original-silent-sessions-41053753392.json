@@ -1,0 +1,46 @@
+{
+  "doNotRegenerate": true,
+  "runId": 41053753392,
+  "artifactId": 12975788278,
+  "artifactName": "four-cell-candidate-app-instrumented-plugin",
+  "checkRunId": 124057441169,
+  "note": "Original packaged silent-session evidence. Do not overwrite. A later audible session does not disprove these failures. dumpedSilent:2 in the save corpus annotation.",
+  "frozenIdentities": {
+    "candidateAppExeSha256": "cfcb2fcf…d8df00",
+    "candidateAsarSha256": "1d290044…e0924c",
+    "candidateHelperSha256": "e9f9c947…400c6",
+    "instrumentedPluginSha256": "d4b6e0f6…fbe64",
+    "overlaySha256": "ebd0e1d7…d39d08",
+    "delayComponentSha256": "d30bac85…e3b2d",
+    "rezFilterComponentSha256": "0a7a9ec7…98b63"
+  },
+  "overlayParameters": [
+    { "id": 0, "value": 0.8 },
+    { "id": 1, "value": 0.25 },
+    { "id": 3, "value": 0.5 },
+    { "id": 6, "value": 0.5 },
+    { "id": 8, "value": 0 },
+    { "id": 9, "value": 1 }
+  ],
+  "sampleRate": 48000,
+  "framesPerBlock": 1024,
+  "channels": 2,
+  "sessions": [
+    {
+      "label": "A",
+      "sessionId": "5c8b5e54-e6fb-414e-854a-2a2258485155",
+      "blockCount": 65,
+      "completeInputSha256": "2243555109109edd55ac00a1d9746558fb07c20b08b3f8f2f4934cfc78d822fc",
+      "completeOutputSha256": "07bd921f21d3daf1b817fb4b4f5bb611c6e0971a84ebd8ae9f947abac5b6f9dd",
+      "silentInsert": true
+    },
+    {
+      "label": "B",
+      "sessionId": "75ba0f9a-b843-4335-a554-7fdc44268ecc",
+      "blockCount": 66,
+      "completeInputSha256": "1c6bdf106c7877a05f57751ee7d6d5c89a953ebc89293be6d0a55217f5313733",
+      "completeOutputSha256": "6be60cb1262630be79a89c09b4dae9c7c959cb4c9b26c7ab169676cb7a33e782",
+      "silentInsert": true
+    }
+  ]
+}

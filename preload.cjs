@@ -3,6 +3,7 @@ const { contextBridge, ipcRenderer } = require('electron');
 // Expose safe desktop platform APIs to the renderer.
 const smokeTest = process.argv.includes('--apex-smoke-test');
 const diagnosticPhase = process.env.APEX_REZFILTER_PHASE || 'attempts';
+const diagnosticAttempts = Number(process.env.APEX_REZFILTER_ATTEMPTS || 20);
 const smokeIpcMeasurements = smokeTest ? [] : null;
 const desktopApi = {
   isDesktop: true,
@@ -81,5 +82,6 @@ if (smokeTest) {
   });
   desktopApi.vst3.smokeWriteEvidence = payload => ipcRenderer.invoke('vst3:smokeWriteEvidence', payload);
   desktopApi.vst3.diagnosticPhase = diagnosticPhase;
+  desktopApi.vst3.diagnosticAttempts = Number.isFinite(diagnosticAttempts) && diagnosticAttempts > 0 ? diagnosticAttempts : 20;
 }
 contextBridge.exposeInMainWorld('desktopApp', desktopApi);

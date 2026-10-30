@@ -1,8 +1,6 @@
 name: RezFilter four-cell packaged comparison
 
 on:
-  push:
-    branches: [diag/packaged-rezfilter-parity]
   workflow_dispatch:
 
 permissions:

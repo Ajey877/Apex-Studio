@@ -61,25 +61,45 @@ if(APEX_BUILD_VST3_FIXTURE)
   set_property(TARGET mda-vst3 PROPERTY SOURCES "${mda_sources}")
   target_sources(mda-vst3 PRIVATE "${CMAKE_BINARY_DIR}/fixture-mdaBaseProcessor.cpp")
   file(READ "${mda_dir}/mdaRezFilterProcessor.cpp" mda_rez)
+  # Candidate fixture: the unspaced buf0=0.f needle is the denormal tail in
+  # doProcessing, not setActive/setProcessing. Keep it on this isolated
+  # diagnostic plugin variant so instrumented and uninstrumented candidate
+  # plugins share the same DSP source. Production PR #292 is untouched.
+  string(FIND "${mda_rez}" "buf0=0.f;" rez_offset)
+  if(rez_offset EQUAL -1)
+    message(FATAL_ERROR "Pinned mda RezFilter setActive buffer init no longer matches")
+  endif()
+  string(REPLACE "buf0=0.f;" "env=0.f; env2=0.f; phi=0.f; bufl=0.f; ttrig=0; tatt=0; buf0=0.f;" mda_rez "${mda_rez}")
   if(APEX_MDA_REZFILTER_TRACE)
     # Read-only snapshots of existing members. Does not assign env/phi/buffers.
-    # Separate from the candidate fixture buf0 replace and from production.
     string(REPLACE "#include <cstdlib>" "#include <cstdlib>\n#include \"apexRezFilterTrace.h\"" mda_rez "${mda_rez}")
     string(REPLACE "\tallocParameters (10);\n}" "\tallocParameters (10);\n\tAPEX_REZ_SNAP(\"construct\");\n}" mda_rez "${mda_rez}")
     string(REPLACE "\t\trecalculate ();\n\t}\n\treturn res;\n}" "\t\trecalculate ();\n\t\tAPEX_REZ_SNAP(\"initialize\");\n\t}\n\treturn res;\n}" mda_rez "${mda_rez}")
     string(REPLACE "tresult PLUGIN_API RezFilterProcessor::setActive (TBool state)\n{\n\treturn BaseProcessor::setActive (state);\n}"
       "tresult PLUGIN_API RezFilterProcessor::setActive (TBool state)\n{\n\tAPEX_REZ_SNAP(state ? \"setActive-on\" : \"setActive-off\");\n\tconst auto _apex_active = BaseProcessor::setActive (state);\n\tAPEX_REZ_SNAP(state ? \"setActive-on-after\" : \"setActive-off-after\");\n\treturn _apex_active;\n}" mda_rez "${mda_rez}")
     string(REPLACE "\t\tbuf2 = 0.f;\n\t}\n\n\tBaseProcessor::setProcessing (state);\n\treturn kResultOk;\n}"
-      "\t\tbuf2 = 0.f;\n\t}\n\tAPEX_REZ_SNAP(state ? \"setProcessing-on\" : \"setProcessing-off\");\n\tBaseProcessor::setProcessing (state);\n\tif (!state) apexRezTraceFlush();\n\treturn kResultOk;\n}" mda_rez "${mda_rez}")
+      "\t\tbuf2 = 0.f;\n\t}\n\tAPEX_REZ_SNAP(state ? \"setProcessing-on\" : \"setProcessing-off\");\n\tBaseProcessor::setProcessing (state);\n\treturn kResultOk;\n}" mda_rez "${mda_rez}")
+    string(REPLACE "tresult PLUGIN_API RezFilterProcessor::terminate ()\n{\n\treturn BaseProcessor::terminate ();\n}"
+      "tresult PLUGIN_API RezFilterProcessor::terminate ()\n{\n\tapexRezTraceFlush();\n\treturn BaseProcessor::terminate ();\n}" mda_rez "${mda_rez}")
     string(REPLACE "\tint32 lm=lfomode, ta=tatt, tt=ttrig;\n\n\t--in1;"
-      "\tint32 lm=lfomode, ta=tatt, tt=ttrig;\n\tAPEX_REZ_SNAP(gApexRezTraceBlock == 0 ? \"first-process-pre\" : \"process-pre\");\n\n\t--in1;" mda_rez "${mda_rez}")
+      "\tint32 lm=lfomode, ta=tatt, tt=ttrig;\n\tapexRezBeginBlock(static_cast<uint32_t>(sampleFrames));\n\tAPEX_REZ_SNAP(\"process-pre\");\n\n\t--in1;" mda_rez "${mda_rez}")
+    string(REPLACE "\t\t\tf = ff + fe * e + bl; //freq\n\t\t\tif (f<0.f) i = 0.f; else i= (f>fm)? fm : f;"
+      "\t\t\tf = ff + fe * e + bl; //freq\n\t\t\tapexRezAccumCutoff(f);\n\t\t\tif (f<0.f) i = 0.f; else i= (f>fm)? fm : f;\n\t\t\tif (i==0.f) apexRezAccumIZero();" mda_rez "${mda_rez}")
+    string(REPLACE "\t\t\ta = *++in1 + *++in2;"
+      "\t\t\ta = *++in1 + *++in2;\n\t\t\tapexRezAccumIn(a);" mda_rez "${mda_rez}")
+    string(REPLACE "\t\t\t*++out1 = b1;\n\t\t\t*++out2 = b1;"
+      "\t\t\t*++out1 = b1;\n\t\t\t*++out2 = b1;\n\t\t\tapexRezAccumOut(b1);" mda_rez "${mda_rez}")
     string(REPLACE "\tphi= (float)fmod(ph,6.2831853f);\n}"
-      "\tphi= (float)fmod(ph,6.2831853f);\n\tAPEX_REZ_SNAP(gApexRezTraceBlock <= 1 ? \"first-process-post\" : \"process-post\");\n}" mda_rez "${mda_rez}")
+      "\tphi= (float)fmod(ph,6.2831853f);\n\tAPEX_REZ_SNAP(\"process-post\");\n}" mda_rez "${mda_rez}")
     string(REPLACE "\tif (params[8]<0.1) tthr=0.f; else tthr = static_cast<float> (3.f * params[8] * params[8]);\n}"
       "\tif (params[8]<0.1) tthr=0.f; else tthr = static_cast<float> (3.f * params[8] * params[8]);\n\tAPEX_REZ_SNAP(\"recalculate\");\n}" mda_rez "${mda_rez}")
     string(FIND "${mda_rez}" "APEX_REZ_SNAP" snap_offset)
     if(snap_offset EQUAL -1)
       message(FATAL_ERROR "MDA RezFilter read-only trace injection failed")
+    endif()
+    string(FIND "${mda_rez}" "apexRezAccumCutoff" cutoff_offset)
+    if(cutoff_offset EQUAL -1)
+      message(FATAL_ERROR "MDA RezFilter cutoff accumulator injection failed")
     endif()
     file(WRITE "${CMAKE_BINARY_DIR}/trace-mdaRezFilterProcessor.cpp" "${mda_rez}")
     get_target_property(mda_sources mda-vst3 SOURCES)
@@ -87,16 +107,8 @@ if(APEX_BUILD_VST3_FIXTURE)
     set_property(TARGET mda-vst3 PROPERTY SOURCES "${mda_sources}")
     target_sources(mda-vst3 PRIVATE "${CMAKE_BINARY_DIR}/trace-mdaRezFilterProcessor.cpp")
     target_include_directories(mda-vst3 PRIVATE "${mda_dir}" "${CMAKE_CURRENT_SOURCE_DIR}/diag")
-    message(STATUS "MDA RezFilter diagnostic read-only trace enabled; DSP members are not assigned")
+    message(STATUS "MDA RezFilter diagnostic read-only per-instance trace enabled; DSP members are not assigned")
   else()
-    # Candidate fixture: the unspaced buf0=0.f needle is the denormal tail in
-    # doProcessing, not setActive/setProcessing. Keep it only on this isolated
-    # diagnostic plugin variant. Production PR #292 is untouched.
-    string(FIND "${mda_rez}" "buf0=0.f;" rez_offset)
-    if(rez_offset EQUAL -1)
-      message(FATAL_ERROR "Pinned mda RezFilter setActive buffer init no longer matches")
-    endif()
-    string(REPLACE "buf0=0.f;" "env=0.f; env2=0.f; phi=0.f; bufl=0.f; ttrig=0; tatt=0; buf0=0.f;" mda_rez "${mda_rez}")
     file(WRITE "${CMAKE_BINARY_DIR}/fixture-mdaRezFilterProcessor.cpp" "${mda_rez}")
     get_target_property(mda_sources mda-vst3 SOURCES)
     list(REMOVE_ITEM mda_sources source/mdaRezFilterProcessor.cpp)

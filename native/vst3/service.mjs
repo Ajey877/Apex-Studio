@@ -57,15 +57,17 @@ export class Vst3Service {
       if (this.#closed || this.#ownerTokens.get(owner) !== token) throw new Error('VST3 service/renderer closed during load');
       client = new NativeVst3Client(this.#executable, { timeoutMs: 2000 });
       this.#loading.set(client, owner);
-      const opened = await client.open({ ...instrument, path: pluginPath }, { sampleRate, mode, state: instrument.state, kind });
+      const id = randomUUID();
+      const opened = await client.open({ ...instrument, path: pluginPath }, {
+        sampleRate, mode, state: instrument.state, kind, diagnosticSessionId: id,
+      });
       if (this.#closed || this.#ownerTokens.get(owner) !== token) throw new Error('VST3 service/renderer closed during load');
       // Nonzero plugin latency needs explicit delay compensation; fail honestly
       // rather than exporting time-shifted audio in this first slice.
       if (opened.plugin.latencySamples !== 0) throw new Error(`VST3 ${kind} reports ${opened.plugin.latencySamples} samples of latency; this host path currently supports zero-reported-latency ${kind}s only.`);
       const parameters = validateMetadata(opened.plugin.parameters, opened.plugin.controllerAvailable);
-      const id = randomUUID();
-      this.#sessions.set(id, { client, owner, processing: false, parameters, kind });
-      return { id, latencySamples: opened.plugin.latencySamples, parameters, controllerAvailable: opened.plugin.controllerAvailable };
+      this.#sessions.set(id, { client, owner, processing: false, parameters, kind, pid: client.pid });
+      return { id, latencySamples: opened.plugin.latencySamples, parameters, controllerAvailable: opened.plugin.controllerAvailable, helperPid: client.pid };
     } catch (error) { if (client) await client.dispose().catch(() => {}); throw error; }
     finally { if (client) this.#loading.delete(client); this.#pending--; }
   }

@@ -264,7 +264,33 @@ function registerVst3({ app, ipcMain, dialog, getWindow }) {
     const file = dest.replace(/\.json$/i, '') + '-rezfilter-parity.json';
     fsSync.mkdirSync(path.dirname(file), { recursive: true });
     const corpus = dumpPcmCorpus(dest);
-    fsSync.writeFileSync(file, JSON.stringify({ ...payload, pcmCorpus: corpus }));
+    const traceDir = process.env.APEX_REZFILTER_TRACE_DIR;
+    let traces = null;
+    if (traceDir && fsSync.existsSync(traceDir)) {
+      const destTraces = dest.replace(/\.json$/i, '') + '-rezfilter-traces';
+      fsSync.mkdirSync(destTraces, { recursive: true });
+      const files = [];
+      for (const name of fsSync.readdirSync(traceDir)) {
+        const src = path.join(traceDir, name);
+        if (!fsSync.statSync(src).isFile()) continue;
+        fsSync.copyFileSync(src, path.join(destTraces, name));
+        files.push(name);
+      }
+      traces = { dir: destTraces, files };
+    }
+    const fingerprints = payload?.stateFingerprints ?? {};
+    const dumpHex = (hex, stem) => {
+      if (typeof hex !== 'string' || !hex.length) return null;
+      const bytes = Buffer.from(hex, 'hex');
+      const bin = dest.replace(/\.json$/i, '') + `-${stem}.bin`;
+      fsSync.writeFileSync(bin, bytes);
+      return { path: bin, sha256: crypto.createHash('sha256').update(bytes).digest('hex'), length: bytes.length };
+    };
+    const componentDump = {
+      rezFilterComponent: dumpHex(fingerprints.rezFilterComponentHex, 'rezfilter-component'),
+      rezFilterController: dumpHex(fingerprints.rezFilterControllerHex, 'rezfilter-controller'),
+    };
+    fsSync.writeFileSync(file, JSON.stringify({ ...payload, pcmCorpus: corpus, traces, componentDump }));
     return true;
   });
   if (smokeTimingEnabled) handle('smokeTimingSnapshot', context => {

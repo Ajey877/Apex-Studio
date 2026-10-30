@@ -374,6 +374,17 @@ async function sha256Text(text: string | undefined) {
   return [...new Uint8Array(digest)].map(b => b.toString(16).padStart(2, '0')).join('');
 }
 
+async function sha256BytesFromHex(hex: string | undefined) {
+  if (!hex || hex.length % 2) return { sha256: null as string | null, length: 0 };
+  const bytes = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < bytes.length; i++) bytes[i] = Number.parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+  const digest = await crypto.subtle.digest('SHA-256', bytes);
+  return {
+    sha256: [...new Uint8Array(digest)].map(b => b.toString(16).padStart(2, '0')).join(''),
+    length: bytes.length,
+  };
+}
+
 function compactProcessBlock(record: any) {
   const trace = record.processTrace;
   return {
@@ -1046,7 +1057,8 @@ async function runPackagedMixerAcceptance(instance: typeof audioEngine) {
   const phase = String((globalThis as any).desktopApp?.vst3?.diagnosticPhase ?? 'attempts');
   const twoInsertAttempts: Array<Record<string, unknown>> = [];
   let twoInsertAlignment: Awaited<ReturnType<typeof captureLiveMixerRun>> | undefined;
-  const attemptCount = phase === 'preroll' ? 0 : 20;
+  const requestedAttempts = Number((globalThis as any).desktopApp?.vst3?.diagnosticAttempts ?? 20);
+  const attemptCount = phase === 'preroll' ? 0 : (Number.isFinite(requestedAttempts) && requestedAttempts > 0 ? requestedAttempts : 20);
   for (let attempt = 0; attempt < attemptCount; attempt++) {
     const delayFirst = attempt % 2 === 0;
     const mixer = delayFirst ? twoNativeInsertsDelayFirst : twoNativeInsertsFilterFirst;
@@ -1124,12 +1136,27 @@ async function runPackagedMixerAcceptance(instance: typeof audioEngine) {
   } catch (error) {
     stallError = error instanceof Error ? error.message : String(error);
   }
+  const rezFilterComponentBytes = await sha256BytesFromHex(rezFilter.state?.component);
+  const rezFilterControllerBytes = await sha256BytesFromHex(rezFilter.state?.controller);
+  const delayComponentBytes = await sha256BytesFromHex(delay.state?.component);
+  const delayControllerBytes = await sha256BytesFromHex(delay.state?.controller);
   const stateFingerprints = {
     delayComponentSha256: await sha256Text(delay.state?.component),
     delayControllerSha256: await sha256Text(delay.state?.controller),
+    delayComponentByteSha256: delayComponentBytes.sha256,
+    delayComponentByteLength: delayComponentBytes.length,
+    delayControllerByteSha256: delayControllerBytes.sha256,
+    delayControllerByteLength: delayControllerBytes.length,
     rezFilterComponentSha256: await sha256Text(rezFilter.state?.component),
     rezFilterControllerSha256: await sha256Text(rezFilter.state?.controller),
+    rezFilterComponentByteSha256: rezFilterComponentBytes.sha256,
+    rezFilterComponentByteLength: rezFilterComponentBytes.length,
+    rezFilterControllerByteSha256: rezFilterControllerBytes.sha256,
+    rezFilterControllerByteLength: rezFilterControllerBytes.length,
+    rezFilterComponentHex: rezFilter.state?.component ?? null,
+    rezFilterControllerHex: rezFilter.state?.controller ?? null,
     overlaySha256: await sha256Text(JSON.stringify(PACKAGED_REZFILTER_FIXTURE_PARAMETERS)),
+    overlayParameters: PACKAGED_REZFILTER_FIXTURE_PARAMETERS,
     bypassDelayComponentSha256: await sha256Text(bypassDelay.state?.component),
   };
   const independent = {
