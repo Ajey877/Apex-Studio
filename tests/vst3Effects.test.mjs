@@ -34,6 +34,17 @@ function makeAudio(frames = 4096) {
   }
   return audio;
 }
+function makeMixerNoise(frames = 1024) {
+  const audio = new Float32Array(frames * 2);
+  let state = 0x6d2b79f5;
+  for (let i = 0; i < frames; i++) {
+    state ^= state << 13; state ^= state >>> 17; state ^= state << 5;
+    const sample = ((state >>> 0) / 0x80000000 - 1) * 0.1;
+    audio[i] = sample;
+    audio[frames + i] = sample;
+  }
+  return audio;
+}
 const rms = audio => Math.sqrt(audio.reduce((sum, sample) => sum + sample * sample, 0) / audio.length);
 const difference = (a, b) => {
   assert.equal(a.length, b.length);
@@ -129,7 +140,7 @@ const REZFILTER_OVERLAY = [
 async function measureRestoredRezFilter(service, inspected, delayEffect, {
   owner, reverse, mode, reopen,
 }) {
-  const dry = makeAudio(1024);
+  const dry = makeMixerNoise(1024);
   const openPair = async () => {
     const firstPlugin = reverse ? inspected : delayEffect;
     const secondPlugin = reverse ? delayEffect : inspected;

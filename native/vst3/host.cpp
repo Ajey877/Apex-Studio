@@ -460,7 +460,10 @@ public:
     const auto& output = data.outputs[0];
     for (int ch = 0; ch < 2; ++ch) {
       const int source = std::min(ch, output.numChannels - 1);
-      if (output.silenceFlags & (uint64_t{1} << source)) continue;
+      // Copy processor buffers even when silenceFlags is set. That flag is a
+      // skip hint; MDA RezFilter's checkSilence samples every 10th frame and
+      // can drop a whole non-silent block. Host-zeroed buffers stay silent
+      // if the processor wrote nothing.
       for (int i = 0; i < frames; ++i) {
         float sample = output.channelBuffers32[source][i];
         require(std::isfinite(sample), "Plugin produced non-finite audio");
