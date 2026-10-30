@@ -862,25 +862,16 @@ async function runPackagedMixerAcceptance(instance: typeof audioEngine) {
       prerollSilentInsert: prerollAttempts.filter(a => (a.classification as any)?.dsp === 'silent-insert').length,
     },
   };
+  const independent = {
+    twoInsert: failedTwoInserts.length ? 'failed' : 'passed',
+    silentInsertCount: twoInsertAttempts.filter(a => (a.classification as any)?.dsp === 'silent-insert').length,
+  };
+  Object.assign(parityEvidence, { independent });
   try { await desktopApi.vst3.smokeWriteEvidence?.(parityEvidence); } catch { /* evidence write is diagnostic-only */ }
   if (!twoInsertAlignment) twoInsertAlignment = await captureRun(twoNativeInsertsDelayFirst, alignmentOptions());
-  if (failedTwoInserts.length) {
-    const compactAttempts = failedTwoInserts.map(attempt => {
-      const traces = (attempt.first32 ?? {}) as Record<string, any>;
-      return {
-        attempt: attempt.attempt, prerollSilentBlocks: attempt.prerollSilentBlocks, order: attempt.order,
-        status: attempt.status, classification: attempt.classification,
-        identities: attempt.identities, nativeServicePcm: attempt.nativeServicePcm,
-        first32: Object.fromEntries(Object.entries(traces).map(([slotId, slot]) => [slotId, {
-          sessionId: slot.sessionId, classId: slot.classId, mode: slot.mode, sampleRate: slot.sampleRate,
-          lifecycle: slot.lifecycle, inputEnergy: slot.inputEnergy, outputEnergy: slot.outputEnergy,
-          bufferEnergy: slot.bufferEnergy, flaggedSilence: slot.flaggedSilence, blocks: (slot.blocks ?? []).slice(0, 2),
-        }])),
-        transportError: attempt.transportError ? String(attempt.transportError).slice(0, 400) : undefined,
-      };
-    });
-    throw new Error(`Packaged two-insert failed ${failedTwoInserts.length} (silent insert is audio failure; no retry conversion): ${JSON.stringify(compactAttempts)}`);
-  }
+  let remainderError: string | null = null;
+  let remainder: Record<string, unknown> = {};
+  try {
   const onsetFramesFor = (result: any) => Object.fromEntries([0, 1, 2].map(trackId => [trackId,
     firstCapturedOnsetFrame(result.captures.get(trackId), result.sourceStartContextFrame,
       result.sourceStartContextFrame + result.sampleRate)]));
@@ -991,7 +982,7 @@ async function runPackagedMixerAcceptance(instance: typeof audioEngine) {
   for (const [label, result] of Object.entries(runs)) {
     if (label !== 'removed') assertPackagedMixerRun(result, label);
   }
-  return {
+  remainder = {
     status: 'passed', sampleRate: orderA.sampleRate, blockFrames: VST3_FX_BLOCK_FRAMES,
     blockPeriodMs: VST3_FX_BLOCK_FRAMES * 1000 / orderA.sampleRate,
     pipelineFramesPerEffect: VST3_FX_PIPELINE_FRAMES,
@@ -1020,6 +1011,15 @@ async function runPackagedMixerAcceptance(instance: typeof audioEngine) {
       delayProcessed: correlatedTimingSamples(delayProcessed), delayBypassed: correlatedTimingSamples(delayPassThrough),
       cleanupAfterRemoval: correlatedTimingSamples(removed) },
     proof: 'Packaged Electron production AudioWorklet → authorized main IPC → native VST3 helper → production preload → worklet PCM, captured from per-track and master production Mixer analysers. Deterministic broadband stereo target input preserves the mono-pan-law regression fix. A separate non-periodic known-onset stereo stimulus verifies zero/one/two-insert alignment from actual captured frame positions, with no assertion-side offsets; the master PCM is checked against the exact-frame sum of both track taps. A phase-reset control signal still checks isolation; no exposeFunction processing bridge.'
+  };
+  } catch (error) {
+    remainderError = error instanceof Error ? error.message : String(error);
+  }
+  const status = failedTwoInserts.length || remainderError ? 'failed' : 'passed';
+  return {
+    ...remainder, status,
+    independent: { ...independent, remainder: remainderError ? 'failed' : 'passed' },
+    remainderError, rezFilterParity: parityEvidence, twoInsertFailedCount: failedTwoInserts.length,
   };
 }
 
@@ -1117,6 +1117,10 @@ export async function runDesktopVst3Smoke() {
     if (!reopening) {
       const project = createDefaultProjectState();
       await persistProjectState({ ...project, meta: { ...project.meta, bpm: 120 }, selectedChannelId: channel.id, channels: [channel], mixerTracks: mixer, playlistClips: [clip, automation] });
+    }
+    if (mixerEffects?.status && mixerEffects.status !== 'passed' && mixerEffects.status !== 'not-run') {
+      const detail = 'independent' in mixerEffects ? JSON.stringify((mixerEffects as { independent?: unknown }).independent) : mixerEffects.status;
+      throw new Error(`Packaged mixer diagnostic failed (${detail}): silent inserts remain audio failures; save/reopen are independent`);
     }
     return { automationExportDifferenceRms, automationPcmChecksum, automationStateChecksum, parameterValue: .05, parameterExportDifferenceRms, plugin: plugin.name, classId: plugin.classId, onsetFrame, rms, livePeak, stateReopenEqual: true, missingRejected: rejected,
       applicationStage: reopening ? 'reopened-from-indexeddb-after-process-exit' : 'saved-to-production-indexeddb',
