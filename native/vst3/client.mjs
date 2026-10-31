@@ -18,9 +18,13 @@ export class NativeVst3Client {
   #timeoutMs;
   #stderr = '';
   #exited;
-  constructor(executable, { timeoutMs = 10000 } = {}) {
+  #sessionId;
+  constructor(executable, { timeoutMs = 10000, diagnosticSessionId } = {}) {
     this.#timeoutMs = timeoutMs;
-    this.#child = spawn(executable, [], { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, shell: false });
+    this.#sessionId = diagnosticSessionId || undefined;
+    const env = { ...process.env };
+    if (this.#sessionId) env.APEX_REZFILTER_SESSION_ID = this.#sessionId;
+    this.#child = spawn(executable, [], { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, shell: false, env });
     this.#exited = new Promise(resolve => this.#child.once('close', resolve));
     this.#child.on('error', error => this.#fail(error));
     this.#child.on('exit', (code, signal) => this.#fail(new Error(`VST3 helper exited (${signal ?? code}). ${this.#stderr}`)));
@@ -82,10 +86,12 @@ export class NativeVst3Client {
     return operation;
   }
   get pid() { return this.#child?.pid ?? null; }
+  get diagnosticSessionId() { return this.#sessionId ?? null; }
   open(plugin, { sampleRate = 48000, mode = 'offline', state, kind = 'instrument', diagnosticSessionId } = {}) {
     if (!['instrument', 'effect'].includes(kind)) throw new Error('Invalid VST3 plugin kind');
+    const sessionId = diagnosticSessionId || this.#sessionId;
     return this.request({ command: 'open', path: plugin.path, classId: plugin.classId, sampleRate, mode, kind,
-      ...(diagnosticSessionId ? { diagnosticSessionId } : {}),
+      ...(sessionId ? { diagnosticSessionId: sessionId } : {}),
       ...(state === undefined ? {} : { state }) });
   }
   async parameters(changes) { return (await this.request({ command: 'parameters', parameters: changes })).parameters; }

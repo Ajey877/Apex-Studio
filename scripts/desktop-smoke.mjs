@@ -12,18 +12,22 @@ const fixture = join(process.cwd(), 'build/native-vst3/VST3/Release/mda-vst3.vst
 if (!existsSync(fixture)) throw new Error('Build the real MDA VST3 fixture before packaged smoke');
 const evidence = join(process.cwd(), 'build/native-evidence');
 mkdirSync(evidence, { recursive: true });
-if (process.env.APEX_REZFILTER_TRACE_DIR) mkdirSync(process.env.APEX_REZFILTER_TRACE_DIR, { recursive: true });
+const traceRoot = process.env.APEX_REZFILTER_TRACE_DIR || '';
+if (traceRoot) mkdirSync(traceRoot, { recursive: true });
 const profile = mkdtempSync(join(process.cwd(), 'build/vst3-smoke-profile-'));
 function readJson(path) {
   try { return JSON.parse(readFileSync(path, 'utf8')); } catch { return null; }
 }
 async function launch(reopening) {
   const output = join(evidence, `apex-packaged-smoke-${reopening ? 'reopen' : 'save'}.json`);
+  const traceDir = traceRoot ? join(traceRoot, reopening ? 'reopen' : 'save') : '';
+  if (traceDir) mkdirSync(traceDir, { recursive: true });
   console.log(`[Apex Studio smoke] ${reopening ? 'reopening saved project in new process' : 'launching isolated profile'}: ${executable}`);
   const exit = await new Promise(resolve => {
     const child = spawn(executable, [], {
       env: { ...process.env, APEX_SMOKE_TEST: '1', APEX_SMOKE_REOPEN: reopening ? '1' : '0',
-        APEX_VST3_SMOKE_PLUGIN: fixture, APEX_SMOKE_EVIDENCE: output, APEX_SMOKE_USER_DATA: profile },
+        APEX_VST3_SMOKE_PLUGIN: fixture, APEX_SMOKE_EVIDENCE: output, APEX_SMOKE_USER_DATA: profile,
+        ...(traceDir ? { APEX_REZFILTER_TRACE_DIR: traceDir } : {}) },
       stdio: 'inherit', windowsHide: true,
     });
     const attempts = Number(process.env.APEX_REZFILTER_ATTEMPTS || 20);

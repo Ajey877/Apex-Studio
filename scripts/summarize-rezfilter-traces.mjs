@@ -29,12 +29,15 @@ for (const name of files) {
     traces.push({
       file: name,
       sessionId: json.sessionId,
+      classId: json.classId,
       instanceGen: json.instanceGen,
       pid: json.pid,
       recs: recs.length,
       dropped: json.dropped,
       flushed: json.flushed,
+      silenceOrigin: json.silenceOrigin,
       cutoff: json.cutoff,
+      inL: json.inL, inR: json.inR, outL: json.outL, outR: json.outR,
       firstStage: first?.stage ?? null,
       lastStage: last?.stage ?? null,
       first: first ? {
@@ -43,14 +46,14 @@ for (const name of files) {
         fff: bitsToFloat(first.fff_bits ?? first.fff), fenv: bitsToFloat(first.fenv_bits ?? first.fenv),
         flfo: bitsToFloat(first.flfo_bits ?? first.flfo), buf0: bitsToFloat(first.buf0_bits ?? first.buf0),
         framesFNeg: first.framesFNeg, framesIZero: first.framesIZero,
-        inputNonzero: first.inputNonzero, outputNonzero: first.outputNonzero,
+        inL: first.inL, inR: first.inR, outL: first.outL, outR: first.outR,
       } : null,
       last: last ? {
         stage: last.stage, block: last.block, sequence: last.sequence,
         env: bitsToFloat(last.env_bits ?? last.env), phi: bitsToFloat(last.phi_bits ?? last.phi),
         fff: bitsToFloat(last.fff_bits ?? last.fff), fenv: bitsToFloat(last.fenv_bits ?? last.fenv),
         framesFNeg: last.framesFNeg, framesIZero: last.framesIZero,
-        inputNonzero: last.inputNonzero, outputNonzero: last.outputNonzero,
+        inL: last.inL, inR: last.inR, outL: last.outL, outR: last.outR,
       } : null,
     });
   } catch (error) {

@@ -55,9 +55,9 @@ export class Vst3Service {
     try {
       const pluginPath = await this.#authorize(instrument);
       if (this.#closed || this.#ownerTokens.get(owner) !== token) throw new Error('VST3 service/renderer closed during load');
-      client = new NativeVst3Client(this.#executable, { timeoutMs: 2000 });
-      this.#loading.set(client, owner);
       const id = randomUUID();
+      client = new NativeVst3Client(this.#executable, { timeoutMs: 2000, diagnosticSessionId: id });
+      this.#loading.set(client, owner);
       const opened = await client.open({ ...instrument, path: pluginPath }, {
         sampleRate, mode, state: instrument.state, kind, diagnosticSessionId: id,
       });

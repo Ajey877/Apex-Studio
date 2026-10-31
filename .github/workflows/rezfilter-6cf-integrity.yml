@@ -1,0 +1,357 @@
+name: RezFilter 6C-F integrity, variants, and exact replay
+
+on:
+  push:
+    branches: [diag/packaged-rezfilter-parity]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  package-app:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install --legacy-peer-deps
+      - run: npm run lint
+      - run: npm run native:vst3:build
+      - name: Package Windows dir without a second native rebuild
+        run: node scripts/stage-vst3-helper.mjs && npx vite build && npx electron-builder --win --x64 --dir --publish never
+      - name: Record frozen application/helper hashes
+        shell: bash
+        run: |
+          mkdir -p build/native-evidence
+          node scripts/hash-frozen-binaries.mjs build/native-evidence/frozen-manifest.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: frozen-app-candidate
+          path: dist-electron/win-unpacked
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: frozen-manifest-candidate
+          path: build/native-evidence/frozen-manifest.json
+          if-no-files-found: error
+
+  build-plugin:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - id: upstream
+            fixture: '0'
+            trace: '0'
+          - id: fixture
+            fixture: '1'
+            trace: '0'
+          - id: fixture-trace
+            fixture: '1'
+            trace: '1'
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install --legacy-peer-deps
+      - name: Build plugin variant
+        env:
+          APEX_MDA_REZFILTER_FIXTURE: ${{ matrix.fixture }}
+          APEX_MDA_REZFILTER_TRACE: ${{ matrix.trace }}
+        run: npm run native:vst3:build
+      - name: Record generated source variants and plugin hash
+        shell: bash
+        run: |
+          mkdir -p build/native-evidence/generated-source
+          cp -f build/native-vst3/generated-mdaRezFilter-*.cpp build/native-evidence/generated-source/ || true
+          node scripts/diff-rezfilter-variants.mjs build/native-vst3 build/native-evidence/generated-source/variant-hashes.json
+          node scripts/hash-frozen-binaries.mjs build/native-evidence/plugin-manifest.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mda-vst3-${{ matrix.id }}
+          path: build/native-vst3/VST3/Release/mda-vst3.vst3
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: plugin-manifest-${{ matrix.id }}
+          path: |
+            build/native-evidence/plugin-manifest.json
+            build/native-evidence/generated-source
+
+  perturbation:
+    needs: [package-app, build-plugin]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - plugin: upstream
+            attempts: '20'
+            trace: '0'
+          - plugin: fixture
+            attempts: '20'
+            trace: '0'
+          - plugin: fixture-trace
+            attempts: '20'
+            trace: '1'
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Download frozen application
+        uses: actions/download-artifact@v4
+        with:
+          name: frozen-app-candidate
+          path: dist-electron/win-unpacked
+      - name: Download frozen app manifest
+        uses: actions/download-artifact@v4
+        with:
+          name: frozen-manifest-candidate
+          path: frozen-app-manifest
+      - name: Download swapped plugin
+        uses: actions/download-artifact@v4
+        with:
+          name: mda-vst3-${{ matrix.plugin }}
+          path: swapped-plugin
+      - name: Download plugin manifest
+        uses: actions/download-artifact@v4
+        with:
+          name: plugin-manifest-${{ matrix.plugin }}
+          path: frozen-plugin-manifest
+      - name: Install plugin and verify this-freeze helper identity
+        shell: bash
+        env:
+          CELL: candidate-app-${{ matrix.plugin }}-plugin
+        run: |
+          node -e '
+            const fs = require("fs"), crypto = require("crypto"), path = require("path");
+            function rm(p) { fs.rmSync(p, { recursive: true, force: true }); }
+            function copy(src, dest) {
+              const st = fs.statSync(src);
+              if (st.isDirectory()) {
+                fs.mkdirSync(dest, { recursive: true });
+                for (const name of fs.readdirSync(src)) copy(path.join(src, name), path.join(dest, name));
+              } else {
+                fs.mkdirSync(path.dirname(dest), { recursive: true });
+                fs.copyFileSync(src, dest);
+              }
+            }
+            function find(bundle) {
+              if (!bundle || !fs.existsSync(bundle)) return null;
+              if (fs.statSync(bundle).isFile()) return bundle;
+              const stack = [bundle];
+              let best = null, bestSize = -1;
+              while (stack.length) {
+                const dir = stack.pop();
+                for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+                  const full = path.join(dir, entry.name);
+                  if (entry.isDirectory()) stack.push(full);
+                  else if (/\.(vst3|dll|so|dylib)$/i.test(entry.name)) {
+                    const size = fs.statSync(full).size;
+                    if (size > bestSize) { best = full; bestSize = size; }
+                  }
+                }
+              }
+              return best;
+            }
+            function sha(file) { return crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex"); }
+            const dest = "build/native-vst3/VST3/Release/mda-vst3.vst3";
+            const srcRoot = "swapped-plugin";
+            const nested = path.join(srcRoot, "mda-vst3.vst3");
+            rm(dest);
+            copy(fs.existsSync(nested) ? nested : srcRoot, dest);
+            const pluginMod = find(dest);
+            const pluginSha = sha(pluginMod);
+            const pluginManifest = JSON.parse(fs.readFileSync("frozen-plugin-manifest/plugin-manifest.json", "utf8"));
+            const appManifest = JSON.parse(fs.readFileSync("frozen-app-manifest/frozen-manifest.json", "utf8"));
+            const helper = "dist-electron/win-unpacked/resources/vst3/apex-vst3-host.exe";
+            if (!fs.existsSync(helper)) { console.error("frozen helper missing"); process.exit(1); }
+            const helperSha = sha(helper);
+            const report = {
+              cell: process.env.CELL, pluginModule: pluginMod, pluginSha,
+              expectedPluginSha: pluginManifest.pluginModuleSha256,
+              pluginMatch: pluginSha === pluginManifest.pluginModuleSha256,
+              helperSha, expectedHelperSha: appManifest.helperSha256,
+              helperMatch: helperSha === appManifest.helperSha256,
+              variant: process.env.CELL, attempts: 20,
+              note: "B is candidate fixture, not unmodified upstream. Preserve 41053753392 and 41071255773.",
+            };
+            console.log("::notice title=6C-F frozen identities " + process.env.CELL + "::" + JSON.stringify(report));
+            if (!report.pluginMatch || !report.helperMatch) {
+              console.log("::error title=this-freeze identity mismatch::" + JSON.stringify(report));
+              process.exit(1);
+            }
+          '
+      - name: Run packaged 20-attempt perturbation
+        env:
+          APEX_REZFILTER_PHASE: attempts
+          APEX_REZFILTER_ATTEMPTS: ${{ matrix.attempts }}
+          APEX_REZFILTER_TRACE_DIR: ${{ matrix.plugin == 'fixture-trace' && 'build/native-evidence/rezfilter-traces' || '' }}
+        run: node scripts/desktop-smoke.mjs
+      - name: Annotate and validate traces
+        if: always()
+        shell: bash
+        run: |
+          node -e "
+            const fs = require('fs');
+            const path = require('path');
+            const cell = 'plugin=${{ matrix.plugin }} attempts=20';
+            const dir = 'build/native-evidence';
+            const files = fs.existsSync(dir) ? fs.readdirSync(dir) : [];
+            console.log('::notice title='+cell+' files::'+JSON.stringify(files));
+            const independent = files.filter(f => f.includes('independent-phases'));
+            for (const file of independent) {
+              console.log('::notice title='+cell+' independent::'+fs.readFileSync(path.join(dir, file), 'utf8').slice(0, 3900));
+            }
+            const parity = files.filter(f => f.includes('rezfilter-parity'));
+            for (const file of parity) {
+              const e = JSON.parse(fs.readFileSync(path.join(dir, file), 'utf8'));
+              console.log('::notice title='+cell+' summary::'+JSON.stringify({
+                summary: e.summary || e.rezFilterParity?.summary,
+                identities: e.identities || e.rezFilterParity?.identities,
+                independent: e.independent, stallError: e.stallError, pcmCorpus: e.pcmCorpus,
+                traces: e.traces && { dir: e.traces.dir, fileCount: (e.traces.files||[]).length },
+                componentDump: e.componentDump,
+              }).slice(0, 3900));
+            }
+          "
+          for phase in save reopen; do
+            if [ -d build/native-evidence/rezfilter-traces/$phase ]; then
+              node scripts/summarize-rezfilter-traces.mjs build/native-evidence/rezfilter-traces/$phase build/native-evidence/rezfilter-traces-$phase-summary.json
+              node scripts/check-rezfilter-trace-integrity.mjs build/native-evidence/rezfilter-traces/$phase build/native-evidence/trace-integrity-$phase.json
+            fi
+            copied=build/native-evidence/apex-packaged-smoke-$phase-rezfilter-traces
+            if [ -d "$copied" ]; then
+              node scripts/check-rezfilter-trace-integrity.mjs "$copied" build/native-evidence/$phase-copied-trace-integrity.json || true
+            fi
+          done
+      - name: Upload perturbation evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: 6cf-candidate-app-${{ matrix.plugin }}-plugin
+          path: build/native-evidence
+          if-no-files-found: warn
+
+  replay-original-sessions:
+    needs: [package-app, build-plugin]
+    runs-on: windows-latest
+    timeout-minutes: 50
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Download this-freeze helper
+        uses: actions/download-artifact@v4
+        with:
+          name: frozen-app-candidate
+          path: dist-electron/win-unpacked
+      - name: Download new plugin variants
+        uses: actions/download-artifact@v4
+        with:
+          name: mda-vst3-upstream
+          path: plugin-upstream
+      - uses: actions/download-artifact@v4
+        with:
+          name: mda-vst3-fixture
+          path: plugin-fixture
+      - uses: actions/download-artifact@v4
+        with:
+          name: mda-vst3-fixture-trace
+          path: plugin-fixture-trace
+      - name: Download original 41053753392 evidence and plugins without mutating them
+        shell: bash
+        run: |
+          mkdir -p original-41053753392 original-plugins
+          gh api -H "Accept: application/vnd.github+json" \
+            /repos/Ajey877/Apex-Studio/actions/artifacts/12975788278/zip \
+            --output original-41053753392/artifact.zip
+          gh api -H "Accept: application/vnd.github+json" \
+            /repos/Ajey877/Apex-Studio/actions/artifacts/12975084708/zip \
+            --output original-plugins/instrumented.zip
+          gh api -H "Accept: application/vnd.github+json" \
+            /repos/Ajey877/Apex-Studio/actions/artifacts/12976206816/zip \
+            --output original-plugins/candidate.zip
+          gh api -H "Accept: application/vnd.github+json" \
+            /repos/Ajey877/Apex-Studio/actions/artifacts/12975901772/zip \
+            --output original-41053753392/frozen-app.zip
+          powershell -Command "Expand-Archive -LiteralPath original-41053753392/artifact.zip -DestinationPath original-41053753392/extracted -Force"
+          powershell -Command "Expand-Archive -LiteralPath original-plugins/instrumented.zip -DestinationPath original-plugins/instrumented -Force"
+          powershell -Command "Expand-Archive -LiteralPath original-plugins/candidate.zip -DestinationPath original-plugins/candidate -Force"
+          powershell -Command "Expand-Archive -LiteralPath original-41053753392/frozen-app.zip -DestinationPath original-41053753392/frozen-app -Force"
+          find original-41053753392/extracted -maxdepth 4 -type d -print
+      - name: PCM self-test on fixture-trace plugin
+        shell: bash
+        run: |
+          HELPER="dist-electron/win-unpacked/resources/vst3/apex-vst3-host.exe"
+          node scripts/rezfilter-pcm-selftest.mjs "$HELPER" plugin-fixture-trace build/native-evidence/pcm-selftest.json
+      - name: Replay original save and reopen corpora independently
+        shell: bash
+        run: |
+          set -e
+          NEW_HELPER="dist-electron/win-unpacked/resources/vst3/apex-vst3-host.exe"
+          ORIG_HELPER=$(find original-41053753392/frozen-app -name 'apex-vst3-host.exe' | head -n 1)
+          SAVE_CORPUS=$(find original-41053753392/extracted -type d -name '*save*pcm-corpus*' | head -n 1)
+          REOPEN_CORPUS=$(find original-41053753392/extracted -type d -name '*reopen*pcm-corpus*' | head -n 1)
+          STATE_DIR=original-41053753392/extracted
+          mkdir -p build/native-evidence
+          echo "::notice title=original replay inputs::helper=${ORIG_HELPER:-missing} save=${SAVE_CORPUS:-missing} reopen=${REOPEN_CORPUS:-missing}"
+          replay() {
+            local phase="$1" helper="$2" plugin="$3" corpus="$4" extra="$5"
+            local out="build/native-evidence/replay-${phase}-${extra}.json"
+            if [ -z "$corpus" ] || [ ! -d "$corpus" ]; then
+              echo "{\"ok\":false,\"phase\":\"$phase\",\"error\":\"corpus missing\"}" > "$out"
+              echo "::error title=$phase $extra::corpus missing"
+              return 1
+            fi
+            node scripts/replay-rezfilter-pcm.mjs \
+              --helper "$helper" --plugin "$plugin" --corpus-dir "$corpus" \
+              --state-dir "$STATE_DIR" --phase "$phase" \
+              --out "$out" --trace-dir "build/native-evidence/replay-traces-${phase}-${extra}"
+          }
+          save_status=0
+          reopen_status=0
+          if [ -n "$ORIG_HELPER" ]; then
+            replay save "$ORIG_HELPER" original-plugins/instrumented "${SAVE_CORPUS}" original-instrumented || save_status=1
+            replay reopen "$ORIG_HELPER" original-plugins/instrumented "${REOPEN_CORPUS}" original-instrumented || reopen_status=1
+          else
+            echo '{"ok":false,"error":"original helper missing"}' > build/native-evidence/replay-original-helper-missing.json
+            save_status=1
+            reopen_status=1
+          fi
+          replay save "$NEW_HELPER" plugin-upstream "${SAVE_CORPUS}" new-upstream || true
+          replay save "$NEW_HELPER" plugin-fixture "${SAVE_CORPUS}" new-fixture || true
+          replay save "$NEW_HELPER" plugin-fixture-trace "${SAVE_CORPUS}" new-fixture-trace || true
+          replay reopen "$NEW_HELPER" plugin-upstream "${REOPEN_CORPUS}" new-upstream || true
+          replay reopen "$NEW_HELPER" plugin-fixture "${REOPEN_CORPUS}" new-fixture || true
+          replay reopen "$NEW_HELPER" plugin-fixture-trace "${REOPEN_CORPUS}" new-fixture-trace || true
+          if [ -d build/native-evidence/replay-traces-save-new-fixture-trace ]; then
+            node scripts/check-rezfilter-trace-integrity.mjs \
+              build/native-evidence/replay-traces-save-new-fixture-trace \
+              build/native-evidence/replay-save-trace-integrity.json || true
+          fi
+          echo "save_status=$save_status reopen_status=$reopen_status"
+          if [ "$save_status" != 0 ]; then echo "::error title=save replay::save phase failed independently"; fi
+          if [ "$reopen_status" != 0 ]; then echo "::error title=reopen replay::reopen phase failed independently"; fi
+          if [ "$save_status" != 0 ] || [ "$reopen_status" != 0 ]; then exit 1; fi
+      - name: Upload replay evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: 6cf-original-session-replay
+          path: |
+            build/native-evidence
+            original-41053753392/extracted
+          if-no-files-found: warn

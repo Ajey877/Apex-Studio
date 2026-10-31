@@ -4,7 +4,8 @@
   "artifactId": 12975788278,
   "artifactName": "four-cell-candidate-app-instrumented-plugin",
   "checkRunId": 124057441169,
-  "note": "Original packaged silent-session evidence. Do not overwrite. A later audible session does not disprove these failures. dumpedSilent:2 in the save corpus annotation.",
+  "note": "Original packaged silent-session evidence. Do not overwrite. A later audible session does not disprove these failures. dumpedSilent:2 in the save corpus annotation. Phase 6C-E run 41071255773 is preserved separately and is not a substitute for these sessions.",
+  "phase6ceRunId": 41071255773,
   "frozenIdentities": {
     "candidateAppExeSha256": "cfcb2fcf…d8df00",
     "candidateAsarSha256": "1d290044…e0924c",

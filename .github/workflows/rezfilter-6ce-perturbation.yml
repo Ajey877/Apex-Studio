@@ -1,8 +1,6 @@
 name: RezFilter 6C-E perturbation and original-session replay
 
 on:
-  push:
-    branches: [diag/packaged-rezfilter-parity]
   workflow_dispatch:
 
 permissions:

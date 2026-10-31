@@ -24,6 +24,9 @@
 #include <vector>
 #include <cstdio>
 #include <cstdlib>
+#ifndef _WIN32
+#include <unistd.h>
+#endif
 #ifdef _WIN32
 #include <windows.h>
 #include <objbase.h>
@@ -52,30 +55,36 @@ constexpr size_t kMaxRequest = 8 * 1024 * 1024;
 void require(bool condition, const std::string& message) {
   if (!condition) throw std::runtime_error(message);
 }
-json measurePlanar(const float* samples, int frames) {
-  double square = 0;
-  int nonzero = 0;
-  const int count = frames * 2;
-  for (int i = 0; i < count; ++i) {
-    square += double(samples[i]) * samples[i];
-    if (samples[i] != 0.f) ++nonzero;
+json measureChannel(const float* samples, int frames) {
+  double square = 0, peak = 0;
+  int nonzero = 0, nanInf = 0;
+  for (int i = 0; i < frames; ++i) {
+    const float sample = samples[i];
+    if (!std::isfinite(sample)) { ++nanInf; continue; }
+    if (sample != 0.f) ++nonzero;
+    square += double(sample) * sample;
+    const double abs = sample < 0 ? -double(sample) : double(sample);
+    if (abs > peak) peak = abs;
   }
-  return {{"rms", count ? std::sqrt(square / count) : 0.0}, {"nonzero", nonzero}, {"count", count}};
+  return {{"rms", frames ? std::sqrt(square / frames) : 0.0}, {"peak", peak},
+    {"nonzero", nonzero}, {"nanInf", nanInf}, {"frames", frames}};
+}
+json measurePlanar(const float* samples, int frames) {
+  json left = frames ? measureChannel(samples, frames) : json{{"rms", 0.0}, {"peak", 0.0}, {"nonzero", 0}, {"nanInf", 0}, {"frames", 0}};
+  json right = frames ? measureChannel(samples + frames, frames) : left;
+  return {{"left", left}, {"right", right},
+    {"rms", (left["rms"].get<double>() + right["rms"].get<double>()) * 0.5},
+    {"nonzero", left["nonzero"].get<int>() + right["nonzero"].get<int>()},
+    {"count", frames * 2}};
 }
 json measureChannels(float* const* channels, int32 channelCount, int frames) {
-  double square = 0;
-  int nonzero = 0;
-  int count = 0;
-  const int used = std::min(int(channelCount), 2);
-  for (int ch = 0; ch < used; ++ch) {
-    const float* samples = channels[ch];
-    for (int i = 0; i < frames; ++i) {
-      square += double(samples[i]) * samples[i];
-      if (samples[i] != 0.f) ++nonzero;
-      ++count;
-    }
-  }
-  return {{"rms", count ? std::sqrt(square / count) : 0.0}, {"nonzero", nonzero}, {"count", count}};
+  json left = channelCount > 0 && frames > 0 ? measureChannel(channels[0], frames) : json{{"rms", 0.0}, {"peak", 0.0}, {"nonzero", 0}, {"nanInf", 0}, {"frames", 0}};
+  json right = channelCount > 1 && frames > 0 ? measureChannel(channels[1], frames) : json{{"rms", 0.0}, {"peak", 0.0}, {"nonzero", 0}, {"nanInf", 0}, {"frames", 0}};
+  return {{"left", left}, {"right", right},
+    {"rms", (left["rms"].get<double>() + right["rms"].get<double>()) * 0.5},
+    {"nonzero", left["nonzero"].get<int>() + right["nonzero"].get<int>()},
+    {"nanInf", left["nanInf"].get<int>() + right["nanInf"].get<int>()},
+    {"count", frames * std::min(int(channelCount), 2)}};
 }
 uint32_t fnv1a(const float* samples, int count) {
   uint32_t hash = 2166136261u;
@@ -215,23 +224,30 @@ public:
   }
   json open(const json& request) {
     diagnosticSessionId = request.value("diagnosticSessionId", std::string{});
-    if (const char* dir = std::getenv("APEX_REZFILTER_TRACE_DIR")) {
-      char pending[1024];
-      std::snprintf(pending, sizeof(pending), "%s/pending-open.txt", dir);
-      if (FILE* file = std::fopen(pending, "wb")) {
-        std::fprintf(file, "%s\n", diagnosticSessionId.c_str());
-        std::fclose(file);
-      }
-      const auto map = std::string("{\"sessionId\":\"") + diagnosticSessionId + "\",\"pid\":" +
+    classId = request.at("classId").get<std::string>();
 #ifdef _WIN32
-        std::to_string(_getpid())
+    SetEnvironmentVariableA("APEX_REZFILTER_SESSION_ID", diagnosticSessionId.c_str());
+    SetEnvironmentVariableA("APEX_REZFILTER_CLASS_ID", classId.c_str());
 #else
-        std::to_string(0)
+    setenv("APEX_REZFILTER_SESSION_ID", diagnosticSessionId.c_str(), 1);
+    setenv("APEX_REZFILTER_CLASS_ID", classId.c_str(), 1);
 #endif
-        + ",\"classId\":\"" + request.at("classId").get<std::string>() + "\",\"path\":" +
-        json(request.at("path").get<std::string>()).dump() + "}";
+    if (std::getenv("APEX_REZFILTER_TRACE_DIR")) {
+      const auto pid =
+#ifdef _WIN32
+        _getpid();
+#else
+        getpid();
+#endif
+      json map = {
+        {"sessionId", diagnosticSessionId},
+        {"pid", pid},
+        {"classId", classId},
+        {"path", request.at("path").get<std::string>()},
+      };
+      const auto text = map.dump();
       writeTraceSidecar("host-session-" + (diagnosticSessionId.empty() ? "unknown" : diagnosticSessionId) + ".json",
-        map.data(), map.size());
+        text.data(), text.size());
     }
     std::string error;
     module = VST3::Hosting::Module::create(request.at("path").get<std::string>(), error);
@@ -550,8 +566,11 @@ public:
     if (trace && processBlockIndex == 0) note("first-process");
     checked(processor->process(data), "Plugin process failed");
     const auto& output = data.outputs[0];
-    json inputStats = frames > 0 && !inputAudio.empty() ? measurePlanar(inputAudio.data(), frames) : json{{"rms", 0.0}, {"nonzero", 0}, {"count", 0}};
-    json bufferStats = frames > 0 ? measureChannels(output.channelBuffers32, output.numChannels, frames) : json{{"rms", 0.0}, {"nonzero", 0}, {"count", 0}};
+    json inputStats = frames > 0 && !inputAudio.empty() ? measurePlanar(inputAudio.data(), frames) : json{{"rms", 0.0}, {"nonzero", 0}, {"count", 0}, {"left", json::object()}, {"right", json::object()}};
+    json bufferStats = frames > 0 ? measureChannels(output.channelBuffers32, output.numChannels, frames) : json{{"rms", 0.0}, {"nonzero", 0}, {"nanInf", 0}, {"count", 0}, {"left", json::object()}, {"right", json::object()}};
+    json processorInputStats = frames > 0 && !isInstrument && data.numInputs == 1
+      ? measureChannels(data.inputs[0].channelBuffers32, data.inputs[0].numChannels, frames)
+      : json{{"left", json::object()}, {"right", json::object()}};
     // Retain a zero-sample flush for the next audible block too: some SDK
     // processors recalculate coefficients only while processing samples.
     if (frames > 0) {
@@ -589,10 +608,19 @@ public:
         {"inputChecksum", frames > 0 && !inputAudio.empty() ? fnv1a(inputAudio.data(), frames * 2) : 0},
         {"inputRms", inputStats["rms"]},
         {"inputNonzero", inputStats["nonzero"]},
+        {"inputLeft", inputStats["left"]},
+        {"inputRight", inputStats["right"]},
+        {"processorInputLeft", processorInputStats["left"]},
+        {"processorInputRight", processorInputStats["right"]},
         {"outputBufferRms", bufferStats["rms"]},
         {"outputBufferNonzero", bufferStats["nonzero"]},
+        {"outputRawLeft", bufferStats["left"]},
+        {"outputRawRight", bufferStats["right"]},
+        {"outputRawNanInf", bufferStats["nanInf"]},
         {"extractedRms", extracted["rms"]},
-        {"extractedNonzero", extracted["nonzero"]}
+        {"extractedNonzero", extracted["nonzero"]},
+        {"extractedLeft", extracted["left"]},
+        {"extractedRight", extracted["right"]}
       };
       if (processBlockIndex == 0) processTrace["lifecycle"] = lifecycle;
       if (frames > 0) ++processBlockIndex;

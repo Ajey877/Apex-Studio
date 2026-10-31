@@ -29,6 +29,8 @@ const { NativeVst3Client, discoverVst3 } = await import(pathToFileURL(path.resol
 const catalog = JSON.parse(readFileSync(catalogPath, 'utf8'));
 const overlay = catalog.overlayParameters ?? [];
 const requested = new Set((catalog.sessions ?? []).map(session => session.sessionId));
+const stateRoot = args['state-dir'] || corpusDir;
+const phase = args.phase || null;
 
 function sha256Buf(buf) {
   return createHash('sha256').update(buf).digest('hex');
@@ -106,25 +108,84 @@ const manifest = loadManifest(corpusDir);
 const sessions = [];
 const catalogById = Object.fromEntries((catalog.sessions ?? []).map(session => [session.sessionId, session]));
 
+function findNamedFile(root, predicate) {
+  if (!root || !existsSync(root)) return null;
+  const walk = [root];
+  while (walk.length) {
+    const current = walk.pop();
+    for (const entry of readdirSync(current, { withFileTypes: true })) {
+      const full = path.join(current, entry.name);
+      if (entry.isDirectory()) walk.push(full);
+      else if (predicate(entry.name, full)) return full;
+    }
+  }
+  return null;
+}
+function loadStateBytes(sessionId) {
+  const componentPath = args.component
+    || findNamedFile(stateRoot, name => name === `component-${sessionId}.bin`)
+    || findNamedFile(stateRoot, name => name.endsWith('rezfilter-component.bin'));
+  const controllerPath = args.controller
+    || findNamedFile(stateRoot, name => name === `controller-${sessionId}.bin`)
+    || findNamedFile(stateRoot, name => name.endsWith('rezfilter-controller.bin'));
+  const component = componentPath && existsSync(componentPath) ? readFileSync(componentPath) : null;
+  const controller = controllerPath && existsSync(controllerPath) ? readFileSync(controllerPath) : null;
+  return {
+    componentPath, controllerPath,
+    componentHex: component ? component.toString('hex') : null,
+    controllerHex: controller ? controller.toString('hex') : null,
+    componentSha256: component ? sha256Buf(component) : null,
+    controllerSha256: controller ? sha256Buf(controller) : null,
+    componentLength: component ? component.length : 0,
+  };
+}
+
 async function replaySession(sessionId, inputPath, expectedOutPath, expected) {
   const input = readFileSync(inputPath);
   const inputSha = sha256Buf(input);
+  if (expected?.completeInputSha256 && inputSha !== expected.completeInputSha256) {
+    return {
+      sessionId, label: expected.label ?? null, phase,
+      error: 'input PCM SHA-256 does not match the preserved session catalog',
+      inputSha256: inputSha, catalogInputSha256: expected.completeInputSha256, inputMatch: false,
+    };
+  }
+  const restored = loadStateBytes(sessionId);
+  const expectedComponent = expected?.componentByteSha256 || catalog.rezFilterComponentByteSha256 || catalog.frozenIdentities?.rezFilterComponentByteSha256;
+  if (expectedComponent && restored.componentSha256 && restored.componentSha256 !== expectedComponent) {
+    return {
+      sessionId, label: expected?.label ?? null, phase,
+      error: 'component-state SHA-256 does not match the preserved session catalog; refusing replay',
+      componentSha256: restored.componentSha256, expectedComponent, ...restored,
+    };
+  }
+  if (!restored.componentHex) {
+    return { sessionId, label: expected?.label ?? null, phase, error: 'serialized component state missing; parameter-only replay is not an exact reproduction' };
+  }
   const samples = new Float32Array(input.buffer, input.byteOffset, Math.floor(input.byteLength / 4));
   const blockFloats = framesPerBlock * 2;
   const blockCount = Math.floor(samples.length / blockFloats);
-  const client = new NativeVst3Client(helper, { timeoutMs: 15000 });
+  if (traceDir) {
+    mkdirSync(traceDir, { recursive: true });
+    process.env.APEX_REZFILTER_TRACE_DIR = traceDir;
+  }
+  const client = new NativeVst3Client(helper, { timeoutMs: 15000, diagnosticSessionId: sessionId });
   const outputs = [];
-  let outputNonzero = 0, inputNonzero = 0, silentBlocks = 0;
+  let outputNonzero = 0, inputNonzero = 0, silentBlocks = 0, helperPid = null;
   try {
-    if (traceDir) process.env.APEX_REZFILTER_TRACE_DIR = traceDir;
+    helperPid = client.pid;
     await client.open(identity, {
       sampleRate, mode: 'realtime', kind: 'effect', diagnosticSessionId: sessionId,
-      state: { schema: 1, classId: identity.classId, parameters: overlay },
+      state: {
+        schema: 1, classId: identity.classId, parameters: overlay,
+        component: restored.componentHex,
+        ...(restored.controllerHex ? { controller: restored.controllerHex } : {}),
+      },
     });
     for (let index = 0; index < blockCount; index++) {
       const block = samples.subarray(index * blockFloats, (index + 1) * blockFloats);
       for (let i = 0; i < block.length; i++) if (block[i] !== 0) inputNonzero++;
-      const result = await client.processAudio(framesPerBlock, Float32Array.from(block), [], 120, false);
+      const result = await client.processAudio(framesPerBlock, Float32Array.from(block), [], 120, true);
       const out = result.samples;
       outputs.push(Buffer.from(out.buffer, out.byteOffset, out.byteLength));
       let blockOutNz = 0;
@@ -151,12 +212,16 @@ async function replaySession(sessionId, inputPath, expectedOutPath, expected) {
     outputMatch: expectedOutSha ? outputSha === expectedOutSha : null,
     inputNonzero, outputNonzero, silentBlocks,
     pluginSilent: outputNonzero === 0 && inputNonzero > 0,
+    helperPid,
+    restored,
+    phase,
   };
 }
 
 if (manifest?.sessions) {
   for (const entry of manifest.sessions) {
     const sessionId = String(entry.sessionId ?? '');
+    if (phase && corpusDir && !String(corpusDir).includes(phase) && args['require-phase']) continue;
     if (requested.size && !requested.has(sessionId) && !args.all) continue;
     const inputPath = resolveReplayFile(entry.replayFiles?.input, corpusDir);
     const outputPath = resolveReplayFile(entry.replayFiles?.output, corpusDir);
@@ -175,11 +240,13 @@ if (manifest?.sessions) {
 const report = {
   helper, helperSha256: helperSha, plugin, pluginModule, pluginSha256: pluginSha,
   classId: identity.classId, name: identity.name,
-  sampleRate, framesPerBlock, overlay,
+  sampleRate, framesPerBlock, overlay, phase,
   catalogRunId: catalog.runId, artifactId: catalog.artifactId,
   sessions,
   scannedErrors: scanned.errors,
 };
+const failed = sessions.filter(session => session.error || session.inputMatch === false);
+report.ok = failed.length === 0 && sessions.length > 0;
 mkdirSync(path.dirname(outPath), { recursive: true });
 writeFileSync(outPath, JSON.stringify(report, null, 2));
 if (process.env.GITHUB_ACTIONS) {
@@ -190,4 +257,5 @@ if (process.env.GITHUB_ACTIONS) {
     })),
   }).slice(0, 3900)}`);
 }
-console.log(JSON.stringify({ ok: true, outPath, sessions: sessions.length }, null, 2));
+console.log(JSON.stringify({ ok: report.ok, outPath, sessions: sessions.length, failed: failed.length }, null, 2));
+if (!report.ok) process.exitCode = 1;

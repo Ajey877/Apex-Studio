@@ -24,8 +24,9 @@ const cmake = process.env.CMAKE ?? 'cmake';
 // can move beyond VS2022); never pin to a toolchain absent from the runner.
 const generator = process.platform === 'win32' ? ['-A', 'x64'] : ['-G', 'Ninja'];
 const trace = process.env.APEX_MDA_REZFILTER_TRACE === '1' ? ['-DAPEX_MDA_REZFILTER_TRACE=ON'] : [];
+const fixture = process.env.APEX_MDA_REZFILTER_FIXTURE === '0' ? ['-DAPEX_MDA_REZFILTER_FIXTURE=OFF'] : ['-DAPEX_MDA_REZFILTER_FIXTURE=ON'];
 run(cmake, ['-S', 'native/vst3', '-B', 'build/native-vst3', ...generator, '-DCMAKE_BUILD_TYPE=Release',
   `-DVST3_SDK_ROOT=${path.resolve('build/native-deps/vst3sdk')}`,
-  `-DJSON_ROOT=${path.resolve('build/native-deps/json')}`, ...trace]);
+  `-DJSON_ROOT=${path.resolve('build/native-deps/json')}`, ...fixture, ...trace]);
 run(cmake, ['--build', 'build/native-vst3', '--config', 'Release', '--target',
   'apex-vst3-host', 'mda-vst3', 'apex-vst3-protocol-fault', '--parallel', '2']);
