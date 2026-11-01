@@ -1,4 +1,5 @@
 import { MixerRoute, MixerRouteValidation, MixerRoutingGraph } from './mixerRouting';
+import { MAX_MIXER_COMPENSATION_SECONDS } from './mixerLatencyCompensation';
 
 export interface MixerAudioNodePair {
   input: AudioNode;
@@ -162,8 +163,12 @@ export class MixerRoutingAdapter {
           continue;
         }
         const context = source.output.context;
-        const delay = context.createDelay(10);
-        delay.delayTime.value = frames / context.sampleRate;
+        const delaySeconds = frames / context.sampleRate;
+        if (!Number.isFinite(delaySeconds) || delaySeconds < 0 || delaySeconds > MAX_MIXER_COMPENSATION_SECONDS) {
+          throw new Error(`Mixer route ${route.trackId} -> ${route.targetId} compensation delay (${frames} frames / ${delaySeconds.toFixed(3)} s) exceeds the maximum ${MAX_MIXER_COMPENSATION_SECONDS} s DelayNode budget.`);
+        }
+        const delay = context.createDelay(MAX_MIXER_COMPENSATION_SECONDS);
+        delay.delayTime.value = delaySeconds;
         source.output.connect(delay);
         delay.connect(destination);
         this.routeDelayNodes.set(route.trackId, delay);

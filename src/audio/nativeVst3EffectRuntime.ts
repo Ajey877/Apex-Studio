@@ -1,13 +1,15 @@
 import type { FxSlot, MixerTrack } from '../types/daw';
 import type { Vst3Effect, Vst3ParameterChange, Vst3Parameter, Vst3Bridge, Vst3AudioProcessProfile } from './nativeVst3Types';
-import { assertVst3Effect, getVst3Bridge } from './nativeVst3Types';
+import { assertValidVst3EffectLatencySamples, assertVst3Effect, getVst3Bridge } from './nativeVst3Types';
 
 export interface Vst3MixerEffectDiagnostic {
   trackId: number;
   slotId: string;
   message: string;
-  /** Fixed worklet buffering delay; plugin-reported latency must be zero. */
+  /** Fixed worklet buffering delay; plugin-reported latency is tracked separately. */
   pipelineLatencyMs?: number;
+  pluginLatencySamples?: number;
+  pluginLatencyMs?: number;
 }
 
 const listeners = new Set<() => void>();
@@ -17,9 +19,23 @@ export const subscribeVst3MixerEffectDiagnostics = (listener: () => void) => {
   listeners.add(listener);
   return () => listeners.delete(listener);
 };
-export function reportVst3MixerEffect(trackId: number, slotId: string, message: string, pipelineLatencyMs?: number) {
+export function reportVst3MixerEffect(
+  trackId: number,
+  slotId: string,
+  message: string,
+  pipelineLatencyMs?: number,
+  pluginLatencySamples?: number,
+  pluginLatencyMs?: number,
+) {
   diagnostics = [...diagnostics.filter(item => !(item.trackId === trackId && item.slotId === slotId)),
-    { trackId, slotId, message, ...(pipelineLatencyMs === undefined ? {} : { pipelineLatencyMs }) }].slice(-32);
+    {
+      trackId,
+      slotId,
+      message,
+      ...(pipelineLatencyMs === undefined ? {} : { pipelineLatencyMs }),
+      ...(pluginLatencySamples === undefined ? {} : { pluginLatencySamples }),
+      ...(pluginLatencyMs === undefined ? {} : { pluginLatencyMs }),
+    }].slice(-32);
   listeners.forEach(listener => listener());
 }
 function clearDiagnostic(trackId: number, slotId: string) {
@@ -70,6 +86,10 @@ class ApexVst3FxProcessor extends AudioWorkletProcessor {
     super();
     this.blockFrames = ${VST3_FX_BLOCK_FRAMES};
     this.delayFrames = ${VST3_FX_PIPELINE_FRAMES};
+    this.pluginLatencyFrames = 0;
+    this.bypassDelayL = null;
+    this.bypassDelayR = null;
+    this.bypassDelayPos = 0;
     this.left = new Float32Array(this.blockFrames);
     this.right = new Float32Array(this.blockFrames);
     this.silentInput = new Float32Array(128);
@@ -126,6 +146,27 @@ class ApexVst3FxProcessor extends AudioWorkletProcessor {
         this.dryReady.clear();
         if (this.livePort) { try { this.livePort.close(); } catch (e) {} this.livePort = null; }
         this.port.postMessage({ type: 'stop-ack', sequence, reason: message.reason || 'dispose' });
+        return;
+      }
+      if (message?.type === 'plugin-latency') {
+        const frames = message.frames;
+        if (!Number.isInteger(frames) || frames < 0 || frames > 192000) {
+          this.fail('Invalid native effect plugin latency configuration.');
+          return;
+        }
+        if (this.nodeStartContextFrame !== null && frames !== this.pluginLatencyFrames) {
+          this.fail('Native effect latency cannot be reconfigured after audio streaming has started.');
+          return;
+        }
+        this.pluginLatencyFrames = frames;
+        if (frames > 0) {
+          this.bypassDelayL = new Float32Array(frames);
+          this.bypassDelayR = new Float32Array(frames);
+        } else {
+          this.bypassDelayL = null;
+          this.bypassDelayR = null;
+        }
+        this.bypassDelayPos = 0;
         return;
       }
       if (message?.type === 'bypass') { this.bypass = !!message.value; return; }
@@ -217,8 +258,18 @@ class ApexVst3FxProcessor extends AudioWorkletProcessor {
         this.fail('Native effect output was not ready at its scheduled audio frame; playback stopped rather than using dry or stale audio. Sequence ' + sequence + ', source frame ' + sourceFrame + ', due output frame ' + dueOutputFrame + ', current output frame ' + currentOutputFrame + ', pending sequence ' + this.pending + '.');
         break;
       }
-      out[0][i] = this.bypass ? dry[offset] : processed[offset];
-      out[1][i] = this.bypass ? dry[this.blockFrames + offset] : processed[this.blockFrames + offset];
+      let alignedDryL = dry[offset];
+      let alignedDryR = dry[this.blockFrames + offset];
+      if (this.pluginLatencyFrames > 0 && this.bypassDelayL && this.bypassDelayR) {
+        const pos = this.bypassDelayPos;
+        alignedDryL = this.bypassDelayL[pos];
+        alignedDryR = this.bypassDelayR[pos];
+        this.bypassDelayL[pos] = dry[offset];
+        this.bypassDelayR[pos] = dry[this.blockFrames + offset];
+        this.bypassDelayPos = pos + 1 >= this.pluginLatencyFrames ? 0 : pos + 1;
+      }
+      out[0][i] = this.bypass ? alignedDryL : processed[offset];
+      out[1][i] = this.bypass ? alignedDryR : processed[this.blockFrames + offset];
       if (offset === this.blockFrames - 1) { this.ready.delete(sequence); this.dryReady.delete(sequence); }
     }
     this.outputFrame += out[0].length;
@@ -289,6 +340,7 @@ interface PreparedEffect {
   context: BaseAudioContext;
   bridge: Vst3Bridge;
   node: AudioWorkletNode;
+  pluginLatencyFrames: number;
   sessionId?: string;
   runtimeId?: string;
   profileEnabled: boolean;
@@ -336,6 +388,18 @@ export class NativeVst3EffectRuntime {
       (!effect || entry.configuration === effectKey(effect));
   }
 
+  pluginLatencyFramesFor(trackId: number, slotId: string, context: BaseAudioContext, effect?: Vst3Effect): number | undefined {
+    const entry = this.prepared.get(runtimeKey(trackId, slotId));
+    if (!entry || entry.trackId !== trackId || entry.context !== context || entry.disposed || entry.stopping || entry.faulted ||
+        (effect && entry.configuration !== effectKey(effect))) return undefined;
+    return entry.pluginLatencyFrames;
+  }
+
+  liveLatencyFramesFor(trackId: number, slotId: string, context: BaseAudioContext, effect?: Vst3Effect): number | undefined {
+    const pluginFrames = this.pluginLatencyFramesFor(trackId, slotId, context, effect);
+    return pluginFrames === undefined ? undefined : VST3_FX_PIPELINE_FRAMES + pluginFrames;
+  }
+
   setBypassed(trackId: number, slotId: string, bypassed: boolean) {
     const entry = this.prepared.get(runtimeKey(trackId, slotId));
     if (entry && entry.trackId === trackId && !entry.disposed && !entry.stopping) entry.node.port.postMessage({ type: 'bypass', value: bypassed });
@@ -376,6 +440,7 @@ export class NativeVst3EffectRuntime {
     });
     const entry: PreparedEffect = {
       trackId, slotId: slot.id, configuration: effectKey(slot.vst3Effect), effect: structuredClone(slot.vst3Effect), context, bridge, node,
+      pluginLatencyFrames: 0,
       runtimeId: crypto.randomUUID(), profileEnabled, liveAudioBound: false,
       tail: Promise.resolve(), queueDepth: 0, disposed: false, stopping: false, faulted: false,
       stopCancelledSequences: new Set(), ready: Promise.resolve(),
@@ -508,8 +573,15 @@ export class NativeVst3EffectRuntime {
     node.onprocessorerror = () => this.fail(entry, 'Native effect AudioWorklet processor failed.');
     entry.ready = bridge.open(entry.effect, context.sampleRate, 'realtime', 'effect').then(async opened => {
       if (isCancelled()) { await bridge.close(opened.id).catch(() => {}); throw new Error('Native effect preparation cancelled.'); }
-      if (opened.latencySamples !== 0) { await bridge.close(opened.id).catch(() => {}); throw new Error(`VST3 effect reports ${opened.latencySamples} samples of latency; nonzero plugin latency is unsupported and is not compensated.`); }
+      let pluginLatencyFrames: number;
+      try {
+        pluginLatencyFrames = assertValidVst3EffectLatencySamples(opened.latencySamples, context.sampleRate);
+      } catch (error) {
+        await bridge.close(opened.id).catch(() => {});
+        throw error;
+      }
       entry.sessionId = opened.id;
+      entry.pluginLatencyFrames = pluginLatencyFrames;
       const overlay = entry.effect.state.parameters
         .filter(parameter => Number.isInteger(parameter.id) && parameter.id >= 0 && Number.isFinite(parameter.value) && parameter.value >= 0 && parameter.value <= 1)
         .map(parameter => ({ id: parameter.id, value: parameter.value }));
@@ -530,6 +602,7 @@ export class NativeVst3EffectRuntime {
           throw new Error('Native effect preparation cancelled.');
         }
       }
+      node.port.postMessage({ type: 'plugin-latency', frames: pluginLatencyFrames });
       if (typeof bridge.bindLiveAudioPort === 'function') {
         const bound = new Promise<void>((resolve, reject) => {
           const timer = setTimeout(() => reject(new Error('Live audio port bind timed out.')), 2000);
@@ -559,9 +632,15 @@ export class NativeVst3EffectRuntime {
         throw new Error('Dedicated live audio port is required in the desktop Mixer.');
       }
       const fixedLatencyMs = VST3_FX_PIPELINE_FRAMES * 1000 / context.sampleRate;
-      reportVst3MixerEffect(trackId, slot.id,
-        `VST3 ready. Fixed live block buffering: ${fixedLatencyMs.toFixed(1)} ms. Track branches are compensated at Mixer summing inputs; plugin-reported latency remains unsupported.`,
-        fixedLatencyMs);
+      const pluginLatencyMs = pluginLatencyFrames * 1000 / context.sampleRate;
+      reportVst3MixerEffect(
+        trackId,
+        slot.id,
+        `VST3 ready. Fixed live block buffering: ${fixedLatencyMs.toFixed(1)} ms; plugin latency: ${pluginLatencyFrames} samples (${pluginLatencyMs.toFixed(2)} ms). Track branches are compensated at Mixer summing inputs.`,
+        fixedLatencyMs,
+        pluginLatencyFrames,
+        pluginLatencyMs,
+      );
     });
     entry.ready.catch(() => {});
     try { await entry.ready; }

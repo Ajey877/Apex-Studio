@@ -35,7 +35,26 @@ export interface Vst3Parameter {
   defaultValue: number; currentValue: number | null; flags: number; stepCount: number;
   choices?: Array<{ value: number; label: string }>;
 }
-export interface Vst3ParameterMetadata { parameters: Vst3Parameter[]; controllerAvailable: boolean }
+export interface Vst3ParameterMetadata {
+  parameters: Vst3Parameter[];
+  controllerAvailable: boolean;
+  latencySamples?: number;
+}
+export const MAX_VST3_EFFECT_LATENCY_SECONDS = 1;
+export function maxVst3EffectLatencySamples(sampleRate: number): number {
+  if (!Number.isFinite(sampleRate) || sampleRate <= 0) return 0;
+  return Math.floor(sampleRate * MAX_VST3_EFFECT_LATENCY_SECONDS);
+}
+export function assertValidVst3EffectLatencySamples(latencySamples: unknown, sampleRate: number): number {
+  if (typeof latencySamples !== 'number' || !Number.isSafeInteger(latencySamples) || latencySamples < 0) {
+    throw new Error(`VST3 effect reported an invalid latency value (${String(latencySamples)} samples).`);
+  }
+  const maxSamples = maxVst3EffectLatencySamples(sampleRate);
+  if (latencySamples > maxSamples) {
+    throw new Error(`VST3 effect reports excessive latency (${latencySamples} samples at ${sampleRate} Hz; maximum supported is ${maxSamples} samples).`);
+  }
+  return latencySamples;
+}
 export type Vst3ParameterPoint = { id: number; value: number; offset?: number };
 export type Vst3ParameterChange = { id: number; value: number };
 /** Smoke-only correlation metadata; the production IPC payload remains PCM plus validated settings. */

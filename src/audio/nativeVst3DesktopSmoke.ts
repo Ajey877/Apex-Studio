@@ -782,7 +782,7 @@ function assertPackagedMixerRun(run: any, label: string) {
 
 async function runPackagedMixerAcceptance(
   instance: typeof audioEngine,
-  options: { reopening?: boolean; restoredTwoInsertSlots?: FxSlot[] } = {},
+  options: { reopening?: boolean; restoredTwoInsertSlots?: FxSlot[]; restoredNonzeroLatencySlots?: FxSlot[] } = {},
 ) {
   const desktopApi = (globalThis as any).desktopApp;
   if (desktopApi?.smokeTest !== true || typeof desktopApi?.vst3?.smokeTimingSnapshot !== 'function') {
@@ -795,7 +795,11 @@ async function runPackagedMixerAcceptance(
   const discovered = await bridge.discoverEffects();
   const delayIdentity: Vst3Identity | undefined = discovered.plugins.find(plugin => plugin.name === 'mda Delay');
   const filterIdentity: Vst3Identity | undefined = discovered.plugins.find(plugin => plugin.name === 'mda RezFilter');
-  if (!delayIdentity || !filterIdentity) throw new Error(`Redistributable MDA Mixer fixtures unavailable through packaged production IPC: ${JSON.stringify(discovered.errors)}`);
+  const lookaheadIdentity: Vst3Identity | undefined = discovered.plugins.find(plugin => plugin.name === 'Apex Latency Fixture');
+  const invalidLatencyIdentity: Vst3Identity | undefined = discovered.plugins.find(plugin => plugin.name === 'Apex Invalid Latency Fixture');
+  if (!delayIdentity || !filterIdentity || !lookaheadIdentity || !invalidLatencyIdentity) {
+    throw new Error(`Redistributable MDA / Apex Latency Mixer fixtures unavailable through packaged production IPC: ${JSON.stringify(discovered.errors)}`);
+  }
   const delay = await bridge.inspectEffect(delayIdentity);
   const rezFilterLatencyParameters = PACKAGED_REZFILTER_FIXTURE_PARAMETERS.map(
     parameter => ({ id: parameter.id, value: parameter.value }));
@@ -1039,7 +1043,141 @@ async function runPackagedMixerAcceptance(
   if (Math.abs(bypassVsRemoved.normalizedLagFrames + VST3_FX_PIPELINE_FRAMES) > 256) {
     throw new Error(`Removing the effect did not remove exactly its declared ${VST3_FX_PIPELINE_FRAMES}-frame pipeline (after run-start normalization): ${JSON.stringify(bypassVsRemoved)}; bounded timing evidence=${acceptanceTimingEvidence}`);
   }
-  const runs = { orderA, orderB, delayProcessed, delayPassThrough, removed, persistedTwoInserts: persistedTwoInsertsRun };
+
+  // Nonzero plugin-reported latency proof (320 samples + 512 samples) through
+  // the real packaged AudioWorklet + MessagePortMain + C++ helper + Master sum:
+  const baseLookahead = await bridge.inspectEffect(lookaheadIdentity);
+  const lookahead320Params = [{ id: 0, value: 320 / 4096 }, { id: 1, value: 0.55 }, { id: 2, value: 0.5 }, { id: 3, value: 0 }];
+  const lookahead512Params = [{ id: 0, value: 512 / 4096 }, { id: 1, value: 0 }, { id: 2, value: 0.375 }, { id: 3, value: 0 }];
+  const lookahead320 = withOverlayParameters(
+    await bridge.inspectEffect(lookaheadIdentity, { ...baseLookahead.state, parameters: lookahead320Params }),
+    lookahead320Params,
+  );
+  const lookahead512 = withOverlayParameters(
+    await bridge.inspectEffect(lookaheadIdentity, { ...baseLookahead.state, parameters: lookahead512Params }),
+    lookahead512Params,
+  );
+  const desc320 = await bridge.describeEffect(lookahead320);
+  const desc512 = await bridge.describeEffect(lookahead512);
+  if (desc320.latencySamples !== 320 || desc512.latencySamples !== 512) {
+    throw new Error(`Packaged Apex Latency Fixture reported unexpected latencySamples: expected 320 & 512, got ${desc320.latencySamples} & ${desc512.latencySamples}`);
+  }
+  let persistedNonzeroLatencySlots: FxSlot[] = [
+    makeSlot('persisted-lookahead-320', lookahead320),
+    makeSlot('persisted-lookahead-512', lookahead512),
+  ];
+  if (options.reopening) {
+    const restoredNz = options.restoredNonzeroLatencySlots;
+    if (!restoredNz || restoredNz.length !== 2 ||
+        restoredNz[0]?.vst3Effect?.classId !== lookaheadIdentity.classId ||
+        restoredNz[1]?.vst3Effect?.classId !== lookaheadIdentity.classId ||
+        !restoredNz[0]?.vst3Effect?.state.component ||
+        !restoredNz[1]?.vst3Effect?.state.component) {
+      throw new Error(`Reopened packaged project did not preserve nonzero-latency two-insert slots: ${JSON.stringify(restoredNz)}`);
+    }
+    persistedNonzeroLatencySlots = restoredNz;
+  }
+  const nonzeroOneInsertTracks = withSlots([makeSlot('nonzero-one-320', lookahead320)]);
+  const nonzeroTwoOrderATracks = withSlots(persistedNonzeroLatencySlots);
+  const nonzeroTwoOrderBTracks = withSlots([
+    makeSlot('nonzero-orderb-512', lookahead512),
+    makeSlot('nonzero-orderb-320', lookahead320),
+  ]);
+  const nonzeroOneRun = await run(nonzeroOneInsertTracks, 'Mixer nonzero-latency one insert (320)', alignmentOptions());
+  const nonzeroTwoARun = await run(nonzeroTwoOrderATracks, 'Mixer nonzero-latency two inserts (320 -> 512)', alignmentOptions());
+  const nonzeroTwoBRun = await run(nonzeroTwoOrderBTracks, 'Mixer nonzero-latency two inserts (512 -> 320)', alignmentOptions());
+  const nonzeroAlignmentRows = [
+    { label: 'nonzero-one-320', result: nonzeroOneRun, stageLatencies: [320] },
+    { label: 'nonzero-two-320-then-512', result: nonzeroTwoARun, stageLatencies: [320, 512] },
+    { label: 'nonzero-two-512-then-320', result: nonzeroTwoBRun, stageLatencies: [512, 320] },
+  ].map(({ label, result, stageLatencies }) => {
+    const totalPluginFrames = stageLatencies.reduce((a, b) => a + b, 0);
+    const totalPipelineFrames = stageLatencies.length * VST3_FX_PIPELINE_FRAMES + totalPluginFrames;
+    const expectedRelativeOnsetFrame = 256 + totalPipelineFrames;
+    const onsets = onsetFramesFor(result);
+    const actualRelativeOnsets = [1, 2].map(trackId => onsets[String(trackId)] === null ? null :
+      Number(onsets[String(trackId)]) - result.sourceStartContextFrame);
+    const masterRelativeOnset = onsets['0'] === null ? null : Number(onsets['0']) - result.sourceStartContextFrame;
+    let cumulativePlugin = 0;
+    const nativeStageRows = [...result.nativeStageCaptures].map(([slotId, capture]: [string, MixerCapture], index) => {
+      cumulativePlugin += stageLatencies[index] ?? 0;
+      const expectedStageRelativeOnset = 256 + (index + 1) * VST3_FX_PIPELINE_FRAMES + cumulativePlugin;
+      const onset = firstCapturedOnsetFrame(capture, result.sourceStartContextFrame,
+        result.sourceStartContextFrame + result.sampleRate);
+      return {
+        slotId,
+        pluginLatencyFrames: stageLatencies[index],
+        expectedRelativeOnsetFrame: expectedStageRelativeOnset,
+        actualRelativeOnsetFrame: onset === null ? null : onset - result.sourceStartContextFrame,
+        pcmRms: result.nativeStageRms[slotId],
+      };
+    });
+    const masterSum = compareCapturedMasterToTrackSum(
+      result.captures,
+      result.sourceStartContextFrame + expectedRelativeOnsetFrame,
+      result.sourceStartContextFrame + expectedRelativeOnsetFrame + VST3_FX_BLOCK_FRAMES * 6,
+    );
+    if (actualRelativeOnsets.some(frame => frame !== expectedRelativeOnsetFrame) ||
+        masterRelativeOnset !== expectedRelativeOnsetFrame ||
+        nativeStageRows.some(stage => stage.actualRelativeOnsetFrame !== stage.expectedRelativeOnsetFrame) ||
+        masterSum.comparedSamples < VST3_FX_BLOCK_FRAMES * 2 || masterSum.rmsDifference > 1e-5) {
+      throw new Error(`Packaged Mixer nonzero-latency alignment failed (${label}): ${JSON.stringify({
+        expectedRelativeOnsetFrame, actualRelativeOnsets, masterRelativeOnset, nativeStageRows, masterSum,
+      })}`);
+    }
+    return {
+      label,
+      stagePluginLatencies: stageLatencies,
+      fixedBridgeFramesPerInsert: VST3_FX_PIPELINE_FRAMES,
+      totalCompensatedFrames: totalPipelineFrames,
+      expectedRelativeOnsetFrame,
+      relativeOnsetFrames: { track1: actualRelativeOnsets[0], track2: actualRelativeOnsets[1], master: masterRelativeOnset },
+      nativeStageRows,
+      masterSumPcmDifferenceRms: masterSum.rmsDifference,
+    };
+  });
+  const nonzeroOrderComparison = compareMixerRuns(nonzeroTwoARun, nonzeroTwoBRun, 1, 'nonzero-latency order reversal');
+  if (nonzeroOrderComparison.rmsDifference <= 1e-4 || nonzeroOrderComparison.normalizedLagFrames !== 0) {
+    throw new Error(`Packaged nonzero-latency order reversal failed audible distinction or cumulative frame alignment: ${JSON.stringify(nonzeroOrderComparison)}`);
+  }
+  const bypassedNonzeroTracks = nonzeroOneInsertTracks.map(track => track.id === 1
+    ? { ...track, fxSlots: track.fxSlots.map(slot => ({ ...slot, enabled: false })) } : track);
+  const nonzeroDynamicBypass = await run(nonzeroOneInsertTracks, 'Mixer nonzero-latency live bypass (320)', {
+    durationMs: 1150,
+    inputBuffers: new Map([[1, createKnownOnsetBurstInput(context, 0.08)], [2, createKnownOnsetBurstInput(context, 0.035)]]),
+    includeMaster: true, bypassMixerAfterMs: 80, bypassMixerTracks: bypassedNonzeroTracks,
+  });
+  const nonzeroBypassExpectedOffset = VST3_FX_PIPELINE_FRAMES + 320;
+  const nonzeroBypassBurstRows = [256, 24_000, 48_000].map(inputFrame => {
+    const expected = nonzeroDynamicBypass.sourceStartContextFrame + inputFrame + nonzeroBypassExpectedOffset;
+    const onsets = Object.fromEntries([0, 1, 2].map(trackId => [trackId, capturedOnsetInWindow(
+      nonzeroDynamicBypass.captures.get(trackId), expected - 32, expected + VST3_FX_BLOCK_FRAMES)]));
+    const masterSum = compareCapturedMasterToTrackSum(nonzeroDynamicBypass.captures, expected,
+      expected + VST3_FX_BLOCK_FRAMES * 2);
+    if (Object.values(onsets).some(frame => frame !== expected) || masterSum.rmsDifference > 1e-5) {
+      throw new Error(`Nonzero-latency dynamic live bypass changed alignment at input frame ${inputFrame}: ${JSON.stringify({ inputFrame, expected, onsets, masterSum })}`);
+    }
+    return { inputFrame, expectedContextFrame: expected, measuredOnsetContextFrames: onsets, masterSumPcmDifferenceRms: masterSum.rmsDifference };
+  });
+  let invalidLiveRejectionError = '';
+  try {
+    const invalidEffect: Vst3Effect = {
+      ...invalidLatencyIdentity,
+      state: { schema: 1, classId: invalidLatencyIdentity.classId, parameters: [] },
+    };
+    await bridge.open(invalidEffect, context.sampleRate, 'realtime', 'effect');
+    throw new Error('Expected invalid latency fixture to fail open()');
+  } catch (error) {
+    invalidLiveRejectionError = error instanceof Error ? error.message : String(error);
+    if (!/invalid or excessive latency/i.test(invalidLiveRejectionError)) {
+      throw new Error(`Unexpected invalid-latency rejection error: ${invalidLiveRejectionError}`);
+    }
+  }
+
+  const runs = {
+    orderA, orderB, delayProcessed, delayPassThrough, removed, persistedTwoInserts: persistedTwoInsertsRun,
+    nonzeroOneRun, nonzeroTwoARun, nonzeroTwoBRun,
+  };
   for (const [label, result] of Object.entries(runs)) {
     if (label !== 'removed') assertPackagedMixerRun(result, label);
   }
@@ -1057,10 +1195,19 @@ async function runPackagedMixerAcceptance(
     pipelineFramesPerEffect: VST3_FX_PIPELINE_FRAMES,
     pipelineMsPerEffect: VST3_FX_PIPELINE_FRAMES * 1000 / orderA.sampleRate,
     deadlineReference: '1024 frames = 21.33 ms at 48 kHz; existing two-block Mixer pipeline = 2048 frames = 42.67 ms per effect; no delay increase was made.',
-    latencyCompensation: 'Before each Mixer bus FX chain, direct producers and every routed/aux child branch are delayed to the slowest incoming fixed native-bridge path. Each prepared native insert contributes exactly 2048 frames; bypass retains that budget while its prepared worklet remains in the chain. Plugin-reported nonzero latency remains unsupported. Offline rendering sets this live-only compensation budget to zero and processes effects on project frames.',
+    latencyCompensation: 'Before each Mixer bus FX chain, direct producers and every routed/aux child branch are delayed to the slowest incoming path. Each prepared native insert contributes fixed 2048 bridge frames plus its validated getLatencySamples() value; bypass retains that exact budget via pre-allocated dry delay buffers while its prepared worklet remains in the chain. Offline rendering sets the live-bridge budget to zero and compensates plugin-reported latency directly on project frames.',
     latencyFixture: { plugin: rezFilter.name, parameters: rezFilterLatencyParameters,
       reason: 'LFO/envelope modulation disabled and cutoff fixed positive so onset timing measures the bridge pipeline, not variable plugin startup silence.' },
     latencyAlignmentRegression: alignmentRows,
+    nonzeroPluginLatencyRegression: {
+      reopenedFromIndexedDb: Boolean(options.reopening),
+      alignmentRows: nonzeroAlignmentRows,
+      orderDifferenceRms: nonzeroOrderComparison.rmsDifference,
+      orderNormalizedLagFrames: nonzeroOrderComparison.normalizedLagFrames,
+      dynamicBypassBursts: nonzeroBypassBurstRows,
+      invalidLatencyRejectedMessage: invalidLiveRejectionError,
+    },
+    persistedNonzeroLatencySlotsForSave: options.reopening ? undefined : persistedNonzeroLatencySlots,
     rendererStallRegression,
     twoInsertPcmEvidence: {
       orderDelayThenRezFilter: orderAStagePcm,
@@ -1103,6 +1250,7 @@ async function runPackagedMixerAcceptance(
       orderA: orderA.timing, orderB: orderB.timing, delayProcessed: delayProcessed.timing, delayBypassed: delayPassThrough.timing,
       cleanupAfterRemoval: removed.timing, twoInsertAlignment: twoInsertAlignment.timing,
       rendererStallTwoInserts: stalledTwoInserts.timing, persistedTwoInserts: persistedTwoInsertsRun.timing,
+      nonzeroOneInsert: nonzeroOneRun.timing, nonzeroTwoInsertsOrderA: nonzeroTwoARun.timing, nonzeroTwoInsertsOrderB: nonzeroTwoBRun.timing,
     },
     timingSamples: { orderA: correlatedTimingSamples(orderA), orderB: correlatedTimingSamples(orderB),
       delayProcessed: correlatedTimingSamples(delayProcessed), delayBypassed: correlatedTimingSamples(delayPassThrough),
@@ -1131,6 +1279,7 @@ export async function runDesktopVst3Smoke() {
   const clip: PlaylistClip = { id: 'native-smoke-clip', trackIndex: 0, startBar: 0, lengthBars: 1, type: 'pattern', channelId: channel.id, name: 'Native smoke', color: '#fff' };
   let savedAutomation: PlaylistClip | undefined;
   let restoredTwoInsertSlots: FxSlot[] | undefined;
+  let restoredNonzeroLatencySlots: FxSlot[] | undefined;
   const reopening = (globalThis as unknown as { desktopApp?: { smokeReopen?: boolean } }).desktopApp?.smokeReopen === true;
   if (reopening) {
     const saved = await restorePersistedProjectState(instance, createDefaultProjectState());
@@ -1140,6 +1289,7 @@ export async function runDesktopVst3Smoke() {
     if (!savedAutomation) throw new Error('Native automation lane did not survive application restart');
     if (channel.vst3?.classId !== plugin.classId) throw new Error('Reopened project selected the wrong native class');
     restoredTwoInsertSlots = saved.state.mixerTracks.find(track => track.id === 2)?.fxSlots;
+    restoredNonzeroLatencySlots = saved.state.mixerTracks.find(track => track.id === 3)?.fxSlots;
   }
   function digest(bytes: Uint8Array): string {
     let value = 2166136261;
@@ -1202,15 +1352,59 @@ export async function runDesktopVst3Smoke() {
     }
     const errors = getVst3Diagnostics().filter(item => item.channelId === channel.id && !item.message.startsWith('VST3 ready') && !item.message.startsWith('VST3 active'));
     if (livePeak < 0.001 || errors.length) throw new Error(`Packaged live graph failed: peak=${livePeak}, diagnostics=${JSON.stringify(errors)}`);
-    const mixerResult: any = await runPackagedMixerAcceptance(instance, { reopening, restoredTwoInsertSlots });
-    const { persistedTwoInsertSlotsForSave, ...mixerEffects } = mixerResult;
+    const mixerResult: any = await runPackagedMixerAcceptance(instance, {
+      reopening,
+      restoredTwoInsertSlots,
+      restoredNonzeroLatencySlots,
+    });
+    const { persistedTwoInsertSlotsForSave, persistedNonzeroLatencySlotsForSave, ...mixerEffects } = mixerResult;
+    const nonzeroOfflineSlots = reopening ? (restoredNonzeroLatencySlots ?? []) : (persistedNonzeroLatencySlotsForSave ?? []);
+    if (mixerEffects.status === 'passed' && mixerEffects.nonzeroPluginLatencyRegression) {
+      if (nonzeroOfflineSlots.length !== 2) {
+        throw new Error(`Expected 2 nonzero-latency FX slots for packaged offline verification, got ${nonzeroOfflineSlots.length}`);
+      }
+      const nonzeroOfflineMixer = mixer.map(track => track.id === 1 ? { ...track, fxSlots: nonzeroOfflineSlots } : track);
+      const nonzeroOfflineRendered = await instance.renderTimelineOffline(
+        [channel], [clip], nonzeroOfflineMixer, 120, 1, 48000, true, 'song', undefined, undefined, undefined, 0.5,
+      );
+      const nonzeroOfflineL = nonzeroOfflineRendered.getChannelData(0);
+      const lookaheadDrive = 1 + 0.55 * 4;
+      const lookaheadNorm = Math.tanh(lookaheadDrive);
+      const equivalentOnsetThreshold = Math.fround(Math.fround(Math.tanh(1e-7 * lookaheadDrive) / lookaheadNorm) * 0.75);
+      const nonzeroOfflineOnset = nonzeroOfflineL.findIndex(value => Math.abs(value) > equivalentOnsetThreshold);
+      let analyticalErrorSumSq = 0;
+      const compareFrames = Math.min(nonzeroOfflineL.length, samples.length);
+      for (let i = 0; i < compareFrames; i++) {
+        const expectedSample = Math.fround(Math.fround(Math.tanh(samples[i]! * lookaheadDrive) / lookaheadNorm) * 0.75);
+        const diff = nonzeroOfflineL[i]! - expectedSample;
+        analyticalErrorSumSq += diff * diff;
+      }
+      const nonzeroOfflineAnalyticalRmsError = compareFrames > 0 ? Math.sqrt(analyticalErrorSumSq / compareFrames) : Infinity;
+      if (nonzeroOfflineRendered.length !== output.length ||
+          nonzeroOfflineOnset < 0 ||
+          Math.abs(nonzeroOfflineOnset - onsetFrame) > 1 ||
+          nonzeroOfflineAnalyticalRmsError > 1e-5) {
+        throw new Error(`Packaged offline nonzero-latency render misaligned or changed render length: expected frames=${output.length}, onset=${onsetFrame}; got frames=${nonzeroOfflineRendered.length}, onset=${nonzeroOfflineOnset}, analyticalRmsError=${nonzeroOfflineAnalyticalRmsError}`);
+      }
+      const nonzeroOfflinePcmChecksum = digest(new Uint8Array(nonzeroOfflineL.buffer, nonzeroOfflineL.byteOffset, nonzeroOfflineL.byteLength));
+      mixerEffects.nonzeroPluginLatencyRegression.offlineRender = {
+        frames: nonzeroOfflineRendered.length,
+        expectedFrames: output.length,
+        onsetFrame: nonzeroOfflineOnset,
+        referenceOnsetFrame: onsetFrame,
+        analyticalRmsError: nonzeroOfflineAnalyticalRmsError,
+        pcmChecksum: nonzeroOfflinePcmChecksum,
+      };
+    }
     if (reopening && !document.body.textContent?.includes(channel.name)) throw new Error('The actual Apex application UI did not restore the saved native channel');
     if (!reopening) {
       const project = createDefaultProjectState();
       const persistedMixerTracks: MixerTrack[] = [
         ...mixer,
-        { id: 2, name: 'Smoke two-insert FX track', color: '#fff', volume: 1, pan: 0, mute: false, solo: false,
-          fxSlots: persistedTwoInsertSlotsForSave ?? [], peakL: 0, peakR: 0 },
+        ...(persistedTwoInsertSlotsForSave ? [{ id: 2, name: 'Smoke two-insert FX track', color: '#fff', volume: 1, pan: 0, mute: false, solo: false,
+          fxSlots: persistedTwoInsertSlotsForSave, peakL: 0, peakR: 0 }] : []),
+        ...(persistedNonzeroLatencySlotsForSave ? [{ id: 3, name: 'Smoke nonzero-latency FX track', color: '#fff', volume: 1, pan: 0, mute: false, solo: false,
+          fxSlots: persistedNonzeroLatencySlotsForSave, peakL: 0, peakR: 0 }] : []),
       ];
       await persistProjectState({
         ...project, meta: { ...project.meta, bpm: 120 }, selectedChannelId: channel.id,

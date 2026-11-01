@@ -6,6 +6,12 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { NativeVst3Client, discoverVst3 } from './client.mjs';
 
+export const MAX_VST3_EFFECT_LATENCY_SECONDS = 1;
+export function maxVst3EffectLatencySamples(sampleRate) {
+  if (!Number.isFinite(sampleRate) || sampleRate <= 0) return 0;
+  return Math.floor(sampleRate * MAX_VST3_EFFECT_LATENCY_SECONDS);
+}
+
 export class Vst3Service {
   #executable;
   #roots;
@@ -19,6 +25,18 @@ export class Vst3Service {
   constructor(executable, roots) { this.#executable = executable; this.#roots = roots; }
   setRoots(roots) { this.#roots = [...roots]; }
   get sessionCount() { return this.#sessions.size + this.#pending + this.#closing.size; }
+  #validateLatency(latencySamples, kind, sampleRate) {
+    if (!Number.isSafeInteger(latencySamples) || latencySamples < 0) {
+      throw new Error(`VST3 ${kind} reported an invalid latency value (${String(latencySamples)} samples).`);
+    }
+    if (kind === 'instrument' && latencySamples !== 0) {
+      throw new Error(`VST3 instrument reports ${latencySamples} samples of latency; this host path currently supports zero-reported-latency instruments only.`);
+    }
+    if (kind === 'effect' && latencySamples > maxVst3EffectLatencySamples(sampleRate)) {
+      throw new Error(`VST3 effect reports excessive latency (${latencySamples} samples at ${sampleRate} Hz; maximum supported is ${maxVst3EffectLatencySamples(sampleRate)} samples).`);
+    }
+    return latencySamples;
+  }
   async discover(owner = 'local', kind = 'instrument') {
     if (!['instrument', 'effect'].includes(kind)) throw new Error('Invalid VST3 discovery kind');
     if (this.#closed) throw new Error('VST3 service closed');
@@ -59,13 +77,11 @@ export class Vst3Service {
       this.#loading.set(client, owner);
       const opened = await client.open({ ...instrument, path: pluginPath }, { sampleRate, mode, state: instrument.state, kind });
       if (this.#closed || this.#ownerTokens.get(owner) !== token) throw new Error('VST3 service/renderer closed during load');
-      // Nonzero plugin latency needs explicit delay compensation; fail honestly
-      // rather than exporting time-shifted audio in this first slice.
-      if (opened.plugin.latencySamples !== 0) throw new Error(`VST3 ${kind} reports ${opened.plugin.latencySamples} samples of latency; this host path currently supports zero-reported-latency ${kind}s only.`);
+      const latencySamples = this.#validateLatency(opened.plugin.latencySamples, kind, sampleRate);
       const parameters = validateMetadata(opened.plugin.parameters, opened.plugin.controllerAvailable);
       const id = randomUUID();
-      this.#sessions.set(id, { client, owner, processing: false, parameters, kind });
-      return { id, latencySamples: opened.plugin.latencySamples, parameters, controllerAvailable: opened.plugin.controllerAvailable };
+      this.#sessions.set(id, { client, owner, processing: false, parameters, kind, sampleRate, latencySamples });
+      return { id, latencySamples, parameters, controllerAvailable: opened.plugin.controllerAvailable };
     } catch (error) { if (client) await client.dispose().catch(() => {}); throw error; }
     finally { if (client) this.#loading.delete(client); this.#pending--; }
   }
@@ -116,7 +132,7 @@ export class Vst3Service {
   }
   async describeEffect(effect, owner = 'local') {
     const opened = await this.open(effect, 48000, 'offline', owner, 'effect');
-    try { return { parameters: opened.parameters, controllerAvailable: opened.controllerAvailable }; }
+    try { return { parameters: opened.parameters, controllerAvailable: opened.controllerAvailable, latencySamples: opened.latencySamples }; }
     finally { await this.close(opened.id, owner); }
   }
   async inspectEffect(plugin, state, owner = 'local') {
@@ -138,9 +154,12 @@ export class Vst3Service {
     const validated = validateParameterChanges(changes, session.parameters);
     session.processing = true;
     try {
-      const metadata = await session.client.parameters(validated);
+      const response = await session.client.request({ command: 'parameters', parameters: validated });
+      if (response.latencySamples !== undefined) {
+        session.latencySamples = this.#validateLatency(response.latencySamples, session.kind, session.sampleRate);
+      }
       // A missing/invalid controller response is never acknowledged as a successful edit.
-      session.parameters = validateMetadata(metadata, true);
+      session.parameters = validateMetadata(response.parameters, true);
       for (const change of validated) {
         const p = session.parameters.find(p => p.id === change.id);
         if (!p || p.currentValue === null || Math.abs(p.currentValue - change.value) > 1e-7) throw new Error('VST3 controller did not accept the requested value');

@@ -11,7 +11,7 @@ function run(command, args) {
     // Make the actual compiler/configuration error visible in the check API as
     // well as downloadable logs (which may be inaccessible in restricted CI).
     if (process.env.GITHUB_ACTIONS) {
-      const tail = `${result.stdout ?? ''}\n${result.stderr ?? ''}`.slice(-12000)
+      const tail = `${result.stdout ?? ''}\n${result.stderr ?? ''}`.slice(-3500)
         .replaceAll('%', '%25').replaceAll('\r', '%0D').replaceAll('\n', '%0A');
       console.error(`::error title=Native VST3 build failed::${tail}`);
     }
@@ -27,4 +27,4 @@ run(cmake, ['-S', 'native/vst3', '-B', 'build/native-vst3', ...generator, '-DCMA
   `-DVST3_SDK_ROOT=${path.resolve('build/native-deps/vst3sdk')}`,
   `-DJSON_ROOT=${path.resolve('build/native-deps/json')}`]);
 run(cmake, ['--build', 'build/native-vst3', '--config', 'Release', '--target',
-  'apex-vst3-host', 'mda-vst3', 'apex-vst3-protocol-fault', '--parallel', '2']);
+  'apex-vst3-host', 'mda-vst3', 'apex-vst3-protocol-fault', 'apex-vst3-restart-flags-test', 'apex-latency-vst3', '--parallel', '2']);

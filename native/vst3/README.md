@@ -204,40 +204,49 @@ editing, bypass/removal, chain reordering, project persistence and project
 Undo/Redo use the existing authorized VST3 helper/service boundary. Native code
 still runs only in the helper process, never inside the renderer or audio callback.
 The helper rejects instrument classes used as effects, event-input effects,
-extra audio buses, non-stereo main buses, non-finite/oversized audio, and plugins
-reporting nonzero latency. Effect parameter writes are retained for the next
-actual process block.
+extra audio buses, non-stereo main buses, non-finite/oversized audio, negative or
+excessive reported latency (`> 1.0 s` per effect at the session sample rate), and
+mid-stream latency changes during active processing. Stopped (`offline` mode)
+parameter updates may reconfigure plugin latency cleanly via component restart.
+Effect parameter writes are retained for the next actual process block.
 
 The live AudioEngine path prepares effects asynchronously before transport
 start and inserts an AudioWorklet node at each saved Mixer slot in order. Each
 worklet captures 1024 stereo frames and hands them to the main-thread/IPC/helper
 pipeline; no IPC or waiting occurs in `process()`. Two blocks (2048 frames) of
-fixed buffering give the helper one block of processing time. At 48 kHz this is
-42.7 ms **per native insert**, before plugin-reported latency (which must be 0).
+fixed buffering give the helper one block of processing time (`42.7 ms` at 48 kHz
+**per native insert**), tracked separately from each plugin's validated
+`IAudioProcessor::getLatencySamples()`. Before each Mixer bus FX chain, direct
+producers and routed/aux child branches are delayed at summing inputs to match the
+slowest incoming path (`2048 + pluginLatencySamples` per prepared insert), and
+mid-take bypass preserves that exact alignment via pre-allocated dry delay buffers.
 If a processed result is not ready at its scheduled frame, the worklet emits
-silence, reports the failure and stops playback; it never forwards dry audio or
-replays a stale block. Stop/restart and project replacement close owner-scoped
-sessions. **There is no inter-track latency compensation.** A native insert can
-therefore be misaligned against other Mixer tracks; this is reported in the
-Mixer diagnostic and is not claimed to be handled.
+silence, reports the failure and stops playback; it never forwards unaligned dry
+audio or replays a stale block. Stop/restart and project replacement close
+owner-scoped sessions and tear down nonzero compensation DelayNodes so buffered
+samples never bleed across takes.
 
-Production offline export now routes native Mixer effects through the real
-`renderTimelineOffline`/`renderProjectToWav` pipeline: for each enabled native
-slot, it captures that track's pre-insert stereo PCM from an isolated four-
-channel OfflineAudioContext tap, processes bounded 4096-frame planar blocks in
-the authorized native helper, and injects the resulting AudioBuffer at the
-original timeline offset before the next Mixer slot. Repeating this pass in
-saved slot order means earlier native inserts and built-in FX feed later native
-inserts; the final production render mixes processed tracks through normal
-routing/mastering and the existing WAV encoder. Captures retain the render tail
-for native effect decay; final WAV tail trimming still examines processed output.
-The helper is closed in `finally`, processing/open/layout/latency failures abort
-the export, and no dry/fabricated fallback is installed. At most eight enabled
-inserts and 128 MiB estimated native PCM working memory are accepted; larger
-renders fail before PCM allocation. Nonzero plugin latency is rejected without
-compensation. A pre-master export explicitly rejects a native master-bus slot
-because that existing export stage intentionally omits master processing.
-Turning off `Include Mixer FX` remains the explicit dry-export option.
+Production offline export routes native Mixer effects through the real
+`renderTimelineOffline`/`renderProjectToWav` pipeline in upstream-first topological
+Mixer order across direct routes and aux sends: for each enabled native slot, it
+captures that track's pre-insert stereo PCM from an isolated four-channel
+OfflineAudioContext tap, streams `input.length + latencySamples` frames in bounded
+4096-frame planar blocks through the authorized native helper (flushing the
+trailing `latencySamples` frames with silence and stripping the leading
+`latencySamples` pre-roll without adding live 2048-frame bridge buffering), and
+injects the compensated AudioBuffer at the original timeline offset before the
+next Mixer slot. Repeating this pass in topological track and saved slot order
+means earlier native inserts, routed buses, aux sends, and built-in FX feed
+downstream inserts at exact timeline alignment; the final production render mixes
+processed tracks through normal routing/mastering and the existing WAV encoder.
+Captures retain the render tail for native effect decay; final WAV tail trimming
+still examines processed output. The helper is closed in `finally`, and
+processing/open/layout/invalid-latency failures abort export without installing a
+dry or fabricated fallback. At most eight enabled inserts and 128 MiB estimated
+native PCM working memory are accepted; larger renders fail before PCM allocation.
+A pre-master export explicitly rejects a native master-bus slot because that
+existing export stage intentionally omits master processing. Turning off
+`Include Mixer FX` remains the explicit dry-export option.
 
 Code-level offline integration was exercised locally against the redistributable
 MDA RezFilter and the real helper/service via Apex's production
@@ -261,16 +270,30 @@ acceptance path for live PCM, slot order/bypass, track isolation, parameter
 editing, save/reopen, undo/redo and processed WAV PCM; test source is not
 acceptance evidence until a browser run passes.
 
-Live and offline handling have different limits. Offline exports are scheduled
-and awaited outside the real-time callback; their plugin-reported latency must
-be zero. Live effect inserts use a fixed two-block FIFO (2048 frames: 42.7 ms
-at 48 kHz by calculation); this is a design value, not an observed end-to-end
-latency measurement. Live latency has not been measured or compensated, and
-there is no inter-track latency compensation. Do not claim those limits are
-handled. Feature Expansion 01 remains unaccepted until the real Chromium/MDA
-Mixer workflow, missing-plugin/layout product diagnostics, built-in FX/native
-instrument regression coverage, and applicable Windows desktop integration
-workflow pass on this branch.
+Live and offline handling have distinct buffering models while preserving the same
+musical timeline alignment. Offline exports stream `input.length + latencySamples`
+outside the real-time callback and trim each insert's `latencySamples` pre-roll
+with zero live-bridge buffering. Live effect inserts use a fixed two-block FIFO
+(2048 frames: 42.7 ms at 48 kHz) plus each prepared insert's validated
+`latencySamples` (`0` up to `1.0 s` per insert), compensated across the acyclic
+Mixer routing and aux-send DAG at summing inputs. VST3 instruments continue to
+require zero reported latency, and physical audio-device output latency remains
+outside software Mixer PDC.
+
+`HostComponentHandler::restartComponent(flags)` accumulates controller restart
+flags atomically (`fetch_or` / `exchange` with acquire-release ordering) so
+combined and concurrent callback notifications cannot lose flags. On
+`RestartFlags::kIoChanged` during `open()` or `parameters()`, the host never
+simply toggles `setActive(false)`/`setActive(true)` or continues with stale bus
+or `HostProcessData` state: it deactivates the component, re-queries and
+strictly validates the supported stereo bus layout (`0` inputs / `1` stereo
+output for instruments, `1` stereo input / `1` stereo output for effects),
+re-applies `setBusArrangements`, re-activates buses, re-runs `setupProcessing`,
+unprepares and re-prepares `HostProcessData` (verifying 2-channel `float32`
+buffer bindings), and reactivates. Unsupported I/O layouts, `kReloadComponent`,
+and mid-stream structural `kIoChanged`/`kLatencyChanged`/`kReloadComponent`
+requests during active `process()` are explicitly rejected and close the native
+instance cleanly.
 
 ## Generic parameter control contract (Issue #285)
 

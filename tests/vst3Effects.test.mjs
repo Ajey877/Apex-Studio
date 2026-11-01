@@ -2,10 +2,14 @@
 // build the pinned SDK's redistributable MDA fixture with npm run native:vst3:build.
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import path from 'node:path';
 import { existsSync } from 'node:fs';
 import { NativeVst3Client, discoverVst3 } from '../native/vst3/client.mjs';
 import { Vst3Service } from '../native/vst3/service.mjs';
+
+const execFileAsync = promisify(execFile);
 
 const build = path.resolve(process.env.APEX_NATIVE_BUILD ?? 'build/native-vst3');
 const executableName = process.platform === 'win32' ? 'apex-vst3-host.exe' : 'apex-vst3-host';
@@ -436,3 +440,180 @@ test('unsupported class, bus layout, missing module and malformed native audio f
     await assert.rejects(missing.open({ ...delay, path: `${bundle}.missing` }, { kind: 'effect', sampleRate }), /module load failed/);
   } finally { await missing.dispose(); }
 });
+
+test('native host reports valid getLatencySamples(), supports stopped offline latency reconfiguration and sample-rate scaling, and rejects realtime/mid-stream/invalid latency mutations', async () => {
+  const service = new Vst3Service(executable, [root]);
+  const owner = 'latency-host-contract';
+  try {
+    const { plugins } = await service.discover(owner, 'effect');
+    const lookahead = plugins.find(p => p.name === 'Apex Latency Fixture');
+    const invalidNegative = plugins.find(p => p.name === 'Apex Invalid Latency Fixture');
+    const invalidExcessive = plugins.find(p => p.name === 'Apex Excessive Latency Fixture');
+    const dynamicMidstream = plugins.find(p => p.name === 'Apex Dynamic Latency Fixture');
+    assert.ok(lookahead && invalidNegative && invalidExcessive && dynamicMidstream, 'Apex latency C++ fixtures must be discovered');
+
+    // Default reported latency = 320 samples; impulse delayed by exact 320 samples
+    const baseDesc = await service.describeEffect(lookahead, owner);
+    assert.equal(baseDesc.latencySamples, 320);
+
+    // Offline parameter edit can reconfigure latency (320 -> 600 samples) cleanly via component restart
+    const baseInspected = await service.inspectEffect(lookahead, undefined, owner);
+    const offlineSession = await service.open(baseInspected, 48000, 'offline', owner, 'effect');
+    assert.equal(offlineSession.latencySamples, 320);
+    const updatedParams = await service.parameters(offlineSession.id, [{ id: 0, value: 600 / 4096 }], owner);
+    assert.ok(Math.abs(updatedParams.find(p => p.id === 0).currentValue - 600 / 4096) < 1e-7);
+    const impulse = new Float32Array(2048);
+    impulse[0] = 0.8;
+    impulse[1024] = -0.6;
+    const delayed600 = await service.processAudio(offlineSession.id, 1024, impulse, 120, owner);
+    const idxL = Array.from(delayed600.subarray(0, 1024)).findIndex(v => Math.abs(v) > 1e-6);
+    const idxR = Array.from(delayed600.subarray(1024, 2048)).findIndex(v => Math.abs(v) > 1e-6);
+    assert.equal(idxL, 600);
+    assert.equal(idxR, 600);
+    assert.ok(Math.abs(delayed600[600] - 0.8) < 1e-6 && Math.abs(delayed600[1024 + 600] + 0.6) < 1e-6);
+    await service.close(offlineSession.id, owner);
+
+    // Sample-rate-dependent latency (RateScale = 1): 400 @ 48 kHz -> 800 @ 96 kHz
+    const rateScaled = await service.inspectEffect(lookahead, {
+      ...baseInspected.state,
+      parameters: [{ id: 0, value: 400 / 4096 }, { id: 3, value: 1 }],
+    }, owner);
+    const at48 = await service.open(rateScaled, 48000, 'offline', owner, 'effect');
+    const at96 = await service.open(rateScaled, 96000, 'offline', owner, 'effect');
+    assert.equal(at48.latencySamples, 400);
+    assert.equal(at96.latencySamples, 800);
+    await service.close(at48.id, owner);
+    await service.close(at96.id, owner);
+
+    // Realtime live session rejects parameter edits that mutate latencySamples
+    const realtimeSession = await service.open(baseInspected, 48000, 'realtime', owner, 'effect');
+    await assert.rejects(
+      service.parameters(realtimeSession.id, [{ id: 0, value: 768 / 4096 }], owner),
+      /changed reported latency.*active live session/i,
+    );
+    assert.equal(service.sessionCount, 0, 'rejected realtime latency mutation closes session cleanly');
+
+    // Invalid (0xFFFFFFFF / -1 cast to uint32) and excessive (> 1.0 s) latencies fail safely on open()
+    await assert.rejects(service.open(invalidNegative, 48000, 'offline', owner, 'effect'), /invalid or excessive latency/i);
+    await assert.rejects(service.open(invalidExcessive, 48000, 'realtime', owner, 'effect'), /invalid or excessive latency/i);
+    assert.equal(service.sessionCount, 0);
+
+    // Mid-stream dynamic latency change during process() is caught and aborted immediately
+    const dynSession = await service.open(dynamicMidstream, 48000, 'realtime', owner, 'effect');
+    assert.equal(dynSession.latencySamples, 256);
+    await service.processAudio(dynSession.id, 128, new Float32Array(256), 120, owner);
+    await assert.rejects(
+      service.processAudio(dynSession.id, 128, new Float32Array(256), 120, owner),
+      /changed reported latency during active processing/i,
+    );
+    assert.equal(service.sessionCount, 0);
+  } finally {
+    await service.dispose();
+  }
+});
+
+test('HostComponentHandler atomic restart-flag regression test preserves combined and concurrent restart flags across threads', async () => {
+  const testExeName = process.platform === 'win32' ? 'apex-vst3-restart-flags-test.exe' : 'apex-vst3-restart-flags-test';
+  const testExe = [path.join(build, 'bin', testExeName), path.join(build, 'bin/Release', testExeName)].find(existsSync);
+  assert.ok(testExe, 'apex-vst3-restart-flags-test binary must be built under build/native-vst3');
+  const { stdout } = await execFileAsync(testExe, [], { timeout: 15000 });
+  const parsed = JSON.parse(stdout.trim());
+  assert.deepEqual(parsed, { ok: true, rounds: 10000, producers: 4 });
+});
+
+test('RestartFlags::kIoChanged reconfigures valid stereo bus + HostProcessData completely and rejects unsupported or mid-stream I/O changes safely', async () => {
+  const latencyBundle = path.join(root, 'apex-latency-vst3.vst3');
+  assert.ok(existsSync(latencyBundle), 'Apex latency C++ VST3 fixture bundle is required');
+  const service = new Vst3Service(executable, [root]);
+  const owner = 'io-changed-test';
+  try {
+    const { plugins } = await service.discover(owner, 'effect');
+    const ioFixture = plugins.find(p => p.name === 'Apex IoChanged Fixture');
+    assert.ok(ioFixture, 'Apex IoChanged Fixture must be discovered');
+
+    // Scenario 0: Baseline Stereo 1 in / 1 out, latency = 192 samples
+    const baseInspected = await service.inspectEffect(ioFixture, undefined, owner);
+    const offlineSession = await service.open(baseInspected, 48000, 'offline', owner, 'effect');
+    assert.equal(offlineSession.latencySamples, 192);
+    const impulse0 = new Float32Array(2048);
+    impulse0[0] = 0.75;
+    impulse0[1024] = -0.5;
+    const out0 = await service.processAudio(offlineSession.id, 1024, impulse0, 120, owner);
+    assert.equal(Array.from(out0.subarray(0, 1024)).findIndex(v => Math.abs(v) > 1e-6), 192);
+    assert.equal(Array.from(out0.subarray(1024, 2048)).findIndex(v => Math.abs(v) > 1e-6), 192);
+
+    // Scenario 1 (0.25): Concurrent dual-thread kIoChanged + kLatencyChanged -> full Stereo bus rebuild (384 samples)
+    // Fixture strictly fails setActive(true) unless host re-queries bus info, calls setBusArrangements,
+    // re-activates both rebuilt buses, and re-runs setupProcessing() before reactivating.
+    const updatedParams = await service.parameters(offlineSession.id, [{ id: 0, value: 0.25 }], owner);
+    assert.ok(Math.abs(updatedParams.find(p => p.id === 0).currentValue - 0.25) < 1e-7);
+    const impulse1 = new Float32Array(2048);
+    impulse1[0] = 0.6;
+    impulse1[1024] = -0.4;
+    const out1 = await service.processAudio(offlineSession.id, 1024, impulse1, 120, owner);
+    assert.equal(Array.from(out1.subarray(0, 1024)).findIndex(v => Math.abs(v) > 1e-6), 384);
+    assert.equal(Array.from(out1.subarray(1024, 2048)).findIndex(v => Math.abs(v) > 1e-6), 384);
+    assert.ok(Math.abs(out1[384] - 0.6) < 1e-6 && Math.abs(out1[1024 + 384] + 0.4) < 1e-6);
+    await service.close(offlineSession.id, owner);
+
+    // Realtime live session rejects Scenario 1 because kIoChanged (and latency change) cannot reconfigure an active live session
+    const rtSession = await service.open(baseInspected, 48000, 'realtime', owner, 'effect');
+    await assert.rejects(
+      service.parameters(rtSession.id, [{ id: 0, value: 0.25 }], owner),
+      /I\/O bus reconfiguration \(kIoChanged\) on an active live session/i,
+    );
+    assert.equal(service.sessionCount, 0);
+
+    // Scenario 2 (0.50): Unsupported Mono (1 ch) kIoChanged rejected during parameters() and open()
+    const monoSession = await service.open(baseInspected, 48000, 'offline', owner, 'effect');
+    await assert.rejects(
+      service.parameters(monoSession.id, [{ id: 0, value: 0.50 }], owner),
+      /Only effects with a stereo main input and stereo main output are supported/i,
+    );
+    assert.equal(service.sessionCount, 0);
+    await assert.rejects(
+      service.open({ ...baseInspected, state: { ...baseInspected.state, parameters: [{ id: 0, value: 0.50 }] } }, 48000, 'offline', owner, 'effect'),
+      /Only effects with a stereo main input and stereo main output are supported/i,
+    );
+    assert.equal(service.sessionCount, 0);
+
+    // Scenario 3 (0.75): Unsupported Multi-Bus Sidechain (2 inputs / 1 output) kIoChanged rejected during parameters() and open()
+    const sidechainSession = await service.open(baseInspected, 48000, 'offline', owner, 'effect');
+    await assert.rejects(
+      service.parameters(sidechainSession.id, [{ id: 0, value: 0.75 }], owner),
+      /Only one-input\/one-output VST3 audio effects are supported/i,
+    );
+    assert.equal(service.sessionCount, 0);
+    await assert.rejects(
+      service.open({ ...baseInspected, state: { ...baseInspected.state, parameters: [{ id: 0, value: 0.75 }] } }, 48000, 'offline', owner, 'effect'),
+      /Only one-input\/one-output VST3 audio effects are supported/i,
+    );
+    assert.equal(service.sessionCount, 0);
+
+    // Scenario 4 (1.00): Mid-stream kIoChanged raised inside active process() aborts and closes session cleanly
+    const midstreamInspected = await service.inspectEffect(ioFixture, {
+      ...baseInspected.state,
+      parameters: [{ id: 0, value: 1.0 }],
+    }, owner);
+    const midSession = await service.open(midstreamInspected, 48000, 'realtime', owner, 'effect');
+    assert.equal(midSession.latencySamples, 192);
+    await service.processAudio(midSession.id, 128, new Float32Array(256), 120, owner);
+    await assert.rejects(
+      service.processAudio(midSession.id, 128, new Float32Array(256), 120, owner),
+      /I\/O bus reconfiguration \(kIoChanged\) during active processing/i,
+    );
+    assert.equal(service.sessionCount, 0);
+
+    // Subsequent valid session opens and processes cleanly after all rejected I/O scenarios
+    const cleanAfter = await service.open(baseInspected, 48000, 'realtime', owner, 'effect');
+    assert.equal(cleanAfter.latencySamples, 192);
+    const cleanOut = await service.processAudio(cleanAfter.id, 1024, impulse0, 120, owner);
+    assert.equal(Array.from(cleanOut.subarray(0, 1024)).findIndex(v => Math.abs(v) > 1e-6), 192);
+    await service.close(cleanAfter.id, owner);
+    assert.equal(service.sessionCount, 0);
+  } finally {
+    await service.dispose();
+  }
+});
+
+

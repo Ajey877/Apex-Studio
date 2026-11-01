@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.25)
-project(apex_vst3_host LANGUAGES CXX)
+project(apex_vst3_host VERSION 1.0.0 LANGUAGES CXX)
 
 # Standalone executable: no Node/Electron ABI dependency; Windows x64 is the
 # intended desktop target. Linux exists for reproducible DSP verification.
@@ -94,4 +94,27 @@ endif()
 if(APEX_BUILD_VST3_FIXTURE)
   add_executable(apex-vst3-protocol-fault protocol-fault.cpp)
   set_target_properties(apex-vst3-protocol-fault PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
+  add_executable(apex-vst3-restart-flags-test restart-flags-test.cpp)
+  if(WIN32)
+    target_compile_definitions(apex-vst3-restart-flags-test PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+    target_link_libraries(apex-vst3-restart-flags-test PRIVATE ole32 shell32 uuid)
+  else()
+    target_link_libraries(apex-vst3-restart-flags-test PRIVATE pthread)
+  endif()
+  target_link_libraries(apex-vst3-restart-flags-test PRIVATE sdk_hosting)
+  set_target_properties(apex-vst3-restart-flags-test PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
+  smtg_add_vst3plugin(apex-latency-vst3
+    latency-fixture.cpp
+    "${SDK_ROOT}/public.sdk/source/vst/vstsinglecomponenteffect.cpp"
+  )
+  if(WIN32)
+    target_sources(apex-latency-vst3 PRIVATE "${SDK_ROOT}/public.sdk/source/main/dllmain.cpp")
+    target_compile_definitions(apex-latency-vst3 PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+  else()
+    target_sources(apex-latency-vst3 PRIVATE "${SDK_ROOT}/public.sdk/source/main/linuxmain.cpp")
+  endif()
+  target_link_libraries(apex-latency-vst3 PRIVATE sdk)
+  target_compile_options(apex-latency-vst3 PRIVATE $<$<CXX_COMPILER_ID:MSVC>:/fp:precise>)
 endif()
