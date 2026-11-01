@@ -13,6 +13,7 @@
 #include "pluginterfaces/vst/ivstprocesscontext.h"
 #include <nlohmann/json.hpp>
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <iostream>
@@ -33,6 +34,46 @@ using namespace Steinberg::Vst;
 using json = nlohmann::json;
 constexpr int kMaxBlock = 16384;
 constexpr size_t kMaxRequest = 8 * 1024 * 1024;
+constexpr double kMaxEffectLatencySeconds = 1.0;
+
+uint32_t maxEffectLatencySamples(double sampleRate) {
+  const auto bound = std::llround(std::floor(sampleRate * kMaxEffectLatencySeconds));
+  return bound > 0 ? static_cast<uint32_t>(bound) : 0u;
+}
+
+class HostComponentHandler final : public IComponentHandler {
+  std::atomic<uint32> refCount{1};
+  int32 pendingRestartFlags = 0;
+public:
+  tresult PLUGIN_API queryInterface(const TUID _iid, void** obj) override {
+    if (FUnknownPrivate::iidEqual(_iid, IComponentHandler::iid) ||
+        FUnknownPrivate::iidEqual(_iid, FUnknown::iid)) {
+      addRef();
+      *obj = static_cast<IComponentHandler*>(this);
+      return kResultTrue;
+    }
+    *obj = nullptr;
+    return kNoInterface;
+  }
+  uint32 PLUGIN_API addRef() override { return ++refCount; }
+  uint32 PLUGIN_API release() override {
+    const uint32 r = --refCount;
+    if (r == 0) delete this;
+    return r;
+  }
+  tresult PLUGIN_API beginEdit(ParamID) override { return kResultOk; }
+  tresult PLUGIN_API performEdit(ParamID, ParamValue) override { return kResultOk; }
+  tresult PLUGIN_API endEdit(ParamID) override { return kResultOk; }
+  tresult PLUGIN_API restartComponent(int32 flags) override {
+    pendingRestartFlags |= flags;
+    return kResultOk;
+  }
+  int32 consumeRestartFlags() {
+    const int32 flags = pendingRestartFlags;
+    pendingRestartFlags = 0;
+    return flags;
+  }
+};
 
 void require(bool condition, const std::string& message) {
   if (!condition) throw std::runtime_error(message);
@@ -120,6 +161,7 @@ std::vector<float> decodePlanarAudio(const std::string& encoded, int frames) {
 class Instance {
   // Declaration order matters: SDK objects are released BEFORE the module unloads.
   IPtr<HostApplication> host = owned(new HostApplication());
+  IPtr<HostComponentHandler> componentHandler = owned(new HostComponentHandler());
   VST3::Hosting::Module::Ptr module;
   IPtr<PlugProvider> provider;
   IPtr<IComponent> component;
@@ -139,18 +181,45 @@ class Instance {
   double sampleRate = 48000;
   int mode = kOffline;
   int64_t cursor = 0;
+  uint32_t configuredLatencySamples = 0;
   bool active = false;
   bool processing = false;
   bool isInstrument = true;
+
+  uint32_t validateLatencySamples(uint32_t latency) const {
+    if (isInstrument) {
+      require(latency == 0, "VST3 instrument reports " + std::to_string(latency) +
+        " samples of latency; this host path currently supports zero-reported-latency instruments only");
+      return 0;
+    }
+    const auto maxSamples = maxEffectLatencySamples(sampleRate);
+    require(latency <= maxSamples, "VST3 effect reports invalid or excessive latency (" +
+      std::to_string(latency) + " samples; maximum supported is " + std::to_string(maxSamples) +
+      " samples at " + std::to_string(static_cast<int>(std::llround(sampleRate))) + " Hz)");
+    return latency;
+  }
+  void restartActiveComponent(const char* contextLabel) {
+    checked(processor->setProcessing(false), std::string("Cannot suspend processing (") + contextLabel + ")");
+    processing = false;
+    checked(component->setActive(false), std::string("Cannot deactivate component (") + contextLabel + ")");
+    active = false;
+    checked(component->setActive(true), std::string("Cannot reactivate component (") + contextLabel + ")");
+    active = true;
+    checked(processor->setProcessing(true), std::string("Cannot resume processing (") + contextLabel + ")");
+    processing = true;
+    componentHandler->consumeRestartFlags();
+  }
 public:
   ~Instance() {
     if (processing) processor->setProcessing(false);
     if (active) component->setActive(false);
+    if (controller) controller->setComponentHandler(nullptr);
     data.unprepare();
     processor = nullptr;
     controller = nullptr;
     component = nullptr;
     provider = nullptr; // PlugProvider disconnects and terminates both components.
+    componentHandler = nullptr;
     module.reset();
     PluginContextFactory::instance().setPluginContext(nullptr);
   }
@@ -177,6 +246,11 @@ public:
     require(bool(provider), "Saved instrument class ID is not present in this module");
     component = provider->getComponentPtr();
     controller = provider->getControllerPtr();
+    if (controller) {
+      const auto handlerResult = controller->setComponentHandler(componentHandler);
+      require(handlerResult == kResultOk || handlerResult == kNotImplemented,
+        "setComponentHandler failed (VST result " + std::to_string(handlerResult) + ")");
+    }
     processor = FUnknownPtr<IAudioProcessor>(component);
     require(bool(processor), "Plugin has no IAudioProcessor");
     checked(processor->canProcessSampleSize(kSample32), "Plugin does not support float32 processing");
@@ -239,13 +313,30 @@ public:
     // metadata reflect authoritative saved values before the first live block.
     if (!isInstrument && request.contains("state") && request.at("state").contains("parameters"))
       applyParameters(request.at("state").at("parameters"), false, -1, false);
+    const int32 setupFlags = componentHandler->consumeRestartFlags();
+    if ((setupFlags & (RestartFlags::kLatencyChanged | RestartFlags::kIoChanged)) != 0)
+      restartActiveComponent("open latency setup");
+    configuredLatencySamples = validateLatencySamples(processor->getLatencySamples());
     result["parameters"] = metadata();
     result["controllerAvailable"] = bool(controller);
-    result["latencySamples"] = processor->getLatencySamples();
+    result["latencySamples"] = configuredLatencySamples;
     result["tailSamples"] = processor->getTailSamples();
     return result;
   }
   bool isInstrumentKind() const { return isInstrument; }
+  uint32_t latencySamples() const { return configuredLatencySamples; }
+  uint32_t reconcileParameterLatencyChange() {
+    const int32 flags = componentHandler->consumeRestartFlags();
+    const uint32_t nextLatency = validateLatencySamples(processor->getLatencySamples());
+    const bool latencyFlagged = (flags & (RestartFlags::kLatencyChanged | RestartFlags::kIoChanged)) != 0;
+    if (!latencyFlagged && nextLatency == configuredLatencySamples) return configuredLatencySamples;
+    require(mode == kOffline, "VST3 effect changed reported latency (" +
+      std::to_string(configuredLatencySamples) + " -> " + std::to_string(nextLatency) +
+      " samples) on an active live session; stop playback to reconfigure Mixer delay compensation");
+    restartActiveComponent("parameter latency reconfiguration");
+    configuredLatencySamples = validateLatencySamples(processor->getLatencySamples());
+    return configuredLatencySamples;
+  }
   json metadata() {
     json result = json::array();
     int choiceBudget = 4096;
@@ -449,6 +540,13 @@ public:
     data.inputParameterChanges = &parameters; data.outputParameterChanges = &outputParameters;
     data.processContext = &context;
     checked(processor->process(data), "Plugin process failed");
+    const int32 restartFlags = componentHandler->consumeRestartFlags();
+    const uint32_t currentLatency = validateLatencySamples(processor->getLatencySamples());
+    require((restartFlags & (RestartFlags::kLatencyChanged | RestartFlags::kIoChanged)) == 0 &&
+      currentLatency == configuredLatencySamples,
+      "VST3 plugin changed reported latency during active processing (" +
+      std::to_string(configuredLatencySamples) + " -> " + std::to_string(currentLatency) +
+      " samples); stop and restart playback to recompute Mixer delay compensation");
     // Retain a zero-sample flush for the next audible block too: some SDK
     // processors recalculate coefficients only while processing samples.
     if (frames > 0) {
@@ -530,8 +628,11 @@ int main() {
         // some processors ignore parameter queues on zero-sample calls.
         if (instance->isInstrumentKind())
           instance->process({{"frames", 0}, {"events", json::array()}, {"bpm", 120}, {"parameters", request.at("parameters")}}, true);
-        else instance->applyParameters(request.at("parameters"), false, -1, false);
-        reply({{"ok", true}, {"parameters", instance->metadata()}});
+        else {
+          instance->applyParameters(request.at("parameters"), false, -1, false);
+          instance->reconcileParameterLatencyChange();
+        }
+        reply({{"ok", true}, {"parameters", instance->metadata()}, {"latencySamples", instance->latencySamples()}});
       } else if (command == "snapshot") {
         require(bool(instance), "No plugin instance loaded");
         reply({{"ok", true}, {"state", instance->snapshot()}});

@@ -1,3 +1,5 @@
+export const MAX_MIXER_COMPENSATION_SECONDS = 10;
+
 export interface MixerLatencyRoute {
   trackId: number;
   targetId: number;

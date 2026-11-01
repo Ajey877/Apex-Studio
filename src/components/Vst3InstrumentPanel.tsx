@@ -11,11 +11,12 @@ export function Vst3StatusBanner() {
   const diagnostics = useSyncExternalStore(subscribeVst3Diagnostics, getVst3Diagnostics, getVst3Diagnostics);
   const effectDiagnostics = useSyncExternalStore(subscribeVst3MixerEffectDiagnostics, getVst3MixerEffectDiagnostics, getVst3MixerEffectDiagnostics);
   const errors = diagnostics.filter(item => !item.message.startsWith('VST3 ready') && !item.message.startsWith('VST3 active'));
+  const effectErrors = effectDiagnostics.filter(item => !item.message.startsWith('VST3 ready'));
   if (!errors.length && !effectDiagnostics.length) return null;
-  return <div role={errors.length ? 'alert' : 'status'} className="px-3 py-2 text-xs bg-[var(--apex-panel)] text-[var(--apex-text)] border-b border-[var(--apex-border)]">
+  return <div role={(errors.length || effectErrors.length) ? 'alert' : 'status'} className="px-3 py-2 text-xs bg-[var(--apex-panel)] text-[var(--apex-text)] border-b border-[var(--apex-border)]">
     {errors.map(item => <p key={`instrument:${item.channelId}`}>VST3 ({item.channelId}): {item.message} Saved instrument data is retained. Open Instruments to retry or relink.</p>)}
     {effectDiagnostics.map(item => <p key={`effect:${item.trackId}:${item.slotId}`}>
-      VST3 Mixer effect (track {item.trackId}, slot {item.slotId}): {item.message} Saved effect state is retained; export will refuse an unsupported native path instead of silently bypassing it.
+      VST3 Mixer effect (track {item.trackId}, slot {item.slotId}): {item.message}{item.message.startsWith('VST3 ready') ? '' : ' Saved effect state is retained; export will refuse an unsupported native path instead of silently bypassing it.'}
     </p>)}
   </div>;
 }

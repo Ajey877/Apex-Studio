@@ -532,3 +532,165 @@ test('prepareTracks flushes saved parameter overlays before live-port bind and c
   }
 });
 
+test('worklet nonzero pluginLatencyFrames aligns mid-take dry bypass at 2048 + L without changing delayFrames or exceeding two-block queues', () => {
+  for (const pluginLatency of [320, 1500]) {
+    const sandbox: any = {
+      currentFrame: 0, Float32Array, Map, Number, Array, Math, String,
+      AudioWorkletProcessor: class {
+        port = {
+          onmessage: null as ((event: { data: any }) => void) | null,
+          sent: [] as any[],
+          postMessage(message: any) { this.sent.push(message); },
+        };
+      },
+      registerProcessor(_name: string, constructor: new (options: any) => any) { sandbox.Processor = constructor; },
+    };
+    runInNewContext(VST3_FX_WORKLET_SOURCE, sandbox);
+    const processor = new sandbox.Processor({ processorOptions: { profileEnabled: false } });
+    processor.port.onmessage({ data: { type: 'plugin-latency', frames: pluginLatency } });
+    assert.equal(processor.delayFrames, VST3_FX_PIPELINE_FRAMES, 'fixed 2048-frame worklet bridge delay must remain separate from plugin latency');
+
+    // Simulate a real plugin with `pluginLatency`-frame internal delay and 0.5x wet gain:
+    const delayLineL = new Float32Array(pluginLatency);
+    const delayLineR = new Float32Array(pluginLatency);
+    let delayPos = 0;
+
+    let globalInputSample = 0;
+    const wetOutL: number[] = [];
+    const wetOutR: number[] = [];
+    const totalQuanta = 64; // 64 * 128 = 8192 frames
+    for (let q = 0; q < totalQuanta; q++) {
+      // Toggle bypass ON at quantum 36 (frame 4608) and OFF at quantum 50 (frame 6400)
+      if (q === 36) processor.port.onmessage({ data: { type: 'bypass', value: true } });
+      if (q === 50) processor.port.onmessage({ data: { type: 'bypass', value: false } });
+
+      const inL = new Float32Array(128);
+      const inR = new Float32Array(128);
+      for (let i = 0; i < 128; i++) {
+        // Distinct marker at every frame so 1-sample drift is immediately caught:
+        const idx = globalInputSample++;
+        inL[i] = (idx + 1) / 16384;
+        inR[i] = -((idx + 1) / 32768);
+      }
+      const outL = new Float32Array(128);
+      const outR = new Float32Array(128);
+      sandbox.currentFrame = q * 128;
+      processor.process([[inL, inR]], [[outL, outR]]);
+      assert.ok(processor.ready.size <= 2 && processor.dryReady.size <= 2,
+        `two-block queue bound must hold for pluginLatency=${pluginLatency} (ready=${processor.ready.size}, dry=${processor.dryReady.size})`);
+
+      // Service any submitted 1024-frame block immediately (simulating fast helper turnaround)
+      while (processor.port.sent.length > 0) {
+        const msg = processor.port.sent.shift();
+        if (msg.type === 'failure') assert.fail(`Unexpected worklet failure: ${msg.reason}`);
+        if (msg.type === 'process') {
+          const outSamples = new Float32Array(VST3_FX_BLOCK_FRAMES * 2);
+          for (let s = 0; s < VST3_FX_BLOCK_FRAMES; s++) {
+            outSamples[s] = delayLineL[delayPos] * 0.5;
+            outSamples[VST3_FX_BLOCK_FRAMES + s] = delayLineR[delayPos] * 0.5;
+            delayLineL[delayPos] = msg.samples[s];
+            delayLineR[delayPos] = msg.samples[VST3_FX_BLOCK_FRAMES + s];
+            delayPos = (delayPos + 1) % pluginLatency;
+          }
+          processor.port.onmessage({ data: { type: 'result', sequence: msg.sequence, samples: outSamples } });
+        }
+      }
+      for (let i = 0; i < 128; i++) {
+        wetOutL.push(outL[i]!);
+        wetOutR.push(outR[i]!);
+      }
+    }
+
+    const totalExpectedDelay = VST3_FX_PIPELINE_FRAMES + pluginLatency;
+    for (let f = 0; f < totalExpectedDelay; f++) {
+      assert.equal(wetOutL[f], 0, `pre-roll frame ${f} must be 0 before 2048 + ${pluginLatency}`);
+      assert.equal(wetOutR[f], 0);
+    }
+    for (let f = totalExpectedDelay; f < wetOutL.length; f++) {
+      const srcIdx = f - totalExpectedDelay;
+      const q = Math.floor(f / 128);
+      const isBypassed = q >= 36 && q < 50;
+      const expectedGain = isBypassed ? 1.0 : 0.5;
+      const expectedL = ((srcIdx + 1) / 16384) * expectedGain;
+      const expectedR = -((srcIdx + 1) / 32768) * expectedGain;
+      assert.ok(Math.abs(wetOutL[f]! - expectedL) < 1e-6,
+        `sample mismatch on L at output frame ${f} (bypass=${isBypassed}, pluginLatency=${pluginLatency}): expected ${expectedL}, got ${wetOutL[f]}`);
+      assert.ok(Math.abs(wetOutR[f]! - expectedR) < 1e-6,
+        `sample mismatch on R at output frame ${f} (bypass=${isBypassed}, pluginLatency=${pluginLatency}): expected ${expectedR}, got ${wetOutR[f]}`);
+    }
+  }
+});
+
+test('NativeVst3EffectRuntime exposes liveLatencyFramesFor (2048 + pluginLatency) and rejects invalid or excessive latencySamples without leaking sessions', async () => {
+  const originalNode = (globalThis as any).AudioWorkletNode;
+  const sentMessages: any[] = [];
+  class FakeWorkletNode {
+    port = {
+      onmessage: null as ((event: { data: any }) => void) | null,
+      postMessage: (message: any) => {
+        sentMessages.push(message);
+        if (message?.type === 'stop') queueMicrotask(() => this.port.onmessage?.({ data: { type: 'stop-ack', sequence: null, reason: message.reason } }));
+      },
+      close() {},
+    };
+    onprocessorerror: (() => void) | null = null;
+    disconnect() {}
+  }
+  (globalThis as any).AudioWorkletNode = FakeWorkletNode;
+
+  const effect: Vst3Effect = {
+    path: '/plugins/lookahead.vst3',
+    classId: '415045584C4154454E43594658303031',
+    name: 'Lookahead',
+    vendor: 'Apex',
+    version: '1.0.0',
+    state: { schema: 1, classId: '415045584C4154454E43594658303031', parameters: [] },
+  };
+  const track: MixerTrack = {
+    id: 1, name: 'Track 1', color: '#fff', volume: 1, pan: 0, mute: false, solo: false, peakL: 0, peakR: 0,
+    fxSlots: [{ id: 'slot-lookahead', type: 'vst3', name: 'Lookahead', enabled: true, mix: 1, params: {}, vst3Effect: effect }],
+  };
+  const openSessions = new Set<string>();
+  let nextLatency: any = 320;
+  let seq = 0;
+  const bridge: Vst3Bridge = {
+    paths: async () => [],
+    choosePath: async () => null,
+    discover: async () => ({ plugins: [], errors: [] }),
+    discoverEffects: async () => ({ plugins: [], errors: [] }),
+    inspect: async () => { throw new Error('unused'); },
+    inspectEffect: async () => effect,
+    describe: async () => ({ parameters: [], controllerAvailable: true }),
+    describeEffect: async () => ({ parameters: [], controllerAvailable: true, latencySamples: 320 }),
+    open: async () => {
+      const id = `lat-session-${++seq}`;
+      openSessions.add(id);
+      return { id, latencySamples: nextLatency };
+    },
+    parameters: async () => [],
+    process: async () => new Float32Array(),
+    processAudio: async () => new Float32Array(VST3_FX_BLOCK_FRAMES * 2),
+    close: async id => { openSessions.delete(id); },
+  };
+  const context: any = { sampleRate: 48000, currentTime: 0, state: 'running', audioWorklet: { addModule: async () => {} } };
+  const runtime = new NativeVst3EffectRuntime(() => {}, () => bridge);
+  try {
+    await runtime.prepareTracks([track], context);
+    assert.equal(runtime.pluginLatencyFramesFor(1, 'slot-lookahead', context, effect), 320);
+    assert.equal(runtime.liveLatencyFramesFor(1, 'slot-lookahead', context, effect), VST3_FX_PIPELINE_FRAMES + 320);
+    assert.ok(sentMessages.some(m => m?.type === 'plugin-latency' && m.frames === 320));
+    await runtime.stop();
+    assert.equal(openSessions.size, 0);
+
+    for (const badLatency of [-1, 12.5, Number.NaN, 48001, 0xffffffff]) {
+      nextLatency = badLatency;
+      await assert.rejects(runtime.prepareTracks([track], context), /invalid|excessive/i);
+      assert.equal(openSessions.size, 0, `session must be closed when latencySamples=${String(badLatency)} is rejected`);
+    }
+  } finally {
+    await runtime.stop();
+    (globalThis as any).AudioWorkletNode = originalNode;
+  }
+});
+
+

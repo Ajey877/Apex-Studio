@@ -436,3 +436,75 @@ test('unsupported class, bus layout, missing module and malformed native audio f
     await assert.rejects(missing.open({ ...delay, path: `${bundle}.missing` }, { kind: 'effect', sampleRate }), /module load failed/);
   } finally { await missing.dispose(); }
 });
+
+test('native host reports valid getLatencySamples(), supports stopped offline latency reconfiguration and sample-rate scaling, and rejects realtime/mid-stream/invalid latency mutations', async () => {
+  const service = new Vst3Service(executable, [root]);
+  const owner = 'latency-host-contract';
+  try {
+    const { plugins } = await service.discover(owner, 'effect');
+    const lookahead = plugins.find(p => p.name === 'Apex Latency Fixture');
+    const invalidNegative = plugins.find(p => p.name === 'Apex Invalid Latency Fixture');
+    const invalidExcessive = plugins.find(p => p.name === 'Apex Excessive Latency Fixture');
+    const dynamicMidstream = plugins.find(p => p.name === 'Apex Dynamic Latency Fixture');
+    assert.ok(lookahead && invalidNegative && invalidExcessive && dynamicMidstream, 'Apex latency C++ fixtures must be discovered');
+
+    // Default reported latency = 320 samples; impulse delayed by exact 320 samples
+    const baseDesc = await service.describeEffect(lookahead, owner);
+    assert.equal(baseDesc.latencySamples, 320);
+
+    // Offline parameter edit can reconfigure latency (320 -> 600 samples) cleanly via component restart
+    const baseInspected = await service.inspectEffect(lookahead, undefined, owner);
+    const offlineSession = await service.open(baseInspected, 48000, 'offline', owner, 'effect');
+    assert.equal(offlineSession.latencySamples, 320);
+    const updatedParams = await service.parameters(offlineSession.id, [{ id: 0, value: 600 / 4096 }], owner);
+    assert.ok(Math.abs(updatedParams.find(p => p.id === 0).currentValue - 600 / 4096) < 1e-7);
+    const impulse = new Float32Array(2048);
+    impulse[0] = 0.8;
+    impulse[1024] = -0.6;
+    const delayed600 = await service.processAudio(offlineSession.id, 1024, impulse, 120, owner);
+    const idxL = Array.from(delayed600.subarray(0, 1024)).findIndex(v => Math.abs(v) > 1e-6);
+    const idxR = Array.from(delayed600.subarray(1024, 2048)).findIndex(v => Math.abs(v) > 1e-6);
+    assert.equal(idxL, 600);
+    assert.equal(idxR, 600);
+    assert.ok(Math.abs(delayed600[600] - 0.8) < 1e-6 && Math.abs(delayed600[1024 + 600] + 0.6) < 1e-6);
+    await service.close(offlineSession.id, owner);
+
+    // Sample-rate-dependent latency (RateScale = 1): 400 @ 48 kHz -> 800 @ 96 kHz
+    const rateScaled = await service.inspectEffect(lookahead, {
+      ...baseInspected.state,
+      parameters: [{ id: 0, value: 400 / 4096 }, { id: 3, value: 1 }],
+    }, owner);
+    const at48 = await service.open(rateScaled, 48000, 'offline', owner, 'effect');
+    const at96 = await service.open(rateScaled, 96000, 'offline', owner, 'effect');
+    assert.equal(at48.latencySamples, 400);
+    assert.equal(at96.latencySamples, 800);
+    await service.close(at48.id, owner);
+    await service.close(at96.id, owner);
+
+    // Realtime live session rejects parameter edits that mutate latencySamples
+    const realtimeSession = await service.open(baseInspected, 48000, 'realtime', owner, 'effect');
+    await assert.rejects(
+      service.parameters(realtimeSession.id, [{ id: 0, value: 768 / 4096 }], owner),
+      /changed reported latency.*active live session/i,
+    );
+    assert.equal(service.sessionCount, 0, 'rejected realtime latency mutation closes session cleanly');
+
+    // Invalid (0xFFFFFFFF / -1 cast to uint32) and excessive (> 1.0 s) latencies fail safely on open()
+    await assert.rejects(service.open(invalidNegative, 48000, 'offline', owner, 'effect'), /invalid or excessive latency/i);
+    await assert.rejects(service.open(invalidExcessive, 48000, 'realtime', owner, 'effect'), /invalid or excessive latency/i);
+    assert.equal(service.sessionCount, 0);
+
+    // Mid-stream dynamic latency change during process() is caught and aborted immediately
+    const dynSession = await service.open(dynamicMidstream, 48000, 'realtime', owner, 'effect');
+    assert.equal(dynSession.latencySamples, 256);
+    await service.processAudio(dynSession.id, 128, new Float32Array(256), 120, owner);
+    await assert.rejects(
+      service.processAudio(dynSession.id, 128, new Float32Array(256), 120, owner),
+      /changed reported latency during active processing/i,
+    );
+    assert.equal(service.sessionCount, 0);
+  } finally {
+    await service.dispose();
+  }
+});
+

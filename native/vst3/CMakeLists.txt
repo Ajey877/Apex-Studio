@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.25)
-project(apex_vst3_host LANGUAGES CXX)
+project(apex_vst3_host VERSION 1.0.0 LANGUAGES CXX)
 
 # Standalone executable: no Node/Electron ABI dependency; Windows x64 is the
 # intended desktop target. Linux exists for reproducible DSP verification.
@@ -94,4 +94,16 @@ endif()
 if(APEX_BUILD_VST3_FIXTURE)
   add_executable(apex-vst3-protocol-fault protocol-fault.cpp)
   set_target_properties(apex-vst3-protocol-fault PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
+  smtg_add_vst3plugin(apex-latency-vst3
+    latency-fixture.cpp
+    "${SDK_ROOT}/public.sdk/source/vst/vstsinglecomponenteffect.cpp"
+  )
+  if(WIN32)
+    target_sources(apex-latency-vst3 PRIVATE "${SDK_ROOT}/public.sdk/source/main/dllmain.cpp")
+  else()
+    target_sources(apex-latency-vst3 PRIVATE "${SDK_ROOT}/public.sdk/source/main/linuxmain.cpp")
+  endif()
+  target_link_libraries(apex-latency-vst3 PRIVATE sdk)
+  target_compile_options(apex-latency-vst3 PRIVATE $<$<CXX_COMPILER_ID:MSVC>:/fp:precise>)
 endif()

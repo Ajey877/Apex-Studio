@@ -48,10 +48,10 @@ import { resolveLimiterLatencySamples } from './masteringLimiter';
 import type { AudioLatencyMetrics, MasterMeasurementSnapshot } from '../types/daw';
 import { ChorusEffect } from './effects/ChorusEffect';
 import { WetDryEffect } from './effects/WetDryEffect';
-import { assertVst3Effect, getVst3Bridge, type Vst3Effect, type Vst3Instrument, type Vst3ParameterChange } from './nativeVst3Types';
+import { assertValidVst3EffectLatencySamples, assertVst3Effect, getVst3Bridge, type Vst3Effect, type Vst3Instrument, type Vst3ParameterChange } from './nativeVst3Types';
 import { NativeVst3Runtime, NativeVst3OfflineRender, reportVst3, reconcileVst3Diagnostics } from './nativeVst3Runtime';
 import { NativeVst3EffectRuntime, reportVst3MixerEffect, VST3_FX_PIPELINE_FRAMES } from './nativeVst3EffectRuntime';
-import { computeMixerLatencyCompensation, type MixerLatencyEdge } from './mixerLatencyCompensation';
+import { computeMixerLatencyCompensation, MAX_MIXER_COMPENSATION_SECONDS, type MixerLatencyEdge } from './mixerLatencyCompensation';
 import { createInstrumentRegistry, InstrumentRegistry, InstrumentVoiceHandle } from './instrumentRegistry';
 import { MixerRoutingAdapter } from './mixerRoutingAdapter';
 import { buildDryStemMixerTracks, buildWetStemMixerTracks, getDirectAuxSendSourceIds, getUpstreamMixerTrackIds } from './auxStemRouting';
@@ -720,7 +720,36 @@ class AudioEngine {
   public releaseNativeInstruments(): Promise<void> {
     this.nativePreparing = false;
     this.nativePlayGeneration++;
-    return Promise.all([this.nativeInstruments?.stop() ?? Promise.resolve(), this.nativeMixerEffects.stop()]).then(() => undefined);
+    const stopPromise = Promise.all([this.nativeInstruments?.stop() ?? Promise.resolve(), this.nativeMixerEffects.stop()]).then(() => undefined);
+    this.resetMixerLatencyCompensation();
+    return stopPromise;
+  }
+
+  private resetMixerLatencyCompensation(): void {
+    if (this.isOfflineRendering || !this.ctx || (this.ctx as AudioContext).state === 'closed' || !this.mixerChannels.has(0)) return;
+    try {
+      for (const [, channel] of this.mixerChannels) {
+        this.syncDirectMixerCompensation(channel, 0);
+        if (channel.auxSendDelays?.size) {
+          for (const targetId of [...channel.auxSendDelays.keys()]) {
+            const target = this.mixerChannels.get(targetId);
+            if (target) this.syncAuxSendCompensation(channel, target, targetId, 0);
+            else {
+              try { channel.auxSendDelays.get(targetId)?.disconnect(); } catch (_) {}
+              channel.auxSendDelays.delete(targetId);
+            }
+          }
+        }
+      }
+      if (this.mixerRoutingAdapter && this.mixerRoutingChannelMap === this.mixerChannels) {
+        const currentRoutes = this.mixerRoutingAdapter.getRoutes()
+          .filter(route => route.trackId !== 0 && this.mixerChannels.has(route.trackId) && this.mixerChannels.has(route.targetId));
+        this.mixerRoutingAdapter.syncRoutes(currentRoutes, new Map());
+        this.restoreAuxSendConnections();
+      }
+    } catch {
+      // Best-effort teardown when releasing native sessions on a closing/mocked graph.
+    }
   }
   public async flushNativeLiveForTest() { await this.nativeInstruments.flushLive(); }
 
@@ -1598,6 +1627,9 @@ class AudioEngine {
     }
     if (!this.ctx) return;
     const seconds = Math.max(0, frames) / this.ctx.sampleRate;
+    if (!Number.isFinite(seconds) || seconds > MAX_MIXER_COMPENSATION_SECONDS) {
+      throw new Error(`Mixer latency compensation (${frames} frames / ${seconds.toFixed(3)} s) exceeds the maximum ${MAX_MIXER_COMPENSATION_SECONDS} s DelayNode budget.`);
+    }
     if (Math.abs(node.delayTime.value - seconds) < 1e-12) return;
     const now = this.ctx.currentTime;
     try {
@@ -1619,10 +1651,14 @@ class AudioEngine {
       return;
     }
     if (!this.ctx) return;
+    const seconds = frames / this.ctx.sampleRate;
+    if (!Number.isFinite(seconds) || seconds > MAX_MIXER_COMPENSATION_SECONDS) {
+      throw new Error(`Mixer direct-input latency compensation (${frames} frames / ${seconds.toFixed(3)} s) exceeds the maximum ${MAX_MIXER_COMPENSATION_SECONDS} s DelayNode budget.`);
+    }
     let delay = existing;
     if (!delay) {
       if (typeof this.ctx.createDelay !== 'function') throw new Error('This AudioContext cannot apply required Mixer latency compensation.');
-      delay = this.ctx.createDelay(10);
+      delay = this.ctx.createDelay(MAX_MIXER_COMPENSATION_SECONDS);
       if (!delay.delayTime) throw new Error('This AudioContext returned an invalid Mixer compensation delay node.');
       try { channel.input.disconnect(); } catch (_) {}
       channel.input.connect(delay);
@@ -1645,10 +1681,14 @@ class AudioEngine {
       return;
     }
     if (!this.ctx) return;
+    const seconds = frames / this.ctx.sampleRate;
+    if (!Number.isFinite(seconds) || seconds > MAX_MIXER_COMPENSATION_SECONDS) {
+      throw new Error(`Mixer aux-send latency compensation (${frames} frames / ${seconds.toFixed(3)} s) exceeds the maximum ${MAX_MIXER_COMPENSATION_SECONDS} s DelayNode budget.`);
+    }
     let delay = existing;
     if (!delay) {
       if (typeof this.ctx.createDelay !== 'function') throw new Error('This AudioContext cannot apply required aux-send latency compensation.');
-      delay = this.ctx.createDelay(10);
+      delay = this.ctx.createDelay(MAX_MIXER_COMPENSATION_SECONDS);
       if (!delay.delayTime) throw new Error('This AudioContext returned an invalid aux-send compensation delay node.');
       try { gain.disconnect(target.routingInput); } catch (_) {}
       gain.connect(delay);
@@ -1659,11 +1699,13 @@ class AudioEngine {
   }
 
   /**
-   * Computes the fixed live-bridge latency through the actual mixer DAG. Each
-   * direct source and routed child is delayed at the channel's summing input to
-   * the slowest incoming path, before that channel's native inserts. Offline
-   * rendering deliberately uses a zero bridge budget: native effects are
-   * rendered on the project timeline by the offline helper pass instead.
+   * Computes live latency compensation through the actual mixer DAG. Each
+   * prepared VST3 insert contributes the fixed live AudioWorklet bridge latency
+   * (`VST3_FX_PIPELINE_FRAMES` = 2048 frames) plus that plugin's validated
+   * `IAudioProcessor::getLatencySamples()`. Each direct source and routed/aux
+   * child is delayed at the channel's summing input to the slowest incoming
+   * path, before that channel's own native inserts. Offline rendering uses a
+   * zero live-bridge budget and compensates plugin latency in `processOfflineVst3Effect`.
    */
   private applyMixerLatencyCompensation(tracks: readonly MixerTrack[], routes: readonly { trackId: number; targetId: number }[]) {
     const channelIds = [...this.mixerChannels.keys()];
@@ -1674,7 +1716,7 @@ class AudioEngine {
     }));
     const auxSendsAreAcyclic = this.validateAuxSendsNoCycle([...tracks]) === null;
     if (auxSendsAreAcyclic) {
-      for (const track of tracks) for (const send of track.auxSends ?? []) {
+      for (const track of tracks) for (const send of (track.auxSends ?? []).slice(0, 2)) {
         if (track.id === 0 || send.targetId === 0 || !Number.isInteger(send.targetId) || send.targetId === track.id ||
             !knownIds.has(track.id) || !knownIds.has(send.targetId)) continue;
         edges.push({ id: `aux:${track.id}:${send.targetId}`, sourceTrackId: track.id, targetTrackId: send.targetId });
@@ -1685,9 +1727,11 @@ class AudioEngine {
       if (this.isOfflineRendering || !context) return 0;
       const track = trackById.get(trackId);
       if (!track) return 0;
-      return track.fxSlots.reduce((frames, slot) => frames + (slot.type === 'vst3' &&
-        this.nativeMixerEffects.nodeFor(trackId, slot.id, context, slot.vst3Effect)
-        ? VST3_FX_PIPELINE_FRAMES : 0), 0);
+      return track.fxSlots.reduce((frames, slot) => {
+        if (slot.type !== 'vst3') return frames;
+        const liveFrames = this.nativeMixerEffects.liveLatencyFramesFor(trackId, slot.id, context, slot.vst3Effect);
+        return frames + (liveFrames ?? 0);
+      }, 0);
     });
 
     for (const [trackId, channel] of this.mixerChannels) {
@@ -1696,7 +1740,7 @@ class AudioEngine {
     for (const track of tracks) {
       const source = this.mixerChannels.get(track.id);
       if (!source) continue;
-      for (const send of track.auxSends ?? []) {
+      for (const send of (track.auxSends ?? []).slice(0, 2)) {
         const target = this.mixerChannels.get(send.targetId);
         if (!target) continue;
         this.syncAuxSendCompensation(source, target, send.targetId,
@@ -1735,7 +1779,7 @@ class AudioEngine {
     } else {
       // Phase 88: bus rebuild cleared aux taps; restore them and sync this track's sends
       this.restoreAuxSendConnections();
-      this.syncAuxSendsForTrack(track);
+      this.syncAuxSendsForTrackInternal(track, undefined, false);
       this.applyMixerLatencyCompensation([...knownTracks.values()], routes);
     }
   }
@@ -1796,9 +1840,9 @@ class AudioEngine {
         if (!adj.has(t.id)) adj.set(t.id, new Set());
         adj.get(t.id)!.add(target);
       }
-      let sends = t.auxSends ?? [];
+      let sends = (t.auxSends ?? []).slice(0, 2);
       if (newAuxForSource && t.id === newAuxForSource.sourceId) {
-        sends = newAuxForSource.auxSends;
+        sends = newAuxForSource.auxSends.slice(0, 2);
       }
       for (const s of sends) {
         if (s.targetId === 0 || s.targetId === t.id) continue;
@@ -1831,6 +1875,10 @@ class AudioEngine {
   }
 
   public syncAuxSendsForTrack(track: MixerTrack, allTracks?: MixerTrack[]): void {
+    this.syncAuxSendsForTrackInternal(track, allTracks, true);
+  }
+
+  private syncAuxSendsForTrackInternal(track: MixerTrack, allTracks?: MixerTrack[], recomputeCompensation = true): void {
     if (this.shouldBlockLiveMutation() || !this.ctx) return;
     // Master cannot send
     if (track.id === 0) {
@@ -1858,6 +1906,7 @@ class AudioEngine {
     const map = this.ensureAuxSendGainsMap(channel);
     const desired = (track.auxSends ?? []).slice(0, 2);
     const desiredIds = new Set(desired.map(s => s.targetId));
+    let topologyChanged = false;
     // Remove stale
     for (const [targetId, gain] of [...map.entries()]) {
       if (!desiredIds.has(targetId)) {
@@ -1866,6 +1915,7 @@ class AudioEngine {
         try { channel.auxSendDelays?.get(targetId)?.disconnect(); } catch (_) {}
         channel.auxSendDelays?.delete(targetId);
         map.delete(targetId);
+        topologyChanged = true;
       }
     }
     // Add / update
@@ -1890,6 +1940,7 @@ class AudioEngine {
         gain.gain.value = clamped;
         map.set(send.targetId, gain);
         try { gain.connect(targetCh.routingInput); } catch (_) {}
+        topologyChanged = true;
       } else {
         // Update amount without rebuilding the route's compensation node.
         const now = this.ctx.currentTime;
@@ -1897,6 +1948,30 @@ class AudioEngine {
         else gain.gain.value = clamped;
       }
       try { channel.output.connect(gain); } catch (_) {}
+    }
+    if (recomputeCompensation && topologyChanged && this.mixerChannels.has(0)) {
+      const adapter = this.ensureMixerRoutingAdapter();
+      const baseTracks = allTracks ?? (this.activeMixerTracks.length ? this.activeMixerTracks : this.playbackProjectMixerTracks);
+      const knownTracks = new Map(baseTracks.map(item => [item.id, item]));
+      knownTracks.set(track.id, track);
+      const existingRoutes = new Map(
+        adapter.getRoutes()
+          .filter(route => route.trackId !== 0 && this.mixerChannels.has(route.trackId))
+          .map(route => [route.trackId, route.targetId]),
+      );
+      for (const trackId of this.mixerChannels.keys()) {
+        if (trackId !== 0 && !existingRoutes.has(trackId)) {
+          existingRoutes.set(trackId, knownTracks.get(trackId)?.routingTargetId ?? 0);
+        }
+      }
+      const routes = [...existingRoutes.entries()].map(([trackId, targetId]) => ({ trackId, targetId }));
+      const tracksList = [...knownTracks.values()];
+      const routeDelayFrames = this.applyMixerLatencyCompensation(tracksList, routes);
+      const result = adapter.syncRoutes(routes, routeDelayFrames);
+      if (result.valid) {
+        this.restoreAuxSendConnections();
+        this.applyMixerLatencyCompensation(tracksList, routes);
+      }
     }
   }
 
@@ -1911,7 +1986,7 @@ class AudioEngine {
     }
     for (const track of tracks) {
       if (track.id === 0) continue;
-      this.syncAuxSendsForTrack(track);
+      this.syncAuxSendsForTrackInternal(track, undefined, false);
     }
     // Ensure any aux gains whose target track was removed are pruned
     const validIds = new Set(tracks.map(t => t.id));
@@ -3884,6 +3959,50 @@ class AudioEngine {
     return new OfflineContextClass(channels, frames, sampleRate).createBuffer(channels, frames, sampleRate);
   }
 
+  private orderMixerTracksUpstreamFirst(tracks: readonly MixerTrack[]): MixerTrack[] {
+    const trackById = new Map<number, MixerTrack>();
+    for (const track of tracks) trackById.set(track.id, track);
+    const upstreamByTarget = new Map<number, number[]>();
+    const addEdge = (sourceId: number, targetId: number) => {
+      if (sourceId === targetId || !trackById.has(sourceId) || !trackById.has(targetId)) return;
+      const list = upstreamByTarget.get(targetId) ?? [];
+      if (!list.includes(sourceId)) list.push(sourceId);
+      upstreamByTarget.set(targetId, list);
+    };
+    for (const track of tracks) {
+      if (track.id === 0) continue;
+      addEdge(track.id, track.routingTargetId ?? 0);
+    }
+    if (this.validateAuxSendsNoCycle([...tracks]) === null) {
+      for (const track of tracks) {
+        if (track.id === 0) continue;
+        for (const send of (track.auxSends ?? []).slice(0, 2)) {
+          if (!Number.isInteger(send.targetId) || send.targetId === 0 || send.targetId === track.id) continue;
+          addEdge(track.id, send.targetId);
+        }
+      }
+    }
+    const ordered: MixerTrack[] = [];
+    const visited = new Set<number>();
+    const visiting = new Set<number>();
+    const visit = (trackId: number) => {
+      if (visited.has(trackId)) return;
+      if (visiting.has(trackId)) throw new Error('Offline VST3 export requires an acyclic Mixer routing graph.');
+      const track = trackById.get(trackId);
+      if (!track) return;
+      visiting.add(trackId);
+      for (const sourceId of upstreamByTarget.get(trackId) ?? []) visit(sourceId);
+      visiting.delete(trackId);
+      visited.add(trackId);
+      ordered.push(track);
+    };
+    for (const track of tracks) {
+      if (track.id !== 0) visit(track.id);
+    }
+    if (trackById.has(0)) visit(0);
+    return ordered;
+  }
+
   private async renderTimelineOfflineWithNativeEffects(request: {
     channels: Channel[]; clips: PlaylistClip[]; mixerTracks: MixerTrack[]; bpm: number; totalBars: number;
     sampleRate?: number; includeMixerFx: boolean; renderScope: OfflineRenderScope;
@@ -3893,7 +4012,8 @@ class AudioEngine {
     if (this.nativeFxOfflineBatchHeld || this.offlineRenderLeaseHeld) {
       throw new Error('Another production offline render is already running.');
     }
-    const slots = request.mixerTracks.flatMap(track => track.fxSlots
+    const orderedTracks = this.orderMixerTracksUpstreamFirst(request.mixerTracks);
+    const slots = orderedTracks.flatMap(track => track.fxSlots
       .filter(slot => slot.type === 'vst3' && slot.enabled)
       .map(slot => ({ trackId: track.id, slot })));
     if (slots.length > 8) throw new Error('Offline VST3 export supports at most 8 enabled Mixer-effect inserts per render.');
@@ -3971,11 +4091,14 @@ class AudioEngine {
       reportVst3MixerEffect(trackId, slotId, `Offline VST3 effect restoration/open failed: ${error instanceof Error ? error.message : String(error)}. Project identity/state was retained; relink the plugin and retry.`);
       throw error;
     }
-    if (opened.latencySamples !== 0) {
-      await bridge.close(opened.id);
-      const message = `VST3 effect ${effect.name} reports ${opened.latencySamples} samples of latency. Nonzero plugin latency is unsupported and export was stopped without compensation.`;
+    let latencySamples: number;
+    try {
+      latencySamples = assertValidVst3EffectLatencySamples(opened.latencySamples, input.sampleRate);
+    } catch (error) {
+      await bridge.close(opened.id).catch(() => {});
+      const message = error instanceof Error ? error.message : String(error);
       reportVst3MixerEffect(trackId, slotId, message);
-      throw new Error(message);
+      throw error;
     }
     const output = this.createNativeFxPcmBuffer(2, input.length, input.sampleRate);
     const leftIn = input.getChannelData(0), rightIn = input.getChannelData(1);
@@ -3983,17 +4106,28 @@ class AudioEngine {
     try {
       const safeBpm = Math.max(20, Math.min(300, Number(bpm) || 120));
       const blockSize = 4096;
-      for (let offset = 0; offset < input.length; offset += blockSize) {
-        const frames = Math.min(blockSize, input.length - offset);
+      const totalStreamFrames = input.length + latencySamples;
+      for (let streamOffset = 0; streamOffset < totalStreamFrames; streamOffset += blockSize) {
+        const frames = Math.min(blockSize, totalStreamFrames - streamOffset);
         const planar = new Float32Array(frames * 2);
-        planar.set(leftIn.subarray(offset, offset + frames), 0);
-        planar.set(rightIn.subarray(offset, offset + frames), frames);
+        if (streamOffset < input.length) {
+          const inputFrames = Math.min(frames, input.length - streamOffset);
+          planar.set(leftIn.subarray(streamOffset, streamOffset + inputFrames), 0);
+          planar.set(rightIn.subarray(streamOffset, streamOffset + inputFrames), frames);
+        }
         const processed = await bridge.processAudio(opened.id, frames, planar, safeBpm);
         if (!(processed instanceof Float32Array) || processed.length !== frames * 2 || processed.some(sample => !Number.isFinite(sample))) {
-          throw new Error(`VST3 effect ${effect.name} returned malformed/non-finite PCM at frame ${offset}. Export stopped.`);
+          throw new Error(`VST3 effect ${effect.name} returned malformed/non-finite PCM at frame ${streamOffset}. Export stopped.`);
         }
-        leftOut.set(processed.subarray(0, frames), offset);
-        rightOut.set(processed.subarray(frames), offset);
+        const keepStart = Math.max(streamOffset, latencySamples);
+        const keepEnd = Math.min(streamOffset + frames, latencySamples + input.length);
+        if (keepEnd > keepStart) {
+          const srcOffset = keepStart - streamOffset;
+          const count = keepEnd - keepStart;
+          const dstOffset = keepStart - latencySamples;
+          leftOut.set(processed.subarray(srcOffset, srcOffset + count), dstOffset);
+          rightOut.set(processed.subarray(frames + srcOffset, frames + srcOffset + count), dstOffset);
+        }
       }
     } catch (error) {
       reportVst3MixerEffect(trackId, slotId, `Offline VST3 processing failed; export was stopped rather than substituting dry audio: ${error instanceof Error ? error.message : String(error)}`);
@@ -5614,7 +5748,7 @@ class AudioEngine {
   private nativeMixerLatencyTopology(tracks: readonly MixerTrack[]): string {
     return JSON.stringify([...tracks].map(track => ({
       id: track.id, target: track.routingTargetId ?? 0,
-      aux: (track.auxSends ?? []).map(send => send.targetId).sort((left, right) => left - right),
+      aux: (track.auxSends ?? []).slice(0, 2).map(send => send.targetId).sort((left, right) => left - right),
       nativeSlots: track.fxSlots.filter(slot => slot.type === 'vst3').map(slot => ({
         id: slot.id, effect: slot.vst3Effect,
       })),

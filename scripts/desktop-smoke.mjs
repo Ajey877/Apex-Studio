@@ -66,6 +66,13 @@ try {
   assert.equal(reopened.vst3.mixerEffects.persistedTwoInsertStateChecksum, saved.vst3.mixerEffects.persistedTwoInsertStateChecksum,
     'Actual application restart changed persisted two-insert Mixer VST3 configuration/parameters');
   assert.equal(reopened.vst3.mixerEffects.twoInsertSaveReopen?.restoredFromIndexedDb, true);
+  assert.equal(reopened.vst3.mixerEffects.nonzeroPluginLatencyRegression?.reopenedFromIndexedDb, true,
+    'Reopen process did not restore persisted nonzero-latency VST3 inserts from IndexedDB');
+  assert.equal(
+    reopened.vst3.mixerEffects.nonzeroPluginLatencyRegression?.offlineRender?.pcmChecksum,
+    saved.vst3.mixerEffects.nonzeroPluginLatencyRegression?.offlineRender?.pcmChecksum,
+    'Actual application restart changed compensated nonzero-latency offline PCM checksum',
+  );
   for (const field of ['classId', 'onsetFrame', 'rms', 'pcmChecksum', 'savedStateChecksum', 'parameterValue', 'parameterExportDifferenceRms', 'automationPcmChecksum', 'automationStateChecksum', 'automationExportDifferenceRms']) {
     assert.equal(reopened.vst3[field], saved.vst3[field], `Actual application restart changed ${field}`);
   }
@@ -93,6 +100,7 @@ try {
       rendererStallRegression: reopened.vst3.mixerEffects.rendererStallRegression,
       timing: compactTiming,
     })}`);
+    console.log(`::notice title=Packaged VST3 nonzero latency compensation proof::${JSON.stringify(reopened.vst3.mixerEffects.nonzeroPluginLatencyRegression)}`);
   }
   rmSync(profile, { recursive: true, force: true });
 } catch (error) {
