@@ -6,8 +6,10 @@
 #include "base/source/fstreamer.h"
 #include "pluginterfaces/vst/ivstparameterchanges.h"
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdint>
+#include <thread>
 #include <vector>
 
 namespace ApexLatencyFixture {
@@ -18,6 +20,7 @@ static const FUID kLookaheadEffectUid(0x41504558, 0x4C415445, 0x4E435946, 0x5830
 static const FUID kInvalidLatencyEffectUid(0x41504558, 0x4C415445, 0x4E435946, 0x58424144);
 static const FUID kExcessiveLatencyEffectUid(0x41504558, 0x4C415445, 0x4E435946, 0x58424947);
 static const FUID kDynamicLatencyEffectUid(0x41504558, 0x4C415445, 0x4E435946, 0x5844594E);
+static const FUID kIoChangedEffectUid(0x41504558, 0x4C415445, 0x4E435946, 0x58494F31);
 
 constexpr uint32 kMaxConfigurableSamples = 4096;
 constexpr double kDefaultLatencyNormalized = 320.0 / 4096.0; // 320 samples by default
@@ -376,6 +379,265 @@ public:
   }
 };
 
+// Deterministic I/O reconfiguration & concurrent restart-flag fixture:
+//   IoScenario = 0 (0.00): Stereo 1 in / 1 out, latency = 192 samples
+//   IoScenario = 1 (0.25): Concurrent dual-thread restartComponent(kIoChanged) +
+//                          restartComponent(kLatencyChanged) -> rebuilds Stereo 1 in / 1 out
+//                          buses while deactivated (latency = 384 samples) and strictly fails
+//                          setActive(true) unless the host re-queried bus info, re-activated
+//                          both rebuilt buses, and re-ran setupProcessing().
+//   IoScenario = 2 (0.50): Raises kIoChanged and reconfigures to unsupported Mono (1 ch in/out)
+//   IoScenario = 3 (0.75): Raises kIoChanged and reconfigures to unsupported 2-input (sidechain)
+//   IoScenario = 4 (1.00): Raises kIoChanged mid-stream during active process() on block >= 2
+class IoChangedEffect final : public SingleComponentEffect {
+  int scenario = 0;
+  int appliedBusScenario = 0;
+  uint32 activeLatencySamples = 192;
+  std::vector<float> delayL;
+  std::vector<float> delayR;
+  size_t writePos = 0;
+  bool isComponentActive = false;
+  bool requiresFullHostIoReconfigure = false;
+  bool busInfoQueriedSinceDeactivate = false;
+  bool busArrangementsAppliedSinceDeactivate = false;
+  bool setupProcessingSinceDeactivate = false;
+  AudioBus* currentMainInBus = nullptr;
+  AudioBus* currentMainOutBus = nullptr;
+  int64_t processedAudioBlocks = 0;
+  bool midstreamRaised = false;
+
+  static int decodeScenario(double norm) {
+    return std::max(0, std::min(4, static_cast<int>(std::llround(clamp01(norm) * 4.0))));
+  }
+
+  uint32 targetLatencyForScenario(int sc) const {
+    return sc == 1 ? 384u : 192u;
+  }
+
+  void rebuildDelayLine(uint32 samples) {
+    activeLatencySamples = samples;
+    const size_t cap = std::max<size_t>(1, samples);
+    delayL.assign(cap, 0.f);
+    delayR.assign(cap, 0.f);
+    writePos = 0;
+  }
+
+  void rebuildBusesForScenario(int sc) {
+    removeAudioBusses();
+    currentMainInBus = nullptr;
+    currentMainOutBus = nullptr;
+    if (sc == 2) {
+      currentMainInBus = addAudioInput(STR16("Mono In"), SpeakerArr::kMono);
+      currentMainOutBus = addAudioOutput(STR16("Mono Out"), SpeakerArr::kMono);
+    } else if (sc == 3) {
+      currentMainInBus = addAudioInput(STR16("Stereo Main In"), SpeakerArr::kStereo);
+      addAudioInput(STR16("Stereo Sidechain In"), SpeakerArr::kStereo, kAux);
+      currentMainOutBus = addAudioOutput(STR16("Stereo Main Out"), SpeakerArr::kStereo);
+    } else {
+      currentMainInBus = addAudioInput(STR16("Stereo In"), SpeakerArr::kStereo);
+      currentMainOutBus = addAudioOutput(STR16("Stereo Out"), SpeakerArr::kStereo);
+    }
+    appliedBusScenario = sc;
+  }
+
+  void emitConcurrentIoAndLatencyFlags() {
+    if (!componentHandler) return;
+    std::atomic<int> ready{0};
+    std::atomic<bool> go{false};
+    std::thread tIo([&]() {
+      ready.fetch_add(1, std::memory_order_acq_rel);
+      while (!go.load(std::memory_order_acquire)) std::this_thread::yield();
+      componentHandler->restartComponent(kIoChanged);
+    });
+    std::thread tLat([&]() {
+      ready.fetch_add(1, std::memory_order_acq_rel);
+      while (!go.load(std::memory_order_acquire)) std::this_thread::yield();
+      componentHandler->restartComponent(kLatencyChanged);
+    });
+    while (ready.load(std::memory_order_acquire) < 2) std::this_thread::yield();
+    go.store(true, std::memory_order_release);
+    tIo.join();
+    tLat.join();
+  }
+
+public:
+  static FUnknown* createInstance(void*) {
+    return static_cast<IAudioProcessor*>(new IoChangedEffect());
+  }
+
+  tresult PLUGIN_API initialize(FUnknown* context) override {
+    const tresult res = SingleComponentEffect::initialize(context);
+    if (res != kResultOk) return res;
+    rebuildBusesForScenario(0);
+    parameters.addParameter(STR16("IoScenario"), STR16(""), 4, 0.0,
+      ParameterInfo::kCanAutomate, 0, 0, STR16("IO"));
+    rebuildDelayLine(192);
+    return kResultOk;
+  }
+
+  tresult PLUGIN_API canProcessSampleSize(int32 symbolicSampleSize) override {
+    return symbolicSampleSize == kSample32 ? kResultTrue : kResultFalse;
+  }
+
+  tresult PLUGIN_API getBusInfo(MediaType type, BusDirection dir, int32 index, BusInfo& info) override {
+    if (!isComponentActive) busInfoQueriedSinceDeactivate = true;
+    return SingleComponentEffect::getBusInfo(type, dir, index, info);
+  }
+
+  tresult PLUGIN_API setBusArrangements(SpeakerArrangement* inputs, int32 numIns,
+                                        SpeakerArrangement* outputs, int32 numOuts) override {
+    if (appliedBusScenario == 2) {
+      if (numIns != 1 || numOuts != 1 || !inputs || !outputs ||
+          inputs[0] != SpeakerArr::kMono || outputs[0] != SpeakerArr::kMono) {
+        return kResultFalse;
+      }
+    } else if (appliedBusScenario == 3) {
+      if (numIns != 2 || numOuts != 1) return kResultFalse;
+    } else {
+      if (numIns != 1 || numOuts != 1 || !inputs || !outputs ||
+          inputs[0] != SpeakerArr::kStereo || outputs[0] != SpeakerArr::kStereo) {
+        return kResultFalse;
+      }
+    }
+    const tresult res = SingleComponentEffect::setBusArrangements(inputs, numIns, outputs, numOuts);
+    if (res == kResultOk && !isComponentActive) {
+      busArrangementsAppliedSinceDeactivate = true;
+    }
+    return res;
+  }
+
+  tresult PLUGIN_API setupProcessing(ProcessSetup& newSetup) override {
+    const tresult res = SingleComponentEffect::setupProcessing(newSetup);
+    if (res == kResultOk && !isComponentActive) {
+      setupProcessingSinceDeactivate = true;
+    }
+    return res;
+  }
+
+  tresult PLUGIN_API setActive(TBool state) override {
+    const tresult res = SingleComponentEffect::setActive(state);
+    if (res != kResultOk) return res;
+    if (!state) {
+      isComponentActive = false;
+      busInfoQueriedSinceDeactivate = false;
+      busArrangementsAppliedSinceDeactivate = false;
+      setupProcessingSinceDeactivate = false;
+      if (scenario == 1 || scenario == 2 || scenario == 3) {
+        rebuildBusesForScenario(scenario);
+      }
+      return kResultOk;
+    }
+    if (requiresFullHostIoReconfigure) {
+      if (!busInfoQueriedSinceDeactivate || !busArrangementsAppliedSinceDeactivate ||
+          !setupProcessingSinceDeactivate || !currentMainInBus || !currentMainOutBus ||
+          !currentMainInBus->isActive() || !currentMainOutBus->isActive()) {
+        return kResultFalse;
+      }
+      requiresFullHostIoReconfigure = false;
+    }
+    isComponentActive = true;
+    processedAudioBlocks = 0;
+    midstreamRaised = false;
+    rebuildDelayLine(targetLatencyForScenario(scenario));
+    return kResultOk;
+  }
+
+  tresult PLUGIN_API setProcessing(TBool state) override {
+    if (state) {
+      processedAudioBlocks = 0;
+      midstreamRaised = false;
+    }
+    return kResultOk;
+  }
+
+  uint32 PLUGIN_API getLatencySamples() override {
+    return activeLatencySamples;
+  }
+
+  tresult PLUGIN_API setParamNormalized(ParamID id, ParamValue value) override {
+    const double clamped = clamp01(value);
+    const tresult res = SingleComponentEffect::setParamNormalized(id, clamped);
+    if (res != kResultOk || id != 0) return res;
+    const int nextScenario = decodeScenario(clamped);
+    if (nextScenario == scenario) return kResultOk;
+    scenario = nextScenario;
+    if (!isComponentActive) {
+      if (scenario == 1 || scenario == 2 || scenario == 3) {
+        rebuildBusesForScenario(scenario);
+      } else if (appliedBusScenario != 0) {
+        rebuildBusesForScenario(0);
+      }
+      rebuildDelayLine(targetLatencyForScenario(scenario));
+      return kResultOk;
+    }
+    if (scenario == 1) {
+      requiresFullHostIoReconfigure = true;
+      emitConcurrentIoAndLatencyFlags();
+    } else if (scenario == 2 || scenario == 3) {
+      requiresFullHostIoReconfigure = true;
+      if (componentHandler) componentHandler->restartComponent(kIoChanged);
+    } else if (scenario == 0 && appliedBusScenario != 0) {
+      requiresFullHostIoReconfigure = true;
+      emitConcurrentIoAndLatencyFlags();
+    }
+    return kResultOk;
+  }
+
+  tresult PLUGIN_API getState(IBStream* state) override {
+    if (!state) return kInvalidArgument;
+    IBStreamer writer(state, kLittleEndian);
+    return (writer.writeInt32u(1) && writer.writeInt32(scenario)) ? kResultOk : kResultFalse;
+  }
+
+  tresult PLUGIN_API setState(IBStream* state) override {
+    if (!state) return kInvalidArgument;
+    IBStreamer reader(state, kLittleEndian);
+    uint32 version = 0;
+    int32 savedScenario = 0;
+    if (!reader.readInt32u(version) || version != 1 || !reader.readInt32(savedScenario)) {
+      return kResultFalse;
+    }
+    scenario = std::max(0, std::min(4, static_cast<int>(savedScenario)));
+    SingleComponentEffect::setParamNormalized(0, static_cast<double>(scenario) / 4.0);
+    if (!isComponentActive) {
+      rebuildBusesForScenario(scenario);
+      rebuildDelayLine(targetLatencyForScenario(scenario));
+    }
+    return kResultOk;
+  }
+
+  tresult PLUGIN_API setComponentState(IBStream* state) override {
+    return setState(state);
+  }
+
+  tresult PLUGIN_API process(ProcessData& data) override {
+    if (data.numSamples <= 0) return kResultOk;
+    if (data.numInputs < 1 || data.numOutputs < 1 ||
+        data.inputs[0].numChannels < 2 || data.outputs[0].numChannels < 2) {
+      return kResultFalse;
+    }
+    ++processedAudioBlocks;
+    if (scenario == 4 && data.numSamples > 1 && processedAudioBlocks >= 2 && !midstreamRaised) {
+      midstreamRaised = true;
+      if (componentHandler) componentHandler->restartComponent(kIoChanged);
+    }
+    const float* inL = data.inputs[0].channelBuffers32[0];
+    const float* inR = data.inputs[0].channelBuffers32[1];
+    float* outL = data.outputs[0].channelBuffers32[0];
+    float* outR = data.outputs[0].channelBuffers32[1];
+    data.outputs[0].silenceFlags = 0;
+    const uint32 delaySamples = activeLatencySamples;
+    for (int32 i = 0; i < data.numSamples; ++i) {
+      outL[i] = delayL[writePos];
+      outR[i] = delayR[writePos];
+      delayL[writePos] = inL[i];
+      delayR[writePos] = inR[i];
+      if (++writePos >= delaySamples) writePos = 0;
+    }
+    return kResultOk;
+  }
+};
+
 } // namespace ApexLatencyFixture
 
 BEGIN_FACTORY_DEF("Apex Studio Test Fixtures", "https://github.com/Ajey877/Apex-Studio", "mailto:noreply@example.com")
@@ -395,4 +657,8 @@ BEGIN_FACTORY_DEF("Apex Studio Test Fixtures", "https://github.com/Ajey877/Apex-
     PClassInfo::kManyInstances, kVstAudioEffectClass, "Apex Dynamic Latency Fixture",
     Steinberg::Vst::kDistributable, Steinberg::Vst::PlugType::kFx, "1.0.0", kVstVersionString,
     ApexLatencyFixture::DynamicLatencyEffect::createInstance)
+  DEF_CLASS2(INLINE_UID_FROM_FUID(ApexLatencyFixture::kIoChangedEffectUid),
+    PClassInfo::kManyInstances, kVstAudioEffectClass, "Apex IoChanged Fixture",
+    Steinberg::Vst::kDistributable, Steinberg::Vst::PlugType::kFx, "1.0.0", kVstVersionString,
+    ApexLatencyFixture::IoChangedEffect::createInstance)
 END_FACTORY

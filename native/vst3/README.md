@@ -280,6 +280,21 @@ Mixer routing and aux-send DAG at summing inputs. VST3 instruments continue to
 require zero reported latency, and physical audio-device output latency remains
 outside software Mixer PDC.
 
+`HostComponentHandler::restartComponent(flags)` accumulates controller restart
+flags atomically (`fetch_or` / `exchange` with acquire-release ordering) so
+combined and concurrent callback notifications cannot lose flags. On
+`RestartFlags::kIoChanged` during `open()` or `parameters()`, the host never
+simply toggles `setActive(false)`/`setActive(true)` or continues with stale bus
+or `HostProcessData` state: it deactivates the component, re-queries and
+strictly validates the supported stereo bus layout (`0` inputs / `1` stereo
+output for instruments, `1` stereo input / `1` stereo output for effects),
+re-applies `setBusArrangements`, re-activates buses, re-runs `setupProcessing`,
+unprepares and re-prepares `HostProcessData` (verifying 2-channel `float32`
+buffer bindings), and reactivates. Unsupported I/O layouts, `kReloadComponent`,
+and mid-stream structural `kIoChanged`/`kLatencyChanged`/`kReloadComponent`
+requests during active `process()` are explicitly rejected and close the native
+instance cleanly.
+
 ## Generic parameter control contract (Issue #285)
 
 `open` now forwards bounded genuine metadata; `describe` opens/restores a temporary

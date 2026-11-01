@@ -11,6 +11,7 @@
 #include "pluginterfaces/vst/ivstaudioprocessor.h"
 #include "pluginterfaces/vst/ivsteditcontroller.h"
 #include "pluginterfaces/vst/ivstprocesscontext.h"
+#include "component-handler.hpp"
 #include <nlohmann/json.hpp>
 #include <algorithm>
 #include <atomic>
@@ -29,51 +30,20 @@
 #include <io.h>
 #endif
 
+using ApexVst3Host::HostComponentHandler;
 using namespace Steinberg;
 using namespace Steinberg::Vst;
 using json = nlohmann::json;
 constexpr int kMaxBlock = 16384;
 constexpr size_t kMaxRequest = 8 * 1024 * 1024;
 constexpr double kMaxEffectLatencySeconds = 1.0;
+constexpr int32 kStructuralRestartMask =
+  RestartFlags::kReloadComponent | RestartFlags::kIoChanged | RestartFlags::kLatencyChanged;
 
 uint32_t maxEffectLatencySamples(double sampleRate) {
   const auto bound = std::llround(std::floor(sampleRate * kMaxEffectLatencySeconds));
   return bound > 0 ? static_cast<uint32_t>(bound) : 0u;
 }
-
-class HostComponentHandler final : public IComponentHandler {
-  std::atomic<uint32> refCount{1};
-  int32 pendingRestartFlags = 0;
-public:
-  tresult PLUGIN_API queryInterface(const TUID _iid, void** obj) override {
-    if (FUnknownPrivate::iidEqual(_iid, IComponentHandler::iid) ||
-        FUnknownPrivate::iidEqual(_iid, FUnknown::iid)) {
-      addRef();
-      *obj = static_cast<IComponentHandler*>(this);
-      return kResultTrue;
-    }
-    *obj = nullptr;
-    return kNoInterface;
-  }
-  uint32 PLUGIN_API addRef() override { return ++refCount; }
-  uint32 PLUGIN_API release() override {
-    const uint32 r = --refCount;
-    if (r == 0) delete this;
-    return r;
-  }
-  tresult PLUGIN_API beginEdit(ParamID) override { return kResultOk; }
-  tresult PLUGIN_API performEdit(ParamID, ParamValue) override { return kResultOk; }
-  tresult PLUGIN_API endEdit(ParamID) override { return kResultOk; }
-  tresult PLUGIN_API restartComponent(int32 flags) override {
-    pendingRestartFlags |= flags;
-    return kResultOk;
-  }
-  int32 consumeRestartFlags() {
-    const int32 flags = pendingRestartFlags;
-    pendingRestartFlags = 0;
-    return flags;
-  }
-};
 
 void require(bool condition, const std::string& message) {
   if (!condition) throw std::runtime_error(message);
@@ -198,16 +168,111 @@ class Instance {
       " samples at " + std::to_string(static_cast<int>(std::llround(sampleRate))) + " Hz)");
     return latency;
   }
-  void restartActiveComponent(const char* contextLabel) {
+  void validateBusContract() {
+    const auto inputBuses = component->getBusCount(kAudio, kInput);
+    const auto outputBuses = component->getBusCount(kAudio, kOutput);
+    const auto eventInputBuses = component->getBusCount(kEvent, kInput);
+    if (isInstrument) {
+      require(inputBuses == 0, "Instrument class unexpectedly requires audio input");
+      require(outputBuses >= 1 && eventInputBuses >= 1,
+        "Instrument requires an audio output and event input");
+      BusInfo bus{};
+      checked(component->getBusInfo(kAudio, kOutput, 0, bus), "Cannot query main output bus");
+      require(bus.busType == kMain && (bus.channelCount == 1 || bus.channelCount == 2),
+        "Only mono/stereo instrument output supported");
+    } else {
+      require(inputBuses == 1 && outputBuses == 1,
+        "Only one-input/one-output VST3 audio effects are supported");
+      BusInfo input{}, output{};
+      checked(component->getBusInfo(kAudio, kInput, 0, input), "Cannot query main input bus");
+      checked(component->getBusInfo(kAudio, kOutput, 0, output), "Cannot query main output bus");
+      require(input.busType == kMain && output.busType == kMain &&
+        input.channelCount == 2 && output.channelCount == 2,
+        "Only effects with a stereo main input and stereo main output are supported");
+      SpeakerArrangement inArr = 0, outArr = 0;
+      if (processor->getBusArrangement(kInput, 0, inArr) == kResultOk) {
+        require(inArr == SpeakerArr::kStereo,
+          "Only stereo input speaker arrangement (kStereo) is supported for VST3 effects");
+      }
+      if (processor->getBusArrangement(kOutput, 0, outArr) == kResultOk) {
+        require(outArr == SpeakerArr::kStereo,
+          "Only stereo output speaker arrangement (kStereo) is supported for VST3 effects");
+      }
+      require(eventInputBuses == 0, "VST3 audio effects with event input buses are not supported");
+    }
+  }
+
+  void assertPreparedProcessDataMatchesContract() const {
+    require(data.numOutputs >= 1 && data.outputs != nullptr && data.outputs[0].numChannels >= 1,
+      "Prepared HostProcessData has no valid main output bus");
+    if (!isInstrument) {
+      require(data.numInputs == 1 && data.numOutputs == 1 &&
+        data.inputs != nullptr &&
+        data.inputs[0].numChannels == 2 && data.outputs[0].numChannels == 2,
+        "Prepared HostProcessData does not match stereo effect contract");
+    }
+  }
+
+  void configureBusesAndSetup(bool prepareProcessData) {
+    validateBusContract();
+    if (!isInstrument) {
+      SpeakerArrangement stereoIn = SpeakerArr::kStereo;
+      SpeakerArrangement stereoOut = SpeakerArr::kStereo;
+      const auto arrangeRes = processor->setBusArrangements(&stereoIn, 1, &stereoOut, 1);
+      require(arrangeRes == kResultOk || arrangeRes == kNotImplemented,
+        "Plugin rejected stereo bus arrangement (VST result " + std::to_string(arrangeRes) + ")");
+    }
+    const auto inputBuses = component->getBusCount(kAudio, kInput);
+    const auto outputBuses = component->getBusCount(kAudio, kOutput);
+    const auto eventInputBuses = component->getBusCount(kEvent, kInput);
+    for (int32 i = 0; i < inputBuses; ++i)
+      checked(component->activateBus(kAudio, kInput, i, i == 0), "Cannot configure audio input bus");
+    for (int32 i = 0; i < outputBuses; ++i)
+      checked(component->activateBus(kAudio, kOutput, i, i == 0), "Cannot configure audio output bus");
+    for (int32 i = 0; i < eventInputBuses; ++i)
+      checked(component->activateBus(kEvent, kInput, i, i == 0), "Cannot configure MIDI input bus");
+    ProcessSetup setup{mode, kSample32, kMaxBlock, sampleRate};
+    checked(processor->setupProcessing(setup), "setupProcessing failed");
+    if (prepareProcessData) {
+      data.unprepare();
+      require(data.prepare(*component, kMaxBlock, kSample32), "HostProcessData preparation failed");
+      assertPreparedProcessDataMatchesContract();
+    }
+  }
+
+  void reconfigureActiveComponent(int32 flags, const char* contextLabel) {
+    require((flags & RestartFlags::kReloadComponent) == 0,
+      std::string("VST3 plugin requested full component reload (kReloadComponent) during ") +
+      contextLabel + ", which is unsupported");
     checked(processor->setProcessing(false), std::string("Cannot suspend processing (") + contextLabel + ")");
     processing = false;
     checked(component->setActive(false), std::string("Cannot deactivate component (") + contextLabel + ")");
     active = false;
+    if ((flags & RestartFlags::kIoChanged) != 0) {
+      data.unprepare();
+      configureBusesAndSetup(true);
+    }
     checked(component->setActive(true), std::string("Cannot reactivate component (") + contextLabel + ")");
     active = true;
     checked(processor->setProcessing(true), std::string("Cannot resume processing (") + contextLabel + ")");
     processing = true;
-    componentHandler->consumeRestartFlags();
+    const int32 postFlags = componentHandler->consumeRestartFlags();
+    require((postFlags & kStructuralRestartMask) == 0,
+      std::string("VST3 plugin raised recursive structural restart flags (") +
+      std::to_string(postFlags) + ") during " + contextLabel);
+  }
+
+  void assertNoActiveProcessRestartFlags(int32 restartFlags) const {
+    require((restartFlags & RestartFlags::kReloadComponent) == 0,
+      "VST3 plugin requested full component reload (kReloadComponent) during active processing");
+    require((restartFlags & RestartFlags::kIoChanged) == 0,
+      "VST3 plugin requested I/O bus reconfiguration (kIoChanged) during active processing; dynamic bus changes are unsupported");
+    const uint32_t currentLatency = validateLatencySamples(processor->getLatencySamples());
+    require((restartFlags & RestartFlags::kLatencyChanged) == 0 &&
+      currentLatency == configuredLatencySamples,
+      "VST3 plugin changed reported latency during active processing (" +
+      std::to_string(configuredLatencySamples) + " -> " + std::to_string(currentLatency) +
+      " samples); stop and restart playback to recompute Mixer delay compensation");
   }
 public:
   ~Instance() {
@@ -254,36 +319,11 @@ public:
     processor = FUnknownPtr<IAudioProcessor>(component);
     require(bool(processor), "Plugin has no IAudioProcessor");
     checked(processor->canProcessSampleSize(kSample32), "Plugin does not support float32 processing");
-    const auto inputBuses = component->getBusCount(kAudio, kInput);
-    const auto outputBuses = component->getBusCount(kAudio, kOutput);
-    if (isInstrument) {
-      require(inputBuses == 0, "Instrument class unexpectedly requires audio input");
-      require(outputBuses >= 1 && component->getBusCount(kEvent, kInput) >= 1,
-        "Instrument requires an audio output and event input");
-      BusInfo bus{};
-      checked(component->getBusInfo(kAudio, kOutput, 0, bus), "Cannot query main output bus");
-      require(bus.busType == kMain && (bus.channelCount == 1 || bus.channelCount == 2), "Only mono/stereo instrument output supported");
-    } else {
-      require(inputBuses == 1 && outputBuses == 1, "Only one-input/one-output VST3 audio effects are supported");
-      BusInfo input{}, output{};
-      checked(component->getBusInfo(kAudio, kInput, 0, input), "Cannot query main input bus");
-      checked(component->getBusInfo(kAudio, kOutput, 0, output), "Cannot query main output bus");
-      require(input.busType == kMain && output.busType == kMain && input.channelCount == 2 && output.channelCount == 2,
-        "Only effects with a stereo main input and stereo main output are supported");
-      require(component->getBusCount(kEvent, kInput) == 0, "VST3 audio effects with event input buses are not supported");
-    }
-    for (int32 i = 0; i < inputBuses; ++i)
-      checked(component->activateBus(kAudio, kInput, i, i == 0), "Cannot configure audio input bus");
-    for (int32 i = 0; i < outputBuses; ++i)
-      checked(component->activateBus(kAudio, kOutput, i, i == 0), "Cannot configure audio output bus");
-    for (int32 i = 0; i < component->getBusCount(kEvent, kInput); ++i)
-      checked(component->activateBus(kEvent, kInput, i, i == 0), "Cannot configure MIDI input bus");
     sampleRate = real(request, "sampleRate", 8000, 192000);
     const auto modeName = request.value("mode", std::string("offline"));
     require(modeName == "offline" || modeName == "realtime", "Unknown processing mode");
     mode = modeName == "offline" ? kOffline : kRealtime;
-    ProcessSetup setup{mode, kSample32, kMaxBlock, sampleRate};
-    checked(processor->setupProcessing(setup), "setupProcessing failed");
+    configureBusesAndSetup(false);
     if (controller) {
       const auto count = controller->getParameterCount();
       require(count >= 0 && count <= 4096, "Too many plugin parameters");
@@ -305,7 +345,16 @@ public:
         controller->setComponentState(&stream);
       }
     }
-    data.prepare(*component, kMaxBlock, kSample32);
+    const int32 preActiveFlags = componentHandler->consumeRestartFlags();
+    require((preActiveFlags & RestartFlags::kReloadComponent) == 0,
+      "VST3 plugin requested full component reload (kReloadComponent) during state restore, which is unsupported");
+    if ((preActiveFlags & RestartFlags::kIoChanged) != 0) {
+      configureBusesAndSetup(true);
+    } else {
+      validateBusContract();
+      require(data.prepare(*component, kMaxBlock, kSample32), "HostProcessData preparation failed");
+      assertPreparedProcessDataMatchesContract();
+    }
     checked(component->setActive(true), "setActive failed"); active = true;
     checked(processor->setProcessing(true), "setProcessing failed"); processing = true;
     // Component/controller streams are restored while inactive. Apply saved
@@ -314,8 +363,8 @@ public:
     if (!isInstrument && request.contains("state") && request.at("state").contains("parameters"))
       applyParameters(request.at("state").at("parameters"), false, -1, false);
     const int32 setupFlags = componentHandler->consumeRestartFlags();
-    if ((setupFlags & (RestartFlags::kLatencyChanged | RestartFlags::kIoChanged)) != 0)
-      restartActiveComponent("open latency setup");
+    if ((setupFlags & kStructuralRestartMask) != 0)
+      reconfigureActiveComponent(setupFlags, "open setup");
     configuredLatencySamples = validateLatencySamples(processor->getLatencySamples());
     result["parameters"] = metadata();
     result["controllerAvailable"] = bool(controller);
@@ -325,15 +374,27 @@ public:
   }
   bool isInstrumentKind() const { return isInstrument; }
   uint32_t latencySamples() const { return configuredLatencySamples; }
-  uint32_t reconcileParameterLatencyChange() {
+  uint32_t reconcileParameterRestartAndLatency() {
     const int32 flags = componentHandler->consumeRestartFlags();
+    require((flags & RestartFlags::kReloadComponent) == 0,
+      "VST3 effect requested full component reload (kReloadComponent) after parameter update, which is unsupported");
+    const bool ioChanged = (flags & RestartFlags::kIoChanged) != 0;
+    const bool latencyFlagged = (flags & RestartFlags::kLatencyChanged) != 0;
     const uint32_t nextLatency = validateLatencySamples(processor->getLatencySamples());
-    const bool latencyFlagged = (flags & (RestartFlags::kLatencyChanged | RestartFlags::kIoChanged)) != 0;
-    if (!latencyFlagged && nextLatency == configuredLatencySamples) return configuredLatencySamples;
+    if (!ioChanged && !latencyFlagged && nextLatency == configuredLatencySamples) {
+      return configuredLatencySamples;
+    }
+    if (ioChanged && mode != kOffline) {
+      throw std::runtime_error(
+        "VST3 effect requested I/O bus reconfiguration (kIoChanged) on an active live session; "
+        "stop playback to reconfigure");
+    }
     require(mode == kOffline, "VST3 effect changed reported latency (" +
       std::to_string(configuredLatencySamples) + " -> " + std::to_string(nextLatency) +
       " samples) on an active live session; stop playback to reconfigure Mixer delay compensation");
-    restartActiveComponent("parameter latency reconfiguration");
+    reconfigureActiveComponent(
+      flags | (nextLatency != configuredLatencySamples ? RestartFlags::kLatencyChanged : 0),
+      ioChanged ? "parameter I/O reconfiguration" : "parameter latency reconfiguration");
     configuredLatencySamples = validateLatencySamples(processor->getLatencySamples());
     return configuredLatencySamples;
   }
@@ -514,6 +575,8 @@ public:
       }
     }
     if (request.contains("parameters")) applyParameters(request.at("parameters"), flush, flush ? -1 : frames);
+    assertNoActiveProcessRestartFlags(componentHandler->consumeRestartFlags());
+    assertPreparedProcessDataMatchesContract();
     for (int32 bus = 0; bus < data.numOutputs; ++bus) {
       data.outputs[bus].silenceFlags = 0;
       for (int32 ch = 0; ch < data.outputs[bus].numChannels; ++ch)
@@ -540,13 +603,8 @@ public:
     data.inputParameterChanges = &parameters; data.outputParameterChanges = &outputParameters;
     data.processContext = &context;
     checked(processor->process(data), "Plugin process failed");
-    const int32 restartFlags = componentHandler->consumeRestartFlags();
-    const uint32_t currentLatency = validateLatencySamples(processor->getLatencySamples());
-    require((restartFlags & (RestartFlags::kLatencyChanged | RestartFlags::kIoChanged)) == 0 &&
-      currentLatency == configuredLatencySamples,
-      "VST3 plugin changed reported latency during active processing (" +
-      std::to_string(configuredLatencySamples) + " -> " + std::to_string(currentLatency) +
-      " samples); stop and restart playback to recompute Mixer delay compensation");
+    assertNoActiveProcessRestartFlags(componentHandler->consumeRestartFlags());
+    assertPreparedProcessDataMatchesContract();
     // Retain a zero-sample flush for the next audible block too: some SDK
     // processors recalculate coefficients only while processing samples.
     if (frames > 0) {
@@ -630,7 +688,7 @@ int main() {
           instance->process({{"frames", 0}, {"events", json::array()}, {"bpm", 120}, {"parameters", request.at("parameters")}}, true);
         else {
           instance->applyParameters(request.at("parameters"), false, -1, false);
-          instance->reconcileParameterLatencyChange();
+          instance->reconcileParameterRestartAndLatency();
         }
         reply({{"ok", true}, {"parameters", instance->metadata()}, {"latencySamples", instance->latencySamples()}});
       } else if (command == "snapshot") {

@@ -95,6 +95,15 @@ if(APEX_BUILD_VST3_FIXTURE)
   add_executable(apex-vst3-protocol-fault protocol-fault.cpp)
   set_target_properties(apex-vst3-protocol-fault PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 
+  add_executable(apex-vst3-restart-flags-test restart-flags-test.cpp)
+  if(WIN32)
+    target_compile_definitions(apex-vst3-restart-flags-test PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+  else()
+    target_link_libraries(apex-vst3-restart-flags-test PRIVATE pthread)
+  endif()
+  target_link_libraries(apex-vst3-restart-flags-test PRIVATE sdk_hosting)
+  set_target_properties(apex-vst3-restart-flags-test PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
   smtg_add_vst3plugin(apex-latency-vst3
     latency-fixture.cpp
     "${SDK_ROOT}/public.sdk/source/vst/vstsinglecomponenteffect.cpp"

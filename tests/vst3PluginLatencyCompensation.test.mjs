@@ -403,7 +403,8 @@ const lookaheadIdentity = discoveredEffects.find(p => p.name === 'Apex Latency F
 const invalidLatencyIdentity = discoveredEffects.find(p => p.name === 'Apex Invalid Latency Fixture');
 const excessiveLatencyIdentity = discoveredEffects.find(p => p.name === 'Apex Excessive Latency Fixture');
 const dynamicLatencyIdentity = discoveredEffects.find(p => p.name === 'Apex Dynamic Latency Fixture');
-assert.ok(mdaDelayIdentity && lookaheadIdentity && invalidLatencyIdentity && excessiveLatencyIdentity && dynamicLatencyIdentity,
+const ioChangedIdentity = discoveredEffects.find(p => p.name === 'Apex IoChanged Fixture');
+assert.ok(mdaDelayIdentity && lookaheadIdentity && invalidLatencyIdentity && excessiveLatencyIdentity && dynamicLatencyIdentity && ioChangedIdentity,
   'Required MDA and Apex Latency C++ VST3 effect fixtures must be discovered');
 
 const baseLookahead = await bridge.inspectEffect(lookaheadIdentity);
@@ -1204,11 +1205,27 @@ test('Case 12: invalid, negative, excessive, and mid-stream-mutating reported la
   const negEffect = makeRawEffect(invalidLatencyIdentity);
   const bigEffect = makeRawEffect(excessiveLatencyIdentity);
   const dynEffect = makeRawEffect(dynamicLatencyIdentity);
+  const baseIoEffect = await bridge.inspectEffect(ioChangedIdentity);
+  const monoIoEffect = {
+    ...baseIoEffect,
+    state: { ...baseIoEffect.state, parameters: [{ id: 0, value: 0.50 }] },
+  };
+  const sidechainIoEffect = {
+    ...baseIoEffect,
+    state: { ...baseIoEffect.state, parameters: [{ id: 0, value: 0.75 }] },
+  };
+  const midstreamIoEffect = {
+    ...baseIoEffect,
+    state: { ...baseIoEffect.state, parameters: [{ id: 0, value: 1.00 }] },
+  };
 
   for (const [label, badFx, expectedPattern] of [
     ['uint32(-1) negative/overflow latency', negEffect, /invalid or excessive latency/i],
     ['250000-sample (>1.0s) excessive latency', bigEffect, /invalid or excessive latency/i],
     ['mid-stream dynamic latency change', dynEffect, /changed reported latency during active processing/i],
+    ['kIoChanged unsupported Mono bus layout', monoIoEffect, /Only effects with a stereo main input and stereo main output are supported/i],
+    ['kIoChanged unsupported Multi-Bus Sidechain layout', sidechainIoEffect, /Only one-input\/one-output VST3 audio effects are supported/i],
+    ['mid-stream kIoChanged during active processing', midstreamIoEffect, /I\/O bus reconfiguration \(kIoChanged\) during active processing/i],
   ]) {
     const badMixer = [makeTrack(0), makeTrack(1, { fxSlots: [makeFxSlot('bad-slot', badFx)] })];
     const snapshotBefore = JSON.stringify(badMixer);
@@ -1242,7 +1259,21 @@ test('Case 12: invalid, negative, excessive, and mid-stream-mutating reported la
   }
   assert.equal(service.sessionCount, 0);
 
-  // Subsequent valid render succeeds cleanly after failures:
+  // Valid reconfigured Stereo IoChanged effect (Scenario 1 = 384 samples) and subsequent Lookahead render succeed sample-accurately:
+  const validIoRebuilt = await bridge.inspectEffect(ioChangedIdentity, {
+    ...baseIoEffect.state,
+    parameters: [{ id: 0, value: 0.25 }],
+  });
+  const dryRefBuf = await eng.renderTimelineOffline(
+    [ch], [clip], [makeTrack(0), makeTrack(1)], 120, 1, 48000, true, 'song', undefined, undefined, undefined, 1,
+  );
+  const ioRebuiltBuf = await eng.renderTimelineOffline(
+    [ch], [clip], [makeTrack(0), makeTrack(1, { fxSlots: [makeFxSlot('io-rebuilt', validIoRebuilt)] })],
+    120, 1, 48000, true, 'song', undefined, undefined, undefined, 1,
+  );
+  assert.equal(firstOnsetIndex(ioRebuiltBuf.getChannelData(0)), 128);
+  assert.ok(rmsDiffRange(dryRefBuf.getChannelData(0), ioRebuiltBuf.getChannelData(0)) < 1e-6);
+
   const recoveryBuf = await eng.renderTimelineOffline(
     [ch], [clip], [makeTrack(0), makeTrack(1, { fxSlots: [makeFxSlot('ok-slot', validFx)] })],
     120, 1, 48000, true, 'song', undefined, undefined, undefined, 1,
@@ -1254,6 +1285,10 @@ test('Case 12: invalid, negative, excessive, and mid-stream-mutating reported la
     negativeUint32Rejected: true,
     excessiveOverOneSecondRejected: true,
     midstreamDynamicChangeRejected: true,
+    unsupportedMonoIoChangedRejected: true,
+    unsupportedSidechainIoChangedRejected: true,
+    midstreamIoChangedRejected: true,
+    validStereoIoChanged384OnsetFrame: 128,
     leakedSessionsAfterFailures: service.sessionCount,
     subsequentValidRenderOnsetFrame: 128,
   };

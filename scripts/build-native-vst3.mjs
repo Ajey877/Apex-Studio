@@ -27,4 +27,4 @@ run(cmake, ['-S', 'native/vst3', '-B', 'build/native-vst3', ...generator, '-DCMA
   `-DVST3_SDK_ROOT=${path.resolve('build/native-deps/vst3sdk')}`,
   `-DJSON_ROOT=${path.resolve('build/native-deps/json')}`]);
 run(cmake, ['--build', 'build/native-vst3', '--config', 'Release', '--target',
-  'apex-vst3-host', 'mda-vst3', 'apex-vst3-protocol-fault', 'apex-latency-vst3', '--parallel', '2']);
+  'apex-vst3-host', 'mda-vst3', 'apex-vst3-protocol-fault', 'apex-vst3-restart-flags-test', 'apex-latency-vst3', '--parallel', '2']);
