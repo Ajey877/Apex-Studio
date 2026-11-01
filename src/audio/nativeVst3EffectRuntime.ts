@@ -184,12 +184,18 @@ class ApexVst3FxProcessor extends AudioWorkletProcessor {
           this.dryReady.set(sequence, samples.slice());
           this.pending = sequence;
           if (this.profileEnabled) this.port.postMessage({ type: 'profile', event: 'worklet-submit', ...timing });
-          const dest = this.livePort || (!this.requireLivePort ? this.port : null);
-          if (!dest) {
+          const payload = { type: 'process', sequence, samples, ...(this.profileEnabled ? { timing } : {}) };
+          if (this.livePort) {
+            // Cross-process MessagePort (AudioWorklet -> Electron MessagePortMain)
+            // structured-clones typed arrays over Mojo; transferring ArrayBuffer
+            // across OS processes is unsupported by Chromium BlinkTransferableMessage.
+            this.livePort.postMessage(payload);
+          } else if (!this.requireLivePort) {
+            this.port.postMessage(payload, [samples.buffer]);
+          } else {
             this.fail('Live audio port is not bound.');
             break;
           }
-          dest.postMessage({ type: 'process', sequence, samples, ...(this.profileEnabled ? { timing } : {}) }, [samples.buffer]);
           this.fill = 0;
         }
       }

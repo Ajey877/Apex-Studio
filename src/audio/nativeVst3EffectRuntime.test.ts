@@ -337,10 +337,15 @@ test('two VST3 inserts in one Mixer chain process cascaded stereo PCM in exact s
   const ch2 = new MessageChannel();
 
   // Adapt worker_threads MessagePort for worklet sandbox (onmessage property)
+  // and enforce Electron/Chromium's cross-process MessagePortMain contract:
+  // ArrayBuffer transfer lists across OS processes are forbidden.
   const wrapWorkletSidePort = (port: any) => {
     const wrapper: any = {
       onmessage: null as ((event: { data: any }) => void) | null,
-      postMessage: (msg: any, transfer?: any[]) => port.postMessage(msg, transfer),
+      postMessage: (msg: any, transfer?: any[]) => {
+        assert.equal(transfer, undefined, 'cross-process livePort.postMessage must not pass an ArrayBuffer transfer list');
+        port.postMessage(msg);
+      },
       close: () => port.close(),
     };
     port.on('message', (data: any) => wrapper.onmessage?.({ data }));

@@ -17,7 +17,8 @@ function registerVst3({ app, ipcMain, dialog, getWindow }) {
   // wedged; dispose finishes port teardown once the in-flight promise settles.
   const disposeLivePort = (sessionId, owner) => {
     const live = livePorts.get(sessionId);
-    if (!live || (owner !== undefined && live.owner !== owner)) return;
+    if (!live) return;
+    if (owner !== undefined && live.owner !== owner) throw new Error('VST3 session is closed or belongs to another renderer');
     livePorts.delete(sessionId);
     live.stop();
     void live.dispose();
