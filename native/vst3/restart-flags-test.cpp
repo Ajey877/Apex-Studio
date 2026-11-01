@@ -136,7 +136,7 @@ void testAtomicRefCountThreadSafety() {
   std::vector<std::thread> workers;
   workers.reserve(kThreads);
   for (int t = 0; t < kThreads; ++t) {
-    workers.emplace_back([raw]() {
+    workers.emplace_back([raw, kOpsPerThread]() {
       for (int i = 0; i < kOpsPerThread; ++i) {
         raw->addRef();
         raw->release();
