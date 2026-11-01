@@ -113,8 +113,8 @@ test('no unsupported command is ever presented as a functional menu row', () => 
     'Select All',
     '>About<',
     // Phase 1J: 'Time Signature' is now real (Project → Project Settings).
+    // Audio Device & Engine Management: 'Audio Settings…' is now real (Audio → Audio Settings…).
     'Sample Rate',
-    'Audio Settings',
     'Monitoring',
     'Duplicate Track',
     'Rename Track',
@@ -122,6 +122,9 @@ test('no unsupported command is ever presented as a functional menu row', () => 
   ]) {
     assert.equal(rendered.includes(forbidden), false, `unsupported command "${forbidden}" must not render`);
   }
+  const audioHtml = renderBar('audio');
+  assert.ok(audioHtml.includes('id="application-menu-command-audio.settings"'), 'Audio Settings command must render in the Audio menu');
+  assert.ok(audioHtml.includes('Audio Settings…'), 'Audio Settings label must render');
 });
 
 test('the Edit dropdown contains Undo and Redo and nothing fabricated', () => {

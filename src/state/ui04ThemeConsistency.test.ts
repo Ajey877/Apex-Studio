@@ -59,6 +59,7 @@ const THEMED_SURFACES = [
   'src/components/ProjectSettingsModal.tsx',
   'src/components/ProjectReplaceConfirmModal.tsx',
   'src/components/MasteringSuiteModal.tsx',
+  'src/components/AudioSettingsModal.tsx',
 ];
 
 test('UI-04 defines shared dark and light surface, state, grid and piano-key tokens', () => {

@@ -81,7 +81,7 @@ for (const file of requiredPackagedFiles) {
 }
 
 const appUrl = 'file:///app/dist/index.html';
-for (const permission of ['media', 'midi', 'midiSysex']) {
+for (const permission of ['media', 'midi', 'midiSysex', 'speaker-selection']) {
   if (!canRequestPermission(appUrl, permission) || !canCheckPermission(appUrl, permission)) {
     throw new Error(`Desktop permission regression: app content must request and check ${permission}.`);
   }

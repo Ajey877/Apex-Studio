@@ -6,8 +6,8 @@ const { canRequestPermission, canCheckPermission } = require('../desktop-permiss
 const appFile = 'file:///app/dist/index.html';
 const appDev = 'http://localhost:3000/';
 
-test('app content may request media, MIDI, and MIDI sysex', () => {
-  for (const permission of ['media', 'midi', 'midiSysex']) {
+test('app content may request media, MIDI, MIDI sysex, and speaker-selection', () => {
+  for (const permission of ['media', 'midi', 'midiSysex', 'speaker-selection']) {
     assert.equal(canRequestPermission(appFile, permission), true, `${permission} file app`);
     assert.equal(canRequestPermission(appDev, permission), true, `${permission} dev app`);
   }
@@ -19,8 +19,8 @@ test('unrelated requests are not broadly granted', () => {
   }
 });
 
-test('permission checks allow only app Web MIDI/media plus preserved desktop capabilities', () => {
-  for (const permission of ['media', 'midi', 'midiSysex']) {
+test('permission checks allow only app Web MIDI/media/speaker-selection plus preserved desktop capabilities', () => {
+  for (const permission of ['media', 'midi', 'midiSysex', 'speaker-selection']) {
     assert.equal(canCheckPermission(appFile, permission), true, permission);
   }
   for (const permission of ['fullscreen', 'clipboard-read', 'clipboard-sanitized-write']) {

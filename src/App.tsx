@@ -168,6 +168,7 @@ import { DEFAULT_INCLUDE_MIXER_FX } from './components/exportMixerFxPreference';
 import { MasterMacroRackModal } from './components/MasterMacroRackModal';
 import { ProjectBundleZipModal } from './components/ProjectBundleZipModal';
 import { AppearanceSettingsModal } from './components/AppearanceSettingsModal';
+import { AudioSettingsModal } from './components/AudioSettingsModal';
 import { ProjectReplaceConfirmModal } from './components/ProjectReplaceConfirmModal';
 import { hasOpenModalDialog } from './components/ModalFrame';
 
@@ -430,6 +431,7 @@ export function App() {
   const [isMasterMacrosOpen, setIsMasterMacrosOpen] = useState(false);
   const [isProjectZipOpen, setIsProjectZipOpen] = useState(false);
   const [isAppearanceSettingsOpen, setIsAppearanceSettingsOpen] = useState(false);
+  const [isAudioSettingsOpen, setIsAudioSettingsOpen] = useState(false);
   // UI-03A: `readThemePreference` is total — blocked storage, a null storage
   // object and an unrecognised stored value all resolve to the default dark
   // theme — so this initial state can never throw before the app renders. The
@@ -650,8 +652,33 @@ export function App() {
     audioEngine.setOfflineRenderCompleteCallback(() => {
       resynchronizeLiveEngineFromProjectState(audioEngine, projectStateRef.current, { metronome });
     });
-    return () => audioEngine.setOfflineRenderCompleteCallback(null);
+    audioEngine.setAudioContextReconfiguredCallback(() => {
+      const current = projectStateRef.current;
+      resynchronizeLiveEngineFromProjectState(audioEngine, current, { metronome });
+      if (current.masteringSuiteState) {
+        audioEngine.setMasteringState(current.masteringSuiteState);
+      }
+      for (const channel of current.channels) {
+        if (channel.pan !== 0) {
+          audioEngine.updateChannel(channel);
+        }
+      }
+    });
+    return () => {
+      audioEngine.setOfflineRenderCompleteCallback(null);
+      audioEngine.setAudioContextReconfiguredCallback(null);
+    };
   }, [metronome]);
+
+  useEffect(() => {
+    audioEngine.setExternalActiveOperationCheck(() => {
+      if (midiRecorderRef.current?.isRecording) {
+        return 'Stop active MIDI performance recording before reconfiguring the audio engine.';
+      }
+      return null;
+    });
+    return () => audioEngine.setExternalActiveOperationCheck(null);
+  }, []);
 
   // Audio-clock transport state drives the UI playhead.
   useEffect(() => {
@@ -2129,6 +2156,7 @@ export function App() {
 
     toggleMetronome: () => setMetronome(value => !value),
     toggleRecord: handleToggleRecord,
+    openAudioSettings: () => setIsAudioSettingsOpen(true),
 
     openMidiDevices: () => setIsMidiModalOpen(true),
     openMidiLearn: () => setIsMidiLearnOpen(true),
@@ -3027,6 +3055,7 @@ export function App() {
         onCancel={() => settlePendingReplacement(false)}
       />
       <AppearanceSettingsModal isOpen={isAppearanceSettingsOpen} mode={themeMode} onChange={setThemeMode} onClose={() => setIsAppearanceSettingsOpen(false)} />
+      <AudioSettingsModal isOpen={isAudioSettingsOpen} onClose={() => setIsAudioSettingsOpen(false)} />
       <OrientationLockModal />
     </div>
   );

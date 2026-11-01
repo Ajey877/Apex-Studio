@@ -64,9 +64,10 @@ export type ApplicationMenuCommandId =
   | 'track.muteSelectedChannel'
   | 'track.soloSelectedChannel'
   | 'track.deleteChannel'
-  // Audio — the two real transport-level audio toggles.
+  // Audio — transport-level audio toggles and the Audio Settings surface.
   | 'audio.metronome'
   | 'audio.record'
+  | 'audio.settings'
   // MIDI — the two existing MIDI surfaces.
   | 'midi.devices'
   | 'midi.learn'
@@ -145,6 +146,7 @@ export const APPLICATION_MENU_COMMANDS: Readonly<Record<ApplicationMenuCommandId
 
   'audio.metronome': { label: 'Metronome', accelerator: 'M' },
   'audio.record': { label: 'Record', accelerator: 'R' },
+  'audio.settings': { label: 'Audio Settings…' },
 
   'midi.devices': { label: 'MIDI Devices & Controllers…' },
   'midi.learn': { label: 'MIDI Learn & Mapping…' },
@@ -241,6 +243,8 @@ export const APPLICATION_MENUS: readonly ApplicationMenu[] = [
     items: [
       command('audio.metronome', APPLICATION_MENU_COMMANDS['audio.metronome']),
       command('audio.record', APPLICATION_MENU_COMMANDS['audio.record']),
+      separator,
+      command('audio.settings', APPLICATION_MENU_COMMANDS['audio.settings']),
     ],
   },
   {
@@ -344,16 +348,10 @@ export const UNSUPPORTED_APPLICATION_MENU_COMMANDS: readonly UnsupportedApplicat
     reason: 'Only notes and playlist clips can be duplicated; there is no track/channel duplication.',
   },
   {
-    id: 'audio.settings',
-    label: 'Audio Settings',
-    menu: 'audio',
-    reason: 'new AudioContext({ latencyHint: "interactive" }) is hardcoded; latency is read-only telemetry.',
-  },
-  {
     id: 'audio.monitoring',
     label: 'Monitoring',
     menu: 'audio',
-    reason: 'No monitor toggle, no input-device enumeration and no input gain path exists.',
+    reason: 'Live input monitoring through the Mixer is not implemented; input selection routes microphone capture for recording only.',
   },
   {
     id: 'help.about',

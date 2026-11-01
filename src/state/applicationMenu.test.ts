@@ -92,8 +92,8 @@ test('unsupported commands that must not be fabricated are absent from the menu 
     'Select All',
     'About',
     // Phase 1J: 'Time Signature' is now real (Project → Project Settings).
+    // Audio Device & Engine Management: 'Audio Settings…' is now real (Audio → Audio Settings…).
     'Sample Rate',
-    'Audio Settings',
     'Monitoring',
     'Duplicate',
     'Rename',
@@ -104,6 +104,22 @@ test('unsupported commands that must not be fabricated are absent from the menu 
       `menu tree must not present the unsupported command "${forbidden}"`
     );
   }
+});
+
+test('Audio menu exposes Metronome, Record, and Audio Settings while keeping Appearance Settings in View', () => {
+  const audio = APPLICATION_MENUS.find(menu => menu.id === 'audio');
+  assert.ok(audio);
+  assert.deepEqual(
+    audio.items.filter((item): item is Extract<ApplicationMenuItem, { kind: 'command' }> => item.kind === 'command')
+      .map(item => item.id),
+    ['audio.metronome', 'audio.record', 'audio.settings']
+  );
+  const view = APPLICATION_MENUS.find(menu => menu.id === 'view');
+  assert.ok(view);
+  assert.ok(
+    view.items.some(item => item.kind === 'command' && item.id === 'view.settings'),
+    'Appearance Settings remains intact in the View menu'
+  );
 });
 
 test('File menu exposes only New Session, Open, Save and Export commands', () => {

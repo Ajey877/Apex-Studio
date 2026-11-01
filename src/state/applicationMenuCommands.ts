@@ -45,6 +45,7 @@ export interface ApplicationMenuCommandDeps {
 
   toggleMetronome: () => void;
   toggleRecord: () => void;
+  openAudioSettings: () => void;
 
   openMidiDevices: () => void;
   openMidiLearn: () => void;
@@ -224,6 +225,9 @@ const runCommand = (id: ApplicationMenuCommandId, deps: ApplicationMenuCommandDe
       return;
     case 'audio.record':
       deps.toggleRecord();
+      return;
+    case 'audio.settings':
+      deps.openAudioSettings();
       return;
 
     case 'midi.devices':

@@ -1,5 +1,5 @@
 const DEV_URL = 'http://localhost:3000';
-const APP_PERMISSIONS = new Set(['media', 'midi', 'midiSysex']);
+const APP_PERMISSIONS = new Set(['media', 'midi', 'midiSysex', 'speaker-selection']);
 // These are existing desktop capabilities, not newly granted browser permissions.
 const PRESERVED_DESKTOP_CHECKS = new Set([
   'fullscreen',
