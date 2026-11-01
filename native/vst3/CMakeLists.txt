@@ -32,6 +32,7 @@ add_executable(apex-vst3-host host.cpp
 if(WIN32)
   target_sources(apex-vst3-host PRIVATE "${SDK_ROOT}/public.sdk/source/vst/hosting/module_win32.cpp")
   target_compile_definitions(apex-vst3-host PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+  target_compile_options(apex-vst3-host PRIVATE $<$<CXX_COMPILER_ID:MSVC>:/fp:precise>)
   target_link_libraries(apex-vst3-host PRIVATE ole32 shell32 uuid)
 else()
   target_sources(apex-vst3-host PRIVATE "${SDK_ROOT}/public.sdk/source/vst/hosting/module_linux.cpp")
@@ -59,6 +60,34 @@ if(APEX_BUILD_VST3_FIXTURE)
   list(REMOVE_ITEM mda_sources source/mdaBaseProcessor.cpp)
   set_property(TARGET mda-vst3 PROPERTY SOURCES "${mda_sources}")
   target_sources(mda-vst3 PRIVATE "${CMAKE_BINARY_DIR}/fixture-mdaBaseProcessor.cpp")
+
+  # Pinned mda RezFilterProcessor leaves env, env2, phi, bufl, lfomode, ttrig,
+  # and tatt uninitialized in its constructor and setProcessing(true). When the
+  # allocator reuses heap memory holding NaN bit patterns (e.g. 0xffffffff on
+  # Windows CRT), 0.0f * NaN produces NaN cutoff modulation and clamps output to
+  # 0.0f under MSVC /fp:fast for the entire session. Keep the SDK checkout
+  # immutable and initialize those members in a generated fixture source.
+  file(READ "${mda_dir}/mdaRezFilterProcessor.cpp" mda_rez)
+  string(REPLACE "\r\n" "\n" mda_rez "${mda_rez}")
+  set(rez_ctor_needle "\tsetControllerClass (RezFilterController::uid);\n\tallocParameters (10);")
+  set(rez_ctor_init "\tsetControllerClass (RezFilterController::uid);\n\tallocParameters (10);\n\tbuf0 = 0.f; buf1 = 0.f; buf2 = 0.f;\n\tenv = 0.f; env2 = 0.f; phi = 0.f; bufl = 0.f;\n\tlfomode = 0; ttrig = 0; tatt = 0;")
+  string(FIND "${mda_rez}" "${rez_ctor_needle}" rez_ctor_offset)
+  if(rez_ctor_offset EQUAL -1)
+    message(FATAL_ERROR "Pinned mda RezFilter constructor init needle no longer matches")
+  endif()
+  string(REPLACE "${rez_ctor_needle}" "${rez_ctor_init}" mda_rez "${mda_rez}")
+  set(rez_proc_needle "\tif (state)\n\t{\n\t\tbuf0 = 0.f;\n\t\tbuf1 = 0.f;\n\t\tbuf2 = 0.f;\n\t}")
+  set(rez_proc_init "\tif (state)\n\t{\n\t\tbuf0 = 0.f;\n\t\tbuf1 = 0.f;\n\t\tbuf2 = 0.f;\n\t\tenv = 0.f;\n\t\tenv2 = 0.f;\n\t\tphi = 0.f;\n\t\tbufl = 0.f;\n\t\tttrig = 0;\n\t\ttatt = 0;\n\t}")
+  string(FIND "${mda_rez}" "${rez_proc_needle}" rez_proc_offset)
+  if(rez_proc_offset EQUAL -1)
+    message(FATAL_ERROR "Pinned mda RezFilter setProcessing init needle no longer matches")
+  endif()
+  string(REPLACE "${rez_proc_needle}" "${rez_proc_init}" mda_rez "${mda_rez}")
+  file(WRITE "${CMAKE_BINARY_DIR}/fixture-mdaRezFilterProcessor.cpp" "${mda_rez}")
+  get_target_property(mda_sources mda-vst3 SOURCES)
+  list(REMOVE_ITEM mda_sources source/mdaRezFilterProcessor.cpp)
+  set_property(TARGET mda-vst3 PROPERTY SOURCES "${mda_sources}")
+  target_sources(mda-vst3 PRIVATE "${CMAKE_BINARY_DIR}/fixture-mdaRezFilterProcessor.cpp")
   target_include_directories(mda-vst3 PRIVATE "${mda_dir}")
 endif()
 

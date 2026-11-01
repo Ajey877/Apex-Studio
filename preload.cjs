@@ -3,6 +3,24 @@ const { contextBridge, ipcRenderer } = require('electron');
 // Expose safe desktop platform APIs to the renderer.
 const smokeTest = process.argv.includes('--apex-smoke-test');
 const smokeIpcMeasurements = smokeTest ? [] : null;
+const pendingLiveAudioPorts = new Map();
+ipcRenderer.on('vst3:liveAudioPort', (event, metadata) => {
+  const port = event.ports && event.ports[0];
+  const sessionId = metadata && typeof metadata.sessionId === 'string' ? metadata.sessionId : '';
+  if (!port || !sessionId) {
+    if (port) try { port.close(); } catch { /* ignore */ }
+    return;
+  }
+  const waiter = pendingLiveAudioPorts.get(sessionId);
+  if (!waiter) {
+    try { port.close(); } catch { /* ignore */ }
+    return;
+  }
+  pendingLiveAudioPorts.delete(sessionId);
+  clearTimeout(waiter.timer);
+  window.postMessage({ type: 'vst3:liveAudioPort', sessionId, trackId: metadata.trackId, slotId: metadata.slotId }, '*', [port]);
+  waiter.resolve();
+});
 const desktopApi = {
   isDesktop: true,
   smokeTest,
@@ -31,6 +49,27 @@ const desktopApi = {
       return pcm;
     },
     close: (id) => ipcRenderer.invoke('vst3:close', id),
+    bindLiveAudioPort: (sessionId, trackId, slotId, runtimeId, sampleRate) => new Promise((resolve, reject) => {
+      const existing = pendingLiveAudioPorts.get(sessionId);
+      if (existing) {
+        clearTimeout(existing.timer);
+        existing.reject(new Error('Superseded live audio port bind'));
+      }
+      const timer = setTimeout(() => {
+        pendingLiveAudioPorts.delete(sessionId);
+        reject(new Error('Live audio port transfer timed out'));
+      }, 2000);
+      pendingLiveAudioPorts.set(sessionId, { resolve, reject, timer });
+      ipcRenderer.invoke('vst3:bindLiveAudioPort', sessionId, trackId, slotId, runtimeId, sampleRate).catch(error => {
+        const current = pendingLiveAudioPorts.get(sessionId);
+        if (current && current.timer === timer) {
+          pendingLiveAudioPorts.delete(sessionId);
+          clearTimeout(timer);
+        }
+        reject(error);
+      });
+    }),
+    unbindLiveAudioPort: (sessionId) => ipcRenderer.invoke('vst3:unbindLiveAudioPort', sessionId),
   },
   send: (channel, data) => {
     const validChannels = ['toMain', 'audio-stream', 'midi-event'];
@@ -50,5 +89,9 @@ if (smokeTest) {
     preload: smokeIpcMeasurements.slice(),
     main: await ipcRenderer.invoke('vst3:smokeTimingSnapshot'),
   });
+  desktopApi.vst3.smokeTimingReset = async () => {
+    smokeIpcMeasurements.length = 0;
+    await ipcRenderer.invoke('vst3:smokeTimingReset');
+  };
 }
 contextBridge.exposeInMainWorld('desktopApp', desktopApi);

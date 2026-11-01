@@ -234,6 +234,11 @@ public:
     data.prepare(*component, kMaxBlock, kSample32);
     checked(component->setActive(true), "setActive failed"); active = true;
     checked(processor->setProcessing(true), "setProcessing failed"); processing = true;
+    // Component/controller streams are restored while inactive. Apply saved
+    // normalized overrides after activation so effect processors and controller
+    // metadata reflect authoritative saved values before the first live block.
+    if (!isInstrument && request.contains("state") && request.at("state").contains("parameters"))
+      applyParameters(request.at("state").at("parameters"), false, -1, false);
     result["parameters"] = metadata();
     result["controllerAvailable"] = bool(controller);
     result["latencySamples"] = processor->getLatencySamples();
@@ -282,7 +287,9 @@ public:
       MemoryStream stream(bytes.data(), bytes.size());
       checked(controller->setState(&stream), "Plugin rejected saved controller state");
     }
-    if (state.contains("parameters")) applyParameters(state.at("parameters"), false, -1, isInstrument);
+    // Instruments keep the established pre-activation queue contract. Effect
+    // overlays are applied after setActive/setProcessing in open().
+    if (isInstrument && state.contains("parameters")) applyParameters(state.at("parameters"), false, -1, true);
   }
   void applyParameters(const json& changes, bool live = false, int32 frames = -1, bool enqueue = true) {
     require(changes.is_array() && changes.size() <= 4096, "Invalid parameter list");
@@ -452,11 +459,11 @@ public:
     const auto& output = data.outputs[0];
     for (int ch = 0; ch < 2; ++ch) {
       const int source = std::min(ch, output.numChannels - 1);
-      if (output.silenceFlags & (uint64_t{1} << source)) continue;
+      const bool channelSilent = (output.silenceFlags & (uint64_t{1} << source)) != 0;
       for (int i = 0; i < frames; ++i) {
         float sample = output.channelBuffers32[source][i];
         require(std::isfinite(sample), "Plugin produced non-finite audio");
-        pcm[ch * frames + i] = sample;
+        if (!channelSilent) pcm[ch * frames + i] = sample;
       }
     }
     cursor += frames;

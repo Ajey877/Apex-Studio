@@ -34,7 +34,27 @@ function makeAudio(frames = 4096) {
   }
   return audio;
 }
+function makeAsymmetricStereo(frames = 1024, leftFreq = 330, rightFreq = 660) {
+  const audio = new Float32Array(frames * 2);
+  for (let i = 0; i < frames; ++i) {
+    audio[i] = Math.sin(i * 2 * Math.PI * leftFreq / sampleRate) * 0.18;
+    audio[frames + i] = Math.cos(i * 2 * Math.PI * rightFreq / sampleRate) * 0.14;
+  }
+  return audio;
+}
+function makeMixerNoise(frames = 1024) {
+  const audio = new Float32Array(frames * 2);
+  let state = 0x6d2b79f5;
+  for (let i = 0; i < frames; i++) {
+    state ^= state << 13; state ^= state >>> 17; state ^= state << 5;
+    const sample = ((state >>> 0) / 0x80000000 - 1) * 0.1;
+    audio[i] = sample;
+    audio[frames + i] = sample;
+  }
+  return audio;
+}
 const rms = audio => Math.sqrt(audio.reduce((sum, sample) => sum + sample * sample, 0) / audio.length);
+const allFinite = audio => audio.every(Number.isFinite);
 const difference = (a, b) => {
   assert.equal(a.length, b.length);
   return Math.sqrt(a.reduce((sum, sample, i) => sum + (sample - b[i]) ** 2, 0) / a.length);
@@ -72,6 +92,67 @@ test('effect discovery is category-specific and real MDA stereo processing chang
   assert.equal(difference(input, bypassed), 0, 'zero wet mix is an audio bypass control');
   assert.ok(difference(dry, wet) > 0.05, 'a genuine VST3 parameter changes processed samples');
   assert.equal(rms(wet), 0, 'the selected native wet-mix setting is measurably different');
+});
+
+test('two simultaneous effect instances maintain isolated identity, DSP state, asymmetric stereo integrity, and mid-session parameter updates', async () => {
+  const service = new Vst3Service(executable, [root]);
+  const owner = 'two-instance-isolation';
+  try {
+    const delayA = await service.open(delay, sampleRate, 'realtime', owner, 'effect');
+    const delayB = await service.open(delay, sampleRate, 'realtime', owner, 'effect');
+    const filterA = await service.open(rezFilter, sampleRate, 'realtime', owner, 'effect');
+    const filterB = await service.open(rezFilter, sampleRate, 'realtime', owner, 'effect');
+    assert.notEqual(delayA.id, delayB.id);
+    assert.notEqual(filterA.id, filterB.id);
+    assert.equal(service.sessionCount, 4);
+
+    // Distinct asymmetric stereo inputs and distinct parameter configurations
+    await service.parameters(delayA.id, [{ id: 4, value: 0 }], owner); // 100% dry bypass
+    await service.parameters(delayB.id, [{ id: 4, value: 0.5 }], owner); // wet mix active
+    await service.parameters(filterA.id, [{ id: 0, value: 0.85 }, { id: 1, value: 0.2 }, { id: 8, value: 0 }, { id: 9, value: 1 }], owner);
+    await service.parameters(filterB.id, [{ id: 0, value: 0.55 }, { id: 1, value: 0.6 }, { id: 8, value: 0 }, { id: 9, value: 1 }], owner);
+
+    const inputA = makeAsymmetricStereo(1024, 330, 770);
+    const inputB = makeAsymmetricStereo(1024, 520, 910);
+
+    for (let block = 0; block < 12; block++) {
+      const [outDelayA, outDelayB] = await Promise.all([
+        service.processAudio(delayA.id, 1024, inputA, 120, owner, []),
+        service.processAudio(delayB.id, 1024, inputB, 120, owner, []),
+      ]);
+      assert.equal(allFinite(outDelayA), true);
+      assert.equal(allFinite(outDelayB), true);
+      assert.equal(difference(inputA, outDelayA), 0, 'instance A dry mix must remain unaffected by instance B wet mix');
+      // Asymmetric left/right channels must remain distinct in planar stereo output
+      assert.ok(difference(outDelayA.subarray(0, 1024), outDelayA.subarray(1024)) > 0.05);
+
+      const [outFilterA, outFilterB] = await Promise.all([
+        service.processAudio(filterA.id, 1024, outDelayA, 120, owner, []),
+        service.processAudio(filterB.id, 1024, outDelayB, 120, owner, []),
+      ]);
+      assert.equal(allFinite(outFilterA), true);
+      assert.equal(allFinite(outFilterB), true);
+      assert.ok(rms(outFilterA.subarray(0, 1024)) > 0.01, `filterA left channel must be audible on block ${block}`);
+      assert.ok(rms(outFilterA.subarray(1024)) > 0.01, `filterA right channel must be audible on block ${block}`);
+      assert.ok(rms(outFilterB) > 0.005, `filterB output must be audible on block ${block}`);
+      assert.ok(difference(outFilterA, outFilterB) > 0.01, 'independent instances must produce distinct processed stereo signals');
+    }
+
+    // Mid-session parameter update on delayA only must change delayA without mutating delayB
+    const refB = await service.processAudio(delayB.id, 1024, inputB, 120, owner, []);
+    await service.parameters(delayA.id, [{ id: 4, value: 1 }], owner); // 100% wet (zero immediate dry output on silent delay line)
+    const mutatedA = await service.processAudio(delayA.id, 1024, inputA, 120, owner, []);
+    const afterB = await service.processAudio(delayB.id, 1024, inputB, 120, owner, []);
+    assert.ok(difference(inputA, mutatedA) > 0.05, 'mid-session parameter change takes effect immediately on target instance');
+    assert.ok(rms(afterB) > 0.05 && allFinite(afterB), 'untouched sibling instance continues processing normally');
+    assert.ok(rms(refB) > 0.05);
+
+    await service.close(delayA.id, owner);
+    await service.close(delayB.id, owner);
+    await service.close(filterA.id, owner);
+    await service.close(filterB.id, owner);
+    assert.equal(service.sessionCount, 0);
+  } finally { await service.dispose(); }
 });
 
 test('effect parameters, opaque plugin state and reopen retain identical actual DSP output', async () => {
@@ -115,6 +196,184 @@ test('effect order is audible: delay then resonant filter differs from filter th
   assert.ok(rms(delayThenAmbience) > 0);
   assert.ok(rms(ambienceThenDelay) > 0);
   assert.ok(difference(delayThenAmbience, ambienceThenDelay) > 1e-4);
+});
+
+const REZFILTER_OVERLAY = [
+  { id: 0, value: 0.8 },
+  { id: 1, value: 0.25 },
+  { id: 3, value: 0.5 },
+  { id: 6, value: 0.5 },
+  { id: 8, value: 0 },
+  { id: 9, value: 1 },
+];
+
+async function measureRestoredRezFilter(service, inspected, delayEffect, {
+  owner, reverse, mode, reopen, preRollSilenceBlocks = 2,
+}) {
+  const dry = makeMixerNoise(1024);
+  const silence = new Float32Array(2048);
+  const openPair = async () => {
+    const firstPlugin = reverse ? inspected : delayEffect;
+    const secondPlugin = reverse ? delayEffect : inspected;
+    const first = await service.open(firstPlugin, sampleRate, mode, owner, 'effect');
+    const second = await service.open(secondPlugin, sampleRate, mode, owner, 'effect');
+    return reverse
+      ? { delayOpened: second, filterOpened: first }
+      : { delayOpened: first, filterOpened: second };
+  };
+  let pair = await openPair();
+  try {
+    if (reopen) {
+      await service.close(pair.delayOpened.id, owner);
+      await service.close(pair.filterOpened.id, owner);
+      pair = await openPair();
+    }
+    const flushed = await service.parameters(pair.filterOpened.id, REZFILTER_OVERLAY, owner);
+    const overlayHeld = REZFILTER_OVERLAY.every(parameter => {
+      const actual = flushed.find(entry => entry.id === parameter.id);
+      return actual && actual.currentValue !== null && Math.abs(actual.currentValue - parameter.value) < 1e-6;
+    });
+    // Mirror the live two-insert Mixer pipeline: downstream insert receives
+    // upstream pipeline-delay silence blocks before the first audible block.
+    for (let s = 0; s < preRollSilenceBlocks; s++) {
+      const silentOut = await service.processAudio(pair.filterOpened.id, 1024, silence, 120, owner, []);
+      assert.equal(allFinite(silentOut), true);
+      assert.equal(rms(silentOut), 0, 'silent pre-roll through RezFilter must produce exact finite silence');
+    }
+    const filterInput = reverse ? dry : await service.processAudio(pair.delayOpened.id, 1024, dry, 120, owner, []);
+    const inputs = Array.from({ length: 16 }, () => new Float32Array(filterInput));
+    const outputs = [];
+    for (const block of inputs) outputs.push(await service.processAudio(pair.filterOpened.id, 1024, block, 120, owner, []));
+    const blocks = outputs.map((output, index) => ({
+      index,
+      inputRms: rms(inputs[index]),
+      outputRms: rms(output),
+      finite: allFinite(output),
+    }));
+    return {
+      owner, reverse, mode, reopen, overlayHeld,
+      delaySession: pair.delayOpened.id, filterSession: pair.filterOpened.id,
+      delayRms: reverse ? null : rms(filterInput),
+      blocks,
+      silentBlocks: blocks.filter(block => !block.finite || (block.inputRms > 0.01 && block.outputRms <= 0.01)).map(block => block.index),
+    };
+  } finally {
+    await service.close(pair.delayOpened.id, owner).catch(() => {});
+    await service.close(pair.filterOpened.id, owner).catch(() => {});
+  }
+}
+
+test('realtime restored RezFilter stays audible across 20 varied open/reopen cycles including silent pre-roll and empty live parameter lists', async () => {
+  const service = new Vst3Service(executable, [root]);
+  const owner = 'rezfilter-restore-cycles';
+  try {
+    const inspected = await service.inspectEffect(rezFilter, { schema: 1, classId: rezFilter.classId, parameters: REZFILTER_OVERLAY }, owner);
+    const delayInspected = await service.inspectEffect(delay, undefined, owner);
+    const outcomes = [];
+    for (let cycle = 0; cycle < 20; cycle++) {
+      const outcome = await measureRestoredRezFilter(service, inspected, delayInspected, {
+        owner: `${owner}-${cycle}`,
+        reverse: cycle % 2 === 1,
+        mode: cycle % 5 === 0 ? 'offline' : 'realtime',
+        reopen: cycle % 4 === 3,
+      });
+      outcomes.push({
+        cycle,
+        reverse: outcome.reverse,
+        mode: outcome.mode,
+        reopen: outcome.reopen,
+        overlayHeld: outcome.overlayHeld,
+        delayRms: outcome.delayRms,
+        firstOutputRms: outcome.blocks[0]?.outputRms ?? null,
+        minOutputRms: Math.min(...outcome.blocks.map(block => block.outputRms)),
+        silentBlocks: outcome.silentBlocks,
+        filterSession: outcome.filterSession,
+      });
+      assert.equal(outcome.overlayHeld, true, `controller overlay lost on cycle ${cycle}: ${JSON.stringify(outcome)}`);
+      assert.deepEqual(outcome.silentBlocks, [], `RezFilter DSP went silent on cycle ${cycle}: ${JSON.stringify(outcomes)}`);
+    }
+    assert.equal(outcomes.length, 20);
+    assert.equal(outcomes.filter(outcome => outcome.reverse).length, 10);
+    assert.ok(outcomes.some(outcome => outcome.reopen));
+    assert.ok(outcomes.some(outcome => outcome.mode === 'offline'));
+    assert.ok(outcomes.filter(outcome => outcome.mode === 'realtime').length >= 16);
+  } finally { await service.dispose(); }
+});
+
+test('realtime restore plus saved overlay flush reaches RezFilter DSP on Delay then filter with empty live parameter list', async () => {
+  const service = new Vst3Service(executable, [root]);
+  const owner = 'rezfilter-realtime-init';
+  try {
+    const inspected = await service.inspectEffect(rezFilter, { schema: 1, classId: rezFilter.classId, parameters: REZFILTER_OVERLAY }, owner);
+    const delayInspected = await service.inspectEffect(delay, undefined, owner);
+    const delayOpened = await service.open(delayInspected, sampleRate, 'realtime', owner, 'effect');
+    const defaultOpened = await service.open(rezFilter, sampleRate, 'realtime', owner, 'effect');
+    const filterOpened = await service.open(inspected, sampleRate, 'realtime', owner, 'effect');
+    try {
+      // Open alone with saved state.parameters must already apply normalized parameters to DSP
+      for (const parameter of REZFILTER_OVERLAY) {
+        const actual = filterOpened.parameters.find(entry => entry.id === parameter.id);
+        assert.ok(actual && actual.currentValue !== null && Math.abs(actual.currentValue - parameter.value) < 1e-6,
+          `opened session must reflect saved overlay ${parameter.id}=${parameter.value}`);
+      }
+      const delayed = await service.processAudio(delayOpened.id, 1024, makeAudio(1024), 120, owner, []);
+      assert.ok(rms(delayed) > 0.01, `Delay realtime restore was silent: ${rms(delayed)}`);
+      const defaults = await service.processAudio(defaultOpened.id, 1024, delayed, 120, owner, []);
+      const filtered = await service.processAudio(filterOpened.id, 1024, delayed, 120, owner, []);
+      assert.ok(rms(filtered) > 0.01,
+        `Delay→RezFilter realtime overlay was silent with empty live parameter list: delay=${rms(delayed)} filter=${rms(filtered)}`);
+      assert.ok(difference(defaults, filtered) > 1e-4,
+        `normalized overlay must change RezFilter DSP, not only controller metadata: default=${rms(defaults)} overlay=${rms(filtered)}`);
+    } finally {
+      await service.close(delayOpened.id, owner);
+      await service.close(defaultOpened.id, owner);
+      await service.close(filterOpened.id, owner);
+    }
+  } finally { await service.dispose(); }
+});
+
+test('cancellation, close-during-process, owner teardown and helper process lifetime leave no orphaned sessions or undefined state', async () => {
+  const service = new Vst3Service(executable, [root]);
+  try {
+    const openedA = await service.open(delay, sampleRate, 'realtime', 'owner-a', 'effect');
+    const openedB = await service.open(rezFilter, sampleRate, 'realtime', 'owner-b', 'effect');
+    assert.equal(service.sessionCount, 2);
+
+    // Cancel owner-a while a processAudio call is in flight; owner-b must remain healthy.
+    const inFlight = service.processAudio(openedA.id, 4096, makeAudio(4096), 120, 'owner-a', [])
+      .then(() => 'completed', error => String(error?.message ?? error));
+    await service.close(openedA.id, 'owner-a');
+    const inFlightOutcome = await inFlight;
+    assert.match(inFlightOutcome, /cancelled|closed|not open|completed/i);
+    assert.equal(service.sessionCount, 1);
+    await assert.rejects(service.processAudio(openedA.id, 1024, makeAudio(1024), 120, 'owner-a', []), /closed or belongs to another renderer/);
+
+    // Sibling instance owned by owner-b must still process cleanly after owner-a abort
+    const healthyB = await service.processAudio(openedB.id, 1024, makeAudio(1024), 120, 'owner-b', []);
+    assert.ok(rms(healthyB) > 0.01 && allFinite(healthyB));
+
+    // closeOwner tears down remaining sessions for owner-b cleanly
+    await service.closeOwner('owner-b');
+    assert.equal(service.sessionCount, 0);
+
+    // Direct NativeVst3Client helper process exits cleanly on dispose() and rejects subsequent requests
+    const client = new NativeVst3Client(executable);
+    try {
+      await client.open(rezFilter, { kind: 'effect', sampleRate });
+    } finally {
+      await client.dispose();
+    }
+    await assert.rejects(client.snapshot(), /exited|cancelled|closed/i);
+
+    const abortedClient = new NativeVst3Client(executable);
+    try {
+      await abortedClient.open(delay, { kind: 'effect', sampleRate });
+      abortedClient.abort();
+      await assert.rejects(abortedClient.snapshot(), /VST3 instance cancelled/);
+    } finally {
+      await abortedClient.dispose();
+    }
+  } finally { await service.dispose(); }
 });
 
 test('service exposes genuine effect parameter metadata and captures persisted native controller/component state', async () => {

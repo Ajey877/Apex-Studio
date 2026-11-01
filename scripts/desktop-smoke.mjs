@@ -43,9 +43,29 @@ try {
     assert.equal(mixer?.status, 'passed', `${label} did not complete packaged production Mixer-effect acceptance`);
     for (const [runName, timing] of Object.entries(mixer.timing)) {
       assert.equal(timing.missedDeadlines, 0, `${label} ${runName} reported a Mixer deadline miss`);
+      assert.equal(timing.unaccountedRequestCount, 0, `${label} ${runName} reported unaccounted Mixer requests`);
       assert.equal(timing.nativeServiceSessionCountAfterCleanup, 0, `${label} ${runName} leaked native helper sessions`);
     }
+    assert.equal(mixer.projectReplacementCleanup?.nativeServiceSessionCountAfterReplacement, 0,
+      `${label} leaked native helper sessions after project replacement`);
+    for (const [stageGroup, stages] of Object.entries(mixer.twoInsertPcmEvidence ?? {})) {
+      assert.equal(Object.keys(stages).length, 2, `${label} ${stageGroup} must capture two insert stages`);
+      for (const [slotId, metrics] of Object.entries(stages)) {
+        assert.equal(metrics.nonFiniteCount, 0, `${label} ${stageGroup} ${slotId} emitted non-finite samples`);
+        assert.ok(metrics.leftRms > 0.01 && metrics.rightRms > 0.01 && metrics.rms > 0.01,
+          `${label} ${stageGroup} ${slotId} was silent: ${JSON.stringify(metrics)}`);
+      }
+    }
+    assert.equal(mixer.twoInsertSaveReopen?.playbackActiveAtEnd, true, `${label} two-insert save/reopen playback stopped`);
+    for (const [slotId, metrics] of Object.entries(mixer.twoInsertSaveReopen?.stagePcm ?? {})) {
+      assert.equal(metrics.nonFiniteCount, 0, `${label} save/reopen ${slotId} emitted non-finite samples`);
+      assert.ok(metrics.leftRms > 0.01 && metrics.rightRms > 0.01 && metrics.rms > 0.01,
+        `${label} save/reopen ${slotId} was silent: ${JSON.stringify(metrics)}`);
+    }
   }
+  assert.equal(reopened.vst3.mixerEffects.persistedTwoInsertStateChecksum, saved.vst3.mixerEffects.persistedTwoInsertStateChecksum,
+    'Actual application restart changed persisted two-insert Mixer VST3 configuration/parameters');
+  assert.equal(reopened.vst3.mixerEffects.twoInsertSaveReopen?.restoredFromIndexedDb, true);
   for (const field of ['classId', 'onsetFrame', 'rms', 'pcmChecksum', 'savedStateChecksum', 'parameterValue', 'parameterExportDifferenceRms', 'automationPcmChecksum', 'automationStateChecksum', 'automationExportDifferenceRms']) {
     assert.equal(reopened.vst3[field], saved.vst3[field], `Actual application restart changed ${field}`);
   }
@@ -55,6 +75,24 @@ try {
   if (process.env.GITHUB_ACTIONS) {
     const { timingSamples: _samples, ...mixerSummary } = reopened.vst3.mixerEffects;
     console.log(`::notice title=Packaged VST3 application restart proof::${JSON.stringify({ applicationRestartEqual: true, ...reopened.vst3, mixerEffects: mixerSummary })}`);
+    const compactTiming = Object.fromEntries(Object.entries(reopened.vst3.mixerEffects.timing).map(([runName, t]) => [runName, {
+      requestCount: t.requestCount,
+      acceptedWorkletResults: t.acceptedWorkletResults,
+      cancelledAtStopBlocks: t.cancelledAtStopBlocks,
+      missedDeadlines: t.missedDeadlines,
+      unaccountedRequestCount: t.unaccountedRequestCount,
+      nativeServiceSessionCountAfterCleanup: t.nativeServiceSessionCountAfterCleanup,
+      workletReceiptMaxMs: t.workletSubmissionToReceipt?.maxMs ?? null,
+      nativeServiceMaxMs: t.mainNativeServiceCall?.maxMs ?? null,
+    }]));
+    console.log(`::notice title=Packaged VST3 two-insert Mixer proof::${JSON.stringify({
+      persistedTwoInsertStateChecksum: reopened.vst3.mixerEffects.persistedTwoInsertStateChecksum,
+      twoInsertPcmEvidence: reopened.vst3.mixerEffects.twoInsertPcmEvidence,
+      twoInsertSaveReopen: reopened.vst3.mixerEffects.twoInsertSaveReopen,
+      projectReplacementCleanup: reopened.vst3.mixerEffects.projectReplacementCleanup,
+      rendererStallRegression: reopened.vst3.mixerEffects.rendererStallRegression,
+      timing: compactTiming,
+    })}`);
   }
   rmSync(profile, { recursive: true, force: true });
 } catch (error) {
