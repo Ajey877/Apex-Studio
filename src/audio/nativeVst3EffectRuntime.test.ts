@@ -309,3 +309,226 @@ test('stop acknowledges an in-flight block per effect; late session replies cann
     (globalThis as any).AudioWorkletNode = originalNode;
   }
 });
+
+test('two VST3 inserts in one Mixer chain process cascaded stereo PCM in exact slot order without cross-instance contamination or lost blocks', async () => {
+  const { MessageChannel } = await import('node:worker_threads');
+  const { createLiveAudioPortSession } = await import('../../native/vst3/liveAudioPort.mjs');
+
+  function createLiveBoundWorklet() {
+    const sandbox: any = {
+      currentFrame: 0, Float32Array, Map, Number, Array, Math, String,
+      AudioWorkletProcessor: class {
+        port = {
+          onmessage: null as ((event: { data: any; ports?: any[] }) => void) | null,
+          sent: [] as any[],
+          postMessage(message: any) { this.sent.push(message); },
+        };
+      },
+      registerProcessor(_name: string, constructor: new (options: any) => any) { sandbox.Processor = constructor; },
+    };
+    runInNewContext(VST3_FX_WORKLET_SOURCE, sandbox);
+    const processor = new sandbox.Processor({ processorOptions: { profileEnabled: true, requireLivePort: true } });
+    return { processor, sandbox };
+  }
+
+  const stage1 = createLiveBoundWorklet();
+  const stage2 = createLiveBoundWorklet();
+  const ch1 = new MessageChannel();
+  const ch2 = new MessageChannel();
+
+  // Adapt worker_threads MessagePort for worklet sandbox (onmessage property)
+  // and enforce Electron/Chromium's cross-process MessagePortMain contract:
+  // ArrayBuffer transfer lists across OS processes are forbidden.
+  const wrapWorkletSidePort = (port: any) => {
+    const wrapper: any = {
+      onmessage: null as ((event: { data: any }) => void) | null,
+      postMessage: (msg: any, transfer?: any[]) => {
+        assert.equal(transfer, undefined, 'cross-process livePort.postMessage must not pass an ArrayBuffer transfer list');
+        port.postMessage(msg);
+      },
+      close: () => port.close(),
+    };
+    port.on('message', (data: any) => wrapper.onmessage?.({ data }));
+    port.start();
+    return wrapper;
+  };
+
+  const stage1Inputs: Float32Array[] = [];
+  const stage2Inputs: Float32Array[] = [];
+  const processAudio = async ({ sessionId, samples }: { sessionId: string; samples: Float32Array }) => {
+    const frames = VST3_FX_BLOCK_FRAMES;
+    const out = new Float32Array(samples.length);
+    if (sessionId === 'insert-1') {
+      stage1Inputs.push(samples.slice());
+      for (let i = 0; i < frames; i++) {
+        out[i] = samples[i]! * 2;
+        out[frames + i] = samples[frames + i]! * 0.5;
+      }
+    } else {
+      stage2Inputs.push(samples.slice());
+      for (let i = 0; i < frames; i++) {
+        out[i] = samples[i]! + 0.1;
+        out[frames + i] = samples[frames + i]! - 0.05;
+      }
+    }
+    return out;
+  };
+
+  const live1 = createLiveAudioPortSession({
+    sessionId: 'insert-1', owner: 'owner-1', trackId: 1, slotId: 'slot-1', processAudio,
+  });
+  const live2 = createLiveAudioPortSession({
+    sessionId: 'insert-2', owner: 'owner-1', trackId: 1, slotId: 'slot-2', processAudio,
+  });
+  stage1.processor.port.onmessage!({ data: { type: 'live-port' }, ports: [wrapWorkletSidePort(ch1.port2)] });
+  stage2.processor.port.onmessage!({ data: { type: 'live-port' }, ports: [wrapWorkletSidePort(ch2.port2)] });
+  live1.attach(ch1.port1);
+  live2.attach(ch2.port1);
+  await new Promise(resolve => setTimeout(resolve, 10));
+
+  try {
+    const capturedCascadedLeft: number[] = [];
+    const capturedCascadedRight: number[] = [];
+    // Run 8 blocks (8192 frames = 64 render quanta of 128 frames)
+    for (let q = 0; q < 64; q++) {
+      const frame = q * 128;
+      stage1.sandbox.currentFrame = frame;
+      stage2.sandbox.currentFrame = frame;
+      const inL = new Float32Array(128).fill(0.2);
+      const inR = new Float32Array(128).fill(-0.4);
+      const mid = [new Float32Array(128), new Float32Array(128)];
+      const finalOut = [new Float32Array(128), new Float32Array(128)];
+      stage1.processor.process([[inL, inR]], [mid]);
+      stage2.processor.process([[mid[0], mid[1]]], [finalOut]);
+      for (let i = 0; i < 128; i++) {
+        capturedCascadedLeft.push(finalOut[0]![i]!);
+        capturedCascadedRight.push(finalOut[1]![i]!);
+      }
+      if ((q + 1) % 8 === 0) await new Promise(resolve => setTimeout(resolve, 10));
+    }
+
+    assert.equal(stage1.processor.failed, false);
+    assert.equal(stage2.processor.failed, false);
+    assert.equal(stage1Inputs.length, 8);
+    assert.equal(stage2Inputs.length, 8);
+    // Stage 1 receives dry input (0.2, -0.4) from block 0
+    assert.ok(Math.abs(stage1Inputs[0]![0]! - 0.2) < 1e-6);
+    assert.ok(Math.abs(stage1Inputs[0]![VST3_FX_BLOCK_FRAMES]! - -0.4) < 1e-6);
+    // Stage 2 receives 2 blocks of pipeline delay (0, 0), then Stage 1's processed output (0.4, -0.2)
+    assert.equal(stage2Inputs[0]![0], 0);
+    assert.equal(stage2Inputs[1]![0], 0);
+    assert.ok(Math.abs(stage2Inputs[2]![0]! - 0.4) < 1e-6);
+    assert.ok(Math.abs(stage2Inputs[2]![VST3_FX_BLOCK_FRAMES]! - -0.2) < 1e-6);
+    // Cascaded output after 2 * 2048 = 4096 frames equals Stage 2(Stage 1(dry)) = (0.5, -0.25)
+    for (let f = VST3_FX_PIPELINE_FRAMES * 2; f < capturedCascadedLeft.length; f++) {
+      assert.ok(Math.abs(capturedCascadedLeft[f]! - 0.5) < 1e-6, `left sample at frame ${f}`);
+      assert.ok(Math.abs(capturedCascadedRight[f]! - -0.25) < 1e-6, `right sample at frame ${f}`);
+    }
+  } finally {
+    await live1.dispose();
+    await live2.dispose();
+    ch1.port2.close();
+    ch2.port2.close();
+  }
+});
+
+test('prepareTracks flushes saved parameter overlays before live-port bind and cancels cleanly on concurrent stop/replacement without leaking sessions', async () => {
+  const originalNode = (globalThis as any).AudioWorkletNode;
+  class FakeLiveWorkletNode {
+    port = {
+      onmessage: null as ((event: { data: any }) => void) | null,
+      postMessage: (message: any) => {
+        if (message?.type === 'live-port') queueMicrotask(() => this.port.onmessage?.({ data: { type: 'live-bound' } }));
+        if (message?.type === 'stop') queueMicrotask(() => this.port.onmessage?.({ data: { type: 'stop-ack', sequence: null, reason: message.reason } }));
+      },
+      close() {},
+    };
+    onprocessorerror: (() => void) | null = null;
+    disconnect() {}
+  }
+  (globalThis as any).AudioWorkletNode = FakeLiveWorkletNode;
+
+  const events: string[] = [];
+  const openSessions = new Set<string>();
+  let seq = 0;
+  const holdOpens: Array<() => void> = [];
+  let blockNextOpen = false;
+  const flushHoldOpens = () => { while (holdOpens.length) holdOpens.shift()!(); };
+
+  const effectA: Vst3Effect = {
+    ...effect, classId: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    state: { schema: 1, classId: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA', parameters: [{ id: 0, value: 0.8 }, { id: 9, value: 1 }] },
+  };
+  const effectB: Vst3Effect = {
+    ...effect, classId: 'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB',
+    state: { schema: 1, classId: 'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB', parameters: [{ id: 4, value: 0.25 }] },
+  };
+  const twoInsertTrack: MixerTrack = {
+    ...track,
+    fxSlots: [
+      { ...slot, id: 'slot-1', vst3Effect: effectA },
+      { ...slot, id: 'slot-2', vst3Effect: effectB },
+    ],
+  };
+
+  const bridge: Vst3Bridge = {
+    paths: async () => [], choosePath: async () => null,
+    discover: async () => ({ plugins: [], errors: [] }), discoverEffects: async () => ({ plugins: [], errors: [] }),
+    inspect: async () => { throw new Error('unused'); }, inspectEffect: async () => { throw new Error('unused'); },
+    describeEffect: async () => ({ parameters: [], controllerAvailable: false }), describe: async () => ({ parameters: [], controllerAvailable: false }),
+    open: async () => {
+      const id = `live-${++seq}`;
+      openSessions.add(id);
+      events.push(`open:${id}`);
+      if (blockNextOpen) await new Promise<void>(resolve => { holdOpens.push(resolve); });
+      return { id, latencySamples: 0 };
+    },
+    parameters: async (id, changes) => {
+      events.push(`params:${id}:${changes.map(c => `${c.id}=${c.value}`).join(',')}`);
+      return [];
+    },
+    bindLiveAudioPort: async id => {
+      events.push(`bind:${id}`);
+      return { postMessage() {}, close() {} } as any;
+    },
+    unbindLiveAudioPort: async id => { events.push(`unbind:${id}`); },
+    process: async () => new Float32Array(),
+    processAudio: async () => new Float32Array(VST3_FX_BLOCK_FRAMES * 2),
+    close: async id => { openSessions.delete(id); events.push(`close:${id}`); },
+  };
+
+  const context: any = { sampleRate: 48000, currentTime: 0, state: 'running', audioWorklet: { addModule: async () => {} } };
+  const runtime = new NativeVst3EffectRuntime(() => {}, () => bridge);
+  try {
+    await runtime.prepareTracks([twoInsertTrack], context);
+    assert.equal(openSessions.size, 2);
+    // For each session, parameters must flush before bindLiveAudioPort
+    for (const id of ['live-1', 'live-2']) {
+      const openIdx = events.indexOf(`open:${id}`);
+      const paramIdx = events.findIndex(e => e.startsWith(`params:${id}:`));
+      const bindIdx = events.indexOf(`bind:${id}`);
+      assert.ok(openIdx >= 0 && paramIdx > openIdx && bindIdx > paramIdx, `expected open -> params -> bind for ${id}, got ${events.join(' -> ')}`);
+    }
+    await runtime.stop();
+    assert.equal(openSessions.size, 0);
+    for (const id of ['live-1', 'live-2']) {
+      assert.ok(events.indexOf(`unbind:${id}`) < events.indexOf(`close:${id}`), `unbind precedes close for ${id}`);
+    }
+
+    // Concurrent stop() during in-flight prepareTracks must close newly opened sessions without leaking
+    blockNextOpen = true;
+    const pendingPrepare = runtime.prepareTracks([twoInsertTrack], context);
+    await tick(); await tick();
+    const stopPromise = runtime.stop();
+    flushHoldOpens();
+    await assert.rejects(pendingPrepare, /cancelled/i);
+    await stopPromise;
+    assert.equal(openSessions.size, 0, 'no leaked native helper sessions after concurrent stop during prepare');
+  } finally {
+    blockNextOpen = false;
+    flushHoldOpens();
+    await runtime.stop();
+    (globalThis as any).AudioWorkletNode = originalNode;
+  }
+});
+

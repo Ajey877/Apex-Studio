@@ -3,8 +3,8 @@ import { nativeTarget } from './nativeVst3Automation';
 // the production engine/registry/export path, not an alternate WAV renderer.
 import { audioEngine } from './audioEngine';
 import { DEFAULT_MASTERING_SUITE_STATE } from './masteringState';
-import { getVst3Bridge, type Vst3Effect } from './nativeVst3Types';
-import { VST3_FX_BLOCK_FRAMES, VST3_FX_PIPELINE_FRAMES, getNativeVst3MixerEffectSmokeTiming, resetNativeVst3MixerEffectSmokeTiming, getVst3MixerEffectDiagnostics } from './nativeVst3EffectRuntime';
+import { getVst3Bridge, type Vst3Bridge, type Vst3Effect, type Vst3Identity } from './nativeVst3Types';
+import { VST3_FX_BLOCK_FRAMES, VST3_FX_PIPELINE_FRAMES, getNativeVst3MixerEffectSmokeTiming, resetAllNativeVst3SmokeTiming, resetNativeVst3MixerEffectSmokeTiming, getVst3MixerEffectDiagnostics } from './nativeVst3EffectRuntime';
 import { getVst3Diagnostics } from './nativeVst3Runtime';
 import { createDefaultProjectState, normalizeProjectState } from '../state/projectState';
 import { persistProjectState, restorePersistedProjectState, serializeProjectState } from '../state/projectPersistence';
@@ -20,8 +20,20 @@ type MixerCaptureOptions = {
   bypassMixerTracks?: MixerTrack[];
   /** Smoke-only taps after each native insert for diagnosing silent stages. */
   includeNativeStages?: boolean;
+  /** Test-only renderer UI-thread stall. Never used in production capture. */
+  stallRendererMs?: number;
+  stallRendererAfterMs?: number;
 };
-type PlanarPcm = { left: Float32Array; right: Float32Array; frames: number; rms: number; startFrame: number | null };
+type PlanarPcm = {
+  left: Float32Array;
+  right: Float32Array;
+  frames: number;
+  rms: number;
+  leftRms: number;
+  rightRms: number;
+  nonFiniteCount: number;
+  startFrame: number | null;
+};
 const captureModuleByContext = new WeakMap<BaseAudioContext, Promise<string>>();
 
 async function attachMixerCapture(instance: typeof audioEngine, trackId: number, sourceOverride?: AudioNode): Promise<MixerCapture> {
@@ -69,14 +81,27 @@ function toPlanarPcm(blocks: MixerCaptureBlock[], startFrame = -Infinity, endFra
   const selected = blocks.filter(block => block.frame >= startFrame && block.frame + VST3_FX_BLOCK_FRAMES <= endFrame);
   const frames = selected.length * VST3_FX_BLOCK_FRAMES;
   const left = new Float32Array(frames), right = new Float32Array(frames);
-  let square = 0, samples = 0;
+  let leftSquare = 0, rightSquare = 0, nonFiniteCount = 0;
   selected.forEach(({ samples: block }, index) => {
     if (block.length !== VST3_FX_BLOCK_FRAMES * 2) throw new Error('Packaged Mixer capture returned malformed stereo PCM');
-    left.set(block.subarray(0, VST3_FX_BLOCK_FRAMES), index * VST3_FX_BLOCK_FRAMES);
-    right.set(block.subarray(VST3_FX_BLOCK_FRAMES), index * VST3_FX_BLOCK_FRAMES);
-    for (const value of block) { square += value * value; samples++; }
+    const lSlice = block.subarray(0, VST3_FX_BLOCK_FRAMES);
+    const rSlice = block.subarray(VST3_FX_BLOCK_FRAMES);
+    left.set(lSlice, index * VST3_FX_BLOCK_FRAMES);
+    right.set(rSlice, index * VST3_FX_BLOCK_FRAMES);
+    for (let i = 0; i < VST3_FX_BLOCK_FRAMES; i++) {
+      const l = lSlice[i]!, r = rSlice[i]!;
+      if (!Number.isFinite(l)) nonFiniteCount++; else leftSquare += l * l;
+      if (!Number.isFinite(r)) nonFiniteCount++; else rightSquare += r * r;
+    }
   });
-  return { left, right, frames, rms: samples ? Math.sqrt(square / samples) : 0, startFrame: selected[0]?.frame ?? null };
+  return {
+    left, right, frames,
+    rms: frames ? Math.sqrt((leftSquare + rightSquare) / (frames * 2)) : 0,
+    leftRms: frames ? Math.sqrt(leftSquare / frames) : 0,
+    rightRms: frames ? Math.sqrt(rightSquare / frames) : 0,
+    nonFiniteCount,
+    startFrame: selected[0]?.frame ?? null,
+  };
 }
 
 function alignedDifference(reference: PlanarPcm, candidate: PlanarPcm, offsetFrames: number) {
@@ -141,10 +166,16 @@ function summarizeMixerTiming(events: ReturnType<typeof getNativeVst3MixerEffect
   const stopCancellationWindowMs = VST3_FX_BLOCK_FRAMES * 1000 / sampleRate + 2;
   const nativeCancelledAtStopRequestIds = new Set<string>();
   for (const [requestId, timing] of allMain) {
+    if (timing.error !== 'VST3 instance cancelled' || !stopAcks.has(requestId)) continue;
     const start = allBridgeStarts.get(requestId);
-    const ageAtStopMs = stopRequestedAtRendererMs - Number(start?.bridgeCallStartedAt);
-    if (timing.error === 'VST3 instance cancelled' && Number.isFinite(ageAtStopMs) &&
-        ageAtStopMs >= 0 && ageAtStopMs <= stopCancellationWindowMs && stopAcks.has(requestId)) {
+    // Live-port blocks travel directly between AudioWorklet and Electron main,
+    // so they never emit renderer-bridge-call-start; stop-ack already fences them.
+    if (!start) {
+      nativeCancelledAtStopRequestIds.add(requestId);
+      continue;
+    }
+    const ageAtStopMs = stopRequestedAtRendererMs - Number(start.bridgeCallStartedAt);
+    if (Number.isFinite(ageAtStopMs) && ageAtStopMs >= 0 && ageAtStopMs <= stopCancellationWindowMs) {
       nativeCancelledAtStopRequestIds.add(requestId);
     }
   }
@@ -196,7 +227,7 @@ function summarizeMixerTiming(events: ReturnType<typeof getNativeVst3MixerEffect
     const bridgeStart = events.find(event => event.event === 'renderer-bridge-call-start' && event.requestId === requestId);
     const phase = Number(submit.rendererAtMs) < captureStartRendererMs ? 'before-capture' :
       Number(submit.rendererAtMs) >= captureEndRendererMs ? 'stop-boundary' : 'measured-capture';
-    const complete = mainRecord && !mainRecord.error && preloadRecord && rendererResponse && result?.accepted === true;
+    const complete = mainRecord && !mainRecord.error && result?.accepted === true;
     return {
       requestId, sequence: submit.sequence, trackId: submit.trackId, slotId: submit.slotId, phase,
       rendererSubmitAtMs: submit.rendererAtMs, inputBlockStartContextFrame: submit.inputBlockStartContextFrame,
@@ -474,6 +505,7 @@ async function captureLiveMixerRun(instance: typeof audioEngine, channels: Chann
   const controlGain = context.createGain();
   targetGain.gain.value = 1;
   controlGain.gain.value = controlBuffer ? 1 : 0.1;
+  await resetAllNativeVst3SmokeTiming();
   await instance.play(channels, [], 'pat', undefined, mixer, 16);
   await context.resume();
   for (const trackId of options.includeMaster ? [0, 1, 2] : [1, 2]) taps.set(trackId, await attachMixerCapture(instance, trackId));
@@ -499,6 +531,7 @@ async function captureLiveMixerRun(instance: typeof audioEngine, channels: Chann
   const startedAt = performance.now();
   const startedContextFrame = sourceStartContextFrame + Math.round(0.25 * context.sampleRate);
   let bypassUpdateAppliedContextFrame: number | null = null;
+  let rendererStall: { startedAtMs: number; endedAtMs: number; durationMs: number; startFrame: number; endFrame: number } | null = null;
   const bypassUpdate = options.bypassMixerTracks && options.bypassMixerAfterMs !== undefined
     ? new Promise<void>(resolve => setTimeout(() => {
       instance.synchronizePlaybackState({ mixerTracks: options.bypassMixerTracks! });
@@ -506,7 +539,20 @@ async function captureLiveMixerRun(instance: typeof audioEngine, channels: Chann
       resolve();
     }, options.bypassMixerAfterMs))
     : Promise.resolve();
-  await Promise.all([new Promise<void>(resolve => setTimeout(resolve, durationMs)), bypassUpdate]);
+  const stallRenderer = options.stallRendererMs
+    ? new Promise<void>(resolve => setTimeout(() => {
+      const startedAtMs = performance.now();
+      const startFrame = Math.round(context.currentTime * context.sampleRate);
+      const until = startedAtMs + options.stallRendererMs!;
+      while (performance.now() < until) { /* test-only renderer UI-thread stall */ }
+      rendererStall = {
+        startedAtMs, endedAtMs: performance.now(), durationMs: performance.now() - startedAtMs,
+        startFrame, endFrame: Math.round(context.currentTime * context.sampleRate),
+      };
+      resolve();
+    }, options.stallRendererAfterMs ?? 280))
+    : Promise.resolve();
+  await Promise.all([new Promise<void>(resolve => setTimeout(resolve, durationMs)), bypassUpdate, stallRenderer]);
   const stoppedAt = performance.now();
   const stoppedContextFrame = Math.round(context.currentTime * context.sampleRate);
   const playbackActiveAtEnd = instance.isPlaybackActive();
@@ -555,7 +601,154 @@ async function captureLiveMixerRun(instance: typeof audioEngine, channels: Chann
     nativeStagePcm,
     trackRms: Object.fromEntries([...pcm].map(([trackId, audio]) => [trackId, audio.rms])),
     nativeStageRms: Object.fromEntries([...nativeStagePcm].map(([slotId, audio]) => [slotId, audio.rms])),
-    diagnostics: getVst3MixerEffectDiagnostics(), timing, runtimeEvents, ipc };
+    diagnostics: getVst3MixerEffectDiagnostics(), timing, runtimeEvents, ipc, rendererStall };
+}
+
+function summarizeStageStereoPcm(run: any) {
+  return Object.fromEntries([...(run.nativeStagePcm as Map<string, PlanarPcm>)].map(([slotId, pcm]) => [slotId, {
+    frames: pcm.frames,
+    rms: pcm.rms,
+    leftRms: pcm.leftRms,
+    rightRms: pcm.rightRms,
+    nonFiniteCount: pcm.nonFiniteCount,
+  }]));
+}
+
+function assertTwoInsertStageStereoSignal(run: any, expectedSlotIds: readonly [string, string], label: string) {
+  const stageSummary = summarizeStageStereoPcm(run);
+  for (const slotId of expectedSlotIds) {
+    const stage = stageSummary[slotId];
+    if (!stage || stage.frames < VST3_FX_BLOCK_FRAMES * 4 || stage.nonFiniteCount !== 0 ||
+        stage.rms <= 0.01 || stage.leftRms <= 0.01 || stage.rightRms <= 0.01) {
+      throw new Error(`${label}: insert ${slotId} did not emit valid finite stereo signal on both channels: ${JSON.stringify(stageSummary)}`);
+    }
+  }
+  return stageSummary;
+}
+
+function assertRendererStallSurvived(run: any, label: string) {
+  const stall = run.rendererStall;
+  const fail = (reason: string) => {
+    throw new Error(`${label}: ${reason}; stall=${JSON.stringify(stall)}; missedDeadlines=${run.timing?.missedDeadlines}; playbackActiveAtEnd=${run.playbackActiveAtEnd}`);
+  };
+  if (!stall) fail('test-only renderer stall did not run');
+  if (stall.durationMs < 28) fail(`renderer stall lasted ${stall.durationMs} ms, expected at least 28 ms`);
+  const advancedFrames = stall.endFrame - stall.startFrame;
+  if (advancedFrames < Math.round(0.02 * run.sampleRate)) {
+    fail(`AudioContext clock advanced only ${advancedFrames} frames during the renderer stall`);
+  }
+  const events = run.runtimeEvents as Array<Record<string, any>>;
+  const overlapping = events.filter(event => event.event === 'worklet-submit' &&
+    Number(event.submittedContextFrame) >= stall.startFrame && Number(event.submittedContextFrame) <= stall.endFrame);
+  const slots = new Set(overlapping.map(event => event.slotId));
+  if (slots.size < 2) {
+    fail(`renderer stall did not overlap both native inserts; overlappingSlots=${JSON.stringify([...slots])} overlappingSubmits=${overlapping.length}`);
+  }
+  for (const submit of overlapping) {
+    const accepted = events.find(event => event.event === 'worklet-result' && event.requestId === submit.requestId && event.accepted === true);
+    if (!accepted) fail(`live-port result for ${submit.requestId} was not accepted after overlapping the renderer stall`);
+  }
+  if (!run.playbackActiveAtEnd) fail('production Mixer transport stopped during the renderer stall');
+  if (run.timing.missedDeadlines !== 0) fail('production Mixer missed a deadline during the renderer stall');
+}
+
+function rendererStallRegressionEvidence(run: any) {
+  const stall = run.rendererStall;
+  const events = (run.runtimeEvents as Array<Record<string, any>>) ?? [];
+  const overlapping = events.filter(event => event.event === 'worklet-submit' &&
+    Number(event.submittedContextFrame) >= stall.startFrame && Number(event.submittedContextFrame) <= stall.endFrame);
+  const accepted = overlapping.filter(submit => events.some(event =>
+    event.event === 'worklet-result' && event.requestId === submit.requestId && event.accepted === true));
+  return {
+    durationMs: stall.durationMs,
+    startFrame: stall.startFrame,
+    endFrame: stall.endFrame,
+    overlappingInserts: [...new Set(overlapping.map(event => event.slotId))],
+    overlappingSequences: overlapping.map(event => ({ slotId: event.slotId, sequence: event.sequence, requestId: event.requestId })),
+    acceptedResultCount: accepted.length,
+    missedDeadlines: run.timing.missedDeadlines,
+    playbackActiveAtEnd: run.playbackActiveAtEnd === true,
+  };
+}
+
+/** Packaged Mixer onset fixture: disable MDA RezFilter LFO/envelope and pin a positive cutoff. */
+const PACKAGED_REZFILTER_FIXTURE_PARAMETERS: ReadonlyArray<{ id: number; value: number }> = [
+  { id: 0, value: 0.8 },  // fixed cutoff above zero
+  { id: 1, value: 0.25 }, // stable, modest resonance
+  { id: 3, value: 0.5 },  // disable envelope-to-filter modulation
+  { id: 6, value: 0.5 },  // disable LFO-to-filter modulation
+  { id: 8, value: 0 },    // disable trigger mode
+  { id: 9, value: 1 },    // keep maximum cutoff above the fixed setting
+];
+
+function createPlanarTone(frames: number, sampleRate: number): Float32Array {
+  const pcm = new Float32Array(frames * 2);
+  let state = 0x6d2b79f5;
+  for (let i = 0; i < frames; i++) {
+    state ^= state << 13; state ^= state >>> 17; state ^= state << 5;
+    const sample = ((state >>> 0) / 0x80000000 - 1) * 0.1;
+    pcm[i] = sample;
+    pcm[frames + i] = sample;
+  }
+  void sampleRate;
+  return pcm;
+}
+
+function planarStereoMetrics(samples: Float32Array) {
+  const frames = samples.length / 2;
+  let leftSq = 0, rightSq = 0, nonFiniteCount = 0;
+  for (let i = 0; i < frames; i++) {
+    const l = samples[i]!, r = samples[frames + i]!;
+    if (!Number.isFinite(l)) nonFiniteCount++; else leftSq += l * l;
+    if (!Number.isFinite(r)) nonFiniteCount++; else rightSq += r * r;
+  }
+  return {
+    frames,
+    rms: frames ? Math.sqrt((leftSq + rightSq) / (frames * 2)) : 0,
+    leftRms: frames ? Math.sqrt(leftSq / frames) : 0,
+    rightRms: frames ? Math.sqrt(rightSq / frames) : 0,
+    nonFiniteCount,
+  };
+}
+
+function withOverlayParameters(inspected: Vst3Effect, overlay: ReadonlyArray<{ id: number; value: number }>): Vst3Effect {
+  const map = new Map<number, { id: number; value: number }>(
+    inspected.state.parameters.map(parameter => [parameter.id, { id: parameter.id, value: parameter.value }]));
+  for (const parameter of overlay) map.set(parameter.id, { id: parameter.id, value: parameter.value });
+  return { ...inspected, state: { ...inspected.state, parameters: [...map.values()] } };
+}
+
+async function assertSingleShotTwoInsertRestore(
+  bridge: Vst3Bridge, delayEffect: Vst3Effect, rezFilterEffect: Vst3Effect, label: string,
+) {
+  const sampleRate = 48000;
+  const silence = new Float32Array(VST3_FX_BLOCK_FRAMES * 2);
+  const noise = createPlanarTone(VST3_FX_BLOCK_FRAMES, sampleRate);
+  const delayOpened = await bridge.open(delayEffect, sampleRate, 'realtime', 'effect');
+  const filterOpened = await bridge.open(rezFilterEffect, sampleRate, 'realtime', 'effect');
+  try {
+    for (let s = 0; s < 2; s++) {
+      const preRoll = planarStereoMetrics(await bridge.processAudio(filterOpened.id, VST3_FX_BLOCK_FRAMES, silence, 120, []));
+      if (preRoll.nonFiniteCount !== 0 || preRoll.rms !== 0) {
+        throw new Error(`${label}: RezFilter silent pre-roll produced invalid output: ${JSON.stringify(preRoll)}`);
+      }
+    }
+    for (let block = 0; block < 8; block++) {
+      const delayed = await bridge.processAudio(delayOpened.id, VST3_FX_BLOCK_FRAMES, noise, 120, []);
+      const delayMetrics = planarStereoMetrics(delayed);
+      if (delayMetrics.nonFiniteCount !== 0 || delayMetrics.leftRms <= 0.01 || delayMetrics.rightRms <= 0.01) {
+        throw new Error(`${label}: Delay single-shot block ${block} was silent/invalid: ${JSON.stringify(delayMetrics)}`);
+      }
+      const filtered = await bridge.processAudio(filterOpened.id, VST3_FX_BLOCK_FRAMES, delayed, 120, []);
+      const filterMetrics = planarStereoMetrics(filtered);
+      if (filterMetrics.nonFiniteCount !== 0 || filterMetrics.leftRms <= 0.01 || filterMetrics.rightRms <= 0.01) {
+        throw new Error(`${label}: RezFilter single-shot block ${block} was silent/invalid with empty live parameter list: ${JSON.stringify({ delayMetrics, filterMetrics })}`);
+      }
+    }
+  } finally {
+    await bridge.close(delayOpened.id);
+    await bridge.close(filterOpened.id);
+  }
 }
 
 function assertPackagedMixerRun(run: any, label: string) {
@@ -587,48 +780,47 @@ function assertPackagedMixerRun(run: any, label: string) {
   }
 }
 
-async function runPackagedMixerAcceptance(instance: typeof audioEngine) {
+async function runPackagedMixerAcceptance(
+  instance: typeof audioEngine,
+  options: { reopening?: boolean; restoredTwoInsertSlots?: FxSlot[] } = {},
+) {
   const desktopApi = (globalThis as any).desktopApp;
   if (desktopApi?.smokeTest !== true || typeof desktopApi?.vst3?.smokeTimingSnapshot !== 'function') {
     return { status: 'not-run', reason: 'Mixer production IPC/timing acceptance is restricted to the explicit packaged smoke-test launch.' };
   }
-  resetNativeVst3MixerEffectSmokeTiming();
+  await resetAllNativeVst3SmokeTiming();
   const bridge = getVst3Bridge();
   if (!bridge) throw new Error('Packaged production VST3 preload bridge missing for Mixer acceptance');
   const context = instance.getContext() as AudioContext;
   const discovered = await bridge.discoverEffects();
-  const delayIdentity = discovered.plugins.find(plugin => plugin.name === 'mda Delay');
-  const filterIdentity = discovered.plugins.find(plugin => plugin.name === 'mda RezFilter');
+  const delayIdentity: Vst3Identity | undefined = discovered.plugins.find(plugin => plugin.name === 'mda Delay');
+  const filterIdentity: Vst3Identity | undefined = discovered.plugins.find(plugin => plugin.name === 'mda RezFilter');
   if (!delayIdentity || !filterIdentity) throw new Error(`Redistributable MDA Mixer fixtures unavailable through packaged production IPC: ${JSON.stringify(discovered.errors)}`);
   const delay = await bridge.inspectEffect(delayIdentity);
-  const inspectedRezFilter = await bridge.inspectEffect(filterIdentity);
-  // The pinned mda RezFilter leaves its LFO phase as processing-instance state.
-  // Its default envelope/LFO modulation can hold the cutoff closed for a
-  // nondeterministic startup interval, which is not native bridge latency. For
-  // onset/ordering acceptance only, disable both modulators and use a fixed,
-  // positive cutoff so the real effect is audibly responsive from its first
-  // processed block. This is a test-fixture state, not a change to user audio.
-  const rezFilterLatencyParameters = [
-    { id: 0, value: 0.8 },  // fixed cutoff above zero
-    { id: 1, value: 0.25 }, // stable, modest resonance
-    { id: 3, value: 0.5 },  // disable envelope-to-filter modulation
-    { id: 6, value: 0.5 },  // disable LFO-to-filter modulation
-    { id: 8, value: 0 },    // disable trigger mode
-    { id: 9, value: 1 },    // keep maximum cutoff above the fixed setting
-  ];
-  const rezFilterParameterMap = new Map<number, { id: number; value: number }>(
-    inspectedRezFilter.state.parameters.map(parameter => [parameter.id, parameter]));
-  for (const parameter of rezFilterLatencyParameters) rezFilterParameterMap.set(parameter.id, parameter);
-  const rezFilter = await bridge.inspectEffect(filterIdentity, {
-    ...inspectedRezFilter.state, parameters: [...rezFilterParameterMap.values()],
+  const rezFilterLatencyParameters = PACKAGED_REZFILTER_FIXTURE_PARAMETERS.map(
+    parameter => ({ id: parameter.id, value: parameter.value }));
+  const inspectedRezFilter = await bridge.inspectEffect(filterIdentity, {
+    schema: 1, classId: filterIdentity.classId, parameters: rezFilterLatencyParameters,
   });
+  const rezFilter = withOverlayParameters(inspectedRezFilter, rezFilterLatencyParameters);
   const delayParameters = await bridge.describeEffect(delay);
   const feedbackMix = delayParameters.parameters.find(parameter => parameter.id === 4 && parameter.name === 'Fb Mix');
   if (!feedbackMix) throw new Error('The pinned mda Delay fixture no longer exposes the verified Fb Mix bypass parameter id 4');
-  const bypassDelay = await bridge.inspectEffect(delayIdentity, {
+  const inspectedBypassDelay = await bridge.inspectEffect(delayIdentity, {
     ...delay.state,
     parameters: [...delay.state.parameters.filter(parameter => parameter.id !== feedbackMix.id), { id: feedbackMix.id, value: 0 }],
   });
+  const bypassDelay = withOverlayParameters(inspectedBypassDelay, [{ id: feedbackMix.id, value: 0 }]);
+  const inspectedPersistedDelay = await bridge.inspectEffect(delayIdentity, {
+    ...delay.state,
+    parameters: [...delay.state.parameters.filter(parameter => parameter.id !== feedbackMix.id), { id: feedbackMix.id, value: 0.25 }],
+  });
+  const persistedDelay = withOverlayParameters(inspectedPersistedDelay, [{ id: feedbackMix.id, value: 0.25 }]);
+
+  // Single-shot verification (no retry loops): restored Delay -> RezFilter must
+  // emit valid finite stereo PCM on every block after silent pipeline pre-roll.
+  await assertSingleShotTwoInsertRestore(bridge, bypassDelay, rezFilter, 'Single-shot Fb Mix=0 Delay → RezFilter');
+  await assertSingleShotTwoInsertRestore(bridge, persistedDelay, rezFilter, 'Single-shot Fb Mix=0.25 Delay → RezFilter');
 
   const channels: Channel[] = [];
   const tracks: MixerTrack[] = [0, 1, 2].map(id => ({ id, name: `Packaged smoke track ${id}`, color: '#fff',
@@ -641,8 +833,8 @@ async function runPackagedMixerAcceptance(instance: typeof audioEngine) {
   const reversed = withSlots([makeSlot('smoke-rezfilter', rezFilter), makeSlot('smoke-delay', delay)]);
   const delayOnly = withSlots([makeSlot('smoke-delay', delay)]);
   const delayBypassed = withSlots([makeSlot('smoke-delay-bypass', bypassDelay)]);
-  const run = async (mixer: MixerTrack[], label: string, options: MixerCaptureOptions = {}) => {
-    const result = await captureLiveMixerRun(instance, channels, mixer, options);
+  const run = async (mixer: MixerTrack[], label: string, runOptions: MixerCaptureOptions = {}) => {
+    const result = await captureLiveMixerRun(instance, channels, mixer, runOptions);
     if (mixer.some(track => track.fxSlots.some(slot => slot.enabled && slot.type === 'vst3'))) assertPackagedMixerRun(result, label);
     else {
       if (!result.playbackActiveAtEnd || result.timing.nativeServiceSessionCountAfterCleanup !== 0 ||
@@ -654,10 +846,72 @@ async function runPackagedMixerAcceptance(instance: typeof audioEngine) {
   };
 
   const orderA = await run(ordered, 'Mixer order Delay → RezFilter', { includeNativeStages: true });
+  const orderAStagePcm = assertTwoInsertStageStereoSignal(orderA, ['smoke-delay', 'smoke-rezfilter'], 'Mixer order Delay → RezFilter');
   const orderB = await run(reversed, 'Mixer order RezFilter → Delay', { includeNativeStages: true });
+  const orderBStagePcm = assertTwoInsertStageStereoSignal(orderB, ['smoke-rezfilter', 'smoke-delay'], 'Mixer order RezFilter → Delay');
   const delayProcessed = await run(delayOnly, 'Mixer processed Delay', { includeNativeStages: true });
   const delayPassThrough = await run(delayBypassed, 'Mixer native Delay Fb Mix=0 bypass', { includeNativeStages: true });
   const removed = await run(noEffects, 'Mixer effect removal/restart');
+
+  // Project-replacement cleanup: start active two-insert playback, then execute
+  // the production project-replacement teardown (stop + releaseNativeInstruments +
+  // synchronizePlaybackState with replacement empty Mixer) and verify 0 sessions remain.
+  await resetAllNativeVst3SmokeTiming();
+  await instance.play(channels, [], 'pat', undefined, ordered, 16);
+  await context.resume();
+  const replacementSource = context.createBufferSource();
+  replacementSource.buffer = createDeterministicMixerInput(context);
+  replacementSource.connect(instance.getOrCreateMixerChannel(1).input);
+  replacementSource.start(context.currentTime + 0.02);
+  await new Promise(resolve => setTimeout(resolve, 260));
+  const activeBeforeReplacement = instance.isPlaybackActive();
+  instance.stop();
+  replacementSource.stop(context.currentTime);
+  replacementSource.disconnect();
+  await instance.releaseNativeInstruments();
+  instance.synchronizePlaybackState({ mixerTracks: noEffects });
+  const replacementSnapshot = await desktopApi.vst3.smokeTimingSnapshot();
+  const sessionsAfterReplacement = replacementSnapshot?.main?.nativeServiceSessionCount ?? -1;
+  if (!activeBeforeReplacement || sessionsAfterReplacement !== 0) {
+    throw new Error(`Project replacement during active two-insert playback failed cleanup: activeBeforeReplacement=${activeBeforeReplacement}, sessionsAfterReplacement=${sessionsAfterReplacement}`);
+  }
+  const replacementCleanRun = await run(noEffects, 'Mixer post-project-replacement playback', { durationMs: 650 });
+
+  // Two-insert project save/reopen verification across separate Electron processes:
+  const defaultPersistedSlots: FxSlot[] = [
+    makeSlot('persisted-delay', persistedDelay),
+    makeSlot('persisted-rezfilter', rezFilter),
+  ];
+  let persistedTwoInsertSlots = defaultPersistedSlots;
+  if (options.reopening) {
+    const restored = options.restoredTwoInsertSlots;
+    if (!restored || restored.length !== 2 ||
+        restored[0]?.id !== 'persisted-delay' || restored[0]?.vst3Effect?.classId !== delay.classId ||
+        restored[1]?.id !== 'persisted-rezfilter' || restored[1]?.vst3Effect?.classId !== rezFilter.classId) {
+      throw new Error(`Two-insert Mixer VST3 chain did not survive IndexedDB application restart: ${JSON.stringify(restored?.map(s => ({ id: s.id, classId: s.vst3Effect?.classId })))}`);
+    }
+    const restoredFbMix = restored[0].vst3Effect.state.parameters.find(p => p.id === feedbackMix.id)?.value;
+    if (restoredFbMix === undefined || Math.abs(restoredFbMix - 0.25) > 1e-6 || !restored[0].vst3Effect.state.component) {
+      throw new Error(`Reopened Delay insert lost edited parameter or component state: fbMix=${restoredFbMix}`);
+    }
+    for (const expected of rezFilterLatencyParameters) {
+      const actual = restored[1].vst3Effect.state.parameters.find(p => p.id === expected.id)?.value;
+      if (actual === undefined || Math.abs(actual - expected.value) > 1e-6 || !restored[1].vst3Effect.state.component) {
+        throw new Error(`Reopened RezFilter insert lost parameter ${expected.id}=${expected.value} or component state: actual=${actual}`);
+      }
+    }
+    persistedTwoInsertSlots = restored;
+  }
+  const persistedTwoInsertsRun = await run(
+    withSlots(persistedTwoInsertSlots),
+    options.reopening ? 'Mixer reopened two-insert chain from IndexedDB' : 'Mixer saved two-insert chain',
+    { durationMs: 1050, includeNativeStages: true },
+  );
+  const persistedStagePcm = assertTwoInsertStageStereoSignal(
+    persistedTwoInsertsRun,
+    ['persisted-delay', 'persisted-rezfilter'],
+    options.reopening ? 'Mixer reopened two-insert chain' : 'Mixer saved two-insert chain',
+  );
 
   // Known-onset stereo buffers exercise the real per-track → routed master
   // path. The no-insert, one-insert, and two-insert cases have the same source
@@ -670,6 +924,15 @@ async function runPackagedMixerAcceptance(instance: typeof audioEngine) {
   const zeroInsertAlignment = await run(noEffects, 'Mixer onset alignment zero inserts', alignmentOptions());
   const oneInsertAlignment = await run(oneNativeInsert, 'Mixer onset alignment one insert', alignmentOptions());
   const twoInsertAlignment = await run(twoNativeInserts, 'Mixer onset alignment two inserts', alignmentOptions());
+  const twoInsertAlignmentStagePcm = assertTwoInsertStageStereoSignal(
+    twoInsertAlignment, ['latency-two-delay', 'latency-two-filter'], 'Mixer onset alignment two inserts');
+  const stalledTwoInserts = await run(twoNativeInserts, 'Mixer renderer-stall two inserts', {
+    ...alignmentOptions(), stallRendererMs: 30, stallRendererAfterMs: 280,
+  });
+  assertRendererStallSurvived(stalledTwoInserts, 'Mixer renderer-stall two inserts');
+  const stalledStagePcm = assertTwoInsertStageStereoSignal(
+    stalledTwoInserts, ['latency-two-delay', 'latency-two-filter'], 'Mixer renderer-stall two inserts');
+  const rendererStallRegression = rendererStallRegressionEvidence(stalledTwoInserts);
   const onsetFramesFor = (result: any) => Object.fromEntries([0, 1, 2].map(trackId => [trackId,
     firstCapturedOnsetFrame(result.captures.get(trackId), result.sourceStartContextFrame,
       result.sourceStartContextFrame + result.sampleRate)]));
@@ -776,10 +1039,18 @@ async function runPackagedMixerAcceptance(instance: typeof audioEngine) {
   if (Math.abs(bypassVsRemoved.normalizedLagFrames + VST3_FX_PIPELINE_FRAMES) > 256) {
     throw new Error(`Removing the effect did not remove exactly its declared ${VST3_FX_PIPELINE_FRAMES}-frame pipeline (after run-start normalization): ${JSON.stringify(bypassVsRemoved)}; bounded timing evidence=${acceptanceTimingEvidence}`);
   }
-  const runs = { orderA, orderB, delayProcessed, delayPassThrough, removed };
+  const runs = { orderA, orderB, delayProcessed, delayPassThrough, removed, persistedTwoInserts: persistedTwoInsertsRun };
   for (const [label, result] of Object.entries(runs)) {
     if (label !== 'removed') assertPackagedMixerRun(result, label);
   }
+  const slotChecksumBytes = new TextEncoder().encode(JSON.stringify(persistedTwoInsertSlots.map(s => ({
+    id: s.id, type: s.type, name: s.name, enabled: s.enabled, mix: s.mix,
+    classId: s.vst3Effect?.classId, parameters: s.vst3Effect?.state.parameters,
+    hasComponent: Boolean(s.vst3Effect?.state.component),
+  }))));
+  let slotDigest = 2166136261;
+  for (const byte of slotChecksumBytes) slotDigest = Math.imul(slotDigest ^ byte, 16777619) >>> 0;
+  const persistedTwoInsertStateChecksum = slotDigest.toString(16).padStart(8, '0');
   return {
     status: 'passed', sampleRate: orderA.sampleRate, blockFrames: VST3_FX_BLOCK_FRAMES,
     blockPeriodMs: VST3_FX_BLOCK_FRAMES * 1000 / orderA.sampleRate,
@@ -790,6 +1061,32 @@ async function runPackagedMixerAcceptance(instance: typeof audioEngine) {
     latencyFixture: { plugin: rezFilter.name, parameters: rezFilterLatencyParameters,
       reason: 'LFO/envelope modulation disabled and cutoff fixed positive so onset timing measures the bridge pipeline, not variable plugin startup silence.' },
     latencyAlignmentRegression: alignmentRows,
+    rendererStallRegression,
+    twoInsertPcmEvidence: {
+      orderDelayThenRezFilter: orderAStagePcm,
+      orderRezFilterThenDelay: orderBStagePcm,
+      onsetAlignmentTwoInserts: twoInsertAlignmentStagePcm,
+      rendererStallTwoInserts: stalledStagePcm,
+    },
+    projectReplacementCleanup: {
+      activeBeforeReplacement,
+      nativeServiceSessionCountAfterReplacement: sessionsAfterReplacement,
+      postReplacementTrack1Rms: replacementCleanRun.trackRms['1'],
+      postReplacementSettledTailRms: replacementCleanRun.tailRms['1']?.settled ?? null,
+    },
+    persistedTwoInsertStateChecksum,
+    twoInsertSaveReopen: {
+      restoredFromIndexedDb: Boolean(options.reopening),
+      slots: persistedTwoInsertSlots.map(s => ({
+        id: s.id, name: s.name, classId: s.vst3Effect?.classId,
+        parameterCount: s.vst3Effect?.state.parameters.length ?? 0,
+        hasComponentState: Boolean(s.vst3Effect?.state.component),
+      })),
+      stagePcm: persistedStagePcm,
+      track1Rms: persistedTwoInsertsRun.trackRms['1'],
+      playbackActiveAtEnd: persistedTwoInsertsRun.playbackActiveAtEnd === true,
+    },
+    persistedTwoInsertSlotsForSave: options.reopening ? undefined : persistedTwoInsertSlots,
     priorPlaywrightBridgeReference: { approximatelyMs: 28, measurement: 'test-only page.exposeFunction bridge; separate from this production IPC/preload/helper measurement' },
     orderDifferenceRms: orderDifference.rmsDifference, orderOffsetFrames: orderDifference.normalizedLagFrames,
     controlTrackRmsDifference: controlRmsDifference, controlTrackPcmDifferenceRms: controlDifference.rmsDifference,
@@ -802,12 +1099,15 @@ async function runPackagedMixerAcceptance(instance: typeof audioEngine) {
     bypassVsRemovedLagAfterRunStartNormalizationFrames: bypassVsRemoved.normalizedLagFrames,
     targetTrackRms: { processed: delayProcessed.trackRms['1'], bypass: delayPassThrough.trackRms['1'], removed: removed.trackRms['1'] },
     settledTailRms: Object.fromEntries(Object.entries(runs).map(([label, result]) => [label, result.tailRms])),
-    timing: { orderA: orderA.timing, orderB: orderB.timing, delayProcessed: delayProcessed.timing, delayBypassed: delayPassThrough.timing,
-      cleanupAfterRemoval: removed.timing },
+    timing: {
+      orderA: orderA.timing, orderB: orderB.timing, delayProcessed: delayProcessed.timing, delayBypassed: delayPassThrough.timing,
+      cleanupAfterRemoval: removed.timing, twoInsertAlignment: twoInsertAlignment.timing,
+      rendererStallTwoInserts: stalledTwoInserts.timing, persistedTwoInserts: persistedTwoInsertsRun.timing,
+    },
     timingSamples: { orderA: correlatedTimingSamples(orderA), orderB: correlatedTimingSamples(orderB),
       delayProcessed: correlatedTimingSamples(delayProcessed), delayBypassed: correlatedTimingSamples(delayPassThrough),
       cleanupAfterRemoval: correlatedTimingSamples(removed) },
-    proof: 'Packaged Electron production AudioWorklet → authorized main IPC → native VST3 helper → production preload → worklet PCM, captured from per-track and master production Mixer analysers. Deterministic broadband stereo target input preserves the mono-pan-law regression fix. A separate non-periodic known-onset stereo stimulus verifies zero/one/two-insert alignment from actual captured frame positions, with no assertion-side offsets; the master PCM is checked against the exact-frame sum of both track taps. A phase-reset control signal still checks isolation; no exposeFunction processing bridge.'
+    proof: 'Packaged Electron production AudioWorklet → dedicated MessagePortMain live audio port → native VST3 helper → worklet PCM, captured from per-track, per-insert, and master production Mixer taps. Deterministic broadband stereo target input preserves the mono-pan-law regression fix. A separate non-periodic known-onset stereo stimulus verifies zero/one/two-insert alignment from actual captured frame positions, with no assertion-side offsets; the master PCM is checked against the exact-frame sum of both track taps. Includes >28 ms renderer UI-thread stall survival, active project-replacement cleanup, and two-insert IndexedDB save/reopen across separate OS processes.'
   };
 }
 
@@ -830,6 +1130,7 @@ export async function runDesktopVst3Smoke() {
   const mixer = [0, 1].map(id => ({ id, name: 'Smoke insert', color: '#fff', volume: 1, pan: 0, mute: false, solo: false, fxSlots: [], peakL: 0, peakR: 0 })) as MixerTrack[];
   const clip: PlaylistClip = { id: 'native-smoke-clip', trackIndex: 0, startBar: 0, lengthBars: 1, type: 'pattern', channelId: channel.id, name: 'Native smoke', color: '#fff' };
   let savedAutomation: PlaylistClip | undefined;
+  let restoredTwoInsertSlots: FxSlot[] | undefined;
   const reopening = (globalThis as unknown as { desktopApp?: { smokeReopen?: boolean } }).desktopApp?.smokeReopen === true;
   if (reopening) {
     const saved = await restorePersistedProjectState(instance, createDefaultProjectState());
@@ -838,6 +1139,7 @@ export async function runDesktopVst3Smoke() {
     savedAutomation = saved.state.playlistClips.find(c => c.automationTarget?.type === 'vst3_param');
     if (!savedAutomation) throw new Error('Native automation lane did not survive application restart');
     if (channel.vst3?.classId !== plugin.classId) throw new Error('Reopened project selected the wrong native class');
+    restoredTwoInsertSlots = saved.state.mixerTracks.find(track => track.id === 2)?.fxSlots;
   }
   function digest(bytes: Uint8Array): string {
     let value = 2166136261;
@@ -900,11 +1202,20 @@ export async function runDesktopVst3Smoke() {
     }
     const errors = getVst3Diagnostics().filter(item => item.channelId === channel.id && !item.message.startsWith('VST3 ready') && !item.message.startsWith('VST3 active'));
     if (livePeak < 0.001 || errors.length) throw new Error(`Packaged live graph failed: peak=${livePeak}, diagnostics=${JSON.stringify(errors)}`);
-    const mixerEffects = await runPackagedMixerAcceptance(instance);
+    const mixerResult: any = await runPackagedMixerAcceptance(instance, { reopening, restoredTwoInsertSlots });
+    const { persistedTwoInsertSlotsForSave, ...mixerEffects } = mixerResult;
     if (reopening && !document.body.textContent?.includes(channel.name)) throw new Error('The actual Apex application UI did not restore the saved native channel');
     if (!reopening) {
       const project = createDefaultProjectState();
-      await persistProjectState({ ...project, meta: { ...project.meta, bpm: 120 }, selectedChannelId: channel.id, channels: [channel], mixerTracks: mixer, playlistClips: [clip, automation] });
+      const persistedMixerTracks: MixerTrack[] = [
+        ...mixer,
+        { id: 2, name: 'Smoke two-insert FX track', color: '#fff', volume: 1, pan: 0, mute: false, solo: false,
+          fxSlots: persistedTwoInsertSlotsForSave ?? [], peakL: 0, peakR: 0 },
+      ];
+      await persistProjectState({
+        ...project, meta: { ...project.meta, bpm: 120 }, selectedChannelId: channel.id,
+        channels: [channel], mixerTracks: persistedMixerTracks, playlistClips: [clip, automation],
+      });
     }
     return { automationExportDifferenceRms, automationPcmChecksum, automationStateChecksum, parameterValue: .05, parameterExportDifferenceRms, plugin: plugin.name, classId: plugin.classId, onsetFrame, rms, livePeak, stateReopenEqual: true, missingRejected: rejected,
       applicationStage: reopening ? 'reopened-from-indexeddb-after-process-exit' : 'saved-to-production-indexeddb',
