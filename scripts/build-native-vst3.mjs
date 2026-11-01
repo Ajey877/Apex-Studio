@@ -11,7 +11,7 @@ function run(command, args) {
     // Make the actual compiler/configuration error visible in the check API as
     // well as downloadable logs (which may be inaccessible in restricted CI).
     if (process.env.GITHUB_ACTIONS) {
-      const tail = `${result.stdout ?? ''}\n${result.stderr ?? ''}`.slice(-12000)
+      const tail = `${result.stdout ?? ''}\n${result.stderr ?? ''}`.slice(-3500)
         .replaceAll('%', '%25').replaceAll('\r', '%0D').replaceAll('\n', '%0A');
       console.error(`::error title=Native VST3 build failed::${tail}`);
     }
