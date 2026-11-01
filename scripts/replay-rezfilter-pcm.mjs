@@ -160,7 +160,13 @@ async function replaySession(sessionId, inputPath, expectedOutPath, expected) {
     };
   }
   if (!restored.componentHex) {
-    return { sessionId, label: expected?.label ?? null, phase, error: 'serialized component state missing; parameter-only replay is not an exact reproduction' };
+    if (!args['allow-reconstructed']) {
+      return {
+        sessionId, label: expected?.label ?? null, phase,
+        exactOriginalStateReplayAvailable: false,
+        error: 'serialized component state missing; refusing to call a parameter-only run an exact original-state replay',
+      };
+    }
   }
   const samples = new Float32Array(input.buffer, input.byteOffset, Math.floor(input.byteLength / 4));
   const blockFloats = framesPerBlock * 2;
@@ -178,7 +184,7 @@ async function replaySession(sessionId, inputPath, expectedOutPath, expected) {
       sampleRate, mode: 'realtime', kind: 'effect', diagnosticSessionId: sessionId,
       state: {
         schema: 1, classId: identity.classId, parameters: overlay,
-        component: restored.componentHex,
+        ...(restored.componentHex ? { component: restored.componentHex } : {}),
         ...(restored.controllerHex ? { controller: restored.controllerHex } : {}),
       },
     });
@@ -215,6 +221,8 @@ async function replaySession(sessionId, inputPath, expectedOutPath, expected) {
     helperPid,
     restored,
     phase,
+    exactOriginalStateReplay: Boolean(restored.componentHex) && !args['allow-reconstructed'],
+    reconstructedDefaultState: !restored.componentHex && Boolean(args['allow-reconstructed']),
   };
 }
 

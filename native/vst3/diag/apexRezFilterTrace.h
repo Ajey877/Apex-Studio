@@ -63,7 +63,7 @@ struct ApexRezInst {
   uint32_t fFirst_bits, fLast_bits, fMinFinite_bits, fMaxFinite_bits, fNegExample_bits;
   bool haveF, haveFinite;
   ApexRezChan inL, inR, outL, outR;
-  ApexRezTraceRec recs[APEX_REZ_TRACE_CAP];
+  ApexRezTraceRec* recs;
 };
 
 static ApexRezInst gApexRezInst[APEX_REZ_INST_CAP];
@@ -150,31 +150,34 @@ inline void apexRezCopyEnv(char* dest, size_t destSize, const char* key) {
     std::strncpy(dest, value, destSize - 1);
 }
 
+inline void apexRezWriteSelfTest(uint32_t pid) {
+  char err[192]{};
+  const bool ok = apexRezMeasurementSelfTest(err, sizeof(err));
+  const char* dir = std::getenv("APEX_REZFILTER_TRACE_DIR");
+  if (!dir || !dir[0]) return;
+  char path[1024];
+  std::snprintf(path, sizeof(path), "%s/pcm-selftest-pid-%u.json", dir, pid);
+  if (FILE* file = std::fopen(path, "w")) {
+    std::fprintf(file, "{\"ok\":%s,\"pid\":%u,\"error\":\"%s\"}\n", ok ? "true" : "false", pid, err);
+    std::fclose(file);
+  }
+}
+
 inline ApexRezInst* apexRezBind() {
   if (gApexRezCurrent >= 0 && gApexRezCurrent < APEX_REZ_INST_CAP && !gApexRezInst[gApexRezCurrent].flushed)
     return &gApexRezInst[gApexRezCurrent];
   for (int i = 0; i < APEX_REZ_INST_CAP; ++i) {
     if (gApexRezInst[i].gen == 0 || gApexRezInst[i].flushed) {
       ApexRezInst& inst = gApexRezInst[i];
+      if (inst.recs) { std::free(inst.recs); inst.recs = nullptr; }
       std::memset(&inst, 0, sizeof(inst));
+      inst.recs = static_cast<ApexRezTraceRec*>(std::calloc(static_cast<size_t>(APEX_REZ_TRACE_CAP), sizeof(ApexRezTraceRec)));
+      if (!inst.recs) return nullptr;
       inst.gen = gApexRezNextGen++;
       inst.pid = static_cast<uint32_t>(apex_getpid());
       apexRezCopyEnv(inst.sessionId, sizeof(inst.sessionId), "APEX_REZFILTER_SESSION_ID");
       apexRezCopyEnv(inst.classId, sizeof(inst.classId), "APEX_REZFILTER_CLASS_ID");
       gApexRezCurrent = i;
-      if (!gApexRezSelfTestRan) {
-        gApexRezSelfTestRan = true;
-        char err[192]{};
-        const bool ok = apexRezMeasurementSelfTest(err, sizeof(err));
-        if (const char* dir = std::getenv("APEX_REZFILTER_TRACE_DIR")) {
-          char path[1024];
-          std::snprintf(path, sizeof(path), "%s/pcm-selftest-pid-%u.json", dir, inst.pid);
-          if (FILE* file = std::fopen(path, "w")) {
-            std::fprintf(file, "{\"ok\":%s,\"pid\":%u,\"error\":\"%s\"}\n", ok ? "true" : "false", inst.pid, err);
-            std::fclose(file);
-          }
-        }
-      }
       return &inst;
     }
   }
@@ -237,10 +240,15 @@ inline void apexRezAccumIZero() {
   if (inst) ++inst->iZero;
 }
 
+inline float apexRezParamAt(const void* values, uint32_t count, uint32_t index) {
+  if (!values || index >= count) return 0.f;
+  return static_cast<float>(static_cast<const double*>(values)[index]);
+}
+
 #define APEX_REZ_SNAP(stage) apexRezTrace((stage), env, env2, phi, bufl, buf0, buf1, buf2, \
   fff, fenv, flfo, dphi, fq, fg, fmax, att, rel, tthr, tatt, ttrig, lfomode, \
-  static_cast<float>(params[0]), static_cast<float>(params[1]), static_cast<float>(params[3]), \
-  static_cast<float>(params[6]), static_cast<float>(params[8]), static_cast<float>(params[9]))
+  apexRezParamAt(params, numParams, 0), apexRezParamAt(params, numParams, 1), apexRezParamAt(params, numParams, 3), \
+  apexRezParamAt(params, numParams, 6), apexRezParamAt(params, numParams, 8), apexRezParamAt(params, numParams, 9))
 
 inline void apexRezTrace(const char* stage,
   float env, float env2, float phi, float bufl, float buf0, float buf1, float buf2,
@@ -249,7 +257,11 @@ inline void apexRezTrace(const char* stage,
   float p0, float p1, float p3, float p6, float p8, float p9)
 {
   ApexRezInst* inst = apexRezBind();
-  if (!inst) return;
+  if (!inst || !inst->recs) return;
+  if (!gApexRezSelfTestRan) {
+    gApexRezSelfTestRan = true;
+    apexRezWriteSelfTest(inst->pid);
+  }
   if (inst->count >= APEX_REZ_TRACE_CAP) { ++inst->dropped; return; }
   ApexRezTraceRec record{};
   std::strncpy(record.stage, stage, sizeof(record.stage) - 1);
@@ -292,8 +304,16 @@ inline void apexRezWriteChan(FILE* json, const char* name, const ApexRezChan& ch
 inline void apexRezTraceFlush() {
   ApexRezInst* inst = gApexRezCurrent >= 0 ? &gApexRezInst[gApexRezCurrent] : nullptr;
   if (!inst || inst->flushed) return;
+  if (!gApexRezSelfTestRan) {
+    gApexRezSelfTestRan = true;
+    apexRezWriteSelfTest(inst->pid);
+  }
   const char* dir = std::getenv("APEX_REZFILTER_TRACE_DIR");
-  if (!dir || !dir[0]) return;
+  if (!dir || !dir[0] || !inst->recs) {
+    inst->flushed = true;
+    if (inst->recs) { std::free(inst->recs); inst->recs = nullptr; }
+    return;
+  }
   char path[1024];
   std::snprintf(path, sizeof(path), "%s/rezfilter-pid-%u-gen-%llu-session-%s.json",
     dir, inst->pid, static_cast<unsigned long long>(inst->gen),
@@ -372,4 +392,6 @@ inline void apexRezTraceFlush() {
   std::fprintf(json, "]}\n");
   std::fclose(json);
   inst->flushed = true;
+  std::free(inst->recs);
+  inst->recs = nullptr;
 }

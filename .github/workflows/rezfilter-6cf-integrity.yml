@@ -1,8 +1,6 @@
 name: RezFilter 6C-F integrity, variants, and exact replay
 
 on:
-  push:
-    branches: [diag/packaged-rezfilter-parity]
   workflow_dispatch:
 
 permissions:

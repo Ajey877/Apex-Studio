@@ -1,5 +1,6 @@
 // Diagnostic-only: known nonzero stereo must be visible in host and plugin traces.
 import { createHash, randomUUID } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -20,6 +21,7 @@ rmSync(traceDir, { recursive: true, force: true });
 mkdirSync(traceDir, { recursive: true });
 process.env.APEX_REZFILTER_TRACE_DIR = traceDir;
 process.env.APEX_REZFILTER_SESSION_ID = sessionId;
+process.env.APEX_REZFILTER_CLASS_ID = identity.classId;
 
 const frames = 1024;
 const samples = new Float32Array(frames * 2);
@@ -49,6 +51,7 @@ const pluginTraces = readdirSync(traceDir).filter(name => name.startsWith('rezfi
 const selftests = readdirSync(traceDir).filter(name => name.startsWith('pcm-selftest-'));
 const hosts = readdirSync(traceDir).filter(name => name.startsWith('host-session-'));
 const errors = [];
+if (pluginTraces.length !== 1) errors.push(`expected exactly one internal trace JSON, found ${pluginTraces.length}`);
 if (leftNz === 0 || rightNz === 0) errors.push('control stimulus is not nonzero stereo');
 if (!hostTrace) errors.push('host processTrace missing');
 if (hostTrace && Number(hostTrace.inputLeft?.nonzero) !== leftNz) {
@@ -91,11 +94,32 @@ if (pluginTraces.length) {
   if (summed.inL === leftNz + rightNz && summed.inR === 0) {
     errors.push('plugin trace appears to have summed stereo before counting nonzero');
   }
+  const processRecs = recs.filter(rec => String(rec.stage || '').startsWith('process-'));
+  const expectedSlices = frames / 16;
+  if (pres.length && pres.length !== expectedSlices) {
+    errors.push(`process-pre count ${pres.length} != expected ${expectedSlices} 16-frame slices`);
+  }
+  for (const rec of processRecs) {
+    const recFrames = Number(rec.frames || 0);
+    const accounted = Number(rec.framesFFinite || 0) + Number(rec.framesFNan || 0) + Number(rec.framesFInf || 0);
+    if (recFrames && accounted !== recFrames) {
+      errors.push(`cutoff accounting ${rec.stage} block ${rec.block}: frames=${recFrames} != finite+nan+inf ${accounted}`);
+    }
+  }
 }
 if (!selftests.length) errors.push('plugin measurement self-test file missing');
 else {
   const self = JSON.parse(readFileSync(path.join(traceDir, selftests[0]), 'utf8'));
   if (!self.ok) errors.push(`plugin measurement self-test failed: ${self.error}`);
+}
+
+const integrityOut = outPath.replace(/\.json$/i, '') + '-integrity.json';
+const integrity = spawnSync(process.execPath, [
+  'scripts/check-rezfilter-trace-integrity.mjs', traceDir, integrityOut,
+  '--class-id', identity.classId, '--require-traces', 'true',
+], { encoding: 'utf8' });
+if (integrity.status !== 0) {
+  errors.push(`integrity checker failed: ${(integrity.stdout || '') + (integrity.stderr || '')}`.slice(0, 1500));
 }
 
 const report = {

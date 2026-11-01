@@ -16,7 +16,7 @@ if (missing.length) errors.push({ error: 'generated variant source missing', mis
 else {
   const text = Object.fromEntries(Object.entries(files).map(([id, path]) => [id, readFileSync(path, 'utf8')]));
   const hashes = Object.fromEntries(Object.entries(files).map(([id, path]) => [id, sha(path)]));
-  if (text.A.includes('env=0.f; env2=0.f; phi=0.f;')) errors.push({ error: 'variant A is not unmodified upstream MDA' });
+  if (text.A.includes('env=0.f; env2=0.f; phi=0.f;')) errors.push({ error: 'variant A must not include the candidate RezFilter env/phi fixture' });
   if (!text.B.includes('env=0.f; env2=0.f; phi=0.f; bufl=0.f; ttrig=0; tatt=0; buf0=0.f;')) {
     errors.push({ error: 'variant B is missing the candidate fixture assignment' });
   }
@@ -29,7 +29,15 @@ else {
   if (text.C.includes('apexRezAccumIn(')) errors.push({ error: 'variant C must not count summed stereo input' });
   if (hashes.A === hashes.B) errors.push({ error: 'A and B must differ; do not describe B as unmodified upstream' });
   if (hashes.B === hashes.C) errors.push({ error: 'B and C must differ by tracing only' });
-  const report = { hashes, sdkImmutable: !text.A.includes('apexRez'), errors };
+  const report = {
+    labels: {
+      A: 'upstream RezFilter processor with the common mdaBaseProcessor event-boundary fixture; not an entirely unmodified MDA bundle',
+      B: 'candidate RezFilter fixture initialization with the same common base correction; tracing disabled',
+      C: 'variant B plus read-only tracing',
+    },
+    hashes, rezFilterProcessorImmutableInA: !text.A.includes('apexRez') && !text.A.includes('env=0.f; env2=0.f;'),
+    errors,
+  };
   if (outPath) writeFileSync(outPath, JSON.stringify(report, null, 2));
   if (process.env.GITHUB_ACTIONS) {
     console.log(`::notice title=RezFilter generated source variants::${JSON.stringify(report).slice(0, 3900)}`);

@@ -1,0 +1,281 @@
+name: RezFilter 6C-G instrumentation bring-up
+
+on:
+  push:
+    branches: [diag/packaged-rezfilter-parity]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  package-app:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install --legacy-peer-deps
+      - run: npm run lint
+      - run: npm run native:vst3:build
+      - name: Package Windows dir without a second native rebuild
+        run: node scripts/stage-vst3-helper.mjs && npx vite build && npx electron-builder --win --x64 --dir --publish never
+      - name: Record frozen application/helper hashes
+        shell: bash
+        run: |
+          mkdir -p build/native-evidence
+          node scripts/hash-frozen-binaries.mjs build/native-evidence/frozen-manifest.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: frozen-app-candidate
+          path: dist-electron/win-unpacked
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: frozen-manifest-candidate
+          path: build/native-evidence/frozen-manifest.json
+
+  build-plugin:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - id: upstream
+            fixture: '0'
+            trace: '0'
+          - id: fixture
+            fixture: '1'
+            trace: '0'
+          - id: fixture-trace
+            fixture: '1'
+            trace: '1'
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install --legacy-peer-deps
+      - name: Build plugin variant
+        env:
+          APEX_MDA_REZFILTER_FIXTURE: ${{ matrix.fixture }}
+          APEX_MDA_REZFILTER_TRACE: ${{ matrix.trace }}
+        run: npm run native:vst3:build
+      - name: Record generated source variants and plugin hash
+        shell: bash
+        run: |
+          mkdir -p build/native-evidence/generated-source
+          cp -f build/native-vst3/generated-mdaRezFilter-*.cpp build/native-evidence/generated-source/ || true
+          node scripts/diff-rezfilter-variants.mjs build/native-vst3 build/native-evidence/generated-source/variant-hashes.json
+          node scripts/hash-frozen-binaries.mjs build/native-evidence/plugin-manifest.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mda-vst3-${{ matrix.id }}
+          path: build/native-vst3/VST3/Release/mda-vst3.vst3
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: plugin-manifest-${{ matrix.id }}
+          path: |
+            build/native-evidence/plugin-manifest.json
+            build/native-evidence/generated-source
+
+  instrumentation-smoke:
+    needs: [package-app, build-plugin]
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/download-artifact@v4
+        with:
+          name: frozen-app-candidate
+          path: dist-electron/win-unpacked
+      - uses: actions/download-artifact@v4
+        with:
+          name: mda-vst3-fixture-trace
+          path: plugin-fixture-trace
+      - name: Minimal helper/plugin instrumentation smoke
+        shell: bash
+        run: |
+          set -e
+          HELPER="dist-electron/win-unpacked/resources/vst3/apex-vst3-host.exe"
+          test -f "$HELPER"
+          mkdir -p build/native-evidence
+          node scripts/rezfilter-pcm-selftest.mjs "$HELPER" plugin-fixture-trace build/native-evidence/pcm-selftest.json
+      - name: Upload smoke evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: 6cg-instrumentation-smoke
+          path: build/native-evidence
+          if-no-files-found: warn
+
+  original-artifact:
+    needs: [package-app, build-plugin, instrumentation-smoke]
+    runs-on: windows-latest
+    timeout-minutes: 40
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/download-artifact@v4
+        with:
+          name: frozen-app-candidate
+          path: dist-electron/win-unpacked
+      - uses: actions/download-artifact@v4
+        with:
+          name: mda-vst3-fixture-trace
+          path: plugin-fixture-trace
+      - name: Download original 41053753392 artifact without mutating it
+        shell: bash
+        run: |
+          set -e
+          mkdir -p original-41053753392 build/native-evidence
+          node scripts/download-gh-artifact.mjs 12975788278 original-41053753392/artifact.zip
+          powershell -Command "Expand-Archive -LiteralPath original-41053753392/artifact.zip -DestinationPath original-41053753392/extracted -Force"
+          node scripts/classify-original-component-state.mjs original-41053753392/extracted build/native-evidence/original-component-state.json
+          node -e '
+            const fs = require("fs"), crypto = require("crypto"), path = require("path");
+            const catalog = JSON.parse(fs.readFileSync("native/vst3/diag/original-silent-sessions-41053753392.json","utf8"));
+            function walk(dir, acc=[]) {
+              if (!fs.existsSync(dir)) return acc;
+              for (const name of fs.readdirSync(dir)) {
+                const full = path.join(dir, name);
+                if (fs.statSync(full).isDirectory()) walk(full, acc); else acc.push(full);
+              }
+              return acc;
+            }
+            const files = walk("original-41053753392/extracted");
+            const hashes = {};
+            for (const session of catalog.sessions) {
+              const hit = files.find(f => f.includes(session.sessionId) && f.endsWith("-native-in.f32"));
+              hashes[session.label] = hit ? {
+                file: hit,
+                sha256: crypto.createHash("sha256").update(fs.readFileSync(hit)).digest("hex"),
+                match: crypto.createHash("sha256").update(fs.readFileSync(hit)).digest("hex") === session.completeInputSha256,
+              } : { file: null, match: false };
+            }
+            const report = { pcmFiles: files.filter(f => f.endsWith(".f32")).length, hashes };
+            fs.writeFileSync("build/native-evidence/original-pcm-hashes.json", JSON.stringify(report, null, 2));
+            console.log("::notice title=original PCM hashes::"+JSON.stringify(report).slice(0,3900));
+            if (Object.values(hashes).some(h => h.match === false)) process.exitCode = 1;
+          '
+      - name: Labelled reconstructed-state replay only (not exact original-state)
+        shell: bash
+        run: |
+          set -e
+          HELPER="dist-electron/win-unpacked/resources/vst3/apex-vst3-host.exe"
+          SAVE_CORPUS=$(find original-41053753392/extracted -type d -name '*save*pcm-corpus*' | head -n 1)
+          REOPEN_CORPUS=$(find original-41053753392/extracted -type d -name '*reopen*pcm-corpus*' | head -n 1)
+          echo "::notice title=replay corpora::save=${SAVE_CORPUS:-missing} reopen=${REOPEN_CORPUS:-missing}"
+          mkdir -p build/native-evidence
+          if [ -n "$SAVE_CORPUS" ]; then
+            node scripts/replay-rezfilter-pcm.mjs --helper "$HELPER" --plugin plugin-fixture-trace \
+              --corpus-dir "$SAVE_CORPUS" --state-dir original-41053753392/extracted --phase save \
+              --allow-reconstructed --out build/native-evidence/replay-save-reconstructed.json \
+              --trace-dir build/native-evidence/replay-traces-save || true
+          else
+            echo '{"ok":false,"phase":"save","error":"save corpus missing"}' > build/native-evidence/replay-save-reconstructed.json
+          fi
+          if [ -n "$REOPEN_CORPUS" ]; then
+            node scripts/replay-rezfilter-pcm.mjs --helper "$HELPER" --plugin plugin-fixture-trace \
+              --corpus-dir "$REOPEN_CORPUS" --state-dir original-41053753392/extracted --phase reopen \
+              --allow-reconstructed --out build/native-evidence/replay-reopen-reconstructed.json \
+              --trace-dir build/native-evidence/replay-traces-reopen || true
+          else
+            echo '{"ok":false,"phase":"reopen","exactOriginalStateReplayAvailable":false,"error":"reopen corpus missing"}' > build/native-evidence/replay-reopen-reconstructed.json
+          fi
+          node -e '
+            const fs = require("fs");
+            const save = JSON.parse(fs.readFileSync("build/native-evidence/replay-save-reconstructed.json","utf8"));
+            const reopen = JSON.parse(fs.readFileSync("build/native-evidence/replay-reopen-reconstructed.json","utf8"));
+            const report = {
+              exactOriginalStateReplayAvailable: false,
+              saveIndependent: { ok: save.ok === true, error: save.error || null, sessions: (save.sessions||[]).length },
+              reopenIndependent: { ok: reopen.ok === true, error: reopen.error || null, sessions: (reopen.sessions||[]).length },
+              note: "reconstructed/default parameter overlay replay is not an exact original-state replay",
+            };
+            fs.writeFileSync("build/native-evidence/replay-phase-report.json", JSON.stringify(report, null, 2));
+            console.log("::notice title=save/reopen independent::"+JSON.stringify(report).slice(0,3900));
+          '
+      - name: Upload original-artifact evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: 6cg-original-artifact
+          path: |
+            build/native-evidence
+            original-41053753392/extracted
+          if-no-files-found: warn
+
+  small-packaged:
+    needs: [instrumentation-smoke]
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/download-artifact@v4
+        with:
+          name: frozen-app-candidate
+          path: dist-electron/win-unpacked
+      - uses: actions/download-artifact@v4
+        with:
+          name: mda-vst3-fixture-trace
+          path: swapped-plugin
+      - name: Install instrumented plugin into smoke fixture path
+        shell: bash
+        run: |
+          node -e '
+            const fs = require("fs"), path = require("path");
+            function copy(src, dest) {
+              const st = fs.statSync(src);
+              if (st.isDirectory()) {
+                fs.mkdirSync(dest, { recursive: true });
+                for (const name of fs.readdirSync(src)) copy(path.join(src, name), path.join(dest, name));
+              } else { fs.mkdirSync(path.dirname(dest), { recursive: true }); fs.copyFileSync(src, dest); }
+            }
+            const dest = "build/native-vst3/VST3/Release/mda-vst3.vst3";
+            const nested = path.join("swapped-plugin", "mda-vst3.vst3");
+            fs.rmSync(dest, { recursive: true, force: true });
+            copy(fs.existsSync(nested) ? nested : "swapped-plugin", dest);
+          '
+      - name: One packaged save/reopen after successful instrumentation smoke
+        env:
+          APEX_REZFILTER_PHASE: attempts
+          APEX_REZFILTER_ATTEMPTS: '1'
+          APEX_REZFILTER_TRACE_DIR: build/native-evidence/rezfilter-traces
+        run: node scripts/desktop-smoke.mjs
+      - name: Integrity on packaged traces
+        if: always()
+        shell: bash
+        run: |
+          for phase in save reopen; do
+            if [ -d build/native-evidence/rezfilter-traces/$phase ]; then
+              node scripts/check-rezfilter-trace-integrity.mjs build/native-evidence/rezfilter-traces/$phase \
+                build/native-evidence/packaged-$phase-integrity.json --require-traces true
+            else
+              echo "{\"ok\":false,\"error\":\"no $phase traces\"}" > build/native-evidence/packaged-$phase-integrity.json
+              echo "::error title=packaged $phase::no RezFilter traces"
+              exit 1
+            fi
+          done
+      - name: Upload small packaged evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: 6cg-small-packaged
+          path: build/native-evidence
+          if-no-files-found: warn
