@@ -1364,12 +1364,23 @@ export async function runDesktopVst3Smoke() {
       [channel], [clip], nonzeroOfflineMixer, 120, 1, 48000, true, 'song', undefined, undefined, undefined, 0.5,
     );
     const nonzeroOfflineL = nonzeroOfflineRendered.getChannelData(0);
-    let nonzeroOfflineOnset = -1;
-    for (let i = 0; i < nonzeroOfflineL.length; i++) {
-      if (Math.abs(nonzeroOfflineL[i]!) > 1e-4) { nonzeroOfflineOnset = i; break; }
+    const lookaheadDrive = 1 + 0.55 * 4;
+    const lookaheadNorm = Math.tanh(lookaheadDrive);
+    const equivalentOnsetThreshold = Math.fround(Math.fround(Math.tanh(1e-7 * lookaheadDrive) / lookaheadNorm) * 0.75);
+    const nonzeroOfflineOnset = nonzeroOfflineL.findIndex(value => Math.abs(value) > equivalentOnsetThreshold);
+    let analyticalErrorSumSq = 0;
+    const compareFrames = Math.min(nonzeroOfflineL.length, samples.length);
+    for (let i = 0; i < compareFrames; i++) {
+      const expectedSample = Math.fround(Math.fround(Math.tanh(samples[i]! * lookaheadDrive) / lookaheadNorm) * 0.75);
+      const diff = nonzeroOfflineL[i]! - expectedSample;
+      analyticalErrorSumSq += diff * diff;
     }
-    if (nonzeroOfflineRendered.length !== output.length || Math.abs(nonzeroOfflineOnset - onsetFrame) > 1) {
-      throw new Error(`Packaged offline nonzero-latency render misaligned or changed render length: expected frames=${output.length}, onset=${onsetFrame}; got frames=${nonzeroOfflineRendered.length}, onset=${nonzeroOfflineOnset}`);
+    const nonzeroOfflineAnalyticalRmsError = compareFrames > 0 ? Math.sqrt(analyticalErrorSumSq / compareFrames) : Infinity;
+    if (nonzeroOfflineRendered.length !== output.length ||
+        nonzeroOfflineOnset < 0 ||
+        Math.abs(nonzeroOfflineOnset - onsetFrame) > 1 ||
+        nonzeroOfflineAnalyticalRmsError > 1e-5) {
+      throw new Error(`Packaged offline nonzero-latency render misaligned or changed render length: expected frames=${output.length}, onset=${onsetFrame}; got frames=${nonzeroOfflineRendered.length}, onset=${nonzeroOfflineOnset}, analyticalRmsError=${nonzeroOfflineAnalyticalRmsError}`);
     }
     const nonzeroOfflinePcmChecksum = digest(new Uint8Array(nonzeroOfflineL.buffer, nonzeroOfflineL.byteOffset, nonzeroOfflineL.byteLength));
     mixerEffects.nonzeroPluginLatencyRegression.offlineRender = {
@@ -1377,6 +1388,7 @@ export async function runDesktopVst3Smoke() {
       expectedFrames: output.length,
       onsetFrame: nonzeroOfflineOnset,
       referenceOnsetFrame: onsetFrame,
+      analyticalRmsError: nonzeroOfflineAnalyticalRmsError,
       pcmChecksum: nonzeroOfflinePcmChecksum,
     };
     if (reopening && !document.body.textContent?.includes(channel.name)) throw new Error('The actual Apex application UI did not restore the saved native channel');
