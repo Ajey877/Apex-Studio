@@ -65,7 +65,7 @@ if (process.env.APEX_PDC_CHILD_REOPEN_PROJECT) {
   globalThis.document ??= { createElement: () => ({}) };
 
   const { audioEngine: childEngineSingleton } = await import('../src/audio/audioEngine.ts');
-  const { normalizeProjectState } = await import('../src/state/projectState.ts');
+  const { createDefaultProjectState, normalizeProjectState } = await import('../src/state/projectState.ts');
   const ChildAudioEngine = childEngineSingleton.constructor;
 
   try {
@@ -73,7 +73,7 @@ if (process.env.APEX_PDC_CHILD_REOPEN_PROJECT) {
     const parsed = JSON.parse(rawJson);
     const restored = normalizeProjectState(parsed.state ?? parsed);
     const eng = new ChildAudioEngine();
-    eng.setMasteringState({ enabled: false });
+    eng.setMasteringState({ ...createDefaultProjectState().mastering, enabled: false });
     eng.setBpm(restored.meta?.bpm ?? 120);
 
     // Register deterministic test stimulus buffer at 48 kHz (2 seconds = 1 bar at 120 BPM)
@@ -522,7 +522,7 @@ function createStimulusBuffer(sampleRate = 48000, durationSeconds = 2, polarity 
 
 function createEngineWithStimulus(sampleRate = 48000, durationSeconds = 2) {
   const eng = new AudioEngine();
-  eng.setMasteringState({ enabled: false });
+  eng.setMasteringState({ ...createDefaultProjectState().mastering, enabled: false });
   eng.setBpm(120);
   eng.setSampleBuffer('pdc-stimulus', createStimulusBuffer(sampleRate, durationSeconds, 1));
   eng.setSampleBuffer('pdc-stimulus-inverted', createStimulusBuffer(sampleRate, durationSeconds, -1));
