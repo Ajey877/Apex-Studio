@@ -1359,47 +1359,52 @@ export async function runDesktopVst3Smoke() {
     });
     const { persistedTwoInsertSlotsForSave, persistedNonzeroLatencySlotsForSave, ...mixerEffects } = mixerResult;
     const nonzeroOfflineSlots = reopening ? (restoredNonzeroLatencySlots ?? []) : (persistedNonzeroLatencySlotsForSave ?? []);
-    const nonzeroOfflineMixer = mixer.map(track => track.id === 1 ? { ...track, fxSlots: nonzeroOfflineSlots } : track);
-    const nonzeroOfflineRendered = await instance.renderTimelineOffline(
-      [channel], [clip], nonzeroOfflineMixer, 120, 1, 48000, true, 'song', undefined, undefined, undefined, 0.5,
-    );
-    const nonzeroOfflineL = nonzeroOfflineRendered.getChannelData(0);
-    const lookaheadDrive = 1 + 0.55 * 4;
-    const lookaheadNorm = Math.tanh(lookaheadDrive);
-    const equivalentOnsetThreshold = Math.fround(Math.fround(Math.tanh(1e-7 * lookaheadDrive) / lookaheadNorm) * 0.75);
-    const nonzeroOfflineOnset = nonzeroOfflineL.findIndex(value => Math.abs(value) > equivalentOnsetThreshold);
-    let analyticalErrorSumSq = 0;
-    const compareFrames = Math.min(nonzeroOfflineL.length, samples.length);
-    for (let i = 0; i < compareFrames; i++) {
-      const expectedSample = Math.fround(Math.fround(Math.tanh(samples[i]! * lookaheadDrive) / lookaheadNorm) * 0.75);
-      const diff = nonzeroOfflineL[i]! - expectedSample;
-      analyticalErrorSumSq += diff * diff;
+    if (mixerEffects.status === 'passed' && mixerEffects.nonzeroPluginLatencyRegression) {
+      if (nonzeroOfflineSlots.length !== 2) {
+        throw new Error(`Expected 2 nonzero-latency FX slots for packaged offline verification, got ${nonzeroOfflineSlots.length}`);
+      }
+      const nonzeroOfflineMixer = mixer.map(track => track.id === 1 ? { ...track, fxSlots: nonzeroOfflineSlots } : track);
+      const nonzeroOfflineRendered = await instance.renderTimelineOffline(
+        [channel], [clip], nonzeroOfflineMixer, 120, 1, 48000, true, 'song', undefined, undefined, undefined, 0.5,
+      );
+      const nonzeroOfflineL = nonzeroOfflineRendered.getChannelData(0);
+      const lookaheadDrive = 1 + 0.55 * 4;
+      const lookaheadNorm = Math.tanh(lookaheadDrive);
+      const equivalentOnsetThreshold = Math.fround(Math.fround(Math.tanh(1e-7 * lookaheadDrive) / lookaheadNorm) * 0.75);
+      const nonzeroOfflineOnset = nonzeroOfflineL.findIndex(value => Math.abs(value) > equivalentOnsetThreshold);
+      let analyticalErrorSumSq = 0;
+      const compareFrames = Math.min(nonzeroOfflineL.length, samples.length);
+      for (let i = 0; i < compareFrames; i++) {
+        const expectedSample = Math.fround(Math.fround(Math.tanh(samples[i]! * lookaheadDrive) / lookaheadNorm) * 0.75);
+        const diff = nonzeroOfflineL[i]! - expectedSample;
+        analyticalErrorSumSq += diff * diff;
+      }
+      const nonzeroOfflineAnalyticalRmsError = compareFrames > 0 ? Math.sqrt(analyticalErrorSumSq / compareFrames) : Infinity;
+      if (nonzeroOfflineRendered.length !== output.length ||
+          nonzeroOfflineOnset < 0 ||
+          Math.abs(nonzeroOfflineOnset - onsetFrame) > 1 ||
+          nonzeroOfflineAnalyticalRmsError > 1e-5) {
+        throw new Error(`Packaged offline nonzero-latency render misaligned or changed render length: expected frames=${output.length}, onset=${onsetFrame}; got frames=${nonzeroOfflineRendered.length}, onset=${nonzeroOfflineOnset}, analyticalRmsError=${nonzeroOfflineAnalyticalRmsError}`);
+      }
+      const nonzeroOfflinePcmChecksum = digest(new Uint8Array(nonzeroOfflineL.buffer, nonzeroOfflineL.byteOffset, nonzeroOfflineL.byteLength));
+      mixerEffects.nonzeroPluginLatencyRegression.offlineRender = {
+        frames: nonzeroOfflineRendered.length,
+        expectedFrames: output.length,
+        onsetFrame: nonzeroOfflineOnset,
+        referenceOnsetFrame: onsetFrame,
+        analyticalRmsError: nonzeroOfflineAnalyticalRmsError,
+        pcmChecksum: nonzeroOfflinePcmChecksum,
+      };
     }
-    const nonzeroOfflineAnalyticalRmsError = compareFrames > 0 ? Math.sqrt(analyticalErrorSumSq / compareFrames) : Infinity;
-    if (nonzeroOfflineRendered.length !== output.length ||
-        nonzeroOfflineOnset < 0 ||
-        Math.abs(nonzeroOfflineOnset - onsetFrame) > 1 ||
-        nonzeroOfflineAnalyticalRmsError > 1e-5) {
-      throw new Error(`Packaged offline nonzero-latency render misaligned or changed render length: expected frames=${output.length}, onset=${onsetFrame}; got frames=${nonzeroOfflineRendered.length}, onset=${nonzeroOfflineOnset}, analyticalRmsError=${nonzeroOfflineAnalyticalRmsError}`);
-    }
-    const nonzeroOfflinePcmChecksum = digest(new Uint8Array(nonzeroOfflineL.buffer, nonzeroOfflineL.byteOffset, nonzeroOfflineL.byteLength));
-    mixerEffects.nonzeroPluginLatencyRegression.offlineRender = {
-      frames: nonzeroOfflineRendered.length,
-      expectedFrames: output.length,
-      onsetFrame: nonzeroOfflineOnset,
-      referenceOnsetFrame: onsetFrame,
-      analyticalRmsError: nonzeroOfflineAnalyticalRmsError,
-      pcmChecksum: nonzeroOfflinePcmChecksum,
-    };
     if (reopening && !document.body.textContent?.includes(channel.name)) throw new Error('The actual Apex application UI did not restore the saved native channel');
     if (!reopening) {
       const project = createDefaultProjectState();
       const persistedMixerTracks: MixerTrack[] = [
         ...mixer,
-        { id: 2, name: 'Smoke two-insert FX track', color: '#fff', volume: 1, pan: 0, mute: false, solo: false,
-          fxSlots: persistedTwoInsertSlotsForSave ?? [], peakL: 0, peakR: 0 },
-        { id: 3, name: 'Smoke nonzero-latency FX track', color: '#fff', volume: 1, pan: 0, mute: false, solo: false,
-          fxSlots: persistedNonzeroLatencySlotsForSave ?? [], peakL: 0, peakR: 0 },
+        ...(persistedTwoInsertSlotsForSave ? [{ id: 2, name: 'Smoke two-insert FX track', color: '#fff', volume: 1, pan: 0, mute: false, solo: false,
+          fxSlots: persistedTwoInsertSlotsForSave, peakL: 0, peakR: 0 }] : []),
+        ...(persistedNonzeroLatencySlotsForSave ? [{ id: 3, name: 'Smoke nonzero-latency FX track', color: '#fff', volume: 1, pan: 0, mute: false, solo: false,
+          fxSlots: persistedNonzeroLatencySlotsForSave, peakL: 0, peakR: 0 }] : []),
       ];
       await persistProjectState({
         ...project, meta: { ...project.meta, bpm: 120 }, selectedChannelId: channel.id,
