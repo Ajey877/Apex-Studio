@@ -354,6 +354,30 @@ export interface Channel {
   sampleZones?: SampleZone[];
   drumPads?: DrumPad[];
   arp?: ArpSettings;
+  /**
+   * Phase 1 — external MIDI output routing for this channel.
+   *
+   * Optional so legacy projects load unchanged (`undefined` resolves to
+   * `{ outputDeviceId: null, midiChannel: 1, mode: 'off' }`). Configured device
+   * IDs are preserved verbatim across save/reopen even when hardware is
+   * disconnected; another port is never silently substituted.
+   */
+  midiOutput?: ChannelMidiOutputRouting;
+}
+
+export type ChannelMidiOutputMode = 'off' | 'mirror' | 'external';
+
+export interface ChannelMidiOutputRouting {
+  /** Web MIDI output port ID, or null when no hardware output is selected. */
+  outputDeviceId: string | null;
+  /** Target MIDI channel, 1–16 inclusive. */
+  midiChannel: number;
+  /**
+   * - `off`: internal synth/sampler/VST3 audio only; no external MIDI sent.
+   * - `mirror`: internal audio AND external MIDI output.
+   * - `external`: external MIDI output only; internal channel audio suppressed.
+   */
+  mode: ChannelMidiOutputMode;
 }
 
 /**
@@ -839,7 +863,12 @@ export interface MidiDeviceInfo {
   name: string;
   manufacturer?: string;
   state: string;
+  connection?: string;
   type: 'input' | 'output';
+  /** True only when an output port is connected, opened (if supported), and has a verified send path without error. */
+  usable?: boolean;
+  /** Honest human-readable reason when an enumerated port is unavailable or not ready. */
+  statusReason?: string;
 }
 
 export type MusicalScale = 

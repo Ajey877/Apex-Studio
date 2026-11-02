@@ -7,15 +7,27 @@ import {
   Sliders, 
   Activity, 
   CheckCircle, 
+  AlertTriangle,
   RefreshCw, 
   Zap, 
   Volume2, 
   Disc,
   Layers
 } from 'lucide-react';
-import { MidiDeviceInfo, MidiMapping, Channel, MixerTrack } from '../types/daw';
+import {
+  MidiDeviceInfo,
+  MidiMapping,
+  Channel,
+  ChannelMidiOutputMode,
+  MixerTrack,
+} from '../types/daw';
 import { audioEngine } from '../audio/audioEngine';
 import { resolveMidiLearnCapture, type MidiLearnTarget } from '../audio/midiMappingRuntime';
+import {
+  clampMidiChannelNumber,
+  resolveChannelMidiOutputRouting,
+  type MidiAccessStateSnapshot,
+} from '../audio/midiOutputScheduler';
 
 export interface QuickArmTargetDescriptor extends MidiLearnTarget {
   label: string;
@@ -75,6 +87,111 @@ export const buildQuickArmTargets = (
   ];
 };
 
+export interface MidiPortDisplayStatus {
+  tone: 'success' | 'warning' | 'danger' | 'neutral';
+  label: string;
+  detail?: string;
+}
+
+/**
+ * Pure helper evaluating honest UI status for a MIDI input or output port.
+ * Output ports are NEVER reported as `Ready` merely because they were
+ * enumerated: `device.usable === true` and `device.state === 'connected'` are
+ * both required.
+ */
+export const describeMidiDeviceStatus = (device: MidiDeviceInfo): MidiPortDisplayStatus => {
+  if (device.state !== 'connected') {
+    return {
+      tone: 'danger',
+      label: 'Disconnected',
+      detail: device.statusReason || 'Hardware device disconnected',
+    };
+  }
+  if (device.type === 'input') {
+    return {
+      tone: 'success',
+      label: 'Connected',
+    };
+  }
+  if (device.usable === true) {
+    return {
+      tone: 'success',
+      label: 'Ready',
+    };
+  }
+  if (device.connection === 'pending') {
+    return {
+      tone: 'warning',
+      label: 'Opening Port...',
+      detail: device.statusReason || 'Verifying output port access',
+    };
+  }
+  return {
+    tone: 'warning',
+    label: 'Port Unavailable',
+    detail: device.statusReason || 'Enumerated port is not open or cannot transmit MIDI',
+  };
+};
+
+export const describeChannelMidiRouteStatus = (
+  channel: Pick<Channel, 'midiOutput'>,
+  outputDevices: readonly MidiDeviceInfo[],
+  accessState: MidiAccessStateSnapshot,
+): MidiPortDisplayStatus => {
+  const routing = resolveChannelMidiOutputRouting(channel);
+  if (routing.mode === 'off') {
+    return {
+      tone: 'neutral',
+      label: 'Internal Only',
+    };
+  }
+  if (
+    accessState.status === 'unsupported' ||
+    accessState.status === 'denied' ||
+    accessState.status === 'error'
+  ) {
+    return {
+      tone: 'danger',
+      label: 'Web MIDI Unavailable',
+      detail: accessState.errorMessage || 'External MIDI access is unavailable',
+    };
+  }
+  if (!routing.outputDeviceId) {
+    return {
+      tone: 'warning',
+      label: 'Select Output Device',
+      detail: 'Choose an external MIDI output port to transmit notes',
+    };
+  }
+  const matchedPort = outputDevices.find(dev => dev.id === routing.outputDeviceId);
+  if (!matchedPort) {
+    return {
+      tone: 'danger',
+      label: 'Unavailable (Disconnected)',
+      detail: `Configured output "${routing.outputDeviceId}" is not connected; no fallback device substituted`,
+    };
+  }
+  if (matchedPort.state !== 'connected') {
+    return {
+      tone: 'danger',
+      label: 'Disconnected',
+      detail: matchedPort.statusReason || 'Hardware disconnected; no fallback device substituted',
+    };
+  }
+  if (matchedPort.usable !== true) {
+    return {
+      tone: 'warning',
+      label: 'Port Not Ready',
+      detail: matchedPort.statusReason || 'Output port is enumerated but cannot transmit yet',
+    };
+  }
+  return {
+    tone: 'success',
+    label: `Ready · Ch ${routing.midiChannel}`,
+    detail: routing.mode === 'external' ? 'External MIDI only (internal synth muted)' : 'Mirroring internal synth + external MIDI',
+  };
+};
+
 interface MidiControllerModalProps {
   isOpen: boolean;
   onClose: () => void;
@@ -83,6 +200,9 @@ interface MidiControllerModalProps {
   midiMappings: MidiMapping[];
   onUpdateMidiMappings: (mappings: MidiMapping[]) => void;
   activeChannel: Channel;
+  onUpdateChannel?: (channelId: string, updates: Partial<Channel>) => void;
+  midiAccessStateOverride?: MidiAccessStateSnapshot;
+  devicesOverride?: MidiDeviceInfo[];
 }
 
 interface MidiLogEntry {
@@ -103,9 +223,15 @@ export const MidiControllerModal: React.FC<MidiControllerModalProps> = ({
   mixerTracks,
   midiMappings,
   onUpdateMidiMappings,
-  activeChannel
+  activeChannel,
+  onUpdateChannel,
+  midiAccessStateOverride,
+  devicesOverride,
 }) => {
   const [devices, setDevices] = useState<MidiDeviceInfo[]>([]);
+  const [midiAccessState, setMidiAccessState] = useState<MidiAccessStateSnapshot>(() =>
+    audioEngine.getMidiAccessState(),
+  );
   const [logs, setLogs] = useState<MidiLogEntry[]>([]);
   const [learningTarget, setLearningTarget] = useState<MidiMapping | null>(null);
   const [activeTab, setActiveTab] = useState<'devices' | 'learn' | 'virtual_controller' | 'monitor'>('devices');
@@ -113,10 +239,18 @@ export const MidiControllerModal: React.FC<MidiControllerModalProps> = ({
   const [pitchBend, setPitchBend] = useState<number>(0);
   const [modWheel, setModWheel] = useState<number>(0);
 
-  // Scan devices on mount
+  const syncDeviceSnapshot = () => {
+    setDevices(audioEngine.getConnectedMidiDevices());
+    setMidiAccessState(audioEngine.getMidiAccessState());
+  };
+
+  // Scan devices on mount and subscribe to live MIDI port state changes
   useEffect(() => {
     if (!isOpen) return;
-    refreshDevices();
+    void refreshDevices();
+    const unsubscribeDeviceChanges = audioEngine.subscribeMidiDeviceChanges(() => {
+      syncDeviceSnapshot();
+    });
 
     const handleMidiEvent = (e: any) => {
       const now = new Date();
@@ -151,14 +285,63 @@ export const MidiControllerModal: React.FC<MidiControllerModalProps> = ({
 
     audioEngine.addMidiListener(handleMidiEvent);
     return () => {
+      unsubscribeDeviceChanges();
       audioEngine.removeMidiListener(handleMidiEvent);
     };
   }, [isOpen, learningTarget, midiMappings, onUpdateMidiMappings]);
 
   const refreshDevices = async () => {
     await audioEngine.initMidi();
-    const devList = audioEngine.getConnectedMidiDevices();
-    setDevices(devList);
+    syncDeviceSnapshot();
+  };
+
+  const handleChannelRoutingChange = (
+    channel: Channel,
+    patch: Partial<{ outputDeviceId: string | null; midiChannel: number; mode: ChannelMidiOutputMode }>,
+  ) => {
+    if (!onUpdateChannel) return;
+    const current = resolveChannelMidiOutputRouting(channel);
+    const nextOutputDeviceId =
+      patch.outputDeviceId !== undefined ? patch.outputDeviceId : current.outputDeviceId;
+    const nextMidiChannel =
+      patch.midiChannel !== undefined
+        ? clampMidiChannelNumber(patch.midiChannel)
+        : current.midiChannel;
+    const nextMode = patch.mode !== undefined ? patch.mode : current.mode;
+
+    if (nextOutputDeviceId) {
+      void audioEngine.ensureMidiOutputPortOpen(nextOutputDeviceId);
+    }
+
+    onUpdateChannel(channel.id, {
+      midiOutput: {
+        outputDeviceId: nextOutputDeviceId,
+        midiChannel: nextMidiChannel,
+        mode: nextMode,
+      },
+    });
+  };
+
+  const effectiveAccessState = midiAccessStateOverride ?? midiAccessState;
+  const effectiveDevices = devicesOverride ?? devices;
+  const inputDevices = effectiveDevices.filter(dev => dev.type === 'input');
+  const outputDevices = effectiveDevices.filter(dev => dev.type === 'output');
+  const webMidiUnavailable =
+    effectiveAccessState.status === 'unsupported' ||
+    effectiveAccessState.status === 'denied' ||
+    effectiveAccessState.status === 'error';
+
+  const statusToneClasses = (tone: MidiPortDisplayStatus['tone']): string => {
+    if (tone === 'success') {
+      return 'text-[var(--apex-success)] bg-[color-mix(in_srgb,var(--apex-success)_16%,transparent)] border-[color-mix(in_srgb,var(--apex-success)_40%,transparent)]';
+    }
+    if (tone === 'warning') {
+      return 'text-[var(--apex-warning)] bg-[color-mix(in_srgb,var(--apex-warning)_16%,transparent)] border-[color-mix(in_srgb,var(--apex-warning)_40%,transparent)]';
+    }
+    if (tone === 'danger') {
+      return 'text-[var(--apex-danger)] bg-[color-mix(in_srgb,var(--apex-danger)_16%,transparent)] border-[color-mix(in_srgb,var(--apex-danger)_40%,transparent)]';
+    }
+    return 'text-[var(--apex-text-3)] bg-[var(--apex-chrome-inset)] border-[var(--apex-border)]';
   };
 
   const handleStartLearn = (targetType: MidiMapping['targetType'], targetId: string | number, paramName?: string) => {
@@ -240,7 +423,7 @@ export const MidiControllerModal: React.FC<MidiControllerModalProps> = ({
             }`}
           >
             <Cpu className="w-3.5 h-3.5" />
-            <span>Connected Devices ({devices.length})</span>
+            <span>Connected Devices ({effectiveDevices.length})</span>
           </button>
           <button
             id="tab-midi-learn"
@@ -282,35 +465,63 @@ export const MidiControllerModal: React.FC<MidiControllerModalProps> = ({
 
         {/* Content Body */}
         <div className="p-6 overflow-y-auto flex-1 custom-scrollbar">
-          {/* TAB 1: Connected Devices */}
+          {/* TAB 1: Connected Devices & External MIDI Routing */}
           {activeTab === 'devices' && (
             <div className="space-y-6">
-              <div className="flex items-center justify-between bg-[var(--apex-surface-2)] p-4 rounded-lg border border-[var(--apex-border)]">
+              <div
+                data-testid="web-midi-engine-banner"
+                className={`flex items-center justify-between p-4 rounded-lg border ${
+                  webMidiUnavailable
+                    ? 'bg-[color-mix(in_srgb,var(--apex-danger)_12%,transparent)] border-[color-mix(in_srgb,var(--apex-danger)_40%,transparent)]'
+                    : 'bg-[var(--apex-surface-2)] border-[var(--apex-border)]'
+                }`}
+              >
                 <div className="space-y-1">
-                  <div className="text-sm font-semibold text-[var(--apex-text)] flex items-center space-x-2">
-                    <span className="w-2.5 h-2.5 rounded-full bg-[var(--apex-success)] animate-pulse"></span>
-                    <span>Web MIDI Engine Active</span>
-                  </div>
-                  <p className="text-xs text-[var(--apex-text-2)]">
-                    Plug in any class-compliant USB or Bluetooth MIDI controller (AKAI, Novation, Arturia, KORG, Roland, Yamaha, etc.)
-                  </p>
+                  {webMidiUnavailable ? (
+                    <>
+                      <div className="text-sm font-semibold text-[var(--apex-text)] flex items-center space-x-2">
+                        <AlertTriangle className="w-4 h-4 text-[var(--apex-danger)]" />
+                        <span>
+                          {effectiveAccessState.status === 'unsupported'
+                            ? 'Web MIDI Unavailable in This Browser'
+                            : effectiveAccessState.status === 'denied'
+                              ? 'Web MIDI Permission Denied'
+                              : 'Web MIDI Access Error'}
+                        </span>
+                      </div>
+                      <p className="text-xs text-[var(--apex-text-2)]">
+                        {effectiveAccessState.errorMessage ||
+                          'Hardware MIDI input and external MIDI output require a Web MIDI–capable browser or Apex Studio Desktop with MIDI permissions allowed.'}
+                      </p>
+                    </>
+                  ) : (
+                    <>
+                      <div className="text-sm font-semibold text-[var(--apex-text)] flex items-center space-x-2">
+                        <span className="w-2.5 h-2.5 rounded-full bg-[var(--apex-success)] animate-pulse"></span>
+                        <span>Web MIDI Engine Active</span>
+                      </div>
+                      <p className="text-xs text-[var(--apex-text-2)]">
+                        Plug in class-compliant USB or Bluetooth MIDI controllers (inputs) and hardware synths or MIDI interfaces (outputs).
+                      </p>
+                    </>
+                  )}
                 </div>
                 <button
                   id="rescan-midi-devices-btn"
                   onClick={refreshDevices}
-                  className="px-3.5 py-1.5 bg-[var(--apex-surface-2)] hover:bg-[var(--apex-surface-3)] text-[var(--apex-text)] text-xs font-semibold rounded-lg border border-[var(--apex-border)] flex items-center space-x-2 transition-colors"
+                  className="px-3.5 py-1.5 bg-[var(--apex-surface-2)] hover:bg-[var(--apex-surface-3)] text-[var(--apex-text)] text-xs font-semibold rounded-lg border border-[var(--apex-border)] flex items-center space-x-2 transition-colors shrink-0"
                 >
                   <RefreshCw className="w-3.5 h-3.5" />
                   <span>Rescan Hardware</span>
                 </button>
               </div>
 
-              {devices.length === 0 ? (
-                <div className="text-center py-12 border border-dashed border-[var(--apex-border)] rounded-xl bg-[color-mix(in_srgb,var(--apex-chrome-inset)_50%,transparent)]">
-                  <Cpu className="w-12 h-12 text-[var(--apex-text-3)] mx-auto mb-3" />
+              {effectiveDevices.length === 0 ? (
+                <div className="text-center py-8 border border-dashed border-[var(--apex-border)] rounded-xl bg-[color-mix(in_srgb,var(--apex-chrome-inset)_50%,transparent)]">
+                  <Cpu className="w-10 h-10 text-[var(--apex-text-3)] mx-auto mb-2.5" />
                   <h3 className="text-sm font-semibold text-[var(--apex-text)] mb-1">No Hardware MIDI Devices Detected</h3>
                   <p className="text-xs text-[var(--apex-text-3)] max-w-md mx-auto mb-4">
-                    Connect a MIDI keyboard or drum pad via USB or Bluetooth. You can also use computer keyboard hotkeys or the Virtual Controller tab below!
+                    Connect a MIDI keyboard, pad controller, or external MIDI synth/interface via USB or Bluetooth. You can also use the Virtual Controller tab below.
                   </p>
                   <button
                     onClick={() => setActiveTab('virtual_controller')}
@@ -321,32 +532,275 @@ export const MidiControllerModal: React.FC<MidiControllerModalProps> = ({
                 </div>
               ) : (
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  {devices.map((device, idx) => (
-                    <div 
-                      key={device.id || idx}
-                      className="p-4 bg-[var(--apex-surface-2)] border border-[var(--apex-border)] rounded-xl flex items-center justify-between"
-                    >
-                      <div className="flex items-center space-x-3">
-                        <div className="w-10 h-10 rounded-lg bg-[color-mix(in_srgb,var(--apex-success)_16%,transparent)] border border-[color-mix(in_srgb,var(--apex-success)_40%,transparent)] flex items-center justify-center text-[var(--apex-success)]">
-                          <Zap className="w-5 h-5" />
-                        </div>
-                        <div>
-                          <div className="text-sm font-bold text-[var(--apex-text)]">{device.name}</div>
-                          <div className="text-xs text-[var(--apex-text-2)] flex items-center space-x-2">
-                            <span>{device.manufacturer || 'Generic'}</span>
-                            <span>•</span>
-                            <span className="uppercase text-[10px] text-[var(--apex-accent)] font-mono">{device.type}</span>
-                          </div>
-                        </div>
-                      </div>
-                      <div className="flex items-center space-x-1.5 text-xs text-[var(--apex-success)] font-semibold bg-[color-mix(in_srgb,var(--apex-success)_16%,transparent)] px-2.5 py-1 rounded-full border border-[color-mix(in_srgb,var(--apex-success)_40%,transparent)]">
-                        <CheckCircle className="w-3.5 h-3.5" />
-                        <span>Ready</span>
+                  {/* MIDI Input Devices */}
+                  <div
+                    data-testid="midi-input-devices-section"
+                    className="p-4 bg-[var(--apex-surface-2)] border border-[var(--apex-border)] rounded-xl space-y-3"
+                  >
+                    <div className="flex items-center justify-between border-b border-[var(--apex-border)] pb-2">
+                      <div>
+                        <h3 className="text-xs font-bold uppercase tracking-wider text-[var(--apex-text)]">
+                          MIDI Input Devices ({inputDevices.length})
+                        </h3>
+                        <p className="text-[11px] text-[var(--apex-text-3)]">
+                          Controllers, keyboards, and CC surfaces feeding Apex Studio
+                        </p>
                       </div>
                     </div>
-                  ))}
+                    {inputDevices.length === 0 ? (
+                      <div className="text-xs text-[var(--apex-text-3)] py-3 text-center">
+                        No MIDI input ports detected.
+                      </div>
+                    ) : (
+                      <div className="space-y-2">
+                        {inputDevices.map((device, idx) => {
+                          const status = describeMidiDeviceStatus(device);
+                          return (
+                            <div
+                              key={device.id || `in-${idx}`}
+                              data-testid={`midi-input-card-${device.id}`}
+                              className="p-3 bg-[var(--apex-chrome-inset)] border border-[var(--apex-border)] rounded-lg flex items-center justify-between gap-2"
+                            >
+                              <div className="flex items-center space-x-2.5 min-w-0">
+                                <div className="w-8 h-8 rounded-lg bg-[color-mix(in_srgb,var(--apex-cyan)_16%,transparent)] border border-[color-mix(in_srgb,var(--apex-cyan)_40%,transparent)] flex items-center justify-center text-[var(--apex-cyan-text)] shrink-0">
+                                  <Zap className="w-4 h-4" />
+                                </div>
+                                <div className="min-w-0">
+                                  <div className="text-xs font-bold text-[var(--apex-text)] truncate">{device.name}</div>
+                                  <div className="text-[11px] text-[var(--apex-text-2)] flex items-center space-x-1.5">
+                                    <span className="truncate">{device.manufacturer || 'Generic'}</span>
+                                    <span>•</span>
+                                    <span className="uppercase text-[10px] text-[var(--apex-cyan-text)] font-mono">INPUT</span>
+                                  </div>
+                                </div>
+                              </div>
+                              <div className={`flex items-center space-x-1 text-[11px] font-semibold px-2.5 py-0.5 rounded-full border shrink-0 ${statusToneClasses(status.tone)}`}>
+                                {status.tone === 'success' ? <CheckCircle className="w-3 h-3" /> : <AlertTriangle className="w-3 h-3" />}
+                                <span>{status.label}</span>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* MIDI Output Devices */}
+                  <div
+                    data-testid="midi-output-devices-section"
+                    className="p-4 bg-[var(--apex-surface-2)] border border-[var(--apex-border)] rounded-xl space-y-3"
+                  >
+                    <div className="flex items-center justify-between border-b border-[var(--apex-border)] pb-2">
+                      <div>
+                        <h3 className="text-xs font-bold uppercase tracking-wider text-[var(--apex-text)]">
+                          MIDI Output Devices ({outputDevices.length})
+                        </h3>
+                        <p className="text-[11px] text-[var(--apex-text-3)]">
+                          External hardware synthesizers, drum machines, and MIDI interfaces
+                        </p>
+                      </div>
+                    </div>
+                    {outputDevices.length === 0 ? (
+                      <div className="text-xs text-[var(--apex-text-3)] py-3 text-center">
+                        No MIDI output ports detected.
+                      </div>
+                    ) : (
+                      <div className="space-y-2">
+                        {outputDevices.map((device, idx) => {
+                          const status = describeMidiDeviceStatus(device);
+                          return (
+                            <div
+                              key={device.id || `out-${idx}`}
+                              data-testid={`midi-output-card-${device.id}`}
+                              className="p-3 bg-[var(--apex-chrome-inset)] border border-[var(--apex-border)] rounded-lg space-y-1.5"
+                            >
+                              <div className="flex items-center justify-between gap-2">
+                                <div className="flex items-center space-x-2.5 min-w-0">
+                                  <div className="w-8 h-8 rounded-lg bg-[color-mix(in_srgb,var(--apex-accent)_16%,transparent)] border border-[color-mix(in_srgb,var(--apex-accent)_40%,transparent)] flex items-center justify-center text-[var(--apex-accent)] shrink-0">
+                                    <Radio className="w-4 h-4" />
+                                  </div>
+                                  <div className="min-w-0">
+                                    <div className="text-xs font-bold text-[var(--apex-text)] truncate">{device.name}</div>
+                                    <div className="text-[11px] text-[var(--apex-text-2)] flex items-center space-x-1.5">
+                                      <span className="truncate">{device.manufacturer || 'Generic'}</span>
+                                      <span>•</span>
+                                      <span className="uppercase text-[10px] text-[var(--apex-accent)] font-mono">OUTPUT</span>
+                                    </div>
+                                  </div>
+                                </div>
+                                <div className={`flex items-center space-x-1 text-[11px] font-semibold px-2.5 py-0.5 rounded-full border shrink-0 ${statusToneClasses(status.tone)}`}>
+                                  {status.tone === 'success' ? <CheckCircle className="w-3 h-3" /> : <AlertTriangle className="w-3 h-3" />}
+                                  <span>{status.label}</span>
+                                </div>
+                              </div>
+                              {status.detail && (
+                                <div className="flex items-center justify-between gap-2 pt-1 text-[11px] text-[var(--apex-text-3)]">
+                                  <span>{status.detail}</span>
+                                  {device.state === 'connected' && device.usable !== true && (
+                                    <button
+                                      type="button"
+                                      onClick={() => void audioEngine.ensureMidiOutputPortOpen(device.id)}
+                                      className="px-2 py-0.5 rounded border border-[var(--apex-border)] bg-[var(--apex-surface-2)] hover:bg-[var(--apex-surface-3)] text-[10px] font-semibold text-[var(--apex-text)] shrink-0"
+                                    >
+                                      Verify Port
+                                    </button>
+                                  )}
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
                 </div>
               )}
+
+              {/* Per-Channel External MIDI Output Routing Matrix */}
+              <div
+                data-testid="channel-midi-output-routing"
+                className="p-4 bg-[var(--apex-surface-2)] border border-[var(--apex-border)] rounded-xl space-y-3"
+              >
+                <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[var(--apex-border)] pb-3">
+                  <div>
+                    <h3 className="text-xs font-bold uppercase tracking-wider text-[var(--apex-text)]">
+                      Channel External MIDI Output Routing
+                    </h3>
+                    <p className="text-[11px] text-[var(--apex-text-2)]">
+                      Route any channel to external MIDI hardware (Ch 1–16) in Mirror (internal + MIDI) or External Only (mute internal synth) mode.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    data-testid="midi-output-panic-btn"
+                    onClick={() => audioEngine.panicExternalMidi(channels)}
+                    className="px-3 py-1.5 rounded-lg border border-[var(--apex-border)] bg-[var(--apex-chrome-inset)] hover:bg-[var(--apex-surface-3)] text-[11px] font-semibold text-[var(--apex-text)] transition-colors"
+                  >
+                    All Notes Off (Panic)
+                  </button>
+                </div>
+
+                <div className="space-y-2">
+                  {channels.map(ch => {
+                    const routing = resolveChannelMidiOutputRouting(ch);
+                    const routeStatus = describeChannelMidiRouteStatus(ch, outputDevices, effectiveAccessState);
+                    const configuredMissingPort =
+                      routing.outputDeviceId !== null &&
+                      !outputDevices.some(dev => dev.id === routing.outputDeviceId);
+
+                    return (
+                      <div
+                        key={ch.id}
+                        data-testid={`channel-midi-route-row-${ch.id}`}
+                        className="p-3 rounded-lg bg-[var(--apex-chrome-inset)] border border-[var(--apex-border)] space-y-2"
+                      >
+                        <div className="grid grid-cols-1 lg:grid-cols-12 gap-2.5 items-center">
+                          {/* Channel Identity */}
+                          <div className="lg:col-span-3 flex items-center space-x-2 min-w-0">
+                            <span
+                              className="w-2.5 h-2.5 rounded-full shrink-0 border border-[var(--apex-border)]"
+                              style={{ backgroundColor: ch.color }}
+                            />
+                            <div className="min-w-0">
+                              <div className="text-xs font-bold text-[var(--apex-text)] truncate">{ch.name}</div>
+                              <div className="text-[10px] font-mono uppercase text-[var(--apex-text-3)] truncate">
+                                {ch.instrumentType}
+                              </div>
+                            </div>
+                          </div>
+
+                          {/* Output Mode */}
+                          <div className="lg:col-span-3">
+                            <select
+                              data-testid={`midi-out-mode-${ch.id}`}
+                              aria-label={`MIDI output mode for ${ch.name}`}
+                              value={routing.mode}
+                              disabled={!onUpdateChannel}
+                              onChange={e =>
+                                handleChannelRoutingChange(ch, {
+                                  mode: e.target.value as ChannelMidiOutputMode,
+                                })
+                              }
+                              className="w-full px-2.5 py-1.5 rounded border border-[var(--apex-border)] bg-[var(--apex-surface-2)] text-xs text-[var(--apex-text)] focus:outline-none focus:border-[var(--apex-accent)] disabled:opacity-50"
+                            >
+                              <option value="off">Off (Internal Only)</option>
+                              <option value="mirror">Mirror (Internal + MIDI)</option>
+                              <option value="external">External Only</option>
+                            </select>
+                          </div>
+
+                          {/* Output Device */}
+                          <div className="lg:col-span-4">
+                            <select
+                              data-testid={`midi-out-device-${ch.id}`}
+                              aria-label={`MIDI output device for ${ch.name}`}
+                              value={routing.outputDeviceId ?? ''}
+                              disabled={!onUpdateChannel}
+                              onChange={e =>
+                                handleChannelRoutingChange(ch, {
+                                  outputDeviceId: e.target.value ? e.target.value : null,
+                                })
+                              }
+                              className="w-full px-2.5 py-1.5 rounded border border-[var(--apex-border)] bg-[var(--apex-surface-2)] text-xs text-[var(--apex-text)] focus:outline-none focus:border-[var(--apex-accent)] disabled:opacity-50"
+                            >
+                              <option value="">No MIDI Output Device</option>
+                              {configuredMissingPort && routing.outputDeviceId && (
+                                <option value={routing.outputDeviceId}>
+                                  Unavailable: {routing.outputDeviceId} (Disconnected)
+                                </option>
+                              )}
+                              {outputDevices.map(dev => {
+                                const devStatus = describeMidiDeviceStatus(dev);
+                                return (
+                                  <option key={dev.id} value={dev.id}>
+                                    {dev.name} ({devStatus.label})
+                                  </option>
+                                );
+                              })}
+                            </select>
+                          </div>
+
+                          {/* MIDI Channel 1-16 */}
+                          <div className="lg:col-span-2">
+                            <select
+                              data-testid={`midi-out-channel-${ch.id}`}
+                              aria-label={`MIDI output channel for ${ch.name}`}
+                              value={String(routing.midiChannel)}
+                              disabled={!onUpdateChannel}
+                              onChange={e =>
+                                handleChannelRoutingChange(ch, {
+                                  midiChannel: Number(e.target.value),
+                                })
+                              }
+                              className="w-full px-2.5 py-1.5 rounded border border-[var(--apex-border)] bg-[var(--apex-surface-2)] text-xs font-mono text-[var(--apex-text)] focus:outline-none focus:border-[var(--apex-accent)] disabled:opacity-50"
+                            >
+                              {Array.from({ length: 16 }, (_, idx) => idx + 1).map(chNum => (
+                                <option key={chNum} value={String(chNum)}>
+                                  Ch {chNum}
+                                </option>
+                              ))}
+                            </select>
+                          </div>
+                        </div>
+
+                        <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
+                          <span
+                            data-testid={`midi-out-status-${ch.id}`}
+                            className={`inline-flex items-center space-x-1 text-[10px] font-semibold px-2 py-0.5 rounded-full border ${statusToneClasses(routeStatus.tone)}`}
+                          >
+                            <span>{routeStatus.label}</span>
+                          </span>
+                          {routeStatus.detail && (
+                            <span className="text-[11px] text-[var(--apex-text-3)]">
+                              {routeStatus.detail}
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
             </div>
           )}
 

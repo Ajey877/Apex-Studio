@@ -8,6 +8,7 @@ import { normalizeTakeCompRegionsInClips } from '../audio/takeCompRegions';
 import { normalizePatternContentModel, removeChannelFromPatternContent } from './patternContent';
 import { normalizeWavetableParameters } from '../audio/wavetableTables';
 import { normalizeSidechainSettings } from '../audio/sidechainCompression';
+import { normalizeChannelMidiOutputRouting } from '../audio/midiOutputScheduler';
 
 /**
  * Phase 79: default Gross Beat gate state used when the persisted project has
@@ -81,6 +82,11 @@ function normalizeChannelWavetable<
 >(channel: C): C {
   if (!('wavetable' in channel) || channel.wavetable === undefined) return channel;
   return { ...channel, wavetable: normalizeWavetableParameters(channel.wavetable) };
+}
+
+function normalizeChannelMidiOutput<C extends { midiOutput?: unknown }>(channel: C): C {
+  if (!('midiOutput' in channel) || channel.midiOutput === undefined) return channel;
+  return { ...channel, midiOutput: normalizeChannelMidiOutputRouting(channel.midiOutput) };
 }
 
 // Obsolete fields on mixer tracks (stereoWidth, inert sidechain fields).
@@ -553,6 +559,7 @@ export const normalizeProjectState = (input: unknown): ProjectState => {
     channels: (Array.isArray(candidate.channels) ? clone(candidate.channels) : defaults.channels)
       .map(stripObsoleteChannelFields)
       .map(normalizeChannelWavetable)
+      .map(normalizeChannelMidiOutput)
       .map(channel => {
         if (channel.customSample?.id && channel.sampleZones?.length === 1) {
           const singleZone = channel.sampleZones[0];
