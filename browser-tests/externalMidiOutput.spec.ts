@@ -134,6 +134,7 @@ test.describe('Phase 1 External MIDI Output — Chromium E2E', () => {
 
     await page.goto(APP_URL);
     await page.waitForSelector('#root > *', { state: 'attached' });
+    await page.waitForTimeout(600);
 
     // 1. Open Hardware MIDI & Controller Hub and verify separated Input / Output sections + opened port readiness
     await page.locator('#fl-midi-hub-btn').click();
@@ -153,14 +154,14 @@ test.describe('Phase 1 External MIDI Output — Chromium E2E', () => {
       .toBeGreaterThanOrEqual(1);
     await expect(outputSection.getByTestId('midi-output-card-out-synth-a')).toContainText('Ready');
 
-    // 2. Configure ch-1 (808 Kick Sub, which has 4-on-the-floor steps on Pattern 1) -> External Only, Prophet-6, MIDI Ch 4
+    // 2. Configure ch-kick (808 Kick Punch, pitch 36 notes on Pattern 1) -> External Only, Prophet-6, MIDI Ch 4
     const routingSection = midiDialog.getByTestId('channel-midi-output-routing');
     await expect(routingSection).toBeVisible();
 
-    await routingSection.getByTestId('midi-out-mode-ch-1').selectOption('external');
-    await routingSection.getByTestId('midi-out-device-ch-1').selectOption('out-synth-a');
-    await routingSection.getByTestId('midi-out-channel-ch-1').selectOption('4');
-    await expect(routingSection.getByTestId('midi-out-status-ch-1')).toContainText('Ready · Ch 4');
+    await routingSection.getByTestId('midi-out-mode-ch-kick').selectOption('external');
+    await routingSection.getByTestId('midi-out-device-ch-kick').selectOption('out-synth-a');
+    await routingSection.getByTestId('midi-out-channel-ch-kick').selectOption('4');
+    await expect(routingSection.getByTestId('midi-out-status-ch-kick')).toContainText('Ready · Ch 4');
 
     // Close modal via dedicated close button (never Escape while <select> has focus)
     await midiDialog.locator('#close-midi-modal-btn').click();
@@ -219,11 +220,11 @@ test.describe('Phase 1 External MIDI Output — Chromium E2E', () => {
     await expect(midiDialog).toBeVisible();
 
     await page.evaluate(() => window.__apexMidiTestHarness?.setOutputState('out-synth-a', 'disconnected'));
-    await expect(midiDialog.getByTestId('midi-out-status-ch-1')).toContainText('Device Disconnected');
-    await expect(midiDialog.getByTestId('midi-out-device-ch-1')).toHaveValue('out-synth-a');
+    await expect(midiDialog.getByTestId('midi-out-status-ch-kick')).toContainText('Device Disconnected');
+    await expect(midiDialog.getByTestId('midi-out-device-ch-kick')).toHaveValue('out-synth-a');
 
     await page.evaluate(() => window.__apexMidiTestHarness?.setOutputState('out-synth-a', 'connected'));
-    await expect(midiDialog.getByTestId('midi-out-status-ch-1')).toContainText('Ready · Ch 4');
+    await expect(midiDialog.getByTestId('midi-out-status-ch-kick')).toContainText('Ready · Ch 4');
 
     await midiDialog.locator('#close-midi-modal-btn').click();
     await expect(midiDialog).toBeHidden();
@@ -232,14 +233,14 @@ test.describe('Phase 1 External MIDI Output — Chromium E2E', () => {
     await page.keyboard.press('Control+z');
     await page.locator('#fl-midi-hub-btn').click();
     await expect(midiDialog).toBeVisible();
-    await expect(midiDialog.getByTestId('midi-out-channel-ch-1')).toHaveValue('1');
+    await expect(midiDialog.getByTestId('midi-out-channel-ch-kick')).toHaveValue('1');
     await midiDialog.locator('#close-midi-modal-btn').click();
     await expect(midiDialog).toBeHidden();
 
-    await page.keyboard.press('Control+y');
+    await page.keyboard.press('Control+Shift+z');
     await page.locator('#fl-midi-hub-btn').click();
     await expect(midiDialog).toBeVisible();
-    await expect(midiDialog.getByTestId('midi-out-channel-ch-1')).toHaveValue('4');
+    await expect(midiDialog.getByTestId('midi-out-channel-ch-kick')).toHaveValue('4');
     await midiDialog.locator('#close-midi-modal-btn').click();
     await expect(midiDialog).toBeHidden();
 

@@ -470,41 +470,16 @@ export const MidiControllerModal: React.FC<MidiControllerModalProps> = ({
             <div className="space-y-6">
               <div
                 data-testid="web-midi-engine-banner"
-                className={`flex items-center justify-between p-4 rounded-lg border ${
-                  webMidiUnavailable
-                    ? 'bg-[color-mix(in_srgb,var(--apex-danger)_12%,transparent)] border-[color-mix(in_srgb,var(--apex-danger)_40%,transparent)]'
-                    : 'bg-[var(--apex-surface-2)] border-[var(--apex-border)]'
-                }`}
+                className="flex items-center justify-between p-4 rounded-lg border bg-[var(--apex-surface-2)] border-[var(--apex-border)]"
               >
                 <div className="space-y-1">
-                  {webMidiUnavailable ? (
-                    <>
-                      <div className="text-sm font-semibold text-[var(--apex-text)] flex items-center space-x-2">
-                        <AlertTriangle className="w-4 h-4 text-[var(--apex-danger)]" />
-                        <span>
-                          {effectiveAccessState.status === 'unsupported'
-                            ? 'Web MIDI Unavailable in This Browser'
-                            : effectiveAccessState.status === 'denied'
-                              ? 'Web MIDI Permission Denied'
-                              : 'Web MIDI Access Error'}
-                        </span>
-                      </div>
-                      <p className="text-xs text-[var(--apex-text-2)]">
-                        {effectiveAccessState.errorMessage ||
-                          'Hardware MIDI input and external MIDI output require a Web MIDI–capable browser or Apex Studio Desktop with MIDI permissions allowed.'}
-                      </p>
-                    </>
-                  ) : (
-                    <>
-                      <div className="text-sm font-semibold text-[var(--apex-text)] flex items-center space-x-2">
-                        <span className="w-2.5 h-2.5 rounded-full bg-[var(--apex-success)] animate-pulse"></span>
-                        <span>Web MIDI Engine Active</span>
-                      </div>
-                      <p className="text-xs text-[var(--apex-text-2)]">
-                        Plug in class-compliant USB or Bluetooth MIDI controllers (inputs) and hardware synths or MIDI interfaces (outputs).
-                      </p>
-                    </>
-                  )}
+                  <div className="text-sm font-semibold text-[var(--apex-text)] flex items-center space-x-2">
+                    <span className="w-2.5 h-2.5 rounded-full bg-[var(--apex-success)] animate-pulse"></span>
+                    <span>Web MIDI Engine Active</span>
+                  </div>
+                  <p className="text-xs text-[var(--apex-text-2)]">
+                    Plug in class-compliant USB or Bluetooth MIDI controllers (inputs) and hardware synths or MIDI interfaces (outputs).
+                  </p>
                 </div>
                 <button
                   id="rescan-midi-devices-btn"
@@ -515,6 +490,29 @@ export const MidiControllerModal: React.FC<MidiControllerModalProps> = ({
                   <span>Rescan Hardware</span>
                 </button>
               </div>
+
+              {webMidiUnavailable && (
+                <div
+                  data-testid="web-midi-hardware-warning"
+                  role="alert"
+                  className="p-4 rounded-lg border bg-[color-mix(in_srgb,var(--apex-danger)_12%,transparent)] border-[color-mix(in_srgb,var(--apex-danger)_40%,transparent)] space-y-1"
+                >
+                  <div className="text-sm font-semibold text-[var(--apex-text)] flex items-center space-x-2">
+                    <AlertTriangle className="w-4 h-4 text-[var(--apex-danger)] shrink-0" />
+                    <span>
+                      {effectiveAccessState.status === 'unsupported'
+                        ? 'Web MIDI Unavailable in This Browser'
+                        : effectiveAccessState.status === 'denied'
+                          ? 'Web MIDI Permission Denied'
+                          : 'Web MIDI Access Error'}
+                    </span>
+                  </div>
+                  <p className="text-xs text-[var(--apex-text-2)]">
+                    {effectiveAccessState.errorMessage ||
+                      'Hardware MIDI input and external MIDI output require a Web MIDI–capable browser or Apex Studio Desktop with MIDI permissions allowed.'}
+                  </p>
+                </div>
+              )}
 
               {effectiveDevices.length === 0 ? (
                 <div className="text-center py-8 border border-dashed border-[var(--apex-border)] rounded-xl bg-[color-mix(in_srgb,var(--apex-chrome-inset)_50%,transparent)]">
