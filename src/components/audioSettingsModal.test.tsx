@@ -7,13 +7,18 @@ import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import {
   AudioSettingsModal,
+  bindAudioSettingsModalSubscriptions,
   formatLatencyMilliseconds,
   formatSampleRateLabel,
   type AudioSettingsDevicePort,
   type AudioSettingsEnginePort,
 } from './AudioSettingsModal';
 import type { AudioEngineDiagnostics } from '../audio/audioEngine';
-import type { AudioDeviceManagerSnapshot } from '../audio/audioDeviceManager';
+import {
+  AudioDeviceManager,
+  type AudioDeviceManagerSnapshot,
+  type MediaDevicesLike,
+} from '../audio/audioDeviceManager';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 
@@ -129,11 +134,16 @@ const createPorts = (
     deviceManager: {
       getSnapshot: () => snap,
       subscribe: () => () => {},
-      initializePassiveMonitoring: async () => snap,
       refreshDevices: async () => snap,
       requestMicrophonePermission: async () => ({ granted: true, message: null }),
       promptOutputDeviceSelection: async () => ({ ok: true, message: null }),
-      selectOutputDevice: async id => ({ ok: true, activeDeviceId: id, message: null }),
+      selectOutputDevice: async id => ({
+        ok: true,
+        liveSwitched: true,
+        preferenceSaved: true,
+        activeDeviceId: id,
+        message: null,
+      }),
       selectInputDevice: id => ({ ok: true, selectedDeviceId: id, message: null }),
       resetToDefaults: () => ({
         outputDeviceId: '',
@@ -274,3 +284,107 @@ test('AudioSettingsModal enforces strict product truthfulness (no fake buffer-si
   assert.equal(formatLatencyMilliseconds(null), 'Not reported by runtime');
   assert.equal(formatLatencyMilliseconds(0.008), '8.00 ms');
 });
+
+test('P2 regression: opening and closing AudioSettingsModal repeatedly scopes subscriptions to UI lifecycle without initializing or duplicating hardware monitoring listeners, and App starts/stops monitoring once', async () => {
+  const modalSource = readFileSync(path.join(repoRoot, 'src/components/AudioSettingsModal.tsx'), 'utf8');
+  const appSource = readFileSync(path.join(repoRoot, 'src/App.tsx'), 'utf8');
+
+  assert.doesNotMatch(
+    modalSource,
+    /initializePassiveMonitoring/,
+    'AudioSettingsModal must not own or trigger hardware passive monitoring initialization',
+  );
+  assert.match(appSource, /audioEngine\.startDeviceMonitoring\(\)/);
+  assert.match(appSource, /audioEngine\.stopDeviceMonitoring\(\)/);
+
+  const deviceChangeListeners = new Set<EventListener>();
+  const permissionChangeListeners = new Set<() => void>();
+  let getUserMediaCalls = 0;
+
+  const mediaDevices: MediaDevicesLike = {
+    enumerateDevices: async () => [
+      {
+        deviceId: 'default',
+        groupId: 'grp-default',
+        kind: 'audiooutput',
+        label: 'Default System Output',
+        toJSON: () => ({}),
+      } as MediaDeviceInfo,
+    ],
+    getUserMedia: async () => {
+      getUserMediaCalls += 1;
+      throw new Error('Unexpected startup getUserMedia');
+    },
+    addEventListener: (type, cb) => {
+      if (type === 'devicechange') deviceChangeListeners.add(cb);
+    },
+    removeEventListener: (type, cb) => {
+      if (type === 'devicechange') deviceChangeListeners.delete(cb);
+    },
+  };
+
+  const manager = new AudioDeviceManager({
+    storage: {
+      getItem: () => null,
+      setItem: () => {},
+      removeItem: () => {},
+    },
+    getMediaDevices: () => mediaDevices,
+    getPermissions: () => ({
+      query: async () => ({
+        state: 'prompt',
+        addEventListener: (type: string, cb: () => void) => {
+          if (type === 'change') permissionChangeListeners.add(cb);
+        },
+        removeEventListener: (type: string, cb: () => void) => {
+          if (type === 'change') permissionChangeListeners.delete(cb);
+        },
+      }),
+    }),
+  });
+
+  const engineListeners = new Set<() => void>();
+  const ports = createPorts();
+  const trackedEngine: AudioSettingsEnginePort = {
+    ...ports.engine,
+    subscribeAudioEngineState: cb => {
+      engineListeners.add(cb);
+      return () => {
+        engineListeners.delete(cb);
+      };
+    },
+  };
+
+  // Application startup starts passive monitoring once while modal is closed.
+  await manager.initializePassiveMonitoring();
+  assert.equal(getUserMediaCalls, 0);
+  assert.equal(deviceChangeListeners.size, 1);
+  assert.equal(permissionChangeListeners.size, 1);
+
+  // Repeatedly open and close AudioSettingsModal 5 times: hardware listeners stay at 1
+  // and UI listeners return cleanly to 0 after every close.
+  for (let cycle = 0; cycle < 5; cycle += 1) {
+    let syncCalls = 0;
+    const disposeModalUi = bindAudioSettingsModalSubscriptions({
+      isOpen: true,
+      engine: trackedEngine,
+      deviceManager: manager,
+      onSync: () => {
+        syncCalls += 1;
+      },
+    });
+    assert.equal(syncCalls, 1);
+    assert.equal(engineListeners.size, 1);
+    assert.equal(deviceChangeListeners.size, 1, `cycle ${cycle}: devicechange listener must not duplicate`);
+    assert.equal(permissionChangeListeners.size, 1, `cycle ${cycle}: permission listener must not duplicate`);
+    disposeModalUi();
+    assert.equal(engineListeners.size, 0, `cycle ${cycle}: modal engine subscription must dispose on close`);
+  }
+
+  // Application teardown disposes hardware monitoring listeners.
+  manager.disposeMonitoring();
+  assert.equal(deviceChangeListeners.size, 0);
+  assert.equal(permissionChangeListeners.size, 0);
+  assert.equal(getUserMediaCalls, 0);
+});
+

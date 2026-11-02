@@ -22,8 +22,11 @@ import { resynchronizeLiveEngineFromProjectState } from '../state/liveEngineResy
 const AudioEngineCtor = (audioEngine as unknown as { constructor: new () => typeof audioEngine }).constructor;
 
 interface TrackedContextInstance {
+  readonly raw: AudioContext & { sinkId: string; sinkCalls: string[] };
   readonly options: AudioContextOptions | undefined;
   readonly sampleRate: number;
+  readonly sinkId: string;
+  readonly sinkCalls: readonly string[];
   state: AudioContextState;
   closedCount: number;
   resumedCount: number;
@@ -47,6 +50,8 @@ const installRenderingAudioEnvironment = (config: {
   }) {
     readonly constructedOptions: AudioContextOptions | undefined;
     private _stateOverride: AudioContextState = 'running';
+    private _sinkId = '';
+    readonly sinkCalls: string[] = [];
     closedCount = 0;
     resumedCount = 0;
     baseLatency: number | undefined;
@@ -69,11 +74,20 @@ const installRenderingAudioEnvironment = (config: {
 
       const self = this;
       instances.push({
+        get raw() {
+          return self as unknown as AudioContext & { sinkId: string; sinkCalls: string[] };
+        },
         get options() {
           return self.constructedOptions;
         },
         get sampleRate() {
           return self.sampleRate;
+        },
+        get sinkId() {
+          return self._sinkId;
+        },
+        get sinkCalls() {
+          return self.sinkCalls;
         },
         get state() {
           return self.state;
@@ -92,6 +106,20 @@ const installRenderingAudioEnvironment = (config: {
           self.onstatechange?.();
         },
       });
+    }
+
+    get sinkId(): string {
+      return this._sinkId;
+    }
+
+    async setSinkId(sinkId: string): Promise<void> {
+      if (this._stateOverride === 'closed') {
+        const err = new Error('Cannot setSinkId on closed AudioContext');
+        err.name = 'InvalidStateError';
+        throw err;
+      }
+      this.sinkCalls.push(sinkId);
+      this._sinkId = sinkId;
     }
 
     override get state(): AudioContextState {
@@ -511,3 +539,303 @@ test('real DSP rendering: full graph, sample assets, Mixer FX/routing, project h
     env.restore();
   }
 });
+
+test('P1 regression: binds current live AudioContext when started with persisted non-default output, reconfigured 48 kHz -> 96 kHz, switched between non-default outputs, and hot-unplugged after reconfiguration', async () => {
+  const OriginalNavigator = globalThis.navigator;
+  const OriginalLocalStorage = (globalThis as Record<string, unknown>).localStorage;
+
+  const makeDevice = (kind: MediaDeviceKind, deviceId: string, label: string): MediaDeviceInfo => ({
+    deviceId,
+    groupId: `grp-${deviceId}`,
+    kind,
+    label,
+    toJSON: () => ({ deviceId, kind, label }),
+  });
+
+  let availableDevices: MediaDeviceInfo[] = [
+    makeDevice('audiooutput', 'default', 'Default - Built-in Speakers'),
+    makeDevice('audiooutput', 'dac-usb', 'Studio USB DAC'),
+    makeDevice('audiooutput', 'monitors-spdif', 'S/PDIF Reference Monitors'),
+    makeDevice('audioinput', 'default', 'Default - Built-in Mic'),
+  ];
+  const deviceChangeListeners = new Set<EventListener>();
+  const storageMap = new Map<string, string>();
+  const memoryLocalStorage = {
+    getItem: (key: string) => storageMap.get(key) ?? null,
+    setItem: (key: string, value: string) => {
+      storageMap.set(key, value);
+    },
+    removeItem: (key: string) => {
+      storageMap.delete(key);
+    },
+  };
+
+  const env = installRenderingAudioEnvironment();
+  try {
+    (globalThis as Record<string, unknown>).localStorage = memoryLocalStorage;
+    Object.defineProperty(globalThis, 'navigator', {
+      configurable: true,
+      value: {
+        mediaDevices: {
+          enumerateDevices: async () => availableDevices,
+          addEventListener: (type: string, listener: EventListener) => {
+            if (type === 'devicechange') deviceChangeListeners.add(listener);
+          },
+          removeEventListener: (type: string, listener: EventListener) => {
+            if (type === 'devicechange') deviceChangeListeners.delete(listener);
+          },
+        },
+      },
+    });
+
+    const engine = new AudioEngineCtor();
+    audioDeviceManager.disposeMonitoring();
+    audioDeviceManager.bindAudioContext(null);
+    audioDeviceManager.resetToDefaults();
+
+    // 0. Saving an output preference before the engine is initialized persists the
+    // preference while truthfully reporting ok=false / liveSwitched=false.
+    await engine.startDeviceMonitoring();
+    const preInitChoice = await audioDeviceManager.selectOutputDevice('dac-usb');
+    assert.equal(preInitChoice.preferenceSaved, true);
+    assert.equal(preInitChoice.ok, false);
+    assert.equal(preInitChoice.liveSwitched, false);
+    assert.equal(preInitChoice.activeDeviceId, '');
+    assert.equal(audioDeviceManager.getPreferredOutputDeviceId(), 'dac-usb');
+    audioDeviceManager.updateEnginePreferences({ sampleRate: 48000 });
+
+    // 1. Start engine with persisted non-default output ('dac-usb' @ 48 kHz) and verify
+    // audioDeviceManager binds to the newly created 48 kHz context and applies 'dac-usb'.
+    await engine.ensureAudioEngineInitialized();
+    await new Promise(resolve => setTimeout(resolve, 20));
+
+    assert.equal(env.instances.length, 1);
+    const ctx48 = env.instances[0];
+    assert.equal(ctx48.sampleRate, 48000);
+    assert.equal(audioDeviceManager.getBoundAudioContext(), ctx48.raw);
+    assert.equal(ctx48.sinkId, 'dac-usb');
+    assert.equal(audioDeviceManager.getActiveOutputDeviceId(), 'dac-usb');
+
+    // 2 & 3. Reconfigure from 48 kHz to 96 kHz with non-default output ('dac-usb') selected;
+    // verify old context is closed and audioDeviceManager points to the replacement context.
+    const reconfig96 = await engine.reconfigureAudioContext({ sampleRate: 96000 });
+    assert.equal(reconfig96.actualSampleRate, 96000);
+    assert.equal(env.instances.length, 2);
+    const ctx96 = env.instances[1];
+    assert.notEqual(ctx96.raw, ctx48.raw);
+    assert.equal(ctx48.state, 'closed');
+    assert.equal(ctx48.closedCount, 1);
+    assert.equal(audioDeviceManager.getBoundAudioContext(), ctx96.raw);
+    assert.equal(ctx96.sinkId, 'dac-usb');
+    assert.equal(audioDeviceManager.getActiveOutputDeviceId(), 'dac-usb');
+    const ctx48SinkCallsAfterClose = ctx48.sinkCalls.length;
+
+    // 4 & 5. Switch from one non-default output ('dac-usb') to another ('monitors-spdif')
+    // after reconfiguration WITHOUT passing an explicit context (exact AudioSettingsModal call).
+    const postReconfigSwitch = await audioDeviceManager.selectOutputDevice('monitors-spdif');
+    assert.equal(postReconfigSwitch.ok, true);
+    assert.equal(postReconfigSwitch.liveSwitched, true);
+    assert.equal(postReconfigSwitch.activeDeviceId, 'monitors-spdif');
+    assert.equal(ctx96.sinkId, 'monitors-spdif');
+    assert.equal(audioDeviceManager.getActiveOutputDeviceId(), 'monitors-spdif');
+    assert.equal(
+      ctx48.sinkCalls.length,
+      ctx48SinkCallsAfterClose,
+      'closed 48 kHz context must never receive post-reconfigure setSinkId calls',
+    );
+
+    // 6 & 7. Simulate output-device disconnection after reconfiguration and verify
+    // hot-unplug fallback is applied to the replacement 96 kHz context.
+    availableDevices = [
+      makeDevice('audiooutput', 'default', 'Default - Built-in Speakers'),
+      makeDevice('audiooutput', 'dac-usb', 'Studio USB DAC'),
+      makeDevice('audioinput', 'default', 'Default - Built-in Mic'),
+    ];
+    for (const listener of [...deviceChangeListeners]) {
+      listener(new Event('devicechange'));
+    }
+    await new Promise(resolve => setTimeout(resolve, 25));
+
+    assert.equal(ctx96.sinkId, '');
+    assert.equal(ctx96.sinkCalls.at(-1), '');
+    assert.equal(audioDeviceManager.getActiveOutputDeviceId(), '');
+    assert.equal(audioDeviceManager.getPreferredOutputDeviceId(), '');
+    assert.equal(ctx48.sinkCalls.length, ctx48SinkCallsAfterClose);
+    assert.match(
+      audioDeviceManager.getSnapshot().outputNotice?.message ?? '',
+      /disconnected.*Default System Device/i,
+    );
+
+    // 8. Verify null, closed, and foreign/stale contexts cannot report a successful live switch.
+    const nullSwitch = await audioDeviceManager.selectOutputDevice('dac-usb', null);
+    assert.equal(nullSwitch.ok, false);
+    assert.equal(nullSwitch.liveSwitched, false);
+    assert.equal(nullSwitch.preferenceSaved, false);
+    assert.equal(audioDeviceManager.getBoundAudioContext(), ctx96.raw);
+
+    const closedStaleSwitch = await audioDeviceManager.selectOutputDevice('dac-usb', ctx48.raw);
+    assert.equal(closedStaleSwitch.ok, false);
+    assert.equal(closedStaleSwitch.liveSwitched, false);
+    assert.equal(closedStaleSwitch.preferenceSaved, false);
+    assert.equal(audioDeviceManager.getBoundAudioContext(), ctx96.raw);
+
+    const foreignCtx = new (globalThis.AudioContext as unknown as {
+      new (opts?: AudioContextOptions): AudioContext & { sinkCalls: string[] };
+    })({ sampleRate: 44100 });
+    try {
+      const foreignStaleSwitch = await audioDeviceManager.selectOutputDevice('dac-usb', foreignCtx);
+      assert.equal(foreignStaleSwitch.ok, false);
+      assert.equal(foreignStaleSwitch.liveSwitched, false);
+      assert.equal(foreignStaleSwitch.preferenceSaved, false);
+      assert.equal(foreignCtx.sinkCalls.length, 0);
+      assert.equal(audioDeviceManager.getBoundAudioContext(), ctx96.raw);
+    } finally {
+      await foreignCtx.close();
+    }
+
+    engine.stopDeviceMonitoring();
+    audioDeviceManager.bindAudioContext(null);
+    audioDeviceManager.resetToDefaults();
+  } finally {
+    audioDeviceManager.disposeMonitoring();
+    audioDeviceManager.bindAudioContext(null);
+    Object.defineProperty(globalThis, 'navigator', { configurable: true, value: OriginalNavigator });
+    (globalThis as Record<string, unknown>).localStorage = OriginalLocalStorage;
+    env.restore();
+  }
+});
+
+test('P2 regression: AudioEngine.startDeviceMonitoring detects device changes while Audio Settings is closed without prompting microphone permission, and stopDeviceMonitoring removes listeners on teardown', async () => {
+  const OriginalNavigator = globalThis.navigator;
+
+  const makeDevice = (kind: MediaDeviceKind, deviceId: string, label: string): MediaDeviceInfo => ({
+    deviceId,
+    groupId: `grp-${deviceId}`,
+    kind,
+    label,
+    toJSON: () => ({ deviceId, kind, label }),
+  });
+
+  let availableDevices: MediaDeviceInfo[] = [
+    makeDevice('audiooutput', 'default', 'Default - Built-in Output'),
+    makeDevice('audioinput', 'default', 'Default - Built-in Mic'),
+  ];
+  let getUserMediaCalls = 0;
+  let permissionsQueryCalls = 0;
+  const deviceChangeListeners = new Set<EventListener>();
+  const permissionChangeListeners = new Set<() => void>();
+
+  const env = installRenderingAudioEnvironment();
+  try {
+    Object.defineProperty(globalThis, 'navigator', {
+      configurable: true,
+      value: {
+        mediaDevices: {
+          enumerateDevices: async () => availableDevices,
+          getUserMedia: async () => {
+            getUserMediaCalls += 1;
+            throw new Error('getUserMedia must never be called during startup passive monitoring');
+          },
+          addEventListener: (type: string, listener: EventListener) => {
+            if (type === 'devicechange') deviceChangeListeners.add(listener);
+          },
+          removeEventListener: (type: string, listener: EventListener) => {
+            if (type === 'devicechange') deviceChangeListeners.delete(listener);
+          },
+        },
+        permissions: {
+          query: async () => {
+            permissionsQueryCalls += 1;
+            return {
+              state: 'prompt',
+              addEventListener: (type: string, cb: () => void) => {
+                if (type === 'change') permissionChangeListeners.add(cb);
+              },
+              removeEventListener: (type: string, cb: () => void) => {
+                if (type === 'change') permissionChangeListeners.delete(cb);
+              },
+            };
+          },
+        },
+      },
+    });
+
+    const engine = new AudioEngineCtor();
+    audioDeviceManager.disposeMonitoring();
+    audioDeviceManager.bindAudioContext(null);
+    audioDeviceManager.resetToDefaults();
+
+    let engineNotifications = 0;
+    const unsubEngine = engine.subscribeAudioEngineState(() => {
+      engineNotifications += 1;
+    });
+
+    // 1 & 2. Startup monitoring runs with Audio Settings closed and never calls getUserMedia.
+    await engine.startDeviceMonitoring();
+    assert.equal(getUserMediaCalls, 0, 'startup monitoring must never trigger getUserMedia');
+    assert.equal(permissionsQueryCalls, 1, 'passive permission query should execute once');
+    assert.equal(deviceChangeListeners.size, 1);
+    assert.equal(permissionChangeListeners.size, 1);
+    assert.equal(audioDeviceManager.isMonitoringActive(), true);
+
+    // Hot-plug a USB interface while Audio Settings remains closed.
+    const notificationsBeforeHotplug = engineNotifications;
+    availableDevices = [
+      ...availableDevices,
+      makeDevice('audiooutput', 'usb-apollo', 'Universal Audio USB Out'),
+      makeDevice('audioinput', 'usb-apollo-in', 'Universal Audio USB In'),
+    ];
+    for (const listener of [...deviceChangeListeners]) {
+      listener(new Event('devicechange'));
+    }
+    await new Promise(resolve => setTimeout(resolve, 25));
+
+    const snapAfterHotplug = audioDeviceManager.getSnapshot();
+    assert.equal(
+      snapAfterHotplug.outputDevices.some(d => d.deviceId === 'usb-apollo'),
+      true,
+      'output hot-plug must be observed while Audio Settings modal is closed',
+    );
+    assert.equal(
+      snapAfterHotplug.inputDevices.some(d => d.deviceId === 'usb-apollo-in'),
+      true,
+      'input hot-plug must be observed while Audio Settings modal is closed',
+    );
+    assert.ok(engineNotifications > notificationsBeforeHotplug);
+
+    // 5. Output hot-unplug fallback while Audio Settings is closed operates on the current live AudioContext.
+    await engine.reconfigureAudioContext({ sampleRate: 96000 });
+    const liveCtx96 = env.instances[0];
+    const routed = await audioDeviceManager.selectOutputDevice('usb-apollo');
+    assert.equal(routed.ok, true);
+    assert.equal(liveCtx96.sinkId, 'usb-apollo');
+
+    availableDevices = [
+      makeDevice('audiooutput', 'default', 'Default - Built-in Output'),
+      makeDevice('audioinput', 'default', 'Default - Built-in Mic'),
+    ];
+    for (const listener of [...deviceChangeListeners]) {
+      listener(new Event('devicechange'));
+    }
+    await new Promise(resolve => setTimeout(resolve, 25));
+    assert.equal(liveCtx96.sinkId, '');
+    assert.equal(audioDeviceManager.getActiveOutputDeviceId(), '');
+
+    // 4. Application teardown removes both devicechange and permission listeners.
+    unsubEngine();
+    engine.stopDeviceMonitoring();
+    assert.equal(audioDeviceManager.isMonitoringActive(), false);
+    assert.equal(deviceChangeListeners.size, 0, 'teardown must remove devicechange listener');
+    assert.equal(permissionChangeListeners.size, 0, 'teardown must remove permission listener');
+    assert.equal(getUserMediaCalls, 0);
+
+    audioDeviceManager.bindAudioContext(null);
+    audioDeviceManager.resetToDefaults();
+  } finally {
+    audioDeviceManager.disposeMonitoring();
+    audioDeviceManager.bindAudioContext(null);
+    Object.defineProperty(globalThis, 'navigator', { configurable: true, value: OriginalNavigator });
+    env.restore();
+  }
+});
+

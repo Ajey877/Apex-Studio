@@ -475,3 +475,156 @@ test('selected input device wires exact deviceId constraints into BOTH Recording
     Object.defineProperty(globalThis, 'MediaRecorder', { configurable: true, value: OriginalMediaRecorder });
   }
 });
+
+test('P1 regression: pre-init output selection saves preference with ok=false, while null, closed, or stale AudioContext never reports a successful live switch or clobbers boundContext', async () => {
+  const mediaDevices: MediaDevicesLike = {
+    enumerateDevices: async () => [
+      makeDevice('audiooutput', 'default', 'Default - Built-in Speakers'),
+      makeDevice('audiooutput', 'dac-usb', 'Studio USB DAC'),
+      makeDevice('audiooutput', 'monitors-spdif', 'S/PDIF Reference Monitors'),
+    ],
+  };
+
+  const storage = new MemoryStorage();
+  const manager = new AudioDeviceManager({
+    storage,
+    getMediaDevices: () => mediaDevices,
+    getAudioContextConstructor: () => FakeSinkAudioContext,
+  });
+  await manager.refreshDevices();
+
+  // 1. Pre-initialization: boundContext is null; preference is saved while ok=false / liveSwitched=false.
+  const preInit = await manager.selectOutputDevice('dac-usb');
+  assert.equal(preInit.ok, false);
+  assert.equal(preInit.liveSwitched, false);
+  assert.equal(preInit.preferenceSaved, true);
+  assert.equal(preInit.activeDeviceId, '');
+  assert.equal(manager.getPreferredOutputDeviceId(), 'dac-usb');
+
+  // 2. Bind live 48 kHz context, then replace with live 96 kHz context and close the 48 kHz context.
+  const oldCtx48 = new FakeSinkAudioContext() as unknown as AudioContext & AudioContextWithSinkId;
+  manager.bindAudioContext(oldCtx48);
+  const firstLive = await manager.selectOutputDevice('dac-usb');
+  assert.equal(firstLive.ok, true);
+  assert.equal(firstLive.liveSwitched, true);
+  assert.equal(oldCtx48.sinkId, 'dac-usb');
+
+  const liveCtx96Fake = new FakeSinkAudioContext();
+  liveCtx96Fake.sampleRate = 96000;
+  const liveCtx96 = liveCtx96Fake as unknown as AudioContext & AudioContextWithSinkId;
+  (oldCtx48 as unknown as FakeSinkAudioContext).state = 'closed';
+  manager.bindAudioContext(liveCtx96);
+  const appliedReplacement = await manager.applyOutputDeviceToContext(liveCtx96, 'dac-usb', {
+    persist: true,
+  });
+  assert.equal(appliedReplacement.ok, true);
+  assert.equal(appliedReplacement.liveSwitched, true);
+  assert.equal(manager.getBoundAudioContext(), liveCtx96);
+  assert.equal(liveCtx96.sinkId, 'dac-usb');
+
+  // 3. Explicit null context cannot report a live switch or clobber boundContext.
+  const nullDirect = await manager.applyOutputDeviceToContext(null, 'monitors-spdif');
+  assert.equal(nullDirect.ok, false);
+  assert.equal(nullDirect.liveSwitched, false);
+  assert.equal(nullDirect.preferenceSaved, false);
+  assert.equal(manager.getBoundAudioContext(), liveCtx96);
+  assert.equal(manager.getPreferredOutputDeviceId(), 'dac-usb');
+
+  // 4. Closed stale context cannot report a live switch or re-bind itself.
+  const closedSwitch = await manager.selectOutputDevice('monitors-spdif', oldCtx48);
+  assert.equal(closedSwitch.ok, false);
+  assert.equal(closedSwitch.liveSwitched, false);
+  assert.equal(closedSwitch.preferenceSaved, false);
+  assert.equal(manager.getBoundAudioContext(), liveCtx96);
+  assert.equal(liveCtx96.sinkId, 'dac-usb');
+
+  // 5. Foreign running (stale/unclosed) context cannot report a live switch or hijack boundContext.
+  const foreignRunningCtx = new FakeSinkAudioContext() as unknown as AudioContext & AudioContextWithSinkId;
+  const foreignSwitch = await manager.selectOutputDevice('monitors-spdif', foreignRunningCtx);
+  assert.equal(foreignSwitch.ok, false);
+  assert.equal(foreignSwitch.liveSwitched, false);
+  assert.equal(foreignSwitch.preferenceSaved, false);
+  assert.equal((foreignRunningCtx as unknown as FakeSinkAudioContext).sinkCalls.length, 0);
+  assert.equal(manager.getBoundAudioContext(), liveCtx96);
+
+  // 6. Verified sinkId readback also guards Default System Device ('') switches.
+  (liveCtx96 as unknown as FakeSinkAudioContext).ignoreSinkSwitchForTarget = '';
+  const failedDefaultReset = await manager.selectOutputDevice('');
+  assert.equal(failedDefaultReset.ok, false);
+  assert.equal(failedDefaultReset.liveSwitched, false);
+  assert.equal(failedDefaultReset.activeDeviceId, 'dac-usb');
+  (liveCtx96 as unknown as FakeSinkAudioContext).ignoreSinkSwitchForTarget = null;
+});
+
+test('P2 regression: initializePassiveMonitoring is idempotent across concurrent/repeated calls, never calls getUserMedia, and disposeMonitoring cleanly removes devicechange and permission listeners even mid-flight', async () => {
+  let getUserMediaCalls = 0;
+  let permissionsQueryCalls = 0;
+  const deviceChangeListeners = new Set<EventListener>();
+  const permissionChangeListeners = new Set<() => void>();
+
+  const mediaDevices: MediaDevicesLike = {
+    enumerateDevices: async () => [
+      makeDevice('audiooutput', 'default', 'Default Speakers'),
+      makeDevice('audioinput', 'default', 'Default Mic'),
+    ],
+    getUserMedia: async () => {
+      getUserMediaCalls += 1;
+      throw new Error('getUserMedia must not run during passive monitoring');
+    },
+    addEventListener: (type, cb) => {
+      if (type === 'devicechange') deviceChangeListeners.add(cb);
+    },
+    removeEventListener: (type, cb) => {
+      if (type === 'devicechange') deviceChangeListeners.delete(cb);
+    },
+  };
+
+  const manager = new AudioDeviceManager({
+    storage: new MemoryStorage(),
+    getMediaDevices: () => mediaDevices,
+    getPermissions: () => ({
+      query: async () => {
+        permissionsQueryCalls += 1;
+        await new Promise(resolve => setTimeout(resolve, 10));
+        return {
+          state: 'prompt',
+          addEventListener: (type: string, cb: () => void) => {
+            if (type === 'change') permissionChangeListeners.add(cb);
+          },
+          removeEventListener: (type: string, cb: () => void) => {
+            if (type === 'change') permissionChangeListeners.delete(cb);
+          },
+        };
+      },
+    }),
+  });
+
+  // Concurrent + repeated calls attach listeners exactly once and never call getUserMedia.
+  await Promise.all([
+    manager.initializePassiveMonitoring(),
+    manager.initializePassiveMonitoring(),
+  ]);
+  await manager.initializePassiveMonitoring();
+
+  assert.equal(getUserMediaCalls, 0);
+  assert.equal(permissionsQueryCalls, 1);
+  assert.equal(deviceChangeListeners.size, 1);
+  assert.equal(permissionChangeListeners.size, 1);
+  assert.equal(manager.isMonitoringActive(), true);
+
+  // Teardown disposes both listeners cleanly.
+  manager.disposeMonitoring();
+  assert.equal(manager.isMonitoringActive(), false);
+  assert.equal(deviceChangeListeners.size, 0);
+  assert.equal(permissionChangeListeners.size, 0);
+
+  // Mid-flight dispose during async permissions.query prevents stale permission listener attachment.
+  const inflight = manager.initializePassiveMonitoring();
+  manager.disposeMonitoring();
+  await inflight;
+  assert.equal(manager.isMonitoringActive(), false);
+  assert.equal(deviceChangeListeners.size, 0);
+  assert.equal(permissionChangeListeners.size, 0);
+  assert.equal(getUserMediaCalls, 0);
+});
+

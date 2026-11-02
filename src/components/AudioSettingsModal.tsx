@@ -34,11 +34,19 @@ export interface AudioSettingsEnginePort {
 export interface AudioSettingsDevicePort {
   getSnapshot(ctx?: AudioContext | null): AudioDeviceManagerSnapshot;
   subscribe(listener: (snapshot: AudioDeviceManagerSnapshot) => void): () => void;
-  initializePassiveMonitoring(): Promise<AudioDeviceManagerSnapshot>;
   refreshDevices(): Promise<AudioDeviceManagerSnapshot>;
   requestMicrophonePermission(): Promise<{ granted: boolean; message: string | null }>;
   promptOutputDeviceSelection(ctx?: AudioContext | null): Promise<{ ok: boolean; message: string | null }>;
-  selectOutputDevice(deviceId: string, ctx?: AudioContext | null): Promise<{ ok: boolean; activeDeviceId: string; message: string | null }>;
+  selectOutputDevice(
+    deviceId: string,
+    ctx?: AudioContext | null,
+  ): Promise<{
+    ok: boolean;
+    liveSwitched?: boolean;
+    preferenceSaved?: boolean;
+    activeDeviceId: string;
+    message: string | null;
+  }>;
   selectInputDevice(deviceId: string): { ok: boolean; selectedDeviceId: string; message: string | null };
   resetToDefaults(): {
     outputDeviceId: string;
@@ -53,6 +61,32 @@ export interface AudioSettingsModalProps {
   onClose: () => void;
   engine?: AudioSettingsEnginePort;
   deviceManager?: AudioSettingsDevicePort;
+}
+
+export function bindAudioSettingsModalSubscriptions(params: {
+  isOpen: boolean;
+  engine: Pick<
+    AudioSettingsEnginePort,
+    'getAudioEngineDiagnostics' | 'subscribeAudioEngineState'
+  >;
+  deviceManager: Pick<AudioSettingsDevicePort, 'getSnapshot' | 'subscribe'>;
+  onSync: (diagnostics: AudioEngineDiagnostics, deviceSnapshot: AudioDeviceManagerSnapshot) => void;
+}): () => void {
+  if (!params.isOpen) {
+    return () => {};
+  }
+  const syncBoth = () => {
+    params.onSync(params.engine.getAudioEngineDiagnostics(), params.deviceManager.getSnapshot());
+  };
+  syncBoth();
+  const unsubEngine = params.engine.subscribeAudioEngineState(syncBoth);
+  const unsubDevices = params.deviceManager.subscribe(nextSnap => {
+    params.onSync(params.engine.getAudioEngineDiagnostics(), nextSnap);
+  });
+  return () => {
+    unsubEngine();
+    unsubDevices();
+  };
 }
 
 const LATENCY_COPY: Record<
@@ -123,30 +157,20 @@ export const AudioSettingsModal: React.FC<AudioSettingsModalProps> = ({
   useEffect(() => {
     if (!isOpen) return;
 
-    const refreshDiagnostics = () => {
-      const nextDiag = engine.getAudioEngineDiagnostics();
-      setDiagnostics(nextDiag);
-      setDeviceSnapshot(deviceManager.getSnapshot());
-    };
-
-    refreshDiagnostics();
     const initialDiag = engine.getAudioEngineDiagnostics();
     setStagedSampleRate(initialDiag.requestedSampleRate);
     setStagedLatencyHint(initialDiag.latencyHint);
     setStatusBanner(null);
 
-    const unsubEngine = engine.subscribeAudioEngineState(refreshDiagnostics);
-    const unsubDevices = deviceManager.subscribe(nextSnap => {
-      setDeviceSnapshot(nextSnap);
-      setDiagnostics(engine.getAudioEngineDiagnostics());
+    return bindAudioSettingsModalSubscriptions({
+      isOpen,
+      engine,
+      deviceManager,
+      onSync: (nextDiag, nextSnap) => {
+        setDiagnostics(nextDiag);
+        setDeviceSnapshot(nextSnap);
+      },
     });
-
-    void deviceManager.initializePassiveMonitoring();
-
-    return () => {
-      unsubEngine();
-      unsubDevices();
-    };
   }, [isOpen, engine, deviceManager]);
 
   const handleRefreshDevices = useCallback(async () => {
@@ -175,6 +199,12 @@ export const AudioSettingsModal: React.FC<AudioSettingsModalProps> = ({
         setStatusBanner({
           tone: 'success',
           message: `Audio output routed to ${chosen?.label ?? 'Default System Device'}.`,
+        });
+      } else if (result.preferenceSaved) {
+        const chosen = deviceSnapshot.outputDevices.find(d => d.deviceId === nextDeviceId);
+        setStatusBanner({
+          tone: 'warning',
+          message: `Preferred audio output saved (${chosen?.label ?? 'Default System Device'}). Initialize or start the audio engine to route live audio.`,
         });
       }
     },
@@ -265,10 +295,12 @@ export const AudioSettingsModal: React.FC<AudioSettingsModalProps> = ({
       return;
     }
     const defaults = deviceManager.resetToDefaults();
-    await deviceManager.selectOutputDevice(defaults.outputDeviceId);
     setStagedSampleRate(defaults.sampleRate);
     setStagedLatencyHint(defaults.latencyHint);
     if (diagnostics.initialized) {
+      if (diagnostics.contextState !== 'closed') {
+        await deviceManager.selectOutputDevice(defaults.outputDeviceId);
+      }
       try {
         const result = await engine.reconfigureAudioContext({
           sampleRate: defaults.sampleRate,

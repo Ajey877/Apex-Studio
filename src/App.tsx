@@ -671,6 +671,13 @@ export function App() {
   }, [metronome]);
 
   useEffect(() => {
+    void audioEngine.startDeviceMonitoring();
+    return () => {
+      audioEngine.stopDeviceMonitoring();
+    };
+  }, []);
+
+  useEffect(() => {
     audioEngine.setExternalActiveOperationCheck(() => {
       if (midiRecorderRef.current?.isRecording) {
         return 'Stop active MIDI performance recording before reconfiguring the audio engine.';

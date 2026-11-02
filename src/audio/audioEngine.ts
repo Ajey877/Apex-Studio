@@ -88,7 +88,11 @@ import {
 } from './fxParameterControl';
 import { resolveFxParameterSpec } from './fxParameterContract';
 import { fullPatternEventsInWindow } from './fullPatternSchedule';
-import { audioDeviceManager, hasActiveRecordingSession } from './audioDeviceManager';
+import {
+  audioDeviceManager,
+  hasActiveRecordingSession,
+  type AudioDeviceManagerSnapshot,
+} from './audioDeviceManager';
 import {
   type AudioLatencyPreference,
   type AudioPreferences,
@@ -1013,6 +1017,22 @@ class AudioEngine {
   private lastKnownMixerTracks: Map<number, MixerTrack> = new Map();
   private lastKnownChannelsById: Map<string, Channel> = new Map();
   private masterVolumeValue = 1.0;
+  private detachDeviceManagerBridge: (() => void) | null = null;
+
+  public startDeviceMonitoring(): Promise<AudioDeviceManagerSnapshot> {
+    if (!this.detachDeviceManagerBridge) {
+      this.detachDeviceManagerBridge = audioDeviceManager.subscribe(() => {
+        this.emitAudioEngineState();
+      });
+    }
+    return audioDeviceManager.initializePassiveMonitoring();
+  }
+
+  public stopDeviceMonitoring(): void {
+    this.detachDeviceManagerBridge?.();
+    this.detachDeviceManagerBridge = null;
+    audioDeviceManager.disposeMonitoring();
+  }
 
   public setExternalActiveOperationCheck(check: (() => string | null) | null): void {
     this.externalActiveOperationCheck = check;
@@ -1108,7 +1128,11 @@ class AudioEngine {
     return new AudioContextClass(options);
   }
 
-  private attachLiveContextLifecycle(ctx: AudioContext, requestedRate?: RequestedSampleRate): void {
+  private attachLiveContextLifecycle(
+    ctx: AudioContext,
+    requestedRate?: RequestedSampleRate,
+    options: { skipAutoOutputRouting?: boolean } = {},
+  ): void {
     this.detachContextStateListener?.();
     this.detachContextStateListener = null;
     this.contextUnexpectedlyClosed = false;
@@ -1147,13 +1171,17 @@ class AudioEngine {
       };
     }
 
-    const preferredOutputId = audioDeviceManager.getPreferredOutputDeviceId();
-    if (preferredOutputId !== SYSTEM_DEFAULT_DEVICE_ID) {
-      void audioDeviceManager
-        .applyOutputDeviceToContext(ctx, preferredOutputId, { persist: true })
-        .finally(() => this.emitAudioEngineState());
-    } else {
-      audioDeviceManager.bindAudioContext(ctx);
+    // Always bind the newly attached or replaced live context first, even when a
+    // non-default output device is configured.
+    audioDeviceManager.bindAudioContext(ctx);
+
+    if (!options.skipAutoOutputRouting) {
+      const preferredOutputId = audioDeviceManager.getPreferredOutputDeviceId();
+      if (preferredOutputId !== SYSTEM_DEFAULT_DEVICE_ID) {
+        void audioDeviceManager
+          .applyOutputDeviceToContext(ctx, preferredOutputId, { persist: true })
+          .finally(() => this.emitAudioEngineState());
+      }
     }
   }
 
@@ -1403,15 +1431,15 @@ class AudioEngine {
           }
         }
 
-        this.attachLiveContextLifecycle(nextCtx, targetPrefs.sampleRate);
+        this.attachLiveContextLifecycle(nextCtx, targetPrefs.sampleRate, {
+          skipAutoOutputRouting: true,
+        });
         if (targetPrefs.outputDeviceId !== SYSTEM_DEFAULT_DEVICE_ID) {
           await audioDeviceManager.applyOutputDeviceToContext(
             nextCtx,
             targetPrefs.outputDeviceId,
             { persist: true },
           );
-        } else {
-          audioDeviceManager.bindAudioContext(nextCtx);
         }
 
         // Restore cached mixer tracks, custom bus/aux routing, and channel panners.

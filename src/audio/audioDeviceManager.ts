@@ -38,6 +38,8 @@ export interface AudioDeviceCapabilities {
 
 export interface OutputDeviceSwitchResult {
   ok: boolean;
+  liveSwitched: boolean;
+  preferenceSaved: boolean;
   activeDeviceId: string;
   fellBackToDefault: boolean;
   unsupported: boolean;
@@ -183,6 +185,8 @@ export class AudioDeviceManager {
 
   private boundContext: AudioContext | null = null;
   private monitoringInitialized = false;
+  private monitoringGeneration = 0;
+  private monitoringInitPromise: Promise<AudioDeviceManagerSnapshot> | null = null;
   private detachDeviceChangeListener: (() => void) | null = null;
   private detachPermissionListener: (() => void) | null = null;
   private knownHardwareOutputIds = new Set<string>();
@@ -238,15 +242,26 @@ export class AudioDeviceManager {
     return this.preferences.outputDeviceId;
   }
 
+  public getBoundAudioContext(): AudioContext | null {
+    return this.boundContext;
+  }
+
+  public isMonitoringActive(): boolean {
+    return this.monitoringInitialized;
+  }
+
   public getActiveOutputDeviceId(ctx?: AudioContext | null): string {
-    const effectiveCtx = ctx ?? this.boundContext;
-    if (effectiveCtx && supportsAudioContextSetSinkId(effectiveCtx, this.env.getAudioContextConstructor?.())) {
-      const sinkRaw = (effectiveCtx as AudioContextWithSinkId).sinkId;
-      if (typeof sinkRaw === 'string') {
-        return normalizeAudioDeviceId(sinkRaw);
+    const effectiveCtx = ctx === undefined ? this.boundContext : ctx;
+    if (effectiveCtx && effectiveCtx.state !== 'closed') {
+      if (supportsAudioContextSetSinkId(effectiveCtx, this.env.getAudioContextConstructor?.())) {
+        const sinkRaw = (effectiveCtx as AudioContextWithSinkId).sinkId;
+        if (typeof sinkRaw === 'string') {
+          return normalizeAudioDeviceId(sinkRaw);
+        }
       }
+      return this.activeOutputDeviceId;
     }
-    return this.activeOutputDeviceId;
+    return SYSTEM_DEFAULT_DEVICE_ID;
   }
 
   public getSnapshot(ctx?: AudioContext | null): AudioDeviceManagerSnapshot {
@@ -295,7 +310,7 @@ export class AudioDeviceManager {
 
   public bindAudioContext(ctx: AudioContext | null): void {
     this.boundContext = ctx;
-    if (ctx) {
+    if (ctx && ctx.state !== 'closed') {
       this.activeOutputDeviceId = readContextSinkId(ctx);
     } else {
       this.activeOutputDeviceId = SYSTEM_DEFAULT_DEVICE_ID;
@@ -304,29 +319,51 @@ export class AudioDeviceManager {
   }
 
   /**
-   * Initializes passive permission inspection and `devicechange` monitoring.
+   * Initializes passive permission inspection and `devicechange` monitoring once.
    * Never calls `getUserMedia` and never triggers a startup permission prompt.
    */
-  public async initializePassiveMonitoring(): Promise<AudioDeviceManagerSnapshot> {
-    if (!this.monitoringInitialized) {
-      this.monitoringInitialized = true;
-      const mediaDevices = this.resolveMediaDevices();
-      if (mediaDevices?.addEventListener) {
-        const onDeviceChange = () => {
-          void this.handleDeviceChangeEvent();
-        };
-        mediaDevices.addEventListener('devicechange', onDeviceChange);
-        this.detachDeviceChangeListener = () => {
-          mediaDevices.removeEventListener?.('devicechange', onDeviceChange);
-        };
+  public initializePassiveMonitoring(): Promise<AudioDeviceManagerSnapshot> {
+    if (this.monitoringInitialized) {
+      if (this.monitoringInitPromise) {
+        return this.monitoringInitPromise;
       }
-      await this.inspectMicrophonePermissionPassively();
+      return Promise.resolve(this.getSnapshot());
     }
-    await this.refreshDevices();
-    return this.getSnapshot();
+
+    this.monitoringInitialized = true;
+    const generation = ++this.monitoringGeneration;
+
+    const mediaDevices = this.resolveMediaDevices();
+    if (mediaDevices?.addEventListener) {
+      const onDeviceChange = () => {
+        if (this.monitoringGeneration !== generation || !this.monitoringInitialized) return;
+        void this.handleDeviceChangeEvent();
+      };
+      mediaDevices.addEventListener('devicechange', onDeviceChange);
+      this.detachDeviceChangeListener = () => {
+        mediaDevices.removeEventListener?.('devicechange', onDeviceChange);
+      };
+    }
+
+    const initRun = (async () => {
+      await this.inspectMicrophonePermissionPassively(generation);
+      if (this.monitoringGeneration === generation && this.monitoringInitialized) {
+        await this.refreshDevices();
+      }
+      return this.getSnapshot();
+    })().finally(() => {
+      if (this.monitoringInitPromise === initRun) {
+        this.monitoringInitPromise = null;
+      }
+    });
+
+    this.monitoringInitPromise = initRun;
+    return initRun;
   }
 
   public disposeMonitoring(): void {
+    this.monitoringGeneration += 1;
+    this.monitoringInitPromise = null;
     this.detachDeviceChangeListener?.();
     this.detachDeviceChangeListener = null;
     this.detachPermissionListener?.();
@@ -334,7 +371,7 @@ export class AudioDeviceManager {
     this.monitoringInitialized = false;
   }
 
-  private async inspectMicrophonePermissionPassively(): Promise<void> {
+  private async inspectMicrophonePermissionPassively(generation: number): Promise<void> {
     const capabilities = this.getCapabilities();
     if (!capabilities.microphoneCaptureSupported) {
       this.microphonePermission = 'unsupported';
@@ -349,7 +386,11 @@ export class AudioDeviceManager {
     }
     try {
       const status = await permissions.query({ name: 'microphone' });
+      if (this.monitoringGeneration !== generation || !this.monitoringInitialized) {
+        return;
+      }
       const applyState = (rawState: string) => {
+        if (this.monitoringGeneration !== generation || !this.monitoringInitialized) return;
         if (rawState === 'granted' || rawState === 'denied' || rawState === 'prompt') {
           const previous = this.microphonePermission;
           this.microphonePermission = rawState;
@@ -374,7 +415,9 @@ export class AudioDeviceManager {
       } else if ('onchange' in status) {
         status.onchange = onChange;
         this.detachPermissionListener = () => {
-          status.onchange = null;
+          if (status.onchange === onChange) {
+            status.onchange = null;
+          }
         };
       }
     } catch {
@@ -536,6 +579,7 @@ export class AudioDeviceManager {
       if (
         fromHotPlug &&
         this.boundContext &&
+        this.boundContext.state !== 'closed' &&
         this.getActiveOutputDeviceId(this.boundContext) !== preferredOutput &&
         this.getCapabilities(this.boundContext).outputSinkSelectionSupported
       ) {
@@ -604,18 +648,20 @@ export class AudioDeviceManager {
     reasonMessage: string,
     options: { keepPreferenceForReconnect: boolean },
   ): Promise<void> {
+    const liveCtx =
+      this.boundContext && this.boundContext.state !== 'closed' ? this.boundContext : null;
     if (
-      this.boundContext &&
-      supportsAudioContextSetSinkId(this.boundContext, this.env.getAudioContextConstructor?.())
+      liveCtx &&
+      supportsAudioContextSetSinkId(liveCtx, this.env.getAudioContextConstructor?.())
     ) {
       try {
-        await (this.boundContext as AudioContextWithSinkId).setSinkId?.(SYSTEM_DEFAULT_DEVICE_ID);
+        await (liveCtx as AudioContextWithSinkId).setSinkId?.(SYSTEM_DEFAULT_DEVICE_ID);
       } catch {
         // Ignore secondary fallback errors on closing/broken contexts.
       }
     }
-    const actualAfterFallback = this.boundContext
-      ? readContextSinkId(this.boundContext)
+    const actualAfterFallback = liveCtx
+      ? readContextSinkId(liveCtx)
       : SYSTEM_DEFAULT_DEVICE_ID;
     this.activeOutputDeviceId = actualAfterFallback;
     if (!options.keepPreferenceForReconnect) {
@@ -721,6 +767,8 @@ export class AudioDeviceManager {
       this.emit();
       return {
         ok: false,
+        liveSwitched: false,
+        preferenceSaved: false,
         activeDeviceId: this.getActiveOutputDeviceId(ctx),
         fellBackToDefault: false,
         unsupported: true,
@@ -732,7 +780,9 @@ export class AudioDeviceManager {
       const chosen = await mediaDevices.selectAudioOutput();
       await this.refreshDevices();
       const targetId = normalizeAudioDeviceId(chosen?.deviceId);
-      return await this.selectOutputDevice(targetId, ctx ?? this.boundContext);
+      return ctx === undefined
+        ? await this.selectOutputDevice(targetId)
+        : await this.selectOutputDevice(targetId, ctx);
     } catch (error) {
       const domName = extractDomExceptionName(error);
       const message =
@@ -743,6 +793,8 @@ export class AudioDeviceManager {
       this.emit();
       return {
         ok: false,
+        liveSwitched: false,
+        preferenceSaved: false,
         activeDeviceId: this.getActiveOutputDeviceId(ctx),
         fellBackToDefault: false,
         unsupported: false,
@@ -753,12 +805,83 @@ export class AudioDeviceManager {
 
   public async selectOutputDevice(
     requestedDeviceId: string,
-    ctx: AudioContext | null = this.boundContext,
+    ctx?: AudioContext | null,
   ): Promise<OutputDeviceSwitchResult> {
     const normalizedId = normalizeAudioDeviceId(requestedDeviceId);
-    if (ctx) {
-      this.boundContext = ctx;
+
+    // When called without an explicit context argument (standard Audio Settings UI path),
+    // target `this.boundContext`. If the engine has not initialized a live context yet,
+    // allow saving the preference for initial context creation WITHOUT reporting a live switch.
+    if (ctx === undefined) {
+      if (this.boundContext === null) {
+        const setSinkSupported = supportsAudioContextSetSinkId(
+          null,
+          this.env.getAudioContextConstructor?.(),
+        );
+        if (normalizedId !== SYSTEM_DEFAULT_DEVICE_ID && !setSinkSupported) {
+          const message =
+            'Audio output device switching (AudioContext.setSinkId) is not supported in this browser/runtime. Audio remains routed to Default System Device.';
+          this.activeOutputDeviceId = SYSTEM_DEFAULT_DEVICE_ID;
+          this.outputNotice = { tone: 'warning', message };
+          this.persistPreferences({ outputDeviceId: SYSTEM_DEFAULT_DEVICE_ID });
+          this.emit();
+          return {
+            ok: false,
+            liveSwitched: false,
+            preferenceSaved: false,
+            activeDeviceId: SYSTEM_DEFAULT_DEVICE_ID,
+            fellBackToDefault: true,
+            unsupported: true,
+            message,
+          };
+        }
+
+        const enumeratedHardwareOutputs = this.outputDevices.filter(
+          device => !device.isSystemDefault && device.deviceId !== SYSTEM_DEFAULT_DEVICE_ID,
+        );
+        if (
+          normalizedId !== SYSTEM_DEFAULT_DEVICE_ID &&
+          enumeratedHardwareOutputs.length > 0 &&
+          !enumeratedHardwareOutputs.some(device => device.deviceId === normalizedId)
+        ) {
+          const fallbackMessage =
+            'Selected audio output device is no longer connected. Audio output fell back to Default System Device.';
+          this.persistPreferences({ outputDeviceId: SYSTEM_DEFAULT_DEVICE_ID });
+          this.activeOutputDeviceId = SYSTEM_DEFAULT_DEVICE_ID;
+          this.selectedOutputAvailable = true;
+          this.outputNotice = { tone: 'warning', message: fallbackMessage };
+          this.emit();
+          return {
+            ok: false,
+            liveSwitched: false,
+            preferenceSaved: false,
+            activeDeviceId: SYSTEM_DEFAULT_DEVICE_ID,
+            fellBackToDefault: true,
+            unsupported: false,
+            message: fallbackMessage,
+          };
+        }
+
+        this.persistPreferences({ outputDeviceId: normalizedId });
+        this.activeOutputDeviceId = SYSTEM_DEFAULT_DEVICE_ID;
+        this.selectedOutputAvailable = true;
+        this.outputNotice = null;
+        this.emit();
+        return {
+          ok: false,
+          liveSwitched: false,
+          preferenceSaved: true,
+          activeDeviceId: SYSTEM_DEFAULT_DEVICE_ID,
+          fellBackToDefault: false,
+          unsupported: false,
+          message:
+            'Preferred audio output device saved. It will be applied when the audio engine initializes.',
+        };
+      }
+
+      return this.applyOutputDeviceToContext(this.boundContext, normalizedId, { persist: true });
     }
+
     return this.applyOutputDeviceToContext(ctx, normalizedId, { persist: true });
   }
 
@@ -768,22 +891,101 @@ export class AudioDeviceManager {
     options: { persist: boolean } = { persist: true },
   ): Promise<OutputDeviceSwitchResult> {
     const normalizedId = normalizeAudioDeviceId(requestedDeviceId);
+    const currentLiveCtx =
+      this.boundContext && this.boundContext.state !== 'closed' ? this.boundContext : null;
+    const currentActiveId = currentLiveCtx
+      ? readContextSinkId(currentLiveCtx)
+      : SYSTEM_DEFAULT_DEVICE_ID;
+
+    if (!ctx) {
+      const message =
+        'Cannot switch live audio output: no active AudioContext is available.';
+      this.outputNotice = { tone: 'warning', message };
+      this.emit();
+      return {
+        ok: false,
+        liveSwitched: false,
+        preferenceSaved: false,
+        activeDeviceId: currentActiveId,
+        fellBackToDefault: false,
+        unsupported: false,
+        message,
+      };
+    }
+
+    if (ctx.state === 'closed') {
+      const message = 'Cannot switch live audio output on a closed AudioContext.';
+      this.outputNotice = { tone: 'error', message };
+      this.emit();
+      return {
+        ok: false,
+        liveSwitched: false,
+        preferenceSaved: false,
+        activeDeviceId: currentActiveId,
+        fellBackToDefault: false,
+        unsupported: false,
+        message,
+      };
+    }
+
+    if (currentLiveCtx && ctx !== currentLiveCtx) {
+      const message =
+        'Cannot switch live audio output on a stale AudioContext that is no longer active.';
+      this.outputNotice = { tone: 'error', message };
+      this.emit();
+      return {
+        ok: false,
+        liveSwitched: false,
+        preferenceSaved: false,
+        activeDeviceId: currentActiveId,
+        fellBackToDefault: false,
+        unsupported: false,
+        message,
+      };
+    }
+
+    // `ctx` is verified live and non-stale; keep `boundContext` aligned.
+    this.boundContext = ctx;
+
     const setSinkSupported = supportsAudioContextSetSinkId(
       ctx,
       this.env.getAudioContextConstructor?.(),
     );
 
     if (normalizedId === SYSTEM_DEFAULT_DEVICE_ID) {
-      if (ctx && setSinkSupported) {
+      if (setSinkSupported) {
         try {
           await (ctx as AudioContextWithSinkId).setSinkId?.(SYSTEM_DEFAULT_DEVICE_ID);
         } catch (error) {
+          const actualSink = readContextSinkId(ctx);
+          this.activeOutputDeviceId = actualSink;
           const message = `Failed to switch audio output to Default System Device: ${extractErrorMessage(error)}`;
           this.outputNotice = { tone: 'error', message };
           this.emit();
           return {
             ok: false,
-            activeDeviceId: readContextSinkId(ctx),
+            liveSwitched: false,
+            preferenceSaved: false,
+            activeDeviceId: actualSink,
+            fellBackToDefault: false,
+            unsupported: false,
+            message,
+          };
+        }
+        const hasReadableDefaultSink = typeof (ctx as AudioContextWithSinkId).sinkId === 'string';
+        const verifiedDefaultSink = hasReadableDefaultSink
+          ? readContextSinkId(ctx)
+          : SYSTEM_DEFAULT_DEVICE_ID;
+        if (verifiedDefaultSink !== SYSTEM_DEFAULT_DEVICE_ID) {
+          const message = 'Audio engine did not switch back to Default System Device.';
+          this.activeOutputDeviceId = verifiedDefaultSink;
+          this.outputNotice = { tone: 'error', message };
+          this.emit();
+          return {
+            ok: false,
+            liveSwitched: false,
+            preferenceSaved: false,
+            activeDeviceId: verifiedDefaultSink,
             fellBackToDefault: false,
             unsupported: false,
             message,
@@ -799,6 +1001,8 @@ export class AudioDeviceManager {
       this.emit();
       return {
         ok: true,
+        liveSwitched: true,
+        preferenceSaved: Boolean(options.persist),
         activeDeviceId: SYSTEM_DEFAULT_DEVICE_ID,
         fellBackToDefault: false,
         unsupported: false,
@@ -807,9 +1011,10 @@ export class AudioDeviceManager {
     }
 
     if (!setSinkSupported) {
+      const actualSink = readContextSinkId(ctx);
       const message =
         'Audio output device switching (AudioContext.setSinkId) is not supported in this browser/runtime. Audio remains routed to Default System Device.';
-      this.activeOutputDeviceId = SYSTEM_DEFAULT_DEVICE_ID;
+      this.activeOutputDeviceId = actualSink;
       this.outputNotice = { tone: 'warning', message };
       if (options.persist) {
         this.persistPreferences({ outputDeviceId: SYSTEM_DEFAULT_DEVICE_ID });
@@ -817,8 +1022,10 @@ export class AudioDeviceManager {
       this.emit();
       return {
         ok: false,
-        activeDeviceId: SYSTEM_DEFAULT_DEVICE_ID,
-        fellBackToDefault: true,
+        liveSwitched: false,
+        preferenceSaved: false,
+        activeDeviceId: actualSink,
+        fellBackToDefault: actualSink === SYSTEM_DEFAULT_DEVICE_ID,
         unsupported: true,
         message,
       };
@@ -834,30 +1041,16 @@ export class AudioDeviceManager {
       const fallbackMessage =
         'Selected audio output device is no longer connected. Audio output fell back to Default System Device.';
       await this.fallBackOutputToSystemDefault(fallbackMessage, { keepPreferenceForReconnect: false });
+      const actualAfterFallback = readContextSinkId(ctx);
       this.emit();
       return {
         ok: false,
-        activeDeviceId: SYSTEM_DEFAULT_DEVICE_ID,
-        fellBackToDefault: true,
+        liveSwitched: false,
+        preferenceSaved: false,
+        activeDeviceId: actualAfterFallback,
+        fellBackToDefault: actualAfterFallback === SYSTEM_DEFAULT_DEVICE_ID,
         unsupported: false,
         message: fallbackMessage,
-      };
-    }
-
-    if (!ctx) {
-      // Context has not been constructed yet; persist preference for initial context creation.
-      if (options.persist) {
-        this.persistPreferences({ outputDeviceId: normalizedId });
-      }
-      this.selectedOutputAvailable = true;
-      this.outputNotice = null;
-      this.emit();
-      return {
-        ok: true,
-        activeDeviceId: normalizedId,
-        fellBackToDefault: false,
-        unsupported: false,
-        message: null,
       };
     }
 
@@ -875,6 +1068,8 @@ export class AudioDeviceManager {
         this.emit();
         return {
           ok: false,
+          liveSwitched: false,
+          preferenceSaved: false,
           activeDeviceId: actualSinkAfterFallback,
           fellBackToDefault: actualSinkAfterFallback === SYSTEM_DEFAULT_DEVICE_ID,
           unsupported: false,
@@ -892,6 +1087,8 @@ export class AudioDeviceManager {
       this.emit();
       return {
         ok: true,
+        liveSwitched: true,
+        preferenceSaved: Boolean(options.persist),
         activeDeviceId: verifiedSink,
         fellBackToDefault: false,
         unsupported: false,
@@ -907,11 +1104,14 @@ export class AudioDeviceManager {
             : extractErrorMessage(error);
       const fallbackMessage = `Could not route audio output to the selected device (${detail}). Audio output fell back to Default System Device.`;
       await this.fallBackOutputToSystemDefault(fallbackMessage, { keepPreferenceForReconnect: false });
+      const actualSinkAfterFallback = readContextSinkId(ctx);
       this.emit();
       return {
         ok: false,
-        activeDeviceId: SYSTEM_DEFAULT_DEVICE_ID,
-        fellBackToDefault: true,
+        liveSwitched: false,
+        preferenceSaved: false,
+        activeDeviceId: actualSinkAfterFallback,
+        fellBackToDefault: actualSinkAfterFallback === SYSTEM_DEFAULT_DEVICE_ID,
         unsupported: false,
         message: fallbackMessage,
       };
