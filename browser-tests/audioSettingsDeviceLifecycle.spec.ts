@@ -40,10 +40,10 @@ test('P1 & P2 in Chromium: startup passive monitoring runs while modal is closed
       'apex:audio-preferences',
       JSON.stringify({
         version: 1,
-        preferredOutputDeviceId: 'dac-usb',
-        preferredInputDeviceId: '',
-        requestedSampleRate: 48000,
-        latencyPreference: 'interactive',
+        outputDeviceId: 'dac-usb',
+        inputDeviceId: '',
+        sampleRate: 48000,
+        latencyHint: 'interactive',
       }),
     );
 
