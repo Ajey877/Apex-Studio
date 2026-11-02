@@ -179,6 +179,27 @@ describe('External MIDI Output — Project Persistence, Undo/Redo, and UI Truthf
     assert.equal(missingStatus.label, 'Unavailable (Disconnected)');
     assert.equal(missingStatus.tone, 'danger');
 
+    // Hot-unplugged port still enumerated in MIDIAccess.outputs with state === 'disconnected':
+    const hotDisconnectedPort: MidiDeviceInfo = {
+      id: 'out-ready-synth',
+      name: 'Prophet-5 MIDI Out',
+      manufacturer: 'Sequential',
+      state: 'disconnected',
+      type: 'output',
+      connection: 'closed',
+      usable: false,
+      statusReason: 'Hardware device disconnected',
+    };
+    assert.equal(describeMidiDeviceStatus(hotDisconnectedPort).label, 'Disconnected');
+    const hotDisconnectedRouteStatus = describeChannelMidiRouteStatus(
+      ch2,
+      [devices[1], hotDisconnectedPort],
+      { status: 'ready', errorMessage: null },
+    );
+    assert.equal(hotDisconnectedRouteStatus.label, 'Disconnected');
+    assert.equal(hotDisconnectedRouteStatus.tone, 'danger');
+    assert.equal(hotDisconnectedRouteStatus.detail, 'Hardware device disconnected');
+
     const markup = renderToStaticMarkup(
       <MidiControllerModal
         isOpen

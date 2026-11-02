@@ -683,4 +683,126 @@ describe('MidiOutputScheduler — overlapping pitches, cleanup isolation, loop w
     assert.ok(noteOff!.timestamp! > 5040);
     assert.equal(scheduler.getActiveNoteCount(), 0);
   });
+
+  it('guards audioTimeToPerformanceMs against stale pre-suspend getOutputTimestamp pairs so look-ahead timestamps stay in the future', () => {
+    // Stale outputTimestamp from 3 seconds before resume: impliedNowPerfMs = 2010 vs safeNowMs = 5010
+    const mappedAfterResume = audioTimeToPerformanceMs(2.04, 2.01, 5010, {
+      contextTime: 2.0,
+      performanceTime: 2000,
+    });
+    assert.ok(
+      Math.abs(mappedAfterResume - 5040) < 1e-6,
+      'falls back cleanly to preserve +30 ms look-ahead when outputTimestamp is stale',
+    );
+  });
+
+  it('distinguishes completed vs active vs future-queued notes on Stop and preserves sibling future events during per-channel cleanup', () => {
+    let perfMs = 1000;
+    const portA = new InstrumentedMidiOutputPort('port-a');
+    const portB = new InstrumentedMidiOutputPort('port-b');
+    const ports = new Map<string, MidiOutputPortLike>([
+      [portA.id, portA],
+      [portB.id, portB],
+    ]);
+    const scheduler = new MidiOutputScheduler({
+      getOutputs: () => ports,
+      performanceNowMs: () => perfMs,
+    });
+
+    const chA1 = makeChannel('ch-a1', {
+      midiOutput: { outputDeviceId: 'port-a', midiChannel: 4, mode: 'external' },
+    });
+    const chA2 = makeChannel('ch-a2', {
+      midiOutput: { outputDeviceId: 'port-a', midiChannel: 7, mode: 'external' },
+    });
+
+    // 1. Completed note before Stop -> no unnecessary port.clear() call
+    scheduler.beginTransportTake(1);
+    scheduler.beginTransportStep({
+      takeGeneration: 1,
+      absoluteStep: 0,
+      step: 0,
+      stepAudioTimeSeconds: 0,
+      unswungStepAudioTimeSeconds: 0,
+      grooveOffsetSeconds: 0,
+      bpm: 120,
+      mode: 'pat',
+      patternLoopSteps: 16,
+      contextCurrentTimeSeconds: 0,
+    });
+    scheduler.scheduleChannelNote({
+      channel: chA1,
+      note: makeNote(36, { id: 'short-done', duration: 1 }),
+      onsetAudioTimeSeconds: 0,
+      bpm: 120,
+      contextCurrentTimeSeconds: 0,
+    });
+    scheduler.endTransportStep();
+
+    perfMs = 1300; // past 1125 ms release
+    scheduler.cleanupAll('stop');
+    assert.equal(portA.clearCalls, 0, 'completed note does not trigger unnecessary port.clear()');
+    assert.equal(scheduler.getActiveNoteCount(), 0);
+
+    // 2. Shared-port per-channel cleanup cancels target future Note On while re-queuing sibling future events
+    portA.sent.length = 0;
+    perfMs = 2000;
+    scheduler.beginTransportTake(2);
+    scheduler.beginTransportStep({
+      takeGeneration: 2,
+      absoluteStep: 0,
+      step: 0,
+      stepAudioTimeSeconds: 2.06, // +60 ms look-ahead -> 2060 ms
+      unswungStepAudioTimeSeconds: 2.06,
+      grooveOffsetSeconds: 0,
+      bpm: 120,
+      mode: 'pat',
+      patternLoopSteps: 16,
+      contextCurrentTimeSeconds: 2.0,
+    });
+    scheduler.scheduleChannelNote({
+      channel: chA1,
+      note: makeNote(48, { id: 'target-future', duration: 4 }),
+      onsetAudioTimeSeconds: 2.06,
+      bpm: 120,
+      contextCurrentTimeSeconds: 2.0,
+    });
+    scheduler.scheduleChannelNote({
+      channel: chA2,
+      note: makeNote(60, { id: 'sibling-future', duration: 1 }),
+      onsetAudioTimeSeconds: 2.06,
+      bpm: 120,
+      contextCurrentTimeSeconds: 2.0,
+    });
+    scheduler.endTransportStep();
+
+    perfMs = 2010; // both notes still queued in the future at 2060 ms
+    scheduler.cleanupChannel('ch-a1');
+    assert.equal(portA.clearCalls, 1, 'cleared port-a to cancel ch-a1 queued future Note On');
+    const postClearPackets = portA.sent.slice(3); // after initial 3 packets (chA1 On, chA2 On, chA2 Off)
+    assert.ok(
+      postClearPackets.some(p => p.bytes[0] === 0x96 && p.bytes[1] === 60 && p.timestamp === 2060),
+      're-queued ch-a2 future Note On on Ch 7 at exact timestamp 2060 ms',
+    );
+    assert.ok(
+      postClearPackets.some(p => p.bytes[0] === 0x86 && p.bytes[1] === 60 && p.timestamp === 2185),
+      're-queued ch-a2 future Note Off on Ch 7 at exact timestamp 2185 ms',
+    );
+    assert.equal(
+      postClearPackets.some(p => p.bytes[0] === 0x83 && p.bytes[1] === 48),
+      false,
+      'cancelled future ch-a1 Note On never sounded and required no redundant Note Off',
+    );
+    assert.ok(
+      postClearPackets.some(p => p.bytes[0] === 0xb3 && p.bytes[1] === 123 && p.bytes[2] === 0),
+      'emitted CC 123 All Notes Off exclusively on Ch 4',
+    );
+    assert.equal(
+      postClearPackets.some(p => p.bytes[0] === 0xb6 && p.bytes[1] === 123),
+      false,
+      'did not emit CC 123 on sibling Ch 7',
+    );
+    assert.equal(portB.clearCalls, 0, 'unrelated port-b untouched');
+    assert.equal(portB.sent.length, 0, 'unrelated port-b received zero MIDI messages');
+  });
 });

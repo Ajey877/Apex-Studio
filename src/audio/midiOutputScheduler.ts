@@ -269,8 +269,15 @@ export const audioTimeToPerformanceMs = (
     Number.isFinite(outputTimestamp.performanceTime) &&
     outputTimestamp.performanceTime > 0
   ) {
-    const mapped = outputTimestamp.performanceTime + (safeAudio - outputTimestamp.contextTime) * 1000;
-    return Math.max(safeNowMs, mapped);
+    const impliedNowPerfMs =
+      outputTimestamp.performanceTime + (safeCurrent - outputTimestamp.contextTime) * 1000;
+    // Guard against unprimed or pre-suspend AudioContext outputTimestamp pairs
+    // whose implied clock lags/leads performance.now() by >500 ms (which would
+    // otherwise clamp future look-ahead MIDI events down to safeNowMs).
+    if (Math.abs(impliedNowPerfMs - safeNowMs) <= 500) {
+      const mapped = outputTimestamp.performanceTime + (safeAudio - outputTimestamp.contextTime) * 1000;
+      return Math.max(safeNowMs, mapped);
+    }
   }
   const deltaMs = (safeAudio - safeCurrent) * 1000;
   return Math.max(safeNowMs, safeNowMs + deltaMs);
@@ -977,17 +984,45 @@ export class MidiOutputScheduler {
     const clearedPorts = new Set<string>();
 
     for (const outputDeviceId of portsUsedByTarget) {
-      const otherChannelHasQueuedFutureOnPort = [...this.activeNotes.values()].some(
+      const targetHasQueuedFutureOnPort = channelNotes.some(
+        note =>
+          note.outputDeviceId === outputDeviceId &&
+          (note.onPerfMs > nowPerfMs || (note.queuedOffPerfMs !== null && note.queuedOffPerfMs > nowPerfMs)),
+      );
+      const siblingQueuedFutureNotes = [...this.activeNotes.values()].filter(
         other =>
           other.outputDeviceId === outputDeviceId &&
           (other.onPerfMs > nowPerfMs || (other.queuedOffPerfMs !== null && other.queuedOffPerfMs > nowPerfMs)),
       );
-      if (!otherChannelHasQueuedFutureOnPort) {
+
+      // Clear the hardware port queue when either no sibling channel has queued
+      // future events on this port, or the target channel itself has queued
+      // future events that must be cancelled (in which case sibling future
+      // events are immediately re-queued at their exact original timestamps).
+      if (siblingQueuedFutureNotes.length === 0 || targetHasQueuedFutureOnPort) {
         const port = this.resolveOutputPort(outputDeviceId);
         if (port && typeof port.clear === 'function') {
           try {
             port.clear();
             clearedPorts.add(outputDeviceId);
+            if (siblingQueuedFutureNotes.length > 0 && (port.state ?? 'connected') === 'connected') {
+              for (const sibling of siblingQueuedFutureNotes) {
+                if (sibling.onPerfMs > nowPerfMs) {
+                  this.trySend(
+                    port,
+                    [0x90 | (sibling.midiChannel - 1), sibling.pitch, sibling.velocityByte],
+                    sibling.onPerfMs,
+                  );
+                }
+                if (sibling.queuedOffPerfMs !== null && sibling.queuedOffPerfMs > nowPerfMs) {
+                  this.trySend(
+                    port,
+                    [0x80 | (sibling.midiChannel - 1), sibling.pitch, 0],
+                    sibling.queuedOffPerfMs,
+                  );
+                }
+              }
+            }
           } catch {
             // Fall through to targeted Note Offs below.
           }
@@ -1002,6 +1037,7 @@ export class MidiOutputScheduler {
       if (!port || (port.state ?? 'connected') !== 'connected' || typeof port.send !== 'function') {
         continue;
       }
+      affectedPortChannels.add(`${note.outputDeviceId}:${note.midiChannel}`);
       const wasCleared = clearedPorts.has(note.outputDeviceId);
       // If Note On was still in the future and port.clear() succeeded, it was
       // cancelled before ever sounding; otherwise send Note Off cleanly.
@@ -1023,7 +1059,6 @@ export class MidiOutputScheduler {
           note.onPerfMs + MIN_MIDI_NOTE_OFF_DELTA_MS,
         );
       }
-      affectedPortChannels.add(`${note.outputDeviceId}:${note.midiChannel}`);
     }
 
     this.releaseChannelSustainIfExclusive(channelId);
