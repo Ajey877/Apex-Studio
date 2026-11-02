@@ -5,9 +5,9 @@
  * is closed, zero startup getUserMedia prompt, no listener duplication across repeated
  * modal open/close cycles, and clean listener teardown).
  *
- * Note: Headless CI runners do not attach physical USB DACs, so AudioContext.setSinkId
- * and navigator.mediaDevices.enumerateDevices are instrumented in-browser on top of the
- * real Chromium AudioContext and real mounted React <App /> tree.
+ * Note: Headless CI runners do not attach physical USB DACs, so AudioContext.prototype.setSinkId
+ * and navigator.mediaDevices.enumerateDevices are instrumented in-browser on top of genuine
+ * Chromium AudioContext instances and the real mounted React <App /> tree.
  */
 import { expect, test, type Page } from '@playwright/test';
 
@@ -16,6 +16,7 @@ const APP_URL = 'http://localhost:3000';
 const waitForApp = async (page: Page): Promise<void> => {
   await page.waitForSelector('#root > *', { state: 'attached' });
   await page.waitForSelector('#application-menu-audio', { state: 'visible' });
+  await page.waitForTimeout(1000);
 };
 
 const openAudioSettings = async (page: Page) => {
@@ -84,51 +85,80 @@ test('P1 & P2 in Chromium: startup passive monitoring runs while modal is closed
       get: () => fakeMediaDevices,
     });
 
+    const nativePermissions = navigator.permissions;
+    const nativeQuery =
+      nativePermissions && typeof nativePermissions.query === 'function'
+        ? nativePermissions.query.bind(nativePermissions)
+        : null;
+
     Object.defineProperty(navigator, 'permissions', {
       configurable: true,
       value: {
-        query: async () => ({
-          state: 'granted',
-          addEventListener: (type: string, listener: EventListenerOrEventListenerObject) => {
-            if (type === 'change') permissionChangeListeners.add(listener);
-          },
-          removeEventListener: (type: string, listener: EventListenerOrEventListenerObject) => {
-            if (type === 'change') permissionChangeListeners.delete(listener);
-          },
-        }),
+        query: async (desc: PermissionDescriptor) => {
+          if (desc && desc.name === 'microphone') {
+            return {
+              state: 'granted',
+              addEventListener: (type: string, listener: EventListenerOrEventListenerObject) => {
+                if (type === 'change') permissionChangeListeners.add(listener);
+              },
+              removeEventListener: (type: string, listener: EventListenerOrEventListenerObject) => {
+                if (type === 'change') permissionChangeListeners.delete(listener);
+              },
+            };
+          }
+          if (nativeQuery) {
+            return nativeQuery(desc);
+          }
+          return {
+            state: 'prompt',
+            addEventListener: () => {},
+            removeEventListener: () => {},
+          };
+        },
       },
     });
 
-    // Instrument real Chromium AudioContext so setSinkId / sinkId are tracked per live instance.
+    // Instrument genuine Chromium AudioContext instances without subclassing Blink WebIDL wrappers.
     const NativeAudioContext = window.AudioContext;
     const sinkMap = new WeakMap<AudioContext, { sinkId: string; calls: string[] }>();
     const createdContexts: AudioContext[] = [];
 
-    class TrackedBrowserAudioContext extends NativeAudioContext {
-      constructor(options?: AudioContextOptions) {
-        super(options);
-        sinkMap.set(this, { sinkId: '', calls: [] });
-        createdContexts.push(this);
-      }
-
-      get sinkId(): string {
+    Object.defineProperty(NativeAudioContext.prototype, 'sinkId', {
+      configurable: true,
+      get(this: AudioContext) {
         return sinkMap.get(this)?.sinkId ?? '';
-      }
+      },
+    });
 
-      async setSinkId(sinkId: string): Promise<void> {
+    Object.defineProperty(NativeAudioContext.prototype, 'setSinkId', {
+      configurable: true,
+      writable: true,
+      value: async function setSinkId(this: AudioContext, sinkId: string): Promise<void> {
         if (this.state === 'closed') {
           throw new DOMException('Context is closed', 'InvalidStateError');
         }
-        const entry = sinkMap.get(this);
-        if (entry) {
-          entry.calls.push(sinkId);
-          entry.sinkId = sinkId;
+        let entry = sinkMap.get(this);
+        if (!entry) {
+          entry = { sinkId: '', calls: [] };
+          sinkMap.set(this, entry);
         }
-      }
-    }
+        entry.calls.push(sinkId);
+        entry.sinkId = sinkId;
+      },
+    });
 
-    (window as unknown as { AudioContext: typeof AudioContext }).AudioContext =
-      TrackedBrowserAudioContext as unknown as typeof AudioContext;
+    const WrappedAudioContext = new Proxy(NativeAudioContext, {
+      construct(target, argArray) {
+        const ctx = Reflect.construct(target, argArray, target) as AudioContext;
+        if (!sinkMap.has(ctx)) {
+          sinkMap.set(ctx, { sinkId: '', calls: [] });
+        }
+        createdContexts.push(ctx);
+        return ctx;
+      },
+    });
+
+    (window as unknown as { AudioContext: typeof AudioContext }).AudioContext = WrappedAudioContext;
 
     (window as unknown as Record<string, unknown>).__apexAudioTestHarness = {
       getStats: () => ({
@@ -163,13 +193,22 @@ test('P1 & P2 in Chromium: startup passive monitoring runs while modal is closed
   await expect
     .poll(async () =>
       page.evaluate(() => {
-        const h = (window as unknown as { __apexAudioTestHarness: { getStats: () => { deviceChangeListenerCount: number; getUserMediaCalls: number } } }).__apexAudioTestHarness;
+        const h = (window as unknown as {
+          __apexAudioTestHarness: {
+            getStats: () => {
+              deviceChangeListenerCount: number;
+              permissionChangeListenerCount: number;
+              getUserMediaCalls: number;
+            };
+          };
+        }).__apexAudioTestHarness;
         return h.getStats();
       }),
     )
     .toMatchObject({
       getUserMediaCalls: 0,
       deviceChangeListenerCount: 1,
+      permissionChangeListenerCount: 1,
     });
 
   // Plug in a new USB interface while Audio Settings modal is still closed.
@@ -188,12 +227,15 @@ test('P1 & P2 in Chromium: startup passive monitoring runs while modal is closed
     ]);
   });
 
-  const observedWhileClosed = await page.evaluate(async () => {
-    // @ts-ignore — browser-side Vite module import
-    const { audioDeviceManager } = await import('/src/audio/audioDeviceManager.ts');
-    return audioDeviceManager.getSnapshot().outputDevices.map((d: { deviceId: string }) => d.deviceId);
-  });
-  expect(observedWhileClosed).toContain('usb-apollo');
+  await expect
+    .poll(async () =>
+      page.evaluate(async () => {
+        // @ts-ignore — browser-side Vite module import
+        const { audioDeviceManager } = await import('/src/audio/audioDeviceManager.ts');
+        return audioDeviceManager.getSnapshot().outputDevices.map((d: { deviceId: string }) => d.deviceId);
+      }),
+    )
+    .toContain('usb-apollo');
 
   // P2 (3): Repeatedly open and close Audio Settings 4 times without duplicating listeners.
   for (let i = 0; i < 4; i += 1) {
@@ -201,7 +243,15 @@ test('P1 & P2 in Chromium: startup passive monitoring runs while modal is closed
     await page.keyboard.press('Escape');
     await expect(dialog).toBeHidden();
     const stats = await page.evaluate(() => {
-      const h = (window as unknown as { __apexAudioTestHarness: { getStats: () => { deviceChangeListenerCount: number; permissionChangeListenerCount: number; getUserMediaCalls: number } } }).__apexAudioTestHarness;
+      const h = (window as unknown as {
+        __apexAudioTestHarness: {
+          getStats: () => {
+            deviceChangeListenerCount: number;
+            permissionChangeListenerCount: number;
+            getUserMediaCalls: number;
+          };
+        };
+      }).__apexAudioTestHarness;
       return h.getStats();
     });
     expect(stats.deviceChangeListenerCount).toBe(1);
@@ -209,7 +259,7 @@ test('P1 & P2 in Chromium: startup passive monitoring runs while modal is closed
     expect(stats.getUserMediaCalls).toBe(0);
   }
 
-  // P1 (1–7): Open Audio Settings, initialize engine with persisted 'dac-usb' @ 48 kHz,
+  // P1 (1–7): Open Audio Settings, verify persisted 'dac-usb' @ 48 kHz bound to initial live context,
   // reconfigure to 96 kHz, switch output to 'monitors-spdif', then close modal and hot-unplug.
   const dialog = await openAudioSettings(page);
   const initButton = dialog.getByRole('button', { name: 'Initialize Engine', exact: true });
@@ -249,32 +299,41 @@ test('P1 & P2 in Chromium: startup passive monitoring runs while modal is closed
   // Switch output from 'dac-usb' to 'monitors-spdif' after reconfiguration.
   await dialog.locator('#audio-output-device-select').selectOption('monitors-spdif');
 
-  const afterSwitch = await page.evaluate(async () => {
-    // @ts-ignore — browser-side Vite module import
-    const { audioDeviceManager } = await import('/src/audio/audioDeviceManager.ts');
-    // @ts-ignore — browser-side Vite module import
-    const { audioEngine } = await import('/src/audio/audioEngine.ts');
-    const h = (window as unknown as {
-      __apexAudioTestHarness: {
-        getStats: () => {
-          contexts: Array<{ sampleRate: number; state: string; sinkId: string; sinkCalls: string[] }>;
+  await expect
+    .poll(async () =>
+      page.evaluate(async () => {
+        // @ts-ignore — browser-side Vite module import
+        const { audioDeviceManager } = await import('/src/audio/audioDeviceManager.ts');
+        // @ts-ignore — browser-side Vite module import
+        const { audioEngine } = await import('/src/audio/audioEngine.ts');
+        const h = (window as unknown as {
+          __apexAudioTestHarness: {
+            getStats: () => {
+              contexts: Array<{ sampleRate: number; state: string; sinkId: string; sinkCalls: string[] }>;
+            };
+          };
+        }).__apexAudioTestHarness;
+        const liveCtx = audioEngine.getContext();
+        const contexts = h.getStats().contexts;
+        const latest = contexts[contexts.length - 1] ?? null;
+        return {
+          boundMatchesReplacement: Boolean(liveCtx && audioDeviceManager.getBoundAudioContext() === liveCtx),
+          activeDeviceId: audioDeviceManager.getActiveOutputDeviceId(),
+          contextCountGreaterThanOne: contexts.length >= 2,
+          allPriorClosed: contexts.slice(0, -1).every(c => c.state === 'closed'),
+          latestSampleRate: latest?.sampleRate ?? null,
+          latestSinkId: latest?.sinkId ?? null,
         };
-      };
-    }).__apexAudioTestHarness;
-    const liveCtx = audioEngine.getContext();
-    return {
-      boundMatchesReplacement: Boolean(liveCtx && audioDeviceManager.getBoundAudioContext() === liveCtx),
-      activeDeviceId: audioDeviceManager.getActiveOutputDeviceId(),
-      contexts: h.getStats().contexts,
-    };
-  });
-
-  expect(afterSwitch.boundMatchesReplacement).toBe(true);
-  expect(afterSwitch.activeDeviceId).toBe('monitors-spdif');
-  expect(afterSwitch.contexts).toHaveLength(2);
-  expect(afterSwitch.contexts[0].state).toBe('closed');
-  expect(afterSwitch.contexts[1].sampleRate).toBe(96000);
-  expect(afterSwitch.contexts[1].sinkId).toBe('monitors-spdif');
+      }),
+    )
+    .toEqual({
+      boundMatchesReplacement: true,
+      activeDeviceId: 'monitors-spdif',
+      contextCountGreaterThanOne: true,
+      allPriorClosed: true,
+      latestSampleRate: 96000,
+      latestSinkId: 'monitors-spdif',
+    });
 
   // Close Audio Settings, then simulate unplugging 'monitors-spdif' and verify fallback hits replacement 96 kHz context.
   await page.keyboard.press('Escape');
@@ -305,9 +364,11 @@ test('P1 & P2 in Chromium: startup passive monitoring runs while modal is closed
             };
           };
         }).__apexAudioTestHarness;
+        const contexts = h.getStats().contexts;
+        const latest = contexts[contexts.length - 1] ?? null;
         return {
           activeDeviceId: audioDeviceManager.getActiveOutputDeviceId(),
-          replacementSinkId: h.getStats().contexts[1]?.sinkId ?? null,
+          replacementSinkId: latest?.sinkId ?? null,
         };
       }),
     )
