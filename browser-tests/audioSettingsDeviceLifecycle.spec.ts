@@ -6,8 +6,8 @@
  * modal open/close cycles, and clean listener teardown).
  *
  * Note: Headless CI runners do not attach physical USB DACs, so AudioContext.prototype.setSinkId
- * and navigator.mediaDevices.enumerateDevices are instrumented in-browser on top of genuine
- * Chromium AudioContext instances and the real mounted React <App /> tree.
+ * and MediaDevices/Permissions are instrumented in-browser on top of genuine Chromium
+ * AudioContext instances and the real mounted React <App /> tree.
  */
 import { expect, test, type Page } from '@playwright/test';
 
@@ -35,7 +35,6 @@ test('P1 & P2 in Chromium: startup passive monitoring runs while modal is closed
   page.on('pageerror', err => pageErrors.push(err.message));
 
   await page.addInitScript(() => {
-    // Seed persisted non-default output device ('dac-usb') and 48,000 Hz sample rate before App mounts.
     window.localStorage.setItem(
       'apex:audio-preferences',
       JSON.stringify({
@@ -66,57 +65,60 @@ test('P1 & P2 in Chromium: startup passive monitoring runs while modal is closed
       makeDevice('audioinput', 'default', 'Default - Built-in Mic'),
     ];
 
-    const fakeMediaDevices = {
-      enumerateDevices: async () => devices,
-      getUserMedia: async () => {
+    if (typeof MediaDevices !== 'undefined' && MediaDevices.prototype) {
+      MediaDevices.prototype.enumerateDevices = async () =>
+        devices as unknown as MediaDeviceInfo[];
+      MediaDevices.prototype.getUserMedia = async () => {
         getUserMediaCalls += 1;
         throw new Error('Unexpected getUserMedia call');
-      },
-      addEventListener: (type: string, listener: EventListenerOrEventListenerObject) => {
-        if (type === 'devicechange') deviceChangeListeners.add(listener);
-      },
-      removeEventListener: (type: string, listener: EventListenerOrEventListenerObject) => {
-        if (type === 'devicechange') deviceChangeListeners.delete(listener);
-      },
-    };
+      };
+      const origAdd = MediaDevices.prototype.addEventListener;
+      const origRemove = MediaDevices.prototype.removeEventListener;
+      MediaDevices.prototype.addEventListener = function (
+        type: string,
+        listener: EventListenerOrEventListenerObject | null,
+        options?: boolean | AddEventListenerOptions,
+      ) {
+        if (type === 'devicechange' && listener) {
+          deviceChangeListeners.add(listener);
+        }
+        return origAdd.call(this, type, listener, options);
+      };
+      MediaDevices.prototype.removeEventListener = function (
+        type: string,
+        listener: EventListenerOrEventListenerObject | null,
+        options?: boolean | EventListenerOptions,
+      ) {
+        if (type === 'devicechange' && listener) {
+          deviceChangeListeners.delete(listener);
+        }
+        return origRemove.call(this, type, listener, options);
+      };
+    }
 
-    Object.defineProperty(navigator, 'mediaDevices', {
-      configurable: true,
-      get: () => fakeMediaDevices,
-    });
-
-    const nativePermissions = navigator.permissions;
-    const nativeQuery =
-      nativePermissions && typeof nativePermissions.query === 'function'
-        ? nativePermissions.query.bind(nativePermissions)
-        : null;
-
-    Object.defineProperty(navigator, 'permissions', {
-      configurable: true,
-      value: {
-        query: async (desc: PermissionDescriptor) => {
-          if (desc && desc.name === 'microphone') {
-            return {
-              state: 'granted',
-              addEventListener: (type: string, listener: EventListenerOrEventListenerObject) => {
-                if (type === 'change') permissionChangeListeners.add(listener);
-              },
-              removeEventListener: (type: string, listener: EventListenerOrEventListenerObject) => {
-                if (type === 'change') permissionChangeListeners.delete(listener);
-              },
-            };
-          }
-          if (nativeQuery) {
-            return nativeQuery(desc);
-          }
+    if (typeof Permissions !== 'undefined' && Permissions.prototype) {
+      const origQuery = Permissions.prototype.query;
+      Permissions.prototype.query = async function (desc: PermissionDescriptor) {
+        if (desc && desc.name === 'microphone') {
           return {
-            state: 'prompt',
-            addEventListener: () => {},
-            removeEventListener: () => {},
-          };
-        },
-      },
-    });
+            name: 'microphone',
+            state: 'granted',
+            onchange: null,
+            addEventListener: (type: string, listener: EventListenerOrEventListenerObject | null) => {
+              if (type === 'change' && listener) permissionChangeListeners.add(listener);
+            },
+            removeEventListener: (
+              type: string,
+              listener: EventListenerOrEventListenerObject | null,
+            ) => {
+              if (type === 'change' && listener) permissionChangeListeners.delete(listener);
+            },
+            dispatchEvent: () => true,
+          } as unknown as PermissionStatus;
+        }
+        return origQuery.call(this, desc);
+      };
+    }
 
     // Instrument genuine Chromium AudioContext instances without subclassing Blink WebIDL wrappers.
     const NativeAudioContext = window.AudioContext;
@@ -262,13 +264,6 @@ test('P1 & P2 in Chromium: startup passive monitoring runs while modal is closed
   // P1 (1–7): Open Audio Settings, verify persisted 'dac-usb' @ 48 kHz bound to initial live context,
   // reconfigure to 96 kHz, switch output to 'monitors-spdif', then close modal and hot-unplug.
   const dialog = await openAudioSettings(page);
-  const initButton = dialog.getByRole('button', { name: 'Initialize Engine', exact: true });
-  const resumeButton = dialog.getByRole('button', { name: 'Resume Engine', exact: true });
-  if (await initButton.isVisible()) {
-    await initButton.click();
-  } else if (await resumeButton.isVisible()) {
-    await resumeButton.click();
-  }
 
   await expect
     .poll(async () =>
@@ -293,7 +288,9 @@ test('P1 & P2 in Chromium: startup passive monitoring runs while modal is closed
 
   // Reconfigure from 48,000 Hz to 96,000 Hz via the modal controls.
   await dialog.locator('#audio-sample-rate-select').selectOption('96000');
-  await dialog.getByRole('button', { name: 'Apply Engine Settings' }).click();
+  const applyButton = dialog.getByRole('button', { name: 'Apply Engine Settings', exact: true });
+  await expect(applyButton).toBeEnabled();
+  await applyButton.click();
   await expect(dialog.getByTestId('audio-actual-sample-rate')).toContainText('96,000 Hz');
 
   // Switch output from 'dac-usb' to 'monitors-spdif' after reconfiguration.

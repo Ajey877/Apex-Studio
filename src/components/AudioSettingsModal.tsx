@@ -230,14 +230,16 @@ export const AudioSettingsModal: React.FC<AudioSettingsModalProps> = ({
   const handleInitializeOrResumeEngine = useCallback(async () => {
     setStatusBanner(null);
     engine.clearAudioEngineError();
+    const wasUninitialized = diagnostics.contextState === 'uninitialized';
     try {
-      const next =
-        diagnostics.contextState === 'uninitialized'
-          ? await engine.ensureAudioEngineInitialized()
-          : await engine.resumeAudioContext();
+      const next = wasUninitialized
+        ? await engine.ensureAudioEngineInitialized()
+        : await engine.resumeAudioContext();
       setDiagnostics(next);
-      setStagedSampleRate(next.requestedSampleRate);
-      setStagedLatencyHint(next.latencyHint);
+      if (wasUninitialized) {
+        setStagedSampleRate(next.requestedSampleRate);
+        setStagedLatencyHint(next.latencyHint);
+      }
       if (next.contextState === 'running') {
         setStatusBanner({
           tone: 'success',
