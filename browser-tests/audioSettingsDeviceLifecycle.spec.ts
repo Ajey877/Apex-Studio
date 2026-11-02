@@ -388,13 +388,91 @@ test('P1 & P2 in Chromium: startup passive monitoring runs while modal is closed
       fallbackStatus: 'verified-default',
     });
 
-  // Fallback verification failure in real Chromium DOM: select 'dac-usb', force setSinkId('') to reject,
-  // unplug 'dac-usb', and assert fallback is NOT reported as successful and UI surfaces unavailable state.
+  // Fallback verification & existing-output availability in real Chromium DOM:
+  // 1) Enumerate 'dac-usb' + 'broken-spdif', select 'dac-usb', then fail both 'broken-spdif' and fallback '':
+  //    'dac-usb' remains connected & active, so selectedOutputAvailable stays true and NO unavailable badge renders.
+  await page.evaluate(() => {
+    const h = (window as unknown as {
+      __apexAudioTestHarness: {
+        setDevicesAndNotify: (d: Array<{ kind: MediaDeviceKind; deviceId: string; label: string }>) => void;
+      };
+    }).__apexAudioTestHarness;
+    h.setDevicesAndNotify([
+      { kind: 'audiooutput', deviceId: 'default', label: 'Default - Built-in Output' },
+      { kind: 'audiooutput', deviceId: 'dac-usb', label: 'Studio USB DAC' },
+      { kind: 'audiooutput', deviceId: 'broken-spdif', label: 'Broken S/PDIF Output' },
+      { kind: 'audioinput', deviceId: 'default', label: 'Default - Built-in Mic' },
+    ]);
+  });
+
+  await expect
+    .poll(async () =>
+      page.evaluate(async () => {
+        // @ts-ignore — browser-side Vite module import
+        const { audioDeviceManager } = await import('/src/audio/audioDeviceManager.ts');
+        return audioDeviceManager.getSnapshot().outputDevices.map((d: { deviceId: string }) => d.deviceId);
+      }),
+    )
+    .toContain('broken-spdif');
+
   const dialogForReject = await openAudioSettings(page);
   await dialogForReject.locator('#audio-output-device-select').selectOption('dac-usb');
+
+  await expect
+    .poll(async () =>
+      page.evaluate(async () => {
+        // @ts-ignore — browser-side Vite module import
+        const { audioDeviceManager } = await import('/src/audio/audioDeviceManager.ts');
+        return audioDeviceManager.getActiveOutputDeviceId();
+      }),
+    )
+    .toBe('dac-usb');
+
+  await page.evaluate(() => {
+    const h = (window as unknown as {
+      __apexAudioTestHarness: {
+        setSinkBehavior: (opts: { rejectSinkIds?: string[]; noopSinkIds?: string[] }) => void;
+      };
+    }).__apexAudioTestHarness;
+    h.setSinkBehavior({ rejectSinkIds: ['broken-spdif', ''] });
+  });
+
+  await dialogForReject.locator('#audio-output-device-select').selectOption('broken-spdif');
+
+  await expect
+    .poll(async () =>
+      page.evaluate(async () => {
+        // @ts-ignore — browser-side Vite module import
+        const { audioDeviceManager } = await import('/src/audio/audioDeviceManager.ts');
+        const snap = audioDeviceManager.getSnapshot();
+        return {
+          fallbackStatus: snap.lastOutputFallback?.status ?? null,
+          verifiedLiveDefault: snap.lastOutputFallback?.verifiedLiveDefault ?? null,
+          selectedOutputAvailable: snap.selectedOutputAvailable,
+          activeOutputDeviceId: snap.activeOutputDeviceId,
+          preferredOutputDeviceId: snap.preferences.outputDeviceId,
+          noticeTone: snap.outputNotice?.tone ?? null,
+        };
+      }),
+    )
+    .toEqual({
+      fallbackStatus: 'failed',
+      verifiedLiveDefault: false,
+      selectedOutputAvailable: true,
+      activeOutputDeviceId: 'dac-usb',
+      preferredOutputDeviceId: 'dac-usb',
+      noticeTone: 'error',
+    });
+
+  await expect(dialogForReject.getByTestId('audio-output-unavailable-badge')).toBeHidden();
+  await expect(dialogForReject.getByRole('alert')).toContainText(
+    /Previous output \(Studio USB DAC\) remains active/i,
+  );
   await dialogForReject.getByRole('button', { name: 'Close Audio Settings' }).click();
   await expect(dialogForReject).toBeHidden();
 
+  // 2) Now genuinely unplug 'dac-usb' while setSinkId('') rejects:
+  //    fallback is NOT reported as successful and UI surfaces unavailable state.
   await page.evaluate(() => {
     const h = (window as unknown as {
       __apexAudioTestHarness: {

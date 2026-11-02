@@ -767,10 +767,14 @@ test('Fallback regression 2: hot-unplug + silent no-op setSinkId("") treats stuc
     snap.outputNotice?.message ?? '',
     /Audio output fell back to Default System Device/i,
   );
+
+  const refreshedAfterSilentNoop = await manager.refreshDevices();
+  assert.equal(refreshedAfterSilentNoop.selectedOutputAvailable, false);
+  assert.equal(refreshedAfterSilentNoop.activeOutputDeviceId, 'dac-usb');
 });
 
-test('Fallback regression 3: requested output switch failure + fallback rejection reports ok=false and fellBackToDefault=false across active and default starting states', async () => {
-  const currentDevices: MediaDeviceInfo[] = [
+test('Fallback regression 3: separates switch/fallback failure from existing output availability across default (Case A), connected non-default (Case B), and genuinely disconnected (Case C) outputs', async () => {
+  let currentDevices: MediaDeviceInfo[] = [
     makeDevice('audiooutput', 'default', 'Default - Built-in Speakers'),
     makeDevice('audiooutput', 'dac-usb', 'External Studio DAC'),
     makeDevice('audiooutput', 'broken-spdif', 'Broken S/PDIF Output'),
@@ -790,8 +794,8 @@ test('Fallback regression 3: requested output switch failure + fallback rejectio
   manager.bindAudioContext(ctx);
   await manager.refreshDevices();
 
-  // Case 3A: Starting fromDefault System Device (''), target switch rejects AND fallback setSinkId('') ALSO rejects.
-  // Even though ctx.sinkId happens to still read '', fellBackToDefault MUST be false because setSinkId('') rejected.
+  // Case A: Existing Default System Device ('') remains active when 'broken-spdif' and redundant setSinkId('') both reject.
+  // Availability must remain true, while ok=false, fellBackToDefault=false, and fallbackOutcome.status='failed'.
   fakeCtx.failOnSinkIds.add('broken-spdif');
   fakeCtx.failOnSinkIds.add('');
   fakeCtx.failErrorMessage = 'Driver endpoint fault';
@@ -801,21 +805,47 @@ test('Fallback regression 3: requested output switch failure + fallback rejectio
   assert.equal(fromDefaultFail.liveSwitched, false);
   assert.equal(fromDefaultFail.preferenceSaved, false);
   assert.equal(fromDefaultFail.fellBackToDefault, false);
+  assert.equal(fromDefaultFail.activeDeviceId, '');
   assert.equal(fromDefaultFail.fallbackOutcome?.status, 'failed');
   assert.equal(fromDefaultFail.fallbackOutcome?.verifiedLiveDefault, false);
+  assert.equal(fromDefaultFail.fallbackOutcome?.selectedOutputAvailable, true);
+
+  assert.equal(fakeCtx.sinkId, '');
+  assert.equal(manager.getActiveOutputDeviceId(ctx), '');
   assert.equal(manager.getPreferences().outputDeviceId, '');
-  assert.equal(manager.getSnapshot(ctx).selectedOutputAvailable, false);
-  assert.equal(manager.getSnapshot(ctx).outputNotice?.tone, 'error');
+
+  const snapCaseABeforeRefresh = manager.getSnapshot(ctx);
+  assert.equal(snapCaseABeforeRefresh.activeOutputDeviceId, '');
+  assert.equal(snapCaseABeforeRefresh.preferences.outputDeviceId, '');
+  assert.equal(
+    snapCaseABeforeRefresh.selectedOutputAvailable,
+    true,
+    'existing Default System Device remains active and available',
+  );
+  assert.equal(snapCaseABeforeRefresh.lastOutputFallback?.status, 'failed');
+  assert.equal(snapCaseABeforeRefresh.outputNotice?.tone, 'error');
   assert.match(
     fromDefaultFail.message ?? '',
-    /Could not route audio output to the selected device.*Default System Device fallback could not be confirmed/i,
+    /Could not route audio output to the selected device.*Default System Device fallback could not be confirmed.*Audio output remains on Default System Device/i,
+  );
+  assert.doesNotMatch(
+    fromDefaultFail.message ?? '',
+    /Audio output fell back to Default System Device/i,
   );
 
-  // Case 3B: Recover to connected 'dac-usb', then request 'broken-spdif' while both 'broken-spdif' and '' reject.
+  const snapCaseAAfterRefresh = await manager.refreshDevices();
+  assert.equal(snapCaseAAfterRefresh.selectedOutputAvailable, true);
+  assert.equal(snapCaseAAfterRefresh.activeOutputDeviceId, '');
+  assert.equal(snapCaseAAfterRefresh.preferences.outputDeviceId, '');
+  assert.equal(snapCaseAAfterRefresh.outputNotice?.tone, 'error');
+
+  // Case B: Select connected 'dac-usb', keep 'dac-usb' enumerated & connected, then fail both 'broken-spdif' and fallback ''.
+  // 'dac-usb' remains persisted, active, and available before and after passive refreshDevices().
   fakeCtx.failOnSinkIds.clear();
   const onUsb = await manager.selectOutputDevice('dac-usb', ctx);
   assert.equal(onUsb.ok, true);
   assert.equal(fakeCtx.sinkId, 'dac-usb');
+  assert.equal(manager.getPreferences().outputDeviceId, 'dac-usb');
 
   fakeCtx.failOnSinkIds.add('broken-spdif');
   fakeCtx.failOnSinkIds.add('');
@@ -828,24 +858,82 @@ test('Fallback regression 3: requested output switch failure + fallback rejectio
   assert.equal(fromUsbFail.fellBackToDefault, false);
   assert.equal(fromUsbFail.activeDeviceId, 'dac-usb');
   assert.equal(fromUsbFail.fallbackOutcome?.status, 'failed');
+  assert.equal(fromUsbFail.fallbackOutcome?.verifiedLiveDefault, false);
+  assert.equal(fromUsbFail.fallbackOutcome?.selectedOutputAvailable, true);
+
+  assert.equal(fakeCtx.sinkId, 'dac-usb');
+  assert.equal(manager.getActiveOutputDeviceId(ctx), 'dac-usb');
   assert.equal(manager.getPreferences().outputDeviceId, 'dac-usb');
-  assert.equal(manager.getSnapshot(ctx).activeOutputDeviceId, 'dac-usb');
-  assert.equal(manager.getSnapshot(ctx).selectedOutputAvailable, false);
-  assert.equal(manager.getSnapshot(ctx).outputNotice?.tone, 'error');
+  const persistedCaseB = JSON.parse(storage.getItem(AUDIO_PREFERENCES_STORAGE_KEY) ?? '{}') as {
+    outputDeviceId?: string;
+  };
+  assert.equal(persistedCaseB.outputDeviceId, 'dac-usb');
+
+  const snapCaseBBeforeRefresh = manager.getSnapshot(ctx);
+  assert.equal(snapCaseBBeforeRefresh.activeOutputDeviceId, 'dac-usb');
+  assert.equal(snapCaseBBeforeRefresh.preferences.outputDeviceId, 'dac-usb');
+  assert.equal(
+    snapCaseBBeforeRefresh.selectedOutputAvailable,
+    true,
+    'connected dac-usb remains active and must not be marked unavailable',
+  );
+  assert.equal(snapCaseBBeforeRefresh.lastOutputFallback?.status, 'failed');
+  assert.equal(snapCaseBBeforeRefresh.outputNotice?.tone, 'error');
+  assert.match(
+    fromUsbFail.message ?? '',
+    /Could not route audio output to the selected device.*Default System Device fallback could not be confirmed.*Previous output \(External Studio DAC\) remains active/i,
+  );
   assert.doesNotMatch(
     fromUsbFail.message ?? '',
     /Audio output fell back to Default System Device/i,
   );
 
-  // Case 3C: Selecting non-enumerated missing device while fallback silently no-ops also reports fellBackToDefault=false.
+  const snapCaseBAfterRefresh = await manager.refreshDevices();
+  assert.equal(snapCaseBAfterRefresh.selectedOutputAvailable, true);
+  assert.equal(snapCaseBAfterRefresh.activeOutputDeviceId, 'dac-usb');
+  assert.equal(snapCaseBAfterRefresh.preferences.outputDeviceId, 'dac-usb');
+  assert.equal(snapCaseBAfterRefresh.outputNotice?.tone, 'error');
+
+  // Also verify missing target ('unplugged-hdmi') while 'dac-usb' remains connected and fallback silently no-ops:
+  // 'dac-usb' still remains connected and active, so selectedOutputAvailable stays true while fellBackToDefault=false.
   fakeCtx.failOnSinkIds.clear();
   fakeCtx.ignoreSinkSwitchForTargets.add('');
-  const missingSwitchFail = await manager.selectOutputDevice('unplugged-hdmi', ctx);
-  assert.equal(missingSwitchFail.ok, false);
-  assert.equal(missingSwitchFail.fellBackToDefault, false);
-  assert.equal(missingSwitchFail.activeDeviceId, 'dac-usb');
-  assert.equal(missingSwitchFail.fallbackOutcome?.status, 'failed');
+  const missingTargetWhileUsbConnected = await manager.selectOutputDevice('unplugged-hdmi', ctx);
+  assert.equal(missingTargetWhileUsbConnected.ok, false);
+  assert.equal(missingTargetWhileUsbConnected.fellBackToDefault, false);
+  assert.equal(missingTargetWhileUsbConnected.activeDeviceId, 'dac-usb');
+  assert.equal(missingTargetWhileUsbConnected.fallbackOutcome?.status, 'failed');
+  assert.equal(manager.getSnapshot(ctx).selectedOutputAvailable, true);
+
+  // Case C: When 'dac-usb' itself is genuinely disconnected (absent from enumerated outputs) and both target switch
+  // and fallback fail (leaving ctx.sinkId on unenumerated 'dac-usb'), selectedOutputAvailable MUST be false before and after refresh.
+  currentDevices = [
+    makeDevice('audiooutput', 'default', 'Default - Built-in Speakers'),
+    makeDevice('audiooutput', 'broken-spdif', 'Broken S/PDIF Output'),
+  ];
+  await manager.refreshDevices({ fromHotPlug: true });
   assert.equal(manager.getSnapshot(ctx).selectedOutputAvailable, false);
+  assert.equal(manager.getSnapshot(ctx).activeOutputDeviceId, 'dac-usb');
+
+  fakeCtx.ignoreSinkSwitchForTargets.clear();
+  fakeCtx.failOnSinkIds.add('broken-spdif');
+  fakeCtx.failOnSinkIds.add('');
+  const switchWhileDisconnectedFail = await manager.selectOutputDevice('broken-spdif', ctx);
+  assert.equal(switchWhileDisconnectedFail.ok, false);
+  assert.equal(switchWhileDisconnectedFail.fellBackToDefault, false);
+  assert.equal(switchWhileDisconnectedFail.activeDeviceId, 'dac-usb');
+  assert.equal(switchWhileDisconnectedFail.fallbackOutcome?.status, 'failed');
+  assert.equal(switchWhileDisconnectedFail.fallbackOutcome?.selectedOutputAvailable, false);
+  assert.equal(manager.getPreferences().outputDeviceId, '');
+  assert.equal(manager.getSnapshot(ctx).selectedOutputAvailable, false);
+  assert.doesNotMatch(
+    switchWhileDisconnectedFail.message ?? '',
+    /remains active|remains on Default System Device/i,
+  );
+
+  const snapCaseCAfterRefresh = await manager.refreshDevices();
+  assert.equal(snapCaseCAfterRefresh.selectedOutputAvailable, false);
+  assert.equal(snapCaseCAfterRefresh.activeOutputDeviceId, 'dac-usb');
 });
 
 test('Fallback regression 4: confirmed sinkId === "" fallback control case and preference-only no-context distinction', async () => {

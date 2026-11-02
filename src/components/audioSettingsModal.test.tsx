@@ -435,4 +435,147 @@ test('AudioSettingsModal surfaces unverified fallback failure honestly without d
   assert.match(html, /role="alert"[\s\S]*Default System Device fallback could not be confirmed/);
 });
 
+test('AudioSettingsModal renders no unavailable badge when existing Default or connected output stays active on failed switch (Cases A & B), and renders unavailable badge on genuine disconnect (Case C)', async () => {
+  let currentDevices: MediaDeviceInfo[] = [
+    {
+      deviceId: 'default',
+      groupId: 'grp-default',
+      kind: 'audiooutput',
+      label: 'Default - Built-in Speakers',
+      toJSON: () => ({}),
+    } as MediaDeviceInfo,
+    {
+      deviceId: 'dac-usb',
+      groupId: 'grp-usb',
+      kind: 'audiooutput',
+      label: 'External Studio DAC',
+      toJSON: () => ({}),
+    } as MediaDeviceInfo,
+    {
+      deviceId: 'broken-spdif',
+      groupId: 'grp-spdif',
+      kind: 'audiooutput',
+      label: 'Broken S/PDIF Output',
+      toJSON: () => ({}),
+    } as MediaDeviceInfo,
+  ];
+
+  class ModalTestSinkContext {
+    state: AudioContextState = 'running';
+    sampleRate = 48000;
+    sinkId = '';
+    readonly failIds = new Set<string>();
+    async setSinkId(id: string): Promise<void> {
+      if (this.failIds.has(id)) {
+        const err = new Error('Endpoint switch rejected');
+        err.name = id === '' ? 'InvalidStateError' : 'NotFoundError';
+        throw err;
+      }
+      this.sinkId = id;
+    }
+  }
+
+  const store = new Map<string, string>();
+  const manager = new AudioDeviceManager({
+    storage: {
+      getItem: k => store.get(k) ?? null,
+      setItem: (k, v) => {
+        store.set(k, v);
+      },
+      removeItem: k => {
+        store.delete(k);
+      },
+    },
+    getMediaDevices: () => ({
+      enumerateDevices: async () => currentDevices,
+    }),
+    getAudioContextConstructor: () => ModalTestSinkContext,
+  });
+
+  const sinkCtx = new ModalTestSinkContext();
+  const liveCtx = sinkCtx as unknown as AudioContext;
+  manager.bindAudioContext(liveCtx);
+  await manager.refreshDevices();
+
+  const renderModalForCurrentManagerState = (): string => {
+    const snap = manager.getSnapshot(liveCtx);
+    const ports = createPorts(
+      { activeOutputDeviceId: snap.activeOutputDeviceId },
+      snap,
+    );
+    return renderToStaticMarkup(
+      <AudioSettingsModal
+        isOpen
+        onClose={() => undefined}
+        engine={ports.engine}
+        deviceManager={ports.deviceManager}
+      />,
+    );
+  };
+
+  // Case A: Existing Default System Device ('') stays active after 'broken-spdif' and fallback '' both reject.
+  sinkCtx.failIds.add('broken-spdif');
+  sinkCtx.failIds.add('');
+  const caseAResult = await manager.selectOutputDevice('broken-spdif', liveCtx);
+  assert.equal(caseAResult.ok, false);
+  assert.equal(caseAResult.fellBackToDefault, false);
+
+  const htmlCaseA = renderModalForCurrentManagerState();
+  assert.doesNotMatch(htmlCaseA, /data-testid="audio-output-unavailable-badge"/);
+  assert.doesNotMatch(htmlCaseA, /Disconnected Output Device/);
+  assert.match(htmlCaseA, /role="alert"[\s\S]*Audio output remains on Default System Device/);
+
+  await manager.refreshDevices();
+  assert.doesNotMatch(renderModalForCurrentManagerState(), /data-testid="audio-output-unavailable-badge"/);
+
+  // Case B: Existing connected 'dac-usb' stays active after 'broken-spdif' and fallback '' both reject.
+  sinkCtx.failIds.clear();
+  const usbOk = await manager.selectOutputDevice('dac-usb', liveCtx);
+  assert.equal(usbOk.ok, true);
+
+  sinkCtx.failIds.add('broken-spdif');
+  sinkCtx.failIds.add('');
+  const caseBResult = await manager.selectOutputDevice('broken-spdif', liveCtx);
+  assert.equal(caseBResult.ok, false);
+  assert.equal(caseBResult.fellBackToDefault, false);
+
+  const htmlCaseB = renderModalForCurrentManagerState();
+  assert.doesNotMatch(htmlCaseB, /data-testid="audio-output-unavailable-badge"/);
+  assert.doesNotMatch(htmlCaseB, /Disconnected Output Device/);
+  assert.doesNotMatch(htmlCaseB, /Saved Output Device \(Disconnected\)/);
+  assert.ok(htmlCaseB.includes('External Studio DAC'));
+  assert.match(
+    htmlCaseB,
+    /role="alert"[\s\S]*Previous output \(External Studio DAC\) remains active/,
+  );
+
+  await manager.refreshDevices();
+  const htmlCaseBAfterRefresh = renderModalForCurrentManagerState();
+  assert.doesNotMatch(htmlCaseBAfterRefresh, /data-testid="audio-output-unavailable-badge"/);
+  assert.match(
+    htmlCaseBAfterRefresh,
+    /role="alert"[\s\S]*Previous output \(External Studio DAC\) remains active/,
+  );
+
+  // Case C: Genuine disconnect of 'dac-usb' while fallback '' rejects MUST show unavailable badge & disconnected sink.
+  currentDevices = [
+    {
+      deviceId: 'default',
+      groupId: 'grp-default',
+      kind: 'audiooutput',
+      label: 'Default - Built-in Speakers',
+      toJSON: () => ({}),
+    } as MediaDeviceInfo,
+  ];
+  await manager.refreshDevices({ fromHotPlug: true });
+  const htmlCaseC = renderModalForCurrentManagerState();
+  assert.match(htmlCaseC, /data-testid="audio-output-unavailable-badge"/);
+  assert.ok(htmlCaseC.includes('Disconnected Output Device (Fallback Unverified)'));
+  assert.match(htmlCaseC, /role="alert"[\s\S]*Default System Device fallback could not be confirmed/);
+
+  await manager.refreshDevices();
+  assert.match(renderModalForCurrentManagerState(), /data-testid="audio-output-unavailable-badge"/);
+});
+
+
 
