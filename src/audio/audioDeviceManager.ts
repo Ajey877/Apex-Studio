@@ -36,12 +36,36 @@ export interface AudioDeviceCapabilities {
   selectAudioOutputPromptSupported: boolean;
 }
 
+export type OutputFallbackStatus =
+  | 'verified-default'
+  | 'failed'
+  | 'preference-only';
+
+export interface OutputFallbackResult {
+  status: OutputFallbackStatus;
+  /** True only when a current non-closed live AudioContext completed `setSinkId('')` without error and `sinkId` readback confirmed `''`. */
+  verifiedLiveDefault: boolean;
+  /** True when a live AudioContext existed so default output routing was attempted on it. */
+  attemptedLiveSwitch: boolean;
+  /** Observed live `sinkId` readback (`''` when no live AudioContext exists). */
+  actualOutputDeviceId: string;
+  /** Preferred `outputDeviceId` after handling the fallback. */
+  preferredOutputDeviceId: string;
+  /** Current `selectedOutputAvailable` state after handling the fallback. */
+  selectedOutputAvailable: boolean;
+  /** User-facing notice recorded on the manager snapshot. */
+  notice: { tone: 'warning' | 'error' | 'info'; message: string };
+  /** Specific failure detail when `status === 'failed'`, otherwise `null`. */
+  failureDetail: string | null;
+}
+
 export interface OutputDeviceSwitchResult {
   ok: boolean;
   liveSwitched: boolean;
   preferenceSaved: boolean;
   activeDeviceId: string;
   fellBackToDefault: boolean;
+  fallbackOutcome?: OutputFallbackResult | null;
   unsupported: boolean;
   message: string | null;
 }
@@ -66,6 +90,7 @@ export interface AudioDeviceManagerSnapshot {
   isRequestingPermission: boolean;
   outputNotice: { tone: 'warning' | 'error' | 'info'; message: string } | null;
   inputNotice: { tone: 'warning' | 'error' | 'info'; message: string } | null;
+  lastOutputFallback?: OutputFallbackResult | null;
 }
 
 export interface MediaDevicesLike {
@@ -90,6 +115,12 @@ export interface AudioDeviceManagerEnvironment {
   getPermissions?: () => PermissionsLike | undefined;
   getAudioContextConstructor?: () => { prototype?: unknown } | undefined;
   storage?: StorageLike | null;
+  /**
+   * When true, hot-unplug of a selected non-default output device retains the
+   * user's saved `outputDeviceId` preference so it can automatically reconnect
+   * when plugged back in, rather than resetting saved preference to `''`.
+   */
+  keepOutputPreferenceOnDisconnect?: boolean;
 }
 
 const stripDefaultPrefix = (label: string): string =>
@@ -130,6 +161,16 @@ export const readContextSinkId = (ctx?: AudioContext | null): string => {
   const raw = (ctx as AudioContextWithSinkId).sinkId;
   if (typeof raw !== 'string') return SYSTEM_DEFAULT_DEVICE_ID;
   return normalizeAudioDeviceId(raw);
+};
+
+export const hasVerifiedSinkReadback = (
+  ctx: AudioContext | null | undefined,
+  expectedDeviceId: string,
+): boolean => {
+  if (!ctx || ctx.state === 'closed') return false;
+  const raw = (ctx as AudioContextWithSinkId).sinkId;
+  if (typeof raw !== 'string') return false;
+  return normalizeAudioDeviceId(raw) === normalizeAudioDeviceId(expectedDeviceId);
 };
 
 export const buildMicrophoneAudioTrackConstraints = (
@@ -182,6 +223,8 @@ export class AudioDeviceManager {
   private isRequestingPermission = false;
   private outputNotice: { tone: 'warning' | 'error' | 'info'; message: string } | null = null;
   private inputNotice: { tone: 'warning' | 'error' | 'info'; message: string } | null = null;
+  private unverifiedFallbackPending = false;
+  private lastOutputFallback: OutputFallbackResult | null = null;
 
   private boundContext: AudioContext | null = null;
   private monitoringInitialized = false;
@@ -279,6 +322,12 @@ export class AudioDeviceManager {
       isRequestingPermission: this.isRequestingPermission,
       outputNotice: this.outputNotice ? { ...this.outputNotice } : null,
       inputNotice: this.inputNotice ? { ...this.inputNotice } : null,
+      lastOutputFallback: this.lastOutputFallback
+        ? {
+            ...this.lastOutputFallback,
+            notice: { ...this.lastOutputFallback.notice },
+          }
+        : null,
     };
   }
 
@@ -308,12 +357,29 @@ export class AudioDeviceManager {
     this.storageAvailable = saved.persisted;
   }
 
+  private isEnumeratedHardwareOutputConnected(deviceId: string): boolean {
+    const normalized = normalizeAudioDeviceId(deviceId);
+    if (normalized === SYSTEM_DEFAULT_DEVICE_ID) return true;
+    const enumeratedHardwareOutputs = this.outputDevices.filter(
+      device => !device.isSystemDefault && device.deviceId !== SYSTEM_DEFAULT_DEVICE_ID,
+    );
+    if (enumeratedHardwareOutputs.length === 0) {
+      return !this.knownHardwareOutputIds.has(normalized);
+    }
+    return enumeratedHardwareOutputs.some(device => device.deviceId === normalized);
+  }
+
   public bindAudioContext(ctx: AudioContext | null): void {
+    const contextChanged = this.boundContext !== ctx;
     this.boundContext = ctx;
+    if (contextChanged) {
+      this.unverifiedFallbackPending = false;
+    }
     if (ctx && ctx.state !== 'closed') {
       this.activeOutputDeviceId = readContextSinkId(ctx);
     } else {
       this.activeOutputDeviceId = SYSTEM_DEFAULT_DEVICE_ID;
+      this.unverifiedFallbackPending = false;
     }
     this.emit();
   }
@@ -431,7 +497,9 @@ export class AudioDeviceManager {
     await this.refreshDevices({ fromHotPlug: true });
   }
 
-  public async refreshDevices(options: { fromHotPlug?: boolean } = {}): Promise<AudioDeviceManagerSnapshot> {
+  public async refreshDevices(
+    options: { fromHotPlug?: boolean; keepPreferenceForReconnect?: boolean } = {},
+  ): Promise<AudioDeviceManagerSnapshot> {
     const mediaDevices = this.resolveMediaDevices();
     if (typeof mediaDevices?.enumerateDevices !== 'function') {
       this.outputDevices = [
@@ -485,13 +553,19 @@ export class AudioDeviceManager {
       for (const id of currentHardwareOutputIds) this.knownHardwareOutputIds.add(id);
       for (const id of currentHardwareInputIds) this.knownHardwareInputIds.add(id);
 
+      const fromHotPlug = Boolean(options.fromHotPlug);
+      const keepPreferenceForReconnect =
+        options.keepPreferenceForReconnect ??
+        (fromHotPlug && Boolean(this.env.keepOutputPreferenceOnDisconnect));
+
       await this.reconcileSelectedOutputAfterEnumeration(
         currentHardwareOutputIds,
-        Boolean(options.fromHotPlug),
+        fromHotPlug,
+        keepPreferenceForReconnect,
       );
       this.reconcileSelectedInputAfterEnumeration(
         currentHardwareInputIds,
-        Boolean(options.fromHotPlug),
+        fromHotPlug,
       );
     } catch (error) {
       this.outputNotice = {
@@ -566,24 +640,41 @@ export class AudioDeviceManager {
   private async reconcileSelectedOutputAfterEnumeration(
     currentHardwareOutputIds: ReadonlySet<string>,
     fromHotPlug: boolean,
+    keepPreferenceForReconnect: boolean,
   ): Promise<void> {
     const preferredOutput = this.preferences.outputDeviceId;
     if (preferredOutput === SYSTEM_DEFAULT_DEVICE_ID) {
+      if (
+        this.unverifiedFallbackPending &&
+        this.boundContext &&
+        this.boundContext.state !== 'closed' &&
+        !hasVerifiedSinkReadback(this.boundContext, SYSTEM_DEFAULT_DEVICE_ID)
+      ) {
+        this.selectedOutputAvailable = false;
+        return;
+      }
+      this.unverifiedFallbackPending = false;
       this.selectedOutputAvailable = true;
       return;
     }
 
     if (currentHardwareOutputIds.has(preferredOutput)) {
-      this.selectedOutputAvailable = true;
+      const wasUnavailable = !this.selectedOutputAvailable || this.unverifiedFallbackPending;
       // If a previously disconnected preferred output was plugged back in while bound, re-route to it cleanly.
       if (
         fromHotPlug &&
         this.boundContext &&
         this.boundContext.state !== 'closed' &&
-        this.getActiveOutputDeviceId(this.boundContext) !== preferredOutput &&
+        (wasUnavailable || this.getActiveOutputDeviceId(this.boundContext) !== preferredOutput) &&
         this.getCapabilities(this.boundContext).outputSinkSelectionSupported
       ) {
         await this.applyOutputDeviceToContext(this.boundContext, preferredOutput, { persist: false });
+        return;
+      }
+      this.selectedOutputAvailable = true;
+      this.unverifiedFallbackPending = false;
+      if (wasUnavailable) {
+        this.outputNotice = null;
       }
       return;
     }
@@ -599,9 +690,9 @@ export class AudioDeviceManager {
     this.selectedOutputAvailable = false;
     await this.fallBackOutputToSystemDefault(
       fromHotPlug
-        ? 'Selected audio output device was disconnected. Audio output fell back to Default System Device.'
-        : 'Saved audio output device is not currently connected. Using Default System Device.',
-      { keepPreferenceForReconnect: false },
+        ? 'Selected audio output device was disconnected.'
+        : 'Saved audio output device is not currently connected.',
+      { keepPreferenceForReconnect, emit: false },
     );
   }
 
@@ -644,34 +735,152 @@ export class AudioDeviceManager {
     };
   }
 
-  private async fallBackOutputToSystemDefault(
-    reasonMessage: string,
-    options: { keepPreferenceForReconnect: boolean },
-  ): Promise<void> {
+  /**
+   * Attempts to route the current live non-closed `AudioContext` to Default
+   * System Device (`''`) and verifies the outcome via `ctx.sinkId` readback.
+   *
+   * Never reports `'verified-default'` unless a live `AudioContext` completed
+   * `setSinkId('')` without rejecting AND `ctx.sinkId` readback confirmed `''`.
+   */
+  public async fallBackOutputToSystemDefault(
+    reasonPrefix: string,
+    options: { keepPreferenceForReconnect: boolean; emit?: boolean },
+  ): Promise<OutputFallbackResult> {
+    const trimmedReason = reasonPrefix.trim().replace(/\.*$/, '.');
     const liveCtx =
       this.boundContext && this.boundContext.state !== 'closed' ? this.boundContext : null;
-    if (
-      liveCtx &&
-      supportsAudioContextSetSinkId(liveCtx, this.env.getAudioContextConstructor?.())
-    ) {
+
+    if (!liveCtx) {
+      this.activeOutputDeviceId = SYSTEM_DEFAULT_DEVICE_ID;
+      this.unverifiedFallbackPending = false;
+      if (!options.keepPreferenceForReconnect) {
+        this.persistPreferences({ outputDeviceId: SYSTEM_DEFAULT_DEVICE_ID });
+        this.selectedOutputAvailable = true;
+      } else {
+        this.selectedOutputAvailable =
+          this.preferences.outputDeviceId === SYSTEM_DEFAULT_DEVICE_ID;
+      }
+      const notice = {
+        tone: 'warning' as const,
+        message: options.keepPreferenceForReconnect
+          ? `${trimmedReason} Saved output preference retained and will reconnect when available.`
+          : `${trimmedReason} Output preference reset to Default System Device.`,
+      };
+      this.outputNotice = notice;
+      const result: OutputFallbackResult = {
+        status: 'preference-only',
+        verifiedLiveDefault: false,
+        attemptedLiveSwitch: false,
+        actualOutputDeviceId: SYSTEM_DEFAULT_DEVICE_ID,
+        preferredOutputDeviceId: this.preferences.outputDeviceId,
+        selectedOutputAvailable: this.selectedOutputAvailable,
+        notice: { ...notice },
+        failureDetail: null,
+      };
+      this.lastOutputFallback = result;
+      if (options.emit !== false) {
+        this.emit();
+      }
+      return result;
+    }
+
+    const setSinkSupported = supportsAudioContextSetSinkId(
+      liveCtx,
+      this.env.getAudioContextConstructor?.(),
+    );
+    let sinkSwitchError: unknown = null;
+    if (setSinkSupported) {
       try {
         await (liveCtx as AudioContextWithSinkId).setSinkId?.(SYSTEM_DEFAULT_DEVICE_ID);
-      } catch {
-        // Ignore secondary fallback errors on closing/broken contexts.
+      } catch (error) {
+        sinkSwitchError = error;
       }
     }
-    const actualAfterFallback = liveCtx
-      ? readContextSinkId(liveCtx)
-      : SYSTEM_DEFAULT_DEVICE_ID;
-    this.activeOutputDeviceId = actualAfterFallback;
-    if (!options.keepPreferenceForReconnect) {
-      this.persistPreferences({ outputDeviceId: actualAfterFallback });
-      this.selectedOutputAvailable = true;
+
+    const verifiedDefault =
+      setSinkSupported &&
+      sinkSwitchError === null &&
+      hasVerifiedSinkReadback(liveCtx, SYSTEM_DEFAULT_DEVICE_ID);
+
+    if (verifiedDefault) {
+      this.activeOutputDeviceId = SYSTEM_DEFAULT_DEVICE_ID;
+      this.unverifiedFallbackPending = false;
+      if (!options.keepPreferenceForReconnect) {
+        this.persistPreferences({ outputDeviceId: SYSTEM_DEFAULT_DEVICE_ID });
+        this.selectedOutputAvailable = true;
+      } else {
+        this.selectedOutputAvailable =
+          this.preferences.outputDeviceId === SYSTEM_DEFAULT_DEVICE_ID;
+      }
+      const notice = {
+        tone: 'warning' as const,
+        message: options.keepPreferenceForReconnect
+          ? `${trimmedReason} Audio output fell back to Default System Device and will reconnect when available.`
+          : `${trimmedReason} Audio output fell back to Default System Device.`,
+      };
+      this.outputNotice = notice;
+      const result: OutputFallbackResult = {
+        status: 'verified-default',
+        verifiedLiveDefault: true,
+        attemptedLiveSwitch: true,
+        actualOutputDeviceId: SYSTEM_DEFAULT_DEVICE_ID,
+        preferredOutputDeviceId: this.preferences.outputDeviceId,
+        selectedOutputAvailable: this.selectedOutputAvailable,
+        notice: { ...notice },
+        failureDetail: null,
+      };
+      this.lastOutputFallback = result;
+      if (options.emit !== false) {
+        this.emit();
+      }
+      return result;
     }
-    this.outputNotice = {
-      tone: 'warning',
-      message: reasonMessage,
+
+    const rawSink = (liveCtx as AudioContextWithSinkId).sinkId;
+    const observedSink = readContextSinkId(liveCtx);
+    const failureDetail =
+      sinkSwitchError !== null
+        ? extractErrorMessage(sinkSwitchError)
+        : !setSinkSupported
+          ? 'AudioContext.setSinkId is not supported in this runtime'
+          : typeof rawSink !== 'string'
+            ? 'AudioContext.sinkId readback is unavailable'
+            : `AudioContext remained routed to "${observedSink}"`;
+
+    this.activeOutputDeviceId = observedSink;
+    this.selectedOutputAvailable = false;
+    this.unverifiedFallbackPending = true;
+
+    if (!options.keepPreferenceForReconnect) {
+      // Never persist the disconnected/unverified sink ID as though fallback succeeded.
+      if (
+        this.preferences.outputDeviceId !== SYSTEM_DEFAULT_DEVICE_ID &&
+        !this.isEnumeratedHardwareOutputConnected(this.preferences.outputDeviceId)
+      ) {
+        this.persistPreferences({ outputDeviceId: SYSTEM_DEFAULT_DEVICE_ID });
+      }
+    }
+
+    const notice = {
+      tone: 'error' as const,
+      message: `${trimmedReason} Default System Device fallback could not be confirmed (${failureDetail}).`,
     };
+    this.outputNotice = notice;
+    const result: OutputFallbackResult = {
+      status: 'failed',
+      verifiedLiveDefault: false,
+      attemptedLiveSwitch: true,
+      actualOutputDeviceId: observedSink,
+      preferredOutputDeviceId: this.preferences.outputDeviceId,
+      selectedOutputAvailable: this.selectedOutputAvailable,
+      notice: { ...notice },
+      failureDetail,
+    };
+    this.lastOutputFallback = result;
+    if (options.emit !== false) {
+      this.emit();
+    }
+    return result;
   }
 
   /**
@@ -822,6 +1031,7 @@ export class AudioDeviceManager {
           const message =
             'Audio output device switching (AudioContext.setSinkId) is not supported in this browser/runtime. Audio remains routed to Default System Device.';
           this.activeOutputDeviceId = SYSTEM_DEFAULT_DEVICE_ID;
+          this.unverifiedFallbackPending = false;
           this.outputNotice = { tone: 'warning', message };
           this.persistPreferences({ outputDeviceId: SYSTEM_DEFAULT_DEVICE_ID });
           this.emit();
@@ -830,7 +1040,8 @@ export class AudioDeviceManager {
             liveSwitched: false,
             preferenceSaved: false,
             activeDeviceId: SYSTEM_DEFAULT_DEVICE_ID,
-            fellBackToDefault: true,
+            fellBackToDefault: false,
+            fallbackOutcome: null,
             unsupported: true,
             message,
           };
@@ -844,27 +1055,26 @@ export class AudioDeviceManager {
           enumeratedHardwareOutputs.length > 0 &&
           !enumeratedHardwareOutputs.some(device => device.deviceId === normalizedId)
         ) {
-          const fallbackMessage =
-            'Selected audio output device is no longer connected. Audio output fell back to Default System Device.';
-          this.persistPreferences({ outputDeviceId: SYSTEM_DEFAULT_DEVICE_ID });
-          this.activeOutputDeviceId = SYSTEM_DEFAULT_DEVICE_ID;
-          this.selectedOutputAvailable = true;
-          this.outputNotice = { tone: 'warning', message: fallbackMessage };
-          this.emit();
+          const fallback = await this.fallBackOutputToSystemDefault(
+            'Selected audio output device is no longer connected.',
+            { keepPreferenceForReconnect: false },
+          );
           return {
             ok: false,
             liveSwitched: false,
             preferenceSaved: false,
-            activeDeviceId: SYSTEM_DEFAULT_DEVICE_ID,
-            fellBackToDefault: true,
+            activeDeviceId: fallback.actualOutputDeviceId,
+            fellBackToDefault: fallback.verifiedLiveDefault,
+            fallbackOutcome: fallback,
             unsupported: false,
-            message: fallbackMessage,
+            message: fallback.notice.message,
           };
         }
 
         this.persistPreferences({ outputDeviceId: normalizedId });
         this.activeOutputDeviceId = SYSTEM_DEFAULT_DEVICE_ID;
         this.selectedOutputAvailable = true;
+        this.unverifiedFallbackPending = false;
         this.outputNotice = null;
         this.emit();
         return {
@@ -873,6 +1083,7 @@ export class AudioDeviceManager {
           preferenceSaved: true,
           activeDeviceId: SYSTEM_DEFAULT_DEVICE_ID,
           fellBackToDefault: false,
+          fallbackOutcome: null,
           unsupported: false,
           message:
             'Preferred audio output device saved. It will be applied when the audio engine initializes.',
@@ -908,6 +1119,7 @@ export class AudioDeviceManager {
         preferenceSaved: false,
         activeDeviceId: currentActiveId,
         fellBackToDefault: false,
+        fallbackOutcome: null,
         unsupported: false,
         message,
       };
@@ -923,6 +1135,7 @@ export class AudioDeviceManager {
         preferenceSaved: false,
         activeDeviceId: currentActiveId,
         fellBackToDefault: false,
+        fallbackOutcome: null,
         unsupported: false,
         message,
       };
@@ -939,6 +1152,7 @@ export class AudioDeviceManager {
         preferenceSaved: false,
         activeDeviceId: currentActiveId,
         fellBackToDefault: false,
+        fallbackOutcome: null,
         unsupported: false,
         message,
       };
@@ -959,6 +1173,8 @@ export class AudioDeviceManager {
         } catch (error) {
           const actualSink = readContextSinkId(ctx);
           this.activeOutputDeviceId = actualSink;
+          this.selectedOutputAvailable = false;
+          this.unverifiedFallbackPending = true;
           const message = `Failed to switch audio output to Default System Device: ${extractErrorMessage(error)}`;
           this.outputNotice = { tone: 'error', message };
           this.emit();
@@ -968,17 +1184,17 @@ export class AudioDeviceManager {
             preferenceSaved: false,
             activeDeviceId: actualSink,
             fellBackToDefault: false,
+            fallbackOutcome: null,
             unsupported: false,
             message,
           };
         }
-        const hasReadableDefaultSink = typeof (ctx as AudioContextWithSinkId).sinkId === 'string';
-        const verifiedDefaultSink = hasReadableDefaultSink
-          ? readContextSinkId(ctx)
-          : SYSTEM_DEFAULT_DEVICE_ID;
-        if (verifiedDefaultSink !== SYSTEM_DEFAULT_DEVICE_ID) {
+        if (!hasVerifiedSinkReadback(ctx, SYSTEM_DEFAULT_DEVICE_ID)) {
+          const verifiedDefaultSink = readContextSinkId(ctx);
           const message = 'Audio engine did not switch back to Default System Device.';
           this.activeOutputDeviceId = verifiedDefaultSink;
+          this.selectedOutputAvailable = false;
+          this.unverifiedFallbackPending = true;
           this.outputNotice = { tone: 'error', message };
           this.emit();
           return {
@@ -987,6 +1203,7 @@ export class AudioDeviceManager {
             preferenceSaved: false,
             activeDeviceId: verifiedDefaultSink,
             fellBackToDefault: false,
+            fallbackOutcome: null,
             unsupported: false,
             message,
           };
@@ -994,6 +1211,8 @@ export class AudioDeviceManager {
       }
       this.activeOutputDeviceId = SYSTEM_DEFAULT_DEVICE_ID;
       this.selectedOutputAvailable = true;
+      this.unverifiedFallbackPending = false;
+      this.lastOutputFallback = null;
       this.outputNotice = null;
       if (options.persist) {
         this.persistPreferences({ outputDeviceId: SYSTEM_DEFAULT_DEVICE_ID });
@@ -1005,6 +1224,7 @@ export class AudioDeviceManager {
         preferenceSaved: Boolean(options.persist),
         activeDeviceId: SYSTEM_DEFAULT_DEVICE_ID,
         fellBackToDefault: false,
+        fallbackOutcome: null,
         unsupported: false,
         message: null,
       };
@@ -1025,7 +1245,8 @@ export class AudioDeviceManager {
         liveSwitched: false,
         preferenceSaved: false,
         activeDeviceId: actualSink,
-        fellBackToDefault: actualSink === SYSTEM_DEFAULT_DEVICE_ID,
+        fellBackToDefault: false,
+        fallbackOutcome: null,
         unsupported: true,
         message,
       };
@@ -1038,47 +1259,47 @@ export class AudioDeviceManager {
       enumeratedHardwareOutputs.length > 0 &&
       !enumeratedHardwareOutputs.some(device => device.deviceId === normalizedId)
     ) {
-      const fallbackMessage =
-        'Selected audio output device is no longer connected. Audio output fell back to Default System Device.';
-      await this.fallBackOutputToSystemDefault(fallbackMessage, { keepPreferenceForReconnect: false });
-      const actualAfterFallback = readContextSinkId(ctx);
-      this.emit();
+      const fallback = await this.fallBackOutputToSystemDefault(
+        'Selected audio output device is no longer connected.',
+        { keepPreferenceForReconnect: false },
+      );
       return {
         ok: false,
         liveSwitched: false,
         preferenceSaved: false,
-        activeDeviceId: actualAfterFallback,
-        fellBackToDefault: actualAfterFallback === SYSTEM_DEFAULT_DEVICE_ID,
+        activeDeviceId: fallback.actualOutputDeviceId,
+        fellBackToDefault: fallback.verifiedLiveDefault,
+        fallbackOutcome: fallback,
         unsupported: false,
-        message: fallbackMessage,
+        message: fallback.notice.message,
       };
     }
 
     try {
       await (ctx as AudioContextWithSinkId).setSinkId?.(normalizedId);
-      const rawSink = (ctx as AudioContextWithSinkId).sinkId;
-      const verifiedSink =
-        typeof rawSink === 'string' ? normalizeAudioDeviceId(rawSink) : normalizedId;
 
-      if (verifiedSink !== normalizedId) {
-        const mismatchMessage =
-          'Audio engine did not switch to the requested output device. Routed audio back to Default System Device.';
-        await this.fallBackOutputToSystemDefault(mismatchMessage, { keepPreferenceForReconnect: false });
-        const actualSinkAfterFallback = readContextSinkId(ctx);
-        this.emit();
+      if (!hasVerifiedSinkReadback(ctx, normalizedId)) {
+        const fallback = await this.fallBackOutputToSystemDefault(
+          'Audio engine did not switch to the requested output device.',
+          { keepPreferenceForReconnect: false },
+        );
         return {
           ok: false,
           liveSwitched: false,
           preferenceSaved: false,
-          activeDeviceId: actualSinkAfterFallback,
-          fellBackToDefault: actualSinkAfterFallback === SYSTEM_DEFAULT_DEVICE_ID,
+          activeDeviceId: fallback.actualOutputDeviceId,
+          fellBackToDefault: fallback.verifiedLiveDefault,
+          fallbackOutcome: fallback,
           unsupported: false,
-          message: mismatchMessage,
+          message: fallback.notice.message,
         };
       }
 
+      const verifiedSink = readContextSinkId(ctx);
       this.activeOutputDeviceId = verifiedSink;
       this.selectedOutputAvailable = true;
+      this.unverifiedFallbackPending = false;
+      this.lastOutputFallback = null;
       this.knownHardwareOutputIds.add(verifiedSink);
       this.outputNotice = null;
       if (options.persist) {
@@ -1091,6 +1312,7 @@ export class AudioDeviceManager {
         preferenceSaved: Boolean(options.persist),
         activeDeviceId: verifiedSink,
         fellBackToDefault: false,
+        fallbackOutcome: null,
         unsupported: false,
         message: null,
       };
@@ -1102,18 +1324,19 @@ export class AudioDeviceManager {
           : domName === 'NotAllowedError'
             ? 'speaker selection permission was denied'
             : extractErrorMessage(error);
-      const fallbackMessage = `Could not route audio output to the selected device (${detail}). Audio output fell back to Default System Device.`;
-      await this.fallBackOutputToSystemDefault(fallbackMessage, { keepPreferenceForReconnect: false });
-      const actualSinkAfterFallback = readContextSinkId(ctx);
-      this.emit();
+      const fallback = await this.fallBackOutputToSystemDefault(
+        `Could not route audio output to the selected device (${detail}).`,
+        { keepPreferenceForReconnect: false },
+      );
       return {
         ok: false,
         liveSwitched: false,
         preferenceSaved: false,
-        activeDeviceId: actualSinkAfterFallback,
-        fellBackToDefault: actualSinkAfterFallback === SYSTEM_DEFAULT_DEVICE_ID,
+        activeDeviceId: fallback.actualOutputDeviceId,
+        fellBackToDefault: fallback.verifiedLiveDefault,
+        fallbackOutcome: fallback,
         unsupported: false,
-        message: fallbackMessage,
+        message: fallback.notice.message,
       };
     }
   }
@@ -1193,6 +1416,8 @@ export class AudioDeviceManager {
     this.storageAvailable = saved.persisted;
     this.selectedOutputAvailable = true;
     this.selectedInputAvailable = true;
+    this.unverifiedFallbackPending = false;
+    this.lastOutputFallback = null;
     this.outputNotice = null;
     this.inputNotice = null;
     this.emit();

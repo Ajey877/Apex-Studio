@@ -388,3 +388,51 @@ test('P2 regression: opening and closing AudioSettingsModal repeatedly scopes su
   assert.equal(getUserMediaCalls, 0);
 });
 
+test('AudioSettingsModal surfaces unverified fallback failure honestly without displaying Disconnected sink as Default System Device', () => {
+  const unverifiedPorts = createPorts(
+    {
+      activeOutputDeviceId: 'dac-usb',
+    },
+    {
+      preferences: {
+        outputDeviceId: 'dac-usb',
+        inputDeviceId: 'mic-xlr',
+        sampleRate: 48000,
+        latencyHint: 'interactive',
+      },
+      outputDevices: [
+        {
+          deviceId: '',
+          groupId: 'default',
+          kind: 'audiooutput',
+          label: 'Default System Device',
+          isSystemDefault: true,
+          labelRevealed: true,
+        },
+      ],
+      activeOutputDeviceId: 'dac-usb',
+      selectedOutputAvailable: false,
+      outputNotice: {
+        tone: 'error',
+        message:
+          'Selected audio output device was disconnected. Default System Device fallback could not be confirmed (AudioContext remained routed to "dac-usb").',
+      },
+    },
+  );
+
+  const html = renderToStaticMarkup(
+    <AudioSettingsModal
+      isOpen
+      onClose={() => undefined}
+      engine={unverifiedPorts.engine}
+      deviceManager={unverifiedPorts.deviceManager}
+    />,
+  );
+
+  assert.match(html, /data-testid="audio-output-unavailable-badge"/);
+  assert.ok(html.includes('Disconnected Output Device (Fallback Unverified)'));
+  assert.ok(html.includes('Saved Output Device (Disconnected)'));
+  assert.match(html, /role="alert"[\s\S]*Default System Device fallback could not be confirmed/);
+});
+
+

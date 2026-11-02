@@ -124,6 +124,8 @@ test('P1 & P2 in Chromium: startup passive monitoring runs while modal is closed
     const NativeAudioContext = window.AudioContext;
     const sinkMap = new WeakMap<AudioContext, { sinkId: string; calls: string[] }>();
     const createdContexts: AudioContext[] = [];
+    let rejectSinkIds = new Set<string>();
+    let noopSinkIds = new Set<string>();
 
     Object.defineProperty(NativeAudioContext.prototype, 'sinkId', {
       configurable: true,
@@ -145,6 +147,12 @@ test('P1 & P2 in Chromium: startup passive monitoring runs while modal is closed
           sinkMap.set(this, entry);
         }
         entry.calls.push(sinkId);
+        if (rejectSinkIds.has(sinkId)) {
+          throw new DOMException('Hardware sink fallback rejected', 'InvalidStateError');
+        }
+        if (noopSinkIds.has(sinkId)) {
+          return;
+        }
         entry.sinkId = sinkId;
       },
     });
@@ -184,6 +192,10 @@ test('P1 & P2 in Chromium: startup passive monitoring runs while modal is closed
           if (typeof listener === 'function') listener(evt);
           else listener.handleEvent(evt);
         }
+      },
+      setSinkBehavior: (opts: { rejectSinkIds?: string[]; noopSinkIds?: string[] }) => {
+        rejectSinkIds = new Set(opts.rejectSinkIds ?? []);
+        noopSinkIds = new Set(opts.noopSinkIds ?? []);
       },
     };
   });
@@ -366,13 +378,70 @@ test('P1 & P2 in Chromium: startup passive monitoring runs while modal is closed
         return {
           activeDeviceId: audioDeviceManager.getActiveOutputDeviceId(),
           replacementSinkId: latest?.sinkId ?? null,
+          fallbackStatus: audioDeviceManager.getSnapshot().lastOutputFallback?.status ?? null,
         };
       }),
     )
     .toEqual({
       activeDeviceId: '',
       replacementSinkId: '',
+      fallbackStatus: 'verified-default',
     });
+
+  // Fallback verification failure in real Chromium DOM: select 'dac-usb', force setSinkId('') to reject,
+  // unplug 'dac-usb', and assert fallback is NOT reported as successful and UI surfaces unavailable state.
+  const dialogForReject = await openAudioSettings(page);
+  await dialogForReject.locator('#audio-output-device-select').selectOption('dac-usb');
+  await dialogForReject.getByRole('button', { name: 'Close Audio Settings' }).click();
+  await expect(dialogForReject).toBeHidden();
+
+  await page.evaluate(() => {
+    const h = (window as unknown as {
+      __apexAudioTestHarness: {
+        setSinkBehavior: (opts: { rejectSinkIds?: string[]; noopSinkIds?: string[] }) => void;
+        setDevicesAndNotify: (d: Array<{ kind: MediaDeviceKind; deviceId: string; label: string }>) => void;
+      };
+    }).__apexAudioTestHarness;
+    h.setSinkBehavior({ rejectSinkIds: [''] });
+    h.setDevicesAndNotify([
+      { kind: 'audiooutput', deviceId: 'default', label: 'Default - Built-in Output' },
+      { kind: 'audioinput', deviceId: 'default', label: 'Default - Built-in Mic' },
+    ]);
+  });
+
+  await expect
+    .poll(async () =>
+      page.evaluate(async () => {
+        // @ts-ignore — browser-side Vite module import
+        const { audioDeviceManager } = await import('/src/audio/audioDeviceManager.ts');
+        const snap = audioDeviceManager.getSnapshot();
+        return {
+          fallbackStatus: snap.lastOutputFallback?.status ?? null,
+          verifiedLiveDefault: snap.lastOutputFallback?.verifiedLiveDefault ?? null,
+          selectedOutputAvailable: snap.selectedOutputAvailable,
+          activeOutputDeviceId: snap.activeOutputDeviceId,
+          preferredOutputDeviceId: snap.preferences.outputDeviceId,
+          noticeTone: snap.outputNotice?.tone ?? null,
+        };
+      }),
+    )
+    .toEqual({
+      fallbackStatus: 'failed',
+      verifiedLiveDefault: false,
+      selectedOutputAvailable: false,
+      activeOutputDeviceId: 'dac-usb',
+      preferredOutputDeviceId: '',
+      noticeTone: 'error',
+    });
+
+  const dialogAfterReject = await openAudioSettings(page);
+  await expect(dialogAfterReject.getByTestId('audio-output-unavailable-badge')).toBeVisible();
+  await expect(dialogAfterReject.getByText('Disconnected Output Device (Fallback Unverified)')).toBeVisible();
+  await expect(dialogAfterReject.getByRole('alert')).toContainText(
+    /Default System Device fallback could not be confirmed/i,
+  );
+  await dialogAfterReject.getByRole('button', { name: 'Close Audio Settings' }).click();
+  await expect(dialogAfterReject).toBeHidden();
 
   // P2 (4): Stopping monitoring on teardown removes listeners cleanly.
   const afterTeardown = await page.evaluate(async () => {

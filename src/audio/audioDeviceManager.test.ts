@@ -17,7 +17,10 @@ import {
 } from './audioDeviceManager';
 import { RecordingEngine } from './recordingEngine';
 import { audioEngine } from './audioEngine';
-import type { StorageLike } from '../state/audioPreferences';
+import {
+  AUDIO_PREFERENCES_STORAGE_KEY,
+  type StorageLike,
+} from '../state/audioPreferences';
 
 class MemoryStorage implements StorageLike {
   private readonly store = new Map<string, string>();
@@ -77,16 +80,22 @@ class FakeSinkAudioContext {
   sinkId = '';
   readonly sinkCalls: string[] = [];
   failOnSinkId: string | null = null;
+  readonly failOnSinkIds = new Set<string>();
+  failErrorMessage = 'Requested device not found';
   ignoreSinkSwitchForTarget: string | null = null;
+  readonly ignoreSinkSwitchForTargets = new Set<string>();
 
   async setSinkId(id: string): Promise<void> {
     this.sinkCalls.push(id);
-    if (this.failOnSinkId !== null && id === this.failOnSinkId) {
-      const err = new Error('Requested device not found');
-      err.name = 'NotFoundError';
+    if ((this.failOnSinkId !== null && id === this.failOnSinkId) || this.failOnSinkIds.has(id)) {
+      const err = new Error(this.failErrorMessage);
+      err.name = id === '' ? 'InvalidStateError' : 'NotFoundError';
       throw err;
     }
-    if (this.ignoreSinkSwitchForTarget !== null && id === this.ignoreSinkSwitchForTarget) {
+    if (
+      (this.ignoreSinkSwitchForTarget !== null && id === this.ignoreSinkSwitchForTarget) ||
+      this.ignoreSinkSwitchForTargets.has(id)
+    ) {
       return;
     }
     this.sinkId = id;
@@ -627,4 +636,402 @@ test('P2 regression: initializePassiveMonitoring is idempotent across concurrent
   assert.equal(permissionChangeListeners.size, 0);
   assert.equal(getUserMediaCalls, 0);
 });
+
+test('Fallback regression 1: hot-unplug + rejected setSinkId("") never claims fallback succeeded, preserves observed sinkId, keeps output unavailable, and never persists disconnected sink', async () => {
+  let currentDevices: MediaDeviceInfo[] = [
+    makeDevice('audiooutput', 'default', 'Default - Built-in Speakers'),
+    makeDevice('audiooutput', 'dac-usb', 'External Studio DAC'),
+  ];
+  let deviceChangeHandler: EventListener | null = null;
+
+  const mediaDevices: MediaDevicesLike = {
+    enumerateDevices: async () => currentDevices,
+    addEventListener: (type, cb) => {
+      if (type === 'devicechange') deviceChangeHandler = cb;
+    },
+    removeEventListener: () => {
+      deviceChangeHandler = null;
+    },
+  };
+
+  const storage = new MemoryStorage();
+  const manager = new AudioDeviceManager({
+    storage,
+    getMediaDevices: () => mediaDevices,
+    getAudioContextConstructor: () => FakeSinkAudioContext,
+  });
+
+  const fakeCtx = new FakeSinkAudioContext();
+  const ctx = fakeCtx as unknown as AudioContext & AudioContextWithSinkId;
+  manager.bindAudioContext(ctx);
+  await manager.initializePassiveMonitoring();
+
+  const selected = await manager.selectOutputDevice('dac-usb', ctx);
+  assert.equal(selected.ok, true);
+  assert.equal(fakeCtx.sinkId, 'dac-usb');
+  assert.equal(manager.getPreferences().outputDeviceId, 'dac-usb');
+
+  // Unplug External Studio DAC while live fallback setSinkId('') rejects.
+  currentDevices = [makeDevice('audiooutput', 'default', 'Default - Built-in Speakers')];
+  fakeCtx.failOnSinkIds.add('');
+  fakeCtx.failErrorMessage = 'Audio hardware sink busy';
+
+  assert.ok(deviceChangeHandler, 'devicechange listener must be attached');
+  deviceChangeHandler(new Event('devicechange'));
+  await new Promise(resolve => setTimeout(resolve, 20));
+
+  const snap = manager.getSnapshot(ctx);
+  assert.equal(snap.lastOutputFallback?.status, 'failed');
+  assert.equal(snap.lastOutputFallback?.verifiedLiveDefault, false);
+  assert.equal(snap.lastOutputFallback?.attemptedLiveSwitch, true);
+  assert.equal(snap.lastOutputFallback?.actualOutputDeviceId, 'dac-usb');
+  assert.equal(snap.selectedOutputAvailable, false, 'disconnected device must not be marked available');
+  assert.equal(snap.activeOutputDeviceId, 'dac-usb', 'actual observed sinkId readback must be preserved');
+  assert.equal(manager.getActiveOutputDeviceId(ctx), 'dac-usb');
+
+  // Disconnected sink ID must NOT remain persisted as though fallback succeeded.
+  assert.equal(manager.getPreferences().outputDeviceId, '');
+  const persistedRaw = JSON.parse(storage.getItem(AUDIO_PREFERENCES_STORAGE_KEY) ?? '{}') as {
+    outputDeviceId?: string;
+  };
+  assert.equal(persistedRaw.outputDeviceId, '');
+
+  assert.equal(snap.outputNotice?.tone, 'error');
+  assert.match(snap.outputNotice?.message ?? '', /disconnected/i);
+  assert.match(
+    snap.outputNotice?.message ?? '',
+    /Default System Device fallback could not be confirmed.*Audio hardware sink busy/i,
+  );
+  assert.doesNotMatch(
+    snap.outputNotice?.message ?? '',
+    /Audio output fell back to Default System Device/i,
+  );
+
+  // Subsequent passive refresh while fallback remains unverified must keep selectedOutputAvailable=false.
+  const refreshed = await manager.refreshDevices();
+  assert.equal(refreshed.selectedOutputAvailable, false);
+  assert.equal(refreshed.activeOutputDeviceId, 'dac-usb');
+});
+
+test('Fallback regression 2: hot-unplug + silent no-op setSinkId("") treats stuck sinkId readback as failed fallback', async () => {
+  let currentDevices: MediaDeviceInfo[] = [
+    makeDevice('audiooutput', 'default', 'Default - Built-in Speakers'),
+    makeDevice('audiooutput', 'dac-usb', 'External Studio DAC'),
+  ];
+
+  const storage = new MemoryStorage();
+  const manager = new AudioDeviceManager({
+    storage,
+    getMediaDevices: () => ({
+      enumerateDevices: async () => currentDevices,
+    }),
+    getAudioContextConstructor: () => FakeSinkAudioContext,
+  });
+
+  const fakeCtx = new FakeSinkAudioContext();
+  const ctx = fakeCtx as unknown as AudioContext & AudioContextWithSinkId;
+  manager.bindAudioContext(ctx);
+  await manager.refreshDevices();
+
+  const switched = await manager.selectOutputDevice('dac-usb', ctx);
+  assert.equal(switched.ok, true);
+  assert.equal(fakeCtx.sinkId, 'dac-usb');
+
+  // Unplug External Studio DAC while setSinkId('') resolves as a silent no-op (sinkId stays 'dac-usb').
+  currentDevices = [makeDevice('audiooutput', 'default', 'Default - Built-in Speakers')];
+  fakeCtx.ignoreSinkSwitchForTargets.add('');
+
+  const snap = await manager.refreshDevices({ fromHotPlug: true });
+
+  assert.equal(fakeCtx.sinkCalls.at(-1), '');
+  assert.equal(fakeCtx.sinkId, 'dac-usb');
+  assert.equal(snap.lastOutputFallback?.status, 'failed');
+  assert.equal(snap.lastOutputFallback?.verifiedLiveDefault, false);
+  assert.equal(snap.lastOutputFallback?.actualOutputDeviceId, 'dac-usb');
+  assert.equal(snap.selectedOutputAvailable, false, 'silent no-op fallback must not mark output available');
+  assert.equal(snap.activeOutputDeviceId, 'dac-usb', 'observed stuck sinkId must be preserved');
+
+  // Disconnected sink ID must NOT be persisted as current output preference.
+  assert.equal(manager.getPreferences().outputDeviceId, '');
+  const persistedRaw = JSON.parse(storage.getItem(AUDIO_PREFERENCES_STORAGE_KEY) ?? '{}') as {
+    outputDeviceId?: string;
+  };
+  assert.equal(persistedRaw.outputDeviceId, '');
+
+  assert.equal(snap.outputNotice?.tone, 'error');
+  assert.match(
+    snap.outputNotice?.message ?? '',
+    /Default System Device fallback could not be confirmed.*remained routed to "dac-usb"/i,
+  );
+  assert.doesNotMatch(
+    snap.outputNotice?.message ?? '',
+    /Audio output fell back to Default System Device/i,
+  );
+});
+
+test('Fallback regression 3: requested output switch failure + fallback rejection reports ok=false and fellBackToDefault=false across active and default starting states', async () => {
+  const currentDevices: MediaDeviceInfo[] = [
+    makeDevice('audiooutput', 'default', 'Default - Built-in Speakers'),
+    makeDevice('audiooutput', 'dac-usb', 'External Studio DAC'),
+    makeDevice('audiooutput', 'broken-spdif', 'Broken S/PDIF Output'),
+  ];
+
+  const storage = new MemoryStorage();
+  const manager = new AudioDeviceManager({
+    storage,
+    getMediaDevices: () => ({
+      enumerateDevices: async () => currentDevices,
+    }),
+    getAudioContextConstructor: () => FakeSinkAudioContext,
+  });
+
+  const fakeCtx = new FakeSinkAudioContext();
+  const ctx = fakeCtx as unknown as AudioContext & AudioContextWithSinkId;
+  manager.bindAudioContext(ctx);
+  await manager.refreshDevices();
+
+  // Case 3A: Starting fromDefault System Device (''), target switch rejects AND fallback setSinkId('') ALSO rejects.
+  // Even though ctx.sinkId happens to still read '', fellBackToDefault MUST be false because setSinkId('') rejected.
+  fakeCtx.failOnSinkIds.add('broken-spdif');
+  fakeCtx.failOnSinkIds.add('');
+  fakeCtx.failErrorMessage = 'Driver endpoint fault';
+
+  const fromDefaultFail = await manager.selectOutputDevice('broken-spdif', ctx);
+  assert.equal(fromDefaultFail.ok, false);
+  assert.equal(fromDefaultFail.liveSwitched, false);
+  assert.equal(fromDefaultFail.preferenceSaved, false);
+  assert.equal(fromDefaultFail.fellBackToDefault, false);
+  assert.equal(fromDefaultFail.fallbackOutcome?.status, 'failed');
+  assert.equal(fromDefaultFail.fallbackOutcome?.verifiedLiveDefault, false);
+  assert.equal(manager.getPreferences().outputDeviceId, '');
+  assert.equal(manager.getSnapshot(ctx).selectedOutputAvailable, false);
+  assert.equal(manager.getSnapshot(ctx).outputNotice?.tone, 'error');
+  assert.match(
+    fromDefaultFail.message ?? '',
+    /Could not route audio output to the selected device.*Default System Device fallback could not be confirmed/i,
+  );
+
+  // Case 3B: Recover to connected 'dac-usb', then request 'broken-spdif' while both 'broken-spdif' and '' reject.
+  fakeCtx.failOnSinkIds.clear();
+  const onUsb = await manager.selectOutputDevice('dac-usb', ctx);
+  assert.equal(onUsb.ok, true);
+  assert.equal(fakeCtx.sinkId, 'dac-usb');
+
+  fakeCtx.failOnSinkIds.add('broken-spdif');
+  fakeCtx.failOnSinkIds.add('');
+  fakeCtx.failErrorMessage = 'Sink switch rejected';
+
+  const fromUsbFail = await manager.selectOutputDevice('broken-spdif', ctx);
+  assert.equal(fromUsbFail.ok, false);
+  assert.equal(fromUsbFail.liveSwitched, false);
+  assert.equal(fromUsbFail.preferenceSaved, false);
+  assert.equal(fromUsbFail.fellBackToDefault, false);
+  assert.equal(fromUsbFail.activeDeviceId, 'dac-usb');
+  assert.equal(fromUsbFail.fallbackOutcome?.status, 'failed');
+  assert.equal(manager.getPreferences().outputDeviceId, 'dac-usb');
+  assert.equal(manager.getSnapshot(ctx).activeOutputDeviceId, 'dac-usb');
+  assert.equal(manager.getSnapshot(ctx).selectedOutputAvailable, false);
+  assert.equal(manager.getSnapshot(ctx).outputNotice?.tone, 'error');
+  assert.doesNotMatch(
+    fromUsbFail.message ?? '',
+    /Audio output fell back to Default System Device/i,
+  );
+
+  // Case 3C: Selecting non-enumerated missing device while fallback silently no-ops also reports fellBackToDefault=false.
+  fakeCtx.failOnSinkIds.clear();
+  fakeCtx.ignoreSinkSwitchForTargets.add('');
+  const missingSwitchFail = await manager.selectOutputDevice('unplugged-hdmi', ctx);
+  assert.equal(missingSwitchFail.ok, false);
+  assert.equal(missingSwitchFail.fellBackToDefault, false);
+  assert.equal(missingSwitchFail.activeDeviceId, 'dac-usb');
+  assert.equal(missingSwitchFail.fallbackOutcome?.status, 'failed');
+  assert.equal(manager.getSnapshot(ctx).selectedOutputAvailable, false);
+});
+
+test('Fallback regression 4: confirmed sinkId === "" fallback control case and preference-only no-context distinction', async () => {
+  let currentDevices: MediaDeviceInfo[] = [
+    makeDevice('audiooutput', 'default', 'Default - Built-in Speakers'),
+    makeDevice('audiooutput', 'dac-usb', 'External Studio DAC'),
+    makeDevice('audiooutput', 'flaky-hdmi', 'HDMI Receiver'),
+  ];
+
+  const storage = new MemoryStorage();
+  const manager = new AudioDeviceManager({
+    storage,
+    getMediaDevices: () => ({
+      enumerateDevices: async () => currentDevices,
+    }),
+    getAudioContextConstructor: () => FakeSinkAudioContext,
+  });
+
+  // 1. Pre-init (no live AudioContext): missing device produces 'preference-only' outcome, never claiming live fallback.
+  await manager.refreshDevices();
+  const preInitMissing = await manager.selectOutputDevice('missing-thunderbolt');
+  assert.equal(preInitMissing.ok, false);
+  assert.equal(preInitMissing.liveSwitched, false);
+  assert.equal(preInitMissing.fellBackToDefault, false);
+  assert.equal(preInitMissing.fallbackOutcome?.status, 'preference-only');
+  assert.equal(preInitMissing.fallbackOutcome?.verifiedLiveDefault, false);
+  assert.equal(preInitMissing.fallbackOutcome?.attemptedLiveSwitch, false);
+  assert.equal(manager.getPreferences().outputDeviceId, '');
+  assert.equal(manager.getSnapshot().selectedOutputAvailable, true);
+  assert.match(preInitMissing.message ?? '', /Output preference reset to Default System Device/i);
+
+  // 2. Live context bound: select 'dac-usb', then fail switch to 'flaky-hdmi' with working fallback to ''.
+  const fakeCtx = new FakeSinkAudioContext();
+  const ctx = fakeCtx as unknown as AudioContext & AudioContextWithSinkId;
+  manager.bindAudioContext(ctx);
+  const selected = await manager.selectOutputDevice('dac-usb', ctx);
+  assert.equal(selected.ok, true);
+  assert.equal(fakeCtx.sinkId, 'dac-usb');
+
+  fakeCtx.failOnSinkIds.add('flaky-hdmi');
+  const recoveredSwitch = await manager.selectOutputDevice('flaky-hdmi', ctx);
+  assert.equal(recoveredSwitch.ok, false);
+  assert.equal(recoveredSwitch.fellBackToDefault, true);
+  assert.equal(recoveredSwitch.activeDeviceId, '');
+  assert.equal(recoveredSwitch.fallbackOutcome?.status, 'verified-default');
+  assert.equal(recoveredSwitch.fallbackOutcome?.verifiedLiveDefault, true);
+  assert.equal(fakeCtx.sinkId, '');
+  assert.equal(manager.getPreferences().outputDeviceId, '');
+  assert.equal(manager.getSnapshot(ctx).selectedOutputAvailable, true);
+  assert.equal(manager.getSnapshot(ctx).outputNotice?.tone, 'warning');
+  assert.match(
+    recoveredSwitch.message ?? '',
+    /Audio output fell back to Default System Device/i,
+  );
+
+  // 3. Hot-unplug control with confirmed sinkId === '' readback.
+  fakeCtx.failOnSinkIds.clear();
+  await manager.selectOutputDevice('dac-usb', ctx);
+  assert.equal(fakeCtx.sinkId, 'dac-usb');
+
+  currentDevices = [makeDevice('audiooutput', 'default', 'Default - Built-in Speakers')];
+  const unplugVerifiedSnap = await manager.refreshDevices({ fromHotPlug: true });
+  assert.equal(fakeCtx.sinkId, '');
+  assert.equal(unplugVerifiedSnap.lastOutputFallback?.status, 'verified-default');
+  assert.equal(unplugVerifiedSnap.lastOutputFallback?.verifiedLiveDefault, true);
+  assert.equal(unplugVerifiedSnap.activeOutputDeviceId, '');
+  assert.equal(unplugVerifiedSnap.preferences.outputDeviceId, '');
+  assert.equal(unplugVerifiedSnap.selectedOutputAvailable, true);
+  assert.equal(unplugVerifiedSnap.outputNotice?.tone, 'warning');
+  assert.match(
+    unplugVerifiedSnap.outputNotice?.message ?? '',
+    /Selected audio output device was disconnected\. Audio output fell back to Default System Device\./,
+  );
+});
+
+test('Fallback regression 5: keepPreferenceForReconnect preserves intended device preference across both failed/unconfirmed and verified fallbacks, and re-routes on reconnect', async () => {
+  let currentDevices: MediaDeviceInfo[] = [
+    makeDevice('audiooutput', 'default', 'Default - Built-in Speakers'),
+    makeDevice('audiooutput', 'dac-usb', 'External Studio DAC'),
+  ];
+
+  const storage = new MemoryStorage();
+  const manager = new AudioDeviceManager({
+    storage,
+    getMediaDevices: () => ({
+      enumerateDevices: async () => currentDevices,
+    }),
+    getAudioContextConstructor: () => FakeSinkAudioContext,
+    keepOutputPreferenceOnDisconnect: true,
+  });
+
+  const fakeCtx = new FakeSinkAudioContext();
+  const ctx = fakeCtx as unknown as AudioContext & AudioContextWithSinkId;
+  manager.bindAudioContext(ctx);
+  await manager.refreshDevices();
+
+  const initialSelect = await manager.selectOutputDevice('dac-usb', ctx);
+  assert.equal(initialSelect.ok, true);
+  assert.equal(fakeCtx.sinkId, 'dac-usb');
+
+  // Phase A: Temporary disconnect while fallback setSinkId('') REJECTS.
+  currentDevices = [makeDevice('audiooutput', 'default', 'Default - Built-in Speakers')];
+  fakeCtx.failOnSinkIds.add('');
+  fakeCtx.failErrorMessage = 'Endpoint unavailable during unplug';
+
+  const rejectedDisconnectSnap = await manager.refreshDevices({ fromHotPlug: true });
+  assert.equal(rejectedDisconnectSnap.lastOutputFallback?.status, 'failed');
+  assert.equal(rejectedDisconnectSnap.lastOutputFallback?.verifiedLiveDefault, false);
+  assert.equal(rejectedDisconnectSnap.preferences.outputDeviceId, 'dac-usb');
+  assert.equal(
+    (JSON.parse(storage.getItem(AUDIO_PREFERENCES_STORAGE_KEY) ?? '{}') as { outputDeviceId?: string })
+      .outputDeviceId,
+    'dac-usb',
+    'persisted preference must be preserved for reconnect even when fallback rejects',
+  );
+  assert.equal(rejectedDisconnectSnap.selectedOutputAvailable, false);
+  assert.equal(rejectedDisconnectSnap.activeOutputDeviceId, 'dac-usb');
+  assert.equal(rejectedDisconnectSnap.outputNotice?.tone, 'error');
+  assert.match(
+    rejectedDisconnectSnap.outputNotice?.message ?? '',
+    /Default System Device fallback could not be confirmed/i,
+  );
+
+  // Reconnect 'dac-usb' after failed fallback: must re-apply 'dac-usb' to live context and clear notice.
+  fakeCtx.failOnSinkIds.clear();
+  const sinkCallCountBeforeReconnectA = fakeCtx.sinkCalls.length;
+  currentDevices = [
+    makeDevice('audiooutput', 'default', 'Default - Built-in Speakers'),
+    makeDevice('audiooutput', 'dac-usb', 'External Studio DAC'),
+  ];
+  const reconnectedAfterReject = await manager.refreshDevices({ fromHotPlug: true });
+  assert.ok(
+    fakeCtx.sinkCalls.length > sinkCallCountBeforeReconnectA &&
+      fakeCtx.sinkCalls.at(-1) === 'dac-usb',
+    'reconnect after unconfirmed fallback must still invoke setSinkId(preferredOutput)',
+  );
+  assert.equal(reconnectedAfterReject.activeOutputDeviceId, 'dac-usb');
+  assert.equal(reconnectedAfterReject.preferences.outputDeviceId, 'dac-usb');
+  assert.equal(reconnectedAfterReject.selectedOutputAvailable, true);
+  assert.equal(reconnectedAfterReject.outputNotice, null);
+
+  // Phase B: Temporary disconnect while fallback setSinkId('') is a SILENT NO-OP.
+  currentDevices = [makeDevice('audiooutput', 'default', 'Default - Built-in Speakers')];
+  fakeCtx.ignoreSinkSwitchForTargets.add('');
+  const silentDisconnectSnap = await manager.refreshDevices({ fromHotPlug: true });
+  assert.equal(silentDisconnectSnap.lastOutputFallback?.status, 'failed');
+  assert.equal(silentDisconnectSnap.preferences.outputDeviceId, 'dac-usb');
+  assert.equal(silentDisconnectSnap.selectedOutputAvailable, false);
+  assert.equal(silentDisconnectSnap.activeOutputDeviceId, 'dac-usb');
+  assert.equal(silentDisconnectSnap.outputNotice?.tone, 'error');
+
+  // Reconnect after silent no-op fallback.
+  fakeCtx.ignoreSinkSwitchForTargets.clear();
+  currentDevices = [
+    makeDevice('audiooutput', 'default', 'Default - Built-in Speakers'),
+    makeDevice('audiooutput', 'dac-usb', 'External Studio DAC'),
+  ];
+  const reconnectedAfterNoop = await manager.refreshDevices({ fromHotPlug: true });
+  assert.equal(reconnectedAfterNoop.selectedOutputAvailable, true);
+  assert.equal(reconnectedAfterNoop.activeOutputDeviceId, 'dac-usb');
+  assert.equal(reconnectedAfterNoop.outputNotice, null);
+
+  // Phase C: Temporary disconnect with VERIFIED default fallback, followed by reconnect.
+  currentDevices = [makeDevice('audiooutput', 'default', 'Default - Built-in Speakers')];
+  const verifiedDisconnectSnap = await manager.refreshDevices({ fromHotPlug: true });
+  assert.equal(verifiedDisconnectSnap.lastOutputFallback?.status, 'verified-default');
+  assert.equal(verifiedDisconnectSnap.lastOutputFallback?.verifiedLiveDefault, true);
+  assert.equal(verifiedDisconnectSnap.activeOutputDeviceId, '');
+  assert.equal(verifiedDisconnectSnap.preferences.outputDeviceId, 'dac-usb');
+  assert.equal(verifiedDisconnectSnap.selectedOutputAvailable, false);
+  assert.equal(verifiedDisconnectSnap.outputNotice?.tone, 'warning');
+  assert.match(
+    verifiedDisconnectSnap.outputNotice?.message ?? '',
+    /Audio output fell back to Default System Device and will reconnect when available/i,
+  );
+
+  currentDevices = [
+    makeDevice('audiooutput', 'default', 'Default - Built-in Speakers'),
+    makeDevice('audiooutput', 'dac-usb', 'External Studio DAC'),
+  ];
+  const reconnectedAfterVerified = await manager.refreshDevices({ fromHotPlug: true });
+  assert.equal(fakeCtx.sinkId, 'dac-usb');
+  assert.equal(reconnectedAfterVerified.activeOutputDeviceId, 'dac-usb');
+  assert.equal(reconnectedAfterVerified.preferences.outputDeviceId, 'dac-usb');
+  assert.equal(reconnectedAfterVerified.selectedOutputAvailable, true);
+  assert.equal(reconnectedAfterVerified.outputNotice, null);
+});
+
 

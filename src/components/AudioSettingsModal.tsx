@@ -339,13 +339,26 @@ export const AudioSettingsModal: React.FC<AudioSettingsModalProps> = ({
     !diagnostics.initialized ||
     diagnostics.contextState === 'closed';
 
-  const activeOutputLabel =
-    deviceSnapshot.outputDevices.find(d => d.deviceId === diagnostics.activeOutputDeviceId)
-      ?.label ?? 'Default System Device';
+  const activeOutputLabel = (() => {
+    if (!diagnostics.activeOutputDeviceId) {
+      return (
+        deviceSnapshot.outputDevices.find(d => d.deviceId === SYSTEM_DEFAULT_DEVICE_ID)?.label ??
+        'Default System Device'
+      );
+    }
+    const matched = deviceSnapshot.outputDevices.find(
+      d => d.deviceId === diagnostics.activeOutputDeviceId,
+    );
+    return matched?.label ?? 'Disconnected Output Device (Fallback Unverified)';
+  })();
 
   const selectedOutputValue = deviceSnapshot.capabilities.outputSinkSelectionSupported
     ? deviceSnapshot.preferences.outputDeviceId
     : SYSTEM_DEFAULT_DEVICE_ID;
+
+  const selectedOutputInList = deviceSnapshot.outputDevices.some(
+    d => d.deviceId === selectedOutputValue,
+  );
 
   const selectedInputInList = deviceSnapshot.inputDevices.some(
     d => d.deviceId === deviceSnapshot.preferences.inputDeviceId,
@@ -613,6 +626,14 @@ export const AudioSettingsModal: React.FC<AudioSettingsModalProps> = ({
               <span className="inline-flex items-center gap-1.5">
                 <Volume2 className="h-4 w-4 text-[var(--apex-accent)]" />
                 Audio Output Device
+                {!deviceSnapshot.selectedOutputAvailable && (
+                  <span
+                    data-testid="audio-output-unavailable-badge"
+                    className="ml-1 rounded border border-[var(--apex-danger)] bg-[var(--apex-surface-3)] px-1.5 py-0.5 text-[10px] font-medium normal-case tracking-normal text-[var(--apex-danger)]"
+                  >
+                    Output Unavailable
+                  </span>
+                )}
               </span>
             </legend>
 
@@ -633,6 +654,11 @@ export const AudioSettingsModal: React.FC<AudioSettingsModalProps> = ({
                       {device.label}
                     </option>
                   ))}
+                  {!selectedOutputInList && selectedOutputValue !== SYSTEM_DEFAULT_DEVICE_ID && (
+                    <option value={selectedOutputValue}>
+                      Saved Output Device (Disconnected)
+                    </option>
+                  )}
                 </select>
                 {deviceSnapshot.capabilities.selectAudioOutputPromptSupported && (
                   <button
@@ -664,7 +690,13 @@ export const AudioSettingsModal: React.FC<AudioSettingsModalProps> = ({
                       : 'border-[var(--apex-gold)] text-[var(--apex-text)]'
                   }`}
                 >
-                  <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-[var(--apex-gold)]" />
+                  <AlertTriangle
+                    className={`mt-0.5 h-3.5 w-3.5 shrink-0 ${
+                      deviceSnapshot.outputNotice.tone === 'error'
+                        ? 'text-[var(--apex-danger)]'
+                        : 'text-[var(--apex-gold)]'
+                    }`}
+                  />
                   <span>{deviceSnapshot.outputNotice.message}</span>
                 </div>
               )}
