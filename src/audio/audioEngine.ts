@@ -88,6 +88,45 @@ import {
 } from './fxParameterControl';
 import { resolveFxParameterSpec } from './fxParameterContract';
 import { fullPatternEventsInWindow } from './fullPatternSchedule';
+import {
+  audioDeviceManager,
+  hasActiveRecordingSession,
+  type AudioDeviceManagerSnapshot,
+} from './audioDeviceManager';
+import {
+  type AudioLatencyPreference,
+  type AudioPreferences,
+  type RequestedSampleRate,
+  SYSTEM_DEFAULT_DEVICE_ID,
+  normalizeAudioLatencyPreference,
+  normalizeRequestedSampleRate,
+} from '../state/audioPreferences';
+
+export interface AudioEngineDiagnostics {
+  initialized: boolean;
+  contextState: AudioContextState | 'uninitialized';
+  unexpectedlyClosed: boolean;
+  requestedSampleRate: RequestedSampleRate;
+  actualSampleRate: number | null;
+  sampleRateMatched: boolean;
+  sampleRateMismatchNotice: string | null;
+  latencyHint: AudioLatencyPreference;
+  latencyMetrics: AudioLatencyMetrics | null;
+  activeOutputDeviceId: string;
+  reconfigureBlockedReason: string | null;
+  isReconfiguring: boolean;
+  lastReconfigureError: string | null;
+}
+
+export interface AudioContextReconfigureResult {
+  ok: boolean;
+  requestedSampleRate: RequestedSampleRate;
+  actualSampleRate: number;
+  sampleRateMatched: boolean;
+  sampleRateMismatchNotice: string | null;
+  latencyHint: AudioLatencyPreference;
+  contextState: AudioContextState;
+}
 import { audioBufferToWav } from './wavEncoder';
 import {
   SIDECHAIN_DETECTOR_PROCESSOR,
@@ -966,15 +1005,274 @@ class AudioEngine {
     }
   }
 
-  private createAudioContext(): AudioContext {
-    const AudioContextClass = window.AudioContext || (window as unknown as WindowWithWebKitAudio).webkitAudioContext;
-    const options: AudioContextOptions = { latencyHint: 'interactive' };
-    // The explicit packaged smoke launch pins the realtime measurement to the
-    // requested 48 kHz reference; ordinary sessions continue using the device default.
-    if ((globalThis as typeof globalThis & { desktopApp?: { smokeTest?: boolean } }).desktopApp?.smokeTest === true) {
+  private isReconfiguringContext = false;
+  private contextUnexpectedlyClosed = false;
+  private lastReconfigureError: string | null = null;
+  private lastSampleRateMismatchNotice: string | null = null;
+  private detachContextStateListener: (() => void) | null = null;
+  private detachRecordingStreamMonitor: (() => void) | null = null;
+  private externalActiveOperationCheck: (() => string | null) | null = null;
+  private audioContextReconfiguredCallback: (() => void) | null = null;
+  private audioEngineStateListeners = new Set<() => void>();
+  private lastKnownMixerTracks: Map<number, MixerTrack> = new Map();
+  private lastKnownChannelsById: Map<string, Channel> = new Map();
+  private masterVolumeValue = 1.0;
+  private detachDeviceManagerBridge: (() => void) | null = null;
+
+  public startDeviceMonitoring(): Promise<AudioDeviceManagerSnapshot> {
+    if (!this.detachDeviceManagerBridge) {
+      this.detachDeviceManagerBridge = audioDeviceManager.subscribe(() => {
+        this.emitAudioEngineState();
+      });
+    }
+    return audioDeviceManager.initializePassiveMonitoring();
+  }
+
+  public stopDeviceMonitoring(): void {
+    this.detachDeviceManagerBridge?.();
+    this.detachDeviceManagerBridge = null;
+    audioDeviceManager.disposeMonitoring();
+  }
+
+  public setExternalActiveOperationCheck(check: (() => string | null) | null): void {
+    this.externalActiveOperationCheck = check;
+  }
+
+  public setAudioContextReconfiguredCallback(callback: (() => void) | null): void {
+    this.audioContextReconfiguredCallback = callback;
+  }
+
+  public subscribeAudioEngineState(listener: () => void): () => void {
+    this.audioEngineStateListeners.add(listener);
+    return () => {
+      this.audioEngineStateListeners.delete(listener);
+    };
+  }
+
+  private emitAudioEngineState(): void {
+    for (const listener of this.audioEngineStateListeners) {
+      try {
+        listener();
+      } catch (error) {
+        console.error('[Apex Studio] Audio engine state listener failed', error);
+      }
+    }
+  }
+
+  public isAudioRecordingActive(): boolean {
+    const legacyActive =
+      this.mediaRecorder !== null && this.mediaRecorder.state !== 'inactive';
+    return legacyActive || hasActiveRecordingSession();
+  }
+
+  public getAudioReconfigureBlockReason(): string | null {
+    if (this.isReconfiguringContext) {
+      return 'Audio engine reconfiguration is already in progress.';
+    }
+    if (this.isOfflineRendering || this.offlineRenderLeaseHeld) {
+      return 'Offline audio export/rendering is running. Wait for rendering to finish before reconfiguring the audio engine.';
+    }
+    if (this.nativePreparing) {
+      return 'Native VST3 preparation is in progress. Wait for plugin initialization to finish before reconfiguring the audio engine.';
+    }
+    if (this.isPlaybackActive()) {
+      return 'Stop transport playback before changing sample rate or latency preferences.';
+    }
+    if (this.isCountInRunning()) {
+      return 'Cancel active recording count-in before reconfiguring the audio engine.';
+    }
+    if (this.isPunchTakeActive()) {
+      return 'Cancel armed or active punch recording before reconfiguring the audio engine.';
+    }
+    if (this.isAudioRecordingActive()) {
+      return 'Stop active microphone audio recording before reconfiguring the audio engine.';
+    }
+    const externalReason = this.externalActiveOperationCheck?.() ?? null;
+    if (externalReason) {
+      return externalReason;
+    }
+    return null;
+  }
+
+  public canReconfigureAudioContext(): boolean {
+    return this.getAudioReconfigureBlockReason() === null;
+  }
+
+  private buildAudioContextOptions(overridePrefs?: Partial<AudioPreferences>): AudioContextOptions {
+    const prefs = {
+      ...audioDeviceManager.getPreferences(),
+      ...overridePrefs,
+    };
+    const latencyHint = normalizeAudioLatencyPreference(prefs.latencyHint);
+    const requestedSampleRate = normalizeRequestedSampleRate(prefs.sampleRate);
+    const options: AudioContextOptions = { latencyHint };
+    if (requestedSampleRate !== 'default') {
+      options.sampleRate = requestedSampleRate;
+    } else if (
+      (globalThis as typeof globalThis & { desktopApp?: { smokeTest?: boolean } }).desktopApp?.smokeTest === true
+    ) {
+      // The explicit packaged smoke launch pins the realtime measurement to the
+      // requested 48 kHz reference; ordinary sessions continue using the device default.
       options.sampleRate = 48000;
     }
+    return options;
+  }
+
+  private constructRawAudioContext(overridePrefs?: Partial<AudioPreferences>): AudioContext {
+    const hostWindow = (typeof window !== 'undefined' ? window : globalThis) as unknown as typeof globalThis & WindowWithWebKitAudio;
+    const AudioContextClass = hostWindow.AudioContext || hostWindow.webkitAudioContext;
+    if (!AudioContextClass) {
+      throw new Error('Web Audio API (AudioContext) is not supported in this runtime.');
+    }
+    const options = this.buildAudioContextOptions(overridePrefs);
     return new AudioContextClass(options);
+  }
+
+  private attachLiveContextLifecycle(
+    ctx: AudioContext,
+    requestedRate?: RequestedSampleRate,
+    options: { skipAutoOutputRouting?: boolean } = {},
+  ): void {
+    this.detachContextStateListener?.();
+    this.detachContextStateListener = null;
+    this.contextUnexpectedlyClosed = false;
+
+    const effectiveRequested =
+      requestedRate ?? audioDeviceManager.getPreferences().sampleRate;
+    if (effectiveRequested !== 'default' && ctx.sampleRate !== effectiveRequested) {
+      this.lastSampleRateMismatchNotice = `Requested ${effectiveRequested.toLocaleString()} Hz, but the audio hardware/runtime opened at ${ctx.sampleRate.toLocaleString()} Hz.`;
+    } else {
+      this.lastSampleRateMismatchNotice = null;
+    }
+
+    const onStateChange = () => {
+      if (this.ctx !== ctx) return;
+      if (ctx.state === 'closed' && !this.isReconfiguringContext) {
+        this.contextUnexpectedlyClosed = true;
+      }
+      this.emitAudioEngineState();
+    };
+
+    if (typeof ctx.addEventListener === 'function') {
+      ctx.addEventListener('statechange', onStateChange);
+      this.detachContextStateListener = () => {
+        try {
+          ctx.removeEventListener('statechange', onStateChange);
+        } catch {
+          // Best-effort cleanup.
+        }
+      };
+    } else if ('onstatechange' in ctx) {
+      ctx.onstatechange = onStateChange;
+      this.detachContextStateListener = () => {
+        if (ctx.onstatechange === onStateChange) {
+          ctx.onstatechange = null;
+        }
+      };
+    }
+
+    // Always bind the newly attached or replaced live context first, even when a
+    // non-default output device is configured.
+    audioDeviceManager.bindAudioContext(ctx);
+
+    if (!options.skipAutoOutputRouting) {
+      const preferredOutputId = audioDeviceManager.getPreferredOutputDeviceId();
+      if (preferredOutputId !== SYSTEM_DEFAULT_DEVICE_ID) {
+        void audioDeviceManager
+          .applyOutputDeviceToContext(ctx, preferredOutputId, { persist: true })
+          .finally(() => this.emitAudioEngineState());
+      }
+    }
+  }
+
+  private createAudioContext(): AudioContext {
+    const prefs = audioDeviceManager.getPreferences();
+    const created = this.constructRawAudioContext(prefs);
+    this.attachLiveContextLifecycle(created, prefs.sampleRate);
+    return created;
+  }
+
+  private buildLiveGraphOnCurrentContext(options: { awaitWorklets?: boolean } = {}): Promise<void> | void {
+    if (!this.ctx) return;
+    const ctx = this.ctx;
+
+    // Master bus with the master amplitude gate
+    this.masterGain = ctx.createGain();
+    this.masterGain.gain.value = this.masterVolumeValue;
+    this.grossBeatNode = ctx.createGain();
+    this.masterAnalyser = ctx.createAnalyser();
+    this.masterAnalyser.fftSize = 512;
+    this.masterAnalyser.smoothingTimeConstant = 0.8;
+
+    this.masteringProcessor?.dispose();
+    // Lightweight test/fallback contexts may not implement the full Web Audio DSP API.
+    // Keep those contexts usable with a transparent master path; real browser AudioContext
+    // supports these nodes and receives the complete mastering processor.
+    const supportsMasteringDsp =
+      typeof (ctx as any).createChannelSplitter === 'function' &&
+      typeof (ctx as any).createChannelMerger === 'function' &&
+      typeof (ctx as any).createDynamicsCompressor === 'function' &&
+      typeof (ctx as any).createWaveShaper === 'function';
+    this.masteringProcessor = supportsMasteringDsp && this.ctx
+      ? new MasteringProcessor(this.ctx, this.masteringState)
+      : null;
+    this.masterGain.connect(this.grossBeatNode);
+    if (this.masteringProcessor) {
+      this.grossBeatNode.connect(this.masteringProcessor.input);
+      this.masteringProcessor.output.connect(this.masterAnalyser);
+    } else {
+      this.grossBeatNode.connect(this.masterAnalyser);
+    }
+    this.masterAnalyser.connect(ctx.destination);
+    this.createMasterMeasurementTap(ctx);
+
+    const limiterPromise = this.masteringProcessor
+      ? this.prepareMasteringLimiter(this.masteringProcessor)
+      : Promise.resolve();
+
+    // Build default reverb impulse response at this context's sample rate
+    this.buildReverbImpulse(2.5, 2.0);
+
+    // Initialize default mixer tracks (0 to 8)
+    for (let i = 0; i <= 8; i++) {
+      this.getOrCreateMixerChannel(i);
+    }
+    this.mixerRoutingAdapter = new MixerRoutingAdapter(this.mixerChannels);
+    this.mixerRoutingChannelMap = this.mixerChannels;
+
+    this.transport = new AudioClockTransport(ctx);
+    this.transport.setBpm(this.bpm);
+    this.transport.setTimeSignature(this.meter);
+
+    if (options.awaitWorklets) {
+      return limiterPromise;
+    }
+    void limiterPromise;
+  }
+
+  private disconnectMixerChannelNodes(channel: MixerChannel): void {
+    try { channel.input.disconnect(); } catch (_) {}
+    try { channel.directCompensation?.disconnect(); } catch (_) {}
+    try { channel.mixInput.disconnect(); } catch (_) {}
+    for (const fx of channel.fxNodes) {
+      try { fx.disconnect(); } catch (_) {}
+    }
+    try { channel.panner.disconnect(); } catch (_) {}
+    try { channel.duckingGain.disconnect(); } catch (_) {}
+    try { channel.output.disconnect(); } catch (_) {}
+    try { channel.analyser.disconnect(); } catch (_) {}
+    if (channel.auxSendGains) {
+      for (const gain of channel.auxSendGains.values()) {
+        try { gain.disconnect(); } catch (_) {}
+      }
+      channel.auxSendGains.clear();
+    }
+    if (channel.auxSendDelays) {
+      for (const delay of channel.auxSendDelays.values()) {
+        try { delay.disconnect(); } catch (_) {}
+      }
+      channel.auxSendDelays.clear();
+    }
   }
 
   public init() {
@@ -996,52 +1294,7 @@ class AudioEngine {
     if (this.ctx) this.invalidateContextBoundAudioState();
 
     this.ctx = this.createAudioContext();
-
-    // Master bus with the master amplitude gate
-    this.masterGain = this.ctx.createGain();
-    this.grossBeatNode = this.ctx.createGain();
-    this.masterAnalyser = this.ctx.createAnalyser();
-    this.masterAnalyser.fftSize = 512;
-    this.masterAnalyser.smoothingTimeConstant = 0.8;
-
-    this.masteringProcessor?.dispose();
-    // Lightweight test/fallback contexts may not implement the full Web Audio DSP API.
-    // Keep those contexts usable with a transparent master path; real browser AudioContext
-    // supports these nodes and receives the complete mastering processor.
-    const supportsMasteringDsp =
-      typeof (this.ctx as any).createChannelSplitter === 'function' &&
-      typeof (this.ctx as any).createChannelMerger === 'function' &&
-      typeof (this.ctx as any).createDynamicsCompressor === 'function' &&
-      typeof (this.ctx as any).createWaveShaper === 'function';
-    this.masteringProcessor = supportsMasteringDsp
-      ? new MasteringProcessor(this.ctx, this.masteringState)
-      : null;
-    this.masterGain.connect(this.grossBeatNode);
-    if (this.masteringProcessor) {
-      this.grossBeatNode.connect(this.masteringProcessor.input);
-      this.masteringProcessor.output.connect(this.masterAnalyser);
-    } else {
-      this.grossBeatNode.connect(this.masterAnalyser);
-    }
-    this.masterAnalyser.connect(this.ctx.destination);
-    this.createMasterMeasurementTap(this.ctx);
-
-    // Phase 9B: load the lookahead limiter into this context. Asynchronous (an
-    // AudioWorklet module), so the first few milliseconds of a take run through
-    // the documented fallback; the limiter is spliced in as soon as it is ready.
-    if (this.masteringProcessor) void this.prepareMasteringLimiter(this.masteringProcessor);
-
-    // Build default reverb impulse response
-    this.buildReverbImpulse(2.5, 2.0);
-
-    // Initialize default mixer tracks (0 to 8)
-    for (let i = 0; i <= 8; i++) {
-      this.getOrCreateMixerChannel(i);
-    }
-    this.mixerRoutingAdapter = new MixerRoutingAdapter(this.mixerChannels);
-    this.mixerRoutingChannelMap = this.mixerChannels;
-
-    this.transport = new AudioClockTransport(this.ctx);
+    this.buildLiveGraphOnCurrentContext({ awaitWorklets: false });
 
     // Init Web MIDI
     this.initMidi();
@@ -1050,6 +1303,295 @@ class AudioEngine {
     // detector on this fresh context. The load is asynchronous (AudioWorklet),
     // and the request is a no-op when no level-detected route exists.
     this.requestSidechainDetectorSync();
+    this.emitAudioEngineState();
+  }
+
+  /**
+   * Safely reconfigures the live `AudioContext` (sample rate and/or latencyHint)
+   * while stopped. Refuses to run when playback, recording, count-in, punch-in,
+   * offline rendering, or native VST3 preparation is active.
+   *
+   * Constructs the replacement `AudioContext` BEFORE tearing down the active
+   * graph so constructor rejection (e.g. an unsupported sample rate) leaves the
+   * current audio session 100% intact. Preserves project assets (`sampleBuffers`),
+   * mixer tracks, routing/aux sends, mastering processor, sidechain detectors,
+   * channel panners, transport position, and native VST3 plugin state.
+   */
+  public async reconfigureAudioContext(patch: {
+    sampleRate?: RequestedSampleRate;
+    latencyHint?: AudioLatencyPreference;
+  }): Promise<AudioContextReconfigureResult> {
+    const blockReason = this.getAudioReconfigureBlockReason();
+    if (blockReason !== null) {
+      this.lastReconfigureError = blockReason;
+      this.emitAudioEngineState();
+      throw new Error(blockReason);
+    }
+
+    const previousPrefs = audioDeviceManager.getPreferences();
+    const targetPrefs: AudioPreferences = {
+      ...previousPrefs,
+      ...(patch.sampleRate !== undefined
+        ? { sampleRate: normalizeRequestedSampleRate(patch.sampleRate) }
+        : {}),
+      ...(patch.latencyHint !== undefined
+        ? { latencyHint: normalizeAudioLatencyPreference(patch.latencyHint) }
+        : {}),
+    };
+
+    this.isReconfiguringContext = true;
+    this.emitAudioEngineState();
+
+    let nextCtx: AudioContext | null = null;
+    try {
+      // 1. Construct replacement context BEFORE disposing the running graph.
+      try {
+        nextCtx = this.constructRawAudioContext(targetPrefs);
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        const rateLabel =
+          targetPrefs.sampleRate === 'default'
+            ? 'System Default'
+            : `${targetPrefs.sampleRate.toLocaleString()} Hz`;
+        const message = `Audio runtime rejected the requested configuration (${rateLabel}, ${targetPrefs.latencyHint} latency): ${detail}. Previous audio session remains active.`;
+        this.lastReconfigureError = message;
+        throw new Error(message);
+      }
+
+      // 2. Snapshot live graph metadata before tearing down old context-bound nodes.
+      const oldCtx = this.ctx;
+      const preservedTransportState = this.transport ? { ...this.transport.getState() } : null;
+      const preservedMixerTracks = [...this.lastKnownMixerTracks.values()].map(track =>
+        structuredClone(track),
+      );
+      const hadPannerIds = new Set(this.channelPanners.keys());
+      const preservedChannels = [...this.lastKnownChannelsById.values()]
+        .filter(ch => hadPannerIds.has(ch.id) || ch.pan !== 0)
+        .map(ch => structuredClone(ch));
+
+      // 3. Cleanly tear down all resources bound to the old AudioContext.
+      this.detachContextStateListener?.();
+      this.detachContextStateListener = null;
+      this.stopMasterMeasurementPump();
+      this.disposeMasterMeasurementTap();
+      this.stopActivePlaybackAudio();
+      this.countInScheduler?.cancel();
+      this.countInScheduler = null;
+      this.punchWindow?.cancel();
+      this.punchWindow = null;
+
+      await this.releaseNativeInstruments();
+      this.detachAllSidechainDetectors();
+      for (const [, slotEffects] of this.__fxSlotEffectMaps) {
+        this.disposeFxSlotEffects(slotEffects.values());
+      }
+      this.__fxSlotEffectMaps = new Map();
+      for (const [, mixerChannel] of this.mixerChannels) {
+        this.disconnectMixerChannelNodes(mixerChannel);
+      }
+      this.mixerChannels = new Map();
+      for (const [, entry] of this.channelPanners) {
+        try { entry.panner.disconnect(); } catch (_) {}
+      }
+      this.channelPanners = new Map();
+      this.mixerRoutingAdapter = null;
+      this.mixerRoutingChannelMap = null;
+      this.masteringProcessor?.dispose();
+      this.masteringProcessor = null;
+      try { this.masterGain?.disconnect(); } catch (_) {}
+      try { this.grossBeatNode?.disconnect(); } catch (_) {}
+      try { this.masterAnalyser?.disconnect(); } catch (_) {}
+      this.masterGain = null;
+      this.grossBeatNode = null;
+      this.masterAnalyser = null;
+      this.impulseResponses.clear();
+      if (this.transport) {
+        this.transport.stop(false);
+        this.transport = null;
+      }
+
+      if (oldCtx && oldCtx.state !== 'closed' && typeof oldCtx.close === 'function') {
+        await oldCtx.close().catch(() => {});
+      }
+
+      // 4. Commit preferences, install replacement context, and rebuild complete live graph.
+      try {
+        audioDeviceManager.updateEnginePreferences({
+          sampleRate: targetPrefs.sampleRate,
+          latencyHint: targetPrefs.latencyHint,
+        });
+
+        this.ctx = nextCtx;
+        await this.buildLiveGraphOnCurrentContext({ awaitWorklets: true });
+
+        if (preservedTransportState && this.transport) {
+          this.transport.setMode(preservedTransportState.mode);
+          if (preservedTransportState.positionSeconds > 0) {
+            this.transport.seek(preservedTransportState.positionSeconds);
+          }
+        }
+
+        this.attachLiveContextLifecycle(nextCtx, targetPrefs.sampleRate, {
+          skipAutoOutputRouting: true,
+        });
+        if (targetPrefs.outputDeviceId !== SYSTEM_DEFAULT_DEVICE_ID) {
+          await audioDeviceManager.applyOutputDeviceToContext(
+            nextCtx,
+            targetPrefs.outputDeviceId,
+            { persist: true },
+          );
+        }
+
+        // Restore cached mixer tracks, custom bus/aux routing, and channel panners.
+        for (const track of preservedMixerTracks) {
+          this.getOrCreateMixerChannel(track.id);
+        }
+        const masterTrack = preservedMixerTracks.find(track => track.id === 0);
+        if (masterTrack) this.updateMixerTrack(masterTrack);
+        for (const track of preservedMixerTracks) {
+          if (track.id !== 0) this.updateMixerTrack(track);
+        }
+        if (preservedMixerTracks.length > 0) {
+          this.syncMixerRouting(preservedMixerTracks);
+        }
+        for (const channel of preservedChannels) {
+          this.updateChannel(channel);
+        }
+        this.setGrossBeatState(this.grossBeatState);
+
+        // Allow App.tsx to re-publish authoritative ProjectState onto the new live graph.
+        if (this.audioContextReconfiguredCallback) {
+          try {
+            this.audioContextReconfiguredCallback();
+          } catch (callbackError) {
+            console.error('[Apex Studio] AudioContext reconfiguration callback failed', callbackError);
+          }
+        }
+
+        await this.attachSidechainDetectors();
+        this.initMidi();
+
+        if (nextCtx.state === 'suspended' && typeof nextCtx.resume === 'function') {
+          await nextCtx.resume().catch(() => {});
+        }
+      } catch (rebuildError) {
+        // Emergency recovery: close partially wired context and restore a clean default context.
+        try {
+          if (nextCtx && nextCtx.state !== 'closed' && typeof nextCtx.close === 'function') {
+            await nextCtx.close().catch(() => {});
+          }
+        } catch {
+          // Best-effort close.
+        }
+        audioDeviceManager.updateEnginePreferences({
+          sampleRate: previousPrefs.sampleRate,
+          latencyHint: previousPrefs.latencyHint,
+        });
+        this.ctx = null;
+        try {
+          this.init();
+          this.audioContextReconfiguredCallback?.();
+        } catch {
+          // Keep recoverable state for explicit user retry if AudioContext is temporarily unavailable.
+        }
+        const detail = rebuildError instanceof Error ? rebuildError.message : String(rebuildError);
+        const recoveryMessage = `Audio engine reconfiguration failed during graph rebuild (${detail}). Restored fallback audio context.`;
+        this.lastReconfigureError = recoveryMessage;
+        throw new Error(recoveryMessage);
+      }
+
+      this.lastReconfigureError = null;
+      this.contextUnexpectedlyClosed = false;
+      const sampleRateMatched =
+        targetPrefs.sampleRate === 'default' || nextCtx.sampleRate === targetPrefs.sampleRate;
+
+      return {
+        ok: true,
+        requestedSampleRate: targetPrefs.sampleRate,
+        actualSampleRate: nextCtx.sampleRate,
+        sampleRateMatched,
+        sampleRateMismatchNotice: this.lastSampleRateMismatchNotice,
+        latencyHint: targetPrefs.latencyHint,
+        contextState: nextCtx.state,
+      };
+    } finally {
+      this.isReconfiguringContext = false;
+      this.emitAudioEngineState();
+    }
+  }
+
+  public async ensureAudioEngineInitialized(): Promise<AudioEngineDiagnostics> {
+    if (!this.shouldBlockLiveMutation() && !this.isOfflineRendering) {
+      if (!this.ctx || this.ctx.state === 'closed') {
+        this.init();
+        if (this.audioContextReconfiguredCallback) {
+          try {
+            this.audioContextReconfiguredCallback();
+          } catch (error) {
+            console.error('[Apex Studio] Audio initialization sync callback failed', error);
+          }
+        }
+      }
+      if (this.ctx && this.ctx.state === 'suspended' && typeof this.ctx.resume === 'function') {
+        await this.ctx.resume().catch(() => {});
+      }
+      this.emitAudioEngineState();
+    }
+    return this.getAudioEngineDiagnostics();
+  }
+
+  public async resumeAudioContext(): Promise<AudioEngineDiagnostics> {
+    if (this.shouldBlockLiveMutation() || this.isOfflineRendering) {
+      return this.getAudioEngineDiagnostics();
+    }
+    const current = this.liveCtx ?? this.ctx;
+    if (!current || current.state === 'closed') {
+      const prefs = audioDeviceManager.getPreferences();
+      await this.reconfigureAudioContext({
+        sampleRate: prefs.sampleRate,
+        latencyHint: prefs.latencyHint,
+      });
+      return this.getAudioEngineDiagnostics();
+    }
+    if (current.state === 'suspended' && typeof current.resume === 'function') {
+      await current.resume();
+      this.emitAudioEngineState();
+    }
+    return this.getAudioEngineDiagnostics();
+  }
+
+  public getAudioEngineDiagnostics(): AudioEngineDiagnostics {
+    const prefs = audioDeviceManager.getPreferences();
+    const liveContext = this.liveCtx ?? (this.isOfflineRendering ? null : this.ctx);
+    const actualSampleRate = liveContext ? liveContext.sampleRate : null;
+    const contextState: AudioContextState | 'uninitialized' = liveContext
+      ? liveContext.state
+      : 'uninitialized';
+    const sampleRateMatched =
+      actualSampleRate === null ||
+      prefs.sampleRate === 'default' ||
+      actualSampleRate === prefs.sampleRate;
+
+    return {
+      initialized: liveContext !== null,
+      contextState,
+      unexpectedlyClosed: this.contextUnexpectedlyClosed,
+      requestedSampleRate: prefs.sampleRate,
+      actualSampleRate,
+      sampleRateMatched,
+      sampleRateMismatchNotice: this.lastSampleRateMismatchNotice,
+      latencyHint: prefs.latencyHint,
+      latencyMetrics: this.getLatencyMetrics(),
+      activeOutputDeviceId: audioDeviceManager.getActiveOutputDeviceId(liveContext),
+      reconfigureBlockedReason: this.getAudioReconfigureBlockReason(),
+      isReconfiguring: this.isReconfiguringContext,
+      lastReconfigureError: this.lastReconfigureError,
+    };
+  }
+
+  public clearAudioEngineError(): void {
+    this.lastReconfigureError = null;
+    this.emitAudioEngineState();
   }
 
   public getContext(): AudioContext {
@@ -1374,6 +1916,9 @@ class AudioEngine {
     // channel that used this track as its source must also detach.
     this.detachSidechainDetector(trackId, channel);
     this.mixerChannels.delete(trackId);
+    if (!this.isOfflineRendering) {
+      this.lastKnownMixerTracks.delete(trackId);
+    }
     for (const [otherId, otherChannel] of this.mixerChannels) {
       if (otherChannel.sidechainDetector && otherChannel.sidechainDetector.sourceTrackId === trackId) {
         this.detachSidechainDetector(otherId, otherChannel);
@@ -1539,7 +2084,14 @@ class AudioEngine {
     channel: Pick<Channel, 'id' | 'pan' | 'mixerTrackId'> & Partial<Pick<Channel, 'volume'>>,
     atTime?: number,
   ): void {
-    if (this.shouldBlockLiveMutation() || !this.ctx) return;
+    if (this.shouldBlockLiveMutation()) return;
+    if (!this.isOfflineRendering) {
+      this.lastKnownChannelsById.set(channel.id, {
+        ...(this.lastKnownChannelsById.get(channel.id) ?? ({} as Channel)),
+        ...channel,
+      } as Channel);
+    }
+    if (!this.ctx) return;
     const now = typeof atTime === 'number' && Number.isFinite(atTime)
       ? atTime
       : (this.ctx.currentTime ?? 0);
@@ -1559,6 +2111,9 @@ class AudioEngine {
 
   public removeChannelPanner(channelId: string): void {
     if (this.shouldBlockLiveMutation() || !this.channelPanners) return;
+    if (!this.isOfflineRendering) {
+      this.lastKnownChannelsById.delete(channelId);
+    }
     const entry = this.channelPanners.get(channelId);
     if (!entry) return;
     try {
@@ -1587,6 +2142,9 @@ class AudioEngine {
 
   public updateMixerTrack(track: MixerTrack) {
     if (this.shouldBlockLiveMutation()) return;
+    if (!this.isOfflineRendering) {
+      this.lastKnownMixerTracks.set(track.id, structuredClone(track));
+    }
     const channel = this.getOrCreateMixerChannel(track.id);
     if (!this.ctx) return;
 
@@ -3728,18 +4286,42 @@ class AudioEngine {
     if (this.shouldBlockLiveMutation()) {
       throw new Error('Recording cannot start while an offline render is running.');
     }
+    if (!navigator.mediaDevices?.getUserMedia) {
+      throw new Error('Microphone capture is not supported in this environment.');
+    }
     if (!this.ctx) await this.init();
     this.recordedChunks = [];
 
-    const stream = await navigator.mediaDevices.getUserMedia({
-      audio: {
-        echoCancellation: false,
-        noiseSuppression: false,
-        autoGainControl: false,
+    const requestedDeviceId = audioDeviceManager.getPreferredInputDeviceId();
+    const constraints = audioDeviceManager.buildRecordingConstraints(requestedDeviceId);
+
+    let stream: MediaStream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia(constraints);
+    } catch (error) {
+      throw audioDeviceManager.translateAndRecordCaptureFailure(error, requestedDeviceId);
+    }
+
+    this.detachRecordingStreamMonitor?.();
+    this.mediaStream = stream;
+    this.detachRecordingStreamMonitor = audioDeviceManager.monitorActiveCaptureStream(stream, () => {
+      try {
+        if (this.mediaRecorder && this.mediaRecorder.state !== 'inactive') {
+          this.mediaRecorder.stop();
+        }
+      } catch (_) {}
+      this.detachRecordingStreamMonitor?.();
+      this.detachRecordingStreamMonitor = null;
+      if (this.mediaStream) {
+        this.mediaStream.getTracks().forEach(t => {
+          try { t.stop(); } catch (_) {}
+        });
+        this.mediaStream = null;
       }
+      this.mediaRecorder = null;
+      this.emitAudioEngineState();
     });
 
-    this.mediaStream = stream;
     const source = this.ctx!.createMediaStreamSource(stream);
     this.recordingAnalyser = this.ctx!.createAnalyser();
     this.recordingAnalyser.fftSize = 256;
@@ -3752,6 +4334,8 @@ class AudioEngine {
       }
     };
     this.mediaRecorder.start();
+    audioDeviceManager.notifyInputCaptureSucceeded(stream);
+    this.emitAudioEngineState();
 
     return stream;
   }
@@ -3771,6 +4355,8 @@ class AudioEngine {
   public async stopAudioRecording(): Promise<AudioRecording> {
     return new Promise((resolve) => {
       if (!this.mediaRecorder) {
+        this.detachRecordingStreamMonitor?.();
+        this.detachRecordingStreamMonitor = null;
         resolve({
           id: `rec-${Date.now()}`,
           name: 'Take 1',
@@ -3781,15 +4367,21 @@ class AudioEngine {
         return;
       }
 
-      this.mediaRecorder.onstop = async () => {
+      const activeRecorder = this.mediaRecorder;
+      activeRecorder.onstop = async () => {
         const blob = new Blob(this.recordedChunks, { type: 'audio/webm' });
         const url = URL.createObjectURL(blob);
-        
+
+        this.detachRecordingStreamMonitor?.();
+        this.detachRecordingStreamMonitor = null;
+
         // Stop stream tracks
         if (this.mediaStream) {
           this.mediaStream.getTracks().forEach(t => t.stop());
           this.mediaStream = null;
         }
+        this.mediaRecorder = null;
+        this.emitAudioEngineState();
 
         // Generate waveform preview
         const waveform = [0.1, 0.3, 0.6, 0.9, 0.7, 0.4, 0.8, 0.5, 0.2, 0.6, 0.3];
@@ -3807,7 +4399,7 @@ class AudioEngine {
         resolve(rec);
       };
 
-      this.mediaRecorder.stop();
+      activeRecorder.stop();
     });
   }
 
@@ -4177,6 +4769,7 @@ class AudioEngine {
       throw new Error('An offline timeline render is already running.');
     }
     this.offlineRenderLeaseHeld = true;
+    this.emitAudioEngineState();
     let transportToResume: AudioClockTransport | null = null;
     try {
       onProgress?.(15, `Preparing ${renderScope === 'pattern' ? 'pattern loop' : 'song'} export...`);
@@ -4621,6 +5214,7 @@ class AudioEngine {
       }
     } finally {
       this.offlineRenderLeaseHeld = false;
+      this.emitAudioEngineState();
       try {
         if (transportToResume) transportToResume.start();
       } finally {
@@ -5487,8 +6081,12 @@ class AudioEngine {
    * satisfies "wire if trivial".
    */
   public setMasterVolume(linearGain: number) {
-    if (this.shouldBlockLiveMutation() || !this.ctx || !this.masterGain) return;
+    if (this.shouldBlockLiveMutation()) return;
     const clamped = Math.max(0, Math.min(1.5, linearGain));
+    if (!this.isOfflineRendering) {
+      this.masterVolumeValue = clamped;
+    }
+    if (!this.ctx || !this.masterGain) return;
     this.masterGain.gain.setTargetAtTime(clamped, this.ctx.currentTime, 0.02);
   }
 
@@ -5980,6 +6578,7 @@ class AudioEngine {
     this.transport?.stop(false);
     const generation = ++this.nativePlayGeneration;
     this.nativePreparing = true;
+    this.emitAudioEngineState();
     const snapshot = structuredClone(channels);
     const mixerSnapshot = structuredClone(mixerTracks ?? []);
     return Promise.all([
@@ -5999,10 +6598,12 @@ class AudioEngine {
     ]).then(() => {
       if (generation !== this.nativePlayGeneration) return;
       this.nativePreparing = false;
+      this.emitAudioEngineState();
       this.startPlayback(snapshot, clips, mode, patternId, mixerSnapshot, patternLengthSteps, playlistTracks, patterns, true);
     }).catch(error => {
       if (generation !== this.nativePlayGeneration) return;
       this.nativePreparing = false;
+      this.emitAudioEngineState();
       for (const channel of nativeChannels) reportVst3(channel.id, error instanceof Error ? error.message : String(error));
       void this.nativeInstruments.stop();
       void this.nativeMixerEffects.stop();
@@ -6136,6 +6737,7 @@ class AudioEngine {
     });
 
     this.transport.start();
+    this.emitAudioEngineState();
 
     // Resuming a take at a mid-arrangement position must restore the audio the
     // previous take silenced: playlist clips spanning the position restart
@@ -6173,6 +6775,7 @@ class AudioEngine {
 
   this.currentStep = 0;
   this.currentBar = 1;
+  this.emitAudioEngineState();
 }
 
   /**
@@ -6200,6 +6803,7 @@ class AudioEngine {
     this.syncEnginePositionFromTransport();
     const state = this.transport.getState();
     this.transportStateCallback?.(state);
+    this.emitAudioEngineState();
   }
 
   /**

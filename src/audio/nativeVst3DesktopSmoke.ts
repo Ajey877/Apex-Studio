@@ -466,19 +466,37 @@ function capturedSignalEvidence(capture: MixerCapture, sourceStartFrame: number,
 }
 
 function compareCapturedMasterToTrackSum(captures: Map<number, MixerCapture>, startFrame: number, endFrame: number) {
-  const blocksByTrack = new Map([...captures].map(([trackId, capture]) => [trackId,
-    new Map(capture.blocks.map(block => [block.frame, block.samples]))]));
-  const master = blocksByTrack.get(0), leftTrack = blocksByTrack.get(1), rightTrack = blocksByTrack.get(2);
-  if (!master || !leftTrack || !rightTrack) throw new Error('Packaged latency acceptance did not capture master and both source tracks');
-  let sumSquared = 0, count = 0;
-  for (const [frame, masterPcm] of master) {
-    if (frame < startFrame || frame + VST3_FX_BLOCK_FRAMES > endFrame) continue;
-    const pcmA = leftTrack.get(frame), pcmB = rightTrack.get(frame);
-    if (!pcmA || !pcmB) continue;
-    for (let sample = 0; sample < VST3_FX_BLOCK_FRAMES * 2; sample++) {
-      const delta = masterPcm[sample]! - pcmA[sample]! - pcmB[sample]!;
-      sumSquared += delta * delta; count++;
+  const masterCapture = captures.get(0), leftCapture = captures.get(1), rightCapture = captures.get(2);
+  if (!masterCapture || !leftCapture || !rightCapture) throw new Error('Packaged latency acceptance did not capture master and both source tracks');
+  if (endFrame <= startFrame) return { comparedSamples: 0, rmsDifference: Infinity };
+  const windowFrames = endFrame - startFrame;
+  const extractWindow = (capture: MixerCapture) => {
+    const left = new Float32Array(windowFrames);
+    const right = new Float32Array(windowFrames);
+    const present = new Uint8Array(windowFrames);
+    for (const block of capture.blocks) {
+      if (block.frame + VST3_FX_BLOCK_FRAMES <= startFrame || block.frame >= endFrame) continue;
+      for (let offset = 0; offset < VST3_FX_BLOCK_FRAMES; offset++) {
+        const frame = block.frame + offset;
+        if (frame < startFrame || frame >= endFrame) continue;
+        const index = frame - startFrame;
+        left[index] = block.samples[offset] ?? 0;
+        right[index] = block.samples[VST3_FX_BLOCK_FRAMES + offset] ?? 0;
+        present[index] = 1;
+      }
     }
+    return { left, right, present };
+  };
+  const master = extractWindow(masterCapture);
+  const leftTrack = extractWindow(leftCapture);
+  const rightTrack = extractWindow(rightCapture);
+  let sumSquared = 0, count = 0;
+  for (let index = 0; index < windowFrames; index++) {
+    if (!master.present[index] || !leftTrack.present[index] || !rightTrack.present[index]) continue;
+    const deltaL = master.left[index]! - leftTrack.left[index]! - rightTrack.left[index]!;
+    const deltaR = master.right[index]! - leftTrack.right[index]! - rightTrack.right[index]!;
+    sumSquared += deltaL * deltaL + deltaR * deltaR;
+    count += 2;
   }
   return { comparedSamples: count, rmsDifference: count ? Math.sqrt(sumSquared / count) : Infinity };
 }
@@ -508,7 +526,9 @@ async function captureLiveMixerRun(instance: typeof audioEngine, channels: Chann
   await resetAllNativeVst3SmokeTiming();
   await instance.play(channels, [], 'pat', undefined, mixer, 16);
   await context.resume();
-  for (const trackId of options.includeMaster ? [0, 1, 2] : [1, 2]) taps.set(trackId, await attachMixerCapture(instance, trackId));
+  const trackIdsToCapture = options.includeMaster ? [0, 1, 2] : [1, 2];
+  const attachedTaps = await Promise.all(trackIdsToCapture.map(trackId => attachMixerCapture(instance, trackId)));
+  trackIdsToCapture.forEach((trackId, idx) => taps.set(trackId, attachedTaps[idx]!));
   if (options.includeNativeStages) {
     const nativeSlots = mixer.find(track => track.id === 1)?.fxSlots.filter(slot => slot.enabled && slot.type === 'vst3') ?? [];
     const effectNodes = (instance.getOrCreateMixerChannel(1) as any).fxNodes as AudioNode[];

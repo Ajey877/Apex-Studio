@@ -1,6 +1,12 @@
 import { persistAudioClip } from './audioPersistence';
 import { installAudioPlaybackLifecycle } from './audioPlaybackLifecycle';
 import { sessionBlobUrlRegistry } from '../state/sessionBlobUrlRegistry';
+import {
+  AudioDeviceManager,
+  audioDeviceManager,
+  hasActiveRecordingSession,
+  registerActiveRecordingSession,
+} from './audioDeviceManager';
 
 installAudioPlaybackLifecycle();
 
@@ -22,15 +28,22 @@ export interface RecordingEngineOptions {
   timesliceMs?: number;
   onError?: (error: Error) => void;
   persistAudioClip?: (id: string, blob: Blob) => Promise<void>;
+  deviceManager?: AudioDeviceManager;
+  inputDeviceId?: string;
 }
+
+export const hasActiveRecordingEngineSession = (): boolean => hasActiveRecordingSession();
 
 export class RecordingEngine {
   private recorder: MediaRecorder | null = null;
   private stream: MediaStream | null = null;
+  private detachStreamMonitor: (() => void) | null = null;
+  private releaseActiveSessionToken: (() => void) | null = null;
   private analyser: AnalyserNode | null = null;
   private analyserSource: MediaStreamAudioSourceNode | null = null;
   private chunks: Blob[] = [];
   private state: RecordingState = 'idle';
+  private starting = false;
   private startedAt = 0;
   private pausedAt = 0;
   private pausedDurationMs = 0;
@@ -41,16 +54,21 @@ export class RecordingEngine {
   private readonly timesliceMs: number;
   private readonly onError?: (error: Error) => void;
   private readonly persistAudioClip: (id: string, blob: Blob) => Promise<void>;
+  private readonly deviceManager: AudioDeviceManager;
+  private readonly explicitInputDeviceId?: string;
 
   constructor(private readonly contextProvider: () => AudioContext, options: RecordingEngineOptions = {}) {
     this.waveformSamples = Math.max(32, Math.min(2048, Math.floor(options.waveformSamples ?? 512)));
     this.timesliceMs = Math.max(50, Math.floor(options.timesliceMs ?? 250));
     this.onError = options.onError;
     this.persistAudioClip = options.persistAudioClip ?? persistAudioClip;
+    this.deviceManager = options.deviceManager ?? audioDeviceManager;
+    this.explicitInputDeviceId = options.inputDeviceId;
   }
 
   getState(): RecordingState { return this.state; }
   getMimeType(): string { return this.mimeType; }
+  isBusy(): boolean { return this.starting || this.state !== 'idle'; }
 
   getDurationSeconds(now = performance.now()): number {
     if (this.startedAt <= 0) return 0;
@@ -60,11 +78,30 @@ export class RecordingEngine {
   }
 
   async start(): Promise<MediaStream> {
-    if (this.state !== 'idle') throw new Error(`Cannot start recording while state is ${this.state}`);
+    if (this.state !== 'idle' || this.starting) throw new Error(`Cannot start recording while state is ${this.state}`);
     if (!navigator.mediaDevices?.getUserMedia) throw new Error('Microphone capture is not supported in this environment');
     if (typeof MediaRecorder === 'undefined') throw new Error('MediaRecorder is not supported in this environment');
 
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false } });
+    const requestedDeviceId =
+      this.explicitInputDeviceId !== undefined
+        ? this.explicitInputDeviceId
+        : this.deviceManager.getPreferredInputDeviceId();
+    const constraints = this.deviceManager.buildRecordingConstraints(requestedDeviceId);
+
+    this.starting = true;
+    this.releaseActiveSessionToken?.();
+    this.releaseActiveSessionToken = registerActiveRecordingSession();
+
+    let stream: MediaStream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia(constraints);
+    } catch (error) {
+      this.starting = false;
+      this.releaseActiveSessionToken?.();
+      this.releaseActiveSessionToken = null;
+      throw this.deviceManager.translateAndRecordCaptureFailure(error, requestedDeviceId);
+    }
+
     let source: MediaStreamAudioSourceNode | null = null;
     let analyser: AnalyserNode | null = null;
     try {
@@ -80,6 +117,9 @@ export class RecordingEngine {
       recorder.ondataavailable = event => { if (event.data.size > 0) this.chunks.push(event.data); };
       recorder.onerror = () => this.handleRecorderError(new Error('Audio recording failed'));
       this.stream = stream;
+      this.detachStreamMonitor = this.deviceManager.monitorActiveCaptureStream(stream, err => {
+        this.handleUnexpectedStreamEnded(err);
+      });
       this.analyserSource = source;
       this.analyser = analyser;
       this.recorder = recorder;
@@ -90,10 +130,15 @@ export class RecordingEngine {
       this.pausedDurationMs = 0;
       this.cancellationRequested = false;
       this.finalizationPromise = null;
+      this.starting = false;
       this.state = 'recording';
+      this.deviceManager.notifyInputCaptureSucceeded(stream);
       recorder.start(this.timesliceMs);
       return stream;
     } catch (error) {
+      this.starting = false;
+      this.detachStreamMonitor?.();
+      this.detachStreamMonitor = null;
       try { source?.disconnect(); } catch (_) { /* best effort */ }
       try { analyser?.disconnect(); } catch (_) { /* best effort */ }
       stream.getTracks().forEach(track => {
@@ -105,6 +150,8 @@ export class RecordingEngine {
       this.recorder = null;
       this.chunks = [];
       this.state = 'idle';
+      this.releaseActiveSessionToken?.();
+      this.releaseActiveSessionToken = null;
       throw error;
     }
   }
@@ -210,6 +257,24 @@ export class RecordingEngine {
     return this.finalizationPromise?.then(() => undefined, () => undefined) ?? Promise.resolve();
   }
 
+  private handleUnexpectedStreamEnded(error: Error): void {
+    if (this.finalizationPromise || this.state === 'idle') return;
+    const activeRecorder = this.recorder;
+    if (activeRecorder && activeRecorder.state !== 'inactive') {
+      try {
+        activeRecorder.ondataavailable = null;
+        activeRecorder.onstop = null;
+        activeRecorder.onerror = null;
+        activeRecorder.stop();
+      } catch (_) {
+        /* best effort */
+      }
+    }
+    this.cleanup();
+    this.notifyError(error);
+    console.error('[Apex Studio] Recording input stream ended unexpectedly.', error);
+  }
+
   private handleRecorderError(error: Error): void {
     if (this.finalizationPromise) return;
     this.cleanup();
@@ -251,6 +316,8 @@ export class RecordingEngine {
   }
 
   private cleanup(): void {
+    this.detachStreamMonitor?.();
+    this.detachStreamMonitor = null;
     this.stream?.getTracks().forEach(track => {
       try { track.stop(); } catch (_) { /* best effort */ }
     });
@@ -261,11 +328,14 @@ export class RecordingEngine {
     this.analyser = null;
     this.recorder = null;
     this.chunks = [];
+    this.starting = false;
     this.startedAt = 0;
     this.pausedAt = 0;
     this.pausedDurationMs = 0;
     this.mimeType = '';
     this.cancellationRequested = false;
     this.state = 'idle';
+    this.releaseActiveSessionToken?.();
+    this.releaseActiveSessionToken = null;
   }
 }
