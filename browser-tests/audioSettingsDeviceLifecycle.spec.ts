@@ -333,7 +333,7 @@ test('P1 & P2 in Chromium: startup passive monitoring runs while modal is closed
     });
 
   // Close Audio Settings, then simulate unplugging 'monitors-spdif' and verify fallback hits replacement 96 kHz context.
-  await page.keyboard.press('Escape');
+  await dialog.getByRole('button', { name: 'Close Audio Settings' }).click();
   await expect(dialog).toBeHidden();
 
   await page.evaluate(() => {
