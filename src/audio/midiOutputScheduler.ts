@@ -59,7 +59,29 @@ export interface ScheduleChannelNoteParams {
 export interface ScheduleChannelNoteResult {
   sent: boolean;
   deferredToHorizon?: boolean;
+  /**
+   * True when an overlapping same-pitch note already had a future Note Off
+   * submitted to a port without a working `MIDIOutput.clear()`, so that
+   * pre-queued Note Off could not be cancelled by the Web MIDI API.
+   */
+  uncancelledQueuedNoteOff?: boolean;
+  effectiveReleasePerfMs?: number;
   reason?: 'off_or_unassigned' | 'port_unavailable' | 'zero_velocity' | 'duplicate' | 'send_failed';
+}
+
+interface PendingMidiControlChange {
+  channelId: string;
+  outputDeviceId: string;
+  midiChannel: number;
+  bytes: [number, number, number];
+  perfMs: number;
+}
+
+interface RetriggerOverlapOutcome {
+  effectiveReleaseStep: number;
+  effectiveReleasePerfMs: number | null;
+  uncancelledQueuedOffPerfMs: number | null;
+  uncancelledReleaseStep: number | null;
 }
 
 interface ActiveMidiOutputNote {
@@ -304,6 +326,7 @@ export class MidiOutputScheduler {
   private currentTransportStep: TransportStepMidiContext | null = null;
   private activeNotes = new Map<number, ActiveMidiOutputNote>();
   private deferredTransportNotes: DeferredTransportNoteOn[] = [];
+  private pendingControlChanges: PendingMidiControlChange[] = [];
   private scheduledEventKeys = new Map<string, number>();
   private sustainChannelsByPortKey = new Map<string, Set<string>>();
   private portErrors = new Map<string, string>();
@@ -487,6 +510,9 @@ export class MidiOutputScheduler {
       }
     }
     this.deferredTransportNotes = this.deferredTransportNotes.filter(
+      item => item.outputDeviceId !== outputDeviceId,
+    );
+    this.pendingControlChanges = this.pendingControlChanges.filter(
       item => item.outputDeviceId !== outputDeviceId,
     );
     for (const key of [...this.sustainChannelsByPortKey.keys()]) {
@@ -699,7 +725,7 @@ export class MidiOutputScheduler {
         return { sent: true, deferredToHorizon: true };
       }
 
-      const sent = this.commitTransportNote({
+      const committed = this.commitTransportNote({
         channelId: params.channel.id,
         outputDeviceId: routing.outputDeviceId,
         midiChannel,
@@ -714,7 +740,17 @@ export class MidiOutputScheduler {
         secondsPerStep,
         nowPerfMs,
       });
-      return sent ? { sent: true } : { sent: false, reason: 'send_failed' };
+      if (!committed.sent) {
+        return { sent: false, reason: 'send_failed' };
+      }
+      if (committed.uncancelledQueuedOffPerfMs !== null) {
+        return {
+          sent: true,
+          uncancelledQueuedNoteOff: true,
+          effectiveReleasePerfMs: committed.uncancelledQueuedOffPerfMs,
+        };
+      }
+      return { sent: true };
     }
 
     // Non-transport live input or preview note:
@@ -723,25 +759,43 @@ export class MidiOutputScheduler {
       params.contextCurrentTimeSeconds,
       nowPerfMs,
     );
-    this.retriggerOverlappingPitchIfOpen(routing.outputDeviceId, midiChannel, pitch, onPerfMs, null);
+    const previewSeconds =
+      params.liveInputMidiChannel === undefined
+        ? Math.min(gateSeconds, MAX_PREVIEW_MIDI_NOTE_SECONDS)
+        : null;
+    const requestedOffPerfMs =
+      previewSeconds !== null
+        ? Math.max(
+            onPerfMs + MIN_MIDI_NOTE_OFF_DELTA_MS,
+            this.mapAudioToPerfMs(
+              params.onsetAudioTimeSeconds + previewSeconds,
+              params.contextCurrentTimeSeconds,
+              nowPerfMs,
+            ),
+          )
+        : null;
+
+    const overlap = this.retriggerOverlappingPitchIfOpen({
+      outputDeviceId: routing.outputDeviceId,
+      midiChannel,
+      pitch,
+      onPerfMs,
+      nowPerfMs,
+      requestedReleaseStep: null,
+      requestedReleasePerfMs: requestedOffPerfMs,
+      patternCycleIndex: null,
+    });
 
     if (!this.trySend(port, [0x90 | (midiChannel - 1), pitch, velocityByte], onPerfMs)) {
       return { sent: false, reason: 'send_failed' };
     }
 
     let queuedOffPerfMs: number | null = null;
-    if (params.liveInputMidiChannel === undefined) {
-      const previewSeconds = Math.min(gateSeconds, MAX_PREVIEW_MIDI_NOTE_SECONDS);
-      const offPerfMs = Math.max(
-        onPerfMs + MIN_MIDI_NOTE_OFF_DELTA_MS,
-        this.mapAudioToPerfMs(
-          params.onsetAudioTimeSeconds + previewSeconds,
-          params.contextCurrentTimeSeconds,
-          nowPerfMs,
-        ),
-      );
-      if (this.trySend(port, [0x80 | (midiChannel - 1), pitch, 0], offPerfMs)) {
-        queuedOffPerfMs = offPerfMs;
+    if (overlap.uncancelledQueuedOffPerfMs !== null) {
+      queuedOffPerfMs = overlap.uncancelledQueuedOffPerfMs;
+    } else if (overlap.effectiveReleasePerfMs !== null) {
+      if (this.trySend(port, [0x80 | (midiChannel - 1), pitch, 0], overlap.effectiveReleasePerfMs)) {
+        queuedOffPerfMs = overlap.effectiveReleasePerfMs;
       }
     }
 
@@ -761,6 +815,13 @@ export class MidiOutputScheduler {
       patternCycleIndex: null,
     };
     this.activeNotes.set(noteRecord.id, noteRecord);
+    if (overlap.uncancelledQueuedOffPerfMs !== null) {
+      return {
+        sent: true,
+        uncancelledQueuedNoteOff: true,
+        effectiveReleasePerfMs: overlap.uncancelledQueuedOffPerfMs,
+      };
+    }
     return { sent: true };
   }
 
@@ -778,9 +839,9 @@ export class MidiOutputScheduler {
     stepContext: TransportStepMidiContext;
     secondsPerStep: number;
     nowPerfMs: number;
-  }): boolean {
+  }): { sent: boolean; uncancelledQueuedOffPerfMs: number | null } {
     const port = this.resolveUsablePort(params.outputDeviceId);
-    if (!port) return false;
+    if (!port) return { sent: false, uncancelledQueuedOffPerfMs: null };
 
     const onPerfMs = this.mapAudioToPerfMs(
       params.onsetAudioTimeSeconds,
@@ -788,21 +849,32 @@ export class MidiOutputScheduler {
       params.nowPerfMs,
     );
 
-    const mergedReleaseStep = this.retriggerOverlappingPitchIfOpen(
-      params.outputDeviceId,
-      params.midiChannel,
-      params.pitch,
+    const overlap = this.retriggerOverlappingPitchIfOpen({
+      outputDeviceId: params.outputDeviceId,
+      midiChannel: params.midiChannel,
+      pitch: params.pitch,
       onPerfMs,
-      params.releaseAbsoluteStep,
-    );
+      nowPerfMs: params.nowPerfMs,
+      requestedReleaseStep: params.releaseAbsoluteStep,
+      requestedReleasePerfMs: null,
+      patternCycleIndex: params.patternCycleIndex,
+    });
 
     if (!this.trySend(port, [0x90 | (params.midiChannel - 1), params.pitch, params.velocityByte], onPerfMs)) {
-      return false;
+      return { sent: false, uncancelledQueuedOffPerfMs: null };
     }
 
+    let finalReleaseStep = overlap.effectiveReleaseStep;
     let queuedOffPerfMs: number | null = null;
-    if (mergedReleaseStep <= params.stepContext.absoluteStep + 1 + 1e-9) {
-      const releaseOffsetSteps = Math.max(0, mergedReleaseStep - params.stepContext.absoluteStep);
+    if (overlap.uncancelledQueuedOffPerfMs !== null) {
+      // Port lacked clear(): the earlier queued Note Off (> onPerfMs) could not
+      // be cancelled in Web MIDI and remains the honest hardware cutoff.
+      queuedOffPerfMs = overlap.uncancelledQueuedOffPerfMs;
+      if (overlap.uncancelledReleaseStep !== null) {
+        finalReleaseStep = overlap.uncancelledReleaseStep;
+      }
+    } else if (finalReleaseStep <= params.stepContext.absoluteStep + 1 + 1e-9) {
+      const releaseOffsetSteps = Math.max(0, finalReleaseStep - params.stepContext.absoluteStep);
       const releaseAudioSeconds =
         params.stepContext.unswungStepAudioTimeSeconds +
         releaseOffsetSteps * params.secondsPerStep +
@@ -828,31 +900,59 @@ export class MidiOutputScheduler {
       pitch: params.pitch,
       velocityByte: params.velocityByte,
       onPerfMs,
-      releaseAbsoluteStep: mergedReleaseStep,
+      releaseAbsoluteStep: finalReleaseStep,
       grooveOffsetSeconds: params.grooveOffsetSeconds,
       queuedOffPerfMs,
       isTransportNote: true,
       patternCycleIndex: params.patternCycleIndex,
     };
     this.activeNotes.set(record.id, record);
-    return true;
+    return { sent: true, uncancelledQueuedOffPerfMs: overlap.uncancelledQueuedOffPerfMs };
   }
 
   /**
    * When a new Note On arrives for an `(outputDeviceId, midiChannel, pitch)` that
-   * already has an open (unreleased) Note On, emits a clean retrigger Note Off
-   * immediately before the new Note On and merges their release span so the
-   * longer overlapping note is never cut short and Note On/Off counts stay 1:1.
+   * already has an open or overlapping queued Note On/Off:
+   * - If an earlier overlapping note already submitted a future Note Off
+   *   (`queuedOffPerfMs > onPerfMs`) on a port supporting `clear()`, clears the
+   *   physical port queue, re-queues all unrelated pending events on that port
+   *   (sibling channels, other pitches, pending CCs, and any not-yet-fired onset
+   *   of the truncated note) at their exact original timestamps without
+   *   duplication or loss, omits the stale Note Off, and queues a clean
+   *   retrigger Note Off at `onPerfMs`.
+   * - If the port lacks `clear()` (or `clear()` throws), never claims the
+   *   already-queued Note Off was cancelled; emits the retrigger Note Off before
+   *   the new Note On while recording the uncancelled hardware cutoff honestly
+   *   so Note On/Off parity stays strictly 1:1.
+   * - If the open note had not yet queued its Note Off (`queuedOffPerfMs === null`),
+   *   emits a clean retrigger Note Off at `onPerfMs` without calling `clear()`
+   *   and merges their release span so longer sustained notes are never cut short.
    */
-  private retriggerOverlappingPitchIfOpen(
-    outputDeviceId: string,
-    midiChannel: number,
-    pitch: number,
-    onPerfMs: number,
-    requestedReleaseStep: number | null,
-  ): number {
+  private retriggerOverlappingPitchIfOpen(params: {
+    outputDeviceId: string;
+    midiChannel: number;
+    pitch: number;
+    onPerfMs: number;
+    nowPerfMs: number;
+    requestedReleaseStep: number | null;
+    requestedReleasePerfMs: number | null;
+    patternCycleIndex: number | null;
+  }): RetriggerOverlapOutcome {
+    const {
+      outputDeviceId,
+      midiChannel,
+      pitch,
+      onPerfMs,
+      nowPerfMs,
+      requestedReleaseStep,
+      requestedReleasePerfMs,
+      patternCycleIndex,
+    } = params;
     let effectiveReleaseStep = requestedReleaseStep ?? 0;
+    let effectiveReleasePerfMs = requestedReleasePerfMs;
     const port = this.resolveUsablePort(outputDeviceId);
+
+    const overlapping: ActiveMidiOutputNote[] = [];
     for (const [id, existing] of [...this.activeNotes.entries()]) {
       if (
         existing.outputDeviceId !== outputDeviceId ||
@@ -862,20 +962,203 @@ export class MidiOutputScheduler {
         continue;
       }
       if (existing.queuedOffPerfMs !== null && existing.queuedOffPerfMs <= onPerfMs) {
-        this.activeNotes.delete(id);
+        if (existing.queuedOffPerfMs <= nowPerfMs) {
+          this.activeNotes.delete(id);
+        }
         continue;
       }
-      if (existing.queuedOffPerfMs === null) {
-        if (port) {
-          this.trySend(port, [0x80 | (midiChannel - 1), pitch, 0], onPerfMs);
-        }
-        if (existing.releaseAbsoluteStep !== null && requestedReleaseStep !== null) {
-          effectiveReleaseStep = Math.max(effectiveReleaseStep, existing.releaseAbsoluteStep);
-        }
-        this.activeNotes.delete(id);
+      overlapping.push(existing);
+    }
+
+    if (overlapping.length === 0) {
+      return {
+        effectiveReleaseStep,
+        effectiveReleasePerfMs,
+        uncancelledQueuedOffPerfMs: null,
+        uncancelledReleaseStep: null,
+      };
+    }
+
+    for (const existing of overlapping) {
+      if (
+        existing.releaseAbsoluteStep !== null &&
+        requestedReleaseStep !== null &&
+        existing.patternCycleIndex === patternCycleIndex
+      ) {
+        effectiveReleaseStep = Math.max(effectiveReleaseStep, existing.releaseAbsoluteStep);
+      }
+      if (existing.queuedOffPerfMs !== null && effectiveReleasePerfMs !== null) {
+        effectiveReleasePerfMs = Math.max(effectiveReleasePerfMs, existing.queuedOffPerfMs);
       }
     }
-    return effectiveReleaseStep;
+
+    const conflictingQueuedOffNotes = overlapping.filter(
+      n => n.queuedOffPerfMs !== null && n.queuedOffPerfMs > onPerfMs,
+    );
+    const simultaneousFutureNotes = overlapping.filter(
+      n => n.onPerfMs >= onPerfMs && n.onPerfMs > nowPerfMs,
+    );
+    const needsPortQueueClear =
+      conflictingQueuedOffNotes.length > 0 || simultaneousFutureNotes.length > 0;
+
+    if (!needsPortQueueClear) {
+      if (onPerfMs <= nowPerfMs) {
+        for (const existing of overlapping) {
+          this.activeNotes.delete(existing.id);
+        }
+      } else {
+        const [segment, ...rest] = overlapping;
+        segment.queuedOffPerfMs = onPerfMs;
+        segment.releaseAbsoluteStep = null;
+        segment.isTransportNote = false;
+        for (const extra of rest) {
+          this.activeNotes.delete(extra.id);
+        }
+      }
+      if (port) {
+        this.trySend(port, [0x80 | (midiChannel - 1), pitch, 0], onPerfMs);
+      }
+      return {
+        effectiveReleaseStep,
+        effectiveReleasePerfMs,
+        uncancelledQueuedOffPerfMs: null,
+        uncancelledReleaseStep: null,
+      };
+    }
+
+    let cleared = false;
+    if (port && typeof port.clear === 'function') {
+      try {
+        port.clear();
+        cleared = true;
+      } catch {
+        cleared = false;
+      }
+    }
+
+    if (cleared && port) {
+      const startedBeforeNewOn = overlapping
+        .filter(n => n.onPerfMs < onPerfMs || n.onPerfMs <= nowPerfMs)
+        .sort((a, b) => a.onPerfMs - b.onPerfMs);
+
+      let sendImmediateRetriggerOff = false;
+      if (startedBeforeNewOn.length === 0) {
+        for (const existing of overlapping) {
+          this.activeNotes.delete(existing.id);
+        }
+      } else if (onPerfMs <= nowPerfMs) {
+        for (const existing of overlapping) {
+          this.activeNotes.delete(existing.id);
+        }
+        sendImmediateRetriggerOff = true;
+      } else {
+        const primarySegment = startedBeforeNewOn[0];
+        primarySegment.queuedOffPerfMs = onPerfMs;
+        primarySegment.releaseAbsoluteStep = null;
+        primarySegment.isTransportNote = false;
+        for (const existing of overlapping) {
+          if (existing.id !== primarySegment.id) {
+            this.activeNotes.delete(existing.id);
+          }
+        }
+      }
+
+      this.requeueActivePortEvents(port, outputDeviceId, nowPerfMs);
+
+      if (sendImmediateRetriggerOff) {
+        this.trySend(port, [0x80 | (midiChannel - 1), pitch, 0], onPerfMs);
+      }
+
+      return {
+        effectiveReleaseStep,
+        effectiveReleasePerfMs,
+        uncancelledQueuedOffPerfMs: null,
+        uncancelledReleaseStep: null,
+      };
+    }
+
+    // Port does not support `clear()` (or `clear()` threw): do not claim the
+    // pre-queued Note Off was cancelled. Emit retrigger Note Off before the new
+    // Note On while preserving 1:1 Note On/Off parity and honest cutoff state.
+    let uncancelledQueuedOffPerfMs: number | null = null;
+    let uncancelledReleaseStep: number | null = null;
+    if (conflictingQueuedOffNotes.length > 0) {
+      const earliestConflict = [...conflictingQueuedOffNotes].sort(
+        (a, b) => (a.queuedOffPerfMs ?? Infinity) - (b.queuedOffPerfMs ?? Infinity),
+      )[0];
+      uncancelledQueuedOffPerfMs = earliestConflict.queuedOffPerfMs;
+      uncancelledReleaseStep = earliestConflict.releaseAbsoluteStep;
+    }
+
+    const earliestExistingOnMs = Math.min(...overlapping.map(n => n.onPerfMs));
+    const retriggerOffMs = Math.max(onPerfMs, earliestExistingOnMs);
+    if (retriggerOffMs <= nowPerfMs) {
+      for (const existing of overlapping) {
+        this.activeNotes.delete(existing.id);
+      }
+    } else {
+      const [segment, ...rest] = [...overlapping].sort((a, b) => a.onPerfMs - b.onPerfMs);
+      segment.queuedOffPerfMs = retriggerOffMs;
+      segment.releaseAbsoluteStep = null;
+      segment.isTransportNote = false;
+      for (const extra of rest) {
+        this.activeNotes.delete(extra.id);
+      }
+    }
+    if (port) {
+      this.trySend(port, [0x80 | (midiChannel - 1), pitch, 0], retriggerOffMs);
+    }
+
+    return {
+      effectiveReleaseStep,
+      effectiveReleasePerfMs,
+      uncancelledQueuedOffPerfMs,
+      uncancelledReleaseStep,
+    };
+  }
+
+  /**
+   * Re-queues all pending future MIDI events (`timestamp > nowPerfMs`) tracked on
+   * `outputDeviceId` after a `MIDIOutput.clear()` call so sibling channels,
+   * chord voices, and pending timestamped Control Changes keep their exact
+   * original timestamps without losing or duplicating already-fired messages.
+   */
+  private requeueActivePortEvents(
+    port: MidiOutputPortLike,
+    outputDeviceId: string,
+    nowPerfMs: number,
+  ): void {
+    if ((port.state ?? 'connected') !== 'connected') return;
+    const pending: Array<{ perfMs: number; order: number; bytes: number[] }> = [];
+    for (const active of this.activeNotes.values()) {
+      if (active.outputDeviceId !== outputDeviceId) continue;
+      if (active.onPerfMs > nowPerfMs) {
+        pending.push({
+          perfMs: active.onPerfMs,
+          order: 1,
+          bytes: [0x90 | (active.midiChannel - 1), active.pitch, active.velocityByte],
+        });
+      }
+      if (active.queuedOffPerfMs !== null && active.queuedOffPerfMs > nowPerfMs) {
+        pending.push({
+          perfMs: active.queuedOffPerfMs,
+          order: 0,
+          bytes: [0x80 | (active.midiChannel - 1), active.pitch, 0],
+        });
+      }
+    }
+    for (const ccEvt of this.pendingControlChanges) {
+      if (ccEvt.outputDeviceId !== outputDeviceId || ccEvt.perfMs <= nowPerfMs) continue;
+      pending.push({
+        perfMs: ccEvt.perfMs,
+        order: 2,
+        bytes: ccEvt.bytes,
+      });
+    }
+    pending.sort((a, b) => a.perfMs - b.perfMs || a.order - b.order);
+    for (const item of pending) {
+      this.trySend(port, item.bytes, item.perfMs);
+    }
   }
 
   /**
@@ -897,12 +1180,23 @@ export class MidiOutputScheduler {
     const ccNum = clampMidiByte(cc, 0, 127);
     const val = clampMidiByte(valueByte, 0, 127);
     const nowPerfMs = this.getPerformanceNowMs();
+    this.pruneCompletedState(nowPerfMs);
     const timestampMs =
       audioTimeSeconds !== undefined
         ? this.mapAudioToPerfMs(audioTimeSeconds, contextCurrentTimeSeconds, nowPerfMs)
         : undefined;
 
-    const ok = this.trySend(port, [0xb0 | (routing.midiChannel - 1), ccNum, val], timestampMs);
+    const bytes: [number, number, number] = [0xb0 | (routing.midiChannel - 1), ccNum, val];
+    const ok = this.trySend(port, bytes, timestampMs);
+    if (ok && timestampMs !== undefined && Number.isFinite(timestampMs) && timestampMs > nowPerfMs) {
+      this.pendingControlChanges.push({
+        channelId: channel.id,
+        outputDeviceId: routing.outputDeviceId,
+        midiChannel: routing.midiChannel,
+        bytes,
+        perfMs: timestampMs,
+      });
+    }
     if (ok && ccNum === 64) {
       const portChKey = `${routing.outputDeviceId}:${routing.midiChannel}`;
       if (val >= 64) {
@@ -966,6 +1260,10 @@ export class MidiOutputScheduler {
     const nowPerfMs = this.getPerformanceNowMs();
     this.pruneCompletedState(nowPerfMs);
     this.deferredTransportNotes = this.deferredTransportNotes.filter(n => n.channelId !== channelId);
+    const channelPendingCcs = this.pendingControlChanges.filter(
+      c => c.channelId === channelId && c.perfMs > nowPerfMs,
+    );
+    this.pendingControlChanges = this.pendingControlChanges.filter(c => c.channelId !== channelId);
 
     const channelNotes: ActiveMidiOutputNote[] = [];
     for (const [id, active] of [...this.activeNotes.entries()]) {
@@ -975,53 +1273,48 @@ export class MidiOutputScheduler {
       }
     }
 
-    if (channelNotes.length === 0) {
+    if (channelNotes.length === 0 && channelPendingCcs.length === 0) {
       this.releaseChannelSustainIfExclusive(channelId);
       return;
     }
 
-    const portsUsedByTarget = new Set(channelNotes.map(n => n.outputDeviceId));
+    const portsUsedByTarget = new Set([
+      ...channelNotes.map(n => n.outputDeviceId),
+      ...channelPendingCcs.map(c => c.outputDeviceId),
+    ]);
     const clearedPorts = new Set<string>();
 
     for (const outputDeviceId of portsUsedByTarget) {
-      const targetHasQueuedFutureOnPort = channelNotes.some(
-        note =>
-          note.outputDeviceId === outputDeviceId &&
-          (note.onPerfMs > nowPerfMs || (note.queuedOffPerfMs !== null && note.queuedOffPerfMs > nowPerfMs)),
-      );
-      const siblingQueuedFutureNotes = [...this.activeNotes.values()].filter(
-        other =>
-          other.outputDeviceId === outputDeviceId &&
-          (other.onPerfMs > nowPerfMs || (other.queuedOffPerfMs !== null && other.queuedOffPerfMs > nowPerfMs)),
-      );
+      const targetHasQueuedFutureOnPort =
+        channelNotes.some(
+          note =>
+            note.outputDeviceId === outputDeviceId &&
+            (note.onPerfMs > nowPerfMs ||
+              (note.queuedOffPerfMs !== null && note.queuedOffPerfMs > nowPerfMs)),
+        ) || channelPendingCcs.some(c => c.outputDeviceId === outputDeviceId && c.perfMs > nowPerfMs);
+      const siblingHasQueuedFutureOnPort =
+        [...this.activeNotes.values()].some(
+          other =>
+            other.outputDeviceId === outputDeviceId &&
+            (other.onPerfMs > nowPerfMs ||
+              (other.queuedOffPerfMs !== null && other.queuedOffPerfMs > nowPerfMs)),
+        ) ||
+        this.pendingControlChanges.some(
+          c => c.outputDeviceId === outputDeviceId && c.perfMs > nowPerfMs,
+        );
 
       // Clear the hardware port queue when either no sibling channel has queued
       // future events on this port, or the target channel itself has queued
       // future events that must be cancelled (in which case sibling future
       // events are immediately re-queued at their exact original timestamps).
-      if (siblingQueuedFutureNotes.length === 0 || targetHasQueuedFutureOnPort) {
+      if (!siblingHasQueuedFutureOnPort || targetHasQueuedFutureOnPort) {
         const port = this.resolveOutputPort(outputDeviceId);
         if (port && typeof port.clear === 'function') {
           try {
             port.clear();
             clearedPorts.add(outputDeviceId);
-            if (siblingQueuedFutureNotes.length > 0 && (port.state ?? 'connected') === 'connected') {
-              for (const sibling of siblingQueuedFutureNotes) {
-                if (sibling.onPerfMs > nowPerfMs) {
-                  this.trySend(
-                    port,
-                    [0x90 | (sibling.midiChannel - 1), sibling.pitch, sibling.velocityByte],
-                    sibling.onPerfMs,
-                  );
-                }
-                if (sibling.queuedOffPerfMs !== null && sibling.queuedOffPerfMs > nowPerfMs) {
-                  this.trySend(
-                    port,
-                    [0x80 | (sibling.midiChannel - 1), sibling.pitch, 0],
-                    sibling.queuedOffPerfMs,
-                  );
-                }
-              }
+            if (siblingHasQueuedFutureOnPort) {
+              this.requeueActivePortEvents(port, outputDeviceId, nowPerfMs);
             }
           } catch {
             // Fall through to targeted Note Offs below.
@@ -1193,6 +1486,14 @@ export class MidiOutputScheduler {
         }
       }
     }
+
+    for (const ccEvt of this.pendingControlChanges) {
+      if (!clearedPorts.has(ccEvt.outputDeviceId) || ccEvt.perfMs <= nowPerfMs) continue;
+      const port = this.resolveUsablePort(ccEvt.outputDeviceId);
+      if (port) {
+        this.trySend(port, ccEvt.bytes, ccEvt.perfMs);
+      }
+    }
   }
 
   public reconcileChannels(
@@ -1245,6 +1546,7 @@ export class MidiOutputScheduler {
     this.pruneCompletedState(nowPerfMs);
     this.currentTransportStep = null;
     this.deferredTransportNotes = [];
+    this.pendingControlChanges = [];
     if (reason !== 'seek') {
       this.scheduledEventKeys.clear();
     } else {
@@ -1378,6 +1680,9 @@ export class MidiOutputScheduler {
       if (note.queuedOffPerfMs !== null && note.queuedOffPerfMs <= nowPerfMs) {
         this.activeNotes.delete(id);
       }
+    }
+    if (this.pendingControlChanges.length > 0) {
+      this.pendingControlChanges = this.pendingControlChanges.filter(c => c.perfMs > nowPerfMs);
     }
     if (contextCurrentTimeSeconds !== undefined && this.scheduledEventKeys.size > 0) {
       const cutoff = contextCurrentTimeSeconds - DEDUP_RETENTION_SECONDS;

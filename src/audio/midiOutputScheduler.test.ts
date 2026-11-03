@@ -19,6 +19,11 @@ interface RecordedMidiPacket {
   timestamp?: number;
 }
 
+interface WireQueueMidiPacket extends RecordedMidiPacket {
+  sentAtPerfMs: number;
+  cancelledByClearAtPerfMs: number | null;
+}
+
 class InstrumentedMidiOutputPort implements MidiOutputPortLike {
   readonly id: string;
   readonly name: string;
@@ -26,9 +31,11 @@ class InstrumentedMidiOutputPort implements MidiOutputPortLike {
   state: 'connected' | 'disconnected' = 'connected';
   connection: 'open' | 'closed' | 'pending' = 'open';
   readonly sent: RecordedMidiPacket[] = [];
+  readonly wireQueue: WireQueueMidiPacket[] = [];
   clearCalls = 0;
   openCalls = 0;
   readonly supportsClear: boolean;
+  private readonly getNowPerfMs: () => number;
 
   constructor(
     id: string,
@@ -38,6 +45,7 @@ class InstrumentedMidiOutputPort implements MidiOutputPortLike {
       state?: 'connected' | 'disconnected';
       connection?: 'open' | 'closed' | 'pending';
       supportsClear?: boolean;
+      nowPerfMs?: () => number;
     } = {},
   ) {
     this.id = id;
@@ -46,6 +54,7 @@ class InstrumentedMidiOutputPort implements MidiOutputPortLike {
     this.state = options.state ?? 'connected';
     this.connection = options.connection ?? 'open';
     this.supportsClear = options.supportsClear ?? true;
+    this.getNowPerfMs = options.nowPerfMs ?? (() => 0);
     if (!this.supportsClear) {
       (this as { clear?: () => void }).clear = undefined;
     }
@@ -55,11 +64,32 @@ class InstrumentedMidiOutputPort implements MidiOutputPortLike {
     if (this.state !== 'connected' || this.connection === 'closed') {
       throw new Error(`Port ${this.id} cannot transmit (${this.state}/${this.connection})`);
     }
-    this.sent.push({ bytes: Array.from(data), timestamp });
+    const packetBytes = Array.from(data);
+    this.sent.push({ bytes: packetBytes, timestamp });
+    this.wireQueue.push({
+      bytes: packetBytes,
+      timestamp,
+      sentAtPerfMs: this.getNowPerfMs(),
+      cancelledByClearAtPerfMs: null,
+    });
   }
 
   clear(): void {
     this.clearCalls += 1;
+    const now = this.getNowPerfMs();
+    for (const pkt of this.wireQueue) {
+      if (pkt.cancelledByClearAtPerfMs === null && pkt.timestamp !== undefined && pkt.timestamp > now) {
+        pkt.cancelledByClearAtPerfMs = now;
+      }
+    }
+  }
+
+  getDeliveredWirePackets(): WireQueueMidiPacket[] {
+    return this.wireQueue.filter(pkt => pkt.cancelledByClearAtPerfMs === null);
+  }
+
+  getCancelledWirePackets(): WireQueueMidiPacket[] {
+    return this.wireQueue.filter(pkt => pkt.cancelledByClearAtPerfMs !== null);
   }
 
   async open(): Promise<MidiOutputPortLike> {
@@ -804,5 +834,372 @@ describe('MidiOutputScheduler — overlapping pitches, cleanup isolation, loop w
     );
     assert.equal(portB.clearCalls, 0, 'unrelated port-b untouched');
     assert.equal(portB.sent.length, 0, 'unrelated port-b received zero MIDI messages');
+  });
+
+  it('prevents an already-queued short-note Note Off (1125 ms) from prematurely terminating an overlapping fractional-onset Note On (1062.5 ms -> 1187.5 ms)', () => {
+    let perfMs = 1000;
+    const port = new InstrumentedMidiOutputPort('hw-overlap-short', { nowPerfMs: () => perfMs });
+    const ports = new Map<string, MidiOutputPortLike>([[port.id, port]]);
+    const scheduler = new MidiOutputScheduler({
+      performanceNowMs: () => perfMs,
+      getOutputs: () => ports,
+    });
+    const ch = makeChannel('ch-lead', {
+      midiOutput: { mode: 'external', outputDeviceId: port.id, midiChannel: 1 },
+    });
+
+    // Case A: Step 0 at 120 BPM (125 ms/step).
+    // 1. First C4 Note On is scheduled at 1000 ms; its 1-step Note Off is already queued at 1125 ms.
+    scheduler.beginTransportTake(1, 'song');
+    scheduler.beginTransportStep({
+      takeGeneration: 1,
+      absoluteStep: 0,
+      step: 0,
+      stepAudioTimeSeconds: 0,
+      unswungStepAudioTimeSeconds: 0,
+      grooveOffsetSeconds: 0,
+      bpm: 120,
+      mode: 'song',
+      patternLoopSteps: null,
+      contextCurrentTimeSeconds: 0,
+    });
+
+    scheduler.scheduleChannelNote({
+      channel: ch,
+      note: makeNote(60, { id: 'c4-first', start: 0, duration: 1, velocity: 0.8 }),
+      onsetAudioTimeSeconds: 0,
+      bpm: 120,
+      contextCurrentTimeSeconds: 0,
+    });
+    assert.equal(port.sent.length, 2, 'first C4 immediately queued Note On (1000 ms) and Note Off (1125 ms)');
+    assert.equal(port.sent[0].timestamp, 1000);
+    assert.equal(port.sent[1].timestamp, 1125);
+
+    // 2. Second C4 Note On arrives at 1062.5 ms (fractional 0.5-step onset) with intended release at 1187.5 ms.
+    const secondRes = scheduler.scheduleChannelNote({
+      channel: ch,
+      note: makeNote(60, { id: 'c4-second', start: 0.5, duration: 1, velocity: 0.9 }),
+      onsetAudioTimeSeconds: 0.0625,
+      bpm: 120,
+      contextCurrentTimeSeconds: 0,
+    });
+    assert.deepEqual(secondRes, { sent: true });
+    scheduler.endTransportStep();
+
+    assert.equal(port.clearCalls, 1, 'cleared pending 1125 ms Note Off from port queue');
+    const cancelled = port.getCancelledWirePackets();
+    assert.equal(cancelled.length, 1);
+    assert.deepEqual(cancelled[0].bytes, [0x80, 60, 0]);
+    assert.equal(cancelled[0].timestamp, 1125, 'exact stale 1125 ms Note Off was cancelled before firing');
+
+    // 3. Step 1 (1125 ms) enters bounded horizon and queues the intended 1187.5 ms Note Off.
+    perfMs = 1125;
+    scheduler.beginTransportStep({
+      takeGeneration: 1,
+      absoluteStep: 1,
+      step: 1,
+      stepAudioTimeSeconds: 0.125,
+      unswungStepAudioTimeSeconds: 0.125,
+      grooveOffsetSeconds: 0,
+      bpm: 120,
+      mode: 'song',
+      patternLoopSteps: null,
+      contextCurrentTimeSeconds: 0.125,
+    });
+    scheduler.endTransportStep();
+
+    const delivered = port.getDeliveredWirePackets();
+    assert.equal(delivered.length, 4, 'exact 4 MIDI events delivered on wire (2 Note Ons, 2 Note Offs)');
+    assert.deepEqual(
+      delivered.map(p => ({ bytes: p.bytes, timestamp: p.timestamp })),
+      [
+        { bytes: [0x90, 60, Math.round(0.8 * 127)], timestamp: 1000 },
+        { bytes: [0x80, 60, 0], timestamp: 1062.5 },
+        { bytes: [0x90, 60, Math.round(0.9 * 127)], timestamp: 1062.5 },
+        { bytes: [0x80, 60, 0], timestamp: 1187.5 },
+      ],
+    );
+
+    perfMs = 1200;
+    assert.equal(scheduler.getActiveNoteCount(), 0, 'zero stuck notes after 1187.5 ms release');
+
+    // Case B: Look-ahead pass (perfMs = 980 ms) where First C4 Note On (1000 ms) is ALSO still pending
+    // in the Web MIDI queue when the overlapping 1062.5 ms Note On triggers port.clear().
+    port.sent.length = 0;
+    port.wireQueue.length = 0;
+    port.clearCalls = 0;
+    perfMs = 980;
+
+    scheduler.beginTransportTake(2, 'song');
+    scheduler.beginTransportStep({
+      takeGeneration: 2,
+      absoluteStep: 0,
+      step: 0,
+      stepAudioTimeSeconds: 0.02, // +20 ms look-ahead -> 1000 ms
+      unswungStepAudioTimeSeconds: 0.02,
+      grooveOffsetSeconds: 0,
+      bpm: 120,
+      mode: 'song',
+      patternLoopSteps: null,
+      contextCurrentTimeSeconds: 0,
+    });
+    scheduler.scheduleChannelNote({
+      channel: ch,
+      note: makeNote(60, { id: 'c4-la-1', start: 0, duration: 1, velocity: 0.8 }),
+      onsetAudioTimeSeconds: 0.02,
+      bpm: 120,
+      contextCurrentTimeSeconds: 0,
+    });
+    scheduler.scheduleChannelNote({
+      channel: ch,
+      note: makeNote(60, { id: 'c4-la-2', start: 0.5, duration: 1, velocity: 0.9 }),
+      onsetAudioTimeSeconds: 0.0825, // +82.5 ms -> 1062.5 ms
+      bpm: 120,
+      contextCurrentTimeSeconds: 0,
+    });
+    scheduler.endTransportStep();
+
+    perfMs = 1105;
+    scheduler.beginTransportStep({
+      takeGeneration: 2,
+      absoluteStep: 1,
+      step: 1,
+      stepAudioTimeSeconds: 0.145, // -> 1125 ms
+      unswungStepAudioTimeSeconds: 0.145,
+      grooveOffsetSeconds: 0,
+      bpm: 120,
+      mode: 'song',
+      patternLoopSteps: null,
+      contextCurrentTimeSeconds: 0.125,
+    });
+    scheduler.endTransportStep();
+
+    const lookAheadDelivered = port.getDeliveredWirePackets();
+    assert.deepEqual(
+      lookAheadDelivered.map(p => ({ bytes: p.bytes, timestamp: p.timestamp })),
+      [
+        { bytes: [0x90, 60, Math.round(0.8 * 127)], timestamp: 1000 },
+        { bytes: [0x80, 60, 0], timestamp: 1062.5 },
+        { bytes: [0x90, 60, Math.round(0.9 * 127)], timestamp: 1062.5 },
+        { bytes: [0x80, 60, 0], timestamp: 1187.5 },
+      ],
+    );
+  });
+
+  it('protects shared physical output ports during overlap clear() by preserving sibling channels queued Note Ons, Note Offs, and CCs at exact original timestamps', () => {
+    let perfMs = 950;
+    const sharedPort = new InstrumentedMidiOutputPort('hw-shared', { nowPerfMs: () => perfMs });
+    const otherPort = new InstrumentedMidiOutputPort('hw-other', { nowPerfMs: () => perfMs });
+    const ports = new Map<string, MidiOutputPortLike>([
+      [sharedPort.id, sharedPort],
+      [otherPort.id, otherPort],
+    ]);
+    const scheduler = new MidiOutputScheduler({
+      performanceNowMs: () => perfMs,
+      getOutputs: () => ports,
+    });
+
+    const chLead = makeChannel('ch-lead', {
+      midiOutput: { mode: 'external', outputDeviceId: sharedPort.id, midiChannel: 1 },
+    });
+    const chSibling = makeChannel('ch-sibling', {
+      midiOutput: { mode: 'external', outputDeviceId: sharedPort.id, midiChannel: 2 },
+    });
+    const chOtherPort = makeChannel('ch-other-port', {
+      midiOutput: { mode: 'external', outputDeviceId: otherPort.id, midiChannel: 10 },
+    });
+
+    // 1. At 950 ms, schedule a preview/live-style note on chSibling (MIDI Ch 2) that is ALREADY sounding
+    //    by 980 ms (onPerfMs = 950 <= 980) with a pending future Note Off at 1075 ms (> 980).
+    scheduler.scheduleChannelNote({
+      channel: chSibling,
+      note: makeNote(55, { id: 'sib-sounding', start: 0, duration: 1, velocity: 0.75 }),
+      onsetAudioTimeSeconds: 0,
+      bpm: 120, // 1 step = 125 ms -> Note Off at 1075 ms
+      contextCurrentTimeSeconds: 0,
+    });
+
+    // 2. Advance to 980 ms (20 ms look-ahead before Step 0 at 1000 ms).
+    perfMs = 980;
+    scheduler.beginTransportTake(1, 'song');
+    scheduler.beginTransportStep({
+      takeGeneration: 1,
+      absoluteStep: 0,
+      step: 0,
+      stepAudioTimeSeconds: 0.05, // ctxCurrent = 0.03 -> +20 ms -> 1000 ms
+      unswungStepAudioTimeSeconds: 0.05,
+      grooveOffsetSeconds: 0,
+      bpm: 120,
+      mode: 'song',
+      patternLoopSteps: null,
+      contextCurrentTimeSeconds: 0.03,
+    });
+
+    // Sibling channel schedules a future look-ahead Note On (1010 ms) + Note Off (1135 ms) AND a future CC 74 (1040 ms) on MIDI Ch 2,
+    // while unrelated port schedules a hit on MIDI Ch 10.
+    scheduler.scheduleChannelNote({
+      channel: chSibling,
+      note: makeNote(64, { id: 'sib-future', start: 0.08, duration: 1, velocity: 0.85 }),
+      onsetAudioTimeSeconds: 0.06, // -> 1010 ms, Note Off -> 1135 ms
+      bpm: 120,
+      contextCurrentTimeSeconds: 0.03,
+    });
+    scheduler.sendChannelControlChange(chSibling, 74, 96, 0.09, 0.03); // -> 1040 ms
+    scheduler.scheduleChannelNote({
+      channel: chOtherPort,
+      note: makeNote(36, { id: 'kick-other', start: 0, duration: 1, velocity: 1.0 }),
+      onsetAudioTimeSeconds: 0.05, // -> 1000 ms
+      bpm: 120,
+      contextCurrentTimeSeconds: 0.03,
+    });
+
+    // Target channel (MIDI Ch 1) schedules overlapping C4 notes: 1000 -> 1125 ms, then 1062.5 -> 1187.5 ms.
+    scheduler.scheduleChannelNote({
+      channel: chLead,
+      note: makeNote(60, { id: 'lead-c4-1', start: 0, duration: 1, velocity: 0.8 }),
+      onsetAudioTimeSeconds: 0.05, // -> 1000 ms, Note Off -> 1125 ms
+      bpm: 120,
+      contextCurrentTimeSeconds: 0.03,
+    });
+    scheduler.scheduleChannelNote({
+      channel: chLead,
+      note: makeNote(60, { id: 'lead-c4-2', start: 0.5, duration: 1, velocity: 0.9 }),
+      onsetAudioTimeSeconds: 0.1125, // -> 1062.5 ms, intended Note Off -> 1187.5 ms
+      bpm: 120,
+      contextCurrentTimeSeconds: 0.03,
+    });
+    scheduler.endTransportStep();
+
+    // Advance to Step 1 so chLead's 1187.5 ms Note Off enters the horizon.
+    perfMs = 1105;
+    scheduler.beginTransportStep({
+      takeGeneration: 1,
+      absoluteStep: 1,
+      step: 1,
+      stepAudioTimeSeconds: 0.175, // -> 1125 ms
+      unswungStepAudioTimeSeconds: 0.175,
+      grooveOffsetSeconds: 0,
+      bpm: 120,
+      mode: 'song',
+      patternLoopSteps: null,
+      contextCurrentTimeSeconds: 0.155,
+    });
+    scheduler.endTransportStep();
+
+    assert.equal(sharedPort.clearCalls, 1, 'sharedPort cleared once during overlap cancellation');
+    assert.equal(otherPort.clearCalls, 0, 'unrelated physical port never cleared');
+
+    const deliveredShared = sharedPort.getDeliveredWirePackets();
+    const ch1Packets = deliveredShared.filter(p => (p.bytes[0] & 0x0f) === 0);
+    const ch2Packets = deliveredShared.filter(p => (p.bytes[0] & 0x0f) === 1);
+
+    // MIDI Ch 1 (chLead): exact overlap resolution, stale 1125 ms Note Off absent.
+    assert.deepEqual(
+      ch1Packets.map(p => ({ bytes: p.bytes, timestamp: p.timestamp })),
+      [
+        { bytes: [0x90, 60, Math.round(0.8 * 127)], timestamp: 1000 },
+        { bytes: [0x80, 60, 0], timestamp: 1062.5 },
+        { bytes: [0x90, 60, Math.round(0.9 * 127)], timestamp: 1062.5 },
+        { bytes: [0x80, 60, 0], timestamp: 1187.5 },
+      ],
+    );
+
+    // MIDI Ch 2 (chSibling): zero lost or duplicated Note Ons, Note Offs, or CCs; exact original timestamps preserved.
+    assert.deepEqual(
+      ch2Packets.map(p => ({ bytes: p.bytes, timestamp: p.timestamp })),
+      [
+        { bytes: [0x91, 55, Math.round(0.75 * 127)], timestamp: 950 },
+        { bytes: [0x91, 64, Math.round(0.85 * 127)], timestamp: 1010 },
+        { bytes: [0xb1, 74, 96], timestamp: 1040 },
+        { bytes: [0x81, 55, 0], timestamp: 1075 },
+        { bytes: [0x81, 64, 0], timestamp: 1135 },
+      ],
+    );
+  });
+
+  it('handles ports without MIDIOutput.clear() honestly without falsely claiming a pre-queued Note Off was cancelled', () => {
+    let perfMs = 1000;
+    const noClearPort = new InstrumentedMidiOutputPort('hw-no-clear', {
+      supportsClear: false,
+      nowPerfMs: () => perfMs,
+    });
+    const ports = new Map<string, MidiOutputPortLike>([[noClearPort.id, noClearPort]]);
+    const scheduler = new MidiOutputScheduler({
+      performanceNowMs: () => perfMs,
+      getOutputs: () => ports,
+    });
+    const ch = makeChannel('ch-legacy', {
+      midiOutput: { mode: 'external', outputDeviceId: noClearPort.id, midiChannel: 1 },
+    });
+
+    scheduler.beginTransportTake(1, 'song');
+    scheduler.beginTransportStep({
+      takeGeneration: 1,
+      absoluteStep: 0,
+      step: 0,
+      stepAudioTimeSeconds: 0,
+      unswungStepAudioTimeSeconds: 0,
+      grooveOffsetSeconds: 0,
+      bpm: 120,
+      mode: 'song',
+      patternLoopSteps: null,
+      contextCurrentTimeSeconds: 0,
+    });
+
+    const firstRes = scheduler.scheduleChannelNote({
+      channel: ch,
+      note: makeNote(60, { id: 'nc-1', start: 0, duration: 1, velocity: 0.8 }),
+      onsetAudioTimeSeconds: 0,
+      bpm: 120,
+      contextCurrentTimeSeconds: 0,
+    });
+    assert.deepEqual(firstRes, { sent: true });
+
+    const secondRes = scheduler.scheduleChannelNote({
+      channel: ch,
+      note: makeNote(60, { id: 'nc-2', start: 0.5, duration: 1, velocity: 0.9 }),
+      onsetAudioTimeSeconds: 0.0625,
+      bpm: 120,
+      contextCurrentTimeSeconds: 0,
+    });
+    scheduler.endTransportStep();
+
+    assert.equal(noClearPort.clearCalls, 0, 'never invokes missing clear()');
+    assert.deepEqual(
+      secondRes,
+      {
+        sent: true,
+        uncancelledQueuedNoteOff: true,
+        effectiveReleasePerfMs: 1125,
+      },
+      'honestly reports that the pre-queued 1125 ms Note Off could not be cancelled without MIDIOutput.clear()',
+    );
+
+    perfMs = 1125;
+    scheduler.beginTransportStep({
+      takeGeneration: 1,
+      absoluteStep: 1,
+      step: 1,
+      stepAudioTimeSeconds: 0.125,
+      unswungStepAudioTimeSeconds: 0.125,
+      grooveOffsetSeconds: 0,
+      bpm: 120,
+      mode: 'song',
+      patternLoopSteps: null,
+      contextCurrentTimeSeconds: 0.125,
+    });
+    scheduler.endTransportStep();
+
+    const noteOns = noClearPort.sent.filter(p => (p.bytes[0] & 0xf0) === 0x90);
+    const noteOffs = noClearPort.sent.filter(p => (p.bytes[0] & 0xf0) === 0x80);
+    assert.equal(noteOns.length, 2, '2 Note Ons transmitted');
+    assert.equal(noteOffs.length, 2, 'strict 1:1 Note Off parity — no orphan 3rd Note Off queued at 1187.5 ms');
+    assert.deepEqual(
+      noteOffs.map(p => p.timestamp).sort((a, b) => (a ?? 0) - (b ?? 0)),
+      [1062.5, 1125],
+    );
+
+    perfMs = 1200;
+    assert.equal(scheduler.getActiveNoteCount(), 0, 'zero stuck notes after uncancelled 1125 ms cutoff');
   });
 });

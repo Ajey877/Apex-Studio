@@ -48,6 +48,7 @@ class FakeMidiOutputPort {
   state: 'connected' | 'disconnected';
   connection: 'open' | 'closed' | 'pending';
   readonly sent: SentMidiPacket[] = [];
+  readonly wireQueue: Array<SentMidiPacket & { cancelledAtPerfMs: number | null }> = [];
   clearCalls = 0;
   openCalls = 0;
   failOpen = false;
@@ -85,11 +86,25 @@ class FakeMidiOutputPort {
     if (this.state !== 'connected' || this.connection !== 'open') {
       throw new Error(`Port ${this.id} not open (${this.state}/${this.connection})`);
     }
-    this.sent.push({ bytes: Array.from(data), timestamp });
+    const bytes = Array.from(data);
+    this.sent.push({ bytes, timestamp });
+    this.wireQueue.push({ bytes, timestamp, cancelledAtPerfMs: null });
   }
 
   clear(): void {
     this.clearCalls += 1;
+    const now = performance.now();
+    for (const pkt of this.wireQueue) {
+      if (pkt.cancelledAtPerfMs === null && pkt.timestamp !== undefined && pkt.timestamp > now) {
+        pkt.cancelledAtPerfMs = now;
+      }
+    }
+  }
+
+  getDeliveredWirePackets(): SentMidiPacket[] {
+    return this.wireQueue
+      .filter(pkt => pkt.cancelledAtPerfMs === null)
+      .map(({ bytes, timestamp }) => ({ bytes, timestamp }));
   }
 }
 
@@ -1011,5 +1026,56 @@ describe('AudioEngine External MIDI Output — discovery, usability, playback, m
     } finally {
       audioEngine.removeMidiListener(listener);
     }
+  });
+
+  it('13. cancels pre-queued short Note Offs during fractional same-pitch overlaps in live AudioEngine playback without disturbing sibling channels on the shared port', async () => {
+    const ctx = setupLiveEngine();
+    const sharedPort = new FakeMidiOutputPort('out-shared-poly', { name: 'Prophet Rev2' });
+    await installMidiAccess({
+      inputs: new Map(),
+      outputs: new Map([[sharedPort.id, sharedPort]]),
+      onstatechange: null,
+    });
+
+    const leadCh = makeChannel('ch-lead-overlap', {
+      midiOutput: { outputDeviceId: sharedPort.id, midiChannel: 1, mode: 'external' },
+      notes: [
+        makeNote(60, 0, 1, 0.8),
+        makeNote(60, 0.5, 1, 0.9),
+      ],
+    });
+    const siblingCh = makeChannel('ch-sibling-shared', {
+      midiOutput: { outputDeviceId: sharedPort.id, midiChannel: 3, mode: 'external' },
+      notes: [
+        makeNote(64, 0, 1, 0.75),
+      ],
+    });
+    const tracks = makeMixerTracks();
+
+    try {
+      audioEngine.play([leadCh, siblingCh], [], 'pat', 'pat-1', tracks, 16);
+      advanceClock(ctx, 0.35, 8);
+    } finally {
+      audioEngine.stop();
+      await audioEngine.releaseNativeInstruments();
+    }
+
+    const delivered = sharedPort.getDeliveredWirePackets();
+    const ch1Ons = delivered.filter(p => p.bytes[0] === 0x90 && p.bytes[1] === 60);
+    const ch1Offs = delivered.filter(p => p.bytes[0] === 0x80 && p.bytes[1] === 60);
+    const ch3Ons = delivered.filter(p => p.bytes[0] === 0x92 && p.bytes[1] === 64);
+    const ch3Offs = delivered.filter(p => p.bytes[0] === 0x82 && p.bytes[1] === 64);
+
+    assert.equal(ch1Ons.length, 2, '2 delivered C4 Note Ons on Ch 1');
+    assert.equal(ch1Offs.length, 2, '2 delivered C4 Note Offs on Ch 1 (stale 1-step Note Off cancelled)');
+    const baseMs = ch1Ons[0].timestamp!;
+    assert.ok(Math.abs((ch1Ons[1].timestamp! - baseMs) - 62.5) < 1e-3, 'second C4 Note On at +62.5 ms');
+    assert.ok(Math.abs((ch1Offs[0].timestamp! - baseMs) - 62.5) < 1e-3, 'retrigger Note Off at +62.5 ms');
+    assert.ok(Math.abs((ch1Offs[1].timestamp! - baseMs) - 187.5) < 1e-3, 'final C4 Note Off at +187.5 ms (not prematurely terminated at +125 ms)');
+
+    assert.equal(ch3Ons.length, 1, 'sibling Ch 3 Note On preserved without duplication');
+    assert.equal(ch3Offs.length, 1, 'sibling Ch 3 Note Off preserved without loss');
+    assert.ok(Math.abs(ch3Ons[0].timestamp! - baseMs) < 1e-3, 'sibling Ch 3 Note On kept exact step-0 timestamp');
+    assert.ok(Math.abs((ch3Offs[0].timestamp! - baseMs) - 125) < 1e-3, 'sibling Ch 3 Note Off kept exact +125 ms timestamp');
   });
 });
