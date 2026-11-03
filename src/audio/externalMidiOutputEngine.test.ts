@@ -1236,4 +1236,108 @@ describe('AudioEngine External MIDI Output — discovery, usability, playback, m
     assert.ok(Math.abs((ch2Notes[0].timestamp! - step0OriginMs) - 62.5) < 1e-3);
     assert.ok(Math.abs((ch2Notes[1].timestamp! - step0OriginMs) - 312.5) < 1e-3);
   });
+
+  it('16. closes an unavoidable future Note On promptly in live AudioEngine playback when a short contributor is muted before its onset on a clear-less shared port', async () => {
+    const ctx = setupLiveEngine();
+    const clearlessPort = new FakeMidiOutputPort('out-clearless-future-cleanup', {
+      name: 'Oberheim OB-X8 (No clear)',
+    });
+    (clearlessPort as { clear?: () => void }).clear = undefined;
+
+    await installMidiAccess({
+      inputs: new Map(),
+      outputs: new Map([[clearlessPort.id, clearlessPort]]),
+      onstatechange: null,
+    });
+
+    const chA = makeChannel('ch-eng-noclear-a', {
+      midiOutput: { outputDeviceId: clearlessPort.id, midiChannel: 1, mode: 'external' },
+      notes: [
+        makeNote(60, 0, 4, 100 / 127), // step 0 -> +500 ms (4 steps)
+      ],
+    });
+    const chB = makeChannel('ch-eng-noclear-b', {
+      midiOutput: { outputDeviceId: clearlessPort.id, midiChannel: 1, mode: 'external' },
+      notes: [
+        makeNote(60, 0.5, 0.5, 112 / 127), // +62.5 ms -> +125 ms (0.5 step; unqueued tail while A extends to +500 ms)
+      ],
+    });
+    const siblingSameChE4 = makeChannel('ch-eng-noclear-e4', {
+      midiOutput: { outputDeviceId: clearlessPort.id, midiChannel: 1, mode: 'external' },
+      notes: [
+        makeNote(64, 0.4, 2, 94 / 127), // +50 ms -> +300 ms on MIDI Ch 1
+      ],
+    });
+    const siblingCh2G4 = makeChannel('ch-eng-noclear-g4', {
+      midiOutput: { outputDeviceId: clearlessPort.id, midiChannel: 2, mode: 'external' },
+      notes: [
+        makeNote(67, 0.6, 2, 90 / 127), // +75 ms -> +325 ms on MIDI Ch 2
+      ],
+    });
+    const tracks = makeMixerTracks();
+
+    let preStopPackets: Array<{ bytes: number[]; timestamp?: number }> = [];
+    try {
+      audioEngine.play([chA, chB, siblingSameChE4, siblingCh2G4], [], 'pat', 'pat-1', tracks, 16);
+      // Step 0 triggers at +30 ms look-ahead; advance 60 ms (so now is step0 + 30 ms, strictly before chB's +62.5 ms Note On!)
+      advanceClock(ctx, 0.06, 6);
+
+      audioEngine.synchronizePlaybackState({
+        channels: [chA, { ...chB, mute: true }, siblingSameChE4, siblingCh2G4],
+      });
+
+      assert.equal(engine.midiOutputScheduler.getActiveNoteCount(chB.id), 0);
+      assert.equal(
+        clearlessPort.sent.some(p => p.bytes[0] === 0xb0 && p.bytes[1] === 123),
+        false,
+        'no CC 123 emitted on MIDI Ch 1 while chA and siblingSameChE4 own active notes',
+      );
+
+      // Advance past +600 ms so all 4 steps complete cleanly before 16-step pattern wrap at 2000 ms
+      advanceClock(ctx, 0.6, 12);
+      assert.equal(
+        engine.midiOutputScheduler.getActiveNoteCount(),
+        0,
+        'zero active-note records remain after completion',
+      );
+      preStopPackets = clearlessPort.getDeliveredWirePackets().map(p => ({
+        bytes: [...p.bytes],
+        timestamp: p.timestamp,
+      }));
+    } finally {
+      audioEngine.stop();
+      await audioEngine.releaseNativeInstruments();
+    }
+
+    const ch1C4 = preStopPackets.filter(
+      p => (p.bytes[0] === 0x90 || p.bytes[0] === 0x80) && p.bytes[1] === 60,
+    );
+    const ch1E4 = preStopPackets.filter(
+      p => (p.bytes[0] === 0x90 || p.bytes[0] === 0x80) && p.bytes[1] === 64,
+    );
+    const ch2G4 = preStopPackets.filter(
+      p => (p.bytes[0] === 0x91 || p.bytes[0] === 0x81) && p.bytes[1] === 67,
+    );
+
+    assert.equal(ch1C4.length, 4, 'exact 4 C4 events on MIDI Ch 1 (2 Note Ons, 2 Note Offs)');
+    const step0OriginMs = ch1C4[0].timestamp!;
+    assert.deepEqual(ch1C4[0].bytes, [0x90, 60, 100]);
+    assert.deepEqual(ch1C4[1].bytes, [0x80, 60, 0]);
+    assert.deepEqual(ch1C4[2].bytes, [0x90, 60, 112]);
+    assert.deepEqual(ch1C4[3].bytes, [0x80, 60, 0]);
+    assert.ok(Math.abs((ch1C4[1].timestamp! - step0OriginMs) - 62.5) < 1e-3);
+    assert.ok(Math.abs((ch1C4[2].timestamp! - step0OriginMs) - 62.5) < 1e-3);
+    assert.ok(
+      Math.abs((ch1C4[3].timestamp! - step0OriginMs) - 63.5) < 1e-3,
+      `expected deterministic safety Note Off at +63.5 ms (+1 ms after unavoidable +62.5 ms Note On), got +${ch1C4[3].timestamp! - step0OriginMs} ms`,
+    );
+
+    assert.equal(ch1E4.length, 2, 'sibling E4 on same MIDI Ch 1 preserved 1:1');
+    assert.ok(Math.abs((ch1E4[0].timestamp! - step0OriginMs) - 50) < 1e-3);
+    assert.ok(Math.abs((ch1E4[1].timestamp! - step0OriginMs) - 300) < 1e-3);
+
+    assert.equal(ch2G4.length, 2, 'sibling G4 on MIDI Ch 2 preserved 1:1');
+    assert.ok(Math.abs((ch2G4[0].timestamp! - step0OriginMs) - 75) < 1e-3);
+    assert.ok(Math.abs((ch2G4[1].timestamp! - step0OriginMs) - 325) < 1e-3);
+  });
 });

@@ -989,6 +989,7 @@ export class MidiOutputScheduler {
     nowPerfMs: number,
     stepContext: TransportStepMidiContext | null,
     incomingId: number | null,
+    commitToActiveNotes = true,
   ): Array<{ perfMs: number; order: number; bytes: number[] }> {
     if (contributors.length === 0) return [];
     const { midiChannel, pitch } = contributors[0];
@@ -1074,10 +1075,12 @@ export class MidiOutputScheduler {
           s.segmentClosedOnWire = true;
           s.queuedOffPerfMs = null;
           s.releaseAbsoluteStep = null;
-          if (s.intendedOffPerfMs !== null && s.intendedOffPerfMs <= nowPerfMs) {
-            this.activeNotes.delete(s.id);
-          } else {
-            this.activeNotes.set(s.id, s);
+          if (commitToActiveNotes) {
+            if (s.intendedOffPerfMs !== null && s.intendedOffPerfMs <= nowPerfMs) {
+              this.activeNotes.delete(s.id);
+            } else {
+              this.activeNotes.set(s.id, s);
+            }
           }
         }
       }
@@ -1102,8 +1105,10 @@ export class MidiOutputScheduler {
             });
           }
         }
-        for (const c of allInCluster) {
-          this.activeNotes.delete(c.id);
+        if (commitToActiveNotes) {
+          for (const c of allInCluster) {
+            this.activeNotes.delete(c.id);
+          }
         }
         continue;
       }
@@ -1138,10 +1143,12 @@ export class MidiOutputScheduler {
           rep.segmentClosedOnWire = true;
           rep.queuedOffPerfMs = null;
           rep.releaseAbsoluteStep = null;
-          if (rep.intendedOffPerfMs !== null && rep.intendedOffPerfMs <= nowPerfMs) {
-            this.activeNotes.delete(rep.id);
-          } else {
-            this.activeNotes.set(rep.id, rep);
+          if (commitToActiveNotes) {
+            if (rep.intendedOffPerfMs !== null && rep.intendedOffPerfMs <= nowPerfMs) {
+              this.activeNotes.delete(rep.id);
+            } else {
+              this.activeNotes.set(rep.id, rep);
+            }
           }
         } else {
           rep.emitNoteOn = true;
@@ -1161,7 +1168,9 @@ export class MidiOutputScheduler {
               ? envelope.offPerfMs
               : null;
           }
-          this.activeNotes.set(rep.id, rep);
+          if (commitToActiveNotes) {
+            this.activeNotes.set(rep.id, rep);
+          }
         }
       }
     }
@@ -1684,37 +1693,93 @@ export class MidiOutputScheduler {
       const port = this.resolveOutputPort(outputDeviceId);
       const portConnected =
         port !== null && (port.state ?? 'connected') === 'connected' && typeof port.send === 'function';
+      const shouldKeepSoundingAtNow = surviving.some(s => s.onPerfMs <= nowPerfMs);
 
       if (surviving.length === 0) {
-        if (portConnected && port) {
-          let sentImmediate = false;
-          for (const rem of removed) {
-            if (!rem.emitNoteOn || rem.segmentClosedOnWire) continue;
-            if (rem.onPerfMs <= nowPerfMs) {
-              if (!sentImmediate) {
-                sentImmediate = true;
-                this.trySend(port, [0x80 | (midiChannel - 1), voicePitch, 0]);
-              }
-            } else if (rem.queuedOffPerfMs === null) {
-              this.trySend(
-                port,
-                [0x80 | (midiChannel - 1), voicePitch, 0],
-                rem.onPerfMs + MIN_MIDI_NOTE_OFF_DELTA_MS,
-              );
+        const hadFutureRemoved = removed.some(
+          r =>
+            (r.emitNoteOn && !r.segmentClosedOnWire && r.onPerfMs > nowPerfMs) ||
+            (r.queuedOffPerfMs !== null && r.queuedOffPerfMs > nowPerfMs),
+        );
+        const siblingHasFutureOnPort =
+          [...this.activeNotes.values()].some(
+            other =>
+              other.outputDeviceId === outputDeviceId &&
+              ((other.emitNoteOn && !other.segmentClosedOnWire && other.onPerfMs > nowPerfMs) ||
+                (other.queuedOffPerfMs !== null && other.queuedOffPerfMs > nowPerfMs)),
+          ) ||
+          this.pendingControlChanges.some(
+            c => c.outputDeviceId === outputDeviceId && c.perfMs > nowPerfMs,
+          );
+
+        let cleared = false;
+        if (hadFutureRemoved && port && typeof port.clear === 'function') {
+          try {
+            port.clear();
+            cleared = true;
+            if (siblingHasFutureOnPort && portConnected) {
+              this.requeueActivePortEvents(port, outputDeviceId, nowPerfMs);
             }
+          } catch {
+            cleared = false;
+          }
+        }
+
+        if (portConnected && port) {
+          if (cleared) {
+            if (wasSoundingAtNow) {
+              this.trySend(port, [0x80 | (midiChannel - 1), voicePitch, 0]);
+            }
+          } else {
+            this.applyClearlessVoiceCleanup(
+              port,
+              {
+                midiChannel,
+                pitch: voicePitch,
+                removedNotes: removed,
+                survivingNotes: [],
+                wasSoundingAtNow,
+                shouldKeepSoundingAtNow: false,
+              },
+              nowPerfMs,
+            );
           }
         }
         continue;
       }
 
-      const shouldKeepSoundingAtNow = surviving.some(s => s.onPerfMs <= nowPerfMs);
       const prevQueuedOffById = new Map(surviving.map(s => [s.id, s.queuedOffPerfMs]));
+      const prevEmitNoteOnById = new Map(
+        surviving.map(s => [s.id, s.emitNoteOn && !s.segmentClosedOnWire]),
+      );
+      const previewSurvivors = surviving.map(s => ({ ...s }));
+      this.reconcileVoiceContributors(
+        previewSurvivors,
+        nowPerfMs,
+        this.currentTransportStep,
+        null,
+        false,
+      );
       const needsClear =
         removed.some(
           r =>
             (r.emitNoteOn && !r.segmentClosedOnWire && r.onPerfMs > nowPerfMs) ||
             (r.queuedOffPerfMs !== null && r.queuedOffPerfMs > nowPerfMs),
-        ) || surviving.some(s => s.queuedOffPerfMs !== null && s.queuedOffPerfMs > nowPerfMs);
+        ) ||
+        previewSurvivors.some(p => {
+          const prevOff = prevQueuedOffById.get(p.id) ?? null;
+          const prevEmit = prevEmitNoteOnById.get(p.id) ?? false;
+          const nextEmit = p.emitNoteOn && !p.segmentClosedOnWire;
+          if (p.onPerfMs > nowPerfMs && prevEmit !== nextEmit) {
+            return true;
+          }
+          if (prevOff !== null && prevOff > nowPerfMs) {
+            if (p.queuedOffPerfMs === null || Math.abs(p.queuedOffPerfMs - prevOff) > 1e-6) {
+              return true;
+            }
+          }
+          return false;
+        });
 
       let cleared = false;
       if (needsClear && port && typeof port.clear === 'function') {
@@ -1726,29 +1791,215 @@ export class MidiOutputScheduler {
         }
       }
 
-      this.reconcileVoiceContributors(surviving, nowPerfMs, this.currentTransportStep, null);
-
-      if (portConnected && port) {
-        if (wasSoundingAtNow && !shouldKeepSoundingAtNow) {
-          this.trySend(port, [0x80 | (midiChannel - 1), voicePitch, 0]);
-        }
-        if (cleared) {
-          this.requeueActivePortEvents(port, outputDeviceId, nowPerfMs);
-        } else if (!needsClear) {
-          for (const s of surviving) {
-            if (
-              prevQueuedOffById.get(s.id) === null &&
-              s.queuedOffPerfMs !== null &&
-              s.queuedOffPerfMs > nowPerfMs
-            ) {
-              this.trySend(port, [0x80 | (midiChannel - 1), voicePitch, 0], s.queuedOffPerfMs);
+      if (cleared || !needsClear) {
+        this.reconcileVoiceContributors(surviving, nowPerfMs, this.currentTransportStep, null);
+        if (portConnected && port) {
+          if (wasSoundingAtNow && !shouldKeepSoundingAtNow) {
+            this.trySend(port, [0x80 | (midiChannel - 1), voicePitch, 0]);
+          }
+          if (cleared) {
+            this.requeueActivePortEvents(port, outputDeviceId, nowPerfMs);
+          } else {
+            for (const s of surviving) {
+              if (
+                prevQueuedOffById.get(s.id) === null &&
+                s.queuedOffPerfMs !== null &&
+                s.queuedOffPerfMs > nowPerfMs &&
+                s.uncancelledHardwareOffPerfMs === null
+              ) {
+                this.trySend(port, [0x80 | (midiChannel - 1), voicePitch, 0], s.queuedOffPerfMs);
+              }
             }
           }
         }
+      } else if (portConnected && port) {
+        this.applyClearlessVoiceCleanup(
+          port,
+          {
+            midiChannel,
+            pitch: voicePitch,
+            removedNotes: removed,
+            survivingNotes: surviving,
+            wasSoundingAtNow,
+            shouldKeepSoundingAtNow,
+          },
+          nowPerfMs,
+        );
       }
     }
 
     return stopped;
+  }
+
+  /**
+   * Honest voice cleanup when a physical `MIDIOutput` lacks `clear()` or its
+   * `clear()` threw at runtime:
+   * - Never claims already-queued future Note Ons or Note Offs were cancelled.
+   * - For every removed future Note On (`onPerfMs > nowPerfMs`) lacking a valid
+   *   already-queued Note Off strictly after its onset, enqueues a deterministic
+   *   safety Note Off at `onPerfMs + MIN_MIDI_NOTE_OFF_DELTA_MS`.
+   * - Avoids duplicate Note Offs when a valid queued release already exists.
+   * - Keeps surviving contributor ownership consistent with actual hardware state.
+   */
+  private applyClearlessVoiceCleanup(
+    port: MidiOutputPortLike,
+    snap: {
+      midiChannel: number;
+      pitch: number;
+      removedNotes: ActiveMidiOutputNote[];
+      survivingNotes: ActiveMidiOutputNote[];
+      wasSoundingAtNow: boolean;
+      shouldKeepSoundingAtNow: boolean;
+    },
+    nowPerfMs: number,
+  ): void {
+    const removedIds = new Set(snap.removedNotes.map(r => r.id));
+
+    // If a removed future attack had unison-shadowed a surviving contributor at the
+    // exact same `onPerfMs`, transfer that unavoidable physical Note On to the survivor.
+    const promotedShadowIds = new Set<number>();
+    for (const rem of snap.removedNotes) {
+      if (!rem.emitNoteOn || rem.segmentClosedOnWire) continue;
+      const unisonSurvivor = snap.survivingNotes.find(
+        s =>
+          !s.emitNoteOn &&
+          !promotedShadowIds.has(s.id) &&
+          Math.abs(s.onPerfMs - rem.onPerfMs) <= 1e-6,
+      );
+      if (unisonSurvivor) {
+        promotedShadowIds.add(unisonSurvivor.id);
+        unisonSurvivor.emitNoteOn = true;
+        unisonSurvivor.segmentClosedOnWire = false;
+        unisonSurvivor.queuedOffPerfMs = rem.queuedOffPerfMs;
+        unisonSurvivor.releaseAbsoluteStep = rem.releaseAbsoluteStep;
+        unisonSurvivor.tailGrooveOffsetSeconds = rem.tailGrooveOffsetSeconds;
+        rem.emitNoteOn = false;
+        rem.segmentClosedOnWire = true;
+        rem.queuedOffPerfMs = null;
+      }
+    }
+
+    const allVoiceNotes = [...snap.removedNotes, ...snap.survivingNotes];
+    const wireAttacks = allVoiceNotes
+      .filter(n => n.emitNoteOn && !n.segmentClosedOnWire)
+      .sort((a, b) => a.onPerfMs - b.onPerfMs || a.id - b.id);
+
+    for (let k = 0; k < wireAttacks.length; k += 1) {
+      const atk = wireAttacks[k];
+      if (!removedIds.has(atk.id)) continue;
+
+      if (atk.onPerfMs <= nowPerfMs) {
+        const hasQueuedFutureOff =
+          atk.queuedOffPerfMs !== null && atk.queuedOffPerfMs > nowPerfMs;
+        if (snap.shouldKeepSoundingAtNow) {
+          const covering = snap.survivingNotes
+            .filter(s => s.onPerfMs <= nowPerfMs)
+            .sort((a, b) => b.onPerfMs - a.onPerfMs || b.id - a.id);
+          const carrier = covering[0] ?? null;
+          if (carrier) {
+            carrier.emitNoteOn = true;
+            carrier.segmentClosedOnWire = false;
+            if (hasQueuedFutureOff) {
+              carrier.queuedOffPerfMs = atk.queuedOffPerfMs;
+              carrier.uncancelledHardwareOffPerfMs = atk.queuedOffPerfMs;
+              carrier.releaseAbsoluteStep = null;
+            }
+          }
+        } else if (!hasQueuedFutureOff || snap.survivingNotes.length === 0) {
+          this.trySend(port, [0x80 | (snap.midiChannel - 1), snap.pitch, 0]);
+        }
+        continue;
+      }
+
+      const hasValidQueuedOff =
+        atk.queuedOffPerfMs !== null && atk.queuedOffPerfMs > atk.onPerfMs + 1e-6;
+      if (!hasValidQueuedOff) {
+        const nextAtk = k + 1 < wireAttacks.length ? wireAttacks[k + 1] : null;
+        const defaultSafetyOffMs = atk.onPerfMs + MIN_MIDI_NOTE_OFF_DELTA_MS;
+        const safetyOffMs =
+          nextAtk !== null && nextAtk.onPerfMs < defaultSafetyOffMs
+            ? (atk.onPerfMs + nextAtk.onPerfMs) * 0.5
+            : defaultSafetyOffMs;
+        this.trySend(
+          port,
+          [0x80 | (snap.midiChannel - 1), snap.pitch, 0],
+          safetyOffMs,
+        );
+      }
+    }
+
+    if (snap.survivingNotes.length === 0) {
+      return;
+    }
+
+    const survivingWireAttacks = snap.survivingNotes
+      .filter(s => s.emitNoteOn && !s.segmentClosedOnWire)
+      .sort((a, b) => a.onPerfMs - b.onPerfMs || a.id - b.id);
+
+    for (let j = 0; j < survivingWireAttacks.length; j += 1) {
+      const sAtk = survivingWireAttacks[j];
+      const nextSurvivingAtk =
+        j + 1 < survivingWireAttacks.length ? survivingWireAttacks[j + 1] : null;
+
+      if (sAtk.queuedOffPerfMs !== null && sAtk.queuedOffPerfMs > nowPerfMs) {
+        const reopenedByLaterSurvivor =
+          nextSurvivingAtk !== null &&
+          (sAtk.intendedOffPerfMs === null ||
+            sAtk.intendedOffPerfMs > nextSurvivingAtk.onPerfMs + 1e-6);
+        if (!reopenedByLaterSurvivor) {
+          sAtk.uncancelledHardwareOffPerfMs = sAtk.queuedOffPerfMs;
+          sAtk.releaseAbsoluteStep = null;
+        } else {
+          sAtk.releaseAbsoluteStep = null;
+        }
+        this.activeNotes.set(sAtk.id, sAtk);
+        continue;
+      }
+
+      if (sAtk.queuedOffPerfMs === null) {
+        const coveringSurvivors = snap.survivingNotes.filter(
+          c =>
+            c.uncancelledHardwareOffPerfMs === null &&
+            c.onPerfMs <= sAtk.onPerfMs + 1e-6 &&
+            (c.intendedOffPerfMs === null || c.intendedOffPerfMs > sAtk.onPerfMs + 1e-6),
+        );
+        const contributorsForTail =
+          coveringSurvivors.length > 0 ? coveringSurvivors : [sAtk];
+        const envelope = this.resolveClusterEnvelope(contributorsForTail);
+        sAtk.releaseAbsoluteStep = envelope.releaseStep;
+        sAtk.tailGrooveOffsetSeconds = envelope.tailGrooveOffsetSeconds;
+        if (
+          this.shouldQueueClusterTailOffNow(
+            sAtk,
+            envelope.releaseStep,
+            envelope.offPerfMs,
+            this.currentTransportStep,
+          )
+        ) {
+          sAtk.queuedOffPerfMs = envelope.offPerfMs;
+          if (sAtk.queuedOffPerfMs !== null && sAtk.queuedOffPerfMs > nowPerfMs) {
+            this.trySend(
+              port,
+              [0x80 | (snap.midiChannel - 1), snap.pitch, 0],
+              sAtk.queuedOffPerfMs,
+            );
+          }
+        }
+        this.activeNotes.set(sAtk.id, sAtk);
+      }
+    }
+
+    for (const s of snap.survivingNotes) {
+      if (!s.segmentClosedOnWire) continue;
+      const stillCarriedByOpenSurvivor = survivingWireAttacks.some(
+        sAtk =>
+          sAtk.uncancelledHardwareOffPerfMs === null &&
+          (s.intendedOffPerfMs === null || s.intendedOffPerfMs > sAtk.onPerfMs + 1e-6),
+      );
+      if (!stillCarriedByOpenSurvivor) {
+        this.activeNotes.delete(s.id);
+      }
+    }
   }
 
   /**
@@ -1785,6 +2036,7 @@ export class MidiOutputScheduler {
       pitch: number;
       removedNotes: ActiveMidiOutputNote[];
       survivingNotes: ActiveMidiOutputNote[];
+      previewSurvivors: ActiveMidiOutputNote[];
       wasSoundingAtNow: boolean;
       shouldKeepSoundingAtNow: boolean;
       existingFutureOffs: number[];
@@ -1847,31 +2099,30 @@ export class MidiOutputScheduler {
         prevEmitNoteOnById.set(s.id, s.emitNoteOn && !s.segmentClosedOnWire);
       }
 
+      const previewSurvivors = survivingNotes.map(s => ({ ...s }));
+      if (previewSurvivors.length > 0) {
+        this.reconcileVoiceContributors(
+          previewSurvivors,
+          nowPerfMs,
+          this.currentTransportStep,
+          null,
+          false,
+        );
+      }
+
       voiceMap.set(voiceKey, {
         outputDeviceId: note.outputDeviceId,
         midiChannel: note.midiChannel,
         pitch: note.pitch,
         removedNotes,
         survivingNotes,
+        previewSurvivors,
         wasSoundingAtNow,
         shouldKeepSoundingAtNow,
         existingFutureOffs,
         prevQueuedOffById,
         prevEmitNoteOnById,
       });
-    }
-
-    // Reconcile surviving contributor envelopes across all affected voices first
-    // so we know the exact surviving wire schedule before clearing/restoring ports.
-    for (const snap of voiceMap.values()) {
-      if (snap.survivingNotes.length > 0) {
-        this.reconcileVoiceContributors(
-          snap.survivingNotes,
-          nowPerfMs,
-          this.currentTransportStep,
-          null,
-        );
-      }
     }
 
     const portsRequiringClear = new Set<string>();
@@ -1895,15 +2146,15 @@ export class MidiOutputScheduler {
         if (snap.survivingNotes.length === 0 && snap.existingFutureOffs.length > 0) {
           return true;
         }
-        return snap.survivingNotes.some(s => {
-          const prevOff = snap.prevQueuedOffById.get(s.id) ?? null;
-          const prevEmit = snap.prevEmitNoteOnById.get(s.id) ?? false;
-          const nextEmit = s.emitNoteOn && !s.segmentClosedOnWire;
-          if (s.onPerfMs > nowPerfMs && prevEmit !== nextEmit) {
+        return snap.previewSurvivors.some(p => {
+          const prevOff = snap.prevQueuedOffById.get(p.id) ?? null;
+          const prevEmit = snap.prevEmitNoteOnById.get(p.id) ?? false;
+          const nextEmit = p.emitNoteOn && !p.segmentClosedOnWire;
+          if (p.onPerfMs > nowPerfMs && prevEmit !== nextEmit) {
             return true;
           }
           if (prevOff !== null && prevOff > nowPerfMs) {
-            if (s.queuedOffPerfMs === null || Math.abs(s.queuedOffPerfMs - prevOff) > 1e-6) {
+            if (p.queuedOffPerfMs === null || Math.abs(p.queuedOffPerfMs - prevOff) > 1e-6) {
               return true;
             }
           }
@@ -1941,12 +2192,24 @@ export class MidiOutputScheduler {
     }
 
     for (const snap of voiceMap.values()) {
+      const wasCleared = clearedPorts.has(snap.outputDeviceId);
+      const requiredClear = portsRequiringClear.has(snap.outputDeviceId);
+
+      if (wasCleared || !requiredClear) {
+        if (snap.survivingNotes.length > 0) {
+          this.reconcileVoiceContributors(
+            snap.survivingNotes,
+            nowPerfMs,
+            this.currentTransportStep,
+            null,
+          );
+        }
+      }
+
       const port = this.resolveOutputPort(snap.outputDeviceId);
       if (!port || (port.state ?? 'connected') !== 'connected' || typeof port.send !== 'function') {
         continue;
       }
-      const wasCleared = clearedPorts.has(snap.outputDeviceId);
-      const requiredClear = portsRequiringClear.has(snap.outputDeviceId);
 
       if (wasCleared) {
         if (snap.wasSoundingAtNow && !snap.shouldKeepSoundingAtNow) {
@@ -1977,54 +2240,7 @@ export class MidiOutputScheduler {
         continue;
       }
 
-      // Honest fallback when the port lacks `MIDIOutput.clear()` (or `clear()` threw):
-      // already-queued future events in the hardware buffer cannot be cancelled.
-      if (snap.survivingNotes.length === 0) {
-        if (snap.wasSoundingAtNow) {
-          this.trySend(port, [0x80 | (snap.midiChannel - 1), snap.pitch, 0]);
-        }
-        for (const rem of snap.removedNotes) {
-          if (!rem.emitNoteOn || rem.segmentClosedOnWire || rem.onPerfMs <= nowPerfMs) continue;
-          if (rem.queuedOffPerfMs === null) {
-            this.trySend(
-              port,
-              [0x80 | (snap.midiChannel - 1), snap.pitch, 0],
-              rem.onPerfMs + MIN_MIDI_NOTE_OFF_DELTA_MS,
-            );
-          }
-        }
-      } else {
-        const sortedSurvivors = [...snap.survivingNotes].sort((a, b) => a.onPerfMs - b.onPerfMs);
-        const firstSurvivingOn = sortedSurvivors[0].onPerfMs;
-        if (snap.wasSoundingAtNow && !snap.shouldKeepSoundingAtNow) {
-          const hasQueuedOffBeforeSurvivor = snap.existingFutureOffs.some(
-            offMs => offMs <= firstSurvivingOn + 1e-6,
-          );
-          if (!hasQueuedOffBeforeSurvivor) {
-            this.trySend(port, [0x80 | (snap.midiChannel - 1), snap.pitch, 0]);
-          }
-        }
-
-        const tailSurvivor = sortedSurvivors[sortedSurvivors.length - 1];
-        const uncancelledTailOff = snap.existingFutureOffs.find(
-          offMs => offMs > tailSurvivor.onPerfMs + 1e-6,
-        );
-        if (uncancelledTailOff !== undefined) {
-          tailSurvivor.uncancelledHardwareOffPerfMs = uncancelledTailOff;
-          tailSurvivor.queuedOffPerfMs = uncancelledTailOff;
-          tailSurvivor.releaseAbsoluteStep = null;
-        } else if (
-          (snap.prevQueuedOffById.get(tailSurvivor.id) ?? null) === null &&
-          tailSurvivor.queuedOffPerfMs !== null &&
-          tailSurvivor.queuedOffPerfMs > nowPerfMs
-        ) {
-          this.trySend(
-            port,
-            [0x80 | (snap.midiChannel - 1), snap.pitch, 0],
-            tailSurvivor.queuedOffPerfMs,
-          );
-        }
-      }
+      this.applyClearlessVoiceCleanup(port, snap, nowPerfMs);
     }
 
     for (const outputDeviceId of clearedPorts) {
@@ -2291,8 +2507,11 @@ export class MidiOutputScheduler {
     }
 
     const sentImmediatePitches = new Set<string>();
-    for (const note of notesToClean) {
-      if (!note.emitNoteOn || note.segmentClosedOnWire) continue;
+    const wireNotesToClean = notesToClean
+      .filter(n => n.emitNoteOn && !n.segmentClosedOnWire)
+      .sort((a, b) => a.onPerfMs - b.onPerfMs || a.id - b.id);
+    for (let k = 0; k < wireNotesToClean.length; k += 1) {
+      const note = wireNotesToClean[k];
       const port = this.resolveOutputPort(note.outputDeviceId);
       if (!port || (port.state ?? 'connected') !== 'connected' || typeof port.send !== 'function') {
         continue;
@@ -2307,12 +2526,21 @@ export class MidiOutputScheduler {
           sentImmediatePitches.add(pitchKey);
           this.trySend(port, [0x80 | (note.midiChannel - 1), note.pitch, 0]);
         }
-      } else if (note.queuedOffPerfMs === null) {
-        this.trySend(
-          port,
-          [0x80 | (note.midiChannel - 1), note.pitch, 0],
-          note.onPerfMs + MIN_MIDI_NOTE_OFF_DELTA_MS,
-        );
+      } else if (note.queuedOffPerfMs === null || note.queuedOffPerfMs <= note.onPerfMs + 1e-6) {
+        const nextSameVoice = wireNotesToClean
+          .slice(k + 1)
+          .find(
+            other =>
+              other.outputDeviceId === note.outputDeviceId &&
+              other.midiChannel === note.midiChannel &&
+              other.pitch === note.pitch,
+          );
+        const defaultSafetyOffMs = note.onPerfMs + MIN_MIDI_NOTE_OFF_DELTA_MS;
+        const safetyOffMs =
+          nextSameVoice !== undefined && nextSameVoice.onPerfMs < defaultSafetyOffMs
+            ? (note.onPerfMs + nextSameVoice.onPerfMs) * 0.5
+            : defaultSafetyOffMs;
+        this.trySend(port, [0x80 | (note.midiChannel - 1), note.pitch, 0], safetyOffMs);
       }
     }
 
@@ -2413,6 +2641,7 @@ export class MidiOutputScheduler {
           other.outputDeviceId === note.outputDeviceId &&
           other.midiChannel === note.midiChannel &&
           other.pitch === note.pitch &&
+          other.uncancelledHardwareOffPerfMs === null &&
           other.onPerfMs <= nowPerfMs &&
           (other.intendedOffPerfMs === null || other.intendedOffPerfMs > nowPerfMs)
         ) {
