@@ -9,6 +9,7 @@ import {
 import { isRackChannelAudible } from '../audio/midiMappingRuntime';
 import { swingOffsetTicksForStep } from '../audio/parameterScaling';
 import { derivePlaylistLaneMutes, isClipLaneMuted } from '../audio/playlistLaneMutes';
+import { clampMidiChannelNumber } from '../audio/midiOutputScheduler';
 import { fullPatternEventsInWindow } from '../audio/fullPatternSchedule';
 import { isFullPatternPlaylistClip, resolvePlaylistClipChannels, resolveClipChannelContent, withPatternChannelContent } from '../state/patternContent';
 
@@ -255,7 +256,10 @@ function buildMidiTrack(
    */
   audible: boolean = true,
 ): number[] {
-  const midiChannel = channelIndex % 16;
+  const midiChannel =
+    channel.midiOutput && channel.midiOutput.mode !== 'off'
+      ? clampMidiChannelNumber(channel.midiOutput.midiChannel) - 1
+      : channelIndex % 16;
   const events: MidiEvent[] = [];
   const safeBpm = Number.isFinite(meta.bpm) && meta.bpm > 0 ? meta.bpm : 120;
   // Phase 1F: the note grid follows the resolved project meter (legacy 4/4 for

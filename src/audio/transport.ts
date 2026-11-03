@@ -13,7 +13,7 @@ export interface TransportState {
 }
 
 export interface TransportCallbacks {
-  onStep?: (step: number, bar: number, audioTime: number) => void;
+  onStep?: (step: number, bar: number, audioTime: number, absoluteStep?: number) => void;
   onStateChange?: (state: Readonly<TransportState>) => void;
   /** Fired once when Song Mode reaches the end of the arrangement. */
   onSongEnd?: () => void;
@@ -258,6 +258,7 @@ export class AudioClockTransport {
         absoluteStep % this.stepLoopLength,
         Math.floor(absoluteStep / this.stepsPerBar) + 1,
         this.nextEventTime,
+        absoluteStep,
       );
       this.nextEventTime += this.stepDurationSeconds;
       this.nextAbsoluteStep += 1;

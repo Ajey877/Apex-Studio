@@ -585,6 +585,7 @@ export function App() {
       if (document.visibilityState === 'hidden') flushLifecycleSave();
     };
     const handleBeforeUnload = (e: BeforeUnloadEvent) => {
+      audioEngine.shutdownMidiOutputs();
       flushLifecycleSave();
       if (hasUnsavedChangesRef.current) {
         e.preventDefault();
@@ -887,6 +888,7 @@ export function App() {
         next.mixerTracks.forEach(track => audioEngine.updateMixerTrack(track));
       }
       if (previous.channels !== next.channels) {
+        audioEngine.reconcileChannelMidiOutputs(previous.channels, next.channels);
         const nextChannelIds = new Set(next.channels.map(channel => channel.id));
         for (const previousChannel of previous.channels) {
           if (!nextChannelIds.has(previousChannel.id)) {
@@ -1164,7 +1166,19 @@ export function App() {
         recorder.handleMidiEvent(event, audioEngine.getTransportMusicalPosition());
         setMidiRecordedNoteCount(recorder.capturedNoteCount);
       }
-      midiMappingRuntime.handleMidiEvent(event);
+      const ccResult = midiMappingRuntime.handleMidiEvent(event);
+      if (ccResult.status === 'unmapped' && ccResult.ccNumber === 64) {
+        const state = projectStateRef.current;
+        const selectedId = selectedChannelIdRef.current ?? state.selectedChannelId;
+        const channel = state.channels.find(c => c.id === selectedId) ?? state.channels[0];
+        if (channel && isRackChannelAudible(channel, state.channels)) {
+          audioEngine.sendChannelMidiControlChange(
+            channel,
+            64,
+            Math.round(Math.max(0, Math.min(1, event.value ?? 0)) * 127),
+          );
+        }
+      }
     };
 
     audioEngine.addMidiListener(handleMidiMessage);
@@ -1267,6 +1281,7 @@ export function App() {
         // An in-flight MIDI take belongs to the outgoing project: discard it
         // rather than committing its notes into the replacement.
         cancelMidiRecordingRef.current?.();
+        audioEngine.panicExternalMidi(projectStateRef.current.channels);
         handleStop();
         audioEngine.releaseNativeInstruments();
         try {
@@ -2937,7 +2952,7 @@ export function App() {
         onSelectCountInBars={handleSetRecordingCountInBars}
         onClose={() => setIsProjectSettingsOpen(false)}
       />
-      <MidiControllerModal isOpen={isMidiModalOpen} onClose={() => setIsMidiModalOpen(false)} channels={projectState.channels} mixerTracks={projectState.mixerTracks} midiMappings={projectState.midiMappings || []} onUpdateMidiMappings={(mappings) => mutateProjectState(curr => updateMidiMappingsInProjectState(curr, mappings), 'Update MIDI mappings')} activeChannel={selectedChannel} />
+      <MidiControllerModal isOpen={isMidiModalOpen} onClose={() => setIsMidiModalOpen(false)} channels={projectState.channels} mixerTracks={projectState.mixerTracks} midiMappings={projectState.midiMappings || []} onUpdateMidiMappings={(mappings) => mutateProjectState(curr => updateMidiMappingsInProjectState(curr, mappings), 'Update MIDI mappings')} activeChannel={selectedChannel} onUpdateChannel={handleUpdateChannel} />
       <ParametricEqModal isOpen={isParametricEqOpen} onClose={() => setIsParametricEqOpen(false)} mixerTrack={projectState.mixerTracks.find(t => t.id === eqModalTrackId) || projectState.mixerTracks[0]} onUpdateTrack={(track) => handleUpdateMixerTrack(track.id, track)} />
       <MasteringSuiteModal isOpen={isMasteringSuiteOpen} onClose={() => setIsMasteringSuiteOpen(false)} masteringState={projectState.masteringSuiteState ?? DEFAULT_MASTERING_SUITE_STATE} onUpdateMasteringState={(st) => mutateProjectState(curr => ({ ...curr, masteringSuiteState: st }), "Update mastering settings")} isPlaying={isPlaying} />
       <GrossBeatModal

@@ -21,6 +21,7 @@ import { isPunchRecordingSettings, isSamePunchRecording, resolvePunchRecording, 
 import { getProjectTimelineBars } from './playlistTimeline';
 import { addEmptyPatternToProjectState } from './patternContent';
 import { isSupersededGeneratedSeedZone } from '../audio/sampleZones';
+import { normalizeChannelMidiOutputRouting } from '../audio/midiOutputScheduler';
 
 /**
  * Authoritative runtime mutation boundary for ProjectState.
@@ -40,7 +41,18 @@ export const updateChannelInProjectState = (
   ...state,
   channels: state.channels.map(ch => {
     if (ch.id !== channelId) return ch;
-    const nextChannel: Channel = { ...ch, ...updates };
+    const nextChannel: Channel = {
+      ...ch,
+      ...updates,
+      ...(Object.prototype.hasOwnProperty.call(updates, 'midiOutput')
+        ? {
+            midiOutput:
+              updates.midiOutput === undefined
+                ? undefined
+                : normalizeChannelMidiOutputRouting(updates.midiOutput),
+          }
+        : {}),
+    };
     // A generated full-range view of the body sample must never survive a
     // `customSample` change: `findSampleZone` resolves first-match, so a stale
     // 0-127 seed shadows the new sample (and every authored split after it).
@@ -446,7 +458,8 @@ export const isContinuousChannelUpdate = (updates: Partial<Channel>): boolean =>
     'customSample' in updates ||
     'instrumentType' in updates ||
     'name' in updates ||
-    'color' in updates
+    'color' in updates ||
+    'midiOutput' in updates
   ) {
     return false;
   }
@@ -472,6 +485,7 @@ export const getChannelUpdateLabel = (updates: Partial<Channel>): string => {
   if ('volume' in updates) return 'Change channel volume';
   if ('pan' in updates) return 'Change channel pan';
   if ('pitch' in updates) return 'Change channel pitch';
+  if ('midiOutput' in updates) return 'Update MIDI output routing';
   if ('customSample' in updates) return 'Assign sample';
   if ('synthParams' in updates) {
     return isContinuousChannelUpdate(updates) ? 'Change synth parameter' : 'Apply synth preset';

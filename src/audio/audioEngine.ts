@@ -64,6 +64,16 @@ import { renderDrumPadVoice } from './instruments/drumPad';
 import { renderGrandPianoVoice, renderRhodesVoice, renderOrganVoice, renderPluckedGuitarVoice, renderStringsVoice, renderPizzicatoVoice, renderBrassVoice, renderMarimbaVoice } from './instruments/legacyAcoustic';
 import { renderAcid303Voice, renderReeseBassVoice, render808SubVoice, renderSupersawVoice, renderAmbientPadVoice, renderVoxChoirVoice, renderChiptuneVoice } from './instruments/legacySynth';
 import {
+  MidiOutputScheduler,
+  shouldSuppressInternalChannelAudio,
+  shouldTransmitExternalMidi,
+  type MidiAccessStateSnapshot,
+  type MidiAccessStatus,
+  type MidiCleanupReason,
+  type MidiOutputPortLike,
+  type MidiOutputUsability,
+} from './midiOutputScheduler';
+import {
   channelVolumeFromNormalized,
   clampProjectSwing,
   filterCutoffFromNormalized,
@@ -746,14 +756,15 @@ class AudioEngine {
     return this.nativeInstruments.edit(channel, changes, this.getContext(), destination, isCurrent, publish);
   }
   public reconcileNativeInstruments(channels: Channel[]) {
-    reconcileVst3Diagnostics(channels);
+    const internalChannels = channels.filter(ch => !shouldSuppressInternalChannelAudio(ch));
+    reconcileVst3Diagnostics(internalChannels);
     if (this.shouldBlockLiveMutation()) return;
     if (this.nativePreparing) {
       void this.releaseNativeInstruments();
       this.transport?.stop(false);
       return;
     }
-    if (this.nativeInstruments?.reconcile(channels)) this.nativePlayGeneration++;
+    if (this.nativeInstruments?.reconcile(internalChannels)) this.nativePlayGeneration++;
   }
   public discardPreparedVst3Channel(channel: Channel) { this.nativeInstruments.closeIfMatches(channel); }
   public releaseNativeInstruments(): Promise<void> {
@@ -919,9 +930,13 @@ class AudioEngine {
 
   // MIDI
   private midiAccess: MIDIAccess | null = null;
+  private midiAccessStatus: MidiAccessStatus = 'uninitialized';
+  private midiAccessError: string | null = null;
   private midiListeners: ((e: MidiEventPayload) => void)[] = [];
   /** Input IDs already reported disconnected; cleared when that port reconnects. */
   private readonly disconnectedMidiInputIds = new Set<string>();
+  private readonly midiOutputScheduler: MidiOutputScheduler;
+  private midiShutdownListenersInstalled = false;
 
   constructor() {
     // All built-in voices now enter through one registry boundary. The voice
@@ -955,6 +970,25 @@ class AudioEngine {
       wavetable: renderWavetableVoice,
       sampler: renderSamplerVoice,
     }, renderSubtractiveSynthVoice, ['vst3']);
+    this.midiOutputScheduler = new MidiOutputScheduler({
+      getOutputs: () => (this.midiAccess?.outputs as unknown as Map<string, MidiOutputPortLike>) ?? null,
+      getOutputTimestamp: () =>
+        this.ctx && typeof (this.ctx as AudioContext).getOutputTimestamp === 'function'
+          ? (this.ctx as AudioContext).getOutputTimestamp()
+          : null,
+    });
+    this.installMidiShutdownListeners();
+  }
+
+  private installMidiShutdownListeners(): void {
+    if (this.midiShutdownListenersInstalled) return;
+    if (typeof window === 'undefined' || typeof window.addEventListener !== 'function') return;
+    this.midiShutdownListenersInstalled = true;
+    const handleShutdown = () => {
+      this.shutdownMidiOutputs();
+    };
+    window.addEventListener('pagehide', handleShutdown);
+    window.addEventListener('beforeunload', handleShutdown);
   }
 
   /** True while a timeline render owns the shared engine's mutable audio state. */
@@ -2964,21 +2998,22 @@ class AudioEngine {
     channel: Channel,
     note: Note,
     startTime?: number,
-    bpm: number = 120,
+    bpm?: number,
     midiChannel?: number,
   ) {
     if (this.shouldBlockLiveMutation()) return;
     if (!this.ctx) this.init();
     const ctx = this.ctx!;
     const time = startTime ?? ctx.currentTime;
+    const resolvedBpm = typeof bpm === 'number' && Number.isFinite(bpm) && bpm > 0 ? bpm : this.getRenderBpm();
 
     // Check if arpeggiator is enabled on this channel
     if (channel.arp && channel.arp.enabled) {
-      this.playArpSequence(channel, note, time, bpm);
+      this.playArpSequence(channel, note, time, resolvedBpm);
       return;
     }
 
-    this.playSingleVoice(channel, note, time, midiChannel);
+    this.playSingleVoice(channel, note, time, midiChannel, resolvedBpm);
   }
 
   /**
@@ -2995,7 +3030,13 @@ class AudioEngine {
     return Number.isFinite(this.bpm) && this.bpm > 0 ? this.bpm : 120;
   }
 
-  public playSingleVoice(channel: Channel, note: Note, time: number, midiChannel?: number) {
+  public playSingleVoice(
+    channel: Channel,
+    note: Note,
+    time: number,
+    midiChannel?: number,
+    bpmOverride?: number,
+  ) {
     if (this.shouldBlockLiveMutation() || !this.ctx) return;
     if (channel.mute) return;
     if (
@@ -3003,6 +3044,25 @@ class AudioEngine {
       this.activeChannels.some(candidate => candidate.id === channel.id) &&
       !this.isChannelAudibleInTake(channel)
     ) {
+      return;
+    }
+
+    if (!this.isOfflineRendering && shouldTransmitExternalMidi(channel)) {
+      const midiBpm =
+        typeof bpmOverride === 'number' && Number.isFinite(bpmOverride) && bpmOverride > 0
+          ? bpmOverride
+          : this.getRenderBpm();
+      this.midiOutputScheduler.scheduleChannelNote({
+        channel,
+        note,
+        onsetAudioTimeSeconds: time,
+        bpm: midiBpm,
+        contextCurrentTimeSeconds: this.ctx.currentTime,
+        liveInputMidiChannel: midiChannel,
+      });
+    }
+
+    if (shouldSuppressInternalChannelAudio(channel)) {
       return;
     }
 
@@ -3347,7 +3407,7 @@ class AudioEngine {
             ...rootNote,
             pitch: p,
             duration: arpNoteDurationSteps
-          }, t);
+          }, t, undefined, bpm);
         }
       });
       return;
@@ -3361,7 +3421,7 @@ class AudioEngine {
         ...rootNote,
         pitch,
         duration: arpNoteDurationSteps
-      }, t);
+      }, t, undefined, bpm);
     }
   }
 
@@ -4182,11 +4242,13 @@ class AudioEngine {
         stopped += 1;
       }
     }
+    if (!this.isOfflineRendering) {
+      stopped += this.midiOutputScheduler.stopLiveChannelNote(channelId, normalizedPitch, midiChannel);
+    }
     return stopped;
   }
 
-  public stopChannelVoices(channelId: string): void {
-    if (this.shouldBlockLiveMutation()) return;
+  private stopChannelInternalVoices(channelId: string): void {
     this.nativeInstruments?.close(channelId);
     const prefix = `${channelId}-`;
     for (const [voiceId, voice] of this.activeVoices.entries()) {
@@ -4199,6 +4261,14 @@ class AudioEngine {
         this.removeDrumPadChokeVoice(voiceId, voice);
       }
     }
+  }
+
+  public stopChannelVoices(channelId: string): void {
+    if (this.shouldBlockLiveMutation()) return;
+    if (!this.isOfflineRendering) {
+      this.midiOutputScheduler.cleanupChannel(channelId);
+    }
+    this.stopChannelInternalVoices(channelId);
   }
 
 
@@ -4405,69 +4475,184 @@ class AudioEngine {
 
   // Web MIDI API Integration
   public async initMidi() {
+    if (typeof navigator === 'undefined') {
+      this.midiAccessStatus = 'uninitialized';
+      this.midiAccessError = null;
+      return;
+    }
+    if (typeof navigator.requestMIDIAccess !== 'function') {
+      this.midiAccess = null;
+      this.midiAccessStatus = 'unsupported';
+      this.midiAccessError = 'Web MIDI API is not supported in this browser.';
+      this.midiOutputScheduler.notifyStateListeners();
+      return;
+    }
+
     try {
-      if (typeof navigator !== 'undefined' && navigator.requestMIDIAccess) {
-        this.midiAccess = await navigator.requestMIDIAccess({ sysex: false });
-        
-        const attachInputs = () => {
-          for (const input of this.midiAccess.inputs.values()) {
-            input.onmidimessage = this.handleMidiMessage.bind(this);
-          }
-        };
+      this.midiAccess = await navigator.requestMIDIAccess({ sysex: false });
+      this.midiAccessStatus = 'ready';
+      this.midiAccessError = null;
+      this.disconnectedMidiInputIds.clear();
+      this.midiOutputScheduler.resetDeviceErrors();
 
+      const attachInputs = () => {
+        if (!this.midiAccess) return;
+        for (const input of this.midiAccess.inputs.values()) {
+          input.onmidimessage = this.handleMidiMessage.bind(this);
+        }
+      };
+
+      attachInputs();
+      this.midiAccess.onstatechange = event => {
+        // Keep the existing reattachment behavior for every port transition;
+        // only a MIDI *input* disconnect should end an armed MIDI take or
+        // release the notes its live monitor is holding.
         attachInputs();
-        this.midiAccess.onstatechange = event => {
-          // Keep the existing reattachment behavior for every port transition;
-          // only a MIDI *input* disconnect should end an armed MIDI take or
-          // release the notes its live monitor is holding.
-          attachInputs();
-          const port = event.port;
-          if (!port || port.type !== 'input') return;
-          if (port.state === 'connected') {
-            this.disconnectedMidiInputIds.delete(port.id);
-            return;
+        const port = event.port;
+        if (!port) {
+          this.midiOutputScheduler.notifyStateListeners();
+          return;
+        }
+        if (port.type === 'output') {
+          if (port.state === 'disconnected') {
+            this.midiOutputScheduler.handlePortDisconnected(port.id);
+          } else if (port.state === 'connected') {
+            void this.midiOutputScheduler.handlePortReconnected(port.id);
+          } else {
+            this.midiOutputScheduler.notifyStateListeners();
           }
-          if (port.state !== 'disconnected' || this.disconnectedMidiInputIds.has(port.id)) return;
+          return;
+        }
+        if (port.type !== 'input') return;
+        if (port.state === 'connected') {
+          this.disconnectedMidiInputIds.delete(port.id);
+          this.midiOutputScheduler.notifyStateListeners();
+          return;
+        }
+        if (port.state !== 'disconnected' || this.disconnectedMidiInputIds.has(port.id)) return;
 
-          // Web MIDI may deliver a repeated state notification for the same
-          // disconnect. Emit once, then allow a later real disconnect after a
-          // reconnect (which clears the ID above).
-          this.disconnectedMidiInputIds.add(port.id);
-          this.midiListeners.forEach(listener => listener({
-            type: 'deviceState',
-            deviceState: 'disconnected',
-            deviceId: port.id,
-          }));
-        };
-      }
+        // Web MIDI may deliver a repeated state notification for the same
+        // disconnect. Emit once, then allow a later real disconnect after a
+        // reconnect (which clears the ID above).
+        this.disconnectedMidiInputIds.add(port.id);
+        this.midiListeners.forEach(listener => listener({
+          type: 'deviceState',
+          deviceState: 'disconnected',
+          deviceId: port.id,
+        }));
+        this.midiOutputScheduler.notifyStateListeners();
+      };
+
+      await this.midiOutputScheduler.openConnectedOutputPorts();
+      this.midiOutputScheduler.notifyStateListeners();
     } catch (err) {
+      const errName = (err as { name?: string } | null)?.name ?? '';
+      const errMessage = err instanceof Error ? err.message : 'Web MIDI access denied or unavailable.';
+      this.midiAccess = null;
+      this.midiAccessStatus =
+        errName === 'SecurityError' || errName === 'NotAllowedError' ? 'denied' : 'error';
+      this.midiAccessError = errMessage;
+      this.midiOutputScheduler.notifyStateListeners();
       console.log('Web MIDI access not available or user denied permission');
     }
   }
 
-  public getConnectedMidiDevices(): { id: string; name: string; manufacturer?: string; state: string; type: 'input' | 'output' }[] {
-    const devices: { id: string; name: string; manufacturer?: string; state: string; type: 'input' | 'output' }[] = [];
+  public getMidiAccessState(): MidiAccessStateSnapshot {
+    if (
+      this.midiAccessStatus === 'uninitialized' &&
+      typeof window !== 'undefined' &&
+      typeof navigator !== 'undefined' &&
+      typeof navigator.requestMIDIAccess !== 'function'
+    ) {
+      return {
+        status: 'unsupported',
+        errorMessage: 'Web MIDI API is not supported in this browser.',
+      };
+    }
+    return {
+      status: this.midiAccess ? 'ready' : this.midiAccessStatus,
+      errorMessage: this.midiAccess ? null : this.midiAccessError,
+    };
+  }
+
+  public getConnectedMidiDevices(): import('../types/daw').MidiDeviceInfo[] {
+    const devices: import('../types/daw').MidiDeviceInfo[] = [];
     if (this.midiAccess) {
       for (const input of this.midiAccess.inputs.values()) {
+        const inputState = input.state || 'connected';
         devices.push({
           id: input.id || `midi-in-${devices.length}`,
           name: input.name || 'Generic MIDI Controller',
           manufacturer: input.manufacturer || 'Hardware Device',
-          state: input.state || 'connected',
-          type: 'input'
+          state: inputState,
+          connection: (input as { connection?: string }).connection,
+          type: 'input',
+          usable: inputState === 'connected',
+          statusReason: inputState === 'connected' ? undefined : 'Hardware device disconnected',
         });
       }
       for (const output of this.midiAccess.outputs.values()) {
-        devices.push({
-          id: output.id || `midi-out-${devices.length}`,
-          name: output.name || 'MIDI Out Port',
-          manufacturer: output.manufacturer || 'Hardware Device',
-          state: output.state || 'connected',
-          type: 'output'
-        });
+        devices.push(
+          this.midiOutputScheduler.describePortInfo(
+            output as unknown as MidiOutputPortLike,
+            devices.length,
+          ),
+        );
       }
     }
     return devices;
+  }
+
+  public getMidiOutputPortUsability(outputDeviceId: string | null | undefined): MidiOutputUsability {
+    return this.midiOutputScheduler.getPortUsability(outputDeviceId);
+  }
+
+  public ensureMidiOutputPortOpen(outputDeviceId: string): Promise<boolean> {
+    return this.midiOutputScheduler.ensureOutputPortOpen(outputDeviceId);
+  }
+
+  public subscribeMidiDeviceChanges(listener: () => void): () => void {
+    return this.midiOutputScheduler.subscribeStateChange(listener);
+  }
+
+  public sendChannelMidiControlChange(
+    channel: Channel,
+    cc: number,
+    valueByte: number,
+    startTime?: number,
+  ): boolean {
+    if (this.shouldBlockLiveMutation() || this.isOfflineRendering) return false;
+    const contextNow = this.ctx?.currentTime ?? 0;
+    const audioTime = startTime ?? contextNow;
+    return this.midiOutputScheduler.sendChannelControlChange(
+      channel,
+      cc,
+      valueByte,
+      audioTime,
+      contextNow,
+    );
+  }
+
+  public reconcileChannelMidiOutputs(
+    previousChannels: readonly Channel[],
+    nextChannels: readonly Channel[],
+  ): void {
+    if (this.shouldBlockLiveMutation() || this.isOfflineRendering) return;
+    this.midiOutputScheduler.reconcileChannels(previousChannels, nextChannels, isRackChannelAudible);
+  }
+
+  public panicExternalMidi(channels?: readonly Channel[]): void {
+    if (this.isOfflineRendering) return;
+    this.midiOutputScheduler.cleanupAll('panic', channels ?? this.activeChannels);
+  }
+
+  public shutdownMidiOutputs(): void {
+    if (this.isOfflineRendering) return;
+    this.midiOutputScheduler.cleanupAll('shutdown', this.activeChannels);
+  }
+
+  public getActiveExternalMidiNoteCount(channelId?: string): number {
+    return this.midiOutputScheduler.getActiveNoteCount(channelId);
   }
 
   /**
@@ -5594,9 +5779,13 @@ class AudioEngine {
 
   public setBpm(bpm: number) {
     if (this.shouldBlockLiveMutation()) return;
+    const previousBpm = this.bpm;
     this.bpm = Math.max(20, Math.min(300, bpm));
     if (this.transport) {
       this.transport.setBpm(this.bpm);
+    }
+    if (this.isPlaying && !this.isOfflineRendering && previousBpm !== this.bpm) {
+      this.midiOutputScheduler.handleTempoChange(previousBpm, this.bpm);
     }
     // Phase 1K: a tempo change re-times the remaining count-in clicks in
     // place — the musical capture position is unchanged, only its wall-clock
@@ -6372,7 +6561,7 @@ class AudioEngine {
     }
 
     if (update.channels) {
-      this.nativeInstruments?.reconcile(update.channels);
+      this.nativeInstruments?.reconcile(update.channels.filter(ch => !shouldSuppressInternalChannelAudio(ch)));
       const now = this.ctx?.currentTime ?? 0;
       const previousChannels = this.activeChannels;
       const previouslyAudibleIds = new Set(
@@ -6409,8 +6598,20 @@ class AudioEngine {
       this.syncChannelPanners(this.activeChannels, now);
       this.playbackProjectChannels = structuredClone(update.channels);
 
+      if (!this.isOfflineRendering) {
+        this.midiOutputScheduler.reconcileChannels(previousChannels, this.activeChannels, isRackChannelAudible);
+      }
+
       const positionSeconds = this.transport?.getState().positionSeconds ?? 0;
       for (const nextChannel of this.activeChannels) {
+        const prevChannel = activeById.get(nextChannel.id);
+        if (
+          prevChannel &&
+          !shouldSuppressInternalChannelAudio(prevChannel) &&
+          shouldSuppressInternalChannelAudio(nextChannel)
+        ) {
+          this.stopChannelInternalVoices(nextChannel.id);
+        }
         const wasAudible = previouslyAudibleIds.has(nextChannel.id);
         const isNowAudible = isRackChannelAudible(nextChannel, this.activeChannels);
         if (wasAudible && !isNowAudible) {
@@ -6565,7 +6766,7 @@ class AudioEngine {
   ): void | Promise<void> {
     if (this.shouldBlockLiveMutation()) return;
     const hasSolo = channels.some(channel => channel.solo);
-    const nativeChannels = channels.filter(channel => channel.instrumentType === 'vst3' && !channel.mute && (!hasSolo || channel.solo));
+    const nativeChannels = channels.filter(channel => channel.instrumentType === 'vst3' && !shouldSuppressInternalChannelAudio(channel) && !channel.mute && (!hasSolo || channel.solo));
     const nativeEffectTracks = (mixerTracks ?? []).filter(track => track.fxSlots.some(slot => slot.type === 'vst3' && slot.enabled));
     if (nativeChannels.length === 0 && nativeEffectTracks.length === 0) {
       return this.startPlayback(channels, clips, mode, patternId, mixerTracks, patternLengthSteps, playlistTracks, patterns);
@@ -6687,10 +6888,14 @@ class AudioEngine {
     this.transport.setMode(mode);
     // Pattern Mode loops over the pattern length (16/32/64 steps); Song Mode
     // keeps the one-bar grid that playlist scheduling is built on.
-    this.transport.setPatternLoopSteps(
-      mode === 'pat'
-        ? resolvePatternLoopLengthSteps(this.activeChannels, patternLengthSteps, this.meter)
-        : undefined
+    const resolvedPatternLoopSteps = mode === 'pat'
+      ? resolvePatternLoopLengthSteps(this.activeChannels, patternLengthSteps, this.meter)
+      : undefined;
+    this.transport.setPatternLoopSteps(resolvedPatternLoopSteps);
+    this.midiOutputScheduler.beginTransportTake(
+      currentGeneration,
+      mode,
+      resolvedPatternLoopSteps ?? null,
     );
     // Song Mode owns its real end from the active clip schedule; Pattern Mode
     // loops its declared length forever (Phase 9D).
@@ -6708,11 +6913,12 @@ class AudioEngine {
       this.transport.stop(false);
     }
     this.transport.setCallbacks({
-      onStep: (step, bar, audioTime) => {
+      onStep: (step, bar, audioTime, absoluteStep) => {
         if (this.offlineRenderLeaseHeld || !this.isPlaying || this.playbackGeneration !== currentGeneration) return;
 
         this.currentStep = step;
         this.currentBar = bar;
+        this.currentTransportAbsoluteStep = absoluteStep;
 
         const secondsPerBeat = beatsToSeconds(1, this.bpm);
         const secondsPerStep = secondsPerBeat / SIXTEENTH_STEPS_PER_BEAT;
@@ -6721,6 +6927,7 @@ class AudioEngine {
           : 0;
 
         this.triggerCurrentStep(audioTime + swingOffsetSeconds);
+        this.currentTransportAbsoluteStep = undefined;
 
         if (this.stepCallback) {
           this.stepCallback(step, bar);
@@ -6794,7 +7001,7 @@ class AudioEngine {
     this.cancelPunchRecording();
     if (!this.isPlaying || !this.transport) return;
     this.playbackGeneration++;
-    this.stopActivePlaybackAudio();
+    this.stopActivePlaybackAudio(false, 'pause');
     this.transport.pause();
     this.isPlaying = false;
     // The last measurement stays readable, but the pump stops so the numbers
@@ -6823,12 +7030,12 @@ class AudioEngine {
     const boundedPosition = this.boundSeekPosition(positionSeconds);
     // A seek starts a new measurement session, including async native seeks.
     this.resetMasterMeasurement();
-    if (this.isPlaying && (this.activeChannels.some(c => c.instrumentType === 'vst3') ||
+    if (this.isPlaying && (this.activeChannels.some(c => c.instrumentType === 'vst3' && !shouldSuppressInternalChannelAudio(c)) ||
         this.playbackProjectMixerTracks.some(track => track.fxSlots.some(slot => slot.type === 'vst3')))) {
       // Native seek is an asynchronous re-prepare, just like Play. Never race a
       // newly opened helper against the ordinary 5 ms seek deadline, or retain
       // queued PCM/parameter events from the old timeline position.
-      this.stopActivePlaybackAudio();
+      this.stopActivePlaybackAudio(false, 'seek');
       this.isPlaying = false; transport.stop(false); transport.seek(boundedPosition);
       this.syncEnginePositionFromTransport();
       void this.play(this.playbackProjectChannels, this.activeClips, this.activePlayMode, this.activePatternId,
@@ -6837,7 +7044,9 @@ class AudioEngine {
     }
 
     if (this.isPlaying) {
-      this.stopActivePlaybackAudio();
+      this.stopActivePlaybackAudio(false, 'seek');
+    } else if (!this.isOfflineRendering) {
+      this.midiOutputScheduler.cleanupAll('seek', this.activeChannels);
     }
     transport.seek(boundedPosition);
     this.syncEnginePositionFromTransport();
@@ -6851,8 +7060,11 @@ class AudioEngine {
   }
 
   /** Stops every playlist clip source and note voice of the active take. */
-  private stopActivePlaybackAudio(preserveNative = false): void {
+  private stopActivePlaybackAudio(preserveNative = false, midiCleanupReason: MidiCleanupReason = 'stop'): void {
     if (!preserveNative) this.releaseNativeInstruments();
+    if (!this.isOfflineRendering) {
+      this.midiOutputScheduler.cleanupAll(midiCleanupReason, this.activeChannels);
+    }
     for (const source of Array.from(this.activeClipSources)) {
       try { source.stop(); } catch (_) { /* already inactive */ }
       this.cleanupClipChannelVolume(source);
@@ -7050,7 +7262,14 @@ class AudioEngine {
     }
   }
 
-  private triggerCurrentStep(audioTime?: number) {
+  private currentTransportAbsoluteStep: number | undefined = undefined;
+
+  private triggerCurrentStep(
+    audioTime?: number,
+    transportAbsoluteStep?: number,
+    unswungStepAudioTime?: number,
+    grooveOffsetSecondsArg?: number,
+  ) {
     if (!this.ctx) return;
     const now = audioTime ?? this.ctx.currentTime;
     // `now` is the already (possibly swung) step boundary the transport reported
@@ -7063,145 +7282,179 @@ class AudioEngine {
 
     // Native automation is evaluated by the bounded PCM producer, not by
     // project mutation or asynchronous editor writes on each sequencer step.
-    if (!this.isOfflineRendering && this.activeChannels.some(c => c.instrumentType === 'vst3')) {
+    if (!this.isOfflineRendering && this.activeChannels.some(c => c.instrumentType === 'vst3' && !shouldSuppressInternalChannelAudio(c))) {
       const timelineStep = (this.currentBar - 1) * this.currentStepsPerBar + this.currentStep;
       const unswung = now - (this.currentStep % 2 === 1 ? swingOffsetSecondsForStep(this.swing, secondsPerStep) : 0);
       if (!this.nativeInstruments.timeline(this.activePlayMode === 'song' ? this.activeClips.filter(c => !this.isPlaylistLaneMuted(c)) : [],
         this.secondsPerBarAt(safeBpm), unswung, timelineStep * secondsPerStep)) return;
     }
 
-    // Phase 1J: the click grid comes from the resolved project meter and the
-    // authoritative transport step — quarter pulses in 4/4 and 3/4, eighth
-    // pulses in 6/8 (3+3) and 7/8 (configurable grouping) — instead of a
-    // hardcoded `step % 4` that ignored the meter. The step is folded onto the
-    // bar grid so long patterns accent every bar line.
-    if (this.metronome) {
-      const level = resolveMetronomeClickLevel(this.getMetronomePulseLayout(), this.currentStep);
-      if (level !== null) {
-        const osc = scheduleMetronomeClick(this.ctx, this.masterGain || this.ctx.destination, now, level);
-        this.activeMetronomeClicks.add(osc);
-        const release = () => { this.activeMetronomeClicks.delete(osc); };
-        if (typeof (osc as { addEventListener?: unknown }).addEventListener === 'function') {
-          osc.addEventListener('ended', release);
-        } else {
-          (osc as unknown as { onended?: (() => void) | null }).onended = release;
+    const useLiveMidiStepFrame = !this.isOfflineRendering && this.isPlaying;
+    if (useLiveMidiStepFrame) {
+      const resolvedGrooveOffsetSeconds =
+        grooveOffsetSecondsArg ??
+        (this.currentStep % 2 === 1 ? swingOffsetSecondsForStep(this.swing, secondsPerStep) : 0);
+      const resolvedUnswungAudioTime = unswungStepAudioTime ?? (now - resolvedGrooveOffsetSeconds);
+      const resolvedAbsoluteStep =
+        transportAbsoluteStep ??
+        this.currentTransportAbsoluteStep ??
+        ((Math.max(1, this.currentBar) - 1) * this.currentStepsPerBar + (this.currentStep % this.currentStepsPerBar));
+      const resolvedPatternLoopSteps =
+        this.activePlayMode === 'pat'
+          ? resolvePatternLoopLengthSteps(this.activeChannels, this.activePatternLengthSteps, this.meter)
+          : null;
+      this.midiOutputScheduler.beginTransportStep({
+        takeGeneration: this.playbackGeneration,
+        absoluteStep: resolvedAbsoluteStep,
+        step: this.currentStep,
+        stepAudioTimeSeconds: now,
+        unswungStepAudioTimeSeconds: resolvedUnswungAudioTime,
+        grooveOffsetSeconds: resolvedGrooveOffsetSeconds,
+        bpm: safeBpm,
+        mode: this.activePlayMode,
+        patternLoopSteps: resolvedPatternLoopSteps,
+        contextCurrentTimeSeconds: this.ctx.currentTime,
+      });
+    }
+
+    try {
+      // Phase 1J: the click grid comes from the resolved project meter and the
+      // authoritative transport step — quarter pulses in 4/4 and 3/4, eighth
+      // pulses in 6/8 (3+3) and 7/8 (configurable grouping) — instead of a
+      // hardcoded `step % 4` that ignored the meter. The step is folded onto the
+      // bar grid so long patterns accent every bar line.
+      if (this.metronome) {
+        const level = resolveMetronomeClickLevel(this.getMetronomePulseLayout(), this.currentStep);
+        if (level !== null) {
+          const osc = scheduleMetronomeClick(this.ctx, this.masterGain || this.ctx.destination, now, level);
+          this.activeMetronomeClicks.add(osc);
+          const release = () => { this.activeMetronomeClicks.delete(osc); };
+          if (typeof (osc as { addEventListener?: unknown }).addEventListener === 'function') {
+            osc.addEventListener('ended', release);
+          } else {
+            (osc as unknown as { onended?: (() => void) | null }).onended = release;
+          }
         }
       }
-    }
 
-    // Phase 57: 16-step amplitude gate on the master bus. The gain comes from
-    // the shared resolver so the live transport and the offline/export
-    // renderer (which both call this method) stay behaviourally identical.
-    if (this.grossBeatState.enabled && this.grossBeatNode && !this.renderingPreMaster) {
-      const targetGain = resolveGrossBeatGateGain(this.grossBeatState, this.currentStep);
-      this.grossBeatNode.gain.cancelScheduledValues(now);
-      this.grossBeatNode.gain.setTargetAtTime(targetGain, now, 0.012);
-    }
+      // Phase 57: 16-step amplitude gate on the master bus. The gain comes from
+      // the shared resolver so the live transport and the offline/export
+      // renderer (which both call this method) stay behaviourally identical.
+      if (this.grossBeatState.enabled && this.grossBeatNode && !this.renderingPreMaster) {
+        const targetGain = resolveGrossBeatGateGain(this.grossBeatState, this.currentStep);
+        this.grossBeatNode.gain.cancelScheduledValues(now);
+        this.grossBeatNode.gain.setTargetAtTime(targetGain, now, 0.012);
+      }
 
-    if (this.activePlayMode === 'pat') {
-      // Trigger all channel active steps
-      this.activeChannels.forEach(channel => {
-        if (!this.isChannelAudibleInTake(channel)) return;
+      if (this.activePlayMode === 'pat') {
+        // Trigger all channel active steps
+        this.activeChannels.forEach(channel => {
+          if (!this.isChannelAudibleInTake(channel)) return;
 
-        // 1. Step sequencer trigger
-        if (channel.steps && channel.steps[this.currentStep]) {
-          const defaultPitch = channel.instrumentType === 'drumpad' ? 36 : 60;
-          this.playNote(channel, {
-            id: `seq-${channel.id}-${this.currentStep}`,
-            pitch: defaultPitch,
-            start: this.currentStep,
-            duration: 1,
-            velocity: 0.9
-          }, now, safeBpm);
-        }
-
-        // 2. Piano roll notes starting on this step
-        if (channel.notes) {
-          channel.notes.forEach(note => {
-            const offsetSteps = noteOnsetOffsetSteps(note.start, this.currentStep);
-            if (offsetSteps !== null) {
-              this.playNote(channel, note, now + offsetSteps * secondsPerStep, safeBpm);
-            }
-          });
-        }
-      });
-    } else {
-      // Song mode: trigger clips in current bar
-      const barIdx = this.currentBar - 1;
-      const stepsBar = this.currentStepsPerBar;
-      const currentGlobalStep = (barIdx * stepsBar) + this.currentStep;
-
-      // 1. Evaluate automation clips at current bar & step
-      this.activeClips.forEach(clip => {
-        if (clip.type === 'automation' && !clip.mute && !this.isPlaylistLaneMuted(clip) && clip.automationTarget && clip.automationTarget.type !== 'vst3_param' && clip.automationPoints && clip.automationPoints.length >= 2) {
-          const currentTotalBar = barIdx + (this.currentStep / stepsBar);
-          if (currentTotalBar >= clip.startBar && currentTotalBar <= clip.startBar + clip.lengthBars) {
-            const relX = (currentTotalBar - clip.startBar) / clip.lengthBars;
-            const val = this.interpolateAutomationCurve(clip.automationPoints, relX);
-            this.applyAutomationValue(clip.automationTarget, val, this.activeChannels, this.activeMixerTracks, now);
+          // 1. Step sequencer trigger
+          if (channel.steps && channel.steps[this.currentStep]) {
+            const defaultPitch = channel.instrumentType === 'drumpad' ? 36 : 60;
+            this.playNote(channel, {
+              id: `seq-${channel.id}-${this.currentStep}`,
+              pitch: defaultPitch,
+              start: this.currentStep,
+              duration: 1,
+              velocity: 0.9
+            }, now, safeBpm);
           }
-        }
-      });
 
-      this.activeClips.forEach(clip => {
-        if (clip.type === 'pattern') {
-          if (clip.mute || this.isPlaylistLaneMuted(clip)) return;
-          const clipStartStep = clip.startBar * stepsBar;
-          const clipEndStep = clipStartStep + (clip.lengthBars * stepsBar);
-
-          if ((isFullPatternPlaylistClip(clip) ? currentGlobalStep + 1 > clipStartStep : currentGlobalStep >= clipStartStep) && currentGlobalStep < clipEndStep) {
-            for (const channel of resolvePlaylistClipChannels(this.activePatterns, clip, this.activeChannels)) {
-              if (!this.isChannelAudibleInTake(channel)) continue;
-              // Independent patterns: a clip plays its channel's content in the
-              // pattern it names (the live channel content for the selected
-              // pattern, stored content for any other). The channel itself still
-              // supplies the instrument, level and routing of every voice.
-              const content = resolveClipChannelContent(this.activePatterns, clip, channel);
-              const loopLength = resolvePlaylistClipLoopLengthSteps(this.activePatterns, clip, channel, this.meter);
-              if (isFullPatternPlaylistClip(clip)) {
-                for (const event of fullPatternEventsInWindow(channel, content, clip, loopLength, stepsBar, currentGlobalStep, currentGlobalStep + 1)) {
-                  this.playNote(channel, event.note, now + (event.step - currentGlobalStep) * secondsPerStep, safeBpm);
-                }
-                continue;
+          // 2. Piano roll notes starting on this step
+          if (channel.notes) {
+            channel.notes.forEach(note => {
+              const offsetSteps = noteOnsetOffsetSteps(note.start, this.currentStep);
+              if (offsetSteps !== null) {
+                this.playNote(channel, note, now + offsetSteps * secondsPerStep, safeBpm);
               }
-              const stepOffset = clip.offsetSteps || 0;
-              const relStep = ((currentGlobalStep - clipStartStep + stepOffset) % loopLength + loopLength) % loopLength;
+            });
+          }
+        });
+      } else {
+        // Song mode: trigger clips in current bar
+        const barIdx = this.currentBar - 1;
+        const stepsBar = this.currentStepsPerBar;
+        const currentGlobalStep = (barIdx * stepsBar) + this.currentStep;
 
-              if (content.steps[relStep]) {
-                const defaultPitch = channel.instrumentType === 'drumpad' ? 36 : 60;
-                this.playNote(channel, {
-                  id: `song-${channel.id}-${relStep}`,
-                  pitch: defaultPitch,
-                  start: relStep,
-                  duration: 1,
-                  velocity: 0.9
-                }, now, safeBpm);
-              }
-              content.notes.forEach(note => {
-                const offsetSteps = noteOnsetOffsetSteps(note.start, relStep);
-                if (offsetSteps !== null) {
-                  this.playNote(channel, note, now + offsetSteps * secondsPerStep, safeBpm);
-                }
-              });
+        // 1. Evaluate automation clips at current bar & step
+        this.activeClips.forEach(clip => {
+          if (clip.type === 'automation' && !clip.mute && !this.isPlaylistLaneMuted(clip) && clip.automationTarget && clip.automationTarget.type !== 'vst3_param' && clip.automationPoints && clip.automationPoints.length >= 2) {
+            const currentTotalBar = barIdx + (this.currentStep / stepsBar);
+            if (currentTotalBar >= clip.startBar && currentTotalBar <= clip.startBar + clip.lengthBars) {
+              const relX = (currentTotalBar - clip.startBar) / clip.lengthBars;
+              const val = this.interpolateAutomationCurve(clip.automationPoints, relX);
+              this.applyAutomationValue(clip.automationTarget, val, this.activeChannels, this.activeMixerTracks, now);
             }
           }
-        } else if (clip.type === 'audio') {
-          const clipStartStep = clip.startBar * stepsBar;
-          // Audio placements need not land on integer sixteenths (e.g. a
-          // quarter-bar in 7/8 is 3.5 steps). Schedule once in the half-open
-          // step window, retaining the fractional onset in both live and export.
-          const onsetOffsetSteps = clipStartStep - currentGlobalStep;
-          if (
-            onsetOffsetSteps >= 0 && onsetOffsetSteps < 1 &&
-            !clip.mute &&
-            !this.isPlaylistLaneMuted(clip) &&
-            !this.isClipTakeInactive(clip) &&
-            this.isAudioClipChannelAudible(clip)
-          ) {
-            this.playAudioClipWithFades(clip, now + onsetOffsetSteps * secondsPerStep);
+        });
+
+        this.activeClips.forEach(clip => {
+          if (clip.type === 'pattern') {
+            if (clip.mute || this.isPlaylistLaneMuted(clip)) return;
+            const clipStartStep = clip.startBar * stepsBar;
+            const clipEndStep = clipStartStep + (clip.lengthBars * stepsBar);
+
+            if ((isFullPatternPlaylistClip(clip) ? currentGlobalStep + 1 > clipStartStep : currentGlobalStep >= clipStartStep) && currentGlobalStep < clipEndStep) {
+              for (const channel of resolvePlaylistClipChannels(this.activePatterns, clip, this.activeChannels)) {
+                if (!this.isChannelAudibleInTake(channel)) continue;
+                // Independent patterns: a clip plays its channel's content in the
+                // pattern it names (the live channel content for the selected
+                // pattern, stored content for any other). The channel itself still
+                // supplies the instrument, level and routing of every voice.
+                const content = resolveClipChannelContent(this.activePatterns, clip, channel);
+                const loopLength = resolvePlaylistClipLoopLengthSteps(this.activePatterns, clip, channel, this.meter);
+                if (isFullPatternPlaylistClip(clip)) {
+                  for (const event of fullPatternEventsInWindow(channel, content, clip, loopLength, stepsBar, currentGlobalStep, currentGlobalStep + 1)) {
+                    this.playNote(channel, event.note, now + (event.step - currentGlobalStep) * secondsPerStep, safeBpm);
+                  }
+                  continue;
+                }
+                const stepOffset = clip.offsetSteps || 0;
+                const relStep = ((currentGlobalStep - clipStartStep + stepOffset) % loopLength + loopLength) % loopLength;
+
+                if (content.steps[relStep]) {
+                  const defaultPitch = channel.instrumentType === 'drumpad' ? 36 : 60;
+                  this.playNote(channel, {
+                    id: `song-${channel.id}-${relStep}`,
+                    pitch: defaultPitch,
+                    start: relStep,
+                    duration: 1,
+                    velocity: 0.9
+                  }, now, safeBpm);
+                }
+                content.notes.forEach(note => {
+                  const offsetSteps = noteOnsetOffsetSteps(note.start, relStep);
+                  if (offsetSteps !== null) {
+                    this.playNote(channel, note, now + offsetSteps * secondsPerStep, safeBpm);
+                  }
+                });
+              }
+            }
+          } else if (clip.type === 'audio') {
+            const clipStartStep = clip.startBar * stepsBar;
+            // Audio placements need not land on integer sixteenths (e.g. a
+            // quarter-bar in 7/8 is 3.5 steps). Schedule once in the half-open
+            // step window, retaining the fractional onset in both live and export.
+            const onsetOffsetSteps = clipStartStep - currentGlobalStep;
+            if (
+              onsetOffsetSteps >= 0 && onsetOffsetSteps < 1 &&
+              !clip.mute &&
+              !this.isPlaylistLaneMuted(clip) &&
+              !this.isClipTakeInactive(clip) &&
+              this.isAudioClipChannelAudible(clip)
+            ) {
+              this.playAudioClipWithFades(clip, now + onsetOffsetSteps * secondsPerStep);
+            }
           }
-        }
-      });
+        });
+      }
+    } finally {
+      if (useLiveMidiStepFrame) {
+        this.midiOutputScheduler.endTransportStep();
+      }
     }
   }
 

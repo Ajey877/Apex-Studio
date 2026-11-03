@@ -58,7 +58,66 @@ interface ExportModalProps {
   patterns?: Pattern[];
 }
 
-type ExportFormat = 'wav24' | 'wav16' | 'wav32' | 'midi' | 'stems';
+export type ExportFormat = 'wav24' | 'wav16' | 'wav32' | 'midi' | 'stems';
+
+export interface ExternalMidiExportNotice {
+  externalOnlyNames: string[];
+  mirrorNames: string[];
+  headline: string;
+  body: string;
+  tone: 'warning' | 'info';
+}
+
+/**
+ * Pure helper describing how channels routed to external MIDI behave for the
+ * selected export format. Offline WAV/stem renders cannot capture physical
+ * hardware synth audio unless recorded back onto an audio track first.
+ */
+export const describeExternalMidiExportNotice = (
+  channels: readonly Channel[],
+  format: ExportFormat = 'wav24',
+): ExternalMidiExportNotice | null => {
+  const externalOnlyNames = channels
+    .filter(ch => ch.midiOutput?.mode === 'external')
+    .map(ch => ch.name || ch.id);
+  const mirrorNames = channels
+    .filter(ch => ch.midiOutput?.mode === 'mirror')
+    .map(ch => ch.name || ch.id);
+
+  if (externalOnlyNames.length === 0 && mirrorNames.length === 0) {
+    return null;
+  }
+
+  if (format === 'midi') {
+    return {
+      externalOnlyNames,
+      mirrorNames,
+      tone: 'info',
+      headline: 'Standard MIDI (.mid) preserves external MIDI channel notes',
+      body: 'Musical note data and configured MIDI channels (1–16) are exported in the .mid file for both External Only and Mirror channels.',
+    };
+  }
+
+  const modeDetails: string[] = [];
+  if (externalOnlyNames.length > 0) {
+    modeDetails.push(
+      `External Only (${externalOnlyNames.join(', ')}) suppresses internal synthesis and renders silent in offline audio.`,
+    );
+  }
+  if (mirrorNames.length > 0) {
+    modeDetails.push(
+      `Mirror (${mirrorNames.join(', ')}) renders only its internal instrument audio.`,
+    );
+  }
+
+  return {
+    externalOnlyNames,
+    mirrorNames,
+    tone: 'warning',
+    headline: 'External MIDI hardware audio is not included in offline WAV/stem exports',
+    body: `${modeDetails.join(' ')} Route your hardware synth output into an audio input and record it onto an audio track first to include hardware audio in bounces.`,
+  };
+};
 
 /**
  * Pure helper exported for unit testing — returns true when the current
@@ -223,6 +282,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, chann
           const folder = zip.folder(`${meta.name.replace(/\s+/g, '_')}_Stems_BPM${meta.bpm}`);
           Object.entries(stems).forEach(([stemName, blob]) => folder?.file(stemName, blob));
           folder?.file('00_Master_Mix.wav', master);
+          const externalNotice = describeExternalMidiExportNotice(channels, 'stems');
           folder?.file('project_info.txt', [
             `PROJECT: ${meta.name}`,
             `AUTHOR: ${meta.author || 'Studio Producer'}`,
@@ -231,6 +291,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, chann
             `SWING: ${formatProjectSwingPercent(meta.swing)}`,
             `TRACKS COUNT: ${channels.length}`,
             `RENDER BARS: ${renderBars}`,
+            ...(externalNotice ? [`EXTERNAL MIDI NOTE: ${externalNotice.headline} — ${externalNotice.body}`] : []),
             `EXPORT DATE: ${new Date().toISOString()}`,
           ].join('\n'));
           setRenderProgress(80);
@@ -324,6 +385,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, chann
   // modal can never claim a different loop than the selected pattern declares.
   const patternLoopSteps = normalizePatternLengthSteps(patternLengthSteps);
   const patternRenderBars = getProjectRenderBars(clips, 'pattern', patternLengthSteps, undefined, meta.timeSignature);
+  const externalMidiNotice = describeExternalMidiExportNotice(channels, format);
 
   const formatOptions: Array<{ id: ExportFormat; name: string; desc: string }> = [
     { id: 'stems', name: 'All Stems (.zip)', desc: 'Multi-track WAV bundle' },
@@ -385,6 +447,21 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, chann
               ))}
             </div>
           </div>
+
+          {externalMidiNotice && (
+            <div
+              data-testid="export-external-midi-notice"
+              role="status"
+              className={`rounded-lg border p-2.5 text-[11px] space-y-1 ${
+                externalMidiNotice.tone === 'warning'
+                  ? 'bg-[color-mix(in_srgb,var(--apex-warning)_12%,transparent)] border-[color-mix(in_srgb,var(--apex-warning)_40%,transparent)]'
+                  : 'bg-[color-mix(in_srgb,var(--apex-accent)_10%,transparent)] border-[color-mix(in_srgb,var(--apex-accent)_35%,transparent)]'
+              }`}
+            >
+              <div className="font-bold text-[var(--apex-text)]">{externalMidiNotice.headline}</div>
+              <div className="text-[10px] leading-relaxed text-[var(--apex-text-2)]">{externalMidiNotice.body}</div>
+            </div>
+          )}
 
           {/*
             Phase 10A export-quality toggle. Default (unset) follows the project
