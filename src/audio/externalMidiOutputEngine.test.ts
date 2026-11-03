@@ -1148,4 +1148,92 @@ describe('AudioEngine External MIDI Output — discovery, usability, playback, m
     assert.ok(Math.abs((ch3Notes[0].timestamp! - step0OriginMs) - 31.25) < 1e-3);
     assert.ok(Math.abs((ch3Notes[1].timestamp! - step0OriginMs) - 156.25) < 1e-3);
   });
+
+  it('15. preserves per-channel release ownership in live AudioEngine playback when a long contributor is muted mid-note while a shorter contributor shares the same port, MIDI channel, and pitch', async () => {
+    const ctx = setupLiveEngine();
+    const sharedPort = new FakeMidiOutputPort('out-shared-ownership', { name: 'Sequential Take 5' });
+    await installMidiAccess({
+      inputs: new Map(),
+      outputs: new Map([[sharedPort.id, sharedPort]]),
+      onstatechange: null,
+    });
+
+    const chA = makeChannel('ch-eng-long-a', {
+      midiOutput: { outputDeviceId: sharedPort.id, midiChannel: 1, mode: 'external' },
+      notes: [
+        makeNote(60, 0, 4, 100 / 127), // step 0 -> +500 ms (4 steps)
+      ],
+    });
+    const chB = makeChannel('ch-eng-short-b', {
+      midiOutput: { outputDeviceId: sharedPort.id, midiChannel: 1, mode: 'external' },
+      notes: [
+        makeNote(60, 0.5, 1, 112 / 127), // +62.5 ms -> +187.5 ms (1 step)
+      ],
+    });
+    const siblingCh = makeChannel('ch-eng-sibling-ch2', {
+      midiOutput: { outputDeviceId: sharedPort.id, midiChannel: 2, mode: 'external' },
+      notes: [
+        makeNote(67, 0.5, 2, 96 / 127), // +62.5 ms -> +312.5 ms on MIDI Ch 2
+      ],
+    });
+    const tracks = makeMixerTracks();
+
+    let preStopPackets: Array<{ bytes: number[]; timestamp?: number }> = [];
+    try {
+      audioEngine.play([chA, chB, siblingCh], [], 'pat', 'pat-1', tracks, 16);
+      // Advance 130 ms (step 0 was at +30 ms -> now at step0 + 100 ms: past B's +62.5 ms attack, before B's +187.5 ms release)
+      advanceClock(ctx, 0.13, 10);
+
+      audioEngine.synchronizePlaybackState({
+        channels: [{ ...chA, mute: true }, chB, siblingCh],
+      });
+
+      assert.equal(engine.midiOutputScheduler.getActiveNoteCount(chA.id), 0);
+      assert.equal(engine.midiOutputScheduler.getActiveNoteCount(chB.id), 1);
+      assert.equal(
+        sharedPort.sent.some(p => p.bytes[0] === 0xb0 && p.bytes[1] === 123),
+        false,
+        'no CC 123 emitted on MIDI Ch 1 while chB still owns an active C4',
+      );
+
+      // Advance past 4+ steps (+600 ms total, well past 530 ms, before 16-step pattern wrap at 2000 ms)
+      advanceClock(ctx, 0.5, 10);
+      assert.equal(
+        engine.midiOutputScheduler.getActiveNoteCount(),
+        0,
+        'zero active notes after chB and siblingCh complete',
+      );
+      preStopPackets = sharedPort.getDeliveredWirePackets().map(p => ({
+        bytes: [...p.bytes],
+        timestamp: p.timestamp,
+      }));
+    } finally {
+      audioEngine.stop();
+      await audioEngine.releaseNativeInstruments();
+    }
+
+    const ch1Notes = preStopPackets.filter(
+      p => (p.bytes[0] === 0x90 || p.bytes[0] === 0x80) && p.bytes[1] === 60,
+    );
+    const ch2Notes = preStopPackets.filter(
+      p => (p.bytes[0] === 0x91 || p.bytes[0] === 0x81) && p.bytes[1] === 67,
+    );
+
+    assert.equal(ch1Notes.length, 4, 'exact 4 C4 events on Ch 1 (2 Note Ons, 2 Note Offs)');
+    const step0OriginMs = ch1Notes[0].timestamp!;
+    assert.deepEqual(ch1Notes[0].bytes, [0x90, 60, 100]);
+    assert.deepEqual(ch1Notes[1].bytes, [0x80, 60, 0]);
+    assert.deepEqual(ch1Notes[2].bytes, [0x90, 60, 112]);
+    assert.deepEqual(ch1Notes[3].bytes, [0x80, 60, 0]);
+    assert.ok(Math.abs((ch1Notes[1].timestamp! - step0OriginMs) - 62.5) < 1e-3);
+    assert.ok(Math.abs((ch1Notes[2].timestamp! - step0OriginMs) - 62.5) < 1e-3);
+    assert.ok(
+      Math.abs((ch1Notes[3].timestamp! - step0OriginMs) - 187.5) < 1e-3,
+      `expected chB Note Off at +187.5 ms (not chA +500 ms), got +${ch1Notes[3].timestamp! - step0OriginMs} ms`,
+    );
+
+    assert.equal(ch2Notes.length, 2, 'sibling Ch 2 note preserved 1:1');
+    assert.ok(Math.abs((ch2Notes[0].timestamp! - step0OriginMs) - 62.5) < 1e-3);
+    assert.ok(Math.abs((ch2Notes[1].timestamp! - step0OriginMs) - 312.5) < 1e-3);
+  });
 });

@@ -1833,4 +1833,992 @@ describe('MidiOutputScheduler — overlapping pitches, cleanup isolation, loop w
     simPerfMs = 2400;
     assert.equal(simScheduler.getActiveNoteCount(), 0, 'zero stuck notes after all releases');
   });
+
+  it('preserves per-channel release ownership (Long A 1000->1500 ms, Short B 1062.5->1187.5 ms): removing A releases B at 1187.5 ms, not 1500 ms', () => {
+    let perfMs = 1000;
+    const port = new InstrumentedMidiOutputPort('hw-ownership-long-short', {
+      nowPerfMs: () => perfMs,
+    });
+    const scheduler = new MidiOutputScheduler({
+      performanceNowMs: () => perfMs,
+      getOutputs: () => new Map([[port.id, port]]),
+    });
+    const chA = makeChannel('ch-a', {
+      midiOutput: { mode: 'external', outputDeviceId: port.id, midiChannel: 1 },
+    });
+    const chB = makeChannel('ch-b', {
+      midiOutput: { mode: 'external', outputDeviceId: port.id, midiChannel: 1 },
+    });
+
+    // Subcase A: Mute/reroute Channel A at 1100 ms (after B's 1062.5 ms attack, before B's 1187.5 ms release)
+    scheduler.beginTransportTake(1, 'song');
+    scheduler.beginTransportStep({
+      takeGeneration: 1,
+      absoluteStep: 0,
+      step: 0,
+      stepAudioTimeSeconds: 0,
+      unswungStepAudioTimeSeconds: 0,
+      grooveOffsetSeconds: 0,
+      bpm: 120,
+      mode: 'song',
+      patternLoopSteps: null,
+      contextCurrentTimeSeconds: 0,
+    });
+    scheduler.scheduleChannelNote({
+      channel: chA,
+      note: makeNote(60, { id: 'long-a', start: 0, duration: 4, velocity: 100 / 127 }),
+      onsetAudioTimeSeconds: 0, // -> 1000..1500 ms
+      bpm: 120,
+      contextCurrentTimeSeconds: 0,
+    });
+    scheduler.scheduleChannelNote({
+      channel: chB,
+      note: makeNote(60, { id: 'short-b', start: 0.5, duration: 1, velocity: 112 / 127 }),
+      onsetAudioTimeSeconds: 0.0625, // -> 1062.5..1187.5 ms
+      bpm: 120,
+      contextCurrentTimeSeconds: 0,
+    });
+    scheduler.endTransportStep();
+
+    assert.equal(scheduler.getActiveNoteCount('ch-a'), 1);
+    assert.equal(scheduler.getActiveNoteCount('ch-b'), 1);
+
+    // At 1100 ms: B is actively sounding; mute Channel A via reconcileChannels
+    perfMs = 1100;
+    const chAMuted: Channel = { ...chA, mute: true };
+    scheduler.reconcileChannels([chA, chB], [chAMuted, chB], c => !c.mute);
+
+    assert.equal(scheduler.getActiveNoteCount('ch-a'), 0, 'Channel A contributor removed');
+    assert.equal(scheduler.getActiveNoteCount('ch-b'), 1, 'Channel B contributor remains active until 1187.5 ms');
+    assert.equal(
+      port.sent.some(p => p.bytes[0] === 0xb0 && p.bytes[1] === 123),
+      false,
+      'must not send CC 123 while Channel B still owns an active note on MIDI Ch 1',
+    );
+
+    // Advance through steps 1..4 to verify no trailing 1500 ms Note Off ever fires
+    for (const stepIdx of [1, 2, 3, 4]) {
+      perfMs = 1000 + stepIdx * 125;
+      scheduler.beginTransportStep({
+        takeGeneration: 1,
+        absoluteStep: stepIdx,
+        step: stepIdx,
+        stepAudioTimeSeconds: stepIdx * 0.125,
+        unswungStepAudioTimeSeconds: stepIdx * 0.125,
+        grooveOffsetSeconds: 0,
+        bpm: 120,
+        mode: 'song',
+        patternLoopSteps: null,
+        contextCurrentTimeSeconds: stepIdx * 0.125,
+      });
+      scheduler.endTransportStep();
+      if (stepIdx === 2) {
+        // 1250 ms > 1187.5 ms: B must already be completely released!
+        assert.equal(scheduler.getActiveNoteCount(), 0, 'B already released before 1250 ms');
+      }
+    }
+
+    const deliveredA = port.getDeliveredWirePackets();
+    assert.deepEqual(
+      deliveredA.map(p => ({ bytes: p.bytes, timestamp: p.timestamp })),
+      [
+        { bytes: [0x90, 60, 100], timestamp: 1000 },
+        { bytes: [0x80, 60, 0], timestamp: 1062.5 },
+        { bytes: [0x90, 60, 112], timestamp: 1062.5 },
+        { bytes: [0x80, 60, 0], timestamp: 1187.5 },
+      ],
+      'B releases at its own 1187.5 ms timestamp (not A inherited 1500 ms) with exact 1:1 Note Off parity',
+    );
+
+    // Subcase B: Reroute Channel A at 1030 ms (while A is sounding, before B's 1062.5 ms attack)
+    port.sent.length = 0;
+    port.wireQueue.length = 0;
+    port.clearCalls = 0;
+    perfMs = 2000;
+
+    scheduler.beginTransportTake(2, 'song');
+    scheduler.beginTransportStep({
+      takeGeneration: 2,
+      absoluteStep: 0,
+      step: 0,
+      stepAudioTimeSeconds: 0,
+      unswungStepAudioTimeSeconds: 0,
+      grooveOffsetSeconds: 0,
+      bpm: 120,
+      mode: 'song',
+      patternLoopSteps: null,
+      contextCurrentTimeSeconds: 0,
+    });
+    scheduler.scheduleChannelNote({
+      channel: chA,
+      note: makeNote(60, { id: 'long-a2', start: 0, duration: 4, velocity: 100 / 127 }),
+      onsetAudioTimeSeconds: 0, // -> 2000..2500 ms
+      bpm: 120,
+      contextCurrentTimeSeconds: 0,
+    });
+    scheduler.scheduleChannelNote({
+      channel: chB,
+      note: makeNote(60, { id: 'short-b2', start: 0.5, duration: 1, velocity: 112 / 127 }),
+      onsetAudioTimeSeconds: 0.0625, // -> 2062.5..2187.5 ms
+      bpm: 120,
+      contextCurrentTimeSeconds: 0,
+    });
+    scheduler.endTransportStep();
+
+    perfMs = 2030;
+    const chARerouted: Channel = {
+      ...chA,
+      midiOutput: { mode: 'external', outputDeviceId: port.id, midiChannel: 5 },
+    };
+    scheduler.reconcileChannels([chA, chB], [chARerouted, chB], c => !c.mute);
+
+    assert.equal(scheduler.getActiveNoteCount('ch-a'), 0);
+    assert.equal(scheduler.getActiveNoteCount('ch-b'), 1);
+    assert.equal(
+      port.sent.some(p => p.bytes[0] === 0xb0 && p.bytes[1] === 123),
+      false,
+      'no CC 123 on MIDI Ch 1 while B owns upcoming 2062.5 ms note',
+    );
+
+    const deliveredB = port.getDeliveredWirePackets();
+    assert.deepEqual(
+      deliveredB.map(p => ({ bytes: p.bytes, timestamp: p.timestamp ?? 2030 })),
+      [
+        { bytes: [0x90, 60, 100], timestamp: 2000 },
+        { bytes: [0x80, 60, 0], timestamp: 2030 },
+        { bytes: [0x90, 60, 112], timestamp: 2062.5 },
+        { bytes: [0x80, 60, 0], timestamp: 2187.5 },
+      ],
+      'A stops immediately at 2030 ms, stale 2062.5 ms Note Off is cancelled, and B plays 2062.5->2187.5 ms with 1:1 Note Off parity',
+    );
+    perfMs = 2200;
+    assert.equal(scheduler.getActiveNoteCount(), 0);
+  });
+
+  it('preserves inverse release ownership: removing the shorter contributor keeps the longer surviving note release intact', () => {
+    let perfMs = 1000;
+    const port = new InstrumentedMidiOutputPort('hw-inverse-ownership', {
+      nowPerfMs: () => perfMs,
+    });
+    const scheduler = new MidiOutputScheduler({
+      performanceNowMs: () => perfMs,
+      getOutputs: () => new Map([[port.id, port]]),
+    });
+    const chA = makeChannel('ch-short-a', {
+      midiOutput: { mode: 'external', outputDeviceId: port.id, midiChannel: 1 },
+    });
+    const chB = makeChannel('ch-long-b', {
+      midiOutput: { mode: 'external', outputDeviceId: port.id, midiChannel: 1 },
+    });
+
+    // Subcase 1: Short A (1000->1125 ms) + Long B (1062.5->1562.5 ms); remove shorter A at 1080 ms
+    scheduler.beginTransportTake(1, 'song');
+    scheduler.beginTransportStep({
+      takeGeneration: 1,
+      absoluteStep: 0,
+      step: 0,
+      stepAudioTimeSeconds: 0,
+      unswungStepAudioTimeSeconds: 0,
+      grooveOffsetSeconds: 0,
+      bpm: 120,
+      mode: 'song',
+      patternLoopSteps: null,
+      contextCurrentTimeSeconds: 0,
+    });
+    scheduler.scheduleChannelNote({
+      channel: chA,
+      note: makeNote(60, { id: 'inv-short-a', start: 0, duration: 1, velocity: 96 / 127 }),
+      onsetAudioTimeSeconds: 0, // -> 1000..1125 ms
+      bpm: 120,
+      contextCurrentTimeSeconds: 0,
+    });
+    scheduler.scheduleChannelNote({
+      channel: chB,
+      note: makeNote(60, { id: 'inv-long-b', start: 0.5, duration: 4, velocity: 118 / 127 }),
+      onsetAudioTimeSeconds: 0.0625, // -> 1062.5..1562.5 ms
+      bpm: 120,
+      contextCurrentTimeSeconds: 0,
+    });
+    scheduler.endTransportStep();
+
+    perfMs = 1080;
+    scheduler.cleanupChannel('ch-short-a');
+    assert.equal(scheduler.getActiveNoteCount('ch-short-a'), 0);
+    assert.equal(scheduler.getActiveNoteCount('ch-long-b'), 1);
+
+    for (const stepIdx of [1, 2, 3, 4]) {
+      perfMs = 1000 + stepIdx * 125;
+      scheduler.beginTransportStep({
+        takeGeneration: 1,
+        absoluteStep: stepIdx,
+        step: stepIdx,
+        stepAudioTimeSeconds: stepIdx * 0.125,
+        unswungStepAudioTimeSeconds: stepIdx * 0.125,
+        grooveOffsetSeconds: 0,
+        bpm: 120,
+        mode: 'song',
+        patternLoopSteps: null,
+        contextCurrentTimeSeconds: stepIdx * 0.125,
+      });
+      scheduler.endTransportStep();
+    }
+
+    assert.deepEqual(
+      port.getDeliveredWirePackets().map(p => ({ bytes: p.bytes, timestamp: p.timestamp })),
+      [
+        { bytes: [0x90, 60, 96], timestamp: 1000 },
+        { bytes: [0x80, 60, 0], timestamp: 1062.5 },
+        { bytes: [0x90, 60, 118], timestamp: 1062.5 },
+        { bytes: [0x80, 60, 0], timestamp: 1562.5 },
+      ],
+      'longer later-arriving B retains its full 1562.5 ms release after shorter A is removed',
+    );
+    perfMs = 1600;
+    assert.equal(scheduler.getActiveNoteCount(), 0);
+
+    // Subcase 2: Long A (2000->2500 ms) + Short B (2062.5->2187.5 ms); remove shorter B at 2100 ms (after B retriggered!)
+    // Surviving Long A must still extend the physical voice until 2500 ms without premature cutoff!
+    port.sent.length = 0;
+    port.wireQueue.length = 0;
+    port.clearCalls = 0;
+    perfMs = 2000;
+
+    scheduler.beginTransportTake(2, 'song');
+    scheduler.beginTransportStep({
+      takeGeneration: 2,
+      absoluteStep: 0,
+      step: 0,
+      stepAudioTimeSeconds: 0,
+      unswungStepAudioTimeSeconds: 0,
+      grooveOffsetSeconds: 0,
+      bpm: 120,
+      mode: 'song',
+      patternLoopSteps: null,
+      contextCurrentTimeSeconds: 0,
+    });
+    scheduler.scheduleChannelNote({
+      channel: chB, // chB plays long 2000->2500
+      note: makeNote(60, { id: 'inv2-long-early', start: 0, duration: 4, velocity: 104 / 127 }),
+      onsetAudioTimeSeconds: 0,
+      bpm: 120,
+      contextCurrentTimeSeconds: 0,
+    });
+    scheduler.scheduleChannelNote({
+      channel: chA, // chA plays short 2062.5->2187.5
+      note: makeNote(60, { id: 'inv2-short-late', start: 0.5, duration: 1, velocity: 90 / 127 }),
+      onsetAudioTimeSeconds: 0.0625,
+      bpm: 120,
+      contextCurrentTimeSeconds: 0,
+    });
+    scheduler.endTransportStep();
+
+    perfMs = 2100;
+    scheduler.cleanupChannel('ch-short-a');
+    assert.equal(scheduler.getActiveNoteCount('ch-short-a'), 0);
+    assert.equal(scheduler.getActiveNoteCount('ch-long-b'), 1, 'surviving long contributor reclaims open voice');
+
+    for (const stepIdx of [1, 2, 3, 4]) {
+      perfMs = 2000 + stepIdx * 125;
+      scheduler.beginTransportStep({
+        takeGeneration: 2,
+        absoluteStep: stepIdx,
+        step: stepIdx,
+        stepAudioTimeSeconds: stepIdx * 0.125,
+        unswungStepAudioTimeSeconds: stepIdx * 0.125,
+        grooveOffsetSeconds: 0,
+        bpm: 120,
+        mode: 'song',
+        patternLoopSteps: null,
+        contextCurrentTimeSeconds: stepIdx * 0.125,
+      });
+      scheduler.endTransportStep();
+    }
+
+    assert.deepEqual(
+      port.getDeliveredWirePackets().map(p => ({ bytes: p.bytes, timestamp: p.timestamp })),
+      [
+        { bytes: [0x90, 60, 104], timestamp: 2000 },
+        { bytes: [0x80, 60, 0], timestamp: 2062.5 },
+        { bytes: [0x90, 60, 90], timestamp: 2062.5 },
+        { bytes: [0x80, 60, 0], timestamp: 2500 },
+      ],
+      'removing shorter B mid-voice allows surviving Long A to keep extending the voice to 2500 ms with 1:1 Note Off parity',
+    );
+    perfMs = 2550;
+    assert.equal(scheduler.getActiveNoteCount(), 0);
+  });
+
+  it('preserves per-channel release ownership when overlapping notes are submitted in reverse chronological order', () => {
+    let perfMs = 1000;
+    const port = new InstrumentedMidiOutputPort('hw-reverse-ownership', {
+      nowPerfMs: () => perfMs,
+    });
+    const scheduler = new MidiOutputScheduler({
+      performanceNowMs: () => perfMs,
+      getOutputs: () => new Map([[port.id, port]]),
+    });
+    const chA = makeChannel('ch-rev-a', {
+      midiOutput: { mode: 'external', outputDeviceId: port.id, midiChannel: 1 },
+    });
+    const chB = makeChannel('ch-rev-b', {
+      midiOutput: { mode: 'external', outputDeviceId: port.id, midiChannel: 1 },
+    });
+
+    // Subcase 1 (Reverse Long A + Short B): Submit Short B (1062.5->1187.5 ms) FIRST, then Long A (1000->1500 ms) SECOND!
+    scheduler.beginTransportTake(1, 'song');
+    scheduler.beginTransportStep({
+      takeGeneration: 1,
+      absoluteStep: 0,
+      step: 0,
+      stepAudioTimeSeconds: 0,
+      unswungStepAudioTimeSeconds: 0,
+      grooveOffsetSeconds: 0,
+      bpm: 120,
+      mode: 'song',
+      patternLoopSteps: null,
+      contextCurrentTimeSeconds: 0,
+    });
+    scheduler.scheduleChannelNote({
+      channel: chB,
+      note: makeNote(60, { id: 'rev-own-b', start: 0.5, duration: 1, velocity: 112 / 127 }),
+      onsetAudioTimeSeconds: 0.0625, // -> 1062.5..1187.5 ms (queued FIRST)
+      bpm: 120,
+      contextCurrentTimeSeconds: 0,
+    });
+    scheduler.scheduleChannelNote({
+      channel: chA,
+      note: makeNote(60, { id: 'rev-own-a', start: 0, duration: 4, velocity: 100 / 127 }),
+      onsetAudioTimeSeconds: 0, // -> 1000..1500 ms (submitted SECOND)
+      bpm: 120,
+      contextCurrentTimeSeconds: 0,
+    });
+    scheduler.endTransportStep();
+
+    perfMs = 1100;
+    scheduler.cleanupChannel('ch-rev-a');
+    assert.equal(scheduler.getActiveNoteCount('ch-rev-a'), 0);
+    assert.equal(scheduler.getActiveNoteCount('ch-rev-b'), 1);
+
+    for (const stepIdx of [1, 2, 3, 4]) {
+      perfMs = 1000 + stepIdx * 125;
+      scheduler.beginTransportStep({
+        takeGeneration: 1,
+        absoluteStep: stepIdx,
+        step: stepIdx,
+        stepAudioTimeSeconds: stepIdx * 0.125,
+        unswungStepAudioTimeSeconds: stepIdx * 0.125,
+        grooveOffsetSeconds: 0,
+        bpm: 120,
+        mode: 'song',
+        patternLoopSteps: null,
+        contextCurrentTimeSeconds: stepIdx * 0.125,
+      });
+      scheduler.endTransportStep();
+    }
+
+    assert.deepEqual(
+      port.getDeliveredWirePackets().map(p => ({ bytes: p.bytes, timestamp: p.timestamp })),
+      [
+        { bytes: [0x90, 60, 100], timestamp: 1000 },
+        { bytes: [0x80, 60, 0], timestamp: 1062.5 },
+        { bytes: [0x90, 60, 112], timestamp: 1062.5 },
+        { bytes: [0x80, 60, 0], timestamp: 1187.5 },
+      ],
+      'reverse-scheduled Short B releases at its own 1187.5 ms after Long A is removed',
+    );
+    perfMs = 1200;
+    assert.equal(scheduler.getActiveNoteCount(), 0);
+
+    // Subcase 2 (Reverse Inverse Ownership): Submit Long B (2100->2600 ms) FIRST, then Short A (2062.5->2187.5 ms) SECOND;
+    // remove Short A at 2120 ms -> Long B must retain 2600 ms!
+    port.sent.length = 0;
+    port.wireQueue.length = 0;
+    port.clearCalls = 0;
+    perfMs = 2000;
+
+    scheduler.beginTransportTake(2, 'song');
+    scheduler.beginTransportStep({
+      takeGeneration: 2,
+      absoluteStep: 0,
+      step: 0,
+      stepAudioTimeSeconds: 0,
+      unswungStepAudioTimeSeconds: 0,
+      grooveOffsetSeconds: 0,
+      bpm: 120,
+      mode: 'song',
+      patternLoopSteps: null,
+      contextCurrentTimeSeconds: 0,
+    });
+    scheduler.scheduleChannelNote({
+      channel: chB,
+      note: makeNote(60, { id: 'rev-inv-b', start: 0.8, duration: 4, velocity: 115 / 127 }),
+      onsetAudioTimeSeconds: 0.1, // -> 2100..2600 ms (submitted FIRST)
+      bpm: 120,
+      contextCurrentTimeSeconds: 0,
+    });
+    scheduler.scheduleChannelNote({
+      channel: chA,
+      note: makeNote(60, { id: 'rev-inv-a', start: 0.5, duration: 1, velocity: 92 / 127 }),
+      onsetAudioTimeSeconds: 0.0625, // -> 2062.5..2187.5 ms (submitted SECOND)
+      bpm: 120,
+      contextCurrentTimeSeconds: 0,
+    });
+    scheduler.endTransportStep();
+
+    perfMs = 2120;
+    scheduler.cleanupChannel('ch-rev-a');
+    assert.equal(scheduler.getActiveNoteCount('ch-rev-a'), 0);
+    assert.equal(scheduler.getActiveNoteCount('ch-rev-b'), 1);
+
+    for (const stepIdx of [1, 2, 3, 4]) {
+      perfMs = 2000 + stepIdx * 125;
+      scheduler.beginTransportStep({
+        takeGeneration: 2,
+        absoluteStep: stepIdx,
+        step: stepIdx,
+        stepAudioTimeSeconds: stepIdx * 0.125,
+        unswungStepAudioTimeSeconds: stepIdx * 0.125,
+        grooveOffsetSeconds: 0,
+        bpm: 120,
+        mode: 'song',
+        patternLoopSteps: null,
+        contextCurrentTimeSeconds: stepIdx * 0.125,
+      });
+      scheduler.endTransportStep();
+    }
+
+    assert.deepEqual(
+      port.getDeliveredWirePackets().map(p => ({ bytes: p.bytes, timestamp: p.timestamp })),
+      [
+        { bytes: [0x90, 60, 92], timestamp: 2062.5 },
+        { bytes: [0x80, 60, 0], timestamp: 2100 },
+        { bytes: [0x90, 60, 115], timestamp: 2100 },
+        { bytes: [0x80, 60, 0], timestamp: 2600 },
+      ],
+      'reverse-scheduled Long B retains its full 2600 ms release when Short A is removed',
+    );
+    perfMs = 2650;
+    assert.equal(scheduler.getActiveNoteCount(), 0);
+  });
+
+  it('recomputes three-note same-pitch cluster releases from surviving contributors without blindly shortening surviving envelopes', () => {
+    let perfMs = 1000;
+    const port = new InstrumentedMidiOutputPort('hw-three-cluster-ownership', {
+      nowPerfMs: () => perfMs,
+    });
+    const scheduler = new MidiOutputScheduler({
+      performanceNowMs: () => perfMs,
+      getOutputs: () => new Map([[port.id, port]]),
+    });
+    const chA = makeChannel('ch-3a', {
+      midiOutput: { mode: 'external', outputDeviceId: port.id, midiChannel: 1 },
+    });
+    const chB = makeChannel('ch-3b', {
+      midiOutput: { mode: 'external', outputDeviceId: port.id, midiChannel: 1 },
+    });
+    const chC = makeChannel('ch-3c', {
+      midiOutput: { mode: 'external', outputDeviceId: port.id, midiChannel: 1 },
+    });
+
+    // Subcase 1: Mixed arrival order (C -> A -> B):
+    //   A: 1000 -> 1500 ms (4 steps, vel 100)
+    //   B: 1062.5 -> 1375 ms (2.5 steps, vel 92)
+    //   C: 1100 -> 1225 ms (1 step, vel 84)
+    // Remove A at 1120 ms -> surviving {B, C} must release at B's 1375 ms (NOT 1500 ms, and NOT C's 1225 ms)!
+    scheduler.beginTransportTake(1, 'song');
+    scheduler.beginTransportStep({
+      takeGeneration: 1,
+      absoluteStep: 0,
+      step: 0,
+      stepAudioTimeSeconds: 0,
+      unswungStepAudioTimeSeconds: 0,
+      grooveOffsetSeconds: 0,
+      bpm: 120,
+      mode: 'song',
+      patternLoopSteps: null,
+      contextCurrentTimeSeconds: 0,
+    });
+    scheduler.scheduleChannelNote({
+      channel: chC,
+      note: makeNote(60, { id: '3c', start: 0.8, duration: 1, velocity: 84 / 127 }),
+      onsetAudioTimeSeconds: 0.1, // -> 1100..1225 ms
+      bpm: 120,
+      contextCurrentTimeSeconds: 0,
+    });
+    scheduler.scheduleChannelNote({
+      channel: chA,
+      note: makeNote(60, { id: '3a', start: 0, duration: 4, velocity: 100 / 127 }),
+      onsetAudioTimeSeconds: 0, // -> 1000..1500 ms
+      bpm: 120,
+      contextCurrentTimeSeconds: 0,
+    });
+    scheduler.scheduleChannelNote({
+      channel: chB,
+      note: makeNote(60, { id: '3b', start: 0.5, duration: 2.5, velocity: 92 / 127 }),
+      onsetAudioTimeSeconds: 0.0625, // -> 1062.5..1375 ms
+      bpm: 120,
+      contextCurrentTimeSeconds: 0,
+    });
+    scheduler.endTransportStep();
+
+    perfMs = 1120;
+    scheduler.cleanupChannel('ch-3a');
+    assert.equal(scheduler.getActiveNoteCount('ch-3a'), 0);
+    assert.equal(scheduler.getActiveNoteCount('ch-3b'), 1);
+    assert.equal(scheduler.getActiveNoteCount('ch-3c'), 1);
+
+    for (const stepIdx of [1, 2, 3, 4]) {
+      perfMs = 1000 + stepIdx * 125;
+      scheduler.beginTransportStep({
+        takeGeneration: 1,
+        absoluteStep: stepIdx,
+        step: stepIdx,
+        stepAudioTimeSeconds: stepIdx * 0.125,
+        unswungStepAudioTimeSeconds: stepIdx * 0.125,
+        grooveOffsetSeconds: 0,
+        bpm: 120,
+        mode: 'song',
+        patternLoopSteps: null,
+        contextCurrentTimeSeconds: stepIdx * 0.125,
+      });
+      scheduler.endTransportStep();
+    }
+
+    assert.deepEqual(
+      port.getDeliveredWirePackets().map(p => ({ bytes: p.bytes, timestamp: p.timestamp })),
+      [
+        { bytes: [0x90, 60, 100], timestamp: 1000 },
+        { bytes: [0x80, 60, 0], timestamp: 1062.5 },
+        { bytes: [0x90, 60, 92], timestamp: 1062.5 },
+        { bytes: [0x80, 60, 0], timestamp: 1100 },
+        { bytes: [0x90, 60, 84], timestamp: 1100 },
+        { bytes: [0x80, 60, 0], timestamp: 1375 },
+      ],
+      'removing longest contributor A recalculates cluster tail to surviving B 1375 ms (3 Note Ons, 3 Note Offs)',
+    );
+    perfMs = 1400;
+    assert.equal(scheduler.getActiveNoteCount(), 0);
+
+    // Subcase 2: Sequential removal of A (at 2120 ms) AND B (at 2150 ms) collapses release to C's own 2225 ms!
+    port.sent.length = 0;
+    port.wireQueue.length = 0;
+    port.clearCalls = 0;
+    perfMs = 2000;
+
+    scheduler.beginTransportTake(2, 'song');
+    scheduler.beginTransportStep({
+      takeGeneration: 2,
+      absoluteStep: 0,
+      step: 0,
+      stepAudioTimeSeconds: 0,
+      unswungStepAudioTimeSeconds: 0,
+      grooveOffsetSeconds: 0,
+      bpm: 120,
+      mode: 'song',
+      patternLoopSteps: null,
+      contextCurrentTimeSeconds: 0,
+    });
+    scheduler.scheduleChannelNote({
+      channel: chA,
+      note: makeNote(60, { id: '3a-seq', start: 0, duration: 4, velocity: 100 / 127 }),
+      onsetAudioTimeSeconds: 0, // -> 2000..2500 ms
+      bpm: 120,
+      contextCurrentTimeSeconds: 0,
+    });
+    scheduler.scheduleChannelNote({
+      channel: chB,
+      note: makeNote(60, { id: '3b-seq', start: 0.5, duration: 2.5, velocity: 92 / 127 }),
+      onsetAudioTimeSeconds: 0.0625, // -> 2062.5..2375 ms
+      bpm: 120,
+      contextCurrentTimeSeconds: 0,
+    });
+    scheduler.scheduleChannelNote({
+      channel: chC,
+      note: makeNote(60, { id: '3c-seq', start: 0.8, duration: 1, velocity: 84 / 127 }),
+      onsetAudioTimeSeconds: 0.1, // -> 2100..2225 ms
+      bpm: 120,
+      contextCurrentTimeSeconds: 0,
+    });
+    scheduler.endTransportStep();
+
+    perfMs = 2120;
+    scheduler.cleanupChannel('ch-3a');
+    perfMs = 2150;
+    scheduler.cleanupChannel('ch-3b');
+    assert.equal(scheduler.getActiveNoteCount('ch-3c'), 1);
+    assert.equal(scheduler.getActiveNoteCount(), 1);
+
+    assert.deepEqual(
+      port.getDeliveredWirePackets().map(p => ({ bytes: p.bytes, timestamp: p.timestamp })),
+      [
+        { bytes: [0x90, 60, 100], timestamp: 2000 },
+        { bytes: [0x80, 60, 0], timestamp: 2062.5 },
+        { bytes: [0x90, 60, 92], timestamp: 2062.5 },
+        { bytes: [0x80, 60, 0], timestamp: 2100 },
+        { bytes: [0x90, 60, 84], timestamp: 2100 },
+        { bytes: [0x80, 60, 0], timestamp: 2225 },
+      ],
+      'removing both A and B leaves C releasing at its own 2225 ms',
+    );
+    perfMs = 2250;
+    assert.equal(scheduler.getActiveNoteCount(), 0);
+  });
+
+  it('preserves shared-port sibling Note Ons, Note Offs, and CCs and suppresses CC 123 while another DAW channel owns an active note on the same MIDI channel', () => {
+    let perfMs = 1000;
+    const sharedPort = new InstrumentedMidiOutputPort('hw-shared-own', {
+      nowPerfMs: () => perfMs,
+    });
+    const otherPort = new InstrumentedMidiOutputPort('hw-other-own', {
+      nowPerfMs: () => perfMs,
+    });
+    const ports = new Map<string, MidiOutputPortLike>([
+      [sharedPort.id, sharedPort],
+      [otherPort.id, otherPort],
+    ]);
+    const scheduler = new MidiOutputScheduler({
+      performanceNowMs: () => perfMs,
+      getOutputs: () => ports,
+    });
+
+    const chA = makeChannel('ch-own-a', {
+      midiOutput: { mode: 'external', outputDeviceId: sharedPort.id, midiChannel: 1 },
+    });
+    const chB = makeChannel('ch-own-b', {
+      midiOutput: { mode: 'external', outputDeviceId: sharedPort.id, midiChannel: 1 },
+    });
+    const chSiblingSameMidiCh = makeChannel('ch-own-sib-ch1', {
+      midiOutput: { mode: 'external', outputDeviceId: sharedPort.id, midiChannel: 1 },
+    });
+    const chSiblingCh2 = makeChannel('ch-own-sib-ch2', {
+      midiOutput: { mode: 'external', outputDeviceId: sharedPort.id, midiChannel: 2 },
+    });
+    const chOtherPort = makeChannel('ch-own-other-port', {
+      midiOutput: { mode: 'external', outputDeviceId: otherPort.id, midiChannel: 1 },
+    });
+
+    scheduler.beginTransportTake(1, 'song');
+    scheduler.beginTransportStep({
+      takeGeneration: 1,
+      absoluteStep: 0,
+      step: 0,
+      stepAudioTimeSeconds: 0,
+      unswungStepAudioTimeSeconds: 0,
+      grooveOffsetSeconds: 0,
+      bpm: 120,
+      mode: 'song',
+      patternLoopSteps: null,
+      contextCurrentTimeSeconds: 0,
+    });
+    // Long A (1000->1500 ms) + Short B (1062.5->1187.5 ms) on sharedPort Ch 1 pitch C4 (60)
+    scheduler.scheduleChannelNote({
+      channel: chA,
+      note: makeNote(60, { id: 'sh-a', start: 0, duration: 4, velocity: 100 / 127 }),
+      onsetAudioTimeSeconds: 0,
+      bpm: 120,
+      contextCurrentTimeSeconds: 0,
+    });
+    scheduler.scheduleChannelNote({
+      channel: chB,
+      note: makeNote(60, { id: 'sh-b', start: 0.5, duration: 1, velocity: 112 / 127 }),
+      onsetAudioTimeSeconds: 0.0625,
+      bpm: 120,
+      contextCurrentTimeSeconds: 0,
+    });
+    // Additional note on sharedPort Ch 1 pitch E4 (64) owned by chSiblingSameMidiCh (1080->1205 ms)
+    scheduler.scheduleChannelNote({
+      channel: chSiblingSameMidiCh,
+      note: makeNote(64, { id: 'sh-sib-ch1', start: 0.64, duration: 1, velocity: 95 / 127 }),
+      onsetAudioTimeSeconds: 0.08,
+      bpm: 120,
+      contextCurrentTimeSeconds: 0,
+    });
+    // Unrelated sibling channel on sharedPort Ch 2 with future Note On (1090 ms), Note Off (1215 ms), and future CCs
+    scheduler.scheduleChannelNote({
+      channel: chSiblingCh2,
+      note: makeNote(67, { id: 'sh-sib-ch2', start: 0.72, duration: 1, velocity: 108 / 127 }),
+      onsetAudioTimeSeconds: 0.09,
+      bpm: 120,
+      contextCurrentTimeSeconds: 0,
+    });
+    // Unrelated physical port
+    scheduler.scheduleChannelNote({
+      channel: chOtherPort,
+      note: makeNote(48, { id: 'sh-other', start: 0.4, duration: 1, velocity: 90 / 127 }),
+      onsetAudioTimeSeconds: 0.05,
+      bpm: 120,
+      contextCurrentTimeSeconds: 0,
+    });
+    scheduler.endTransportStep();
+
+    scheduler.sendChannelControlChange(chSiblingCh2, 74, 99, 0.11, 0); // -> 1110 ms on Ch 2
+    scheduler.sendChannelControlChange(chSiblingCh2, 1, 64, 0.075, 0); // -> 1075 ms on Ch 2
+
+    // At 1030 ms (before 1062.5 ms, forcing sharedPort.clear()), clean up chA!
+    perfMs = 1030;
+    scheduler.cleanupChannel('ch-own-a');
+
+    assert.equal(otherPort.clearCalls, 0, 'unrelated physical port never cleared');
+    assert.equal(
+      sharedPort.sent.some(p => p.bytes[0] === 0xb0 && p.bytes[1] === 123),
+      false,
+      'must NOT emit CC 123 on MIDI Ch 1 while ch-own-b and ch-own-sib-ch1 still own active notes on Ch 1',
+    );
+    assert.equal(
+      sharedPort.sent.some(p => p.bytes[0] === 0xb1 && p.bytes[1] === 123),
+      false,
+      'must NOT emit CC 123 on sibling MIDI Ch 2',
+    );
+
+    const deliveredShared = sharedPort.getDeliveredWirePackets();
+    const ch1Delivered = deliveredShared.filter(p => (p.bytes[0] & 0x0f) === 0);
+    const ch2Delivered = deliveredShared.filter(p => (p.bytes[0] & 0x0f) === 1);
+
+    assert.deepEqual(
+      ch1Delivered.map(p => ({ bytes: p.bytes, timestamp: p.timestamp ?? 1030 })),
+      [
+        { bytes: [0x90, 60, 100], timestamp: 1000 },
+        { bytes: [0x80, 60, 0], timestamp: 1030 },
+        { bytes: [0x90, 60, 112], timestamp: 1062.5 },
+        { bytes: [0x90, 64, 95], timestamp: 1080 },
+        { bytes: [0x80, 60, 0], timestamp: 1187.5 },
+        { bytes: [0x80, 64, 0], timestamp: 1205 },
+      ],
+      'Ch 1 preserves sibling E4 at 1080->1205 ms and releases B C4 at 1187.5 ms without CC 123',
+    );
+
+    assert.deepEqual(
+      ch2Delivered.map(p => ({ bytes: p.bytes, timestamp: p.timestamp })),
+      [
+        { bytes: [0xb1, 1, 64], timestamp: 1075 },
+        { bytes: [0x91, 67, 108], timestamp: 1090 },
+        { bytes: [0xb1, 74, 99], timestamp: 1110 },
+        { bytes: [0x81, 67, 0], timestamp: 1215 },
+      ],
+      'Ch 2 sibling Note On, Note Off, and timestamped CCs preserved at exact original timestamps',
+    );
+
+    // Once chB finishes at 1187.5 ms, cleaning up the final active owner on Ch 1 (at 1195 ms) DOES emit CC 123!
+    perfMs = 1195;
+    scheduler.cleanupChannel('ch-own-sib-ch1');
+    assert.equal(
+      sharedPort.sent.some(p => p.bytes[0] === 0xb0 && p.bytes[1] === 123 && p.bytes[2] === 0),
+      true,
+      'CC 123 emitted once the final active owner on MIDI Ch 1 is cleaned up',
+    );
+
+    perfMs = 1250;
+    assert.equal(scheduler.getActiveNoteCount(), 0);
+  });
+
+  it('handles per-channel ownership cleanup honestly on ports without MIDIOutput.clear() (or when clear() throws) with strict Note Off parity', () => {
+    let perfMs = 1000;
+    const noClearPort = new InstrumentedMidiOutputPort('hw-own-noclear', {
+      supportsClear: false,
+      nowPerfMs: () => perfMs,
+    });
+    const scheduler = new MidiOutputScheduler({
+      performanceNowMs: () => perfMs,
+      getOutputs: () => new Map([[noClearPort.id, noClearPort]]),
+    });
+    const chA = makeChannel('ch-nc-a', {
+      midiOutput: { mode: 'external', outputDeviceId: noClearPort.id, midiChannel: 1 },
+    });
+    const chB = makeChannel('ch-nc-b', {
+      midiOutput: { mode: 'external', outputDeviceId: noClearPort.id, midiChannel: 1 },
+    });
+
+    // Subcase 1: Short A (1000->1125 ms, Note Off @ 1125 already queued!) + Long B (1062.5->1562.5 ms).
+    // Even if Short A is cleaned up at 1080 ms, the clear-less port CANNOT cancel the queued 1125 ms Note Off:
+    // never pretend it was cancelled and never emit an orphan 3rd Note Off at 1562.5 ms!
+    scheduler.beginTransportTake(1, 'song');
+    scheduler.beginTransportStep({
+      takeGeneration: 1,
+      absoluteStep: 0,
+      step: 0,
+      stepAudioTimeSeconds: 0,
+      unswungStepAudioTimeSeconds: 0,
+      grooveOffsetSeconds: 0,
+      bpm: 120,
+      mode: 'song',
+      patternLoopSteps: null,
+      contextCurrentTimeSeconds: 0,
+    });
+    assert.deepEqual(
+      scheduler.scheduleChannelNote({
+        channel: chA,
+        note: makeNote(60, { id: 'nc-own-short', start: 0, duration: 1, velocity: 96 / 127 }),
+        onsetAudioTimeSeconds: 0, // -> 1000..1125 ms
+        bpm: 120,
+        contextCurrentTimeSeconds: 0,
+      }),
+      { sent: true },
+    );
+    assert.deepEqual(
+      scheduler.scheduleChannelNote({
+        channel: chB,
+        note: makeNote(60, { id: 'nc-own-long', start: 0.5, duration: 4, velocity: 114 / 127 }),
+        onsetAudioTimeSeconds: 0.0625, // -> 1062.5..1562.5 ms
+        bpm: 120,
+        contextCurrentTimeSeconds: 0,
+      }),
+      {
+        sent: true,
+        uncancelledQueuedNoteOff: true,
+        effectiveReleasePerfMs: 1125,
+      },
+    );
+    scheduler.endTransportStep();
+
+    perfMs = 1080;
+    scheduler.cleanupChannel('ch-nc-a');
+    assert.equal(noClearPort.clearCalls, 0);
+    assert.equal(
+      noClearPort.sent.some(p => p.bytes[0] === 0xb0 && p.bytes[1] === 123),
+      false,
+      'no CC 123 while B remains active until uncancelled 1125 ms cutoff',
+    );
+
+    for (const stepIdx of [1, 2, 3, 4]) {
+      perfMs = 1000 + stepIdx * 125;
+      scheduler.beginTransportStep({
+        takeGeneration: 1,
+        absoluteStep: stepIdx,
+        step: stepIdx,
+        stepAudioTimeSeconds: stepIdx * 0.125,
+        unswungStepAudioTimeSeconds: stepIdx * 0.125,
+        grooveOffsetSeconds: 0,
+        bpm: 120,
+        mode: 'song',
+        patternLoopSteps: null,
+        contextCurrentTimeSeconds: stepIdx * 0.125,
+      });
+      scheduler.endTransportStep();
+    }
+
+    const ncOns1 = noClearPort.sent.filter(p => (p.bytes[0] & 0xf0) === 0x90);
+    const ncOffs1 = noClearPort.sent.filter(p => (p.bytes[0] & 0xf0) === 0x80);
+    assert.equal(ncOns1.length, 2, 'exact 2 Note Ons');
+    assert.equal(ncOffs1.length, 2, 'strict 1:1 Note Off parity — no orphan 1562.5 ms Note Off');
+    assert.deepEqual(
+      ncOffs1.map(p => p.timestamp).sort((a, b) => (a ?? 0) - (b ?? 0)),
+      [1062.5, 1125],
+    );
+    perfMs = 1200;
+    assert.equal(scheduler.getActiveNoteCount(), 0);
+
+    // Subcase 2: Long A (2000->2500 ms, unqueued beyond horizon) + Short B (2062.5->2187.5 ms) on clear-less port:
+    // removing Long A at 2100 ms queues Short B's 2187.5 ms Note Off cleanly!
+    noClearPort.sent.length = 0;
+    perfMs = 2000;
+    scheduler.beginTransportTake(2, 'song');
+    scheduler.beginTransportStep({
+      takeGeneration: 2,
+      absoluteStep: 0,
+      step: 0,
+      stepAudioTimeSeconds: 0,
+      unswungStepAudioTimeSeconds: 0,
+      grooveOffsetSeconds: 0,
+      bpm: 120,
+      mode: 'song',
+      patternLoopSteps: null,
+      contextCurrentTimeSeconds: 0,
+    });
+    scheduler.scheduleChannelNote({
+      channel: chA,
+      note: makeNote(60, { id: 'nc2-long-a', start: 0, duration: 4, velocity: 100 / 127 }),
+      onsetAudioTimeSeconds: 0,
+      bpm: 120,
+      contextCurrentTimeSeconds: 0,
+    });
+    scheduler.scheduleChannelNote({
+      channel: chB,
+      note: makeNote(60, { id: 'nc2-short-b', start: 0.5, duration: 1, velocity: 112 / 127 }),
+      onsetAudioTimeSeconds: 0.0625,
+      bpm: 120,
+      contextCurrentTimeSeconds: 0,
+    });
+    scheduler.endTransportStep();
+
+    perfMs = 2100;
+    scheduler.cleanupChannel('ch-nc-a');
+
+    assert.deepEqual(
+      noClearPort.sent.map(p => ({ bytes: p.bytes, timestamp: p.timestamp })),
+      [
+        { bytes: [0x90, 60, 100], timestamp: 2000 },
+        { bytes: [0x80, 60, 0], timestamp: 2062.5 },
+        { bytes: [0x90, 60, 112], timestamp: 2062.5 },
+        { bytes: [0x80, 60, 0], timestamp: 2187.5 },
+      ],
+      'clear-less port still releases Short B at 2187.5 ms when Long A had no pre-queued hardware Note Off',
+    );
+    perfMs = 2200;
+    assert.equal(scheduler.getActiveNoteCount(), 0);
+
+    // Subcase 3: Port whose `clear()` throws at runtime with Medium A (3040->3165 ms, pre-queued 3165 ms Note Off)
+    // and Shorter B (3062.5->3125 ms): removing A at 3080 ms preserves 1:1 Note Off parity honestly!
+    let throwPerfMs = 3000;
+    const throwingPort = new InstrumentedMidiOutputPort('hw-throwing-clear', {
+      nowPerfMs: () => throwPerfMs,
+    });
+    throwingPort.clear = () => {
+      throwingPort.clearCalls += 1;
+      throw new Error('clear() unsupported by driver');
+    };
+    const throwingScheduler = new MidiOutputScheduler({
+      performanceNowMs: () => throwPerfMs,
+      getOutputs: () => new Map([[throwingPort.id, throwingPort]]),
+    });
+    const chThrowA = makeChannel('ch-th-a', {
+      midiOutput: { mode: 'external', outputDeviceId: throwingPort.id, midiChannel: 1 },
+    });
+    const chThrowB = makeChannel('ch-th-b', {
+      midiOutput: { mode: 'external', outputDeviceId: throwingPort.id, midiChannel: 1 },
+    });
+
+    throwingScheduler.beginTransportTake(1, 'song');
+    throwingScheduler.beginTransportStep({
+      takeGeneration: 1,
+      absoluteStep: 0,
+      step: 0,
+      stepAudioTimeSeconds: 0,
+      unswungStepAudioTimeSeconds: 0,
+      grooveOffsetSeconds: 0,
+      bpm: 120,
+      mode: 'song',
+      patternLoopSteps: null,
+      contextCurrentTimeSeconds: 0,
+    });
+    throwingScheduler.scheduleChannelNote({
+      channel: chThrowA,
+      note: makeNote(60, { id: 'th-med-a', start: 0.32, duration: 1, velocity: 100 / 127 }),
+      onsetAudioTimeSeconds: 0.04, // -> 3040..3165 ms (queued 3165 ms Note Off!)
+      bpm: 120,
+      contextCurrentTimeSeconds: 0,
+    });
+    const throwResB = throwingScheduler.scheduleChannelNote({
+      channel: chThrowB,
+      note: makeNote(60, { id: 'th-short-b', start: 0.5, duration: 0.5, velocity: 110 / 127 }),
+      onsetAudioTimeSeconds: 0.0625, // -> 3062.5..3125 ms
+      bpm: 120,
+      contextCurrentTimeSeconds: 0,
+    });
+    throwingScheduler.endTransportStep();
+
+    assert.deepEqual(throwResB, {
+      sent: true,
+      uncancelledQueuedNoteOff: true,
+      effectiveReleasePerfMs: 3165,
+    });
+
+    throwPerfMs = 3080;
+    throwingScheduler.cleanupChannel('ch-th-a');
+    const thOns = throwingPort.sent.filter(p => (p.bytes[0] & 0xf0) === 0x90);
+    const thOffs = throwingPort.sent.filter(p => (p.bytes[0] & 0xf0) === 0x80);
+    assert.equal(thOns.length, 2, '2 Note Ons on throwing-clear port');
+    assert.equal(thOffs.length, 2, 'strict 1:1 Note Off parity — no duplicate 3125 ms Note Off sent alongside uncancelled 3165 ms');
+    throwPerfMs = 3200;
+    assert.equal(throwingScheduler.getActiveNoteCount(), 0);
+  });
 });
