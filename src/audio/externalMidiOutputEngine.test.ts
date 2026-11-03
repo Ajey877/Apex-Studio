@@ -1078,4 +1078,74 @@ describe('AudioEngine External MIDI Output — discovery, usability, playback, m
     assert.ok(Math.abs(ch3Ons[0].timestamp! - baseMs) < 1e-3, 'sibling Ch 3 Note On kept exact step-0 timestamp');
     assert.ok(Math.abs((ch3Offs[0].timestamp! - baseMs) - 125) < 1e-3, 'sibling Ch 3 Note Off kept exact +125 ms timestamp');
   });
+
+  it('14. preserves both attacks and canonical release timing when fractional same-pitch channel.notes are stored in reverse array order during live AudioEngine.play()', async () => {
+    const ctx = setupLiveEngine();
+    const sharedPort = new FakeMidiOutputPort('out-shared-reverse', { name: 'OB-X8' });
+    await installMidiAccess({
+      inputs: new Map(),
+      outputs: new Map([[sharedPort.id, sharedPort]]),
+      onstatechange: null,
+    });
+
+    // Stored in REVERSE chronological order inside `leadCh.notes`:
+    //   notes[0]: start = 0.8 (+100 ms), duration = 1 (+225 ms), vel = 0.7 (89)
+    //   notes[1]: start = 0.5 (+62.5 ms), duration = 1 (+187.5 ms), vel = 0.95 (121)
+    const leadCh = makeChannel('ch-lead-reverse', {
+      midiOutput: { outputDeviceId: sharedPort.id, midiChannel: 1, mode: 'external' },
+      notes: [
+        makeNote(60, 0.8, 1, 0.7),
+        makeNote(60, 0.5, 1, 0.95),
+      ],
+    });
+    const siblingCh = makeChannel('ch-sibling-c4', {
+      midiOutput: { outputDeviceId: sharedPort.id, midiChannel: 3, mode: 'external' },
+      notes: [
+        makeNote(60, 0.25, 1, 0.8), // same pitch C4 on sibling MIDI Ch 3 (+31.25 ms -> +156.25 ms)
+      ],
+    });
+    const tracks = makeMixerTracks();
+
+    try {
+      audioEngine.play([leadCh, siblingCh], [], 'pat', 'pat-1', tracks, 16);
+      advanceClock(ctx, 0.4, 10);
+      assert.equal(
+        engine.midiOutputScheduler.getActiveNoteCount(),
+        0,
+        'zero active notes after reverse-order playback window completes',
+      );
+    } finally {
+      audioEngine.stop();
+      await audioEngine.releaseNativeInstruments();
+    }
+
+    const delivered = sharedPort.getDeliveredWirePackets();
+    // Filter out post-stop CC 123 cleanup messages to inspect musical note stream
+    const ch1Notes = delivered.filter(
+      p => (p.bytes[0] === 0x90 || p.bytes[0] === 0x80) && p.bytes[1] === 60 && p.timestamp !== undefined,
+    );
+    const ch3Notes = delivered.filter(
+      p => (p.bytes[0] === 0x92 || p.bytes[0] === 0x82) && p.bytes[1] === 60 && p.timestamp !== undefined,
+    );
+
+    assert.equal(ch1Notes.length, 4, 'exact 4 C4 MIDI events delivered on Ch 1 (2 Note Ons, 2 Note Offs)');
+    const firstOnMs = ch1Notes[0].timestamp!;
+    const step0OriginMs = firstOnMs - 62.5;
+
+    assert.deepEqual(ch1Notes[0].bytes, [0x90, 60, Math.round(0.95 * 127)]);
+    assert.deepEqual(ch1Notes[1].bytes, [0x80, 60, 0]);
+    assert.deepEqual(ch1Notes[2].bytes, [0x90, 60, Math.round(0.7 * 127)]);
+    assert.deepEqual(ch1Notes[3].bytes, [0x80, 60, 0]);
+
+    assert.ok(Math.abs((ch1Notes[0].timestamp! - step0OriginMs) - 62.5) < 1e-3, 'earlier C4 Note On at +62.5 ms');
+    assert.ok(Math.abs((ch1Notes[1].timestamp! - step0OriginMs) - 100) < 1e-3, 'retrigger Note Off at +100 ms strictly before Note On');
+    assert.ok(Math.abs((ch1Notes[2].timestamp! - step0OriginMs) - 100) < 1e-3, 'later C4 Note On preserved at +100 ms');
+    assert.ok(Math.abs((ch1Notes[3].timestamp! - step0OriginMs) - 225) < 1e-3, 'final C4 Note Off at +225 ms (obsolete +187.5 ms Note Off suppressed)');
+
+    assert.equal(ch3Notes.length, 2, 'sibling Ch 3 same-pitch C4 preserved 1:1 on shared port');
+    assert.deepEqual(ch3Notes[0].bytes, [0x92, 60, Math.round(0.8 * 127)]);
+    assert.deepEqual(ch3Notes[1].bytes, [0x82, 60, 0]);
+    assert.ok(Math.abs((ch3Notes[0].timestamp! - step0OriginMs) - 31.25) < 1e-3);
+    assert.ok(Math.abs((ch3Notes[1].timestamp! - step0OriginMs) - 156.25) < 1e-3);
+  });
 });
