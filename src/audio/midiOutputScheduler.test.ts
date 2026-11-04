@@ -3504,8 +3504,12 @@ describe('MidiOutputScheduler — overlapping pitches, cleanup isolation, loop w
     portA.connection = 'closed';
     const reconnect = scheduler.handlePortReconnected(portA.id);
     // Recovery Note Offs are timestamped after any accepted future Note On;
-    // advance the deterministic clock while the reconnect task is gated.
+    // advance the deterministic clock while the reconnect task is gated. The
+    // extra tick also lets a queued recovery CC64-up reach its timestamp before
+    // this fake-clock test awaits route readiness.
     perfMs = 1200;
+    await Promise.resolve();
+    perfMs = 1205;
     await reconnect;
 
     const recoveryPackets = portA.sent.slice(-4).map(packet => packet.bytes);
@@ -3543,6 +3547,212 @@ describe('MidiOutputScheduler — overlapping pitches, cleanup isolation, loop w
     });
     assert.equal(resumed.sent, true, 'route resumes after route-specific recovery completes');
     assert.ok(portA.sent.some(packet => packet.bytes[0] === 0x90 && packet.bytes[1] === 69));
+  });
+
+  it('recovers uncertain sustain after queued pedal-up pruning and a delayed disconnect callback without touching sibling routes or channels', async () => {
+    let perfMs = 1000;
+    const portA = new InstrumentedMidiOutputPort('delayed-sustain-a', { nowPerfMs: () => perfMs });
+    const portB = new InstrumentedMidiOutputPort('delayed-sustain-b', { nowPerfMs: () => perfMs });
+    const scheduler = new MidiOutputScheduler({
+      performanceNowMs: () => perfMs,
+      getOutputs: () => new Map([[portA.id, portA], [portB.id, portB]]),
+    });
+    const channelA = makeChannel('delayed-sustain-a-ch1', {
+      midiOutput: { outputDeviceId: portA.id, midiChannel: 1, mode: 'external' },
+    });
+    const channelAShared = makeChannel('delayed-sustain-a-shared-ch1', {
+      midiOutput: { outputDeviceId: portA.id, midiChannel: 1, mode: 'external' },
+    });
+    const channelAOtherMidiChannel = makeChannel('delayed-sustain-a-ch2', {
+      midiOutput: { outputDeviceId: portA.id, midiChannel: 2, mode: 'external' },
+    });
+    const channelB = makeChannel('delayed-sustain-b-ch1', {
+      midiOutput: { outputDeviceId: portB.id, midiChannel: 1, mode: 'external' },
+    });
+
+    assert.equal(scheduler.sendChannelControlChange(channelA, 64, 127), true);
+    assert.equal(scheduler.sendChannelControlChange(channelAShared, 64, 127), true);
+    assert.equal(scheduler.sendChannelControlChange(channelB, 64, 127), true);
+    assert.equal(scheduler.sendChannelControlChange(channelAOtherMidiChannel, 1, 64), true);
+    const queuedPedalUpPerfMs = 1200;
+    assert.equal(scheduler.sendChannelControlChange(channelA, 64, 0, 0.2, 0), true);
+    assert.equal(scheduler.sendChannelControlChange(channelAShared, 64, 0, 0.2, 0), true);
+    assert.deepEqual(
+      portA.sent.filter(packet => packet.bytes[0] === 0xb0 && packet.bytes[1] === 64 && packet.bytes[2] === 0)
+        .map(packet => packet.timestamp),
+      [queuedPedalUpPerfMs, queuedPedalUpPerfMs],
+      'both DAW contributors queue pedal-up on the same physical output/channel',
+    );
+
+    // The accepted down has reached the modeled receiver, but the link drops
+    // before either future pedal-up can be delivered.
+    const receiverSustain = new Set<string>();
+    for (const packet of portA.sent) {
+      const [status, cc, value] = packet.bytes;
+      if ((status & 0xf0) !== 0xb0 || cc !== 64) continue;
+      const messageTime = packet.timestamp ?? 1000;
+      if (messageTime <= 1000) {
+        const key = `${portA.id}:${(status & 0x0f) + 1}`;
+        if (value >= 64) receiverSustain.add(key);
+        else receiverSustain.delete(key);
+      }
+    }
+    assert.deepEqual([...receiverSustain], [`${portA.id}:1`]);
+
+    portA.state = 'disconnected';
+    portA.connection = 'closed';
+    perfMs = queuedPedalUpPerfMs + 20;
+    scheduler.getActiveNoteCount(); // ordinary pruning drops the elapsed pending CC64 transitions
+    const pendingControlChanges = (scheduler as unknown as {
+      pendingControlChanges: Array<{ outputDeviceId: string; midiChannel: number; bytes: number[] }>;
+    }).pendingControlChanges;
+    assert.equal(
+      pendingControlChanges.some(event => event.outputDeviceId === portA.id && event.midiChannel === 1 && event.bytes[1] === 64),
+      false,
+      'ordinary pruning has removed the queued CC64-up before the delayed disconnect callback',
+    );
+    assert.ok(receiverSustain.has(`${portA.id}:1`), 'the receiver remains pedal-down after the disconnected queue is lost');
+
+    const siblingPacketsBeforeRecovery = portB.sent.length;
+    const portPacketsBeforeRecovery = portA.sent.length;
+    scheduler.handlePortDisconnected(portA.id);
+    portA.state = 'connected';
+    portA.connection = 'open';
+    const reconnect = scheduler.handlePortReconnected(portA.id);
+    perfMs += 5;
+    await reconnect;
+
+    const recoveryPackets = portA.sent.slice(portPacketsBeforeRecovery);
+    assert.deepEqual(recoveryPackets.map(packet => packet.bytes), [[0xb0, 64, 0]],
+      'the delayed callback emits one route/channel-specific CC64-up despite ordinary pruning and shared DAW holders');
+    assert.equal(portB.sent.length, siblingPacketsBeforeRecovery, 'the sibling output receives no cleanup');
+    assert.equal(
+      recoveryPackets.some(packet => packet.bytes[0] === 0xb1 && packet.bytes[1] === 64),
+      false,
+      'the unrelated MIDI channel on the affected output receives no pedal cleanup',
+    );
+    assert.equal(
+      recoveryPackets.some(packet => (packet.bytes[0] & 0xf0) === 0xb0 && packet.bytes[1] === 123),
+      false,
+      'reconnect recovery does not use CC123',
+    );
+    for (const packet of recoveryPackets) {
+      const [status, cc, value] = packet.bytes;
+      if ((status & 0xf0) === 0xb0 && cc === 64 && value < 64) {
+        receiverSustain.delete(`${portA.id}:${(status & 0x0f) + 1}`);
+      }
+    }
+    assert.equal(receiverSustain.has(`${portA.id}:1`), false, 'the receiver pedal state is cleared only by completed recovery');
+    assert.equal(scheduler.getPortUsability(portA.id).usable, true, 'the route resumes after the recovery CC64-up timestamp passes');
+
+    // A subsequent pedal-down starts a fresh uncertainty lifetime; a second
+    // disconnect/reconnect must recover it without reusing or losing the first
+    // cycle's settled state.
+    assert.equal(scheduler.sendChannelControlChange(channelA, 64, 127), true);
+    receiverSustain.add(`${portA.id}:1`);
+    assert.equal(scheduler.sendChannelControlChange(channelA, 64, 0, 0.5, 0), true);
+    const secondCycleStart = portA.sent.length;
+    portA.state = 'disconnected';
+    portA.connection = 'closed';
+    scheduler.handlePortDisconnected(portA.id);
+    portA.state = 'connected';
+    portA.connection = 'open';
+    const secondReconnect = scheduler.handlePortReconnected(portA.id);
+    perfMs += 5;
+    await secondReconnect;
+    const secondCycleRecovery = portA.sent.slice(secondCycleStart);
+    assert.deepEqual(secondCycleRecovery.map(packet => packet.bytes), [[0xb0, 64, 0]],
+      'a fresh disconnect/reconnect cycle releases the newly uncertain sustain state exactly once');
+    for (const packet of secondCycleRecovery) {
+      const [status, cc, value] = packet.bytes;
+      if ((status & 0xf0) === 0xb0 && cc === 64 && value < 64) {
+        receiverSustain.delete(`${portA.id}:${(status & 0x0f) + 1}`);
+      }
+    }
+    assert.equal(receiverSustain.has(`${portA.id}:1`), false);
+    assert.equal(portB.sent.length, siblingPacketsBeforeRecovery, 'neither cycle cleans up the sibling output');
+    assert.equal(scheduler.getPortUsability(portA.id).usable, true);
+  });
+
+  it('fails closed at disconnected-recovery capacity without evicting older unresolved route ownership', async () => {
+    let perfMs = 1000;
+    const portCount = 65; // The scheduler retains at most 64 disconnected-output recovery records.
+    const ports = Array.from({ length: portCount }, (_, index) =>
+      new InstrumentedMidiOutputPort(`recovery-capacity-${index}`, { nowPerfMs: () => perfMs }),
+    );
+    const outputs = new Map(ports.map(port => [port.id, port]));
+    const scheduler = new MidiOutputScheduler({
+      performanceNowMs: () => perfMs,
+      getOutputs: () => outputs,
+    });
+    const channels = ports.map((port, index) => makeChannel(`recovery-capacity-channel-${index}`, {
+      midiOutput: { outputDeviceId: port.id, midiChannel: 1, mode: 'external' },
+    }));
+
+    for (let index = 0; index < ports.length; index += 1) {
+      const scheduled = scheduler.scheduleChannelNote({
+        channel: channels[index],
+        note: makeNote(40 + (index % 80), { id: `recovery-capacity-note-${index}`, duration: 4 }),
+        onsetAudioTimeSeconds: 0,
+        bpm: 120,
+        contextCurrentTimeSeconds: 0,
+      });
+      assert.equal(scheduled.sent, true, `output ${index} accepts its initial Note On`);
+      ports[index].state = 'disconnected';
+      ports[index].connection = 'closed';
+      scheduler.handlePortDisconnected(ports[index].id);
+    }
+
+    const oldestPort = ports[0];
+    oldestPort.state = 'connected';
+    oldestPort.connection = 'open';
+    assert.equal(scheduler.getPortUsability(oldestPort.id).usable, false,
+      'the first unresolved recovery still gates its output after the 65th route arrives');
+    assert.match(scheduler.getPortUsability(oldestPort.id).statusReason ?? '', /reconnect cleanup is pending/i);
+
+    // A later callback on the original route must merge into its existing
+    // unresolved record rather than replacing it with an empty recovery.
+    oldestPort.state = 'disconnected';
+    oldestPort.connection = 'closed';
+    scheduler.handlePortDisconnected(oldestPort.id);
+    oldestPort.state = 'connected';
+    oldestPort.connection = 'open';
+    assert.equal(scheduler.getPortUsability(oldestPort.id).usable, false,
+      'repeated disconnect does not overwrite or erase the original Note Off obligation');
+    assert.match(scheduler.getPortUsability(oldestPort.id).statusReason ?? '', /reconnect cleanup is pending/i);
+
+    const overflowPort = ports[64];
+    overflowPort.state = 'connected';
+    overflowPort.connection = 'open';
+    const overflowStatus = scheduler.getPortUsability(overflowPort.id);
+    assert.equal(overflowStatus.usable, false, 'the overflow route fails closed instead of being reported ready');
+    assert.match(overflowStatus.statusReason ?? '', /recovery capacity exhausted/i);
+    assert.equal(scheduler.describePortInfo(overflowPort).usable, false);
+    assert.match(scheduler.describePortInfo(overflowPort).statusReason ?? '', /recovery capacity exhausted/i);
+
+    const overflowPacketsBeforePlaybackAttempt = overflowPort.sent.length;
+    const blockedPlayback = scheduler.scheduleChannelNote({
+      channel: channels[64],
+      note: makeNote(100, { id: 'recovery-capacity-must-stay-blocked' }),
+      onsetAudioTimeSeconds: 0,
+      bpm: 120,
+      contextCurrentTimeSeconds: 0,
+    });
+    assert.equal(blockedPlayback.sent, false, 'the quarantined output cannot resume playback');
+    assert.equal(blockedPlayback.reason, 'port_unavailable');
+    assert.equal(overflowPort.sent.length, overflowPacketsBeforePlaybackAttempt, 'fail-closed scheduling sends no new MIDI');
+
+    // Another callback cannot clear the sticky capacity quarantine or evict any
+    // previously retained recovery record.
+    overflowPort.state = 'disconnected';
+    overflowPort.connection = 'closed';
+    scheduler.handlePortDisconnected(overflowPort.id);
+    overflowPort.state = 'connected';
+    overflowPort.connection = 'open';
+    assert.equal(scheduler.getPortUsability(overflowPort.id).usable, false);
+    assert.match(scheduler.getPortUsability(overflowPort.id).statusReason ?? '', /recovery capacity exhausted/i);
+    assert.equal(scheduler.getPortUsability(oldestPort.id).usable, false);
+    assert.match(scheduler.getPortUsability(oldestPort.id).statusReason ?? '', /reconnect cleanup is pending/i);
   });
 
   it('recovers a completed voice after prune precedes a delayed disconnect callback, once per unison wire voice across clear modes', async () => {

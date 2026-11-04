@@ -1057,7 +1057,13 @@ describe('AudioEngine External MIDI Output — discovery, usability, playback, m
       // Reconnect primaryOut: port re-opens and resumes transmitting on subsequent steps!
       primaryOut.state = 'connected';
       access.onstatechange?.({ port: primaryOut });
-      await audioEngine.ensureMidiOutputPortOpen(primaryOut.id);
+      const reconnectReady = audioEngine.ensureMidiOutputPortOpen(primaryOut.id);
+      // Recovery retains sustain uncertainty until the queued pedal-up timestamp
+      // has passed; advance this test's deterministic performance clock while
+      // the reconnect task is waiting on its safe release time.
+      await Promise.resolve();
+      advanceClock(ctx, 0.005, 1);
+      await reconnectReady;
 
       const recoveryPackets = primaryOut.sent.slice(recoveryStartIndex);
       assert.ok(

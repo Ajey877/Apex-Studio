@@ -99,6 +99,13 @@ interface RecentMidiVoiceRecoveryCandidate {
   expiresAtPerfMs: number;
 }
 
+interface RecentMidiSustainRecoveryCandidate {
+  outputDeviceId: string;
+  midiChannel: number;
+  /** Latest queued CC64 event; send acceptance is not receiver acknowledgement. */
+  latestEventPerfMs: number;
+}
+
 interface PitchScheduleOutcome {
   sent: boolean;
   uncancelledQueuedOffPerfMs: number | null;
@@ -166,7 +173,9 @@ const DEDUP_RETENTION_SECONDS = 1.5;
  */
 const RECENT_NOTE_RECOVERY_RETENTION_MS = 30_000;
 const MAX_RECENT_NOTE_RECOVERY_CANDIDATES = 8_192;
+const MAX_RECENT_SUSTAIN_RECOVERY_CANDIDATES = 8_192;
 const MAX_DISCONNECTED_PORT_RECOVERIES = 64;
+const MAX_RECOVERY_CAPACITY_BLOCKED_OUTPUTS = 64;
 const RECENT_NOTE_RECOVERY_PRUNE_INTERVAL_MS = 1_000;
 
 export const DEFAULT_CHANNEL_MIDI_OUTPUT_ROUTING: Readonly<ChannelMidiOutputRouting> = Object.freeze({
@@ -372,6 +381,12 @@ export class MidiOutputScheduler {
   private sustainChannelsByPortKey = new Map<string, Set<string>>();
   private disconnectedPortRecoveries = new Map<string, DisconnectedMidiPortRecovery>();
   private recentNoteRecoveryCandidates = new Map<string, RecentMidiVoiceRecoveryCandidate>();
+  /** Sticky per-route fail-closed markers for obligations that exceeded a bounded recovery store. */
+  private recoveryCapacityBlockedOutputIds = new Set<string>();
+  /** If even the bounded per-route marker store fills, quarantine every output for this scheduler session. */
+  private recoveryCapacityGloballyBlocked = false;
+  /** One persistent uncertainty record per output/channel until reconnect cleanup settles. */
+  private recentSustainRecoveryCandidates = new Map<string, RecentMidiSustainRecoveryCandidate>();
   private lastRecentNoteRecoveryPrunePerfMs = Number.NEGATIVE_INFINITY;
   private portErrors = new Map<string, string>();
   private verifiedOpenPortIds = new Set<string>();
@@ -450,6 +465,13 @@ export class MidiOutputScheduler {
       recordedError: this.portErrors.get(outputDeviceId) ?? null,
       verifiedOpen: this.verifiedOpenPortIds.has(outputDeviceId),
     });
+    if (this.isRecoveryCapacityBlocked(outputDeviceId)) {
+      return {
+        ...usability,
+        usable: false,
+        statusReason: this.recoveryCapacityStatusReason(outputDeviceId),
+      };
+    }
     const recoveryPending = this.disconnectedPortRecoveries.has(outputDeviceId);
     return recoveryPending && usability.usable
       ? { ...usability, usable: false, statusReason: 'Reconnect cleanup is pending for this MIDI output' }
@@ -462,6 +484,7 @@ export class MidiOutputScheduler {
       recordedError: this.portErrors.get(id) ?? null,
       verifiedOpen: this.verifiedOpenPortIds.has(id),
     });
+    const recoveryCapacityBlocked = this.isRecoveryCapacityBlocked(id);
     const recoveryPending = this.disconnectedPortRecoveries.has(id);
     return {
       id,
@@ -470,10 +493,12 @@ export class MidiOutputScheduler {
       state: usability.state,
       connection: usability.connection,
       type: 'output',
-      usable: usability.usable && !recoveryPending,
-      statusReason: recoveryPending && usability.usable
-        ? 'Reconnect cleanup is pending for this MIDI output'
-        : usability.statusReason,
+      usable: usability.usable && !recoveryPending && !recoveryCapacityBlocked,
+      statusReason: recoveryCapacityBlocked
+        ? this.recoveryCapacityStatusReason(id)
+        : recoveryPending && usability.usable
+          ? 'Reconnect cleanup is pending for this MIDI output'
+          : usability.statusReason,
     };
   }
 
@@ -584,15 +609,72 @@ export class MidiOutputScheduler {
         Math.max(nowPerfMs, eventPerfMs) + RECENT_NOTE_RECOVERY_RETENTION_MS,
       ),
     };
-    // Map insertion order is the bounded LRU/FIFO eviction order. Refreshing
-    // a voice moves just that voice to the newest position without growing history.
+    if (!existing && this.recentNoteRecoveryCandidates.size >= MAX_RECENT_NOTE_RECOVERY_CANDIDATES) {
+      // Do not evict an unresolved physical voice to make room for a newer one.
+      // This output is quarantined instead of pretending its recovery state is complete.
+      this.blockOutputForRecoveryCapacity(port.id);
+      return;
+    }
     this.recentNoteRecoveryCandidates.delete(key);
     this.recentNoteRecoveryCandidates.set(key, candidate);
-    while (this.recentNoteRecoveryCandidates.size > MAX_RECENT_NOTE_RECOVERY_CANDIDATES) {
-      const oldestKey = this.recentNoteRecoveryCandidates.keys().next().value;
-      if (oldestKey === undefined) break;
-      this.recentNoteRecoveryCandidates.delete(oldestKey);
+  }
+
+  private sustainRecoveryCandidateKey(outputDeviceId: string, midiChannel: number): string {
+    return JSON.stringify([outputDeviceId, midiChannel]);
+  }
+
+  private rememberRecentSustainRecoveryCandidate(
+    outputDeviceId: string,
+    midiChannel: number,
+    eventPerfMs: number,
+  ): boolean {
+    const key = this.sustainRecoveryCandidateKey(outputDeviceId, midiChannel);
+    const existing = this.recentSustainRecoveryCandidates.get(key);
+    if (!existing && this.recentSustainRecoveryCandidates.size >= MAX_RECENT_SUSTAIN_RECOVERY_CANDIDATES) {
+      this.blockOutputForRecoveryCapacity(outputDeviceId);
+      return false;
     }
+    this.recentSustainRecoveryCandidates.set(key, {
+      outputDeviceId,
+      midiChannel,
+      latestEventPerfMs: Math.max(existing?.latestEventPerfMs ?? Number.NEGATIVE_INFINITY, eventPerfMs),
+    });
+    return true;
+  }
+
+  private clearRecentSustainRecoveryCandidate(
+    outputDeviceId: string,
+    midiChannel: number,
+    noNewerThanPerfMs = Number.POSITIVE_INFINITY,
+  ): void {
+    const key = this.sustainRecoveryCandidateKey(outputDeviceId, midiChannel);
+    const candidate = this.recentSustainRecoveryCandidates.get(key);
+    if (candidate && candidate.latestEventPerfMs <= noNewerThanPerfMs) {
+      this.recentSustainRecoveryCandidates.delete(key);
+    }
+  }
+
+  private isRecoveryCapacityBlocked(outputDeviceId: string): boolean {
+    return this.recoveryCapacityGloballyBlocked || this.recoveryCapacityBlockedOutputIds.has(outputDeviceId);
+  }
+
+  private recoveryCapacityStatusReason(outputDeviceId: string): string {
+    if (this.recoveryCapacityGloballyBlocked && !this.recoveryCapacityBlockedOutputIds.has(outputDeviceId)) {
+      return 'MIDI recovery capacity exhausted; all output routes are fail-closed until the scheduler is restarted';
+    }
+    return 'MIDI recovery capacity exhausted; this output is fail-closed until the scheduler is restarted';
+  }
+
+  private blockOutputForRecoveryCapacity(outputDeviceId: string): void {
+    if (this.isRecoveryCapacityBlocked(outputDeviceId)) return;
+    if (this.recoveryCapacityBlockedOutputIds.size < MAX_RECOVERY_CAPACITY_BLOCKED_OUTPUTS) {
+      this.recoveryCapacityBlockedOutputIds.add(outputDeviceId);
+    } else {
+      // Keep the quarantine store bounded. If it fills, fail closed globally so
+      // no unrecorded overflow output can be mistaken for a usable route.
+      this.recoveryCapacityGloballyBlocked = true;
+    }
+    this.notifyStateListeners();
   }
 
   private pruneRecentMidiVoiceRecoveryCandidates(nowPerfMs: number): void {
@@ -617,18 +699,18 @@ export class MidiOutputScheduler {
   private retainDisconnectedPortRecovery(
     outputDeviceId: string,
     recovery: DisconnectedMidiPortRecovery,
-  ): void {
-    if (!this.disconnectedPortRecoveries.has(outputDeviceId)) {
-      // Bound pathological device churn as well as the short-lived voice
-      // journal. Under the cap, preserve the most recently disconnected routes.
-      while (this.disconnectedPortRecoveries.size >= MAX_DISCONNECTED_PORT_RECOVERIES) {
-        const oldestOutputId = this.disconnectedPortRecoveries.keys().next().value;
-        if (oldestOutputId === undefined) break;
-        this.disconnectedPortRecoveries.delete(oldestOutputId);
-      }
+  ): boolean {
+    if (
+      !this.disconnectedPortRecoveries.has(outputDeviceId) &&
+      this.disconnectedPortRecoveries.size >= MAX_DISCONNECTED_PORT_RECOVERIES
+    ) {
+      // Never evict another route's unresolved obligation. A route that cannot
+      // fit is quarantined and remains unusable for this scheduler session.
+      this.blockOutputForRecoveryCapacity(outputDeviceId);
+      return false;
     }
-    this.disconnectedPortRecoveries.delete(outputDeviceId);
     this.disconnectedPortRecoveries.set(outputDeviceId, recovery);
+    return true;
   }
 
   public handlePortDisconnected(outputDeviceId: string): void {
@@ -687,6 +769,14 @@ export class MidiOutputScheduler {
         latestOnPerfMs: Math.max(existing?.latestOnPerfMs ?? -Infinity, candidate.latestOnPerfMs),
       });
     }
+    for (const candidate of this.recentSustainRecoveryCandidates.values()) {
+      if (candidate.outputDeviceId !== outputDeviceId) continue;
+      recovery.latestQueuedEventPerfMs = Math.max(
+        recovery.latestQueuedEventPerfMs,
+        candidate.latestEventPerfMs,
+      );
+      recovery.sustainChannels.add(candidate.midiChannel);
+    }
     const sustainPrefix = `${outputDeviceId}:`;
     for (const [key, holders] of this.sustainChannelsByPortKey.entries()) {
       if (!key.startsWith(sustainPrefix) || holders.size === 0) continue;
@@ -702,16 +792,16 @@ export class MidiOutputScheduler {
       recovery.latestQueuedEventPerfMs = Math.max(recovery.latestQueuedEventPerfMs, pending.perfMs);
       if (pending.bytes[1] === 64) recovery.sustainChannels.add(pending.midiChannel);
     }
-    if (
+    const hasRecoveryObligation =
       recovery.noteOffs.size > 0 ||
       recovery.sustainChannels.size > 0 ||
-      recovery.latestQueuedEventPerfMs > nowPerfMs
-    ) {
-      this.retainDisconnectedPortRecovery(outputDeviceId, recovery);
-    }
-    // Ownership has now been transferred into the pending recovery record;
-    // discard this port's short-lived journal entries to keep memory bounded.
-    this.clearRecentMidiVoiceRecoveryCandidates(outputDeviceId);
+      recovery.latestQueuedEventPerfMs > nowPerfMs;
+    const retainedRecovery = !hasRecoveryObligation || this.retainDisconnectedPortRecovery(outputDeviceId, recovery);
+    // Keep the recent voice journal if the bounded recovery store rejected this
+    // route. Its explicit quarantine remains sticky, but retaining available
+    // evidence allows a later callback to attempt safe cleanup without evicting
+    // another route's obligation.
+    if (retainedRecovery) this.clearRecentMidiVoiceRecoveryCandidates(outputDeviceId);
 
     const port = this.resolveOutputPort(outputDeviceId);
     if (port && typeof port.clear === 'function') {
@@ -816,10 +906,23 @@ export class MidiOutputScheduler {
 
       // Pedal-up first, then explicit Note Offs for known pitches. A Note Off is
       // idempotent here; deduplication by channel/pitch avoids duplicate releases
-      // when several DAW channels contributed the same physical voice.
+      // when several DAW channels contributed the same physical voice. A
+      // successful CC64 send is still only queue acceptance, so retain pedal
+      // ownership until its cleanup timestamp has passed.
+      const queuedSustainUps = new Map<number, { releasePerfMs: number; latestEventPerfMs: number }>();
+      let latestQueuedRecoverySustainUpPerfMs = Number.NEGATIVE_INFINITY;
       for (const midiChannel of [...latestRecovery.sustainChannels].sort((a, b) => a - b)) {
-        if (this.trySend(port, [0xb0 | (midiChannel - 1), 64, 0])) {
-          latestRecovery.sustainChannels.delete(midiChannel);
+        const releasePerfMs = this.getPerformanceNowMs();
+        if (this.trySend(port, [0xb0 | (midiChannel - 1), 64, 0], releasePerfMs)) {
+          const candidate = this.recentSustainRecoveryCandidates.get(
+            this.sustainRecoveryCandidateKey(outputDeviceId, midiChannel),
+          );
+          queuedSustainUps.set(midiChannel, {
+            releasePerfMs,
+            latestEventPerfMs: candidate?.latestEventPerfMs ?? Number.NEGATIVE_INFINITY,
+          });
+          latestQueuedRecoverySustainUpPerfMs = Math.max(latestQueuedRecoverySustainUpPerfMs, releasePerfMs);
+          latestRecovery.latestQueuedEventPerfMs = Math.max(latestRecovery.latestQueuedEventPerfMs, releasePerfMs);
         }
       }
       const noteOffs = [...latestRecovery.noteOffs.entries()].sort(([, a], [, b]) =>
@@ -837,11 +940,19 @@ export class MidiOutputScheduler {
         }
       }
 
-      // A successful send of a future-timestamped Note Off only queues it. Keep
-      // this output gated until those releases can reach the receiver, and keep
-      // their recovery ownership if another disconnect interrupts the queue.
-      if (latestQueuedRecoveryOffPerfMs > this.getPerformanceNowMs()) {
-        const releaseDeadlinePerfMs = latestQueuedRecoveryOffPerfMs + MIN_MIDI_NOTE_OFF_DELTA_MS;
+      // A successful send only queues MIDI. Keep this output gated until
+      // future Note Offs and even immediate CC64-up cleanup timestamps have
+      // passed; if another disconnect interrupts the wait, the generation
+      // checks below retain every obligation for the next reconnect attempt.
+      const latestQueuedRecoveryReleasePerfMs = Math.max(
+        latestQueuedRecoveryOffPerfMs,
+        latestQueuedRecoverySustainUpPerfMs,
+      );
+      if (
+        queuedSustainUps.size > 0 ||
+        latestQueuedRecoveryOffPerfMs > this.getPerformanceNowMs()
+      ) {
+        const releaseDeadlinePerfMs = latestQueuedRecoveryReleasePerfMs + MIN_MIDI_NOTE_OFF_DELTA_MS;
         while (true) {
           const remainingMs = releaseDeadlinePerfMs - this.getPerformanceNowMs();
           if (remainingMs <= 0) break;
@@ -866,6 +977,14 @@ export class MidiOutputScheduler {
         (port.connection !== undefined && port.connection !== 'open')
       ) {
         return false;
+      }
+      for (const [midiChannel, sentRelease] of queuedSustainUps) {
+        const candidate = this.recentSustainRecoveryCandidates.get(
+          this.sustainRecoveryCandidateKey(outputDeviceId, midiChannel),
+        );
+        if (candidate && candidate.latestEventPerfMs > sentRelease.latestEventPerfMs) continue;
+        settledRecovery.sustainChannels.delete(midiChannel);
+        this.clearRecentSustainRecoveryCandidate(outputDeviceId, midiChannel, sentRelease.latestEventPerfMs);
       }
       for (const [key, sentRelease] of queuedNoteOffs) {
         const stillOwned = settledRecovery.noteOffs.get(key);
@@ -1969,7 +2088,15 @@ export class MidiOutputScheduler {
     }
     if (ok && ccNum === 64) {
       const portChKey = `${routing.outputDeviceId}:${routing.midiChannel}`;
+      const sustainCandidateKey = this.sustainRecoveryCandidateKey(routing.outputDeviceId, routing.midiChannel);
+      const eventPerfMs = Number.isFinite(timestampMs) ? timestampMs! : nowPerfMs;
       if (val >= 64) {
+        // The physical sustain state is shared across every DAW channel routed
+        // to this output/channel. Keep one conservative recovery obligation for
+        // the physical route, regardless of which contributor raised the pedal.
+        if (!this.rememberRecentSustainRecoveryCandidate(routing.outputDeviceId, routing.midiChannel, eventPerfMs)) {
+          return true;
+        }
         let holders = this.sustainChannelsByPortKey.get(portChKey);
         if (!holders) {
           holders = new Set();
@@ -1978,6 +2105,13 @@ export class MidiOutputScheduler {
         holders.add(channel.id);
       } else {
         const holders = this.sustainChannelsByPortKey.get(portChKey);
+        const mayStillBeHeld = Boolean(holders?.size || this.recentSustainRecoveryCandidates.has(sustainCandidateKey));
+        if (
+          mayStillBeHeld &&
+          !this.rememberRecentSustainRecoveryCandidate(routing.outputDeviceId, routing.midiChannel, eventPerfMs)
+        ) {
+          return true;
+        }
         holders?.delete(channel.id);
         if (holders && holders.size === 0) {
           this.sustainChannelsByPortKey.delete(portChKey);
@@ -2927,8 +3061,9 @@ export class MidiOutputScheduler {
   }
 
   private resolveUsablePort(outputDeviceId: string): MidiOutputPortLike | null {
-    // Do not let playback or control changes race ahead of reconnect cleanup.
-    if (this.disconnectedPortRecoveries.has(outputDeviceId)) return null;
+    // Do not let playback or control changes race ahead of reconnect cleanup
+    // or bypass a sticky fail-closed capacity quarantine.
+    if (this.disconnectedPortRecoveries.has(outputDeviceId) || this.isRecoveryCapacityBlocked(outputDeviceId)) return null;
     const port = this.resolveOutputPort(outputDeviceId);
     if (!port) return null;
     const usability = evaluateMidiOutputPortUsability(port, {
