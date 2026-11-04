@@ -3502,7 +3502,11 @@ describe('MidiOutputScheduler — overlapping pitches, cleanup isolation, loop w
 
     portA.state = 'connected';
     portA.connection = 'closed';
-    await scheduler.handlePortReconnected(portA.id);
+    const reconnect = scheduler.handlePortReconnected(portA.id);
+    // Recovery Note Offs are timestamped after any accepted future Note On;
+    // advance the deterministic clock while the reconnect task is gated.
+    perfMs = 1200;
+    await reconnect;
 
     const recoveryPackets = portA.sent.slice(-4).map(packet => packet.bytes);
     assert.deepEqual(
@@ -3539,6 +3543,209 @@ describe('MidiOutputScheduler — overlapping pitches, cleanup isolation, loop w
     });
     assert.equal(resumed.sent, true, 'route resumes after route-specific recovery completes');
     assert.ok(portA.sent.some(packet => packet.bytes[0] === 0x90 && packet.bytes[1] === 69));
+  });
+
+  it('recovers a completed voice after prune precedes a delayed disconnect callback, once per unison wire voice across clear modes', async () => {
+    for (const clearMode of ['supported', 'absent', 'throwing'] as const) {
+      let perfMs = 1000;
+      const portA = new InstrumentedMidiOutputPort(`delayed-disconnect-${clearMode}`, {
+        supportsClear: clearMode !== 'absent',
+        nowPerfMs: () => perfMs,
+      });
+      if (clearMode === 'throwing') {
+        portA.clear = () => {
+          portA.clearCalls += 1;
+          throw new Error('clear() unsupported');
+        };
+      }
+      const portB = new InstrumentedMidiOutputPort(`delayed-disconnect-sibling-${clearMode}`, {
+        nowPerfMs: () => perfMs,
+      });
+      const scheduler = new MidiOutputScheduler({
+        performanceNowMs: () => perfMs,
+        getOutputs: () => new Map([[portA.id, portA], [portB.id, portB]]),
+      });
+      const channelA = makeChannel(`delayed-a-${clearMode}`, {
+        midiOutput: { outputDeviceId: portA.id, midiChannel: 1, mode: 'external' },
+      });
+      const channelAUnison = makeChannel(`delayed-a-unison-${clearMode}`, {
+        midiOutput: { outputDeviceId: portA.id, midiChannel: 1, mode: 'external' },
+      });
+      const channelB = makeChannel(`delayed-b-${clearMode}`, {
+        midiOutput: { outputDeviceId: portB.id, midiChannel: 1, mode: 'external' },
+      });
+
+      scheduler.beginTransportTake(1, 'song');
+      scheduler.beginTransportStep({
+        takeGeneration: 1,
+        absoluteStep: 0,
+        step: 0,
+        stepAudioTimeSeconds: 0,
+        unswungStepAudioTimeSeconds: 0,
+        grooveOffsetSeconds: 0,
+        bpm: 120,
+        mode: 'song',
+        patternLoopSteps: null,
+        contextCurrentTimeSeconds: 0,
+      });
+      scheduler.scheduleChannelNote({
+        channel: channelA,
+        note: makeNote(60, { id: `delayed-long-${clearMode}`, duration: 2 }),
+        onsetAudioTimeSeconds: 0, // Note On @ 1000 ms, intended Note Off @ 1250 ms.
+        bpm: 120,
+        contextCurrentTimeSeconds: 0,
+      });
+      scheduler.scheduleChannelNote({
+        channel: channelAUnison,
+        note: makeNote(60, { id: `delayed-short-${clearMode}`, start: 0.5, duration: 1 }),
+        onsetAudioTimeSeconds: 0.0625, // overlapping contributor @ 1062.5 ms, off @ 1187.5 ms.
+        bpm: 120,
+        contextCurrentTimeSeconds: 0,
+      });
+      scheduler.scheduleChannelNote({
+        channel: channelB,
+        note: makeNote(67, { id: `unrelated-${clearMode}`, duration: 100 }),
+        onsetAudioTimeSeconds: 0,
+        bpm: 120,
+        contextCurrentTimeSeconds: 0,
+      });
+      scheduler.endTransportStep();
+
+      // The scheduler releases multi-step contributors when the target step
+      // enters its lookahead window. Queue both future Note Offs before loss.
+      perfMs = 1125;
+      scheduler.beginTransportStep({
+        takeGeneration: 1,
+        absoluteStep: 1,
+        step: 1,
+        stepAudioTimeSeconds: 0.125,
+        unswungStepAudioTimeSeconds: 0.125,
+        grooveOffsetSeconds: 0,
+        bpm: 120,
+        mode: 'song',
+        patternLoopSteps: null,
+        contextCurrentTimeSeconds: 0.125,
+      });
+      scheduler.endTransportStep();
+
+      const disconnectAtPerfMs = 1125;
+      const receiverNotes = new Set<string>();
+      const applyReceiverPacket = (packet: RecordedMidiPacket) => {
+        const [status, pitch, velocity] = packet.bytes;
+        const command = status & 0xf0;
+        const midiChannel = (status & 0x0f) + 1;
+        if (command === 0x90 && velocity > 0) receiverNotes.add(`${midiChannel}:${pitch}`);
+        if (command === 0x80 || (command === 0x90 && velocity === 0)) receiverNotes.delete(`${midiChannel}:${pitch}`);
+      };
+      for (const packet of [...portA.getDeliveredWirePackets()]
+        .filter(packet => (packet.timestamp ?? packet.sentAtPerfMs) <= disconnectAtPerfMs)
+        .sort((a, b) => (a.timestamp ?? a.sentAtPerfMs) - (b.timestamp ?? b.sentAtPerfMs))) {
+        applyReceiverPacket(packet);
+      }
+      assert.ok(receiverNotes.has('1:60'), `[${clearMode}] receiver owns the overlapping C4 before link loss`);
+      const latestFutureOffPerfMs = Math.max(
+        ...portA.sent
+          .filter(packet => (packet.bytes[0] & 0xf0) === 0x80 && packet.bytes[1] === 60 && packet.timestamp! > disconnectAtPerfMs)
+          .map(packet => packet.timestamp!),
+      );
+      const latestAcceptedOnPerfMs = Math.max(
+        ...portA.sent
+          .filter(packet => (packet.bytes[0] & 0xf0) === 0x90 && packet.bytes[1] === 60)
+          .map(packet => packet.timestamp!),
+      );
+      assert.ok(latestFutureOffPerfMs > disconnectAtPerfMs, `[${clearMode}] a Note Off is still queued when the cable is lost`);
+
+      // Physical disconnect happens now, but deliberately delay its callback.
+      // The receiver cannot get either future release while the cable is down.
+      portA.state = 'disconnected';
+      portA.connection = 'closed';
+      perfMs = latestFutureOffPerfMs + 100;
+      assert.equal(scheduler.getActiveNoteCount(channelA.id), 0, `[${clearMode}] normal pruning retires completed musical ownership first`);
+      assert.equal(scheduler.getActiveNoteCount(channelAUnison.id), 0, `[${clearMode}] the overlapping contributor is pruned too`);
+      assert.ok(receiverNotes.has('1:60'), `[${clearMode}] the modeled receiver remains stuck because no Note Off crossed the link`);
+      assert.equal(scheduler.getActiveNoteCount(channelB.id), 1, `[${clearMode}] unrelated output ownership remains active`);
+
+      const sentBeforeDisconnectCallback = portA.sent.length;
+      scheduler.handlePortDisconnected(portA.id);
+      assert.equal(portA.sent.length, sentBeforeDisconnectCallback, `[${clearMode}] disconnect capture sends no message on a lost link`);
+      portA.state = 'connected';
+      portA.connection = 'closed';
+      const reconnect = scheduler.handlePortReconnected(portA.id);
+      // Let absent/throwing clear paths pass their old event deadline without
+      // requiring a wall-clock MIDI device or an actual hardware connection.
+      perfMs += 20;
+      await reconnect;
+
+      const recoveryPackets = portA.sent.slice(sentBeforeDisconnectCallback);
+      assert.deepEqual(
+        recoveryPackets.map(packet => packet.bytes),
+        [[0x80, 60, 0]],
+        `[${clearMode}] reconnect emits exactly one explicit Note Off for the shared (port, channel, pitch) voice`,
+      );
+      const recoveryWirePacket = portA.wireQueue.at(-1)!;
+      assert.ok(
+        recoveryWirePacket.sentAtPerfMs >= latestAcceptedOnPerfMs + 1,
+        `[${clearMode}] recovery Note Off is never earlier than the latest accepted Note On`,
+      );
+      for (const packet of recoveryPackets) applyReceiverPacket(packet);
+      assert.equal(receiverNotes.has('1:60'), false, `[${clearMode}] modeled receiver no longer owns the stuck voice`);
+      assert.equal(portB.sent.length, 1, `[${clearMode}] reconnect cleanup never substitutes or sends to the sibling output`);
+      assert.equal(
+        portA.sent.some(packet => (packet.bytes[0] & 0xf0) === 0xb0 && packet.bytes[1] === 123),
+        false,
+        `[${clearMode}] recovery does not use automatic CC 123`,
+      );
+    }
+  });
+
+  it('restarts reconnect cleanup from the latest disconnect generation when a future Note On is interrupted again', async () => {
+    let perfMs = 1000;
+    const port = new InstrumentedMidiOutputPort('reconnect-generation-bounce', { nowPerfMs: () => perfMs });
+    const scheduler = new MidiOutputScheduler({
+      performanceNowMs: () => perfMs,
+      getOutputs: () => new Map([[port.id, port]]),
+    });
+    const channel = makeChannel('reconnect-generation-bounce-channel', {
+      midiOutput: { outputDeviceId: port.id, midiChannel: 1, mode: 'external' },
+    });
+    const scheduled = scheduler.scheduleChannelNote({
+      channel,
+      note: makeNote(72, { id: 'generation-bounce-future', duration: 1 }),
+      onsetAudioTimeSeconds: 0.1,
+      bpm: 120,
+      contextCurrentTimeSeconds: 0,
+    });
+    assert.equal(scheduled.sent, true);
+    const queuedOn = port.sent.find(packet => packet.bytes[0] === 0x90 && packet.bytes[1] === 72)!;
+    const initialPacketCount = port.sent.length;
+
+    port.state = 'disconnected';
+    port.connection = 'closed';
+    scheduler.handlePortDisconnected(port.id);
+    port.state = 'connected';
+    port.connection = 'open';
+    const firstReconnect = scheduler.handlePortReconnected(port.id);
+
+    // Bounce the same output again while the first recovery is waiting to put a
+    // safe Note Off after its future Note On. The second reconnect notification
+    // may arrive while that first task is still in flight.
+    port.state = 'disconnected';
+    port.connection = 'closed';
+    scheduler.handlePortDisconnected(port.id);
+    port.state = 'connected';
+    port.connection = 'open';
+    const secondReconnect = scheduler.handlePortReconnected(port.id);
+    perfMs = 1300;
+    await Promise.all([firstReconnect, secondReconnect]);
+
+    const recoveryPackets = port.sent.slice(initialPacketCount);
+    assert.deepEqual(
+      recoveryPackets.map(packet => packet.bytes),
+      [[0x80, 72, 0]],
+      'the invalidated first task does not lose ownership or duplicate cleanup; the new generation releases once',
+    );
+    assert.ok(recoveryPackets[0].timestamp! >= queuedOn.timestamp! + 1, 'the recovery Note Off remains after its accepted future Note On');
+    assert.equal(scheduler.getPortUsability(port.id).usable, true, 'the route resumes only after the fresh generation completes');
   });
 
   it('holds a clear-less reconnected port until all old timestamped events pass, then sends cleanup before resuming', async () => {
@@ -3595,13 +3802,15 @@ describe('MidiOutputScheduler — overlapping pitches, cleanup isolation, loop w
 
     assert.equal(scheduler.getPortUsability(port.id).usable, true, 'route becomes usable after the queue has drained and recovery completes');
     assert.equal(scheduler.describePortInfo(port).usable, true);
-    const recoveryOff = port.wireQueue.find(packet =>
-      packet.bytes[0] === 0x80 && packet.bytes[1] === 72 && packet.timestamp === undefined,
-    );
-    assert.ok(recoveryOff, 'a final immediate Note Off follows the old scheduled queue');
+    const recoveryOff = port.wireQueue.at(-1);
     assert.ok(
-      recoveryOff!.sentAtPerfMs >= queuedOff.timestamp! + 1,
-      `recovery at ${recoveryOff!.sentAtPerfMs} ms follows latest queued release ${queuedOff.timestamp} ms by at least the scheduler 1 ms delta`,
+      recoveryOff && recoveryOff.bytes[0] === 0x80 && recoveryOff.bytes[1] === 72,
+      'a final timestamp-safe Note Off follows the old scheduled queue',
+    );
+    assert.ok(
+      recoveryOff!.sentAtPerfMs >= queuedOff.timestamp! + 1 &&
+        recoveryOff!.timestamp! >= queuedOff.timestamp! + 1,
+      `recovery send/timestamp at ${recoveryOff!.sentAtPerfMs}/${recoveryOff!.timestamp} ms follows latest queued release ${queuedOff.timestamp} ms by at least the scheduler 1 ms delta`,
     );
     const resumed = scheduler.scheduleChannelNote({
       channel,

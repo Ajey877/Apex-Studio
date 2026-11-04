@@ -1,6 +1,9 @@
 const $ = id => document.getElementById(id);
 const MAX_VISIBLE_EVENTS = 1200;
 const MAX_CAPTURED_EVENTS = 12000;
+const MAX_NOTE_OFF_SEND_ATTEMPTS = 3;
+const NOTE_OFF_RETRY_DELAY_MS = 50;
+const NOTE_OFF_SETTLE_MS = 30;
 
 const ui = {
   permission: $('permission-status'),
@@ -41,6 +44,7 @@ const sustainChannelsByOutput = new Map();
 const sustainTransitionsByOutput = new Map();
 const latestQueuedEventPerfMsByOutput = new Map();
 const recoveryByOutput = new Map();
+const reconnectRecoveryPromisesByOutput = new Map();
 
 for (let channel = 1; channel <= 16; channel += 1) {
   const option = document.createElement('option');
@@ -124,6 +128,10 @@ function updatePermissionLabel(errorMessage = '') {
   ui.permission.replaceChildren(heading, document.createTextNode(` ${label}${errorMessage ? ` — ${errorMessage}` : ''}`));
 }
 
+function hasPendingNoteRelease(portId) {
+  return [...getRouteState(portId, false).values()].some(note => note.noteOffState === 'pending');
+}
+
 function updateSelectedOutputLabel() {
   const info = selectedOutput ? portInfo(selectedOutput) : null;
   const label = info
@@ -132,9 +140,12 @@ function updateSelectedOutputLabel() {
   const heading = document.createElement('strong');
   heading.textContent = 'Selected output:';
   ui.selectedOutput.replaceChildren(heading, document.createTextNode(` ${label}`));
-  const recoveryPending = Boolean(selectedOutput && recoveryByOutput.has(selectedOutput.id));
+  const reconnectRecoveryPending = Boolean(selectedOutput && recoveryByOutput.has(selectedOutput.id));
+  const noteReleasePending = Boolean(selectedOutput && hasPendingNoteRelease(selectedOutput.id));
+  const recoveryPending = reconnectRecoveryPending || noteReleasePending;
   const ready = Boolean(selectedOutput && selectedOutput.state === 'connected' && selectedOutput.connection === 'open' && !recoveryPending);
-  if (recoveryPending) ui.selectedOutput.append(document.createTextNode(' · recovery pending'));
+  if (reconnectRecoveryPending) ui.selectedOutput.append(document.createTextNode(' · reconnect recovery pending'));
+  else if (noteReleasePending) ui.selectedOutput.append(document.createTextNode(' · note release pending'));
   ui.sendNote.disabled = !ready;
   ui.sendCc.disabled = !ready;
   ui.sustainDown.disabled = !ready;
@@ -291,6 +302,58 @@ function getRouteState(portId, create) {
   return state ?? new Map();
 }
 
+function clearNoteTimers(note) {
+  if (note.retryTimeoutId !== null && note.retryTimeoutId !== undefined) {
+    window.clearTimeout(note.retryTimeoutId);
+    note.retryTimeoutId = null;
+  }
+  if (note.cleanupTimeoutId !== null && note.cleanupTimeoutId !== undefined) {
+    window.clearTimeout(note.cleanupTimeoutId);
+    note.cleanupTimeoutId = null;
+  }
+}
+
+function unresolvedNoteDetails(note) {
+  return {
+    noteId: note.id,
+    midiChannel: note.midiChannel,
+    pitch: note.pitch,
+    velocity: note.velocity,
+    noteOffState: note.noteOffState,
+    intendedOnTimeMs: note.onTime,
+    intendedOffTimeMs: note.offTime,
+    scheduledOffTimeMs: note.scheduledOffTime ?? null,
+    noteOffAttempts: note.noteOffAttempts ?? 0,
+    retryLimit: MAX_NOTE_OFF_SEND_ATTEMPTS,
+  };
+}
+
+function buildUnresolvedRecoverySnapshot() {
+  const pendingNoteReleases = [];
+  for (const [outputDeviceId, notes] of activeNotesByOutput) {
+    for (const note of notes.values()) {
+      if (note.noteOffState !== 'pending') continue;
+      pendingNoteReleases.push({ outputDeviceId, ...unresolvedNoteDetails(note) });
+    }
+  }
+  pendingNoteReleases.sort((a, b) =>
+    a.outputDeviceId.localeCompare(b.outputDeviceId) ||
+    a.midiChannel - b.midiChannel ||
+    a.pitch - b.pitch,
+  );
+
+  const reconnectRecoveries = [...recoveryByOutput.entries()]
+    .map(([outputDeviceId, recovery]) => ({
+      outputDeviceId,
+      pendingVoices: [...recovery.notes.values()].map(unresolvedNoteDetails)
+        .sort((a, b) => a.midiChannel - b.midiChannel || a.pitch - b.pitch),
+      pendingSustainChannels: [...recovery.sustainChannels].sort((a, b) => a - b),
+      latestQueuedEventPerfMs: recovery.latestQueuedEventPerfMs,
+    }))
+    .sort((a, b) => a.outputDeviceId.localeCompare(b.outputDeviceId));
+  return { pendingNoteReleases, reconnectRecoveries };
+}
+
 function getSustainState(portId, create) {
   let state = sustainChannelsByOutput.get(portId);
   if (!state && create) {
@@ -360,9 +423,18 @@ function handlePortDisconnected(port) {
     notes: new Map(),
     sustainChannels: new Set(),
     latestQueuedEventPerfMs: now,
+    generation: 0,
   };
+  existing.generation = (existing.generation ?? 0) + 1;
   existing.latestQueuedEventPerfMs = Math.max(existing.latestQueuedEventPerfMs, latestQueuedEventPerfMs);
-  for (const note of active) existing.notes.set(`${note.midiChannel}:${note.pitch}`, note);
+  for (const note of active) {
+    const key = `${note.midiChannel}:${note.pitch}`;
+    const previous = existing.notes.get(key);
+    // Several diagnostic notes can contribute the same physical voice. Keep
+    // the latest accepted onset so reconnect cleanup can never precede a later
+    // queued unison attack, regardless of submission order.
+    if (!previous || note.onTime >= previous.onTime) existing.notes.set(key, note);
+  }
   for (const channel of sustainChannels) existing.sustainChannels.add(channel);
   for (const [channel, transition] of sustainTransitionsByOutput.get(port.id) ?? []) {
     if (transition.value >= 64 || transition.timestampMs > now) existing.sustainChannels.add(channel);
@@ -384,16 +456,48 @@ function handlePortDisconnected(port) {
 }
 
 async function recoverPortAfterReconnect(port) {
+  const inFlight = reconnectRecoveryPromisesByOutput.get(port.id);
+  if (inFlight) return inFlight;
   const recovery = recoveryByOutput.get(port.id);
   if (!recovery) return;
-  if (!(await openOutputPort(port))) return;
-  const queueCleared = clearOutputQueue(port, 'reconnect-recovery');
-  if (!queueCleared) {
-    const deadline = Math.max(nowMs(), recovery.latestQueuedEventPerfMs) + 1;
-    while (nowMs() < deadline) await new Promise(resolve => setTimeout(resolve, deadline - nowMs()));
+  const generation = recovery.generation ?? 0;
+  const task = performPortReconnectRecovery(port, generation);
+  reconnectRecoveryPromisesByOutput.set(port.id, task);
+  try {
+    await task;
+  } finally {
+    if (reconnectRecoveryPromisesByOutput.get(port.id) === task) {
+      reconnectRecoveryPromisesByOutput.delete(port.id);
+    }
   }
+  const latestRecovery = recoveryByOutput.get(port.id);
+  if (
+    latestRecovery &&
+    (latestRecovery !== recovery || latestRecovery.generation !== generation) &&
+    port.state === 'connected'
+  ) {
+    // If a rapid unplug/replug invalidated this task while it awaited a safe
+    // timestamp, retry once from the new generation rather than settling stale
+    // recovery ownership. Further generation changes are coalesced identically.
+    await recoverPortAfterReconnect(port);
+  }
+}
+
+async function performPortReconnectRecovery(port, generation) {
+  const recovery = recoveryByOutput.get(port.id);
+  if (!recovery || recovery.generation !== generation) return;
+  if (!(await openOutputPort(port))) return;
+  if (recoveryByOutput.get(port.id) !== recovery || recovery.generation !== generation) return;
+  const queueCleared = clearOutputQueue(port, 'reconnect-recovery');
+  const latestOnTime = Math.max(-Infinity, ...[...recovery.notes.values()].map(note => note.onTime));
+  const deadline = queueCleared
+    ? Math.max(nowMs(), latestOnTime + 1)
+    : Math.max(nowMs(), recovery.latestQueuedEventPerfMs + 1, latestOnTime + 1);
+  while (nowMs() < deadline) await new Promise(resolve => setTimeout(resolve, deadline - nowMs()));
+
   const currentRecovery = recoveryByOutput.get(port.id);
-  if (!currentRecovery) return;
+  if (!currentRecovery || currentRecovery !== recovery || currentRecovery.generation !== generation) return;
+  if (port.state !== 'connected' || (port.connection !== undefined && port.connection !== 'open')) return;
   logEvent('reconnect-recovery-start', {
     device: portInfo(port),
     queueCleared,
@@ -412,21 +516,54 @@ async function recoverPortAfterReconnect(port) {
       if (transitions?.size === 0) sustainTransitionsByOutput.delete(port.id);
     }
   }
+
   const notes = [...currentRecovery.notes.entries()].sort(([, a], [, b]) => a.midiChannel - b.midiChannel || a.pitch - b.pitch);
+  const queuedNoteOffs = new Map();
+  let latestRecoveryOffTime = -Infinity;
   for (const [key, note] of notes) {
-    const sent = sendPacket(port, [0x80 | (note.midiChannel - 1), note.pitch, 0], nowMs(), 'recovery-note-off');
+    const releaseTime = Math.max(nowMs(), note.onTime + 1);
+    const sent = sendPacket(port, [0x80 | (note.midiChannel - 1), note.pitch, 0], releaseTime, 'recovery-note-off');
     complete = sent && complete;
-    if (sent) currentRecovery.notes.delete(key);
+    if (sent) {
+      queuedNoteOffs.set(key, { onTime: note.onTime, releaseTime });
+      latestRecoveryOffTime = Math.max(latestRecoveryOffTime, releaseTime);
+    }
   }
-  if (currentRecovery.notes.size === 0 && currentRecovery.sustainChannels.size === 0) {
+
+  // A send accepted with a future timestamp is queued, not yet a delivered
+  // release. Keep route ownership and the recovery gate until that safe Note
+  // Off time has passed; a second disconnect during the wait retains the same
+  // (output, channel, pitch) cleanup state for the next reconnect.
+  if (latestRecoveryOffTime > nowMs()) {
+    const releaseDeadline = latestRecoveryOffTime + 1;
+    while (nowMs() < releaseDeadline) await new Promise(resolve => setTimeout(resolve, releaseDeadline - nowMs()));
+  }
+  const settledRecovery = recoveryByOutput.get(port.id);
+  if (
+    !settledRecovery ||
+    settledRecovery !== recovery ||
+    settledRecovery.generation !== generation ||
+    port.state !== 'connected' ||
+    (port.connection !== undefined && port.connection !== 'open')
+  ) return;
+  for (const [key, sentRelease] of queuedNoteOffs) {
+    const stillOwned = settledRecovery.notes.get(key);
+    if (stillOwned && stillOwned.onTime <= sentRelease.onTime) settledRecovery.notes.delete(key);
+  }
+  complete = complete && settledRecovery.notes.size === 0 && settledRecovery.sustainChannels.size === 0;
+
+  if (complete) {
     recoveryByOutput.delete(port.id);
-    activeNotesByOutput.get(port.id)?.clear();
-    sustainChannelsByOutput.get(port.id)?.clear();
+    for (const note of getRouteState(port.id, false).values()) clearNoteTimers(note);
+    activeNotesByOutput.delete(port.id);
+    sustainChannelsByOutput.delete(port.id);
+    sustainTransitionsByOutput.delete(port.id);
+    latestQueuedEventPerfMsByOutput.delete(port.id);
     updateSelectedOutputLabel();
     logEvent('reconnect-recovery-complete', { device: portInfo(port) });
   } else {
     updateSelectedOutputLabel();
-    logEvent('reconnect-recovery-incomplete', { device: portInfo(port), complete, pendingVoices: currentRecovery.notes.size, pendingSustainChannels: [...currentRecovery.sustainChannels] });
+    logEvent('reconnect-recovery-incomplete', { device: portInfo(port), complete, pendingVoices: settledRecovery.notes.size, pendingSustainChannels: [...settledRecovery.sustainChannels] });
   }
 }
 
@@ -441,13 +578,24 @@ function handlePortStateChange(event) {
 
 function sendPacket(port, bytes, timestampMs, kind) {
   const recoveryPending = Boolean(port && recoveryByOutput.has(port.id) && !kind.startsWith('recovery-'));
-  if (!port || typeof port.send !== 'function' || port.state !== 'connected' || recoveryPending) {
+  const noteReleasePending = Boolean(
+    port &&
+    hasPendingNoteRelease(port.id) &&
+    kind !== 'test-note-off' &&
+    kind !== 'test-note-off-retry' &&
+    !kind.startsWith('recovery-'),
+  );
+  if (!port || typeof port.send !== 'function' || port.state !== 'connected' || recoveryPending || noteReleasePending) {
     logEvent('output-send-failed', {
       kind,
       device: portInfo(port),
       bytes,
       timestampMs,
-      message: recoveryPending ? 'Reconnect cleanup is pending for this output.' : 'Selected output is not connected.',
+      message: recoveryPending
+        ? 'Reconnect cleanup is pending for this output.'
+        : noteReleasePending
+          ? 'A previously accepted test Note On is awaiting its Note Off.'
+          : 'Selected output is not connected.',
     });
     return false;
   }
@@ -488,8 +636,150 @@ async function selectedReadyOutput() {
   const port = access?.outputs.get(ui.outputSelect.value) ?? null;
   selectedOutput = port;
   updateSelectedOutputLabel();
-  if (!port || recoveryByOutput.has(port.id) || !(await openOutputPort(port))) return null;
+  if (!port || recoveryByOutput.has(port.id) || hasPendingNoteRelease(port.id) || !(await openOutputPort(port))) return null;
   return port;
+}
+
+function scheduleNoteCleanup(portId, key, note, releasePerfMs) {
+  if (note.cleanupTimeoutId !== null && note.cleanupTimeoutId !== undefined) {
+    window.clearTimeout(note.cleanupTimeoutId);
+  }
+  const settle = () => {
+    note.cleanupTimeoutId = null;
+    const remainingMs = releasePerfMs + NOTE_OFF_SETTLE_MS - nowMs();
+    if (remainingMs > 0) {
+      note.cleanupTimeoutId = window.setTimeout(settle, remainingMs);
+      return;
+    }
+    const route = getRouteState(portId, false);
+    if (route.get(key) !== note || note.noteOffState !== 'scheduled' || recoveryByOutput.has(portId)) return;
+    const port = access?.outputs.get(portId) ?? (selectedOutput?.id === portId ? selectedOutput : null);
+    if (!port || port.state !== 'connected' || (port.connection !== undefined && port.connection !== 'open')) {
+      logEvent('test-note-release-awaiting-reconnect', {
+        outputDeviceId: portId,
+        midiChannel: note.midiChannel,
+        pitch: note.pitch,
+        intendedOnTimeMs: note.onTime,
+        intendedOffTimeMs: note.offTime,
+        scheduledOffTimeMs: note.scheduledOffTime ?? null,
+      });
+      updateSelectedOutputLabel();
+      return;
+    }
+    route.delete(key);
+    if (route.size === 0) activeNotesByOutput.delete(portId);
+    updateSelectedOutputLabel();
+    logEvent('test-note-release-settled', {
+      device: portInfo(port),
+      midiChannel: note.midiChannel,
+      pitch: note.pitch,
+      intendedOffTimeMs: note.offTime,
+      scheduledOffTimeMs: note.scheduledOffTime ?? releasePerfMs,
+    });
+  };
+  note.cleanupTimeoutId = window.setTimeout(
+    settle,
+    Math.max(0, releasePerfMs + NOTE_OFF_SETTLE_MS - nowMs()),
+  );
+}
+
+function scheduleNoteOffRetry(portId, key, note, delayMs) {
+  if (note.retryTimeoutId !== null && note.retryTimeoutId !== undefined) {
+    window.clearTimeout(note.retryTimeoutId);
+  }
+  note.retryTimeoutId = window.setTimeout(() => {
+    note.retryTimeoutId = null;
+    void retryPendingNoteOff(portId, key, note);
+  }, Math.max(0, delayMs));
+}
+
+function logNoteOffRetryExhausted(portId, note) {
+  logEvent('test-note-off-retry-exhausted', {
+    outputDeviceId: portId,
+    midiChannel: note.midiChannel,
+    pitch: note.pitch,
+    intendedOnTimeMs: note.onTime,
+    intendedOffTimeMs: note.offTime,
+    attempts: note.noteOffAttempts,
+    retryLimit: MAX_NOTE_OFF_SEND_ATTEMPTS,
+    unresolved: true,
+  });
+  updateSelectedOutputLabel();
+}
+
+async function retryPendingNoteOff(portId, key, note) {
+  const route = getRouteState(portId, false);
+  if (route.get(key) !== note || note.noteOffState !== 'pending' || recoveryByOutput.has(portId)) return;
+
+  const safeNotBefore = Math.max(note.offTime, note.onTime + 1);
+  if (nowMs() < safeNotBefore + 1) {
+    scheduleNoteOffRetry(portId, key, note, safeNotBefore + 1 - nowMs());
+    return;
+  }
+  const port = access?.outputs.get(portId) ?? (selectedOutput?.id === portId ? selectedOutput : null);
+  if (!port || port.state !== 'connected') {
+    logEvent('test-note-off-deferred-to-reconnect', {
+      outputDeviceId: portId,
+      midiChannel: note.midiChannel,
+      pitch: note.pitch,
+      intendedOnTimeMs: note.onTime,
+      intendedOffTimeMs: note.offTime,
+      attempts: note.noteOffAttempts,
+    });
+    updateSelectedOutputLabel();
+    return;
+  }
+  if (note.noteOffAttempts >= MAX_NOTE_OFF_SEND_ATTEMPTS) {
+    logNoteOffRetryExhausted(portId, note);
+    return;
+  }
+
+  note.noteOffAttempts += 1;
+  const ready = await openOutputPort(port);
+  if (!ready) {
+    logEvent('test-note-off-retry-failed', {
+      outputDeviceId: portId,
+      midiChannel: note.midiChannel,
+      pitch: note.pitch,
+      attempt: note.noteOffAttempts,
+      message: 'The same selected MIDI output could not be opened for its pending Note Off.',
+    });
+  } else if (route.get(key) === note && !recoveryByOutput.has(portId)) {
+    const releasePerfMs = Math.max(nowMs(), safeNotBefore);
+    const sent = sendPacket(port, [0x80 | (note.midiChannel - 1), note.pitch, 0], releasePerfMs, 'test-note-off-retry');
+    if (sent) {
+      note.noteOffState = 'scheduled';
+      note.scheduledOffTime = releasePerfMs;
+      scheduleNoteCleanup(portId, key, note, releasePerfMs);
+      updateSelectedOutputLabel();
+      logEvent('test-note-off-retry-scheduled', {
+        device: portInfo(port),
+        midiChannel: note.midiChannel,
+        pitch: note.pitch,
+        intendedOnTimeMs: note.onTime,
+        intendedOffTimeMs: note.offTime,
+        scheduledOffTimeMs: releasePerfMs,
+        attempts: note.noteOffAttempts,
+      });
+      return;
+    }
+    logEvent('test-note-off-retry-failed', {
+      outputDeviceId: portId,
+      midiChannel: note.midiChannel,
+      pitch: note.pitch,
+      attempt: note.noteOffAttempts,
+      message: 'The same output rejected the pending Note Off.',
+    });
+  }
+
+  if (route.get(key) === note && note.noteOffState === 'pending') {
+    if (note.noteOffAttempts < MAX_NOTE_OFF_SEND_ATTEMPTS) {
+      scheduleNoteOffRetry(portId, key, note, NOTE_OFF_RETRY_DELAY_MS * note.noteOffAttempts);
+    } else {
+      logNoteOffRetryExhausted(portId, note);
+    }
+  }
+  updateSelectedOutputLabel();
 }
 
 async function sendTestNote() {
@@ -502,19 +792,79 @@ async function sendTestNote() {
   const onTime = nowMs() + 80;
   const offTime = onTime + gateMs;
   const id = `${channel}:${pitch}:${nextEventId}`;
-  const note = { id, midiChannel: channel, pitch, velocity, onTime, offTime };
   const key = `${channel}:${pitch}:${id}`;
+  const note = {
+    id,
+    midiChannel: channel,
+    pitch,
+    velocity,
+    onTime,
+    offTime,
+    scheduledOffTime: null,
+    noteOffState: 'pending',
+    noteOffAttempts: 0,
+    retryTimeoutId: null,
+    cleanupTimeoutId: null,
+  };
   const onSent = sendPacket(port, [0x90 | (channel - 1), pitch, velocity], onTime, 'test-note-on');
-  const offSent = sendPacket(port, [0x80 | (channel - 1), pitch, 0], offTime, 'test-note-off');
-  if (onSent && offSent) {
-    getRouteState(port.id, true).set(key, note);
-    window.setTimeout(() => {
-      if (port.state === 'connected' && (port.connection === undefined || port.connection === 'open')) {
-        getRouteState(port.id, false).delete(key);
-      }
-    }, Math.max(0, offTime - nowMs() + 30));
+  if (!onSent) {
+    logEvent('test-note-not-scheduled', {
+      device: portInfo(port),
+      midiChannel: channel,
+      pitch,
+      velocity,
+      noteOnAccepted: false,
+      noteOffAccepted: false,
+      schedulingStatus: 'failed',
+      intendedOnTimeMs: onTime,
+      intendedOffTimeMs: offTime,
+    });
+    return;
   }
-  logEvent('test-note-scheduled', { device: portInfo(port), midiChannel: channel, pitch, velocity, gateMs, onTimeMs: onTime, offTimeMs: offTime });
+
+  // Own the voice immediately after the output accepts Note On. In particular,
+  // a later synchronous Note Off exception must not erase recovery ownership.
+  getRouteState(port.id, true).set(key, note);
+  note.noteOffAttempts = 1;
+  const offSent = sendPacket(port, [0x80 | (channel - 1), pitch, 0], offTime, 'test-note-off');
+  if (offSent) {
+    note.noteOffState = 'scheduled';
+    note.scheduledOffTime = offTime;
+    scheduleNoteCleanup(port.id, key, note, offTime);
+    updateSelectedOutputLabel();
+    logEvent('test-note-scheduled', {
+      device: portInfo(port),
+      midiChannel: channel,
+      pitch,
+      velocity,
+      gateMs,
+      onTimeMs: onTime,
+      offTimeMs: offTime,
+      noteOnAccepted: true,
+      noteOffAccepted: true,
+      schedulingStatus: 'complete',
+    });
+    return;
+  }
+
+  updateSelectedOutputLabel();
+  logEvent('test-note-partial-schedule', {
+    device: portInfo(port),
+    midiChannel: channel,
+    pitch,
+    velocity,
+    gateMs,
+    noteOnAccepted: true,
+    noteOffAccepted: false,
+    schedulingStatus: 'partial',
+    intendedOnTimeMs: onTime,
+    intendedOffTimeMs: offTime,
+    noteOffAttempts: note.noteOffAttempts,
+    retryLimit: MAX_NOTE_OFF_SEND_ATTEMPTS,
+    unresolved: true,
+  });
+  const safeNotBefore = Math.max(offTime, onTime + 1);
+  scheduleNoteOffRetry(port.id, key, note, Math.max(0, safeNotBefore + 1 - nowMs()));
 }
 
 async function sendControlChange(number, value, label) {
@@ -651,6 +1001,7 @@ function downloadJson() {
     },
     selectedOutput: selectedOutput ? portInfo(selectedOutput) : null,
     selectedInput: selectedInput ? portInfo(selectedInput) : null,
+    unresolvedRecovery: buildUnresolvedRecoverySnapshot(),
     events,
     expectedPackets,
     observedLoopbackPackets: observedPackets,
@@ -680,6 +1031,23 @@ function downloadCsv() {
     event.bytes,
     event.timestampMs,
     Object.fromEntries(Object.entries(event).filter(([key]) => !['eventId', 'utc', 'perfTimeMs', 'type', 'permissionState', 'output', 'input', 'channel', 'bytes', 'timestampMs'].includes(key))),
+  ]);
+  const selectedOutputInfo = selectedOutput ? portInfo(selectedOutput) : null;
+  const selectedInputInfo = selectedInput ? portInfo(selectedInput) : null;
+  rows.push([
+    '',
+    new Date().toISOString(),
+    nowMs(),
+    'unresolved-recovery-snapshot',
+    permissionState,
+    selectedOutputInfo?.id,
+    selectedOutputInfo?.name,
+    selectedInputInfo?.id,
+    selectedInputInfo?.name,
+    Number(ui.channelSelect.value) || null,
+    null,
+    null,
+    { unresolvedRecovery: buildUnresolvedRecoverySnapshot() },
   ]);
   const content = [columns, ...rows].map(row => row.map(csvCell).join(',')).join('\r\n');
   downloadBlob(`apex-midi-diagnostic-${new Date().toISOString().replace(/[:.]/g, '-')}.csv`, content, 'text/csv;charset=utf-8');

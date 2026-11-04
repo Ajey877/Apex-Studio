@@ -84,6 +84,19 @@ interface DisconnectedMidiPortRecovery {
   sustainChannels: Set<number>;
   /** Latest timestamp of any old queued event that clear() could not cancel. */
   latestQueuedEventPerfMs: number;
+  /** Prevent concurrent open/statechange paths from queueing duplicate recovery releases. */
+  recovering: boolean;
+  /** Invalidates an in-flight recovery if the same output disconnects again. */
+  generation: number;
+}
+
+interface RecentMidiVoiceRecoveryCandidate {
+  outputDeviceId: string;
+  midiChannel: number;
+  pitch: number;
+  latestOnPerfMs: number;
+  latestEventPerfMs: number;
+  expiresAtPerfMs: number;
 }
 
 interface PitchScheduleOutcome {
@@ -144,6 +157,17 @@ export const MAX_PREVIEW_MIDI_NOTE_SECONDS = 8;
 
 /** Retention window for per-take scheduler deduplication keys (in seconds). */
 const DEDUP_RETENTION_SECONDS = 1.5;
+
+/**
+ * A delayed MIDI-port disconnect callback can arrive after the scheduler's
+ * intended Note Off has elapsed. Retain only the latest state for each
+ * (output, channel, pitch) for a short grace window so that this callback can
+ * still recover the physical voice without keeping note history indefinitely.
+ */
+const RECENT_NOTE_RECOVERY_RETENTION_MS = 30_000;
+const MAX_RECENT_NOTE_RECOVERY_CANDIDATES = 8_192;
+const MAX_DISCONNECTED_PORT_RECOVERIES = 64;
+const RECENT_NOTE_RECOVERY_PRUNE_INTERVAL_MS = 1_000;
 
 export const DEFAULT_CHANNEL_MIDI_OUTPUT_ROUTING: Readonly<ChannelMidiOutputRouting> = Object.freeze({
   outputDeviceId: null,
@@ -347,6 +371,8 @@ export class MidiOutputScheduler {
   private scheduledEventKeys = new Map<string, number>();
   private sustainChannelsByPortKey = new Map<string, Set<string>>();
   private disconnectedPortRecoveries = new Map<string, DisconnectedMidiPortRecovery>();
+  private recentNoteRecoveryCandidates = new Map<string, RecentMidiVoiceRecoveryCandidate>();
+  private lastRecentNoteRecoveryPrunePerfMs = Number.NEGATIVE_INFINITY;
   private portErrors = new Map<string, string>();
   private verifiedOpenPortIds = new Set<string>();
   private openingPortPromises = new Map<string, Promise<boolean>>();
@@ -525,6 +551,86 @@ export class MidiOutputScheduler {
     return openPromise;
   }
 
+  private rememberRecentMidiVoice(port: MidiOutputPortLike, data: number[], timestampMs?: number): void {
+    const status = data[0];
+    const pitch = data[1];
+    const velocity = data[2];
+    if (!Number.isInteger(status) || !Number.isInteger(pitch) || !Number.isInteger(velocity)) return;
+    const command = status & 0xf0;
+    const isNoteOn = command === 0x90 && velocity > 0;
+    const isNoteOff = command === 0x80 || (command === 0x90 && velocity === 0);
+    if (!isNoteOn && !isNoteOff) return;
+
+    const midiChannel = (status & 0x0f) + 1;
+    const key = JSON.stringify([port.id, midiChannel, pitch]);
+    const nowPerfMs = this.getPerformanceNowMs();
+    const eventPerfMs = Number.isFinite(timestampMs) ? timestampMs! : nowPerfMs;
+    const existing = this.recentNoteRecoveryCandidates.get(key);
+    // A release without a recently accepted Note On does not establish voice
+    // ownership. Keeping one latest record per route voice also coalesces MIDI
+    // unison contributors instead of accumulating one record per DAW note.
+    if (isNoteOff && !existing) return;
+
+    const candidate: RecentMidiVoiceRecoveryCandidate = {
+      outputDeviceId: port.id,
+      midiChannel,
+      pitch,
+      latestOnPerfMs: isNoteOn
+        ? Math.max(existing?.latestOnPerfMs ?? Number.NEGATIVE_INFINITY, eventPerfMs)
+        : existing!.latestOnPerfMs,
+      latestEventPerfMs: Math.max(existing?.latestEventPerfMs ?? Number.NEGATIVE_INFINITY, eventPerfMs),
+      expiresAtPerfMs: Math.max(
+        existing?.expiresAtPerfMs ?? Number.NEGATIVE_INFINITY,
+        Math.max(nowPerfMs, eventPerfMs) + RECENT_NOTE_RECOVERY_RETENTION_MS,
+      ),
+    };
+    // Map insertion order is the bounded LRU/FIFO eviction order. Refreshing
+    // a voice moves just that voice to the newest position without growing history.
+    this.recentNoteRecoveryCandidates.delete(key);
+    this.recentNoteRecoveryCandidates.set(key, candidate);
+    while (this.recentNoteRecoveryCandidates.size > MAX_RECENT_NOTE_RECOVERY_CANDIDATES) {
+      const oldestKey = this.recentNoteRecoveryCandidates.keys().next().value;
+      if (oldestKey === undefined) break;
+      this.recentNoteRecoveryCandidates.delete(oldestKey);
+    }
+  }
+
+  private pruneRecentMidiVoiceRecoveryCandidates(nowPerfMs: number): void {
+    if (
+      nowPerfMs >= this.lastRecentNoteRecoveryPrunePerfMs &&
+      nowPerfMs - this.lastRecentNoteRecoveryPrunePerfMs < RECENT_NOTE_RECOVERY_PRUNE_INTERVAL_MS
+    ) {
+      return;
+    }
+    this.lastRecentNoteRecoveryPrunePerfMs = nowPerfMs;
+    for (const [key, candidate] of this.recentNoteRecoveryCandidates) {
+      if (candidate.expiresAtPerfMs <= nowPerfMs) this.recentNoteRecoveryCandidates.delete(key);
+    }
+  }
+
+  private clearRecentMidiVoiceRecoveryCandidates(outputDeviceId: string): void {
+    for (const [key, candidate] of this.recentNoteRecoveryCandidates) {
+      if (candidate.outputDeviceId === outputDeviceId) this.recentNoteRecoveryCandidates.delete(key);
+    }
+  }
+
+  private retainDisconnectedPortRecovery(
+    outputDeviceId: string,
+    recovery: DisconnectedMidiPortRecovery,
+  ): void {
+    if (!this.disconnectedPortRecoveries.has(outputDeviceId)) {
+      // Bound pathological device churn as well as the short-lived voice
+      // journal. Under the cap, preserve the most recently disconnected routes.
+      while (this.disconnectedPortRecoveries.size >= MAX_DISCONNECTED_PORT_RECOVERIES) {
+        const oldestOutputId = this.disconnectedPortRecoveries.keys().next().value;
+        if (oldestOutputId === undefined) break;
+        this.disconnectedPortRecoveries.delete(oldestOutputId);
+      }
+    }
+    this.disconnectedPortRecoveries.delete(outputDeviceId);
+    this.disconnectedPortRecoveries.set(outputDeviceId, recovery);
+  }
+
   public handlePortDisconnected(outputDeviceId: string): void {
     this.verifiedOpenPortIds.delete(outputDeviceId);
     this.openingPortPromises.delete(outputDeviceId);
@@ -535,7 +641,10 @@ export class MidiOutputScheduler {
       noteOffs: new Map<string, { midiChannel: number; pitch: number; latestOnPerfMs: number }>(),
       sustainChannels: new Set<number>(),
       latestQueuedEventPerfMs: nowPerfMs,
+      recovering: false,
+      generation: 0,
     };
+    recovery.generation += 1;
     for (const active of this.activeNotes.values()) {
       if (active.outputDeviceId !== outputDeviceId) continue;
       recovery.latestQueuedEventPerfMs = Math.max(
@@ -551,6 +660,31 @@ export class MidiOutputScheduler {
         midiChannel: active.midiChannel,
         pitch: active.pitch,
         latestOnPerfMs: Math.max(existing?.latestOnPerfMs ?? -Infinity, active.onPerfMs),
+      });
+    }
+    // `pruneCompletedState()` intentionally retires completed musical owners.
+    // Keep a bounded per-wire-voice journal for a short grace window so a
+    // delayed disconnect callback can still release a voice whose Note Off may
+    // have been lost with the physical link. A queue timestamp is not delivery
+    // acknowledgement, so include both active owners and recently completed
+    // accepted Note On voices, deduplicated by (channel, pitch).
+    for (const candidate of this.recentNoteRecoveryCandidates.values()) {
+      if (
+        candidate.outputDeviceId !== outputDeviceId ||
+        candidate.expiresAtPerfMs <= nowPerfMs
+      ) {
+        continue;
+      }
+      recovery.latestQueuedEventPerfMs = Math.max(
+        recovery.latestQueuedEventPerfMs,
+        candidate.latestEventPerfMs,
+      );
+      const key = `${candidate.midiChannel}:${candidate.pitch}`;
+      const existing = recovery.noteOffs.get(key);
+      recovery.noteOffs.set(key, {
+        midiChannel: candidate.midiChannel,
+        pitch: candidate.pitch,
+        latestOnPerfMs: Math.max(existing?.latestOnPerfMs ?? -Infinity, candidate.latestOnPerfMs),
       });
     }
     const sustainPrefix = `${outputDeviceId}:`;
@@ -573,8 +707,11 @@ export class MidiOutputScheduler {
       recovery.sustainChannels.size > 0 ||
       recovery.latestQueuedEventPerfMs > nowPerfMs
     ) {
-      this.disconnectedPortRecoveries.set(outputDeviceId, recovery);
+      this.retainDisconnectedPortRecovery(outputDeviceId, recovery);
     }
+    // Ownership has now been transferred into the pending recovery record;
+    // discard this port's short-lived journal entries to keep memory bounded.
+    this.clearRecentMidiVoiceRecoveryCandidates(outputDeviceId);
 
     const port = this.resolveOutputPort(outputDeviceId);
     if (port && typeof port.clear === 'function') {
@@ -614,63 +751,139 @@ export class MidiOutputScheduler {
   ): Promise<boolean> {
     const recovery = this.disconnectedPortRecoveries.get(outputDeviceId);
     if (!recovery) return true;
+    if (recovery.recovering) return false;
     if ((port.state ?? 'connected') !== 'connected' || typeof port.send !== 'function') return false;
+    recovery.recovering = true;
+    const recoveryGeneration = recovery.generation;
 
-    let queueCleared = false;
-    if (typeof port.clear === 'function') {
-      try {
-        port.clear();
-        queueCleared = true;
-      } catch {
-        // If clear() is unsupported/throws, wait out all known queued events before releasing/reopening this route.
+    try {
+      let queueCleared = false;
+      if (typeof port.clear === 'function') {
+        try {
+          port.clear();
+          queueCleared = true;
+        } catch {
+          // If clear() is unsupported/throws, wait out all known queued events before releasing/reopening this route.
+        }
       }
-    }
-    if (!queueCleared) {
-      const recoveryDeadlinePerfMs = Math.max(
-        this.getPerformanceNowMs(),
-        recovery.latestQueuedEventPerfMs,
+
+      const latestKnownOnPerfMs = Math.max(
+        Number.NEGATIVE_INFINITY,
         ...[...recovery.noteOffs.values()].map(note => note.latestOnPerfMs),
-      ) + MIN_MIDI_NOTE_OFF_DELTA_MS;
-      // Timers can wake slightly early relative to the high-resolution MIDI
-      // timestamp clock. Recheck against the same clock before issuing cleanup.
+      );
+      const deadlineNowPerfMs = this.getPerformanceNowMs();
+      const recoveryDeadlinePerfMs = queueCleared
+        // clear() cancels queued events, but keep every recovery Note Off at
+        // least 1 ms after the latest accepted Note On, even if that On was
+        // scheduled for the future. The route remains gated until that release
+        // timestamp has passed.
+        ? Math.max(deadlineNowPerfMs, latestKnownOnPerfMs + MIN_MIDI_NOTE_OFF_DELTA_MS)
+        // Without a reliable clear(), wait until each known old event and the
+        // latest Note On has elapsed by the strict safety delta. Do not add an
+        // unnecessary extra millisecond when all timestamps are already past.
+        : Math.max(
+          deadlineNowPerfMs,
+          recovery.latestQueuedEventPerfMs + MIN_MIDI_NOTE_OFF_DELTA_MS,
+          latestKnownOnPerfMs + MIN_MIDI_NOTE_OFF_DELTA_MS,
+        );
       while (true) {
         const remainingMs = recoveryDeadlinePerfMs - this.getPerformanceNowMs();
         if (remainingMs <= 0) break;
         await new Promise<void>(resolve => setTimeout(resolve, remainingMs));
       }
-    }
 
-    const latestRecovery = this.disconnectedPortRecoveries.get(outputDeviceId);
-    if (!latestRecovery) return true;
-    if (
-      (port.state ?? 'connected') !== 'connected' ||
-      (port.connection !== undefined && port.connection !== 'open')
-    ) {
+      const latestRecovery = this.disconnectedPortRecoveries.get(outputDeviceId);
+      if (!latestRecovery) return true;
+      if (latestRecovery !== recovery || latestRecovery.generation !== recoveryGeneration) {
+        // A disconnect/reconnect cycle overtook this async wait. Do not release
+        // or clear ownership using a stale queue snapshot; restart from the
+        // newest per-port state if the same output is already back online.
+        recovery.recovering = false;
+        if (
+          (port.state ?? 'connected') === 'connected' &&
+          (port.connection === undefined || port.connection === 'open')
+        ) {
+          return await this.recoverDisconnectedPort(outputDeviceId, port);
+        }
+        return false;
+      }
+      if (
+        (port.state ?? 'connected') !== 'connected' ||
+        (port.connection !== undefined && port.connection !== 'open')
+      ) {
+        return false;
+      }
+
+      // Pedal-up first, then explicit Note Offs for known pitches. A Note Off is
+      // idempotent here; deduplication by channel/pitch avoids duplicate releases
+      // when several DAW channels contributed the same physical voice.
+      for (const midiChannel of [...latestRecovery.sustainChannels].sort((a, b) => a - b)) {
+        if (this.trySend(port, [0xb0 | (midiChannel - 1), 64, 0])) {
+          latestRecovery.sustainChannels.delete(midiChannel);
+        }
+      }
+      const noteOffs = [...latestRecovery.noteOffs.entries()].sort(([, a], [, b]) =>
+        a.midiChannel - b.midiChannel || a.pitch - b.pitch,
+      );
+      const queuedNoteOffs = new Map<string, { latestOnPerfMs: number; releasePerfMs: number }>();
+      let latestQueuedRecoveryOffPerfMs = Number.NEGATIVE_INFINITY;
+      for (const [key, note] of noteOffs) {
+        const sendNowPerfMs = this.getPerformanceNowMs();
+        const releasePerfMs = Math.max(sendNowPerfMs, note.latestOnPerfMs + MIN_MIDI_NOTE_OFF_DELTA_MS);
+        if (this.trySend(port, [0x80 | (note.midiChannel - 1), note.pitch, 0], releasePerfMs)) {
+          queuedNoteOffs.set(key, { latestOnPerfMs: note.latestOnPerfMs, releasePerfMs });
+          latestQueuedRecoveryOffPerfMs = Math.max(latestQueuedRecoveryOffPerfMs, releasePerfMs);
+          latestRecovery.latestQueuedEventPerfMs = Math.max(latestRecovery.latestQueuedEventPerfMs, releasePerfMs);
+        }
+      }
+
+      // A successful send of a future-timestamped Note Off only queues it. Keep
+      // this output gated until those releases can reach the receiver, and keep
+      // their recovery ownership if another disconnect interrupts the queue.
+      if (latestQueuedRecoveryOffPerfMs > this.getPerformanceNowMs()) {
+        const releaseDeadlinePerfMs = latestQueuedRecoveryOffPerfMs + MIN_MIDI_NOTE_OFF_DELTA_MS;
+        while (true) {
+          const remainingMs = releaseDeadlinePerfMs - this.getPerformanceNowMs();
+          if (remainingMs <= 0) break;
+          await new Promise<void>(resolve => setTimeout(resolve, remainingMs));
+        }
+      }
+
+      const settledRecovery = this.disconnectedPortRecoveries.get(outputDeviceId);
+      if (!settledRecovery) return true;
+      if (settledRecovery !== recovery || settledRecovery.generation !== recoveryGeneration) {
+        recovery.recovering = false;
+        if (
+          (port.state ?? 'connected') === 'connected' &&
+          (port.connection === undefined || port.connection === 'open')
+        ) {
+          return await this.recoverDisconnectedPort(outputDeviceId, port);
+        }
+        return false;
+      }
+      if (
+        (port.state ?? 'connected') !== 'connected' ||
+        (port.connection !== undefined && port.connection !== 'open')
+      ) {
+        return false;
+      }
+      for (const [key, sentRelease] of queuedNoteOffs) {
+        const stillOwned = settledRecovery.noteOffs.get(key);
+        if (stillOwned && stillOwned.latestOnPerfMs <= sentRelease.latestOnPerfMs) {
+          settledRecovery.noteOffs.delete(key);
+        }
+      }
+
+      if (settledRecovery.sustainChannels.size === 0 && settledRecovery.noteOffs.size === 0) {
+        this.disconnectedPortRecoveries.delete(outputDeviceId);
+        this.clearRecentMidiVoiceRecoveryCandidates(outputDeviceId);
+        return true;
+      }
       return false;
+    } finally {
+      const currentRecovery = this.disconnectedPortRecoveries.get(outputDeviceId);
+      if (currentRecovery === recovery) currentRecovery.recovering = false;
     }
-
-    // Pedal-up first, then explicit Note Offs for known pitches. A Note Off is
-    // idempotent here; deduplication by channel/pitch avoids duplicate releases
-    // when several DAW channels contributed the same physical voice.
-    for (const midiChannel of [...latestRecovery.sustainChannels].sort((a, b) => a - b)) {
-      if (this.trySend(port, [0xb0 | (midiChannel - 1), 64, 0])) {
-        latestRecovery.sustainChannels.delete(midiChannel);
-      }
-    }
-    const noteOffs = [...latestRecovery.noteOffs.entries()].sort(([, a], [, b]) =>
-      a.midiChannel - b.midiChannel || a.pitch - b.pitch,
-    );
-    for (const [key, note] of noteOffs) {
-      if (this.trySend(port, [0x80 | (note.midiChannel - 1), note.pitch, 0])) {
-        latestRecovery.noteOffs.delete(key);
-      }
-    }
-
-    if (latestRecovery.sustainChannels.size === 0 && latestRecovery.noteOffs.size === 0) {
-      this.disconnectedPortRecoveries.delete(outputDeviceId);
-      return true;
-    }
-    return false;
   }
 
   public async handlePortReconnected(outputDeviceId: string): Promise<void> {
@@ -2733,6 +2946,7 @@ export class MidiOutputScheduler {
       } else {
         port.send(data);
       }
+      this.rememberRecentMidiVoice(port, data, timestampMs);
       return true;
     } catch (error) {
       const id = port.id || '';
@@ -2747,6 +2961,7 @@ export class MidiOutputScheduler {
   }
 
   private pruneCompletedState(nowPerfMs: number, contextCurrentTimeSeconds?: number): void {
+    this.pruneRecentMidiVoiceRecoveryCandidates(nowPerfMs);
     for (const [id, note] of [...this.activeNotes.entries()]) {
       if (
         note.uncancelledHardwareOffPerfMs !== null &&
