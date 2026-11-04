@@ -77,6 +77,15 @@ interface PendingMidiControlChange {
   perfMs: number;
 }
 
+interface DisconnectedMidiPortRecovery {
+  /** Unique voices owned on this output at link loss, keyed by MIDI channel and pitch. */
+  noteOffs: Map<string, { midiChannel: number; pitch: number; latestOnPerfMs: number }>;
+  /** Channels on which this output may still have a held sustain pedal. */
+  sustainChannels: Set<number>;
+  /** Latest timestamp of any old queued event that clear() could not cancel. */
+  latestQueuedEventPerfMs: number;
+}
+
 interface PitchScheduleOutcome {
   sent: boolean;
   uncancelledQueuedOffPerfMs: number | null;
@@ -337,6 +346,7 @@ export class MidiOutputScheduler {
   private pendingControlChanges: PendingMidiControlChange[] = [];
   private scheduledEventKeys = new Map<string, number>();
   private sustainChannelsByPortKey = new Map<string, Set<string>>();
+  private disconnectedPortRecoveries = new Map<string, DisconnectedMidiPortRecovery>();
   private portErrors = new Map<string, string>();
   private verifiedOpenPortIds = new Set<string>();
   private openingPortPromises = new Map<string, Promise<boolean>>();
@@ -410,10 +420,14 @@ export class MidiOutputScheduler {
       };
     }
     const port = this.resolveOutputPort(outputDeviceId);
-    return evaluateMidiOutputPortUsability(port, {
+    const usability = evaluateMidiOutputPortUsability(port, {
       recordedError: this.portErrors.get(outputDeviceId) ?? null,
       verifiedOpen: this.verifiedOpenPortIds.has(outputDeviceId),
     });
+    const recoveryPending = this.disconnectedPortRecoveries.has(outputDeviceId);
+    return recoveryPending && usability.usable
+      ? { ...usability, usable: false, statusReason: 'Reconnect cleanup is pending for this MIDI output' }
+      : usability;
   }
 
   public describePortInfo(port: MidiOutputPortLike, fallbackIndex = 0): MidiDeviceInfo {
@@ -422,6 +436,7 @@ export class MidiOutputScheduler {
       recordedError: this.portErrors.get(id) ?? null,
       verifiedOpen: this.verifiedOpenPortIds.has(id),
     });
+    const recoveryPending = this.disconnectedPortRecoveries.has(id);
     return {
       id,
       name: port.name || 'MIDI Out Port',
@@ -429,8 +444,10 @@ export class MidiOutputScheduler {
       state: usability.state,
       connection: usability.connection,
       type: 'output',
-      usable: usability.usable,
-      statusReason: usability.statusReason,
+      usable: usability.usable && !recoveryPending,
+      statusReason: recoveryPending && usability.usable
+        ? 'Reconnect cleanup is pending for this MIDI output'
+        : usability.statusReason,
     };
   }
 
@@ -464,13 +481,19 @@ export class MidiOutputScheduler {
     if (typeof port.open !== 'function') {
       // Minimal standard MIDIOutput implementations without explicit open()
       // rely on connection state (if present) and send() availability.
-      const usability = this.getPortUsability(outputDeviceId);
-      return usability.usable;
+      const usability = evaluateMidiOutputPortUsability(port, {
+        recordedError: this.portErrors.get(outputDeviceId) ?? null,
+        verifiedOpen: this.verifiedOpenPortIds.has(outputDeviceId),
+      });
+      if (!usability.usable) return false;
+      const recovered = await this.recoverDisconnectedPort(outputDeviceId, port);
+      return recovered && this.getPortUsability(outputDeviceId).usable;
     }
     if (port.connection === 'open') {
       this.portErrors.delete(outputDeviceId);
       this.verifiedOpenPortIds.add(outputDeviceId);
-      return true;
+      const recovered = await this.recoverDisconnectedPort(outputDeviceId, port);
+      return recovered && this.getPortUsability(outputDeviceId).usable;
     }
     const inFlight = this.openingPortPromises.get(outputDeviceId);
     if (inFlight) return inFlight;
@@ -484,8 +507,9 @@ export class MidiOutputScheduler {
         } else {
           this.verifiedOpenPortIds.delete(outputDeviceId);
         }
+        const recovered = await this.recoverDisconnectedPort(outputDeviceId, port);
         this.notifyStateListeners();
-        return this.getPortUsability(outputDeviceId).usable;
+        return recovered && this.getPortUsability(outputDeviceId).usable;
       } catch (error) {
         const message = error instanceof Error ? error.message : 'Failed to open MIDI output port';
         this.portErrors.set(outputDeviceId, message);
@@ -504,6 +528,54 @@ export class MidiOutputScheduler {
   public handlePortDisconnected(outputDeviceId: string): void {
     this.verifiedOpenPortIds.delete(outputDeviceId);
     this.openingPortPromises.delete(outputDeviceId);
+    const nowPerfMs = this.getPerformanceNowMs();
+    this.pruneCompletedState(nowPerfMs);
+
+    const recovery = this.disconnectedPortRecoveries.get(outputDeviceId) ?? {
+      noteOffs: new Map<string, { midiChannel: number; pitch: number; latestOnPerfMs: number }>(),
+      sustainChannels: new Set<number>(),
+      latestQueuedEventPerfMs: nowPerfMs,
+    };
+    for (const active of this.activeNotes.values()) {
+      if (active.outputDeviceId !== outputDeviceId) continue;
+      recovery.latestQueuedEventPerfMs = Math.max(
+        recovery.latestQueuedEventPerfMs,
+        active.onPerfMs,
+        active.queuedOffPerfMs ?? -Infinity,
+        active.uncancelledHardwareOffPerfMs ?? -Infinity,
+      );
+      if (!active.emitNoteOn || active.segmentClosedOnWire) continue;
+      const key = `${active.midiChannel}:${active.pitch}`;
+      const existing = recovery.noteOffs.get(key);
+      recovery.noteOffs.set(key, {
+        midiChannel: active.midiChannel,
+        pitch: active.pitch,
+        latestOnPerfMs: Math.max(existing?.latestOnPerfMs ?? -Infinity, active.onPerfMs),
+      });
+    }
+    const sustainPrefix = `${outputDeviceId}:`;
+    for (const [key, holders] of this.sustainChannelsByPortKey.entries()) {
+      if (!key.startsWith(sustainPrefix) || holders.size === 0) continue;
+      const midiChannel = Number(key.slice(sustainPrefix.length));
+      if (Number.isInteger(midiChannel) && midiChannel >= 1 && midiChannel <= 16) {
+        recovery.sustainChannels.add(midiChannel);
+      }
+    }
+    // A future CC64 transition may not have reached the receiver before the link
+    // disappeared. Reset that specific route as well, regardless of its value.
+    for (const pending of this.pendingControlChanges) {
+      if (pending.outputDeviceId !== outputDeviceId) continue;
+      recovery.latestQueuedEventPerfMs = Math.max(recovery.latestQueuedEventPerfMs, pending.perfMs);
+      if (pending.bytes[1] === 64) recovery.sustainChannels.add(pending.midiChannel);
+    }
+    if (
+      recovery.noteOffs.size > 0 ||
+      recovery.sustainChannels.size > 0 ||
+      recovery.latestQueuedEventPerfMs > nowPerfMs
+    ) {
+      this.disconnectedPortRecoveries.set(outputDeviceId, recovery);
+    }
+
     const port = this.resolveOutputPort(outputDeviceId);
     if (port && typeof port.clear === 'function') {
       try {
@@ -524,11 +596,81 @@ export class MidiOutputScheduler {
       item => item.outputDeviceId !== outputDeviceId,
     );
     for (const key of [...this.sustainChannelsByPortKey.keys()]) {
-      if (key.startsWith(`${outputDeviceId}:`)) {
+      if (key.startsWith(sustainPrefix)) {
         this.sustainChannelsByPortKey.delete(key);
       }
     }
     this.notifyStateListeners();
+  }
+
+  /**
+   * Releases only voices and sustain state owned by a just-disconnected output.
+   * Recovery is kept per port/channel/pitch; CC 123 is deliberately avoided so
+   * reconnecting one device cannot silence sibling channels or other ports.
+   */
+  private async recoverDisconnectedPort(
+    outputDeviceId: string,
+    port: MidiOutputPortLike,
+  ): Promise<boolean> {
+    const recovery = this.disconnectedPortRecoveries.get(outputDeviceId);
+    if (!recovery) return true;
+    if ((port.state ?? 'connected') !== 'connected' || typeof port.send !== 'function') return false;
+
+    let queueCleared = false;
+    if (typeof port.clear === 'function') {
+      try {
+        port.clear();
+        queueCleared = true;
+      } catch {
+        // If clear() is unsupported/throws, wait out all known queued events before releasing/reopening this route.
+      }
+    }
+    if (!queueCleared) {
+      const recoveryDeadlinePerfMs = Math.max(
+        this.getPerformanceNowMs(),
+        recovery.latestQueuedEventPerfMs,
+        ...[...recovery.noteOffs.values()].map(note => note.latestOnPerfMs),
+      ) + MIN_MIDI_NOTE_OFF_DELTA_MS;
+      // Timers can wake slightly early relative to the high-resolution MIDI
+      // timestamp clock. Recheck against the same clock before issuing cleanup.
+      while (true) {
+        const remainingMs = recoveryDeadlinePerfMs - this.getPerformanceNowMs();
+        if (remainingMs <= 0) break;
+        await new Promise<void>(resolve => setTimeout(resolve, remainingMs));
+      }
+    }
+
+    const latestRecovery = this.disconnectedPortRecoveries.get(outputDeviceId);
+    if (!latestRecovery) return true;
+    if (
+      (port.state ?? 'connected') !== 'connected' ||
+      (port.connection !== undefined && port.connection !== 'open')
+    ) {
+      return false;
+    }
+
+    // Pedal-up first, then explicit Note Offs for known pitches. A Note Off is
+    // idempotent here; deduplication by channel/pitch avoids duplicate releases
+    // when several DAW channels contributed the same physical voice.
+    for (const midiChannel of [...latestRecovery.sustainChannels].sort((a, b) => a - b)) {
+      if (this.trySend(port, [0xb0 | (midiChannel - 1), 64, 0])) {
+        latestRecovery.sustainChannels.delete(midiChannel);
+      }
+    }
+    const noteOffs = [...latestRecovery.noteOffs.entries()].sort(([, a], [, b]) =>
+      a.midiChannel - b.midiChannel || a.pitch - b.pitch,
+    );
+    for (const [key, note] of noteOffs) {
+      if (this.trySend(port, [0x80 | (note.midiChannel - 1), note.pitch, 0])) {
+        latestRecovery.noteOffs.delete(key);
+      }
+    }
+
+    if (latestRecovery.sustainChannels.size === 0 && latestRecovery.noteOffs.size === 0) {
+      this.disconnectedPortRecoveries.delete(outputDeviceId);
+      return true;
+    }
+    return false;
   }
 
   public async handlePortReconnected(outputDeviceId: string): Promise<void> {
@@ -2572,6 +2714,8 @@ export class MidiOutputScheduler {
   }
 
   private resolveUsablePort(outputDeviceId: string): MidiOutputPortLike | null {
+    // Do not let playback or control changes race ahead of reconnect cleanup.
+    if (this.disconnectedPortRecoveries.has(outputDeviceId)) return null;
     const port = this.resolveOutputPort(outputDeviceId);
     if (!port) return null;
     const usability = evaluateMidiOutputPortUsability(port, {

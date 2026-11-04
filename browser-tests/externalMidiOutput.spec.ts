@@ -24,15 +24,22 @@ declare global {
       clearCounts: Record<string, number>;
       clearEvents: RecordedClearEvent[];
       openCounts: Record<string, number>;
+      requestCalls: number;
+      setPermissionGranted: (granted: boolean) => void;
       setOutputState: (portId: string, nextState: 'connected' | 'disconnected') => void;
       clearRecorded: () => void;
     };
   }
 }
 
-async function installInstrumentedWebMidiHarness(page: Page): Promise<void> {
-  await page.addInitScript(() => {
+async function installInstrumentedWebMidiHarness(
+  page: Page,
+  initiallyGranted = true,
+): Promise<void> {
+  await page.addInitScript((permissionInitiallyGranted: boolean) => {
     let nextSeq = 1;
+    let permissionGranted = permissionInitiallyGranted;
+    let requestCalls = 0;
     const sentPackets: RecordedMidiPacket[] = [];
     const clearEvents: RecordedClearEvent[] = [];
     const clearCounts: Record<string, number> = {
@@ -136,7 +143,14 @@ async function installInstrumentedWebMidiHarness(page: Page): Promise<void> {
     Object.defineProperty(navigator, 'requestMIDIAccess', {
       configurable: true,
       writable: true,
-      value: () => Promise.resolve(access),
+      value: () => {
+        requestCalls += 1;
+        if (!permissionGranted) {
+          const error = new DOMException('Web MIDI permission denied by test harness', 'NotAllowedError');
+          return Promise.reject(error);
+        }
+        return Promise.resolve(access);
+      },
     });
 
     window.__apexMidiTestHarness = {
@@ -144,6 +158,17 @@ async function installInstrumentedWebMidiHarness(page: Page): Promise<void> {
       clearCounts,
       clearEvents,
       openCounts,
+      get requestCalls() {
+        return requestCalls;
+      },
+      setPermissionGranted(granted: boolean) {
+        permissionGranted = granted;
+        if (granted) {
+          for (const port of outputs.values()) {
+            port.connection = 'closed';
+          }
+        }
+      },
       setOutputState(portId: string, nextState: 'connected' | 'disconnected') {
         const target = outputs.get(portId);
         if (!target) return;
@@ -160,10 +185,44 @@ async function installInstrumentedWebMidiHarness(page: Page): Promise<void> {
         clearCounts['out-drum-b'] = 0;
       },
     };
-  });
+  }, initiallyGranted);
 }
 
 test.describe('Phase 1 External MIDI Output — Chromium E2E', () => {
+  test('surfaces denied MIDI permission and recovers UI/device discovery after grant and re-grant', async ({ page }) => {
+    await installInstrumentedWebMidiHarness(page, false);
+    await page.goto(APP_URL);
+    await page.waitForSelector('#root > *', { state: 'attached' });
+    await page.locator('#fl-midi-hub-btn').click();
+
+    const midiDialog = page.locator('#midi-controller-modal-overlay');
+    await expect(midiDialog).toBeVisible();
+    await expect(midiDialog.getByTestId('web-midi-hardware-warning')).toContainText('Web MIDI Permission Denied');
+    await expect(midiDialog).toContainText('No Hardware MIDI Devices Detected');
+    const outputSection = midiDialog.getByTestId('midi-output-devices-section');
+
+    const initialRequests = await page.evaluate(() => window.__apexMidiTestHarness?.requestCalls ?? 0);
+    await page.evaluate(() => window.__apexMidiTestHarness?.setPermissionGranted(true));
+    await midiDialog.locator('#rescan-midi-devices-btn').click();
+    await expect(outputSection.getByTestId('midi-output-card-out-synth-a')).toContainText('Ready');
+    const opensAfterGrant = await page.evaluate(() => window.__apexMidiTestHarness?.openCounts['out-synth-a'] ?? 0);
+    expect(opensAfterGrant).toBeGreaterThanOrEqual(1);
+
+    await page.evaluate(() => window.__apexMidiTestHarness?.setPermissionGranted(false));
+    await midiDialog.locator('#rescan-midi-devices-btn').click();
+    await expect(midiDialog.getByTestId('web-midi-hardware-warning')).toContainText('Web MIDI Permission Denied');
+    await expect(midiDialog).toContainText('No Hardware MIDI Devices Detected');
+
+    await page.evaluate(() => window.__apexMidiTestHarness?.setPermissionGranted(true));
+    await midiDialog.locator('#rescan-midi-devices-btn').click();
+    await expect(outputSection.getByTestId('midi-output-card-out-synth-a')).toContainText('Ready');
+    await expect
+      .poll(async () => page.evaluate(() => window.__apexMidiTestHarness?.requestCalls ?? 0))
+      .toBeGreaterThan(initialRequests + 2);
+    const opensAfterRegrant = await page.evaluate(() => window.__apexMidiTestHarness?.openCounts['out-synth-a'] ?? 0);
+    expect(opensAfterRegrant).toBeGreaterThan(opensAfterGrant);
+  });
+
   test('routes pattern playback to an instrumented MIDIOutput with real timestamps, deterministic stop cleanup, hot-unplug safety, undo/redo, and export truthfulness', async ({
     page,
   }) => {
