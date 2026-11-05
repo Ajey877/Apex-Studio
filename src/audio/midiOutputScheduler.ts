@@ -111,6 +111,9 @@ interface PitchScheduleOutcome {
   uncancelledQueuedOffPerfMs: number | null;
 }
 
+/** Result of journaling a wire voice, used to fail closed before transmission. */
+type RecentMidiVoiceJournalOutcome = 'recorded' | 'ignored' | 'capacity_blocked';
+
 interface ActiveMidiOutputNote {
   id: number;
   channelId: string;
@@ -171,11 +174,17 @@ const DEDUP_RETENTION_SECONDS = 1.5;
  * (output, channel, pitch) for a short grace window so that this callback can
  * still recover the physical voice without keeping note history indefinitely.
  */
-const RECENT_NOTE_RECOVERY_RETENTION_MS = 30_000;
-const MAX_RECENT_NOTE_RECOVERY_CANDIDATES = 8_192;
-const MAX_RECENT_SUSTAIN_RECOVERY_CANDIDATES = 8_192;
-const MAX_DISCONNECTED_PORT_RECOVERIES = 64;
-const MAX_RECOVERY_CAPACITY_BLOCKED_OUTPUTS = 64;
+export const RECENT_NOTE_RECOVERY_RETENTION_MS = 30_000;
+/**
+ * Hard bound on the per-wire-voice recovery journal. Reaching it never evicts an
+ * unresolved physical voice: a Note On that cannot be journaled is refused
+ * before transmission and its route is quarantined (see `trySend`).
+ */
+export const MAX_RECENT_NOTE_RECOVERY_CANDIDATES = 8_192;
+/** Hard bound on the per-output/channel sustain (CC 64) recovery journal. */
+export const MAX_RECENT_SUSTAIN_RECOVERY_CANDIDATES = 8_192;
+export const MAX_DISCONNECTED_PORT_RECOVERIES = 64;
+export const MAX_RECOVERY_CAPACITY_BLOCKED_OUTPUTS = 64;
 const RECENT_NOTE_RECOVERY_PRUNE_INTERVAL_MS = 1_000;
 
 export const DEFAULT_CHANNEL_MIDI_OUTPUT_ROUTING: Readonly<ChannelMidiOutputRouting> = Object.freeze({
@@ -576,15 +585,28 @@ export class MidiOutputScheduler {
     return openPromise;
   }
 
-  private rememberRecentMidiVoice(port: MidiOutputPortLike, data: number[], timestampMs?: number): void {
+  /**
+   * Records (or refreshes) the bounded recovery-journal entry that owns one wire
+   * voice. Returns `'capacity_blocked'` when a *new* obligation cannot be stored
+   * — the caller must then refuse to transmit any byte for that voice, because a
+   * voice with no journal entry becomes an unrecoverable stuck note after a
+   * disconnect. Existing entries are always refreshed in place and never evicted.
+   */
+  private recordRecentMidiVoice(
+    port: MidiOutputPortLike,
+    data: number[],
+    timestampMs?: number,
+  ): RecentMidiVoiceJournalOutcome {
     const status = data[0];
     const pitch = data[1];
     const velocity = data[2];
-    if (!Number.isInteger(status) || !Number.isInteger(pitch) || !Number.isInteger(velocity)) return;
+    if (!Number.isInteger(status) || !Number.isInteger(pitch) || !Number.isInteger(velocity)) {
+      return 'ignored';
+    }
     const command = status & 0xf0;
     const isNoteOn = command === 0x90 && velocity > 0;
     const isNoteOff = command === 0x80 || (command === 0x90 && velocity === 0);
-    if (!isNoteOn && !isNoteOff) return;
+    if (!isNoteOn && !isNoteOff) return 'ignored';
 
     const midiChannel = (status & 0x0f) + 1;
     const key = JSON.stringify([port.id, midiChannel, pitch]);
@@ -594,8 +616,14 @@ export class MidiOutputScheduler {
     // A release without a recently accepted Note On does not establish voice
     // ownership. Keeping one latest record per route voice also coalesces MIDI
     // unison contributors instead of accumulating one record per DAW note.
-    if (isNoteOff && !existing) return;
+    if (isNoteOff && !existing) return 'ignored';
 
+    if (!existing && this.isRecentMidiVoiceJournalFull(nowPerfMs)) {
+      // Do not evict an unresolved physical voice to make room for a newer one.
+      // This output is quarantined instead of pretending its recovery state is complete.
+      this.blockOutputForRecoveryCapacity(port.id);
+      return 'capacity_blocked';
+    }
     const candidate: RecentMidiVoiceRecoveryCandidate = {
       outputDeviceId: port.id,
       midiChannel,
@@ -609,14 +637,44 @@ export class MidiOutputScheduler {
         Math.max(nowPerfMs, eventPerfMs) + RECENT_NOTE_RECOVERY_RETENTION_MS,
       ),
     };
-    if (!existing && this.recentNoteRecoveryCandidates.size >= MAX_RECENT_NOTE_RECOVERY_CANDIDATES) {
-      // Do not evict an unresolved physical voice to make room for a newer one.
-      // This output is quarantined instead of pretending its recovery state is complete.
-      this.blockOutputForRecoveryCapacity(port.id);
-      return;
-    }
     this.recentNoteRecoveryCandidates.delete(key);
     this.recentNoteRecoveryCandidates.set(key, candidate);
+    return 'recorded';
+  }
+
+  /**
+   * True only when no recovery-journal slot is available for a *new* wire voice.
+   * Retention-expired evidence is reclaimed first (ignoring the ordinary prune
+   * throttle) so genuine capacity — not a stale timestamp — is what gates
+   * transmission. Unresolved obligations are never reclaimed here.
+   */
+  private isRecentMidiVoiceJournalFull(nowPerfMs: number): boolean {
+    if (this.recentNoteRecoveryCandidates.size < MAX_RECENT_NOTE_RECOVERY_CANDIDATES) return false;
+    this.pruneRecentMidiVoiceRecoveryCandidatesNow(nowPerfMs);
+    return this.recentNoteRecoveryCandidates.size >= MAX_RECENT_NOTE_RECOVERY_CANDIDATES;
+  }
+
+  /**
+   * Preflight + reserve the recovery-journal slot for a Note On **before** any
+   * MIDI byte is transmitted. Returns false when the obligation cannot be
+   * journaled, in which case the caller must not send the Note On at all and the
+   * affected output has already been quarantined.
+   *
+   * The reservation deliberately happens before `send()`: if that send then
+   * throws, delivery is ambiguous, so the reservation is kept and the voice stays
+   * recoverable instead of being optimistically forgotten.
+   */
+  private reserveNoteOnRecoveryBeforeSend(
+    port: MidiOutputPortLike,
+    data: number[],
+    timestampMs?: number,
+  ): boolean {
+    const status = data[0];
+    const velocity = data[2];
+    if (!Number.isInteger(status) || !Number.isInteger(velocity)) return true;
+    // Only Note On attacks establish a voice that a later disconnect must release.
+    if ((status & 0xf0) !== 0x90 || velocity === 0) return true;
+    return this.recordRecentMidiVoice(port, data, timestampMs) !== 'capacity_blocked';
   }
 
   private sustainRecoveryCandidateKey(outputDeviceId: string, midiChannel: number): string {
@@ -685,6 +743,15 @@ export class MidiOutputScheduler {
       return;
     }
     this.lastRecentNoteRecoveryPrunePerfMs = nowPerfMs;
+    this.pruneRecentMidiVoiceRecoveryCandidatesNow(nowPerfMs);
+  }
+
+  /**
+   * Unthrottled retention sweep. Only evidence whose bounded retention window
+   * has already expired is removed, so this can never discard an unresolved
+   * recovery obligation to satisfy pressure on the journal.
+   */
+  private pruneRecentMidiVoiceRecoveryCandidatesNow(nowPerfMs: number): void {
     for (const [key, candidate] of this.recentNoteRecoveryCandidates) {
       if (candidate.expiresAtPerfMs <= nowPerfMs) this.recentNoteRecoveryCandidates.delete(key);
     }
@@ -2076,8 +2143,33 @@ export class MidiOutputScheduler {
         : undefined;
 
     const bytes: [number, number, number] = [0xb0 | (routing.midiChannel - 1), ccNum, val];
+
+    const portChKey = `${routing.outputDeviceId}:${routing.midiChannel}`;
+    const sustainCandidateKey = this.sustainRecoveryCandidateKey(routing.outputDeviceId, routing.midiChannel);
+    const eventPerfMs = Number.isFinite(timestampMs) ? timestampMs! : nowPerfMs;
+    // A tracked CC 64 transition must have its recovery obligation journaled
+    // *before* the byte reaches the wire. A pedal-down always creates one; a
+    // pedal-up only does when this route may still be holding the pedal (a
+    // queued pedal-up is not delivery acknowledgement).
+    const sustainHolders = ccNum === 64 ? this.sustainChannelsByPortKey.get(portChKey) : undefined;
+    const tracksSustainRecovery =
+      ccNum === 64 &&
+      (val >= 64 ||
+        Boolean(sustainHolders?.size || this.recentSustainRecoveryCandidates.has(sustainCandidateKey)));
+    if (
+      tracksSustainRecovery &&
+      !this.rememberRecentSustainRecoveryCandidate(routing.outputDeviceId, routing.midiChannel, eventPerfMs)
+    ) {
+      // Capacity for the sustain obligation is unavailable: reject the
+      // transmission entirely (no CC 64 byte is sent) and leave the route
+      // quarantined, rather than moving unrecorded pedal state onto hardware.
+      return false;
+    }
+
     const ok = this.trySend(port, bytes, timestampMs);
-    if (ok && timestampMs !== undefined && Number.isFinite(timestampMs) && timestampMs > nowPerfMs) {
+    if (!ok) return false;
+
+    if (timestampMs !== undefined && Number.isFinite(timestampMs) && timestampMs > nowPerfMs) {
       this.pendingControlChanges.push({
         channelId: channel.id,
         outputDeviceId: routing.outputDeviceId,
@@ -2086,39 +2178,25 @@ export class MidiOutputScheduler {
         perfMs: timestampMs,
       });
     }
-    if (ok && ccNum === 64) {
-      const portChKey = `${routing.outputDeviceId}:${routing.midiChannel}`;
-      const sustainCandidateKey = this.sustainRecoveryCandidateKey(routing.outputDeviceId, routing.midiChannel);
-      const eventPerfMs = Number.isFinite(timestampMs) ? timestampMs! : nowPerfMs;
+    if (ccNum === 64) {
       if (val >= 64) {
         // The physical sustain state is shared across every DAW channel routed
         // to this output/channel. Keep one conservative recovery obligation for
         // the physical route, regardless of which contributor raised the pedal.
-        if (!this.rememberRecentSustainRecoveryCandidate(routing.outputDeviceId, routing.midiChannel, eventPerfMs)) {
-          return true;
-        }
-        let holders = this.sustainChannelsByPortKey.get(portChKey);
+        let holders = sustainHolders;
         if (!holders) {
           holders = new Set();
           this.sustainChannelsByPortKey.set(portChKey, holders);
         }
         holders.add(channel.id);
       } else {
-        const holders = this.sustainChannelsByPortKey.get(portChKey);
-        const mayStillBeHeld = Boolean(holders?.size || this.recentSustainRecoveryCandidates.has(sustainCandidateKey));
-        if (
-          mayStillBeHeld &&
-          !this.rememberRecentSustainRecoveryCandidate(routing.outputDeviceId, routing.midiChannel, eventPerfMs)
-        ) {
-          return true;
-        }
-        holders?.delete(channel.id);
-        if (holders && holders.size === 0) {
+        sustainHolders?.delete(channel.id);
+        if (sustainHolders && sustainHolders.size === 0) {
           this.sustainChannelsByPortKey.delete(portChKey);
         }
       }
     }
-    return ok;
+    return true;
   }
 
   /**
@@ -3075,13 +3153,17 @@ export class MidiOutputScheduler {
 
   private trySend(port: MidiOutputPortLike, data: number[], timestampMs?: number): boolean {
     if (!port || typeof port.send !== 'function') return false;
+    // Fail closed: a Note On whose recovery obligation cannot be journaled must
+    // never reach the wire. Sending it anyway would leave a voice the scheduler
+    // cannot release after a disconnect — a silent stuck note on real hardware.
+    if (!this.reserveNoteOnRecoveryBeforeSend(port, data, timestampMs)) return false;
     try {
       if (timestampMs !== undefined && Number.isFinite(timestampMs)) {
         port.send(data, timestampMs);
       } else {
         port.send(data);
       }
-      this.rememberRecentMidiVoice(port, data, timestampMs);
+      this.recordRecentMidiVoice(port, data, timestampMs);
       return true;
     } catch (error) {
       const id = port.id || '';

@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import {
+  MAX_RECENT_NOTE_RECOVERY_CANDIDATES,
+  MAX_RECENT_SUSTAIN_RECOVERY_CANDIDATES,
   MidiOutputScheduler,
   audioTimeToPerformanceMs,
   clampMidiChannelNumber,
@@ -4105,5 +4107,360 @@ describe('MidiOutputScheduler — overlapping pitches, cleanup isolation, loop w
         `[${mode}] strict 1:1 Note On / Note Off parity maintained across live-note cleanup`,
       );
     }
+  });
+});
+
+/**
+ * Lead Engineer finding: bounded recovery-journal capacity was checked only
+ * *after* a Note On / tracked CC 64 transition had already been handed to
+ * `MIDIOutput.send()`, so the byte reached hardware while the recovery
+ * obligation was silently dropped. These regressions pin the fail-closed
+ * contract: capacity is preflighted and reserved first, and a rejected event
+ * must transmit zero MIDI bytes while never evicting an existing obligation.
+ */
+describe('MidiOutputScheduler — recovery-capacity preflight fails closed before transmission', () => {
+  /** A port whose `send()` can be made to fail on demand to model an ambiguous link. */
+  class FlakyMidiOutputPort implements MidiOutputPortLike {
+    readonly id: string;
+    readonly name: string;
+    readonly manufacturer = 'Sequential';
+    state: 'connected' | 'disconnected' = 'connected';
+    connection: 'open' | 'closed' | 'pending' = 'open';
+    readonly sent: RecordedMidiPacket[] = [];
+    failSends = false;
+
+    constructor(id: string) {
+      this.id = id;
+      this.name = id;
+    }
+
+    send(data: number[] | Uint8Array, timestamp?: number): void {
+      if (this.failSends) {
+        throw new Error(`Port ${this.id} transmission outcome is ambiguous`);
+      }
+      this.sent.push({ bytes: Array.from(data), timestamp });
+    }
+
+    clear(): void {
+      // No queue model needed: these regressions only assert transmitted bytes.
+    }
+
+    async open(): Promise<MidiOutputPortLike> {
+      this.connection = 'open';
+      return this;
+    }
+  }
+
+  const noteOnBytesOf = (port: InstrumentedMidiOutputPort): number[] =>
+    port.sent.filter(packet => (packet.bytes[0] & 0xf0) === 0x90 && packet.bytes[2] > 0)
+      .map(packet => packet.bytes[1]);
+
+  const isSustainOf = (packet: RecordedMidiPacket, value: number): boolean =>
+    (packet.bytes[0] & 0xf0) === 0xb0 && packet.bytes[1] === 64 && packet.bytes[2] === value;
+
+  const isChannelModeOf = (packet: RecordedMidiPacket): boolean =>
+    (packet.bytes[0] & 0xf0) === 0xb0 && packet.bytes[1] === 123;
+
+  it('refuses a Note On that cannot be journaled, transmits no bytes, and never evicts an existing obligation', () => {
+    let perfMs = 1_000;
+    // One journal slot per (port, MIDI channel, pitch) wire voice.
+    const fillPorts = Array.from({ length: 4 }, (_, index) =>
+      new InstrumentedMidiOutputPort(`journal-capacity-${index}`, { nowPerfMs: () => perfMs }),
+    );
+    const overflowPort = new InstrumentedMidiOutputPort('journal-capacity-overflow', {
+      nowPerfMs: () => perfMs,
+    });
+    const ports = [...fillPorts, overflowPort];
+    const outputs = new Map(ports.map(port => [port.id, port]));
+    const scheduler = new MidiOutputScheduler({
+      performanceNowMs: () => perfMs,
+      getOutputs: () => outputs,
+    });
+    const channels = new Map<string, Channel>();
+    for (const port of fillPorts) {
+      for (let midiChannel = 1; midiChannel <= 16; midiChannel += 1) {
+        const key = `${port.id}:${midiChannel}`;
+        channels.set(key, makeChannel(`journal-capacity-channel-${key}`, {
+          midiOutput: { outputDeviceId: port.id, midiChannel, mode: 'external' },
+        }));
+      }
+    }
+    const overflowChannel = makeChannel('journal-capacity-overflow-channel', {
+      midiOutput: { outputDeviceId: overflowPort.id, midiChannel: 1, mode: 'external' },
+    });
+
+    // Fill every journal slot with a distinct, short-lived wire voice. The clock
+    // advances 1 ms per voice so each note's 1 ms tail closes before the next
+    // onset, keeping `activeNotes` tiny while the journal fills to capacity.
+    const expectedJournalSize =
+      fillPorts.length * 16 * 128;
+    assert.equal(expectedJournalSize, MAX_RECENT_NOTE_RECOVERY_CANDIDATES);
+    let scheduledVoices = 0;
+    for (const port of fillPorts) {
+      for (let midiChannel = 1; midiChannel <= 16; midiChannel += 1) {
+        const channel = channels.get(`${port.id}:${midiChannel}`)!;
+        for (let pitch = 0; pitch < 128; pitch += 1) {
+          const contextSeconds = perfMs / 1000;
+          const result = scheduler.scheduleChannelNote({
+            channel,
+            note: makeNote(pitch, { id: `${port.id}-${midiChannel}-${pitch}`, duration: 0.001 }),
+            onsetAudioTimeSeconds: contextSeconds,
+            bpm: 120,
+            contextCurrentTimeSeconds: contextSeconds,
+          });
+          assert.equal(result.sent, true, 'filling a free journal slot transmits normally');
+          scheduledVoices += 1;
+          perfMs += 1;
+        }
+      }
+    }
+    assert.equal(scheduledVoices, MAX_RECENT_NOTE_RECOVERY_CANDIDATES);
+    assert.equal(scheduler.getActiveNoteCount(), 0, 'the fill uses closed voices, not open ones');
+
+    // The slot that exactly filled the journal was accepted...
+    assert.equal(
+      noteOnBytesOf(fillPorts[3]).length,
+      16 * 128,
+      'the boundary Note On that consumes the final journal slot is transmitted',
+    );
+
+    // ...but the next *new* wire voice cannot be journaled, so it is refused
+    // before transmission and the route is quarantined.
+    const overflowContextSeconds = perfMs / 1000;
+    const rejected = scheduler.scheduleChannelNote({
+      channel: overflowChannel,
+      note: makeNote(60, { id: 'journal-capacity-rejected', duration: 0.001 }),
+      onsetAudioTimeSeconds: overflowContextSeconds,
+      bpm: 120,
+      contextCurrentTimeSeconds: overflowContextSeconds,
+    });
+    assert.equal(rejected.sent, false, 'an unjournalable Note On is rejected');
+    assert.equal(rejected.reason, 'send_failed');
+    assert.equal(overflowPort.sent.length, 0, 'the rejected Note On transmits no MIDI bytes at all');
+    const overflowUsability = scheduler.getPortUsability(overflowPort.id);
+    assert.equal(overflowUsability.usable, false, 'the route with no journal slot is quarantined');
+    assert.match(overflowUsability.statusReason ?? '', /recovery capacity exhausted/i);
+    assert.equal(scheduler.describePortInfo(overflowPort).usable, false);
+    assert.match(scheduler.describePortInfo(overflowPort).statusReason ?? '', /recovery capacity exhausted/i);
+
+    // The quarantine is scoped to the affected output and stays fail-closed
+    // without ever dismantling another route's existing obligation.
+    const blockedRepeat = scheduler.scheduleChannelNote({
+      channel: overflowChannel,
+      note: makeNote(64, { id: 'journal-capacity-rejected-again', duration: 0.001 }),
+      onsetAudioTimeSeconds: overflowContextSeconds,
+      bpm: 120,
+      contextCurrentTimeSeconds: overflowContextSeconds,
+    });
+    assert.equal(blockedRepeat.sent, false);
+    assert.equal(blockedRepeat.reason, 'port_unavailable');
+    assert.equal(overflowPort.sent.length, 0, 'no later attempt on the quarantined route transmits bytes');
+
+    // Refreshing an already-journaled wire voice needs no new capacity, so it
+    // must still transmit: capacity gates new obligations, not existing ones.
+    const refreshChannel = channels.get(`${fillPorts[0].id}:1`)!;
+    const refreshedPortPacketsBefore = fillPorts[0].sent.length;
+    const refreshContextSeconds = perfMs / 1000;
+    const refreshed = scheduler.scheduleChannelNote({
+      channel: refreshChannel,
+      note: makeNote(0, { id: 'journal-capacity-refresh', duration: 0.001 }),
+      onsetAudioTimeSeconds: refreshContextSeconds,
+      bpm: 120,
+      contextCurrentTimeSeconds: refreshContextSeconds,
+    });
+    assert.equal(refreshed.sent, true, 'an existing journal entry is refreshed without new capacity');
+    assert.ok(fillPorts[0].sent.length > refreshedPortPacketsBefore);
+
+    // No obligation was evicted to make room: the first route still knows every
+    // voice it owns and releases exactly those pitches on reconnect.
+    const firstPortPacketsBefore = fillPorts[0].sent.length;
+    fillPorts[0].state = 'disconnected';
+    fillPorts[0].connection = 'closed';
+    scheduler.handlePortDisconnected(fillPorts[0].id);
+    fillPorts[0].state = 'connected';
+    fillPorts[0].connection = 'open';
+    const reconnect = scheduler.handlePortReconnected(fillPorts[0].id);
+    perfMs += 5;
+    return reconnect.then(() => {
+      const recoveryPackets = fillPorts[0].sent.slice(firstPortPacketsBefore);
+      assert.equal(recoveryPackets.length, 16 * 128, 'every retained voice is released exactly once');
+      assert.equal(recoveryPackets.some(isChannelModeOf), false, 'reconnect recovery never panics with CC 123');
+      const releasedVoices = new Set(recoveryPackets.map(packet => `${(packet.bytes[0] & 0x0f) + 1}:${packet.bytes[1]}`));
+      assert.equal(releasedVoices.size, 16 * 128, 'the recovery set is one targeted voice per journal entry');
+      for (const packet of recoveryPackets) {
+        assert.equal(packet.bytes[0] & 0xf0, 0x80, 'every recovery packet is a Note Off');
+        assert.equal(packet.bytes[2], 0);
+      }
+      assert.equal(scheduler.getPortUsability(overflowPort.id).usable, false,
+        'the quarantined route stays fail-closed after a sibling route recovers');
+      assert.equal(overflowPort.sent.length, 0, 'the quarantined route never regained transmission');
+      assert.equal(noteOnBytesOf(fillPorts[1]).length, 16 * 128, 'untouched sibling routes are unaffected');
+    });
+  });
+
+  it('refuses a tracked CC 64 pedal-down that cannot be journaled while untracked transitions still transmit', async () => {
+    let perfMs = 1_000;
+    // One sustain slot per (output, MIDI channel); 16 channels per port.
+    const portCount = MAX_RECENT_SUSTAIN_RECOVERY_CANDIDATES / 16;
+    const ports = Array.from({ length: portCount + 2 }, (_, index) =>
+      new InstrumentedMidiOutputPort(`sustain-capacity-${index}`, { nowPerfMs: () => perfMs }),
+    );
+    const outputs = new Map(ports.map(port => [port.id, port]));
+    const scheduler = new MidiOutputScheduler({
+      performanceNowMs: () => perfMs,
+      getOutputs: () => outputs,
+    });
+    const channelFor = (port: InstrumentedMidiOutputPort, midiChannel: number): Channel =>
+      makeChannel(`sustain-capacity-channel-${port.id}-${midiChannel}`, {
+        midiOutput: { outputDeviceId: port.id, midiChannel, mode: 'external' },
+      });
+
+    for (let index = 0; index < portCount; index += 1) {
+      const port = ports[index];
+      for (let midiChannel = 1; midiChannel <= 16; midiChannel += 1) {
+        assert.equal(
+          scheduler.sendChannelControlChange(channelFor(port, midiChannel), 64, 127),
+          true,
+          'filling a free sustain slot transmits normally',
+        );
+        perfMs += 1;
+      }
+    }
+    assert.equal(
+      ports[portCount - 1].sent.filter(packet => isSustainOf(packet, 127)).length,
+      16,
+      'the boundary pedal-down that consumes the final sustain slot is transmitted',
+    );
+
+    // A further pedal-down cannot be journaled: no CC 64 byte may be sent.
+    const overflowPort = ports[portCount];
+    const overflowChannel = channelFor(overflowPort, 1);
+    assert.equal(
+      scheduler.sendChannelControlChange(overflowChannel, 64, 127),
+      false,
+      'an unjournalable tracked pedal-down is rejected',
+    );
+    assert.equal(overflowPort.sent.length, 0, 'the rejected CC 64 transmits no MIDI bytes at all');
+    const overflowUsability = scheduler.getPortUsability(overflowPort.id);
+    assert.equal(overflowUsability.usable, false, 'the route that could not journal sustain is quarantined');
+    assert.match(overflowUsability.statusReason ?? '', /recovery capacity exhausted/i);
+    assert.equal(scheduler.describePortInfo(overflowPort).usable, false);
+    assert.match(scheduler.describePortInfo(overflowPort).statusReason ?? '', /recovery capacity exhausted/i);
+
+    // A pedal-up on a route with no held pedal creates no obligation, so it is
+    // still safe to transmit while the sustain journal is at capacity.
+    const untrackedPort = ports[portCount + 1];
+    assert.equal(
+      scheduler.sendChannelControlChange(channelFor(untrackedPort, 1), 64, 0),
+      true,
+      'a pedal-up with no recovery obligation is not blocked by capacity',
+    );
+    assert.deepEqual(untrackedPort.sent.map(packet => packet.bytes), [[0xb0, 64, 0]]);
+    // Non-CC 64 control changes never consume sustain capacity.
+    assert.equal(
+      scheduler.sendChannelControlChange(channelFor(untrackedPort, 1), 1, 64),
+      true,
+      'unrelated control changes are unaffected by sustain capacity',
+    );
+    assert.equal(untrackedPort.sent.length, 2);
+
+    // A pedal-up on a route that already holds the pedal refreshes an existing
+    // sustain obligation, so it needs no new slot and must still transmit.
+    const heldPortPacketsBefore = ports[0].sent.length;
+    assert.equal(
+      scheduler.sendChannelControlChange(channelFor(ports[0], 1), 64, 0),
+      true,
+      'a de-obligating tracked pedal-up is not blocked by a full sustain journal',
+    );
+    assert.equal(ports[0].sent.length, heldPortPacketsBefore + 1);
+    assert.equal(isSustainOf(ports[0].sent[ports[0].sent.length - 1], 0), true);
+
+    // Existing sustain obligations survive untouched: the first route is still
+    // gated after its disconnect and releases exactly its own 16 MIDI channels.
+    const firstPort = ports[0];
+    firstPort.state = 'disconnected';
+    firstPort.connection = 'closed';
+    scheduler.handlePortDisconnected(firstPort.id);
+    firstPort.state = 'connected';
+    firstPort.connection = 'open';
+    const firstPortPacketsBeforeRecovery = firstPort.sent.length;
+    const reconnect = scheduler.handlePortReconnected(firstPort.id);
+    perfMs += 5;
+    await reconnect;
+
+    const recoveryPackets = firstPort.sent
+      .slice(firstPortPacketsBeforeRecovery)
+      .filter(packet => isSustainOf(packet, 0));
+    assert.equal(recoveryPackets.length, 16, 'every retained sustain obligation is released exactly once');
+    assert.deepEqual(
+      recoveryPackets.map(packet => (packet.bytes[0] & 0x0f) + 1),
+      Array.from({ length: 16 }, (_, index) => index + 1),
+      'recovery targets only the affected output/channel set',
+    );
+    assert.equal(firstPort.sent.some(isChannelModeOf), false, 'sustain recovery never panics with CC 123');
+    assert.equal(overflowPort.sent.length, 0, 'the quarantined route stays silent through sibling recovery');
+    assert.equal(scheduler.getPortUsability(overflowPort.id).usable, false,
+      'the quarantined route remains fail-closed');
+    assert.equal(scheduler.getPortUsability(firstPort.id).usable, true,
+      'the recovered sibling route resumes normally');
+  });
+
+  it('retains the journaled obligation when a Note On send fails ambiguously', async () => {
+    let perfMs = 1_000;
+    const port = new FlakyMidiOutputPort('ambiguous-send-port');
+    const scheduler = new MidiOutputScheduler({
+      performanceNowMs: () => perfMs,
+      getOutputs: () => new Map([[port.id, port]]),
+    });
+    const channel = makeChannel('ambiguous-send-channel', {
+      midiOutput: { outputDeviceId: port.id, midiChannel: 1, mode: 'external' },
+    });
+
+    // The attack may or may not have reached the receiver: the send throws.
+    port.failSends = true;
+    const ambiguous = scheduler.scheduleChannelNote({
+      channel,
+      note: makeNote(60, { id: 'ambiguous-send-note', duration: 0.001 }),
+      onsetAudioTimeSeconds: perfMs / 1000,
+      bpm: 120,
+      contextCurrentTimeSeconds: perfMs / 1000,
+    });
+    assert.equal(ambiguous.sent, false, 'an ambiguous send is reported as not sent');
+    assert.equal(port.sent.length, 0, 'nothing was recorded as transmitted');
+    assert.equal(scheduler.getPortUsability(port.id).usable, false,
+      'an ambiguous send error gates the route');
+
+    // Once the link recovers, a later voice is accepted — and the ambiguous
+    // attack must still be released, because delivery was never disproved.
+    port.failSends = false;
+    await scheduler.handlePortReconnected(port.id);
+    assert.equal(scheduler.getPortUsability(port.id).usable, true);
+    perfMs += 10;
+    const accepted = scheduler.scheduleChannelNote({
+      channel,
+      note: makeNote(64, { id: 'ambiguous-send-note-2', duration: 0.001 }),
+      onsetAudioTimeSeconds: perfMs / 1000,
+      bpm: 120,
+      contextCurrentTimeSeconds: perfMs / 1000,
+    });
+    assert.equal(accepted.sent, true);
+
+    const packetsBeforeRecovery = port.sent.length;
+    port.state = 'disconnected';
+    port.connection = 'closed';
+    scheduler.handlePortDisconnected(port.id);
+    port.state = 'connected';
+    port.connection = 'open';
+    const reconnect = scheduler.handlePortReconnected(port.id);
+    perfMs += 5;
+    await reconnect;
+
+    const recoveryPackets = port.sent.slice(packetsBeforeRecovery);
+    assert.deepEqual(
+      recoveryPackets.map(packet => packet.bytes),
+      [[0x80, 60, 0], [0x80, 64, 0]],
+      'the conservatively retained ambiguous attack is released alongside the confirmed voice',
+    );
+    assert.equal(recoveryPackets.some(isChannelModeOf), false, 'no CC 123 panic is used');
   });
 });
