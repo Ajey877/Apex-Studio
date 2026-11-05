@@ -4119,38 +4119,6 @@ describe('MidiOutputScheduler — overlapping pitches, cleanup isolation, loop w
  * must transmit zero MIDI bytes while never evicting an existing obligation.
  */
 describe('MidiOutputScheduler — recovery-capacity preflight fails closed before transmission', () => {
-  /** A port whose `send()` can be made to fail on demand to model an ambiguous link. */
-  class FlakyMidiOutputPort implements MidiOutputPortLike {
-    readonly id: string;
-    readonly name: string;
-    readonly manufacturer = 'Sequential';
-    state: 'connected' | 'disconnected' = 'connected';
-    connection: 'open' | 'closed' | 'pending' = 'open';
-    readonly sent: RecordedMidiPacket[] = [];
-    failSends = false;
-
-    constructor(id: string) {
-      this.id = id;
-      this.name = id;
-    }
-
-    send(data: number[] | Uint8Array, timestamp?: number): void {
-      if (this.failSends) {
-        throw new Error(`Port ${this.id} transmission outcome is ambiguous`);
-      }
-      this.sent.push({ bytes: Array.from(data), timestamp });
-    }
-
-    clear(): void {
-      // No queue model needed: these regressions only assert transmitted bytes.
-    }
-
-    async open(): Promise<MidiOutputPortLike> {
-      this.connection = 'open';
-      return this;
-    }
-  }
-
   const noteOnBytesOf = (port: InstrumentedMidiOutputPort): number[] =>
     port.sent.filter(packet => (packet.bytes[0] & 0xf0) === 0x90 && packet.bytes[2] > 0)
       .map(packet => packet.bytes[1]);
@@ -4405,62 +4373,427 @@ describe('MidiOutputScheduler — recovery-capacity preflight fails closed befor
       'the recovered sibling route resumes normally');
   });
 
-  it('retains the journaled obligation when a Note On send fails ambiguously', async () => {
+});
+/**
+ * Lead Engineer finding: an ambiguous `MIDIOutput.send()` failure set a port
+ * error but left no pending recovery record, so `handlePortReconnected()` could
+ * clear the error and report the route usable while a possibly-delivered Note On
+ * or CC64-down was never released. These regressions drive a fake receiver that
+ * accepts a message into its simulated hardware state and *then* throws, which is
+ * what "ambiguous" actually means: the scheduler has no proof the receiver
+ * skipped the message.
+ */
+describe('MidiOutputScheduler — ambiguous send failure keeps output recovery pending', () => {
+  type AmbiguousSendMode = 'accept' | 'deliver_then_throw' | 'discard_then_throw';
+
+  /**
+   * Models a receiver's physical state. `deliver_then_throw` applies the message
+   * to the simulated hardware and then fails the send, which is precisely the
+   * case the scheduler cannot disambiguate.
+   */
+  class AmbiguousReceiverMidiPort implements MidiOutputPortLike {
+    readonly id: string;
+    readonly name: string;
+    readonly manufacturer = 'Sequential';
+    state: 'connected' | 'disconnected' = 'connected';
+    connection: 'open' | 'closed' | 'pending' = 'open';
+    /** Every message the scheduler attempted, delivered or not. */
+    readonly attempted: RecordedMidiPacket[] = [];
+    /** Every message the simulated receiver actually acted on. */
+    readonly delivered: RecordedMidiPacket[] = [];
+    /** Simulated hardware voices, keyed `${midiChannel}:${pitch}`. */
+    readonly sounding = new Set<string>();
+    /** Simulated hardware pedal state per MIDI channel. */
+    readonly pedalDown = new Set<number>();
+    clearCalls = 0;
+    decideSend: (bytes: number[]) => AmbiguousSendMode = () => 'accept';
+
+    constructor(id: string) {
+      this.id = id;
+      this.name = id;
+    }
+
+    private applyToReceiver(bytes: number[]): void {
+      const command = bytes[0] & 0xf0;
+      const midiChannel = (bytes[0] & 0x0f) + 1;
+      if (command === 0x90 && bytes[2] > 0) {
+        this.sounding.add(`${midiChannel}:${bytes[1]}`);
+        return;
+      }
+      if (command === 0x80 || (command === 0x90 && bytes[2] === 0)) {
+        this.sounding.delete(`${midiChannel}:${bytes[1]}`);
+        return;
+      }
+      if (command === 0xb0 && bytes[1] === 64) {
+        if (bytes[2] >= 64) this.pedalDown.add(midiChannel);
+        else this.pedalDown.delete(midiChannel);
+        return;
+      }
+      if (command === 0xb0 && bytes[1] === 123) {
+        // Channel-mode "all notes off": modelled so a panic is observable.
+        this.sounding.clear();
+      }
+    }
+
+    send(data: number[] | Uint8Array, timestamp?: number): void {
+      const bytes = Array.from(data);
+      this.attempted.push({ bytes, timestamp });
+      if (this.decideSend(bytes) === 'discard_then_throw') {
+        throw new Error(`Port ${this.id} rejected the send`);
+      }
+      this.delivered.push({ bytes, timestamp });
+      this.applyToReceiver(bytes);
+      if (this.decideSend(bytes) === 'deliver_then_throw') {
+        throw new Error(`Port ${this.id} failed after delivery`);
+      }
+    }
+
+    clear(): void {
+      this.clearCalls += 1;
+      // A real `clear()` cannot reach a receiver that already acted on a message,
+      // so the simulated hardware state is intentionally left untouched.
+    }
+
+    async open(): Promise<MidiOutputPortLike> {
+      this.connection = 'open';
+      return this;
+    }
+
+    deliveredBytes(filter?: (bytes: number[]) => boolean): number[][] {
+      const list = filter ? this.delivered.filter(packet => filter(packet.bytes)) : this.delivered;
+      return list.map(packet => packet.bytes);
+    }
+  }
+
+  const noteOnAttempts = (port: AmbiguousReceiverMidiPort): number =>
+    port.attempted.filter(packet => (packet.bytes[0] & 0xf0) === 0x90).length;
+
+  const panicPackets = (port: AmbiguousReceiverMidiPort): number[][] =>
+    port.deliveredBytes(bytes => (bytes[0] & 0xf0) === 0xb0 && bytes[1] === 123);
+
+  it('releases a Note On whose send threw after delivery, on reconnect and without any disconnect callback', async () => {
     let perfMs = 1_000;
-    const port = new FlakyMidiOutputPort('ambiguous-send-port');
+    const port = new AmbiguousReceiverMidiPort('ambiguous-note-on');
+    const sibling = new AmbiguousReceiverMidiPort('ambiguous-note-on-sibling');
+    const scheduler = new MidiOutputScheduler({
+      performanceNowMs: () => perfMs,
+      getOutputs: () => new Map([[port.id, port], [sibling.id, sibling]]),
+    });
+    const channel = makeChannel('ambiguous-note-on-channel', {
+      midiOutput: { outputDeviceId: port.id, midiChannel: 1, mode: 'external' },
+    });
+    const siblingChannel = makeChannel('ambiguous-note-on-sibling-channel', {
+      midiOutput: { outputDeviceId: sibling.id, midiChannel: 1, mode: 'external' },
+    });
+
+    // A healthy sibling route carries normal traffic that must never be touched.
+    const siblingScheduled = scheduler.scheduleChannelNote({
+      channel: siblingChannel,
+      note: makeNote(72, { id: 'ambiguous-note-on-sibling-note', duration: 0.5 }),
+      onsetAudioTimeSeconds: 1,
+      bpm: 120,
+      contextCurrentTimeSeconds: 1,
+    });
+    assert.equal(siblingScheduled.sent, true);
+    const siblingPacketsAfterScheduling = sibling.delivered.length;
+    assert.equal(siblingPacketsAfterScheduling, 2, 'sibling attack and release were delivered');
+
+    // The attack reaches the simulated receiver, then the send reports failure.
+    port.decideSend = () => 'deliver_then_throw';
+    const ambiguous = scheduler.scheduleChannelNote({
+      channel,
+      note: makeNote(60, { id: 'ambiguous-note-on', duration: 0.5 }),
+      onsetAudioTimeSeconds: 1,
+      bpm: 120,
+      contextCurrentTimeSeconds: 1,
+    });
+    assert.equal(ambiguous.sent, false, 'an ambiguous attack is reported as not sent');
+    assert.deepEqual([...port.sounding], ['1:60'], 'the simulated receiver did act on the attack');
+    assert.equal(scheduler.getPortUsability(port.id).usable, false, 'the route is gated immediately');
+
+    // No new Note On may be transmitted while the obligation is unresolved.
+    const blocked = scheduler.scheduleChannelNote({
+      channel,
+      note: makeNote(64, { id: 'ambiguous-note-on-blocked', duration: 0.5 }),
+      onsetAudioTimeSeconds: 1,
+      bpm: 120,
+      contextCurrentTimeSeconds: 1,
+    });
+    assert.equal(blocked.sent, false);
+    assert.equal(blocked.reason, 'port_unavailable');
+    assert.equal(noteOnAttempts(port), 1, 'no second attack is even attempted on the gated route');
+
+    // Recovery is driven by reconnection alone — no disconnect callback is fired.
+    port.decideSend = () => 'accept';
+    const reconnect = scheduler.handlePortReconnected(port.id);
+    assert.equal(scheduler.getPortUsability(port.id).usable, false,
+      'cleanup in flight still gates the route');
+    const duringRecovery = scheduler.scheduleChannelNote({
+      channel,
+      note: makeNote(67, { id: 'ambiguous-note-on-during-recovery', duration: 0.5 }),
+      onsetAudioTimeSeconds: 1,
+      bpm: 120,
+      contextCurrentTimeSeconds: 1,
+    });
+    assert.equal(duringRecovery.sent, false, 'no attack may overtake pending cleanup');
+    assert.equal(duringRecovery.reason, 'port_unavailable');
+    assert.equal(noteOnAttempts(port), 1, 'the in-flight cleanup was not overtaken by a new attack');
+    perfMs += 5;
+    await reconnect;
+
+    // Exact output/channel/pitch ownership: one targeted Note Off, nothing else.
+    assert.deepEqual(
+      port.deliveredBytes(),
+      [[0x90, 60, 102], [0x80, 60, 0]],
+      'the possibly-sounding voice is released exactly once before the route resumes',
+    );
+    assert.equal(port.sounding.size, 0, 'the simulated voice is no longer stuck');
+    assert.equal(panicPackets(port).length, 0, 'recovery never panics with CC 123');
+    assert.equal(port.deliveredBytes(bytes => (bytes[0] & 0xf0) === 0xb0).length, 0,
+      'no sustain or channel-mode traffic is emitted for a note-only obligation');
+    assert.equal(sibling.delivered.length, siblingPacketsAfterScheduling,
+      'the sibling output is never substituted or cleaned up');
+    assert.equal(scheduler.getPortUsability(port.id).usable, true, 'the route resumes only after cleanup');
+
+    // Transmission resumes strictly after the release.
+    const resumed = scheduler.scheduleChannelNote({
+      channel,
+      note: makeNote(67, { id: 'ambiguous-note-on-resumed', duration: 0.5 }),
+      onsetAudioTimeSeconds: 1,
+      bpm: 120,
+      contextCurrentTimeSeconds: 1,
+    });
+    assert.equal(resumed.sent, true);
+    assert.deepEqual(
+      port.deliveredBytes(),
+      [[0x90, 60, 102], [0x80, 60, 0], [0x90, 67, 102], [0x80, 67, 0]],
+      'the released voice precedes the first post-recovery attack',
+    );
+    assert.equal(scheduler.getPortUsability(sibling.id).usable, true);
+    assert.equal(sibling.delivered.length, siblingPacketsAfterScheduling,
+      'the sibling output receives no substituted or cleanup traffic');
+  });
+
+  it('resets a sustain pedal-down whose send threw after delivery, on the affected channel only', async () => {
+    let perfMs = 2_000;
+    const port = new AmbiguousReceiverMidiPort('ambiguous-sustain');
+    const sibling = new AmbiguousReceiverMidiPort('ambiguous-sustain-sibling');
+    const scheduler = new MidiOutputScheduler({
+      performanceNowMs: () => perfMs,
+      getOutputs: () => new Map([[port.id, port], [sibling.id, sibling]]),
+    });
+    const channelA = makeChannel('ambiguous-sustain-ch1', {
+      midiOutput: { outputDeviceId: port.id, midiChannel: 1, mode: 'external' },
+    });
+    const channelB = makeChannel('ambiguous-sustain-ch2', {
+      midiOutput: { outputDeviceId: port.id, midiChannel: 2, mode: 'external' },
+    });
+    const siblingChannel = makeChannel('ambiguous-sustain-sibling-ch1', {
+      midiOutput: { outputDeviceId: sibling.id, midiChannel: 1, mode: 'external' },
+    });
+
+    // The pedal-down reaches the receiver, then the send reports failure.
+    port.decideSend = bytes => ((bytes[0] & 0xf0) === 0xb0 && bytes[1] === 64 ? 'deliver_then_throw' : 'accept');
+    assert.equal(scheduler.sendChannelControlChange(channelA, 64, 127), false);
+    assert.deepEqual([...port.pedalDown], [1], 'the simulated receiver is pedal-down');
+    assert.equal(scheduler.getPortUsability(port.id).usable, false);
+
+    // A second, unrelated route on the same port cannot slip bytes out meanwhile.
+    assert.equal(scheduler.sendChannelControlChange(channelB, 64, 127), false);
+    assert.equal(port.attempted.length, 1, 'no further bytes are attempted on the gated route');
+
+    port.decideSend = () => 'accept';
+    const reconnect = scheduler.handlePortReconnected(port.id);
+    assert.equal(scheduler.getPortUsability(port.id).usable, false, 'cleanup in flight still gates the route');
+    perfMs += 5;
+    await reconnect;
+
+    assert.deepEqual(
+      port.deliveredBytes(),
+      [[0xb0, 64, 127], [0xb0, 64, 0]],
+      'only the affected channel receives a targeted pedal-up before the route resumes',
+    );
+    assert.equal(port.pedalDown.size, 0, 'the simulated pedal is released');
+    assert.equal(panicPackets(port).length, 0, 'sustain recovery never panics with CC 123');
+    assert.equal(port.deliveredBytes(bytes => (bytes[0] & 0x0f) === 1).length, 0,
+      'the unrelated MIDI channel on the same output is not cleaned up');
+    assert.equal(sibling.delivered.length, 0, 'the sibling output receives no cleanup traffic');
+    assert.equal(scheduler.getPortUsability(port.id).usable, true);
+    assert.equal(
+      scheduler.sendChannelControlChange(siblingChannel, 64, 127),
+      true,
+      'the sibling output still transmits normally',
+    );
+    assert.deepEqual(sibling.deliveredBytes(), [[0xb0, 64, 127]]);
+  });
+
+  it('keeps the original voice obligation when the Note Off send fails', async () => {
+    let perfMs = 3_000;
+    const port = new AmbiguousReceiverMidiPort('ambiguous-note-off');
     const scheduler = new MidiOutputScheduler({
       performanceNowMs: () => perfMs,
       getOutputs: () => new Map([[port.id, port]]),
     });
-    const channel = makeChannel('ambiguous-send-channel', {
+    const channel = makeChannel('ambiguous-note-off-channel', {
       midiOutput: { outputDeviceId: port.id, midiChannel: 1, mode: 'external' },
     });
 
-    // The attack may or may not have reached the receiver: the send throws.
-    port.failSends = true;
-    const ambiguous = scheduler.scheduleChannelNote({
+    // The attack is accepted; the scheduled release is lost.
+    port.decideSend = bytes => ((bytes[0] & 0xf0) === 0x80 ? 'discard_then_throw' : 'accept');
+    const scheduled = scheduler.scheduleChannelNote({
       channel,
-      note: makeNote(60, { id: 'ambiguous-send-note', duration: 0.001 }),
-      onsetAudioTimeSeconds: perfMs / 1000,
+      note: makeNote(60, { id: 'ambiguous-note-off', duration: 0.5 }),
+      onsetAudioTimeSeconds: 3,
       bpm: 120,
-      contextCurrentTimeSeconds: perfMs / 1000,
+      contextCurrentTimeSeconds: 3,
     });
-    assert.equal(ambiguous.sent, false, 'an ambiguous send is reported as not sent');
-    assert.equal(port.sent.length, 0, 'nothing was recorded as transmitted');
-    assert.equal(scheduler.getPortUsability(port.id).usable, false,
-      'an ambiguous send error gates the route');
+    assert.equal(scheduled.sent, true, 'the accepted attack is reported as sent');
+    assert.deepEqual([...port.sounding], ['1:60'], 'the attack sounds while its release was lost');
+    assert.equal(scheduler.getPortUsability(port.id).usable, false, 'the failed release gates the route');
 
-    // Once the link recovers, a later voice is accepted — and the ambiguous
-    // attack must still be released, because delivery was never disproved.
-    port.failSends = false;
-    await scheduler.handlePortReconnected(port.id);
-    assert.equal(scheduler.getPortUsability(port.id).usable, true);
-    perfMs += 10;
-    const accepted = scheduler.scheduleChannelNote({
+    const blocked = scheduler.scheduleChannelNote({
       channel,
-      note: makeNote(64, { id: 'ambiguous-send-note-2', duration: 0.001 }),
-      onsetAudioTimeSeconds: perfMs / 1000,
+      note: makeNote(64, { id: 'ambiguous-note-off-blocked', duration: 0.5 }),
+      onsetAudioTimeSeconds: 3,
       bpm: 120,
-      contextCurrentTimeSeconds: perfMs / 1000,
+      contextCurrentTimeSeconds: 3,
     });
-    assert.equal(accepted.sent, true);
+    assert.equal(blocked.sent, false);
+    assert.equal(blocked.reason, 'port_unavailable');
+    assert.equal(noteOnAttempts(port), 1, 'the unresolved voice blocks any further attack');
 
-    const packetsBeforeRecovery = port.sent.length;
-    port.state = 'disconnected';
-    port.connection = 'closed';
-    scheduler.handlePortDisconnected(port.id);
-    port.state = 'connected';
-    port.connection = 'open';
+    // Reconnect only: the retained obligation releases the original voice.
+    port.decideSend = () => 'accept';
     const reconnect = scheduler.handlePortReconnected(port.id);
     perfMs += 5;
     await reconnect;
 
-    const recoveryPackets = port.sent.slice(packetsBeforeRecovery);
     assert.deepEqual(
-      recoveryPackets.map(packet => packet.bytes),
-      [[0x80, 60, 0], [0x80, 64, 0]],
-      'the conservatively retained ambiguous attack is released alongside the confirmed voice',
+      port.deliveredBytes(),
+      [[0x90, 60, 102], [0x80, 60, 0]],
+      'the original voice is released exactly once from the retained obligation',
     );
-    assert.equal(recoveryPackets.some(isChannelModeOf), false, 'no CC 123 panic is used');
+    assert.equal(port.sounding.size, 0);
+    assert.equal(panicPackets(port).length, 0);
+    assert.equal(scheduler.getPortUsability(port.id).usable, true);
+  });
+
+  it('keeps the route gated when cleanup fails and retries the obligation on the next attempt', async () => {
+    let perfMs = 4_000;
+    const port = new AmbiguousReceiverMidiPort('ambiguous-cleanup-failure');
+    const sibling = new AmbiguousReceiverMidiPort('ambiguous-cleanup-failure-sibling');
+    const scheduler = new MidiOutputScheduler({
+      performanceNowMs: () => perfMs,
+      getOutputs: () => new Map([[port.id, port], [sibling.id, sibling]]),
+    });
+    const channel = makeChannel('ambiguous-cleanup-failure-channel', {
+      midiOutput: { outputDeviceId: port.id, midiChannel: 1, mode: 'external' },
+    });
+    const siblingChannel = makeChannel('ambiguous-cleanup-failure-sibling-channel', {
+      midiOutput: { outputDeviceId: sibling.id, midiChannel: 1, mode: 'external' },
+    });
+
+    const siblingScheduled = scheduler.scheduleChannelNote({
+      channel: siblingChannel,
+      note: makeNote(72, { id: 'ambiguous-cleanup-failure-sibling-note', duration: 0.5 }),
+      onsetAudioTimeSeconds: 4,
+      bpm: 120,
+      contextCurrentTimeSeconds: 4,
+    });
+    assert.equal(siblingScheduled.sent, true);
+    const siblingPacketsAfterScheduling = sibling.delivered.length;
+
+    port.decideSend = bytes => ((bytes[0] & 0xf0) === 0x90 ? 'deliver_then_throw' : 'accept');
+    const ambiguous = scheduler.scheduleChannelNote({
+      channel,
+      note: makeNote(60, { id: 'ambiguous-cleanup-failure', duration: 0.5 }),
+      onsetAudioTimeSeconds: 4,
+      bpm: 120,
+      contextCurrentTimeSeconds: 4,
+    });
+    assert.equal(ambiguous.sent, false);
+    assert.deepEqual([...port.sounding], ['1:60']);
+
+    // Every send now fails, so targeted cleanup cannot complete.
+    port.decideSend = () => 'discard_then_throw';
+    const firstAttempt = scheduler.handlePortReconnected(port.id);
+    perfMs += 5;
+    await firstAttempt;
+    const gatedStatus = scheduler.getPortUsability(port.id);
+    assert.equal(gatedStatus.usable, false, 'a failed cleanup keeps the route gated');
+    assert.match(gatedStatus.statusReason ?? '', /recovery|failed|rejected/i);
+    assert.deepEqual([...port.sounding], ['1:60'], 'the obligation survives a failed cleanup attempt');
+    const blockedAfterFailedCleanup = scheduler.scheduleChannelNote({
+      channel,
+      note: makeNote(64, { id: 'ambiguous-cleanup-failure-blocked', duration: 0.5 }),
+      onsetAudioTimeSeconds: 4,
+      bpm: 120,
+      contextCurrentTimeSeconds: 4,
+    });
+    assert.equal(blockedAfterFailedCleanup.sent, false, 'a new attack cannot jump a failed cleanup');
+    assert.equal(blockedAfterFailedCleanup.reason, 'port_unavailable');
+    assert.equal(noteOnAttempts(port), 1, 'the failed attempt produced no extra attack');
+    assert.equal(sibling.delivered.length, siblingPacketsAfterScheduling,
+      'a failing route never spills onto a sibling output');
+
+    // The next recovery attempt completes the same obligation exactly once.
+    port.decideSend = () => 'accept';
+    const retry = scheduler.handlePortReconnected(port.id);
+    perfMs += 5;
+    await retry;
+
+    assert.equal(scheduler.getPortUsability(port.id).usable, true, 'the retried cleanup unblocks the route');
+    assert.equal(port.sounding.size, 0, 'the retained voice is finally released');
+    assert.equal(
+      port.deliveredBytes(bytes => (bytes[0] & 0xf0) === 0x80 && bytes[1] === 60).length,
+      1,
+      'the retried cleanup emits the release exactly once',
+    );
+    assert.equal(panicPackets(port).length, 0, 'no CC 123 is used to escape the failure');
+    assert.equal(sibling.delivered.length, siblingPacketsAfterScheduling,
+      'the sibling output still receives no extra traffic');
+  });
+
+  it('does not duplicate or restart recovery when a tracked CC 64 cleanup send throws', async () => {
+    let perfMs = 5_000;
+    const port = new AmbiguousReceiverMidiPort('ambiguous-sustain-cleanup-failure');
+    const scheduler = new MidiOutputScheduler({
+      performanceNowMs: () => perfMs,
+      getOutputs: () => new Map([[port.id, port]]),
+    });
+    const channel = makeChannel('ambiguous-sustain-cleanup-failure-channel', {
+      midiOutput: { outputDeviceId: port.id, midiChannel: 1, mode: 'external' },
+    });
+
+    // The pedal-down is ambiguous: delivered, then the send threw.
+    port.decideSend = bytes => ((bytes[0] & 0xf0) === 0xb0 && bytes[1] === 64 ? 'deliver_then_throw' : 'accept');
+    assert.equal(scheduler.sendChannelControlChange(channel, 64, 127), false);
+    assert.deepEqual([...port.pedalDown], [1]);
+
+    // Now every send fails, including the recovery pedal-up. That failed cleanup
+    // send re-enters `trySend`'s catch block: it must merge into the existing
+    // pending recovery instead of starting a second disconnect lifecycle.
+    port.decideSend = () => 'discard_then_throw';
+    const firstAttempt = scheduler.handlePortReconnected(port.id);
+    perfMs += 5;
+    await firstAttempt;
+    assert.equal(scheduler.getPortUsability(port.id).usable, false,
+      'an ambiguous cleanup failure keeps the route gated');
+    assert.deepEqual([...port.pedalDown], [1], 'the pedal obligation is retained, not forgotten');
+    assert.equal(port.deliveredBytes().length, 1, 'the failed cleanup delivered nothing');
+
+    // The retried cleanup releases the pedal exactly once — no duplicated obligation.
+    port.decideSend = () => 'accept';
+    const retry = scheduler.handlePortReconnected(port.id);
+    perfMs += 5;
+    await retry;
+    assert.equal(scheduler.getPortUsability(port.id).usable, true);
+    assert.equal(port.pedalDown.size, 0, 'the retained pedal obligation is finally released');
+    assert.deepEqual(
+      port.deliveredBytes(bytes => (bytes[0] & 0xf0) === 0xb0 && bytes[1] === 64 && bytes[2] === 0),
+      [[0xb0, 64, 0]],
+      'the merged recovery record releases the pedal exactly once',
+    );
+    assert.equal(panicPackets(port).length, 0, 'no CC 123 is used');
   });
 });

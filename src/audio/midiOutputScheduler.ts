@@ -780,20 +780,38 @@ export class MidiOutputScheduler {
     return true;
   }
 
-  public handlePortDisconnected(outputDeviceId: string): void {
-    this.verifiedOpenPortIds.delete(outputDeviceId);
-    this.openingPortPromises.delete(outputDeviceId);
-    const nowPerfMs = this.getPerformanceNowMs();
-    this.pruneCompletedState(nowPerfMs);
-
-    const recovery = this.disconnectedPortRecoveries.get(outputDeviceId) ?? {
+  private emptyPendingPortRecovery(nowPerfMs: number): DisconnectedMidiPortRecovery {
+    return {
       noteOffs: new Map<string, { midiChannel: number; pitch: number; latestOnPerfMs: number }>(),
       sustainChannels: new Set<number>(),
       latestQueuedEventPerfMs: nowPerfMs,
       recovering: false,
       generation: 0,
     };
-    recovery.generation += 1;
+  }
+
+  private hasPendingRecoveryObligation(
+    recovery: DisconnectedMidiPortRecovery,
+    nowPerfMs: number,
+  ): boolean {
+    return (
+      recovery.noteOffs.size > 0 ||
+      recovery.sustainChannels.size > 0 ||
+      recovery.latestQueuedEventPerfMs > nowPerfMs
+    );
+  }
+
+  /**
+   * Merges every piece of evidence that an output may still own a physical voice
+   * or pedal into an existing pending-recovery record. Only exact
+   * output/channel/pitch (and output/channel sustain) ownership is copied — never
+   * a blanket panic, and other routes are never touched.
+   */
+  private mergeWireStateIntoPendingRecovery(
+    outputDeviceId: string,
+    recovery: DisconnectedMidiPortRecovery,
+    nowPerfMs: number,
+  ): void {
     for (const active of this.activeNotes.values()) {
       if (active.outputDeviceId !== outputDeviceId) continue;
       recovery.latestQueuedEventPerfMs = Math.max(
@@ -859,17 +877,14 @@ export class MidiOutputScheduler {
       recovery.latestQueuedEventPerfMs = Math.max(recovery.latestQueuedEventPerfMs, pending.perfMs);
       if (pending.bytes[1] === 64) recovery.sustainChannels.add(pending.midiChannel);
     }
-    const hasRecoveryObligation =
-      recovery.noteOffs.size > 0 ||
-      recovery.sustainChannels.size > 0 ||
-      recovery.latestQueuedEventPerfMs > nowPerfMs;
-    const retainedRecovery = !hasRecoveryObligation || this.retainDisconnectedPortRecovery(outputDeviceId, recovery);
-    // Keep the recent voice journal if the bounded recovery store rejected this
-    // route. Its explicit quarantine remains sticky, but retaining available
-    // evidence allows a later callback to attempt safe cleanup without evicting
-    // another route's obligation.
-    if (retainedRecovery) this.clearRecentMidiVoiceRecoveryCandidates(outputDeviceId);
+  }
 
+  /**
+   * Drops local playback ownership for an output whose wire state is no longer
+   * trusted. The release obligations themselves survive in the pending-recovery
+   * record, so nothing physical is forgotten here.
+   */
+  private discardLocalOutputOwnership(outputDeviceId: string): void {
     const port = this.resolveOutputPort(outputDeviceId);
     if (port && typeof port.clear === 'function') {
       try {
@@ -878,10 +893,14 @@ export class MidiOutputScheduler {
         // Disconnected hardware may reject clear(); drop local tracking regardless.
       }
     }
+    // Collect first so this stays safe when it is invoked from inside a caller
+    // that is itself iterating the same maps.
+    const ownedNoteIds: number[] = [];
     for (const [noteId, active] of this.activeNotes.entries()) {
-      if (active.outputDeviceId === outputDeviceId) {
-        this.activeNotes.delete(noteId);
-      }
+      if (active.outputDeviceId === outputDeviceId) ownedNoteIds.push(noteId);
+    }
+    for (const noteId of ownedNoteIds) {
+      this.activeNotes.delete(noteId);
     }
     this.deferredTransportNotes = this.deferredTransportNotes.filter(
       item => item.outputDeviceId !== outputDeviceId,
@@ -889,12 +908,94 @@ export class MidiOutputScheduler {
     this.pendingControlChanges = this.pendingControlChanges.filter(
       item => item.outputDeviceId !== outputDeviceId,
     );
+    const sustainPrefix = `${outputDeviceId}:`;
     for (const key of [...this.sustainChannelsByPortKey.keys()]) {
       if (key.startsWith(sustainPrefix)) {
         this.sustainChannelsByPortKey.delete(key);
       }
     }
+  }
+
+  public handlePortDisconnected(outputDeviceId: string): void {
+    this.verifiedOpenPortIds.delete(outputDeviceId);
+    this.openingPortPromises.delete(outputDeviceId);
+    const nowPerfMs = this.getPerformanceNowMs();
+    this.pruneCompletedState(nowPerfMs);
+
+    const recovery = this.disconnectedPortRecoveries.get(outputDeviceId) ?? this.emptyPendingPortRecovery(nowPerfMs);
+    recovery.generation += 1;
+    this.mergeWireStateIntoPendingRecovery(outputDeviceId, recovery, nowPerfMs);
+
+    const hasRecoveryObligation = this.hasPendingRecoveryObligation(recovery, nowPerfMs);
+    const retainedRecovery = !hasRecoveryObligation || this.retainDisconnectedPortRecovery(outputDeviceId, recovery);
+    // Keep the recent voice journal if the bounded recovery store rejected this
+    // route. Its explicit quarantine remains sticky, but retaining available
+    // evidence allows a later callback to attempt safe cleanup without evicting
+    // another route's obligation.
+    if (retainedRecovery) this.clearRecentMidiVoiceRecoveryCandidates(outputDeviceId);
+
+    this.discardLocalOutputOwnership(outputDeviceId);
     this.notifyStateListeners();
+  }
+
+  /**
+   * A `MIDIOutput.send()` that throws is an ambiguous outcome: the scheduler has
+   * no proof the receiver did not act on the message. When the failed message can
+   * have left a voice sounding, a release un-delivered, or a pedal held, the route
+   * must stay gated exactly like a disconnected output until targeted cleanup has
+   * been delivered *and* outlived its timestamps — otherwise a later
+   * `handlePortReconnected()` would clear the recorded error and report the route
+   * usable with an unreleased voice still on the hardware.
+   *
+   * This deliberately never transmits and never calls `handlePortDisconnected()`:
+   * it only merges the obligation into the pending-recovery record. A cleanup
+   * send that throws therefore cannot re-enter disconnect handling, restart the
+   * in-flight recovery generation, or duplicate an obligation.
+   */
+  private registerAmbiguousSendFailure(outputDeviceId: string): void {
+    if (!outputDeviceId) return;
+    const nowPerfMs = this.getPerformanceNowMs();
+    const existing = this.disconnectedPortRecoveries.get(outputDeviceId);
+    if (existing) {
+      // A real disconnect or an earlier ambiguous failure already owns this
+      // route's recovery lifecycle; merge newer evidence only, so a retry of the
+      // in-flight cleanup stays valid.
+      this.mergeWireStateIntoPendingRecovery(outputDeviceId, existing, nowPerfMs);
+      this.notifyStateListeners();
+      return;
+    }
+    const recovery = this.emptyPendingPortRecovery(nowPerfMs);
+    recovery.generation += 1;
+    this.mergeWireStateIntoPendingRecovery(outputDeviceId, recovery, nowPerfMs);
+    if (!this.hasPendingRecoveryObligation(recovery, nowPerfMs)) return;
+    if (!this.retainDisconnectedPortRecovery(outputDeviceId, recovery)) return;
+    this.clearRecentMidiVoiceRecoveryCandidates(outputDeviceId);
+    this.discardLocalOutputOwnership(outputDeviceId);
+    this.notifyStateListeners();
+  }
+
+  /**
+   * True when a failed `send()` may have left physical state this scheduler owns:
+   * a Note On attack (always journaled before transmission), a Note Off for a
+   * voice still in the journal, or a tracked CC 64 transition.
+   */
+  private hasUnprovenWireObligation(port: MidiOutputPortLike, data: number[]): boolean {
+    const status = data[0];
+    if (!Number.isInteger(status)) return false;
+    const command = status & 0xf0;
+    const midiChannel = (status & 0x0f) + 1;
+    if (command === 0x90 || command === 0x80) {
+      const pitch = data[1];
+      if (!Number.isInteger(pitch)) return false;
+      if (command === 0x90 && (data[2] ?? 0) > 0) return true;
+      return this.recentNoteRecoveryCandidates.has(JSON.stringify([port.id, midiChannel, pitch]));
+    }
+    if (command === 0xb0 && data[1] === 64) {
+      return this.recentSustainRecoveryCandidates.has(
+        this.sustainRecoveryCandidateKey(port.id, midiChannel),
+      );
+    }
+    return false;
   }
 
   /**
@@ -3171,6 +3272,19 @@ export class MidiOutputScheduler {
       if (id) {
         this.portErrors.set(id, message);
         this.verifiedOpenPortIds.delete(id);
+        // Ambiguous delivery: the route still claims to be connected, so this
+        // failure is no proof the receiver skipped the message. If the attempted
+        // message can have left a voice sounding, a release un-delivered, or a
+        // pedal held, convert that into pending output recovery so reconnection
+        // cannot report the route usable before targeted cleanup completes.
+        // Registration never transmits, so a throwing cleanup send cannot
+        // recurse into another disconnect lifecycle.
+        if (
+          (port.state ?? 'connected') === 'connected' &&
+          this.hasUnprovenWireObligation(port, data)
+        ) {
+          this.registerAmbiguousSendFailure(id);
+        }
       }
       this.notifyStateListeners();
       return false;
