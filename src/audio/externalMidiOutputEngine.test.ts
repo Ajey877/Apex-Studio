@@ -530,7 +530,7 @@ afterEach(async () => {
 });
 
 describe('AudioEngine External MIDI Output — discovery, usability, playback, modes, cleanup, export, and regressions', () => {
-  it('1. discovers separated input/output devices, verifies actual output port usability via open(), and reports Web MIDI errors honestly', async () => {
+  it('1. discovers separated input/output devices, verifies open() usability, and recovers from denied → granted → revoked → re-granted permission', async () => {
     const input = new FakeMidiInputPort('in-keystep', 'Arturia KeyStep 37', 'Arturia');
     const readyOut = new FakeMidiOutputPort('out-prophet', {
       name: 'Prophet-6 USB',
@@ -570,19 +570,44 @@ describe('AudioEngine External MIDI Output — discovery, usability, playback, m
     );
     assert.match(lockedInfo!.statusReason ?? '', /locked/i);
 
-    // Permission denied handling:
+    const denyMidiPermission = async () => {
+      const err = new Error('User denied MIDI permission');
+      err.name = 'NotAllowedError';
+      throw err;
+    };
     Object.defineProperty(globalThis, 'navigator', {
       configurable: true,
-      value: {
-        requestMIDIAccess: async () => {
-          const err = new Error('User denied MIDI permission');
-          err.name = 'NotAllowedError';
-          throw err;
-        },
-      } as unknown as Navigator,
+      value: { requestMIDIAccess: denyMidiPermission } as unknown as Navigator,
     });
     await audioEngine.initMidi();
-    assert.equal(audioEngine.getMidiAccessState().status, 'denied');
+    assert.equal(audioEngine.getMidiAccessState().status, 'denied', 'OS/browser denial is reported');
+
+    // Re-grant after denial, then revoke and re-grant again. Each grant must
+    // rebuild usable output access without substituting or retaining stale state.
+    readyOut.connection = 'closed';
+    Object.defineProperty(globalThis, 'navigator', {
+      configurable: true,
+      value: { requestMIDIAccess: async () => access } as unknown as Navigator,
+    });
+    await audioEngine.initMidi();
+    assert.equal(audioEngine.getMidiAccessState().status, 'ready');
+    assert.ok(readyOut.openCalls >= 2, 're-grant reopens the configured output');
+
+    Object.defineProperty(globalThis, 'navigator', {
+      configurable: true,
+      value: { requestMIDIAccess: denyMidiPermission } as unknown as Navigator,
+    });
+    await audioEngine.initMidi();
+    assert.equal(audioEngine.getMidiAccessState().status, 'denied', 'a later permission revocation is reported');
+
+    readyOut.connection = 'closed';
+    Object.defineProperty(globalThis, 'navigator', {
+      configurable: true,
+      value: { requestMIDIAccess: async () => access } as unknown as Navigator,
+    });
+    await audioEngine.initMidi();
+    assert.equal(audioEngine.getMidiAccessState().status, 'ready', 'MIDI output works after a second re-grant');
+    assert.ok(readyOut.openCalls >= 3, 'second re-grant reopens the selected output');
   });
 
   it('2–4. transmits timestamped Note On & Note Off messages from real Pattern and Song playback with exact channels (1–16), velocities, and durations', async () => {
@@ -869,6 +894,119 @@ describe('AudioEngine External MIDI Output — discovery, usability, playback, m
     assert.ok(outPort.sent.some(p => p.bytes[0] === 0x82 && p.bytes[1] === 60), 'shutdown releases held notes');
   });
 
+  it('9. ends Song Mode with a long MIDI note active and cleans the external voice at the arrangement boundary', async () => {
+    const ctx = setupLiveEngine();
+    const synthOut = new FakeMidiOutputPort('out-song-end', { name: 'Song End Synth' });
+    await installMidiAccess({
+      inputs: new Map(),
+      outputs: new Map([[synthOut.id, synthOut]]),
+      onstatechange: null,
+    });
+    const channel = makeChannel('ch-song-end', {
+      midiOutput: { outputDeviceId: synthOut.id, midiChannel: 5, mode: 'external' },
+      notes: [makeNote(72, 15, 8, 0.9)], // starts on the final bar step and outlasts the arrangement
+    });
+    const pattern: Pattern = {
+      id: 'pat-song-end',
+      name: 'Song End Pattern',
+      color: '#00e5ff',
+      lengthSteps: 16,
+    };
+    const clip: PlaylistClip = {
+      id: 'clip-song-end',
+      trackIndex: 0,
+      startBar: 0,
+      lengthBars: 1,
+      type: 'pattern',
+      patternId: pattern.id,
+      channelId: channel.id,
+      name: pattern.name,
+      color: pattern.color,
+    };
+
+    try {
+      audioEngine.play([channel], [clip], 'song', pattern.id, makeMixerTracks(), 16, [], [pattern]);
+      advanceClock(ctx, 2.2, 44); // 1 bar @ 120 BPM ends at 2.0 s
+      assert.equal(engine.isPlaying, false, 'transport stops at the actual arrangement end');
+      assert.equal(audioEngine.getActiveExternalMidiNoteCount(), 0, 'song-end cleanup removes the active MIDI note');
+    } finally {
+      audioEngine.stop();
+      await audioEngine.releaseNativeInstruments();
+    }
+
+    assert.equal(
+      synthOut.sent.filter(packet => packet.bytes[0] === 0x94 && packet.bytes[1] === 72).length,
+      1,
+      'one Note On is sent on MIDI channel 5 for the overhanging final-step note',
+    );
+    assert.ok(
+      synthOut.sent.some(packet => packet.bytes[0] === 0x84 && packet.bytes[1] === 72 && packet.bytes[2] === 0),
+      'song-end cleanup emits a route-specific Note Off before the long scheduled release',
+    );
+  });
+
+  it('11. cleans soloed-away notes and routing-mode changes during playback without leaking later Note Ons', async () => {
+    const ctx = setupLiveEngine();
+    const sharedOut = new FakeMidiOutputPort('out-solo-mode', { name: 'Solo Mode Synth' });
+    const backupOut = new FakeMidiOutputPort('out-solo-backup', { name: 'Unused Backup Synth' });
+    await installMidiAccess({
+      inputs: new Map(),
+      outputs: new Map([[sharedOut.id, sharedOut], [backupOut.id, backupOut]]),
+      onstatechange: null,
+    });
+    const chA = makeChannel('ch-solo-a', {
+      midiOutput: { outputDeviceId: sharedOut.id, midiChannel: 1, mode: 'external' },
+      notes: [makeNote(60, 0, 4, 0.8), makeNote(61, 3, 1, 0.8)],
+    });
+    const chB = makeChannel('ch-solo-b', {
+      midiOutput: { outputDeviceId: sharedOut.id, midiChannel: 2, mode: 'external' },
+      notes: [makeNote(64, 0, 4, 0.8), makeNote(65, 2, 1, 0.8)],
+    });
+
+    try {
+      audioEngine.play([chA, chB], [], 'pat', 'pat-solo-mode', makeMixerTracks(), 16);
+      advanceClock(ctx, 0.13, 10);
+      assert.equal(engine.midiOutputScheduler.getActiveNoteCount(chA.id), 1);
+      assert.equal(engine.midiOutputScheduler.getActiveNoteCount(chB.id), 1);
+
+      audioEngine.synchronizePlaybackState({ channels: [{ ...chA, solo: true }, chB] });
+      assert.equal(engine.midiOutputScheduler.getActiveNoteCount(chA.id), 1, 'soloed channel keeps its active note');
+      assert.equal(engine.midiOutputScheduler.getActiveNoteCount(chB.id), 0, 'non-solo channel is cleaned immediately');
+      assert.ok(
+        sharedOut.sent.some(packet => packet.bytes[0] === 0x81 && packet.bytes[1] === 64 && packet.bytes[2] === 0),
+        'solo transition sends Note Off only on the non-solo channel route',
+      );
+
+      audioEngine.synchronizePlaybackState({
+        channels: [
+          { ...chA, solo: true, midiOutput: { outputDeviceId: sharedOut.id, midiChannel: 1, mode: 'off' } },
+          chB,
+        ],
+      });
+      assert.equal(engine.midiOutputScheduler.getActiveNoteCount(chA.id), 0, 'switching external routing Off releases its active note');
+      assert.ok(
+        sharedOut.sent.some(packet => packet.bytes[0] === 0x80 && packet.bytes[1] === 60 && packet.bytes[2] === 0),
+        'routing-mode change emits the active note release on its original port/channel',
+      );
+
+      audioEngine.synchronizePlaybackState({
+        channels: [
+          { ...chA, solo: false, midiOutput: { outputDeviceId: sharedOut.id, midiChannel: 1, mode: 'off' } },
+          chB,
+        ],
+      });
+      advanceClock(ctx, 0.25, 10); // Channel B's step-2 pitch occurs; channel A's later pitch remains Off.
+      assert.ok(sharedOut.sent.some(packet => packet.bytes[0] === 0x91 && packet.bytes[1] === 65),
+        'a channel that becomes audible again resumes on its configured MIDI channel');
+      assert.equal(sharedOut.sent.some(packet => packet.bytes[0] === 0x90 && packet.bytes[1] === 61), false,
+        'the channel switched to Off does not emit a stale/future Note On');
+      assert.equal(backupOut.sent.length, 0, 'solo and route edits never substitute the configured output');
+    } finally {
+      audioEngine.stop();
+      await audioEngine.releaseNativeInstruments();
+    }
+  });
+
   it('10. handles output device hot-disconnect and reconnect cleanly without silent device substitution', async () => {
     const ctx = setupLiveEngine();
     const primaryOut = new FakeMidiOutputPort('out-primary', { name: 'Primary Synth' });
@@ -898,6 +1036,9 @@ describe('AudioEngine External MIDI Output — discovery, usability, playback, m
       advanceClock(ctx, 0.14, 4); // Step 0 & 1 scheduled on primaryOut
       const countBeforeUnplug = primaryOut.sent.length;
       assert.ok(countBeforeUnplug >= 2);
+      audioEngine.sendChannelMidiControlChange(ch, 64, 127); // Sustain is active when the cable disappears.
+      const recoveryStartIndex = primaryOut.sent.length;
+      assert.ok(primaryOut.sent.some(p => p.bytes[0] === 0xb0 && p.bytes[1] === 64 && p.bytes[2] === 127));
 
       // Unplug primaryOut mid-playback!
       primaryOut.state = 'disconnected';
@@ -916,7 +1057,30 @@ describe('AudioEngine External MIDI Output — discovery, usability, playback, m
       // Reconnect primaryOut: port re-opens and resumes transmitting on subsequent steps!
       primaryOut.state = 'connected';
       access.onstatechange?.({ port: primaryOut });
-      await audioEngine.ensureMidiOutputPortOpen(primaryOut.id);
+      const reconnectReady = audioEngine.ensureMidiOutputPortOpen(primaryOut.id);
+      // Recovery retains sustain uncertainty until the queued pedal-up timestamp
+      // has passed; advance this test's deterministic performance clock while
+      // the reconnect task is waiting on its safe release time.
+      await Promise.resolve();
+      advanceClock(ctx, 0.005, 1);
+      await reconnectReady;
+
+      const recoveryPackets = primaryOut.sent.slice(recoveryStartIndex);
+      assert.ok(
+        recoveryPackets.some(p => p.bytes[0] === 0xb0 && p.bytes[1] === 64 && p.bytes[2] === 0),
+        'reconnect sends CC64=0 only on the previously sustained channel',
+      );
+      assert.ok(
+        recoveryPackets.some(p => p.bytes[0] === 0x80 && p.bytes[1] === 60 && p.bytes[2] === 0),
+        'reconnect sends an explicit Note Off for the active primary-output pitch',
+      );
+      assert.equal(
+        recoveryPackets.some(p => (p.bytes[0] & 0xf0) === 0xb0 && p.bytes[1] === 123),
+        false,
+        'reconnect does not use channel-wide All Notes Off',
+      );
+      assert.equal(secondaryOut.sent.length, 0, 'recovery never spills to the backup output');
+      assert.equal(audioEngine.getActiveExternalMidiNoteCount(), 0, 'reconnected port inherits no stale scheduler notes');
 
       const countBeforeResumeSteps = primaryOut.sent.length;
       advanceClock(ctx, 0.3, 6);

@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark light" />
+    <title>Apex Studio — External MIDI Hardware Diagnostic</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        background: #101319;
+        color: #e8edf4;
+        --panel: #191f29;
+        --line: #303a49;
+        --muted: #aab5c4;
+        --accent: #65d5c2;
+        --danger: #ff8c8c;
+      }
+      * { box-sizing: border-box; }
+      body { margin: 0 auto; max-width: 1120px; padding: 28px 20px 64px; }
+      h1, h2 { margin: 0; line-height: 1.2; }
+      h1 { font-size: clamp(1.6rem, 3vw, 2.2rem); }
+      h2 { font-size: 1.1rem; margin-bottom: 14px; }
+      p { color: var(--muted); line-height: 1.55; }
+      .notice { border: 1px solid #6c5430; background: #2b2418; border-radius: 10px; padding: 14px 16px; margin: 18px 0; }
+      .notice strong { color: #ffd58a; }
+      .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 18px; margin-top: 16px; }
+      .row { display: flex; flex-wrap: wrap; gap: 12px; align-items: end; }
+      .field { display: grid; gap: 6px; flex: 1 1 190px; }
+      label { color: #c4cedb; font-size: .86rem; }
+      input, select, button { font: inherit; color: inherit; }
+      input, select { min-height: 40px; border-radius: 7px; border: 1px solid #455163; background: #111720; padding: 8px 10px; width: 100%; }
+      input[type="range"] { padding: 0; }
+      button { min-height: 40px; border: 1px solid #546174; background: #283343; border-radius: 7px; padding: 8px 13px; cursor: pointer; font-weight: 650; }
+      button:hover { border-color: var(--accent); }
+      button.primary { background: #176b63; border-color: #2d9a8c; }
+      button.danger { background: #582f35; border-color: #8b454d; }
+      button:disabled { opacity: .5; cursor: not-allowed; }
+      .status { display: inline-flex; gap: 8px; align-items: center; border: 1px solid var(--line); border-radius: 999px; padding: 6px 11px; color: var(--muted); font-size: .88rem; }
+      .status strong { color: #e8edf4; }
+      .status.good strong { color: var(--accent); }
+      .status.bad strong { color: var(--danger); }
+      .subtle { font-size: .86rem; }
+      .actions { display: flex; flex-wrap: wrap; gap: 9px; margin-top: 14px; }
+      .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(215px, 1fr)); gap: 12px; }
+      .summary { border: 1px solid var(--line); background: #111720; border-radius: 8px; padding: 12px; min-height: 72px; white-space: pre-wrap; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .86rem; }
+      #event-log { height: 340px; overflow: auto; background: #0b1016; border: 1px solid var(--line); border-radius: 8px; padding: 10px; font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; }
+      .log-line { border-bottom: 1px solid #202834; padding: 3px 0; overflow-wrap: anywhere; }
+      .kbd { font: 12px ui-monospace, monospace; color: #d5dfeb; background: #111720; border: 1px solid var(--line); border-radius: 4px; padding: 2px 5px; }
+      .footnote { border-left: 3px solid #506a83; padding-left: 12px; }
+      @media (max-width: 600px) { body { padding: 18px 12px 48px; } .panel { padding: 14px; } }
+    </style>
+    <script type="module" src="/midi-hardware-diagnostic.js"></script>
+  </head>
+  <body>
+    <header>
+      <h1>External MIDI Hardware Diagnostic</h1>
+      <p>A standalone bench tool for raw Web MIDI I/O checks. It does not call Apex Studio’s real-time playback engine or modify a project.</p>
+    </header>
+
+    <div class="notice" role="note">
+      <strong>Hardware test only.</strong> This page sends MIDI to the selected output. Start with your synth volume low, select the intended device/channel, and connect a MIDI loopback input only when you want byte-by-byte return capture. This test page cannot prove sound generation without an actual synth.
+    </div>
+
+    <section class="panel" aria-labelledby="access-heading">
+      <h2 id="access-heading">Permission and device identity</h2>
+      <div class="row">
+        <span id="permission-status" class="status"><strong>Permission:</strong> Not requested</span>
+        <span id="selected-device-status" class="status"><strong>Selected output:</strong> None</span>
+        <span id="secure-context-status" class="status"><strong>Secure context:</strong> Checking</span>
+      </div>
+      <p class="subtle">Web MIDI requires a supported browser and a secure context (HTTPS or localhost). Browser permission is requested only after you click below. Device IDs are recorded locally in the downloaded test log.</p>
+      <div class="actions">
+        <button id="request-midi-access-btn" class="primary" type="button">Request / refresh MIDI access</button>
+        <button id="download-json-btn" type="button" disabled>Download JSON log</button>
+        <button id="download-csv-btn" type="button" disabled>Download CSV events</button>
+      </div>
+    </section>
+
+    <section class="panel" aria-labelledby="route-heading">
+      <h2 id="route-heading">Selected physical route</h2>
+      <div class="grid">
+        <div class="field">
+          <label for="midi-output-select">MIDI output (stable ID · manufacturer · name)</label>
+          <select id="midi-output-select"><option value="">Request access to enumerate outputs</option></select>
+        </div>
+        <div class="field">
+          <label for="midi-input-select">Optional loopback / monitor input</label>
+          <select id="midi-input-select"><option value="">No input selected</option></select>
+        </div>
+        <div class="field">
+          <label for="midi-channel-select">MIDI channel</label>
+          <select id="midi-channel-select"></select>
+        </div>
+      </div>
+      <p class="subtle">Use a MIDI interface output patched to its input (or another explicitly selected loopback path) to verify the bytes actually return through the interface. A JavaScript fake port is not hardware evidence.</p>
+    </section>
+
+    <section class="panel" aria-labelledby="send-heading">
+      <h2 id="send-heading">Controlled message tests</h2>
+      <div class="grid">
+        <div class="field"><label for="note-pitch">Test pitch (0–127)</label><input id="note-pitch" type="number" min="0" max="127" value="60" /></div>
+        <div class="field"><label for="note-velocity">Velocity (1–127)</label><input id="note-velocity" type="number" min="1" max="127" value="96" /></div>
+        <div class="field"><label for="note-gate-ms">Gate length (milliseconds)</label><input id="note-gate-ms" type="number" min="20" max="10000" step="10" value="500" /></div>
+        <div class="field"><label for="cc-number">CC number (0–127)</label><input id="cc-number" type="number" min="0" max="127" value="64" /></div>
+        <div class="field"><label for="cc-value">CC value (0–127)</label><input id="cc-value" type="number" min="0" max="127" value="127" /></div>
+      </div>
+      <div class="actions">
+        <button id="send-test-note-btn" class="primary" type="button" disabled>Send timestamped Note On + Note Off</button>
+        <button id="send-cc-btn" type="button" disabled>Send selected CC</button>
+        <button id="sustain-down-btn" type="button" disabled>CC64 sustain down</button>
+        <button id="sustain-up-btn" type="button" disabled>CC64 sustain up</button>
+        <button id="panic-route-btn" class="danger" type="button" disabled>Panic selected route (CC64 + CC123)</button>
+      </div>
+      <p class="footnote subtle">Panic is intentionally limited to the selected output and MIDI channel, but CC123 affects every voice on that synth channel. Reconnect recovery below does not send CC123; it releases only tracked pitches and sustain state.</p>
+    </section>
+
+    <section class="panel" aria-labelledby="compare-heading">
+      <h2 id="compare-heading">Loopback comparison</h2>
+      <p class="subtle">Exact-byte counts identify missing, duplicate, or channel-misrouted loopback messages. Timestamp deltas are measurements from this interface path, not a preset acceptance threshold.</p>
+      <div class="actions"><button id="compare-loopback-btn" type="button" disabled>Compare selected output with selected input</button></div>
+      <div id="loopback-summary" class="summary" aria-live="polite">Select an output and a loopback input, send a short test, then compare.</div>
+    </section>
+
+    <section class="panel" aria-labelledby="log-heading">
+      <h2 id="log-heading">Timestamped event log</h2>
+      <div class="actions"><button id="clear-log-btn" type="button">Clear log and comparison</button></div>
+      <div id="event-log" role="log" aria-live="polite"></div>
+    </section>
+  </body>
+</html>
