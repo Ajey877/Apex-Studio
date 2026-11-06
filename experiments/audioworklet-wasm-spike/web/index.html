@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Apex Studio — AudioWorklet + WASM spike (experimental)</title>
+  <style>
+    body { font: 14px/1.4 system-ui, sans-serif; margin: 24px; background: #11131a; color: #e6e8ef; }
+    button, input { font: inherit; }
+    button { padding: 6px 14px; margin-right: 8px; }
+    label { margin-right: 16px; }
+    input { width: 5em; }
+    pre { background: #1b1e28; padding: 12px; overflow: auto; max-height: 60vh; }
+    .pass { color: #6fdc8c; } .fail { color: #ff7b7b; }
+    .warn { color: #f5c26b; }
+  </style>
+</head>
+<body>
+  <h1>AudioWorklet + WebAssembly spike</h1>
+  <p class="warn">Experimental architecture proof. Not connected to the Apex Studio audio engine.
+    The live tests play a quiet filtered noise/saw signal through your default output.</p>
+  <p>
+    <label>Instances <input id="instances" type="number" value="16" min="1" max="512" /></label>
+    <label>Sustained seconds <input id="seconds" type="number" value="60" min="5" max="3600" /></label>
+    <label>Lag threshold ms <input id="lag" type="number" value="50" min="5" max="1000" /></label>
+  </p>
+  <p>
+    <button id="run">Run full suite</button>
+    <button id="runLive">Run sustained live only</button>
+    <button id="download" disabled>Download results JSON</button>
+  </p>
+  <div id="summary"></div>
+  <pre id="out">Click a button to start (a user gesture is required to start audio).</pre>
+  <script type="module" src="./ui.mjs"></script>
+</body>
+</html>
