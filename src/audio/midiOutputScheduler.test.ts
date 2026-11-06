@@ -5154,3 +5154,450 @@ describe('MidiOutputScheduler — long-held live note ownership survives a faile
     assert.equal(port.deliveredBytes(bytes => (bytes[0] & 0xf0) === 0xb0).length, 0, 'no CC traffic');
   });
 });
+
+/**
+ * Lead Engineer finding: `trySend()` did not enforce the pending-recovery gate
+ * itself. Every caller resolves a *usable* port up front, but a failure part-way
+ * through a multi-event operation converts that output into pending recovery
+ * while the caller keeps iterating with the port reference it already holds — so
+ * a later Note On in the same batch could reach the wire, land outside the
+ * recovery snapshot that had just been taken, and survive reconnection.
+ *
+ * These regressions drive `commitTransportNote()` → `reconcileVoiceContributors()`
+ * → `requeueActivePortEvents()` through a receiver that records every attempt,
+ * can reject one release without delivering it, and can observe route usability
+ * at the moment each message is transmitted.
+ */
+describe('MidiOutputScheduler — pending recovery gates transmission at the send boundary', () => {
+  class GateProbeReceiverPort implements MidiOutputPortLike {
+    readonly id: string;
+    readonly name: string;
+    readonly manufacturer = 'Roland';
+    state: 'connected' | 'disconnected' = 'connected';
+    connection: 'open' | 'closed' | 'pending' = 'open';
+    readonly attempted: RecordedMidiPacket[] = [];
+    readonly delivered: RecordedMidiPacket[] = [];
+    readonly sounding = new Set<string>();
+    /** Number of upcoming release sends that throw without reaching the receiver. */
+    failReleaseAttempts = 0;
+    clearCalls = 0;
+    /** Observes scheduler state at the moment a message is actually transmitted. */
+    onDelivered?: (packet: RecordedMidiPacket) => void;
+
+    constructor(id: string) {
+      this.id = id;
+      this.name = id;
+    }
+
+    send(data: number[] | Uint8Array, timestamp?: number): void {
+      const bytes = Array.from(data);
+      this.attempted.push({ bytes, timestamp });
+      const command = bytes[0] & 0xf0;
+      const isRelease = command === 0x80 || (command === 0x90 && bytes[2] === 0);
+      if (isRelease && this.failReleaseAttempts > 0) {
+        this.failReleaseAttempts -= 1;
+        throw new Error(`Port ${this.id} rejected the release`);
+      }
+      this.delivered.push({ bytes, timestamp });
+      const midiChannel = (bytes[0] & 0x0f) + 1;
+      if (command === 0x90 && bytes[2] > 0) {
+        this.sounding.add(`${midiChannel}:${bytes[1]}`);
+      } else if (isRelease) {
+        this.sounding.delete(`${midiChannel}:${bytes[1]}`);
+      }
+      this.onDelivered?.({ bytes, timestamp });
+    }
+
+    clear(): void {
+      this.clearCalls += 1;
+    }
+
+    async open(): Promise<MidiOutputPortLike> {
+      this.connection = 'open';
+      return this;
+    }
+
+    deliveredBytes(filter?: (bytes: number[]) => boolean): number[][] {
+      const list = filter ? this.delivered.filter(packet => filter(packet.bytes)) : this.delivered;
+      return list.map(packet => packet.bytes);
+    }
+  }
+
+  const transportStep = (absoluteStep: number, seconds: number) => ({
+    takeGeneration: 1,
+    absoluteStep,
+    step: absoluteStep % 16,
+    stepAudioTimeSeconds: seconds,
+    unswungStepAudioTimeSeconds: seconds,
+    grooveOffsetSeconds: 0,
+    bpm: 120,
+    mode: 'song' as const,
+    patternLoopSteps: null,
+    contextCurrentTimeSeconds: seconds,
+  });
+
+  /**
+   * Drives one real multi-event scheduler operation: an open C4 whose 1125 ms
+   * release is already queued, a future E4 attack at 1250 ms, and then an
+   * overlapping C4 whose commit path clears the port queue and replays every
+   * pending event through `requeueActivePortEvents()`.
+   */
+  const runOverlapBatch = (failFirstRelease: boolean) => {
+    const clock = { now: 1_000 };
+    const port = new GateProbeReceiverPort('gated-batch');
+    const sibling = new GateProbeReceiverPort('gated-batch-sibling');
+    const scheduler = new MidiOutputScheduler({
+      performanceNowMs: () => clock.now,
+      getOutputs: () => new Map([[port.id, port], [sibling.id, sibling]]),
+    });
+    const lead = makeChannel('gated-batch-lead', {
+      midiOutput: { outputDeviceId: port.id, midiChannel: 1, mode: 'external' },
+    });
+    const siblingChannel = makeChannel('gated-batch-sibling-channel', {
+      midiOutput: { outputDeviceId: sibling.id, midiChannel: 1, mode: 'external' },
+    });
+
+    scheduler.beginTransportTake(1, 'song');
+    scheduler.beginTransportStep(transportStep(0, 0));
+    assert.equal(
+      scheduler.scheduleChannelNote({
+        channel: lead,
+        note: makeNote(60, { id: 'gated-batch-c4', duration: 1 }),
+        onsetAudioTimeSeconds: 0,
+        bpm: 120,
+        contextCurrentTimeSeconds: 0,
+      }).sent,
+      true,
+    );
+    assert.equal(
+      scheduler.scheduleChannelNote({
+        channel: lead,
+        note: makeNote(64, { id: 'gated-batch-e4', start: 0.25, duration: 0.5 }),
+        onsetAudioTimeSeconds: 0.25,
+        bpm: 120,
+        contextCurrentTimeSeconds: 0,
+      }).sent,
+      true,
+    );
+    assert.equal(
+      scheduler.scheduleChannelNote({
+        channel: siblingChannel,
+        note: makeNote(72, { id: 'gated-batch-sibling', duration: 1 }),
+        onsetAudioTimeSeconds: 0,
+        bpm: 120,
+        contextCurrentTimeSeconds: 0,
+      }).sent,
+      true,
+    );
+    scheduler.endTransportStep();
+
+    const state = {
+      scheduler,
+      port,
+      sibling,
+      lead,
+      clock,
+      attemptsBefore: port.attempted.length,
+      deliveredBefore: port.delivered.length,
+      siblingAttemptsBefore: sibling.attempted.length,
+      siblingDeliveredBefore: sibling.delivered.length,
+    };
+
+    if (failFirstRelease) port.failReleaseAttempts = 1;
+    scheduler.scheduleChannelNote({
+      channel: lead,
+      note: makeNote(60, { id: 'gated-batch-overlap', start: 0.5, duration: 1, velocity: 0.9 }),
+      onsetAudioTimeSeconds: 0.0625,
+      bpm: 120,
+      contextCurrentTimeSeconds: 0,
+    });
+    return state;
+  };
+
+  const batchBytes = (state: ReturnType<typeof runOverlapBatch>): number[][] =>
+    state.port.attempted.slice(state.attemptsBefore).map(packet => packet.bytes);
+
+  it('replays the whole cached-port batch when nothing fails (control)', () => {
+    const state = runOverlapBatch(false);
+    assert.deepEqual(
+      batchBytes(state),
+      [
+        [0x80, 60, 0],
+        [0x90, 60, 114],
+        [0x80, 60, 0],
+        [0x90, 64, 102],
+        [0x80, 64, 0],
+      ],
+      'the batch commits its release and attack, then requeueActivePortEvents replays the pending events',
+    );
+    assert.equal(state.port.delivered.length, state.deliveredBefore + 5, 'every event was transmitted');
+  });
+
+  it('stops a cached-port batch at the send boundary once recovery begins', async () => {
+    // 2. An early Note Off of the batch fails ambiguously (throws, not delivered)
+    //    while the caller keeps iterating with the port it already resolved.
+    const state = runOverlapBatch(true);
+    const { port, sibling, scheduler, lead } = state;
+
+    // 3. + 4. The batch keeps running, but the gate rejects everything after the
+    //    failed release: no commit Note On, no requeued Note Off or attack, no CC.
+    assert.deepEqual(
+      batchBytes(state),
+      [[0x80, 60, 0]],
+      'nothing is transmitted after the failed release, not even an attempt',
+    );
+    assert.equal(port.delivered.length, state.deliveredBefore, 'no post-failure message reached the receiver');
+
+    // 5. The route stays unavailable.
+    assert.equal(scheduler.getPortUsability(port.id).usable, false, 'the failed release gates the route');
+
+    // 8. A later attack cannot overtake the pending cleanup.
+    const blocked = scheduler.scheduleChannelNote({
+      channel: lead,
+      note: makeNote(67, { id: 'gated-batch-blocked', start: 0.5, duration: 0.5 }),
+      onsetAudioTimeSeconds: 0.5,
+      bpm: 120,
+      contextCurrentTimeSeconds: 0,
+    });
+    assert.equal(blocked.sent, false, 'a new attack is refused while cleanup is pending');
+    assert.equal(blocked.reason, 'port_unavailable');
+    assert.deepEqual(batchBytes(state), [[0x80, 60, 0]], 'the refused attack attempted no bytes');
+
+    // 9. No panic, no sibling traffic, no unrelated channel.
+    assert.equal(
+      port.attempted.some(packet => (packet.bytes[0] & 0xf0) === 0xb0),
+      false,
+      'the gated batch emits no CC traffic, let alone a CC 123 panic',
+    );
+    assert.equal(sibling.attempted.length, state.siblingAttemptsBefore, 'the sibling output is untouched');
+    assert.equal(sibling.delivered.length, state.siblingDeliveredBefore);
+    assert.deepEqual(
+      [...new Set(port.attempted.map(packet => (packet.bytes[0] & 0x0f) + 1))],
+      [1],
+      'only the affected MIDI channel is addressed',
+    );
+
+    // 7. Recovery cleanup is explicitly authorized through the gate: both owed
+    //    voices are released while the route still reports unusable.
+    state.clock.now = 1_400;
+    const usabilityWhenCleaningUp: boolean[] = [];
+    port.onDelivered = () => usabilityWhenCleaningUp.push(scheduler.getPortUsability(port.id).usable);
+    // 6. Reconnection alone performs the cleanup — no disconnect callback is used.
+    await scheduler.handlePortReconnected(port.id);
+
+    assert.deepEqual(
+      usabilityWhenCleaningUp,
+      [false, false],
+      'every cleanup send passes the gate while the route is still closed',
+    );
+    assert.deepEqual(port.deliveredBytes().slice(-2), [[0x80, 60, 0], [0x80, 64, 0]],
+      'each accepted voice is released exactly once by targeted Note Offs');
+    assert.deepEqual(port.deliveredBytes(), [
+      [0x90, 60, 102],
+      [0x80, 60, 0],
+      [0x90, 64, 102],
+      [0x80, 64, 0],
+      [0x80, 60, 0],
+      [0x80, 64, 0],
+    ]);
+    assert.equal(scheduler.getPortUsability(port.id).usable, true, 'the route resumes after cleanup');
+
+    // Ordinary traffic is gated only while recovery is pending.
+    const resumed = scheduler.scheduleChannelNote({
+      channel: lead,
+      note: makeNote(67, { id: 'gated-batch-resumed', start: 0.5, duration: 0.5 }),
+      onsetAudioTimeSeconds: 0.5,
+      bpm: 120,
+      contextCurrentTimeSeconds: 0,
+    });
+    assert.equal(resumed.sent, true, 'the recovered route transmits again');
+    assert.deepEqual(port.deliveredBytes().slice(6), [[0x90, 67, 102], [0x80, 67, 0]],
+      'the post-recovery attack is the first new byte after the cleanup');
+  });
+
+  it('keeps a failed cleanup retryable while refusing ordinary traffic in between', async () => {
+    let perfMs = 1_000;
+    const port = new GateProbeReceiverPort('gated-retry');
+    const scheduler = new MidiOutputScheduler({
+      performanceNowMs: () => perfMs,
+      getOutputs: () => new Map([[port.id, port]]),
+    });
+    const channel = makeChannel('gated-retry-channel', {
+      midiOutput: { outputDeviceId: port.id, midiChannel: 1, mode: 'external' },
+    });
+
+    assert.equal(
+      scheduler.scheduleChannelNote({
+        channel,
+        note: makeNote(60, { id: 'gated-retry-note', duration: 1 }),
+        onsetAudioTimeSeconds: 1,
+        bpm: 120,
+        contextCurrentTimeSeconds: 1,
+        liveInputMidiChannel: 1,
+      }).sent,
+      true,
+    );
+    assert.deepEqual([...port.sounding], ['1:60']);
+
+    // The live release throws without delivering, which opens pending recovery.
+    port.failReleaseAttempts = 1;
+    assert.equal(scheduler.stopLiveChannelNote(channel.id, 60, 1), 1);
+    assert.equal(scheduler.getPortUsability(port.id).usable, false);
+
+    perfMs += 50;
+    // The first cleanup attempt fails too: the route must stay gated and keep the
+    // obligation for another attempt.
+    port.failReleaseAttempts = 1;
+    await scheduler.handlePortReconnected(port.id);
+    assert.equal(scheduler.getPortUsability(port.id).usable, false, 'a failed cleanup keeps the route closed');
+    assert.deepEqual([...port.sounding], ['1:60'], 'the voice is still sounding on the receiver');
+
+    // Ordinary traffic is still refused and transmits nothing.
+    const attemptsBefore = port.attempted.length;
+    const blocked = scheduler.scheduleChannelNote({
+      channel,
+      note: makeNote(72, { id: 'gated-retry-blocked', duration: 0.5 }),
+      onsetAudioTimeSeconds: perfMs / 1000,
+      bpm: 120,
+      contextCurrentTimeSeconds: perfMs / 1000,
+    });
+    assert.equal(blocked.sent, false);
+    assert.equal(blocked.reason, 'port_unavailable');
+    assert.equal(port.attempted.length, attemptsBefore, 'the refused attack attempts no bytes');
+
+    // The retry delivers exactly one release and only then reopens the route.
+    perfMs += 50;
+    await scheduler.handlePortReconnected(port.id);
+    assert.equal(scheduler.getPortUsability(port.id).usable, true);
+    assert.deepEqual([...port.sounding], [], 'the retried cleanup released the voice once');
+    assert.deepEqual(
+      port.deliveredBytes().filter(bytes => (bytes[0] & 0xf0) === 0x80),
+      [[0x80, 60, 0]],
+      'exactly one Note Off is delivered across both cleanup attempts',
+    );
+  });
+
+  it('keeps a voice whose release the gate blocked recoverable', async () => {
+    // Two long-held live notes: both journal entries have expired, so only the
+    // release attempts themselves can carry ownership. The first cleanup send
+    // fails and closes the gate; the second is refused but must still be recorded,
+    // otherwise that voice would be lost and left sounding after recovery.
+    let perfMs = 1_000;
+    const port = new GateProbeReceiverPort('gated-blocked-release');
+    const scheduler = new MidiOutputScheduler({
+      performanceNowMs: () => perfMs,
+      getOutputs: () => new Map([[port.id, port]]),
+    });
+    const channel = makeChannel('gated-blocked-release-channel', {
+      midiOutput: { outputDeviceId: port.id, midiChannel: 1, mode: 'external' },
+    });
+
+    for (const pitch of [60, 72]) {
+      assert.equal(
+        scheduler.scheduleChannelNote({
+          channel,
+          note: makeNote(pitch, { id: `gated-blocked-release-${pitch}`, duration: 1 }),
+          onsetAudioTimeSeconds: 1,
+          bpm: 120,
+          contextCurrentTimeSeconds: 1,
+          liveInputMidiChannel: 1,
+        }).sent,
+        true,
+      );
+    }
+    assert.deepEqual([...port.sounding], ['1:60', '1:72']);
+
+    perfMs += RECENT_NOTE_RECOVERY_RETENTION_MS + 5_000;
+    const attemptsBefore = port.attempted.length;
+    port.failReleaseAttempts = 1;
+    scheduler.cleanupAll('stop');
+
+    // Only the first release was even attempted; the second was gated outright.
+    assert.deepEqual(
+      port.attempted.slice(attemptsBefore).map(packet => packet.bytes),
+      [[0x80, 60, 0]],
+      'the gate stops the cleanup batch at the failed release',
+    );
+    assert.equal(
+      port.attempted.slice(attemptsBefore).some(packet => (packet.bytes[0] & 0xf0) === 0xb0),
+      false,
+      'no CC 123 panic escapes the gate either',
+    );
+    assert.equal(scheduler.getPortUsability(port.id).usable, false);
+
+    // Both voices are released on reconnect, including the one whose release was
+    // blocked rather than attempted.
+    await scheduler.handlePortReconnected(port.id);
+    assert.deepEqual(
+      port.deliveredBytes().filter(bytes => (bytes[0] & 0xf0) === 0x80),
+      [[0x80, 60, 0], [0x80, 72, 0]],
+      'the blocked release still contributed its ownership evidence',
+    );
+    assert.deepEqual([...port.sounding], []);
+    assert.equal(scheduler.getPortUsability(port.id).usable, true);
+  });
+
+  it('the sticky capacity quarantine rejects cached-port queue replay', () => {
+    const clock = { now: 1_000 };
+    const port = new GateProbeReceiverPort('gated-capacity');
+    const scheduler = new MidiOutputScheduler({
+      performanceNowMs: () => clock.now,
+      getOutputs: () => new Map([[port.id, port]]),
+    });
+    const channel = makeChannel('gated-capacity-channel', {
+      midiOutput: { outputDeviceId: port.id, midiChannel: 1, mode: 'external' },
+    });
+    const requeue = () =>
+      (scheduler as unknown as {
+        requeueActivePortEvents: (
+          port: MidiOutputPortLike,
+          outputDeviceId: string,
+          nowPerfMs: number,
+        ) => void;
+      }).requeueActivePortEvents(port, port.id, clock.now);
+
+    scheduler.beginTransportTake(1, 'song');
+    scheduler.beginTransportStep(transportStep(0, 0));
+    scheduler.scheduleChannelNote({
+      channel,
+      note: makeNote(60, { id: 'gated-capacity-held', duration: 1 }),
+      onsetAudioTimeSeconds: 0,
+      bpm: 120,
+      contextCurrentTimeSeconds: 0,
+    });
+    scheduler.scheduleChannelNote({
+      channel,
+      note: makeNote(64, { id: 'gated-capacity-future', start: 0.25, duration: 0.5 }),
+      onsetAudioTimeSeconds: 0.25,
+      bpm: 120,
+      contextCurrentTimeSeconds: 0,
+    });
+    scheduler.endTransportStep();
+
+    // Quarantine the output exactly as the capacity preflight does.
+    (scheduler as unknown as { blockOutputForRecoveryCapacity: (id: string) => void })
+      .blockOutputForRecoveryCapacity(port.id);
+    const usability = scheduler.getPortUsability(port.id);
+    assert.equal(usability.usable, false);
+    assert.match(usability.statusReason ?? '', /recovery capacity exhausted/i);
+
+    // The loop still owns pending work — so silence proves the gate, not an
+    // empty queue.
+    assert.ok(scheduler.getActiveNoteCount() > 0, 'the route still owns voices with pending events');
+    const attemptsBefore = port.attempted.length;
+    requeue();
+    assert.equal(port.attempted.length, attemptsBefore, 'a quarantined output accepts no cached-port queue replay');
+
+    clock.now += 10;
+    const blocked = scheduler.scheduleChannelNote({
+      channel,
+      note: makeNote(67, { id: 'gated-capacity-blocked', duration: 0.5 }),
+      onsetAudioTimeSeconds: 0.01,
+      bpm: 120,
+      contextCurrentTimeSeconds: 0.01,
+    });
+    assert.equal(blocked.sent, false);
+    assert.equal(blocked.reason, 'port_unavailable');
+    assert.equal(port.attempted.length, attemptsBefore, 'the quarantine stays fail-closed');
+  });
+});
