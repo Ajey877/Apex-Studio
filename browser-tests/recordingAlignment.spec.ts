@@ -3,6 +3,12 @@ import JSZip from 'jszip';
 
 const APP_URL = 'http://localhost:3000';
 
+function reportCiNotice(title: string, details: unknown) {
+  if (!process.env.GITHUB_ACTIONS) return;
+  const message = JSON.stringify(details).replaceAll('%', '%25').replaceAll('\r', '%0D').replaceAll('\n', '%0A');
+  process.stdout.write(`::notice title=${title}::${message}\n`);
+}
+
 async function unlockAudio(page: Page, createCaptureContext = true) {
   await page.waitForFunction(() => !!document.body);
   await page.evaluate((withCaptureContext) => {
@@ -274,6 +280,7 @@ async function captureScenario(page: Page, scenario: 'count-in' | 'punch') {
     return summary;
   }, scenario);
   console.log('[recording-alignment]', evidence);
+  reportCiNotice(`Recording-alignment-${scenario}`, evidence);
   expect(evidence.resumeCalls).toBeGreaterThan(0);
   expect(evidence.resumePromiseDelayMs).toBeGreaterThanOrEqual(100);
   expect(evidence.micInitializationDelayMs).toBeGreaterThanOrEqual(70);
@@ -529,7 +536,7 @@ test('production AudioWorklet recording stays frame-aligned through count-in, pu
     };
   }, { countInEvidence: countIn });
 
-  console.log('[float32-recording-compatibility]', {
+  const compatibilitySummary = {
     baseId: compatibility.baseId,
     editedId: compatibility.editedId,
     sourceFormatTag: compatibility.sourceFormatTag,
@@ -540,7 +547,9 @@ test('production AudioWorklet recording stays frame-aligned through count-in, pu
     offlinePeaks: compatibility.offlinePeaks,
     export: compatibility.export,
     bundleAssets: compatibility.bundleAssets.map(({ id, path, mimeType, size }: any) => ({ id, path, mimeType, size })),
-  });
+  };
+  console.log('[float32-recording-compatibility]', compatibilitySummary);
+  reportCiNotice('Float32-recording-compatibility', compatibilitySummary);
   expect(compatibility.sourceFormatTag).toBe(3);
   expect(compatibility.sourceBitsPerSample).toBe(32);
   expect(compatibility.sourceMimeType).toBe('audio/wav');
@@ -594,7 +603,9 @@ test('production AudioWorklet recording stays frame-aligned through count-in, pu
     expect(archived.compare(original), `Float32 WAV bytes changed in bundle for ${asset.id}`).toBe(0);
     expect(archived.readUInt16LE(20), `Bundled asset ${asset.id} is not IEEE-float WAV`).toBe(3);
   }
-  console.log('[float32-project-bundle]', { zipBytes: archive.byteLength, assets: manifestAudioFiles });
+  const bundleSummary = { zipBytes: archive.byteLength, assets: manifestAudioFiles };
+  console.log('[float32-project-bundle]', bundleSummary);
+  reportCiNotice('Float32-project-bundle', bundleSummary);
 
   await page.reload();
   await unlockAudio(page, false);
@@ -691,6 +702,7 @@ test('production AudioWorklet recording stays frame-aligned through count-in, pu
     };
   }, { baseId: compatibility.baseId, editedId: compatibility.editedId });
   console.log('[float32-project-reopen]', reopened);
+  reportCiNotice('Float32-project-reopen', reopened);
   expect(reopened.restored).toBe(true);
   expect(reopened.hydratedAudioIds).toContain(compatibility.baseId);
   expect(reopened.hydratedAudioIds).toContain(compatibility.editedId);
