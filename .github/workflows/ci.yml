@@ -23,7 +23,7 @@ jobs:
           node-version: 22
 
       - name: Release tag and source commit parity tests
-        run: node --test tests/releaseTagCommitParity.test.mjs
+        run: npm run test:release-integrity
 
       - name: Install dependencies
         run: npm install --legacy-peer-deps
