@@ -3,7 +3,7 @@ import { ModalFrame } from './ModalFrame';
 import { Mic, Square, Pause, Play, Check, X, AlertCircle, Crosshair } from 'lucide-react';
 import { AudioRecording } from '../types/daw';
 import { audioEngine } from '../audio/audioEngine';
-import { RecordingEngine } from '../audio/recordingEngine';
+import { RecordingCancelledError, RecordingEngine } from '../audio/recordingEngine';
 import { CountInCancelledError } from '../audio/countInScheduler';
 import { PunchCancelledError } from '../audio/punchCaptureWindow';
 import { planPunchClipPlacement, type PunchClipPlacement } from '../audio/recordingPipeline';
@@ -60,7 +60,7 @@ interface AudioRecorderModalProps {
   onSaveRecording: (recording: AudioRecording, targetTrackIndex: number, projectGeneration: number, captureStartBar?: number, punchPlacement?: PunchClipPlacement) => void | Promise<void>;
 }
 
-type RecorderUiState = 'idle' | 'counting-in' | 'recording' | 'paused' | 'stopping';
+type RecorderUiState = 'idle' | 'preparing' | 'counting-in' | 'recording' | 'paused' | 'stopping';
 
 export const AudioRecorderModal: React.FC<AudioRecorderModalProps> = ({ isOpen, projectGeneration, getCurrentProjectGeneration, countInBars, onUpdateCountInBars, punchRecording, onUpdatePunchRecording, timeSignature, sevenEightGrouping, totalBars, bpm, currentBar, currentStep, onClose, onRegisterProjectReplacementHandler, onSaveRecording }) => {
   const [recordingState, setRecordingState] = useState<RecorderUiState>('idle');
@@ -116,7 +116,13 @@ export const AudioRecorderModal: React.FC<AudioRecorderModalProps> = ({ isOpen, 
     : 0;
 
   useEffect(() => {
-    if (!engineRef.current) engineRef.current = new RecordingEngine(() => audioEngine.getContext(), { onError: error => setError(error.message) });
+    if (!engineRef.current) engineRef.current = new RecordingEngine(() => audioEngine.getContext(), {
+      onError: error => {
+        audioEngine.cancelRecordingCountIn();
+        audioEngine.cancelPunchRecording();
+        setError(error.message);
+      },
+    });
     return () => {
       // Effect cleanups must be synchronous; dispose() is async and any failure is already reported via onError.
       void engineRef.current?.dispose();
@@ -231,14 +237,20 @@ export const AudioRecorderModal: React.FC<AudioRecorderModalProps> = ({ isOpen, 
     }
   }, [isOpen]);
 
-  /** Finalizes the active capture into a take (Stop button and punch-out). */
-  const handleStop = async () => {
+  /** Finalizes at the supplied audio-clock boundary (punch-out) or current frame (manual Stop). */
+  const handleStop = async (stopTime?: number) => {
     const engine = engineRef.current;
     if (!engine) return;
     try {
       setError(null);
       setRecordingState('stopping');
-      const result = await engine.stop();
+      const result = await engine.stop(stopTime);
+      // Tempo changes can retime punch-out in audio seconds while preserving the
+      // planned musical geometry. Trim against the measured, frame-exact take,
+      // never the stale pre-recording duration from the initial plan.
+      if (punchPlacementRef.current) {
+        punchPlacementRef.current = { ...punchPlacementRef.current, trimSeconds: result.durationSeconds };
+      }
       const recording: AudioRecording = { id: result.id, name: result.name, timestamp: result.timestamp, durationSeconds: result.durationSeconds, audioBlob: result.blob, audioUrl: result.url, waveform: result.waveform };
       setRecordedTake(recording);
       setRecordingState('idle');
@@ -250,40 +262,39 @@ export const AudioRecorderModal: React.FC<AudioRecorderModalProps> = ({ isOpen, 
   };
 
   /**
-   * Phase 1K: count-in first, capture second.
-   *
-   * When the count-in is 1 or 2 bars, `audioEngine.beginRecordingCountIn`
-   * clicks the active meter's pulses at the project tempo (including the 7/8
-   * accent grouping) and resolves exactly at the planned capture moment.
-   * `RecordingEngine.start()` — the only path that opens the microphone and
-   * MediaRecorder — runs strictly AFTER that, which is what prevents count-in
-   * clicks from being recorded as audio. No note/step data is ever written by
-   * the count-in, so nothing can be "recorded as notes" either. The resolved
-   * `clipStartBar` is kept so the take is placed at the bar capture began on.
-   *
-   * Phase 1L: with punch on, the SAME count-in runs as the pre-roll (planned
-   * backwards so its capture moment IS the punch-in), capture then starts, and
-   * the scheduled punch-out stops it. With punch off this is byte-for-byte the
-   * Phase 1K path.
+   * Capture ownership and PCM pre-roll are established BEFORE any musical
+   * count-in or punch boundary is scheduled. `start(captureTime)` then selects
+   * the exact AudioContext frame from the worklet's rolling input buffer, even
+   * if the count-in/punch callback is delivered late on the JavaScript thread.
    */
   const handleStart = async () => {
     // A double-pressed Record must never arm a second recorder.
     if (isStartingRef.current || recordingState !== 'idle' || recordedTake) return;
     isStartingRef.current = true;
+    const engine = engineRef.current;
     try {
+      if (!engine) throw new Error('The microphone capture engine is unavailable');
       setError(null);
       setRecordedTake(null);
       punchPlacementRef.current = null;
       recordingProjectGenerationRef.current = projectGeneration;
       const bars = resolveCountInBars({ countInBars });
 
+      if (punchDraft.enabled && !punchValidation.valid) {
+        setError(punchValidation.issues[0]?.message ?? 'The punch window is not valid');
+        return;
+      }
+
+      // Permission prompts, context resume, worklet loading, and input priming
+      // all happen before the count-in clock starts. The UI exposes cancellation
+      // while a permission prompt or worklet initialization is pending.
+      setRecordingState('preparing');
+      await engine.prepare();
+      if (recordingProjectGenerationRef.current !== getCurrentProjectGeneration()) {
+        throw new RecordingCancelledError('The recording was cancelled because the project was replaced');
+      }
+
       if (punchDraft.enabled) {
-        // Phase 1L: a punch take refuses to arm an invalid window — recording
-        // the wrong bars is worse than not recording.
-        if (!punchValidation.valid) {
-          setError(punchValidation.issues[0]?.message ?? 'The punch window is not valid');
-          return;
-        }
         setRecordingState('counting-in');
         const session = await audioEngine.beginPunchRecording({
           settings: punchDraft,
@@ -292,32 +303,29 @@ export const AudioRecorderModal: React.FC<AudioRecorderModalProps> = ({ isOpen, 
         });
         if (recordingProjectGenerationRef.current !== getCurrentProjectGeneration()) {
           audioEngine.cancelPunchRecording();
-          throw new Error('The recording was cancelled because the project was replaced');
+          throw new RecordingCancelledError('The recording was cancelled because the project was replaced');
         }
         punchPlacementRef.current = planPunchClipPlacement(session.plan);
         setCaptureStartBar(session.plan.clipStartBar);
-        await engineRef.current!.start();
+        await engine.start(session.captureTime);
         if (recordingProjectGenerationRef.current !== getCurrentProjectGeneration()) {
           audioEngine.cancelPunchRecording();
-          await engineRef.current!.cancel().catch(() => undefined);
-          throw new Error('The recording was cancelled because the project was replaced');
+          throw new RecordingCancelledError('The recording was cancelled because the project was replaced');
         }
         setRecordingState('recording');
-        // The punch-out moment owns the take's end: capture stops there without
-        // the user pressing Stop. An abort (stop / pause / seek / meter change /
-        // close / project replacement) discards the take instead of leaving a
-        // truncated one on the playlist.
-        void session.punchOut.then(() => {
-          void handleStop();
+        // Punch-out carries an absolute audio-clock time. Passing it through to
+        // the capture engine prevents timer delivery latency from extending the
+        // WAV past the planned musical boundary.
+        void session.punchOut.then(punchResult => {
+          void handleStop(punchResult.stopTime);
         }, (punchError: unknown) => {
-          if (punchError instanceof PunchCancelledError) {
-            void engineRef.current?.cancel().catch(() => undefined);
-            punchPlacementRef.current = null;
-            setRecordingState('idle');
-            setRecordSeconds(0);
-            return;
+          void engine.cancel().catch(() => undefined);
+          punchPlacementRef.current = null;
+          setRecordingState('idle');
+          setRecordSeconds(0);
+          if (!(punchError instanceof PunchCancelledError)) {
+            setError(punchError instanceof Error ? punchError.message : 'The punch recording failed');
           }
-          setError(punchError instanceof Error ? punchError.message : 'The punch recording failed');
         });
         return;
       }
@@ -326,27 +334,27 @@ export const AudioRecorderModal: React.FC<AudioRecorderModalProps> = ({ isOpen, 
         setRecordingState('counting-in');
         const countIn = await audioEngine.beginRecordingCountIn(bars);
         if (recordingProjectGenerationRef.current !== getCurrentProjectGeneration()) {
-          throw new Error('The recording was cancelled because the project was replaced');
+          throw new RecordingCancelledError('The recording was cancelled because the project was replaced');
         }
         setCaptureStartBar(countIn.clipStartBar);
+        await engine.start(countIn.captureTime);
       } else {
         setCaptureStartBar(0);
+        await engine.start();
       }
-      await engineRef.current!.start();
       if (recordingProjectGenerationRef.current !== getCurrentProjectGeneration()) {
-        await engineRef.current!.cancel().catch(() => undefined);
-        throw new Error('The recording was cancelled because the project was replaced');
+        throw new RecordingCancelledError('The recording was cancelled because the project was replaced');
       }
       setRecordingState('recording');
     } catch (err) {
+      audioEngine.cancelRecordingCountIn();
+      audioEngine.cancelPunchRecording();
+      await engine?.cancel().catch(() => undefined);
+      punchPlacementRef.current = null;
       setRecordingState('idle');
-      if (err instanceof CountInCancelledError) {
-        // A deliberate abort (Stop, close, seek, project replacement): no take
-        // exists and the count-in clicks were silenced. Nothing to report.
-        return;
-      }
-      if (err instanceof PunchCancelledError) {
-        // Phase 1L: the same rule for an aborted punch pre-roll.
+      setRecordSeconds(0);
+      if (err instanceof CountInCancelledError || err instanceof PunchCancelledError || err instanceof RecordingCancelledError) {
+        // Deliberate aborts and project replacement have no take to publish.
         return;
       }
       setError(err instanceof Error ? err.message : 'Unable to start audio recording');
@@ -360,6 +368,18 @@ export const AudioRecorderModal: React.FC<AudioRecorderModalProps> = ({ isOpen, 
     audioEngine.cancelRecordingCountIn();
     // Phase 1L: cancelling the pre-roll of a punch take abandons the take.
     audioEngine.cancelPunchRecording();
+    // The microphone is already prepared by this point; release it immediately
+    // rather than holding an active capture session until the count-in promise
+    // reaches its rejection handler.
+    void engineRef.current?.cancel().catch(() => undefined);
+  };
+
+  const handleCancelPunch = () => {
+    audioEngine.cancelPunchRecording();
+    void engineRef.current?.cancel().catch(() => undefined);
+    punchPlacementRef.current = null;
+    setRecordingState('idle');
+    setRecordSeconds(0);
   };
 
   const handlePauseResume = () => {
@@ -420,11 +440,13 @@ export const AudioRecorderModal: React.FC<AudioRecorderModalProps> = ({ isOpen, 
 
   if (!isOpen) return null;
 
-  const statusLabel = recordingState === 'counting-in'
-    ? (punchDraft.enabled ? 'COUNT-IN → PUNCH' : 'COUNT-IN')
-    : recordingState === 'recording' && punchDraft.enabled
-      ? 'PUNCH RECORDING'
-      : recordingState.toUpperCase();
+  const statusLabel = recordingState === 'preparing'
+    ? 'INITIALIZING MICROPHONE'
+    : recordingState === 'counting-in'
+      ? (punchDraft.enabled ? 'COUNT-IN → PUNCH' : 'COUNT-IN')
+      : recordingState === 'recording' && punchDraft.enabled
+        ? 'PUNCH RECORDING'
+        : recordingState.toUpperCase();
 
   return (
     <ModalFrame id="audio-recorder-modal" labelledBy="audio-recorder-modal-title" onClose={onClose} className="fixed inset-0 backdrop-blur-sm z-50 flex items-center justify-center p-4">
@@ -437,7 +459,7 @@ export const AudioRecorderModal: React.FC<AudioRecorderModalProps> = ({ isOpen, 
           <div className="bg-[var(--apex-bg)] border border-[var(--apex-border)] rounded-lg p-4 flex flex-col items-center justify-center space-y-2">
             <div className="text-2xl font-mono font-bold text-[var(--apex-text)] flex items-center gap-2">{(recordingState === 'recording' || recordingState === 'paused') && <div className="w-3 h-3 bg-[var(--apex-state-recording)] rounded-full animate-pulse" />}<span>{formatTime(recordSeconds)}</span></div>
             <canvas ref={canvasRef} width={360} height={50} className="w-full h-12 bg-[var(--apex-canvas)] rounded border border-[var(--apex-border)]" />
-            <div className="w-full flex items-center justify-between text-[10px] text-[var(--apex-text-3)] font-mono"><span>INPUT PEAK: {Math.round(inputLevel * 100)}%</span><span data-recorder-status={statusLabel} className={(recordingState === 'recording' || recordingState === 'paused' || recordingState === 'counting-in') ? 'text-[var(--apex-accent)] font-bold' : ''}>STATUS: {statusLabel}</span></div>
+            <div className="w-full flex items-center justify-between text-[10px] text-[var(--apex-text-3)] font-mono"><span>INPUT PEAK: {Math.round(inputLevel * 100)}%</span><span data-recorder-status={statusLabel} className={(recordingState === 'preparing' || recordingState === 'recording' || recordingState === 'paused' || recordingState === 'counting-in') ? 'text-[var(--apex-accent)] font-bold' : ''}>STATUS: {statusLabel}</span></div>
           </div>
           {error && <div className="flex items-start gap-2 p-3 bg-[color-mix(in_srgb,var(--apex-danger)_14%,transparent)] border border-[color-mix(in_srgb,var(--apex-danger)_50%,transparent)] rounded-lg text-xs text-[color-mix(in_srgb,var(--apex-danger)_70%,var(--apex-text))]"><AlertCircle className="w-4 h-4 shrink-0 mt-0.5" /><span>{error}</span></div>}
           {/* Phase 1K: recording count-in setting — Off / 1 bar / 2 bars. The
@@ -591,8 +613,8 @@ export const AudioRecorderModal: React.FC<AudioRecorderModalProps> = ({ isOpen, 
           )}
           <div className="flex items-center justify-center gap-3">
             {recordingState === 'idle' && !recordedTake && <button onClick={handleStart} className="flex items-center gap-2 px-6 py-2.5 bg-[var(--apex-accent)] hover:bg-[var(--apex-accent-strong)] text-[var(--apex-state-playing-fg)] font-bold text-sm rounded shadow-lg transition active:scale-95"><div className="w-3 h-3 bg-[var(--apex-state-playing-fg)] rounded-full" />{punchDraft.enabled ? 'PUNCH RECORD' : 'START RECORDING'}</button>}
-            {recordingState === 'counting-in' && <><span className="text-xs text-[var(--apex-accent)] font-bold font-mono">COUNT-IN · {describeCountInBars(resolveCountInBars({ countInBars }))}</span><button onClick={handleCancelCountIn} className="flex items-center gap-2 px-5 py-2.5 bg-[var(--apex-surface-2)] hover:bg-[var(--apex-surface-3)] text-[var(--apex-text)] font-bold text-sm rounded border border-[var(--apex-border)] transition"><X className="w-4 h-4" />CANCEL</button></>}
-            {(recordingState === 'recording' || recordingState === 'paused') && <><button onClick={handlePauseResume} disabled={punchDraft.enabled} className="flex items-center gap-2 px-5 py-2.5 bg-[var(--apex-surface-2)] hover:bg-[var(--apex-surface-3)] text-[var(--apex-text)] font-bold text-sm rounded border border-[var(--apex-border)] transition disabled:opacity-40" title={punchDraft.enabled ? 'A punch take has a fixed length and cannot be paused' : undefined}>{recordingState === 'recording' ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4" />}{recordingState === 'recording' ? 'PAUSE' : 'RESUME'}</button><button onClick={handleStop} className="flex items-center gap-2 px-6 py-2.5 bg-[var(--apex-state-recording)] hover:opacity-80 text-[var(--apex-state-recording-fg)] font-bold text-sm rounded shadow-lg transition active:scale-95"><Square className="w-4 h-4 fill-current" />STOP & SAVE</button></>}
+            {(recordingState === 'preparing' || recordingState === 'counting-in') && <><span className="text-xs text-[var(--apex-accent)] font-bold font-mono">{recordingState === 'preparing' ? 'INITIALIZING MICROPHONE' : `COUNT-IN · ${describeCountInBars(resolveCountInBars({ countInBars }))}`}</span><button onClick={handleCancelCountIn} className="flex items-center gap-2 px-5 py-2.5 bg-[var(--apex-surface-2)] hover:bg-[var(--apex-surface-3)] text-[var(--apex-text)] font-bold text-sm rounded border border-[var(--apex-border)] transition"><X className="w-4 h-4" />CANCEL</button></>}
+            {(recordingState === 'recording' || recordingState === 'paused') && <><button onClick={handlePauseResume} disabled={punchDraft.enabled} className="flex items-center gap-2 px-5 py-2.5 bg-[var(--apex-surface-2)] hover:bg-[var(--apex-surface-3)] text-[var(--apex-text)] font-bold text-sm rounded border border-[var(--apex-border)] transition disabled:opacity-40" title={punchDraft.enabled ? 'A punch take has a fixed length and cannot be paused' : undefined}>{recordingState === 'recording' ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4" />}{recordingState === 'recording' ? 'PAUSE' : 'RESUME'}</button><button onClick={() => punchDraft.enabled ? handleCancelPunch() : void handleStop()} className="flex items-center gap-2 px-6 py-2.5 bg-[var(--apex-state-recording)] hover:opacity-80 text-[var(--apex-state-recording-fg)] font-bold text-sm rounded shadow-lg transition active:scale-95"><Square className="w-4 h-4 fill-current" />{punchDraft.enabled ? 'CANCEL PUNCH' : 'STOP & SAVE'}</button></>}
             {recordingState === 'stopping' && <span className="text-xs text-[var(--apex-text-3)]">Finalizing recording…</span>}
           </div>
           {recordedTake && <div className="p-3 bg-[var(--apex-surface)] border border-[var(--apex-state-selected-border)] rounded-lg space-y-3">

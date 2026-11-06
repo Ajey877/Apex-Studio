@@ -15,6 +15,7 @@ import * as WebAudio from 'web-audio-engine';
 import { audioEngine } from './audioEngine';
 import { audioDeviceManager } from './audioDeviceManager';
 import { RecordingEngine } from './recordingEngine';
+import { createRecordingTestRig } from './recordingCaptureTestHarness';
 import { createDefaultProjectState } from '../state/projectState';
 import { createHistory } from '../state/projectHistory';
 import { resynchronizeLiveEngineFromProjectState } from '../state/liveEngineResynchronization';
@@ -246,7 +247,6 @@ test('reconfigureAudioContext refuses every active operation (playback, count-in
 
     // 7. Active RecordingEngine session
     const OriginalNavigator = globalThis.navigator;
-    const OriginalMediaRecorder = globalThis.MediaRecorder;
     Object.defineProperty(globalThis, 'navigator', {
       configurable: true,
       value: {
@@ -258,23 +258,17 @@ test('reconfigureAudioContext refuses every active operation (playback, count-in
         },
       },
     });
-    Object.defineProperty(globalThis, 'MediaRecorder', {
-      configurable: true,
-      value: class {
-        static isTypeSupported() { return true; }
-        state = 'inactive';
-        mimeType = 'audio/webm';
-        ondataavailable: unknown = null;
-        onstop: (() => void) | null = null;
-        onerror: unknown = null;
-        start() { this.state = 'recording'; }
-        stop() { this.state = 'inactive'; queueMicrotask(() => this.onstop?.()); }
-      },
-    });
 
     try {
-      const rec = new RecordingEngine(() => engine.getContext(), { persistAudioClip: async () => {} });
-      await rec.start();
+      // A primed AudioWorklet-backed RecordingEngine registers the same shared
+      // session token as production; MediaRecorder fakes are no longer relevant.
+      const captureRig = createRecordingTestRig();
+      const rec = new RecordingEngine(() => captureRig.context as unknown as AudioContext, captureRig.engineOptions);
+      const preparing = rec.prepare();
+      await captureRig.context.captureNodeReady;
+      captureRig.context.advanceToFrame(2048);
+      await preparing;
+      await rec.start(captureRig.context.currentTime);
       await assert.rejects(
         () => engine.reconfigureAudioContext({ sampleRate: 48000 }),
         /microphone audio recording/i,
@@ -282,7 +276,6 @@ test('reconfigureAudioContext refuses every active operation (playback, count-in
       await rec.cancel().catch(() => {});
     } finally {
       Object.defineProperty(globalThis, 'navigator', { configurable: true, value: OriginalNavigator });
-      Object.defineProperty(globalThis, 'MediaRecorder', { configurable: true, value: OriginalMediaRecorder });
     }
 
     assert.equal(env.instances.length, 1, 'no replacement AudioContext may be created while blocked');

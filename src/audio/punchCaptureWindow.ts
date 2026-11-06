@@ -164,8 +164,16 @@ export class PunchCaptureWindow {
     const delayMs = Math.max(0, (active.stopTime - now) * 1000);
     active.timer = this.host.setTimer(() => {
       if (this.active !== active || active.settled) return;
-      active.settled = true;
       active.timer = null;
+      // Timer delivery may lag the audio clock (or run while an AudioContext is
+      // suspended). Only resolve after the audio clock has reached the planned
+      // punch-out boundary; otherwise re-arm against the remaining audio time.
+      const remainingSeconds = active.stopTime - this.host.now();
+      if (remainingSeconds > 1e-9) {
+        this.armTimer(active);
+        return;
+      }
+      active.settled = true;
       if (this.active === active) this.active = null;
       active.resolve({
         stopTime: active.stopTime,

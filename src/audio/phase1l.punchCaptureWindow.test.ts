@@ -66,6 +66,22 @@ describe('Phase 1L — the punch window resolves at the punch-out moment', () =>
     assert.equal(punchWindow.isActive, false);
   });
 
+  it('re-arms when a wall-clock callback arrives before the audio clock reaches punch-out', async () => {
+    const host = new FakeHost();
+    const punchWindow = new PunchCaptureWindow(host);
+    const armed = punchWindow.arm({ captureTime: 2, durationBeats: 4, bpm: 120 });
+    const earlyTimer = host.timers[0];
+    assert.ok(earlyTimer);
+    earlyTimer.cleared = true;
+    earlyTimer.fn();
+    assert.equal(punchWindow.isActive, true, 'an early timer cannot stop the take');
+    assert.equal(host.liveTimers.length, 1, 'punch-out is re-armed against the remaining audio-clock time');
+    host.advance(4.1);
+    const result = await armed;
+    assert.equal(r(result.stopTime), 4);
+    assert.equal(punchWindow.isActive, false);
+  });
+
   it('resolves only once — a second advance does not resolve anything new', async () => {
     const host = new FakeHost();
     const punchWindow = new PunchCaptureWindow(host);

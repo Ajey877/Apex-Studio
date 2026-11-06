@@ -121,12 +121,10 @@ export const planPunchClipPlacement = (plan: PunchCapturePlan): PunchClipPlaceme
 /**
  * Phase 1L — trims a decoded take to the punch window.
  *
- * `MediaRecorder` cannot start or stop on a sample: it opens when the count-in
- * resolves and closes a task or two after the punch-out timer fires, so the
- * encoded blob is normally a few milliseconds longer than the punched window.
- * Trimming the decoded buffer to the window is what guarantees the project
- * never holds audio from beyond punch-out, and it keeps the clip's audio the
- * same length as its playlist geometry.
+ * `RecordingEngine` now writes an exact frame window, but trimming remains a
+ * defensive hand-off at playlist placement: tempo changes can retime a window,
+ * and decoded-buffer rounding must never leave audio beyond punch-out. The trim
+ * keeps the clip's decoded audio within its punched playlist geometry.
  *
  * A buffer already at or inside the window is returned unchanged (never padded
  * and never re-allocated), so a take cannot grow silence it never recorded.
