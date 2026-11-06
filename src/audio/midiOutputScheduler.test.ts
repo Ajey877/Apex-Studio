@@ -4,6 +4,7 @@ import {
   MAX_RECENT_NOTE_RECOVERY_CANDIDATES,
   MAX_RECENT_SUSTAIN_RECOVERY_CANDIDATES,
   MidiOutputScheduler,
+  RECENT_NOTE_RECOVERY_RETENTION_MS,
   audioTimeToPerformanceMs,
   clampMidiChannelNumber,
   evaluateMidiOutputPortUsability,
@@ -4795,5 +4796,361 @@ describe('MidiOutputScheduler — ambiguous send failure keeps output recovery p
       'the merged recovery record releases the pedal exactly once',
     );
     assert.equal(panicPackets(port).length, 0, 'no CC 123 is used');
+  });
+});
+
+/**
+ * Lead Engineer finding: a live MIDI note held longer than
+ * `RECENT_NOTE_RECOVERY_RETENTION_MS` outlives its bounded recent-wire journal
+ * entry, and `stopLiveChannelNote()` removes the active-note records before it
+ * attempts the physical Note Off. A failed release therefore had neither a
+ * journal entry nor an active record, so no pending recovery was registered and
+ * reconnection could report the route usable with the voice still sounding.
+ *
+ * The correction carries the known wire voice from the release call site into
+ * the send-failure recovery path, without extending journal retention.
+ */
+describe('MidiOutputScheduler — long-held live note ownership survives a failed release', () => {
+  /** Receiver that models physical state and can fail (and withhold) a release. */
+  class LiveNoteReceiverPort implements MidiOutputPortLike {
+    readonly id: string;
+    readonly name: string;
+    readonly manufacturer = 'Sequential';
+    state: 'connected' | 'disconnected' = 'connected';
+    connection: 'open' | 'closed' | 'pending' = 'open';
+    readonly attempted: RecordedMidiPacket[] = [];
+    readonly delivered: RecordedMidiPacket[] = [];
+    readonly sounding = new Set<string>();
+    /** When true, every Note Off attempt throws without reaching the receiver. */
+    failReleaseSends = false;
+    /** When true, every attempt throws without reaching the receiver. */
+    failAllSends = false;
+    clearCalls = 0;
+
+    constructor(id: string) {
+      this.id = id;
+      this.name = id;
+    }
+
+    send(data: number[] | Uint8Array, timestamp?: number): void {
+      const bytes = Array.from(data);
+      this.attempted.push({ bytes, timestamp });
+      const command = bytes[0] & 0xf0;
+      const isRelease = command === 0x80 || (command === 0x90 && bytes[2] === 0);
+      if (this.failAllSends || (isRelease && this.failReleaseSends)) {
+        throw new Error(`Port ${this.id} rejected the release`);
+      }
+      this.delivered.push({ bytes, timestamp });
+      const midiChannel = (bytes[0] & 0x0f) + 1;
+      if (command === 0x90 && bytes[2] > 0) {
+        this.sounding.add(`${midiChannel}:${bytes[1]}`);
+      } else if (isRelease) {
+        this.sounding.delete(`${midiChannel}:${bytes[1]}`);
+      } else if (command === 0xb0 && bytes[1] === 123) {
+        this.sounding.clear();
+      }
+    }
+
+    clear(): void {
+      this.clearCalls += 1;
+      // `clear()` cancels queued messages; it cannot un-sound a delivered attack.
+    }
+
+    async open(): Promise<MidiOutputPortLike> {
+      this.connection = 'open';
+      return this;
+    }
+
+    deliveredBytes(filter?: (bytes: number[]) => boolean): number[][] {
+      const list = filter ? this.delivered.filter(packet => filter(packet.bytes)) : this.delivered;
+      return list.map(packet => packet.bytes);
+    }
+  }
+
+  const journalOf = (scheduler: MidiOutputScheduler): Map<string, unknown> =>
+    (scheduler as unknown as { recentNoteRecoveryCandidates: Map<string, unknown> })
+      .recentNoteRecoveryCandidates;
+
+  const journalKey = (outputDeviceId: string, midiChannel: number, pitch: number): string =>
+    JSON.stringify([outputDeviceId, midiChannel, pitch]);
+
+  const noteOnAttempts = (port: LiveNoteReceiverPort): number =>
+    port.attempted.filter(packet => (packet.bytes[0] & 0xf0) === 0x90 && packet.bytes[2] > 0).length;
+
+  it('releases a live voice whose Note Off failed after the journal retention expired', async () => {
+    let perfMs = 1_000;
+    const port = new LiveNoteReceiverPort('long-held-live-note');
+    const sibling = new LiveNoteReceiverPort('long-held-live-note-sibling');
+    const scheduler = new MidiOutputScheduler({
+      performanceNowMs: () => perfMs,
+      getOutputs: () => new Map([[port.id, port], [sibling.id, sibling]]),
+    });
+    const channel = makeChannel('long-held-live-note-channel', {
+      midiOutput: { outputDeviceId: port.id, midiChannel: 1, mode: 'external' },
+    });
+    const siblingChannel = makeChannel('long-held-live-note-sibling-channel', {
+      midiOutput: { outputDeviceId: sibling.id, midiChannel: 1, mode: 'external' },
+    });
+
+    // A healthy sibling route carries traffic that must never be touched.
+    const siblingScheduled = scheduler.scheduleChannelNote({
+      channel: siblingChannel,
+      note: makeNote(72, { id: 'long-held-live-note-sibling', duration: 0.5 }),
+      onsetAudioTimeSeconds: 1,
+      bpm: 120,
+      contextCurrentTimeSeconds: 1,
+    });
+    assert.equal(siblingScheduled.sent, true);
+    const siblingPacketsAfterScheduling = sibling.delivered.length;
+
+    // 1. The live Note On is delivered and its active ownership is stored.
+    const attack = scheduler.scheduleChannelNote({
+      channel,
+      note: makeNote(60, { id: 'long-held-live-note', duration: 1 }),
+      onsetAudioTimeSeconds: 1,
+      bpm: 120,
+      contextCurrentTimeSeconds: 1,
+      liveInputMidiChannel: 1,
+    });
+    assert.equal(attack.sent, true);
+    assert.deepEqual([...port.sounding], ['1:60'], 'the live attack is sounding');
+    assert.equal(scheduler.getActiveNoteCount(channel.id), 1, 'the live note is owned');
+    assert.equal(
+      journalOf(scheduler).has(journalKey(port.id, 1, 60)),
+      true,
+      'the accepted attack is journaled',
+    );
+
+    // 2. The key is held far beyond the bounded journal retention.
+    perfMs += RECENT_NOTE_RECOVERY_RETENTION_MS + 5_000;
+
+    // 3. Ordinary pruning expires the journal entry while the note stays owned.
+    assert.equal(
+      scheduler.getActiveNoteCount(channel.id),
+      1,
+      'the live note is still owned after the retention window',
+    );
+    assert.equal(
+      journalOf(scheduler).has(journalKey(port.id, 1, 60)),
+      false,
+      'the bounded recent-wire journal no longer remembers the voice',
+    );
+
+    // 4. The release send fails without reaching the receiver.
+    port.failReleaseSends = true;
+    const stopped = scheduler.stopLiveChannelNote(channel.id, 60, 1);
+    assert.equal(stopped, 1, 'the held live note ownership was stopped');
+
+    // 5. The receiver still has the voice sounding.
+    assert.deepEqual([...port.sounding], ['1:60'], 'the receiver kept the voice after the failed release');
+    assert.equal(
+      port.attempted.filter(packet => (packet.bytes[0] & 0xf0) === 0x80).length,
+      1,
+      'exactly one release was attempted',
+    );
+
+    // The failed release must gate the route rather than silently resume.
+    assert.equal(scheduler.getPortUsability(port.id).usable, false, 'the failed release gates the route');
+    assert.equal(
+      journalOf(scheduler).has(journalKey(port.id, 1, 60)),
+      false,
+      'the obligation is carried without reviving the journal',
+    );
+
+    // 8. A new Note On cannot overtake the unresolved cleanup.
+    const blocked = scheduler.scheduleChannelNote({
+      channel,
+      note: makeNote(67, { id: 'long-held-live-note-blocked', duration: 0.5 }),
+      onsetAudioTimeSeconds: perfMs / 1000,
+      bpm: 120,
+      contextCurrentTimeSeconds: perfMs / 1000,
+    });
+    assert.equal(blocked.sent, false, 'no new attack may jump the pending recovery');
+    assert.equal(blocked.reason, 'port_unavailable');
+    assert.equal(noteOnAttempts(port), 1, 'the blocked attack transmitted nothing');
+
+    // 6. Reconnection alone performs the cleanup — no disconnect callback is used.
+    port.failReleaseSends = false;
+    const reconnect = scheduler.handlePortReconnected(port.id);
+    perfMs += 5;
+    await reconnect;
+
+    // 7. The targeted Note Off is delivered before the route becomes usable.
+    assert.deepEqual(
+      port.deliveredBytes(),
+      [[0x90, 60, 102], [0x80, 60, 0]],
+      'exactly one targeted Note Off releases the long-held voice',
+    );
+    assert.equal(port.sounding.size, 0, 'the simulated receiver voice is finally released');
+    assert.equal(scheduler.getPortUsability(port.id).usable, true, 'the route resumes only after cleanup');
+
+    // 9. No panic, no unrelated-channel traffic, no sibling substitution.
+    assert.equal(
+      port.deliveredBytes(bytes => (bytes[0] & 0xf0) === 0xb0).length,
+      0,
+      'no control-change or CC 123 panic traffic is emitted',
+    );
+    assert.equal(
+      port.deliveredBytes(bytes => (bytes[0] & 0x0f) !== 0).length,
+      0,
+      'only the affected MIDI channel is touched',
+    );
+    assert.equal(
+      sibling.delivered.length,
+      siblingPacketsAfterScheduling,
+      'the sibling output is never substituted or cleaned up',
+    );
+    assert.equal(scheduler.getActiveNoteCount(channel.id), 0, 'no stale local ownership remains');
+
+    // The released voice precedes the first post-recovery attack.
+    const resumed = scheduler.scheduleChannelNote({
+      channel,
+      note: makeNote(67, { id: 'long-held-live-note-resumed', duration: 0.5 }),
+      onsetAudioTimeSeconds: perfMs / 1000,
+      bpm: 120,
+      contextCurrentTimeSeconds: perfMs / 1000,
+      liveInputMidiChannel: 1,
+    });
+    assert.equal(resumed.sent, true);
+    assert.deepEqual(
+      port.deliveredBytes().slice(0, 3),
+      [[0x90, 60, 102], [0x80, 60, 0], [0x90, 67, 102]],
+      'the recovered release precedes the next attack',
+    );
+  });
+
+  it('does not retain stale ownership or duplicate releases when the live Note Off succeeds', async () => {
+    let perfMs = 1_000;
+    const port = new LiveNoteReceiverPort('long-held-live-note-success');
+    const scheduler = new MidiOutputScheduler({
+      performanceNowMs: () => perfMs,
+      getOutputs: () => new Map([[port.id, port]]),
+    });
+    const channel = makeChannel('long-held-live-note-success-channel', {
+      midiOutput: { outputDeviceId: port.id, midiChannel: 1, mode: 'external' },
+    });
+
+    const attack = scheduler.scheduleChannelNote({
+      channel,
+      note: makeNote(60, { id: 'long-held-live-note-success', duration: 1 }),
+      onsetAudioTimeSeconds: 1,
+      bpm: 120,
+      contextCurrentTimeSeconds: 1,
+      liveInputMidiChannel: 1,
+    });
+    assert.equal(attack.sent, true);
+    assert.deepEqual([...port.sounding], ['1:60']);
+
+    // Held past the journal retention, then released successfully.
+    perfMs += RECENT_NOTE_RECOVERY_RETENTION_MS + 5_000;
+    assert.equal(scheduler.getActiveNoteCount(), 1);
+    assert.equal(
+      journalOf(scheduler).has(journalKey(port.id, 1, 60)),
+      false,
+      'the journal expired the long-held voice',
+    );
+
+    const stopped = scheduler.stopLiveChannelNote(channel.id, 60, 1);
+    assert.equal(stopped, 1);
+    assert.deepEqual(
+      port.deliveredBytes(),
+      [[0x90, 60, 102], [0x80, 60, 0]],
+      'the successful release is delivered exactly once',
+    );
+    assert.equal(port.sounding.size, 0, 'the receiver voice is released');
+    assert.equal(scheduler.getActiveNoteCount(), 0, 'no stale ownership is retained');
+    assert.equal(
+      scheduler.getPortUsability(port.id).usable,
+      true,
+      'a successful release never gates the route',
+    );
+
+    // A later reconnection must not replay anything: no obligation was registered.
+    const reconnect = scheduler.handlePortReconnected(port.id);
+    perfMs += 5;
+    await reconnect;
+    assert.equal(port.attempted.length, 2, 'reconnection sends no duplicate Note Off');
+    assert.deepEqual(port.deliveredBytes(), [[0x90, 60, 102], [0x80, 60, 0]]);
+
+    // The same pitch can be attacked and released again without duplication.
+    const again = scheduler.scheduleChannelNote({
+      channel,
+      note: makeNote(60, { id: 'long-held-live-note-success-again', duration: 1 }),
+      onsetAudioTimeSeconds: perfMs / 1000,
+      bpm: 120,
+      contextCurrentTimeSeconds: perfMs / 1000,
+      liveInputMidiChannel: 1,
+    });
+    assert.equal(again.sent, true);
+    assert.equal(scheduler.stopLiveChannelNote(channel.id, 60, 1), 1);
+    assert.equal(
+      port.deliveredBytes(bytes => (bytes[0] & 0xf0) === 0x80 && bytes[1] === 60).length,
+      2,
+      'one release per accepted attack, never a duplicate',
+    );
+    assert.equal(port.sounding.size, 0);
+    assert.equal(scheduler.getActiveNoteCount(), 0);
+  });
+
+  it('carries the obligation when the journal entry is stale but not yet pruned', async () => {
+    let perfMs = 1_000;
+    const port = new LiveNoteReceiverPort('stale-journal-live-note');
+    const scheduler = new MidiOutputScheduler({
+      performanceNowMs: () => perfMs,
+      getOutputs: () => new Map([[port.id, port]]),
+    });
+    const channel = makeChannel('stale-journal-live-note-channel', {
+      midiOutput: { outputDeviceId: port.id, midiChannel: 1, mode: 'external' },
+    });
+
+    const attack = scheduler.scheduleChannelNote({
+      channel,
+      note: makeNote(60, { id: 'stale-journal-live-note', duration: 1 }),
+      onsetAudioTimeSeconds: 1,
+      bpm: 120,
+      contextCurrentTimeSeconds: 1,
+      liveInputMidiChannel: 1,
+    });
+    assert.equal(attack.sent, true);
+    const key = journalKey(port.id, 1, 60);
+    const expiresAtPerfMs = (
+      journalOf(scheduler).get(key) as { expiresAtPerfMs: number }
+    ).expiresAtPerfMs;
+
+    // Prune just before expiry so the entry survives, then step past expiry while
+    // the prune throttle suppresses the next sweep: the journal still *holds* an
+    // entry for the voice, but that entry is no longer evidence of anything.
+    perfMs = expiresAtPerfMs - 500;
+    assert.equal(scheduler.getActiveNoteCount(channel.id), 1);
+    assert.equal(journalOf(scheduler).has(key), true, 'the entry is still inside its retention window');
+
+    perfMs = expiresAtPerfMs + 200;
+    assert.equal(scheduler.getActiveNoteCount(channel.id), 1, 'the live note is still owned');
+    const stale = journalOf(scheduler).get(key) as { expiresAtPerfMs: number } | undefined;
+    assert.notEqual(stale, undefined, 'the throttled sweep has not removed the expired entry yet');
+    assert.ok((stale as { expiresAtPerfMs: number }).expiresAtPerfMs <= perfMs, 'the entry is stale');
+
+    // Transport cleanup drops its active records before releasing, so this also
+    // proves the obligation travels with the release attempt itself. Every send
+    // fails here, including the cleanup's own CC 123.
+    port.failAllSends = true;
+    scheduler.cleanupAll('stop');
+    assert.deepEqual([...port.sounding], ['1:60'], 'the receiver keeps the voice after the failed cleanup');
+    assert.equal(port.delivered.length, 1, 'the failed cleanup delivered nothing');
+    assert.equal(scheduler.getPortUsability(port.id).usable, false, 'the failed cleanup gates the route');
+
+    port.failAllSends = false;
+    const reconnect = scheduler.handlePortReconnected(port.id);
+    perfMs += 5;
+    await reconnect;
+
+    assert.deepEqual(
+      port.deliveredBytes(),
+      [[0x90, 60, 102], [0x80, 60, 0]],
+      'ownership evidence comes from the live records, not the stale journal entry',
+    );
+    assert.equal(port.sounding.size, 0);
+    assert.equal(scheduler.getPortUsability(port.id).usable, true);
+    assert.equal(port.deliveredBytes(bytes => (bytes[0] & 0xf0) === 0xb0).length, 0, 'no CC traffic');
   });
 });

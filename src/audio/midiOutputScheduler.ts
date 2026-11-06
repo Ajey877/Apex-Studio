@@ -114,6 +114,19 @@ interface PitchScheduleOutcome {
 /** Result of journaling a wire voice, used to fail closed before transmission. */
 type RecentMidiVoiceJournalOutcome = 'recorded' | 'ignored' | 'capacity_blocked';
 
+/**
+ * A wire voice this scheduler knows it owns, together with the latest Note On
+ * timestamp that can still be sounding. Tracked separately from the bounded
+ * recent-wire journal because a live note can be held longer than
+ * `RECENT_NOTE_RECOVERY_RETENTION_MS`: the journal entry then expires while the
+ * physical voice is still owned, so a failed release must carry its own evidence.
+ */
+interface KnownMidiWireVoice {
+  midiChannel: number;
+  pitch: number;
+  latestOnPerfMs: number;
+}
+
 interface ActiveMidiOutputNote {
   id: number;
   channelId: string;
@@ -952,7 +965,10 @@ export class MidiOutputScheduler {
    * send that throws therefore cannot re-enter disconnect handling, restart the
    * in-flight recovery generation, or duplicate an obligation.
    */
-  private registerAmbiguousSendFailure(outputDeviceId: string): void {
+  private registerAmbiguousSendFailure(
+    outputDeviceId: string,
+    releaseObligation?: KnownMidiWireVoice,
+  ): void {
     if (!outputDeviceId) return;
     const nowPerfMs = this.getPerformanceNowMs();
     const existing = this.disconnectedPortRecoveries.get(outputDeviceId);
@@ -961,17 +977,89 @@ export class MidiOutputScheduler {
       // route's recovery lifecycle; merge newer evidence only, so a retry of the
       // in-flight cleanup stays valid.
       this.mergeWireStateIntoPendingRecovery(outputDeviceId, existing, nowPerfMs);
+      this.mergeKnownWireVoiceIntoPendingRecovery(existing, releaseObligation);
       this.notifyStateListeners();
       return;
     }
     const recovery = this.emptyPendingPortRecovery(nowPerfMs);
     recovery.generation += 1;
     this.mergeWireStateIntoPendingRecovery(outputDeviceId, recovery, nowPerfMs);
+    this.mergeKnownWireVoiceIntoPendingRecovery(recovery, releaseObligation);
     if (!this.hasPendingRecoveryObligation(recovery, nowPerfMs)) return;
     if (!this.retainDisconnectedPortRecovery(outputDeviceId, recovery)) return;
     this.clearRecentMidiVoiceRecoveryCandidates(outputDeviceId);
     this.discardLocalOutputOwnership(outputDeviceId);
     this.notifyStateListeners();
+  }
+
+  /**
+   * The wire voice a release attempt is responsible for, derived from the owning
+   * records the caller still has in hand. Records are consulted directly rather
+   * than through the bounded recent-wire journal, so an active live note held
+   * longer than the journal retention is still recognized as owned.
+   */
+  private knownWireVoiceForRelease(
+    outputDeviceId: string,
+    midiChannel: number,
+    pitch: number,
+    candidates: readonly ActiveMidiOutputNote[] = [...this.activeNotes.values()],
+  ): KnownMidiWireVoice | undefined {
+    let latestOnPerfMs = Number.NEGATIVE_INFINITY;
+    for (const note of candidates) {
+      if (note.outputDeviceId !== outputDeviceId) continue;
+      if (note.midiChannel !== midiChannel || note.pitch !== pitch) continue;
+      if (!note.emitNoteOn || note.segmentClosedOnWire) continue;
+      latestOnPerfMs = Math.max(latestOnPerfMs, note.onPerfMs);
+    }
+    return Number.isFinite(latestOnPerfMs)
+      ? { midiChannel, pitch, latestOnPerfMs }
+      : undefined;
+  }
+
+  /**
+   * Sends the physical Note Off for a voice whose owning records the caller has
+   * already removed (or is about to remove), carrying the known voice obligation
+   * into any send-failure recovery. Without this, a failed release could leave a
+   * still-owned voice with no tracked evidence once the bounded journal expires.
+   */
+  private sendVoiceRelease(
+    port: MidiOutputPortLike,
+    outputDeviceId: string,
+    midiChannel: number,
+    pitch: number,
+    candidates: readonly ActiveMidiOutputNote[],
+    timestampMs?: number,
+  ): boolean {
+    return this.trySend(
+      port,
+      [0x80 | (midiChannel - 1), pitch, 0],
+      timestampMs,
+      this.knownWireVoiceForRelease(outputDeviceId, midiChannel, pitch, candidates),
+    );
+  }
+
+  /**
+   * Carries an explicitly known wire voice into a pending-recovery record. The
+   * caller owns this voice even if the bounded recent-wire journal no longer has
+   * an entry for it (a live note held past the journal retention), so the release
+   * must be remembered regardless of journal state.
+   */
+  private mergeKnownWireVoiceIntoPendingRecovery(
+    recovery: DisconnectedMidiPortRecovery,
+    obligation: KnownMidiWireVoice | undefined,
+  ): void {
+    if (!obligation) return;
+    const key = `${obligation.midiChannel}:${obligation.pitch}`;
+    const existing = recovery.noteOffs.get(key);
+    recovery.noteOffs.set(key, {
+      midiChannel: obligation.midiChannel,
+      pitch: obligation.pitch,
+      latestOnPerfMs: Math.max(existing?.latestOnPerfMs ?? Number.NEGATIVE_INFINITY, obligation.latestOnPerfMs),
+    });
+    recovery.latestQueuedEventPerfMs = Math.max(
+      recovery.latestQueuedEventPerfMs,
+      obligation.latestOnPerfMs,
+    );
   }
 
   /**
@@ -2396,7 +2484,7 @@ export class MidiOutputScheduler {
         if (portConnected && port) {
           if (cleared) {
             if (wasSoundingAtNow) {
-              this.trySend(port, [0x80 | (midiChannel - 1), voicePitch, 0]);
+              this.sendVoiceRelease(port, outputDeviceId, midiChannel, voicePitch, allVoiceNotes);
             }
           } else {
             this.applyClearlessVoiceCleanup(
@@ -2463,7 +2551,7 @@ export class MidiOutputScheduler {
         this.reconcileVoiceContributors(surviving, nowPerfMs, this.currentTransportStep, null);
         if (portConnected && port) {
           if (wasSoundingAtNow && !shouldKeepSoundingAtNow) {
-            this.trySend(port, [0x80 | (midiChannel - 1), voicePitch, 0]);
+            this.sendVoiceRelease(port, outputDeviceId, midiChannel, voicePitch, allVoiceNotes);
           }
           if (cleared) {
             this.requeueActivePortEvents(port, outputDeviceId, nowPerfMs);
@@ -2522,6 +2610,16 @@ export class MidiOutputScheduler {
     nowPerfMs: number,
   ): void {
     const removedIds = new Set(snap.removedNotes.map(r => r.id));
+    // The owning records are already removed (or are about to be reconciled away),
+    // so capture the exact wire voice this cleanup may have to release *before*
+    // any mutation. A live note held past the journal retention keeps its
+    // obligation through this snapshot instead of the bounded journal.
+    const releaseObligation = this.knownWireVoiceForRelease(
+      port.id,
+      snap.midiChannel,
+      snap.pitch,
+      [...snap.removedNotes, ...snap.survivingNotes],
+    );
 
     // If a removed future attack had unison-shadowed a surviving contributor at the
     // exact same `onPerfMs`, transfer that unavoidable physical Note On to the survivor.
@@ -2574,7 +2672,7 @@ export class MidiOutputScheduler {
             }
           }
         } else if (!hasQueuedFutureOff || snap.survivingNotes.length === 0) {
-          this.trySend(port, [0x80 | (snap.midiChannel - 1), snap.pitch, 0]);
+          this.trySend(port, [0x80 | (snap.midiChannel - 1), snap.pitch, 0], undefined, releaseObligation);
         }
         continue;
       }
@@ -2592,6 +2690,7 @@ export class MidiOutputScheduler {
           port,
           [0x80 | (snap.midiChannel - 1), snap.pitch, 0],
           safetyOffMs,
+          releaseObligation,
         );
       }
     }
@@ -2881,14 +2980,20 @@ export class MidiOutputScheduler {
 
       if (wasCleared) {
         if (snap.wasSoundingAtNow && !snap.shouldKeepSoundingAtNow) {
-          this.trySend(port, [0x80 | (snap.midiChannel - 1), snap.pitch, 0]);
+          this.sendVoiceRelease(port, snap.outputDeviceId, snap.midiChannel, snap.pitch, [
+            ...snap.removedNotes,
+            ...snap.survivingNotes,
+          ]);
         }
         continue;
       }
 
       if (!requiredClear) {
         if (snap.wasSoundingAtNow && !snap.shouldKeepSoundingAtNow) {
-          this.trySend(port, [0x80 | (snap.midiChannel - 1), snap.pitch, 0]);
+          this.sendVoiceRelease(port, snap.outputDeviceId, snap.midiChannel, snap.pitch, [
+            ...snap.removedNotes,
+            ...snap.survivingNotes,
+          ]);
         }
         for (const s of snap.survivingNotes) {
           const prevOff = snap.prevQueuedOffById.get(s.id) ?? null;
@@ -3137,6 +3242,17 @@ export class MidiOutputScheduler {
     }
 
     const notesToClean = [...this.activeNotes.values()];
+    // Ownership is dropped below before any release is attempted, so the exact
+    // known voices are captured here and carried into each send.
+    const releaseObligations = new Map<string, KnownMidiWireVoice | undefined>();
+    for (const note of notesToClean) {
+      const key = `${note.outputDeviceId}:${note.midiChannel}:${note.pitch}`;
+      if (releaseObligations.has(key)) continue;
+      releaseObligations.set(
+        key,
+        this.knownWireVoiceForRelease(note.outputDeviceId, note.midiChannel, note.pitch, notesToClean),
+      );
+    }
     this.activeNotes.clear();
 
     const affectedPortIds = new Set<string>();
@@ -3192,7 +3308,12 @@ export class MidiOutputScheduler {
       if (note.onPerfMs <= nowPerfMs) {
         if (!sentImmediatePitches.has(pitchKey)) {
           sentImmediatePitches.add(pitchKey);
-          this.trySend(port, [0x80 | (note.midiChannel - 1), note.pitch, 0]);
+          this.trySend(
+            port,
+            [0x80 | (note.midiChannel - 1), note.pitch, 0],
+            undefined,
+            releaseObligations.get(pitchKey),
+          );
         }
       } else if (note.queuedOffPerfMs === null || note.queuedOffPerfMs <= note.onPerfMs + 1e-6) {
         const nextSameVoice = wireNotesToClean
@@ -3208,7 +3329,12 @@ export class MidiOutputScheduler {
           nextSameVoice !== undefined && nextSameVoice.onPerfMs < defaultSafetyOffMs
             ? (note.onPerfMs + nextSameVoice.onPerfMs) * 0.5
             : defaultSafetyOffMs;
-        this.trySend(port, [0x80 | (note.midiChannel - 1), note.pitch, 0], safetyOffMs);
+        this.trySend(
+          port,
+          [0x80 | (note.midiChannel - 1), note.pitch, 0],
+          safetyOffMs,
+          releaseObligations.get(pitchKey),
+        );
       }
     }
 
@@ -3252,12 +3378,22 @@ export class MidiOutputScheduler {
     return usability.usable ? port : null;
   }
 
-  private trySend(port: MidiOutputPortLike, data: number[], timestampMs?: number): boolean {
+  private trySend(
+    port: MidiOutputPortLike,
+    data: number[],
+    timestampMs?: number,
+    releaseObligation?: KnownMidiWireVoice,
+  ): boolean {
     if (!port || typeof port.send !== 'function') return false;
     // Fail closed: a Note On whose recovery obligation cannot be journaled must
     // never reach the wire. Sending it anyway would leave a voice the scheduler
     // cannot release after a disconnect — a silent stuck note on real hardware.
     if (!this.reserveNoteOnRecoveryBeforeSend(port, data, timestampMs)) return false;
+    // Capture the voice this release is responsible for *before* the send. The
+    // bounded recent-wire journal may already have expired a long-held live note,
+    // and callers may have removed their active records ahead of this send, so
+    // ownership evidence has to come from the call site or the live records.
+    const ownedRelease = this.resolveWireReleaseObligation(port, data, releaseObligation);
     try {
       if (timestampMs !== undefined && Number.isFinite(timestampMs)) {
         port.send(data, timestampMs);
@@ -3281,14 +3417,38 @@ export class MidiOutputScheduler {
         // recurse into another disconnect lifecycle.
         if (
           (port.state ?? 'connected') === 'connected' &&
-          this.hasUnprovenWireObligation(port, data)
+          (ownedRelease !== undefined || this.hasUnprovenWireObligation(port, data))
         ) {
-          this.registerAmbiguousSendFailure(id);
+          this.registerAmbiguousSendFailure(id, ownedRelease);
         }
       }
       this.notifyStateListeners();
       return false;
     }
+  }
+
+  /**
+   * The wire voice a failed release attempt must still be able to release. An
+   * explicit call-site obligation wins; otherwise a Note Off is matched against
+   * the live ownership records that are still present at send time.
+   */
+  private resolveWireReleaseObligation(
+    port: MidiOutputPortLike,
+    data: number[],
+    explicit?: KnownMidiWireVoice,
+  ): KnownMidiWireVoice | undefined {
+    if (explicit) return explicit;
+    const status = data[0];
+    const pitch = data[1];
+    if (!Number.isInteger(status) || !Number.isInteger(pitch)) return undefined;
+    const command = status & 0xf0;
+    const isRelease = command === 0x80 || (command === 0x90 && (data[2] ?? 0) === 0);
+    if (!isRelease) return undefined;
+    // Ownership is taken from the live records rather than the bounded journal:
+    // a journal entry can be expired-but-unpruned (the sweep is throttled) or
+    // simply gone for a long-held voice, and neither is evidence that the
+    // scheduler stopped owning the voice.
+    return this.knownWireVoiceForRelease(port.id, (status & 0x0f) + 1, pitch);
   }
 
   private pruneCompletedState(nowPerfMs: number, contextCurrentTimeSeconds?: number): void {
