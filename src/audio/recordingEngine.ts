@@ -1,4 +1,4 @@
-import { persistAudioClip, deletePersistedAudioClip } from './audioPersistence';
+import { persistAudioClip, deletePersistedAudioClip as deletePersistedAudioClipFromStore } from './audioPersistence';
 import { installAudioPlaybackLifecycle } from './audioPlaybackLifecycle';
 import { sessionBlobUrlRegistry } from '../state/sessionBlobUrlRegistry';
 import {
@@ -70,6 +70,7 @@ export interface RecordingEngineOptions {
   waveformSamples?: number;
   onError?: (error: Error) => void;
   persistAudioClip?: (id: string, blob: Blob) => Promise<void>;
+  deletePersistedAudioClip?: (id: string) => Promise<void>;
   deviceManager?: AudioDeviceManager;
   inputDeviceId?: string;
   /** Dependency seams used by deterministic tests; production defaults use browser APIs. */
@@ -146,6 +147,8 @@ export class RecordingEngine {
   private primedDeferred: Deferred<void> | null = null;
   private armDeferred: Deferred<void> | null = null;
   private finalizationPromise: Promise<RecordingResult> | null = null;
+  /** The async assembly/persistence work continues after a caller cancels stop; track it so cancel/dispose can await orphan cleanup. */
+  private finalizationWork: Promise<void> | null = null;
   private finalizationResolve: ((result: RecordingResult) => void) | null = null;
   private finalizationReject: ((error: unknown) => void) | null = null;
   private preRollBlocks: RecordingPcmBlock[] = [];
@@ -160,6 +163,7 @@ export class RecordingEngine {
   private readonly waveformSamples: number;
   private readonly onError?: (error: Error) => void;
   private readonly persistAudioClip: (id: string, blob: Blob) => Promise<void>;
+  private readonly deletePersistedAudioClip: (id: string) => Promise<void>;
   private readonly getUserMediaOverride?: RecordingEngineOptions['getUserMedia'];
   private readonly createInputSourceOverride?: RecordingEngineOptions['createInputSource'];
   private readonly createCaptureNodeOverride?: RecordingEngineOptions['createCaptureNode'];
@@ -171,6 +175,7 @@ export class RecordingEngine {
     this.waveformSamples = Math.max(32, Math.min(2048, Math.floor(options.waveformSamples ?? 512)));
     this.onError = options.onError;
     this.persistAudioClip = options.persistAudioClip ?? persistAudioClip;
+    this.deletePersistedAudioClip = options.deletePersistedAudioClip ?? deletePersistedAudioClipFromStore;
     this.deviceManager = options.deviceManager ?? audioDeviceManager;
     this.explicitInputDeviceId = options.inputDeviceId;
     this.getUserMediaOverride = options.getUserMedia;
@@ -497,6 +502,7 @@ export class RecordingEngine {
     this.cancelledGeneration = generation;
     const error = new RecordingCancelledError();
     const pendingFinalization = this.finalizationPromise;
+    const pendingFinalizationWork = this.finalizationWork;
     const pendingPreparation = this.preparationAbort;
     try { this.captureNode?.port.postMessage({ type: 'cancel', sessionId: generation }); } catch (_) { /* best effort */ }
     pendingPreparation?.reject(error);
@@ -508,7 +514,15 @@ export class RecordingEngine {
       this.armDeferred.reject(error);
       this.armDeferred = null;
     }
-    if (pendingFinalization) return pendingFinalization.then(() => undefined, reason => { throw reason; });
+    if (pendingFinalization) {
+      const settled = pendingFinalization.then(() => undefined, () => undefined);
+      return settled.then(async () => {
+        // The public stop promise is rejected immediately, but cancellation is
+        // not complete until in-flight persistence has deleted any late asset.
+        await pendingFinalizationWork?.catch(() => undefined);
+        throw error;
+      });
+    }
     return Promise.reject(error);
   }
 
@@ -519,6 +533,7 @@ export class RecordingEngine {
       this.releaseCaptureResources();
     }
     await this.finalizationPromise?.then(() => undefined, () => undefined);
+    await this.finalizationWork?.catch(() => undefined);
   }
 
   private handleCaptureMessage(message: unknown, generation: number): void {
@@ -551,7 +566,12 @@ export class RecordingEngine {
       }
       const channels = Number(value.channelCount);
       if (Number.isSafeInteger(channels) && channels > 0) this.inputChannelCount = channels;
-      void this.finishCapture(generation);
+      const work = this.finishCapture(generation);
+      this.finalizationWork = work;
+      void work.then(
+        () => { if (this.finalizationWork === work) this.finalizationWork = null; },
+        () => { if (this.finalizationWork === work) this.finalizationWork = null; },
+      );
       return;
     }
     if (value.type === 'failure') {
@@ -642,8 +662,7 @@ export class RecordingEngine {
       await this.persistAudioClip(persistedId, blob);
       assetPersisted = true;
       if (this.isGenerationCancelled(generation)) {
-        await deletePersistedAudioClip(persistedId).catch(() => undefined);
-        assetPersisted = false;
+        // Let the catch path remove a committed asset before cancellation settles.
         throw new RecordingCancelledError();
       }
       const url = URL.createObjectURL(blob);
@@ -664,7 +683,7 @@ export class RecordingEngine {
       };
       if (generation !== this.generation) {
         sessionBlobUrlRegistry.release(url);
-        await deletePersistedAudioClip(persistedId).catch(() => undefined);
+        await this.deletePersistedAudioClip(persistedId).catch(() => undefined);
         assetPersisted = false;
         return;
       }
@@ -673,7 +692,8 @@ export class RecordingEngine {
       this.settleFinalizationSuccess(result);
     } catch (error) {
       if (assetPersisted || this.isGenerationCancelled(generation)) {
-        await deletePersistedAudioClip(persistedId).catch(() => undefined);
+        await this.deletePersistedAudioClip(persistedId).catch(() => undefined);
+        assetPersisted = false;
       }
       if (generation === this.generation) {
         this.releaseCaptureResources();

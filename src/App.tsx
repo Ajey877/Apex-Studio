@@ -73,7 +73,7 @@ import {
   runApplicationMenuCommand,
   type ApplicationMenuCommandDeps
 } from './state/applicationMenuCommands';
-import { isRecordingProjectGenerationCurrent, nextRecordingProjectGeneration } from './state/recordingProjectLifecycle';
+import { commitRecordingForCurrentProject, isRecordingProjectGenerationCurrent, nextRecordingProjectGeneration } from './state/recordingProjectLifecycle';
 import { isPureAdditivePlaylistClipAppend, resolveAdditivePlaylistClipPublication } from './state/playlistAudioPublication';
 import {
   describeRejectedPlaylistAudioClips,
@@ -2088,15 +2088,21 @@ export function App() {
       playlistClips: updatedClips,
       meta: { ...currentState.meta, updated: Date.now() }
     };
-    if (!isRecordingProjectGenerationCurrent(recordingProjectGeneration, recordingProjectGenerationRef.current)) {
+    const published = commitRecordingForCurrentProject(
+      recordingProjectGeneration,
+      recordingProjectGenerationRef.current,
+      () => {
+        updatePlaylistProjectState(nextState);
+        commitPlaylistHistory(nextState, 'Record audio to playlist');
+        // The modal's temporary recording ownership is transferred to the project
+        // only after the project state has successfully accepted the take.
+        sessionBlobUrlRegistry.transfer(recording.audioUrl ?? '');
+      },
+    );
+    if (!published) {
       sessionBlobUrlRegistry.release(recording.audioUrl ?? '');
       throw new Error('The recording belongs to a project that has already been replaced');
     }
-    updatePlaylistProjectState(nextState);
-    commitPlaylistHistory(nextState, 'Record audio to playlist');
-    // The modal's temporary recording ownership is transferred to the project
-    // only after the project state has successfully accepted the take.
-    sessionBlobUrlRegistry.transfer(recording.audioUrl ?? '');
   };
 
   // --- Computer Keypad & Keyboard Live Engine ---

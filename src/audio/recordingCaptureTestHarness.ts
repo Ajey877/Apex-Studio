@@ -239,6 +239,7 @@ export const createRecordingTestRig = (options: {
   sampleRate?: number;
   stream?: DeterministicMediaStream;
   persistAudioClip?: (id: string, blob: Blob) => Promise<void>;
+  deletePersistedAudioClip?: (id: string) => Promise<void>;
   onError?: (error: Error) => void;
   deviceManager?: RecordingEngineOptions['deviceManager'];
   getUserMedia?: RecordingEngineOptions['getUserMedia'];
@@ -247,6 +248,7 @@ export const createRecordingTestRig = (options: {
   const stream = options.stream ?? new DeterministicMediaStream();
   const engineOptions: RecordingEngineOptions = {
     persistAudioClip: options.persistAudioClip ?? (async () => undefined),
+    deletePersistedAudioClip: options.deletePersistedAudioClip,
     onError: options.onError,
     deviceManager: options.deviceManager,
     getUserMedia: options.getUserMedia ?? (async () => stream as unknown as MediaStream),
