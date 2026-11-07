@@ -53,12 +53,20 @@ export interface PunchWindowResult {
 }
 
 interface ActiveWindow {
-  captureTime: number;
+  /** Immutable planned punch-in boundary; independent of callback delivery. */
+  readonly captureTime: number;
+  /** Audio-clock start of the currently active tempo segment. */
   startTime: number;
+  /** Remaining musical beats at `startTime`. */
   durationBeats: MusicalBeats;
+  /** Original musical length, kept immutable so repeated retimes don't subtract from rounded remainders. */
+  readonly totalDurationBeats: MusicalBeats;
+  /** Musical beats consumed before the current tempo segment. */
+  elapsedBeats: number;
   bpm: number;
   stopTime: number;
   timer: unknown;
+  timerGeneration: number;
   resolve: (result: PunchWindowResult) => void;
   reject: (error: Error) => void;
   settled: boolean;
@@ -73,12 +81,17 @@ export class PunchCaptureWindow {
     return this.active !== null;
   }
 
+  /** Immutable planned punch-in AudioContext time for the armed take, or null. */
+  get captureTime(): number | null {
+    return this.active ? this.active.captureTime : null;
+  }
+
   /** Audio-clock moment the armed take must stop at, or null. */
   get stopTime(): number | null {
     return this.active ? this.active.stopTime : null;
   }
 
-  /** Musical length of the armed take in quarter beats, or null. */
+  /** Remaining musical length in quarter beats at the latest tempo anchor, or null. */
   get durationBeats(): MusicalBeats | null {
     return this.active ? this.active.durationBeats : null;
   }
@@ -110,11 +123,16 @@ export class PunchCaptureWindow {
 
     const active: ActiveWindow = {
       captureTime,
-      startTime: now,
+      // Musical time begins at the planned punch-in frame, not at this
+      // asynchronous JS callback's delivery time.
+      startTime: captureTime,
       durationBeats: windowBeats,
+      totalDurationBeats: windowBeats,
+      elapsedBeats: 0,
       bpm,
       stopTime: captureTime + beatsToSeconds(windowBeats, bpm),
       timer: null,
+      timerGeneration: 0,
       resolve,
       reject,
       settled: false,
@@ -125,22 +143,31 @@ export class PunchCaptureWindow {
   }
 
   /**
-   * Tempo change during the take: the musical length of the punch window is
-   * preserved, so the remaining beats are re-measured at the new tempo from
-   * now. The punch-in moment never moves — audio already captured stays where
-   * it was recorded.
+   * Tempo change during the take: integrate the elapsed beats from the current
+   * tempo segment, whose first anchor is the planned capture frame, then
+   * recompute the remainder from the immutable original musical length. This
+   * keeps repeated tempo changes from accumulating remainder-subtraction drift.
+   * The punch-in frame and already captured audio never move.
    */
   retime(bpm: number): void {
     const active = this.active;
     if (!active || active.settled) return;
     const nextBpm = Number.isFinite(bpm) && bpm > 0 ? bpm : active.bpm;
-    const now = this.host.now();
-    const elapsedBeats = Math.max(0, (now - active.startTime) * active.bpm / 60);
-    const remainingBeats = Math.max(0, active.durationBeats - elapsedBeats);
+    // A pre-capture retime changes the tempo in force at the planned boundary;
+    // it must not move that boundary to the earlier callback time.
+    const now = Math.max(active.captureTime, active.startTime, this.host.now());
+    const segmentElapsedBeats = Math.max(0, (now - active.startTime) * active.bpm / 60);
+    const elapsedBeats = Math.min(active.totalDurationBeats, active.elapsedBeats + segmentElapsedBeats);
+    const remainingBeats = Math.max(0, active.totalDurationBeats - elapsedBeats);
+    active.elapsedBeats = elapsedBeats;
     active.bpm = nextBpm;
     active.startTime = now;
     active.durationBeats = remainingBeats;
-    active.stopTime = now + beatsToSeconds(remainingBeats, nextBpm);
+    // Once the musical window is already complete, retain its original stop
+    // boundary; a late tempo edit cannot extend audio past punch-out.
+    if (remainingBeats > 0) {
+      active.stopTime = now + beatsToSeconds(remainingBeats, nextBpm);
+    }
     this.armTimer(active);
   }
 
@@ -162,10 +189,19 @@ export class PunchCaptureWindow {
     this.clearTimer(active);
     const now = this.host.now();
     const delayMs = Math.max(0, (active.stopTime - now) * 1000);
+    const timerGeneration = ++active.timerGeneration;
     active.timer = this.host.setTimer(() => {
-      if (this.active !== active || active.settled) return;
-      active.settled = true;
+      if (this.active !== active || active.settled || active.timerGeneration !== timerGeneration) return;
       active.timer = null;
+      // Timer delivery may lag the audio clock (or run while an AudioContext is
+      // suspended). Only resolve after the audio clock has reached the planned
+      // punch-out boundary; otherwise re-arm against the remaining audio time.
+      const remainingSeconds = active.stopTime - this.host.now();
+      if (remainingSeconds > 1e-9) {
+        this.armTimer(active);
+        return;
+      }
+      active.settled = true;
       if (this.active === active) this.active = null;
       active.resolve({
         stopTime: active.stopTime,
@@ -179,5 +215,6 @@ export class PunchCaptureWindow {
     if (active.timer === null) return;
     this.host.clearTimer(active.timer);
     active.timer = null;
+    active.timerGeneration++;
   }
 }

@@ -54,6 +54,14 @@ if (/allowRunningInsecureContent:\s*true/.test(electronConfig)) {
   throw new Error('Electron security regression: insecure content must never be enabled.');
 }
 
+// The production microphone-capture AudioWorklet is loaded through a Blob URL.
+// Check the normal packaged script-src directive directly: a smoke-only Blob
+// exception does not allow recording in an ordinary packaged session.
+const packagedScriptSrcLine = electronConfig.split(/\r?\n/).find(line => line.includes("script-src 'self'"));
+if (!packagedScriptSrcLine || !/script-src\s+['"]self['"]\s+blob:/.test(packagedScriptSrcLine) || /APEX_SMOKE_TEST/.test(packagedScriptSrcLine)) {
+  throw new Error('Electron CSP regression: normal packaged script-src must allow blob: for the production microphone-capture AudioWorklet.');
+}
+
 const validIpcSendChannels = preload.match(/const validChannels = \[(.*?)\]/s)?.[1] ?? '';
 if (!validIpcSendChannels.includes("'toMain'") || !validIpcSendChannels.includes("'audio-stream'") || !validIpcSendChannels.includes("'midi-event'")) {
   throw new Error('Preload IPC allowlist is missing an expected channel.');

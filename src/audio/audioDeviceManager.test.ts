@@ -16,6 +16,7 @@ import {
   buildMicrophoneAudioTrackConstraints,
 } from './audioDeviceManager';
 import { RecordingEngine } from './recordingEngine';
+import { DeterministicAudioContext } from './recordingCaptureTestHarness';
 import { audioEngine } from './audioEngine';
 import {
   AUDIO_PREFERENCES_STORAGE_KEY,
@@ -431,16 +432,34 @@ test('selected input device wires exact deviceId constraints into BOTH Recording
   const prevEngineCtx = (audioEngine as unknown as { ctx: AudioContext | null }).ctx;
   try {
     const fakeCtx = new FakeSinkAudioContext() as unknown as AudioContext;
+    const captureContext = new DeterministicAudioContext(1000);
     const recorderErrors: Error[] = [];
 
-    // Entry point A: RecordingEngine.start()
-    const recorder = new RecordingEngine(() => fakeCtx, {
+    // Entry point A: RecordingEngine prepares the production AudioWorklet path,
+    // then starts at the current audio-clock frame after one PCM packet primes.
+    const recorder = new RecordingEngine(() => captureContext as unknown as AudioContext, {
       deviceManager: manager,
       persistAudioClip: async () => {},
       onError: err => recorderErrors.push(err),
+      getUserMedia: async constraints => {
+        capturedConstraints.push(constraints);
+        if (rejectOverconstrained) {
+          const err = new Error('Overconstrained');
+          err.name = 'OverconstrainedError';
+          throw err;
+        }
+        activeStream = new FakeMediaStream(1);
+        return activeStream as unknown as MediaStream;
+      },
+      createInputSource: () => captureContext.createMediaStreamSource(),
+      createCaptureNode: (_context, _processorName, options) => captureContext.makeCaptureNode(options),
     });
 
-    await recorder.start();
+    const preparing = recorder.prepare();
+    await captureContext.captureNodeReady;
+    captureContext.advanceToFrame(2048);
+    await preparing;
+    await recorder.start(captureContext.currentTime);
     assert.equal(recorder.getState(), 'recording');
     assert.deepEqual((capturedConstraints[0].audio as MediaTrackConstraints).deviceId, {
       exact: 'usb-mic-77',

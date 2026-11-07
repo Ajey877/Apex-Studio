@@ -1,319 +1,436 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { RecordingEngine } from './recordingEngine';
+import { RecordingCancelledError, RecordingEngine, hasActiveRecordingEngineSession } from './recordingEngine';
+import { CountInScheduler, type CountInHost } from './countInScheduler';
+import { resolveMeterPulseLayout } from '../music/meterPulse';
 import { sessionBlobUrlRegistry } from '../state/sessionBlobUrlRegistry';
-import { isRecordingProjectGenerationCurrent, nextRecordingProjectGeneration } from '../state/recordingProjectLifecycle';
+import {
+  createRecordingTestRig,
+  decodeFloatWav,
+  type DeterministicCaptureNode,
+  type RecordingTestRig,
+} from './recordingCaptureTestHarness';
 
-class FakeTrack {
-  stopped = false;
-  stop(): void { this.stopped = true; }
-}
+let nextUrl = 0;
 
-class FakeStream {
-  readonly track = new FakeTrack();
-  getTracks(): FakeTrack[] { return [this.track]; }
-}
-
-class FakeSource {
-  disconnected = false;
-  connect(): void {}
-  disconnect(): void { this.disconnected = true; }
-}
-
-class FakeAnalyser {
-  fftSize = 1024;
-  smoothingTimeConstant = 0;
-  disconnected = false;
-  connect(): void {}
-  disconnect(): void { this.disconnected = true; }
-  getByteTimeDomainData(data: Uint8Array): void { data.fill(128); }
-}
-
-class FakeAudioContext {
-  state = 'running';
-  readonly decoded = {
-    numberOfChannels: 1,
-    length: 4,
-    duration: 0.1,
-    sampleRate: 44100,
-    getChannelData: () => new Float32Array([0, 0.5, -0.25, 0.1]),
-    copyFromChannel: () => {},
-    copyToChannel: () => {},
-  } as unknown as AudioBuffer;
-  async resume(): Promise<void> {}
-  createMediaStreamSource(): FakeSource { return new FakeSource(); }
-  createAnalyser(): FakeAnalyser { return new FakeAnalyser(); }
-  async decodeAudioData(): Promise<AudioBuffer> { return this.decoded; }
-}
-
-class FakeMediaRecorder {
-  static isTypeSupported(): boolean { return true; }
-  state: 'inactive' | 'recording' = 'inactive';
-  mimeType = 'audio/webm';
-  ondataavailable: ((event: { data: Blob }) => void) | null = null;
-  onstop: (() => void | Promise<void>) | null = null;
-  onerror: (() => void) | null = null;
-
-  constructor(readonly stream: FakeStream) {}
-  start(): void { this.state = 'recording'; }
-  pause(): void { this.state = 'recording'; }
-  resume(): void { this.state = 'recording'; }
-  stop(): void {
-    this.state = 'inactive';
-    queueMicrotask(() => {
-      this.ondataavailable?.({ data: new Blob(['recorded'], { type: 'audio/webm' }) });
-        this.ondataavailable?.({ data: new Blob(['-tail'], { type: 'audio/webm' }) });
-      void this.onstop?.();
-    });
+const withObjectUrlMock = async <T>(run: () => Promise<T>): Promise<T> => {
+  const originalCreate = URL.createObjectURL;
+  const originalRevoke = URL.revokeObjectURL;
+  URL.createObjectURL = () => `blob:recording-engine-test-${++nextUrl}`;
+  URL.revokeObjectURL = () => undefined;
+  try {
+    return await run();
+  } finally {
+    URL.createObjectURL = originalCreate;
+    URL.revokeObjectURL = originalRevoke;
   }
-  fail(): void { this.onerror?.(); }
-}
-
-const installBrowserMocks = () => {
-  const stream = new FakeStream();
-  const recorderInstances: FakeMediaRecorder[] = [];
-  const OriginalMediaRecorder = globalThis.MediaRecorder;
-  const OriginalNavigator = globalThis.navigator;
-  const OriginalCreateObjectURL = URL.createObjectURL;
-  const OriginalRevokeObjectURL = URL.revokeObjectURL;
-  const revokedUrls: string[] = [];
-
-  Object.defineProperty(globalThis, 'navigator', {
-    configurable: true,
-    value: { mediaDevices: { getUserMedia: async () => stream } },
-  });
-  Object.defineProperty(globalThis, 'MediaRecorder', {
-    configurable: true,
-    value: class extends FakeMediaRecorder {
-      constructor(input: FakeStream) {
-        super(input);
-        recorderInstances.push(this);
-      }
-    },
-  });
-  URL.createObjectURL = () => 'blob:recording-test';
-  URL.revokeObjectURL = (url: string) => { revokedUrls.push(url); };
-
-  return {
-    stream,
-    recorderInstances,
-    revokedUrls,
-    restore: () => {
-      Object.defineProperty(globalThis, 'navigator', { configurable: true, value: OriginalNavigator });
-      Object.defineProperty(globalThis, 'MediaRecorder', { configurable: true, value: OriginalMediaRecorder });
-      URL.createObjectURL = OriginalCreateObjectURL;
-      URL.revokeObjectURL = OriginalRevokeObjectURL;
-      },
-  };
 };
 
-const createContext = (): AudioContext => new FakeAudioContext() as unknown as AudioContext;
+const prepareRig = async (rig: RecordingTestRig): Promise<{ engine: RecordingEngine; node: DeterministicCaptureNode }> => {
+  const engine = new RecordingEngine(() => rig.context as unknown as AudioContext, rig.engineOptions);
+  const preparing = engine.prepare();
+  const node = await rig.context.captureNodeReady;
+  // Prime the same 2048-frame production packet used to verify the worklet and
+  // exercise the actual prepare -> sample-stamped pre-roll state transition.
+  rig.context.advanceToFrame(2048);
+  await preparing;
+  return { engine, node };
+};
 
-test('recording stop registers the temporary Blob URL for explicit ownership', async () => {
-  const mocks = installBrowserMocks();
-  try {
-    const engine = new RecordingEngine(createContext, { waveformSamples: 32, persistAudioClip: async () => {} });
-    const result = await engine.start().then(() => engine.stop());
+const deferred = <T>() => {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>(res => { resolve = res; });
+  return { promise, resolve };
+};
 
-    assert.equal(result.url, 'blob:recording-test');
-    assert.equal(sessionBlobUrlRegistry.getOwnerCount(result.url), 1);
+test('late count-in callback selects the exact impulse frame and emits only the planned WAV window', async () => {
+  await withObjectUrlMock(async () => {
+    const rig = createRecordingTestRig();
+    const { engine, node } = await prepareRig(rig);
+    const hostTimers: Array<{ fn: () => void; cleared: boolean }> = [];
+    const host: CountInHost = {
+      now: () => rig.context.currentTime,
+      scheduleClick: () => ({ stop() {}, disconnect() {} }),
+      setTimer: fn => {
+        const entry = { fn, cleared: false };
+        hostTimers.push(entry);
+        return entry;
+      },
+      clearTimer: handle => {
+        const entry = hostTimers.find(candidate => candidate === handle);
+        if (entry) entry.cleared = true;
+      },
+    };
+    const countIn = new CountInScheduler(host).start({
+      bars: 1,
+      layout: resolveMeterPulseLayout([4, 4]),
+      bpm: 120,
+      startBeat: 0,
+    });
+    const plannedStartFrame = Math.round((rig.context.currentTime + 0.03 + 2) * rig.context.sampleRate);
+    const plannedStopFrame = plannedStartFrame + 500;
+    const impulses = new Map<number, number>([
+      [plannedStartFrame - 1, 0.25], // must not leak into sample zero
+      [plannedStartFrame, 0.75],
+      [plannedStartFrame + 31, -0.5],
+      [plannedStopFrame - 1, 0.9],
+      [plannedStopFrame, 0.33], // half-open stop boundary: must be excluded
+    ]);
 
-    sessionBlobUrlRegistry.release(result.url);
-    assert.deepEqual(mocks.revokedUrls, ['blob:recording-test']);
-  } finally {
-    mocks.restore();
-  }
-});
+    // Deliberately let the main-thread completion callback arrive more than a
+    // second late. The capture worklet has already timestamped all input frames.
+    rig.context.advanceToFrame(6144, frame => impulses.get(frame) ?? 0);
+    const lateTimer = hostTimers.find(timer => !timer.cleared);
+    assert.ok(lateTimer, 'count-in completion timer should be pending');
+    lateTimer.fn();
+    const result = await countIn;
+    assert.equal(Math.round(result.captureTime * rig.context.sampleRate), plannedStartFrame);
+    assert.ok(rig.context.currentTime - result.captureTime > 1, 'the synthetic JS delivery is measurably late');
 
-test('recording stop decodes the Blob for waveform generation and releases capture resources', async () => {
-  const mocks = installBrowserMocks();
-  try {
-    const engine = new RecordingEngine(createContext, { waveformSamples: 32, persistAudioClip: async () => {} });
-    await engine.start();
-    const result = await engine.stop();
-
-    assert.equal(result.blob.size > 0, true);
-    assert.equal(result.mimeType, 'audio/webm');
-    assert.equal(result.waveform.length, 32);
-    assert.ok(result.waveform.some(value => value > 0));
+    await engine.start(result.captureTime);
+    const take = await engine.stop(plannedStopFrame / rig.context.sampleRate);
+    const wav = await decodeFloatWav(take.blob);
+    assert.equal(take.captureStartFrame, plannedStartFrame);
+    assert.equal(take.captureEndFrame, plannedStopFrame);
+    assert.equal(take.sampleRate, rig.context.sampleRate);
+    assert.equal(take.capturedFrames, 500);
+    assert.equal(take.durationSeconds, 0.5);
+    assert.equal(wav.channelCount, 1);
+    assert.equal(wav.frameCount, 500);
+    assert.equal(wav.samples[0], 0.75);
+    assert.equal(wav.samples[31], -0.5);
+    assert.equal(wav.samples[499], Math.fround(0.9));
+    assert.equal(wav.samples.includes(0.25), false);
+    assert.equal(wav.samples.includes(0.33), false);
     assert.equal(engine.getState(), 'idle');
-    assert.equal(mocks.stream.track.stopped, true);
-  } finally {
-    mocks.restore();
-  }
+    assert.equal(rig.stream.tracks[0].stopped, true);
+    assert.equal(hasActiveRecordingEngineSession(), false);
+    sessionBlobUrlRegistry.release(take.url);
+  });
 });
 
-test('cancel always stops the microphone and returns the engine to idle', async () => {
-  const mocks = installBrowserMocks();
-  try {
-    const engine = new RecordingEngine(createContext);
-    await engine.start();
-    await assert.rejects(engine.cancel(), /cancelled/);
-    assert.equal(engine.getState(), 'idle');
-    assert.equal(mocks.stream.track.stopped, true);
-  } finally {
-    mocks.restore();
-  }
+test('prepare awaits AudioContext resume and retains the shared recording/reconfiguration lock until cleanup', async () => {
+  const rig = createRecordingTestRig();
+  rig.context.state = 'suspended';
+  const { engine } = await prepareRig(rig);
+  assert.equal(rig.context.resumeCalls, 1);
+  assert.equal(engine.getState(), 'prepared');
+  assert.equal(hasActiveRecordingEngineSession(), true);
+  await assert.rejects(engine.cancel(), /cancelled/);
+  assert.equal(hasActiveRecordingEngineSession(), false);
+  assert.equal(rig.stream.tracks[0].stopped, true);
 });
 
-test('replacement cancellation never publishes a temporary Blob URL', async () => {
-  const mocks = installBrowserMocks();
-  try {
-    const engine = new RecordingEngine(createContext);
-    const ownersBefore = sessionBlobUrlRegistry.getOwnerCount('blob:recording-test');
-    await engine.start();
-    await assert.rejects(engine.cancel(), /cancelled/);
-    assert.equal(sessionBlobUrlRegistry.getOwnerCount('blob:recording-test'), ownersBefore);
-    assert.deepEqual(mocks.revokedUrls, []);
-  } finally {
-    mocks.restore();
-  }
+test('permission denial reports the device error and releases the capture-session token', async () => {
+  const denied = Object.assign(new Error('permission denied'), { name: 'NotAllowedError' });
+  const rig = createRecordingTestRig({ getUserMedia: async () => { throw denied; } });
+  const engine = new RecordingEngine(() => rig.context as unknown as AudioContext, rig.engineOptions);
+  await assert.rejects(engine.prepare(), /Microphone permission denied/i);
+  assert.equal(engine.getState(), 'idle');
+  assert.equal(hasActiveRecordingEngineSession(), false);
 });
 
-test('persistence failure rejects stop, does not return a recording, and still cleans up', async () => {
-  const mocks = installBrowserMocks();
-  try {
+test('cancellation during an unabortable permission prompt stops any stream that resolves later', async () => {
+  const rig = createRecordingTestRig();
+  let resolvePermission!: (stream: MediaStream) => void;
+  const permission = new Promise<MediaStream>(resolve => { resolvePermission = resolve; });
+  const options = { ...rig.engineOptions, getUserMedia: () => permission };
+  const engine = new RecordingEngine(() => rig.context as unknown as AudioContext, options);
+  const preparing = engine.prepare();
+  await assert.rejects(engine.cancel(), /cancelled/);
+  await assert.rejects(preparing, /cancelled/);
+  resolvePermission(rig.stream as unknown as MediaStream);
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(rig.stream.tracks[0].stopped, true);
+  assert.equal(engine.getState(), 'idle');
+  assert.equal(hasActiveRecordingEngineSession(), false);
+});
+
+test('unexpected input-track end immediately abandons the aligned take and releases all locks', async () => {
+  const errors: Error[] = [];
+  const rig = createRecordingTestRig({ onError: error => errors.push(error) });
+  const { engine } = await prepareRig(rig);
+  const node = rig.context.captureNode!;
+  await engine.start(rig.context.currentTime);
+  node.commands.length = 0;
+  rig.stream.tracks[0].triggerUnexpectedEnd();
+  assert.equal(engine.getState(), 'idle');
+  assert.equal(errors.length, 1);
+  assert.match(errors[0].message, /ended unexpectedly/i);
+  assert.equal(hasActiveRecordingEngineSession(), false);
+});
+
+test('pause intervals are excluded from the saved frames without introducing a resume-boundary gap', async () => {
+  await withObjectUrlMock(async () => {
+    const rig = createRecordingTestRig();
+    const { engine } = await prepareRig(rig);
+    await engine.start(rig.context.currentTime);
+    rig.context.advanceToFrame(4096, frame => frame / 10000);
+    engine.pause();
+    rig.context.advanceToFrame(5120, frame => frame / 10000);
+    engine.resume();
+    rig.context.advanceToFrame(6144, frame => frame / 10000);
+    assert.equal(engine.getDurationSeconds(), 3.072);
+    const take = await engine.stop();
+    const wav = await decodeFloatWav(take.blob);
+    assert.equal(wav.frameCount, 3072);
+    assert.equal(take.durationSeconds, 3.072);
+    assert.equal(wav.samples[0], Math.fround(2048 / 10000));
+    assert.equal(wav.samples[2048], Math.fround(5120 / 10000));
+    sessionBlobUrlRegistry.release(take.url);
+  });
+});
+
+test('capture refuses an expired pre-roll boundary rather than silently starting late', async () => {
+  const rig = createRecordingTestRig();
+  const { engine } = await prepareRig(rig);
+  rig.context.advanceToFrame(65536);
+  await assert.rejects(engine.start(0), /older than the retained microphone pre-roll/i);
+  assert.equal(engine.getState(), 'prepared');
+  await assert.rejects(engine.cancel(), /cancelled/);
+});
+
+test('worklet channel-layout changes during capture reject the take and clean up the input', async () => {
+  const errors: Error[] = [];
+  const rig = createRecordingTestRig({ onError: error => errors.push(error) });
+  const { engine } = await prepareRig(rig);
+  await engine.start(rig.context.currentTime);
+  rig.context.advanceToFrame(2176, () => 0.2, 2);
+  assert.equal(engine.getState(), 'idle');
+  assert.match(errors[0]?.message ?? '', /channel layout changed/i);
+  assert.equal(rig.stream.tracks[0].stopped, true);
+  assert.equal(hasActiveRecordingEngineSession(), false);
+});
+
+test('empty captures and persistence failures reject without publishing a URL', async () => {
+  await withObjectUrlMock(async () => {
+    const urlCallsBefore = nextUrl;
+    const emptyRig = createRecordingTestRig();
+    const { engine: emptyEngine } = await prepareRig(emptyRig);
+    const emptyStart = emptyRig.context.currentTime;
+    await emptyEngine.start(emptyStart);
+    await assert.rejects(emptyEngine.stop(emptyStart), /no captured audio frames/i);
+    assert.equal(emptyEngine.getState(), 'idle');
+    assert.equal(nextUrl, urlCallsBefore, 'an empty capture never creates or publishes a Blob URL');
+
     const persistenceError = new Error('storage unavailable');
-    const errors: Error[] = [];
-    const engine = new RecordingEngine(createContext, {
+    const persistenceErrors: Error[] = [];
+    const persistenceUrlCallsBefore = nextUrl;
+    const failedRig = createRecordingTestRig({
       persistAudioClip: async () => { throw persistenceError; },
-      onError: error => errors.push(error)
+      onError: error => persistenceErrors.push(error),
     });
-    await engine.start();
-
-    await assert.rejects(engine.stop(), error => error === persistenceError);
-    assert.equal(errors[0], persistenceError);
-    assert.equal(engine.getState(), 'idle');
-    assert.equal(mocks.stream.track.stopped, true);
-  } finally {
-    mocks.restore();
-  }
+    const { engine: failedEngine } = await prepareRig(failedRig);
+    await failedEngine.start(failedRig.context.currentTime);
+    failedRig.context.advanceToFrame(4096, () => 0.1);
+    await assert.rejects(failedEngine.stop(), error => error === persistenceError);
+    assert.equal(nextUrl, persistenceUrlCallsBefore, 'persistence failure cannot return a publishable URL');
+    assert.equal(persistenceErrors[0], persistenceError);
+    assert.equal(failedEngine.getState(), 'idle');
+    assert.equal(failedRig.stream.tracks[0].stopped, true);
+    assert.equal(hasActiveRecordingEngineSession(), false);
+  });
 });
 
-test('a throwing onError callback cannot prevent stop from rejecting', async () => {
-  const mocks = installBrowserMocks();
-  try {
-    const engine = new RecordingEngine(createContext, {
-      persistAudioClip: async () => { throw new Error('storage unavailable'); },
-      onError: () => { throw new Error('callback failed'); }
+test('repeated stop calls share one worklet finalization and one persisted recording', async () => {
+  await withObjectUrlMock(async () => {
+    let persistCalls = 0;
+    let persistedBlob: Blob | null = null;
+    const rig = createRecordingTestRig({
+      persistAudioClip: async (_id, blob) => { persistCalls++; persistedBlob = blob; },
     });
-    await engine.start();
+    const { engine, node } = await prepareRig(rig);
+    await engine.start(rig.context.currentTime);
+    rig.context.advanceToFrame(4096, () => 0.2);
 
-    await assert.rejects(engine.stop(), /storage unavailable/);
-    assert.equal(engine.getState(), 'idle');
-  } finally {
-    mocks.restore();
-  }
-});
-
-test('repeated stop shares finalization and queued chunks are included', async () => {
-  const mocks = installBrowserMocks();
-  try {
-    const engine = new RecordingEngine(createContext, { persistAudioClip: async () => {} });
-    await engine.start();
     const firstStop = engine.stop();
     const secondStop = engine.stop();
-    assert.equal(firstStop, secondStop);
+    assert.strictEqual(firstStop, secondStop, 'all callers observe the same finalization promise');
+    assert.equal(node.commands.filter(command => command.direction === 'main-to-processor' && command.type === 'stop').length, 1);
     const result = await firstStop;
-    assert.equal(await result.blob.text(), 'recorded-tail');
-  } finally {
-    mocks.restore();
-  }
-});
-
-test('dispose during recording and repeated cancellation settle without duplicate cleanup', async () => {
-  const mocks = installBrowserMocks();
-  try {
-    const engine = new RecordingEngine(createContext, { persistAudioClip: async () => {} });
-    await engine.start();
-    const firstCancel = engine.cancel();
-    const secondCancel = engine.cancel();
-    await assert.rejects(firstCancel, /cancelled/);
-    await assert.rejects(secondCancel, /cancelled/);
-    await engine.dispose();
+    assert.strictEqual(await secondStop, result);
+    assert.equal(persistCalls, 1, 'only one asset is persisted');
+    assert.equal(result.captureStartFrame, 2048);
+    assert.equal(result.captureEndFrame, 4096);
+    assert.equal(result.capturedFrames, 2048, 'the final queued sample frames through the exclusive stop are included');
+    assert.strictEqual(result.blob, persistedBlob, 'the published take is the Blob registered by persistence');
+    const persistedWav = await decodeFloatWav(persistedBlob!);
+    assert.equal(persistedWav.sampleRate, rig.context.sampleRate);
+    assert.ok(persistedWav.frameCount > 0, 'persistence receives non-empty 32-bit IEEE-float PCM');
+    assert.ok(result.waveform.length > 0, 'the returned take includes waveform peaks from decoded PCM');
+    assert.ok(result.waveform.some(value => value > 0));
+    assert.equal(sessionBlobUrlRegistry.getOwnerCount(result.url), 1, 'the published URL has one explicit owner');
     assert.equal(engine.getState(), 'idle');
-    assert.equal(mocks.stream.track.stopped, true);
-  } finally {
-    mocks.restore();
-  }
+    assert.equal(rig.stream.tracks[0].stopped, true);
+    assert.equal(hasActiveRecordingEngineSession(), false);
+    sessionBlobUrlRegistry.release(result.url);
+    assert.equal(sessionBlobUrlRegistry.getOwnerCount(result.url), 0, 'releasing the temporary owner clears registry ownership');
+  });
 });
 
-test('recorder error during finalization rejects and cleans up', async () => {
-  const mocks = installBrowserMocks();
-  try {
-    const engine = new RecordingEngine(createContext, { persistAudioClip: async () => {} });
-    await engine.start();
+test('repeated cancellation during recording is safe and releases the stream and capture lock once', async () => {
+  const rig = createRecordingTestRig();
+  const { engine } = await prepareRig(rig);
+  await engine.start(rig.context.currentTime);
+  const firstCancellation = engine.cancel();
+  const firstRejected = assert.rejects(firstCancellation, RecordingCancelledError);
+  await engine.cancel();
+  await firstRejected;
+  assert.equal(engine.getState(), 'idle');
+  assert.equal(rig.stream.tracks[0].stopped, true);
+  assert.equal(hasActiveRecordingEngineSession(), false);
+});
+
+test('dispose during preparation aborts safely and stops a permission stream that arrives later', async () => {
+  const rig = createRecordingTestRig();
+  let resolvePermission!: (stream: MediaStream) => void;
+  const permission = new Promise<MediaStream>(resolve => { resolvePermission = resolve; });
+  const engine = new RecordingEngine(() => rig.context as unknown as AudioContext, {
+    ...rig.engineOptions,
+    getUserMedia: () => permission,
+  });
+  const preparing = engine.prepare();
+  await engine.dispose();
+  await assert.rejects(preparing, RecordingCancelledError);
+  assert.equal(engine.getState(), 'idle');
+  assert.equal(hasActiveRecordingEngineSession(), false);
+
+  resolvePermission(rig.stream as unknown as MediaStream);
+  await permission;
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(rig.stream.tracks[0].stopped, true, 'late getUserMedia completion cannot leak a track');
+});
+
+test('dispose during recording cancels capture and cleans up all active resources', async () => {
+  const rig = createRecordingTestRig();
+  const { engine } = await prepareRig(rig);
+  await engine.start(rig.context.currentTime);
+  await engine.dispose();
+  assert.equal(engine.getState(), 'idle');
+  assert.equal(rig.stream.tracks[0].stopped, true);
+  assert.equal(hasActiveRecordingEngineSession(), false);
+});
+
+test('a throwing onError callback cannot block finalization rejection or cleanup', async () => {
+  await withObjectUrlMock(async () => {
+    const originalConsoleError = console.error;
+    console.error = () => undefined;
+    try {
+      const persistenceError = new Error('storage unavailable');
+      const urlCallsBefore = nextUrl;
+      const rig = createRecordingTestRig({
+        persistAudioClip: async () => { throw persistenceError; },
+        onError: () => { throw new Error('injected onError failure'); },
+      });
+      const { engine } = await prepareRig(rig);
+      await engine.start(rig.context.currentTime);
+      rig.context.advanceToFrame(4096, () => 0.1);
+      await assert.rejects(engine.stop(), error => error === persistenceError);
+      assert.equal(nextUrl, urlCallsBefore, 'a callback exception cannot publish a URL');
+      assert.equal(engine.getState(), 'idle');
+      assert.equal(rig.stream.tracks[0].stopped, true);
+      assert.equal(hasActiveRecordingEngineSession(), false);
+    } finally {
+      console.error = originalConsoleError;
+    }
+  });
+});
+
+test('cancellation during finalization waits for persisted-asset deletion and never publishes a URL', async () => {
+  await withObjectUrlMock(async () => {
+    const persisted = new Map<string, Blob>();
+    const persistStarted = deferred<{ id: string; blob: Blob }>();
+    const allowPersist = deferred<void>();
+    const deleteStarted = deferred<string>();
+    const allowDelete = deferred<void>();
+    const deletedIds: string[] = [];
+    const rig = createRecordingTestRig({
+      persistAudioClip: async (id, blob) => {
+        persistStarted.resolve({ id, blob });
+        await allowPersist.promise;
+        persisted.set(id, blob);
+      },
+      deletePersistedAudioClip: async id => {
+        deletedIds.push(id);
+        deleteStarted.resolve(id);
+        await allowDelete.promise;
+        persisted.delete(id);
+      },
+    });
+    const { engine } = await prepareRig(rig);
+    await engine.start(rig.context.currentTime);
+    rig.context.advanceToFrame(4096, () => 0.1);
+    const urlCallsBefore = nextUrl;
     const stopping = engine.stop();
-    mocks.recorderInstances[0].fail();
-    await assert.rejects(stopping, /Audio recording failed/);
+    const asset = await persistStarted.promise;
+    const stopRejected = assert.rejects(stopping, RecordingCancelledError);
+    let cancellationSettled = false;
+    const cancellation = engine.cancel();
+    const cancellationRejected = assert.rejects(cancellation, RecordingCancelledError).then(() => {
+      cancellationSettled = true;
+    });
+
+    allowPersist.resolve();
+    assert.equal(await deleteStarted.promise, asset.id);
+    assert.equal(persisted.get(asset.id), asset.blob, 'the persisted asset exists until deletion is committed');
+    assert.equal(cancellationSettled, false, 'cancel does not finish before the orphan is removed');
+    assert.equal(nextUrl, urlCallsBefore, 'cancelled finalization never creates a playable URL');
+
+    allowDelete.resolve();
+    await Promise.all([stopRejected, cancellationRejected]);
+    assert.equal(persisted.has(asset.id), false);
+    assert.deepEqual(deletedIds, [asset.id], 'the just-persisted asset is deleted exactly once');
+    assert.equal(cancellationSettled, true);
     assert.equal(engine.getState(), 'idle');
-    assert.equal(mocks.stream.track.stopped, true);
-  } finally {
-    mocks.restore();
-  }
+    assert.equal(rig.stream.tracks[0].stopped, true);
+    assert.equal(hasActiveRecordingEngineSession(), false);
+  });
 });
 
-test('MediaRecorder errors immediately clean up capture resources', async () => {
-  const mocks = installBrowserMocks();
-  try {
-    const engine = new RecordingEngine(createContext);
-    await engine.start();
-    mocks.recorderInstances[0].fail();
-    assert.equal(engine.getState(), 'idle');
-    assert.equal(mocks.stream.track.stopped, true);
-  } finally {
-    mocks.restore();
-  }
-});
+test('unexpected AudioWorklet processor failures clean up recording and finalization resources', async () => {
+  const errors: Error[] = [];
+  const rig = createRecordingTestRig({ onError: error => errors.push(error) });
+  const { engine, node } = await prepareRig(rig);
+  await engine.start(rig.context.currentTime);
+  node.onprocessorerror?.(new Event('processorerror'));
+  assert.equal(engine.getState(), 'idle');
+  assert.equal(errors.length, 1);
+  assert.match(errors[0].message, /AudioWorklet processor failed/i);
+  assert.equal(node.commands.some(command => command.direction === 'main-to-processor' && command.type === 'cancel'), true);
+  assert.equal(rig.stream.tracks[0].stopped, true);
+  assert.equal(hasActiveRecordingEngineSession(), false);
 
+  const persisted = new Map<string, Blob>();
+  const persistStarted = deferred<{ id: string; blob: Blob }>();
+  const allowPersistence = deferred<void>();
+  const deletedIds: string[] = [];
+  const finalizationErrors: Error[] = [];
+  const finalizingRig = createRecordingTestRig({
+    persistAudioClip: async (id, blob) => {
+      persisted.set(id, blob);
+      persistStarted.resolve({ id, blob });
+      await allowPersistence.promise;
+    },
+    deletePersistedAudioClip: async id => { deletedIds.push(id); persisted.delete(id); },
+    onError: error => finalizationErrors.push(error),
+  });
+  const { engine: finalizingEngine, node: finalizingNode } = await prepareRig(finalizingRig);
+  await finalizingEngine.start(finalizingRig.context.currentTime);
+  finalizingRig.context.advanceToFrame(4096, () => 0.1);
+  const stopping = finalizingEngine.stop();
+  const asset = await persistStarted.promise;
+  finalizingNode.onprocessorerror?.(new Event('processorerror'));
+  await assert.rejects(stopping, /AudioWorklet processor failed/i);
+  assert.equal(finalizationErrors.length, 1);
+  assert.equal(finalizingEngine.getState(), 'idle');
+  assert.equal(finalizingRig.stream.tracks[0].stopped, true);
+  assert.equal(hasActiveRecordingEngineSession(), false);
 
-test('project replacement invalidates the recording generation before stale commit', () => {
-  let generation = 0;
-  const recordingGeneration = generation;
-  generation = nextRecordingProjectGeneration(generation);
-
-  assert.equal(isRecordingProjectGenerationCurrent(recordingGeneration, generation), false);
-});
-
-test('recording generation stays valid during normal recording', () => {
-  const generation = 7;
-  assert.equal(isRecordingProjectGenerationCurrent(generation, generation), true);
-});
-
-test('stale recording commit gate leaves the incoming project unchanged', () => {
-  let generation = 0;
-  const recordingGeneration = generation;
-  const incomingProject = { recordings: [] as string[], playlistClips: [] as string[] };
-
-  generation = nextRecordingProjectGeneration(generation);
-
-  if (isRecordingProjectGenerationCurrent(recordingGeneration, generation)) {
-    incomingProject.recordings.push('stale-recording');
-    incomingProject.playlistClips.push('stale-clip');
-  }
-
-  assert.deepEqual(incomingProject, { recordings: [], playlistClips: [] });
-});
-
-test('finished-but-unapplied take becomes stale after replacement', () => {
-  let generation = 4;
-  const finishedTakeGeneration = generation;
-  generation = nextRecordingProjectGeneration(generation);
-
-  assert.equal(isRecordingProjectGenerationCurrent(finishedTakeGeneration, generation), false);
-});
-
-
-test('replacement invalidation survives replacement persistence failure', async () => {
-  let generation = 0;
-  const recordingGeneration = generation;
-  let cancelled = false;
-
-  generation = nextRecordingProjectGeneration(generation);
-  cancelled = true;
-
-  await assert.rejects(Promise.reject(new Error('replacement persistence failed')), /replacement persistence failed/);
-
-  assert.equal(cancelled, true);
-  assert.equal(isRecordingProjectGenerationCurrent(recordingGeneration, generation), false);
+  allowPersistence.resolve();
+  await finalizingEngine.dispose();
+  assert.equal(persisted.has(asset.id), false, 'a late persistence completion is deleted after worklet failure');
+  assert.deepEqual(deletedIds, [asset.id]);
+  assert.equal(hasActiveRecordingEngineSession(), false);
 });

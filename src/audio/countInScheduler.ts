@@ -321,8 +321,16 @@ export class CountInScheduler {
     const delayMs = Math.max(0, (active.captureTime - now) * 1000);
     active.timer = this.host.setTimer(() => {
       if (this.active !== active || active.settled) return;
-      active.settled = true;
       active.timer = null;
+      // A wall-clock timer can fire while an AudioContext is suspended or
+      // interrupted. The audio clock is authoritative: never publish a capture
+      // boundary until it has actually reached the scheduled frame time.
+      const remainingSeconds = active.captureTime - this.host.now();
+      if (remainingSeconds > 1e-9) {
+        this.armCompletionTimer(active);
+        return;
+      }
+      active.settled = true;
       if (this.active === active) this.active = null;
       active.resolve({
         schedule: active.schedule,

@@ -1,66 +1,42 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { RecordingEngine } from './recordingEngine';
+import { RecordingEngine, hasActiveRecordingEngineSession } from './recordingEngine';
+import { DeterministicAudioContext, DeterministicMediaStream } from './recordingCaptureTestHarness';
 
-class StartupTrack {
-  stopped = false;
-  stop(): void { this.stopped = true; }
-}
-
-class StartupStream {
-  readonly track = new StartupTrack();
-  getTracks(): StartupTrack[] { return [this.track]; }
-}
-
-class StartupSource {
-  disconnected = false;
-  connect(): void {}
-  disconnect(): void { this.disconnected = true; }
-}
-
-class StartupAnalyser {
-  fftSize = 1024;
-  smoothingTimeConstant = 0;
-  disconnected = false;
-  connect(): void {}
-  disconnect(): void { this.disconnected = true; }
-}
-
-class StartupContext {
-  readonly source = new StartupSource();
-  readonly analyser = new StartupAnalyser();
-  state = 'running';
-  createMediaStreamSource(): StartupSource { return this.source; }
-  createAnalyser(): StartupAnalyser { return this.analyser; }
-}
-
-test('startup failure disconnects locally-created audio nodes before assignment', async () => {
-  const stream = new StartupStream();
-  const context = new StartupContext();
-  const OriginalNavigator = globalThis.navigator;
-  const OriginalMediaRecorder = globalThis.MediaRecorder;
-
-  Object.defineProperty(globalThis, 'navigator', {
-    configurable: true,
-    value: { mediaDevices: { getUserMedia: async () => stream } },
-  });
-  Object.defineProperty(globalThis, 'MediaRecorder', {
-    configurable: true,
-    value: class {
-      static isTypeSupported(): boolean { return true; }
-      constructor() { throw new Error('MediaRecorder construction failed'); }
-    },
+test('capture startup failure disconnects locally-created nodes and releases the microphone/session token', async () => {
+  const stream = new DeterministicMediaStream();
+  const context = new DeterministicAudioContext();
+  const source = {
+    disconnected: false,
+    connect() { return context.destination as unknown as AudioNode; },
+    disconnect() { this.disconnected = true; },
+  };
+  const engine = new RecordingEngine(() => context as unknown as AudioContext, {
+    getUserMedia: async () => stream as unknown as MediaStream,
+    createInputSource: () => source,
+    createCaptureNode: () => { throw new Error('AudioWorklet node construction failed'); },
   });
 
-  try {
-    const engine = new RecordingEngine(() => context as unknown as AudioContext);
-    await assert.rejects(engine.start(), /MediaRecorder construction failed/);
-    assert.equal(context.source.disconnected, true);
-    assert.equal(context.analyser.disconnected, true);
-    assert.equal(stream.track.stopped, true);
-    assert.equal(engine.getState(), 'idle');
-  } finally {
-    Object.defineProperty(globalThis, 'navigator', { configurable: true, value: OriginalNavigator });
-    Object.defineProperty(globalThis, 'MediaRecorder', { configurable: true, value: OriginalMediaRecorder });
-  }
+  await assert.rejects(engine.prepare(), /AudioWorklet node construction failed/);
+  assert.equal(source.disconnected, true);
+  assert.equal(stream.tracks[0].stopped, true);
+  assert.equal(engine.getState(), 'idle');
+  assert.equal(hasActiveRecordingEngineSession(), false);
+});
+
+test('interrupted audio context during preparation rejects instead of opening an unclocked take', async () => {
+  const stream = new DeterministicMediaStream();
+  const context = new DeterministicAudioContext();
+  const engine = new RecordingEngine(() => context as unknown as AudioContext, {
+    getUserMedia: async () => stream as unknown as MediaStream,
+    createCaptureNode: (_context, _processorName, options) => context.makeCaptureNode(options),
+  });
+  const preparing = engine.prepare();
+  const node = await context.captureNodeReady;
+  await context.suspend();
+  await assert.rejects(preparing, /audio context was interrupted/i);
+  assert.equal(node.commands.some(command => command.direction === 'main-to-processor' && command.type === 'cancel'), true);
+  assert.equal(stream.tracks[0].stopped, true);
+  assert.equal(engine.getState(), 'idle');
+  assert.equal(hasActiveRecordingEngineSession(), false);
 });

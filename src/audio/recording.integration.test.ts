@@ -1,6 +1,14 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { commitRecordingForCurrentProject, nextRecordingProjectGeneration } from '../state/recordingProjectLifecycle';
+
+const deferred = <T>() => {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej; });
+  return { promise, resolve, reject };
+};
 
 describe('recording to playlist integration', () => {
   it('uses the validated recording pipeline after AudioEngine registration', () => {
@@ -61,5 +69,38 @@ describe('recording to playlist integration', () => {
   it('cancels an active recording when the recorder modal closes', () => {
     const source = readFileSync(new URL('../components/AudioRecorderModal.tsx', import.meta.url), 'utf8');
     assert.match(source, /engineRef\.current\?\.cancel\(\)/);
+  });
+
+  it('a project replacement during async audio registration cannot publish the stale take', async () => {
+    let currentGeneration = 12;
+    const recordingGeneration = currentGeneration;
+    const incomingProject = { recordings: [] as string[], playlistClips: [] as string[] };
+    const persistenceGate = deferred<void>();
+    const replacementPersistence = deferred<void>();
+    const replacementPersistenceRejected = assert.rejects(replacementPersistence.promise, /replacement persistence failed/);
+    const pendingPublication = (async () => {
+      await persistenceGate.promise;
+      return commitRecordingForCurrentProject(recordingGeneration, currentGeneration, () => {
+        incomingProject.recordings.push('stale-recording');
+        incomingProject.playlistClips.push('stale-recording-clip');
+      });
+    })();
+
+    currentGeneration = nextRecordingProjectGeneration(currentGeneration);
+    replacementPersistence.reject(new Error('replacement persistence failed'));
+    await replacementPersistenceRejected;
+    persistenceGate.resolve();
+    assert.equal(await pendingPublication, false);
+    assert.deepEqual(incomingProject, { recordings: [], playlistClips: [] });
+    let currentProjectCommits = 0;
+    assert.equal(commitRecordingForCurrentProject(currentGeneration, currentGeneration, () => { currentProjectCommits++; }), true);
+    assert.equal(currentProjectCommits, 1, 'the same gate permits a take from the still-current project');
+
+    const appSource = readFileSync(new URL('../App.tsx', import.meta.url), 'utf8');
+    assert.match(
+      appSource,
+      /const published = commitRecordingForCurrentProject\([\s\S]*?updatePlaylistProjectState\(nextState\);[\s\S]*?commitPlaylistHistory\(nextState,[\s\S]*?sessionBlobUrlRegistry\.transfer\(recording\.audioUrl \?\? ''\);[\s\S]*?if \(!published\)/,
+      'the real App commit, history entry, and URL transfer stay behind the tested generation gate',
+    );
   });
 });

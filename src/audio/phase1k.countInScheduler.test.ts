@@ -119,6 +119,24 @@ describe('Phase 1K TEST 1 — count-in timing and capture moment', () => {
     assert.equal(r(host.audibleClicks()[3].time), 0.78); // pulse 3 = 0.75 s + lead
   });
 
+  it('re-arms when a wall-clock callback arrives before the audio clock reaches capture', async () => {
+    const host = new FakeHost();
+    const scheduler = new CountInScheduler(host);
+    const resultPromise = scheduler.start({
+      bars: 1, layout: resolveMeterPulseLayout([4, 4]), bpm: 120, startBeat: 0,
+    });
+    const earlyTimer = host.timers.find(timer => !timer.cleared);
+    assert.ok(earlyTimer);
+    earlyTimer.cleared = true;
+    earlyTimer.fn();
+    assert.equal(scheduler.isRunning, true, 'an early wall-clock callback cannot publish capture');
+    assert.equal(host.timers.filter(timer => !timer.cleared).length, 1, 'completion is re-armed against remaining audio time');
+    host.advanceTo(2.5);
+    const result = await resultPromise;
+    assert.equal(r(result.captureTime), 2.03);
+    assert.equal(scheduler.isRunning, false);
+  });
+
   it('bars=0 resolves immediately with no clicks (Off)', async () => {
     const host = new FakeHost();
     const scheduler = new CountInScheduler(host);

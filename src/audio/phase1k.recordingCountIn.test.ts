@@ -1,26 +1,24 @@
 /**
  * Phase 1K — recording count-in through the PRODUCTION path:
  *
- *   audioEngine.beginRecordingCountIn → CountInScheduler
- *   → scheduleMetronomeClick (the real metronome click voice)
- *   → capture moment → RecordingEngine.start() (MediaRecorder opens HERE)
- *   → createRecordingPlaylistClip at the capture bar
+ * audioEngine.beginRecordingCountIn → CountInScheduler
+ * → scheduleMetronomeClick (the real metronome click voice)
+ * → a pre-primed RecordingEngine selects the exact capture frame from its PCM pre-roll
  *
  * A fake AudioContext records every click oscillator (frequency, start time,
  * every stop() call) exactly like the Phase 1J metronome tests; a delay-aware
- * fake `window` timer pump keeps the audio clock and the count-in completion
- * timer deterministic. The browser recording APIs (getUserMedia/MediaRecorder)
- * use the same structural fakes as `recordingEngine.test.ts`, so this drives
- * the real RecordingEngine — not a UI mock. What is NOT exercised is a real
- * microphone/codec (browser-only; see the report's browser-test limitations).
+ * fake `window` timer pump keeps the audio clock and count-in completion
+ * deterministic. The capture tests compile the production AudioWorklet source
+ * and inspect synthetic PCM at exact sample frames; MediaRecorder timing is not
+ * part of the acceptance test.
  */
-import { afterEach, beforeEach, describe, it } from 'node:test';
+import { afterEach, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { audioEngine, CountInCancelledError } from './audioEngine';
 import { RecordingEngine } from './recordingEngine';
 import { METRONOME_CLICK_VOICES } from './metronomeClick';
-import { createRecordingPlaylistClip, getRecordingAudioBufferId } from './recordingPipeline';
-import type { AudioRecording, PlaylistTrack } from '../types/daw';
+import { createRecordingTestRig, decodeFloatWav } from './recordingCaptureTestHarness';
+import { sessionBlobUrlRegistry } from '../state/sessionBlobUrlRegistry';
 
 const HI = METRONOME_CLICK_VOICES.downbeat.frequencyHz; // 1400
 const MID = METRONOME_CLICK_VOICES.accent.frequencyHz; // 1100
@@ -114,7 +112,7 @@ const SAVED_KEYS = [
   'stepCallback', 'transportStateCallback', 'sampleBuffers',
   'masterGain', 'mixerChannels', 'isOfflineRendering', 'offlineRenderLeaseHeld',
   'playlistLaneMutes', 'sevenEightGrouping', 'metronomePulseLayout', 'activeMetronomeClicks',
-  'countInBars', 'countInScheduler', 'timerId',
+  'countInBars', 'countInScheduler', 'pendingCountInStart', 'timerId',
 ];
 
 interface Harness { ctx: FakeAudioContext }
@@ -271,6 +269,27 @@ describe('Phase 1K — engine count-in clicks follow tempo, meter and accent gro
 });
 
 describe('Phase 1K — stop, cancel, seek and double-start lifecycle', () => {
+  it('cancelling while AudioContext resume is pending prevents a late count-in start', async () => {
+    const h = install();
+    h.ctx.state = 'suspended';
+    let finishResume!: () => void;
+    h.ctx.resume = () => new Promise<void>(resolve => {
+      finishResume = () => {
+        h.ctx.state = 'running';
+        resolve();
+      };
+    });
+    const pending = engine.beginRecordingCountIn(1);
+    assert.equal(engine.isCountInRunning(), true, 'the pending resume is treated as an active count-in operation');
+    engine.cancelRecordingCountIn();
+    await assert.rejects(pending, CountInCancelledError);
+    finishResume();
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.equal(h.ctx.oscillators.length, 0, 'resume completion after cancellation schedules no clicks');
+    assert.equal(engine.isCountInRunning(), false);
+  });
+
   it('stop() during a count-in silences pending clicks and rejects with CountInCancelledError', async () => {
     const h = install();
     const promise = engine.beginRecordingCountIn(2);
@@ -385,161 +404,71 @@ describe('Phase 1K — tempo and meter changes during a count-in', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Real recording path: RecordingEngine + MediaRecorder ordering and offsets.
+// Sample-measured capture path: the production AudioWorklet source is driven
+// with a deterministic frame clock; the test checks the encoded WAV samples.
 // ---------------------------------------------------------------------------
 
-class FakeTrack { stopped = false; stop(): void { this.stopped = true; } }
-class FakeStream { readonly track = new FakeTrack(); getTracks(): FakeTrack[] { return [this.track]; } }
-
-class FakeMediaRecorder {
-  static isTypeSupported(): boolean { return true; }
-  state: 'inactive' | 'recording' = 'inactive';
-  mimeType = 'audio/webm';
-  startedAtAudioTime = Number.NaN;
-  ondataavailable: ((event: { data: Blob }) => void) | null = null;
-  onstop: (() => void | Promise<void>) | null = null;
-  onerror: (() => void) | null = null;
-  constructor(readonly stream: FakeStream, readonly onConstruct?: () => number) {}
-  start(): void {
-    this.startedAtAudioTime = this.onConstruct?.() ?? Number.NaN;
-    this.state = 'recording';
-  }
-  pause(): void {}
-  resume(): void {}
-  stop(): void {
-    this.state = 'inactive';
-    queueMicrotask(() => {
-      this.ondataavailable?.({ data: new Blob(['recorded'], { type: 'audio/webm' }) });
-      void this.onstop?.();
-    });
-  }
-}
-
-const installBrowserMocks = (ctx: () => FakeAudioContext) => {
-  const stream = new FakeStream();
-  const recorderInstances: FakeMediaRecorder[] = [];
-  const OriginalMediaRecorder = globalThis.MediaRecorder;
-  const OriginalNavigator = globalThis.navigator;
-  const OriginalCreateObjectURL = URL.createObjectURL;
-  Object.defineProperty(globalThis, 'navigator', {
-    configurable: true,
-    value: { mediaDevices: { getUserMedia: async () => stream } },
-  });
-  Object.defineProperty(globalThis, 'MediaRecorder', {
-    configurable: true,
-    value: class extends FakeMediaRecorder {
-      constructor(input: FakeStream) {
-        super(input, () => ctx().currentTime);
-        recorderInstances.push(this);
-      }
-    },
-  });
-  URL.createObjectURL = () => 'blob:count-in-test';
-  return {
-    stream,
-    recorderInstances,
-    restore: () => {
-      Object.defineProperty(globalThis, 'navigator', { configurable: true, value: OriginalNavigator });
-      Object.defineProperty(globalThis, 'MediaRecorder', { configurable: true, value: OriginalMediaRecorder });
-      URL.createObjectURL = OriginalCreateObjectURL;
-    },
-  };
-};
-
-describe('Phase 1K — the real recording path never captures the count-in', () => {
-  it('MediaRecorder opens only after the count-in resolves — at the capture moment, on the capture bar', async () => {
+describe('Phase 1K — sample-aligned count-in capture', () => {
+  it('prepares PCM before the count-in and trims the saved take to its capture frame', async () => {
     const h = install();
-    const mocks = installBrowserMocks(() => h.ctx);
-    try {
-      const recorder = new RecordingEngine(() => h.ctx as unknown as AudioContext, {
-        waveformSamples: 32,
-        persistAudioClip: async () => {},
-      });
-      const promise = engine.beginRecordingCountIn(2);
-      runUntil(h, 1);
-      assert.ok(h.ctx.oscillators.length > 0, 'count-in clicks are sounding');
-      assert.equal(mocks.recorderInstances.length, 0, 'capture must not open while the count-in runs');
-      runUntil(h, 4.5);
-      const result = await promise;
-      assert.equal(mocks.recorderInstances.length, 0, 'capture must not open before the promise resolves');
-      await recorder.start();
-      assert.equal(mocks.recorderInstances.length, 1);
-      const mediaRecorder = mocks.recorderInstances[0];
-      assert.ok(
-        mediaRecorder.startedAtAudioTime >= result.captureTime - 1e-9,
-        `MediaRecorder started at ${mediaRecorder.startedAtAudioTime}, before capture time ${result.captureTime}`
-      );
-      // No count-in click is scheduled at/after capture: the take window starts
-      // silent of clicks (and the mic stream is a separate graph anyway).
-      const clicksAfterCapture = h.ctx.oscillators.filter(o => o.startAt >= result.captureTime - 1e-9);
-      assert.equal(clicksAfterCapture.length, 0, 'count-in clicks never overlap the take window');
-      // The count-in wrote no notes and triggered no instrument voices.
-      assert.equal(engine.playNote, originalPlayNote, 'the count-in never calls playNote');
+    const rig = createRecordingTestRig({ sampleRate: 1000 });
+    const recorder = new RecordingEngine(() => rig.context as unknown as AudioContext, rig.engineOptions);
+    const preparing = recorder.prepare();
+    await rig.context.captureNodeReady;
+    rig.context.advanceToFrame(2048);
+    await preparing;
+    assert.equal(recorder.getState(), 'prepared', 'input is primed before the musical timer starts');
 
-      // Offset: the take is placed on the bar capture began on.
-      const take: AudioRecording = {
-        id: 'take-1', name: 'Take', timestamp: 0, durationSeconds: 1.5, waveform: [0.5],
-        audioBlob: new Blob(['x'], { type: 'audio/webm' }),
-      };
-      const tracks: PlaylistTrack[] = [{ id: 1, name: 'Vocals', color: '#fff', mute: false, solo: false, volume: 1, pan: 0 }];
-      const clip = createRecordingPlaylistClip(
-        take,
-        { id: getRecordingAudioBufferId(take.id), buffer: h.ctx.decoded, peaks: [0.5], duration: 1.5 },
-        tracks,
-        0,
-        120,
-        'clip-1',
-        [4, 4],
-        result.clipStartBar
-      );
-      assert.equal(clip.startBar, 2, 'the take lands at the capture bar, not blindly on bar 1');
-      assert.equal(clip.lengthBars, 1);
-      await recorder.stop();
-    } finally {
-      mocks.restore();
-    }
+    const countInPromise = engine.beginRecordingCountIn(2);
+    runUntil(h, 4.5);
+    const countIn = await countInPromise;
+    assert.equal(r(countIn.captureTime), 4.03);
+    assert.equal(countIn.clipStartBar, 2);
+
+    const startFrame = Math.round(countIn.captureTime * rig.context.sampleRate);
+    const stopFrame = startFrame + 500;
+    const impulses = new Map<number, number>([
+      [startFrame - 1, 0.25],
+      [startFrame, 0.75],
+      [startFrame + 17, -0.5],
+      [stopFrame - 1, 0.9],
+      [stopFrame, 0.33],
+    ]);
+    // The host timer pump can deliver the count-in promise after the planned
+    // moment; the capture worklet has already retained the corresponding frames.
+    rig.context.advanceToFrame(6144, frame => impulses.get(frame) ?? 0);
+    await recorder.start(countIn.captureTime);
+    const take = await recorder.stop(stopFrame / rig.context.sampleRate);
+    const wav = await decodeFloatWav(take.blob);
+
+    assert.equal(take.captureStartFrame, startFrame);
+    assert.equal(take.captureEndFrame, stopFrame);
+    assert.equal(wav.frameCount, 500);
+    assert.equal(wav.samples[0], 0.75);
+    assert.equal(wav.samples[17], -0.5);
+    assert.equal(wav.samples[499], Math.fround(0.9));
+    assert.equal(wav.samples.includes(0.25), false);
+    assert.equal(wav.samples.includes(0.33), false);
+    assert.ok(audible(h).every(click => click.startAt < countIn.captureTime), 'count-in clicks end before the selected PCM frame');
+    sessionBlobUrlRegistry.release(take.url);
   });
 
-  it('cancelling the count-in opens no capture at all', async () => {
+  it('cancelling the count-in also releases the already-prepared microphone session', async () => {
     const h = install();
-    const mocks = installBrowserMocks(() => h.ctx);
-    try {
-      const recorder = new RecordingEngine(() => h.ctx as unknown as AudioContext, {
-        waveformSamples: 32,
-        persistAudioClip: async () => {},
-      });
-      const promise = engine.beginRecordingCountIn(2);
-      runUntil(h, 0.5);
-      // Modal "CANCEL" path: abort the count-in, never start the recorder.
-      engine.cancelRecordingCountIn();
-      await assert.rejects(promise, CountInCancelledError);
-      assert.equal(mocks.recorderInstances.length, 0);
-      assert.equal(recorder.getState(), 'idle');
-      assert.ok(h.ctx.oscillators.every(o => !o.audible), 'cancelled clicks never sound');
-    } finally {
-      mocks.restore();
-    }
-  });
+    const rig = createRecordingTestRig({ sampleRate: 1000 });
+    const recorder = new RecordingEngine(() => rig.context as unknown as AudioContext, rig.engineOptions);
+    const preparing = recorder.prepare();
+    await rig.context.captureNodeReady;
+    rig.context.advanceToFrame(2048);
+    await preparing;
 
-  it('a take started with the count-in Off behaves like the pre-Phase-1K immediate start', async () => {
-    const h = install();
-    const mocks = installBrowserMocks(() => h.ctx);
-    try {
-      const recorder = new RecordingEngine(() => h.ctx as unknown as AudioContext, {
-        waveformSamples: 32,
-        persistAudioClip: async () => {},
-      });
-      engine.countInBars = 0;
-      const promise = engine.beginRecordingCountIn();
-      runUntil(h, 0.2);
-      const result = await promise;
-      await recorder.start();
-      assert.equal(result.captureBar, 1);
-      assert.equal(result.clipStartBar, 0);
-      assert.equal(h.ctx.oscillators.length, 0, 'Off schedules no clicks');
-      await recorder.stop();
-    } finally {
-      mocks.restore();
-    }
+    const countIn = engine.beginRecordingCountIn(2);
+    const cancelled = assert.rejects(countIn, CountInCancelledError);
+    runUntil(h, 0.5);
+    engine.cancelRecordingCountIn();
+    await cancelled;
+    await assert.rejects(recorder.cancel(), /cancelled/);
+    assert.equal(recorder.getState(), 'idle');
+    assert.equal(rig.stream.tracks[0].stopped, true);
   });
 });

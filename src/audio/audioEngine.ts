@@ -687,7 +687,7 @@ export function noteOnsetOffsetSteps(start: unknown, currentStep: number): numbe
 /**
  * Phase 1K — what a finished count-in promises the recorder.
  *
- * `captureTime` is the audio-clock moment `MediaRecorder` must start at;
+ * `captureTime` is the exact audio-clock frame where the prepared PCM capture begins;
  * `captureBar`/`clipStartBar` are the musical position that moment corresponds
  * to, so the take can be placed on the playlist at the exact bar recording
  * began on. Cancelling the count-in rejects with `CountInCancelledError` and
@@ -5741,6 +5741,8 @@ class AudioEngine {
    */
   private countInBars: CountInBars = 0;
   private countInScheduler: CountInScheduler | null = null;
+  /** Rejects a count-in that is waiting for a suspended AudioContext to resume. */
+  private pendingCountInStart: { reject: (error: Error) => void } | null = null;
   /**
    * Phase 1L — punch-in / punch-out recording.
    *
@@ -5752,6 +5754,9 @@ class AudioEngine {
   private punchRecording: PunchRecordingSettings = DEFAULT_PUNCH_RECORDING;
   private punchWindow: PunchCaptureWindow | null = null;
   private activePunchTake: { plan: PunchCapturePlan; phase: 'pre-roll' | 'capture' } | null = null;
+  /** Invalidates an async context-resume step if the pending punch is cancelled. */
+  private punchStartToken = 0;
+  private pendingPunchStart: { reject: (error: Error) => void } | null = null;
   private isPlaying: boolean = false;
   private timerId: ReturnType<typeof setTimeout> | null = null;
   private currentStep: number = 0;
@@ -5919,7 +5924,7 @@ class AudioEngine {
 
   /** True while a count-in is counting down to its capture moment. */
   public isCountInRunning(): boolean {
-    return this.countInScheduler?.isRunning ?? false;
+    return this.pendingCountInStart !== null || (this.countInScheduler?.isRunning ?? false);
   }
 
   /**
@@ -5946,8 +5951,8 @@ class AudioEngine {
    *     way the promise still resolves one full count-in after the audible
    *     clicks, so `captureBar` is correct when capture begins.
    *   - count-in clicks are pure audio events: no note, step or pattern data
-   *     is written, and the caller must not start `MediaRecorder` before this
-   *     promise resolves (which is what keeps clicks out of the recorded take).
+   *     is written. The caller prepares its PCM capture first, then uses the
+   *     resolved audio-clock boundary so count-in clicks stay out of the take.
    */
   public beginRecordingCountIn(bars?: CountInBars | number): Promise<RecordingCountInResult> {
     if (this.shouldBlockLiveMutation()) {
@@ -5957,28 +5962,61 @@ class AudioEngine {
     if (!this.ctx) this.init();
     const ctx = this.ctx;
     if (!ctx) return Promise.reject(new Error('Audio context unavailable for the recording count-in'));
-    if (ctx.state === 'suspended') void ctx.resume();
-    const plan = planCountInCapturePosition(this.transportPositionBeats(), this.meter, resolvedBars);
-    const scheduler = this.ensureCountInScheduler();
-    // Throws synchronously when a count-in already runs — a double-pressed
-    // Record button must never schedule a second click set.
-    const started = scheduler.start({
-      bars: resolvedBars,
-      layout: this.getMetronomePulseLayout(),
-      bpm: this.bpm,
-      startBeat: plan.startBeat,
-    });
-    return started.then(result => {
-      // Bar numbers are derived at resolve time so a restart (meter change)
-      // during the count-in reports the capture position that actually
-      // happened, not the one planned before the change.
-      const barsInfo = captureBarNumbers(result.captureBeat, result.schedule.layout.meter);
-      return {
-        ...result,
+    if (this.countInScheduler?.isRunning || this.pendingCountInStart) {
+      throw new Error('A recording count-in is already running');
+    }
+
+    const schedule = (): Promise<RecordingCountInResult> => {
+      if (ctx.state !== 'running') {
+        throw new Error('The audio context is not running; the recording count-in cannot establish a capture boundary.');
+      }
+      const plan = planCountInCapturePosition(this.transportPositionBeats(), this.meter, resolvedBars);
+      const scheduler = this.ensureCountInScheduler();
+      // Throws synchronously when a count-in already runs — a double-pressed
+      // Record button must never schedule a second click set.
+      const started = scheduler.start({
         bars: resolvedBars,
-        captureBar: barsInfo.captureBar,
-        clipStartBar: barsInfo.clipStartBar,
-      };
+        layout: this.getMetronomePulseLayout(),
+        bpm: this.bpm,
+        startBeat: plan.startBeat,
+      });
+      return started.then(result => {
+        // Bar numbers are derived at resolve time so a restart (meter change)
+        // during the count-in reports the capture position that actually
+        // happened, not the one planned before the change.
+        const barsInfo = captureBarNumbers(result.captureBeat, result.schedule.layout.meter);
+        return {
+          ...result,
+          bars: resolvedBars,
+          captureBar: barsInfo.captureBar,
+          clipStartBar: barsInfo.clipStartBar,
+        };
+      });
+    };
+
+    if (ctx.state === 'running') return schedule();
+    // Resume is awaited: a count-in timer driven by currentTime must never be
+    // armed against a suspended audio clock and then mistaken for a real boundary.
+    // Keep a cancellable reservation during this async step so Stop/Seek/Close
+    // cannot let a late resume start a count-in after the user already cancelled.
+    let rejectCancellation!: (error: Error) => void;
+    const cancelled = new Promise<never>((_resolve, reject) => { rejectCancellation = reject; });
+    const pending = { reject: rejectCancellation };
+    this.pendingCountInStart = pending;
+    let resuming: Promise<void>;
+    try {
+      resuming = ctx.resume();
+    } catch (error) {
+      if (this.pendingCountInStart === pending) this.pendingCountInStart = null;
+      throw error;
+    }
+    return Promise.race([resuming, cancelled]).then(() => {
+      if (this.pendingCountInStart !== pending) throw new CountInCancelledError();
+      this.pendingCountInStart = null;
+      return schedule();
+    }, error => {
+      if (this.pendingCountInStart === pending) this.pendingCountInStart = null;
+      throw error;
     });
   }
 
@@ -5987,6 +6025,11 @@ class AudioEngine {
    * waiting recorder promise rejects with `CountInCancelledError` (no take).
    */
   public cancelRecordingCountIn(): void {
+    const pending = this.pendingCountInStart;
+    if (pending) {
+      this.pendingCountInStart = null;
+      pending.reject(new CountInCancelledError());
+    }
     this.countInScheduler?.cancel();
   }
 
@@ -6119,49 +6162,96 @@ class AudioEngine {
     if (!this.ctx) this.init();
     const ctx = this.ctx;
     if (!ctx) return Promise.reject(new Error('Audio context unavailable for punch recording'));
-    if (ctx.state === 'suspended') void ctx.resume();
 
-    // Drop any stale take (and its count-in / stop moment) before arming.
+    // Drop any stale take (and its count-in / stop moment) before reserving this
+    // start. The reservation makes cancellation during an awaited context resume
+    // observable even though no count-in timer exists yet.
     this.cancelPunchRecording();
-    // Park the playhead at the pre-roll start so the transport and the take
-    // agree on position. Must happen before arming: seek() cancels takes.
-    if (plan.countInStartBeat > 1e-9 && this.transport) {
-      this.seek(beatsToSeconds(plan.countInStartBeat, this.bpm));
-    }
-
     const take: { plan: PunchCapturePlan; phase: 'pre-roll' | 'capture' } = { plan, phase: 'pre-roll' };
+    const startToken = ++this.punchStartToken;
     this.activePunchTake = take;
-    const scheduler = this.ensureCountInScheduler();
-    const started = scheduler.start({
-      bars: plan.countInBars,
-      layout: this.getMetronomePulseLayout(),
-      bpm: this.bpm,
-      startBeat: plan.countInStartBeat,
-    });
-    // A count-in that never reaches capture (stop/seek/cancel) leaves no armed
-    // take behind. This handler only clears bookkeeping; the caller's await on
-    // the returned promise still sees the rejection.
-    void started.catch(() => {
-      if (this.activePunchTake === take) this.activePunchTake = null;
-    });
 
-    return started.then(result => {
-      if (this.activePunchTake !== take) throw new PunchCancelledError();
-      take.phase = 'capture';
-      const punchOut = this.ensurePunchWindow().arm({
-        captureTime: result.captureTime,
-        durationBeats: plan.captureDurationBeats,
-        bpm: this.bpm,
+    const arm = (): Promise<PunchRecordingSession> => {
+      if (this.punchStartToken !== startToken || this.activePunchTake !== take) throw new PunchCancelledError();
+      if (ctx.state !== 'running') throw new Error('The audio context is not running; the punch capture boundary cannot be trusted.');
+      // Park the playhead at the pre-roll start so the transport and the take
+      // agree on position. Clear the reservation around seek because seek()'s
+      // normal lifecycle cleanup would otherwise cancel the take being armed.
+      if (plan.countInStartBeat > 1e-9 && this.transport) {
+        this.activePunchTake = null;
+        this.seek(beatsToSeconds(plan.countInStartBeat, this.bpm));
+        if (this.punchStartToken !== startToken) throw new PunchCancelledError();
+        this.activePunchTake = take;
+      }
+
+      const scheduler = this.ensureCountInScheduler();
+      let started: Promise<CountInResult>;
+      try {
+        started = scheduler.start({
+          bars: plan.countInBars,
+          layout: this.getMetronomePulseLayout(),
+          bpm: this.bpm,
+          startBeat: plan.countInStartBeat,
+        });
+      } catch (error) {
+        if (this.activePunchTake === take) this.activePunchTake = null;
+        throw error;
+      }
+      // A count-in that never reaches capture (stop/seek/cancel) leaves no armed
+      // take behind. This handler only clears bookkeeping; the caller's await on
+      // the returned promise still sees the rejection.
+      void started.catch(() => {
+        if (this.activePunchTake === take) this.activePunchTake = null;
       });
-      // A take that reached its punch-out — or was cancelled — is finished, so
-      // the engine must stop reporting it as armed. `isPunchTakeActive()` is
-      // what the transport lifecycle checks, and a stale "armed" flag would
-      // make a later stop/seek cancel a take that no longer exists.
-      void punchOut.then(
-        () => { if (this.activePunchTake === take) this.activePunchTake = null; },
-        () => { if (this.activePunchTake === take) this.activePunchTake = null; },
-      );
-      return { plan, captureTime: result.captureTime, punchOut };
+
+      return started.then(result => {
+        if (this.punchStartToken !== startToken || this.activePunchTake !== take) throw new PunchCancelledError();
+        take.phase = 'capture';
+        const punchOut = this.ensurePunchWindow().arm({
+          captureTime: result.captureTime,
+          durationBeats: plan.captureDurationBeats,
+          bpm: this.bpm,
+        });
+        // A take that reached its punch-out — or was cancelled — is finished, so
+        // the engine must stop reporting it as armed. `isPunchTakeActive()` is
+        // what the transport lifecycle checks, and a stale "armed" flag would
+        // make a later stop/seek cancel a take that no longer exists.
+        void punchOut.then(
+          () => { if (this.activePunchTake === take) this.activePunchTake = null; },
+          () => { if (this.activePunchTake === take) this.activePunchTake = null; },
+        );
+        return { plan, captureTime: result.captureTime, punchOut };
+      });
+    };
+
+    if (ctx.state === 'running') {
+      try { return arm(); } catch (error) {
+        if (this.activePunchTake === take) this.activePunchTake = null;
+        return Promise.reject(error);
+      }
+    }
+    let rejectCancellation!: (error: Error) => void;
+    const cancelled = new Promise<never>((_resolve, reject) => { rejectCancellation = reject; });
+    const pending = { reject: rejectCancellation };
+    this.pendingPunchStart = pending;
+    let resuming: Promise<void>;
+    try {
+      resuming = ctx.resume();
+    } catch (error) {
+      if (this.pendingPunchStart === pending) this.pendingPunchStart = null;
+      if (this.activePunchTake === take) this.activePunchTake = null;
+      return Promise.reject(error);
+    }
+    return Promise.race([resuming, cancelled]).then(() => {
+      if (this.pendingPunchStart !== pending || this.punchStartToken !== startToken || this.activePunchTake !== take) {
+        throw new PunchCancelledError();
+      }
+      this.pendingPunchStart = null;
+      return arm();
+    }).catch(error => {
+      if (this.pendingPunchStart === pending) this.pendingPunchStart = null;
+      if (this.activePunchTake === take) this.activePunchTake = null;
+      throw error;
     });
   }
 
@@ -6171,8 +6261,14 @@ class AudioEngine {
    * rejects. Idempotent, and a no-op for an ordinary (non-punch) count-in.
    */
   public cancelPunchRecording(): void {
-    if (!this.activePunchTake) return;
+    if (!this.activePunchTake && !this.pendingPunchStart) return;
     this.activePunchTake = null;
+    this.punchStartToken++;
+    const pending = this.pendingPunchStart;
+    if (pending) {
+      this.pendingPunchStart = null;
+      pending.reject(new PunchCancelledError());
+    }
     this.countInScheduler?.cancel();
     this.punchWindow?.cancel();
   }

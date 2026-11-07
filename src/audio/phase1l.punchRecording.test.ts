@@ -3,22 +3,17 @@
  *
  *   audioEngine.beginPunchRecording → planPunchCapture (punch policy)
  *   → CountInScheduler (the Phase 1K count-in, planned backwards from punch-in)
- *   → RecordingEngine.start() (MediaRecorder opens HERE, at punch-in)
- *   → PunchCaptureWindow (the punch-out stop moment)
- *   → RecordingEngine.stop() → planPunchClipPlacement → playlist clip
+ *   → PunchCaptureWindow (the audio-clock punch-out stop moment)
+ *   → planPunchClipPlacement → playlist clip
  *
- * The harness is the Phase 1K one: a fake AudioContext records every click
- * oscillator and every stop() call, a delay-aware fake `window` timer pump keeps
- * the audio clock and the scheduled moments deterministic, and the browser
- * recording APIs use the same structural fakes as `recordingEngine.test.ts`.
- * This drives the real `RecordingEngine` and the real `audioEngine` punch path —
- * not a UI mock. What is NOT exercised is a real microphone/codec
- * (browser-only; see the report's limitations).
+ * A fake AudioContext records click oscillators and a delay-aware fake `window`
+ * timer pump verifies the production musical schedule and cancellation rules.
+ * Sample-frame capture and WAV output are measured separately against the same
+ * production AudioWorklet source in recordingEngine.test.ts.
  */
 import { afterEach, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { audioEngine, CountInCancelledError, PunchCancelledError } from './audioEngine';
-import { RecordingEngine } from './recordingEngine';
 import { createPunchRecordingPlaylistClip, planPunchClipPlacement, trimAudioBufferToSeconds, getRecordingAudioBufferId } from './recordingPipeline';
 import type { AudioRecording, PlaylistTrack } from '../types/daw';
 
@@ -117,36 +112,6 @@ class FakeAudioContext {
   async decodeAudioData(): Promise<AudioBuffer> { return this.decoded; }
 }
 
-/** Records the audio-clock moments a capture opened and closed at. */
-class FakeTrack { stopped = false; stop(): void { this.stopped = true; } }
-class FakeStream { readonly track = new FakeTrack(); getTracks(): FakeTrack[] { return [this.track]; } }
-
-class FakeMediaRecorder {
-  static isTypeSupported(): boolean { return true; }
-  state: 'inactive' | 'recording' = 'inactive';
-  mimeType = 'audio/webm';
-  startedAtAudioTime = Number.NaN;
-  stoppedAtAudioTime = Number.NaN;
-  ondataavailable: ((event: { data: Blob }) => void) | null = null;
-  onstop: (() => void | Promise<void>) | null = null;
-  onerror: (() => void) | null = null;
-  constructor(readonly stream: FakeStream, readonly clock?: () => number) {}
-  start(): void {
-    this.startedAtAudioTime = this.clock?.() ?? Number.NaN;
-    this.state = 'recording';
-  }
-  pause(): void {}
-  resume(): void {}
-  stop(): void {
-    this.stoppedAtAudioTime = this.clock?.() ?? Number.NaN;
-    this.state = 'inactive';
-    queueMicrotask(() => {
-      this.ondataavailable?.({ data: new Blob(['recorded'], { type: 'audio/webm' }) });
-      void this.onstop?.();
-    });
-  }
-}
-
 type EngineInternals = Record<string, any>;
 const engine = audioEngine as unknown as EngineInternals;
 const realWindow = (globalThis as any).window;
@@ -163,20 +128,18 @@ const SAVED_KEYS = [
   'stepCallback', 'transportStateCallback', 'sampleBuffers',
   'masterGain', 'mixerChannels', 'isOfflineRendering', 'offlineRenderLeaseHeld',
   'playlistLaneMutes', 'sevenEightGrouping', 'metronomePulseLayout', 'activeMetronomeClicks',
-  'countInBars', 'countInScheduler', 'timerId',
+  'countInBars', 'countInScheduler', 'pendingCountInStart', 'timerId',
   // Phase 1L state must be saved and restored too, or a take leaks across tests.
-  'punchRecording', 'punchWindow', 'activePunchTake',
+  'punchRecording', 'punchWindow', 'activePunchTake', 'punchStartToken', 'pendingPunchStart',
 ];
 
-interface Harness { ctx: FakeAudioContext; recorders: FakeMediaRecorder[] }
+interface Harness { ctx: FakeAudioContext }
 
 const install = (options: { punch?: unknown; countInBars?: number } = {}): Harness => {
   timers = [];
   const ctx = new FakeAudioContext();
-  const recorders: FakeMediaRecorder[] = [];
   // Delay-aware fake window timers: a timer fires when the audio clock reaches
-  // schedule-time + delay, so the count-in and punch-out moments land exactly
-  // on their planned instants under the pump.
+  // schedule-time + delay, so count-in and punch-out moments are deterministic.
   (globalThis as any).window = {
     setTimeout: (fn: () => void, ms = 0) => {
       timers.push({ at: ctx.currentTime + ms / 1000, fn, cleared: false });
@@ -186,29 +149,6 @@ const install = (options: { punch?: unknown; countInBars?: number } = {}): Harne
       const timer = timers[id - 1];
       if (timer) timer.cleared = true;
     },
-  };
-  const OriginalNavigator = globalThis.navigator;
-  const OriginalMediaRecorder = globalThis.MediaRecorder;
-  const OriginalCreateObjectURL = URL.createObjectURL;
-  const stream = new FakeStream();
-  Object.defineProperty(globalThis, 'navigator', {
-    configurable: true,
-    value: { mediaDevices: { getUserMedia: async () => stream } },
-  });
-  Object.defineProperty(globalThis, 'MediaRecorder', {
-    configurable: true,
-    value: class extends FakeMediaRecorder {
-      constructor(input: FakeStream) {
-        super(input, () => ctx.currentTime);
-        recorders.push(this);
-      }
-    },
-  });
-  URL.createObjectURL = () => 'blob:punch-test';
-  (globalThis as any).__restorePunchMocks = () => {
-    Object.defineProperty(globalThis, 'navigator', { configurable: true, value: OriginalNavigator });
-    Object.defineProperty(globalThis, 'MediaRecorder', { configurable: true, value: OriginalMediaRecorder });
-    URL.createObjectURL = OriginalCreateObjectURL;
   };
 
   saved = {};
@@ -235,16 +175,16 @@ const install = (options: { punch?: unknown; countInBars?: number } = {}): Harne
   engine.punchRecording = options.punch ?? { enabled: false, inBar: 1, inBeat: 1, outBar: 5, outBeat: 1 };
   engine.punchWindow = null;
   engine.activePunchTake = null;
+  engine.punchStartToken = 0;
+  engine.pendingPunchStart = null;
   engine.setTimeSignature([4, 4]);
   engine.setSevenEightGrouping(undefined);
-  return { ctx, recorders };
+  return { ctx };
 };
 
 afterEach(() => {
   engine.cancelPunchRecording?.();
   engine.cancelRecordingCountIn?.();
-  (globalThis as any).__restorePunchMocks?.();
-  delete (globalThis as any).__restorePunchMocks;
   for (const key of SAVED_KEYS) engine[key] = saved[key];
   (globalThis as any).window = realWindow;
 });
@@ -265,67 +205,51 @@ const runUntil = (h: Harness, until: number): void => {
 const audible = (h: Harness) => h.ctx.oscillators.filter(o => o.audible).sort((a, b) => a.startAt - b.startAt);
 const r = (x: number) => Math.round(x * 1e6) / 1e6;
 
-const newRecorder = (ctx: FakeAudioContext): RecordingEngine =>
-  new RecordingEngine(() => ctx as unknown as AudioContext, { waveformSamples: 32, persistAudioClip: async () => {} });
-
 /** The window used by most tests: bars 3–5 of a 4/4 project, 1-bar pre-roll. */
 const PUNCH = { enabled: true, inBar: 3, inBeat: 1, outBar: 5, outBeat: 1 };
 const TRACKS: PlaylistTrack[] = [
   { id: 1, name: 'Vocals', color: '#fff', mute: false, solo: false, volume: 1, pan: 0 },
 ];
 
-describe('Phase 1L — capture begins exactly at punch-in and stops exactly at punch-out', () => {
-  it('a 1-bar pre-roll clicks before punch-in, then capture runs the punched length', async () => {
+describe('Phase 1L — punch capture boundaries follow the audio clock', () => {
+  it('a 1-bar pre-roll clicks before the exact punch-in and punch-out moments', async () => {
     const h = install({ punch: PUNCH, countInBars: 1 });
-    const recorder = newRecorder(h.ctx);
     const armed = engine.beginPunchRecording({ settings: PUNCH, countInBars: 1, totalBars: 32 });
     runUntil(h, 1);
-    assert.equal(h.recorders.length, 0, 'capture must not open during the pre-roll');
     assert.ok(h.ctx.oscillators.length > 0, 'the pre-roll clicks are sounding');
     runUntil(h, 2.03);
     const session = await armed;
-    assert.equal(h.recorders.length, 0, 'capture must not open before the pre-roll promise resolves');
-    await recorder.start();
-    assert.equal(h.recorders.length, 1, 'the punch take opens exactly one recorder');
-    const mediaRecorder = h.recorders[0];
     // punch-in = bar 3 beat 1 = beat 8; a 1-bar 4/4 pre-roll starts at beat 4.
     assert.equal(session.plan.inBeats, 8);
     assert.equal(session.plan.countInStartBeat, 4);
     assert.equal(session.plan.captureDurationSeconds, 4);
     assert.equal(r(session.captureTime), 2.03, 'pre-roll lead (30 ms) + one 4/4 bar at 120 BPM');
-    assert.ok(mediaRecorder.startedAtAudioTime >= session.captureTime - 1e-9, 'capture opens at punch-in, never before');
-    assert.equal(r(mediaRecorder.startedAtAudioTime), r(session.captureTime), 'capture opens exactly on punch-in');
-    // Every count-in click lands strictly before punch-in.
     const clicks = audible(h);
     assert.equal(clicks.length, 4);
-    assert.ok(clicks.every(click => click.startAt < session.captureTime - 1e-9), 'no click may fall inside the take');
+    assert.ok(clicks.every(click => click.startAt < session.captureTime - 1e-9), 'no count-in click may overlap punch-in');
 
     let stopped = false;
-    const punchOut = session.punchOut.then(() => { stopped = true; });
+    const punchOut = session.punchOut.then(result => { stopped = true; return result; });
     runUntil(h, 6.0);
-    assert.equal(stopped, false, 'capture must still be running just before punch-out');
+    assert.equal(stopped, false, 'the punch window remains armed just before punch-out');
     runUntil(h, 6.03);
-    await punchOut;
-    await recorder.stop();
-    const captured = mediaRecorder.stoppedAtAudioTime - mediaRecorder.startedAtAudioTime;
-    assert.equal(r(captured), 4, 'capture runs exactly the punched length — no audio beyond punch-out');
+    const result = await punchOut;
+    assert.equal(r(result.stopTime), 6.03, 'punch-out is an absolute audio-clock boundary');
   });
 
-  it('with the count-in off, capture starts immediately at punch-in', async () => {
+  it('with the count-in off, punch-in uses only the scheduler lead', async () => {
     const h = install({ punch: PUNCH, countInBars: 0 });
-    const recorder = newRecorder(h.ctx);
     const armed = engine.beginPunchRecording({ settings: PUNCH, countInBars: 0, totalBars: 32 });
     runUntil(h, 0.03);
     const session = await armed;
-    await recorder.start();
     assert.equal(h.ctx.oscillators.length, 0, 'no pre-roll clicks are scheduled');
     assert.equal(r(session.captureTime), 0.03, 'only the scheduler lead separates the request from capture');
     assert.equal(session.plan.countInBeats, 0);
     runUntil(h, 4.0);
     assert.equal(engine.isPunchTakeActive(), true, 'the take runs until punch-out');
     runUntil(h, 4.03);
-    await session.punchOut;
-    await recorder.stop();
+    const result = await session.punchOut;
+    assert.equal(r(result.stopTime), 4.03);
   });
 
   it('the recorded take is placed at the punched geometry, and trimmed to the window', async () => {
@@ -414,15 +338,36 @@ describe('Phase 1L — the take stops at the end of the project', () => {
       engine.beginPunchRecording({ settings: punch, countInBars: 0, totalBars: 8 }),
       /past the end of the arrangement/,
     );
-    assert.equal(h.recorders.length, 0);
     assert.equal(engine.isPunchTakeActive(), false);
   });
 });
 
 describe('Phase 1L — stop, pause, seek, cancel and close abort the take', () => {
-  it('stop() during the pre-roll silences the clicks and opens no capture', async () => {
+  it('cancelling while AudioContext resume is pending rejects immediately and prevents a late punch start', async () => {
+    const h = install({ punch: PUNCH, countInBars: 1 });
+    h.ctx.state = 'suspended';
+    let finishResume!: () => void;
+    h.ctx.resume = () => new Promise<void>(resolve => {
+      finishResume = () => {
+        h.ctx.state = 'running';
+        resolve();
+      };
+    });
+    const pending = engine.beginPunchRecording({ settings: PUNCH, countInBars: 1, totalBars: 32 });
+    assert.equal(engine.isPunchTakeActive(), true, 'the pending resume reserves the punch start');
+    engine.cancelPunchRecording();
+    await assert.rejects(pending, PunchCancelledError);
+    finishResume();
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.equal(h.ctx.oscillators.length, 0, 'late resume must not schedule pre-roll clicks');
+    assert.equal(timers.filter(timer => !timer.cleared).length, 0);
+    assert.equal(engine.isPunchTakeActive(), false);
+    assert.equal(engine.pendingPunchStart, null);
+  });
+
+  it('stop() during the pre-roll silences every pending click and clears the punch plan', async () => {
     const h = install({ punch: PUNCH, countInBars: 2 });
-    const recorder = newRecorder(h.ctx);
     const armed = engine.beginPunchRecording({ settings: PUNCH, countInBars: 2, totalBars: 32 });
     const settled = assert.rejects(armed, CountInCancelledError);
     runUntil(h, 0.6);
@@ -431,8 +376,6 @@ describe('Phase 1L — stop, pause, seek, cancel and close abort the take', () =
     engine.stop();
     await settled;
     assert.ok(pending.every(o => !o.audible), 'stop() pre-empts every pending pre-roll click');
-    assert.equal(h.recorders.length, 0, 'capture never opens');
-    assert.equal(recorder.getState(), 'idle');
     assert.equal(engine.isPunchTakeActive(), false);
   });
 
@@ -446,22 +389,17 @@ describe('Phase 1L — stop, pause, seek, cancel and close abort the take', () =
       else engine.pause();
       await settled;
       assert.equal(engine.isPunchTakeActive(), false, `${action} must clear the armed take`);
-      assert.equal(h.recorders.length, 0);
     }
   });
 
-  it('stop() during capture rejects punch-out instead of keeping a partial take', async () => {
+  it('stop() during the punch window rejects punch-out instead of retaining a truncated plan', async () => {
     const h = install({ punch: PUNCH, countInBars: 1 });
-    const recorder = newRecorder(h.ctx);
     const armed = engine.beginPunchRecording({ settings: PUNCH, countInBars: 1, totalBars: 32 });
     runUntil(h, 2.03);
     const session = await armed;
-    await recorder.start();
-    assert.equal(recorder.getState(), 'recording');
     runUntil(h, 3);
     engine.stop();
     await assert.rejects(session.punchOut, PunchCancelledError);
-    await recorder.cancel().catch(() => undefined);
     assert.equal(engine.isPunchTakeActive(), false);
     assert.equal(timers.filter(timer => !timer.cleared).length, 0, 'no stale punch-out timer survives a stop');
   });
@@ -551,7 +489,6 @@ describe('Phase 1L — tempo and meter changes while a punch take is live', () =
     engine.setTimeSignature([7, 8]);
     await settled;
     assert.equal(engine.isPunchTakeActive(), false);
-    assert.equal(h.recorders.length, 0, 'no capture opened for a window that no longer exists');
   });
 
   it('a meter change during capture aborts the take rather than re-targeting it', async () => {
@@ -582,21 +519,17 @@ describe('Phase 1L — tempo and meter changes while a punch take is live', () =
 });
 
 describe('Phase 1L — ordinary recording is untouched when punch is off', () => {
-  it('the Phase 1K count-in path still captures from the transport position', async () => {
+  it('the Phase 1K count-in reports the ordinary capture bar without arming punch state', async () => {
     const h = install({ countInBars: 1 });
-    const recorder = newRecorder(h.ctx);
     engine.transport = {
       getState: () => ({ positionSeconds: 2, step: 0, bar: 2, playing: false, bpm: 120, beatsPerBar: 4, stepsPerBeat: 4, mode: 'song' }),
     };
     const promise = engine.beginRecordingCountIn(1);
     runUntil(h, 2.5);
     const countIn = await promise;
-    await recorder.start();
     assert.equal(countIn.captureBar, 3, 'an ordinary take is placed at the count-in capture bar');
     assert.equal(countIn.clipStartBar, 2);
     assert.equal(engine.isPunchTakeActive(), false, 'no punch take is armed for an ordinary recording');
-    assert.equal(h.recorders.length, 1);
-    await recorder.stop();
   });
 
   it('an ordinary take keeps whole-bar clip rounding and no punch placement', async () => {

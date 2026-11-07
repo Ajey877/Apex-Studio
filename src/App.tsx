@@ -73,7 +73,7 @@ import {
   runApplicationMenuCommand,
   type ApplicationMenuCommandDeps
 } from './state/applicationMenuCommands';
-import { isRecordingProjectGenerationCurrent, nextRecordingProjectGeneration } from './state/recordingProjectLifecycle';
+import { commitRecordingForCurrentProject, isRecordingProjectGenerationCurrent, nextRecordingProjectGeneration } from './state/recordingProjectLifecycle';
 import { isPureAdditivePlaylistClipAppend, resolveAdditivePlaylistClipPublication } from './state/playlistAudioPublication';
 import {
   describeRejectedPlaylistAudioClips,
@@ -2012,13 +2012,13 @@ export function App() {
     }
     const persistedRecording: AudioRecording = { ...recording, audioBufferId };
     /**
-     * Phase 1L: a punch take is trimmed to its punched window before the clip is
-     * built. `MediaRecorder` cannot start or stop on a sample, so the encoded
-     * blob normally carries a few milliseconds past punch-out; re-registering
-     * the trimmed buffer through `setSampleBuffer` replaces both the in-memory
-     * playback asset and the persisted one (the installer encodes and stores it
-     * under the same id), so nothing beyond punch-out can play, export or
-     * survive a reload. The clip's `lengthBars` independently bounds playback.
+     * Phase 1L: the capture worklet already writes the exact frame window, but
+     * keep this defensive trim at the playlist hand-off. A tempo retime or
+     * decoded-buffer rounding may make the punched geometry shorter than the
+     * decoded asset; re-registering a shortened buffer through `setSampleBuffer`
+     * replaces both the in-memory asset and its persisted float32 WAV under the
+     * same id, so no audio beyond punch-out can play, export, or survive reload.
+     * The clip's `lengthBars` independently bounds playback as well.
      */
     let registration = { id: audioBufferId, buffer: loaded.buffer, peaks: loaded.peaks, duration: loaded.duration };
     if (punchPlacement) {
@@ -2088,15 +2088,21 @@ export function App() {
       playlistClips: updatedClips,
       meta: { ...currentState.meta, updated: Date.now() }
     };
-    if (!isRecordingProjectGenerationCurrent(recordingProjectGeneration, recordingProjectGenerationRef.current)) {
+    const published = commitRecordingForCurrentProject(
+      recordingProjectGeneration,
+      recordingProjectGenerationRef.current,
+      () => {
+        updatePlaylistProjectState(nextState);
+        commitPlaylistHistory(nextState, 'Record audio to playlist');
+        // The modal's temporary recording ownership is transferred to the project
+        // only after the project state has successfully accepted the take.
+        sessionBlobUrlRegistry.transfer(recording.audioUrl ?? '');
+      },
+    );
+    if (!published) {
       sessionBlobUrlRegistry.release(recording.audioUrl ?? '');
       throw new Error('The recording belongs to a project that has already been replaced');
     }
-    updatePlaylistProjectState(nextState);
-    commitPlaylistHistory(nextState, 'Record audio to playlist');
-    // The modal's temporary recording ownership is transferred to the project
-    // only after the project state has successfully accepted the take.
-    sessionBlobUrlRegistry.transfer(recording.audioUrl ?? '');
   };
 
   // --- Computer Keypad & Keyboard Live Engine ---
