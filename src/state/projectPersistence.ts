@@ -14,8 +14,8 @@ export interface PreparedAudioFile {
 
 export interface AudioHydrationEngine {
   loadAudioFile: (file: File | Blob, id: string) => Promise<PreparedAudioFile>;
-  /** Publishes a side-effect-free decode after its owning project transaction commits. */
-  setSampleBuffer?: (id: string, buffer: AudioBuffer) => void;
+  /** Publishes already-persisted audio without invoking the new-asset persistence wrapper. */
+  publishHydratedSampleBuffer?: (id: string, buffer: AudioBuffer) => void;
 }
 
 export interface HydrateProjectAudioOptions {
@@ -189,8 +189,8 @@ const publishAudioAsset = async (
   preparedAudio?: ReadonlyMap<string, PreparedAudioFile>,
 ): Promise<void> => {
   const prepared = preparedAudio?.get(audioId);
-  if (prepared && audioEngine.setSampleBuffer) {
-    audioEngine.setSampleBuffer(audioId, prepared.buffer);
+  if (prepared && audioEngine.publishHydratedSampleBuffer) {
+    audioEngine.publishHydratedSampleBuffer(audioId, prepared.buffer);
     return;
   }
   await audioEngine.loadAudioFile(blob, audioId);

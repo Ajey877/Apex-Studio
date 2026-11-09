@@ -270,7 +270,7 @@ test('hydrateProjectAudio publishes a prepared ZIP decode after commit without d
     const published: Array<{ id: string; buffer: AudioBuffer }> = [];
     const hydrated = await hydrateProjectAudio(state, {
       loadAudioFile: async () => { throw new Error('prepared ZIP audio must not be decoded twice'); },
-      setSampleBuffer: (id, buffer) => published.push({ id, buffer }),
+      publishHydratedSampleBuffer: (id, buffer) => published.push({ id, buffer }),
     }, {
       preparedAudio: new Map([[audioBufferId, { buffer: preparedBuffer, peaks: [0.2, 0.8], duration: 2 }]]),
     });

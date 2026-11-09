@@ -1678,6 +1678,11 @@ class AudioEngine {
     if (!this.getLiveProjectSampleBufferIds().has(id)) this.getLiveSessionSampleBufferIds().add(id);
   }
 
+  /** Register bytes already durable in project storage without invoking the new-asset persistence wrapper. */
+  public publishHydratedSampleBuffer(id: string, buffer: AudioBuffer): void {
+    this.setSessionSampleBuffer(id, buffer);
+  }
+
   /** Discard only a newly allocated, never-published editor asset. Shared/project assets are protected. */
   public discardUnpublishedSampleBuffer(id: string, expected: AudioBuffer): void {
     const buffers = this.getLiveSampleBufferStore();

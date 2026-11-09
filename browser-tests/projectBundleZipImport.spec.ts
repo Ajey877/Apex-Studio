@@ -83,7 +83,7 @@ const readProjectAndAudio = async (page: Page, ids: string[]) => page.evaluate(a
     return await new Promise<{
       current: { stateJson: string } | undefined;
       recovery: { stateJson: string } | undefined;
-      audio: Record<string, { size: number; type: string; text: string } | null>;
+      audio: Record<string, { size: number; type: string; bytes: number[] } | null>;
       projectKeys: string[];
     }>((resolve, reject) => {
       const transaction = db.transaction(['clips', 'projects'], 'readonly');
@@ -98,10 +98,12 @@ const readProjectAndAudio = async (page: Page, ids: string[]) => page.evaluate(a
         request.onsuccess = () => { audio[id] = request.result?.blob ?? null; };
       }
       transaction.oncomplete = async () => {
-        const audioInfo: Record<string, { size: number; type: string; text: string } | null> = {};
+        const audioInfo: Record<string, { size: number; type: string; bytes: number[] } | null> = {};
         for (const id of audioIds) {
           const blob = audio[id];
-          audioInfo[id] = blob ? { size: blob.size, type: blob.type, text: await blob.text() } : null;
+          audioInfo[id] = blob
+            ? { size: blob.size, type: blob.type, bytes: Array.from(new Uint8Array(await blob.arrayBuffer())) }
+            : null;
         }
         resolve({
           current: currentRequest.result,
@@ -141,7 +143,7 @@ test('Portable ZIP import commits project and decodable audio together, then rep
   const stored = await readProjectAndAudio(page, [audioId]);
   expect(JSON.parse(stored.current!.stateJson).state.meta.name).toBe('Browser ZIP Import');
   expect(stored.recovery!.stateJson).toBe(stored.current!.stateJson);
-  expect(stored.audio[audioId]).toMatchObject({ size: wav.length, type: 'audio/wav' });
+  expect(stored.audio[audioId]).toMatchObject({ size: wav.length, type: 'audio/wav', bytes: Array.from(wav) });
   expect(stored.projectKeys).toContain('current-project');
   expect(stored.projectKeys).toContain('recovery-snapshot');
   expect(stored.projectKeys.some(key => key.startsWith('backup:'))).toBe(true);
@@ -191,6 +193,9 @@ test('cancelling the replacement confirmation leaves project records and importe
 
   await page.reload();
   await expect(page.getByText('Browser Current Project', { exact: true }).first()).toBeVisible({ timeout: 30_000 });
+  // Startup hydration schedules the app's normal settled-state autosave. Let
+  // that lifecycle write finish before capturing the cancellation baseline.
+  await page.waitForTimeout(800);
   const before = await readProjectAndAudio(page, [oldAudioId, 'browser-cancelled-import-audio']);
   expect(JSON.parse(before.current!.stateJson).state.meta.name).toBe('Browser Current Project');
 
@@ -211,7 +216,7 @@ test('cancelling the replacement confirmation leaves project records and importe
   const after = await readProjectAndAudio(page, [oldAudioId, importedAudioId]);
   expect(JSON.parse(after.current!.stateJson).state.meta.name).toBe('Browser Current Project');
   expect(after.recovery!.stateJson).toBe(before.recovery!.stateJson);
-  expect(after.audio[oldAudioId]).toMatchObject({ size: oldWav.length, type: 'audio/wav' });
+  expect(after.audio[oldAudioId]).toMatchObject({ size: oldWav.length, type: 'audio/wav', bytes: Array.from(oldWav) });
   expect(after.audio[importedAudioId]).toBeNull();
   expect(after.projectKeys.some(key => key.startsWith('backup:'))).toBe(false);
   expect(errors).toEqual([]);
