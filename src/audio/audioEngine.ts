@@ -1678,6 +1678,11 @@ class AudioEngine {
     if (!this.getLiveProjectSampleBufferIds().has(id)) this.getLiveSessionSampleBufferIds().add(id);
   }
 
+  /** Register bytes already durable in project storage without invoking the new-asset persistence wrapper. */
+  public publishHydratedSampleBuffer(id: string, buffer: AudioBuffer): void {
+    this.setSessionSampleBuffer(id, buffer);
+  }
+
   /** Discard only a newly allocated, never-published editor asset. Shared/project assets are protected. */
   public discardUnpublishedSampleBuffer(id: string, expected: AudioBuffer): void {
     const buffers = this.getLiveSampleBufferStore();
@@ -3889,12 +3894,13 @@ class AudioEngine {
     return bassNotes.sort((a, b) => a.start - b.start);
   }
 
-  // Audio File Loader
-  public async loadAudioFile(file: File | Blob, id: string): Promise<{ buffer: AudioBuffer; peaks: number[]; duration: number }> {
+  // Decode without publishing the result into the live sample-buffer store.
+  // ZIP imports use this as a pre-commit validation step so an undecodable
+  // archive cannot become the active project before its audio is usable.
+  public async decodeAudioFile(file: File | Blob): Promise<{ buffer: AudioBuffer; peaks: number[]; duration: number }> {
     const ctx = this.getContext();
     const arrayBuffer = await file.arrayBuffer();
     const audioBuffer = await ctx.decodeAudioData(arrayBuffer);
-    this.setSessionSampleBuffer(id, audioBuffer);
 
     const rawData = audioBuffer.getChannelData(0);
     const numPeaks = 64;
@@ -3909,6 +3915,13 @@ class AudioEngine {
       peaks.push(Math.min(1.0, max));
     }
     return { buffer: audioBuffer, peaks, duration: audioBuffer.duration };
+  }
+
+  // Audio File Loader
+  public async loadAudioFile(file: File | Blob, id: string): Promise<{ buffer: AudioBuffer; peaks: number[]; duration: number }> {
+    const decoded = await this.decodeAudioFile(file);
+    this.setSessionSampleBuffer(id, decoded.buffer);
+    return decoded;
   }
 
   // Automation Evaluator

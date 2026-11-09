@@ -19,13 +19,13 @@
  * The fix introduces `planBundleAudioImport`: an all-or-nothing validation
  * pass (manifest shape → duplicate ids/paths → path safety → payload presence
  * → byte-length vs declared size → conflict check against the real storage
- * layer) that must fully succeed before the modal writes anything. These
- * tests run the REAL production primitives end to end: `JSZip` archive
- * generation/loading, `collectBundleAudioAssets` + `buildBundleAudioAssetPath`
- * (export side), `normalizeProjectState` + `getAudioIdsForProject`
- * (reference side) and `persistAudioClip`/`getPersistedAudioClip` against the
- * in-memory IndexedDB fake (storage side). Every rejection test asserts the
- * store is byte-for-byte untouched.
+ * layer) that must fully succeed before any write is attempted. These tests
+ * retain the byte-level planner/export/storage regressions using real JSZip,
+ * `collectBundleAudioAssets` + `buildBundleAudioAssetPath`, project references,
+ * and `persistAudioClip`/`getPersistedAudioClip` against the in-memory store.
+ * Atomic project+audio commit, rollback, race, and cancellation boundaries are
+ * separately exercised in `projectBundleImportTransaction.test.ts`. Every
+ * rejection test here still asserts the audio store is byte-for-byte untouched.
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -194,7 +194,7 @@ const exportBundleZip = async (state: ProjectState, includeSamples: boolean): Pr
   return zip.generateAsync({ type: 'uint8array' });
 };
 
-/** Mirrors the modal's post-plan write loop exactly. */
+/** Applies a validated plan to the audio fake for retained byte-level round-trip checks. */
 const applyImportPlan = async (plan: BundleAudioImportPlan): Promise<number> => {
   let restoredAudioCount = 0;
   for (const audioFile of plan.assetsToPersist) {

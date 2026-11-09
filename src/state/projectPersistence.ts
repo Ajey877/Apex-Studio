@@ -1,13 +1,26 @@
 import type { AudioRecording, Channel, PlaylistClip, ProjectState } from '../types/daw';
-import { deletePersistedAudioClip, getPersistedAudioClip, getPersistedProjectRecoverySnapshotRecord, getPersistedProjectStateRecord, listPersistedAudioClipIds, listProjectBackupRecords, persistProjectRecoverySnapshotRecord, persistProjectStateRecord, replacePersistedProjectStateRecord, type StoredProjectBackup } from '../audio/audioPersistence';
+import { deletePersistedAudioClip, getPersistedAudioClip, getPersistedProjectRecoverySnapshotRecord, getPersistedProjectStateRecord, listPersistedAudioClipIds, listProjectBackupRecords, persistProjectBundleRecords, persistProjectRecoverySnapshotRecord, persistProjectStateRecord, replacePersistedProjectStateRecord, ProjectBundleAudioIdCollisionError, ProjectBundleCommitCancelledError, type ProjectBundleAudioWrite, type ProjectBundleTransactionOptions, type StoredProjectBackup } from '../audio/audioPersistence';
 import { normalizeProjectState } from './projectState';
 import { reapplyMacroRackOnHydration } from './macroMappings';
 import { getRecordingAudioBufferId } from '../audio/recordingPipeline';
 import { isSampleAudioUnavailable } from './audioAssetAvailability';
 import { sessionBlobUrlRegistry } from './sessionBlobUrlRegistry';
 
+export interface PreparedAudioFile {
+  buffer: AudioBuffer;
+  peaks: number[];
+  duration: number;
+}
+
 export interface AudioHydrationEngine {
-  loadAudioFile: (file: File | Blob, id: string) => Promise<{ buffer: AudioBuffer; peaks: number[]; duration: number }>;
+  loadAudioFile: (file: File | Blob, id: string) => Promise<PreparedAudioFile>;
+  /** Publishes already-persisted audio without invoking the new-asset persistence wrapper. */
+  publishHydratedSampleBuffer?: (id: string, buffer: AudioBuffer) => void;
+}
+
+export interface HydrateProjectAudioOptions {
+  /** Decodes prepared before a project commit; only published during hydration after commit. */
+  preparedAudio?: ReadonlyMap<string, PreparedAudioFile>;
 }
 
 export interface HydratedAudioResult {
@@ -61,9 +74,84 @@ export const serializeProjectState = (state: ProjectState): string => {
  * asynchronous saves must not be allowed to complete out of order when a large
  * project or slow storage makes an earlier write take longer than a later one.
  */
-export const persistProjectState = async (state: ProjectState): Promise<void> => {
+export interface ProjectPersistenceQueueOptions {
+  /** Rechecked when this write reaches the queue head, not only when scheduled. */
+  shouldPersist?: () => boolean;
+}
+
+export const persistProjectState = async (
+  state: ProjectState,
+  options: ProjectPersistenceQueueOptions = {},
+): Promise<void> => {
   const serialized = serializeProjectState(state);
-  await enqueuePersistenceOperation(() => persistSerializedProjectState(serialized));
+  await enqueuePersistenceOperation(async () => {
+    if (options.shouldPersist && !options.shouldPersist()) return;
+    await persistSerializedProjectState(serialized);
+  });
+};
+
+export class ProjectBundleAudioConflictError extends Error {
+  readonly audioId: string;
+
+  constructor(audioId: string) {
+    super(`Import failed — audio asset "${audioId}" appeared in local storage with different content. Existing audio was left untouched.`);
+    this.name = 'ProjectBundleAudioConflictError';
+    this.audioId = audioId;
+  }
+}
+
+const blobsHaveIdenticalBytes = async (left: Blob, right: Blob): Promise<boolean> => {
+  if (left.size !== right.size) return false;
+  const [leftBuffer, rightBuffer] = await Promise.all([left.arrayBuffer(), right.arrayBuffer()]);
+  const leftBytes = new Uint8Array(leftBuffer);
+  const rightBytes = new Uint8Array(rightBuffer);
+  for (let index = 0; index < leftBytes.length; index += 1) {
+    if (leftBytes[index] !== rightBytes[index]) return false;
+  }
+  return true;
+};
+
+/**
+ * Serializes a Portable ZIP commit with ordinary project saves. A commit-time
+ * `add` collision aborts the first transaction; only a byte-identical record is
+ * excluded from the retry, and its existing bytes are never rewritten.
+ */
+export const persistProjectBundleImport = async (
+  state: ProjectState,
+  assets: readonly ProjectBundleAudioWrite[],
+  options: ProjectBundleTransactionOptions = {},
+): Promise<void> => {
+  const serialized = serializeProjectState(state);
+  await enqueuePersistenceOperation(async () => {
+    let assetsToAdd = [...assets];
+    let identicalCollisionCount = 0;
+    const isCancelled = () => options.signal?.aborted === true || options.isCurrent?.() === false;
+
+    while (true) {
+      if (isCancelled()) throw new ProjectBundleCommitCancelledError();
+      try {
+        await persistProjectBundleRecords(serialized, assetsToAdd, options);
+        return;
+      } catch (error) {
+        if (!(error instanceof ProjectBundleAudioIdCollisionError)) throw error;
+        const collidedAsset = assetsToAdd.find(asset => asset.id === error.audioId);
+        if (!collidedAsset) throw error;
+
+        if (isCancelled()) throw new ProjectBundleCommitCancelledError();
+        const stored = await getPersistedAudioClip(error.audioId);
+        if (!stored || !(await blobsHaveIdenticalBytes(stored, collidedAsset.blob))) {
+          throw new ProjectBundleAudioConflictError(error.audioId);
+        }
+
+        // Retry only after comparing outside the aborted transaction. The
+        // active project and recovery snapshot are written again with the
+        // remaining assets in one new transaction.
+        assetsToAdd = assetsToAdd.filter(asset => asset.id !== error.audioId);
+        identicalCollisionCount += 1;
+        if (identicalCollisionCount > assets.length) throw error;
+      }
+    }
+  });
 };
 
 export const getAudioIdsForProject = (state: ProjectState): string[] => {
@@ -94,9 +182,24 @@ export const getAudioIdsForProject = (state: ProjectState): string[] => {
   return [...ids];
 };
 
+const publishAudioAsset = async (
+  blob: Blob,
+  audioId: string,
+  audioEngine: AudioHydrationEngine,
+  preparedAudio?: ReadonlyMap<string, PreparedAudioFile>,
+): Promise<void> => {
+  const prepared = preparedAudio?.get(audioId);
+  if (prepared && audioEngine.publishHydratedSampleBuffer) {
+    audioEngine.publishHydratedSampleBuffer(audioId, prepared.buffer);
+    return;
+  }
+  await audioEngine.loadAudioFile(blob, audioId);
+};
+
 const hydrateRecording = async (
   recording: AudioRecording,
-  audioEngine: AudioHydrationEngine
+  audioEngine: AudioHydrationEngine,
+  preparedAudio?: ReadonlyMap<string, PreparedAudioFile>,
 ): Promise<{ recording: AudioRecording; hydrated: boolean; audioId: string }> => {
   const audioId = recording.audioBufferId || getRecordingAudioBufferId(recording.id);
   const blob = await getPersistedAudioClip(audioId);
@@ -104,7 +207,7 @@ const hydrateRecording = async (
     return { recording: { ...recording, audioBufferId: audioId }, hydrated: false, audioId };
   }
 
-  await audioEngine.loadAudioFile(blob, audioId);
+  await publishAudioAsset(blob, audioId, audioEngine, preparedAudio);
   const audioUrl = URL.createObjectURL(blob);
   sessionBlobUrlRegistry.retain(audioUrl);
   return {
@@ -126,14 +229,15 @@ const hydrateRecording = async (
  */
 export const hydrateProjectAudio = async (
   state: ProjectState,
-  audioEngine: AudioHydrationEngine
+  audioEngine: AudioHydrationEngine,
+  options: HydrateProjectAudioOptions = {},
 ): Promise<HydratedAudioResult> => {
   const hydratedAudioIds: string[] = [];
   const missingAudioIds: string[] = [];
 
   const restoredRecordings = await Promise.all(state.recordings.map(async recording => {
     try {
-      const result = await hydrateRecording(recording, audioEngine);
+      const result = await hydrateRecording(recording, audioEngine, options.preparedAudio);
       if (result.hydrated) hydratedAudioIds.push(result.audioId);
       else missingAudioIds.push(result.audioId);
       return result.recording;
@@ -155,7 +259,7 @@ export const hydrateProjectAudio = async (
         missingAudioIds.push(audioId);
         continue;
       }
-      await audioEngine.loadAudioFile(blob, audioId);
+      await publishAudioAsset(blob, audioId, audioEngine, options.preparedAudio);
       hydratedAudioIds.push(audioId);
       loadedIds.add(audioId);
     } catch (error) {
@@ -404,7 +508,7 @@ export const reconcilePersistedAudio = async (
   };
 };
 
-export interface SaveAndReconcileOptions extends AudioReconciliationOptions {
+export interface SaveAndReconcileOptions extends AudioReconciliationOptions, ProjectPersistenceQueueOptions {
   reconcileAudio?: boolean;
 }
 
@@ -420,6 +524,11 @@ export const saveAndReconcileProjectState = async (
   const serialized = serializeProjectState(state);
 
   return enqueuePersistenceOperation(async () => {
+    // This predicate is intentionally evaluated inside the queue. A replacement
+    // can commit while an older save is waiting behind it; such a write must not
+    // overwrite the just-committed project or reconcile against the old state.
+    if (options?.shouldPersist && !options.shouldPersist()) return null;
+
     // Keep project persistence and audio reconciliation in the same queue entry.
     // A newer save cannot become durable until this save's reconciliation has
     // finished, so stale reconciliation can never observe and delete newer audio.

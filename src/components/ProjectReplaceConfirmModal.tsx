@@ -59,7 +59,7 @@ export const ProjectReplaceConfirmModal: React.FC<ProjectReplaceConfirmModalProp
 
         <div className="p-4 space-y-3 text-xs">
           <p className="text-[var(--apex-text-2)] leading-relaxed select-text">
-            <strong className="text-[var(--apex-text)]">{plan.currentName}</strong> is open and contains work.
+            <strong className="text-[var(--apex-text)]">{plan.currentName}</strong> is open.
             {' '}{describeReplacementSource(plan.source)} will replace it with <strong className="text-[var(--apex-text)]">{plan.incomingName}</strong>.
           </p>
 

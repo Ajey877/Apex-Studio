@@ -49,11 +49,14 @@ import {
   getSelectedPatternLengthSteps,
   setPatternLengthStepsInProjectState
 } from './state/patternLength';
-import { getHistoryAudioIds, getAudioIdsForProject, hydrateProjectAudio, persistProjectState, restorePersistedProjectState, saveAndReconcileProjectState } from './state/projectPersistence';
+import { getHistoryAudioIds, getAudioIdsForProject, hydrateProjectAudio, persistProjectBundleImport, persistProjectState, reconcilePersistedAudio, restorePersistedProjectState, saveAndReconcileProjectState, type PreparedAudioFile } from './state/projectPersistence';
 import { ProjectBackupError, backupProjectBeforeReplacement } from './state/projectBackup';
+import { ProjectBundleCommitCancelledError } from './audio/audioPersistence';
+import type { BundleAudioImportPlan } from './components/projectBundleImport';
+import { runBundleImportCommit } from './components/projectBundleImport';
 import { getSampleBufferPersistenceController, waitForSampleBufferPersistence } from './audio/sampleBufferPersistence';
 import { getProjectSessionBlobUrls, replaceProjectSessionBlobUrls, sessionBlobUrlRegistry } from './state/sessionBlobUrlRegistry';
-import { planProjectReplacement, runProjectReplacementAfterBackup, type ProjectReplacementPlan, type ProjectReplacementSource } from './state/projectReplacement';
+import { planProjectReplacement, runProjectReplacementAfterBackup, runProjectReplacementAfterBackupAndCommit, type ProjectReplacementCommitOutcome, type ProjectReplacementPlan, type ProjectReplacementSource } from './state/projectReplacement';
 import {
   collectMissingAudioAssets,
   describeMissingAudioAssets,
@@ -174,13 +177,25 @@ import { hasOpenModalDialog } from './components/ModalFrame';
 
 import { AlertTriangle, X } from 'lucide-react';
 
+type ProjectLoadResult = boolean | { committed: true; warning?: string };
+
+interface BundleProjectLoadRequest {
+  plan: BundleAudioImportPlan;
+  controller: AbortController;
+  isCurrent: () => boolean;
+  onCommitted: () => void;
+}
+
 interface PendingProjectReplacement {
+  requestId: number;
   incomingState: ProjectState;
   plan: ProjectReplacementPlan;
-  resolve: (replaced: boolean) => void;
+  resolve: (result: ProjectLoadResult) => void;
   isWorking: boolean;
   backupError: string | null;
   error: string | null;
+  didCommit: boolean;
+  bundleImport?: BundleProjectLoadRequest;
 }
 
 export function App() {
@@ -191,6 +206,9 @@ export function App() {
   const hasUnsavedChangesRef = useRef(false);
   const skipNextAutosaveStateRef = useRef<ProjectState | null>(null);
   const lifecycleSavePromiseRef = useRef<Promise<boolean> | null>(null);
+  const committedBundlePublicationRef = useRef(false);
+  const blockedStaleProjectSaveRef = useRef<ProjectState | null>(null);
+  const projectSaveGenerationRef = useRef(0);
   const [saveError, setSaveError] = useState<string | null>(null);
   // Phase 8C (P1-11): missing audio must be visible in the app, not only in the
   // console. The banner re-appears whenever the set of missing assets changes.
@@ -198,6 +216,9 @@ export function App() {
   // Phase 8A: destructive project replacement waits for explicit confirmation (and a backup).
   const [pendingReplacement, setPendingReplacement] = useState<PendingProjectReplacement | null>(null);
   const pendingReplacementRef = useRef<PendingProjectReplacement | null>(null);
+  const replacementRequestIdRef = useRef(0);
+  const activeBundleImportRef = useRef<{ requestId: number; controller: AbortController; didCommit: boolean } | null>(null);
+  const projectReplacementWorkRef = useRef<Promise<unknown> | null>(null);
   const [currentView, setCurrentView] = useState<ViewMode>('channel_rack');
   const [playMode, setPlayMode] = useState<PlayMode>('pat');
   const [isPlaying, setIsPlaying] = useState(false);
@@ -518,19 +539,33 @@ export function App() {
     stateToSave: ProjectState = projectStateRef.current,
     options?: { reconcileAudio?: boolean; additionalReferencedIds?: Iterable<string> }
   ): Promise<boolean> => {
+    const saveGeneration = projectSaveGenerationRef.current;
+    const shouldPersist = () =>
+      saveGeneration === projectSaveGenerationRef.current &&
+      !committedBundlePublicationRef.current &&
+      stateToSave !== blockedStaleProjectSaveRef.current;
+
+    // Once a bundle transaction completes, stale lifecycle/autosave callbacks
+    // must not rewrite the outgoing document over the durable incoming commit.
+    if (!shouldPersist()) return true;
     try {
       if (options?.reconcileAudio) {
         await saveAndReconcileProjectState(stateToSave, {
           history: projectHistoryRef.current,
           reconcileAudio: true,
+          shouldPersist,
           // Preserve explicit session-only buffers without treating stale project-owned
           // engine residency as a reference to the active project.
           additionalReferencedIds: options?.additionalReferencedIds ?? audioEngine.getPersistableSampleBufferIds()
         });
       } else {
-        await persistProjectState(stateToSave);
+        await persistProjectState(stateToSave, { shouldPersist });
       }
 
+      // A save can have been queued behind an import transaction while it still
+      // looked current. Its queue-time predicate skips the write; this second
+      // check also prevents stale runtime ownership/dirty-state publication.
+      if (!shouldPersist()) return true;
       audioEngine.setProjectSampleBufferOwnership(new Set([...getAudioIdsForProject(stateToSave), ...getHistoryAudioIds(projectHistoryRef.current)]));
       if (projectStateRef.current === stateToSave) {
         hasUnsavedChangesRef.current = false;
@@ -1258,17 +1293,147 @@ export function App() {
   /**
    * Replaces the open project. Validation happens before anything destructive:
    * a project that fails normalization leaves the current project untouched.
+   * Portable ZIPs use a separate durable boundary: backup, prepare, atomically
+   * commit project+audio, and only then hydrate/publish runtime state.
    */
   const applyProjectReplacement = useCallback(async (
     state: ProjectState,
-    options: { backup: boolean }
-  ): Promise<void> => {
-    // Phase 51: every interactive load path (project manager import, bundle ZIP,
-    // demo project, backup restore) funnels through here, so this is where a
-    // loaded macro rack is re-applied to the parameters it drives. Doing it
-    // before hydration/backup means the published, persisted and audio-hydrated
-    // state are all the same resolved document.
+    options: { backup: boolean; bundleImport?: BundleProjectLoadRequest }
+  ): Promise<ProjectLoadResult> => {
     const normalized = reapplyMacroRackOnHydration(normalizeProjectState(state));
+
+    if (options.bundleImport) {
+      const bundleImport = options.bundleImport;
+      let didCommit = false;
+      const preparedAudio = new Map<string, PreparedAudioFile>();
+      const publishCommittedBundle = async (): Promise<ProjectLoadResult> => {
+        const warnings: string[] = [];
+        const describeError = (error: unknown): string => error instanceof Error ? error.message : String(error);
+        const warn = (label: string, error: unknown) => warnings.push(`${label}: ${describeError(error)}`);
+        const outgoingState = projectStateRef.current;
+
+        setAudioEditorClipId(null);
+        setAudioEditorNotice('');
+        recordingProjectGenerationRef.current = nextRecordingProjectGeneration(recordingProjectGenerationRef.current);
+        try { await cancelRecordingForReplacementRef.current?.(); } catch (error) { warn('Recording shutdown warning', error); }
+        try { cancelMidiRecordingRef.current?.(); } catch (error) { warn('MIDI recording shutdown warning', error); }
+        try { audioEngine.panicExternalMidi(outgoingState.channels); } catch (error) { warn('External MIDI shutdown warning', error); }
+        try { handleStop(); } catch (error) { warn('Transport shutdown warning', error); }
+        try { audioEngine.releaseNativeInstruments(); } catch (error) { warn('Instrument release warning', error); }
+
+        let publishedState = normalized;
+        try {
+          const hydrated = await hydrateProjectAudio(normalized, audioEngine, { preparedAudio });
+          preparedAudio.clear();
+          publishedState = hydrated.state;
+          if (hydrated.missingAudioIds.length > 0) {
+            warnings.push(`${hydrated.missingAudioIds.length} referenced audio asset(s) could not be hydrated after the project commit.`);
+          }
+        } catch (error) {
+          warn('Audio hydration warning', error);
+        }
+
+        try { synchronizeRuntimeState(outgoingState, publishedState); }
+        catch (error) { warn('Runtime synchronization warning', error); }
+        try { replaceProjectSessionBlobUrls(outgoingState, publishedState); }
+        catch (error) {
+          warn('Session URL cleanup warning', error);
+          for (const url of getProjectSessionBlobUrls(outgoingState)) sessionBlobUrlRegistry.release(url);
+        }
+
+        // IndexedDB already contains the incoming state. Publish it even when a
+        // runtime subsystem failed; never turn a durable import into a false
+        // "unchanged" result or issue a second, non-atomic project save here.
+        projectStateRef.current = publishedState;
+        skipNextAutosaveStateRef.current = publishedState;
+        setProjectState(publishedState);
+        resetProjectHistory(publishedState);
+        setSelectedChannelId(publishedState.selectedChannelId || publishedState.channels[0]?.id || 'ch-1');
+        setSelectedTrackId(publishedState.selectedMixerTrackId ?? 0);
+        setDismissedMissingAudioSignature(publishedState.dismissedMissingAudioSignature ?? null);
+        hasUnsavedChangesRef.current = false;
+        setSaveError(null);
+        try {
+          audioEngine.setProjectSampleBufferOwnership(new Set([
+            ...getAudioIdsForProject(publishedState),
+            ...getHistoryAudioIds(projectHistoryRef.current),
+          ]));
+        } catch (error) { warn('Audio ownership publication warning', error); }
+
+        try {
+          // Reconciliation is deliberately post-commit and sees the new history
+          // plus retained outgoing backups before considering any audio deletion.
+          await reconcilePersistedAudio(publishedState, {
+            history: projectHistoryRef.current,
+            additionalReferencedIds: audioEngine.getPersistableSampleBufferIds(),
+          });
+        } catch (error) { warn('Audio reconciliation warning', error); }
+
+        committedBundlePublicationRef.current = false;
+        return warnings.length > 0
+          ? { committed: true, warning: warnings.join(' ') }
+          : { committed: true };
+      };
+
+      try {
+        const outcome: ProjectReplacementCommitOutcome<ProjectLoadResult> = await runProjectReplacementAfterBackupAndCommit(
+          true,
+          options.backup
+            ? () => backupProjectBeforeReplacement(projectStateRef.current, { reason: 'replace' })
+            : undefined,
+          () => runBundleImportCommit(bundleImport.plan, {
+            accepted: true,
+            signal: bundleImport.controller.signal,
+            isCurrent: bundleImport.isCurrent,
+            prepare: async plan => {
+              for (const asset of plan.validatedAssets) {
+                if (bundleImport.controller.signal.aborted || !bundleImport.isCurrent()) {
+                  throw new ProjectBundleCommitCancelledError();
+                }
+                preparedAudio.set(asset.id, await audioEngine.decodeAudioFile(asset.blob));
+              }
+            },
+            persist: assets => persistProjectBundleImport(
+              normalized,
+              assets.map(({ id, blob, mimeType }) => ({ id, blob, mimeType })),
+              {
+                signal: bundleImport.controller.signal,
+                isCurrent: bundleImport.isCurrent,
+                onCommitted: () => {
+                  didCommit = true;
+                  projectSaveGenerationRef.current += 1;
+                  committedBundlePublicationRef.current = true;
+                  blockedStaleProjectSaveRef.current = projectStateRef.current;
+                  bundleImport.onCommitted();
+                },
+              },
+            ),
+          }),
+          publishCommittedBundle,
+        );
+        return outcome.committed ? outcome.value : false;
+      } catch (error) {
+        if (!didCommit) throw error;
+        // A post-commit exception must still be represented as a committed load.
+        // The normal publication helper catches subsystem failures individually;
+        // this final fallback protects against an unexpected state/UI exception.
+        const warning = error instanceof Error ? error.message : String(error);
+        try {
+          projectStateRef.current = normalized;
+          skipNextAutosaveStateRef.current = normalized;
+          setProjectState(normalized);
+          resetProjectHistory(normalized);
+          setSelectedChannelId(normalized.selectedChannelId || normalized.channels[0]?.id || 'ch-1');
+          setSelectedTrackId(normalized.selectedMixerTrackId ?? 0);
+          hasUnsavedChangesRef.current = false;
+        } catch (fallbackError) {
+          console.error('[Apex Studio] Committed ZIP project fallback publication failed.', fallbackError);
+        }
+        committedBundlePublicationRef.current = false;
+        return { committed: true, warning: `The project was imported, but runtime publication reported a warning: ${warning}` };
+      }
+    }
+
     await runProjectReplacementAfterBackup(
       options.backup
         ? () => backupProjectBeforeReplacement(projectStateRef.current, { reason: 'replace' }).then(() => undefined)
@@ -1322,35 +1487,128 @@ export function App() {
         }
       }
     );
-  }, [resetProjectHistory, performSave, synchronizeRuntimeState]);
+    return true;
+  }, [handleStop, resetProjectHistory, performSave, synchronizeRuntimeState]);
 
-  const settlePendingReplacement = useCallback((replaced: boolean) => {
+  const settlePendingReplacement = useCallback((result: ProjectLoadResult, expectedRequestId?: number) => {
     const pending = pendingReplacementRef.current;
+    if (!pending || (expectedRequestId !== undefined && pending.requestId !== expectedRequestId)) return;
     pendingReplacementRef.current = null;
     setPendingReplacement(null);
-    pending?.resolve(replaced);
+    const resolved = pending.didCommit && result === false
+      ? { committed: true as const, warning: 'The project was already committed and could not be cancelled.' }
+      : result;
+    if (activeBundleImportRef.current?.requestId === pending.requestId) activeBundleImportRef.current = null;
+    pending.resolve(resolved);
   }, []);
 
   /**
    * Entry point for every project load (demos, manifest/bundle import, new session,
-   * backup restore). Pristine templates are replaced immediately; anything with
-   * work waits for the confirm dialog. Resolves true only when the project was replaced.
+   * backup restore). Pristine templates are replaced immediately; ZIP imports
+   * always require explicit acceptance and a successful outgoing backup.
    */
   const handleLoadProjectState = useCallback(async (
     state: ProjectState,
-    options?: { source?: ProjectReplacementSource }
-  ): Promise<boolean> => {
-    const plan = planProjectReplacement(projectStateRef.current, state, { source: options?.source });
-    if (!plan.requiresConfirmation) {
+    options?: {
+      source?: ProjectReplacementSource;
+      bundleImportPlan?: BundleAudioImportPlan;
+      bundleImportController?: AbortController;
+    }
+  ): Promise<ProjectLoadResult> => {
+    const committedPending = pendingReplacementRef.current;
+    const committedActive = activeBundleImportRef.current;
+    const committedWork = projectReplacementWorkRef.current;
+    if ((committedPending?.didCommit || committedActive?.didCommit) && committedWork) {
+      let committedResult: ProjectLoadResult = { committed: true };
+      try {
+        const result = await committedWork;
+        committedResult = result === undefined ? true : result as ProjectLoadResult;
+      } catch (error) {
+        committedResult = {
+          committed: true,
+          warning: error instanceof Error ? error.message : String(error),
+        };
+      }
+      if (committedPending?.didCommit) {
+        settlePendingReplacement(committedResult, committedPending.requestId);
+      }
+    }
+
+    const requestId = ++replacementRequestIdRef.current;
+    const controller = options?.bundleImportController;
+    const previousPending = pendingReplacementRef.current;
+    const previousActive = activeBundleImportRef.current;
+    if (previousActive && previousActive.controller !== controller && !previousActive.didCommit) {
+      previousActive.controller.abort();
+    }
+    if (previousPending && previousPending.requestId !== requestId && !previousPending.didCommit) {
+      previousPending.bundleImport?.controller.abort();
+      settlePendingReplacement(false, previousPending.requestId);
+    }
+
+    const basePlan = planProjectReplacement(projectStateRef.current, state, { source: options?.source });
+    const isBundleImport = options?.source === 'bundle-import' || Boolean(options?.bundleImportPlan || controller);
+    if (isBundleImport && (!options?.bundleImportPlan || !controller)) {
+      throw new Error('Portable ZIP replacement requires its validated import plan and cancellation controller.');
+    }
+    const plan = isBundleImport
+      ? { ...basePlan, requiresConfirmation: true, shouldBackup: true }
+      : basePlan;
+    if (!plan.requiresConfirmation && !isBundleImport) {
       await applyProjectReplacement(state, { backup: false });
       return true;
     }
-    // A newer request supersedes any dialog still waiting for an answer.
-    if (pendingReplacementRef.current) settlePendingReplacement(false);
-    return new Promise<boolean>(resolve => {
-      const pending: PendingProjectReplacement = { incomingState: state, plan, resolve, isWorking: false, backupError: null, error: null };
+
+    let bundleImport: BundleProjectLoadRequest | undefined;
+    if (isBundleImport && controller && options?.bundleImportPlan) {
+      const active = { requestId, controller, didCommit: false };
+      activeBundleImportRef.current = active;
+      bundleImport = {
+        plan: options.bundleImportPlan,
+        controller,
+        isCurrent: () => {
+          const current = activeBundleImportRef.current;
+          return !controller.signal.aborted && current?.requestId === requestId && current.controller === controller;
+        },
+        onCommitted: () => {
+          active.didCommit = true;
+          if (activeBundleImportRef.current?.requestId === requestId) activeBundleImportRef.current.didCommit = true;
+          committedBundlePublicationRef.current = true;
+          blockedStaleProjectSaveRef.current = projectStateRef.current;
+          const currentPending = pendingReplacementRef.current;
+          if (currentPending?.requestId === requestId) {
+            const committedPending = { ...currentPending, didCommit: true };
+            pendingReplacementRef.current = committedPending;
+            setPendingReplacement(committedPending);
+          }
+        },
+      };
+      controller.signal.addEventListener('abort', () => {
+        const currentPending = pendingReplacementRef.current;
+        if (active.didCommit || currentPending?.requestId !== requestId) return;
+        // Before acceptance, resolve immediately so closing the ZIP modal can
+        // unwind its pending request. Once the user accepted, wait for the
+        // transaction result: its synchronous onCommitted hook is the authority
+        // when abort races the IndexedDB completion event.
+        if (!currentPending.isWorking) settlePendingReplacement(false, requestId);
+      }, { once: true });
+    }
+
+    return new Promise<ProjectLoadResult>(resolve => {
+      const pending: PendingProjectReplacement = {
+        requestId,
+        incomingState: state,
+        plan,
+        resolve,
+        isWorking: false,
+        backupError: null,
+        error: null,
+        didCommit: false,
+        bundleImport,
+      };
       pendingReplacementRef.current = pending;
       setPendingReplacement(pending);
+      if (controller?.signal.aborted) settlePendingReplacement(false, requestId);
     });
   }, [applyProjectReplacement, settlePendingReplacement]);
 
@@ -1359,25 +1617,38 @@ export function App() {
     if (!pending || pending.isWorking) return;
     const update = (patch: Partial<PendingProjectReplacement>) => {
       const current = pendingReplacementRef.current;
-      if (!current) return; // superseded or cancelled while working
+      if (!current || current.requestId !== pending.requestId) return; // superseded or cancelled while working
       const next = { ...current, ...patch };
       pendingReplacementRef.current = next;
       setPendingReplacement(next);
     };
     update({ isWorking: true, backupError: null, error: null });
+    const work = applyProjectReplacement(pending.incomingState, {
+      backup: pending.plan.shouldBackup,
+      bundleImport: pending.bundleImport,
+    });
+    projectReplacementWorkRef.current = work;
     try {
-      // A confirmed replacement always takes the backup-required path. There is
-      // intentionally no alternate confirmation that can bypass it.
-      await applyProjectReplacement(pending.incomingState, { backup: pending.plan.shouldBackup });
-      settlePendingReplacement(true);
+      const result = await work;
+      settlePendingReplacement(result === undefined ? true : result, pending.requestId);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown error';
       console.warn('[Apex Studio] Project replacement did not complete.', error);
-      if (error instanceof ProjectBackupError) {
+      const current = pendingReplacementRef.current;
+      const committed = (current?.requestId === pending.requestId && current.didCommit) ||
+        (activeBundleImportRef.current?.requestId === pending.requestId && activeBundleImportRef.current.didCommit);
+      if (error instanceof ProjectBundleCommitCancelledError || pending.bundleImport?.controller.signal.aborted) {
+        if (committed) settlePendingReplacement({ committed: true, warning: message }, pending.requestId);
+        else settlePendingReplacement(false, pending.requestId);
+      } else if (committed) {
+        settlePendingReplacement({ committed: true, warning: message }, pending.requestId);
+      } else if (error instanceof ProjectBackupError) {
         update({ isWorking: false, backupError: message });
       } else {
         update({ isWorking: false, error: message });
       }
+    } finally {
+      if (projectReplacementWorkRef.current === work) projectReplacementWorkRef.current = null;
     }
   }, [applyProjectReplacement, settlePendingReplacement]);
 
@@ -2927,7 +3198,7 @@ export function App() {
         accept=".json,.flmp"
         className="hidden"
       />
-      <ProjectManagerModal isOpen={isProjectManagerOpen} onClose={() => setIsProjectManagerOpen(false)} currentState={projectState} onLoadProject={handleLoadProjectState} onUpdateMeta={handleUpdateMeta} onRequestManifestImport={() => manifestInputRef.current?.click()} />
+      <ProjectManagerModal isOpen={isProjectManagerOpen} onClose={() => setIsProjectManagerOpen(false)} currentState={projectState} onLoadProject={async (state, options) => (await handleLoadProjectState(state, options)) !== false} onUpdateMeta={handleUpdateMeta} onRequestManifestImport={() => manifestInputRef.current?.click()} />
       <CollaborationModal
         isOpen={isCollabOpen}
         onClose={() => setIsCollabOpen(false)}

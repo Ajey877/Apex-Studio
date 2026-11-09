@@ -5,18 +5,28 @@ import JSZip from 'jszip';
 import { ProjectState } from '../types/daw';
 import { normalizeProjectState } from '../state/projectState';
 import { resolvePatternChannelContent } from '../state/patternContent';
-import { getPersistedAudioClip, persistAudioClip } from '../audio/audioPersistence';
+import { getPersistedAudioClip } from '../audio/audioPersistence';
 import { BundleAudioAssetError, collectBundleAudioAssets } from './projectBundleAudioAssets';
-import { BundleImportError, planBundleAudioImport } from './projectBundleImport';
+import { BundleImportError, getRecognizedBundleAudioFiles, planBundleAudioImport } from './projectBundleImport';
+import type { BundleAudioImportPlan } from './projectBundleImport';
 import { getAudioIdsForProject } from '../state/projectPersistence';
 import type { ProjectReplacementSource } from '../state/projectReplacement';
+
+type BundleProjectLoadResult = boolean | void | { committed: true; warning?: string };
 
 interface ProjectBundleZipModalProps {
   isOpen: boolean;
   onClose: () => void;
   projectState: ProjectState;
-  /** Resolves false when the user kept the current project (replacement confirmation declined). */
-  onLoadProjectState: (state: ProjectState, options?: { source?: ProjectReplacementSource }) => boolean | void | Promise<boolean | void>;
+  /** Resolves false when the user kept the current project; reports post-commit issues as warnings. */
+  onLoadProjectState: (
+    state: ProjectState,
+    options?: {
+      source?: ProjectReplacementSource;
+      bundleImportPlan?: BundleAudioImportPlan;
+      bundleImportController?: AbortController;
+    }
+  ) => BundleProjectLoadResult | Promise<BundleProjectLoadResult>;
 }
 
 interface BundleAudioFile {
@@ -51,6 +61,8 @@ export const ProjectBundleZipModal: React.FC<ProjectBundleZipModalProps> = ({
   );
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const importRequestIdRef = useRef(0);
+  const activeImportControllerRef = useRef<AbortController | null>(null);
 
   if (!isOpen) return null;
 
@@ -154,69 +166,95 @@ Engine: Apex Studio Digital Audio Workstation
     }
   };
 
+  const handleClose = () => {
+    importRequestIdRef.current += 1;
+    activeImportControllerRef.current?.abort();
+    activeImportControllerRef.current = null;
+    setIsImporting(false);
+    onClose();
+  };
+
   const handleImportZip = async (e: React.ChangeEvent<HTMLInputElement>) => {
     if (!e.target.files?.[0]) return;
     const file = e.target.files[0];
+    const requestId = ++importRequestIdRef.current;
+    const controller = new AbortController();
+    activeImportControllerRef.current?.abort();
+    activeImportControllerRef.current = controller;
+    const isCurrent = () => requestId === importRequestIdRef.current && !controller.signal.aborted;
+
     try {
       setIsImporting(true);
       setStatusMessage(`Unpacking "${file.name}"...`);
 
       const zip = await JSZip.loadAsync(file);
+      if (!isCurrent()) return;
       const manifestFile = zip.file('project_manifest.json');
       if (!manifestFile) throw new Error('project_manifest.json not found in ZIP bundle');
 
       const manifestContent = await manifestFile.async('string');
+      if (!isCurrent()) return;
       const loadedState = normalizeProjectState(JSON.parse(manifestContent));
 
+      let audioFiles: unknown[] = [];
       const bundleManifestFile = zip.file('bundle_manifest.json');
-      let restoredAudioCount = 0;
       if (bundleManifestFile) {
-        let bundleManifest: { format?: string; formatVersion?: number; audioFiles?: unknown };
+        let bundleManifest: unknown;
         try {
-          bundleManifest = JSON.parse(await bundleManifestFile.async('string')) as { format?: string; formatVersion?: number; audioFiles?: unknown };
+          bundleManifest = JSON.parse(await bundleManifestFile.async('string')) as unknown;
         } catch {
           throw new BundleImportError('malformed-audio-manifest', 'Import failed — bundle_manifest.json is not valid JSON.');
         }
-        if (bundleManifest.format === 'apex-studio-project-bundle' && Array.isArray(bundleManifest.audioFiles)) {
-          // Phase 6B (issue #56): validate every declared entry and read every
-          // payload BEFORE any storage write. The plan is all-or-nothing, so a
-          // rejected archive can never overwrite existing audio (even when the
-          // replacement is cancelled) and can never half-restore a project.
-          const importPlan = await planBundleAudioImport(bundleManifest.audioFiles, zip, getPersistedAudioClip);
-          for (const audioFile of importPlan.assetsToPersist) {
-            const typedBlob = audioFile.blob.type ? audioFile.blob : new Blob([audioFile.blob], { type: audioFile.mimeType || 'application/octet-stream' });
-            await persistAudioClip(audioFile.id, typedBlob);
-            restoredAudioCount += 1;
-          }
-          // Assets already stored byte-identically need no rewrite but ARE restored.
-          restoredAudioCount += importPlan.alreadyStoredIds.length;
-        }
+        audioFiles = getRecognizedBundleAudioFiles(bundleManifest);
       }
+      if (!isCurrent()) return;
 
-      const replaced = await onLoadProjectState(loadedState, { source: 'bundle-import' });
+      // Planning is read-only: validate every declared entry and compare
+      // existing bytes, but write nothing before acceptance, the outgoing
+      // backup, and the atomic project+audio commit.
+      const importPlan = await planBundleAudioImport(audioFiles, zip, getPersistedAudioClip);
+      if (!isCurrent()) return;
+      const restoredAudioCount = importPlan.assetsToPersist.length + importPlan.alreadyStoredIds.length;
+
+      const replaced = await onLoadProjectState(loadedState, {
+        source: 'bundle-import',
+        bundleImportPlan: importPlan,
+        bundleImportController: controller,
+      });
+      if (!isCurrent()) return;
       setIsImporting(false);
       if (replaced === false) {
         setStatusMessage('Import cancelled — the current project was kept unchanged.');
         setTimeout(() => setStatusMessage(null), 3500);
         return;
       }
-      setStatusMessage(`Imported "${loadedState.meta?.name || 'Project'}" and restored ${restoredAudioCount} audio asset(s).`);
+      const warning = typeof replaced === 'object' && replaced !== null ? replaced.warning : undefined;
+      setStatusMessage(
+        `Imported "${loadedState.meta?.name || 'Project'}" and restored ${restoredAudioCount} audio asset(s).${warning ? ` ${warning}` : ''}`
+      );
       setTimeout(() => {
         setStatusMessage(null);
-        onClose();
+        handleClose();
       }, 1500);
     } catch (err) {
+      if (!isCurrent()) return;
       console.error(err);
       setIsImporting(false);
-      setStatusMessage(err instanceof BundleImportError ? err.message : 'Error unpacking ZIP archive. Please ensure it contains a valid Apex Studio bundle.');
+      setStatusMessage(
+        err instanceof BundleImportError || err instanceof Error &&
+          (err.name === 'ProjectBundleAudioConflictError' || err.name === 'ProjectBundleCommitCancelledError')
+          ? err.message
+          : 'Error unpacking ZIP archive. Please ensure it contains a valid Apex Studio bundle.'
+      );
       setTimeout(() => setStatusMessage(null), 4000);
     } finally {
+      if (activeImportControllerRef.current === controller) activeImportControllerRef.current = null;
       if (fileInputRef.current) fileInputRef.current.value = '';
     }
   };
 
   return (
-    <ModalFrame id="fl-project-zip-modal" labelledBy="fl-project-zip-modal-title" onClose={onClose} className="fixed inset-0 backdrop-blur-md z-50 flex items-center justify-center p-3 sm:p-4 select-none">
+    <ModalFrame id="fl-project-zip-modal" labelledBy="fl-project-zip-modal-title" onClose={handleClose} className="fixed inset-0 backdrop-blur-md z-50 flex items-center justify-center p-3 sm:p-4 select-none">
       <div className="bg-[var(--apex-surface)] border border-[color-mix(in_srgb,var(--apex-accent)_48%,transparent)] rounded-xl w-full max-w-2xl shadow-2xl overflow-hidden text-[var(--apex-text-2)] flex flex-col max-h-[92vh]">
         <div className="px-5 py-3.5 bg-[var(--apex-panel-header)] border-b border-[var(--apex-border)] flex items-center justify-between">
           <div className="flex items-center gap-3">
@@ -229,7 +267,7 @@ Engine: Apex Studio Digital Audio Workstation
               <p className="text-[10px] text-[var(--apex-text-3)]">Portable ZIP = project state + audio assets (complete portable archive)</p>
             </div>
           </div>
-          <button onClick={onClose} aria-label="Close project bundler" className="text-[var(--apex-text-3)] hover:text-[var(--apex-text)] p-1 rounded hover:bg-[var(--apex-state-hover)] transition"><X className="w-5 h-5" /></button>
+          <button onClick={handleClose} aria-label="Close project bundler" className="text-[var(--apex-text-3)] hover:text-[var(--apex-text)] p-1 rounded hover:bg-[var(--apex-state-hover)] transition"><X className="w-5 h-5" /></button>
         </div>
 
         {statusMessage && (
@@ -276,7 +314,7 @@ Engine: Apex Studio Digital Audio Workstation
 
         <div className="px-5 py-3 bg-[var(--apex-panel-header)] border-t border-[var(--apex-border)] flex items-center justify-between text-xs">
           <span className="text-[10px] text-[var(--apex-text-3)]">Apex Studio Portable Bundle v2</span>
-          <button onClick={onClose} className="px-4 py-1.5 bg-[var(--apex-surface-3)] hover:bg-[var(--apex-state-hover)] text-[var(--apex-text)] font-bold rounded transition">Close</button>
+          <button onClick={handleClose} className="px-4 py-1.5 bg-[var(--apex-surface-3)] hover:bg-[var(--apex-state-hover)] text-[var(--apex-text)] font-bold rounded transition">Close</button>
         </div>
       </div>
     </ModalFrame>

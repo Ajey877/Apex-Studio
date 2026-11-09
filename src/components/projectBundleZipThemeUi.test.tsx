@@ -23,10 +23,9 @@
  *     its bytes exactly. Only the modal paints; the archive is data.
  *
  * Behaviour is pinned here as well: the generated archive paths, the bundle
- * manifest format/version, the `audioBlob`/`blob` stripping, the import seam
- * that calls `persistAudioClip` and then `onLoadProjectState` with
- * `source: 'bundle-import'`, both aria-labels, and the fact that a closed modal
- * renders nothing.
+ * manifest format/version, the `audioBlob`/`blob` stripping, and the transactional
+ * import seam that validates a read-only plan before passing it and a cancellation
+ * controller to the app. Both aria-labels and the closed-modal contract remain.
  *
  * Live pixel contrast in both palettes is measured in
  * `browser-tests/projectBundleZipTheme.spec.ts`.
@@ -215,7 +214,7 @@ describe('Project Bundle Zip modal theme contract (UI-03P)', () => {
     assert.equal(/bg-black/.test(markup), false);
   });
 
-  it('keeps every archive path, manifest field and import seam byte-identical', () => {
+  it('keeps archive paths and export fields while enforcing the transactional import seam', () => {
     for (const path of [
       "'project_manifest.json'",
       "'bundle_manifest.json'",
@@ -233,12 +232,16 @@ describe('Project Bundle Zip modal theme contract (UI-03P)', () => {
     assert.match(code, /if \(key === 'audioBlob' \|\| key === 'blob'\) return undefined;/);
     assert.match(code, /pattern_\$\{idx \+ 1\}_\$\{sanitizeFilePart\(pat\.name\)\}\.json/);
     assert.match(code, /a\.download = `\$\{bundleName\}\.zip`/);
-    // Import seam: load, normalise, restore audio, then hand the state to the app.
+    // Import seam: validate read-only, then hand the plan/controller to App.
     assert.match(code, /JSZip\.loadAsync\(file\)/);
     assert.match(code, /normalizeProjectState\(JSON\.parse\(manifestContent\)\)/);
-    assert.match(code, /await persistAudioClip\(audioFile\.id, typedBlob\)/);
-    assert.match(code, /onLoadProjectState\(loadedState, \{ source: 'bundle-import' \}\)/);
+    assert.match(code, /getRecognizedBundleAudioFiles\(bundleManifest\)/);
+    assert.match(code, /planBundleAudioImport\(audioFiles, zip, getPersistedAudioClip\)/);
+    assert.match(code, /onLoadProjectState\(loadedState, \{[\s\S]*?source: 'bundle-import',[\s\S]*?bundleImportPlan: importPlan,[\s\S]*?bundleImportController: controller/);
+    assert.doesNotMatch(code, /persistAudioClip\(/);
     assert.match(code, /if \(replaced === false\) \{/);
+    assert.match(code, /activeImportControllerRef\.current\?\.abort\(\)/, 'closing the modal aborts a pre-commit import');
+    assert.match(code, /typeof replaced === 'object'[\s\S]*?replaced\.warning/, 'post-commit runtime issues are shown as committed warnings');
     // The user-visible copy that describes the format is unchanged.
     assert.match(code, /Import cancelled — the current project was kept unchanged\./);
     assert.match(code, /Error unpacking ZIP archive\. Please ensure it contains a valid Apex Studio bundle\./);

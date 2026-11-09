@@ -20,6 +20,40 @@ interface StoredProjectState {
   updatedAt: number;
 }
 
+export interface ProjectBundleAudioWrite {
+  id: string;
+  blob: Blob;
+  mimeType: string;
+}
+
+export interface ProjectBundleTransactionOptions {
+  /** Aborting before the transaction completes rolls back its audio and project writes. */
+  signal?: AbortSignal;
+  /** Rechecked immediately before opening the transaction. */
+  isCurrent?: () => boolean;
+  /** Called synchronously from the successful transaction-complete event. */
+  onCommitted?: () => void;
+}
+
+/** The import was cancelled or superseded before its IndexedDB transaction committed. */
+export class ProjectBundleCommitCancelledError extends Error {
+  constructor() {
+    super('Portable ZIP import was cancelled before commit.');
+    this.name = 'ProjectBundleCommitCancelledError';
+  }
+}
+
+/** An asset id became occupied after the import planner's read-only preflight. */
+export class ProjectBundleAudioIdCollisionError extends Error {
+  readonly audioId: string;
+
+  constructor(audioId: string) {
+    super(`Audio asset "${audioId}" was added while the Portable ZIP import was being committed.`);
+    this.name = 'ProjectBundleAudioIdCollisionError';
+    this.audioId = audioId;
+  }
+}
+
 export interface StoredProjectBackup {
   /** Storage key; always starts with PROJECT_BACKUP_ID_PREFIX. */
   id: string;
@@ -192,6 +226,99 @@ export async function getPersistedProjectRecoverySnapshotRecord(): Promise<strin
       tx.onabort = () => reject(tx.error || new Error('Unable to read project recovery snapshot'));
     });
     return result?.stateJson ?? null;
+  } finally {
+    db.close();
+  }
+}
+
+/**
+ * Commits a Portable ZIP import's new audio assets, active project, and recovery
+ * snapshot as one IndexedDB transaction. Audio uses `add`, never `put`, so a
+ * commit-time id collision aborts the whole batch instead of replacing bytes.
+ * All Blob work and planning must already be complete before this is called;
+ * this function only queues synchronous IndexedDB requests and waits for tx completion.
+ */
+export async function persistProjectBundleRecords(
+  stateJson: string,
+  assets: readonly ProjectBundleAudioWrite[],
+  options: ProjectBundleTransactionOptions = {}
+): Promise<void> {
+  if (!stateJson) throw new Error('Cannot commit an empty project bundle state');
+  const seenIds = new Set<string>();
+  for (const asset of assets) {
+    if (!asset.id || asset.blob.size === 0) throw new Error('Cannot commit an empty Portable ZIP audio asset');
+    if (seenIds.has(asset.id)) throw new Error(`Duplicate Portable ZIP audio id "${asset.id}"`);
+    seenIds.add(asset.id);
+  }
+
+  const isCancelled = () => options.signal?.aborted === true || options.isCurrent?.() === false;
+  if (isCancelled()) throw new ProjectBundleCommitCancelledError();
+
+  const db = await openDb();
+  try {
+    // The request may have waited behind other IDB work while the user dismissed
+    // or superseded this import. Recheck immediately before opening the tx.
+    if (isCancelled()) throw new ProjectBundleCommitCancelledError();
+
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction([AUDIO_STORE_NAME, PROJECT_STORE_NAME], 'readwrite');
+      let collisionId: string | null = null;
+      let setupError: unknown = null;
+      const onSignalAbort = () => {
+        try { tx.abort(); } catch { /* a completed transaction cannot be rolled back */ }
+      };
+      const removeAbortListener = () => options.signal?.removeEventListener('abort', onSignalAbort);
+
+      tx.oncomplete = () => {
+        removeAbortListener();
+        try { options.onCommitted?.(); } catch (error) {
+          // The durable transaction is authoritative; a UI notification hook
+          // must not turn a committed import into a reported storage failure.
+          console.error('[Apex Studio] Portable ZIP commit notification failed.', error);
+        }
+        resolve();
+      };
+      tx.onabort = () => {
+        removeAbortListener();
+        if (isCancelled()) {
+          reject(new ProjectBundleCommitCancelledError());
+        } else if (collisionId) {
+          reject(new ProjectBundleAudioIdCollisionError(collisionId));
+        } else if (setupError instanceof Error) {
+          reject(setupError);
+        } else {
+          reject(tx.error || new Error('Portable ZIP project transaction was aborted'));
+        }
+      };
+
+      options.signal?.addEventListener('abort', onSignalAbort, { once: true });
+      if (isCancelled()) {
+        try { tx.abort(); } catch (error) { reject(error); }
+        return;
+      }
+
+      try {
+        const clips = tx.objectStore(AUDIO_STORE_NAME);
+        const projects = tx.objectStore(PROJECT_STORE_NAME);
+        for (const asset of assets) {
+          const mimeType = asset.mimeType || asset.blob.type || 'application/octet-stream';
+          const blob = asset.blob.type ? asset.blob : new Blob([asset.blob], { type: mimeType });
+          const request = clips.add({ id: asset.id, blob, mimeType, createdAt: Date.now() } satisfies StoredAudioClip);
+          request.onerror = () => {
+            if (request.error?.name === 'ConstraintError') collisionId = asset.id;
+            // Do not preventDefault: a failed `add` must abort the whole transaction.
+          };
+        }
+
+        const updatedAt = Date.now();
+        const projectRecord = { stateJson, updatedAt };
+        projects.put({ id: CURRENT_PROJECT_ID, ...projectRecord } satisfies StoredProjectState);
+        projects.put({ id: RECOVERY_PROJECT_ID, ...projectRecord } satisfies StoredProjectState);
+      } catch (error) {
+        setupError = error;
+        try { tx.abort(); } catch { reject(error); }
+      }
+    });
   } finally {
     db.close();
   }
