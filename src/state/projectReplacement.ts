@@ -134,3 +134,26 @@ export const runProjectReplacementAfterBackup = async <T>(
   advancePlaylistAudioProjectGeneration();
   return replace();
 };
+
+export type ProjectReplacementCommitOutcome<T> =
+  | { committed: false }
+  | { committed: true; value: T };
+
+/**
+ * ZIP replacements have a durable transaction before runtime publication.
+ * Dismissal skips the whole sequence; backup failure skips commit; commit
+ * failure leaves the playlist generation/current project untouched. Only a
+ * completed commit advances the project generation and permits publication.
+ */
+export const runProjectReplacementAfterBackupAndCommit = async <T>(
+  accepted: boolean,
+  backup: (() => Promise<unknown>) | undefined,
+  commit: () => Promise<unknown>,
+  replace: () => Promise<T> | T,
+): Promise<ProjectReplacementCommitOutcome<T>> => {
+  if (!accepted) return { committed: false };
+  if (backup) await backup();
+  await commit();
+  advancePlaylistAudioProjectGeneration();
+  return { committed: true, value: await replace() };
+};

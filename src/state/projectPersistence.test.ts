@@ -244,6 +244,47 @@ test('hydrateProjectAudio on arbitrary unhydrated project restores recordings, l
   }
 });
 
+test('hydrateProjectAudio publishes a prepared ZIP decode after commit without decoding the asset again', async () => {
+  const restore = installIndexedDbMock();
+  try {
+    const audioBufferId = 'prepared-zip-buffer';
+    const state: ProjectState = {
+      ...createDefaultProjectState(),
+      playlistClips: [{
+        id: 'prepared-zip-clip',
+        trackIndex: 0,
+        startBar: 1,
+        lengthBars: 2,
+        type: 'audio',
+        audioBufferId,
+        audioName: 'Prepared ZIP audio',
+        audioWaveform: [0.2, 0.8],
+        audioUnavailable: true,
+        color: '#ff6e00',
+        name: 'Prepared ZIP audio',
+      }],
+    };
+    await persistAudioClip(audioBufferId, new Blob(['prepared-audio'], { type: 'audio/wav' }));
+
+    const preparedBuffer = { duration: 2 } as AudioBuffer;
+    const published: Array<{ id: string; buffer: AudioBuffer }> = [];
+    const hydrated = await hydrateProjectAudio(state, {
+      loadAudioFile: async () => { throw new Error('prepared ZIP audio must not be decoded twice'); },
+      setSampleBuffer: (id, buffer) => published.push({ id, buffer }),
+    }, {
+      preparedAudio: new Map([[audioBufferId, { buffer: preparedBuffer, peaks: [0.2, 0.8], duration: 2 }]]),
+    });
+
+    assert.deepEqual(published, [{ id: audioBufferId, buffer: preparedBuffer }]);
+    assert.deepEqual(hydrated.hydratedAudioIds, [audioBufferId]);
+    assert.deepEqual(hydrated.missingAudioIds, []);
+    assert.equal(hydrated.state.playlistClips[0].audioUnavailable, false);
+  } finally {
+    await deletePersistedAudioClip('prepared-zip-buffer').catch(() => undefined);
+    restore();
+  }
+});
+
 test('hydrateProjectAudio with missing audio marks playlistClip.audioUnavailable without corrupting project', async () => {
   const restore = installIndexedDbMock();
   try {
