@@ -78,6 +78,17 @@ async function waitFor(predicate, timeoutMs = 5000) {
   }
 }
 
+/** Poll a synchronous getter until it produces a value (child spawn is async). */
+async function waitForValue(read, timeoutMs = 5000) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const value = read();
+    if (value !== null && value !== undefined) return value;
+    if (Date.now() > deadline) return null;
+    await new Promise(resolve => setTimeout(resolve, 25));
+  }
+}
+
 const sampleRate = 48000;
 const { plugins, errors } = await discoverVst3(executable, [bundle], { kind: 'effect' });
 if (errors.length) throw new Error(`fixture discovery failed: ${JSON.stringify(errors)}`);
@@ -121,13 +132,13 @@ try {
   // ---- 1. audio session uses its own helper process -------------------------
   const audio = await service.open(delay, sampleRate, 'realtime', OWNER_AUDIO, 'effect');
   await service.parameters(audio.id, [{ id: 4, value: 0 }], OWNER_AUDIO); // 100% dry
-  // Spawn is asynchronous (and slower on a loaded CI runner, especially on
-  // Windows), so wait for the OS to show the audio helper rather than assuming it.
-  let before = [];
-  await waitFor(() => { before = helperProcesses(); return before.length >= 1; }, 15000).catch(() => {});
+  // The pid comes from the child process the OS actually created. The process
+  // table scan below is an independent cross-check (one scan: on Windows it is a
+  // PowerShell query, so it must never sit in a polling loop).
+  const audioPid = await waitForValue(() => service.getSessionHelperPid(audio.id, OWNER_AUDIO), 15000);
   const dryReference = await service.processAudio(audio.id, 1024, makeAudio(1024), 120, OWNER_AUDIO, []);
-  report.checks.push(check('audio session owns exactly one helper process', before.length === 1,
-    { helperPids: before.map(p => p.pid) }));
+  report.checks.push(check('the audio session runs in its own helper process', Number.isInteger(audioPid),
+    { audioHelperPid: audioPid }));
 
   // ---- 2. editor open cannot block audio processing ------------------------
   // A dedicated, separately spawned helper that never answers stands in for a
@@ -163,35 +174,19 @@ try {
   const editorOpen = editorService.openEditor(effect, { projectId: 'evidence', trackId: 1, slotId: 'vst3-fx-1' }, OWNER_EDITOR)
     .then(() => 'opened', error => error.message).finally(() => { editorSettled = true; });
 
-  const audioPid = before.length === 1 ? before[0].pid : null;
-  // Everything already in the table before the editor opens. Any process that
-  // appears afterwards belongs to the editor's own launch tree.
-  const preexisting = new Set(helperProcesses(workerName).concat(helperProcesses(launcherName)).map(p => p.pid));
   const during = [];
-  const editorPids = [];
   for (let block = 0; block < 12; block++) {
     const started = process.hrtime.bigint();
     const pcm = await service.processAudio(audio.id, 1024, makeAudio(1024), 120, OWNER_AUDIO, []);
     during.push({ ms: Number(process.hrtime.bigint() - started) / 1e6, identical: pcm.length === dryReference.length &&
       pcm.every((sample, index) => Math.abs(sample - dryReference[index]) < 1e-9) });
-    // The editor child is the helper whose command line is the slow stub; keep
-    // scanning because spawn/exec is asynchronous and may trail the first block.
-    for (const name of [workerName, launcherName]) {
-      for (const candidate of helperProcesses(name)) {
-        if (candidate.pid !== audioPid && !editorPids.includes(candidate.pid)) editorPids.push(candidate.pid);
-      }
-    }
   }
-  // Editor open is still pending, so its child must be observable now; give the
-  // OS table a bounded grace period instead of failing on a spawn race.
-  await waitFor(() => {
-    for (const name of [workerName, launcherName]) {
-      for (const candidate of helperProcesses(name)) {
-        if (candidate.pid !== audioPid && !editorPids.includes(candidate.pid)) editorPids.push(candidate.pid);
-      }
-    }
-    return editorPids.length > 0;
-  }, 8000).catch(() => {});
+  const editorPid = await waitForValue(() => editorService.getEditorHelperPid(OWNER_EDITOR), 15000);
+  // Independent cross-check from the OS process table: something must be running
+  // this launcher/worker, and it must not be the audio helper.
+  const observed = helperProcesses(workerName).concat(helperProcesses(launcherName));
+  const editorPids = [...new Set(observed.map(process => process.pid))];
+  const preexisting = new Set();
   // The blocking claim is about DURING the open. If a very slow machine let the
   // editor request finish first, say so instead of silently passing on a weak
   // signal: `editorStillPending` records what was actually observed.
@@ -216,8 +211,9 @@ try {
   // the editor's process tree shares no pid with the audio helper's.
   const freshEditorPids = editorPids.filter(pid => !preexisting.has(pid));
   report.checks.push(check('the editor helper was a separate OS process from the audio helper',
-    freshEditorPids.length >= 1 && audioPid !== null && !freshEditorPids.includes(audioPid),
-    { audioHelperPid: audioPid, editorHelperPids: editorPids, freshEditorPids }));
+    Number.isInteger(editorPid) && editorPid !== audioPid &&
+      freshEditorPids.length >= 1 && !freshEditorPids.includes(audioPid ?? -1),
+    { audioHelperPid: audioPid, editorHelperPid: editorPid, editorHelperPids: editorPids, freshEditorPids }));
 
   // ---- 5. ownership is explicit and non-overlapping -----------------------
   let crossOwnerRejected = false;

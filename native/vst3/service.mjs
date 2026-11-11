@@ -455,6 +455,20 @@ export class Vst3Service {
         vendor: plugin.vendor, version: plugin.version, state: await session.client.snapshot() };
     } finally { await this.close(id, owner); }
   }
+  /** OS pid of the helper backing a session, for diagnostics and evidence.
+   * Returns null when the session is unknown to this owner or the spawn failed.
+   * This is an observation of the real child process, never a fabricated value. */
+  getSessionHelperPid(id, owner = 'local') {
+    const session = this.#sessions.get(id);
+    return session && session.owner === owner ? session.client.pid ?? null : null;
+  }
+  /** OS pid of the editor helper while its session is open or opening. */
+  getEditorHelperPid(owner = null) {
+    const client = this.#editor?.client ?? this.#editorOpening?.client ?? null;
+    if (!client) return null;
+    const clientOwner = this.#editor?.owner ?? this.#editorOpening?.owner ?? null;
+    return owner === null || owner === clientOwner ? client.pid ?? null : null;
+  }
   async close(id, owner = 'local') {
     const session = this.#sessions.get(id);
     if (!session || session.owner !== owner) return;
