@@ -255,8 +255,15 @@ const evidencePath = path.join(root, 'build/native-evidence/native-editor-proces
 mkdirSync(path.dirname(evidencePath), { recursive: true });
 writeFileSync(evidencePath, JSON.stringify(report, null, 2));
 console.log(JSON.stringify(report, null, 2));
+// One line per check so a truncated CI capture still identifies what failed.
+for (const item of report.checks) {
+  console.log(`${item.ok ? 'PASS' : 'FAIL'} ${item.check} ${JSON.stringify(item.detail)}`);
+}
 if (failures.length) {
   console.error(`\n${failures.length} process-separation check(s) failed`);
+  for (const failure of failures) {
+    console.error(`FAILED: ${failure.check} :: ${JSON.stringify(failure.detail)}`);
+  }
   process.exit(1);
 }
 console.log('\nAll process-separation checks passed.');
