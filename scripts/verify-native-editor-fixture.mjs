@@ -122,7 +122,9 @@ if (uidesc) {
 
 // ---- Apex's own host must discover the genuine editor effect ---------------
 const { plugins, errors } = await discoverVst3(executable, [bundle], { kind: 'effect' });
-const again = plugins.find(plugin => plugin.name === 'AGain');
+// The SDK reports the plug-in name as "AGain VST3" (and a "AGain SideChain VST3"
+// variant), so match the real identity rather than one exact spelling.
+const again = plugins.find(plugin => /^AGain( VST3)?$/.test(plugin.name));
 check('Apex native VST3 host discovers AGain as a Mixer audio effect', Boolean(again),
   { plugins: plugins.map(plugin => plugin.name), errors });
 if (again) {
