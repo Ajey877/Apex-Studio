@@ -133,19 +133,33 @@ if (again) {
 }
 
 // ---- controller parameters: the genuine ParamID 0 Gain ---------------------
+// The Apex host refuses AGain's audio path (event input bus), so its controller
+// metadata is read through the editor path, which is the path this feature uses.
 if (again) {
   const service = new Vst3Service(executable, [path.dirname(bundle)]);
-  const metadata = await service.describeEffect({
-    ...again, state: { schema: 1, classId: again.classId, parameters: [] },
-  }, 'fixture-check');
-  const gain = metadata.parameters.find(parameter => parameter.id === 0);
-  check('AGain controller exposes genuine ParamID 0 (Gain)', Boolean(gain),
-    { parameterCount: metadata.parameters.length, ids: metadata.parameters.slice(0, 8).map(p => p.id) });
-  if (gain) {
-    check('the Gain parameter is writable and automatable', (gain.flags & 2) === 0 && (gain.flags & 1) !== 0,
-      { flags: gain.flags, name: gain.name, units: gain.units });
+  try {
+    const opened = await service.openEditor({
+      ...again, state: { schema: 1, classId: again.classId, parameters: [] },
+    }, { projectId: 'fixture-check', trackId: 1, slotId: 'vst3-fx-1' }, 'fixture-check').then(
+      result => result, error => ({ error }));
+    if (opened.error) {
+      check('AGain controller metadata is reachable through the editor path', false, { error: opened.error.message });
+    } else {
+      const gain = opened.parameters.find(parameter => parameter.id === 0);
+      check('AGain controller exposes genuine ParamID 0 (Gain)', Boolean(gain),
+        { parameterCount: opened.parameters.length, ids: opened.parameters.slice(0, 8).map(p => p.id) });
+      if (gain) {
+        check('the Gain parameter is writable and automatable', (gain.flags & 2) === 0 && (gain.flags & 1) !== 0,
+          { flags: gain.flags, name: gain.name, units: gain.units });
+      }
+      await service.closeEditor(opened.id, 'fixture-check').catch(() => {});
+      await service.finishEditor(opened.id, 'fixture-check').catch(() => {});
+    }
+  } catch (error) {
+    check('AGain controller metadata is reachable through the editor path', false, { error: error.message });
+  } finally {
+    await service.dispose().catch(() => {});
   }
-  await service.dispose();
 }
 
 // ---- helper process starts and terminates cleanly -------------------------
