@@ -89,6 +89,9 @@ async function waitForValue(read, timeoutMs = 5000) {
   }
 }
 
+// Progress markers: if the run is killed, the last marker names the stage.
+const stage = name => console.log(`STAGE ${name} ${Date.now()}`);
+
 const sampleRate = 48000;
 const { plugins, errors } = await discoverVst3(executable, [bundle], { kind: 'effect' });
 if (errors.length) throw new Error(`fixture discovery failed: ${JSON.stringify(errors)}`);
@@ -124,12 +127,22 @@ const report = {
 if (!(process.platform === 'win32' && process.arch === 'x64')) {
   Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
 }
+// Hard wall clock bound. A hung native teardown on a CI runner must fail fast
+// with a nameable stage instead of silently eating the job timeout.
+const watchdogMs = Number(process.env.APEX_EVIDENCE_TIMEOUT_MS ?? 240000);
+const watchdog = setTimeout(() => {
+  console.error(`EVIDENCE TIMEOUT after ${watchdogMs}ms`);
+  process.exit(2);
+}, watchdogMs);
+watchdog.unref?.();
+
 try {
   const service = new Vst3Service(executable, [bundleRoot]);
   const OWNER_AUDIO = 'evidence-audio';
   const OWNER_EDITOR = 'evidence-editor';
 
   // ---- 1. audio session uses its own helper process -------------------------
+    stage('open audio session');
   const audio = await service.open(delay, sampleRate, 'realtime', OWNER_AUDIO, 'effect');
   await service.parameters(audio.id, [{ id: 4, value: 0 }], OWNER_AUDIO); // 100% dry
   // The pid comes from the child process the OS actually created. The process
@@ -141,6 +154,7 @@ try {
     { audioHelperPid: audioPid }));
 
   // ---- 2. editor open cannot block audio processing ------------------------
+    stage('audio processing under a pending editor open');
   // A dedicated, separately spawned helper that never answers stands in for a
   // plug-in slow to build its window. It is a real OS process (a POSIX launcher
   // that exec()s a Node worker) whose file name stays in the process table, so
@@ -197,6 +211,7 @@ try {
     { blocks: during.length }));
 
   // ---- 3/5. editor failure is isolated from audio -------------------------
+    stage('editor failure isolation');
   const editorResult = await editorOpen;
   report.checks.push(check('a failing editor helper reports a clear error', typeof editorResult === 'string' && editorResult.length > 0,
     { editorResult }));
@@ -216,6 +231,7 @@ try {
     { audioHelperPid: audioPid, editorHelperPid: editorPid, editorHelperPids: editorPids, freshEditorPids }));
 
   // ---- 5. ownership is explicit and non-overlapping -----------------------
+    stage('ownership and teardown');
   let crossOwnerRejected = false;
   try { await service.assertSession(audio.id, OWNER_EDITOR); } catch { crossOwnerRejected = true; }
   report.checks.push(check('a different owner cannot address the audio session', crossOwnerRejected, {}));
@@ -225,6 +241,7 @@ try {
   await editorService.dispose();
 
   // ---- 6. state transfer is bounded bytes, not shared handles -------------
+    stage('state transfer');
   const snapshot = await service.inspectEffect(delay, { schema: 1, classId: delay.classId, parameters: [] }, OWNER_AUDIO);
   const keys = Object.keys(snapshot.state).sort();
   report.checks.push(check('state transfer carries validated component/controller bytes and normalized values only',
@@ -245,6 +262,7 @@ try {
     { sessionCount: service.sessionCount }));
   await service.dispose();
 } finally {
+  clearTimeout(watchdog);
   if (originalPlatform && Object.getOwnPropertyDescriptor(process, 'platform')?.value !== originalPlatform.value) {
     Object.defineProperty(process, 'platform', originalPlatform);
   }
