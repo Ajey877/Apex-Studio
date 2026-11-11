@@ -7,7 +7,7 @@ import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import { pathToFileURL } from 'node:url';
 import path from 'node:path';
-import { mkdtempSync, mkdirSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { Vst3Service, MAX_VST3_EFFECT_LATENCY_SECONDS } from '../native/vst3/service.mjs';
 
@@ -307,6 +307,36 @@ test('editor state validation is shared with the renderer contract', async () =>
   assert.ok(MAX_VST3_EFFECT_LATENCY_SECONDS > 0);
   // The helper module is imported by URL so this test proves the real path.
   assert.ok(pathToFileURL(path.resolve('native/vst3/service.mjs')).href.endsWith('service.mjs'));
+});
+
+test('a recovery record names the plug-in path exactly as the caller identified it, not the resolved one', async () => {
+  // Windows resolves case and 8.3 short components (RUNNER~1), and POSIX resolves
+  // symlinks, so realpath() can return a different spelling of the same bundle.
+  // A recovery record is matched against the saved project, so it must keep the
+  // caller's identity; only the helper load uses the authorized path.
+  const aliasDir = mkdtempSync(path.join(tmpdir(), 'apex-vst3-alias-'));
+  const aliasRoot = path.join(aliasDir, 'alias');
+  try {
+    try { symlinkSync(pluginRoot, aliasRoot, 'dir'); }
+    catch { return; } // no symlink permission on this runner; the path fix is still covered above
+    const aliasEffect = { ...effect, path: path.join(aliasRoot, 'AGain.vst3') };
+    await withStubbedClient({
+      helper: () => fakeHelper(request => {
+        if (request.command === 'editorOpen') return { editor: { available: true, classId: CLASS_ID, name: 'AGain',
+          title: 'AGain', resizable: true, width: 320, height: 200, controllerAvailable: true, parameters } };
+        return {};
+      }),
+      service: async () => {
+        const service = new Vst3Service('apex-vst3-host.exe', [aliasRoot]);
+        const opened = await service.openEditor(aliasEffect, context, 'owner-1');
+        const recovery = service.getEditorRecovery(opened.id, 'owner-1');
+        assert.equal(recovery.originalEffect.path, aliasEffect.path);
+        assert.equal(recovery.effect.path, aliasEffect.path);
+        assert.equal('authorizedPath' in recovery.originalEffect, false);
+        await service.finishEditor(opened.id, 'owner-1').catch(() => {});
+      },
+    });
+  } finally { rmSync(aliasDir, { recursive: true, force: true }); }
 });
 
 test.after(() => { rmSync(pluginRoot, { recursive: true, force: true }); });

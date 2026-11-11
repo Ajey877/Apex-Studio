@@ -145,7 +145,12 @@ export class Vst3Service {
       client = new NativeVst3Client(this.#executable, { timeoutMs: 15000 });
       opening.client = client;
       this.#loading.set(client, owner);
-      const plugin = { ...safeEffect, path: pluginPath };
+      // The helper loads the authorized (resolved) path, but the session must
+      // keep the identity the caller supplied: a recovery record has to name the
+      // insert exactly as the project does. Windows resolves case and 8.3 short
+      // components (RUNNER~1), so substituting the resolved path here would make
+      // the record refer to a different-looking plug-in than the saved project.
+      const plugin = { ...safeEffect, path: pluginPath, authorizedPath: pluginPath };
       const opened = await client.openEditor(plugin);
       if (!opened.editor || opened.editor.available !== true || opened.editor.classId !== safeEffect.classId) {
         throw new Error('The VST3 plug-in did not provide a genuine Windows editor view.');
@@ -161,7 +166,7 @@ export class Vst3Service {
       }
       const id = randomUUID();
       const session = {
-        id, owner, client, effect: plugin, context: editorContext, parameters,
+        id, owner, client, effect: plugin, requestedPath: safeEffect.path, context: editorContext, parameters,
         activeEdits: new Set(), draftParameters: new Map(initialState.parameters.map(item => [item.id, item.value])),
         busy: false, busyPromise: null, closed: false, finalState: null, finalStatus: null, recoveryRecord: null,
       };
@@ -321,16 +326,22 @@ export class Vst3Service {
       parameters: [...parameters].map(([id, value]) => ({ id, value })) },
     session.effect.classId, session.parameters);
   }
+  /** The effect exactly as the caller identified it (no resolved path). */
+  #callerEffect(session) {
+    const { authorizedPath, ...identity } = session.effect;
+    return { ...identity, path: session.requestedPath };
+  }
   #makeEditorRecovery(session, state, error) {
     const effectState = state ?? this.#editorDraftState(session);
+    const identity = this.#callerEffect(session);
     return {
       schema: 1,
       id: session.recoveryRecord?.id ?? randomUUID(),
       projectId: session.context.projectId,
       trackId: session.context.trackId,
       slotId: session.context.slotId,
-      originalEffect: session.effect,
-      effect: { ...session.effect, state: effectState },
+      originalEffect: identity,
+      effect: { ...identity, state: effectState },
       ...(error ? { error: String(error).slice(0, 2048) } : {}),
       createdAt: Date.now(),
     };
