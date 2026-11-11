@@ -27,10 +27,11 @@ for (const [name, url, pin] of dependencies) {
     throw new Error(`${name}: expected clean pinned revision ${pin}; refusing to overwrite local files`);
   }
   if (name === 'vst3sdk') {
-    run(['submodule', 'update', '--init', '--depth=1', 'base', 'cmake', 'pluginterfaces', 'public.sdk'], dir);
-    const submodules = run(['submodule', 'status', 'base', 'cmake', 'pluginterfaces', 'public.sdk'], dir);
-    if (submodules.split('\n').some(line => /^[+U-]/.test(line.trimStart()))) throw new Error('SDK submodule revision mismatch');
-    for (const module of ['base', 'cmake', 'pluginterfaces', 'public.sdk']) {
+    const sdkSubmodules = ['base', 'cmake', 'pluginterfaces', 'public.sdk', ...(process.platform === 'win32' ? ['vstgui4'] : [])];
+    run(['submodule', 'update', '--init', '--depth=1', ...sdkSubmodules], dir);
+    const submodules = run(['submodule', 'status', ...sdkSubmodules], dir);
+    if (submodules.split('\n').some(line => /^[+U-]/.test(line.trimStart()))) throw new Error('SDK/VSTGUI submodule revision mismatch');
+    for (const module of sdkSubmodules) {
       if (run(['status', '--porcelain'], path.join(dir, module))) throw new Error(`Dirty SDK submodule: ${module}`);
     }
   }

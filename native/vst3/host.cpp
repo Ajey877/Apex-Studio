@@ -11,6 +11,9 @@
 #include "pluginterfaces/vst/ivstaudioprocessor.h"
 #include "pluginterfaces/vst/ivsteditcontroller.h"
 #include "pluginterfaces/vst/ivstprocesscontext.h"
+#include "pluginterfaces/gui/iplugview.h"
+#include "pluginterfaces/gui/iplugviewcontentscalesupport.h"
+#include "pluginterfaces/base/keycodes.h"
 #include "component-handler.hpp"
 #include <nlohmann/json.hpp>
 #include <algorithm>
@@ -20,14 +23,18 @@
 #include <iostream>
 #include <memory>
 #include <map>
+#include <optional>
 #include <set>
 #include <stdexcept>
+#include <string>
 #include <vector>
 #ifdef _WIN32
 #include <windows.h>
+#include <windowsx.h>
 #include <objbase.h>
 #include <fcntl.h>
 #include <io.h>
+#include <mutex>
 #endif
 
 using ApexVst3Host::HostComponentHandler;
@@ -127,6 +134,10 @@ std::vector<float> decodePlanarAudio(const std::string& encoded, int frames) {
   for (float sample : result) require(std::isfinite(sample), "Non-finite VST3 input audio");
   return result;
 }
+
+#ifdef _WIN32
+#include "editor-host.hpp"
+#endif
 
 class Instance {
   // Declaration order matters: SDK objects are released BEFORE the module unloads.
@@ -628,39 +639,110 @@ public:
 };
 
 // Binary framing: little-endian uint32 JSON length, uint32 PCM byte length,
-// UTF-8 JSON, then planar stereo float32 PCM. No per-sample IPC.
+// UTF-8 JSON, then planar stereo float32 PCM. The editor mode drains callback
+// events only in response to a bounded poll command; it never writes unsolicited
+// stdout that could desynchronize this synchronous helper protocol.
 void reply(const json& message, const std::vector<float>& pcm = {}) {
   const auto text = message.dump();
+  require(text.size() <= 5 * 1024 * 1024, "VST3 helper response exceeds 5 MiB limit");
   auto put32 = [](uint32_t n) { for (int i = 0; i < 4; ++i) std::cout.put(static_cast<char>((n >> (8 * i)) & 255)); };
   put32(static_cast<uint32_t>(text.size())); put32(static_cast<uint32_t>(pcm.size() * sizeof(float)));
   std::cout.write(text.data(), text.size());
   if (!pcm.empty()) std::cout.write(reinterpret_cast<const char*>(pcm.data()), pcm.size() * sizeof(float));
   std::cout.flush();
 }
+
+#ifdef _WIN32
+std::optional<std::string> tryReadEditorPipeLine(std::string& pending, bool& eof) {
+  const HANDLE input = GetStdHandle(STD_INPUT_HANDLE);
+  DWORD available = 0;
+  if (!PeekNamedPipe(input, nullptr, 0, nullptr, &available, nullptr)) {
+    const auto error = GetLastError();
+    if (error == ERROR_BROKEN_PIPE || error == ERROR_INVALID_HANDLE) { eof = true; return std::nullopt; }
+    throw std::runtime_error("Could not poll the VST3 editor command pipe");
+  }
+  if (available > 0) {
+    char chunk[4096];
+    const auto requested = std::min<DWORD>(available, static_cast<DWORD>(sizeof(chunk)));
+    DWORD received = 0;
+    if (!ReadFile(input, chunk, requested, &received, nullptr)) {
+      const auto error = GetLastError();
+      if (error == ERROR_BROKEN_PIPE || error == ERROR_INVALID_HANDLE) { eof = true; return std::nullopt; }
+      throw std::runtime_error("Could not read the VST3 editor command pipe");
+    }
+    if (received == 0) { eof = true; return std::nullopt; }
+    pending.append(chunk, chunk + received);
+    if (pending.size() > kMaxRequest + 1) throw std::runtime_error("Request exceeds 8 MiB limit");
+  }
+  const auto newline = pending.find('\n');
+  if (newline == std::string::npos) return std::nullopt;
+  auto line = pending.substr(0, newline);
+  pending.erase(0, newline + 1);
+  if (!line.empty() && line.back() == '\r') line.pop_back();
+  return line;
+}
+#endif
+
 int main() {
 #ifdef _WIN32
   _setmode(_fileno(stdout), _O_BINARY);
+  const auto user32 = GetModuleHandleW(L"user32.dll");
+  using SetDpiContextFn = BOOL(WINAPI*)(DPI_AWARENESS_CONTEXT);
+  const auto setDpiContext = reinterpret_cast<SetDpiContextFn>(GetProcAddress(user32, "SetProcessDpiAwarenessContext"));
+  if (setDpiContext) setDpiContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
   auto com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
   if (FAILED(com)) return 2;
 #endif
   PlugProvider::setErrorStream(&std::cerr);
   // Reserve stdout exclusively for framed protocol; plugin debug logs using
-  // stdout will be detected as a protocol error by the parent, not played.
+  // stdout will be rejected by the parent, never interpreted as UI events.
   std::unique_ptr<Instance> instance;
+#ifdef _WIN32
+  std::unique_ptr<ApexVst3Host::NativeEditorSession> editor;
+  std::string editorPipeBuffer;
+#endif
   std::string line;
   while (true) {
     line.clear();
-    char c;
-    while (std::cin.get(c) && c != '\n') {
-      line.push_back(c);
-      if (line.size() > kMaxRequest) { reply({{"ok", false}, {"error", "Request exceeds 8 MiB limit"}}); return 1; }
+#ifdef _WIN32
+    if (editor) {
+      bool eof = false;
+      std::optional<std::string> editorLine;
+      try { editorLine = tryReadEditorPipeLine(editorPipeBuffer, eof); }
+      catch (const std::exception& error) {
+        reply({{"ok", false}, {"error", error.what()}});
+        break;
+      }
+      if (!editorLine) {
+        if (eof) break;
+        editor->pumpMessages();
+        MsgWaitForMultipleObjectsEx(0, nullptr, 12, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
+        continue;
+      }
+      line = std::move(*editorLine);
+    } else
+#endif
+    {
+      char c;
+      while (std::cin.get(c) && c != '\n') {
+        line.push_back(c);
+        if (line.size() > kMaxRequest) {
+          reply({{"ok", false}, {"error", "Request exceeds 8 MiB limit"}});
+          return 1;
+        }
+      }
+      if (line.empty() && !std::cin) break;
     }
-    if (line.empty() && !std::cin) break;
+
+    std::string command;
     try {
       auto request = json::parse(line);
-      auto command = request.at("command").get<std::string>();
+      command = request.at("command").get<std::string>();
       if (command == "scan") {
         require(!instance, "Scan requires a separate helper");
+#ifdef _WIN32
+        require(!editor, "Plugin discovery cannot run inside an editor-only helper");
+#endif
         std::string error;
         auto module = VST3::Hosting::Module::create(request.at("path").get<std::string>(), error);
         require(bool(module), "Plugin module load failed: " + error);
@@ -672,9 +754,36 @@ int main() {
         reply({{"ok", true}, {"plugins", plugins}});
       } else if (command == "open") {
         require(!instance, "Close current instance before opening another");
+#ifdef _WIN32
+        require(!editor, "Audio processing cannot run inside an editor-only helper");
+#endif
         instance = std::make_unique<Instance>();
         auto result = instance->open(request);
         reply({{"ok", true}, {"plugin", result}});
+      } else if (command == "editorOpen") {
+#ifdef _WIN32
+        require(!instance && !editor, "A VST3 helper process can host exactly one isolated session");
+        editor = std::make_unique<ApexVst3Host::NativeEditorSession>();
+        auto result = editor->open(request);
+        reply({{"ok", true}, {"editor", result}});
+#else
+        throw std::runtime_error("Native VST3 editor windows are supported only on Windows x64");
+#endif
+      } else if (command == "editorPoll") {
+#ifdef _WIN32
+        require(editor != nullptr, "No native VST3 editor session is open");
+        editor->pumpMessages();
+        reply({{"ok", true}, {"editor", editor->poll()}});
+#else
+        throw std::runtime_error("Native VST3 editor windows are supported only on Windows x64");
+#endif
+      } else if (command == "editorClose") {
+#ifdef _WIN32
+        require(editor != nullptr, "No native VST3 editor session is open");
+        reply({{"ok", true}, {"editor", editor->closeAndCapture()}});
+#else
+        throw std::runtime_error("Native VST3 editor windows are supported only on Windows x64");
+#endif
       } else if (command == "process") {
         require(bool(instance), "No plugin instance loaded");
         auto pcm = instance->process(request);
@@ -695,17 +804,29 @@ int main() {
         require(bool(instance), "No plugin instance loaded");
         reply({{"ok", true}, {"state", instance->snapshot()}});
       } else if (command == "close") {
-        instance.reset(); reply({{"ok", true}});
+#ifdef _WIN32
+        if (editor) {
+          if (!editor->isClosed()) editor->closeAndCapture();
+          editor.reset();
+        }
+#endif
+        instance.reset();
+        reply({{"ok", true}});
       } else throw std::runtime_error("Unknown command");
     } catch (const std::exception& error) {
-      // Invalid state, process errors and partial initialization invalidate this
-      // instance. Caller keeps its original project state and can reopen/retry.
+      // A state-capture failure during editorClose intentionally keeps the
+      // editor process/window alive so the user can retry. Processing failures
+      // continue to invalidate only their independent processing instance.
       instance.reset();
+#ifdef _WIN32
+      if (command == "editorOpen") editor.reset();
+#endif
       reply({{"ok", false}, {"error", error.what()}});
     }
   }
   instance.reset();
 #ifdef _WIN32
+  editor.reset();
   CoUninitialize();
 #endif
   return 0;

@@ -70,6 +70,49 @@ export interface Vst3AudioProcessProfile {
   sampleRate: number;
 }
 export type Vst3ParameterEditorCommit = (channel: import('../types/daw').Channel, changes: Vst3ParameterChange[], signal: AbortSignal) => Promise<void>;
+/** Where an open native editor window belongs, so its final state can be
+ * committed to exactly one Mixer insert and never to a replaced project. */
+export interface Vst3EditorContext {
+  projectId: string;
+  trackId: number;
+  slotId: string;
+}
+/** One genuine VST3 editor window. `state` is only present once closed. */
+export interface Vst3EditorStatus {
+  id: string;
+  closed: boolean;
+  events: Array<{ type: 'begin' | 'perform' | 'end'; id: number; value?: number }>;
+  editedParameters: Array<{ id: number; value: number }>;
+  activeEditIds: number[];
+  dirty: boolean;
+  eventQueueOverflow: boolean;
+  nativeCloseError?: string;
+  state?: Vst3State;
+}
+export interface Vst3EditorOpened {
+  id: string;
+  classId: string;
+  name: string;
+  title: string;
+  resizable: boolean;
+  width: number;
+  height: number;
+  controllerAvailable: boolean;
+  parameters: Vst3Parameter[];
+}
+/** A captured editor state the renderer could not commit (project changed or
+ * closed). It is persisted by the main process and offered on next launch. */
+export interface Vst3EditorRecovery {
+  schema: 1;
+  id: string;
+  projectId: string;
+  trackId: number;
+  slotId: string;
+  originalEffect: Vst3Effect;
+  effect?: Vst3Effect;
+  error?: string;
+  createdAt: number;
+}
 /** Narrow async desktop boundary. Never exposes ipcRenderer, paths to executables or raw host commands. */
 export interface Vst3Bridge {
   paths(): Promise<string[]>;
@@ -85,6 +128,17 @@ export interface Vst3Bridge {
   process(id: string, frames: number, events: Vst3Event[], bpm: number, parameters?: Vst3ParameterPoint[]): Promise<Float32Array>;
   processAudio(id: string, frames: number, audio: Float32Array, bpm: number, parameters?: Vst3ParameterPoint[], profile?: Vst3AudioProcessProfile): Promise<Float32Array>;
   close(id: string): Promise<void>;
+  /** Opens the plug-in's own VST3 editor view in a native OS window.
+   * Optional so non-desktop/older bridges stay type-compatible; the desktop
+   * preload always provides them on Windows x64. */
+  openEditor?(effect: Vst3Effect, context: Vst3EditorContext): Promise<Vst3EditorOpened>;
+  pollEditor?(id: string): Promise<Vst3EditorStatus>;
+  /** Captures the final plug-in state and closes the native window. */
+  closeEditor?(id: string): Promise<Vst3EditorStatus>;
+  /** `committed` is true only when the renderer already stored the state. */
+  finishEditor?(id: string, committed: boolean): Promise<void>;
+  editorRecovery?(): Promise<{ recovery: Vst3EditorRecovery | null; loadError: string | null }>;
+  dismissEditorRecovery?(id: string): Promise<void>;
   /** Handshake only: transfers a dedicated live PCM port bound to this session. */
   bindLiveAudioPort?(sessionId: string, trackId: number, slotId: string, runtimeId: string, sampleRate: number): void | MessagePort | Promise<void | MessagePort>;
   unbindLiveAudioPort?(sessionId: string): Promise<void>;

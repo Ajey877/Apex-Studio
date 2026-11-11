@@ -49,6 +49,12 @@ const desktopApi = {
       return pcm;
     },
     close: (id) => ipcRenderer.invoke('vst3:close', id),
+    openEditor: (effect, context) => ipcRenderer.invoke('vst3:openEditor', effect, context),
+    pollEditor: (id) => ipcRenderer.invoke('vst3:pollEditor', id),
+    closeEditor: (id) => ipcRenderer.invoke('vst3:closeEditor', id),
+    finishEditor: (id, committed) => ipcRenderer.invoke('vst3:finishEditor', id, committed === true),
+    editorRecovery: () => ipcRenderer.invoke('vst3:editorRecovery'),
+    dismissEditorRecovery: (id) => ipcRenderer.invoke('vst3:dismissEditorRecovery', id),
     bindLiveAudioPort: (sessionId, trackId, slotId, runtimeId, sampleRate) => new Promise((resolve, reject) => {
       const existing = pendingLiveAudioPorts.get(sessionId);
       if (existing) {

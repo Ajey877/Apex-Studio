@@ -46,6 +46,18 @@ jobs:
       - name: Verify production native DAW integration on Windows
         run: npm run test:vst3-daw
 
+      - name: Verify native VST3 editor session and recovery contract
+        run: npm run test:vst3-editor
+
+      - name: Prove editor/audio helper process separation with real PIDs
+        run: npm run test:vst3-editor-process
+
+      - name: Build the native helper and the genuine AGain VSTGUI editor fixture
+        run: npm run native:vst3:build
+
+      - name: Verify the AGain VSTGUI editor fixture was built and is discoverable
+        run: node scripts/verify-native-editor-fixture.mjs
+
       - name: Run packaged Windows runtime smoke test
         run: npm run smoke:win
 

@@ -31,6 +31,8 @@ import {
 } from './types/daw';
 import { audioEngine, type MidiEventPayload, type PlaybackStateUpdate } from './audio/audioEngine';
 import { getVst3Bridge, type Vst3Effect, type Vst3ParameterChange } from './audio/nativeVst3Types';
+import { Vst3EditorWindowPanel } from './components/Vst3EditorWindowPanel';
+import { NativeVst3EditorSession, supportsNativeVst3Editor } from './audio/nativeVst3EditorSession';
 import { MidiCcMappingRuntime, MidiNoteInputRuntime, isRackChannelAudible } from './audio/midiMappingRuntime';
 import { MidiPerformanceRecorder, appendRecordedNotesToChannelInProjectState, type MidiRecordingClock } from './audio/midiRecording';
 import { finishMidiTake, type FinishMidiTakeOptions } from './audio/midiTakeBoundary';
@@ -446,6 +448,11 @@ export function App() {
   const [isSidechainOpen, setIsSidechainOpen] = useState(false);
   const [isAudioToMidiOpen, setIsAudioToMidiOpen] = useState(false);
   const [isDesktopAppOpen, setIsDesktopAppOpen] = useState(false);
+  // Genuine VST3 editor window state (the plug-in draws the controls itself in
+  // a native OS window; this is its renderer-side status/lifecycle panel).
+  const [vst3EditorView, setVst3EditorView] = useState<import('./audio/nativeVst3EditorSession').Vst3EditorView | null>(null);
+  const [isVst3EditorBusy, setIsVst3EditorBusy] = useState(false);
+  const vst3EditorRef = useRef<import('./audio/nativeVst3EditorSession').NativeVst3EditorSession | null>(null);
   const [audioEditorClipId, setAudioEditorClipId] = useState<string | null>(null);
   const [audioEditorNotice, setAudioEditorNotice] = useState('');
   const [isWarpProcessorOpen, setIsWarpProcessorOpen] = useState(false);
@@ -2225,6 +2232,160 @@ export function App() {
       'Edit VST3 effect parameters');
   };
 
+  /**
+   * Opens the plug-in's OWN VST3 editor view. The saved insert state is loaded
+   * into the plug-in first, and only the plug-in's native HWND is shown; Apex's
+   * parameter list remains available as a separate, genuine-parameter fallback.
+   */
+  const handleOpenVst3Editor = async (trackId: number, slotId: string) => {
+    const bridge = getVst3Bridge();
+    if (!supportsNativeVst3Editor(bridge)) {
+      throw new Error('Genuine VST3 editor windows require the Windows desktop application.');
+    }
+    if (audioEngine.isPlaybackActive()) throw new Error('Stop playback before opening a native VST3 editor window.');
+    if (isRecording) throw new Error('Stop recording before opening a native VST3 editor window.');
+    // A finished session (committed/recovered/failed) no longer owns a native
+    // window; only a live one blocks opening another.
+    if (vst3EditorRef.current && !vst3EditorRef.current.isFinished) {
+      throw new Error('Close the open native VST3 editor window first.');
+    }
+    vst3EditorRef.current = null;
+    const state = projectStateRef.current;
+    const slot = state.mixerTracks.find(track => track.id === trackId)?.fxSlots.find(candidate => candidate.id === slotId);
+    const effect = slot?.vst3Effect;
+    if (!slot || slot.type !== 'vst3' || !effect) throw new Error('VST3 effect identity/state is missing; relink the insert first.');
+    const openedEffect = effect;
+    const session = new NativeVst3EditorSession(bridge, openedEffect, {
+      projectId: state.meta.id, trackId, slotId,
+    }, {
+      onView: view => setVst3EditorView(view),
+      commit: async finalState => {
+        // The captured state is committed to exactly the insert that was edited:
+        // if the project, the track or the slot changed while the plug-in window
+        // was open, the newer state wins and the capture becomes a recovery record.
+        const currentState = projectStateRef.current;
+        if (currentState.meta.id !== state.meta.id) throw new Error('A different project was loaded while the editor was open.');
+        const currentSlot = currentState.mixerTracks.find(track => track.id === trackId)?.fxSlots.find(candidate => candidate.id === slotId);
+        if (!currentSlot || currentSlot.type !== 'vst3' || !currentSlot.vst3Effect ||
+            currentSlot.vst3Effect.classId !== openedEffect.classId || currentSlot.vst3Effect.path !== openedEffect.path) {
+          throw new Error('This insert was removed or relinked while the editor was open.');
+        }
+        const updatedEffect: Vst3Effect = { ...currentSlot.vst3Effect, state: finalState };
+        // A plug-in that changed nothing must not add an empty undo step; the
+        // captured state still replaces the previous one so a plugin-internal
+        // (non-parameter) change reported only through setDirty is preserved.
+        const unchanged = JSON.stringify(updatedEffect.state) === JSON.stringify(currentSlot.vst3Effect.state);
+        const published = unchanged ? currentState
+          : mutateProjectState(current => updateFxSlotInProjectState(current, trackId, slotId, { vst3Effect: updatedEffect }),
+            'Edit VST3 effect in native editor');
+        // Persist synchronously here: closing a plug-in window and then quitting
+        // must not depend on the debounced autosave succeeding in time.
+        const saved = await performSave(published);
+        if (!saved) throw new Error('The project could not be saved; the captured state was kept for recovery.');
+      },
+    });
+    vst3EditorRef.current = session;
+    setIsVst3EditorBusy(true);
+    setVst3EditorView(session.currentView);
+    try {
+      await session.open();
+    } catch (error) {
+      if (vst3EditorRef.current === session) vst3EditorRef.current = null;
+      throw error;
+    } finally { setIsVst3EditorBusy(false); }
+  };
+
+  const handleCloseVst3Editor = useCallback(async () => {
+    const session = vst3EditorRef.current;
+    if (!session) return;
+    setIsVst3EditorBusy(true);
+    try {
+      await session.close();
+    } finally {
+      setIsVst3EditorBusy(false);
+    }
+  }, []);
+
+  const handleDismissVst3Editor = useCallback(() => {
+    const session = vst3EditorRef.current;
+    if (session && !['committed', 'recovered', 'failed'].includes(session.currentView.phase)) return;
+    vst3EditorRef.current = null;
+    setVst3EditorView(null);
+  }, []);
+
+  // Project replacement (load/new session/bundle import) and unmount must not
+  // leave a plug-in window pointing at a document that no longer exists. The
+  // session discards without committing; the main process keeps the captured
+  // state as a recovery record.
+  useEffect(() => () => {
+    const session = vst3EditorRef.current;
+    vst3EditorRef.current = null;
+    if (session) void session.discard();
+  }, [projectState.meta.id]);
+
+  // Deleting or relinking the insert while its plug-in window is open must also
+  // close the window (capturing a recovery record) instead of leaving an editor
+  // bound to a slot that no longer exists.
+  useEffect(() => {
+    const session = vst3EditorRef.current;
+    if (!session || session.isFinished) return;
+    const { trackId, slotId } = session.context;
+    const slot = projectState.mixerTracks.find(track => track.id === trackId)?.fxSlots.find(candidate => candidate.id === slotId);
+    if (slot?.type === 'vst3' && slot.vst3Effect?.classId === session.effect.classId &&
+        slot.vst3Effect.path === session.effect.path) return;
+    vst3EditorRef.current = null;
+    void session.discard();
+  }, [projectState.mixerTracks]);
+
+  // A captured native-editor state that could not be committed (the insert was
+  // removed, the project was replaced, or the renderer/app went away) is offered
+  // on the next launch. Nothing is applied silently: the user chooses.
+  const [vst3EditorRecovery, setVst3EditorRecovery] = useState<import('./audio/nativeVst3Types').Vst3EditorRecovery | null>(null);
+  useEffect(() => {
+    let active = true;
+    const bridge = getVst3Bridge();
+    if (!bridge?.editorRecovery) return;
+    void bridge.editorRecovery().then(result => {
+      if (!active) return;
+      if (result?.loadError) console.warn('[Apex Studio] VST3 editor recovery data could not be read:', result.loadError);
+      if (result?.recovery) setVst3EditorRecovery(result.recovery);
+    }).catch(error => console.warn('[Apex Studio] VST3 editor recovery lookup failed.', error));
+    return () => { active = false; };
+  }, []);
+
+  const handleRestoreVst3EditorRecovery = () => {
+    const recovery = vst3EditorRecovery;
+    const bridge = getVst3Bridge();
+    if (!recovery || !bridge?.dismissEditorRecovery) return;
+    setVst3EditorRecovery(null);
+    const currentState = projectStateRef.current;
+    const slot = currentState.mixerTracks.find(track => track.id === recovery.trackId)
+      ?.fxSlots.find(candidate => candidate.id === recovery.slotId);
+    if (currentState.meta.id !== recovery.projectId || !slot || slot.type !== 'vst3' || !slot.vst3Effect) {
+      console.warn('[Apex Studio] The VST3 editor recovery record does not match an insert in this project; it was left on disk.');
+      void bridge.dismissEditorRecovery(recovery.id).catch(() => {});
+      return;
+    }
+    const effect = recovery.effect ?? recovery.originalEffect;
+    if (effect.classId !== slot.vst3Effect.classId || effect.path !== slot.vst3Effect.path) {
+      console.warn('[Apex Studio] The VST3 editor recovery record belongs to a different plug-in; it was left on disk.');
+      return;
+    }
+    mutateProjectState(current => updateFxSlotInProjectState(current, recovery.trackId, recovery.slotId, { vst3Effect: effect }),
+      'Recover VST3 editor state');
+    void bridge.dismissEditorRecovery(recovery.id).catch(error =>
+      console.warn('[Apex Studio] Recovered VST3 state could not be cleared from disk.', error));
+  };
+
+  const handleDiscardVst3EditorRecovery = () => {
+    const recovery = vst3EditorRecovery;
+    const bridge = getVst3Bridge();
+    if (!recovery || !bridge?.dismissEditorRecovery) return;
+    setVst3EditorRecovery(null);
+    void bridge.dismissEditorRecovery(recovery.id).catch(error =>
+      console.warn('[Apex Studio] Pending VST3 editor recovery could not be cleared.', error));
+  };
+
   const handleDeleteFxSlot = (trackId: number, slotId: string) => {
     mutateProjectState(
       current => deleteFxSlotFromProjectState(current, trackId, slotId),
@@ -3017,6 +3178,7 @@ export function App() {
               onAddVst3FxSlot={handleAddVst3FxSlot}
               onMoveFxSlot={handleMoveFxSlot}
               onEditVst3Effect={handleEditVst3Effect}
+              onOpenVst3Editor={handleOpenVst3Editor}
               onDeleteFxSlot={handleDeleteFxSlot}
               onUpdateFxSlot={handleUpdateFxSlot}
               isPlaying={isPlaying}
@@ -3024,6 +3186,29 @@ export function App() {
               onInteractionStart={handleContinuousInteractionStart}
               onInteractionEnd={handleContinuousInteractionEnd}
               onCreateAuxReturn={handleCreateAuxReturnTrack}
+            />
+          )}
+
+          {vst3EditorRecovery && !vst3EditorView && (
+            <div role="alert" className="mx-3 mt-2 rounded border border-[var(--apex-border)] bg-[var(--apex-panel)] px-3 py-2 text-[10px] text-[var(--apex-text)]">
+              <p>
+                A native VST3 editor captured changes that were never applied to this project
+                (track {vst3EditorRecovery.trackId}, slot {vst3EditorRecovery.slotId}
+                {vst3EditorRecovery.error ? `: ${vst3EditorRecovery.error}` : ''}).
+              </p>
+              <div className="mt-1 flex gap-1">
+                <button className="rounded border border-[var(--apex-border)] px-2 py-0.5" onClick={handleRestoreVst3EditorRecovery}>Restore captured state</button>
+                <button className="rounded border border-[var(--apex-border)] px-2 py-0.5" onClick={handleDiscardVst3EditorRecovery}>Discard</button>
+              </div>
+            </div>
+          )}
+
+          {vst3EditorView && (
+            <Vst3EditorWindowPanel
+              view={vst3EditorView}
+              busy={isVst3EditorBusy}
+              onClose={() => void handleCloseVst3Editor()}
+              onDismiss={handleDismissVst3Editor}
             />
           )}
 

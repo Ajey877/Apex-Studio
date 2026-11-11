@@ -1,6 +1,15 @@
 // Privileged main-process service shared by Electron and real integration tests.
 // This is a process boundary, NOT a security sandbox for untrusted plugins.
-import { validateMetadata, validateParameterChanges, validateProcessParameters } from './parameters.mjs';
+import {
+  validateEditorActiveEdits,
+  validateEditorContext,
+  validateEditorEvents,
+  validateEditorParameterSnapshot,
+  validateEditorState,
+  validateMetadata,
+  validateParameterChanges,
+  validateProcessParameters,
+} from './parameters.mjs';
 import { realpath } from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -22,9 +31,13 @@ export class Vst3Service {
   #loading = new Map();
   #closing = new Set();
   #scans = new Map();
+  #editor = null;
+  #editorOpening = null;
   constructor(executable, roots) { this.#executable = executable; this.#roots = roots; }
   setRoots(roots) { this.#roots = [...roots]; }
-  get sessionCount() { return this.#sessions.size + this.#pending + this.#closing.size; }
+  get sessionCount() { return this.#sessions.size + this.#pending + this.#closing.size + (this.#editor ? 1 : 0); }
+  get editorSessionCount() { return this.#editor ? 1 : 0; }
+  get hasEditorSession() { return Boolean(this.#editor || this.#editorOpening); }
   #validateLatency(latencySamples, kind, sampleRate) {
     if (!Number.isSafeInteger(latencySamples) || latencySamples < 0) {
       throw new Error(`VST3 ${kind} reported an invalid latency value (${String(latencySamples)} samples).`);
@@ -84,6 +97,256 @@ export class Vst3Service {
       return { id, latencySamples, parameters, controllerAvailable: opened.plugin.controllerAvailable };
     } catch (error) { if (client) await client.dispose().catch(() => {}); throw error; }
     finally { if (client) this.#loading.delete(client); this.#pending--; }
+  }
+  async openEditor(effect, context, owner = 'local') {
+    if (process.platform !== 'win32' || process.arch !== 'x64') {
+      throw new Error('Genuine VST3 editor windows are available only in the Windows x64 desktop build.');
+    }
+    if (this.#closed || this.#editor || this.#editorOpening) throw new Error('One native VST3 editor window is allowed per application session.');
+    if (this.sessionCount >= 16) throw new Error('VST3 session limit reached (maximum 16 including editors and exports).');
+    const editorContext = validateEditorContext(context);
+    if (!effect || typeof effect !== 'object' || Array.isArray(effect) ||
+        typeof effect.name !== 'string' || effect.name.length > 512 ||
+        typeof effect.vendor !== 'string' || effect.vendor.length > 512 ||
+        typeof effect.version !== 'string' || effect.version.length > 512 ||
+        typeof effect.classId !== 'string' || !/^[A-F0-9]{32}$/.test(effect.classId) ||
+        !effect.state || effect.state.classId !== effect.classId || !Array.isArray(effect.state.parameters)) {
+      throw new Error('Invalid VST3 effect identity/state; the committed project state was not changed.');
+    }
+    if (!effect.state.parameters.every(parameter => parameter && Number.isInteger(parameter.id) &&
+        parameter.id >= 0 && parameter.id <= 0xffffffff && Number.isFinite(parameter.value) &&
+        parameter.value >= 0 && parameter.value <= 1) ||
+        new Set(effect.state.parameters.map(parameter => parameter.id)).size !== effect.state.parameters.length) {
+      throw new Error('Invalid VST3 effect parameter state; the committed project state was not changed.');
+    }
+    // The controller's real metadata (with its read-only flags) is authoritative,
+    // so the saved values are structurally validated here and re-validated
+    // against that metadata once the helper reports it.
+    const initialState = validateEditorState(effect.state, effect.classId,
+      effect.state.parameters.map(parameter => ({ id: parameter.id, flags: 0 })));
+    const safeEffect = { ...effect, state: initialState };
+    if (JSON.stringify(safeEffect).length > 4 * 1024 * 1024) throw new Error('VST3 effect state exceeds the 4 MiB editor limit.');
+
+    let resolveOpening;
+    const opening = {
+      owner, effect: safeEffect, context: editorContext, client: null,
+      cancelled: false, recoveryRecord: null,
+      settled: new Promise(resolve => { resolveOpening = resolve; }),
+      settle: () => resolveOpening(),
+    };
+    this.#editorOpening = opening;
+    this.#pending++;
+    const token = this.#ownerTokens.get(owner) ?? Symbol();
+    this.#ownerTokens.set(owner, token);
+    let client;
+    try {
+      const pluginPath = await this.#authorize(safeEffect);
+      if (this.#closed || this.#ownerTokens.get(owner) !== token) throw new Error('VST3 editor was cancelled while authorizing the plug-in.');
+      client = new NativeVst3Client(this.#executable, { timeoutMs: 15000 });
+      opening.client = client;
+      this.#loading.set(client, owner);
+      const plugin = { ...safeEffect, path: pluginPath };
+      const opened = await client.openEditor(plugin);
+      if (!opened.editor || opened.editor.available !== true || opened.editor.classId !== safeEffect.classId) {
+        throw new Error('The VST3 plug-in did not provide a genuine Windows editor view.');
+      }
+      const parameters = validateMetadata(opened.editor.parameters, opened.editor.controllerAvailable);
+      if (!opened.editor.controllerAvailable) throw new Error('This VST3 plug-in has no edit controller for its native editor.');
+      // Saved values must still exist and stay writable on THIS controller.
+      for (const saved of initialState.parameters) {
+        const metadata = parameters.find(parameter => parameter.id === saved.id);
+        if (!metadata || (metadata.flags & (2 | 16))) {
+          throw new Error(`Saved VST3 parameter ${saved.id} is no longer writable on this plug-in controller.`);
+        }
+      }
+      const id = randomUUID();
+      const session = {
+        id, owner, client, effect: plugin, context: editorContext, parameters,
+        activeEdits: new Set(), draftParameters: new Map(initialState.parameters.map(item => [item.id, item.value])),
+        busy: false, busyPromise: null, closed: false, finalState: null, finalStatus: null, recoveryRecord: null,
+      };
+      this.#editor = session;
+      if (this.#closed || this.#ownerTokens.get(owner) !== token) {
+        try {
+          const finalStatus = await this.closeEditor(id, owner);
+          opening.recoveryRecord = this.#makeEditorRecovery(session, finalStatus.state,
+            'The renderer closed while the native VST3 editor was opening.');
+        } catch (error) {
+          opening.recoveryRecord = this.#makeEditorRecovery(session, null,
+            `The renderer closed while the native VST3 editor was opening; the last committed state was preserved. ${error.message}`);
+        }
+        throw new Error('VST3 editor was cancelled while loading the plug-in.');
+      }
+      return { id, ...opened.editor, parameters };
+    } catch (error) {
+      if (opening.cancelled && !opening.recoveryRecord) {
+        opening.recoveryRecord = this.#makePendingEditorRecovery(opening,
+          `The native VST3 editor could not finish opening; the last committed state was preserved. ${error.message}`);
+      }
+      if (client) await client.dispose().catch(() => {});
+      throw error;
+    } finally {
+      if (client) this.#loading.delete(client);
+      this.#pending--;
+      if (this.#editorOpening === opening) this.#editorOpening = null;
+      opening.settle();
+    }
+  }
+  #editorSession(id, owner) {
+    const session = this.#editor;
+    if (!session || session.id !== id || session.owner !== owner) throw new Error('VST3 editor session is closed or belongs to another renderer.');
+    return session;
+  }
+  #editorResult(session, value) {
+    const allowedKeys = new Set(['closed', 'events', 'editedParameters', 'activeEditIds', 'dirty', 'eventQueueOverflow', 'nativeCloseError', 'state']);
+    if (!value || typeof value !== 'object' || Array.isArray(value) ||
+        Object.keys(value).some(key => !allowedKeys.has(key)) || typeof value.closed !== 'boolean' ||
+        typeof value.dirty !== 'boolean' || typeof value.eventQueueOverflow !== 'boolean') {
+      throw new Error('Invalid VST3 editor status response.');
+    }
+    if (value.closed !== Object.hasOwn(value, 'state')) throw new Error('VST3 editor state/closed status mismatch.');
+    if (!Array.isArray(value.events) || value.events.length > 4096) throw new Error('Invalid VST3 editor event batch.');
+    const activeEdits = new Set(session.activeEdits);
+    const activeSnapshot = validateEditorActiveEdits(value.activeEditIds, session.parameters);
+    let events;
+    if (value.eventQueueOverflow) {
+      // The native helper also sends complete bounded snapshots. After an
+      // overflow, those are authoritative; partial callback chronology is not.
+      activeEdits.clear();
+      for (const id of activeSnapshot) activeEdits.add(id);
+      events = [];
+    } else {
+      events = validateEditorEvents(value.events, session.parameters, activeEdits);
+      if (activeEdits.size !== activeSnapshot.size || [...activeEdits].some(id => !activeSnapshot.has(id))) {
+        throw new Error('VST3 editor callback sequence disagrees with its active-edit snapshot.');
+      }
+    }
+    const editedParameters = validateEditorParameterSnapshot(value.editedParameters, session.parameters);
+    for (const item of editedParameters) session.draftParameters.set(item.id, item.value);
+    session.activeEdits = activeEdits;
+    const result = { id: session.id, closed: value.closed, events, editedParameters,
+      activeEditIds: [...activeSnapshot], dirty: value.dirty,
+      eventQueueOverflow: value.eventQueueOverflow };
+    if (value.nativeCloseError !== undefined) {
+      if (typeof value.nativeCloseError !== 'string' || value.nativeCloseError.length > 1024) throw new Error('Invalid VST3 editor close diagnostic.');
+      result.nativeCloseError = value.nativeCloseError;
+    }
+    if (value.closed) {
+      const state = validateEditorState(value.state, session.effect.classId, session.parameters);
+      const mergedParameters = new Map(state.parameters.map(item => [item.id, item.value]));
+      for (const item of editedParameters) mergedParameters.set(item.id, item.value);
+      const finalState = validateEditorState({ ...state,
+        parameters: [...mergedParameters].map(([id, value]) => ({ id, value })) },
+      session.effect.classId, session.parameters);
+      session.closed = true;
+      session.activeEdits.clear();
+      session.finalState = finalState;
+      session.finalStatus = { ...result, activeEditIds: [], state: finalState };
+      return session.finalStatus;
+    }
+    return result;
+  }
+  async pollEditor(id, owner = 'local') {
+    const session = this.#editorSession(id, owner);
+    if (session.closed) return session.finalStatus;
+    if (session.busy) throw new Error('Concurrent VST3 editor status request rejected.');
+    session.busy = true;
+    const operation = (async () => {
+      try {
+        // NativeVst3Client.pollEditor/closeEditor already unwrap the helper's
+        // `editor` field; validate that payload directly.
+        return this.#editorResult(session, await session.client.pollEditor());
+      } catch (error) {
+        if (session.client.isDead) {
+          if (this.#editor === session) this.#editor = null;
+          await session.client.dispose().catch(() => {});
+          throw new Error(`Native VST3 editor helper failed; the previously committed project state is preserved and can be retried. ${error.message}`);
+        }
+        // A malformed response is a helper protocol failure, not a plug-in edit.
+        if (this.#editor === session) this.#editor = null;
+        session.client.abort();
+        await session.client.dispose().catch(() => {});
+        throw new Error(`Native VST3 editor response was rejected; the previously committed project state is preserved. ${error.message}`);
+      }
+    })();
+    session.busyPromise = operation;
+    try { return await operation; }
+    finally { session.busy = false; session.busyPromise = null; }
+  }
+  async closeEditor(id, owner = 'local') {
+    const session = this.#editorSession(id, owner);
+    if (session.closed) return session.finalStatus;
+    if (session.busy) throw new Error('VST3 editor is still servicing another request; retry in a moment.');
+    session.busy = true;
+    const operation = (async () => {
+      try {
+        return this.#editorResult(session, await session.client.closeEditor());
+      } catch (error) {
+        if (session.client.isDead) {
+          if (this.#editor === session) this.#editor = null;
+          await session.client.dispose().catch(() => {});
+          throw new Error(`Native VST3 editor stopped before state capture; the previously committed project state is preserved. ${error.message}`);
+        }
+        // The native helper deliberately remains alive after a failed state
+        // capture so the user can retry without losing the plug-in's live state.
+        if (String(error.message).includes('Invalid VST3 editor')) {
+          if (this.#editor === session) this.#editor = null;
+          session.client.abort();
+          await session.client.dispose().catch(() => {});
+        }
+        throw new Error(`VST3 editor state capture failed; nothing was committed. Retry closing the editor. ${error.message}`);
+      }
+    })();
+    session.busyPromise = operation;
+    try { return await operation; }
+    finally { session.busy = false; session.busyPromise = null; }
+  }
+  async finishEditor(id, owner = 'local') {
+    const session = this.#editorSession(id, owner);
+    if (!session.closed) throw new Error('Capture the final VST3 editor state before releasing the helper.');
+    if (session.busy) throw new Error('VST3 editor is still servicing another request.');
+    this.#editor = null;
+    await session.client.dispose().catch(() => {});
+  }
+  getEditorRecovery(id, owner = 'local') {
+    const session = this.#editorSession(id, owner);
+    const state = session.closed && session.finalState ? session.finalState : this.#editorDraftState(session);
+    session.recoveryRecord = this.#makeEditorRecovery(session, state);
+    return session.recoveryRecord;
+  }
+  #editorDraftState(session) {
+    const parameters = new Map(session.effect.state.parameters.map(item => [item.id, item.value]));
+    for (const [id, value] of session.draftParameters) parameters.set(id, value);
+    return validateEditorState({ ...session.effect.state,
+      parameters: [...parameters].map(([id, value]) => ({ id, value })) },
+    session.effect.classId, session.parameters);
+  }
+  #makeEditorRecovery(session, state, error) {
+    const effectState = state ?? this.#editorDraftState(session);
+    return {
+      schema: 1,
+      id: session.recoveryRecord?.id ?? randomUUID(),
+      projectId: session.context.projectId,
+      trackId: session.context.trackId,
+      slotId: session.context.slotId,
+      originalEffect: session.effect,
+      effect: { ...session.effect, state: effectState },
+      ...(error ? { error: String(error).slice(0, 2048) } : {}),
+      createdAt: Date.now(),
+    };
+  }
+  #makePendingEditorRecovery(opening, error) {
+    return {
+      schema: 1,
+      id: opening.recoveryRecord?.id ?? randomUUID(),
+      projectId: opening.context.projectId,
+      trackId: opening.context.trackId,
+      slotId: opening.context.slotId,
+      originalEffect: opening.effect,
+      effect: opening.effect,
+      error: String(error).slice(0, 2048),
+      createdAt: Date.now(),
+    };
   }
   #session(id, owner) {
     const session = this.#sessions.get(id);
@@ -194,14 +457,48 @@ export class Vst3Service {
   async closeOwner(owner) {
     this.#ownerTokens.delete(owner);
     this.#scans.get(owner)?.abort();
-    for (const [client, loadingOwner] of this.#loading) if (loadingOwner === owner) client.abort();
-    await Promise.all([...this.#sessions].filter(([, s]) => s.owner === owner).map(([id]) => this.close(id, owner)));
+    const opening = this.#editorOpening?.owner === owner ? this.#editorOpening : null;
+    if (opening) {
+      // Let an in-flight editorOpen finish its native handshake. openEditor sees
+      // the invalidated owner token and closes/captures before resolving; killing
+      // the helper here could otherwise lose a view that was already visible.
+      opening.cancelled = true;
+      await opening.settled.catch(() => {});
+    }
+    for (const [client, loadingOwner] of this.#loading) {
+      if (loadingOwner === owner && client !== opening?.client) client.abort();
+    }
+
+    let recovery = opening?.recoveryRecord ?? null;
+    const editor = this.#editor?.owner === owner ? this.#editor : null;
+    if (editor) {
+      if (editor.busyPromise) await editor.busyPromise.catch(() => {});
+      try {
+        const result = editor.closed ? editor.finalStatus : await this.closeEditor(editor.id, owner);
+        recovery = this.#makeEditorRecovery(editor, result.state);
+      } catch (error) {
+        recovery = this.#makeEditorRecovery(editor, null,
+          `Editor state capture failed during renderer shutdown; the last captured parameter values and previous committed plug-in state were retained. ${error.message}`);
+      }
+      if (this.#editor === editor) this.#editor = null;
+      if (!editor.client.isDead) {
+        if (!editor.closed) editor.client.abort();
+        await editor.client.dispose().catch(() => {});
+      }
+    }
+    await Promise.all([...this.#sessions].filter(([, session]) => session.owner === owner).map(([id]) => this.close(id, owner)));
+    return recovery;
   }
   async dispose() {
     this.#closed = true;
     for (const controller of this.#scans.values()) controller.abort();
-    for (const client of this.#loading.keys()) client.abort();
-    await Promise.all([...this.#sessions].map(([id, session]) => this.close(id, session.owner)));
+    const owners = new Set([...this.#sessions.values()].map(session => session.owner));
+    if (this.#editor) owners.add(this.#editor.owner);
+    if (this.#editorOpening) owners.add(this.#editorOpening.owner);
+    for (const [client, owner] of this.#loading) {
+      if (owner !== this.#editorOpening?.owner) client.abort();
+    }
+    await Promise.all([...owners].map(owner => this.closeOwner(owner)));
     await Promise.all([...this.#closing]);
     this.#ownerTokens.clear();
   }

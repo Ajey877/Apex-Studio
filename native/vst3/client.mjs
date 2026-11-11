@@ -5,6 +5,13 @@ import { spawn } from 'node:child_process';
 import { readdir, lstat } from 'node:fs/promises';
 import path from 'node:path';
 
+// Production always spawns the staged helper binary. Unit/integration tests use
+// the setter below to substitute a protocol-faithful child process, because the
+// real executable only exists after the Windows native build.
+let spawnNativeHelper = spawn;
+export function setNativeHelperSpawnForTests(factory) {
+  spawnNativeHelper = factory ?? spawn;
+}
 const MAX_JSON = 5 * 1024 * 1024;
 const MAX_PCM = 16384 * 2 * 4;
 const MAX_REQUEST = 8 * 1024 * 1024;
@@ -18,9 +25,10 @@ export class NativeVst3Client {
   #timeoutMs;
   #stderr = '';
   #exited;
+  get isDead() { return Boolean(this.#dead); }
   constructor(executable, { timeoutMs = 10000 } = {}) {
     this.#timeoutMs = timeoutMs;
-    this.#child = spawn(executable, [], { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, shell: false });
+    this.#child = spawnNativeHelper(executable, [], { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, shell: false });
     this.#exited = new Promise(resolve => this.#child.once('close', resolve));
     this.#child.on('error', error => this.#fail(error));
     this.#child.on('exit', (code, signal) => this.#fail(new Error(`VST3 helper exited (${signal ?? code}). ${this.#stderr}`)));
@@ -86,6 +94,14 @@ export class NativeVst3Client {
     return this.request({ command: 'open', path: plugin.path, classId: plugin.classId, sampleRate, mode, kind,
       ...(state === undefined ? {} : { state }) });
   }
+  openEditor(effect) {
+    if (!effect || typeof effect.path !== 'string' || typeof effect.classId !== 'string' || !effect.state) {
+      throw new Error('Invalid VST3 editor identity/state');
+    }
+    return this.request({ command: 'editorOpen', path: effect.path, classId: effect.classId, state: effect.state });
+  }
+  async pollEditor() { return (await this.request({ command: 'editorPoll' })).editor; }
+  async closeEditor() { return (await this.request({ command: 'editorClose' })).editor; }
   async parameters(changes) { return (await this.request({ command: 'parameters', parameters: changes })).parameters; }
   async snapshot() { return (await this.request({ command: 'snapshot' })).state; }
   process(frames, events = [], parameters = [], bpm = 120) {

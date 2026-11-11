@@ -48,3 +48,106 @@ export function validateProcessParameters(changes, parameters, frames) {
     return { ...validated, offset: p.offset };
   });
 }
+
+export function validateEditorContext(context) {
+  if (!context || typeof context !== 'object' || Array.isArray(context) ||
+      typeof context.projectId !== 'string' || !context.projectId.length || context.projectId.length > 256 ||
+      !Number.isSafeInteger(context.trackId) || context.trackId < 0 || context.trackId > 1_000_000 ||
+      typeof context.slotId !== 'string' || !context.slotId.length || context.slotId.length > 128 ||
+      Object.keys(context).some(key => !['projectId', 'trackId', 'slotId'].includes(key))) {
+    throw new Error('Invalid VST3 editor project/slot context');
+  }
+  return { projectId: context.projectId, trackId: context.trackId, slotId: context.slotId };
+}
+
+export function validateEditorEvents(events, parameters, activeEdits = new Set()) {
+  if (!Array.isArray(events) || events.length > 4096 || !(activeEdits instanceof Set)) throw new Error('Invalid or oversized VST3 editor event batch');
+  const metadata = new Map(parameters.map(parameter => [parameter.id, parameter]));
+  const active = activeEdits;
+  return events.map(event => {
+    if (!event || typeof event !== 'object' || Array.isArray(event) ||
+        !Number.isInteger(event.id) || event.id < 0 || event.id > 0xffffffff) {
+      throw new Error('Invalid VST3 editor parameter callback');
+    }
+    const parameter = metadata.get(event.id);
+    if (!parameter || (parameter.flags & (2 | 16))) throw new Error('VST3 editor callback referenced an unknown or read-only ParamID');
+    if (event.type === 'begin' && Object.keys(event).length === 2) {
+      if (active.has(event.id) || active.size >= 256) throw new Error('Invalid or excessive VST3 beginEdit callback');
+      active.add(event.id);
+      return { type: 'begin', id: event.id };
+    }
+    if (event.type === 'perform' && Object.keys(event).length === 3) {
+      if (!active.has(event.id) || !Number.isFinite(event.value) || event.value < 0 || event.value > 1) {
+        throw new Error('Invalid VST3 performEdit callback');
+      }
+      return { type: 'perform', id: event.id, value: event.value };
+    }
+    if (event.type === 'end' && Object.keys(event).length === 2) {
+      if (!active.delete(event.id)) throw new Error('Invalid VST3 endEdit callback');
+      return { type: 'end', id: event.id };
+    }
+    throw new Error('Unknown or malformed VST3 editor callback');
+  });
+}
+
+export function validateEditorParameterSnapshot(values, parameters) {
+  if (!Array.isArray(values) || values.length > 4096) throw new Error('Invalid or oversized VST3 editor parameter snapshot');
+  const metadata = new Map(parameters.map(parameter => [parameter.id, parameter]));
+  const seen = new Set();
+  return values.map(item => {
+    if (!item || typeof item !== 'object' || Array.isArray(item) || Object.keys(item).length !== 2 ||
+        !Number.isInteger(item.id) || item.id < 0 || item.id > 0xffffffff ||
+        !Number.isFinite(item.value) || item.value < 0 || item.value > 1 || seen.has(item.id)) {
+      throw new Error('Invalid or duplicate VST3 editor parameter snapshot value');
+    }
+    const parameter = metadata.get(item.id);
+    if (!parameter || (parameter.flags & (2 | 16))) throw new Error('VST3 editor snapshot referenced an unknown or read-only ParamID');
+    seen.add(item.id);
+    return { id: item.id, value: item.value };
+  });
+}
+
+export function validateEditorActiveEdits(ids, parameters) {
+  if (!Array.isArray(ids) || ids.length > 256) throw new Error('Invalid or oversized VST3 editor active-edit set');
+  const metadata = new Map(parameters.map(parameter => [parameter.id, parameter]));
+  const seen = new Set();
+  for (const id of ids) {
+    const parameter = metadata.get(id);
+    if (!Number.isInteger(id) || id < 0 || id > 0xffffffff || seen.has(id) ||
+        !parameter || (parameter.flags & (2 | 16))) throw new Error('VST3 editor active-edit set contains an unknown or read-only ParamID');
+    seen.add(id);
+  }
+  return seen;
+}
+
+export function validateEditorState(state, classId, parameters) {
+  if (!state || typeof state !== 'object' || Array.isArray(state) || state.schema !== 1 ||
+      state.classId !== classId || !Array.isArray(state.parameters) || state.parameters.length > 4096 ||
+      Object.keys(state).some(key => !['schema', 'classId', 'component', 'controller', 'parameters'].includes(key))) {
+    throw new Error('Invalid VST3 editor state; the previously committed project state is retained');
+  }
+  for (const key of ['component', 'controller']) {
+    const value = state[key];
+    if (value !== undefined && (typeof value !== 'string' || value.length > 2 * 1024 * 1024 ||
+        !/^(?:[A-Fa-f0-9]{2})*$/.test(value))) {
+      throw new Error(`Invalid or oversized VST3 ${key} state`);
+    }
+  }
+  const metadata = new Map(parameters.map(parameter => [parameter.id, parameter]));
+  const seen = new Set();
+  const normalizedParameters = state.parameters.map(item => {
+    if (!item || typeof item !== 'object' || Array.isArray(item) || Object.keys(item).length !== 2 ||
+        !Number.isInteger(item.id) || item.id < 0 || item.id > 0xffffffff ||
+        !Number.isFinite(item.value) || item.value < 0 || item.value > 1 || seen.has(item.id)) {
+      throw new Error('Invalid or duplicate normalized VST3 editor parameter value');
+    }
+    const parameter = metadata.get(item.id);
+    if (!parameter || (parameter.flags & 2)) throw new Error('VST3 editor state contains an unknown or read-only ParamID');
+    seen.add(item.id);
+    return { id: item.id, value: item.value };
+  });
+  const result = { schema: 1, classId, ...(state.component === undefined ? {} : { component: state.component }),
+    ...(state.controller === undefined ? {} : { controller: state.controller }), parameters: normalizedParameters };
+  if (JSON.stringify(result).length > 4 * 1024 * 1024) throw new Error('VST3 editor state exceeds the 4 MiB project-state limit');
+  return result;
+}
