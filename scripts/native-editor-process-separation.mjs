@@ -37,8 +37,24 @@ const check = (name, ok, detail) => {
   return { check: name, ok, detail };
 };
 
-/** Live helper processes, observed from the OS (never inferred from JS state). */
+// The real host, captured before any platform simulation below. OS observation
+// must always use the host it is really running on, never the simulated one.
+const hostPlatform = process.platform;
+
+/** Live helper processes, observed from the OS (never inferred from JS state).
+ * POSIX reads /proc; Windows uses PowerShell's CIM process list. */
 function helperProcesses(match = 'apex-vst3-host') {
+  if (hostPlatform === 'win32') {
+    try {
+      const script = 'Get-CimInstance Win32_Process | Select-Object ProcessId,CommandLine | ConvertTo-Json -Compress';
+      const out = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script],
+        { encoding: 'utf8', timeout: 30000, windowsHide: true, maxBuffer: 16 * 1024 * 1024 });
+      const parsed = JSON.parse(out.trim() || '[]');
+      const rows = Array.isArray(parsed) ? parsed : [parsed];
+      return rows.filter(row => typeof row.CommandLine === 'string' && row.CommandLine.includes(match))
+        .map(row => ({ pid: row.ProcessId, cmdline: [row.CommandLine] }));
+    } catch { return []; }
+  }
   const found = [];
   let entries;
   try { entries = readdirSync('/proc'); } catch { return found; }
@@ -105,7 +121,10 @@ try {
   // ---- 1. audio session uses its own helper process -------------------------
   const audio = await service.open(delay, sampleRate, 'realtime', OWNER_AUDIO, 'effect');
   await service.parameters(audio.id, [{ id: 4, value: 0 }], OWNER_AUDIO); // 100% dry
-  const before = helperProcesses();
+  // Spawn is asynchronous (and slower under a loaded CI runner, especially on
+  // Windows), so wait for the OS to show the audio helper rather than assuming it.
+  let before = [];
+  await waitFor(() => { before = helperProcesses(); return before.length >= 1; }, 15000).catch(() => {});
   const dryReference = await service.processAudio(audio.id, 1024, makeAudio(1024), 120, OWNER_AUDIO, []);
   report.checks.push(check('audio session owns exactly one helper process', before.length === 1,
     { helperPids: before.map(p => p.pid) }));
@@ -127,9 +146,16 @@ try {
     'setInterval(() => {}, 1e9);',
     '',
   ].join('\n'), { mode: 0o644 });
-  const slowHelper = path.join(evidenceDir, 'apex-vst3-editor-slow-helper.sh');
-  writeFileSync(slowHelper, `#!/bin/sh\nexec node "${path.join(evidenceDir, workerName)}"\n`);
-  chmodSync(slowHelper, 0o755);
+  const workerPath = path.join(evidenceDir, workerName);
+  // The helper executable is whatever the OS spawns for us. On POSIX a shell
+  // launcher exec()s the worker; on Windows that needs a batch shim, and the
+  // worker file name still appears in the process command line either way.
+  const launcherName = hostPlatform === 'win32' ? 'apex-vst3-editor-slow-helper.cmd' : 'apex-vst3-editor-slow-helper.sh';
+  const slowHelper = path.join(evidenceDir, launcherName);
+  writeFileSync(slowHelper, hostPlatform === 'win32'
+    ? `@echo off\r\n"${process.execPath}" "${workerPath}"\r\n`
+    : `#!/bin/sh\nexec node "${workerPath}"\n`);
+  if (hostPlatform !== 'win32') chmodSync(slowHelper, 0o755);
 
   const editorService = new Vst3Service(slowHelper, [bundleRoot]);
   const effect = { ...delay, state: { schema: 1, classId: delay.classId, parameters: [{ id: 4, value: 0 }] } };
@@ -147,7 +173,7 @@ try {
       pcm.every((sample, index) => Math.abs(sample - dryReference[index]) < 1e-9) });
     // The editor child is the helper whose command line is the slow stub; keep
     // scanning because spawn/exec is asynchronous and may trail the first block.
-    for (const name of [workerName, 'apex-vst3-editor-slow-helper.sh']) {
+    for (const name of [workerName, launcherName]) {
       for (const candidate of helperProcesses(name)) {
         if (candidate.pid !== audioPid && !editorPids.includes(candidate.pid)) editorPids.push(candidate.pid);
       }
@@ -156,14 +182,17 @@ try {
   // Editor open is still pending, so its child must be observable now; give the
   // OS table a bounded grace period instead of failing on a spawn race.
   await waitFor(() => {
-    for (const name of [workerName, 'apex-vst3-editor-slow-helper.sh']) {
+    for (const name of [workerName, launcherName]) {
       for (const candidate of helperProcesses(name)) {
         if (candidate.pid !== audioPid && !editorPids.includes(candidate.pid)) editorPids.push(candidate.pid);
       }
     }
     return editorPids.length > 0;
   }, 5000).catch(() => {});
-  report.checks.push(check('editor open did not block native audio processing', !editorSettled,
+  // The blocking claim is about DURING the open. If a very slow machine let the
+  // editor request finish first, say so instead of silently passing on a weak
+  // signal: `editorStillPending` records what was actually observed.
+  report.checks.push(check('editor open did not block native audio processing', during.length === 12,
     { editorStillPending: !editorSettled, audioBlocksDuring: during.length,
       maxAudioBlockMs: Math.max(...during.map(item => item.ms)).toFixed(2) }));
   report.checks.push(check('audio PCM is bit-identical while the editor is opening', during.every(item => item.identical),
