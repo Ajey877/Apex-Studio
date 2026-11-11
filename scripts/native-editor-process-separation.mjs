@@ -121,7 +121,7 @@ try {
   // ---- 1. audio session uses its own helper process -------------------------
   const audio = await service.open(delay, sampleRate, 'realtime', OWNER_AUDIO, 'effect');
   await service.parameters(audio.id, [{ id: 4, value: 0 }], OWNER_AUDIO); // 100% dry
-  // Spawn is asynchronous (and slower under a loaded CI runner, especially on
+  // Spawn is asynchronous (and slower on a loaded CI runner, especially on
   // Windows), so wait for the OS to show the audio helper rather than assuming it.
   let before = [];
   await waitFor(() => { before = helperProcesses(); return before.length >= 1; }, 15000).catch(() => {});

@@ -360,4 +360,29 @@ test('a batch helper is spawned through the shell, the real .exe helper is not',
   } finally { setNativeHelperSpawnForTests(null); }
 });
 
+test('disposing a helper that never exits is bounded instead of hanging', async () => {
+  // A shell-spawned helper leaves a grandchild holding the pipes, so `close` can
+  // never fire. Teardown must give up and kill the tree rather than hanging the
+  // caller forever (this hung a Windows CI job for 20 minutes).
+  const { NativeVst3Client, setNativeHelperSpawnForTests } = await import('../native/vst3/client.mjs');
+  setNativeHelperSpawnForTests(() => {
+    const child = new EventEmitter();
+    child.pid = undefined;
+    child.stdin = new PassThrough();
+    child.stdout = new PassThrough();
+    child.stderr = new PassThrough();
+    child.kill = () => true;
+    // Deliberately never emits 'close' and never answers a request.
+    child.stdin.on('data', () => {});
+    return child;
+  });
+  const started = Date.now();
+  try {
+    const client = new NativeVst3Client('apex-vst3-host.exe', { timeoutMs: 200 });
+    await client.dispose();
+    const elapsed = Date.now() - started;
+    assert.ok(elapsed < 12000, `dispose must be bounded, took ${elapsed}ms`);
+  } finally { setNativeHelperSpawnForTests(null); }
+});
+
 test.after(() => { rmSync(pluginRoot, { recursive: true, force: true }); });
