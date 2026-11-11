@@ -28,7 +28,13 @@ export class NativeVst3Client {
   get isDead() { return Boolean(this.#dead); }
   constructor(executable, { timeoutMs = 10000 } = {}) {
     this.#timeoutMs = timeoutMs;
-    this.#child = spawnNativeHelper(executable, [], { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, shell: false });
+    // A `.cmd`/`.bat` helper cannot be spawned with shell:false on Windows
+    // (spawn raises EINVAL), so batch helpers go through cmd.exe. The real
+    // helper is an .exe and keeps the strict shell:false path.
+    const batch = process.platform === 'win32' && /\.(cmd|bat)$/i.test(executable);
+    this.#child = spawnNativeHelper(executable, [], {
+      stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, shell: batch,
+    });
     this.#exited = new Promise(resolve => this.#child.once('close', resolve));
     this.#child.on('error', error => this.#fail(error));
     this.#child.on('exit', (code, signal) => this.#fail(new Error(`VST3 helper exited (${signal ?? code}). ${this.#stderr}`)));

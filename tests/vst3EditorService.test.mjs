@@ -339,4 +339,25 @@ test('a recovery record names the plug-in path exactly as the caller identified 
   } finally { rmSync(aliasDir, { recursive: true, force: true }); }
 });
 
+test('a batch helper is spawned through the shell, the real .exe helper is not', async () => {
+  // spawn() with shell:false throws EINVAL for a .cmd target on Windows. A batch
+  // helper is only used by the process-separation evidence script, but the client
+  // must not be the reason that evidence cannot run.
+  const { NativeVst3Client, setNativeHelperSpawnForTests } = await import('../native/vst3/client.mjs');
+  const seen = [];
+  setNativeHelperSpawnForTests((file, args, options) => {
+    seen.push({ file, options });
+    const child = fakeHelper(() => ({}));
+    return child;
+  });
+  try {
+    const cmdClient = new NativeVst3Client('C:\\evidence\\slow-helper.cmd');
+    assert.equal(seen.at(-1).options.shell, true, 'a .cmd helper must be spawned through the shell');
+    await cmdClient.dispose();
+    const exeClient = new NativeVst3Client('C:\\build\\apex-vst3-host.exe');
+    assert.equal(seen.at(-1).options.shell, false, 'the real helper must never go through a shell');
+    await exeClient.dispose();
+  } finally { setNativeHelperSpawnForTests(null); }
+});
+
 test.after(() => { rmSync(pluginRoot, { recursive: true, force: true }); });
