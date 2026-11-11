@@ -74,6 +74,15 @@ function helperProcesses(match = 'apex-vst3-host') {
   return found;
 }
 
+/** Force-kill a pid and its children. Never by image name. */
+function killProcessTree(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return;
+  try {
+    if (hostPlatform === 'win32') execFileSync('taskkill', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore', timeout: 10000 });
+    else process.kill(pid, 'SIGKILL');
+  } catch { /* already gone */ }
+}
+
 /** pids of this script's helper processes that are still running. */
 function liveHelpers(pids) {
   return pids.filter(processAlive);
@@ -283,6 +292,11 @@ try {
   await service.dispose();
 } finally {
   clearTimeout(watchdog);
+  // Descendants of a launcher (.cmd on Windows) survive the launcher's death and
+  // keep this process's stdio pipes open, which stops Node from exiting even
+  // after all work is done. Reclaim this run's pids explicitly.
+  stage('reclaim helpers');
+  for (const pid of [...helperPidsSeen]) killProcessTree(pid);
   if (originalPlatform && Object.getOwnPropertyDescriptor(process, 'platform')?.value !== originalPlatform.value) {
     Object.defineProperty(process, 'platform', originalPlatform);
   }
@@ -311,3 +325,5 @@ if (failures.length) {
   process.exit(1);
 }
 console.log('\nAll process-separation checks passed.');
+// Exit explicitly: an evidence run must never hang on an inherited pipe.
+process.exit(0);
