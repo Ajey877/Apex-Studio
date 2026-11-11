@@ -49,7 +49,17 @@ jobs:
           fi
           exit "$status"
       - name: Prove editor/audio helper process separation with real PIDs
-        run: npm run test:vst3-editor-process
+        shell: bash
+        run: |
+          set +e
+          npm run test:vst3-editor-process 2>&1 | tee separation-tests.log
+          status=${PIPESTATUS[0]}
+          if [ "$status" -ne 0 ]; then
+            grep -E "failed|FAIL|Error|error|check|expected|actual" separation-tests.log | head -50 | while IFS= read -r line; do
+              echo "::error::$line"
+            done
+          fi
+          exit "$status"
       - name: Verify the AGain VSTGUI editor fixture was built and is discoverable
         if: runner.os == 'Windows'
         run: node scripts/verify-native-editor-fixture.mjs
