@@ -48,22 +48,52 @@ const finish = () => {
   mkdirSync(path.dirname(target), { recursive: true });
   writeFileSync(target, JSON.stringify(report, null, 2));
   console.log(JSON.stringify(report, null, 2));
+  for (const item of results) console.log(`${item.ok ? 'PASS' : 'FAIL'} ${item.check} ${JSON.stringify(item.detail)}`);
   if (failures.length) {
+    // Say what the build actually produced, so a missing fixture is diagnosable
+    // from a single annotation.
+    try {
+      const shipped = readdirSync(path.join(build, 'VST3/Release'));
+      console.log(`BUILT ${JSON.stringify(shipped)}`);
+    } catch (error) {
+      console.log(`BUILT <unreadable> ${error.message}`);
+    }
     console.error(`\n${failures.length} editor-fixture check(s) failed`);
     process.exit(1);
   }
   console.log('\nAGain editor fixture verified.');
+  process.exit(0);
 };
 
 if (!check('native helper binary exists', Boolean(executable), { executable })) finish();
-const bundle = path.join(build, 'VST3/Release/again.vst3');
-const bundleExists = existsSync(bundle);
-check('AGain VSTGUI editor fixture bundle exists', bundleExists, { bundle });
+// The bundler output layout depends on the generator (Visual Studio puts bundles
+// under VST3/Release, Ninja puts them under VST3/Release too on POSIX but a
+// multi-config build can add a configuration directory). Search instead of
+// assuming one path, and report every candidate that was considered.
+function findBundle(directory, name, depth = 0) {
+  if (depth > 5) return undefined;
+  let entries;
+  try { entries = readdirSync(directory, { withFileTypes: true }); } catch { return undefined; }
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const full = path.join(directory, entry.name);
+    if (entry.name.toLowerCase() === name.toLowerCase()) return full;
+    const found = findBundle(full, name, depth + 1);
+    if (found) return found;
+  }
+  return undefined;
+}
+const bundle = findBundle(path.join(build, 'VST3'), 'again.vst3');
+const bundleExists = Boolean(bundle);
+let candidates = [];
+try { candidates = readdirSync(path.join(build, 'VST3/Release')); } catch { /* reported below */ }
+check('AGain VSTGUI editor fixture bundle exists', bundleExists, { bundle, candidates });
 if (!bundleExists) {
   // The SDK only builds AGain when SMTG_ENABLE_VSTGUI_SUPPORT is ON, which this
   // repository enables through APEX_BUILD_VST3_EDITOR_FIXTURE on Windows.
   check('editor fixture build option enabled', false,
-    { hint: 'APEX_BUILD_VST3_EDITOR_FIXTURE=ON is Windows-only; on Windows run npm run native:vst3:build' });
+    { hint: 'APEX_BUILD_VST3_EDITOR_FIXTURE=ON is Windows-only; on Windows run npm run native:vst3:build',
+      builtTargets: candidates });
   finish();
 }
 
