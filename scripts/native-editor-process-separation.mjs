@@ -41,20 +41,26 @@ const check = (name, ok, detail) => {
 // must always use the host it is really running on, never the simulated one.
 const hostPlatform = process.platform;
 
-/** Live helper processes, observed from the OS (never inferred from JS state).
- * POSIX reads /proc; Windows uses PowerShell's CIM process list. */
-function helperProcesses(match = 'apex-vst3-host') {
+/** Is this OS pid alive right now? POSIX reads /proc, Windows asks tasklist.
+ * Both are cheap: this must never block the event loop for long. */
+function processAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
   if (hostPlatform === 'win32') {
     try {
-      const script = 'Get-CimInstance Win32_Process | Select-Object ProcessId,CommandLine | ConvertTo-Json -Compress';
-      const out = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script],
-        { encoding: 'utf8', timeout: 30000, windowsHide: true, maxBuffer: 16 * 1024 * 1024 });
-      const parsed = JSON.parse(out.trim() || '[]');
-      const rows = Array.isArray(parsed) ? parsed : [parsed];
-      return rows.filter(row => typeof row.CommandLine === 'string' && row.CommandLine.includes(match))
-        .map(row => ({ pid: row.ProcessId, cmdline: [row.CommandLine] }));
-    } catch { return []; }
+      const out = execFileSync('tasklist', ['/FI', `PID eq ${pid}`, '/NH', '/FO', 'CSV'],
+        { encoding: 'utf8', timeout: 5000, windowsHide: true });
+      return out.includes(`"${pid}"`);
+    } catch { return false; }
   }
+  try { return existsSync(`/proc/${pid}`); } catch { return false; }
+}
+
+/** Helper processes matching a command-line fragment, read from the OS.
+ * POSIX can enumerate command lines through /proc. Windows cannot do that
+ * cheaply without PowerShell/WMI (which is slow enough to stall the run), so
+ * Windows callers must use processAlive() on a pid the OS already gave us. */
+function helperProcesses(match = 'apex-vst3-host') {
+  if (hostPlatform === 'win32') return [];
   const found = [];
   let entries;
   try { entries = readdirSync('/proc'); } catch { return found; }
@@ -66,6 +72,11 @@ function helperProcesses(match = 'apex-vst3-host') {
     } catch { /* process exited while scanning */ }
   }
   return found;
+}
+
+/** pids of this script's helper processes that are still running. */
+function liveHelpers(pids) {
+  return pids.filter(processAlive);
 }
 
 /** Poll `predicate` until true or `timeoutMs` elapses (child exit is async). */
@@ -91,6 +102,9 @@ async function waitForValue(read, timeoutMs = 5000) {
 
 // Progress markers: if the run is killed, the last marker names the stage.
 const stage = name => console.log(`STAGE ${name} ${Date.now()}`);
+
+// Every helper pid this run created, for the final leak check.
+const helperPidsSeen = new Set();
 
 const sampleRate = 48000;
 const { plugins, errors } = await discoverVst3(executable, [bundle], { kind: 'effect' });
@@ -196,11 +210,16 @@ try {
       pcm.every((sample, index) => Math.abs(sample - dryReference[index]) < 1e-9) });
   }
   const editorPid = await waitForValue(() => editorService.getEditorHelperPid(OWNER_EDITOR), 15000);
-  // Independent cross-check from the OS process table: something must be running
-  // this launcher/worker, and it must not be the audio helper.
-  const observed = helperProcesses(workerName).concat(helperProcesses(launcherName));
-  const editorPids = [...new Set(observed.map(process => process.pid))];
-  const preexisting = new Set();
+  // Cross-check with the OS: the editor helper pid must be alive and running this
+  // launcher/worker, and the audio helper must be a different live process.
+  const editorAlive = processAlive(editorPid);
+  const onPosix = hostPlatform !== 'win32';
+  const editorCmdline = onPosix && editorAlive
+    ? (helperProcesses(workerName).find(process => process.pid === editorPid)?.cmdline ??
+       helperProcesses(launcherName).find(process => process.pid === editorPid)?.cmdline ?? [])
+    : [];
+  helperPidsSeen.add(audioPid);
+  if (Number.isInteger(editorPid)) helperPidsSeen.add(editorPid);
   // The blocking claim is about DURING the open. If a very slow machine let the
   // editor request finish first, say so instead of silently passing on a weak
   // signal: `editorStillPending` records what was actually observed.
@@ -224,11 +243,11 @@ try {
   // On Windows the launcher (.cmd) and the node worker are two processes; on
   // POSIX the launcher exec()s into the worker. Either way the claim is the same:
   // the editor's process tree shares no pid with the audio helper's.
-  const freshEditorPids = editorPids.filter(pid => !preexisting.has(pid));
-  report.checks.push(check('the editor helper was a separate OS process from the audio helper',
-    Number.isInteger(editorPid) && editorPid !== audioPid &&
-      freshEditorPids.length >= 1 && !freshEditorPids.includes(audioPid ?? -1),
-    { audioHelperPid: audioPid, editorHelperPid: editorPid, editorHelperPids: editorPids, freshEditorPids }));
+  report.checks.push(check('the editor helper was a separate, live OS process from the audio helper',
+    Number.isInteger(editorPid) && Number.isInteger(audioPid) && editorPid !== audioPid &&
+      editorAlive && processAlive(audioPid) && (!onPosix || editorCmdline.some(part => part.includes(workerName))),
+    { audioHelperPid: audioPid, editorHelperPid: editorPid, editorAlive,
+      audioAlive: processAlive(audioPid), editorCmdline }));
 
   // ---- 5. ownership is explicit and non-overlapping -----------------------
     stage('ownership and teardown');
@@ -258,6 +277,7 @@ try {
 
   // ---- editor teardown never enumerates audio sessions -------------------
   await service.close(audio.id, OWNER_AUDIO);
+  stage('teardown');
   report.checks.push(check('closing the audio session leaves no service session', service.sessionCount === 0,
     { sessionCount: service.sessionCount }));
   await service.dispose();
@@ -268,9 +288,12 @@ try {
   }
 }
 
-const remaining = helperProcesses();
-report.checks.push(check('no helper process leaks after evidence run', remaining.length === 0,
-  { helperPids: remaining.map(p => p.pid) }));
+// Leak check on the exact pids this run created, plus a POSIX table sweep for
+// any stray helper. Both must be empty.
+const survivors = await waitForValue(() => (liveHelpers([...helperPidsSeen]).length === 0 ? [] : null), 5000) ?? liveHelpers([...helperPidsSeen]);
+const strays = helperProcesses(executableName);
+report.checks.push(check('no helper process leaks after evidence run', survivors.length === 0 && strays.length === 0,
+  { watchedPids: [...helperPidsSeen], survivorPids: survivors, strayPids: strays.map(p => p.pid) }));
 report.failures = failures;
 const evidencePath = path.join(root, 'build/native-evidence/native-editor-process-separation.json');
 mkdirSync(path.dirname(evidencePath), { recursive: true });
