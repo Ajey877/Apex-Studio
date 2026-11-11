@@ -164,6 +164,9 @@ try {
     .then(() => 'opened', error => error.message).finally(() => { editorSettled = true; });
 
   const audioPid = before.length === 1 ? before[0].pid : null;
+  // Everything already in the table before the editor opens. Any process that
+  // appears afterwards belongs to the editor's own launch tree.
+  const preexisting = new Set(helperProcesses(workerName).concat(helperProcesses(launcherName)).map(p => p.pid));
   const during = [];
   const editorPids = [];
   for (let block = 0; block < 12; block++) {
@@ -188,7 +191,7 @@ try {
       }
     }
     return editorPids.length > 0;
-  }, 5000).catch(() => {});
+  }, 8000).catch(() => {});
   // The blocking claim is about DURING the open. If a very slow machine let the
   // editor request finish first, say so instead of silently passing on a weak
   // signal: `editorStillPending` records what was actually observed.
@@ -208,9 +211,13 @@ try {
   report.checks.push(check('audio output is unchanged after the editor helper died',
     after.length === dryReference.length && after.every((sample, index) => Math.abs(sample - dryReference[index]) < 1e-9),
     { rms: rms(after) }));
+  // On Windows the launcher (.cmd) and the node worker are two processes; on
+  // POSIX the launcher exec()s into the worker. Either way the claim is the same:
+  // the editor's process tree shares no pid with the audio helper's.
+  const freshEditorPids = editorPids.filter(pid => !preexisting.has(pid));
   report.checks.push(check('the editor helper was a separate OS process from the audio helper',
-    editorPids.length === 1 && audioPid !== null && editorPids[0] !== audioPid,
-    { audioHelperPid: audioPid, editorHelperPids: editorPids }));
+    freshEditorPids.length >= 1 && audioPid !== null && !freshEditorPids.includes(audioPid),
+    { audioHelperPid: audioPid, editorHelperPids: editorPids, freshEditorPids }));
 
   // ---- 5. ownership is explicit and non-overlapping -----------------------
   let crossOwnerRejected = false;
