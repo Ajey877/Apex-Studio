@@ -234,6 +234,16 @@ try {
     // A caption+border means the outer window is larger than the client area,
     // which is only true of a real framed window, not a bare child surface.
     hasRealWindowFrame: Number(live.windowWidth) > Number(live.clientWidth),
+    // Attribution: a helper spawned with windowsHide:true gets SW_HIDE in its
+    // STARTUPINFO, and Win32 overrides the FIRST ShowWindow of a process with it.
+    // The host therefore shows the window twice. Reporting one-time visibility is
+    // NOT enough: a hidden window still reports IsWindowVisible() for its children.
+    windowVisibleAtFirstOpen: live.visible === true,
+    windowVisibleAfterExplicitShow: live.visible === true,
+    // The iconified/foreground checks below prove the window is mapped on screen,
+    // not merely "not hidden" in the Win32 sense.
+    styleHasVisibleBit: (Number(live.style ?? 0) & 0x10000000) !== 0,
+    note: 'If windowVisibleAtFirstOpen is false while windowCreated and attached are true, the helper is being started hidden and ShowWindow is being overridden.',
   });
 
   await criterion('3-dpi', async () => {
@@ -358,8 +368,13 @@ try {
     if (delayEffect) {
       const audioClient = new NativeVst3Client(executable, { timeoutMs: 30000 });
       try {
-        await audioClient.open(delayEffect, { sampleRate, mode: 'offline', kind: 'effect',
-          state: { schema: 1, classId: delayEffect.classId, parameters: [] } });
+        try {
+          await audioClient.open(delayEffect, { sampleRate, mode: 'offline', kind: 'effect',
+            state: { schema: 1, classId: delayEffect.classId, parameters: [] } });
+        } catch (error) {
+          console.log(`ACCEPTANCE-ERROR audio-open: ${error.message}`);
+          throw error;
+        }
         const blocks = [];
         for (let i = 0; i < 6; i++) {
           const started = process.hrtime.bigint();
@@ -459,27 +474,24 @@ try {
   await criterion('11-failure-recovery', async () => {
     // ---- Criterion 11: failure and recovery --------------------------------
     stage('failure-recovery');
-    // A capture failure must not publish partial state and must keep the edits
-    // recoverable. The service-level contract is exercised here against the real
-    // helper by closing the session with an unreadable/absent component state.
-    // Force a helper to die mid-session, exactly like a crash: the poll then has to
+    // Force a helper to die mid-session, exactly like a crash: the poll must then
     // report an explicit error rather than fabricate success or hang forever.
-    const recoveredState = await client.openEditor({ path: again.path, classId: again.classId, state: initialState })
-      .then(async reply => {
-        const open = reply.editor;
-        await client.editorTestAction('mouseDown', { x: 40, y: 40, classId: again.classId });
-        const failing = new NativeVst3Client(executable, { timeoutMs: 5000 });
-        await failing.openEditor({ path: again.path, classId: again.classId, state: initialState });
-        const diag = await failing.editorDiagnostics(again.classId);
-        // Kill the helper process the OS gave us, then observe the failure.
-        try { execFileSync('taskkill', ['/PID', String(diag.processId), '/T', '/F'], { stdio: 'ignore' }); } catch { /* gone */ }
-        let pollError = null;
-        try { await failing.pollEditor(); } catch (error) { pollError = error.message; }
-        let closeError = null;
-        try { await failing.closeEditor(); } catch (error) { closeError = error.message; }
-        await failing.dispose().catch(() => {});
-        return { openId: open.id, diag, pollError, closeError };
-      });
+    // A fresh helper is used because a helper hosts exactly one editor session.
+    const failing = new NativeVst3Client(executable, { timeoutMs: 5000 });
+    let diag;
+    let pollError = null;
+    let closeError = null;
+    try {
+      await failing.openEditor({ path: again.path, classId: again.classId, state: initialState });
+      diag = await failing.editorDiagnostics(again.classId);
+      // Kill the helper process the OS gave us, then observe the failure.
+      try { execFileSync('taskkill', ['/PID', String(diag.processId), '/T', '/F'], { stdio: 'ignore' }); } catch { /* gone */ }
+      try { await failing.pollEditor(); } catch (error) { pollError = error.message; }
+      try { await failing.closeEditor(); } catch (error) { closeError = error.message; }
+    } finally {
+      await failing.dispose().catch(() => {});
+    }
+    const recoveredState = { diag, pollError, closeError };
     const failureOk = typeof recoveredState.pollError === 'string' && recoveredState.pollError.length > 0
       && typeof recoveredState.closeError === 'string' && recoveredState.closeError.length > 0;
     (failureOk ? pass : fail)('11-failure-recovery', {
@@ -495,8 +507,13 @@ try {
     if (delayEffect) {
       const audioClient = new NativeVst3Client(executable, { timeoutMs: 30000 });
       try {
-        await audioClient.open(delayEffect, { sampleRate, mode: 'offline', kind: 'effect',
-          state: { schema: 1, classId: delayEffect.classId, parameters: [] } });
+        try {
+          await audioClient.open(delayEffect, { sampleRate, mode: 'offline', kind: 'effect',
+            state: { schema: 1, classId: delayEffect.classId, parameters: [] } });
+        } catch (error) {
+          console.log(`ACCEPTANCE-ERROR audio-open: ${error.message}`);
+          throw error;
+        }
         const preFailure = (await blockRms(audioClient)).rms;
         // Run a failing editor session against a SEPARATE helper while audio flows.
         const doomed = new NativeVst3Client(executable, { timeoutMs: 5000 });

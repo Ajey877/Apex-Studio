@@ -316,3 +316,18 @@ test('the editor helper exposes read-only window diagnostics and no product path
   assert.ok(!/editorTestAction|editorDiagnostics/.test(readFileSync(path.join(root, 'native/vst3/service.mjs'), 'utf8')),
     'the product service never calls the acceptance seam');
 });
+
+test('the editor window is explicitly shown twice so a hidden helper start cannot keep it invisible', () => {
+  const editorHost = readFileSync(path.join(process.cwd(), 'native/vst3/editor-host.hpp'), 'utf8');
+  // Win32 honours STARTUPINFO.wShowWindow for the FIRST ShowWindow call of a
+  // process. Node spawns helpers with windowsHide:true (SW_HIDE), so a single
+  // ShowWindow(SW_SHOWNORMAL) created the window, attached the plug-in, and left
+  // it invisible: the user never saw an editor. Showing twice makes it stick.
+  const shows = [...editorHost.matchAll(/ShowWindow\(window, (SW_[A-Z]+)\)/g)].map(m => m[1]);
+  assert.ok(shows.length >= 2, `expected a second ShowWindow, saw ${JSON.stringify(shows)}`);
+  assert.ok(shows.includes('SW_SHOWNORMAL'), 'the window is shown normally');
+  assert.ok(shows.includes('SW_SHOW'), 'and shown again so STARTUPINFO cannot override it');
+  // Visibility is asserted, not assumed.
+  assert.ok(editorHost.includes('IsWindowVisible(window)'),
+    'the helper checks the window really is visible before reporting success');
+});

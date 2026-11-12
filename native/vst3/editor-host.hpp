@@ -674,10 +674,18 @@ public:
     applyContentScale(dpiForWindow(window));
     applyInitialSize();
     rejectStructuralRestartFlags("editor open");
+    // A process's FIRST ShowWindow call is overridden by the parent's STARTUPINFO
+    // (STARTF_USESHOWWINDOW). Node spawns helpers with windowsHide:true, i.e.
+    // SW_HIDE, so a single call would create the editor window but leave it
+    // invisible -- the plug-in is attached and drawing, yet the user never sees a
+    // window. Showing twice is the documented way to make the request stick.
     ShowWindow(window, SW_SHOWNORMAL);
+    ShowWindow(window, SW_SHOW);
     UpdateWindow(window);
     SetForegroundWindow(window);
     SetFocus(window);
+    require(IsWindowVisible(window) != 0,
+      "The native VST3 editor window could not be made visible");
 
     return {{"available", true}, {"classId", classId}, {"name", pluginName},
       {"title", "Apex Studio VST3 Editor - " + pluginName},
