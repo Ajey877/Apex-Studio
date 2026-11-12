@@ -4,7 +4,7 @@ on:
   push:
     branches: [main, phase-0-foundation-ui, phase-5.5-hardening, fix/phase-4-playlist-editing-core, phase-10d-project-persistence-recovery, phase-5-5-song-mode-verification, phase-10e-ci-canonical-branch-hardening]
   pull_request:
-    branches: [main]
+    branches: [main, ci-diagnose-playwright]
 
 permissions:
   contents: read

@@ -2,7 +2,7 @@ name: Audio Validation
 
 on:
   pull_request:
-    branches: [phase-0-foundation-ui, main, phase-5-5-song-mode-verification]
+    branches: [phase-0-foundation-ui, main, phase-5-5-song-mode-verification, ci-diagnose-playwright]
   push:
     branches: [main, phase-0-foundation-ui, phase-5.5-hardening, phase-5-5-song-mode-verification, phase-11-release-parity-validation]
 
