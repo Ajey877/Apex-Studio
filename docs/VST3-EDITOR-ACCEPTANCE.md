@@ -4,14 +4,28 @@ This is the **only** way to claim the native editor window works. Everything tha
 runs on Linux — JavaScript unit tests, IPC, helper framing, process separation,
 `test:vst3-editor` — is contract-level. None of it creates an HWND.
 
-Status of this change: **partially verified.** The automated half has been run
+Status of this change: **all twelve automated criteria PASS on real Windows; the
+packaged-application checklist is still outstanding.**
+
+`Native VST3 Validation / Native DSP (windows-latest)` ran the acceptance harness
 against a real Windows helper, a real HWND, and the real pinned-SDK AGain VSTGUI
-editor. The interactive packaged-application half has **not** been executed,
-because no interactive Windows x64 desktop was available. Both halves are
-recorded separately and never traded for one another.
+editor: **14 PASS, 0 FAIL, 2 NOT_VERIFIED** at commit `b399996`. The two
+`NOT_VERIFIED` rows are the packaged-application claim and the AGain audio-policy
+row — neither was observed, and neither is reported as passing. The interactive
+packaged-application half has **not** been executed because no interactive Windows
+x64 desktop was available. Both halves are recorded separately and never traded
+for one another.
+
+Observed on Windows for the record: helper `apex-vst3-host.exe` in its own
+process, window style `0xcf0000`, outer `366×159`, client `350×120`, title
+`Apex Studio VST3 Editor - AGain VST3`, `visible: true`, DPI 96 with a content
+scale factor of 1 accepted by the plug-in.
 
 - Automated evidence: `build/native-evidence/native-editor-acceptance.json`,
-  produced by `node scripts/native-editor-windows-acceptance.mjs`.
+  produced by `node scripts/native-editor-windows-acceptance.mjs`. A checked-in
+  snapshot of the Windows run is at
+  `docs/evidence/native-editor-acceptance.windows-latest.json`, because CI
+  artifacts and job logs are not always retrievable.
 - Interactive evidence: still outstanding. See
   [Part 2](#part-2--interactive-packaged-application-checklist-not-executed).
 

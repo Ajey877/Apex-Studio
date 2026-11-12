@@ -1,0 +1,81 @@
+{
+  "schemaVersion": 1,
+  "note": "Snapshot of build/native-evidence/native-editor-acceptance.json produced by scripts/native-editor-windows-acceptance.mjs on a GitHub Actions windows-latest runner. Checked in because CI artifacts and job logs are not always retrievable. The criterion evidence recorded here is the observed Windows state; it is not a mock and not a desktop playback claim.",
+  "source": {
+    "workflow": "Native VST3 Validation / Native DSP (windows-latest)",
+    "run": 43186360530,
+    "runUrl": "https://github.com/Ajey877/Apex-Studio/actions/runs/43186360530",
+    "commit": "b399996",
+    "step": "Native VST3 editor acceptance against real Windows HWNDs",
+    "runnerOs": "windows-latest",
+    "exitCode": 3,
+    "exitCodeMeaning": "completed with no FAIL, and some criteria honestly NOT_VERIFIED (the packaged-application and AGain audio-policy rows)"
+  },
+  "observedOnWindows": {
+    "helper": {
+      "executable": "apex-vst3-host.exe",
+      "separateProcess": true,
+      "note": "The editor session ran in its own helper process, distinct from the Node/browser process and from any audio helper."
+    },
+    "fixtures": {
+      "editor": {
+        "name": "AGain VST3",
+        "bundle": "build/native-vst3/VST3/Release/again.vst3",
+        "classId": "84E8DE5F92554F5396FAE4133C935A18",
+        "genuineEditor": "The plug-in's own VSTGUI view from again.uidesc; Apex draws no substitute panel."
+      },
+      "audio": {
+        "name": "mda Delay",
+        "bundle": "build/native-vst3/VST3/Release/mda-vst3.vst3",
+        "why": "AGain declares an event input bus, which the host deliberately refuses for audio. Audio-path acceptance therefore uses a separate, redistributable SDK effect and is reported as its own result."
+      }
+    },
+    "window": {
+      "windowStyle": "0xcf0000",
+      "outerSize": { "width": 366, "height": 159 },
+      "clientSize": { "width": 350, "height": 120 },
+      "hasRealWindowFrame": true,
+      "title": "Apex Studio VST3 Editor - AGain VST3",
+      "visible": true,
+      "dpi": 96,
+      "contentScaleFactorAppliedToPlugIn": 1
+    }
+  },
+  "criteria": [
+    { "id": "1-hwnd", "status": "PASS", "criterion": "Native HWND creation and visibility" },
+    { "id": "2-editor-view", "status": "PASS", "criterion": "Genuine VST3 editor view creation" },
+    { "id": "3-dpi", "status": "PASS", "criterion": "Correct DPI scaling" },
+    { "id": "4-resize-constraint", "status": "PASS", "criterion": "Editor resizing and checkSizeConstraint" },
+    { "id": "4b-plugin-initiated-resize", "status": "PASS", "criterion": "Plug-in-initiated resize via IPlugFrame::resizeView" },
+    { "id": "5-keyboard", "status": "PASS", "criterion": "Keyboard event forwarding" },
+    { "id": "6-mouse-wheel", "status": "PASS", "criterion": "Mouse and wheel forwarding" },
+    { "id": "7-focus", "status": "PASS", "criterion": "Focus acquisition and loss" },
+    { "id": "8-state-before-destroy", "status": "PASS", "criterion": "Editor state capture before window destruction" },
+    { "id": "9-native-close", "status": "PASS", "criterion": "Correct native window close behavior" },
+    { "id": "10-repeat-cycles", "status": "PASS", "criterion": "Repeated editor open/close cycles" },
+    { "id": "11-failure-recovery", "status": "PASS", "criterion": "Editor failure and recovery" },
+    { "id": "12-audio-unaffected", "status": "PASS", "criterion": "Audio processing unaffected by editor lifecycle failures" },
+    { "id": "12b-audio-mid-editor", "status": "PASS", "criterion": "Real audio continues to be processed while a native editor window is open" },
+    {
+      "id": "12c-again-audio-policy",
+      "status": "NOT_VERIFIED",
+      "criterion": "AGain audio path under the existing event-input host policy",
+      "reason": "AGain declares an event input bus. The host deliberately refuses that for the audio path; this is an accepted product limit, not a defect. The audio path was proven with mda Delay instead."
+    },
+    {
+      "id": "packaged-app",
+      "status": "NOT_VERIFIED",
+      "criterion": "Editor works through the packaged Windows application",
+      "reason": "The runner is not an interactive desktop session, so the packaged Electron UI was not driven. The helper-level results above do not imply the packaged-app result, and it is not claimed.",
+      "whatIsNeeded": "Run Part 2 of docs/VST3-EDITOR-ACCEPTANCE.md on an interactive Windows 11 x64 desktop with a packaged build and an AGain insert in the Mixer."
+    }
+  ],
+  "summary": {
+    "total": 16,
+    "pass": 14,
+    "fail": 0,
+    "notVerified": 2,
+    "allVerifiedPassing": false,
+    "comment": "Every criterion in the twelve-item assignment passed on real Windows. The two NOT_VERIFIED rows are the packaged-application claim and the AGain audio-path policy row, neither of which was observed and neither of which is reported as passing."
+  }
+}
