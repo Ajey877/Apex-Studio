@@ -110,7 +110,15 @@ function writeReport(extra = {}) {
   };
   mkdirSync(path.dirname(outPath), { recursive: true });
   writeFileSync(outPath, JSON.stringify(report, null, 2));
-  for (const r of results) console.log(`${r.status.padEnd(12)} ${r.id.padEnd(22)} ${r.criterion}`);
+  for (const r of results) {
+    console.log(`${r.status.padEnd(12)} ${r.id.padEnd(22)} ${r.criterion}`);
+    // One compact line per non-passing criterion: job logs are often unreachable,
+    // and a CI annotation is the only channel that reliably survives.
+    if (r.status !== 'PASS') {
+      const compact = JSON.stringify({ id: r.id, status: r.status, evidence: r.evidence });
+      console.log(`${r.status === 'FAIL' ? 'FAIL-DETAIL' : 'UNVERIFIED-DETAIL'} ${compact.slice(0, 900)}`);
+    }
+  }
   console.log(`\n${JSON.stringify(report.summary)}`);
   return report;
 }

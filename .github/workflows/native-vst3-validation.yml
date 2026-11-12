@@ -104,19 +104,18 @@ jobs:
             exit 1
           fi
           if [ "$status" -eq 1 ]; then
-            grep -E '^(STAGE|ACCEPTANCE-ERROR)' native-editor-acceptance.log | head -20 | while IFS= read -r line; do
+            # FAIL details first: annotations are capped at ~10 per step, so the
+            # lines that explain the failure must not be pushed out by stage noise.
+            grep -E '^(ACCEPTANCE-ERROR|FAIL-DETAIL|FAIL )' native-editor-acceptance.log | head -8 | while IFS= read -r line; do
               echo "::error::${line}"
             done
-            grep -E '^(FAIL|PASS|NOT_VERIFIED)' native-editor-acceptance.log | head -40 | while IFS= read -r line; do
+            grep -E '^STAGE' native-editor-acceptance.log | tail -2 | while IFS= read -r line; do
               echo "::error::${line}"
             done
             exit 1
           fi
           # Surface where it stopped and why, even if the log is unreadable.
-          grep -E '^(STAGE|ACCEPTANCE-ERROR)' native-editor-acceptance.log | head -20 | while IFS= read -r line; do
-            echo "::notice::${line}"
-          done
-          grep -E '^(PASS|NOT_VERIFIED)' native-editor-acceptance.log | head -40 | while IFS= read -r line; do
+          grep -E '^(PASS|NOT_VERIFIED|UNVERIFIED-DETAIL)' native-editor-acceptance.log | head -10 | while IFS= read -r line; do
             echo "::notice::${line}"
           done
           exit 0
