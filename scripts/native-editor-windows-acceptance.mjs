@@ -110,6 +110,13 @@ function writeReport(extra = {}) {
   };
   mkdirSync(path.dirname(outPath), { recursive: true });
   writeFileSync(outPath, JSON.stringify(report, null, 2));
+  // One line that carries the whole verdict. Job logs and artifacts are not
+  // always retrievable, and annotations are capped, so the summary must fit in a
+  // single annotation.
+  console.log(`ACCEPTANCE-SUMMARY ${JSON.stringify({
+    summary: report.summary,
+    statuses: Object.fromEntries(results.map(r => [r.id, r.status])),
+  })}`);
   for (const r of results) {
     console.log(`${r.status.padEnd(12)} ${r.id.padEnd(22)} ${r.criterion}`);
     // One compact line per non-passing criterion: job logs are often unreachable,

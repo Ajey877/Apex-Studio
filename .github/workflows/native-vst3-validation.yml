@@ -115,7 +115,11 @@ jobs:
             exit 1
           fi
           # Surface where it stopped and why, even if the log is unreadable.
-          grep -E '^(PASS|NOT_VERIFIED|UNVERIFIED-DETAIL)' native-editor-acceptance.log | head -10 | while IFS= read -r line; do
+          # The summary first: it is the only channel that carries every status.
+          grep -E '^ACCEPTANCE-SUMMARY' native-editor-acceptance.log | head -1 | while IFS= read -r line; do
+            echo "::notice::${line}"
+          done
+          grep -E '^(PASS|NOT_VERIFIED|UNVERIFIED-DETAIL)' native-editor-acceptance.log | head -8 | while IFS= read -r line; do
             echo "::notice::${line}"
           done
           exit 0
