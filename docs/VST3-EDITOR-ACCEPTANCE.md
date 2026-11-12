@@ -9,7 +9,7 @@ packaged-application checklist is still outstanding.**
 
 `Native VST3 Validation / Native DSP (windows-latest)` ran the acceptance harness
 against a real Windows helper, a real HWND, and the real pinned-SDK AGain VSTGUI
-editor: **14 PASS, 0 FAIL, 2 NOT_VERIFIED** at commit `b399996`. The two
+editor: **14 PASS, 0 FAIL, 2 NOT_VERIFIED** at commit `6dcdf1a` (also confirmed at `b399996`). The two
 `NOT_VERIFIED` rows are the packaged-application claim and the AGain audio-policy
 row — neither was observed, and neither is reported as passing. The interactive
 packaged-application half has **not** been executed because no interactive Windows

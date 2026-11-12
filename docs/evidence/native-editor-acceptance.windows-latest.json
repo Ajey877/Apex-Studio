@@ -3,9 +3,9 @@
   "note": "Snapshot of build/native-evidence/native-editor-acceptance.json produced by scripts/native-editor-windows-acceptance.mjs on a GitHub Actions windows-latest runner. Checked in because CI artifacts and job logs are not always retrievable. The criterion evidence recorded here is the observed Windows state; it is not a mock and not a desktop playback claim.",
   "source": {
     "workflow": "Native VST3 Validation / Native DSP (windows-latest)",
-    "run": 43186360530,
-    "runUrl": "https://github.com/Ajey877/Apex-Studio/actions/runs/43186360530",
-    "commit": "b399996",
+    "run": 43187998468,
+    "runUrl": "https://github.com/Ajey877/Apex-Studio/actions/runs/43187998468",
+    "commit": "6dcdf1a",
     "step": "Native VST3 editor acceptance against real Windows HWNDs",
     "runnerOs": "windows-latest",
     "exitCode": 3,
