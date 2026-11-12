@@ -46,6 +46,21 @@ const CRITERIA = {
 };
 
 const results = [];
+/** Stage marker: a CI log may be unreachable, so annotations carry the position. */
+function stage(name, detail = '') {
+  console.log(`STAGE ${name}${detail ? ' ' + JSON.stringify(detail) : ''}`);
+}
+/** Run one criterion in isolation. A throw becomes that criterion's FAIL, so a
+ * single defect can never erase the evidence for the criteria that did run. */
+async function criterion(id, body) {
+  stage(id);
+  try { return await body(); } catch (error) {
+    console.log(`ACCEPTANCE-ERROR ${id}: ${error.message}`);
+    if (!results.some(r => r.id === id)) fail(id, { error: error.message, stack: error.stack?.slice(0, 2000) });
+    return undefined;
+  }
+}
+
 function record(id, status, evidence) {
   results.push({ id, criterion: CRITERIA[id], status, evidence, kind: 'automated' });
 }
@@ -132,6 +147,7 @@ function findBundle(directory, name, depth = 0) {
   }
   return undefined;
 }
+stage('discover', { build });
 const againBundle = findBundle(path.join(build, 'VST3'), 'again.vst3');
 const mdaBundle = findBundle(path.join(build, 'VST3'), 'mda-vst3.vst3');
 const delayEffect = mdaBundle
@@ -147,6 +163,7 @@ const again = editorPlugins.find(p => /^AGain( VST3)?$/.test(p.name));
 
 // The editor helper rehydrates state, so a valid empty-but-well-formed state is
 // supplied; the plug-in then reports its own live parameter values.
+stage('fixtures', { againBundle, mdaBundle, again: again?.name, delay: delayEffect?.name });
 const initialState = again ? { schema: 1, classId: again.classId, parameters: [] } : null;
 const client = new NativeVst3Client(executable, { timeoutMs: 30000 });
 
@@ -178,7 +195,8 @@ try {
     writeReport({ blocked: 'again-not-discovered' });
     process.exit(2);
   }
-  const opened = await client.openEditor({ path: again.path, classId: again.classId, state: initialState });
+  stage('open-editor', { path: again.path, classId: again.classId });
+  const opened = (await client.openEditor({ path: again.path, classId: again.classId, state: initialState })).editor;
   pass('2-editor-view', {
     available: opened.available,
     pluginName: opened.name,
@@ -191,6 +209,7 @@ try {
   });
 
   // ---- Criterion 1: native HWND creation and visibility -------------------
+  stage('diagnostics', {});
   const live = await diagnostics();
   const hwndOk = live.windowCreated === true && live.visible === true && live.attached === true
     && live.processId !== process.pid;
@@ -209,276 +228,307 @@ try {
     hasRealWindowFrame: Number(live.windowWidth) > Number(live.clientWidth),
   });
 
-  // ---- Criterion 3: DPI scaling -------------------------------------------
-  const dpi = Number(live.dpi ?? 0);
-  const scale = Number(live.contentScale ?? 0);
-  (dpi >= 96 && Math.abs(scale - dpi / 96) < 1e-3 ? pass : fail)('3-dpi', {
-    windowDpi: dpi,
-    contentScaleFactorAppliedToPlugIn: scale,
-    expectedScale: dpi / 96,
-    note: 'setContentScaleFactor was called with the real GetDpiForWindow value and the plug-in accepted it.',
-  });
-
-  // ---- Criterion 4: resizing and checkSizeConstraint -----------------------
-  const before = await diagnostics();
-  const resized = await client.editorTestAction('resizeClient', {
-    width: 640, height: 420, classId: again.classId,
-  });
-  const afterResize = resized.diagnostics;
-  const resizeOk = Number(afterResize.clientWidth) > Number(before.clientWidth)
-    && Number(afterResize.viewWidth) === Number(afterResize.clientWidth)
-    && Number(afterResize.viewHeight) === Number(afterResize.clientHeight);
-  (resizeOk ? pass : fail)('4-resize-constraint', {
-    before: { clientWidth: before.clientWidth, clientHeight: before.clientHeight, viewWidth: before.viewWidth, viewHeight: before.viewHeight },
-    after: { clientWidth: afterResize.clientWidth, clientHeight: afterResize.clientHeight, viewWidth: afterResize.viewWidth, viewHeight: afterResize.viewHeight },
-    resizeRejectedByPlugin: afterResize.nativeCloseError ?? null,
-    note: 'Resize goes through WM_SIZING (checkSizeConstraint) then WM_SIZE -> IPlugView::onSize; the plug-in-reported view size must match the real client area.',
-  });
-
-  // Plug-in-initiated resize through IPlugFrame::resizeView, if it supports one.
-  const pluginSized = await client.editorTestAction('requestPluginResize', {
-    width: 520, height: 340, classId: again.classId,
-  });
-  const afterPluginResize = pluginSized.diagnostics;
-  results.push({
-    id: '4b-plugin-initiated-resize',
-    criterion: 'Plug-in-initiated resize via IPlugFrame::resizeView',
-    status: pluginSized.accepted === true
-      && Number(afterPluginResize.clientWidth) >= 32 ? 'PASS'
-      : (pluginSized.accepted === false ? 'NOT_VERIFIED' : 'FAIL'),
-    kind: 'automated',
-    evidence: {
-      pluginRequestedResize: pluginSized.accepted,
-      clientSize: { width: afterPluginResize.clientWidth, height: afterPluginResize.clientHeight },
-      note: pluginSized.accepted === false
-        ? 'AGain did not request a plug-in-owned resize in this session, so the host-side resize path could not be exercised this way; the user-driven path is covered by 4-resize-constraint.'
-        : 'The plug-in asked the host to resize and the host applied it to the real window.',
-    },
-  });
-
-  // ---- Criterion 5: keyboard forwarding -----------------------------------
-  const keyBefore = await diagnostics();
-  await client.editorTestAction('keyDown', { vk: 0x09, classId: again.classId }); // VK_TAB
-  await client.editorTestAction('keyUp', { vk: 0x09, classId: again.classId });
-  const keyAfter = await diagnostics();
-  // The view must receive the key without the host crashing or losing the view.
-  (keyAfter.attached === true && keyAfter.closed === false ? pass : fail)('5-keyboard', {
-    sent: ['WM_KEYDOWN VK_TAB', 'WM_KEYUP VK_TAB'],
-    stillAttached: keyAfter.attached,
-    focusOwnedByWindow: keyAfter.ownsFocus,
-    forwardedThrough: 'WM_KEYDOWN -> IPlugView::onKeyDown(mapVirtualKey(vk), modifiers)',
-    before: { ownsFocus: keyBefore.ownsFocus },
-    note: 'Key events are delivered to the plug-in view; the host does not intercept them.',
-  });
-
-  // ---- Criterion 6: mouse and wheel forwarding ----------------------------
-  // VST3 has NO mouse entry points on IPlugView. Windows delivers mouse input to
-  // the plug-in's own child HWND, so the host's obligation is to create a real
-  // window, not to swallow the input, and to keep the plug-in's child reachable.
-  // The criterion is therefore verified by real Win32 hit-testing, plus the one
-  // mouse event VST3 does route through the host (the wheel).
-  const mouseDown = await client.editorTestAction('mouseDown', { x: 40, y: 40, classId: again.classId });
-  const mouseMove = await client.editorTestAction('mouseMove', { x: 60, y: 40, classId: again.classId });
-  const mouseUp = await client.editorTestAction('mouseUp', { x: 60, y: 40, classId: again.classId });
-  const wheel = await client.editorTestAction('wheel', { delta: 120, classId: again.classId });
-  const afterMouse = wheel.diagnostics;
-  const hitReachable = mouseDown.hitTargetIsPlugInChild === true || mouseDown.hostDeepestChild === true;
-  const wheelRouted = wheel.queued === 'wheel' && afterMouse.closed === false && afterMouse.attached === true;
-  (hitReachable && wheelRouted ? pass : fail)('6-mouse-wheel', {
-    // Real Win32 answers, not simulated events.
-    hitTargetExists: mouseDown.hitTargetExists,
-    hitTargetIsPlugInChildWindow: mouseDown.hitTargetIsPlugInChild,
-    hostWindowHasChildWindowAtCursor: mouseDown.hostDeepestChild,
-    childWindowCount: afterMouse.childWindowCount,
-    mouseDown: { x: mouseDown.x, y: mouseDown.y, screenPoint: mouseDown.screenPoint },
-    mouseMove: { x: mouseMove.x, y: mouseMove.y },
-    mouseUp: { x: mouseUp.x, y: mouseUp.y },
-    wheelDeltaRoutedToPlugInView: wheelRouted,
-    stillAttached: afterMouse.attached,
-    vst3Semantics: 'IPlugView has no onMouse* methods. Mouse clicks are delivered by Windows to the plug-in child HWND; only the wheel is routed via IPlugView::onWheel.',
-  });
-
-  // ---- Criterion 7: focus acquisition and loss ---------------------------
-  const focused = await client.editorTestAction('focus', { classId: again.classId });
-  const focusAfter = focused.diagnostics;
-  (focusAfter.ownsFocus === true || focusAfter.activeWindowMatches === true ? pass : fail)('7-focus', {
-    focusRequested: true,
-    windowOwnsFocus: focusAfter.ownsFocus,
-    isActiveWindow: focusAfter.activeWindowMatches,
-    note: 'Focus was requested on the real window; IPlugView::onFocus(1) is sent from WM_SETFOCUS and onFocus(0) from WM_KILLFOCUS.',
-    focusLossEvidence: 'see 9-native-close: closing the window destroys it and the focus leaves with it',
-  });
-
-  // ---- Criterion 12 (part A): real audio through a non-event-input effect ---
-  // AGain is refused for audio by policy (event input bus), so audio continuity is
-  // proven with an MDA effect the host accepts, while the editor is open.
-  let audioBaseline = null;
-  if (delayEffect) {
-    const audioClient = new NativeVst3Client(executable, { timeoutMs: 30000 });
-    try {
-      await audioClient.open(delayEffect, { sampleRate, mode: 'offline', kind: 'effect',
-        state: { schema: 1, classId: delayEffect.classId, parameters: [] } });
-      const blocks = [];
-      for (let i = 0; i < 6; i++) {
-        const started = process.hrtime.bigint();
-        const block = await blockRms(audioClient);
-        blocks.push({ ms: Number(process.hrtime.bigint() - started) / 1e6, rms: block.rms });
-      }
-      audioBaseline = { blocks, meanRms: blocks.reduce((s, b) => s + b.rms, 0) / blocks.length };
-      pass('12b-audio-mid-editor', {
-        effect: delayEffect.name,
-        blocks: blocks.length,
-        maxBlockMs: Math.max(...blocks.map(b => b.ms)).toFixed(2),
-        meanRms: audioBaseline.meanRms,
-        editorWindowStillOpen: (await diagnostics()).visible,
-        note: 'Real PCM processed by a separate audio helper while the native editor window is open.',
-      });
-    } finally {
-      await audioClient.dispose().catch(() => {});
-    }
-  } else {
-    notVerified('12b-audio-mid-editor', { reason: 'mda Delay fixture not found' });
-  }
-
-  // ---- Criterion 8: state capture before destruction ---------------------
-  // Closing captures IComponent/IEditController state BEFORE the window is
-  // destroyed; the diagnostics taken first prove the window was still up.
-  const preClose = await diagnostics();
-  const closed = await client.closeEditor();
-  const postClose = await diagnostics().catch(error => ({ error: error.message }));
-  const captureOk = closed.closed === true && typeof closed.state?.component === 'string'
-    && closed.state.component.length > 0;
-  (captureOk ? pass : fail)('8-state-before-destroy', {
-    windowVisibleBeforeClose: preClose.visible,
-    capturedComponentStateBytes: closed.state?.component ? closed.state.component.length / 2 : 0,
-    capturedParameterCount: closed.state?.parameters?.length ?? 0,
-    dirty: closed.dirty,
-    eventQueueOverflow: closed.eventQueueOverflow,
-    stateCapturedBeforeWindowGone: preClose.visible === true && captureOk,
-    windowAfterClose: postClose.windowCreated === false || postClose.closed === true ? 'gone' : postClose,
-    note: 'Component and controller state were captured while the window was still visible; a failed capture keeps the window open instead of publishing partial state.',
-  });
-
-  // ---- Criterion 9: correct native window close behaviour ----------------
-  // A helper hosts exactly one editor session, so each scenario below runs in a
-  // fresh helper process -- which is also what the app does per insert.
-  const closeClient = new NativeVst3Client(executable, { timeoutMs: 30000 });
-  const closeAgain = await closeClient.openEditor({ path: again.path, classId: again.classId, state: initialState });
-  const openAgain = await closeClient.editorDiagnostics(again.classId);
-  const viaWindow = await closeClient.editorTestAction('closeFromWindow', { classId: again.classId });
-  const afterNativeClose = viaWindow.diagnostics;
-  const polled = await closeClient.pollEditor();
-  await closeClient.dispose();
-  const closeOk = closeAgain.available === true && openAgain.visible === true
-    && afterNativeClose.closed === true && polled.closed === true
-    && typeof polled.state?.component === 'string';
-  (closeOk ? pass : fail)('9-native-close', {
-    reopened: closeAgain.available,
-    visibleBeforeClose: openAgain.visible,
-    closeSentAs: 'WM_CLOSE (what the title-bar X produces)',
-    closedObservation: afterNativeClose.closed,
-    pollReportedClosed: polled.closed,
-    pollCarriedState: typeof polled.state?.component === 'string',
-    note: 'The real window-close path captures state and reports it; it does not rely on the app asking the helper to close.',
-  });
-
-  // ---- Criterion 10: repeated open/close cycles --------------------------
-  const cycles = [];
-  for (let i = 0; i < 10; i++) {
-    const cycleClient = new NativeVst3Client(executable, { timeoutMs: 30000 });
-    try {
-      const open = await cycleClient.openEditor({ path: again.path, classId: again.classId, state: initialState });
-      const live = await cycleClient.editorDiagnostics(again.classId);
-      const shut = await cycleClient.editorTestAction('closeFromWindow', { classId: again.classId });
-      cycles.push({ cycle: i + 1, opened: open.available === true, visible: live.visible === true,
-        closed: shut.diagnostics.closed === true, pid: live.processId });
-    } finally {
-      await cycleClient.dispose().catch(() => {});
-    }
-  }
-  const allCycles = cycles.every(c => c.opened && c.visible && c.closed);
-  (allCycles ? pass : fail)('10-repeat-cycles', {
-    cycles: cycles.length,
-    allOpenedVisibleAndClosed: allCycles,
-    detail: cycles,
-    note: 'Each cycle opens the real window, confirms IsWindowVisible, and closes it through WM_CLOSE.',
-  });
-
-  // ---- Criterion 11: failure and recovery --------------------------------
-  // A capture failure must not publish partial state and must keep the edits
-  // recoverable. The service-level contract is exercised here against the real
-  // helper by closing the session with an unreadable/absent component state.
-  // Force a helper to die mid-session, exactly like a crash: the poll then has to
-  // report an explicit error rather than fabricate success or hang forever.
-  const recoveredState = await client.openEditor({ path: again.path, classId: again.classId, state: initialState })
-    .then(async open => {
-      await client.editorTestAction('mouseDown', { x: 40, y: 40, classId: again.classId });
-      const failing = new NativeVst3Client(executable, { timeoutMs: 5000 });
-      await failing.openEditor({ path: again.path, classId: again.classId, state: initialState });
-      const diag = await failing.editorDiagnostics(again.classId);
-      // Kill the helper process the OS gave us, then observe the failure.
-      try { execFileSync('taskkill', ['/PID', String(diag.processId), '/T', '/F'], { stdio: 'ignore' }); } catch { /* gone */ }
-      let pollError = null;
-      try { await failing.pollEditor(); } catch (error) { pollError = error.message; }
-      let closeError = null;
-      try { await failing.closeEditor(); } catch (error) { closeError = error.message; }
-      await failing.dispose().catch(() => {});
-      return { openId: open.id, diag, pollError, closeError };
+  await criterion('3-dpi', async () => {
+    // ---- Criterion 3: DPI scaling -------------------------------------------
+    stage('dpi');
+    const dpi = Number(live.dpi ?? 0);
+    const scale = Number(live.contentScale ?? 0);
+    (dpi >= 96 && Math.abs(scale - dpi / 96) < 1e-3 ? pass : fail)('3-dpi', {
+      windowDpi: dpi,
+      contentScaleFactorAppliedToPlugIn: scale,
+      expectedScale: dpi / 96,
+      note: 'setContentScaleFactor was called with the real GetDpiForWindow value and the plug-in accepted it.',
     });
-  const failureOk = typeof recoveredState.pollError === 'string' && recoveredState.pollError.length > 0
-    && typeof recoveredState.closeError === 'string' && recoveredState.closeError.length > 0;
-  (failureOk ? pass : fail)('11-failure-recovery', {
-    killedProcessId: recoveredState.diag?.processId,
-    pollAfterCrash: recoveredState.pollError,
-    closeAfterCrash: recoveredState.closeError,
-    note: 'A dead editor helper surfaces an explicit error and never reports a fabricated success; the renderer turns this into a recovery record rather than dropping edits.',
   });
 
-  // ---- Criterion 12 (part B): audio survives editor failure --------------
-  if (delayEffect) {
-    const audioClient = new NativeVst3Client(executable, { timeoutMs: 30000 });
-    try {
-      await audioClient.open(delayEffect, { sampleRate, mode: 'offline', kind: 'effect',
-        state: { schema: 1, classId: delayEffect.classId, parameters: [] } });
-      const preFailure = (await blockRms(audioClient)).rms;
-      // Run a failing editor session against a SEPARATE helper while audio flows.
-      const doomed = new NativeVst3Client(executable, { timeoutMs: 5000 });
-      await doomed.openEditor({ path: again.path, classId: again.classId, state: initialState });
-      const diag = await doomed.editorDiagnostics(again.classId);
-      try { execFileSync('taskkill', ['/PID', String(diag.processId), '/T', '/F'], { stdio: 'ignore' }); } catch { /* gone */ }
-      await doomed.pollEditor().catch(() => {});
-      await doomed.dispose().catch(() => {});
-      const postFailure = [];
-      for (let i = 0; i < 4; i++) {
-        postFailure.push((await blockRms(audioClient)).rms);
-      }
-      const continuous = postFailure.every(value => Math.abs(value - preFailure) < 1e-9) && preFailure > 0;
-      (continuous ? pass : fail)('12-audio-unaffected', {
-        audioEffect: delayEffect.name,
-        rmsBeforeEditorCrash: preFailure,
-        rmsAfterEditorCrash: postFailure,
-        bitIdentical: continuous,
-        editorHelperWasSeparateProcess: diag.processId !== process.pid,
-        note: 'A crashed editor helper did not disturb audio produced by a different helper process.',
-      });
-    } finally {
-      await audioClient.dispose().catch(() => {});
-    }
-  } else {
-    notVerified('12-audio-unaffected', { reason: 'mda Delay fixture not found' });
-  }
+  await criterion('4-resize-constraint', async () => {
+    // ---- Criterion 4: resizing and checkSizeConstraint -----------------------
+    const before = await diagnostics();
+    const resized = await client.editorTestAction('resizeClient', {
+      width: 640, height: 420, classId: again.classId,
+    });
+    const afterResize = resized.diagnostics;
+    const resizeOk = Number(afterResize.clientWidth) > Number(before.clientWidth)
+      && Number(afterResize.viewWidth) === Number(afterResize.clientWidth)
+      && Number(afterResize.viewHeight) === Number(afterResize.clientHeight);
+    (resizeOk ? pass : fail)('4-resize-constraint', {
+      before: { clientWidth: before.clientWidth, clientHeight: before.clientHeight, viewWidth: before.viewWidth, viewHeight: before.viewHeight },
+      after: { clientWidth: afterResize.clientWidth, clientHeight: afterResize.clientHeight, viewWidth: afterResize.viewWidth, viewHeight: afterResize.viewHeight },
+      resizeRejectedByPlugin: afterResize.nativeCloseError ?? null,
+      note: 'Resize goes through WM_SIZING (checkSizeConstraint) then WM_SIZE -> IPlugView::onSize; the plug-in-reported view size must match the real client area.',
+    });
 
-  // AGain's audio path is refused by policy. Record that as an explicit product
-  // limit rather than silently omitting it.
-  results.push({
-    id: '12c-again-audio-policy',
-    criterion: CRITERIA['12c-again-audio-policy'],
-    status: 'NOT_VERIFIED',
-    kind: 'automated',
-    evidence: {
-      expected: 'VST3 audio effects with event input buses are not supported',
-      note: 'AGain declares an event input bus. The host deliberately refuses that for the audio path; this is an accepted product limit, not a defect, and the audio path was therefore proven with mda Delay.',
-    },
+    // Plug-in-initiated resize through IPlugFrame::resizeView, if it supports one.
+    const pluginSized = await client.editorTestAction('requestPluginResize', {
+      width: 520, height: 340, classId: again.classId,
+    });
+    const afterPluginResize = pluginSized.diagnostics;
+    results.push({
+      id: '4b-plugin-initiated-resize',
+      criterion: 'Plug-in-initiated resize via IPlugFrame::resizeView',
+      status: pluginSized.accepted === true
+        && Number(afterPluginResize.clientWidth) >= 32 ? 'PASS'
+        : (pluginSized.accepted === false ? 'NOT_VERIFIED' : 'FAIL'),
+      kind: 'automated',
+      evidence: {
+        pluginRequestedResize: pluginSized.accepted,
+        clientSize: { width: afterPluginResize.clientWidth, height: afterPluginResize.clientHeight },
+        note: pluginSized.accepted === false
+          ? 'AGain did not request a plug-in-owned resize in this session, so the host-side resize path could not be exercised this way; the user-driven path is covered by 4-resize-constraint.'
+          : 'The plug-in asked the host to resize and the host applied it to the real window.',
+      },
+    });
+  });
+
+  await criterion('5-keyboard', async () => {
+    // ---- Criterion 5: keyboard forwarding -----------------------------------
+    stage('keyboard');
+    const keyBefore = await diagnostics();
+    await client.editorTestAction('keyDown', { vk: 0x09, classId: again.classId }); // VK_TAB
+    await client.editorTestAction('keyUp', { vk: 0x09, classId: again.classId });
+    const keyAfter = await diagnostics();
+    // The view must receive the key without the host crashing or losing the view.
+    (keyAfter.attached === true && keyAfter.closed === false ? pass : fail)('5-keyboard', {
+      sent: ['WM_KEYDOWN VK_TAB', 'WM_KEYUP VK_TAB'],
+      stillAttached: keyAfter.attached,
+      focusOwnedByWindow: keyAfter.ownsFocus,
+      forwardedThrough: 'WM_KEYDOWN -> IPlugView::onKeyDown(mapVirtualKey(vk), modifiers)',
+      before: { ownsFocus: keyBefore.ownsFocus },
+      note: 'Key events are delivered to the plug-in view; the host does not intercept them.',
+    });
+  });
+
+  await criterion('6-mouse-wheel', async () => {
+    // ---- Criterion 6: mouse and wheel forwarding ----------------------------
+    // VST3 has NO mouse entry points on IPlugView. Windows delivers mouse input to
+    // the plug-in's own child HWND, so the host's obligation is to create a real
+    // window, not to swallow the input, and to keep the plug-in's child reachable.
+    // The criterion is therefore verified by real Win32 hit-testing, plus the one
+    // mouse event VST3 does route through the host (the wheel).
+    const mouseDown = await client.editorTestAction('mouseDown', { x: 40, y: 40, classId: again.classId });
+    const mouseMove = await client.editorTestAction('mouseMove', { x: 60, y: 40, classId: again.classId });
+    const mouseUp = await client.editorTestAction('mouseUp', { x: 60, y: 40, classId: again.classId });
+    const wheel = await client.editorTestAction('wheel', { delta: 120, classId: again.classId });
+    const afterMouse = wheel.diagnostics;
+    const hitReachable = mouseDown.hitTargetIsPlugInChild === true || mouseDown.hostDeepestChild === true;
+    const wheelRouted = wheel.queued === 'wheel' && afterMouse.closed === false && afterMouse.attached === true;
+    (hitReachable && wheelRouted ? pass : fail)('6-mouse-wheel', {
+      // Real Win32 answers, not simulated events.
+      hitTargetExists: mouseDown.hitTargetExists,
+      hitTargetIsPlugInChildWindow: mouseDown.hitTargetIsPlugInChild,
+      hostWindowHasChildWindowAtCursor: mouseDown.hostDeepestChild,
+      childWindowCount: afterMouse.childWindowCount,
+      mouseDown: { x: mouseDown.x, y: mouseDown.y, screenPoint: mouseDown.screenPoint },
+      mouseMove: { x: mouseMove.x, y: mouseMove.y },
+      mouseUp: { x: mouseUp.x, y: mouseUp.y },
+      wheelDeltaRoutedToPlugInView: wheelRouted,
+      stillAttached: afterMouse.attached,
+      vst3Semantics: 'IPlugView has no onMouse* methods. Mouse clicks are delivered by Windows to the plug-in child HWND; only the wheel is routed via IPlugView::onWheel.',
+    });
+  });
+
+  await criterion('7-focus', async () => {
+    // ---- Criterion 7: focus acquisition and loss ---------------------------
+    stage('focus');
+    const focused = await client.editorTestAction('focus', { classId: again.classId });
+    const focusAfter = focused.diagnostics;
+    (focusAfter.ownsFocus === true || focusAfter.activeWindowMatches === true ? pass : fail)('7-focus', {
+      focusRequested: true,
+      windowOwnsFocus: focusAfter.ownsFocus,
+      isActiveWindow: focusAfter.activeWindowMatches,
+      note: 'Focus was requested on the real window; IPlugView::onFocus(1) is sent from WM_SETFOCUS and onFocus(0) from WM_KILLFOCUS.',
+      focusLossEvidence: 'see 9-native-close: closing the window destroys it and the focus leaves with it',
+    });
+  });
+
+  await criterion('12b-audio-mid-editor', async () => {
+    // ---- Criterion 12 (part A): real audio through a non-event-input effect ---
+    // AGain is refused for audio by policy (event input bus), so audio continuity is
+    // proven with an MDA effect the host accepts, while the editor is open.
+    stage('audio-mid-editor');
+    let audioBaseline = null;
+    if (delayEffect) {
+      const audioClient = new NativeVst3Client(executable, { timeoutMs: 30000 });
+      try {
+        await audioClient.open(delayEffect, { sampleRate, mode: 'offline', kind: 'effect',
+          state: { schema: 1, classId: delayEffect.classId, parameters: [] } });
+        const blocks = [];
+        for (let i = 0; i < 6; i++) {
+          const started = process.hrtime.bigint();
+          const block = await blockRms(audioClient);
+          blocks.push({ ms: Number(process.hrtime.bigint() - started) / 1e6, rms: block.rms });
+        }
+        audioBaseline = { blocks, meanRms: blocks.reduce((s, b) => s + b.rms, 0) / blocks.length };
+        pass('12b-audio-mid-editor', {
+          effect: delayEffect.name,
+          blocks: blocks.length,
+          maxBlockMs: Math.max(...blocks.map(b => b.ms)).toFixed(2),
+          meanRms: audioBaseline.meanRms,
+          editorWindowStillOpen: (await diagnostics()).visible,
+          note: 'Real PCM processed by a separate audio helper while the native editor window is open.',
+        });
+      } finally {
+        await audioClient.dispose().catch(() => {});
+      }
+    } else {
+      notVerified('12b-audio-mid-editor', { reason: 'mda Delay fixture not found' });
+    }
+  });
+
+  await criterion('8-state-before-destroy', async () => {
+    // ---- Criterion 8: state capture before destruction ---------------------
+    stage('close-capture');
+    // Closing captures IComponent/IEditController state BEFORE the window is
+    // destroyed; the diagnostics taken first prove the window was still up.
+    const preClose = await diagnostics();
+    const closed = await client.closeEditor();
+    const postClose = await diagnostics().catch(error => ({ error: error.message }));
+    const captureOk = closed.closed === true && typeof closed.state?.component === 'string'
+      && closed.state.component.length > 0;
+    (captureOk ? pass : fail)('8-state-before-destroy', {
+      windowVisibleBeforeClose: preClose.visible,
+      capturedComponentStateBytes: closed.state?.component ? closed.state.component.length / 2 : 0,
+      capturedParameterCount: closed.state?.parameters?.length ?? 0,
+      dirty: closed.dirty,
+      eventQueueOverflow: closed.eventQueueOverflow,
+      stateCapturedBeforeWindowGone: preClose.visible === true && captureOk,
+      windowAfterClose: postClose.windowCreated === false || postClose.closed === true ? 'gone' : postClose,
+      note: 'Component and controller state were captured while the window was still visible; a failed capture keeps the window open instead of publishing partial state.',
+    });
+  });
+
+  await criterion('9-native-close', async () => {
+    // ---- Criterion 9: correct native window close behaviour ----------------
+    stage('native-close');
+    // A helper hosts exactly one editor session, so each scenario below runs in a
+    // fresh helper process -- which is also what the app does per insert.
+    const closeClient = new NativeVst3Client(executable, { timeoutMs: 30000 });
+    const closeAgain = (await closeClient.openEditor({ path: again.path, classId: again.classId, state: initialState })).editor;
+    const openAgain = await closeClient.editorDiagnostics(again.classId);
+    const viaWindow = await closeClient.editorTestAction('closeFromWindow', { classId: again.classId });
+    const afterNativeClose = viaWindow.diagnostics;
+    const polled = await closeClient.pollEditor();
+    await closeClient.dispose();
+    const closeOk = closeAgain.available === true && openAgain.visible === true
+      && afterNativeClose.closed === true && polled.closed === true
+      && typeof polled.state?.component === 'string';
+    (closeOk ? pass : fail)('9-native-close', {
+      reopened: closeAgain.available,
+      visibleBeforeClose: openAgain.visible,
+      closeSentAs: 'WM_CLOSE (what the title-bar X produces)',
+      closedObservation: afterNativeClose.closed,
+      pollReportedClosed: polled.closed,
+      pollCarriedState: typeof polled.state?.component === 'string',
+      note: 'The real window-close path captures state and reports it; it does not rely on the app asking the helper to close.',
+    });
+  });
+
+  await criterion('10-repeat-cycles', async () => {
+    // ---- Criterion 10: repeated open/close cycles --------------------------
+    stage('cycles');
+    const cycles = [];
+    for (let i = 0; i < 10; i++) {
+      const cycleClient = new NativeVst3Client(executable, { timeoutMs: 30000 });
+      try {
+        const open = (await cycleClient.openEditor({ path: again.path, classId: again.classId, state: initialState })).editor;
+        const live = await cycleClient.editorDiagnostics(again.classId);
+        const shut = await cycleClient.editorTestAction('closeFromWindow', { classId: again.classId });
+        cycles.push({ cycle: i + 1, opened: open.available === true, visible: live.visible === true,
+          closed: shut.diagnostics.closed === true, pid: live.processId });
+      } finally {
+        await cycleClient.dispose().catch(() => {});
+      }
+    }
+    const allCycles = cycles.every(c => c.opened && c.visible && c.closed);
+    (allCycles ? pass : fail)('10-repeat-cycles', {
+      cycles: cycles.length,
+      allOpenedVisibleAndClosed: allCycles,
+      detail: cycles,
+      note: 'Each cycle opens the real window, confirms IsWindowVisible, and closes it through WM_CLOSE.',
+    });
+  });
+
+  await criterion('11-failure-recovery', async () => {
+    // ---- Criterion 11: failure and recovery --------------------------------
+    stage('failure-recovery');
+    // A capture failure must not publish partial state and must keep the edits
+    // recoverable. The service-level contract is exercised here against the real
+    // helper by closing the session with an unreadable/absent component state.
+    // Force a helper to die mid-session, exactly like a crash: the poll then has to
+    // report an explicit error rather than fabricate success or hang forever.
+    const recoveredState = await client.openEditor({ path: again.path, classId: again.classId, state: initialState })
+      .then(async reply => {
+        const open = reply.editor;
+        await client.editorTestAction('mouseDown', { x: 40, y: 40, classId: again.classId });
+        const failing = new NativeVst3Client(executable, { timeoutMs: 5000 });
+        await failing.openEditor({ path: again.path, classId: again.classId, state: initialState });
+        const diag = await failing.editorDiagnostics(again.classId);
+        // Kill the helper process the OS gave us, then observe the failure.
+        try { execFileSync('taskkill', ['/PID', String(diag.processId), '/T', '/F'], { stdio: 'ignore' }); } catch { /* gone */ }
+        let pollError = null;
+        try { await failing.pollEditor(); } catch (error) { pollError = error.message; }
+        let closeError = null;
+        try { await failing.closeEditor(); } catch (error) { closeError = error.message; }
+        await failing.dispose().catch(() => {});
+        return { openId: open.id, diag, pollError, closeError };
+      });
+    const failureOk = typeof recoveredState.pollError === 'string' && recoveredState.pollError.length > 0
+      && typeof recoveredState.closeError === 'string' && recoveredState.closeError.length > 0;
+    (failureOk ? pass : fail)('11-failure-recovery', {
+      killedProcessId: recoveredState.diag?.processId,
+      pollAfterCrash: recoveredState.pollError,
+      closeAfterCrash: recoveredState.closeError,
+      note: 'A dead editor helper surfaces an explicit error and never reports a fabricated success; the renderer turns this into a recovery record rather than dropping edits.',
+    });
+  });
+
+  await criterion('12-audio-unaffected', async () => {
+    // ---- Criterion 12 (part B): audio survives editor failure --------------
+    if (delayEffect) {
+      const audioClient = new NativeVst3Client(executable, { timeoutMs: 30000 });
+      try {
+        await audioClient.open(delayEffect, { sampleRate, mode: 'offline', kind: 'effect',
+          state: { schema: 1, classId: delayEffect.classId, parameters: [] } });
+        const preFailure = (await blockRms(audioClient)).rms;
+        // Run a failing editor session against a SEPARATE helper while audio flows.
+        const doomed = new NativeVst3Client(executable, { timeoutMs: 5000 });
+        await doomed.openEditor({ path: again.path, classId: again.classId, state: initialState });
+        const diag = await doomed.editorDiagnostics(again.classId);
+        try { execFileSync('taskkill', ['/PID', String(diag.processId), '/T', '/F'], { stdio: 'ignore' }); } catch { /* gone */ }
+        await doomed.pollEditor().catch(() => {});
+        await doomed.dispose().catch(() => {});
+        const postFailure = [];
+        for (let i = 0; i < 4; i++) {
+          postFailure.push((await blockRms(audioClient)).rms);
+        }
+        const continuous = postFailure.every(value => Math.abs(value - preFailure) < 1e-9) && preFailure > 0;
+        (continuous ? pass : fail)('12-audio-unaffected', {
+          audioEffect: delayEffect.name,
+          rmsBeforeEditorCrash: preFailure,
+          rmsAfterEditorCrash: postFailure,
+          bitIdentical: continuous,
+          editorHelperWasSeparateProcess: diag.processId !== process.pid,
+          note: 'A crashed editor helper did not disturb audio produced by a different helper process.',
+        });
+      } finally {
+        await audioClient.dispose().catch(() => {});
+      }
+    } else {
+      notVerified('12-audio-unaffected', { reason: 'mda Delay fixture not found' });
+    }
+
+    // AGain's audio path is refused by policy. Record that as an explicit product
+    // limit rather than silently omitting it.
+    results.push({
+      id: '12c-again-audio-policy',
+      criterion: CRITERIA['12c-again-audio-policy'],
+      status: 'NOT_VERIFIED',
+      kind: 'automated',
+      evidence: {
+        expected: 'VST3 audio effects with event input buses are not supported',
+        note: 'AGain declares an event input bus. The host deliberately refuses that for the audio path; this is an accepted product limit, not a defect, and the audio path was therefore proven with mda Delay.',
+      },
+    });
   });
 
   // ---- Packaged application: never inferred from the above ---------------
@@ -490,6 +540,10 @@ try {
 } catch (error) {
   // An exception means the harness could not complete; record it as a failure
   // rather than leaving earlier PASSes to look like a complete run.
+  // Print on its own line: the workflow lifts this to an annotation, which is
+  // readable even when the job log itself cannot be retrieved.
+  console.log(`ACCEPTANCE-ERROR ${error.message}`);
+  if (error.stack) console.log(error.stack.slice(0, 2000));
   fail('harness', { error: error.message, stack: error.stack?.slice(0, 4000) });
 } finally {
   await client.dispose().catch(() => {});

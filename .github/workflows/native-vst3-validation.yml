@@ -82,10 +82,16 @@ jobs:
       # editor; every criterion is decided from observed Win32 state. The run
       # writes build/native-evidence/native-editor-acceptance.json, which is
       # uploaded below with the rest of the evidence.
+      - name: Install Chromium for real native parameter UI regression
+        run: npx playwright install --with-deps chromium
+      - name: Native parameter controls through actual App, service, MDA and production export
+        run: node scripts/run-native-vst3-browser.mjs
       - name: Native VST3 editor acceptance against real Windows HWNDs
+        id: editor-acceptance
         if: runner.os == 'Windows'
         shell: bash
         timeout-minutes: 12
+        continue-on-error: true
         run: |
           set +e
           # An uninteractive runner cannot satisfy every criterion; the script
@@ -98,19 +104,33 @@ jobs:
             exit 1
           fi
           if [ "$status" -eq 1 ]; then
+            grep -E '^(STAGE|ACCEPTANCE-ERROR)' native-editor-acceptance.log | head -20 | while IFS= read -r line; do
+              echo "::error::${line}"
+            done
             grep -E '^(FAIL|PASS|NOT_VERIFIED)' native-editor-acceptance.log | head -40 | while IFS= read -r line; do
               echo "::error::${line}"
             done
             exit 1
           fi
+          # Surface where it stopped and why, even if the log is unreadable.
+          grep -E '^(STAGE|ACCEPTANCE-ERROR)' native-editor-acceptance.log | head -20 | while IFS= read -r line; do
+            echo "::notice::${line}"
+          done
           grep -E '^(PASS|NOT_VERIFIED)' native-editor-acceptance.log | head -40 | while IFS= read -r line; do
             echo "::notice::${line}"
           done
           exit 0
-      - name: Install Chromium for real native parameter UI regression
-        run: npx playwright install --with-deps chromium
-      - name: Native parameter controls through actual App, service, MDA and production export
-        run: node scripts/run-native-vst3-browser.mjs
+      - name: Record the acceptance verdict
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          # The evidence is written and uploaded either way; only a real FAIL (or
+          # a missing file) fails the job. NOT_VERIFIED is honest, not a pass.
+          if [ "${{ steps.editor-acceptance.outcome }}" = "failure" ]; then
+            echo "::error::Native editor acceptance reported a failure; see the artifact"
+            exit 1
+          fi
+          echo "::notice::Native editor acceptance completed; see native-editor-acceptance.json"
       - name: Upload measured evidence (not a desktop playback claim)
         if: always()
         uses: actions/upload-artifact@v4
