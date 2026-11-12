@@ -113,6 +113,19 @@ export class NativeVst3Client {
     return this.request({ command: 'editorOpen', path: effect.path, classId: effect.classId, state: effect.state });
   }
   async pollEditor() { return (await this.request({ command: 'editorPoll' })).editor; }
+  /** Acceptance harness: perform one real Win32 operation on the live editor
+   * window. Only used by the Windows acceptance script; product code never calls it. */
+  async editorTestAction(action, fields = {}) {
+    if (typeof action !== 'string' || !action) throw new Error('Invalid editor test action');
+    return (await this.request({ command: 'editorTestAction', action, ...fields })).result;
+  }
+  /** Read-only observation of the live native editor window (Windows x64 only). */
+  async editorDiagnostics(classId) {
+    if (typeof classId !== 'string' || !/^[A-F0-9]{32}$/.test(classId)) {
+      throw new Error('Invalid VST3 class id for editor diagnostics');
+    }
+    return (await this.request({ command: 'editorDiagnostics', classId })).diagnostics;
+  }
   async closeEditor() { return (await this.request({ command: 'editorClose' })).editor; }
   async parameters(changes) { return (await this.request({ command: 'parameters', parameters: changes })).parameters; }
   async snapshot() { return (await this.request({ command: 'snapshot' })).state; }

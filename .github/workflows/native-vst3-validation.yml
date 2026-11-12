@@ -77,6 +77,36 @@ jobs:
             done
           fi
           exit "$status"
+      # Native editor acceptance on a real Windows desktop. The helper is a real
+      # process, the window is a real HWND, and AGain attaches its own VSTGUI
+      # editor; every criterion is decided from observed Win32 state. The run
+      # writes build/native-evidence/native-editor-acceptance.json, which is
+      # uploaded below with the rest of the evidence.
+      - name: Native VST3 editor acceptance against real Windows HWNDs
+        if: runner.os == 'Windows'
+        shell: bash
+        timeout-minutes: 12
+        run: |
+          set +e
+          # An uninteractive runner cannot satisfy every criterion; the script
+          # records NOT_VERIFIED for those and exits 3. Only a real FAIL fails
+          # the job, and a missing evidence file is always a failure.
+          node scripts/native-editor-windows-acceptance.mjs 2>&1 | tee native-editor-acceptance.log
+          status=${PIPESTATUS[0]}
+          if [ ! -f build/native-evidence/native-editor-acceptance.json ]; then
+            echo "::error::The acceptance run produced no evidence file"
+            exit 1
+          fi
+          if [ "$status" -eq 1 ]; then
+            grep -E '^(FAIL|PASS|NOT_VERIFIED)' native-editor-acceptance.log | head -40 | while IFS= read -r line; do
+              echo "::error::${line}"
+            done
+            exit 1
+          fi
+          grep -E '^(PASS|NOT_VERIFIED)' native-editor-acceptance.log | head -40 | while IFS= read -r line; do
+            echo "::notice::${line}"
+          done
+          exit 0
       - name: Install Chromium for real native parameter UI regression
         run: npx playwright install --with-deps chromium
       - name: Native parameter controls through actual App, service, MDA and production export

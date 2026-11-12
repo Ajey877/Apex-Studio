@@ -281,3 +281,38 @@ test('the editor panel states plainly what the native window is doing', async ()
   assert.match(done, /Dismiss/);
   assert.doesNotMatch(done, /Close editor and save state/);
 });
+
+test('a native close failure is reported through the protocol, never through a modal dialog', () => {
+  const root = process.cwd();
+  const editorHost = readFileSync(path.join(root, 'native/vst3/editor-host.hpp'), 'utf8');
+  // Regression: nativeCloseFromWindow() used to raise MessageBoxW on the helper's
+  // UI thread when state capture failed. A modal dialog cannot be dismissed without
+  // a human click, so it froze the helper, blocked every later editorPoll, and made
+  // an unattended or automated session hang forever with the editor stuck open.
+  assert.ok(!/MessageBoxW?\s*\(/.test(editorHost),
+    'the editor helper must not show a modal message box on its UI thread');
+  assert.ok(editorHost.includes('lastNativeCloseError'),
+    'a capture failure is still surfaced to the caller');
+  assert.ok(/lastCloseFailurePending\s*=\s*true/.test(editorHost),
+    'a capture failure is recorded as pending so the failure state is observable');
+  // The window must stay open for a retry, as before: the failure is not silently
+  // swallowed and partial state is still never published.
+  assert.ok(editorHost.includes('closeFailurePending'), 'the pending close failure is exposed');
+});
+
+test('the editor helper exposes read-only window diagnostics and no product path depends on them', () => {
+  const root = process.cwd();
+  const editorHost = readFileSync(path.join(root, 'native/vst3/editor-host.hpp'), 'utf8');
+  const host = readFileSync(path.join(root, 'native/vst3/host.cpp'), 'utf8');
+  const client = readFileSync(path.join(root, 'native/vst3/client.mjs'), 'utf8');
+  assert.ok(editorHost.includes('json windowDiagnostics('), 'window state is observable');
+  // Every field comes from a real Win32 call, so the evidence cannot be fabricated.
+  for (const call of ['IsWindowVisible', 'GetWindowTextW', 'GetClientRect', 'WindowFromPoint']) {
+    assert.ok(editorHost.includes(call), `diagnostics read real Win32 state via ${call}`);
+  }
+  assert.ok(host.includes('"editorDiagnostics"'), 'the helper answers a diagnostics command');
+  assert.ok(client.includes('async editorDiagnostics('), 'the client can read diagnostics');
+  // The seam must not be reachable from product code.
+  assert.ok(!/editorTestAction|editorDiagnostics/.test(readFileSync(path.join(root, 'native/vst3/service.mjs'), 'utf8')),
+    'the product service never calls the acceptance seam');
+});

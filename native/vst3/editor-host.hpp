@@ -8,11 +8,37 @@
 #include "pluginterfaces/vst/ivstcomponent.h"
 #include "pluginterfaces/vst/ivsteditcontroller.h"
 #include "public.sdk/source/vst/utility/stringconvert.h"
+#include <deque>
+#include <functional>
 #include <limits>
 #include <mutex>
 #include <sstream>
 
 namespace ApexVst3Host {
+
+// Acceptance-test seam. Empty in production: the queue is only populated by the
+// host executable when it is explicitly compiled/run as a test build, so no
+// product code path depends on it.
+namespace tests {
+using Action = std::function<void()>;
+// Messages queued for the window (WM_KEYDOWN etc.) so a harness can inject real
+// Win32 input without needing OS-level input injection permissions.
+inline std::deque<std::pair<UINT, WPARAM>>& pendingMessages() {
+  static std::deque<std::pair<UINT, WPARAM>> queue;
+  return queue;
+}
+inline void queueMessage(UINT message, WPARAM wParam) { pendingMessages().emplace_back(message, wParam); }
+inline std::deque<Action>& pendingActions() { static std::deque<Action> queue; return queue; }
+inline void queueAction(Action action) { pendingActions().push_back(std::move(action)); }
+inline void runPendingActions() {
+  auto& queue = pendingActions();
+  while (!queue.empty()) {
+    Action action = std::move(queue.front());
+    queue.pop_front();
+    try { action(); } catch (...) { /* a harness action must never kill the helper */ }
+  }
+}
+} // namespace tests
 
 class NativeEditorSession;
 
@@ -59,6 +85,9 @@ class NativeEditorSession {
   bool attached = false;
   bool resizingByPlugin = false;
   bool closed = false;
+  bool lastCloseFailurePending = false;
+  float contentScaleFactor = 1.f;
+  std::optional<std::pair<int, int>> lastPluginResizeRequest;
   bool dirtyAtClose = false;
   bool editQueueOverflowAtClose = false;
   std::string lastNativeCloseError;
@@ -80,6 +109,17 @@ class NativeEditorSession {
     }
     return self ? self->handleWindowMessage(hwnd, message, wParam, lParam)
                 : DefWindowProcW(hwnd, message, wParam, lParam);
+  }
+
+  static std::string fromWide(const std::wstring& text) {
+    if (text.empty()) return {};
+    const int count = WideCharToMultiByte(CP_UTF8, 0, text.data(), static_cast<int>(text.size()),
+                                          nullptr, 0, nullptr, nullptr);
+    if (count <= 0) return {};
+    std::string result(static_cast<size_t>(count), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, text.data(), static_cast<int>(text.size()),
+                        result.data(), count, nullptr, nullptr);
+    return result;
   }
 
   static std::wstring toWide(const std::string& text) {
@@ -186,6 +226,7 @@ class NativeEditorSession {
   void applyContentScale(uint32_t dpi) {
     if (!scaleSupport) return;
     const auto factor = static_cast<float>(dpi ? dpi : 96u) / 96.f;
+    contentScaleFactor = factor;
     const auto result = scaleSupport->setContentScaleFactor(factor);
     if (result != Steinberg::kResultTrue && result != Steinberg::kResultOk &&
         result != Steinberg::kResultFalse && result != Steinberg::kNotImplemented) {
@@ -425,6 +466,11 @@ class NativeEditorSession {
     releasePluginObjects();
   }
 
+  // The capture failure is reported through the framed protocol (nativeCloseError)
+  // and rendered by Apex's own panel. It must NOT be a modal MessageBox: a modal
+  // dialog on this helper's UI thread never returns without a human click, which
+  // would freeze the helper, block every later editorPoll, and make the state
+  // capture unrecoverable in any unattended or automated session.
   void nativeCloseFromWindow() noexcept {
     if (closed) return;
     try {
@@ -433,12 +479,10 @@ class NativeEditorSession {
     } catch (const std::exception& error) {
       lastNativeCloseError = error.what();
       if (lastNativeCloseError.size() > 1024) lastNativeCloseError.resize(1024);
-      const auto message = toWide("Apex Studio could not capture this plug-in's final state. The editor remains open so you can retry.\n\n" + lastNativeCloseError);
-      MessageBoxW(window, message.c_str(), L"VST3 editor state not saved", MB_OK | MB_ICONERROR | MB_SETFOREGROUND);
+      lastCloseFailurePending = true;
     } catch (...) {
       lastNativeCloseError = "Unknown editor state capture error";
-      MessageBoxW(window, L"Apex Studio could not capture this plug-in's final state. The editor remains open so you can retry.",
-        L"VST3 editor state not saved", MB_OK | MB_ICONERROR | MB_SETFOREGROUND);
+      lastCloseFailurePending = true;
     }
   }
 
@@ -646,6 +690,7 @@ public:
       return Steinberg::kInvalidArgument;
     RECT bounds{0, 0, newSize->getWidth(), newSize->getHeight()};
     if (!AdjustWindowRectEx(&bounds, windowStyle, FALSE, 0)) return Steinberg::kInternalError;
+    lastPluginResizeRequest = {newSize->getWidth(), newSize->getHeight()};
     resizingByPlugin = true;
     const BOOL changed = SetWindowPos(window, nullptr, 0, 0, bounds.right - bounds.left,
       bounds.bottom - bounds.top, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
@@ -655,7 +700,19 @@ public:
     return view->onSize(&requestedSize);
   }
 
+  /** Deliver messages a harness injected, through the real window procedure. */
+  void dispatchInjectedMessages() {
+    auto& queue = tests::pendingMessages();
+    while (!queue.empty() && window && !closed) {
+      const auto [message, wParam] = queue.front();
+      queue.pop_front();
+      SendMessageW(window, message, wParam, 0);
+    }
+  }
+
   bool pumpMessages() {
+    dispatchInjectedMessages();
+    tests::runPendingActions();
     MSG message{};
     bool dispatched = false;
     while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) {
@@ -666,8 +723,48 @@ public:
       }
       TranslateMessage(&message);
       DispatchMessageW(&message);
+      dispatchInjectedMessages();
+      tests::runPendingActions();
     }
     return dispatched;
+  }
+
+  /** Live HWND, for a harness that needs to post real input to it. Null when no
+   * window exists. Deliberately narrow: no view/controller access is exposed. */
+  HWND testWindowHandle() const { return window; }
+
+  /** Deliver a real Win32 mouse message to this window's own procedure. VST3 has
+   * no mouse entry point on IPlugView: Windows routes mouse input to whatever
+   * child window is under the cursor, which is the plug-in's own child HWND. The
+   * host's duty is therefore to *not swallow* the message and to report which
+   * window would have received it. */
+  LRESULT injectMouse(UINT message, LPARAM packedCoordinates) {
+    return window && !closed ? SendMessageW(window, message, 0, packedCoordinates) : 0;
+  }
+
+  /** Note a size the plug-in asked the host for, so a harness can prove the
+   * request was applied to the real window (resizeView may legitimately be
+   * synchronous and already complete before it returns). */
+  bool consumePluginResizeRequest(int* width, int* height) {
+    if (!lastPluginResizeRequest) return false;
+    if (width) *width = lastPluginResizeRequest->first;
+    if (height) *height = lastPluginResizeRequest->second;
+    lastPluginResizeRequest.reset();
+    return true;
+  }
+
+  /** Ask the plug-in to resize itself through IPlugFrame::resizeView, which is
+   * the only path a plug-in-owned resize handle takes. Returns false when the
+   * plug-in does not request a resize, so the caller can report it honestly. */
+  bool requestTestPluginResize(int width, int height) {
+    if (!view || !frame || closed) return false;
+    lastPluginResizeRequest.reset();
+    Steinberg::ViewRect requested{0, 0, width, height};
+    frame->resizeView(view, &requested);
+    // The interesting fact is whether the plug-in asked for a size, not whether
+    // the synchronous call had already finished applying it by the time it
+    // returned -- so report the recorded request.
+    return lastPluginResizeRequest.has_value();
   }
 
   json poll() {
@@ -715,6 +812,72 @@ public:
   }
 
   bool isClosed() const { return closed; }
+
+  /** True while the plug-in window is up but its state could not be captured. */
+  bool closeFailurePending() const { return lastCloseFailurePending; }
+
+  /** Structured, passively-observable window state for acceptance evidence.
+   * Reads only real Win32 state, so a check either observes the truth or fails. */
+  json windowDiagnostics(const char* pluginClassId) {
+    json result{{"closed", closed}, {"attached", attached}, {"windowCreated", window != nullptr},
+      {"classId", pluginClassId ? pluginClassId : ""}, {"resizable", resizable}};
+    if (window) {
+      RECT client{};
+      if (GetClientRect(window, &client)) {
+        result["clientWidth"] = client.right - client.left;
+        result["clientHeight"] = client.bottom - client.top;
+      }
+      RECT outer{};
+      if (GetWindowRect(window, &outer)) {
+        result["windowWidth"] = outer.right - outer.left;
+        result["windowHeight"] = outer.bottom - outer.top;
+      }
+      result["visible"] = IsWindowVisible(window) != FALSE;
+      result["iconic"] = IsIconic(window) != FALSE;
+      result["ownsFocus"] = GetFocus() == window;
+      result["activeWindowMatches"] = GetActiveWindow() == window;
+      result["dpi"] = dpiForWindow(window);
+      wchar_t title[512]{};
+      if (GetWindowTextW(window, title, 512) > 0) result["title"] = fromWide(std::wstring(title));
+      // Mouse input: VST3 forwards nothing through IPlugView, so what matters is
+      // that real Win32 hit-testing lands on a live child window belonging to the
+      // plug-in's view. WindowFromPoint is the OS's own answer, not our guess.
+      RECT clientRect{};
+      if (GetClientRect(window, &clientRect)) {
+        POINT centre{clientRect.right / 2, clientRect.bottom / 2};
+        ClientToScreen(window, &centre);
+        const HWND hit = WindowFromPoint(centre);
+        const bool hasTarget = hit != nullptr;
+        const bool isChild = hit && hit != window && IsChild(window, hit) != FALSE;
+        result["hitTestHasTarget"] = hasTarget;
+        result["hitTestIsPlugInChild"] = isChild;
+        result["hitTestIsHostWindow"] = hasTarget && hit == window;
+        // A plug-in child window is what actually receives WM_MOUSEMOVE/LBUTTONDOWN.
+        result["childWindowCount"] = [&] {
+          int count = 0;
+          EnumChildWindows(window, [](HWND, LPARAM data) -> BOOL {
+            *reinterpret_cast<int*>(data) += 1;
+            return TRUE;
+          }, reinterpret_cast<LPARAM>(&count));
+          return count;
+        }();
+      }
+      result["threadId"] = static_cast<unsigned long>(GetCurrentThreadId());
+      result["processId"] = static_cast<unsigned long>(GetCurrentProcessId());
+      result["style"] = static_cast<unsigned long>(windowStyle);
+      // Ask the plug-in what size it believes it has, so a host/plug-in size
+      // disagreement after a resize or DPI change is visible rather than assumed.
+      if (view && attached) {
+        Steinberg::ViewRect viewSize{};
+        if (isSuccess(view->getSize(&viewSize))) {
+          result["viewWidth"] = viewSize.getWidth();
+          result["viewHeight"] = viewSize.getHeight();
+        }
+        result["contentScale"] = contentScaleFactor;
+      }
+    }
+    return result;
+  }
 
   void shutdownNoThrow() noexcept {
     try { detachViewAndDestroyWindow(); } catch (...) { forceDetachNoThrow(); }

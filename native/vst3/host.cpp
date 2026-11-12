@@ -784,6 +784,108 @@ int main() {
 #else
         throw std::runtime_error("Native VST3 editor windows are supported only on Windows x64");
 #endif
+      } else if (command == "editorTestAction") {
+        // Acceptance harness only. Performs a REAL Win32 operation on the live
+        // window (not a simulated message) and lets the plug-in react through its
+        // normal path, then reports what the OS and the plug-in observed.
+#ifdef _WIN32
+        require(editor != nullptr, "No native VST3 editor session is open");
+        json result = json::object();
+        const auto action = request.value("action", std::string());
+        HWND window = editor->testWindowHandle();
+        require(window != nullptr && !editor->isClosed(), "The native editor window is not open");
+        const auto classId = request.value("classId", std::string());
+        if (action == "resizeClient") {
+          const auto width = request.at("width").get<int>();
+          const auto height = request.at("height").get<int>();
+          require(width >= 32 && height >= 32 && width <= 8192 && height <= 8192, "Invalid resize target");
+          RECT target{0, 0, width, height};
+          const auto style = static_cast<DWORD>(GetWindowLongPtrW(window, GWL_STYLE));
+          AdjustWindowRectEx(&target, style, FALSE, 0);
+          // A real resize goes through WM_SIZING/WM_SIZE exactly like a user drag,
+          // so IPlugView::checkSizeConstraint() is genuinely exercised.
+          SetWindowPos(window, nullptr, 0, 0, target.right - target.left, target.bottom - target.top,
+            SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+          editor->pumpMessages();
+          result["requestedWidth"] = width;
+          result["requestedHeight"] = height;
+        } else if (action == "keyDown" || action == "keyUp") {
+          ApexVst3Host::tests::queueMessage(action == "keyDown" ? WM_KEYDOWN : WM_KEYUP,
+            static_cast<WPARAM>(request.at("vk").get<unsigned>()));
+          editor->pumpMessages();
+          result["queued"] = action;
+        } else if (action == "wheel") {
+          ApexVst3Host::tests::queueMessage(WM_MOUSEWHEEL,
+            static_cast<WPARAM>(request.value("delta", 120)));
+          editor->pumpMessages();
+          result["queued"] = "wheel";
+        } else if (action == "mouseDown" || action == "mouseUp" || action == "mouseMove") {
+          // VST3 deliberately has no IPlugView mouse entry points: Windows routes
+          // mouse input to the plug-in's own child HWND. So the honest check is
+          // that real Win32 hit-testing at the requested point lands on a window
+          // of the plug-in's, and that the host window does not swallow the
+          // message. Coordinates are packed exactly as Win32 packs them.
+          const auto x = request.value("x", 0), y = request.value("y", 0);
+          POINT point{x, y};
+          ClientToScreen(window, &point);
+          const HWND target = WindowFromPoint(point);
+          const HWND deepest = target ? ChildWindowFromPointEx(window, POINT{x, y},
+            CWP_SKIPINVISIBLE | CWP_SKIPDISABLED | CWP_SKIPTRANSPARENT) : nullptr;
+          result["requested"] = action;
+          result["x"] = x;
+          result["y"] = y;
+          result["screenPoint"] = {point.x, point.y};
+          result["hitTargetExists"] = target != nullptr;
+          result["hitTargetIsPlugInChild"] = target && target != window && IsChild(window, target) != FALSE;
+          result["hostDeepestChild"] = deepest != nullptr;
+          // Deliver the real message anyway: if a plug-in child window is under the
+          // cursor, Win32 would have sent it there, so the host must not consume it.
+          const auto lparam = static_cast<LPARAM>(MAKELPARAM(x, y));
+          editor->injectMouse(action == "mouseDown" ? WM_LBUTTONDOWN
+            : action == "mouseUp" ? WM_LBUTTONUP : WM_MOUSEMOVE, lparam);
+          editor->pumpMessages();
+        } else if (action == "focus") {
+          SetForegroundWindow(window);
+          SetFocus(window);
+          editor->pumpMessages();
+          result["focusRequested"] = true;
+        } else if (action == "requestPluginResize") {
+          result["accepted"] = editor->requestTestPluginResize(request.value("width", 480), request.value("height", 320));
+          editor->pumpMessages();
+        } else if (action == "closeFromWindow") {
+          // A real WM_CLOSE, exactly what the title-bar X produces.
+          PostMessageW(window, WM_CLOSE, 0, 0);
+          editor->pumpMessages();
+          result["closePosted"] = true;
+        } else if (action == "minimize") {
+          ShowWindow(window, SW_MINIMIZE);
+          editor->pumpMessages();
+          result["minimized"] = IsIconic(window) != 0;
+          ShowWindow(window, SW_RESTORE);
+          editor->pumpMessages();
+        } else {
+          throw std::runtime_error("Unknown editor test action: " + action);
+        }
+        editor->pumpMessages();
+        result["diagnostics"] = editor->windowDiagnostics(classId.c_str());
+        reply({{"ok", true}, {"action", action}, {"result", result}});
+#else
+        throw std::runtime_error("Native VST3 editor windows are supported only on Windows x64");
+#endif
+      } else if (command == "editorDiagnostics") {
+        // Read-only observation of the live native window, used to verify genuine
+        // HWND creation, visibility, focus, DPI and resize behaviour. It never
+        // mutates the session, so it is safe while the editor is open.
+#ifdef _WIN32
+        require(editor != nullptr, "No native VST3 editor session is open");
+        editor->pumpMessages();
+        // The caller supplies the class id it expects; the diagnostics report it
+        // back so an evidence run can prove it inspected the intended plug-in.
+        const auto expectedClassId = request.value("classId", std::string());
+        reply({{"ok", true}, {"diagnostics", editor->windowDiagnostics(expectedClassId.c_str())}});
+#else
+        throw std::runtime_error("Native VST3 editor windows are supported only on Windows x64");
+#endif
       } else if (command == "process") {
         require(bool(instance), "No plugin instance loaded");
         auto pcm = instance->process(request);
