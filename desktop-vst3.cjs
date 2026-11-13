@@ -183,6 +183,16 @@ function registerVst3({ app, ipcMain, dialog, getWindow }) {
       : fn(context, String(event.sender.id), ...args);
   });
   handle('paths', context => [...context.roots]);
+  // Packaged-acceptance only: quit through the shipped path (window close ->
+  // window-all-closed -> app.quit -> before-quit), never through a bypass.
+  if (process.env.APEX_ACCEPTANCE === '1') {
+    ipcMain.handle('app:closeWindowForAcceptance', event => {
+      const win = getWindow();
+      if (!win || event.senderFrame !== win.webContents.mainFrame) throw new Error('Untrusted acceptance close request');
+      win.close();
+      return { closing: true };
+    });
+  }
   // A native editor is a real OS window owned by the helper process. Only one
   // may exist, it belongs to the renderer that requested it, and quitting the
   // app must first capture the plug-in's final state.

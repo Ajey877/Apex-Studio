@@ -810,45 +810,26 @@ int main() {
           result["requestedWidth"] = width;
           result["requestedHeight"] = height;
         } else if (action == "keyDown" || action == "keyUp") {
-          ApexVst3Host::tests::queueMessage(action == "keyDown" ? WM_KEYDOWN : WM_KEYUP,
-            static_cast<WPARAM>(request.at("vk").get<unsigned>()));
+          // Real keyboard input: focus the editor window, then inject the key with
+          // SendInput so Windows routes WM_KEYDOWN to the focused window.
+          const auto vk = static_cast<WORD>(request.at("vk").get<unsigned>());
+          result["vk"] = vk;
+          result["delivered"] = editor->sendKeyForTest(vk, action == "keyDown");
           editor->pumpMessages();
-          result["queued"] = action;
-        } else if (action == "wheel") {
-          ApexVst3Host::tests::queueMessage(WM_MOUSEWHEEL,
-            static_cast<WPARAM>(request.value("delta", 120)));
+        } else if (action == "mouseMove" || action == "mouseDown" || action == "mouseWheel") {
+          const auto kind = action == "mouseMove" ? "move" : action == "mouseDown" ? "down" : "wheel";
+          result = editor->deliverMouse(kind, request.value("x", 0), request.value("y", 0));
+        } else if (action == "setScale") {
+          const auto factor = request.at("scale").get<float>();
+          require(factor >= 0.5f && factor <= 4.f, "Invalid content scale factor");
+          const auto code = editor->setScaleForTest(factor);
+          result["requestedScale"] = factor;
+          result["result"] = ApexVst3Host::NativeEditorSession::resultName(code);
+          result["supported"] = editor->scaleSupported();
+        } else if (action == "destroyFocusSink") {
+          editor->destroyFocusSink();
+          result["focusSinkDestroyed"] = true;
           editor->pumpMessages();
-          result["queued"] = "wheel";
-        } else if (action == "mouseDown" || action == "mouseUp" || action == "mouseMove") {
-          // VST3 deliberately has no IPlugView mouse entry points: Windows routes
-          // mouse input to the plug-in's own child HWND. So the honest check is
-          // that real Win32 hit-testing at the requested point lands on a window
-          // of the plug-in's, and that the host window does not swallow the
-          // message. Coordinates are packed exactly as Win32 packs them.
-          const auto x = request.value("x", 0), y = request.value("y", 0);
-          POINT point{x, y};
-          ClientToScreen(window, &point);
-          const HWND target = WindowFromPoint(point);
-          const HWND deepest = target ? ChildWindowFromPointEx(window, POINT{x, y},
-            CWP_SKIPINVISIBLE | CWP_SKIPDISABLED | CWP_SKIPTRANSPARENT) : nullptr;
-          result["requested"] = action;
-          result["x"] = x;
-          result["y"] = y;
-          result["screenPoint"] = {point.x, point.y};
-          result["hitTargetExists"] = target != nullptr;
-          result["hitTargetIsPlugInChild"] = target && target != window && IsChild(window, target) != FALSE;
-          result["hostDeepestChild"] = deepest != nullptr;
-          // Deliver the real message anyway: if a plug-in child window is under the
-          // cursor, Win32 would have sent it there, so the host must not consume it.
-          const auto lparam = static_cast<LPARAM>(MAKELPARAM(x, y));
-          editor->injectMouse(action == "mouseDown" ? WM_LBUTTONDOWN
-            : action == "mouseUp" ? WM_LBUTTONUP : WM_MOUSEMOVE, lparam);
-          editor->pumpMessages();
-        } else if (action == "focus") {
-          SetForegroundWindow(window);
-          SetFocus(window);
-          editor->pumpMessages();
-          result["focusRequested"] = true;
         } else if (action == "requestPluginResize") {
           result["accepted"] = editor->requestTestPluginResize(request.value("width", 480), request.value("height", 320));
           editor->pumpMessages();
@@ -857,6 +838,26 @@ int main() {
           PostMessageW(window, WM_CLOSE, 0, 0);
           editor->pumpMessages();
           result["closePosted"] = true;
+        } else if (action == "focus") {
+          SetForegroundWindow(window);
+          SetFocus(window);
+          editor->pumpMessages();
+          result["focusRequested"] = true;
+        } else if (action == "loseFocus") {
+          // A genuine focus change needs a real second window that can own focus.
+          // This helper is otherwise GUI-less, so create one: a real, separate
+          // top-level window owned by this process. Focus then moves through the
+          // normal Win32 path and the plug-in receives onFocus(0) via WM_KILLFOCUS.
+          editor->ensureFocusSink();
+          HWND sink = editor->focusSink();
+          require(sink != nullptr, "Could not create the focus-loss target window");
+          ShowWindow(sink, SW_SHOWNOACTIVATE);
+          SetForegroundWindow(sink);
+          SetFocus(sink);
+          editor->pumpMessages();
+          result["focusSinkCreated"] = true;
+          result["focusSinkIsSeparateWindow"] = sink != window;
+          result["focusSinkOwnsFocus"] = GetFocus() == sink;
         } else if (action == "minimize") {
           ShowWindow(window, SW_MINIMIZE);
           editor->pumpMessages();

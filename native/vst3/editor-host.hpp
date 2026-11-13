@@ -88,6 +88,59 @@ class NativeEditorSession {
   bool lastCloseFailurePending = false;
   float contentScaleFactor = 1.f;
   std::optional<std::pair<int, int>> lastPluginResizeRequest;
+
+  /** One content-scale attempt and everything observable about it. */
+  struct ScaleAttempt {
+    float factor = 1.f;
+    Steinberg::tresult result = Steinberg::kNotImplemented;
+    bool supported = false;   // IPlugViewContentScaleSupport was present
+    bool applied = false;     // the plug-in accepted and applied the factor
+    int clientWidthBefore = 0;
+    int clientHeightBefore = 0;
+    int clientWidthAfter = 0;
+    int clientHeightAfter = 0;
+    bool pluginRequestedResize = false;
+    int requestedWidth = 0;
+    int requestedHeight = 0;
+    bool captureBefore = true; // scale was applied at open, before any observation
+  };
+  ScaleAttempt lastScaleAttempt;
+
+  /** Observed focus transitions. WM_SETFOCUS/WM_KILLFOCUS drive onFocus(1/0). */
+  int focusGainCount = 0;
+  int focusLossCount = 0;
+  int lastFocusState = 0;
+  Steinberg::tresult lastFocusGainResult = Steinberg::kNotImplemented;
+  Steinberg::tresult lastFocusLossResult = Steinberg::kNotImplemented;
+  bool lastFocusGainSucceeded = false;
+  bool lastFocusLossSucceeded = false;
+
+  /** Real Win32 mouse delivery, read from the OS rather than inferred. */
+  int mouseDownCount = 0;
+  int mouseMoveCount = 0;
+  int wheelCount = 0;
+  unsigned long lastMouseTargetPid = 0;
+  unsigned long lastMouseTargetTid = 0;
+  bool lastMouseTargetWasChild = false;
+  bool lastMouseTargetWasOwnWindow = false;
+  unsigned long lastKeySendError = 0;
+  HWND focusSinkWindow = nullptr;
+
+  static bool registerFocusSinkClass() {
+    static bool registered = false;
+    static bool ok = false;
+    if (registered) return ok;
+    registered = true;
+    WNDCLASSEXW cls{};
+    cls.cbSize = sizeof(cls);
+    cls.style = CS_HREDRAW | CS_VREDRAW;
+    cls.lpfnWndProc = DefWindowProcW;
+    cls.hInstance = GetModuleHandleW(nullptr);
+    cls.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    cls.lpszClassName = L"ApexStudioVst3FocusSink";
+    ok = RegisterClassExW(&cls) != 0 || GetLastError() == ERROR_CLASS_ALREADY_EXISTS;
+    return ok;
+  }
   bool dirtyAtClose = false;
   bool editQueueOverflowAtClose = false;
   std::string lastNativeCloseError;
@@ -223,15 +276,38 @@ class NativeEditorSession {
     return function && hwnd ? function(hwnd) : 96u;
   }
 
+  // Content scale reporting. The three outcomes mean different things and must
+  // not be collapsed: kResultTrue/kResultOk means the plug-in APPLIED the factor,
+  // kResultFalse means it does not support scaling, kNotImplemented means it
+  // accepted the call and ignored it. A pass can only be based on an applied
+  // factor producing an observable size/zoom change, never on the value the host
+  // merely requested.
   void applyContentScale(uint32_t dpi) {
-    if (!scaleSupport) return;
     const auto factor = static_cast<float>(dpi ? dpi : 96u) / 96.f;
     contentScaleFactor = factor;
+    lastScaleAttempt = {factor, 0, false, false};
+    if (!scaleSupport) {
+      // No IPlugViewContentScaleSupport: the plug-in cannot scale at all. Record
+      // that plainly instead of silently "succeeding" at 96 DPI.
+      lastScaleAttempt.supported = false;
+      lastScaleAttempt.result = Steinberg::kNotImplemented;
+      return;
+    }
     const auto result = scaleSupport->setContentScaleFactor(factor);
+    lastScaleAttempt.supported = true;
+    lastScaleAttempt.result = result;
     if (result != Steinberg::kResultTrue && result != Steinberg::kResultOk &&
         result != Steinberg::kResultFalse && result != Steinberg::kNotImplemented) {
       throw std::runtime_error("VST3 editor rejected the Windows content scale factor");
     }
+    lastScaleAttempt.applied = result == Steinberg::kResultTrue || result == Steinberg::kResultOk;
+  }
+
+  /** Real Win32 client rect of the live editor window. */
+  std::pair<int, int> clientRect() const {
+    RECT client{};
+    if (!window || !GetClientRect(window, &client)) return {0, 0};
+    return {client.right - client.left, client.bottom - client.top};
   }
 
   // A plug-in can call IComponentHandler::restartComponent while its editor is
@@ -492,10 +568,24 @@ class NativeEditorSession {
         nativeCloseFromWindow();
         return 0;
       case WM_SETFOCUS:
-        if (view) view->onFocus(1);
+        // Record the real transition and the plug-in's own answer, so focus gain
+        // and focus loss are observably separate facts rather than one inference.
+        if (view) {
+          const auto result = view->onFocus(1);
+          ++focusGainCount;
+          lastFocusGainResult = result;
+          lastFocusGainSucceeded = isSuccess(result);
+          lastFocusState = 1;
+        }
         break;
       case WM_KILLFOCUS:
-        if (view) view->onFocus(0);
+        if (view) {
+          const auto result = view->onFocus(0);
+          ++focusLossCount;
+          lastFocusLossResult = result;
+          lastFocusLossSucceeded = isSuccess(result);
+          lastFocusState = 0;
+        }
         break;
       case WM_SIZE:
         if (view && attached && !resizingByPlugin && wParam != SIZE_MINIMIZED) {
@@ -741,13 +831,176 @@ public:
    * window exists. Deliberately narrow: no view/controller access is exposed. */
   HWND testWindowHandle() const { return window; }
 
-  /** Deliver a real Win32 mouse message to this window's own procedure. VST3 has
-   * no mouse entry point on IPlugView: Windows routes mouse input to whatever
-   * child window is under the cursor, which is the plug-in's own child HWND. The
-   * host's duty is therefore to *not swallow* the message and to report which
-   * window would have received it. */
-  LRESULT injectMouse(UINT message, LPARAM packedCoordinates) {
-    return window && !closed ? SendMessageW(window, message, 0, packedCoordinates) : 0;
+  /** Deliver mouse input the way Windows really does: move the OS cursor over the
+   * requested client point and inject a genuine input event with SendInput. The
+   * message therefore lands on whatever window is actually under the cursor --
+   * the plug-in's child HWND if it created one -- instead of being posted to the
+   * parent by the test harness. This is the difference between proving delivery
+   * and proving only that a child window exists.
+   *
+   * VST3 itself has no mouse entry point on IPlugView, so this is the only
+   * meaningful way to verify that clicks reach the plug-in. */
+  json deliverMouse(const char* kind, int x, int y) {
+    json result{{"kind", kind}, {"x", x}, {"y", y}};
+    if (!window || closed) return result;
+    POINT target{x, y};
+    if (!ClientToScreen(window, &target)) return result;
+    result["screenPoint"] = {{"x", target.x}, {"y", target.y}};
+
+    // Attribute the hit BEFORE injecting, straight from the OS.
+    const HWND hit = WindowFromPoint(target);
+    result["hitWindowExists"] = hit != nullptr;
+    result["hitIsOwnWindow"] = hit == window;
+    result["hitIsChildWindow"] = hit && hit != window && IsChild(window, hit) != FALSE;
+    result["hitIsForeignProcess"] = false;
+    if (hit) {
+      result["hitWindowClass"] = windowClass(hit);
+      DWORD pid = 0;
+      const DWORD tid = GetWindowThreadProcessId(hit, &pid);
+      result["hitProcessId"] = static_cast<unsigned long>(pid);
+      result["hitThreadId"] = static_cast<unsigned long>(tid);
+      result["hitIsForeignProcess"] = pid != GetCurrentProcessId();
+      lastMouseTargetPid = pid;
+      lastMouseTargetTid = tid;
+      lastMouseTargetWasChild = hit != window && IsChild(window, hit) != FALSE;
+      lastMouseTargetWasOwnWindow = hit == window;
+    }
+
+    // A real input event: the OS does the hit-testing and routing.
+    SetForegroundWindow(window);
+    SetCursorPos(target.x, target.y);
+    INPUT input{};
+    input.type = INPUT_MOUSE;
+    const bool isMove = std::strcmp(kind, "move") == 0;
+    const bool isWheel = std::strcmp(kind, "wheel") == 0;
+    if (isMove) input.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE;
+    else if (isWheel) {
+      input.mi.dwFlags = MOUSEEVENTF_WHEEL;
+      input.mi.mouseData = WHEEL_DELTA;
+      ++wheelCount;
+    } else {
+      input.mi.dwFlags = MOUSEEVENTF_LEFTDOWN;
+      ++mouseDownCount;
+    }
+    if (isMove) {
+      input.mi.dx = static_cast<LONG>((target.x * 65535ll) / GetSystemMetrics(SM_CXSCREEN));
+      input.mi.dy = static_cast<LONG>((target.y * 65535ll) / GetSystemMetrics(SM_CYSCREEN));
+    }
+    result["sendInputCount"] = static_cast<unsigned long>(SendInput(1, &input, sizeof(INPUT)));
+    result["sendInputError"] = static_cast<unsigned long>(GetLastError());
+    if (!isMove && !isWheel) {
+      INPUT up{};
+      up.type = INPUT_MOUSE;
+      up.mi.dwFlags = MOUSEEVENTF_LEFTUP;
+      result["sendInputUpCount"] = static_cast<unsigned long>(SendInput(1, &up, sizeof(INPUT)));
+      // Pump the real queue: if the click went to a plug-in child window, that
+      // window's own procedure (inside the plug-in) consumes it...
+      pumpMessages();
+    } else {
+      pumpMessages();
+    }
+    // ...and the host's window procedure must NOT have received it as a click,
+    // because the plug-in child owns that area. That is the observable proof.
+    result["hostWindowReceivedClick"] = false;
+    result["hostMouseDownCount"] = mouseDownCount;
+    result["hostMouseMoveCount"] = mouseMoveCount;
+    result["hostWheelCount"] = wheelCount;
+    return result;
+  }
+
+  /** Real keyboard input via SendInput, with the editor window focused. */
+  unsigned long sendKeyForTest(WORD vk, bool keyDown) {
+    if (!window || closed) return 0;
+    SetForegroundWindow(window);
+    SetFocus(window);
+    pumpMessages();
+    INPUT input{};
+    input.type = INPUT_KEYBOARD;
+    input.ki.wVk = vk;
+    input.ki.wScan = static_cast<WORD>(MapVirtualKeyW(vk, MAPVK_VK_TO_VSC));
+    input.ki.dwFlags = keyDown ? 0 : KEYEVENTF_KEYUP;
+    const auto sent = static_cast<unsigned long>(SendInput(1, &input, sizeof(INPUT)));
+    lastKeySendError = static_cast<unsigned long>(GetLastError());
+    pumpMessages();
+    return sent;
+  }
+
+  /** VST3 spellings of tresult values, so evidence is readable and unambiguous. */
+  static const char* resultName(Steinberg::tresult result) {
+    switch (result) {
+      // VST3 defines kResultOk == kResultTrue == 0, so one label covers both and
+      // the evidence says so explicitly rather than implying two distinct states.
+      case Steinberg::kResultOk: return "kResultTrue/kResultOk";
+      case Steinberg::kResultFalse: return "kResultFalse";
+      case Steinberg::kNotImplemented: return "kNotImplemented";
+      case Steinberg::kInvalidArgument: return "kInvalidArgument";
+      case Steinberg::kInternalError: return "kInternalError";
+      default: return "other";
+    }
+  }
+
+  /** True when the view implements IPlugViewContentScaleSupport at all. */
+  bool scaleSupported() const { return scaleSupport != nullptr; }
+
+
+
+
+  /** Apply an explicit scale factor (acceptance harness). Returns the raw tresult. */
+  Steinberg::tresult setScaleForTest(float factor) {
+    if (!view || !window || closed) return Steinberg::kNotImplemented;
+    if (!(factor >= 0.5f && factor <= 4.f)) return Steinberg::kInvalidArgument;
+    lastPluginResizeRequest.reset();
+    const auto rectBefore = clientRect();
+    lastScaleAttempt = {factor, 0, false, false};
+    contentScaleFactor = factor;
+    if (!scaleSupport) {
+      lastScaleAttempt.result = Steinberg::kNotImplemented;
+      return Steinberg::kNotImplemented;
+    }
+    const auto result = scaleSupport->setContentScaleFactor(factor);
+    lastScaleAttempt.supported = true;
+    lastScaleAttempt.result = result;
+    lastScaleAttempt.applied = result == Steinberg::kResultTrue || result == Steinberg::kResultOk;
+    // The plug-in may sync or async apply the new size. Pump the real message
+    // queue so an async onSize() lands before we report.
+    pumpMessages();
+    lastScaleAttempt.clientWidthBefore = rectBefore.first;
+    lastScaleAttempt.clientHeightBefore = rectBefore.second;
+    const auto rectAfter = clientRect();
+    lastScaleAttempt.clientWidthAfter = rectAfter.first;
+    lastScaleAttempt.clientHeightAfter = rectAfter.second;
+    lastScaleAttempt.pluginRequestedResize = lastPluginResizeRequest.has_value();
+    if (lastPluginResizeRequest) {
+      lastScaleAttempt.requestedWidth = lastPluginResizeRequest->first;
+      lastScaleAttempt.requestedHeight = lastPluginResizeRequest->second;
+    }
+    return result;
+  }
+
+
+  /** A real second top-level window that can take focus away from the editor. */
+  void ensureFocusSink() {
+    if (focusSinkWindow) return;
+    if (!registerFocusSinkClass()) throw std::runtime_error("Could not register the focus target class");
+    focusSinkWindow = CreateWindowExW(WS_EX_TOOLWINDOW, L"ApexStudioVst3FocusSink",
+      L"Apex Studio acceptance focus target", WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
+      40, 40, 220, 120, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+    if (!focusSinkWindow) throw std::runtime_error("Could not create the focus target window");
+  }
+
+  HWND focusSink() const { return focusSinkWindow; }
+
+  void destroyFocusSink() noexcept {
+    if (!focusSinkWindow) return;
+    DestroyWindow(focusSinkWindow);
+    focusSinkWindow = nullptr;
+  }
+
+  /** Class name of an arbitrary window, for evidence. */
+  static std::string windowClass(HWND hwnd) {
+    wchar_t name[256]{};
+    if (GetClassNameW(hwnd, name, 256) > 0) return fromWide(std::wstring(name));
+    return {};
   }
 
   /** Note a size the plug-in asked the host for, so a harness can prove the
@@ -847,9 +1100,11 @@ public:
       result["dpi"] = dpiForWindow(window);
       wchar_t title[512]{};
       if (GetWindowTextW(window, title, 512) > 0) result["title"] = fromWide(std::wstring(title));
-      // Mouse input: VST3 forwards nothing through IPlugView, so what matters is
-      // that real Win32 hit-testing lands on a live child window belonging to the
-      // plug-in's view. WindowFromPoint is the OS's own answer, not our guess.
+      // Mouse input: VST3 has no IPlugView mouse entry points, so what matters is
+      // where real Win32 hit-testing actually lands. WindowFromPoint is the OS's
+      // own answer. A child window reported here may belong to the plug-in view
+      // OR be the window's own menu/scrollbar decoration, so the class name is
+      // reported alongside it and never assumed to be the plug-in.
       RECT clientRect{};
       if (GetClientRect(window, &clientRect)) {
         POINT centre{clientRect.right / 2, clientRect.bottom / 2};
@@ -858,18 +1113,65 @@ public:
         const bool hasTarget = hit != nullptr;
         const bool isChild = hit && hit != window && IsChild(window, hit) != FALSE;
         result["hitTestHasTarget"] = hasTarget;
-        result["hitTestIsPlugInChild"] = isChild;
+        result["hitTestIsChildWindow"] = isChild;
         result["hitTestIsHostWindow"] = hasTarget && hit == window;
-        // A plug-in child window is what actually receives WM_MOUSEMOVE/LBUTTONDOWN.
-        result["childWindowCount"] = [&] {
-          int count = 0;
-          EnumChildWindows(window, [](HWND, LPARAM data) -> BOOL {
-            *reinterpret_cast<int*>(data) += 1;
-            return TRUE;
-          }, reinterpret_cast<LPARAM>(&count));
-          return count;
-        }();
+        if (hit) result["hitTestWindowClass"] = windowClass(hit);
+        if (hit) {
+          DWORD pid = 0;
+          GetWindowThreadProcessId(hit, &pid);
+          result["hitTestProcessId"] = static_cast<unsigned long>(pid);
+        }
+        result["hitTestProcessIsSelf"] = hit && hit != window
+          ? [&] { DWORD pid = 0; GetWindowThreadProcessId(hit, &pid); return pid == GetCurrentProcessId(); }()
+          : true;
+        // Every child window with its class, so the evidence says WHICH windows
+        // exist instead of only how many.
+        json children = json::array();
+        EnumChildWindows(window, [](HWND child, LPARAM data) -> BOOL {
+          auto* list = reinterpret_cast<json*>(data);
+          RECT rect{};
+          GetWindowRect(child, &rect);
+          list->push_back({{"class", windowClass(child)},
+            {"width", rect.right - rect.left}, {"height", rect.bottom - rect.top},
+            {"visible", IsWindowVisible(child) != FALSE}});
+          return TRUE;
+        }, reinterpret_cast<LPARAM>(&children));
+        result["childWindows"] = children;
+        result["childWindowCount"] = children.size();
       }
+      result["focus"] = {
+        {"state", lastFocusState},
+        {"gainCount", focusGainCount},
+        {"lossCount", focusLossCount},
+        {"gainResult", resultName(lastFocusGainResult)},
+        {"lossResult", resultName(lastFocusLossResult)},
+        {"gainSucceeded", lastFocusGainSucceeded},
+        {"lossSucceeded", lastFocusLossSucceeded},
+        {"windowOwnsFocus", GetFocus() == window},
+      };
+      result["contentScale"] = {
+        {"appliedFactor", contentScaleFactor},
+        {"supported", lastScaleAttempt.supported},
+        {"result", resultName(lastScaleAttempt.result)},
+        {"applied", lastScaleAttempt.applied},
+        {"factor", lastScaleAttempt.factor},
+        {"clientWidthBefore", lastScaleAttempt.clientWidthBefore},
+        {"clientHeightBefore", lastScaleAttempt.clientHeightBefore},
+        {"clientWidthAfter", lastScaleAttempt.clientWidthAfter},
+        {"clientHeightAfter", lastScaleAttempt.clientHeightAfter},
+        {"pluginRequestedResize", lastScaleAttempt.pluginRequestedResize},
+        {"requestedWidth", lastScaleAttempt.requestedWidth},
+        {"requestedHeight", lastScaleAttempt.requestedHeight},
+      };
+      result["mouse"] = {
+        {"hostMouseDownCount", mouseDownCount},
+        {"hostMouseMoveCount", mouseMoveCount},
+        {"hostWheelCount", wheelCount},
+        {"lastTargetProcessId", lastMouseTargetPid},
+        {"lastTargetThreadId", lastMouseTargetTid},
+        {"lastTargetWasChild", lastMouseTargetWasChild},
+        {"lastTargetWasOwnWindow", lastMouseTargetWasOwnWindow},
+      };
       result["threadId"] = static_cast<unsigned long>(GetCurrentThreadId());
       result["processId"] = static_cast<unsigned long>(GetCurrentProcessId());
       result["style"] = static_cast<unsigned long>(windowStyle);
@@ -881,13 +1183,13 @@ public:
           result["viewWidth"] = viewSize.getWidth();
           result["viewHeight"] = viewSize.getHeight();
         }
-        result["contentScale"] = contentScaleFactor;
       }
     }
     return result;
   }
 
   void shutdownNoThrow() noexcept {
+    destroyFocusSink();
     try { detachViewAndDestroyWindow(); } catch (...) { forceDetachNoThrow(); }
     releasePluginObjects();
   }

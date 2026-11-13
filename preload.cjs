@@ -24,6 +24,11 @@ ipcRenderer.on('vst3:liveAudioPort', (event, metadata) => {
 const desktopApi = {
   isDesktop: true,
   smokeTest,
+  /** Set only by APEX_ACCEPTANCE=1; enables the packaged-acceptance hook. */
+  packagedAcceptance: process.argv.includes('--apex-packaged-acceptance'),
+  closeWindow: process.argv.includes('--apex-packaged-acceptance')
+    ? () => ipcRenderer.invoke('app:closeWindowForAcceptance')
+    : undefined,
   smokeReopen: process.argv.includes('--apex-smoke-reopen'),
   platform: process.platform,
   arch: process.arch,

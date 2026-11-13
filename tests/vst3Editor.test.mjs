@@ -331,3 +331,45 @@ test('the editor window is explicitly shown twice so a hidden helper start canno
   assert.ok(editorHost.includes('IsWindowVisible(window)'),
     'the helper checks the window really is visible before reporting success');
 });
+
+test('content scaling is judged by the plug-in\'s response, never by the requested factor', () => {
+  const editorHost = readFileSync(path.join(process.cwd(), 'native/vst3/editor-host.hpp'), 'utf8');
+  // Regression: a 96-DPI runner with an absent (or ignored) scale interface passed
+  // the old check because it compared its own variable with its own variable.
+  assert.ok(editorHost.includes('IPlugViewContentScaleSupport'), 'the interface is looked up');
+  assert.ok(editorHost.includes('setContentScaleFactor'), 'the factor is actually sent');
+  // All three outcomes must stay distinguishable.
+  for (const value of ['kResultFalse', 'kNotImplemented', 'kResultTrue']) {
+    assert.ok(editorHost.includes(value), `result ${value} is distinguished`);
+  }
+  // And the evidence records the observed size change, not just the request.
+  assert.ok(editorHost.includes('clientWidthBefore') && editorHost.includes('clientWidthAfter'),
+    'the client size before and after the scale change is recorded');
+  assert.ok(editorHost.includes('pluginRequestedResize'),
+    'a plug-in-requested resize after scaling is recorded');
+});
+
+test('focus loss is proved by a real focus transition, not by calling onFocus directly', () => {
+  const editorHost = readFileSync(path.join(process.cwd(), 'native/vst3/editor-host.hpp'), 'utf8');
+  const host = readFileSync(path.join(process.cwd(), 'native/vst3/host.cpp'), 'utf8');
+  assert.ok(editorHost.includes('WM_KILLFOCUS') && editorHost.includes('WM_SETFOCUS'),
+    'focus transitions come from real window messages');
+  assert.ok(/focusLossCount/.test(editorHost), 'focus losses are counted, not assumed');
+  assert.ok(/lastFocusLossSucceeded/.test(editorHost), 'the plug-in\'s onFocus(0) result is recorded');
+  assert.ok(host.includes('ensureFocusSink'), 'a real second window is created to steal focus');
+  assert.ok(/focusSinkOwnsFocus/.test(host), 'the evidence shows focus really moved');
+});
+
+test('mouse acceptance uses real OS input instead of posting to the parent window', () => {
+  const editorHost = readFileSync(path.join(process.cwd(), 'native/vst3/editor-host.hpp'), 'utf8');
+  const host = readFileSync(path.join(process.cwd(), 'native/vst3/host.cpp'), 'utf8');
+  // Regression: the harness used to SendMessage the parent HWND, which proves only
+  // that the host accepts messages, not that the plug-in receives anything.
+  assert.ok(editorHost.includes('SendInput'), 'real OS input is injected');
+  assert.ok(editorHost.includes('WindowFromPoint'), 'the OS hit-test result is recorded');
+  assert.ok(editorHost.includes('hitIsChildWindow'), 'child-window attribution is recorded');
+  assert.ok(/hostMouseDownCount/.test(editorHost),
+    'whether the host window swallowed the click is recorded');
+  assert.ok(!/injectMouse\(\s*WM_LBUTTONDOWN/.test(host),
+    'the parent-window click injection path is gone');
+});

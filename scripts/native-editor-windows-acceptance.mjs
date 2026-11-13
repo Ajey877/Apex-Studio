@@ -254,15 +254,58 @@ try {
   });
 
   await criterion('3-dpi', async () => {
-    // ---- Criterion 3: DPI scaling -------------------------------------------
-    stage('dpi');
-    const dpi = Number(live.dpi ?? 0);
-    const scale = Number(live.contentScale ?? 0);
-    (dpi >= 96 && Math.abs(scale - dpi / 96) < 1e-3 ? pass : fail)('3-dpi', {
-      windowDpi: dpi,
-      contentScaleFactorAppliedToPlugIn: scale,
-      expectedScale: dpi / 96,
-      note: 'setContentScaleFactor was called with the real GetDpiForWindow value and the plug-in accepted it.',
+    // ---- Criterion 3: DPI / content scaling --------------------------------
+    // The runner desktop is 96 DPI, so 96 is NOT evidence of high-DPI support.
+    // What matters is whether the view implements IPlugViewContentScaleSupport,
+    // what setContentScaleFactor actually returned, and whether the plug-in then
+    // resized itself. Requesting a factor proves nothing on its own.
+    const base = await diagnostics();
+    const initial = base.contentScale ?? {};
+    const attempts = [];
+    // Exercise genuine non-default transitions in both directions, plus a
+    // non-integer factor. Each is applied to the live view.
+    for (const factor of [1.5, 2.0, 0.75, 1.0]) {
+      const response = await client.setEditorScale(factor, again.classId);
+      const after = response.diagnostics ?? await diagnostics();
+      attempts.push({
+        requested: factor,
+        returned: response.result,
+        supported: response.supported,
+        // Observed, from the plug-in's own report after the call.
+        appliedFactor: after.contentScale?.appliedFactor,
+        clientSizeAfter: { width: after.clientWidth, height: after.clientHeight },
+        plugInViewSizeAfter: { width: after.viewWidth, height: after.viewHeight },
+        pluginRequestedResize: after.contentScale?.pluginRequestedResize,
+        resizeRequest: { width: after.contentScale?.requestedWidth, height: after.contentScale?.requestedHeight },
+        supportedBeforeScale: after.contentScale?.supported,
+        // The plug-in's own size must track the request, not just our variable.
+        plugInSizeChanged: after.contentScale?.clientWidthAfter !== after.contentScale?.clientWidthBefore
+          || after.contentScale?.pluginRequestedResize === true,
+      });
+    }
+    const supported = initial.supported === true;
+    const returnedValues = attempts.map(a => a.returned);
+    const anyApplied = attempts.some(a => a.returned === 'kResultTrue/kResultOk');
+    const anyResizeObserved = attempts.some(a => a.plugInSizeChanged === true);
+    const anyNonDefaultApplied = attempts.some(a =>
+      (a.requested === 1.5 || a.requested === 2.0) && a.returned === 'kResultTrue/kResultOk');
+    // PASS requires: the interface exists, a non-default factor was genuinely
+    // accepted, and the plug-in resized itself in response. 96 DPI alone is never
+    // enough, and the host's own variable is never the evidence.
+    const ok = supported && anyApplied && anyNonDefaultApplied && anyResizeObserved;
+    (ok ? pass : fail)('3-dpi', {
+      desktopDpi: Number(base.dpi ?? 0),
+      runnerDesktopIsHighDpi: Number(base.dpi ?? 0) > 96,
+      contentScaleSupportAvailable: supported,
+      initialScaleState: initial,
+      attempts,
+      returnedValues,
+      anyNonDefaultFactorApplied: anyNonDefaultApplied,
+      anyPlugInResizeObserved: anyResizeObserved,
+      note: supported
+        ? 'IPlugViewContentScaleSupport is present. PASS requires an applied non-default factor AND the plug-in resizing itself; 96 DPI is not accepted as evidence.'
+        : 'The view does not implement IPlugViewContentScaleSupport, so it cannot scale. That is a NOT_VERIFIED/FAIL for high-DPI, never a pass at 96 DPI.',
+      multiMonitorMigration: 'NOT_VERIFIED here: moving a window between monitors with different DPI needs an interactive desktop. Tracked as a separate interactive requirement.',
     });
   });
 
@@ -324,45 +367,95 @@ try {
   });
 
   await criterion('6-mouse-wheel', async () => {
-    // ---- Criterion 6: mouse and wheel forwarding ----------------------------
-    // VST3 has NO mouse entry points on IPlugView. Windows delivers mouse input to
-    // the plug-in's own child HWND, so the host's obligation is to create a real
-    // window, not to swallow the input, and to keep the plug-in's child reachable.
-    // The criterion is therefore verified by real Win32 hit-testing, plus the one
-    // mouse event VST3 does route through the host (the wheel).
-    const mouseDown = await client.editorTestAction('mouseDown', { x: 40, y: 40, classId: again.classId });
-    const mouseMove = await client.editorTestAction('mouseMove', { x: 60, y: 40, classId: again.classId });
-    const mouseUp = await client.editorTestAction('mouseUp', { x: 60, y: 40, classId: again.classId });
-    const wheel = await client.editorTestAction('wheel', { delta: 120, classId: again.classId });
-    const afterMouse = wheel.diagnostics;
-    const hitReachable = mouseDown.hitTargetIsPlugInChild === true || mouseDown.hostDeepestChild === true;
-    const wheelRouted = wheel.queued === 'wheel' && afterMouse.closed === false && afterMouse.attached === true;
-    (hitReachable && wheelRouted ? pass : fail)('6-mouse-wheel', {
-      // Real Win32 answers, not simulated events.
-      hitTargetExists: mouseDown.hitTargetExists,
-      hitTargetIsPlugInChildWindow: mouseDown.hitTargetIsPlugInChild,
-      hostWindowHasChildWindowAtCursor: mouseDown.hostDeepestChild,
-      childWindowCount: afterMouse.childWindowCount,
-      mouseDown: { x: mouseDown.x, y: mouseDown.y, screenPoint: mouseDown.screenPoint },
-      mouseMove: { x: mouseMove.x, y: mouseMove.y },
-      mouseUp: { x: mouseUp.x, y: mouseUp.y },
-      wheelDeltaRoutedToPlugInView: wheelRouted,
-      stillAttached: afterMouse.attached,
-      vst3Semantics: 'IPlugView has no onMouse* methods. Mouse clicks are delivered by Windows to the plug-in child HWND; only the wheel is routed via IPlugView::onWheel.',
+    // ---- Criterion 6: genuine mouse delivery -------------------------------
+    // The previous version posted messages to the PARENT window, which proves only
+    // that the host accepts them -- not that the plug-in receives anything. This
+    // version drives real OS input with SendInput at real screen coordinates, so
+    // Windows performs the hit-test and routes the message to whatever window is
+    // actually there.
+    const before = await diagnostics();
+    const point = { x: Math.max(8, Math.round((before.clientWidth ?? 40) / 2)), y: Math.max(8, Math.round((before.clientHeight ?? 40) / 2)) };
+    const move = await client.sendEditorMouse('move', { ...point, classId: again.classId });
+    const down = await client.sendEditorMouse('down', { ...point, classId: again.classId });
+    const wheel = await client.sendEditorMouse('wheel', { ...point, classId: again.classId });
+    const after = wheel.diagnostics;
+    const injected = (down.sendInputCount ?? 0) > 0;
+    const hitReal = down.hitWindowExists === true;
+    const hitIsChild = down.hitIsChildWindow === true;
+    const hostSawNoClick = (after.mouse?.hostMouseDownCount ?? 0) === 0;
+    const wheelRoutedToView = (after.mouse?.hostWheelCount ?? 0) > 0;
+    // PASS requires the OS to have routed injected input, with the hit-test
+    // attributed to an actual window, and no fabricated claim about the plug-in.
+    (injected && hitReal && hostSawNoClick && wheelRoutedToView ? pass : fail)('6-mouse-wheel', {
+      method: 'SendInput (real OS input), cursor moved to real screen coordinates',
+      injectedAt: { clientPoint: point, screenPoint: down.screenPoint },
+      sendInputReturnCount: down.sendInputCount,
+      sendInputLastError: down.sendInputError,
+      hitTestAttribution: {
+        windowExists: down.hitWindowExists,
+        isChildOfEditorWindow: down.hitIsChildWindow,
+        isEditorWindowItself: down.hitIsOwnWindow,
+        windowClass: down.hitWindowClass,
+        processId: down.hitProcessId,
+        isForeignProcess: down.hitIsForeignProcess,
+      },
+      childWindows: after.childWindows ?? [],
+      hostWindowDidNotReceiveClick: hostSawNoClick,
+      hostMouseDownCount: after.mouse?.hostMouseDownCount,
+      wheelReachedPlugInView: wheelRoutedToView,
+      vst3Semantics: 'IPlugView has no onMouse* methods. Real Windows input is routed by the OS to whatever window is under the cursor; only the wheel is also routed via IPlugView::onWheel.',
+      note: hostSawNoClick
+        ? 'Injected clicks did NOT arrive at the host window procedure, which is the observable proof that input went somewhere else (the plug-in child) rather than being consumed by the host.'
+        : 'The host window received the clicks, so the plug-in did not own that area.',
     });
   });
 
   await criterion('7-focus', async () => {
-    // ---- Criterion 7: focus acquisition and loss ---------------------------
-    stage('focus');
-    const focused = await client.editorTestAction('focus', { classId: again.classId });
-    const focusAfter = focused.diagnostics;
-    (focusAfter.ownsFocus === true || focusAfter.activeWindowMatches === true ? pass : fail)('7-focus', {
-      focusRequested: true,
-      windowOwnsFocus: focusAfter.ownsFocus,
-      isActiveWindow: focusAfter.activeWindowMatches,
-      note: 'Focus was requested on the real window; IPlugView::onFocus(1) is sent from WM_SETFOCUS and onFocus(0) from WM_KILLFOCUS.',
-      focusLossEvidence: 'see 9-native-close: closing the window destroys it and the focus leaves with it',
+    // ---- Criterion 7: focus gain AND loss ----------------------------------
+    // Proving acquisition alone is not proving focus handling. A real second
+    // top-level window is created and given focus, so the transition goes through
+    // the normal Win32 path: WM_KILLFOCUS -> IPlugView::onFocus(0).
+    const before = await diagnostics();
+    const gain = await client.editorTestAction('focus', { classId: again.classId });
+    const afterGain = gain.diagnostics;
+    const loss = await client.loseEditorFocus(again.classId);
+    const afterLoss = loss.diagnostics;
+    const regaining = await client.editorTestAction('focus', { classId: again.classId });
+    const afterRegain = regaining.diagnostics;
+    await client.editorTestAction('destroyFocusSink', { classId: again.classId });
+
+    const gained = (afterGain.focus?.gainCount ?? 0) > (before.focus?.gainCount ?? 0)
+      && afterGain.focus?.gainSucceeded === true;
+    const lost = (afterLoss.focus?.lossCount ?? 0) > (afterGain.focus?.lossCount ?? 0)
+      && afterLoss.focus?.lossSucceeded === true
+      && afterLoss.focus?.state === 0;
+    // Focus really left the editor for another window, not merely "onFocus was called".
+    const focusLeftWindow = loss.focusSinkOwnsFocus === true && afterLoss.focus?.windowOwnsFocus === false;
+    const regained = (afterRegain.focus?.gainCount ?? 0) > (afterLoss.focus?.gainCount ?? 0)
+      && afterRegain.focus?.state === 1;
+    (gained && lost && focusLeftWindow && regained ? pass : fail)('7-focus', {
+      gain: {
+        onFocusCalls: afterGain.focus?.gainCount,
+        plugInReturned: afterGain.focus?.gainResult,
+        plugInSucceeded: afterGain.focus?.gainSucceeded,
+        state: afterGain.focus?.state,
+        windowOwnsFocus: afterGain.focus?.windowOwnsFocus,
+      },
+      loss: {
+        onFocusCalls: afterLoss.focus?.lossCount,
+        plugInReturned: afterLoss.focus?.lossResult,
+        plugInSucceeded: afterLoss.focus?.lossSucceeded,
+        state: afterLoss.focus?.state,
+        windowOwnsFocus: afterLoss.focus?.windowOwnsFocus,
+        separateFocusTargetCreated: loss.focusSinkCreated === true,
+        focusTargetIsSeparateWindow: loss.focusSinkIsSeparateWindow === true,
+        focusActuallyMoved: loss.focusSinkOwnsFocus === true,
+      },
+      regain: {
+        onFocusCalls: afterRegain.focus?.gainCount,
+        state: afterRegain.focus?.state,
+      },
+      note: 'Gain and loss are separate observed facts: WM_SETFOCUS/WM_KILLFOCUS drive onFocus(1)/onFocus(0), and the loss is a real move to another top-level window.',
     });
   });
 

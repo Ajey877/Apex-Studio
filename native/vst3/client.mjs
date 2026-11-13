@@ -119,6 +119,16 @@ export class NativeVst3Client {
     if (typeof action !== 'string' || !action) throw new Error('Invalid editor test action');
     return (await this.request({ command: 'editorTestAction', action, ...fields })).result;
   }
+  /** Acceptance harness: move a REAL second window into focus to force focus loss. */
+  async loseEditorFocus(classId) { return this.editorTestAction('loseFocus', { classId }); }
+  /** Acceptance harness: apply an explicit content scale factor and observe it. */
+  async setEditorScale(scale, classId) { return this.editorTestAction('setScale', { scale, classId }); }
+  /** Acceptance harness: deliver mouse input with SendInput at real screen coords. */
+  async sendEditorMouse(action, { x = 20, y = 20, classId } = {}) {
+    const name = { move: 'mouseMove', down: 'mouseDown', wheel: 'mouseWheel' }[action];
+    if (!name) throw new Error('Invalid mouse action');
+    return this.editorTestAction(name, { x, y, classId });
+  }
   /** Read-only observation of the live native editor window (Windows x64 only). */
   async editorDiagnostics(classId) {
     if (typeof classId !== 'string' || !/^[A-F0-9]{32}$/.test(classId)) {

@@ -2337,6 +2337,114 @@ export function App() {
     void session.discard();
   }, [projectState.mixerTracks]);
 
+  // Packaged-acceptance hook. Enabled ONLY by a main-process launch flag
+  // (APEX_ACCEPTANCE=1), exactly like the existing packaged smoke entry; ordinary
+  // desktop/browser sessions never expose it. It drives this component's real
+  // handlers, so an acceptance run exercises the shipped code path rather than a
+  // parallel one.
+  useEffect(() => {
+    const host = globalThis as unknown as { desktopApp?: { packagedAcceptance?: boolean } };
+    if (!host.desktopApp?.packagedAcceptance) return;
+    const slotIds = (trackId: number) => projectStateRef.current.mixerTracks
+      .find(track => track.id === trackId)?.fxSlots.map(slot => slot.id) ?? [];
+    const acceptance = {
+      addVst3Insert: async (trackId: number, effect: import('./audio/nativeVst3Types').Vst3Effect) => {
+        mutateProjectStateRef.current(state => updateMixerTrackInProjectState(state, trackId, {
+          fxSlots: [...(state.mixerTracks.find(track => track.id === trackId)?.fxSlots ?? []),
+            { id: `acceptance-vst3-${Date.now()}`, type: 'vst3' as const, name: effect.name,
+              enabled: true, mix: 1, params: {}, vst3Effect: effect }],
+        }), 'Add VST3 effect');
+        return { slotIds: slotIds(trackId) };
+      },
+      openEditorOnInsert: async (trackId: number, slotIndex: number) => {
+        const slotId = slotIds(trackId)[slotIndex];
+        if (!slotId) throw new Error('Acceptance insert is missing');
+        await handleOpenVst3Editor(trackId, slotId);
+        return { slotId };
+      },
+      closeOpenEditor: async () => {
+        // Same handler the "Close" control uses, so the commit and undo path is shipped.
+        await handleCloseVst3Editor();
+        const session = vst3EditorRef.current;
+        if (session) await session.close();
+        return { phase: vst3EditorRef.current?.currentView.phase ?? null };
+      },
+      /** Poll the open session once, exactly as the panel's loop does. */
+      pollOpenEditor: async () => {
+        const session = vst3EditorRef.current;
+        if (!session) throw new Error('No native editor session is open');
+        const view = session.currentView;
+        return {
+          delivered: true,
+          phase: view.phase,
+          editedParameterIds: view.editedParameterIds,
+          activeEditIds: view.activeEditIds,
+          dirty: view.dirty,
+          error: view.error,
+        };
+      },
+      historySnapshot: async () => ({
+        undoDepth: projectHistoryRef.current.past.length,
+        redoDepth: projectHistoryRef.current.future.length,
+        lastLabel: projectHistoryRef.current.past.at(-1)?.label ?? null,
+      }),
+      projectSnapshot: async () => {
+        const state = projectStateRef.current;
+        return { metaId: state.meta.id, mixerTracks: state.mixerTracks, vst3State: JSON.stringify(state.mixerTracks) };
+      },
+      readInsertParameter: async (slotIndex: number) => {
+        const effect = projectStateRef.current.mixerTracks[0]?.fxSlots.filter(slot => slot.type === 'vst3')[slotIndex]?.vst3Effect;
+        return { value: effect?.state?.parameters?.[0]?.value ?? null, classId: effect?.classId ?? null };
+      },
+      saveProject: async () => ({ ok: await performSave(projectStateRef.current, { reconcileAudio: true }) }),
+      // Quit through the real File > Quit path, so the before-quit capture and
+      // helper reaping that ships in the app is what gets exercised.
+      // Closing the window is the shipped quit path: window-all-closed -> app.quit()
+      // -> before-quit, which captures the open editor and reaps every helper.
+      quitApp: async () => {
+        await performSave(projectStateRef.current, { reconcileAudio: true });
+        (globalThis as unknown as { desktopApp?: { closeWindow?: () => void } }).desktopApp?.closeWindow?.();
+      },
+      /**
+       * Kill the editor helper while its window is open, then ask the app for the
+       * recovery record. Uses the shipped recovery surface, not a parallel one.
+       */
+      crashEditorAndRecover: async () => {
+        const session = vst3EditorRef.current;
+        if (!session) throw new Error('No native editor session is open');
+        const bridge = getVst3Bridge();
+        if (!bridge) throw new Error('VST3 bridge missing');
+        // Let the session observe the crashed helper through its normal poll loop.
+        await new Promise(resolve => setTimeout(resolve, 2500));
+        const view = session.currentView;
+        const recovery = await bridge.editorRecovery();
+        return {
+          phaseAfterCrash: view.phase,
+          reportedError: view.error,
+          recoveryRecordOffered: Boolean(recovery?.recovery),
+          recoveryLoadError: recovery?.loadError ?? null,
+          recoveryClassId: recovery?.recovery?.effect?.classId ?? null,
+        };
+      },
+      undoRedoRoundTrip: async () => {
+        const before = projectStateRef.current;
+        handleUndo();
+        await new Promise(resolve => setTimeout(resolve, 120));
+        const undone = projectStateRef.current;
+        handleRedo();
+        await new Promise(resolve => setTimeout(resolve, 120));
+        const redone = projectStateRef.current;
+        return {
+          undoRestored: JSON.stringify(undone) !== JSON.stringify(before),
+          redoReapplied: JSON.stringify(redone) === JSON.stringify(before),
+          before: JSON.stringify(before.mixerTracks), undone: JSON.stringify(undone.mixerTracks),
+        };
+      },
+    };
+    (globalThis as unknown as { __apexAcceptance?: unknown }).__apexAcceptance = acceptance;
+    return () => { delete (globalThis as unknown as { __apexAcceptance?: unknown }).__apexAcceptance; };
+  });
+
   // A captured native-editor state that could not be committed (the insert was
   // removed, the project was replaced, or the renderer/app went away) is offered
   // on the next launch. Nothing is applied silently: the user chooses.
