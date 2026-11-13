@@ -148,7 +148,8 @@ if (!executable) {
 //    prove BOTH the packaged Mixer insert and the plug-in's own window without
 //    weakening any host policy.
 const editorFixture = path.join(root, 'build/native-vst3/VST3/Release/data-exchange.vst3');
-const EDITOR_FIXTURE_NAME = /^data-exchange/i;
+// The factory registers the class as "DataExchange" (no hyphen).
+const EDITOR_FIXTURE_NAME = /^data-?exchange/i;
 const profile = path.join(root, 'build', `packaged-acceptance-profile-${Date.now()}`);
 /** Every launch of the packaged app uses this environment. Declared once so no
  *  launch can silently forget the flag that enables the acceptance hook. */
@@ -179,7 +180,7 @@ async function run() {
     const bridge = globalThis.desktopApp?.vst3;
     if (!bridge) return { error: 'packaged preload bridge missing' };
     const discovered = await bridge.discoverEffects();
-    const target = (discovered.plugins ?? []).find(p => /^data-exchange/i.test(p.name));
+    const target = (discovered.plugins ?? []).find(p => /^data-?exchange/i.test(p.name));
     if (!target) {
       return { error: 'editor fixture not discovered in the packaged app',
         errors: discovered.errors, names: (discovered.plugins ?? []).map(p => p.name) };

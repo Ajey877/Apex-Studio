@@ -413,3 +413,11 @@ test('the packaged acceptance fixture is actually built', () => {
     'data-exchange is built alongside again on Windows');
   assert.ok(/platform === 'win32'/.test(build), 'the editor fixtures stay Windows-only');
 });
+
+test('the packaged run matches the fixture by its real registered name', () => {
+  const script = readFileSync(path.join(process.cwd(), 'scripts/packaged-editor-acceptance.mjs'), 'utf8');
+  // The SDK registers the class as "DataExchange"; an /^data-exchange/ matcher
+  // never matched it, so discovery failed even once the bundle was built.
+  assert.ok(/const EDITOR_FIXTURE_NAME = \/\^data-\?exchange\/i;/.test(script),
+    'fixture matcher tolerates the hyphenless registered name');
+});
