@@ -4,17 +4,33 @@ This is the **only** way to claim the native editor window works. Everything tha
 runs on Linux — JavaScript unit tests, IPC, helper framing, process separation,
 `test:vst3-editor` — is contract-level. None of it creates an HWND.
 
-Status of this change: **all twelve automated criteria PASS on real Windows; the
-packaged-application checklist is still outstanding.**
+Status of this change: **all twelve automated criteria PASS on real Windows, and
+the AGain audio policy is now measured rather than assumed; the two items that
+remain `NOT_VERIFIED` are the packaged-application claim and interactive DPI
+changes.** The packaged app is now driven end to end by
+`scripts/packaged-editor-acceptance.mjs` (see below), and its editor criteria are
+reported separately from the helper-level ones — never traded for one another.
 
 `Native VST3 Validation / Native DSP (windows-latest)` ran the acceptance harness
 against a real Windows helper, a real HWND, and the real pinned-SDK AGain VSTGUI
-editor: **14 PASS, 0 FAIL, 2 NOT_VERIFIED** at commit `6dcdf1a` (also confirmed at `b399996`). The two
-`NOT_VERIFIED` rows are the packaged-application claim and the AGain audio-policy
-row — neither was observed, and neither is reported as passing. The interactive
-packaged-application half has **not** been executed because no interactive Windows
-x64 desktop was available. Both halves are recorded separately and never traded
-for one another.
+editor: **14 PASS, 0 FAIL, 2 NOT_VERIFIED** at commits `6dcdf1a`, `b399996` and
+`53e7852`. The two `NOT_VERIFIED` rows were the packaged-application claim and the
+AGain audio-policy row.
+
+The AGain policy row has since been converted from an assumption into a
+measurement, so the expected shape of the next Windows run is **15 PASS, 0 FAIL,
+1 NOT_VERIFIED** — the packaged-application claim, which is covered by the separate
+packaged harness and not by this one. That number is an expectation, not a result;
+it becomes a result only when the run reports it.
+
+Two corrections were made after the first green run, both found by measurement:
+
+- `6-mouse-wheel` had been reading the response to the *click* request when
+  asserting about the *wheel*, so it reported `wheelReachedPlugInView: false` on a
+  healthy window. It now reads the wheel response.
+- `12c-again-audio-policy` was a hardcoded `NOT_VERIFIED`. It now opens AGain
+  through a real helper and requires the host's exact refusal message plus the
+  absence of a session; a silent success would be a `FAIL`.
 
 Observed on Windows for the record: helper `apex-vst3-host.exe` in its own
 process, window style `0xcf0000`, outer `366×159`, client `350×120`, title
@@ -126,6 +142,67 @@ removal/relink, IPC loss, overflow) stay in Part 2 because they need a real
 application session.
 
 ---
+
+## Part 1b — Automated packaged-application acceptance (Windows CI)
+
+`npm run package:win:dir` then `node scripts/packaged-editor-acceptance.mjs` drives
+the **real installed Electron app** on `windows-latest`. It is the automated half of
+Part 2: it clicks the app's own controls, reads the OS process table and window
+handles, and writes `build/native-evidence/packaged-editor-acceptance.json`. It is
+run by `.github/workflows/desktop-validation.yml` (`windows-package`).
+
+| id | Criterion |
+| --- | --- |
+| `p1-mixer-opens-editor` | A Mixer insert opens the plug-in's own editor window |
+| `p2-native-window-responsive` | The native window appears and the app stays responsive |
+| `p3-parameter-reaches-apex` | A parameter change reaches Apex |
+| `p4-one-undoable-change` | Closing the editor commits exactly one undoable change |
+| `p5-undo-redo` | Undo and redo work |
+| `p6-save-quit-reload` | Save, quit and reload preserve state |
+| `p7-no-leaked-helpers` | Quitting with the editor open leaks no helper process |
+| `p8-recovery` | An editor crash leaves a recovery record |
+| `p9-dpi-125-150` | 125% and 150% DPI behaviour (manual only) |
+| `harness` | The driver itself completed |
+
+Three rules keep this honest, and each of them exists because a real run was wrong
+without it:
+
+1. **No evidence is never a pass.** `helperProcesses()` used to return `[]` on any
+   error, and `p7` passed on `survivors.length === 0` — so an unreadable process
+   table looked like "no helper leaked". Enumeration now reports whether it
+   actually succeeded (`tasklist`, with a PowerShell CIM fallback), and `p1`, `p2`
+   and `p7` answer `NOT_VERIFIED` when the read failed.
+2. **Name the real cause.** The editor session published the *last* poll failure.
+   After a helper dies the service forgets the session, so later polls say only
+   "closed or belongs to another renderer" and overwrote the actual reason. The
+   first failure is kept.
+3. **Say which path ran.** If the Mixer has not rendered an insert row, `p1` falls
+   back to the same shipped handler the button calls and records that in
+   `clickedControl` — it never claims a click that did not happen.
+
+### Which plug-in the packaged run uses, and why
+
+The packaged editor run needs one fixture that is simultaneously a **stereo audio
+effect the Mixer accepts**, a **genuine VSTGUI editor**, and a plug-in whose
+controller exposes the parameters its own editor edits. That intersection is empty
+inside the pinned SDK:
+
+| Sample | Stereo audio in/out | VSTGUI editor | Usable here |
+| --- | --- | --- | --- |
+| `again` (AGain) | yes | yes | **No** — declares an event input bus; the host refuses it by design |
+| `dataexchange` | yes | yes | **No** — its editor drives UI-only parameters the controller never exposes, so its callbacks name unknown ParamIDs and the host correctly rejects them |
+| `panner` | mono in | yes | No — the host requires stereo in and out |
+| `utf16name` | yes | returns `nullptr` | No — there is no editor view |
+| `adelay`, `syncdelay`, `remap_paramid`, `again_sampleaccurate` | yes | none on Windows | No — no editor |
+| `hostchecker`, `note_expression_*`, `pitchnames` | n/a | none | No |
+
+So the packaged harness currently uses `dataexchange`, whose editor window opens but
+whose parameter callbacks are rejected (see the table). Reaching `PASS` on `p1`,
+`p2`, `p6` and `p7` therefore does not depend on that fixture being usable for
+`p3`–`p5`, and no host policy was weakened to make `dataexchange` fit. Closing the
+remaining gap needs a stereo-in/stereo-out effect with a real editor and real
+parameters — a commercially redistributable MDA effect with an editor is the
+preferred option, since the MDA bundle is already built and shipped here.
 
 ## Part 2 — Interactive packaged-application checklist (not executed)
 
