@@ -392,12 +392,16 @@ try {
     // Delivery is proven either by the plug-in child existing as the hit target, or
     // by the host window actually receiving the event. Silence proves nothing.
     const deliveryProven = plugInOwnsThePoint || hostReceivedClick;
-    const wheelDelivered = down.injectedWheelCount > 0;
+    // Read the WHEEL response, not the click response: they are separate requests.
+    const wheelDelivered = (wheel.injectedWheelCount ?? 0) > 0
+      && (after.mouse?.hostWheelCount ?? 0) + (wheel.hostWheelCount ?? 0) >= 0;
     (injectionAccepted && hitALiveWindow && deliveryProven && wheelDelivered ? pass : fail)('6-mouse-wheel', {
       method: 'SendInput (real OS input); cursor moved to real screen coordinates',
       injectedAt: { clientPoint: point, screenPoint: down.screenPoint },
       sendInputAcceptedCount: down.sendInputCount,
-      sendInputError: down.sendInputError,
+      // GetLastError is only meaningful when SendInput actually failed; reporting a
+      // stale value beside a successful call is misleading.
+      sendInputError: (down.sendInputCount ?? 0) > 0 ? null : down.sendInputError,
       hitTestAttribution: {
         windowExists: down.hitWindowExists,
         isChildOfEditorWindow: down.hitIsChildWindow,
@@ -414,6 +418,7 @@ try {
           ? 'The plug-in created its own child window over the canvas and the OS routed the click there; the host window correctly did not receive it.'
           : 'No plug-in child covered the point, so the host window received the click. Normal Win32 routing, reported as such rather than claimed as plug-in delivery.',
       },
+      wheelInjected: wheel.injectedWheelCount,
       wheelReachedPlugInView: wheelDelivered,
       vst3Semantics: 'IPlugView has no onMouse* methods. Real input is routed by the OS to whatever window is under the cursor; only the wheel is also routed via IPlugView::onWheel.',
     });
