@@ -30,5 +30,12 @@ const targets = [
   'apex-vst3-host', 'mda-vst3', 'apex-vst3-protocol-fault',
   'apex-vst3-restart-flags-test', 'apex-latency-vst3',
 ];
-if (process.platform === 'win32') targets.push('again');
+if (process.platform === 'win32') {
+  // `again` proves the genuine editor window. `data-exchange` is stereo-in /
+  // stereo-out AND has a genuine VSTGUI editor, so it is the only SDK fixture that
+  // can prove the PACKAGED Mixer-insert path without weakening the host's refusal
+  // of audio effects with event input buses (AGain has one, so it cannot be a
+  // Mixer insert at all). Both are built; neither substitutes for the other.
+  targets.push('again', 'data-exchange');
+}
 run(cmake, ['--build', 'build/native-vst3', '--config', 'Release', '--target', ...targets, '--parallel', '2']);

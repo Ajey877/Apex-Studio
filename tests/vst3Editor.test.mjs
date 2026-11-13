@@ -404,3 +404,12 @@ test('the packaged acceptance environment enables its own hook, not the smoke ho
   assert.ok(preload.includes("APEX_ACCEPTANCE === '1'") === false, 'flags stay in the main process');
   assert.ok(main.includes("APEX_ACCEPTANCE === '1'"), 'only the main process reads the env flag');
 });
+
+test('the packaged acceptance fixture is actually built', () => {
+  const build = readFileSync(path.join(process.cwd(), 'scripts/build-native-vst3.mjs'), 'utf8');
+  // Regression: the harness looked for data-exchange.vst3 but the build never
+  // produced it, so discovery failed on every run.
+  assert.ok(/targets\.push\('again', 'data-exchange'\)/.test(build),
+    'data-exchange is built alongside again on Windows');
+  assert.ok(/platform === 'win32'/.test(build), 'the editor fixtures stay Windows-only');
+});
