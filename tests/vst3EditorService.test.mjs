@@ -386,3 +386,35 @@ test('disposing a helper that never exits is bounded instead of hanging', async 
 });
 
 test.after(() => { rmSync(pluginRoot, { recursive: true, force: true }); });
+
+test('a helper that dies mid-session is reported as a failure, not a missing session', async () => {
+  // Regression for the packaged Windows run: the editor helper exited on its own,
+  // the service dropped the session, and every later poll answered "closed or
+  // belongs to another renderer" -- which describes a foreign owner, not a crash,
+  // so the app never entered its failure/recovery path.
+  await withStubbedClient({
+    helper: () => fakeHelper(request => {
+      if (request.command === 'editorOpen') return { editor: { available: true, classId: CLASS_ID, name: 'DataExchange',
+        title: 'DataExchange', resizable: true, width: 320, height: 200, controllerAvailable: true, parameters } };
+      if (request.command === 'editorPoll') return { editor: { closed: false, events: [], editedParameters: [],
+        activeEditIds: [], dirty: false, eventQueueOverflow: false } };
+      return {};
+    }),
+    service: async (children) => {
+      const service = new Vst3Service('apex-vst3-host.exe', [pluginRoot]);
+      const opened = await service.openEditor(effect, context, 'owner-1');
+      await service.pollEditor(opened.id, 'owner-1');
+      // The helper process goes away; the service learns about it on the next poll.
+      children.at(-1).stderr.write('helper crashed: editorHostInit failed');
+      children.at(-1).emit('exit', 3, null);
+      await new Promise(resolve => setTimeout(resolve, 50));
+      await assert.rejects(() => service.pollEditor(opened.id, 'owner-1'),
+        error => {
+          assert.match(error.message, /helper failed/i, 'the crash is named as a helper failure');
+          assert.doesNotMatch(error.message, /belongs to another renderer/, 'a crash is not disguised as a foreign owner');
+          assert.match(error.message, /previously committed project state is preserved/i, 'the preserved-state contract is stated');
+          return true;
+        });
+    },
+  });
+});

@@ -72,6 +72,8 @@ export class NativeVst3EditorSession {
   };
   private pollTimer: ReturnType<typeof setTimeout> | null = null;
   private pollFailures = 0;
+  /** The first failure explains what actually went wrong; later ones are noise. */
+  private firstPollError = '';
   private finished = false;
   private disposeRequested = false;
   private closeRequested = false;
@@ -138,10 +140,14 @@ export class NativeVst3EditorSession {
     } catch (error) {
       if (this.finished || this.disposeRequested || this.id !== id) return;
       this.pollFailures += 1;
+      // Once the helper dies the service forgets the session, so every later poll
+      // fails with "closed or belongs to another renderer". Keeping the first
+      // error is what makes the failure diagnosable instead of generic.
+      if (!this.firstPollError) this.firstPollError = message(error);
       if (this.pollFailures >= MAX_POLL_FAILURES) {
         this.publish({
           phase: 'failed', status: 'The native editor stopped responding. The saved effect state was not changed.',
-          error: message(error),
+          error: this.firstPollError,
         });
         await this.release(false);
         this.finished = true;

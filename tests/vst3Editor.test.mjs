@@ -480,3 +480,28 @@ test('every non-PASS criterion states why in an annotation', () => {
   assert.ok(/ACCEPTANCE-DETAIL \$\{id\} \$\{status\}/.test(script),
     'FAIL/NOT_VERIFIED reasons are visible without downloading artifacts');
 });
+
+test('a crashed helper is reported by its own reason, not a later generic error', async () => {
+  // Regression: the service drops the dead session on the first failed poll, so
+  // attempts 2 and 3 answer "closed or belongs to another renderer". The panel
+  // published the LAST message, so the real cause ("VST3 helper exited ...") was
+  // reported as a foreign-owner error -- which is why the Windows packaged run
+  // showed only "No native editor session is open" with no root cause.
+  let polls = 0;
+  const { bridge } = fakeBridge({
+    poll: async () => {
+      polls += 1;
+      if (polls === 1) throw new Error('VST3 helper exited (3). helper crashed: editorHostInit failed');
+      throw new Error('VST3 editor session is closed or belongs to another renderer.');
+    },
+  });
+  const { instance, views } = session(bridge, async () => {});
+  await instance.open();
+  // Let the poll loop fail MAX_POLL_FAILURES (3) times at 120ms intervals.
+  await new Promise(resolve => setTimeout(resolve, 900));
+  const failed = views.filter(v => v.phase === 'failed');
+  assert.ok(failed.length > 0, 'the session reaches a failed phase');
+  const error = failed.at(-1).error;
+  assert.match(error, /helper crashed|helper exited/i, 'the crash reason survives to the UI');
+  assert.doesNotMatch(error, /belongs to another renderer/, 'a later generic error does not replace it');
+});

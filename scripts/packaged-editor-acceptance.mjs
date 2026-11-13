@@ -89,17 +89,37 @@ function writeReport(extra = {}) {
 }
 
 /** apex-vst3-host processes the OS currently knows about. */
+// Enumerating helpers must never be able to say "no helpers" when the question
+// could not be asked at all: a silent [] turned "we saw nothing" into a PASS for
+// the no-leak criterion. Every call reports whether the read actually succeeded.
 function helperProcesses() {
-  try {
-    const out = execFileSync('tasklist', ['/FI', 'IMAGENAME eq apex-vst3-host.exe', '/FO', 'CSV', '/NH'],
-      { encoding: 'utf8', windowsHide: true });
-    return out.split(/\r?\n/).map(l => l.trim())
+  const attempts = [];
+  const read = (cmd, args, parse) => {
+    try {
+      const out = execFileSync(cmd, args, { encoding: 'utf8', windowsHide: true, timeout: 20000 });
+      return { ok: true, processes: parse(out) };
+    } catch (error) {
+      attempts.push(`${cmd}: ${error.message.split('\n')[0]}`);
+      return null;
+    }
+  };
+  const fromTasklist = read('tasklist', ['/FI', 'IMAGENAME eq apex-vst3-host.exe', '/FO', 'CSV', '/NH'],
+    out => out.split(/\r?\n/).map(l => l.trim())
       .filter(l => /^"apex-vst3-host\.exe"/i.test(l))
       .map(l => {
         const cells = l.split('","').map(c => c.replace(/^"|"$/g, ''));
         return { image: cells[0], pid: Number(cells[1]) };
-      });
-  } catch { return []; }
+      }));
+  const fromCim = fromTasklist ?? read('powershell.exe',
+    ['-NoProfile', '-NonInteractive', '-Command',
+      "Get-CimInstance Win32_Process -Filter \"Name='apex-vst3-host.exe'\" | Select-Object ProcessId,Name | ConvertTo-Json -Compress"],
+    out => {
+      const parsed = out.trim() ? JSON.parse(out.trim()) : [];
+      return (Array.isArray(parsed) ? parsed : [parsed]).map(e => ({ image: e.Name, pid: Number(e.ProcessId) }));
+    });
+  const result = fromTasklist ?? fromCim;
+  if (!result) return { ok: false, error: attempts, processes: [] };
+  return { ok: true, source: fromTasklist ? 'tasklist' : 'powershell-cim', processes: result.processes };
 }
 
 /** Pids with a visible top-level window (OS truth, not the app's claim). */
@@ -209,7 +229,8 @@ async function run() {
     throw new Error(setup.error);
   }
 
-  const helpersBefore = helperProcesses();
+  const helpersBeforeRead = helperProcesses();
+  const helpersBefore = helpersBeforeRead.processes;
 
   // ---- p1: the Mixer insert opens the plug-in's own editor ----------------
   // Put a VST3 insert on a Mixer track through the app's own project state, then
@@ -244,12 +265,17 @@ async function run() {
   }
   await page.waitForTimeout(4000); // let the helper spawn and the window appear
 
-  const helpersDuring = helperProcesses();
+  const helpersDuringRead = helperProcesses();
+  const helpersDuring = helpersDuringRead.processes;
   const newHelpers = helpersDuring.filter(h => !helpersBefore.some(b => b.pid === h.pid));
   const windows = helperWindows(newHelpers);
   const visibleWindow = windows.find(w => w.handle > 0);
-  record('p1-mixer-opens-editor', newHelpers.length > 0 && visibleWindow ? 'PASS'
+  // No helper read means no evidence either way: never PASS and never claim FAIL.
+  record('p1-mixer-opens-editor', !helpersDuringRead.ok ? 'NOT_VERIFIED'
+    : newHelpers.length > 0 && visibleWindow ? 'PASS'
     : newHelpers.length > 0 ? 'NOT_VERIFIED' : 'FAIL', {
+    helperEnumeration: { before: helpersBeforeRead.ok, during: helpersDuringRead.ok,
+      source: helpersDuringRead.source ?? null, errors: helpersDuringRead.error ?? null },
     clickedControl: triggeredVia,
     acceptanceInsert: { slotId: inserted?.slotId ?? null, slotIndex: inserted?.slotIndex ?? null },
     discoveredThroughPackagedIpc: { name: setup.effect?.name, classId: setup.effect?.classId, pluginCount: setup.pluginCount },
@@ -273,8 +299,9 @@ async function run() {
     return { roundTripMs: Math.round(performance.now() - started), pathCount: paths.length };
   });
   // Still the same live window a moment later (not a one-frame flash).
-  const helpersLater = helperProcesses();
-  const windowStillThere = windows.some(w => helpersLater.some(h => h.pid === w.pid));
+  const helpersLaterRead = helperProcesses();
+  const helpersLater = helpersLaterRead.processes;
+  const windowStillThere = helpersLaterRead.ok && windows.some(w => helpersLater.some(h => h.pid === w.pid));
   record('p2-native-window-responsive', windowStillThere && responsive.roundTripMs < 5000 ? 'PASS' : 'FAIL', {
     windowObservedAgainAfterDelay: windowStillThere,
     packagedIpcRoundTripMs: responsive.roundTripMs,
@@ -342,19 +369,24 @@ async function run() {
 
     // ---- p7: quitting with an editor open leaks no helper -----------------
     stage('p7');
-    const beforeOpen = helperProcesses();
+    const beforeOpenRead = helperProcesses();
+    const beforeOpen = beforeOpenRead.processes;
     // After the reload the insert order is whatever was saved; ask for the track's
     // VST3 insert rather than assuming a position.
     const reopened = await page2.evaluate(async () => globalThis.__apexAcceptance.openEditorOnInsert(1));
     await page2.waitForTimeout(4000);
-    const duringOpen = helperProcesses();
+    const duringOpenRead = helperProcesses();
+    const duringOpen = duringOpenRead.processes;
     const openedForQuit = duringOpen.filter(h => !beforeOpen.some(b => b.pid === h.pid));
     // Quit WITHOUT closing the editor: the app must capture state and reap helpers.
     await page2.evaluate(async () => { await globalThis.__apexAcceptance.quitApp(); });
     await new Promise(r => setTimeout(r, 6000));
-    const afterQuit = helperProcesses();
-    const survivors = afterQuit;
-    record('p7-no-leaked-helpers', survivors.length === 0 ? 'PASS' : 'FAIL', {
+    const afterQuitRead = helperProcesses();
+    const survivors = afterQuitRead.processes;
+    // A leak can only be ruled out if the process table was actually readable.
+    record('p7-no-leaked-helpers', !afterQuitRead.ok ? 'NOT_VERIFIED' : survivors.length === 0 ? 'PASS' : 'FAIL', {
+      helperEnumeration: { before: beforeOpenRead.ok, during: duringOpenRead.ok, after: afterQuitRead.ok,
+        source: afterQuitRead.source ?? null, errors: afterQuitRead.error ?? null },
       reopenedEditor: reopened,
       helpersBeforeOpening: beforeOpen.length,
       helpersWithEditorOpen: duringOpen.length,
