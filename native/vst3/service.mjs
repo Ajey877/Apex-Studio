@@ -278,6 +278,34 @@ export class Vst3Service {
     try { return await operation; }
     finally { session.busy = false; session.busyPromise = null; }
   }
+  /**
+   * ACCEPTANCE ONLY. Drive the open editor window with genuine OS input.
+   *
+   * Used by scripts/packaged-editor-acceptance.mjs to prove that a user action in
+   * the plug-in's own window reaches Apex. The main process refuses to route it
+   * unless the packaged acceptance flag is set (see desktop-vst3.cjs), so it is
+   * unreachable in a normal user session. It does not bypass any product logic: the
+   * helper injects real input and the renderer's normal poll loop observes the
+   * resulting parameter change exactly as it would for a human.
+   */
+  async editorInput(id, action, point, owner = 'local') {
+    const session = this.#editorSession(id, owner);
+    if (session.closed) throw new Error('The native VST3 editor is closed.');
+    if (session.busy) throw new Error('VST3 editor is still servicing another request; retry in a moment.');
+    if (!['move', 'down', 'wheel'].includes(action)) throw new Error('Invalid editor input action');
+    const x = Number(point?.x);
+    const y = Number(point?.y);
+    if (!Number.isInteger(x) || !Number.isInteger(y) || x < 0 || y < 0 || x > 8192 || y > 8192) {
+      throw new Error('Invalid editor input point');
+    }
+    session.busy = true;
+    try {
+      return await session.client.sendEditorMouse(action, { x, y, classId: session.effect.classId });
+    } finally {
+      session.busy = false;
+      session.busyPromise = null;
+    }
+  }
   async closeEditor(id, owner = 'local') {
     const session = this.#editorSession(id, owner);
     if (session.closed) return session.finalStatus;

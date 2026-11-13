@@ -126,6 +126,47 @@ class NativeEditorSession {
   unsigned long lastKeySendError = 0;
   int injectedClickCount = 0;
   int injectedWheelCount = 0;
+  /**
+   * Received-vs-attempted instrumentation.
+   *
+   * Every counter below is incremented by the window procedure or the plug-in
+   * callback that actually observed the event. Nothing here is incremented by the
+   * code that injects input, because an attempted injection is not a received
+   * event: that is exactly the bug this block exists to prevent.
+   */
+  int keyDownMessageCount = 0;      // WM_KEYDOWN seen by our WndProc
+  int keyUpMessageCount = 0;        // WM_KEYUP seen by our WndProc
+  int keyCharMessageCount = 0;      // WM_CHAR seen by our WndProc
+  int viewKeyDownCount = 0;         // IPlugView::onKeyDown actually invoked
+  int viewKeyUpCount = 0;           // IPlugView::onKeyUp actually invoked
+  Steinberg::tresult lastViewKeyDownResult = Steinberg::kResultFalse;
+  Steinberg::tresult lastViewKeyUpResult = Steinberg::kResultFalse;
+  int16_t lastViewKeyDownKeycode = 0;
+  int16_t lastViewKeyUpKeycode = 0;
+  /**
+   * Real WM_DPICHANGED handling, kept strictly separate from the plug-in's own
+   * IPlugViewContentScaleSupport. A scale factor applied through the view interface
+   * is NOT evidence that the window handled a DPI change, and vice versa.
+   */
+  int dpiChangedMessageCount = 0;
+  unsigned int lastDpiChangedNewDpi = 0;
+  unsigned int lastDpiChangedSuggestedWidth = 0;
+  unsigned int lastDpiChangedSuggestedHeight = 0;
+  bool lastDpiChangedAppliedContentScale = false;
+  bool lastDpiChangedScaleSupported = false;
+  bool lastDpiChangedScaleApplied = false;
+  int wheelMessageCount = 0;        // WM_MOUSEWHEEL seen by our WndProc
+  int viewWheelCount = 0;           // IPlugView::onWheel actually invoked (IPlugView path)
+  Steinberg::tresult lastViewWheelResult = Steinberg::kResultFalse;
+  float lastViewWheelDelta = 0.f;
+  /** What the last injected wheel was, so the harness can prove the observed event
+   *  is the one it sent rather than any wheel event. */
+  long long lastInjectedWheelAtMs = 0;
+  int lastInjectedWheelDelta = 0;
+  /** WM_MOUSEWHEEL hit-test attribution: the window the OS routed the message to. */
+  bool lastWheelWasChildTarget = false;
+  bool lastWheelWasOwnWindow = false;
+  std::string lastWheelTargetClass;
   HWND focusSinkWindow = nullptr;
 
   static bool registerFocusSinkClass() {
@@ -648,31 +689,78 @@ class NativeEditorSession {
         }
         break;
       case WM_DPICHANGED: {
+        // Recorded from the message Windows actually sent, so "the window handled a
+        // DPI change" is never inferred from a scale request we made ourselves.
+        dpiChangedMessageCount++;
+        lastDpiChangedNewDpi = static_cast<unsigned int>(HIWORD(wParam));
         const auto* suggested = reinterpret_cast<const RECT*>(lParam);
-        if (suggested) SetWindowPos(hwnd, nullptr, suggested->left, suggested->top,
-          suggested->right - suggested->left, suggested->bottom - suggested->top,
-          SWP_NOZORDER | SWP_NOACTIVATE);
-        try { applyContentScale(HIWORD(wParam)); }
+        if (suggested) {
+          lastDpiChangedSuggestedWidth = static_cast<unsigned int>(suggested->right - suggested->left);
+          lastDpiChangedSuggestedHeight = static_cast<unsigned int>(suggested->bottom - suggested->top);
+          SetWindowPos(hwnd, nullptr, suggested->left, suggested->top,
+            suggested->right - suggested->left, suggested->bottom - suggested->top,
+            SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+        try {
+          // Reuse the same path a plug-in scale request takes, so the two are
+          // comparable, but the DPI counter above is what proves the window itself
+          // was told about a DPI change by Windows.
+          applyContentScale(lastDpiChangedNewDpi);
+          lastDpiChangedAppliedContentScale = lastScaleAttempt.supported;
+          lastDpiChangedScaleSupported = lastScaleAttempt.supported;
+          lastDpiChangedScaleApplied = lastScaleAttempt.applied;
+        }
         catch (const std::exception& error) { lastNativeCloseError = error.what(); }
         return 0;
       }
-      case WM_MOUSEWHEEL:
-        if (view && view->onWheel(static_cast<float>(GET_WHEEL_DELTA_WPARAM(wParam)) / WHEEL_DELTA) == Steinberg::kResultTrue)
-          return 0;
+      case WM_MOUSEWHEEL: {
+        // Recorded by the window procedure that RECEIVED it -- never by the code
+        // that injected it. The delta and target are kept so the harness can prove
+        // the observed event is the one it sent.
+        wheelMessageCount++;
+        lastWheelWasOwnWindow = true;
+        lastWheelWasChildTarget = false;
+        lastWheelTargetClass = windowClass(hwnd);
+        if (view) {
+          const float delta = static_cast<float>(GET_WHEEL_DELTA_WPARAM(wParam)) / WHEEL_DELTA;
+          viewWheelCount++;
+          lastViewWheelResult = view->onWheel(delta);
+          lastViewWheelDelta = delta;
+          if (lastViewWheelResult == Steinberg::kResultTrue) return 0;
+        }
         break;
+      }
       case WM_KEYDOWN:
       case WM_SYSKEYDOWN:
-        if (view && view->onKeyDown(0, mapVirtualKey(wParam), keyModifiers()) == Steinberg::kResultTrue)
-          return 0;
+        keyDownMessageCount++;
+        if (view) {
+          const int16_t code = mapVirtualKey(wParam);
+          viewKeyDownCount++;
+          lastViewKeyDownKeycode = code;
+          lastViewKeyDownResult = view->onKeyDown(0, code, keyModifiers());
+          if (lastViewKeyDownResult == Steinberg::kResultTrue) return 0;
+        }
         break;
       case WM_KEYUP:
       case WM_SYSKEYUP:
-        if (view && view->onKeyUp(0, mapVirtualKey(wParam), keyModifiers()) == Steinberg::kResultTrue)
-          return 0;
+        keyUpMessageCount++;
+        if (view) {
+          const int16_t code = mapVirtualKey(wParam);
+          viewKeyUpCount++;
+          lastViewKeyUpKeycode = code;
+          lastViewKeyUpResult = view->onKeyUp(0, code, keyModifiers());
+          if (lastViewKeyUpResult == Steinberg::kResultTrue) return 0;
+        }
         break;
       case WM_CHAR:
-        if (view && view->onKeyDown(static_cast<Steinberg::char16>(wParam), 0, keyModifiers()) == Steinberg::kResultTrue)
-          return 0;
+        keyCharMessageCount++;
+        if (view) {
+          const auto code = static_cast<Steinberg::char16>(wParam);
+          viewKeyDownCount++;
+          lastViewKeyDownKeycode = static_cast<int16_t>(code);
+          lastViewKeyDownResult = view->onKeyDown(code, 0, keyModifiers());
+          if (lastViewKeyDownResult == Steinberg::kResultTrue) return 0;
+        }
         break;
       case WM_DESTROY:
         // This child process owns one editor window, but it must continue
@@ -886,7 +974,11 @@ public:
     else if (isWheel) {
       input.mi.dwFlags = MOUSEEVENTF_WHEEL;
       input.mi.mouseData = WHEEL_DELTA;
+      // injectedWheelCount is the ATTEMPT tally and is deliberately kept apart
+      // from wheelMessageCount/viewWheelCount, which only a real receiver raises.
       injectedWheelCount++;
+      lastInjectedWheelDelta = WHEEL_DELTA;
+      lastInjectedWheelAtMs = static_cast<long long>(GetTickCount64());
     } else {
       input.mi.dwFlags = MOUSEEVENTF_LEFTDOWN;
       injectedClickCount++;
@@ -901,6 +993,10 @@ public:
     mouseDownCount = 0;
     mouseMoveCount = 0;
     wheelCount = 0;
+    wheelMessageCount = 0;
+    viewWheelCount = 0;
+    lastViewWheelResult = Steinberg::kResultFalse;
+    lastViewWheelDelta = 0.f;
     result["sendInputCount"] = static_cast<unsigned long>(SendInput(1, &input, sizeof(INPUT)));
     result["sendInputError"] = static_cast<unsigned long>(GetLastError());
     if (!isMove && !isWheel) {
@@ -923,6 +1019,17 @@ public:
     result["hostWheelCount"] = wheelCount;
     result["injectedClickCount"] = injectedClickCount;
     result["injectedWheelCount"] = injectedWheelCount;
+    // Received truth, separated by path: the WM_MOUSEWHEEL that our window
+    // procedure observed, and the IPlugView::onWheel call it caused.
+    result["wheelMessageCount"] = wheelMessageCount;
+    result["viewWheelCount"] = viewWheelCount;
+    result["viewWheelResult"] = resultName(lastViewWheelResult);
+    result["viewWheelDelta"] = lastViewWheelDelta;
+    result["wheelWasChildTarget"] = lastWheelWasChildTarget;
+    result["wheelWasOwnWindowTarget"] = lastWheelWasOwnWindow;
+    result["wheelTargetClass"] = lastWheelTargetClass;
+    result["lastInjectedWheelAtMs"] = lastInjectedWheelAtMs;
+    result["lastInjectedWheelDelta"] = lastInjectedWheelDelta;
     return result;
   }
 
@@ -937,10 +1044,34 @@ public:
     input.ki.wVk = vk;
     input.ki.wScan = static_cast<WORD>(MapVirtualKeyW(vk, MAPVK_VK_TO_VSC));
     input.ki.dwFlags = keyDown ? 0 : KEYEVENTF_KEYUP;
+    keyDownMessageCount = 0;
+    keyUpMessageCount = 0;
+    keyCharMessageCount = 0;
+    viewKeyDownCount = 0;
+    viewKeyUpCount = 0;
     const auto sent = static_cast<unsigned long>(SendInput(1, &input, sizeof(INPUT)));
-    lastKeySendError = static_cast<unsigned long>(GetLastError());
+    // Only meaningful when nothing was accepted; a stale GetLastError beside a
+    // successful SendInput is exactly the kind of false signal to avoid.
+    lastKeySendError = sent > 0 ? 0 : static_cast<unsigned long>(GetLastError());
     pumpMessages();
     return sent;
+  }
+
+  /** What the window procedure and the plug-in view observed for one key injection. */
+  json keyObservation() const {
+    json result = json::object();
+    result["keyDownMessageCount"] = keyDownMessageCount;
+    result["keyUpMessageCount"] = keyUpMessageCount;
+    result["keyCharMessageCount"] = keyCharMessageCount;
+    result["viewKeyDownCount"] = viewKeyDownCount;
+    result["viewKeyUpCount"] = viewKeyUpCount;
+    result["viewKeyDownResult"] = resultName(lastViewKeyDownResult);
+    result["viewKeyUpResult"] = resultName(lastViewKeyUpResult);
+    result["viewKeyDownKeycode"] = lastViewKeyDownKeycode;
+    result["viewKeyUpKeycode"] = lastViewKeyUpKeycode;
+    result["sendInputError"] = static_cast<unsigned long>(lastKeySendError);
+    result["windowOwnsFocus"] = window && GetFocus() == window;
+    return result;
   }
 
   /** VST3 spellings of tresult values, so evidence is readable and unambiguous. */
@@ -1189,6 +1320,28 @@ public:
         {"lastTargetThreadId", lastMouseTargetTid},
         {"lastTargetWasChild", lastMouseTargetWasChild},
         {"lastTargetWasOwnWindow", lastMouseTargetWasOwnWindow},
+      };
+      result["keyObservation"] = keyObservation();
+      result["dpiWindowObservation"] = {
+        {"dpiChangedMessageCount", dpiChangedMessageCount},
+        {"lastNewDpi", lastDpiChangedNewDpi},
+        {"suggestedWidth", lastDpiChangedSuggestedWidth},
+        {"suggestedHeight", lastDpiChangedSuggestedHeight},
+        {"appliedContentScaleFromDpiChange", lastDpiChangedAppliedContentScale},
+        {"scaleInterfaceSupported", lastDpiChangedScaleSupported},
+        {"scaleApplied", lastDpiChangedScaleApplied},
+        {"windowDpi", dpiForWindow(window)},
+        {"note", "Raised only by a real WM_DPICHANGED. Independent of IPlugViewContentScaleSupport."},
+      };
+      result["wheelObservation"] = {
+        {"wheelMessageCount", wheelMessageCount},
+        {"viewWheelCount", viewWheelCount},
+        {"viewWheelResult", resultName(lastViewWheelResult)},
+        {"viewWheelDelta", lastViewWheelDelta},
+        {"targetWasOwnWindow", lastWheelWasOwnWindow},
+        {"targetClass", lastWheelTargetClass},
+        {"lastInjectedAtMs", lastInjectedWheelAtMs},
+        {"lastInjectedDelta", lastInjectedWheelDelta},
       };
       result["threadId"] = static_cast<unsigned long>(GetCurrentThreadId());
       result["processId"] = static_cast<unsigned long>(GetCurrentProcessId());

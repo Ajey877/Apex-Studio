@@ -823,9 +823,15 @@ int main() {
           // Real keyboard input: focus the editor window, then inject the key with
           // SendInput so Windows routes WM_KEYDOWN to the focused window.
           const auto vk = static_cast<WORD>(request.at("vk").get<unsigned>());
-          result["vk"] = vk;
-          result["delivered"] = editor->sendKeyForTest(vk, action == "keyDown");
+          const unsigned long accepted = editor->sendKeyForTest(vk, action == "keyDown");
           editor->pumpMessages();
+          result["vk"] = vk;
+          result["key"] = action;
+          // accepted = how many events SendInput consumed (the ATTEMPT). The
+          // observation below is what the window procedure and the plug-in view
+          // actually saw (the RECEIPT). They are reported separately on purpose.
+          result["sendInputAccepted"] = accepted;
+          result["observation"] = editor->keyObservation();
         } else if (action == "mouseMove" || action == "mouseDown" || action == "mouseWheel") {
           const auto kind = action == "mouseMove" ? "move" : action == "mouseDown" ? "down" : "wheel";
           result = editor->deliverMouse(kind, request.value("x", 0), request.value("y", 0));

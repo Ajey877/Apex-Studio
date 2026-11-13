@@ -293,6 +293,17 @@ try {
     // accepted, and the plug-in resized itself in response. 96 DPI alone is never
     // enough, and the host's own variable is never the evidence.
     const ok = supported && anyApplied && anyNonDefaultApplied && anyResizeObserved;
+
+    // Three different things were previously conflated. They are now reported
+    // separately, and only the first is what this criterion proves:
+    //   (1) IPlugViewContentScaleSupport: the plug-in accepts a scale factor we
+    //       pass it through the VST3 interface. This is what the attempts above test.
+    //   (2) WM_DPICHANGED: Windows told the editor window its DPI changed. Proven
+    //       here only if the counter is non-zero, which needs a real DPI change.
+    //   (3) Interactive display-scale change at 125%/150%: needs a user and a real
+    //       display. Never claimed from this runner.
+    const dpiWindow = (await diagnostics()).dpiWindowObservation ?? {};
+    const dpiChangedDelivered = (dpiWindow.dpiChangedMessageCount ?? 0) > 0;
     (ok ? pass : fail)('3-dpi', {
       desktopDpi: Number(base.dpi ?? 0),
       runnerDesktopIsHighDpi: Number(base.dpi ?? 0) > 96,
@@ -302,6 +313,26 @@ try {
       returnedValues,
       anyNonDefaultFactorApplied: anyNonDefaultApplied,
       anyPlugInResizeObserved: anyResizeObserved,
+      // The distinction Task 5 requires, stated explicitly in the evidence.
+      contentScaleSupport: {
+        proven: ok,
+        meaning: 'The plug-in implements IPlugViewContentScaleSupport and accepted a non-default factor, resizing itself in response.',
+      },
+      wmDpiChanged: {
+        proven: dpiChangedDelivered,
+        messagesObserved: dpiWindow.dpiChangedMessageCount ?? 0,
+        lastNewDpi: dpiWindow.lastNewDpi ?? null,
+        suggestedSize: dpiWindow.suggestedWidth
+          ? { width: dpiWindow.suggestedWidth, height: dpiWindow.suggestedHeight } : null,
+        scaleAppliedFromDpiChange: dpiWindow.scaleApplied ?? null,
+        meaning: dpiChangedDelivered
+          ? 'The editor window received a real WM_DPICHANGED and applied the resulting scale.'
+          : 'NOT_VERIFIED: the runner desktop never sends WM_DPICHANGED, so window-level DPI handling was not exercised. A scale factor applied through IPlugViewContentScaleSupport is NOT evidence of it.',
+      },
+      interactiveDisplayScale125and150: {
+        status: 'NOT_VERIFIED',
+        reason: 'The CI runner has no interactive desktop and no 125%/150% display configuration to change. Requirements for it are recorded in docs/VST3-EDITOR-ACCEPTANCE.md.',
+      },
       note: supported
         ? 'IPlugViewContentScaleSupport is present. PASS requires an applied non-default factor AND the plug-in resizing itself; 96 DPI is not accepted as evidence.'
         : 'The view does not implement IPlugViewContentScaleSupport, so it cannot scale. That is a NOT_VERIFIED/FAIL for high-DPI, never a pass at 96 DPI.',
@@ -349,32 +380,91 @@ try {
   });
 
   await criterion('5-keyboard', async () => {
-    // ---- Criterion 5: keyboard forwarding -----------------------------------
+    // ---- Criterion 5: keyboard forwarding, proven by receipt ----------------
+    // The previous version queued WM_KEYDOWN/WM_KEYUP straight at the window and
+    // passed on "the view is still attached". That proves nothing: an attached
+    // window is not evidence that a key ever arrived, and a hand-posted message is
+    // not real OS input.
+    //
+    // This version uses SendInput (the OS input path), then requires ALL of:
+    //   1. SendInput accepted both events (report the count, not a boolean);
+    //   2. our own window procedure observed WM_KEYDOWN and WM_KEYUP;
+    //   3. IPlugView::onKeyDown and IPlugView::onKeyUp were actually invoked;
+    //   4. the keycode reaching the view is the key we sent;
+    //   5. the plug-in's real tresult for each call is recorded.
+    // Counting our own injection is never accepted as receipt: every counter below
+    // is raised by the receiver.
     stage('keyboard');
     const keyBefore = await diagnostics();
-    await client.editorTestAction('keyDown', { vk: 0x09, classId: again.classId }); // VK_TAB
-    await client.editorTestAction('keyUp', { vk: 0x09, classId: again.classId });
+    const keyDown = await client.editorTestAction('keyDown', { vk: 0x09, classId: again.classId }); // VK_TAB
+    const keyUp = await client.editorTestAction('keyUp', { vk: 0x09, classId: again.classId });
     const keyAfter = await diagnostics();
-    // The view must receive the key without the host crashing or losing the view.
-    (keyAfter.attached === true && keyAfter.closed === false ? pass : fail)('5-keyboard', {
-      sent: ['WM_KEYDOWN VK_TAB', 'WM_KEYUP VK_TAB'],
-      stillAttached: keyAfter.attached,
-      focusOwnedByWindow: keyAfter.ownsFocus,
-      forwardedThrough: 'WM_KEYDOWN -> IPlugView::onKeyDown(mapVirtualKey(vk), modifiers)',
-      before: { ownsFocus: keyBefore.ownsFocus },
-      note: 'Key events are delivered to the plug-in view; the host does not intercept them.',
+
+    const downObs = keyDown?.observation ?? {};
+    const upObs = keyUp?.observation ?? {};
+    const sendInputAcceptedDown = keyDown?.sendInputAccepted ?? 0;
+    const sendInputAcceptedUp = keyUp?.sendInputAccepted ?? 0;
+    // Receipt, read from the receiver.
+    const windowSawKeyDown = (downObs.keyDownMessageCount ?? 0) > 0;
+    const windowSawKeyUp = (upObs.keyUpMessageCount ?? 0) > 0;
+    const viewGotKeyDown = (downObs.viewKeyDownCount ?? 0) > 0;
+    const viewGotKeyUp = (upObs.viewKeyUpCount ?? 0) > 0;
+    // Steinberg::Vst::KEY_TAB -- the key actually delivered, not merely "a key".
+    const KEY_TAB = 3;
+    const rightKeyDown = downObs.viewKeyDownKeycode === KEY_TAB;
+    const rightKeyUp = upObs.viewKeyUpKeycode === KEY_TAB;
+    const attachedThroughout = keyAfter.attached === true && keyAfter.closed === false;
+
+    const keyboardProven = sendInputAcceptedDown === 1 && sendInputAcceptedUp === 1 &&
+      windowSawKeyDown && windowSawKeyUp && viewGotKeyDown && viewGotKeyUp &&
+      rightKeyDown && rightKeyUp && attachedThroughout;
+
+    (keyboardProven ? pass : fail)('5-keyboard', {
+      method: 'SendInput keyboard events with the editor window focused (real OS input path)',
+      sent: ['VK_TAB down', 'VK_TAB up (KEYEVENTF_KEYUP)'],
+      sendInputAccepted: { down: sendInputAcceptedDown, up: sendInputAcceptedUp },
+      sendInputAcceptedMeans: 'how many events the OS accepted from SendInput (the ATTEMPT); 1 is required for each',
+      // Receipt: raised by the WndProc and by the plug-in view, never by injection.
+      receivedByWindowProc: {
+        keyDownMessageCount: downObs.keyDownMessageCount ?? 0,
+        keyUpMessageCount: upObs.keyUpMessageCount ?? 0,
+        sawWM_KEYDOWN: windowSawKeyDown,
+        sawWM_KEYUP: windowSawKeyUp,
+      },
+      receivedByPlugInView: {
+        onKeyDownInvocations: downObs.viewKeyDownCount ?? 0,
+        onKeyUpInvocations: upObs.viewKeyUpCount ?? 0,
+        onKeyDownKeycode: downObs.viewKeyDownKeycode,
+        onKeyUpKeycode: upObs.viewKeyUpKeycode,
+        expectedKeycode: KEY_TAB,
+        expectedKeycodeName: 'KEY_TAB',
+        onKeyDownReturned: downObs.viewKeyDownResult,
+        onKeyUpReturned: upObs.viewKeyUpResult,
+        note: 'A tresult of kResultFalse is contract-compliant and is recorded, not gated on. The pass condition is that the callback was invoked with the right key.',
+      },
+      windowOwnsFocus: downObs.windowOwnsFocus === true,
+      stillAttached: attachedThroughout,
+      forwardedThrough: 'WM_KEYDOWN/WM_KEYUP -> IPlugView::onKeyDown/onKeyUp(mapVirtualKey(vk), modifiers)',
     });
   });
 
   await criterion('6-mouse-wheel', async () => {
-    // ---- Criterion 6: genuine mouse delivery -------------------------------
-    // Real OS input via SendInput at real screen coordinates, so Windows performs
-    // the hit-test and routes the message. Two outcomes are both healthy, and the
-    // evidence must say which happened rather than pretending only one is correct:
-    //   (a) the plug-in owns a child window under the cursor -> it receives the
-    //       click. The host window must NOT see it.
-    //   (b) no plug-in child covers the point -> the host window receives it, which
-    //       is normal Win32 behaviour and is reported as such.
+    // ---- Criterion 6: mouse and wheel delivery, proven by receipt -----------
+    // Two defects are fixed here:
+    //   (a) the host incremented injectedWheelCount BEFORE calling SendInput, so
+    //       the "received" number was really an attempt counter -- the harness was
+    //       reading its own injection back as if the plug-in had seen it;
+    //   (b) the pass condition contained `>= 0`, which is true of every possible
+    //       count and therefore discriminated nothing.
+    //
+    // The wheel is now proven through whichever of the two paths Windows actually
+    // used, and the evidence says which:
+    //   PATH A -- the host window's WndProc observed WM_MOUSEWHEEL, counted it, and
+    //             IPlugView::onWheel was invoked with the delta we sent;
+    //   PATH B -- a plug-in child window owned the point, so the OS delivered the
+    //             wheel to the plug-in directly and the host's onWheel path was
+    //             correctly NOT used.
+    // A harness-injected event is never counted as received.
     const before = await diagnostics();
     const point = {
       x: Math.max(8, Math.round((before.clientWidth ?? 40) / 2)),
@@ -385,42 +475,80 @@ try {
     const wheel = await client.sendEditorMouse('wheel', { ...point, classId: again.classId });
     const after = wheel.diagnostics;
 
-    const injectionAccepted = (down.sendInputCount ?? 0) > 0;
+    // ---- the click: proof of hit-testing and routing, not of a pass --------
+    const clickSendInputAccepted = down.sendInputCount ?? 0;
     const hitALiveWindow = down.hitWindowExists === true;
     const plugInOwnsThePoint = down.hitIsChildWindow === true;
-    const hostReceivedClick = down.hostMouseDownCount > 0;
-    // Delivery is proven either by the plug-in child existing as the hit target, or
-    // by the host window actually receiving the event. Silence proves nothing.
-    const deliveryProven = plugInOwnsThePoint || hostReceivedClick;
-    // Read the WHEEL response, not the click response: they are separate requests.
-    const wheelDelivered = (wheel.injectedWheelCount ?? 0) > 0
-      && (after.mouse?.hostWheelCount ?? 0) + (wheel.hostWheelCount ?? 0) >= 0;
-    (injectionAccepted && hitALiveWindow && deliveryProven && wheelDelivered ? pass : fail)('6-mouse-wheel', {
-      method: 'SendInput (real OS input); cursor moved to real screen coordinates',
+    const hostReceivedClick = (wheel.diagnostics?.mouse?.hostMouseDownCount ?? 0) > 0 ||
+      (down.hostMouseDownCount ?? 0) > 0;
+    // Exactly one of these must be true. Both false means nothing observed the
+    // click; both true would mean the same event was counted twice.
+    const clickRoutedSomewhere = plugInOwnsThePoint !== hostReceivedClick;
+    const clickProven = clickSendInputAccepted === 1 && hitALiveWindow && clickRoutedSomewhere;
+
+    // ---- the wheel: the part that was previously unfalsifiable -------------
+    const wheelSendInputAccepted = wheel.sendInputCount ?? 0;
+    const wheelMessageCount = wheel.wheelMessageCount ?? 0;   // WndProc receipt
+    const viewWheelCount = wheel.viewWheelCount ?? 0;         // IPlugView::onWheel receipt
+    const viewWheelResult = wheel.viewWheelResult ?? null;
+    const viewWheelDelta = wheel.viewWheelDelta ?? 0;
+    const injectedDelta = wheel.lastInjectedWheelDelta ?? 0;
+    const wheelArrivedAtHostWindow = wheelMessageCount > 0;
+    const wheelReachedView = viewWheelCount > 0;
+    // The observed delta must be the one this harness sent, so a stray or earlier
+    // wheel event cannot be mistaken for ours.
+    const deltaMatchesTheSentEvent = wheelReachedView && injectedDelta !== 0 &&
+      Math.abs(viewWheelDelta - injectedDelta / 120) < 1e-6;
+
+    const pathA = wheelArrivedAtHostWindow && wheelReachedView && deltaMatchesTheSentEvent;
+    // Path B is only creditable when the hit-test really did land on a plug-in
+    // child window; otherwise "the host did not see it" proves nothing.
+    const pathB = !wheelArrivedAtHostWindow && plugInOwnsThePoint && wheelSendInputAccepted === 1;
+    const wheelProven = pathA || pathB;
+
+    const evidence = {
+      method: 'SendInput (real OS input) with the cursor moved to real screen coordinates; Windows performs the hit-test and routing',
       injectedAt: { clientPoint: point, screenPoint: down.screenPoint },
-      sendInputAcceptedCount: down.sendInputCount,
-      // GetLastError is only meaningful when SendInput actually failed; reporting a
-      // stale value beside a successful call is misleading.
-      sendInputError: (down.sendInputCount ?? 0) > 0 ? null : down.sendInputError,
-      hitTestAttribution: {
-        windowExists: down.hitWindowExists,
-        isChildOfEditorWindow: down.hitIsChildWindow,
-        isEditorWindowItself: down.hitIsOwnWindow,
-        windowClass: down.hitWindowClass,
-        processId: down.hitProcessId,
-        isForeignProcess: down.hitIsForeignProcess,
-      },
-      childWindows: after.childWindows ?? [],
-      delivery: {
+      click: {
+        sendInputAcceptedCount: clickSendInputAccepted,
+        sendInputError: clickSendInputAccepted > 0 ? null : down.sendInputError,
+        hitWindowExists: down.hitWindowExists,
+        hitWindowClass: down.hitWindowClass,
+        hitIsChildOfEditorWindow: down.hitIsChildWindow,
+        hitIsEditorWindowItself: down.hitIsOwnWindow,
+        hitProcessIsPluginBuffer: down.hitIsForeignProcess === false ? 'same process as the editor helper' : 'foreign',
         plugInChildOwnsThePoint: plugInOwnsThePoint,
         hostWindowReceivedTheClick: hostReceivedClick,
-        interpretation: plugInOwnsThePoint
-          ? 'The plug-in created its own child window over the canvas and the OS routed the click there; the host window correctly did not receive it.'
-          : 'No plug-in child covered the point, so the host window received the click. Normal Win32 routing, reported as such rather than claimed as plug-in delivery.',
+        exactlyOneRecipient: clickRoutedSomewhere,
       },
-      wheelInjected: wheel.injectedWheelCount,
-      wheelReachedPlugInView: wheelDelivered,
-      vst3Semantics: 'IPlugView has no onMouse* methods. Real input is routed by the OS to whatever window is under the cursor; only the wheel is also routed via IPlugView::onWheel.',
+      wheel: {
+        sendInputAcceptedCount: wheelSendInputAccepted,
+        injectedDelta: injectedDelta,
+        // Receipt, from the receiver only.
+        wndProcSawWM_MOUSEWHEEL: wheelMessageCount > 0,
+        wmMouseWheelCount: wheelMessageCount,
+        onWheelInvocations: viewWheelCount,
+        onWheelReceivedDelta: viewWheelDelta,
+        onWheelReturned: viewWheelResult,
+        observedEventIsTheInjectedOne: deltaMatchesTheSentEvent,
+        deliveredVia: pathA ? 'host WndProc -> IPlugView::onWheel'
+          : pathB ? 'OS delivered directly to the plug-in child window that owns the point'
+          : 'not observed',
+      },
+      interpretation: pathA
+        ? 'The host window received WM_MOUSEWHEEL and forwarded it to IPlugView::onWheel with the injected delta.'
+        : pathB
+          ? 'The plug-in created its own child window over the canvas, so the OS delivered the real wheel event to the plug-in directly and the host correctly did not see it.'
+          : 'Neither path observed the injected wheel, so delivery is unproven.',
+      vst3Semantics: 'IPlugView has no onMouse* methods, so a click is routed by the OS to whichever window is under the cursor. The wheel is additionally routable through IPlugView::onWheel when the host window receives it.',
+      childWindows: after.childWindows ?? [],
+    };
+
+    (clickProven && wheelProven ? pass : fail)('6-mouse-wheel', {
+      ...evidence,
+      clickProven,
+      wheelProven,
+      deliveredViaPath: pathA ? 'A' : pathB ? 'B' : null,
     });
   });
 

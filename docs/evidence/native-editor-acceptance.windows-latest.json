@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "note": "Snapshot of build/native-evidence/native-editor-acceptance.json produced by scripts/native-editor-windows-acceptance.mjs on a GitHub Actions windows-latest runner. Checked in because CI artifacts and job logs are not always retrievable. The criterion evidence recorded here is the observed Windows state; it is not a mock and not a desktop playback claim.",
+  "note": "Snapshot of build/native-evidence/native-editor-acceptance.json produced by scripts/native-editor-windows-acceptance.mjs on a GitHub Actions windows-latest runner. Checked in because CI artifacts and job logs are not always retrievable. The criterion evidence recorded here is the observed Windows state; it is not a mock and not a desktop playback claim.\n\nSUPERSEDED CHECK REQUIRED: the criteria in this snapshot were produced by the harness revision in which keyboard delivery was gated on window attachment and wheel delivery was gated on 'injectedWheelCount > 0 && hostWheelCount >= 0'. Both conditions were shown to be non-discriminating and have been replaced (see 'Proof rules' below). This snapshot must be regenerated from a windows-latest run of the current harness before p5/p6 are read as evidence; until then treat criteria 5 and 6 here as historical, not as proof.",
   "source": {
     "workflow": "Native VST3 Validation / Native DSP (windows-latest)",
     "run": 43187998468,
@@ -32,8 +32,14 @@
     },
     "window": {
       "windowStyle": "0xcf0000",
-      "outerSize": { "width": 366, "height": 159 },
-      "clientSize": { "width": 350, "height": 120 },
+      "outerSize": {
+        "width": 366,
+        "height": 159
+      },
+      "clientSize": {
+        "width": 350,
+        "height": 120
+      },
       "hasRealWindowFrame": true,
       "title": "Apex Studio VST3 Editor - AGain VST3",
       "visible": true,
@@ -42,20 +48,76 @@
     }
   },
   "criteria": [
-    { "id": "1-hwnd", "status": "PASS", "criterion": "Native HWND creation and visibility" },
-    { "id": "2-editor-view", "status": "PASS", "criterion": "Genuine VST3 editor view creation" },
-    { "id": "3-dpi", "status": "PASS", "criterion": "Correct DPI scaling" },
-    { "id": "4-resize-constraint", "status": "PASS", "criterion": "Editor resizing and checkSizeConstraint" },
-    { "id": "4b-plugin-initiated-resize", "status": "PASS", "criterion": "Plug-in-initiated resize via IPlugFrame::resizeView" },
-    { "id": "5-keyboard", "status": "PASS", "criterion": "Keyboard event forwarding" },
-    { "id": "6-mouse-wheel", "status": "PASS", "criterion": "Mouse and wheel forwarding" },
-    { "id": "7-focus", "status": "PASS", "criterion": "Focus acquisition and loss" },
-    { "id": "8-state-before-destroy", "status": "PASS", "criterion": "Editor state capture before window destruction" },
-    { "id": "9-native-close", "status": "PASS", "criterion": "Correct native window close behavior" },
-    { "id": "10-repeat-cycles", "status": "PASS", "criterion": "Repeated editor open/close cycles" },
-    { "id": "11-failure-recovery", "status": "PASS", "criterion": "Editor failure and recovery" },
-    { "id": "12-audio-unaffected", "status": "PASS", "criterion": "Audio processing unaffected by editor lifecycle failures" },
-    { "id": "12b-audio-mid-editor", "status": "PASS", "criterion": "Real audio continues to be processed while a native editor window is open" },
+    {
+      "id": "1-hwnd",
+      "status": "PASS",
+      "criterion": "Native HWND creation and visibility"
+    },
+    {
+      "id": "2-editor-view",
+      "status": "PASS",
+      "criterion": "Genuine VST3 editor view creation"
+    },
+    {
+      "id": "3-dpi",
+      "status": "PASS",
+      "criterion": "Correct DPI scaling"
+    },
+    {
+      "id": "4-resize-constraint",
+      "status": "PASS",
+      "criterion": "Editor resizing and checkSizeConstraint"
+    },
+    {
+      "id": "4b-plugin-initiated-resize",
+      "status": "PASS",
+      "criterion": "Plug-in-initiated resize via IPlugFrame::resizeView"
+    },
+    {
+      "id": "5-keyboard",
+      "status": "PASS",
+      "criterion": "Keyboard event forwarding"
+    },
+    {
+      "id": "6-mouse-wheel",
+      "status": "PASS",
+      "criterion": "Mouse and wheel forwarding"
+    },
+    {
+      "id": "7-focus",
+      "status": "PASS",
+      "criterion": "Focus acquisition and loss"
+    },
+    {
+      "id": "8-state-before-destroy",
+      "status": "PASS",
+      "criterion": "Editor state capture before window destruction"
+    },
+    {
+      "id": "9-native-close",
+      "status": "PASS",
+      "criterion": "Correct native window close behavior"
+    },
+    {
+      "id": "10-repeat-cycles",
+      "status": "PASS",
+      "criterion": "Repeated editor open/close cycles"
+    },
+    {
+      "id": "11-failure-recovery",
+      "status": "PASS",
+      "criterion": "Editor failure and recovery"
+    },
+    {
+      "id": "12-audio-unaffected",
+      "status": "PASS",
+      "criterion": "Audio processing unaffected by editor lifecycle failures"
+    },
+    {
+      "id": "12b-audio-mid-editor",
+      "status": "PASS",
+      "criterion": "Real audio continues to be processed while a native editor window is open"
+    },
     {
       "id": "12c-again-audio-policy",
       "status": "NOT_VERIFIED",
@@ -77,5 +139,48 @@
     "notVerified": 2,
     "allVerifiedPassing": false,
     "comment": "Every criterion in the twelve-item assignment passed on real Windows. The two NOT_VERIFIED rows are the packaged-application claim and the AGain audio-path policy row, neither of which was observed and neither of which is reported as passing."
+  },
+  "proofRules": {
+    "attemptIsNotReceipt": "sendInputAccepted / injectedWheelCount only record that injection was requested. Evidence is only counted when raised by the receiver: the editor WndProc, or IPlugView::onKeyDown/onKeyUp/onWheel.",
+    "eventMustBeOurs": "The observed keycode and wheel delta are compared against what the harness actually sent.",
+    "attachmentIsNotDelivery": "A visible, focused window is not evidence that a keystroke or wheel event reached the plug-in.",
+    "noVacuousGates": "No criterion may be gated on a comparison that is true of every possible value. The previous wheel check used hostWheelCount >= 0, which could never fail.",
+    "unobservableIsNotFailed": "A criterion that could not be observed is NOT_VERIFIED, never PASS and never FAIL."
+  },
+  "acceptanceFixture": {
+    "name": "ApexAcceptanceGain",
+    "provenance": "Original Apex Studio code written for this repository (native/vst3/acceptance-fixture-*.cpp/.hpp and resources/acceptancegain.uidesc). Not copied from a Steinberg sample build and not part of any release artifact.",
+    "why": "No pinned-SDK sample is simultaneously a policy-compliant stereo effect, a genuine VSTGUI editor, and one whose controller exposes the parameters its own editor edits. Rather than weaken a host policy, this fixture was written to satisfy all three.",
+    "processorUid": "41504558-41434741-494E0001-00000001",
+    "controllerUid": "41504558-41434741-494E0001-00000002",
+    "busLayout": "stereo in, stereo out; no event input bus and no event output bus",
+    "parameter": {
+      "name": "Gain",
+      "paramId": 0,
+      "units": "dB",
+      "defaultNormalized": 0.5,
+      "law": "0.0 -> -24 dB, 0.5 -> 0 dB (unity), 1.0 -> +12 dB"
+    },
+    "editor": {
+      "uidesc": "acceptancegain.uidesc",
+      "size": "320x120",
+      "controls": "CSlider and CTextEdit, both control-tag \"Gain\" (ParamID 0)"
+    },
+    "testTarget": "apex-acceptance-vst3-test",
+    "testResult": {
+      "total": 39,
+      "pass": 39,
+      "fail": 0,
+      "platform": "linux x64 (local)",
+      "command": "./build/native-vst3/bin/apex-acceptance-vst3-test",
+      "exitCode": 0,
+      "note": "Proves the fixture itself before it is used to judge the host: measured gain law, stereo buses, absence of event buses, in-block parameter application, state round-trip and truncation rejection, and controller exposure of ParamID 0."
+    }
+  },
+  "dpiDistinction": {
+    "contentScaleSupport": "IPlugViewContentScaleSupport: a non-default factor accepted through setContentScaleFactor, with the plug-in resizing itself. Exercised by criterion 3.",
+    "wmDpiChanged": "Real WM_DPICHANGED, counted only when Windows sends it (dpiChangedMessageCount). NOT_VERIFIED on an unattended runner, which never changes DPI.",
+    "interactiveDisplayScale125and150": "NOT_VERIFIED. Requires a human changing display scale on a real display. Never derived from (a) or (b).",
+    "multiMonitorMigration": "NOT_VERIFIED. Requires interactive desktop drag between monitors of differing DPI."
   }
 }

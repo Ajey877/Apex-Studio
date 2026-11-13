@@ -217,6 +217,16 @@ function registerVst3({ app, ipcMain, dialog, getWindow }) {
     editorOwner(owner, id);
     return context.service.pollEditor(id, owner);
   });
+  // ACCEPTANCE ONLY. Deliberately refused unless the packaged acceptance run set
+  // APEX_ACCEPTANCE, so a normal session can never reach it. It injects real OS
+  // input at the plug-in window; it does not fabricate a parameter change.
+  handle('editorInput', async (context, owner, id, action, point) => {
+    if (process.env.APEX_ACCEPTANCE !== '1') {
+      throw new Error('VST3 editor input injection is available only to the acceptance run.');
+    }
+    editorOwner(owner, id);
+    return context.service.editorInput(id, action, point, owner);
+  });
   handle('closeEditor', async (context, owner, id) => {
     editorOwner(owner, id);
     let timer;

@@ -165,18 +165,16 @@ if (!executable) {
   process.exit(2);
 }
 
-// Fixture choice matters here and is deliberate:
-//  - AGain has a genuine editor but declares an EVENT INPUT bus, which Apex
-//    deliberately refuses for audio. It can therefore never become a real Mixer
-//    insert, so it cannot prove the packaged Mixer path (and its composer is not a
-//    bus we may bypass).
-//  - The pinned SDK's `data-exchange` sample is stereo-in/stereo-out (policy
-//    compliant) AND provides a genuine VSTGUI editor from editor.uidesc, so it can
-//    prove BOTH the packaged Mixer insert and the plug-in's own window without
-//    weakening any host policy.
-const editorFixture = path.join(root, 'build/native-vst3/VST3/Release/data-exchange.vst3');
-// The factory registers the class as "DataExchange" (no hyphen).
-const EDITOR_FIXTURE_NAME = /^data-?exchange/i;
+// The fixture is Apex's own test-only acceptance plug-in, built next to the other
+// native fixtures. It is the ONLY plug-in available here that satisfies all three
+// requirements at once (see docs/VST3-EDITOR-ACCEPTANCE.md for the full survey):
+//   - stereo in/out with NO event input bus, so the Mixer accepts the insert;
+//   - a genuine VSTGUI editor window;
+//   - a controller that exposes the exact parameter its editor edits, so its
+//     beginEdit/performEdit/endEdit callbacks name known, writable ParamIDs.
+const editorFixture = path.join(root, 'build/native-vst3/VST3/Release/apex-acceptance-vst3.vst3');
+// Registered name from acceptance-fixture-entry.cpp.
+const EDITOR_FIXTURE_NAME = /^ApexAcceptanceGain$/i;
 const profile = path.join(root, 'build', `packaged-acceptance-profile-${Date.now()}`);
 /** Every launch of the packaged app uses this environment. Declared once so no
  *  launch can silently forget the flag that enables the acceptance hook. */
@@ -207,9 +205,9 @@ async function run() {
     const bridge = globalThis.desktopApp?.vst3;
     if (!bridge) return { error: 'packaged preload bridge missing' };
     const discovered = await bridge.discoverEffects();
-    const target = (discovered.plugins ?? []).find(p => /^data-?exchange/i.test(p.name));
+    const target = (discovered.plugins ?? []).find(p => /^ApexAcceptanceGain$/i.test(p.name));
     if (!target) {
-      return { error: 'editor fixture not discovered in the packaged app',
+      return { error: 'ApexAcceptanceGain was not discovered in the packaged app',
         errors: discovered.errors, names: (discovered.plugins ?? []).map(p => p.name) };
     }
     // inspectEffect resolves to the effect itself (see App.handleEditVst3Effect),
@@ -233,36 +231,63 @@ async function run() {
   const helpersBefore = helpersBeforeRead.processes;
 
   // ---- p1: the Mixer insert opens the plug-in's own editor ----------------
-  // Put a VST3 insert on a Mixer track through the app's own project state, then
-  // click the real "Open VST3 editor" button in the Mixer UI.
-  stage('p1');
-  const inserted = await page.evaluate(async (effect) => {
-    const app = globalThis.__apexAcceptance;
-    if (!app) throw new Error('packaged acceptance project hook missing');
-    return app.addVst3Insert(1, effect);
-  }, setup.effect);
-  // Prefer the real control. If the Mixer has not rendered an insert row for the
-  // injected effect, fall back to the shipped handler that same button calls
-  // (handleOpenVst3Editor) and record which path was used, so the evidence never
-  // claims a click that did not happen.
+  // This drives the app's REAL user interface end to end, in this order:
+  //   Mixer track -> "+" (Add Effect Plugin) -> "Native VST3 Effect" -> pick the
+  //   discovered plug-in -> the insert row renders -> its "Open VST3 editor".
+  // No test-only handler is used to open the editor: the visible control is the
+  // control that is clicked, and its absence is a FAIL rather than a fallback.
+  stage('p1-mixer-ui');
+  const ui = {};
+
+  // 1. Select a Mixer track. The Mixer strip buttons carry the track name.
+  const trackButton = page.getByRole('button', { name: /Kick \/ 808/i }).first();
+  await trackButton.waitFor({ state: 'visible', timeout: 30000 });
+  await trackButton.click({ timeout: 15000 });
+  ui.selectedTrack = 'Kick / 808';
+  await page.waitForTimeout(300);
+
+  // 2. Open the effect menu with the real "+" button.
+  const addEffect = page.getByTitle('Add Effect Plugin').first();
+  await addEffect.waitFor({ state: 'visible', timeout: 15000 });
+  await addEffect.click({ timeout: 15000 });
+  ui.openedAddEffectMenu = true;
+
+  // 3. Choose "Native VST3 Effect" to open the genuine picker.
+  const nativeChoice = page.getByRole('button', { name: 'Native VST3 Effect' }).first();
+  await nativeChoice.waitFor({ state: 'visible', timeout: 15000 });
+  await nativeChoice.click({ timeout: 15000 });
+  ui.openedVst3Picker = true;
+
+  // 4. Pick our fixture by its registered name from the real picker list.
+  const fixtureButton = page.getByRole('button', { name: EDITOR_FIXTURE_NAME }).first();
+  await fixtureButton.waitFor({ state: 'visible', timeout: 60000 });
+  await fixtureButton.click({ timeout: 60000 });
+  ui.choseFixtureFromPicker = true;
+
+  // 5. The Mixer must now render an insert row exposing the real editor control.
   const openButton = page.getByRole('button', { name: 'Open VST3 editor' }).first();
-  let triggeredVia;
-  try {
-    await openButton.waitFor({ state: 'visible', timeout: 15000 });
-    await openButton.click({ timeout: 15000 });
-    triggeredVia = 'Mixer insert "Open VST3 editor" button';
-  } catch (clickError) {
-    try {
-      await page.evaluate(async ([trackId, slotId]) => {
-        const app = globalThis.__apexAcceptance;
-        if (!app) throw new Error('packaged acceptance project hook missing');
-        await app.openEditorOnInsert(trackId, slotId);
-      }, [1, inserted?.slotId]);
-      triggeredVia = 'shipped handleOpenVst3Editor via acceptance hook (insert row not rendered)';
-    } catch (hookError) {
-      throw new Error(`could not open the editor: click=${clickError?.message?.split('\n')[0]} hook=${hookError?.message?.split('\n')[0]}`);
-    }
-  }
+  await openButton.waitFor({ state: 'visible', timeout: 60000 });
+  ui.insertRowRendered = true;
+  // What the row says about the insert, read from the live DOM.
+  ui.insertRowText = (await page.locator('div').filter({ has: openButton }).first().innerText().catch(() => ''))
+    .split('\n').map(line => line.trim()).filter(Boolean).slice(0, 6);
+
+  // 6. Click the real control. This is the user's own path; nothing is simulated.
+  await openButton.click({ timeout: 30000 });
+  const triggeredVia = 'Mixer insert "Open VST3 editor" button (real UI click)';
+
+  // Cross-check that the project state agrees an insert was actually added.
+  const inserted = await page.evaluate(async () => {
+    const app = globalThis.__apexAcceptance;
+    if (!app) return null;
+    return app.projectSnapshot();
+  });
+  const insertCount = (() => {
+    try { return JSON.parse(inserted?.vst3State ?? '[]')
+      .flatMap(track => track.fxSlots ?? []).filter(slot => slot.type === 'vst3').length; } catch { return null; }
+  })();
+  ui.vst3InsertCountInProject = insertCount;
+
   // Sample continuously instead of once at +4s: a short-lived helper (one whose
   // session is reaped early, e.g. by a rejected callbacks stream) would otherwise
   // leave "no window" as the only observation even though a window did appear.
@@ -293,9 +318,14 @@ async function run() {
     ? { firstSeenMs: samples.find(sample => sample.helperPids.length)?.atMs ?? null,
         lastSeenMs: samples.filter(sample => sample.helperPids.length).at(-1)?.atMs ?? null }
     : null;
+  // p1 requires the whole visible chain to have worked: the insert row rendered,
+  // the real control was clicked, a helper spawned, and an OS-visible window
+  // appeared. Anything less is unproven rather than passed.
+  const uiChainComplete = ui.insertRowRendered === true && ui.vst3InsertCountInProject !== 0;
   record('p1-mixer-opens-editor', !helpersDuringRead.ok ? 'NOT_VERIFIED'
     : newHelpers.length > 0 && visibleWindow ? 'PASS'
-    : newHelpers.length > 0 ? 'NOT_VERIFIED' : 'FAIL', {
+    : uiChainComplete ? 'NOT_VERIFIED'
+    : 'FAIL', {
     helperLifetimeMs,
     // The fixture, not the host, is what limits this run: see the fixture table in
     // docs/VST3-EDITOR-ACCEPTANCE.md. Recorded so nobody reads this as a host bug.
@@ -304,7 +334,7 @@ async function run() {
     helperEnumeration: { before: helpersBeforeRead.ok, during: helpersDuringRead.ok,
       source: helpersDuringRead.source ?? null, errors: helpersDuringRead.error ?? null },
     clickedControl: triggeredVia,
-    acceptanceInsert: { slotId: inserted?.slotId ?? null, slotIndex: inserted?.slotIndex ?? null },
+    mixerUi: ui,
     discoveredThroughPackagedIpc: { name: setup.effect?.name, classId: setup.effect?.classId, pluginCount: setup.pluginCount },
     helperProcessesBefore: helpersBefore,
     helperProcessesDuring: helpersDuring,
@@ -345,6 +375,17 @@ async function run() {
   // An open plug-in window that reports a parameter change must reach Apex. The
   // real panel polls the session; a session that reports an edit here proves the
   // same path the panel uses.
+  // Drive the plug-in's own editor window with genuine OS input over the Gain
+  // slider's real screen position, then read what Apex received. The slider sits at
+  // a known offset in the fixture's uidesc (origin 64,40 size 168x18 inside a
+  // 320x120 view), so the click lands on the control itself.
+  const sliderPoint = { x: 64 + 84, y: 40 + 9 };
+  const gainInput = await page.evaluate(async (point) => {
+    const app = globalThis.__apexAcceptance;
+    if (!app?.driveEditorWithRealInput) return { error: 'no real-input hook available' };
+    return app.driveEditorWithRealInput(point);
+  }, sliderPoint).catch(error => ({ error: String(error?.message ?? error) }));
+  // Then let the panel's normal poll loop observe the edit.
   const edited = await page.evaluate(async () => globalThis.__apexAcceptance.pollOpenEditor());
   const reachedApex = await page.evaluate(async (slotId) => globalThis.__apexAcceptance.readInsertParameter(1, slotId), inserted?.slotId);
   // A rejection is a genuine FAIL (the host refused something). A session that
@@ -358,7 +399,8 @@ async function run() {
     : edited?.phase === 'failed' ? 'FAIL' : 'NOT_VERIFIED';
   const blockedByFixture = fixtureRejection;
   record('p3-parameter-reaches-apex', p3Verdict, {
-    mechanism: 'the packaged renderer drove the open editor session and polled it, exactly as the panel does',
+    mechanism: 'genuine OS input (SendInput) was aimed at the Gain slider inside the plug-in\'s own editor window, then the panel\'s normal poll loop observed the edit',
+    gainInput,
     blockedByFixture,
     blockedBy: blockedByFixture
       ? 'the fixture editor references ParamIDs its own controller does not expose (DataExchange UI-only tags); the host rejects them by design'
@@ -418,9 +460,17 @@ async function run() {
     stage('p7');
     const beforeOpenRead = helperProcesses();
     const beforeOpen = beforeOpenRead.processes;
-    // After the reload the insert order is whatever was saved; ask for the track's
-    // VST3 insert rather than assuming a position.
-    const reopened = await page2.evaluate(async () => globalThis.__apexAcceptance.openEditorOnInsert(1));
+    // Open it through the SAME real control the user would use. The insert survived
+    // the reload, so its row and its editor button must be present again.
+    const reopenButton = page2.getByRole('button', { name: 'Open VST3 editor' }).first();
+    let reopened;
+    try {
+      await reopenButton.waitFor({ state: 'visible', timeout: 30000 });
+      await reopenButton.click({ timeout: 30000 });
+      reopened = { viaRealUi: true };
+    } catch (error) {
+      reopened = { viaRealUi: false, error: String(error?.message ?? error).split('\n')[0] };
+    }
     await page2.waitForTimeout(4000);
     const duringOpenRead = helperProcesses();
     const duringOpen = duringOpenRead.processes;

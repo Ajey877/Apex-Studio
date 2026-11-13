@@ -137,6 +137,12 @@ export interface Vst3Bridge {
   closeEditor?(id: string): Promise<Vst3EditorStatus>;
   /** `committed` is true only when the renderer already stored the state. */
   finishEditor?(id: string, committed: boolean): Promise<void>;
+  /**
+   * ACCEPTANCE ONLY. Injects genuine OS input into the open editor window. The
+   * main process refuses it unless the packaged acceptance flag is set, so this is
+   * unreachable in a normal user session.
+   */
+  editorInput?(id: string, action: 'move' | 'down' | 'wheel', point: { x: number; y: number }): Promise<unknown>;
   editorRecovery?(): Promise<{ recovery: Vst3EditorRecovery | null; loadError: string | null }>;
   dismissEditorRecovery?(id: string): Promise<void>;
   /** Handshake only: transfers a dedicated live PCM port bound to this session. */

@@ -58,6 +58,24 @@ as `PASS` unless the check actually ran and observed it. On a non-Windows host t
 script records all criteria as `NOT_VERIFIED` and exits `2`, so a Linux CI log can
 never be mistaken for Windows evidence.
 
+### Attempted is not received
+
+Three rules decide every input-related criterion here, because violating them is
+how a green test can prove nothing:
+
+1. **An attempt is not a receipt.** The counter raised at the injection site
+   (`sendInputAccepted`, `injectedWheelCount`) records only that we asked Windows
+   to deliver something. Only counters raised *by the receiver* — the editor
+   WndProc, or the plug-in's own `IPlugView` callback — are evidence.
+2. **The event must be ours.** The observed delta and keycode are compared against
+   what the harness actually sent, so a stray or earlier event cannot be credited.
+3. **Attached is not delivered.** A window that exists and has focus says nothing
+   about whether a keystroke or wheel event reached the plug-in.
+
+Consequently no criterion may be gated on a comparison that is true of every
+possible value (the previous wheel check used `hostWheelCount >= 0`, which could
+never fail).
+
 ---
 
 ## Part 1 — Automated acceptance on a real Windows desktop
@@ -84,11 +102,11 @@ reported size.
 | --- | --- | --- |
 | 1 | Native HWND creation and visibility | `windowCreated`, `IsWindowVisible`, `attached`, a separate helper `processId`, and outer size > client size (a real framed window). |
 | 2 | Genuine VST3 editor view | `createView(kEditor)` returned a view that accepted `kPlatformTypeHWND`; the size and title come from the plug-in. |
-| 3 | DPI scaling | `GetDpiForWindow` vs the scale factor actually pushed through `IPlugViewContentScaleSupport::setContentScaleFactor`, which must accept it. |
+| 3 | DPI scaling | Three things, reported separately and never conflated: (a) `IPlugViewContentScaleSupport` — a non-default factor pushed through `setContentScaleFactor` must be accepted *and* the plug-in must resize itself; (b) `WM_DPICHANGED` — counted only when Windows actually sends it (`dpiChangedMessageCount`), which no unattended runner triggers; (c) interactive 125%/150% display changes — always `NOT_VERIFIED` in CI. 96 DPI is never evidence of any of them. |
 | 4 | Resize and `checkSizeConstraint` | A real `SetWindowPos` goes through `WM_SIZING` → `checkSizeConstraint` → `WM_SIZE` → `onSize`; the plug-in's `getSize` must then equal the real client area. |
 | 4b | Plug-in-initiated resize | `IPlugFrame::resizeView` driven by the plug-in, recorded honestly as `NOT_VERIFIED` when the plug-in declines to resize itself. |
-| 5 | Keyboard forwarding | `WM_KEYDOWN`/`WM_KEYUP` reach `onKeyDown`/`onKeyUp`; the view must stay attached. |
-| 6 | Mouse and wheel forwarding | VST3 has **no** mouse entry point on `IPlugView`: see [Mouse semantics](#mouse-semantics) below. Verified by real hit-testing (`WindowFromPoint` lands on a plug-in child window) plus `WM_MOUSEWHEEL` → `onWheel`. |
+| 5 | Keyboard forwarding | Real `SendInput` for a TAB down and up. The `SendInput` return count must be `1` for each, the editor WndProc must observe `WM_KEYDOWN`/`WM_KEYUP` (`keyDownMessageCount`/`keyUpMessageCount`), and the plug-in's `onKeyDown`/`onKeyUp` must both be invoked with `VK_TAB` and a recorded return value. A merely attached window is not evidence. |
+| 6 | Mouse and wheel forwarding | VST3 has **no** mouse entry point on `IPlugView`: see [Mouse semantics](#mouse-semantics) below. The wheel is proven through whichever path Windows actually used, and the evidence names it: **path A** the host WndProc observed `WM_MOUSEWHEEL` and invoked `onWheel` with the injected delta, or **path B** a plug-in child window owned the point, so the OS delivered the wheel there and the host correctly saw nothing. The observed delta must equal the injected delta. An attempted injection is never counted as a receipt. |
 | 7 | Focus gain and loss | `SetForegroundWindow`/`SetFocus` on the real window, then `GetFocus`/`GetActiveWindow`; `onFocus` follows `WM_SETFOCUS`/`WM_KILLFOCUS`. |
 | 8 | State capture before destruction | The window is confirmed visible, *then* closed; component state bytes, parameter count, dirty flag and overflow flag are captured from the response. |
 | 9 | Native close behaviour | A real `WM_CLOSE` (what the title-bar X sends) must capture state and be reported by the next `editorPoll`, without the app asking. |
@@ -112,8 +130,21 @@ VST3's `IPlugView` exposes `onWheel`, `onKeyDown`, `onKeyUp`, `onSize`,
 plug-in that wants clicks creates its own child `HWND` inside the host window and
 Windows routes `WM_MOUSEMOVE`/`WM_LBUTTONDOWN`/… straight to it. So the host has
 no mouse-forwarding responsibility; its duties are to create a real parent window,
-not intercept those messages, and keep the child reachable. Criterion 6 verifies
-exactly that, and does not pretend a forwarding API exists.
+not intercept those messages, and keep the child reachable.
+
+Criterion 6 therefore accepts **either** routing outcome, but only one of them,
+and it records which:
+
+- **Path A** — no plug-in child owns the point, so the host window receives
+  `WM_MOUSEWHEEL` (`wheelMessageCount`) and forwards it, invoking
+  `IPlugView::onWheel` (`viewWheelCount`) with the delta we injected.
+- **Path B** — a plug-in child window owns the point (`WindowFromPoint` lands on a
+  child of the editor window), so Windows delivers the wheel to the plug-in
+  directly and the host correctly observes nothing.
+
+For the click, exactly one of "the plug-in child owned the point" and "the host
+received the click" must hold; both being false means nothing observed it, and
+both being true would mean the same event was counted twice.
 
 ## Failure matrix (automated rows)
 
@@ -182,9 +213,32 @@ without it:
    After a helper dies the service forgets the session, so later polls say only
    "closed or belongs to another renderer" and overwrote the actual reason. The
    first failure is kept.
-3. **Say which path ran.** If the Mixer has not rendered an insert row, `p1` falls
-   back to the same shipped handler the button calls and records that in
-   `clickedControl` — it never claims a click that did not happen.
+3. **Drive the real UI, and only the real UI.** `p1` clicks the visible controls in
+   the order a user does. There is no fallback: if an insert row does not render,
+   `p1` records `NOT_VERIFIED` (or `FAIL`) rather than calling the handler the
+   button would have called. Clicking a test-only entry point and reporting it as
+   user-interface acceptance would prove nothing about the UI.
+
+### The order the packaged run drives the real UI
+
+Each step is a real DOM control in the packaged renderer, and each is recorded
+before the next begins:
+
+| Step | Control | Recorded as |
+| --- | --- | --- |
+| 1 | Mixer track strip for `Kick / 808` | `selectedTrack` |
+| 2 | `Add Effect Plugin` (`+`) button | `openedAddEffectMenu` |
+| 3 | `Native VST3 Effect` in the effect menu | `openedVst3Picker` |
+| 4 | The discovered plug-in's row in the real picker | `choseFixtureFromPicker` |
+| 5 | The rendered insert row's `Open VST3 editor` button | `insertRowRendered`, `insertRowText` |
+| 6 | A real click on that button | `clickedControl` |
+
+The run additionally cross-checks the result against project state: the number of
+`type: 'vst3'` inserts must be non-zero, so a purely visual success cannot pass.
+Gain edits then come from genuine `SendInput` aimed at the slider inside the
+plug-in's own window, and the panel's normal poll loop observes the change — the
+injection never synthesises a parameter event. That input hook is refused unless
+`APEX_ACCEPTANCE=1`, so it is unreachable in a user session.
 
 ### Which plug-in the packaged run uses, and why
 
@@ -201,18 +255,46 @@ inside the pinned SDK:
 | `utf16name` | yes | returns `nullptr` | No — there is no editor view |
 | `adelay`, `syncdelay`, `remap_paramid`, `again_sampleaccurate` | yes | none on Windows | No — no editor |
 | `hostchecker`, `note_expression_*`, `pitchnames` | n/a | none | No |
+| MDA bundle (28 effects) | yes | none | No — no editor at all in this tree |
 
-So the packaged harness currently uses `dataexchange`: the app spawns the editor
-helper (observed live at 1281 ms, gone by 1483 ms) but no visible window appears,
-and when its editor is polled the host rejects the callback stream with
-`VST3 editor callback referenced an unknown or read-only ParamID` — correctly, since
-that editor drives UI-only tags. MDA has no editor at all in this tree, so no
-already-built fixture can satisfy all three properties. Reaching `PASS` on `p1`,
-`p2`, `p6` and `p7` therefore does not depend on that fixture being usable for
-`p3`–`p5`, and no host policy was weakened to make `dataexchange` fit. Closing the
-remaining gap needs a stereo-in/stereo-out effect with a real editor and real
-parameters — a commercially redistributable MDA effect with an editor is the
-preferred option, since the MDA bundle is already built and shipped here.
+Rather than weaken a host policy to fit one of the above, Apex ships its own
+test-only acceptance plug-in.
+
+#### `ApexAcceptanceGain` — the acceptance fixture
+
+Source: `native/vst3/acceptance-fixture-*.cpp` / `.hpp`, plus
+`native/vst3/resources/acceptancegain.uidesc`. It is **original Apex code written
+for this repository**, not copied from a Steinberg sample, so it carries no
+sample-code licensing question; it is likewise **not** part of any release build.
+
+| Property | Value | Why it matters |
+| --- | --- | --- |
+| Bus layout | Stereo in → stereo out, **no** audio side-chains | Matches the host's stereo-only policy |
+| Event buses | **None declared** | The host refuses audio effects with event input buses; the fixture does not need one |
+| Parameter | `Gain`, **ParamID 0**, automatable, `dB`, default `0.5` | One controller-exposed parameter, matching the slider in the editor |
+| Gain law | `0.5` → 0 dB (unity), `0.0` → −24 dB, `1.0` → +12 dB | A known, testable curve with a real audible effect |
+| Editor | Genuine VSTGUI `VST3Editor` from `acceptancegain.uidesc`, 320×120 | A real plug-in window, not a placeholder |
+| Editor controls | `CSlider` **and** `CTextEdit`, both tagged `Gain` (ParamID 0) | Dragging the slider must produce `beginEdit`/`performEdit`/`endEdit` naming a real, writable ParamID |
+| Identity | UID `41504558-41434741-494E0001-00000001` (processor) / `…00000002` (controller) | Stable across component, controller and editor |
+| Build | `APEX_BUILD_ACCEPTANCE_FIXTURE` (default ON); bundle additionally gated on `APEX_BUILD_VST3_EDITOR_FIXTURE` | Buildable without X11 on Linux; the `.vst3` bundle only where VSTGUI exists |
+
+The fixture proves itself. `native/vst3/acceptance-fixture-test.cpp` builds as
+`apex-acceptance-vst3-test` and runs on **every** platform, asserting observed
+behaviour rather than declared intent — 39 checks, all passing locally:
+
+- the gain law is exact: `0.5` normalizes to unity, `1.0` measures ×`3.981071703`
+  (the RMS ratio, not a nominal value), `0.0` measures ×`0.063095735`;
+- a real `process()` call applies a parameter change **within the block that
+  delivered it**, and the value persists into the next block when no new change
+  arrives;
+- there is **no** event input bus and **no** event output bus, and the audio
+  buffers really are stereo;
+- `getState`/`setState` round-trip a saved gain, and a **truncated** state is
+  rejected rather than silently accepted;
+- the controller exposes exactly one parameter and it is automatable.
+
+So when the packaged run fails to find a usable editor window, that is evidence
+about the host or the package — not an unproven fixture.
 
 ## Part 2 — Interactive packaged-application checklist (not executed)
 

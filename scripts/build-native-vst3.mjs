@@ -29,7 +29,15 @@ run(cmake, ['-S', 'native/vst3', '-B', 'build/native-vst3', ...generator, '-DCMA
 const targets = [
   'apex-vst3-host', 'mda-vst3', 'apex-vst3-protocol-fault',
   'apex-vst3-restart-flags-test', 'apex-latency-vst3',
+  // Test-only: stereo effect + genuine VSTGUI editor + controller-exposed
+  // parameters, which no pinned SDK sample provides all of at once.
+  'apex-acceptance-vst3-test',
 ];
+if (process.platform === 'win32') {
+  // The VSTGUI editor half of the acceptance fixture needs the Windows bundle
+  // layout (and VSTGUI needs X11 on Linux, which headless runners lack).
+  targets.push('apex-acceptance-vst3');
+}
 if (process.platform === 'win32') {
   // `again` proves the genuine editor window. `data-exchange` is stereo-in /
   // stereo-out AND has a genuine VSTGUI editor, so it is the only SDK fixture that

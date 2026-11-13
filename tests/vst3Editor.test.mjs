@@ -374,19 +374,32 @@ test('mouse acceptance uses real OS input instead of posting to the parent windo
     'the parent-window click injection path is gone');
 });
 
-test('packaged acceptance uses a policy-compliant fixture that also has a genuine editor', () => {
+test('packaged acceptance uses the purpose-built acceptance fixture', () => {
   const script = readFileSync(path.join(process.cwd(), 'scripts/packaged-editor-acceptance.mjs'), 'utf8');
-  // AGain has a real editor but an EVENT INPUT bus, which Apex refuses for audio,
-  // so it can never become a real Mixer insert. The packaged path must be proven
-  // with an effect that is stereo-in/stereo-out AND has a genuine VSTGUI editor.
-  assert.ok(script.includes('data-exchange.vst3'),
-    'the packaged acceptance uses the data-exchange SDK fixture');
-  assert.ok(/data-exchange/i.test(script), 'the fixture is matched by name');
+  // No pinned SDK sample is simultaneously a policy-compliant stereo effect, a
+  // genuine VSTGUI editor, and one whose controller exposes what its editor edits.
+  // Apex therefore ships its own test-only fixture for this run.
+  assert.ok(script.includes('apex-acceptance-vst3.vst3'), 'the packaged run uses ApexAcceptanceGain');
+  assert.ok(/ApexAcceptanceGain/i.test(script), 'the fixture is matched by its registered name');
   assert.ok(!/again\.vst3/.test(script), 'AGain is not used for the packaged Mixer path');
-  // And the host policy itself must be untouched.
+  // And the host policies the fixture was designed around must be untouched.
   const host = readFileSync(path.join(process.cwd(), 'native/vst3/host.cpp'), 'utf8');
   assert.ok(host.includes('VST3 audio effects with event input buses are not supported'),
     'the event-input-bus policy is still enforced verbatim');
+  assert.ok(host.includes('unknown or read-only ParamID') ||
+    host.includes('ParamID'), 'parameter identity validation still exists');
+});
+
+test('the acceptance fixture is test-only and never staged into a packaged build', () => {
+  const cmake = readFileSync(path.join(process.cwd(), 'native/vst3/CMakeLists.txt'), 'utf8');
+  assert.ok(/APEX_BUILD_ACCEPTANCE_FIXTURE/.test(cmake), 'the fixture has its own build option');
+  assert.ok(/if\(APEX_BUILD_VST3_EDITOR_FIXTURE\)\n\s+smtg_add_vst3plugin\(apex-acceptance-vst3/.test(cmake),
+    'the VSTGUI bundle half only builds with VSTGUI support');
+  // Nothing in the packaging path may pick it up.
+  const pkg = readFileSync(path.join(process.cwd(), 'scripts/build-native-vst3.mjs'), 'utf8');
+  assert.ok(/apex-acceptance-vst3-test/.test(pkg), 'the DSP test builds everywhere');
+  assert.ok(/targets\.push\('apex-acceptance-vst3'\)/.test(pkg),
+    'the editor bundle is added explicitly, and only on Windows');
 });
 
 test('the packaged acceptance environment enables its own hook, not the smoke hook', () => {
@@ -414,12 +427,14 @@ test('the packaged acceptance fixture is actually built', () => {
   assert.ok(/platform === 'win32'/.test(build), 'the editor fixtures stay Windows-only');
 });
 
-test('the packaged run matches the fixture by its real registered name', () => {
+test('the packaged run matches the fixture by its registered name', () => {
   const script = readFileSync(path.join(process.cwd(), 'scripts/packaged-editor-acceptance.mjs'), 'utf8');
-  // The SDK registers the class as "DataExchange"; an /^data-exchange/ matcher
-  // never matched it, so discovery failed even once the bundle was built.
-  assert.ok(/const EDITOR_FIXTURE_NAME = \/\^data-\?exchange\/i;/.test(script),
-    'fixture matcher tolerates the hyphenless registered name');
+  const entry = readFileSync(path.join(process.cwd(), 'native/vst3/acceptance-fixture-entry.cpp'), 'utf8');
+  // The name the factory registers and the name the harness looks for must agree,
+  // or discovery fails for a reason that looks like a host bug.
+  assert.ok(entry.includes('#define stringPluginName "ApexAcceptanceGain"'), 'the factory name');
+  assert.ok(/const EDITOR_FIXTURE_NAME = \/\^ApexAcceptanceGain\$\/i;/.test(script),
+    'the harness matcher matches the registered name exactly');
 });
 
 test('setProcessing accepts kNotImplemented but still rejects real errors', () => {
@@ -436,22 +451,28 @@ test('setProcessing accepts kNotImplemented but still rejects real errors', () =
     'every setProcessing call site uses the tolerant gate');
 });
 
-test('p1 falls back to the shipped open path and says which one it used', () => {
+test('p1 drives the real Mixer UI and never substitutes a test-only handler', () => {
   const script = readFileSync(path.join(process.cwd(), 'scripts/packaged-editor-acceptance.mjs'), 'utf8');
-  // The injected insert did not always render a Mixer row, which made the run die
-  // on a 30s click timeout before any criterion was evaluated.
-  assert.ok(/openEditorOnInsert\(trackId, slotId\)/.test(script), 'falls back to the shipped handler');
-  assert.ok(/clickedControl: triggeredVia/.test(script), 'records the path that actually ran');
-  assert.ok(/insert row not rendered/.test(script), 'labels the fallback honestly');
+  // The previous version fell back to an acceptance hook when the insert row did
+  // not render, and reported that as UI acceptance. That fallback is gone.
+  assert.ok(!/openEditorOnInsert/.test(script), 'no test-only open path is used');
+  assert.ok(!/insert row not rendered/.test(script), 'no fallback is claimed');
+  // The real control chain must be present, in order.
+  assert.ok(/getByTitle\('Add Effect Plugin'\)/.test(script), 'the real "+" button');
+  assert.ok(/name: 'Native VST3 Effect'/.test(script), 'the real picker entry point');
+  assert.ok(/getByRole\('button', \{ name: EDITOR_FIXTURE_NAME \}\)/.test(script),
+    'the fixture is chosen from the real picker list');
+  assert.ok(/name: 'Open VST3 editor'/.test(script), 'the real editor control');
+  assert.ok(/ui\.insertRowRendered = true/.test(script), 'the rendered insert row is recorded');
 });
 
-test('the acceptance insert reports its own slot index', () => {
-  const app = readFileSync(path.join(process.cwd(), 'src/App.tsx'), 'utf8');
+test('the packaged run cross-checks that a VST3 insert really reached the project', () => {
   const script = readFileSync(path.join(process.cwd(), 'scripts/packaged-editor-acceptance.mjs'), 'utf8');
-  // Tracks ship with FX slots, so the appended insert is never at index 0; the
-  // harness used to open index 0 and hit a non-VST3 slot.
-  assert.ok(/slotId, slotIndex: slotIds\(trackId\)\.indexOf\(slotId\)/.test(app), 'hook reports the real index');
-  assert.ok(/inserted\?\.slotIndex/.test(script), 'harness opens the slot it inserted');
+  // A rendered row is not enough on its own; the project must agree an insert of
+  // type 'vst3' exists, so a UI-only illusion cannot pass.
+  assert.ok(/vst3InsertCountInProject/.test(script), 'the insert count is read from project state');
+  assert.ok(/filter\(slot => slot\.type === 'vst3'\)/.test(script), 'only real vst3 slots count');
+  assert.ok(/ui\.vst3InsertCountInProject !== 0/.test(script), 'a zero insert count cannot pass p1');
 });
 
 test('the packaged run builds its effect from the inspected result', () => {
@@ -553,4 +574,105 @@ test('p8 reports a missing session instead of aborting the run', () => {
   assert.ok(/blockedByFixture: !crash\.ok/.test(script), 'p8 distinguishes a block from a failure');
   assert.ok(!/const crash = await page3\.evaluate\(async \(\) => globalThis\.__apexAcceptance\.crashEditorAndRecover\(\)\);/.test(script),
     'the unguarded call is gone');
+});
+
+// ---- Keyboard and mouse delivery proof (acceptance harness) ----------------
+// These pin the specific defects the Lead Engineer identified: a test that passes
+// without ever observing delivery, and a "received" counter that was really an
+// attempt counter.
+
+test('keyboard acceptance requires OS input and observes real receipts', () => {
+  const script = readFileSync(path.join(process.cwd(), 'scripts/native-editor-windows-acceptance.mjs'), 'utf8');
+  const start = script.indexOf("criterion('5-keyboard'");
+  const body = script.slice(start, script.indexOf("criterion('6-mouse-wheel'", start));
+
+  // Real OS input, not a hand-posted window message.
+  assert.ok(/SendInput/.test(readFileSync(path.join(process.cwd(), 'native/vst3/editor-host.hpp'), 'utf8')),
+    'the host uses SendInput for keyboard input');
+  assert.ok(!/PostMessageW\([^)]*WM_KEYDOWN/.test(script), 'no WM_KEYDOWN is hand-posted');
+  assert.ok(!/WM_KEYDOWN VK_TAB'/.test(body) || /SendInput/.test(body), 'the criterion names the real method');
+
+  // The verdict must depend on observation, not on the window merely existing.
+  for (const required of [
+    /sendInputAcceptedDown === 1/,
+    /windowSawKeyDown/,
+    /windowSawKeyUp/,
+    /viewGotKeyDown/,
+    /viewGotKeyUp/,
+    /rightKeyDown/,
+    /rightKeyUp/,
+  ]) assert.match(body, required);
+  assert.ok(!/stillAttached: keyAfter\.attached,\s*focusOwnedByWindow/.test(body),
+    'an attached window alone is no longer the pass condition');
+});
+
+test('mouse-wheel acceptance counts only what a receiver observed', () => {
+  const script = readFileSync(path.join(process.cwd(), 'scripts/native-editor-windows-acceptance.mjs'), 'utf8');
+  const start = script.indexOf("criterion('6-mouse-wheel'");
+  const body = script.slice(start, script.indexOf("criterion('7-focus'", start));
+
+  // The old non-discriminating condition must be gone. Strip comments first: the
+  // criterion documents the old bug, and that documentation is not the bug.
+  const code = body.split('\n').filter(line => !/^\s*\/\//.test(line)).join('\n');
+  assert.ok(!/>= 0\b/.test(code), 'no assertion that is true of every count');
+
+  // And the new verdict must be built from receiver-side counters.
+  for (const required of [
+    /wheelMessageCount/,
+    /viewWheelCount/,
+    /deltaMatchesTheSentEvent/,
+    /observedEventIsTheInjectedOne/,
+    /const pathA =/,
+    /const pathB =/,
+  ]) assert.match(body, required);
+
+  // C++ side: the attempt counter must not also be the receipt counter.
+  const host = readFileSync(path.join(process.cwd(), 'native/vst3/editor-host.hpp'), 'utf8');
+  const wheelCase = host.slice(host.indexOf('case WM_MOUSEWHEEL:'));
+  assert.ok(/wheelMessageCount\+\+/.test(wheelCase.slice(0, 700)),
+    'WM_MOUSEWHEEL raises a receipt counter in the WndProc');
+  assert.ok(/viewWheelCount\+\+/.test(wheelCase.slice(0, 900)),
+    'IPlugView::onWheel invocation is counted');
+  // injectedWheelCount may only be bumped in the injection helper.
+  const injectionSite = host.indexOf('injectedWheelCount++');
+  const wndProc = host.indexOf('case WM_MOUSEWHEEL:');
+  assert.ok(injectionSite > wndProc, 'injectedWheelCount is not raised inside the WndProc');
+});
+
+test('the acceptance fixture builds, is test-only, and proves its own DSP', () => {
+  const cmake = readFileSync(path.join(process.cwd(), 'native/vst3/CMakeLists.txt'), 'utf8');
+  const test = readFileSync(path.join(process.cwd(), 'native/vst3/acceptance-fixture-test.cpp'), 'utf8');
+  const proc = readFileSync(path.join(process.cwd(), 'native/vst3/acceptance-fixture-processor.cpp'), 'utf8');
+
+  // Stereo, and no event buses: the two properties that make it a legal insert.
+  assert.ok(/addAudioInput\(USTRING\("Stereo In"\), SpeakerArr::kStereo\)/.test(proc));
+  assert.ok(/addAudioOutput\(USTRING\("Stereo Out"\), SpeakerArr::kStereo\)/.test(proc));
+  assert.ok(!/addEventInput/.test(proc), 'the fixture declares no event input bus');
+
+  // The processor and controller must agree on the parameter id.
+  const ctrl = readFileSync(path.join(process.cwd(), 'native/vst3/acceptance-fixture-controller.cpp'), 'utf8');
+  assert.ok(/kParamGain/.test(proc) && /kParamGain/.test(ctrl), 'one shared parameter id');
+
+  // The behavioural test must actually assert measured audio.
+  assert.ok(/boost\.leftRms \/ inputRms/.test(test), 'the gain is measured, not asserted');
+  assert.ok(/a parameter change applies within the block that delivered it/.test(test));
+  assert.ok(/NO event input bus/.test(test));
+
+  // Test-only.
+  assert.ok(/APEX_BUILD_ACCEPTANCE_FIXTURE/.test(cmake));
+});
+
+test('the acceptance-only input hook is unreachable outside an acceptance run', () => {
+  const desktop = readFileSync(path.join(process.cwd(), 'desktop-vst3.cjs'), 'utf8');
+  const start = desktop.indexOf("handle('editorInput'");
+  const body = desktop.slice(start, start + 600);
+  assert.ok(/process\.env\.APEX_ACCEPTANCE !== '1'/.test(body),
+    'the hook refuses to run unless APEX_ACCEPTANCE is set');
+  assert.ok(/throw new Error/.test(body), 'it throws rather than silently no-oping');
+  // It injects input; it must not fabricate a parameter change.
+  const service = readFileSync(path.join(process.cwd(), 'native/vst3/service.mjs'), 'utf8');
+  const svc = service.slice(service.indexOf('async editorInput('));
+  assert.ok(/sendEditorMouse/.test(svc.slice(0, 1200)), 'it routes real injected input');
+  assert.ok(!/performEdit|setParamNormalized/.test(svc.slice(0, 1600)),
+    'it never synthesises a parameter change');
 });

@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  ApexAcceptanceGain editor layout. Original Apex Studio fixture code (see
+  native/vst3/acceptance-fixture.hpp for provenance); no Steinberg sample layout
+  is copied.
+
+  Deliberately bitmap-free: every control uses vector drawing, so the bundle needs
+  no PNG resources and the editor renders identically on a CI runner without any
+  asset files. The Gain slider's control-tag is "Gain", which the controller
+  exposes as ParamID 0 -- the same id the processor reads. That agreement is what
+  makes beginEdit/performEdit/endEdit reference a genuinely writable parameter.
+-->
+<vstgui-ui-description version="1">
+	<colors>
+		<color name="Background" rgba="#1e1e1eff"/>
+		<color name="Panel" rgba="#2b2b2bff"/>
+		<color name="Label" rgba="#e0e0e0ff"/>
+		<color name="Accent" rgba="#ff6e00ff"/>
+	</colors>
+	<fonts>
+		<font name="LabelFont" font="Arial" size="11"/>
+		<font name="TitleFont" font="Arial" size="12" bold="true"/>
+	</fonts>
+	<gradients>
+		<gradient name="SliderTrack">
+			<color-stop rgba="#3a3a3aff" start="0"/>
+			<color-stop rgba="#242424ff" start="1"/>
+		</gradient>
+	</gradients>
+	<template background-color="~ Background" class="CViewContainer" maxSize="320, 120" minSize="320, 120" mouse-enabled="false" name="view" opacity="1" origin="0, 0" size="320, 120" transparent="false">
+		<view background-color="~ Panel" class="CViewContainer" maxSize="300, 96" minSize="300, 96" mouse-enabled="false" name="panel" opacity="1" origin="10, 12" size="300, 96" transparent="false">
+			<view class="CTextLabel" font="TitleFont" font-color="~ Accent" mouse-enabled="false" name="title" origin="10, 8" size="280, 16" text-alignment="left" title="ApexAcceptanceGain" transparent="true"/>
+			<view class="CTextLabel" font="LabelFont" font-color="~ Label" mouse-enabled="false" name="gainLabel" origin="10, 40" size="48, 18" text-alignment="left" title="Gain" transparent="true"/>
+			<view class="CSlider" control-tag="Gain" default-value="0.5" draw-back="true" draw-back-color="~ SliderTrack" draw-frame="false" draw-value="false" gradient="~ SliderTrack" handle-color="~ Accent" max-value="1" min-value="0" mode="free click" mouse-enabled="true" name="gainSlider" orientation="horizontal" origin="64, 40" size="168, 18" transparent="false" value-precision="2" wheel-inc-value="0.05" zoom-factor="8"/>
+			<view class="CTextEdit" control-tag="Gain" default-value="0.5" font="LabelFont" font-color="~ Label" frame-color="~ Accent" frame-width="1" immediate-text-change="false" max-value="1" min-value="0" mouse-enabled="true" name="gainValue" origin="240, 40" size="50, 18" text-alignment="center" transparent="false" value-precision="2"/>
+			<view class="CTextLabel" font="LabelFont" font-color="~ Label" mouse-enabled="false" name="hint" origin="10, 70" size="280, 16" text-alignment="left" title="Acceptance fixture: stereo in/out, no event buses" transparent="true"/>
+		</view>
+	</template>
+	<variables/>
+	<custom>
+		<attributes SelectedTemplate="view" name="UITemplateController"/>
+	</custom>
+</vstgui-ui-description>

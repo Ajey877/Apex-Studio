@@ -2376,6 +2376,29 @@ export function App() {
         await handleOpenVst3Editor(trackId, chosen.id);
         return { slotId: chosen.id, slotIndex: slotIds(trackId).indexOf(chosen.id) };
       },
+      /**
+       * ACCEPTANCE ONLY. Aim genuine OS input at a point inside the plug-in's own
+       * editor window, then report what the helper observed. Nothing here creates a
+       * parameter change: the edit comes from the plug-in reacting to real input,
+       * and the panel's normal poll loop forwards it exactly as for a human user.
+       */
+      driveEditorWithRealInput: async (point: number | { x: number; y: number }) => {
+        const session = vst3EditorRef.current;
+        if (!session) throw new Error('No native editor session is open');
+        const bridge = getVst3Bridge();
+        if (!bridge?.editorInput) throw new Error('This build cannot inject editor input');
+        const id = session.sessionId;
+        if (!id) throw new Error('The native editor session has no id yet');
+        const target = typeof point === 'number' ? { x: 148, y: 49 } : point;
+        const move = await bridge.editorInput(id, 'move', target);
+        const down = await bridge.editorInput(id, 'down', target);
+        return {
+          target,
+          injectedThrough: 'vst3:editorInput -> helper SendInput (real OS input)',
+          move: move ?? null,
+          down: down ?? null,
+        };
+      },
       closeOpenEditor: async () => {
         // Same handler the "Close" control uses, so the commit and undo path is shipped.
         await handleCloseVst3Editor();
