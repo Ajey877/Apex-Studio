@@ -2349,12 +2349,15 @@ export function App() {
       .find(track => track.id === trackId)?.fxSlots.map(slot => slot.id) ?? [];
     const acceptance = {
       addVst3Insert: async (trackId: number, effect: import('./audio/nativeVst3Types').Vst3Effect) => {
+        // Tracks already carry FX slots, so the new insert is appended, not first.
+        // Report its real id and index instead of letting callers guess index 0.
+        const slotId = `acceptance-vst3-${Date.now()}`;
         mutateProjectStateRef.current(state => updateMixerTrackInProjectState(state, trackId, {
           fxSlots: [...(state.mixerTracks.find(track => track.id === trackId)?.fxSlots ?? []),
-            { id: `acceptance-vst3-${Date.now()}`, type: 'vst3' as const, name: effect.name,
+            { id: slotId, type: 'vst3' as const, name: effect.name,
               enabled: true, mix: 1, params: {}, vst3Effect: effect }],
         }), 'Add VST3 effect');
-        return { slotIds: slotIds(trackId) };
+        return { slotId, slotIndex: slotIds(trackId).indexOf(slotId), slotIds: slotIds(trackId) };
       },
       openEditorOnInsert: async (trackId: number, slotIndex: number) => {
         const slotId = slotIds(trackId)[slotIndex];

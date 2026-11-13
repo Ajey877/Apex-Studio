@@ -200,10 +200,10 @@ async function run() {
   // Put a VST3 insert on a Mixer track through the app's own project state, then
   // click the real "Open VST3 editor" button in the Mixer UI.
   stage('p1');
-  await page.evaluate(async (effect) => {
+  const inserted = await page.evaluate(async (effect) => {
     const app = globalThis.__apexAcceptance;
     if (!app) throw new Error('packaged acceptance project hook missing');
-    await app.addVst3Insert(1, effect);
+    return app.addVst3Insert(1, effect);
   }, setup.effect);
   // Prefer the real control. If the Mixer has not rendered an insert row for the
   // injected effect, fall back to the shipped handler that same button calls
@@ -221,7 +221,7 @@ async function run() {
         const app = globalThis.__apexAcceptance;
         if (!app) throw new Error('packaged acceptance project hook missing');
         await app.openEditorOnInsert(trackId, slotIndex);
-      }, [1, 0]);
+      }, [1, inserted?.slotIndex ?? 0]);
       triggeredVia = 'shipped handleOpenVst3Editor via acceptance hook (insert row not rendered)';
     } catch (hookError) {
       throw new Error(`could not open the editor: click=${clickError?.message?.split('\n')[0]} hook=${hookError?.message?.split('\n')[0]}`);
@@ -236,6 +236,7 @@ async function run() {
   record('p1-mixer-opens-editor', newHelpers.length > 0 && visibleWindow ? 'PASS'
     : newHelpers.length > 0 ? 'NOT_VERIFIED' : 'FAIL', {
     clickedControl: triggeredVia,
+    acceptanceInsert: { slotId: inserted?.slotId ?? null, slotIndex: inserted?.slotIndex ?? null },
     discoveredThroughPackagedIpc: { name: setup.effect?.name, classId: setup.effect?.classId, pluginCount: setup.pluginCount },
     helperProcessesBefore: helpersBefore,
     helperProcessesDuring: helpersDuring,

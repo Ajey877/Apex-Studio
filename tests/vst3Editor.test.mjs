@@ -444,3 +444,12 @@ test('p1 falls back to the shipped open path and says which one it used', () => 
   assert.ok(/clickedControl: triggeredVia/.test(script), 'records the path that actually ran');
   assert.ok(/insert row not rendered/.test(script), 'labels the fallback honestly');
 });
+
+test('the acceptance insert reports its own slot index', () => {
+  const app = readFileSync(path.join(process.cwd(), 'src/App.tsx'), 'utf8');
+  const script = readFileSync(path.join(process.cwd(), 'scripts/packaged-editor-acceptance.mjs'), 'utf8');
+  // Tracks ship with FX slots, so the appended insert is never at index 0; the
+  // harness used to open index 0 and hit a non-VST3 slot.
+  assert.ok(/slotId, slotIndex: slotIds\(trackId\)\.indexOf\(slotId\)/.test(app), 'hook reports the real index');
+  assert.ok(/inserted\?\.slotIndex/.test(script), 'harness opens the slot it inserted');
+});
