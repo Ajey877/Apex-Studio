@@ -187,7 +187,11 @@ async function run() {
     const inspected = await bridge.inspectEffect(target, undefined);
     return { effect: { ...target, ...inspected?.effect }, pluginCount: (discovered.plugins ?? []).length };
   });
-  if (setup?.error) throw new Error(setup.error);
+  if (setup?.error) {
+    // The reason matters more than the symptom: record what WAS discoverable.
+    console.log(`ACCEPTANCE-ERROR ${setup.error} | names=${JSON.stringify(setup.names ?? [])} | errors=${JSON.stringify(setup.errors ?? [])}`.slice(0, 900));
+    throw new Error(setup.error);
+  }
 
   const helpersBefore = helperProcesses();
 
@@ -344,7 +348,15 @@ try {
 } catch (error) {
   console.log(`ACCEPTANCE-ERROR ${error.message}`);
   if (error.stack) console.log(error.stack.slice(0, 2000));
-  record('harness', 'FAIL', { error: error.message, stack: error.stack?.slice(0, 4000) });
+  record('harness', 'FAIL', {
+    error: error.message,
+    stack: error.stack?.slice(0, 4000),
+    // Surface what the app could and could not discover, so a failure names the
+    // fixture rather than only the symptom.
+    hint: /discovered/.test(error.message)
+      ? 'The packaged app did not see the fixture bundle. Check that the bundle exists and that the launch env adds its root.'
+      : undefined,
+  });
 }
 
 // p9 needs an interactive display; it is never inferred from the runner.
