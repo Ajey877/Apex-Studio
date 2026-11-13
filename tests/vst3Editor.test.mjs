@@ -527,3 +527,13 @@ test('the packaged run samples for a short-lived window instead of glancing once
   assert.ok(!/await page\.waitForTimeout\(4000\); \/\/ let the helper spawn/.test(script),
     'no single-shot read remains');
 });
+
+test('a criterion is only FAIL when the host was actually shown to be wrong', () => {
+  const script = readFileSync(path.join(process.cwd(), 'scripts/packaged-editor-acceptance.mjs'), 'utf8');
+  // p2/p3 used to fail whenever no window appeared, which reads as a host defect
+  // even when the bundled fixture is the reason no window could appear.
+  assert.ok(/!windowEverObserved \? 'NOT_VERIFIED'/.test(script), 'p2 does not fail without an observation');
+  assert.ok(/edited\?\.phase === 'failed' \? 'FAIL' : 'NOT_VERIFIED'/.test(script),
+    'p3 fails on a real rejection, not on absence');
+  assert.ok(/fixtureLimit:/.test(script), 'the fixture limit is named in the evidence');
+});
