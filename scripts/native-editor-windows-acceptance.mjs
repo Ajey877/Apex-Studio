@@ -657,18 +657,35 @@ try {
       notVerified('12-audio-unaffected', { reason: 'mda Delay fixture not found' });
     }
 
-    // AGain's audio path is refused by policy. Record that as an explicit product
-    // limit rather than silently omitting it.
-    results.push({
-      id: '12c-again-audio-policy',
-      criterion: CRITERIA['12c-again-audio-policy'],
-      status: 'NOT_VERIFIED',
-      kind: 'automated',
-      evidence: {
-        expected: 'VST3 audio effects with event input buses are not supported',
-        note: 'AGain declares an event input bus. The host deliberately refuses that for the audio path; this is an accepted product limit, not a defect, and the audio path was therefore proven with mda Delay.',
-      },
-    });
+    // AGain's audio path is refused by policy. The refusal itself is observable,
+    // so it is measured rather than assumed: the exact policy message must come
+    // back, and no session may be created. This is an accepted product limit, not
+    // a defect, so a correct refusal is a PASS for "the policy holds".
+    if (!again) {
+      notVerified('12c-again-audio-policy', { reason: 'AGain fixture not found, so the policy could not be exercised' });
+    } else {
+      const policyClient = new NativeVst3Client(executable, { timeoutMs: 20000 });
+      try {
+        let refusal = null;
+        try {
+          await policyClient.open(again, { sampleRate, mode: 'offline', kind: 'effect',
+            state: { schema: 1, classId: again.classId, parameters: [] } });
+        } catch (error) {
+          refusal = error.message;
+        }
+        const expectedPolicy = /VST3 audio effects with event input buses are not supported/;
+        (refusal && expectedPolicy.test(refusal) ? pass : fail)('12c-again-audio-policy', {
+          plugin: again.name,
+          classId: again.classId,
+          observedRefusal: refusal,
+          policyMessageMatched: Boolean(refusal && expectedPolicy.test(refusal)),
+          openedSession: refusal === null,
+          note: 'AGain declares an event input bus. The host must refuse the audio path with this exact message and create no session; the audio path itself is proven separately with mda Delay.',
+        });
+      } finally {
+        await policyClient.dispose().catch(() => {});
+      }
+    }
   });
 
   // ---- Packaged application: never inferred from the above ---------------

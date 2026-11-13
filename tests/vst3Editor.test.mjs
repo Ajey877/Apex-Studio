@@ -505,3 +505,15 @@ test('a crashed helper is reported by its own reason, not a later generic error'
   assert.match(error, /helper crashed|helper exited/i, 'the crash reason survives to the UI');
   assert.doesNotMatch(error, /belongs to another renderer/, 'a later generic error does not replace it');
 });
+
+test('the AGain audio-policy row measures the refusal instead of assuming it', () => {
+  const script = readFileSync(path.join(process.cwd(), 'scripts/native-editor-windows-acceptance.mjs'), 'utf8');
+  const host = readFileSync(path.join(process.cwd(), 'native/vst3/host.cpp'), 'utf8');
+  // It used to be a hardcoded NOT_VERIFIED, so nobody learned whether the policy
+  // still held. It now opens AGain and requires the exact refusal.
+  assert.ok(/expectedPolicy = \/VST3 audio effects with event input buses are not supported\//.test(script),
+    'the harness requires the exact policy message');
+  assert.ok(/openedSession: refusal === null/.test(script), 'it records that no session was created');
+  assert.ok(host.includes('VST3 audio effects with event input buses are not supported'),
+    'the policy message is still the host\'s own');
+});
