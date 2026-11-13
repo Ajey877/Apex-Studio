@@ -421,3 +421,17 @@ test('the packaged run matches the fixture by its real registered name', () => {
   assert.ok(/const EDITOR_FIXTURE_NAME = \/\^data-\?exchange\/i;/.test(script),
     'fixture matcher tolerates the hyphenless registered name');
 });
+
+test('setProcessing accepts kNotImplemented but still rejects real errors', () => {
+  const host = readFileSync(path.join(process.cwd(), 'native/vst3/host.cpp'), 'utf8');
+  // IAudioProcessor::setProcessing has no failure semantics in the VST3 contract
+  // and the SDK's AudioEffect base returns kNotImplemented. The DataExchange
+  // sample (our packaged editor fixture) inherits that, so a strict kResultOk
+  // gate made it unloadable: "setProcessing failed (VST result -2147467263)".
+  assert.ok(/void checkedProcessing\(tresult result, const std::string& message\) \{\s*require\(result == kResultOk \|\| result == kNotImplemented,/.test(host),
+    'kNotImplemented is tolerated for setProcessing');
+  assert.strictEqual((host.match(/checked\(processor->setProcessing/g) ?? []).length, 0,
+    'no setProcessing call site uses the strict gate');
+  assert.strictEqual((host.match(/checkedProcessing\(processor->setProcessing/g) ?? []).length, 5,
+    'every setProcessing call site uses the tolerant gate');
+});

@@ -58,6 +58,16 @@ void require(bool condition, const std::string& message) {
 void checked(tresult result, const std::string& message) {
   require(result == kResultOk, message + " (VST result " + std::to_string(result) + ")");
 }
+// IAudioProcessor::setProcessing is advisory in the VST3 contract: the interface
+// documents what the call means but assigns no failure semantics, and the SDK's
+// own AudioEffect base implements it as `return kNotImplemented;` (the
+// DataExchange sample inherits that verbatim). Treating kNotImplemented as fatal
+// rejects conformant plug-ins, so any accepted or merely unimplemented result
+// passes while a genuine error still fails the operation.
+void checkedProcessing(tresult result, const std::string& message) {
+  require(result == kResultOk || result == kNotImplemented,
+    message + " (VST result " + std::to_string(result) + ")");
+}
 int integer(const json& object, const char* key, int low, int high) {
   require(object.contains(key) && object.at(key).is_number_integer(), std::string(key) + " must be an integer");
   auto value = object.at(key).get<int64_t>();
@@ -255,7 +265,7 @@ class Instance {
     require((flags & RestartFlags::kReloadComponent) == 0,
       std::string("VST3 plugin requested full component reload (kReloadComponent) during ") +
       contextLabel + ", which is unsupported");
-    checked(processor->setProcessing(false), std::string("Cannot suspend processing (") + contextLabel + ")");
+    checkedProcessing(processor->setProcessing(false), std::string("Cannot suspend processing (") + contextLabel + ")");
     processing = false;
     checked(component->setActive(false), std::string("Cannot deactivate component (") + contextLabel + ")");
     active = false;
@@ -265,7 +275,7 @@ class Instance {
     }
     checked(component->setActive(true), std::string("Cannot reactivate component (") + contextLabel + ")");
     active = true;
-    checked(processor->setProcessing(true), std::string("Cannot resume processing (") + contextLabel + ")");
+    checkedProcessing(processor->setProcessing(true), std::string("Cannot resume processing (") + contextLabel + ")");
     processing = true;
     const int32 postFlags = componentHandler->consumeRestartFlags();
     require((postFlags & kStructuralRestartMask) == 0,
@@ -367,7 +377,7 @@ public:
       assertPreparedProcessDataMatchesContract();
     }
     checked(component->setActive(true), "setActive failed"); active = true;
-    checked(processor->setProcessing(true), "setProcessing failed"); processing = true;
+    checkedProcessing(processor->setProcessing(true), "setProcessing failed"); processing = true;
     // Component/controller streams are restored while inactive. Apply saved
     // normalized overrides after activation so effect processors and controller
     // metadata reflect authoritative saved values before the first live block.
@@ -511,7 +521,7 @@ public:
     }
   }
   json snapshot() {
-    checked(processor->setProcessing(false), "Cannot suspend for state capture"); processing = false;
+    checkedProcessing(processor->setProcessing(false), "Cannot suspend for state capture"); processing = false;
     json state{{"schema", 1}, {"classId", classId}, {"parameters", json::array()}};
     MemoryStream componentState;
     auto componentResult = component->getState(&componentState);
@@ -528,7 +538,7 @@ public:
       for (const auto& entry : overrides)
         state["parameters"].push_back({{"id", entry.first}, {"value", entry.second}});
     }
-    checked(processor->setProcessing(true), "Cannot resume after state capture"); processing = true;
+    checkedProcessing(processor->setProcessing(true), "Cannot resume after state capture"); processing = true;
     return state;
   }
   std::vector<float> process(const json& request, bool flush = false) {
