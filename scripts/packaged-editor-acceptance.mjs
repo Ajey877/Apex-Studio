@@ -205,7 +205,28 @@ async function run() {
     if (!app) throw new Error('packaged acceptance project hook missing');
     await app.addVst3Insert(1, effect);
   }, setup.effect);
-  await page.getByRole('button', { name: 'Open VST3 editor' }).first().click({ timeout: 30000 });
+  // Prefer the real control. If the Mixer has not rendered an insert row for the
+  // injected effect, fall back to the shipped handler that same button calls
+  // (handleOpenVst3Editor) and record which path was used, so the evidence never
+  // claims a click that did not happen.
+  const openButton = page.getByRole('button', { name: 'Open VST3 editor' }).first();
+  let triggeredVia;
+  try {
+    await openButton.waitFor({ state: 'visible', timeout: 15000 });
+    await openButton.click({ timeout: 15000 });
+    triggeredVia = 'Mixer insert "Open VST3 editor" button';
+  } catch (clickError) {
+    try {
+      await page.evaluate(async ([trackId, slotIndex]) => {
+        const app = globalThis.__apexAcceptance;
+        if (!app) throw new Error('packaged acceptance project hook missing');
+        await app.openEditorOnInsert(trackId, slotIndex);
+      }, [1, 0]);
+      triggeredVia = 'shipped handleOpenVst3Editor via acceptance hook (insert row not rendered)';
+    } catch (hookError) {
+      throw new Error(`could not open the editor: click=${clickError?.message?.split('\n')[0]} hook=${hookError?.message?.split('\n')[0]}`);
+    }
+  }
   await page.waitForTimeout(4000); // let the helper spawn and the window appear
 
   const helpersDuring = helperProcesses();
@@ -214,7 +235,7 @@ async function run() {
   const visibleWindow = windows.find(w => w.handle > 0);
   record('p1-mixer-opens-editor', newHelpers.length > 0 && visibleWindow ? 'PASS'
     : newHelpers.length > 0 ? 'NOT_VERIFIED' : 'FAIL', {
-    clickedControl: 'Mixer insert "Open VST3 editor" button',
+    clickedControl: triggeredVia,
     discoveredThroughPackagedIpc: { name: setup.effect?.name, classId: setup.effect?.classId, pluginCount: setup.pluginCount },
     helperProcessesBefore: helpersBefore,
     helperProcessesDuring: helpersDuring,

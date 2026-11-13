@@ -435,3 +435,12 @@ test('setProcessing accepts kNotImplemented but still rejects real errors', () =
   assert.strictEqual((host.match(/checkedProcessing\(processor->setProcessing/g) ?? []).length, 5,
     'every setProcessing call site uses the tolerant gate');
 });
+
+test('p1 falls back to the shipped open path and says which one it used', () => {
+  const script = readFileSync(path.join(process.cwd(), 'scripts/packaged-editor-acceptance.mjs'), 'utf8');
+  // The injected insert did not always render a Mixer row, which made the run die
+  // on a 30s click timeout before any criterion was evaluated.
+  assert.ok(/openEditorOnInsert\(trackId, slotIndex\)/.test(script), 'falls back to the shipped handler');
+  assert.ok(/clickedControl: triggeredVia/.test(script), 'records the path that actually ran');
+  assert.ok(/insert row not rendered/.test(script), 'labels the fallback honestly');
+});
