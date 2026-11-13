@@ -537,3 +537,20 @@ test('a criterion is only FAIL when the host was actually shown to be wrong', ()
     'p3 fails on a real rejection, not on absence');
   assert.ok(/fixtureLimit:/.test(script), 'the fixture limit is named in the evidence');
 });
+
+test('a correct policy rejection is not scored as a host failure', () => {
+  const script = readFileSync(path.join(process.cwd(), 'scripts/packaged-editor-acceptance.mjs'), 'utf8');
+  // The DataExchange editor edits UI-only parameters. The host rejecting those is
+  // right, so p3/p4/p5 must be NOT_VERIFIED (fixture block), not FAIL.
+  assert.ok(/fixtureRejection = \/unknown or read-only ParamID\//.test(script), 'the policy rejection is recognised');
+  assert.ok(/blockedByFixture \? 'NOT_VERIFIED' : 'FAIL'/.test(script), 'p4 inherits the block');
+  assert.ok(/blockedByFixture \? 'NOT_VERIFIED' : 'FAIL', \{ blockedByFixture, \.\.\.undoRedo \}/.test(script),
+    'p5 inherits the block');
+});
+
+test('p8 reports a missing session instead of aborting the run', () => {
+  const script = readFileSync(path.join(process.cwd(), 'scripts/packaged-editor-acceptance.mjs'), 'utf8');
+  assert.ok(/blockedByFixture: !crash\.ok/.test(script), 'p8 distinguishes a block from a failure');
+  assert.ok(!/const crash = await page3\.evaluate\(async \(\) => globalThis\.__apexAcceptance\.crashEditorAndRecover\(\)\);/.test(script),
+    'the unguarded call is gone');
+});
