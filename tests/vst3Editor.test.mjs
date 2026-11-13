@@ -453,3 +453,12 @@ test('the acceptance insert reports its own slot index', () => {
   assert.ok(/slotId, slotIndex: slotIds\(trackId\)\.indexOf\(slotId\)/.test(app), 'hook reports the real index');
   assert.ok(/inserted\?\.slotIndex/.test(script), 'harness opens the slot it inserted');
 });
+
+test('the packaged run builds its effect from the inspected result', () => {
+  const script = readFileSync(path.join(process.cwd(), 'scripts/packaged-editor-acceptance.mjs'), 'utf8');
+  // inspectEffect resolves to the effect itself. Reading .effect off it produced
+  // an identity-less insert that openEditor rightly rejected.
+  assert.ok(!/inspected\?\.effect/.test(script), 'does not read a non-existent .effect wrapper');
+  assert.ok(/inspected \?\? \{\}/.test(script), 'spreads the inspected effect');
+  assert.ok(/no usable identity\/state/.test(script), 'reports a bad inspection by name');
+});

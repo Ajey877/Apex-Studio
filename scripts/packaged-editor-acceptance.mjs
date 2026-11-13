@@ -185,8 +185,16 @@ async function run() {
       return { error: 'editor fixture not discovered in the packaged app',
         errors: discovered.errors, names: (discovered.plugins ?? []).map(p => p.name) };
     }
+    // inspectEffect resolves to the effect itself (see App.handleEditVst3Effect),
+    // carrying the state that openEditor validates; it is not wrapped in {effect}.
     const inspected = await bridge.inspectEffect(target, undefined);
-    return { effect: { ...target, ...inspected?.effect }, pluginCount: (discovered.plugins ?? []).length };
+    const effect = { ...target, ...(inspected ?? {}) };
+    if (!effect.state || effect.state.classId !== effect.classId || !Array.isArray(effect.state.parameters)) {
+      return { error: 'inspected fixture has no usable identity/state',
+        names: [], errors: [{ inspectedKeys: Object.keys(inspected ?? {}), classId: effect.classId ?? null,
+          stateClassId: effect.state?.classId ?? null, parameterCount: effect.state?.parameters?.length ?? null }] };
+    }
+    return { effect, pluginCount: (discovered.plugins ?? []).length };
   });
   if (setup?.error) {
     // The reason matters more than the symptom: record what WAS discoverable.
