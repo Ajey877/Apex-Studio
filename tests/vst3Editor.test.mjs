@@ -660,6 +660,14 @@ test('the acceptance fixture builds, is test-only, and proves its own DSP', () =
 
   // Test-only.
   assert.ok(/APEX_BUILD_ACCEPTANCE_FIXTURE/.test(cmake));
+
+  // The SDK's own instruction: vstsinglecomponenteffect.cpp already #includes
+  // vsteditcontroller.cpp, so listing both defines ProgramList and
+  // ProgramListWithPitchNames twice (MSVC LNK2005). Linux hid this because nothing
+  // pulled both in, so assert it here rather than waiting for a Windows build.
+  const code = cmake.split('\n').filter(line => !/^\s*#/.test(line)).join('\n');
+  assert.ok(!/vsteditcontroller\.cpp/.test(code),
+    'vsteditcontroller.cpp is never compiled alongside vstsinglecomponenteffect.cpp');
 });
 
 test('the acceptance-only input hook is unreachable outside an acceptance run', () => {

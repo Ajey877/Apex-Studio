@@ -165,8 +165,11 @@ if(APEX_BUILD_ACCEPTANCE_FIXTURE)
     acceptance-fixture-editor.cpp
     acceptance-fixture-entry.cpp
     acceptance-fixture.hpp
+    # vstsinglecomponenteffect.cpp already provides EditController's implementation
+    # (including getEditorState/setEditorState). Adding vsteditcontroller.cpp as well
+    # defines ProgramList/ProgramListWithPitchNames twice, which MSVC rejects with
+    # LNK2005 and which Linux only tolerated because nothing pulled both in.
     "${SDK_ROOT}/public.sdk/source/vst/vstsinglecomponenteffect.cpp"
-    "${SDK_ROOT}/public.sdk/source/vst/vsteditcontroller.cpp"
   )
   if(WIN32)
     target_sources(apex-acceptance-vst3 PRIVATE "${SDK_ROOT}/public.sdk/source/main/dllmain.cpp")
