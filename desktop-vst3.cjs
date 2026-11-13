@@ -154,7 +154,12 @@ function registerVst3({ app, ipcMain, dialog, getWindow }) {
       if (Array.isArray(stored) && stored.length <= 32 && stored.every(p => typeof p === 'string' && path.isAbsolute(p))) roots = stored;
     } catch { /* first launch / invalid preferences: keep known defaults */ }
     // Test-only root is accepted from the launching process, never web content.
-    if (process.env.APEX_SMOKE_TEST === '1' && process.env.APEX_VST3_SMOKE_PLUGIN) roots = [...roots, path.dirname(process.env.APEX_VST3_SMOKE_PLUGIN)];
+    // The packaged-editor acceptance sets the same environment from the runner, so
+    // it needs the same allowance; ordinary launches never set either flag.
+    if ((process.env.APEX_SMOKE_TEST === '1' || process.env.APEX_ACCEPTANCE === '1') &&
+        process.env.APEX_VST3_SMOKE_PLUGIN) {
+      roots = [...roots, path.dirname(process.env.APEX_VST3_SMOKE_PLUGIN)];
+    }
     const executable = app.isPackaged
       ? path.join(process.resourcesPath, 'vst3', 'apex-vst3-host.exe')
       : path.join(__dirname, 'build/native-vst3/bin', process.platform === 'win32' ? 'Release/apex-vst3-host.exe' : 'apex-vst3-host');

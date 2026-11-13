@@ -140,13 +140,24 @@ if (!executable) {
 
 const againFixture = path.join(root, 'build/native-vst3/VST3/Release/again.vst3');
 const profile = path.join(root, 'build', `packaged-acceptance-profile-${Date.now()}`);
+/** Every launch of the packaged app uses this environment. Declared once so no
+ *  launch can silently forget the flag that enables the acceptance hook. */
+function launchEnv(extra = {}) {
+  return {
+    ...process.env,
+    APEX_ACCEPTANCE: '1',
+    APEX_ACCEPTANCE_USER_DATA: profile,
+    APEX_VST3_SMOKE_PLUGIN: againFixture,
+    ...extra,
+  };
+}
 
 async function run() {
   const { _electron } = await import('playwright');
   stage('launch-packaged-app', { executable });
   const app = await _electron.launch({
     executablePath: executable,
-    env: { ...process.env, APEX_ACCEPTANCE_USER_DATA: profile, APEX_VST3_SMOKE_PLUGIN: againFixture },
+    env: launchEnv(),
     timeout: 180000,
   });
   const page = await app.firstWindow();
@@ -260,7 +271,7 @@ async function run() {
 
   const app2 = await _electron.launch({
     executablePath: executable,
-    env: { ...process.env, APEX_ACCEPTANCE_USER_DATA: profile, APEX_ACCEPTANCE_REOPEN: '1', APEX_VST3_SMOKE_PLUGIN: againFixture },
+    env: launchEnv({ APEX_ACCEPTANCE_REOPEN: '1' }),
     timeout: 180000,
   });
   try {
@@ -301,7 +312,7 @@ async function run() {
   stage('p8');
   const app3 = await _electron.launch({
     executablePath: executable,
-    env: { ...process.env, APEX_ACCEPTANCE_USER_DATA: profile, APEX_ACCEPTANCE_REOPEN: '1', APEX_VST3_SMOKE_PLUGIN: againFixture },
+    env: launchEnv({ APEX_ACCEPTANCE_REOPEN: '1' }),
     timeout: 180000,
   });
   try {
