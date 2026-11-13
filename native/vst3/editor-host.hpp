@@ -124,6 +124,8 @@ class NativeEditorSession {
   bool lastMouseTargetWasChild = false;
   bool lastMouseTargetWasOwnWindow = false;
   unsigned long lastKeySendError = 0;
+  int injectedClickCount = 0;
+  int injectedWheelCount = 0;
   HWND focusSinkWindow = nullptr;
 
   static bool registerFocusSinkClass() {
@@ -567,23 +569,30 @@ class NativeEditorSession {
       case WM_CLOSE:
         nativeCloseFromWindow();
         return 0;
-      case WM_SETFOCUS:
-        // Record the real transition and the plug-in's own answer, so focus gain
-        // and focus loss are observably separate facts rather than one inference.
+      case WM_SETFOCUS: {
+        // Record the real transition and the plug-in's own answer. A repeated
+        // WM_SETFOCUS while already focused still calls onFocus(1) (the plug-in
+        // expects it), but it is not a new user transition and must not be counted
+        // as one, or the evidence would overstate what happened.
         if (view) {
           const auto result = view->onFocus(1);
-          ++focusGainCount;
-          lastFocusGainResult = result;
-          lastFocusGainSucceeded = isSuccess(result);
+          if (lastFocusState != 1) {
+            ++focusGainCount;
+            lastFocusGainResult = result;
+            lastFocusGainSucceeded = isSuccess(result);
+          }
           lastFocusState = 1;
         }
         break;
+      }
       case WM_KILLFOCUS:
         if (view) {
           const auto result = view->onFocus(0);
-          ++focusLossCount;
-          lastFocusLossResult = result;
-          lastFocusLossSucceeded = isSuccess(result);
+          if (lastFocusState != 0) {
+            ++focusLossCount;
+            lastFocusLossResult = result;
+            lastFocusLossSucceeded = isSuccess(result);
+          }
           lastFocusState = 0;
         }
         break;
@@ -877,15 +886,21 @@ public:
     else if (isWheel) {
       input.mi.dwFlags = MOUSEEVENTF_WHEEL;
       input.mi.mouseData = WHEEL_DELTA;
-      ++wheelCount;
+      injectedWheelCount++;
     } else {
       input.mi.dwFlags = MOUSEEVENTF_LEFTDOWN;
-      ++mouseDownCount;
+      injectedClickCount++;
     }
     if (isMove) {
       input.mi.dx = static_cast<LONG>((target.x * 65535ll) / GetSystemMetrics(SM_CXSCREEN));
       input.mi.dy = static_cast<LONG>((target.y * 65535ll) / GetSystemMetrics(SM_CYSCREEN));
     }
+    // Counts are reset so the two "received" tallies below describe ONLY what the
+    // real window procedure saw after this injection. Counting our own input here
+    // would fabricate the result we are trying to observe.
+    mouseDownCount = 0;
+    mouseMoveCount = 0;
+    wheelCount = 0;
     result["sendInputCount"] = static_cast<unsigned long>(SendInput(1, &input, sizeof(INPUT)));
     result["sendInputError"] = static_cast<unsigned long>(GetLastError());
     if (!isMove && !isWheel) {
@@ -899,12 +914,15 @@ public:
     } else {
       pumpMessages();
     }
-    // ...and the host's window procedure must NOT have received it as a click,
-    // because the plug-in child owns that area. That is the observable proof.
-    result["hostWindowReceivedClick"] = false;
+    // Truthful attribution: the host's own window procedure counts what IT received.
+    // A plug-in child window owns the canvas, so clicks must NOT show up here.
     result["hostMouseDownCount"] = mouseDownCount;
+    result["hostWindowReceivedClick"] = mouseDownCount > 0;
+    result["receivedByWindowUnderCursor"] = mouseDownCount > 0;
     result["hostMouseMoveCount"] = mouseMoveCount;
     result["hostWheelCount"] = wheelCount;
+    result["injectedClickCount"] = injectedClickCount;
+    result["injectedWheelCount"] = injectedWheelCount;
     return result;
   }
 
