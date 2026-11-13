@@ -373,3 +373,34 @@ test('mouse acceptance uses real OS input instead of posting to the parent windo
   assert.ok(!/injectMouse\(\s*WM_LBUTTONDOWN/.test(host),
     'the parent-window click injection path is gone');
 });
+
+test('packaged acceptance uses a policy-compliant fixture that also has a genuine editor', () => {
+  const script = readFileSync(path.join(process.cwd(), 'scripts/packaged-editor-acceptance.mjs'), 'utf8');
+  // AGain has a real editor but an EVENT INPUT bus, which Apex refuses for audio,
+  // so it can never become a real Mixer insert. The packaged path must be proven
+  // with an effect that is stereo-in/stereo-out AND has a genuine VSTGUI editor.
+  assert.ok(script.includes('data-exchange.vst3'),
+    'the packaged acceptance uses the data-exchange SDK fixture');
+  assert.ok(/data-exchange/i.test(script), 'the fixture is matched by name');
+  assert.ok(!/again\.vst3/.test(script), 'AGain is not used for the packaged Mixer path');
+  // And the host policy itself must be untouched.
+  const host = readFileSync(path.join(process.cwd(), 'native/vst3/host.cpp'), 'utf8');
+  assert.ok(host.includes('VST3 audio effects with event input buses are not supported'),
+    'the event-input-bus policy is still enforced verbatim');
+});
+
+test('the packaged acceptance environment enables its own hook, not the smoke hook', () => {
+  const script = readFileSync(path.join(process.cwd(), 'scripts/packaged-editor-acceptance.mjs'), 'utf8');
+  const main = readFileSync(path.join(process.cwd(), 'electron.cjs'), 'utf8');
+  const preload = readFileSync(path.join(process.cwd(), 'preload.cjs'), 'utf8');
+  // Regression: every launch previously omitted APEX_ACCEPTANCE, so the renderer
+  // hook and the test-only plug-in root were never enabled and the run failed at
+  // discovery. One launchEnv() helper now guarantees it.
+  assert.ok(/APEX_ACCEPTANCE: '1'/.test(script), 'the acceptance flag is set for launches');
+  assert.ok(/function launchEnv/.test(script), 'a single launch environment is used');
+  assert.ok(!/APEX_SMOKE_TEST: '1'/.test(script), 'the acceptance run does not borrow the smoke flag');
+  assert.ok(main.includes('--apex-packaged-acceptance'), 'the main process passes the renderer flag');
+  assert.ok(preload.includes('packagedAcceptance'), 'the preload exposes the flag');
+  assert.ok(preload.includes("APEX_ACCEPTANCE === '1'") === false, 'flags stay in the main process');
+  assert.ok(main.includes("APEX_ACCEPTANCE === '1'"), 'only the main process reads the env flag');
+});

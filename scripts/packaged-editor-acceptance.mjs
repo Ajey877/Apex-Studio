@@ -138,7 +138,17 @@ if (!executable) {
   process.exit(2);
 }
 
-const againFixture = path.join(root, 'build/native-vst3/VST3/Release/again.vst3');
+// Fixture choice matters here and is deliberate:
+//  - AGain has a genuine editor but declares an EVENT INPUT bus, which Apex
+//    deliberately refuses for audio. It can therefore never become a real Mixer
+//    insert, so it cannot prove the packaged Mixer path (and its composer is not a
+//    bus we may bypass).
+//  - The pinned SDK's `data-exchange` sample is stereo-in/stereo-out (policy
+//    compliant) AND provides a genuine VSTGUI editor from editor.uidesc, so it can
+//    prove BOTH the packaged Mixer insert and the plug-in's own window without
+//    weakening any host policy.
+const editorFixture = path.join(root, 'build/native-vst3/VST3/Release/data-exchange.vst3');
+const EDITOR_FIXTURE_NAME = /^data-exchange/i;
 const profile = path.join(root, 'build', `packaged-acceptance-profile-${Date.now()}`);
 /** Every launch of the packaged app uses this environment. Declared once so no
  *  launch can silently forget the flag that enables the acceptance hook. */
@@ -147,7 +157,7 @@ function launchEnv(extra = {}) {
     ...process.env,
     APEX_ACCEPTANCE: '1',
     APEX_ACCEPTANCE_USER_DATA: profile,
-    APEX_VST3_SMOKE_PLUGIN: againFixture,
+    APEX_VST3_SMOKE_PLUGIN: editorFixture,
     ...extra,
   };
 }
@@ -169,10 +179,13 @@ async function run() {
     const bridge = globalThis.desktopApp?.vst3;
     if (!bridge) return { error: 'packaged preload bridge missing' };
     const discovered = await bridge.discoverEffects();
-    const again = (discovered.plugins ?? []).find(p => /^AGain/.test(p.name));
-    if (!again) return { error: 'AGain not discovered in the packaged app', errors: discovered.errors };
-    const inspected = await bridge.inspectEffect(again, undefined);
-    return { effect: { ...again, ...inspected?.effect }, pluginCount: (discovered.plugins ?? []).length };
+    const target = (discovered.plugins ?? []).find(p => /^data-exchange/i.test(p.name));
+    if (!target) {
+      return { error: 'editor fixture not discovered in the packaged app',
+        errors: discovered.errors, names: (discovered.plugins ?? []).map(p => p.name) };
+    }
+    const inspected = await bridge.inspectEffect(target, undefined);
+    return { effect: { ...target, ...inspected?.effect }, pluginCount: (discovered.plugins ?? []).length };
   });
   if (setup?.error) throw new Error(setup.error);
 
