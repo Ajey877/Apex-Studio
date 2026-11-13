@@ -18,10 +18,9 @@ editor: **14 PASS, 0 FAIL, 2 NOT_VERIFIED** at commits `6dcdf1a`, `b399996` and
 AGain audio-policy row.
 
 The AGain policy row has since been converted from an assumption into a
-measurement, so the expected shape of the next Windows run is **15 PASS, 0 FAIL,
-1 NOT_VERIFIED** — the packaged-application claim, which is covered by the separate
-packaged harness and not by this one. That number is an expectation, not a result;
-it becomes a result only when the run reports it.
+measurement, and that run reported **15 PASS, 0 FAIL, 1 NOT_VERIFIED** at
+`78cad31` — the single remaining `NOT_VERIFIED` being the packaged-application
+claim, which the separate packaged harness covers and this one does not.
 
 Two corrections were made after the first green run, both found by measurement:
 
@@ -164,6 +163,13 @@ run by `.github/workflows/desktop-validation.yml` (`windows-package`).
 | `p9-dpi-125-150` | 125% and 150% DPI behaviour (manual only) |
 | `harness` | The driver itself completed |
 
+Result at `78cad31` (`windows-package`, real installed app): **2 PASS, 0 FAIL,
+7 NOT_VERIFIED** — `p6` and `p7` pass; `p1`–`p5` and `p8` are blocked by the fixture
+limitation documented below; `p9` needs an interactive desktop. A criterion is only
+`FAIL` when the host was shown to be wrong: a plug-in that correctly rejects an
+edit naming parameters its controller never exposes is a fixture limit
+(`blockedByFixture`), not a host defect.
+
 Three rules keep this honest, and each of them exists because a real run was wrong
 without it:
 
@@ -196,8 +202,12 @@ inside the pinned SDK:
 | `adelay`, `syncdelay`, `remap_paramid`, `again_sampleaccurate` | yes | none on Windows | No — no editor |
 | `hostchecker`, `note_expression_*`, `pitchnames` | n/a | none | No |
 
-So the packaged harness currently uses `dataexchange`, whose editor window opens but
-whose parameter callbacks are rejected (see the table). Reaching `PASS` on `p1`,
+So the packaged harness currently uses `dataexchange`: the app spawns the editor
+helper (observed live at 1281 ms, gone by 1483 ms) but no visible window appears,
+and when its editor is polled the host rejects the callback stream with
+`VST3 editor callback referenced an unknown or read-only ParamID` — correctly, since
+that editor drives UI-only tags. MDA has no editor at all in this tree, so no
+already-built fixture can satisfy all three properties. Reaching `PASS` on `p1`,
 `p2`, `p6` and `p7` therefore does not depend on that fixture being usable for
 `p3`–`p5`, and no host policy was weakened to make `dataexchange` fit. Closing the
 remaining gap needs a stereo-in/stereo-out effect with a real editor and real
