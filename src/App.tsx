@@ -2359,11 +2359,22 @@ export function App() {
         }), 'Add VST3 effect');
         return { slotId, slotIndex: slotIds(trackId).indexOf(slotId), slotIds: slotIds(trackId) };
       },
-      openEditorOnInsert: async (trackId: number, slotIndex: number) => {
-        const slotId = slotIds(trackId)[slotIndex];
-        if (!slotId) throw new Error('Acceptance insert is missing');
-        await handleOpenVst3Editor(trackId, slotId);
-        return { slotId };
+      openEditorOnInsert: async (trackId: number, slot?: number | string) => {
+        // Resolve by id when given one, else take the first VST3 insert on the
+        // track. Positional indices are unreliable: tracks already carry FX slots
+        // and a reopened project keeps whatever order it was saved with.
+        const slots = projectStateRef.current.mixerTracks.find(track => track.id === trackId)?.fxSlots ?? [];
+        const chosen = typeof slot === 'string'
+          ? slots.find(candidate => candidate.id === slot)
+          : typeof slot === 'number'
+            ? slots[slot]
+            : slots.find(candidate => candidate.type === 'vst3');
+        if (!chosen) throw new Error(`Acceptance insert is missing (track ${trackId}, requested ${String(slot)})`);
+        if (chosen.type !== 'vst3' || !chosen.vst3Effect) {
+          throw new Error(`Acceptance slot ${chosen.id} is not a VST3 insert (type ${chosen.type})`);
+        }
+        await handleOpenVst3Editor(trackId, chosen.id);
+        return { slotId: chosen.id, slotIndex: slotIds(trackId).indexOf(chosen.id) };
       },
       closeOpenEditor: async () => {
         // Same handler the "Close" control uses, so the commit and undo path is shipped.
@@ -2395,9 +2406,11 @@ export function App() {
         const state = projectStateRef.current;
         return { metaId: state.meta.id, mixerTracks: state.mixerTracks, vst3State: JSON.stringify(state.mixerTracks) };
       },
-      readInsertParameter: async (slotIndex: number) => {
-        const effect = projectStateRef.current.mixerTracks[0]?.fxSlots.filter(slot => slot.type === 'vst3')[slotIndex]?.vst3Effect;
-        return { value: effect?.state?.parameters?.[0]?.value ?? null, classId: effect?.classId ?? null };
+      readInsertParameter: async (trackId: number, slotId?: string) => {
+        const slots = projectStateRef.current.mixerTracks.find(track => track.id === trackId)?.fxSlots ?? [];
+        const effect = (slotId ? slots.find(slot => slot.id === slotId) : slots.find(slot => slot.type === 'vst3'))?.vst3Effect;
+        return { value: effect?.state?.parameters?.[0]?.value ?? null, classId: effect?.classId ?? null,
+          parameterCount: effect?.state?.parameters?.length ?? null, slotIds: slots.map(slot => `${slot.type}:${slot.id}`) };
       },
       saveProject: async () => ({ ok: await performSave(projectStateRef.current, { reconcileAudio: true }) }),
       // Quit through the real File > Quit path, so the before-quit capture and

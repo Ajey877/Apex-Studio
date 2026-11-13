@@ -38,8 +38,15 @@ const CRITERIA = {
 const results = [];
 const stage = (name, detail = '') =>
   console.log(`STAGE ${name}${detail ? ' ' + JSON.stringify(detail) : ''}`);
-const record = (id, status, evidence) =>
+const record = (id, status, evidence) => {
   results.push({ id, criterion: CRITERIA[id], status, evidence, kind: 'automated-packaged' });
+  // Annotations are the only CI evidence channel available here, so every
+  // non-PASS criterion states why in one line instead of only living in the JSON.
+  if (status !== 'PASS') {
+    const why = JSON.stringify(evidence ?? {}).slice(0, 700);
+    console.log(`ACCEPTANCE-DETAIL ${id} ${status} ${why}`);
+  }
+};
 
 function environment() {
   const query = (cmd, args) => {
@@ -225,11 +232,11 @@ async function run() {
     triggeredVia = 'Mixer insert "Open VST3 editor" button';
   } catch (clickError) {
     try {
-      await page.evaluate(async ([trackId, slotIndex]) => {
+      await page.evaluate(async ([trackId, slotId]) => {
         const app = globalThis.__apexAcceptance;
         if (!app) throw new Error('packaged acceptance project hook missing');
-        await app.openEditorOnInsert(trackId, slotIndex);
-      }, [1, inserted?.slotIndex ?? 0]);
+        await app.openEditorOnInsert(trackId, slotId);
+      }, [1, inserted?.slotId]);
       triggeredVia = 'shipped handleOpenVst3Editor via acceptance hook (insert row not rendered)';
     } catch (hookError) {
       throw new Error(`could not open the editor: click=${clickError?.message?.split('\n')[0]} hook=${hookError?.message?.split('\n')[0]}`);
@@ -281,7 +288,7 @@ async function run() {
   // real panel polls the session; a session that reports an edit here proves the
   // same path the panel uses.
   const edited = await page.evaluate(async () => globalThis.__apexAcceptance.pollOpenEditor());
-  const reachedApex = await page.evaluate(async () => globalThis.__apexAcceptance.readInsertParameter(0));
+  const reachedApex = await page.evaluate(async (slotId) => globalThis.__apexAcceptance.readInsertParameter(1, slotId), inserted?.slotId);
   record('p3-parameter-reaches-apex', edited?.delivered && reachedApex?.value != null ? 'PASS' : 'FAIL', {
     mechanism: 'the packaged renderer drove the open editor session and polled it, exactly as the panel does',
     edited: edited,
@@ -336,7 +343,9 @@ async function run() {
     // ---- p7: quitting with an editor open leaks no helper -----------------
     stage('p7');
     const beforeOpen = helperProcesses();
-    await page2.evaluate(async () => globalThis.__apexAcceptance.openEditorOnInsert(1, 0));
+    // After the reload the insert order is whatever was saved; ask for the track's
+    // VST3 insert rather than assuming a position.
+    const reopened = await page2.evaluate(async () => globalThis.__apexAcceptance.openEditorOnInsert(1));
     await page2.waitForTimeout(4000);
     const duringOpen = helperProcesses();
     const openedForQuit = duringOpen.filter(h => !beforeOpen.some(b => b.pid === h.pid));
@@ -346,6 +355,7 @@ async function run() {
     const afterQuit = helperProcesses();
     const survivors = afterQuit;
     record('p7-no-leaked-helpers', survivors.length === 0 ? 'PASS' : 'FAIL', {
+      reopenedEditor: reopened,
       helpersBeforeOpening: beforeOpen.length,
       helpersWithEditorOpen: duringOpen.length,
       openedForQuit: openedForQuit.length,

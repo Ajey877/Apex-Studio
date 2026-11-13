@@ -440,7 +440,7 @@ test('p1 falls back to the shipped open path and says which one it used', () => 
   const script = readFileSync(path.join(process.cwd(), 'scripts/packaged-editor-acceptance.mjs'), 'utf8');
   // The injected insert did not always render a Mixer row, which made the run die
   // on a 30s click timeout before any criterion was evaluated.
-  assert.ok(/openEditorOnInsert\(trackId, slotIndex\)/.test(script), 'falls back to the shipped handler');
+  assert.ok(/openEditorOnInsert\(trackId, slotId\)/.test(script), 'falls back to the shipped handler');
   assert.ok(/clickedControl: triggeredVia/.test(script), 'records the path that actually ran');
   assert.ok(/insert row not rendered/.test(script), 'labels the fallback honestly');
 });
@@ -461,4 +461,22 @@ test('the packaged run builds its effect from the inspected result', () => {
   assert.ok(!/inspected\?\.effect/.test(script), 'does not read a non-existent .effect wrapper');
   assert.ok(/inspected \?\? \{\}/.test(script), 'spreads the inspected effect');
   assert.ok(/no usable identity\/state/.test(script), 'reports a bad inspection by name');
+});
+
+test('acceptance slots are resolved by identity, not position', () => {
+  const app = readFileSync(path.join(process.cwd(), 'src/App.tsx'), 'utf8');
+  const readInsert = app.slice(app.indexOf('readInsertParameter: async'));
+  // The parameter readout looked at track 0 while inserts live on track 1, so p3
+  // could never see the edited value.
+  assert.ok(/readInsertParameter: async \(trackId: number, slotId\?: string\)/.test(app),
+    'parameter readout is told which track and slot to read');
+  assert.ok(!/mixerTracks\[0\]\?\.fxSlots\.filter\(slot => slot\.type === 'vst3'\)\[slotIndex\]/.test(readInsert),
+    'no positional lookup on a hardcoded track');
+  assert.ok(/is not a VST3 insert/.test(app), 'a non-VST3 slot is reported, not opened');
+});
+
+test('every non-PASS criterion states why in an annotation', () => {
+  const script = readFileSync(path.join(process.cwd(), 'scripts/packaged-editor-acceptance.mjs'), 'utf8');
+  assert.ok(/ACCEPTANCE-DETAIL \$\{id\} \$\{status\}/.test(script),
+    'FAIL/NOT_VERIFIED reasons are visible without downloading artifacts');
 });
