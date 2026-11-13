@@ -263,13 +263,29 @@ async function run() {
       throw new Error(`could not open the editor: click=${clickError?.message?.split('\n')[0]} hook=${hookError?.message?.split('\n')[0]}`);
     }
   }
-  await page.waitForTimeout(4000); // let the helper spawn and the window appear
-
-  const helpersDuringRead = helperProcesses();
-  const helpersDuring = helpersDuringRead.processes;
-  const newHelpers = helpersDuring.filter(h => !helpersBefore.some(b => b.pid === h.pid));
-  const windows = helperWindows(newHelpers);
-  const visibleWindow = windows.find(w => w.handle > 0);
+  // Sample continuously instead of once at +4s: a short-lived helper (one whose
+  // session is reaped early, e.g. by a rejected callbacks stream) would otherwise
+  // leave "no window" as the only observation even though a window did appear.
+  const samples = [];
+  const seenHelpers = new Map();
+  let visibleWindow;
+  const deadline = Date.now() + 6000;
+  while (Date.now() < deadline) {
+    const read = helperProcesses();
+    const fresh = read.processes.filter(h => !helpersBefore.some(b => b.pid === h.pid));
+    for (const helper of fresh) seenHelpers.set(helper.pid, helper);
+    const found = helperWindows(fresh);
+    const visible = found.find(w => w.handle > 0);
+    samples.push({ atMs: 6000 - (deadline - Date.now()), ok: read.ok,
+      helperPids: fresh.map(h => h.pid), visibleWindows: found.filter(w => w.handle > 0).length });
+    if (visible) { visibleWindow = visible; break; }
+    await page.waitForTimeout(150);
+  }
+  const helpersDuringRead = { ok: samples.some(sample => sample.ok), source: 'sampled',
+    error: samples.every(sample => !sample.ok) ? ['process table unreadable for every sample'] : null };
+  const helpersDuring = [...seenHelpers.values()];
+  const newHelpers = helpersDuring;
+  const windows = helperWindows(helpersDuring);
   // No helper read means no evidence either way: never PASS and never claim FAIL.
   record('p1-mixer-opens-editor', !helpersDuringRead.ok ? 'NOT_VERIFIED'
     : newHelpers.length > 0 && visibleWindow ? 'PASS'
@@ -281,6 +297,7 @@ async function run() {
     discoveredThroughPackagedIpc: { name: setup.effect?.name, classId: setup.effect?.classId, pluginCount: setup.pluginCount },
     helperProcessesBefore: helpersBefore,
     helperProcessesDuring: helpersDuring,
+    observationSamples: samples.slice(0, 40),
     newHelperCount: newHelpers.length,
     helperWindows: windows,
     // A separate OS process owning a visible top-level window IS the native window.

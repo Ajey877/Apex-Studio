@@ -517,3 +517,13 @@ test('the AGain audio-policy row measures the refusal instead of assuming it', (
   assert.ok(host.includes('VST3 audio effects with event input buses are not supported'),
     'the policy message is still the host\'s own');
 });
+
+test('the packaged run samples for a short-lived window instead of glancing once', () => {
+  const script = readFileSync(path.join(process.cwd(), 'scripts/packaged-editor-acceptance.mjs'), 'utf8');
+  // One read at +4s missed helpers that were reaped earlier, so p1 reported
+  // "no window" even when a window had appeared.
+  assert.ok(/while \(Date\.now\(\) < deadline\)/.test(script), 'reads are taken across a window');
+  assert.ok(/observationSamples: samples/.test(script), 'every sample is kept as evidence');
+  assert.ok(!/await page\.waitForTimeout\(4000\); \/\/ let the helper spawn/.test(script),
+    'no single-shot read remains');
+});
