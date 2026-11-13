@@ -10,6 +10,20 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { NativeVst3EditorSession, supportsNativeVst3Editor } from '../src/audio/nativeVst3EditorSession.ts';
+/**
+ * Read a file with CRLF normalised to LF.
+ *
+ * Several tests assert on multi-line source structure. Assertions that span lines
+ * must not silently pass on Linux and fail on a Windows checkout, so read through
+ * this helper instead of relying on the platform's line endings.
+ */
+function readScript(relative = 'scripts/build-native-vst3.mjs') {
+  return readSource(relative);
+}
+
+function readSource(relative) {
+  return readFileSync(path.join(process.cwd(), relative), 'utf8').replace(/\r\n/g, '\n');
+}
 /** @typedef {import('../src/audio/nativeVst3Types.ts').Vst3EditorStatus} Vst3EditorStatus */
 /** @typedef {import('../src/audio/nativeVst3Types.ts').Vst3EditorView} Vst3EditorView */
 /** @typedef {import('../src/audio/nativeVst3Types.ts').Vst3Effect} Vst3Effect */
@@ -393,7 +407,9 @@ test('packaged acceptance uses the purpose-built acceptance fixture', () => {
 test('the acceptance fixture is test-only and never staged into a packaged build', () => {
   const cmake = readFileSync(path.join(process.cwd(), 'native/vst3/CMakeLists.txt'), 'utf8');
   assert.ok(/APEX_BUILD_ACCEPTANCE_FIXTURE/.test(cmake), 'the fixture has its own build option');
-  assert.ok(/if\(APEX_BUILD_VST3_EDITOR_FIXTURE\)\n\s+smtg_add_vst3plugin\(apex-acceptance-vst3/.test(cmake),
+  // \s+ rather than \n\s+: a Windows checkout has CRLF line endings, and this
+  // assertion must not silently depend on the platform that runs it.
+  assert.ok(/if\(APEX_BUILD_VST3_EDITOR_FIXTURE\)\s+smtg_add_vst3plugin\(apex-acceptance-vst3/.test(cmake),
     'the VSTGUI bundle half only builds with VSTGUI support');
   // Nothing in the packaging path may pick it up.
   const pkg = readFileSync(path.join(process.cwd(), 'scripts/build-native-vst3.mjs'), 'utf8');
@@ -419,12 +435,24 @@ test('the packaged acceptance environment enables its own hook, not the smoke ho
 });
 
 test('the packaged acceptance fixture is actually built', () => {
-  const build = readFileSync(path.join(process.cwd(), 'scripts/build-native-vst3.mjs'), 'utf8');
-  // Regression: the harness looked for data-exchange.vst3 but the build never
-  // produced it, so discovery failed on every run.
-  assert.ok(/targets\.push\('again', 'data-exchange'\)/.test(build),
-    'data-exchange is built alongside again on Windows');
-  assert.ok(/platform === 'win32'/.test(build), 'the editor fixtures stay Windows-only');
+  const build = readScript();
+  // Regression: the harness looked for a bundle the build never produced, so
+  // discovery failed on every run. Whatever the harness targets must be built.
+  const harness = readScript('scripts/packaged-editor-acceptance.mjs');
+  const wanted = harness.match(/Release\/([a-z0-9-]+\.vst3)/)?.[1];
+  assert.ok(wanted, 'the harness names the bundle it needs');
+  assert.ok(build.includes(`'${wanted.replace(/\.vst3$/, '')}'`),
+    `${wanted} is built by scripts/build-native-vst3.mjs`);
+  // It is a VSTGUI editor fixture, so it stays Windows-only.
+  assert.ok(/if \(process\.platform === 'win32'\)[\s\S]{0,400}apex-acceptance-vst3/.test(build),
+    'the editor fixture bundle stays Windows-only');
+  // The cross-platform DSP test must still build everywhere: it sits in the base
+  // targets array, before any platform guard. Scope to that array -- the file also
+  // selects a CMake generator with a win32 check much earlier.
+  // lastIndexOf: `run(cmake` first occurs in the helper's own definition.
+  const targetList = build.slice(build.indexOf('const targets = ['), build.lastIndexOf('run(cmake'));
+  assert.ok(/apex-acceptance-vst3-test/.test(targetList.split("platform === 'win32'")[0]),
+    'the DSP test target is unconditional');
 });
 
 test('the packaged run matches the fixture by its registered name', () => {
