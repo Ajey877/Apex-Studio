@@ -59,6 +59,8 @@ const desktopApi = {
     closeEditor: (id) => ipcRenderer.invoke('vst3:closeEditor', id),
     // ACCEPTANCE ONLY: the main process refuses this unless APEX_ACCEPTANCE=1.
     editorInput: (id, action, point) => ipcRenderer.invoke('vst3:editorInput', id, action, point),
+    // ACCEPTANCE ONLY: kills the real helper backing the open editor.
+    editorCrash: (id) => ipcRenderer.invoke('vst3:editorCrash', id),
     finishEditor: (id, committed) => ipcRenderer.invoke('vst3:finishEditor', id, committed === true),
     editorRecovery: () => ipcRenderer.invoke('vst3:editorRecovery'),
     dismissEditorRecovery: (id) => ipcRenderer.invoke('vst3:dismissEditorRecovery', id),

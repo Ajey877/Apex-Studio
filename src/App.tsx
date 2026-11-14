@@ -2475,11 +2475,20 @@ export function App() {
         if (!session) throw new Error('No native editor session is open');
         const bridge = getVst3Bridge();
         if (!bridge) throw new Error('VST3 bridge missing');
-        // Let the session observe the crashed helper through its normal poll loop.
+        if (!bridge.editorCrash) throw new Error('This build cannot force an editor crash');
+        const sessionId = session.sessionId;
+        if (!sessionId) throw new Error('The native editor session has no id yet');
+        // Kill the real helper. Without this the session simply stays open and no
+        // recovery path is ever exercised -- which is what happened when the
+        // criterion first ran: it observed "open" and no recovery record.
+        const crash = await bridge.editorCrash(sessionId);
+        // Let the session observe the dead helper through its normal poll loop.
         await new Promise(resolve => setTimeout(resolve, 2500));
         const view = session.currentView;
         const recovery = await bridge.editorRecovery();
         return {
+          killedPid: crash.killedPid,
+          signal: crash.signal,
           phaseAfterCrash: view.phase,
           reportedError: view.error,
           recoveryRecordOffered: Boolean(recovery?.recovery),
@@ -2512,6 +2521,16 @@ export function App() {
           const isObject = (value: unknown) => Boolean(value) && typeof value === 'object';
           if (!isObject(left) || !isObject(right)) {
             return `${path || '(root)'}: ${JSON.stringify(left)?.slice(0, 60)} != ${JSON.stringify(right)?.slice(0, 60)}`;
+          }
+          // Arrays are values here, not containers to recurse into: comparing a
+          // two-element tuple key by key reported "structurally different" only
+          // because the closure's three-argument signature collided with Array#map's
+          // index argument, which said nothing about the actual contents.
+          if (Array.isArray(left) || Array.isArray(right)) {
+            const leftText = JSON.stringify(left);
+            const rightText = JSON.stringify(right);
+            return leftText === rightText ? ''
+              : `${path || '(root)'}: ${leftText?.slice(0, 60)} != ${rightText?.slice(0, 60)}`;
           }
           const keys = new Set([...Object.keys(left as object), ...Object.keys(right as object)]);
           for (const key of keys) {

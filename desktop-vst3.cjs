@@ -220,6 +220,20 @@ function registerVst3({ app, ipcMain, dialog, getWindow }) {
   // ACCEPTANCE ONLY. Deliberately refused unless the packaged acceptance run set
   // APEX_ACCEPTANCE, so a normal session can never reach it. It injects real OS
   // input at the plug-in window; it does not fabricate a parameter change.
+  // ACCEPTANCE ONLY, refused unless APEX_ACCEPTANCE=1. Force-crashes the helper
+  // that actually backs the open editor, so recovery is proven against a real dead
+  // process rather than a simulated failure. The pid comes from the spawned child,
+  // never from the app's own bookkeeping.
+  handle('editorCrash', async (context, owner, id) => {
+    if (process.env.APEX_ACCEPTANCE !== '1') {
+      throw new Error('VST3 editor crash injection is available only to the acceptance run.');
+    }
+    editorOwner(owner, id);
+    const pid = context.service.getEditorHelperPid(owner);
+    if (!Number.isInteger(pid) || pid <= 0) throw new Error('The editor helper pid is unavailable; nothing was killed.');
+    process.kill(pid, 'SIGKILL');
+    return { killedPid: pid, signal: 'SIGKILL' };
+  });
   handle('editorInput', async (context, owner, id, action, point) => {
     if (process.env.APEX_ACCEPTANCE !== '1') {
       throw new Error('VST3 editor input injection is available only to the acceptance run.');

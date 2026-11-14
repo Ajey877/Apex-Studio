@@ -71,6 +71,9 @@ function compactReason(evidence) {
   take('reason', evidence.reason);
   take('error', evidence.error);
   // Verdict-deciding facts that are otherwise buried past the annotation cut.
+  take('killedPid', evidence.killedPid);
+  take('phaseAfterCrash', evidence.phaseAfterCrash);
+  take('recoveryRecordOffered', evidence.recoveryRecordOffered);
   take('gainParameterEdited', evidence.gainParameterEdited);
   take('editedParameterIds', Array.isArray(evidence.editedParameterIds) ? evidence.editedParameterIds.join(',') : evidence.editedParameterIds);
   take('sessionPhase', evidence.sessionPhase);

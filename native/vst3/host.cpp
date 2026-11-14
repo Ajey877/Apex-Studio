@@ -832,8 +832,14 @@ int main() {
           // actually saw (the RECEIPT). They are reported separately on purpose.
           result["sendInputAccepted"] = accepted;
           result["observation"] = editor->keyObservation();
-        } else if (action == "mouseMove" || action == "mouseDown" || action == "mouseWheel") {
-          const auto kind = action == "mouseMove" ? "move" : action == "mouseDown" ? "down" : "wheel";
+        } else if (action == "mouseMove" || action == "mouseDown" || action == "mouseUp" ||
+                   action == "mouseWheel") {
+          // mouseUp is a real action, not a synonym: a press with no release leaves
+          // the button down and the control never commits a value.
+          const auto kind = action == "mouseMove" ? "move"
+            : action == "mouseDown" ? "down"
+            : action == "mouseUp" ? "up"
+            : "wheel";
           result = editor->deliverMouse(kind, request.value("x", 0), request.value("y", 0));
         } else if (action == "setScale") {
           const auto factor = request.at("scale").get<float>();

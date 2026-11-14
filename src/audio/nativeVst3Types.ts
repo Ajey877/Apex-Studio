@@ -143,6 +143,11 @@ export interface Vst3Bridge {
    * unreachable in a normal user session.
    */
   editorInput?(id: string, action: 'move' | 'down' | 'up' | 'wheel', point: { x: number; y: number }): Promise<unknown>;
+  /**
+   * ACCEPTANCE ONLY. Force-crashes the helper backing the open editor so recovery
+   * is proven against a real dead process. Refused unless APEX_ACCEPTANCE is set.
+   */
+  editorCrash?(id: string): Promise<{ killedPid: number; signal: string }>;
   editorRecovery?(): Promise<{ recovery: Vst3EditorRecovery | null; loadError: string | null }>;
   dismissEditorRecovery?(id: string): Promise<void>;
   /** Handshake only: transfers a dedicated live PCM port bound to this session. */

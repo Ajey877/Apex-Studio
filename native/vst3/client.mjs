@@ -125,7 +125,8 @@ export class NativeVst3Client {
   async setEditorScale(scale, classId) { return this.editorTestAction('setScale', { scale, classId }); }
   /** Acceptance harness: deliver mouse input with SendInput at real screen coords. */
   async sendEditorMouse(action, { x = 20, y = 20, classId } = {}) {
-    const name = { move: 'mouseMove', down: 'mouseDown', wheel: 'mouseWheel' }[action];
+    // `up` must be routable: a press with no release never completes a click.
+    const name = { move: 'mouseMove', down: 'mouseDown', up: 'mouseUp', wheel: 'mouseWheel' }[action];
     if (!name) throw new Error('Invalid mouse action');
     return this.editorTestAction(name, { x, y, classId });
   }

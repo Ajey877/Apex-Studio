@@ -846,3 +846,23 @@ test('the acceptance click sends a press and a release', () => {
     'the renderer sends both halves of the click');
   assert.ok(/sent: \['move', 'down', 'up'\]/.test(hook), 'the evidence names what was sent');
 });
+
+test('the recovery crash kills the real helper and is acceptance-only', () => {
+  const desktop = readScript('desktop-vst3.cjs');
+  const start = desktop.indexOf("handle('editorCrash'");
+  assert.ok(start > 0, 'the crash hook exists');
+  const body = desktop.slice(start, start + 700);
+  assert.ok(/process\.env\.APEX_ACCEPTANCE !== '1'/.test(body),
+    'the hook refuses to run outside an acceptance run');
+  assert.ok(/getEditorHelperPid/.test(body),
+    'the pid is observed from the spawned child, not from app bookkeeping');
+  assert.ok(/process\.kill\(pid, 'SIGKILL'\)/.test(body), 'the real helper is killed');
+
+  const app = readSource('src/App.tsx');
+  const hook = app.slice(app.indexOf('crashEditorAndRecover'), app.indexOf('undoRedoRoundTrip'));
+  assert.ok(/bridge\.editorCrash\(sessionId\)/.test(hook), 'the renderer crashes the real helper');
+  assert.ok(/killedPid/.test(hook), 'the killed pid is reported as evidence');
+  // Without a kill the session stays open and recovery is never exercised.
+  assert.ok(!/^ {8}crashEditorAndRecover: async \(\) => \{\n {10}const session[\s\S]{0,400}await new Promise\(resolve => setTimeout\(resolve, 2500\)\);$/m.test(hook),
+    'the hook no longer merely waits and hopes');
+});
