@@ -406,6 +406,32 @@ async function reopenEditorThroughMixerUi(page) {
   }
 }
 
+/**
+ * Clear the editor result panel if one is up.
+ *
+ * After a committing close the panel stays mounted with its result and a Dismiss
+ * control, which is shipped behaviour. Anything that then wants to click in the
+ * Mixer has to dismiss it first, exactly as a user would. Returns true when a panel
+ * was dismissed, false when none was present, and records an error if it was up but
+ * would not go away.
+ */
+async function dismissEditorResultPanel(page) {
+  const dismiss = page.getByRole('button', { name: 'Dismiss' }).first();
+  let visible = false;
+  try {
+    // Short timeout on purpose: the usual case is that no panel is present, and this
+    // must not add 15 seconds to every cycle.
+    visible = await dismiss.isVisible({ timeout: 1500 }).catch(() => false);
+  } catch { visible = false; }
+  if (!visible) return { dismissed: false, wasPresent: false };
+  try {
+    await dismiss.click({ timeout: 15000 });
+    return { dismissed: true, wasPresent: true };
+  } catch (error) {
+    return { dismissed: false, wasPresent: true, error: `${error?.message ?? error}`.split('\n')[0] };
+  }
+}
+
 const profile = path.join(root, 'build', `packaged-acceptance-profile-${Date.now()}`);
 /** Every launch of the packaged app uses this environment. Declared once so no
  *  launch can silently forget the flag that enables the acceptance hook. */
@@ -976,6 +1002,11 @@ async function run() {
   for (let cycle = 1; cycle <= CYCLES; cycle += 1) {
     const row = { cycle };
     try {
+      // Clear any result panel still up from the previous stage (p4 leaves its own,
+      // since its hook closes the editor and measures the history). Its Dismiss control
+      // covers the Mixer, so without this the cycle's first click is blocked -- which
+      // is exactly what a 15s click timeout on the Mixer tab reported.
+      row.panelClearedAtStart = await dismissEditorResultPanel(page);
       // Re-open the SAME insert through the real Mixer UI. Adding a second insert
       // here would measure a different object and make the cycle meaningless.
       const reopened = await reopenEditorThroughMixerUi(page);
@@ -1030,15 +1061,9 @@ async function run() {
       // leaving it mounted blocks the next cycle's Mixer clicks (a 15s click timeout
       // was how this first showed up). This is the shipped button, not a test hook.
       if (result?.phaseAfterClose === 'committed') {
-        try {
-          const dismiss = page.getByRole('button', { name: 'Dismiss' }).first();
-          await dismiss.waitFor({ state: 'visible', timeout: 15000 });
-          await dismiss.click({ timeout: 15000 });
-          row.dismissed = true;
-        } catch (error) {
-          row.dismissed = false;
-          row.dismissError = `${error?.message ?? error}`.split('\n')[0];
-        }
+        const cleared = await dismissEditorResultPanel(page);
+        row.dismissed = cleared.dismissed;
+        if (cleared.error) row.dismissError = cleared.error;
       }
       row.effectiveAfterClose = result?.effectiveAfterClose?.value ?? null;
       row.effectiveAfterUndo = result?.effectiveAfterUndo?.value ?? null;

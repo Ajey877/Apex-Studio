@@ -1299,8 +1299,10 @@ test('p4 and p6 are proven on the edited parameter, not just on depth', () => {
   // After a committing close the panel stays mounted with its result; a user must
   // dismiss it before the Mixer is reachable again. A cycle that skips this blocks
   // every later cycle's clicks, which is how a 15s click timeout first appeared.
-  assert.ok(/getByRole\('button', \{ name: 'Dismiss' \}\)/.test(script),
-    'the cycle dismisses the result panel through the shipped control');
+  assert.ok(/async function dismissEditorResultPanel\(page\)/.test(script),
+    'one helper dismisses the result panel through the shipped control');
+  assert.ok(/row\.panelClearedAtStart = await dismissEditorResultPanel\(page\)/.test(script),
+    'a cycle clears a panel left up by an earlier stage before it clicks anything');
   assert.ok(/row\.dismissed !== false/.test(script),
     'a cycle does not pass unless the panel was dismissed');
 
