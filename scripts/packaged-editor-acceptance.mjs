@@ -227,6 +227,8 @@ async function run() {
     throw new Error(setup.error);
   }
 
+  /** Editor-session errors the app reported, collected for p1's evidence. */
+  const sessionErrors = [];
   const helpersBeforeRead = helperProcesses();
   const helpersBefore = helpersBeforeRead.processes;
 
@@ -302,6 +304,14 @@ async function run() {
   await openButton.click({ timeout: 30000 });
   const triggeredVia = 'Mixer insert "Open VST3 editor" button (real UI click)';
 
+  // Capture the insert row's own status/error text. If the editor failed to open,
+  // the UI already says why -- recording it turns "no helper" into a diagnosis
+  // instead of a mystery.
+  ui.editorStatusAfterClick = await page
+    .locator('p[role="status"]').allInnerTexts().then(list => list.filter(Boolean).slice(-4)).catch(() => []);
+  ui.editorAlertAfterClick = await page
+    .locator('p[role="alert"]').allInnerTexts().then(list => list.filter(Boolean).slice(-4)).catch(() => []);
+
   // Cross-check that the project state agrees an insert was actually added.
   const inserted = await page.evaluate(async () => {
     const app = globalThis.__apexAcceptance;
@@ -355,8 +365,12 @@ async function run() {
     helperLifetimeMs,
     // The fixture, not the host, is what limits this run: see the fixture table in
     // docs/VST3-EDITOR-ACCEPTANCE.md. Recorded so nobody reads this as a host bug.
-    fixtureLimit: visibleWindow ? null
-      : 'the bundled editor fixtures are DataExchange (UI-only parameters its controller never exposes) and AGain (event input bus, refused by policy); see the fixture table in docs/VST3-EDITOR-ACCEPTANCE.md',
+    // No fixture excuse any more: ApexAcceptanceGain is stereo, declares no event
+    // buses, has a genuine VSTGUI editor and exposes the parameter its editor edits.
+    // If no window appears now, that is a host or package finding, not a fixture
+    // limitation, and the evidence must say so rather than blame the fixture.
+    fixtureLimit: null,
+    helperSessionErrors: sessionErrors.length ? sessionErrors : ui.editorAlertAfterClick ?? [],
     helperEnumeration: { before: helpersBeforeRead.ok, during: helpersDuringRead.ok,
       source: helpersDuringRead.source ?? null, errors: helpersDuringRead.error ?? null },
     clickedControl: triggeredVia,
