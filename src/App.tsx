@@ -2592,11 +2592,17 @@ export function App() {
        * through the shipped describeEffect path -- the same one the Mixer uses to show
        * a parameter -- and never infers a value from a missing override.
        */
-      readEffectiveParameter: async () => {
+      readEffectiveParameter: async (trackId?: number, slotId?: string) => {
+        // Same lookup rules as readInsertParameter: scope by track/slot when the caller
+        // knows them, and otherwise take the first VST3 insert anywhere. A mismatch
+        // between the two hooks would let p4 compare values from different inserts.
         const locate = () => {
           for (const track of projectStateRef.current.mixerTracks) {
+            if (trackId !== undefined && track.id !== trackId) continue;
             for (const slot of track.fxSlots ?? []) {
-              if (slot.type === 'vst3' && slot.vst3Effect) return slot;
+              if (slot.type !== 'vst3' || !slot.vst3Effect) continue;
+              if (slotId && slot.id !== slotId) continue;
+              return slot;
             }
           }
           return undefined;
