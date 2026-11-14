@@ -1267,11 +1267,21 @@ test('p4 and p6 are proven on the edited parameter, not just on depth', () => {
   assert.ok(/readEffectiveParameter/.test(script),
     'the baseline comes from the controller through describeEffect, not from stored state');
   // Reading the controller opens its own short-lived native session, so the baseline
-  // must be taken before the editor window opens and never while one is live.
-  const baselineAt = script.indexOf('const preEditEffective = await page.evaluate');
-  const openAt = script.indexOf('const opened = await openEditorThroughMixerUi(page);');
-  assert.ok(baselineAt > 0 && openAt > 0 && baselineAt < openAt,
-    'the effective baseline is measured before the editor window opens');
+  // must be taken before the editor window opens and never while one is live. It must
+  // also be taken AFTER the insert exists: sampling first produced a null baseline
+  // and made a working path look broken.
+  const insertAt = script.indexOf('const insertReady = await openEditorThroughMixerUi(page, { open: false });');
+  const baselineAt = script.indexOf('const preEditEffective = insertReady.ok');
+  const openAt = script.indexOf('const opened = insertReady.ok');
+  assert.ok(insertAt > 0 && baselineAt > 0 && openAt > 0 && insertAt < baselineAt && baselineAt < openAt,
+    'the effective baseline is measured after the insert exists and before the editor opens');
+  assert.ok(/open: false/.test(script), 'the opener can stop before clicking Open, so the read fits between');
+  // Repeat cycles must re-open the EXISTING insert; adding another would measure a
+  // different object and make the cycle meaningless.
+  assert.ok(/async function reopenEditorThroughMixerUi\(page\)/.test(script),
+    'a reopen path exists that does not add an insert');
+  assert.ok(/const reopened = await reopenEditorThroughMixerUi\(page\);/.test(script),
+    'the repeat cycles use the reopen path');
 
   // The reliability criterion: ten consecutive cycles, each one observed.
   assert.ok(/'p4b-repeated-cycles'/.test(script), 'the repeated-cycle criterion is registered');

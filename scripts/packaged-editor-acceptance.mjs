@@ -202,10 +202,14 @@ function writeReport(extra = {}) {
       };
     }
     if (r.id === 'p4b-repeated-cycles') {
-      return { cyclesAttempted: r.detail?.cyclesAttempted ?? null,
-        cyclesPassed: r.detail?.cyclesPassed ?? null,
-        firstFailingCycle: r.detail?.firstFailingCycle ?? null,
-        failingReason: r.detail?.failingReason ?? null };
+      // `record()` stores evidence directly on the result, so read it from there.
+      // Reading a non-existent `detail` produced nulls here and reported a run as
+      // failing with no numbers to explain it.
+      const e = r.evidence ?? {};
+      return { cyclesAttempted: e.cyclesAttempted ?? null,
+        cyclesPassed: e.cyclesPassed ?? null,
+        firstFailingCycle: e.firstFailingCycle ?? null,
+        failingReason: e.failingReason ?? null };
     }
     if (r.id === 'p6-save-quit-reload') {
       const e = r.evidence ?? {};
@@ -321,7 +325,7 @@ const EDITOR_FIXTURE_NAME = /^ApexAcceptanceGain$/i;
  *
  * Deliberately has no fallback: if a row does not render, that is the result.
  */
-async function openEditorThroughMixerUi(page) {
+async function openEditorThroughMixerUi(page, options = {}) {
   const ui = {};
   try {
     const mixerTab = page.locator('#nav-mixer');
@@ -354,6 +358,43 @@ async function openEditorThroughMixerUi(page) {
     await fixtureButton.click({ timeout: 60000 });
     ui.choseFixtureFromPicker = true;
 
+    const openButton = page.getByRole('button', { name: 'Open VST3 editor' }).first();
+    await openButton.waitFor({ state: 'visible', timeout: 60000 });
+    ui.insertRowRendered = true;
+    // `open: false` stops with the insert created and its editor button located. The
+    // caller then measures the plug-in controller and opens the window itself, which
+    // keeps the baseline read from happening while a second native session (the one
+    // the read creates) coexists with a live editor.
+    if (options.open === false) return { ok: true, ui, openButton };
+    await openButton.click({ timeout: 30000 });
+    ui.clickedOpenVst3Editor = true;
+    return { ok: true, ui };
+  } catch (error) {
+    return { ok: false, ui, error: `${error?.message ?? error}`.split('\n')[0] };
+  }
+}
+
+/**
+ * Re-open the EXISTING insert's editor through the real Mixer UI.
+ *
+ * This is the repeated-cycle path: `openEditorThroughMixerUi` adds an insert, which is
+ * correct exactly once. A second call would add a SECOND insert and silently measure a
+ * different object, so the repeat cycles navigate to the insert that is already there
+ * and click its own "Open VST3 editor" control.
+ */
+async function reopenEditorThroughMixerUi(page) {
+  const ui = {};
+  try {
+    const mixerTab = page.locator('#nav-mixer');
+    await mixerTab.waitFor({ state: 'visible', timeout: 30000 });
+    await mixerTab.click({ timeout: 15000 });
+    ui.openedMixerView = true;
+    await page.waitForTimeout(400);
+    const trackStrip = page.locator('#mixer-strip-1');
+    await trackStrip.waitFor({ state: 'visible', timeout: 30000 });
+    await trackStrip.click({ timeout: 15000 });
+    ui.selectedTrackStrip = '#mixer-strip-1';
+    await page.waitForTimeout(250);
     const openButton = page.getByRole('button', { name: 'Open VST3 editor' }).first();
     await openButton.waitFor({ state: 'visible', timeout: 60000 });
     ui.insertRowRendered = true;
@@ -430,17 +471,34 @@ async function run() {
   // No test-only handler is used to open the editor: the visible control is the
   // control that is clicked, and its absence is a FAIL rather than a fallback.
   stage('p1-mixer-ui');
-  // The EFFECTIVE value before any editor exists, read from the plug-in's controller
-  // through the shipped describeEffect path. Taken HERE, before the editor window
-  // opens, so the baseline is never measured while a second native session is live.
+  // Stop after the insert exists but BEFORE the editor window opens.
+  const insertReady = await openEditorThroughMixerUi(page, { open: false });
+  // The EFFECTIVE value before the gesture, read from the plug-in's controller through
+  // the shipped describeEffect path.
+  //
+  // Timing matters twice over. The insert must already exist, because before it does
+  // there is no plug-in to ask (an earlier revision sampled this first and recorded a
+  // null baseline that made a working path look broken). And it must be read BEFORE
+  // the editor window opens, because the read starts its own short-lived native
+  // session that must never coexist with the editor under test.
   //
   // The stored override is null for a fresh insert, so null says "nothing serialized
   // yet" and NOT "the gain is zero". The controller's own value is the only honest
   // baseline for "undo restored the original".
-  const preEditEffective = await page.evaluate(async () =>
-    globalThis.__apexAcceptance.readEffectiveParameter())
-    .catch(error => ({ value: null, error: String(error?.message ?? error) }));
-  const opened = await openEditorThroughMixerUi(page);
+  const preEditEffective = insertReady.ok
+    ? await page.evaluate(async () => globalThis.__apexAcceptance.readEffectiveParameter())
+      .catch(error => ({ value: null, error: String(error?.message ?? error) }))
+    : { value: null, error: insertReady.error };
+  const opened = insertReady.ok
+    ? await (async () => {
+      try {
+        await insertReady.openButton.click({ timeout: 30000 });
+        return { ok: true, ui: { ...insertReady.ui, clickedOpenVst3Editor: true } };
+      } catch (error) {
+        return { ok: false, ui: insertReady.ui, error: `${error?.message ?? error}`.split('\n')[0] };
+      }
+    })()
+    : insertReady;
   const ui = { ...opened.ui, selectedTrack: 'Kick / 808' };
   if (!opened.ok) {
     // One of the visible controls was missing. Say which step and stop: every later
@@ -918,13 +976,15 @@ async function run() {
   for (let cycle = 1; cycle <= CYCLES; cycle += 1) {
     const row = { cycle };
     try {
-      // The value the controller holds before this cycle's gesture.
+      // Re-open the SAME insert through the real Mixer UI. Adding a second insert
+      // here would measure a different object and make the cycle meaningless.
+      const reopened = await reopenEditorThroughMixerUi(page);
+      if (!reopened.ok) throw new Error(`open failed: ${reopened.error}`);
+      // The value the controller holds before this cycle's gesture, read after the
+      // insert exists so the plug-in can actually be asked.
       const before = await page.evaluate(async () =>
         globalThis.__apexAcceptance.readEffectiveParameter());
       row.effectiveBefore = before?.value ?? null;
-      // Re-open through the real Mixer UI: a new gesture needs a new window.
-      const reopened = await openEditorThroughMixerUi(page);
-      if (!reopened.ok) throw new Error(`open failed: ${reopened.error}`);
       // Aim at the handle's CURRENT position: after the first cycle the gain is no
       // longer at its default, so a fixed point would miss the handle entirely.
       const current = row.effectiveBefore;
