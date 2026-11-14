@@ -7,7 +7,7 @@
   Deliberately bitmap-free: every control uses vector drawing, so the bundle needs
   no PNG resources and the editor renders identically on a CI runner without any
   asset files. The Gain slider's control-tag is "Gain", which the controller
-  exposes as ParamID 0 -- the same id the processor reads. That agreement is what
+  exposes as ParamID 0, the same id the processor reads. That agreement is what
   makes beginEdit/performEdit/endEdit reference a genuinely writable parameter.
 -->
 <vstgui-ui-description version="1">

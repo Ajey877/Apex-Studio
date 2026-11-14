@@ -764,3 +764,31 @@ test('the fixture declares its controller class, so PlugProvider can load it', (
   assert.ok(/getControllerClassId returns kResultTrue/.test(test_),
     'the behavioural test asserts the real load-path precondition');
 });
+
+test('the acceptance fixture uidesc is well-formed XML', () => {
+  // VSTGUI parses this at createView time. A malformed file yields no view, so the
+  // plug-in reports a null/zero size and the host correctly refuses to open a
+  // window with "invalid or unsupported initial size" -- a message that points at
+  // the host while the fault is in the layout file. Nothing else in the repository
+  // parsed it, so it shipped broken while every other fixture check was green.
+  const xml = readSource('native/vst3/resources/acceptancegain.uidesc');
+  // `--` is illegal inside an XML comment, which is how this broke.
+  for (const comment of xml.match(/<!--[\s\S]*?-->/g) ?? []) {
+    const body = comment.slice(4, -3);
+    assert.ok(!body.includes('--'), 'no XML comment contains a double hyphen');
+  }
+  // Element balance, which catches everything a double hyphen did.
+  const tagPattern = /<\s*(\/?)\s*([A-Za-z_][\w.:-]*)([^>]*?)(\/?)\s*>/g;
+  const stack = [];
+  for (const match of xml.matchAll(tagPattern)) {
+    const [, closing, name, attrs, selfClosing] = match;
+    if (closing) { assert.equal(stack.pop(), name, `unbalanced </${name}>`); continue; }
+    if (selfClosing || attrs.trimEnd().endsWith('/')) continue;
+    stack.push(name);
+  }
+  assert.deepEqual(stack, [], 'every element is closed');
+
+  // And the layout must still describe the editor the host opens.
+  assert.match(xml, /class="CViewContainer"[^>]*size="320, 120"/, 'the root view is 320x120');
+  assert.match(xml, /control-tag="Gain"/, 'the Gain control still targets ParamID 0');
+});

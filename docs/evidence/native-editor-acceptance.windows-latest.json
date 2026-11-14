@@ -220,6 +220,14 @@
       "fix": "The constructor now calls setControllerClass(kControllerUID); three load-path assertions were added to the fixture test and were verified to fail when that line is removed.",
       "wouldTheOldTestHaveCaughtIt": false,
       "note": "Genuine end-to-end defect in the fixture, found only because the packaged path was finally made to run the real Mixer UI instead of a test hook."
+    },
+    {
+      "id": "malformed-uidesc-blaming-the-host",
+      "symptom": "The packaged run reached the real \"Open VST3 editor\" click and failed with \"VST3 editor returned an invalid or unsupported initial size\".",
+      "cause": "acceptancegain.uidesc was not well-formed XML: an XML comment contained \"--\", which is illegal inside a comment. VSTGUI could not build the description, so createView produced no usable view and getSize returned a zero rect. The host then correctly refused the size, so the error message pointed at the host while the fault was in the layout file.",
+      "fix": "Rewrote the comment. A unit test now asserts the file is well-formed (no double hyphen in comments, balanced elements) and is verified to fail when the double hyphen is restored.",
+      "wouldTheOldTestHaveCaughtIt": false,
+      "note": "Sixth defect; also only reachable once the packaged run drove the real UI."
     }
   ]
 }

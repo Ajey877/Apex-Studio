@@ -319,7 +319,14 @@ behaviour rather than declared intent — 43 checks, all passing locally:
   `PluginHost::PlugProvider::initialize()` requires before it will create a
   controller at all.
 
-That last check exists because its absence was a real defect: constructing the
+The layout file is validated as XML too. VSTGUI parses `acceptancegain.uidesc`
+at `createView` time, and a malformed file yields no view, so the plug-in reports a
+zero size and the host correctly refuses with "invalid or unsupported initial size"
+— a message that blames the host for a fault in the layout. That is exactly what
+happened: an XML comment contained `--`, which is illegal inside a comment, and
+nothing in the repository parsed the file.
+
+That load-path check exists because its absence was a real defect: constructing the
 processor and controller directly proves they work but says nothing about whether
 a host can *load* them. `PlugProvider` asks the component for
 `getControllerClassId` and fails when it gets `kResultFalse`, which is exactly what
