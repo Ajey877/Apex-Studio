@@ -748,10 +748,11 @@ async function run() {
   // the undo/redo that follow, so "one undoable change" is proven on the actual value
   // the user edited rather than on the depth counter alone: a depth-only check passes
   // for any change, including one that never touched the gain.
-  const history = await page.evaluate(async (slotId) => {
-    const app = globalThis.__apexAcceptance;
-    return app.editorParameterUndoRedo(1, slotId);
-  }, inserted?.slotId);
+  // The hook locates the VST3 insert in live state. `inserted` is the project
+  // snapshot, which carries no per-insert id, so passing `inserted?.slotId` here
+  // supplied undefined and the parameter read returned null on every run.
+  const history = await page.evaluate(async () =>
+    globalThis.__apexAcceptance.editorParameterUndoRedo());
   const added = history?.entriesAddedByGesture;
   // The edited value must differ from the fixture default (0.5); otherwise "undo
   // restored the original" is a comparison of two identical numbers and proves
@@ -763,6 +764,8 @@ async function run() {
   record('p4-one-undoable-change', p4Passed ? 'PASS' : blockedByFixture ? 'NOT_VERIFIED' : 'FAIL', {
     // Front-loaded: these decide the verdict.
     entriesAddedByGesture: added,
+    locatedSlotId: history?.locatedSlotId ?? null,
+    parameterCount: history?.parameterCount ?? null,
     editedValue: history?.valueAfterClose ?? null,
     valueAfterUndo: history?.valueAfterUndo ?? null,
     valueAfterRedo: history?.valueAfterRedo ?? null,
@@ -807,8 +810,8 @@ async function run() {
     // Mixer uses. Comparing the serialized state to itself proves durability but says
     // nothing about whether the edited parameter was the thing that survived: the
     // fixture default would survive a run in which the edit never happened.
-    const reloaded = await page2.evaluate(async (slotId) =>
-      globalThis.__apexAcceptance.readInsertParameter(1, slotId), inserted?.slotId);
+    const reloaded = await page2.evaluate(async () =>
+      globalThis.__apexAcceptance.readInsertParameter());
     const reloadedParameter = reloaded?.value ?? null;
     const reloadedMatchesEdit = typeof editedParameterValue === 'number'
       && typeof reloadedParameter === 'number'

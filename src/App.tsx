@@ -2553,11 +2553,22 @@ export function App() {
        * after it, original after undo, edited after redo.
        */
       editorParameterUndoRedo: async (trackId: number, slotId?: string) => {
-        const read = () => {
-          const slots = projectStateRef.current.mixerTracks.find(track => track.id === trackId)?.fxSlots ?? [];
-          const effect = (slotId ? slots.find(slot => slot.id === slotId) : slots.find(slot => slot.type === 'vst3'))?.vst3Effect;
-          return effect?.state?.parameters?.[0]?.value ?? null;
+        // Find the insert rather than trusting a caller-supplied id: the packaged
+        // harness passes the project snapshot's shape, which has no per-insert id, so
+        // a slotId argument arrives undefined and a lookup keyed on it silently reads
+        // nothing. Searching the live state is both correct and self-contained.
+        const locate = () => {
+          for (const track of projectStateRef.current.mixerTracks) {
+            if (trackId !== undefined && track.id !== trackId) continue;
+            for (const slot of track.fxSlots ?? []) {
+              if (slot.type !== 'vst3') continue;
+              if (slotId && slot.id !== slotId) continue;
+              return slot;
+            }
+          }
+          return undefined;
         };
+        const read = () => locate()?.vst3Effect?.state?.parameters?.[0]?.value ?? null;
         const depths = () => ({ undo: projectHistoryRef.current.past.length, redo: projectHistoryRef.current.future.length });
         const edited = read();
         const before = depths();
@@ -2575,6 +2586,12 @@ export function App() {
         // Leave the document exactly as the edit left it, so the later persistence
         // checks see the edited value and not the undone one.
         return {
+          // Which insert the numbers came from: a null value with a null slot means
+          // the insert was never located, which is a different finding from an edit
+          // that did not change the value.
+          locatedSlotId: locate()?.id ?? null,
+          locatedTrackId: projectStateRef.current.mixerTracks.find(t => (t.fxSlots ?? []).some(sl => sl.type === 'vst3'))?.id ?? null,
+          parameterCount: locate()?.vst3Effect?.state?.parameters?.length ?? null,
           editedValue: edited,
           valueAfterClose: afterClose,
           valueAfterUndo: afterUndo,
