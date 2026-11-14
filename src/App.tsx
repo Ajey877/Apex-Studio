@@ -2542,6 +2542,58 @@ export function App() {
           parameterCount: effect?.state?.parameters?.length ?? null, slotIds: slots.map(slot => `${slot.type}:${slot.id}`) };
       },
       saveProject: async () => ({ ok: await performSave(projectStateRef.current, { reconcileAudio: true }) }),
+      /**
+       * Undo/redo measured on the EDITED PARAMETER specifically.
+       *
+       * The generic round trip compares the whole history-governed document, which proves
+       * undo/redo move something but not that the gain the user just edited survives
+       * the round trip. This closes the editor (the gesture that commits), then reads
+       * the insert's parameter value across undo, redo and undo again, so the packaged
+       * criterion can assert the actual numbers: original before the edit, edited
+       * after it, original after undo, edited after redo.
+       */
+      editorParameterUndoRedo: async (trackId: number, slotId?: string) => {
+        const read = () => {
+          const slots = projectStateRef.current.mixerTracks.find(track => track.id === trackId)?.fxSlots ?? [];
+          const effect = (slotId ? slots.find(slot => slot.id === slotId) : slots.find(slot => slot.type === 'vst3'))?.vst3Effect;
+          return effect?.state?.parameters?.[0]?.value ?? null;
+        };
+        const depths = () => ({ undo: projectHistoryRef.current.past.length, redo: projectHistoryRef.current.future.length });
+        const edited = read();
+        const before = depths();
+        await handleCloseVst3Editor();
+        const afterClose = read();
+        const afterCloseDepths = depths();
+        handleUndo();
+        await new Promise(resolve => setTimeout(resolve, 150));
+        const afterUndo = read();
+        const afterUndoDepths = depths();
+        handleRedo();
+        await new Promise(resolve => setTimeout(resolve, 150));
+        const afterRedo = read();
+        const afterRedoDepths = depths();
+        // Leave the document exactly as the edit left it, so the later persistence
+        // checks see the edited value and not the undone one.
+        return {
+          editedValue: edited,
+          valueAfterClose: afterClose,
+          valueAfterUndo: afterUndo,
+          valueAfterRedo: afterRedo,
+          depthBeforeClose: before,
+          depthAfterClose: afterCloseDepths,
+          depthAfterUndo: afterUndoDepths,
+          depthAfterRedo: afterRedoDepths,
+          // Exactly one entry for one completed gesture.
+          entriesAddedByGesture: afterCloseDepths.undo - before.undo,
+          // Undo must land on something different from the edited value, and redo must
+          // bring the edited value back exactly.
+          undoChanged: afterUndo !== afterClose,
+          undoRestoredOriginal: afterUndo !== afterClose && afterUndo !== null,
+          redoRestoredEdited: afterRedo === afterClose && afterRedo !== null,
+          // A phantom entry would show up as the undo stack growing without an edit.
+          noDuplicateEntries: afterCloseDepths.undo - before.undo <= 1,
+        };
+      },
       // Quit through the real File > Quit path, so the before-quit capture and
       // helper reaping that ships in the app is what gets exercised.
       // Closing the window is the shipped quit path: window-all-closed -> app.quit()

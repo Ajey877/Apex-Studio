@@ -1006,12 +1006,18 @@ test('every container above an interactive control is mouse-enabled', () => {
   // frame as a CHILD view. The container walk below skips mouse-disabled children, so
   // a mouse-enabled="false" template puts every control inside it out of reach just as
   // surely as a nested panel does. Matching only <view> here is what let that survive.
-  const rootTemplate = /<template\b([^>]*)>/.exec(xml);
-  assert.ok(rootTemplate, 'the layout has a root <template>');
-  assert.ok(!/\bmouse-enabled="false"/.test(rootTemplate[1]),
+  // Match the ELEMENT, not a string that happens to appear in the file: strip
+  // comments first, or a comment quoting `<template …>` would satisfy this check
+  // while the real element stayed broken. (That is not hypothetical: prose about the
+  // template is exactly what the layout's comments contain.)
+  const markup = xml.replace(/<!--[\s\S]*?-->/g, '');
+  const rootTemplate = /<template\b([^>]*)>/.exec(markup);
+  assert.ok(rootTemplate, 'the layout has a root <template> element');
+  const rootFlag = /\bmouse-enabled="([a-z]+)"/.exec(rootTemplate[1])?.[1] ?? 'true';
+  assert.notEqual(rootFlag, 'false',
     'the root <template> must not be mouse-enabled="false": VST3Editor adds it to the frame as a child, so the frame would never reach the controls inside it');
 
-  const tags = [...xml.matchAll(/<(\/?)(view|template)\b([^>]*)>/g)];
+  const tags = [...markup.matchAll(/<(\/?)(view|template)\b([^>]*)>/g)];
   const stack = [];
   let checked = 0;
   for (const tag of tags) {
@@ -1183,4 +1189,59 @@ test('the packaged gesture retries only the transient busy refusal', () => {
   // The gesture itself is unchanged: still a genuine shift-drag of OS input.
   assert.ok(/'shift-drag: press at the handle, move to the target, release'/.test(app),
     'the gesture is still a real drag');
+});
+
+test('the editor trace is reported even when p3 passes', () => {
+  /**
+   * record() only annotates NON-passing criteria, so the moment p3 started passing
+   * its trace stopped being visible in CI: the verdict was reported but the evidence
+   * that justified it was only in an artifact that CI cannot always hand back. The
+   * trace line is emitted unconditionally and lifted to a notice by the workflow, so
+   * a PASS is auditable from the run itself.
+   */
+  const script = readScript('scripts/packaged-editor-acceptance.mjs');
+  assert.ok(/ACCEPTANCE-EDITOR-TRACE/.test(script), 'the script prints the trace verdict');
+  // It must be outside the non-PASS branch: emitted from the report path, not record().
+  const traceIndex = script.indexOf('ACCEPTANCE-EDITOR-TRACE');
+  const recordIndex = script.indexOf('ACCEPTANCE-DETAIL');
+  assert.ok(traceIndex > recordIndex, 'the trace line sits in the report path, after record()');
+  const workflow = readSource('.github/workflows/desktop-validation.yml');
+  assert.ok(/grep -E '\^ACCEPTANCE-EDITOR-TRACE'/.test(workflow),
+    'the workflow lifts the trace line into the run annotations');
+});
+
+test('p4 and p6 are proven on the edited parameter, not just on depth', () => {
+  /**
+   * "One undoable change" measured by a depth counter passes for any change at all,
+   * including one that never touched the gain. And a reload check that compares the
+   * serialized state against itself passes even when the edit never happened, because
+   * the fixture default would survive either way. Both criteria therefore assert the
+   * actual parameter value across the round trip.
+   */
+  const script = readScript('scripts/packaged-editor-acceptance.mjs');
+  assert.ok(/editorParameterUndoRedo/.test(script), 'p4 drives a parameter-level round trip');
+  for (const field of ['entriesAddedByGesture', 'valueAfterUndo', 'valueAfterRedo',
+    'undoChanged', 'redoRestoredEdited']) {
+    assert.ok(script.includes(field), `p4 records ${field}`);
+  }
+  // The edited value must differ from the plugin's own default, or undo/redo restores
+  // two identical numbers and proves nothing.
+  assert.ok(/editedDiffersFromDefault/.test(script),
+    'p4 refuses to accept an edit that left the parameter at its default');
+
+  // p6 must read the reloaded parameter and compare it to the edited value.
+  assert.ok(/reloadedMatchesEdit/.test(script), 'p6 compares the reloaded parameter');
+  assert.ok(/readInsertParameter\(1, slotId\)/.test(script),
+    'p6 reads it through the same hook the Mixer uses');
+
+  // The hook exists and leaves the document holding the edited value.
+  const app = readSource('src/App.tsx');
+  const hookStart = app.indexOf('editorParameterUndoRedo');
+  // Bound by the next acceptance member, never by a fixed character count: the
+  // comment above this hook is long enough that a fixed window would truncate it.
+  const hook = app.slice(hookStart, app.indexOf('crashEditorAndRecover', hookStart));
+  assert.ok(/handleUndo\(\)/.test(hook) && /handleRedo\(\)/.test(hook),
+    'the round trip really invokes undo and redo');
+  assert.ok(/await handleCloseVst3Editor\(\)/.test(hook),
+    'the commit runs through the shipped close handler');
 });

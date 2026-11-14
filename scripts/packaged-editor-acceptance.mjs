@@ -159,6 +159,30 @@ function writeReport(extra = {}) {
     statuses: Object.fromEntries(results.map(r => [r.id, r.status])),
   })}`);
   for (const r of results) console.log(`${r.status.padEnd(12)} ${r.id.padEnd(26)} ${r.criterion}`);
+  // The C/D instrument's own finding, printed whether or not p3 passes.
+  //
+  // `record()` only annotates non-PASS criteria, so once p3 passes its trace became
+  // invisible in CI: the verdict was reported but the evidence that justified it was
+  // not. This additive line is lifted to a notice by the workflow and states what the
+  // editor actually observed, so the PASS is auditable from the run itself.
+  const p3 = results.find(r => r.id === 'p3-parameter-reaches-apex');
+  if (p3?.evidence?.cOrDVerdict) {
+    const facts = p3.evidence.traceFacts ?? {};
+    console.log(`ACCEPTANCE-EDITOR-TRACE ${JSON.stringify({
+      cOrDVerdict: p3.evidence.cOrDVerdict,
+      mouseDownOnGainSlider: facts.mouseDownOnGainSlider ?? null,
+      controlValueMoved: facts.controlValueMoved ?? null,
+      valuesSeen: facts.valuesSeen ?? null,
+      beganEditing: facts.beganEditing ?? null,
+      controlBeginEditObserved: facts.controlBeginEditObserved ?? null,
+      valueChangedObserved: facts.valueChangedObserved ?? null,
+      performEditObserved: facts.performEditObserved ?? null,
+      controlEndEditObserved: facts.controlEndEditObserved ?? null,
+      gainParameterEdited: p3.evidence.gainParameterEdited ?? null,
+      editedParameterIds: p3.evidence.editedParameterIds ?? null,
+      traceLineCount: p3.evidence.editorTraceLineCount ?? null,
+    })}`);
+  }
   return report;
 }
 
@@ -720,22 +744,41 @@ async function run() {
 
   // ---- p4/p5: one undoable change, undo and redo -------------------------
   stage('p4');
-  const history = await page.evaluate(async () => {
+  // Closing the editor is the commit. This reads the PARAMETER across the gesture and
+  // the undo/redo that follow, so "one undoable change" is proven on the actual value
+  // the user edited rather than on the depth counter alone: a depth-only check passes
+  // for any change, including one that never touched the gain.
+  const history = await page.evaluate(async (slotId) => {
     const app = globalThis.__apexAcceptance;
-    const before = await app.historySnapshot();
-    await app.closeOpenEditor();
-    const after = await app.historySnapshot();
-    return { before, after };
-  });
-  const added = history.after.undoDepth - history.before.undoDepth;
-  record('p4-one-undoable-change', added === 1 ? 'PASS' : blockedByFixture ? 'NOT_VERIFIED' : 'FAIL', {
+    return app.editorParameterUndoRedo(1, slotId);
+  }, inserted?.slotId);
+  const added = history?.entriesAddedByGesture;
+  // The edited value must differ from the fixture default (0.5); otherwise "undo
+  // restored the original" is a comparison of two identical numbers and proves
+  // nothing. The plugin's own default is the only honest baseline.
+  const editedDiffersFromDefault = typeof history?.valueAfterClose === 'number'
+    && Math.abs(history.valueAfterClose - 0.5) > 1e-6;
+  const p4Passed = added === 1 && editedDiffersFromDefault
+    && history?.undoChanged === true && history?.redoRestoredEdited === true;
+  record('p4-one-undoable-change', p4Passed ? 'PASS' : blockedByFixture ? 'NOT_VERIFIED' : 'FAIL', {
+    // Front-loaded: these decide the verdict.
+    entriesAddedByGesture: added,
+    editedValue: history?.valueAfterClose ?? null,
+    valueAfterUndo: history?.valueAfterUndo ?? null,
+    valueAfterRedo: history?.valueAfterRedo ?? null,
+    editedDiffersFromDefault,
+    undoChanged: history?.undoChanged ?? null,
+    redoRestoredEdited: history?.redoRestoredEdited ?? null,
+    noDuplicateEntries: history?.noDuplicateEntries ?? null,
+    depthBeforeClose: history?.depthBeforeClose ?? null,
+    depthAfterClose: history?.depthAfterClose ?? null,
+    depthAfterUndo: history?.depthAfterUndo ?? null,
+    depthAfterRedo: history?.depthAfterRedo ?? null,
     blockedByFixture,
-    undoDepthBefore: history.before.undoDepth,
-    undoDepthAfter: history.after.undoDepth,
-    entriesAdded: added,
-    label: history.after.lastLabel,
-    note: 'Closing the plug-in window must add exactly one undo entry, never one per parameter change.',
+    note: 'One completed gesture adds exactly one undo entry; undo restores the pre-edit gain and redo restores the edited gain.',
   });
+  // Remember the edited value so the reload check cannot pass on the default.
+  const editedParameterValue = typeof history?.valueAfterRedo === 'number' ? history.valueAfterRedo : null;
 
   stage('p5');
   const undoRedo = await page.evaluate(async () => globalThis.__apexAcceptance.undoRedoRoundTrip());
@@ -760,9 +803,22 @@ async function run() {
     await page2.waitForTimeout(4000);
     const stateAfterReload = await page2.evaluate(async () => globalThis.__apexAcceptance.projectSnapshot());
     const same = JSON.stringify(stateAfterReload?.vst3State) === JSON.stringify(stateBeforeQuit?.vst3State);
-    record('p6-save-quit-reload', saved?.ok === true && same ? 'PASS' : 'FAIL', {
-      saved, beforeQuit: stateBeforeQuit, afterReload: stateAfterReload,
-      vst3StateIdentical: same,
+    // The reloaded value must be the EDITED gain, read back through the same hook the
+    // Mixer uses. Comparing the serialized state to itself proves durability but says
+    // nothing about whether the edited parameter was the thing that survived: the
+    // fixture default would survive a run in which the edit never happened.
+    const reloaded = await page2.evaluate(async (slotId) =>
+      globalThis.__apexAcceptance.readInsertParameter(1, slotId), inserted?.slotId);
+    const reloadedParameter = reloaded?.value ?? null;
+    const reloadedMatchesEdit = typeof editedParameterValue === 'number'
+      && typeof reloadedParameter === 'number'
+      && Math.abs(reloadedParameter - editedParameterValue) < 1e-6;
+    record('p6-save-quit-reload', saved?.ok === true && same && reloadedMatchesEdit ? 'PASS' : 'FAIL', {
+      saved, vst3StateIdentical: same,
+      editedParameterValue,
+      reloadedParameter,
+      reloadedMatchesEdit,
+      beforeQuit: stateBeforeQuit, afterReload: stateAfterReload,
     });
 
     // ---- p7: quitting with an editor open leaks no helper -----------------
