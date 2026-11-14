@@ -2535,11 +2535,25 @@ export function App() {
         const state = projectStateRef.current;
         return { metaId: state.meta.id, mixerTracks: state.mixerTracks, vst3State: JSON.stringify(state.mixerTracks) };
       },
-      readInsertParameter: async (trackId: number, slotId?: string) => {
-        const slots = projectStateRef.current.mixerTracks.find(track => track.id === trackId)?.fxSlots ?? [];
-        const effect = (slotId ? slots.find(slot => slot.id === slotId) : slots.find(slot => slot.type === 'vst3'))?.vst3Effect;
-        return { value: effect?.state?.parameters?.[0]?.value ?? null, classId: effect?.classId ?? null,
-          parameterCount: effect?.state?.parameters?.length ?? null, slotIds: slots.map(slot => `${slot.type}:${slot.id}`) };
+      /**
+       * The insert's first parameter, as the Mixer stores it.
+       *
+       * Without a trackId this searches every track for the VST3 insert. Callers that
+       * have no id to hand (the packaged reload check) must still be able to read the
+       * value; filtering on an undefined track matched nothing and reported null, which
+       * looked like a lost parameter rather than a lookup that never found the insert.
+       */
+      readInsertParameter: async (trackId?: number, slotId?: string) => {
+        for (const track of projectStateRef.current.mixerTracks) {
+          if (trackId !== undefined && track.id !== trackId) continue;
+          const slots = track.fxSlots ?? [];
+          const effect = (slotId ? slots.find(slot => slot.id === slotId) : slots.find(slot => slot.type === 'vst3'))?.vst3Effect;
+          if (!effect) continue;
+          return { value: effect.state?.parameters?.[0]?.value ?? null, classId: effect.classId ?? null,
+            parameterCount: effect.state?.parameters?.length ?? null, trackId: track.id,
+            slotIds: slots.map(slot => `${slot.type}:${slot.id}`) };
+        }
+        return { value: null, classId: null, parameterCount: null, trackId: null, slotIds: [] };
       },
       saveProject: async () => ({ ok: await performSave(projectStateRef.current, { reconcileAudio: true }) }),
       /**

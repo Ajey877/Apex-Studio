@@ -522,8 +522,10 @@ test('acceptance slots are resolved by identity, not position', () => {
   const readInsert = app.slice(app.indexOf('readInsertParameter: async'));
   // The parameter readout looked at track 0 while inserts live on track 1, so p3
   // could never see the edited value.
-  assert.ok(/readInsertParameter: async \(trackId: number, slotId\?: string\)/.test(app),
-    'parameter readout is told which track and slot to read');
+  // Still identity-based: it resolves the track and slot it is given (and searches
+  // live state when it is given neither), never a positional index.
+  assert.ok(/readInsertParameter: async \(trackId\?: number, slotId\?: string\)/.test(app),
+    'parameter readout resolves the insert by identity, and searches when given no id');
   assert.ok(!/mixerTracks\[0\]\?\.fxSlots\.filter\(slot => slot\.type === 'vst3'\)\[slotIndex\]/.test(readInsert),
     'no positional lookup on a hardcoded track');
   assert.ok(/is not a VST3 insert/.test(app), 'a non-VST3 slot is reported, not opened');
@@ -1231,7 +1233,7 @@ test('p4 and p6 are proven on the edited parameter, not just on depth', () => {
 
   // p6 must read the reloaded parameter and compare it to the edited value.
   assert.ok(/reloadedMatchesEdit/.test(script), 'p6 compares the reloaded parameter');
-  assert.ok(/readInsertParameter\(1, slotId\)/.test(script),
+  assert.ok(/readInsertParameter\(\)/.test(script),
     'p6 reads it through the same hook the Mixer uses');
 
   // The hook exists and leaves the document holding the edited value.

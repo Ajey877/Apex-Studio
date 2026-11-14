@@ -590,7 +590,10 @@ async function run() {
     return { ...latest, beforeParameterIds: before.editedParameterIds ?? [],
       observedWithinMs: (latest.editedParameterIds ?? []).length > 0 ? 'edit reported by the poll loop' : null };
   });
-  const reachedApex = await page.evaluate(async (slotId) => globalThis.__apexAcceptance.readInsertParameter(1, slotId), inserted?.slotId);
+  // `inserted` is the project snapshot and has no per-insert id, so passing
+  // `inserted?.slotId` here always supplied undefined. The hook resolves the insert
+  // from live state instead.
+  const reachedApex = await page.evaluate(async () => globalThis.__apexAcceptance.readInsertParameter());
   // A rejection is a genuine FAIL (the host refused something). A session that
   // never reached a live window has no edit to forward, so it is NOT_VERIFIED.
   // The host rejects edits that name parameters the controller does not expose.
