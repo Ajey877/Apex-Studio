@@ -293,16 +293,30 @@ enabled `panel` rather than the slider inside it — so an earlier run reported
 `false` while the same trace showed the slider editing and emitting `performEdit`. The
 probe now asks for a deep search with containers excluded, and it reports `true`.
 
-**What still varies between runs.** Three consecutive packaged runs at the same code
-produced one committed edit each time it was measured cleanly, and one run produced
-none: `entriesAddedByGesture: 0` with `labelsAfterClose: ["Add VST3 Mixer effect"]`,
-while p3 in that same session reported `editedParameterIds: [0]`. The commit path has
-several legitimate exits that add no entry (state capture failed, no final state, the
-captured state byte-identical to what was stored, or the save threw), and they were
-indistinguishable in the evidence. The hook now records `editedIdsBeforeClose`,
-`phaseAfterClose` and `errorAfterClose` so the next occurrence names its own cause.
-That difference is **not explained yet**, and no determinism claim is made across
-runs until it is.
+**Reproduced.** Two consecutive packaged runs at `50c44d5` produced identical results —
+8 PASS, 0 FAIL, 1 NOT_VERIFIED — with the same edited value (0.5314371585845947), the
+same trace, and the same history:
+
+```text
+labelsAfterClose: ["Add VST3 Mixer effect", "Edit VST3 effect in native editor"]
+labelsAfterUndo:  ["Add VST3 Mixer effect"]
+entriesAddedByGesture: 1   valueAfterUndo: null   valueAfterRedo: 0.5314371585845947
+```
+
+`valueAfterUndo` is null because the fixture's insert carries no saved parameter value
+until the first commit writes one, so null is the pre-edit value and undo returns to
+it exactly; redo then reapplies the edit. The undo stack shows one entry added by the
+gesture and the edit entry consumed by undo — no duplicates, no phantoms.
+
+**One earlier run still differs.** At `e9b724f` a run added no entry at all
+(`entriesAddedByGesture: 0`, `labelsAfterClose: ["Add VST3 Mixer effect"]`) while p3 in
+that same session reported `editedParameterIds: [0]`. That is not explained. The commit
+path has several legitimate exits that add no entry (state capture failed, no final
+state, the captured state byte-identical to what was stored, or the save threw), and
+they were indistinguishable in the evidence at the time. The hook now records
+`editedIdsBeforeClose`, `phaseAfterClose` and `errorAfterClose` so a recurrence names
+its own cause. Two clean consecutive runs is not proof of determinism, and this
+document does not claim it.
 
 Whether the corrected layout makes a genuine drag reach Apex is decided by the packaged
 acceptance run, not by this reasoning; the criteria table below carries the honest
