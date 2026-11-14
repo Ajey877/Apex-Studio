@@ -248,11 +248,19 @@ async function run() {
   ui.openedMixerView = true;
   await page.waitForTimeout(500);
 
-  // 1. Select a Mixer track. The Mixer strip buttons carry the track name.
-  const trackButton = page.getByRole('button', { name: /Kick \/ 808/i }).first();
-  await trackButton.waitFor({ state: 'visible', timeout: 30000 });
-  await trackButton.click({ timeout: 15000 });
+  // 1. Select the Kick / 808 Mixer strip. Each strip is a clickable div with a
+  // stable id (mixer-strip-<trackId>), not a button, so it is clicked by that id;
+  // this is the same element the user clicks to select a track.
+  const trackStrip = page.locator('#mixer-strip-1');
+  await trackStrip.waitFor({ state: 'visible', timeout: 30000 });
+  await trackStrip.click({ timeout: 15000 });
+  ui.selectedTrackStrip = '#mixer-strip-1';
   ui.selectedTrack = 'Kick / 808';
+  // Confirm the selection actually took effect, rather than assuming the click
+  // landed: the FX-slots header names the selected track.
+  ui.fxSlotsHeaderNamesSelection = await page
+    .getByText(/FX SLOTS \(KICK \/ 808\)/i).first()
+    .isVisible().catch(() => false);
   await page.waitForTimeout(300);
 
   // 2. Open the effect menu with the real "+" button.
