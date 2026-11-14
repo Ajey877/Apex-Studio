@@ -2555,6 +2555,48 @@ export function App() {
         }
         return { value: null, classId: null, parameterCount: null, trackId: null, slotIds: [] };
       },
+      /**
+       * The EFFECTIVE value of the insert's first parameter, as the plug-in's own
+       * controller holds it.
+       *
+       * readInsertParameter reports the value stored in project state. That is not the
+       * same thing: a freshly added insert has no serialized parameter at all (null),
+       * and the controller may hold something the project never captured. Undo/redo
+       * must be proven on what the user can actually see, so this asks the controller
+       * through the shipped describeEffect path -- the same one the Mixer uses to show
+       * a parameter -- and never infers a value from a missing override.
+       */
+      readEffectiveParameter: async () => {
+        const locate = () => {
+          for (const track of projectStateRef.current.mixerTracks) {
+            for (const slot of track.fxSlots ?? []) {
+              if (slot.type === 'vst3' && slot.vst3Effect) return slot;
+            }
+          }
+          return undefined;
+        };
+        const slot = locate();
+        if (!slot?.vst3Effect) return { value: null, id: null, reason: 'no VST3 insert in project state' };
+        const bridge = getVst3Bridge();
+        if (!bridge) return { value: null, id: null, reason: 'no VST3 bridge in this build' };
+        try {
+          const described = await bridge.describeEffect(slot.vst3Effect);
+          const first = described?.parameters?.[0];
+          // `currentValue` is read from controller->getParamNormalized() on the native
+          // side. A null means the controller could not answer -- reported as such
+          // rather than coerced to a number, because 0 is a legitimate gain.
+          return {
+            value: typeof first?.currentValue === 'number' ? first.currentValue : null,
+            id: first?.id ?? null,
+            defaultValue: typeof first?.defaultValue === 'number' ? first.defaultValue : null,
+            parameterCount: described?.parameters?.length ?? null,
+            controllerAvailable: described?.controllerAvailable === true,
+            slotId: slot.id,
+          };
+        } catch (error) {
+          return { value: null, id: null, reason: error instanceof Error ? error.message : String(error) };
+        }
+      },
       saveProject: async () => ({ ok: await performSave(projectStateRef.current, { reconcileAudio: true }) }),
       /**
        * Undo/redo measured on the EDITED PARAMETER specifically.
@@ -2583,6 +2625,21 @@ export function App() {
           return undefined;
         };
         const read = () => locate()?.vst3Effect?.state?.parameters?.[0]?.value ?? null;
+        // Effective value via the controller, through the same describeEffect path the
+        // Mixer uses. Returns null (with a reason) when it cannot be measured; it never
+        // substitutes the stored override, which is absent for an unedited insert.
+        const effectiveParameter = async () => {
+          const slot = locate();
+          const bridge = slot?.vst3Effect ? getVst3Bridge() : null;
+          if (!slot?.vst3Effect || !bridge) return null;
+          try {
+            const described = await bridge.describeEffect(slot.vst3Effect);
+            const first = described?.parameters?.[0];
+            return typeof first?.currentValue === 'number'
+              ? { value: first.currentValue, id: first.id ?? null, parameterCount: described.parameters.length }
+              : { value: null, id: first?.id ?? null, parameterCount: described?.parameters?.length ?? null };
+          } catch { return null; }
+        };
         // Naming the entries makes a surprising undo result diagnosable: if the value
         // after undo is null, the question is whether undo consumed the edit or walked
         // past the insert that created it.
@@ -2605,15 +2662,23 @@ export function App() {
         const afterClose = read();
         const afterCloseDepths = depths();
         const labelsAfterClose = undoLabels();
+        // The EFFECTIVE value, read from the plug-in's own controller after loading
+        // the project's stored state. Only sampled while no editor window is open, so
+        // this cannot disturb the session under test. A stored-value read cannot stand
+        // in for this: an insert with no saved parameter reports null while its
+        // controller still holds the default.
+        const effectiveAfterClose = await effectiveParameter();
         handleUndo();
         await new Promise(resolve => setTimeout(resolve, 150));
         const afterUndo = read();
         const afterUndoDepths = depths();
         const labelsAfterUndo = undoLabels();
+        const effectiveAfterUndo = await effectiveParameter();
         handleRedo();
         await new Promise(resolve => setTimeout(resolve, 150));
         const afterRedo = read();
         const afterRedoDepths = depths();
+        const effectiveAfterRedo = await effectiveParameter();
         // Leave the document exactly as the edit left it, so the later persistence
         // checks see the edited value and not the undone one.
         return {
@@ -2627,6 +2692,10 @@ export function App() {
           valueAfterClose: afterClose,
           valueAfterUndo: afterUndo,
           valueAfterRedo: afterRedo,
+          // What the plug-in's controller actually holds at each stage.
+          effectiveAfterClose,
+          effectiveAfterUndo,
+          effectiveAfterRedo,
           editedIdsBeforeClose,
           phaseAfterClose,
           errorAfterClose,

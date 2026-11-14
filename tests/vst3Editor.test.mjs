@@ -1255,6 +1255,37 @@ test('p4 and p6 are proven on the edited parameter, not just on depth', () => {
   assert.ok(/history\.valueAfterUndo !== history\.valueAfterClose/.test(script),
     'and undo must not leave the edited value in place');
 
+  // Undo/redo must be proven on the EFFECTIVE value the plug-in controller holds,
+  // not on a serialized override. A fresh insert stores no parameter at all, so the
+  // stored value is null while the controller still holds its default: comparing
+  // stored values alone cannot tell "restored the default" from "stored nothing".
+  assert.ok(/effectiveValueBeforeEdit/.test(script) && /effectiveValueAfterUndo/.test(script),
+    'p4 records the controller value before the edit and after undo');
+  assert.ok(/effectiveValueAfterRedo/.test(script), 'and after redo');
+  assert.ok(/effectiveEditMoved && effectiveUndoRestored && effectiveRedoReapplied/.test(script),
+    'p4 PASS requires the controller value to move, return and return again');
+  assert.ok(/readEffectiveParameter/.test(script),
+    'the baseline comes from the controller through describeEffect, not from stored state');
+  // Reading the controller opens its own short-lived native session, so the baseline
+  // must be taken before the editor window opens and never while one is live.
+  const baselineAt = script.indexOf('const preEditEffective = await page.evaluate');
+  const openAt = script.indexOf('const opened = await openEditorThroughMixerUi(page);');
+  assert.ok(baselineAt > 0 && openAt > 0 && baselineAt < openAt,
+    'the effective baseline is measured before the editor window opens');
+
+  // The reliability criterion: ten consecutive cycles, each one observed.
+  assert.ok(/'p4b-repeated-cycles'/.test(script), 'the repeated-cycle criterion is registered');
+  assert.ok(/const CYCLES = 10/.test(script), 'it runs ten cycles');
+  assert.ok(/cyclesPassed === CYCLES \? 'PASS'/.test(script),
+    'PASS requires every cycle to pass, not a majority');
+  // A cycle that fails must stop the loop and be named; silently retrying or
+  // skipping it would report a reliability claim the run did not earn.
+  assert.ok(/if \(!row\.passed\) break;/.test(script), 'the loop stops at the first failure');
+  assert.ok(/firstFailingCycle/.test(script) && /failingReason/.test(script),
+    'the first failure is named with its reason');
+  assert.ok(/everyCycleRecorded: cycles/.test(script),
+    'every cycle is recorded, not only the passing ones');
+
   // p6 must read the reloaded parameter and compare it to the edited value.
   assert.ok(/reloadedMatchesEdit/.test(script), 'p6 compares the reloaded parameter');
   assert.ok(/readInsertParameter\(\)/.test(script),

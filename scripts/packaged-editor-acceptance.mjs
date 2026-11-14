@@ -48,6 +48,7 @@ const CRITERIA = {
   'p2-native-window-responsive': 'Native window appears and stays responsive',
   'p3-parameter-reaches-apex': 'Parameter changes reach Apex',
   'p4-one-undoable-change': 'Closing the editor commits exactly one undoable change',
+  'p4b-repeated-cycles': 'Ten consecutive edit/close/undo/redo cycles each commit exactly one entry',
   'p5-undo-redo': 'Undo and redo work',
   'p6-save-quit-reload': 'Save, quit and reload preserve state',
   'p7-no-leaked-helpers': 'Closing Apex with the editor open leaks no helper processes',
@@ -199,6 +200,12 @@ function writeReport(extra = {}) {
         undoRestoredOriginalValue: e.undoRestoredOriginalValue ?? null,
         locatedSlotId: e.locatedSlotId ?? null,
       };
+    }
+    if (r.id === 'p4b-repeated-cycles') {
+      return { cyclesAttempted: r.detail?.cyclesAttempted ?? null,
+        cyclesPassed: r.detail?.cyclesPassed ?? null,
+        firstFailingCycle: r.detail?.firstFailingCycle ?? null,
+        failingReason: r.detail?.failingReason ?? null };
     }
     if (r.id === 'p6-save-quit-reload') {
       const e = r.evidence ?? {};
@@ -423,6 +430,16 @@ async function run() {
   // No test-only handler is used to open the editor: the visible control is the
   // control that is clicked, and its absence is a FAIL rather than a fallback.
   stage('p1-mixer-ui');
+  // The EFFECTIVE value before any editor exists, read from the plug-in's controller
+  // through the shipped describeEffect path. Taken HERE, before the editor window
+  // opens, so the baseline is never measured while a second native session is live.
+  //
+  // The stored override is null for a fresh insert, so null says "nothing serialized
+  // yet" and NOT "the gain is zero". The controller's own value is the only honest
+  // baseline for "undo restored the original".
+  const preEditEffective = await page.evaluate(async () =>
+    globalThis.__apexAcceptance.readEffectiveParameter())
+    .catch(error => ({ value: null, error: String(error?.message ?? error) }));
   const opened = await openEditorThroughMixerUi(page);
   const ui = { ...opened.ui, selectedTrack: 'Kick / 808' };
   if (!opened.ok) {
@@ -816,8 +833,36 @@ async function run() {
   const undoRestoredOriginalValue = Boolean(history)
     && Object.is(history.valueAfterUndo, preEditValue)
     && history.valueAfterUndo !== history.valueAfterClose;
+  /**
+   * The EFFECTIVE round trip: what the plug-in's controller holds, not what the
+   * project has serialized.
+   *
+   * Steps, each an observation rather than an assumption:
+   *   preGesture  the controller's value before any edit (expected: the default 0.5)
+   *   afterClose  the controller reflecting the committed edit
+   *   afterUndo   the controller back at the pre-edit value
+   *   afterRedo   the controller back at the edited value
+   *
+   * A null here means the controller could not be read, which is missing evidence
+   * and fails the criterion rather than passing it.
+   */
+  const eff = {
+    pre: preEditEffective?.value ?? null,
+    afterClose: history?.effectiveAfterClose?.value ?? null,
+    afterUndo: history?.effectiveAfterUndo?.value ?? null,
+    afterRedo: history?.effectiveAfterRedo?.value ?? null,
+  };
+  const close = (a, b) => typeof a === 'number' && typeof b === 'number' && Math.abs(a - b) <= 1e-6;
+  // The gesture must have moved the controller off its pre-edit value, otherwise the
+  // undo comparison below is between two identical numbers and proves nothing.
+  const effectiveEditMoved = typeof eff.pre === 'number' && typeof eff.afterClose === 'number'
+    && Math.abs(eff.afterClose - eff.pre) > 1e-6;
+  const effectiveUndoRestored = effectiveEditMoved && close(eff.afterUndo, eff.pre);
+  const effectiveRedoReapplied = effectiveEditMoved && close(eff.afterRedo, eff.afterClose);
+
   const p4Passed = added === 1 && editedDiffersFromDefault
-    && undoRestoredOriginalValue && history?.redoRestoredEdited === true;
+    && undoRestoredOriginalValue && history?.redoRestoredEdited === true
+    && effectiveEditMoved && effectiveUndoRestored && effectiveRedoReapplied;
   record('p4-one-undoable-change', p4Passed ? 'PASS' : blockedByFixture ? 'NOT_VERIFIED' : 'FAIL', {
     // Front-loaded: these decide the verdict.
     entriesAddedByGesture: added,
@@ -826,6 +871,15 @@ async function run() {
     editedValue: history?.valueAfterClose ?? null,
     valueAfterUndo: history?.valueAfterUndo ?? null,
     valueAfterRedo: history?.valueAfterRedo ?? null,
+    // The decisive numbers: the plug-in controller's own value across the round trip.
+    effectiveValueBeforeEdit: eff.pre,
+    effectiveValueAfterClose: eff.afterClose,
+    effectiveValueAfterUndo: eff.afterUndo,
+    effectiveValueAfterRedo: eff.afterRedo,
+    effectiveEditMoved,
+    effectiveUndoRestored,
+    effectiveRedoReapplied,
+    controllerAvailable: preEditEffective?.controllerAvailable ?? null,
     editedDiffersFromDefault,
     preEditValue,
     // Why a commit did or did not happen, in the commit's own terms.
@@ -849,7 +903,113 @@ async function run() {
   // Remember the edited value so the reload check cannot pass on the default.
   const editedParameterValue = typeof history?.valueAfterRedo === 'number' ? history.valueAfterRedo : null;
 
-  stage('p5');
+  // ---- p4b: repeated reliability cycles ---------------------------------
+  //
+  // One passing cycle proves the path works once. Ten consecutive cycles prove it
+  // keeps working, which is what a user experiences. Every cycle performs the SAME
+  // genuine interaction -- real OS input on the VSTGUI slider, then the real close
+  // that commits, then undo and redo -- and every cycle is recorded whether it passes
+  // or fails. There is no retry: a failing cycle stops the loop and is reported.
+  stage('p4b');
+  const CYCLES = 10;
+  const cycles = [];
+  let firstFailingCycle = null;
+  let failingReason = null;
+  for (let cycle = 1; cycle <= CYCLES; cycle += 1) {
+    const row = { cycle };
+    try {
+      // The value the controller holds before this cycle's gesture.
+      const before = await page.evaluate(async () =>
+        globalThis.__apexAcceptance.readEffectiveParameter());
+      row.effectiveBefore = before?.value ?? null;
+      // Re-open through the real Mixer UI: a new gesture needs a new window.
+      const reopened = await openEditorThroughMixerUi(page);
+      if (!reopened.ok) throw new Error(`open failed: ${reopened.error}`);
+      // Aim at the handle's CURRENT position: after the first cycle the gain is no
+      // longer at its default, so a fixed point would miss the handle entirely.
+      const current = row.effectiveBefore;
+      const fromFraction = typeof current === 'number' ? Math.min(0.9, Math.max(0.1, current)) : 0.5;
+      const toFraction = fromFraction > 0.5 ? 0.25 : 0.75;
+      const track = {
+        left: GAIN_SLIDER.panelOrigin.x + GAIN_SLIDER.origin.x,
+        y: GAIN_SLIDER.panelOrigin.y + GAIN_SLIDER.origin.y + Math.round(GAIN_SLIDER.size.height / 2),
+      };
+      const from = { x: track.left + Math.round(GAIN_SLIDER.size.width * fromFraction), y: track.y };
+      const to = { x: track.left + Math.round(GAIN_SLIDER.size.width * toFraction), y: track.y };
+      const driven = await page.evaluate(async (points) => {
+        const app = globalThis.__apexAcceptance;
+        if (!app?.driveEditorWithRealInput) return { error: 'no real-input hook' };
+        return app.driveEditorWithRealInput({ ...points.from, to: points.to });
+      }, { from, to }).catch(error => ({ error: String(error?.message ?? error) }));
+      row.gestureError = driven?.error ?? null;
+      // Let the panel's poll loop observe the edit, exactly as p3 does.
+      const observed = await page.evaluate(async () => {
+        const app = globalThis.__apexAcceptance;
+        const deadline = Date.now() + 4000;
+        let latest = await app.pollOpenEditor();
+        while (Date.now() < deadline && (latest.editedParameterIds ?? []).length === 0) {
+          await new Promise(resolve => setTimeout(resolve, 200));
+          latest = await app.pollOpenEditor();
+        }
+        return latest;
+      });
+      row.paramIdsReceived = observed?.editedParameterIds ?? null;
+      row.sessionPhaseBeforeClose = observed?.phase ?? null;
+      // Close = commit. The hook then undoes and redoes, measuring the controller.
+      const result = await page.evaluate(async () =>
+        globalThis.__apexAcceptance.editorParameterUndoRedo());
+      row.sessionPhaseAfterClose = result?.phaseAfterClose ?? null;
+      row.sessionErrorAfterClose = result?.errorAfterClose ?? null;
+      row.entriesAdded = result?.entriesAddedByGesture ?? null;
+      row.effectiveAfterClose = result?.effectiveAfterClose?.value ?? null;
+      row.effectiveAfterUndo = result?.effectiveAfterUndo?.value ?? null;
+      row.effectiveAfterRedo = result?.effectiveAfterRedo?.value ?? null;
+      row.labelsAfterClose = result?.labelsAfterClose ?? null;
+      row.labelsAfterUndo = result?.labelsAfterUndo ?? null;
+      const near = (a, b) => typeof a === 'number' && typeof b === 'number' && Math.abs(a - b) <= 1e-6;
+      const moved = typeof row.effectiveBefore === 'number' && typeof row.effectiveAfterClose === 'number'
+        && !near(row.effectiveAfterClose, row.effectiveBefore);
+      row.effectiveMoved = moved;
+      row.undoRestored = moved && near(row.effectiveAfterUndo, row.effectiveBefore);
+      row.redoReapplied = moved && near(row.effectiveAfterRedo, row.effectiveAfterClose);
+      // A cycle passes only if it did all of it: one entry, a real move, undo back
+      // to the start, redo back to the edit.
+      row.passed = row.entriesAdded === 1 && (row.paramIdsReceived ?? []).includes(0)
+        && moved && row.undoRestored && row.redoReapplied;
+      if (!row.passed && firstFailingCycle === null) {
+        firstFailingCycle = cycle;
+        failingReason = row.entriesAdded !== 1
+          ? `expected exactly one history entry, got ${row.entriesAdded}`
+          : !(row.paramIdsReceived ?? []).includes(0)
+            ? `the plug-in reported no edit of ParamID 0 (received ${JSON.stringify(row.paramIdsReceived)})`
+            : !moved ? 'the gesture did not change the controller value'
+              : !row.undoRestored ? `undo did not restore ${row.effectiveBefore} (got ${row.effectiveAfterUndo})`
+                : `redo did not reapply ${row.effectiveAfterClose} (got ${row.effectiveAfterRedo})`;
+      }
+    } catch (error) {
+      row.passed = false;
+      row.error = String(error?.message ?? error).split('\n')[0];
+      if (firstFailingCycle === null) { firstFailingCycle = cycle; failingReason = row.error; }
+    }
+    cycles.push(row);
+    // Stop at the first failure. Reporting the rest as "not attempted" is honest;
+    // continuing would hide how often the path fails.
+    if (!row.passed) break;
+  }
+  const cyclesPassed = cycles.filter(c => c.passed).length;
+  record('p4b-repeated-cycles',
+    cyclesPassed === CYCLES ? 'PASS' : blockedByFixture ? 'NOT_VERIFIED' : 'FAIL', {
+      // Decisive facts first.
+      cyclesAttempted: cycles.length,
+      cyclesPassed,
+      firstFailingCycle,
+      failingReason,
+      requiredCycles: CYCLES,
+      everyCycleRecorded: cycles,
+      note: 'Each cycle drives genuine OS input at the VSTGUI slider, closes to commit, then undoes and redoes, measuring the plug-in controller value at every stage. No cycle is retried.',
+    });
+
+  // ---- p5: undo, redo ------------------------------------------------
   const undoRedo = await page.evaluate(async () => globalThis.__apexAcceptance.undoRedoRoundTrip());
   record('p5-undo-redo', undoRedo?.undoRestored === true && undoRedo?.redoReapplied === true ? 'PASS'
     : blockedByFixture ? 'NOT_VERIFIED' : 'FAIL', { blockedByFixture, ...undoRedo });
