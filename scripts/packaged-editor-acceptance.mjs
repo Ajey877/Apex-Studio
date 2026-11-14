@@ -36,6 +36,13 @@ const CRITERIA = {
   'p9-dpi-125-150': '125% and 150% DPI behaviour',
 };
 const results = [];
+/**
+ * The most recent renderer-side diagnosis, kept so a failure thrown further along
+ * can explain itself. The UI already knows why an editor did not open; without
+ * this the thrown error is only a symptom ("no native editor session is open")
+ * and the cause is lost with the evidence blob.
+ */
+let lastUiDiagnosis = null;
 const stage = (name, detail = '') =>
   console.log(`STAGE ${name}${detail ? ' ' + JSON.stringify(detail) : ''}`);
 const record = (id, status, evidence) => {
@@ -43,12 +50,15 @@ const record = (id, status, evidence) => {
   // Annotations are the only CI evidence channel available here, so every
   // non-PASS criterion states why in one line instead of only living in the JSON.
   if (status !== 'PASS') {
-    // Annotations are truncated around 1000 characters, so a nested evidence blob
-    // hides its own diagnosis. Emit a compact summary line FIRST -- the few fields
-    // that explain a failure -- then the detail as far as it fits.
+    // Annotations are truncated near 1000 characters, so a nested evidence blob can
+    // hide its own diagnosis: the fields that explain a failure sit past the cut.
+    // The compact reason therefore goes FIRST, inside the line the workflow already
+    // lifts (`reason` is conventional for this script), then the detail as far as
+    // it fits. No new prefix is introduced -- the workflow's allowlist is shipped
+    // behaviour and this change is not allowed to touch it.
     const summary = compactReason(evidence);
-    if (summary) console.log(`ACCEPTANCE-WHY ${id} ${status} ${summary}`);
-    const why = JSON.stringify(evidence ?? {}).slice(0, 700);
+    const payload = summary ? { reason: summary, detail: evidence } : (evidence ?? {});
+    const why = JSON.stringify(payload).slice(0, 700);
     console.log(`ACCEPTANCE-DETAIL ${id} ${status} ${why}`);
   }
 };
@@ -60,17 +70,21 @@ function compactReason(evidence) {
   const take = (key, value) => { if (value !== undefined && value !== null && `${value}` !== '') pick[key] = value; };
   take('reason', evidence.reason);
   take('error', evidence.error);
-  const ui = evidence.mixerUi ?? {};
+  const diagnosed = evidence.diagnosedByRenderer ?? {};
+  for (const [key, value] of Object.entries(diagnosed)) {
+    if (value !== undefined && value !== null && value !== '') pick[key] = value;
+  }
+  const ui = evidence.mixerUi ?? diagnosed;
   take('insertRowRendered', ui.insertRowRendered);
   take('clickedControl', evidence.clickedControl);
   take('vst3Inserts', ui.vst3InsertCountInProject);
   take('lastEditorOpenError', ui.lastEditorOpenError);
-  take('editorAlerts', Array.isArray(ui.editorAlertAfterClick) ? ui.editorAlertAfterClick.join(' | ') : undefined);
+  take('editorAlerts', Array.isArray(ui.editorAlertAfterClick) ? ui.editorAlertAfterClick.join(' | ') : ui.editorAlertAfterClick);
   take('editorStatus', Array.isArray(ui.editorStatusAfterClick) ? ui.editorStatusAfterClick.join(' | ') : undefined);
   take('helperLifetimeMs', evidence.helperLifetimeMs ? JSON.stringify(evidence.helperLifetimeMs) : undefined);
   take('helperSessionErrors', Array.isArray(evidence.helperSessionErrors) && evidence.helperSessionErrors.length
     ? evidence.helperSessionErrors.join(' | ') : undefined);
-  try { return JSON.stringify(pick).slice(0, 850); } catch { return ''; }
+  try { return JSON.stringify(pick).slice(0, 600); } catch { return ''; }
 }
 
 function environment() {
@@ -341,6 +355,14 @@ async function run() {
   ui.lastEditorOpenError = await page
     .evaluate(() => globalThis.__apexAcceptance?.lastEditorOpenError?.() ?? null)
     .catch(() => null);
+  lastUiDiagnosis = {
+    insertRowRendered: ui.insertRowRendered ?? null,
+    vst3InsertCountInProject: ui.vst3InsertCountInProject ?? null,
+    lastEditorOpenError: ui.lastEditorOpenError ?? null,
+    editorAlertAfterClick: ui.editorAlertAfterClick ?? null,
+    editorStatusAfterClick: ui.editorStatusAfterClick ?? null,
+    pickerStatusText: ui.pickerStatusText ?? null,
+  };
 
   // Cross-check that the project state agrees an insert was actually added.
   const inserted = await page.evaluate(async () => {
@@ -602,6 +624,9 @@ try {
   console.log(`ACCEPTANCE-ERROR ${error.message}`);
   if (error.stack) console.log(error.stack.slice(0, 2000));
   record('harness', 'FAIL', {
+    // Diagnosed by the renderer, listed first so annotation truncation cannot hide
+    // it: this is what actually says why the run stopped.
+    diagnosedByRenderer: lastUiDiagnosis,
     error: error.message,
     stack: error.stack?.slice(0, 4000),
     // Surface what the app could and could not discover, so a failure names the
