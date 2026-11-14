@@ -1053,3 +1053,99 @@ test('undo/redo comparison uses the representation history stores', () => {
   assert.ok(/getSemanticComparable = \(state: ProjectState\): string => \{[\s\S]{0,200}canonicalProjectJson\(/.test(history),
     'history decides equality with that same canonical form');
 });
+
+test('the editor trace is how C and D are told apart, and the harness parses it', () => {
+  /**
+   * The packaged p3 criterion could not say WHERE a genuine drag stopped: a press
+   * that reached the plug-in window and produced no performEdit is equally
+   * consistent with
+   *
+   *   C. the CSlider received the gesture and its value never changed, and
+   *   D. the value changed but beginEdit/performEdit/endEdit never ran,
+   *
+   * which need different fixes. The editor now records its own observations, and
+   * the harness derives the verdict by PARSING per-stage slider state. This test
+   * pins the two properties that make that evidence trustworthy:
+   *
+   *   1. the classifier cannot claim a case it did not observe (no trace => NO_TRACE,
+   *      never a guess), and
+   *   2. a value that moved is detected from the recorded numbers, so a no-op
+   *      gesture cannot be reported as case D.
+   */
+  const script = readScript('scripts/packaged-editor-acceptance.mjs');
+
+  // The trace is read from the editor, not inferred from session state.
+  assert.ok(/function readEditorTrace\(\)/.test(script), 'the harness reads the editor trace');
+  assert.ok(/APEX_ACCEPTANCE_EDITOR_TRACE/.test(script),
+    'the trace path reaches the helper process through its environment');
+  // Cleared before the gesture, so the trace describes THIS gesture only.
+  const clearAt = script.indexOf('rmSync(editorTracePath');
+  const gestureAt = script.indexOf('driveEditorWithRealInput');
+  assert.ok(clearAt !== -1 && clearAt < gestureAt,
+    'the trace is cleared before the gesture, not after');
+
+  // The classifier must parse numbers rather than match fixed log prose.
+  assert.ok(/function parseSliderStates\(/.test(script), 'slider state is parsed per stage');
+  assert.ok(/sliderNormalized=\(\[-\\d\.e\+\]\+\)/.test(script),
+    'the normalized value is captured as a number');
+  // Movement is decided by comparing the set of observed values.
+  assert.ok(/const controlValueMoved = valuesSeen\.length > 1/.test(script),
+    'a value moved only when two different observed values exist');
+
+  // No evidence must not become a case.
+  assert.ok(/editorTrace\.lineCount === 0 \? 'NO_TRACE'/.test(script),
+    'an empty trace reports NO_TRACE rather than a hypothesis');
+  // Missing post-dispatch evidence must NOT read as case C. The frame can decline to
+  // schedule a post-event read, and "no state recorded" is the same shape as "the
+  // value did not move" unless it is called out separately.
+  assert.ok(/UNRESOLVED_NO_POST_DISPATCH_STATE/.test(script),
+    'a missing post-dispatch read is unresolved, never case C');
+  assert.ok(/afterDispatch=UNAVAILABLE/.test(script) && /afterDispatch=UNAVAILABLE/.test(
+    readSource('native/vst3/acceptance-fixture-editor.cpp')),
+    'the editor records when the post-dispatch read was unavailable');
+  for (const verdict of ['CASE_C_NO_MOUSEDOWN_ON_SLIDER', 'CASE_C_CONTROL_VALUE_DID_NOT_MOVE',
+    'CASE_D_LIFECYCLE_NOT_INVOKED', 'CASE_D_NO_PARAMETER_BINDING', 'EDIT_REACHED_CONTROLLER']) {
+    assert.ok(script.includes(verdict), `the classifier can report ${verdict}`);
+  }
+
+  // The verdict is recorded as evidence, so it survives in the artefact.
+  assert.ok(/cOrDVerdict: traceVerdict/.test(script), 'the C/D verdict is recorded');
+  assert.ok(/editorTraceLines: editorTrace\?\.lines \?\? null/.test(script),
+    'the raw trace is recorded alongside the verdict');
+});
+
+test('the VSTGUI editor instrumentation stays in the one TU that builds with VSTGUI', () => {
+  /**
+   * editor-host.hpp is deliberately built WITHOUT the VSTGUI GUI include paths, so
+   * naming any VSTGUI type there fails every native build (C2653). The trace must
+   * live in acceptance-fixture-editor.cpp, which is the only fixture TU compiled
+   * with the VSTGUI SDK.
+   */
+  const editorHost = readSource('native/vst3/editor-host.hpp');
+  // Strip comments first: the header legitimately TALKS about VSTGUI behaviour in
+  // prose (why the shift modifier matters, how CSliderBase handles a drag). What it
+  // must never do is name a VSTGUI type in code, because it is compiled without the
+  // GUI include paths and would fail every native build with C2653.
+  const editorHostCode = editorHost
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .split('\n').map(line => line.replace(/\/\/.*$/, '')).join('\n');
+  assert.ok(!/VSTGUI::|\bCControl\b|\bCSlider\b|\bCFrame\b/.test(editorHostCode),
+    'editor-host.hpp must not reference VSTGUI types in code');
+
+  const fixtureEditor = readSource('native/vst3/acceptance-fixture-editor.cpp');
+  // It observes the real editor rather than substituting for it.
+  assert.ok(/class TracedGainEditor final : public VSTGUI::VST3Editor/.test(fixtureEditor),
+    'the instrumentation subclasses the shipping VST3Editor');
+  assert.ok(/VSTGUI::VST3Editor::valueChanged\(control\)/.test(fixtureEditor),
+    'valueChanged is forwarded to the real implementation, not replaced');
+  assert.ok(/VSTGUI::VST3Editor::controlBeginEdit\(control\)/.test(fixtureEditor),
+    'controlBeginEdit is forwarded to the real implementation');
+  assert.ok(/return new TracedGainEditor\(controller, "view", "acceptancegain\.uidesc"\)/.test(fixtureEditor),
+    'the factory returns the real editor, so the packaged path uses it');
+  // Post-dispatch observation: the observer runs BEFORE the frame routes the event,
+  // so reading state in the observer would report the pre-gesture value.
+  assert.ok(/doAfterEventProcessing/.test(fixtureEditor),
+    'the post-dispatch state is read after the frame routed the event');
+  assert.ok(!/setValueNormalized\(|performEdit \(/.test(fixtureEditor),
+    'the instrumented editor never sets a value itself');
+});

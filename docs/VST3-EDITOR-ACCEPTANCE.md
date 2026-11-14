@@ -187,33 +187,57 @@ layout and fails if any container above an interactive control disables the mous
 parameter. So the fixture bug was real but not sufficient to explain the failure, and
 this document does not claim otherwise.
 
-**Not yet established: where it stops after the frame receives the press**
-
-The remaining range is lead-engineer cases **C/D**: either `CSlider` receives the press
-and does not change its value, or it changes and never calls `performEdit`. Reading the
-dispatch path rules out the alternatives but cannot decide between those two:
-
-| case | status |
-| --- | --- |
-| A. Windows routed it wrongly | **ruled out** — the drag lands on the plug-in child window with the button held |
-| B. The frame hit-tests the wrong view | **contributed** (the panel flag, now fixed); no container above the control disables the mouse after the fix |
-| E. performEdit happened, host rejected it | **ruled out** — no rejection, session stays open, `editedParameterIds` empty rather than refused |
-| F. Host accepted, Apex did not consume | **ruled out for the same reason** — the helper's edit snapshot is empty, so there is nothing for Apex to miss |
-| C. The control got it and did not change | **open** |
-| D. It changed and never called performEdit | **open** |
+**The instrument that decides C vs D, and where it lives**
 
 Deciding between C and D needs an observation *inside* the plug-in's editor, where the
-`CSlider` runs. A runtime probe in `editor-host.hpp` cannot do it: that header is
-compiled with no VSTGUI include path by design, and naming `VSTGUI::CFrame` there broke
-the build with `C2653`. The observation has to live in the fixture's own editor
-translation unit (`acceptance-fixture-editor.cpp`), which is the only place that
-compiles with VSTGUI — and also the only place that cannot be built on this Linux
-development host, because VSTGUI needs a GUI toolchain.
+`CSlider` runs. That instrument now exists. It lives in
+`native/vst3/acceptance-fixture-editor.cpp`, the only fixture translation unit compiled
+with the VSTGUI SDK — **not** in `editor-host.hpp`, which stays free of GUI types so the
+DSP/parameter half keeps building on a host with no GUI toolchain.
 
-That is the honest state: the failure is narrowed to two specific stages inside the
-plug-in's control, and the instrument that would separate them belongs in fixture code
-that only the Windows runner can compile. Adding it unverified is how the previous two
-revisions broke the build, so it is proposed rather than guessed at.
+It does not replace the interaction. `TracedGainEditor` is a `VST3Editor` subclass: the
+same uidesc is parsed, the same `CControl`s are built, and every override forwards to
+the shipping implementation before recording anything. There is no synthetic drag and
+no direct controller call.
+
+| what is recorded | which of the 13 required data points it answers |
+| --- | --- |
+| `mouse:down … hit=` from the frame's mouse observer | 1, 2 — whether the press reached a real `CSlider`, and which control |
+| `mouse:downLandedOnGainSlider preValue=` | 3 — the value before interaction |
+| `state:down afterDispatch … editing=` | 4 — value and editing flag after mouse-down |
+| `state:move afterDispatch …` (one per move) | 5 — value during the drag |
+| `state:up afterDispatch … editing=false` | 6 — value after mouse-up |
+| `lifecycle:controlBeginEdit` / `controlEndEdit` | 7, 10 — whether begin/end edit ran |
+| `controller:performEdit … accepted=true/false` | 8, 9, 11 — performEdit, its ParamID and value, and whether the controller accepted it |
+| `state:* … controllerNormalized=` | 12 — the controller's value at each stage |
+| `cOrDVerdict` in the p3 evidence | 13 — whether the helper recorded an edited ParamID |
+
+Two details make the trace trustworthy rather than decorative:
+
+- The frame's mouse observers run **before** the frame routes the event
+  (`CFrame::dispatchMouseDownEvent` calls the observers, then dispatches), so reading
+  the control in the observer would report the state the gesture *started* in. The
+  post-event state is therefore read through `doAfterEventProcessing`, after routing.
+- If that post-event read cannot be scheduled, the editor records
+  `afterDispatch=UNAVAILABLE` and the harness classifies it as
+  `UNRESOLVED_NO_POST_DISPATCH_STATE`. "No reading" is the same shape as "the value did
+  not move", and must never be reported as case C.
+
+**Status: the instrument is built and its classification is tested; it has not yet
+produced a trace.** The editor half of the fixture only compiles on Windows (VSTGUI
+needs a GUI toolchain; this host has no X11), and the packaged acceptance needs the
+Windows application. The trace is emitted by the packaged run, so C vs D is decided by
+the next packaged-acceptance run — not by this revision. Until that evidence exists,
+both remain **open**:
+
+| case | status after this revision |
+| --- | --- |
+| A. Windows routed it wrongly | **ruled out** — the drag lands on the plug-in child window with the button held |
+| B. The frame hit-tests the wrong view | **contributed** (the panel flag, now fixed); the root `<template>`'s `mouse-enabled="false"` was checked and is **inert** — `CView::dispatchEvent` never tests the container's own flag, and `CFrame` is itself the root, so it only gates children that do not include the frame |
+| E. performEdit happened, host rejected it | **ruled out** — no rejection, session stays open, `editedParameterIds` empty rather than refused |
+| F. Host accepted, Apex did not consume | **ruled out for the same reason** — the helper's edit snapshot is empty |
+| C. The control got it and did not change | **open — decided by the next packaged run** |
+| D. It changed and never called performEdit | **open — decided by the next packaged run** |
 
 ### Why the probe was withdrawn, and what distinguishes these cases instead
 

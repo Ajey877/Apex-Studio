@@ -15,7 +15,7 @@
 // by an automated runner; they are recorded as NOT_VERIFIED and stay in
 // docs/VST3-EDITOR-ACCEPTANCE.md as manual steps.
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, readdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -23,6 +23,25 @@ import { fileURLToPath } from 'node:url';
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const outPath = path.resolve(process.env.APEX_PACKAGED_ACCEPTANCE_OUT
   ?? path.join(root, 'build/native-evidence/packaged-editor-acceptance.json'));
+
+/**
+ * Where the plug-in's editor writes its own record of a gesture.
+ *
+ * The editor runs inside the fixture bundle, which the helper process loads; the
+ * harness cannot call into it. The helper inherits this process's environment, so
+ * this path is how the editor's own observations of the real control leave that
+ * process. It is deleted before the gesture so the trace provably describes THIS
+ * gesture and not an earlier one.
+ */
+const editorTracePath = path.join(path.dirname(outPath), 'editor-gesture-trace.log');
+
+/** Read the editor's trace, or null when the editor wrote nothing. */
+function readEditorTrace() {
+  if (!existsSync(editorTracePath)) return null;
+  const text = readFileSync(editorTracePath, 'utf8');
+  const lines = text.split('\n').filter(line => line.length > 0);
+  return { lineCount: lines.length, lines };
+}
 
 const CRITERIA = {
   'p1-mixer-opens-editor': "Mixer insert opens the plug-in's own editor",
@@ -291,6 +310,7 @@ function launchEnv(extra = {}) {
     APEX_ACCEPTANCE: '1',
     APEX_ACCEPTANCE_USER_DATA: profile,
     APEX_VST3_SMOKE_PLUGIN: editorFixture,
+    APEX_ACCEPTANCE_EDITOR_TRACE: editorTracePath,
     ...extra,
   };
 }
@@ -521,6 +541,9 @@ async function run() {
   };
   const sliderPoint = { x: sliderTrack.left + Math.round(GAIN_SLIDER.size.width * 0.5), y: sliderTrack.centreY };
   const dragTarget = { x: sliderTrack.left + Math.round(GAIN_SLIDER.size.width * 0.75), y: sliderTrack.centreY };
+  // Start from an empty trace so every line recorded below belongs to this gesture.
+  mkdirSync(path.dirname(editorTracePath), { recursive: true });
+  rmSync(editorTracePath, { force: true });
   const gainInput = await page.evaluate(async (point) => {
     const app = globalThis.__apexAcceptance;
     if (!app?.driveEditorWithRealInput) return { error: 'no real-input hook available' };
@@ -558,6 +581,97 @@ async function run() {
     : fixtureRejection ? 'NOT_VERIFIED'
     : edited?.phase === 'failed' ? 'FAIL' : 'NOT_VERIFIED';
   const blockedByFixture = fixtureRejection;
+  // The plug-in's own editor wrote this during the gesture. It is the only evidence
+  // that says WHERE the genuine interaction stops, so it is recorded with the verdict
+  // rather than left in a log file.
+  const editorTrace = readEditorTrace();
+  const traceText = editorTrace ? editorTrace.lines.join('\n') : '';
+
+  /**
+   * Parse the editor's trace into per-stage slider states instead of matching log
+   * prose with patterns: a test that greps fixed text breaks the moment a number
+   * changes width, and would report the wrong thing rather than fail.
+   *
+   * Each `state:<stage> afterDispatch` line is one post-event observation of the
+   * real Gain slider: its normalized value, whether it is editing, and what the
+   * controller holds at that moment.
+   */
+  function parseSliderStates(lines) {
+    const states = {};
+    for (const line of lines) {
+      const match = /^state:(down|move|up) afterDispatch sliderValue=([-\d.e+]+) sliderNormalized=([-\d.e+]+) editing=(true|false) dirty=(true|false) controllerNormalized=([-\d.eNa/]+)/.exec(line);
+      if (!match) continue;
+      const [, stage, value, normalized, editing, dirty, controller] = match;
+      // Keep every observation per stage: a drag produces several moves.
+      (states[stage] ??= []).push({
+        value: Number(value), normalized: Number(normalized), editing: editing === 'true',
+        dirty: dirty === 'true', controllerNormalized: Number(controller),
+      });
+    }
+    return states;
+  }
+
+  const sliderStates = editorTrace ? parseSliderStates(editorTrace.lines) : {};
+  const firstDown = sliderStates.down?.[0] ?? null;
+  const allMoves = sliderStates.move ?? [];
+  const lastUp = sliderStates.up?.at(-1) ?? null;
+  // The value moved if any post-dispatch observation differs from where the press
+  // found it. This is the measurement, not an expectation about the direction.
+  const anyStateNormalized = [firstDown, ...allMoves, lastUp]
+    .filter(Boolean).map(state => state.normalized);
+  const valuesSeen = [...new Set(anyStateNormalized)];
+  const controlValueMoved = valuesSeen.length > 1;
+  // A post-dispatch read can be unavailable (the frame was not inside event
+  // handling). That is missing evidence, not an observation that the value stayed
+  // put, so it must never be classified as case C.
+  const postDispatchUnavailable = /afterDispatch=UNAVAILABLE/.test(traceText);
+  const havePostDispatchState = firstDown !== null || allMoves.length > 0 || lastUp !== null;
+  const beganEditing = Boolean(firstDown?.editing) || allMoves.some(state => state.editing);
+  const endedEditing = lastUp ? lastUp.editing === false : false;
+
+  const traceFacts = {
+    // Was the real control under the pointer, and did the frame resolve the press to it?
+    mouseDownOnGainSlider: /^mouse:downLandedOnGainSlider/.test(traceText) ||
+      editorTrace?.lines.some(line => line.startsWith('mouse:downLandedOnGainSlider')) === true,
+    sliderPresentAtOpen: /editor:binding[^\n]*gainSliderPresent=true/.test(traceText),
+    listenerIsEditor: /listenerIsEditor=true/.test(traceText),
+    parameterListenerPresent: /parameterListener=present/.test(traceText),
+    parameterListenerMissing: /parameterListener=null/.test(traceText),
+    // Did the control act on the gesture?
+    controlValueMoved,
+    valuesSeen,
+    havePostDispatchState,
+    postDispatchUnavailable,
+    beganEditing,
+    endedEditing,
+    controlBeginEditObserved: /lifecycle:controlBeginEdit/.test(traceText),
+    controlEndEditObserved: /lifecycle:controlEndEdit/.test(traceText),
+    valueChangedObserved: /lifecycle:valueChanged/.test(traceText),
+    // Did the edit reach the controller?
+    performEditObserved: /controller:performEdit .*accepted=true/.test(traceText),
+    performEditRejected: /controller:performEdit .*accepted=false/.test(traceText),
+    performEditSkipped: /controller:performEditSkipped/.test(traceText),
+    sliderStates,
+  };
+
+  /**
+   * Which hypothesis the trace supports.
+   *
+   * C = the control took the gesture and its value did not change.
+   * D = the value changed but the beginEdit/performEdit/endEdit lifecycle did not run.
+   * With no trace, and with any state the trace does not cover, the answer stays
+   * open: it is never supplied by assumption.
+   */
+  const traceVerdict = !editorTrace || editorTrace.lineCount === 0 ? 'NO_TRACE'
+    : traceFacts.performEditObserved ? 'EDIT_REACHED_CONTROLLER'
+    : traceFacts.parameterListenerMissing ? 'CASE_D_NO_PARAMETER_BINDING'
+    : !traceFacts.mouseDownOnGainSlider ? 'CASE_C_NO_MOUSEDOWN_ON_SLIDER'
+    : traceFacts.postDispatchUnavailable || !traceFacts.havePostDispatchState
+      ? 'UNRESOLVED_NO_POST_DISPATCH_STATE'
+    : !traceFacts.controlValueMoved ? 'CASE_C_CONTROL_VALUE_DID_NOT_MOVE'
+    : !traceFacts.controlBeginEditObserved ? 'CASE_D_LIFECYCLE_NOT_INVOKED'
+    : 'UNRESOLVED';
+
   record('p3-parameter-reaches-apex', p3Verdict, {
     // Compact, front-loaded facts: annotations are truncated, and these are the
     // three things that decide the verdict.
@@ -582,6 +696,13 @@ async function run() {
       ? Object.fromEntries(Object.entries(gainInput.delivered).map(([step, value]) => [step, value?.buttonHeldAfter ?? null]))
       : null,
     mechanism: 'genuine OS input (SendInput) was aimed at the Gain slider inside the plug-in\'s own editor window, then the panel\'s normal poll loop observed the edit',
+    // The editor's own account of the gesture, and what it proves about C vs D.
+    editorTracePresent: Boolean(editorTrace),
+    editorTraceLineCount: editorTrace?.lineCount ?? 0,
+    editorTracePath: editorTrace ? editorTracePath : null,
+    cOrDVerdict: traceVerdict,
+    traceFacts,
+    editorTraceLines: editorTrace?.lines ?? null,
     gainInput,
     sliderPoint,
     dragTarget,
