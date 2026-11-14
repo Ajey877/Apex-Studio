@@ -24,6 +24,11 @@ ipcRenderer.on('vst3:liveAudioPort', (event, metadata) => {
 const desktopApi = {
   isDesktop: true,
   smokeTest,
+  /** Set only by APEX_ACCEPTANCE=1; enables the packaged-acceptance hook. */
+  packagedAcceptance: process.argv.includes('--apex-packaged-acceptance'),
+  closeWindow: process.argv.includes('--apex-packaged-acceptance')
+    ? () => ipcRenderer.invoke('app:closeWindowForAcceptance')
+    : undefined,
   smokeReopen: process.argv.includes('--apex-smoke-reopen'),
   platform: process.platform,
   arch: process.arch,
@@ -49,6 +54,16 @@ const desktopApi = {
       return pcm;
     },
     close: (id) => ipcRenderer.invoke('vst3:close', id),
+    openEditor: (effect, context) => ipcRenderer.invoke('vst3:openEditor', effect, context),
+    pollEditor: (id) => ipcRenderer.invoke('vst3:pollEditor', id),
+    closeEditor: (id) => ipcRenderer.invoke('vst3:closeEditor', id),
+    // ACCEPTANCE ONLY: the main process refuses this unless APEX_ACCEPTANCE=1.
+    editorInput: (id, action, point) => ipcRenderer.invoke('vst3:editorInput', id, action, point),
+    // ACCEPTANCE ONLY: kills the real helper backing the open editor.
+    editorCrash: (id) => ipcRenderer.invoke('vst3:editorCrash', id),
+    finishEditor: (id, committed) => ipcRenderer.invoke('vst3:finishEditor', id, committed === true),
+    editorRecovery: () => ipcRenderer.invoke('vst3:editorRecovery'),
+    dismissEditorRecovery: (id) => ipcRenderer.invoke('vst3:dismissEditorRecovery', id),
     bindLiveAudioPort: (sessionId, trackId, slotId, runtimeId, sampleRate) => new Promise((resolve, reject) => {
       const existing = pendingLiveAudioPorts.get(sessionId);
       if (existing) {

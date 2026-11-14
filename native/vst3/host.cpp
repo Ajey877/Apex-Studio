@@ -11,6 +11,9 @@
 #include "pluginterfaces/vst/ivstaudioprocessor.h"
 #include "pluginterfaces/vst/ivsteditcontroller.h"
 #include "pluginterfaces/vst/ivstprocesscontext.h"
+#include "pluginterfaces/gui/iplugview.h"
+#include "pluginterfaces/gui/iplugviewcontentscalesupport.h"
+#include "pluginterfaces/base/keycodes.h"
 #include "component-handler.hpp"
 #include <nlohmann/json.hpp>
 #include <algorithm>
@@ -20,14 +23,18 @@
 #include <iostream>
 #include <memory>
 #include <map>
+#include <optional>
 #include <set>
 #include <stdexcept>
+#include <string>
 #include <vector>
 #ifdef _WIN32
 #include <windows.h>
+#include <windowsx.h>
 #include <objbase.h>
 #include <fcntl.h>
 #include <io.h>
+#include <mutex>
 #endif
 
 using ApexVst3Host::HostComponentHandler;
@@ -50,6 +57,16 @@ void require(bool condition, const std::string& message) {
 }
 void checked(tresult result, const std::string& message) {
   require(result == kResultOk, message + " (VST result " + std::to_string(result) + ")");
+}
+// IAudioProcessor::setProcessing is advisory in the VST3 contract: the interface
+// documents what the call means but assigns no failure semantics, and the SDK's
+// own AudioEffect base implements it as `return kNotImplemented;` (the
+// DataExchange sample inherits that verbatim). Treating kNotImplemented as fatal
+// rejects conformant plug-ins, so any accepted or merely unimplemented result
+// passes while a genuine error still fails the operation.
+void checkedProcessing(tresult result, const std::string& message) {
+  require(result == kResultOk || result == kNotImplemented,
+    message + " (VST result " + std::to_string(result) + ")");
 }
 int integer(const json& object, const char* key, int low, int high) {
   require(object.contains(key) && object.at(key).is_number_integer(), std::string(key) + " must be an integer");
@@ -127,6 +144,10 @@ std::vector<float> decodePlanarAudio(const std::string& encoded, int frames) {
   for (float sample : result) require(std::isfinite(sample), "Non-finite VST3 input audio");
   return result;
 }
+
+#ifdef _WIN32
+#include "editor-host.hpp"
+#endif
 
 class Instance {
   // Declaration order matters: SDK objects are released BEFORE the module unloads.
@@ -244,7 +265,7 @@ class Instance {
     require((flags & RestartFlags::kReloadComponent) == 0,
       std::string("VST3 plugin requested full component reload (kReloadComponent) during ") +
       contextLabel + ", which is unsupported");
-    checked(processor->setProcessing(false), std::string("Cannot suspend processing (") + contextLabel + ")");
+    checkedProcessing(processor->setProcessing(false), std::string("Cannot suspend processing (") + contextLabel + ")");
     processing = false;
     checked(component->setActive(false), std::string("Cannot deactivate component (") + contextLabel + ")");
     active = false;
@@ -254,7 +275,7 @@ class Instance {
     }
     checked(component->setActive(true), std::string("Cannot reactivate component (") + contextLabel + ")");
     active = true;
-    checked(processor->setProcessing(true), std::string("Cannot resume processing (") + contextLabel + ")");
+    checkedProcessing(processor->setProcessing(true), std::string("Cannot resume processing (") + contextLabel + ")");
     processing = true;
     const int32 postFlags = componentHandler->consumeRestartFlags();
     require((postFlags & kStructuralRestartMask) == 0,
@@ -356,7 +377,7 @@ public:
       assertPreparedProcessDataMatchesContract();
     }
     checked(component->setActive(true), "setActive failed"); active = true;
-    checked(processor->setProcessing(true), "setProcessing failed"); processing = true;
+    checkedProcessing(processor->setProcessing(true), "setProcessing failed"); processing = true;
     // Component/controller streams are restored while inactive. Apply saved
     // normalized overrides after activation so effect processors and controller
     // metadata reflect authoritative saved values before the first live block.
@@ -500,7 +521,7 @@ public:
     }
   }
   json snapshot() {
-    checked(processor->setProcessing(false), "Cannot suspend for state capture"); processing = false;
+    checkedProcessing(processor->setProcessing(false), "Cannot suspend for state capture"); processing = false;
     json state{{"schema", 1}, {"classId", classId}, {"parameters", json::array()}};
     MemoryStream componentState;
     auto componentResult = component->getState(&componentState);
@@ -517,7 +538,7 @@ public:
       for (const auto& entry : overrides)
         state["parameters"].push_back({{"id", entry.first}, {"value", entry.second}});
     }
-    checked(processor->setProcessing(true), "Cannot resume after state capture"); processing = true;
+    checkedProcessing(processor->setProcessing(true), "Cannot resume after state capture"); processing = true;
     return state;
   }
   std::vector<float> process(const json& request, bool flush = false) {
@@ -628,39 +649,110 @@ public:
 };
 
 // Binary framing: little-endian uint32 JSON length, uint32 PCM byte length,
-// UTF-8 JSON, then planar stereo float32 PCM. No per-sample IPC.
+// UTF-8 JSON, then planar stereo float32 PCM. The editor mode drains callback
+// events only in response to a bounded poll command; it never writes unsolicited
+// stdout that could desynchronize this synchronous helper protocol.
 void reply(const json& message, const std::vector<float>& pcm = {}) {
   const auto text = message.dump();
+  require(text.size() <= 5 * 1024 * 1024, "VST3 helper response exceeds 5 MiB limit");
   auto put32 = [](uint32_t n) { for (int i = 0; i < 4; ++i) std::cout.put(static_cast<char>((n >> (8 * i)) & 255)); };
   put32(static_cast<uint32_t>(text.size())); put32(static_cast<uint32_t>(pcm.size() * sizeof(float)));
   std::cout.write(text.data(), text.size());
   if (!pcm.empty()) std::cout.write(reinterpret_cast<const char*>(pcm.data()), pcm.size() * sizeof(float));
   std::cout.flush();
 }
+
+#ifdef _WIN32
+std::optional<std::string> tryReadEditorPipeLine(std::string& pending, bool& eof) {
+  const HANDLE input = GetStdHandle(STD_INPUT_HANDLE);
+  DWORD available = 0;
+  if (!PeekNamedPipe(input, nullptr, 0, nullptr, &available, nullptr)) {
+    const auto error = GetLastError();
+    if (error == ERROR_BROKEN_PIPE || error == ERROR_INVALID_HANDLE) { eof = true; return std::nullopt; }
+    throw std::runtime_error("Could not poll the VST3 editor command pipe");
+  }
+  if (available > 0) {
+    char chunk[4096];
+    const auto requested = std::min<DWORD>(available, static_cast<DWORD>(sizeof(chunk)));
+    DWORD received = 0;
+    if (!ReadFile(input, chunk, requested, &received, nullptr)) {
+      const auto error = GetLastError();
+      if (error == ERROR_BROKEN_PIPE || error == ERROR_INVALID_HANDLE) { eof = true; return std::nullopt; }
+      throw std::runtime_error("Could not read the VST3 editor command pipe");
+    }
+    if (received == 0) { eof = true; return std::nullopt; }
+    pending.append(chunk, chunk + received);
+    if (pending.size() > kMaxRequest + 1) throw std::runtime_error("Request exceeds 8 MiB limit");
+  }
+  const auto newline = pending.find('\n');
+  if (newline == std::string::npos) return std::nullopt;
+  auto line = pending.substr(0, newline);
+  pending.erase(0, newline + 1);
+  if (!line.empty() && line.back() == '\r') line.pop_back();
+  return line;
+}
+#endif
+
 int main() {
 #ifdef _WIN32
   _setmode(_fileno(stdout), _O_BINARY);
+  const auto user32 = GetModuleHandleW(L"user32.dll");
+  using SetDpiContextFn = BOOL(WINAPI*)(DPI_AWARENESS_CONTEXT);
+  const auto setDpiContext = reinterpret_cast<SetDpiContextFn>(GetProcAddress(user32, "SetProcessDpiAwarenessContext"));
+  if (setDpiContext) setDpiContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
   auto com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
   if (FAILED(com)) return 2;
 #endif
   PlugProvider::setErrorStream(&std::cerr);
   // Reserve stdout exclusively for framed protocol; plugin debug logs using
-  // stdout will be detected as a protocol error by the parent, not played.
+  // stdout will be rejected by the parent, never interpreted as UI events.
   std::unique_ptr<Instance> instance;
+#ifdef _WIN32
+  std::unique_ptr<ApexVst3Host::NativeEditorSession> editor;
+  std::string editorPipeBuffer;
+#endif
   std::string line;
   while (true) {
     line.clear();
-    char c;
-    while (std::cin.get(c) && c != '\n') {
-      line.push_back(c);
-      if (line.size() > kMaxRequest) { reply({{"ok", false}, {"error", "Request exceeds 8 MiB limit"}}); return 1; }
+#ifdef _WIN32
+    if (editor) {
+      bool eof = false;
+      std::optional<std::string> editorLine;
+      try { editorLine = tryReadEditorPipeLine(editorPipeBuffer, eof); }
+      catch (const std::exception& error) {
+        reply({{"ok", false}, {"error", error.what()}});
+        break;
+      }
+      if (!editorLine) {
+        if (eof) break;
+        editor->pumpMessages();
+        MsgWaitForMultipleObjectsEx(0, nullptr, 12, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
+        continue;
+      }
+      line = std::move(*editorLine);
+    } else
+#endif
+    {
+      char c;
+      while (std::cin.get(c) && c != '\n') {
+        line.push_back(c);
+        if (line.size() > kMaxRequest) {
+          reply({{"ok", false}, {"error", "Request exceeds 8 MiB limit"}});
+          return 1;
+        }
+      }
+      if (line.empty() && !std::cin) break;
     }
-    if (line.empty() && !std::cin) break;
+
+    std::string command;
     try {
       auto request = json::parse(line);
-      auto command = request.at("command").get<std::string>();
+      command = request.at("command").get<std::string>();
       if (command == "scan") {
         require(!instance, "Scan requires a separate helper");
+#ifdef _WIN32
+        require(!editor, "Plugin discovery cannot run inside an editor-only helper");
+#endif
         std::string error;
         auto module = VST3::Hosting::Module::create(request.at("path").get<std::string>(), error);
         require(bool(module), "Plugin module load failed: " + error);
@@ -672,9 +764,160 @@ int main() {
         reply({{"ok", true}, {"plugins", plugins}});
       } else if (command == "open") {
         require(!instance, "Close current instance before opening another");
+#ifdef _WIN32
+        require(!editor, "Audio processing cannot run inside an editor-only helper");
+#endif
         instance = std::make_unique<Instance>();
         auto result = instance->open(request);
         reply({{"ok", true}, {"plugin", result}});
+      } else if (command == "editorOpen") {
+#ifdef _WIN32
+        require(!instance && !editor, "A VST3 helper process can host exactly one isolated session");
+        editor = std::make_unique<ApexVst3Host::NativeEditorSession>();
+        auto result = editor->open(request);
+        reply({{"ok", true}, {"editor", result}});
+#else
+        throw std::runtime_error("Native VST3 editor windows are supported only on Windows x64");
+#endif
+      } else if (command == "editorPoll") {
+#ifdef _WIN32
+        require(editor != nullptr, "No native VST3 editor session is open");
+        editor->pumpMessages();
+        reply({{"ok", true}, {"editor", editor->poll()}});
+#else
+        throw std::runtime_error("Native VST3 editor windows are supported only on Windows x64");
+#endif
+      } else if (command == "editorClose") {
+#ifdef _WIN32
+        require(editor != nullptr, "No native VST3 editor session is open");
+        reply({{"ok", true}, {"editor", editor->closeAndCapture()}});
+#else
+        throw std::runtime_error("Native VST3 editor windows are supported only on Windows x64");
+#endif
+      } else if (command == "editorTestAction") {
+        // Acceptance harness only. Performs a REAL Win32 operation on the live
+        // window (not a simulated message) and lets the plug-in react through its
+        // normal path, then reports what the OS and the plug-in observed.
+#ifdef _WIN32
+        require(editor != nullptr, "No native VST3 editor session is open");
+        json result = json::object();
+        const auto action = request.value("action", std::string());
+        HWND window = editor->testWindowHandle();
+        require(window != nullptr && !editor->isClosed(), "The native editor window is not open");
+        const auto classId = request.value("classId", std::string());
+        if (action == "resizeClient") {
+          const auto width = request.at("width").get<int>();
+          const auto height = request.at("height").get<int>();
+          require(width >= 32 && height >= 32 && width <= 8192 && height <= 8192, "Invalid resize target");
+          RECT target{0, 0, width, height};
+          const auto style = static_cast<DWORD>(GetWindowLongPtrW(window, GWL_STYLE));
+          AdjustWindowRectEx(&target, style, FALSE, 0);
+          // A real resize goes through WM_SIZING/WM_SIZE exactly like a user drag,
+          // so IPlugView::checkSizeConstraint() is genuinely exercised.
+          SetWindowPos(window, nullptr, 0, 0, target.right - target.left, target.bottom - target.top,
+            SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+          editor->pumpMessages();
+          result["requestedWidth"] = width;
+          result["requestedHeight"] = height;
+        } else if (action == "keyDown" || action == "keyUp") {
+          // Real keyboard input: focus the editor window, then inject the key with
+          // SendInput so Windows routes WM_KEYDOWN to the focused window.
+          const auto vk = static_cast<WORD>(request.at("vk").get<unsigned>());
+          const unsigned long accepted = editor->sendKeyForTest(vk, action == "keyDown");
+          editor->pumpMessages();
+          result["vk"] = vk;
+          result["key"] = action;
+          // accepted = how many events SendInput consumed (the ATTEMPT). The
+          // observation below is what the window procedure and the plug-in view
+          // actually saw (the RECEIPT). They are reported separately on purpose.
+          result["sendInputAccepted"] = accepted;
+          result["observation"] = editor->keyObservation();
+        } else if (action == "mouseMove" || action == "mouseDown" || action == "mouseUp" ||
+                   action == "mouseWheel") {
+          // mouseUp is a real action, not a synonym: a press with no release leaves
+          // the button down and the control never commits a value.
+          const auto kind = action == "mouseMove" ? "move"
+            : action == "mouseDown" ? "down"
+            : action == "mouseUp" ? "up"
+            : "wheel";
+          // `zoomModifier` requests VSTGUI's zoom modifier (the shift key) for the
+          // gesture, so a drag moves the value by a controlled step instead of
+          // jumping the handle to the pointer. It is a real key state that the
+          // helper sets and clears around the gesture.
+          const bool zoomModifier = request.value("zoomModifier", false);
+          result = editor->deliverMouse(kind, request.value("x", 0), request.value("y", 0), zoomModifier);
+        } else if (action == "gestureModifier") {
+          // Real shift key down/up, for a genuine zoom-modifier drag.
+          const bool down = request.value("down", false);
+          result = editor->setGestureModifier(down);
+        } else if (action == "setScale") {
+          const auto factor = request.at("scale").get<float>();
+          require(factor >= 0.5f && factor <= 4.f, "Invalid content scale factor");
+          const auto code = editor->setScaleForTest(factor);
+          result["requestedScale"] = factor;
+          result["result"] = ApexVst3Host::NativeEditorSession::resultName(code);
+          result["supported"] = editor->scaleSupported();
+        } else if (action == "destroyFocusSink") {
+          editor->destroyFocusSink();
+          result["focusSinkDestroyed"] = true;
+          editor->pumpMessages();
+        } else if (action == "requestPluginResize") {
+          result["accepted"] = editor->requestTestPluginResize(request.value("width", 480), request.value("height", 320));
+          editor->pumpMessages();
+        } else if (action == "closeFromWindow") {
+          // A real WM_CLOSE, exactly what the title-bar X produces.
+          PostMessageW(window, WM_CLOSE, 0, 0);
+          editor->pumpMessages();
+          result["closePosted"] = true;
+        } else if (action == "focus") {
+          SetForegroundWindow(window);
+          SetFocus(window);
+          editor->pumpMessages();
+          result["focusRequested"] = true;
+        } else if (action == "loseFocus") {
+          // A genuine focus change needs a real second window that can own focus.
+          // This helper is otherwise GUI-less, so create one: a real, separate
+          // top-level window owned by this process. Focus then moves through the
+          // normal Win32 path and the plug-in receives onFocus(0) via WM_KILLFOCUS.
+          editor->ensureFocusSink();
+          HWND sink = editor->focusSink();
+          require(sink != nullptr, "Could not create the focus-loss target window");
+          ShowWindow(sink, SW_SHOWNOACTIVATE);
+          SetForegroundWindow(sink);
+          SetFocus(sink);
+          editor->pumpMessages();
+          result["focusSinkCreated"] = true;
+          result["focusSinkIsSeparateWindow"] = sink != window;
+          result["focusSinkOwnsFocus"] = GetFocus() == sink;
+        } else if (action == "minimize") {
+          ShowWindow(window, SW_MINIMIZE);
+          editor->pumpMessages();
+          result["minimized"] = IsIconic(window) != 0;
+          ShowWindow(window, SW_RESTORE);
+          editor->pumpMessages();
+        } else {
+          throw std::runtime_error("Unknown editor test action: " + action);
+        }
+        editor->pumpMessages();
+        result["diagnostics"] = editor->windowDiagnostics(classId.c_str());
+        reply({{"ok", true}, {"action", action}, {"result", result}});
+#else
+        throw std::runtime_error("Native VST3 editor windows are supported only on Windows x64");
+#endif
+      } else if (command == "editorDiagnostics") {
+        // Read-only observation of the live native window, used to verify genuine
+        // HWND creation, visibility, focus, DPI and resize behaviour. It never
+        // mutates the session, so it is safe while the editor is open.
+#ifdef _WIN32
+        require(editor != nullptr, "No native VST3 editor session is open");
+        editor->pumpMessages();
+        // The caller supplies the class id it expects; the diagnostics report it
+        // back so an evidence run can prove it inspected the intended plug-in.
+        const auto expectedClassId = request.value("classId", std::string());
+        reply({{"ok", true}, {"diagnostics", editor->windowDiagnostics(expectedClassId.c_str())}});
+#else
+        throw std::runtime_error("Native VST3 editor windows are supported only on Windows x64");
+#endif
       } else if (command == "process") {
         require(bool(instance), "No plugin instance loaded");
         auto pcm = instance->process(request);
@@ -695,17 +938,29 @@ int main() {
         require(bool(instance), "No plugin instance loaded");
         reply({{"ok", true}, {"state", instance->snapshot()}});
       } else if (command == "close") {
-        instance.reset(); reply({{"ok", true}});
+#ifdef _WIN32
+        if (editor) {
+          if (!editor->isClosed()) editor->closeAndCapture();
+          editor.reset();
+        }
+#endif
+        instance.reset();
+        reply({{"ok", true}});
       } else throw std::runtime_error("Unknown command");
     } catch (const std::exception& error) {
-      // Invalid state, process errors and partial initialization invalidate this
-      // instance. Caller keeps its original project state and can reopen/retry.
+      // A state-capture failure during editorClose intentionally keeps the
+      // editor process/window alive so the user can retry. Processing failures
+      // continue to invalidate only their independent processing instance.
       instance.reset();
+#ifdef _WIN32
+      if (command == "editorOpen") editor.reset();
+#endif
       reply({{"ok", false}, {"error", error.what()}});
     }
   }
   instance.reset();
 #ifdef _WIN32
+  editor.reset();
   CoUninitialize();
 #endif
   return 0;

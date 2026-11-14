@@ -110,6 +110,64 @@ The Native VST3 and Desktop Validation workflows run these on Windows; native
 DSP and deterministic DAW integration also run on Linux. Inspect final-head CI
 for results—test source alone is not a claimed passing Windows run.
 
+## Genuine VST3 editor windows for Mixer effects
+
+A Mixer native insert exposes **Open VST3 editor**, which shows the plug-in's own
+VST3 editor view (`IEditController::createView(ViewType::kEditor)` attached to a
+real HWND) instead of Apex's generic parameter sliders. The generic controls stay
+available as a fallback that edits the same saved state.
+
+- Platform: Windows x64 only. The window is created and owned by the isolated
+  helper process (`native/vst3/editor-host.hpp`); no plug-in UI code runs in the
+  renderer, the main process or the audio callback. Browsers and Linux builds
+  report an explicit refusal instead of a fabricated editor.
+- State: the saved insert state is loaded into the plug-in before the window
+  appears (`editorOpen`). Closing the plug-in window (its own X) captures
+  `IComponent::getState`, `IEditController::getState` and the coalesced final
+  values of every `performEdit` callback, then destroys the HWND and releases the
+  plug-in objects.
+- Parameter callbacks: `IComponentHandler::beginEdit/performEdit/endEdit` are
+  validated (known, non-read-only IDs; ordered gestures; finite normalized
+  values), coalesced per gesture and reported to the renderer. If a noisy plug-in
+  saturates the bounded queue, the final validated value per parameter is still
+  kept, and the renderer is told (`eventQueueOverflow`) that intermediate moves
+  were dropped. `setDirty` is surfaced as plug-in-internal changed state.
+- Commit: the captured state becomes **one** undoable project change on exactly
+  the track/slot that opened the window, and is saved synchronously through the
+  normal project persistence path. If the project, track or slot changed, or the
+  save failed, the newer project state wins and the capture is written to
+  `vst3-editor-recovery.json` in the app profile instead.
+- Lifecycle: one editor window per app session; editing is refused while transport
+  is playing; renderer navigation/crash/destruction, project replacement and app
+  quit all close the window and persist a recovery record rather than silently
+  dropping the user's edits. A pending recovery record is offered on the next
+  launch (**Restore captured state** / **Discard**) and is only applied to a
+  matching insert of the same project and plug-in.
+
+### Editor fixture and validation
+
+`native/vst3/CMakeLists.txt` builds the pinned SDK's genuine VSTGUI `AGain`
+effect (`APEX_BUILD_VST3_EDITOR_FIXTURE`, ON for Windows) as the real editor
+fixture next to the MDA bundles. Its `again.uidesc` resource is what the helper
+attaches to the HWND, and its Gain slider is bound to ParamID 0, so a captured
+state must contain a real ParamID-0 value. VSTGUI notices are retained in
+`licenses/VSTGUI-BSD.txt`.
+
+```sh
+npm run native:vst3:build
+npm run test:vst3-editor
+```
+
+`test:vst3-editor` covers the renderer session and the privileged service without
+a plugin binary: commit-once semantics, close-once sharing, refused/failed
+capture leading to recovery instead of a bogus state, poll-loop termination,
+foreign class ID rejection, callback chronology/read-only rejection, overflow
+coalescing, ownership and renderer-teardown recovery, plus the preload/IPC/package
+wiring. Opening, resizing, DPI scaling, keyboard/mouse input, the plug-in's own
+window painting and packaged acceptance require a real Windows x64 session; the
+Windows desktop job builds the fixture, but test source is not evidence of a
+passing windowed run.
+
 ## Async architecture and explicit limits
 
 - Registry adds optional **channel ownership**, preserving synchronous built-in
@@ -143,10 +201,10 @@ for results—test source alone is not a claimed passing Windows run.
 - First slice supports x64 VST3 instruments with mono/stereo main output and
   **zero reported processing latency**. Other latency is rejected pending proper
   delay compensation. Plugins taking >2 s per operation are rejected.
-- No VST2/AU/CLAP, Mixer-native effect insert chain, plugin editor windows, sample-accurate parameter DSP automation,
-  per-note native pan, arbitrary-bus layouts or broad plugin certification. The separate
-  experimental audio-effect discovery/process IPC is documented below; it is not yet
-  attached to Mixer playback or production export.
+- No VST2/AU/CLAP, sample-accurate parameter DSP automation, per-note native pan,
+  arbitrary-bus layouts or broad plugin certification. Mixer-native effect inserts
+  are attached to live/offline playback and export (below); the genuine plug-in
+  editor window is documented in its own section below.
   Native transport context is per-session; tempo-synchronized plugin internal
   sequencers/seek-position synchronization beyond scheduled MIDI are not claimed.
   Windows x64/MDA is the reproducible acceptance fixture; other plugins may vary.

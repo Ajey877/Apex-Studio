@@ -58,3 +58,36 @@ test('native Mixer effect add, edit, reorder, undo, redo and removal are project
   const deleted = deleteFxSlotFromProjectState(redone.present, 1, first.id);
   assert.deepEqual(deleted.mixerTracks.find(track => track.id === 1)!.fxSlots.map(item => item.id), ['native-b']);
 });
+
+test('re-saving an identical plug-in state in another key order records no undo step', () => {
+  // Regression for packaged p5. The regained document is legitimately rebuilt from
+  // a parameter list, so its keys arrive in another order. History compared the two
+  // with JSON.stringify, whose output follows insertion order, so closing an editor
+  // that changed nothing pushed an undo entry whose restore changed nothing either.
+  // Undo then appeared to do nothing, and the NEXT undo -- the one that mattered --
+  // looked broken.
+  const base = createDefaultProjectState();
+  const withSlot = {
+    ...base,
+    mixerTracks: base.mixerTracks.map(track => track.id === 1 ? { ...track, fxSlots: [slot('native-a')] } : track),
+  };
+  const history = createHistory(withSlot);
+  const present = history.present;
+  const sameValuesOtherOrder = JSON.parse(JSON.stringify(present));
+  const fx = sameValuesOtherOrder.mixerTracks.find((track: { id: number }) => track.id === 1).fxSlots[0];
+  const state = fx.vst3Effect.state;
+  fx.vst3Effect.state = {
+    parameters: state.parameters, controller: state.controller, component: state.component,
+    classId: state.classId, schema: state.schema,
+  };
+  const after = history.commit(sameValuesOtherOrder, 'Close editor (nothing changed)');
+  assert.equal(after.past.length, history.past.length, 'an identical document adds no history entry');
+  assert.equal(after, history, 'the history object is returned unchanged');
+
+  // A genuine change in the same representation must still be recorded.
+  const changed = JSON.parse(JSON.stringify(present));
+  changed.mixerTracks.find((track: { id: number }) => track.id === 1).fxSlots[0].vst3Effect
+    .state.parameters[0].value = 0.25;
+  assert.equal(history.commit(changed, 'Edit plug-in state').past.length, 1,
+    'a real parameter change is still one undo step');
+});

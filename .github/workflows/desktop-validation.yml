@@ -32,7 +32,21 @@ jobs:
         run: npm run lint
 
       - name: Audio regression tests
-        run: npm run test:audio
+        shell: bash
+        env:
+          # Node's own reporter is used because the job log is not always
+          # retrievable; failures are lifted to annotations that name the test.
+          NODE_OPTIONS: --test-reporter=spec
+        run: |
+          set +e
+          npm run test:audio 2>&1 | tee audio-tests.log
+          status=${PIPESTATUS[0]}
+          if [ "$status" -ne 0 ]; then
+            grep -E '^[[:space:]]*(not ok|✖)' audio-tests.log | head -8 | while IFS= read -r line; do
+              echo "::error::${line}"
+            done
+          fi
+          exit "$status"
 
       - name: History regression tests
         run: npm run test:history
@@ -46,9 +60,58 @@ jobs:
       - name: Verify production native DAW integration on Windows
         run: npm run test:vst3-daw
 
+      - name: Verify native VST3 editor session and recovery contract
+        run: npm run test:vst3-editor
+
+      - name: Prove editor/audio helper process separation with real PIDs
+        run: npm run test:vst3-editor-process
+
+      - name: Build the native helper and the genuine AGain VSTGUI editor fixture
+        run: npm run native:vst3:build
+
+      - name: Verify the AGain VSTGUI editor fixture was built and is discoverable
+        run: node scripts/verify-native-editor-fixture.mjs
+
       - name: Run packaged Windows runtime smoke test
         run: npm run smoke:win
 
+      # Packaged-application editor acceptance: Playwright drives the REAL packaged
+      # exe (Mixer insert -> plug-in's own window), and native facts are read from
+      # the OS process table. Interactive-only rows are recorded NOT_VERIFIED.
+      - name: Native VST3 editor acceptance through the packaged application
+        id: packaged-editor-acceptance
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        timeout-minutes: 20
+        shell: bash
+        run: |
+          set +e
+          node scripts/packaged-editor-acceptance.mjs 2>&1 | tee packaged-editor-acceptance.log
+          status=${PIPESTATUS[0]}
+          echo "exit=$status"
+          grep -E '^ACCEPTANCE-SUMMARY' packaged-editor-acceptance.log | head -1 | while IFS= read -r line; do
+            echo "::notice::${line}"
+          done
+          grep -E '^(ACCEPTANCE-ERROR|FAIL-DETAIL|ACCEPTANCE-DETAIL)' packaged-editor-acceptance.log | head -12 | while IFS= read -r line; do
+            echo "::error::${line}"
+          done
+          grep -E '^(PASS|FAIL|NOT_VERIFIED)' packaged-editor-acceptance.log | head -10 | while IFS= read -r line; do
+            echo "::notice::${line}"
+          done
+          if [ ! -f build/native-evidence/packaged-editor-acceptance.json ]; then
+            echo "::error::Packaged acceptance produced no evidence file"
+            exit 1
+          fi
+          exit 0
+      - name: Record the packaged acceptance verdict
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          if [ "${{ steps.packaged-editor-acceptance.outcome }}" = "failure" ]; then
+            echo "::error::Packaged editor acceptance reported a failure; see the artifact"
+            exit 1
+          fi
+          echo "::notice::Packaged editor acceptance completed; see packaged-editor-acceptance.json"
       - name: Upload measured production VST3 evidence
         if: always()
         uses: actions/upload-artifact@v4

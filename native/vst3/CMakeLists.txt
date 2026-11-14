@@ -7,13 +7,40 @@ if(NOT WIN32 AND NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
   message(FATAL_ERROR "This prototype supports Windows and Linux only")
 endif()
 option(APEX_BUILD_VST3_FIXTURE "Build the MIT SDK mda instrument bundle for tests only" ON)
+if(WIN32)
+  option(APEX_BUILD_VST3_EDITOR_FIXTURE "Build the genuine VSTGUI editor fixtures (AGain + ApexAcceptanceGain) for editor tests only" ON)
+else()
+  option(APEX_BUILD_VST3_EDITOR_FIXTURE "Build the genuine VSTGUI editor fixtures (AGain + ApexAcceptanceGain) for editor tests only" OFF)
+endif()
+# AGain (the SDK sample) cannot build off Windows: its bundle needs the Windows
+# resource/entry path. ApexAcceptanceGain CAN, and building it on Linux is how this
+# repository compile-verifies the fixture and proves it loads and processes audio
+# without needing a Windows runner for every iteration.
+if(APEX_BUILD_VST3_EDITOR_FIXTURE AND NOT WIN32)
+  set(APEX_SDK_EDITOR_FIXTURE_ONLY_WIN32 ON)
+endif()
+# Test-only acceptance fixture. It is a stereo-in/stereo-out effect with a genuine
+# VSTGUI editor and a controller that exposes exactly the parameter its editor
+# edits -- the one combination no pinned SDK sample provides. Built ONLY when the
+# editor fixture option is on, and never referenced by any packaged/staged build.
+# On by default: the DSP test needs no GUI, so it runs everywhere. The VSTGUI
+# bundle half is gated separately below on VSTGUI availability.
+option(APEX_BUILD_ACCEPTANCE_FIXTURE "Build the test-only ApexAcceptanceGain fixture and its DSP test" ON)
 set(SMTG_CREATE_MODULE_INFO OFF CACHE BOOL "" FORCE)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 set(SMTG_USE_STATIC_CRT ON CACHE BOOL "" FORCE)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(SMTG_ENABLE_VSTGUI_SUPPORT OFF CACHE BOOL "" FORCE)
-set(SMTG_ENABLE_VST3_PLUGIN_EXAMPLES ${APEX_BUILD_VST3_FIXTURE} CACHE BOOL "" FORCE)
+if(APEX_BUILD_VST3_EDITOR_FIXTURE)
+  set(SMTG_ENABLE_VSTGUI_SUPPORT ON CACHE BOOL "" FORCE)
+else()
+  set(SMTG_ENABLE_VSTGUI_SUPPORT OFF CACHE BOOL "" FORCE)
+endif()
+if(APEX_BUILD_VST3_FIXTURE OR APEX_BUILD_VST3_EDITOR_FIXTURE)
+  set(SMTG_ENABLE_VST3_PLUGIN_EXAMPLES ON CACHE BOOL "" FORCE)
+else()
+  set(SMTG_ENABLE_VST3_PLUGIN_EXAMPLES OFF CACHE BOOL "" FORCE)
+endif()
 set(SMTG_ENABLE_VST3_HOSTING_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(SMTG_ADD_VST3_UTILITIES OFF CACHE BOOL "" FORCE)
 set(SMTG_RUN_VST_VALIDATOR OFF CACHE BOOL "" FORCE)
@@ -117,4 +144,78 @@ if(APEX_BUILD_VST3_FIXTURE)
   endif()
   target_link_libraries(apex-latency-vst3 PRIVATE sdk)
   target_compile_options(apex-latency-vst3 PRIVATE $<$<CXX_COMPILER_ID:MSVC>:/fp:precise>)
+endif()
+
+# ---------------------------------------------------------------------------
+# ApexAcceptanceGain -- test-only acceptance fixture (original Apex code; see
+# native/vst3/acceptance-fixture.hpp for provenance and rationale).
+#
+# Only built for acceptance runs. It is never staged into a packaged build: the
+# packaging step collects products from build/native-vst3 into resources/vst3 for
+# the host binary only, and the editor harness points at this bundle explicitly.
+# ---------------------------------------------------------------------------
+if(APEX_BUILD_ACCEPTANCE_FIXTURE)
+  # The DSP test always builds (see below); the bundle needs VSTGUI for its editor.
+  if(APEX_BUILD_VST3_EDITOR_FIXTURE)
+  smtg_add_vst3plugin(apex-acceptance-vst3
+    acceptance-fixture-processor.cpp
+    acceptance-fixture-processor.hpp
+    acceptance-fixture-controller.cpp
+    acceptance-fixture-controller.hpp
+    acceptance-fixture-editor.cpp
+    acceptance-fixture-entry.cpp
+    acceptance-fixture.hpp
+    # vstsinglecomponenteffect.cpp already provides EditController's implementation
+    # (including getEditorState/setEditorState). Adding vsteditcontroller.cpp as well
+    # defines ProgramList/ProgramListWithPitchNames twice, which MSVC rejects with
+    # LNK2005 and which Linux only tolerated because nothing pulled both in.
+    "${SDK_ROOT}/public.sdk/source/vst/vstsinglecomponenteffect.cpp"
+  )
+  if(WIN32)
+    target_sources(apex-acceptance-vst3 PRIVATE "${SDK_ROOT}/public.sdk/source/main/dllmain.cpp")
+    target_compile_definitions(apex-acceptance-vst3 PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+  else()
+    target_sources(apex-acceptance-vst3 PRIVATE "${SDK_ROOT}/public.sdk/source/main/linuxmain.cpp")
+  endif()
+  target_link_libraries(apex-acceptance-vst3 PRIVATE sdk vstgui_support)
+  target_include_directories(apex-acceptance-vst3 PRIVATE "${SMTG_VSTGUI_SOURCE_DIR}")
+  target_compile_definitions(apex-acceptance-vst3 PRIVATE APEX_ACCEPTANCE_FIXTURE_HAS_VSTGUI=1)
+  target_compile_features(apex-acceptance-vst3 PUBLIC cxx_std_17)
+  target_compile_options(apex-acceptance-vst3 PRIVATE $<$<CXX_COMPILER_ID:MSVC>:/fp:precise>)
+  # The uidesc ships inside the bundle's Resources directory, which is where
+  # VSTGUI's UIDescription looks for it.
+  smtg_target_add_plugin_resources(apex-acceptance-vst3
+    RESOURCES
+      "${CMAKE_CURRENT_SOURCE_DIR}/resources/acceptancegain.uidesc"
+  )
+  endif()
+
+  # Behavioural test of the fixture's DSP, bus layout, state round-trip and
+  # controller parameter exposure. Deliberately separate from the plugin bundle:
+  # it does not touch VSTGUI, so it builds and runs on a headless Linux host where
+  # the editor half cannot link (no X11).
+  add_executable(apex-acceptance-vst3-test
+    acceptance-fixture-test.cpp
+    acceptance-fixture-processor.cpp
+    acceptance-fixture-controller.cpp
+    acceptance-fixture-editor.cpp
+    acceptance-fixture.hpp
+    acceptance-fixture-processor.hpp
+    acceptance-fixture-controller.hpp
+    "${SDK_ROOT}/public.sdk/source/common/memorystream.cpp"
+    "${SDK_ROOT}/public.sdk/source/vst/hosting/parameterchanges.cpp"
+    # vstsinglecomponenteffect.cpp already carries EditController's implementation,
+    # so adding vsteditcontroller.cpp as well would define those symbols twice.
+    "${SDK_ROOT}/public.sdk/source/vst/vstsinglecomponenteffect.cpp"
+  )
+  # The test links the GUI-free build of the editor seam (createView returns
+  # nullptr there), so it needs no VSTGUI and runs on a headless host.
+  target_link_libraries(apex-acceptance-vst3-test PRIVATE sdk)
+  target_compile_definitions(apex-acceptance-vst3-test PRIVATE APEX_ACCEPTANCE_FIXTURE_HAS_VSTGUI=0)
+  if(WIN32)
+    target_compile_definitions(apex-acceptance-vst3-test PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+    target_link_libraries(apex-acceptance-vst3-test PRIVATE ole32 shell32 uuid)
+  endif()
+  target_compile_features(apex-acceptance-vst3-test PUBLIC cxx_std_17)
+  set_target_properties(apex-acceptance-vst3-test PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 endif()
