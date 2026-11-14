@@ -2457,11 +2457,6 @@ export function App() {
           { action: 'up', point: { ...target, zoomModifier: true }, label: `up@${target.x},${target.y}` },
           { action: 'modifier', point: { down: false }, label: 'modifier@up' },
         ];
-        // Ask the live VSTGUI frame which control is under the point BEFORE touching
-        // it. This is the observation that separates "Windows routed the input
-        // wrongly" from "the frame hit-tests the wrong view" from "the right view
-        // ignores the event"; without it, all three look like the same silence.
-        const probeAfterOpen = await bridge.editorInput(id, 'probe', { ...start });
         const delivered: Record<string, unknown> = {};
         for (const step of steps) {
           delivered[step.label] = await bridge.editorInput(id, step.action, step.point);
@@ -2469,14 +2464,9 @@ export function App() {
           // the next one so it sees a press, a move and a release in order.
           await new Promise(resolve => setTimeout(resolve, 100));
         }
-        // And again afterwards: the value a control reports is the direct answer to
-        // "did the drag land on the Gain slider and change it".
-        const probeAfterDrag = await bridge.editorInput(id, 'probe', { ...target });
         return {
           target,
           start,
-          viewUnderPress: probeAfterOpen,
-          viewAfterDrag: probeAfterDrag,
           injectedThrough: 'vst3:editorInput -> helper SendInput (real OS input)',
           sent: steps.map(step => step.action),
           gesture: 'shift-drag: press at the handle, move to the target, release',

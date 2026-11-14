@@ -721,10 +721,15 @@ test('the acceptance-only input hook is unreachable outside an acceptance run', 
   // It injects input; it must not fabricate a parameter change.
   const service = readFileSync(path.join(process.cwd(), 'native/vst3/service.mjs'), 'utf8');
   const svc = service.slice(service.indexOf('async editorInput('));
-  assert.ok(/sendEditorMouse/.test(svc.slice(0, 1600)), 'it routes real pointer input');
-  assert.ok(/setEditorGestureModifier/.test(svc.slice(0, 1600)),
+  // Bound the body by the next method rather than by a character count: a fixed
+  // window silently stops covering the code once anything is added above it.
+  const bodyEnd = svc.indexOf('\n  async closeEditor(');
+  const editorInput = bodyEnd > 0 ? svc.slice(0, bodyEnd) : svc;
+  assert.ok(editorInput.length > 400, 'the editorInput body was found');
+  assert.ok(/sendEditorMouse/.test(editorInput), 'it routes real pointer input');
+  assert.ok(/setEditorGestureModifier/.test(editorInput),
     'the zoom modifier is a real held key, routed through the helper');
-  assert.ok(!/performEdit|setParamNormalized/.test(svc.slice(0, 2000)),
+  assert.ok(!/performEdit|setParamNormalized/.test(editorInput),
     'it never synthesises a parameter change');
 });
 

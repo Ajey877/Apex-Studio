@@ -316,22 +316,6 @@ export class Vst3Service {
     const session = this.#editorSession(id, owner);
     if (session.closed) throw new Error('The native VST3 editor is closed.');
     if (session.busy) throw new Error('VST3 editor is still servicing another request; retry in a moment.');
-    // `probe` is a query, not input: it asks the live frame which VSTGUI view sits
-    // under a point. It dispatches nothing, so it can never fabricate an edit.
-    if (action === 'probe') {
-      const px = Number(point?.x);
-      const py = Number(point?.y);
-      if (!Number.isInteger(px) || !Number.isInteger(py) || px < 0 || py < 0 || px > 8192 || py > 8192) {
-        throw new Error('Invalid view probe point');
-      }
-      session.busy = true;
-      try {
-        return await session.client.describeEditorViewAt(px, py, session.effect.classId);
-      } finally {
-        session.busy = false;
-        session.busyPromise = null;
-      }
-    }
     // `modifier` is not a mouse event: it holds or releases the real shift key so a
     // drag can use VSTGUI's zoom modifier. Everything else is pointer input.
     if (action === 'modifier') {

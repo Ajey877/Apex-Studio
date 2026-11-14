@@ -183,15 +183,35 @@ flag, and `CViewContainer` does not override `onMouseDown`, so the root returns
 blocks a container's *own* children, which is why the panel was decisive and the root
 was not.
 
-### Instrumenting the answer
+### Why the probe was withdrawn, and what distinguishes these cases instead
 
-To make this class of failure visible rather than silent, the helper now answers a
-read-only probe: `describeViewAt(point)` asks the live frame — through VST3's own
-`VSTGUIEditorInterface::getFrame()` — which view it places under a client point, the
-full hit chain with each level's `mouseEnabled`, and the `gainSlider`'s tag, value and
-range. It dispatches nothing, so it can never fabricate an edit. The packaged run
-records the probe before the press and after the drag, which is what turns a failure
-into one of lead-engineer case A–F instead of "no edit observed".
+A read-only `describeViewAt(point)` probe was written to ask the live `CFrame` which
+view it places under a point. It was **withdrawn from this change**, and the reason
+matters:
+
+`editor-host.hpp` is compiled without any VSTGUI include path, on purpose — the
+helper's DSP/parameter half must build on a host with no GUI toolchain, and the fixture
+keeps VSTGUI isolated in one translation unit for the same reason. Naming
+`VSTGUI::CFrame` in that header pulled a GUI dependency into the native host and failed
+both Windows builds (`C2653: 'VSTGUI' is not a class or namespace name`). A diagnostic
+is not worth eroding that separation, and the separation is itself load-bearing.
+
+So how is this class of failure distinguished without the probe? By reading the
+authoritative dispatch source, which settles it without touching the plug-in:
+
+| case | what the evidence shows |
+| --- | --- |
+| A. Windows routed it wrongly | `hitIsChildWindow` false, or the receiver is another process |
+| B. The frame hit-tests the wrong view | a container in the chain is not `getMouseEnabled()`, or an interactive child is `mouse-enabled="false"` — checkable statically from the uidesc, and now asserted by a test |
+| C. The control got it but did not change | `mouse-enabled="true"` all the way down, so the value is the next thing to read |
+| D. It changed but never called performEdit | `isDirty()`/`valueChanged()` path in `cslider.cpp`/`ccontrol.cpp` |
+| E. performEdit happened, host rejected it | the helper's edit events are empty but the callback counters move |
+| F. Host accepted, Apex did not consume | the helper reports edits but `editedParameterIds` in Apex stays empty |
+
+The decisive static fact here was B: `CViewContainer::onMouseDownEvent()` skips a child
+whose `getMouseEnabled()` is false before hit-testing it, and the panel was false. The
+uidesc test now prevents that specific silent case, which is cheaper and more durable
+than a runtime probe that cannot be compiled where it is needed.
 
 ### Why redo looked broken (history stores sanitized state)
 

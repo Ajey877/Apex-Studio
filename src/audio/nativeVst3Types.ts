@@ -149,7 +149,7 @@ export interface Vst3Bridge {
    */
   editorInput?(
     id: string,
-    action: 'move' | 'down' | 'up' | 'wheel' | 'modifier' | 'probe',
+    action: 'move' | 'down' | 'up' | 'wheel' | 'modifier',
     point: { x: number; y: number } | { down: boolean } | { x: number; y: number; zoomModifier: boolean },
   ): Promise<unknown>;
   /**

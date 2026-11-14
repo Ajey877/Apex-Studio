@@ -138,11 +138,6 @@ export class NativeVst3Client {
     if (!name) throw new Error('Invalid mouse action');
     return this.editorTestAction(name, { x, y, classId, zoomModifier });
   }
-  /** Acceptance harness: ask the live frame which view sits under a client point. */
-  async describeEditorViewAt(x, y, classId) {
-    if (!Number.isInteger(x) || !Number.isInteger(y)) throw new Error('Invalid view probe point');
-    return this.editorTestAction('describeViewAt', { x, y, classId });
-  }
   /** Acceptance harness: hold or release the real shift key around a gesture. */
   async setEditorGestureModifier(down, classId) {
     if (typeof down !== 'boolean') throw new Error('Invalid gesture modifier state');
