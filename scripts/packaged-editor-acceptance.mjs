@@ -158,30 +158,57 @@ function writeReport(extra = {}) {
     kind: 'packaged-application', summary: report.summary,
     statuses: Object.fromEntries(results.map(r => [r.id, r.status])),
   })}`);
-  for (const r of results) console.log(`${r.status.padEnd(12)} ${r.id.padEnd(26)} ${r.criterion}`);
-  // The C/D instrument's own finding, printed whether or not p3 passes.
-  //
-  // `record()` only annotates non-PASS criteria, so once p3 passes its trace became
-  // invisible in CI: the verdict was reported but the evidence that justified it was
-  // not. This additive line is lifted to a notice by the workflow and states what the
-  // editor actually observed, so the PASS is auditable from the run itself.
-  const p3 = results.find(r => r.id === 'p3-parameter-reaches-apex');
-  if (p3?.evidence?.cOrDVerdict) {
-    const facts = p3.evidence.traceFacts ?? {};
-    console.log(`ACCEPTANCE-EDITOR-TRACE ${JSON.stringify({
-      cOrDVerdict: p3.evidence.cOrDVerdict,
-      mouseDownOnGainSlider: facts.mouseDownOnGainSlider ?? null,
-      controlValueMoved: facts.controlValueMoved ?? null,
-      valuesSeen: facts.valuesSeen ?? null,
-      beganEditing: facts.beganEditing ?? null,
-      controlBeginEditObserved: facts.controlBeginEditObserved ?? null,
-      valueChangedObserved: facts.valueChangedObserved ?? null,
-      performEditObserved: facts.performEditObserved ?? null,
-      controlEndEditObserved: facts.controlEndEditObserved ?? null,
-      gainParameterEdited: p3.evidence.gainParameterEdited ?? null,
-      editedParameterIds: p3.evidence.editedParameterIds ?? null,
-      traceLineCount: p3.evidence.editorTraceLineCount ?? null,
-    })}`);
+  /**
+   * Status lines, with the decisive numbers attached to the three criteria whose
+   * verdicts rest on measured values.
+   *
+   * The workflow lifts these `^(PASS|FAIL|NOT_VERIFIED)` lines into run annotations,
+   * and GitHub caps notices per step, so a separate trace line was silently dropped.
+   * Riding the status line puts the evidence where the verdict is already read, and
+   * keeps the count at nine.
+   */
+  const traceFactsFor = (r) => {
+    if (r.id === 'p3-parameter-reaches-apex') {
+      const facts = r.evidence?.traceFacts ?? {};
+      return {
+        cOrDVerdict: r.evidence?.cOrDVerdict ?? null,
+        mouseDownOnGainSlider: facts.mouseDownOnGainSlider ?? null,
+        controlValueMoved: facts.controlValueMoved ?? null,
+        valuesSeen: facts.valuesSeen ?? null,
+        controlBeginEditObserved: facts.controlBeginEditObserved ?? null,
+        valueChangedObserved: facts.valueChangedObserved ?? null,
+        performEditObserved: facts.performEditObserved ?? null,
+        controlEndEditObserved: facts.controlEndEditObserved ?? null,
+        gainParameterEdited: r.evidence?.gainParameterEdited ?? null,
+        editedParameterIds: r.evidence?.editedParameterIds ?? null,
+      };
+    }
+    if (r.id === 'p4-one-undoable-change') {
+      const e = r.evidence ?? {};
+      return {
+        entriesAddedByGesture: e.entriesAddedByGesture ?? null,
+        editedValue: e.editedValue ?? null,
+        valueAfterUndo: e.valueAfterUndo ?? null,
+        valueAfterRedo: e.valueAfterRedo ?? null,
+        editedDiffersFromDefault: e.editedDiffersFromDefault ?? null,
+        locatedSlotId: e.locatedSlotId ?? null,
+      };
+    }
+    if (r.id === 'p6-save-quit-reload') {
+      const e = r.evidence ?? {};
+      return {
+        editedParameterValue: e.editedParameterValue ?? null,
+        reloadedParameter: e.reloadedParameter ?? null,
+        reloadedMatchesEdit: e.reloadedMatchesEdit ?? null,
+        vst3StateIdentical: e.vst3StateIdentical ?? null,
+      };
+    }
+    return null;
+  };
+  for (const r of results) {
+    const facts = traceFactsFor(r);
+    console.log(`${r.status.padEnd(12)} ${r.id.padEnd(26)} ${r.criterion}`
+      + (facts ? ` ${JSON.stringify(facts)}` : ''));
   }
   return report;
 }

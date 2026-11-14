@@ -98,11 +98,6 @@ jobs:
           grep -E '^(PASS|FAIL|NOT_VERIFIED)' packaged-editor-acceptance.log | head -10 | while IFS= read -r line; do
             echo "::notice::${line}"
           done
-          # The editor instrument's own finding, so the p3 verdict is auditable from
-          # the run even when it passes (record() only annotates non-PASS criteria).
-          grep -E '^ACCEPTANCE-EDITOR-TRACE' packaged-editor-acceptance.log | head -1 | while IFS= read -r line; do
-            echo "::notice::${line}"
-          done
           if [ ! -f build/native-evidence/packaged-editor-acceptance.json ]; then
             echo "::error::Packaged acceptance produced no evidence file"
             exit 1

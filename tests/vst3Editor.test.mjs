@@ -1193,25 +1193,33 @@ test('the packaged gesture retries only the transient busy refusal', () => {
     'the gesture is still a real drag');
 });
 
-test('the editor trace is reported even when p3 passes', () => {
+test('the C/D trace rides the status line the workflow already lifts', () => {
   /**
-   * record() only annotates NON-passing criteria, so the moment p3 started passing
-   * its trace stopped being visible in CI: the verdict was reported but the evidence
-   * that justified it was only in an artifact that CI cannot always hand back. The
-   * trace line is emitted unconditionally and lifted to a notice by the workflow, so
-   * a PASS is auditable from the run itself.
+   * record() only annotates NON-passing criteria, so a passing p3 reported PASS with
+   * the evidence that justified it only in an artifact. A separate trace line did not
+   * help either: GitHub caps notices per step and it was dropped. The decisive numbers
+   * are therefore appended to the status lines themselves -- there are only nine, well
+   * under the workflow's `head -10`, and those lines are already lifted.
    */
   const script = readScript('scripts/packaged-editor-acceptance.mjs');
-  assert.ok(/ACCEPTANCE-EDITOR-TRACE/.test(script), 'the script prints the trace verdict');
-  // It must be outside the non-PASS branch: emitted from the report path, not record().
-  const traceIndex = script.indexOf('ACCEPTANCE-EDITOR-TRACE');
-  const recordIndex = script.indexOf('ACCEPTANCE-DETAIL');
-  assert.ok(traceIndex > recordIndex, 'the trace line sits in the report path, after record()');
+  assert.ok(/const traceFactsFor = \(r\) =>/.test(script), 'per-criterion facts are attached');
+  // p3's line must carry the verdict AND the observations behind it.
+  for (const field of ['cOrDVerdict', 'mouseDownOnGainSlider', 'controlValueMoved',
+    'valuesSeen', 'performEditObserved']) {
+    assert.ok(script.includes(field), `the p3 status line carries ${field}`);
+  }
+  // p4 and p6 carry their measured values, so a PASS is auditable.
+  for (const field of ['entriesAddedByGesture', 'valueAfterUndo', 'valueAfterRedo', 'reloadedParameter']) {
+    assert.ok(script.includes(field), `the status lines carry ${field}`);
+  }
+  // Emitted on the status line, not as a separate competing notice.
+  assert.ok(!/ACCEPTANCE-EDITOR-TRACE/.test(script), 'no separate notice line competes for the cap');
+  assert.ok(/console\.log\(`\$\{r\.status\.padEnd\(12\)\} \$\{r\.id\.padEnd\(26\)\} \$\{r\.criterion\}`/.test(script),
+    'the numbers are appended to the criterion status line');
   const workflow = readSource('.github/workflows/desktop-validation.yml');
-  assert.ok(/grep -E '\^ACCEPTANCE-EDITOR-TRACE'/.test(workflow),
-    'the workflow lifts the trace line into the run annotations');
+  assert.ok(/grep -E '\^\(PASS\|FAIL\|NOT_VERIFIED\)'/.test(workflow),
+    'the workflow still lifts those lines');
 });
-
 test('p4 and p6 are proven on the edited parameter, not just on depth', () => {
   /**
    * "One undoable change" measured by a depth counter passes for any change at all,
