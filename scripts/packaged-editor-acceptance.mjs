@@ -187,10 +187,16 @@ function writeReport(extra = {}) {
       const e = r.evidence ?? {};
       return {
         entriesAddedByGesture: e.entriesAddedByGesture ?? null,
+        // Which entries exist and which one undo consumed: the answer to a null
+        // valueAfterUndo is in these labels, not in another guess.
+        labelsAfterClose: e.labelsAfterClose ?? null,
+        labelsAfterUndo: e.labelsAfterUndo ?? null,
         editedValue: e.editedValue ?? null,
         valueAfterUndo: e.valueAfterUndo ?? null,
         valueAfterRedo: e.valueAfterRedo ?? null,
         editedDiffersFromDefault: e.editedDiffersFromDefault ?? null,
+        preEditValue: e.preEditValue ?? null,
+        undoRestoredOriginalValue: e.undoRestoredOriginalValue ?? null,
         locatedSlotId: e.locatedSlotId ?? null,
       };
     }
@@ -592,6 +598,11 @@ async function run() {
   };
   const sliderPoint = { x: sliderTrack.left + Math.round(GAIN_SLIDER.size.width * 0.5), y: sliderTrack.centreY };
   const dragTarget = { x: sliderTrack.left + Math.round(GAIN_SLIDER.size.width * 0.75), y: sliderTrack.centreY };
+  // The parameter value BEFORE the user's gesture. p4 needs it to prove undo restores
+  // the original rather than merely changing something: comparing undo against the
+  // edited value alone would pass even if undo walked past the edit entirely.
+  const preEditParameter = await page.evaluate(async () =>
+    globalThis.__apexAcceptance.readInsertParameter());
   // Start from an empty trace so every line recorded below belongs to this gesture.
   mkdirSync(path.dirname(editorTracePath), { recursive: true });
   rmSync(editorTracePath, { force: true });
@@ -789,8 +800,15 @@ async function run() {
   // nothing. The plugin's own default is the only honest baseline.
   const editedDiffersFromDefault = typeof history?.valueAfterClose === 'number'
     && Math.abs(history.valueAfterClose - 0.5) > 1e-6;
+  const preEditValue = preEditParameter?.value ?? null;
+  // Undo must restore the value the parameter held before the gesture. A null or
+  // different value means undo walked past the edit (or did not undo it), and the
+  // criterion is not met no matter how the depth counter moved.
+  const undoRestoredOriginalValue = typeof preEditValue === 'number'
+    && typeof history?.valueAfterUndo === 'number'
+    && Math.abs(history.valueAfterUndo - preEditValue) < 1e-6;
   const p4Passed = added === 1 && editedDiffersFromDefault
-    && history?.undoChanged === true && history?.redoRestoredEdited === true;
+    && undoRestoredOriginalValue && history?.redoRestoredEdited === true;
   record('p4-one-undoable-change', p4Passed ? 'PASS' : blockedByFixture ? 'NOT_VERIFIED' : 'FAIL', {
     // Front-loaded: these decide the verdict.
     entriesAddedByGesture: added,
@@ -800,6 +818,8 @@ async function run() {
     valueAfterUndo: history?.valueAfterUndo ?? null,
     valueAfterRedo: history?.valueAfterRedo ?? null,
     editedDiffersFromDefault,
+    preEditValue,
+    undoRestoredOriginalValue,
     undoChanged: history?.undoChanged ?? null,
     redoRestoredEdited: history?.redoRestoredEdited ?? null,
     noDuplicateEntries: history?.noDuplicateEntries ?? null,

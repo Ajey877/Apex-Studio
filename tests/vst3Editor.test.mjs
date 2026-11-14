@@ -1238,6 +1238,15 @@ test('p4 and p6 are proven on the edited parameter, not just on depth', () => {
   // two identical numbers and proves nothing.
   assert.ok(/editedDiffersFromDefault/.test(script),
     'p4 refuses to accept an edit that left the parameter at its default');
+  // Undo must restore the value captured BEFORE the gesture. Asserting only that undo
+  // "changed something" passes even when undo walks past the edit and removes the
+  // insert, which is exactly what one packaged run reported (valueAfterUndo: null).
+  assert.ok(/const preEditParameter = await page\.evaluate/.test(script),
+    'p4 captures the pre-edit value before the gesture');
+  assert.ok(/undoRestoredOriginalValue/.test(script),
+    'p4 requires undo to restore the pre-edit value');
+  assert.ok(/Math\.abs\(history\.valueAfterUndo - preEditValue\) < 1e-6/.test(script),
+    'the comparison is against the original value, not merely "different"');
 
   // p6 must read the reloaded parameter and compare it to the edited value.
   assert.ok(/reloadedMatchesEdit/.test(script), 'p6 compares the reloaded parameter');

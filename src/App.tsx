@@ -2583,16 +2583,23 @@ export function App() {
           return undefined;
         };
         const read = () => locate()?.vst3Effect?.state?.parameters?.[0]?.value ?? null;
+        // Naming the entries makes a surprising undo result diagnosable: if the value
+        // after undo is null, the question is whether undo consumed the edit or walked
+        // past the insert that created it.
+        const undoLabels = () => projectHistoryRef.current.past.map(entry => entry.label);
         const depths = () => ({ undo: projectHistoryRef.current.past.length, redo: projectHistoryRef.current.future.length });
         const edited = read();
         const before = depths();
+        const labelsBefore = undoLabels();
         await handleCloseVst3Editor();
         const afterClose = read();
         const afterCloseDepths = depths();
+        const labelsAfterClose = undoLabels();
         handleUndo();
         await new Promise(resolve => setTimeout(resolve, 150));
         const afterUndo = read();
         const afterUndoDepths = depths();
+        const labelsAfterUndo = undoLabels();
         handleRedo();
         await new Promise(resolve => setTimeout(resolve, 150));
         const afterRedo = read();
@@ -2610,6 +2617,9 @@ export function App() {
           valueAfterClose: afterClose,
           valueAfterUndo: afterUndo,
           valueAfterRedo: afterRedo,
+          labelsBeforeClose: labelsBefore,
+          labelsAfterClose,
+          labelsAfterUndo,
           depthBeforeClose: before,
           depthAfterClose: afterCloseDepths,
           depthAfterUndo: afterUndoDepths,
