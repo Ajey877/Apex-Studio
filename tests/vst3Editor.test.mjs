@@ -829,45 +829,56 @@ test('the packaged Gain click is derived from the real uidesc nesting', () => {
     'the slider size is used to centre the click');
 });
 
-test('deliverMouse never sends a press it is not holding', () => {
+test('deliverMouse holds the button across a drag and only `up` releases it', () => {
   /**
-   * The transport decision has to hold for the WHOLE function, and a leftover block
-   * can quietly undo it.
+   * The button state a VSTGUI control acts on comes from
+   * Win32Frame::getCurrentMouseButtons(), which asks GetAsyncKeyState(VK_LBUTTON)
+   * -- not from wParam. Two things follow, and both were shipped wrong first:
    *
-   * This exact failure shipped to CI: the new posted-message path was added but the
-   * old SendInput tail survived below it. On Windows that tail injected
-   * MOUSEEVENTF_LEFTUP after every gesture -- so the drag's move still arrived with
-   * the button up -- and on the compiler it failed outright because `input` was only
-   * declared inside the wheel branch. A local GCC build missed it because the
-   * header's depfile did not trigger a recompile, so this is asserted structurally
-   * instead of relying on one toolchain noticing.
+   * 1. `down` must NOT be paired with an automatic LEFTUP. Doing that turns the
+   *    gesture into a click, and every following move is processed with the button
+   *    up, so CSliderBase::onMouseMoved returns kMouseEventNotHandled and the value
+   *    never changes.
+   * 2. Posting messages that merely claim MK_LBUTTON is not delivery either: the
+   *    key state is unchanged, so the drag is still ignored. The press has to be a
+   *    real SendInput LEFT DOWN.
+   *
+   * This exact stale auto-release shipped to CI (bf89a73) and failed to compile on
+   * MSVC, so the transport is asserted structurally rather than trusted.
    */
   const host = readSource('native/vst3/editor-host.hpp');
   const start = host.indexOf('json deliverMouse(');
   assert.ok(start > 0, 'deliverMouse exists');
-  // The body ends at the next member: the keyboard helper follows it.
-  const body = host.slice(start, host.indexOf('unsigned long sendKeyForTest', start));
-  assert.ok(body.length > 500, 'the body was found');
+  const raw = host.slice(start, host.indexOf('unsigned long sendKeyForTest', start));
+  assert.ok(raw.length > 500, 'the body was found');
+  // Code only: a mention in a comment must neither satisfy nor fail a check.
+  const body = raw.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
 
-  // A release must never follow a press automatically: that is a click, not a drag,
-  // and VSTGUI reads the held button from GetAsyncKeyState.
-  assert.ok(!/MOUSEEVENTF_LEFTUP/.test(body),
-    'no automatic release: the press and release are separate, explicitly ordered steps');
-  // Only the wheel may still be a SendInput event; the pointer press must not be.
-  const pointerSendInput = body.match(/SendInput\(1, &input, sizeof\(INPUT\)\)/g) ?? [];
-  assert.equal(pointerSendInput.length, 1, 'exactly one SendInput call remains');
-  const wheelBranch = body.slice(body.indexOf('if (isWheel)'), body.indexOf('} else {', body.indexOf('if (isWheel)')));
-  assert.ok(/SendInput\(1, &input/.test(wheelBranch),
-    'the one SendInput is the wheel, which Windows delivers as a message with no button state');
+  // The release is reachable only from the `up` branch. Count CALLS, not mentions:
+  // the evidence label names the event too.
+  const leftUpCalls = body.match(/\(MOUSEEVENTF_LEFTUP\)/g) ?? [];
+  assert.equal(leftUpCalls.length, 1, 'the release is issued exactly once');
+  const upBranch = body.slice(body.indexOf('} else if (isUp) {'), body.indexOf('} else {', body.indexOf('} else if (isUp) {')));
+  assert.ok(/\(MOUSEEVENTF_LEFTUP\)/.test(upBranch), 'and it is issued in the `up` branch');
+  assert.ok(/\(MOUSEEVENTF_LEFTDOWN\)/.test(body), 'the press is a real LEFT DOWN');
+  // The press branch must not also release, which is what made every drag a click.
+  const downBranch = body.slice(body.indexOf('} else {', body.indexOf('} else if (isUp)')), body.indexOf('result["postedMessages"]'));
+  assert.ok(!/MOUSEEVENTF_LEFTUP/.test(downBranch), 'the press branch never releases');
 
-  // Every reference in the body must be in scope. Counting declarations catches the
-  // stale-tail class of error without needing MSVC.
-  const declarations = (body.match(/\bINPUT\s+\w+\s*\{?\}?\s*;/g) ?? []);
-  const uses = (body.match(/&input\b/g) ?? []);
-  assert.equal(declarations.length, 1, 'exactly one INPUT record is declared');
-  assert.equal(uses.length, 1, 'and it is the one the send uses');
-  const declared = /INPUT\s+(\w+)\s*\{/.exec(body)[1];
-  assert.ok(!/&input\b/.test(body) || declared === 'input', 'the address taken is a declared record');
+  // Posting a message is not a held button, so the pointer press must be SendInput.
+  assert.ok(!/PostMessageW/.test(body),
+    'the pointer press is not faked with a posted message; VSTGUI reads the live key state');
+  assert.ok(/buttonHeldAfter/.test(body),
+    'the helper reports whether the button is actually held, instead of assuming');
+
+  // Every &input address must refer to a declared record (the C2065 class of error).
+  const declared = /INPUT\s+(\w+)\s*\{/.exec(body);
+  assert.ok(declared, 'an INPUT record is declared');
+  for (const use of (body.match(/SendInput\(1, &\w+/g) ?? [])) {
+    const name = /&(\w+)/.exec(use)[1];
+    assert.ok(new RegExp(`INPUT\\s+${name}\\s*\\{`).test(body),
+      `${name} is declared in this scope`);
+  }
 });
 
 test('the acceptance click sends a press and a release', () => {
@@ -893,13 +904,11 @@ test('the acceptance click sends a press and a release', () => {
   // from GetAsyncKeyState, so a press whose button is already up when the move is
   // processed reaches the control's drag handler with no button and is ignored.
   const hostSource = readSource('native/vst3/editor-host.hpp');
-  assert.ok(/PostMessageW\(receiver, message, wParam, lParam\)/.test(hostSource),
-    'the gesture is posted as real mouse messages carrying the button state');
-  assert.ok(/MK_LBUTTON/.test(hostSource), 'the drag move carries the held button');
+  // Posting a message that claims MK_LBUTTON is not delivery: Win32Frame reads the
+  // held button from GetAsyncKeyState, so the press must be a real SendInput event.
+  assert.ok(/MOUSEEVENTF_LEFTDOWN/.test(hostSource), 'the press is a real button-down event');
   assert.ok(/keybd_event\(VK_SHIFT/.test(hostSource),
     'the zoom modifier is a real held key, not a flag in the message');
-  assert.ok(/receiverRejectedForeignProcess/.test(hostSource),
-    'a message is never posted into another process');
   assert.ok(/'down'/.test(hook) && /'up'/.test(hook), 'the renderer sends both halves of the click');
   // A press exactly where the handle already is computes the value the control
   // already holds, so VSTGUI's isDirty() is false and no performEdit is emitted.

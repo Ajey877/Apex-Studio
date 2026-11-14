@@ -1022,59 +1022,62 @@ public:
       pumpMessages();
     } else {
       /**
-       * Mouse press / move / release are POSTED, and the button state travels in
-       * wParam.
+       * Press, move and release are REAL SendInput events, and `down` deliberately
+       * does not release the button.
        *
-       * SendInput cannot express this sequence. The button state a VSTGUI control
-       * sees does not come from the message: Win32Frame::getCurrentMouseButtons()
-       * asks GetAsyncKeyState(VK_LBUTTON). A press followed by a released button
-       * is therefore delivered to the control as kLButton (WM_LBUTTONDOWN is what
-       * makes it start the edit), but the DRAG that follows is delivered with no
-       * button held, so CSliderBase::onMouseMoved returns
-       * kMouseEventNotHandled without touching the value. That is why a fully
-       * accurate press-move-release produced no performEdit at all.
+       * The button state a VSTGUI control acts on does not come from wParam:
+       * Win32Frame::getCurrentMouseButtons() asks GetAsyncKeyState(VK_LBUTTON).
+       * Posting messages that merely claim MK_LBUTTON is therefore not delivery --
+       * the drag is still processed with no button held, CSliderBase::onMouseMoved
+       * returns kMouseEventNotHandled, and the value never changes. Only a genuine
+       * held button works, so the sequence is:
        *
-       * Posting the messages with MK_LBUTTON in wParam is what Windows itself
-       * does, and each one still goes to the window the OS says owns the point
-       * (see the hit test above) after being addressed to that window's thread.
-       * The coordinates and the gesture are unchanged; only the transport is.
+       *   move  -> takes the cursor to the point
+       *   down  -> LEFT DOWN, button really held afterwards
+       *   move  -> a real move while it is held (this is the drag)
+       *   up    -> LEFT UP
+       *
+       * The release is the caller's `up`, never an automatic consequence of `down`:
+       * pairing them automatically is what turned every drag into a click.
        */
-      static const UINT kMouseMessages[][2] = {
-        { WM_MOUSEMOVE, 0 }, { WM_LBUTTONDOWN, WM_LBUTTONDOWN },
-        { WM_MOUSEMOVE, MK_LBUTTON }, { WM_LBUTTONUP, 0 },
-      };
       SetActiveWindow(window);
       SetFocus(hit ? hit : window);
-      const int step = isMove ? 0 : (isUp ? 3 : 1);
-      if (!isMove && !isUp) injectedClickCount++;
-      std::vector<std::string> posted;
-      for (int i = 0; i <= step; ++i) {
-        const UINT message = kMouseMessages[i][0];
-        WPARAM wParam = kMouseMessages[i][1];
-        // The press carries whatever is really held so a zoom drag still works.
-        if (i > 0 && withZoomModifier && GetAsyncKeyState(VK_SHIFT) < 0) wParam |= MK_SHIFT;
-        if (i > 0 && i < 3 && GetAsyncKeyState(VK_LBUTTON) < 0 && message == WM_MOUSEMOVE) wParam |= MK_LBUTTON;
-        LPARAM lParam = MAKELPARAM(x, y);
-        HWND receiver = nullptr;
-        // Address the message to the window under the cursor's thread so it is
-        // processed in that window's queue; the OS resolves the owner below.
-        SetCursorPos(target.x, target.y);
-        receiver = WindowFromPoint(target);
-        if (receiver) {
-          DWORD receiverPid = 0;
-          const DWORD receiverThread = GetWindowThreadProcessId(receiver, &receiverPid);
-          if (receiverPid != GetCurrentProcessId()) {
-            // Never post into another process: that would be fabrication, not delivery.
-            result["receiverRejectedForeignProcess"] = true;
-            break;
-          }
-          if (PostMessageW(receiver, message, wParam, lParam) != FALSE) posted.push_back(messageName(message));
+      const bool zoomModifier = withZoomModifier;
+
+      auto injectPointer = [&](DWORD flags) -> unsigned long {
+        INPUT input{};
+        input.type = INPUT_MOUSE;
+        input.mi.dwFlags = flags;
+        if (flags & MOUSEEVENTF_MOVE) {
+          input.mi.dx = static_cast<LONG>((target.x * 65535ll) / GetSystemMetrics(SM_CXSCREEN));
+          input.mi.dy = static_cast<LONG>((target.y * 65535ll) / GetSystemMetrics(SM_CYSCREEN));
         }
+        // Shift is a real held key (see setGestureModifier); it is never claimed in
+        // the flags, because SendInput has no way to assert a modifier and VSTGUI
+        // reads it from the live key state anyway.
+        return static_cast<unsigned long>(SendInput(1, &input, sizeof(INPUT)));
+      };
+
+      std::vector<std::string> injected;
+      const DWORD moveFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE;
+      if (isMove) {
+        if (injectPointer(moveFlags) == 1) injected.push_back("MOUSEEVENTF_MOVE");
+      } else if (isUp) {
+        // Release: a real move to the release point first, then the button up.
+        if (injectPointer(moveFlags) == 1) injected.push_back("MOUSEEVENTF_MOVE");
+        if (injectPointer(MOUSEEVENTF_LEFTUP) == 1) injected.push_back("MOUSEEVENTF_LEFTUP");
+      } else {
+        SetCursorPos(target.x, target.y);
+        if (injectPointer(MOUSEEVENTF_LEFTDOWN) == 1) injected.push_back("MOUSEEVENTF_LEFTDOWN");
+        injectedClickCount++;
       }
-      // Receipt, not attempt: only messages the OS accepted for a window in this
-      // process are listed.
-      result["postedMessages"] = posted;
-      result["postedCount"] = static_cast<unsigned long>(posted.size());
+      // Recorded for both transports so the criterion reads one field.
+      result["postedMessages"] = injected;
+      result["postedCount"] = static_cast<unsigned long>(injected.size());
+      // Observation, not assumption: is the button actually held now? A move that
+      // reads true here is a genuine drag; this is the fact the packaged run needed.
+      result["buttonHeldAfter"] = GetAsyncKeyState(VK_LBUTTON) < 0;
+      if (zoomModifier) result["zoomModifierHeld"] = GetAsyncKeyState(VK_SHIFT) < 0;
       pumpMessages();
     }
     // Only the wheel is a SendInput event now. Press, move and release are posted as

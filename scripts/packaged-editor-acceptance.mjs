@@ -573,8 +573,13 @@ async function run() {
     // What actually reached the plug-in window, per step. `postedMessages` is the
     // receipt (real mouse messages), never the attempt.
     deliveredSteps: gainInput?.delivered ? Object.keys(gainInput.delivered) : null,
-    postedMessages: gainInput?.delivered
+    // What the helper's SendInput accepted per step, and whether the button was
+    // really held at the steps where that is what makes it a drag.
+    sentEvents: gainInput?.delivered
       ? Object.fromEntries(Object.entries(gainInput.delivered).map(([step, value]) => [step, value?.postedMessages ?? null]))
+      : null,
+    buttonHeldAfter: gainInput?.delivered
+      ? Object.fromEntries(Object.entries(gainInput.delivered).map(([step, value]) => [step, value?.buttonHeldAfter ?? null]))
       : null,
     mechanism: 'genuine OS input (SendInput) was aimed at the Gain slider inside the plug-in\'s own editor window, then the panel\'s normal poll loop observed the edit',
     gainInput,

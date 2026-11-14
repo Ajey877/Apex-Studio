@@ -105,36 +105,44 @@ user does to change a gain.
 
 ### Why the drag still did nothing (the button state is not in the message)
 
-The first drag attempt pressed and released with `SendInput`, and a `down` injection
-also released the button immediately (`deliverMouse` paired every non-move injection
-with a `MOUSEEVENTF_LEFTUP`). That makes a click, not a drag, and it fails in a way
-that looks like the plug-in ignoring input:
+Two attempts failed here, and both failed for the same underlying reason:
 
 > `Win32Frame::getCurrentMouseButtons()` reads the held buttons from
 > `GetAsyncKeyState(VK_LBUTTON)`, **not** from `wParam`.
 
-So `WM_LBUTTONDOWN` told the slider to begin an edit, but the `WM_MOUSEMOVE` that
-followed was delivered while the button was already up. `CSliderBase::onMouseMoved`
-takes its `_buttons` argument from that live state, saw no button, returned
-`kMouseEventNotHandled`, and never touched the value.
+1. Delivering press/move/release with `SendInput` while `deliverMouse` paired every
+   press with an immediate `MOUSEEVENTF_LEFTUP`. That makes a click. `WM_LBUTTONDOWN`
+   told the slider to begin an edit, but the `WM_MOUSEMOVE` that followed was processed
+   with the button already up, so `CSliderBase::onMouseMoved` saw no button and
+   returned `kMouseEventNotHandled` without touching the value.
+2. Posting `WM_LBUTTONDOWN` / `WM_MOUSEMOVE` carrying `MK_LBUTTON`. The messages
+   admitted the press, but `GetAsyncKeyState` still said the button was up, so the
+   control behaved identically. Claiming a button in `wParam` is not holding it.
 
-Press, move and release are now posted as genuine mouse messages carrying their
-button state (`MK_LBUTTON` on the drag), addressed only to a window the OS reports
-under the point and only when that window belongs to this process — a message posted
-into another process would be fabrication, and the helper reports
-`receiverRejectedForeignProcess` instead. The zoom modifier is a real held shift key
-(`keybd_event`), because VSTGUI reads its modifier from the live key state too, so
-the drag moves the value by a controlled step rather than jumping the handle to the
-pointer.
+The transport is now a real `SendInput` sequence in which `down` genuinely leaves the
+button held and **only `up` releases it**:
+
+| step | injected | effect |
+| --- | --- | --- |
+| `move` | `MOUSEEVENTF_MOVE` | cursor reaches the handle |
+| `down` | `MOUSEEVENTF_LEFTDOWN` | edit begins, button really held |
+| `move` | `MOUSEEVENTF_MOVE` | the drag — processed with the button down |
+| `up` | `MOUSEEVENTF_MOVE` + `MOUSEEVENTF_LEFTUP` | value commits, button released |
+
+The helper reports `buttonHeldAfter` from `GetAsyncKeyState` after each step, so the
+evidence says the button was actually held rather than asserting it. The zoom modifier
+is a real held shift key (`keybd_event`), for the same reason: VSTGUI reads `kShift`
+from the live key state, which makes the drag a stepped change rather than a jump to
+the pointer — which is how a user changes a gain.
 
 Two things followed from that change and are worth keeping:
 
-* **A leftover block undid it silently.** The first version added the posted-message
-  path but left the old `SendInput` tail below it. That tail re-sent
-  `MOUSEEVENTF_LEFTUP` after every gesture — the original defect, restored — and did
-  not compile at all, because its `INPUT` record was scoped to the wheel branch.
-  A structural test now asserts `deliverMouse` contains no automatic release and
-  exactly one `SendInput` (the wheel's).
+* **A leftover block undid it silently.** One version added the new transport but left
+  the old `SendInput` tail below it. That tail re-sent `MOUSEEVENTF_LEFTUP` after every
+  gesture — the original defect, restored — and did not compile at all, because its
+  `INPUT` record was scoped to the wheel branch. A structural test now asserts that the
+  release is issued exactly once, in the `up` branch, and that the press branch never
+  releases; it was verified by reintroducing the defect.
 
 * **A local "no work to do" is not a build.** The header was missing from ninja's
   depfile, so a GCC rebuild reported success without recompiling it and only MSVC

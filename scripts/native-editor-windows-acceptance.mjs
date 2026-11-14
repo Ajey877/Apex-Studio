@@ -498,7 +498,13 @@ try {
     // the machine in a sane state, and every drag then arrived with no button held.
     // The attempt tally is therefore the POSTED receipt, and it must be 1 for the
     // press -- a message the OS refused is not delivery.
+    // A press is proven when SendInput accepted it AND the button is really held
+    // afterwards. The second half is the one that matters to VSTGUI, which reads the
+    // held state from GetAsyncKeyState rather than from the message.
     const clickSendInputAccepted = down.postedCount ?? 0;
+    const clickPost= Array.isArray(down.postedMessages) ? down.postedMessages : [];
+    const clickDeliveredAPress = clickPost.includes('MOUSEEVENTF_LEFTDOWN') &&
+      clickSendInputAccepted >= 1 && down.buttonHeldAfter === true;
     const hitALiveWindow = down.hitWindowExists === true;
     const plugInOwnsThePoint = down.hitIsChildWindow === true;
     const hostReceivedClick = (wheel.diagnostics?.mouse?.hostMouseDownCount ?? 0) > 0 ||
@@ -506,7 +512,7 @@ try {
     // Exactly one of these must be true. Both false means nothing observed the
     // click; both true would mean the same event was counted twice.
     const clickRoutedSomewhere = plugInOwnsThePoint !== hostReceivedClick;
-    const clickProven = clickSendInputAccepted === 1 && hitALiveWindow && clickRoutedSomewhere;
+    const clickProven = clickDeliveredAPress && hitALiveWindow && clickRoutedSomewhere;
 
     // ---- the wheel: the part that was previously unfalsifiable -------------
     const wheelSendInputAccepted = wheel.sendInputCount ?? 0;
@@ -529,12 +535,14 @@ try {
     const wheelProven = pathA || pathB;
 
     const evidence = {
-      method: 'SendInput (real OS input) with the cursor moved to real screen coordinates; Windows performs the hit-test and routing',
+      method: 'real OS input (SendInput) with the cursor moved to real screen coordinates; Windows performs the hit-test and routing',
       injectedAt: { clientPoint: point, screenPoint: down.screenPoint },
       click: {
-        delivery: 'posted mouse messages carrying the button state (WM_LBUTTONDOWN with MK_LBUTTON)',
+        delivery: 'real SendInput press/move/release; `down` holds the button and only `up` releases it',
         sendInputAcceptedCount: clickSendInputAccepted,
-        postedMessages: down.postedMessages ?? null,
+        sentEvents: down.postedMessages ?? null,
+        buttonHeldAfterPress: down.buttonHeldAfter ?? null,
+        deliveredAPress: clickDeliveredAPress,
         sendInputError: clickSendInputAccepted > 0 ? null : down.sendInputError,
         hitWindowExists: down.hitWindowExists,
         hitWindowClass: down.hitWindowClass,
