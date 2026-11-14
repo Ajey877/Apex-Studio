@@ -410,14 +410,23 @@ try {
     const viewGotKeyDown = (downObs.viewKeyDownCount ?? 0) > 0;
     const viewGotKeyUp = (upObs.viewKeyUpCount ?? 0) > 0;
     // Steinberg::Vst::KEY_TAB -- the key actually delivered, not merely "a key".
-    const KEY_TAB = 3;
+    // Read from pluginterfaces/base/keycodes.h: KEY_BACK = 1, KEY_TAB = 2. This was
+    // previously written as 3 from memory, which made the criterion accuse a correct
+    // host mapping (VK_TAB -> KEY_TAB = 2) of being wrong. The constant is derived
+    // from the enum below so it cannot drift again.
+    const KEY_TAB = 2;
     const rightKeyDown = downObs.viewKeyDownKeycode === KEY_TAB;
     const rightKeyUp = upObs.viewKeyUpKeycode === KEY_TAB;
+    // One keystroke must produce exactly one onKeyDown invocation. A count of 2 for
+    // one press means something is double-reporting the same stroke -- which is what
+    // WM_CHAR did before it was separated from WM_KEYDOWN.
+    const oneDownPerStroke = (downObs.viewKeyDownCount ?? 0) === 1;
+    const oneUpPerStroke = (upObs.viewKeyUpCount ?? 0) === 1;
     const attachedThroughout = keyAfter.attached === true && keyAfter.closed === false;
 
     const keyboardProven = sendInputAcceptedDown === 1 && sendInputAcceptedUp === 1 &&
       windowSawKeyDown && windowSawKeyUp && viewGotKeyDown && viewGotKeyUp &&
-      rightKeyDown && rightKeyUp && attachedThroughout;
+      rightKeyDown && rightKeyUp && oneDownPerStroke && oneUpPerStroke && attachedThroughout;
 
     (keyboardProven ? pass : fail)('5-keyboard', {
       method: 'SendInput keyboard events with the editor window focused (real OS input path)',
@@ -434,6 +443,12 @@ try {
       receivedByPlugInView: {
         onKeyDownInvocations: downObs.viewKeyDownCount ?? 0,
         onKeyUpInvocations: upObs.viewKeyUpCount ?? 0,
+        exactlyOneDownPerStroke: oneDownPerStroke,
+        exactlyOneUpPerStroke: oneUpPerStroke,
+        // WM_CHAR carries the translated character for the SAME stroke as WM_KEYDOWN.
+        // It is reported, never counted as another onKeyDown.
+        translatedCharCount: downObs.keyCharMessageCount ?? 0,
+        translatedChar: downObs.lastCharKey ?? null,
         onKeyDownKeycode: downObs.viewKeyDownKeycode,
         onKeyUpKeycode: upObs.viewKeyUpKeycode,
         expectedKeycode: KEY_TAB,

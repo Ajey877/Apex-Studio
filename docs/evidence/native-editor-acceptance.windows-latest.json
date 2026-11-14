@@ -182,5 +182,36 @@
     "wmDpiChanged": "Real WM_DPICHANGED, counted only when Windows sends it (dpiChangedMessageCount). NOT_VERIFIED on an unattended runner, which never changes DPI.",
     "interactiveDisplayScale125and150": "NOT_VERIFIED. Requires a human changing display scale on a real display. Never derived from (a) or (b).",
     "multiMonitorMigration": "NOT_VERIFIED. Requires interactive desktop drag between monitors of differing DPI."
-  }
+  },
+  "defectsFoundBySharperCriteria": [
+    {
+      "id": "wm-char-double-reported-one-keystroke",
+      "symptom": "One SendInput TAB press produced viewKeyDownCount 2 and recorded keycode 9.",
+      "cause": "WM_CHAR carries the translated character for the SAME stroke as WM_KEYDOWN. The host counted it as a second onKeyDown invocation and overwrote the recorded keycode with the character code.",
+      "fix": "WM_CHAR is observed separately (keyCharMessageCount, lastCharKey) and never counted as a key event.",
+      "wouldTheOldTestHaveCaughtIt": false
+    },
+    {
+      "id": "criterion-asserted-wrong-keycode",
+      "symptom": "5-keyboard failed with onKeyUpKeycode 2 against an expected 3.",
+      "cause": "The harness asserted KEY_TAB == 3. pluginterfaces/base/keycodes.h defines KEY_BACK = 1 and KEY_TAB = 2, so the host mapping VK_TAB -> KEY_TAB was correct and the test was wrong.",
+      "fix": "Expected value corrected to 2 and derived from the pinned SDK header by a unit test instead of being remembered.",
+      "wouldTheOldTestHaveCaughtIt": false
+    },
+    {
+      "id": "windows-only-link-failure",
+      "symptom": "windows-latest DSP and windows-package both failed with MSVC LNK2005 on ProgramList and ProgramListWithPitchNames.",
+      "cause": "The bundle listed both vsteditcontroller.cpp and vstsinglecomponenteffect.cpp. The latter #includes the former, and the SDK comment says to exclude it.",
+      "fix": "Removed the duplicate source; regression test asserts both are never listed together.",
+      "wouldTheOldTestHaveCaughtIt": false,
+      "note": "Linux could not catch this because nothing there pulled both in."
+    },
+    {
+      "id": "crlf-sensitive-test-assertions",
+      "symptom": "windows-latest failed two tests that passed locally: both read CMakeLists.txt and matched a pattern containing a literal newline.",
+      "cause": "A Windows checkout has CRLF line endings, so \\n\\s+ never matched.",
+      "fix": "readSource() normalises CRLF to LF and the assertion uses \\s+. Verified by converting all native/vst3 sources to CRLF: 53/53 pass, and reverting only the assertion makes it fail.",
+      "wouldTheOldTestHaveCaughtIt": false
+    }
+  ]
 }

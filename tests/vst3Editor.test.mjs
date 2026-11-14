@@ -712,3 +712,35 @@ test('the acceptance-only input hook is unreachable outside an acceptance run', 
   assert.ok(!/performEdit|setParamNormalized/.test(svc.slice(0, 1600)),
     'it never synthesises a parameter change');
 });
+
+test('the keyboard criterion expects the SDK keycode, not a remembered one', () => {
+  const script = readSource('scripts/native-editor-windows-acceptance.mjs');
+  const start = script.indexOf("criterion('5-keyboard'");
+  const body = script.slice(start, script.indexOf("criterion('6-mouse-wheel'", start));
+  const expected = Number(body.match(/const KEY_TAB = (\d+);/)?.[1]);
+  assert.ok(Number.isInteger(expected), 'the criterion states the keycode explicitly');
+
+  // Derive KEY_TAB from the pinned SDK enum instead of trusting the literal.
+  // KEY_BACK = 1, KEY_TAB is the next enumerator.
+  const header = readSource('build/native-deps/vst3sdk/pluginterfaces/base/keycodes.h');
+  const enumBody = header.slice(header.indexOf('enum VirtualKeyCodes'));
+  const names = [...enumBody.slice(0, enumBody.indexOf('}')).matchAll(/^\s*(KEY_[A-Z0-9_]+)/gm)]
+    .map(match => match[1]);
+  const tabIndex = names.indexOf('KEY_TAB');
+  assert.ok(tabIndex >= 0, 'KEY_TAB is present in the SDK enum');
+  const backValue = Number(enumBody.match(/KEY_BACK\s*=\s*(\d+)/)?.[1]);
+  assert.equal(expected, backValue + tabIndex,
+    `KEY_TAB must be ${backValue + tabIndex} per the pinned keycodes.h, not ${expected}`);
+});
+
+test('one keystroke is one onKeyDown invocation, not two', () => {
+  const host = readSource('native/vst3/editor-host.hpp');
+  // WM_CHAR describes the same stroke as WM_KEYDOWN; counting it as another
+  // onKeyDown corrupted both the invocation count and the recorded keycode.
+  const charCase = host.slice(host.indexOf('case WM_CHAR:'));
+  const block = charCase.slice(0, charCase.indexOf('case WM_DESTROY:'));
+  assert.ok(!/viewKeyDownCount\+\+/.test(block), 'WM_CHAR does not raise viewKeyDownCount');
+  assert.ok(!/lastViewKeyDownKeycode\s*=/.test(block), 'WM_CHAR does not overwrite the keycode');
+  assert.ok(!/onKeyDown\(/.test(block), 'WM_CHAR does not invoke onKeyDown again');
+  assert.ok(/keyCharMessageCount\+\+/.test(block), 'WM_CHAR is still observed, separately');
+});

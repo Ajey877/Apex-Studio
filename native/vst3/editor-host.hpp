@@ -139,6 +139,7 @@ class NativeEditorSession {
   int keyCharMessageCount = 0;      // WM_CHAR seen by our WndProc
   int viewKeyDownCount = 0;         // IPlugView::onKeyDown actually invoked
   int viewKeyUpCount = 0;           // IPlugView::onKeyUp actually invoked
+  int16_t lastCharKey = 0;          // translated WM_CHAR character, never a keycode
   Steinberg::tresult lastViewKeyDownResult = Steinberg::kResultFalse;
   Steinberg::tresult lastViewKeyUpResult = Steinberg::kResultFalse;
   int16_t lastViewKeyDownKeycode = 0;
@@ -753,14 +754,15 @@ class NativeEditorSession {
         }
         break;
       case WM_CHAR:
+        // WM_CHAR carries a translated character for IPlugView::onKeyDown's `key`
+        // argument, but the event it reports is the SAME keystroke as WM_KEYDOWN.
+        // Counting it as a second onKeyDown invocation corrupted two observations:
+        // the invocation count read 2 for one key press, and the recorded keycode
+        // was overwritten by the character code (TAB -> 9) so the harness compared
+        // against the wrong key. It is tracked separately and only fills in the
+        // character when a WM_KEYDOWN for this stroke did not already run.
         keyCharMessageCount++;
-        if (view) {
-          const auto code = static_cast<Steinberg::char16>(wParam);
-          viewKeyDownCount++;
-          lastViewKeyDownKeycode = static_cast<int16_t>(code);
-          lastViewKeyDownResult = view->onKeyDown(code, 0, keyModifiers());
-          if (lastViewKeyDownResult == Steinberg::kResultTrue) return 0;
-        }
+        lastCharKey = static_cast<int16_t>(wParam);
         break;
       case WM_DESTROY:
         // This child process owns one editor window, but it must continue
@@ -1063,6 +1065,10 @@ public:
     result["keyDownMessageCount"] = keyDownMessageCount;
     result["keyUpMessageCount"] = keyUpMessageCount;
     result["keyCharMessageCount"] = keyCharMessageCount;
+    result["lastCharKey"] = lastCharKey;
+    result["keyCharNote"] = "WM_CHAR is the translated character for the same stroke "
+      "as WM_KEYDOWN. It is counted separately and never counted as a second "
+      "onKeyDown invocation.";
     result["viewKeyDownCount"] = viewKeyDownCount;
     result["viewKeyUpCount"] = viewKeyUpCount;
     result["viewKeyDownResult"] = resultName(lastViewKeyDownResult);

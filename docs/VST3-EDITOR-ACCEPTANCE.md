@@ -76,6 +76,29 @@ Consequently no criterion may be gated on a comparison that is true of every
 possible value (the previous wheel check used `hostWheelCount >= 0`, which could
 never fail).
 
+### Two defects the stricter criteria found
+
+Rewriting criteria 5 and 6 to demand real receipts immediately turned both red.
+Neither failure was a test problem:
+
+1. **`WM_CHAR` double-reported one keystroke.** `WM_CHAR` carries the translated
+   character for the *same* stroke as `WM_KEYDOWN`. The host was counting it as a
+   second `onKeyDown` invocation and overwriting the recorded keycode with the
+   character code, so one TAB press appeared as two `onKeyDown` calls with keycode
+   9 instead of `KEY_TAB`. `WM_CHAR` is now tracked separately
+   (`keyCharMessageCount`, `lastCharKey`) and never counted or reported as a key.
+
+2. **The criterion compared against a misremembered keycode.** It asserted
+   `KEY_TAB == 3`. Reading `pluginterfaces/base/keycodes.h` shows `KEY_BACK = 1`
+   and `KEY_TAB = 2`, so the host's `VK_TAB -> KEY_TAB` mapping was correct and the
+   test was accusing it wrongly. Both defects were hiding behind the old
+   "is the window still attached" gate, which stayed green either way. The
+   expected value is now derived from the SDK header by a unit test rather than
+   remembered.
+
+`WM_DPICHANGED` and the wheel paths likewise only became meaningful once the
+counters were separated into attempt-versus-receipt.
+
 ---
 
 ## Part 1 — Automated acceptance on a real Windows desktop
@@ -105,7 +128,7 @@ reported size.
 | 3 | DPI scaling | Three things, reported separately and never conflated: (a) `IPlugViewContentScaleSupport` — a non-default factor pushed through `setContentScaleFactor` must be accepted *and* the plug-in must resize itself; (b) `WM_DPICHANGED` — counted only when Windows actually sends it (`dpiChangedMessageCount`), which no unattended runner triggers; (c) interactive 125%/150% display changes — always `NOT_VERIFIED` in CI. 96 DPI is never evidence of any of them. |
 | 4 | Resize and `checkSizeConstraint` | A real `SetWindowPos` goes through `WM_SIZING` → `checkSizeConstraint` → `WM_SIZE` → `onSize`; the plug-in's `getSize` must then equal the real client area. |
 | 4b | Plug-in-initiated resize | `IPlugFrame::resizeView` driven by the plug-in, recorded honestly as `NOT_VERIFIED` when the plug-in declines to resize itself. |
-| 5 | Keyboard forwarding | Real `SendInput` for a TAB down and up. The `SendInput` return count must be `1` for each, the editor WndProc must observe `WM_KEYDOWN`/`WM_KEYUP` (`keyDownMessageCount`/`keyUpMessageCount`), and the plug-in's `onKeyDown`/`onKeyUp` must both be invoked with `VK_TAB` and a recorded return value. A merely attached window is not evidence. |
+| 5 | Keyboard forwarding | Real `SendInput` for a TAB down and up. The `SendInput` return count must be `1` for each, the editor WndProc must observe `WM_KEYDOWN`/`WM_KEYUP` (`keyDownMessageCount`/`keyUpMessageCount`), and the plug-in's `onKeyDown`/`onKeyUp` must each be invoked **exactly once** with `KEY_TAB` and a recorded return value. A merely attached window is not evidence. |
 | 6 | Mouse and wheel forwarding | VST3 has **no** mouse entry point on `IPlugView`: see [Mouse semantics](#mouse-semantics) below. The wheel is proven through whichever path Windows actually used, and the evidence names it: **path A** the host WndProc observed `WM_MOUSEWHEEL` and invoked `onWheel` with the injected delta, or **path B** a plug-in child window owned the point, so the OS delivered the wheel there and the host correctly saw nothing. The observed delta must equal the injected delta. An attempted injection is never counted as a receipt. |
 | 7 | Focus gain and loss | `SetForegroundWindow`/`SetFocus` on the real window, then `GetFocus`/`GetActiveWindow`; `onFocus` follows `WM_SETFOCUS`/`WM_KILLFOCUS`. |
 | 8 | State capture before destruction | The window is confirmed visible, *then* closed; component state bytes, parameter count, dirty flag and overflow flag are captured from the response. |
