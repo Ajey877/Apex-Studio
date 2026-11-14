@@ -352,17 +352,9 @@ async function run() {
     .locator('p[role="alert"]').allInnerTexts().then(list => list.filter(Boolean).slice(-4)).catch(() => []);
   // The renderer's own record of why the open failed, which carries the helper's
   // stderr through every layer. This is the only place the native cause survives.
-  ui.lastEditorOpenError = await page
-    .evaluate(() => globalThis.__apexAcceptance?.lastEditorOpenError?.() ?? null)
-    .catch(() => null);
-  lastUiDiagnosis = {
-    insertRowRendered: ui.insertRowRendered ?? null,
-    vst3InsertCountInProject: ui.vst3InsertCountInProject ?? null,
-    lastEditorOpenError: ui.lastEditorOpenError ?? null,
-    editorAlertAfterClick: ui.editorAlertAfterClick ?? null,
-    editorStatusAfterClick: ui.editorStatusAfterClick ?? null,
-    pickerStatusText: ui.pickerStatusText ?? null,
-  };
+  // NOTE: the renderer's own diagnosis is read AFTER the sampling loop below. The
+  // open is asynchronous, so reading it here captures the "Opening…" state and
+  // misses the rejection that actually explains the failure.
 
   // Cross-check that the project state agrees an insert was actually added.
   const inserted = await page.evaluate(async () => {
@@ -394,6 +386,24 @@ async function run() {
     if (visible) { visibleWindow = visible; break; }
     await page.waitForTimeout(150);
   }
+  // Now that the window-sampling window has elapsed, the open has either produced a
+  // window or rejected. Read what the renderer recorded, which is where the
+  // helper's own stderr survives.
+  ui.lastEditorOpenError = await page
+    .evaluate(() => globalThis.__apexAcceptance?.lastEditorOpenError?.() ?? null)
+    .catch(() => null);
+  ui.editorAlertAfterClick = await page
+    .locator('p[role="alert"]').allInnerTexts().then(list => list.filter(Boolean).slice(-4)).catch(() => []);
+  ui.editorStatusAfterClick = await page
+    .locator('p[role="status"]').allInnerTexts().then(list => list.filter(Boolean).slice(-4)).catch(() => []);
+  lastUiDiagnosis = {
+    insertRowRendered: ui.insertRowRendered ?? null,
+    vst3InsertCountInProject: ui.vst3InsertCountInProject ?? null,
+    lastEditorOpenError: ui.lastEditorOpenError ?? null,
+    editorAlertAfterClick: ui.editorAlertAfterClick ?? null,
+    editorStatusAfterClick: ui.editorStatusAfterClick ?? null,
+    pickerStatusText: ui.pickerStatusText ?? null,
+  };
   const helpersDuringRead = { ok: samples.some(sample => sample.ok), source: 'sampled',
     error: samples.every(sample => !sample.ok) ? ['process table unreadable for every sample'] : null };
   const helpersDuring = [...seenHelpers.values()];
