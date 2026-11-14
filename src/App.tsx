@@ -2482,17 +2482,38 @@ export function App() {
         };
       },
       undoRedoRoundTrip: async () => {
+        /**
+         * The fields undo/redo governs. Live meters are excluded because they are
+         * deliberately not part of history (see audioEngine's topLevelKeys, which
+         * treats peakL/peakR as volatile playback values): comparing them made redo
+         * look broken whenever a meter ticked between the snapshot and the compare,
+         * which is a property of the test, not of undo.
+         */
+        const comparable = (state: typeof projectStateRef.current) => JSON.stringify({
+          ...state,
+          mixerTracks: state.mixerTracks.map(track => {
+            const { peakL: _peakL, peakR: _peakR, ...rest } = track;
+            return rest;
+          }),
+        });
         const before = projectStateRef.current;
+        const beforeText = comparable(before);
         handleUndo();
         await new Promise(resolve => setTimeout(resolve, 120));
         const undone = projectStateRef.current;
+        const undoneText = comparable(undone);
         handleRedo();
         await new Promise(resolve => setTimeout(resolve, 120));
         const redone = projectStateRef.current;
+        const redoneText = comparable(redone);
         return {
-          undoRestored: JSON.stringify(undone) !== JSON.stringify(before),
-          redoReapplied: JSON.stringify(redone) === JSON.stringify(before),
-          before: JSON.stringify(before.mixerTracks), undone: JSON.stringify(undone.mixerTracks),
+          // Undo must actually change something, and redo must restore exactly what
+          // undo replaced -- both measured against history-governed state only.
+          undoRestored: undoneText !== beforeText,
+          redoReapplied: redoneText === beforeText,
+          changedByUndo: undoneText !== beforeText,
+          redoDiffersAt: redoneText === beforeText ? null
+            : redoneText.slice(0, 120),
         };
       },
     };

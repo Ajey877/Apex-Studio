@@ -214,6 +214,58 @@ if (!executable) {
 const editorFixture = path.join(root, 'build/native-vst3/VST3/Release/apex-acceptance-vst3.vst3');
 // Registered name from acceptance-fixture-entry.cpp.
 const EDITOR_FIXTURE_NAME = /^ApexAcceptanceGain$/i;
+/**
+ * Open the fixture's editor through the real Mixer UI, in the order a user does:
+ * Mixer tab, track strip, "+", "Native VST3 Effect", the plug-in row, then the
+ * insert row's "Open VST3 editor" button. Shared by p1 and p8 so the two cannot
+ * drift into different definitions of "the UI".
+ *
+ * Deliberately has no fallback: if a row does not render, that is the result.
+ */
+async function openEditorThroughMixerUi(page) {
+  const ui = {};
+  try {
+    const mixerTab = page.locator('#nav-mixer');
+    await mixerTab.waitFor({ state: 'visible', timeout: 30000 });
+    await mixerTab.click({ timeout: 15000 });
+    ui.openedMixerView = true;
+    await page.waitForTimeout(500);
+
+    const trackStrip = page.locator('#mixer-strip-1');
+    await trackStrip.waitFor({ state: 'visible', timeout: 30000 });
+    await trackStrip.click({ timeout: 15000 });
+    ui.selectedTrackStrip = '#mixer-strip-1';
+    await page.waitForTimeout(300);
+
+    const addEffect = page.getByTitle('Add Effect Plugin').first();
+    await addEffect.waitFor({ state: 'visible', timeout: 15000 });
+    await addEffect.click({ timeout: 15000 });
+    ui.openedAddEffectMenu = true;
+
+    const nativeChoice = page.getByRole('button', { name: 'Native VST3 Effect' }).first();
+    await nativeChoice.waitFor({ state: 'visible', timeout: 15000 });
+    await nativeChoice.click({ timeout: 15000 });
+    ui.openedVst3Picker = true;
+
+    ui.pickerStatusText = await page.locator('[aria-label="VST3 effect picker"] [role="status"]').first()
+      .innerText().catch(() => '');
+    const fixtureButton = page.getByRole('button', { name: /ApexAcceptanceGain/ }).first();
+    await fixtureButton.waitFor({ state: 'visible', timeout: 60000 });
+    ui.pickerRowLabel = await fixtureButton.innerText().catch(() => '');
+    await fixtureButton.click({ timeout: 60000 });
+    ui.choseFixtureFromPicker = true;
+
+    const openButton = page.getByRole('button', { name: 'Open VST3 editor' }).first();
+    await openButton.waitFor({ state: 'visible', timeout: 60000 });
+    ui.insertRowRendered = true;
+    await openButton.click({ timeout: 30000 });
+    ui.clickedOpenVst3Editor = true;
+    return { ok: true, ui };
+  } catch (error) {
+    return { ok: false, ui, error: `${error?.message ?? error}`.split('\n')[0] };
+  }
+}
+
 const profile = path.join(root, 'build', `packaged-acceptance-profile-${Date.now()}`);
 /** Every launch of the packaged app uses this environment. Declared once so no
  *  launch can silently forget the flag that enables the acceptance hook. */
@@ -278,70 +330,22 @@ async function run() {
   // No test-only handler is used to open the editor: the visible control is the
   // control that is clicked, and its absence is a FAIL rather than a fallback.
   stage('p1-mixer-ui');
-  const ui = {};
-
-  // 0. Switch to the Mixer workspace. The app does not open there, so a click on
-  // the ribbon tab is a genuine part of the user's path -- without it there are no
-  // insert rows to click at all.
-  const mixerTab = page.locator('#nav-mixer');
-  await mixerTab.waitFor({ state: 'visible', timeout: 30000 });
-  await mixerTab.click({ timeout: 15000 });
-  ui.openedMixerView = true;
-  await page.waitForTimeout(500);
-
-  // 1. Select the Kick / 808 Mixer strip. Each strip is a clickable div with a
-  // stable id (mixer-strip-<trackId>), not a button, so it is clicked by that id;
-  // this is the same element the user clicks to select a track.
-  const trackStrip = page.locator('#mixer-strip-1');
-  await trackStrip.waitFor({ state: 'visible', timeout: 30000 });
-  await trackStrip.click({ timeout: 15000 });
-  ui.selectedTrackStrip = '#mixer-strip-1';
-  ui.selectedTrack = 'Kick / 808';
-  // Confirm the selection actually took effect, rather than assuming the click
-  // landed: the FX-slots header names the selected track.
-  ui.fxSlotsHeaderNamesSelection = await page
-    .getByText(/FX SLOTS \(KICK \/ 808\)/i).first()
-    .isVisible().catch(() => false);
-  await page.waitForTimeout(300);
-
-  // 2. Open the effect menu with the real "+" button.
-  const addEffect = page.getByTitle('Add Effect Plugin').first();
-  await addEffect.waitFor({ state: 'visible', timeout: 15000 });
-  await addEffect.click({ timeout: 15000 });
-  ui.openedAddEffectMenu = true;
-
-  // 3. Choose "Native VST3 Effect" to open the genuine picker.
-  const nativeChoice = page.getByRole('button', { name: 'Native VST3 Effect' }).first();
-  await nativeChoice.waitFor({ state: 'visible', timeout: 15000 });
-  await nativeChoice.click({ timeout: 15000 });
-  ui.openedVst3Picker = true;
-
-  // 4. Pick our fixture from the real picker list.
-  //
-  // The picker row's accessible name is "<name> · <vendor><path>", so the anchored
-  // EDITOR_FIXTURE_NAME matcher used for bridge discovery cannot be reused here --
-  // it is correct for a bare name and wrong for this concatenation. Match on the
-  // registered name as a substring, and record what the picker itself reported so a
-  // discovery problem is visible instead of looking like a missing row.
-  const pickerStatus = page.locator('[aria-label="VST3 effect picker"] [role="status"]').first();
-  ui.pickerStatusText = await pickerStatus.innerText().catch(() => '');
-  const fixtureButton = page.getByRole('button', { name: /ApexAcceptanceGain/ }).first();
-  await fixtureButton.waitFor({ state: 'visible', timeout: 60000 });
-  ui.pickerRowLabel = await fixtureButton.innerText().catch(() => '');
-  await fixtureButton.click({ timeout: 60000 });
-  ui.choseFixtureFromPicker = true;
-
-  // 5. The Mixer must now render an insert row exposing the real editor control.
-  const openButton = page.getByRole('button', { name: 'Open VST3 editor' }).first();
-  await openButton.waitFor({ state: 'visible', timeout: 60000 });
-  ui.insertRowRendered = true;
-  // What the row says about the insert, read from the live DOM.
-  ui.insertRowText = (await page.locator('div').filter({ has: openButton }).first().innerText().catch(() => ''))
-    .split('\n').map(line => line.trim()).filter(Boolean).slice(0, 6);
-
-  // 6. Click the real control. This is the user's own path; nothing is simulated.
-  await openButton.click({ timeout: 30000 });
+  const opened = await openEditorThroughMixerUi(page);
+  const ui = { ...opened.ui, selectedTrack: 'Kick / 808' };
+  if (!opened.ok) {
+    // One of the visible controls was missing. Say which step and stop: every later
+    // packaged criterion depends on an editor that this path could not open.
+    record('p1-mixer-opens-editor', 'FAIL', {
+      clickedControl: 'Mixer insert "Open VST3 editor" button (real UI click)',
+      mixerUi: ui,
+      failingStep: opened.error,
+      note: 'The real Mixer UI could not open the editor; no test-only path is used as a substitute.',
+    });
+    throw new Error(`the real Mixer UI could not open the editor: ${opened.error}`);
+  }
   const triggeredVia = 'Mixer insert "Open VST3 editor" button (real UI click)';
+  ui.fxSlotsHeaderNamesSelection = await page
+    .getByText(/FX SLOTS \(KICK \/ 808\)/i).first().isVisible().catch(() => false);
 
   // Capture the insert row's own status/error text. If the editor failed to open,
   // the UI already says why -- recording it turns "no helper" into a diagnosis
@@ -487,8 +491,23 @@ async function run() {
     if (!app?.driveEditorWithRealInput) return { error: 'no real-input hook available' };
     return app.driveEditorWithRealInput(point);
   }, sliderPoint).catch(error => ({ error: String(error?.message ?? error) }));
-  // Then let the panel's normal poll loop observe the edit.
-  const edited = await page.evaluate(async () => globalThis.__apexAcceptance.pollOpenEditor());
+  // Then let the panel's normal poll loop observe the edit. Sample rather than
+  // reading once: the click is delivered asynchronously by the OS and the plug-in
+  // reports the change on its next poll, so a single read can race it.
+  const edited = await page.evaluate(async () => {
+    const app = globalThis.__apexAcceptance;
+    const before = await app.pollOpenEditor();
+    let latest = before;
+    const deadline = Date.now() + 4000;
+    while (Date.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, 200));
+      latest = await app.pollOpenEditor();
+      // Stop as soon as the plug-in reports an edit of the Gain parameter.
+      if ((latest.editedParameterIds ?? []).length > 0) break;
+    }
+    return { ...latest, beforeParameterIds: before.editedParameterIds ?? [],
+      observedWithinMs: (latest.editedParameterIds ?? []).length > 0 ? 'edit reported by the poll loop' : null };
+  });
   const reachedApex = await page.evaluate(async (slotId) => globalThis.__apexAcceptance.readInsertParameter(1, slotId), inserted?.slotId);
   // A rejection is a genuine FAIL (the host refused something). A session that
   // never reached a live window has no edit to forward, so it is NOT_VERIFIED.
@@ -496,7 +515,11 @@ async function run() {
   // For a fixture whose editor drives UI-only tags that is CORRECT behaviour, so
   // the criterion is unproven rather than failed. Any other rejection is a FAIL.
   const fixtureRejection = /unknown or read-only ParamID/.test(String(edited?.error ?? ''));
-  const p3Verdict = edited?.delivered && reachedApex?.value != null ? 'PASS'
+  // PASS requires the plug-in's own editor to have reported an edit of a real
+  // parameter, observed by the same poll loop the panel uses. The presence of the
+  // insert's saved value is NOT evidence: it is non-null before the click too.
+  const gainEdited = (edited?.editedParameterIds ?? []).includes(0);
+  const p3Verdict = gainEdited ? 'PASS'
     : fixtureRejection ? 'NOT_VERIFIED'
     : edited?.phase === 'failed' ? 'FAIL' : 'NOT_VERIFIED';
   const blockedByFixture = fixtureRejection;
@@ -507,8 +530,10 @@ async function run() {
     blockedBy: blockedByFixture
       ? 'the fixture editor references ParamIDs its own controller does not expose (DataExchange UI-only tags); the host rejects them by design'
       : null,
+    gainParameterEdited: gainEdited,
     edited: edited,
-    valueObservedByApex: reachedApex,
+    insertStateAfterEdit: reachedApex,
+    valueIsNotEvidence: 'readInsertParameter returns the insert\'s saved value, which is non-null before the click; the editedParameterIds reported by the plug-in are what prove the edit.',
   });
 
   // ---- p4/p5: one undoable change, undo and redo -------------------------
@@ -608,6 +633,10 @@ async function run() {
     const page3 = await app3.firstWindow();
     await page3.waitForLoadState('domcontentloaded');
     await page3.waitForTimeout(3000);
+    // Recovery is only meaningful with a live editor, so open one exactly the way
+    // the user does -- same visible controls, same order as p1. Using a test-only
+    // opener here would prove recovery of something a user never opened.
+    const reopen = await openEditorThroughMixerUi(page3);
     // Asking the app to crash an editor that was never opened says nothing about
     // recovery, so it is reported as a block rather than aborting the whole run.
     const crash = await page3.evaluate(async () => {
@@ -617,10 +646,14 @@ async function run() {
         return { ok: false, error: error.message };
       }
     });
-    record('p8-recovery', !crash.ok ? 'NOT_VERIFIED'
+    record('p8-recovery', !reopen.ok ? 'NOT_VERIFIED'
+      : !crash.ok ? 'NOT_VERIFIED'
       : crash.result?.recoveryRecordOffered === true ? 'PASS' : 'FAIL', {
-      blockedByFixture: !crash.ok,
-      blockedBy: !crash.ok ? 'no editor session could be opened with the bundled fixtures, so there was none to crash' : null,
+      openedThroughMixerUi: reopen.ok,
+      openerEvidence: reopen,
+      blockedByFixture: false,
+      blockedBy: !reopen.ok ? `the real Mixer UI could not open an editor to crash: ${reopen.error}`
+        : !crash.ok ? `the editor session was not usable after opening: ${crash.error}` : null,
       ...(crash.ok ? crash.result : { error: crash.error }),
     });
   } finally {

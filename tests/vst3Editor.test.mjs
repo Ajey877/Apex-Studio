@@ -602,11 +602,19 @@ test('a correct policy rejection is not scored as a host failure', () => {
     'p5 inherits the block');
 });
 
-test('p8 reports a missing session instead of aborting the run', () => {
-  const script = readFileSync(path.join(process.cwd(), 'scripts/packaged-editor-acceptance.mjs'), 'utf8');
-  assert.ok(/blockedByFixture: !crash\.ok/.test(script), 'p8 distinguishes a block from a failure');
-  assert.ok(!/const crash = await page3\.evaluate\(async \(\) => globalThis\.__apexAcceptance\.crashEditorAndRecover\(\)\);/.test(script),
-    'the unguarded call is gone');
+test('p8 opens a real editor through the UI before crashing one', () => {
+  const script = readScript('scripts/packaged-editor-acceptance.mjs');
+  // Recovery is only meaningful for an editor a user could actually open, so p8
+  // drives the same visible controls as p1 rather than a test-only opener.
+  assert.ok(/openEditorThroughMixerUi\(page3\)/.test(script),
+    'p8 opens the editor through the real Mixer UI');
+  assert.ok(!/openEditorOnInsert/.test(script), 'no test-only opener is used anywhere');
+  assert.ok(/blockedByFixture: false/.test(script),
+    'a fixture excuse is no longer reported for p8');
+  assert.ok(/openedThroughMixerUi: reopen\.ok/.test(script),
+    'the reopen result is part of the evidence');
+  assert.ok(/!reopen\.ok \? 'NOT_VERIFIED'/.test(script),
+    'a failed reopen is a block, not a crash-recovery verdict');
 });
 
 // ---- Keyboard and mouse delivery proof (acceptance harness) ----------------
