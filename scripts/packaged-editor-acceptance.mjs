@@ -630,29 +630,28 @@ async function run() {
   const endedEditing = lastUp ? lastUp.editing === false : false;
 
   const traceFacts = {
-    // Was the real control under the pointer, and did the frame resolve the press to it?
-    mouseDownOnGainSlider: /^mouse:downLandedOnGainSlider/.test(traceText) ||
-      editorTrace?.lines.some(line => line.startsWith('mouse:downLandedOnGainSlider')) === true,
-    sliderPresentAtOpen: /editor:binding[^\n]*gainSliderPresent=true/.test(traceText),
-    listenerIsEditor: /listenerIsEditor=true/.test(traceText),
-    parameterListenerPresent: /parameterListener=present/.test(traceText),
-    parameterListenerMissing: /parameterListener=null/.test(traceText),
-    // Did the control act on the gesture?
+    // Decisive facts first: annotations truncate, and these are what name the case.
+    mouseDownOnGainSlider: editorTrace?.lines.some(line => line.startsWith('mouse:downLandedOnGainSlider')) === true,
     controlValueMoved,
-    valuesSeen,
-    havePostDispatchState,
-    postDispatchUnavailable,
     beganEditing,
     endedEditing,
     controlBeginEditObserved: /lifecycle:controlBeginEdit/.test(traceText),
     controlEndEditObserved: /lifecycle:controlEndEdit/.test(traceText),
     valueChangedObserved: /lifecycle:valueChanged/.test(traceText),
-    // Did the edit reach the controller?
     performEditObserved: /controller:performEdit .*accepted=true/.test(traceText),
+    parameterListenerPresent: /parameterListener=present/.test(traceText),
+    parameterListenerMissing: /parameterListener=null/.test(traceText),
+    // Then the supporting detail.
+    valuesSeen,
+    sliderPresentAtOpen: /editor:binding[^\n]*gainSliderPresent=true/.test(traceText),
+    listenerIsEditor: /listenerIsEditor=true/.test(traceText),
+    havePostDispatchState,
+    postDispatchUnavailable,
     performEditRejected: /controller:performEdit .*accepted=false/.test(traceText),
     performEditSkipped: /controller:performEditSkipped/.test(traceText),
     sliderStates,
   };
+
 
   /**
    * Which hypothesis the trace supports.
@@ -673,6 +672,16 @@ async function run() {
     : 'UNRESOLVED';
 
   record('p3-parameter-reaches-apex', p3Verdict, {
+    // The editor's own account of the gesture comes FIRST, before the bulky
+    // gesture/poll payloads below. CI annotations are truncated, and the C/D
+    // verdict plus its raw evidence are the whole point of this run: burying them
+    // made the first instrumented run report a verdict nobody could read.
+    cOrDVerdict: traceVerdict,
+    editorTracePresent: Boolean(editorTrace),
+    editorTraceLineCount: editorTrace?.lineCount ?? 0,
+    traceFacts,
+    editorTraceLines: editorTrace?.lines ?? null,
+    editorTracePath: editorTrace ? editorTracePath : null,
     // Compact, front-loaded facts: annotations are truncated, and these are the
     // three things that decide the verdict.
     gainParameterEdited: gainEdited,
@@ -696,13 +705,6 @@ async function run() {
       ? Object.fromEntries(Object.entries(gainInput.delivered).map(([step, value]) => [step, value?.buttonHeldAfter ?? null]))
       : null,
     mechanism: 'genuine OS input (SendInput) was aimed at the Gain slider inside the plug-in\'s own editor window, then the panel\'s normal poll loop observed the edit',
-    // The editor's own account of the gesture, and what it proves about C vs D.
-    editorTracePresent: Boolean(editorTrace),
-    editorTraceLineCount: editorTrace?.lineCount ?? 0,
-    editorTracePath: editorTrace ? editorTracePath : null,
-    cOrDVerdict: traceVerdict,
-    traceFacts,
-    editorTraceLines: editorTrace?.lines ?? null,
     gainInput,
     sliderPoint,
     dragTarget,

@@ -1149,3 +1149,29 @@ test('the VSTGUI editor instrumentation stays in the one TU that builds with VST
   assert.ok(!/setValueNormalized\(|performEdit \(/.test(fixtureEditor),
     'the instrumented editor never sets a value itself');
 });
+
+test('the packaged gesture retries only the transient busy refusal', () => {
+  /**
+   * The first instrumented packaged run recorded no gesture at all: the panel's own
+   * poll loop was in flight, the service correctly refused input with "VST3 editor is
+   * still servicing another request", and the whole gesture aborted on its FIRST
+   * step. p3 was therefore NOT_VERIFIED for a reason that had nothing to do with the
+   * slider. Retrying that one transient refusal is what lets genuine input be
+   * delivered; every other error must still propagate, or a real failure would be
+   * retried into a timeout and reported as a timing problem.
+   */
+  const app = readSource('src/App.tsx');
+  assert.ok(/const deliverStep = async/.test(app), 'each step is delivered through a retrying helper');
+  assert.ok(/still servicing another request/.test(app),
+    'the retry is limited to the known transient refusal');
+  const deliverAt = app.indexOf('const deliverStep = async');
+  const body = app.slice(deliverAt, deliverAt + 1200);
+  // Any error that is not that refusal must be rethrown immediately.
+  assert.ok(/if \(!busy \|\| Date\.now\(\) > deadline\) throw error;/.test(body),
+    'a non-transient error is thrown rather than retried');
+  // And it is bounded, so a persistently busy session fails instead of hanging.
+  assert.ok(/const deadline = Date\.now\(\) \+ /.test(body), 'the retry is bounded in time');
+  // The gesture itself is unchanged: still a genuine shift-drag of OS input.
+  assert.ok(/'shift-drag: press at the handle, move to the target, release'/.test(app),
+    'the gesture is still a real drag');
+});

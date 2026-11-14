@@ -2457,9 +2457,33 @@ export function App() {
           { action: 'up', point: { ...target, zoomModifier: true }, label: `up@${target.x},${target.y}` },
           { action: 'modifier', point: { down: false }, label: 'modifier@up' },
         ];
+        /**
+         * Deliver one step, waiting out the session being busy.
+         *
+         * The panel polls the open editor on its own loop, and the service refuses
+         * input while any request is in flight ("VST3 editor is still servicing
+         * another request"). That refusal is correct back-pressure, but it made the
+         * whole gesture abort on its FIRST step, so the packaged run recorded no
+         * gesture at all and could not say where the drag stopped. Retrying only this
+         * specific transient error lets the genuine input be delivered without
+         * pretending anything happened: every other error still propagates.
+         */
+        const deliverStep = async (step: (typeof steps)[number]) => {
+          const deadline = Date.now() + 5000;
+          for (;;) {
+            try {
+              return await bridge.editorInput(id, step.action, step.point);
+            } catch (error) {
+              const message = String((error as Error)?.message ?? error);
+              const busy = message.includes('still servicing another request');
+              if (!busy || Date.now() > deadline) throw error;
+              await new Promise(resolve => setTimeout(resolve, 50));
+            }
+          }
+        };
         const delivered: Record<string, unknown> = {};
         for (const step of steps) {
-          delivered[step.label] = await bridge.editorInput(id, step.action, step.point);
+          delivered[step.label] = await deliverStep(step);
           // The OS delivers asynchronously; let the plug-in consume each event before
           // the next one so it sees a press, a move and a release in order.
           await new Promise(resolve => setTimeout(resolve, 100));
