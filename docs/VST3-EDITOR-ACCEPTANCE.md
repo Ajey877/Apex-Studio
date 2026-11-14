@@ -148,40 +148,72 @@ Two things followed from that change and are worth keeping:
   depfile, so a GCC rebuild reported success without recompiling it and only MSVC
   caught the error. Native verification now deletes the object directory first.
 
-### Where the genuine drag stopped (a container with the mouse disabled)
+### Where the genuine drag stops — what is proven, and what is not
 
-The third and final cause of `p3` was in the layout, one level above the control.
-`CViewContainer::onMouseDownEvent()` walks its children and skips every child whose
-`getMouseEnabled()` is false — **before hit-testing it at all**:
+Four delivered revisions of real input (click, drag, posted messages, held-button
+SendInput) all reached the plug-in window with the button genuinely held and none
+produced a `performEdit`. This section records exactly what has been established and,
+just as importantly, what has not.
+
+**Proven from the SDK source and the scenario's own diagnostics**
+
+1. Windows routes the drag to the plug-in's VSTGUI child window:
+   `hitIsChildWindow: true`, `hitWindowClass: VSTGUI…`, same process.
+2. The button really is held across the drag: `buttonHeldAfter: true` after the
+   `MOUSEEVENTF_LEFTDOWN`, read back through `GetAsyncKeyState`, and the preceding
+   move is a separate accepted `MOUSEEVENTF_MOVE`. `SendInput` returns 1 for each.
+3. The input is not rejected downstream: the session stays `open`, `sessionError` is
+   null, and no `unknown or read-only ParamID` rejection appears.
+4. `mouse-enabled` is a real uidesc attribute — `kAttrMouseEnabled` in
+   `uiviewcreatorattributes.h`, applied by `ViewCreator::apply` at
+   `viewcreator.cpp:127`, and containers inherit it because
+   `ViewContainerCreator::getBaseViewName()` returns `kCView`.
+
+**A real defect that was fixed, but which was not the last blocker**
+
+`CViewContainer::onMouseDownEvent()` skips any child whose `getMouseEnabled()` is
+false, before hit-testing it:
 
 ```cpp
 if (pV && pV->isVisible() && pV->getMouseEnabled() && pV->hitTest (event.mousePosition, event))
 ```
 
-The fixture's `panel` container was declared `mouse-enabled="false"`. It contained the
-Gain slider and its value field. So:
-
-* Windows delivered the drag to the plug-in's VSTGUI child window — observed;
-* the button was genuinely held for the drag move — observed;
-* `CFrame` dispatched the press into the view tree — and the tree stopped at `panel`,
-  because the panel was not eligible for the mouse and the slider inside it was never
-  reached.
-
-The slider was correctly bound, correctly sized, `mouse-enabled="true"` itself, and
-completely unreachable. Nothing failed with an error, because nothing was ever asked
-to handle the event.
-
-This is why the earlier fixes were all necessary but not sufficient, and why the answer
-is not any of "the coordinates", "the timing" or "the host rejected it": the event
-never reached the control. `panel` is now `mouse-enabled="true"`, and a test walks the
+The fixture's `panel` container — which carries the Gain slider — was declared
+`mouse-enabled="false"`, which does put every control inside it out of the mouse's
+reach. That is a genuine bug in the fixture and it is fixed, with a test that walks the
 layout and fails if any container above an interactive control disables the mouse.
 
-A note on the container path for the record: the root `view` may stay
-`mouse-enabled="false"`. `CView::dispatchEvent` does not consult the receiver's own
-flag, and `CViewContainer` does not override `onMouseDown`, so the root returns
-`kMouseEventNotImplemented` and dispatch continues into its children. The flag only
-blocks a container's *own* children, which is why the panel was decisive and the root
-was not.
+**It was not the only cause.** With the panel corrected, `p3` still reports no edited
+parameter. So the fixture bug was real but not sufficient to explain the failure, and
+this document does not claim otherwise.
+
+**Not yet established: where it stops after the frame receives the press**
+
+The remaining range is lead-engineer cases **C/D**: either `CSlider` receives the press
+and does not change its value, or it changes and never calls `performEdit`. Reading the
+dispatch path rules out the alternatives but cannot decide between those two:
+
+| case | status |
+| --- | --- |
+| A. Windows routed it wrongly | **ruled out** — the drag lands on the plug-in child window with the button held |
+| B. The frame hit-tests the wrong view | **contributed** (the panel flag, now fixed); no container above the control disables the mouse after the fix |
+| E. performEdit happened, host rejected it | **ruled out** — no rejection, session stays open, `editedParameterIds` empty rather than refused |
+| F. Host accepted, Apex did not consume | **ruled out for the same reason** — the helper's edit snapshot is empty, so there is nothing for Apex to miss |
+| C. The control got it and did not change | **open** |
+| D. It changed and never called performEdit | **open** |
+
+Deciding between C and D needs an observation *inside* the plug-in's editor, where the
+`CSlider` runs. A runtime probe in `editor-host.hpp` cannot do it: that header is
+compiled with no VSTGUI include path by design, and naming `VSTGUI::CFrame` there broke
+the build with `C2653`. The observation has to live in the fixture's own editor
+translation unit (`acceptance-fixture-editor.cpp`), which is the only place that
+compiles with VSTGUI — and also the only place that cannot be built on this Linux
+development host, because VSTGUI needs a GUI toolchain.
+
+That is the honest state: the failure is narrowed to two specific stages inside the
+plug-in's control, and the instrument that would separate them belongs in fixture code
+that only the Windows runner can compile. Adding it unverified is how the previous two
+revisions broke the build, so it is proposed rather than guessed at.
 
 ### Why the probe was withdrawn, and what distinguishes these cases instead
 
