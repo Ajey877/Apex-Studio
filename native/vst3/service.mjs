@@ -33,9 +33,12 @@ export class Vst3Service {
   #scans = new Map();
   #editor = null;
   #editorOpening = null;
+  // Editors whose helper died. Kept with their last reported parameter values so a
+  // recovery record can still be produced; cleared when the renderer releases them.
+  #retiredEditors = new Map();
   constructor(executable, roots) { this.#executable = executable; this.#roots = roots; }
   setRoots(roots) { this.#roots = [...roots]; }
-  get sessionCount() { return this.#sessions.size + this.#pending + this.#closing.size + (this.#editor ? 1 : 0); }
+  get sessionCount() { return this.#sessions.size + this.#pending + this.#closing.size + (this.#editor ? 1 : 0) + this.#retiredEditors.size; }
   get editorSessionCount() { return this.#editor ? 1 : 0; }
   get hasEditorSession() { return Boolean(this.#editor || this.#editorOpening); }
   #validateLatency(latencySamples, kind, sampleRate) {
@@ -197,6 +200,28 @@ export class Vst3Service {
       opening.settle();
     }
   }
+  /**
+   * A helper that died cannot be asked for the plug-in's final state, but the
+   * parameters the user already changed were reported by the last successful poll
+   * and are still here. Retire the session instead of deleting it: the record
+   * built from those values is the only thing standing between a crash and silent
+   * data loss, and `getEditorRecovery` is the shipped surface that produces it.
+   *
+   * Dropping the session (which is what this did before) made every later call
+   * answer "closed or belongs to another renderer" -- a description of a foreign
+   * owner, not of a crash -- so recovery could never be offered.
+   */
+  async #retireDeadSession(session) {
+    session.closed = true;
+    session.crashed = true;
+    session.activeEdits.clear();
+    session.finalState = null;
+    session.recoveryRecord = this.#makeEditorRecovery(session, null,
+      session.recoveryError ?? 'The native editor helper exited while the editor was open; the last parameter values the plug-in reported were kept for recovery.');
+    this.#retiredEditors.set(session.id, session);
+    if (this.#editor === session) this.#editor = null;
+    await session.client.dispose().catch(() => {});
+  }
   #editorSession(id, owner) {
     const session = this.#editor;
     if (!session || session.id !== id || session.owner !== owner) throw new Error('VST3 editor session is closed or belongs to another renderer.');
@@ -263,8 +288,7 @@ export class Vst3Service {
         return this.#editorResult(session, await session.client.pollEditor());
       } catch (error) {
         if (session.client.isDead) {
-          if (this.#editor === session) this.#editor = null;
-          await session.client.dispose().catch(() => {});
+          await this.#retireDeadSession(session);
           throw new Error(`Native VST3 editor helper failed; the previously committed project state is preserved and can be retried. ${error.message}`);
         }
         // A malformed response is a helper protocol failure, not a plug-in edit.
@@ -316,8 +340,7 @@ export class Vst3Service {
         return this.#editorResult(session, await session.client.closeEditor());
       } catch (error) {
         if (session.client.isDead) {
-          if (this.#editor === session) this.#editor = null;
-          await session.client.dispose().catch(() => {});
+          await this.#retireDeadSession(session);
           throw new Error(`Native VST3 editor stopped before state capture; the previously committed project state is preserved. ${error.message}`);
         }
         // The native helper deliberately remains alive after a failed state
@@ -335,17 +358,27 @@ export class Vst3Service {
     finally { session.busy = false; session.busyPromise = null; }
   }
   async finishEditor(id, owner = 'local') {
-    const session = this.#editorSession(id, owner);
+    const retired = this.#retiredEditor(id, owner);
+    const session = retired ?? this.#editorSession(id, owner);
     if (!session.closed) throw new Error('Capture the final VST3 editor state before releasing the helper.');
     if (session.busy) throw new Error('VST3 editor is still servicing another request.');
-    this.#editor = null;
+    if (this.#editor === session) this.#editor = null;
     await session.client.dispose().catch(() => {});
+    if (retired) this.#retiredEditors.delete(id);
   }
   getEditorRecovery(id, owner = 'local') {
-    const session = this.#editorSession(id, owner);
+    // A crashed editor keeps its last reported values; nothing here invents a
+    // final state the dead helper never provided.
+    const session = this.#retiredEditor(id, owner) ?? this.#editorSession(id, owner);
+    if (session.crashed) return session.recoveryRecord;
     const state = session.closed && session.finalState ? session.finalState : this.#editorDraftState(session);
     session.recoveryRecord = this.#makeEditorRecovery(session, state);
     return session.recoveryRecord;
+  }
+  #retiredEditor(id, owner) {
+    const session = this.#retiredEditors.get(id);
+    if (!session || session.owner !== owner) return null;
+    return session;
   }
   #editorDraftState(session) {
     const parameters = new Map(session.effect.state.parameters.map(item => [item.id, item.value]));
@@ -523,6 +556,12 @@ export class Vst3Service {
     }
 
     let recovery = opening?.recoveryRecord ?? null;
+    // A crashed editor this renderer owned still owes a recovery record.
+    for (const [id, retired] of [...this.#retiredEditors]) {
+      if (retired.owner !== owner) continue;
+      recovery = recovery ?? retired.recoveryRecord;
+      this.#retiredEditors.delete(id);
+    }
     const editor = this.#editor?.owner === owner ? this.#editor : null;
     if (editor) {
       if (editor.busyPromise) await editor.busyPromise.catch(() => {});

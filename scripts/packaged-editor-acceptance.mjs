@@ -507,15 +507,25 @@ async function run() {
   // the gain label, which is why the plug-in reported no edit at all.
   //   panel origin (10,12) + slider origin (64,40) = (74,52); size 168x18
   const GAIN_SLIDER = { panelOrigin: { x: 10, y: 12 }, origin: { x: 64, y: 40 }, size: { width: 168, height: 18 } };
-  const sliderPoint = {
-    x: GAIN_SLIDER.panelOrigin.x + GAIN_SLIDER.origin.x + Math.round(GAIN_SLIDER.size.width / 2),
-    y: GAIN_SLIDER.panelOrigin.y + GAIN_SLIDER.origin.y + Math.round(GAIN_SLIDER.size.height / 2),
+  // Where the handle sits, and where the drag takes it.
+  //
+  // The fixture's default gain is 0.5 (0 dB), so the handle starts at the middle
+  // of the track. A CLICK at that point re-sets the value it already holds:
+  // VSTGUI's slider only emits valueChanged() when isDirty(), so a well-aimed
+  // click emits no performEdit at all and the parameter never changes. The
+  // gesture must therefore be a real drag -- press on the handle, move, release
+  // -- which is also what a user does to change a gain.
+  const sliderTrack = {
+    left: GAIN_SLIDER.panelOrigin.x + GAIN_SLIDER.origin.x,
+    centreY: GAIN_SLIDER.panelOrigin.y + GAIN_SLIDER.origin.y + Math.round(GAIN_SLIDER.size.height / 2),
   };
+  const sliderPoint = { x: sliderTrack.left + Math.round(GAIN_SLIDER.size.width * 0.5), y: sliderTrack.centreY };
+  const dragTarget = { x: sliderTrack.left + Math.round(GAIN_SLIDER.size.width * 0.75), y: sliderTrack.centreY };
   const gainInput = await page.evaluate(async (point) => {
     const app = globalThis.__apexAcceptance;
     if (!app?.driveEditorWithRealInput) return { error: 'no real-input hook available' };
     return app.driveEditorWithRealInput(point);
-  }, sliderPoint).catch(error => ({ error: String(error?.message ?? error) }));
+  }, { ...sliderPoint, to: dragTarget }).catch(error => ({ error: String(error?.message ?? error) }));
   // Then let the panel's normal poll loop observe the edit. Sample rather than
   // reading once: the click is delivered asynchronously by the OS and the plug-in
   // reports the change on its next poll, so a single read can race it.
@@ -555,9 +565,15 @@ async function run() {
     editedParameterIds: edited?.editedParameterIds ?? null,
     sessionPhase: edited?.phase ?? null,
     sessionError: edited?.error || null,
+    // Front-loaded because annotations truncate: a failure has to say what
+    // gesture was performed and whether the OS actually delivered it.
+    gesture: gainInput?.gesture ?? null,
+    sent: gainInput?.sent ?? null,
+    injectionError: gainInput?.error ?? null,
     mechanism: 'genuine OS input (SendInput) was aimed at the Gain slider inside the plug-in\'s own editor window, then the panel\'s normal poll loop observed the edit',
     gainInput,
     sliderPoint,
+    dragTarget,
     sliderGeometry: GAIN_SLIDER,
     blockedByFixture,
     blockedBy: blockedByFixture

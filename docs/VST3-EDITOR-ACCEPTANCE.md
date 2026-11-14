@@ -91,6 +91,18 @@ plug-in, or the input injection; the layout had no binding. A unit test now asse
 that every `control-tag` used by the layout is declared in the table and that the
 `Gain` entry resolves to the same ParamID the controller exposes.
 
+The binding was necessary but not sufficient, and the second half is worth recording
+because it looks like success. The packaged driver pressed and released at the slider's
+**centre** — and the fixture's default gain is `0.5`, which puts the handle exactly
+there. VSTGUI's slider computes its value from the pointer position, so a press at the
+handle re-sets the value it already holds; `isDirty()` stays false and `valueChanged()`
+is never called, so no `performEdit` is emitted and no edit can be observed. A
+perfectly aimed click on a correctly bound control produces nothing.
+
+The driver therefore performs a **drag**: land on the handle, press, move to a new
+position, release — all through `SendInput`, with the helper's per-step receipt counts
+recorded. That is also what a user does to change a gain.
+
 ### Why redo looked broken (history stores sanitized state)
 
 `projectHistory` stores `sanitizeProjectSnapshot(state)` — a normalize plus document
@@ -100,9 +112,34 @@ reports a difference that undo/redo neither caused nor controls. Packaged `p5` w
 doing exactly that, and additionally compared `JSON.stringify` output, which is
 sensitive to key insertion order.
 
-The round trip now snapshots both sides the way history does and compares
-canonically (sorted keys, `undefined` dropped, array order preserved). Undo/redo
-depth transitions of 1 → 1 → 0 confirm the stacks themselves were always correct.
+The first correction was to compare sanitized against sanitized. That was necessary
+but not sufficient, because the same key-order blindness lived in *history itself*:
+`areSemanticallyEqual` decided whether to record an entry with `JSON.stringify(snapshot)`.
+A captured plug-in state legitimately arrives rebuilt from a parameter list, so closing
+an editor that changed **nothing** recorded a history entry whose only difference was
+property order. Undo then restored a document that compared equal to what was already
+on screen, so `p5` reported `undoRestored: false` — the undo step was real, it just
+undid nothing.
+
+Both places now use one shared `canonicalProjectJson` (sorted object keys,
+`undefined` dropped, array order preserved), and a unit test fails if either side
+stops using it. Verified locally against the real `createHistory`: a document in
+another key order adds **no** entry, a genuine parameter change still adds exactly
+one, and undo/redo transitions 1 → 1 → 0 restore the document exactly.
+
+### Why the crash changed nothing (a dead helper dropped its session)
+
+Packaged `p8` killed the real helper (`killedPid` set, session `failed`), yet no
+recovery record was offered. The service deleted the editor session on the first
+failed poll after the helper died, so `getEditorRecovery` — the shipped surface that
+builds the record — answered *"closed or belongs to another renderer"*, which
+describes a foreign owner, not a crash. Every parameter the plug-in had already
+reported was still in `draftParameters`, but nothing could reach it.
+
+A dead helper now **retires** the session instead of deleting it: it keeps the values
+the plug-in last reported, marks itself crashed, and is released when the renderer
+calls `finishEditor`. The record states that the helper exited rather than pretending
+the final state was captured, and it is never counted against the live-editor limit.
 
 ### Two defects the stricter criteria found
 

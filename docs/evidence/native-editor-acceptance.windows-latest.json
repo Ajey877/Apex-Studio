@@ -249,6 +249,27 @@
       "cause": "The session id is assigned only after openEditor resolves, which happens after the click handler returns. Reading it once immediately after the click raced the open.",
       "fix": "Wait for the id (or for the session to finish) before crashing, and kill the real helper pid from the spawned child.",
       "wouldTheOldTestHaveCaughtIt": false
+    },
+    {
+      "id": "control-bound-but-gesture-cannot-change-it",
+      "symptom": "Packaged p3 after the control-tag table was added: the session stayed open, editedParameterIds was empty, and no error was reported, even though genuine SendInput landed on the slider.",
+      "cause": "The driver pressed and released at the slider's centre, and the fixture's default gain of 0.5 puts the handle exactly there. VSTGUI's slider computes its value from the pointer position, so a press at the handle sets the value it already holds: isDirty() is false, valueChanged() is never called, and CControl both beginEdit()s and endEdit()s the same value, so no performEdit is emitted.",
+      "fix": "The acceptance gesture is a drag: land on the handle, press, move to a new position, release, each step a real SendInput with the helper's receipt counts recorded per step. Declaring the control-tag table was necessary but not sufficient -- a correctly bound control cannot report a change that a click never made.",
+      "wouldTheOldTestHaveCaughtIt": "No. The old check asked whether the click was injected and whether the window was attached, both of which were true. Only requiring a real performEdit for a real parameter exposed it."
+    },
+    {
+      "id": "history-recorded-an-entry-for-key-order-only",
+      "symptom": "Packaged p5: undoRestored false, redoReapplied true, depths 2 -> 1 -> 2. Undo ran and reported success, yet the round trip saw no change.",
+      "cause": "History decides whether to record an entry with areSemanticallyEqual, which compared JSON.stringify(snapshot). A captured plug-in state is rebuilt from a parameter list, so its keys arrive in another order; closing an editor that changed nothing pushed an undo entry whose only difference was property order. Undo then restored a document that compares equal to what was already on screen.",
+      "fix": "One shared canonicalProjectJson (sorted object keys, undefined dropped, array order preserved) is used both by history's equality decision and by the packaged round trip, so the two can never disagree. A unit test fails if either side stops using it, and it was verified to fail against the old implementation.",
+      "wouldTheOldTestHaveCaughtIt": "No. The old comparison used the same order-sensitive serialization, so a phantom entry looked like a legitimate undo step."
+    },
+    {
+      "id": "dead-helper-dropped-its-own-session",
+      "symptom": "Packaged p8: killedPid was set and the session reached phase failed, but recoveryRecordOffered was false.",
+      "cause": "On the first failed poll after the helper died, the service deleted the editor session. getEditorRecovery then answered 'VST3 editor session is closed or belongs to another renderer' -- a foreign-owner message, not a crash -- so the recovery record could never be built even though the last reported parameter values were still in draftParameters.",
+      "fix": "A dead helper retires the session instead of deleting it: it keeps the values the plug-in last reported, marks itself crashed, and is released by finishEditor. The record states that the helper exited rather than claiming the final state was captured, and a retired session is not counted against the live-editor limit.",
+      "wouldTheOldTestHaveCaughtIt": "No. The old criterion only asked whether a crash happened; it never required the crashed session to still be able to produce a record."
     }
   ]
 }

@@ -387,6 +387,47 @@ test('disposing a helper that never exits is bounded instead of hanging', async 
 
 test.after(() => { rmSync(pluginRoot, { recursive: true, force: true }); });
 
+test('a crashed editor still offers a recovery record carrying the edits it reported', async () => {
+  // Regression for packaged p8. Killing the helper worked (the pid died), but the
+  // service dropped the session on the first failed poll, so by the time the app
+  // asked for recovery every call answered "closed or belongs to another renderer"
+  // and no record was ever offered. A crash must not be a data-loss path.
+  await withStubbedClient({
+    helper: () => fakeHelper(request => {
+      if (request.command === 'editorOpen') return { editor: { available: true, classId: CLASS_ID, name: 'DataExchange',
+        title: 'DataExchange', resizable: true, width: 320, height: 200, controllerAvailable: true, parameters } };
+      // The plug-in reported a real edit before the helper died.
+      if (request.command === 'editorPoll') return { editor: { closed: false, events: [], editedParameters: [{ id: 0, value: 0.75 }],
+        activeEditIds: [], dirty: true, eventQueueOverflow: false } };
+      return {};
+    }),
+    service: async (children) => {
+      const service = new Vst3Service('apex-vst3-host.exe', [pluginRoot]);
+      const opened = await service.openEditor(effect, context, 'owner-1');
+      await service.pollEditor(opened.id, 'owner-1');
+      children.at(-1).stderr.write('helper crashed: editorHostInit failed');
+      children.at(-1).emit('exit', 3, null);
+      await new Promise(resolve => setTimeout(resolve, 50));
+      await assert.rejects(() => service.pollEditor(opened.id, 'owner-1'), /helper failed/i);
+      // The shipped recovery surface must still be able to answer, and the value
+      // the plug-in reported before it died must be in the record.
+      const recovery = service.getEditorRecovery(opened.id, 'owner-1');
+      assert.equal(recovery.schema, 1);
+      assert.equal(recovery.projectId, 'proj-1');
+      assert.equal(recovery.slotId, 'vst3-fx-9');
+      assert.deepEqual(recovery.effect.state.parameters, [{ id: 0, value: 0.75 }],
+        'the edit reported before the crash survives as recovery data');
+      assert.match(String(recovery.error), /exited while the editor was open/i,
+        'the record says what happened instead of pretending capture succeeded');
+      // A crashed editor must not leak into the live-session limits.
+      assert.equal(service.hasEditorSession, false, 'the dead window is no longer live');
+      await service.finishEditor(opened.id, 'owner-1');
+      assert.throws(() => service.getEditorRecovery(opened.id, 'owner-1'),
+        /closed or belongs to another renderer/, 'releasing it clears the retired session');
+    },
+  });
+});
+
 test('a helper that dies mid-session is reported as a failure, not a missing session', async () => {
   // Regression for the packaged Windows run: the editor helper exited on its own,
   // the service dropped the session, and every later poll answered "closed or

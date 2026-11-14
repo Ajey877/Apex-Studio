@@ -86,7 +86,7 @@ import {
   resolvePlaylistClipPublication
 } from './state/playlistClipIntegrity';
 import { synchronizeBeforeRuntimePublication } from './state/runtimeStatePublication';
-import { sanitizeProjectSnapshot } from './state/projectHistory';
+import { canonicalProjectJson, sanitizeProjectSnapshot } from './state/projectHistory';
 import { resynchronizeLiveEngineFromProjectState } from './state/liveEngineResynchronization';
 import { addEmptyPatternToProjectState, clonePatternInProjectState, selectPatternInHistory, selectPatternInProjectState } from './state/patternContent';
 import { audioToMidiNewPatternLengthSteps, commitAudioToMidiNotes } from './state/audioToMidiCommit';
@@ -2393,27 +2393,69 @@ export function App() {
        * parameter change: the edit comes from the plug-in reacting to real input,
        * and the panel's normal poll loop forwards it exactly as for a human user.
        */
-      driveEditorWithRealInput: async (point: number | { x: number; y: number }) => {
+      driveEditorWithRealInput: async (
+        point: number | { x: number; y: number; to?: { x: number; y: number } },
+      ) => {
         const session = vst3EditorRef.current;
         if (!session) throw new Error('No native editor session is open');
         const bridge = getVst3Bridge();
         if (!bridge?.editorInput) throw new Error('This build cannot inject editor input');
-        const id = session.sessionId;
-        if (!id) throw new Error('The native editor session has no id yet');
-        const target = typeof point === 'number' ? { x: 158, y: 61 } : point;
-        // A press alone never completes a click: the button would stay down for every
-        // later event, and a control sees a drag that never ends. Send the pair.
-        const move = await bridge.editorInput(id, 'move', target);
-        const down = await bridge.editorInput(id, 'down', target);
-        await new Promise(resolve => setTimeout(resolve, 80));
-        const up = await bridge.editorInput(id, 'up', target);
+        // The id exists only after openEditor resolves, which is after the click that
+        // opened the editor returned. Wait for it instead of sampling once.
+        const id = await (async () => {
+          const deadline = Date.now() + 20000;
+          while (Date.now() < deadline) {
+            if (session.sessionId) return session.sessionId;
+            if (session.isFinished) break;
+            await new Promise(resolve => setTimeout(resolve, 100));
+          }
+          return null;
+        })();
+        if (!id) throw new Error('The native editor session never produced an id');
+        /**
+         * A DRAG, not a click at one point.
+         *
+         * VSTGUI's slider computes a delta from the mouse position, and a click that
+         * lands where the handle already is computes the value it already has: the
+         * control begins an edit, sets the same value, and `isDirty()` is false, so
+         * `valueChanged()` is never called and no performEdit is emitted. The
+         * packaged run showed exactly that -- a well-aimed press at the slider's
+         * centre produced no edited parameter, because the fixture's default gain of
+         * 0.5 puts the handle under that centre.
+         *
+         * Real input therefore has to travel: press where the value is, move to where
+         * it should be, release. Every step is genuine OS input through SendInput;
+         * the helper reports what its window procedure and the plug-in's own
+         * IPlugView callbacks actually received after each one.
+         */
+        const requested = typeof point === 'number' ? { x: point, y: 61 } : point;
+        const start = { x: requested.x, y: requested.y };
+        // Default to a short slide to the right, which raises the gain.
+        const target = requested.to ?? { x: start.x + 40, y: start.y };
+        const steps: Array<{ action: 'move' | 'down' | 'up'; point: { x: number; y: number } }> = [
+          // Land on the handle first so the press starts an edit on the control.
+          { action: 'move', point: start },
+          { action: 'down', point: start },
+          // Then slide it: same y, offset x, which raises a real mouse-move.
+          { action: 'move', point: target },
+          { action: 'up', point: target },
+        ];
+        const delivered: Record<string, unknown> = {};
+        for (const step of steps) {
+          delivered[`${step.action}@${step.point.x},${step.point.y}`] =
+            await bridge.editorInput(id, step.action, step.point);
+          // The OS delivers asynchronously; let the plug-in consume each event before
+          // the next one so it sees a press, a move and a release in order.
+          await new Promise(resolve => setTimeout(resolve, 80));
+        }
         return {
           target,
+          start,
           injectedThrough: 'vst3:editorInput -> helper SendInput (real OS input)',
-          sent: ['move', 'down', 'up'],
-          move: move ?? null,
-          down: down ?? null,
-          up: up ?? null,
+          sent: steps.map(step => step.action),
+          gesture: 'press at the handle, drag to the target, release',
+          whyDrag: 'a click at the handle value re-sets the same value, so VSTGUI emits no performEdit',
+          delivered,
         };
       },
       closeOpenEditor: async () => {
@@ -2535,22 +2577,17 @@ export function App() {
          * Live meters (peakL/peakR) are excluded because they are deliberately not
          * part of history, and array order is preserved because it is meaningful.
          */
-        const canonical = (value: unknown): unknown => {
-          if (Array.isArray(value)) return value.map(canonical);
-          if (!value || typeof value !== 'object') return value;
-          return Object.fromEntries(Object.keys(value as Record<string, unknown>).sort()
-            .filter(key => (value as Record<string, unknown>)[key] !== undefined)
-            .map(key => [key, canonical((value as Record<string, unknown>)[key])]));
-        };
         const comparable = (state: typeof projectStateRef.current) => {
           const snapshot = sanitizeProjectSnapshot(state);
-          return JSON.stringify(canonical({
+          // Same canonicalisation history itself uses, so the comparison and the
+          // decision to record an entry can never disagree.
+          return canonicalProjectJson({
             ...snapshot,
             mixerTracks: snapshot.mixerTracks.map(track => {
               const { peakL: _peakL, peakR: _peakR, ...rest } = track;
               return rest;
             }),
-          }));
+          });
         };
         const depths = () => ({
           undo: projectHistoryRef.current.past.length,

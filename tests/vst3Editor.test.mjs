@@ -842,9 +842,16 @@ test('the acceptance click sends a press and a release', () => {
 
   const app = readSource('src/App.tsx');
   const hook = app.slice(app.indexOf('driveEditorWithRealInput'), app.indexOf('closeOpenEditor'));
-  assert.ok(/editorInput\(id, 'down'/.test(hook) && /editorInput\(id, 'up'/.test(hook),
-    'the renderer sends both halves of the click');
-  assert.ok(/sent: \['move', 'down', 'up'\]/.test(hook), 'the evidence names what was sent');
+  assert.ok(/editorInput\(id, step\.action/.test(hook), 'every step goes through the real-input IPC');
+  assert.ok(/'down'/.test(hook) && /'up'/.test(hook), 'the renderer sends both halves of the click');
+  // A press exactly where the handle already is computes the value the control
+  // already holds, so VSTGUI's isDirty() is false and no performEdit is emitted.
+  // That is why a well-aimed click produced no edit while the binding was fine.
+  assert.ok(/action: 'move', point: start \},/.test(hook), 'the pointer lands on the handle first');
+  assert.ok(/action: 'down', point: start \}/.test(hook), 'the press happens on the handle');
+  assert.ok(/action: 'move', point: target \}/.test(hook),
+    'the gesture moves between the press and the release, so the value actually changes');
+  assert.ok(/whyDrag/.test(hook), 'the evidence states why a click is not enough');
 });
 
 test('the recovery crash kills the real helper and is acceptance-only', () => {
@@ -905,9 +912,17 @@ test('undo/redo comparison uses the representation history stores', () => {
   // History stores sanitizeProjectSnapshot(state), a normalise + document round
   // trip, so the restored state is the sanitized form. Comparing it against the raw
   // pre-undo object reported a redo failure that did not exist.
-  assert.ok(/import \{ sanitizeProjectSnapshot \}/.test(app),
+  assert.ok(/import \{ canonicalProjectJson, sanitizeProjectSnapshot \}/.test(app),
     'the sanitizer history uses is imported');
   assert.ok(/sanitizeProjectSnapshot\(state\)/.test(hook),
     'the round trip snapshots the same way history does');
-  assert.ok(/\.sort\(\)/.test(hook), 'key order is normalised before comparing');
+  // Key order is a real defect, not a test artefact: history decides whether to
+  // record an entry with the same canonical form, so if the two disagree history
+  // records an entry the round trip then calls a change. Assert the SHARED helper is
+  // used on both sides rather than a local sort that can drift.
+  assert.ok(/canonicalProjectJson\(/.test(hook), 'the round trip uses the shared canonical form');
+  const history = readSource('src/state/projectHistory.ts');
+  assert.ok(/export const canonicalProjectJson/.test(history), 'history exports it');
+  assert.ok(/getSemanticComparable = \(state: ProjectState\): string => \{[\s\S]{0,200}canonicalProjectJson\(/.test(history),
+    'history decides equality with that same canonical form');
 });
