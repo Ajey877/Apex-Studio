@@ -77,6 +77,9 @@ function compactReason(evidence) {
   take('sessionError', evidence.sessionError);
   take('undoRestored', evidence.undoRestored);
   take('redoReapplied', evidence.redoReapplied);
+  take('redoDepths', evidence.depthsAfterUndo ? JSON.stringify({
+    before: evidence.depthsBefore, afterUndo: evidence.depthsAfterUndo, afterRedo: evidence.depthsAfterRedo,
+  }) : undefined);
   take('undoDepthBefore', evidence.undoDepthBefore);
   take('undoDepthAfter', evidence.undoDepthAfter);
   const diagnosed = evidence.diagnosedByRenderer ?? {};

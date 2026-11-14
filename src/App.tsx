@@ -2496,22 +2496,35 @@ export function App() {
             return rest;
           }),
         });
+        const depths = () => ({
+          undo: projectHistoryRef.current.past.length,
+          redo: projectHistoryRef.current.future.length,
+        });
         const before = projectStateRef.current;
         const beforeText = comparable(before);
+        const depthsBefore = depths();
         handleUndo();
         await new Promise(resolve => setTimeout(resolve, 120));
         const undone = projectStateRef.current;
         const undoneText = comparable(undone);
+        const depthsAfterUndo = depths();
         handleRedo();
         await new Promise(resolve => setTimeout(resolve, 120));
         const redone = projectStateRef.current;
         const redoneText = comparable(redone);
+        const depthsAfterRedo = depths();
         return {
           // Undo must actually change something, and redo must restore exactly what
           // undo replaced -- both measured against history-governed state only.
           undoRestored: undoneText !== beforeText,
           redoReapplied: redoneText === beforeText,
           changedByUndo: undoneText !== beforeText,
+          // The stacks decide whether a failed redo is a bug or simply nothing to
+          // redo: an emptied redo stack means something recorded a new edit between
+          // undo and redo, which discards the redo branch by design.
+          depthsBefore,
+          depthsAfterUndo,
+          depthsAfterRedo,
           redoDiffersAt: redoneText === beforeText ? null
             : redoneText.slice(0, 120),
         };
