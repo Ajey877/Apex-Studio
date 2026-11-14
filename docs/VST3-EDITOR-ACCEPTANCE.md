@@ -148,6 +148,51 @@ Two things followed from that change and are worth keeping:
   depfile, so a GCC rebuild reported success without recompiling it and only MSVC
   caught the error. Native verification now deletes the object directory first.
 
+### Where the genuine drag stopped (a container with the mouse disabled)
+
+The third and final cause of `p3` was in the layout, one level above the control.
+`CViewContainer::onMouseDownEvent()` walks its children and skips every child whose
+`getMouseEnabled()` is false — **before hit-testing it at all**:
+
+```cpp
+if (pV && pV->isVisible() && pV->getMouseEnabled() && pV->hitTest (event.mousePosition, event))
+```
+
+The fixture's `panel` container was declared `mouse-enabled="false"`. It contained the
+Gain slider and its value field. So:
+
+* Windows delivered the drag to the plug-in's VSTGUI child window — observed;
+* the button was genuinely held for the drag move — observed;
+* `CFrame` dispatched the press into the view tree — and the tree stopped at `panel`,
+  because the panel was not eligible for the mouse and the slider inside it was never
+  reached.
+
+The slider was correctly bound, correctly sized, `mouse-enabled="true"` itself, and
+completely unreachable. Nothing failed with an error, because nothing was ever asked
+to handle the event.
+
+This is why the earlier fixes were all necessary but not sufficient, and why the answer
+is not any of "the coordinates", "the timing" or "the host rejected it": the event
+never reached the control. `panel` is now `mouse-enabled="true"`, and a test walks the
+layout and fails if any container above an interactive control disables the mouse.
+
+A note on the container path for the record: the root `view` may stay
+`mouse-enabled="false"`. `CView::dispatchEvent` does not consult the receiver's own
+flag, and `CViewContainer` does not override `onMouseDown`, so the root returns
+`kMouseEventNotImplemented` and dispatch continues into its children. The flag only
+blocks a container's *own* children, which is why the panel was decisive and the root
+was not.
+
+### Instrumenting the answer
+
+To make this class of failure visible rather than silent, the helper now answers a
+read-only probe: `describeViewAt(point)` asks the live frame — through VST3's own
+`VSTGUIEditorInterface::getFrame()` — which view it places under a client point, the
+full hit chain with each level's `mouseEnabled`, and the `gainSlider`'s tag, value and
+range. It dispatches nothing, so it can never fabricate an edit. The packaged run
+records the probe before the press and after the drag, which is what turns a failure
+into one of lead-engineer case A–F instead of "no edit observed".
+
 ### Why redo looked broken (history stores sanitized state)
 
 `projectHistory` stores `sanitizeProjectSnapshot(state)` — a normalize plus document

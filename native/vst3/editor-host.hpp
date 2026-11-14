@@ -939,6 +939,103 @@ public:
   HWND testWindowHandle() const { return window; }
 
   /**
+   * Which VSTGUI view does the live frame place under a client point?
+   *
+   * This is the observation the packaged run was missing. Windows can prove a
+   * message reached the plug-in's HWND and that the button was held; only the frame
+   * itself can say whether the press resolved to the Gain slider or stopped at a
+   * container above it. It reads the real view tree through the editor's own
+   * VSTGUIEditorInterface::getFrame(), and reports the hit chain by name so a wrong
+   * control is distinguishable from a right control that ignores the event.
+   *
+   * It dispatches nothing and changes nothing: this is a query, not a fake input.
+   */
+  json describeViewAt(int x, int y) {
+    json result{{"x", x}, {"y", y}};
+    if (!view || closed) return result;
+    // IPlugView -> VSTGUIEditorInterface -> CFrame. vst3editor derives from both,
+    // so this reaches the frame the plug-in actually renders, not a copy.
+    auto* editor = dynamic_cast<VSTGUI::VSTGUIEditorInterface*>(view.get());
+    result["isVstguiEditor"] = editor != nullptr;
+    if (!editor) return result;
+    VSTGUI::CFrame* liveFrame = editor->getFrame();
+    result["hasFrame"] = liveFrame != nullptr;
+    if (!liveFrame) return result;
+
+    VSTGUI::CPoint point(x, y);
+    VSTGUI::CView* hit = liveFrame->getViewAt(point);
+    result["hitView"] = hit ? describeView(hit) : json(nullptr);
+    // The full chain from the root down to the hit view, so a container that blocks
+    // its children is visible as the deepest entry rather than as silence.
+    json chain = json::array();
+    if (auto* container = liveFrame->getContentView()) collectViewChain(container, point, chain);
+    result["hitChain"] = chain;
+    // Named lookup for the control the criterion cares about, independent of the hit.
+    if (auto* slider = findViewByName(liveFrame->getContentView(), "gainSlider")) {
+      result["gainSlider"] = describeView(slider);
+      auto* control = dynamic_cast<VSTGUI::CControl*>(slider);
+      if (control) {
+        result["gainSlider"]["tag"] = static_cast<int>(control->getTag());
+        result["gainSlider"]["value"] = control->getValue();
+        result["gainSlider"]["valueNormalized"] = control->getValueNormalized();
+        result["gainSlider"]["minValue"] = control->getMin();
+        result["gainSlider"]["maxValue"] = control->getMax();
+      }
+    }
+    return result;
+  }
+
+  /** Mouse-related facts about one view, by name and by what it can receive. */
+  static json describeView(VSTGUI::CView* target) {
+    json described{{"className", target->getClassName()}};
+    if (auto* named = dynamic_cast<VSTGUI::CViewContainer*>(target)) {
+      described["isContainer"] = true;
+      described["childCount"] = named->getNbViews();
+    } else {
+      described["isContainer"] = false;
+    }
+    if (target->getName()) described["name"] = target->getName();
+    described["mouseEnabled"] = target->getMouseEnabled();
+    described["visible"] = target->isVisible();
+    const auto size = target->getViewSize();
+    described["viewSize"] = {{"left", size.left}, {"top", size.top}, {"right", size.right}, {"bottom", size.bottom}};
+    return described;
+  }
+
+  /** Walk the container tree in the same order CViewContainer dispatches. */
+  static void collectViewChain(VSTGUI::CViewContainer* container, VSTGUI::CPoint point, json& chain) {
+    if (!container) return;
+    for (uint32_t index = 0; index < container->getNbViews(); ++index) {
+      VSTGUI::CView* child = container->getView(index);
+      if (!child || !child->isVisible()) continue;
+      const auto size = child->getViewSize();
+      if (!size.pointInside(point)) continue;
+      json entry = describeView(child);
+      // This is the exact condition CViewContainer::onMouseDownEvent applies before
+      // it will hit-test a child. Reporting it here makes the blocking flag explicit.
+      entry["wouldReceiveClick"] = child->getMouseEnabled();
+      chain.push_back(entry);
+      if (auto* nested = dynamic_cast<VSTGUI::CViewContainer*>(child)) {
+        VSTGUI::CPoint local(point.x - size.left, point.y - size.top);
+        collectViewChain(nested, local, chain);
+      }
+    }
+  }
+
+  static VSTGUI::CView* findViewByName(VSTGUI::CViewContainer* container, const char* name) {
+    if (!container) return nullptr;
+    for (uint32_t index = 0; index < container->getNbViews(); ++index) {
+      VSTGUI::CView* child = container->getView(index);
+      if (!child) continue;
+      if (child->getName() && std::strcmp(child->getName(), name) == 0) return child;
+      if (auto* nested = dynamic_cast<VSTGUI::CViewContainer*>(child)) {
+        if (auto* found = findViewByName(nested, name)) return found;
+      }
+    }
+    return nullptr;
+  }
+
+  /**
    * Hold or release the real shift key.
    *
    * VSTGUI's slider uses kShift (CControl::kZoomModifier) as its zoom modifier, and

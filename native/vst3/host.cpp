@@ -846,6 +846,9 @@ int main() {
           // helper sets and clears around the gesture.
           const bool zoomModifier = request.value("zoomModifier", false);
           result = editor->deliverMouse(kind, request.value("x", 0), request.value("y", 0), zoomModifier);
+        } else if (action == "describeViewAt") {
+          // Query only: which VSTGUI view the live frame places under this point.
+          result = editor->describeViewAt(request.value("x", 0), request.value("y", 0));
         } else if (action == "gestureModifier") {
           // Real shift key down/up, for a genuine zoom-modifier drag.
           const bool down = request.value("down", false);

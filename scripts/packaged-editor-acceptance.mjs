@@ -572,6 +572,11 @@ async function run() {
     injectionError: gainInput?.error ?? null,
     // What actually reached the plug-in window, per step. `postedMessages` is the
     // receipt (real mouse messages), never the attempt.
+    // WHERE the press landed, straight from the plug-in's own VSTGUI frame. This is
+    // the fact that separates a misrouted event from a mis-hit-tested one from a
+    // control that receives the event and ignores it.
+    viewUnderPress: gainInput?.viewUnderPress ?? null,
+    viewAfterDrag: gainInput?.viewAfterDrag ?? null,
     deliveredSteps: gainInput?.delivered ? Object.keys(gainInput.delivered) : null,
     // What the helper's SendInput accepted per step, and whether the button was
     // really held at the steps where that is what makes it a drag.

@@ -39,7 +39,22 @@
 		</gradient>
 	</gradients>
 	<template background-color="~ Background" class="CViewContainer" maxSize="320, 120" minSize="320, 120" mouse-enabled="false" name="view" opacity="1" origin="0, 0" size="320, 120" transparent="false">
-		<view background-color="~ Panel" class="CViewContainer" maxSize="300, 96" minSize="300, 96" mouse-enabled="false" name="panel" opacity="1" origin="10, 12" size="300, 96" transparent="false">
+		<!--
+		  mouse-enabled MUST be true on a container that carries interactive children.
+
+		  CViewContainer::onMouseDownEvent() walks its children and skips any child whose
+		  getMouseEnabled() is false, BEFORE hit-testing it at all:
+
+		      if (pV && pV->isVisible() && pV->getMouseEnabled() && pV->hitTest (...))
+
+		  So a container marked mouse-enabled="false" makes every control inside it
+		  unreachable by the mouse, however correctly those controls are bound. The
+		  slider still drew, still was bound to ParamID 0, and still could never receive
+		  a press: Windows delivered the drag to the plug-in window and VSTGUI stopped
+		  one level above the control. This is the flag that made a genuine, held drag
+		  produce no performEdit.
+		-->
+		<view background-color="~ Panel" class="CViewContainer" maxSize="300, 96" minSize="300, 96" mouse-enabled="true" name="panel" opacity="1" origin="10, 12" size="300, 96" transparent="false">
 			<view class="CTextLabel" font="TitleFont" font-color="~ Accent" mouse-enabled="false" name="title" origin="10, 8" size="280, 16" text-alignment="left" title="ApexAcceptanceGain" transparent="true"/>
 			<view class="CTextLabel" font="LabelFont" font-color="~ Label" mouse-enabled="false" name="gainLabel" origin="10, 40" size="48, 18" text-alignment="left" title="Gain" transparent="true"/>
 			<view class="CSlider" control-tag="Gain" default-value="0.5" draw-back="true" draw-back-color="~ SliderTrack" draw-frame="false" draw-value="false" gradient="~ SliderTrack" handle-color="~ Accent" max-value="1" min-value="0" mode="free click" mouse-enabled="true" name="gainSlider" orientation="horizontal" origin="64, 40" size="168, 18" transparent="false" value-precision="2" wheel-inc-value="0.05" zoom-factor="8"/>

@@ -971,6 +971,57 @@ test('every control-tag used by the uidesc is declared in the control-tag table'
     'the Gain control-tag resolves to the controller parameter id');
 });
 
+test('every container above an interactive control is mouse-enabled', () => {
+  /**
+   * CViewContainer::onMouseDownEvent() walks its children and skips any child whose
+   * getMouseEnabled() is false, BEFORE hit-testing it:
+   *
+   *     if (pV && pV->isVisible() && pV->getMouseEnabled() && pV->hitTest (...))
+   *
+   * so a container marked mouse-enabled="false" puts every control inside it out of
+   * the mouse's reach, however correctly those controls are bound to parameters.
+   * That is exactly what happened: the Gain slider was bound to ParamID 0, Windows
+   * delivered a real drag to the plug-in window with the button held, and VSTGUI
+   * stopped one level above the control, so no performEdit could ever be emitted.
+   *
+   * The serializer writes the flag from `mouse-enabled`, and CView defaults it to
+   * true, so an ABSENT attribute is safe; only an explicit false blocks a child.
+   */
+  const xml = readSource('native/vst3/resources/acceptancegain.uidesc');
+
+  // Parse the nesting of <view> elements that carry a name, keeping the markup
+  // (regex over this small, machine-generated layout) so the flag is read per level.
+  const interactive = /<view\b[^>]*\bname="(gainSlider|gainValue)"[^>]*>/g;
+  const interactiveTags = [...xml.matchAll(interactive)];
+  assert.ok(interactiveTags.length >= 2, 'the layout has interactive controls');
+
+  // Every container that OPENS before an interactive control and closes after it is
+  // an ancestor. Walk the document text in order, maintaining a stack.
+  const tags = [...xml.matchAll(/<(\/?)view\b([^>]*)>/g)];
+  const stack = [];
+  let checked = 0;
+  for (const tag of tags) {
+    const closing = tag[1] === '/';
+    const attributes = tag[2];
+    if (closing) { stack.pop(); continue; }
+    const name = /\bname="([^"]+)"/.exec(attributes)?.[1] ?? '(unnamed)';
+    const selfClosing = /\/\s*$/.test(attributes);
+    // An interactive control is the leaf we are protecting; its own flag must be on.
+    if (name === 'gainSlider' || name === 'gainValue') {
+      assert.ok(/\bmouse-enabled="true"/.test(attributes),
+        `${name} itself must be mouse-enabled`);
+      for (const ancestor of stack) {
+        // Absent means true (CView's default); an explicit false blocks the child.
+        assert.ok(!/\bmouse-enabled="false"/.test(ancestor.attributes),
+          `container "${ancestor.name}" must not be mouse-enabled="false": it would make ${name} unreachable`);
+      }
+      checked += 1;
+    }
+    if (!selfClosing) stack.push({ name, attributes });
+  }
+  assert.equal(checked, 2, 'both interactive controls were checked against their ancestors');
+});
+
 test('undo/redo comparison uses the representation history stores', () => {
   const app = readSource('src/App.tsx');
   // The hook runs until the next acceptance member; crashEditorAndRecover appears
