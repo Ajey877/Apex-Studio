@@ -70,6 +70,15 @@ function compactReason(evidence) {
   const take = (key, value) => { if (value !== undefined && value !== null && `${value}` !== '') pick[key] = value; };
   take('reason', evidence.reason);
   take('error', evidence.error);
+  // Verdict-deciding facts that are otherwise buried past the annotation cut.
+  take('gainParameterEdited', evidence.gainParameterEdited);
+  take('editedParameterIds', Array.isArray(evidence.editedParameterIds) ? evidence.editedParameterIds.join(',') : evidence.editedParameterIds);
+  take('sessionPhase', evidence.sessionPhase);
+  take('sessionError', evidence.sessionError);
+  take('undoRestored', evidence.undoRestored);
+  take('redoReapplied', evidence.redoReapplied);
+  take('undoDepthBefore', evidence.undoDepthBefore);
+  take('undoDepthAfter', evidence.undoDepthAfter);
   const diagnosed = evidence.diagnosedByRenderer ?? {};
   for (const [key, value] of Object.entries(diagnosed)) {
     if (value !== undefined && value !== null && value !== '') pick[key] = value;
@@ -524,13 +533,18 @@ async function run() {
     : edited?.phase === 'failed' ? 'FAIL' : 'NOT_VERIFIED';
   const blockedByFixture = fixtureRejection;
   record('p3-parameter-reaches-apex', p3Verdict, {
+    // Compact, front-loaded facts: annotations are truncated, and these are the
+    // three things that decide the verdict.
+    gainParameterEdited: gainEdited,
+    editedParameterIds: edited?.editedParameterIds ?? null,
+    sessionPhase: edited?.phase ?? null,
+    sessionError: edited?.error || null,
     mechanism: 'genuine OS input (SendInput) was aimed at the Gain slider inside the plug-in\'s own editor window, then the panel\'s normal poll loop observed the edit',
     gainInput,
     blockedByFixture,
     blockedBy: blockedByFixture
       ? 'the fixture editor references ParamIDs its own controller does not expose (DataExchange UI-only tags); the host rejects them by design'
       : null,
-    gainParameterEdited: gainEdited,
     edited: edited,
     insertStateAfterEdit: reachedApex,
     valueIsNotEvidence: 'readInsertParameter returns the insert\'s saved value, which is non-null before the click; the editedParameterIds reported by the plug-in are what prove the edit.',
