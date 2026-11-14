@@ -270,6 +270,13 @@
       "cause": "On the first failed poll after the helper died, the service deleted the editor session. getEditorRecovery then answered 'VST3 editor session is closed or belongs to another renderer' -- a foreign-owner message, not a crash -- so the recovery record could never be built even though the last reported parameter values were still in draftParameters.",
       "fix": "A dead helper retires the session instead of deleting it: it keeps the values the plug-in last reported, marks itself crashed, and is released by finishEditor. The record states that the helper exited rather than claiming the final state was captured, and a retired session is not counted against the live-editor limit.",
       "wouldTheOldTestHaveCaughtIt": "No. The old criterion only asked whether a crash happened; it never required the crashed session to still be able to produce a record."
+    },
+    {
+      "id": "drag-delivered-with-the-button-already-up",
+      "symptom": "Packaged p3 after the drag was introduced: the gesture was sent (move, down, move, up) and the injection reported no error, yet editedParameterIds stayed empty and the session stayed open.",
+      "cause": "Win32Frame::getCurrentMouseButtons() reads the held buttons from GetAsyncKeyState(VK_LBUTTON), not from wParam, and the helper's deliverMouse released the button immediately after every press. So WM_LBUTTONDOWN began the edit, but the WM_MOUSEMOVE that followed was processed with no button held; CSliderBase::onMouseMoved saw no button and returned kMouseEventNotHandled without changing the value.",
+      "fix": "Press, move and release are posted as genuine mouse messages carrying their button state (MK_LBUTTON on the drag), addressed only to a window the OS reports under the point and only when it belongs to this process. The zoom modifier is a real held shift key via keybd_event, because VSTGUI reads modifiers from live key state too. A message posted into another process is refused and reported as receiverRejectedForeignProcess.",
+      "wouldTheOldTestHaveCaughtIt": "No. The old checks confirmed the injection attempt and the attached window. Neither observes the button state the control actually reads, which is the only thing that decides whether a drag moves the value."
     }
   ]
 }

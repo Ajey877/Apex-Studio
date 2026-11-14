@@ -100,8 +100,32 @@ is never called, so no `performEdit` is emitted and no edit can be observed. A
 perfectly aimed click on a correctly bound control produces nothing.
 
 The driver therefore performs a **drag**: land on the handle, press, move to a new
-position, release — all through `SendInput`, with the helper's per-step receipt counts
-recorded. That is also what a user does to change a gain.
+position, release — with the helper's per-step receipt recorded. That is also what a
+user does to change a gain.
+
+### Why the drag still did nothing (the button state is not in the message)
+
+The first drag attempt pressed and released with `SendInput`, and a `down` injection
+also released the button immediately (`deliverMouse` paired every non-move injection
+with a `MOUSEEVENTF_LEFTUP`). That makes a click, not a drag, and it fails in a way
+that looks like the plug-in ignoring input:
+
+> `Win32Frame::getCurrentMouseButtons()` reads the held buttons from
+> `GetAsyncKeyState(VK_LBUTTON)`, **not** from `wParam`.
+
+So `WM_LBUTTONDOWN` told the slider to begin an edit, but the `WM_MOUSEMOVE` that
+followed was delivered while the button was already up. `CSliderBase::onMouseMoved`
+takes its `_buttons` argument from that live state, saw no button, returned
+`kMouseEventNotHandled`, and never touched the value.
+
+Press, move and release are now posted as genuine mouse messages carrying their
+button state (`MK_LBUTTON` on the drag), addressed only to a window the OS reports
+under the point and only when that window belongs to this process — a message posted
+into another process would be fabrication, and the helper reports
+`receiverRejectedForeignProcess` instead. The zoom modifier is a real held shift key
+(`keybd_event`), because VSTGUI reads its modifier from the live key state too, so
+the drag moves the value by a controlled step rather than jumping the handle to the
+pointer.
 
 ### Why redo looked broken (history stores sanitized state)
 

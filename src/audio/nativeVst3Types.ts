@@ -142,7 +142,16 @@ export interface Vst3Bridge {
    * main process refuses it unless the packaged acceptance flag is set, so this is
    * unreachable in a normal user session.
    */
-  editorInput?(id: string, action: 'move' | 'down' | 'up' | 'wheel', point: { x: number; y: number }): Promise<unknown>;
+  /**
+   * Acceptance-only pointer input at real screen-independent client coordinates.
+   * `modifier` is not a pointer event: it holds or releases the real shift key so a
+   * drag can ask VSTGUI's slider for its zoom (stepped) mode.
+   */
+  editorInput?(
+    id: string,
+    action: 'move' | 'down' | 'up' | 'wheel' | 'modifier',
+    point: { x: number; y: number } | { down: boolean } | { x: number; y: number; zoomModifier: boolean },
+  ): Promise<unknown>;
   /**
    * ACCEPTANCE ONLY. Force-crashes the helper backing the open editor so recovery
    * is proven against a real dead process. Refused unless APEX_ACCEPTANCE is set.

@@ -840,7 +840,16 @@ int main() {
             : action == "mouseDown" ? "down"
             : action == "mouseUp" ? "up"
             : "wheel";
-          result = editor->deliverMouse(kind, request.value("x", 0), request.value("y", 0));
+          // `zoomModifier` requests VSTGUI's zoom modifier (the shift key) for the
+          // gesture, so a drag moves the value by a controlled step instead of
+          // jumping the handle to the pointer. It is a real key state that the
+          // helper sets and clears around the gesture.
+          const bool zoomModifier = request.value("zoomModifier", false);
+          result = editor->deliverMouse(kind, request.value("x", 0), request.value("y", 0), zoomModifier);
+        } else if (action == "gestureModifier") {
+          // Real shift key down/up, for a genuine zoom-modifier drag.
+          const bool down = request.value("down", false);
+          result = editor->setGestureModifier(down);
         } else if (action == "setScale") {
           const auto factor = request.at("scale").get<float>();
           require(factor >= 0.5f && factor <= 4.f, "Invalid content scale factor");

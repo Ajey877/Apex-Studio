@@ -316,6 +316,18 @@ export class Vst3Service {
     const session = this.#editorSession(id, owner);
     if (session.closed) throw new Error('The native VST3 editor is closed.');
     if (session.busy) throw new Error('VST3 editor is still servicing another request; retry in a moment.');
+    // `modifier` is not a mouse event: it holds or releases the real shift key so a
+    // drag can use VSTGUI's zoom modifier. Everything else is pointer input.
+    if (action === 'modifier') {
+      if (typeof point?.down !== 'boolean') throw new Error('Invalid editor modifier state');
+      session.busy = true;
+      try {
+        return await session.client.setEditorGestureModifier(point.down, session.effect.classId);
+      } finally {
+        session.busy = false;
+        session.busyPromise = null;
+      }
+    }
     if (!['move', 'down', 'up', 'wheel'].includes(action)) throw new Error('Invalid editor input action');
     const x = Number(point?.x);
     const y = Number(point?.y);
@@ -324,7 +336,8 @@ export class Vst3Service {
     }
     session.busy = true;
     try {
-      return await session.client.sendEditorMouse(action, { x, y, classId: session.effect.classId });
+      return await session.client.sendEditorMouse(action,
+        { x, y, classId: session.effect.classId, zoomModifier: point?.zoomModifier === true });
     } finally {
       session.busy = false;
       session.busyPromise = null;

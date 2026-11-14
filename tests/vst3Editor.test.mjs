@@ -721,8 +721,10 @@ test('the acceptance-only input hook is unreachable outside an acceptance run', 
   // It injects input; it must not fabricate a parameter change.
   const service = readFileSync(path.join(process.cwd(), 'native/vst3/service.mjs'), 'utf8');
   const svc = service.slice(service.indexOf('async editorInput('));
-  assert.ok(/sendEditorMouse/.test(svc.slice(0, 1200)), 'it routes real injected input');
-  assert.ok(!/performEdit|setParamNormalized/.test(svc.slice(0, 1600)),
+  assert.ok(/sendEditorMouse/.test(svc.slice(0, 1600)), 'it routes real pointer input');
+  assert.ok(/setEditorGestureModifier/.test(svc.slice(0, 1600)),
+    'the zoom modifier is a real held key, routed through the helper');
+  assert.ok(!/performEdit|setParamNormalized/.test(svc.slice(0, 2000)),
     'it never synthesises a parameter change');
 });
 
@@ -833,8 +835,11 @@ test('the acceptance click sends a press and a release', () => {
   // MOUSEEVENTF_LEFTDOWN, so the plug-in never reported an edit -- the criterion
   // was right to report no edit, and the injection was the defect.
   const host = readSource('native/vst3/editor-host.hpp');
-  assert.ok(/MOUSEEVENTF_LEFTDOWN/.test(host), 'the press is sent');
-  assert.ok(/MOUSEEVENTF_LEFTUP/.test(host), 'the release is sent');
+  // A press and a release are both real events with their own button state. They
+  // must NOT be a SendInput press that releases the button immediately: VSTGUI takes
+  // the held state from GetAsyncKeyState, so the drag that follows would be ignored.
+  assert.ok(/WM_LBUTTONDOWN/.test(host), 'the press is a real button-down message');
+  assert.ok(/WM_LBUTTONUP/.test(host), 'the release is a real button-up message');
   assert.ok(/isUp/.test(host), 'up is a distinct action, not another press');
 
   const service = readSource('native/vst3/service.mjs');
@@ -843,14 +848,30 @@ test('the acceptance click sends a press and a release', () => {
   const app = readSource('src/App.tsx');
   const hook = app.slice(app.indexOf('driveEditorWithRealInput'), app.indexOf('closeOpenEditor'));
   assert.ok(/editorInput\(id, step\.action/.test(hook), 'every step goes through the real-input IPC');
+  // The transport matters as much as the gesture: Win32Frame reads the button state
+  // from GetAsyncKeyState, so a press whose button is already up when the move is
+  // processed reaches the control's drag handler with no button and is ignored.
+  const hostSource = readSource('native/vst3/editor-host.hpp');
+  assert.ok(/PostMessageW\(receiver, message, wParam, lParam\)/.test(hostSource),
+    'the gesture is posted as real mouse messages carrying the button state');
+  assert.ok(/MK_LBUTTON/.test(hostSource), 'the drag move carries the held button');
+  assert.ok(/keybd_event\(VK_SHIFT/.test(hostSource),
+    'the zoom modifier is a real held key, not a flag in the message');
+  assert.ok(/receiverRejectedForeignProcess/.test(hostSource),
+    'a message is never posted into another process');
   assert.ok(/'down'/.test(hook) && /'up'/.test(hook), 'the renderer sends both halves of the click');
   // A press exactly where the handle already is computes the value the control
   // already holds, so VSTGUI's isDirty() is false and no performEdit is emitted.
   // That is why a well-aimed click produced no edit while the binding was fine.
-  assert.ok(/action: 'move', point: start \},/.test(hook), 'the pointer lands on the handle first');
-  assert.ok(/action: 'down', point: start \}/.test(hook), 'the press happens on the handle');
-  assert.ok(/action: 'move', point: target \}/.test(hook),
+  assert.ok(/action: 'move', point: \{ \.\.\.start, zoomModifier: true \}/.test(hook),
+    'the pointer lands on the handle first');
+  assert.ok(/action: 'down', point: \{ \.\.\.start, zoomModifier: true \}/.test(hook),
+    'the press happens on the handle');
+  assert.ok(/action: 'move', point: \{ \.\.\.target, zoomModifier: true \}/.test(hook),
     'the gesture moves between the press and the release, so the value actually changes');
+  assert.ok(/action: 'modifier', point: \{ down: true \}/.test(hook) &&
+    /action: 'modifier', point: \{ down: false \}/.test(hook),
+    'the modifier is held for the whole gesture and released after it');
   assert.ok(/whyDrag/.test(hook), 'the evidence states why a click is not enough');
 });
 

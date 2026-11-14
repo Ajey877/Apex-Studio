@@ -123,12 +123,25 @@ export class NativeVst3Client {
   async loseEditorFocus(classId) { return this.editorTestAction('loseFocus', { classId }); }
   /** Acceptance harness: apply an explicit content scale factor and observe it. */
   async setEditorScale(scale, classId) { return this.editorTestAction('setScale', { scale, classId }); }
-  /** Acceptance harness: deliver mouse input with SendInput at real screen coords. */
-  async sendEditorMouse(action, { x = 20, y = 20, classId } = {}) {
+  /**
+   * Acceptance harness: deliver mouse input at real screen coordinates.
+   *
+   * Press, move and release travel as genuine mouse messages carrying the button
+   * state, addressed to the window the OS reports under the point. `zoomModifier`
+   * asks the helper to hold the real shift key for the gesture, which VSTGUI reads
+   * as its slider zoom modifier -- that is what lets a drag move the value by a
+   * controlled step instead of jumping the handle to the pointer.
+   */
+  async sendEditorMouse(action, { x = 20, y = 20, classId, zoomModifier = false } = {}) {
     // `up` must be routable: a press with no release never completes a click.
     const name = { move: 'mouseMove', down: 'mouseDown', up: 'mouseUp', wheel: 'mouseWheel' }[action];
     if (!name) throw new Error('Invalid mouse action');
-    return this.editorTestAction(name, { x, y, classId });
+    return this.editorTestAction(name, { x, y, classId, zoomModifier });
+  }
+  /** Acceptance harness: hold or release the real shift key around a gesture. */
+  async setEditorGestureModifier(down, classId) {
+    if (typeof down !== 'boolean') throw new Error('Invalid gesture modifier state');
+    return this.editorTestAction('gestureModifier', { down, classId });
   }
   /** Read-only observation of the live native editor window (Windows x64 only). */
   async editorDiagnostics(classId) {

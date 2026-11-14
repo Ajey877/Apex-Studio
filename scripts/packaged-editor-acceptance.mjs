@@ -570,6 +570,12 @@ async function run() {
     gesture: gainInput?.gesture ?? null,
     sent: gainInput?.sent ?? null,
     injectionError: gainInput?.error ?? null,
+    // What actually reached the plug-in window, per step. `postedMessages` is the
+    // receipt (real mouse messages), never the attempt.
+    deliveredSteps: gainInput?.delivered ? Object.keys(gainInput.delivered) : null,
+    postedMessages: gainInput?.delivered
+      ? Object.fromEntries(Object.entries(gainInput.delivered).map(([step, value]) => [step, value?.postedMessages ?? null]))
+      : null,
     mechanism: 'genuine OS input (SendInput) was aimed at the Gain slider inside the plug-in\'s own editor window, then the panel\'s normal poll loop observed the edit',
     gainInput,
     sliderPoint,

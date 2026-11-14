@@ -2432,29 +2432,46 @@ export function App() {
         const start = { x: requested.x, y: requested.y };
         // Default to a short slide to the right, which raises the gain.
         const target = requested.to ?? { x: start.x + 40, y: start.y };
-        const steps: Array<{ action: 'move' | 'down' | 'up'; point: { x: number; y: number } }> = [
+        /**
+         * The gesture is a SHIFT-DRAG, and both halves are needed.
+         *
+         * Win32Frame takes the button state from GetAsyncKeyState, not from the
+         * message, so a press/move/release sequence posted on its own reaches the
+         * control's drag handler with no button held and is ignored. Press, move and
+         * release therefore travel as real mouse messages carrying their button
+         * state (see the helper's deliverMouse), and the shift key is genuinely
+         * held so VSTGUI treats the drag as its zoom modifier -- a stepped change
+         * rather than a jump to the pointer position.
+         */
+        const steps: Array<{
+          action: 'move' | 'down' | 'up' | 'modifier';
+          point: { x: number; y: number } | { down: boolean } | { x: number; y: number; zoomModifier: boolean };
+          label: string;
+        }> = [
+          { action: 'modifier', point: { down: true }, label: 'modifier@down' },
           // Land on the handle first so the press starts an edit on the control.
-          { action: 'move', point: start },
-          { action: 'down', point: start },
+          { action: 'move', point: { ...start, zoomModifier: true }, label: `move@${start.x},${start.y}` },
+          { action: 'down', point: { ...start, zoomModifier: true }, label: `down@${start.x},${start.y}` },
           // Then slide it: same y, offset x, which raises a real mouse-move.
-          { action: 'move', point: target },
-          { action: 'up', point: target },
+          { action: 'move', point: { ...target, zoomModifier: true }, label: `move@${target.x},${target.y}` },
+          { action: 'up', point: { ...target, zoomModifier: true }, label: `up@${target.x},${target.y}` },
+          { action: 'modifier', point: { down: false }, label: 'modifier@up' },
         ];
         const delivered: Record<string, unknown> = {};
         for (const step of steps) {
-          delivered[`${step.action}@${step.point.x},${step.point.y}`] =
-            await bridge.editorInput(id, step.action, step.point);
+          delivered[step.label] = await bridge.editorInput(id, step.action, step.point);
           // The OS delivers asynchronously; let the plug-in consume each event before
           // the next one so it sees a press, a move and a release in order.
-          await new Promise(resolve => setTimeout(resolve, 80));
+          await new Promise(resolve => setTimeout(resolve, 100));
         }
         return {
           target,
           start,
           injectedThrough: 'vst3:editorInput -> helper SendInput (real OS input)',
           sent: steps.map(step => step.action),
-          gesture: 'press at the handle, drag to the target, release',
+          gesture: 'shift-drag: press at the handle, move to the target, release',
           whyDrag: 'a click at the handle value re-sets the same value, so VSTGUI emits no performEdit',
+          whyShift: 'VSTGUI reads its zoom modifier from the live key state, so the drag must happen with shift really held',
           delivered,
         };
       },

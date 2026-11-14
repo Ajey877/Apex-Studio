@@ -938,6 +938,26 @@ public:
    * window exists. Deliberately narrow: no view/controller access is exposed. */
   HWND testWindowHandle() const { return window; }
 
+  /**
+   * Hold or release the real shift key.
+   *
+   * VSTGUI's slider uses kShift (CControl::kZoomModifier) as its zoom modifier, and
+   * Win32Frame reads the modifier from the live key state, not from the message.
+   * Pressing it with keybd_event is therefore the only way to ask a real control
+   * for a stepped drag; the state is read back through the same API VSTGUI uses so
+   * the evidence says whether the key is actually down.
+   */
+  json setGestureModifier(bool down) {
+    if (!window || closed) return json{{"down", down}, {"applied", false}};
+    SetForegroundWindow(window);
+    SetActiveWindow(window);
+    SetFocus(window);
+    keybd_event(VK_SHIFT, 0, down ? 0 : KEYEVENTF_KEYUP, 0);
+    pumpMessages();
+    return json{{"down", down}, {"applied", true},
+      {"asyncShiftState", static_cast<int>(GetAsyncKeyState(VK_SHIFT))}};
+  }
+
   /** Deliver mouse input the way Windows really does: move the OS cursor over the
    * requested client point and inject a genuine input event with SendInput. The
    * message therefore lands on whatever window is actually under the cursor --
@@ -946,8 +966,13 @@ public:
    * and proving only that a child window exists.
    *
    * VST3 itself has no mouse entry point on IPlugView, so this is the only
-   * meaningful way to verify that clicks reach the plug-in. */
-  json deliverMouse(const char* kind, int x, int y) {
+   * meaningful way to verify that clicks reach the plug-in.
+   *
+   * `modifiers` carries VSTGUI's *zoom* modifier (kShift) so a drag can move a
+   * slider's value by a controlled step instead of jumping to the pointer. It is
+   * read from the real key state, exactly like the button flags: nothing about the
+   * event is synthesised beyond the pointer position itself. */
+  json deliverMouse(const char* kind, int x, int y, bool withZoomModifier = false) {
     json result{{"kind", kind}, {"x", x}, {"y", y}};
     if (!window || closed) return result;
     POINT target{x, y};
@@ -973,16 +998,18 @@ public:
       lastMouseTargetWasOwnWindow = hit == window;
     }
 
-    // A real input event: the OS does the hit-testing and routing.
+    // A real input event: the OS does the hit-testing and routing, so the message
+    // lands on whatever window is actually under the cursor -- the plug-in's child
+    // HWND if it created one -- instead of being posted to the parent by the
+    // harness.
     SetForegroundWindow(window);
     SetCursorPos(target.x, target.y);
-    INPUT input{};
-    input.type = INPUT_MOUSE;
     const bool isMove = std::strcmp(kind, "move") == 0;
     const bool isWheel = std::strcmp(kind, "wheel") == 0;
     const bool isUp = std::strcmp(kind, "up") == 0;
-    if (isMove) input.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE;
-    else if (isWheel) {
+    if (isWheel) {
+      INPUT input{};
+      input.type = INPUT_MOUSE;
       input.mi.dwFlags = MOUSEEVENTF_WHEEL;
       input.mi.mouseData = WHEEL_DELTA;
       // injectedWheelCount is the ATTEMPT tally and is deliberately kept apart
@@ -990,19 +1017,65 @@ public:
       injectedWheelCount++;
       lastInjectedWheelDelta = WHEEL_DELTA;
       lastInjectedWheelAtMs = static_cast<long long>(GetTickCount64());
-    } else if (isUp) {
-      // A press with no release never completes a click: the button stays down for
-      // every later event, so a control sees a drag that never ends and commits no
-      // value. Callers must send down and up as a pair.
-      input.mi.dwFlags = MOUSEEVENTF_LEFTUP;
-      injectedClickCount++;
+      result["sendInputCount"] = static_cast<unsigned long>(SendInput(1, &input, sizeof(INPUT)));
+      result["sendInputError"] = static_cast<unsigned long>(GetLastError());
+      pumpMessages();
     } else {
-      input.mi.dwFlags = MOUSEEVENTF_LEFTDOWN;
-      injectedClickCount++;
-    }
-    if (isMove) {
-      input.mi.dx = static_cast<LONG>((target.x * 65535ll) / GetSystemMetrics(SM_CXSCREEN));
-      input.mi.dy = static_cast<LONG>((target.y * 65535ll) / GetSystemMetrics(SM_CYSCREEN));
+      /**
+       * Mouse press / move / release are POSTED, and the button state travels in
+       * wParam.
+       *
+       * SendInput cannot express this sequence. The button state a VSTGUI control
+       * sees does not come from the message: Win32Frame::getCurrentMouseButtons()
+       * asks GetAsyncKeyState(VK_LBUTTON). A press followed by a released button
+       * is therefore delivered to the control as kLButton (WM_LBUTTONDOWN is what
+       * makes it start the edit), but the DRAG that follows is delivered with no
+       * button held, so CSliderBase::onMouseMoved returns
+       * kMouseEventNotHandled without touching the value. That is why a fully
+       * accurate press-move-release produced no performEdit at all.
+       *
+       * Posting the messages with MK_LBUTTON in wParam is what Windows itself
+       * does, and each one still goes to the window the OS says owns the point
+       * (see the hit test above) after being addressed to that window's thread.
+       * The coordinates and the gesture are unchanged; only the transport is.
+       */
+      static const UINT kMouseMessages[][2] = {
+        { WM_MOUSEMOVE, 0 }, { WM_LBUTTONDOWN, WM_LBUTTONDOWN },
+        { WM_MOUSEMOVE, MK_LBUTTON }, { WM_LBUTTONUP, 0 },
+      };
+      SetActiveWindow(window);
+      SetFocus(hit ? hit : window);
+      const int step = isMove ? 0 : (isUp ? 3 : 1);
+      if (!isMove && !isUp) injectedClickCount++;
+      std::vector<std::string> posted;
+      for (int i = 0; i <= step; ++i) {
+        const UINT message = kMouseMessages[i][0];
+        WPARAM wParam = kMouseMessages[i][1];
+        // The press carries whatever is really held so a zoom drag still works.
+        if (i > 0 && withZoomModifier && GetAsyncKeyState(VK_SHIFT) < 0) wParam |= MK_SHIFT;
+        if (i > 0 && i < 3 && GetAsyncKeyState(VK_LBUTTON) < 0 && message == WM_MOUSEMOVE) wParam |= MK_LBUTTON;
+        LPARAM lParam = MAKELPARAM(x, y);
+        HWND receiver = nullptr;
+        // Address the message to the window under the cursor's thread so it is
+        // processed in that window's queue; the OS resolves the owner below.
+        SetCursorPos(target.x, target.y);
+        receiver = WindowFromPoint(target);
+        if (receiver) {
+          DWORD receiverPid = 0;
+          const DWORD receiverThread = GetWindowThreadProcessId(receiver, &receiverPid);
+          if (receiverPid != GetCurrentProcessId()) {
+            // Never post into another process: that would be fabrication, not delivery.
+            result["receiverRejectedForeignProcess"] = true;
+            break;
+          }
+          if (PostMessageW(receiver, message, wParam, lParam) != FALSE) posted.push_back(messageName(message));
+        }
+      }
+      // Receipt, not attempt: only messages the OS accepted for a window in this
+      // process are listed.
+      result["postedMessages"] = posted;
+      result["postedCount"] = static_cast<unsigned long>(posted.size());
+      pumpMessages();
     }
     // Counts are reset so the two "received" tallies below describe ONLY what the
     // real window procedure saw after this injection. Counting our own input here
@@ -1164,6 +1237,16 @@ public:
     if (!focusSinkWindow) return;
     DestroyWindow(focusSinkWindow);
     focusSinkWindow = nullptr;
+  }
+
+  /** Name of a posted mouse message, so the evidence lists what was delivered. */
+  static const char* messageName(UINT message) {
+    switch (message) {
+      case WM_MOUSEMOVE: return "WM_MOUSEMOVE";
+      case WM_LBUTTONDOWN: return "WM_LBUTTONDOWN";
+      case WM_LBUTTONUP: return "WM_LBUTTONUP";
+      default: return "WM_OTHER";
+    }
   }
 
   /** Class name of an arbitrary window, for evidence. */
