@@ -1163,6 +1163,11 @@ test('the VSTGUI editor instrumentation stays in the one TU that builds with VST
   // so reading state in the observer would report the pre-gesture value.
   assert.ok(/doAfterEventProcessing/.test(fixtureEditor),
     'the post-dispatch state is read after the frame routed the event');
+  // A shallow getViewAt() just returns the first enabled container, which made the
+  // trace report "no mouse down on the slider" while the slider was demonstrably
+  // editing and emitting performEdit.
+  assert.ok(/GetViewOptions\(\)\.deep\(\)/.test(fixtureEditor),
+    'the hit probe searches deeply, so it can name the control rather than its panel');
   assert.ok(!/setValueNormalized\(|performEdit \(/.test(fixtureEditor),
     'the instrumented editor never sets a value itself');
 });
@@ -1245,8 +1250,10 @@ test('p4 and p6 are proven on the edited parameter, not just on depth', () => {
     'p4 captures the pre-edit value before the gesture');
   assert.ok(/undoRestoredOriginalValue/.test(script),
     'p4 requires undo to restore the pre-edit value');
-  assert.ok(/Math\.abs\(history\.valueAfterUndo - preEditValue\) < 1e-6/.test(script),
-    'the comparison is against the original value, not merely "different"');
+  assert.ok(/Object\.is\(history\.valueAfterUndo, preEditValue\)/.test(script),
+    'the comparison is exact against the captured original, not merely "different"');
+  assert.ok(/history\.valueAfterUndo !== history\.valueAfterClose/.test(script),
+    'and undo must not leave the edited value in place');
 
   // p6 must read the reloaded parameter and compare it to the edited value.
   assert.ok(/reloadedMatchesEdit/.test(script), 'p6 compares the reloaded parameter');

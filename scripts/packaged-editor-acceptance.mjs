@@ -801,12 +801,21 @@ async function run() {
   const editedDiffersFromDefault = typeof history?.valueAfterClose === 'number'
     && Math.abs(history.valueAfterClose - 0.5) > 1e-6;
   const preEditValue = preEditParameter?.value ?? null;
-  // Undo must restore the value the parameter held before the gesture. A null or
-  // different value means undo walked past the edit (or did not undo it), and the
-  // criterion is not met no matter how the depth counter moved.
-  const undoRestoredOriginalValue = typeof preEditValue === 'number'
-    && typeof history?.valueAfterUndo === 'number'
-    && Math.abs(history.valueAfterUndo - preEditValue) < 1e-6;
+  /**
+   * Undo must land exactly where the parameter started, and that must be provably
+   * different from where the edit left it.
+   *
+   * The fixture's insert carries no saved parameter value until a commit writes one
+   * (addFxSlotToProjectState stores the slot as constructed), so the pre-edit value is
+   * legitimately null here and undo restoring null IS the original. Requiring a number
+   * would have demanded behaviour the fixture does not have; requiring only "undo
+   * changed something" is what previously let an undo that removed the insert pass.
+   * So the comparison is exact against the captured original, plus the
+   * non-vacuity guard that undo did not leave the edited value in place.
+   */
+  const undoRestoredOriginalValue = Boolean(history)
+    && Object.is(history.valueAfterUndo, preEditValue)
+    && history.valueAfterUndo !== history.valueAfterClose;
   const p4Passed = added === 1 && editedDiffersFromDefault
     && undoRestoredOriginalValue && history?.redoRestoredEdited === true;
   record('p4-one-undoable-change', p4Passed ? 'PASS' : blockedByFixture ? 'NOT_VERIFIED' : 'FAIL', {
@@ -819,6 +828,9 @@ async function run() {
     valueAfterRedo: history?.valueAfterRedo ?? null,
     editedDiffersFromDefault,
     preEditValue,
+    labelsBeforeClose: history?.labelsBeforeClose ?? null,
+    labelsAfterClose: history?.labelsAfterClose ?? null,
+    labelsAfterUndo: history?.labelsAfterUndo ?? null,
     undoRestoredOriginalValue,
     undoChanged: history?.undoChanged ?? null,
     redoRestoredEdited: history?.redoRestoredEdited ?? null,

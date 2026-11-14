@@ -372,11 +372,20 @@ private:
     }
   }
 
-  /** What the frame says is under a point right now. Read-only. */
+  /**
+   * The control under a point, resolved DEEPLY and read-only.
+   *
+   * CFrame::getViewAt() defaults to a shallow search that returns the first
+   * mouse-enabled child container it meets, so it reports `panel` rather than the
+   * slider inside it. Asking for a deep search with containers excluded is what
+   * makes this probe answer the question it is being used for: did the press land on
+   * the control itself. It only reads; nothing is dispatched.
+   */
   VSTGUI::CView* viewAt(VSTGUI::CPoint point) {
     auto* frame = getFrame();
     if (!frame) return nullptr;
-    return frame->getViewAt(point);
+    return frame->getViewAt(point,
+      VSTGUI::GetViewOptions().deep().mouseEnabled());
   }
 
   /**
