@@ -308,16 +308,58 @@ until the first commit writes one, so null is the pre-edit value and undo return
 it exactly; redo then reapplies the edit. The undo stack shows one entry added by the
 gesture and the edit entry consumed by undo — no duplicates, no phantoms.
 
-**One earlier run still differs.** At `e9b724f` a run added no entry at all
-(`entriesAddedByGesture: 0`, `labelsAfterClose: ["Add VST3 Mixer effect"]`) while p3 in
-that same session reported `editedParameterIds: [0]`. That is not explained. The commit
-path has several legitimate exits that add no entry (state capture failed, no final
-state, the captured state byte-identical to what was stored, or the save threw), and
-they were indistinguishable in the evidence at the time. The hook now records
-`editedIdsBeforeClose`, `phaseAfterClose` and `errorAfterClose` so a recurrence names
-its own cause. Three clean runs with identical values is strong evidence, not proof,
-and this document does not claim more than that; the one divergent run stays recorded
-above.
+**One earlier run added no entry, and that is now explained.** At `e9b724f` a run
+committed nothing (`entriesAddedByGesture: 0`, `labelsAfterClose: ["Add VST3 Mixer
+effect"]`) while p3 in that same session reported `editedParameterIds: [0]`.
+
+For a while this could only be guessed at: the commit path has several legitimate exits
+that add no entry (state capture failed, no final state, the captured state identical to
+what was stored, or the save threw), and they looked identical from outside.
+
+The hook now records `editedIdsBeforeClose`, `phaseAfterClose` and `errorAfterClose`, and
+the ten-cycle run reproduced the failure with them attached:
+
+```text
+editedIdsBeforeClose:     [0]          the plug-in had reported the edited ParamID
+phaseAfterClose:          "recovered"
+errorAfterClose:          "vst3:closeEditor: VST3 editor is still servicing
+                           another request; retry in a moment."
+entriesAddedByGesture:    0
+effectiveValueAfterClose: 0.5          the edit was gone
+```
+
+**Cause: a production lifecycle race.** `closeEditor()` refuses with "still servicing
+another request" while any request is in flight, and the renderer polls the open editor
+on a 120 ms loop it schedules itself. A close landing during one of those polls was
+treated as a permanent refusal: the commit never ran, the session published `recovered`,
+released the helper, and the edit was discarded. The renderer already retried that exact
+transient message in its *input* path; the close path never did.
+
+The close now retries that one message (60 ms interval, 5 s ceiling), after stopping the
+poll loop, and captures the state once — by the call that succeeds. Other errors still
+fail on the first attempt. Two regression tests cover it, and the retry test fails
+against the previous code.
+
+**Ten consecutive cycles.** p4b performs ten cycles of the same real interaction and
+records, for each: the controller value before, the ParamIDs received, the session phase
+either side of close, the commit verdict, the entries added, and the controller value
+after close, undo and redo. All ten pass, on two consecutive runs:
+
+```text
+cyclesAttempted: 10   cyclesPassed: 10   firstFailingCycle: null
+```
+
+**Undo on the controller, not on the serialized value.** A fresh insert serializes no
+parameter, so the stored value is null while the controller holds its real default — the
+two are not interchangeable, and only the second can prove a restore. Read through the
+shipped `describeEffect` path:
+
+```text
+effectiveValueBeforeEdit:  0.5
+effectiveValueAfterClose:  0.5314371585845947
+effectiveValueAfterUndo:   0.5
+effectiveValueAfterRedo:   0.5314371585845947
+```
 
 Whether the corrected layout makes a genuine drag reach Apex is decided by the packaged
 acceptance run, not by this reasoning; the criteria table below carries the honest
