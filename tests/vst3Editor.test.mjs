@@ -829,6 +829,47 @@ test('the packaged Gain click is derived from the real uidesc nesting', () => {
     'the slider size is used to centre the click');
 });
 
+test('deliverMouse never sends a press it is not holding', () => {
+  /**
+   * The transport decision has to hold for the WHOLE function, and a leftover block
+   * can quietly undo it.
+   *
+   * This exact failure shipped to CI: the new posted-message path was added but the
+   * old SendInput tail survived below it. On Windows that tail injected
+   * MOUSEEVENTF_LEFTUP after every gesture -- so the drag's move still arrived with
+   * the button up -- and on the compiler it failed outright because `input` was only
+   * declared inside the wheel branch. A local GCC build missed it because the
+   * header's depfile did not trigger a recompile, so this is asserted structurally
+   * instead of relying on one toolchain noticing.
+   */
+  const host = readSource('native/vst3/editor-host.hpp');
+  const start = host.indexOf('json deliverMouse(');
+  assert.ok(start > 0, 'deliverMouse exists');
+  // The body ends at the next member: the keyboard helper follows it.
+  const body = host.slice(start, host.indexOf('unsigned long sendKeyForTest', start));
+  assert.ok(body.length > 500, 'the body was found');
+
+  // A release must never follow a press automatically: that is a click, not a drag,
+  // and VSTGUI reads the held button from GetAsyncKeyState.
+  assert.ok(!/MOUSEEVENTF_LEFTUP/.test(body),
+    'no automatic release: the press and release are separate, explicitly ordered steps');
+  // Only the wheel may still be a SendInput event; the pointer press must not be.
+  const pointerSendInput = body.match(/SendInput\(1, &input, sizeof\(INPUT\)\)/g) ?? [];
+  assert.equal(pointerSendInput.length, 1, 'exactly one SendInput call remains');
+  const wheelBranch = body.slice(body.indexOf('if (isWheel)'), body.indexOf('} else {', body.indexOf('if (isWheel)')));
+  assert.ok(/SendInput\(1, &input/.test(wheelBranch),
+    'the one SendInput is the wheel, which Windows delivers as a message with no button state');
+
+  // Every reference in the body must be in scope. Counting declarations catches the
+  // stale-tail class of error without needing MSVC.
+  const declarations = (body.match(/\bINPUT\s+\w+\s*\{?\}?\s*;/g) ?? []);
+  const uses = (body.match(/&input\b/g) ?? []);
+  assert.equal(declarations.length, 1, 'exactly one INPUT record is declared');
+  assert.equal(uses.length, 1, 'and it is the one the send uses');
+  const declared = /INPUT\s+(\w+)\s*\{/.exec(body)[1];
+  assert.ok(!/&input\b/.test(body) || declared === 'input', 'the address taken is a declared record');
+});
+
 test('the acceptance click sends a press and a release', () => {
   // A press with no release leaves the button down for every later event: the
   // control sees a drag that never ends and commits no value. p3 injected only

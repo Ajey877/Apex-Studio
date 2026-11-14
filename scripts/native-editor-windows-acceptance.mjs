@@ -491,7 +491,14 @@ try {
     const after = wheel.diagnostics;
 
     // ---- the click: proof of hit-testing and routing, not of a pass --------
-    const clickSendInputAccepted = down.sendInputCount ?? 0;
+    //
+    // The press and release are posted as real mouse messages carrying their button
+    // state, not injected with SendInput: VSTGUI reads the held buttons from
+    // GetAsyncKeyState, so a SendInput press had to be released immediately to leave
+    // the machine in a sane state, and every drag then arrived with no button held.
+    // The attempt tally is therefore the POSTED receipt, and it must be 1 for the
+    // press -- a message the OS refused is not delivery.
+    const clickSendInputAccepted = down.postedCount ?? 0;
     const hitALiveWindow = down.hitWindowExists === true;
     const plugInOwnsThePoint = down.hitIsChildWindow === true;
     const hostReceivedClick = (wheel.diagnostics?.mouse?.hostMouseDownCount ?? 0) > 0 ||
@@ -525,7 +532,9 @@ try {
       method: 'SendInput (real OS input) with the cursor moved to real screen coordinates; Windows performs the hit-test and routing',
       injectedAt: { clientPoint: point, screenPoint: down.screenPoint },
       click: {
+        delivery: 'posted mouse messages carrying the button state (WM_LBUTTONDOWN with MK_LBUTTON)',
         sendInputAcceptedCount: clickSendInputAccepted,
+        postedMessages: down.postedMessages ?? null,
         sendInputError: clickSendInputAccepted > 0 ? null : down.sendInputError,
         hitWindowExists: down.hitWindowExists,
         hitWindowClass: down.hitWindowClass,

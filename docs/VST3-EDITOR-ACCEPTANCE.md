@@ -127,6 +127,19 @@ into another process would be fabrication, and the helper reports
 the drag moves the value by a controlled step rather than jumping the handle to the
 pointer.
 
+Two things followed from that change and are worth keeping:
+
+* **A leftover block undid it silently.** The first version added the posted-message
+  path but left the old `SendInput` tail below it. That tail re-sent
+  `MOUSEEVENTF_LEFTUP` after every gesture — the original defect, restored — and did
+  not compile at all, because its `INPUT` record was scoped to the wheel branch.
+  A structural test now asserts `deliverMouse` contains no automatic release and
+  exactly one `SendInput` (the wheel's).
+
+* **A local "no work to do" is not a build.** The header was missing from ninja's
+  depfile, so a GCC rebuild reported success without recompiling it and only MSVC
+  caught the error. Native verification now deletes the object directory first.
+
 ### Why redo looked broken (history stores sanitized state)
 
 `projectHistory` stores `sanitizeProjectSnapshot(state)` — a normalize plus document

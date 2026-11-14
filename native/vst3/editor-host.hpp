@@ -1077,9 +1077,14 @@ public:
       result["postedCount"] = static_cast<unsigned long>(posted.size());
       pumpMessages();
     }
-    // Counts are reset so the two "received" tallies below describe ONLY what the
-    // real window procedure saw after this injection. Counting our own input here
-    // would fabricate the result we are trying to observe.
+    // Only the wheel is a SendInput event now. Press, move and release are posted as
+    // real mouse messages above, because a SendInput press would have to be followed
+    // by an immediate release for SendInput to be meaningful here -- and that release
+    // is exactly what made every drag arrive with the button already up.
+    //
+    // Counting our own input as received would fabricate the result this function
+    // exists to observe, so the receipts below are reset here and only the window
+    // procedure raises them.
     mouseDownCount = 0;
     mouseMoveCount = 0;
     wheelCount = 0;
@@ -1087,19 +1092,6 @@ public:
     viewWheelCount = 0;
     lastViewWheelResult = Steinberg::kResultFalse;
     lastViewWheelDelta = 0.f;
-    result["sendInputCount"] = static_cast<unsigned long>(SendInput(1, &input, sizeof(INPUT)));
-    result["sendInputError"] = static_cast<unsigned long>(GetLastError());
-    if (!isMove && !isWheel) {
-      INPUT up{};
-      up.type = INPUT_MOUSE;
-      up.mi.dwFlags = MOUSEEVENTF_LEFTUP;
-      result["sendInputUpCount"] = static_cast<unsigned long>(SendInput(1, &up, sizeof(INPUT)));
-      // Pump the real queue: if the click went to a plug-in child window, that
-      // window's own procedure (inside the plug-in) consumes it...
-      pumpMessages();
-    } else {
-      pumpMessages();
-    }
     // Truthful attribution: the host's own window procedure counts what IT received.
     // A plug-in child window owns the canvas, so clicks must NOT show up here.
     result["hostMouseDownCount"] = mouseDownCount;

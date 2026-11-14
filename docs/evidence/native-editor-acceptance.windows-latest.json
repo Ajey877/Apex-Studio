@@ -277,6 +277,13 @@
       "cause": "Win32Frame::getCurrentMouseButtons() reads the held buttons from GetAsyncKeyState(VK_LBUTTON), not from wParam, and the helper's deliverMouse released the button immediately after every press. So WM_LBUTTONDOWN began the edit, but the WM_MOUSEMOVE that followed was processed with no button held; CSliderBase::onMouseMoved saw no button and returned kMouseEventNotHandled without changing the value.",
       "fix": "Press, move and release are posted as genuine mouse messages carrying their button state (MK_LBUTTON on the drag), addressed only to a window the OS reports under the point and only when it belongs to this process. The zoom modifier is a real held shift key via keybd_event, because VSTGUI reads modifiers from live key state too. A message posted into another process is refused and reported as receiverRejectedForeignProcess.",
       "wouldTheOldTestHaveCaughtIt": "No. The old checks confirmed the injection attempt and the attached window. Neither observes the button state the control actually reads, which is the only thing that decides whether a drag moves the value."
+    },
+    {
+      "id": "stale-sendinput-tail-kept-releasing-the-button",
+      "symptom": "Native DSP (windows) and windows-package both failed at bf89a73 in under 90 seconds with error C2065 \"'input': undeclared identifier\" at editor-host.hpp(1090).",
+      "cause": "Adding the posted-message transport left the old SendInput tail in place below it. That tail both failed to compile (its INPUT record was scoped to the wheel branch) and, had it compiled, would have injected MOUSEEVENTF_LEFTUP after every gesture -- re-creating the exact defect the change was meant to fix, with the drag's move still arriving with the button up.",
+      "fix": "The duplicate tail is removed; only the wheel remains a SendInput event. A structural unit test now asserts that deliverMouse contains no automatic release, exactly one SendInput (the wheel), and that every &input address refers to a declared record, so this class of stale block is caught without needing MSVC.",
+      "wouldTheOldTestHaveCaughtIt": "No, and it did not. A local GCC build reported 'ninja: no work to do' because the header was not in the depfile, so the toolchain that was available said the change compiled when it did not. Only the MSVC runner exposed it."
     }
   ]
 }
