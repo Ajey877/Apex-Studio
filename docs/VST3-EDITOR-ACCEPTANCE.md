@@ -293,9 +293,9 @@ enabled `panel` rather than the slider inside it — so an earlier run reported
 `false` while the same trace showed the slider editing and emitting `performEdit`. The
 probe now asks for a deep search with containers excluded, and it reports `true`.
 
-**Reproduced.** Two consecutive packaged runs at `50c44d5` produced identical results —
-8 PASS, 0 FAIL, 1 NOT_VERIFIED — with the same edited value (0.5314371585845947), the
-same trace, and the same history:
+**Reproduced.** Three packaged runs across `50c44d5` and `96d27dd` produced identical
+results — 8 PASS, 0 FAIL, 1 NOT_VERIFIED — with the same edited value
+(0.5314371585845947), the same trace, and the same history:
 
 ```text
 labelsAfterClose: ["Add VST3 Mixer effect", "Edit VST3 effect in native editor"]
@@ -315,8 +315,9 @@ path has several legitimate exits that add no entry (state capture failed, no fi
 state, the captured state byte-identical to what was stored, or the save threw), and
 they were indistinguishable in the evidence at the time. The hook now records
 `editedIdsBeforeClose`, `phaseAfterClose` and `errorAfterClose` so a recurrence names
-its own cause. Two clean consecutive runs is not proof of determinism, and this
-document does not claim it.
+its own cause. Three clean runs with identical values is strong evidence, not proof,
+and this document does not claim more than that; the one divergent run stays recorded
+above.
 
 Whether the corrected layout makes a genuine drag reach Apex is decided by the packaged
 acceptance run, not by this reasoning; the criteria table below carries the honest
