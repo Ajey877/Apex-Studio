@@ -322,6 +322,29 @@ Whether the corrected layout makes a genuine drag reach Apex is decided by the p
 acceptance run, not by this reasoning; the criteria table below carries the honest
 status.
 
+### One unrelated Windows-only test flake, on the record
+
+At `ffef03c` the `windows-package` job failed in its *Audio regression tests* step,
+before any editor acceptance ran: `two VST3 inserts in one Mixer chain process cascaded
+stereo PCM …`. It is recorded here rather than dismissed because a failure that is
+quietly ignored is how a real defect survives.
+
+What the evidence says about it:
+
+- the dedicated `audio-tests` job passed the same suite on that same commit (7m59s,
+  ubuntu-latest);
+- the identical Windows step passed on the three preceding commits (`132547388104`,
+  `132551531730`, `132554395685`);
+- `src/audio/nativeVst3EffectRuntime.test.ts` and `native/vst3/liveAudioPort.mjs` are
+  untouched by this branch;
+- the test passes 5/5 in repeated local runs.
+
+The test drives two `MessageChannel` live-port sessions across a worklet sandbox and
+yields every eight blocks, so timing under a loaded Windows runner is the plausible
+mechanism — but that is inference, not a measured cause, and no fix is attempted for a
+test this change does not own. It is reported as a flake with its evidence, and the
+Windows job is expected to be re-run before this is called green.
+
 ### Why the probe was withdrawn, and what distinguishes these cases instead
 
 A read-only `describeViewAt(point)` probe was written to ask the live `CFrame` which
