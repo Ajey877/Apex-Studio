@@ -491,10 +491,19 @@ async function run() {
   // real panel polls the session; a session that reports an edit here proves the
   // same path the panel uses.
   // Drive the plug-in's own editor window with genuine OS input over the Gain
-  // slider's real screen position, then read what Apex received. The slider sits at
-  // a known offset in the fixture's uidesc (origin 64,40 size 168x18 inside a
-  // 320x120 view), so the click lands on the control itself.
-  const sliderPoint = { x: 64 + 84, y: 40 + 9 };
+  // slider, then read what Apex received.
+  //
+  // Coordinates come from the real uidesc nesting and are added up here on purpose:
+  // the slider's origin is relative to its PARENT container, and the parent panel
+  // sits at (10, 12) inside the 320x120 root view. Using the slider's own origin
+  // directly (as an earlier version did) aimed at empty space between the title and
+  // the gain label, which is why the plug-in reported no edit at all.
+  //   panel origin (10,12) + slider origin (64,40) = (74,52); size 168x18
+  const GAIN_SLIDER = { panelOrigin: { x: 10, y: 12 }, origin: { x: 64, y: 40 }, size: { width: 168, height: 18 } };
+  const sliderPoint = {
+    x: GAIN_SLIDER.panelOrigin.x + GAIN_SLIDER.origin.x + Math.round(GAIN_SLIDER.size.width / 2),
+    y: GAIN_SLIDER.panelOrigin.y + GAIN_SLIDER.origin.y + Math.round(GAIN_SLIDER.size.height / 2),
+  };
   const gainInput = await page.evaluate(async (point) => {
     const app = globalThis.__apexAcceptance;
     if (!app?.driveEditorWithRealInput) return { error: 'no real-input hook available' };
@@ -541,6 +550,8 @@ async function run() {
     sessionError: edited?.error || null,
     mechanism: 'genuine OS input (SendInput) was aimed at the Gain slider inside the plug-in\'s own editor window, then the panel\'s normal poll loop observed the edit',
     gainInput,
+    sliderPoint,
+    sliderGeometry: GAIN_SLIDER,
     blockedByFixture,
     blockedBy: blockedByFixture
       ? 'the fixture editor references ParamIDs its own controller does not expose (DataExchange UI-only tags); the host rejects them by design'

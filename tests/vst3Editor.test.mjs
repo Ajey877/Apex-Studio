@@ -800,3 +800,29 @@ test('the acceptance fixture uidesc is well-formed XML', () => {
   assert.match(xml, /class="CViewContainer"[^>]*size="320, 120"/, 'the root view is 320x120');
   assert.match(xml, /control-tag="Gain"/, 'the Gain control still targets ParamID 0');
 });
+
+test('the packaged Gain click is derived from the real uidesc nesting', () => {
+  const script = readScript('scripts/packaged-editor-acceptance.mjs');
+  const xml = readSource('native/vst3/resources/acceptancegain.uidesc');
+  const pair = raw => raw.split(',').map(part => Number(part.trim()));
+
+  const panel = xml.match(/name="panel"[^>]*origin="([^"]+)"[^>]*size="([^"]+)"/) ??
+    xml.match(/origin="([^"]+)"[^>]*size="([^"]+)"[^>]*name="panel"/);
+  assert.ok(panel, 'the panel container declares an origin and size');
+  const [panelX, panelY] = pair(panel[1]);
+
+  const slider = xml.match(/class="CSlider"[^>]*origin="([^"]+)"[^>]*size="([^"]+)"/) ??
+    xml.match(/origin="([^"]+)"[^>]*size="([^"]+)"[^>]*class="CSlider"/);
+  assert.ok(slider, 'the Gain slider declares an origin and size');
+  const [sliderX, sliderY] = pair(slider[1]);
+  const [sliderWidth, sliderHeight] = pair(slider[2]);
+
+  // The slider's origin is relative to its parent panel. Both offsets must appear
+  // in the script, or the click lands somewhere the control is not.
+  assert.ok(new RegExp(`panelOrigin: \\{ x: ${panelX}, y: ${panelY} \\}`).test(script),
+    `the panel offset (${panelX},${panelY}) is used`);
+  assert.ok(new RegExp(`origin: \\{ x: ${sliderX}, y: ${sliderY} \\}`).test(script),
+    `the slider offset (${sliderX},${sliderY}) is used`);
+  assert.ok(new RegExp(`width: ${sliderWidth}, height: ${sliderHeight}`).test(script),
+    'the slider size is used to centre the click');
+});

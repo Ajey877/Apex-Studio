@@ -368,7 +368,15 @@ class NativeEditorSession {
   }
 
   void createHostWindow(const Steinberg::ViewRect& initialSize) {
-    require(validRect(initialSize), "VST3 editor returned an invalid or unsupported initial size");
+    // Report the actual rect when it is rejected. The fixture's uidesc was once
+    // malformed, which produced a zero-size view; the error named neither the value
+    // nor the resource, so the fault looked like a host bug.
+    require(validRect(initialSize),
+      "VST3 editor returned an invalid or unsupported initial size (left=" +
+      std::to_string(initialSize.left) + " top=" + std::to_string(initialSize.top) +
+      " width=" + std::to_string(initialSize.getWidth()) + " height=" +
+      std::to_string(initialSize.getHeight()) + "; the plug-in's own layout resource"
+      " could not be parsed, or it declares no size)");
     require(registerHostWindowClass(), "Could not register the native VST3 editor window class");
 
     const auto canResizeResult = view->canResize();
