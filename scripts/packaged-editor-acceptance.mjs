@@ -985,6 +985,10 @@ async function run() {
     note: 'One completed gesture adds exactly one undo entry; undo restores the pre-edit gain and redo restores the edited gain.',
   });
   // Remember the edited value so the reload check cannot pass on the default.
+  // Captured here because p4b below performs further real edits: by the time p6 runs,
+  // the insert holds whatever the LAST cycle committed, not what p4 committed. Using a
+  // value captured before those cycles made p6 compare the reloaded state with a stale
+  // number and report a false mismatch.
   const editedParameterValue = typeof history?.valueAfterRedo === 'number' ? history.valueAfterRedo : null;
 
   // ---- p4b: repeated reliability cycles ---------------------------------
@@ -1118,6 +1122,10 @@ async function run() {
       firstFailingCycle,
       failingReason,
       requiredCycles: CYCLES,
+      // The failing cycle's own numbers FIRST: the annotation carrying this is cut
+      // near 700 characters, and the whole per-cycle table does not fit. A failure
+      // that cannot show its own values invites a guess.
+      failingCycleRecord: cycles.find(c => c.cycle === firstFailingCycle) ?? null,
       everyCycleRecorded: cycles,
       note: 'Each cycle drives genuine OS input at the VSTGUI slider, closes to commit, then undoes and redoes, measuring the plug-in controller value at every stage. No cycle is retried.',
     });
@@ -1129,6 +1137,11 @@ async function run() {
 
   // ---- p6: save, quit and reload ----------------------------------------
   stage('p6');
+  // Read the insert's value as it stands NOW. The reliability cycles above each
+  // committed a real edit, so the state p6 must preserve is the latest one.
+  const beforeSaveParameter = await page.evaluate(async () =>
+    globalThis.__apexAcceptance.readInsertParameter());
+  const valueBeingSaved = beforeSaveParameter?.value ?? null;
   const saved = await page.evaluate(async () => globalThis.__apexAcceptance.saveProject());
   const stateBeforeQuit = await page.evaluate(async () => globalThis.__apexAcceptance.projectSnapshot());
   await app.close();
@@ -1152,12 +1165,15 @@ async function run() {
     const reloaded = await page2.evaluate(async () =>
       globalThis.__apexAcceptance.readInsertParameter());
     const reloadedParameter = reloaded?.value ?? null;
-    const reloadedMatchesEdit = typeof editedParameterValue === 'number'
+    const reloadedMatchesEdit = typeof valueBeingSaved === 'number'
       && typeof reloadedParameter === 'number'
-      && Math.abs(reloadedParameter - editedParameterValue) < 1e-6;
+      && Math.abs(reloadedParameter - valueBeingSaved) < 1e-6;
     record('p6-save-quit-reload', saved?.ok === true && same && reloadedMatchesEdit ? 'PASS' : 'FAIL', {
       saved, vst3StateIdentical: same,
-      editedParameterValue,
+      // The value present at save time, and the same value after reload. The p4 value
+      // is also shown so the two are distinguishable at a glance.
+      editedParameterValue: valueBeingSaved,
+      p4EditedValue: editedParameterValue,
       reloadedParameter,
       reloadedMatchesEdit,
       beforeQuit: stateBeforeQuit, afterReload: stateAfterReload,

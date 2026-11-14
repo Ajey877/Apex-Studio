@@ -1306,8 +1306,18 @@ test('p4 and p6 are proven on the edited parameter, not just on depth', () => {
   assert.ok(/row\.dismissed !== false/.test(script),
     'a cycle does not pass unless the panel was dismissed');
 
+  // The failing cycle must carry its own numbers onto the status line: the annotation
+  // is cut near 700 characters, so a whole per-cycle table never fits and a failure
+  // without its values invites a guess.
+  assert.ok(/failingCycleRecord: cycles\.find/.test(script),
+    'the failing cycle is reported with its values before the full table');
+
   // p6 must read the reloaded parameter and compare it to the edited value.
   assert.ok(/reloadedMatchesEdit/.test(script), 'p6 compares the reloaded parameter');
+  // p4b edits the parameter again after p4 captures its value, so p6 must compare
+  // against what is actually on disk at save time, not a stale earlier number.
+  assert.ok(/const valueBeingSaved = beforeSaveParameter\?\.value \?\? null;/.test(script),
+    'p6 reads the value present at save time');
   assert.ok(/readInsertParameter\(\)/.test(script),
     'p6 reads it through the same hook the Mixer uses');
 
