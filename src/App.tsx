@@ -2399,14 +2399,20 @@ export function App() {
         if (!bridge?.editorInput) throw new Error('This build cannot inject editor input');
         const id = session.sessionId;
         if (!id) throw new Error('The native editor session has no id yet');
-        const target = typeof point === 'number' ? { x: 148, y: 49 } : point;
+        const target = typeof point === 'number' ? { x: 158, y: 61 } : point;
+        // A press alone never completes a click: the button would stay down for every
+        // later event, and a control sees a drag that never ends. Send the pair.
         const move = await bridge.editorInput(id, 'move', target);
         const down = await bridge.editorInput(id, 'down', target);
+        await new Promise(resolve => setTimeout(resolve, 80));
+        const up = await bridge.editorInput(id, 'up', target);
         return {
           target,
           injectedThrough: 'vst3:editorInput -> helper SendInput (real OS input)',
+          sent: ['move', 'down', 'up'],
           move: move ?? null,
           down: down ?? null,
+          up: up ?? null,
         };
       },
       closeOpenEditor: async () => {
@@ -2500,6 +2506,21 @@ export function App() {
           undo: projectHistoryRef.current.past.length,
           redo: projectHistoryRef.current.future.length,
         });
+        /** First path whose value differs, so a failed redo names its field. */
+        const firstDifference = (left: unknown, right: unknown, path = ''): string => {
+          if (left === right) return '';
+          const isObject = (value: unknown) => Boolean(value) && typeof value === 'object';
+          if (!isObject(left) || !isObject(right)) {
+            return `${path || '(root)'}: ${JSON.stringify(left)?.slice(0, 60)} != ${JSON.stringify(right)?.slice(0, 60)}`;
+          }
+          const keys = new Set([...Object.keys(left as object), ...Object.keys(right as object)]);
+          for (const key of keys) {
+            const found = firstDifference((left as Record<string, unknown>)[key],
+              (right as Record<string, unknown>)[key], path ? `${path}.${key}` : key);
+            if (found) return found;
+          }
+          return `${path || '(root)'}: structurally different`;
+        };
         const before = projectStateRef.current;
         const beforeText = comparable(before);
         const depthsBefore = depths();
@@ -2525,8 +2546,10 @@ export function App() {
           depthsBefore,
           depthsAfterUndo,
           depthsAfterRedo,
+          // A prefix is useless for diagnosis: it always matches. Report the first
+          // path that differs, so a genuine redo defect names its field.
           redoDiffersAt: redoneText === beforeText ? null
-            : redoneText.slice(0, 120),
+            : firstDifference(before, redone),
         };
       },
     };

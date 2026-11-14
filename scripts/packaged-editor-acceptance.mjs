@@ -77,6 +77,7 @@ function compactReason(evidence) {
   take('sessionError', evidence.sessionError);
   take('undoRestored', evidence.undoRestored);
   take('redoReapplied', evidence.redoReapplied);
+  take('redoDiffersAt', evidence.redoDiffersAt);
   take('redoDepths', evidence.depthsAfterUndo ? JSON.stringify({
     before: evidence.depthsBefore, afterUndo: evidence.depthsAfterUndo, afterRedo: evidence.depthsAfterRedo,
   }) : undefined);

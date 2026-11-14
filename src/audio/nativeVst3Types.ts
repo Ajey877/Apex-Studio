@@ -142,7 +142,7 @@ export interface Vst3Bridge {
    * main process refuses it unless the packaged acceptance flag is set, so this is
    * unreachable in a normal user session.
    */
-  editorInput?(id: string, action: 'move' | 'down' | 'wheel', point: { x: number; y: number }): Promise<unknown>;
+  editorInput?(id: string, action: 'move' | 'down' | 'up' | 'wheel', point: { x: number; y: number }): Promise<unknown>;
   editorRecovery?(): Promise<{ recovery: Vst3EditorRecovery | null; loadError: string | null }>;
   dismissEditorRecovery?(id: string): Promise<void>;
   /** Handshake only: transfers a dedicated live PCM port bound to this session. */

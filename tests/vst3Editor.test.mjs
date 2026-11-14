@@ -826,3 +826,23 @@ test('the packaged Gain click is derived from the real uidesc nesting', () => {
   assert.ok(new RegExp(`width: ${sliderWidth}, height: ${sliderHeight}`).test(script),
     'the slider size is used to centre the click');
 });
+
+test('the acceptance click sends a press and a release', () => {
+  // A press with no release leaves the button down for every later event: the
+  // control sees a drag that never ends and commits no value. p3 injected only
+  // MOUSEEVENTF_LEFTDOWN, so the plug-in never reported an edit -- the criterion
+  // was right to report no edit, and the injection was the defect.
+  const host = readSource('native/vst3/editor-host.hpp');
+  assert.ok(/MOUSEEVENTF_LEFTDOWN/.test(host), 'the press is sent');
+  assert.ok(/MOUSEEVENTF_LEFTUP/.test(host), 'the release is sent');
+  assert.ok(/isUp/.test(host), 'up is a distinct action, not another press');
+
+  const service = readSource('native/vst3/service.mjs');
+  assert.ok(/\['move', 'down', 'up', 'wheel'\]/.test(service), 'the service accepts up');
+
+  const app = readSource('src/App.tsx');
+  const hook = app.slice(app.indexOf('driveEditorWithRealInput'), app.indexOf('closeOpenEditor'));
+  assert.ok(/editorInput\(id, 'down'/.test(hook) && /editorInput\(id, 'up'/.test(hook),
+    'the renderer sends both halves of the click');
+  assert.ok(/sent: \['move', 'down', 'up'\]/.test(hook), 'the evidence names what was sent');
+});

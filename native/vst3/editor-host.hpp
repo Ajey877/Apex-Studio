@@ -980,6 +980,7 @@ public:
     input.type = INPUT_MOUSE;
     const bool isMove = std::strcmp(kind, "move") == 0;
     const bool isWheel = std::strcmp(kind, "wheel") == 0;
+    const bool isUp = std::strcmp(kind, "up") == 0;
     if (isMove) input.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE;
     else if (isWheel) {
       input.mi.dwFlags = MOUSEEVENTF_WHEEL;
@@ -989,6 +990,12 @@ public:
       injectedWheelCount++;
       lastInjectedWheelDelta = WHEEL_DELTA;
       lastInjectedWheelAtMs = static_cast<long long>(GetTickCount64());
+    } else if (isUp) {
+      // A press with no release never completes a click: the button stays down for
+      // every later event, so a control sees a drag that never ends and commits no
+      // value. Callers must send down and up as a pair.
+      input.mi.dwFlags = MOUSEEVENTF_LEFTUP;
+      injectedClickCount++;
     } else {
       input.mi.dwFlags = MOUSEEVENTF_LEFTDOWN;
       injectedClickCount++;
