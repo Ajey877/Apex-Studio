@@ -1314,6 +1314,12 @@ test('p4 and p6 are proven on the edited parameter, not just on depth', () => {
   assert.ok(/effectiveValueAfterRedo/.test(script), 'and after redo');
   assert.ok(/effectiveEditMoved && effectiveUndoRestored && effectiveRedoReapplied/.test(script),
     'p4 PASS requires the controller value to move, return and return again');
+  // ...and those numbers must be readable from the status line CI already lifts, not
+  // only from the detail blob that annotations truncate.
+  assert.ok(/effectiveValueBeforeEdit: e\.effectiveValueBeforeEdit/.test(script),
+    'the controller values ride the status line');
+  assert.ok(/effectiveUndoRestored: e\.effectiveUndoRestored/.test(script),
+    'so does the undo verdict');
   assert.ok(/readEffectiveParameter/.test(script),
     'the baseline comes from the controller through describeEffect, not from stored state');
   // Reading the controller opens its own short-lived native session, so the baseline

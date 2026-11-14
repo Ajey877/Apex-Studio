@@ -185,6 +185,9 @@ function writeReport(extra = {}) {
       };
     }
     if (r.id === 'p4-one-undoable-change') {
+      // Put the controller values on the status line too: they are the numbers that
+      // prove the round trip, and the PASS line previously carried only the stored
+      // ones, so a reader could not see them without the (truncated) detail blob.
       const e = r.evidence ?? {};
       return {
         entriesAddedByGesture: e.entriesAddedByGesture ?? null,
@@ -195,6 +198,13 @@ function writeReport(extra = {}) {
         editedValue: e.editedValue ?? null,
         valueAfterUndo: e.valueAfterUndo ?? null,
         valueAfterRedo: e.valueAfterRedo ?? null,
+        // The plug-in controller's own values across the round trip.
+        effectiveValueBeforeEdit: e.effectiveValueBeforeEdit ?? null,
+        effectiveValueAfterClose: e.effectiveValueAfterClose ?? null,
+        effectiveValueAfterUndo: e.effectiveValueAfterUndo ?? null,
+        effectiveValueAfterRedo: e.effectiveValueAfterRedo ?? null,
+        effectiveUndoRestored: e.effectiveUndoRestored ?? null,
+        effectiveRedoReapplied: e.effectiveRedoReapplied ?? null,
         editedDiffersFromDefault: e.editedDiffersFromDefault ?? null,
         preEditValue: e.preEditValue ?? null,
         undoRestoredOriginalValue: e.undoRestoredOriginalValue ?? null,
