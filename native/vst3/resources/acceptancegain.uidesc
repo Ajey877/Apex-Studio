@@ -38,21 +38,28 @@
 			<color-stop rgba="#242424ff" start="1"/>
 		</gradient>
 	</gradients>
-	<template background-color="~ Background" class="CViewContainer" maxSize="320, 120" minSize="320, 120" mouse-enabled="false" name="view" opacity="1" origin="0, 0" size="320, 120" transparent="false">
+	<template background-color="~ Background" class="CViewContainer" maxSize="320, 120" minSize="320, 120" mouse-enabled="true" name="view" opacity="1" origin="0, 0" size="320, 120" transparent="false">
 		<!--
-		  mouse-enabled MUST be true on a container that carries interactive children.
+		  mouse-enabled MUST be true on EVERY container above an interactive control,
+		  including the root template element itself.
 
 		  CViewContainer::onMouseDownEvent() walks its children and skips any child whose
 		  getMouseEnabled() is false, BEFORE hit-testing it at all:
 
 		      if (pV && pV->isVisible() && pV->getMouseEnabled() && pV->hitTest (...))
 
-		  So a container marked mouse-enabled="false" makes every control inside it
-		  unreachable by the mouse, however correctly those controls are bound. The
-		  slider still drew, still was bound to ParamID 0, and still could never receive
-		  a press: Windows delivered the drag to the plug-in window and VSTGUI stopped
-		  one level above the control. This is the flag that made a genuine, held drag
-		  produce no performEdit.
+		  VST3Editor adds this template to the frame as a CHILD view
+		  (`getFrame()->addView(view)`), so the template's own flag is not decorative: it
+		  decides whether the frame reaches the template at all. With the template
+		  marked mouse-enabled="false" nothing inside it is reachable, however correctly
+		  the inner containers and controls are bound, and CFrame::getViewAt() skips the
+		  same children, so the press resolves to no view at all.
+
+		  The panel below carried this mistake first; fixing it was necessary but not
+		  sufficient, because the model still had to pass through this template. The
+		  editor trace showed the result: the slider existed, was bound to ParamID 0 and
+		  had a live parameter listener, and a genuine held drag produced no MouseDown on
+		  it and no value change (case C).
 		-->
 		<view background-color="~ Panel" class="CViewContainer" maxSize="300, 96" minSize="300, 96" mouse-enabled="true" name="panel" opacity="1" origin="10, 12" size="300, 96" transparent="false">
 			<view class="CTextLabel" font="TitleFont" font-color="~ Accent" mouse-enabled="false" name="title" origin="10, 8" size="280, 16" text-alignment="left" title="ApexAcceptanceGain" transparent="true"/>

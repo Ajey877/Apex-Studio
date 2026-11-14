@@ -187,57 +187,91 @@ layout and fails if any container above an interactive control disables the mous
 parameter. So the fixture bug was real but not sufficient to explain the failure, and
 this document does not claim otherwise.
 
-**The instrument that decides C vs D, and where it lives**
+**The instrument, what it recorded, and what it proved**
 
-Deciding between C and D needs an observation *inside* the plug-in's editor, where the
-`CSlider` runs. That instrument now exists. It lives in
+Deciding between C and D needed an observation *inside* the plug-in's editor, where the
+`CSlider` runs. That instrument lives in
 `native/vst3/acceptance-fixture-editor.cpp`, the only fixture translation unit compiled
 with the VSTGUI SDK — **not** in `editor-host.hpp`, which stays free of GUI types so the
 DSP/parameter half keeps building on a host with no GUI toolchain.
 
 It does not replace the interaction. `TracedGainEditor` is a `VST3Editor` subclass: the
 same uidesc is parsed, the same `CControl`s are built, and every override forwards to
-the shipping implementation before recording anything. There is no synthetic drag and
-no direct controller call.
+the shipping implementation before recording anything. There is no synthetic drag and no
+direct controller call.
 
-| what is recorded | which of the 13 required data points it answers |
+| what it records | the data point it answers |
 | --- | --- |
 | `mouse:down … hit=` from the frame's mouse observer | 1, 2 — whether the press reached a real `CSlider`, and which control |
-| `mouse:downLandedOnGainSlider preValue=` | 3 — the value before interaction |
+| `mouse:downLandedOnGainSlider preValue=` | 3 — value before interaction |
 | `state:down afterDispatch … editing=` | 4 — value and editing flag after mouse-down |
 | `state:move afterDispatch …` (one per move) | 5 — value during the drag |
 | `state:up afterDispatch … editing=false` | 6 — value after mouse-up |
 | `lifecycle:controlBeginEdit` / `controlEndEdit` | 7, 10 — whether begin/end edit ran |
-| `controller:performEdit … accepted=true/false` | 8, 9, 11 — performEdit, its ParamID and value, and whether the controller accepted it |
+| `controller:performEdit … accepted=` | 8, 9, 11 — performEdit, its ParamID and value, and acceptance |
 | `state:* … controllerNormalized=` | 12 — the controller's value at each stage |
 | `cOrDVerdict` in the p3 evidence | 13 — whether the helper recorded an edited ParamID |
 
-Two details make the trace trustworthy rather than decorative:
+Two details keep the trace honest. The frame's mouse observers run **before** it routes
+the event, so the post-event state is read through `doAfterEventProcessing`, after
+routing. And if that read cannot be scheduled the editor records
+`afterDispatch=UNAVAILABLE`, which the harness reports as
+`UNRESOLVED_NO_POST_DISPATCH_STATE` — "no reading" has the same shape as "the value did
+not move" and must never be reported as case C.
 
-- The frame's mouse observers run **before** the frame routes the event
-  (`CFrame::dispatchMouseDownEvent` calls the observers, then dispatches), so reading
-  the control in the observer would report the state the gesture *started* in. The
-  post-event state is therefore read through `doAfterEventProcessing`, after routing.
-- If that post-event read cannot be scheduled, the editor records
-  `afterDispatch=UNAVAILABLE` and the harness classifies it as
-  `UNRESOLVED_NO_POST_DISPATCH_STATE`. "No reading" is the same shape as "the value did
-  not move", and must never be reported as case C.
+**What the trace said (run 43613875050, commit `5afab14`, 19 trace lines)**
 
-**Status: the instrument is built and its classification is tested; it has not yet
-produced a trace.** The editor half of the fixture only compiles on Windows (VSTGUI
-needs a GUI toolchain; this host has no X11), and the packaged acceptance needs the
-Windows application. The trace is emitted by the packaged run, so C vs D is decided by
-the next packaged-acceptance run — not by this revision. Until that evidence exists,
-both remain **open**:
+```text
+cOrDVerdict: CASE_C_NO_MOUSEDOWN_ON_SLIDER
+mouseDownOnGainSlider: false     controlValueMoved: false
+beganEditing: false              valuesSeen: [0.5]
+sliderPresentAtOpen: true        listenerIsEditor: true
+parameterListenerPresent: true   performEditObserved: false
+```
 
-| case | status after this revision |
+The control was present, carried the Gain tag, had the editor as its listener and had a
+live `ParameterChangeListener` — so the parameter binding was healthy and the edit
+machinery was armed. A genuinely delivered, button-held shift-drag still produced **no
+`MouseDown` on the slider and no value change**: case **C**, and specifically "the press
+never reached the control", not "the control ignored it".
+
+**The root cause**
+
+`VST3Editor` adds the parsed template to the frame as a **child** view
+(`getFrame()->addView(view)`). `CFrame` dispatches a press to its children through
+`CViewContainer::onMouseDownEvent()`, which skips any child whose `getMouseEnabled()` is
+false before hit-testing:
+
+```cpp
+if (pV && pV->isVisible() && pV->getMouseEnabled() && pV->hitTest (event.mousePosition, event))
+```
+
+`CFrame::getViewAt()` applies the same filter. Because the root `<template>` declared
+`mouse-enabled="false"`, every press stopped at the frame: the panel and the slider
+inside it were unreachable, however correctly they were bound.
+
+**The fix, and the correction it required.** The `panel` container carried this mistake
+first and fixing it was necessary but not sufficient — the press still had to pass
+through the template. An earlier revision of this document examined the template flag
+and concluded it was inert, on the reasoning that `CView::dispatchEvent` never tests a
+container's own flag and `CFrame` is itself the root. That reasoning was wrong: `CFrame`
+is the root, but the *template* is a child of it, so the flag gates everything inside.
+The layout now declares `mouse-enabled="true"` on the template, and the regression test
+walks the document with `template` and `view` on the same stack, so a disabled root
+cannot recur.
+
+| case | status |
 | --- | --- |
 | A. Windows routed it wrongly | **ruled out** — the drag lands on the plug-in child window with the button held |
-| B. The frame hit-tests the wrong view | **contributed** (the panel flag, now fixed); the root `<template>`'s `mouse-enabled="false"` was checked and is **inert** — `CView::dispatchEvent` never tests the container's own flag, and `CFrame` is itself the root, so it only gates children that do not include the frame |
-| E. performEdit happened, host rejected it | **ruled out** — no rejection, session stays open, `editedParameterIds` empty rather than refused |
-| F. Host accepted, Apex did not consume | **ruled out for the same reason** — the helper's edit snapshot is empty |
-| C. The control got it and did not change | **open — decided by the next packaged run** |
-| D. It changed and never called performEdit | **open — decided by the next packaged run** |
+| B. The frame hit-tests the wrong view | **the proven cause** — first the panel, then the root template |
+| C. The control got it and did not change | **observed** — `mouseDownOnGainSlider: false`, `valuesSeen: [0.5]` |
+| D. It changed and never called performEdit | **ruled out for this run** — the value never moved, so there was no edit to lose |
+| E. performEdit happened, host rejected it | **ruled out** — no rejection; the session stays open |
+| F. Host accepted, Apex did not consume | **ruled out** — the helper's edit snapshot is empty |
+
+Whether the corrected layout makes a genuine drag reach Apex is decided by the packaged
+acceptance run, not by this reasoning; the criteria table below carries the honest
+status.
 
 ### Why the probe was withdrawn, and what distinguishes these cases instead
 

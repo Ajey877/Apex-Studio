@@ -1002,12 +1002,21 @@ test('every container above an interactive control is mouse-enabled', () => {
 
   // Every container that OPENS before an interactive control and closes after it is
   // an ancestor. Walk the document text in order, maintaining a stack.
-  const tags = [...xml.matchAll(/<(\/?)view\b([^>]*)>/g)];
+  // The root element is a <template>, not a <view>, and VST3Editor adds it to the
+  // frame as a CHILD view. The container walk below skips mouse-disabled children, so
+  // a mouse-enabled="false" template puts every control inside it out of reach just as
+  // surely as a nested panel does. Matching only <view> here is what let that survive.
+  const rootTemplate = /<template\b([^>]*)>/.exec(xml);
+  assert.ok(rootTemplate, 'the layout has a root <template>');
+  assert.ok(!/\bmouse-enabled="false"/.test(rootTemplate[1]),
+    'the root <template> must not be mouse-enabled="false": VST3Editor adds it to the frame as a child, so the frame would never reach the controls inside it');
+
+  const tags = [...xml.matchAll(/<(\/?)(view|template)\b([^>]*)>/g)];
   const stack = [];
   let checked = 0;
   for (const tag of tags) {
     const closing = tag[1] === '/';
-    const attributes = tag[2];
+    const attributes = tag[3];
     if (closing) { stack.pop(); continue; }
     const name = /\bname="([^"]+)"/.exec(attributes)?.[1] ?? '(unnamed)';
     const selfClosing = /\/\s*$/.test(attributes);
