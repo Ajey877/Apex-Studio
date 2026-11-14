@@ -2476,8 +2476,19 @@ export function App() {
         const bridge = getVst3Bridge();
         if (!bridge) throw new Error('VST3 bridge missing');
         if (!bridge.editorCrash) throw new Error('This build cannot force an editor crash');
-        const sessionId = session.sessionId;
-        if (!sessionId) throw new Error('The native editor session has no id yet');
+        // The id is assigned only once openEditor has resolved, and the click that
+        // opened this session returns before that. Wait for it instead of sampling
+        // once: a single read races the open and reports "no id yet".
+        const sessionId = await (async () => {
+          const deadline = Date.now() + 20000;
+          while (Date.now() < deadline) {
+            if (session.sessionId) return session.sessionId;
+            if (session.isFinished) break;
+            await new Promise(resolve => setTimeout(resolve, 100));
+          }
+          return null;
+        })();
+        if (!sessionId) throw new Error('The native editor session never produced an id');
         // Kill the real helper. Without this the session simply stays open and no
         // recovery path is ever exercised -- which is what happened when the
         // criterion first ran: it observed "open" and no recovery record.
@@ -2504,13 +2515,28 @@ export function App() {
          * look broken whenever a meter ticked between the snapshot and the compare,
          * which is a property of the test, not of undo.
          */
-        const comparable = (state: typeof projectStateRef.current) => JSON.stringify({
+        /**
+         * Canonical text for the history-governed state.
+         *
+         * Key order is normalised: JSON.stringify preserves insertion order, and a
+         * redo that rebuilds an equal object with its keys in a different order
+         * compared unequal while every value matched -- which reported a redo defect
+         * that did not exist. Arrays keep their order, which is meaningful here.
+         */
+        const canonical = (value: unknown): unknown => {
+          if (Array.isArray(value)) return value.map(canonical);
+          if (!value || typeof value !== 'object') return value;
+          return Object.fromEntries(Object.keys(value as Record<string, unknown>).sort()
+            .filter(key => (value as Record<string, unknown>)[key] !== undefined)
+            .map(key => [key, canonical((value as Record<string, unknown>)[key])]));
+        };
+        const comparable = (state: typeof projectStateRef.current) => JSON.stringify(canonical({
           ...state,
           mixerTracks: state.mixerTracks.map(track => {
             const { peakL: _peakL, peakR: _peakR, ...rest } = track;
             return rest;
           }),
-        });
+        }));
         const depths = () => ({
           undo: projectHistoryRef.current.past.length,
           redo: projectHistoryRef.current.future.length,
@@ -2538,7 +2564,7 @@ export function App() {
               (right as Record<string, unknown>)[key], path ? `${path}.${key}` : key);
             if (found) return found;
           }
-          return `${path || '(root)'}: structurally different`;
+          return `${path || '(root)'}: structurally different (keys ${[...keys].join(',')})`;
         };
         const before = projectStateRef.current;
         const beforeText = comparable(before);
