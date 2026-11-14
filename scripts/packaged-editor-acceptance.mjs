@@ -43,10 +43,35 @@ const record = (id, status, evidence) => {
   // Annotations are the only CI evidence channel available here, so every
   // non-PASS criterion states why in one line instead of only living in the JSON.
   if (status !== 'PASS') {
+    // Annotations are truncated around 1000 characters, so a nested evidence blob
+    // hides its own diagnosis. Emit a compact summary line FIRST -- the few fields
+    // that explain a failure -- then the detail as far as it fits.
+    const summary = compactReason(evidence);
+    if (summary) console.log(`ACCEPTANCE-WHY ${id} ${status} ${summary}`);
     const why = JSON.stringify(evidence ?? {}).slice(0, 700);
     console.log(`ACCEPTANCE-DETAIL ${id} ${status} ${why}`);
   }
 };
+
+/** The handful of evidence fields that actually explain a non-PASS result. */
+function compactReason(evidence) {
+  if (!evidence || typeof evidence !== 'object') return '';
+  const pick = {};
+  const take = (key, value) => { if (value !== undefined && value !== null && `${value}` !== '') pick[key] = value; };
+  take('reason', evidence.reason);
+  take('error', evidence.error);
+  const ui = evidence.mixerUi ?? {};
+  take('insertRowRendered', ui.insertRowRendered);
+  take('clickedControl', evidence.clickedControl);
+  take('vst3Inserts', ui.vst3InsertCountInProject);
+  take('lastEditorOpenError', ui.lastEditorOpenError);
+  take('editorAlerts', Array.isArray(ui.editorAlertAfterClick) ? ui.editorAlertAfterClick.join(' | ') : undefined);
+  take('editorStatus', Array.isArray(ui.editorStatusAfterClick) ? ui.editorStatusAfterClick.join(' | ') : undefined);
+  take('helperLifetimeMs', evidence.helperLifetimeMs ? JSON.stringify(evidence.helperLifetimeMs) : undefined);
+  take('helperSessionErrors', Array.isArray(evidence.helperSessionErrors) && evidence.helperSessionErrors.length
+    ? evidence.helperSessionErrors.join(' | ') : undefined);
+  try { return JSON.stringify(pick).slice(0, 850); } catch { return ''; }
+}
 
 function environment() {
   const query = (cmd, args) => {
