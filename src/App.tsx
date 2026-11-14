@@ -460,6 +460,18 @@ export function App() {
    * (the only place the native cause is described) is lost between processes.
    */
   const lastEditorOpenErrorRef = useRef<string | null>(null);
+  /**
+   * The last commit's own account of what it did: whether the captured state was
+   * byte-identical to the stored one (a legitimate no-op), and enough of both states
+   * to see why.
+   */
+  const lastEditorCommitRef = useRef<{
+    unchanged: boolean;
+    capturedParameterCount: number | null;
+    storedParameterCount: number | null;
+    capturedParameters: string | null;
+    storedParameters: string | null;
+  } | null>(null);
   const [audioEditorClipId, setAudioEditorClipId] = useState<string | null>(null);
   const [audioEditorNotice, setAudioEditorNotice] = useState('');
   const [isWarpProcessorOpen, setIsWarpProcessorOpen] = useState(false);
@@ -2263,6 +2275,9 @@ export function App() {
     if (!slot || slot.type !== 'vst3' || !effect) throw new Error('VST3 effect identity/state is missing; relink the insert first.');
     const openedEffect = effect;
     lastEditorOpenErrorRef.current = null;
+    // Cleared per open, so a close that never reached the commit cannot report the
+    // verdict of a previous, unrelated session.
+    lastEditorCommitRef.current = null;
     const session = new NativeVst3EditorSession(bridge, openedEffect, {
       projectId: state.meta.id, trackId, slotId,
     }, {
@@ -2283,6 +2298,17 @@ export function App() {
         // captured state still replaces the previous one so a plugin-internal
         // (non-parameter) change reported only through setDirty is preserved.
         const unchanged = JSON.stringify(updatedEffect.state) === JSON.stringify(currentSlot.vst3Effect.state);
+        // Record the commit's OWN verdict. A zero-entry close has several legitimate
+        // explanations -- nothing changed, a stale identity, a refused save -- and they
+        // were indistinguishable from the outside, which is why one packaged run could
+        // report "committed" with no entry and no way to say whether that was correct.
+        lastEditorCommitRef.current = {
+          unchanged,
+          capturedParameterCount: finalState?.parameters?.length ?? null,
+          storedParameterCount: currentSlot.vst3Effect.state?.parameters?.length ?? null,
+          capturedParameters: JSON.stringify(finalState?.parameters ?? null),
+          storedParameters: JSON.stringify(currentSlot.vst3Effect.state?.parameters ?? null),
+        };
         const published = unchanged ? currentState
           : mutateProjectState(current => updateFxSlotInProjectState(current, trackId, slotId, { vst3Effect: updatedEffect }),
             'Edit VST3 effect in native editor');
@@ -2699,6 +2725,9 @@ export function App() {
           editedIdsBeforeClose,
           phaseAfterClose,
           errorAfterClose,
+          // The commit's own verdict: `unchanged: true` is a legitimate no-op and
+          // NOT a lost edit, and the two parameter dumps say which it was.
+          commitVerdict: lastEditorCommitRef.current,
           labelsBeforeClose: labelsBefore,
           labelsAfterClose,
           labelsAfterUndo,

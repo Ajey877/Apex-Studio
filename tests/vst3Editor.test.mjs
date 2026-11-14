@@ -1312,6 +1312,22 @@ test('p4 and p6 are proven on the edited parameter, not just on depth', () => {
   assert.ok(/failingCycleRecord: cycles\.find/.test(script),
     'the failing cycle is reported with its values before the full table');
 
+  // A zero-entry close must be explainable by the commit itself. The commit records
+  // whether the captured state was byte-identical to the stored one (a legitimate
+  // no-op) and both parameter dumps, so "committed but nothing happened" can be told
+  // apart from "a real edit was discarded".
+  const appSource = readSource('src/App.tsx');
+  assert.ok(/lastEditorCommitRef\.current = \{/.test(appSource),
+    'the commit records its own verdict');
+  assert.ok(/capturedParameters: JSON\.stringify/.test(appSource) && /storedParameters: JSON\.stringify/.test(appSource),
+    'both parameter sets are recorded, so a no-op and a lost edit differ');
+  assert.ok(/lastEditorCommitRef\.current = null;\n    const session = new NativeVst3EditorSession/.test(appSource),
+    'the verdict is cleared per open and cannot leak from a previous session');
+  assert.ok(/commitVerdict: lastEditorCommitRef\.current/.test(appSource),
+    'the packaged hook can read the verdict');
+  assert.ok(/row\.commitVerdict = result\?\.commitVerdict \?\? null;/.test(script),
+    'each cycle records it');
+
   // p6 must read the reloaded parameter and compare it to the edited value.
   assert.ok(/reloadedMatchesEdit/.test(script), 'p6 compares the reloaded parameter');
   // p4b edits the parameter again after p4 captures its value, so p6 must compare

@@ -1059,6 +1059,10 @@ async function run() {
         globalThis.__apexAcceptance.editorParameterUndoRedo());
       row.sessionPhaseAfterClose = result?.phaseAfterClose ?? null;
       row.sessionErrorAfterClose = result?.errorAfterClose ?? null;
+      // The commit's own verdict. `unchanged` with identical parameter dumps means the
+      // drag genuinely produced no change (a legitimate no-op); `unchanged` with
+      // differing dumps would mean a real edit was discarded, which IS a defect.
+      row.commitVerdict = result?.commitVerdict ?? null;
       row.entriesAdded = result?.entriesAddedByGesture ?? null;
       // After a committing close the panel stays up with its result and a Dismiss
       // control, exactly as it does for a user. Clicking Dismiss is part of the flow:
@@ -1094,7 +1098,12 @@ async function run() {
         } else if (!(row.paramIdsReceived ?? []).includes(0)) {
           failingReason = `the plug-in reported no edit of ParamID 0 (received ${JSON.stringify(row.paramIdsReceived)})`;
         } else if (!moved) {
-          failingReason = `the gesture did not change the controller value (it stayed at ${row.effectiveAfterClose})`;
+          // Distinguish "the drag really changed nothing" from "a real change was
+          // discarded". The commit's own verdict is the only thing that can tell them
+          // apart, and they need opposite fixes.
+          failingReason = row.commitVerdict?.unchanged === true
+            ? `the gesture produced no change to commit (the captured state was identical to the stored one: stored ${row.commitVerdict.storedParameters} vs captured ${row.commitVerdict.capturedParameters})`
+            : `the gesture did not change the controller value (it stayed at ${row.effectiveAfterClose}) and the commit did not report a no-op`;
         } else if (!row.undoRestored) {
           failingReason = `undo did not restore ${row.effectiveBefore} (got ${row.effectiveAfterUndo})`;
         } else if (!row.redoReapplied) {
