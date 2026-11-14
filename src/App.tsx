@@ -453,6 +453,12 @@ export function App() {
   const [vst3EditorView, setVst3EditorView] = useState<import('./audio/nativeVst3EditorSession').Vst3EditorView | null>(null);
   const [isVst3EditorBusy, setIsVst3EditorBusy] = useState(false);
   const vst3EditorRef = useRef<import('./audio/nativeVst3EditorSession').NativeVst3EditorSession | null>(null);
+  /**
+   * The last native-editor open failure, kept so the packaged acceptance run can
+   * report why an editor failed to appear. Without this the helper's own stderr
+   * (the only place the native cause is described) is lost between processes.
+   */
+  const lastEditorOpenErrorRef = useRef<string | null>(null);
   const [audioEditorClipId, setAudioEditorClipId] = useState<string | null>(null);
   const [audioEditorNotice, setAudioEditorNotice] = useState('');
   const [isWarpProcessorOpen, setIsWarpProcessorOpen] = useState(false);
@@ -2255,6 +2261,7 @@ export function App() {
     const effect = slot?.vst3Effect;
     if (!slot || slot.type !== 'vst3' || !effect) throw new Error('VST3 effect identity/state is missing; relink the insert first.');
     const openedEffect = effect;
+    lastEditorOpenErrorRef.current = null;
     const session = new NativeVst3EditorSession(bridge, openedEffect, {
       projectId: state.meta.id, trackId, slotId,
     }, {
@@ -2290,6 +2297,9 @@ export function App() {
     try {
       await session.open();
     } catch (error) {
+      // Keep the reason. The helper's own stderr is the only description of the
+      // native cause, and the session that carries it is discarded right here.
+      lastEditorOpenErrorRef.current = error instanceof Error ? error.message : String(error);
       if (vst3EditorRef.current === session) vst3EditorRef.current = null;
       throw error;
     } finally { setIsVst3EditorBusy(false); }
@@ -2406,6 +2416,12 @@ export function App() {
         if (session) await session.close();
         return { phase: vst3EditorRef.current?.currentView.phase ?? null };
       },
+      /**
+       * Why the last open attempt failed, as the UI knows it. The packaged
+       * acceptance run records this so a failed open is diagnosable from CI instead
+       * of showing up as a helper that appeared and vanished.
+       */
+      lastEditorOpenError: () => lastEditorOpenErrorRef.current,
       /** Poll the open session once, exactly as the panel's loop does. */
       pollOpenEditor: async () => {
         const session = vst3EditorRef.current;

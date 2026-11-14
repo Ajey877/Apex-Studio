@@ -311,6 +311,11 @@ async function run() {
     .locator('p[role="status"]').allInnerTexts().then(list => list.filter(Boolean).slice(-4)).catch(() => []);
   ui.editorAlertAfterClick = await page
     .locator('p[role="alert"]').allInnerTexts().then(list => list.filter(Boolean).slice(-4)).catch(() => []);
+  // The renderer's own record of why the open failed, which carries the helper's
+  // stderr through every layer. This is the only place the native cause survives.
+  ui.lastEditorOpenError = await page
+    .evaluate(() => globalThis.__apexAcceptance?.lastEditorOpenError?.() ?? null)
+    .catch(() => null);
 
   // Cross-check that the project state agrees an insert was actually added.
   const inserted = await page.evaluate(async () => {
