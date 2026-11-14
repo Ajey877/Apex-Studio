@@ -239,6 +239,15 @@ async function run() {
   stage('p1-mixer-ui');
   const ui = {};
 
+  // 0. Switch to the Mixer workspace. The app does not open there, so a click on
+  // the ribbon tab is a genuine part of the user's path -- without it there are no
+  // insert rows to click at all.
+  const mixerTab = page.locator('#nav-mixer');
+  await mixerTab.waitFor({ state: 'visible', timeout: 30000 });
+  await mixerTab.click({ timeout: 15000 });
+  ui.openedMixerView = true;
+  await page.waitForTimeout(500);
+
   // 1. Select a Mixer track. The Mixer strip buttons carry the track name.
   const trackButton = page.getByRole('button', { name: /Kick \/ 808/i }).first();
   await trackButton.waitFor({ state: 'visible', timeout: 30000 });
