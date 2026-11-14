@@ -134,11 +134,12 @@
   ],
   "summary": {
     "total": 16,
-    "pass": 14,
+    "pass": 15,
     "fail": 0,
-    "notVerified": 2,
+    "notVerified": 1,
     "allVerifiedPassing": false,
-    "comment": "Every criterion in the twelve-item assignment passed on real Windows. The two NOT_VERIFIED rows are the packaged-application claim and the AGain audio-path policy row, neither of which was observed and neither of which is reported as passing."
+    "observedAt": "2e5b95c",
+    "comment": "Every one of the fifteen runnable native criteria passed on real Windows at 2e5b95c, including keyboard, mouse/wheel, focus, DPI, resize, state capture, native close, repeated cycles and failure/recovery. The single NOT_VERIFIED row is the packaged-application claim, which is measured separately by scripts/packaged-editor-acceptance.mjs and is not reported as passing here."
   },
   "proofRules": {
     "attemptIsNotReceipt": "sendInputAccepted / injectedWheelCount only record that injection was requested. Evidence is only counted when raised by the receiver: the editor WndProc, or IPlugView::onKeyDown/onKeyUp/onWheel.",
@@ -292,5 +293,24 @@
       "fix": "Press, move and release are real SendInput events again, with the crucial correction that `down` genuinely leaves the button held and only `up` releases it (a move to the release point followed by MOUSEEVENTF_LEFTUP). The helper reports buttonHeldAfter from GetAsyncKeyState after each step, so the evidence states whether the button was really down. A structural test asserts the release is issued exactly once, in the `up` branch, and that the press branch never releases.",
       "wouldTheOldTestHaveCaughtIt": "No. Posted messages were accepted by the OS and the diagnostics recorded them as delivered; only the live key state, which is what the control actually reads, distinguishes a claim from a press."
     }
-  ]
+  ],
+  "packagedApplicationAt2e5b95c": {
+    "total": 9,
+    "pass": 6,
+    "fail": 1,
+    "notVerified": 2,
+    "statuses": {
+      "p1-mixer-opens-editor": "PASS",
+      "p2-native-window-responsive": "PASS",
+      "p3-parameter-reaches-apex": "NOT_VERIFIED",
+      "p4-one-undoable-change": "FAIL",
+      "p5-undo-redo": "PASS",
+      "p6-save-quit-reload": "PASS",
+      "p7-no-leaked-helpers": "PASS",
+      "p8-recovery": "PASS",
+      "p9-dpi-125-150": "NOT_VERIFIED"
+    },
+    "openDefect": "p3: a real shift-drag is delivered to the plug-in's VSTGUI child window -- MOUSEEVENTF_LEFTDOWN accepted, the button held, the drag move processed while it is held -- and the plug-in still reports no edited parameter. The remaining question is inside the plug-in's VSTGUI keyboard/mouse dispatch, not in delivery, which is now observed step by step.",
+    "p4IsAConsequence": "p4 reports entriesAdded 0 because no edit was made, so closing the editor correctly commits nothing. It is not an independent defect; it cannot pass until p3 does."
+  }
 }
