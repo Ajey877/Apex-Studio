@@ -2591,7 +2591,17 @@ export function App() {
         const edited = read();
         const before = depths();
         const labelsBefore = undoLabels();
+        // What the renderer believed about the edit BEFORE the commit, so a commit
+        // that discarded it can be told apart from a drag that never registered.
+        const sessionBeforeClose = vst3EditorRef.current?.currentView ?? null;
+        const editedIdsBeforeClose = sessionBeforeClose?.editedParameterIds ?? [];
         await handleCloseVst3Editor();
+        // The commit runs inside close(): if it threw, the session reports 'recovered'
+        // and no undo entry is added. Recording the phase and error is what explains a
+        // gesture that provably edited the plug-in but added nothing to history.
+        const sessionAfterClose = vst3EditorRef.current?.currentView ?? null;
+        const phaseAfterClose = sessionAfterClose?.phase ?? null;
+        const errorAfterClose = sessionAfterClose?.error ?? null;
         const afterClose = read();
         const afterCloseDepths = depths();
         const labelsAfterClose = undoLabels();
@@ -2617,6 +2627,9 @@ export function App() {
           valueAfterClose: afterClose,
           valueAfterUndo: afterUndo,
           valueAfterRedo: afterRedo,
+          editedIdsBeforeClose,
+          phaseAfterClose,
+          errorAfterClose,
           labelsBeforeClose: labelsBefore,
           labelsAfterClose,
           labelsAfterUndo,

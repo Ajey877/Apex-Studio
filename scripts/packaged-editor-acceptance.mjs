@@ -828,6 +828,10 @@ async function run() {
     valueAfterRedo: history?.valueAfterRedo ?? null,
     editedDiffersFromDefault,
     preEditValue,
+    // Why a commit did or did not happen, in the commit's own terms.
+    editedIdsBeforeClose: history?.editedIdsBeforeClose ?? null,
+    phaseAfterClose: history?.phaseAfterClose ?? null,
+    errorAfterClose: history?.errorAfterClose ?? null,
     labelsBeforeClose: history?.labelsBeforeClose ?? null,
     labelsAfterClose: history?.labelsAfterClose ?? null,
     labelsAfterUndo: history?.labelsAfterUndo ?? null,
