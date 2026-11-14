@@ -488,8 +488,13 @@ test('p1 drives the real Mixer UI and never substitutes a test-only handler', ()
   // The real control chain must be present, in order.
   assert.ok(/getByTitle\('Add Effect Plugin'\)/.test(script), 'the real "+" button');
   assert.ok(/name: 'Native VST3 Effect'/.test(script), 'the real picker entry point');
-  assert.ok(/getByRole\('button', \{ name: EDITOR_FIXTURE_NAME \}\)/.test(script),
+  assert.ok(/getByRole\('button', \{ name: \/ApexAcceptanceGain\/ \}\)/.test(script),
     'the fixture is chosen from the real picker list');
+  // The picker row's accessible name is "<name> · <vendor><path>", so discovery's
+  // anchored EDITOR_FIXTURE_NAME matcher cannot be reused for the click; the
+  // criterion must say what the picker reported so a missing row is diagnosable.
+  assert.ok(/pickerStatusText/.test(script), 'the picker status is recorded');
+  assert.ok(/pickerRowLabel/.test(script), 'the matched row label is recorded');
   assert.ok(/name: 'Open VST3 editor'/.test(script), 'the real editor control');
   assert.ok(/ui\.insertRowRendered = true/.test(script), 'the rendered insert row is recorded');
 });

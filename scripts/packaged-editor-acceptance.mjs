@@ -275,9 +275,18 @@ async function run() {
   await nativeChoice.click({ timeout: 15000 });
   ui.openedVst3Picker = true;
 
-  // 4. Pick our fixture by its registered name from the real picker list.
-  const fixtureButton = page.getByRole('button', { name: EDITOR_FIXTURE_NAME }).first();
+  // 4. Pick our fixture from the real picker list.
+  //
+  // The picker row's accessible name is "<name> · <vendor><path>", so the anchored
+  // EDITOR_FIXTURE_NAME matcher used for bridge discovery cannot be reused here --
+  // it is correct for a bare name and wrong for this concatenation. Match on the
+  // registered name as a substring, and record what the picker itself reported so a
+  // discovery problem is visible instead of looking like a missing row.
+  const pickerStatus = page.locator('[aria-label="VST3 effect picker"] [role="status"]').first();
+  ui.pickerStatusText = await pickerStatus.innerText().catch(() => '');
+  const fixtureButton = page.getByRole('button', { name: /ApexAcceptanceGain/ }).first();
   await fixtureButton.waitFor({ state: 'visible', timeout: 60000 });
+  ui.pickerRowLabel = await fixtureButton.innerText().catch(() => '');
   await fixtureButton.click({ timeout: 60000 });
   ui.choseFixtureFromPicker = true;
 
