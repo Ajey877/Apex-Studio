@@ -228,6 +228,27 @@
       "fix": "Rewrote the comment. A unit test now asserts the file is well-formed (no double hyphen in comments, balanced elements) and is verified to fail when the double hyphen is restored.",
       "wouldTheOldTestHaveCaughtIt": false,
       "note": "Sixth defect; also only reachable once the packaged run drove the real UI."
+    },
+    {
+      "id": "uidesc-declared-no-control-tags",
+      "symptom": "Packaged p3: the plug-in editor reported no parameter edit at all (session stayed open, editedParameterIds empty, no error), despite real SendInput landing on the plug-in child window.",
+      "cause": "The layout used control-tag=\"Gain\" but its uidesc had no <control-tags> table. UIDescription::getTagForName() then returns -1, and a control with tag -1 is bound to nothing, so it never emits beginEdit/performEdit/endEdit.",
+      "fix": "Added <control-tags> declaring Gain -> 0, matching the controller ParamID. A unit test asserts every used control-tag is declared and resolves to the controller parameter id.",
+      "wouldTheOldTestHaveCaughtIt": false
+    },
+    {
+      "id": "undo-redo-compared-unsanitized-state",
+      "symptom": "Packaged p5: undoRestored true, redoReapplied false, while the stacks moved 2->1 and 1->2 and the walker found no differing value.",
+      "cause": "projectHistory stores sanitizeProjectSnapshot(state), so a restored state is the sanitized representation. Comparing it against the raw pre-undo object reported a difference redo does not control; JSON.stringify key order compounded it.",
+      "fix": "Both sides are snapshotted the same way history snapshots them and compared canonically. Verified locally: undo changes state, redo restores it exactly.",
+      "wouldTheOldTestHaveCaughtIt": false
+    },
+    {
+      "id": "recovery-race-on-session-id",
+      "symptom": "Packaged p8: \"The native editor session has no id yet\"; nothing was ever crashed, so recovery was never exercised.",
+      "cause": "The session id is assigned only after openEditor resolves, which happens after the click handler returns. Reading it once immediately after the click raced the open.",
+      "fix": "Wait for the id (or for the session to finish) before crashing, and kill the real helper pid from the spawned child.",
+      "wouldTheOldTestHaveCaughtIt": false
     }
   ]
 }

@@ -17,6 +17,17 @@
 		<color name="Label" rgba="#e0e0e0ff"/>
 		<color name="Accent" rgba="#ff6e00ff"/>
 	</colors>
+	<!--
+	  The control-tag table is what binds the visible controls to controller
+	  parameters. Without this node, UIDescription::getTagForName() asks the
+	  controller, which (correctly) has no name mapping of its own, and returns -1;
+	  a control whose tag is -1 is not bound to anything, so it can never emit
+	  beginEdit/performEdit/endEdit at all. "Gain" here must name the SAME parameter
+	  the controller exposes as ParamID 0.
+	-->
+	<control-tags>
+		<control-tag name="Gain" tag="0"/>
+	</control-tags>
 	<fonts>
 		<font name="LabelFont" font="Arial" size="11"/>
 		<font name="TitleFont" font="Arial" size="12" bold="true"/>

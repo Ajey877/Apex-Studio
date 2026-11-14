@@ -76,6 +76,34 @@ Consequently no criterion may be gated on a comparison that is true of every
 possible value (the previous wheel check used `hostWheelCount >= 0`, which could
 never fail).
 
+### Why the editor could not change the parameter (control tags)
+
+A VSTGUI control reaches a parameter through a **control tag**: `UIDescription::getTagForName`
+looks the name up in the uidesc's `<control-tags>` table, then asks the controller. A
+name in neither place resolves to `-1`, and a control whose tag is `-1` is bound to
+nothing — it still draws, still takes clicks, and still never emits
+`beginEdit`/`performEdit`/`endEdit`, so the host cannot observe an edit at all.
+
+The fixture's layout named `control-tag="Gain"` but declared no `<control-tags>`
+table, so the slider was decorative. This is why packaged `p3` reported a session
+that stayed `open` with no edit and no error: nothing was broken in the host, the
+plug-in, or the input injection; the layout had no binding. A unit test now asserts
+that every `control-tag` used by the layout is declared in the table and that the
+`Gain` entry resolves to the same ParamID the controller exposes.
+
+### Why redo looked broken (history stores sanitized state)
+
+`projectHistory` stores `sanitizeProjectSnapshot(state)` — a normalize plus document
+round-trip — not the raw React state object. After a redo the live state is therefore
+the *sanitized* representation, so comparing it against the raw pre-undo object
+reports a difference that undo/redo neither caused nor controls. Packaged `p5` was
+doing exactly that, and additionally compared `JSON.stringify` output, which is
+sensitive to key insertion order.
+
+The round trip now snapshots both sides the way history does and compares
+canonically (sorted keys, `undefined` dropped, array order preserved). Undo/redo
+depth transitions of 1 → 1 → 0 confirm the stacks themselves were always correct.
+
 ### Two defects the stricter criteria found
 
 Rewriting criteria 5 and 6 to demand real receipts immediately turned both red.

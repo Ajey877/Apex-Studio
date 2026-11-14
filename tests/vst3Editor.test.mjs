@@ -866,3 +866,48 @@ test('the recovery crash kills the real helper and is acceptance-only', () => {
   assert.ok(!/^ {8}crashEditorAndRecover: async \(\) => \{\n {10}const session[\s\S]{0,400}await new Promise\(resolve => setTimeout\(resolve, 2500\)\);$/m.test(hook),
     'the hook no longer merely waits and hopes');
 });
+
+test('every control-tag used by the uidesc is declared in the control-tag table', () => {
+  const xml = readSource('native/vst3/resources/acceptancegain.uidesc');
+  // UIDescription::getTagForName() looks the name up in <control-tags> and then
+  // asks the controller; a name in neither place resolves to -1, and a control
+  // whose tag is -1 is bound to nothing, so it can never emit
+  // beginEdit/performEdit/endEdit. That is exactly how the Gain slider silently
+  // produced no parameter change at all.
+  const declared = new Map([...xml.matchAll(/<control-tag\s+name="([^"]+)"\s+tag="(\d+)"/g)]
+    .map(match => [match[1], Number(match[2])]));
+  assert.ok(declared.size > 0, 'the uidesc declares a control-tag table');
+
+  const used = [...xml.matchAll(/control-tag="([^"]+)"/g)].map(match => match[1]);
+  assert.ok(used.length > 0, 'the layout binds at least one control');
+  for (const name of used) {
+    assert.ok(declared.has(name), `control-tag "${name}" is declared in <control-tags>`);
+  }
+
+  // And the table must name the same parameter the controller exposes, or the
+  // binding points at a parameter that does not exist.
+  const controller = readSource('native/vst3/acceptance-fixture-controller.cpp');
+  const gainId = Number(controller.match(/kParamGain\s*=\s*(\d+)/)?.[1]
+    ?? readSource('native/vst3/acceptance-fixture.hpp').match(/kParamGain\s*=\s*(\d+)/)?.[1]);
+  assert.equal(declared.get('Gain'), gainId,
+    'the Gain control-tag resolves to the controller parameter id');
+});
+
+test('undo/redo comparison uses the representation history stores', () => {
+  const app = readSource('src/App.tsx');
+  // The hook runs until the next acceptance member; crashEditorAndRecover appears
+  // EARLIER in the file, so slicing to it would produce an empty string.
+  const start = app.indexOf('undoRedoRoundTrip');
+  const rest = app.slice(start + 'undoRedoRoundTrip'.length);
+  const hook = rest.slice(0, rest.search(/\n {6}\w+: async \(/) === -1 ? rest.length
+    : rest.search(/\n {6}\w+: async \(/));
+  assert.ok(hook.includes('comparable'), 'the round trip body was found');
+  // History stores sanitizeProjectSnapshot(state), a normalise + document round
+  // trip, so the restored state is the sanitized form. Comparing it against the raw
+  // pre-undo object reported a redo failure that did not exist.
+  assert.ok(/import \{ sanitizeProjectSnapshot \}/.test(app),
+    'the sanitizer history uses is imported');
+  assert.ok(/sanitizeProjectSnapshot\(state\)/.test(hook),
+    'the round trip snapshots the same way history does');
+  assert.ok(/\.sort\(\)/.test(hook), 'key order is normalised before comparing');
+});

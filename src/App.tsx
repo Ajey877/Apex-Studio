@@ -86,6 +86,7 @@ import {
   resolvePlaylistClipPublication
 } from './state/playlistClipIntegrity';
 import { synchronizeBeforeRuntimePublication } from './state/runtimeStatePublication';
+import { sanitizeProjectSnapshot } from './state/projectHistory';
 import { resynchronizeLiveEngineFromProjectState } from './state/liveEngineResynchronization';
 import { addEmptyPatternToProjectState, clonePatternInProjectState, selectPatternInHistory, selectPatternInProjectState } from './state/patternContent';
 import { audioToMidiNewPatternLengthSteps, commitAudioToMidiNotes } from './state/audioToMidiCommit';
@@ -2516,12 +2517,23 @@ export function App() {
          * which is a property of the test, not of undo.
          */
         /**
-         * Canonical text for the history-governed state.
+         * Canonical text for the state undo/redo governs.
          *
-         * Key order is normalised: JSON.stringify preserves insertion order, and a
-         * redo that rebuilds an equal object with its keys in a different order
-         * compared unequal while every value matched -- which reported a redo defect
-         * that did not exist. Arrays keep their order, which is meaningful here.
+         * Two corrections, both found by redo reporting failure when it had actually
+         * worked:
+         *
+         * 1. History stores sanitizeProjectSnapshot(state) -- a normalize + document
+         *    round-trip -- not the raw React state object. So after a redo the live
+         *    state is the SANITIZED representation, and comparing a restored state
+         *    against the raw pre-undo object reported a difference that undo/redo
+         *    neither caused nor controls. Both sides are snapshotted the same way
+         *    history snapshots them.
+         * 2. Key order is normalised. JSON.stringify preserves insertion order, and a
+         *    redo that rebuilds an equal document with its keys in another order
+         *    compared unequal while every value matched.
+         *
+         * Live meters (peakL/peakR) are excluded because they are deliberately not
+         * part of history, and array order is preserved because it is meaningful.
          */
         const canonical = (value: unknown): unknown => {
           if (Array.isArray(value)) return value.map(canonical);
@@ -2530,13 +2542,16 @@ export function App() {
             .filter(key => (value as Record<string, unknown>)[key] !== undefined)
             .map(key => [key, canonical((value as Record<string, unknown>)[key])]));
         };
-        const comparable = (state: typeof projectStateRef.current) => JSON.stringify(canonical({
-          ...state,
-          mixerTracks: state.mixerTracks.map(track => {
-            const { peakL: _peakL, peakR: _peakR, ...rest } = track;
-            return rest;
-          }),
-        }));
+        const comparable = (state: typeof projectStateRef.current) => {
+          const snapshot = sanitizeProjectSnapshot(state);
+          return JSON.stringify(canonical({
+            ...snapshot,
+            mixerTracks: snapshot.mixerTracks.map(track => {
+              const { peakL: _peakL, peakR: _peakR, ...rest } = track;
+              return rest;
+            }),
+          }));
+        };
         const depths = () => ({
           undo: projectHistoryRef.current.past.length,
           redo: projectHistoryRef.current.future.length,
