@@ -269,6 +269,41 @@ cannot recur.
 | E. performEdit happened, host rejected it | **ruled out** — no rejection; the session stays open |
 | F. Host accepted, Apex did not consume | **ruled out** — the helper's edit snapshot is empty |
 
+**The corrected layout does make the drag reach Apex.** The packaged run at `48f713c`
+reports, from the editor's own trace:
+
+```text
+cOrDVerdict: EDIT_REACHED_CONTROLLER
+mouseDownOnGainSlider: true       controlValueMoved: true
+valuesSeen: [0.5, 0.531437]       controlBeginEditObserved: true
+valueChangedObserved: true        performEditObserved: true
+controlEndEditObserved: true      gainParameterEdited: true
+editedParameterIds: [0]           sliderPresentAtOpen: true
+```
+
+Every one of the thirteen required data points is now observed on the real control:
+the press reaches the `CSlider`, its value moves from the plug-in's 0.5 to 0.531437,
+begin/valueChanged/performEdit/end all fire, the controller accepts the edit, the
+helper records ParamID 0, and Apex's poll loop reports the same parameter as edited.
+Case C is closed for this build, and the layout fix is what closed it.
+
+`mouseDownOnGainSlider` itself needed a correction to become trustworthy. It is set
+from `CFrame::getViewAt()`, which defaults to a *shallow* search and returned the
+enabled `panel` rather than the slider inside it — so an earlier run reported
+`false` while the same trace showed the slider editing and emitting `performEdit`. The
+probe now asks for a deep search with containers excluded, and it reports `true`.
+
+**What still varies between runs.** Three consecutive packaged runs at the same code
+produced one committed edit each time it was measured cleanly, and one run produced
+none: `entriesAddedByGesture: 0` with `labelsAfterClose: ["Add VST3 Mixer effect"]`,
+while p3 in that same session reported `editedParameterIds: [0]`. The commit path has
+several legitimate exits that add no entry (state capture failed, no final state, the
+captured state byte-identical to what was stored, or the save threw), and they were
+indistinguishable in the evidence. The hook now records `editedIdsBeforeClose`,
+`phaseAfterClose` and `errorAfterClose` so the next occurrence names its own cause.
+That difference is **not explained yet**, and no determinism claim is made across
+runs until it is.
+
 Whether the corrected layout makes a genuine drag reach Apex is decided by the packaged
 acceptance run, not by this reasoning; the criteria table below carries the honest
 status.
