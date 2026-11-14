@@ -47,6 +47,9 @@ export interface Vst3EditorHandlers {
 }
 
 const POLL_INTERVAL_MS = 120;
+/** A close is retried past an in-flight poll. Bounded: a stuck service must fail. */
+const CLOSE_RETRY_INTERVAL_MS = 60;
+const CLOSE_RETRY_DEADLINE_MS = 5000;
 const MAX_POLL_FAILURES = 3;
 
 const message = (error: unknown) => (error instanceof Error ? error.message : String(error));
@@ -212,7 +215,7 @@ export class NativeVst3EditorSession {
     if (commit) this.publish({ phase: 'closing', status: 'Closing the plug-in editor and capturing its final state…' });
     let status: Vst3EditorStatus;
     try {
-      status = await this.bridge.closeEditor(id);
+      status = await this.closeEditorWhenIdle(id);
     } catch (error) {
       this.publish({ phase: 'recovered', status: 'The plug-in state could not be captured; the last known values were kept for recovery.', error: message(error) });
       await this.release(false);
@@ -234,6 +237,38 @@ export class NativeVst3EditorSession {
       return this.view;
     }
     return this.finishWithStatus(status);
+  }
+
+  /**
+   * Close the editor, retrying while the service reports it is mid-poll.
+   *
+   * The service refuses closeEditor with "still servicing another request" whenever a
+   * poll is in flight. That refusal is correct back-pressure, but a poll is a short
+   * periodic status read that the renderer itself issued -- so a user who closes the
+   * window at the wrong moment had their edit thrown away: the close was refused, the
+   * commit never ran, and the panel reported "recovered" with nothing saved. One
+   * packaged run recorded exactly that, with the plug-in having already reported the
+   * edited ParamID and the value reverting to its default.
+   *
+   * Only that specific transient message is retried, the wait is bounded, and every
+   * other error still propagates: a genuinely stuck service must still fail loudly.
+   * Nothing is re-sent on the user's behalf -- the retry re-attempts the same close,
+   * and the plug-in's state is captured once, by the call that succeeds.
+   */
+  private async closeEditorWhenIdle(id: string): Promise<Vst3EditorStatus> {
+    const deadline = Date.now() + CLOSE_RETRY_DEADLINE_MS;
+    for (;;) {
+      try {
+        return await this.bridge.closeEditor(id);
+      } catch (error) {
+        const text = message(error);
+        const transient = text.includes('still servicing another request');
+        if (!transient || Date.now() > deadline) throw error;
+        // Stop polling first so this close cannot race a poll it just scheduled.
+        this.stopPolling();
+        await new Promise(resolve => setTimeout(resolve, CLOSE_RETRY_INTERVAL_MS));
+      }
+    }
   }
 
   private async finishWithStatus(status: Vst3EditorStatus) {

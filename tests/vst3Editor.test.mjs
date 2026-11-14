@@ -537,6 +537,56 @@ test('every non-PASS criterion states why in an annotation', () => {
     'FAIL/NOT_VERIFIED reasons are visible without downloading artifacts');
 });
 
+test('a close refused mid-poll is retried, so a real edit is not thrown away', async () => {
+  // The packaged run that exposed this recorded phaseAfterClose 'recovered' with
+  // "VST3 editor is still servicing another request; retry in a moment." while the
+  // plug-in had already reported the edited ParamID -- and the value was back at its
+  // default. A periodic poll the renderer itself scheduled was enough to lose a user's
+  // edit, because the close was treated as permanently refused.
+  let closeAttempts = 0;
+  const { bridge, calls } = fakeBridge({
+    poll: async () => openStatus(),
+    close: async () => {
+      closeAttempts += 1;
+      // The service refuses while its poll is in flight; it clears moments later.
+      if (closeAttempts < 3) throw new Error('VST3 editor is still servicing another request; retry in a moment.');
+      return closedStatus();
+    },
+  });
+  /** @type {Vst3State[]} */
+  const committed = [];
+  const { instance, views } = session(bridge, async state => { committed.push(state); });
+  await instance.open();
+  const view = await instance.close();
+  assert.equal(closeAttempts, 3, 'the close keeps trying past the in-flight poll');
+  assert.equal(committed.length, 1, 'the edit is committed exactly once');
+  assert.equal(view.phase, 'committed', 'the close reports success rather than recovery');
+  // Release must still be told the state was committed, or the main process keeps a
+  // duplicate recovery record for an edit that was actually saved.
+  assert.deepEqual(calls.filter(c => c[0] === 'finishEditor').at(-1), ['finishEditor', 'editor-1', true]);
+});
+
+test('a close refused for any other reason still fails loudly instead of retrying', async () => {
+  // The retry is for one transient, self-inflicted condition only. A real capture
+  // failure must not be looped on: that would stall the close and hide the cause.
+  let closeAttempts = 0;
+  const { bridge } = fakeBridge({
+    poll: async () => openStatus(),
+    close: async () => {
+      closeAttempts += 1;
+      throw new Error('VST3 editor state capture failed; nothing was committed.');
+    },
+  });
+  let commits = 0;
+  const { instance, views } = session(bridge, async () => { commits += 1; });
+  await instance.open();
+  const view = await instance.close();
+  assert.equal(closeAttempts, 1, 'a genuine failure is attempted once, not retried');
+  assert.equal(commits, 0, 'and nothing is committed');
+  assert.equal(view.phase, 'recovered', 'the session reports recovery');
+  assert.match(view.error, /state capture failed/, 'and keeps the real reason');
+});
+
 test('a crashed helper is reported by its own reason, not a later generic error', async () => {
   // Regression: the service drops the dead session on the first failed poll, so
   // attempts 2 and 3 answer "closed or belongs to another renderer". The panel
