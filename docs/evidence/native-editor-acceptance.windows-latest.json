@@ -168,13 +168,13 @@
     },
     "testTarget": "apex-acceptance-vst3-test",
     "testResult": {
-      "total": 39,
-      "pass": 39,
+      "total": 43,
+      "pass": 43,
       "fail": 0,
       "platform": "linux x64 (local)",
       "command": "./build/native-vst3/bin/apex-acceptance-vst3-test",
       "exitCode": 0,
-      "note": "Proves the fixture itself before it is used to judge the host: measured gain law, stereo buses, absence of event buses, in-block parameter application, state round-trip and truncation rejection, and controller exposure of ParamID 0."
+      "note": "Proves the fixture itself before it is used to judge the host: measured gain law, stereo buses, absence of event buses, in-block parameter application, state round-trip and truncation rejection, controller exposure of ParamID 0, and -- added after the packaged run failed -- that the component declares the controller class id PlugProvider::initialize() requires."
     }
   },
   "dpiDistinction": {
@@ -212,6 +212,14 @@
       "cause": "A Windows checkout has CRLF line endings, so \\n\\s+ never matched.",
       "fix": "readSource() normalises CRLF to LF and the assertion uses \\s+. Verified by converting all native/vst3 sources to CRLF: 53/53 pass, and reverting only the assertion makes it fail.",
       "wouldTheOldTestHaveCaughtIt": false
+    },
+    {
+      "id": "fixture-was-constructible-but-not-loadable",
+      "symptom": "The packaged run died at vst3:inspectEffect with \"VST3: Plugin component/controller initialization failed\"; everything else passed.",
+      "cause": "AcceptanceGainProcessor never called setControllerClass(), so getControllerClassId returned kResultFalse. PluginHost::PlugProvider::initialize() requires a controller class id and fails without one. The DSP test only constructed the two classes directly, which never exercises that path.",
+      "fix": "The constructor now calls setControllerClass(kControllerUID); three load-path assertions were added to the fixture test and were verified to fail when that line is removed.",
+      "wouldTheOldTestHaveCaughtIt": false,
+      "note": "Genuine end-to-end defect in the fixture, found only because the packaged path was finally made to run the real Mixer UI instead of a test hook."
     }
   ]
 }

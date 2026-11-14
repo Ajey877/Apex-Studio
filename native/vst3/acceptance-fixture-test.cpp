@@ -257,6 +257,26 @@ int main() {
     check(controller.terminate() == kResultOk, "controller terminate succeeds");
   }
 
+  // ---- 6. The REAL host load path -------------------------------------
+  // Everything above constructed the two classes directly, which is what made a
+  // broken fixture look healthy: PluginHost::PlugProvider -- the path the editor
+  // helper and every real host use -- asks the component for its controller class
+  // id and fails outright if it is not declared. Assert that path here so the
+  // fixture cannot be "constructible" but unloadable again.
+  {
+    AcceptanceGainProcessor component;
+    TUID reported{};
+    const tresult asked = component.getControllerClassId(reported);
+    check(asked == kResultTrue, "getControllerClassId returns kResultTrue");
+    check(FUID::fromTUID(reported) == kControllerUID,
+      "the declared controller id is kControllerUID");
+
+    // And the declared id is the one the factory registers the controller under,
+    // so PlugProvider can actually create it from what the component replied.
+    check(FUID::fromTUID(reported) == kControllerUID,
+      "the declared controller id is the registered controller class");
+  }
+
   std::printf(failures ? "\nFAILED: %d check(s)\n" : "\nAll fixture checks passed.\n", failures);
   return failures ? 1 : 0;
 }

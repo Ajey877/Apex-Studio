@@ -20,6 +20,18 @@ FUnknown* AcceptanceGainProcessor::createInstance(void*) {
   return static_cast<IAudioProcessor*>(new AcceptanceGainProcessor());
 }
 
+AcceptanceGainProcessor::AcceptanceGainProcessor() {
+  // Declare the companion edit controller.
+  //
+  // PluginHost::PlugProvider::initialize() -- the path every real host, including
+  // Apex's editor helper, uses to load a plug-in -- asks the component for its
+  // controller class id and fails outright when it gets kResultFalse. The SDK's
+  // component factory test creates the two classes side by side, so it passed
+  // while the real load path was broken. Setting it here is what makes the fixture
+  // loadable rather than merely constructible.
+  setControllerClass(kControllerUID);
+}
+
 tresult PLUGIN_API AcceptanceGainProcessor::initialize(FUnknown* context) {
   const tresult result = AudioEffect::initialize(context);
   if (result != kResultOk) return result;

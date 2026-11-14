@@ -9,7 +9,9 @@ namespace ApexAcceptanceGain {
 /** Stereo in/out gain effect. No event buses by construction. */
 class AcceptanceGainProcessor final : public AudioEffect {
 public:
-  AcceptanceGainProcessor() = default;
+  // Declares the companion controller; see the definition for why the real host
+  // load path depends on it.
+  AcceptanceGainProcessor();
   static FUnknown* createInstance(void*);
 
   tresult PLUGIN_API initialize(FUnknown* context) override;

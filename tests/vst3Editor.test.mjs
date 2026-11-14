@@ -744,3 +744,18 @@ test('one keystroke is one onKeyDown invocation, not two', () => {
   assert.ok(!/onKeyDown\(/.test(block), 'WM_CHAR does not invoke onKeyDown again');
   assert.ok(/keyCharMessageCount\+\+/.test(block), 'WM_CHAR is still observed, separately');
 });
+
+test('the fixture declares its controller class, so PlugProvider can load it', () => {
+  const processor = readSource('native/vst3/acceptance-fixture-processor.cpp');
+  const test_ = readSource('native/vst3/acceptance-fixture-test.cpp');
+  // PluginHost::PlugProvider::initialize() asks the component for its controller
+  // class id and fails outright on kResultFalse. Constructing the two classes side
+  // by side -- which is all the DSP test used to do -- never exercises that, so the
+  // fixture could be constructible and still unloadable by every real host.
+  assert.match(processor, /setControllerClass\(kControllerUID\)/,
+    'the component registers its companion controller');
+  assert.ok(/the declared controller id is the registered controller class/.test(test_),
+    'the behavioural test asserts the id the factory registers');
+  assert.ok(/getControllerClassId returns kResultTrue/.test(test_),
+    'the behavioural test asserts the real load-path precondition');
+});

@@ -303,7 +303,7 @@ sample-code licensing question; it is likewise **not** part of any release build
 
 The fixture proves itself. `native/vst3/acceptance-fixture-test.cpp` builds as
 `apex-acceptance-vst3-test` and runs on **every** platform, asserting observed
-behaviour rather than declared intent — 39 checks, all passing locally:
+behaviour rather than declared intent — 43 checks, all passing locally:
 
 - the gain law is exact: `0.5` normalizes to unity, `1.0` measures ×`3.981071703`
   (the RMS ratio, not a nominal value), `0.0` measures ×`0.063095735`;
@@ -314,7 +314,19 @@ behaviour rather than declared intent — 39 checks, all passing locally:
   buffers really are stereo;
 - `getState`/`setState` round-trip a saved gain, and a **truncated** state is
   rejected rather than silently accepted;
-- the controller exposes exactly one parameter and it is automatable.
+- the controller exposes exactly one parameter and it is automatable;
+- the component **declares its controller class id**, which
+  `PluginHost::PlugProvider::initialize()` requires before it will create a
+  controller at all.
+
+That last check exists because its absence was a real defect: constructing the
+processor and controller directly proves they work but says nothing about whether
+a host can *load* them. `PlugProvider` asks the component for
+`getControllerClassId` and fails when it gets `kResultFalse`, which is exactly what
+happened — the packaged run died with `Plugin component/controller initialization
+failed` while all the direct-construction checks were green. The fixture now calls
+`setControllerClass(kControllerUID)` in its constructor, and the three load-path
+assertions fail if that line is removed.
 
 So when the packaged run fails to find a usable editor window, that is evidence
 about the host or the package — not an unproven fixture.
