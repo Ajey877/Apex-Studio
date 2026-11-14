@@ -979,7 +979,11 @@ async function run() {
       // Re-open the SAME insert through the real Mixer UI. Adding a second insert
       // here would measure a different object and make the cycle meaningless.
       const reopened = await reopenEditorThroughMixerUi(page);
-      if (!reopened.ok) throw new Error(`open failed: ${reopened.error}`);
+      // Keep the per-step UI state on the row: a click timeout names the control, and
+      // which steps had already succeeded says whether the Mixer or the insert row was
+      // the problem. Without this the failure is only "Timeout 15000ms exceeded".
+      row.reopenUi = reopened.ui ?? null;
+      if (!reopened.ok) throw new Error(`open failed at ${JSON.stringify(reopened.ui ?? {})}: ${reopened.error}`);
       // The value the controller holds before this cycle's gesture, read after the
       // insert exists so the plug-in can actually be asked.
       const before = await page.evaluate(async () =>
@@ -1021,6 +1025,21 @@ async function run() {
       row.sessionPhaseAfterClose = result?.phaseAfterClose ?? null;
       row.sessionErrorAfterClose = result?.errorAfterClose ?? null;
       row.entriesAdded = result?.entriesAddedByGesture ?? null;
+      // After a committing close the panel stays up with its result and a Dismiss
+      // control, exactly as it does for a user. Clicking Dismiss is part of the flow:
+      // leaving it mounted blocks the next cycle's Mixer clicks (a 15s click timeout
+      // was how this first showed up). This is the shipped button, not a test hook.
+      if (result?.phaseAfterClose === 'committed') {
+        try {
+          const dismiss = page.getByRole('button', { name: 'Dismiss' }).first();
+          await dismiss.waitFor({ state: 'visible', timeout: 15000 });
+          await dismiss.click({ timeout: 15000 });
+          row.dismissed = true;
+        } catch (error) {
+          row.dismissed = false;
+          row.dismissError = `${error?.message ?? error}`.split('\n')[0];
+        }
+      }
       row.effectiveAfterClose = result?.effectiveAfterClose?.value ?? null;
       row.effectiveAfterUndo = result?.effectiveAfterUndo?.value ?? null;
       row.effectiveAfterRedo = result?.effectiveAfterRedo?.value ?? null;
@@ -1035,16 +1054,25 @@ async function run() {
       // A cycle passes only if it did all of it: one entry, a real move, undo back
       // to the start, redo back to the edit.
       row.passed = row.entriesAdded === 1 && (row.paramIdsReceived ?? []).includes(0)
-        && moved && row.undoRestored && row.redoReapplied;
+        && moved && row.undoRestored && row.redoReapplied && row.dismissed !== false;
       if (!row.passed && firstFailingCycle === null) {
         firstFailingCycle = cycle;
-        failingReason = row.entriesAdded !== 1
-          ? `expected exactly one history entry, got ${row.entriesAdded}`
-          : !(row.paramIdsReceived ?? []).includes(0)
-            ? `the plug-in reported no edit of ParamID 0 (received ${JSON.stringify(row.paramIdsReceived)})`
-            : !moved ? 'the gesture did not change the controller value'
-              : !row.undoRestored ? `undo did not restore ${row.effectiveBefore} (got ${row.effectiveAfterUndo})`
-                : `redo did not reapply ${row.effectiveAfterClose} (got ${row.effectiveAfterRedo})`;
+        // Name the FIRST thing that was wrong, in the order a cycle does them. A
+        // chained ternary hid which branch fired when the dismiss step was added, so
+        // this is an explicit chain where each condition is stated once.
+        if (row.entriesAdded !== 1) {
+          failingReason = `expected exactly one history entry, got ${row.entriesAdded}`;
+        } else if (!(row.paramIdsReceived ?? []).includes(0)) {
+          failingReason = `the plug-in reported no edit of ParamID 0 (received ${JSON.stringify(row.paramIdsReceived)})`;
+        } else if (!moved) {
+          failingReason = `the gesture did not change the controller value (it stayed at ${row.effectiveAfterClose})`;
+        } else if (!row.undoRestored) {
+          failingReason = `undo did not restore ${row.effectiveBefore} (got ${row.effectiveAfterUndo})`;
+        } else if (!row.redoReapplied) {
+          failingReason = `redo did not reapply ${row.effectiveAfterClose} (got ${row.effectiveAfterRedo})`;
+        } else {
+          failingReason = row.dismissError ?? 'the result panel could not be dismissed';
+        }
       }
     } catch (error) {
       row.passed = false;

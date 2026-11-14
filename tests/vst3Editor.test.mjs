@@ -1296,6 +1296,14 @@ test('p4 and p6 are proven on the edited parameter, not just on depth', () => {
   assert.ok(/everyCycleRecorded: cycles/.test(script),
     'every cycle is recorded, not only the passing ones');
 
+  // After a committing close the panel stays mounted with its result; a user must
+  // dismiss it before the Mixer is reachable again. A cycle that skips this blocks
+  // every later cycle's clicks, which is how a 15s click timeout first appeared.
+  assert.ok(/getByRole\('button', \{ name: 'Dismiss' \}\)/.test(script),
+    'the cycle dismisses the result panel through the shipped control');
+  assert.ok(/row\.dismissed !== false/.test(script),
+    'a cycle does not pass unless the panel was dismissed');
+
   // p6 must read the reloaded parameter and compare it to the edited value.
   assert.ok(/reloadedMatchesEdit/.test(script), 'p6 compares the reloaded parameter');
   assert.ok(/readInsertParameter\(\)/.test(script),
