@@ -159,5 +159,39 @@ inline bool shouldPinFixedSize(bool resizable, bool applyingPluginResize, bool a
   return !resizable && !applyingPluginResize && !applyingDpiChange && !fittingClient;
 }
 
+/**
+ * Is a WM_SIZE part of a DPI change the plug-in has not been told about yet?
+ *
+ * When a window is dragged onto a monitor with another scale, Windows resizes it
+ * BEFORE it sends WM_DPICHANGED (measured on Windows Server 2025: the size change
+ * arrives first, WM_DPICHANGED after). Forwarding that size to the plug-in hands it
+ * a size meant for the new scale while it is still laid out for the old one; the
+ * scale call that follows then scales that wrong size again. Such a size is
+ * withheld, and the DPI change that follows does the sizing.
+ *
+ *   pluginDpi      the DPI the plug-in was last told (its content scale)
+ *   liveWindowDpi  what Windows reports for the window right now
+ *   announcedDpi   the DPI of the last WM_GETDPISCALEDSIZE in this move loop, or 0
+ */
+inline bool sizeBelongsToPendingDpiChange(unsigned pluginDpi, unsigned liveWindowDpi, unsigned announcedDpi,
+                                          bool inMoveLoop, bool userIsSizing) {
+  if (liveWindowDpi && liveWindowDpi != pluginDpi) return true;
+  // A drag by the title bar does not resize a window. If Windows has asked what
+  // size the window wants at another DPI and then resizes it, that is the DPI move.
+  return announcedDpi && announcedDpi != pluginDpi && inMoveLoop && !userIsSizing;
+}
+
+/**
+ * The outer window size to answer WM_GETDPISCALEDSIZE with: the size the editor
+ * will really have at the new DPI, so that Windows (and its move loop) starts from
+ * the right size instead of a linear guess that ignores how the frame scales.
+ * A plug-in without content-scale support keeps its pixels and only the frame changes.
+ */
+inline Size outerForPendingDpi(const Size& clientNow, unsigned fromDpi, unsigned toDpi, bool pluginScales,
+                               const Frame& frameAtNewDpi) {
+  const auto client = pluginScales ? rescaleClient(clientNow, fromDpi, toDpi) : clientNow;
+  return outerForClient(client, frameAtNewDpi);
+}
+
 } // namespace dpi
 } // namespace ApexVst3Host

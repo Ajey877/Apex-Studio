@@ -191,6 +191,44 @@ void testFixedSizePinning() {
   expect(!shouldPinFixedSize(false, false, false, true), "fitting the client area is not clamped");
 }
 
+void testSizeBeforeDpiChangeIsWithheld() {
+  // Measured on Windows Server 2025, title-bar drag from a 125% monitor to a 100%
+  // one: Windows resized the window (WM_SIZE) and only then sent WM_DPICHANGED.
+  // The plug-in was still at 120 DPI when that size arrived.
+  expect(sizeBelongsToPendingDpiChange(120, 96, 96, true, false),
+    "a size that arrives after the window's DPI changed, before WM_DPICHANGED, is withheld");
+  expect(sizeBelongsToPendingDpiChange(120, 120, 96, true, false),
+    "also when Windows still reports the old DPI but has announced the new one during a move");
+  expect(sizeBelongsToPendingDpiChange(120, 0, 96, true, false),
+    "and when the live DPI cannot be read");
+  // Everything else is an ordinary resize and must reach the plug-in.
+  expect(!sizeBelongsToPendingDpiChange(120, 120, 0, false, false), "an ordinary resize is forwarded");
+  expect(!sizeBelongsToPendingDpiChange(120, 120, 0, true, true), "a border drag is forwarded");
+  expect(!sizeBelongsToPendingDpiChange(120, 120, 96, true, true),
+    "a border drag is forwarded even if Windows asked about another DPI earlier");
+  expect(!sizeBelongsToPendingDpiChange(120, 120, 96, false, false),
+    "an announcement left over from a finished move does not block later resizes");
+  expect(!sizeBelongsToPendingDpiChange(96, 96, 96, true, false),
+    "an announcement for the DPI the plug-in already has changes nothing");
+
+  // The arithmetic of the defect, so the numbers stay on record: the withheld size
+  // was 346x111; AGain at 1.25 scaled it by 1/1.25 when told the new scale.
+  const Size wrong = rescaleClient({346, 111}, 120, 96);
+  expect(wrong == Size{277, 89} && wrong != Size{350, 120},
+    "scaling the size Windows chose gives a clipped editor, not the 350x120 AGain needs");
+}
+
+void testAnswerForGetDpiScaledSize() {
+  const Frame at96{16, 39};
+  const Frame at144{22, 56};
+  expect(outerForPendingDpi({437, 150}, 120, 96, true, at96) == Size{366, 159},
+    "125% to 100%: the window is offered the outer size of the 350x120 editor");
+  expect(outerForPendingDpi({350, 120}, 96, 144, true, at144) == Size{547, 236},
+    "100% to 150%: the outer size of the 525x180 editor with the 144 DPI frame");
+  expect(outerForPendingDpi({350, 120}, 96, 144, false, at144) == Size{372, 176},
+    "a plug-in that does not scale keeps its pixels; only the frame grows");
+}
+
 } // namespace
 
 int main() {
@@ -206,6 +244,8 @@ int main() {
   testFixedSizePluginThatScales();
   testInvalidSizesFallBack();
   testFixedSizePinning();
+  testSizeBeforeDpiChangeIsWithheld();
+  testAnswerForGetDpiScaledSize();
   if (failures) {
     std::cerr << "editor-dpi-test: " << failures << " failure(s)\n";
     return 1;

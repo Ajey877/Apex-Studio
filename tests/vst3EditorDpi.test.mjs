@@ -89,6 +89,42 @@ test('a host-chosen size is not forwarded to the plug-in while the scale is bein
     'WM_SIZE does not call onSize while the host or the plug-in is setting the size');
 });
 
+test('a size Windows applies before WM_DPICHANGED is withheld from the plug-in', () => {
+  // Regression, measured on Windows Server 2025 with a second display: dragging the
+  // editor by its title bar from a 125% monitor to a 100% one, Windows resized the
+  // window and delivered WM_SIZE BEFORE WM_DPICHANGED. The host forwarded that size
+  // to the plug-in, still at the old scale, and the scale change that followed
+  // scaled it again: AGain ended at 276x88 instead of 350x120.
+  const size = messageCase('WM_SIZE');
+  const withheld = size.indexOf('dpi::sizeBelongsToPendingDpiChange(windowDpi, dpiForWindow(hwnd)');
+  const forwarded = size.indexOf('forwardClientSize(');
+  assert.ok(withheld >= 0 && forwarded >= 0, 'WM_SIZE asks whether the size belongs to a pending DPI change');
+  assert.ok(withheld < forwarded, 'and decides that BEFORE anything is forwarded to the plug-in');
+  assert.ok(size.includes('sizeWithheldForDpi = true') && size.includes('++withheldSizeCount'),
+    'a withheld size is remembered and counted');
+  // The plug-in still learns the real size if no DPI change follows.
+  const exit = messageCase('WM_EXITSIZEMOVE');
+  assert.ok(exit.includes('sizeWithheldForDpi && dpiForWindow(hwnd) == windowDpi') && exit.includes('forwardClientSize('),
+    'a withheld size is delivered when the move ends without a DPI change');
+  // And the fit that follows a withheld size starts from what the plug-in still has.
+  const fit = memberBody('void applyScaleAndFit(');
+  assert.ok(fit.includes('sizeWithheldForDpi && agreedClient ? *agreedClient'),
+    'the DPI change compares against the size the plug-in has, not the one Windows set');
+  // Every place that tells the plug-in a size records it.
+  const told = [...editorHost.matchAll(/view->onSize\(/g)].length;
+  const recorded = [...editorHost.matchAll(/agreedClient = /g)].length;
+  assert.ok(told === 4 && recorded >= 4, `each of the ${told} onSize calls records the agreed size (${recorded} records)`);
+});
+
+test('Windows is told the editor\'s real size for a pending DPI change', () => {
+  const start = editorHost.indexOf('case 0x02E4: {  // WM_GETDPISCALEDSIZE');
+  assert.ok(start >= 0, 'WM_GETDPISCALEDSIZE is handled');
+  const handler = editorHost.slice(start, editorHost.indexOf('case WM_SIZING:', start));
+  assert.ok(handler.includes('dpi::outerForPendingDpi(') && handler.includes('frameForDpi(targetDpi)'),
+    'the answer is the editor size at the new DPI with the frame of the new DPI');
+  assert.ok(handler.includes('return TRUE;'), 'and the handler says it answered');
+});
+
 test('a nested WM_DPICHANGED is deferred, never handled re-entrantly', () => {
   const handler = messageCase('WM_DPICHANGED');
   assert.ok(handler.includes('if (applyingDpiChange)') && handler.includes('pendingDpiChange = change'),

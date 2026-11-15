@@ -118,6 +118,20 @@ class NativeEditorSession {
   bool fittingClient = false;
   /** The last IPlugFrame::resizeView ended with a successful IPlugView::onSize. */
   bool pluginResizeAccepted = false;
+  /** Inside Windows' modal move/size loop (WM_ENTERSIZEMOVE .. WM_EXITSIZEMOVE). */
+  bool inSizeMoveLoop = false;
+  /** That loop is a border drag (WM_SIZING seen), not a move by the title bar. */
+  bool userSizingInLoop = false;
+  /** DPI of the last WM_GETDPISCALEDSIZE in this loop: Windows is about to move
+   * the window to that DPI and will resize it before it sends WM_DPICHANGED. */
+  unsigned int announcedMoveDpi = 0;
+  /** A WM_SIZE was withheld from the plug-in because it belongs to a DPI change
+   * the plug-in has not been told about yet (see dpi::sizeBelongsToPendingDpiChange). */
+  bool sizeWithheldForDpi = false;
+  int withheldSizeCount = 0;
+  int dpiScaledSizeQueryCount = 0;
+  /** The client size the plug-in and the host last agreed on, at `windowDpi`. */
+  std::optional<dpi::Size> agreedClient;
   /** A WM_DPICHANGED that arrived while another one was being handled. */
   struct PendingDpiChange {
     unsigned int dpi = 0;
@@ -147,6 +161,8 @@ class NativeEditorSession {
     bool pluginNotified = false;
     Steinberg::tresult notifyResult = Steinberg::kNotImplemented;
     bool constrained = false;
+    /** Windows had already resized the window for this DPI; that size was withheld. */
+    bool sizeWasWithheld = false;
   };
   ScaleFit lastScaleFit;
   int reentrantDpiChangeCount = 0;
@@ -489,13 +505,17 @@ class NativeEditorSession {
    */
   void applyScaleAndFit(unsigned int newDpi, const dpi::Size* hostProposal, const POINT* position,
                         bool announce, bool fromDpiChange) {
-    const auto before = clientRect();
+    // If Windows already resized the window for this DPI (and that size was
+    // withheld), "before" is the size the plug-in still has, not the live one.
+    const auto live = clientRect();
+    const dpi::Size before = sizeWithheldForDpi && agreedClient ? *agreedClient : dpi::Size{live.first, live.second};
     ScaleFit fit;
     fit.happened = true;
     fit.fromDpiChange = fromDpiChange;
     fit.previousDpi = windowDpi;
     fit.newDpi = newDpi ? newDpi : dpi::kDefaultDpi;
-    fit.clientBefore = {before.first, before.second};
+    fit.clientBefore = before;
+    fit.sizeWasWithheld = sizeWithheldForDpi;
 
     windowDpi = fit.newDpi;
     lastPluginResizeRequest.reset();
@@ -542,6 +562,8 @@ class NativeEditorSession {
     }
     const auto after = clientRect();
     fit.clientAfter = {after.first, after.second};
+    sizeWithheldForDpi = false;
+    if (dpi::validClient(fit.clientAfter)) agreedClient = fit.clientAfter;
 
     if (announce && plan.notifyPlugin && view && dpi::validClient(fit.clientAfter)) {
       Steinberg::ViewRect size{0, 0, fit.clientAfter.width, fit.clientAfter.height};
@@ -625,6 +647,7 @@ class NativeEditorSession {
     require(validRect(size), "Native VST3 editor client size is invalid");
     const auto result = view->onSize(&size);
     require(isSuccess(result), "VST3 editor rejected the initial native window size");
+    agreedClient = dpi::Size{size.getWidth(), size.getHeight()};
   }
 
   json metadata() {
@@ -838,6 +861,16 @@ class NativeEditorSession {
     }
   }
 
+  /** Tell the plug-in a client size the host (or the user) chose. */
+  void forwardClientSize(Steinberg::int32 width, Steinberg::int32 height) {
+    if (width < kMinViewDimension || height < kMinViewDimension ||
+        width > kMaxViewDimension || height > kMaxViewDimension) return;
+    Steinberg::ViewRect size{0, 0, width, height};
+    const auto result = view->onSize(&size);
+    if (!isSuccess(result)) lastNativeCloseError = "Plug-in rejected a host window resize";
+    else agreedClient = dpi::Size{width, height};
+  }
+
   /**
    * Geometry messages seen during a harness drag, in the order Windows sent them.
    * Recorded only while a pointerDrag test action is running; it exists because the
@@ -871,7 +904,8 @@ class NativeEditorSession {
         break;
       }
       case WM_SIZE:
-        entry = {{"m", "size"}, {"client", {LOWORD(lParam), HIWORD(lParam)}}};
+        entry = {{"m", "size"}, {"client", {LOWORD(lParam), HIWORD(lParam)}},
+          {"liveDpi", window ? dpiForWindow(window) : 0u}, {"pluginDpi", windowDpi}};
         break;
       default: return;
     }
@@ -916,18 +950,40 @@ class NativeEditorSession {
         break;
       case WM_SIZE:
         if (view && attached && !resizingByPlugin && !fittingClient && wParam != SIZE_MINIMIZED) {
-          const auto width = static_cast<int32>(LOWORD(lParam));
-          const auto height = static_cast<int32>(HIWORD(lParam));
-          if (width >= kMinViewDimension && height >= kMinViewDimension &&
-              width <= kMaxViewDimension && height <= kMaxViewDimension) {
-            Steinberg::ViewRect size{0, 0, width, height};
-            const auto result = view->onSize(&size);
-            if (!isSuccess(result)) lastNativeCloseError = "Plug-in rejected a host window resize";
+          // Windows resizes a window it is moving to another DPI BEFORE it sends
+          // WM_DPICHANGED. That size is for a scale the plug-in does not have yet:
+          // it is withheld here and WM_DPICHANGED does the sizing.
+          if (!applyingDpiChange && dpi::sizeBelongsToPendingDpiChange(windowDpi, dpiForWindow(hwnd),
+                announcedMoveDpi, inSizeMoveLoop, userSizingInLoop)) {
+            sizeWithheldForDpi = true;
+            ++withheldSizeCount;
+            return 0;
           }
+          forwardClientSize(static_cast<int32>(LOWORD(lParam)), static_cast<int32>(HIWORD(lParam)));
         }
         return 0;
+      case 0x02E4: {  // WM_GETDPISCALEDSIZE
+        // Windows asks what size the window wants at another DPI before it moves it
+        // there. The default answer scales the whole window linearly, frame included,
+        // which is never exactly the editor's size; answer with the real one.
+        ++dpiScaledSizeQueryCount;
+        const auto targetDpi = static_cast<unsigned int>(wParam);
+        auto* answer = reinterpret_cast<SIZE*>(lParam);
+        if (!answer || !targetDpi || !view || !attached) break;
+        if (inSizeMoveLoop) announcedMoveDpi = targetDpi;
+        if (targetDpi == windowDpi) break;
+        const auto live = clientRect();
+        const dpi::Size current = agreedClient ? *agreedClient : dpi::Size{live.first, live.second};
+        if (!dpi::validClient(current)) break;
+        const auto outer = dpi::outerForPendingDpi(current, windowDpi, targetDpi,
+          lastScaleAttempt.supported && lastScaleAttempt.applied, frameForDpi(targetDpi));
+        answer->cx = outer.width;
+        answer->cy = outer.height;
+        return TRUE;
+      }
       case WM_SIZING:
         ++sizingMessageCount;
+        if (inSizeMoveLoop) userSizingInLoop = true;
         if (view && attached && resizable && lParam) {
           auto* outer = reinterpret_cast<RECT*>(lParam);
           // The frame of the window as it is NOW (its current DPI), so the size
@@ -974,11 +1030,29 @@ class NativeEditorSession {
           }
         }
         break;
-      case WM_ENTERSIZEMOVE:
+      case WM_ENTERSIZEMOVE: {
         ++enterSizeMoveCount;
+        inSizeMoveLoop = true;
+        userSizingInLoop = false;
+        announcedMoveDpi = 0;
+        // The size the plug-in has now, in case Windows resizes the window for
+        // another DPI during this loop before saying so.
+        const auto live = clientRect();
+        if (!agreedClient && dpi::validClient({live.first, live.second})) agreedClient = dpi::Size{live.first, live.second};
         break;
+      }
       case WM_EXITSIZEMOVE:
         ++exitSizeMoveCount;
+        inSizeMoveLoop = false;
+        userSizingInLoop = false;
+        announcedMoveDpi = 0;
+        if (sizeWithheldForDpi && dpiForWindow(hwnd) == windowDpi) {
+          // A size was withheld but no DPI change followed (the window came back):
+          // the plug-in must still learn the size the window really has.
+          sizeWithheldForDpi = false;
+          const auto live = clientRect();
+          if (view && attached) forwardClientSize(live.first, live.second);
+        }
         break;
       case WM_DPICHANGED: {
         // Recorded from the message Windows actually sent, so "the window handled a
@@ -1215,6 +1289,7 @@ public:
     const bool changed = setClientSize({newSize->getWidth(), newSize->getHeight()});
     resizingByPlugin = alreadyResizing;
     if (!changed) return Steinberg::kInternalError;
+    agreedClient = dpi::Size{newSize->getWidth(), newSize->getHeight()};
     auto requestedSize = *newSize;
     const auto result = view->onSize(&requestedSize);
     pluginResizeAccepted = isSuccess(result);
@@ -1999,6 +2074,8 @@ public:
         {"lastConstraintResult", resultName(lastConstraintResult)},
         {"enterSizeMoveCount", enterSizeMoveCount},
         {"exitSizeMoveCount", exitSizeMoveCount},
+        {"sizesWithheldForDpiChange", withheldSizeCount},
+        {"dpiScaledSizeQueries", dpiScaledSizeQueryCount},
       };
       result["testMode"] = {{"ignoreContentScale", testIgnoreContentScale}, {"forceFixedSize", testForceFixedSize}};
       result["resources"] = {
