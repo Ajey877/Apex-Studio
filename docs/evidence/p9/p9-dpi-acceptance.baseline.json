@@ -1,0 +1,2390 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-11-15T12:11:05.537Z",
+  "host": "baseline",
+  "commit": "73a7b3df468cac1a661c7a0642a801a84009c0c3",
+  "environment": {
+    "monitorsAtStart": [
+      {
+        "workWidth": 1920,
+        "top": 0,
+        "width": 1920,
+        "workHeight": 1032,
+        "workTop": 0,
+        "workLeft": 0,
+        "primary": true,
+        "device": "\\\\.\\DISPLAY1",
+        "height": 1080,
+        "left": 0,
+        "effectiveDpi": 96,
+        "handle": 65537
+      }
+    ],
+    "sourcesAtStart": [
+      {
+        "dpiScaleQueryStatus": 0,
+        "device": "\\\\.\\DISPLAY1",
+        "minScaleRel": 0,
+        "maximumPercent": 175,
+        "currentPercent": 100,
+        "curScaleRel": 0,
+        "maxScaleRel": 3,
+        "sourceId": 0,
+        "recommendedPercent": 100,
+        "index": 0
+      }
+    ],
+    "monitorsAtEnd": [
+      {
+        "device": "\\\\.\\DISPLAY1",
+        "handle": 65537,
+        "effectiveDpi": 96,
+        "width": 1920,
+        "primary": true,
+        "height": 1080,
+        "workTop": 0,
+        "workWidth": 1920,
+        "workLeft": 0,
+        "workHeight": 1032,
+        "top": 0,
+        "left": 0
+      }
+    ],
+    "executedScales": [
+      100,
+      125,
+      150
+    ],
+    "shell": "pwsh.exe",
+    "osCaption": "Microsoft Windows [Version 10.0.26100.33674]"
+  },
+  "rule": "A case is PASS only when every configuration it needs was executed on this machine and every check passed. Anything not executed is NOT_VERIFIED.",
+  "statuses": {
+    "P9-A": "PASS",
+    "P9-B": "PASS",
+    "P9-C": "PASS",
+    "P9-D": "NOT_VERIFIED",
+    "P9-E": "NOT_VERIFIED",
+    "P9-F": "NOT_VERIFIED",
+    "P9-G": "NOT_VERIFIED",
+    "P9-H": "PASS",
+    "P9-I": "PASS",
+    "P9-J": "PASS",
+    "P9-K": "FAIL",
+    "P9-L": "NOT_VERIFIED",
+    "P9-M": "NOT_VERIFIED"
+  },
+  "cases": [
+    {
+      "id": "P9-A",
+      "title": "Single monitor at 100%: editor creation and display",
+      "status": "PASS",
+      "needs": [
+        "single-100"
+      ],
+      "missing": [],
+      "runs": [
+        {
+          "config": "single-100",
+          "status": "PASS",
+          "checks": [
+            {
+              "name": "editor-opened",
+              "ok": true
+            },
+            {
+              "name": "plugin-reports-its-unscaled-size",
+              "ok": true,
+              "reported": [
+                350,
+                120
+              ]
+            },
+            {
+              "name": "content-scale-supported-and-applied",
+              "ok": true,
+              "contentScale": {
+                "applied": true,
+                "appliedFactor": 1,
+                "clientHeightAfter": 0,
+                "clientHeightBefore": 0,
+                "clientWidthAfter": 0,
+                "clientWidthBefore": 0,
+                "factor": 1,
+                "pluginRequestedResize": false,
+                "requestedHeight": 0,
+                "requestedWidth": 0,
+                "result": "kResultTrue/kResultOk",
+                "supported": true
+              }
+            },
+            {
+              "name": "window-dpi",
+              "ok": true,
+              "actual": 96,
+              "expected": 96
+            },
+            {
+              "name": "client-width",
+              "ok": true,
+              "actual": 350,
+              "expected": 350,
+              "tolerance": 1
+            },
+            {
+              "name": "client-height",
+              "ok": true,
+              "actual": 120,
+              "expected": 120,
+              "tolerance": 1
+            },
+            {
+              "name": "view-width-equals-client",
+              "ok": true,
+              "actual": 350,
+              "expected": 350
+            },
+            {
+              "name": "view-height-equals-client",
+              "ok": true,
+              "actual": 120,
+              "expected": 120
+            },
+            {
+              "name": "plugin-window-covers-client",
+              "ok": true,
+              "children": [
+                {
+                  "class": "VSTGUI00007FFFC2320000",
+                  "height": 120,
+                  "visible": true,
+                  "width": 350
+                }
+              ],
+              "client": [
+                350,
+                120
+              ]
+            },
+            {
+              "name": "content-scale-factor",
+              "ok": true,
+              "actual": 1,
+              "expected": 1,
+              "tolerance": 0.001
+            },
+            {
+              "name": "visible",
+              "ok": true,
+              "actual": true,
+              "expected": true
+            },
+            {
+              "name": "not-minimised",
+              "ok": true,
+              "actual": false,
+              "expected": false
+            },
+            {
+              "name": "rendered-not-blank",
+              "ok": true,
+              "distinctColours": 668,
+              "dominantColourFraction": 0.0874
+            },
+            {
+              "name": "content-reaches-edges",
+              "ok": true,
+              "rightStripColours": 105,
+              "bottomStripColours": 110
+            }
+          ],
+          "evidence": {
+            "diagnostics": {
+              "dpi": 96,
+              "clientWidth": 350,
+              "clientHeight": 120,
+              "windowWidth": 366,
+              "windowHeight": 159,
+              "viewWidth": 350,
+              "viewHeight": 120,
+              "visible": true,
+              "iconic": false,
+              "contentScale": {
+                "applied": true,
+                "appliedFactor": 1,
+                "clientHeightAfter": 0,
+                "clientHeightBefore": 0,
+                "clientWidthAfter": 0,
+                "clientWidthBefore": 0,
+                "factor": 1,
+                "pluginRequestedResize": false,
+                "requestedHeight": 0,
+                "requestedWidth": 0,
+                "result": "kResultTrue/kResultOk",
+                "supported": true
+              },
+              "dpiWindowObservation": {
+                "appliedContentScaleFromDpiChange": false,
+                "dpiChangedMessageCount": 0,
+                "lastNewDpi": 0,
+                "note": "Raised only by a real WM_DPICHANGED. Independent of IPlugViewContentScaleSupport.",
+                "scaleApplied": false,
+                "scaleInterfaceSupported": false,
+                "suggestedHeight": 0,
+                "suggestedWidth": 0,
+                "windowDpi": 96
+              },
+              "childWindows": [
+                {
+                  "class": "VSTGUI00007FFFC2320000",
+                  "height": 120,
+                  "visible": true,
+                  "width": 350
+                }
+              ],
+              "style": 13565952,
+              "processId": 8488,
+              "closed": false,
+              "windowCreated": true
+            },
+            "screenshot": "baseline-single-100.png"
+          }
+        }
+      ]
+    },
+    {
+      "id": "P9-B",
+      "title": "Single monitor at 125%: dimensions and rendering",
+      "status": "PASS",
+      "needs": [
+        "single-125"
+      ],
+      "missing": [],
+      "runs": [
+        {
+          "config": "single-125",
+          "status": "PASS",
+          "checks": [
+            {
+              "name": "editor-opened",
+              "ok": true
+            },
+            {
+              "name": "plugin-reports-its-unscaled-size",
+              "ok": true,
+              "reported": [
+                350,
+                120
+              ]
+            },
+            {
+              "name": "content-scale-supported-and-applied",
+              "ok": true,
+              "contentScale": {
+                "applied": true,
+                "appliedFactor": 1.25,
+                "clientHeightAfter": 0,
+                "clientHeightBefore": 0,
+                "clientWidthAfter": 0,
+                "clientWidthBefore": 0,
+                "factor": 1.25,
+                "pluginRequestedResize": false,
+                "requestedHeight": 0,
+                "requestedWidth": 0,
+                "result": "kResultTrue/kResultOk",
+                "supported": true
+              }
+            },
+            {
+              "name": "window-dpi",
+              "ok": true,
+              "actual": 120,
+              "expected": 120
+            },
+            {
+              "name": "client-width",
+              "ok": true,
+              "actual": 437,
+              "expected": 437,
+              "tolerance": 1
+            },
+            {
+              "name": "client-height",
+              "ok": true,
+              "actual": 150,
+              "expected": 150,
+              "tolerance": 1
+            },
+            {
+              "name": "view-width-equals-client",
+              "ok": true,
+              "actual": 437,
+              "expected": 437
+            },
+            {
+              "name": "view-height-equals-client",
+              "ok": true,
+              "actual": 150,
+              "expected": 150
+            },
+            {
+              "name": "plugin-window-covers-client",
+              "ok": true,
+              "children": [
+                {
+                  "class": "VSTGUI00007FFFC2320000",
+                  "height": 150,
+                  "visible": true,
+                  "width": 437
+                }
+              ],
+              "client": [
+                437,
+                150
+              ]
+            },
+            {
+              "name": "content-scale-factor",
+              "ok": true,
+              "actual": 1.25,
+              "expected": 1.25,
+              "tolerance": 0.001
+            },
+            {
+              "name": "visible",
+              "ok": true,
+              "actual": true,
+              "expected": true
+            },
+            {
+              "name": "not-minimised",
+              "ok": true,
+              "actual": false,
+              "expected": false
+            },
+            {
+              "name": "rendered-not-blank",
+              "ok": true,
+              "distinctColours": 662,
+              "dominantColourFraction": 0.0786
+            },
+            {
+              "name": "content-reaches-edges",
+              "ok": true,
+              "rightStripColours": 114,
+              "bottomStripColours": 110
+            },
+            {
+              "name": "layout-matches-100-percent",
+              "ok": true,
+              "meanAbsDifference": 1.254,
+              "maxCellDifference": 38,
+              "limit": 16,
+              "sizes": "350x120 vs 437x150"
+            }
+          ],
+          "evidence": {
+            "diagnostics": {
+              "dpi": 120,
+              "clientWidth": 437,
+              "clientHeight": 150,
+              "windowWidth": 455,
+              "windowHeight": 197,
+              "viewWidth": 437,
+              "viewHeight": 150,
+              "visible": true,
+              "iconic": false,
+              "contentScale": {
+                "applied": true,
+                "appliedFactor": 1.25,
+                "clientHeightAfter": 0,
+                "clientHeightBefore": 0,
+                "clientWidthAfter": 0,
+                "clientWidthBefore": 0,
+                "factor": 1.25,
+                "pluginRequestedResize": false,
+                "requestedHeight": 0,
+                "requestedWidth": 0,
+                "result": "kResultTrue/kResultOk",
+                "supported": true
+              },
+              "dpiWindowObservation": {
+                "appliedContentScaleFromDpiChange": false,
+                "dpiChangedMessageCount": 0,
+                "lastNewDpi": 0,
+                "note": "Raised only by a real WM_DPICHANGED. Independent of IPlugViewContentScaleSupport.",
+                "scaleApplied": false,
+                "scaleInterfaceSupported": false,
+                "suggestedHeight": 0,
+                "suggestedWidth": 0,
+                "windowDpi": 120
+              },
+              "childWindows": [
+                {
+                  "class": "VSTGUI00007FFFC2320000",
+                  "height": 150,
+                  "visible": true,
+                  "width": 437
+                }
+              ],
+              "style": 13565952,
+              "processId": 3792,
+              "closed": false,
+              "windowCreated": true
+            },
+            "screenshot": "baseline-single-125.png"
+          }
+        }
+      ]
+    },
+    {
+      "id": "P9-C",
+      "title": "Single monitor at 150%: dimensions and rendering",
+      "status": "PASS",
+      "needs": [
+        "single-150"
+      ],
+      "missing": [],
+      "runs": [
+        {
+          "config": "single-150",
+          "status": "PASS",
+          "checks": [
+            {
+              "name": "editor-opened",
+              "ok": true
+            },
+            {
+              "name": "plugin-reports-its-unscaled-size",
+              "ok": true,
+              "reported": [
+                350,
+                120
+              ]
+            },
+            {
+              "name": "content-scale-supported-and-applied",
+              "ok": true,
+              "contentScale": {
+                "applied": true,
+                "appliedFactor": 1.5,
+                "clientHeightAfter": 0,
+                "clientHeightBefore": 0,
+                "clientWidthAfter": 0,
+                "clientWidthBefore": 0,
+                "factor": 1.5,
+                "pluginRequestedResize": false,
+                "requestedHeight": 0,
+                "requestedWidth": 0,
+                "result": "kResultTrue/kResultOk",
+                "supported": true
+              }
+            },
+            {
+              "name": "window-dpi",
+              "ok": true,
+              "actual": 144,
+              "expected": 144
+            },
+            {
+              "name": "client-width",
+              "ok": true,
+              "actual": 525,
+              "expected": 525,
+              "tolerance": 1
+            },
+            {
+              "name": "client-height",
+              "ok": true,
+              "actual": 180,
+              "expected": 180,
+              "tolerance": 1
+            },
+            {
+              "name": "view-width-equals-client",
+              "ok": true,
+              "actual": 525,
+              "expected": 525
+            },
+            {
+              "name": "view-height-equals-client",
+              "ok": true,
+              "actual": 180,
+              "expected": 180
+            },
+            {
+              "name": "plugin-window-covers-client",
+              "ok": true,
+              "children": [
+                {
+                  "class": "VSTGUI00007FFFC2320000",
+                  "height": 180,
+                  "visible": true,
+                  "width": 525
+                }
+              ],
+              "client": [
+                525,
+                180
+              ]
+            },
+            {
+              "name": "content-scale-factor",
+              "ok": true,
+              "actual": 1.5,
+              "expected": 1.5,
+              "tolerance": 0.001
+            },
+            {
+              "name": "visible",
+              "ok": true,
+              "actual": true,
+              "expected": true
+            },
+            {
+              "name": "not-minimised",
+              "ok": true,
+              "actual": false,
+              "expected": false
+            },
+            {
+              "name": "rendered-not-blank",
+              "ok": true,
+              "distinctColours": 660,
+              "dominantColourFraction": 0.0806
+            },
+            {
+              "name": "content-reaches-edges",
+              "ok": true,
+              "rightStripColours": 108,
+              "bottomStripColours": 94
+            },
+            {
+              "name": "layout-matches-100-percent",
+              "ok": true,
+              "meanAbsDifference": 0.884,
+              "maxCellDifference": 36,
+              "limit": 16,
+              "sizes": "350x120 vs 525x180"
+            }
+          ],
+          "evidence": {
+            "diagnostics": {
+              "dpi": 144,
+              "clientWidth": 525,
+              "clientHeight": 180,
+              "windowWidth": 547,
+              "windowHeight": 236,
+              "viewWidth": 525,
+              "viewHeight": 180,
+              "visible": true,
+              "iconic": false,
+              "contentScale": {
+                "applied": true,
+                "appliedFactor": 1.5,
+                "clientHeightAfter": 0,
+                "clientHeightBefore": 0,
+                "clientWidthAfter": 0,
+                "clientWidthBefore": 0,
+                "factor": 1.5,
+                "pluginRequestedResize": false,
+                "requestedHeight": 0,
+                "requestedWidth": 0,
+                "result": "kResultTrue/kResultOk",
+                "supported": true
+              },
+              "dpiWindowObservation": {
+                "appliedContentScaleFromDpiChange": false,
+                "dpiChangedMessageCount": 0,
+                "lastNewDpi": 0,
+                "note": "Raised only by a real WM_DPICHANGED. Independent of IPlugViewContentScaleSupport.",
+                "scaleApplied": false,
+                "scaleInterfaceSupported": false,
+                "suggestedHeight": 0,
+                "suggestedWidth": 0,
+                "windowDpi": 144
+              },
+              "childWindows": [
+                {
+                  "class": "VSTGUI00007FFFC2320000",
+                  "height": 180,
+                  "visible": true,
+                  "width": 525
+                }
+              ],
+              "style": 13565952,
+              "processId": 6016,
+              "closed": false,
+              "windowCreated": true
+            },
+            "screenshot": "baseline-single-150.png"
+          }
+        }
+      ]
+    },
+    {
+      "id": "P9-D",
+      "title": "Dual monitors 100% + 125%: positioning and scaling",
+      "status": "NOT_VERIFIED",
+      "needs": [
+        "dual-100-125"
+      ],
+      "missing": [
+        "dual-100-125"
+      ],
+      "runs": [
+        {
+          "config": "dual-100-125",
+          "status": "NOT_VERIFIED",
+          "checks": [],
+          "evidence": {
+            "reason": "Windows reports 1 monitor; two are required. Not executed."
+          }
+        }
+      ]
+    },
+    {
+      "id": "P9-E",
+      "title": "Dual monitors 100% + 150%: positioning and scaling",
+      "status": "NOT_VERIFIED",
+      "needs": [
+        "dual-100-150"
+      ],
+      "missing": [
+        "dual-100-150"
+      ],
+      "runs": [
+        {
+          "config": "dual-100-150",
+          "status": "NOT_VERIFIED",
+          "checks": [],
+          "evidence": {
+            "reason": "Windows reports 1 monitor; two are required. Not executed."
+          }
+        }
+      ]
+    },
+    {
+      "id": "P9-F",
+      "title": "Move editor between monitors with different DPI",
+      "status": "NOT_VERIFIED",
+      "needs": [
+        "dual-move"
+      ],
+      "missing": [
+        "dual-move"
+      ],
+      "runs": [
+        {
+          "config": "dual-move",
+          "status": "NOT_VERIFIED",
+          "checks": [],
+          "evidence": {
+            "reason": "Windows reports 1 monitor; two are required. Not executed."
+          }
+        }
+      ]
+    },
+    {
+      "id": "P9-G",
+      "title": "Resize at different DPI levels and VST3 size constraints",
+      "status": "NOT_VERIFIED",
+      "needs": [
+        "single-100",
+        "single-125",
+        "single-150"
+      ],
+      "missing": [
+        "single-100",
+        "single-125",
+        "single-150"
+      ],
+      "runs": [
+        {
+          "config": "single-100",
+          "status": "NOT_VERIFIED",
+          "checks": [
+            {
+              "name": "resize:client-width",
+              "ok": true,
+              "actual": 640,
+              "expected": 640
+            },
+            {
+              "name": "resize:client-height",
+              "ok": true,
+              "actual": 420,
+              "expected": 420
+            },
+            {
+              "name": "resize:view-equals-client",
+              "ok": true,
+              "view": [
+                640,
+                420
+              ],
+              "client": [
+                640,
+                420
+              ]
+            },
+            {
+              "name": "resize:plugin-window-covers-client",
+              "ok": true
+            },
+            {
+              "name": "resize:restored",
+              "ok": true,
+              "client": [
+                350,
+                120
+              ],
+              "wanted": {
+                "width": 350,
+                "height": 120
+              }
+            },
+            {
+              "name": "constraint:interactive-border-drag",
+              "ok": null,
+              "reason": "this helper build has no pointerDrag action"
+            }
+          ],
+          "evidence": {}
+        },
+        {
+          "config": "single-125",
+          "status": "NOT_VERIFIED",
+          "checks": [
+            {
+              "name": "resize:client-width",
+              "ok": true,
+              "actual": 800,
+              "expected": 800
+            },
+            {
+              "name": "resize:client-height",
+              "ok": true,
+              "actual": 525,
+              "expected": 525
+            },
+            {
+              "name": "resize:view-equals-client",
+              "ok": true,
+              "view": [
+                800,
+                525
+              ],
+              "client": [
+                800,
+                525
+              ]
+            },
+            {
+              "name": "resize:plugin-window-covers-client",
+              "ok": true
+            },
+            {
+              "name": "resize:restored",
+              "ok": true,
+              "client": [
+                437,
+                150
+              ],
+              "wanted": {
+                "width": 437,
+                "height": 150
+              }
+            },
+            {
+              "name": "constraint:interactive-border-drag",
+              "ok": null,
+              "reason": "this helper build has no pointerDrag action"
+            }
+          ],
+          "evidence": {}
+        },
+        {
+          "config": "single-150",
+          "status": "NOT_VERIFIED",
+          "checks": [
+            {
+              "name": "resize:client-width",
+              "ok": true,
+              "actual": 960,
+              "expected": 960
+            },
+            {
+              "name": "resize:client-height",
+              "ok": true,
+              "actual": 630,
+              "expected": 630
+            },
+            {
+              "name": "resize:view-equals-client",
+              "ok": true,
+              "view": [
+                960,
+                630
+              ],
+              "client": [
+                960,
+                630
+              ]
+            },
+            {
+              "name": "resize:plugin-window-covers-client",
+              "ok": true
+            },
+            {
+              "name": "resize:restored",
+              "ok": true,
+              "client": [
+                525,
+                180
+              ],
+              "wanted": {
+                "width": 525,
+                "height": 180
+              }
+            },
+            {
+              "name": "constraint:interactive-border-drag",
+              "ok": null,
+              "reason": "this helper build has no pointerDrag action"
+            }
+          ],
+          "evidence": {}
+        }
+      ]
+    },
+    {
+      "id": "P9-H",
+      "title": "Close and reopen: no stale HWND, leak or lifecycle failure",
+      "status": "PASS",
+      "needs": [
+        "single-100",
+        "single-125",
+        "single-150"
+      ],
+      "missing": [],
+      "runs": [
+        {
+          "config": "single-100",
+          "status": "PASS",
+          "checks": [
+            {
+              "name": "reopened-editor-closed-by-WM_CLOSE",
+              "ok": true
+            },
+            {
+              "name": "every-cycle-opened-at-the-right-size",
+              "ok": true,
+              "cycles": [
+                {
+                  "cycle": 1,
+                  "pid": 4300,
+                  "hwnd": null,
+                  "visible": true,
+                  "sizeOk": true,
+                  "client": [
+                    350,
+                    120
+                  ],
+                  "closed": true,
+                  "stateOnClose": true,
+                  "resources": null
+                },
+                {
+                  "cycle": 2,
+                  "pid": 1316,
+                  "hwnd": null,
+                  "visible": true,
+                  "sizeOk": true,
+                  "client": [
+                    350,
+                    120
+                  ],
+                  "closed": true,
+                  "stateOnClose": true,
+                  "resources": null
+                },
+                {
+                  "cycle": 3,
+                  "pid": 8460,
+                  "hwnd": null,
+                  "visible": true,
+                  "sizeOk": true,
+                  "client": [
+                    350,
+                    120
+                  ],
+                  "closed": true,
+                  "stateOnClose": true,
+                  "resources": null
+                },
+                {
+                  "cycle": 4,
+                  "pid": 8204,
+                  "hwnd": null,
+                  "visible": true,
+                  "sizeOk": true,
+                  "client": [
+                    350,
+                    120
+                  ],
+                  "closed": true,
+                  "stateOnClose": true,
+                  "resources": null
+                }
+              ]
+            },
+            {
+              "name": "every-cycle-closed-and-returned-state",
+              "ok": true
+            },
+            {
+              "name": "every-helper-process-exited",
+              "ok": true,
+              "pids": [
+                6228,
+                4300,
+                1316,
+                8460,
+                8204
+              ],
+              "exited": [
+                true,
+                true,
+                true,
+                true,
+                true
+              ]
+            },
+            {
+              "name": "no-stale-editor-windows",
+              "ok": true,
+              "actual": 0,
+              "expected": 0,
+              "leftovers": []
+            }
+          ],
+          "evidence": {
+            "note": "A helper process hosts exactly one editor session, so \"reopen\" is a new helper. Stale state is therefore judged at the OS level: the window class has no surviving window and every helper process has exited."
+          }
+        },
+        {
+          "config": "single-125",
+          "status": "PASS",
+          "checks": [
+            {
+              "name": "reopened-editor-closed-by-WM_CLOSE",
+              "ok": true
+            },
+            {
+              "name": "every-cycle-opened-at-the-right-size",
+              "ok": true,
+              "cycles": [
+                {
+                  "cycle": 1,
+                  "pid": 6348,
+                  "hwnd": null,
+                  "visible": true,
+                  "sizeOk": true,
+                  "client": [
+                    437,
+                    150
+                  ],
+                  "closed": true,
+                  "stateOnClose": true,
+                  "resources": null
+                },
+                {
+                  "cycle": 2,
+                  "pid": 3880,
+                  "hwnd": null,
+                  "visible": true,
+                  "sizeOk": true,
+                  "client": [
+                    437,
+                    150
+                  ],
+                  "closed": true,
+                  "stateOnClose": true,
+                  "resources": null
+                },
+                {
+                  "cycle": 3,
+                  "pid": 7656,
+                  "hwnd": null,
+                  "visible": true,
+                  "sizeOk": true,
+                  "client": [
+                    437,
+                    150
+                  ],
+                  "closed": true,
+                  "stateOnClose": true,
+                  "resources": null
+                },
+                {
+                  "cycle": 4,
+                  "pid": 7044,
+                  "hwnd": null,
+                  "visible": true,
+                  "sizeOk": true,
+                  "client": [
+                    437,
+                    150
+                  ],
+                  "closed": true,
+                  "stateOnClose": true,
+                  "resources": null
+                }
+              ]
+            },
+            {
+              "name": "every-cycle-closed-and-returned-state",
+              "ok": true
+            },
+            {
+              "name": "every-helper-process-exited",
+              "ok": true,
+              "pids": [
+                4448,
+                6348,
+                3880,
+                7656,
+                7044
+              ],
+              "exited": [
+                true,
+                true,
+                true,
+                true,
+                true
+              ]
+            },
+            {
+              "name": "no-stale-editor-windows",
+              "ok": true,
+              "actual": 0,
+              "expected": 0,
+              "leftovers": []
+            }
+          ],
+          "evidence": {
+            "note": "A helper process hosts exactly one editor session, so \"reopen\" is a new helper. Stale state is therefore judged at the OS level: the window class has no surviving window and every helper process has exited."
+          }
+        },
+        {
+          "config": "single-150",
+          "status": "PASS",
+          "checks": [
+            {
+              "name": "reopened-editor-closed-by-WM_CLOSE",
+              "ok": true
+            },
+            {
+              "name": "every-cycle-opened-at-the-right-size",
+              "ok": true,
+              "cycles": [
+                {
+                  "cycle": 1,
+                  "pid": 7684,
+                  "hwnd": null,
+                  "visible": true,
+                  "sizeOk": true,
+                  "client": [
+                    525,
+                    180
+                  ],
+                  "closed": true,
+                  "stateOnClose": true,
+                  "resources": null
+                },
+                {
+                  "cycle": 2,
+                  "pid": 3436,
+                  "hwnd": null,
+                  "visible": true,
+                  "sizeOk": true,
+                  "client": [
+                    525,
+                    180
+                  ],
+                  "closed": true,
+                  "stateOnClose": true,
+                  "resources": null
+                },
+                {
+                  "cycle": 3,
+                  "pid": 8892,
+                  "hwnd": null,
+                  "visible": true,
+                  "sizeOk": true,
+                  "client": [
+                    525,
+                    180
+                  ],
+                  "closed": true,
+                  "stateOnClose": true,
+                  "resources": null
+                },
+                {
+                  "cycle": 4,
+                  "pid": 1860,
+                  "hwnd": null,
+                  "visible": true,
+                  "sizeOk": true,
+                  "client": [
+                    525,
+                    180
+                  ],
+                  "closed": true,
+                  "stateOnClose": true,
+                  "resources": null
+                }
+              ]
+            },
+            {
+              "name": "every-cycle-closed-and-returned-state",
+              "ok": true
+            },
+            {
+              "name": "every-helper-process-exited",
+              "ok": true,
+              "pids": [
+                880,
+                7684,
+                3436,
+                8892,
+                1860
+              ],
+              "exited": [
+                true,
+                true,
+                true,
+                true,
+                true
+              ]
+            },
+            {
+              "name": "no-stale-editor-windows",
+              "ok": true,
+              "actual": 0,
+              "expected": 0,
+              "leftovers": []
+            }
+          ],
+          "evidence": {
+            "note": "A helper process hosts exactly one editor session, so \"reopen\" is a new helper. Stale state is therefore judged at the OS level: the window class has no surviving window and every helper process has exited."
+          }
+        }
+      ]
+    },
+    {
+      "id": "P9-I",
+      "title": "Keyboard, mouse wheel and focus forwarding",
+      "status": "PASS",
+      "needs": [
+        "single-100",
+        "single-125",
+        "single-150"
+      ],
+      "missing": [],
+      "runs": [
+        {
+          "config": "single-100",
+          "status": "PASS",
+          "checks": [
+            {
+              "name": "keyboard:sendinput-accepted",
+              "ok": true,
+              "actual": 2,
+              "expected": 2
+            },
+            {
+              "name": "keyboard:window-received",
+              "ok": true
+            },
+            {
+              "name": "keyboard:view-onKeyDown-calls",
+              "ok": true,
+              "actual": 1,
+              "expected": 1
+            },
+            {
+              "name": "keyboard:view-onKeyUp-calls",
+              "ok": true,
+              "actual": 1,
+              "expected": 1
+            },
+            {
+              "name": "keyboard:keycode-is-tab",
+              "ok": true,
+              "actual": 2,
+              "expected": 2
+            },
+            {
+              "name": "mouse:click-hit-plugin-window",
+              "ok": true,
+              "hitWindowClass": "VSTGUI00007FFFC2320000"
+            },
+            {
+              "name": "mouse:press-delivered",
+              "ok": true
+            },
+            {
+              "name": "mouse:slider-value-at-25-percent",
+              "ok": true,
+              "actual": 0.25925925374031067,
+              "expected": 0.25,
+              "tolerance": 0.06,
+              "point": {
+                "x": 128,
+                "y": 99
+              },
+              "screenPoint": {
+                "x": 214,
+                "y": 208
+              }
+            },
+            {
+              "name": "mouse:slider-value-at-80-percent",
+              "ok": true,
+              "actual": 0.8055555820465088,
+              "expected": 0.8,
+              "tolerance": 0.06,
+              "point": {
+                "x": 187,
+                "y": 99
+              },
+              "screenPoint": {
+                "x": 273,
+                "y": 208
+              }
+            },
+            {
+              "name": "wheel:delivered",
+              "ok": true,
+              "path": "OS -> plug-in child window",
+              "sendInputAccepted": 1,
+              "hitIsChildWindow": true,
+              "screenPoint": {
+                "x": 261,
+                "y": 169
+              }
+            },
+            {
+              "name": "focus:gained",
+              "ok": true,
+              "gainCountBefore": 1,
+              "gainCount": 2
+            },
+            {
+              "name": "focus:lost-to-another-window",
+              "ok": true
+            },
+            {
+              "name": "focus:regained",
+              "ok": true
+            }
+          ],
+          "evidence": {}
+        },
+        {
+          "config": "single-125",
+          "status": "PASS",
+          "checks": [
+            {
+              "name": "keyboard:sendinput-accepted",
+              "ok": true,
+              "actual": 2,
+              "expected": 2
+            },
+            {
+              "name": "keyboard:window-received",
+              "ok": true
+            },
+            {
+              "name": "keyboard:view-onKeyDown-calls",
+              "ok": true,
+              "actual": 1,
+              "expected": 1
+            },
+            {
+              "name": "keyboard:view-onKeyUp-calls",
+              "ok": true,
+              "actual": 1,
+              "expected": 1
+            },
+            {
+              "name": "keyboard:keycode-is-tab",
+              "ok": true,
+              "actual": 2,
+              "expected": 2
+            },
+            {
+              "name": "mouse:click-hit-plugin-window",
+              "ok": true,
+              "hitWindowClass": "VSTGUI00007FFFC2320000"
+            },
+            {
+              "name": "mouse:press-delivered",
+              "ok": true
+            },
+            {
+              "name": "mouse:slider-value-at-25-percent",
+              "ok": true,
+              "actual": 0.25925925374031067,
+              "expected": 0.25,
+              "tolerance": 0.06,
+              "point": {
+                "x": 160,
+                "y": 124
+              },
+              "screenPoint": {
+                "x": 201,
+                "y": 194
+              }
+            },
+            {
+              "name": "mouse:slider-value-at-80-percent",
+              "ok": true,
+              "actual": 0.8074073791503906,
+              "expected": 0.8,
+              "tolerance": 0.06,
+              "point": {
+                "x": 234,
+                "y": 124
+              },
+              "screenPoint": {
+                "x": 275,
+                "y": 194
+              }
+            },
+            {
+              "name": "wheel:delivered",
+              "ok": true,
+              "path": "OS -> plug-in child window",
+              "sendInputAccepted": 1,
+              "hitIsChildWindow": true,
+              "screenPoint": {
+                "x": 260,
+                "y": 145
+              }
+            },
+            {
+              "name": "focus:gained",
+              "ok": true,
+              "gainCountBefore": 1,
+              "gainCount": 2
+            },
+            {
+              "name": "focus:lost-to-another-window",
+              "ok": true
+            },
+            {
+              "name": "focus:regained",
+              "ok": true
+            }
+          ],
+          "evidence": {}
+        },
+        {
+          "config": "single-150",
+          "status": "PASS",
+          "checks": [
+            {
+              "name": "keyboard:sendinput-accepted",
+              "ok": true,
+              "actual": 2,
+              "expected": 2
+            },
+            {
+              "name": "keyboard:window-received",
+              "ok": true
+            },
+            {
+              "name": "keyboard:view-onKeyDown-calls",
+              "ok": true,
+              "actual": 1,
+              "expected": 1
+            },
+            {
+              "name": "keyboard:view-onKeyUp-calls",
+              "ok": true,
+              "actual": 1,
+              "expected": 1
+            },
+            {
+              "name": "keyboard:keycode-is-tab",
+              "ok": true,
+              "actual": 2,
+              "expected": 2
+            },
+            {
+              "name": "mouse:click-hit-plugin-window",
+              "ok": true,
+              "hitWindowClass": "VSTGUI00007FFFC2320000"
+            },
+            {
+              "name": "mouse:press-delivered",
+              "ok": true
+            },
+            {
+              "name": "mouse:slider-value-at-25-percent",
+              "ok": true,
+              "actual": 0.25925925374031067,
+              "expected": 0.25,
+              "tolerance": 0.06,
+              "point": {
+                "x": 192,
+                "y": 149
+              },
+              "screenPoint": {
+                "x": 241,
+                "y": 232
+              }
+            },
+            {
+              "name": "mouse:slider-value-at-80-percent",
+              "ok": true,
+              "actual": 0.8086419701576233,
+              "expected": 0.8,
+              "tolerance": 0.06,
+              "point": {
+                "x": 281,
+                "y": 149
+              },
+              "screenPoint": {
+                "x": 330,
+                "y": 232
+              }
+            },
+            {
+              "name": "wheel:delivered",
+              "ok": true,
+              "path": "OS -> plug-in child window",
+              "sendInputAccepted": 1,
+              "hitIsChildWindow": true,
+              "screenPoint": {
+                "x": 312,
+                "y": 173
+              }
+            },
+            {
+              "name": "focus:gained",
+              "ok": true,
+              "gainCountBefore": 1,
+              "gainCount": 2
+            },
+            {
+              "name": "focus:lost-to-another-window",
+              "ok": true
+            },
+            {
+              "name": "focus:regained",
+              "ok": true
+            }
+          ],
+          "evidence": {}
+        }
+      ]
+    },
+    {
+      "id": "P9-J",
+      "title": "Capture plug-in state and destroy window: state preserved",
+      "status": "PASS",
+      "needs": [
+        "single-100",
+        "single-125",
+        "single-150"
+      ],
+      "missing": [],
+      "runs": [
+        {
+          "config": "single-100",
+          "status": "PASS",
+          "checks": [
+            {
+              "name": "window-was-open-when-capture-began",
+              "ok": true
+            },
+            {
+              "name": "component-state-captured",
+              "ok": true,
+              "bytes": 12
+            },
+            {
+              "name": "edited-gain-is-in-captured-state",
+              "ok": true,
+              "captured": 0.8055555820465088,
+              "lastEdited": 0.8055555820465088
+            },
+            {
+              "name": "window-destroyed",
+              "ok": true,
+              "afterClose": {
+                "closed": true,
+                "windowCreated": false
+              }
+            },
+            {
+              "name": "no-editor-window-left-for-the-helper",
+              "ok": true,
+              "actual": 0,
+              "expected": 0,
+              "hwnd": 590162
+            },
+            {
+              "name": "helper-process-exited",
+              "ok": true,
+              "pid": 8488
+            },
+            {
+              "name": "state-restored-after-reopen",
+              "ok": true,
+              "restored": 0.8055555820465088,
+              "expected": 0.8055555820465088
+            },
+            {
+              "name": "reopened:window-dpi",
+              "ok": true,
+              "actual": 96,
+              "expected": 96
+            },
+            {
+              "name": "reopened:client-width",
+              "ok": true,
+              "actual": 350,
+              "expected": 350,
+              "tolerance": 1
+            },
+            {
+              "name": "reopened:client-height",
+              "ok": true,
+              "actual": 120,
+              "expected": 120,
+              "tolerance": 1
+            },
+            {
+              "name": "reopened:view-width-equals-client",
+              "ok": true,
+              "actual": 350,
+              "expected": 350
+            },
+            {
+              "name": "reopened:view-height-equals-client",
+              "ok": true,
+              "actual": 120,
+              "expected": 120
+            },
+            {
+              "name": "reopened:plugin-window-covers-client",
+              "ok": true,
+              "children": [
+                {
+                  "class": "VSTGUI00007FFFC2320000",
+                  "height": 120,
+                  "visible": true,
+                  "width": 350
+                }
+              ],
+              "client": [
+                350,
+                120
+              ]
+            },
+            {
+              "name": "reopened:content-scale-factor",
+              "ok": true,
+              "actual": 1,
+              "expected": 1,
+              "tolerance": 0.001
+            },
+            {
+              "name": "reopened:visible",
+              "ok": true,
+              "actual": true,
+              "expected": true
+            },
+            {
+              "name": "reopened:not-minimised",
+              "ok": true,
+              "actual": false,
+              "expected": false
+            }
+          ],
+          "evidence": {}
+        },
+        {
+          "config": "single-125",
+          "status": "PASS",
+          "checks": [
+            {
+              "name": "window-was-open-when-capture-began",
+              "ok": true
+            },
+            {
+              "name": "component-state-captured",
+              "ok": true,
+              "bytes": 12
+            },
+            {
+              "name": "edited-gain-is-in-captured-state",
+              "ok": true,
+              "captured": 0.8074073791503906,
+              "lastEdited": 0.8074073791503906
+            },
+            {
+              "name": "window-destroyed",
+              "ok": true,
+              "afterClose": {
+                "closed": true,
+                "windowCreated": false
+              }
+            },
+            {
+              "name": "no-editor-window-left-for-the-helper",
+              "ok": true,
+              "actual": 0,
+              "expected": 0,
+              "hwnd": 917870
+            },
+            {
+              "name": "helper-process-exited",
+              "ok": true,
+              "pid": 3792
+            },
+            {
+              "name": "state-restored-after-reopen",
+              "ok": true,
+              "restored": 0.8074073791503906,
+              "expected": 0.8074073791503906
+            },
+            {
+              "name": "reopened:window-dpi",
+              "ok": true,
+              "actual": 120,
+              "expected": 120
+            },
+            {
+              "name": "reopened:client-width",
+              "ok": true,
+              "actual": 437,
+              "expected": 437,
+              "tolerance": 1
+            },
+            {
+              "name": "reopened:client-height",
+              "ok": true,
+              "actual": 150,
+              "expected": 150,
+              "tolerance": 1
+            },
+            {
+              "name": "reopened:view-width-equals-client",
+              "ok": true,
+              "actual": 437,
+              "expected": 437
+            },
+            {
+              "name": "reopened:view-height-equals-client",
+              "ok": true,
+              "actual": 150,
+              "expected": 150
+            },
+            {
+              "name": "reopened:plugin-window-covers-client",
+              "ok": true,
+              "children": [
+                {
+                  "class": "VSTGUI00007FFFC2320000",
+                  "height": 150,
+                  "visible": true,
+                  "width": 437
+                }
+              ],
+              "client": [
+                437,
+                150
+              ]
+            },
+            {
+              "name": "reopened:content-scale-factor",
+              "ok": true,
+              "actual": 1.25,
+              "expected": 1.25,
+              "tolerance": 0.001
+            },
+            {
+              "name": "reopened:visible",
+              "ok": true,
+              "actual": true,
+              "expected": true
+            },
+            {
+              "name": "reopened:not-minimised",
+              "ok": true,
+              "actual": false,
+              "expected": false
+            }
+          ],
+          "evidence": {}
+        },
+        {
+          "config": "single-150",
+          "status": "PASS",
+          "checks": [
+            {
+              "name": "window-was-open-when-capture-began",
+              "ok": true
+            },
+            {
+              "name": "component-state-captured",
+              "ok": true,
+              "bytes": 12
+            },
+            {
+              "name": "edited-gain-is-in-captured-state",
+              "ok": true,
+              "captured": 0.8086419701576233,
+              "lastEdited": 0.8086419701576233
+            },
+            {
+              "name": "window-destroyed",
+              "ok": true,
+              "afterClose": {
+                "closed": true,
+                "windowCreated": false
+              }
+            },
+            {
+              "name": "no-editor-window-left-for-the-helper",
+              "ok": true,
+              "actual": 0,
+              "expected": 0,
+              "hwnd": 721368
+            },
+            {
+              "name": "helper-process-exited",
+              "ok": true,
+              "pid": 6016
+            },
+            {
+              "name": "state-restored-after-reopen",
+              "ok": true,
+              "restored": 0.8086419701576233,
+              "expected": 0.8086419701576233
+            },
+            {
+              "name": "reopened:window-dpi",
+              "ok": true,
+              "actual": 144,
+              "expected": 144
+            },
+            {
+              "name": "reopened:client-width",
+              "ok": true,
+              "actual": 525,
+              "expected": 525,
+              "tolerance": 1
+            },
+            {
+              "name": "reopened:client-height",
+              "ok": true,
+              "actual": 180,
+              "expected": 180,
+              "tolerance": 1
+            },
+            {
+              "name": "reopened:view-width-equals-client",
+              "ok": true,
+              "actual": 525,
+              "expected": 525
+            },
+            {
+              "name": "reopened:view-height-equals-client",
+              "ok": true,
+              "actual": 180,
+              "expected": 180
+            },
+            {
+              "name": "reopened:plugin-window-covers-client",
+              "ok": true,
+              "children": [
+                {
+                  "class": "VSTGUI00007FFFC2320000",
+                  "height": 180,
+                  "visible": true,
+                  "width": 525
+                }
+              ],
+              "client": [
+                525,
+                180
+              ]
+            },
+            {
+              "name": "reopened:content-scale-factor",
+              "ok": true,
+              "actual": 1.5,
+              "expected": 1.5,
+              "tolerance": 0.001
+            },
+            {
+              "name": "reopened:visible",
+              "ok": true,
+              "actual": true,
+              "expected": true
+            },
+            {
+              "name": "reopened:not-minimised",
+              "ok": true,
+              "actual": false,
+              "expected": false
+            }
+          ],
+          "evidence": {}
+        }
+      ]
+    },
+    {
+      "id": "P9-K",
+      "title": "Display scale changed while the editor is open (real WM_DPICHANGED)",
+      "status": "FAIL",
+      "needs": [
+        "live-scale"
+      ],
+      "missing": [
+        "live-scale"
+      ],
+      "runs": [
+        {
+          "config": "live-scale",
+          "status": "FAIL",
+          "checks": [
+            {
+              "name": "opened-at-100",
+              "ok": true,
+              "dpi": 96,
+              "base": {
+                "width": 350,
+                "height": 120
+              }
+            },
+            {
+              "name": "to-125:windows-sent-WM_DPICHANGED",
+              "ok": true,
+              "before": 0,
+              "after": 1,
+              "lastNewDpi": 120
+            },
+            {
+              "name": "to-125:window-dpi",
+              "ok": true,
+              "actual": 120,
+              "expected": 120
+            },
+            {
+              "name": "to-125:client-width",
+              "ok": false,
+              "actual": 548,
+              "expected": 437,
+              "tolerance": 1
+            },
+            {
+              "name": "to-125:client-height",
+              "ok": false,
+              "actual": 182,
+              "expected": 150,
+              "tolerance": 1
+            },
+            {
+              "name": "to-125:view-width-equals-client",
+              "ok": false,
+              "actual": 550,
+              "expected": 548
+            },
+            {
+              "name": "to-125:view-height-equals-client",
+              "ok": false,
+              "actual": 190,
+              "expected": 182
+            },
+            {
+              "name": "to-125:plugin-window-covers-client",
+              "ok": false,
+              "children": [
+                {
+                  "class": "VSTGUI00007FFFC2320000",
+                  "height": 190,
+                  "visible": true,
+                  "width": 550
+                }
+              ],
+              "client": [
+                548,
+                182
+              ]
+            },
+            {
+              "name": "to-125:content-scale-factor",
+              "ok": true,
+              "actual": 1.25,
+              "expected": 1.25,
+              "tolerance": 0.001
+            },
+            {
+              "name": "to-125:visible",
+              "ok": true,
+              "actual": true,
+              "expected": true
+            },
+            {
+              "name": "to-125:not-minimised",
+              "ok": true,
+              "actual": false,
+              "expected": false
+            },
+            {
+              "name": "rendered-not-blank",
+              "ok": true,
+              "distinctColours": 505,
+              "dominantColourFraction": 0.3589
+            },
+            {
+              "name": "content-reaches-edges",
+              "ok": false,
+              "rightStripColours": 1,
+              "bottomStripColours": 1
+            },
+            {
+              "name": "layout-matches-100-percent",
+              "ok": false,
+              "meanAbsDifference": 69.418,
+              "maxCellDifference": 255,
+              "limit": 16,
+              "sizes": "350x120 vs 548x182"
+            },
+            {
+              "name": "to-125:slider-click-lands",
+              "ok": true,
+              "actual": 0.31111109256744385,
+              "expected": 0.3,
+              "tolerance": 0.06,
+              "point": {
+                "x": 167,
+                "y": 124
+              }
+            },
+            {
+              "name": "to-150:windows-sent-WM_DPICHANGED",
+              "ok": true,
+              "before": 1,
+              "after": 2,
+              "lastNewDpi": 144
+            },
+            {
+              "name": "to-150:window-dpi",
+              "ok": true,
+              "actual": 144,
+              "expected": 144
+            },
+            {
+              "name": "to-150:client-width",
+              "ok": false,
+              "actual": 626,
+              "expected": 525,
+              "tolerance": 1
+            },
+            {
+              "name": "to-150:client-height",
+              "ok": false,
+              "actual": 202,
+              "expected": 180,
+              "tolerance": 1
+            },
+            {
+              "name": "to-150:view-width-equals-client",
+              "ok": false,
+              "actual": 632,
+              "expected": 626
+            },
+            {
+              "name": "to-150:view-height-equals-client",
+              "ok": false,
+              "actual": 219,
+              "expected": 202
+            },
+            {
+              "name": "to-150:plugin-window-covers-client",
+              "ok": false,
+              "children": [
+                {
+                  "class": "VSTGUI00007FFFC2320000",
+                  "height": 219,
+                  "visible": true,
+                  "width": 632
+                }
+              ],
+              "client": [
+                626,
+                202
+              ]
+            },
+            {
+              "name": "to-150:content-scale-factor",
+              "ok": true,
+              "actual": 1.5,
+              "expected": 1.5,
+              "tolerance": 0.001
+            },
+            {
+              "name": "to-150:visible",
+              "ok": true,
+              "actual": true,
+              "expected": true
+            },
+            {
+              "name": "to-150:not-minimised",
+              "ok": true,
+              "actual": false,
+              "expected": false
+            },
+            {
+              "name": "rendered-not-blank",
+              "ok": true,
+              "distinctColours": 560,
+              "dominantColourFraction": 0.2705
+            },
+            {
+              "name": "content-reaches-edges",
+              "ok": false,
+              "rightStripColours": 1,
+              "bottomStripColours": 1
+            },
+            {
+              "name": "layout-matches-100-percent",
+              "ok": false,
+              "meanAbsDifference": 57.136,
+              "maxCellDifference": 255,
+              "limit": 16,
+              "sizes": "350x120 vs 626x202"
+            },
+            {
+              "name": "to-150:slider-click-lands",
+              "ok": true,
+              "actual": 0.709876537322998,
+              "expected": 0.7,
+              "tolerance": 0.06,
+              "point": {
+                "x": 265,
+                "y": 149
+              }
+            },
+            {
+              "name": "to-125:windows-sent-WM_DPICHANGED",
+              "ok": true,
+              "before": 2,
+              "after": 3,
+              "lastNewDpi": 120
+            },
+            {
+              "name": "to-125:window-dpi",
+              "ok": true,
+              "actual": 120,
+              "expected": 120
+            },
+            {
+              "name": "to-125:client-width",
+              "ok": false,
+              "actual": 364,
+              "expected": 437,
+              "tolerance": 1
+            },
+            {
+              "name": "to-125:client-height",
+              "ok": false,
+              "actual": 118,
+              "expected": 150,
+              "tolerance": 1
+            },
+            {
+              "name": "to-125:view-width-equals-client",
+              "ok": false,
+              "actual": 366,
+              "expected": 364
+            },
+            {
+              "name": "to-125:view-height-equals-client",
+              "ok": false,
+              "actual": 126,
+              "expected": 118
+            },
+            {
+              "name": "to-125:plugin-window-covers-client",
+              "ok": false,
+              "children": [
+                {
+                  "class": "VSTGUI00007FFFC2320000",
+                  "height": 126,
+                  "visible": true,
+                  "width": 366
+                }
+              ],
+              "client": [
+                364,
+                118
+              ]
+            },
+            {
+              "name": "to-125:content-scale-factor",
+              "ok": true,
+              "actual": 1.25,
+              "expected": 1.25,
+              "tolerance": 0.001
+            },
+            {
+              "name": "to-125:visible",
+              "ok": true,
+              "actual": true,
+              "expected": true
+            },
+            {
+              "name": "to-125:not-minimised",
+              "ok": true,
+              "actual": false,
+              "expected": false
+            },
+            {
+              "name": "rendered-not-blank",
+              "ok": true,
+              "distinctColours": 673,
+              "dominantColourFraction": 0.0742
+            },
+            {
+              "name": "content-reaches-edges",
+              "ok": true,
+              "rightStripColours": 129,
+              "bottomStripColours": 128
+            },
+            {
+              "name": "layout-matches-100-percent",
+              "ok": false,
+              "meanAbsDifference": 30.111,
+              "maxCellDifference": 192,
+              "limit": 16,
+              "sizes": "350x120 vs 364x118"
+            },
+            {
+              "name": "live-scale-sequence-completed",
+              "ok": false,
+              "error": "VST3 helper timed out after 45000ms"
+            }
+          ],
+          "evidence": {}
+        }
+      ]
+    },
+    {
+      "id": "P9-L",
+      "title": "Plug-in without content-scale support at 150%",
+      "status": "NOT_VERIFIED",
+      "needs": [
+        "no-content-scale"
+      ],
+      "missing": [
+        "no-content-scale"
+      ],
+      "runs": [
+        {
+          "config": "no-content-scale",
+          "status": "NOT_VERIFIED",
+          "checks": [],
+          "evidence": {
+            "reason": "this helper build has no no-content-scale test mode"
+          }
+        }
+      ]
+    },
+    {
+      "id": "P9-M",
+      "title": "Fixed-size (non-resizable) editor across a real DPI change",
+      "status": "NOT_VERIFIED",
+      "needs": [
+        "fixed-size"
+      ],
+      "missing": [
+        "fixed-size"
+      ],
+      "runs": [
+        {
+          "config": "fixed-size",
+          "status": "NOT_VERIFIED",
+          "checks": [],
+          "evidence": {
+            "reason": "this helper build has no fixed-size test mode"
+          }
+        }
+      ]
+    }
+  ],
+  "notes": [
+    "Display scale of \\\\.\\DISPLAY1 restored to 100%: true"
+  ],
+  "screenshots": [
+    {
+      "name": "single-100",
+      "file": "baseline-single-100.png",
+      "client": "baseline-single-100.client.png",
+      "bounds": {
+        "left": 85,
+        "clientLeft": 86,
+        "clientHeight": 120,
+        "width": 352,
+        "clientTop": 109,
+        "top": 78,
+        "height": 152,
+        "isWindow": true,
+        "source": "DWMWA_EXTENDED_FRAME_BOUNDS",
+        "clientWidth": 350,
+        "dpi": 96
+      },
+      "measured": {
+        "samples": 2048,
+        "distinctColours": 668,
+        "dominantColourFraction": 0.0874,
+        "distinctColoursInRightStrip": 105,
+        "distinctColoursInBottomStrip": 110
+      }
+    },
+    {
+      "name": "single-125",
+      "file": "baseline-single-125.png",
+      "client": "baseline-single-125.client.png",
+      "bounds": {
+        "clientWidth": 437,
+        "isWindow": true,
+        "clientLeft": 41,
+        "clientTop": 70,
+        "left": 40,
+        "dpi": 120,
+        "width": 439,
+        "height": 189,
+        "top": 32,
+        "clientHeight": 150,
+        "source": "DWMWA_EXTENDED_FRAME_BOUNDS"
+      },
+      "measured": {
+        "samples": 2048,
+        "distinctColours": 662,
+        "dominantColourFraction": 0.0786,
+        "distinctColoursInRightStrip": 114,
+        "distinctColoursInBottomStrip": 110
+      }
+    },
+    {
+      "name": "single-150",
+      "file": "baseline-single-150.png",
+      "client": "baseline-single-150.client.png",
+      "bounds": {
+        "left": 47,
+        "source": "DWMWA_EXTENDED_FRAME_BOUNDS",
+        "clientLeft": 49,
+        "height": 227,
+        "clientWidth": 525,
+        "clientTop": 83,
+        "dpi": 144,
+        "top": 38,
+        "isWindow": true,
+        "clientHeight": 180,
+        "width": 529
+      },
+      "measured": {
+        "samples": 2048,
+        "distinctColours": 660,
+        "dominantColourFraction": 0.0806,
+        "distinctColoursInRightStrip": 108,
+        "distinctColoursInBottomStrip": 94
+      }
+    },
+    {
+      "name": "live-1-to-125",
+      "file": "baseline-live-1-to-125.png",
+      "client": "baseline-live-1-to-125.client.png",
+      "bounds": {
+        "top": 26,
+        "dpi": 120,
+        "source": "DWMWA_EXTENDED_FRAME_BOUNDS",
+        "width": 550,
+        "clientTop": 64,
+        "clientLeft": 35,
+        "isWindow": true,
+        "left": 34,
+        "clientWidth": 548,
+        "clientHeight": 182,
+        "height": 221
+      },
+      "measured": {
+        "samples": 2048,
+        "distinctColours": 505,
+        "dominantColourFraction": 0.3589,
+        "distinctColoursInRightStrip": 1,
+        "distinctColoursInBottomStrip": 1
+      }
+    },
+    {
+      "name": "live-2-to-150",
+      "file": "baseline-live-2-to-150.png",
+      "client": "baseline-live-2-to-150.client.png",
+      "bounds": {
+        "height": 249,
+        "clientTop": 71,
+        "isWindow": true,
+        "left": 35,
+        "source": "DWMWA_EXTENDED_FRAME_BOUNDS",
+        "clientHeight": 202,
+        "top": 26,
+        "clientLeft": 37,
+        "clientWidth": 626,
+        "dpi": 144,
+        "width": 630
+      },
+      "measured": {
+        "samples": 2048,
+        "distinctColours": 560,
+        "dominantColourFraction": 0.2705,
+        "distinctColoursInRightStrip": 1,
+        "distinctColoursInBottomStrip": 1
+      }
+    },
+    {
+      "name": "live-3-to-125",
+      "file": "baseline-live-3-to-125.png",
+      "client": "baseline-live-3-to-125.client.png",
+      "bounds": {
+        "clientWidth": 364,
+        "clientHeight": 118,
+        "isWindow": true,
+        "clientTop": 64,
+        "clientLeft": 35,
+        "height": 157,
+        "width": 366,
+        "top": 26,
+        "left": 34,
+        "source": "DWMWA_EXTENDED_FRAME_BOUNDS",
+        "dpi": 120
+      },
+      "measured": {
+        "samples": 2048,
+        "distinctColours": 673,
+        "dominantColourFraction": 0.0742,
+        "distinctColoursInRightStrip": 129,
+        "distinctColoursInBottomStrip": 128
+      }
+    }
+  ]
+}
