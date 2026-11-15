@@ -23,7 +23,10 @@ const hostMain = read('native/vst3/host.cpp');
 
 /** Body of one `case WM_X:` in the editor window procedure. */
 function messageCase(name) {
-  const start = editorHost.indexOf(`case ${name}:`);
+  // Inside the window procedure proper, not in the test-only geometry trace above it.
+  const procedure = editorHost.indexOf('LRESULT handleWindowMessage(');
+  assert.ok(procedure >= 0, 'the window procedure exists');
+  const start = editorHost.indexOf(`case ${name}:`, procedure);
   assert.ok(start >= 0, `${name} is handled`);
   const next = editorHost.indexOf('\n      case WM_', start + 10);
   return editorHost.slice(start, next < 0 ? undefined : next);
