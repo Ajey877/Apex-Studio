@@ -4,23 +4,30 @@ This is the **only** way to claim the native editor window works. Everything tha
 runs on Linux — JavaScript unit tests, IPC, helper framing, process separation,
 `test:vst3-editor` — is contract-level. None of it creates an HWND.
 
-Status of this change: **all twelve automated criteria PASS on real Windows, and
-the AGain audio policy is now measured rather than assumed; the two items that
-remain `NOT_VERIFIED` are the packaged-application claim and interactive DPI
-changes.** The packaged app is now driven end to end by
-`scripts/packaged-editor-acceptance.mjs` (see below), and its editor criteria are
-reported separately from the helper-level ones — never traded for one another.
+There are **two separate layers of acceptance**, and neither may be traded for the
+other. They answer different questions and are reported independently:
 
-`Native VST3 Validation / Native DSP (windows-latest)` ran the acceptance harness
-against a real Windows helper, a real HWND, and the real pinned-SDK AGain VSTGUI
-editor: **14 PASS, 0 FAIL, 2 NOT_VERIFIED** at commits `6dcdf1a`, `b399996` and
-`53e7852`. The two `NOT_VERIFIED` rows were the packaged-application claim and the
-AGain audio-policy row.
+| Layer | Question it answers | Where it runs |
+| --- | --- | --- |
+| **Helper-level** (Part 1) | Does the native helper create a real `HWND`, attach the real AGain `IPlugView`, and route input/state honestly? | `Native VST3 Validation / Native DSP (windows-latest)` |
+| **Packaged-application** (Part 1b) | Does the installed Apex app, driven through its own visible controls, deliver a genuine edit into project state and persist it? | `Desktop Validation / windows-package` |
 
-The AGain policy row has since been converted from an assumption into a
-measurement, and that run reported **15 PASS, 0 FAIL, 1 NOT_VERIFIED** at
-`78cad31` — the single remaining `NOT_VERIFIED` being the packaged-application
-claim, which the separate packaged harness covers and this one does not.
+**Current status at `100011b`:**
+
+- **Helper-level (Part 1): 15 PASS, 0 FAIL, 1 NOT_VERIFIED.** The `NOT_VERIFIED` row is
+  `packaged-app`, which is `NOT_VERIFIED` **by design**: the helper harness launches the
+  natively built helper directly, not the Electron app, so it never claims to have
+  driven the app's UI. That claim belongs to Part 1b, which does exactly that.
+- **Packaged application (Part 1b): 9 PASS, 0 FAIL, 1 NOT_VERIFIED.** `p9-dpi-125-150`
+  is the single `NOT_VERIFIED` row: 125%/150% scaling and cross-monitor migration need
+  an interactive desktop.
+- **Interactive checklist (Part 2): not executed.** Nothing in it has been observed on
+  screen.
+
+The packaged-application claim is therefore **verified**, at the `p1`–`p8` and `p4b`
+level of the table in Part 1b. It was previously `NOT_VERIFIED` and that statement is
+now historical: `scripts/packaged-editor-acceptance.mjs` drives the installed app end to
+end and commits a real edit through the plug-in's own VSTGUI control.
 
 Two corrections were made after the first green run, both found by measurement:
 
@@ -545,8 +552,12 @@ Extra records the harness always writes:
 - `12c` — `NOT_VERIFIED` by design: AGain declares an event input bus, and Apex
   deliberately refuses to run audio for such effects. That is a product policy,
   not a defect, and the audio path is proven with `mda Delay` instead.
-- `packaged-app` — `NOT_VERIFIED` unless supplied from an interactive session. The
-  harness cannot drive the Electron UI, so it never claims to have done so.
+- `packaged-app` — always `NOT_VERIFIED` here, and that is correct rather than a gap in
+  this layer. This harness launches the natively built helper and the real AGain
+  `IPlugView` directly; it cannot drive the Electron UI, so it never claims to have done
+  so. The packaged-application claim is measured by Part 1b, which runs the installed app
+  and clicks its real controls. Keeping the row `NOT_VERIFIED` here is what stops one
+  layer's result being reported as the other's.
 
 ### Mouse semantics
 
@@ -612,6 +623,7 @@ run by `.github/workflows/desktop-validation.yml` (`windows-package`).
 | `p2-native-window-responsive` | The native window appears and the app stays responsive |
 | `p3-parameter-reaches-apex` | A parameter change reaches Apex |
 | `p4-one-undoable-change` | Closing the editor commits exactly one undoable change |
+| `p4b-repeated-cycles` | Ten consecutive edit/close/undo/redo cycles each commit exactly one entry |
 | `p5-undo-redo` | Undo and redo work |
 | `p6-save-quit-reload` | Save, quit and reload preserve state |
 | `p7-no-leaked-helpers` | Quitting with the editor open leaks no helper process |
@@ -619,11 +631,30 @@ run by `.github/workflows/desktop-validation.yml` (`windows-package`).
 | `p9-dpi-125-150` | 125% and 150% DPI behaviour (manual only) |
 | `harness` | The driver itself completed |
 
-Result at `78cad31` (`windows-package`, real installed app): **2 PASS, 0 FAIL,
-7 NOT_VERIFIED** — `p6` and `p7` pass; `p1`–`p5` and `p8` are blocked by the fixture
-limitation documented below; `p9` needs an interactive desktop. A criterion is only
-`FAIL` when the host was shown to be wrong: a plug-in that correctly rejects an
-edit naming parameters its controller never exposes is a fixture limit
+Result at `100011b` (`windows-package`, real installed app): **9 PASS, 0 FAIL,
+1 NOT_VERIFIED.**
+
+```
+{"total":10,"pass":9,"fail":0,"notVerified":1}
+p1-mixer-opens-editor      PASS     p4b-repeated-cycles  PASS (10/10 cycles)
+p2-native-window-responsive PASS    p5-undo-redo        PASS
+p3-parameter-reaches-apex  PASS     p6-save-quit-reload PASS
+p4-one-undoable-change     PASS     p7-no-leaked-helpers PASS
+p8-recovery                PASS     p9-dpi-125-150      NOT_VERIFIED
+```
+
+`p9` is the only `NOT_VERIFIED` row: changing the Windows display scale to 125%/150%
+and moving the window between monitors with different per-monitor DPI requires an
+interactive desktop, and the automated runner is 96 DPI. It is not inferred from a green
+run.
+
+This row used to read "2 PASS, 7 NOT_VERIFIED" at `78cad31`, with `p1`–`p5` and `p8`
+blocked by a fixture limitation. Those criteria now pass on the genuine interaction; the
+history of how the block was mistaken for a host defect is in
+[the failure matrix](#failure-matrix-automated-rows) and in the sections above.
+
+A criterion is only `FAIL` when the host was shown to be wrong: a plug-in that correctly
+rejects an edit naming parameters its controller never exposes is a fixture limit
 (`blockedByFixture`), not a host defect.
 
 Three rules keep this honest, and each of them exists because a real run was wrong
