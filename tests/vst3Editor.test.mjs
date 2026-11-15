@@ -537,6 +537,155 @@ test('every non-PASS criterion states why in an annotation', () => {
     'FAIL/NOT_VERIFIED reasons are visible without downloading artifacts');
 });
 
+test('the Windows job fails when packaged acceptance fails, and the evidence still uploads', () => {
+  // The packaged acceptance step used to capture the script's exit code into `status`
+  // and then `exit 0`. Combined with continue-on-error, its `outcome` was therefore
+  // ALWAYS success, so the verdict step that branched on that outcome could never
+  // fail: a run with failing criteria produced a green Windows job, and the only
+  // signal was a notice nobody was gated on.
+  //
+  // These assertions pin the mechanism that replaced it, and each one corresponds to a
+  // way the masking could come back.
+  const workflow = readSource('.github/workflows/desktop-validation.yml');
+
+  // 1. The exit code must cross the step boundary. A local shell variable cannot.
+  assert.ok(/echo "exit_code=\$\{?status\}?" >> "\$GITHUB_OUTPUT"/.test(workflow),
+    'the script exit code is written to $GITHUB_OUTPUT');
+  // 2. The acceptance step must not end with a blanket `exit 0` that erases it.
+  const acceptanceStep = workflow.slice(
+    workflow.indexOf('- name: Native VST3 editor acceptance through the packaged application'),
+    workflow.indexOf('- name: Record the packaged acceptance verdict'));
+  assert.ok(/\$GITHUB_OUTPUT/.test(acceptanceStep),
+    'the acceptance step publishes the code it measured');
+  assert.ok(/missing_evidence=true/.test(acceptanceStep),
+    'and reports a missing evidence file as its own signal');
+
+  // 3. The verdict must read the recorded code, not the step outcome. continue-on-error
+  //    makes the outcome meaningless, so branching on it is the bug itself.
+  const verdictStep = workflow.slice(
+    workflow.indexOf('- name: Record the packaged acceptance verdict'),
+    workflow.indexOf('- name: Upload measured production VST3 evidence'));
+  assert.ok(/steps\.packaged-editor-acceptance\.outputs\.exit_code/.test(verdictStep),
+    'the verdict reads the recorded exit code');
+  assert.ok(!/steps\.packaged-editor-acceptance\.outcome/.test(verdictStep),
+    'the verdict does not branch on the meaningless step outcome');
+  assert.ok(/exit 1/.test(verdictStep), 'the verdict can fail the job');
+  assert.ok(/ACCEPTANCE_MISSING_EVIDENCE/.test(verdictStep) && /missing/.test(verdictStep),
+    'a missing evidence file fails the job');
+
+  // 4. NOT_VERIFIED (exit 3) must not be converted into a failure OR into a PASS:
+  //    the code is accepted, and the criteria are still reported as NOT_VERIFIED.
+  assert.ok(/"\$ACCEPTANCE_EXIT_CODE" -ne 0 \] && \[ "\$ACCEPTANCE_EXIT_CODE" -ne 3 \]/.test(verdictStep),
+    'exit 3 (verified criteria passed, some NOT_VERIFIED) is accepted');
+  assert.ok(/NOT_VERIFIED/.test(verdictStep),
+    'and the verdict step says those criteria remain NOT_VERIFIED');
+
+  // 5. Evidence must still upload when acceptance failed.
+  const uploadStep = workflow.slice(workflow.indexOf('- name: Upload measured production VST3 evidence'));
+  assert.ok(/^\s*if: always\(\)/m.test(uploadStep),
+    'the evidence upload runs even after a failure');
+
+  // 6. The script's documented exit codes must be the ones the workflow accepts.
+  const script = readSource('scripts/packaged-editor-acceptance.mjs');
+  assert.ok(/process\.exit\(results\.some\(r => r\.status === 'FAIL'\) \? 1 : 3\)/.test(script),
+    'the script exits 1 on FAIL and 3 when it is only NOT_VERIFIED');
+});
+
+test('a poll already in flight when close is requested does not schedule another poll', async () => {
+  // The Lead Engineer's finding, tested as behaviour rather than as source text.
+  //
+  // stopPolling() clears the pending timer, but it cannot cancel a poll that is already
+  // awaiting pollEditor(). That poll resumes after close() has run and, with only the
+  // finished/disposeRequested/id guard, schedules the NEXT poll. When the close takes
+  // longer than one poll interval -- the normal case, since it captures component and
+  // controller state -- that scheduled poll issues a real pollEditor while closeEditor
+  // is still pending, and the service refuses the close with "still servicing another
+  // request". That refusal is how a user's edit was discarded.
+  //
+  // The interleaving has to be held open deliberately: releasing the poll only after
+  // the close has finished would let `finished` mask the bug, and the test would pass
+  // against the broken code.
+  let releasePoll;
+  let releaseClose;
+  let pollsStarted = 0;
+  const pollGate = new Promise(resolve => { releasePoll = resolve; });
+  const closeGate = new Promise(resolve => { releaseClose = resolve; });
+  const { bridge } = fakeBridge({
+    poll: async () => {
+      pollsStarted += 1;
+      if (pollsStarted === 1) await pollGate;
+      return openStatus();
+    },
+    close: async () => {
+      // Stay in flight long enough that any poll scheduled by the resumed poll fires
+      // while this close is still pending -- the real production ordering.
+      await closeGate;
+      return closedStatus();
+    },
+  });
+  /** @type {Vst3State[]} */
+  const committed = [];
+  const { instance } = session(bridge, async state => { committed.push(state); });
+  await instance.open();
+  const started = Date.now() + 2000;
+  while (pollsStarted === 0 && Date.now() < started) await new Promise(r => setTimeout(r, 10));
+  assert.equal(pollsStarted, 1, 'the first poll is in flight');
+
+  const closePromise = instance.close();
+  // Let close() reach its await before the poll resumes, so closeRequested is set.
+  await new Promise(resolve => setTimeout(resolve, 30));
+  releasePoll();
+  // Wait past two poll intervals while the close is still pending. With the bug the
+  // resumed poll schedules a timer, it fires here, and pollsStarted increments.
+  await new Promise(resolve => setTimeout(resolve, 400));
+  const whileClosing = pollsStarted;
+
+  releaseClose();
+  const view = await closePromise;
+  await new Promise(resolve => setTimeout(resolve, 400));
+
+  assert.equal(whileClosing, 1,
+    `no poll may start while the close is pending (saw ${whileClosing})`);
+  assert.equal(pollsStarted, whileClosing, 'and none starts after it completes');
+  assert.equal(view.phase, 'committed', 'the close commits');
+  assert.equal(committed.length, 1, 'the edit is committed exactly once');
+  // The in-flight poll's own result is kept: the state it reported is what was saved.
+  assert.deepEqual(committed[0].parameters, finalState.parameters);
+});
+
+test('a poll that reports closed during a close request still finishes the session once', async () => {
+  // The in-flight poll's result must not be discarded: if the plug-in reports it has
+  // closed, the session finishes from that status. With closeRequested set, the guard
+  // must still not schedule anything afterwards.
+  let pollsStarted = 0;
+  let releasePoll;
+  const gate = new Promise(resolve => { releasePoll = resolve; });
+  const { bridge } = fakeBridge({
+    poll: async () => {
+      pollsStarted += 1;
+      if (pollsStarted === 1) await gate;
+      // This poll itself observes the plug-in window as closed.
+      return closedStatus();
+    },
+    close: async () => closedStatus(),
+  });
+  /** @type {Vst3State[]} */
+  const committed = [];
+  const { instance, views } = session(bridge, async state => { committed.push(state); });
+  await instance.open();
+  const deadline = Date.now() + 2000;
+  while (pollsStarted === 0 && Date.now() < deadline) await new Promise(r => setTimeout(r, 10));
+  const closePromise = instance.close();
+  releasePoll();
+  await closePromise;
+  const settled = pollsStarted;
+  await new Promise(resolve => setTimeout(resolve, 500));
+  assert.equal(pollsStarted, settled, 'nothing is scheduled after the close was requested');
+  // Exactly one commit, never two, even though both the poll and the close reported
+  // a captured state.
+  assert.equal(committed.length, 1, 'the state is committed exactly once across poll and close');
+});
+
 test('a close refused mid-poll is retried, so a real edit is not thrown away', async () => {
   // The packaged run that exposed this recorded phaseAfterClose 'recovered' with
   // "VST3 editor is still servicing another request; retry in a moment." while the
@@ -585,6 +734,42 @@ test('a close refused for any other reason still fails loudly instead of retryin
   assert.equal(commits, 0, 'and nothing is committed');
   assert.equal(view.phase, 'recovered', 'the session reports recovery');
   assert.match(view.error, /state capture failed/, 'and keeps the real reason');
+});
+
+test('a close that is refused past the retry deadline gives up, keeps the reason, and leaks nothing', async () => {
+  // The retry exists for a transient condition. If the service never becomes idle the
+  // retry MUST stop: an unbounded loop would stall the close forever, hold the helper
+  // open, and leave the user with no outcome. This takes the real deadline (5s) rather
+  // than a shortened one, so the shipped bound is what gets exercised.
+  let closeAttempts = 0;
+  const { bridge, calls } = fakeBridge({
+    poll: async () => openStatus(),
+    close: async () => {
+      closeAttempts += 1;
+      throw new Error('VST3 editor is still servicing another request; retry in a moment.');
+    },
+  });
+  let commits = 0;
+  const { instance } = session(bridge, async () => { commits += 1; });
+  await instance.open();
+  const startedAt = Date.now();
+  const view = await instance.close();
+  const elapsed = Date.now() - startedAt;
+
+  // Bounded: it retried, and it stopped.
+  assert.ok(closeAttempts > 1, `the close was retried (attempts ${closeAttempts})`);
+  assert.ok(elapsed < 15000, `the retry is bounded, it gave up after ${elapsed}ms`);
+  // Nothing was committed, and the session says so instead of pretending success.
+  assert.equal(commits, 0, 'no commit happened');
+  assert.equal(view.phase, 'recovered', 'the session reports recovery, not success');
+  // The real reason survives: a bounded timeout must not become "unknown error".
+  assert.match(view.error, /still servicing another request/,
+    'the cause of the failure is kept, not replaced by a generic timeout');
+  // No leak and no silent discard: the helper is released exactly once, and it is told
+  // the state was NOT committed so the main process keeps a recovery record for it.
+  const finishCalls = calls.filter(c => c[0] === 'finishEditor');
+  assert.deepEqual(finishCalls, [['finishEditor', 'editor-1', false]],
+    'the helper is released exactly once and told the state was not committed');
 });
 
 test('a crashed helper is reported by its own reason, not a later generic error', async () => {

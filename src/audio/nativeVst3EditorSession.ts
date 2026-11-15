@@ -126,7 +126,17 @@ export class NativeVst3EditorSession {
   }
 
   private schedulePoll() {
-    if (this.pollTimer !== null || this.finished || this.disposeRequested) return;
+    // `closeRequested` is checked here as well as in the other stops, because a poll
+    // that is already awaiting pollEditor() is not cancelled by stopPolling(): it
+    // resumes afterwards and, without this, schedules the NEXT poll.
+    //
+    // That is how a close ends up competing with polls it cannot see. close() sets
+    // closeRequested and clears the timer, the in-flight poll resumes with finished
+    // still false, schedules another one, and 120ms later a pollEditor is in flight
+    // again -- so the service refuses closeEditor with "still servicing another
+    // request". Retrying the close absorbs the symptom; not scheduling this poll is
+    // what removes the cause.
+    if (this.pollTimer !== null || this.finished || this.disposeRequested || this.closeRequested) return;
     this.pollTimer = setTimeout(() => { void this.poll(); }, POLL_INTERVAL_MS);
   }
 
@@ -157,6 +167,11 @@ export class NativeVst3EditorSession {
         return;
       }
     }
+    // Reaching here with closeRequested set means the close began while this poll was
+    // in flight. Its result has already been applied above -- so the parameters it
+    // reported are kept, and a `closed` status was still handed to finishWithStatus --
+    // but no further poll is scheduled. Scheduling one here is what put a request back
+    // in front of the close it was racing.
     this.schedulePoll();
   }
 

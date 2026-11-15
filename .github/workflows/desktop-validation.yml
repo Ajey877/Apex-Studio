@@ -98,20 +98,57 @@ jobs:
           grep -E '^(PASS|FAIL|NOT_VERIFIED)' packaged-editor-acceptance.log | head -10 | while IFS= read -r line; do
             echo "::notice::${line}"
           done
+          # The script's own exit code is the verdict and must survive this step.
+          # It used to be captured into `status` and then discarded by a final
+          # `exit 0`, so with continue-on-error the step's outcome was ALWAYS success
+          # and the verdict step below could never fail. A failing acceptance run was
+          # therefore reported as a green Windows job. Recording it in $GITHUB_OUTPUT
+          # is what carries it across the step boundary.
+          echo "exit_code=$status" >> "$GITHUB_OUTPUT"
           if [ ! -f build/native-evidence/packaged-editor-acceptance.json ]; then
+            echo "missing_evidence=true" >> "$GITHUB_OUTPUT"
             echo "::error::Packaged acceptance produced no evidence file"
-            exit 1
+          else
+            echo "missing_evidence=false" >> "$GITHUB_OUTPUT"
           fi
+          # Do not fail here: the artifact must still upload after a failure, and the
+          # verdict step below is the single place that decides the job's outcome.
           exit 0
       - name: Record the packaged acceptance verdict
         if: runner.os == 'Windows'
         shell: bash
+        env:
+          # Read through env so the workflow expression cannot silently evaluate the
+          # step's (always-success) outcome instead of the script's exit code.
+          ACCEPTANCE_EXIT_CODE: ${{ steps.packaged-editor-acceptance.outputs.exit_code }}
+          ACCEPTANCE_MISSING_EVIDENCE: ${{ steps.packaged-editor-acceptance.outputs.missing_evidence }}
         run: |
-          if [ "${{ steps.packaged-editor-acceptance.outcome }}" = "failure" ]; then
-            echo "::error::Packaged editor acceptance reported a failure; see the artifact"
+          set -euo pipefail
+          echo "packaged acceptance exit code: ${ACCEPTANCE_EXIT_CODE:-<none>}"
+          # The evidence file is mandatory: a run that produced no evidence has not
+          # proved anything, whatever its exit code says.
+          if [ "${ACCEPTANCE_MISSING_EVIDENCE}" = "true" ]; then
+            echo "::error::Packaged acceptance produced no evidence file; nothing was measured"
             exit 1
           fi
-          echo "::notice::Packaged editor acceptance completed; see packaged-editor-acceptance.json"
+          if [ -z "${ACCEPTANCE_EXIT_CODE:-}" ]; then
+            echo "::error::Packaged acceptance did not report an exit code; the step did not run to completion"
+            exit 1
+          fi
+          # 0 means every verified criterion passed. 3 is the script's documented
+          # "verified criteria all passed, some remain NOT_VERIFIED" code, which is
+          # NOT a failure: P9 needs an interactive desktop and stays reported as such.
+          # Any other code means at least one criterion FAILED, or the harness itself
+          # crashed, and the job must go red.
+          if [ "$ACCEPTANCE_EXIT_CODE" -ne 0 ] && [ "$ACCEPTANCE_EXIT_CODE" -ne 3 ]; then
+            echo "::error::Packaged editor acceptance failed (exit ${ACCEPTANCE_EXIT_CODE}); see the uploaded evidence"
+            exit 1
+          fi
+          if [ "$ACCEPTANCE_EXIT_CODE" -eq 3 ]; then
+            echo "::notice::Packaged acceptance passed every verified criterion; criteria requiring an interactive desktop remain NOT_VERIFIED (see the summary line)"
+          else
+            echo "::notice::Packaged editor acceptance passed every criterion; see packaged-editor-acceptance.json"
+          fi
       - name: Upload measured production VST3 evidence
         if: always()
         uses: actions/upload-artifact@v4
