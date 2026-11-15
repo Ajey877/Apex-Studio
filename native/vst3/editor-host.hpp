@@ -8,13 +8,32 @@
 #include "pluginterfaces/vst/ivstcomponent.h"
 #include "pluginterfaces/vst/ivsteditcontroller.h"
 #include "public.sdk/source/vst/utility/stringconvert.h"
+#include "editor-dpi.hpp"
+#include <atomic>
+#include <cstdlib>
 #include <deque>
 #include <functional>
 #include <limits>
 #include <mutex>
 #include <sstream>
+#include <thread>
 
 namespace ApexVst3Host {
+
+/**
+ * What happened when the helper asked Windows for per-monitor-v2 DPI awareness.
+ * Recorded by main() and reported in the editor diagnostics, so "the process is
+ * DPI aware" is an observation of this process and never an assumption.
+ */
+struct DpiAwarenessRequest {
+  bool apiAvailable = false;   // SetProcessDpiAwarenessContext exists on this Windows
+  bool succeeded = false;      // the call returned TRUE
+  unsigned long error = 0;     // GetLastError when it did not
+};
+inline DpiAwarenessRequest& dpiAwarenessRequest() {
+  static DpiAwarenessRequest request;
+  return request;
+}
 
 // Acceptance-test seam. Empty in production: the queue is only populated by the
 // host executable when it is explicitly compiled/run as a test build, so no
@@ -88,6 +107,58 @@ class NativeEditorSession {
   bool lastCloseFailurePending = false;
   float contentScaleFactor = 1.f;
   std::optional<std::pair<int, int>> lastPluginResizeRequest;
+
+  /** DPI Windows reports for the editor window. Never assumed to be 96, and never
+   * the DPI the process started at: the two differ after a display-scale change
+   * and on any monitor whose scale is not the primary's. */
+  unsigned int windowDpi = dpi::kDefaultDpi;
+  /** Inside WM_DPICHANGED: the host is moving the editor to a new scale. */
+  bool applyingDpiChange = false;
+  /** The host is sizing the window to a client size it has already decided. */
+  bool fittingClient = false;
+  /** The last IPlugFrame::resizeView ended with a successful IPlugView::onSize. */
+  bool pluginResizeAccepted = false;
+  /** A WM_DPICHANGED that arrived while another one was being handled. */
+  struct PendingDpiChange {
+    unsigned int dpi = 0;
+    bool hasSuggestion = false;
+    RECT suggested{};
+  };
+  std::optional<PendingDpiChange> pendingDpiChange;
+  /** How often the real client area disagreed with the computed frame and had to
+   * be corrected. Non-zero means the frame metrics were not what Windows used. */
+  int frameCorrectionCount = 0;
+  /** Acceptance-only switches (APEX_VST3_EDITOR_TEST_MODE). They let the harness
+   * drive the host's code paths for plug-ins that do not scale or cannot be
+   * resized, using a real plug-in view on a real display. Unset in the product. */
+  bool testIgnoreContentScale = false;
+  bool testForceFixedSize = false;
+
+  /** The last scale fit (open or WM_DPICHANGED) and what decided the client size. */
+  struct ScaleFit {
+    bool happened = false;
+    bool fromDpiChange = false;
+    unsigned int previousDpi = 0;
+    unsigned int newDpi = 0;
+    dpi::Size clientBefore;
+    dpi::Size planned;
+    dpi::Size clientAfter;
+    dpi::ClientSource source = dpi::ClientSource::Unchanged;
+    bool pluginNotified = false;
+    Steinberg::tresult notifyResult = Steinberg::kNotImplemented;
+    bool constrained = false;
+  };
+  ScaleFit lastScaleFit;
+  int reentrantDpiChangeCount = 0;
+
+  /** Interactive sizing, counted by the window procedure that received it. */
+  int sizingMessageCount = 0;
+  int constraintCallCount = 0;
+  dpi::Size lastConstraintRequested;
+  dpi::Size lastConstraintGranted;
+  Steinberg::tresult lastConstraintResult = Steinberg::kNotImplemented;
+  int enterSizeMoveCount = 0;
+  int exitSizeMoveCount = 0;
 
   /** One content-scale attempt and everything observable about it. */
   struct ScaleAttempt {
@@ -354,6 +425,153 @@ class NativeEditorSession {
     return {client.right - client.left, client.bottom - client.top};
   }
 
+  /**
+   * Non-client extents of the editor window at a given DPI.
+   *
+   * AdjustWindowRectEx answers for the DPI the PROCESS started at. In a
+   * per-monitor-v2 process the frame follows the WINDOW's DPI instead, so after a
+   * display-scale change, or on a monitor with a different scale, the two disagree
+   * and a window sized with the wrong one ends up with a client area that is not
+   * the size the plug-in was told. AdjustWindowRectExForDpi (Windows 10 1607+) is
+   * the matching call; older systems have no per-monitor frames and fall back.
+   */
+  dpi::Frame frameForDpi(unsigned int dpiValue) const {
+    RECT extents{0, 0, 0, 0};
+    const DWORD exStyle = window
+      ? static_cast<DWORD>(GetWindowLongPtrW(window, GWL_EXSTYLE)) : static_cast<DWORD>(WS_EX_APPWINDOW);
+    using AdjustForDpiFn = BOOL(WINAPI*)(LPRECT, DWORD, BOOL, DWORD, UINT);
+    static const auto adjustForDpi = reinterpret_cast<AdjustForDpiFn>(
+      GetProcAddress(GetModuleHandleW(L"user32.dll"), "AdjustWindowRectExForDpi"));
+    if (!(adjustForDpi && adjustForDpi(&extents, windowStyle, FALSE, exStyle, dpiValue ? dpiValue : dpi::kDefaultDpi))) {
+      extents = RECT{0, 0, 0, 0};
+      AdjustWindowRectEx(&extents, windowStyle, FALSE, exStyle);
+    }
+    return {extents.right - extents.left, extents.bottom - extents.top};
+  }
+
+  /**
+   * Size the window so its REAL client area is `client`, optionally moving it.
+   *
+   * The outer size comes from the frame for the window's current DPI, and the
+   * result is then read back from Windows: if the client area is not what was
+   * asked for, the difference is applied once. The plug-in is always told a size
+   * the window really has.
+   */
+  bool setClientSize(const dpi::Size& client, const POINT* position = nullptr) {
+    if (!window) return false;
+    const auto outer = dpi::outerForClient(client, frameForDpi(windowDpi));
+    const UINT flags = SWP_NOZORDER | SWP_NOACTIVATE | (position ? 0u : static_cast<UINT>(SWP_NOMOVE));
+    if (!SetWindowPos(window, nullptr, position ? position->x : 0, position ? position->y : 0,
+                      outer.width, outer.height, flags)) return false;
+    const auto actual = clientRect();
+    if ((actual.first != client.width || actual.second != client.height) &&
+        actual.first > 0 && actual.second > 0 && !IsIconic(window)) {
+      ++frameCorrectionCount;
+      SetWindowPos(window, nullptr, 0, 0, outer.width + (client.width - actual.first),
+        outer.height + (client.height - actual.second), SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+    return true;
+  }
+
+  /**
+   * Tell the plug-in the content scale for `newDpi`, then make the window's client
+   * area match the size that results. Shared by the first scale at open and by
+   * every WM_DPICHANGED, so both follow one rule (see editor-dpi.hpp):
+   *
+   *   scale first -> the plug-in sizes itself -> the window follows.
+   *
+   * `hostProposal` is the client size Windows suggests (absent at open) and
+   * `position` the suggested top-left corner. `announce` delivers a host-chosen
+   * size to the plug-in with onSize; open passes false because applyInitialSize()
+   * announces the final size immediately afterwards.
+   */
+  void applyScaleAndFit(unsigned int newDpi, const dpi::Size* hostProposal, const POINT* position,
+                        bool announce, bool fromDpiChange) {
+    const auto before = clientRect();
+    ScaleFit fit;
+    fit.happened = true;
+    fit.fromDpiChange = fromDpiChange;
+    fit.previousDpi = windowDpi;
+    fit.newDpi = newDpi ? newDpi : dpi::kDefaultDpi;
+    fit.clientBefore = {before.first, before.second};
+
+    windowDpi = fit.newDpi;
+    lastPluginResizeRequest.reset();
+    pluginResizeAccepted = false;
+    applyContentScale(windowDpi);  // a scale-aware plug-in re-enters resizeView here
+
+    dpi::ScaleOutcome outcome;
+    outcome.clientBefore = fit.clientBefore;
+    if (hostProposal) {
+      outcome.hostProposal = *hostProposal;
+      outcome.hostProposalValid = true;
+    }
+    outcome.scaleSupported = lastScaleAttempt.supported;
+    outcome.scaleApplied = lastScaleAttempt.applied;
+    outcome.pluginResized = lastPluginResizeRequest.has_value() && pluginResizeAccepted;
+    if (lastPluginResizeRequest)
+      outcome.pluginRequested = {lastPluginResizeRequest->first, lastPluginResizeRequest->second};
+    Steinberg::ViewRect reported{};
+    if (view && isSuccess(view->getSize(&reported)) && validRect(reported)) {
+      outcome.pluginSizeKnown = true;
+      outcome.pluginSize = {reported.getWidth(), reported.getHeight()};
+    }
+    outcome.resizable = resizable;
+
+    auto plan = dpi::planClientAfterScale(outcome);
+    if (plan.constrain && view) {
+      // A size the host proposes is only a proposal: the plug-in's limits decide.
+      Steinberg::ViewRect candidate{0, 0, plan.client.width, plan.client.height};
+      if (isSuccess(view->checkSizeConstraint(&candidate)) && validRect(candidate))
+        plan.client = {candidate.getWidth(), candidate.getHeight()};
+      plan.notifyPlugin = plan.client != outcome.clientBefore;
+      fit.constrained = true;
+    }
+    fit.planned = plan.client;
+    fit.source = plan.source;
+
+    if (dpi::validClient(plan.client)) {
+      fittingClient = true;
+      setClientSize(plan.client, position);
+      fittingClient = false;
+    } else if (position && window) {
+      SetWindowPos(window, nullptr, position->x, position->y, 0, 0,
+        SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+    const auto after = clientRect();
+    fit.clientAfter = {after.first, after.second};
+
+    if (announce && plan.notifyPlugin && view && dpi::validClient(fit.clientAfter)) {
+      Steinberg::ViewRect size{0, 0, fit.clientAfter.width, fit.clientAfter.height};
+      fit.notifyResult = view->onSize(&size);
+      fit.pluginNotified = true;
+      if (!isSuccess(fit.notifyResult))
+        lastNativeCloseError = "Plug-in rejected the editor size after a display-scale change";
+    }
+
+    // The same observation setScaleForTest records, so the diagnostics describe
+    // the scale that was really applied last, whoever applied it.
+    lastScaleAttempt.clientWidthBefore = fit.clientBefore.width;
+    lastScaleAttempt.clientHeightBefore = fit.clientBefore.height;
+    lastScaleAttempt.clientWidthAfter = fit.clientAfter.width;
+    lastScaleAttempt.clientHeightAfter = fit.clientAfter.height;
+    lastScaleAttempt.pluginRequestedResize = lastPluginResizeRequest.has_value();
+    if (lastPluginResizeRequest) {
+      lastScaleAttempt.requestedWidth = lastPluginResizeRequest->first;
+      lastScaleAttempt.requestedHeight = lastPluginResizeRequest->second;
+    }
+    lastScaleFit = fit;
+  }
+
+  /** Read APEX_VST3_EDITOR_TEST_MODE (comma separated). Acceptance harness only. */
+  void readTestMode() {
+    const char* raw = std::getenv("APEX_VST3_EDITOR_TEST_MODE");
+    if (!raw) return;
+    const std::string mode(raw);
+    testIgnoreContentScale = mode.find("no-content-scale") != std::string::npos;
+    testForceFixedSize = mode.find("fixed-size") != std::string::npos;
+  }
+
   // A plug-in can call IComponentHandler::restartComponent while its editor is
   // open. Structural restarts cannot be applied to a live view, so they are
   // refused explicitly (the user is told) instead of leaving a stale window that
@@ -380,18 +598,22 @@ class NativeEditorSession {
     require(registerHostWindowClass(), "Could not register the native VST3 editor window class");
 
     const auto canResizeResult = view->canResize();
-    resizable = canResizeResult == Steinberg::kResultTrue;
+    resizable = canResizeResult == Steinberg::kResultTrue && !testForceFixedSize;
     windowStyle = resizable
       ? (WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_THICKFRAME | WS_MAXIMIZEBOX)
       : (WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX);
+    // Which monitor the window lands on, and therefore its DPI, is only known once
+    // it exists. This first size uses the process's frame metrics and is corrected
+    // against the real client area in open(), before the window is ever shown.
     RECT bounds{0, 0, initialSize.getWidth(), initialSize.getHeight()};
-    require(AdjustWindowRectEx(&bounds, windowStyle, FALSE, 0) != 0,
+    require(AdjustWindowRectEx(&bounds, windowStyle, FALSE, WS_EX_APPWINDOW) != 0,
       "Could not calculate native VST3 editor window bounds");
     const auto title = windowTitle(pluginName);
     window = CreateWindowExW(WS_EX_APPWINDOW, L"ApexStudioVst3EditorHostWindow", title.c_str(),
       windowStyle, CW_USEDEFAULT, CW_USEDEFAULT, bounds.right - bounds.left,
       bounds.bottom - bounds.top, nullptr, nullptr, GetModuleHandleW(nullptr), this);
     require(window != nullptr, "Could not create the native VST3 editor window");
+    windowDpi = dpiForWindow(window);
   }
 
   void applyInitialSize() {
@@ -647,7 +869,7 @@ class NativeEditorSession {
         }
         break;
       case WM_SIZE:
-        if (view && attached && !resizingByPlugin && wParam != SIZE_MINIMIZED) {
+        if (view && attached && !resizingByPlugin && !fittingClient && wParam != SIZE_MINIMIZED) {
           const auto width = static_cast<int32>(LOWORD(lParam));
           const auto height = static_cast<int32>(HIWORD(lParam));
           if (width >= kMinViewDimension && height >= kMinViewDimension &&
@@ -659,17 +881,22 @@ class NativeEditorSession {
         }
         return 0;
       case WM_SIZING:
+        ++sizingMessageCount;
         if (view && attached && resizable && lParam) {
           auto* outer = reinterpret_cast<RECT*>(lParam);
-          RECT extents{0, 0, 0, 0};
-          AdjustWindowRectEx(&extents, windowStyle, FALSE, 0);
-          const int frameWidth = extents.right - extents.left;
-          const int frameHeight = extents.bottom - extents.top;
+          // The frame of the window as it is NOW (its current DPI), so the size
+          // offered to checkSizeConstraint is the client area the drag would give.
+          const auto extents = frameForDpi(windowDpi);
+          const int frameWidth = extents.width;
+          const int frameHeight = extents.height;
           Steinberg::ViewRect size{0, 0,
             std::max<int32>(kMinViewDimension, outer->right - outer->left - frameWidth),
             std::max<int32>(kMinViewDimension, outer->bottom - outer->top - frameHeight)};
           if (size.getWidth() <= kMaxViewDimension && size.getHeight() <= kMaxViewDimension) {
-            view->checkSizeConstraint(&size);
+            lastConstraintRequested = {size.getWidth(), size.getHeight()};
+            lastConstraintResult = view->checkSizeConstraint(&size);
+            ++constraintCallCount;
+            lastConstraintGranted = {size.getWidth(), size.getHeight()};
             if (validRect(size)) {
               const int targetWidth = size.getWidth() + frameWidth;
               const int targetHeight = size.getHeight() + frameHeight;
@@ -685,41 +912,78 @@ class NativeEditorSession {
         }
         break;
       case WM_GETMINMAXINFO:
-        if (view && !resizable && lParam) {
+        // A fixed-size editor is pinned to the size it reports -- but not while the
+        // host is applying a size the plug-in has just asked for, or moving it to a
+        // new DPI: getSize() still answers with the OLD size during that request, and
+        // pinning to it would clamp the new size away.
+        if (view && lParam &&
+            dpi::shouldPinFixedSize(resizable, resizingByPlugin, applyingDpiChange, fittingClient)) {
           Steinberg::ViewRect size{};
           if (isSuccess(view->getSize(&size)) && validRect(size)) {
-            RECT outer{0, 0, size.getWidth(), size.getHeight()};
-            AdjustWindowRectEx(&outer, windowStyle, FALSE, 0);
+            const auto outer = dpi::outerForClient({size.getWidth(), size.getHeight()}, frameForDpi(windowDpi));
             auto* info = reinterpret_cast<MINMAXINFO*>(lParam);
-            info->ptMinTrackSize.x = info->ptMaxTrackSize.x = outer.right - outer.left;
-            info->ptMinTrackSize.y = info->ptMaxTrackSize.y = outer.bottom - outer.top;
+            info->ptMinTrackSize.x = info->ptMaxTrackSize.x = outer.width;
+            info->ptMinTrackSize.y = info->ptMaxTrackSize.y = outer.height;
             return 0;
           }
         }
+        break;
+      case WM_ENTERSIZEMOVE:
+        ++enterSizeMoveCount;
+        break;
+      case WM_EXITSIZEMOVE:
+        ++exitSizeMoveCount;
         break;
       case WM_DPICHANGED: {
         // Recorded from the message Windows actually sent, so "the window handled a
         // DPI change" is never inferred from a scale request we made ourselves.
         dpiChangedMessageCount++;
-        lastDpiChangedNewDpi = static_cast<unsigned int>(HIWORD(wParam));
-        const auto* suggested = reinterpret_cast<const RECT*>(lParam);
-        if (suggested) {
-          lastDpiChangedSuggestedWidth = static_cast<unsigned int>(suggested->right - suggested->left);
-          lastDpiChangedSuggestedHeight = static_cast<unsigned int>(suggested->bottom - suggested->top);
-          SetWindowPos(hwnd, nullptr, suggested->left, suggested->top,
-            suggested->right - suggested->left, suggested->bottom - suggested->top,
-            SWP_NOZORDER | SWP_NOACTIVATE);
+        PendingDpiChange change;
+        change.dpi = static_cast<unsigned int>(HIWORD(wParam));
+        if (const auto* suggested = reinterpret_cast<const RECT*>(lParam)) {
+          change.hasSuggestion = true;
+          change.suggested = *suggested;
         }
-        try {
-          // Reuse the same path a plug-in scale request takes, so the two are
-          // comparable, but the DPI counter above is what proves the window itself
-          // was told about a DPI change by Windows.
-          applyContentScale(lastDpiChangedNewDpi);
-          lastDpiChangedAppliedContentScale = lastScaleAttempt.supported;
-          lastDpiChangedScaleSupported = lastScaleAttempt.supported;
-          lastDpiChangedScaleApplied = lastScaleAttempt.applied;
+        if (applyingDpiChange) {
+          // Sizing the window for one DPI can itself carry it onto another monitor.
+          // Windows then reports the next DPI from inside our own SetWindowPos; it
+          // is applied once the current transition has finished, never nested.
+          ++reentrantDpiChangeCount;
+          pendingDpiChange = change;
+          return 0;
         }
-        catch (const std::exception& error) { lastNativeCloseError = error.what(); }
+        applyingDpiChange = true;
+        // Bounded: a window straddling two monitors must not flip between them
+        // forever. Each pass handles the most recent DPI Windows reported.
+        for (int pass = 0; pass < 4; ++pass) {
+          lastDpiChangedNewDpi = change.dpi;
+          std::optional<dpi::Size> proposal;
+          POINT position{};
+          if (change.hasSuggestion) {
+            const int suggestedWidth = change.suggested.right - change.suggested.left;
+            const int suggestedHeight = change.suggested.bottom - change.suggested.top;
+            lastDpiChangedSuggestedWidth = static_cast<unsigned int>(std::max(0, suggestedWidth));
+            lastDpiChangedSuggestedHeight = static_cast<unsigned int>(std::max(0, suggestedHeight));
+            proposal = dpi::clientForOuter({suggestedWidth, suggestedHeight}, frameForDpi(change.dpi));
+            position = POINT{change.suggested.left, change.suggested.top};
+          }
+          try {
+            // Scale first, then size. Applying Windows' suggested rectangle before the
+            // plug-in knows the new scale hands it a resize at the OLD scale, and the
+            // scale call that follows then multiplies the enlarged view again.
+            applyScaleAndFit(change.dpi, proposal ? &*proposal : nullptr,
+              change.hasSuggestion ? &position : nullptr, true, true);
+            lastDpiChangedAppliedContentScale = lastScaleAttempt.supported;
+            lastDpiChangedScaleSupported = lastScaleAttempt.supported;
+            lastDpiChangedScaleApplied = lastScaleAttempt.applied;
+          }
+          catch (const std::exception& error) { lastNativeCloseError = error.what(); }
+          if (!pendingDpiChange || pendingDpiChange->dpi == windowDpi) break;
+          change = *pendingDpiChange;
+          pendingDpiChange.reset();
+        }
+        pendingDpiChange.reset();
+        applyingDpiChange = false;
         return 0;
       }
       case WM_MOUSEWHEEL: {
@@ -856,7 +1120,9 @@ public:
     require(view, "Native editor unavailable: createView(\"editor\") returned no view");
     require(view->isPlatformTypeSupported(Steinberg::kPlatformTypeHWND) == Steinberg::kResultTrue,
       "Native editor unavailable: the plug-in does not support the Windows HWND platform type");
+    readTestMode();
     scaleSupport = Steinberg::FUnknownPtr<Steinberg::IPlugViewContentScaleSupport>(view);
+    if (testIgnoreContentScale) scaleSupport = nullptr;
     frame = owned(new NativeEditorFrame(this));
     checked(view->setFrame(frame), "VST3 editor rejected the host IPlugFrame");
 
@@ -868,7 +1134,10 @@ public:
       "VST3 editor failed to attach to the native HWND host window");
     attached = true;
 
-    applyContentScale(dpiForWindow(window));
+    // The window now exists, so its real DPI is known. Tell the plug-in the scale,
+    // let it size itself, and make the client area match -- all before the window
+    // is shown, and with the frame measured for THIS window's DPI.
+    applyScaleAndFit(dpiForWindow(window), nullptr, nullptr, false, false);
     applyInitialSize();
     rejectStructuralRestartFlags("editor open");
     // A process's FIRST ShowWindow call is overridden by the parent's STARTUPINFO
@@ -893,16 +1162,17 @@ public:
   Steinberg::tresult resizeView(Steinberg::IPlugView* requestedView, Steinberg::ViewRect* newSize) {
     if (!view || requestedView != view || !window || closed || !newSize || !validRect(*newSize))
       return Steinberg::kInvalidArgument;
-    RECT bounds{0, 0, newSize->getWidth(), newSize->getHeight()};
-    if (!AdjustWindowRectEx(&bounds, windowStyle, FALSE, 0)) return Steinberg::kInternalError;
     lastPluginResizeRequest = {newSize->getWidth(), newSize->getHeight()};
+    pluginResizeAccepted = false;
+    const bool alreadyResizing = resizingByPlugin;
     resizingByPlugin = true;
-    const BOOL changed = SetWindowPos(window, nullptr, 0, 0, bounds.right - bounds.left,
-      bounds.bottom - bounds.top, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
-    resizingByPlugin = false;
+    const bool changed = setClientSize({newSize->getWidth(), newSize->getHeight()});
+    resizingByPlugin = alreadyResizing;
     if (!changed) return Steinberg::kInternalError;
     auto requestedSize = *newSize;
-    return view->onSize(&requestedSize);
+    const auto result = view->onSize(&requestedSize);
+    pluginResizeAccepted = isSuccess(result);
+    return result;
   }
 
   /** Deliver messages a harness injected, through the real window procedure. */
@@ -972,6 +1242,171 @@ public:
    * slider's value by a controlled step instead of jumping to the pointer. It is
    * read from the real key state, exactly like the button flags: nothing about the
    * event is synthesised beyond the pointer position itself. */
+  /**
+   * Absolute SendInput coordinates for a screen point, normalised over the whole
+   * VIRTUAL desktop (use with MOUSEEVENTF_VIRTUALDESK). Normalising over the
+   * primary monitor alone cannot address a point on any other monitor: it clamps
+   * to the primary's edge, so input aimed at an editor on a second display lands
+   * somewhere else.
+   */
+  static POINT absolutePointerCoordinates(POINT screen) {
+    const long long left = GetSystemMetrics(SM_XVIRTUALSCREEN);
+    const long long top = GetSystemMetrics(SM_YVIRTUALSCREEN);
+    const long long width = std::max(2, GetSystemMetrics(SM_CXVIRTUALSCREEN));
+    const long long height = std::max(2, GetSystemMetrics(SM_CYVIRTUALSCREEN));
+    // Round to the centre of the target pixel so the cursor lands ON the pixel.
+    return POINT{
+      static_cast<LONG>(((screen.x - left) * 65535ll + (width - 1) / 2) / (width - 1)),
+      static_cast<LONG>(((screen.y - top) * 65535ll + (height - 1) / 2) / (height - 1))};
+  }
+
+  /** Every monitor Windows reports, with its real rectangle and effective DPI. */
+  static json monitorList() {
+    json list = json::array();
+    EnumDisplayMonitors(nullptr, nullptr, [](HMONITOR monitor, HDC, LPRECT, LPARAM data) -> BOOL {
+      reinterpret_cast<json*>(data)->push_back(describeMonitor(monitor));
+      return TRUE;
+    }, reinterpret_cast<LPARAM>(&list));
+    return list;
+  }
+
+  static json describeMonitor(HMONITOR monitor) {
+    json result = json::object();
+    if (!monitor) return result;
+    MONITORINFOEXW info{};
+    info.cbSize = sizeof(info);
+    if (GetMonitorInfoW(monitor, &info)) {
+      result["device"] = fromWide(std::wstring(info.szDevice));
+      result["primary"] = (info.dwFlags & MONITORINFOF_PRIMARY) != 0;
+      result["left"] = info.rcMonitor.left;
+      result["top"] = info.rcMonitor.top;
+      result["width"] = info.rcMonitor.right - info.rcMonitor.left;
+      result["height"] = info.rcMonitor.bottom - info.rcMonitor.top;
+      result["workLeft"] = info.rcWork.left;
+      result["workTop"] = info.rcWork.top;
+      result["workWidth"] = info.rcWork.right - info.rcWork.left;
+      result["workHeight"] = info.rcWork.bottom - info.rcWork.top;
+    }
+    // shcore!GetDpiForMonitor(MDT_EFFECTIVE_DPI): the monitor's own scale, which in
+    // a per-monitor-aware process is independent of every other monitor's.
+    using GetDpiForMonitorFn = HRESULT(WINAPI*)(HMONITOR, int, UINT*, UINT*);
+    static const HMODULE shcore = LoadLibraryW(L"shcore.dll");
+    static const auto getDpiForMonitor = shcore
+      ? reinterpret_cast<GetDpiForMonitorFn>(GetProcAddress(shcore, "GetDpiForMonitor")) : nullptr;
+    UINT dpiX = 0, dpiY = 0;
+    if (getDpiForMonitor && SUCCEEDED(getDpiForMonitor(monitor, 0, &dpiX, &dpiY))) result["dpi"] = dpiX;
+    return result;
+  }
+
+  /** Programmatic resize to a client size (acceptance harness): WM_SIZE -> onSize.
+   * Deliberately a plain SetWindowPos with no read-back correction, so a frame
+   * that was computed for the wrong DPI shows up as a wrong client size. */
+  bool resizeClientForTest(int width, int height) {
+    if (!window || closed) return false;
+    const auto outer = dpi::outerForClient({width, height}, frameForDpi(windowDpi));
+    return SetWindowPos(window, nullptr, 0, 0, outer.width, outer.height,
+      SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE) != 0;
+  }
+
+  /** Move the editor window's outer top-left corner (acceptance harness). */
+  json moveWindowForTest(int x, int y) {
+    json result{{"requestedX", x}, {"requestedY", y}};
+    if (!window || closed) return result;
+    const int dpiMessagesBefore = dpiChangedMessageCount;
+    result["moved"] = SetWindowPos(window, nullptr, x, y, 0, 0,
+      SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE) != 0;
+    pumpMessages();
+    result["dpiChangedMessagesDuringMove"] = dpiChangedMessageCount - dpiMessagesBefore;
+    return result;
+  }
+
+  /**
+   * A complete pointer drag with real OS input: press at `from`, move to `to` in
+   * steps, release (acceptance harness).
+   *
+   * It has to be one action. Pressing on a title bar or a sizing border makes
+   * DefWindowProc run Windows' own modal move/size loop, which does not return
+   * until the button is released -- so a harness that sent press, move and release
+   * as separate commands would deadlock behind its own press. The input is
+   * therefore injected from a second thread while this thread keeps dispatching
+   * messages, exactly as it would for a person holding the mouse.
+   */
+  json pointerDragForTest(POINT from, POINT to, int steps, int stepDelayMs) {
+    json result{{"from", {{"x", from.x}, {"y", from.y}}}, {"to", {{"x", to.x}, {"y", to.y}}}};
+    if (!window || closed) return result;
+    steps = std::clamp(steps, 1, 200);
+    stepDelayMs = std::clamp(stepDelayMs, 1, 200);
+    const int sizingBefore = sizingMessageCount;
+    const int constraintBefore = constraintCallCount;
+    const int dpiBefore = dpiChangedMessageCount;
+    const int enterBefore = enterSizeMoveCount;
+    const int exitBefore = exitSizeMoveCount;
+    SetForegroundWindow(window);
+    pumpMessages();
+
+    std::atomic<bool> finished{false};
+    std::atomic<unsigned long> accepted{0};
+    std::atomic<bool> heldDuringDrag{false};
+    std::thread injector([&] {
+      auto inject = [&](DWORD flags, POINT at) {
+        INPUT input{};
+        input.type = INPUT_MOUSE;
+        input.mi.dwFlags = flags;
+        if (flags & MOUSEEVENTF_MOVE) {
+          const auto absolute = absolutePointerCoordinates(at);
+          input.mi.dx = absolute.x;
+          input.mi.dy = absolute.y;
+        }
+        accepted += static_cast<unsigned long>(SendInput(1, &input, sizeof(INPUT)));
+      };
+      const DWORD move = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK;
+      SetCursorPos(from.x, from.y);
+      inject(move, from);
+      Sleep(80);
+      inject(MOUSEEVENTF_LEFTDOWN, from);
+      Sleep(150);
+      for (int step = 1; step <= steps; ++step) {
+        const POINT at{from.x + (to.x - from.x) * step / steps, from.y + (to.y - from.y) * step / steps};
+        inject(move, at);
+        if (GetAsyncKeyState(VK_LBUTTON) < 0) heldDuringDrag = true;
+        Sleep(static_cast<DWORD>(stepDelayMs));
+      }
+      Sleep(120);
+      inject(MOUSEEVENTF_LEFTUP, to);
+      Sleep(120);
+      finished = true;
+    });
+    // Keep the window alive and dispatching for the whole gesture. Inside the modal
+    // loop this call simply does not return until the release arrives.
+    const auto deadline = GetTickCount64() + 30000ull;
+    while (!finished && GetTickCount64() < deadline) {
+      pumpMessages();
+      MsgWaitForMultipleObjectsEx(0, nullptr, 5, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
+    }
+    injector.join();
+    pumpMessages();
+    if (GetAsyncKeyState(VK_LBUTTON) < 0) {
+      // Never leave the machine with a button held if the gesture went wrong.
+      INPUT release{};
+      release.type = INPUT_MOUSE;
+      release.mi.dwFlags = MOUSEEVENTF_LEFTUP;
+      SendInput(1, &release, sizeof(INPUT));
+      pumpMessages();
+      result["forcedRelease"] = true;
+    }
+    result["steps"] = steps;
+    result["sendInputAccepted"] = accepted.load();
+    result["sendInputExpected"] = static_cast<unsigned long>(steps + 3);
+    result["buttonHeldDuringDrag"] = heldDuringDrag.load();
+    // Receipts, raised only by the window procedure.
+    result["sizingMessages"] = sizingMessageCount - sizingBefore;
+    result["constraintCalls"] = constraintCallCount - constraintBefore;
+    result["dpiChangedMessages"] = dpiChangedMessageCount - dpiBefore;
+    result["enteredSizeMove"] = enterSizeMoveCount - enterBefore;
+    result["exitedSizeMove"] = exitSizeMoveCount - exitBefore;
+    return result;
+  }
+
   json deliverMouse(const char* kind, int x, int y, bool withZoomModifier = false) {
     json result{{"kind", kind}, {"x", x}, {"y", y}};
     if (!window || closed) return result;
@@ -1049,8 +1484,9 @@ public:
         input.type = INPUT_MOUSE;
         input.mi.dwFlags = flags;
         if (flags & MOUSEEVENTF_MOVE) {
-          input.mi.dx = static_cast<LONG>((target.x * 65535ll) / GetSystemMetrics(SM_CXSCREEN));
-          input.mi.dy = static_cast<LONG>((target.y * 65535ll) / GetSystemMetrics(SM_CYSCREEN));
+          const auto absolute = absolutePointerCoordinates(target);
+          input.mi.dx = absolute.x;
+          input.mi.dy = absolute.y;
         }
         // Shift is a real held key (see setGestureModifier); it is never claimed in
         // the flags, because SendInput has no way to assert a modifier and VSTGUI
@@ -1059,7 +1495,7 @@ public:
       };
 
       std::vector<std::string> injected;
-      const DWORD moveFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE;
+      const DWORD moveFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK;
       if (isMove) {
         if (injectPointer(moveFlags) == 1) injected.push_back("MOUSEEVENTF_MOVE");
       } else if (isUp) {
@@ -1441,6 +1877,83 @@ public:
         {"targetClass", lastWheelTargetClass},
         {"lastInjectedAtMs", lastInjectedWheelAtMs},
         {"lastInjectedDelta", lastInjectedWheelDelta},
+      };
+      // ---- Display / DPI placement, read from Windows --------------------------
+      result["hwnd"] = static_cast<unsigned long long>(reinterpret_cast<UINT_PTR>(window));
+      if (GetWindowRect(window, &outer)) {
+        result["windowRect"] = {{"left", outer.left}, {"top", outer.top},
+          {"right", outer.right}, {"bottom", outer.bottom}};
+      }
+      POINT clientOrigin{0, 0};
+      if (ClientToScreen(window, &clientOrigin))
+        result["clientOrigin"] = {{"x", clientOrigin.x}, {"y", clientOrigin.y}};
+      result["monitor"] = describeMonitor(MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST));
+      result["monitorCount"] = GetSystemMetrics(SM_CMONITORS);
+      {
+        // Is THIS window really per-monitor-v2? Asked of the window, not assumed
+        // from the call main() made.
+        const HMODULE user32 = GetModuleHandleW(L"user32.dll");
+        using GetWindowContextFn = DPI_AWARENESS_CONTEXT(WINAPI*)(HWND);
+        using ContextsEqualFn = BOOL(WINAPI*)(DPI_AWARENESS_CONTEXT, DPI_AWARENESS_CONTEXT);
+        using GetSystemDpiFn = UINT(WINAPI*)();
+        const auto getWindowContext = reinterpret_cast<GetWindowContextFn>(
+          GetProcAddress(user32, "GetWindowDpiAwarenessContext"));
+        const auto contextsEqual = reinterpret_cast<ContextsEqualFn>(
+          GetProcAddress(user32, "AreDpiAwarenessContextsEqual"));
+        const auto getSystemDpi = reinterpret_cast<GetSystemDpiFn>(GetProcAddress(user32, "GetDpiForSystem"));
+        json awareness{{"requestApiAvailable", dpiAwarenessRequest().apiAvailable},
+          {"requestSucceeded", dpiAwarenessRequest().succeeded},
+          {"requestError", dpiAwarenessRequest().error}};
+        if (getWindowContext && contextsEqual) {
+          const auto context = getWindowContext(window);
+          const char* name = "unknown";
+          if (contextsEqual(context, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)) name = "per-monitor-v2";
+          else if (contextsEqual(context, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE)) name = "per-monitor";
+          else if (contextsEqual(context, DPI_AWARENESS_CONTEXT_SYSTEM_AWARE)) name = "system";
+          else if (contextsEqual(context, DPI_AWARENESS_CONTEXT_UNAWARE)) name = "unaware";
+          awareness["windowContext"] = name;
+        }
+        if (getSystemDpi) awareness["processSystemDpi"] = getSystemDpi();
+        result["dpiAwareness"] = awareness;
+      }
+      {
+        const auto expected = frameForDpi(windowDpi);
+        result["frame"] = {
+          {"actualWidth", (outer.right - outer.left) - (client.right - client.left)},
+          {"actualHeight", (outer.bottom - outer.top) - (client.bottom - client.top)},
+          {"expectedWidthForWindowDpi", expected.width},
+          {"expectedHeightForWindowDpi", expected.height},
+          {"corrections", frameCorrectionCount},
+        };
+      }
+      result["trackedWindowDpi"] = windowDpi;
+      result["scaleFit"] = {
+        {"happened", lastScaleFit.happened},
+        {"fromDpiChange", lastScaleFit.fromDpiChange},
+        {"previousDpi", lastScaleFit.previousDpi},
+        {"newDpi", lastScaleFit.newDpi},
+        {"clientBefore", {{"width", lastScaleFit.clientBefore.width}, {"height", lastScaleFit.clientBefore.height}}},
+        {"planned", {{"width", lastScaleFit.planned.width}, {"height", lastScaleFit.planned.height}}},
+        {"clientAfter", {{"width", lastScaleFit.clientAfter.width}, {"height", lastScaleFit.clientAfter.height}}},
+        {"source", dpi::clientSourceName(lastScaleFit.source)},
+        {"pluginNotified", lastScaleFit.pluginNotified},
+        {"notifyResult", resultName(lastScaleFit.notifyResult)},
+        {"constrained", lastScaleFit.constrained},
+        {"reentrantDpiChanges", reentrantDpiChangeCount},
+      };
+      result["sizing"] = {
+        {"sizingMessageCount", sizingMessageCount},
+        {"constraintCallCount", constraintCallCount},
+        {"lastConstraintRequested", {{"width", lastConstraintRequested.width}, {"height", lastConstraintRequested.height}}},
+        {"lastConstraintGranted", {{"width", lastConstraintGranted.width}, {"height", lastConstraintGranted.height}}},
+        {"lastConstraintResult", resultName(lastConstraintResult)},
+        {"enterSizeMoveCount", enterSizeMoveCount},
+        {"exitSizeMoveCount", exitSizeMoveCount},
+      };
+      result["testMode"] = {{"ignoreContentScale", testIgnoreContentScale}, {"forceFixedSize", testForceFixedSize}};
+      result["resources"] = {
+        {"gdiObjects", static_cast<unsigned long>(GetGuiResources(GetCurrentProcess(), GR_GDIOBJECTS))},
+        {"userObjects", static_cast<unsigned long>(GetGuiResources(GetCurrentProcess(), GR_USEROBJECTS))},
       };
       result["threadId"] = static_cast<unsigned long>(GetCurrentThreadId());
       result["processId"] = static_cast<unsigned long>(GetCurrentProcessId());

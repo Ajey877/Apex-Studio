@@ -15,10 +15,12 @@
 #   windows-display-scale.ps1 -Action set-resolution -Width 1920 -Height 1080
 #   windows-display-scale.ps1 -Action set-scale -Scale 150 [-Monitor 0]
 #   windows-display-scale.ps1 -Action screenshot -Hwnd 12345 -Out shot.png
+#   windows-display-scale.ps1 -Action compare -A one.png -B two.png
+#   windows-display-scale.ps1 -Action find-windows -WindowClass ApexStudioVst3EditorHostWindow
 #
 # Every action prints exactly one line of JSON on stdout.
 param(
-  [ValidateSet('query', 'modes', 'set-resolution', 'set-scale', 'screenshot')]
+  [ValidateSet('query', 'modes', 'set-resolution', 'set-scale', 'screenshot', 'compare', 'find-windows')]
   [string]$Action = 'query',
   [int]$Scale = 0,
   [int]$Monitor = 0,
@@ -26,7 +28,10 @@ param(
   [int]$Height = 0,
   [long]$Hwnd = 0,
   [string]$Out = '',
-  [int]$MaxWidth = 0
+  [int]$MaxWidth = 0,
+  [string]$A = '',
+  [string]$B = '',
+  [string]$WindowClass = ''
 )
 $ErrorActionPreference = 'Stop'
 
@@ -85,6 +90,14 @@ public static class ApexDisplay {
   [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr hwnd, out RECT rect);
   [DllImport("dwmapi.dll")] static extern int DwmGetWindowAttribute(IntPtr hwnd, int attribute, out RECT value, int size);
   [DllImport("user32.dll")] static extern bool IsWindow(IntPtr hwnd);
+  [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr hwnd);
+  [DllImport("user32.dll")] static extern bool GetClientRect(IntPtr hwnd, out RECT rect);
+  [StructLayout(LayoutKind.Sequential)] public struct POINT { public int x, y; }
+  [DllImport("user32.dll")] static extern bool ClientToScreen(IntPtr hwnd, ref POINT point);
+  public delegate bool WindowEnumProc(IntPtr hwnd, IntPtr data);
+  [DllImport("user32.dll")] static extern bool EnumWindows(WindowEnumProc proc, IntPtr data);
+  [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint processId);
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetClassNameW(IntPtr hwnd, System.Text.StringBuilder name, int max);
 
   public static readonly int[] Steps = { 100, 125, 150, 175, 200, 225, 250, 300, 350, 400, 450, 500 };
 
@@ -238,6 +251,31 @@ public static class ApexDisplay {
     } else result["source"] = "DWMWA_EXTENDED_FRAME_BOUNDS";
     result["left"] = rect.left; result["top"] = rect.top; result["width"] = rect.right - rect.left; result["height"] = rect.bottom - rect.top;
     result["dpi"] = GetDpiForWindow(handle);
+    RECT client; POINT origin = new POINT();
+    if (GetClientRect(handle, out client) && ClientToScreen(handle, ref origin)) {
+      result["clientLeft"] = origin.x; result["clientTop"] = origin.y;
+      result["clientWidth"] = client.right - client.left; result["clientHeight"] = client.bottom - client.top;
+    }
+    return result;
+  }
+
+  /** Every top-level window of a class, with its owning process. */
+  public static ArrayList FindWindows(string className) {
+    Aware();
+    ArrayList result = new ArrayList();
+    WindowEnumProc proc = delegate(IntPtr hwnd, IntPtr data) {
+      System.Text.StringBuilder name = new System.Text.StringBuilder(256);
+      GetClassNameW(hwnd, name, 256);
+      if (name.ToString() == className) {
+        uint pid; GetWindowThreadProcessId(hwnd, out pid);
+        Hashtable item = new Hashtable();
+        item["hwnd"] = hwnd.ToInt64(); item["processId"] = pid; item["visible"] = IsWindowVisible(hwnd);
+        result.Add(item);
+      }
+      return true;
+    };
+    EnumWindows(proc, IntPtr.Zero);
+    GC.KeepAlive(proc);
     return result;
   }
 }
@@ -273,7 +311,7 @@ switch ($Action) {
     Add-Type -AssemblyName System.Drawing
     $bounds = [ApexDisplay]::WindowBounds($Hwnd)
     $result = [ordered]@{ hwnd = $Hwnd; bounds = $bounds; out = $Out; written = $false }
-    if ($bounds['width'] -gt 0 -and $bounds['height'] -gt 0) {
+    if ($bounds['isWindow'] -and $bounds['width'] -gt 0 -and $bounds['height'] -gt 0) {
       $bitmap = New-Object System.Drawing.Bitmap([int]$bounds['width'], [int]$bounds['height'])
       $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
       $size = New-Object System.Drawing.Size([int]$bounds['width'], [int]$bounds['height'])
@@ -281,6 +319,50 @@ switch ($Action) {
       # private render of the window. An occluded or off-screen window shows as such.
       $graphics.CopyFromScreen([int]$bounds['left'], [int]$bounds['top'], 0, 0, $size)
       $graphics.Dispose()
+      # Measure the CLIENT area of what was captured: how many distinct colours it
+      # shows and how much of it is one flat colour. A blank or unpainted editor is
+      # a single colour; these numbers are evidence, the PNG is the proof.
+      if ($bounds.ContainsKey('clientWidth') -and $bounds['clientWidth'] -gt 0 -and $bounds['clientHeight'] -gt 0) {
+        $offsetX = [int]$bounds['clientLeft'] - [int]$bounds['left']
+        $offsetY = [int]$bounds['clientTop'] - [int]$bounds['top']
+        $colours = @{}
+        $samples = 0
+        $columns = 64; $rows = 32
+        $rightStrip = @{}; $bottomStrip = @{}
+        for ($row = 0; $row -lt $rows; $row++) {
+          for ($column = 0; $column -lt $columns; $column++) {
+            $x = $offsetX + [int](($column + 0.5) * $bounds['clientWidth'] / $columns)
+            $y = $offsetY + [int](($row + 0.5) * $bounds['clientHeight'] / $rows)
+            if ($x -lt 0 -or $y -lt 0 -or $x -ge $bitmap.Width -or $y -ge $bitmap.Height) { continue }
+            $argb = $bitmap.GetPixel($x, $y).ToArgb()
+            $colours[$argb] = 1 + [int]$colours[$argb]
+            if ($column -ge $columns - 6) { $rightStrip[$argb] = 1 }
+            if ($row -ge $rows - 4) { $bottomStrip[$argb] = 1 }
+            $samples++
+          }
+        }
+        $dominant = 0
+        foreach ($count in $colours.Values) { if ($count -gt $dominant) { $dominant = $count } }
+        $result['client'] = [ordered]@{
+          samples = $samples
+          distinctColours = $colours.Count
+          dominantColourFraction = if ($samples) { [math]::Round($dominant / $samples, 4) } else { 1 }
+          distinctColoursInRightStrip = $rightStrip.Count
+          distinctColoursInBottomStrip = $bottomStrip.Count
+        }
+        if ($Out) {
+          # The client area alone, for like-for-like comparison between scales.
+          $clientPath = [IO.Path]::ChangeExtension($Out, $null).TrimEnd('.') + '.client.png'
+          $rect = New-Object System.Drawing.Rectangle($offsetX, $offsetY, [int]$bounds['clientWidth'], [int]$bounds['clientHeight'])
+          $rect.Intersect((New-Object System.Drawing.Rectangle(0, 0, $bitmap.Width, $bitmap.Height)))
+          if ($rect.Width -gt 0 -and $rect.Height -gt 0) {
+            $clientBitmap = $bitmap.Clone($rect, $bitmap.PixelFormat)
+            $clientBitmap.Save($clientPath, [System.Drawing.Imaging.ImageFormat]::Png)
+            $clientBitmap.Dispose()
+            $result['clientOut'] = $clientPath
+          }
+        }
+      }
       if ($MaxWidth -gt 0 -and $bitmap.Width -gt $MaxWidth) {
         $scaledHeight = [int][math]::Round($bitmap.Height * $MaxWidth / $bitmap.Width)
         $scaled = New-Object System.Drawing.Bitmap($bitmap, $MaxWidth, $scaledHeight)
@@ -292,6 +374,50 @@ switch ($Action) {
       $result['written'] = $true
       $result['bytes'] = (Get-Item $Out).Length
     }
+  }
+  'compare' {
+    # Both images are resampled to one small common grid and compared, so the same
+    # editor drawn at 100% and at 150% compares as (nearly) equal, while an editor
+    # drawn at the wrong scale -- content in one corner, blank elsewhere -- does not.
+    Add-Type -AssemblyName System.Drawing
+    $first = New-Object System.Drawing.Bitmap($A)
+    $second = New-Object System.Drawing.Bitmap($B)
+    $gridWidth = 96
+    $gridHeight = [math]::Max(8, [int][math]::Round($gridWidth * $first.Height / $first.Width))
+    $resample = {
+      param($image)
+      $target = New-Object System.Drawing.Bitmap($gridWidth, $gridHeight)
+      $g = [System.Drawing.Graphics]::FromImage($target)
+      $g.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBilinear
+      $g.PixelOffsetMode = [System.Drawing.Drawing2D.PixelOffsetMode]::HighQuality
+      $g.DrawImage($image, (New-Object System.Drawing.Rectangle(0, 0, $gridWidth, $gridHeight)),
+        0, 0, $image.Width, $image.Height, [System.Drawing.GraphicsUnit]::Pixel)
+      $g.Dispose()
+      return $target
+    }
+    $small1 = & $resample $first
+    $small2 = & $resample $second
+    $total = 0.0; $worst = 0.0
+    for ($y = 0; $y -lt $gridHeight; $y++) {
+      for ($x = 0; $x -lt $gridWidth; $x++) {
+        $p = $small1.GetPixel($x, $y); $q = $small2.GetPixel($x, $y)
+        $difference = ([math]::Abs($p.R - $q.R) + [math]::Abs($p.G - $q.G) + [math]::Abs($p.B - $q.B)) / 3.0
+        $total += $difference
+        if ($difference -gt $worst) { $worst = $difference }
+      }
+    }
+    $result = [ordered]@{
+      a = $A; b = $B
+      aSize = "$($first.Width)x$($first.Height)"; bSize = "$($second.Width)x$($second.Height)"
+      aspectA = [math]::Round($first.Width / $first.Height, 4); aspectB = [math]::Round($second.Width / $second.Height, 4)
+      grid = "${gridWidth}x${gridHeight}"
+      meanAbsDifference = [math]::Round($total / ($gridWidth * $gridHeight), 3)
+      maxCellDifference = [math]::Round($worst, 3)
+    }
+    $first.Dispose(); $second.Dispose(); $small1.Dispose(); $small2.Dispose()
+  }
+  'find-windows' {
+    $result = [ordered]@{ windowClass = $WindowClass; windows = @([ApexDisplay]::FindWindows($WindowClass)) }
   }
 }
 $result | ConvertTo-Json -Depth 8 -Compress

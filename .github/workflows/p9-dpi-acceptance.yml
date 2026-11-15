@@ -1,107 +1,148 @@
 name: P9 High-DPI Editor Acceptance
 
-# Real Windows display scaling for the native VST3 editor (docs/VST3-EDITOR-ACCEPTANCE.md, P9).
-# Job logs and artifacts are not always retrievable, so every result is also
-# published as a check-run annotation.
+# Native VST3 editor acceptance at REAL Windows display scales
+# (docs/VST3-EDITOR-ACCEPTANCE.md, P9).
 #
-# Trigger: pushes to the P9 working branch and manual dispatch only. It does not
-# run on main or on unrelated PRs.
+# The runner's display scale is changed the way the Settings app changes it, so
+# Windows itself reports 120/144 DPI and itself sends WM_DPICHANGED. Nothing here
+# simulates a DPI value. The runner has ONE monitor, so the multi-monitor cases
+# stay NOT_VERIFIED on this workflow by construction.
+#
+# Job logs and artifacts are not always retrievable, so every verdict and the
+# measurements behind it are also published as check-run annotations.
 on:
   workflow_dispatch:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'native/vst3/**'
+      - 'scripts/native-editor-dpi-acceptance.mjs'
+      - 'scripts/windows-display-scale.ps1'
+      - 'scripts/build-native-vst3.mjs'
+      - 'scripts/setup-native-vst3.mjs'
+      - '.github/workflows/p9-dpi-acceptance.yml'
   push:
-    branches: ['arena/bb3a702c-apex-studio']
+    branches: [main]
+    paths:
+      - 'native/vst3/**'
+      - 'scripts/native-editor-dpi-acceptance.mjs'
+      - 'scripts/windows-display-scale.ps1'
+      - 'scripts/build-native-vst3.mjs'
+      - 'scripts/setup-native-vst3.mjs'
+      - '.github/workflows/p9-dpi-acceptance.yml'
 
 permissions:
   contents: read
 
 jobs:
-  display-probe:
-    name: Display capability probe (windows-latest)
+  dpi-acceptance:
+    name: Editor at real display scale (${{ matrix.host }})
     runs-on: windows-latest
-    timeout-minutes: 10
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        # `baseline` builds the helper exactly as it was on main before the P9 fix
+        # (c246e2a) and runs the SAME harness against it. It is expected to fail:
+        # that failure is the reproduction of the defect, kept as evidence. It is
+        # informational and never gates the workflow.
+        host: [branch, baseline]
+    continue-on-error: ${{ matrix.host == 'baseline' }}
     steps:
       - uses: actions/checkout@v4
-      - name: Environment
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install JavaScript tools (no Electron binary needed)
+        run: npm ci --legacy-peer-deps --ignore-scripts
+      - name: Use the pre-fix native helper sources (baseline only)
+        if: matrix.host == 'baseline'
+        shell: bash
+        run: |
+          git checkout c246e2a91f7d7c7aaca1d9903d334e7eceab5be8 -- native/vst3 scripts/build-native-vst3.mjs
+          git status --short | head -20
+      - name: Build the helper and the AGain VSTGUI editor fixture
+        run: npm run native:vst3:build
+      - name: Display before the run, and a resolution that allows 150%
         shell: pwsh
-        continue-on-error: true
         run: |
           function Note($title, $text) {
             $t = ([string]$text) -replace '%', '%25' -replace "`r", '%0D' -replace "`n", '%0A'
             Write-Host "::notice title=$title::$t"
           }
+          $tool = './scripts/windows-display-scale.ps1'
           $os = Get-CimInstance Win32_OperatingSystem
-          $video = Get-CimInstance Win32_VideoController | ForEach-Object { "$($_.Name)|$($_.DriverVersion)|$($_.VideoModeDescription)|$($_.PNPDeviceID)" }
-          $monitors = Get-CimInstance Win32_PnPEntity | Where-Object { $_.PNPClass -in 'Monitor', 'Display' } | ForEach-Object { "$($_.PNPClass)|$($_.Name)|$($_.Status)" }
-          $session = [System.Diagnostics.Process]::GetCurrentProcess().SessionId
-          $sessions = (& query.exe session 2>&1 | Out-String)
-          $info = [ordered]@{
-            caption = $os.Caption; version = $os.Version; build = $os.BuildNumber
-            psVersion = $PSVersionTable.PSVersion.ToString(); sessionId = $session
-            userInteractive = [Environment]::UserInteractive; user = $env:USERNAME
-            imageOs = $env:ImageOS; imageVersion = $env:ImageVersion
-            video = @($video); pnp = @($monitors); sessions = $sessions
-            iddCx = (Test-Path "$env:windir\System32\drivers\UMDF\IddCx.dll")
-            devcon = [bool](Get-Command devcon.exe -ErrorAction SilentlyContinue)
-            pnputil = [bool](Get-Command pnputil.exe -ErrorAction SilentlyContinue)
-          }
-          Note 'P9-PROBE-ENV' ($info | ConvertTo-Json -Depth 5 -Compress)
-          $global:LASTEXITCODE = 0
-      - name: Display topology, modes and resolution
-        shell: pwsh
-        continue-on-error: true
-        run: |
-          function Note($title, $text) {
-            $t = ([string]$text) -replace '%', '%25' -replace "`r", '%0D' -replace "`n", '%0A'
-            Write-Host "::notice title=$title::$t"
-          }
-          $tool = './scripts/windows-display-scale.ps1'
-          Note 'P9-PROBE-INITIAL' (& $tool -Action query)
-          Note 'P9-PROBE-MODES' (& $tool -Action modes)
+          Note 'P9-ENV ${{ matrix.host }}' ("{0} {1} image={2} {3} session={4} interactive={5}" -f $os.Caption, $os.Version, $env:ImageOS, $env:ImageVersion, [System.Diagnostics.Process]::GetCurrentProcess().SessionId, [Environment]::UserInteractive)
+          # The runner boots at 1024x768, where Windows offers at most 125%.
           $resolution = & $tool -Action set-resolution -Width 1920 -Height 1080
-          Note 'P9-PROBE-RESOLUTION' $resolution
-          if (($resolution | ConvertFrom-Json).status -ne 0) {
-            try {
-              Set-DisplayResolution -Width 1920 -Height 1080 -Force
-              Start-Sleep -Seconds 2
-              Note 'P9-PROBE-RESOLUTION-CMDLET' (& $tool -Action query)
-            } catch { Note 'P9-PROBE-RESOLUTION-CMDLET' "failed: $($_.Exception.Message)" }
-          }
+          Note 'P9-DISPLAY ${{ matrix.host }}' $resolution
           $global:LASTEXITCODE = 0
-      - name: Change the real display scale (125%, 150%, 100%)
-        shell: pwsh
-        continue-on-error: true
+      - name: P9 acceptance at 100%, 125% and 150% on the real display
+        id: acceptance
+        shell: bash
+        timeout-minutes: 20
+        env:
+          APEX_P9_ALLOW_DISPLAY_CHANGES: '1'
+          APEX_P9_HOST_LABEL: ${{ matrix.host }}
+          APEX_P9_OUT: build/native-evidence/p9-${{ matrix.host }}
         run: |
-          function Note($title, $text) {
-            $t = ([string]$text) -replace '%', '%25' -replace "`r", '%0D' -replace "`n", '%0A'
-            Write-Host "::notice title=$title::$t"
-          }
-          $tool = './scripts/windows-display-scale.ps1'
-          foreach ($percent in 125, 150, 100) {
-            $changed = & $tool -Action set-scale -Scale $percent
-            Note "P9-PROBE-SCALE-$percent" $changed
-            # A process started AFTER the change: what does it see as system DPI?
-            $fresh = & pwsh -NoProfile -File $tool -Action query
-            Note "P9-PROBE-FRESH-$percent" $fresh
-          }
-          $global:LASTEXITCODE = 0
-      - name: Annotation capacity and screenshot channel
-        shell: pwsh
-        continue-on-error: true
+          set +e
+          node scripts/native-editor-dpi-acceptance.mjs 2>&1 | tee p9-acceptance.log
+          status=${PIPESTATUS[0]}
+          echo "harness exit code: $status"
+          if [ ! -f "$APEX_P9_OUT/p9-dpi-acceptance.json" ]; then
+            echo "::error::The P9 run produced no evidence file"
+            grep -E '^(P9-ERROR|STAGE)' p9-acceptance.log | tail -4 | while IFS= read -r line; do echo "::error::${line}"; done
+            tail -c 1500 p9-acceptance.log | tr '\n' ' ' | sed 's/^/::error::/'
+            exit 1
+          fi
+          # 0 = every case passed, 3 = no failure but some cases NOT_VERIFIED (the
+          # multi-monitor ones always are on this single-monitor runner).
+          if [ "$status" -eq 0 ] || [ "$status" -eq 3 ]; then exit 0; fi
+          exit 1
+      - name: Upload evidence (JSON and screenshots)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: p9-evidence-${{ matrix.host }}
+          path: |
+            build/native-evidence/p9-${{ matrix.host }}
+            p9-acceptance.log
+          if-no-files-found: warn
+
+  # Evidence as content-addressed git blobs. Artifacts cannot be fetched from every
+  # environment; a blob can, and its SHA is the file's git hash, so a copy checked
+  # into docs/evidence can be verified against the SHA printed here. No ref is
+  # created or changed. This job runs no plug-in or helper code.
+  publish-evidence:
+    name: Publish evidence blobs
+    needs: dpi-acceptance
+    # Never for a pull request from a fork: its token cannot write, and must not.
+    if: always() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: evidence
+          pattern: p9-evidence-*
+      - name: Store each evidence file as a git blob
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
         run: |
-          function Note($title, $text) {
-            $t = ([string]$text) -replace '%', '%25' -replace "`r", '%0D' -replace "`n", '%0A'
-            Write-Host "::notice title=$title::$t"
-          }
-          foreach ($size in 4000, 16000, 60000) { Note "P9-PROBE-SIZE-$size" ('A' * $size) }
-          $tool = './scripts/windows-display-scale.ps1'
-          Start-Process notepad.exe
-          Start-Sleep -Seconds 4
-          $window = Get-Process notepad -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 } | Select-Object -First 1
-          if ($window) {
-            $shot = & $tool -Action screenshot -Hwnd ([int64]$window.MainWindowHandle) -Out "$env:RUNNER_TEMP\probe.png" -MaxWidth 480
-            Note 'P9-PROBE-SHOT' $shot
-            if (Test-Path "$env:RUNNER_TEMP\probe.png") {
-              Note 'P9-PROBE-PNG' ([Convert]::ToBase64String([IO.File]::ReadAllBytes("$env:RUNNER_TEMP\probe.png")))
-            }
-          } else { Note 'P9-PROBE-SHOT' 'no window with a main handle was found' }
-          $global:LASTEXITCODE = 0
+          set -euo pipefail
+          : > manifest.txt
+          find evidence -type f \( -name '*.json' -o -name '*.png' -o -name '*.log' \) | sort | while IFS= read -r file; do
+            size=$(stat -c %s "$file")
+            if [ "$size" -gt 900000 ]; then echo "skip (too large): $file"; continue; fi
+            sha=$(base64 -w0 "$file" | jq -Rs '{content: ., encoding: "base64"}' | gh api "repos/$REPO/git/blobs" --input - --jq .sha)
+            echo "$sha $size ${file#evidence/}" | tee -a manifest.txt
+          done
+          manifest=$(base64 -w0 manifest.txt | jq -Rs '{content: ., encoding: "base64"}' | gh api "repos/$REPO/git/blobs" --input - --jq .sha)
+          echo "::notice title=P9-EVIDENCE-MANIFEST::manifest blob $manifest ($(wc -l < manifest.txt) files) for commit ${{ github.sha }}"
