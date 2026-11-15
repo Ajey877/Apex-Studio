@@ -597,7 +597,7 @@ test('the packaged gate actually executes to the right verdict for each exit cod
   // produce -- so a future edit that breaks the decision logic is caught even if every
   // string it looks for is still present.
   const { execFileSync } = await import('node:child_process');
-  const { writeFileSync, mkdtempSync } = await import('node:fs');
+  const { writeFileSync, mkdtempSync, mkdirSync } = await import('node:fs');
   const { tmpdir } = await import('node:os');
   const workflow = readSource('.github/workflows/desktop-validation.yml');
   const start = workflow.indexOf('- name: Record the packaged acceptance verdict');
@@ -610,33 +610,53 @@ test('the packaged gate actually executes to the right verdict for each exit cod
   const dir = mkdtempSync(path.join(tmpdir(), 'apex-gate-'));
   const file = path.join(dir, 'verdict.sh');
   writeFileSync(file, script);
-  const run = (env) => {
+  // The verdict reads the evidence file by relative path, so each case runs in a
+  // scratch working directory that can hold (or omit) a realistic evidence file.
+  const withEvidence = (criteria) => {
+    const workdir = mkdtempSync(path.join(tmpdir(), 'apex-evidence-'));
+    writeFileSync(path.join(workdir, 'evidence.json'), JSON.stringify({ criteria }));
+    const dir2 = path.join(workdir, 'build', 'native-evidence');
+    mkdirSync(dir2, { recursive: true });
+    writeFileSync(path.join(dir2, 'packaged-editor-acceptance.json'), JSON.stringify({ criteria }));
+    return workdir;
+  };
+  const passingOnly = withEvidence([
+    { id: 'p1', status: 'PASS' }, { id: 'p2', status: 'PASS' },
+  ]);
+  const withNotVerified = withEvidence([
+    { id: 'p1', status: 'PASS' }, { id: 'p9', status: 'NOT_VERIFIED' },
+  ]);
+  const run = (env, cwd) => {
     try {
-      execFileSync('bash', [file], { encoding: 'utf8', stdio: 'pipe', env: { ...process.env, ...env } });
+      execFileSync('bash', [file], { encoding: 'utf8', stdio: 'pipe', cwd, env: { ...process.env, ...env } });
       return 0;
     } catch (error) { return error.status; }
   };
 
   // 0: everything passed. 3: verified criteria passed, some NOT_VERIFIED (P9).
-  assert.equal(run({ ACCEPTANCE_EXIT_CODE: '0', ACCEPTANCE_MISSING_EVIDENCE: 'false' }), 0,
+  assert.equal(run({ ACCEPTANCE_EXIT_CODE: '0', ACCEPTANCE_MISSING_EVIDENCE: 'false' }, passingOnly), 0,
     'exit 0 must not fail the job');
-  assert.equal(run({ ACCEPTANCE_EXIT_CODE: '3', ACCEPTANCE_MISSING_EVIDENCE: 'false' }), 0,
-    'exit 3 (only NOT_VERIFIED criteria) must not fail the job');
+  // Exit 3 is only acceptable when the evidence really does report NOT_VERIFIED rows:
+  // otherwise "some criteria remain unverified" would be an unchecked claim.
+  assert.equal(run({ ACCEPTANCE_EXIT_CODE: '3', ACCEPTANCE_MISSING_EVIDENCE: 'false' }, withNotVerified), 0,
+    'exit 3 with a reported NOT_VERIFIED criterion must not fail the job');
+  assert.equal(run({ ACCEPTANCE_EXIT_CODE: '3', ACCEPTANCE_MISSING_EVIDENCE: 'false' }, passingOnly), 1,
+    'exit 3 whose evidence reports no NOT_VERIFIED criterion must fail the job');
   // 1: a criterion failed. 2: the packaged app/fixture was missing -- not a pass either.
-  assert.equal(run({ ACCEPTANCE_EXIT_CODE: '1', ACCEPTANCE_MISSING_EVIDENCE: 'false' }), 1,
+  assert.equal(run({ ACCEPTANCE_EXIT_CODE: '1', ACCEPTANCE_MISSING_EVIDENCE: 'false' }, passingOnly), 1,
     'a failed criterion must fail the job');
-  assert.equal(run({ ACCEPTANCE_EXIT_CODE: '2', ACCEPTANCE_MISSING_EVIDENCE: 'false' }), 1,
+  assert.equal(run({ ACCEPTANCE_EXIT_CODE: '2', ACCEPTANCE_MISSING_EVIDENCE: 'false' }, passingOnly), 1,
     'a blocked run must fail the job');
-  assert.equal(run({ ACCEPTANCE_EXIT_CODE: '7', ACCEPTANCE_MISSING_EVIDENCE: 'false' }), 1,
+  assert.equal(run({ ACCEPTANCE_EXIT_CODE: '7', ACCEPTANCE_MISSING_EVIDENCE: 'false' }, passingOnly), 1,
     'an unrecognised failure code must fail the job');
   // No evidence file, or no code at all: nothing was measured, so nothing passed.
-  assert.equal(run({ ACCEPTANCE_EXIT_CODE: '0', ACCEPTANCE_MISSING_EVIDENCE: 'true' }), 1,
+  assert.equal(run({ ACCEPTANCE_EXIT_CODE: '0', ACCEPTANCE_MISSING_EVIDENCE: 'true' }, passingOnly), 1,
     'a missing evidence file must fail the job even on exit 0');
   const noCodeEnv = { ...process.env, ACCEPTANCE_MISSING_EVIDENCE: 'false' };
   delete noCodeEnv.ACCEPTANCE_EXIT_CODE;
   let noCodeStatus = 0;
   try {
-    execFileSync('bash', [file], { encoding: 'utf8', stdio: 'pipe', env: noCodeEnv });
+    execFileSync('bash', [file], { encoding: 'utf8', stdio: 'pipe', cwd: passingOnly, env: noCodeEnv });
   } catch (error) { noCodeStatus = error.status; }
   assert.equal(noCodeStatus, 1, 'an unset exit code must fail the job');
 });

@@ -145,6 +145,14 @@ jobs:
             exit 1
           fi
           if [ "$ACCEPTANCE_EXIT_CODE" -eq 3 ]; then
+            # Exit 3 means "verified criteria passed, some remain NOT_VERIFIED". Assert
+            # that the evidence really does contain NOT_VERIFIED criteria before calling
+            # it acceptable: a run that exited 3 without reporting any would mean those
+            # criteria had been silently dropped or turned into passes.
+            if ! grep -q '"NOT_VERIFIED"' build/native-evidence/packaged-editor-acceptance.json; then
+              echo "::error::Packaged acceptance exited 3 but its evidence reports no NOT_VERIFIED criterion; the unverified rows were not reported"
+              exit 1
+            fi
             echo "::notice::Packaged acceptance passed every verified criterion; criteria requiring an interactive desktop remain NOT_VERIFIED (see the summary line)"
           else
             echo "::notice::Packaged editor acceptance passed every criterion; see packaged-editor-acceptance.json"
