@@ -645,10 +645,15 @@ async function liveScalePass() {
       { dpi: session.diag.dpi, base });
     let messages = session.diag.dpiWindowObservation?.dpiChangedMessageCount ?? 0;
     const transitions = [];
+    let currentPercent = 100;
     for (const percent of [125, 150, 125, 100]) {
       const dpi = Math.round(96 * percent / 100);
+      // A step that would not change the scale (because an earlier scale was not
+      // available here) cannot produce a WM_DPICHANGED and proves nothing.
+      if (percent === currentPercent) { checks.notExecuted(`to-${percent}:scale-change`, 'the display is already at this scale'); continue; }
       const set = setPrimaryScale(percent);
       if (!set.ok) { checks.notExecuted(`to-${percent}:scale-change`, JSON.stringify(set).slice(0, 200)); continue; }
+      currentPercent = percent;
       const diag = await waitForDpi(session, dpi);
       const observed = diag.dpiWindowObservation ?? {};
       const label = `to-${percent}`;

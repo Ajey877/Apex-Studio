@@ -95,6 +95,16 @@ try {
     }
   } while ($now.monitorCount -lt 2 -and (Get-Date) -lt $deadline)
 
+  # Adding a display resets the desktop to small default modes, at which Windows
+  # offers no scale above 100% or 125%. Give every display a mode that allows 150%.
+  if ($now.monitorCount -ge 2) {
+    foreach ($monitor in $now.monitors) {
+      $set = (& $tool -Action set-resolution -Width 1920 -Height 1080 -Device $monitor.device) | ConvertFrom-Json
+      Step "resolution $($monitor.device)" "status $($set.status)"
+    }
+    Start-Sleep -Seconds 2
+    $now = Get-Display
+  }
   $result['monitorCount'] = $now.monitorCount
   $result['available'] = $now.monitorCount -ge 2
   $result['display'] = $now

@@ -12,7 +12,7 @@
 # Usage (PowerShell 5.1 or 7, Windows only):
 #   windows-display-scale.ps1 -Action query
 #   windows-display-scale.ps1 -Action modes
-#   windows-display-scale.ps1 -Action set-resolution -Width 1920 -Height 1080
+#   windows-display-scale.ps1 -Action set-resolution -Width 1920 -Height 1080 [-Device \\.\DISPLAY2]
 #   windows-display-scale.ps1 -Action set-scale -Scale 150 [-Monitor 0]
 #   windows-display-scale.ps1 -Action extend          (desktop across all connected displays, as Win+P > Extend)
 #   windows-display-scale.ps1 -Action screenshot -Hwnd 12345 -Out shot.png
@@ -27,6 +27,7 @@ param(
   [int]$Monitor = 0,
   [int]$Width = 0,
   [int]$Height = 0,
+  [string]$Device = '',
   [long]$Hwnd = 0,
   [string]$Out = '',
   [int]$MaxWidth = 0,
@@ -235,11 +236,13 @@ public static class ApexDisplay {
     return result;
   }
 
-  public static int SetResolution(int width, int height) {
+  /** `device` is a name such as \\.\DISPLAY2; null or empty means the primary display. */
+  public static int SetResolution(string device, int width, int height) {
+    if (string.IsNullOrEmpty(device)) device = null;
     DEVMODE dm = new DEVMODE(); dm.dmSize = (ushort)Marshal.SizeOf(typeof(DEVMODE));
-    if (!EnumDisplaySettingsW(null, -1, ref dm)) return -100;
+    if (!EnumDisplaySettingsW(device, -1, ref dm)) return -100;
     dm.dmPelsWidth = (uint)width; dm.dmPelsHeight = (uint)height; dm.dmFields = 0x80000 | 0x100000;
-    return ChangeDisplaySettingsExW(null, ref dm, IntPtr.Zero, 0, IntPtr.Zero);
+    return ChangeDisplaySettingsExW(device, ref dm, IntPtr.Zero, 0, IntPtr.Zero);
   }
 
   /** Visible bounds of a top-level window in physical pixels (DWM extended frame). */
@@ -300,9 +303,9 @@ switch ($Action) {
   'query' { $result = Get-State }
   'modes' { $result = [ordered]@{ current = [ApexDisplay]::CurrentMode(); available = @([ApexDisplay]::Modes()) } }
   'set-resolution' {
-    $status = [ApexDisplay]::SetResolution($Width, $Height)
+    $status = [ApexDisplay]::SetResolution($Device, $Width, $Height)
     Start-Sleep -Milliseconds 1500
-    $result = [ordered]@{ requested = "${Width}x${Height}"; status = $status; state = Get-State }
+    $result = [ordered]@{ requested = "${Width}x${Height}"; device = $Device; status = $status; state = Get-State }
   }
   'extend' {
     $status = [ApexDisplay]::Extend()
