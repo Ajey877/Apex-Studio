@@ -12,9 +12,13 @@ other. They answer different questions and are reported independently:
 | **Helper-level** (Part 1) | Does the native helper create a real `HWND`, attach the real AGain `IPlugView`, and route input/state honestly? | `Native VST3 Validation / Native DSP (windows-latest)` |
 | **Packaged-application** (Part 1b) | Does the installed Apex app, driven through its own visible controls, deliver a genuine edit into project state and persist it? | `Desktop Validation / windows-package` |
 
-**Current status at `7ab6d85`** (the current PR head; `100011b` was the original measured
-baseline and `7ab6d85` re-ran the same four workflows on an identical tree — documentation
-commits only — reproducing these numbers):
+**Status at `7ab6d85`, the measured commit.** `100011b` was the original measured
+baseline; `7ab6d85` re-ran the same four workflows and reproduced these numbers. Only
+documentation has changed since `7ab6d85`, so this tree — not that SHA — is what applies
+to the PR head.
+
+(Phrased against the measured commit rather than "the current head" on purpose: a commit
+that names the head becomes stale the moment it is committed.)
 
 - **Helper-level (Part 1): 15 PASS, 0 FAIL, 1 NOT_VERIFIED.** The `NOT_VERIFIED` row is
   `packaged-app`, which is `NOT_VERIFIED` **by design**: the helper harness launches the
@@ -633,9 +637,9 @@ run by `.github/workflows/desktop-validation.yml` (`windows-package`).
 | `p9-dpi-125-150` | 125% and 150% DPI behaviour (manual only) |
 | `harness` | The driver itself completed |
 
-Result at `7ab6d85` (`windows-package`, real installed app): **9 PASS, 0 FAIL,
-1 NOT_VERIFIED.** The original measurement was taken at `100011b` (Desktop Validation
-#1211) and this is the re-run on the current head (Desktop Validation #1213); both
+Result at `7ab6d85`, the measured commit (`windows-package`, real installed app):
+**9 PASS, 0 FAIL, 1 NOT_VERIFIED.** The original measurement was taken at `100011b`
+(Desktop Validation #1211); `7ab6d85` is the re-run (Desktop Validation #1213) and both
 produced these same figures, including 10/10 repeated cycles.
 
 ```
