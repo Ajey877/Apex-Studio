@@ -1,0 +1,99 @@
+name: P9 High-DPI Editor Acceptance
+
+# Real Windows display scaling for the native VST3 editor (docs/VST3-EDITOR-ACCEPTANCE.md, P9).
+# Job logs and artifacts are not always retrievable, so every result is also
+# published as a check-run annotation.
+#
+# Trigger: pushes to the P9 working branch and manual dispatch only. It does not
+# run on main or on unrelated PRs.
+on:
+  workflow_dispatch:
+  push:
+    branches: ['arena/bb3a702c-apex-studio']
+
+permissions:
+  contents: read
+
+jobs:
+  display-probe:
+    name: Display capability probe (windows-latest)
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Environment
+        shell: pwsh
+        run: |
+          function Note($title, $text) {
+            $t = ([string]$text) -replace '%', '%25' -replace "`r", '%0D' -replace "`n", '%0A'
+            Write-Host "::notice title=$title::$t"
+          }
+          $os = Get-CimInstance Win32_OperatingSystem
+          $video = Get-CimInstance Win32_VideoController | ForEach-Object { "$($_.Name)|$($_.DriverVersion)|$($_.VideoModeDescription)|$($_.PNPDeviceID)" }
+          $monitors = Get-CimInstance Win32_PnPEntity | Where-Object { $_.PNPClass -in 'Monitor', 'Display' } | ForEach-Object { "$($_.PNPClass)|$($_.Name)|$($_.Status)" }
+          $session = [System.Diagnostics.Process]::GetCurrentProcess().SessionId
+          $sessions = (& query.exe session 2>&1 | Out-String)
+          $info = [ordered]@{
+            caption = $os.Caption; version = $os.Version; build = $os.BuildNumber
+            psVersion = $PSVersionTable.PSVersion.ToString(); sessionId = $session
+            userInteractive = [Environment]::UserInteractive; user = $env:USERNAME
+            imageOs = $env:ImageOS; imageVersion = $env:ImageVersion
+            video = @($video); pnp = @($monitors); sessions = $sessions
+            iddCx = (Test-Path "$env:windir\System32\drivers\UMDF\IddCx.dll")
+            devcon = [bool](Get-Command devcon.exe -ErrorAction SilentlyContinue)
+            pnputil = [bool](Get-Command pnputil.exe -ErrorAction SilentlyContinue)
+          }
+          Note 'P9-PROBE-ENV' ($info | ConvertTo-Json -Depth 5 -Compress)
+      - name: Display topology, modes and resolution
+        shell: pwsh
+        run: |
+          function Note($title, $text) {
+            $t = ([string]$text) -replace '%', '%25' -replace "`r", '%0D' -replace "`n", '%0A'
+            Write-Host "::notice title=$title::$t"
+          }
+          $tool = './scripts/windows-display-scale.ps1'
+          Note 'P9-PROBE-INITIAL' (& $tool -Action query)
+          Note 'P9-PROBE-MODES' (& $tool -Action modes)
+          $resolution = & $tool -Action set-resolution -Width 1920 -Height 1080
+          Note 'P9-PROBE-RESOLUTION' $resolution
+          if (($resolution | ConvertFrom-Json).status -ne 0) {
+            try {
+              Set-DisplayResolution -Width 1920 -Height 1080 -Force
+              Start-Sleep -Seconds 2
+              Note 'P9-PROBE-RESOLUTION-CMDLET' (& $tool -Action query)
+            } catch { Note 'P9-PROBE-RESOLUTION-CMDLET' "failed: $($_.Exception.Message)" }
+          }
+      - name: Change the real display scale (125%, 150%, 100%)
+        shell: pwsh
+        run: |
+          function Note($title, $text) {
+            $t = ([string]$text) -replace '%', '%25' -replace "`r", '%0D' -replace "`n", '%0A'
+            Write-Host "::notice title=$title::$t"
+          }
+          $tool = './scripts/windows-display-scale.ps1'
+          foreach ($percent in 125, 150, 100) {
+            $changed = & $tool -Action set-scale -Scale $percent
+            Note "P9-PROBE-SCALE-$percent" $changed
+            # A process started AFTER the change: what does it see as system DPI?
+            $fresh = & pwsh -NoProfile -File $tool -Action query
+            Note "P9-PROBE-FRESH-$percent" $fresh
+          }
+      - name: Annotation capacity and screenshot channel
+        shell: pwsh
+        run: |
+          function Note($title, $text) {
+            $t = ([string]$text) -replace '%', '%25' -replace "`r", '%0D' -replace "`n", '%0A'
+            Write-Host "::notice title=$title::$t"
+          }
+          foreach ($size in 4000, 16000, 60000) { Note "P9-PROBE-SIZE-$size" ('A' * $size) }
+          $tool = './scripts/windows-display-scale.ps1'
+          Start-Process notepad.exe
+          Start-Sleep -Seconds 4
+          $window = Get-Process notepad -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 } | Select-Object -First 1
+          if ($window) {
+            $shot = & $tool -Action screenshot -Hwnd ([int64]$window.MainWindowHandle) -Out "$env:RUNNER_TEMP\probe.png" -MaxWidth 480
+            Note 'P9-PROBE-SHOT' $shot
+            if (Test-Path "$env:RUNNER_TEMP\probe.png") {
+              Note 'P9-PROBE-PNG' ([Convert]::ToBase64String([IO.File]::ReadAllBytes("$env:RUNNER_TEMP\probe.png")))
+            }
+          } else { Note 'P9-PROBE-SHOT' 'no window with a main handle was found' }
