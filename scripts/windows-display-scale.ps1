@@ -14,13 +14,14 @@
 #   windows-display-scale.ps1 -Action modes
 #   windows-display-scale.ps1 -Action set-resolution -Width 1920 -Height 1080
 #   windows-display-scale.ps1 -Action set-scale -Scale 150 [-Monitor 0]
+#   windows-display-scale.ps1 -Action extend          (desktop across all connected displays, as Win+P > Extend)
 #   windows-display-scale.ps1 -Action screenshot -Hwnd 12345 -Out shot.png
 #   windows-display-scale.ps1 -Action compare -A one.png -B two.png
 #   windows-display-scale.ps1 -Action find-windows -WindowClass ApexStudioVst3EditorHostWindow
 #
 # Every action prints exactly one line of JSON on stdout.
 param(
-  [ValidateSet('query', 'modes', 'set-resolution', 'set-scale', 'screenshot', 'compare', 'find-windows')]
+  [ValidateSet('query', 'modes', 'set-resolution', 'set-scale', 'extend', 'screenshot', 'compare', 'find-windows')]
   [string]$Action = 'query',
   [int]$Scale = 0,
   [int]$Monitor = 0,
@@ -73,6 +74,9 @@ public static class ApexDisplay {
   public delegate bool MonitorEnumProc(IntPtr hMonitor, IntPtr hdc, IntPtr rect, IntPtr data);
 
   [DllImport("user32.dll")] static extern int GetDisplayConfigBufferSizes(uint flags, out uint numPaths, out uint numModes);
+  [DllImport("user32.dll")] static extern int SetDisplayConfig(uint numPaths, IntPtr paths, uint numModes, IntPtr modes, uint flags);
+  /** Win+P "Extend": SDC_APPLY | SDC_TOPOLOGY_EXTEND. Returns the Win32 status. */
+  public static int Extend() { return SetDisplayConfig(0, IntPtr.Zero, 0, IntPtr.Zero, 0x80 | 0x04); }
   [DllImport("user32.dll")] static extern int QueryDisplayConfig(uint flags, ref uint numPaths, [Out] PATH_INFO[] paths, ref uint numModes, [Out] MODE_INFO[] modes, IntPtr topology);
   [DllImport("user32.dll", EntryPoint = "DisplayConfigGetDeviceInfo")] static extern int GetDpiScale(ref DPI_SCALE_GET packet);
   [DllImport("user32.dll", EntryPoint = "DisplayConfigSetDeviceInfo")] static extern int SetDpiScale(ref DPI_SCALE_SET packet);
@@ -299,6 +303,11 @@ switch ($Action) {
     $status = [ApexDisplay]::SetResolution($Width, $Height)
     Start-Sleep -Milliseconds 1500
     $result = [ordered]@{ requested = "${Width}x${Height}"; status = $status; state = Get-State }
+  }
+  'extend' {
+    $status = [ApexDisplay]::Extend()
+    Start-Sleep -Milliseconds 2500
+    $result = [ordered]@{ status = $status; state = Get-State }
   }
   'set-scale' {
     $before = Get-State

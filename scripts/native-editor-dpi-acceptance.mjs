@@ -302,7 +302,7 @@ function windowHandle(diag) {
 
 let referenceClientPng = null;
 /** Capture what is really on screen for the editor window and measure it. */
-function capture(session, diag, name, checks, { compareToReference = true, isReference = false } = {}) {
+function capture(session, diag, name, checks, { compareToReference = true, isReference = false, fillsClient = true } = {}) {
   const hwnd = windowHandle(diag);
   if (!hwnd) { checks.notExecuted('screenshot', 'window handle not found'); return null; }
   const file = path.join(outDir, `${hostLabel}-${name}.png`);
@@ -318,7 +318,8 @@ function capture(session, diag, name, checks, { compareToReference = true, isRef
     distinctColours: shot.client.distinctColours, dominantColourFraction: shot.client.dominantColourFraction });
   // Content must reach the right and bottom edges of the client area. An editor
   // drawn at the wrong scale leaves those strips as flat, unpainted background.
-  checks.is('content-reaches-edges', shot.client.distinctColoursInRightStrip >= 2 && shot.client.distinctColoursInBottomStrip >= 2, {
+  // (Not asked of a window the harness forced larger than a fixed-layout editor.)
+  if (fillsClient) checks.is('content-reaches-edges', shot.client.distinctColoursInRightStrip >= 2 && shot.client.distinctColoursInBottomStrip >= 2, {
     rightStripColours: shot.client.distinctColoursInRightStrip, bottomStripColours: shot.client.distinctColoursInBottomStrip });
   if (isReference && shot.clientOut) referenceClientPng = shot.clientOut;
   else if (compareToReference && referenceClientPng && shot.clientOut) {
@@ -663,7 +664,11 @@ async function liveScalePass() {
       transitions.push({ percent, dpi, client: [diag.clientWidth, diag.clientHeight], view: [diag.viewWidth, diag.viewHeight],
         suggested: [observed.suggestedWidth, observed.suggestedHeight], scaleFit: diag.scaleFit ?? null, frame: diag.frame ?? null });
     }
-    // A window the user has resized must scale from ITS size, and come back to it.
+    // A window the HOST has sized must scale from ITS size, and come back to it.
+    // This exercises the host's arithmetic only. AGain's layout is fixed, so the
+    // editor stays at its own scaled size in the corner of the enlarged window:
+    // the screenshot is kept as evidence but is not expected to be filled. A
+    // genuinely resizable plug-in layout at high DPI is not covered by any fixture.
     const custom = { width: 640, height: 420 };
     await action(session, 'resizeClient', custom);
     let set = setPrimaryScale(150);
@@ -673,7 +678,7 @@ async function liveScalePass() {
       checks.near('resized-window:height-at-150', Number(up.clientHeight), 630, 1);
       checks.is('resized-window:view-equals-client-at-150', up.viewWidth === up.clientWidth && up.viewHeight === up.clientHeight,
         { view: [up.viewWidth, up.viewHeight], client: [up.clientWidth, up.clientHeight] });
-      capture(session, up, 'live-resized-at-150', checks, { compareToReference: false });
+      capture(session, up, 'live-resized-at-150', checks, { compareToReference: false, fillsClient: false });
       set = setPrimaryScale(100);
       if (set.ok) {
         const down = await waitForDpi(session, 96);
