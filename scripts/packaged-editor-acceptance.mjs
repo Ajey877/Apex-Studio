@@ -10,11 +10,15 @@
 // WHAT THIS IS NOT: no `npm run dev`, no browser tab, no service mock. Helper-level
 // acceptance is reported separately and is never substituted for this.
 //
+// Display scale (p9): with APEX_P9_ALLOW_DISPLAY_CHANGES=1 this script sets the
+// REAL Windows display scale to 125% and 150% (scripts/windows-display-scale.ps1,
+// the calls the Settings app makes) and opens the editor through the Mixer at each.
+// Without that permission it never touches the display and p9 is NOT_VERIFIED.
+//
 // Interactive-only checks (physically dragging the window, moving it between
-// monitors with different DPI, real 125%/150% display scaling) cannot be produced
-// by an automated runner; they are recorded as NOT_VERIFIED and stay in
-// docs/VST3-EDITOR-ACCEPTANCE.md as manual steps.
-import { execFileSync } from 'node:child_process';
+// monitors with different DPI) are not produced here; they are recorded as
+// NOT_VERIFIED and stay in docs/VST3-EDITOR-ACCEPTANCE.md as manual steps.
+import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -54,6 +58,7 @@ const CRITERIA = {
   'p7-no-leaked-helpers': 'Closing Apex with the editor open leaks no helper processes',
   'p8-recovery': 'Recovery behaviour works after an editor crash',
   'p9-dpi-125-150': '125% and 150% DPI behaviour',
+  'p9b-multi-monitor': 'Moving the editor between monitors with different DPI',
 };
 const results = [];
 /**
@@ -1295,10 +1300,159 @@ try {
   });
 }
 
-// p9 needs an interactive display; it is never inferred from the runner.
-record('p9-dpi-125-150', 'NOT_VERIFIED', {
-  reason: 'Changing the Windows display scale to 125%/150% and moving the window between monitors requires an interactive desktop; the automated desktop is 96 DPI.',
-  whatIsNeeded: 'On a Windows 11 x64 desktop, set Settings > Display > Scale to 150%, reopen the editor, and repeat at 125%; the plug-in must re-layout without blank areas. Multi-monitor migration with different per-monitor DPI is also manual.',
+// ---- p9: the packaged application at real 125% and 150% display scale ----------
+//
+// The scale is changed on the real display, so Windows itself reports 120/144 DPI
+// for the editor window. Nothing is inferred from the 96 DPI desktop: a scale that
+// Windows did not apply is NOT_VERIFIED, never a pass.
+const DPI_FIXTURE_BASE = { width: 320, height: 120 };  // acceptancegain.uidesc
+const EDITOR_WINDOW_CLASS = 'ApexStudioVst3EditorHostWindow';
+const displayTool = path.join(root, 'scripts/windows-display-scale.ps1');
+const evidenceDir = path.dirname(outPath);
+let displayShell = null;
+function displayCall(action, args = {}) {
+  displayShell ??= ['pwsh.exe', 'powershell.exe'].find(candidate => spawnSync(candidate,
+    ['-NoProfile', '-NonInteractive', '-Command', 'exit 0'], { windowsHide: true, timeout: 60000 }).status === 0) ?? 'powershell.exe';
+  const argv = ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', displayTool, '-Action', action];
+  for (const [key, value] of Object.entries(args)) argv.push(`-${key}`, String(value));
+  const result = spawnSync(displayShell, argv, { encoding: 'utf8', windowsHide: true, timeout: 120000 });
+  const line = (result.stdout ?? '').trim().split(/\r?\n/).filter(Boolean).at(-1) ?? '';
+  try { return JSON.parse(line); }
+  catch { throw new Error(`display tool ${action} failed (${result.status}): ${(result.stderr || result.stdout || '').slice(-400)}`); }
+}
+const primaryDisplay = state => state.monitors.find(m => m.primary) ?? state.monitors[0];
+function setPrimaryDisplayScale(percent) {
+  const before = displayCall('query');
+  const index = Math.max(0, before.sources.findIndex(s => s.device === primaryDisplay(before).device));
+  const changed = displayCall('set-scale', { Scale: percent, Monitor: index });
+  const dpi = primaryDisplay(changed.after ?? displayCall('query')).effectiveDpi;
+  return { ok: dpi === Math.round(96 * percent / 100), percent, dpi, detail: changed.set };
+}
+
+/** Open the editor through the Mixer of a freshly launched packaged app, at the
+ *  display scale that is set right now, and measure the window Windows shows. */
+async function measurePackagedEditorAtScale(percent, reference) {
+  const { _electron } = await import('playwright');
+  const expectedDpi = Math.round(96 * percent / 100);
+  const expected = { width: Math.round(DPI_FIXTURE_BASE.width * percent / 100), height: Math.round(DPI_FIXTURE_BASE.height * percent / 100) };
+  const measured = { percent, expectedDpi, expectedClient: expected, checks: {} };
+  const helpersBefore = helperProcesses().processes;
+  const app = await _electron.launch({
+    executablePath: executable, timeout: 180000,
+    // A profile of its own: the Mixer starts with no insert, exactly as in p1.
+    env: launchEnv({ APEX_ACCEPTANCE_USER_DATA: path.join(root, 'build', `packaged-acceptance-profile-dpi-${percent}-${Date.now()}`) }),
+  });
+  try {
+    const page = await app.firstWindow();
+    await page.waitForLoadState('domcontentloaded');
+    await page.waitForTimeout(2000);
+    const opened = await openEditorThroughMixerUi(page);
+    measured.openedThroughMixerUi = opened.ok;
+    if (!opened.ok) { measured.error = `the Mixer UI did not open the editor: ${opened.error}`; return measured; }
+    // The window is found in the OS, owned by a helper process, not asked of the app.
+    let found = null;
+    for (let attempt = 0; attempt < 40 && !found; attempt++) {
+      await page.waitForTimeout(500);
+      const helpers = helperProcesses().processes.filter(h => !helpersBefore.some(b => b.pid === h.pid));
+      const windows = displayCall('find-windows', { WindowClass: EDITOR_WINDOW_CLASS }).windows ?? [];
+      found = windows.find(w => w.visible && helpers.some(h => h.pid === w.processId)) ?? null;
+    }
+    if (!found) { measured.error = 'no visible editor window owned by a new helper process appeared'; return measured; }
+    await page.waitForTimeout(1500);  // let the editor paint
+    const file = path.join(evidenceDir, `packaged-editor-at-${percent}.png`);
+    const shot = displayCall('screenshot', { Hwnd: found.hwnd, Out: file });
+    const bounds = shot.bounds ?? {};
+    measured.window = { hwnd: found.hwnd, helperPid: found.processId, dpi: bounds.dpi, client: [bounds.clientWidth, bounds.clientHeight],
+      outer: [bounds.width, bounds.height], screenshot: path.basename(file), rendered: shot.client ?? null };
+    measured.clientPng = shot.clientOut ?? null;
+    measured.checks.windowDpiIsTheDisplayDpi = bounds.dpi === expectedDpi;
+    measured.checks.clientIsTheScaledEditorSize = Math.abs(bounds.clientWidth - expected.width) <= 1 && Math.abs(bounds.clientHeight - expected.height) <= 1;
+    measured.checks.editorRendered = Boolean(shot.client) && shot.client.distinctColours >= 4 && shot.client.dominantColourFraction < 0.97;
+    if (reference && shot.clientOut) {
+      // Same layout, only larger: a clipped editor or one with blank margins differs.
+      const compared = displayCall('compare', { A: reference, B: shot.clientOut });
+      measured.layoutVersus100Percent = { meanAbsDifference: compared.meanAbsDifference, limit: 16 };
+      measured.checks.layoutMatches100Percent = compared.meanAbsDifference <= 16;
+    }
+    return measured;
+  } finally {
+    try { await (await app.firstWindow()).evaluate(async () => { await globalThis.__apexAcceptance.quitApp(); }); } catch { /* already gone */ }
+    await new Promise(resolve => setTimeout(resolve, 5000));
+    await app.close().catch(() => {});
+    const survivors = helperProcesses();
+    measured.helpersLeftAfterQuit = survivors.ok ? survivors.processes.length : null;
+    measured.checks.noHelperLeftAfterQuit = survivors.ok && survivors.processes.length === 0;
+  }
+}
+
+async function displayScalePass() {
+  if (process.env.APEX_P9_ALLOW_DISPLAY_CHANGES !== '1') {
+    record('p9-dpi-125-150', 'NOT_VERIFIED', {
+      reason: 'This run was not permitted to change the Windows display scale (APEX_P9_ALLOW_DISPLAY_CHANGES is not 1), so the packaged editor was only exercised at the current scale.',
+      whatIsNeeded: 'Run with APEX_P9_ALLOW_DISPLAY_CHANGES=1 on a desktop whose scale may be changed, or follow the manual steps in docs/VST3-EDITOR-ACCEPTANCE.md.',
+    });
+    return;
+  }
+  if (results.some(r => r.id === 'harness')) {
+    record('p9-dpi-125-150', 'NOT_VERIFIED', { reason: 'the main packaged run did not complete, so the display-scale pass was not started' });
+    return;
+  }
+  stage('p9-display-scale');
+  const runs = [];
+  let reference = null, initialPercent = 100, restored = null, initialMode = null, resolution = null;
+  try {
+    const initial = displayCall('query');
+    const source = initial.sources.find(s => s.device === primaryDisplay(initial).device);
+    initialPercent = source?.currentPercent ?? 100;
+    // Windows offers 150% only above a minimum resolution (a CI desktop boots at
+    // 1024x768, where the limit is 125%). Raise it for this pass and put it back.
+    if ((source?.maximumPercent ?? 0) < 150) {
+      initialMode = initial.mode;
+      const changed = displayCall('set-resolution', { Width: 1920, Height: 1080 });
+      resolution = { from: `${initialMode.width}x${initialMode.height}`, to: '1920x1080', status: changed.status };
+    }
+    for (const percent of [100, 125, 150]) {
+      const set = setPrimaryDisplayScale(percent);
+      if (!set.ok) { runs.push({ percent, executed: false, reason: `Windows did not apply ${percent}%`, detail: set }); continue; }
+      const measured = await measurePackagedEditorAtScale(percent, percent === 100 ? null : reference);
+      if (percent === 100) reference = measured.clientPng;
+      runs.push({ executed: !measured.error, ...measured });
+    }
+  } catch (error) {
+    runs.push({ executed: false, reason: `the display-scale pass stopped: ${error.message}`.slice(0, 400) });
+  } finally {
+    try { restored = setPrimaryDisplayScale(initialPercent).ok; } catch { restored = false; }
+    if (initialMode) {
+      try { resolution.restoredStatus = displayCall('set-resolution', { Width: initialMode.width, Height: initialMode.height }).status; }
+      catch { resolution.restoredStatus = 'failed'; }
+    }
+  }
+  const scaled = [125, 150].map(percent => runs.find(r => r.percent === percent));
+  const executed = scaled.every(r => r?.executed);
+  const failures = runs.filter(r => r.executed && Object.values(r.checks ?? {}).some(ok => ok !== true))
+    .map(r => ({ percent: r.percent, failed: Object.entries(r.checks).filter(([, ok]) => ok !== true).map(([name]) => name), window: r.window }));
+  record('p9-dpi-125-150', failures.length ? 'FAIL' : executed ? 'PASS' : 'NOT_VERIFIED', {
+    reason: failures.length ? `checks failed: ${JSON.stringify(failures).slice(0, 300)}`
+      : executed ? undefined : `not every scale was executed: ${JSON.stringify(scaled.map(r => r?.reason ?? r?.error ?? 'missing')).slice(0, 300)}`,
+    how: 'The Windows display scale was changed on the real display; at each scale the packaged app was launched and its editor opened through the Mixer UI. The window was measured from the OS.',
+    notCovered: 'Changing the scale while the packaged editor is open, and moving it between monitors, are not part of this criterion here (see scripts/native-editor-dpi-acceptance.mjs for the helper-level runs).',
+    displayScaleRestored: restored,
+    resolutionChange: resolution,
+    runs,
+  });
+  const summary = runs.map(r => r.executed
+    ? `${r.percent}%: dpi=${r.window?.dpi} client=${r.window?.client?.join('x')} expected=${r.expectedClient.width}x${r.expectedClient.height} layoutDiff=${r.layoutVersus100Percent?.meanAbsDifference ?? 'reference'}`
+    : `${r.percent ?? '?'}%: not executed (${r.reason ?? r.error})`).join(' | ');
+  console.log(`P9-PACKAGED ${summary}`);
+  if (process.env.GITHUB_ACTIONS) console.log(`::notice title=P9-PACKAGED::${summary}`);
+}
+await displayScalePass();
+
+// Moving between monitors needs two displays with different scales; it is never
+// inferred from a single display.
+record('p9b-multi-monitor', 'NOT_VERIFIED', {
+  reason: 'Moving the packaged editor between monitors with different DPI was not executed: it needs two displays and a person (or an input driver) to move the window.',
+  whatIsNeeded: 'On a Windows 11 x64 desktop with two monitors at different scales, drag the open editor from one to the other; it must re-layout without blank areas. The helper-level equivalent is scripts/native-editor-dpi-acceptance.mjs (P9-D, P9-E, P9-F).',
 });
 
 for (const id of Object.keys(CRITERIA)) {

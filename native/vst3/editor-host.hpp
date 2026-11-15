@@ -158,6 +158,8 @@ class NativeEditorSession {
   dpi::Size lastConstraintGranted;
   Steinberg::tresult lastConstraintResult = Steinberg::kNotImplemented;
   int enterSizeMoveCount = 0;
+  bool tracingGeometry = false;
+  json geometryTrace = json::array();
   int exitSizeMoveCount = 0;
 
   /** One content-scale attempt and everything observable about it. */
@@ -836,7 +838,51 @@ class NativeEditorSession {
     }
   }
 
+  /**
+   * Geometry messages seen during a harness drag, in the order Windows sent them.
+   * Recorded only while a pointerDrag test action is running; it exists because the
+   * modal move loop sizes the window itself, and only the message order shows who
+   * chose a size.
+   */
+  void traceGeometryMessage(UINT message, WPARAM wParam, LPARAM lParam) {
+    if (!tracingGeometry || geometryTrace.size() >= 160) return;
+    json entry;
+    switch (message) {
+      case WM_ENTERSIZEMOVE: entry = {{"m", "enter"}}; break;
+      case WM_EXITSIZEMOVE: entry = {{"m", "exit"}}; break;
+      case 0x02E4: /* WM_GETDPISCALEDSIZE */
+        entry = {{"m", "getDpiScaledSize"}, {"dpi", static_cast<unsigned int>(wParam)}};
+        break;
+      case WM_DPICHANGED: {
+        entry = {{"m", "dpiChanged"}, {"dpi", static_cast<unsigned int>(HIWORD(wParam))}};
+        if (const auto* r = reinterpret_cast<const RECT*>(lParam))
+          entry["suggested"] = {r->left, r->top, r->right - r->left, r->bottom - r->top};
+        break;
+      }
+      case WM_WINDOWPOSCHANGING:
+      case WM_WINDOWPOSCHANGED: {
+        const auto* pos = reinterpret_cast<const WINDOWPOS*>(lParam);
+        if (!pos) return;
+        // Pure moves are the bulk of a drag and say nothing about size.
+        if ((pos->flags & SWP_NOSIZE) && message == WM_WINDOWPOSCHANGING) return;
+        if (message == WM_WINDOWPOSCHANGED && (pos->flags & SWP_NOSIZE)) return;
+        entry = {{"m", message == WM_WINDOWPOSCHANGING ? "posChanging" : "posChanged"},
+          {"rect", {pos->x, pos->y, pos->cx, pos->cy}}, {"flags", static_cast<unsigned int>(pos->flags)}};
+        break;
+      }
+      case WM_SIZE:
+        entry = {{"m", "size"}, {"client", {LOWORD(lParam), HIWORD(lParam)}}};
+        break;
+      default: return;
+    }
+    entry["byPlugin"] = resizingByPlugin;
+    entry["fitting"] = fittingClient;
+    entry["inDpiChange"] = applyingDpiChange;
+    geometryTrace.push_back(std::move(entry));
+  }
+
   LRESULT handleWindowMessage(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
+    traceGeometryMessage(message, wParam, lParam);
     switch (message) {
       case WM_CLOSE:
         nativeCloseFromWindow();
@@ -1343,6 +1389,8 @@ public:
     const int exitBefore = exitSizeMoveCount;
     SetForegroundWindow(window);
     pumpMessages();
+    geometryTrace = json::array();
+    tracingGeometry = true;
 
     std::atomic<bool> finished{false};
     std::atomic<unsigned long> accepted{0};
@@ -1385,6 +1433,8 @@ public:
     }
     injector.join();
     pumpMessages();
+    tracingGeometry = false;
+    result["geometryTrace"] = geometryTrace;
     if (GetAsyncKeyState(VK_LBUTTON) < 0) {
       // Never leave the machine with a button held if the gesture went wrong.
       INPUT release{};

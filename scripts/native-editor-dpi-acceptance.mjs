@@ -858,7 +858,12 @@ async function multiMonitorPass(state) {
       const drop = { x: p.workLeft + Math.round(p.workWidth / 2), y: p.workTop + Math.round(p.workHeight / 2) };
       const drag = await action(session, 'pointerDrag', { fromX: grab.x, fromY: grab.y, toX: drop.x, toY: drop.y, steps: 40, stepDelayMs: 20 });
       const dropped = await waitForDpi(session, 96);
-      move.is('title-drag:windows-move-loop-ran', drag.enteredSizeMove >= 1 && drag.exitedSizeMove >= 1, { drag: { ...drag, diagnostics: undefined } });
+      // Who sized the window during the drag, in the order Windows sent it.
+      const trace = (drag.geometryTrace ?? []).map(e => [e.m, e.dpi ?? '', (e.suggested ?? e.rect ?? e.client ?? []).join(','),
+        e.flags === undefined ? '' : `f${e.flags.toString(16)}`, `${e.byPlugin ? 'P' : ''}${e.fitting ? 'F' : ''}${e.inDpiChange ? 'D' : ''}`]
+        .filter(part => part !== '').join(' '));
+      if (trace.length) notes.push(`title-drag geometry (${config}): ${trace.join(' | ')}`.slice(0, 1900));
+      move.is('title-drag:windows-move-loop-ran', drag.enteredSizeMove >= 1 && drag.exitedSizeMove >= 1, { drag: { ...drag, diagnostics: undefined, geometryTrace: undefined }, trace });
       move.is('title-drag:WM_DPICHANGED-during-drag', drag.dpiChangedMessages >= 1, { messages: drag.dpiChangedMessages });
       move.equal('title-drag:landed-on-primary', dropped.monitor?.device, p.device);
       sizeChecks(move, dropped, { dpi: 96, pluginScale: 1, expectedClient: AGAIN.base, label: 'title-drag' });
