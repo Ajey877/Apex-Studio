@@ -950,9 +950,24 @@ try {
   console.log(`P9-ERROR ${error.message}`);
   if (error.stack) console.log(error.stack.slice(0, 1500));
 } finally {
-  if (allowDisplayChanges && initialPercent) {
-    const restored = setPrimaryScale(initialPercent);
-    notes.push(`Display scale restored to ${initialPercent}%: ${restored.ok}`);
+  if (allowDisplayChanges) {
+    // Every display goes back to the scale it had, not only the primary: the
+    // multi-monitor pass changes the second display as well.
+    for (const [index, source] of initial.sources.entries()) {
+      if (!source.currentPercent) continue;
+      const isPrimary = source.device === primaryOf(initial).device;
+      try {
+        if (isPrimary) setPrimaryScale(source.currentPercent);
+        else display('set-scale', { Scale: source.currentPercent, Monitor: index });
+      } catch (error) {
+        notes.push(`restoring ${source.device} failed: ${error.message}`);
+      }
+    }
+    const after = display('query');
+    for (const source of initial.sources) {
+      const now = after.sources.find(s => s.device === source.device);
+      notes.push(`Display scale of ${source.device} restored to ${source.currentPercent}%: ${now?.currentPercent === source.currentPercent}`);
+    }
   }
 }
 
