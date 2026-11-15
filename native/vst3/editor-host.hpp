@@ -481,7 +481,15 @@ class NativeEditorSession {
     const UINT flags = SWP_NOZORDER | SWP_NOACTIVATE | (position ? 0u : static_cast<UINT>(SWP_NOMOVE));
     if (!SetWindowPos(window, nullptr, position ? position->x : 0, position ? position->y : 0,
                       outer.width, outer.height, flags)) return false;
-    const auto actual = clientRect();
+    auto actual = clientRect();
+    if ((actual.first != client.width || actual.second != client.height) && !IsIconic(window)) {
+      // Inside a DPI change the window can still carry the frame of its previous
+      // DPI (measured: outer 366x159 at 96 DPI reporting a 348x112 client, i.e. the
+      // 120 DPI frame). Make Windows recompute the frame before judging the result.
+      SetWindowPos(window, nullptr, 0, 0, 0, 0,
+        SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+      actual = clientRect();
+    }
     if ((actual.first != client.width || actual.second != client.height) &&
         actual.first > 0 && actual.second > 0 && !IsIconic(window)) {
       ++frameCorrectionCount;
