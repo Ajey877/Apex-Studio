@@ -1,10 +1,17 @@
 // Native helper adapter; only the authorized service is exposed by Electron preload.
 // One OS process per plugin instance. A crash/timeout rejects requests; this is
 // failure containment, not a security sandbox. Plugins retain OS user privileges.
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { readdir, lstat } from 'node:fs/promises';
 import path from 'node:path';
 
+// Production always spawns the staged helper binary. Unit/integration tests use
+// the setter below to substitute a protocol-faithful child process, because the
+// real executable only exists after the Windows native build.
+let spawnNativeHelper = spawn;
+export function setNativeHelperSpawnForTests(factory) {
+  spawnNativeHelper = factory ?? spawn;
+}
 const MAX_JSON = 5 * 1024 * 1024;
 const MAX_PCM = 16384 * 2 * 4;
 const MAX_REQUEST = 8 * 1024 * 1024;
@@ -18,9 +25,22 @@ export class NativeVst3Client {
   #timeoutMs;
   #stderr = '';
   #exited;
+  #pid = null;
+  #batched = false;
+  get isDead() { return Boolean(this.#dead); }
+  /** OS pid of this helper, or null if the spawn never produced one. */
+  get pid() { return this.#pid; }
   constructor(executable, { timeoutMs = 10000 } = {}) {
     this.#timeoutMs = timeoutMs;
-    this.#child = spawn(executable, [], { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, shell: false });
+    // A `.cmd`/`.bat` helper cannot be spawned with shell:false on Windows
+    // (spawn raises EINVAL), so batch helpers go through cmd.exe. The real
+    // helper is an .exe and keeps the strict shell:false path.
+    const batch = process.platform === 'win32' && /\.(cmd|bat)$/i.test(executable);
+    this.#batched = batch;
+    this.#child = spawnNativeHelper(executable, [], {
+      stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, shell: batch,
+    });
+    this.#pid = this.#child.pid ?? null;
     this.#exited = new Promise(resolve => this.#child.once('close', resolve));
     this.#child.on('error', error => this.#fail(error));
     this.#child.on('exit', (code, signal) => this.#fail(new Error(`VST3 helper exited (${signal ?? code}). ${this.#stderr}`)));
@@ -86,6 +106,51 @@ export class NativeVst3Client {
     return this.request({ command: 'open', path: plugin.path, classId: plugin.classId, sampleRate, mode, kind,
       ...(state === undefined ? {} : { state }) });
   }
+  openEditor(effect) {
+    if (!effect || typeof effect.path !== 'string' || typeof effect.classId !== 'string' || !effect.state) {
+      throw new Error('Invalid VST3 editor identity/state');
+    }
+    return this.request({ command: 'editorOpen', path: effect.path, classId: effect.classId, state: effect.state });
+  }
+  async pollEditor() { return (await this.request({ command: 'editorPoll' })).editor; }
+  /** Acceptance harness: perform one real Win32 operation on the live editor
+   * window. Only used by the Windows acceptance script; product code never calls it. */
+  async editorTestAction(action, fields = {}) {
+    if (typeof action !== 'string' || !action) throw new Error('Invalid editor test action');
+    return (await this.request({ command: 'editorTestAction', action, ...fields })).result;
+  }
+  /** Acceptance harness: move a REAL second window into focus to force focus loss. */
+  async loseEditorFocus(classId) { return this.editorTestAction('loseFocus', { classId }); }
+  /** Acceptance harness: apply an explicit content scale factor and observe it. */
+  async setEditorScale(scale, classId) { return this.editorTestAction('setScale', { scale, classId }); }
+  /**
+   * Acceptance harness: deliver mouse input at real screen coordinates.
+   *
+   * Press, move and release travel as genuine mouse messages carrying the button
+   * state, addressed to the window the OS reports under the point. `zoomModifier`
+   * asks the helper to hold the real shift key for the gesture, which VSTGUI reads
+   * as its slider zoom modifier -- that is what lets a drag move the value by a
+   * controlled step instead of jumping the handle to the pointer.
+   */
+  async sendEditorMouse(action, { x = 20, y = 20, classId, zoomModifier = false } = {}) {
+    // `up` must be routable: a press with no release never completes a click.
+    const name = { move: 'mouseMove', down: 'mouseDown', up: 'mouseUp', wheel: 'mouseWheel' }[action];
+    if (!name) throw new Error('Invalid mouse action');
+    return this.editorTestAction(name, { x, y, classId, zoomModifier });
+  }
+  /** Acceptance harness: hold or release the real shift key around a gesture. */
+  async setEditorGestureModifier(down, classId) {
+    if (typeof down !== 'boolean') throw new Error('Invalid gesture modifier state');
+    return this.editorTestAction('gestureModifier', { down, classId });
+  }
+  /** Read-only observation of the live native editor window (Windows x64 only). */
+  async editorDiagnostics(classId) {
+    if (typeof classId !== 'string' || !/^[A-F0-9]{32}$/.test(classId)) {
+      throw new Error('Invalid VST3 class id for editor diagnostics');
+    }
+    return (await this.request({ command: 'editorDiagnostics', classId })).diagnostics;
+  }
+  async closeEditor() { return (await this.request({ command: 'editorClose' })).editor; }
   async parameters(changes) { return (await this.request({ command: 'parameters', parameters: changes })).parameters; }
   async snapshot() { return (await this.request({ command: 'snapshot' })).state; }
   process(frames, events = [], parameters = [], bpm = 120) {
@@ -102,13 +167,34 @@ export class NativeVst3Client {
     // Kill rather than waiting on untrusted plugin teardown forever. Destructors
     // run on normal close/EOF, but OS reclamation is the final bound for a hang.
     if (!this.#dead) {
-      try { await this.request({ command: 'close' }); } finally {
+      // A teardown path must not throw: a plugin that refuses or ignores `close`
+      // still has to be reclaimed, and the caller is already discarding it.
+      try { await this.request({ command: 'close' }); } catch { /* reclaim below */ } finally {
         this.#child.stdin.end();
-        const timer = setTimeout(() => this.#child.kill('SIGKILL'), 1000);
-        await this.#exited;
-        clearTimeout(timer);
+        this.#child.kill('SIGKILL');
+        // A helper started through a shell has a grandchild that can outlive the
+        // shell and keep the pipes open, so `close` may never fire. Bound the wait
+        // instead of hanging the caller (and the app) forever.
+        const exited = await Promise.race([
+          this.#exited.then(() => true),
+          new Promise(resolve => setTimeout(() => resolve(false), 5000)),
+        ]);
+        if (!exited) await this.#killTree();
       }
-    } else await this.#exited;
+    } else await Promise.race([this.#exited, new Promise(resolve => setTimeout(resolve, 5000))]);
+  }
+  /** Last resort for a surviving grandchild: kill by pid tree, never by name. */
+  async #killTree() {
+    if (this.#pid) {
+      try {
+        if (process.platform === 'win32') { execFileSync('taskkill', ['/PID', String(this.#pid), '/T', '/F'], { stdio: 'ignore' }); }
+        else process.kill(this.#pid, 'SIGKILL');
+      } catch { /* already gone */ }
+    }
+    // Do not leave the parent waiting on pipes a dead grandchild still holds.
+    this.#child.stdout?.destroy();
+    this.#child.stdin?.destroy();
+    await Promise.race([this.#exited, new Promise(resolve => setTimeout(resolve, 2000))]);
   }
   // External cancellation (project/channel/renderer replacement).
   abort() { this.#fail(new Error('VST3 instance cancelled')); }

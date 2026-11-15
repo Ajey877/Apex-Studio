@@ -31,6 +31,11 @@ const openExternalUrl = (url) => {
 };
 
 if (process.env.APEX_SMOKE_TEST === '1' && process.env.APEX_SMOKE_USER_DATA) app.setPath('userData', process.env.APEX_SMOKE_USER_DATA);
+// Packaged acceptance runs against an isolated profile for the same reason: a test
+// must never read or write the user's real Apex data.
+if (process.env.APEX_ACCEPTANCE === '1' && process.env.APEX_ACCEPTANCE_USER_DATA) {
+  app.setPath('userData', process.env.APEX_ACCEPTANCE_USER_DATA);
+}
 
 let mainWindow = null;
 
@@ -49,7 +54,12 @@ function createWindow() {
     autoHideMenuBar: true,
     titleBarStyle: 'default',
     webPreferences: {
-      additionalArguments: process.env.APEX_SMOKE_TEST === '1' ? ['--apex-smoke-test', ...(process.env.APEX_SMOKE_REOPEN === '1' ? ['--apex-smoke-reopen'] : [])] : [],
+      additionalArguments: [
+        ...(process.env.APEX_SMOKE_TEST === '1' ? ['--apex-smoke-test', ...(process.env.APEX_SMOKE_REOPEN === '1' ? ['--apex-smoke-reopen'] : [])] : []),
+        // Packaged-editor acceptance: a separate flag from the smoke entry, so the
+        // two never enable each other's hooks. Never set by a normal launch.
+        ...(process.env.APEX_ACCEPTANCE === '1' ? ['--apex-packaged-acceptance'] : []),
+      ],
       nodeIntegration: false,
       contextIsolation: true,
       sandbox: true,

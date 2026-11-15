@@ -1,0 +1,76 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  ApexAcceptanceGain editor layout. Original Apex Studio fixture code (see
+  native/vst3/acceptance-fixture.hpp for provenance); no Steinberg sample layout
+  is copied.
+
+  Deliberately bitmap-free: every control uses vector drawing, so the bundle needs
+  no PNG resources and the editor renders identically on a CI runner without any
+  asset files. The Gain slider's control-tag is "Gain", which the controller
+  exposes as ParamID 0, the same id the processor reads. That agreement is what
+  makes beginEdit/performEdit/endEdit reference a genuinely writable parameter.
+-->
+<vstgui-ui-description version="1">
+	<colors>
+		<color name="Background" rgba="#1e1e1eff"/>
+		<color name="Panel" rgba="#2b2b2bff"/>
+		<color name="Label" rgba="#e0e0e0ff"/>
+		<color name="Accent" rgba="#ff6e00ff"/>
+	</colors>
+	<!--
+	  The control-tag table is what binds the visible controls to controller
+	  parameters. Without this node, UIDescription::getTagForName() asks the
+	  controller, which (correctly) has no name mapping of its own, and returns -1;
+	  a control whose tag is -1 is not bound to anything, so it can never emit
+	  beginEdit/performEdit/endEdit at all. "Gain" here must name the SAME parameter
+	  the controller exposes as ParamID 0.
+	-->
+	<control-tags>
+		<control-tag name="Gain" tag="0"/>
+	</control-tags>
+	<fonts>
+		<font name="LabelFont" font="Arial" size="11"/>
+		<font name="TitleFont" font="Arial" size="12" bold="true"/>
+	</fonts>
+	<gradients>
+		<gradient name="SliderTrack">
+			<color-stop rgba="#3a3a3aff" start="0"/>
+			<color-stop rgba="#242424ff" start="1"/>
+		</gradient>
+	</gradients>
+	<template background-color="~ Background" class="CViewContainer" maxSize="320, 120" minSize="320, 120" mouse-enabled="true" name="view" opacity="1" origin="0, 0" size="320, 120" transparent="false">
+		<!--
+		  mouse-enabled MUST be true on EVERY container above an interactive control,
+		  including the root template element itself.
+
+		  CViewContainer::onMouseDownEvent() walks its children and skips any child whose
+		  getMouseEnabled() is false, BEFORE hit-testing it at all:
+
+		      if (pV && pV->isVisible() && pV->getMouseEnabled() && pV->hitTest (...))
+
+		  VST3Editor adds this template to the frame as a CHILD view
+		  (`getFrame()->addView(view)`), so the template's own flag is not decorative: it
+		  decides whether the frame reaches the template at all. With the template
+		  marked mouse-enabled="false" nothing inside it is reachable, however correctly
+		  the inner containers and controls are bound, and CFrame::getViewAt() skips the
+		  same children, so the press resolves to no view at all.
+
+		  The panel below carried this mistake first; fixing it was necessary but not
+		  sufficient, because the model still had to pass through this template. The
+		  editor trace showed the result: the slider existed, was bound to ParamID 0 and
+		  had a live parameter listener, and a genuine held drag produced no MouseDown on
+		  it and no value change (case C).
+		-->
+		<view background-color="~ Panel" class="CViewContainer" maxSize="300, 96" minSize="300, 96" mouse-enabled="true" name="panel" opacity="1" origin="10, 12" size="300, 96" transparent="false">
+			<view class="CTextLabel" font="TitleFont" font-color="~ Accent" mouse-enabled="false" name="title" origin="10, 8" size="280, 16" text-alignment="left" title="ApexAcceptanceGain" transparent="true"/>
+			<view class="CTextLabel" font="LabelFont" font-color="~ Label" mouse-enabled="false" name="gainLabel" origin="10, 40" size="48, 18" text-alignment="left" title="Gain" transparent="true"/>
+			<view class="CSlider" control-tag="Gain" default-value="0.5" draw-back="true" draw-back-color="~ SliderTrack" draw-frame="false" draw-value="false" gradient="~ SliderTrack" handle-color="~ Accent" max-value="1" min-value="0" mode="free click" mouse-enabled="true" name="gainSlider" orientation="horizontal" origin="64, 40" size="168, 18" transparent="false" value-precision="2" wheel-inc-value="0.05" zoom-factor="8"/>
+			<view class="CTextEdit" control-tag="Gain" default-value="0.5" font="LabelFont" font-color="~ Label" frame-color="~ Accent" frame-width="1" immediate-text-change="false" max-value="1" min-value="0" mouse-enabled="true" name="gainValue" origin="240, 40" size="50, 18" text-alignment="center" transparent="false" value-precision="2"/>
+			<view class="CTextLabel" font="LabelFont" font-color="~ Label" mouse-enabled="false" name="hint" origin="10, 70" size="280, 16" text-alignment="left" title="Acceptance fixture: stereo in/out, no event buses" transparent="true"/>
+		</view>
+	</template>
+	<variables/>
+	<custom>
+		<attributes SelectedTemplate="view" name="UITemplateController"/>
+	</custom>
+</vstgui-ui-description>

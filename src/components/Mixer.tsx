@@ -109,6 +109,8 @@ interface MixerProps {
   onAddVst3FxSlot?: (trackId: number, effect: Vst3Effect) => void;
   onMoveFxSlot?: (trackId: number, slotId: string, direction: -1 | 1) => void;
   onEditVst3Effect?: (trackId: number, slotId: string, changes: Vst3ParameterChange[]) => Promise<void>;
+  /** Opens the plug-in's own VST3 editor view in a native OS window. */
+  onOpenVst3Editor?: (trackId: number, slotId: string) => Promise<void>;
   isPlaying: boolean;
   onOpenParametricEq?: (track: MixerTrack) => void;
   onInteractionStart?: (label?: string) => void;
@@ -143,6 +145,7 @@ export const Mixer: React.FC<MixerProps> = ({
   onAddVst3FxSlot,
   onMoveFxSlot,
   onEditVst3Effect,
+  onOpenVst3Editor,
   isPlaying,
   onOpenParametricEq,
   onInteractionStart,
@@ -775,6 +778,9 @@ export const Mixer: React.FC<MixerProps> = ({
                     disabled={isPlaying}
                     onRelink={() => setVst3PickerTarget({ trackId: selectedTrack.id, slotId: slot.id })}
                     onApply={changes => onEditVst3Effect?.(selectedTrack.id, slot.id, changes) ?? Promise.reject(new Error('Native parameter editing is unavailable.'))}
+                    onOpenEditor={onOpenVst3Editor
+                      ? () => onOpenVst3Editor(selectedTrack.id, slot.id)
+                      : undefined}
                   /> : <FxParameterControls
                     slot={slot}
                     trackId={selectedTrack.id}

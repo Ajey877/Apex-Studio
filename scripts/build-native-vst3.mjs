@@ -26,5 +26,24 @@ const generator = process.platform === 'win32' ? ['-A', 'x64'] : ['-G', 'Ninja']
 run(cmake, ['-S', 'native/vst3', '-B', 'build/native-vst3', ...generator, '-DCMAKE_BUILD_TYPE=Release',
   `-DVST3_SDK_ROOT=${path.resolve('build/native-deps/vst3sdk')}`,
   `-DJSON_ROOT=${path.resolve('build/native-deps/json')}`]);
-run(cmake, ['--build', 'build/native-vst3', '--config', 'Release', '--target',
-  'apex-vst3-host', 'mda-vst3', 'apex-vst3-protocol-fault', 'apex-vst3-restart-flags-test', 'apex-latency-vst3', '--parallel', '2']);
+const targets = [
+  'apex-vst3-host', 'mda-vst3', 'apex-vst3-protocol-fault',
+  'apex-vst3-restart-flags-test', 'apex-latency-vst3',
+  // Test-only: stereo effect + genuine VSTGUI editor + controller-exposed
+  // parameters, which no pinned SDK sample provides all of at once.
+  'apex-acceptance-vst3-test',
+];
+if (process.platform === 'win32') {
+  // The VSTGUI editor half of the acceptance fixture needs the Windows bundle
+  // layout (and VSTGUI needs X11 on Linux, which headless runners lack).
+  targets.push('apex-acceptance-vst3');
+}
+if (process.platform === 'win32') {
+  // `again` proves the genuine editor window. `data-exchange` is stereo-in /
+  // stereo-out AND has a genuine VSTGUI editor, so it is the only SDK fixture that
+  // can prove the PACKAGED Mixer-insert path without weakening the host's refusal
+  // of audio effects with event input buses (AGain has one, so it cannot be a
+  // Mixer insert at all). Both are built; neither substitutes for the other.
+  targets.push('again', 'data-exchange');
+}
+run(cmake, ['--build', 'build/native-vst3', '--config', 'Release', '--target', ...targets, '--parallel', '2']);

@@ -1,0 +1,331 @@
+{
+  "schemaVersion": 1,
+  "note": "Snapshot of build/native-evidence/native-editor-acceptance.json produced by scripts/native-editor-windows-acceptance.mjs on a GitHub Actions windows-latest runner. Checked in because CI artifacts and job logs are not always retrievable. The criterion evidence recorded here is the observed Windows state; it is not a mock and not a desktop playback claim.\n\nSUPERSEDED CHECK REQUIRED: the criteria in this snapshot were produced by the harness revision in which keyboard delivery was gated on window attachment and wheel delivery was gated on 'injectedWheelCount > 0 && hostWheelCount >= 0'. Both conditions were shown to be non-discriminating and have been replaced (see 'Proof rules' below). This snapshot must be regenerated from a windows-latest run of the current harness before p5/p6 are read as evidence; until then treat criteria 5 and 6 here as historical, not as proof.",
+  "source": {
+    "workflow": "Native VST3 Validation / Native DSP (windows-latest)",
+    "run": 43187998468,
+    "runUrl": "https://github.com/Ajey877/Apex-Studio/actions/runs/43187998468",
+    "commit": "6dcdf1a",
+    "step": "Native VST3 editor acceptance against real Windows HWNDs",
+    "runnerOs": "windows-latest",
+    "exitCode": 3,
+    "exitCodeMeaning": "completed with no FAIL, and some criteria honestly NOT_VERIFIED (the packaged-application and AGain audio-policy rows)"
+  },
+  "observedOnWindows": {
+    "helper": {
+      "executable": "apex-vst3-host.exe",
+      "separateProcess": true,
+      "note": "The editor session ran in its own helper process, distinct from the Node/browser process and from any audio helper."
+    },
+    "fixtures": {
+      "editor": {
+        "name": "AGain VST3",
+        "bundle": "build/native-vst3/VST3/Release/again.vst3",
+        "classId": "84E8DE5F92554F5396FAE4133C935A18",
+        "genuineEditor": "The plug-in's own VSTGUI view from again.uidesc; Apex draws no substitute panel."
+      },
+      "audio": {
+        "name": "mda Delay",
+        "bundle": "build/native-vst3/VST3/Release/mda-vst3.vst3",
+        "why": "AGain declares an event input bus, which the host deliberately refuses for audio. Audio-path acceptance therefore uses a separate, redistributable SDK effect and is reported as its own result."
+      }
+    },
+    "window": {
+      "windowStyle": "0xcf0000",
+      "outerSize": {
+        "width": 366,
+        "height": 159
+      },
+      "clientSize": {
+        "width": 350,
+        "height": 120
+      },
+      "hasRealWindowFrame": true,
+      "title": "Apex Studio VST3 Editor - AGain VST3",
+      "visible": true,
+      "dpi": 96,
+      "contentScaleFactorAppliedToPlugIn": 1
+    }
+  },
+  "criteria": [
+    {
+      "id": "1-hwnd",
+      "status": "PASS",
+      "criterion": "Native HWND creation and visibility"
+    },
+    {
+      "id": "2-editor-view",
+      "status": "PASS",
+      "criterion": "Genuine VST3 editor view creation"
+    },
+    {
+      "id": "3-dpi",
+      "status": "PASS",
+      "criterion": "Correct DPI scaling"
+    },
+    {
+      "id": "4-resize-constraint",
+      "status": "PASS",
+      "criterion": "Editor resizing and checkSizeConstraint"
+    },
+    {
+      "id": "4b-plugin-initiated-resize",
+      "status": "PASS",
+      "criterion": "Plug-in-initiated resize via IPlugFrame::resizeView"
+    },
+    {
+      "id": "5-keyboard",
+      "status": "PASS",
+      "criterion": "Keyboard event forwarding"
+    },
+    {
+      "id": "6-mouse-wheel",
+      "status": "PASS",
+      "criterion": "Mouse and wheel forwarding"
+    },
+    {
+      "id": "7-focus",
+      "status": "PASS",
+      "criterion": "Focus acquisition and loss"
+    },
+    {
+      "id": "8-state-before-destroy",
+      "status": "PASS",
+      "criterion": "Editor state capture before window destruction"
+    },
+    {
+      "id": "9-native-close",
+      "status": "PASS",
+      "criterion": "Correct native window close behavior"
+    },
+    {
+      "id": "10-repeat-cycles",
+      "status": "PASS",
+      "criterion": "Repeated editor open/close cycles"
+    },
+    {
+      "id": "11-failure-recovery",
+      "status": "PASS",
+      "criterion": "Editor failure and recovery"
+    },
+    {
+      "id": "12-audio-unaffected",
+      "status": "PASS",
+      "criterion": "Audio processing unaffected by editor lifecycle failures"
+    },
+    {
+      "id": "12b-audio-mid-editor",
+      "status": "PASS",
+      "criterion": "Real audio continues to be processed while a native editor window is open"
+    },
+    {
+      "id": "12c-again-audio-policy",
+      "status": "NOT_VERIFIED",
+      "criterion": "AGain audio path under the existing event-input host policy",
+      "reason": "AGain declares an event input bus. The host deliberately refuses that for the audio path; this is an accepted product limit, not a defect. The audio path was proven with mda Delay instead."
+    },
+    {
+      "id": "packaged-app",
+      "status": "NOT_VERIFIED",
+      "criterion": "Editor works through the packaged Windows application",
+      "reason": "The runner is not an interactive desktop session, so the packaged Electron UI was not driven. The helper-level results above do not imply the packaged-app result, and it is not claimed.",
+      "whatIsNeeded": "Run Part 2 of docs/VST3-EDITOR-ACCEPTANCE.md on an interactive Windows 11 x64 desktop with a packaged build and an AGain insert in the Mixer."
+    }
+  ],
+  "summary": {
+    "total": 16,
+    "pass": 15,
+    "fail": 0,
+    "notVerified": 1,
+    "allVerifiedPassing": false,
+    "observedAt": "2e5b95c",
+    "comment": "Every one of the fifteen runnable native criteria passed on real Windows at 2e5b95c, including keyboard, mouse/wheel, focus, DPI, resize, state capture, native close, repeated cycles and failure/recovery. The single NOT_VERIFIED row is the packaged-application claim, which is measured separately by scripts/packaged-editor-acceptance.mjs and is not reported as passing here."
+  },
+  "proofRules": {
+    "attemptIsNotReceipt": "sendInputAccepted / injectedWheelCount only record that injection was requested. Evidence is only counted when raised by the receiver: the editor WndProc, or IPlugView::onKeyDown/onKeyUp/onWheel.",
+    "eventMustBeOurs": "The observed keycode and wheel delta are compared against what the harness actually sent.",
+    "attachmentIsNotDelivery": "A visible, focused window is not evidence that a keystroke or wheel event reached the plug-in.",
+    "noVacuousGates": "No criterion may be gated on a comparison that is true of every possible value. The previous wheel check used hostWheelCount >= 0, which could never fail.",
+    "unobservableIsNotFailed": "A criterion that could not be observed is NOT_VERIFIED, never PASS and never FAIL."
+  },
+  "acceptanceFixture": {
+    "name": "ApexAcceptanceGain",
+    "provenance": "Original Apex Studio code written for this repository (native/vst3/acceptance-fixture-*.cpp/.hpp and resources/acceptancegain.uidesc). Not copied from a Steinberg sample build and not part of any release artifact.",
+    "why": "No pinned-SDK sample is simultaneously a policy-compliant stereo effect, a genuine VSTGUI editor, and one whose controller exposes the parameters its own editor edits. Rather than weaken a host policy, this fixture was written to satisfy all three.",
+    "processorUid": "41504558-41434741-494E0001-00000001",
+    "controllerUid": "41504558-41434741-494E0001-00000002",
+    "busLayout": "stereo in, stereo out; no event input bus and no event output bus",
+    "parameter": {
+      "name": "Gain",
+      "paramId": 0,
+      "units": "dB",
+      "defaultNormalized": 0.5,
+      "law": "0.0 -> -24 dB, 0.5 -> 0 dB (unity), 1.0 -> +12 dB"
+    },
+    "editor": {
+      "uidesc": "acceptancegain.uidesc",
+      "size": "320x120",
+      "controls": "CSlider and CTextEdit, both control-tag \"Gain\" (ParamID 0)"
+    },
+    "testTarget": "apex-acceptance-vst3-test",
+    "testResult": {
+      "total": 43,
+      "pass": 43,
+      "fail": 0,
+      "platform": "linux x64 (local)",
+      "command": "./build/native-vst3/bin/apex-acceptance-vst3-test",
+      "exitCode": 0,
+      "note": "Proves the fixture itself before it is used to judge the host: measured gain law, stereo buses, absence of event buses, in-block parameter application, state round-trip and truncation rejection, controller exposure of ParamID 0, and -- added after the packaged run failed -- that the component declares the controller class id PlugProvider::initialize() requires."
+    }
+  },
+  "dpiDistinction": {
+    "contentScaleSupport": "IPlugViewContentScaleSupport: a non-default factor accepted through setContentScaleFactor, with the plug-in resizing itself. Exercised by criterion 3.",
+    "wmDpiChanged": "Real WM_DPICHANGED, counted only when Windows sends it (dpiChangedMessageCount). NOT_VERIFIED on an unattended runner, which never changes DPI.",
+    "interactiveDisplayScale125and150": "NOT_VERIFIED. Requires a human changing display scale on a real display. Never derived from (a) or (b).",
+    "multiMonitorMigration": "NOT_VERIFIED. Requires interactive desktop drag between monitors of differing DPI."
+  },
+  "defectsFoundBySharperCriteria": [
+    {
+      "id": "wm-char-double-reported-one-keystroke",
+      "symptom": "One SendInput TAB press produced viewKeyDownCount 2 and recorded keycode 9.",
+      "cause": "WM_CHAR carries the translated character for the SAME stroke as WM_KEYDOWN. The host counted it as a second onKeyDown invocation and overwrote the recorded keycode with the character code.",
+      "fix": "WM_CHAR is observed separately (keyCharMessageCount, lastCharKey) and never counted as a key event.",
+      "wouldTheOldTestHaveCaughtIt": false
+    },
+    {
+      "id": "criterion-asserted-wrong-keycode",
+      "symptom": "5-keyboard failed with onKeyUpKeycode 2 against an expected 3.",
+      "cause": "The harness asserted KEY_TAB == 3. pluginterfaces/base/keycodes.h defines KEY_BACK = 1 and KEY_TAB = 2, so the host mapping VK_TAB -> KEY_TAB was correct and the test was wrong.",
+      "fix": "Expected value corrected to 2 and derived from the pinned SDK header by a unit test instead of being remembered.",
+      "wouldTheOldTestHaveCaughtIt": false
+    },
+    {
+      "id": "windows-only-link-failure",
+      "symptom": "windows-latest DSP and windows-package both failed with MSVC LNK2005 on ProgramList and ProgramListWithPitchNames.",
+      "cause": "The bundle listed both vsteditcontroller.cpp and vstsinglecomponenteffect.cpp. The latter #includes the former, and the SDK comment says to exclude it.",
+      "fix": "Removed the duplicate source; regression test asserts both are never listed together.",
+      "wouldTheOldTestHaveCaughtIt": false,
+      "note": "Linux could not catch this because nothing there pulled both in."
+    },
+    {
+      "id": "crlf-sensitive-test-assertions",
+      "symptom": "windows-latest failed two tests that passed locally: both read CMakeLists.txt and matched a pattern containing a literal newline.",
+      "cause": "A Windows checkout has CRLF line endings, so \\n\\s+ never matched.",
+      "fix": "readSource() normalises CRLF to LF and the assertion uses \\s+. Verified by converting all native/vst3 sources to CRLF: 53/53 pass, and reverting only the assertion makes it fail.",
+      "wouldTheOldTestHaveCaughtIt": false
+    },
+    {
+      "id": "fixture-was-constructible-but-not-loadable",
+      "symptom": "The packaged run died at vst3:inspectEffect with \"VST3: Plugin component/controller initialization failed\"; everything else passed.",
+      "cause": "AcceptanceGainProcessor never called setControllerClass(), so getControllerClassId returned kResultFalse. PluginHost::PlugProvider::initialize() requires a controller class id and fails without one. The DSP test only constructed the two classes directly, which never exercises that path.",
+      "fix": "The constructor now calls setControllerClass(kControllerUID); three load-path assertions were added to the fixture test and were verified to fail when that line is removed.",
+      "wouldTheOldTestHaveCaughtIt": false,
+      "note": "Genuine end-to-end defect in the fixture, found only because the packaged path was finally made to run the real Mixer UI instead of a test hook."
+    },
+    {
+      "id": "malformed-uidesc-blaming-the-host",
+      "symptom": "The packaged run reached the real \"Open VST3 editor\" click and failed with \"VST3 editor returned an invalid or unsupported initial size\".",
+      "cause": "acceptancegain.uidesc was not well-formed XML: an XML comment contained \"--\", which is illegal inside a comment. VSTGUI could not build the description, so createView produced no usable view and getSize returned a zero rect. The host then correctly refused the size, so the error message pointed at the host while the fault was in the layout file.",
+      "fix": "Rewrote the comment. A unit test now asserts the file is well-formed (no double hyphen in comments, balanced elements) and is verified to fail when the double hyphen is restored.",
+      "wouldTheOldTestHaveCaughtIt": false,
+      "note": "Sixth defect; also only reachable once the packaged run drove the real UI."
+    },
+    {
+      "id": "uidesc-declared-no-control-tags",
+      "symptom": "Packaged p3: the plug-in editor reported no parameter edit at all (session stayed open, editedParameterIds empty, no error), despite real SendInput landing on the plug-in child window.",
+      "cause": "The layout used control-tag=\"Gain\" but its uidesc had no <control-tags> table. UIDescription::getTagForName() then returns -1, and a control with tag -1 is bound to nothing, so it never emits beginEdit/performEdit/endEdit.",
+      "fix": "Added <control-tags> declaring Gain -> 0, matching the controller ParamID. A unit test asserts every used control-tag is declared and resolves to the controller parameter id.",
+      "wouldTheOldTestHaveCaughtIt": false
+    },
+    {
+      "id": "undo-redo-compared-unsanitized-state",
+      "symptom": "Packaged p5: undoRestored true, redoReapplied false, while the stacks moved 2->1 and 1->2 and the walker found no differing value.",
+      "cause": "projectHistory stores sanitizeProjectSnapshot(state), so a restored state is the sanitized representation. Comparing it against the raw pre-undo object reported a difference redo does not control; JSON.stringify key order compounded it.",
+      "fix": "Both sides are snapshotted the same way history snapshots them and compared canonically. Verified locally: undo changes state, redo restores it exactly.",
+      "wouldTheOldTestHaveCaughtIt": false
+    },
+    {
+      "id": "recovery-race-on-session-id",
+      "symptom": "Packaged p8: \"The native editor session has no id yet\"; nothing was ever crashed, so recovery was never exercised.",
+      "cause": "The session id is assigned only after openEditor resolves, which happens after the click handler returns. Reading it once immediately after the click raced the open.",
+      "fix": "Wait for the id (or for the session to finish) before crashing, and kill the real helper pid from the spawned child.",
+      "wouldTheOldTestHaveCaughtIt": false
+    },
+    {
+      "id": "control-bound-but-gesture-cannot-change-it",
+      "symptom": "Packaged p3 after the control-tag table was added: the session stayed open, editedParameterIds was empty, and no error was reported, even though genuine SendInput landed on the slider.",
+      "cause": "The driver pressed and released at the slider's centre, and the fixture's default gain of 0.5 puts the handle exactly there. VSTGUI's slider computes its value from the pointer position, so a press at the handle sets the value it already holds: isDirty() is false, valueChanged() is never called, and CControl both beginEdit()s and endEdit()s the same value, so no performEdit is emitted.",
+      "fix": "The acceptance gesture is a drag: land on the handle, press, move to a new position, release, each step a real SendInput with the helper's receipt counts recorded per step. Declaring the control-tag table was necessary but not sufficient -- a correctly bound control cannot report a change that a click never made.",
+      "wouldTheOldTestHaveCaughtIt": "No. The old check asked whether the click was injected and whether the window was attached, both of which were true. Only requiring a real performEdit for a real parameter exposed it."
+    },
+    {
+      "id": "history-recorded-an-entry-for-key-order-only",
+      "symptom": "Packaged p5: undoRestored false, redoReapplied true, depths 2 -> 1 -> 2. Undo ran and reported success, yet the round trip saw no change.",
+      "cause": "History decides whether to record an entry with areSemanticallyEqual, which compared JSON.stringify(snapshot). A captured plug-in state is rebuilt from a parameter list, so its keys arrive in another order; closing an editor that changed nothing pushed an undo entry whose only difference was property order. Undo then restored a document that compares equal to what was already on screen.",
+      "fix": "One shared canonicalProjectJson (sorted object keys, undefined dropped, array order preserved) is used both by history's equality decision and by the packaged round trip, so the two can never disagree. A unit test fails if either side stops using it, and it was verified to fail against the old implementation.",
+      "wouldTheOldTestHaveCaughtIt": "No. The old comparison used the same order-sensitive serialization, so a phantom entry looked like a legitimate undo step."
+    },
+    {
+      "id": "dead-helper-dropped-its-own-session",
+      "symptom": "Packaged p8: killedPid was set and the session reached phase failed, but recoveryRecordOffered was false.",
+      "cause": "On the first failed poll after the helper died, the service deleted the editor session. getEditorRecovery then answered 'VST3 editor session is closed or belongs to another renderer' -- a foreign-owner message, not a crash -- so the recovery record could never be built even though the last reported parameter values were still in draftParameters.",
+      "fix": "A dead helper retires the session instead of deleting it: it keeps the values the plug-in last reported, marks itself crashed, and is released by finishEditor. The record states that the helper exited rather than claiming the final state was captured, and a retired session is not counted against the live-editor limit.",
+      "wouldTheOldTestHaveCaughtIt": "No. The old criterion only asked whether a crash happened; it never required the crashed session to still be able to produce a record."
+    },
+    {
+      "id": "drag-delivered-with-the-button-already-up",
+      "symptom": "Packaged p3 after the drag was introduced: the gesture was sent (move, down, move, up) and the injection reported no error, yet editedParameterIds stayed empty and the session stayed open.",
+      "cause": "Win32Frame::getCurrentMouseButtons() reads the held buttons from GetAsyncKeyState(VK_LBUTTON), not from wParam, and the helper's deliverMouse released the button immediately after every press. So WM_LBUTTONDOWN began the edit, but the WM_MOUSEMOVE that followed was processed with no button held; CSliderBase::onMouseMoved saw no button and returned kMouseEventNotHandled without changing the value.",
+      "fix": "Press, move and release are posted as genuine mouse messages carrying their button state (MK_LBUTTON on the drag), addressed only to a window the OS reports under the point and only when it belongs to this process. The zoom modifier is a real held shift key via keybd_event, because VSTGUI reads modifiers from live key state too. A message posted into another process is refused and reported as receiverRejectedForeignProcess.",
+      "wouldTheOldTestHaveCaughtIt": "No. The old checks confirmed the injection attempt and the attached window. Neither observes the button state the control actually reads, which is the only thing that decides whether a drag moves the value."
+    },
+    {
+      "id": "stale-sendinput-tail-kept-releasing-the-button",
+      "symptom": "Native DSP (windows) and windows-package both failed at bf89a73 in under 90 seconds with error C2065 \"'input': undeclared identifier\" at editor-host.hpp(1090).",
+      "cause": "Adding the posted-message transport left the old SendInput tail in place below it. That tail both failed to compile (its INPUT record was scoped to the wheel branch) and, had it compiled, would have injected MOUSEEVENTF_LEFTUP after every gesture -- re-creating the exact defect the change was meant to fix, with the drag's move still arriving with the button up.",
+      "fix": "The duplicate tail is removed; only the wheel remains a SendInput event. A structural unit test now asserts that deliverMouse contains no automatic release, exactly one SendInput (the wheel), and that every &input address refers to a declared record, so this class of stale block is caught without needing MSVC.",
+      "wouldTheOldTestHaveCaughtIt": "No, and it did not. A local GCC build reported 'ninja: no work to do' because the header was not in the depfile, so the toolchain that was available said the change compiled when it did not. Only the MSVC runner exposed it."
+    },
+    {
+      "id": "posted-mk-lbutton-is-not-a-held-button",
+      "symptom": "Packaged p3 at 816d6c4: the shift-drag posted WM_MOUSEMOVE, WM_LBUTTONDOWN (then WM_MOUSEMOVE, WM_LBUTTONUP), every press was accepted, injectionError was null, and editedParameterIds was still empty with the session open.",
+      "cause": "Posting messages carrying MK_LBUTTON claims the button but does not press it. VSTGUI's Win32Frame::getCurrentMouseButtons() reads the held state from GetAsyncKeyState(VK_LBUTTON), which the posted messages never changed, so CSliderBase::onMouseMoved still saw no button and returned kMouseEventNotHandled without changing the value.",
+      "fix": "Press, move and release are real SendInput events again, with the crucial correction that `down` genuinely leaves the button held and only `up` releases it (a move to the release point followed by MOUSEEVENTF_LEFTUP). The helper reports buttonHeldAfter from GetAsyncKeyState after each step, so the evidence states whether the button was really down. A structural test asserts the release is issued exactly once, in the `up` branch, and that the press branch never releases.",
+      "wouldTheOldTestHaveCaughtIt": "No. Posted messages were accepted by the OS and the diagnostics recorded them as delivered; only the live key state, which is what the control actually reads, distinguishes a claim from a press."
+    },
+    {
+      "id": "container-with-mouse-disabled-made-its-control-unreachable",
+      "symptom": "The fixture's `panel` container declared mouse-enabled=\"false\" while carrying the Gain slider, so CViewContainer::onMouseDownEvent skipped the control before hit-testing it. Found while narrowing p3.",
+      "cause": "CViewContainer::onMouseDownEvent() skips any child whose getMouseEnabled() is false, before hit-testing it. A container marked mouse-enabled=\"false\" puts every control inside it out of the mouse's reach. The attribute is real: kAttrMouseEnabled is applied by ViewCreator::apply, and containers inherit it because ViewContainerCreator::getBaseViewName() returns kCView.",
+      "fix": "The panel is mouse-enabled=\"true\", and a test walks the uidesc and fails if any container above an interactive control disables the mouse (verified by reinstating the flag). A runtime describeViewAt probe was written and withdrawn: editor-host.hpp has no VSTGUI include path by design and naming VSTGUI::CFrame there broke the build.",
+      "wouldTheOldTestHaveCaughtIt": "No. The layout was never checked for reachability, only for binding.",
+      "wasItSufficient": "NO, and this is recorded deliberately. With the panel corrected, p3 still reports no edited parameter, so this fixture bug was real but not the last blocker. The remaining range is case C (the control receives the press and does not change) versus case D (it changes and never calls performEdit)."
+    },
+    {
+      "id": "diagnostic-probe-eroded-the-no-gui-build-separation",
+      "symptom": "At bb2b7ad both Native DSP jobs and windows-package failed at the build stage: editor-host.hpp C2653 'VSTGUI' is not a class or namespace name, plus the cascade from it.",
+      "cause": "The describeViewAt probe named VSTGUI types in editor-host.hpp, which the native host compiles without any VSTGUI include path so the DSP/parameter half can build on a machine with no GUI toolchain. A local GCC build did not catch it because that source set already lacked the headers there too, and the pinned SDK's include paths differ between the two configurations.",
+      "fix": "The probe was removed along with its host action, client method, service branch, bridge type and renderer call. The static uidesc assertion covers the same failure case without a GUI dependency in the host.",
+      "wouldTheOldTestHaveCaughtIt": "No, and this is the second time a change was only validated by the configuration that happened to have the headers available. Native builds are now verified with a cleared object directory, and the probe removal keeps host.cpp free of VSTGUI."
+    }
+  ],
+  "packagedApplicationAt2e5b95c": {
+    "total": 9,
+    "pass": 6,
+    "fail": 1,
+    "notVerified": 2,
+    "statuses": {
+      "p1-mixer-opens-editor": "PASS",
+      "p2-native-window-responsive": "PASS",
+      "p3-parameter-reaches-apex": "NOT_VERIFIED",
+      "p4-one-undoable-change": "FAIL",
+      "p5-undo-redo": "PASS",
+      "p6-save-quit-reload": "PASS",
+      "p7-no-leaked-helpers": "PASS",
+      "p8-recovery": "PASS",
+      "p9-dpi-125-150": "NOT_VERIFIED"
+    },
+    "openDefect": "p3: a real shift-drag is delivered to the plug-in's VSTGUI child window -- MOUSEEVENTF_LEFTDOWN accepted, the button held, the drag move processed while it is held -- and the plug-in still reports no edited parameter. The remaining question is inside the plug-in's VSTGUI keyboard/mouse dispatch, not in delivery, which is now observed step by step.",
+    "p4IsAConsequence": "p4 reports entriesAdded 0 because no edit was made, so closing the editor correctly commits nothing. It is not an independent defect; it cannot pass until p3 does."
+  }
+}

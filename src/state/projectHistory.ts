@@ -39,9 +39,38 @@ export const sanitizeProjectSnapshot = (state: ProjectState): ProjectState => {
   return JSON.parse(serializeProjectState(normalized)).state as ProjectState;
 };
 
+/**
+ * Key-order-independent text for a JSON document.
+ *
+ * `JSON.stringify` emits properties in insertion order, so two documents that
+ * hold the same values compare unequal if their keys were built in another
+ * order. That matters here because a captured native plug-in state is
+ * reconstructed from a parameter list, and the reconstruction legitimately
+ * arrives with a different property order than the state it was saved from.
+ * Without this, closing an editor that changed nothing recorded a history entry
+ * whose only difference was key order: an undo step that restores exactly what
+ * is already on screen, which makes the NEXT undo appear to do nothing.
+ *
+ * Arrays keep their order (it is meaningful); only object keys are sorted, and
+ * `undefined` members are dropped the way serialization would drop them.
+ */
+export const canonicalProjectJson = (value: unknown): string => JSON.stringify(canonicalizeJson(value));
+
+const canonicalizeJson = (value: unknown): unknown => {
+  if (Array.isArray(value)) return value.map(canonicalizeJson);
+  if (!value || typeof value !== 'object') return value;
+  const record = value as Record<string, unknown>;
+  const canonical: Record<string, unknown> = {};
+  for (const key of Object.keys(record).sort()) {
+    if (record[key] === undefined) continue;
+    canonical[key] = canonicalizeJson(record[key]);
+  }
+  return canonical;
+};
+
 const getSemanticComparable = (state: ProjectState): string => {
   const snapshot = sanitizeProjectSnapshot(state);
-  return JSON.stringify({
+  return canonicalProjectJson({
     ...snapshot,
     meta: {
       ...snapshot.meta,

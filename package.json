@@ -42,7 +42,9 @@
     "test:native-vst3": "node --import tsx --test tests/nativeVst3.test.mjs",
     "test:vst3-browser": "playwright test --config=playwright.native.config.ts",
     "test:vst3-daw": "node --import tsx --test tests/vst3DawIntegration.test.mjs tests/vst3Ui.test.mjs tests/vst3SampleRateReconfigure.test.mjs",
-    "test:vst3-effects": "node --import tsx --test tests/vst3Effects.test.mjs tests/vst3PluginLatencyCompensation.test.mjs tests/vst3SampleRateReconfigure.test.mjs"
+    "test:vst3-effects": "node --import tsx --test tests/vst3Effects.test.mjs tests/vst3PluginLatencyCompensation.test.mjs tests/vst3SampleRateReconfigure.test.mjs",
+    "test:vst3-editor": "node --import tsx --test tests/vst3Editor.test.mjs tests/vst3EditorService.test.mjs",
+    "test:vst3-editor-process": "node scripts/native-editor-process-separation.mjs"
   },
   "build": {
     "appId": "com.apexstudio.daw",

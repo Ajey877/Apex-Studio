@@ -78,11 +78,13 @@ export function Vst3EffectPicker({ onChoose, onCancel }: {
   </section>;
 }
 
-export function Vst3EffectControls({ effect, disabled = false, onApply, onRelink }: {
+export function Vst3EffectControls({ effect, disabled = false, onApply, onRelink, onOpenEditor }: {
   effect?: Vst3Effect;
   disabled?: boolean;
   onApply: (changes: Vst3ParameterChange[]) => Promise<void>;
   onRelink: () => void;
+  /** Opens the plug-in's own VST3 editor view (desktop build only). */
+  onOpenEditor?: () => Promise<void>;
 }) {
   const [parameters, setParameters] = useState<Vst3Parameter[]>([]);
   const [draft, setDraft] = useState<Record<number, number>>({});
@@ -92,6 +94,8 @@ export function Vst3EffectControls({ effect, disabled = false, onApply, onRelink
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState('Loading native parameter metadata…');
   const [error, setError] = useState('');
+  const [editorBusy, setEditorBusy] = useState(false);
+  const [editorStatus, setEditorStatus] = useState('');
   const parameterSignature = effect?.state.parameters.map(parameter => `${parameter.id}:${parameter.value}`).join(',') ?? '';
   useEffect(() => {
     let active = true;
@@ -131,8 +135,19 @@ export function Vst3EffectControls({ effect, disabled = false, onApply, onRelink
   return <div className="space-y-1.5 border-t border-[var(--apex-border)] pt-1.5">
     <div className="flex items-center justify-between gap-1">
       <span className="text-[9px] font-semibold">{effect?.name ?? 'Unresolved VST3 effect'}</span>
-      <button className={field} disabled={disabled || busy} onClick={onRelink}>Relink</button>
+      <span className="flex gap-1">
+        {onOpenEditor && <button className={field} disabled={disabled || busy || editorBusy || !effect}
+          title="Open the plug-in's own VST3 editor window; closing it saves its final state to this insert."
+          onClick={() => void (async () => {
+            setEditorBusy(true); setEditorStatus('Opening the plug-in’s own editor window…'); setError('');
+            try { await onOpenEditor(); setEditorStatus('The plug-in editor window is open.'); }
+            catch (reason) { setEditorStatus(''); setError(String(reason instanceof Error ? reason.message : reason)); }
+            finally { setEditorBusy(false); }
+          })()}>{editorBusy ? 'Opening editor…' : 'Open VST3 editor'}</button>}
+        <button className={field} disabled={disabled || busy} onClick={onRelink}>Relink</button>
+      </span>
     </div>
+    {editorStatus && <p role="status" className="text-[9px] text-[var(--apex-text-3)]">{editorStatus}</p>}
     {effect && <p className="truncate text-[8px] text-[var(--apex-text-3)]" title={effect.path}>{effect.vendor} · {effect.path}</p>}
     <p role="status" className="text-[9px] text-[var(--apex-text-3)]">{loading ? 'Loading…' : status}</p>
     {error && <p role="alert" className="text-[9px] text-[var(--apex-danger)]">{error}</p>}

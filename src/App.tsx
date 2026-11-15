@@ -31,6 +31,8 @@ import {
 } from './types/daw';
 import { audioEngine, type MidiEventPayload, type PlaybackStateUpdate } from './audio/audioEngine';
 import { getVst3Bridge, type Vst3Effect, type Vst3ParameterChange } from './audio/nativeVst3Types';
+import { Vst3EditorWindowPanel } from './components/Vst3EditorWindowPanel';
+import { NativeVst3EditorSession, supportsNativeVst3Editor } from './audio/nativeVst3EditorSession';
 import { MidiCcMappingRuntime, MidiNoteInputRuntime, isRackChannelAudible } from './audio/midiMappingRuntime';
 import { MidiPerformanceRecorder, appendRecordedNotesToChannelInProjectState, type MidiRecordingClock } from './audio/midiRecording';
 import { finishMidiTake, type FinishMidiTakeOptions } from './audio/midiTakeBoundary';
@@ -84,6 +86,7 @@ import {
   resolvePlaylistClipPublication
 } from './state/playlistClipIntegrity';
 import { synchronizeBeforeRuntimePublication } from './state/runtimeStatePublication';
+import { canonicalProjectJson, sanitizeProjectSnapshot } from './state/projectHistory';
 import { resynchronizeLiveEngineFromProjectState } from './state/liveEngineResynchronization';
 import { addEmptyPatternToProjectState, clonePatternInProjectState, selectPatternInHistory, selectPatternInProjectState } from './state/patternContent';
 import { audioToMidiNewPatternLengthSteps, commitAudioToMidiNotes } from './state/audioToMidiCommit';
@@ -446,6 +449,29 @@ export function App() {
   const [isSidechainOpen, setIsSidechainOpen] = useState(false);
   const [isAudioToMidiOpen, setIsAudioToMidiOpen] = useState(false);
   const [isDesktopAppOpen, setIsDesktopAppOpen] = useState(false);
+  // Genuine VST3 editor window state (the plug-in draws the controls itself in
+  // a native OS window; this is its renderer-side status/lifecycle panel).
+  const [vst3EditorView, setVst3EditorView] = useState<import('./audio/nativeVst3EditorSession').Vst3EditorView | null>(null);
+  const [isVst3EditorBusy, setIsVst3EditorBusy] = useState(false);
+  const vst3EditorRef = useRef<import('./audio/nativeVst3EditorSession').NativeVst3EditorSession | null>(null);
+  /**
+   * The last native-editor open failure, kept so the packaged acceptance run can
+   * report why an editor failed to appear. Without this the helper's own stderr
+   * (the only place the native cause is described) is lost between processes.
+   */
+  const lastEditorOpenErrorRef = useRef<string | null>(null);
+  /**
+   * The last commit's own account of what it did: whether the captured state was
+   * byte-identical to the stored one (a legitimate no-op), and enough of both states
+   * to see why.
+   */
+  const lastEditorCommitRef = useRef<{
+    unchanged: boolean;
+    capturedParameterCount: number | null;
+    storedParameterCount: number | null;
+    capturedParameters: string | null;
+    storedParameters: string | null;
+  } | null>(null);
   const [audioEditorClipId, setAudioEditorClipId] = useState<string | null>(null);
   const [audioEditorNotice, setAudioEditorNotice] = useState('');
   const [isWarpProcessorOpen, setIsWarpProcessorOpen] = useState(false);
@@ -2225,6 +2251,709 @@ export function App() {
       'Edit VST3 effect parameters');
   };
 
+  /**
+   * Opens the plug-in's OWN VST3 editor view. The saved insert state is loaded
+   * into the plug-in first, and only the plug-in's native HWND is shown; Apex's
+   * parameter list remains available as a separate, genuine-parameter fallback.
+   */
+  const handleOpenVst3Editor = async (trackId: number, slotId: string) => {
+    const bridge = getVst3Bridge();
+    if (!supportsNativeVst3Editor(bridge)) {
+      throw new Error('Genuine VST3 editor windows require the Windows desktop application.');
+    }
+    if (audioEngine.isPlaybackActive()) throw new Error('Stop playback before opening a native VST3 editor window.');
+    if (isRecording) throw new Error('Stop recording before opening a native VST3 editor window.');
+    // A finished session (committed/recovered/failed) no longer owns a native
+    // window; only a live one blocks opening another.
+    if (vst3EditorRef.current && !vst3EditorRef.current.isFinished) {
+      throw new Error('Close the open native VST3 editor window first.');
+    }
+    vst3EditorRef.current = null;
+    const state = projectStateRef.current;
+    const slot = state.mixerTracks.find(track => track.id === trackId)?.fxSlots.find(candidate => candidate.id === slotId);
+    const effect = slot?.vst3Effect;
+    if (!slot || slot.type !== 'vst3' || !effect) throw new Error('VST3 effect identity/state is missing; relink the insert first.');
+    const openedEffect = effect;
+    lastEditorOpenErrorRef.current = null;
+    // Cleared per open, so a close that never reached the commit cannot report the
+    // verdict of a previous, unrelated session.
+    lastEditorCommitRef.current = null;
+    const session = new NativeVst3EditorSession(bridge, openedEffect, {
+      projectId: state.meta.id, trackId, slotId,
+    }, {
+      onView: view => setVst3EditorView(view),
+      commit: async finalState => {
+        // The captured state is committed to exactly the insert that was edited:
+        // if the project, the track or the slot changed while the plug-in window
+        // was open, the newer state wins and the capture becomes a recovery record.
+        const currentState = projectStateRef.current;
+        if (currentState.meta.id !== state.meta.id) throw new Error('A different project was loaded while the editor was open.');
+        const currentSlot = currentState.mixerTracks.find(track => track.id === trackId)?.fxSlots.find(candidate => candidate.id === slotId);
+        if (!currentSlot || currentSlot.type !== 'vst3' || !currentSlot.vst3Effect ||
+            currentSlot.vst3Effect.classId !== openedEffect.classId || currentSlot.vst3Effect.path !== openedEffect.path) {
+          throw new Error('This insert was removed or relinked while the editor was open.');
+        }
+        const updatedEffect: Vst3Effect = { ...currentSlot.vst3Effect, state: finalState };
+        // A plug-in that changed nothing must not add an empty undo step; the
+        // captured state still replaces the previous one so a plugin-internal
+        // (non-parameter) change reported only through setDirty is preserved.
+        const unchanged = JSON.stringify(updatedEffect.state) === JSON.stringify(currentSlot.vst3Effect.state);
+        // Record the commit's OWN verdict. A zero-entry close has several legitimate
+        // explanations -- nothing changed, a stale identity, a refused save -- and they
+        // were indistinguishable from the outside, which is why one packaged run could
+        // report "committed" with no entry and no way to say whether that was correct.
+        lastEditorCommitRef.current = {
+          unchanged,
+          capturedParameterCount: finalState?.parameters?.length ?? null,
+          storedParameterCount: currentSlot.vst3Effect.state?.parameters?.length ?? null,
+          capturedParameters: JSON.stringify(finalState?.parameters ?? null),
+          storedParameters: JSON.stringify(currentSlot.vst3Effect.state?.parameters ?? null),
+        };
+        const published = unchanged ? currentState
+          : mutateProjectState(current => updateFxSlotInProjectState(current, trackId, slotId, { vst3Effect: updatedEffect }),
+            'Edit VST3 effect in native editor');
+        // Persist synchronously here: closing a plug-in window and then quitting
+        // must not depend on the debounced autosave succeeding in time.
+        const saved = await performSave(published);
+        if (!saved) throw new Error('The project could not be saved; the captured state was kept for recovery.');
+      },
+    });
+    vst3EditorRef.current = session;
+    setIsVst3EditorBusy(true);
+    setVst3EditorView(session.currentView);
+    try {
+      await session.open();
+    } catch (error) {
+      // Keep the reason. The helper's own stderr is the only description of the
+      // native cause, and the session that carries it is discarded right here.
+      lastEditorOpenErrorRef.current = error instanceof Error ? error.message : String(error);
+      if (vst3EditorRef.current === session) vst3EditorRef.current = null;
+      throw error;
+    } finally { setIsVst3EditorBusy(false); }
+  };
+
+  const handleCloseVst3Editor = useCallback(async () => {
+    const session = vst3EditorRef.current;
+    if (!session) return;
+    setIsVst3EditorBusy(true);
+    try {
+      await session.close();
+    } finally {
+      setIsVst3EditorBusy(false);
+    }
+  }, []);
+
+  const handleDismissVst3Editor = useCallback(() => {
+    const session = vst3EditorRef.current;
+    if (session && !['committed', 'recovered', 'failed'].includes(session.currentView.phase)) return;
+    vst3EditorRef.current = null;
+    setVst3EditorView(null);
+  }, []);
+
+  // Project replacement (load/new session/bundle import) and unmount must not
+  // leave a plug-in window pointing at a document that no longer exists. The
+  // session discards without committing; the main process keeps the captured
+  // state as a recovery record.
+  useEffect(() => () => {
+    const session = vst3EditorRef.current;
+    vst3EditorRef.current = null;
+    if (session) void session.discard();
+  }, [projectState.meta.id]);
+
+  // Deleting or relinking the insert while its plug-in window is open must also
+  // close the window (capturing a recovery record) instead of leaving an editor
+  // bound to a slot that no longer exists.
+  useEffect(() => {
+    const session = vst3EditorRef.current;
+    if (!session || session.isFinished) return;
+    const { trackId, slotId } = session.context;
+    const slot = projectState.mixerTracks.find(track => track.id === trackId)?.fxSlots.find(candidate => candidate.id === slotId);
+    if (slot?.type === 'vst3' && slot.vst3Effect?.classId === session.effect.classId &&
+        slot.vst3Effect.path === session.effect.path) return;
+    vst3EditorRef.current = null;
+    void session.discard();
+  }, [projectState.mixerTracks]);
+
+  // Packaged-acceptance hook. Enabled ONLY by a main-process launch flag
+  // (APEX_ACCEPTANCE=1), exactly like the existing packaged smoke entry; ordinary
+  // desktop/browser sessions never expose it. It drives this component's real
+  // handlers, so an acceptance run exercises the shipped code path rather than a
+  // parallel one.
+  useEffect(() => {
+    const host = globalThis as unknown as { desktopApp?: { packagedAcceptance?: boolean } };
+    if (!host.desktopApp?.packagedAcceptance) return;
+    const slotIds = (trackId: number) => projectStateRef.current.mixerTracks
+      .find(track => track.id === trackId)?.fxSlots.map(slot => slot.id) ?? [];
+    const acceptance = {
+      addVst3Insert: async (trackId: number, effect: import('./audio/nativeVst3Types').Vst3Effect) => {
+        // Tracks already carry FX slots, so the new insert is appended, not first.
+        // Report its real id and index instead of letting callers guess index 0.
+        const slotId = `acceptance-vst3-${Date.now()}`;
+        mutateProjectStateRef.current(state => updateMixerTrackInProjectState(state, trackId, {
+          fxSlots: [...(state.mixerTracks.find(track => track.id === trackId)?.fxSlots ?? []),
+            { id: slotId, type: 'vst3' as const, name: effect.name,
+              enabled: true, mix: 1, params: {}, vst3Effect: effect }],
+        }), 'Add VST3 effect');
+        return { slotId, slotIndex: slotIds(trackId).indexOf(slotId), slotIds: slotIds(trackId) };
+      },
+      openEditorOnInsert: async (trackId: number, slot?: number | string) => {
+        // Resolve by id when given one, else take the first VST3 insert on the
+        // track. Positional indices are unreliable: tracks already carry FX slots
+        // and a reopened project keeps whatever order it was saved with.
+        const slots = projectStateRef.current.mixerTracks.find(track => track.id === trackId)?.fxSlots ?? [];
+        const chosen = typeof slot === 'string'
+          ? slots.find(candidate => candidate.id === slot)
+          : typeof slot === 'number'
+            ? slots[slot]
+            : slots.find(candidate => candidate.type === 'vst3');
+        if (!chosen) throw new Error(`Acceptance insert is missing (track ${trackId}, requested ${String(slot)})`);
+        if (chosen.type !== 'vst3' || !chosen.vst3Effect) {
+          throw new Error(`Acceptance slot ${chosen.id} is not a VST3 insert (type ${chosen.type})`);
+        }
+        await handleOpenVst3Editor(trackId, chosen.id);
+        return { slotId: chosen.id, slotIndex: slotIds(trackId).indexOf(chosen.id) };
+      },
+      /**
+       * ACCEPTANCE ONLY. Aim genuine OS input at a point inside the plug-in's own
+       * editor window, then report what the helper observed. Nothing here creates a
+       * parameter change: the edit comes from the plug-in reacting to real input,
+       * and the panel's normal poll loop forwards it exactly as for a human user.
+       */
+      driveEditorWithRealInput: async (
+        point: number | { x: number; y: number; to?: { x: number; y: number } },
+      ) => {
+        const session = vst3EditorRef.current;
+        if (!session) throw new Error('No native editor session is open');
+        const bridge = getVst3Bridge();
+        if (!bridge?.editorInput) throw new Error('This build cannot inject editor input');
+        // The id exists only after openEditor resolves, which is after the click that
+        // opened the editor returned. Wait for it instead of sampling once.
+        const id = await (async () => {
+          const deadline = Date.now() + 20000;
+          while (Date.now() < deadline) {
+            if (session.sessionId) return session.sessionId;
+            if (session.isFinished) break;
+            await new Promise(resolve => setTimeout(resolve, 100));
+          }
+          return null;
+        })();
+        if (!id) throw new Error('The native editor session never produced an id');
+        /**
+         * A DRAG, not a click at one point.
+         *
+         * VSTGUI's slider computes a delta from the mouse position, and a click that
+         * lands where the handle already is computes the value it already has: the
+         * control begins an edit, sets the same value, and `isDirty()` is false, so
+         * `valueChanged()` is never called and no performEdit is emitted. The
+         * packaged run showed exactly that -- a well-aimed press at the slider's
+         * centre produced no edited parameter, because the fixture's default gain of
+         * 0.5 puts the handle under that centre.
+         *
+         * Real input therefore has to travel: press where the value is, move to where
+         * it should be, release. Every step is genuine OS input through SendInput;
+         * the helper reports what its window procedure and the plug-in's own
+         * IPlugView callbacks actually received after each one.
+         */
+        const requested = typeof point === 'number' ? { x: point, y: 61 } : point;
+        const start = { x: requested.x, y: requested.y };
+        // Default to a short slide to the right, which raises the gain.
+        const target = requested.to ?? { x: start.x + 40, y: start.y };
+        /**
+         * The gesture is a SHIFT-DRAG, and both halves are needed.
+         *
+         * Win32Frame takes the button state from GetAsyncKeyState, not from the
+         * message, so a press/move/release sequence posted on its own reaches the
+         * control's drag handler with no button held and is ignored. Press, move and
+         * release therefore travel as real mouse messages carrying their button
+         * state (see the helper's deliverMouse), and the shift key is genuinely
+         * held so VSTGUI treats the drag as its zoom modifier -- a stepped change
+         * rather than a jump to the pointer position.
+         */
+        const steps: Array<{
+          action: 'move' | 'down' | 'up' | 'modifier';
+          point: { x: number; y: number } | { down: boolean } | { x: number; y: number; zoomModifier: boolean };
+          label: string;
+        }> = [
+          { action: 'modifier', point: { down: true }, label: 'modifier@down' },
+          // Land on the handle first so the press starts an edit on the control.
+          { action: 'move', point: { ...start, zoomModifier: true }, label: `move@${start.x},${start.y}` },
+          { action: 'down', point: { ...start, zoomModifier: true }, label: `down@${start.x},${start.y}` },
+          // Then slide it: same y, offset x, which raises a real mouse-move.
+          { action: 'move', point: { ...target, zoomModifier: true }, label: `move@${target.x},${target.y}` },
+          { action: 'up', point: { ...target, zoomModifier: true }, label: `up@${target.x},${target.y}` },
+          { action: 'modifier', point: { down: false }, label: 'modifier@up' },
+        ];
+        /**
+         * Deliver one step, waiting out the session being busy.
+         *
+         * The panel polls the open editor on its own loop, and the service refuses
+         * input while any request is in flight ("VST3 editor is still servicing
+         * another request"). That refusal is correct back-pressure, but it made the
+         * whole gesture abort on its FIRST step, so the packaged run recorded no
+         * gesture at all and could not say where the drag stopped. Retrying only this
+         * specific transient error lets the genuine input be delivered without
+         * pretending anything happened: every other error still propagates.
+         */
+        const deliverStep = async (step: (typeof steps)[number]) => {
+          const deadline = Date.now() + 5000;
+          for (;;) {
+            try {
+              return await bridge.editorInput(id, step.action, step.point);
+            } catch (error) {
+              const message = String((error as Error)?.message ?? error);
+              const busy = message.includes('still servicing another request');
+              if (!busy || Date.now() > deadline) throw error;
+              await new Promise(resolve => setTimeout(resolve, 50));
+            }
+          }
+        };
+        const delivered: Record<string, unknown> = {};
+        for (const step of steps) {
+          delivered[step.label] = await deliverStep(step);
+          // The OS delivers asynchronously; let the plug-in consume each event before
+          // the next one so it sees a press, a move and a release in order.
+          await new Promise(resolve => setTimeout(resolve, 100));
+        }
+        return {
+          target,
+          start,
+          injectedThrough: 'vst3:editorInput -> helper SendInput (real OS input)',
+          sent: steps.map(step => step.action),
+          gesture: 'shift-drag: press at the handle, move to the target, release',
+          whyDrag: 'a click at the handle value re-sets the same value, so VSTGUI emits no performEdit',
+          whyShift: 'VSTGUI reads its zoom modifier from the live key state, so the drag must happen with shift really held',
+          delivered,
+        };
+      },
+      closeOpenEditor: async () => {
+        // Same handler the "Close" control uses, so the commit and undo path is shipped.
+        await handleCloseVst3Editor();
+        const session = vst3EditorRef.current;
+        if (session) await session.close();
+        return { phase: vst3EditorRef.current?.currentView.phase ?? null };
+      },
+      /**
+       * Why the last open attempt failed, as the UI knows it. The packaged
+       * acceptance run records this so a failed open is diagnosable from CI instead
+       * of showing up as a helper that appeared and vanished.
+       */
+      lastEditorOpenError: () => lastEditorOpenErrorRef.current,
+      /** Poll the open session once, exactly as the panel's loop does. */
+      pollOpenEditor: async () => {
+        const session = vst3EditorRef.current;
+        if (!session) throw new Error('No native editor session is open');
+        const view = session.currentView;
+        return {
+          delivered: true,
+          phase: view.phase,
+          editedParameterIds: view.editedParameterIds,
+          activeEditIds: view.activeEditIds,
+          dirty: view.dirty,
+          error: view.error,
+        };
+      },
+      historySnapshot: async () => ({
+        undoDepth: projectHistoryRef.current.past.length,
+        redoDepth: projectHistoryRef.current.future.length,
+        lastLabel: projectHistoryRef.current.past.at(-1)?.label ?? null,
+      }),
+      projectSnapshot: async () => {
+        const state = projectStateRef.current;
+        return { metaId: state.meta.id, mixerTracks: state.mixerTracks, vst3State: JSON.stringify(state.mixerTracks) };
+      },
+      /**
+       * The insert's first parameter, as the Mixer stores it.
+       *
+       * Without a trackId this searches every track for the VST3 insert. Callers that
+       * have no id to hand (the packaged reload check) must still be able to read the
+       * value; filtering on an undefined track matched nothing and reported null, which
+       * looked like a lost parameter rather than a lookup that never found the insert.
+       */
+      readInsertParameter: async (trackId?: number, slotId?: string) => {
+        for (const track of projectStateRef.current.mixerTracks) {
+          if (trackId !== undefined && track.id !== trackId) continue;
+          const slots = track.fxSlots ?? [];
+          const effect = (slotId ? slots.find(slot => slot.id === slotId) : slots.find(slot => slot.type === 'vst3'))?.vst3Effect;
+          if (!effect) continue;
+          return { value: effect.state?.parameters?.[0]?.value ?? null, classId: effect.classId ?? null,
+            parameterCount: effect.state?.parameters?.length ?? null, trackId: track.id,
+            slotIds: slots.map(slot => `${slot.type}:${slot.id}`) };
+        }
+        return { value: null, classId: null, parameterCount: null, trackId: null, slotIds: [] };
+      },
+      /**
+       * The EFFECTIVE value of the insert's first parameter, as the plug-in's own
+       * controller holds it.
+       *
+       * readInsertParameter reports the value stored in project state. That is not the
+       * same thing: a freshly added insert has no serialized parameter at all (null),
+       * and the controller may hold something the project never captured. Undo/redo
+       * must be proven on what the user can actually see, so this asks the controller
+       * through the shipped describeEffect path -- the same one the Mixer uses to show
+       * a parameter -- and never infers a value from a missing override.
+       */
+      readEffectiveParameter: async (trackId?: number, slotId?: string) => {
+        // Same lookup rules as readInsertParameter: scope by track/slot when the caller
+        // knows them, and otherwise take the first VST3 insert anywhere. A mismatch
+        // between the two hooks would let p4 compare values from different inserts.
+        const locate = () => {
+          for (const track of projectStateRef.current.mixerTracks) {
+            if (trackId !== undefined && track.id !== trackId) continue;
+            for (const slot of track.fxSlots ?? []) {
+              if (slot.type !== 'vst3' || !slot.vst3Effect) continue;
+              if (slotId && slot.id !== slotId) continue;
+              return slot;
+            }
+          }
+          return undefined;
+        };
+        const slot = locate();
+        if (!slot?.vst3Effect) return { value: null, id: null, reason: 'no VST3 insert in project state' };
+        const bridge = getVst3Bridge();
+        if (!bridge) return { value: null, id: null, reason: 'no VST3 bridge in this build' };
+        try {
+          const described = await bridge.describeEffect(slot.vst3Effect);
+          const first = described?.parameters?.[0];
+          // `currentValue` is read from controller->getParamNormalized() on the native
+          // side. A null means the controller could not answer -- reported as such
+          // rather than coerced to a number, because 0 is a legitimate gain.
+          return {
+            value: typeof first?.currentValue === 'number' ? first.currentValue : null,
+            id: first?.id ?? null,
+            defaultValue: typeof first?.defaultValue === 'number' ? first.defaultValue : null,
+            parameterCount: described?.parameters?.length ?? null,
+            controllerAvailable: described?.controllerAvailable === true,
+            slotId: slot.id,
+          };
+        } catch (error) {
+          return { value: null, id: null, reason: error instanceof Error ? error.message : String(error) };
+        }
+      },
+      saveProject: async () => ({ ok: await performSave(projectStateRef.current, { reconcileAudio: true }) }),
+      /**
+       * Undo/redo measured on the EDITED PARAMETER specifically.
+       *
+       * The generic round trip compares the whole history-governed document, which proves
+       * undo/redo move something but not that the gain the user just edited survives
+       * the round trip. This closes the editor (the gesture that commits), then reads
+       * the insert's parameter value across undo, redo and undo again, so the packaged
+       * criterion can assert the actual numbers: original before the edit, edited
+       * after it, original after undo, edited after redo.
+       */
+      editorParameterUndoRedo: async (trackId: number, slotId?: string) => {
+        // Find the insert rather than trusting a caller-supplied id: the packaged
+        // harness passes the project snapshot's shape, which has no per-insert id, so
+        // a slotId argument arrives undefined and a lookup keyed on it silently reads
+        // nothing. Searching the live state is both correct and self-contained.
+        const locate = () => {
+          for (const track of projectStateRef.current.mixerTracks) {
+            if (trackId !== undefined && track.id !== trackId) continue;
+            for (const slot of track.fxSlots ?? []) {
+              if (slot.type !== 'vst3') continue;
+              if (slotId && slot.id !== slotId) continue;
+              return slot;
+            }
+          }
+          return undefined;
+        };
+        const read = () => locate()?.vst3Effect?.state?.parameters?.[0]?.value ?? null;
+        // Effective value via the controller, through the same describeEffect path the
+        // Mixer uses. Returns null (with a reason) when it cannot be measured; it never
+        // substitutes the stored override, which is absent for an unedited insert.
+        const effectiveParameter = async () => {
+          const slot = locate();
+          const bridge = slot?.vst3Effect ? getVst3Bridge() : null;
+          if (!slot?.vst3Effect || !bridge) return null;
+          try {
+            const described = await bridge.describeEffect(slot.vst3Effect);
+            const first = described?.parameters?.[0];
+            return typeof first?.currentValue === 'number'
+              ? { value: first.currentValue, id: first.id ?? null, parameterCount: described.parameters.length }
+              : { value: null, id: first?.id ?? null, parameterCount: described?.parameters?.length ?? null };
+          } catch { return null; }
+        };
+        // Naming the entries makes a surprising undo result diagnosable: if the value
+        // after undo is null, the question is whether undo consumed the edit or walked
+        // past the insert that created it.
+        const undoLabels = () => projectHistoryRef.current.past.map(entry => entry.label);
+        const depths = () => ({ undo: projectHistoryRef.current.past.length, redo: projectHistoryRef.current.future.length });
+        const edited = read();
+        const before = depths();
+        const labelsBefore = undoLabels();
+        // What the renderer believed about the edit BEFORE the commit, so a commit
+        // that discarded it can be told apart from a drag that never registered.
+        const sessionBeforeClose = vst3EditorRef.current?.currentView ?? null;
+        const editedIdsBeforeClose = sessionBeforeClose?.editedParameterIds ?? [];
+        await handleCloseVst3Editor();
+        // The commit runs inside close(): if it threw, the session reports 'recovered'
+        // and no undo entry is added. Recording the phase and error is what explains a
+        // gesture that provably edited the plug-in but added nothing to history.
+        const sessionAfterClose = vst3EditorRef.current?.currentView ?? null;
+        const phaseAfterClose = sessionAfterClose?.phase ?? null;
+        const errorAfterClose = sessionAfterClose?.error ?? null;
+        const afterClose = read();
+        const afterCloseDepths = depths();
+        const labelsAfterClose = undoLabels();
+        // The EFFECTIVE value, read from the plug-in's own controller after loading
+        // the project's stored state. Only sampled while no editor window is open, so
+        // this cannot disturb the session under test. A stored-value read cannot stand
+        // in for this: an insert with no saved parameter reports null while its
+        // controller still holds the default.
+        const effectiveAfterClose = await effectiveParameter();
+        handleUndo();
+        await new Promise(resolve => setTimeout(resolve, 150));
+        const afterUndo = read();
+        const afterUndoDepths = depths();
+        const labelsAfterUndo = undoLabels();
+        const effectiveAfterUndo = await effectiveParameter();
+        handleRedo();
+        await new Promise(resolve => setTimeout(resolve, 150));
+        const afterRedo = read();
+        const afterRedoDepths = depths();
+        const effectiveAfterRedo = await effectiveParameter();
+        // Leave the document exactly as the edit left it, so the later persistence
+        // checks see the edited value and not the undone one.
+        return {
+          // Which insert the numbers came from: a null value with a null slot means
+          // the insert was never located, which is a different finding from an edit
+          // that did not change the value.
+          locatedSlotId: locate()?.id ?? null,
+          locatedTrackId: projectStateRef.current.mixerTracks.find(t => (t.fxSlots ?? []).some(sl => sl.type === 'vst3'))?.id ?? null,
+          parameterCount: locate()?.vst3Effect?.state?.parameters?.length ?? null,
+          editedValue: edited,
+          valueAfterClose: afterClose,
+          valueAfterUndo: afterUndo,
+          valueAfterRedo: afterRedo,
+          // What the plug-in's controller actually holds at each stage.
+          effectiveAfterClose,
+          effectiveAfterUndo,
+          effectiveAfterRedo,
+          editedIdsBeforeClose,
+          phaseAfterClose,
+          errorAfterClose,
+          // The commit's own verdict: `unchanged: true` is a legitimate no-op and
+          // NOT a lost edit, and the two parameter dumps say which it was.
+          commitVerdict: lastEditorCommitRef.current,
+          labelsBeforeClose: labelsBefore,
+          labelsAfterClose,
+          labelsAfterUndo,
+          depthBeforeClose: before,
+          depthAfterClose: afterCloseDepths,
+          depthAfterUndo: afterUndoDepths,
+          depthAfterRedo: afterRedoDepths,
+          // Exactly one entry for one completed gesture.
+          entriesAddedByGesture: afterCloseDepths.undo - before.undo,
+          // Undo must land on something different from the edited value, and redo must
+          // bring the edited value back exactly.
+          undoChanged: afterUndo !== afterClose,
+          undoRestoredOriginal: afterUndo !== afterClose && afterUndo !== null,
+          redoRestoredEdited: afterRedo === afterClose && afterRedo !== null,
+          // A phantom entry would show up as the undo stack growing without an edit.
+          noDuplicateEntries: afterCloseDepths.undo - before.undo <= 1,
+        };
+      },
+      // Quit through the real File > Quit path, so the before-quit capture and
+      // helper reaping that ships in the app is what gets exercised.
+      // Closing the window is the shipped quit path: window-all-closed -> app.quit()
+      // -> before-quit, which captures the open editor and reaps every helper.
+      quitApp: async () => {
+        await performSave(projectStateRef.current, { reconcileAudio: true });
+        (globalThis as unknown as { desktopApp?: { closeWindow?: () => void } }).desktopApp?.closeWindow?.();
+      },
+      /**
+       * Kill the editor helper while its window is open, then ask the app for the
+       * recovery record. Uses the shipped recovery surface, not a parallel one.
+       */
+      crashEditorAndRecover: async () => {
+        const session = vst3EditorRef.current;
+        if (!session) throw new Error('No native editor session is open');
+        const bridge = getVst3Bridge();
+        if (!bridge) throw new Error('VST3 bridge missing');
+        if (!bridge.editorCrash) throw new Error('This build cannot force an editor crash');
+        // The id is assigned only once openEditor has resolved, and the click that
+        // opened this session returns before that. Wait for it instead of sampling
+        // once: a single read races the open and reports "no id yet".
+        const sessionId = await (async () => {
+          const deadline = Date.now() + 20000;
+          while (Date.now() < deadline) {
+            if (session.sessionId) return session.sessionId;
+            if (session.isFinished) break;
+            await new Promise(resolve => setTimeout(resolve, 100));
+          }
+          return null;
+        })();
+        if (!sessionId) throw new Error('The native editor session never produced an id');
+        // Kill the real helper. Without this the session simply stays open and no
+        // recovery path is ever exercised -- which is what happened when the
+        // criterion first ran: it observed "open" and no recovery record.
+        const crash = await bridge.editorCrash(sessionId);
+        // Let the session observe the dead helper through its normal poll loop.
+        await new Promise(resolve => setTimeout(resolve, 2500));
+        const view = session.currentView;
+        const recovery = await bridge.editorRecovery();
+        return {
+          killedPid: crash.killedPid,
+          signal: crash.signal,
+          phaseAfterCrash: view.phase,
+          reportedError: view.error,
+          recoveryRecordOffered: Boolean(recovery?.recovery),
+          recoveryLoadError: recovery?.loadError ?? null,
+          recoveryClassId: recovery?.recovery?.effect?.classId ?? null,
+        };
+      },
+      undoRedoRoundTrip: async () => {
+        /**
+         * The fields undo/redo governs. Live meters are excluded because they are
+         * deliberately not part of history (see audioEngine's topLevelKeys, which
+         * treats peakL/peakR as volatile playback values): comparing them made redo
+         * look broken whenever a meter ticked between the snapshot and the compare,
+         * which is a property of the test, not of undo.
+         */
+        /**
+         * Canonical text for the state undo/redo governs.
+         *
+         * Two corrections, both found by redo reporting failure when it had actually
+         * worked:
+         *
+         * 1. History stores sanitizeProjectSnapshot(state) -- a normalize + document
+         *    round-trip -- not the raw React state object. So after a redo the live
+         *    state is the SANITIZED representation, and comparing a restored state
+         *    against the raw pre-undo object reported a difference that undo/redo
+         *    neither caused nor controls. Both sides are snapshotted the same way
+         *    history snapshots them.
+         * 2. Key order is normalised. JSON.stringify preserves insertion order, and a
+         *    redo that rebuilds an equal document with its keys in another order
+         *    compared unequal while every value matched.
+         *
+         * Live meters (peakL/peakR) are excluded because they are deliberately not
+         * part of history, and array order is preserved because it is meaningful.
+         */
+        const comparable = (state: typeof projectStateRef.current) => {
+          const snapshot = sanitizeProjectSnapshot(state);
+          // Same canonicalisation history itself uses, so the comparison and the
+          // decision to record an entry can never disagree.
+          return canonicalProjectJson({
+            ...snapshot,
+            mixerTracks: snapshot.mixerTracks.map(track => {
+              const { peakL: _peakL, peakR: _peakR, ...rest } = track;
+              return rest;
+            }),
+          });
+        };
+        const depths = () => ({
+          undo: projectHistoryRef.current.past.length,
+          redo: projectHistoryRef.current.future.length,
+        });
+        /** First path whose value differs, so a failed redo names its field. */
+        const firstDifference = (left: unknown, right: unknown, path = ''): string => {
+          if (left === right) return '';
+          const isObject = (value: unknown) => Boolean(value) && typeof value === 'object';
+          if (!isObject(left) || !isObject(right)) {
+            return `${path || '(root)'}: ${JSON.stringify(left)?.slice(0, 60)} != ${JSON.stringify(right)?.slice(0, 60)}`;
+          }
+          // Arrays are values here, not containers to recurse into: comparing a
+          // two-element tuple key by key reported "structurally different" only
+          // because the closure's three-argument signature collided with Array#map's
+          // index argument, which said nothing about the actual contents.
+          if (Array.isArray(left) || Array.isArray(right)) {
+            const leftText = JSON.stringify(left);
+            const rightText = JSON.stringify(right);
+            return leftText === rightText ? ''
+              : `${path || '(root)'}: ${leftText?.slice(0, 60)} != ${rightText?.slice(0, 60)}`;
+          }
+          const keys = new Set([...Object.keys(left as object), ...Object.keys(right as object)]);
+          for (const key of keys) {
+            const found = firstDifference((left as Record<string, unknown>)[key],
+              (right as Record<string, unknown>)[key], path ? `${path}.${key}` : key);
+            if (found) return found;
+          }
+          return `${path || '(root)'}: structurally different (keys ${[...keys].join(',')})`;
+        };
+        const before = projectStateRef.current;
+        const beforeText = comparable(before);
+        const depthsBefore = depths();
+        handleUndo();
+        await new Promise(resolve => setTimeout(resolve, 120));
+        const undone = projectStateRef.current;
+        const undoneText = comparable(undone);
+        const depthsAfterUndo = depths();
+        handleRedo();
+        await new Promise(resolve => setTimeout(resolve, 120));
+        const redone = projectStateRef.current;
+        const redoneText = comparable(redone);
+        const depthsAfterRedo = depths();
+        return {
+          // Undo must actually change something, and redo must restore exactly what
+          // undo replaced -- both measured against history-governed state only.
+          undoRestored: undoneText !== beforeText,
+          redoReapplied: redoneText === beforeText,
+          changedByUndo: undoneText !== beforeText,
+          // The stacks decide whether a failed redo is a bug or simply nothing to
+          // redo: an emptied redo stack means something recorded a new edit between
+          // undo and redo, which discards the redo branch by design.
+          depthsBefore,
+          depthsAfterUndo,
+          depthsAfterRedo,
+          // A prefix is useless for diagnosis: it always matches. Report the first
+          // path that differs, so a genuine redo defect names its field.
+          redoDiffersAt: redoneText === beforeText ? null
+            : firstDifference(before, redone),
+        };
+      },
+    };
+    (globalThis as unknown as { __apexAcceptance?: unknown }).__apexAcceptance = acceptance;
+    return () => { delete (globalThis as unknown as { __apexAcceptance?: unknown }).__apexAcceptance; };
+  });
+
+  // A captured native-editor state that could not be committed (the insert was
+  // removed, the project was replaced, or the renderer/app went away) is offered
+  // on the next launch. Nothing is applied silently: the user chooses.
+  const [vst3EditorRecovery, setVst3EditorRecovery] = useState<import('./audio/nativeVst3Types').Vst3EditorRecovery | null>(null);
+  useEffect(() => {
+    let active = true;
+    const bridge = getVst3Bridge();
+    if (!bridge?.editorRecovery) return;
+    void bridge.editorRecovery().then(result => {
+      if (!active) return;
+      if (result?.loadError) console.warn('[Apex Studio] VST3 editor recovery data could not be read:', result.loadError);
+      if (result?.recovery) setVst3EditorRecovery(result.recovery);
+    }).catch(error => console.warn('[Apex Studio] VST3 editor recovery lookup failed.', error));
+    return () => { active = false; };
+  }, []);
+
+  const handleRestoreVst3EditorRecovery = () => {
+    const recovery = vst3EditorRecovery;
+    const bridge = getVst3Bridge();
+    if (!recovery || !bridge?.dismissEditorRecovery) return;
+    setVst3EditorRecovery(null);
+    const currentState = projectStateRef.current;
+    const slot = currentState.mixerTracks.find(track => track.id === recovery.trackId)
+      ?.fxSlots.find(candidate => candidate.id === recovery.slotId);
+    if (currentState.meta.id !== recovery.projectId || !slot || slot.type !== 'vst3' || !slot.vst3Effect) {
+      console.warn('[Apex Studio] The VST3 editor recovery record does not match an insert in this project; it was left on disk.');
+      void bridge.dismissEditorRecovery(recovery.id).catch(() => {});
+      return;
+    }
+    const effect = recovery.effect ?? recovery.originalEffect;
+    if (effect.classId !== slot.vst3Effect.classId || effect.path !== slot.vst3Effect.path) {
+      console.warn('[Apex Studio] The VST3 editor recovery record belongs to a different plug-in; it was left on disk.');
+      return;
+    }
+    mutateProjectState(current => updateFxSlotInProjectState(current, recovery.trackId, recovery.slotId, { vst3Effect: effect }),
+      'Recover VST3 editor state');
+    void bridge.dismissEditorRecovery(recovery.id).catch(error =>
+      console.warn('[Apex Studio] Recovered VST3 state could not be cleared from disk.', error));
+  };
+
+  const handleDiscardVst3EditorRecovery = () => {
+    const recovery = vst3EditorRecovery;
+    const bridge = getVst3Bridge();
+    if (!recovery || !bridge?.dismissEditorRecovery) return;
+    setVst3EditorRecovery(null);
+    void bridge.dismissEditorRecovery(recovery.id).catch(error =>
+      console.warn('[Apex Studio] Pending VST3 editor recovery could not be cleared.', error));
+  };
+
   const handleDeleteFxSlot = (trackId: number, slotId: string) => {
     mutateProjectState(
       current => deleteFxSlotFromProjectState(current, trackId, slotId),
@@ -3017,6 +3746,7 @@ export function App() {
               onAddVst3FxSlot={handleAddVst3FxSlot}
               onMoveFxSlot={handleMoveFxSlot}
               onEditVst3Effect={handleEditVst3Effect}
+              onOpenVst3Editor={handleOpenVst3Editor}
               onDeleteFxSlot={handleDeleteFxSlot}
               onUpdateFxSlot={handleUpdateFxSlot}
               isPlaying={isPlaying}
@@ -3024,6 +3754,29 @@ export function App() {
               onInteractionStart={handleContinuousInteractionStart}
               onInteractionEnd={handleContinuousInteractionEnd}
               onCreateAuxReturn={handleCreateAuxReturnTrack}
+            />
+          )}
+
+          {vst3EditorRecovery && !vst3EditorView && (
+            <div role="alert" className="mx-3 mt-2 rounded border border-[var(--apex-border)] bg-[var(--apex-panel)] px-3 py-2 text-[10px] text-[var(--apex-text)]">
+              <p>
+                A native VST3 editor captured changes that were never applied to this project
+                (track {vst3EditorRecovery.trackId}, slot {vst3EditorRecovery.slotId}
+                {vst3EditorRecovery.error ? `: ${vst3EditorRecovery.error}` : ''}).
+              </p>
+              <div className="mt-1 flex gap-1">
+                <button className="rounded border border-[var(--apex-border)] px-2 py-0.5" onClick={handleRestoreVst3EditorRecovery}>Restore captured state</button>
+                <button className="rounded border border-[var(--apex-border)] px-2 py-0.5" onClick={handleDiscardVst3EditorRecovery}>Discard</button>
+              </div>
+            </div>
+          )}
+
+          {vst3EditorView && (
+            <Vst3EditorWindowPanel
+              view={vst3EditorView}
+              busy={isVst3EditorBusy}
+              onClose={() => void handleCloseVst3Editor()}
+              onDismiss={handleDismissVst3Editor}
             />
           )}
 
