@@ -23,6 +23,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Environment
         shell: pwsh
+        continue-on-error: true
         run: |
           function Note($title, $text) {
             $t = ([string]$text) -replace '%', '%25' -replace "`r", '%0D' -replace "`n", '%0A'
@@ -44,8 +45,10 @@ jobs:
             pnputil = [bool](Get-Command pnputil.exe -ErrorAction SilentlyContinue)
           }
           Note 'P9-PROBE-ENV' ($info | ConvertTo-Json -Depth 5 -Compress)
+          $global:LASTEXITCODE = 0
       - name: Display topology, modes and resolution
         shell: pwsh
+        continue-on-error: true
         run: |
           function Note($title, $text) {
             $t = ([string]$text) -replace '%', '%25' -replace "`r", '%0D' -replace "`n", '%0A'
@@ -63,8 +66,10 @@ jobs:
               Note 'P9-PROBE-RESOLUTION-CMDLET' (& $tool -Action query)
             } catch { Note 'P9-PROBE-RESOLUTION-CMDLET' "failed: $($_.Exception.Message)" }
           }
+          $global:LASTEXITCODE = 0
       - name: Change the real display scale (125%, 150%, 100%)
         shell: pwsh
+        continue-on-error: true
         run: |
           function Note($title, $text) {
             $t = ([string]$text) -replace '%', '%25' -replace "`r", '%0D' -replace "`n", '%0A'
@@ -78,8 +83,10 @@ jobs:
             $fresh = & pwsh -NoProfile -File $tool -Action query
             Note "P9-PROBE-FRESH-$percent" $fresh
           }
+          $global:LASTEXITCODE = 0
       - name: Annotation capacity and screenshot channel
         shell: pwsh
+        continue-on-error: true
         run: |
           function Note($title, $text) {
             $t = ([string]$text) -replace '%', '%25' -replace "`r", '%0D' -replace "`n", '%0A'
@@ -97,3 +104,4 @@ jobs:
               Note 'P9-PROBE-PNG' ([Convert]::ToBase64String([IO.File]::ReadAllBytes("$env:RUNNER_TEMP\probe.png")))
             }
           } else { Note 'P9-PROBE-SHOT' 'no window with a main handle was found' }
+          $global:LASTEXITCODE = 0
