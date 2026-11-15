@@ -2064,6 +2064,7 @@ public:
         {"pluginNotified", lastScaleFit.pluginNotified},
         {"notifyResult", resultName(lastScaleFit.notifyResult)},
         {"constrained", lastScaleFit.constrained},
+        {"sizeWasWithheld", lastScaleFit.sizeWasWithheld},
         {"reentrantDpiChanges", reentrantDpiChangeCount},
       };
       result["sizing"] = {

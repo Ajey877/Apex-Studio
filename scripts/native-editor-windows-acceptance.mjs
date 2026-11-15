@@ -331,12 +331,12 @@ try {
       },
       interactiveDisplayScale125and150: {
         status: 'NOT_VERIFIED',
-        reason: 'The CI runner has no interactive desktop and no 125%/150% display configuration to change. Requirements for it are recorded in docs/VST3-EDITOR-ACCEPTANCE.md.',
+        reason: 'Not exercised by THIS harness, which runs at the scale the desktop already has. Real 125%/150% display scale is exercised by scripts/native-editor-dpi-acceptance.mjs (P9); see docs/VST3-EDITOR-DPI-ACCEPTANCE.md.',
       },
       note: supported
         ? 'IPlugViewContentScaleSupport is present. PASS requires an applied non-default factor AND the plug-in resizing itself; 96 DPI is not accepted as evidence.'
         : 'The view does not implement IPlugViewContentScaleSupport, so it cannot scale. That is a NOT_VERIFIED/FAIL for high-DPI, never a pass at 96 DPI.',
-      multiMonitorMigration: 'NOT_VERIFIED here: moving a window between monitors with different DPI needs an interactive desktop. Tracked as a separate interactive requirement.',
+      multiMonitorMigration: 'NOT_VERIFIED here: this harness never moves the window between monitors. scripts/native-editor-dpi-acceptance.mjs (P9-D, P9-E, P9-F) does, when Windows reports two displays; see docs/VST3-EDITOR-DPI-ACCEPTANCE.md.',
     });
   });
 

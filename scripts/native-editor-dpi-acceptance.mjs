@@ -840,17 +840,24 @@ async function multiMonitorPass(state) {
       // Input must land on the editor on the SECOND monitor.
       const click = await clickSlider(session, 0.4, percent / 100);
       checks.near('on-second:slider-click-lands', click.value, 0.4, 0.06, { point: click.point, screenPoint: click.screenPoint });
-      await resizeChecks(session, checks, { factor: percent / 100, restingClient: { width: onSecond.clientWidth, height: onSecond.clientHeight } });
-      recordRun(caseId, config, checks.list, { primary: p, second: s });
 
       // ---- F: repeated crossings, programmatic and by real title-bar drag -------
+      // Run BEFORE the resize checks below. Those force a size onto this fixed-size
+      // editor and restore it with onSize, after which VSTGUI derives its unscaled
+      // width from a whole number of pixels (437 / 1.25 = 349.6, floored to 349).
+      // Here nothing but the monitor changes, so the size must come back EXACTLY.
+      const exact = diag => `${diag.clientWidth}x${diag.clientHeight}`;
+      const homeSize = `${AGAIN.base.width}x${AGAIN.base.height}`;
+      const awaySize = exact(onSecond);
       for (let trip = 0; trip < 3; trip++) {
         await action(session, 'moveWindow', { x: p.workLeft + 160, y: p.workTop + 160 });
         const backHome = await waitForDpi(session, 96);
         sizeChecks(move, backHome, { dpi: 96, pluginScale: 1, expectedClient: AGAIN.base, label: `trip${trip + 1}-primary` });
+        move.equal(`trip${trip + 1}-primary:exact-size`, exact(backHome), homeSize);
         await action(session, 'moveWindow', { x: s.workLeft + 160, y: s.workTop + 160 });
         const away = await waitForDpi(session, secondDpi);
         sizeChecks(move, away, { dpi: secondDpi, pluginScale: percent / 100, expectedClient: scaled(AGAIN.base, percent / 100), label: `trip${trip + 1}-second` });
+        move.equal(`trip${trip + 1}-second:exact-size`, exact(away), awaySize);
       }
       // A person dragging the title bar across the boundary.
       const start = await diagnose(session);
@@ -867,7 +874,26 @@ async function multiMonitorPass(state) {
       move.is('title-drag:WM_DPICHANGED-during-drag', drag.dpiChangedMessages >= 1, { messages: drag.dpiChangedMessages });
       move.equal('title-drag:landed-on-primary', dropped.monitor?.device, p.device);
       sizeChecks(move, dropped, { dpi: 96, pluginScale: 1, expectedClient: AGAIN.base, label: 'title-drag' });
+      move.equal('title-drag:exact-size', exact(dropped), homeSize);
+      // If Windows resized the window before it sent WM_DPICHANGED (it does during a
+      // drag on Windows Server 2025), that size must not have reached the plug-in.
+      const raw = drag.geometryTrace ?? [];
+      const dpiAt = raw.findIndex(e => e.m === 'dpiChanged');
+      const sizedFirst = dpiAt > 0 && raw.slice(0, dpiAt).some(e => e.m === 'size' && !e.byPlugin && !e.fitting);
+      if (sizedFirst) {
+        move.is('title-drag:size-applied-before-WM_DPICHANGED-was-withheld', dropped.scaleFit?.sizeWasWithheld === true,
+          { scaleFit: dropped.scaleFit ?? null, sizing: dropped.sizing ?? null });
+      }
+      move.is('title-drag:plug-in-chose-the-final-size', dropped.scaleFit?.source === 'plugin-requested'
+        && dropped.scaleFit?.planned?.width === AGAIN.base.width && dropped.scaleFit?.planned?.height === AGAIN.base.height,
+        { scaleFit: dropped.scaleFit ?? null });
       capture(session, dropped, `${config}-after-title-drag`, move, { compareToReference: false });
+
+      // ---- D/E, last part: resize and constraints on the second monitor ---------
+      await action(session, 'moveWindow', { x: s.workLeft + 120, y: s.workTop + 120 });
+      const backOnSecond = await waitForDpi(session, secondDpi);
+      await resizeChecks(session, checks, { factor: percent / 100, restingClient: { width: backOnSecond.clientWidth, height: backOnSecond.clientHeight } });
+      recordRun(caseId, config, checks.list, { primary: p, second: s });
       const closed = await session.client.closeEditor();
       move.is('session-survived-and-captured-state', closed.closed === true && typeof closed.state?.component === 'string');
       recordRun('P9-F', 'dual-move', move.list, { secondMonitorPercent: percent });
