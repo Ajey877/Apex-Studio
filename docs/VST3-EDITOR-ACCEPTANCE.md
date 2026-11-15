@@ -340,6 +340,28 @@ poll loop, and captures the state once — by the call that succeeds. Other erro
 fail on the first attempt. Two regression tests cover it, and the retry test fails
 against the previous code.
 
+**The retry treated the symptom; the generator was above it.** `schedulePoll()` checked
+`pollTimer`, `finished` and `disposeRequested` but not `closeRequested`.
+`stopPolling()` clears the pending timer and cannot cancel a poll already awaiting
+`pollEditor()`, so that poll resumed after `close()` had run, found `finished` still
+false, and scheduled the next one — putting a real `pollEditor` back in front of the
+close. `schedulePoll()` now returns early when `closeRequested` is set.
+
+The in-flight poll's own result is still applied, so nothing it observed is lost.
+
+This is tested as behaviour rather than as source text: one poll is held in flight, a
+close is requested, the close is kept pending across several poll intervals, and then
+the poll is released. Against the previous code that test observes **four** `pollEditor`
+calls during the pending close; with the fix it observes exactly **one**, the close
+commits exactly once, and the parameters reported by that in-flight poll are the ones
+committed. Releasing the poll only after the close finished would have let `finished`
+mask the bug and the test would have passed against the broken code — which is why the
+interleaving is held open deliberately.
+
+A close refused past the retry deadline is also covered: it gives up, keeps the real
+reason rather than a generic timeout, commits nothing, and releases the helper exactly
+once with `committed=false` so a recovery record survives.
+
 **Ten consecutive cycles.** p4b performs ten cycles of the same real interaction and
 records, for each: the controller value before, the ParamIDs received, the session phase
 either side of close, the commit verdict, the entries added, and the controller value
