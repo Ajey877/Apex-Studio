@@ -629,8 +629,9 @@ test('the P9 workflow gates every lane on the evidence, not on the exit code', (
   assert.ok(sources.includes('actual_tree=$(git write-tree --prefix=native/vst3/)') && sources.includes('[ "$actual_tree" != "$baseline_tree" ] || [ "$on_disk" != "$in_tree" ]'),
     'the tree that is built is proven to be the baseline tree and nothing else');
   assert.ok(job.includes('BASELINE_COMMIT: c246e2a91f7d7c7aaca1d9903d334e7eceab5be8'), 'and the baseline commit is unchanged');
-  assert.equal(execFileSync('git', ['rev-parse', '--verify', '--quiet', 'c246e2a91f7d7c7aaca1d9903d334e7eceab5be8:native/vst3'], { cwd: root, encoding: 'utf8' }).trim(),
-    BASELINE_TREE, 'the tree the tests use for the baseline is the real one');
+  // The workflow itself resolves the baseline tree from that commit at run time
+  // (this test must not: CI checks out without history).
+  assert.ok(sources.includes('baseline_tree=$(git rev-parse "$BASELINE_COMMIT:native/vst3")'));
 
   // Negative controls run on the runner, on real evidence.
   const controls = step('Negative controls - this evidence is rejected by the other lane policies');
