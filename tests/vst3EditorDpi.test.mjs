@@ -413,17 +413,13 @@ test('both acceptance scripts record first, restore in finally, read back, and f
 
 // ---- lane policies ---------------------------------------------------------
 const BASELINE_TREE = '2c63e3b7f952945d181207b40d8b3b086f75dd85';
-const BRANCH_TREE = 'a'.repeat(40);
+/** What the lane verifier was given, and decided, on the runner for `host`. */
+const recordedVerdict = host => JSON.parse(read(`docs/evidence/p9/p9-lane-verdict.${host}.json`));
+const BRANCH_TREE = recordedVerdict('branch').expectedNativeTree;
 const RECORDED = { branch: { verdict: 'NOT_VERIFIED', exitCode: 3 }, 'branch-second-display': { verdict: 'PASS', exitCode: 0 }, baseline: { verdict: 'FAIL', exitCode: 1 } };
-/** Evidence recorded on Windows for `host`, with a consistent restoration record. */
+/** Evidence recorded on Windows for `host`, exactly as the runner wrote it. A fresh copy each call. */
 function recordedEvidence(host) {
-  const report = JSON.parse(read(`docs/evidence/p9/p9-dpi-acceptance.${host}.json`));
-  const displays = report.environment.monitorsAtStart.map(m => ({ device: m.device, primary: m.primary, left: m.left, top: m.top,
-    width: m.width, height: m.height, effectiveDpi: m.effectiveDpi, scalePercent: Math.round(m.effectiveDpi * 100 / 96) }));
-  const snapshot = { monitorCount: displays.length, displays };
-  return { ...report, schemaVersion: 2, host, verdict: RECORDED[host].verdict, exitCode: RECORDED[host].exitCode, harnessErrors: [],
-    nativeSourceTree: host === 'baseline' ? BASELINE_TREE : BRANCH_TREE,
-    restoration: { ok: true, changesWereNeeded: true, original: snapshot, final: structuredClone(snapshot), differences: [], steps: [], errors: [] } };
+  return JSON.parse(read(`docs/evidence/p9/p9-dpi-acceptance.${host}.json`));
 }
 const laneOptions = (lane, overrides = {}) => ({ lane, exitCode: RECORDED[lane].exitCode,
   expectedNativeTree: lane === 'baseline' ? BASELINE_TREE : BRANCH_TREE, ...overrides });
@@ -440,6 +436,62 @@ const rejected = (result, pattern) => {
   assert.equal(result.ok, false, `must be rejected: ${result.summary}`);
   assert.ok(result.problems.some(problem => pattern.test(problem)), `expected a problem matching ${pattern}; got:\n${result.problems.join('\n')}`);
 };
+
+test('the checked-in evidence is what the runner produced, and is judged the same way here', () => {
+  for (const lane of ['branch', 'branch-second-display', 'baseline']) {
+    const report = recordedEvidence(lane);
+    const onRunner = recordedVerdict(lane);
+    // Nothing is filled in by this test: schema, verdict, exit code, source tree
+    // and the restoration record are the harness's own.
+    assert.equal(report.schemaVersion, 2);
+    assert.equal(report.host, lane);
+    assert.equal(report.verdict, RECORDED[lane].verdict);
+    assert.equal(report.exitCode, RECORDED[lane].exitCode);
+    assert.deepEqual(report.harnessErrors, []);
+    assert.equal(report.restoration.ok, true);
+    assert.deepEqual(report.restoration.differences, []);
+    assert.deepEqual(report.restoration.final.displays.map(d => [d.device, d.width, d.height, d.left, d.top, d.scalePercent, d.primary]),
+      report.restoration.original.displays.map(d => [d.device, d.width, d.height, d.left, d.top, d.scalePercent, d.primary]));
+    assert.equal(onRunner.ok, true);
+    assert.equal(onRunner.laneMayBeGreen, true);
+    assert.equal(onRunner.exitCode, RECORDED[lane].exitCode);
+    assert.equal(onRunner.commit, report.commit);
+    const here = evaluateLane(report, { lane, exitCode: onRunner.exitCode, commit: onRunner.commit, expectedNativeTree: onRunner.expectedNativeTree });
+    assert.deepEqual(here.problems, []);
+    assert.equal(here.ok, true);
+    assert.deepEqual(here.statuses, onRunner.statuses);
+  }
+  assert.equal(recordedVerdict('baseline').expectedNativeTree, BASELINE_TREE);
+  assert.equal(recordedEvidence('baseline').nativeSourceTree, BASELINE_TREE);
+  assert.notEqual(BRANCH_TREE, BASELINE_TREE);
+  // The two-display evidence really had two displays, and one of them needed putting back.
+  const two = recordedEvidence('branch-second-display');
+  assert.equal(two.restoration.original.monitorCount, 2);
+  assert.ok(two.restoration.steps.length >= 1, 'a restoring call was made and then verified');
+  for (const id of MULTI_MONITOR_CASES) assert.equal(two.statuses[id], 'PASS');
+  for (const id of MULTI_MONITOR_CASES) assert.equal(recordedEvidence('branch').statuses[id], 'NOT_VERIFIED');
+});
+
+test('the negative controls and the display gate recorded on the runner say what they must', () => {
+  const secondDisplay = JSON.parse(read('docs/evidence/p9/negative-control-second-display-policy.json'));
+  assert.equal(secondDisplay.lane, 'branch-second-display');
+  assert.equal(secondDisplay.ok, false);
+  assert.equal(secondDisplay.expectRejection, true);
+  assert.equal(secondDisplay.exitCode, 3);
+  assert.ok(secondDisplay.problems.some(p => /Exit code 3 .* is not accepted here/.test(p)));
+  for (const id of MULTI_MONITOR_CASES) assert.ok(secondDisplay.problems.some(p => p.startsWith(`${id} is NOT_VERIFIED`)), id);
+  const baseline = JSON.parse(read('docs/evidence/p9/negative-control-baseline-policy.json'));
+  assert.equal(baseline.lane, 'baseline');
+  assert.equal(baseline.ok, false);
+  assert.ok(baseline.problems.some(p => /P9-K is PASS; the defect was not reproduced/.test(p)));
+  const gate = JSON.parse(read('docs/evidence/p9/second-display-gate.json'));
+  assert.equal(gate.ok, true);
+  assert.deepEqual(gate.problems, []);
+  assert.equal(gate.facts.installerAvailable, true);
+  assert.equal(gate.facts.monitorCount, 2);
+  assert.ok(gate.facts.monitorCount > gate.facts.monitorsBeforeInstall);
+  assert.ok(gate.facts.virtualDisplayDevices.some(d => /^Virtual Display Driver \[OK\] ROOT\\DISPLAY\\/.test(d)));
+});
 
 test('the recorded evidence of each lane satisfies that lane\'s policy', () => {
   for (const lane of ['branch', 'branch-second-display', 'baseline']) {

@@ -1,93 +1,215 @@
 {
-  "schemaVersion": 1,
-  "generatedAt": "2026-11-15T12:11:18.558Z",
+  "schemaVersion": 2,
+  "generatedAt": "2026-11-17T06:10:57.993Z",
   "host": "branch-second-display",
-  "commit": "73a7b3df468cac1a661c7a0642a801a84009c0c3",
+  "commit": "8d956fa8f67da97e341612e585f746cb65a68c64",
+  "nativeSourceTree": "a5ce24b7bf63d2be6cab40854fd9e57b234554ab",
+  "verdict": "PASS",
+  "verdictReasons": [],
+  "exitCode": 0,
+  "restoration": {
+    "changesWereNeeded": true,
+    "attempts": 1,
+    "ok": true,
+    "original": {
+      "capturedAt": "2026-11-17T06:09:12.372Z",
+      "monitorCount": 2,
+      "displays": [
+        {
+          "device": "\\\\.\\DISPLAY1",
+          "primary": true,
+          "left": 0,
+          "top": 0,
+          "width": 1920,
+          "height": 1080,
+          "effectiveDpi": 96,
+          "scalePercent": 100,
+          "scaleSource": "windows-display-config",
+          "sourceIndex": 0
+        },
+        {
+          "device": "\\\\.\\DISPLAY2",
+          "primary": false,
+          "left": 1024,
+          "top": -1080,
+          "width": 1920,
+          "height": 1080,
+          "effectiveDpi": 96,
+          "scalePercent": 100,
+          "scaleSource": "windows-display-config",
+          "sourceIndex": 1
+        }
+      ]
+    },
+    "final": {
+      "capturedAt": "2026-11-17T06:10:57.349Z",
+      "monitorCount": 2,
+      "displays": [
+        {
+          "device": "\\\\.\\DISPLAY1",
+          "primary": true,
+          "left": 0,
+          "top": 0,
+          "width": 1920,
+          "height": 1080,
+          "effectiveDpi": 96,
+          "scalePercent": 100,
+          "scaleSource": "windows-display-config",
+          "sourceIndex": 0
+        },
+        {
+          "device": "\\\\.\\DISPLAY2",
+          "primary": false,
+          "left": 1024,
+          "top": -1080,
+          "width": 1920,
+          "height": 1080,
+          "effectiveDpi": 96,
+          "scalePercent": 100,
+          "scaleSource": "windows-display-config",
+          "sourceIndex": 1
+        }
+      ]
+    },
+    "differences": [],
+    "steps": [
+      {
+        "attempt": 1,
+        "device": "\\\\.\\DISPLAY2",
+        "setting": "scale",
+        "requested": 100,
+        "from": 150,
+        "result": {
+          "queryStatus": 0,
+          "relative": 0,
+          "maxScaleRel": 3,
+          "minScaleRel": 0,
+          "setStatus": 0
+        }
+      }
+    ],
+    "errors": []
+  },
+  "harnessErrors": [],
   "environment": {
+    "platform": "win32",
+    "arch": "x64",
+    "osRelease": "10.0.26100",
+    "node": "v22.23.4",
+    "isCi": true,
+    "runnerImage": "win25-vs2026",
+    "runnerImageVersion": "20261103.298.1",
+    "displayChangesAllowed": true,
     "monitorsAtStart": [
       {
-        "workWidth": 1920,
-        "height": 1080,
-        "workTop": 0,
-        "width": 1920,
-        "workLeft": 0,
-        "primary": true,
         "device": "\\\\.\\DISPLAY1",
         "effectiveDpi": 96,
         "workHeight": 1032,
+        "primary": true,
+        "handle": 65624,
+        "top": 0,
+        "workWidth": 1920,
+        "width": 1920,
+        "workLeft": 0,
+        "height": 1080,
         "left": 0,
-        "handle": 65628,
-        "top": 0
+        "workTop": 0
       },
       {
-        "workWidth": 1920,
-        "height": 1080,
-        "workTop": -1080,
-        "width": 1920,
-        "workLeft": 1024,
-        "primary": false,
         "device": "\\\\.\\DISPLAY2",
         "effectiveDpi": 96,
         "workHeight": 1032,
-        "left": 1024,
+        "primary": false,
         "handle": 131073,
-        "top": -1080
+        "top": -1080,
+        "workWidth": 1920,
+        "width": 1920,
+        "workLeft": 1024,
+        "height": 1080,
+        "left": 1024,
+        "workTop": -1080
       }
     ],
     "sourcesAtStart": [
       {
-        "minScaleRel": 0,
-        "maximumPercent": 175,
-        "curScaleRel": 0,
-        "sourceId": 0,
-        "dpiScaleQueryStatus": 0,
         "device": "\\\\.\\DISPLAY1",
-        "index": 0,
+        "minScaleRel": 0,
+        "dpiScaleQueryStatus": 0,
+        "recommendedPercent": 100,
         "maxScaleRel": 3,
+        "index": 0,
+        "sourceId": 0,
+        "maximumPercent": 175,
         "currentPercent": 100,
-        "recommendedPercent": 100
+        "curScaleRel": 0
       },
       {
-        "minScaleRel": 0,
-        "maximumPercent": 175,
-        "curScaleRel": 0,
-        "sourceId": 0,
-        "dpiScaleQueryStatus": 0,
         "device": "\\\\.\\DISPLAY2",
-        "index": 1,
+        "minScaleRel": 0,
+        "dpiScaleQueryStatus": 0,
+        "recommendedPercent": 100,
         "maxScaleRel": 3,
+        "index": 1,
+        "sourceId": 0,
+        "maximumPercent": 175,
         "currentPercent": 100,
-        "recommendedPercent": 100
+        "curScaleRel": 0
       }
     ],
     "monitorsAtEnd": [
       {
+        "handle": 65624,
+        "top": 0,
+        "workWidth": 1920,
+        "height": 1080,
+        "left": 0,
         "primary": true,
         "workTop": 0,
-        "workLeft": 0,
-        "workWidth": 1920,
-        "workHeight": 1032,
-        "handle": 65628,
-        "height": 1080,
-        "width": 1920,
-        "left": 0,
-        "top": 0,
         "effectiveDpi": 96,
-        "device": "\\\\.\\DISPLAY1"
+        "workLeft": 0,
+        "device": "\\\\.\\DISPLAY1",
+        "workHeight": 1032,
+        "width": 1920
       },
       {
+        "handle": 131073,
+        "top": -1080,
+        "workWidth": 1920,
+        "height": 1080,
+        "left": 1024,
         "primary": false,
         "workTop": -1080,
-        "workLeft": 1024,
-        "workWidth": 1920,
-        "workHeight": 1032,
-        "handle": 131073,
-        "height": 1080,
-        "width": 1920,
-        "left": 1024,
-        "top": -1080,
         "effectiveDpi": 96,
-        "device": "\\\\.\\DISPLAY2"
+        "workLeft": 1024,
+        "device": "\\\\.\\DISPLAY2",
+        "workHeight": 1032,
+        "width": 1920
+      }
+    ],
+    "sourcesAtEnd": [
+      {
+        "currentPercent": 100,
+        "curScaleRel": 0,
+        "maxScaleRel": 3,
+        "index": 0,
+        "dpiScaleQueryStatus": 0,
+        "minScaleRel": 0,
+        "recommendedPercent": 100,
+        "device": "\\\\.\\DISPLAY1",
+        "maximumPercent": 175,
+        "sourceId": 0
+      },
+      {
+        "currentPercent": 100,
+        "curScaleRel": 0,
+        "maxScaleRel": 3,
+        "index": 1,
+        "dpiScaleQueryStatus": 0,
+        "minScaleRel": 0,
+        "recommendedPercent": 100,
+        "device": "\\\\.\\DISPLAY2",
+        "maximumPercent": 175,
+        "sourceId": 0
       }
     ],
     "executedScales": [
@@ -207,7 +329,7 @@
               "ok": true,
               "children": [
                 {
-                  "class": "VSTGUI00007FFDAB6A0000",
+                  "class": "VSTGUI00007FFB1FA10000",
                   "height": 120,
                   "visible": true,
                   "width": 350
@@ -337,15 +459,15 @@
               },
               "childWindows": [
                 {
-                  "class": "VSTGUI00007FFDAB6A0000",
+                  "class": "VSTGUI00007FFB1FA10000",
                   "height": 120,
                   "visible": true,
                   "width": 350
                 }
               ],
               "style": 13565952,
-              "processId": 7380,
-              "hwnd": 328018,
+              "processId": 4664,
+              "hwnd": 262540,
               "windowRect": {
                 "bottom": 185,
                 "left": 26,
@@ -529,7 +651,7 @@
               "ok": true,
               "children": [
                 {
-                  "class": "VSTGUI00007FFDAB6A0000",
+                  "class": "VSTGUI00007FFB1FA10000",
                   "height": 150,
                   "visible": true,
                   "width": 437
@@ -667,15 +789,15 @@
               },
               "childWindows": [
                 {
-                  "class": "VSTGUI00007FFDAB6A0000",
+                  "class": "VSTGUI00007FFB1FA10000",
                   "height": 150,
                   "visible": true,
                   "width": 437
                 }
               ],
               "style": 13565952,
-              "processId": 3848,
-              "hwnd": 655714,
+              "processId": 9860,
+              "hwnd": 524838,
               "windowRect": {
                 "bottom": 421,
                 "left": 224,
@@ -859,7 +981,7 @@
               "ok": true,
               "children": [
                 {
-                  "class": "VSTGUI00007FFDAB6A0000",
+                  "class": "VSTGUI00007FFB1FA10000",
                   "height": 180,
                   "visible": true,
                   "width": 525
@@ -997,15 +1119,15 @@
               },
               "childWindows": [
                 {
-                  "class": "VSTGUI00007FFDAB6A0000",
+                  "class": "VSTGUI00007FFB1FA10000",
                   "height": 180,
                   "visible": true,
                   "width": 525
                 }
               ],
               "style": 13565952,
-              "processId": 7308,
-              "hwnd": 131654,
+              "processId": 6688,
+              "hwnd": 66154,
               "windowRect": {
                 "bottom": 464,
                 "left": 228,
@@ -1165,7 +1287,7 @@
               "ok": true,
               "children": [
                 {
-                  "class": "VSTGUI00007FFDAB6A0000",
+                  "class": "VSTGUI00007FFB1FA10000",
                   "height": 120,
                   "visible": true,
                   "width": 350
@@ -1303,7 +1425,7 @@
               "ok": true,
               "children": [
                 {
-                  "class": "VSTGUI00007FFDAB6A0000",
+                  "class": "VSTGUI00007FFB1FA10000",
                   "height": 150,
                   "visible": true,
                   "width": 437
@@ -1383,7 +1505,7 @@
             {
               "name": "on-second:slider-click-lands",
               "ok": true,
-              "actual": 0.4148148000240326,
+              "actual": 0.40740740299224854,
               "expected": 0.4,
               "tolerance": 0.06,
               "point": {
@@ -1506,32 +1628,32 @@
           ],
           "evidence": {
             "primary": {
-              "left": 0,
+              "effectiveDpi": 96,
               "top": 0,
+              "handle": 65624,
+              "device": "\\\\.\\DISPLAY1",
+              "workTop": 0,
               "workLeft": 0,
               "primary": true,
-              "effectiveDpi": 96,
-              "width": 1920,
-              "handle": 65628,
-              "height": 1080,
-              "device": "\\\\.\\DISPLAY1",
+              "left": 0,
               "workWidth": 1920,
-              "workTop": 0,
-              "workHeight": 1032
+              "width": 1920,
+              "workHeight": 1032,
+              "height": 1080
             },
             "second": {
-              "left": 1024,
+              "effectiveDpi": 120,
               "top": -1080,
+              "handle": 131073,
+              "device": "\\\\.\\DISPLAY2",
+              "workTop": -1080,
               "workLeft": 1024,
               "primary": false,
-              "effectiveDpi": 120,
-              "width": 1920,
-              "handle": 131073,
-              "height": 1080,
-              "device": "\\\\.\\DISPLAY2",
+              "left": 1024,
               "workWidth": 1920,
-              "workTop": -1080,
-              "workHeight": 1020
+              "width": 1920,
+              "workHeight": 1020,
+              "height": 1080
             }
           }
         }
@@ -1605,7 +1727,7 @@
               "ok": true,
               "children": [
                 {
-                  "class": "VSTGUI00007FFDAB6A0000",
+                  "class": "VSTGUI00007FFB1FA10000",
                   "height": 120,
                   "visible": true,
                   "width": 350
@@ -1743,7 +1865,7 @@
               "ok": true,
               "children": [
                 {
-                  "class": "VSTGUI00007FFDAB6A0000",
+                  "class": "VSTGUI00007FFB1FA10000",
                   "height": 180,
                   "visible": true,
                   "width": 525
@@ -1823,7 +1945,7 @@
             {
               "name": "on-second:slider-click-lands",
               "ok": true,
-              "actual": 0.4135802686214447,
+              "actual": 0.40740740299224854,
               "expected": 0.4,
               "tolerance": 0.06,
               "point": {
@@ -1946,32 +2068,32 @@
           ],
           "evidence": {
             "primary": {
-              "primary": true,
-              "top": 0,
-              "handle": 65628,
-              "effectiveDpi": 96,
-              "workWidth": 1920,
-              "workHeight": 1032,
-              "height": 1080,
+              "workLeft": 0,
               "device": "\\\\.\\DISPLAY1",
               "width": 1920,
+              "effectiveDpi": 96,
+              "workHeight": 1032,
+              "height": 1080,
+              "top": 0,
               "workTop": 0,
-              "workLeft": 0,
-              "left": 0
+              "workWidth": 1920,
+              "handle": 65624,
+              "left": 0,
+              "primary": true
             },
             "second": {
-              "primary": false,
-              "top": -1080,
-              "handle": 131073,
-              "effectiveDpi": 144,
-              "workWidth": 1920,
-              "workHeight": 1008,
-              "height": 1080,
+              "workLeft": 1024,
               "device": "\\\\.\\DISPLAY2",
               "width": 1920,
+              "effectiveDpi": 144,
+              "workHeight": 1008,
+              "height": 1080,
+              "top": -1080,
               "workTop": -1080,
-              "workLeft": 1024,
-              "left": 1024
+              "workWidth": 1920,
+              "handle": 131073,
+              "left": 1024,
+              "primary": false
             }
           }
         }
@@ -2039,7 +2161,7 @@
               "ok": true,
               "children": [
                 {
-                  "class": "VSTGUI00007FFDAB6A0000",
+                  "class": "VSTGUI00007FFB1FA10000",
                   "height": 120,
                   "visible": true,
                   "width": 350
@@ -2159,7 +2281,7 @@
               "ok": true,
               "children": [
                 {
-                  "class": "VSTGUI00007FFDAB6A0000",
+                  "class": "VSTGUI00007FFB1FA10000",
                   "height": 150,
                   "visible": true,
                   "width": 437
@@ -2279,7 +2401,7 @@
               "ok": true,
               "children": [
                 {
-                  "class": "VSTGUI00007FFDAB6A0000",
+                  "class": "VSTGUI00007FFB1FA10000",
                   "height": 120,
                   "visible": true,
                   "width": 350
@@ -2399,7 +2521,7 @@
               "ok": true,
               "children": [
                 {
-                  "class": "VSTGUI00007FFDAB6A0000",
+                  "class": "VSTGUI00007FFB1FA10000",
                   "height": 150,
                   "visible": true,
                   "width": 437
@@ -2519,7 +2641,7 @@
               "ok": true,
               "children": [
                 {
-                  "class": "VSTGUI00007FFDAB6A0000",
+                  "class": "VSTGUI00007FFB1FA10000",
                   "height": 120,
                   "visible": true,
                   "width": 350
@@ -2639,7 +2761,7 @@
               "ok": true,
               "children": [
                 {
-                  "class": "VSTGUI00007FFDAB6A0000",
+                  "class": "VSTGUI00007FFB1FA10000",
                   "height": 150,
                   "visible": true,
                   "width": 437
@@ -2808,7 +2930,7 @@
               "ok": true,
               "children": [
                 {
-                  "class": "VSTGUI00007FFDAB6A0000",
+                  "class": "VSTGUI00007FFB1FA10000",
                   "height": 120,
                   "visible": true,
                   "width": 350
@@ -2955,8 +3077,8 @@
             {
               "name": "rendered-not-blank",
               "ok": true,
-              "distinctColours": 668,
-              "dominantColourFraction": 0.0889
+              "distinctColours": 671,
+              "dominantColourFraction": 0.0874
             },
             {
               "name": "content-reaches-edges",
@@ -3026,7 +3148,7 @@
               "ok": true,
               "children": [
                 {
-                  "class": "VSTGUI00007FFDAB6A0000",
+                  "class": "VSTGUI00007FFB1FA10000",
                   "height": 120,
                   "visible": true,
                   "width": 350
@@ -3146,7 +3268,7 @@
               "ok": true,
               "children": [
                 {
-                  "class": "VSTGUI00007FFDAB6A0000",
+                  "class": "VSTGUI00007FFB1FA10000",
                   "height": 180,
                   "visible": true,
                   "width": 525
@@ -3266,7 +3388,7 @@
               "ok": true,
               "children": [
                 {
-                  "class": "VSTGUI00007FFDAB6A0000",
+                  "class": "VSTGUI00007FFB1FA10000",
                   "height": 120,
                   "visible": true,
                   "width": 350
@@ -3386,7 +3508,7 @@
               "ok": true,
               "children": [
                 {
-                  "class": "VSTGUI00007FFDAB6A0000",
+                  "class": "VSTGUI00007FFB1FA10000",
                   "height": 180,
                   "visible": true,
                   "width": 525
@@ -3506,7 +3628,7 @@
               "ok": true,
               "children": [
                 {
-                  "class": "VSTGUI00007FFDAB6A0000",
+                  "class": "VSTGUI00007FFB1FA10000",
                   "height": 120,
                   "visible": true,
                   "width": 350
@@ -3626,7 +3748,7 @@
               "ok": true,
               "children": [
                 {
-                  "class": "VSTGUI00007FFDAB6A0000",
+                  "class": "VSTGUI00007FFB1FA10000",
                   "height": 180,
                   "visible": true,
                   "width": 525
@@ -3795,7 +3917,7 @@
               "ok": true,
               "children": [
                 {
-                  "class": "VSTGUI00007FFDAB6A0000",
+                  "class": "VSTGUI00007FFB1FA10000",
                   "height": 120,
                   "visible": true,
                   "width": 350
@@ -3942,8 +4064,8 @@
             {
               "name": "rendered-not-blank",
               "ok": true,
-              "distinctColours": 668,
-              "dominantColourFraction": 0.0884
+              "distinctColours": 671,
+              "dominantColourFraction": 0.0874
             },
             {
               "name": "content-reaches-edges",
@@ -4345,8 +4467,8 @@
               "cycles": [
                 {
                   "cycle": 1,
-                  "pid": 4100,
-                  "hwnd": 1507808,
+                  "pid": 10004,
+                  "hwnd": 197164,
                   "visible": true,
                   "sizeOk": true,
                   "client": [
@@ -4362,8 +4484,8 @@
                 },
                 {
                   "cycle": 2,
-                  "pid": 936,
-                  "hwnd": 328142,
+                  "pid": 4136,
+                  "hwnd": 262702,
                   "visible": true,
                   "sizeOk": true,
                   "client": [
@@ -4379,8 +4501,8 @@
                 },
                 {
                   "cycle": 3,
-                  "pid": 9256,
-                  "hwnd": 459138,
+                  "pid": 5792,
+                  "hwnd": 328232,
                   "visible": true,
                   "sizeOk": true,
                   "client": [
@@ -4396,8 +4518,8 @@
                 },
                 {
                   "cycle": 4,
-                  "pid": 7832,
-                  "hwnd": 590178,
+                  "pid": 2324,
+                  "hwnd": 459302,
                   "visible": true,
                   "sizeOk": true,
                   "client": [
@@ -4421,11 +4543,11 @@
               "name": "every-helper-process-exited",
               "ok": true,
               "pids": [
-                5936,
-                4100,
-                936,
-                9256,
-                7832
+                508,
+                10004,
+                4136,
+                5792,
+                2324
               ],
               "exited": [
                 true,
@@ -4461,8 +4583,8 @@
               "cycles": [
                 {
                   "cycle": 1,
-                  "pid": 7220,
-                  "hwnd": 655822,
+                  "pid": 4712,
+                  "hwnd": 590382,
                   "visible": true,
                   "sizeOk": true,
                   "client": [
@@ -4478,8 +4600,8 @@
                 },
                 {
                   "cycle": 2,
-                  "pid": 2440,
-                  "hwnd": 655680,
+                  "pid": 3412,
+                  "hwnd": 721452,
                   "visible": true,
                   "sizeOk": true,
                   "client": [
@@ -4495,8 +4617,8 @@
                 },
                 {
                   "cycle": 3,
-                  "pid": 6564,
-                  "hwnd": 1310816,
+                  "pid": 3512,
+                  "hwnd": 655924,
                   "visible": true,
                   "sizeOk": true,
                   "client": [
@@ -4512,8 +4634,8 @@
                 },
                 {
                   "cycle": 4,
-                  "pid": 10196,
-                  "hwnd": 917890,
+                  "pid": 6716,
+                  "hwnd": 852518,
                   "visible": true,
                   "sizeOk": true,
                   "client": [
@@ -4537,11 +4659,11 @@
               "name": "every-helper-process-exited",
               "ok": true,
               "pids": [
-                1720,
-                7220,
-                2440,
-                6564,
-                10196
+                1760,
+                4712,
+                3412,
+                3512,
+                6716
               ],
               "exited": [
                 true,
@@ -4577,8 +4699,8 @@
               "cycles": [
                 {
                   "cycle": 1,
-                  "pid": 2336,
-                  "hwnd": 1835054,
+                  "pid": 8488,
+                  "hwnd": 197234,
                   "visible": true,
                   "sizeOk": true,
                   "client": [
@@ -4594,8 +4716,8 @@
                 },
                 {
                   "cycle": 2,
-                  "pid": 1556,
-                  "hwnd": 393816,
+                  "pid": 7568,
+                  "hwnd": 328304,
                   "visible": true,
                   "sizeOk": true,
                   "client": [
@@ -4611,8 +4733,8 @@
                 },
                 {
                   "cycle": 3,
-                  "pid": 8220,
-                  "hwnd": 328270,
+                  "pid": 3024,
+                  "hwnd": 328308,
                   "visible": true,
                   "sizeOk": true,
                   "client": [
@@ -4628,8 +4750,8 @@
                 },
                 {
                   "cycle": 4,
-                  "pid": 2988,
-                  "hwnd": 852548,
+                  "pid": 1416,
+                  "hwnd": 393834,
                   "visible": true,
                   "sizeOk": true,
                   "client": [
@@ -4653,11 +4775,11 @@
               "name": "every-helper-process-exited",
               "ok": true,
               "pids": [
-                7808,
-                2336,
-                1556,
-                8220,
-                2988
+                2580,
+                8488,
+                7568,
+                3024,
+                1416
               ],
               "exited": [
                 true,
@@ -4727,7 +4849,7 @@
             {
               "name": "mouse:click-hit-plugin-window",
               "ok": true,
-              "hitWindowClass": "VSTGUI00007FFDAB6A0000"
+              "hitWindowClass": "VSTGUI00007FFB1FA10000"
             },
             {
               "name": "mouse:press-delivered",
@@ -4736,7 +4858,7 @@
             {
               "name": "mouse:slider-value-at-25-percent",
               "ok": true,
-              "actual": 0.26851850748062134,
+              "actual": 0.25925925374031067,
               "expected": 0.25,
               "tolerance": 0.06,
               "point": {
@@ -4826,7 +4948,7 @@
             {
               "name": "mouse:click-hit-plugin-window",
               "ok": true,
-              "hitWindowClass": "VSTGUI00007FFDAB6A0000"
+              "hitWindowClass": "VSTGUI00007FFB1FA10000"
             },
             {
               "name": "mouse:press-delivered",
@@ -4925,7 +5047,7 @@
             {
               "name": "mouse:click-hit-plugin-window",
               "ok": true,
-              "hitWindowClass": "VSTGUI00007FFDAB6A0000"
+              "hitWindowClass": "VSTGUI00007FFB1FA10000"
             },
             {
               "name": "mouse:press-delivered",
@@ -4949,7 +5071,7 @@
             {
               "name": "mouse:slider-value-at-80-percent",
               "ok": true,
-              "actual": 0.8086419701576233,
+              "actual": 0.8148148059844971,
               "expected": 0.8,
               "tolerance": 0.06,
               "point": {
@@ -5034,12 +5156,12 @@
               "ok": true,
               "actual": 0,
               "expected": 0,
-              "hwnd": 328018
+              "hwnd": 262540
             },
             {
               "name": "helper-process-exited",
               "ok": true,
-              "pid": 7380
+              "pid": 4664
             },
             {
               "name": "state-restored-after-reopen",
@@ -5096,7 +5218,7 @@
               "ok": true,
               "children": [
                 {
-                  "class": "VSTGUI00007FFDAB6A0000",
+                  "class": "VSTGUI00007FFB1FA10000",
                   "height": 120,
                   "visible": true,
                   "width": 350
@@ -5196,12 +5318,12 @@
               "ok": true,
               "actual": 0,
               "expected": 0,
-              "hwnd": 655714
+              "hwnd": 524838
             },
             {
               "name": "helper-process-exited",
               "ok": true,
-              "pid": 3848
+              "pid": 9860
             },
             {
               "name": "state-restored-after-reopen",
@@ -5258,7 +5380,7 @@
               "ok": true,
               "children": [
                 {
-                  "class": "VSTGUI00007FFDAB6A0000",
+                  "class": "VSTGUI00007FFB1FA10000",
                   "height": 150,
                   "visible": true,
                   "width": 437
@@ -5342,8 +5464,8 @@
             {
               "name": "edited-gain-is-in-captured-state",
               "ok": true,
-              "captured": 0.8086419701576233,
-              "lastEdited": 0.8086419701576233
+              "captured": 0.8148148059844971,
+              "lastEdited": 0.8148148059844971
             },
             {
               "name": "window-destroyed",
@@ -5358,18 +5480,18 @@
               "ok": true,
               "actual": 0,
               "expected": 0,
-              "hwnd": 131654
+              "hwnd": 66154
             },
             {
               "name": "helper-process-exited",
               "ok": true,
-              "pid": 7308
+              "pid": 6688
             },
             {
               "name": "state-restored-after-reopen",
               "ok": true,
-              "restored": 0.8086419701576233,
-              "expected": 0.8086419701576233
+              "restored": 0.8148148059844971,
+              "expected": 0.8148148059844971
             },
             {
               "name": "reopened:window-dpi",
@@ -5420,7 +5542,7 @@
               "ok": true,
               "children": [
                 {
-                  "class": "VSTGUI00007FFDAB6A0000",
+                  "class": "VSTGUI00007FFB1FA10000",
                   "height": 180,
                   "visible": true,
                   "width": 525
@@ -5568,7 +5690,7 @@
               "ok": true,
               "children": [
                 {
-                  "class": "VSTGUI00007FFDAB6A0000",
+                  "class": "VSTGUI00007FFB1FA10000",
                   "height": 150,
                   "visible": true,
                   "width": 437
@@ -5720,7 +5842,7 @@
               "ok": true,
               "children": [
                 {
-                  "class": "VSTGUI00007FFDAB6A0000",
+                  "class": "VSTGUI00007FFB1FA10000",
                   "height": 180,
                   "visible": true,
                   "width": 525
@@ -5808,7 +5930,7 @@
             {
               "name": "to-150:slider-click-lands",
               "ok": true,
-              "actual": 0.7160494327545166,
+              "actual": 0.709876537322998,
               "expected": 0.7,
               "tolerance": 0.06,
               "point": {
@@ -5872,7 +5994,7 @@
               "ok": true,
               "children": [
                 {
-                  "class": "VSTGUI00007FFDAB6A0000",
+                  "class": "VSTGUI00007FFB1FA10000",
                   "height": 150,
                   "visible": true,
                   "width": 437
@@ -5940,8 +6062,8 @@
             {
               "name": "rendered-not-blank",
               "ok": true,
-              "distinctColours": 663,
-              "dominantColourFraction": 0.0781
+              "distinctColours": 662,
+              "dominantColourFraction": 0.0791
             },
             {
               "name": "content-reaches-edges",
@@ -5952,8 +6074,8 @@
             {
               "name": "layout-matches-100-percent",
               "ok": true,
-              "meanAbsDifference": 2.465,
-              "maxCellDifference": 122.333,
+              "meanAbsDifference": 2.456,
+              "maxCellDifference": 121.333,
               "limit": 16,
               "sizes": "350x120 vs 437x150"
             },
@@ -6024,7 +6146,7 @@
               "ok": true,
               "children": [
                 {
-                  "class": "VSTGUI00007FFDAB6A0000",
+                  "class": "VSTGUI00007FFB1FA10000",
                   "height": 120,
                   "visible": true,
                   "width": 350
@@ -6570,7 +6692,7 @@
               "ok": true,
               "children": [
                 {
-                  "class": "VSTGUI00007FFDAB6A0000",
+                  "class": "VSTGUI00007FFB1FA10000",
                   "height": 180,
                   "visible": true,
                   "width": 525
@@ -6704,7 +6826,7 @@
               "ok": true,
               "children": [
                 {
-                  "class": "VSTGUI00007FFDAB6A0000",
+                  "class": "VSTGUI00007FFB1FA10000",
                   "height": 120,
                   "visible": true,
                   "width": 350
@@ -6780,8 +6902,7 @@
   "notes": [
     "title-drag geometry (dual-100-125): enter | getDpiScaledSize 96 | getDpiScaledSize 96 | getDpiScaledSize 96 | posChanging 777,505,366,159 f204 | getDpiScaledSize 96 | posChanged 777,505,366,159 f204 | size 348,112 | dpiChanged 96 777,505,366,159 | posChanging 0,0,366,159 f16 PD | size 350,120 PD | posChanging 777,505,366,159 f14 FD | exit",
     "title-drag geometry (dual-100-150): enter | getDpiScaledSize 96 | getDpiScaledSize 96 | getDpiScaledSize 96 | posChanging 777,507,366,159 f204 | getDpiScaledSize 96 | posChanged 777,507,366,159 f204 | size 344,103 | dpiChanged 96 777,507,366,159 | posChanging 0,0,366,159 f16 PD | size 350,120 PD | posChanging 777,507,366,159 f14 FD | exit",
-    "Display scale of \\\\.\\DISPLAY1 restored to 100%: true",
-    "Display scale of \\\\.\\DISPLAY2 restored to 100%: true"
+    "display restoration: OK. Final configuration read back from Windows equals the original: \\\\.\\DISPLAY1 1920x1080 at (0,0) 100% (96 DPI) primary; \\\\.\\DISPLAY2 1920x1080 at (1024,-1080) 100% (96 DPI). Restoring calls: 1, attempts: 1."
   ],
   "screenshots": [
     {
@@ -6789,17 +6910,17 @@
       "file": "branch-second-display-single-100.png",
       "client": "branch-second-display-single-100.client.png",
       "bounds": {
+        "left": 33,
         "height": 152,
-        "isWindow": true,
-        "top": 26,
+        "dpi": 96,
+        "width": 352,
+        "source": "DWMWA_EXTENDED_FRAME_BOUNDS",
         "clientTop": 57,
         "clientWidth": 350,
-        "left": 33,
-        "source": "DWMWA_EXTENDED_FRAME_BOUNDS",
         "clientHeight": 120,
-        "clientLeft": 34,
-        "width": 352,
-        "dpi": 96
+        "top": 26,
+        "isWindow": true,
+        "clientLeft": 34
       },
       "measured": {
         "samples": 2048,
@@ -6814,17 +6935,17 @@
       "file": "branch-second-display-single-125.png",
       "client": "branch-second-display-single-125.client.png",
       "bounds": {
-        "clientHeight": 150,
-        "clientTop": 262,
-        "source": "DWMWA_EXTENDED_FRAME_BOUNDS",
-        "width": 439,
         "left": 232,
+        "dpi": 120,
         "isWindow": true,
-        "clientWidth": 437,
+        "width": 439,
+        "source": "DWMWA_EXTENDED_FRAME_BOUNDS",
+        "clientTop": 262,
         "clientLeft": 233,
         "top": 224,
-        "dpi": 120,
-        "height": 189
+        "clientWidth": 437,
+        "height": 189,
+        "clientHeight": 150
       },
       "measured": {
         "samples": 2048,
@@ -6839,17 +6960,17 @@
       "file": "branch-second-display-single-150.png",
       "client": "branch-second-display-single-150.client.png",
       "bounds": {
-        "isWindow": true,
         "top": 228,
-        "dpi": 144,
-        "source": "DWMWA_EXTENDED_FRAME_BOUNDS",
-        "left": 237,
         "clientLeft": 239,
-        "clientHeight": 180,
-        "clientWidth": 525,
         "clientTop": 273,
+        "left": 237,
+        "clientHeight": 180,
+        "source": "DWMWA_EXTENDED_FRAME_BOUNDS",
+        "height": 227,
+        "clientWidth": 525,
+        "dpi": 144,
         "width": 529,
-        "height": 227
+        "isWindow": true
       },
       "measured": {
         "samples": 2048,
@@ -6864,17 +6985,17 @@
       "file": "branch-second-display-live-1-to-125.png",
       "client": "branch-second-display-live-1-to-125.client.png",
       "bounds": {
-        "top": 156,
-        "clientWidth": 437,
-        "clientLeft": 165,
-        "isWindow": true,
-        "clientTop": 194,
-        "left": 164,
         "dpi": 120,
-        "height": 189,
         "source": "DWMWA_EXTENDED_FRAME_BOUNDS",
+        "clientWidth": 437,
+        "clientTop": 194,
+        "top": 156,
+        "width": 439,
+        "clientLeft": 165,
         "clientHeight": 150,
-        "width": 439
+        "left": 164,
+        "height": 189,
+        "isWindow": true
       },
       "measured": {
         "samples": 2048,
@@ -6889,17 +7010,17 @@
       "file": "branch-second-display-live-2-to-150.png",
       "client": "branch-second-display-live-2-to-150.client.png",
       "bounds": {
-        "left": 165,
-        "clientWidth": 525,
         "clientHeight": 180,
-        "isWindow": true,
-        "clientLeft": 167,
-        "source": "DWMWA_EXTENDED_FRAME_BOUNDS",
-        "dpi": 144,
         "top": 156,
-        "height": 227,
         "clientTop": 201,
-        "width": 529
+        "isWindow": true,
+        "dpi": 144,
+        "source": "DWMWA_EXTENDED_FRAME_BOUNDS",
+        "clientWidth": 525,
+        "width": 529,
+        "height": 227,
+        "clientLeft": 167,
+        "left": 165
       },
       "measured": {
         "samples": 2048,
@@ -6914,22 +7035,22 @@
       "file": "branch-second-display-live-3-to-125.png",
       "client": "branch-second-display-live-3-to-125.client.png",
       "bounds": {
-        "clientLeft": 165,
-        "width": 439,
         "source": "DWMWA_EXTENDED_FRAME_BOUNDS",
+        "clientHeight": 150,
+        "dpi": 120,
         "top": 156,
         "left": 164,
-        "isWindow": true,
         "clientTop": 194,
-        "height": 189,
-        "dpi": 120,
+        "isWindow": true,
         "clientWidth": 437,
-        "clientHeight": 150
+        "height": 189,
+        "width": 439,
+        "clientLeft": 165
       },
       "measured": {
         "samples": 2048,
-        "distinctColours": 663,
-        "dominantColourFraction": 0.0781,
+        "distinctColours": 662,
+        "dominantColourFraction": 0.0791,
         "distinctColoursInRightStrip": 114,
         "distinctColoursInBottomStrip": 110
       }
@@ -6939,17 +7060,17 @@
       "file": "branch-second-display-live-4-to-100.png",
       "client": "branch-second-display-live-4-to-100.client.png",
       "bounds": {
-        "isWindow": true,
-        "source": "DWMWA_EXTENDED_FRAME_BOUNDS",
-        "dpi": 96,
-        "width": 352,
-        "clientHeight": 120,
+        "left": 163,
         "top": 156,
-        "height": 152,
         "clientTop": 187,
-        "clientLeft": 164,
+        "source": "DWMWA_EXTENDED_FRAME_BOUNDS",
+        "width": 352,
+        "dpi": 96,
         "clientWidth": 350,
-        "left": 163
+        "isWindow": true,
+        "clientLeft": 164,
+        "height": 152,
+        "clientHeight": 120
       },
       "measured": {
         "samples": 2048,
@@ -6964,17 +7085,17 @@
       "file": "branch-second-display-live-resized-at-150.png",
       "client": "branch-second-display-live-resized-at-150.client.png",
       "bounds": {
-        "clientLeft": 167,
-        "clientHeight": 630,
-        "left": 165,
-        "clientWidth": 960,
-        "top": 156,
-        "clientTop": 201,
-        "source": "DWMWA_EXTENDED_FRAME_BOUNDS",
-        "height": 677,
-        "dpi": 144,
         "isWindow": true,
-        "width": 964
+        "dpi": 144,
+        "clientTop": 201,
+        "left": 165,
+        "height": 677,
+        "source": "DWMWA_EXTENDED_FRAME_BOUNDS",
+        "clientHeight": 630,
+        "top": 156,
+        "clientWidth": 960,
+        "width": 964,
+        "clientLeft": 167
       },
       "measured": {
         "samples": 2048,
@@ -6989,17 +7110,17 @@
       "file": "branch-second-display-no-content-scale-at-150.png",
       "client": "branch-second-display-no-content-scale-at-150.client.png",
       "bounds": {
-        "dpi": 144,
         "clientWidth": 350,
-        "clientHeight": 120,
-        "source": "DWMWA_EXTENDED_FRAME_BOUNDS",
         "clientLeft": 49,
-        "height": 167,
-        "clientTop": 83,
-        "isWindow": true,
-        "top": 38,
         "width": 354,
-        "left": 47
+        "clientTop": 83,
+        "source": "DWMWA_EXTENDED_FRAME_BOUNDS",
+        "top": 38,
+        "height": 167,
+        "dpi": 144,
+        "left": 47,
+        "isWindow": true,
+        "clientHeight": 120
       },
       "measured": {
         "samples": 2048,
@@ -7014,17 +7135,17 @@
       "file": "branch-second-display-fixed-size-at-150.png",
       "client": "branch-second-display-fixed-size-at-150.client.png",
       "bounds": {
-        "height": 227,
-        "clientLeft": 63,
-        "clientWidth": 525,
-        "clientTop": 97,
         "isWindow": true,
-        "top": 52,
         "dpi": 144,
+        "clientHeight": 180,
+        "clientLeft": 63,
+        "clientTop": 97,
         "source": "DWMWA_EXTENDED_FRAME_BOUNDS",
-        "width": 529,
+        "top": 52,
+        "height": 227,
+        "clientWidth": 525,
         "left": 61,
-        "clientHeight": 180
+        "width": 529
       },
       "measured": {
         "samples": 2048,
@@ -7039,17 +7160,17 @@
       "file": "branch-second-display-dual-100-125-on-primary.png",
       "client": "branch-second-display-dual-100-125-on-primary.client.png",
       "bounds": {
-        "left": 85,
-        "height": 152,
-        "source": "DWMWA_EXTENDED_FRAME_BOUNDS",
-        "clientWidth": 350,
-        "clientHeight": 120,
-        "isWindow": true,
-        "dpi": 96,
+        "top": 78,
         "clientTop": 109,
-        "width": 352,
+        "clientWidth": 350,
+        "left": 85,
+        "source": "DWMWA_EXTENDED_FRAME_BOUNDS",
         "clientLeft": 86,
-        "top": 78
+        "clientHeight": 120,
+        "height": 152,
+        "dpi": 96,
+        "isWindow": true,
+        "width": 352
       },
       "measured": {
         "samples": 2048,
@@ -7064,17 +7185,17 @@
       "file": "branch-second-display-dual-100-125-on-second.png",
       "client": "branch-second-display-dual-100-125-on-second.client.png",
       "bounds": {
-        "dpi": 120,
-        "left": 1152,
-        "height": 189,
-        "clientHeight": 150,
-        "top": -960,
         "clientWidth": 437,
-        "width": 439,
-        "clientLeft": 1153,
         "isWindow": true,
+        "height": 189,
         "source": "DWMWA_EXTENDED_FRAME_BOUNDS",
-        "clientTop": -922
+        "left": 1152,
+        "top": -960,
+        "width": 439,
+        "clientTop": -922,
+        "clientLeft": 1153,
+        "dpi": 120,
+        "clientHeight": 150
       },
       "measured": {
         "samples": 2048,
@@ -7089,22 +7210,22 @@
       "file": "branch-second-display-dual-100-125-after-title-drag.png",
       "client": "branch-second-display-dual-100-125-after-title-drag.client.png",
       "bounds": {
-        "clientHeight": 120,
-        "clientTop": 536,
-        "left": 784,
-        "height": 152,
-        "clientLeft": 785,
-        "dpi": 96,
         "source": "DWMWA_EXTENDED_FRAME_BOUNDS",
+        "clientHeight": 120,
+        "height": 152,
+        "width": 352,
+        "left": 784,
         "clientWidth": 350,
         "isWindow": true,
-        "width": 352,
+        "clientLeft": 785,
+        "clientTop": 536,
+        "dpi": 96,
         "top": 505
       },
       "measured": {
         "samples": 2048,
-        "distinctColours": 668,
-        "dominantColourFraction": 0.0889,
+        "distinctColours": 671,
+        "dominantColourFraction": 0.0874,
         "distinctColoursInRightStrip": 105,
         "distinctColoursInBottomStrip": 110
       }
@@ -7114,17 +7235,17 @@
       "file": "branch-second-display-dual-100-150-on-primary.png",
       "client": "branch-second-display-dual-100-150-on-primary.client.png",
       "bounds": {
-        "clientTop": 161,
-        "height": 152,
-        "width": 352,
-        "left": 137,
-        "isWindow": true,
         "source": "DWMWA_EXTENDED_FRAME_BOUNDS",
-        "clientHeight": 120,
-        "clientWidth": 350,
+        "clientTop": 161,
+        "width": 352,
         "top": 130,
+        "left": 137,
         "dpi": 96,
-        "clientLeft": 138
+        "clientLeft": 138,
+        "clientWidth": 350,
+        "isWindow": true,
+        "clientHeight": 120,
+        "height": 152
       },
       "measured": {
         "samples": 2048,
@@ -7139,17 +7260,17 @@
       "file": "branch-second-display-dual-100-150-on-second.png",
       "client": "branch-second-display-dual-100-150-on-second.client.png",
       "bounds": {
-        "clientLeft": 1155,
-        "left": 1153,
-        "dpi": 144,
-        "isWindow": true,
-        "clientWidth": 525,
         "clientHeight": 180,
-        "width": 529,
+        "isWindow": true,
+        "dpi": 144,
+        "clientTop": -915,
+        "left": 1153,
         "height": 227,
+        "clientWidth": 525,
         "source": "DWMWA_EXTENDED_FRAME_BOUNDS",
         "top": -960,
-        "clientTop": -915
+        "width": 529,
+        "clientLeft": 1155
       },
       "measured": {
         "samples": 2048,
@@ -7164,22 +7285,22 @@
       "file": "branch-second-display-dual-100-150-after-title-drag.png",
       "client": "branch-second-display-dual-100-150-after-title-drag.client.png",
       "bounds": {
-        "height": 152,
-        "dpi": 96,
-        "clientLeft": 785,
-        "width": 352,
-        "left": 784,
         "clientTop": 538,
-        "top": 507,
-        "clientWidth": 350,
         "clientHeight": 120,
         "source": "DWMWA_EXTENDED_FRAME_BOUNDS",
-        "isWindow": true
+        "width": 352,
+        "left": 784,
+        "dpi": 96,
+        "top": 507,
+        "clientLeft": 785,
+        "isWindow": true,
+        "height": 152,
+        "clientWidth": 350
       },
       "measured": {
         "samples": 2048,
-        "distinctColours": 668,
-        "dominantColourFraction": 0.0884,
+        "distinctColours": 671,
+        "dominantColourFraction": 0.0874,
         "distinctColoursInRightStrip": 105,
         "distinctColoursInBottomStrip": 110
       }

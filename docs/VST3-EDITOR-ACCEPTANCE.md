@@ -12,9 +12,13 @@ other. They answer different questions and are reported independently:
 | **Helper-level** (Part 1) | Does the native helper create a real `HWND`, attach the real AGain `IPlugView`, and route input/state honestly? | `Native VST3 Validation / Native DSP (windows-latest)` |
 | **Packaged-application** (Part 1b) | Does the installed Apex app, driven through its own visible controls, deliver a genuine edit into project state and persist it? | `Desktop Validation / windows-package` |
 
-**Status at `684ff89`, the measured commit.** Earlier measurements were taken at
-`100011b` and `7ab6d85`; `684ff89` adds the high-DPI work (P9) and re-ran every
-workflow. Only documentation and checked-in evidence have changed since `684ff89`.
+**Status at `84d682e`, the measured commit.** Earlier measurements were taken at
+`100011b`, `7ab6d85` and `684ff89`. `684ff89` added the high-DPI work (P9); `84d682e`
+changes no native code and makes the P9 acceptance stricter (the two-display lane
+fails closed, display restoration is part of the verdict, the baseline lane must
+reproduce the known defect), and every workflow was run again on it with the same
+figures as below. Since `84d682e` only documentation, checked-in evidence and a test
+that reads that evidence have changed.
 
 (Phrased against the measured commit rather than "the current head" on purpose: a commit
 that names the head becomes stale the moment it is committed.)
@@ -642,8 +646,9 @@ run by `.github/workflows/desktop-validation.yml` (`windows-package`).
 | `p9b-multi-monitor` | Moving the editor between displays with different scales (not executed by CI) |
 | `harness` | The driver itself completed |
 
-Result at `684ff89`, the measured commit (`windows-package`, real installed app,
-Desktop Validation #1225): **10 PASS, 0 FAIL, 1 NOT_VERIFIED.** At `7ab6d85`
+Result at `84d682e`, the measured commit (`windows-package`, real installed app,
+Desktop Validation #1228; the same at `684ff89`, #1225): **10 PASS, 0 FAIL,
+1 NOT_VERIFIED.** At `7ab6d85`
 (Desktop Validation #1213) the figures were 9 PASS and 1 NOT_VERIFIED, because
 `p9-dpi-125-150` was then a hard-coded `NOT_VERIFIED`.
 
@@ -668,6 +673,13 @@ and compares the window with the 100% reference:
 ```
 
 Without that variable the script changes nothing and reports the row `NOT_VERIFIED`.
+
+The row is `PASS` only if the display is also put back: the configuration is recorded
+before the first change (here 1024×768 at 100%), restored in a `finally` block, read
+back from Windows and compared. The record is `displayRestoration` in the evidence
+file, and a display that is not back makes the row `FAIL`
+([details](VST3-EDITOR-DPI-ACCEPTANCE.md#display-restoration-is-part-of-the-verdict)).
+Run #1228: restored and verified after two restoring calls.
 
 `p9b-multi-monitor` is the only `NOT_VERIFIED` row. Moving the packaged editor between
 displays with different scales needs two displays and something that drags the window;
