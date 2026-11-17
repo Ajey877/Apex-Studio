@@ -89,7 +89,9 @@ Linux it is `false`).
 Not covered here, and therefore **not claimed**:
 
 - actual Windows window creation, painting, DPI scaling, keyboard/mouse input
-  and plug-in resizing (requires a real Windows x64 desktop session);
+  and plug-in resizing (requires a real Windows x64 desktop session; the Windows
+  results are in `docs/VST3-EDITOR-ACCEPTANCE.md` and, for 125%/150% and
+  multi-monitor behaviour, `docs/VST3-EDITOR-DPI-ACCEPTANCE.md`);
 - packaged acceptance of an editor window through the installed app;
 - third-party plug-in compatibility in general.
 

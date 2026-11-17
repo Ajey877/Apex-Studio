@@ -77,13 +77,18 @@ jobs:
 
       # Packaged-application editor acceptance: Playwright drives the REAL packaged
       # exe (Mixer insert -> plug-in's own window), and native facts are read from
-      # the OS process table. Interactive-only rows are recorded NOT_VERIFIED.
+      # the OS process table. The display-scale row runs at real 125% and 150%;
+      # rows that need a second monitor or a person are recorded NOT_VERIFIED.
       - name: Native VST3 editor acceptance through the packaged application
         id: packaged-editor-acceptance
         if: runner.os == 'Windows'
         continue-on-error: true
         timeout-minutes: 20
         shell: bash
+        env:
+          # P9: lets the run set the real display scale to 125% and 150% (and put it
+          # back). Without it the display-scale criterion is NOT_VERIFIED.
+          APEX_P9_ALLOW_DISPLAY_CHANGES: '1'
         run: |
           set +e
           node scripts/packaged-editor-acceptance.mjs 2>&1 | tee packaged-editor-acceptance.log
@@ -137,7 +142,7 @@ jobs:
           fi
           # 0 means every verified criterion passed. 3 is the script's documented
           # "verified criteria all passed, some remain NOT_VERIFIED" code, which is
-          # NOT a failure: P9 needs an interactive desktop and stays reported as such.
+          # NOT a failure: multi-monitor needs a second display and stays reported as such.
           # Any other code means at least one criterion FAILED, or the harness itself
           # crashed, and the job must go red.
           if [ "$ACCEPTANCE_EXIT_CODE" -ne 0 ] && [ "$ACCEPTANCE_EXIT_CODE" -ne 3 ]; then

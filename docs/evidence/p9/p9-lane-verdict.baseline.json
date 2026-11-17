@@ -1,0 +1,48 @@
+{
+  "ok": true,
+  "lane": "baseline",
+  "problems": [],
+  "summary": "baseline: the known P9-K defect is REPRODUCED on the pre-fix sources. Editor oversized after a real DPI change: to-125 548x182 (expected 437x150), to-150 626x202 (expected 525x180). P9-A, P9-B, P9-C, P9-H, P9-I, P9-J pass, no other case fails, display restored.",
+  "statuses": {
+    "P9-A": "PASS",
+    "P9-B": "PASS",
+    "P9-C": "PASS",
+    "P9-D": "NOT_VERIFIED",
+    "P9-E": "NOT_VERIFIED",
+    "P9-F": "NOT_VERIFIED",
+    "P9-G": "NOT_VERIFIED",
+    "P9-H": "PASS",
+    "P9-I": "PASS",
+    "P9-J": "PASS",
+    "P9-K": "FAIL",
+    "P9-L": "NOT_VERIFIED",
+    "P9-M": "NOT_VERIFIED"
+  },
+  "exitCode": 1,
+  "commit": "8d956fa8f67da97e341612e585f746cb65a68c64",
+  "expectedNativeTree": "2c63e3b7f952945d181207b40d8b3b086f75dd85",
+  "nativeSourceTree": "2c63e3b7f952945d181207b40d8b3b086f75dd85",
+  "restorationOk": true,
+  "reproduction": {
+    "transitions": {
+      "to-125": {
+        "width": 548,
+        "height": 182,
+        "expectedWidth": 437,
+        "expectedHeight": 150,
+        "equalsRecordedMeasurement": true
+      },
+      "to-150": {
+        "width": 626,
+        "height": 202,
+        "expectedWidth": 525,
+        "expectedHeight": 180,
+        "equalsRecordedMeasurement": true
+      }
+    }
+  },
+  "verifiedAt": "2026-11-17T06:12:19.543Z",
+  "evidence": "build/native-evidence/p9-baseline/p9-dpi-acceptance.json",
+  "expectRejection": false,
+  "laneMayBeGreen": true
+}

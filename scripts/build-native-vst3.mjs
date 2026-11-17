@@ -29,6 +29,8 @@ run(cmake, ['-S', 'native/vst3', '-B', 'build/native-vst3', ...generator, '-DCMA
 const targets = [
   'apex-vst3-host', 'mda-vst3', 'apex-vst3-protocol-fault',
   'apex-vst3-restart-flags-test', 'apex-latency-vst3',
+  // Editor DPI sizing decisions, testable without a display (editor-dpi.hpp).
+  'apex-vst3-editor-dpi-test',
   // Test-only: stereo effect + genuine VSTGUI editor + controller-exposed
   // parameters, which no pinned SDK sample provides all of at once.
   'apex-acceptance-vst3-test',

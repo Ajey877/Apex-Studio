@@ -1,0 +1,37 @@
+{
+  "ok": false,
+  "lane": "baseline",
+  "problems": [
+    "the helper was built from native/vst3 tree a5ce24b7bf63d2be6cab40854fd9e57b234554ab, expected 2c63e3b7f952945d181207b40d8b3b086f75dd85",
+    "harness exit code 3; a reproduced defect is a FAIL (exit 1).",
+    "P9-K is PASS; the defect was not reproduced"
+  ],
+  "summary": "baseline: this run is NOT the expected reproduction of the P9-K sizing defect. 3 problem(s).",
+  "statuses": {
+    "P9-A": "PASS",
+    "P9-B": "PASS",
+    "P9-C": "PASS",
+    "P9-D": "NOT_VERIFIED",
+    "P9-E": "NOT_VERIFIED",
+    "P9-F": "NOT_VERIFIED",
+    "P9-G": "PASS",
+    "P9-H": "PASS",
+    "P9-I": "PASS",
+    "P9-J": "PASS",
+    "P9-K": "PASS",
+    "P9-L": "PASS",
+    "P9-M": "PASS"
+  },
+  "exitCode": 3,
+  "commit": "8d956fa8f67da97e341612e585f746cb65a68c64",
+  "expectedNativeTree": "2c63e3b7f952945d181207b40d8b3b086f75dd85",
+  "nativeSourceTree": "a5ce24b7bf63d2be6cab40854fd9e57b234554ab",
+  "restorationOk": true,
+  "reproduction": {
+    "transitions": {}
+  },
+  "verifiedAt": "2026-11-17T06:11:25.011Z",
+  "evidence": "build/native-evidence/p9-branch/p9-dpi-acceptance.json",
+  "expectRejection": true,
+  "laneMayBeGreen": true
+}

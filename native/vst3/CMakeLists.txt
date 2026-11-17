@@ -132,6 +132,11 @@ if(APEX_BUILD_VST3_FIXTURE)
   target_link_libraries(apex-vst3-restart-flags-test PRIVATE sdk_hosting)
   set_target_properties(apex-vst3-restart-flags-test PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 
+  # Platform-independent regression test for the native editor's DPI sizing
+  # decisions (editor-dpi.hpp). It needs neither the SDK nor a display.
+  add_executable(apex-vst3-editor-dpi-test editor-dpi-test.cpp)
+  set_target_properties(apex-vst3-editor-dpi-test PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
   smtg_add_vst3plugin(apex-latency-vst3
     latency-fixture.cpp
     "${SDK_ROOT}/public.sdk/source/vst/vstsinglecomponenteffect.cpp"

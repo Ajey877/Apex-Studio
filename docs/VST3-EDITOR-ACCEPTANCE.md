@@ -12,10 +12,13 @@ other. They answer different questions and are reported independently:
 | **Helper-level** (Part 1) | Does the native helper create a real `HWND`, attach the real AGain `IPlugView`, and route input/state honestly? | `Native VST3 Validation / Native DSP (windows-latest)` |
 | **Packaged-application** (Part 1b) | Does the installed Apex app, driven through its own visible controls, deliver a genuine edit into project state and persist it? | `Desktop Validation / windows-package` |
 
-**Status at `7ab6d85`, the measured commit.** `100011b` was the original measured
-baseline; `7ab6d85` re-ran the same four workflows and reproduced these numbers. Only
-documentation has changed since `7ab6d85`, so this tree — not that SHA — is what applies
-to the PR head.
+**Status at `84d682e`, the measured commit.** Earlier measurements were taken at
+`100011b`, `7ab6d85` and `684ff89`. `684ff89` added the high-DPI work (P9); `84d682e`
+changes no native code and makes the P9 acceptance stricter (the two-display lane
+fails closed, display restoration is part of the verdict, the baseline lane must
+reproduce the known defect), and every workflow was run again on it with the same
+figures as below. Since `84d682e` only documentation, checked-in evidence and a test
+that reads that evidence have changed.
 
 (Phrased against the measured commit rather than "the current head" on purpose: a commit
 that names the head becomes stale the moment it is committed.)
@@ -24,14 +27,19 @@ that names the head becomes stale the moment it is committed.)
   `packaged-app`, which is `NOT_VERIFIED` **by design**: the helper harness launches the
   natively built helper directly, not the Electron app, so it never claims to have
   driven the app's UI. That claim belongs to Part 1b, which does exactly that.
-- **Packaged application (Part 1b): 9 PASS, 0 FAIL, 1 NOT_VERIFIED.** `p9-dpi-125-150`
-  is the single `NOT_VERIFIED` row: 125%/150% scaling and cross-monitor migration need
-  an interactive desktop.
+- **Packaged application (Part 1b): 10 PASS, 0 FAIL, 1 NOT_VERIFIED.** `p9-dpi-125-150`
+  now passes at a real 100%, 125% and 150% display scale. The single `NOT_VERIFIED` row
+  is `p9b-multi-monitor`: the packaged run has one display and nothing that drags the
+  window to another.
+- **High DPI and multi-monitor, helper-level (P9): 13 of 13 cases PASS** on a runner
+  with a *virtual* second display; 10 PASS and 3 `NOT_VERIFIED` on the plain
+  one-display runner. Cases, measurements and limits are in
+  [`VST3-EDITOR-DPI-ACCEPTANCE.md`](VST3-EDITOR-DPI-ACCEPTANCE.md).
 - **Interactive checklist (Part 2): not executed.** Nothing in it has been observed on
   screen.
 
-The packaged-application claim is therefore **verified**, at the `p1`–`p8` and `p4b`
-level of the table in Part 1b. It was previously `NOT_VERIFIED` and that statement is
+The packaged-application claim is therefore **verified**, at the `p1`–`p8`, `p4b` and
+`p9-dpi-125-150` level of the table in Part 1b. It was previously `NOT_VERIFIED` and that statement is
 now historical: `scripts/packaged-editor-acceptance.mjs` drives the installed app end to
 end and commits a real edit through the plug-in's own VSTGUI control.
 
@@ -540,7 +548,7 @@ reported size.
 | --- | --- | --- |
 | 1 | Native HWND creation and visibility | `windowCreated`, `IsWindowVisible`, `attached`, a separate helper `processId`, and outer size > client size (a real framed window). |
 | 2 | Genuine VST3 editor view | `createView(kEditor)` returned a view that accepted `kPlatformTypeHWND`; the size and title come from the plug-in. |
-| 3 | DPI scaling | Three things, reported separately and never conflated: (a) `IPlugViewContentScaleSupport` — a non-default factor pushed through `setContentScaleFactor` must be accepted *and* the plug-in must resize itself; (b) `WM_DPICHANGED` — counted only when Windows actually sends it (`dpiChangedMessageCount`), which no unattended runner triggers; (c) interactive 125%/150% display changes — always `NOT_VERIFIED` in CI. 96 DPI is never evidence of any of them. |
+| 3 | DPI scaling | Three things, reported separately and never conflated: (a) `IPlugViewContentScaleSupport` — a non-default factor pushed through `setContentScaleFactor` must be accepted *and* the plug-in must resize itself; (b) `WM_DPICHANGED` — counted only when Windows actually sends it (`dpiChangedMessageCount`), which no unattended runner triggers; (c) real 125%/150% display scales — `NOT_VERIFIED` in *this* harness, which runs at the scale the desktop already has. They are measured by the separate P9 run, which changes the real display scale: see [`VST3-EDITOR-DPI-ACCEPTANCE.md`](VST3-EDITOR-DPI-ACCEPTANCE.md). 96 DPI is never evidence of any of them. |
 | 4 | Resize and `checkSizeConstraint` | A real `SetWindowPos` goes through `WM_SIZING` → `checkSizeConstraint` → `WM_SIZE` → `onSize`; the plug-in's `getSize` must then equal the real client area. |
 | 4b | Plug-in-initiated resize | `IPlugFrame::resizeView` driven by the plug-in, recorded honestly as `NOT_VERIFIED` when the plug-in declines to resize itself. |
 | 5 | Keyboard forwarding | Real `SendInput` for a TAB down and up. The `SendInput` return count must be `1` for each, the editor WndProc must observe `WM_KEYDOWN`/`WM_KEYUP` (`keyDownMessageCount`/`keyUpMessageCount`), and the plug-in's `onKeyDown`/`onKeyUp` must each be invoked **exactly once** with `KEY_TAB` and a recorded return value. A merely attached window is not evidence. |
@@ -634,27 +642,51 @@ run by `.github/workflows/desktop-validation.yml` (`windows-package`).
 | `p6-save-quit-reload` | Save, quit and reload preserve state |
 | `p7-no-leaked-helpers` | Quitting with the editor open leaks no helper process |
 | `p8-recovery` | An editor crash leaves a recovery record |
-| `p9-dpi-125-150` | 125% and 150% DPI behaviour (manual only) |
+| `p9-dpi-125-150` | The editor opened from the Mixer at a real 100%, 125% and 150% display scale has the expected size and the same layout |
+| `p9b-multi-monitor` | Moving the editor between displays with different scales (not executed by CI) |
 | `harness` | The driver itself completed |
 
-Result at `7ab6d85`, the measured commit (`windows-package`, real installed app):
-**9 PASS, 0 FAIL, 1 NOT_VERIFIED.** The original measurement was taken at `100011b`
-(Desktop Validation #1211); `7ab6d85` is the re-run (Desktop Validation #1213) and both
-produced these same figures, including 10/10 repeated cycles.
+Result at `84d682e`, the measured commit (`windows-package`, real installed app,
+Desktop Validation #1228; the same at `684ff89`, #1225): **10 PASS, 0 FAIL,
+1 NOT_VERIFIED.** At `7ab6d85`
+(Desktop Validation #1213) the figures were 9 PASS and 1 NOT_VERIFIED, because
+`p9-dpi-125-150` was then a hard-coded `NOT_VERIFIED`.
 
 ```
-{"total":10,"pass":9,"fail":0,"notVerified":1}
+{"total":11,"pass":10,"fail":0,"notVerified":1}
 p1-mixer-opens-editor      PASS     p4b-repeated-cycles  PASS (10/10 cycles)
 p2-native-window-responsive PASS    p5-undo-redo        PASS
 p3-parameter-reaches-apex  PASS     p6-save-quit-reload PASS
 p4-one-undoable-change     PASS     p7-no-leaked-helpers PASS
-p8-recovery                PASS     p9-dpi-125-150      NOT_VERIFIED
+p8-recovery                PASS     p9-dpi-125-150      PASS
+p9b-multi-monitor          NOT_VERIFIED
 ```
 
-`p9` is the only `NOT_VERIFIED` row: changing the Windows display scale to 125%/150%
-and moving the window between monitors with different per-monitor DPI requires an
-interactive desktop, and the automated runner is 96 DPI. It is not inferred from a green
-run.
+`p9-dpi-125-150` changes the real Windows display scale on the runner
+(`APEX_P9_ALLOW_DISPLAY_CHANGES=1`), opens the editor through the Mixer at each scale
+and compares the window with the 100% reference:
+
+```
+100%: dpi=96  client=320x120 expected=320x120 layoutDiff=reference
+125%: dpi=120 client=400x150 expected=400x150 layoutDiff=1.8
+150%: dpi=144 client=480x180 expected=480x180 layoutDiff=1.509
+```
+
+Without that variable the script changes nothing and reports the row `NOT_VERIFIED`.
+
+The row is `PASS` only if the display is also put back: the configuration is recorded
+before the first change (here 1024×768 at 100%), restored in a `finally` block, read
+back from Windows and compared. The record is `displayRestoration` in the evidence
+file, and a display that is not back makes the row `FAIL`
+([details](VST3-EDITOR-DPI-ACCEPTANCE.md#display-restoration-is-part-of-the-verdict)).
+Run #1228: restored and verified after two restoring calls.
+
+`p9b-multi-monitor` is the only `NOT_VERIFIED` row. Moving the packaged editor between
+displays with different scales needs two displays and something that drags the window;
+the packaged run has neither. The same native code is exercised at helper level on a
+virtual second display (P9-D, P9-E, P9-F in
+[`VST3-EDITOR-DPI-ACCEPTANCE.md`](VST3-EDITOR-DPI-ACCEPTANCE.md)), which is not a
+substitute for seeing it in the installed app. It is not inferred from a green run.
 
 This row used to read "2 PASS, 7 NOT_VERIFIED" at `78cad31`, with `p1`–`p5` and `p8`
 blocked by a fixture limitation. Those criteria now pass on the genuine interaction; the
@@ -812,6 +844,10 @@ Record for each step: pass/fail, screenshot or screen recording, and
 5. Resize by dragging the corner, then change display scaling 125% → 150% and move
    the window between monitors with different DPI. The plug-in must re-layout
    without blank areas and the app must not crash or lose the session.
+   (The scale changes are automated at helper level and, for 100/125/150%, in the
+   packaged run — see [`VST3-EDITOR-DPI-ACCEPTANCE.md`](VST3-EDITOR-DPI-ACCEPTANCE.md).
+   Moving the *packaged* editor between two monitors has never been executed, and
+   the helper-level result is from a virtual display, so this step still stands.)
 
 ### B. One undoable change
 

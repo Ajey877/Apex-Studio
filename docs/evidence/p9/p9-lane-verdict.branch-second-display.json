@@ -1,0 +1,30 @@
+{
+  "ok": true,
+  "lane": "branch-second-display",
+  "problems": [],
+  "summary": "branch-second-display: all 13 cases PASS, P9-D/E/F executed on two displays, harness exit code 0, display restored. [A:PASS B:PASS C:PASS D:PASS E:PASS F:PASS G:PASS H:PASS I:PASS J:PASS K:PASS L:PASS M:PASS]",
+  "statuses": {
+    "P9-A": "PASS",
+    "P9-B": "PASS",
+    "P9-C": "PASS",
+    "P9-D": "PASS",
+    "P9-E": "PASS",
+    "P9-F": "PASS",
+    "P9-G": "PASS",
+    "P9-H": "PASS",
+    "P9-I": "PASS",
+    "P9-J": "PASS",
+    "P9-K": "PASS",
+    "P9-L": "PASS",
+    "P9-M": "PASS"
+  },
+  "exitCode": 0,
+  "commit": "8d956fa8f67da97e341612e585f746cb65a68c64",
+  "expectedNativeTree": "a5ce24b7bf63d2be6cab40854fd9e57b234554ab",
+  "nativeSourceTree": "a5ce24b7bf63d2be6cab40854fd9e57b234554ab",
+  "restorationOk": true,
+  "verifiedAt": "2026-11-17T06:10:58.068Z",
+  "evidence": "build/native-evidence/p9-branch-second-display/p9-dpi-acceptance.json",
+  "expectRejection": false,
+  "laneMayBeGreen": true
+}

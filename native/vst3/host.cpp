@@ -699,7 +699,16 @@ int main() {
   const auto user32 = GetModuleHandleW(L"user32.dll");
   using SetDpiContextFn = BOOL(WINAPI*)(DPI_AWARENESS_CONTEXT);
   const auto setDpiContext = reinterpret_cast<SetDpiContextFn>(GetProcAddress(user32, "SetProcessDpiAwarenessContext"));
-  if (setDpiContext) setDpiContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+  // Per-monitor-v2, requested before any window exists (it cannot be changed once
+  // one does). The helper ships without a DPI manifest, so this call is the only
+  // thing that makes the editor window DPI aware; its outcome is recorded rather
+  // than assumed, and the window's real awareness is reported in the diagnostics.
+  auto& dpiRequest = ApexVst3Host::dpiAwarenessRequest();
+  dpiRequest.apiAvailable = setDpiContext != nullptr;
+  if (setDpiContext) {
+    dpiRequest.succeeded = setDpiContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) != FALSE;
+    if (!dpiRequest.succeeded) dpiRequest.error = static_cast<unsigned long>(GetLastError());
+  }
   auto com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
   if (FAILED(com)) return 2;
 #endif
@@ -809,13 +818,10 @@ int main() {
           const auto width = request.at("width").get<int>();
           const auto height = request.at("height").get<int>();
           require(width >= 32 && height >= 32 && width <= 8192 && height <= 8192, "Invalid resize target");
-          RECT target{0, 0, width, height};
-          const auto style = static_cast<DWORD>(GetWindowLongPtrW(window, GWL_STYLE));
-          AdjustWindowRectEx(&target, style, FALSE, 0);
-          // A real resize goes through WM_SIZING/WM_SIZE exactly like a user drag,
-          // so IPlugView::checkSizeConstraint() is genuinely exercised.
-          SetWindowPos(window, nullptr, 0, 0, target.right - target.left, target.bottom - target.top,
-            SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+          // A programmatic resize: the window gets WM_SIZE and the plug-in gets
+          // IPlugView::onSize. It does NOT send WM_SIZING, so checkSizeConstraint is
+          // not involved here; the interactive path is `pointerDrag` on a border.
+          result["resized"] = editor->resizeClientForTest(width, height);
           editor->pumpMessages();
           result["requestedWidth"] = width;
           result["requestedHeight"] = height;
@@ -889,6 +895,17 @@ int main() {
           result["focusSinkCreated"] = true;
           result["focusSinkIsSeparateWindow"] = sink != window;
           result["focusSinkOwnsFocus"] = GetFocus() == sink;
+        } else if (action == "moveWindow") {
+          // A real window move. Crossing onto a monitor with another scale makes
+          // Windows itself send WM_DPICHANGED; nothing here posts that message.
+          result = editor->moveWindowForTest(request.at("x").get<int>(), request.at("y").get<int>());
+        } else if (action == "pointerDrag") {
+          // Real OS input held across Windows' own modal move/size loop.
+          const POINT from{request.at("fromX").get<int>(), request.at("fromY").get<int>()};
+          const POINT to{request.at("toX").get<int>(), request.at("toY").get<int>()};
+          result = editor->pointerDragForTest(from, to, request.value("steps", 24), request.value("stepDelayMs", 15));
+        } else if (action == "listMonitors") {
+          result["monitors"] = ApexVst3Host::NativeEditorSession::monitorList();
         } else if (action == "minimize") {
           ShowWindow(window, SW_MINIMIZE);
           editor->pumpMessages();

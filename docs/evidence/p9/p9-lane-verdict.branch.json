@@ -1,0 +1,30 @@
+{
+  "ok": true,
+  "lane": "branch",
+  "problems": [],
+  "summary": "branch: the ten single-display cases PASS; P9-D/E/F are NOT_VERIFIED/NOT_VERIFIED/NOT_VERIFIED on this one-display runner; display restored. [A:PASS B:PASS C:PASS D:NOT_VERIFIED E:NOT_VERIFIED F:NOT_VERIFIED G:PASS H:PASS I:PASS J:PASS K:PASS L:PASS M:PASS]",
+  "statuses": {
+    "P9-A": "PASS",
+    "P9-B": "PASS",
+    "P9-C": "PASS",
+    "P9-D": "NOT_VERIFIED",
+    "P9-E": "NOT_VERIFIED",
+    "P9-F": "NOT_VERIFIED",
+    "P9-G": "PASS",
+    "P9-H": "PASS",
+    "P9-I": "PASS",
+    "P9-J": "PASS",
+    "P9-K": "PASS",
+    "P9-L": "PASS",
+    "P9-M": "PASS"
+  },
+  "exitCode": 3,
+  "commit": "8d956fa8f67da97e341612e585f746cb65a68c64",
+  "expectedNativeTree": "a5ce24b7bf63d2be6cab40854fd9e57b234554ab",
+  "nativeSourceTree": "a5ce24b7bf63d2be6cab40854fd9e57b234554ab",
+  "restorationOk": true,
+  "verifiedAt": "2026-11-17T06:11:24.698Z",
+  "evidence": "build/native-evidence/p9-branch/p9-dpi-acceptance.json",
+  "expectRejection": false,
+  "laneMayBeGreen": true
+}

@@ -1,0 +1,43 @@
+{
+  "ok": false,
+  "lane": "branch-second-display",
+  "problems": [
+    "harness exit code 3; the two-display lane requires 0. Exit code 3 (cases NOT_VERIFIED) is not accepted here",
+    "Windows reported 1 monitor(s) at the start of the run; two are required",
+    "the recorded display configuration has 1 display(s); two are required",
+    "P9-D is NOT_VERIFIED; every case must be PASS in the two-display lane",
+    "P9-E is NOT_VERIFIED; every case must be PASS in the two-display lane",
+    "P9-F is NOT_VERIFIED; every case must be PASS in the two-display lane",
+    "P9-D: configuration dual-100-125 has no passing run",
+    "P9-D: configurations not covered: dual-100-125",
+    "P9-E: configuration dual-100-150 has no passing run",
+    "P9-E: configurations not covered: dual-100-150",
+    "P9-F: configuration dual-move has no passing run",
+    "P9-F: configurations not covered: dual-move"
+  ],
+  "summary": "branch-second-display: REJECTED. 12 problem(s). [A:PASS B:PASS C:PASS D:NOT_VERIFIED E:NOT_VERIFIED F:NOT_VERIFIED G:PASS H:PASS I:PASS J:PASS K:PASS L:PASS M:PASS]",
+  "statuses": {
+    "P9-A": "PASS",
+    "P9-B": "PASS",
+    "P9-C": "PASS",
+    "P9-D": "NOT_VERIFIED",
+    "P9-E": "NOT_VERIFIED",
+    "P9-F": "NOT_VERIFIED",
+    "P9-G": "PASS",
+    "P9-H": "PASS",
+    "P9-I": "PASS",
+    "P9-J": "PASS",
+    "P9-K": "PASS",
+    "P9-L": "PASS",
+    "P9-M": "PASS"
+  },
+  "exitCode": 3,
+  "commit": "8d956fa8f67da97e341612e585f746cb65a68c64",
+  "expectedNativeTree": "a5ce24b7bf63d2be6cab40854fd9e57b234554ab",
+  "nativeSourceTree": "a5ce24b7bf63d2be6cab40854fd9e57b234554ab",
+  "restorationOk": true,
+  "verifiedAt": "2026-11-17T06:11:24.878Z",
+  "evidence": "build/native-evidence/p9-branch/p9-dpi-acceptance.json",
+  "expectRejection": true,
+  "laneMayBeGreen": true
+}
