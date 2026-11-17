@@ -7,10 +7,34 @@ name: P9 High-DPI Editor Acceptance
 # Windows itself reports 120/144 DPI and itself sends WM_DPICHANGED. Nothing here
 # simulates a DPI value.
 #
-# The runner has ONE monitor. The `branch` job therefore leaves the multi-monitor
-# cases NOT_VERIFIED. The `branch-second-display` job adds a VIRTUAL second display
-# (an indirect display driver) so that those cases can run; its evidence is about
-# per-monitor DPI handling, not about physical monitor hardware.
+# The runner has ONE monitor. The `branch-second-display` job adds a VIRTUAL second
+# display (an indirect display driver) so that the multi-monitor cases can run; its
+# evidence is about per-monitor DPI handling, not about physical monitor hardware.
+#
+# WHAT MAKES A LANE GREEN. The acceptance script exits 3 when nothing failed but
+# some cases were not executed. That is never taken at face value here: after each
+# run scripts/verify-p9-evidence.mjs reads the evidence JSON and applies the policy
+# of the lane. All three lanes gate the workflow.
+#
+#   branch                 one display. The ten single-display cases must be PASS;
+#                          P9-D/E/F may be NOT_VERIFIED.
+#   branch-second-display  FAILS CLOSED. The virtual display must be installed and
+#                          operational and Windows must report two monitors, or the
+#                          job fails before the build. Afterwards all 13 cases,
+#                          P9-D/E/F explicitly, must be PASS in the evidence. Exit
+#                          code 3 is rejected.
+#   baseline               the native sources of the commit before the fix, built
+#                          unchanged. Green ONLY when the run reproduces the known
+#                          P9-K sizing defect (editor oversized after a real DPI
+#                          change) and nothing else is wrong. A build failure, a
+#                          missing report or an unrelated failure turns it red.
+#
+# In every lane the display configuration must be back to what it was, verified by
+# reading it from Windows; otherwise the acceptance script itself reports FAIL.
+#
+# The `branch` lane also runs NEGATIVE CONTROLS on the real runner: its one-display
+# evidence must be rejected by the two-display policy and by the baseline policy,
+# and the second-display gate must refuse a runner without a second display.
 #
 # Job logs and artifacts are not always retrievable, so every verdict and the
 # measurements behind it are also published as check-run annotations.
@@ -21,8 +45,11 @@ on:
     paths:
       - 'native/vst3/**'
       - 'scripts/native-editor-dpi-acceptance.mjs'
+      - 'scripts/display-restoration.mjs'
+      - 'scripts/verify-p9-evidence.mjs'
       - 'scripts/windows-display-scale.ps1'
       - 'scripts/ci-install-virtual-display.ps1'
+      - 'scripts/ci-require-second-display.ps1'
       - 'scripts/build-native-vst3.mjs'
       - 'scripts/setup-native-vst3.mjs'
       - '.github/workflows/p9-dpi-acceptance.yml'
@@ -31,8 +58,11 @@ on:
     paths:
       - 'native/vst3/**'
       - 'scripts/native-editor-dpi-acceptance.mjs'
+      - 'scripts/display-restoration.mjs'
+      - 'scripts/verify-p9-evidence.mjs'
       - 'scripts/windows-display-scale.ps1'
       - 'scripts/ci-install-virtual-display.ps1'
+      - 'scripts/ci-require-second-display.ps1'
       - 'scripts/build-native-vst3.mjs'
       - 'scripts/setup-native-vst3.mjs'
       - '.github/workflows/p9-dpi-acceptance.yml'
@@ -54,12 +84,14 @@ jobs:
           - host: branch-second-display
             second_display: true
           # `baseline` builds the helper exactly as it was on main before the P9
-          # fix (c246e2a) and runs the SAME harness against it. It is expected to
-          # fail: that failure is the reproduction of the defect, kept as
-          # evidence. It is informational and never gates the workflow.
+          # fix and runs the SAME harness against it. The job is green only when
+          # that run reproduces the known P9-K sizing defect; see the header.
           - host: baseline
             baseline: true
-    continue-on-error: ${{ matrix.baseline == true }}
+    # No continue-on-error: every lane gates. A baseline that stops reproducing the
+    # defect, or breaks for another reason, is a finding and must be visible.
+    env:
+      BASELINE_COMMIT: c246e2a91f7d7c7aaca1d9903d334e7eceab5be8
     steps:
       - uses: actions/checkout@v4
         with:
@@ -70,12 +102,40 @@ jobs:
           node-version: 22
       - name: Install JavaScript tools (no Electron binary needed)
         run: npm ci --legacy-peer-deps --ignore-scripts
-      - name: Use the pre-fix native helper sources (baseline only)
+      - name: Use the pre-fix native helper sources, exactly and only (baseline)
         if: matrix.baseline
         shell: bash
         run: |
-          git checkout c246e2a91f7d7c7aaca1d9903d334e7eceab5be8 -- native/vst3 scripts/build-native-vst3.mjs
-          git status --short | head -20
+          set -euo pipefail
+          head_tree=$(git rev-parse HEAD:native/vst3)
+          baseline_tree=$(git rev-parse "$BASELINE_COMMIT:native/vst3")
+          if [ "$head_tree" = "$baseline_tree" ]; then
+            echo "::error title=P9-BASELINE-SOURCES::native/vst3 at HEAD is identical to the baseline commit; there is no pre-fix code to compare with"
+            exit 1
+          fi
+          # Remove the directory first: `git checkout <commit> -- <dir>` alone would
+          # leave files that only exist in the newer tree lying next to the old ones.
+          git rm -r -q --cached native/vst3
+          rm -rf native/vst3
+          git checkout "$BASELINE_COMMIT" -- native/vst3 scripts/build-native-vst3.mjs
+          # Two independent proofs that the directory is the old tree and nothing
+          # else: the index hashes to the baseline tree, and the files on disk are
+          # exactly the files of that tree (no file of the newer tree left behind).
+          actual_tree=$(git write-tree --prefix=native/vst3/)
+          on_disk=$(find native/vst3 -type f | LC_ALL=C sort)
+          in_tree=$(git ls-tree -r --name-only "$BASELINE_COMMIT" native/vst3 | LC_ALL=C sort)
+          if [ "$actual_tree" != "$baseline_tree" ] || [ "$on_disk" != "$in_tree" ]; then
+            echo "::error title=P9-BASELINE-SOURCES::native/vst3 is not exactly the tree of $BASELINE_COMMIT (index tree $actual_tree, wanted $baseline_tree; $(echo "$on_disk" | wc -l | tr -d ' ') files on disk, $(echo "$in_tree" | wc -l | tr -d ' ') in the tree)"
+            exit 1
+          fi
+          echo "APEX_P9_NATIVE_TREE=$actual_tree" >> "$GITHUB_ENV"
+          echo "::notice title=P9-BASELINE-SOURCES::native/vst3 is exactly tree $actual_tree of $BASELINE_COMMIT ($(git ls-files native/vst3 | wc -l | tr -d ' ') files). HEAD has tree $head_tree."
+      - name: Identify the native sources under test (branch lanes)
+        if: ${{ !matrix.baseline }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "APEX_P9_NATIVE_TREE=$(git rev-parse HEAD:native/vst3)" >> "$GITHUB_ENV"
       - name: Display before the run, and a resolution that allows 150%
         shell: pwsh
         run: |
@@ -90,22 +150,57 @@ jobs:
           $resolution = & $tool -Action set-resolution -Width 1920 -Height 1080
           Note 'P9-DISPLAY ${{ matrix.host }}' $resolution
           $global:LASTEXITCODE = 0
-      - name: Add a virtual second display (pinned third-party driver, this runner only)
+      # FAIL CLOSED. This lane exists to run the multi-monitor cases. Without a
+      # working second display it must stop here, not continue with one display.
+      - name: Add a virtual second display and REQUIRE it (pinned third-party driver, this runner only)
         if: matrix.second_display
         shell: pwsh
         run: |
-          $json = ./scripts/ci-install-virtual-display.ps1
-          $info = $json | ConvertFrom-Json
-          $text = ([string]$json) -replace '%', '%25' -replace "`r", '%0D' -replace "`n", '%0A'
-          if ($text.Length -gt 3900) { $text = $text.Substring(0, 3900) }
-          Write-Host "::notice title=P9-VIRTUAL-DISPLAY ${{ matrix.host }}::$text"
-          if (-not $info.available) {
-            Write-Host "::warning title=P9-VIRTUAL-DISPLAY::No second display on this runner. The multi-monitor cases will be NOT_VERIFIED in this job."
+          function Encode($text) {
+            $t = ([string]$text) -replace '%', '%25' -replace "`r", '%0D' -replace "`n", '%0A'
+            if ($t.Length -gt 3900) { $t = $t.Substring(0, 3900) }
+            $t
           }
+          $evidence = 'build/native-evidence/p9-${{ matrix.host }}'
+          New-Item -ItemType Directory -Path $evidence -Force | Out-Null
+          $installReport = Join-Path $evidence 'virtual-display-install.json'
+          $json = [string](./scripts/ci-install-virtual-display.ps1 | Select-Object -Last 1)
+          Set-Content -LiteralPath $installReport -Value $json -Encoding utf8
+          Write-Host "::notice title=P9-VIRTUAL-DISPLAY ${{ matrix.host }}::$(Encode $json)"
+          # The installer only reports. The gate decides, from the report, from what
+          # Windows enumerates now and from the state of the driver device.
+          $gate = [string](./scripts/ci-require-second-display.ps1 -InstallerReport $installReport | Select-Object -Last 1)
+          $gateExit = $LASTEXITCODE
+          Set-Content -LiteralPath (Join-Path $evidence 'second-display-gate.json') -Value $gate -Encoding utf8
+          $accepted = $false
+          try { $accepted = ($gate | ConvertFrom-Json).ok -eq $true } catch { $accepted = $false }
+          if ($gateExit -ne 0 -or -not $accepted) {
+            Write-Host "::error title=P9-SECOND-DISPLAY-GATE ${{ matrix.host }}::No operational virtual second display. This lane cannot run P9-D/E/F and FAILS instead of reporting them NOT_VERIFIED. $(Encode $gate)"
+            exit 1
+          }
+          Write-Host "::notice title=P9-SECOND-DISPLAY-GATE ${{ matrix.host }}::$(Encode $gate)"
+          $global:LASTEXITCODE = 0
+      # Negative control, on the real runner: the same gate must REFUSE a desktop
+      # that has no virtual second display. If it ever accepts one, the gate above
+      # proves nothing.
+      - name: Negative control - the second-display gate refuses this one-display runner
+        if: matrix.host == 'branch'
+        shell: pwsh
+        run: |
+          $gate = [string](./scripts/ci-require-second-display.ps1 | Select-Object -Last 1)
+          $gateExit = $LASTEXITCODE
+          $text = ($gate -replace '%', '%25' -replace "`r", '%0D' -replace "`n", '%0A')
+          $accepted = $true
+          try { $accepted = ($gate | ConvertFrom-Json).ok -ne $false } catch { $accepted = $true }
+          if ($gateExit -eq 0 -or $accepted) {
+            Write-Host "::error title=P9-NEGATIVE-CONTROL second-display-gate::The gate ACCEPTED a runner without a virtual second display (exit $gateExit). $text"
+            exit 1
+          }
+          Write-Host "::notice title=P9-NEGATIVE-CONTROL second-display-gate::Gate refused this one-display runner, as it must (exit $gateExit). $text"
           $global:LASTEXITCODE = 0
       - name: Build the helper and the AGain VSTGUI editor fixture
         run: npm run native:vst3:build
-      - name: P9 acceptance at 100%, 125% and 150% on the real display
+      - name: P9 acceptance at 100%, 125% and 150% on the real display, judged by the lane policy
         id: acceptance
         shell: bash
         timeout-minutes: 20
@@ -115,19 +210,57 @@ jobs:
           APEX_P9_OUT: build/native-evidence/p9-${{ matrix.host }}
         run: |
           set +e
+          mkdir -p "$APEX_P9_OUT"
+          if [ -z "${APEX_P9_NATIVE_TREE:-}" ]; then
+            echo "::error::The native source tree under test was not identified"
+            exit 1
+          fi
           node scripts/native-editor-dpi-acceptance.mjs 2>&1 | tee p9-acceptance.log
           status=${PIPESTATUS[0]}
           echo "harness exit code: $status"
+          echo "$status" > "$APEX_P9_OUT/harness-exit-code.txt"
           if [ ! -f "$APEX_P9_OUT/p9-dpi-acceptance.json" ]; then
-            echo "::error::The P9 run produced no evidence file"
             grep -E '^(P9-ERROR|STAGE)' p9-acceptance.log | tail -4 | while IFS= read -r line; do echo "::error::${line}"; done
             tail -c 1500 p9-acceptance.log | tr '\n' ' ' | sed 's/^/::error::/'
-            exit 1
+            echo
           fi
-          # 0 = every case passed, 3 = no failure but some cases NOT_VERIFIED (the
-          # multi-monitor ones always are on this single-monitor runner).
-          if [ "$status" -eq 0 ] || [ "$status" -eq 3 ]; then exit 0; fi
-          exit 1
+          # The exit code alone decides nothing. 3 ("nothing failed, some cases not
+          # executed") is acceptable only where the lane policy says so, and never
+          # in the two-display lane. A missing evidence file is always a failure.
+          node scripts/verify-p9-evidence.mjs \
+            --lane "$APEX_P9_HOST_LABEL" \
+            --evidence "$APEX_P9_OUT/p9-dpi-acceptance.json" \
+            --exit-code "$status" \
+            --commit "$GITHUB_SHA" \
+            --expected-native-tree "$APEX_P9_NATIVE_TREE" \
+            --out "$APEX_P9_OUT/p9-lane-verdict.json"
+          verdict=$?
+          echo "lane verdict exit code: $verdict"
+          exit "$verdict"
+      # Negative controls, on real evidence from this runner. The one-display
+      # evidence that the `branch` policy has just accepted must be REJECTED by
+      # the two-display policy (P9-D/E/F not executed, exit code 3) and by the
+      # baseline policy (P9-K passes: no defect to reproduce).
+      - name: Negative controls - this evidence is rejected by the other lane policies
+        if: matrix.host == 'branch'
+        shell: bash
+        env:
+          APEX_P9_OUT: build/native-evidence/p9-${{ matrix.host }}
+        run: |
+          set -uo pipefail
+          status=$(cat "$APEX_P9_OUT/harness-exit-code.txt")
+          failed=0
+          node scripts/verify-p9-evidence.mjs --expect-rejection --ignore-host-label \
+            --lane branch-second-display --label "one-display evidence vs two-display policy" \
+            --evidence "$APEX_P9_OUT/p9-dpi-acceptance.json" --exit-code "$status" --commit "$GITHUB_SHA" \
+            --expected-native-tree "$APEX_P9_NATIVE_TREE" \
+            --out "$APEX_P9_OUT/negative-control-second-display-policy.json" || failed=1
+          node scripts/verify-p9-evidence.mjs --expect-rejection --ignore-host-label \
+            --lane baseline --label "fixed-code evidence vs baseline policy" \
+            --evidence "$APEX_P9_OUT/p9-dpi-acceptance.json" --exit-code "$status" --commit "$GITHUB_SHA" \
+            --expected-native-tree "$(git rev-parse "$BASELINE_COMMIT:native/vst3")" \
+            --out "$APEX_P9_OUT/negative-control-baseline-policy.json" || failed=1
+          exit "$failed"
       - name: Upload evidence (JSON and screenshots)
         if: always()
         uses: actions/upload-artifact@v4

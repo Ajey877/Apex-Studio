@@ -23,18 +23,31 @@
 //
 //   APEX_P9_ALLOW_DISPLAY_CHANGES=1  the script changes the display scale itself
 //                                    (CI, or a tester who accepts that). It
-//                                    restores the original scale when it ends.
+//                                    restores the original configuration when it
+//                                    ends, and that restoration is part of the
+//                                    verdict (see below).
 //   (unset)                          attended: only the display configuration that
 //                                    is ALREADY set is tested; change the scale in
 //                                    Settings and run again for the next one.
 //
-// Exit codes: 0 every case PASS; 1 any FAIL; 2 cannot run here; 3 some NOT_VERIFIED.
+// DISPLAY RESTORATION IS PART OF THE VERDICT
+//
+// The display configuration (per display: resolution, position, DPI, scale) is
+// recorded before anything is changed. When the run ends -- normally, after a
+// failed case, after an exception, or on an interrupt -- it is put back, read back
+// from Windows and compared with the record. The result is `restoration` in the
+// evidence file. If the configuration is not back, the verdict is FAIL and the
+// exit code is 1, whatever the cases themselves reported.
+//
+// Exit codes: 0 every case PASS and the display restored; 1 any FAIL, or the
+// display was not restored; 2 cannot run here; 3 some NOT_VERIFIED.
 import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readdirSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { NativeVst3Client, discoverVst3 } from '../native/vst3/client.mjs';
+import { acceptanceVerdict, describeRestoration, restoreDisplayConfiguration, snapshotDisplayConfiguration } from './display-restoration.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const build = path.resolve(process.env.APEX_NATIVE_BUILD ?? 'build/native-vst3');
@@ -67,6 +80,8 @@ const CASES = {
 /** runs[caseId] = [{ config, status, checks, evidence }] */
 const runs = Object.fromEntries(Object.keys(CASES).map(id => [id, []]));
 const notes = [];
+/** Exceptions that escaped a pass. Kept apart from `notes`: they are machine-read. */
+const harnessErrors = [];
 const screenshots = [];
 const stage = (name, detail = {}) => console.log(`STAGE ${name} ${JSON.stringify(detail)}`);
 
@@ -114,17 +129,30 @@ function caseStatus(id) {
 
 function writeReport(extra = {}) {
   const statuses = Object.fromEntries(Object.keys(CASES).map(id => [id, caseStatus(id)]));
+  // The cases say whether the editor behaved; the restoration says whether the
+  // machine was left as it was found. The verdict needs both.
+  const { verdict, reasons: verdictReasons, exitCode } = acceptanceVerdict({ statuses, restoration: extra.restoration, blocked: extra.blocked });
+  // `environment` is merged below; spreading it again would replace the merge.
+  const { environment: extraEnvironment, ...rest } = extra;
   const report = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     generatedAt: new Date().toISOString(),
     host: hostLabel,
     commit: process.env.GITHUB_SHA ?? null,
+    // Git tree of native/vst3 that the helper under test was built from, when the
+    // caller states it (CI does). It tells a baseline build from the current one.
+    nativeSourceTree: process.env.APEX_P9_NATIVE_TREE || null,
+    verdict,
+    verdictReasons,
+    exitCode,
+    restoration: null,
+    harnessErrors,
     environment: {
       platform: process.platform, arch: process.arch, osRelease: os.release(), node: process.version,
       isCi: Boolean(process.env.CI), runnerImage: process.env.ImageOS ?? null,
       runnerImageVersion: process.env.ImageVersion ?? null,
       displayChangesAllowed: allowDisplayChanges,
-      ...extra.environment,
+      ...extraEnvironment,
     },
     rule: 'A case is PASS only when every configuration it needs was executed on this machine and every check passed. Anything not executed is NOT_VERIFIED.',
     statuses,
@@ -135,12 +163,18 @@ function writeReport(extra = {}) {
     })),
     notes,
     screenshots,
-    ...extra,
+    ...rest,
   };
   mkdirSync(outDir, { recursive: true });
   writeFileSync(outPath, JSON.stringify(report, null, 2));
-  const summary = `P9-SUMMARY ${JSON.stringify({ host: hostLabel, statuses })}`;
+  const summary = `P9-SUMMARY ${JSON.stringify({ host: hostLabel, verdict, statuses,
+    displayRestored: report.restoration ? report.restoration.ok === true : null, harnessErrors: harnessErrors.length })}`;
   console.log(summary);
+  const restorationLine = `P9-RESTORATION ${describeRestoration(report.restoration)}`;
+  console.log(restorationLine);
+  if (report.restoration && report.restoration.ok !== true) {
+    console.log(`P9-RESTORATION-DETAIL ${JSON.stringify({ differences: report.restoration.differences, steps: report.restoration.steps, errors: report.restoration.errors }).slice(0, 3600)}`);
+  }
   const failures = [];
   for (const entry of report.cases) {
     for (const run of entry.runs) {
@@ -168,7 +202,11 @@ function writeReport(extra = {}) {
     // capped at 10 per step and 4096 characters each, so the verdict goes first.
     const encode = text => text.slice(0, 4000).replaceAll('%', '%25').replaceAll('\r', '%0D').replaceAll('\n', '%0A');
     const note = (title, text) => console.log(`::notice title=${title}::${encode(text)}`);
-    note(`P9-SUMMARY ${hostLabel}`, summary);
+    // Verdict, restoration and (if it failed) what is still wrong, in one annotation.
+    note(`P9-SUMMARY ${hostLabel}`, [summary, restorationLine,
+      ...(verdictReasons.length ? [`verdict reasons: ${verdictReasons.join(' | ')}`] : []),
+      ...(harnessErrors.length ? [`harness errors: ${harnessErrors.map(e => `${e.where}: ${e.message}`).join(' | ')}`] : []),
+    ].join('\n'));
     note(`P9-RUNS ${hostLabel}`, report.cases.flatMap(entry => entry.runs.map(run => {
       const failed = run.checks.filter(c => c.ok === false).map(c => c.name);
       const skipped = run.checks.filter(c => c.ok === null).map(c => c.name);
@@ -178,7 +216,7 @@ function writeReport(extra = {}) {
     })).join('\n'));
     if (measured.length) note(`P9-MEASURED ${hostLabel}`, measured.join('\n'));
     if (notes.length) note(`P9-NOTES ${hostLabel}`, notes.join('\n'));
-    for (const line of failures.slice(0, 6)) note(`P9-FAIL-DETAIL ${hostLabel}`, line);
+    for (const line of failures.slice(0, 5)) note(`P9-FAIL-DETAIL ${hostLabel}`, line);
   }
   return report;
 }
@@ -918,9 +956,62 @@ catch (error) {
   writeReport({ blocked: 'display-tool-failed' });
   process.exit(2);
 }
-const initialPercent = initial.sources.find(s => s.device === primaryOf(initial).device)?.currentPercent ?? null;
+// Recorded BEFORE anything is changed: this is what the desktop must look like
+// again when the run ends.
+let originalDisplay;
+try { originalDisplay = snapshotDisplayConfiguration(initial); }
+catch (error) {
+  console.log(`P9-ERROR the display configuration could not be recorded: ${error.message}`);
+  notes.push(`The display configuration could not be recorded, so nothing was changed and nothing was verified: ${error.message}`);
+  writeReport({ blocked: 'display-snapshot-failed' });
+  process.exit(2);
+}
+const initialPercent = originalDisplay.displays.find(d => d.primary)?.scalePercent ?? null;
 stage('environment', { monitors: initial.monitorCount, primaryDpi: primaryOf(initial).effectiveDpi, initialPercent, host: hostLabel });
+console.log(`P9-ORIGINAL-DISPLAY ${JSON.stringify(originalDisplay.displays)}`);
 const executedScales = [];
+
+/**
+ * Put the display back and verify it. Runs once, from wherever the run ends.
+ * In attended mode this script never changes the display, so it only compares:
+ * a desktop that changed under the test invalidates the measurements.
+ */
+let restoration = null;
+function restoreDisplay() {
+  restoration ??= restoreDisplayConfiguration({ original: originalDisplay, call: display, attempts: allowDisplayChanges ? 3 : 0 });
+  return restoration;
+}
+function finalReport() {
+  let final = null;
+  try { final = display('query'); } catch (error) { harnessErrors.push({ where: 'final display query', message: error.message }); }
+  return writeReport({
+    restoration: restoreDisplay(),
+    environment: { monitorsAtStart: initial.monitors, sourcesAtStart: initial.sources, monitorsAtEnd: final?.monitors ?? null,
+      sourcesAtEnd: final?.sources ?? null,
+      executedScales, shell, osCaption: (() => {
+        try { return execFileSync('cmd', ['/c', 'ver'], { encoding: 'utf8', windowsHide: true }).trim(); } catch { return null; }
+      })() },
+  });
+}
+/**
+ * The run is being torn down from outside the normal flow (an interrupt, or an
+ * error nothing caught). The display is still put back and the evidence still
+ * written; such a run is never a pass.
+ */
+let abnormalExitHandled = false;
+function abnormalExit(where, error) {
+  if (abnormalExitHandled) return;
+  abnormalExitHandled = true;
+  harnessErrors.push({ where, message: String(error?.message ?? error).slice(0, 800) });
+  console.log(`P9-ERROR ${where}: ${error?.message ?? error}`);
+  try { restoreDisplay(); } catch { /* restoreDisplayConfiguration does not throw; belt and braces */ }
+  try { finalReport(); } catch (reportError) { console.log(`P9-ERROR the report could not be written: ${reportError.message}`); }
+  process.exit(1);
+}
+for (const signal of ['SIGINT', 'SIGTERM', 'SIGBREAK', 'SIGHUP']) process.on(signal, () => abnormalExit('interrupted', signal));
+process.on('uncaughtException', error => abnormalExit('uncaught exception', error));
+process.on('unhandledRejection', error => abnormalExit('unhandled rejection', error));
+
 try {
   if (allowDisplayChanges) {
     for (const percent of wantedScales) {
@@ -946,39 +1037,17 @@ try {
   }
   await multiMonitorPass(display('query'));
 } catch (error) {
+  harnessErrors.push({ where: 'run', message: String(error.message).slice(0, 800) });
   notes.push(`harness error: ${error.message}`);
   console.log(`P9-ERROR ${error.message}`);
   if (error.stack) console.log(error.stack.slice(0, 1500));
 } finally {
-  if (allowDisplayChanges) {
-    // Every display goes back to the scale it had, not only the primary: the
-    // multi-monitor pass changes the second display as well.
-    for (const [index, source] of initial.sources.entries()) {
-      if (!source.currentPercent) continue;
-      const isPrimary = source.device === primaryOf(initial).device;
-      try {
-        if (isPrimary) setPrimaryScale(source.currentPercent);
-        else display('set-scale', { Scale: source.currentPercent, Monitor: index });
-      } catch (error) {
-        notes.push(`restoring ${source.device} failed: ${error.message}`);
-      }
-    }
-    const after = display('query');
-    for (const source of initial.sources) {
-      const now = after.sources.find(s => s.device === source.device);
-      notes.push(`Display scale of ${source.device} restored to ${source.currentPercent}%: ${now?.currentPercent === source.currentPercent}`);
-    }
-  }
+  // Always: after a clean run, after a failed case and after an exception alike.
+  // The outcome is read back from Windows and decides the verdict with the cases.
+  const restored = restoreDisplay();
+  notes.push(describeRestoration(restored));
 }
 
-const final = display('query');
-const report = writeReport({
-  environment: { monitorsAtStart: initial.monitors, sourcesAtStart: initial.sources, monitorsAtEnd: final.monitors,
-    executedScales, shell, osCaption: (() => {
-      try { return execFileSync('cmd', ['/c', 'ver'], { encoding: 'utf8', windowsHide: true }).trim(); } catch { return null; }
-    })() },
-});
-const values = Object.values(report.statuses);
-if (values.includes('FAIL')) process.exit(1);
-if (values.includes('NOT_VERIFIED')) process.exit(3);
-process.exit(0);
+const report = finalReport();
+abnormalExitHandled = true;  // the run has ended normally; nothing more to tear down
+process.exit(report.exitCode);

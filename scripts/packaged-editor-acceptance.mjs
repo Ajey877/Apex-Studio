@@ -14,6 +14,9 @@
 // REAL Windows display scale to 125% and 150% (scripts/windows-display-scale.ps1,
 // the calls the Settings app makes) and opens the editor through the Mixer at each.
 // Without that permission it never touches the display and p9 is NOT_VERIFIED.
+// The display configuration is recorded before it is changed, put back afterwards
+// (also after a failure or an exception) and read back from Windows. The result is
+// `displayRestoration` in the evidence; if the display is not back, p9 is FAIL.
 //
 // Interactive-only checks (physically dragging the window, moving it between
 // monitors with different DPI) are not produced here; they are recorded as
@@ -23,6 +26,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { describeRestoration, restoreDisplayConfiguration, snapshotDisplayConfiguration } from './display-restoration.mjs';
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const outPath = path.resolve(process.env.APEX_PACKAGED_ACCEPTANCE_OUT
@@ -1385,6 +1389,37 @@ async function measurePackagedEditorAtScale(percent, reference) {
   }
 }
 
+/**
+ * The display configuration as it was before this pass touched it, and the record
+ * of putting it back. `displayRestoration` goes into the evidence file; a display
+ * that is not back makes the criterion FAIL, whatever the editor measurements said.
+ */
+let originalDisplay = null;
+let displayRestoration = null;
+function restorePackagedRunDisplay() {
+  // Nothing was recorded means the first query failed, and nothing is changed
+  // before that query: there is nothing to put back.
+  if (!originalDisplay) return null;
+  displayRestoration ??= restoreDisplayConfiguration({ original: originalDisplay, call: displayCall });
+  return displayRestoration;
+}
+/** An interrupt or an uncaught error during the pass must not leave the scale changed. */
+function restoreDisplayOnAbnormalExit(where) {
+  return error => {
+    console.log(`ACCEPTANCE-ERROR ${where} during the display-scale pass: ${error?.message ?? error}`);
+    const restored = restorePackagedRunDisplay();
+    record('p9-dpi-125-150', 'FAIL', {
+      reason: `the display-scale pass was torn down (${where}); ${describeRestoration(restored)}`,
+      displayRestoration: restored,
+    });
+    for (const id of Object.keys(CRITERIA)) {
+      if (!results.some(r => r.id === id)) record(id, 'NOT_VERIFIED', { reason: 'the run did not reach this check' });
+    }
+    try { writeReport({ displayRestoration: restored }); } catch { /* the exit code still says FAIL */ }
+    process.exit(1);
+  };
+}
+
 async function displayScalePass() {
   if (process.env.APEX_P9_ALLOW_DISPLAY_CHANGES !== '1') {
     record('p9-dpi-125-150', 'NOT_VERIFIED', {
@@ -1399,17 +1434,26 @@ async function displayScalePass() {
   }
   stage('p9-display-scale');
   const runs = [];
-  let reference = null, initialPercent = 100, restored = null, initialMode = null, resolution = null;
+  let reference = null, resolution = null;
+  const abnormal = {
+    SIGINT: restoreDisplayOnAbnormalExit('SIGINT'), SIGTERM: restoreDisplayOnAbnormalExit('SIGTERM'),
+    SIGBREAK: restoreDisplayOnAbnormalExit('SIGBREAK'), SIGHUP: restoreDisplayOnAbnormalExit('SIGHUP'),
+    uncaughtException: restoreDisplayOnAbnormalExit('uncaught exception'),
+    unhandledRejection: restoreDisplayOnAbnormalExit('unhandled rejection'),
+  };
+  for (const [event, handler] of Object.entries(abnormal)) process.on(event, handler);
   try {
+    // Recorded BEFORE anything is changed: every display's resolution, position,
+    // DPI and scale. This is what must be read back from Windows at the end.
     const initial = displayCall('query');
+    originalDisplay = snapshotDisplayConfiguration(initial);
+    console.log(`P9-PACKAGED-ORIGINAL-DISPLAY ${JSON.stringify(originalDisplay.displays)}`);
     const source = initial.sources.find(s => s.device === primaryDisplay(initial).device);
-    initialPercent = source?.currentPercent ?? 100;
     // Windows offers 150% only above a minimum resolution (a CI desktop boots at
     // 1024x768, where the limit is 125%). Raise it for this pass and put it back.
     if ((source?.maximumPercent ?? 0) < 150) {
-      initialMode = initial.mode;
       const changed = displayCall('set-resolution', { Width: 1920, Height: 1080 });
-      resolution = { from: `${initialMode.width}x${initialMode.height}`, to: '1920x1080', status: changed.status };
+      resolution = { from: `${initial.mode.width}x${initial.mode.height}`, to: '1920x1080', status: changed.status };
     }
     for (const percent of [100, 125, 150]) {
       const set = setPrimaryDisplayScale(percent);
@@ -1421,22 +1465,29 @@ async function displayScalePass() {
   } catch (error) {
     runs.push({ executed: false, reason: `the display-scale pass stopped: ${error.message}`.slice(0, 400) });
   } finally {
-    try { restored = setPrimaryDisplayScale(initialPercent).ok; } catch { restored = false; }
-    if (initialMode) {
-      try { resolution.restoredStatus = displayCall('set-resolution', { Width: initialMode.width, Height: initialMode.height }).status; }
-      catch { resolution.restoredStatus = 'failed'; }
-    }
+    // Always, also after a failed measurement or an exception above. The result
+    // is what Windows reports afterwards, not what the set calls returned.
+    restorePackagedRunDisplay();
+    for (const [event, handler] of Object.entries(abnormal)) process.off(event, handler);
   }
+  // Restoration is required whenever the configuration was recorded, because from
+  // that point on this pass may have changed it.
+  const restorationFailed = originalDisplay !== null && displayRestoration?.ok !== true;
+  const restorationText = describeRestoration(displayRestoration);
   const scaled = [125, 150].map(percent => runs.find(r => r.percent === percent));
   const executed = scaled.every(r => r?.executed);
   const failures = runs.filter(r => r.executed && Object.values(r.checks ?? {}).some(ok => ok !== true))
     .map(r => ({ percent: r.percent, failed: Object.entries(r.checks).filter(([, ok]) => ok !== true).map(([name]) => name), window: r.window }));
-  record('p9-dpi-125-150', failures.length ? 'FAIL' : executed ? 'PASS' : 'NOT_VERIFIED', {
-    reason: failures.length ? `checks failed: ${JSON.stringify(failures).slice(0, 300)}`
+  // A successful acceptance needs both: the editor behaved, and the display is back.
+  record('p9-dpi-125-150', (failures.length || restorationFailed) ? 'FAIL' : executed ? 'PASS' : 'NOT_VERIFIED', {
+    reason: restorationFailed ? `the display configuration was not restored: ${restorationText}`.slice(0, 900)
+      : failures.length ? `checks failed: ${JSON.stringify(failures).slice(0, 300)}`
       : executed ? undefined : `not every scale was executed: ${JSON.stringify(scaled.map(r => r?.reason ?? r?.error ?? 'missing')).slice(0, 300)}`,
-    how: 'The Windows display scale was changed on the real display; at each scale the packaged app was launched and its editor opened through the Mixer UI. The window was measured from the OS.',
+    editorChecksFailed: failures.length ? failures : undefined,
+    how: 'The Windows display scale was changed on the real display; at each scale the packaged app was launched and its editor opened through the Mixer UI. The window was measured from the OS. Afterwards the display configuration was put back and read back from Windows; a configuration that is not back makes this criterion FAIL.',
     notCovered: 'Changing the scale while the packaged editor is open, and moving it between monitors, are not part of this criterion here (see scripts/native-editor-dpi-acceptance.mjs for the helper-level runs).',
-    displayScaleRestored: restored,
+    displayScaleRestored: displayRestoration ? displayRestoration.ok === true : null,
+    displayRestoration,
     resolutionChange: resolution,
     runs,
   });
@@ -1444,7 +1495,12 @@ async function displayScalePass() {
     ? `${r.percent}%: dpi=${r.window?.dpi} client=${r.window?.client?.join('x')} expected=${r.expectedClient.width}x${r.expectedClient.height} layoutDiff=${r.layoutVersus100Percent?.meanAbsDifference ?? 'reference'}`
     : `${r.percent ?? '?'}%: not executed (${r.reason ?? r.error})`).join(' | ');
   console.log(`P9-PACKAGED ${summary}`);
-  if (process.env.GITHUB_ACTIONS) console.log(`::notice title=P9-PACKAGED::${summary}`);
+  console.log(`P9-PACKAGED-RESTORATION ${restorationText}`);
+  if (process.env.GITHUB_ACTIONS) {
+    const encode = text => text.slice(0, 3900).replaceAll('%', '%25').replaceAll('\r', '%0D').replaceAll('\n', '%0A');
+    console.log(`::notice title=P9-PACKAGED::${encode(summary)}`);
+    console.log(`::${restorationFailed ? 'error' : 'notice'} title=P9-PACKAGED-RESTORATION::${encode(restorationText)}`);
+  }
 }
 await displayScalePass();
 
@@ -1458,5 +1514,7 @@ record('p9b-multi-monitor', 'NOT_VERIFIED', {
 for (const id of Object.keys(CRITERIA)) {
   if (!results.some(r => r.id === id)) record(id, 'NOT_VERIFIED', { reason: 'the run did not reach this check' });
 }
-writeReport();
+// `displayRestoration` is null when the display was never recorded (the scale pass
+// did not run), which means it was never changed either.
+writeReport({ displayRestoration });
 process.exit(results.some(r => r.status === 'FAIL') ? 1 : 3);
