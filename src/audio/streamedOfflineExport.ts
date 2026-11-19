@@ -32,6 +32,13 @@ export const STREAM_WINDOW_FRAMES = STREAM_CHUNK_FRAMES * 48;
  * audio already scheduled.
  */
 export const STREAM_LOOKAHEAD_MARGIN_FRAMES = 256;
+/**
+ * Timeline steps are scheduled this far past the point up to which native PCM
+ * is requested. A native instrument block that starts before that point can
+ * extend one block (at most 16,384 frames) beyond it, and its events must be
+ * known when the block is requested.
+ */
+export const STREAM_TIMELINE_LOOKAHEAD_FRAMES = 16_384 + STREAM_CHUNK_FRAMES;
 /** A tap that delivers nothing for this long has failed; the export stops. */
 export const STREAM_TAP_TIMEOUT_MS = 30_000;
 export const STREAM_TAP_PROCESSOR_NAME = 'apex-offline-stream-tap';
@@ -81,6 +88,29 @@ export interface StreamedExportResult {
   windows: number;
   nativeInstruments: number;
   nativeEffects: number;
+  /** The largest values any pass reached. */
+  scheduling: StreamedSchedulingStats;
+}
+
+/**
+ * What one streamed pass had scheduled ahead of its render position. Every
+ * value except the two step totals is bounded by the lookahead (one window
+ * plus `STREAM_TIMELINE_LOOKAHEAD_FRAMES`) and by the notes that are sounding,
+ * not by the length of the song.
+ */
+export interface StreamedSchedulingStats {
+  /** Sixteenth-note steps of the timeline. */
+  timelineSteps: number;
+  /** Steps handed to the production step scheduler so far. */
+  scheduledSteps: number;
+  /** Most steps that were scheduled and not yet rendered. */
+  peakPendingSteps: number;
+  /** Most voices, clip sources and PCM block sources that were scheduled and not finished. */
+  peakLiveAudioSources: number;
+  /** Most VST3 MIDI events that were scheduled and not yet sent to a plug-in. */
+  peakRetainedVst3Events: number;
+  /** Non-silent frames a VST3 instrument produced before its first note was scheduled; they are not in the file. */
+  leadInDiscardedFrames: number;
 }
 
 // The tap copies its input into fixed-size interleaved chunks and posts them.

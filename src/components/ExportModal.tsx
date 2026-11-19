@@ -439,7 +439,12 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, chann
             if (controller.signal.aborted || streamedJobRef.current !== job) throw new DOMException('Export cancelled.', 'AbortError');
             setStreamedReady({ frames: finished.frames, sampleRate: finished.sampleRate, bytes: finished.bytes });
             setRenderProgress(100);
-            setStatusText('Timeline WAV master render complete. Choose where to save it.');
+            // A VST3 instrument is started when its first note is scheduled. If it
+            // made sound before that point, that sound is not in the file; say so.
+            const leadInSeconds = result.scheduling.leadInDiscardedFrames / result.sampleRate;
+            setStatusText(leadInSeconds > 0
+              ? `Timeline WAV master render complete. A VST3 instrument produced ${leadInSeconds.toFixed(1)} s of sound before its first note; that lead-in is not in the file. Choose where to save it.`
+              : 'Timeline WAV master render complete. Choose where to save it.');
           } catch (error) {
             if (streamedJobRef.current === job) streamedJobRef.current = null;
             await job.abort();

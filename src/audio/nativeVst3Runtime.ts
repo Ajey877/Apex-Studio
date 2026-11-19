@@ -312,12 +312,32 @@ export class NativeVst3Runtime {
   async flushLive() { await Promise.all([...this.sessions].map(([id, session]) => session.pump(id))); }
 }
 
+type OfflineNativeEvent = Vst3Event & { frame: number };
+type OfflineNativeEntry = { channel: Channel; gain: GainNode; events: OfflineNativeEvent[] };
+type OfflineNativeStream = {
+  entry: OfflineNativeEntry;
+  id: string; parameters: Vst3Parameter[]; base: Map<number, number>; automated: Set<number>;
+  cursor: number; blockSize: number;
+};
+const offlineEventOrder = (a: OfflineNativeEvent, b: OfflineNativeEvent) =>
+  a.frame - b.frame || (a.type === b.type ? 0 : a.type === 'off' ? -1 : 1);
+
+/** What a streamed render still holds for its native instruments. */
+export interface NativeVst3StreamedRetention {
+  /** MIDI events scheduled by the timeline and not yet sent to a plug-in. */
+  retainedEvents: number;
+  /** PCM block sources that are scheduled and have not finished playing. */
+  liveSources: number;
+  /** Frames a plug-in produced before its channel existed in the render (see `produceUntil`). */
+  leadInDiscardedFrames: number;
+}
+
 /** Offline registry collector: the existing scheduler supplies every MIDI event,
  * including arrangement, fractional onsets, swing, arpeggiation and lane mutes.
  * A separate native instance is rendered and its actual PCM scheduled into the
  * existing offline mixer graph BEFORE OfflineAudioContext.startRendering(). */
 export class NativeVst3OfflineRender {
-  private channels = new Map<string, { channel: Channel; gain: GainNode; events: Array<Vst3Event & { frame: number }> }>();
+  private channels = new Map<string, OfflineNativeEntry>();
   private nextId = 1;
   private automation = new NativeAutomationTimeline();
   timeline(clips: PlaylistClip[], secondsPerBar: number, preroll: number) {
@@ -326,15 +346,23 @@ export class NativeVst3OfflineRender {
   /**
    * `streamed` (Phase 10G): PCM is requested one bounded window ahead of the
    * render position through `openStreamed`/`produceUntil`, so the full-song
-   * preparation bound that protects `flush()` does not apply.
+   * preparation bound that protects `flush()` does not apply. The timeline is
+   * scheduled one bounded lookahead ahead as well, so `render()` keeps being
+   * called while the context renders and `produceUntil` drops each event once
+   * a plug-in has received it.
    */
   constructor(private context: BaseAudioContext, private frames: number, private bridge = getVst3Bridge(), private streamed = false) {}
-  private streams: Array<{
-    entry: { channel: Channel; gain: GainNode; events: Array<Vst3Event & { frame: number }> };
-    id: string; parameters: Vst3Parameter[]; base: Map<number, number>; automated: Set<number>;
-    eventIndex: number; cursor: number; blockSize: number;
-  }> | null = null;
+  private streams: Map<OfflineNativeEntry, OfflineNativeStream> | null = null;
+  /** Streamed only: the voice bookkeeping to release when a note's release has been sent. */
+  private noteEnded = new Map<OfflineNativeEvent, () => void>();
+  private liveSources = 0;
+  private leadInDiscardedFrames = 0;
   get channelCount() { return this.channels.size; }
+  get retention(): NativeVst3StreamedRetention {
+    let retainedEvents = 0;
+    for (const entry of this.channels.values()) retainedEvents += entry.events.length;
+    return { retainedEvents, liveSources: this.liveSources, leadInDiscardedFrames: this.leadInDiscardedFrames };
+  }
   render(context: InstrumentVoiceContext): InstrumentVoiceHandle {
     assertVst3Instrument(context.channel.vst3);
     bridgeOrThrow(this.bridge);
@@ -351,9 +379,17 @@ export class NativeVst3OfflineRender {
     const id = this.nextId++, event = midiEvent(context, id);
     const start = Math.round(context.time * this.context.sampleRate);
     const end = Math.max(start + 1, Math.round((context.time + resolveGateSeconds(context.note.duration, context.bpm)) * this.context.sampleRate));
+    // A streamed render has already sent every frame before the channel's
+    // cursor to the plug-in. A note behind it could only be dropped or moved,
+    // so the export stops instead of writing audio that differs from the take.
+    const produced = this.streams?.get(entry)?.cursor ?? 0;
+    if (start < produced) {
+      throw new Error(`VST3 export scheduled a note at frame ${start}, behind the ${produced} frames already rendered for ${context.channel.name}. Export stopped.`);
+    }
     entry.events.push({ ...event, frame: start });
     const release = { ...event, type: 'off' as const, velocity: 0, frame: end };
     entry.events.push(release);
+    if (this.streamed && context.onEnded) this.noteEnded.set(release, context.onEnded);
     return { stop: (time = context.time) => { release.frame = Math.min(release.frame, Math.max(start + 1, Math.round(time * this.context.sampleRate))); } };
   }
   volume(id: string, value: number, time: number) { this.channels.get(id)?.gain.gain.setValueAtTime(Math.max(0, value), time); }
@@ -384,50 +420,84 @@ export class NativeVst3OfflineRender {
     }
   }
   /**
-   * Streamed export: opens one offline instance per native channel and keeps it
-   * open for the whole render, so plug-in state is continuous across windows.
-   * The event order, block size and automation points are those of `flush()`.
+   * Streamed export: one offline instance per native channel stays open for the
+   * whole render, so plug-in state is continuous across windows. An instance is
+   * opened by `produceUntil` when the timeline first names its channel.
    */
   async openStreamed(): Promise<void> {
     if (this.streams) throw new Error('VST3 streamed export sessions are already open.');
-    this.streams = [];
-    if (!this.channels.size) return;
-    const bridge = bridgeOrThrow(this.bridge);
-    for (const entry of this.channels.values()) {
-      const { id, parameters = [] } = await bridge.open(entry.channel.vst3!, this.context.sampleRate, 'offline');
-      entry.events.sort((a, b) => a.frame - b.frame || (a.type === b.type ? 0 : a.type === 'off' ? -1 : 1));
-      this.streams.push({
-        entry, id, parameters,
-        base: new Map(parameters.filter(p => p.currentValue !== null).map(p => [p.id, p.currentValue!])),
-        automated: new Set<number>(), eventIndex: 0, cursor: 0,
-        blockSize: this.automation.hasChannel(entry.channel) ? BLOCK : 16384,
-      });
-    }
+    this.streams = new Map();
   }
   /**
    * Renders and schedules native PCM for every block that starts before
-   * `untilFrame`. Blocks start on the same multiples of the block size as in
-   * `flush()`, so each plug-in receives identical process calls.
+   * `untilFrame`. The caller has scheduled every timeline step up to that
+   * point (plus one block), so the events of these blocks are complete. Blocks
+   * start on the same multiples of the block size as in `flush()`, and events
+   * are ordered by the same rule, so each plug-in receives identical process
+   * calls. Events that have been sent are removed.
+   *
+   * A channel whose first note lies beyond the first window gets its instance
+   * here, when that note is scheduled. The instance is then run from frame 0
+   * with the same process calls as `flush()`, so it reaches the note in the
+   * same state. PCM of blocks that lie behind the render position cannot be
+   * placed any more; for a plug-in that is silent until it receives a note
+   * this is silence. Frames that were not silent are counted in
+   * `retention.leadInDiscardedFrames`.
    */
   async produceUntil(untilFrame: number, bpm: number): Promise<void> {
-    if (!this.streams) throw new Error('VST3 streamed export sessions are not open.');
-    const bridge = this.streams.length ? bridgeOrThrow(this.bridge) : this.bridge;
+    const streams = this.streams;
+    if (!streams) throw new Error('VST3 streamed export sessions are not open.');
+    const bridge = this.channels.size ? bridgeOrThrow(this.bridge) : this.bridge;
     const limit = Math.min(untilFrame, this.frames);
-    const results = await Promise.allSettled(this.streams.map(async stream => {
+    const rate = this.context.sampleRate;
+    const position = Math.round(this.context.currentTime * rate);
+    for (const entry of this.channels.values()) {
+      if (streams.has(entry)) continue;
+      const { id, parameters = [] } = await bridge!.open(entry.channel.vst3!, rate, 'offline');
+      // `closeStreamed` may have run while the instance was opening.
+      if (this.streams !== streams) { await bridge!.close(id).catch(() => {}); throw new Error('VST3 streamed export sessions were closed during the render.'); }
+      streams.set(entry, {
+        entry, id, parameters,
+        base: new Map(parameters.filter(p => p.currentValue !== null).map(p => [p.id, p.currentValue!])),
+        automated: new Set<number>(), cursor: 0,
+        blockSize: this.automation.hasChannel(entry.channel) ? BLOCK : 16384,
+      });
+    }
+    const results = await Promise.allSettled([...streams.values()].map(async stream => {
+      const entry = stream.entry;
       while (stream.cursor < limit) {
         const cursor = stream.cursor;
         const frames = Math.min(stream.blockSize, this.frames - cursor), events: Vst3Event[] = [];
-        while (stream.eventIndex < stream.entry.events.length && stream.entry.events[stream.eventIndex].frame < cursor + frames) {
-          const { frame, ...event } = stream.entry.events[stream.eventIndex++];
-          if (frame >= cursor) events.push({ ...event, offset: frame - cursor });
+        // A release can still be moved earlier by `stop()`, and new events
+        // arrive between calls, so the pending events are ordered here.
+        entry.events.sort(offlineEventOrder);
+        let consumed = 0;
+        while (consumed < entry.events.length && entry.events[consumed].frame < cursor + frames) {
+          const pending = entry.events[consumed++];
+          const { frame, ...event } = pending;
+          // A note cannot start behind the cursor (`render()` refuses it); a
+          // release that `stop()` moved behind it is sent at the block start.
+          events.push({ ...event, offset: Math.max(0, frame - cursor) });
+          const ended = this.noteEnded.get(pending);
+          if (ended) { this.noteEnded.delete(pending); ended(); }
         }
-        const points = this.automation.points(stream.entry.channel, stream.parameters, stream.base, stream.automated, cursor / this.context.sampleRate, frames, this.context.sampleRate);
+        if (consumed) entry.events.splice(0, consumed);
+        const points = this.automation.points(entry.channel, stream.parameters, stream.base, stream.automated, cursor / rate, frames, rate);
         const samples = await bridge!.process(stream.id, frames, events, bpm, points);
+        stream.cursor = cursor + frames;
+        if (cursor + frames <= position) {
+          for (let index = 0; index < samples.length; index += 1) {
+            if (samples[index] !== 0) { this.leadInDiscardedFrames += frames; break; }
+          }
+          continue;
+        }
         const source = this.context.createBufferSource();
         source.buffer = pcmBuffer(this.context, samples, frames);
-        source.connect(stream.entry.gain);
-        source.start(cursor / this.context.sampleRate);
-        stream.cursor = cursor + frames;
+        source.connect(entry.gain);
+        this.liveSources += 1;
+        source.addEventListener('ended', () => { this.liveSources -= 1; }, { once: true });
+        if (cursor < position) source.start(position / rate, (position - cursor) / rate);
+        else source.start(cursor / rate);
       }
     }));
     const failed = results.find((result): result is PromiseRejectedResult => result.status === 'rejected');
@@ -436,8 +506,9 @@ export class NativeVst3OfflineRender {
   async closeStreamed(): Promise<void> {
     const streams = this.streams;
     this.streams = null;
-    if (!streams?.length || !this.bridge) return;
-    await Promise.allSettled(streams.map(stream => this.bridge!.close(stream.id)));
+    this.noteEnded.clear();
+    if (!streams?.size || !this.bridge) return;
+    await Promise.allSettled([...streams.values()].map(stream => this.bridge!.close(stream.id)));
   }
   dispose() { for (const entry of this.channels.values()) entry.gain.disconnect(); this.channels.clear(); }
 }

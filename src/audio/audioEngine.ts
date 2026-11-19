@@ -61,6 +61,7 @@ import {
   sliceInterleavedWindow,
   STREAM_CHUNK_FRAMES,
   STREAM_LOOKAHEAD_MARGIN_FRAMES,
+  STREAM_TIMELINE_LOOKAHEAD_FRAMES,
   STREAM_WINDOW_FRAMES,
   StreamedContentWriter,
   StreamedVst3EffectSession,
@@ -68,6 +69,7 @@ import {
   type StreamedExportResult,
   type StreamedExportScratch,
   type StreamedExportTarget,
+  type StreamedSchedulingStats,
 } from './streamedOfflineExport';
 import { createInstrumentRegistry, InstrumentRegistry, InstrumentVoiceHandle } from './instrumentRegistry';
 import { MixerRoutingAdapter } from './mixerRoutingAdapter';
@@ -340,6 +342,21 @@ interface OfflineStreamPass {
   windows: number;
   contentFrames?: number;
   nativeInstruments: number;
+  scheduling?: StreamedSchedulingStats;
+}
+
+/**
+ * The timeline of a streamed pass. `scheduleBefore` runs the production step
+ * scheduler for every step that starts before `horizonSeconds` (context time)
+ * and has not been scheduled yet.
+ */
+interface OfflineStreamTimeline {
+  totalSteps: number;
+  scheduleBefore(horizonSeconds: number): void;
+  /** Steps scheduled so far. */
+  scheduledSteps(): number;
+  /** Scheduled steps that start at or after `positionSeconds` (context time). */
+  pendingSteps(positionSeconds: number): number;
 }
 
 /** The arguments of a streamed production export (`renderTimelineOfflineStreamed`). */
@@ -1118,6 +1135,8 @@ class AudioEngine {
     }
   }
 
+  /** Set for the duration of a streamed offline pass; see `offlineBuiltParamValue`. */
+  private offlineBuiltParamValues: WeakMap<AudioParam, number> | null = null;
   private isReconfiguringContext = false;
   private contextUnexpectedlyClosed = false;
   private lastReconfigureError: string | null = null;
@@ -3897,6 +3916,28 @@ class AudioEngine {
   // entirely for level-detected destinations, whose gain is owned by the
   // detector's control signal (scheduling ramps on that AudioParam would fight
   // the detector and break the measured envelope).
+  /**
+   * The value a scheduling call reads from `param`.
+   *
+   * An in-memory offline render schedules the whole song before rendering
+   * starts, so such a read returns the value the node was built with. A
+   * streamed render schedules while the context is suspended part-way through,
+   * where the same read would return whatever the render had reached at the
+   * last window boundary. During a streamed render this returns the built
+   * value, so both exports schedule the same automation. Live playback and the
+   * in-memory render read the parameter itself.
+   */
+  private offlineBuiltParamValue(param: AudioParam): number {
+    const built = this.offlineBuiltParamValues;
+    if (!built) return param.value;
+    let value = built.get(param);
+    if (value === undefined) {
+      value = param.value;
+      built.set(param, value);
+    }
+    return value;
+  }
+
   public triggerSidechainDucking(sourceTrackId: number, time: number) {
     if (this.shouldBlockLiveMutation() || !this.ctx) return;
 
@@ -3911,7 +3952,7 @@ class AudioEngine {
 
         const duckParam = targetChannel.duckingGain.gain;
         duckParam.cancelScheduledValues(time);
-        duckParam.setValueAtTime(duckParam.value, time);
+        duckParam.setValueAtTime(this.offlineBuiltParamValue(duckParam), time);
         duckParam.linearRampToValueAtTime(minGain, time + attackSec);
         duckParam.exponentialRampToValueAtTime(1.0, time + attackSec + releaseSec);
       }
@@ -5427,7 +5468,9 @@ class AudioEngine {
         // Schedule the offline timeline in small cooperative batches so the browser
         // can service rendering/UI work instead of appearing unresponsive on longer exports.
         const offlineStepsPerBar = this.currentStepsPerBar;
-        for (let globalStep = 0; globalStep < totalSteps; globalStep += 1) {
+        // A streamed pass schedules its steps from the window driver instead
+        // (see `streamTimeline` below), so this loop is not entered for it.
+        for (let globalStep = streamPass ? totalSteps : 0; globalStep < totalSteps; globalStep += 1) {
           this.currentStep = globalStep % patternLoopSteps;
           this.currentBar = Math.floor(globalStep / offlineStepsPerBar) + 1;
           // Same groove conversion the live scheduler uses, so an offline export
@@ -5450,14 +5493,58 @@ class AudioEngine {
         onProgress?.(70, `Rendering offline audio (${totalDurationSeconds.toFixed(2)}s)...`);
         this.nativeOffline!.timeline(renderScope === 'song' ? this.activeClips.filter(c => !this.isPlaylistLaneMuted(c)) : [], this.secondsPerBarAt(safeBpm), masteringPrerollSeconds);
         if (streamPass) {
-          return await this.runStreamedOfflinePass(offlineCtx as unknown as OfflineAudioContext, streamPass, {
-            bpm: safeBpm,
-            prerollFrameCount,
-            prerollSeconds: masteringPrerollSeconds,
-            songFrameCount: outputFrameCount,
-            tailFrameCount,
-            limiterLatencyFrames: nativeEffectPass?.preserveAlignment ? 0 : limiterLatencyFrames,
-          });
+          // Phase 10G: the same steps, in the same order and with the same
+          // times as the loop above, but each one is scheduled only when the
+          // render is one bounded lookahead away from it. The horizon is
+          // compared with the unswung step time: it never decreases from one
+          // step to the next and is never later than anything the step starts.
+          let nextStreamStep = 0;
+          let streamStepsExhausted = false;
+          const streamTimeline: OfflineStreamTimeline = {
+            totalSteps,
+            scheduleBefore: (horizonSeconds: number) => {
+              while (!streamStepsExhausted && nextStreamStep < totalSteps) {
+                const globalStep = nextStreamStep;
+                if (globalStep * secondsPerStep + masteringPrerollSeconds >= horizonSeconds) return;
+                this.currentStep = globalStep % patternLoopSteps;
+                this.currentBar = Math.floor(globalStep / offlineStepsPerBar) + 1;
+                const swingOffsetSeconds = this.currentStep % 2 === 1
+                  ? swingOffsetSecondsForStep(this.swing, secondsPerStep)
+                  : 0;
+                const audioTime = globalStep * secondsPerStep + swingOffsetSeconds;
+                if (audioTime >= totalDurationSeconds) { streamStepsExhausted = true; return; }
+                this.withOfflineRenderOperation(() => this.triggerCurrentStep(audioTime + masteringPrerollSeconds));
+                nextStreamStep = globalStep + 1;
+              }
+            },
+            scheduledSteps: () => nextStreamStep,
+            pendingSteps: (positionSeconds: number) => {
+              const started = Math.ceil(Math.max(0, positionSeconds - masteringPrerollSeconds) / secondsPerStep - 1e-9);
+              return Math.max(0, nextStreamStep - Math.min(nextStreamStep, started));
+            },
+          };
+          // Up-front scheduling reads an AudioParam before the render starts and
+          // therefore sees the value the node was built with. See
+          // `offlineBuiltParamValue`.
+          const builtParamValues = new WeakMap<AudioParam, number>();
+          for (const mixerChannel of this.mixerChannels.values()) {
+            const param = mixerChannel.duckingGain?.gain;
+            if (param) builtParamValues.set(param, param.value);
+          }
+          this.offlineBuiltParamValues = builtParamValues;
+          try {
+            return await this.runStreamedOfflinePass(offlineCtx as unknown as OfflineAudioContext, streamPass, {
+              bpm: safeBpm,
+              prerollFrameCount,
+              prerollSeconds: masteringPrerollSeconds,
+              songFrameCount: outputFrameCount,
+              tailFrameCount,
+              limiterLatencyFrames: nativeEffectPass?.preserveAlignment ? 0 : limiterLatencyFrames,
+              timeline: streamTimeline,
+            });
+          } finally {
+            this.offlineBuiltParamValues = null;
+          }
         }
         await this.nativeOffline!.flush(safeBpm);
         const renderedBuffer = await offlineCtx.startRendering();
@@ -5600,6 +5687,7 @@ class AudioEngine {
       songFrameCount: number;
       tailFrameCount: number;
       limiterLatencyFrames: number;
+      timeline: OfflineStreamTimeline;
     },
   ): Promise<AudioBuffer> {
     const native = this.nativeOffline;
@@ -5650,10 +5738,30 @@ class AudioEngine {
     let overrideCursor = 0;
     let rendering: Promise<AudioBuffer> | null = null;
     let completed = false;
-    stream.nativeInstruments = native.channelCount;
+    const timeline = layout.timeline;
+    const scheduling: StreamedSchedulingStats = {
+      timelineSteps: timeline.totalSteps, scheduledSteps: 0, peakPendingSteps: 0,
+      peakLiveAudioSources: 0, peakRetainedVst3Events: 0, leadInDiscardedFrames: 0,
+    };
+    stream.scheduling = scheduling;
+    let liveOverrideSources = 0;
+    // Taken after each feed, which is when the most is scheduled ahead.
+    const sampleScheduling = () => {
+      const retention = native.retention;
+      scheduling.scheduledSteps = timeline.scheduledSteps();
+      scheduling.peakPendingSteps = Math.max(scheduling.peakPendingSteps, timeline.pendingSteps(ctx.currentTime));
+      scheduling.peakLiveAudioSources = Math.max(scheduling.peakLiveAudioSources,
+        this.activeVoices.size + this.activeClipSources.size + retention.liveSources + liveOverrideSources);
+      scheduling.peakRetainedVst3Events = Math.max(scheduling.peakRetainedVst3Events, retention.retainedEvents);
+      scheduling.leadInDiscardedFrames = retention.leadInDiscardedFrames;
+      stream.nativeInstruments = native.channelCount;
+    };
 
     const feed = async (untilFrame: number): Promise<void> => {
       throwIfStreamedExportCancelled(signal);
+      // The timeline first: the native blocks produced below read the events of
+      // every step up to the end of their last block.
+      timeline.scheduleBefore(untilFrame >= total ? Number.POSITIVE_INFINITY : (untilFrame + STREAM_TIMELINE_LOOKAHEAD_FRAMES) / rate);
       await native.produceUntil(untilFrame, layout.bpm);
       const untilContent = Math.min(contentFrames, Math.max(0, untilFrame - overrideStartFrame));
       if (untilContent > overrideCursor && overrides.length) {
@@ -5667,10 +5775,13 @@ class AudioEngine {
           const source = ctx.createBufferSource();
           source.buffer = interleavedToAudioBuffer(ctx, pcm);
           source.connect(override.bus!);
+          liveOverrideSources += 1;
+          source.addEventListener('ended', () => { liveOverrideSources -= 1; }, { once: true });
           source.start(overrideStartTime(from));
         }));
       }
       overrideCursor = Math.max(overrideCursor, untilContent);
+      sampleScheduling();
       throwIfStreamedExportCancelled(signal);
     };
 
@@ -5749,6 +5860,7 @@ class AudioEngine {
         }
       }));
       if (writer) stream.contentFrames = await writer.finish();
+      sampleScheduling();
       stream.onWindow?.(total, total);
       completed = true;
       return rendered;
@@ -5886,6 +5998,10 @@ class AudioEngine {
     const transportWasPlaying = transport?.getState().playing ?? false;
     let windows = 0;
     let nativeInstruments = 0;
+    const scheduling: StreamedSchedulingStats = {
+      timelineSteps: 0, scheduledSteps: 0, peakPendingSteps: 0,
+      peakLiveAudioSources: 0, peakRetainedVst3Events: 0, leadInDiscardedFrames: 0,
+    };
     this.nativeFxOfflineBatchHeld = true;
     if (transportWasPlaying) transport!.stop(false);
     try {
@@ -5917,6 +6033,11 @@ class AudioEngine {
         );
         windows += stream.windows;
         nativeInstruments = Math.max(nativeInstruments, stream.nativeInstruments);
+        if (stream.scheduling) {
+          for (const key of Object.keys(scheduling) as Array<keyof StreamedSchedulingStats>) {
+            scheduling[key] = Math.max(scheduling[key], stream.scheduling[key]);
+          }
+        }
       };
       const overridesForPass = () => new Map<string, OfflineStreamOverride>(
         [...scratches].map(([key, entry]) => [key, { trackId: entry.trackId, scratch: entry.scratch }]));
@@ -5969,6 +6090,7 @@ class AudioEngine {
         windows,
         nativeInstruments,
         nativeEffects: slotByKey.size,
+        scheduling,
       };
     } catch (error) {
       if (error instanceof Error && /VST3 session limit/i.test(error.message)) {

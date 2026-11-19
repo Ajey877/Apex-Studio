@@ -71,11 +71,20 @@ export const renderDrumPadVoice: InstrumentVoiceRenderer = ({
   const offset = pad.reverse ? end : start;
   source.start(time, offset, pad.loop ? undefined : duration);
 
+  // An offline render schedules a choke ahead of the audio it stops. Scheduled
+  // before rendering starts (the in-memory export), `gain.gain.value` is still
+  // the value this voice was built with; scheduled from a suspended context
+  // (the streamed export) it would be whatever the render had reached at the
+  // last window boundary. Both exports therefore hold the built value. Live
+  // playback chokes at the current time and reads the parameter itself.
+  const offlineBuiltGain =
+    typeof (audioContext as Partial<OfflineAudioContext>).startRendering === 'function' ? gain.gain.value : null;
+
   return {
     stop: (stopTime?: number) => {
       const t = stopTime ?? audioContext.currentTime;
       gain.gain.cancelScheduledValues(t);
-      gain.gain.setValueAtTime(Math.max(0.0001, gain.gain.value), t);
+      gain.gain.setValueAtTime(Math.max(0.0001, offlineBuiltGain ?? gain.gain.value), t);
       gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.02);
       try { source.stop(t + 0.025); } catch (_) {}
     },

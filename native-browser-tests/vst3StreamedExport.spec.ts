@@ -191,6 +191,11 @@ function eightPlusEight(totalBars: number) {
 type RunConfig = {
   project: { bpm: number; totalBars: number; channels: any[]; clips: any[]; tracks: any[] };
   sampleRate?: number; bitDepth?: 16 | 24 | 32; reference?: boolean; streamed?: boolean; fileName?: string; abortAtProgress?: number;
+  /** Renders with the default Mastering Suite state enabled (the product default). Off unless stated. */
+  mastering?: boolean;
+  swing?: number;
+  /** Sample buffers to register before rendering: decaying noise of the given length, by buffer id. */
+  samples?: Record<string, { seconds: number; decay: number }>;
 };
 /** Renders in the page with the production engine: optionally the in-memory reference, then the streamed export. */
 async function run(page: Page, config: RunConfig) {
@@ -203,8 +208,20 @@ async function run(page: Page, config: RunConfig) {
     const { audioBufferToWav } = await import('/src/audio/wavEncoder.ts');
     // @ts-ignore
     const { DesktopStreamedWavExport, getDesktopExportStore } = await import('/src/audio/streamedWavExport.ts');
-    // Mastering is run-to-run variable on its own; parity is asserted on the mix it receives.
-    engine.setMasteringState({ ...DEFAULT_MASTERING_SUITE_STATE, enabled: false });
+    // Mastering is off unless a test asks for it: those tests record how far separate
+    // renders are from each other next to how far the streamed export is from one.
+    engine.setMasteringState({ ...DEFAULT_MASTERING_SUITE_STATE, enabled: cfg.mastering === true });
+    engine.setSwing(cfg.swing ?? 0);
+    let seed = 0x2f6e2b1;
+    for (const [id, shape] of Object.entries(cfg.samples ?? {})) {
+      const buffer = new AudioBuffer({ length: Math.round(shape.seconds * 48000), numberOfChannels: 1, sampleRate: 48000 });
+      const data = buffer.getChannelData(0);
+      for (let index = 0; index < data.length; index += 1) {
+        seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+        data[index] = (seed / 0x80000000 - 1) * 0.6 * Math.exp(-shape.decay * index / 48000);
+      }
+      engine.setSampleBuffer(id, buffer);
+    }
     const { channels, clips, tracks, bpm, totalBars } = cfg.project;
     for (const item of channels) if (item.instrumentType !== 'vst3' && !item.synthParams) item.synthParams = engine.getDefaultSynthParams();
     const encode = (bytes: Uint8Array) => {
@@ -348,6 +365,247 @@ test('streamed export equals the in-memory export: insert chain, bus routing and
   }
   evidence.parityRouting = results;
   console.log('STREAMED_EXPORT_ROUTING_PARITY', JSON.stringify(results));
+});
+
+// ---- bounded-lookahead timeline scheduling ------------------------------------
+// The streamed export schedules timeline steps from its window driver, one lookahead ahead of the
+// render, where the in-memory export schedules the whole song before rendering starts.
+const STREAM_WINDOW_FRAMES = 196_608;
+const STREAM_AHEAD_FRAMES = STREAM_WINDOW_FRAMES + 256 + 16_384 + 4096;
+/** Steps that can be scheduled and not yet rendered: one window plus the lookahead, plus one step and one render quantum. */
+const pendingStepBound = (sampleRate: number, bpm: number) => Math.ceil((STREAM_AHEAD_FRAMES + 128) / (sampleRate * 15 / bpm)) + 1;
+
+/** The first parameter of an instrument fixture that a `vst3_param` lane can drive. */
+async function automatableParameterId(instrument: any): Promise<number> {
+  const { id, parameters = [] } = await service.open(instrument, 48000, 'offline', OWNER, 'instrument');
+  await service.close(id, OWNER);
+  const parameter = parameters.find((candidate: any) => (candidate.flags & 1) && !(candidate.flags & (2 | 8 | 16 | 32768)) && candidate.currentValue !== null);
+  if (!parameter) throw new Error(`${instrument.name} has no automatable parameter`);
+  return parameter.id;
+}
+
+/** A song that uses every part of the step scheduler; `totalBars` only changes how long it plays. */
+function schedulerProject(totalBars: number, pianoParameterId: number, bpm = 120) {
+  const piano = nativeChannel('piano', 1, 'mda Piano', 60, {
+    // The last note is held for ten beats, so its release lies two windows after its onset.
+    notes: [...line('piano', 60), { id: 'piano-held', pitch: 43, start: 2.5, duration: 40, velocity: 0.7 }],
+  });
+  const channels = [
+    piano,
+    // First note in bar 6: its instance is opened after the render has started.
+    nativeChannel('late', 2, 'mda JX10', 52),
+    nativeChannel('arp', 3, 'mda EPiano', 48, {
+      notes: [{ id: 'arp-0', pitch: 48, start: 0, duration: 4, velocity: 0.8 }, { id: 'arp-1', pitch: 55, start: 8, duration: 4, velocity: 0.8 }],
+      arp: { enabled: true, mode: 'up', rate: '1/16', octaves: 2, gate: 0.8, swing: 0, strumMs: 12 },
+    }),
+    channel('synth', 4, { notes: line('synth', 36, 3) }),
+    channel('drums', 5, {
+      instrumentType: 'drumpad',
+      drumPads: [
+        { id: 'open', note: 36, name: 'Open', sampleId: 'open', volume: 1, pan: -0.2, tuneSemitones: 0, chokeGroup: 1 },
+        { id: 'closed', note: 38, name: 'Closed', sampleId: 'closed', volume: 0.9, pan: 0.2, tuneSemitones: 0, chokeGroup: 1 },
+      ],
+      // Each closed hit chokes the open one while it is still ringing.
+      notes: [[0, 36], [3, 38], [6, 36], [7, 38], [10, 36], [13.5, 38]].map(([start, pitch], index) => ({ id: `d-${index}`, pitch, start, duration: 1, velocity: 0.9 })),
+    }),
+  ];
+  const automation = (id: string, target: any, points: Array<[number, number]>, startBar: number, lengthBars: number) => ({
+    id, type: 'automation', trackIndex: 7, startBar, lengthBars, name: id, color: '#fff', automationTarget: target,
+    automationPoints: points.map(([x, y]) => ({ x, y })),
+  });
+  const clips = [
+    clip('c-piano', 'piano', totalBars), clip('c-arp', 'arp', totalBars, 2), clip('c-synth', 'synth', totalBars, 3), clip('c-drums', 'drums', totalBars, 4),
+    { ...clip('c-late', 'late', totalBars - 5, 1), startBar: 5 },
+    // Fractional start, trimmed, with both fades; lane 6 plays through mixer track 7.
+    { id: 'c-audio', type: 'audio', trackIndex: 6, startBar: 1.25, lengthBars: 2, audioBufferId: 'loop', offsetSteps: 1, fadeInBars: 0.25, fadeOutBars: 0.5, name: 'loop', color: '#fff' },
+    automation('a-vol', { type: 'mixer_vol', targetId: 4 }, [[0, 0.9], [0.5, 0.3], [1, 0.8]], 0, totalBars),
+    automation('a-pan', { type: 'channel_pan', targetId: 'synth' }, [[0, 0.1], [1, 0.9]], 1, 3),
+    automation('a-send', { type: 'mixer_send1', targetId: 1 }, [[0, 0], [1, 0.8]], 0, 4),
+    automation('a-native', {
+      type: 'vst3_param', targetId: 'piano',
+      native: { path: instruments['mda Piano'].path, classId: instruments['mda Piano'].classId, automationId: instruments['mda Piano'].automationId ?? null, parameterId: pianoParameterId },
+    }, [[0, 0.2], [1, 0.8]], 0, 4),
+  ];
+  const tracks = [
+    track(0),
+    track(1, { auxSends: [{ targetId: 8, amount: 0.4 }], fxSlots: [nativeSlot('f1', effects['mda Overdrive'])] }),
+    track(2), track(3, { routingTargetId: 9 }),
+    // Ducked by every drum hit (note-triggered sidechain).
+    track(4, { sidechain: { enabled: true, sourceTrackId: 5, amount: 0.75, attackMs: 5, releaseMs: 140 } }),
+    track(5), track(7),
+    track(8, { isAux: true, fxSlots: [nativeSlot('f8', effects['mda Delay'])] }),
+    track(9, { volume: 0.8, pan: 0.25 }),
+  ];
+  return { bpm, totalBars, channels, clips, tracks };
+}
+const schedulerSamples = { open: { seconds: 1.5, decay: 2 }, closed: { seconds: 0.2, decay: 30 }, loop: { seconds: 5, decay: 0.3 } };
+
+test('bounded-lookahead scheduling gives the same file: swing, arpeggio, automation, sends, routing, audio clip, sidechain, choke and a late VST3 instrument', async ({ page }) => {
+  test.setTimeout(300_000);
+  const sampleRate = 48000;
+  const project = schedulerProject(8, await automatableParameterId(instruments['mda Piano']));
+  const config = { project, sampleRate, swing: 0.35, samples: schedulerSamples };
+  const outcome = await run(page, { ...config, reference: true, fileName: 'scheduler.wav' });
+  expect(outcome.error).toBeUndefined();
+  const reference = floatSamples(Buffer.from(outcome.reference.wav, 'base64'));
+  const streamed = floatSamples(readSaved(outcome.streamed.saved.path).bytes);
+  const diff = compare(reference, streamed);
+  expect(diff.framesB).toBe(diff.framesA);
+  expect(diff.rms).toBeGreaterThan(0.01);
+  expect(diff.maxDiff).toBeLessThanOrEqual(PARITY_MAX_DIFF);
+  expect(diff.rmsDiff).toBeLessThanOrEqual(PARITY_RMS_DIFF);
+  const { scheduling } = outcome.streamed.result;
+  expect(outcome.streamed.result).toMatchObject({ nativeInstruments: 3, nativeEffects: 2, passes: 3 });
+  // Every step was scheduled, never more than one lookahead ahead, and the late instrument was silent before its first note.
+  expect(scheduling.scheduledSteps).toBe(scheduling.timelineSteps);
+  expect(scheduling.timelineSteps).toBe(project.totalBars * 16);
+  expect(scheduling.peakPendingSteps).toBeLessThanOrEqual(pendingStepBound(sampleRate, project.bpm));
+  expect(scheduling.peakPendingSteps).toBeLessThan(scheduling.timelineSteps / 2);
+  expect(scheduling.leadInDiscardedFrames).toBe(0);
+  expect(service.sessionCount).toBe(0);
+  // Control: a second in-memory render of the same project.
+  const repeat = await run(page, { ...config, reference: true, streamed: false });
+  const control = compare(reference, floatSamples(Buffer.from(repeat.reference.wav, 'base64')));
+  evidence.boundedLookaheadParity = {
+    sampleRate, ...diff, bitExact: diff.maxDiff === 0, windows: outcome.streamed.result.windows, scheduling,
+    inMemoryRepeat: { maxDiff: control.maxDiff, rmsDiff: control.rmsDiff },
+  };
+  console.log('STREAMED_EXPORT_LOOKAHEAD_PARITY', JSON.stringify(evidence.boundedLookaheadParity));
+});
+
+test('what the streamed export has scheduled ahead does not grow with the length of the song', async ({ page }) => {
+  test.setTimeout(420_000);
+  const sampleRate = 48000;
+  // One bar is exactly half a window at this tempo, so every window boundary falls at the same
+  // place in a bar and the two songs can be compared window for window.
+  const bpm = 240 * sampleRate / (STREAM_WINDOW_FRAMES / 2);
+  const pianoParameterId = await automatableParameterId(instruments['mda Piano']);
+  const runs: any[] = [];
+  for (const totalBars of [8, 32]) {
+    const project = schedulerProject(totalBars, pianoParameterId, bpm);
+    const outcome = await run(page, { project, sampleRate, swing: 0.35, samples: schedulerSamples, bitDepth: 24, fileName: `bounded-${totalBars}.wav` });
+    expect(outcome.error, `${totalBars} bars`).toBeUndefined();
+    const { scheduling, frames, windows } = outcome.streamed.result;
+    expect(scheduling.scheduledSteps, `${totalBars} bars`).toBe(totalBars * 16);
+    expect(scheduling.peakPendingSteps, `${totalBars} bars`).toBeLessThanOrEqual(pendingStepBound(sampleRate, bpm));
+    expect(scheduling.leadInDiscardedFrames, `${totalBars} bars`).toBe(0);
+    runs.push({ totalBars, frames, windows, ...scheduling });
+  }
+  const [short, long] = runs;
+  expect(long.timelineSteps).toBe(short.timelineSteps * 4);
+  expect(long.frames).toBeGreaterThan(short.frames * 3);
+  // Four times the song, and no more steps, VST3 events or sources held at any one time. Sources
+  // are released when the browser reports them ended, which is not tied to a window boundary,
+  // hence the allowance on that one counter.
+  expect(long.peakPendingSteps).toBe(short.peakPendingSteps);
+  expect(long.peakRetainedVst3Events).toBeLessThanOrEqual(short.peakRetainedVst3Events);
+  expect(long.peakLiveAudioSources).toBeLessThanOrEqual(Math.ceil(short.peakLiveAudioSources * 1.1));
+  evidence.boundedLookaheadCounters = { bpm, runs };
+  console.log('STREAMED_EXPORT_LOOKAHEAD_COUNTERS', JSON.stringify(evidence.boundedLookaheadCounters));
+});
+
+// ---- mastering enabled --------------------------------------------------------
+type RegionDiff = { maxDiff: number; rmsDiff: number; rms: number };
+/** Differences of two stereo renders in the first half second, the rest of the song and the tail after it. */
+function regions(a: Float32Array, b: Float32Array, sampleRate: number, songFrames: number): Record<'startup' | 'body' | 'tail', RegionDiff> {
+  const span = (from: number, to: number): RegionDiff => {
+    let maxDiff = 0, sumDiff = 0, sum = 0;
+    for (let index = from * 2; index < to * 2; index += 1) {
+      const diff = Math.abs(a[index]! - b[index]!);
+      if (diff > maxDiff) maxDiff = diff;
+      sumDiff += diff * diff;
+      sum += a[index]! * a[index]!;
+    }
+    const count = Math.max(1, (to - from) * 2);
+    return { maxDiff, rmsDiff: Math.sqrt(sumDiff / count), rms: Math.sqrt(sum / count) };
+  };
+  const startupEnd = Math.round(sampleRate / 2);
+  return { startup: span(0, startupEnd), body: span(startupEnd, songFrames), tail: span(songFrames, a.length / 2) };
+}
+/** The shift of `b` against `a`, in frames, that correlates best (0 = aligned), with the correlation at that shift. */
+function bestLag(a: Float32Array, b: Float32Array, frames: number, maxLag = 480) {
+  let best = { lag: Number.NaN, correlation: -Infinity };
+  let energyA = 0, energyB = 0;
+  for (let index = maxLag * 2; index < (frames - maxLag) * 2; index += 1) { energyA += a[index]! * a[index]!; energyB += b[index]! * b[index]!; }
+  for (let lag = -maxLag; lag <= maxLag; lag += 1) {
+    let sum = 0;
+    for (let index = maxLag * 2; index < (frames - maxLag) * 2; index += 1) sum += a[index]! * b[index + lag * 2]!;
+    const correlation = sum / Math.sqrt(energyA * energyB);
+    if (correlation > best.correlation) best = { lag, correlation };
+  }
+  return best;
+}
+const summarise = (pairs: Array<Record<string, RegionDiff>>) => Object.fromEntries((['startup', 'body', 'tail'] as const).map(region => [region, {
+  maxDiff: pairs.map(pair => pair[region]!.maxDiff), rmsDiff: pairs.map(pair => pair[region]!.rmsDiff),
+  worstMaxDiff: Math.max(...pairs.map(pair => pair[region]!.maxDiff)), worstRmsDiff: Math.max(...pairs.map(pair => pair[region]!.rmsDiff)),
+}]));
+
+test('mastering enabled: streamed export equals the in-memory export in startup, body, alignment and tail, with the run-to-run spread recorded', async ({ page }) => {
+  test.setTimeout(600_000);
+  const sampleRate = 48000;
+  const RENDERS = 3;
+  // VST3 instruments on two tracks, VST3 inserts on both and on the master, and a built-in synth,
+  // through the default Mastering Suite (multiband, maximizer with 5 ms lookahead) as the dialog exports it.
+  const project = {
+    bpm: 120, totalBars: 4,
+    channels: [nativeChannel('piano', 1, 'mda Piano', 60), nativeChannel('lead', 2, 'mda JX10', 55), channel('synth', 3, { notes: line('synth', 43, 3) })],
+    clips: [clip('c1', 'piano', 4), clip('c2', 'lead', 4, 1), clip('c3', 'synth', 4, 2)],
+    tracks: [
+      track(0, { fxSlots: [nativeSlot('m1', effects['mda Limiter'])] }),
+      track(1, { fxSlots: [nativeSlot('f1', effects['mda Overdrive'])] }),
+      track(2, { fxSlots: [nativeSlot('f2', effects['mda Delay'])] }),
+      track(3),
+    ],
+  };
+  const songFrames = Math.round(project.totalBars * 4 * 60 / project.bpm * sampleRate);
+  const inMemory: Float32Array[] = [], streamed: Float32Array[] = [];
+  let result: any;
+  for (let index = 0; index < RENDERS; index += 1) {
+    const outcome = await run(page, { project, sampleRate, mastering: true, reference: true, fileName: `mastered-${index}.wav` });
+    expect(outcome.error, `render ${index}`).toBeUndefined();
+    const saved = readSaved(outcome.streamed.saved.path);
+    const referenceBytes = Buffer.from(outcome.reference.wav, 'base64');
+    expect(saved.header, `render ${index}`).toEqual({ format: 3, channels: 2, sampleRate, bitDepth: 32, blockAlign: 8, dataBytes: outcome.reference.frames * 8, frames: outcome.reference.frames });
+    expect(saved.bytes.length, `render ${index}`).toBe(referenceBytes.length);
+    expect(outcome.streamed.result, `render ${index}`).toMatchObject({ frames: outcome.reference.frames, passes: 3, nativeInstruments: 2, nativeEffects: 3 });
+    expect(service.sessionCount, `render ${index}`).toBe(0);
+    inMemory.push(floatSamples(referenceBytes));
+    streamed.push(floatSamples(saved.bytes));
+    result = outcome.streamed.result;
+  }
+  // The song window plus the four-second tail.
+  expect(inMemory[0]!.length / 2).toBe(songFrames + 4 * sampleRate);
+  const pairsOf = (list: Float32Array[]) => list.flatMap((first, i) => list.slice(i + 1).map(second => regions(first, second, sampleRate, songFrames)));
+  const control = pairsOf(inMemory);
+  const streamedRepeat = pairsOf(streamed);
+  const cross = inMemory.flatMap(reference => streamed.map(candidate => regions(reference, candidate, sampleRate, songFrames)));
+  // Every region carries signal: the first notes, the song, and the delay and release tails after it.
+  for (const region of ['startup', 'body', 'tail'] as const) expect(cross[0]![region].rms, region).toBeGreaterThan(1e-3);
+  // Each streamed render against each in-memory render, in each region, inside the same limits as
+  // the mastering-off tests. The control pairs are not part of the limit; they are recorded.
+  for (const [index, pair] of cross.entries()) {
+    for (const region of ['startup', 'body', 'tail'] as const) {
+      expect(pair[region].maxDiff, `pair ${index} ${region}`).toBeLessThanOrEqual(PARITY_MAX_DIFF);
+      expect(pair[region].rmsDiff, `pair ${index} ${region}`).toBeLessThanOrEqual(PARITY_RMS_DIFF);
+    }
+  }
+  // Latency alignment: the limiter's lookahead is trimmed identically, so no shift correlates better than none.
+  const alignment = streamed.map(candidate => bestLag(inMemory[0]!, candidate, Math.min(songFrames, 2 * sampleRate)));
+  for (const [index, entry] of alignment.entries()) {
+    expect(entry.lag, `streamed render ${index}`).toBe(0);
+    expect(entry.correlation, `streamed render ${index}`).toBeGreaterThan(0.999999);
+  }
+  evidence.masteringEnabledParity = {
+    sampleRate, renders: RENDERS, frames: inMemory[0]!.length / 2, songFrames, passes: result.passes, windows: result.windows,
+    limits: { maxDiff: PARITY_MAX_DIFF, rmsDiff: PARITY_RMS_DIFF },
+    signalRms: Object.fromEntries((['startup', 'body', 'tail'] as const).map(region => [region, cross[0]![region].rms])),
+    controlInMemoryVsInMemory: summarise(control),
+    controlStreamedVsStreamed: summarise(streamedRepeat),
+    streamedVsInMemory: summarise(cross),
+    alignment,
+    scheduling: result.scheduling,
+  };
+  console.log('STREAMED_EXPORT_MASTERING_PARITY', JSON.stringify(evidence.masteringEnabledParity));
 });
 
 test('8 VST3 instruments and 8 VST3 effects export at 16-bit, 24-bit and 32-bit float within the 16-session helper limit', async ({ page }) => {
