@@ -76,7 +76,7 @@ if (preload.includes('exposeInMainWorld(\'electron\'')) {
 // packaged executable dies at require time before app readiness.
 const packagedFiles = packageJson.build?.files ?? [];
 const normalizedPackagedFiles = packagedFiles.map((entry) => String(entry).replace(/^\.\//, ''));
-const requiredPackagedFiles = new Set(['electron.cjs', 'preload.cjs', 'desktop-permissions.cjs']);
+const requiredPackagedFiles = new Set(['electron.cjs', 'preload.cjs', 'desktop-permissions.cjs', 'desktop-export.cjs']);
 for (const match of electronConfig.matchAll(/require\(['"]\.\/([^'"]+)['"]\)/g)) {
   requiredPackagedFiles.add(match[1]);
 }

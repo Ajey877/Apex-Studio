@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import assert from 'node:assert/strict';
@@ -16,16 +17,21 @@ mkdirSync(evidence, { recursive: true });
 // Never write test projects into the user's real Apex profile. Preserve exactly
 // this isolated profile between two genuinely separate application processes.
 const profile = mkdtempSync(join(process.cwd(), 'build/vst3-smoke-profile-'));
+// Destination of the streamed-export save in smoke mode (no save dialog), one folder per launch.
+const exportDirFor = reopening => join(profile, reopening ? 'streamed-export-reopen' : 'streamed-export-save');
 async function launch(reopening) {
   const output = join(evidence, `apex-packaged-smoke-${reopening ? 'reopen' : 'save'}.json`);
+  const exportDir = exportDirFor(reopening);
+  mkdirSync(exportDir, { recursive: true });
   console.log(`[Apex Studio smoke] ${reopening ? 'reopening saved project in new process' : 'launching isolated profile'}: ${executable}`);
   await new Promise((resolve, reject) => {
     const child = spawn(executable, [], {
       env: { ...process.env, APEX_SMOKE_TEST: '1', APEX_SMOKE_REOPEN: reopening ? '1' : '0',
-        APEX_VST3_SMOKE_PLUGIN: fixture, APEX_SMOKE_EVIDENCE: output, APEX_SMOKE_USER_DATA: profile },
+        APEX_VST3_SMOKE_PLUGIN: fixture, APEX_SMOKE_EVIDENCE: output, APEX_SMOKE_USER_DATA: profile,
+        APEX_SMOKE_EXPORT_DIR: exportDir },
       stdio: 'inherit', windowsHide: true,
     });
-    const timeout = setTimeout(() => { child.kill(); reject(new Error('Timed out waiting for packaged app')); }, 120_000);
+    const timeout = setTimeout(() => { child.kill(); reject(new Error('Timed out waiting for packaged app')); }, 180_000);
     child.on('error', error => { clearTimeout(timeout); reject(error); });
     child.on('exit', (code, signal) => {
       clearTimeout(timeout);
@@ -62,6 +68,34 @@ try {
       assert.ok(metrics.leftRms > 0.01 && metrics.rightRms > 0.01 && metrics.rms > 0.01,
         `${label} save/reopen ${slotId} was silent: ${JSON.stringify(metrics)}`);
     }
+    // Phase 10G: streamed VST3 song export through the packaged export store.
+    const streamed = result.vst3?.streamedExport;
+    assert.equal(streamed?.status, 'passed', `${label} did not complete the packaged streamed export`);
+    assert.deepEqual(streamed.project, { nativeInstruments: 1, nativeEffects: 2, bars: 1, bpm: 120 });
+    assert.equal(streamed.savedFile.header.bitDepth, 24);
+    assert.equal(streamed.savedFile.header.frames, streamed.render.frames);
+    assert.equal(streamed.comparedWithInMemoryRender.frames, streamed.render.frames);
+    assert.ok(streamed.comparedWithInMemoryRender.maxDifference <= 1e-4, `${label} streamed export differs from the in-memory render`);
+    assert.equal(streamed.temporaryEntriesAfterSave, 0, `${label} left temporary export files`);
+    assert.equal(streamed.cancel.temporaryEntriesAfter, 0, `${label} left temporary files after cancel`);
+    assert.ok(streamed.nativeServiceSessions.before >= 0, `${label} helper session count unavailable`);
+    assert.equal(streamed.nativeServiceSessions.afterExport, streamed.nativeServiceSessions.before, `${label} leaked helper sessions after the streamed export`);
+    assert.equal(streamed.nativeServiceSessions.afterCancel, streamed.nativeServiceSessions.before, `${label} leaked helper sessions after a cancelled streamed export`);
+    // The saved WAV is on disk, readable by this separate process, and is what the app reported.
+    const exportDir = exportDirFor(result === reopened);
+    const savedPath = join(exportDir, streamed.savedFile.name);
+    const savedBytes = readFileSync(savedPath);
+    assert.equal(savedBytes.length, streamed.savedFile.bytes, `${label} saved WAV size`);
+    assert.equal(createHash('sha256').update(savedBytes).digest('hex'), streamed.savedFile.sha256, `${label} saved WAV checksum`);
+    assert.equal(savedBytes.toString('latin1', 0, 4) + savedBytes.toString('latin1', 8, 12), 'RIFFWAVE');
+    assert.deepEqual(readdirSync(exportDir), [streamed.savedFile.name], `${label} left other files next to the saved WAV`);
+  }
+  // Both application processes have exited: no temporary export data of this run may remain.
+  // (The smoke run ends with app.exit, so an empty per-process folder can remain until the next launch sweeps it.)
+  for (const result of [saved, reopened]) {
+    const root = result.vst3.streamedExport.exportRoot;
+    assert.ok(typeof root === 'string' && root.length > 0, 'export root not reported');
+    assert.deepEqual(existsSync(root) ? readdirSync(root) : [], [], `temporary export data survived application exit: ${root}`);
   }
   assert.equal(reopened.vst3.mixerEffects.persistedTwoInsertStateChecksum, saved.vst3.mixerEffects.persistedTwoInsertStateChecksum,
     'Actual application restart changed persisted two-insert Mixer VST3 configuration/parameters');

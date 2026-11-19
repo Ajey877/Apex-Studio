@@ -6,6 +6,7 @@ import { DEFAULT_MASTERING_SUITE_STATE } from './masteringState';
 import { getVst3Bridge, type Vst3Bridge, type Vst3Effect, type Vst3Identity } from './nativeVst3Types';
 import { VST3_FX_BLOCK_FRAMES, VST3_FX_PIPELINE_FRAMES, getNativeVst3MixerEffectSmokeTiming, resetAllNativeVst3SmokeTiming, resetNativeVst3MixerEffectSmokeTiming, getVst3MixerEffectDiagnostics } from './nativeVst3EffectRuntime';
 import { getVst3Diagnostics } from './nativeVst3Runtime';
+import { runStreamedExportDesktopSmoke } from './streamedExportDesktopSmoke';
 import { createDefaultProjectState, normalizeProjectState } from '../state/projectState';
 import { persistProjectState, restorePersistedProjectState, serializeProjectState } from '../state/projectPersistence';
 import type { Channel, FxSlot, MixerTrack, PlaylistClip } from '../types/daw';
@@ -1417,6 +1418,8 @@ export async function runDesktopVst3Smoke() {
       };
     }
     if (reopening && !document.body.textContent?.includes(channel.name)) throw new Error('The actual Apex application UI did not restore the saved native channel');
+    // Phase 10G: the production streamed song export through the packaged export store.
+    const streamedExport = await runStreamedExportDesktopSmoke(instance, { ...channel, vst3: instrument });
     if (!reopening) {
       const project = createDefaultProjectState();
       const persistedMixerTracks: MixerTrack[] = [
@@ -1437,6 +1440,7 @@ export async function runDesktopVst3Smoke() {
       pcmChecksum: digest(new Uint8Array(samples.buffer, samples.byteOffset, samples.byteLength)),
       savedStateChecksum: digest(new TextEncoder().encode(JSON.stringify(channel.vst3))),
       mixerEffects,
+      streamedExport,
       proof: 'Packaged helper + real preload IPC + AudioClockTransport/live master graph + production song export (Chromium Web Audio); not physical-device listening' };
   } finally {
     instance.stop();

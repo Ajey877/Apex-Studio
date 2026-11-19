@@ -41,26 +41,46 @@ export function audioBufferToWav(buffer: AudioBuffer, bitDepth: 16 | 24 | 32): B
   let offset = 44;
   for (let i = 0; i < buffer.length; i++) {
     for (let channel = 0; channel < numChannels; channel++) {
-      const rawSample = channels[channel][i];
-      if (bitDepth === 32) {
-        view.setFloat32(offset, sanitizeFloat32Sample(rawSample), true);
-        offset += 4;
-      } else if (bitDepth === 24) {
-        const sample = clampPcmSample(rawSample);
-        const value = sample < 0 ? sample * 0x800000 : sample * 0x7fffff;
-        const intValue = Math.round(value);
-        view.setUint8(offset, intValue & 0xff);
-        view.setUint8(offset + 1, (intValue >> 8) & 0xff);
-        view.setUint8(offset + 2, (intValue >> 16) & 0xff);
-        offset += 3;
-      } else {
-        const sample = clampPcmSample(rawSample);
-        const value = sample < 0 ? sample * 0x8000 : sample * 0x7fff;
-        view.setInt16(offset, Math.round(value), true);
-        offset += 2;
-      }
+      offset = writeWavSample(view, offset, channels[channel][i], bitDepth);
     }
   }
 
   return new Blob([arrayBuffer], { type: 'audio/wav' });
+}
+
+/**
+ * Writes one sample in the WAV encoding of `bitDepth` and returns the next
+ * offset. This is the only sample conversion in the application: the
+ * whole-buffer encoder above and the streamed export both go through it, so a
+ * streamed WAV carries byte-identical sample data.
+ */
+export function writeWavSample(view: DataView, offset: number, rawSample: number, bitDepth: 16 | 24 | 32): number {
+  if (bitDepth === 32) {
+    view.setFloat32(offset, sanitizeFloat32Sample(rawSample), true);
+    return offset + 4;
+  }
+  if (bitDepth === 24) {
+    const sample = clampPcmSample(rawSample);
+    const value = sample < 0 ? sample * 0x800000 : sample * 0x7fffff;
+    const intValue = Math.round(value);
+    view.setUint8(offset, intValue & 0xff);
+    view.setUint8(offset + 1, (intValue >> 8) & 0xff);
+    view.setUint8(offset + 2, (intValue >> 16) & 0xff);
+    return offset + 3;
+  }
+  const sample = clampPcmSample(rawSample);
+  const value = sample < 0 ? sample * 0x8000 : sample * 0x7fff;
+  view.setInt16(offset, Math.round(value), true);
+  return offset + 2;
+}
+
+/** WAV sample data for interleaved float32 frames (no header). */
+export function encodeInterleavedWavSamples(interleaved: Float32Array, bitDepth: 16 | 24 | 32): Uint8Array {
+  const bytes = new Uint8Array(interleaved.length * (bitDepth / 8));
+  const view = new DataView(bytes.buffer);
+  let offset = 0;
+  for (let index = 0; index < interleaved.length; index += 1) {
+    offset = writeWavSample(view, offset, interleaved[index]!, bitDepth);
+  }
+  return bytes;
 }

@@ -52,6 +52,23 @@ import { assertValidVst3EffectLatencySamples, assertVst3Effect, getVst3Bridge, t
 import { NativeVst3Runtime, NativeVst3OfflineRender, reportVst3, reconcileVst3Diagnostics } from './nativeVst3Runtime';
 import { NativeVst3EffectRuntime, reportVst3MixerEffect, VST3_FX_PIPELINE_FRAMES } from './nativeVst3EffectRuntime';
 import { computeMixerLatencyCompensation, MAX_MIXER_COMPENSATION_SECONDS, type MixerLatencyEdge } from './mixerLatencyCompensation';
+import {
+  ensureStreamTapModule,
+  interleavedToAudioBuffer,
+  isStreamedExportCancelled,
+  OfflineStreamTap,
+  planNativeEffectLevels,
+  sliceInterleavedWindow,
+  STREAM_CHUNK_FRAMES,
+  STREAM_LOOKAHEAD_MARGIN_FRAMES,
+  STREAM_WINDOW_FRAMES,
+  StreamedContentWriter,
+  StreamedVst3EffectSession,
+  throwIfStreamedExportCancelled,
+  type StreamedExportResult,
+  type StreamedExportScratch,
+  type StreamedExportTarget,
+} from './streamedOfflineExport';
 import { createInstrumentRegistry, InstrumentRegistry, InstrumentVoiceHandle } from './instrumentRegistry';
 import { MixerRoutingAdapter } from './mixerRoutingAdapter';
 import { buildDryStemMixerTracks, buildWetStemMixerTracks, getDirectAuxSendSourceIds, getUpstreamMixerTrackIds } from './auxStemRouting';
@@ -279,6 +296,68 @@ interface NativeVst3OfflineEffectPass {
   preserveAlignment: boolean;
   expectedFrameCount?: number;
   startTimeSeconds?: number;
+  /** Phase 10G: this pass exchanges its PCM in bounded windows (see `OfflineStreamPass`). */
+  stream?: OfflineStreamPass;
+}
+
+/**
+ * Phase 10G — one streamed pass of the production offline renderer.
+ *
+ * The pass is the ordinary single-`OfflineAudioContext` render with the
+ * ordinary up-front scheduler. Its render target is a throw-away mono buffer;
+ * the audio that matters crosses the context boundary in bounded windows:
+ * already-processed VST3 effect PCM (`overrides`) is scheduled one window
+ * ahead, the signal in front of the effects of this pass (`captures`) and the
+ * finished master (`master`) are read through AudioWorklet taps.
+ */
+interface OfflineStreamCapture {
+  trackId: number;
+  slotId: string;
+  name: string;
+  effect: Vst3Effect;
+  scratch: StreamedExportScratch;
+  tap?: OfflineStreamTap;
+  upstream?: AudioNode;
+}
+interface OfflineStreamOverride {
+  trackId: number;
+  scratch: StreamedExportScratch;
+  bus?: GainNode;
+  /** A later override on the same track replaced this one's whole downstream path. */
+  superseded?: boolean;
+}
+interface OfflineStreamPass {
+  signal?: AbortSignal;
+  captures: Map<string, OfflineStreamCapture>;
+  overrides: Map<string, OfflineStreamOverride>;
+  /** Present only in the pass that renders the finished master. */
+  master?: { write: (interleaved: Float32Array) => Promise<void> };
+  masterTap?: OfflineStreamTap;
+  /** Length of this pass's offline context; set when the context is created. */
+  totalFrames: number;
+  onWindow?: (renderedFrames: number, totalFrames: number) => void;
+  /** Filled by the pass. */
+  windows: number;
+  contentFrames?: number;
+  nativeInstruments: number;
+}
+
+/** The arguments of a streamed production export (`renderTimelineOfflineStreamed`). */
+export interface StreamedTimelineRequest {
+  channels: Channel[];
+  clips: PlaylistClip[];
+  mixerTracks: MixerTrack[];
+  bpm: number;
+  totalBars: number;
+  sampleRate?: number;
+  includeMixerFx?: boolean;
+  renderScope?: OfflineRenderScope;
+  onProgress?: OfflineRenderProgress;
+  patternLengthSteps?: number;
+  playlistTracks?: PlaylistTrack[];
+  minimumDurationSeconds?: number;
+  patterns?: Pattern[];
+  outputStage?: 'master' | 'pre-master';
 }
 const mixerFxRuntimeKey = (trackId: number, slotId: string) => `${trackId}:${slotId}`;
 
@@ -2672,11 +2751,56 @@ class AudioEngine {
     // for the live parameter/mix update registry.
     const slotEffectsMap = new Map<string, AudioEffect>();
     const createdEffects: AudioEffect[] = [];
+    const streamPass = this.nativeVst3OfflineEffectPass?.stream;
+    if (streamPass) {
+      // A rebuild replaces this track's chain, so the taps and override buses
+      // of the chain it retires must not be fed or read by the pass.
+      for (const capture of streamPass.captures.values()) {
+        if (capture.trackId !== track.id) continue;
+        capture.tap?.dispose();
+        capture.tap = undefined;
+        capture.upstream = undefined;
+      }
+      for (const override of streamPass.overrides.values()) {
+        if (override.trackId !== track.id) continue;
+        try { override.bus?.disconnect(); } catch (_) {}
+        override.bus = undefined;
+        override.superseded = false;
+      }
+    }
     try {
       track.fxSlots.forEach(slot => {
         if (!slot.enabled && slot.type !== 'vst3') return;
         if (slot.type === 'vst3') {
           const offlinePass = this.nativeVst3OfflineEffectPass;
+          if (offlinePass?.stream) {
+            // Phase 10G streamed pass: the same tap point and the same
+            // replace-everything-upstream override as the full-buffer pass
+            // below, exchanged in bounded windows instead of whole-song buffers.
+            const stream = offlinePass.stream;
+            const key = mixerFxRuntimeKey(track.id, slot.id);
+            const capture = stream.captures.get(key);
+            if (capture) {
+              // `discrete` is the up-mix rule of the channel splitter the
+              // full-buffer capture pass puts at this point.
+              const tap = new OfflineStreamTap(ctx, stream.totalFrames, 'discrete', `before ${slot.name}`);
+              currentSource.connect(tap.node);
+              tap.node.connect(ctx.destination);
+              capture.tap = tap;
+              capture.upstream = currentSource;
+            }
+            const streamed = stream.overrides.get(key);
+            if (streamed) {
+              for (const other of stream.overrides.values()) {
+                if (other !== streamed && other.trackId === track.id && other.bus) other.superseded = true;
+              }
+              const bus = ctx.createGain();
+              streamed.bus = bus;
+              currentSource = bus;
+              channel.fxNodes.push(bus);
+            }
+            return;
+          }
           if (offlinePass) {
             const key = mixerFxRuntimeKey(track.id, slot.id);
             if (offlinePass.captureKey === key) {
@@ -5130,18 +5254,25 @@ class AudioEngine {
         nativeEffectPass.expectedFrameCount = outputFrameCount + tailFrameCount;
         nativeEffectPass.startTimeSeconds = masteringPrerollSeconds;
       }
+      const streamPass = nativeEffectPass?.stream;
+      // Phase 10G: a streamed pass reads its audio through taps, so the render
+      // target it never reads is the smallest one the API allows (mono).
       const offlineCtx = new OfflineContextClass(
-        captureNativeTrack ? 4 : 2,
+        streamPass ? 1 : captureNativeTrack ? 4 : 2,
         outputFrameCount + prerollFrameCount + reservedLimiterFrames + tailFrameCount,
         renderSampleRate,
       );
+      if (streamPass) streamPass.totalFrames = offlineCtx.length;
       this.nativeVst3OfflineEffectPass = nativeEffectPass ?? null;
       this.nativeVst3OfflineTapMerger = captureNativeTrack ? offlineCtx.createChannelMerger(4) : null;
       if (this.nativeVst3OfflineTapMerger) this.nativeVst3OfflineTapMerger.connect(offlineCtx.destination);
-      this.nativeOffline = new NativeVst3OfflineRender(offlineCtx, offlineCtx.length);
+      this.nativeOffline = new NativeVst3OfflineRender(offlineCtx, offlineCtx.length, undefined, Boolean(streamPass));
       this.isOfflineRendering = true;
       this.liveCtx = previous.ctx;
       try {
+        // The taps of a streamed pass are part of the graph the mixer builds
+        // below, so their processor must be registered first.
+        if (streamPass) await ensureStreamTapModule(offlineCtx as unknown as BaseAudioContext);
         this.withOfflineRenderOperation(() => {
           this.renderingPreMaster = outputStage === 'pre-master';
           this.ctx = offlineCtx as unknown as AudioContext;
@@ -5173,6 +5304,13 @@ class AudioEngine {
             mainSplitter.connect(mainMerger, 0, 0);
             mainSplitter.connect(mainMerger, 1, 1);
             mainMerger.connect(offlineCtx.destination);
+          } else if (streamPass?.master) {
+            // `speakers` is the up-mix rule of the stereo destination this tap
+            // stands in for, so a mono master reaches the file as L = R.
+            const masterTap = new OfflineStreamTap(offlineCtx as unknown as BaseAudioContext, offlineCtx.length, 'speakers', 'master');
+            this.masterAnalyser.connect(masterTap.node);
+            masterTap.node.connect(offlineCtx.destination);
+            streamPass.masterTap = masterTap;
           } else {
             this.masterAnalyser.connect(offlineCtx.destination);
           }
@@ -5311,6 +5449,16 @@ class AudioEngine {
         }
         onProgress?.(70, `Rendering offline audio (${totalDurationSeconds.toFixed(2)}s)...`);
         this.nativeOffline!.timeline(renderScope === 'song' ? this.activeClips.filter(c => !this.isPlaylistLaneMuted(c)) : [], this.secondsPerBarAt(safeBpm), masteringPrerollSeconds);
+        if (streamPass) {
+          return await this.runStreamedOfflinePass(offlineCtx as unknown as OfflineAudioContext, streamPass, {
+            bpm: safeBpm,
+            prerollFrameCount,
+            prerollSeconds: masteringPrerollSeconds,
+            songFrameCount: outputFrameCount,
+            tailFrameCount,
+            limiterLatencyFrames: nativeEffectPass?.preserveAlignment ? 0 : limiterLatencyFrames,
+          });
+        }
         await this.nativeOffline!.flush(safeBpm);
         const renderedBuffer = await offlineCtx.startRendering();
         let outputBuffer = renderedBuffer;
@@ -5348,6 +5496,12 @@ class AudioEngine {
         onProgress?.(85, 'Offline render complete. Encoding WAV...');
         return outputBuffer;
       } finally {
+        if (streamPass) {
+          streamPass.masterTap?.dispose();
+          streamPass.masterTap = undefined;
+          for (const capture of streamPass.captures.values()) { capture.tap?.dispose(); capture.tap = undefined; capture.upstream = undefined; }
+          for (const override of streamPass.overrides.values()) { try { override.bus?.disconnect(); } catch (_) {} override.bus = undefined; }
+        }
         this.nativeOffline?.dispose();
         this.nativeOffline = null;
         this.isOfflineRendering = false;
@@ -5421,6 +5575,411 @@ class AudioEngine {
         // during the render cannot be left behind on the offline side.
         this.notifyOfflineRenderComplete();
       }
+    }
+  }
+
+  /**
+   * Phase 10G — drives one streamed pass after the production scheduler has
+   * queued the timeline.
+   *
+   * The context is suspended every `STREAM_WINDOW_FRAMES`. At each suspension
+   * the pass (1) takes what the taps delivered for the window just rendered and
+   * hands it to the VST3 effects of this pass / the master writer, and (2)
+   * schedules VST3 instrument PCM and already-processed effect PCM for the next
+   * window plus a small margin. Every native session stays open for the whole
+   * pass. PCM held in the renderer is therefore bounded by one window per
+   * stream, independent of the song length.
+   */
+  private async runStreamedOfflinePass(
+    ctx: OfflineAudioContext,
+    stream: OfflineStreamPass,
+    layout: {
+      bpm: number;
+      prerollFrameCount: number;
+      prerollSeconds: number;
+      songFrameCount: number;
+      tailFrameCount: number;
+      limiterLatencyFrames: number;
+    },
+  ): Promise<AudioBuffer> {
+    const native = this.nativeOffline;
+    if (!native) throw new Error('Streamed export lost its native instrument collector.');
+    const rate = ctx.sampleRate;
+    const total = ctx.length;
+    const signal = stream.signal;
+    const contentFrames = layout.songFrameCount + layout.tailFrameCount;
+    // Same windows as the full-buffer path: an effect's input is the content
+    // window starting at the mastering preroll, the exported master additionally
+    // skips the limiter's lookahead.
+    const captureStartFrame = layout.prerollFrameCount;
+    const masterStartFrame = layout.prerollFrameCount + layout.limiterLatencyFrames;
+    const captures = [...stream.captures.values()];
+    const overrides = [...stream.overrides.values()].filter(override => override.bus && !override.superseded);
+    for (const capture of captures) {
+      if (!capture.tap) throw new Error(`Native Mixer effect ${capture.name} produced no affected-track capture. Export stopped.`);
+    }
+    for (const override of stream.overrides.values()) {
+      if (override.scratch.frames !== contentFrames) {
+        throw new Error(`Native Mixer effect PCM override mismatch: ${override.scratch.frames} frames, expected ${contentFrames} @ ${rate} Hz.`);
+      }
+    }
+    if (stream.master && !stream.masterTap) throw new Error('Streamed export master tap is unavailable.');
+    const masterTap = stream.master ? stream.masterTap! : null;
+    const writer = stream.master ? new StreamedContentWriter(stream.master.write, layout.songFrameCount, layout.tailFrameCount) : null;
+    const bridge = getVst3Bridge();
+    if (captures.length && !bridge) throw new Error('VST3 effect bridge closed during offline processing. Export stopped; no dry substitute was written.');
+    const sessions = new Map<OfflineStreamCapture, StreamedVst3EffectSession>();
+    const failEffect = (capture: OfflineStreamCapture, prefix: string, error: unknown): never => {
+      if (!isStreamedExportCancelled(error)) {
+        reportVst3MixerEffect(capture.trackId, capture.slotId, `${prefix}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+      throw error;
+    };
+    const settleAll = async (tasks: Array<Promise<void>>): Promise<void> => {
+      const results = await Promise.allSettled(tasks);
+      const failed = results.find((result): result is PromiseRejectedResult => result.status === 'rejected');
+      if (failed) throw failed.reason;
+    };
+    // The override PCM starts where the full-buffer override source starts.
+    const overrideBase = layout.prerollSeconds * rate;
+    const overrideBaseIsFrameAligned = Math.abs(overrideBase - Math.round(overrideBase)) < 1e-6;
+    const overrideStartTime = (contentFrame: number) => overrideBaseIsFrameAligned
+      ? (Math.round(overrideBase) + contentFrame) / rate
+      : layout.prerollSeconds + contentFrame / rate;
+    const overrideStartFrame = Math.ceil(overrideBase - 1e-6);
+    let overrideCursor = 0;
+    let rendering: Promise<AudioBuffer> | null = null;
+    let completed = false;
+    stream.nativeInstruments = native.channelCount;
+
+    const feed = async (untilFrame: number): Promise<void> => {
+      throwIfStreamedExportCancelled(signal);
+      await native.produceUntil(untilFrame, layout.bpm);
+      const untilContent = Math.min(contentFrames, Math.max(0, untilFrame - overrideStartFrame));
+      if (untilContent > overrideCursor && overrides.length) {
+        const from = overrideCursor;
+        const count = untilContent - from;
+        await settleAll(overrides.map(async override => {
+          const pcm = await override.scratch.read(from, count);
+          if (!(pcm instanceof Float32Array) || pcm.length !== count * 2) {
+            throw new Error(`Native Mixer effect PCM could not be read back (${pcm instanceof Float32Array ? pcm.length / 2 : 'no'} of ${count} frames). Export stopped.`);
+          }
+          const source = ctx.createBufferSource();
+          source.buffer = interleavedToAudioBuffer(ctx, pcm);
+          source.connect(override.bus!);
+          source.start(overrideStartTime(from));
+        }));
+      }
+      overrideCursor = Math.max(overrideCursor, untilContent);
+      throwIfStreamedExportCancelled(signal);
+    };
+
+    const drain = async (untilFrame: number): Promise<void> => {
+      const target = untilFrame >= total ? total : Math.floor(untilFrame / STREAM_CHUNK_FRAMES) * STREAM_CHUNK_FRAMES;
+      await settleAll([
+        ...captures.map(capture => capture.tap!.waitForFrames(target, signal)),
+        ...(masterTap ? [masterTap.waitForFrames(target, signal)] : []),
+      ]);
+      await settleAll(captures.map(async capture => {
+        const tap = capture.tap!;
+        const start = tap.takenFrames;
+        const input = sliceInterleavedWindow(tap.take(target), start, captureStartFrame, contentFrames);
+        if (!input.length) return;
+        try {
+          const output = await sessions.get(capture)!.push(input);
+          if (output.length) await capture.scratch.append(output);
+        } catch (error) {
+          failEffect(capture, 'Offline VST3 processing failed; export was stopped rather than substituting dry audio', error);
+        }
+      }));
+      if (masterTap && writer) {
+        const start = masterTap.takenFrames;
+        const content = sliceInterleavedWindow(masterTap.take(target), start, masterStartFrame, contentFrames);
+        if (content.length) await writer.push(content);
+      }
+      throwIfStreamedExportCancelled(signal);
+    };
+
+    try {
+      throwIfStreamedExportCancelled(signal);
+      await native.openStreamed();
+      for (const capture of captures) {
+        try {
+          sessions.set(capture, await StreamedVst3EffectSession.open(bridge!, capture.effect, rate, layout.bpm));
+        } catch (error) {
+          failEffect(capture, 'Offline VST3 effect restoration/open failed; export was stopped rather than substituting dry audio', error);
+        }
+      }
+      let nextSuspendFrame = STREAM_WINDOW_FRAMES;
+      const canSuspendAt = (frame: number) => frame + 128 < total && typeof ctx.suspend === 'function' && typeof ctx.resume === 'function';
+      await feed(canSuspendAt(nextSuspendFrame) ? nextSuspendFrame + STREAM_LOOKAHEAD_MARGIN_FRAMES : total);
+      // Half a frame past the boundary: an implementation that floors the
+      // suspend time to its render quantum and one that rounds both land on it.
+      let suspension: Promise<void> | null = canSuspendAt(nextSuspendFrame) ? ctx.suspend((nextSuspendFrame + 0.5) / rate) : null;
+      rendering = ctx.startRendering();
+      rendering.catch(() => {});
+      const finishedEarly = rendering.then(() => {
+        throw new Error('The offline render finished before a scheduled streaming window. Export stopped; nothing was written.');
+      });
+      finishedEarly.catch(() => {});
+      while (suspension) {
+        await Promise.race([suspension, finishedEarly]);
+        stream.windows += 1;
+        const renderedFrames = Math.round(ctx.currentTime * rate);
+        await drain(renderedFrames);
+        stream.onWindow?.(renderedFrames, total);
+        nextSuspendFrame = renderedFrames + STREAM_WINDOW_FRAMES;
+        const more = canSuspendAt(nextSuspendFrame);
+        await feed(more ? nextSuspendFrame + STREAM_LOOKAHEAD_MARGIN_FRAMES : total);
+        suspension = more ? ctx.suspend((nextSuspendFrame + 0.5) / rate) : null;
+        await ctx.resume();
+      }
+      const rendered = await rendering;
+      stream.windows += 1;
+      await drain(total);
+      await settleAll(captures.map(async capture => {
+        try {
+          const rest = await sessions.get(capture)!.finish();
+          if (rest.length) await capture.scratch.append(rest);
+        } catch (error) {
+          failEffect(capture, 'Offline VST3 processing failed; export was stopped rather than substituting dry audio', error);
+        }
+        if (capture.scratch.frames !== contentFrames) {
+          throw new Error(`Native Mixer effect ${capture.name} returned ${capture.scratch.frames} of ${contentFrames} frames. Export stopped.`);
+        }
+      }));
+      if (writer) stream.contentFrames = await writer.finish();
+      stream.onWindow?.(total, total);
+      completed = true;
+      return rendered;
+    } finally {
+      await Promise.allSettled([...sessions.values()].map(session => session.close()));
+      await native.closeStreamed().catch(() => {});
+      if (!completed && rendering) this.abandonStreamedOfflineContext(ctx, stream);
+    }
+  }
+
+  /**
+   * A streamed pass that stops early leaves its context suspended. A suspended
+   * offline context is never collected, so it is resumed and left to finish —
+   * with every edge the engine owns cut first, so what remains to render is
+   * silence rather than the rest of the song.
+   */
+  private abandonStreamedOfflineContext(ctx: OfflineAudioContext, stream: OfflineStreamPass): void {
+    const sever = (node: unknown) => {
+      if (node && typeof (node as { disconnect?: unknown }).disconnect === 'function') {
+        try { (node as AudioNode).disconnect(); } catch (_) {}
+      }
+    };
+    try {
+      for (const capture of stream.captures.values()) { sever(capture.upstream); capture.tap?.dispose(); }
+      stream.masterTap?.dispose();
+      for (const override of stream.overrides.values()) sever(override.bus);
+      sever(this.masteringProcessor?.output);
+      sever(this.grossBeatNode);
+      sever(this.masterGain);
+      sever(this.masterAnalyser);
+      for (const panner of this.channelPanners.values()) sever(panner);
+      for (const channel of this.mixerChannels.values()) {
+        for (const value of Object.values(channel as unknown as Record<string, unknown>)) {
+          if (value instanceof Map) for (const nested of value.values()) sever(nested);
+          else if (Array.isArray(value)) for (const nested of value) sever(nested);
+          else sever(value);
+        }
+      }
+    } catch (_) {
+      // Best effort: the context is still resumed below.
+    }
+    try {
+      if ((ctx as unknown as { state?: string }).state === 'suspended') void ctx.resume().catch(() => {});
+    } catch (_) {
+      // A context that cannot resume has nothing left to release here.
+    }
+  }
+
+  /**
+   * Phase 10G — streamed production export.
+   *
+   * Renders the same timeline, mixer, VST3 processing and mastering as
+   * `renderTimelineOffline`, but never holds a song-length PCM buffer: VST3
+   * instrument and effect audio is exchanged with the helper in bounded
+   * windows, processed effect audio lives in `target` scratch storage, and the
+   * finished master is written to `target` as it is rendered.
+   *
+   * VST3 Mixer effects keep the production multi-pass structure (capture the
+   * signal in front of an effect, process it in the helper, re-render with the
+   * result in place), with one difference: every effect whose input does not
+   * depend on another unprocessed effect is captured in the same pass, so the
+   * pass count is the deepest serial effect chain plus one.
+   *
+   * Callers that need an `AudioBuffer` (bounce, stems, parity measurement) keep
+   * using `renderTimelineOffline`.
+   */
+  public async renderTimelineOfflineStreamed(
+    request: StreamedTimelineRequest,
+    target: StreamedExportTarget,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<StreamedExportResult> {
+    if (this.nativeFxOfflineBatchHeld || this.offlineRenderLeaseHeld) {
+      throw new Error('Another production offline render is already running.');
+    }
+    const signal = options.signal;
+    throwIfStreamedExportCancelled(signal);
+    const includeMixerFx = request.includeMixerFx ?? false;
+    const renderScope = request.renderScope ?? 'song';
+    const outputStage = request.outputStage ?? 'master';
+    const orderedTracks = includeMixerFx ? this.orderMixerTracksUpstreamFirst(request.mixerTracks) : [];
+    const enabledNativeSlots = (track: MixerTrack) => track.fxSlots.filter(slot => slot.type === 'vst3' && slot.enabled);
+    const slotByKey = new Map<string, { trackId: number; slot: FxSlot }>();
+    for (const track of orderedTracks) {
+      for (const slot of enabledNativeSlots(track)) slotByKey.set(mixerFxRuntimeKey(track.id, slot.id), { trackId: track.id, slot });
+    }
+    if (slotByKey.size > 8) throw new Error('Offline VST3 export supports at most 8 enabled Mixer-effect inserts per render.');
+    if (outputStage === 'pre-master' && [...slotByKey.values()].some(item => item.trackId === 0)) {
+      throw new Error('Pre-master exports intentionally omit master-track processing and cannot include a VST3 master insert. Choose a master export or disable that insert; no substitute was rendered.');
+    }
+    if (slotByKey.size > 0 && !getVst3Bridge()) {
+      throw new Error('Native VST3 Mixer-effect export requires the authorized desktop bridge. Export stopped; no dry substitute was written.');
+    }
+    for (const { slot } of slotByKey.values()) {
+      if (!slot.vst3Effect) throw new Error(`VST3 Mixer effect ${slot.name} has no saved identity/state. Export stopped; the project data is retained.`);
+      assertVst3Effect(slot.vst3Effect);
+    }
+    // The audio edges `orderMixerTracksUpstreamFirst` orders by.
+    const edges: Array<{ sourceTrackId: number; targetTrackId: number }> = [];
+    for (const track of orderedTracks) {
+      if (track.id !== 0) edges.push({ sourceTrackId: track.id, targetTrackId: track.routingTargetId ?? 0 });
+    }
+    if (orderedTracks.length && this.validateAuxSendsNoCycle([...request.mixerTracks]) === null) {
+      for (const track of orderedTracks) {
+        if (track.id === 0) continue;
+        for (const send of (track.auxSends ?? []).slice(0, 2)) {
+          if (!Number.isInteger(send.targetId) || send.targetId === 0 || send.targetId === track.id) continue;
+          edges.push({ sourceTrackId: track.id, targetTrackId: send.targetId });
+        }
+      }
+    }
+    // A level-detected sidechain couples two tracks without an audio edge
+    // between them. Keep the historic one-effect-per-pass order there, so the
+    // detector hears exactly what it hears in the full-buffer export.
+    const sequential = orderedTracks.some(track => !!track.sidechain && track.sidechain.enabled &&
+      resolveSidechainMode(track.sidechain) === SIDECHAIN_MODE_LEVEL_DETECTED);
+    const plan = planNativeEffectLevels(
+      orderedTracks.map(track => ({ id: track.id, slotIds: enabledNativeSlots(track).map(slot => slot.id) })),
+      edges,
+      sequential,
+    );
+    const levelCount = plan.reduce((deepest, item) => Math.max(deepest, item.level), 0);
+    const passCount = levelCount + 1;
+    const formatClock = (seconds: number) => {
+      const whole = Math.max(0, Math.floor(seconds));
+      return `${Math.floor(whole / 60)}:${String(whole % 60).padStart(2, '0')}`;
+    };
+    const scratches = new Map<string, { trackId: number; scratch: StreamedExportScratch }>();
+    const releaseScratch = async (key: string) => {
+      const entry = scratches.get(key);
+      if (!entry) return;
+      scratches.delete(key);
+      await entry.scratch.release().catch(() => {});
+    };
+    const transport = this.transport;
+    const transportWasPlaying = transport?.getState().playing ?? false;
+    let windows = 0;
+    let nativeInstruments = 0;
+    this.nativeFxOfflineBatchHeld = true;
+    if (transportWasPlaying) transport!.stop(false);
+    try {
+      // The helper serves 16 sessions in total. Live instrument and Mixer-effect
+      // sessions are released first (exactly as Stop releases them) so that a
+      // project with 8 instruments and 8 effects has the whole budget for its
+      // export; Play prepares them again.
+      await this.releaseNativeInstruments();
+      const runPass = async (passIndex: number, pass: NativeVst3OfflineEffectPass, label: string): Promise<void> => {
+        const stream = pass.stream!;
+        const base = 12 + (83 * passIndex) / passCount;
+        const span = 83 / passCount;
+        const prefix = passCount > 1 ? `Pass ${passIndex + 1}/${passCount} — ` : '';
+        stream.onWindow = (renderedFrames, totalFrames) => {
+          const rate = request.sampleRate ?? this.liveCtx?.sampleRate ?? this.ctx?.sampleRate ?? 44100;
+          const fraction = totalFrames > 0 ? Math.min(1, renderedFrames / totalFrames) : 1;
+          request.onProgress?.(Math.round(base + span * (0.25 + 0.75 * fraction)),
+            `${prefix}${label} ${formatClock(renderedFrames / rate)} of ${formatClock(totalFrames / rate)}…`);
+        };
+        await this.renderTimelineOffline(
+          request.channels, request.clips, request.mixerTracks, request.bpm, request.totalBars,
+          request.sampleRate, includeMixerFx, renderScope,
+          (progress, status) => {
+            if (progress >= 85) return;
+            request.onProgress?.(Math.round(base + span * 0.25 * Math.max(0, Math.min(1, (progress - 15) / 55))), `${prefix}${status}`);
+          },
+          request.patternLengthSteps, request.playlistTracks, request.minimumDurationSeconds,
+          request.patterns, outputStage, pass,
+        );
+        windows += stream.windows;
+        nativeInstruments = Math.max(nativeInstruments, stream.nativeInstruments);
+      };
+      const overridesForPass = () => new Map<string, OfflineStreamOverride>(
+        [...scratches].map(([key, entry]) => [key, { trackId: entry.trackId, scratch: entry.scratch }]));
+
+      for (let level = 1; level <= levelCount; level += 1) {
+        throwIfStreamedExportCancelled(signal);
+        const captures = new Map<string, OfflineStreamCapture>();
+        try {
+          for (const item of plan) {
+            if (item.level !== level) continue;
+            const key = mixerFxRuntimeKey(item.trackId, item.slotId);
+            const { slot } = slotByKey.get(key)!;
+            captures.set(key, {
+              trackId: item.trackId, slotId: item.slotId, name: slot.name, effect: slot.vst3Effect!,
+              scratch: await target.createScratch(`vst3-effect-${item.trackId}-${item.slotId}`),
+            });
+          }
+          const names = [...captures.values()].map(capture => capture.name);
+          await runPass(level - 1, {
+            overrides: new Map(), captureChannelStart: 2, preserveAlignment: true,
+            stream: { signal, captures, overrides: overridesForPass(), totalFrames: 0, windows: 0, nativeInstruments: 0 },
+          }, `processing ${names.length === 1 ? names[0] : `${names.length} native effects`}`);
+        } catch (error) {
+          await Promise.allSettled([...captures.values()].map(capture => capture.scratch.release()));
+          throw error;
+        }
+        for (const [key, capture] of captures) scratches.set(key, { trackId: capture.trackId, scratch: capture.scratch });
+        // Within one track only the deepest processed insert is ever heard
+        // again: it replaces everything in front of it in every later pass.
+        for (const track of orderedTracks) {
+          const processed = enabledNativeSlots(track).map(slot => mixerFxRuntimeKey(track.id, slot.id)).filter(key => scratches.has(key));
+          for (const key of processed.slice(0, -1)) await releaseScratch(key);
+        }
+      }
+
+      throwIfStreamedExportCancelled(signal);
+      const finalStream: OfflineStreamPass = {
+        signal, captures: new Map(), overrides: overridesForPass(), master: { write: pcm => target.write(pcm) },
+        totalFrames: 0, windows: 0, nativeInstruments: 0,
+      };
+      await runPass(levelCount, { overrides: new Map(), captureChannelStart: 2, preserveAlignment: false, stream: finalStream },
+        levelCount > 0 ? 'rendering the master' : 'rendering');
+      if (finalStream.contentFrames === undefined) throw new Error('Streamed export finished without a master frame count.');
+      const sampleRate = request.sampleRate ?? this.ctx?.sampleRate ?? 44100;
+      request.onProgress?.(96, 'Offline render complete. Finalizing WAV...');
+      return {
+        frames: finalStream.contentFrames,
+        sampleRate,
+        passes: passCount,
+        windows,
+        nativeInstruments,
+        nativeEffects: slotByKey.size,
+      };
+    } catch (error) {
+      if (error instanceof Error && /VST3 session limit/i.test(error.message)) {
+        throw new Error('The VST3 host has no free session for this export: it serves 16 at a time, including an open plugin editor. Close the plugin editor window and export again. Export stopped; no file was written.', { cause: error });
+      }
+      throw error;
+    } finally {
+      await Promise.allSettled([...scratches.keys()].map(key => releaseScratch(key)));
+      this.nativeFxOfflineBatchHeld = false;
+      // Playback stays stopped: the live native sessions were released for the
+      // export and Play prepares them again through the normal path.
     }
   }
 

@@ -323,13 +323,24 @@ export class NativeVst3OfflineRender {
   timeline(clips: PlaylistClip[], secondsPerBar: number, preroll: number) {
     this.automation.set(clips, secondsPerBar); this.automation.clock(preroll, 0);
   }
-  constructor(private context: BaseAudioContext, private frames: number, private bridge = getVst3Bridge()) {}
+  /**
+   * `streamed` (Phase 10G): PCM is requested one bounded window ahead of the
+   * render position through `openStreamed`/`produceUntil`, so the full-song
+   * preparation bound that protects `flush()` does not apply.
+   */
+  constructor(private context: BaseAudioContext, private frames: number, private bridge = getVst3Bridge(), private streamed = false) {}
+  private streams: Array<{
+    entry: { channel: Channel; gain: GainNode; events: Array<Vst3Event & { frame: number }> };
+    id: string; parameters: Vst3Parameter[]; base: Map<number, number>; automated: Set<number>;
+    eventIndex: number; cursor: number; blockSize: number;
+  }> | null = null;
+  get channelCount() { return this.channels.size; }
   render(context: InstrumentVoiceContext): InstrumentVoiceHandle {
     assertVst3Instrument(context.channel.vst3);
     bridgeOrThrow(this.bridge);
     let entry = this.channels.get(context.channel.id);
     if (!entry) {
-      if ((this.channels.size + 1) * this.frames * 8 > 128 * 1024 * 1024) throw new Error('VST3 export PCM exceeds the 128 MiB preparation limit; reduce export length or number of native channels.');
+      if (!this.streamed && (this.channels.size + 1) * this.frames * 8 > 128 * 1024 * 1024) throw new Error('VST3 export PCM exceeds the 128 MiB preparation limit; reduce export length or number of native channels.');
       const gain = this.context.createGain();
       gain.gain.value = context.channel.volume;
       gain.connect(context.destination);
@@ -371,6 +382,62 @@ export class NativeVst3OfflineRender {
         }
       } finally { await bridge!.close(id); }
     }
+  }
+  /**
+   * Streamed export: opens one offline instance per native channel and keeps it
+   * open for the whole render, so plug-in state is continuous across windows.
+   * The event order, block size and automation points are those of `flush()`.
+   */
+  async openStreamed(): Promise<void> {
+    if (this.streams) throw new Error('VST3 streamed export sessions are already open.');
+    this.streams = [];
+    if (!this.channels.size) return;
+    const bridge = bridgeOrThrow(this.bridge);
+    for (const entry of this.channels.values()) {
+      const { id, parameters = [] } = await bridge.open(entry.channel.vst3!, this.context.sampleRate, 'offline');
+      entry.events.sort((a, b) => a.frame - b.frame || (a.type === b.type ? 0 : a.type === 'off' ? -1 : 1));
+      this.streams.push({
+        entry, id, parameters,
+        base: new Map(parameters.filter(p => p.currentValue !== null).map(p => [p.id, p.currentValue!])),
+        automated: new Set<number>(), eventIndex: 0, cursor: 0,
+        blockSize: this.automation.hasChannel(entry.channel) ? BLOCK : 16384,
+      });
+    }
+  }
+  /**
+   * Renders and schedules native PCM for every block that starts before
+   * `untilFrame`. Blocks start on the same multiples of the block size as in
+   * `flush()`, so each plug-in receives identical process calls.
+   */
+  async produceUntil(untilFrame: number, bpm: number): Promise<void> {
+    if (!this.streams) throw new Error('VST3 streamed export sessions are not open.');
+    const bridge = this.streams.length ? bridgeOrThrow(this.bridge) : this.bridge;
+    const limit = Math.min(untilFrame, this.frames);
+    const results = await Promise.allSettled(this.streams.map(async stream => {
+      while (stream.cursor < limit) {
+        const cursor = stream.cursor;
+        const frames = Math.min(stream.blockSize, this.frames - cursor), events: Vst3Event[] = [];
+        while (stream.eventIndex < stream.entry.events.length && stream.entry.events[stream.eventIndex].frame < cursor + frames) {
+          const { frame, ...event } = stream.entry.events[stream.eventIndex++];
+          if (frame >= cursor) events.push({ ...event, offset: frame - cursor });
+        }
+        const points = this.automation.points(stream.entry.channel, stream.parameters, stream.base, stream.automated, cursor / this.context.sampleRate, frames, this.context.sampleRate);
+        const samples = await bridge!.process(stream.id, frames, events, bpm, points);
+        const source = this.context.createBufferSource();
+        source.buffer = pcmBuffer(this.context, samples, frames);
+        source.connect(stream.entry.gain);
+        source.start(cursor / this.context.sampleRate);
+        stream.cursor = cursor + frames;
+      }
+    }));
+    const failed = results.find((result): result is PromiseRejectedResult => result.status === 'rejected');
+    if (failed) throw failed.reason;
+  }
+  async closeStreamed(): Promise<void> {
+    const streams = this.streams;
+    this.streams = null;
+    if (!streams?.length || !this.bridge) return;
+    await Promise.allSettled(streams.map(stream => this.bridge!.close(stream.id)));
   }
   dispose() { for (const entry of this.channels.values()) entry.gain.disconnect(); this.channels.clear(); }
 }

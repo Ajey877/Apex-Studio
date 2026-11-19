@@ -6,6 +6,13 @@ import { Channel, Pattern, PlaylistClip, PlaylistTrack, ProjectMetadata, MixerTr
 import { audioEngine } from '../audio/audioEngine';
 import { formatProjectSwingPercent } from '../audio/parameterScaling';
 import { audioBufferToWav } from '../audio/wavEncoder';
+import { isStreamedExportCancelled } from '../audio/streamedOfflineExport';
+import {
+  DesktopStreamedWavExport,
+  estimateStreamedExportBytes,
+  exportUsesNativeVst3,
+  getDesktopExportStore,
+} from '../audio/streamedWavExport';
 import { buildStandardMidiFile, getProjectRenderBars } from '../utils/exportUtils';
 import type { ExportScope } from '../utils/exportUtils';
 import { normalizePatternLengthSteps } from '../state/patternLength';
@@ -131,6 +138,43 @@ export const canAuditionExport = (format: ExportFormat, hasDownloadUrl: boolean)
 };
 
 /**
+ * Pure helper exported for unit testing — true when a WAV master export is
+ * rendered straight to disk instead of into one in-memory AudioBuffer. That is
+ * the desktop application exporting a full song that contains native VST3
+ * audio; everything else keeps the in-memory path.
+ */
+export const usesStreamedWavExport = (
+  format: ExportFormat,
+  scope: ExportScope,
+  hasDesktopExportStore: boolean,
+  projectUsesNativeVst3: boolean,
+): boolean =>
+  (format === 'wav16' || format === 'wav24' || format === 'wav32') &&
+  scope === 'song' && hasDesktopExportStore && projectUsesNativeVst3;
+
+/**
+ * Pure helper exported for unit testing — the message shown for a failed
+ * streamed export. Electron prefixes a rejected IPC call with its channel name;
+ * that prefix is removed, and the message always states that nothing was saved.
+ */
+export const describeStreamedExportFailure = (error: unknown): string => {
+  const raw = error instanceof Error ? error.message : String(error ?? '');
+  const message = raw
+    .replace(/^Error invoking remote method '[^']*':\s*/, '')
+    .replace(/^(?:[A-Za-z]*Error):\s*/, '')
+    .trim() || 'The export could not be completed.';
+  const sentence = /[.!?]$/.test(message) ? message : `${message}.`;
+  return /no file was written\.?$/i.test(sentence) ? `Export failed: ${sentence}` : `Export failed: ${sentence} No file was written.`;
+};
+
+/** Pure helper exported for unit testing — `12.3 MB` style size. */
+export const formatExportBytes = (bytes: number): string => {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0 MB';
+  const megabytes = bytes / (1024 * 1024);
+  return megabytes >= 100 ? `${Math.round(megabytes)} MB` : `${megabytes.toFixed(1)} MB`;
+};
+
+/**
  * Pure helper exported for unit testing — formats a duration in seconds as
  * `m:ss`. Used by the audition player's elapsed/total readout.
  */
@@ -167,6 +211,28 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, chann
 
   const canAudition = canAuditionExport(format, downloadUrl !== null);
 
+  // Phase 10G: a full-song WAV export with native VST3 audio is rendered
+  // straight to a temporary file by the desktop export store. The modal then
+  // holds a finished job (not a blob) until the user saves or discards it.
+  const streamedJobRef = useRef<DesktopStreamedWavExport | null>(null);
+  const streamedAbortRef = useRef<AbortController | null>(null);
+  const [streamedReady, setStreamedReady] = useState<{ frames: number; sampleRate: number; bytes: number } | null>(null);
+  const [streamedSavedPath, setStreamedSavedPath] = useState<string | null>(null);
+  const [isStreamedRender, setIsStreamedRender] = useState(false);
+  const [isCancelling, setIsCancelling] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
+  const discardStreamedExport = () => {
+    streamedAbortRef.current?.abort();
+    const job = streamedJobRef.current;
+    streamedJobRef.current = null;
+    setStreamedReady(null);
+    setStreamedSavedPath(null);
+    if (job) void job.abort();
+  };
+  // The latest discard function, for the lifecycle effects below.
+  const discardStreamedExportRef = useRef(discardStreamedExport);
+  discardStreamedExportRef.current = discardStreamedExport;
+
   useEffect(() => {
     if (!isOpen) return;
     const base = meta.name.toLowerCase().replace(/\s+/g, '_');
@@ -176,6 +242,13 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, chann
     setRenderProgress(0);
     setFxOverride(null);
   }, [isOpen, meta.name]);
+
+  // Closing the dialog (or unmounting it) discards an unsaved streamed export
+  // and its temporary file. A saved copy is not affected.
+  useEffect(() => {
+    if (!isOpen) discardStreamedExportRef.current();
+  }, [isOpen]);
+  useEffect(() => () => discardStreamedExportRef.current(), []);
 
   useEffect(() => () => {
     if (downloadUrl) URL.revokeObjectURL(downloadUrl);
@@ -217,21 +290,45 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, chann
 
   if (!isOpen) return null;
 
+  // Settings are locked while a streamed export is being written: changing one
+  // would otherwise have to cancel a render the user did not ask to cancel.
+  const settingsLocked = isRendering && isStreamedRender;
+
   const handleFormatChange = (next: ExportFormat) => {
+    if (settingsLocked) return;
     setFormat(next);
     const base = meta.name.toLowerCase().replace(/\s+/g, '_');
     if (next === 'stems') setFileName(`${base}_stems_bpm${meta.bpm}.zip`);
     else if (next === 'midi') setFileName(`${base}.mid`);
     else setFileName(`${base}_master.wav`);
     setDownloadUrl(null);
+    discardStreamedExport();
     setStatusText('Ready to render');
     setRenderProgress(0);
+  };
+
+  const changeScope = (next: ExportScope) => {
+    if (settingsLocked) return;
+    setScope(next);
+    setDownloadUrl(null);
+    discardStreamedExport();
+  };
+
+  const changeFxOverride = (next: ExportFxChoice | null) => {
+    if (settingsLocked) return;
+    setFxOverride(next);
+    // A finished streamed export was rendered with the previous choice.
+    if (streamedJobRef.current) {
+      discardStreamedExport();
+      setStatusText('Ready to render');
+    }
   };
 
   const handleStartExport = async () => {
     setIsRendering(true);
     setRenderProgress(10);
     setDownloadUrl(null);
+    discardStreamedExport();
     setStatusText('Preparing deterministic export...');
 
     try {
@@ -299,6 +396,55 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, chann
           setDownloadUrl(URL.createObjectURL(zipBlob));
           setRenderProgress(100);
           setStatusText('Stem package ready for download.');
+        } else if (usesStreamedWavExport(format, scope, !!getDesktopExportStore(),
+          exportUsesNativeVst3(channels, mixerTracks, effectiveIncludeMixerFx))) {
+          // Phase 10G: native VST3 song export. PCM is streamed to a temporary
+          // file in bounded windows; no full-song AudioBuffer, WAV Blob or
+          // audition copy is ever created in the renderer.
+          const store = getDesktopExportStore()!;
+          const controller = new AbortController();
+          streamedAbortRef.current = controller;
+          setIsStreamedRender(true);
+          setIsCancelling(false);
+          setStatusText(`Rendering timeline WAV to disk (${renderBars} bars)...`);
+          const [beats, unit] = meta.timeSignature ?? [4, 4];
+          const estimatedSeconds = renderBars * beats * (4 / unit) * (60 / Math.max(20, meta.bpm)) + 5;
+          const estimatedFrames = Math.ceil(estimatedSeconds * (audioEngine.getSampleRate() ?? 48000));
+          const nativeEffectCount = effectiveIncludeMixerFx
+            ? mixerTracks.reduce((count, track) => count + track.fxSlots.filter(slot => slot.type === 'vst3' && slot.enabled).length, 0)
+            : 0;
+          const job = await DesktopStreamedWavExport.begin(store, {
+            bitDepth,
+            estimatedBytes: estimateStreamedExportBytes(estimatedFrames, bitDepth, nativeEffectCount),
+          });
+          streamedJobRef.current = job;
+          try {
+            const result = await audioEngine.renderTimelineOfflineStreamed({
+              channels,
+              clips,
+              mixerTracks,
+              bpm: meta.bpm,
+              totalBars: renderBars,
+              includeMixerFx: effectiveIncludeMixerFx,
+              renderScope: scope,
+              onProgress: (progress, status) => {
+                setRenderProgress(progress);
+                setStatusText(status);
+              },
+              patternLengthSteps,
+              playlistTracks,
+              patterns,
+            }, job, { signal: controller.signal });
+            const finished = await job.finalize({ frames: result.frames, sampleRate: result.sampleRate });
+            if (controller.signal.aborted || streamedJobRef.current !== job) throw new DOMException('Export cancelled.', 'AbortError');
+            setStreamedReady({ frames: finished.frames, sampleRate: finished.sampleRate, bytes: finished.bytes });
+            setRenderProgress(100);
+            setStatusText('Timeline WAV master render complete. Choose where to save it.');
+          } catch (error) {
+            if (streamedJobRef.current === job) streamedJobRef.current = null;
+            await job.abort();
+            throw error;
+          }
         } else {
           setStatusText(`Rendering timeline WAV (${renderBars} bars)...`);
           setRenderProgress(35);
@@ -335,11 +481,52 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, chann
         }
       }
     } catch (error) {
-      console.error('[Apex Studio] Export failed', error);
-      setStatusText(error instanceof Error ? `Export failed: ${error.message}` : 'Export failed.');
+      const streamed = streamedAbortRef.current !== null;
+      if (streamed && (streamedAbortRef.current!.signal.aborted || isStreamedExportCancelled(error))) {
+        setStatusText('Export cancelled. No file was written.');
+        setRenderProgress(0);
+      } else {
+        console.error('[Apex Studio] Export failed', error);
+        if (streamed) setStatusText(describeStreamedExportFailure(error));
+        else setStatusText(error instanceof Error ? `Export failed: ${error.message}` : 'Export failed.');
+      }
       setDownloadUrl(null);
+      setStreamedReady(null);
     } finally {
+      streamedAbortRef.current = null;
+      setIsStreamedRender(false);
+      setIsCancelling(false);
       setIsRendering(false);
+    }
+  };
+
+  const handleCancelStreamedExport = () => {
+    const controller = streamedAbortRef.current;
+    if (!controller || controller.signal.aborted) return;
+    setIsCancelling(true);
+    setStatusText('Cancelling export...');
+    controller.abort();
+  };
+
+  const handleSaveStreamedExport = async () => {
+    const job = streamedJobRef.current;
+    if (!job || isSaving) return;
+    setIsSaving(true);
+    try {
+      const saved = await job.save(fileName);
+      if (streamedJobRef.current !== job) return;
+      if (saved.canceled || !saved.path) {
+        setStatusText('Save cancelled. The rendered WAV is still ready to save.');
+      } else {
+        setStreamedSavedPath(saved.path);
+        setStatusText('Timeline WAV master saved.');
+      }
+    } catch (error) {
+      console.error('[Apex Studio] Saving the export failed', error);
+      const message = describeStreamedExportFailure(error).replace(/^Export failed: /, '').replace(/ No file was written\.$/, '');
+      setStatusText(`Save failed: ${message} The rendered WAV is still ready; choose another location.`);
+    } finally {
+      setIsSaving(false);
     }
   };
 
@@ -424,13 +611,13 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, chann
           </div>
 
           <div className="grid grid-cols-2 gap-2">
-            <button onClick={() => { setScope('song'); setDownloadUrl(null); }} className={`p-2.5 rounded-lg border text-left transition ${scope === 'song' ? 'bg-[var(--apex-state-selected)] border-[var(--apex-accent)] text-[var(--apex-text)]' : 'bg-[var(--apex-chrome-inset)] border-[var(--apex-border)] text-[var(--apex-text-3)] hover:text-[var(--apex-text)]'}`}>
+            <button onClick={() => changeScope('song')} className={`p-2.5 rounded-lg border text-left transition ${scope === 'song' ? 'bg-[var(--apex-state-selected)] border-[var(--apex-accent)] text-[var(--apex-text)]' : 'bg-[var(--apex-chrome-inset)] border-[var(--apex-border)] text-[var(--apex-text-3)] hover:text-[var(--apex-text)]'}`}>
               <div className="font-bold text-xs">Full Song</div>
               {/* Phase 54: the stated length is resolved from the same timeline
                   contract the renderer uses, so the label and the WAV agree. */}
               <div className="text-[9px] text-[var(--apex-text-3)]">Render through the last playlist clip ({getProjectRenderBars(clips, 'song', undefined, totalBars)} bars)</div>
             </button>
-            <button id="export-scope-pattern" onClick={() => { setScope('pattern'); setDownloadUrl(null); }} className={`p-2.5 rounded-lg border text-left transition ${scope === 'pattern' ? 'bg-[var(--apex-state-selected)] border-[var(--apex-accent)] text-[var(--apex-text)]' : 'bg-[var(--apex-chrome-inset)] border-[var(--apex-border)] text-[var(--apex-text-3)] hover:text-[var(--apex-text)]'}`}>
+            <button id="export-scope-pattern" onClick={() => changeScope('pattern')} className={`p-2.5 rounded-lg border text-left transition ${scope === 'pattern' ? 'bg-[var(--apex-state-selected)] border-[var(--apex-accent)] text-[var(--apex-text)]' : 'bg-[var(--apex-chrome-inset)] border-[var(--apex-border)] text-[var(--apex-text-3)] hover:text-[var(--apex-text)]'}`}>
               <div className="font-bold text-xs">Pattern Loop</div>
               <div className="text-[9px] text-[var(--apex-text-3)]">Export the selected pattern's {patternLoopSteps}-step loop ({patternRenderBars} bars)</div>
             </button>
@@ -505,7 +692,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, chann
                   <button
                     key={option.id}
                     type="button"
-                    onClick={() => setFxOverride(option.id === 'auto' ? null : option.id)}
+                    onClick={() => changeFxOverride(option.id === 'auto' ? null : option.id)}
                     className={`p-2 rounded border text-left transition ${isActive ? 'bg-[var(--apex-state-selected)] border-[var(--apex-accent)] text-[var(--apex-text)]' : 'bg-[var(--apex-chrome-inset)] border-[var(--apex-border)] text-[var(--apex-text-3)] hover:text-[var(--apex-text)]'}`}
                   >
                     <div className="font-bold text-[11px] text-[var(--apex-text)]">{option.name}</div>
@@ -523,11 +710,50 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, chann
             </div>
             {isRendering && <div className="w-full h-2 bg-[var(--apex-chrome-inset)] rounded-full overflow-hidden border border-[var(--apex-border)]"><div className="h-full bg-[var(--apex-accent)] transition-all duration-150" style={{ width: `${renderProgress}%` }} /></div>}
 
-            {!downloadUrl ? (
-              <button onClick={handleStartExport} disabled={isRendering} className="w-full py-2.5 bg-[var(--apex-accent)] hover:bg-[var(--apex-accent-strong)] disabled:opacity-50 text-[var(--apex-state-playing-fg)] font-bold text-xs rounded transition flex items-center justify-center gap-2 shadow">
-                {format === 'stems' ? <FolderArchive className="w-4 h-4" /> : <Sparkles className="w-4 h-4" />}
-                <span>{isRendering ? 'PROCESSING EXPORT...' : 'START EXPORT'}</span>
-              </button>
+            {streamedReady ? (
+              <div data-testid="export-streamed-ready" className="space-y-2">
+                <div className="rounded-lg border border-[var(--apex-border)] bg-[var(--apex-chrome-inset)] p-3 space-y-1">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[10px] font-bold uppercase tracking-wider text-[var(--apex-text-3)]">Rendered to disk</span>
+                    <span className="text-[10px] font-mono text-[var(--apex-text-2)]">
+                      {formatAuditionTime(streamedReady.frames / streamedReady.sampleRate)} · {formatExportBytes(streamedReady.bytes)} · {streamedReady.sampleRate} Hz
+                    </span>
+                  </div>
+                  <p className="text-[10px] text-[var(--apex-text-3)]">
+                    This VST3 song export is written directly to a file, so the in-app audition preview is not available. Save it and open the WAV to listen.
+                  </p>
+                  {streamedSavedPath && (
+                    <p data-testid="export-streamed-saved-path" className="text-[10px] font-mono text-[var(--apex-text-2)] break-all">Saved to {streamedSavedPath}</p>
+                  )}
+                </div>
+                <button
+                  onClick={() => void handleSaveStreamedExport()}
+                  disabled={isSaving}
+                  data-testid="export-streamed-save"
+                  className="w-full py-2.5 bg-[var(--apex-success)] hover:brightness-110 disabled:opacity-50 text-[var(--apex-state-playing-fg)] font-bold text-xs rounded transition flex items-center justify-center gap-2 shadow"
+                >
+                  <Download className="w-4 h-4" />
+                  <span>{isSaving ? 'SAVING...' : streamedSavedPath ? 'SAVE ANOTHER COPY...' : `SAVE ${fileName}...`}</span>
+                </button>
+              </div>
+            ) : !downloadUrl ? (
+              <>
+                <button onClick={handleStartExport} disabled={isRendering} className="w-full py-2.5 bg-[var(--apex-accent)] hover:bg-[var(--apex-accent-strong)] disabled:opacity-50 text-[var(--apex-state-playing-fg)] font-bold text-xs rounded transition flex items-center justify-center gap-2 shadow">
+                  {format === 'stems' ? <FolderArchive className="w-4 h-4" /> : <Sparkles className="w-4 h-4" />}
+                  <span>{isRendering ? 'PROCESSING EXPORT...' : 'START EXPORT'}</span>
+                </button>
+                {isRendering && isStreamedRender && (
+                  <button
+                    type="button"
+                    onClick={handleCancelStreamedExport}
+                    disabled={isCancelling}
+                    data-testid="export-streamed-cancel"
+                    className="w-full py-2 bg-[var(--apex-panel-header)] hover:bg-[var(--apex-state-hover)] border border-[var(--apex-border)] disabled:opacity-50 rounded text-xs font-bold text-[var(--apex-text-2)] hover:text-[var(--apex-text)] transition"
+                  >
+                    {isCancelling ? 'CANCELLING...' : 'CANCEL EXPORT'}
+                  </button>
+                )}
+              </>
             ) : (
               <>
                 {/* Audition preview: only meaningful for the WAV formats. MIDI
