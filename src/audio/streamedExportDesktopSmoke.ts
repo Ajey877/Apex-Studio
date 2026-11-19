@@ -82,7 +82,8 @@ export async function runStreamedExportDesktopSmoke(instance: Engine, instrument
   } finally {
     await job.abort();
   }
-  if (result.nativeInstruments !== 1 || result.nativeEffects !== 2 || result.passes !== 2) fail(`unexpected render plan ${JSON.stringify(result)}`);
+  // Two inserts in series on one track are two effect levels: one pass each, then the final pass.
+  if (result.nativeInstruments !== 1 || result.nativeEffects !== 2 || result.passes !== 3) fail(`unexpected render plan ${JSON.stringify(result)}`);
   if (result.frames !== reference.length) fail(`streamed ${result.frames} frames, in-memory render ${reference.length}`);
 
   // Sample comparison of the saved 24-bit file with the in-memory render.
