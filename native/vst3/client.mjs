@@ -15,21 +15,64 @@ export function setNativeHelperSpawnForTests(factory) {
 const MAX_JSON = 5 * 1024 * 1024;
 const MAX_PCM = 16384 * 2 * 4;
 const MAX_REQUEST = 8 * 1024 * 1024;
+// Response frames travel on their own pipe, the fourth stdio entry, which the
+// helper is told about on its command line. The helper's stdout and stderr are
+// diagnostics only: plug-ins print there (mda Piano does, from its audio loop),
+// and anything sharing a pipe with the frames corrupts them.
+export const PROTOCOL_FD = 3;
+// Per stream, the most recent text kept for diagnostics. Everything is always
+// read off the pipes; only the retained copy is bounded.
+const DIAGNOSTIC_TAIL_BYTES = 8192;
+// A write to a helper that has just died fails (EPIPE) a moment before its
+// exit is reported. Wait this long for the exit, which names the status and
+// carries stderr, before settling for the bare pipe error.
+const PIPE_ERROR_GRACE_MS = 1000;
+
+class DiagnosticTail {
+  #tail = Buffer.alloc(0);
+  bytes = 0;
+  push(chunk) {
+    this.bytes += chunk.length;
+    // Copy the part worth keeping; never hold on to the stream's own buffers,
+    // and never hold more than the tail however large a single chunk is.
+    const fresh = chunk.length > DIAGNOSTIC_TAIL_BYTES ? chunk.subarray(chunk.length - DIAGNOSTIC_TAIL_BYTES) : chunk;
+    const keep = Math.min(this.#tail.length, DIAGNOSTIC_TAIL_BYTES - fresh.length);
+    this.#tail = Buffer.concat([this.#tail.subarray(this.#tail.length - keep), fresh]);
+  }
+  text(limit = DIAGNOSTIC_TAIL_BYTES) {
+    let start = Math.max(0, this.#tail.length - limit);
+    // Do not start in the middle of a UTF-8 sequence.
+    while (start > 0 && start < this.#tail.length && (this.#tail[start] & 0xc0) === 0x80) start++;
+    return this.#tail.toString('utf8', start);
+  }
+  snapshot() { return { text: this.text(), bytes: this.bytes, truncated: this.bytes > this.#tail.length }; }
+}
+
 export class NativeVst3Client {
   #child;
+  #protocol;
+  #pipeFailure;
+  #stdout = new DiagnosticTail();
+  #stderr = new DiagnosticTail();
   #buffer = Buffer.alloc(0);
   #pending;
   #tail = Promise.resolve();
   #dead;
   #queued = 0;
   #timeoutMs;
-  #stderr = '';
   #exited;
   #pid = null;
   #batched = false;
   get isDead() { return Boolean(this.#dead); }
   /** OS pid of this helper, or null if the spawn never produced one. */
   get pid() { return this.#pid; }
+  /**
+   * What the helper process (in practice: the plug-in) wrote to stdout and
+   * stderr. `bytes` counts everything received on the stream, `text` is the
+   * most recent part of it and `truncated` says whether older text was dropped.
+   * This is diagnostic text only; it never takes part in the protocol.
+   */
+  diagnostics() { return { stdout: this.#stdout.snapshot(), stderr: this.#stderr.snapshot() }; }
   constructor(executable, { timeoutMs = 10000 } = {}) {
     this.#timeoutMs = timeoutMs;
     // A `.cmd`/`.bat` helper cannot be spawned with shell:false on Windows
@@ -37,17 +80,37 @@ export class NativeVst3Client {
     // helper is an .exe and keeps the strict shell:false path.
     const batch = process.platform === 'win32' && /\.(cmd|bat)$/i.test(executable);
     this.#batched = batch;
-    this.#child = spawnNativeHelper(executable, [], {
-      stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, shell: batch,
+    // A batch launcher gets no argument: cmd.exe does not hand descriptor 3 on
+    // to what it starts, so such a helper cannot answer in any case.
+    this.#child = spawnNativeHelper(executable, batch ? [] : [`--protocol-fd=${PROTOCOL_FD}`], {
+      stdio: ['pipe', 'pipe', 'pipe', 'pipe'], windowsHide: true, shell: batch,
     });
     this.#pid = this.#child.pid ?? null;
     this.#exited = new Promise(resolve => this.#child.once('close', resolve));
     this.#child.on('error', error => this.#fail(error));
-    this.#child.on('exit', (code, signal) => this.#fail(new Error(`VST3 helper exited (${signal ?? code}). ${this.#stderr}`)));
-    this.#child.stdin.on('error', error => this.#fail(error));
-    this.#child.stderr.on('data', chunk => { this.#stderr = (this.#stderr + chunk.toString('utf8')).slice(-4096); });
-    this.#child.stdout.on('data', chunk => {
+    this.#child.on('exit', (code, signal) => this.#fail(new Error(`VST3 helper exited (${signal ?? code}). ${this.#stderr.text(4096)}`)));
+    this.#child.stdin.on('error', error => this.#pipeFailed(error));
+    // Diagnostics: always consumed, so a plug-in that prints megabytes can
+    // neither fill a pipe and stall the helper nor grow this process. A read
+    // error here costs diagnostics, never the session.
+    for (const [stream, tail] of [[this.#child.stdout, this.#stdout], [this.#child.stderr, this.#stderr]]) {
+      stream?.on('data', chunk => tail.push(chunk));
+      stream?.on('error', () => {});
+    }
+    this.#protocol = this.#child.stdio?.[PROTOCOL_FD] ?? null;
+    if (!this.#protocol) {
+      // Never fall back to stdout: that is the path this channel replaces.
+      this.#fail(new Error('VST3 helper protocol channel is unavailable'));
+      return;
+    }
+    this.#protocol.on('error', error => this.#pipeFailed(error));
+    this.#protocol.on('data', chunk => {
+      // A dead client has already rejected its request and killed the helper.
+      if (this.#dead) return;
       try {
+        // The helper only ever answers. Bytes with no request waiting are a
+        // protocol violation now, not something to match to the next request.
+        if (!this.#pending) throw new Error('Unsolicited VST3 helper response');
         this.#buffer = Buffer.concat([this.#buffer, chunk]);
         if (this.#buffer.length < 8) return;
         const jsonBytes = this.#buffer.readUInt32LE(0), pcmBytes = this.#buffer.readUInt32LE(4);
@@ -73,9 +136,17 @@ export class NativeVst3Client {
       } catch (error) { this.#fail(error); }
     });
   }
+  /** stdin or the protocol pipe failed. If the helper is exiting, its exit
+   *  event follows and is the more useful report; otherwise fail with this. */
+  #pipeFailed(error) {
+    if (this.#dead || this.#pipeFailure) return;
+    this.#pipeFailure = setTimeout(() => this.#fail(new Error(`VST3 helper pipe failed: ${error.message}`)), PIPE_ERROR_GRACE_MS);
+    this.#pipeFailure.unref?.();
+  }
   #fail(error) {
     if (this.#dead) return;
     this.#dead = error;
+    clearTimeout(this.#pipeFailure);
     if (this.#pending) {
       clearTimeout(this.#pending.timer);
       this.#pending.reject(error);
@@ -95,7 +166,7 @@ export class NativeVst3Client {
       return new Promise((resolve, reject) => {
         const timer = setTimeout(() => this.#fail(new Error(`VST3 helper timed out after ${this.#timeoutMs}ms`)), this.#timeoutMs);
         this.#pending = { resolve, reject, timer };
-        this.#child.stdin.write(text, error => { if (error) this.#fail(error); });
+        this.#child.stdin.write(text, error => { if (error) this.#pipeFailed(error); });
       });
     }).finally(() => { this.#queued--; });
     this.#tail = operation.catch(() => {});
@@ -192,7 +263,9 @@ export class NativeVst3Client {
       } catch { /* already gone */ }
     }
     // Do not leave the parent waiting on pipes a dead grandchild still holds.
+    this.#protocol?.destroy();
     this.#child.stdout?.destroy();
+    this.#child.stderr?.destroy();
     this.#child.stdin?.destroy();
     await Promise.race([this.#exited, new Promise(resolve => setTimeout(resolve, 2000))]);
   }

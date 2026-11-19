@@ -15,11 +15,13 @@
 #include "pluginterfaces/gui/iplugviewcontentscalesupport.h"
 #include "pluginterfaces/base/keycodes.h"
 #include "component-handler.hpp"
+#include "protocol-channel.hpp"
 #include <nlohmann/json.hpp>
 #include <algorithm>
 #include <atomic>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <iostream>
 #include <memory>
 #include <map>
@@ -650,16 +652,21 @@ public:
 
 // Binary framing: little-endian uint32 JSON length, uint32 PCM byte length,
 // UTF-8 JSON, then planar stereo float32 PCM. The editor mode drains callback
-// events only in response to a bounded poll command; it never writes unsolicited
-// stdout that could desynchronize this synchronous helper protocol.
+// events only in response to a bounded poll command; it never writes an
+// unsolicited frame that could desynchronize this synchronous helper protocol.
+//
+// Frames leave on the dedicated protocol channel (protocol-channel.hpp), never
+// on stdout: stdout and stderr belong to the plug-in and are diagnostics only.
 void reply(const json& message, const std::vector<float>& pcm = {}) {
   const auto text = message.dump();
   require(text.size() <= 5 * 1024 * 1024, "VST3 helper response exceeds 5 MiB limit");
-  auto put32 = [](uint32_t n) { for (int i = 0; i < 4; ++i) std::cout.put(static_cast<char>((n >> (8 * i)) & 255)); };
-  put32(static_cast<uint32_t>(text.size())); put32(static_cast<uint32_t>(pcm.size() * sizeof(float)));
-  std::cout.write(text.data(), text.size());
-  if (!pcm.empty()) std::cout.write(reinterpret_cast<const char*>(pcm.data()), pcm.size() * sizeof(float));
-  std::cout.flush();
+  // Hand over whatever the plug-in printed while this request ran before the
+  // response, so the text reaches the parent's diagnostics promptly instead of
+  // sitting in a stdio buffer until the helper exits.
+  std::fflush(stdout);
+  // A failed write means the parent is gone; the request loop sees
+  // isBroken() and shuts the helper down.
+  ApexVst3Host::writeProtocolFrame(text, reinterpret_cast<const char*>(pcm.data()), pcm.size() * sizeof(float));
 }
 
 #ifdef _WIN32
@@ -693,9 +700,15 @@ std::optional<std::string> tryReadEditorPipeLine(std::string& pending, bool& eof
 }
 #endif
 
-int main() {
+int main(int argc, char** argv) {
+  // Responses use their own pipe. Without it there is no parent to talk to,
+  // and answering on stdout would put the protocol back in the plug-in's reach.
+  std::string channelError;
+  if (!ApexVst3Host::protocolChannel().open(argc, argv, channelError)) {
+    std::fprintf(stderr, "apex-vst3-host: protocol channel unavailable: %s\n", channelError.c_str());
+    return ApexVst3Host::kExitNoProtocolChannel;
+  }
 #ifdef _WIN32
-  _setmode(_fileno(stdout), _O_BINARY);
   const auto user32 = GetModuleHandleW(L"user32.dll");
   using SetDpiContextFn = BOOL(WINAPI*)(DPI_AWARENESS_CONTEXT);
   const auto setDpiContext = reinterpret_cast<SetDpiContextFn>(GetProcAddress(user32, "SetProcessDpiAwarenessContext"));
@@ -713,8 +726,9 @@ int main() {
   if (FAILED(com)) return 2;
 #endif
   PlugProvider::setErrorStream(&std::cerr);
-  // Reserve stdout exclusively for framed protocol; plugin debug logs using
-  // stdout will be rejected by the parent, never interpreted as UI events.
+  // stdout and stderr are diagnostic streams. Plug-in debug output on either
+  // is drained by the parent and can never be interpreted as a response or a
+  // UI event.
   std::unique_ptr<Instance> instance;
 #ifdef _WIN32
   std::unique_ptr<ApexVst3Host::NativeEditorSession> editor;
@@ -722,6 +736,8 @@ int main() {
 #endif
   std::string line;
   while (true) {
+    // The parent stopped reading responses: nothing further can be answered.
+    if (ApexVst3Host::protocolChannel().isBroken()) break;
     line.clear();
 #ifdef _WIN32
     if (editor) {
@@ -980,5 +996,5 @@ int main() {
   editor.reset();
   CoUninitialize();
 #endif
-  return 0;
+  return ApexVst3Host::protocolChannel().isBroken() ? ApexVst3Host::kExitProtocolChannelBroken : 0;
 }
