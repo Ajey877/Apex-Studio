@@ -17,7 +17,9 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
+    # The native browser run includes the streamed-export spec (about 6 minutes
+    # on a normal runner); 20 minutes was exceeded on a slow Windows runner.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
