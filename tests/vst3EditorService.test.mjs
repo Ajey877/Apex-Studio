@@ -48,12 +48,16 @@ function frame(json, pcm = Buffer.alloc(0)) {
   return Buffer.concat([header, body, pcm]);
 }
 
-/** A helper process double: reads newline JSON requests, answers with frames. */
+/** A helper process double: reads newline JSON requests, answers with frames.
+ * Like the real helper it answers on the dedicated protocol pipe (the fourth
+ * stdio entry); stdout and stderr carry diagnostics only. */
 function fakeHelper(handler) {
   const child = new EventEmitter();
   child.stdin = new PassThrough();
   child.stdout = new PassThrough();
   child.stderr = new PassThrough();
+  child.protocol = new PassThrough();
+  child.stdio = [child.stdin, child.stdout, child.stderr, child.protocol];
   child.kill = () => {
     child.killed = true;
     // A real process is reaped asynchronously; emit the same event the client
@@ -72,8 +76,8 @@ function fakeHelper(handler) {
       const request = JSON.parse(line);
       const response = handler(request);
       if (response === undefined) continue;
-      if (response instanceof Error) child.stdout.write(frame({ ok: false, error: response.message }));
-      else child.stdout.write(frame({ ok: true, ...response }));
+      if (response instanceof Error) child.protocol.write(frame({ ok: false, error: response.message }));
+      else child.protocol.write(frame({ ok: true, ...response }));
     }
   });
   return child;
@@ -92,7 +96,7 @@ async function withStubbedClient(run) {
   try { return await run.service(children); }
   finally {
     setNativeHelperSpawnForTests(null);
-    for (const child of children) { child.stdout.end(); child.emit('close', 0, null); }
+    for (const child of children) { child.protocol.end(); child.stdout.end(); child.emit('close', 0, null); }
   }
 }
 
@@ -283,7 +287,7 @@ test('an audio session and an editor session are independent helpers with indepe
     await service.dispose();
   } finally {
     setNativeHelperSpawnForTests(null);
-    for (const child of children) { child.stdout.end(); child.emit('close', 0, null); }
+    for (const child of children) { child.protocol.end(); child.stdout.end(); child.emit('close', 0, null); }
   }
 });
 
@@ -371,6 +375,7 @@ test('disposing a helper that never exits is bounded instead of hanging', async 
     child.stdin = new PassThrough();
     child.stdout = new PassThrough();
     child.stderr = new PassThrough();
+    child.stdio = [child.stdin, child.stdout, child.stderr, new PassThrough()];
     child.kill = () => true;
     // Deliberately never emits 'close' and never answers a request.
     child.stdin.on('data', () => {});

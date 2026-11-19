@@ -218,6 +218,65 @@ files, spawn children or attack the system. No hostile-plugin security guarantee
 or physical-device listening/latency certification is claimed. Scan/load trusted
 plugins only. No fallback oscillator or external service is used.
 
+### Helper IPC: the protocol channel is separate from plug-in output
+
+Each helper process has four pipes, and each has one job:
+
+| Descriptor | Direction | Content |
+|---|---|---|
+| 0 (stdin) | parent → helper | One JSON request per line (≤ 8 MiB). |
+| 1 (stdout) | helper → parent | **Diagnostics only.** Whatever the plug-in prints. |
+| 2 (stderr) | helper → parent | **Diagnostics only.** Plug-in and SDK error text. |
+| 3 | helper → parent | **Responses only.** One frame per request: little-endian `uint32` JSON length, `uint32` PCM byte length, UTF-8 JSON, planar stereo float32 PCM. |
+
+`client.mjs` spawns the helper with `stdio: ['pipe', 'pipe', 'pipe', 'pipe']`
+and the argument `--protocol-fd=3`; `protocol-channel.hpp` adopts that
+descriptor (CRT descriptor 3 on Windows, where Node passes it in the process
+start-up block) and writes every frame in a single call. Nothing else in the
+helper ever writes to it.
+
+Why: plug-ins print. The SDK's own mda Piano calls `printf` from its audio loop
+when many overlapping notes push the mix outside ±2.0
+(`mdaPianoProcessor.cpp`, "what is this?"). While frames shared stdout with the
+plug-in, that text landed between frames and the session died with
+`Invalid VST3 helper frame`. A separate pipe holds for every route to stdout:
+`printf`, `std::cout`, a plug-in's private C runtime, a raw write to descriptor
+1, or the Win32 standard output handle.
+
+Rules that follow from this:
+
+- The parent always reads stdout and stderr and keeps only the most recent
+  8 KiB of each, with a byte count (`NativeVst3Client.diagnostics()`,
+  `Vst3Service.getSessionDiagnostics(id, owner)`). A plug-in that prints
+  megabytes cannot fill a pipe permanently, grow the parent, or touch a frame.
+  Diagnostic text is not synchronised with responses and can trail them.
+- The helper flushes its own `stdout` before each response so plug-in text is
+  not held back until exit. A plug-in with a private C runtime (static CRT on
+  Windows) buffers on its own; its text arrives when that buffer fills or the
+  helper exits normally.
+- There is no fallback. A helper started without `--protocol-fd` or with a
+  closed descriptor exits with status 3 and says why on stderr; a client whose
+  child has no fourth pipe fails every request with
+  `VST3 helper protocol channel is unavailable`.
+- Protocol errors stay fatal for the session and are reported as such: an
+  impossible header (`Invalid VST3 helper frame`), a frame nobody asked for or
+  bytes after a complete frame (`Unsolicited VST3 helper response`), non-finite
+  PCM, a body that is not JSON, a helper exit or a timeout with a request
+  pending. A failed pipe write waits up to 1 s for the helper's exit so the
+  error names the exit status and carries stderr.
+- If a response cannot be written the parent is gone: the helper stops taking
+  requests, tears the plug-in down and exits with status 4. (On Linux a closed
+  pipe normally ends the helper with `SIGPIPE` before that, as it did before.)
+- A `.cmd`/`.bat` launcher on Windows cannot forward descriptor 3 (cmd.exe does
+  not pass it to what it starts), so a helper behind one cannot answer. The
+  shipped helper is always the `.exe`, spawned without a shell.
+- Requests still arrive on stdin. A plug-in that reads the helper's stdin could
+  consume a request; that is unchanged by this design and not defended against.
+
+`tests/vst3ProtocolIsolation.test.mjs` (part of `npm run test:native-vst3`)
+covers this with the real helper, the real `Vst3Service` and the production
+offline export, using mda Piano as the printing plug-in.
+
 ## Pinned SDK, fixture and licensing
 
 - `steinbergmedia/vst3sdk` **3.8.0 build 66**:

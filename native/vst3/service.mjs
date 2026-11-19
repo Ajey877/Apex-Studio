@@ -536,6 +536,15 @@ export class Vst3Service {
     const session = this.#sessions.get(id);
     return session && session.owner === owner ? session.client.pid ?? null : null;
   }
+  /** What the plug-in behind a session printed to its helper's stdout/stderr:
+   * `{ stdout, stderr }`, each `{ text, bytes, truncated }` with a bounded,
+   * most-recent `text`. Plug-in output is kept apart from the protocol, so it
+   * is available here instead of breaking the session. Returns null when the
+   * session is unknown to this owner. */
+  getSessionDiagnostics(id, owner = 'local') {
+    const session = this.#sessions.get(id);
+    return session && session.owner === owner ? session.client.diagnostics() : null;
+  }
   /** OS pid of the editor helper while its session is open or opening. */
   getEditorHelperPid(owner = null) {
     const client = this.#editor?.client ?? this.#editorOpening?.client ?? null;
