@@ -103,7 +103,10 @@ swing scheduling, render floors/tail policy and unsupported effects keep their
 existing contracts. Explicit mastering/FX can intentionally change signal and
 silence and need not be bit-identical across arbitrary DSP configurations.
 Native VST3's existing scheduling-resolution limitations are unchanged; this is
-not a new sample-accuracy or physical-device-listening claim. `.flmp` remains a
+not a new sample-accuracy or physical-device-listening claim. (Since Phase 10G the
+desktop WAV export of a song with VST3 audio is streamed to disk; see
+`docs/VST3-STREAMED-EXPORT.md`. Playlist audio clips render through the same
+offline graph in that path.) `.flmp` remains a
 manifest backup; Portable ZIP already owns audio-containing interchange.
 
 Focused command:

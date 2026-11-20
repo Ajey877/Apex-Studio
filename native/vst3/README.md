@@ -104,6 +104,10 @@ production IndexedDB writer into an isolated profile, exits the application,
 then launches a second process and requires the actual UI to restore the native
 channel. Native identity/state and exported PCM checksums must match across the
 application restart. The real user profile is never modified.
+It also exports a short VST3 song through the streamed WAV path and the
+main-process export store, saves it to a folder supplied by the launching script,
+compares the saved samples with the in-memory render, cancels a second export
+and requires that no temporary export data remains.
 It does not generate test-only replacement audio. Its entry is gated by the
 existing smoke launch flag; ordinary sessions expose no test entry/API.
 The Native VST3 and Desktop Validation workflows run these on Windows; native
@@ -194,10 +198,16 @@ passing windowed run.
 - Stop, replacement, context closure, renderer navigation/crash/destruction and
   app exit cancel/close owned resources. Disposed generations cannot play late
   PCM. Note release cleanup is bounded at 10 s; unusually long tails may be cut.
-- Offline preparation is capped at **128 MiB native PCM across channels** (roughly
-  5.8 minutes for one stereo channel at 48 kHz; fewer with multiple channels).
-  Oversized exports fail explicitly; no silent/truncated export. Exports still
-  use the existing isolated render lease, scheduler and mixer contracts.
+- In-memory offline preparation is capped at **128 MiB native PCM across channels**
+  (roughly 5.8 minutes for one stereo channel at 48 kHz; fewer with multiple
+  channels). Oversized exports fail explicitly; no silent/truncated export.
+  Exports still use the existing isolated render lease, scheduler and mixer
+  contracts.
+- **Desktop song export to WAV is streamed to disk and is not subject to that
+  cap** (Phase 10G). It needs temporary disk space instead: the WAV plus 8 bytes
+  per frame for each VST3 effect. Pattern scope, the stems ZIP, bounce and
+  freeze still use the in-memory path and its cap. See
+  [`docs/VST3-STREAMED-EXPORT.md`](../../docs/VST3-STREAMED-EXPORT.md).
 - First slice supports x64 VST3 instruments with mono/stereo main output and
   **zero reported processing latency**. Other latency is rejected pending proper
   delay compensation. Plugins taking >2 s per operation are rejected.
@@ -360,7 +370,11 @@ Captures retain the render tail for native effect decay; final WAV tail trimming
 still examines processed output. The helper is closed in `finally`, and
 processing/open/layout/invalid-latency failures abort export without installing a
 dry or fabricated fallback. At most eight enabled inserts and 128 MiB estimated
-native PCM working memory are accepted; larger renders fail before PCM allocation.
+native PCM working memory are accepted by this in-memory path; larger renders
+fail before PCM allocation. The desktop WAV song export runs the same passes in
+windows and keeps processed effect audio in scratch files instead, so it has the
+eight-insert limit but not the 128 MiB limit
+([`docs/VST3-STREAMED-EXPORT.md`](../../docs/VST3-STREAMED-EXPORT.md)).
 A pre-master export explicitly rejects a native master-bus slot because that
 existing export stage intentionally omits master processing. Turning off
 `Include Mixer FX` remains the explicit dry-export option.

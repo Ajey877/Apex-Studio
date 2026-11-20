@@ -4,7 +4,8 @@ import { renderDrumPadVoice } from './drumPad';
 
 class FakeParam {
   value = 0;
-  setValueAtTime(value: number) { this.value = value; }
+  readonly held: number[] = [];
+  setValueAtTime(value: number) { this.value = value; this.held.push(value); }
   cancelScheduledValues() {}
   exponentialRampToValueAtTime(value: number) { this.value = value; }
 }
@@ -144,5 +145,34 @@ describe('drum-pad renderer', () => {
     handle.stop(0.5);
     assert.equal(ctx.sources[0].stopCalls, 2);
     assert.equal(ended, 1);
+  });
+
+  it('chokes from the built gain in an offline render and from the current gain live', () => {
+    const render = (ctx: FakeContext) => {
+      const handle = renderDrumPadVoice({
+        channel: makeChannel({ reverse: false, loop: false }),
+        note,
+        time: 0,
+        destination: {} as AudioNode,
+        audioContext: ctx as any,
+        voiceId: 'choke', bpm: 120,
+        getSampleBuffer: () => ({ duration: 1 } as AudioBuffer),
+      });
+      assert.ok(handle);
+      const gain = ctx.gains[0].gain;
+      const built = gain.value;
+      // The render has moved on by the time the choke is scheduled.
+      gain.value = 0.2;
+      handle.stop(0.5);
+      return { built, held: gain.held[gain.held.length - 1] };
+    };
+
+    const offline = new FakeContext() as FakeContext & { startRendering: () => void };
+    offline.startRendering = () => {};
+    const offlineResult = render(offline);
+    assert.equal(offlineResult.held, offlineResult.built);
+
+    const liveResult = render(new FakeContext());
+    assert.equal(liveResult.held, 0.2);
   });
 });

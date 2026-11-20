@@ -41,7 +41,8 @@
     "native:vst3:build": "node scripts/build-native-vst3.mjs",
     "test:native-vst3": "node --import tsx --test tests/nativeVst3.test.mjs tests/vst3ProtocolIsolation.test.mjs",
     "test:vst3-browser": "playwright test --config=playwright.native.config.ts",
-    "test:vst3-daw": "node --import tsx --test tests/vst3DawIntegration.test.mjs tests/vst3Ui.test.mjs tests/vst3SampleRateReconfigure.test.mjs",
+    "test:vst3-daw": "node --import tsx --test tests/vst3DawIntegration.test.mjs tests/vst3Ui.test.mjs tests/vst3SampleRateReconfigure.test.mjs tests/exportStore.test.mjs tests/exportIpc.test.mjs tests/streamedExport.test.mjs",
+    "test:export-store": "node --import tsx --test tests/exportStore.test.mjs tests/exportIpc.test.mjs tests/streamedExport.test.mjs",
     "test:vst3-effects": "node --import tsx --test tests/vst3Effects.test.mjs tests/vst3PluginLatencyCompensation.test.mjs tests/vst3SampleRateReconfigure.test.mjs",
     "test:vst3-editor": "node --import tsx --test tests/vst3Editor.test.mjs tests/vst3EditorService.test.mjs tests/vst3EditorDpi.test.mjs",
     "test:vst3-editor-process": "node scripts/native-editor-process-separation.mjs"
@@ -70,6 +71,7 @@
       "preload.cjs",
       "desktop-permissions.cjs",
       "desktop-vst3.cjs",
+      "desktop-export.cjs",
       "native/vst3/client.mjs",
       "native/vst3/service.mjs",
       "native/vst3/parameters.mjs",

@@ -2,6 +2,7 @@ const { app, BrowserWindow, shell, session, ipcMain, dialog } = require('electro
 const path = require('path');
 const fs = require('node:fs');
 const { registerVst3 } = require('./desktop-vst3.cjs');
+const { registerExportStore } = require('./desktop-export.cjs');
 const { canRequestPermission, canCheckPermission } = require('./desktop-permissions.cjs');
 
 // Chromium audio switches must be registered before app readiness.
@@ -40,6 +41,8 @@ if (process.env.APEX_ACCEPTANCE === '1' && process.env.APEX_ACCEPTANCE_USER_DATA
 let mainWindow = null;
 
 registerVst3({ app, ipcMain, dialog, getWindow: () => mainWindow });
+// Phase 10G: disk-backed store for streamed WAV exports (owned by this process).
+registerExportStore({ app, ipcMain, dialog, getWindow: () => mainWindow });
 
 function createWindow() {
   const isDev = process.env.NODE_ENV === 'development' || !app.isPackaged;

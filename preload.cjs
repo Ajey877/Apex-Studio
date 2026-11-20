@@ -86,6 +86,20 @@ const desktopApi = {
     }),
     unbindLiveAudioPort: (sessionId) => ipcRenderer.invoke('vst3:unbindLiveAudioPort', sessionId),
   },
+  // Phase 10G: streamed WAV export. PCM leaves the renderer in bounded chunks
+  // and is written by the main process; the renderer never names a file path.
+  exportStore: {
+    begin: (config) => ipcRenderer.invoke('export:begin', config),
+    write: (jobId, sequence, bytes) => ipcRenderer.invoke('export:write', jobId, sequence, bytes),
+    createScratch: (jobId) => ipcRenderer.invoke('export:createScratch', jobId),
+    appendScratch: (jobId, scratchId, bytes) => ipcRenderer.invoke('export:appendScratch', jobId, scratchId, bytes),
+    readScratch: (jobId, scratchId, byteOffset, byteLength) => ipcRenderer.invoke('export:readScratch', jobId, scratchId, byteOffset, byteLength),
+    releaseScratch: (jobId, scratchId) => ipcRenderer.invoke('export:releaseScratch', jobId, scratchId),
+    finalize: (jobId, result) => ipcRenderer.invoke('export:finalize', jobId, result),
+    save: (jobId, suggestedName) => ipcRenderer.invoke('export:save', jobId, suggestedName),
+    abort: (jobId) => ipcRenderer.invoke('export:abort', jobId),
+    stats: (jobId) => ipcRenderer.invoke('export:stats', jobId),
+  },
   send: (channel, data) => {
     const validChannels = ['toMain', 'audio-stream', 'midi-event'];
     if (validChannels.includes(channel)) {
@@ -109,4 +123,5 @@ if (smokeTest) {
     await ipcRenderer.invoke('vst3:smokeTimingReset');
   };
 }
+if (smokeTest) desktopApi.exportStore.smokeInspect = (jobId, includeAudio) => ipcRenderer.invoke('export:smokeInspect', jobId, includeAudio === true);
 contextBridge.exposeInMainWorld('desktopApp', desktopApi);
