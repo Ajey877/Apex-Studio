@@ -694,3 +694,101 @@ test('NativeVst3EffectRuntime exposes liveLatencyFramesFor (2048 + pluginLatency
 });
 
 
+
+test('ensureTracksPrepared preserves live native sessions that monitoring init must not tear down', async () => {
+  const originalNode = (globalThis as any).AudioWorkletNode;
+  const nodes: any[] = [];
+  class FakeAudioWorkletNode {
+    port = { onmessage: null as ((event: { data: any }) => void) | null, sent: [] as any[], closed: false,
+      stopSequence: null as number | null,
+      postMessage: (message: any) => {
+        this.port.sent.push(message);
+        if (message?.type === 'stop') queueMicrotask(() => this.port.onmessage?.({ data: {
+          type: 'stop-ack', sequence: this.port.stopSequence, reason: message.reason,
+        } }));
+      }, close() { this.closed = true; } };
+    onprocessorerror: (() => void) | null = null;
+    disconnected = false;
+    constructor(_context: any, _name: string, _options: any) { nodes.push(this); }
+    disconnect() { this.disconnected = true; }
+  }
+  (globalThis as any).AudioWorkletNode = FakeAudioWorkletNode;
+
+  let session = 0;
+  const closed: string[] = [];
+  const opened: string[] = [];
+  let failClassId: string | null = null;
+  const bridge: Vst3Bridge = {
+    paths: async () => [], choosePath: async () => null,
+    discover: async () => ({ plugins: [], errors: [] }), discoverEffects: async () => ({ plugins: [], errors: [] }),
+    inspect: async () => { throw new Error('unused'); }, inspectEffect: async () => { throw new Error('unused'); },
+    describeEffect: async () => ({ parameters: [], controllerAvailable: false }), describe: async () => ({ parameters: [], controllerAvailable: false }),
+    parameters: async () => [],
+    open: async (plugin: any) => {
+      if (failClassId && plugin?.classId === failClassId) throw new Error('native host refused to open the effect');
+      const id = `session-${++session}`;
+      opened.push(id);
+      return { id, latencySamples: 0 };
+    },
+    process: async () => new Float32Array(),
+    processAudio: async () => new Float32Array(VST3_FX_BLOCK_FRAMES * 2).fill(0.25),
+    close: async id => { closed.push(id); },
+  };
+  const context: any = { sampleRate: 48000, currentTime: 0, state: 'running', audioWorklet: { addModule: async () => {} } };
+  const runtime = new NativeVst3EffectRuntime(() => {}, () => bridge);
+  try {
+    // A song is already playing with this insert prepared.
+    await runtime.prepareTracks([track], context);
+    const liveNode = runtime.nodeFor(track.id, slot.id, context, effect);
+    assert.ok(liveNode, 'the insert is prepared before monitoring is enabled');
+    assert.equal(opened.length, 1);
+
+    // Monitoring init must reuse it: same node, same session, nothing closed.
+    await runtime.ensureTracksPrepared([track], context);
+    assert.equal(nodes.length, 1, 'no additional native worklet node was built');
+    assert.equal(closed.length, 0, 'the running native session was not stopped');
+    assert.equal(runtime.nodeFor(track.id, slot.id, context, effect), liveNode, 'the same prepared node is reused');
+    assert.equal(runtime.isPrepared(track.id, slot.id, context, effect), true);
+
+    // Idempotent: a second monitoring init is still non-destructive.
+    await runtime.ensureTracksPrepared([track], context);
+    assert.equal(nodes.length, 1);
+    assert.equal(closed.length, 0);
+
+    // Contrast: the destructive path this replaced does stop the live session.
+    await runtime.prepareTracks([track], context);
+    assert.equal(closed.length, 1, 'prepareTracks stops the live session, which is why monitoring no longer calls it');
+    assert.ok(closed.includes('session-1'));
+    const rebuiltNode = runtime.nodeFor(track.id, slot.id, context, effect);
+    assert.ok(rebuiltNode && rebuiltNode !== liveNode, 'prepareTracks rebuilt the insert');
+
+    // Genuinely stale state is still re-prepared, never silently reused.
+    const changedEffect: Vst3Effect = { ...effect, state: { ...effect.state, parameters: [{ id: 7, value: 0.5 }] } };
+    const changedTrack: MixerTrack = { ...track, fxSlots: [{ ...slot, vst3Effect: changedEffect }] };
+    const beforeNodes = nodes.length;
+    await runtime.ensureTracksPrepared([changedTrack], context);
+    assert.equal(nodes.length, beforeNodes + 1, 'a changed effect configuration is re-prepared');
+    assert.equal(runtime.isPrepared(track.id, slot.id, context, changedEffect), true);
+    assert.equal(runtime.isPrepared(track.id, slot.id, context, effect), false, 'the stale configuration is gone');
+    const preservedSession = opened[opened.length - 1];
+
+    // A failed new insert throws and must not take the running session with it,
+    // and must not be silently bypassed either.
+    const failingClassId = 'FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF';
+    failClassId = failingClassId;
+    const failingEffect: Vst3Effect = { ...effect, classId: failingClassId,
+      state: { schema: 1, classId: failingClassId, parameters: [] } };
+    const failingTrack: MixerTrack = { id: 2, name: 'Failing', color: '#fff', volume: 1, pan: 0, mute: false, solo: false,
+      peakL: 0, peakR: 0, fxSlots: [{ id: 'fx-fail', type: 'vst3', name: 'Failing', enabled: true, mix: 1, params: {}, vst3Effect: failingEffect }] };
+    const closedBeforeFailure = closed.length;
+    await assert.rejects(runtime.ensureTracksPrepared([changedTrack, failingTrack], context), /native host refused/i);
+    assert.equal(closed.length, closedBeforeFailure, 'the already-running session survives a failed sibling insert');
+    assert.equal(runtime.isPrepared(track.id, slot.id, context, changedEffect), true);
+    assert.equal(runtime.nodeFor(failingTrack.id, 'fx-fail', context, failingEffect), undefined,
+      'the failed insert is not left half-prepared or bypassed');
+    assert.ok(!closed.includes(preservedSession), 'preserved');
+  } finally {
+    await runtime.stop();
+    (globalThis as any).AudioWorkletNode = originalNode;
+  }
+});

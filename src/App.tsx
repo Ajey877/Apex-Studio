@@ -2443,6 +2443,10 @@ export function App() {
     const slotIds = (trackId: number) => projectStateRef.current.mixerTracks
       .find(track => track.id === trackId)?.fxSlots.map(slot => slot.id) ?? [];
     const acceptance = {
+      runLiveInputGraphPreservationAcceptance: async () => {
+        const { runLiveInputGraphPreservationAcceptance } = await import('./audio/liveInputAcceptance');
+        return runLiveInputGraphPreservationAcceptance(audioEngine);
+      },
       runLiveInputAcceptance: async () => {
         const { runLiveInputAcceptance } = await import('./audio/liveInputAcceptance');
         return runLiveInputAcceptance(audioEngine);

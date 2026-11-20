@@ -136,6 +136,8 @@ export class RecordingEngine {
   private detachContextStateListener: (() => void) | null = null;
   private inputSource: Pick<AudioNode, 'connect' | 'disconnect'> | null = null;
   private captureNode: RecordingCaptureNodeLike | null = null;
+  private frameLabelJumps = 0;
+  private lastFrameLabelJump: { frame: number; expectedFrame: number; frameCount: number } | null = null;
   private silentSink: GainNode | null = null;
   private analyser: AnalyserNode | null = null;
   private context: AudioContext | null = null;
@@ -212,6 +214,21 @@ export class RecordingEngine {
       }
     }
     return Math.max(0, endFrame - this.captureStartFrame - pausedFrames) / this.captureSampleRate;
+  }
+
+  /**
+   * Number of times the capture worklet observed the platform's `currentFrame`
+   * failing to advance by exactly one render quantum. The monotonic worklet
+   * cursor absorbs these, so a non-zero value is expected on affected Chrome
+   * builds and is diagnostic evidence rather than a coverage defect.
+   */
+  get captureFrameLabelJumps(): number {
+    return this.frameLabelJumps;
+  }
+
+  /** Frame details of the most recent `currentFrame` label jump, if any. */
+  get lastCaptureFrameLabelJump(): { frame: number; expectedFrame: number; frameCount: number } | null {
+    return this.lastFrameLabelJump;
   }
 
   /**
@@ -554,6 +571,17 @@ export class RecordingEngine {
     }
     if (value.type === 'samples') {
       this.handlePcmBlock(value, generation);
+      return;
+    }
+    // The worklet's monotonic cursor already absorbs this; recorded only as
+    // evidence that the platform's `currentFrame` did not advance per quantum.
+    if (value.type === 'frameLabelJump') {
+      this.frameLabelJumps++;
+      this.lastFrameLabelJump = {
+        frame: Number(value.frame),
+        expectedFrame: Number(value.expectedFrame),
+        frameCount: Number(value.frameCount),
+      };
       return;
     }
     if (value.type === 'started') {

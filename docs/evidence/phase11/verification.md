@@ -103,3 +103,81 @@ The mandatory new desktop CI step runs `npm run test:live-input-packaged` after 
 - `src/components/Mixer.tsx`
 - `src/components/audioSettingsModal.test.tsx`
 - `src/components/masteringMeteringUi.test.ts`
+
+## Independent review corrections (post-`ac5f2bd5`)
+
+Earlier sections above are retained unchanged, including the failures they record.
+
+### Blocker B — frame-stamped capture gaps: RESOLVED, root cause established
+
+`recordingCaptureWorklet.ts` stamped packets with `AudioWorkletGlobalScope.currentFrame`
+as if it advanced once per render quantum. Measured in-browser, it does not: Chrome runs
+several 128-frame quanta per audio-device buffer and refreshes `currentFrame`/`currentTime`
+only at the start of that buffer. Instrumented evidence (48 kHz):
+
+| call | frameStart | expected | contextTime | input checksum |
+|------|-----------|----------|-------------|----------------|
+| 577 | 232832 | 232960 | 4.850666666666666 | 2.682760 |
+| 578 | 232832 | 232960 | 4.850666666666666 | 1.500929 |
+| 579 | 232832 | 232960 | 4.850666666666666 | -1.292025 |
+| 580 | 232832 | 232960 | 4.850666666666666 | -2.697930 |
+| 581 | 233472 | 232960 | 4.864 | -1.207382 |
+
+`contextTime` is frozen across the repeats, `callCount` increments through them (one
+instance, called repeatedly), the checksums all differ (each call carries 128 genuinely new
+frames), and the jump is exactly the 640 frames delivered. So the worklet emitted duplicate
+`frameStart` stamps (the repeated `308352`) and skipped the frame numbers inside the jump
+(the 128–256 missing frames). Not a MessagePort, pre-roll or pause-boundary defect.
+
+Fix: `process()` advances a monotonic cursor by the frames actually delivered and uses
+`currentFrame` only as the anchor. `assembleRecordingPcm()` and its integrity checks are
+unchanged; nothing is padded and no overlap is ignored.
+
+- Unit regression `capture stays gap-free when the platform only refreshes currentFrame per audio-device buffer`
+  (new `advanceToFrameWithDeviceBufferLabels` harness method): **17/17 pass**. Verified to
+  fail without the fix — `engine.stop()` hangs, because the lagging label never reaches
+  `stopFrame` so `finishAtStop` never posts `stopped`.
+- Browser regression `capture coverage @ 44100/48000 Hz`, `--repeat-each=3`: **6 passed (2.2m)**,
+  under continuous main-thread load, across plain take, pause/resume, count-in→punch and
+  repeated start/stop. Full live-input suite **6/6**; audio unit suite **2230/2230**.
+
+### Blocker A — destructive monitoring init: RESOLVED for the renderer graph
+
+`startLiveInputMonitoring()` no longer calls `prepareTracks()` (which stopped every native
+session) nor `updateMixerTrack()` for every track. It calls the new
+`NativeVst3EffectRuntime.ensureTracksPrepared()` (prepares only what is absent or stale,
+unwinds only what it created on failure, never bypasses a failed insert) and rebuilds only
+tracks whose graph state is genuinely absent or stale.
+
+- Unit regression `ensureTracksPrepared preserves live native sessions…`: **15/15 pass**.
+- Browser regression `preserves the running Mixer graph`, `--repeat-each=3`: **3/3 pass**.
+  Transport position 0.357 s → 1.042 s → 5.101 s with `playing: true` throughout at 140 BPM;
+  `tracksRebuiltDuringMonitoringInit: []`; monitored input RMS 0.1076; insert output after
+  disable 4.7e-6; monitor snapshot `off`.
+
+### Measured limitations that are NOT worked around
+
+- **A browser cannot host a live native VST3 insert.** With a renderer-side stub, the worklet
+  fails closed: `Native effect missed its real-time processing deadline; playback stopped
+  rather than replaying stale PCM.` Bypass does not avoid it — the worklet submits every
+  block regardless. Live native under active playback is verifiable only on packaged Windows.
+- **Per-control transfer gain is not asserted during active playback.** The monitored
+  producer and the project's instruments both enter the insert at `mixInput`, so the output
+  tap is an unattributable mixture, and fake-device amplitude drifts between windows. Those
+  checks remain asserted against a silent graph in `runLiveInputAcceptance`.
+- **Insert leakage is not asserted during active playback.** `getMixerTrackPeak` reported
+  0.21 for a bus carrying no audio before monitoring started, so it is not a trustworthy
+  probe there; leakage remains asserted against a silent graph.
+
+### Blocker C — Windows packaged acceptance: STILL UNRESOLVED
+
+Desktop Validation failed on PR #307 at step 16 (packaged runtime smoke); the packaged
+live-input step was skipped, so no `packaged-windows.json` exists. Annotation:
+`Nonzero-latency dynamic live bypass changed alignment at input frame 24000: expected
+1545952, onsets 0:1545952, 1:1546080, 2:1545952, masterSum comparedSamples 4096,
+rmsDifference 3.3338905037320935e-10`. Baseline run 44724732627 passed, but runs 44506905887
+and 44692385347 also failed at the smoke/verdict steps, so this step has a pre-existing
+instability history. Local run remains `exit 3 / NOT_VERIFIED` (Linux).
+
+No physical microphone, interface, or Windows machine is available here; physical round-trip
+latency and real native plugin processing remain untested.

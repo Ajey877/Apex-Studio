@@ -866,7 +866,11 @@ export interface PunchRecordingSession {
 
 class AudioEngine {
   private nativeInstruments = new NativeVst3Runtime();
-  private nativeMixerEffects = new NativeVst3EffectRuntime(() => {
+  /**
+   * Read-only so acceptance tooling can verify that enabling input monitoring
+   * preserved already-prepared native sessions instead of tearing them down.
+   */
+  public readonly nativeMixerEffects = new NativeVst3EffectRuntime(() => {
     this.stop();
   });
   private nativeOffline: NativeVst3OfflineRender | null = null;
@@ -1218,6 +1222,54 @@ class AudioEngine {
   public readonly liveInputMonitor = new LiveInputMonitor();
 
   /** Only existing insert producer inputs are eligible; master/returns are never monitor destinations. */
+  /**
+   * Deterministic key of everything `updateMixerTrack` would build from, or null
+   * when the track cannot be compared. Used to tell a genuinely unchanged Mixer
+   * track from one whose graph state is absent or stale.
+   */
+  private mixerTrackGraphKey(track: MixerTrack): string | null {
+    const serialize = (value: unknown): unknown => {
+      if (Array.isArray(value)) return value.map(serialize);
+      if (ArrayBuffer.isView(value)) {
+        return [value.constructor.name, Array.from(value as unknown as ArrayLike<number>)];
+      }
+      if (value instanceof ArrayBuffer) return ['ArrayBuffer', value.byteLength];
+      if (value && typeof value === 'object') {
+        const source = value as Record<string, unknown>;
+        return Object.keys(source).sort().reduce<Record<string, unknown>>((accumulator, key) => {
+          accumulator[key] = serialize(source[key]);
+          return accumulator;
+        }, {});
+      }
+      return typeof value === 'number' && !Number.isFinite(value) ? String(value) : value;
+    };
+    try {
+      return JSON.stringify(serialize(track));
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * True when this track's live Mixer graph already matches `track`, so enabling
+   * input monitoring can leave the running chain alone: its built-in FX
+   * instances and live state, effect tails, routing and latency compensation all
+   * stay as they are. Anything genuinely absent or stale returns false - no
+   * channel yet, a changed setting, an incomparable track, or an enabled native
+   * insert that is not actually prepared (a withheld track is stale even when
+   * its settings match).
+   */
+  private isMixerGraphCurrent(track: MixerTrack, context: BaseAudioContext): boolean {
+    if (!this.mixerChannels.has(track.id)) return false;
+    const known = this.lastKnownMixerTracks.get(track.id);
+    if (!known) return false;
+    const knownKey = this.mixerTrackGraphKey(known);
+    const currentKey = this.mixerTrackGraphKey(track);
+    if (knownKey === null || currentKey === null || knownKey !== currentKey) return false;
+    return track.fxSlots.every(slot => slot.type !== 'vst3' || !slot.enabled ||
+      this.nativeMixerEffects.isPrepared(track.id, slot.id, context, slot.vst3Effect));
+  }
+
   public async startLiveInputMonitoring(trackId: number, tracks: readonly MixerTrack[] = [...this.lastKnownMixerTracks.values()]): Promise<void> {
     if (this.shouldBlockLiveMutation() || this.isOfflineRendering || this.isReconfiguringContext) {
       return Promise.reject(new Error('Wait for audio rendering/reconfiguration before enabling monitoring.'));
@@ -1233,15 +1285,22 @@ class AudioEngine {
     const context = this.ctx as AudioContext;
     const snapshot = structuredClone([...tracks]);
     return this.liveInputMonitor.start(context, this.getOrCreateMixerChannel(trackId).input, trackId, async isCurrent => {
-      // Stopped projects need their real FX/routing graph too. In particular a
-      // saved native insert must be prepared, never silently bypassed or left
-      // disconnected while the UI claims that live monitoring is active.
+      // Preserve a Mixer graph that is already live. Enabling monitoring while
+      // the transport is playing must not stop prepared native VST3 sessions or
+      // rebuild built-in FX chains: that would drop plugin state and effect
+      // tails mid-song. `ensureTracksPrepared` prepares only what is genuinely
+      // absent or stale, so an unprepared or failed native insert still throws
+      // and is never silently bypassed with a dry path.
       if (snapshot.some(track => track.fxSlots.some(slot => slot.enabled && slot.type === 'vst3'))) {
-        await this.nativeMixerEffects.prepareTracks(snapshot, context);
+        await this.nativeMixerEffects.ensureTracksPrepared(snapshot, context);
       }
       if (!isCurrent()) return;
-      for (const mixerTrack of snapshot) this.updateMixerTrack(mixerTrack);
-      this.syncMixerRouting(snapshot);
+      // Only build graph state that is absent or stale. Tracks that already
+      // match keep their transport position, live FX state, routing and latency
+      // compensation exactly as they are.
+      const staleTracks = snapshot.filter(track => !this.isMixerGraphCurrent(track, context));
+      for (const mixerTrack of staleTracks) this.updateMixerTrack(mixerTrack);
+      if (staleTracks.length > 0) this.syncMixerRouting(snapshot);
     });
   }
 

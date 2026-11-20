@@ -429,6 +429,67 @@ export class NativeVst3EffectRuntime {
     }
   }
 
+  /**
+   * Prepares only the native VST3 inserts that are genuinely absent or stale and
+   * leaves every already-prepared node, plugin session and live audio port
+   * running. Enabling input monitoring while the transport is playing must not
+   * tear down live inserts: `prepareTracks` stops every session first, which
+   * would drop plugin state and effect tails mid-song. A reused insert is still
+   * verified against the current context, effect configuration and lifecycle
+   * flags, so a stale, faulted or stopping session is re-prepared rather than
+   * silently accepted. Failures are thrown, never bypassed with a dry path.
+   */
+  async ensureTracksPrepared(tracks: MixerTrack[], context: BaseAudioContext): Promise<void> {
+    const generation = ++this.prepareGeneration;
+    const slots = tracks.flatMap(track => track.fxSlots.filter(slot => slot.type === 'vst3' && slot.enabled).map(slot => ({ track, slot })));
+    const live = new Map(slots.map(({ track, slot }) => [runtimeKey(track.id, slot.id), { track, slot }] as const));
+    // Release sessions that no longer belong to this graph (removed slot, stale
+    // context, changed effect state) so they neither leak nor get reused.
+    for (const [key, entry] of [...this.prepared]) {
+      const current = live.get(key);
+      const reusable = !!current && entry.trackId === current.track.id && entry.context === context &&
+        !entry.disposed && !entry.stopping && !entry.faulted && effectKey(current.slot.vst3Effect) === entry.configuration;
+      if (reusable) continue;
+      this.prepared.delete(key);
+      clearDiagnostic(entry.trackId, entry.slotId);
+      if (!entry.disposed && !entry.stopping) await this.disposeEntry(entry, 'stale-entry');
+    }
+    if (generation !== this.prepareGeneration) throw new Error('Native effect preparation cancelled.');
+    if (!slots.length) return;
+    if (slots.length > 8) throw new Error('At most 8 live VST3 Mixer effect inserts are supported in one take.');
+    const bridge = this.getBridge();
+    if (!bridge) throw new Error('Native VST3 Mixer effects require the Windows desktop application. The saved effect and state are retained.');
+    await ensureProcessor(context);
+    if (generation !== this.prepareGeneration) throw new Error('Native effect preparation cancelled.');
+    const missing = slots.filter(({ track, slot }) => !this.isPrepared(track.id, slot.id, context, slot.vst3Effect));
+    if (!missing.length) return;
+    const created = new Set<string>();
+    const results = await Promise.allSettled(missing.map(({ track, slot }) => {
+      created.add(runtimeKey(track.id, slot.id));
+      return this.prepareOne(track.id, slot, context, bridge, generation).catch(error => {
+        if (generation === this.prepareGeneration) {
+          reportVst3MixerEffect(track.id, slot.id, error instanceof Error ? error.message : String(error));
+        }
+        throw error;
+      });
+    }));
+    const failure = results.find((result): result is PromiseRejectedResult => result.status === 'rejected');
+    if (failure) {
+      if (generation === this.prepareGeneration) {
+        // Unwind only what THIS call created. Sessions that were already running
+        // belong to the playing song and keep running; the caller refuses
+        // monitoring instead of leaving a failed insert silently bypassed.
+        for (const key of created) {
+          const entry = this.prepared.get(key);
+          if (!entry) continue;
+          this.prepared.delete(key);
+          await this.disposeEntry(entry, 'prepare-failed');
+        }
+      }
+      throw failure.reason;
+    }
+  }
+
   private async prepareOne(trackId: number, slot: FxSlot, context: BaseAudioContext, bridge: Vst3Bridge, generation: number) {
     if (!slot.vst3Effect) throw new Error(`Mixer track ${trackId}, slot ${slot.id}: VST3 effect identity/state is missing; relink the effect. No dry substitute was installed.`);
     assertVst3Effect(slot.vst3Effect);

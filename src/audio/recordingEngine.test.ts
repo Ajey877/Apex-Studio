@@ -182,6 +182,37 @@ test('pause intervals are excluded from the saved frames without introducing a r
   });
 });
 
+test('capture stays gap-free when the platform only refreshes currentFrame per audio-device buffer', async () => {
+  await withObjectUrlMock(async () => {
+    const rig = createRecordingTestRig();
+    const { engine } = await prepareRig(rig);
+    // Align to a device-buffer boundary so the injected labels start exactly.
+    rig.context.advanceToFrame(2560, frame => frame / 10000);
+    await engine.start(rig.context.currentTime);
+
+    // Ten 640-frame device buffers (the size measured on the affected Chrome
+    // build). Every quantum still carries distinct audio; only the frame LABEL
+    // repeats, which is what used to duplicate and skip frames.
+    rig.context.advanceToFrameWithDeviceBufferLabels(8960, frame => frame / 10000, 1, 5);
+
+    const take = await engine.stop();
+    const wav = await decodeFloatWav(take.blob);
+
+    // Complete, ordered, non-overlapping coverage of exactly the requested
+    // window: 2560..8960. A duplicated or skipped quantum changes either the
+    // frame count or the per-frame values, since every frame is unique.
+    assert.equal(wav.frameCount, 6400, 'the take must cover every captured frame exactly once');
+    for (let index = 0; index < wav.frameCount; index++) {
+      assert.equal(wav.samples[index], Math.fround((2560 + index) / 10000), `frame ${2560 + index} is out of place`);
+    }
+    // Proves the artifact really occurred, so this cannot pass vacuously.
+    assert.ok(engine.captureFrameLabelJumps > 0, 'the stale currentFrame labels must have been observed');
+    const jump = engine.lastCaptureFrameLabelJump;
+    assert.ok(jump && jump.frame !== jump.expectedFrame, 'the observed label jump is recorded as evidence');
+    sessionBlobUrlRegistry.release(take.url);
+  });
+});
+
 test('capture refuses an expired pre-roll boundary rather than silently starting late', async () => {
   const rig = createRecordingTestRig();
   const { engine } = await prepareRig(rig);
