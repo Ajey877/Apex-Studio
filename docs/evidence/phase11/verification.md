@@ -169,7 +169,26 @@ tracks whose graph state is genuinely absent or stale.
   0.21 for a bus carrying no audio before monitoring started, so it is not a trustworthy
   probe there; leakage remains asserted against a silent graph.
 
-### Blocker C — Windows packaged acceptance: STILL UNRESOLVED
+### Blocker C — Windows packaged acceptance: CI now passing on `361dfb7`; artifact contents not read here
+
+Desktop Validation run `44743629670` / job `136313240572` on `361dfb7` passes **5/5**
+(`verify`, `audio-tests`, `Native DSP` ubuntu + windows, `windows-package`). Within the
+Windows job, steps 16 (packaged runtime smoke), 17 (packaged live input PCM and recording
+acceptance, fake microphone), 18 (upload live input evidence), 19 (native VST3 editor
+acceptance) and 20 (packaged acceptance verdict) all report `success`, and artifact
+`apex-packaged-live-input-evidence` (id 14632263159) was uploaded — none of which happened
+on the previous failure.
+
+**Not preclaimed:** the contents of `packaged-windows.json` were NOT read. Artifact and
+job-log downloads redirect to `productionresultssa18.blob.core.windows.net`, outside this
+sandbox's network allowlist, so both fail with EOF. Step conclusions and the artifact's
+existence are confirmed via `api.github.com`; the monitor PCM, recording coexistence,
+resource release, shutdown and reload-OFF fields inside the JSON are unverified here.
+Step 17 is explicitly labelled "(fake microphone)", so it is not physical hardware evidence.
+One passing run also does not by itself prove the smoke step is stable, given runs
+44506905887 and 44692385347 failed there previously.
+
+### Blocker C — previous Windows packaged failure (retained)
 
 Desktop Validation failed on PR #307 at step 16 (packaged runtime smoke); the packaged
 live-input step was skipped, so no `packaged-windows.json` exists. Annotation:
