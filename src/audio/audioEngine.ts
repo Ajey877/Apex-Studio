@@ -29,10 +29,24 @@ import {
   AudioRecording,
   GrossBeatState,
   MasteringSuiteState,
-  SidechainSettings
+  SidechainSettings,
+  ChannelFreeze
 } from '../types/daw';
 import { AudioClockTransport, TransportState } from './transport';
 import { findPatternForClip, isFullPatternPlaylistClip, resolvePlaylistClipChannels, resolveClipChannelContent, withPatternChannelContent } from '../state/patternContent';
+import {
+  CHANNEL_FREEZE_MAX_SECONDS,
+  CHANNEL_FREEZE_TAIL_SECONDS,
+  CHANNEL_FREEZE_VERSION,
+  isChannelFreezeSampleExact,
+  analyzeChannelFreezeRender,
+  collectChannelFreezeRenderClips,
+  computeChannelFreezeFingerprint,
+  getChannelFreezeBlocker,
+  resolveActiveChannelFreezes,
+  resolveChannelFreezeContentEndBars,
+  type ChannelFreezeSource,
+} from '../state/trackFreeze';
 import {
   GROSS_BEAT_OPEN_GAIN,
   grossBeatAlternatingSteps,
@@ -292,6 +306,24 @@ function getChainEnd(node: AudioNode): AudioNode {
 
 export type OfflineRenderScope = 'song' | 'pattern';
 export type OfflineRenderProgress = (progress: number, status: string) => void;
+
+/** Phase 10H: one frozen channel's audio in the graph for the current take / render. */
+interface FreezeSourceEntry {
+  /** `null` when the take started past the end of the render. */
+  source: AudioBufferSourceNode | null;
+  /** Live mute / solo gate; connected to the input of the channel's mixer track. */
+  gain: GainNode;
+  mixerTrackId: number;
+  audioBufferId: string;
+}
+
+/** Phase 10H: result of `AudioEngine.renderChannelFreeze`; nothing is published yet. */
+export interface ChannelFreezeRender {
+  buffer: AudioBuffer;
+  /** The record to attach once `buffer` is durable, minus its asset id. */
+  freeze: Omit<ChannelFreeze, 'audioBufferId'>;
+  peak: number;
+}
 
 interface NativeVst3OfflineEffectPass {
   overrides: Map<string, AudioBuffer>;
@@ -835,6 +867,31 @@ class AudioEngine {
     this.stop();
   });
   private nativeOffline: NativeVst3OfflineRender | null = null;
+  /**
+   * Phase 10H — Track Freeze. Channels whose frozen render replaces their
+   * instrument in the current Song take or Song render, keyed by channel id.
+   * Resolved by `refreshChannelFreezes` from the same project data the take
+   * plays; empty in Pattern mode. One map decides both halves of the swap: a
+   * channel in it gets a frozen-audio source and no sequenced voices, a channel
+   * outside it gets voices and no source.
+   */
+  private activeChannelFreezes: Map<string, ChannelFreeze> = new Map();
+  /**
+   * Lead-in the next `renderTimelineOffline` call must use when the mastering
+   * stage does not already add one. Set only by `renderChannelFreeze`, read and
+   * cleared synchronously at the top of that call.
+   */
+  private pendingOfflineLeadInSeconds = 0;
+  /**
+   * VST3 channels whose plug-in is being loaded mid-take because the channel
+   * stopped playing its frozen audio. Their sequenced notes wait for the load.
+   */
+  private nativeResumingChannelIds: Set<string> = new Set();
+  /** Channels the most recent offline render played from frozen audio (diagnostics / tests). */
+  private lastOfflineFrozenChannelIds: string[] = [];
+  private freezeSources: Map<string, FreezeSourceEntry> = new Map();
+  /** > 0 only while `triggerCurrentStep` is dispatching sequenced notes. */
+  private sequencerDispatchDepth = 0;
   private nativeVst3OfflineEffectPass: NativeVst3OfflineEffectPass | null = null;
   private nativeVst3OfflineTapMerger: ChannelMergerNode | null = null;
   private nativeFxOfflineBatchHeld = false;
@@ -3218,6 +3275,24 @@ class AudioEngine {
       return;
     }
 
+    if (this.sequencerDispatchDepth > 0 && this.activeChannelFreezes.has(channel.id)) {
+      // Phase 10H: this sequenced voice is already inside the channel's frozen
+      // render, so sounding it would double the channel. The note still sends
+      // the note-triggered sidechain pulse it always sent, so tracks ducked by
+      // this channel keep pumping. Notes played by hand (keyboard, MIDI input,
+      // previews) are not sequenced and still reach the instrument.
+      this.triggerSidechainDucking(channel.mixerTrackId, time);
+      return;
+    }
+    if (this.sequencerDispatchDepth > 0 && this.nativeResumingChannelIds.has(channel.id)) {
+      // Phase 10H: the channel just left its freeze mid-take and its plug-in is
+      // still loading. A live VST3 session must be ready before the transport
+      // hands it a note (it fails with "not prepared before the transport
+      // deadline" otherwise), so sequenced notes are held back until it is.
+      this.triggerSidechainDucking(channel.mixerTrackId, time);
+      return;
+    }
+
     const mixerChannel = this.getOrCreateMixerChannel(channel.mixerTrackId);
     const voiceId = midiChannel === undefined
       ? `${channel.id}-${note.pitch}-${Math.random()}`
@@ -4445,6 +4520,285 @@ class AudioEngine {
     }
   }
 
+  // ---------------------------------------------------------------------
+  // Phase 10H — Track Freeze / Unfreeze
+  // ---------------------------------------------------------------------
+
+  /** Channel ids currently playing their frozen render instead of their instrument. */
+  public getActiveFrozenChannelIds(): string[] {
+    return [...this.activeChannelFreezes.keys()];
+  }
+
+  /** Channel ids the most recent offline render played from frozen audio instead of the instrument. */
+  public getLastOfflineRenderFrozenChannelIds(): string[] {
+    return [...this.lastOfflineFrozenChannelIds];
+  }
+
+  /** Channel ids that have a frozen-audio source node in the graph right now. */
+  public getFreezeSourceChannelIds(): string[] {
+    return [...this.freezeSources.entries()].filter(([, entry]) => entry.source !== null).map(([id]) => id);
+  }
+
+  private refreshChannelFreezesIfPlaying(): void {
+    if (this.isPlaying && !this.isOfflineRendering && !this.offlineRenderLeaseHeld) this.refreshChannelFreezes();
+  }
+
+  /**
+   * Re-resolves which channels play frozen audio for the take / render that is
+   * set up on the engine right now, and hands over cleanly in both directions.
+   *
+   * Reads the project-level channel snapshot (`playbackProjectChannels`), not
+   * `activeChannels`: the latter carries automation-written volume and pan, and
+   * a fingerprint taken from it would call every automated channel stale.
+   */
+  private refreshChannelFreezes(
+    playlistTracks: readonly PlaylistTrack[] | undefined = this.playbackPlaylistTracks,
+    accepts?: (freeze: ChannelFreeze) => boolean,
+  ): void {
+    const source: ChannelFreezeSource = {
+      clips: this.activeClips,
+      patterns: this.activePatterns,
+      playlistTracks,
+      bpm: this.bpm,
+      swing: this.swing,
+      meter: this.meter,
+    };
+    const next = this.activePlayMode === 'song'
+      ? resolveActiveChannelFreezes(this.playbackProjectChannels, source, id => this.sampleBuffers.has(id), accepts)
+      : new Map<string, ChannelFreeze>();
+    const now = this.ctx?.currentTime ?? 0;
+
+    // Frozen audio -> instrument: stop the render; the next sequenced note
+    // reaches the instrument again.
+    for (const [channelId, entry] of [...this.freezeSources]) {
+      const freeze = next.get(channelId);
+      if (!freeze || freeze.audioBufferId !== entry.audioBufferId) this.stopFreezeSource(channelId, now);
+    }
+    // A native instrument that was released while its channel was frozen is
+    // loaded again as soon as the channel goes back to it, instead of on its
+    // first note.
+    if (!this.isOfflineRendering && this.isPlaying) {
+      const hasSolo = this.playbackProjectChannels.some(channel => channel.solo);
+      for (const channelId of this.activeChannelFreezes.keys()) {
+        if (next.has(channelId)) continue;
+        const channel = this.playbackProjectChannels.find(candidate => candidate.id === channelId);
+        if (!channel || channel.instrumentType !== 'vst3' || shouldSuppressInternalChannelAudio(channel)) continue;
+        if (channel.mute || (hasSolo && !channel.solo)) continue;
+        this.nativeResumingChannelIds.add(channelId);
+        void this.prepareVst3Channel(channel).catch(error => {
+          reportVst3(channel.id, error instanceof Error ? error.message : String(error));
+        }).finally(() => { this.nativeResumingChannelIds.delete(channelId); });
+      }
+    }
+    for (const channelId of next.keys()) this.nativeResumingChannelIds.delete(channelId);
+    // Instrument -> frozen audio: silence voices that are still sounding so the
+    // tail of a live note cannot overlap the same note inside the render.
+    if (!this.isOfflineRendering) {
+      for (const channelId of next.keys()) {
+        if (!this.activeChannelFreezes.has(channelId)) this.stopChannelInternalVoices(channelId);
+      }
+    }
+    this.activeChannelFreezes = next;
+    this.syncFreezeSources(now);
+
+    if (!this.isOfflineRendering && next.size > 0) {
+      // Release native instrument instances the take no longer needs.
+      this.nativeInstruments?.reconcile(this.playbackProjectChannels.filter(channel =>
+        !shouldSuppressInternalChannelAudio(channel) && !next.has(channel.id)));
+    }
+  }
+
+  /**
+   * Starts the frozen render of every active frozen channel that has no source
+   * yet, aligned to the step being scheduled. Called from the Song branch of
+   * `triggerCurrentStep`, so a fresh start, a resume, a seek, a mid-take
+   * Freeze and an offline render all start it the same way.
+   */
+  private startDueFreezeSources(stepTime: number, globalStep: number, secondsPerStep: number): void {
+    if (this.activeChannelFreezes.size === 0 || !this.ctx) return;
+    const ctx = this.ctx;
+    const swingOffset = this.currentStep % 2 === 1 ? swingOffsetSecondsForStep(this.swing, secondsPerStep) : 0;
+    // The render's own time zero is the unswung start of step 0.
+    const stepStart = stepTime - swingOffset;
+    for (const [channelId, freeze] of this.activeChannelFreezes) {
+      if (this.freezeSources.has(channelId)) continue;
+      const channel = this.activeChannels.find(candidate => candidate.id === channelId);
+      const buffer = this.sampleBuffers.get(freeze.audioBufferId);
+      if (!channel || !buffer) continue;
+      const destination = this.getOrCreateMixerChannel(channel.mixerTrackId)?.input;
+      if (!destination) continue;
+      let when = stepStart;
+      let offset = globalStep * secondsPerStep;
+      if (!this.isOfflineRendering && when < ctx.currentTime) {
+        offset += ctx.currentTime - when;
+        when = ctx.currentTime;
+      }
+      const gain = ctx.createGain();
+      gain.gain.value = isRackChannelAudible(channel, this.activeChannels) ? 1 : 0;
+      gain.connect(destination);
+      const entry: FreezeSourceEntry = {
+        source: null, gain, mixerTrackId: channel.mixerTrackId, audioBufferId: freeze.audioBufferId,
+      };
+      if (offset < buffer.duration) {
+        const source = ctx.createBufferSource();
+        source.buffer = buffer;
+        source.connect(gain);
+        source.start(Math.max(0, when), Math.max(0, offset));
+        entry.source = source;
+      }
+      // An entry is recorded even past the end of the render, so the channel is
+      // not probed again on every later step of this take.
+      this.freezeSources.set(channelId, entry);
+    }
+  }
+
+  /** Applies live mute / solo and mixer routing to the frozen-audio sources. */
+  private syncFreezeSources(now: number): void {
+    for (const [channelId, entry] of this.freezeSources) {
+      const channel = this.activeChannels.find(candidate => candidate.id === channelId);
+      if (!channel) continue;
+      const target = isRackChannelAudible(channel, this.activeChannels) ? 1 : 0;
+      try {
+        entry.gain.gain.cancelScheduledValues(now);
+        entry.gain.gain.setTargetAtTime(target, now, 0.004);
+      } catch (_) {
+        entry.gain.gain.value = target;
+      }
+      if (channel.mixerTrackId !== entry.mixerTrackId) {
+        const destination = this.getOrCreateMixerChannel(channel.mixerTrackId)?.input;
+        if (destination) {
+          try { entry.gain.disconnect(); } catch (_) {}
+          entry.gain.connect(destination);
+          entry.mixerTrackId = channel.mixerTrackId;
+        }
+      }
+    }
+  }
+
+  private stopFreezeSource(channelId: string, now: number): void {
+    const entry = this.freezeSources.get(channelId);
+    if (!entry) return;
+    this.freezeSources.delete(channelId);
+    const { source, gain } = entry;
+    try {
+      gain.gain.cancelScheduledValues(now);
+      gain.gain.setTargetAtTime(0, now, 0.003);
+    } catch (_) {}
+    const release = () => { try { gain.disconnect(); } catch (_) {} };
+    if (!source) { release(); return; }
+    try {
+      source.onended = release;
+      source.stop(now + 0.03);
+    } catch (_) {
+      release();
+    }
+  }
+
+  private stopAllFreezeSources(): void {
+    for (const entry of this.freezeSources.values()) {
+      try { entry.source?.stop(); } catch (_) { /* already inactive */ }
+      try { entry.source?.disconnect(); } catch (_) {}
+      try { entry.gain.disconnect(); } catch (_) {}
+    }
+    this.freezeSources.clear();
+    this.nativeResumingChannelIds.clear();
+  }
+
+  /**
+   * Renders one channel's freeze: its own contribution to the input of its
+   * mixer track over the Song timeline, plus a decay tail.
+   *
+   * The render is the shared offline timeline renderer with nothing but this
+   * channel in it and a neutral mixer (unity, centred, no inserts, no master
+   * stage), so the result is the channel stage alone — instrument, channel
+   * volume and pan, and the automation that targets the channel. The channel is
+   * rendered unmuted and unsoloed: mute and solo stay live after a freeze.
+   *
+   * Nothing is published here. The caller owns the buffer id, persistence and
+   * the project-state change.
+   */
+  public async renderChannelFreeze(
+    channel: Channel,
+    clips: PlaylistClip[],
+    patterns: Pattern[] | undefined,
+    playlistTracks: PlaylistTrack[] | undefined,
+    bpm: number,
+    onProgress?: OfflineRenderProgress,
+  ): Promise<ChannelFreezeRender> {
+    const source: ChannelFreezeSource = { clips, patterns, playlistTracks, bpm, swing: this.swing, meter: this.meter };
+    const blocker = getChannelFreezeBlocker(channel, source);
+    if (blocker) throw new Error(blocker);
+    if (!this.ctx) this.init();
+
+    const { freeze: _existingFreeze, ...unfrozen } = channel;
+    // Routed to a private neutral insert so nothing of the project mixer is baked.
+    const renderChannel: Channel = { ...(unfrozen as Channel), mute: false, solo: false, mixerTrackId: 1 };
+    const neutralTrack = (id: number): MixerTrack => ({
+      id, name: id === 0 ? 'Master' : 'Freeze', color: '#ffffff', volume: 1, pan: 0, mute: false, solo: false,
+      fxSlots: [], peakL: 0, peakR: 0,
+    });
+    const renderClips = collectChannelFreezeRenderClips(channel, clips, patterns);
+    const contentEndBars = resolveChannelFreezeContentEndBars(channel, source);
+    const safeBpm = Math.max(20, Math.min(300, Number(bpm) || 120));
+    const contentSeconds = contentEndBars * beatsPerBar(this.meter) * beatsToSeconds(1, safeBpm);
+    const sampleRate = this.liveCtx?.sampleRate ?? this.ctx?.sampleRate ?? 44100;
+    const renderSeconds = contentSeconds + CHANNEL_FREEZE_TAIL_SECONDS;
+    const formatLength = (seconds: number) => `${Math.floor(seconds / 60)}:${String(Math.floor(seconds % 60)).padStart(2, '0')}`;
+    // A freeze is one in-memory render. Bound it explicitly instead of letting
+    // a very long timeline exhaust memory half-way through.
+    const maxSeconds = channel.instrumentType === 'vst3'
+      // The native in-memory render holds two PCM copies per channel inside a 128 MiB bound.
+      ? Math.min(CHANNEL_FREEZE_MAX_SECONDS, Math.floor((128 * 1024 * 1024) / (16 * sampleRate)) - 1)
+      : CHANNEL_FREEZE_MAX_SECONDS;
+    if (renderSeconds > maxSeconds) {
+      throw new Error(`This channel's Song timeline is ${formatLength(renderSeconds)} long including its ${CHANNEL_FREEZE_TAIL_SECONDS} s tail; ${
+        channel.instrumentType === 'vst3' ? 'a VST3 channel' : 'a channel'} can be frozen up to ${formatLength(maxSeconds)} at ${sampleRate} Hz. The channel was left unchanged.`);
+    }
+
+    // The freeze is rendered behind the same lead-in a mastered export uses, so
+    // its notes fall on the same render-quantum phase as that export's and the
+    // frozen audio is sample-identical to the instrument there (see
+    // `isChannelFreezeSampleExact`). The lead-in is trimmed from the result.
+    this.pendingOfflineLeadInSeconds = OFFLINE_MASTERING_PREROLL_SECONDS;
+    let rendered: AudioBuffer;
+    try {
+      rendered = await this.renderTimelineOffline(
+        [renderChannel], renderClips, [neutralTrack(0), neutralTrack(1)], safeBpm, Math.max(1, Math.ceil(contentEndBars)),
+        sampleRate, false, 'song', onProgress, undefined, playlistTracks,
+        contentSeconds + CHANNEL_FREEZE_TAIL_SECONDS, patterns, 'pre-master',
+      );
+    } finally {
+      this.pendingOfflineLeadInSeconds = 0;
+    }
+
+    const channelData = Array.from({ length: rendered.numberOfChannels }, (_, index) => rendered.getChannelData(index));
+    const analysis = analyzeChannelFreezeRender(channelData, rendered.sampleRate);
+    if (!(analysis.peak > 0)) {
+      throw new Error('The freeze render is silent, so there is nothing to freeze. The channel was left unchanged.');
+    }
+    const context = this.liveCtx ?? this.ctx;
+    if (!context) throw new Error('Audio engine is not initialised.');
+    const buffer = context.createBuffer(rendered.numberOfChannels, analysis.trimmedFrameCount, rendered.sampleRate);
+    for (let index = 0; index < rendered.numberOfChannels; index += 1) {
+      buffer.getChannelData(index).set(channelData[index].subarray(0, analysis.trimmedFrameCount));
+    }
+    return {
+      buffer,
+      freeze: {
+        version: CHANNEL_FREEZE_VERSION,
+        sourceFingerprint: computeChannelFreezeFingerprint(channel, source),
+        frozenAt: Date.now(),
+        sampleRate: buffer.sampleRate,
+        frameCount: buffer.length,
+        leadInFrames: Math.ceil(rendered.sampleRate * OFFLINE_MASTERING_PREROLL_SECONDS),
+        contentSeconds,
+        tailSeconds: Math.max(0, rendered.length / rendered.sampleRate - contentSeconds),
+        tailDecayed: analysis.tailDecayed,
+      },
+      peak: analysis.peak,
+    };
+  }
+
   public stopChannelVoices(channelId: string): void {
     if (this.shouldBlockLiveMutation()) return;
     if (!this.isOfflineRendering) {
@@ -5120,6 +5474,8 @@ class AudioEngine {
     outputStage: 'master' | 'pre-master' = 'master',
     nativeEffectPass?: NativeVst3OfflineEffectPass,
   ): Promise<AudioBuffer> {
+    const requestedLeadInSeconds = this.pendingOfflineLeadInSeconds;
+    this.pendingOfflineLeadInSeconds = 0;
     const nativeFxSlots = includeMixerFx ? mixerTracks.flatMap(track => track.fxSlots
       .filter(slot => slot.type === 'vst3' && slot.enabled)
       .map(slot => ({ trackId: track.id, slot }))) : [];
@@ -5189,6 +5545,7 @@ class AudioEngine {
         liveCtx: this.liveCtx,
         transport: this.transport,
         transportWasPlaying: this.transport?.getState().playing ?? false,
+        activeChannelFreezes: this.activeChannelFreezes,
         masterGain: this.masterGain,
         masteringProcessor: this.masteringProcessor,
         masterAnalyser: this.masterAnalyser,
@@ -5241,6 +5598,12 @@ class AudioEngine {
         transportToResume = previous.transport;
         previous.transport.stop(false);
       }
+      // Phase 10H: a live frozen-audio source is one long buffer; left running
+      // it would keep playing while the transport is parked for this render.
+      // It is restarted from the right position when the take resumes.
+      this.stopAllFreezeSources();
+      this.freezeSources = new Map();
+      this.activeChannelFreezes = new Map();
       const safeBpm = Math.max(20, Math.min(300, Number(bpm) || 120));
       const secondsPerStep = beatsToSeconds(stepsToBeats(1), safeBpm);
       const requestedMinimumDuration = Number.isFinite(minimumDurationSeconds) && minimumDurationSeconds >= 0
@@ -5266,7 +5629,7 @@ class AudioEngine {
         'createChannelSplitter', 'createChannelMerger', 'createDynamicsCompressor', 'createWaveShaper',
       ].every(method => typeof offlineContextPrototype?.[method] === 'function');
       const offlineMasteringStageActive = outputStage === 'master' && this.masteringState.enabled && offlineSupportsMasteringDsp;
-      const masteringPrerollSeconds = offlineMasteringStageActive ? OFFLINE_MASTERING_PREROLL_SECONDS : 0;
+      const masteringPrerollSeconds = offlineMasteringStageActive ? OFFLINE_MASTERING_PREROLL_SECONDS : requestedLeadInSeconds;
       const prerollFrameCount = Math.ceil(renderSampleRate * masteringPrerollSeconds);
       // Phase 9B: the lookahead limiter delays the master by its lookahead, so
       // the render reserves that many frames past the song window (flushing the
@@ -5434,6 +5797,16 @@ class AudioEngine {
         // the live `play()` boundary does. Without this, the offline renderer
         // would still call `playAudioClipWithFades` on muted-lane audio clips.
         this.playlistLaneMutes = offlineLaneMutes;
+        // Phase 10H: a Song render selects frozen audio by exactly the rule
+        // live playback uses, from the data this render was handed, and only
+        // where the frozen audio is sample-identical to the instrument: at the
+        // freeze's sample rate and render-quantum phase. Every other render
+        // (another export rate, mastering switched off, a pre-master bounce, a
+        // subset of the channel's clips) plays the original instrument, so
+        // freezing a channel never changes a rendered file.
+        this.refreshChannelFreezes(playlistTracks, freeze => isChannelFreezeSampleExact(
+          freeze, { sampleRate: renderSampleRate, leadInFrames: prerollFrameCount }));
+        this.lastOfflineFrozenChannelIds = [...this.activeChannelFreezes.keys()];
         this.withOfflineRenderOperation(() => {
           if (includeMixerFx) {
             // Phase 10A: a seeded impulse is required so offline exports are
@@ -5634,6 +6007,8 @@ class AudioEngine {
         this.activePatternId = previous.activePatternId;
         this.activePatternLengthSteps = previous.activePatternLengthSteps;
         this.activePatterns = previous.activePatterns;
+        this.freezeSources = new Map();
+        this.activeChannelFreezes = previous.activeChannelFreezes;
         this.currentStep = previous.currentStep;
         this.currentBar = previous.currentBar;
         this.bpm = previous.bpm;
@@ -6499,6 +6874,8 @@ class AudioEngine {
     if (this.transport) {
       this.transport.setBpm(this.bpm);
     }
+    // Phase 10H: a frozen render is tied to the tempo it was rendered at.
+    if (previousBpm !== this.bpm) this.refreshChannelFreezesIfPlaying();
     if (this.isPlaying && !this.isOfflineRendering && previousBpm !== this.bpm) {
       this.midiOutputScheduler.handleTempoChange(previousBpm, this.bpm);
     }
@@ -6539,6 +6916,8 @@ class AudioEngine {
     // length after a meter change, so the count-in restarts under the new
     // bar grid from the change point (its waiting promise survives).
     this.countInScheduler?.restart(this.getMetronomePulseLayout());
+    // Phase 10H: a frozen render is tied to the bar grid it was rendered on.
+    this.refreshChannelFreezesIfPlaying();
   }
 
   /** The meter the runtime currently plays with (always a resolved value). */
@@ -6564,7 +6943,9 @@ class AudioEngine {
    */
   public setSwing(swing: number) {
     if (this.shouldBlockLiveMutation()) return;
+    const previousSwing = this.swing;
     this.swing = clampProjectSwing(swing);
+    if (previousSwing !== this.swing) this.refreshChannelFreezesIfPlaying();
   }
 
   public setMetronome(enabled: boolean) {
@@ -7559,6 +7940,12 @@ class AudioEngine {
         }
       }
     }
+
+    // Phase 10H: any of these can change what a frozen channel's source is
+    // (stale / valid again), whether it is audible, or where it is routed.
+    if (this.isPlaying && (update.channels || update.clips || update.patterns || update.playlistTracks)) {
+      this.refreshChannelFreezes();
+    }
   }
 
   /** True only while the live transport owns an active playback take. */
@@ -7572,7 +7959,14 @@ class AudioEngine {
   ): void | Promise<void> {
     if (this.shouldBlockLiveMutation()) return;
     const hasSolo = channels.some(channel => channel.solo);
-    const nativeChannels = channels.filter(channel => channel.instrumentType === 'vst3' && !shouldSuppressInternalChannelAudio(channel) && !channel.mute && (!hasSolo || channel.solo));
+    // Phase 10H: a channel that will play its frozen render in this Song take
+    // needs no native instrument instance, so none is opened for it.
+    const frozenChannels = mode === 'song'
+      ? resolveActiveChannelFreezes(channels, {
+          clips, patterns, playlistTracks, bpm: this.bpm, swing: this.swing, meter: this.meter,
+        }, id => this.sampleBuffers.has(id))
+      : new Map<string, ChannelFreeze>();
+    const nativeChannels = channels.filter(channel => channel.instrumentType === 'vst3' && !shouldSuppressInternalChannelAudio(channel) && !channel.mute && (!hasSolo || channel.solo) && !frozenChannels.has(channel.id));
     const nativeEffectTracks = (mixerTracks ?? []).filter(track => track.fxSlots.some(slot => slot.type === 'vst3' && slot.enabled));
     if (nativeChannels.length === 0 && nativeEffectTracks.length === 0) {
       return this.startPlayback(channels, clips, mode, patternId, mixerTracks, patternLengthSteps, playlistTracks, patterns);
@@ -7666,6 +8060,7 @@ class AudioEngine {
     this.activePatternId = patternId;
     this.activePatternLengthSteps = patternLengthSteps;
     this.activePatterns = structuredClone(patterns ?? []);
+    this.refreshChannelFreezes();
 
     // Apply the current project mixer graph at transport start. Subsequent
     // mixer edits use synchronizePlaybackState and update only the changed
@@ -7879,6 +8274,7 @@ class AudioEngine {
     this.activeClipSourceLanes.clear();
     this.activeClipSourceChannels?.clear();
     this.activeClipChannelVolumes?.clear();
+    this.stopAllFreezeSources();
 
     const now = this.ctx?.currentTime;
     for (const [voiceId, voice] of this.activeVoices.entries()) {
@@ -8123,6 +8519,7 @@ class AudioEngine {
       });
     }
 
+    this.sequencerDispatchDepth += 1;
     try {
       // Phase 1J: the click grid comes from the resolved project meter and the
       // authoritative transport step — quarter pulses in 4/4 and 3/4, eighth
@@ -8184,6 +8581,10 @@ class AudioEngine {
         const barIdx = this.currentBar - 1;
         const stepsBar = this.currentStepsPerBar;
         const currentGlobalStep = (barIdx * stepsBar) + this.currentStep;
+
+        // Phase 10H: frozen channels play their render from this timeline
+        // position; the pattern-clip loop below skips their voices.
+        this.startDueFreezeSources(now, currentGlobalStep, secondsPerStep);
 
         // 1. Evaluate automation clips at current bar & step
         this.activeClips.forEach(clip => {
@@ -8258,6 +8659,7 @@ class AudioEngine {
         });
       }
     } finally {
+      this.sequencerDispatchDepth -= 1;
       if (useLiveMidiStepFrame) {
         this.midiOutputScheduler.endTransportStep();
       }

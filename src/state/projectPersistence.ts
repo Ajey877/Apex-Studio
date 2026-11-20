@@ -4,6 +4,7 @@ import { normalizeProjectState } from './projectState';
 import { reapplyMacroRackOnHydration } from './macroMappings';
 import { getRecordingAudioBufferId } from '../audio/recordingPipeline';
 import { isSampleAudioUnavailable } from './audioAssetAvailability';
+import { markChannelFreezeAvailability } from './trackFreeze';
 import { sessionBlobUrlRegistry } from './sessionBlobUrlRegistry';
 
 export interface PreparedAudioFile {
@@ -177,6 +178,8 @@ export const getAudioIdsForProject = (state: ProjectState): string[] => {
     channel.drumPads?.forEach(pad => {
       if (pad.sampleId) ids.add(pad.sampleId);
     });
+    // Phase 10H: a frozen channel's render is project audio like any other.
+    if (channel.freeze?.audioBufferId) ids.add(channel.freeze.audioBufferId);
   });
 
   return [...ids];
@@ -284,13 +287,15 @@ export const hydrateProjectAudio = async (
     return { ...sample, audioUnavailable };
   });
 
-  const channels: Channel[] = state.channels.map(channel => {
+  // Phase 10H: a freeze whose render did not come back is flagged, never
+  // dropped — the channel plays its instrument and the UI says why.
+  const channels: Channel[] = markChannelFreezeAvailability(state.channels.map(channel => {
     const sample = channel.customSample;
     if (!sample?.id) return channel;
     const audioUnavailable = missingIds.has(sample.id);
     if (isSampleAudioUnavailable(sample) === audioUnavailable) return channel;
     return { ...channel, customSample: { ...sample, audioUnavailable } };
-  });
+  }), missingIds);
 
   return {
     state: {

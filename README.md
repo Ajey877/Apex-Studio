@@ -417,6 +417,31 @@ Boundaries worth knowing:
 The representation, the crossfade law, the validation table and the measured evidence are in
 [`docs/TAKE-COMPING.md`](docs/TAKE-COMPING.md).
 
+### Track Freeze scope
+
+**Freeze** (the `FRZ` button on a Channel Rack row) renders that channel's part of the Song
+timeline to audio and plays the audio instead of the instrument; **Unfreeze** (`UNF`) goes back
+to the instrument. The channel's notes, clips, instrument settings and VST3 state are never
+changed, the frozen audio is a separately stored asset, and both actions are single undo steps
+that survive save, reload, backup and the Portable ZIP.
+
+- Baked: the instrument, its settings and VST3 state, channel volume/pan/pitch, the channel's own
+  automation, tempo, swing and meter, plus an 8-second tail.
+- Live: channel mute/solo and mixer routing, and the whole mixer — inserts, faders, sends, buses,
+  sidechain, mixer automation, master and mastering.
+- Editing anything that is baked makes the freeze **Stale**: the instrument plays again until you
+  freeze again, so you always hear the current project.
+- Pattern mode always plays the instrument. A frozen VST3 channel holds no plug-in instance during
+  Song playback.
+- An export uses the frozen audio only where it is sample-identical to the instrument (the
+  mastered export at the device sample rate) and renders the instrument everywhere else, so
+  freezing does not change an exported file.
+- Limits: 10 minutes per freeze (about 3 minutes for a VST3 channel), one freeze at a time, no
+  freeze state shown in the Mixer or Playlist. Bounce-In-Place is a separate feature and is unchanged.
+
+The design decision, the rejected alternatives and the measurements are in
+[`docs/TRACK-FREEZE.md`](docs/TRACK-FREEZE.md).
+
 ### Patterns scope
 
 Every pattern owns its own content: each channel's step-sequencer cells and Piano Roll notes

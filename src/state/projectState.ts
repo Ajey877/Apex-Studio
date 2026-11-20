@@ -6,6 +6,7 @@ import { isImplicitDefaultSingleZone } from '../audio/sampleZones';
 import { markAudioClipsMissingBufferId } from './playlistClipIntegrity';
 import { normalizeTakeCompRegionsInClips } from '../audio/takeCompRegions';
 import { normalizePatternContentModel, removeChannelFromPatternContent } from './patternContent';
+import { normalizeChannelFreeze } from './trackFreeze';
 import { normalizeWavetableParameters } from '../audio/wavetableTables';
 import { normalizeSidechainSettings } from '../audio/sidechainCompression';
 import { normalizeChannelMidiOutputRouting } from '../audio/midiOutputScheduler';
@@ -560,6 +561,8 @@ export const normalizeProjectState = (input: unknown): ProjectState => {
       .map(stripObsoleteChannelFields)
       .map(normalizeChannelWavetable)
       .map(normalizeChannelMidiOutput)
+      // Phase 10H: a malformed freeze record is dropped; the source it sat on is untouched.
+      .map(channel => normalizeChannelFreeze(channel))
       .map(channel => {
         if (channel.customSample?.id && channel.sampleZones?.length === 1) {
           const singleZone = channel.sampleZones[0];
