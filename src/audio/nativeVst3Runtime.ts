@@ -5,6 +5,7 @@ import type { Channel, PlaylistClip } from '../types/daw';
 import type { InstrumentVoiceContext, InstrumentVoiceHandle } from './instrumentRegistry';
 import { resolveGateSeconds } from './noteGate';
 import { assertVst3Instrument, getVst3Bridge, type Vst3Bridge, type Vst3Event } from './nativeVst3Types';
+import { StreamedPcmSources, type StreamedPcmSourceCounts } from './streamedOfflineExport';
 
 export interface Vst3Diagnostic { channelId: string; message: string; inputLatencyMs?: number }
 let diagnostics: readonly Vst3Diagnostic[] = [];
@@ -326,8 +327,10 @@ const offlineEventOrder = (a: OfflineNativeEvent, b: OfflineNativeEvent) =>
 export interface NativeVst3StreamedRetention {
   /** MIDI events scheduled by the timeline and not yet sent to a plug-in. */
   retainedEvents: number;
-  /** PCM block sources that are scheduled and have not finished playing. */
+  /** PCM block sources that are scheduled and have not been released (see `StreamedPcmSources`). */
   liveSources: number;
+  /** PCM block sources started and released since the render began. */
+  sourceCounts: StreamedPcmSourceCounts;
   /** Frames a plug-in produced before its channel existed in the render (see `produceUntil`). */
   leadInDiscardedFrames: number;
 }
@@ -355,13 +358,14 @@ export class NativeVst3OfflineRender {
   private streams: Map<OfflineNativeEntry, OfflineNativeStream> | null = null;
   /** Streamed only: the voice bookkeeping to release when a note's release has been sent. */
   private noteEnded = new Map<OfflineNativeEvent, () => void>();
-  private liveSources = 0;
+  /** Streamed only: the PCM block sources that have been started and not yet released. */
+  private readonly sources = new StreamedPcmSources();
   private leadInDiscardedFrames = 0;
   get channelCount() { return this.channels.size; }
   get retention(): NativeVst3StreamedRetention {
     let retainedEvents = 0;
     for (const entry of this.channels.values()) retainedEvents += entry.events.length;
-    return { retainedEvents, liveSources: this.liveSources, leadInDiscardedFrames: this.leadInDiscardedFrames };
+    return { retainedEvents, liveSources: this.sources.liveCount, sourceCounts: this.sources.counts, leadInDiscardedFrames: this.leadInDiscardedFrames };
   }
   render(context: InstrumentVoiceContext): InstrumentVoiceHandle {
     assertVst3Instrument(context.channel.vst3);
@@ -491,24 +495,32 @@ export class NativeVst3OfflineRender {
           }
           continue;
         }
+        const buffer = pcmBuffer(this.context, samples, frames);
+        // `closeStreamed` may have run while the plug-in was processing; a
+        // source started now would never be released.
+        if (this.streams !== streams) throw new Error('VST3 streamed export sessions were closed during the render.');
         const source = this.context.createBufferSource();
-        source.buffer = pcmBuffer(this.context, samples, frames);
-        source.connect(entry.gain);
-        this.liveSources += 1;
-        source.addEventListener('ended', () => { this.liveSources -= 1; }, { once: true });
-        if (cursor < position) source.start(position / rate, (position - cursor) / rate);
-        else source.start(cursor / rate);
+        source.buffer = buffer;
+        // Released (disconnected, buffer dropped) when the block has played.
+        if (cursor < position) this.sources.play(source, entry.gain, position / rate, (position - cursor) / rate);
+        else this.sources.play(source, entry.gain, cursor / rate);
       }
     }));
     const failed = results.find((result): result is PromiseRejectedResult => result.status === 'rejected');
     if (failed) throw failed.reason;
   }
+  /**
+   * Ends the streamed render: the caller has either rendered the whole context
+   * or stopped the export. Sources that have not reported `ended` yet are
+   * released here, so none outlives the pass.
+   */
   async closeStreamed(): Promise<void> {
     const streams = this.streams;
     this.streams = null;
     this.noteEnded.clear();
+    this.sources.releaseAll();
     if (!streams?.size || !this.bridge) return;
     await Promise.allSettled([...streams.values()].map(stream => this.bridge!.close(stream.id)));
   }
-  dispose() { for (const entry of this.channels.values()) entry.gain.disconnect(); this.channels.clear(); }
+  dispose() { this.sources.releaseAll(); for (const entry of this.channels.values()) entry.gain.disconnect(); this.channels.clear(); }
 }

@@ -196,6 +196,29 @@ type RunConfig = {
   swing?: number;
   /** Sample buffers to register before rendering: decaying noise of the given length, by buffer id. */
   samples?: Record<string, { seconds: number; decay: number }>;
+  /**
+   * Observes every AudioBufferSourceNode the streamed export creates on an offline context and
+   * reports, in `sources`, whether each was disconnected, whether its buffer was dropped, and
+   * when that happened relative to the end of its audio.
+   */
+  trackSources?: boolean;
+};
+/** What `trackSources` reports. Times are context seconds. */
+type SourceReport = {
+  created: number; played: number;
+  /** Played sources that were not disconnected or still hold their buffer. */
+  unreleased: number;
+  /** Sources that never played but are connected or hold a buffer. */
+  unplayedHeld: number;
+  disconnectedMoreThanOnce: number;
+  /** Released while the context was still rendering, i.e. by the `ended` event and not by the end-of-pass sweep. */
+  releasedWhileRendering: number;
+  /** Smallest (disconnect time − end of the source's audio); negative means released early. */
+  earliestRelease: number | null;
+  /** Largest (disconnect time − end of the source's audio) among sources released while rendering. */
+  latestRelease: number | null;
+  /** Played sources per offline context, in creation order (one context per pass). */
+  playedPerPass: number[];
 };
 /** Renders in the page with the production engine: optionally the in-memory reference, then the streamed export. */
 async function run(page: Page, config: RunConfig) {
@@ -237,6 +260,33 @@ async function run(page: Page, config: RunConfig) {
     if (cfg.streamed !== false) {
       const controller = new AbortController();
       let job: any;
+      type SourceRecord = { node: AudioBufferSourceNode; context: BaseAudioContext; connects: number; disconnects: number; played: boolean; end: number; releasedAt: number; contextEnd: number };
+      const records: SourceRecord[] = [];
+      const offlinePrototype = OfflineAudioContext.prototype as any;
+      if (cfg.trackSources) {
+        const create = BaseAudioContext.prototype.createBufferSource;
+        offlinePrototype.createBufferSource = function (this: OfflineAudioContext) {
+          const node = create.call(this);
+          const record: SourceRecord = { node, context: this, connects: 0, disconnects: 0, played: false, end: 0, releasedAt: -1, contextEnd: this.length / this.sampleRate };
+          records.push(record);
+          const connect = node.connect.bind(node) as (...args: any[]) => any;
+          const disconnect = node.disconnect.bind(node) as (...args: any[]) => any;
+          const start = node.start.bind(node) as (...args: any[]) => any;
+          (node as any).connect = (...args: any[]) => { record.connects += 1; return connect(...args); };
+          (node as any).disconnect = (...args: any[]) => {
+            if (record.disconnects === 0) record.releasedAt = this.currentTime;
+            record.disconnects += 1;
+            return disconnect(...args);
+          };
+          (node as any).start = (...args: any[]) => {
+            record.played = true;
+            // Where its audio stops: the end of its buffer, or the end of the render if that comes first.
+            record.end = Math.min(record.contextEnd, Math.max(0, Number(args[0] ?? 0)) + Math.max(0, (node.buffer?.duration ?? 0) - Number(args[1] ?? 0)));
+            return start(...args);
+          };
+          return node;
+        };
+      }
       try {
         job = await DesktopStreamedWavExport.begin(getDesktopExportStore(), { bitDepth: cfg.bitDepth ?? 32 });
         const progress: Array<[number, string]> = [];
@@ -254,6 +304,26 @@ async function run(page: Page, config: RunConfig) {
       } catch (error: any) {
         out.error = { message: String(error?.message ?? error), name: error?.name };
         if (job) await job.abort();
+      } finally {
+        delete offlinePrototype.createBufferSource;
+      }
+      if (cfg.trackSources) {
+        const played = records.filter(record => record.played);
+        const contexts = [...new Set(records.map(record => record.context))];
+        // The context's clock is read on the control thread and can be one render quantum behind.
+        const whileRendering = played.filter(record => record.disconnects > 0 && record.releasedAt < record.contextEnd - 256 / record.context.sampleRate);
+        const lead = played.filter(record => record.disconnects > 0).map(record => record.releasedAt - record.end);
+        out.sources = {
+          created: records.length,
+          played: played.length,
+          unreleased: played.filter(record => record.disconnects === 0 || record.node.buffer !== null).length,
+          unplayedHeld: records.filter(record => !record.played && ((record.connects > 0 && record.disconnects === 0) || record.node.buffer !== null)).length,
+          disconnectedMoreThanOnce: records.filter(record => record.disconnects > 1).length,
+          releasedWhileRendering: whileRendering.length,
+          earliestRelease: lead.length ? Math.min(...lead) : null,
+          latestRelease: whileRendering.length ? Math.max(...whileRendering.map(record => record.releasedAt - record.end)) : null,
+          playedPerPass: contexts.map(context => played.filter(record => record.context === context).length),
+        };
       }
       out.offlineRendering = engine.isOfflineRendering;
     }
@@ -485,7 +555,9 @@ test('what the streamed export has scheduled ahead does not grow with the length
     const project = schedulerProject(totalBars, pianoParameterId, bpm);
     const outcome = await run(page, { project, sampleRate, swing: 0.35, samples: schedulerSamples, bitDepth: 24, fileName: `bounded-${totalBars}.wav` });
     expect(outcome.error, `${totalBars} bars`).toBeUndefined();
-    const { scheduling, frames, windows } = outcome.streamed.result;
+    const { scheduling, frames, windows, pcmSources } = outcome.streamed.result;
+    expect(pcmSources.started, `${totalBars} bars`).toBeGreaterThan(0);
+    expect(pcmSources.released, `${totalBars} bars`).toBe(pcmSources.started);
     expect(scheduling.scheduledSteps, `${totalBars} bars`).toBe(totalBars * 16);
     expect(scheduling.peakPendingSteps, `${totalBars} bars`).toBeLessThanOrEqual(pendingStepBound(sampleRate, bpm));
     expect(scheduling.leadInDiscardedFrames, `${totalBars} bars`).toBe(0);
@@ -608,6 +680,56 @@ test('mastering enabled: streamed export equals the in-memory export in startup,
   console.log('STREAMED_EXPORT_MASTERING_PARITY', JSON.stringify(evidence.masteringEnabledParity));
 });
 
+test('PCM sources are disconnected and lose their buffer when they have played, never earlier, and the file is unchanged', async ({ page }) => {
+  test.setTimeout(240_000);
+  const sampleRate = 48000;
+  // Two VST3 instruments, one with a VST3 insert: the first pass feeds instrument blocks, the
+  // second feeds instrument blocks and the processed-effect windows. Long enough for five windows.
+  const project = {
+    bpm: 120, totalBars: 8,
+    channels: [nativeChannel('piano', 1, 'mda Piano', 60), nativeChannel('keys', 2, 'mda EPiano', 52), channel('synth', 3, { notes: line('synth', 48) })],
+    clips: [clip('c1', 'piano', 8), clip('c2', 'keys', 8, 1), clip('c3', 'synth', 8, 2)],
+    tracks: [track(0), track(1, { fxSlots: [nativeSlot('fx1', effects['mda Delay'])] }), track(2), track(3)],
+  };
+  const outcome = await run(page, { project, sampleRate, reference: true, trackSources: true, fileName: 'sources.wav' });
+  expect(outcome.error).toBeUndefined();
+  const result = outcome.streamed.result;
+  const sources: SourceReport = outcome.sources;
+  expect(result).toMatchObject({ passes: 2, nativeInstruments: 2, nativeEffects: 1 });
+
+  // The engine's own count and the independent observation agree: everything started was released.
+  expect(result.pcmSources.started).toBeGreaterThan(0);
+  expect(result.pcmSources.released).toBe(result.pcmSources.started);
+  expect(sources.played).toBe(result.pcmSources.started);
+  expect(sources.created).toBe(sources.played);
+  expect(sources.unreleased).toBe(0);
+  expect(sources.unplayedHeld).toBe(0);
+  expect(sources.disconnectedMoreThanOnce).toBe(0);
+  // Both kinds: the second pass plays the same instrument blocks plus one source per window for the effect.
+  expect(sources.playedPerPass).toHaveLength(2);
+  expect(sources.playedPerPass[1]!).toBeGreaterThan(sources.playedPerPass[0]!);
+  // Most are released by their `ended` event while the render is still running...
+  expect(sources.releasedWhileRendering).toBeGreaterThan(sources.played / 2);
+  // ...and none before its audio has been rendered. The `ended` event is sent while the render
+  // quantum that holds the source's last frame is being rendered, and the clock read here still
+  // shows the start of that quantum, so a release can read up to 128 frames early. A source
+  // cut short would show in the file comparison below.
+  expect(sources.earliestRelease!).toBeGreaterThanOrEqual(-2 * 128 / sampleRate);
+
+  // The same file as the in-memory export.
+  const saved = readSaved(outcome.streamed.saved.path);
+  const diff = compare(floatSamples(Buffer.from(outcome.reference.wav, 'base64')), floatSamples(saved.bytes));
+  expect(saved.header.frames).toBe(outcome.reference.frames);
+  expect(diff.framesB).toBe(diff.framesA);
+  expect(diff.rms).toBeGreaterThan(0.01);
+  expect(diff.maxDiff).toBeLessThanOrEqual(PARITY_MAX_DIFF);
+  expect(diff.rmsDiff).toBeLessThanOrEqual(PARITY_RMS_DIFF);
+  expect(service.sessionCount).toBe(0);
+
+  evidence.pcmSourceRelease = { sampleRate, frames: result.frames, windows: result.windows, pcmSources: result.pcmSources, observed: sources, parity: diff };
+  console.log('STREAMED_EXPORT_SOURCE_RELEASE', JSON.stringify(evidence.pcmSourceRelease));
+});
+
 test('8 VST3 instruments and 8 VST3 effects export at 16-bit, 24-bit and 32-bit float within the 16-session helper limit', async ({ page }) => {
   test.setTimeout(240_000);
   const project = eightPlusEight(2);
@@ -618,6 +740,8 @@ test('8 VST3 instruments and 8 VST3 effects export at 16-bit, 24-bit and 32-bit 
     const outcome = await run(page, { project, sampleRate: 48000, bitDepth, fileName: `eight-${bitDepth}.wav` });
     expect(outcome.error, `${bitDepth}-bit`).toBeUndefined();
     expect(outcome.streamed.result).toMatchObject({ passes: 2, nativeInstruments: 8, nativeEffects: 8 });
+    expect(outcome.streamed.result.pcmSources.started).toBeGreaterThan(0);
+    expect(outcome.streamed.result.pcmSources.released).toBe(outcome.streamed.result.pcmSources.started);
     // Pass 1 holds eight instrument and eight effect instances at once: exactly the helper's limit.
     expect(peakSessions).toBe(16);
     expect(service.sessionCount).toBe(0);
@@ -656,9 +780,14 @@ test('cancel and every failure stop the export with no output file, clean up, an
   const expectFailure = async (label: string, config: Partial<RunConfig>, message: RegExp, arm: () => void = () => {}) => {
     hooks = {};
     arm();
-    const outcome = await run(page, { project, sampleRate: 48000, fileName: `${label}.wav`, ...config });
+    const outcome = await run(page, { project, sampleRate: 48000, fileName: `${label}.wav`, trackSources: true, ...config });
     hooks = {};
     expect(outcome.streamed, `${label}: must not complete`).toBeUndefined();
+    // Every PCM source the stopped export had started is disconnected and has dropped its buffer.
+    const sources: SourceReport = outcome.sources;
+    expect(sources.unreleased, `${label}: PCM sources released`).toBe(0);
+    expect(sources.unplayedHeld, `${label}: no PCM source left connected`).toBe(0);
+    expect(sources.disconnectedMoreThanOnce, `${label}: PCM sources released once`).toBe(0);
     expect(outcome.error?.message ?? '', label).toMatch(message);
     expect(outcome.offlineRendering, `${label}: render lease released`).toBe(false);
     expect(service.sessionCount, `${label}: helper sessions closed`).toBe(0);
@@ -671,7 +800,7 @@ test('cancel and every failure stop the export with no output file, clean up, an
     const diff = compare(cleanSamples, floatSamples(readSaved(next.streamed.saved.path).bytes));
     expect(diff.framesB, `${label}: next export frames`).toBe(diff.framesA);
     expect(diff.maxDiff, `${label}: next export audio`).toBeLessThanOrEqual(PARITY_MAX_DIFF);
-    report[label] = { error: outcome.error, nextExportMaxDiff: diff.maxDiff };
+    report[label] = { error: outcome.error, nextExportMaxDiff: diff.maxDiff, pcmSourcesPlayed: sources.played, pcmSourcesUnreleased: sources.unreleased };
   };
 
   await expectFailure('cancel-first-pass', { abortAtProgress: 30 }, /^Export cancelled\.$/);

@@ -64,11 +64,13 @@ import {
   STREAM_TIMELINE_LOOKAHEAD_FRAMES,
   STREAM_WINDOW_FRAMES,
   StreamedContentWriter,
+  StreamedPcmSources,
   StreamedVst3EffectSession,
   throwIfStreamedExportCancelled,
   type StreamedExportResult,
   type StreamedExportScratch,
   type StreamedExportTarget,
+  type StreamedPcmSourceCounts,
   type StreamedSchedulingStats,
 } from './streamedOfflineExport';
 import { createInstrumentRegistry, InstrumentRegistry, InstrumentVoiceHandle } from './instrumentRegistry';
@@ -343,6 +345,8 @@ interface OfflineStreamPass {
   contentFrames?: number;
   nativeInstruments: number;
   scheduling?: StreamedSchedulingStats;
+  /** PCM sources this pass started and released (VST3 instrument blocks and processed-effect windows). */
+  pcmSources?: StreamedPcmSourceCounts;
 }
 
 /**
@@ -5744,14 +5748,16 @@ class AudioEngine {
       peakLiveAudioSources: 0, peakRetainedVst3Events: 0, leadInDiscardedFrames: 0,
     };
     stream.scheduling = scheduling;
-    let liveOverrideSources = 0;
+    // Processed-effect PCM read back from scratch, one source per window and
+    // effect. Each is released when it has played; see `StreamedPcmSources`.
+    const overrideSources = new StreamedPcmSources();
     // Taken after each feed, which is when the most is scheduled ahead.
     const sampleScheduling = () => {
       const retention = native.retention;
       scheduling.scheduledSteps = timeline.scheduledSteps();
       scheduling.peakPendingSteps = Math.max(scheduling.peakPendingSteps, timeline.pendingSteps(ctx.currentTime));
       scheduling.peakLiveAudioSources = Math.max(scheduling.peakLiveAudioSources,
-        this.activeVoices.size + this.activeClipSources.size + retention.liveSources + liveOverrideSources);
+        this.activeVoices.size + this.activeClipSources.size + retention.liveSources + overrideSources.liveCount);
       scheduling.peakRetainedVst3Events = Math.max(scheduling.peakRetainedVst3Events, retention.retainedEvents);
       scheduling.leadInDiscardedFrames = retention.leadInDiscardedFrames;
       stream.nativeInstruments = native.channelCount;
@@ -5774,10 +5780,7 @@ class AudioEngine {
           }
           const source = ctx.createBufferSource();
           source.buffer = interleavedToAudioBuffer(ctx, pcm);
-          source.connect(override.bus!);
-          liveOverrideSources += 1;
-          source.addEventListener('ended', () => { liveOverrideSources -= 1; }, { once: true });
-          source.start(overrideStartTime(from));
+          overrideSources.play(source, override.bus!, overrideStartTime(from));
         }));
       }
       overrideCursor = Math.max(overrideCursor, untilContent);
@@ -5866,7 +5869,14 @@ class AudioEngine {
       return rendered;
     } finally {
       await Promise.allSettled([...sessions.values()].map(session => session.close()));
+      // The pass is over: the context has rendered every frame, or the export
+      // has stopped. Sources whose `ended` event has not arrived are released
+      // now, so no PCM block stays connected or referenced after the pass.
       await native.closeStreamed().catch(() => {});
+      overrideSources.releaseAll();
+      const nativeSources = native.retention.sourceCounts;
+      const effectSources = overrideSources.counts;
+      stream.pcmSources = { started: nativeSources.started + effectSources.started, released: nativeSources.released + effectSources.released };
       if (!completed && rendering) this.abandonStreamedOfflineContext(ctx, stream);
     }
   }
@@ -6002,6 +6012,7 @@ class AudioEngine {
       timelineSteps: 0, scheduledSteps: 0, peakPendingSteps: 0,
       peakLiveAudioSources: 0, peakRetainedVst3Events: 0, leadInDiscardedFrames: 0,
     };
+    const pcmSources: StreamedPcmSourceCounts = { started: 0, released: 0 };
     this.nativeFxOfflineBatchHeld = true;
     if (transportWasPlaying) transport!.stop(false);
     try {
@@ -6037,6 +6048,10 @@ class AudioEngine {
           for (const key of Object.keys(scheduling) as Array<keyof StreamedSchedulingStats>) {
             scheduling[key] = Math.max(scheduling[key], stream.scheduling[key]);
           }
+        }
+        if (stream.pcmSources) {
+          pcmSources.started += stream.pcmSources.started;
+          pcmSources.released += stream.pcmSources.released;
         }
       };
       const overridesForPass = () => new Map<string, OfflineStreamOverride>(
@@ -6091,6 +6106,7 @@ class AudioEngine {
         nativeInstruments,
         nativeEffects: slotByKey.size,
         scheduling,
+        pcmSources,
       };
     } catch (error) {
       if (error instanceof Error && /VST3 session limit/i.test(error.message)) {

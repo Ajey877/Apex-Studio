@@ -113,6 +113,27 @@ Three consequences:
   uses the same built value, so both exports schedule the same ramps. Live
   playback and the in-memory export are unchanged.
 
+### PCM sources
+
+A streamed pass feeds native audio into the offline graph as buffer sources:
+one per block for each VST3 instrument (16,384 frames; shorter blocks for an
+instrument with parameter automation), and one per window for each track
+whose VST3 effects were processed in an earlier pass. When a source
+has played, its `ended` event disconnects it from the graph and sets its
+`buffer` to `null` (`StreamedPcmSources` in `streamedOfflineExport.ts`). The
+browser sends that event after the last frame of the buffer has been rendered,
+so a source is never disconnected while it still has audio to give. When a
+pass is over, whether it completed, was cancelled or failed, the sources that
+have not ended are stopped and released the same way. A source is released
+once; a second event or a second sweep finds nothing to do.
+
+The export result carries `pcmSources: { started, released }`, summed over all
+passes. The two are equal after every export. `peakLiveAudioSources` above
+counts a PCM source until it is released.
+
+Releasing the sources does not lower the measured memory peak (see Limits and
+the figures below).
+
 ## Limits
 
 | Limit | Value | Behaviour at the limit |
@@ -138,7 +159,10 @@ offline context keeps a mono render target for the whole song (about 11.5 MB
 per minute at 48 kHz, per pass). The rest is memory the browser manages. In a
 3-minute traced run the JavaScript old space stayed at 14 MB for the whole
 render, while the young generation grew from 8 to 64 MB and the Blink heap
-from 6 to 77 MB with 11 MB of live objects. There is no fixed duration limit;
+from 6 to 77 MB with 11 MB of live objects. Disconnecting finished PCM sources and dropping their buffers
+(see PCM sources) did not change this: the peaks measured before and after
+that change are within the run-to-run spread, and the growth with length is
+the same. There is no fixed duration limit;
 a render the machine cannot hold fails when the offline context is created or
 with an out-of-memory renderer, and the main process then removes the
 temporary files.
@@ -192,6 +216,37 @@ garbage collection; idle renderer 192–194 MB):
 The scheduling counters are the same at all three lengths. Renderer RSS is
 not: it rises through each render (10 minutes: 434 MB at 31 s, 778 MB at the
 end of the first pass, 1,252 MB peak in the second).
+
+The same workload after finished PCM sources are released (same machine, one
+day later; one run per length, plus the repeats listed below):
+
+| | 1 minute | 5 minutes | 10 minutes |
+| --- | --- | --- | --- |
+| Wall time | 92 s | 433 s | 852 s |
+| Renderer peak RSS | 749 MB | 969 MB | 1,234 MB |
+| Renderer + browser + 16 helpers + harness, peak | 1,332 MB | 1,586 MB | 1,864 MB |
+| `pcmSources` started = released | 3,136 | 14,856 | 29,504 |
+| `peakPendingSteps` / `peakLiveAudioSources` / `peakRetainedVst3Events` | 37 / 176 / 11 | 37 / 176 / 11 | 37 / 176 / 11 |
+| Temporary disk peak | 214 MB | 1,021 MB | 2,029 MB |
+| Helper sessions after / non-finite samples | 0 / 0 | 0 / 0 | 0 / 0 |
+
+Frames, passes, windows, steps and file sizes are the same as in the table
+above. Renderer memory still grows with the length of the song, by about
+54 MB per minute between 1 and 10 minutes (60 MB before). The difference
+between the two tables is not a measured improvement. Repeats of the 1-minute
+run on the second day gave a renderer peak of 692 and 722 MB without the
+change and 749, 708 and 686 MB with it, so one run can differ from the next
+by 60 MB. Wall time on the second day was 88 and 90 s without the change and
+92, 94 and 97 s with it; the machine was slower than on the first day (74 s),
+and five runs do not show whether the change itself costs a few seconds.
+
+The audio is unchanged. An 8-bar version of the project, mastering off,
+32-bit float, rendered before and after the change: 1,920,000 samples, largest
+difference 6.3e-6, RMS difference 1.7e-8, 46 samples above 5e-7 in three runs
+of 8 to 15 frames. Two renders without the change differ in the same way
+(1.7e-6, 20 samples), and so do two in-memory renders (5.5e-6, 26 samples) and
+two renders of the built-in synth alone (5.5e-6). None of these places is at
+a block or window boundary.
 
 The previous scheduler on the same 1-minute project: 108 s and a renderer
 peak of 714 MB. The audio is the same: streamed files of an 8-bar version,
@@ -261,4 +316,15 @@ the launching script (`APEX_SMOKE_EXPORT_DIR`, honoured only with
 `APEX_SMOKE_TEST=1`), compares the saved samples with the in-memory render,
 cancels a second export, and checks that no temporary data survives.
 It also requires every step to have been scheduled and no discarded lead-in,
-and records the scheduling counters in its report.
+and records the scheduling counters in its report. It requires
+`pcmSources.started` to be above zero and equal to `pcmSources.released`.
+
+PCM source release is covered in two places. `tests/streamedExport.test.mjs`
+drives `StreamedPcmSources` and the streamed VST3 instrument render with
+stand-in sources: release on `ended` and not before, buffer dropped, repeated
+events and sweeps, a source that cannot start, a helper failure and a
+cancelled render. `vst3StreamedExport.spec.ts` observes every buffer source of
+a real export in Chromium: each one is disconnected once, has no buffer
+afterwards and was not released before its audio ended, and the file still
+matches the in-memory export. The cancel and failure cases check the same for
+every stopped export.

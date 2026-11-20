@@ -12,8 +12,9 @@ import path from 'node:path';
 import {
   planNativeEffectLevels, StreamedContentWriter, sliceInterleavedWindow, concatFloat32,
   StreamedExportCancelledError, isStreamedExportCancelled, throwIfStreamedExportCancelled,
-  STREAM_CHUNK_FRAMES, STREAM_WINDOW_FRAMES,
+  STREAM_CHUNK_FRAMES, STREAM_WINDOW_FRAMES, StreamedPcmSources,
 } from '../src/audio/streamedOfflineExport.ts';
+import { NativeVst3OfflineRender } from '../src/audio/nativeVst3Runtime.ts';
 import {
   DesktopStreamedWavExport, STREAMED_EXPORT_MESSAGE_BYTES, estimateStreamedExportBytes, exportUsesNativeVst3, getDesktopExportStore,
 } from '../src/audio/streamedWavExport.ts';
@@ -283,3 +284,216 @@ test('export failures are reported without transport noise and always say nothin
   assert.equal(formatExportBytes(345.6 * 1024 * 1024), '346 MB');
   assert.equal(formatExportBytes(Number.NaN), '0 MB');
 });
+
+// ---- PCM source lifecycle ----------------------------------------------------
+
+/** An AudioBufferSourceNode stand-in that records what is done to it. */
+class FakeSource extends EventTarget {
+  buffer = { duration: 1 };
+  connections = [];
+  disconnects = 0;
+  starts = [];
+  stops = 0;
+  connect(destination) { this.connections.push(destination); }
+  disconnect() { this.disconnects += 1; this.connections.length = 0; }
+  start(...args) { this.starts.push(args); }
+  stop() { this.stops += 1; }
+  end() { this.dispatchEvent(new Event('ended')); }
+}
+
+test('a streamed PCM source is released when it has ended, and not before', () => {
+  const sources = new StreamedPcmSources();
+  const destination = {};
+  const source = new FakeSource();
+  const buffer = source.buffer;
+  sources.play(source, destination, 2.5);
+
+  assert.deepEqual(source.connections, [destination]);
+  assert.deepEqual(source.starts, [[2.5]]);
+  assert.equal(source.disconnects, 0, 'still connected while its audio is pending');
+  assert.equal(source.buffer, buffer, 'still holds its buffer while its audio is pending');
+  assert.equal(sources.liveCount, 1);
+  assert.deepEqual(sources.counts, { started: 1, released: 0 });
+
+  source.end();
+  assert.equal(source.disconnects, 1);
+  assert.deepEqual(source.connections, []);
+  assert.equal(source.buffer, null);
+  assert.equal(sources.liveCount, 0);
+  assert.deepEqual(sources.counts, { started: 1, released: 1 });
+
+  const offset = new FakeSource();
+  sources.play(offset, destination, 1, 0.25);
+  assert.deepEqual(offset.starts, [[1, 0.25]], 'a block that starts behind the render position keeps its offset');
+});
+
+test('releasing a streamed PCM source again changes nothing and no count goes below zero', () => {
+  const sources = new StreamedPcmSources();
+  const source = new FakeSource();
+  sources.play(source, {}, 0);
+  source.end();
+  // A second event, an explicit release and the end-of-pass sweep, in every order.
+  source.end();
+  assert.equal(sources.release(source), false);
+  assert.equal(sources.releaseAll(), 0);
+  source.end();
+  assert.equal(sources.release(source), false);
+  assert.equal(source.disconnects, 1, 'disconnected exactly once');
+  assert.equal(source.stops, 0, 'a finished source is not stopped');
+  assert.equal(sources.liveCount, 0);
+  assert.deepEqual(sources.counts, { started: 1, released: 1 });
+  // A source this set never played is ignored.
+  const foreign = new FakeSource();
+  assert.equal(sources.release(foreign), false);
+  assert.equal(foreign.disconnects, 0);
+  assert.equal(sources.liveCount, 0);
+});
+
+test('the end-of-pass sweep releases unfinished sources once; a late ended event is ignored', () => {
+  const sources = new StreamedPcmSources();
+  const played = [new FakeSource(), new FakeSource(), new FakeSource()];
+  for (const source of played) sources.play(source, {}, 0);
+  played[0].end();
+  assert.equal(sources.liveCount, 2);
+  assert.equal(sources.releaseAll(), 2);
+  assert.deepEqual(played.map(source => source.disconnects), [1, 1, 1]);
+  assert.deepEqual(played.map(source => source.buffer), [null, null, null]);
+  assert.deepEqual(played.map(source => source.stops), [0, 1, 1], 'only unfinished sources are stopped');
+  for (const source of played) source.end();
+  assert.equal(sources.releaseAll(), 0);
+  assert.deepEqual(played.map(source => source.disconnects), [1, 1, 1]);
+  assert.equal(sources.liveCount, 0);
+  assert.deepEqual(sources.counts, { started: 3, released: 3 });
+});
+
+test('a source that cannot start or cannot be torn down still leaves the counts balanced', () => {
+  const sources = new StreamedPcmSources();
+  const unstartable = new FakeSource();
+  unstartable.start = () => { throw new Error('cannot start'); };
+  assert.throws(() => sources.play(unstartable, {}, 0), /cannot start/);
+  assert.equal(unstartable.disconnects, 1);
+  assert.equal(unstartable.buffer, null);
+  assert.equal(sources.liveCount, 0);
+
+  const stubborn = new FakeSource();
+  stubborn.disconnect = () => { throw new Error('not connected'); };
+  stubborn.stop = () => { throw new Error('not started'); };
+  Object.defineProperty(stubborn, 'buffer', { get: () => 'kept', set: () => { throw new Error('read-only'); } });
+  sources.play(stubborn, {}, 0);
+  assert.equal(sources.releaseAll(), 1);
+  assert.equal(sources.liveCount, 0);
+  assert.deepEqual(sources.counts, { started: 2, released: 2 });
+});
+
+/** The parts of an OfflineAudioContext and of the helper bridge that the streamed VST3 instrument render uses. */
+function fakeNativeRender({ frames = 16384 * 4, failAtCall = 0 } = {}) {
+  const created = [];
+  const context = {
+    sampleRate: 48000,
+    currentTime: 0,
+    createGain: () => ({ gain: { value: 1, setValueAtTime() {} }, connect() {}, disconnect() {} }),
+    createBufferSource: () => { const source = new FakeSource(); source.buffer = null; created.push(source); return source; },
+    createBuffer: (channels, length, sampleRate) => {
+      const data = Array.from({ length: channels }, () => new Float32Array(length));
+      return { length, sampleRate, duration: length / sampleRate, numberOfChannels: channels, getChannelData: index => data[index] };
+    },
+  };
+  const bridge = {
+    opened: 0, closed: 0, calls: 0,
+    open: async () => { bridge.opened += 1; return { id: `session-${bridge.opened}`, latencySamples: 0, parameters: [] }; },
+    process: async (_id, count) => {
+      bridge.calls += 1;
+      if (bridge.calls === failAtCall) throw new Error('helper process failed');
+      return new Float32Array(count * 2).fill(0.25);
+    },
+    close: async () => { bridge.closed += 1; },
+  };
+  const classId = 'A'.repeat(32);
+  const channel = {
+    id: 'native-1', name: 'Native', color: '#fff', instrumentType: 'vst3', mixerTrackId: 1, volume: 0.8, pan: 0, pitch: 0,
+    mute: false, solo: false, steps: [], notes: [],
+    vst3: { path: '/plugins/test.vst3', classId, name: 'Test', vendor: 'Test', state: { schema: 1, classId } },
+  };
+  const render = new NativeVst3OfflineRender(context, frames, bridge, true);
+  render.timeline([], 2, 0);
+  render.render({
+    channel, note: { id: 'n', pitch: 60, start: 0, duration: 4, velocity: 0.8 }, time: 0,
+    destination: {}, audioContext: context, voiceId: 'voice', bpm: 120,
+  });
+  return { context, bridge, render, created };
+}
+
+test('streamed VST3 instrument blocks are disconnected and lose their buffer once they have played', async () => {
+  const { render, created, bridge } = fakeNativeRender();
+  await render.openStreamed();
+  await render.produceUntil(40000, 120);
+  assert.equal(created.length, 3, 'blocks at 0, 16384 and 32768');
+  assert.deepEqual(created.map(source => source.starts[0][0]), [0, 16384 / 48000, 32768 / 48000]);
+  assert.ok(created.every(source => source.buffer && source.connections.length === 1 && source.disconnects === 0));
+  assert.equal(render.retention.liveSources, 3);
+
+  created[0].end();
+  assert.equal(created[0].disconnects, 1);
+  assert.equal(created[0].buffer, null);
+  assert.ok(created[1].buffer && created[1].disconnects === 0, 'a block that has not played is untouched');
+  assert.equal(render.retention.liveSources, 2);
+  created[0].end();
+  assert.equal(render.retention.liveSources, 2, 'a repeated ended event does not count twice');
+
+  await render.produceUntil(65536, 120);
+  assert.equal(created.length, 4);
+  assert.equal(render.retention.liveSources, 3);
+
+  await render.closeStreamed();
+  assert.ok(created.every(source => source.disconnects === 1 && source.buffer === null), 'the end of the pass releases the rest');
+  assert.equal(render.retention.liveSources, 0);
+  assert.deepEqual(render.retention.sourceCounts, { started: 4, released: 4 });
+  assert.equal(bridge.closed, 1);
+
+  // Late events, a second close and dispose find nothing left to release.
+  for (const source of created) source.end();
+  await render.closeStreamed();
+  render.dispose();
+  assert.ok(created.every(source => source.disconnects === 1));
+  assert.equal(render.retention.liveSources, 0);
+  assert.deepEqual(render.retention.sourceCounts, { started: 4, released: 4 });
+});
+
+test('a failed or cancelled streamed VST3 instrument render releases every block it started', async () => {
+  // The helper fails on the third block.
+  const failed = fakeNativeRender({ failAtCall: 3 });
+  await failed.render.openStreamed();
+  await assert.rejects(failed.render.produceUntil(65536, 120), /helper process failed/);
+  assert.equal(failed.created.length, 2);
+  assert.equal(failed.render.retention.liveSources, 2);
+  await failed.render.closeStreamed();
+  assert.ok(failed.created.every(source => source.disconnects === 1 && source.buffer === null && source.stops === 1));
+  assert.equal(failed.render.retention.liveSources, 0);
+  assert.deepEqual(failed.render.retention.sourceCounts, { started: 2, released: 2 });
+  assert.equal(failed.bridge.closed, 1, 'the helper session is closed');
+
+  // The export is cancelled between two windows; the engine closes the render without another call.
+  const cancelled = fakeNativeRender();
+  await cancelled.render.openStreamed();
+  await cancelled.render.produceUntil(20000, 120);
+  assert.equal(cancelled.render.retention.liveSources, 2);
+  await cancelled.render.closeStreamed();
+  cancelled.render.dispose();
+  assert.ok(cancelled.created.every(source => source.disconnects === 1 && source.buffer === null));
+  assert.equal(cancelled.render.retention.liveSources, 0);
+  await assert.rejects(cancelled.render.produceUntil(65536, 120), /not open/);
+  assert.equal(cancelled.created.length, 2, 'nothing is started after the render was closed');
+
+  // The render is closed while the helper is still processing a block: that block is not started.
+  const raced = fakeNativeRender();
+  await raced.render.openStreamed();
+  await raced.render.produceUntil(10000, 120);
+  const process = raced.bridge.process;
+  raced.bridge.process = async (...args) => { const samples = await process(...args); await raced.render.closeStreamed(); return samples; };
+  await assert.rejects(raced.render.produceUntil(65536, 120), /closed during the render/);
+  assert.equal(raced.created.length, 1);
+  assert.ok(raced.created.every(source => source.disconnects === 1 && source.buffer === null));
+  assert.equal(raced.render.retention.liveSources, 0);
+  assert.deepEqual(raced.render.retention.sourceCounts, { started: 1, released: 1 });
+});
+

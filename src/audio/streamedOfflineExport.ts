@@ -90,6 +90,16 @@ export interface StreamedExportResult {
   nativeEffects: number;
   /** The largest values any pass reached. */
   scheduling: StreamedSchedulingStats;
+  /** Totals over every pass; equal after a complete export. */
+  pcmSources: StreamedPcmSourceCounts;
+}
+
+/** PCM buffer sources of a streamed export: VST3 instrument blocks and processed-effect windows. */
+export interface StreamedPcmSourceCounts {
+  /** Sources that were connected and started. */
+  started: number;
+  /** Sources that were disconnected and had their buffer released. */
+  released: number;
 }
 
 /**
@@ -111,6 +121,70 @@ export interface StreamedSchedulingStats {
   peakRetainedVst3Events: number;
   /** Non-silent frames a VST3 instrument produced before its first note was scheduled; they are not in the file. */
   leadInDiscardedFrames: number;
+}
+
+/**
+ * The PCM buffer sources one streamed pass has started and not yet released.
+ *
+ * A streamed pass feeds native PCM into the offline graph as one
+ * `AudioBufferSourceNode` per block. A source that has finished playing is
+ * disconnected and its buffer reference is dropped here, so the block does not
+ * stay reachable through the graph for the rest of the pass. Release happens
+ * on the source's `ended` event, which the context fires after the last frame
+ * of the buffer has been rendered, or in `releaseAll` when the pass is over
+ * (complete, cancelled or failed). Both are safe to repeat: a source is
+ * released once, and `liveCount` is the size of a set, so it cannot go below
+ * zero.
+ */
+export class StreamedPcmSources {
+  private readonly live = new Map<AudioBufferSourceNode, () => void>();
+  private started = 0;
+  private released = 0;
+
+  /** Sources started and not yet released. */
+  get liveCount(): number { return this.live.size; }
+  get counts(): StreamedPcmSourceCounts { return { started: this.started, released: this.released }; }
+
+  /** Connects `source` to `destination`, starts it and releases it when it has finished. */
+  play(source: AudioBufferSourceNode, destination: AudioNode, when: number, offset = 0): void {
+    source.connect(destination);
+    const onEnded = () => { this.release(source); };
+    source.addEventListener('ended', onEnded, { once: true });
+    this.live.set(source, onEnded);
+    this.started += 1;
+    try {
+      if (offset > 0) source.start(when, offset);
+      else source.start(when);
+    } catch (error) {
+      this.release(source);
+      throw error;
+    }
+  }
+
+  /** Disconnects `source` and drops its buffer. Returns false when it was already released or never played here. */
+  release(source: AudioBufferSourceNode): boolean {
+    const onEnded = this.live.get(source);
+    if (!onEnded) return false;
+    this.live.delete(source);
+    this.released += 1;
+    try { source.removeEventListener('ended', onEnded); } catch (_) { /* already gone */ }
+    try { source.disconnect(); } catch (_) { /* not connected */ }
+    try { source.buffer = null; } catch (_) { /* the node keeps its buffer; it is unreachable once collected */ }
+    return true;
+  }
+
+  /**
+   * Releases every source that is still live. Only for a pass that is over: a
+   * source that has not finished is stopped first and loses its remaining audio.
+   */
+  releaseAll(): number {
+    let count = 0;
+    for (const source of [...this.live.keys()]) {
+      try { source.stop(); } catch (_) { /* never started */ }
+      if (this.release(source)) count += 1;
+    }
+    return count;
+  }
 }
 
 // The tap copies its input into fixed-size interleaved chunks and posts them.

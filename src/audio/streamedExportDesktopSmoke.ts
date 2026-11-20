@@ -90,6 +90,11 @@ export async function runStreamedExportDesktopSmoke(instance: Engine, instrument
   if (scheduling.timelineSteps <= 0 || scheduling.scheduledSteps !== scheduling.timelineSteps || scheduling.leadInDiscardedFrames !== 0) {
     fail(`unexpected timeline scheduling ${JSON.stringify(scheduling)}`);
   }
+  // Every PCM source the export started was released when the passes ended.
+  const { pcmSources } = result;
+  if (pcmSources.started <= 0 || pcmSources.released !== pcmSources.started) {
+    fail(`streamed PCM sources were not all released ${JSON.stringify(pcmSources)}`);
+  }
 
   // Sample comparison of the saved 24-bit file with the in-memory render.
   const data = saved.data ?? fail('the saved audio was not returned for comparison');
@@ -144,7 +149,7 @@ export async function runStreamedExportDesktopSmoke(instance: Engine, instrument
   return {
     status: 'passed' as const,
     project: { nativeInstruments: result.nativeInstruments, nativeEffects: result.nativeEffects, bars: BARS, bpm: BPM },
-    render: { frames: result.frames, sampleRate: result.sampleRate, passes: result.passes, windows: result.windows, scheduling },
+    render: { frames: result.frames, sampleRate: result.sampleRate, passes: result.passes, windows: result.windows, scheduling, pcmSources },
     savedFile: { name: saved.path.split(/[\\/]/).pop(), bytes: saved.bytes, sha256: saved.sha256, header: saved.header, directoryEntries: saved.directoryEntries },
     comparedWithInMemoryRender: { frames: reference.length, maxDifference, differenceRms, rms, peak },
     peakTemporaryDiskBytes: peakDiskBytes,
