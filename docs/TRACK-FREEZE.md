@@ -105,18 +105,18 @@ whole number of quanta later it is bit-identical. A mastered export starts the t
 does not.
 
 So the freeze is rendered behind the same lead-in as a mastered export (`leadInFrames`), and an
-offline render uses the frozen audio **only when it is sample-exact**: same sample rate and a
+offline render uses the frozen audio **only when it is aligned with that render**: same sample rate and a
 lead-in that differs by a whole number of quanta (`isChannelFreezeSampleExact`). Every other
 offline render — another export sample rate, mastering switched off, a pre-master render, a lane
-bounce — renders the instrument. The result: freezing a channel does not change an exported
-file, in any export mode.
+bounce — renders the instrument, so those files are unaffected by a freeze. Where the frozen
+audio is used, the measured difference from the instrument render is in §5.
 
 | Render | Frozen audio used? | Result vs. the unfrozen project |
 | --- | --- | --- |
 | Live Song playback | yes | same part; not comparable sample-for-sample (see limits) |
-| WAV export, mastering on, device sample rate | yes | null (measured, §5) |
-| Stem export, mastering on, device sample rate | yes | null (measured) |
-| Streamed production export (desktop), same conditions | yes | null (measured) |
+| WAV export, mastering on, device sample rate | yes | within 1e-4 peak for the built-in synth, bit-identical for the VST3 tested (§5) |
+| Stem export, mastering on, device sample rate | yes | same |
+| Streamed production export (desktop), same conditions | yes | same (built-in synth measured; VST3 not measured on this path) |
 | Any export at another sample rate, or with mastering off | no — instrument | identical by construction |
 | Bounce-In-Place (lane or channel) | no — instrument | unchanged feature |
 | Pattern-scope export | no — instrument | unchanged |
@@ -151,7 +151,7 @@ file, in any export mode.
 | Replace the channel's clips with an **audio clip** (reuse Bounce-In-Place) | Destructive to the arrangement and to undo history, cannot be reversed by removing one record, and would put the audio after the channel's position in the graph for automation targets. |
 | Inject the frozen audio **after the inserts** (post-FX freeze) | Sidechain, sends, routing and mixer automation would stop being live; a later mix change would silently not apply. |
 | Bake **channel mute / solo** | The user would have to unfreeze to mute a part. |
-| Always use the frozen audio in exports | Not sample-identical outside the freeze's render-quantum phase or sample rate; an export would differ from the unfrozen project by up to envelope-corner transients. |
+| Always use the frozen audio in exports | Not aligned outside the freeze's render-quantum phase or sample rate; an export would differ from the unfrozen project by up to envelope-corner transients. |
 | Never use the frozen audio in exports | Loses the main export benefit: the default mastered export of a frozen VST3 channel needs no plug-in instance. |
 
 ## 4. Persistence, undo, backup
@@ -176,16 +176,28 @@ Real Chromium, real Web Audio, production engine (`browser-tests/trackFreeze.spe
 fixture with an insert EQ, aux send to a delay return, bus routing, note-triggered sidechain,
 channel-volume automation and mixer-volume automation:
 
-| Measurement | Value |
+| Measurement (peak sample difference, full scale = 1) | Value |
 | --- | --- |
-| Mastered export, frozen vs. live (peak difference) | 5.8e-5 |
-| Same render of the unfrozen project twice (the engine's own repeatability) | same order (≈6e-5) |
+| Mastered render, frozen vs. live | 5.9e-5 |
+| WAV export / streamed production export, frozen vs. live | 2.6e-5 / 2.6e-5 |
+| Stems, frozen vs. live (lead / bass / return) | 5.9e-5 / 0 / 2.3e-5 |
+| Mixer edits after the freeze: fader+pan / insert / send / re-route / solo itself | 9.1e-5 / 5.4e-5 / 5.9e-5 / 5.9e-5 / 5.9e-5, status stays `frozen` |
+| Channel muted / another channel soloed (the lead plays in neither project) | 6.6e-7 / 5.2e-7 |
+| **Comparison:** two renders that both use the instrument (repeat, stale, missing audio, pre-master, other rate) | 6.8e-6 to 4.0e-5 |
 | Frozen asset replaced by silence (proves the frozen audio is what was rendered) | 0.50 |
 | Lead muted (proves the lead matters in the mix) | 0.62 |
-| WAV export / streamed export / stems, frozen vs. live | 2.5e-5 / 4.0e-5 / 2.6e-5 |
-| Mixer edits after the freeze (fader+pan, insert, send, re-route), frozen vs. live | ≤ 3.9e-5, status stays `frozen` |
-| Channel mute, solo of another channel, solo of itself, frozen vs. live | ≤ 2.6e-5 |
-| Lane bounce of a frozen project vs. unfrozen | 1.0e-6 (instrument rendered both times) |
+| Stale freeze: render vs. the old frozen audio (proves the instrument is used) | 0.79 |
+| Lane bounce of a frozen project vs. unfrozen (instrument rendered both times) | 1.0e-6 |
+
+Values are from one full run of the suite; they move by a few 1e-5 between runs. The tests
+assert `< 2e-4` (-74 dBFS).
+
+**Reading these numbers.** For the built-in synth the frozen and the live render are not
+bit-identical: the residue is 2.6e-5 to 9.1e-5 peak (about -92 to -81 dBFS). Two renders of the
+*unfrozen* project already differ by up to 4.0e-5, so most of the residue is the engine's own
+run-to-run variation, but the frozen figures are consistently the larger ones and the remaining
+difference was not isolated. Before the lead-in alignment described above the same comparison
+gave 0.36, so the alignment removes the audible error; what is left is below -80 dBFS.
 
 Real VST3 (mda JX10 in the production native helper, `native-browser-tests/vst3TrackFreeze.spec.ts`):
 mastered export frozen vs. plug-in: **0** (bit-identical); helper instances opened during the
@@ -215,7 +227,7 @@ frozen export: **0**; audio blocks sent to the plug-in: **0**; live frozen take:
 | File | Role |
 | --- | --- |
 | `src/types/daw.ts` | `ChannelFreeze`, `Channel.freeze` |
-| `src/state/trackFreeze.ts` | fingerprint, status, selection, sample-exact rule, record validation, tail analysis |
+| `src/state/trackFreeze.ts` | fingerprint, status, selection, alignment rule (`isChannelFreezeSampleExact`), record validation, tail analysis |
 | `src/audio/channelFreezeWorkflow.ts` | render → durable → one mutation; Unfreeze |
 | `src/audio/audioEngine.ts` | selection map, voice gate, frozen source, hand-over, `renderChannelFreeze`, offline rule |
 | `src/components/channelFreezeUi.ts`, `ChannelRack.tsx`, `src/App.tsx` | controls, state, messages |

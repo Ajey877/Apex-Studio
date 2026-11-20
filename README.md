@@ -433,9 +433,9 @@ that survive save, reload, backup and the Portable ZIP.
   freeze again, so you always hear the current project.
 - Pattern mode always plays the instrument. A frozen VST3 channel holds no plug-in instance during
   Song playback.
-- An export uses the frozen audio only where it is sample-identical to the instrument (the
-  mastered export at the device sample rate) and renders the instrument everywhere else, so
-  freezing does not change an exported file.
+- An export uses the frozen audio only where it lines up with the instrument render (the mastered
+  export at the device sample rate) and renders the instrument everywhere else. Measured there:
+  bit-identical for the VST3 instrument tested, below -80 dBFS difference for the built-in synth.
 - Limits: 10 minutes per freeze (about 3 minutes for a VST3 channel), one freeze at a time, no
   freeze state shown in the Mixer or Playlist. Bounce-In-Place is a separate feature and is unchanged.
 
