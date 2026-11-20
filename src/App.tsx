@@ -57,6 +57,8 @@ import { ProjectBundleCommitCancelledError } from './audio/audioPersistence';
 import type { BundleAudioImportPlan } from './components/projectBundleImport';
 import { runBundleImportCommit } from './components/projectBundleImport';
 import { getSampleBufferPersistenceController, waitForSampleBufferPersistence } from './audio/sampleBufferPersistence';
+import { freezeChannel, unfreezeChannel } from './audio/channelFreezeWorkflow';
+import { channelFreezeSourceFromProject, resolveChannelFreezeStatus, type ChannelFreezeStatus } from './state/trackFreeze';
 import { getProjectSessionBlobUrls, replaceProjectSessionBlobUrls, sessionBlobUrlRegistry } from './state/sessionBlobUrlRegistry';
 import { planProjectReplacement, runProjectReplacementAfterBackup, runProjectReplacementAfterBackupAndCommit, type ProjectReplacementCommitOutcome, type ProjectReplacementPlan, type ProjectReplacementSource } from './state/projectReplacement';
 import {
@@ -224,6 +226,11 @@ export function App() {
   const projectReplacementWorkRef = useRef<Promise<unknown> | null>(null);
   const [currentView, setCurrentView] = useState<ViewMode>('channel_rack');
   const [playMode, setPlayMode] = useState<PlayMode>('pat');
+  // Phase 10H: Track Freeze UI state. The freeze itself lives in the project
+  // document (`Channel.freeze`); these only describe an operation in flight.
+  const [freezeBusyChannelId, setFreezeBusyChannelId] = useState<string | null>(null);
+  const [freezeMessage, setFreezeMessage] = useState<{ tone: 'info' | 'error'; text: string } | null>(null);
+  const freezeBusyRef = useRef(false);
   const [isPlaying, setIsPlaying] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
   // MIDI performance recording (Piano Roll): the recorder instance is the
@@ -1825,6 +1832,56 @@ export function App() {
     setSelectedChannelId(channel.id);
   };
 
+  /**
+   * Phase 10H — Freeze a Channel Rack channel.
+   *
+   * Renders the channel from its untouched source, waits until the render is
+   * durable, and only then attaches the freeze record as one undoable edit. Any
+   * failure before that leaves the project exactly as it was.
+   */
+  const handleFreezeChannel = useCallback(async (channelId: string) => {
+    if (freezeBusyRef.current) return;
+    const name = projectStateRef.current.channels.find(channel => channel.id === channelId)?.name ?? 'Channel';
+    freezeBusyRef.current = true;
+    setFreezeBusyChannelId(channelId);
+    setFreezeMessage({ tone: 'info', text: `Freezing ${name}…` });
+    try {
+      const result = await freezeChannel({
+        engine: audioEngine,
+        getState: () => projectStateRef.current,
+        waitForPersistence: id => waitForSampleBufferPersistence(audioEngine, id, { allowAdditivePlaylistRevision: true }),
+        mutate: (updater, label) => { mutateProjectState(updater, label); },
+        onProgress: (progress, status) => setFreezeMessage({ tone: 'info', text: `Freezing ${name}: ${Math.round(progress)}% — ${status}` }),
+      }, channelId);
+      if (result.status === 'frozen') {
+        setFreezeMessage({
+          tone: 'info',
+          text: result.tailDecayed
+            ? `${name} is frozen. Song playback now uses the frozen audio and exports are unchanged; the instrument and notes are kept for Unfreeze.`
+            : `${name} is frozen, but it was still sounding ${Math.round(result.freeze.tailSeconds)} s after its last clip, so the frozen audio ends earlier than the live instrument would.`,
+        });
+      } else {
+        setFreezeMessage({ tone: 'error', text: `${name} was not frozen. ${result.reason}` });
+      }
+    } catch (error) {
+      setFreezeMessage({ tone: 'error', text: `${name} was not frozen. ${error instanceof Error ? error.message : String(error)}` });
+    } finally {
+      freezeBusyRef.current = false;
+      setFreezeBusyChannelId(null);
+    }
+  }, [mutateProjectState]);
+
+  /** Phase 10H — Unfreeze: removes the freeze record; the source was never altered. */
+  const handleUnfreezeChannel = useCallback((channelId: string) => {
+    if (freezeBusyRef.current) return;
+    const name = projectStateRef.current.channels.find(channel => channel.id === channelId)?.name ?? 'Channel';
+    const removed = unfreezeChannel({
+      getState: () => projectStateRef.current,
+      mutate: (updater, label) => { mutateProjectState(updater, label); },
+    }, channelId);
+    if (removed) setFreezeMessage({ tone: 'info', text: `${name} is unfrozen and plays its instrument again.` });
+  }, [mutateProjectState]);
+
   const handleDeleteChannel = (channelId: string) => {
     const currentState = projectStateRef.current;
     if (currentState.channels.length <= 1) return;
@@ -3405,6 +3462,21 @@ export function App() {
   // Phase 8C (P1-11): missing audio is derived from the project itself (hydration
   // flags clips/samples), so it stays accurate across save, reload and recovery
   // without a second source of truth.
+  // Phase 10H: one status per channel, from the same function the engine uses.
+  const channelFreezeStatuses = useMemo(() => {
+    const statuses: Record<string, ChannelFreezeStatus> = {};
+    if (!projectState.channels.some(channel => channel.freeze)) return statuses;
+    const source = channelFreezeSourceFromProject(projectState);
+    for (const channel of projectState.channels) {
+      if (channel.freeze) statuses[channel.id] = resolveChannelFreezeStatus(channel, source);
+    }
+    return statuses;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    projectState.channels, projectState.playlistClips, projectState.patterns, projectState.playlistTracks,
+    projectState.meta.bpm, projectState.meta.swing, projectState.meta.timeSignature,
+  ]);
+
   const missingAudioAssets = useMemo(
     () => collectMissingAudioAssets(projectState),
     [projectState]
@@ -3659,6 +3731,13 @@ export function App() {
               onUpdateSwing={(swing) => handleUpdateMeta({ swing })}
               onInteractionStart={handleContinuousInteractionStart}
               onInteractionEnd={handleContinuousInteractionEnd}
+              freezeStatuses={channelFreezeStatuses}
+              freezeBusyChannelId={freezeBusyChannelId}
+              freezeMessage={freezeMessage}
+              onDismissFreezeMessage={() => setFreezeMessage(null)}
+              onFreezeChannel={handleFreezeChannel}
+              onUnfreezeChannel={handleUnfreezeChannel}
+              playMode={playMode}
             />
           )}
 

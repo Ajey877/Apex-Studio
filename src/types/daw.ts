@@ -324,6 +324,62 @@ export interface DrumPad {
   chokeGroup?: number;
 }
 
+/**
+ * Phase 10H — Track Freeze record of one Channel Rack instrument channel.
+ *
+ * Freeze unit: the rack `Channel` (the instrument track). The record states
+ * "the audio asset `audioBufferId` is this channel's own contribution to the
+ * input of its mixer track — instrument, pitch, filter, arpeggiator, channel
+ * volume and channel pan, with the automation that targets the channel — for
+ * every pattern clip that plays the channel on the Song timeline, rendered
+ * while that source had the fingerprint `sourceFingerprint`".
+ *
+ * The record never replaces project data. Notes, patterns, clips, instrument
+ * settings and VST3 state stay exactly where they are; Unfreeze removes this
+ * record and nothing else. The PCM lives in the durable audio-asset store
+ * under `audioBufferId`, never in the project document.
+ *
+ * Whether the frozen audio is played is decided by `src/state/trackFreeze.ts`
+ * and applied by the engine: only in Song playback / Song renders, only while
+ * the current source fingerprint equals `sourceFingerprint`, and only while the
+ * asset is loaded. In every other case the channel plays its original
+ * instrument and the UI reports Stale or Missing audio.
+ */
+export interface ChannelFreeze {
+  version: 1;
+  /** Durable audio asset holding the rendered PCM (32-bit float WAV in storage). */
+  audioBufferId: string;
+  /** Fingerprint of everything baked into the render; see `computeChannelFreezeFingerprint`. */
+  sourceFingerprint: string;
+  /** Wall-clock time of the render, ms since epoch. Display only. */
+  frozenAt: number;
+  sampleRate: number;
+  frameCount: number;
+  /**
+   * Frames of silence the freeze render placed before timeline zero (already
+   * trimmed from the asset). Web Audio renders a voice slightly differently
+   * depending on where its start falls inside the 128-frame render quantum, so
+   * an offline render uses the frozen audio only when its own lead-in puts the
+   * timeline on the same quantum phase at the same sample rate; any other
+   * offline render plays the original instrument. See `isChannelFreezeSampleExact`.
+   */
+  leadInFrames: number;
+  /** End of the channel's last pattern clip on the timeline when it was frozen, in seconds. */
+  contentSeconds: number;
+  /** Seconds rendered past `contentSeconds` before trailing silence was trimmed. */
+  tailSeconds: number;
+  /**
+   * False when the instrument was still sounding at the end of the rendered
+   * tail, i.e. the frozen audio ends earlier than the live instrument would.
+   */
+  tailDecayed: boolean;
+  /**
+   * Set by project hydration when the persisted PCM could not be restored.
+   * Mirrors `PlaylistClip.audioUnavailable`; the channel then plays live.
+   */
+  audioUnavailable?: boolean;
+}
+
 export interface Channel {
   id: string;
   name: string;
@@ -363,6 +419,11 @@ export interface Channel {
    * disconnected; another port is never silently substituted.
    */
   midiOutput?: ChannelMidiOutputRouting;
+  /**
+   * Phase 10H: present while the channel carries a frozen render. Absent =
+   * never frozen / unfrozen. See `ChannelFreeze`.
+   */
+  freeze?: ChannelFreeze;
 }
 
 export type ChannelMidiOutputMode = 'off' | 'mirror' | 'external';

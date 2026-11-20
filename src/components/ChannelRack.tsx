@@ -16,6 +16,8 @@ import { Channel, Pattern, InstrumentType } from '../types/daw';
 import { audioEngine } from '../audio/audioEngine';
 import { describeMissingAudioSample, isChannelSampleAudioUnavailable } from '../state/audioAssetAvailability';
 import { PATTERN_LENGTH_CHOICES } from '../state/patternLength';
+import type { ChannelFreezeStatus } from '../state/trackFreeze';
+import { describeChannelFreeze } from './channelFreezeUi';
 import {
   clearChannelSteps,
   fillChannelSteps,
@@ -52,6 +54,15 @@ interface ChannelRackProps {
   onUpdateSwing: (swing: number) => void;
   onInteractionStart?: (label?: string) => void;
   onInteractionEnd?: (label?: string) => void;
+  /** Phase 10H: freeze status of every channel that carries a freeze record. */
+  freezeStatuses?: Record<string, ChannelFreezeStatus>;
+  /** Channel whose freeze render is running, if any. */
+  freezeBusyChannelId?: string | null;
+  freezeMessage?: { tone: 'info' | 'error'; text: string } | null;
+  onDismissFreezeMessage?: () => void;
+  onFreezeChannel?: (channelId: string) => void;
+  onUnfreezeChannel?: (channelId: string) => void;
+  playMode?: 'pat' | 'song';
 }
 
 export const ChannelRack: React.FC<ChannelRackProps> = ({
@@ -76,7 +87,14 @@ export const ChannelRack: React.FC<ChannelRackProps> = ({
   swing,
   onUpdateSwing,
   onInteractionStart,
-  onInteractionEnd
+  onInteractionEnd,
+  freezeStatuses,
+  freezeBusyChannelId,
+  freezeMessage,
+  onDismissFreezeMessage,
+  onFreezeChannel,
+  onUnfreezeChannel,
+  playMode
 }) => {
   const [showAddMenu, setShowAddMenu] = useState(false);
 
@@ -461,6 +479,32 @@ export const ChannelRack: React.FC<ChannelRackProps> = ({
         </div>
       </div>
 
+      {/* Phase 10H: Track Freeze progress / result */}
+      {freezeMessage && (
+        <div
+          data-testid="channel-freeze-message"
+          data-tone={freezeMessage.tone}
+          role={freezeMessage.tone === 'error' ? 'alert' : 'status'}
+          className={`mx-4 mt-2 px-3 py-1.5 rounded border text-[10px] flex items-start justify-between gap-3 ${
+            freezeMessage.tone === 'error'
+              ? 'border-[var(--apex-danger)] text-[var(--apex-danger)] bg-[var(--apex-panel)]'
+              : 'border-[var(--apex-border)] text-[var(--apex-text-2)] bg-[var(--apex-panel)]'
+          }`}
+        >
+          <span>{freezeMessage.text}</span>
+          {onDismissFreezeMessage && (
+            <button
+              type="button"
+              onClick={onDismissFreezeMessage}
+              aria-label="Dismiss freeze message"
+              className="shrink-0 font-mono text-[var(--apex-text-3)] hover:text-[var(--apex-text)]"
+            >
+              ×
+            </button>
+          )}
+        </div>
+      )}
+
       {/* Main Step Sequencer List */}
       <div className="flex-1 overflow-y-auto custom-scrollbar p-4 space-y-2">
         {channels.map((ch) => {
@@ -564,6 +608,62 @@ export const ChannelRack: React.FC<ChannelRackProps> = ({
                 </button>
 
                 <div className="flex items-center gap-1">
+                  {/* Phase 10H: Track Freeze */}
+                  {onFreezeChannel && onUnfreezeChannel && (() => {
+                    const view = describeChannelFreeze({
+                      status: freezeStatuses?.[ch.id] ?? (ch.freeze ? 'stale' : 'none'),
+                      busy: freezeBusyChannelId === ch.id,
+                      anotherBusy: Boolean(freezeBusyChannelId) && freezeBusyChannelId !== ch.id,
+                      playMode: playMode ?? 'pat',
+                      tailDecayed: ch.freeze?.tailDecayed !== false,
+                      channelName: ch.name,
+                    });
+                    return (
+                      <>
+                        <button
+                          type="button"
+                          data-testid={`channel-freeze-${ch.id}`}
+                          data-freeze-status={view.status}
+                          data-freeze-busy={view.busy ? 'true' : undefined}
+                          disabled={view.primaryDisabled}
+                          aria-label={view.primaryAriaLabel}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onFreezeChannel(ch.id);
+                          }}
+                          className={`px-1 py-0.5 rounded text-[8px] font-mono font-bold transition disabled:cursor-default ${
+                            view.tone === 'frozen'
+                              ? 'bg-[var(--apex-accent)] text-[var(--apex-state-playing-fg)]'
+                              : view.tone === 'warning'
+                                ? 'bg-[var(--apex-gold)] text-[var(--apex-state-playing-fg)]'
+                                : view.tone === 'danger'
+                                  ? 'bg-[var(--apex-danger)] text-[var(--apex-state-recording-fg)]'
+                                  : 'bg-[var(--apex-surface-2)] hover:bg-[var(--apex-state-hover)] text-[var(--apex-text-3)] hover:text-[var(--apex-text)]'
+                          }`}
+                          title={view.primaryTitle}
+                        >
+                          {view.primaryLabel}
+                        </button>
+                        {view.showUnfreeze && (
+                          <button
+                            type="button"
+                            data-testid={`channel-unfreeze-${ch.id}`}
+                            disabled={view.unfreezeDisabled}
+                            aria-label={`Unfreeze ${ch.name}`}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              onUnfreezeChannel(ch.id);
+                            }}
+                            className="px-1 py-0.5 rounded text-[8px] font-mono font-bold transition bg-[var(--apex-surface-2)] hover:bg-[var(--apex-state-hover)] text-[var(--apex-text-3)] hover:text-[var(--apex-text)] disabled:opacity-50"
+                            title="Unfreeze: remove the frozen audio from this channel. The instrument, notes and settings were kept and play again immediately."
+                          >
+                            UNF
+                          </button>
+                        )}
+                      </>
+                    );
+                  })()}
+
                   {/* Arp Button */}
                   {onOpenArp && (
                     <button
