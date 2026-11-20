@@ -1,0 +1,63 @@
+{
+  "status": "UNRESOLVED",
+  "latestNewBrowserSuite": {
+    "command": "npm run test:live-input-browser",
+    "passed": 2,
+    "failed": 1,
+    "failedTest": "AudioRecorderModal count-in and punch preserve active monitoring and share its native input",
+    "sampleRate": 48000,
+    "recorderError": "Audio capture lost 128 input frames; the take was discarded.",
+    "behavior": "Take rejected, not silently padded. Same count-in/punch scenario also passed earlier isolated runs."
+  },
+  "earlier44100": {
+    "observation": "Intermittent 128-256 missing-frame rejections; block diagnostics included repeated frame timestamps. A full PCM run also passed.",
+    "example": {
+      "start": 292480,
+      "pauses": [
+        {
+          "startFrame": 303488,
+          "endFrame": 308736
+        }
+      ],
+      "selectedBlockFrameStartAndCount": [
+        [
+          303872,
+          2048
+        ],
+        [
+          305920,
+          2048
+        ],
+        [
+          307968,
+          512
+        ],
+        [
+          308352,
+          128
+        ],
+        [
+          308352,
+          128
+        ],
+        [
+          308352,
+          128
+        ],
+        [
+          308864,
+          2048
+        ]
+      ]
+    }
+  },
+  "otherEarlierFailure": {
+    "observation": "An under-load 48000 Hz fader-amplitude comparison failed when compared with an earlier wall-clock input window. Diagnostic now also measures contemporaneous producer PCM and tests transfer gain with the same threshold; no production engine delay/timing change."
+  },
+  "windowsPackaged": {
+    "command": "npm run test:live-input-packaged",
+    "exitCode": 3,
+    "status": "NOT_VERIFIED",
+    "reason": "Linux host; Windows executable was not launched."
+  }
+}

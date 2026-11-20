@@ -75,6 +75,17 @@ jobs:
       - name: Run packaged Windows runtime smoke test
         run: npm run smoke:win
 
+      - name: Packaged Windows live input PCM and recording acceptance (fake microphone)
+        run: npm run test:live-input-packaged
+
+      - name: Upload live input acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: apex-packaged-live-input-evidence
+          path: build/live-input-evidence
+          if-no-files-found: warn
+
       # Packaged-application editor acceptance: Playwright drives the REAL packaged
       # exe (Mixer insert -> plug-in's own window), and native facts are read from
       # the OS process table. The display-scale row runs at real 125% and 150%;

@@ -760,7 +760,7 @@ export const AudioSettingsModal: React.FC<AudioSettingsModalProps> = ({
               </div>
 
               <p className="text-xs text-[var(--apex-text-2)]">
-                Selects the capture input used when recording audio takes in Audio Recorder. Live input monitoring through the Mixer is not enabled.
+                Selects the capture input for Audio Recorder and live Mixer input monitoring. In the Mixer, select an insert and explicitly enable monitoring. Use headphones; browser and device latency varies. Monitoring is OFF after reload.
               </p>
 
               {deviceSnapshot.inputNotice && (

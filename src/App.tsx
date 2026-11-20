@@ -653,6 +653,7 @@ export function App() {
       if (document.visibilityState === 'hidden') flushLifecycleSave();
     };
     const handleBeforeUnload = (e: BeforeUnloadEvent) => {
+      audioEngine.liveInputMonitor.stop('Application closing. Monitoring is OFF.');
       audioEngine.shutdownMidiOutputs();
       flushLifecycleSave();
       if (hasUnsavedChangesRef.current) {
@@ -2442,6 +2443,11 @@ export function App() {
     const slotIds = (trackId: number) => projectStateRef.current.mixerTracks
       .find(track => track.id === trackId)?.fxSlots.map(slot => slot.id) ?? [];
     const acceptance = {
+      runLiveInputAcceptance: async () => {
+        const { runLiveInputAcceptance } = await import('./audio/liveInputAcceptance');
+        return runLiveInputAcceptance(audioEngine);
+      },
+      liveInputState: () => audioEngine.liveInputMonitor.getSnapshot(),
       addVst3Insert: async (trackId: number, effect: import('./audio/nativeVst3Types').Vst3Effect) => {
         // Tracks already carry FX slots, so the new insert is appended, not first.
         // Report its real id and index instead of letting callers guess index 0.

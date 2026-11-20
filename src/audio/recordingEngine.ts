@@ -1,3 +1,4 @@
+import { managedAudioInput } from './managedAudioInput';
 import { persistAudioClip, deletePersistedAudioClip as deletePersistedAudioClipFromStore } from './audioPersistence';
 import { installAudioPlaybackLifecycle } from './audioPlaybackLifecycle';
 import { sessionBlobUrlRegistry } from '../state/sessionBlobUrlRegistry';
@@ -128,6 +129,7 @@ const errorFrom = (error: unknown, fallback: string): Error =>
   error instanceof Error ? error : new Error(fallback);
 
 export class RecordingEngine {
+  private readonly managedInputReleases = new WeakMap<MediaStream, () => void>();
   private stream: MediaStream | null = null;
   private detachStreamMonitor: (() => void) | null = null;
   private releaseActiveSessionToken: (() => void) | null = null;
@@ -252,8 +254,11 @@ export class RecordingEngine {
         ? this.explicitInputDeviceId
         : this.deviceManager.getPreferredInputDeviceId();
       const constraints = this.deviceManager.buildRecordingConstraints(requestedDeviceId);
-      const getUserMedia = this.getUserMediaOverride ?? ((value: MediaStreamConstraints) =>
-        navigator.mediaDevices.getUserMedia(value));
+      const getUserMedia = this.getUserMediaOverride ?? (async (_value: MediaStreamConstraints) => {
+        const lease = await managedAudioInput.acquire(requestedDeviceId);
+        this.managedInputReleases.set(lease.stream, lease.release);
+        return lease.stream;
+      });
       const request = getUserMedia(constraints);
       // A getUserMedia permission prompt cannot be aborted by the web platform.
       // If it resolves after cancellation, this continuation still stops the late stream.
@@ -792,6 +797,8 @@ export class RecordingEngine {
 
   private stopStream(stream: MediaStream | null): void {
     if (!stream) return;
+    const release = this.managedInputReleases.get(stream);
+    if (release) { release(); return; }
     try {
       stream.getTracks().forEach(track => {
         try { track.stop(); } catch (_) { /* best effort */ }
