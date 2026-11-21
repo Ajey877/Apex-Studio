@@ -155,9 +155,26 @@ async function addNativeInsertThroughMixerUi(page, pluginName) {
 
   ui.pickerStatusText = await page.locator('[aria-label="VST3 effect picker"] [role="status"]').first()
     .innerText().catch(() => '');
-  const escaped = pluginName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const pluginButton = page.getByRole('button', { name: new RegExp(escaped) }).first();
-  await pluginButton.waitFor({ state: 'visible', timeout: 60000 });
+  const picker = page.locator('[aria-label="VST3 effect picker"]');
+  await picker.waitFor({ state: 'visible', timeout: 30000 });
+  // Match the row by its own text rather than by computed accessible name: the
+  // row also carries the vendor and the plugin path, and an accessible-name regex
+  // is the more brittle of the two.
+  const pluginButton = picker.locator('button').filter({ hasText: pluginName }).first();
+  const rowDeadline = Date.now() + 60000;
+  let rowVisible = await pluginButton.isVisible().catch(() => false);
+  while (!rowVisible && Date.now() < rowDeadline) {
+    await page.waitForTimeout(500);
+    rowVisible = await pluginButton.isVisible().catch(() => false);
+  }
+  if (!rowVisible) {
+    // Name what the picker actually showed. Its status line reports scan results
+    // and load failures, so this is the shipped explanation for a missing row.
+    const status = await picker.locator('[role="status"]').first().innerText().catch(() => null);
+    const rows = await picker.locator('button').allInnerTexts().catch(() => []);
+    assert.fail(`The picker never listed ${pluginName}. `
+      + `Picker status: ${JSON.stringify(status)}. Picker buttons: ${JSON.stringify(rows)}`);
+  }
   ui.pickerRowLabel = await pluginButton.innerText().catch(() => '');
   const statusLocator = page.locator('[aria-label="VST3 effect picker"] [role="status"]').first();
   ui.pickerStatusBeforeChoose = await statusLocator.innerText().catch(() => '');
@@ -575,7 +592,9 @@ if (process.env.GITHUB_ACTIONS) {
   }
   if (evidence.status !== 'PASS') {
     const failed = allRuns.find(run => run.status === 'FAIL');
-    console.log(`::error title=Packaged native VST3 coexistence failed at stage '${failed?.lastStage ?? 'unknown'}'::${String(failed?.error ?? 'unknown').replaceAll('%', '%25').replaceAll('\r', '%0D').replaceAll('\n', '%0A')}`);
+    const detail = [String(failed?.error ?? 'unknown'),
+      failed?.mixerUi ? `mixerUi=${JSON.stringify(failed.mixerUi)}` : ''].filter(Boolean).join(' || ');
+    console.log(`::error title=Packaged native VST3 coexistence failed at stage '${failed?.lastStage ?? 'unknown'}'::${detail.replaceAll('%', '%25').replaceAll('\r', '%0D').replaceAll('\n', '%0A').slice(0, 1500)}`);
   }
 }
 process.exit(exitCode);
