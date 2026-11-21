@@ -108,7 +108,7 @@ const helperPids = () => helperProcesses().processes.map(process => process.pid)
 const stage = (run, name) => { run.lastStage = name; };
 
 /** Add the native insert through the real Mixer UI, in the order a user does. */
-async function addNativeInsertThroughMixerUi(page, pluginName) {
+async function addNativeInsertThroughMixerUi(page) {
   const ui = {};
   const mixerTab = page.locator('#nav-mixer');
   await mixerTab.waitFor({ state: 'visible', timeout: 30000 });
@@ -157,24 +157,30 @@ async function addNativeInsertThroughMixerUi(page, pluginName) {
     .innerText().catch(() => '');
   const picker = page.locator('[aria-label="VST3 effect picker"]');
   await picker.waitFor({ state: 'visible', timeout: 30000 });
-  // Match the row by its own text rather than by computed accessible name: the
-  // row also carries the vendor and the plugin path, and an accessible-name regex
-  // is the more brittle of the two.
-  const pluginButton = picker.locator('button').filter({ hasText: pluginName }).first();
-  const rowDeadline = Date.now() + 60000;
-  let rowVisible = await pluginButton.isVisible().catch(() => false);
-  while (!rowVisible && Date.now() < rowDeadline) {
+  const pickerStatus = () => picker.locator('[role="status"]').first().innerText().catch(() => null);
+  // The picker scans on mount and only renders plugin rows once discovery
+  // resolves, so wait for rows rather than for one predetermined name. textContent
+  // rather than innerText: a row scrolled out of the picker's max-height list is
+  // still a real, clickable row.
+  const rowDeadline = Date.now() + 90000;
+  let rowTexts = await picker.locator('button').allTextContents().catch(() => []);
+  while (rowTexts.length <= 2 && Date.now() < rowDeadline) {
     await page.waitForTimeout(500);
-    rowVisible = await pluginButton.isVisible().catch(() => false);
+    rowTexts = await picker.locator('button').allTextContents().catch(() => []);
   }
-  if (!rowVisible) {
-    // Name what the picker actually showed. Its status line reports scan results
-    // and load failures, so this is the shipped explanation for a missing row.
-    const status = await picker.locator('[role="status"]').first().innerText().catch(() => null);
-    const rows = await picker.locator('button').allInnerTexts().catch(() => []);
-    assert.fail(`The picker never listed ${pluginName}. `
-      + `Picker status: ${JSON.stringify(status)}. Picker buttons: ${JSON.stringify(rows)}`);
+  // Choose from what the shipped picker actually lists, in a user's order of
+  // preference, instead of assuming a fixed plugin is present.
+  const pluginName = PREFERRED_PLUGINS.find(name => rowTexts.some(text => text.includes(name)));
+  if (!pluginName) {
+    // Its status line reports scan results and failures, so this is the shipped
+    // explanation for an empty list.
+    assert.fail(`The picker listed no preferred native Mixer plugin. `
+      + `Picker status: ${JSON.stringify(await pickerStatus())}. `
+      + `Picker buttons: ${JSON.stringify(rowTexts)}`);
   }
+  ui.pickerPluginName = pluginName;
+  const pluginButton = picker.locator('button').filter({ hasText: pluginName }).first();
+  await pluginButton.waitFor({ state: 'visible', timeout: 30000 });
   ui.pickerRowLabel = await pluginButton.innerText().catch(() => '');
   const statusLocator = page.locator('[aria-label="VST3 effect picker"] [role="status"]').first();
   ui.pickerStatusBeforeChoose = await statusLocator.innerText().catch(() => '');
@@ -243,33 +249,27 @@ async function runOnce(runIndex, collector) {
     await expect(page.getByTestId('audio-actual-sample-rate')).toContainText('48,000');
     await page.getByRole('button', { name: 'Close Audio Settings', exact: true }).click();
 
-    stage(run, 'discover-plugin');
-    // Discover the real plugin through the packaged preload bridge.
-    const discovered = await page.evaluate(async () => {
-      const bridge = globalThis.desktopApp?.vst3;
-      if (!bridge) return { error: 'packaged preload bridge missing' };
-      const result = await bridge.discoverEffects();
-      return { names: (result.plugins ?? []).map(plugin => plugin.name), errors: result.errors ?? [],
-        smokeTest: globalThis.desktopApp?.smokeTest === true };
-    });
-    assert.ok(discovered.smokeTest, 'Renderer native processing timings are not enabled in this packaged launch.');
-    const pluginName = PREFERRED_PLUGINS.find(name => discovered.names.includes(name));
-    assert.ok(pluginName, `No preferred native Mixer plugin discovered. Available: ${JSON.stringify(discovered.names)}`);
-    const identity = await page.evaluate(async name => {
-      const bridge = globalThis.desktopApp.vst3;
-      const target = (await bridge.discoverEffects()).plugins.find(plugin => plugin.name === name);
-      const inspected = await bridge.inspectEffect(target, undefined);
-      return { name: target.name, classId: target.classId, path: target.path,
-        stateSchema: inspected?.state?.schema ?? null, parameterCount: inspected?.state?.parameters?.length ?? null };
-    }, pluginName);
-    run.plugin = identity;
+    stage(run, 'check-native-timings');
+    // Confirm the renderer really is measuring native processing. Deliberately does
+    // NOT call discoverEffects here: Vst3Service serializes discovery per owner
+    // (`native/vst3/service.mjs`) and rejects an overlapping scan with "A VST3 scan
+    // is already running". Scanning here raced the picker's own on-mount scan and
+    // made the picker report that error and list nothing. The picker is the real
+    // discovery path, so it owns the only pre-insert scan.
+    const smoke = await page.evaluate(() => ({
+      smokeTest: globalThis.desktopApp?.smokeTest === true,
+      hasBridge: !!globalThis.desktopApp?.vst3,
+    }));
+    assert.ok(smoke.hasBridge, 'The packaged preload VST3 bridge is missing.');
+    assert.ok(smoke.smokeTest, 'Renderer native processing timings are not enabled in this packaged launch.');
 
     stage(run, 'helpers-before-insert');
     run.helpersBeforeInsert = helperPids();
 
     stage(run, 'mixer-ui-insert');
     // Real native insert on Mixer insert 1, through the real Mixer UI.
-    run.mixerUi = await addNativeInsertThroughMixerUi(page, pluginName);
+    run.mixerUi = await addNativeInsertThroughMixerUi(page);
+    const pluginName = run.mixerUi.pickerPluginName;
     // The insert reaches project state through the real mutation path; wait for
     // that instead of assuming the next read already sees it.
     // Read every Mixer track, not only track 1: if the insert landed somewhere
@@ -301,6 +301,16 @@ async function runOnce(runIndex, collector) {
     const slotId = nativeSlots[0].id;
     run.slotId = slotId;
     run.insertSlotsOnTrack1 = await page.evaluate(() => window.__apexAcceptance.mixerInsertSlots(1));
+    // Identity is read now that the picker is closed and no scan can overlap.
+    stage(run, 'plugin-identity');
+    run.plugin = await page.evaluate(async name => {
+      const bridge = globalThis.desktopApp.vst3;
+      const target = (await bridge.discoverEffects()).plugins.find(plugin => plugin.name === name);
+      if (!target) return { name, error: 'chosen plugin absent from a post-insert discovery' };
+      const inspected = await bridge.inspectEffect(target, undefined);
+      return { name: target.name, classId: target.classId, path: target.path,
+        stateSchema: inspected?.state?.schema ?? null, parameterCount: inspected?.state?.parameters?.length ?? null };
+    }, pluginName);
 
     stage(run, 'transport-play');
     // Start the transport through the real Play control. Production code prepares
@@ -359,6 +369,10 @@ async function runOnce(runIndex, collector) {
 
     stage(run, 'assertions');
     // ---- assertions: any one of these failing is a FAIL, never retried away ----
+    // The evidence has to name the real plugin fixture, so a missing identity is a
+    // failure rather than a gap in the report.
+    assert.ok(run.plugin?.classId && run.plugin?.path,
+      `Native plugin fixture identity is incomplete: ${JSON.stringify(run.plugin ?? null)}`);
     const before = stages.beforeMonitoring;
     const during = stages.duringMonitoring;
     const after = stages.afterMonitoring;
