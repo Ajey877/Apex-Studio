@@ -354,18 +354,32 @@ async function runOnce(runIndex, collector) {
     let warmup = await page.evaluate(() => window.__apexAcceptance
       .measureNativeMonitoringCoexistence('warmup'));
     let priorBlocks = warmup.native.processedBlocks;
+    let priorSessions = warmup.native.nativeServiceSessionCount;
     await page.waitForTimeout(500);
     warmup = await page.evaluate(() => window.__apexAcceptance
       .measureNativeMonitoringCoexistence('warmup'));
-    while (Date.now() - warmupStartedAt < 60000
-      && !(warmup.native.prepared && warmup.native.processedBlocks > priorBlocks)) {
+    // The baseline also has to be taken at a SETTLED session count. Reading the
+    // plugin fixture opens short-lived inspect sessions, and sessionCount counts
+    // open + pending + closing sessions, so sampling too early produced baselines
+    // of 3 and of 1 on different runs - and the comparison then measured the
+    // teardown of those inspect sessions rather than anything monitoring did
+    // (observed: before=3 during=1 afterDisable=1, and before=1 during=2).
+    // Requiring the count to be unchanged between consecutive samples makes the
+    // reference stable; it does not relax the comparison itself.
+    const settled = () => warmup.native.prepared
+      && warmup.native.processedBlocks > priorBlocks
+      && warmup.native.nativeServiceSessionCount === priorSessions;
+    while (Date.now() - warmupStartedAt < 60000 && !settled()) {
       priorBlocks = warmup.native.processedBlocks;
+      priorSessions = warmup.native.nativeServiceSessionCount;
       await page.waitForTimeout(500);
       warmup = await page.evaluate(() => window.__apexAcceptance
         .measureNativeMonitoringCoexistence('warmup'));
     }
     run.warmup = { waitedMs: Date.now() - warmupStartedAt, prepared: warmup.native.prepared,
-      processedBlocks: warmup.native.processedBlocks, runtimeIds: warmup.native.runtimeIds };
+      processedBlocks: warmup.native.processedBlocks, runtimeIds: warmup.native.runtimeIds,
+      nativeServiceSessionCount: warmup.native.nativeServiceSessionCount,
+      settledSessionCount: warmup.native.nativeServiceSessionCount === priorSessions };
 
     stages.beforeMonitoring = await page.evaluate(label => window.__apexAcceptance
       .measureNativeMonitoringCoexistence(label), 'beforeMonitoring');
