@@ -279,7 +279,48 @@
     "result": "5/5 pass"
   },
   "nativeMonitoringCoexistence": {
-    "status": "NOT_VERIFIED_PENDING_CI",
+    "status": "PASS",
+    "verifiedOnCommit": "41e0924728ba7676598ad94b5937c3d5082bb813",
+    "verifiedBy": "GitHub Actions Desktop Validation, job 136829011547 (windows-latest), step \"Packaged native VST3 + live input coexistence acceptance\" = success",
+    "runs": "5 of 5 passed; no retry, the loop stops on the first failure",
+    "measuredEvidenceRun1": {
+      "plugin": {
+        "name": "mda RezFilter",
+        "classId": "5653546D6461466D64612072657A6669",
+        "path": "D:\\a\\Apex-Studio\\Apex-Studio\\build\\native-vst3\\VST3\\Release\\mda-vst3.vst3",
+        "stateSchema": 1
+      },
+      "slotId": "vst3-fx-fdea5d61-3c62-4a91-96ba-3841926402bf",
+      "nativeSessionRuntimeIds": [
+        "5458f68c-e494-4969-b067-0de3f987c411"
+      ],
+      "nativeSessionIdentityUnchanged": "asserted identical before monitoring, during monitoring and after disable",
+      "nativeProcessingNodeId": "vst3-fx-fdea5d61-3c62-4a91-96ba-3841926402bf-node-1",
+      "nativeNodeUnchanged": "asserted identical across all three stages",
+      "nativeProcessedBlocks": {
+        "beforeMonitoring": 24,
+        "addedDuringMonitoring": 81,
+        "addedAfterMonitoringDisabled": 80
+      },
+      "transportPositionSeconds": {
+        "beforeMonitoring": 0.4446666666666701,
+        "duringMonitoring": 2.1779999999999973,
+        "afterMonitoringDisabled": 3.876666666666665
+      },
+      "transportPlayingAtEveryStage": true,
+      "mixerTracksRebuiltByMonitoringInit": [],
+      "nativeDeadlineMisses": 0,
+      "nativeProcessingFailures": 0,
+      "helperProcessesLeakedAfterShutdown": [],
+      "appClosedCleanly": true
+    },
+    "defectsFoundAndFixedWhileBringingThisUp": [
+      "The acceptance selected the wrong Mixer track: it clicked the #mixer-strip-1 container, whose centre is the volume fader, and that fader calls stopPropagation, so onSelectTrack never fired and selectedTrackId stayed at its default 0 (Master). The insert was created on Master and insert 1 never gained a slot. Recorded proof: FX panel header \"FX SLOTS (MASTER)\" before vs \"FX SLOTS (KICK / 808)\" after clicking the INS 1 label. It now selects via the INS 1 label and asserts the header changed.",
+      "The acceptance pre-scanned for plugins before opening the picker. Vst3Service serializes discovery per owner (native/vst3/service.mjs:59) and rejects an overlap, so the picker reported \"Scan failed: ... A VST3 scan is already running\" and listed nothing. The picker now owns the only pre-insert scan and the plugin is chosen from the rows it actually lists.",
+      "browser-tests/liveInputMonitoringCoexistenceProbe.spec.ts called a module-scope helper inside page.evaluate, which Playwright cannot serialize; it failed in CI with \"ReferenceError: surface is not defined\". The window access is now inlined in every callback. This is instrumentation only, not native evidence.",
+      "The baseline was read after a fixed 1500 ms delay. Preparing a native session is asynchronous, and under CI load one run in five measured prepared === false. It now waits until the insert is prepared AND its processed-block count advances, bounded at 60 s; no assertion was relaxed."
+    ],
+    "productObservationNotFixedHere": "A user who opens the VST3 picker while any discovery scan is in flight gets the same permanent \"Scan failed: A VST3 scan is already running\" state with no retry. Out of scope for this scenario; reported for the Lead Engineer.",
     "gap": "Renderer tests and simulated bridges cannot prove that a REAL native VST3 session, already processing audio through the real Windows helper process during playback, survives live-input monitoring initialization on the same insert.",
     "scenario": "scripts/packaged-native-monitoring-acceptance.mjs",
     "command": "npm run test:native-monitoring-packaged",
@@ -318,6 +359,6 @@
       "the application does not close cleanly or the helper outlives it"
     ],
     "noRetryPolicy": "A failing run fails the acceptance and stops the loop; no retry converts a failure into a pass.",
-    "probeInstrumentationVerification": "browser-tests/liveInputMonitoringCoexistenceProbe.spec.ts exercises arm/measure/disarm, the deterministic insert signal, monitored-input PCM deltas, the rebuild spy and honest reporting of unobservable native fields. It is instrumentation verification only and is NOT native VST3 evidence. It could not be executed on this host (no browser binary available and browser downloads are blocked by the network allowlist)."
+    "probeInstrumentationVerification": "browser-tests/liveInputMonitoringCoexistenceProbe.spec.ts exercises arm/measure/disarm, the deterministic insert signal, monitored-input PCM deltas, the rebuild spy and honest reporting of unobservable native fields. It runs in CI (verify and audio-tests) and passes. It is instrumentation verification only and is NOT native VST3 evidence."
   }
 }

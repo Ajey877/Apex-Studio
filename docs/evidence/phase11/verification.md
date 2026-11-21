@@ -276,21 +276,59 @@ so RMS combines in quadrature and the monitored contribution is a deterministic 
 | `npm run verify:desktop` | pass | this host |
 | `npm run build` | pass | this host |
 | script syntax + Linux `NOT_VERIFIED` guard | pass, exit 3 | this host |
-| **packaged Windows native coexistence run** | **NOT VERIFIED on this host** | CI only |
-| browser probe spec | **NOT EXECUTED on this host** | no browser binary |
+| **packaged Windows native coexistence run** | **PASS, 5 of 5 runs** | CI (windows-latest) |
+| browser probe spec | pass (runs inside `verify` and `audio-tests`) | CI |
 
-Two things could not be executed here and are not claimed:
+### Verified result
 
-1. The packaged Windows acceptance itself. This host is Linux; there is no packaged executable
-   and no `apex-vst3-host.exe`. The script correctly exits `3 / NOT_VERIFIED` here. CI is the
-   first real execution.
-2. `browser-tests/liveInputMonitoringCoexistenceProbe.spec.ts`. No Playwright browser is
-   installed and `cdn.playwright.dev` is outside this sandbox's network allowlist
-   (`ECONNRESET`), so the spec was written and typechecked but **not run**. It verifies the
-   probe instrumentation only; it is not native VST3 evidence either way.
+Commit `41e0924728ba7676598ad94b5937c3d5082bb813`, Desktop Validation job `136829011547`,
+step **Packaged native VST3 + live input coexistence acceptance** = `success`, **5 of 5 runs
+passed** with no retry (the loop stops on the first failure). Evidence for run 1:
 
-Because of (2), the probe code path is typechecked and reviewed but not yet executed anywhere.
-If it fails in CI, that is a defect in the new instrumentation, not in the native lifecycle.
+| measured | value |
+| --- | --- |
+| plugin fixture | `mda RezFilter`, class ID `5653546D6461466D64612072657A6669`, `build/native-vst3/VST3/Release/mda-vst3.vst3` |
+| native session runtime ids | `["5458f68c-e494-4969-b067-0de3f987c411"]` — asserted identical before, during and after |
+| native processing node | `vst3-fx-fdea5d61-…-node-1` — asserted identical across all three stages |
+| native processed blocks | 24 before → +81 during monitoring → +80 after disable |
+| transport position | 0.4447 s → 2.1780 s → 3.8767 s, playing at every stage |
+| Mixer tracks rebuilt by monitoring init | `[]` |
+| native deadline misses / block failures | 0 / 0 |
+| helper processes leaked after shutdown | `[]`, application closed cleanly |
+
+So a real native VST3 insert, already prepared and processing through the real
+`apex-vst3-host.exe` during playback, kept the same session and the same processing node,
+kept processing more blocks, and kept the transport advancing while monitoring was enabled on
+the same insert and then disabled — with no Mixer track rebuilt and no helper leaked.
+
+### Defects this scenario caught in its own harness
+
+Four were found and fixed while bringing it up; none of them were in the native lifecycle:
+
+1. **Wrong Mixer track.** The harness clicked the `#mixer-strip-1` container. Its centre is the
+   volume fader, whose `onClick` calls `stopPropagation`, so `onSelectTrack` never fired and
+   `selectedTrackId` stayed at its default `0` (`// 0 = Master`). The insert was created on
+   Master and insert 1 never gained a slot. Recorded proof: the FX panel header read
+   `FX SLOTS (MASTER)` before and `FX SLOTS (KICK / 808)` after clicking the `INS 1` label.
+   Selection now goes through the `INS 1` label and asserts the header changed.
+2. **Discovery collision.** The harness pre-scanned before opening the picker. `Vst3Service`
+   serializes discovery per owner (`native/vst3/service.mjs:59`) and rejects an overlap, so the
+   picker reported `Scan failed: … A VST3 scan is already running` and listed nothing. The
+   picker now owns the only pre-insert scan.
+3. **Probe spec scoping.** `liveInputMonitoringCoexistenceProbe.spec.ts` called a module-scope
+   helper inside `page.evaluate`, which Playwright cannot serialize; it failed in CI with
+   `ReferenceError: surface is not defined`. The window access is now inlined.
+4. **Baseline read too early.** A fixed 1500 ms delay preceded the baseline, but preparing a
+   native session is asynchronous; one run in five measured `prepared === false`. It now waits
+   until the insert is prepared *and* its processed-block count advances, bounded at 60 s. No
+   assertion was relaxed and no retry was added.
+
+**Product observation, deliberately not fixed here (out of scope):** a user who opens the VST3
+picker while any discovery scan is in flight gets that same permanent `Scan failed` state with
+no retry. Reported for the Lead Engineer.
+
+This host is Linux, so the packaged run was never executed locally; the script still exits
+`3 / NOT_VERIFIED` here. CI is its only execution, and the numbers above are CI's.
 
 ### Limits of this scenario even when it passes
 
