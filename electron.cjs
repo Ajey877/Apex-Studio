@@ -58,7 +58,14 @@ function createWindow() {
     titleBarStyle: 'default',
     webPreferences: {
       additionalArguments: [
-        ...(process.env.APEX_SMOKE_TEST === '1' ? ['--apex-smoke-test', ...(process.env.APEX_SMOKE_REOPEN === '1' ? ['--apex-smoke-reopen'] : [])] : []),
+        // APEX_SMOKE_TIMING_ONLY turns on the SAME renderer smoke instrumentation
+        // (per-block native processing timings, deadline-miss reporting) without
+        // the built-in smoke entry below, which finishes with app.exit(). It lets
+        // an externally driven acceptance run measure a real native session while
+        // it keeps control of the application. Reopen stays tied to the smoke entry.
+        ...(process.env.APEX_SMOKE_TEST === '1' || process.env.APEX_SMOKE_TIMING_ONLY === '1'
+          ? ['--apex-smoke-test', ...(process.env.APEX_SMOKE_TEST === '1' && process.env.APEX_SMOKE_REOPEN === '1' ? ['--apex-smoke-reopen'] : [])]
+          : []),
         // Packaged-editor acceptance: a separate flag from the smoke entry, so the
         // two never enable each other's hooks. Never set by a normal launch.
         ...(process.env.APEX_ACCEPTANCE === '1' ? ['--apex-packaged-acceptance'] : []),

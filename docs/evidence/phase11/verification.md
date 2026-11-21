@@ -200,3 +200,102 @@ instability history. Local run remains `exit 3 / NOT_VERIFIED` (Linux).
 
 No physical microphone, interface, or Windows machine is available here; physical round-trip
 latency and real native plugin processing remain untested.
+
+## Packaged native VST3 + live-input coexistence acceptance (post-`9d977b0`)
+
+### The gap this closes
+
+Renderer tests and simulated bridges cannot prove that a **real** native VST3 session —
+already prepared and processing audio through the real Windows helper process while the
+transport plays — survives live-input monitoring initialization on the same insert.
+Everything verified so far ran either in a browser (no helper process) or against a
+JavaScript stand-in for the plugin.
+
+### New scenario
+
+`scripts/packaged-native-monitoring-acceptance.mjs` (`npm run test:native-monitoring-packaged`),
+wired into Desktop Validation as **Packaged native VST3 + live input coexistence
+acceptance**, uploading `apex-packaged-native-monitoring-evidence`.
+
+Real, not simulated:
+
+- packaged Electron executable from `dist-electron/win-unpacked`;
+- real `apex-vst3-host.exe` helper, read from the Windows process table (`tasklist`, with a
+  `Get-CimInstance` fallback) rather than from the application's own claims;
+- real native plugin from the MDA VST3 bundle (`mda RezFilter` preferred, `mda Delay` fallback),
+  discovered through the packaged preload bridge;
+- native insert created through the **real Mixer UI** (Mixer → insert 1 → Add Effect Plugin →
+  Native VST3 Effect → plugin row);
+- transport started through the **real transport control** `#fl-play-btn`, whose `aria-label`
+  flipping to `Pause` is the playing indicator — so production code prepares the native session
+  *before* monitoring, never after;
+- monitoring enabled and disabled through the **real Mixer buttons**;
+- native processing measured from production diagnostics that already existed: the main
+  process's per-block `processAudio` timings (real native input/output RMS, per-block errors,
+  `nativeServiceSessionCount`) and the renderer's native Mixer smoke events (worklet block
+  submissions, `pending-deadline-miss`).
+
+Ordering is the point of the test: the insert is prepared by `play()` and demonstrably
+processing (`processedBlocks > 0`, non-silent `nativeOutputRmsMean`) **before** monitoring is
+enabled. Session identity is the `runtimeId` prefix of `requestId` (minted per prepared native
+session), plus the processing-node identity held in a `WeakMap`, so a re-prepare or a replaced
+node is detected rather than assumed away.
+
+Runs 5 times by default (`APEX_NATIVE_MONITORING_RUNS`). A failing run fails the acceptance and
+stops the loop — no retry converts a failure into a pass.
+
+### Instrumentation change
+
+`APEX_SMOKE_TIMING_ONLY=1` turns on the same renderer smoke timings as `APEX_SMOKE_TEST=1`
+**without** the built-in smoke entry, which finishes with `app.exit()` and would end an
+externally driven run. Two lines: `electron.cjs` adds `--apex-smoke-test` for either flag (the
+reopen flag stays tied to the smoke entry), and `desktop-vst3.cjs` accepts either flag for
+`smokeTimingEnabled`. No production DSP or native lifecycle behaviour changes.
+
+### Probe measurement surface
+
+`src/audio/liveInputAcceptance.ts` gained `armNativeVst3MonitoringCoexistenceProbe`,
+`measureNativeVst3MonitoringCoexistence` and `disarmNativeVst3MonitoringCoexistenceProbe`,
+exposed on `__apexAcceptance`. The probe installs a spy recording which Mixer tracks
+`updateMixerTrack` is asked to rebuild, attaches read-only analyser taps to the insert's own
+input and output, and feeds a deterministic buffer so native processing is provably non-silent.
+
+The deterministic signal is **311 Hz / 659 Hz**, deliberately not 440 Hz: the fake capture
+fixture is a 440 Hz sine, and two correlated tones sum phase-dependently, which would make
+"monitored input is present" an unsound comparison. At 311/659 Hz the sources are uncorrelated,
+so RMS combines in quadrature and the monitored contribution is a deterministic increase.
+
+### Verification status — read this before trusting any of it
+
+| check | result | where |
+|---|---|---|
+| `npm run lint` (tsc) | pass | this host |
+| `npm run test:audio` | **2480 pass, 0 fail** (2478 before + 2 new) | this host |
+| `npm run test:history` | **1283 pass, 0 fail** (unchanged) | this host |
+| `npm run test:desktop-permissions` | **6 pass** (unchanged) | this host |
+| `npm run verify:desktop` | pass | this host |
+| `npm run build` | pass | this host |
+| script syntax + Linux `NOT_VERIFIED` guard | pass, exit 3 | this host |
+| **packaged Windows native coexistence run** | **NOT VERIFIED on this host** | CI only |
+| browser probe spec | **NOT EXECUTED on this host** | no browser binary |
+
+Two things could not be executed here and are not claimed:
+
+1. The packaged Windows acceptance itself. This host is Linux; there is no packaged executable
+   and no `apex-vst3-host.exe`. The script correctly exits `3 / NOT_VERIFIED` here. CI is the
+   first real execution.
+2. `browser-tests/liveInputMonitoringCoexistenceProbe.spec.ts`. No Playwright browser is
+   installed and `cdn.playwright.dev` is outside this sandbox's network allowlist
+   (`ECONNRESET`), so the spec was written and typechecked but **not run**. It verifies the
+   probe instrumentation only; it is not native VST3 evidence either way.
+
+Because of (2), the probe code path is typechecked and reviewed but not yet executed anywhere.
+If it fails in CI, that is a defect in the new instrumentation, not in the native lifecycle.
+
+### Limits of this scenario even when it passes
+
+- The microphone is Chromium's fake capture fixture. Not a physical microphone; proves nothing
+  about physical round-trip latency.
+- The audio reaching the insert is a deterministic buffer at the insert input, the same
+  mechanism the packaged Mixer acceptance uses. The plugin session and its processing are real;
+  the source is not a physical instrument performance.

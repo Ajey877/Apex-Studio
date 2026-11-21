@@ -1,0 +1,454 @@
+// Packaged Windows acceptance: an ALREADY-RUNNING native VST3 Mixer insert must
+// survive live-input monitoring initialization while the transport plays.
+//
+// WHAT THIS IS: Playwright launches the REAL packaged Electron application
+// (`dist-electron/win-unpacked/*.exe`) with its real preload bridge, its real
+// native VST3 helper process (`apex-vst3-host.exe`) and a REAL native plugin from
+// the MDA VST3 bundle. The insert is created through the real Mixer UI, the
+// transport is started through the real Play control, and monitoring is enabled
+// and disabled through the real Mixer buttons. Native processing is measured from
+// the production diagnostics that already exist: the main process's per-block
+// `processAudio` timings (real native input/output RMS and per-block errors) and
+// the renderer's native Mixer smoke events (worklet block submissions and
+// real-time deadline misses). Helper facts come from the OS process table.
+//
+// WHAT THIS IS NOT: no dev server, no browser tab, no simulated bridge, no
+// JavaScript stand-in for the plugin. The audio fed to the insert is a
+// deterministic buffer (the same mechanism the packaged Mixer acceptance uses),
+// so "the plugin processes real audio" means real PCM through a real native
+// session - it is not a physical instrument performance. The microphone is
+// Chromium's fake capture device, so this is NOT physical hardware evidence and
+// proves nothing about physical round-trip latency.
+//
+// Timing instrumentation is enabled with APEX_SMOKE_TIMING_ONLY=1, which turns on
+// the renderer smoke timings WITHOUT the built-in smoke entry (that entry ends
+// with app.exit() and would end this run). No production DSP or native lifecycle
+// behaviour is changed by that flag.
+import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { _electron, expect } from '@playwright/test';
+import { writeLiveInputFixture } from './live-input-fixture.mjs';
+
+const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
+const runs = Math.max(1, Number(process.env.APEX_NATIVE_MONITORING_RUNS ?? '5'));
+const evidenceDir = path.join(root, 'build', 'native-monitoring-evidence');
+mkdirSync(evidenceDir, { recursive: true });
+const evidenceFile = path.join(evidenceDir, 'packaged-windows-native-monitoring.json');
+
+if (process.platform !== 'win32') {
+  writeFileSync(evidenceFile, JSON.stringify({
+    status: 'NOT_VERIFIED',
+    reason: 'Requires Windows and the actual packaged executable with the real native VST3 helper process.',
+    platform: process.platform,
+    physicalHardware: 'NOT_VERIFIED',
+  }, null, 2));
+  console.error('NOT_VERIFIED: the packaged Windows native VST3 + live-input coexistence acceptance cannot run on this host.');
+  process.exit(3);
+}
+
+const packageDir = path.join(root, 'dist-electron', 'win-unpacked');
+const executableName = readdirSync(packageDir).find(file => /apex.*\.exe$/i.test(file));
+assert.ok(executableName, 'Packaged Apex executable missing. Run npm run package:win:dir first.');
+const executable = path.join(packageDir, executableName);
+assert.ok(existsSync(executable), `Packaged executable not found: ${executable}`);
+
+// Real native plugins. The packaged Mixer smoke proves these two are discoverable
+// and process audio through the helper, so they are the fixtures used here too.
+const mdaFixture = path.join(root, 'build/native-vst3/VST3/Release/mda-vst3.vst3');
+assert.ok(existsSync(mdaFixture), 'Build the real MDA VST3 fixture first: npm run native:vst3:build');
+const PREFERRED_PLUGINS = ['mda RezFilter', 'mda Delay'];
+
+/**
+ * Native helper processes, read from the Windows process table rather than from
+ * the application's own claims. Mirrors the query in
+ * scripts/packaged-editor-acceptance.mjs; duplicated deliberately so this
+ * acceptance cannot be broken by an edit to that unrelated 1500-line script.
+ */
+function helperProcesses() {
+  const attempts = [];
+  const read = (cmd, args, parse) => {
+    try {
+      const out = execFileSync(cmd, args, { encoding: 'utf8', windowsHide: true, timeout: 20000 });
+      return { ok: true, processes: parse(out) };
+    } catch (error) {
+      attempts.push(`${cmd}: ${error.message.split('\n')[0]}`);
+      return null;
+    }
+  };
+  const fromTasklist = read('tasklist', ['/FI', 'IMAGENAME eq apex-vst3-host.exe', '/FO', 'CSV', '/NH'],
+    out => out.split(/\r?\n/).map(line => line.trim())
+      .filter(line => /^"apex-vst3-host\.exe"/i.test(line))
+      .map(line => {
+        const cells = line.split('","').map(cell => cell.replace(/^"|"$/g, ''));
+        return { image: cells[0], pid: Number(cells[1]) };
+      }));
+  const fromCim = fromTasklist ?? read('powershell.exe',
+    ['-NoProfile', '-NonInteractive', '-Command',
+      "Get-CimInstance Win32_Process -Filter \"Name='apex-vst3-host.exe'\" | Select-Object ProcessId,Name | ConvertTo-Json -Compress"],
+    out => {
+      const parsed = out.trim() ? JSON.parse(out.trim()) : [];
+      return (Array.isArray(parsed) ? parsed : [parsed]).map(entry => ({ image: entry.Name, pid: Number(entry.ProcessId) }));
+    });
+  const result = fromTasklist ?? fromCim;
+  if (!result) return { ok: false, error: attempts, processes: [] };
+  return { ok: true, source: fromTasklist ? 'tasklist' : 'powershell-cim', processes: result.processes };
+}
+
+const helperPids = () => helperProcesses().processes.map(process => process.pid).sort((a, b) => a - b);
+
+/** Add the native insert through the real Mixer UI, in the order a user does. */
+async function addNativeInsertThroughMixerUi(page, pluginName) {
+  const ui = {};
+  const mixerTab = page.locator('#nav-mixer');
+  await mixerTab.waitFor({ state: 'visible', timeout: 30000 });
+  await mixerTab.click({ timeout: 15000 });
+  ui.openedMixerView = true;
+  await page.waitForTimeout(400);
+
+  const trackStrip = page.locator('#mixer-strip-1');
+  await trackStrip.waitFor({ state: 'visible', timeout: 30000 });
+  await trackStrip.click({ timeout: 15000 });
+  ui.selectedTrackStrip = '#mixer-strip-1';
+  await page.waitForTimeout(300);
+
+  const addEffect = page.getByTitle('Add Effect Plugin').first();
+  await addEffect.waitFor({ state: 'visible', timeout: 15000 });
+  await addEffect.click({ timeout: 15000 });
+  ui.openedAddEffectMenu = true;
+
+  const nativeChoice = page.getByRole('button', { name: 'Native VST3 Effect' }).first();
+  await nativeChoice.waitFor({ state: 'visible', timeout: 15000 });
+  await nativeChoice.click({ timeout: 15000 });
+  ui.openedVst3Picker = true;
+
+  ui.pickerStatusText = await page.locator('[aria-label="VST3 effect picker"] [role="status"]').first()
+    .innerText().catch(() => '');
+  const escaped = pluginName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const pluginButton = page.getByRole('button', { name: new RegExp(escaped) }).first();
+  await pluginButton.waitFor({ state: 'visible', timeout: 60000 });
+  ui.pickerRowLabel = await pluginButton.innerText().catch(() => '');
+  await pluginButton.click({ timeout: 60000 });
+  ui.chosePluginFromPicker = true;
+  return ui;
+}
+
+async function runOnce(runIndex, collector) {
+  const profile = mkdtempSync(path.join(root, 'build/native-monitoring-profile-'));
+  const fixture = writeLiveInputFixture();
+  const env = {
+    ...process.env,
+    APEX_ACCEPTANCE: '1',
+    APEX_ACCEPTANCE_USER_DATA: profile,
+    // Real native processing timings, without the built-in smoke entry's app.exit().
+    APEX_SMOKE_TIMING_ONLY: '1',
+    APEX_VST3_SMOKE_PLUGIN: mdaFixture,
+  };
+  const args = ['--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream',
+    `--use-file-for-fake-audio-capture=${fixture}`, '--autoplay-policy=no-user-gesture-required'];
+
+  const run = { runIndex, status: 'RUNNING', executable, profile };
+  let app;
+  const stages = {};
+  try {
+    app = await _electron.launch({ executablePath: executable, env, args, timeout: 180000 });
+    run.version = await app.evaluate(({ app: electronApp }) => electronApp.getVersion()).catch(() => null);
+    const page = await app.firstWindow();
+    page.on('dialog', dialog => dialog.accept());
+    await page.waitForFunction(() => !!window.__apexAcceptance, null, { timeout: 120000 });
+
+    // Record which microphone streams the app opened, so release is provable.
+    await page.evaluate(() => {
+      const original = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
+      window.__inputCaptureEvidence = { calls: 0, streams: [] };
+      navigator.mediaDevices.getUserMedia = async constraints => {
+        const stats = window.__inputCaptureEvidence; stats.calls++;
+        const stream = await original(constraints); stats.streams.push(stream);
+        const clone = stream.clone.bind(stream);
+        stream.clone = () => { const consumer = clone(); stats.streams.push(consumer); return consumer; };
+        return stream;
+      };
+    });
+
+    // Audio engine at the pinned 48 kHz reference with the fake capture device.
+    await page.getByRole('menuitem', { name: 'Audio', exact: true }).click();
+    await page.getByRole('menuitem', { name: 'Audio Settings…', exact: true }).click();
+    await page.locator('#audio-input-device-select').selectOption('');
+    await page.locator('#audio-sample-rate-select').selectOption('48000');
+    await page.getByRole('button', { name: /^(Initialize with Settings|Apply Engine Settings)$/ }).click();
+    await expect(page.getByTestId('audio-actual-sample-rate')).toContainText('48,000');
+    await page.getByRole('button', { name: 'Close Audio Settings', exact: true }).click();
+
+    // Discover the real plugin through the packaged preload bridge.
+    const discovered = await page.evaluate(async () => {
+      const bridge = globalThis.desktopApp?.vst3;
+      if (!bridge) return { error: 'packaged preload bridge missing' };
+      const result = await bridge.discoverEffects();
+      return { names: (result.plugins ?? []).map(plugin => plugin.name), errors: result.errors ?? [],
+        smokeTest: globalThis.desktopApp?.smokeTest === true };
+    });
+    assert.ok(discovered.smokeTest, 'Renderer native processing timings are not enabled in this packaged launch.');
+    const pluginName = PREFERRED_PLUGINS.find(name => discovered.names.includes(name));
+    assert.ok(pluginName, `No preferred native Mixer plugin discovered. Available: ${JSON.stringify(discovered.names)}`);
+    const identity = await page.evaluate(async name => {
+      const bridge = globalThis.desktopApp.vst3;
+      const target = (await bridge.discoverEffects()).plugins.find(plugin => plugin.name === name);
+      const inspected = await bridge.inspectEffect(target, undefined);
+      return { name: target.name, classId: target.classId, path: target.path,
+        stateSchema: inspected?.state?.schema ?? null, parameterCount: inspected?.state?.parameters?.length ?? null };
+    }, pluginName);
+    run.plugin = identity;
+
+    run.helpersBeforeInsert = helperPids();
+
+    // Real native insert on Mixer insert 1, through the real Mixer UI.
+    run.mixerUi = await addNativeInsertThroughMixerUi(page, pluginName);
+    // The insert reaches project state through the real mutation path; wait for
+    // that instead of assuming the next read already sees it.
+    const readNativeSlots = () => page.evaluate(() => window.__apexAcceptance.mixerInsertSlots(1)
+      .filter(slot => slot.type === 'vst3' && slot.enabled));
+    await expect.poll(async () => (await readNativeSlots()).length, { timeout: 60000,
+      message: 'the native insert created through the Mixer UI never reached project state' }).toBe(1);
+    const nativeSlots = await readNativeSlots();
+    const slotId = nativeSlots[0].id;
+    run.slotId = slotId;
+    run.insertSlotsOnTrack1 = await page.evaluate(() => window.__apexAcceptance.mixerInsertSlots(1));
+
+    // Start the transport through the real Play control. Production code prepares
+    // the native session here - the plugin is NOT prepared after monitoring starts.
+    // `#fl-play-btn` is the shipped transport control; its aria-label flips to
+    // "Pause" while playing, which is the real playing indicator.
+    const playButton = page.locator('#fl-play-btn');
+    await playButton.waitFor({ state: 'visible', timeout: 30000 });
+    await playButton.click({ timeout: 30000 });
+    await expect(playButton).toHaveAttribute('aria-label', 'Pause', { timeout: 60000 });
+
+    await page.evaluate(([track, slot]) => window.__apexAcceptance
+      .armNativeMonitoringCoexistenceProbe(track, slot, { inputSignal: true }), [1, slotId]);
+    // Let the native session reach steady-state processing before the baseline.
+    await page.waitForTimeout(1500);
+
+    stages.beforeMonitoring = await page.evaluate(label => window.__apexAcceptance
+      .measureNativeMonitoringCoexistence(label), 'beforeMonitoring');
+    run.helpersBeforeMonitoring = helperPids();
+
+    // THE TRANSITION UNDER TEST: monitoring on the SAME insert, during playback.
+    const rebuildsBefore = stages.beforeMonitoring.mixerTracksRebuiltSinceArm.length;
+    await page.locator('#mixer-strip-1').getByText('INS 1', { exact: true }).click();
+    await page.getByRole('button', { name: 'Enable monitoring on this insert' }).click({ timeout: 30000 });
+    await expect(page.getByRole('region', { name: 'Live audio input' })).toContainText('Active', { timeout: 60000 });
+    await page.waitForTimeout(1500);
+
+    stages.duringMonitoring = await page.evaluate(label => window.__apexAcceptance
+      .measureNativeMonitoringCoexistence(label), 'duringMonitoring');
+    run.helpersDuringMonitoring = helperPids();
+    run.monitorStatusDuring = await page.evaluate(() => window.__apexAcceptance.liveInputState());
+
+    // Disable monitoring through the real Mixer button.
+    await page.locator('#mixer-strip-1').getByText('INS 1', { exact: true }).click();
+    await page.getByRole('button', { name: 'Disable monitoring' }).click({ timeout: 30000 });
+    await expect.poll(async () => (await page.evaluate(() => window.__apexAcceptance.liveInputState())).status,
+      { timeout: 60000 }).toBe('off');
+    await page.waitForTimeout(1500);
+
+    stages.afterMonitoring = await page.evaluate(label => window.__apexAcceptance
+      .measureNativeMonitoringCoexistence(label), 'afterMonitoring');
+    run.helpersAfterMonitoring = helperPids();
+    run.monitorStatusAfter = await page.evaluate(() => window.__apexAcceptance.liveInputState());
+
+    run.resources = await page.evaluate(() => ({
+      calls: window.__inputCaptureEvidence.calls,
+      tracks: window.__inputCaptureEvidence.streams.flatMap(stream => stream.getTracks().map(track => track.readyState)),
+    }));
+
+    await page.evaluate(() => window.__apexAcceptance.disarmNativeMonitoringCoexistenceProbe());
+    run.stages = stages;
+    run.rebuildsAttributableToMonitoring = stages.duringMonitoring.mixerTracksRebuiltSinceArm.slice(rebuildsBefore);
+
+    // ---- assertions: any one of these failing is a FAIL, never retried away ----
+    const before = stages.beforeMonitoring;
+    const during = stages.duringMonitoring;
+    const after = stages.afterMonitoring;
+
+    // The insert must ALREADY be a live, prepared native session before monitoring.
+    assert.equal(before.native.prepared, true, 'Native insert was not prepared before monitoring started.');
+    assert.equal(before.native.nodePresent, true, 'No native processing node existed before monitoring started.');
+    assert.ok(before.native.processedBlocks > 0,
+      `Native plugin processed no audio before monitoring: ${JSON.stringify(before.native)}`);
+    assert.ok((before.native.nativeOutputRmsMean ?? 0) > 0.001,
+      `Native plugin output was silent before monitoring: ${JSON.stringify(before.native)}`);
+    assert.equal(before.transport.playing, true, 'Transport was not playing before monitoring started.');
+
+    // Transport uninterrupted across the transition.
+    for (const stage of [before, during, after]) {
+      assert.equal(stage.transport.playing, true, `Transport stopped at ${stage.label}.`);
+    }
+    assert.ok(during.transport.positionSeconds > before.transport.positionSeconds,
+      `Transport position did not advance into monitoring: ${before.transport.positionSeconds} -> ${during.transport.positionSeconds}`);
+    assert.ok(after.transport.positionSeconds > during.transport.positionSeconds,
+      `Transport position did not advance after monitoring: ${during.transport.positionSeconds} -> ${after.transport.positionSeconds}`);
+
+    // The SAME native session and the SAME processing node survived.
+    assert.deepEqual(during.native.runtimeIds, before.native.runtimeIds,
+      'Native session identity changed when monitoring was enabled (session was re-prepared).');
+    assert.deepEqual(after.native.runtimeIds, before.native.runtimeIds,
+      'Native session identity changed when monitoring was disabled.');
+    assert.equal(before.native.runtimeIds.length, 1,
+      `Expected exactly one native session identity, saw ${JSON.stringify(before.native.runtimeIds)}`);
+    assert.equal(during.native.nodeId, before.native.nodeId,
+      'Native processing node was replaced when monitoring was enabled.');
+    assert.equal(after.native.nodeId, before.native.nodeId,
+      'Native processing node was replaced when monitoring was disabled.');
+    assert.equal(after.native.prepared, true, 'Native insert is no longer prepared after monitoring was disabled.');
+
+    // Native processing continued through and after the transition.
+    const blocksDuring = during.native.processedBlocks - before.native.processedBlocks;
+    const blocksAfter = after.native.processedBlocks - during.native.processedBlocks;
+    run.nativeProcessing = { blocksBefore: before.native.processedBlocks, blocksDuringMonitoring: blocksDuring,
+      blocksAfterMonitoringDisabled: blocksAfter,
+      workletSubmissionsDelta: during.native.workletSubmissions - before.native.workletSubmissions };
+    assert.ok(blocksDuring > 0,
+      `Native plugin stopped processing while monitoring was enabled: ${JSON.stringify(run.nativeProcessing)}`);
+    assert.ok(blocksAfter > 0,
+      `Native plugin did not resume/continue after monitoring was disabled: ${JSON.stringify(run.nativeProcessing)}`);
+    assert.ok((during.native.nativeOutputRmsMean ?? 0) > 0.001,
+      `Native plugin output was silent during monitoring: ${JSON.stringify(during.native)}`);
+    assert.ok((after.native.nativeOutputRmsMean ?? 0) > 0.001,
+      `Native plugin output was silent after monitoring: ${JSON.stringify(after.native)}`);
+
+    // No deadline missed, no failed native block, no helper churn.
+    const deadlineMisses = after.native.deadlineMisses - before.native.deadlineMisses;
+    const failures = after.native.failures - before.native.failures;
+    assert.equal(deadlineMisses, 0, `Native processing missed ${deadlineMisses} real-time deadline(s).`);
+    assert.equal(failures, 0, `Native processing failed ${failures} block(s): ${JSON.stringify(after.native.failureMessages)}`);
+    assert.deepEqual(during.native.nativeServiceSessionCount, before.native.nativeServiceSessionCount,
+      'Native helper session count changed when monitoring was enabled.');
+    assert.deepEqual(run.helpersDuringMonitoring, run.helpersBeforeMonitoring,
+      'Native helper process changed when monitoring was enabled (crash or restart).');
+    assert.deepEqual(run.helpersAfterMonitoring, run.helpersBeforeMonitoring,
+      'Native helper process changed when monitoring was disabled.');
+    assert.ok(run.helpersBeforeMonitoring.length > 0, 'No native helper process was running during the scenario.');
+
+    // No already-live Mixer graph was rebuilt by monitoring initialization.
+    assert.deepEqual(run.rebuildsAttributableToMonitoring, [],
+      `Monitoring initialization rebuilt already-live Mixer tracks [${run.rebuildsAttributableToMonitoring.join(', ')}].`);
+
+    // Monitoring really was active, and its PCM really was present then removed.
+    assert.equal(run.monitorStatusDuring.status, 'active', 'Monitoring was not active during the scenario.');
+    assert.equal(run.monitorStatusAfter.status, 'off', 'Monitoring was not disabled cleanly.');
+    const inputDuring = during.pcm.insertInputRms;
+    const inputAfter = after.pcm.insertInputRms;
+    assert.ok(inputDuring > inputAfter * 1.03,
+      `Monitored input was not measurably present on the insert input during monitoring: during=${inputDuring} after=${inputAfter}`);
+    assert.ok(inputAfter > 0.01,
+      `Deterministic insert signal disappeared after monitoring was disabled: ${JSON.stringify(after.pcm)}`);
+
+    // Microphone resources released.
+    assert.equal(run.resources.calls, 1, `Expected exactly one getUserMedia call, saw ${run.resources.calls}`);
+    assert.ok(run.resources.tracks.length > 0, 'No microphone tracks were recorded.');
+    assert.ok(run.resources.tracks.every(state => state === 'ended'),
+      `Microphone tracks were not all released: ${JSON.stringify(run.resources.tracks)}`);
+
+    run.diagnosticsAtEnd = after.diagnostics;
+    run.status = 'PASS';
+    return run;
+  } catch (error) {
+    run.status = 'FAIL';
+    run.error = `${error?.message ?? error}`.split('\n').slice(0, 12).join(' | ');
+    run.stages = stages;
+    throw error;
+  } finally {
+    if (app) {
+      try { await app.close({ timeout: 60000 }); run.appClosedCleanly = true; }
+      catch (error) { run.appClosedCleanly = false; run.closeError = `${error?.message ?? error}`.split('\n')[0]; }
+    }
+    // The helper is owned by the application and must not outlive it. Poll rather
+    // than sleep a fixed interval, so a slow exit is not reported as a leak while
+    // a genuine leak is still reported once the grace period expires.
+    let helpers = helperPids();
+    for (let attempt = 0; attempt < 10 && helpers.length > 0; attempt++) {
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      helpers = helperPids();
+    }
+    run.helpersAfterShutdown = helpers;
+    try { rmSync(profile, { recursive: true, force: true }); } catch { /* profile retained for inspection */ }
+    collector.push(run);
+  }
+}
+
+const evidence = {
+  status: 'RUNNING',
+  requestedRuns: runs,
+  source: 'Real packaged Windows application + real native VST3 helper process + real MDA plugin; Chromium fake microphone',
+  physicalHardware: 'NOT_VERIFIED',
+  microphone: 'Chromium --use-file-for-fake-audio-capture fixture, NOT a physical microphone',
+  insertAudioSource: 'Deterministic buffer at the insert input (same mechanism as the packaged Mixer acceptance), NOT a physical instrument',
+  host: { platform: process.platform, release: os.release(), arch: process.arch, node: process.version },
+  runs: [],
+};
+
+/**
+ * Every run, including a failing one, with its full stage detail. Populated from
+ * `runOnce`'s finally block so a failure cannot lose the measurements that
+ * explain it.
+ */
+const allRuns = [];
+
+let exitCode = 0;
+for (let index = 1; index <= runs; index++) {
+  console.log(`[native-monitoring] run ${index}/${runs}`);
+  try {
+    const run = await runOnce(index, allRuns);
+    console.log(`[native-monitoring] run ${index} PASS: session=${JSON.stringify(run.stages.beforeMonitoring.native.runtimeIds)} `
+      + `node=${run.stages.beforeMonitoring.native.nodeId} blocks=${run.nativeProcessing.blocksBefore}/+${run.nativeProcessing.blocksDuringMonitoring}/+${run.nativeProcessing.blocksAfterMonitoringDisabled}`);
+  } catch (error) {
+    // A failing run is a failing acceptance. No retry converts it into a pass.
+    exitCode = 1;
+    console.error(`[native-monitoring] run ${index} FAIL: ${String(error?.message ?? error).split('\n')[0]}`);
+    break;
+  }
+}
+evidence.runs = allRuns;
+
+const passed = allRuns.filter(run => run.status === 'PASS').length;
+evidence.status = exitCode === 0 && passed === runs ? 'PASS' : 'FAIL';
+evidence.summary = { requestedRuns: runs, completedRuns: allRuns.length, passedRuns: passed,
+  failedRuns: allRuns.length - passed,
+  // Any run whose helper outlived the application is a resource-release failure.
+  helperProcessesLeakedAfterShutdown: allRuns.flatMap(run => run.helpersAfterShutdown ?? []),
+  // A clean application shutdown is part of the acceptance, not an assumption.
+  appShutdownFailures: allRuns.filter(run => run.appClosedCleanly === false).map(run => run.runIndex) };
+if (evidence.summary.helperProcessesLeakedAfterShutdown.length > 0) evidence.status = 'FAIL';
+if (evidence.summary.appShutdownFailures.length > 0) evidence.status = 'FAIL';
+
+writeFileSync(evidenceFile, JSON.stringify(evidence, null, 2));
+console.log(`[native-monitoring] ${evidence.status}: ${passed}/${runs} runs passed -> ${evidenceFile}`);
+if (process.env.GITHUB_ACTIONS) {
+  const first = evidence.runs[0];
+  if (first?.stages) {
+    console.log(`::notice title=Packaged native VST3 + live input coexistence::${JSON.stringify({
+      status: evidence.status, passedRuns: passed, requestedRuns: runs,
+      plugin: first.plugin, slotId: first.slotId,
+      nativeRuntimeIds: first.stages.beforeMonitoring.native.runtimeIds,
+      nativeNodeId: first.stages.beforeMonitoring.native.nodeId,
+      nativeProcessing: first.nativeProcessing,
+      transportPositionSeconds: {
+        before: first.stages.beforeMonitoring.transport.positionSeconds,
+        during: first.stages.duringMonitoring.transport.positionSeconds,
+        after: first.stages.afterMonitoring.transport.positionSeconds,
+      },
+      mixerTracksRebuiltByMonitoring: first.rebuildsAttributableToMonitoring,
+      deadlineMisses: first.stages.afterMonitoring.native.deadlineMisses,
+      nativeFailures: first.stages.afterMonitoring.native.failures,
+      helperProcessesLeakedAfterShutdown: evidence.summary.helperProcessesLeakedAfterShutdown,
+      physicalHardware: 'NOT_VERIFIED',
+    })}`);
+  }
+  if (evidence.status !== 'PASS') {
+    console.log(`::error title=Packaged native VST3 coexistence failed::${String(evidence.runs.find(run => run.status === 'FAIL')?.error ?? 'unknown').replaceAll('%', '%25').replaceAll('\r', '%0D').replaceAll('\n', '%0A')}`);
+  }
+}
+process.exit(exitCode);

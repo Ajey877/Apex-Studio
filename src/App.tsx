@@ -2452,6 +2452,28 @@ export function App() {
         return runLiveInputAcceptance(audioEngine);
       },
       liveInputState: () => audioEngine.liveInputMonitor.getSnapshot(),
+      /** Real project-state view of an insert's FX slots, so an acceptance run can
+       *  name the slot a UI click just created instead of guessing an index. */
+      mixerInsertSlots: (trackId: number) => (projectStateRef.current.mixerTracks
+        .find(track => track.id === trackId)?.fxSlots ?? [])
+        .map(slot => ({ id: slot.id, type: slot.type, name: slot.name, enabled: slot.enabled })),
+      // Native VST3 / live-input coexistence acceptance. Measurement only: the
+      // scenario itself is driven by the packaged acceptance script through the
+      // real Mixer and transport UI, so it exercises the shipped code path.
+      armNativeMonitoringCoexistenceProbe: async (trackId: number, slotId: string, options?: { inputSignal?: boolean }) => {
+        const { armNativeVst3MonitoringCoexistenceProbe } = await import('./audio/liveInputAcceptance');
+        armNativeVst3MonitoringCoexistenceProbe(audioEngine, trackId, slotId, options ?? {});
+        return { armed: true, trackId, slotId };
+      },
+      measureNativeMonitoringCoexistence: async (label: string) => {
+        const { measureNativeVst3MonitoringCoexistence } = await import('./audio/liveInputAcceptance');
+        return measureNativeVst3MonitoringCoexistence(audioEngine, label);
+      },
+      disarmNativeMonitoringCoexistenceProbe: async () => {
+        const { disarmNativeVst3MonitoringCoexistenceProbe } = await import('./audio/liveInputAcceptance');
+        disarmNativeVst3MonitoringCoexistenceProbe(audioEngine);
+        return { armed: false };
+      },
       addVst3Insert: async (trackId: number, effect: import('./audio/nativeVst3Types').Vst3Effect) => {
         // Tracks already carry FX slots, so the new insert is appended, not first.
         // Report its real id and index instead of letting callers guess index 0.

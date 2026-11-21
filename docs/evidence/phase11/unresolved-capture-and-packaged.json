@@ -277,5 +277,47 @@
       "windows-package": "pass"
     },
     "result": "5/5 pass"
+  },
+  "nativeMonitoringCoexistence": {
+    "status": "NOT_VERIFIED_PENDING_CI",
+    "gap": "Renderer tests and simulated bridges cannot prove that a REAL native VST3 session, already processing audio through the real Windows helper process during playback, survives live-input monitoring initialization on the same insert.",
+    "scenario": "scripts/packaged-native-monitoring-acceptance.mjs",
+    "command": "npm run test:native-monitoring-packaged",
+    "ciStep": "Packaged native VST3 + live input coexistence acceptance (Desktop Validation, Windows)",
+    "artifact": "apex-packaged-native-monitoring-evidence -> build/native-monitoring-evidence/packaged-windows-native-monitoring.json",
+    "requestedRuns": 5,
+    "localStatus": "NOT_VERIFIED (Linux host; the packaged Windows executable and the native helper process cannot run here)",
+    "whatIsReal": [
+      "packaged Electron executable from dist-electron/win-unpacked",
+      "real apex-vst3-host.exe native helper process, discovered from the Windows process table",
+      "real native plugin from the MDA VST3 bundle (mda RezFilter preferred, mda Delay fallback)",
+      "native insert created through the real Mixer UI",
+      "transport started through the real transport Play control (#fl-play-btn)",
+      "monitoring enabled and disabled through the real Mixer buttons",
+      "native processing measured from the main process per-block processAudio timings (real native input/output RMS, per-block errors) and the renderer native Mixer smoke events (worklet submissions, deadline misses)"
+    ],
+    "whatIsNotReal": [
+      "the microphone is Chromium's --use-file-for-fake-audio-capture fixture, not a physical microphone",
+      "the audio fed to the insert is a deterministic buffer at the insert input (the same mechanism the packaged Mixer acceptance uses), not a physical instrument performance",
+      "nothing here measures physical round-trip latency"
+    ],
+    "instrumentationNote": "APEX_SMOKE_TIMING_ONLY=1 enables the renderer smoke timings WITHOUT the built-in smoke entry, which finishes with app.exit() and would end an externally driven run. It changes no production DSP or native lifecycle behaviour.",
+    "failConditions": [
+      "native session identity (runtimeId set) changes",
+      "native processing node is replaced",
+      "native processed-block count does not increase during monitoring",
+      "native processed-block count does not increase after monitoring is disabled",
+      "transport stops or its position does not advance",
+      "native helper PID changes (crash or restart)",
+      "a native real-time deadline is missed",
+      "a native block fails",
+      "monitoring initialization rebuilds an already-live Mixer track",
+      "monitoring cannot be disabled cleanly",
+      "monitored input PCM is not measurably present, or is not removed on disable",
+      "microphone tracks are not all released",
+      "the application does not close cleanly or the helper outlives it"
+    ],
+    "noRetryPolicy": "A failing run fails the acceptance and stops the loop; no retry converts a failure into a pass.",
+    "probeInstrumentationVerification": "browser-tests/liveInputMonitoringCoexistenceProbe.spec.ts exercises arm/measure/disarm, the deterministic insert signal, monitored-input PCM deltas, the rebuild spy and honest reporting of unobservable native fields. It is instrumentation verification only and is NOT native VST3 evidence. It could not be executed on this host (no browser binary available and browser downloads are blocked by the network allowlist)."
   }
 }

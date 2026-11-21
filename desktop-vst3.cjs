@@ -51,7 +51,7 @@ function validateEditorRecoveryRecord(value) {
 // Explicit operations only; never accept raw host commands or executable paths
 // from renderer content. The Electron renderer remains sandboxed/isolated.
 function registerVst3({ app, ipcMain, dialog, getWindow }) {
-  const smokeTimingEnabled = process.env.APEX_SMOKE_TEST === '1';
+  const smokeTimingEnabled = process.env.APEX_SMOKE_TEST === '1' || process.env.APEX_SMOKE_TIMING_ONLY === '1';
   const smokeProcessAudioTimings = smokeTimingEnabled ? [] : null;
   let activeProcessAudioCalls = 0;
   let maximumConcurrentProcessAudioCalls = 0;

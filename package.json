@@ -40,6 +40,7 @@
     "test:live-input": "tsx --test src/audio/liveInputMonitor.test.ts",
     "test:live-input-browser": "playwright test --config=playwright.live-input.config.ts",
     "test:live-input-packaged": "node scripts/packaged-live-input-acceptance.mjs",
+    "test:native-monitoring-packaged": "node scripts/packaged-native-monitoring-acceptance.mjs",
     "test:browser:node": "node --import tsx scripts/realOfflineRenderNode.mjs",
     "native:vst3:build": "node scripts/build-native-vst3.mjs",
     "test:native-vst3": "node --import tsx --test tests/nativeVst3.test.mjs tests/vst3ProtocolIsolation.test.mjs",

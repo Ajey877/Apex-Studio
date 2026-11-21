@@ -3,7 +3,7 @@
 import type { audioEngine } from './audioEngine';
 import type { FxSlot, MixerTrack } from '../types/daw';
 import type { Vst3Effect } from './nativeVst3Types';
-import { getVst3MixerEffectDiagnostics } from './nativeVst3EffectRuntime';
+import { getNativeVst3MixerEffectSmokeTiming, getVst3MixerEffectDiagnostics } from './nativeVst3EffectRuntime';
 import { RecordingEngine } from './recordingEngine';
 import { deletePersistedAudioClip } from './audioPersistence';
 import { sessionBlobUrlRegistry } from '../state/sessionBlobUrlRegistry';
@@ -330,3 +330,189 @@ export async function runLiveInputGraphPreservationAcceptance(
     taps.forEach(tap => { try { tap.disconnect(); } catch { /* removed already */ } });
   }
 }
+
+/** One block the native helper actually processed, as the main process recorded it. */
+interface NativeProcessRecord {
+  requestId?: string;
+  trackId?: number;
+  slotId?: string;
+  sequence?: number;
+  frames?: number;
+  nativeInputRms?: number | null;
+  nativeOutputRms?: number | null;
+  nativeServiceCallMs?: number;
+  error?: string | null;
+}
+type SmokeSnapshot = { main?: { processAudio?: NativeProcessRecord[]; nativeServiceSessionCount?: number } } | null;
+
+const readSmokeSnapshot = async (): Promise<SmokeSnapshot> => {
+  const desktop = (globalThis as unknown as { desktopApp?: { smokeTest?: boolean; vst3?: { smokeTimingSnapshot?: () => Promise<SmokeSnapshot> } } }).desktopApp;
+  if (desktop?.smokeTest !== true || typeof desktop.vst3?.smokeTimingSnapshot !== 'function') return null;
+  return desktop.vst3.smokeTimingSnapshot();
+};
+
+type CoexistenceProbe = {
+  trackId: number;
+  slotId: string;
+  rebuilds: number[];
+  nodeIds: WeakMap<AudioNode, string>;
+  nodeIdCounter: number;
+  originalUpdate: (track: MixerTrack) => void;
+  inputTap: AnalyserNode;
+  outputTap: AnalyserNode;
+  splitter: AudioNode;
+  /**
+   * Deterministic signal fed to the insert input so the native plugin is provably
+   * processing non-silent audio. The plugin session and its processing are real;
+   * only the source is synthetic, exactly as the packaged Mixer acceptance feeds a
+   * deterministic buffer. It is not a physical instrument performance.
+   */
+  signal: { source: AudioBufferSourceNode; gain: GainNode } | null;
+};
+let coexistenceProbe: CoexistenceProbe | null = null;
+
+/**
+ * Arms the measurements for the native-VST3 / live-input coexistence acceptance.
+ *
+ * Installs a spy that records which Mixer tracks `updateMixerTrack` is asked to
+ * rebuild, and attaches read-only analyser taps to the insert's own input and
+ * output. Everything else is read from production diagnostics: the main-process
+ * per-block `processAudio` timings (real native plugin input/output RMS and any
+ * per-block error) and the renderer's native Mixer smoke events (worklet block
+ * submissions and real-time deadline misses).
+ */
+export function armNativeVst3MonitoringCoexistenceProbe(engine: typeof audioEngine, trackId: number, slotId: string,
+  options: { inputSignal?: boolean } = {}): void {
+  if (coexistenceProbe) throw new Error('A native coexistence probe is already armed.');
+  const context = engine.getContext();
+  const channel = engine.getOrCreateMixerChannel(trackId);
+  const splitter = context.createChannelSplitter(2);
+  const inputTap = context.createAnalyser();
+  const outputTap = context.createAnalyser();
+  inputTap.fftSize = outputTap.fftSize = 2048;
+  const rebuilds: number[] = [];
+  const originalUpdate = engine.updateMixerTrack.bind(engine);
+  const spy = (track: MixerTrack) => { rebuilds.push(track.id); return originalUpdate(track); };
+  (engine as unknown as { updateMixerTrack: typeof spy }).updateMixerTrack = spy;
+  coexistenceProbe = { trackId, slotId, rebuilds, nodeIds: new WeakMap(), nodeIdCounter: 0,
+    originalUpdate, inputTap, outputTap, splitter, signal: null };
+  channel.input.connect(inputTap);
+  channel.output.connect(splitter);
+  splitter.connect(outputTap, 0);
+  if (options.inputSignal !== false) {
+    const frames = Math.ceil(context.sampleRate);
+    const buffer = context.createBuffer(2, frames, context.sampleRate);
+    // Deliberately NOT 440 Hz: the fake capture fixture is a 440 Hz sine, and two
+    // correlated tones sum phase-dependently, which would make "monitored input
+    // is present" an unsound comparison. At 311/659 Hz the two sources are
+    // uncorrelated, so their RMS combines in quadrature and the monitored
+    // contribution is a deterministic, measurable increase.
+    for (let index = 0; index < frames; index++) {
+      const t = index / context.sampleRate;
+      buffer.getChannelData(0)[index] = Math.sin(2 * Math.PI * 311 * t) * 0.25;
+      buffer.getChannelData(1)[index] = Math.sin(2 * Math.PI * 659 * t) * 0.25;
+    }
+    const source = context.createBufferSource();
+    source.buffer = buffer;
+    source.loop = true;
+    const gain = context.createGain();
+    gain.gain.value = 1;
+    source.connect(gain);
+    gain.connect(channel.input);
+    source.start();
+    coexistenceProbe.signal = { source, gain };
+  }
+}
+
+/** Removes the probe's taps and restores `updateMixerTrack` exactly as it was. */
+export function disarmNativeVst3MonitoringCoexistenceProbe(engine: typeof audioEngine): void {
+  const probe = coexistenceProbe;
+  coexistenceProbe = null;
+  if (!probe) return;
+  (engine as unknown as { updateMixerTrack: typeof probe.originalUpdate }).updateMixerTrack = probe.originalUpdate;
+  if (probe.signal) {
+    try { probe.signal.source.stop(); } catch { /* never started or already stopped */ }
+    try { probe.signal.source.disconnect(); } catch { /* already disconnected */ }
+    try { probe.signal.gain.disconnect(); } catch { /* already disconnected */ }
+  }
+  for (const node of [probe.inputTap, probe.outputTap, probe.splitter]) {
+    try { node.disconnect(); } catch { /* already disconnected */ }
+  }
+}
+
+const analyserRms = (analyser: AnalyserNode): number => {
+  const samples = new Float32Array(analyser.fftSize);
+  analyser.getFloatTimeDomainData(samples);
+  return Math.sqrt(samples.reduce((sum, sample) => sum + sample * sample, 0) / samples.length);
+};
+
+/**
+ * Reads the live native + monitoring state once. Cumulative counters are returned
+ * so the caller can diff stages; nothing here is invented - a value that cannot be
+ * observed is reported null and named in `unverified`.
+ */
+export async function measureNativeVst3MonitoringCoexistence(engine: typeof audioEngine, label: string) {
+  const probe = coexistenceProbe;
+  if (!probe) throw new Error('Arm the native coexistence probe before measuring.');
+  const unverified: string[] = [];
+  const context = engine.getContext();
+  const snapshot = await readSmokeSnapshot();
+  if (!snapshot) unverified.push('nativeProcessingBlocks', 'nativeInputRms', 'nativeOutputRms', 'nativeServiceSessionCount',
+    'nativeSessionIdentity', 'nativeProcessingFailures');
+
+  const records = (snapshot?.main?.processAudio ?? [])
+    .filter(record => record.trackId === probe.trackId && record.slotId === probe.slotId);
+  // `requestId` is `${runtimeId}:${sequence}`; the runtime id is minted per prepared
+  // native session, so a changed set means the session was re-prepared.
+  const runtimeIds = [...new Set(records.map(record => String(record.requestId ?? '').split(':')[0]).filter(Boolean))].sort();
+  const failures = records.filter(record => record.error !== null && record.error !== undefined);
+  const finiteOutputs = records.filter(record => Number.isFinite(record.nativeOutputRms ?? NaN));
+
+  const rendererEvents = getNativeVst3MixerEffectSmokeTiming()
+    .filter(event => event.trackId === probe.trackId && event.slotId === probe.slotId);
+  const countEvents = (name: string) => rendererEvents.filter(event => event.event === name).length;
+
+  const node = engine.nativeMixerEffects.nodeFor(probe.trackId, probe.slotId, context);
+  let nodeId: string | null = null;
+  if (node) {
+    const known = probe.nodeIds.get(node as unknown as AudioNode);
+    if (known) nodeId = known;
+    else {
+      nodeId = `${probe.slotId}-node-${++probe.nodeIdCounter}`;
+      probe.nodeIds.set(node as unknown as AudioNode, nodeId);
+    }
+  }
+
+  return {
+    label,
+    atMs: performance.now(),
+    transport: engine.getTransportMusicalPosition(),
+    monitor: engine.liveInputMonitor.getSnapshot(),
+    native: {
+      prepared: engine.nativeMixerEffects.isPrepared(probe.trackId, probe.slotId, context),
+      nodePresent: !!node,
+      nodeId,
+      runtimeIds,
+      pluginLatencyFrames: engine.nativeMixerEffects.pluginLatencyFramesFor(probe.trackId, probe.slotId, context) ?? null,
+      processedBlocks: records.length,
+      maxSequence: records.reduce((max, record) => Math.max(max, Number(record.sequence ?? -1)), -1),
+      failures: failures.length,
+      failureMessages: [...new Set(failures.map(record => String(record.error)))].slice(0, 5),
+      nativeInputRmsLast: finiteOutputs.length ? records[records.length - 1]?.nativeInputRms ?? null : null,
+      nativeOutputRmsLast: finiteOutputs.length ? records[records.length - 1]?.nativeOutputRms ?? null : null,
+      nativeOutputRmsMean: finiteOutputs.length
+        ? finiteOutputs.reduce((sum, record) => sum + Number(record.nativeOutputRms), 0) / finiteOutputs.length : null,
+      nativeServiceCallMsMax: records.reduce((max, record) => Math.max(max, Number(record.nativeServiceCallMs ?? 0)), 0),
+      nativeServiceSessionCount: snapshot?.main?.nativeServiceSessionCount ?? null,
+      workletSubmissions: countEvents('worklet-submit'),
+      deadlineMisses: countEvents('pending-deadline-miss'),
+      cancelledAtStop: countEvents('renderer-request-cancelled-at-stop'),
+    },
+    pcm: { insertInputRms: analyserRms(probe.inputTap), insertOutputRms: analyserRms(probe.outputTap) },
+    mixerTracksRebuiltSinceArm: [...probe.rebuilds],
+    diagnostics: getVst3MixerEffectDiagnostics().map(item => ({ trackId: item.trackId, slotId: item.slotId, message: item.message })),
+    unverified,
+  };
+}
+
+export type NativeVst3MonitoringCoexistenceMeasurement = Awaited<ReturnType<typeof measureNativeVst3MonitoringCoexistence>>;
