@@ -313,13 +313,17 @@ async function runOnce(runIndex, collector) {
     for (;;) {
       identityAttempts++;
       try {
+        // discoverEffects only. inspectEffect opens a real native session to read
+        // parameter metadata, and that session lingers long enough to be counted in
+        // the baseline's live session gauge - which is what made the session-count
+        // comparison measure this harness instead of monitoring. Name, class ID and
+        // path are what the evidence needs and discovery alone provides them.
         run.plugin = await page.evaluate(async name => {
           const bridge = globalThis.desktopApp.vst3;
           const target = (await bridge.discoverEffects()).plugins.find(plugin => plugin.name === name);
-          if (!target) return { name, error: 'chosen plugin absent from a post-insert discovery' };
-          const inspected = await bridge.inspectEffect(target, undefined);
-          return { name: target.name, classId: target.classId, path: target.path,
-            stateSchema: inspected?.state?.schema ?? null, parameterCount: inspected?.state?.parameters?.length ?? null };
+          return target
+            ? { name: target.name, classId: target.classId, path: target.path }
+            : { name, error: 'chosen plugin absent from a post-insert discovery' };
         }, pluginName);
         break;
       } catch (error) {
@@ -354,7 +358,6 @@ async function runOnce(runIndex, collector) {
     let warmup = await page.evaluate(() => window.__apexAcceptance
       .measureNativeMonitoringCoexistence('warmup'));
     let priorBlocks = warmup.native.processedBlocks;
-    let priorSessions = warmup.native.nativeServiceSessionCount;
     await page.waitForTimeout(500);
     warmup = await page.evaluate(() => window.__apexAcceptance
       .measureNativeMonitoringCoexistence('warmup'));
@@ -366,12 +369,18 @@ async function runOnce(runIndex, collector) {
     // (observed: before=3 during=1 afterDisable=1, and before=1 during=2).
     // Requiring the count to be unchanged between consecutive samples makes the
     // reference stable; it does not relax the comparison itself.
+    // With exactly one native insert in the project, exactly one native session is
+    // live at steady state. Waiting only for "unchanged between two samples" was
+    // not enough: a leftover inspect session from the shipped picker's own
+    // inspectEffect survived that window and closed later, so the baseline was 2
+    // and monitoring was blamed for the drop to 1 (before=2 during=1 after=1, on
+    // code byte-identical to a 5-of-5 pass). Waiting for the count to reach 1 makes
+    // the reference the steady state rather than a snapshot of teardown in progress.
     const settled = () => warmup.native.prepared
       && warmup.native.processedBlocks > priorBlocks
-      && warmup.native.nativeServiceSessionCount === priorSessions;
+      && warmup.native.nativeServiceSessionCount === 1;
     while (Date.now() - warmupStartedAt < 60000 && !settled()) {
       priorBlocks = warmup.native.processedBlocks;
-      priorSessions = warmup.native.nativeServiceSessionCount;
       await page.waitForTimeout(500);
       warmup = await page.evaluate(() => window.__apexAcceptance
         .measureNativeMonitoringCoexistence('warmup'));
@@ -379,7 +388,11 @@ async function runOnce(runIndex, collector) {
     run.warmup = { waitedMs: Date.now() - warmupStartedAt, prepared: warmup.native.prepared,
       processedBlocks: warmup.native.processedBlocks, runtimeIds: warmup.native.runtimeIds,
       nativeServiceSessionCount: warmup.native.nativeServiceSessionCount,
-      settledSessionCount: warmup.native.nativeServiceSessionCount === priorSessions };
+      reachedSingleSessionSteadyState: warmup.native.nativeServiceSessionCount === 1 };
+    assert.equal(run.warmup.nativeServiceSessionCount, 1,
+      `Expected exactly one live native session at steady state with a single native insert, found `
+      + `${run.warmup.nativeServiceSessionCount} after ${run.warmup.waitedMs} ms. A leftover session means `
+      + 'short-lived inspect sessions are not being released promptly.');
 
     stages.beforeMonitoring = await page.evaluate(label => window.__apexAcceptance
       .measureNativeMonitoringCoexistence(label), 'beforeMonitoring');
