@@ -303,14 +303,32 @@ async function runOnce(runIndex, collector) {
     run.insertSlotsOnTrack1 = await page.evaluate(() => window.__apexAcceptance.mixerInsertSlots(1));
     // Identity is read now that the picker is closed and no scan can overlap.
     stage(run, 'plugin-identity');
-    run.plugin = await page.evaluate(async name => {
-      const bridge = globalThis.desktopApp.vst3;
-      const target = (await bridge.discoverEffects()).plugins.find(plugin => plugin.name === name);
-      if (!target) return { name, error: 'chosen plugin absent from a post-insert discovery' };
-      const inspected = await bridge.inspectEffect(target, undefined);
-      return { name: target.name, classId: target.classId, path: target.path,
-        stateSchema: inspected?.state?.schema ?? null, parameterCount: inspected?.state?.parameters?.length ?? null };
-    }, pluginName);
+    // Vst3Service serializes discovery per owner, so an application-initiated scan
+    // makes this read fail with "A VST3 scan is already running". That is a
+    // documented transient of the discovery API, not a product failure and not an
+    // assertion about the scenario, so wait it out - bounded, only for that exact
+    // error, and the wait is recorded. Anything else fails immediately.
+    const identityStartedAt = Date.now();
+    let identityAttempts = 0;
+    for (;;) {
+      identityAttempts++;
+      try {
+        run.plugin = await page.evaluate(async name => {
+          const bridge = globalThis.desktopApp.vst3;
+          const target = (await bridge.discoverEffects()).plugins.find(plugin => plugin.name === name);
+          if (!target) return { name, error: 'chosen plugin absent from a post-insert discovery' };
+          const inspected = await bridge.inspectEffect(target, undefined);
+          return { name: target.name, classId: target.classId, path: target.path,
+            stateSchema: inspected?.state?.schema ?? null, parameterCount: inspected?.state?.parameters?.length ?? null };
+        }, pluginName);
+        break;
+      } catch (error) {
+        const message = String(error?.message ?? error);
+        if (!message.includes('A VST3 scan is already running') || Date.now() - identityStartedAt > 60000) throw error;
+        await page.waitForTimeout(1000);
+      }
+    }
+    run.pluginIdentityRead = { attempts: identityAttempts, waitedMs: Date.now() - identityStartedAt };
 
     stage(run, 'transport-play');
     // Start the transport through the real Play control. Production code prepares
