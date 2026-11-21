@@ -118,9 +118,30 @@ async function addNativeInsertThroughMixerUi(page, pluginName) {
 
   const trackStrip = page.locator('#mixer-strip-1');
   await trackStrip.waitFor({ state: 'visible', timeout: 30000 });
-  await trackStrip.click({ timeout: 15000 });
-  ui.selectedTrackStrip = '#mixer-strip-1';
+  // Select the track through its `INS 1` label, NOT by clicking the strip
+  // container. The strip's centre is the volume fader, which calls
+  // stopPropagation, so a container click never reaches the strip's
+  // onSelectTrack: selectedTrackId stays at its default 0 (Master) and the
+  // insert is silently created on Master instead of Mixer insert 1.
+  // The FX panel is rendered once, for `selectedTrack`; its header is a span of
+  // the form `FX SLOTS (<SELECTED TRACK NAME>)`, so it names the track that will
+  // receive the next insert.
+  const fxHeader = page.locator('span').filter({ hasText: /^FX SLOTS \(/ }).first();
+  const headerBefore = await fxHeader.innerText().catch(() => null);
+  ui.fxSlotsHeaderBeforeSelection = headerBefore;
+  const insLabel = trackStrip.getByText('INS 1', { exact: true });
+  await insLabel.waitFor({ state: 'visible', timeout: 15000 });
+  await insLabel.click({ timeout: 15000 });
+  ui.selectedTrackStrip = '#mixer-strip-1 (INS 1 label)';
   await page.waitForTimeout(300);
+  const headerAfter = await fxHeader.innerText().catch(() => null);
+  ui.fxSlotsHeaderAfterSelection = headerAfter;
+  // Prove the selection actually moved off Master before creating anything. The
+  // FX panel is driven by selectedTrack, so its header names the track that will
+  // receive the insert.
+  assert.ok(headerAfter && headerAfter !== headerBefore,
+    `Clicking INS 1 did not change the selected Mixer track (FX panel still reads ${JSON.stringify(headerAfter)}). `
+    + 'The insert would land on the previously selected track.');
 
   const addEffect = page.getByTitle('Add Effect Plugin').first();
   await addEffect.waitFor({ state: 'visible', timeout: 15000 });
@@ -138,8 +159,16 @@ async function addNativeInsertThroughMixerUi(page, pluginName) {
   const pluginButton = page.getByRole('button', { name: new RegExp(escaped) }).first();
   await pluginButton.waitFor({ state: 'visible', timeout: 60000 });
   ui.pickerRowLabel = await pluginButton.innerText().catch(() => '');
+  const statusLocator = page.locator('[aria-label="VST3 effect picker"] [role="status"]').first();
+  ui.pickerStatusBeforeChoose = await statusLocator.innerText().catch(() => '');
   await pluginButton.click({ timeout: 60000 });
   ui.chosePluginFromPicker = true;
+  // `choose()` is async: it opens the plugin in the native helper to read its
+  // metadata, and on failure reports the reason in the picker's status line while
+  // adding nothing. Give it the time it needs, then record what it said - that
+  // text is the shipped explanation for "no insert appeared".
+  await page.waitForTimeout(4000);
+  ui.pickerStatusAfterChoose = await statusLocator.innerText().catch(() => 'picker closed');
   return ui;
 }
 
@@ -226,11 +255,32 @@ async function runOnce(runIndex, collector) {
     run.mixerUi = await addNativeInsertThroughMixerUi(page, pluginName);
     // The insert reaches project state through the real mutation path; wait for
     // that instead of assuming the next read already sees it.
-    const readNativeSlots = () => page.evaluate(() => window.__apexAcceptance.mixerInsertSlots(1)
-      .filter(slot => slot.type === 'vst3' && slot.enabled));
-    await expect.poll(async () => (await readNativeSlots()).length, { timeout: 60000,
-      message: 'the native insert created through the Mixer UI never reached project state' }).toBe(1);
-    const nativeSlots = await readNativeSlots();
+    // Read every Mixer track, not only track 1: if the insert landed somewhere
+    // else the failure must name where, not report that nothing appeared.
+    const readAllVst3Slots = () => page.evaluate(() => [0, 1, 2, 3, 4, 5, 6, 7, 8].flatMap(trackId =>
+      window.__apexAcceptance.mixerInsertSlots(trackId)
+        .filter(slot => slot.type === 'vst3' && slot.enabled)
+        .map(slot => ({ trackId, ...slot }))));
+    // Manual poll rather than expect.poll: on timeout the message has to carry the
+    // picker's own status line and every track's slots, because that is the only
+    // evidence available when this job's log and artifact cannot be retrieved.
+    const deadline = Date.now() + 60000;
+    let placed = await readAllVst3Slots();
+    while (placed.length !== 1 && Date.now() < deadline) {
+      await page.waitForTimeout(500);
+      placed = await readAllVst3Slots();
+    }
+    if (placed.length !== 1) {
+      const slotsByTrack = await page.evaluate(() => Object.fromEntries([0, 1, 2, 3, 4, 5, 6, 7, 8]
+        .map(trackId => [trackId, window.__apexAcceptance.mixerInsertSlots(trackId)])));
+      assert.fail('The native insert created through the Mixer UI never reached project state. '
+        + `Picker status after choose: ${JSON.stringify(run.mixerUi?.pickerStatusAfterChoose ?? null)}. `
+        + `All Mixer FX slots: ${JSON.stringify(slotsByTrack)}`);
+    }
+    assert.equal(placed[0].trackId, 1,
+      `The Mixer UI placed the native insert on track ${placed[0].trackId}, not Mixer insert 1. `
+      + `Picker status after choose: ${JSON.stringify(run.mixerUi?.pickerStatusAfterChoose ?? null)}`);
+    const nativeSlots = placed;
     const slotId = nativeSlots[0].id;
     run.slotId = slotId;
     run.insertSlotsOnTrack1 = await page.evaluate(() => window.__apexAcceptance.mixerInsertSlots(1));
