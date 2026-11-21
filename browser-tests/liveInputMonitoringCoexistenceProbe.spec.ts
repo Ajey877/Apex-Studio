@@ -21,7 +21,13 @@ type AcceptanceSurface = {
   disarmNativeMonitoringCoexistenceProbe: () => Promise<unknown>;
   liveInputState: () => Promise<{ status: string }>;
 };
-const surface = () => (window as unknown as { __apexAcceptance: AcceptanceSurface }).__apexAcceptance;
+/**
+ * Every call below reaches `window.__apexAcceptance` from INSIDE the evaluate
+ * callback. Playwright serializes only the arrow function it is handed, so a
+ * module-scope helper is `undefined` in the browser - this spec failed in CI with
+ * exactly that (`ReferenceError: surface is not defined`) until the access was
+ * inlined. `AcceptanceSurface` is a type and is erased at runtime, so it is safe.
+ */
 
 /**
  * Exercises the measurement surface that the packaged native VST3 + live-input
@@ -48,9 +54,9 @@ test('coexistence probe measures insert PCM and reports native fields as unverif
   await page.getByRole('button', { name: 'Close Audio Settings', exact: true }).click();
   await page.locator('#nav-mixer').click();
 
-  await page.evaluate(() => surface().armNativeMonitoringCoexistenceProbe(1, 'probe-slot', { inputSignal: true }));
+  await page.evaluate(() => (window as unknown as { __apexAcceptance: AcceptanceSurface }).__apexAcceptance.armNativeMonitoringCoexistenceProbe(1, 'probe-slot', { inputSignal: true }));
   try {
-    const before = await page.evaluate(() => surface().measureNativeMonitoringCoexistence('before'));
+    const before = await page.evaluate(() => (window as unknown as { __apexAcceptance: AcceptanceSurface }).__apexAcceptance.measureNativeMonitoringCoexistence('before'));
 
     // The deterministic insert signal must be measurably present on the insert input.
     expect(before.pcm.insertInputRms, 'deterministic insert signal reaches the insert input').toBeGreaterThan(0.05);
@@ -67,7 +73,7 @@ test('coexistence probe measures insert PCM and reports native fields as unverif
     await page.getByRole('button', { name: 'Enable monitoring on this insert' }).click();
     await expect(page.getByRole('region', { name: 'Live audio input' })).toContainText('Active');
     await page.waitForTimeout(600);
-    const during = await page.evaluate(() => surface().measureNativeMonitoringCoexistence('during'));
+    const during = await page.evaluate(() => (window as unknown as { __apexAcceptance: AcceptanceSurface }).__apexAcceptance.measureNativeMonitoringCoexistence('during'));
     expect(during.monitor.status).toBe('active');
     expect(during.pcm.insertInputRms, 'monitored microphone adds to the insert input')
       .toBeGreaterThan(before.pcm.insertInputRms * 1.03);
@@ -75,9 +81,9 @@ test('coexistence probe measures insert PCM and reports native fields as unverif
     // Disabling must remove the monitored contribution and leave the signal intact.
     await page.locator('#mixer-strip-1').getByText('INS 1', { exact: true }).click();
     await page.getByRole('button', { name: 'Disable monitoring' }).click();
-    await expect.poll(async () => (await page.evaluate(() => surface().liveInputState())).status).toBe('off');
+    await expect.poll(async () => (await page.evaluate(() => (window as unknown as { __apexAcceptance: AcceptanceSurface }).__apexAcceptance.liveInputState())).status).toBe('off');
     await page.waitForTimeout(600);
-    const after = await page.evaluate(() => surface().measureNativeMonitoringCoexistence('after'));
+    const after = await page.evaluate(() => (window as unknown as { __apexAcceptance: AcceptanceSurface }).__apexAcceptance.measureNativeMonitoringCoexistence('after'));
     expect(after.monitor.status).toBe('off');
     expect(after.pcm.insertInputRms, 'monitored input removed on disable')
       .toBeLessThan(during.pcm.insertInputRms * 0.97);
@@ -88,6 +94,6 @@ test('coexistence probe measures insert PCM and reports native fields as unverif
       unverified: before.unverified,
     }));
   } finally {
-    await page.evaluate(() => surface().disarmNativeMonitoringCoexistenceProbe());
+    await page.evaluate(() => (window as unknown as { __apexAcceptance: AcceptanceSurface }).__apexAcceptance.disarmNativeMonitoringCoexistenceProbe());
   }
 });

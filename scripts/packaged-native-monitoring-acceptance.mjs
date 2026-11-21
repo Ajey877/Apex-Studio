@@ -26,7 +26,7 @@
 // behaviour is changed by that flag.
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -100,6 +100,13 @@ function helperProcesses() {
 
 const helperPids = () => helperProcesses().processes.map(process => process.pid).sort((a, b) => a - b);
 
+/**
+ * Records progress so a failure names the stage it died in. CI logs and artifacts
+ * for this job are not always retrievable, so the evidence file itself has to say
+ * how far the run got rather than leaving that to a log nobody can read.
+ */
+const stage = (run, name) => { run.lastStage = name; };
+
 /** Add the native insert through the real Mixer UI, in the order a user does. */
 async function addNativeInsertThroughMixerUi(page, pluginName) {
   const ui = {};
@@ -150,14 +157,21 @@ async function runOnce(runIndex, collector) {
   const args = ['--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream',
     `--use-file-for-fake-audio-capture=${fixture}`, '--autoplay-policy=no-user-gesture-required'];
 
-  const run = { runIndex, status: 'RUNNING', executable, profile };
+  const run = { runIndex, status: 'RUNNING', executable, profile, lastStage: 'start' };
   let app;
+  let page;
+  const consoleErrors = [];
   const stages = {};
   try {
+    stage(run, 'launch');
     app = await _electron.launch({ executablePath: executable, env, args, timeout: 180000 });
     run.version = await app.evaluate(({ app: electronApp }) => electronApp.getVersion()).catch(() => null);
-    const page = await app.firstWindow();
+    stage(run, 'first-window');
+    page = await app.firstWindow();
     page.on('dialog', dialog => dialog.accept());
+    page.on('console', message => { if (message.type() === 'error') consoleErrors.push(message.text().slice(0, 400)); });
+    page.on('pageerror', error => consoleErrors.push(`pageerror: ${String(error?.message ?? error).slice(0, 400)}`));
+    stage(run, 'acceptance-surface');
     await page.waitForFunction(() => !!window.__apexAcceptance, null, { timeout: 120000 });
 
     // Record which microphone streams the app opened, so release is provable.
@@ -173,6 +187,7 @@ async function runOnce(runIndex, collector) {
       };
     });
 
+    stage(run, 'audio-settings');
     // Audio engine at the pinned 48 kHz reference with the fake capture device.
     await page.getByRole('menuitem', { name: 'Audio', exact: true }).click();
     await page.getByRole('menuitem', { name: 'Audio Settings…', exact: true }).click();
@@ -182,6 +197,7 @@ async function runOnce(runIndex, collector) {
     await expect(page.getByTestId('audio-actual-sample-rate')).toContainText('48,000');
     await page.getByRole('button', { name: 'Close Audio Settings', exact: true }).click();
 
+    stage(run, 'discover-plugin');
     // Discover the real plugin through the packaged preload bridge.
     const discovered = await page.evaluate(async () => {
       const bridge = globalThis.desktopApp?.vst3;
@@ -202,8 +218,10 @@ async function runOnce(runIndex, collector) {
     }, pluginName);
     run.plugin = identity;
 
+    stage(run, 'helpers-before-insert');
     run.helpersBeforeInsert = helperPids();
 
+    stage(run, 'mixer-ui-insert');
     // Real native insert on Mixer insert 1, through the real Mixer UI.
     run.mixerUi = await addNativeInsertThroughMixerUi(page, pluginName);
     // The insert reaches project state through the real mutation path; wait for
@@ -217,6 +235,7 @@ async function runOnce(runIndex, collector) {
     run.slotId = slotId;
     run.insertSlotsOnTrack1 = await page.evaluate(() => window.__apexAcceptance.mixerInsertSlots(1));
 
+    stage(run, 'transport-play');
     // Start the transport through the real Play control. Production code prepares
     // the native session here - the plugin is NOT prepared after monitoring starts.
     // `#fl-play-btn` is the shipped transport control; its aria-label flips to
@@ -226,6 +245,7 @@ async function runOnce(runIndex, collector) {
     await playButton.click({ timeout: 30000 });
     await expect(playButton).toHaveAttribute('aria-label', 'Pause', { timeout: 60000 });
 
+    stage(run, 'arm-probe');
     await page.evaluate(([track, slot]) => window.__apexAcceptance
       .armNativeMonitoringCoexistenceProbe(track, slot, { inputSignal: true }), [1, slotId]);
     // Let the native session reach steady-state processing before the baseline.
@@ -235,6 +255,7 @@ async function runOnce(runIndex, collector) {
       .measureNativeMonitoringCoexistence(label), 'beforeMonitoring');
     run.helpersBeforeMonitoring = helperPids();
 
+    stage(run, 'enable-monitoring');
     // THE TRANSITION UNDER TEST: monitoring on the SAME insert, during playback.
     const rebuildsBefore = stages.beforeMonitoring.mixerTracksRebuiltSinceArm.length;
     await page.locator('#mixer-strip-1').getByText('INS 1', { exact: true }).click();
@@ -247,6 +268,7 @@ async function runOnce(runIndex, collector) {
     run.helpersDuringMonitoring = helperPids();
     run.monitorStatusDuring = await page.evaluate(() => window.__apexAcceptance.liveInputState());
 
+    stage(run, 'disable-monitoring');
     // Disable monitoring through the real Mixer button.
     await page.locator('#mixer-strip-1').getByText('INS 1', { exact: true }).click();
     await page.getByRole('button', { name: 'Disable monitoring' }).click({ timeout: 30000 });
@@ -268,6 +290,7 @@ async function runOnce(runIndex, collector) {
     run.stages = stages;
     run.rebuildsAttributableToMonitoring = stages.duringMonitoring.mixerTracksRebuiltSinceArm.slice(rebuildsBefore);
 
+    stage(run, 'assertions');
     // ---- assertions: any one of these failing is a FAIL, never retried away ----
     const before = stages.beforeMonitoring;
     const during = stages.duringMonitoring;
@@ -352,6 +375,7 @@ async function runOnce(runIndex, collector) {
     assert.ok(run.resources.tracks.every(state => state === 'ended'),
       `Microphone tracks were not all released: ${JSON.stringify(run.resources.tracks)}`);
 
+    stage(run, 'complete');
     run.diagnosticsAtEnd = after.diagnostics;
     run.status = 'PASS';
     return run;
@@ -359,6 +383,21 @@ async function runOnce(runIndex, collector) {
     run.status = 'FAIL';
     run.error = `${error?.message ?? error}`.split('\n').slice(0, 12).join(' | ');
     run.stages = stages;
+    // Capture what the app was actually showing. This is the only failure detail
+    // that survives when the CI log and the evidence artifact cannot be fetched.
+    try {
+      run.failureContext = { rendererConsoleErrors: consoleErrors.slice(0, 25) };
+      if (page) {
+        const shot = path.join(evidenceDir, `failure-run${runIndex}.png`);
+        await page.screenshot({ path: shot, timeout: 20000 }).catch(() => {});
+        if (existsSync(shot)) run.failureContext.screenshot = shot;
+        run.failureContext.url = page.url();
+        run.failureContext.acceptanceAvailable = await page
+          .evaluate(() => typeof window.__apexAcceptance === 'object').catch(() => null);
+        run.failureContext.monitorStatus = await page
+          .evaluate(() => window.__apexAcceptance?.liveInputState?.() ?? null).catch(() => null);
+      }
+    } catch { /* failure context is best-effort; the assertion message is authoritative */ }
     throw error;
   } finally {
     if (app) {
@@ -426,29 +465,67 @@ if (evidence.summary.appShutdownFailures.length > 0) evidence.status = 'FAIL';
 
 writeFileSync(evidenceFile, JSON.stringify(evidence, null, 2));
 console.log(`[native-monitoring] ${evidence.status}: ${passed}/${runs} runs passed -> ${evidenceFile}`);
+// A GitHub step summary is written even on failure, because this job's logs and
+// artifacts redirect to blob storage that is not always reachable - the summary is
+// the one failure detail that is reliably visible on the run page.
+const summaryPath = process.env.GITHUB_STEP_SUMMARY;
+const summaryLines = [
+  `## Packaged native VST3 + live-input coexistence: ${evidence.status}`,
+  '',
+  `- requested runs: ${runs}, completed: ${allRuns.length}, passed: ${passed}`,
+  `- microphone: Chromium fake capture fixture (NOT physical hardware)`,
+  `- insert audio source: deterministic buffer at the insert input (NOT a physical instrument)`,
+];
+for (const run of allRuns) {
+  const before = run.stages?.beforeMonitoring;
+  summaryLines.push('', `### Run ${run.runIndex} — ${run.status} (last stage: ${run.lastStage ?? 'unknown'})`);
+  if (run.error) summaryLines.push('', '```', String(run.error).slice(0, 2000), '```');
+  if (before?.native) {
+    summaryLines.push('', `- native session identity: \`${JSON.stringify(before.native.runtimeIds)}\``,
+      `- native node id: \`${before.native.nodeId}\``,
+      `- native blocks before/during/after: ${run.nativeProcessing?.blocksBefore} / +${run.nativeProcessing?.blocksDuringMonitoring} / +${run.nativeProcessing?.blocksAfterMonitoringDisabled}`,
+      `- transport position s: ${before.transport.positionSeconds} -> ${run.stages.duringMonitoring?.transport?.positionSeconds} -> ${run.stages.afterMonitoring?.transport?.positionSeconds}`,
+      `- mixer tracks rebuilt by monitoring init: \`${JSON.stringify(run.rebuildsAttributableToMonitoring)}\``,
+      `- deadline misses: ${run.stages.afterMonitoring?.native?.deadlineMisses}, native failures: ${run.stages.afterMonitoring?.native?.failures}`);
+  }
+  summaryLines.push(`- helper PIDs before/during/after/after-shutdown: ${JSON.stringify(run.helpersBeforeMonitoring ?? [])} / ${JSON.stringify(run.helpersDuringMonitoring ?? [])} / ${JSON.stringify(run.helpersAfterMonitoring ?? [])} / ${JSON.stringify(run.helpersAfterShutdown ?? [])}`);
+  if (run.failureContext?.rendererConsoleErrors?.length) {
+    summaryLines.push('', '<details><summary>renderer console errors</summary>', '', '```',
+      run.failureContext.rendererConsoleErrors.join('\n').slice(0, 3000), '```', '', '</details>');
+  }
+}
+if (summaryPath) {
+  try { appendFileSync(summaryPath, `${summaryLines.join('\n')}\n`); } catch { /* summary is best-effort */ }
+}
+
 if (process.env.GITHUB_ACTIONS) {
-  const first = evidence.runs[0];
-  if (first?.stages) {
+  // Null-safe by construction: a run that failed before producing stages must
+  // still report. Guarding on `first.stages` alone is not enough because an empty
+  // object is truthy, and that crash previously suppressed the error annotation.
+  const first = allRuns[0];
+  const before = first?.stages?.beforeMonitoring;
+  if (before?.native) {
     console.log(`::notice title=Packaged native VST3 + live input coexistence::${JSON.stringify({
       status: evidence.status, passedRuns: passed, requestedRuns: runs,
       plugin: first.plugin, slotId: first.slotId,
-      nativeRuntimeIds: first.stages.beforeMonitoring.native.runtimeIds,
-      nativeNodeId: first.stages.beforeMonitoring.native.nodeId,
+      nativeRuntimeIds: before.native.runtimeIds,
+      nativeNodeId: before.native.nodeId,
       nativeProcessing: first.nativeProcessing,
       transportPositionSeconds: {
-        before: first.stages.beforeMonitoring.transport.positionSeconds,
-        during: first.stages.duringMonitoring.transport.positionSeconds,
-        after: first.stages.afterMonitoring.transport.positionSeconds,
+        before: before.transport.positionSeconds,
+        during: first.stages.duringMonitoring?.transport?.positionSeconds ?? null,
+        after: first.stages.afterMonitoring?.transport?.positionSeconds ?? null,
       },
       mixerTracksRebuiltByMonitoring: first.rebuildsAttributableToMonitoring,
-      deadlineMisses: first.stages.afterMonitoring.native.deadlineMisses,
-      nativeFailures: first.stages.afterMonitoring.native.failures,
+      deadlineMisses: first.stages.afterMonitoring?.native?.deadlineMisses ?? null,
+      nativeFailures: first.stages.afterMonitoring?.native?.failures ?? null,
       helperProcessesLeakedAfterShutdown: evidence.summary.helperProcessesLeakedAfterShutdown,
       physicalHardware: 'NOT_VERIFIED',
     })}`);
   }
   if (evidence.status !== 'PASS') {
-    console.log(`::error title=Packaged native VST3 coexistence failed::${String(evidence.runs.find(run => run.status === 'FAIL')?.error ?? 'unknown').replaceAll('%', '%25').replaceAll('\r', '%0D').replaceAll('\n', '%0A')}`);
+    const failed = allRuns.find(run => run.status === 'FAIL');
+    console.log(`::error title=Packaged native VST3 coexistence failed at stage '${failed?.lastStage ?? 'unknown'}'::${String(failed?.error ?? 'unknown').replaceAll('%', '%25').replaceAll('\r', '%0D').replaceAll('\n', '%0A')}`);
   }
 }
 process.exit(exitCode);
