@@ -449,8 +449,19 @@ async function runOnce(runIndex, collector) {
     const failures = after.native.failures - before.native.failures;
     assert.equal(deadlineMisses, 0, `Native processing missed ${deadlineMisses} real-time deadline(s).`);
     assert.equal(failures, 0, `Native processing failed ${failures} block(s): ${JSON.stringify(after.native.failureMessages)}`);
+    // sessionCount is a live gauge of open + pending + closing sessions
+    // (native/vst3/service.mjs:41), so a change means a session was really opened
+    // or retired. startLiveInputMonitoring calls nativeMixerEffects.ensureTracksPrepared
+    // (src/audio/audioEngine.ts:1295), which opens a native session for any track it
+    // judges absent or stale - name that mechanism and all three counts so the
+    // finding is actionable and a transient is distinguishable from a leak.
     assert.deepEqual(during.native.nativeServiceSessionCount, before.native.nativeServiceSessionCount,
-      'Native helper session count changed when monitoring was enabled.');
+      'Native helper session count changed when monitoring was enabled. '
+      + `before=${before.native.nativeServiceSessionCount} during=${during.native.nativeServiceSessionCount} `
+      + `afterDisable=${after.native.nativeServiceSessionCount} `
+      + `(a return to the baseline means a transient open during init; a higher value means a leak). `
+      + `tracksRebuiltByMonitoringInit=${JSON.stringify(run.rebuildsAttributableToMonitoring)}; `
+      + `nativeRuntimeIds before=${JSON.stringify(before.native.runtimeIds)} during=${JSON.stringify(during.native.runtimeIds)}.`);
     assert.deepEqual(run.helpersDuringMonitoring, run.helpersBeforeMonitoring,
       'Native helper process changed when monitoring was enabled (crash or restart).');
     assert.deepEqual(run.helpersAfterMonitoring, run.helpersBeforeMonitoring,
