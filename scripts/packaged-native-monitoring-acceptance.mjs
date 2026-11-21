@@ -325,8 +325,29 @@ async function runOnce(runIndex, collector) {
     stage(run, 'arm-probe');
     await page.evaluate(([track, slot]) => window.__apexAcceptance
       .armNativeMonitoringCoexistenceProbe(track, slot, { inputSignal: true }), [1, slotId]);
-    // Let the native session reach steady-state processing before the baseline.
-    await page.waitForTimeout(1500);
+    // Preparing the native session is asynchronous: starting the transport opens
+    // the plugin in the helper process. A fixed delay is not enough under CI load,
+    // and measuring too early reported an unprepared insert as a coexistence
+    // failure (3 of 5 runs passed, then one measured prepared === false). Wait for
+    // the insert to be prepared AND for its processed-block count to advance, which
+    // is what "actively processing" means. This relaxes nothing: if preparation
+    // never completes the wait expires and the baseline assertions still fail.
+    const warmupStartedAt = Date.now();
+    let warmup = await page.evaluate(() => window.__apexAcceptance
+      .measureNativeMonitoringCoexistence('warmup'));
+    let priorBlocks = warmup.native.processedBlocks;
+    await page.waitForTimeout(500);
+    warmup = await page.evaluate(() => window.__apexAcceptance
+      .measureNativeMonitoringCoexistence('warmup'));
+    while (Date.now() - warmupStartedAt < 60000
+      && !(warmup.native.prepared && warmup.native.processedBlocks > priorBlocks)) {
+      priorBlocks = warmup.native.processedBlocks;
+      await page.waitForTimeout(500);
+      warmup = await page.evaluate(() => window.__apexAcceptance
+        .measureNativeMonitoringCoexistence('warmup'));
+    }
+    run.warmup = { waitedMs: Date.now() - warmupStartedAt, prepared: warmup.native.prepared,
+      processedBlocks: warmup.native.processedBlocks, runtimeIds: warmup.native.runtimeIds };
 
     stages.beforeMonitoring = await page.evaluate(label => window.__apexAcceptance
       .measureNativeMonitoringCoexistence(label), 'beforeMonitoring');
