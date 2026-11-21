@@ -281,17 +281,17 @@ so RMS combines in quadrature and the monitored contribution is a deterministic 
 
 ### Verified result
 
-Commit `41e0924728ba7676598ad94b5937c3d5082bb813`, Desktop Validation job `136829011547`,
-step **Packaged native VST3 + live input coexistence acceptance** = `success`, **5 of 5 runs
-passed** with no retry (the loop stops on the first failure). Evidence for run 1:
+Commit `5dae1be`, Desktop Validation job `136847403345`, step **Packaged native VST3 + live
+input coexistence acceptance** = `success`, **5 of 5 runs passed** with no retry (the loop stops
+on the first failure), and all five checks on that commit are green. Evidence for run 1:
 
 | measured | value |
 | --- | --- |
 | plugin fixture | `mda RezFilter`, class ID `5653546D6461466D64612072657A6669`, `build/native-vst3/VST3/Release/mda-vst3.vst3` |
-| native session runtime ids | `["5458f68c-e494-4969-b067-0de3f987c411"]` — asserted identical before, during and after |
-| native processing node | `vst3-fx-fdea5d61-…-node-1` — asserted identical across all three stages |
-| native processed blocks | 24 before → +81 during monitoring → +80 after disable |
-| transport position | 0.4447 s → 2.1780 s → 3.8767 s, playing at every stage |
+| native session runtime ids | `["9553cdb1-5dda-445e-8d5f-b7b43eb5321a"]` — asserted identical before, during and after |
+| native processing node | `vst3-fx-03fe97f0-…-node-1` — asserted identical across all three stages |
+| native processed blocks | 23 before → +78 during monitoring → +77 after disable |
+| transport position | 0.4420 s → 2.1060 s → 3.7487 s, playing at every stage |
 | Mixer tracks rebuilt by monitoring init | `[]` |
 | native deadline misses / block failures | 0 / 0 |
 | helper processes leaked after shutdown | `[]`, application closed cleanly |
@@ -303,7 +303,10 @@ the same insert and then disabled — with no Mixer track rebuilt and no helper 
 
 ### Defects this scenario caught in its own harness
 
-Four were found and fixed while bringing it up; none of them were in the native lifecycle:
+Six were found and fixed while bringing it up; none of them were in the native lifecycle. The
+first four were found on the way to the first 5-of-5 pass on `41e0924`; the last two were found
+when the identical code then failed intermittently (proven identical: `git diff 41e0924 608adaf`
+touches only two files under `docs/evidence/phase11/`).
 
 1. **Wrong Mixer track.** The harness clicked the `#mixer-strip-1` container. Its centre is the
    volume fader, whose `onClick` calls `stopPropagation`, so `onSelectTrack` never fired and
@@ -322,6 +325,17 @@ Four were found and fixed while bringing it up; none of them were in the native 
    native session is asynchronous; one run in five measured `prepared === false`. It now waits
    until the insert is prepared *and* its processed-block count advances, bounded at 60 s. No
    assertion was relaxed and no retry was added.
+
+5. **Identity read collided with an application scan.** The extra discovery made only to record
+   the fixture's class ID and path failed intermittently with `A VST3 scan is already running`.
+   That call now waits the scan out — bounded at 60 s, only for that exact error, with attempts
+   and wait recorded. A transient of the discovery API, not an assertion about the scenario.
+6. **Unstable session-count baseline.** Observed `before=3 during=1 afterDisable=1` on one run
+   and `before=1 during=2` on another. Reading the fixture opens short-lived inspect sessions and
+   `sessionCount` is a live gauge of open + pending + closing sessions
+   (`native/vst3/service.mjs:41`), so an early baseline measured this harness's own inspect-session
+   teardown, not anything monitoring did. The baseline is now taken only once the count is
+   unchanged between two consecutive samples. The insert's own session was never in doubt.
 
 **Product observation, deliberately not fixed here (out of scope):** a user who opens the VST3
 picker while any discovery scan is in flight gets that same permanent `Scan failed` state with
