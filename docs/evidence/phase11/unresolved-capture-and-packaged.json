@@ -1,0 +1,366 @@
+{
+  "status": "CAPTURE_AND_GRAPH_RESOLVED_PACKAGED_CI_NOW_PASSING_ARTIFACT_CONTENTS_UNREAD_HERE",
+  "note": "Original failed-run evidence is preserved verbatim below. Nothing was rewritten to look green.",
+  "captureGap": {
+    "status": "RESOLVED",
+    "rootCause": "recordingCaptureWorklet.ts stamped every PCM packet with AudioWorkletGlobalScope.currentFrame, treating it as a per-render-quantum frame cursor. It is not one in this Chrome configuration: the audio thread runs several 128-frame quanta per audio-device buffer and only refreshes currentFrame/currentTime at the start of that buffer. Consecutive process() calls therefore reported the SAME currentFrame and the next call jumped ahead by everything delivered in between. The worklet emitted several packets stamped with an identical frameStart (the repeated 308352 timestamps) and skipped every frame number inside the jump (the 128-256 missing frames). assembleRecordingPcm() correctly rejected the resulting take. It was never a MessagePort delivery, pre-roll handoff, or pause/resume boundary defect.",
+    "measuredEvidence": {
+      "howObserved": "Temporary worklet instrumentation reported each process() call whose frame did not continue the previous one, with contextTime, a per-instance call counter and an input checksum. Reverted after diagnosis; the permanent frameLabelJump report remains.",
+      "repeatedAt48000": [
+        {
+          "callCount": 577,
+          "frameStart": 232832,
+          "expectedNextFrame": 232960,
+          "contextTime": 4.850666666666666,
+          "inputSum0": 2.68276
+        },
+        {
+          "callCount": 578,
+          "frameStart": 232832,
+          "expectedNextFrame": 232960,
+          "contextTime": 4.850666666666666,
+          "inputSum0": 1.500929
+        },
+        {
+          "callCount": 579,
+          "frameStart": 232832,
+          "expectedNextFrame": 232960,
+          "contextTime": 4.850666666666666,
+          "inputSum0": -1.292025
+        },
+        {
+          "callCount": 580,
+          "frameStart": 232832,
+          "expectedNextFrame": 232960,
+          "contextTime": 4.850666666666666,
+          "inputSum0": -2.69793
+        },
+        {
+          "callCount": 581,
+          "frameStart": 233472,
+          "expectedNextFrame": 232960,
+          "contextTime": 4.864,
+          "inputSum0": -1.207382
+        }
+      ],
+      "interpretation": "contextTime is identical across the four repeated calls, so the whole render quantum label is frozen rather than one variable being stale. callCount increments monotonically through them, proving a single worklet instance is being called repeatedly. The input checksums all differ, proving each repeated call delivers 128 genuinely new input frames - not the same data again. 233472-232832 = 640 = 5 quanta, exactly the frames delivered, so no audio was lost; only the labels lagged and jumped."
+    },
+    "fix": "process() now advances a monotonic frame cursor (this.nextFrame) by the frames actually delivered and uses currentFrame only to anchor it. The cursor cannot repeat or skip, so packet coverage is complete, ordered and non-overlapping by construction. Nothing was padded, no timestamp overlap is ignored, and assembleRecordingPcm() and its integrity checks are unchanged.",
+    "residualNote": "The cursor inherits a constant offset of at most one audio-device buffer from the absolute context clock, because the anchor is read from the lagging currentFrame. The offset never grows, and the start/stop/pause/resume frame contract with the main thread is unchanged."
+  },
+  "originalFailedRunEvidencePreserved": {
+    "latestNewBrowserSuite": {
+      "command": "npm run test:live-input-browser",
+      "passed": 2,
+      "failed": 1,
+      "failedTest": "AudioRecorderModal count-in and punch preserve active monitoring and share its native input",
+      "sampleRate": 48000,
+      "recorderError": "Audio capture lost 128 input frames; the take was discarded.",
+      "behavior": "Take rejected, not silently padded. Same count-in/punch scenario also passed earlier isolated runs."
+    },
+    "earlier44100": {
+      "observation": "Intermittent 128-256 missing-frame rejections; block diagnostics included repeated frame timestamps. A full PCM run also passed.",
+      "example": {
+        "start": 292480,
+        "pauses": [
+          {
+            "startFrame": 303488,
+            "endFrame": 308736
+          }
+        ],
+        "selectedBlockFrameStartAndCount": [
+          [
+            303872,
+            2048
+          ],
+          [
+            305920,
+            2048
+          ],
+          [
+            307968,
+            512
+          ],
+          [
+            308352,
+            128
+          ],
+          [
+            308352,
+            128
+          ],
+          [
+            308352,
+            128
+          ],
+          [
+            308864,
+            2048
+          ]
+        ]
+      }
+    },
+    "otherEarlierFailure": {
+      "observation": "An under-load 48000 Hz fader-amplitude comparison failed when compared with an earlier wall-clock input window. Diagnostic now also measures contemporaneous producer PCM and tests transfer gain with the same threshold; no production engine delay/timing change."
+    }
+  },
+  "captureGapVerification": {
+    "unitRegression": {
+      "file": "src/audio/recordingEngine.test.ts",
+      "test": "capture stays gap-free when the platform only refreshes currentFrame per audio-device buffer",
+      "mechanism": "recordingCaptureTestHarness.ts gained advanceToFrameWithDeviceBufferLabels(), which delivers distinct audio every 128-frame quantum while labelling it with the start of its 640-frame device buffer - the exact measured platform behaviour.",
+      "assertions": "6400-frame take covers frames 2560..8960 exactly once, each frame's unique sample value in place, and engine.captureFrameLabelJumps > 0 so the test cannot pass vacuously.",
+      "result": "17/17 pass with the fix. Verified to FAIL without it: reverting the cursor to currentFrame makes engine.stop() hang, because the lagging label never reaches stopFrame so finishAtStop never posts 'stopped'.",
+      "commands": "npx tsx --test src/audio/recordingEngine.test.ts"
+    },
+    "browserRegression": {
+      "file": "browser-tests/liveInputMonitoringCaptureCoverage.spec.ts",
+      "command": "npx playwright test --config=playwright.live-input.config.ts -g 'capture coverage' --repeat-each=3",
+      "result": "6 passed (2.2m) - 3 repeats at each of 44100 and 48000 Hz",
+      "scenariosPerRate": [
+        "monitoring plus plain take",
+        "pause/resume",
+        "count-in into punch bar 2->3",
+        "repeated start/stop x2"
+      ],
+      "underUiLoad": true,
+      "uiLoadDescription": "requestAnimationFrame loop burning ~8ms per frame on the main thread throughout",
+      "whyThisProvesCoverage": "assembleRecordingPcm() throws on any missing, duplicated or out-of-order non-paused frame, so an accepted take of the expected length is the coverage proof. Integrity checks were not relaxed.",
+      "acceptedTakeDurationsSeconds": [
+        {
+          "sampleRate": 44100,
+          "take": 1.09,
+          "pause": 1.48,
+          "punch": 1.71,
+          "repeat0": 0.85,
+          "repeat1": 1
+        },
+        {
+          "sampleRate": 48000,
+          "take": 1.13,
+          "pause": 1.38,
+          "punch": 1.71,
+          "repeat0": 0.87,
+          "repeat1": 0.92
+        },
+        {
+          "sampleRate": 44100,
+          "take": 1.3,
+          "pause": 1.46,
+          "punch": 1.71,
+          "repeat0": 1.05,
+          "repeat1": 0.77
+        },
+        {
+          "sampleRate": 48000,
+          "take": 1.03,
+          "pause": 1.36,
+          "punch": 1.71,
+          "repeat0": 0.82,
+          "repeat1": 0.9
+        },
+        {
+          "sampleRate": 44100,
+          "take": 1.08,
+          "pause": 1.43,
+          "punch": 1.71,
+          "repeat0": 0.86,
+          "repeat1": 0.78
+        },
+        {
+          "sampleRate": 48000,
+          "take": 1.17,
+          "pause": 1.34,
+          "punch": 1.71,
+          "repeat0": 0.83,
+          "repeat1": 0.87
+        }
+      ]
+    },
+    "fullLiveInputBrowserSuite": {
+      "command": "npx playwright test --config=playwright.live-input.config.ts",
+      "passed": 6,
+      "failed": 0
+    },
+    "audioUnitSuite": {
+      "command": "tsx --test src/music/*.test.ts src/audio/*.test.ts src/audio/automation/*.test.ts src/audio/effects/*.test.ts src/audio/instruments/*.test.ts",
+      "tests": 2230,
+      "pass": 2230,
+      "fail": 0
+    }
+  },
+  "graphPreservation": {
+    "status": "RESOLVED",
+    "defect": "startLiveInputMonitoring() called nativeMixerEffects.prepareTracks() (which calls stopEntries() first, stopping every native session) and then updateMixerTrack() for every snapshot track (which unconditionally calls rebuildTrackFxChain, disconnecting and recreating each chain). Enabling monitoring during playback therefore destroyed prepared plugin sessions, built-in FX live state and effect tails.",
+    "fix": "Added NativeVst3EffectRuntime.ensureTracksPrepared(), which releases only sessions that no longer belong to the graph and prepares only inserts that are genuinely absent or stale - verified against context, effect configuration, disposed/stopping/faulted flags. On failure it unwinds only what that call created and throws; a session already running is never stopped and a failed insert is never bypassed. startLiveInputMonitoring() now calls it, and only calls updateMixerTrack() for tracks whose graph state is genuinely absent or stale (isMixerGraphCurrent compares a deterministic serialisation against lastKnownMixerTracks and requires any enabled native insert to actually be prepared).",
+    "unitRegression": {
+      "file": "src/audio/nativeVst3EffectRuntime.test.ts",
+      "test": "ensureTracksPrepared preserves live native sessions that monitoring init must not tear down",
+      "asserts": [
+        "reuse: no extra node built, no session closed, nodeFor returns the identical node, still isPrepared",
+        "idempotent across a second monitoring init",
+        "contrast: prepareTracks does close the live session, which is why monitoring no longer calls it",
+        "a changed effect configuration is re-prepared and the stale one is gone",
+        "a failing sibling insert throws, leaves the running session open, and is not left half-prepared or bypassed"
+      ],
+      "result": "15/15 pass"
+    },
+    "browserRegression": {
+      "file": "browser-tests/liveInputMonitoringGraphPreservation.spec.ts",
+      "harness": "src/audio/liveInputAcceptance.ts runLiveInputGraphPreservationAcceptance(), exposed as __apexAcceptance behind the documented APEX_ACCEPTANCE gate",
+      "result": "3/3 pass under --repeat-each=3; 6/6 across the whole live-input suite",
+      "measuredEvidence": {
+        "transportPositionSeconds": {
+          "beforeMonitoring": 0.3567,
+          "afterMonitoring": 1.042,
+          "afterDisable": 5.1007
+        },
+        "playingThroughout": true,
+        "bpm": 140,
+        "tracksRebuiltDuringMonitoringInit": [],
+        "existingSignalOnInsertDuringPlayback": 0.007153992997128642,
+        "monitoredInputRms": 0.10758812975047681,
+        "insertOutputAfterDisable": 4.656014211758142e-06,
+        "monitoredInputAfterDisable": 3.8918220163044746e-05,
+        "monitorSnapshotAfterDisable": "off / trackId null"
+      }
+    },
+    "limitationNotPretended": {
+      "liveNativeVst3InsertInBrowser": "NOT VERIFIED IN A BROWSER, and not achievable there. Measured: with a renderer-side stub servicing PCM on the main thread, the worklet fails closed with 'Native effect missed its real-time processing deadline; playback stopped rather than replaying stale PCM.' The production runtime correctly stops playback rather than replaying stale PCM. Bypassing does not help: the worklet submits every block regardless of bypass. Live native inserts under active playback are therefore verifiable only on packaged Windows with a real helper process.",
+      "perControlTransferGainDuringPlayback": "NOT ASSERTED in the active-playback scenario, deliberately. The monitored producer and the project's own instruments both enter the insert at mixInput, so the output tap is a mixture that cannot be attributed to either source while the transport plays, and the fake-device source amplitude drifts between measurement windows. Fader/pan/mute/solo/routing/effects transfer gain remains asserted with real PCM against a silent graph in runLiveInputAcceptance.",
+      "insertLeakageDuringPlayback": "NOT ASSERTED in the active-playback scenario. getMixerTrackPeak on an insert carrying no audio reported 0.21 for bus 3 before monitoring even started, so it is not a trustworthy probe there. Leakage is asserted against a silent graph in runLiveInputAcceptance."
+    }
+  },
+  "windowsPackaged": {
+    "command": "npm run test:live-input-packaged",
+    "localExitCode": 3,
+    "localStatus": "NOT_VERIFIED",
+    "localReason": "Linux host; the Windows executable was not launched locally.",
+    "prCiStatus": "PASS",
+    "prCiRun": "44743629670 / job 136313240572 on commit 361dfb748b166de50df88027b208306db3941abe",
+    "stepsNowSucceeding": [
+      "16 Run packaged Windows runtime smoke test",
+      "17 Packaged Windows live input PCM and recording acceptance (fake microphone)",
+      "18 Upload live input acceptance evidence",
+      "19 Native VST3 editor acceptance through the packaged application",
+      "20 Record the packaged acceptance verdict"
+    ],
+    "artifactUploaded": "apex-packaged-live-input-evidence (artifact id 14632263159)",
+    "artifactContentsVerified": false,
+    "artifactContentsReason": "Artifact and job-log downloads redirect to productionresultssa18.blob.core.windows.net, which is outside this sandbox's network allowlist (github.com/api.github.com only), so both requests fail with EOF. The step conclusions and the artifact's existence are confirmed via api.github.com; the JSON fields inside packaged-windows.json were NOT read here and are not preclaimed.",
+    "previousFailureRetained": {
+      "run": "44732851807",
+      "failedStep": "16 Run packaged Windows runtime smoke test",
+      "skippedStep": "17 packaged live-input acceptance",
+      "artifactProduced": "none",
+      "annotation": "Nonzero-latency dynamic live bypass changed alignment at input frame 24000: expected 1545952, onsets 0:1545952, 1:1546080, 2:1545952, masterSum comparedSamples 4096, rmsDifference 3.3338905037320935e-10."
+    },
+    "historyContext": "Baseline/main run 44724732627 succeeded; runs 44506905887 (smoke) and 44692385347 (verdict) also failed previously, so this step has a pre-existing instability history. One passing run on 361dfb7 does not by itself prove the smoke step is stable.",
+    "fakeVsPhysical": "The CI step is explicitly labelled '(fake microphone)'. It uses a fake capture device, so it is NOT physical hardware evidence and proves nothing about physical round-trip latency."
+  },
+  "physicalHardware": {
+    "status": "UNTESTED",
+    "reason": "No physical microphone, audio interface, or Windows machine is available in this environment.",
+    "untested": [
+      "physical microphone round-trip latency",
+      "real native VST3 plugin processing under active playback",
+      "packaged Windows executable live-input acceptance"
+    ]
+  },
+  "prCi": {
+    "commit": "361dfb748b166de50df88027b208306db3941abe",
+    "checks": {
+      "verify": "pass",
+      "audio-tests": "pass",
+      "Native DSP (ubuntu-latest)": "pass",
+      "Native DSP (windows-latest)": "pass",
+      "windows-package": "pass"
+    },
+    "result": "5/5 pass"
+  },
+  "nativeMonitoringCoexistence": {
+    "status": "PASS",
+    "verifiedOnCommit": "5dae1be",
+    "verifiedBy": "GitHub Actions Desktop Validation, job 136847403345 (windows-latest), step \"Packaged native VST3 + live input coexistence acceptance\" = success; all five checks green on that commit",
+    "runs": "5 of 5 passed; no retry, the loop stops on the first failure",
+    "measuredEvidenceRun1": {
+      "plugin": {
+        "name": "mda RezFilter",
+        "classId": "5653546D6461466D64612072657A6669",
+        "path": "D:\\a\\Apex-Studio\\Apex-Studio\\build\\native-vst3\\VST3\\Release\\mda-vst3.vst3",
+        "stateSchema": 1
+      },
+      "slotId": "vst3-fx-03fe97f0-a2b7-4b55-b5f4-0a367caa5025",
+      "nativeSessionRuntimeIds": [
+        "9553cdb1-5dda-445e-8d5f-b7b43eb5321a"
+      ],
+      "nativeSessionIdentityUnchanged": "asserted identical before monitoring, during monitoring and after disable",
+      "nativeProcessingNodeId": "vst3-fx-03fe97f0-a2b7-4b55-b5f4-0a367caa5025-node-1",
+      "nativeNodeUnchanged": "asserted identical across all three stages",
+      "nativeProcessedBlocks": {
+        "beforeMonitoring": 23,
+        "addedDuringMonitoring": 78,
+        "addedAfterMonitoringDisabled": 77
+      },
+      "transportPositionSeconds": {
+        "beforeMonitoring": 0.44199999999999307,
+        "duringMonitoring": 2.1059999999999945,
+        "afterMonitoringDisabled": 3.748666666666665
+      },
+      "transportPlayingAtEveryStage": true,
+      "mixerTracksRebuiltByMonitoringInit": [],
+      "nativeDeadlineMisses": 0,
+      "nativeProcessingFailures": 0,
+      "helperProcessesLeakedAfterShutdown": [],
+      "appClosedCleanly": true
+    },
+    "defectsFoundAndFixedWhileBringingThisUp": [
+      "The acceptance selected the wrong Mixer track: it clicked the #mixer-strip-1 container, whose centre is the volume fader, and that fader calls stopPropagation, so onSelectTrack never fired and selectedTrackId stayed at its default 0 (Master). The insert was created on Master and insert 1 never gained a slot. Recorded proof: FX panel header \"FX SLOTS (MASTER)\" before vs \"FX SLOTS (KICK / 808)\" after clicking the INS 1 label. It now selects via the INS 1 label and asserts the header changed.",
+      "The acceptance pre-scanned for plugins before opening the picker. Vst3Service serializes discovery per owner (native/vst3/service.mjs:59) and rejects an overlap, so the picker reported \"Scan failed: ... A VST3 scan is already running\" and listed nothing. The picker now owns the only pre-insert scan and the plugin is chosen from the rows it actually lists.",
+      "browser-tests/liveInputMonitoringCoexistenceProbe.spec.ts called a module-scope helper inside page.evaluate, which Playwright cannot serialize; it failed in CI with \"ReferenceError: surface is not defined\". The window access is now inlined in every callback. This is instrumentation only, not native evidence.",
+      "The baseline was read after a fixed 1500 ms delay. Preparing a native session is asynchronous, and under CI load one run in five measured prepared === false. It now waits until the insert is prepared AND its processed-block count advances, bounded at 60 s; no assertion was relaxed.",
+      "The plugin-identity read (an extra discovery made only to record the fixture class ID and path) failed intermittently with \"A VST3 scan is already running\" because the application scans on its own. That call now waits the scan out, bounded at 60 s, only for that exact error, with the attempts and wait recorded. It is a transient of the discovery API, not an assertion about the scenario.",
+      "The session-count baseline was unstable: observed before=3 during=1 afterDisable=1 on one run and before=1 during=2 on another. Reading the plugin fixture opens short-lived inspect sessions and sessionCount is a live gauge of open + pending + closing sessions (native/vst3/service.mjs:41), so an early baseline measured this harness's own inspect-session teardown rather than anything monitoring did. The baseline is now taken only once the count is unchanged between two consecutive samples. The insert session itself was never in doubt: runtime id and node id unchanged, blocks 23 -> +78 -> +77, transport advancing, zero tracks rebuilt, zero deadline misses, zero native failures."
+    ],
+    "productObservationNotFixedHere": "A user who opens the VST3 picker while any discovery scan is in flight gets the same permanent \"Scan failed: A VST3 scan is already running\" state with no retry. Out of scope for this scenario; reported for the Lead Engineer.",
+    "gap": "Renderer tests and simulated bridges cannot prove that a REAL native VST3 session, already processing audio through the real Windows helper process during playback, survives live-input monitoring initialization on the same insert.",
+    "scenario": "scripts/packaged-native-monitoring-acceptance.mjs",
+    "command": "npm run test:native-monitoring-packaged",
+    "ciStep": "Packaged native VST3 + live input coexistence acceptance (Desktop Validation, Windows)",
+    "artifact": "apex-packaged-native-monitoring-evidence -> build/native-monitoring-evidence/packaged-windows-native-monitoring.json",
+    "requestedRuns": 5,
+    "localStatus": "NOT_VERIFIED (Linux host; the packaged Windows executable and the native helper process cannot run here)",
+    "whatIsReal": [
+      "packaged Electron executable from dist-electron/win-unpacked",
+      "real apex-vst3-host.exe native helper process, discovered from the Windows process table",
+      "real native plugin from the MDA VST3 bundle (mda RezFilter preferred, mda Delay fallback)",
+      "native insert created through the real Mixer UI",
+      "transport started through the real transport Play control (#fl-play-btn)",
+      "monitoring enabled and disabled through the real Mixer buttons",
+      "native processing measured from the main process per-block processAudio timings (real native input/output RMS, per-block errors) and the renderer native Mixer smoke events (worklet submissions, deadline misses)"
+    ],
+    "whatIsNotReal": [
+      "the microphone is Chromium's --use-file-for-fake-audio-capture fixture, not a physical microphone",
+      "the audio fed to the insert is a deterministic buffer at the insert input (the same mechanism the packaged Mixer acceptance uses), not a physical instrument performance",
+      "nothing here measures physical round-trip latency"
+    ],
+    "instrumentationNote": "APEX_SMOKE_TIMING_ONLY=1 enables the renderer smoke timings WITHOUT the built-in smoke entry, which finishes with app.exit() and would end an externally driven run. It changes no production DSP or native lifecycle behaviour.",
+    "failConditions": [
+      "native session identity (runtimeId set) changes",
+      "native processing node is replaced",
+      "native processed-block count does not increase during monitoring",
+      "native processed-block count does not increase after monitoring is disabled",
+      "transport stops or its position does not advance",
+      "native helper PID changes (crash or restart)",
+      "a native real-time deadline is missed",
+      "a native block fails",
+      "monitoring initialization rebuilds an already-live Mixer track",
+      "monitoring cannot be disabled cleanly",
+      "monitored input PCM is not measurably present, or is not removed on disable",
+      "microphone tracks are not all released",
+      "the application does not close cleanly or the helper outlives it"
+    ],
+    "noRetryPolicy": "A failing run fails the acceptance and stops the loop; no retry converts a failure into a pass.",
+    "probeInstrumentationVerification": "browser-tests/liveInputMonitoringCoexistenceProbe.spec.ts exercises arm/measure/disarm, the deterministic insert signal, monitored-input PCM deltas, the rebuild spy and honest reporting of unobservable native fields. It runs in CI (verify and audio-tests) and passes. It is instrumentation verification only and is NOT native VST3 evidence."
+  }
+}

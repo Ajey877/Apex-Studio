@@ -75,6 +75,37 @@ jobs:
       - name: Run packaged Windows runtime smoke test
         run: npm run smoke:win
 
+      - name: Packaged Windows live input PCM and recording acceptance (fake microphone)
+        run: npm run test:live-input-packaged
+
+      - name: Upload live input acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: apex-packaged-live-input-evidence
+          path: build/live-input-evidence
+          if-no-files-found: warn
+
+      # The evidence gap this closes: a REAL native VST3 session, already
+      # processing audio through the real helper process during playback, must
+      # survive live-input monitoring initialization on the same insert. Renderer
+      # tests and simulated bridges cannot prove this, so it runs against the
+      # packaged executable with the real MDA plugin and the OS process table.
+      - name: Packaged native VST3 + live input coexistence acceptance
+        if: runner.os == 'Windows'
+        timeout-minutes: 30
+        env:
+          APEX_NATIVE_MONITORING_RUNS: '5'
+        run: npm run test:native-monitoring-packaged
+
+      - name: Upload native VST3 + live input coexistence evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: apex-packaged-native-monitoring-evidence
+          path: build/native-monitoring-evidence
+          if-no-files-found: warn
+
       # Packaged-application editor acceptance: Playwright drives the REAL packaged
       # exe (Mixer insert -> plug-in's own window), and native facts are read from
       # the OS process table. The display-scale row runs at real 125% and 150%;

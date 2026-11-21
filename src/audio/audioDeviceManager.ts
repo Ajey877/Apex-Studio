@@ -503,7 +503,16 @@ export class AudioDeviceManager {
     }
   }
 
+  private readonly hardwareChangeListeners = new Set<() => void>();
+
+  /** Conservative invalidation, including OS changes to the physical system-default input. */
+  public subscribeHardwareChanges(listener: () => void): () => void {
+    this.hardwareChangeListeners.add(listener);
+    return () => { this.hardwareChangeListeners.delete(listener); };
+  }
+
   private async handleDeviceChangeEvent(): Promise<void> {
+    this.hardwareChangeListeners.forEach(listener => listener());
     await this.refreshDevices({ fromHotPlug: true });
   }
 

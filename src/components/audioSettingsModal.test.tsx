@@ -268,15 +268,17 @@ test('AudioSettingsModal surfaces unsupported setSinkId, explicit microphone per
   assert.match(html, /id="audio-sample-rate-select"[^>]*disabled=""/);
 });
 
-test('AudioSettingsModal enforces strict product truthfulness (no fake buffer-size slider, no ASIO/WASAPI/CoreAudio claims, no live monitoring claims)', () => {
+test('AudioSettingsModal enforces strict product truthfulness (no fake buffer-size slider, no ASIO/WASAPI/CoreAudio claims, explicit live monitoring safety guidance)', () => {
   const source = readFileSync(path.join(repoRoot, 'src/components/AudioSettingsModal.tsx'), 'utf8');
 
   // Must not contain a fake hardware buffer-size range slider.
   assert.doesNotMatch(source, /type="range"/);
   // Must not claim native driver APIs Web Audio cannot control.
   assert.doesNotMatch(source, /\b(ASIO|WASAPI|CoreAudio)\b/i);
-  // Must explicitly disclose that live Mixer input monitoring is not enabled.
-  assert.match(source, /Live input monitoring through the Mixer is not enabled/);
+  // Monitoring must require explicit insert activation and disclose latency.
+  assert.match(source, /select an insert and explicitly enable monitoring/);
+  assert.match(source, /Monitoring is OFF after reload/);
+  assert.match(source, /browser and device latency varies/);
 
   assert.equal(formatSampleRateLabel('default'), 'System Default');
   assert.equal(formatSampleRateLabel(48000), '48,000 Hz');

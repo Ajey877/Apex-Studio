@@ -4,9 +4,9 @@
  * MediaRecorder has neither a sample-frame start API nor timestamps for its
  * encoded payload, so a blob cannot be trimmed back to a trustworthy musical
  * boundary after an asynchronous start. This worklet forwards input PCM in
- * ordered blocks stamped with AudioWorklet's `currentFrame`; the main thread
- * keeps a bounded pre-roll and selects the exact frame window before WAV
- * encoding. The worklet is deliberately free of project/UI policy.
+ * ordered blocks stamped with a monotonic frame cursor; the main thread keeps a
+ * bounded pre-roll and selects the exact frame window before WAV encoding. The
+ * worklet is deliberately free of project/UI policy.
  */
 export const RECORDING_CAPTURE_PROCESSOR = 'apex-recording-capture';
 export const RECORDING_CAPTURE_PACKET_FRAMES = 2048;
@@ -36,6 +36,7 @@ class ApexRecordingCaptureProcessor extends AudioWorkletProcessor {
     this.resumeFrame = null;
     this.sessionId = 0;
     this.nextFrame = null;
+    this.frameLabelJumpReported = false;
     this.stopped = false;
     this.port.onmessage = event => this.handleCommand(event && event.data);
     this.port.postMessage({ type: 'ready', sampleRate: sampleRate });
@@ -48,7 +49,24 @@ class ApexRecordingCaptureProcessor extends AudioWorkletProcessor {
 
     const input = inputs && inputs[0] ? inputs[0] : [];
     const frameCount = output[0] ? output[0].length : (input[0] ? input[0].length : 128);
-    const frameStart = currentFrame;
+    // "currentFrame" is not a per-call frame cursor. Some Chrome configurations
+    // run several 128-frame render quanta per audio-device buffer and only
+    // refresh currentFrame/currentTime at the start of that buffer, so
+    // consecutive process() calls report the SAME value and the next one jumps
+    // ahead by everything delivered in between - even though every call carries
+    // exactly frameCount fresh input frames (verified by distinct per-call
+    // input checksums). Stamping packets with it emitted duplicate frame ranges
+    // and skipped the frames inside the jump, which assembleRecordingPcm()
+    // correctly rejected. Advance a monotonic cursor by the frames actually
+    // delivered and use currentFrame only to anchor it, so coverage stays
+    // complete, ordered and non-overlapping.
+    const frameStart = this.nextFrame === null ? currentFrame : this.nextFrame;
+    if (!this.frameLabelJumpReported && this.nextFrame !== null && currentFrame !== this.nextFrame) {
+      // Evidence that the platform artifact really occurred, without letting it
+      // influence coverage. Reported once per processor to stay off the hot path.
+      this.frameLabelJumpReported = true;
+      this.port.postMessage({ type: 'frameLabelJump', frame: currentFrame, expectedFrame: this.nextFrame, frameCount: frameCount });
+    }
     const channelCount = input.length || this.inputChannels || 1;
     if (channelCount > 32) {
       this.fail('The selected input exposes more than 32 channels, which this capture path cannot store.');
