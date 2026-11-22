@@ -281,17 +281,17 @@ so RMS combines in quadrature and the monitored contribution is a deterministic 
 
 ### Verified result
 
-Commit `5dae1be`, Desktop Validation job `136847403345`, step **Packaged native VST3 + live
+Commit `44bb180`, Desktop Validation job `136857415362`, step **Packaged native VST3 + live
 input coexistence acceptance** = `success`, **5 of 5 runs passed** with no retry (the loop stops
 on the first failure), and all five checks on that commit are green. Evidence for run 1:
 
 | measured | value |
 | --- | --- |
 | plugin fixture | `mda RezFilter`, class ID `5653546D6461466D64612072657A6669`, `build/native-vst3/VST3/Release/mda-vst3.vst3` |
-| native session runtime ids | `["9553cdb1-5dda-445e-8d5f-b7b43eb5321a"]` — asserted identical before, during and after |
-| native processing node | `vst3-fx-03fe97f0-…-node-1` — asserted identical across all three stages |
-| native processed blocks | 23 before → +78 during monitoring → +77 after disable |
-| transport position | 0.4420 s → 2.1060 s → 3.7487 s, playing at every stage |
+| native session runtime ids | `["e6778450-b297-4186-a870-7c75b3c7eada"]` — asserted identical before, during and after |
+| native processing node | `vst3-fx-4134274b-…-node-1` — asserted identical across all three stages |
+| native processed blocks | 22 before → +78 during monitoring → +77 after disable |
+| transport position | 0.4260 s → 2.0900 s → 3.7327 s, playing at every stage |
 | Mixer tracks rebuilt by monitoring init | `[]` |
 | native deadline misses / block failures | 0 / 0 |
 | helper processes leaked after shutdown | `[]`, application closed cleanly |
@@ -330,12 +330,19 @@ touches only two files under `docs/evidence/phase11/`).
    the fixture's class ID and path failed intermittently with `A VST3 scan is already running`.
    That call now waits the scan out — bounded at 60 s, only for that exact error, with attempts
    and wait recorded. A transient of the discovery API, not an assertion about the scenario.
-6. **Unstable session-count baseline.** Observed `before=3 during=1 afterDisable=1` on one run
-   and `before=1 during=2` on another. Reading the fixture opens short-lived inspect sessions and
-   `sessionCount` is a live gauge of open + pending + closing sessions
-   (`native/vst3/service.mjs:41`), so an early baseline measured this harness's own inspect-session
-   teardown, not anything monitoring did. The baseline is now taken only once the count is
-   unchanged between two consecutive samples. The insert's own session was never in doubt.
+6. **Unstable session-count baseline.** Observed `before=3 during=1 afterDisable=1`, then
+   `before=1 during=2`, then `before=2 during=1 afterDisable=1` — the last on code proven
+   byte-identical to a 5-of-5 pass (`git diff 5dae1be e1b6f53` touches only docs). Short-lived
+   inspect sessions are counted in `sessionCount`, a live gauge of open + pending + closing
+   sessions (`native/vst3/service.mjs:41`), so an early baseline measured teardown of inspect
+   sessions rather than anything monitoring did. The first remedy — requiring the count to be
+   unchanged between two consecutive samples — was **insufficient**: a leftover session survived
+   that window and closed later. The final remedy removes the contamination and pins the
+   reference: the harness identity read no longer calls `inspectEffect` (discovery alone gives
+   name, class ID and path and opens no session), and the baseline waits for the count to reach
+   `1`, the steady state for a project holding exactly one native insert, failing if it does not.
+   During and after must still equal that baseline. The insert's own session was never in doubt
+   in any run.
 
 **Product observation, deliberately not fixed here (out of scope):** a user who opens the VST3
 picker while any discovery scan is in flight gets that same permanent `Scan failed` state with

@@ -280,32 +280,31 @@
   },
   "nativeMonitoringCoexistence": {
     "status": "PASS",
-    "verifiedOnCommit": "5dae1be",
-    "verifiedBy": "GitHub Actions Desktop Validation, job 136847403345 (windows-latest), step \"Packaged native VST3 + live input coexistence acceptance\" = success; all five checks green on that commit",
+    "verifiedOnCommit": "44bb180",
+    "verifiedBy": "GitHub Actions Desktop Validation, job 136857415362 (windows-latest), step \"Packaged native VST3 + live input coexistence acceptance\" = success; all five checks green on that commit",
     "runs": "5 of 5 passed; no retry, the loop stops on the first failure",
     "measuredEvidenceRun1": {
       "plugin": {
         "name": "mda RezFilter",
         "classId": "5653546D6461466D64612072657A6669",
-        "path": "D:\\a\\Apex-Studio\\Apex-Studio\\build\\native-vst3\\VST3\\Release\\mda-vst3.vst3",
-        "stateSchema": 1
+        "path": "D:\\a\\Apex-Studio\\Apex-Studio\\build\\native-vst3\\VST3\\Release\\mda-vst3.vst3"
       },
-      "slotId": "vst3-fx-03fe97f0-a2b7-4b55-b5f4-0a367caa5025",
+      "slotId": "vst3-fx-4134274b-49df-4ab5-894d-9cbe35316e7e",
       "nativeSessionRuntimeIds": [
-        "9553cdb1-5dda-445e-8d5f-b7b43eb5321a"
+        "e6778450-b297-4186-a870-7c75b3c7eada"
       ],
       "nativeSessionIdentityUnchanged": "asserted identical before monitoring, during monitoring and after disable",
-      "nativeProcessingNodeId": "vst3-fx-03fe97f0-a2b7-4b55-b5f4-0a367caa5025-node-1",
+      "nativeProcessingNodeId": "vst3-fx-4134274b-49df-4ab5-894d-9cbe35316e7e-node-1",
       "nativeNodeUnchanged": "asserted identical across all three stages",
       "nativeProcessedBlocks": {
-        "beforeMonitoring": 23,
+        "beforeMonitoring": 22,
         "addedDuringMonitoring": 78,
         "addedAfterMonitoringDisabled": 77
       },
       "transportPositionSeconds": {
-        "beforeMonitoring": 0.44199999999999307,
-        "duringMonitoring": 2.1059999999999945,
-        "afterMonitoringDisabled": 3.748666666666665
+        "beforeMonitoring": 0.4259999999999948,
+        "duringMonitoring": 2.0899999999999963,
+        "afterMonitoringDisabled": 3.7326666666666597
       },
       "transportPlayingAtEveryStage": true,
       "mixerTracksRebuiltByMonitoringInit": [],
@@ -320,7 +319,7 @@
       "browser-tests/liveInputMonitoringCoexistenceProbe.spec.ts called a module-scope helper inside page.evaluate, which Playwright cannot serialize; it failed in CI with \"ReferenceError: surface is not defined\". The window access is now inlined in every callback. This is instrumentation only, not native evidence.",
       "The baseline was read after a fixed 1500 ms delay. Preparing a native session is asynchronous, and under CI load one run in five measured prepared === false. It now waits until the insert is prepared AND its processed-block count advances, bounded at 60 s; no assertion was relaxed.",
       "The plugin-identity read (an extra discovery made only to record the fixture class ID and path) failed intermittently with \"A VST3 scan is already running\" because the application scans on its own. That call now waits the scan out, bounded at 60 s, only for that exact error, with the attempts and wait recorded. It is a transient of the discovery API, not an assertion about the scenario.",
-      "The session-count baseline was unstable: observed before=3 during=1 afterDisable=1 on one run and before=1 during=2 on another. Reading the plugin fixture opens short-lived inspect sessions and sessionCount is a live gauge of open + pending + closing sessions (native/vst3/service.mjs:41), so an early baseline measured this harness's own inspect-session teardown rather than anything monitoring did. The baseline is now taken only once the count is unchanged between two consecutive samples. The insert session itself was never in doubt: runtime id and node id unchanged, blocks 23 -> +78 -> +77, transport advancing, zero tracks rebuilt, zero deadline misses, zero native failures."
+      "The session-count baseline was unstable: observed before=3 during=1 afterDisable=1, before=1 during=2, and before=2 during=1 afterDisable=1 across runs on code proven byte-identical (git diff 41e0924 608adaf and 5dae1be e1b6f53 each touch only docs). Cause: short-lived inspect sessions are counted in sessionCount, a live gauge of open + pending + closing sessions (native/vst3/service.mjs:41), so an early baseline measured teardown of inspect sessions rather than anything monitoring did. The first remedy - requiring the count to be unchanged between two consecutive samples - was INSUFFICIENT: a leftover session survived that window and closed later. The final remedy removes the contamination and pins the reference: the harness identity read no longer calls inspectEffect (discoverEffects alone gives name, class ID and path and opens no session), and the baseline waits for the count to reach 1, the steady state for a project holding exactly one native insert, failing if it does not. During and after must still equal that baseline. The insert's own session was never in doubt in any run."
     ],
     "productObservationNotFixedHere": "A user who opens the VST3 picker while any discovery scan is in flight gets the same permanent \"Scan failed: A VST3 scan is already running\" state with no retry. Out of scope for this scenario; reported for the Lead Engineer.",
     "gap": "Renderer tests and simulated bridges cannot prove that a REAL native VST3 session, already processing audio through the real Windows helper process during playback, survives live-input monitoring initialization on the same insert.",
