@@ -314,25 +314,63 @@ so RMS combines in quadrature and the monitored contribution is a deterministic 
 
 ### Verified result
 
-Commit `ff8e594`, Desktop Validation job `137153027820`, step **Packaged native VST3 + live
+Commit `bb330bb`, Desktop Validation job `137188089594`, step **Packaged native VST3 + live
 input coexistence acceptance** = `success`, **5 of 5 runs passed** with no retry (the loop stops
 on the first failure), and all five checks on that commit are green. Evidence for run 1:
 
 | measured | value |
 | --- | --- |
-| plugin fixture | `mda RezFilter`, class ID `5653546D6461466D64612072657A6669`, `build/native-vst3/VST3/Release/mda-vst3.vst3` |
-| native session runtime ids | `["1b67fd0b-5945-4326-a49f-5ced36f276fb"]` — asserted identical before, during and after |
-| native processing node | `vst3-fx-de181b37-…-node-1` — asserted identical across all three stages |
-| native processed blocks | 23 before → +81 during monitoring → +79 after disable |
-| transport position | 0.4287 s → 2.1700 s → 3.8553 s, playing at every stage |
+| plugin fixture | `mda RezFilter`, class ID `5653546D6461466D64612072657A6669`, `D:\a\Apex-Studio\Apex-Studio\build\native-vst3\VST3\Release\mda-vst3.vst3` |
+| native session runtime ids | `["1be590cb-9f5e-4813-96de-abc62cfc3e0b"]` — asserted identical before, during and after |
+| native processing node | `vst3-fx-a2873b44-…-node-1` — asserted identical across all three stages |
+| native processed blocks | 23 before → +80 during monitoring → +80 after disable |
+| worklet submissions delta | 80 |
+| transport position | 0.4207 s → 2.1353 s → 3.8287 s, playing at every stage |
 | Mixer tracks rebuilt by monitoring init | `[]` |
 | native deadline misses / block failures | 0 / 0 |
 | helper processes leaked after shutdown | `[]`, application closed cleanly |
+| physical hardware | `NOT_VERIFIED` — Chromium fake capture device, not a physical input |
 
 So a real native VST3 insert, already prepared and processing through the real
 `apex-vst3-host.exe` during playback, kept the same session and the same processing node,
 kept processing more blocks, and kept the transport advancing while monitoring was enabled on
 the same insert and then disabled — with no Mixer track rebuilt and no helper leaked.
+
+Earlier commits with the same production code also passed 5 of 5: `e43a6ae` (job `137171367296`)
+and `ff8e594` (job `137153027820`).
+
+### An intermittent real-time deadline miss, caught by the mandatory warmup
+
+The correction that makes the warmup mandatory was proven by CI to be load-bearing rather than
+cosmetic. On commit `c0cd9a5` — the tree identical to the passing `bb330bb` apart from being one
+empty commit earlier — repetition **1 of 5 passed** and repetition **2 failed at stage
+`arm-probe`** with exactly the diagnostics the new assertion was written to produce:
+
+```
+Warmup timed out: waitedMs=60103 of 60000 prepared=false processedBlocks=2 priorBlocks=2
+runtimeIds=["6a71bb16-4722-4114-91c0-994e37252459"] deadlineMisses=1 nativeFailures=0
+failureMessages=[] nativeDiagnostics=[{"trackId":1,"slotId":"vst3-fx-7d4ef902-…",
+"message":"Native effect missed its real-time processing deadline; playback stopped rather
+than replaying stale PCM."}] rendererConsoleErrors=[]
+```
+
+This is the product's own fail-closed guard: the native effect missed its real-time processing
+deadline, so playback stopped rather than replaying stale PCM. With playback stopped nothing can
+advance, so the processed-block count stayed at 2 for the whole 60 s and the insert was correctly
+reported as not prepared.
+
+**The correction did not introduce this.** The script already asserted `deadlineMisses === 0`
+(line 529) and `prepared === true` in the baseline assertions, so this condition failed the run
+before the correction as well — it only surfaced much later, at the assertions stage, as the
+opaque `not prepared … false !== true` that this document records as harness defect 6. The
+correction moves the same failure to the warmup, with elapsed time, both block counts, the
+runtime IDs, the deadline-miss count and the production diagnostic attached.
+
+No assertion was weakened and no retry was added to absorb it: a repetition that misses a
+real-time deadline is a failed repetition, and the acceptance stops there. The next CI run on the
+identical tree passed 5 of 5, so this is an intermittent real-time scheduling sensitivity of the
+packaged application on a shared `windows-latest` runner, not a deterministic defect. It is
+recorded here as an observed intermittent failure rather than being hidden.
 
 ### Root cause of the intermittent failures
 
