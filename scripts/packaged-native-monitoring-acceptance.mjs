@@ -502,11 +502,27 @@ async function runOnce(runIndex, collector) {
       + `afterDisable=${after.native.nativeServiceSessionCount}.`);
     run.nativeServiceSessionCounts = { before: before.native.nativeServiceSessionCount,
       during: during.native.nativeServiceSessionCount, afterDisable: after.native.nativeServiceSessionCount };
-    assert.deepEqual(run.helpersDuringMonitoring, run.helpersBeforeMonitoring,
-      'Native helper process changed when monitoring was enabled (crash or restart).');
-    assert.deepEqual(run.helpersAfterMonitoring, run.helpersBeforeMonitoring,
-      'Native helper process changed when monitoring was disabled.');
+    // The helper PID list is not compared for exact equality, for the same reason
+    // the session gauge is not: discovery scans and inspectEffect each spawn a
+    // short-lived apex-vst3-host.exe, so the baseline legitimately holds helpers
+    // that exit on their own (observed [2428, 3880, 8580] before monitoring and
+    // [3880] during, with the insert's own helper 3880 present throughout).
+    // What a crash or restart would actually produce is a helper PID that was not
+    // there before, and a dead helper would stop the insert processing - which the
+    // identity and processed-block assertions above already catch. So the sound
+    // invariants are: no new helper appears, and at least one is still alive.
+    const unexpectedHelpers = pids => pids.filter(pid => !run.helpersBeforeMonitoring.includes(pid));
+    assert.deepEqual(unexpectedHelpers(run.helpersDuringMonitoring), [],
+      `A native helper process appeared while monitoring was enabled (crash or restart): `
+      + `before=${JSON.stringify(run.helpersBeforeMonitoring)} during=${JSON.stringify(run.helpersDuringMonitoring)}.`);
+    assert.deepEqual(unexpectedHelpers(run.helpersAfterMonitoring), [],
+      `A native helper process appeared after monitoring was disabled (crash or restart): `
+      + `before=${JSON.stringify(run.helpersBeforeMonitoring)} after=${JSON.stringify(run.helpersAfterMonitoring)}.`);
     assert.ok(run.helpersBeforeMonitoring.length > 0, 'No native helper process was running during the scenario.');
+    assert.ok(run.helpersDuringMonitoring.length > 0,
+      'No native helper process was alive while monitoring was enabled.');
+    assert.ok(run.helpersAfterMonitoring.length > 0,
+      'No native helper process was alive after monitoring was disabled.');
 
     // No already-live Mixer graph was rebuilt by monitoring initialization.
     assert.deepEqual(run.rebuildsAttributableToMonitoring, [],
