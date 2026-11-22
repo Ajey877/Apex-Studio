@@ -280,8 +280,8 @@
   },
   "nativeMonitoringCoexistence": {
     "status": "PASS",
-    "verifiedOnCommit": "44bb180",
-    "verifiedBy": "GitHub Actions Desktop Validation, job 136857415362 (windows-latest), step \"Packaged native VST3 + live input coexistence acceptance\" = success; all five checks green on that commit",
+    "verifiedOnCommit": "ff8e594",
+    "verifiedBy": "GitHub Actions Desktop Validation, job 137153027820 (windows-latest), step \"Packaged native VST3 + live input coexistence acceptance\" = success; all five checks green on that commit",
     "runs": "5 of 5 passed; no retry, the loop stops on the first failure",
     "measuredEvidenceRun1": {
       "plugin": {
@@ -289,22 +289,22 @@
         "classId": "5653546D6461466D64612072657A6669",
         "path": "D:\\a\\Apex-Studio\\Apex-Studio\\build\\native-vst3\\VST3\\Release\\mda-vst3.vst3"
       },
-      "slotId": "vst3-fx-4134274b-49df-4ab5-894d-9cbe35316e7e",
+      "slotId": "vst3-fx-de181b37-f1dd-44f5-83a2-18e3e56ff49f",
       "nativeSessionRuntimeIds": [
-        "e6778450-b297-4186-a870-7c75b3c7eada"
+        "1b67fd0b-5945-4326-a49f-5ced36f276fb"
       ],
       "nativeSessionIdentityUnchanged": "asserted identical before monitoring, during monitoring and after disable",
-      "nativeProcessingNodeId": "vst3-fx-4134274b-49df-4ab5-894d-9cbe35316e7e-node-1",
+      "nativeProcessingNodeId": "vst3-fx-de181b37-f1dd-44f5-83a2-18e3e56ff49f-node-1",
       "nativeNodeUnchanged": "asserted identical across all three stages",
       "nativeProcessedBlocks": {
-        "beforeMonitoring": 22,
-        "addedDuringMonitoring": 78,
-        "addedAfterMonitoringDisabled": 77
+        "beforeMonitoring": 23,
+        "addedDuringMonitoring": 81,
+        "addedAfterMonitoringDisabled": 79
       },
       "transportPositionSeconds": {
-        "beforeMonitoring": 0.4259999999999948,
-        "duringMonitoring": 2.0899999999999963,
-        "afterMonitoringDisabled": 3.7326666666666597
+        "beforeMonitoring": 0.42866666666666475,
+        "duringMonitoring": 2.1699999999999946,
+        "afterMonitoringDisabled": 3.855333333333334
       },
       "transportPlayingAtEveryStage": true,
       "mixerTracksRebuiltByMonitoringInit": [],
@@ -343,7 +343,7 @@
       "the audio fed to the insert is a deterministic buffer at the insert input (the same mechanism the packaged Mixer acceptance uses), not a physical instrument performance",
       "nothing here measures physical round-trip latency"
     ],
-    "instrumentationNote": "APEX_SMOKE_TIMING_ONLY=1 enables the renderer smoke timings WITHOUT the built-in smoke entry, which finishes with app.exit() and would end an externally driven run. It changes no production DSP or native lifecycle behaviour.",
+    "instrumentationNote": "APEX_SMOKE_TIMING_ONLY=1 appends --apex-smoke-timing-only to the renderer, which enables the per-block native processing measurements and deadline-miss reporting. It deliberately does NOT set smokeTest: src/main.tsx runs the built-in native VST3 smoke sequence whenever smokeTest is true. The first implementation of this flag appended --apex-smoke-test instead, which made that sequence run concurrently with the acceptance - see the rootCause entry. The acceptance now asserts smokeTimings is true AND smokeTest is false, so it cannot regress.",
     "failConditions": [
       "native session identity (runtimeId set) changes",
       "native processing node is replaced",
@@ -360,6 +360,8 @@
       "the application does not close cleanly or the helper outlives it"
     ],
     "noRetryPolicy": "A failing run fails the acceptance and stops the loop; no retry converts a failure into a pass.",
-    "probeInstrumentationVerification": "browser-tests/liveInputMonitoringCoexistenceProbe.spec.ts exercises arm/measure/disarm, the deterministic insert signal, monitored-input PCM deltas, the rebuild spy and honest reporting of unobservable native fields. It runs in CI (verify and audio-tests) and passes. It is instrumentation verification only and is NOT native VST3 evidence."
+    "probeInstrumentationVerification": "browser-tests/liveInputMonitoringCoexistenceProbe.spec.ts exercises arm/measure/disarm, the deterministic insert signal, monitored-input PCM deltas, the rebuild spy and honest reporting of unobservable native fields. It runs in CI (verify and audio-tests) and passes. It is instrumentation verification only and is NOT native VST3 evidence.",
+    "rootCauseOfTheIntermittentFailures": "Every intermittent failure of this acceptance had one cause, in the harness's launch configuration rather than in the native lifecycle. src/main.tsx runs the built-in native VST3 smoke sequence (runDesktopVst3Smoke) whenever desktopApp.smokeTest is true, and APEX_SMOKE_TIMING_ONLY=1 was implemented by appending --apex-smoke-test, which sets exactly that flag. The built-in sequence creates its own Mixer inserts on track 1, drives the transport and opens extra native sessions and helper processes while this acceptance was measuring. The decisive evidence was a preparation failure reporting transportPlaying=false and positionSeconds=0 after the transport had been started, deadlineMisses=1, and native diagnostics for slots this script never created: smoke-delay, smoke-delay-bypass, smoke-rezfilter, persisted-delay, persisted-rezfilter, latency-two-delay, latency-two-filter. That also accounts for the native session gauge reading 3, 2 and 0 and the helper PID list [2428, 3880, 8580] across runs on byte-identical code. Fixed by giving the timing instrumentation its own flag; after the fix, 5 of 5 runs passed with deadlineMisses=0.",
+    "correctionToEarlierAttribution": "An earlier revision of this record attributed the unstable session gauge and helper PID list to short-lived inspectEffect sessions from the picker. That attribution was incomplete and is superseded by rootCauseOfTheIntermittentFailures. The concurrent built-in smoke sequence was the actual source. Two assertions were still changed on the way and remain changed: the session gauge is no longer compared for equality (it is recorded, with a no-leak check that the count after monitoring does not exceed the baseline), and the helper PID list is no longer compared for exact equality (no PID may appear that was absent at baseline, and at least one must remain alive). Both are directional properties that the scenario actually requires."
   }
 }

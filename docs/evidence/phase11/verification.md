@@ -281,17 +281,17 @@ so RMS combines in quadrature and the monitored contribution is a deterministic 
 
 ### Verified result
 
-Commit `44bb180`, Desktop Validation job `136857415362`, step **Packaged native VST3 + live
+Commit `ff8e594`, Desktop Validation job `137153027820`, step **Packaged native VST3 + live
 input coexistence acceptance** = `success`, **5 of 5 runs passed** with no retry (the loop stops
 on the first failure), and all five checks on that commit are green. Evidence for run 1:
 
 | measured | value |
 | --- | --- |
 | plugin fixture | `mda RezFilter`, class ID `5653546D6461466D64612072657A6669`, `build/native-vst3/VST3/Release/mda-vst3.vst3` |
-| native session runtime ids | `["e6778450-b297-4186-a870-7c75b3c7eada"]` — asserted identical before, during and after |
-| native processing node | `vst3-fx-4134274b-…-node-1` — asserted identical across all three stages |
-| native processed blocks | 22 before → +78 during monitoring → +77 after disable |
-| transport position | 0.4260 s → 2.0900 s → 3.7327 s, playing at every stage |
+| native session runtime ids | `["1b67fd0b-5945-4326-a49f-5ced36f276fb"]` — asserted identical before, during and after |
+| native processing node | `vst3-fx-de181b37-…-node-1` — asserted identical across all three stages |
+| native processed blocks | 23 before → +81 during monitoring → +79 after disable |
+| transport position | 0.4287 s → 2.1700 s → 3.8553 s, playing at every stage |
 | Mixer tracks rebuilt by monitoring init | `[]` |
 | native deadline misses / block failures | 0 / 0 |
 | helper processes leaked after shutdown | `[]`, application closed cleanly |
@@ -300,6 +300,44 @@ So a real native VST3 insert, already prepared and processing through the real
 `apex-vst3-host.exe` during playback, kept the same session and the same processing node,
 kept processing more blocks, and kept the transport advancing while monitoring was enabled on
 the same insert and then disabled — with no Mixer track rebuilt and no helper leaked.
+
+### Root cause of the intermittent failures
+
+Three earlier commits passed 5 of 5 and then the **byte-identical** code failed
+(`git diff 41e0924 608adaf`, `git diff 5dae1be e1b6f53` and `git diff 44bb180 c1fde0f` each touch
+only docs). All of those failures had one cause, in the harness's launch configuration rather
+than in the native lifecycle:
+
+`src/main.tsx` runs the built-in native VST3 smoke sequence (`runDesktopVst3Smoke`) whenever
+`desktopApp.smokeTest` is true. `APEX_SMOKE_TIMING_ONLY=1` was implemented by appending
+`--apex-smoke-test`, which sets exactly that flag — so the built-in sequence ran concurrently
+with this acceptance, creating its own Mixer inserts on track 1, driving the transport and
+opening extra native sessions and helper processes.
+
+The decisive evidence was a preparation failure reporting `transportPlaying=false` and
+`positionSeconds=0` *after* the transport had been started, `deadlineMisses=1`, and native
+diagnostics for slots this script never created: `smoke-delay`, `smoke-delay-bypass`,
+`smoke-rezfilter`, `persisted-delay`, `persisted-rezfilter`, `latency-two-delay`,
+`latency-two-filter`. That also accounts for the session gauge reading 3, 2 and 0, and the
+helper PID list `[2428, 3880, 8580]`.
+
+Fixed by giving the timing instrumentation its own capability flag
+(`--apex-smoke-timing-only` → `desktopApp.smokeTimings`) in `electron.cjs`, `preload.cjs`,
+`nativeVst3EffectRuntime.ts` and `liveInputAcceptance.ts`, leaving `src/main.tsx` gated on
+`smokeTest` alone so a timing-only session never runs the sequence. The existing
+`APEX_SMOKE_TEST=1` path and its `app.exit()` entry are untouched. The acceptance now asserts
+`smokeTimings === true` **and** `smokeTest === false`, so this cannot silently regress. After the
+fix, 5 of 5 runs passed with `deadlineMisses: 0`.
+
+**Correction to an earlier claim in this document:** the unstable session gauge and helper PID
+list were attributed to short-lived `inspectEffect` sessions from the picker. That attribution
+was incomplete and is superseded by the root cause above. Two assertions were nevertheless
+changed and remain changed, because exact equality on either collection is not a property this
+scenario requires: the session gauge is now recorded with a no-leak check (the count after
+monitoring must not exceed the baseline), and no helper PID may appear that was absent at
+baseline with at least one required to remain alive. Neither can hide an unprepared or crashed
+insert, which the `prepared`, node-present, processed-block, runtime-id and node-id assertions
+independently require.
 
 ### Defects this scenario caught in its own harness
 
