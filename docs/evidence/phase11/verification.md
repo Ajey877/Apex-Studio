@@ -314,6 +314,11 @@ so RMS combines in quadrature and the monitored contribution is a deterministic 
 
 ### Verified result
 
+> **Read this with the intermittency section below.** `03ba06b` is the last commit on which the
+> acceptance passed 5 of 5. The same code failed on `c0cd9a5`, `bb17b95` and `db1e4fa` — about
+> 3 attempts in 8 — on a real-time deadline miss inside the helper's cold-start window. The
+> scenario is therefore intermittent on shared CI hardware and is not a deterministic pass.
+
 Commit `03ba06b`, Desktop Validation job `137201427772`, step **Packaged native VST3 + live
 input coexistence acceptance** = `success`, **5 of 5 repetitions passed** with no retry (the loop
 stops on the first failure), and all five checks on that commit are green. Evidence for run 1:
@@ -374,12 +379,22 @@ them), which is exactly that window. This is production real-time behaviour on a
 `windows-latest` runner, not a defect introduced here, and the harness ordering was **not**
 changed to dodge it.
 
+**Third occurrence, commit `db1e4fa`** (job `137208328702`), same signature
+again: `waitedMs=60000 of 60000`, `prepared=false`, `processedBlocks=2`, `priorBlocks=2`,
+`deadlineMisses=1`, `nativeFailures=0`, `failureMessages=[]`, same production diagnostic.
+
 **Observed rate, recorded honestly.** Since the launch-flag root-cause fix the acceptance has been
-executed 7 times: **5 passed 5 of 5** (`ff8e594`, `5f77fde`, `e43a6ae`, `bb330bb`, `03ba06b`) and
-**2 failed** on this early deadline miss (`c0cd9a5`, `bb17b95`) — roughly 2 in 7. One further
-attempt (`7d480ba`) never reached the acceptance because step 16 flaked and skipped steps 19–22.
-A green 5 of 5 on the final commit is therefore real but the scenario is intermittent on shared
-CI hardware; it is not a deterministic pass, and this document does not present it as one.
+executed **8 times: 5 passed 5 of 5** (`ff8e594`, `5f77fde`, `e43a6ae`, `bb330bb`, `03ba06b`) and
+**3 failed** on this early deadline miss (`c0cd9a5`, `bb17b95`, `db1e4fa`) — about **3 in 8**. One
+further attempt (`7d480ba`) never reached the acceptance because step 16 flaked and skipped steps
+19–22.
+
+This means the honest verdict for the scenario is **not** a deterministic pass. A green 5 of 5 on a
+given commit is real and was measured five times, but the acceptance fails roughly one time in
+three on shared `windows-latest` hardware because the packaged application's own fail-closed guard
+trips inside the helper's cold-start window. This document does not present the green runs as
+proof of reliability, and no green run was selected by re-rolling until one appeared: every
+failure is recorded here with its job id.
 
 **The correction did not introduce this.** The script already asserted `deadlineMisses === 0`
 (line 529) and `prepared === true` in the baseline assertions, so this condition failed the run
