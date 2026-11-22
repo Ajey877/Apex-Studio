@@ -314,18 +314,18 @@ so RMS combines in quadrature and the monitored contribution is a deterministic 
 
 ### Verified result
 
-Commit `bb330bb`, Desktop Validation job `137188089594`, step **Packaged native VST3 + live
-input coexistence acceptance** = `success`, **5 of 5 runs passed** with no retry (the loop stops
-on the first failure), and all five checks on that commit are green. Evidence for run 1:
+Commit `03ba06b`, Desktop Validation job `137201427772`, step **Packaged native VST3 + live
+input coexistence acceptance** = `success`, **5 of 5 repetitions passed** with no retry (the loop
+stops on the first failure), and all five checks on that commit are green. Evidence for run 1:
 
 | measured | value |
 | --- | --- |
 | plugin fixture | `mda RezFilter`, class ID `5653546D6461466D64612072657A6669`, `D:\a\Apex-Studio\Apex-Studio\build\native-vst3\VST3\Release\mda-vst3.vst3` |
-| native session runtime ids | `["1be590cb-9f5e-4813-96de-abc62cfc3e0b"]` — asserted identical before, during and after |
-| native processing node | `vst3-fx-a2873b44-…-node-1` — asserted identical across all three stages |
-| native processed blocks | 23 before → +80 during monitoring → +80 after disable |
-| worklet submissions delta | 80 |
-| transport position | 0.4207 s → 2.1353 s → 3.8287 s, playing at every stage |
+| native session runtime ids | `["944a1be4-f9ac-4dd9-b779-71d2821f50cb"]` — asserted identical before, during and after |
+| native processing node | `vst3-fx-8c69cbcf-…-node-1` — asserted identical across all three stages |
+| native processed blocks | 23 before → +79 during monitoring → +78 after disable |
+| worklet submissions delta | 79 |
+| transport position | 0.4393 s → 2.1273 s → 3.7860 s, playing at every stage |
 | Mixer tracks rebuilt by monitoring init | `[]` |
 | native deadline misses / block failures | 0 / 0 |
 | helper processes leaked after shutdown | `[]`, application closed cleanly |
@@ -336,15 +336,17 @@ So a real native VST3 insert, already prepared and processing through the real
 kept processing more blocks, and kept the transport advancing while monitoring was enabled on
 the same insert and then disabled — with no Mixer track rebuilt and no helper leaked.
 
-Earlier commits with the same production code also passed 5 of 5: `e43a6ae` (job `137171367296`)
-and `ff8e594` (job `137153027820`).
+Earlier commits carrying the same production code also passed 5 of 5: `bb330bb` (job
+`137188089594`), `e43a6ae` (job `137171367296`) and `ff8e594` (job `137153027820`).
 
 ### An intermittent real-time deadline miss, caught by the mandatory warmup
 
 The correction that makes the warmup mandatory was proven by CI to be load-bearing rather than
-cosmetic. On commit `c0cd9a5` — the tree identical to the passing `bb330bb` apart from being one
-empty commit earlier — repetition **1 of 5 passed** and repetition **2 failed at stage
-`arm-probe`** with exactly the diagnostics the new assertion was written to produce:
+cosmetic — and it caught a genuine, recurring condition. It fired **twice**, on two different
+commits whose code is identical to the passing ones.
+
+**First occurrence, commit `c0cd9a5`** — repetition **1 of 5 passed**, repetition **2 failed at
+stage `arm-probe`** with exactly the diagnostics the new assertion was written to produce:
 
 ```
 Warmup timed out: waitedMs=60103 of 60000 prepared=false processedBlocks=2 priorBlocks=2
@@ -358,6 +360,26 @@ This is the product's own fail-closed guard: the native effect missed its real-t
 deadline, so playback stopped rather than replaying stale PCM. With playback stopped nothing can
 advance, so the processed-block count stayed at 2 for the whole 60 s and the insert was correctly
 reported as not prepared.
+
+**Second occurrence, commit `bb17b95`** (job `137194720433`), same signature:
+`waitedMs=60114 of 60000`, `prepared=false`, `processedBlocks=3`, `priorBlocks=3`,
+`deadlineMisses=1`, `nativeFailures=0`, `failureMessages=[]`, same production diagnostic.
+
+**Where the guard lives.** `src/audio/nativeVst3EffectRuntime.ts:218` fails closed when a
+1024-frame block fills while the previous block's native result is still `pending`, so a single
+slow `processAudio` round-trip through `apex-vst3-host.exe` stops playback. Both occurrences were
+at `processedBlocks` 2 and 3, i.e. inside the first ~64 ms of playback while the helper is still
+cold. The script clicks Play and arms the probe back to back (lines 354–366, no wait between
+them), which is exactly that window. This is production real-time behaviour on a shared
+`windows-latest` runner, not a defect introduced here, and the harness ordering was **not**
+changed to dodge it.
+
+**Observed rate, recorded honestly.** Since the launch-flag root-cause fix the acceptance has been
+executed 7 times: **5 passed 5 of 5** (`ff8e594`, `5f77fde`, `e43a6ae`, `bb330bb`, `03ba06b`) and
+**2 failed** on this early deadline miss (`c0cd9a5`, `bb17b95`) — roughly 2 in 7. One further
+attempt (`7d480ba`) never reached the acceptance because step 16 flaked and skipped steps 19–22.
+A green 5 of 5 on the final commit is therefore real but the scenario is intermittent on shared
+CI hardware; it is not a deterministic pass, and this document does not present it as one.
 
 **The correction did not introduce this.** The script already asserted `deadlineMisses === 0`
 (line 529) and `prepared === true` in the baseline assertions, so this condition failed the run
