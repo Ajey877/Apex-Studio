@@ -346,8 +346,11 @@ interface NativeProcessRecord {
 type SmokeSnapshot = { main?: { processAudio?: NativeProcessRecord[]; nativeServiceSessionCount?: number } } | null;
 
 const readSmokeSnapshot = async (): Promise<SmokeSnapshot> => {
-  const desktop = (globalThis as unknown as { desktopApp?: { smokeTest?: boolean; vst3?: { smokeTimingSnapshot?: () => Promise<SmokeSnapshot> } } }).desktopApp;
-  if (desktop?.smokeTest !== true || typeof desktop.vst3?.smokeTimingSnapshot !== 'function') return null;
+  const desktop = (globalThis as unknown as { desktopApp?: { smokeTest?: boolean; smokeTimings?: boolean; vst3?: { smokeTimingSnapshot?: () => Promise<SmokeSnapshot> } } }).desktopApp;
+  // Either capability exposes the snapshot: a smoke session, or a timing-only
+  // session that records measurements without running the built-in smoke sequence.
+  const timingsOn = desktop?.smokeTest === true || desktop?.smokeTimings === true;
+  if (!timingsOn || typeof desktop?.vst3?.smokeTimingSnapshot !== 'function') return null;
   return desktop.vst3.smokeTimingSnapshot();
 };
 

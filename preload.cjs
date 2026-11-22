@@ -2,7 +2,13 @@ const { contextBridge, ipcRenderer } = require('electron');
 
 // Expose safe desktop platform APIs to the renderer.
 const smokeTest = process.argv.includes('--apex-smoke-test');
-const smokeIpcMeasurements = smokeTest ? [] : null;
+// Timing-only is a separate capability: it turns on the same per-block native
+// processing measurements without marking the renderer as a smoke session, so the
+// built-in smoke sequence in src/main.tsx (gated on smokeTest) does not run and
+// interfere with an externally driven acceptance. Never set by an ordinary launch.
+const smokeTimings = process.argv.includes('--apex-smoke-timing-only');
+const smokeMeasurementsEnabled = smokeTest || smokeTimings;
+const smokeIpcMeasurements = smokeMeasurementsEnabled ? [] : null;
 const pendingLiveAudioPorts = new Map();
 ipcRenderer.on('vst3:liveAudioPort', (event, metadata) => {
   const port = event.ports && event.ports[0];
@@ -24,6 +30,8 @@ ipcRenderer.on('vst3:liveAudioPort', (event, metadata) => {
 const desktopApi = {
   isDesktop: true,
   smokeTest,
+  /** Timing instrumentation without the built-in smoke sequence. See above. */
+  smokeTimings,
   /** Set only by APEX_ACCEPTANCE=1; enables the packaged-acceptance hook. */
   packagedAcceptance: process.argv.includes('--apex-packaged-acceptance'),
   closeWindow: process.argv.includes('--apex-packaged-acceptance')
@@ -46,7 +54,7 @@ const desktopApi = {
     parameters: (id, changes) => ipcRenderer.invoke('vst3:parameters', id, changes),
     process: (id, frames, events, bpm, parameters) => ipcRenderer.invoke('vst3:process', id, frames, events, bpm, parameters),
     processAudio: async (id, frames, audio, bpm, parameters, profile) => {
-      if (!smokeTest || !profile) return ipcRenderer.invoke('vst3:processAudio', id, frames, audio, bpm, parameters);
+      if (!smokeMeasurementsEnabled || !profile) return ipcRenderer.invoke('vst3:processAudio', id, frames, audio, bpm, parameters);
       const invokeStartedAt = performance.now();
       const pcm = await ipcRenderer.invoke('vst3:processAudio', id, frames, audio, bpm, parameters, profile);
       const responseReceivedAt = performance.now();
@@ -113,7 +121,7 @@ const desktopApi = {
     }
   }
 };
-if (smokeTest) {
+if (smokeMeasurementsEnabled) {
   desktopApi.vst3.smokeTimingSnapshot = async () => ({
     preload: smokeIpcMeasurements.slice(),
     main: await ipcRenderer.invoke('vst3:smokeTimingSnapshot'),

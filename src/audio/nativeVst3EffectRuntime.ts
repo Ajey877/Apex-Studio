@@ -52,7 +52,13 @@ export interface NativeVst3MixerEffectSmokeEvent {
   [key: string]: unknown;
 }
 const smokeTimingEvents: NativeVst3MixerEffectSmokeEvent[] = [];
-const mixerFxSmokeEnabled = () => (globalThis as any).desktopApp?.smokeTest === true;
+// Timing instrumentation is on for a smoke session and for a timing-only session.
+// The two are distinct because only a smoke session runs the built-in smoke
+// sequence (src/main.tsx); a timing-only session just records.
+const mixerFxSmokeEnabled = () => {
+  const desktop = (globalThis as any).desktopApp;
+  return desktop?.smokeTest === true || desktop?.smokeTimings === true;
+};
 function recordMixerFxSmokeEvent(event: NativeVst3MixerEffectSmokeEvent) {
   if (!mixerFxSmokeEnabled()) return;
   if (smokeTimingEvents.length < 8192) smokeTimingEvents.push({ ...event, rendererAtMs: performance.now() });

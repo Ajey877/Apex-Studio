@@ -59,13 +59,16 @@ function createWindow() {
     webPreferences: {
       additionalArguments: [
         // APEX_SMOKE_TIMING_ONLY turns on the SAME renderer smoke instrumentation
-        // (per-block native processing timings, deadline-miss reporting) without
-        // the built-in smoke entry below, which finishes with app.exit(). It lets
-        // an externally driven acceptance run measure a real native session while
-        // it keeps control of the application. Reopen stays tied to the smoke entry.
-        ...(process.env.APEX_SMOKE_TEST === '1' || process.env.APEX_SMOKE_TIMING_ONLY === '1'
-          ? ['--apex-smoke-test', ...(process.env.APEX_SMOKE_TEST === '1' && process.env.APEX_SMOKE_REOPEN === '1' ? ['--apex-smoke-reopen'] : [])]
-          : []),
+        // (per-block native processing timings, deadline-miss reporting) through a
+        // distinct flag, because the built-in smoke sequence in src/main.tsx is
+        // gated on smokeTest: reusing --apex-smoke-test here made that sequence run
+        // concurrently with an externally driven acceptance, creating its own Mixer
+        // inserts, driving the transport and opening extra native sessions. The
+        // main-process app.exit() entry below stays tied to APEX_SMOKE_TEST, as does
+        // reopen.
+        ...(process.env.APEX_SMOKE_TEST === '1'
+          ? ['--apex-smoke-test', ...(process.env.APEX_SMOKE_REOPEN === '1' ? ['--apex-smoke-reopen'] : [])]
+          : process.env.APEX_SMOKE_TIMING_ONLY === '1' ? ['--apex-smoke-timing-only'] : []),
         // Packaged-editor acceptance: a separate flag from the smoke entry, so the
         // two never enable each other's hooks. Never set by a normal launch.
         ...(process.env.APEX_ACCEPTANCE === '1' ? ['--apex-packaged-acceptance'] : []),

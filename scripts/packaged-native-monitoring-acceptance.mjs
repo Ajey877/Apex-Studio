@@ -258,10 +258,20 @@ async function runOnce(runIndex, collector) {
     // discovery path, so it owns the only pre-insert scan.
     const smoke = await page.evaluate(() => ({
       smokeTest: globalThis.desktopApp?.smokeTest === true,
+      smokeTimings: globalThis.desktopApp?.smokeTimings === true,
       hasBridge: !!globalThis.desktopApp?.vst3,
     }));
     assert.ok(smoke.hasBridge, 'The packaged preload VST3 bridge is missing.');
-    assert.ok(smoke.smokeTest, 'Renderer native processing timings are not enabled in this packaged launch.');
+    assert.ok(smoke.smokeTimings, 'Renderer native processing timings are not enabled in this packaged launch.');
+    // smokeTest must be OFF. src/main.tsx runs the built-in native VST3 smoke
+    // sequence whenever smokeTest is true, and that sequence creates its own Mixer
+    // inserts on track 1, drives the transport and opens extra native sessions -
+    // which is what made earlier runs of this acceptance fail intermittently with
+    // transport stopped, deadline misses, extra helper processes and native
+    // diagnostics for slots this script never created.
+    assert.equal(smoke.smokeTest, false,
+      'The packaged launch is a smoke session, so the built-in native VST3 smoke sequence '
+      + 'is running concurrently and would invalidate this acceptance. Use APEX_SMOKE_TIMING_ONLY.');
 
     stage(run, 'helpers-before-insert');
     run.helpersBeforeInsert = helperPids();
