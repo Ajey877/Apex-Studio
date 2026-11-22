@@ -20,10 +20,17 @@
 // Chromium's fake capture device, so this is NOT physical hardware evidence and
 // proves nothing about physical round-trip latency.
 //
-// Timing instrumentation is enabled with APEX_SMOKE_TIMING_ONLY=1, which turns on
-// the renderer smoke timings WITHOUT the built-in smoke entry (that entry ends
-// with app.exit() and would end this run). No production DSP or native lifecycle
-// behaviour is changed by that flag.
+// Timing instrumentation is enabled with APEX_SMOKE_TIMING_ONLY=1, which passes a
+// DISTINCT renderer argument, --apex-smoke-timing-only, and exposes
+// `desktopApp.smokeTimings`. It deliberately does NOT set `desktopApp.smokeTest`,
+// because src/main.tsx launches the built-in runDesktopVst3Smoke() sequence
+// whenever smokeTest is true - that sequence creates its own Mixer inserts on
+// track 1, drives the transport and opens extra native sessions, and running it
+// alongside this acceptance invalidated the measurement. The existing
+// APEX_SMOKE_TEST=1 path (smokeTest, the built-in sequence, and its app.exit()
+// entry) is unchanged. No production DSP or native lifecycle behaviour is changed
+// by either flag, and this script asserts smokeTimings === true AND
+// smokeTest === false so it cannot silently regress.
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
@@ -357,13 +364,13 @@ async function runOnce(runIndex, collector) {
     stage(run, 'arm-probe');
     await page.evaluate(([track, slot]) => window.__apexAcceptance
       .armNativeMonitoringCoexistenceProbe(track, slot, { inputSignal: true }), [1, slotId]);
-    // Preparing the native session is asynchronous: starting the transport opens
-    // the plugin in the helper process. A fixed delay is not enough under CI load,
-    // and measuring too early reported an unprepared insert as a coexistence
-    // failure (3 of 5 runs passed, then one measured prepared === false). Wait for
-    // the insert to be prepared AND for its processed-block count to advance, which
-    // is what "actively processing" means. This relaxes nothing: if preparation
-    // never completes the wait expires and the baseline assertions still fail.
+    // MANDATORY PRECONDITION. Preparing the native session is asynchronous: starting
+    // the transport opens the plugin in the helper process, and a fixed delay is not
+    // enough under CI load. Wait for the insert to be prepared AND for its
+    // processed-block count to advance between two samples - that is what "already
+    // prepared and actively processing" means - and require that this was actually
+    // achieved before monitoring is enabled.
+    const warmupTimeoutMs = 60000;
     const warmupStartedAt = Date.now();
     let warmup = await page.evaluate(() => window.__apexAcceptance
       .measureNativeMonitoringCoexistence('warmup'));
@@ -371,29 +378,40 @@ async function runOnce(runIndex, collector) {
     await page.waitForTimeout(500);
     warmup = await page.evaluate(() => window.__apexAcceptance
       .measureNativeMonitoringCoexistence('warmup'));
-    // The baseline also has to be taken at a SETTLED session count. Reading the
-    // plugin fixture opens short-lived inspect sessions, and sessionCount counts
-    // open + pending + closing sessions, so sampling too early produced baselines
-    // of 3 and of 1 on different runs - and the comparison then measured the
-    // teardown of those inspect sessions rather than anything monitoring did
-    // (observed: before=3 during=1 afterDisable=1, and before=1 during=2).
-    // Requiring the count to be unchanged between consecutive samples makes the
-    // reference stable; it does not relax the comparison itself.
-    // Gate only on conditions that are directly observable and that the baseline
-    // assertions independently require: the insert is prepared and its processed
-    // block count is advancing.
-    const settled = () => warmup.native.prepared
+    // Gate only on conditions that are directly observable: the insert is prepared
+    // and its processed block count is advancing.
+    const warmupSucceeded = () => warmup.native.prepared
       && warmup.native.processedBlocks > priorBlocks;
-    while (Date.now() - warmupStartedAt < 60000 && !settled()) {
+    while (Date.now() - warmupStartedAt < warmupTimeoutMs && !warmupSucceeded()) {
       priorBlocks = warmup.native.processedBlocks;
       await page.waitForTimeout(500);
       warmup = await page.evaluate(() => window.__apexAcceptance
         .measureNativeMonitoringCoexistence('warmup'));
     }
-    run.warmup = { waitedMs: Date.now() - warmupStartedAt, prepared: warmup.native.prepared,
-      processedBlocks: warmup.native.processedBlocks, runtimeIds: warmup.native.runtimeIds,
-      nativeServiceSessionCount: warmup.native.nativeServiceSessionCount,
-      reachedSingleSessionSteadyState: warmup.native.nativeServiceSessionCount === 1 };
+    // The loop above can expire without the precondition ever having been met, so
+    // record whether it was and require it explicitly. A timeout is a failure here,
+    // at the warmup, with the diagnostics attached - not something to discover
+    // later as a confusing baseline mismatch. Monitoring is never enabled on an
+    // insert that was not proven prepared and processing.
+    const warmupOk = warmupSucceeded();
+    run.warmup = { succeeded: warmupOk, waitedMs: Date.now() - warmupStartedAt,
+      timeoutMs: warmupTimeoutMs, prepared: warmup.native.prepared,
+      processedBlocks: warmup.native.processedBlocks, priorBlocks,
+      runtimeIds: warmup.native.runtimeIds, deadlineMisses: warmup.native.deadlineMisses,
+      nativeFailures: warmup.native.failures,
+      nativeServiceSessionCount: warmup.native.nativeServiceSessionCount };
+    assert.equal(warmupOk, true,
+      'Warmup timed out: the native insert was never proven prepared and actively '
+      + `processing before monitoring would have been enabled. `
+      + `waitedMs=${run.warmup.waitedMs} of ${warmupTimeoutMs} `
+      + `prepared=${warmup.native.prepared} `
+      + `processedBlocks=${warmup.native.processedBlocks} priorBlocks=${priorBlocks} `
+      + `runtimeIds=${JSON.stringify(warmup.native.runtimeIds)} `
+      + `deadlineMisses=${warmup.native.deadlineMisses} `
+      + `nativeFailures=${warmup.native.failures} `
+      + `failureMessages=${JSON.stringify(warmup.native.failureMessages)} `
+      + `nativeDiagnostics=${JSON.stringify(warmup.diagnostics)} `
+      + `rendererConsoleErrors=${JSON.stringify(consoleErrors.slice(0, 8))}`);
 
     stages.beforeMonitoring = await page.evaluate(label => window.__apexAcceptance
       .measureNativeMonitoringCoexistence(label), 'beforeMonitoring');

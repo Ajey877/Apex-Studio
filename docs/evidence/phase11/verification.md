@@ -244,13 +244,46 @@ node is detected rather than assumed away.
 Runs 5 times by default (`APEX_NATIVE_MONITORING_RUNS`). A failing run fails the acceptance and
 stops the loop — no retry converts a failure into a pass.
 
-### Instrumentation change
+### Instrumentation change (final implementation)
 
-`APEX_SMOKE_TIMING_ONLY=1` turns on the same renderer smoke timings as `APEX_SMOKE_TEST=1`
-**without** the built-in smoke entry, which finishes with `app.exit()` and would end an
-externally driven run. Two lines: `electron.cjs` adds `--apex-smoke-test` for either flag (the
-reopen flag stays tied to the smoke entry), and `desktop-vst3.cjs` accepts either flag for
-`smokeTimingEnabled`. No production DSP or native lifecycle behaviour changes.
+`APEX_SMOKE_TIMING_ONLY=1` turns on the same renderer native-processing measurements as
+`APEX_SMOKE_TEST=1` through a **distinct** capability flag, so the built-in smoke sequence never
+runs:
+
+- `electron.cjs` appends `--apex-smoke-timing-only` for `APEX_SMOKE_TIMING_ONLY`, and appends
+  `--apex-smoke-test` **only** for `APEX_SMOKE_TEST` (the reopen flag stays tied to that path).
+- `preload.cjs` exposes `desktopApp.smokeTimings` from that argument and enables the `processAudio`
+  measurements and `smokeTimingSnapshot`/`smokeTimingReset` for either capability.
+- `src/audio/nativeVst3EffectRuntime.ts` records the Mixer effect timing events when
+  `smokeTest === true || smokeTimings === true`.
+- `src/audio/liveInputAcceptance.ts` reads the timing snapshot for either capability.
+- `desktop-vst3.cjs` accepts either env flag for `smokeTimingEnabled`.
+- `src/main.tsx` is unchanged in behaviour and still gated on `smokeTest` **alone**, so a
+  timing-only session never launches `runDesktopVst3Smoke()`.
+
+`APEX_SMOKE_TIMING_ONLY=1` therefore does **not** set `desktopApp.smokeTest`. The existing
+`APEX_SMOKE_TEST=1` behaviour — `smokeTest`, the built-in sequence, and its `app.exit()` entry —
+is unchanged. No production DSP or native lifecycle behaviour changes for either flag. The
+acceptance asserts `smokeTimings === true` **and** `smokeTest === false`, so a regression that
+re-enabled the built-in sequence would fail immediately rather than corrupt the measurement.
+
+> **Superseded:** an earlier revision of this section stated that `electron.cjs` added
+> `--apex-smoke-test` for either flag. That was the broken implementation and is the root cause
+> documented below; it is retained only as history.
+
+### Warmup: a mandatory precondition
+
+After the transport starts, preparing the native session is asynchronous — the plugin is opened in
+the helper process. The script therefore waits, up to 60 s, for the insert to be **prepared** and
+for its **processed-block count to advance between two samples**, which together are what "already
+prepared and actively processing" means.
+
+That precondition is **mandatory**: the loop's outcome is recorded as `run.warmup.succeeded` and
+asserted immediately. If the timeout expires without both conditions being met, the run fails at
+the warmup with elapsed time, `prepared`, processed-block count, the prior count, runtime IDs,
+deadline misses, native failure count and messages, the production native Mixer diagnostics, and
+the renderer console errors. Monitoring is never enabled on an insert that was not proven prepared
+and processing, and no retry is attempted.
 
 ### Probe measurement surface
 
@@ -341,10 +374,13 @@ independently require.
 
 ### Defects this scenario caught in its own harness
 
-Six were found and fixed while bringing it up; none of them were in the native lifecycle. The
-first four were found on the way to the first 5-of-5 pass on `41e0924`; the last two were found
+Seven were found and fixed while bringing it up; none of them were in the native lifecycle. The
+first four were found on the way to the first 5-of-5 pass on `41e0924`; the last three were found
 when the identical code then failed intermittently (proven identical: `git diff 41e0924 608adaf`
-touches only two files under `docs/evidence/phase11/`).
+touches only two files under `docs/evidence/phase11/`). Items 6 and 7 record assertions this
+harness had added for itself and then had to replace, because exact equality on either collection
+is not a property the scenario requires — the properties that are required are asserted
+independently and remain in force.
 
 1. **Wrong Mixer track.** The harness clicked the `#mixer-strip-1` container. Its centre is the
    volume fader, whose `onClick` calls `stopPropagation`, so `onSelectTrack` never fired and
@@ -371,16 +407,28 @@ touches only two files under `docs/evidence/phase11/`).
 6. **Unstable session-count baseline.** Observed `before=3 during=1 afterDisable=1`, then
    `before=1 during=2`, then `before=2 during=1 afterDisable=1` — the last on code proven
    byte-identical to a 5-of-5 pass (`git diff 5dae1be e1b6f53` touches only docs). Short-lived
-   inspect sessions are counted in `sessionCount`, a live gauge of open + pending + closing
-   sessions (`native/vst3/service.mjs:41`), so an early baseline measured teardown of inspect
-   sessions rather than anything monitoring did. The first remedy — requiring the count to be
-   unchanged between two consecutive samples — was **insufficient**: a leftover session survived
-   that window and closed later. The final remedy removes the contamination and pins the
-   reference: the harness identity read no longer calls `inspectEffect` (discovery alone gives
-   name, class ID and path and opens no session), and the baseline waits for the count to reach
-   `1`, the steady state for a project holding exactly one native insert, failing if it does not.
-   During and after must still equal that baseline. The insert's own session was never in doubt
-   in any run.
+   sessions are counted in `sessionCount`, a live gauge of open + pending + closing sessions
+   (`native/vst3/service.mjs:41`), so an early baseline measured teardown in progress rather than
+   anything monitoring did. The dominant source turned out to be the concurrent built-in smoke
+   sequence (see the root cause above); `inspectEffect` sessions were a secondary contributor.
+   **Two remedies were tried and both superseded:** requiring the count to be unchanged between
+   two consecutive samples, and pinning the baseline to exactly `1`. Neither held, because the
+   gauge legitimately moves for reasons this scenario does not own.
+   **Final implementation:** the gauge is *not* an equality invariant. All three readings are
+   recorded, and the assertion is the directional no-leak property the scenario actually requires —
+   the count after monitoring is disabled must not exceed the baseline. The harness identity read
+   also no longer calls `inspectEffect` (discovery alone gives name, class ID and path and opens no
+   session). The insert's own liveness is asserted separately and soundly: `prepared === true`, a
+   processing node present, processed blocks advancing, one unchanged runtime ID and one unchanged
+   node ID.
+7. **Helper PID list compared for exact equality.** A baseline snapshot legitimately holds
+   short-lived `apex-vst3-host.exe` processes spawned by discovery and `inspectEffect`, which exit
+   on their own (observed `[2428, 3880, 8580]` before monitoring and `[3880]` during, with the
+   insert's own helper present throughout). **Final implementation:** no helper PID may appear that
+   was absent at baseline — which is what a crash or restart would actually produce — and at least
+   one helper must be alive during monitoring and after it is disabled. All three PID lists remain
+   in the evidence. A dead helper would also stop the insert processing, which the processed-block
+   and identity assertions already require.
 
 **Product observation, deliberately not fixed here (out of scope):** a user who opens the VST3
 picker while any discovery scan is in flight gets that same permanent `Scan failed` state with
