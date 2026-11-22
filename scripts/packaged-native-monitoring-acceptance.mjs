@@ -435,8 +435,23 @@ async function runOnce(runIndex, collector) {
     const after = stages.afterMonitoring;
 
     // The insert must ALREADY be a live, prepared native session before monitoring.
-    assert.equal(before.native.prepared, true, 'Native insert was not prepared before monitoring started.');
-    assert.equal(before.native.nodePresent, true, 'No native processing node existed before monitoring started.');
+    // This has failed intermittently, so the message carries everything that
+    // explains a preparation that did not happen: how long the warmup waited,
+    // whether any block was ever processed, the production native Mixer
+    // diagnostics, and the renderer's own console errors.
+    const preparationContext = () => `waitedMs=${run.warmup?.waitedMs} `
+      + `processedBlocks=${before.native.processedBlocks} `
+      + `runtimeIds=${JSON.stringify(before.native.runtimeIds)} `
+      + `deadlineMisses=${before.native.deadlineMisses} `
+      + `nativeFailures=${before.native.failures} `
+      + `failureMessages=${JSON.stringify(before.native.failureMessages)} `
+      + `transportPlaying=${before.transport.playing} positionSeconds=${before.transport.positionSeconds} `
+      + `nativeDiagnostics=${JSON.stringify(before.diagnostics)} `
+      + `rendererConsoleErrors=${JSON.stringify(consoleErrors.slice(0, 8))}`;
+    assert.equal(before.native.prepared, true,
+      `Native insert was not prepared before monitoring started. ${preparationContext()}`);
+    assert.equal(before.native.nodePresent, true,
+      `No native processing node existed before monitoring started. ${preparationContext()}`);
     assert.ok(before.native.processedBlocks > 0,
       `Native plugin processed no audio before monitoring: ${JSON.stringify(before.native)}`);
     assert.ok((before.native.nativeOutputRmsMean ?? 0) > 0.001,
