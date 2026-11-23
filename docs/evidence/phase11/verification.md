@@ -715,3 +715,54 @@ The corrected correlation has **not yet been exercised by a packaged run**. Unti
 
 The next diagnostic must report, per failure: the result acceptance status, the timing labelled
 accepted or rejected, and the wall/CPU/wall-minus-CPU triple for each helper span.
+
+### Corrected correlation measured on a packaged run — job `137787023086`, commit `d960d11`
+
+Gating acceptance **5/5 PASS**. The diagnostic attempted **all 60** repetitions (41.8 min):
+**59 PASS / 1 FAIL**. Every passing repetition reported `workletResultsAccepted: 181`,
+`workletResultsRejected: 0`, `workletResultsUnattributable: 0`.
+
+The single failure (repetition 51, helper pid 8576) is the clearest possible demonstration of the
+defect that was corrected:
+
+```
+resultsAccepted = 1   resultsRejected = 1   resultsUnattributable = 0
+guard  = pending-deadline-miss   sequence 1   phase cold
+         currentOutputFrame 2944  dueOutputFrame 3072  nextSequence 2
+         inputContextFrame 1735167  readySequences [0]  drySequences [0, 1]
+block seq 1: accepted=FALSE  totalRoundTripMs=null  marginMs=null
+             inst 1.71  prep 1.58  cb 0.02  coll 0.11  pipe 1.91  lagInBlock 2.42
+             rejection: reason "after-failure"  receivedOutputFrame 3072
+                        dueOutputFrame 3072  roundTripMs 19
+block seq 0: accepted=TRUE   totalRoundTripMs 5  marginMs +16.33
+```
+
+Under the previous extractor this block carried `roundTripMs 19`, which against the 21.33 ms budget
+reads as a **+2.33 ms margin on a block that missed its deadline**. The corrected extractor reports
+`total=null, margin=null, accepted=false`, and keeps the 19 ms visible only as rejection evidence
+with its frame positions. The run's `worstMarginMs` is +16.33 — a failing run whose every *accepted*
+block was comfortable, which is the honest reading: it failed because a block was never accepted,
+not because an accepted block was slow.
+
+The plug-in callback remains ≤0.03 ms throughout, accepted and rejected alike.
+
+### The CPU-time split does not resolve at this granularity on Windows
+
+`helperCpuTimingSupported` was `true`, and every CPU span read **0**, against wall spans of 0.96–1.85
+ms. The mechanism is correct — the C++ unit test on Linux measures a 30 ms injected sleep as
+**0.07 ms of CPU** and genuine arithmetic as **13.04 ms wall / 13.04 ms CPU** — so the observable
+fact is that Windows' per-thread CPU accounting is far coarser than the spans being measured.
+`GetThreadTimes` advances at the system clock interrupt (nominally 15.625 ms), so a 1–2 ms span
+usually accumulates no measurable tick at all.
+
+Two consequences, stated plainly:
+
+- **A CPU value of 0 here means "below the clock's resolution", not "no CPU was used."** That is
+  exactly the fabrication the design tried to avoid, and `cpuTimingSupported: true` makes it worse by
+  implying the number is meaningful.
+- **The question this split was meant to answer — whether the 13 ms host-preparation spans were
+  executing code or waiting to be scheduled — is still not answered.** Resolving it needs either an
+  aggregate over many blocks, a higher-resolution CPU source, or measurement of the spans that are
+  actually large enough to see.
+
+This is recorded as a limitation of the instrumentation, not as a result.
