@@ -57,7 +57,13 @@ function registerVst3({ app, ipcMain, dialog, getWindow }) {
   // round trip is serviced by this event loop, so a stall here delays audio even
   // when the helper is idle. Sampling is 10 ms and the timer is unref'd: it can
   // neither keep the process alive nor affect production, where it never starts.
-  const eventLoopLag = { maxLagMs: 0, samples: 0, startedAtMs: null };
+  const eventLoopLag = { maxLagMs: 0, samples: 0, startedAtMs: null,
+    maxLagDuringAudioMs: 0, firstAudioAtMs: null, lastAudioAtMs: null };
+  // A bounded ring of the worst stalls with their timestamps. The session maximum
+  // alone cannot show that a stall coincided with an audio block - it may belong
+  // to application start-up and never touch playback - so each block reports the
+  // worst stall inside its own request/response window.
+  const worstLagSamples = [];
   if (smokeTimingEnabled) {
     const intervalMs = 10;
     let expectedAtMs = performance.now() + intervalMs;
@@ -68,6 +74,15 @@ function registerVst3({ app, ipcMain, dialog, getWindow }) {
       const lagMs = nowMs - expectedAtMs;
       if (lagMs > eventLoopLag.maxLagMs) eventLoopLag.maxLagMs = lagMs;
       eventLoopLag.samples++;
+      // Keep only stalls that could matter: anything over 1 ms, bounded to the 64
+      // worst, so the ring cannot grow without limit in a long session.
+      if (lagMs > 1) {
+        worstLagSamples.push({ atMs: nowMs, lagMs });
+        if (worstLagSamples.length > 64) {
+          worstLagSamples.sort((x, y) => y.lagMs - x.lagMs);
+          worstLagSamples.length = 32;
+        }
+      }
       expectedAtMs = nowMs + intervalMs;
     }, intervalMs);
     sampler.unref?.();
@@ -319,6 +334,19 @@ function registerVst3({ app, ipcMain, dialog, getWindow }) {
   handle('describeEffect', (context, owner, effect) => context.service.describeEffect(effect, owner));
   handle('parameters', (context, owner, id, changes) => context.service.parameters(id, changes, owner));
   handle('process', (context, owner, id, frames, events, bpm, parameters) => context.service.process(id, frames, events, bpm, owner, parameters));
+  // Worst recorded event-loop stall whose sample falls inside [fromMs, toMs] on
+  // the main-process monotonic clock. Returns null when no stall was sampled in
+  // that window, which is itself the useful answer: the block was not delayed by
+  // this event loop.
+  const worstLagBetween = (fromMs, toMs) => {
+    if (!Number.isFinite(fromMs) || !Number.isFinite(toMs)) return null;
+    let worst = null;
+    for (const sample of worstLagSamples) {
+      if (sample.atMs < fromMs || sample.atMs > toMs) continue;
+      if (worst === null || sample.lagMs > worst) worst = sample.lagMs;
+    }
+    return worst;
+  };
   const runProcessAudio = async (context, owner, id, frames, audio, bpm, parameters, rawProfile, ipcTiming) => {
     const profile = readProfile(rawProfile);
     if (!profile) return context.service.processAudio(id, frames, audio, bpm, owner, parameters);
@@ -340,8 +368,18 @@ function registerVst3({ app, ipcMain, dialog, getWindow }) {
     maximumConcurrentCallsPerEffect = Math.max(maximumConcurrentCallsPerEffect, activeForEffectAtStart);
     try {
       const helper = {};
+      const blockStartedAtMainMs = performance.now();
       const pcm = await context.service.processAudio(id, frames, audio, bpm, owner, parameters, helper);
       const serviceCompletedAtMainMs = performance.now();
+      // Attribute the block's own window: the worst stall sampled between this
+      // block arriving and its result leaving. A stall here delays the round trip
+      // even when the helper answered promptly.
+      const eventLoopLagDuringBlockMs = worstLagBetween(blockStartedAtMainMs, serviceCompletedAtMainMs);
+      if (eventLoopLag.firstAudioAtMs === null) eventLoopLag.firstAudioAtMs = ipcTiming?.ipcReceivedAtMainMs ?? blockStartedAtMainMs;
+      eventLoopLag.lastAudioAtMs = serviceCompletedAtMainMs;
+      if (eventLoopLagDuringBlockMs !== null && eventLoopLagDuringBlockMs > eventLoopLag.maxLagDuringAudioMs) {
+        eventLoopLag.maxLagDuringAudioMs = eventLoopLagDuringBlockMs;
+      }
       if (smokeProcessAudioTimings.length < 8192) smokeProcessAudioTimings.push({
         ...profile, frames, ipcReceivedAtMainMs: ipcTiming?.ipcReceivedAtMainMs ?? serviceStartAtMainMs,
         ipcReceivedAtMainEpochMs: ipcTiming?.ipcReceivedAtMainEpochMs ?? performance.timeOrigin + serviceStartAtMainMs,
@@ -354,6 +392,7 @@ function registerVst3({ app, ipcMain, dialog, getWindow }) {
         helperFrameParseMs: helper.frameParseMs ?? null,
         helperWriteAtMs: helper.writeAtMs ?? null, helperResponseAtMs: helper.responseAtMs ?? null,
         eventLoopLagMaxMs: eventLoopLag.maxLagMs,
+        eventLoopLagDuringBlockMs,
         nativeInputRms: pcmRms(audio), nativeOutputRms: pcmRms(pcm),
         activeProcessAudioCallsAtStart: activeAtStart, activeCallsForEffectAtStart: activeForEffectAtStart, error: null,
       });
@@ -381,11 +420,14 @@ function registerVst3({ app, ipcMain, dialog, getWindow }) {
     handle('smokeTimingSnapshot', context => ({
       processAudio: smokeProcessAudioTimings.slice(), maximumConcurrentProcessAudioCalls,
       maximumConcurrentCallsPerEffect, activeProcessAudioCalls, nativeServiceSessionCount: context.service.sessionCount,
-      eventLoopLag: { ...eventLoopLag }, helperStartup: Object.fromEntries(helperStartupByEffect),
+      eventLoopLag: { ...eventLoopLag, worstStalls: worstLagSamples.slice().sort((x, y) => y.lagMs - x.lagMs).slice(0, 8) },
+      helperStartup: Object.fromEntries(helperStartupByEffect),
     }));
     handle('smokeTimingReset', () => {
       smokeProcessAudioTimings.length = 0;
       eventLoopLag.maxLagMs = 0; eventLoopLag.samples = 0; eventLoopLag.startedAtMs = performance.now();
+      eventLoopLag.maxLagDuringAudioMs = 0; eventLoopLag.firstAudioAtMs = null; eventLoopLag.lastAudioAtMs = null;
+      worstLagSamples.length = 0;
       maximumConcurrentProcessAudioCalls = activeProcessAudioCalls;
       maximumConcurrentCallsPerEffect = Math.max(0, ...activeCallsByEffect.values());
       helperStartupByEffect.clear(); helperStartupAttempted.clear();

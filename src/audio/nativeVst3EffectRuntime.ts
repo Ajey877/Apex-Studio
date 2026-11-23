@@ -190,10 +190,17 @@ class ApexVst3FxProcessor extends AudioWorkletProcessor {
   epochNowMs() {
     // Wall clock in epoch milliseconds, which is the only reading comparable
     // between this audio thread and the main process (their performance.now()
-    // origins differ). This is diagnostics only, so a missing or throwing
-    // performance object degrades to null - it must never break the audio thread.
+    // origins differ). AudioWorkletGlobalScope does NOT expose a performance object in
+    // Chromium - measured on the packaged Windows build, every stamp came back
+    // null - so Date.now() is the clock that actually works here. Millisecond
+    // resolution against a 21.33 ms budget is coarse but sufficient to attribute
+    // a leg, and the main-process side keeps sub-millisecond precision.
+    // Diagnostics only: this must never be able to throw on the audio thread.
     try {
-      return typeof performance === 'undefined' ? null : performance.timeOrigin + performance.now();
+      if (typeof performance !== 'undefined' && typeof performance.timeOrigin === 'number') {
+        return performance.timeOrigin + performance.now();
+      }
+      return typeof Date !== 'undefined' ? Date.now() : null;
     } catch (error) { return null; }
   }
   fail(reason) {

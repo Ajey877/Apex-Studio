@@ -824,10 +824,12 @@ test('the worklet stamps submit and acceptance on a cross-process comparable clo
     'the round trip is the difference of the two epoch stamps');
 });
 
-test('cold-start stamps degrade to null rather than throwing when performance is absent', () => {
-  // Diagnostics run on the real-time audio thread. If the timing surface is
-  // unavailable the block must still process: a failed stamp may never become a
-  // failed audio block.
+test('cold-start stamps fall back to Date.now when performance is absent, as in a real worklet', () => {
+  // AudioWorkletGlobalScope does not expose `performance` in Chromium, which is
+  // exactly what the packaged Windows build measured: every stamp came back null
+  // and the renderer->main leg could not be computed. The fallback has to produce
+  // a usable epoch stamp, and diagnostics run on the real-time audio thread so a
+  // failed stamp may never become a failed audio block.
   const sandbox: any = {
     currentFrame: 0, Float32Array, Map, Number, Array, Math,
     AudioWorkletProcessor: class {
@@ -851,5 +853,8 @@ test('cold-start stamps degrade to null rather than throwing when performance is
   }
   assert.equal(processor.failed, false, 'a missing performance object must not fail the block');
   const submit = processor.port.sent.filter((message: any) => message?.event === 'worklet-submit').at(-1);
-  assert.equal(submit.submittedAtEpochMs, undefined, 'no stamp is invented when the clock is absent');
+  assert.equal(typeof submit.submittedAtEpochMs, 'number',
+    'the Date.now fallback must still yield an epoch stamp');
+  assert.ok(Math.abs(submit.submittedAtEpochMs - Date.now()) < 60000,
+    `the fallback stamp must be epoch milliseconds, got ${submit.submittedAtEpochMs}`);
 });

@@ -357,6 +357,7 @@ interface NativeProcessRecord {
   helperFrameParseMs?: number | null;
   helperRequestBytes?: number | null;
   eventLoopLagMaxMs?: number | null;
+  eventLoopLagDuringBlockMs?: number | null;
 }
 interface HelperStartupTimings {
   pid?: number | null;
@@ -376,7 +377,11 @@ type SmokeSnapshot = {
   main?: {
     processAudio?: NativeProcessRecord[];
     nativeServiceSessionCount?: number;
-    eventLoopLag?: { maxLagMs?: number; samples?: number; startedAtMs?: number | null };
+    eventLoopLag?: {
+      maxLagMs?: number; samples?: number; startedAtMs?: number | null;
+      maxLagDuringAudioMs?: number; firstAudioAtMs?: number | null; lastAudioAtMs?: number | null;
+      worstStalls?: { atMs: number; lagMs: number }[];
+    };
     helperStartup?: Record<string, HelperStartupTimings>;
   };
 } | null;
@@ -560,6 +565,9 @@ export async function measureNativeVst3MonitoringCoexistence(engine: typeof audi
       budgetMs: blockBudgetMs,
       marginMs: totalMs !== null ? blockBudgetMs - totalMs : null,
       eventLoopLagMaxMs: num(record.eventLoopLagMaxMs),
+      // The discriminator this whole investigation turns on: the worst main-process
+      // event-loop stall sampled inside this block's own request/response window.
+      eventLoopLagDuringBlockMs: num(record.eventLoopLagDuringBlockMs),
       error: record.error ?? null,
     };
   });
@@ -608,6 +616,8 @@ export async function measureNativeVst3MonitoringCoexistence(engine: typeof audi
         block.marginMs !== null && (worst === null || block.marginMs < worst)
           ? block.marginMs : worst), null as number | null),
       mainEventLoopLagMaxMs: num(snapshot?.main?.eventLoopLag?.maxLagMs),
+      mainEventLoopLagDuringAudioMs: num(snapshot?.main?.eventLoopLag?.maxLagDuringAudioMs),
+      mainEventLoopWorstStalls: snapshot?.main?.eventLoopLag?.worstStalls ?? null,
       helperStartup: snapshot?.main?.helperStartup ?? null,
       workletSubmissions: countEvents('worklet-submit'),
       deadlineMisses: countEvents('pending-deadline-miss'),

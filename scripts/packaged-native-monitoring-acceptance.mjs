@@ -452,6 +452,8 @@ async function runOnce(runIndex, collector) {
       worstTotalRoundTripMs: stages.afterMonitoring.native.worstColdStartTotalMs ?? null,
       worstMarginMs: stages.afterMonitoring.native.worstColdStartMarginMs ?? null,
       mainEventLoopLagMaxMs: stages.afterMonitoring.native.mainEventLoopLagMaxMs ?? null,
+      mainEventLoopLagDuringAudioMs: stages.afterMonitoring.native.mainEventLoopLagDuringAudioMs ?? null,
+      mainEventLoopWorstStalls: stages.afterMonitoring.native.mainEventLoopWorstStalls ?? null,
       helperStartup: stages.afterMonitoring.native.helperStartup ?? null,
       blocks: stages.afterMonitoring.native.coldStartBlocks ?? [],
     };
@@ -761,15 +763,42 @@ if (process.env.GITHUB_ACTIONS) {
   // channel that carries the timing evidence out of CI. Each line splits one
   // block's round trip into renderer->main, the helper channel and main->renderer,
   // against the one-block budget the fail-closed guard actually enforces.
+  // GitHub truncates an annotation message at 4096 characters, which silently
+  // destroyed the JSON on the first instrumented run. Split the payload in two and
+  // round every number so both halves stay parseable.
+  // Two CI steps emit these annotations into the same job, so a label keeps the
+  // diagnostic high-volume pass distinguishable from the gating 5-run acceptance.
+  const label = process.env.APEX_NATIVE_MONITORING_LABEL ?? 'acceptance';
+  const emit = (title, payload) => console.log(`::notice title=[${label}] ${title}::${JSON.stringify(payload)
+    .replaceAll('%', '%25').replaceAll('\r', '%0D').replaceAll('\n', '%0A').slice(0, 3900)}`);
+  const r2 = value => (typeof value === 'number' && Number.isFinite(value) ? Math.round(value * 100) / 100 : value ?? null);
   for (const run of allRuns) {
     const cold = run.coldStart;
     if (!cold) continue;
-    console.log(`::notice title=Cold-start block timing run ${run.runIndex} (${run.status})::${JSON.stringify({
-      runIndex: run.runIndex, status: run.status, blockBudgetMs: cold.blockBudgetMs,
-      worstTotalRoundTripMs: cold.worstTotalRoundTripMs, worstMarginMs: cold.worstMarginMs,
-      mainEventLoopLagMaxMs: cold.mainEventLoopLagMaxMs, helperStartup: cold.helperStartup,
-      blocks: cold.blocks,
-    }).replaceAll('%', '%25').replaceAll('\r', '%0D').replaceAll('\n', '%0A').slice(0, 6000)}`);
+    const startup = Object.values(cold.helperStartup ?? {})[0] ?? null;
+    emit(`Cold-start summary run ${run.runIndex} (${run.status})`, {
+      runIndex: run.runIndex, status: run.status, blockBudgetMs: r2(cold.blockBudgetMs),
+      worstTotalRoundTripMs: r2(cold.worstTotalRoundTripMs), worstMarginMs: r2(cold.worstMarginMs),
+      mainEventLoopLagMaxMs: r2(cold.mainEventLoopLagMaxMs),
+      mainEventLoopLagDuringAudioMs: r2(cold.mainEventLoopLagDuringAudioMs),
+      mainEventLoopWorstStalls: (cold.mainEventLoopWorstStalls ?? []).slice(0, 6)
+        .map(stall => ({ atMs: r2(stall.atMs), lagMs: r2(stall.lagMs) })),
+      helperPid: startup?.pid ?? null,
+      helperSpawnToProtocolBoundMs: r2(startup?.spawnToProtocolBoundMs),
+      helperProtocolBoundToFirstWriteMs: r2(startup?.protocolBoundToFirstWriteMs),
+      helperFirstRequestRoundTripMs: r2(startup?.firstRequestRoundTripMs),
+      helperConstructedToOpenCompletedMs: r2(startup?.constructedToOpenCompletedMs),
+    });
+    emit(`Cold-start blocks run ${run.runIndex} (${run.status})`, {
+      runIndex: run.runIndex, status: run.status,
+      blocks: (cold.blocks ?? []).slice(0, 6).map(block => ({
+        seq: block.sequence, rToMain: r2(block.rendererToMainMs), svc: r2(block.nativeServiceCallMs),
+        qWait: r2(block.helperQueueWaitMs), ser: r2(block.helperSerializeMs),
+        hRtt: r2(block.helperRoundTripMs), parse: r2(block.helperFrameParseMs),
+        mainToR: r2(block.mainToRendererMs), total: r2(block.totalRoundTripMs),
+        margin: r2(block.marginMs), lagInBlock: r2(block.eventLoopLagDuringBlockMs), err: block.error,
+      })),
+    });
   }
   if (evidence.status !== 'PASS') {
     const failed = allRuns.find(run => run.status === 'FAIL');

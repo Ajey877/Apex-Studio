@@ -106,6 +106,23 @@ jobs:
           path: build/native-monitoring-evidence
           if-no-files-found: warn
 
+      # DIAGNOSTIC ONLY - not a merge gate, and not a retry of the acceptance above.
+      # The 5-run acceptance above already recorded its own verdict before this step
+      # runs. This pass exists because the cold-start deadline miss is intermittent
+      # (about 1 repetition in 12), so a 5-run pass rarely captures one: it runs more
+      # genuinely cold repetitions to collect the timing decomposition AT the moment
+      # of a miss. Every repetition is reported independently in its own annotation
+      # and no repetition is re-run, so nothing here can turn a failure into a pass.
+      # continue-on-error keeps a diagnostic miss from masking the gating result.
+      - name: Cold-start deadline diagnostic (high volume, non-gating)
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        timeout-minutes: 90
+        env:
+          APEX_NATIVE_MONITORING_RUNS: '15'
+          APEX_NATIVE_MONITORING_LABEL: 'coldstart-diagnostic'
+        run: npm run test:native-monitoring-packaged
+
       # Packaged-application editor acceptance: Playwright drives the REAL packaged
       # exe (Mixer insert -> plug-in's own window), and native facts are read from
       # the OS process table. The display-scale row runs at real 125% and 150%;
