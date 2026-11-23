@@ -459,7 +459,7 @@ export class Vst3Service {
     catch (error) { await this.close(id, owner); throw error; }
     finally { session.processing = false; }
   }
-  async processAudio(id, frames, audio, bpm, owner = 'local', parameters = []) {
+  async processAudio(id, frames, audio, bpm, owner = 'local', parameters = [], timings) {
     const session = this.#session(id, owner);
     if (session.kind !== 'effect') throw new Error('Audio-effect processing requires a VST3 effect session');
     if (session.processing) throw new Error('Concurrent VST3 effect processing request rejected');
@@ -469,7 +469,7 @@ export class Vst3Service {
     if (!Number.isFinite(bpm) || bpm < 20 || bpm > 300) throw new Error('Invalid VST3 tempo');
     const changes = validateProcessParameters(parameters, session.parameters, frames);
     session.processing = true;
-    try { return (await session.client.processAudio(frames, audio, changes, bpm)).samples; }
+    try { return (await session.client.processAudio(frames, audio, changes, bpm, timings)).samples; }
     catch (error) { await this.close(id, owner); throw error; }
     finally { session.processing = false; }
   }
@@ -544,6 +544,17 @@ export class Vst3Service {
   getSessionDiagnostics(id, owner = 'local') {
     const session = this.#sessions.get(id);
     return session && session.owner === owner ? session.client.diagnostics() : null;
+  }
+  /**
+   * Start-up forensics for the helper process backing a session: its OS pid and
+   * the wall-clock stamps for spawn, protocol bind, first request and plug-in
+   * load. Used to attribute a real-time deadline miss to helper start-up rather
+   * than to steady-state processing. Read-only; returns null for unknown ids.
+   */
+  helperStartupTimings(id, owner = 'local') {
+    const session = this.#sessions.get(id);
+    if (!session || session.owner !== owner) return null;
+    return { pid: session.client.pid ?? null, ...session.client.lifecycleTimings() };
   }
   /** OS pid of the editor helper while its session is open or opening. */
   getEditorHelperPid(owner = null) {

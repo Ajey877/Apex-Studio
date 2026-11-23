@@ -53,6 +53,30 @@ function validateEditorRecoveryRecord(value) {
 function registerVst3({ app, ipcMain, dialog, getWindow }) {
   const smokeTimingEnabled = process.env.APEX_SMOKE_TEST === '1' || process.env.APEX_SMOKE_TIMING_ONLY === '1';
   const smokeProcessAudioTimings = smokeTimingEnabled ? [] : null;
+  // Main-process event-loop lag, measured only in a timing session. The live PCM
+  // round trip is serviced by this event loop, so a stall here delays audio even
+  // when the helper is idle. Sampling is 10 ms and the timer is unref'd: it can
+  // neither keep the process alive nor affect production, where it never starts.
+  const eventLoopLag = { maxLagMs: 0, samples: 0, startedAtMs: null };
+  if (smokeTimingEnabled) {
+    const intervalMs = 10;
+    let expectedAtMs = performance.now() + intervalMs;
+    eventLoopLag.startedAtMs = performance.now();
+    // unref'd: a diagnostic sampler must never hold the process open.
+    const sampler = setInterval(() => {
+      const nowMs = performance.now();
+      const lagMs = nowMs - expectedAtMs;
+      if (lagMs > eventLoopLag.maxLagMs) eventLoopLag.maxLagMs = lagMs;
+      eventLoopLag.samples++;
+      expectedAtMs = nowMs + intervalMs;
+    }, intervalMs);
+    sampler.unref?.();
+  }
+  // Helper start-up forensics for the first block of each effect, so a cold-start
+  // deadline miss can be attributed to spawn/handshake/plug-in load rather than
+  // guessed at from the deadline counter.
+  const helperStartupByEffect = new Map();
+  const helperStartupAttempted = new Set();
   let activeProcessAudioCalls = 0;
   let maximumConcurrentProcessAudioCalls = 0;
   const activeCallsByEffect = new Map();
@@ -300,17 +324,36 @@ function registerVst3({ app, ipcMain, dialog, getWindow }) {
     if (!profile) return context.service.processAudio(id, frames, audio, bpm, owner, parameters);
     const serviceStartAtMainMs = performance.now();
     const effectKey = `${profile.trackId}:${profile.slotId}`;
+    // Captured once per effect, never per block: this is a diagnostic read and
+    // must not add work to the steady-state audio path.
+    if (!helperStartupAttempted.has(effectKey)) {
+      helperStartupAttempted.add(effectKey);
+      try {
+        const startup = context.service.helperStartupTimings?.(id, owner);
+        if (startup) helperStartupByEffect.set(effectKey, { firstRequestAtMainMs: serviceStartAtMainMs, ...startup });
+      } catch { /* diagnostics only; never let forensics fail an audio block */ }
+    }
     const activeAtStart = ++activeProcessAudioCalls;
     const activeForEffectAtStart = (activeCallsByEffect.get(effectKey) ?? 0) + 1;
     activeCallsByEffect.set(effectKey, activeForEffectAtStart);
     maximumConcurrentProcessAudioCalls = Math.max(maximumConcurrentProcessAudioCalls, activeAtStart);
     maximumConcurrentCallsPerEffect = Math.max(maximumConcurrentCallsPerEffect, activeForEffectAtStart);
     try {
-      const pcm = await context.service.processAudio(id, frames, audio, bpm, owner, parameters);
+      const helper = {};
+      const pcm = await context.service.processAudio(id, frames, audio, bpm, owner, parameters, helper);
       const serviceCompletedAtMainMs = performance.now();
       if (smokeProcessAudioTimings.length < 8192) smokeProcessAudioTimings.push({
         ...profile, frames, ipcReceivedAtMainMs: ipcTiming?.ipcReceivedAtMainMs ?? serviceStartAtMainMs,
+        ipcReceivedAtMainEpochMs: ipcTiming?.ipcReceivedAtMainEpochMs ?? performance.timeOrigin + serviceStartAtMainMs,
         serviceStartAtMainMs, serviceCompletedAtMainMs, nativeServiceCallMs: serviceCompletedAtMainMs - serviceStartAtMainMs,
+        // Where the block's budget was actually spent inside the helper channel:
+        // serial-queue wait behind another request, request serialization, the
+        // helper round trip, and response frame parsing.
+        helperQueueWaitMs: helper.queueWaitMs ?? null, helperSerializeMs: helper.serializeMs ?? null,
+        helperRequestBytes: helper.requestBytes ?? null, helperRoundTripMs: helper.helperRoundTripMs ?? null,
+        helperFrameParseMs: helper.frameParseMs ?? null,
+        helperWriteAtMs: helper.writeAtMs ?? null, helperResponseAtMs: helper.responseAtMs ?? null,
+        eventLoopLagMaxMs: eventLoopLag.maxLagMs,
         nativeInputRms: pcmRms(audio), nativeOutputRms: pcmRms(pcm),
         activeProcessAudioCallsAtStart: activeAtStart, activeCallsForEffectAtStart: activeForEffectAtStart, error: null,
       });
@@ -319,6 +362,7 @@ function registerVst3({ app, ipcMain, dialog, getWindow }) {
       const serviceCompletedAtMainMs = performance.now();
       if (smokeProcessAudioTimings.length < 8192) smokeProcessAudioTimings.push({
         ...profile, frames, ipcReceivedAtMainMs: ipcTiming?.ipcReceivedAtMainMs ?? serviceStartAtMainMs,
+        ipcReceivedAtMainEpochMs: ipcTiming?.ipcReceivedAtMainEpochMs ?? performance.timeOrigin + serviceStartAtMainMs,
         serviceStartAtMainMs, serviceCompletedAtMainMs, nativeServiceCallMs: serviceCompletedAtMainMs - serviceStartAtMainMs,
         nativeInputRms: pcmRms(audio), nativeOutputRms: null,
         activeProcessAudioCallsAtStart: activeAtStart, activeCallsForEffectAtStart: activeForEffectAtStart,
@@ -337,11 +381,14 @@ function registerVst3({ app, ipcMain, dialog, getWindow }) {
     handle('smokeTimingSnapshot', context => ({
       processAudio: smokeProcessAudioTimings.slice(), maximumConcurrentProcessAudioCalls,
       maximumConcurrentCallsPerEffect, activeProcessAudioCalls, nativeServiceSessionCount: context.service.sessionCount,
+      eventLoopLag: { ...eventLoopLag }, helperStartup: Object.fromEntries(helperStartupByEffect),
     }));
     handle('smokeTimingReset', () => {
       smokeProcessAudioTimings.length = 0;
+      eventLoopLag.maxLagMs = 0; eventLoopLag.samples = 0; eventLoopLag.startedAtMs = performance.now();
       maximumConcurrentProcessAudioCalls = activeProcessAudioCalls;
       maximumConcurrentCallsPerEffect = Math.max(0, ...activeCallsByEffect.values());
+      helperStartupByEffect.clear(); helperStartupAttempted.clear();
     });
   }
   handle('unbindLiveAudioPort', (context, owner, id) => {
@@ -369,8 +416,17 @@ function registerVst3({ app, ipcMain, dialog, getWindow }) {
           submittedOutputFrame: timing?.submittedOutputFrame,
           dueOutputFrame: timing?.dueOutputFrame,
           dueContextFrame: timing?.dueContextFrame,
+          // The worklet's own submit wall clock, so the main-process record can
+          // show how long the block spent reaching this process.
+          submittedAtEpochMs: timing?.submittedAtEpochMs,
         };
-        return runProcessAudio(context, owner, sessionId, 1024, samples, 120, [], profile, { ipcReceivedAtMainMs: performance.now() });
+        const receivedAtMs = performance.now();
+        return runProcessAudio(context, owner, sessionId, 1024, samples, 120, [], profile, {
+          ipcReceivedAtMainMs: receivedAtMs,
+          // Epoch stamp: comparable with the worklet's submit stamp, which lives
+          // in a different process with a different performance.now() origin.
+          ipcReceivedAtMainEpochMs: performance.timeOrigin + receivedAtMs,
+        });
       },
     });
     try {

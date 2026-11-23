@@ -4,6 +4,7 @@
 import { execFileSync, spawn } from 'node:child_process';
 import { readdir, lstat } from 'node:fs/promises';
 import path from 'node:path';
+import { performance } from 'node:perf_hooks';
 
 // Production always spawns the staged helper binary. Unit/integration tests use
 // the setter below to substitute a protocol-faithful child process, because the
@@ -63,9 +64,31 @@ export class NativeVst3Client {
   #exited;
   #pid = null;
   #batched = false;
+  // Cold-start forensics. Every stage of bringing a helper up is stamped on the
+  // same `performance.now()` clock the main process uses for the audio path, so
+  // a deadline miss can be attributed to spawn, handshake, plug-in load or a
+  // slow first block instead of being inferred from the deadline counter.
+  // Measurement only: nothing here gates, retries or changes protocol behaviour.
+  #lifecycle = { constructedAtMs: null, spawnedAtMs: null, protocolBoundAtMs: null,
+    firstRequestWrittenAtMs: null, firstResponseAtMs: null, openCompletedAtMs: null };
   get isDead() { return Boolean(this.#dead); }
   /** OS pid of this helper, or null if the spawn never produced one. */
   get pid() { return this.#pid; }
+  /**
+   * Wall-clock (`performance.now()`) stamps for this helper's start-up, plus the
+   * derived spans. Returned by value; safe to embed in evidence JSON.
+   */
+  lifecycleTimings() {
+    const t = this.#lifecycle;
+    const span = (a, b) => (Number.isFinite(a) && Number.isFinite(b) ? b - a : null);
+    return {
+      ...t,
+      spawnToProtocolBoundMs: span(t.spawnedAtMs, t.protocolBoundAtMs),
+      protocolBoundToFirstWriteMs: span(t.protocolBoundAtMs, t.firstRequestWrittenAtMs),
+      firstRequestRoundTripMs: span(t.firstRequestWrittenAtMs, t.firstResponseAtMs),
+      constructedToOpenCompletedMs: span(t.constructedAtMs, t.openCompletedAtMs),
+    };
+  }
   /**
    * What the helper process (in practice: the plug-in) wrote to stdout and
    * stderr. `bytes` counts everything received on the stream, `text` is the
@@ -75,6 +98,7 @@ export class NativeVst3Client {
   diagnostics() { return { stdout: this.#stdout.snapshot(), stderr: this.#stderr.snapshot() }; }
   constructor(executable, { timeoutMs = 10000 } = {}) {
     this.#timeoutMs = timeoutMs;
+    this.#lifecycle.constructedAtMs = performance.now();
     // A `.cmd`/`.bat` helper cannot be spawned with shell:false on Windows
     // (spawn raises EINVAL), so batch helpers go through cmd.exe. The real
     // helper is an .exe and keeps the strict shell:false path.
@@ -86,6 +110,7 @@ export class NativeVst3Client {
       stdio: ['pipe', 'pipe', 'pipe', 'pipe'], windowsHide: true, shell: batch,
     });
     this.#pid = this.#child.pid ?? null;
+    this.#lifecycle.spawnedAtMs = performance.now();
     this.#exited = new Promise(resolve => this.#child.once('close', resolve));
     this.#child.on('error', error => this.#fail(error));
     this.#child.on('exit', (code, signal) => this.#fail(new Error(`VST3 helper exited (${signal ?? code}). ${this.#stderr.text(4096)}`)));
@@ -103,10 +128,14 @@ export class NativeVst3Client {
       this.#fail(new Error('VST3 helper protocol channel is unavailable'));
       return;
     }
+    this.#lifecycle.protocolBoundAtMs = performance.now();
     this.#protocol.on('error', error => this.#pipeFailed(error));
     this.#protocol.on('data', chunk => {
       // A dead client has already rejected its request and killed the helper.
       if (this.#dead) return;
+      if (this.#pending?.timings && this.#pending.timings.firstChunkAtMs === null) {
+        this.#pending.timings.firstChunkAtMs = performance.now();
+      }
       try {
         // The helper only ever answers. Bytes with no request waiting are a
         // protocol violation now, not something to match to the next request.
@@ -128,6 +157,14 @@ export class NativeVst3Client {
         const pending = this.#pending;
         this.#pending = undefined;
         clearTimeout(pending.timer);
+        if (pending.timings) {
+          pending.timings.responseAtMs = performance.now();
+          pending.timings.frameParseMs = (pending.timings.firstChunkAtMs === null ? null
+            : pending.timings.responseAtMs - pending.timings.firstChunkAtMs);
+          pending.timings.helperRoundTripMs = (pending.timings.writeAtMs === null ? null
+            : pending.timings.responseAtMs - pending.timings.writeAtMs);
+        }
+        if (this.#lifecycle.firstResponseAtMs === null) this.#lifecycle.firstResponseAtMs = performance.now();
         if (!result.ok) pending.reject(new Error(`VST3: ${result.error}`));
         else if (pcmBytes && (result.channels !== 2 || result.frames * 8 !== pcmBytes)) {
           pending.reject(new Error('Invalid plugin PCM shape'));
@@ -155,17 +192,43 @@ export class NativeVst3Client {
     this.#buffer = Buffer.alloc(0);
     this.#child.kill('SIGKILL');
   }
-  request(message) {
+  request(message, timings) {
     if (this.#dead) return Promise.reject(this.#dead);
     if (this.#queued >= 64) return Promise.reject(new Error('VST3 helper request queue full'));
+    // Cold-start forensics, measurement only. `timings` is filled in place so the
+    // caller can attribute a slow block to serialization, queueing behind another
+    // request on this strictly serial channel, the helper round trip, or frame
+    // parsing - the four places the 1024-frame budget can actually be spent.
+    const stamp = timings && typeof timings === 'object' ? timings : null;
+    if (stamp) {
+      stamp.queuedAtMs = performance.now();
+      stamp.command = typeof message?.command === 'string' ? message.command : null;
+      stamp.firstChunkAtMs = null; stamp.writeAtMs = null; stamp.responseAtMs = null;
+      stamp.frameParseMs = null; stamp.helperRoundTripMs = null; stamp.queueWaitMs = null;
+    }
+    const serializeStartedAtMs = performance.now();
     const text = JSON.stringify(message) + '\n';
-    if (Buffer.byteLength(text) > MAX_REQUEST) return Promise.reject(new Error('VST3 request too large'));
+    const requestBytes = Buffer.byteLength(text);
+    if (stamp) {
+      stamp.serializeMs = performance.now() - serializeStartedAtMs;
+      stamp.requestBytes = requestBytes;
+    }
+    if (requestBytes > MAX_REQUEST) return Promise.reject(new Error('VST3 request too large'));
     this.#queued++;
     const operation = this.#tail.then(() => {
       if (this.#dead) throw this.#dead;
       return new Promise((resolve, reject) => {
         const timer = setTimeout(() => this.#fail(new Error(`VST3 helper timed out after ${this.#timeoutMs}ms`)), this.#timeoutMs);
-        this.#pending = { resolve, reject, timer };
+        this.#pending = { resolve, reject, timer, timings: stamp };
+        const writtenAtMs = performance.now();
+        // Stamped unconditionally: the first request is normally `open`, the
+        // plug-in load, and that caller passes no timings object. Gating this on
+        // `stamp` left the most interesting start-up span unmeasured.
+        if (this.#lifecycle.firstRequestWrittenAtMs === null) this.#lifecycle.firstRequestWrittenAtMs = writtenAtMs;
+        if (stamp) {
+          stamp.writeAtMs = writtenAtMs;
+          stamp.queueWaitMs = writtenAtMs - stamp.queuedAtMs;
+        }
         this.#child.stdin.write(text, error => { if (error) this.#pipeFailed(error); });
       });
     }).finally(() => { this.#queued--; });
@@ -175,7 +238,10 @@ export class NativeVst3Client {
   open(plugin, { sampleRate = 48000, mode = 'offline', state, kind = 'instrument' } = {}) {
     if (!['instrument', 'effect'].includes(kind)) throw new Error('Invalid VST3 plugin kind');
     return this.request({ command: 'open', path: plugin.path, classId: plugin.classId, sampleRate, mode, kind,
-      ...(state === undefined ? {} : { state }) });
+      ...(state === undefined ? {} : { state }) }).then(opened => {
+      if (this.#lifecycle.openCompletedAtMs === null) this.#lifecycle.openCompletedAtMs = performance.now();
+      return opened;
+    });
   }
   openEditor(effect) {
     if (!effect || typeof effect.path !== 'string' || typeof effect.classId !== 'string' || !effect.state) {
@@ -227,12 +293,12 @@ export class NativeVst3Client {
   process(frames, events = [], parameters = [], bpm = 120) {
     return this.request({ command: 'process', frames, events, parameters, bpm });
   }
-  processAudio(frames, samples, parameters = [], bpm = 120) {
+  processAudio(frames, samples, parameters = [], bpm = 120, timings) {
     if (!Number.isInteger(frames) || frames < 1 || frames > 16384 ||
       !(samples instanceof Float32Array) || samples.length !== frames * 2 ||
       samples.some(sample => !Number.isFinite(sample))) throw new Error('Invalid planar stereo VST3 audio block');
     const bytes = Buffer.from(samples.buffer, samples.byteOffset, samples.byteLength);
-    return this.request({ command: 'process', frames, events: [], parameters, bpm, audio: bytes.toString('base64') });
+    return this.request({ command: 'process', frames, events: [], parameters, bpm, audio: bytes.toString('base64') }, timings);
   }
   async dispose() {
     // Kill rather than waiting on untrusted plugin teardown forever. Destructors

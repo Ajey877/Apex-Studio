@@ -90,6 +90,7 @@ export const VST3_FX_WORKLET_SOURCE = `
 class ApexVst3FxProcessor extends AudioWorkletProcessor {
   constructor(options) {
     super();
+    this.pendingSubmittedAtEpochMs = null;
     this.blockFrames = ${VST3_FX_BLOCK_FRAMES};
     this.delayFrames = ${VST3_FX_PIPELINE_FRAMES};
     this.pluginLatencyFrames = 0;
@@ -108,6 +109,7 @@ class ApexVst3FxProcessor extends AudioWorkletProcessor {
     this.livePort = null;
     this.sequence = 0;
     this.pending = -1;
+    this.pendingSubmittedAtEpochMs = null;
     this.ready = new Map();
     this.dryReady = new Map();
     this.bypass = false;
@@ -124,14 +126,19 @@ class ApexVst3FxProcessor extends AudioWorkletProcessor {
         return;
       }
       if (message?.type !== 'result') return;
+      const acceptedAtEpochMs = this.profileEnabled ? this.epochNowMs() : null;
       const valid = !this.failed && !this.stopped && message.sequence === this.pending &&
         message.samples instanceof Float32Array && message.samples.length === this.blockFrames * 2;
       if (this.profileEnabled) this.port.postMessage({ type: 'profile', event: 'worklet-result', sequence: message.sequence,
         accepted: valid, pendingSequence: this.pending, receivedOutputFrame: this.outputFrame,
         dueOutputFrame: Number.isInteger(message.sequence) ? this.delayFrames + message.sequence * this.blockFrames : null,
+        acceptedAtEpochMs, submittedAtEpochMs: this.pendingSubmittedAtEpochMs,
+        roundTripMs: acceptedAtEpochMs !== null && this.pendingSubmittedAtEpochMs !== null
+          ? acceptedAtEpochMs - this.pendingSubmittedAtEpochMs : null,
         reason: valid ? null : (this.failed ? 'after-failure' : (this.stopped ? 'after-stop' : 'stale-duplicate-or-malformed')) });
       if (!valid) return;
       this.pending = -1;
+      this.pendingSubmittedAtEpochMs = null;
       this.ready.set(message.sequence, message.samples);
       if (this.ready.size > 2 || this.dryReady.size > 2) this.fail('Native effect output queue exceeded its two-block bound.');
     };
@@ -180,6 +187,15 @@ class ApexVst3FxProcessor extends AudioWorkletProcessor {
       handleLive(message);
     };
   }
+  epochNowMs() {
+    // Wall clock in epoch milliseconds, which is the only reading comparable
+    // between this audio thread and the main process (their performance.now()
+    // origins differ). This is diagnostics only, so a missing or throwing
+    // performance object degrades to null - it must never break the audio thread.
+    try {
+      return typeof performance === 'undefined' ? null : performance.timeOrigin + performance.now();
+    } catch (error) { return null; }
+  }
   fail(reason) {
     if (this.failed) return;
     this.failed = true;
@@ -226,8 +242,15 @@ class ApexVst3FxProcessor extends AudioWorkletProcessor {
           const submittedContextFrame = currentFrame + i + 1;
           const submittedOutputFrame = this.outputFrame + i + 1;
           const dueOutputFrame = this.delayFrames + sequence * this.blockFrames;
+          // Epoch wall clock, not performance.now(): the worklet and the main
+          // process have different time origins, so only timeOrigin + now is
+          // comparable across them. This is what lets a deadline miss be split
+          // into renderer->main, helper round trip and main->renderer legs.
+          const submittedAtEpochMs = this.profileEnabled ? this.epochNowMs() : null;
+          this.pendingSubmittedAtEpochMs = submittedAtEpochMs;
           const timing = { sequence, inputBlockStartContextFrame, submittedContextFrame, submittedOutputFrame,
-            dueOutputFrame, dueContextFrame: this.nodeStartContextFrame + dueOutputFrame };
+            dueOutputFrame, dueContextFrame: this.nodeStartContextFrame + dueOutputFrame,
+            ...(submittedAtEpochMs === null ? {} : { submittedAtEpochMs }) };
           this.dryReady.set(sequence, samples.slice());
           this.pending = sequence;
           if (this.profileEnabled) this.port.postMessage({ type: 'profile', event: 'worklet-submit', ...timing });

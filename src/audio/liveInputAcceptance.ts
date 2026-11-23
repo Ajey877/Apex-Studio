@@ -342,8 +342,44 @@ interface NativeProcessRecord {
   nativeOutputRms?: number | null;
   nativeServiceCallMs?: number;
   error?: string | null;
+  // Cold-start forensics. Epoch stamps are `performance.timeOrigin + now()` at
+  // each end, which is the only clock comparable across the renderer, the main
+  // process and the helper channel; the bare `*AtMainMs` values are main-process
+  // monotonic and are only meaningful as differences from each other.
+  submittedAtEpochMs?: number | null;
+  ipcReceivedAtMainMs?: number;
+  ipcReceivedAtMainEpochMs?: number | null;
+  serviceStartAtMainMs?: number;
+  serviceCompletedAtMainMs?: number;
+  helperQueueWaitMs?: number | null;
+  helperSerializeMs?: number | null;
+  helperRoundTripMs?: number | null;
+  helperFrameParseMs?: number | null;
+  helperRequestBytes?: number | null;
+  eventLoopLagMaxMs?: number | null;
 }
-type SmokeSnapshot = { main?: { processAudio?: NativeProcessRecord[]; nativeServiceSessionCount?: number } } | null;
+interface HelperStartupTimings {
+  pid?: number | null;
+  firstRequestAtMainMs?: number | null;
+  constructedAtMs?: number | null;
+  spawnedAtMs?: number | null;
+  protocolBoundAtMs?: number | null;
+  firstRequestWrittenAtMs?: number | null;
+  firstResponseAtMs?: number | null;
+  openCompletedAtMs?: number | null;
+  spawnToProtocolBoundMs?: number | null;
+  protocolBoundToFirstWriteMs?: number | null;
+  firstRequestRoundTripMs?: number | null;
+  constructedToOpenCompletedMs?: number | null;
+}
+type SmokeSnapshot = {
+  main?: {
+    processAudio?: NativeProcessRecord[];
+    nativeServiceSessionCount?: number;
+    eventLoopLag?: { maxLagMs?: number; samples?: number; startedAtMs?: number | null };
+    helperStartup?: Record<string, HelperStartupTimings>;
+  };
+} | null;
 
 const readSmokeSnapshot = async (): Promise<SmokeSnapshot> => {
   const desktop = (globalThis as unknown as { desktopApp?: { smokeTest?: boolean; smokeTimings?: boolean; vst3?: { smokeTimingSnapshot?: () => Promise<SmokeSnapshot> } } }).desktopApp;
@@ -475,6 +511,59 @@ export async function measureNativeVst3MonitoringCoexistence(engine: typeof audi
     .filter(event => event.trackId === probe.trackId && event.slotId === probe.slotId);
   const countEvents = (name: string) => rendererEvents.filter(event => event.event === name).length;
 
+  // Cold-start forensics. The worklet fails closed when a 1024-frame block fills
+  // while the previous block's result is still outstanding, so the real budget is
+  // one block period. Decompose each early block's round trip into the legs that
+  // can actually spend it: renderer -> main, the helper channel (serial-queue
+  // wait, request serialization, helper round trip, frame parsing) and main ->
+  // renderer. Epoch stamps are the only cross-process comparable clock.
+  const num = (value: unknown): number | null => (typeof value === 'number' && Number.isFinite(value) ? value : null);
+  const blockBudgetMs = 1024 * 1000 / context.sampleRate;
+  const resultsBySequence = new Map<number, { acceptedAtEpochMs: number | null; roundTripMs: number | null }>();
+  for (const event of rendererEvents) {
+    if (event.event !== 'worklet-result') continue;
+    const sequence = num(event.sequence);
+    if (sequence === null) continue;
+    resultsBySequence.set(sequence, {
+      acceptedAtEpochMs: num(event.acceptedAtEpochMs), roundTripMs: num(event.roundTripMs),
+    });
+  }
+  const coldStartBlocks = records.slice(0, 12).map(record => {
+    const sequence = num(record.sequence);
+    const submittedAtEpochMs = num(record.submittedAtEpochMs);
+    const ipcReceivedAtMainEpochMs = num(record.ipcReceivedAtMainEpochMs);
+    const ipcReceivedAtMainMs = num(record.ipcReceivedAtMainMs);
+    const serviceCompletedAtMainMs = num(record.serviceCompletedAtMainMs);
+    const accepted = sequence === null ? undefined : resultsBySequence.get(sequence);
+    const acceptedAtEpochMs = accepted?.acceptedAtEpochMs ?? null;
+    // The main process's monotonic clock rebased onto the epoch clock, so its
+    // completion stamp can be compared with the worklet's acceptance stamp.
+    const mainEpochOriginMs = ipcReceivedAtMainEpochMs !== null && ipcReceivedAtMainMs !== null
+      ? ipcReceivedAtMainEpochMs - ipcReceivedAtMainMs : null;
+    const serviceCompletedAtMainEpochMs = mainEpochOriginMs !== null && serviceCompletedAtMainMs !== null
+      ? mainEpochOriginMs + serviceCompletedAtMainMs : null;
+    const totalMs = acceptedAtEpochMs !== null && submittedAtEpochMs !== null
+      ? acceptedAtEpochMs - submittedAtEpochMs : null;
+    return {
+      sequence,
+      rendererToMainMs: ipcReceivedAtMainEpochMs !== null && submittedAtEpochMs !== null
+        ? ipcReceivedAtMainEpochMs - submittedAtEpochMs : null,
+      nativeServiceCallMs: num(record.nativeServiceCallMs),
+      helperQueueWaitMs: num(record.helperQueueWaitMs),
+      helperSerializeMs: num(record.helperSerializeMs),
+      helperRoundTripMs: num(record.helperRoundTripMs),
+      helperFrameParseMs: num(record.helperFrameParseMs),
+      helperRequestBytes: num(record.helperRequestBytes),
+      mainToRendererMs: acceptedAtEpochMs !== null && serviceCompletedAtMainEpochMs !== null
+        ? acceptedAtEpochMs - serviceCompletedAtMainEpochMs : null,
+      totalRoundTripMs: totalMs ?? accepted?.roundTripMs ?? null,
+      budgetMs: blockBudgetMs,
+      marginMs: totalMs !== null ? blockBudgetMs - totalMs : null,
+      eventLoopLagMaxMs: num(record.eventLoopLagMaxMs),
+      error: record.error ?? null,
+    };
+  });
+
   const node = engine.nativeMixerEffects.nodeFor(probe.trackId, probe.slotId, context);
   let nodeId: string | null = null;
   if (node) {
@@ -507,6 +596,19 @@ export async function measureNativeVst3MonitoringCoexistence(engine: typeof audi
         ? finiteOutputs.reduce((sum, record) => sum + Number(record.nativeOutputRms), 0) / finiteOutputs.length : null,
       nativeServiceCallMsMax: records.reduce((max, record) => Math.max(max, Number(record.nativeServiceCallMs ?? 0)), 0),
       nativeServiceSessionCount: snapshot?.main?.nativeServiceSessionCount ?? null,
+      // Cold-start evidence: the first blocks' decomposed round trips, the main
+      // process's worst event-loop stall, and how long the helper took to spawn,
+      // bind its protocol channel and load the plug-in.
+      coldStartBlocks,
+      blockBudgetMs,
+      worstColdStartTotalMs: coldStartBlocks.reduce((worst, block) => (
+        block.totalRoundTripMs !== null && (worst === null || block.totalRoundTripMs > worst)
+          ? block.totalRoundTripMs : worst), null as number | null),
+      worstColdStartMarginMs: coldStartBlocks.reduce((worst, block) => (
+        block.marginMs !== null && (worst === null || block.marginMs < worst)
+          ? block.marginMs : worst), null as number | null),
+      mainEventLoopLagMaxMs: num(snapshot?.main?.eventLoopLag?.maxLagMs),
+      helperStartup: snapshot?.main?.helperStartup ?? null,
       workletSubmissions: countEvents('worklet-submit'),
       deadlineMisses: countEvents('pending-deadline-miss'),
       cancelledAtStop: countEvents('renderer-request-cancelled-at-stop'),

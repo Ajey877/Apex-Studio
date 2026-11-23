@@ -411,6 +411,10 @@ async function runOnce(runIndex, collector) {
       + `nativeFailures=${warmup.native.failures} `
       + `failureMessages=${JSON.stringify(warmup.native.failureMessages)} `
       + `nativeDiagnostics=${JSON.stringify(warmup.diagnostics)} `
+      + `blockBudgetMs=${warmup.native.blockBudgetMs} `
+      + `mainEventLoopLagMaxMs=${warmup.native.mainEventLoopLagMaxMs} `
+      + `helperStartup=${JSON.stringify(warmup.native.helperStartup)} `
+      + `coldStartBlocks=${JSON.stringify(warmup.native.coldStartBlocks)} `
       + `rendererConsoleErrors=${JSON.stringify(consoleErrors.slice(0, 8))}`);
 
     stages.beforeMonitoring = await page.evaluate(label => window.__apexAcceptance
@@ -440,6 +444,17 @@ async function runOnce(runIndex, collector) {
 
     stages.afterMonitoring = await page.evaluate(label => window.__apexAcceptance
       .measureNativeMonitoringCoexistence(label), 'afterMonitoring');
+    // Cold-start forensics, captured BEFORE the assertions so a failing run still
+    // carries the evidence that explains it. `coldStartBlocks` is always the first
+    // blocks of the session, so reading it here does not lose the cold window.
+    run.coldStart = {
+      blockBudgetMs: stages.afterMonitoring.native.blockBudgetMs ?? null,
+      worstTotalRoundTripMs: stages.afterMonitoring.native.worstColdStartTotalMs ?? null,
+      worstMarginMs: stages.afterMonitoring.native.worstColdStartMarginMs ?? null,
+      mainEventLoopLagMaxMs: stages.afterMonitoring.native.mainEventLoopLagMaxMs ?? null,
+      helperStartup: stages.afterMonitoring.native.helperStartup ?? null,
+      blocks: stages.afterMonitoring.native.coldStartBlocks ?? [],
+    };
     run.helpersAfterMonitoring = helperPids();
     run.monitorStatusAfter = await page.evaluate(() => window.__apexAcceptance.liveInputState());
 
@@ -700,6 +715,12 @@ for (const run of allRuns) {
       `- mixer tracks rebuilt by monitoring init: \`${JSON.stringify(run.rebuildsAttributableToMonitoring)}\``,
       `- deadline misses: ${run.stages.afterMonitoring?.native?.deadlineMisses}, native failures: ${run.stages.afterMonitoring?.native?.failures}`);
   }
+  if (run.coldStart) {
+    summaryLines.push(`- cold start: budget ${run.coldStart.blockBudgetMs} ms, worst round trip ${run.coldStart.worstTotalRoundTripMs} ms, worst margin ${run.coldStart.worstMarginMs} ms, main event-loop lag max ${run.coldStart.mainEventLoopLagMaxMs} ms`,
+      `- helper start-up: \`${JSON.stringify(run.coldStart.helperStartup)}\``);
+    summaryLines.push('', '<details><summary>cold-start block decomposition</summary>', '', '```',
+      JSON.stringify(run.coldStart.blocks, null, 1).slice(0, 6000), '```', '', '</details>');
+  }
   summaryLines.push(`- helper PIDs before/during/after/after-shutdown: ${JSON.stringify(run.helpersBeforeMonitoring ?? [])} / ${JSON.stringify(run.helpersDuringMonitoring ?? [])} / ${JSON.stringify(run.helpersAfterMonitoring ?? [])} / ${JSON.stringify(run.helpersAfterShutdown ?? [])}`);
   if (run.failureContext?.rendererConsoleErrors?.length) {
     summaryLines.push('', '<details><summary>renderer console errors</summary>', '', '```',
@@ -734,6 +755,21 @@ if (process.env.GITHUB_ACTIONS) {
       helperProcessesLeakedAfterShutdown: evidence.summary.helperProcessesLeakedAfterShutdown,
       physicalHardware: 'NOT_VERIFIED',
     })}`);
+  }
+  // Cold-start decomposition, one annotation per repetition. This job's log and
+  // artifact redirect outside the retrievable host, so annotations are the only
+  // channel that carries the timing evidence out of CI. Each line splits one
+  // block's round trip into renderer->main, the helper channel and main->renderer,
+  // against the one-block budget the fail-closed guard actually enforces.
+  for (const run of allRuns) {
+    const cold = run.coldStart;
+    if (!cold) continue;
+    console.log(`::notice title=Cold-start block timing run ${run.runIndex} (${run.status})::${JSON.stringify({
+      runIndex: run.runIndex, status: run.status, blockBudgetMs: cold.blockBudgetMs,
+      worstTotalRoundTripMs: cold.worstTotalRoundTripMs, worstMarginMs: cold.worstMarginMs,
+      mainEventLoopLagMaxMs: cold.mainEventLoopLagMaxMs, helperStartup: cold.helperStartup,
+      blocks: cold.blocks,
+    }).replaceAll('%', '%25').replaceAll('\r', '%0D').replaceAll('\n', '%0A').slice(0, 6000)}`);
   }
   if (evidence.status !== 'PASS') {
     const failed = allRuns.find(run => run.status === 'FAIL');

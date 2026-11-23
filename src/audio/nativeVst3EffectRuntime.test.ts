@@ -13,6 +13,9 @@ function createWorklet() {
     Number,
     Array,
     Math,
+    // A real AudioWorkletGlobalScope exposes `performance`; the sandbox has to
+    // model that or the cold-start epoch stamps would go untested here.
+    performance,
     AudioWorkletProcessor: class {
       port = {
         onmessage: null as ((event: { data: any }) => void) | null,
@@ -316,7 +319,7 @@ test('two VST3 inserts in one Mixer chain process cascaded stereo PCM in exact s
 
   function createLiveBoundWorklet() {
     const sandbox: any = {
-      currentFrame: 0, Float32Array, Map, Number, Array, Math, String,
+      currentFrame: 0, Float32Array, Map, Number, Array, Math, String, performance,
       AudioWorkletProcessor: class {
         port = {
           onmessage: null as ((event: { data: any; ports?: any[] }) => void) | null,
@@ -535,7 +538,7 @@ test('prepareTracks flushes saved parameter overlays before live-port bind and c
 test('worklet nonzero pluginLatencyFrames aligns mid-take dry bypass at 2048 + L without changing delayFrames or exceeding two-block queues', () => {
   for (const pluginLatency of [320, 1500]) {
     const sandbox: any = {
-      currentFrame: 0, Float32Array, Map, Number, Array, Math, String,
+      currentFrame: 0, Float32Array, Map, Number, Array, Math, String, performance,
       AudioWorkletProcessor: class {
         port = {
           onmessage: null as ((event: { data: any }) => void) | null,
@@ -791,4 +794,62 @@ test('ensureTracksPrepared preserves live native sessions that monitoring init m
     await runtime.stop();
     (globalThis as any).AudioWorkletNode = originalNode;
   }
+});
+
+test('the worklet stamps submit and acceptance on a cross-process comparable clock', () => {
+  // A cold-start deadline miss has to be split into renderer->main, helper round
+  // trip and main->renderer. That is only possible if the worklet records a wall
+  // clock in epoch milliseconds: its own performance.now() origin differs from the
+  // main process's, so a bare performance.now() would produce a meaningless delta.
+  const { processor, next, sendResult } = createWorklet();
+  for (let i = 0; i < VST3_FX_BLOCK_FRAMES / 128; i++) next();
+  const submit = profileMessages(processor, 'worklet-submit').at(-1) as any;
+  assert.equal(typeof submit.submittedAtEpochMs, 'number', 'the submit carries a wall clock');
+  assert.ok(submit.submittedAtEpochMs > Date.now() - 60000 && submit.submittedAtEpochMs < Date.now() + 60000,
+    `the stamp must be epoch milliseconds, got ${submit.submittedAtEpochMs}`);
+  // The block request itself carries the stamp, because that is what reaches the
+  // main process and lets it measure how long the block took to arrive.
+  const request = processMessages(processor).at(-1) as any;
+  assert.equal(request.timing.submittedAtEpochMs, submit.submittedAtEpochMs,
+    'the submitted block and its request carry the same stamp');
+
+  sendResult(0, 0.5);
+  for (let i = 0; i < 5; i++) next();
+  const accepted = profileMessages(processor, 'worklet-result').find((message: any) => message.accepted) as any;
+  assert.equal(typeof accepted.acceptedAtEpochMs, 'number', 'acceptance is stamped');
+  assert.equal(accepted.submittedAtEpochMs, submit.submittedAtEpochMs,
+    'the acceptance echoes the submit it belongs to, so the legs can be paired');
+  assert.ok(accepted.roundTripMs >= 0, `the round trip must be non-negative, got ${accepted.roundTripMs}`);
+  assert.equal(accepted.roundTripMs, accepted.acceptedAtEpochMs - accepted.submittedAtEpochMs,
+    'the round trip is the difference of the two epoch stamps');
+});
+
+test('cold-start stamps degrade to null rather than throwing when performance is absent', () => {
+  // Diagnostics run on the real-time audio thread. If the timing surface is
+  // unavailable the block must still process: a failed stamp may never become a
+  // failed audio block.
+  const sandbox: any = {
+    currentFrame: 0, Float32Array, Map, Number, Array, Math,
+    AudioWorkletProcessor: class {
+      port = {
+        onmessage: null as ((event: { data: any }) => void) | null,
+        sent: [] as any[],
+        postMessage(message: any) { this.sent.push(message); },
+      };
+    },
+    registerProcessor(_name: string, constructor: new (options: any) => any) { sandbox.Processor = constructor; },
+  };
+  runInNewContext(VST3_FX_WORKLET_SOURCE, sandbox);
+  const processor = new sandbox.Processor({ processorOptions: { profileEnabled: true } });
+  let contextFrame = 0;
+  const input = new Float32Array(128).fill(0.25);
+  for (let i = 0; i < VST3_FX_BLOCK_FRAMES / 128; i++) {
+    sandbox.currentFrame = contextFrame;
+    const outputs = [[new Float32Array(128), new Float32Array(128)]];
+    processor.process([[input, input]], outputs);
+    contextFrame += 128;
+  }
+  assert.equal(processor.failed, false, 'a missing performance object must not fail the block');
+  const submit = processor.port.sent.filter((message: any) => message?.event === 'worklet-submit').at(-1);
+  assert.equal(submit.submittedAtEpochMs, undefined, 'no stamp is invented when the clock is absent');
 });
