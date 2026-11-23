@@ -594,3 +594,51 @@ with its own sequence instead of being described by healthy blocks 0–2.
 No production fix has been made. The pre-warm hypothesis is *supported* by the distribution —
 blocks 0–2 carry the tail while blocks 3+ stay under 2.8 ms — but it is not proven, and it would
 not address the mid-session signature.
+
+### The host/plug-in split is now measured — the plug-in is not the cause
+
+Job `137675627991`, commit `1803ac2`. The gating acceptance passed 5/5. The diagnostic attempted
+**all 60** repetitions (48.5 min) and recorded **50 PASS / 10 FAIL**; `helperProcessesLeakedAfterShutdown`
+was empty, so every helper was reclaimed. The failure rate is therefore about 1 cold start in 6,
+materially worse than the ~1-in-12 estimated from smaller samples.
+
+The missed block in each of the eight failures whose detail survived, in ms:
+
+| run | missed seq | total | margin | inst | prep | **cb** | coll | pipe | mainToR | lag |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 1 | 57 | 22 | −0.67 | 13.48 | 13.26 | **0.03** | 0.18 | 5.49 | 0.23 | — |
+| 11 | 2 | 25 | −3.67 | 6.93 | 6.73 | **0.02** | 0.18 | 14.28 | 2.03 | 4.30 |
+| 14 | 3 | 22 | −0.67 | 4.52 | 4.33 | **0.02** | 0.17 | 5.54 | 2.26 | 5.60 |
+| 16 | 3 | 22 | −0.67 | 2.19 | 2.09 | **0.02** | 0.08 | 2.27 | 2.65 | — |
+| 21 | 149 | 20 | +1.33 | 2.37 | 2.17 | **0.03** | 0.17 | 8.36 | 4.63 | 10.48 |
+| 22 | 2 | 21 | +0.33 | 12.69 | 12.59 | **0.02** | 0.08 | 4.00 | 5.50 | 9.26 |
+| 23 | 0 | 27 | −5.67 | 9.43 | 1.73 | **0.02** | 7.68 | 2.34 | 9.71 | 4.08 |
+| 47 | 2 | 20 | +1.33 | 1.36 | 1.19 | **0.02** | 0.15 | 15.85 | 0.22 | 8.62 |
+
+`cb` is `helperPluginCallbackMs`, the exact `processor->process(data)` call. **It never exceeds
+0.03 ms, in a failing block or in any neighbour.** The plug-in is exonerated. The 14.15 ms
+previously reported as plug-in time was host work, exactly as the rename warned.
+
+There is no single contributor. Across the eight: host preparation spikes to 13.26 and 12.59 ms;
+host output collection spikes to 7.68 ms; pipe plus OS scheduling spikes to 15.85 and 14.28 ms;
+main→renderer spikes to 9.71 ms; main-thread event-loop lag reaches 10.48 ms. The miss is a
+scheduling/contention problem spread across the helper process and the main process, not one slow
+component.
+
+**Mid-session misses are common, not a one-off.** The missed sequences are 0, 2, 2, 2, 3, 3, 57
+and 149. Two of the eight happened well after the cold window — sequence 57 (~1.2 s) and 149
+(~3.2 s) — confirming that the sequence-117 signature seen earlier recurs. A cold-start-only fix
+would not address them.
+
+**An unresolved attribution gap.** Three of the eight named blocks have a non-negative margin
+(+1.33, +0.33, +1.33 ms): the measured round trip finished *inside* the 21.33 ms budget, yet the
+guard still reported `pending-deadline-miss` for that sequence. Either the margin model does not
+account for the whole path from result arrival to the worklet consuming it, or the block the guard
+names is not always the block whose lateness caused the miss. This is not explained and should not
+be assumed away.
+
+**One failure-path capture gap, recorded as designed.** Run 21 failed at stage `disable-monitoring`;
+its failure-time capture reported `failureCaptureError: "page.evaluate: Error: Arm the native
+coexistence probe before measuring."` because the probe had been disarmed. The original error was
+preserved and the `afterMonitoring` snapshot was used instead, which is the intended fallback — but
+a failure after the probe is disarmed still cannot take a fresh measurement.
