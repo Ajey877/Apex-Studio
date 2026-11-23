@@ -8,6 +8,7 @@ import { RecordingEngine } from './recordingEngine';
 import { deletePersistedAudioClip } from './audioPersistence';
 import { sessionBlobUrlRegistry } from '../state/sessionBlobUrlRegistry';
 import { DEFAULT_MASTERING_SUITE_STATE } from './masteringState';
+import { collectMissedSequences, orderBlocksAroundMiss } from './nativeMissWindow';
 
 const wait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 const requireSignal = (condition: boolean, message: string) => { if (!condition) throw new Error(message); };
@@ -536,7 +537,7 @@ export async function measureNativeVst3MonitoringCoexistence(engine: typeof audi
       acceptedAtEpochMs: num(event.acceptedAtEpochMs), roundTripMs: num(event.roundTripMs),
     });
   }
-  const coldStartBlocks = records.slice(0, 12).map(record => {
+  const decompose = (record: NativeProcessRecord) => {
     const sequence = num(record.sequence);
     const submittedAtEpochMs = num(record.submittedAtEpochMs);
     const ipcReceivedAtMainEpochMs = num(record.ipcReceivedAtMainEpochMs);
@@ -577,7 +578,16 @@ export async function measureNativeVst3MonitoringCoexistence(engine: typeof audi
       eventLoopLagDuringBlockMs: num(record.eventLoopLagDuringBlockMs),
       error: record.error ?? null,
     };
-  });
+  };
+  const coldStartBlocks = records.slice(0, 12).map(decompose);
+
+  // A miss is not always a cold-start event: one was measured at sequence 117,
+  // about 2.5 s into playback, around where monitoring is enabled. Capturing only
+  // the first blocks would report a healthy window for a run that failed, so also
+  // capture the blocks either side of every sequence the guard named. The
+  // selection is pure and unit-tested in nativeMissWindow.test.ts.
+  const missedSequences = collectMissedSequences(rendererEvents);
+  const aroundAMiss = orderBlocksAroundMiss(records, missedSequences).map(decompose);
 
   const node = engine.nativeMixerEffects.nodeFor(probe.trackId, probe.slotId, context);
   let nodeId: string | null = null;
@@ -615,6 +625,9 @@ export async function measureNativeVst3MonitoringCoexistence(engine: typeof audi
       // process's worst event-loop stall, and how long the helper took to spawn,
       // bind its protocol channel and load the plug-in.
       coldStartBlocks,
+      // Blocks either side of a miss, whichever part of the session it happened in.
+      blocksAroundMiss: aroundAMiss,
+      missedSequences,
       // The guard's own report. It names the sequence that was still outstanding
       // and the frame it was due at, which is what distinguishes "the request
       // never reached the main process" from "the helper answered too late":

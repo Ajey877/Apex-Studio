@@ -165,8 +165,11 @@ export class NativeVst3Client {
           // measured inside the helper.
           if (typeof result.helperRequestLineReadAtMs === 'number') {
             pending.timings.helperRequestLineReadAtMs = result.helperRequestLineReadAtMs;
-            if (typeof pending.timings.writeAtMs === 'number') {
-              pending.timings.pipeAndScheduleMs = result.helperRequestLineReadAtMs - pending.timings.writeAtMs;
+            if (typeof pending.timings.writeAtEpochMs === 'number') {
+              // Both sides are wall clock now, so this is a real duration: pipe
+              // transfer plus however long the OS left the helper descheduled.
+              pending.timings.pipeAndScheduleMs =
+                result.helperRequestLineReadAtMs - pending.timings.writeAtEpochMs;
             }
           }
           if (typeof result.helperDecodeMs === 'number') pending.timings.helperDecodeMs = result.helperDecodeMs;
@@ -219,7 +222,7 @@ export class NativeVst3Client {
       stamp.command = typeof message?.command === 'string' ? message.command : null;
       stamp.firstChunkAtMs = null; stamp.writeAtMs = null; stamp.responseAtMs = null;
       stamp.frameParseMs = null; stamp.helperRoundTripMs = null; stamp.queueWaitMs = null;
-      stamp.pipeAndScheduleMs = null; stamp.helperDecodeMs = null;
+      stamp.pipeAndScheduleMs = null; stamp.helperDecodeMs = null; stamp.writeAtEpochMs = null;
       stamp.helperPluginProcessMs = null; stamp.helperRequestLineReadAtMs = null;
     }
     const serializeStartedAtMs = performance.now();
@@ -243,6 +246,11 @@ export class NativeVst3Client {
         if (this.#lifecycle.firstRequestWrittenAtMs === null) this.#lifecycle.firstRequestWrittenAtMs = writtenAtMs;
         if (stamp) {
           stamp.writeAtMs = writtenAtMs;
+          // Epoch form of the same instant. The helper reports its arrival on a
+          // wall clock, and this process's performance.now() origin differs, so
+          // subtracting the two directly yields an epoch-sized nonsense number -
+          // which is exactly what the first helper-instrumented run produced.
+          stamp.writeAtEpochMs = performance.timeOrigin + writtenAtMs;
           stamp.queueWaitMs = writtenAtMs - stamp.queuedAtMs;
         }
         this.#child.stdin.write(text, error => { if (error) this.#pipeFailed(error); });

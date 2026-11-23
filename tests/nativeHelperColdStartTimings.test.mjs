@@ -227,6 +227,10 @@ test('helper-reported spans are attributed separately from the main-process roun
     assert.equal(timings.helperPluginProcessMs, pluginMs, 'the plug-in process span is reported verbatim');
     assert.equal(typeof timings.pipeAndScheduleMs, 'number',
       'pipe plus scheduling is derived from two comparable wall clocks');
+    // This is the assertion that catches a cross-process clock mismatch: mixing a
+    // wall clock with a monotonic one yields an epoch-sized number, not a duration.
+    assert.ok(Math.abs(timings.pipeAndScheduleMs) < 5000,
+      `pipe plus scheduling must be a duration, not an epoch stamp; got ${timings.pipeAndScheduleMs}`);
     assert.equal(typeof timings.helperRequestLineReadAtMs, 'number');
     // The plug-in's own time must account for the bulk of the round trip, which is
     // exactly the attribution that was missing before.

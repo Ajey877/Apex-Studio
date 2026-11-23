@@ -38,6 +38,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { _electron, expect } from '@playwright/test';
+import { buildCiAnnotation } from './lib/ciAnnotation.mjs';
 import { writeLiveInputFixture } from './live-input-fixture.mjs';
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
@@ -407,6 +408,11 @@ async function runOnce(runIndex, collector) {
       mainEventLoopWorstStalls: warmup.native.mainEventLoopWorstStalls ?? null,
       helperStartup: warmup.native.helperStartup ?? null,
       blocks: warmup.native.coldStartBlocks ?? [],
+      // A miss at sequence 117 proved the first blocks alone can look perfectly
+      // healthy in a run that still failed, so the guard also names the sequences
+      // it gave up on and the blocks either side of them are captured.
+      blocksAroundMiss: warmup.native.blocksAroundMiss ?? [],
+      missedSequences: warmup.native.missedSequences ?? [],
       deadlineMissEvents: warmup.native.deadlineMissEvents ?? [],
       mainRecordedSequences: warmup.native.mainRecordedSequences ?? [],
       capturedAt: 'warmup',
@@ -473,6 +479,11 @@ async function runOnce(runIndex, collector) {
       mainEventLoopWorstStalls: stages.afterMonitoring.native.mainEventLoopWorstStalls ?? null,
       helperStartup: stages.afterMonitoring.native.helperStartup ?? null,
       blocks: stages.afterMonitoring.native.coldStartBlocks ?? [],
+      // A miss at sequence 117 proved the first blocks alone can look perfectly
+      // healthy in a run that still failed, so the guard also names the sequences
+      // it gave up on and the blocks either side of them are captured.
+      blocksAroundMiss: stages.afterMonitoring.native.blocksAroundMiss ?? [],
+      missedSequences: stages.afterMonitoring.native.missedSequences ?? [],
       deadlineMissEvents: stages.afterMonitoring.native.deadlineMissEvents ?? [],
       mainRecordedSequences: stages.afterMonitoring.native.mainRecordedSequences ?? [],
       capturedAt: 'afterMonitoring',
@@ -789,8 +800,12 @@ if (process.env.GITHUB_ACTIONS) {
   // repetition, and full per-block detail only where it is needed - every failing
   // repetition, plus repetition 1 as a representative cold sample.
   const r2 = value => (typeof value === 'number' && Number.isFinite(value) ? Math.round(value * 100) / 100 : value ?? null);
-  const emit = (title, payload) => console.log(`::notice title=${title}::${JSON.stringify(payload)
-    .replaceAll('%', '%25').replaceAll('\r', '%0D').replaceAll('\n', '%0A').slice(0, 3900)}`);
+  // Annotation size handling lives in its own module so it can be tested: GitHub
+  // truncates at 4096 characters mid-JSON, which is what lost the failing run's
+  // per-block decomposition twice. `blocksAroundMiss` is preserved longest because
+  // it is the window the real-time guard actually gave up on.
+  const emit = (title, payload) => console.log(
+    buildCiAnnotation(title, payload, { cap: 3900, preserve: 'blocksAroundMiss' }).text);
   const label = process.env.APEX_NATIVE_MONITORING_LABEL ?? 'acceptance';
   const startupOf = cold => Object.values(cold?.helperStartup ?? {})[0] ?? null;
   const detailed = allRuns.filter(run => run.coldStart && (run.status !== 'PASS' || run.runIndex === 1));
@@ -811,6 +826,15 @@ if (process.env.GITHUB_ACTIONS) {
     blockBudgetMs: r2(allRuns.find(run => run.coldStart)?.coldStart?.blockBudgetMs),
     runs: aggregate,
   });
+  const fmtBlock = block => ({
+    seq: block.sequence, rToMain: r2(block.rendererToMainMs), svc: r2(block.nativeServiceCallMs),
+    qWait: r2(block.helperQueueWaitMs), ser: r2(block.helperSerializeMs),
+    hRtt: r2(block.helperRoundTripMs), parse: r2(block.helperFrameParseMs),
+    pipe: r2(block.helperPipeAndScheduleMs), decode: r2(block.helperDecodeMs),
+    plugin: r2(block.helperPluginProcessMs),
+    mainToR: r2(block.mainToRendererMs), total: r2(block.totalRoundTripMs),
+    margin: r2(block.marginMs), lagInBlock: r2(block.eventLoopLagDuringBlockMs), err: block.error,
+  });
   for (const run of detailed) {
     const cold = run.coldStart;
     const startup = startupOf(cold);
@@ -828,15 +852,11 @@ if (process.env.GITHUB_ACTIONS) {
       helperConstructedToOpenCompletedMs: r2(startup?.constructedToOpenCompletedMs),
       deadlineMissEvents: cold.deadlineMissEvents ?? [],
       mainRecordedSequences: (cold.mainRecordedSequences ?? []).slice(0, 24),
-      blocks: (cold.blocks ?? []).slice(0, 8).map(block => ({
-        seq: block.sequence, rToMain: r2(block.rendererToMainMs), svc: r2(block.nativeServiceCallMs),
-        qWait: r2(block.helperQueueWaitMs), ser: r2(block.helperSerializeMs),
-        hRtt: r2(block.helperRoundTripMs), parse: r2(block.helperFrameParseMs),
-        pipe: r2(block.helperPipeAndScheduleMs), decode: r2(block.helperDecodeMs),
-        plugin: r2(block.helperPluginProcessMs),
-        mainToR: r2(block.mainToRendererMs), total: r2(block.totalRoundTripMs),
-        margin: r2(block.marginMs), lagInBlock: r2(block.eventLoopLagDuringBlockMs), err: block.error,
-      })),
+      missedSequences: cold.missedSequences ?? [],
+      // The blocks the guard actually gave up on. For a cold-window miss these
+      // overlap `blocks`; for a mid-session miss they are the only relevant ones.
+      blocksAroundMiss: (cold.blocksAroundMiss ?? []).slice(0, 8).map(fmtBlock),
+      blocks: (cold.blocks ?? []).slice(0, 8).map(fmtBlock),
     });
   }
   if (evidence.status !== 'PASS') {
