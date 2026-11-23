@@ -571,7 +571,11 @@ input-buffer setup, then output validation and PCM extraction — wrapped around
 `processor->process(data)`. It must not be read as plug-in execution time. Commit `0de0280`
 splits it into `helperHostPrepareMs`, `helperPluginCallbackMs` and `helperHostCollectMs`, which
 partition `helperInstanceProcessMs`; the field was renamed rather than left under a misleading
-name. **The split of that 14.15 ms between host and plug-in is not yet measured.**
+name.
+
+> **SUPERSEDED.** This paragraph originally ended "the split of that 14.15 ms between host and
+> plug-in is not yet measured." It has since been measured — see *The host/plug-in split is now
+> measured* below. The plug-in callback was 0.02–0.03 ms; the time was host work.
 
 ### A second, different signature
 
@@ -599,8 +603,16 @@ not address the mid-session signature.
 
 Job `137675627991`, commit `1803ac2`. The gating acceptance passed 5/5. The diagnostic attempted
 **all 60** repetitions (48.5 min) and recorded **50 PASS / 10 FAIL**; `helperProcessesLeakedAfterShutdown`
-was empty, so every helper was reclaimed. The failure rate is therefore about 1 cold start in 6,
-materially worse than the ~1-in-12 estimated from smaller samples.
+was empty, so every helper was reclaimed.
+
+**Read the failure rate carefully.** 10 of 60 repetitions failed the *complete acceptance
+scenario*, which is about 1 in 6 — materially worse than the ~1-in-12 estimated from smaller
+samples. But these are **not all cold-start failures**. Of the eight failures whose detail
+survived, the guard-named sequences were 0, 2, 2, 2, 3, 3, 57 and 149: six in the cold window and
+**two well past it** (sequence 57 ≈ 1.2 s, sequence 149 ≈ 3.2 s). One repetition also failed at
+stage `disable-monitoring` on a Playwright click timeout, which is a consequence of playback having
+already stopped rather than an independent defect. Quoting "10 cold-start failures in 60" would
+overstate the cold-start rate and hide the mid-session population.
 
 The missed block in each of the eight failures whose detail survived, in ms:
 
@@ -630,15 +642,76 @@ and 149. Two of the eight happened well after the cold window — sequence 57 (~
 (~3.2 s) — confirming that the sequence-117 signature seen earlier recurs. A cold-start-only fix
 would not address them.
 
-**An unresolved attribution gap.** Three of the eight named blocks have a non-negative margin
-(+1.33, +0.33, +1.33 ms): the measured round trip finished *inside* the 21.33 ms budget, yet the
-guard still reported `pending-deadline-miss` for that sequence. Either the margin model does not
-account for the whole path from result arrival to the worklet consuming it, or the block the guard
-names is not always the block whose lateness caused the miss. This is not explained and should not
-be assumed away.
+**The three positive-margin misses are UNVERIFIED — and were probably a measurement defect.**
+Three of the eight named blocks showed a non-negative margin (+1.33, +0.33, +1.33 ms): the recorded
+round trip appeared to finish *inside* the 21.33 ms budget while the guard still reported
+`pending-deadline-miss` for that sequence.
+
+That has since been explained as an artefact of the extractor, not a property of the audio path.
+It stored a timestamp for every `worklet-result` event keyed by sequence alone and never checked
+the `accepted` flag the worklet reports — and the worklet stamps `acceptedAtEpochMs` *before* it
+computes `valid`. So a result the worklet had **rejected** (arriving after the fail-closed guard
+fired) still supplied a timestamp, and therefore a round trip and a positive margin, for a block
+that never completed in time. A positive margin on a missed block was never physically meaningful.
+
+The correlation is now gated on `accepted === true` and joined on `requestId`, so a rejected result
+can no longer produce a measurement. **These three margins must not be cited until they have been
+re-measured under the corrected correlation**; their status is unverified, and a miss may only be
+called a positive-margin miss if the result was genuinely accepted.
 
 **One failure-path capture gap, recorded as designed.** Run 21 failed at stage `disable-monitoring`;
 its failure-time capture reported `failureCaptureError: "page.evaluate: Error: Arm the native
 coexistence probe before measuring."` because the probe had been disarmed. The original error was
 preserved and the `afterMonitoring` snapshot was used instead, which is the intended fallback — but
 a failure after the probe is disarmed still cannot take a fresh measurement.
+
+### Corrected acceptance correlation, and wall time versus helper-thread CPU time
+
+Two evidence-quality defects were found in the analysis above and corrected. Neither changes
+production audio behaviour.
+
+**1. Round-trip evidence was not gated on acceptance.** The extractor recorded a timestamp for
+every `worklet-result` event, keyed by sequence number alone, and never read the `accepted` flag
+the worklet already reports. Because the worklet stamps `acceptedAtEpochMs` *before* computing
+`valid`, a result it had **rejected** still supplied a timestamp — and therefore a round trip and a
+deadline margin. Sequence-only keying could also join two runtime generations, since the counter
+restarts at zero when the worklet is recreated.
+
+`src/audio/workletResultCorrelation.ts` now joins on `requestId` (`runtimeId:sequence`) and takes
+acceptance only from `accepted === true`. Rejected, late, stale, duplicate, malformed and
+unattributable results are preserved as separate evidence with their frame positions and can never
+yield an accepted round trip or a margin. Every decomposed block carries `resultAccepted`,
+`resultRejectionReasons`, `rejectedResults` and `runtimeGeneration`; `totalRoundTripMs` and
+`marginMs` are null unless the worklet genuinely accepted that exact request. Every run also reports
+`workletResultsAccepted`, `workletResultsRejected` and `workletResultsUnattributable`.
+
+**2. Wall time was reported as though it were CPU time.** A 13 ms host-preparation span does not
+prove 13 ms of executed code; it is equally consistent with the thread being descheduled. Every
+helper span is now measured on two clocks: `*Ms` (steady_clock wall time, includes descheduling)
+and `*CpuMs` (per-thread CPU — `GetThreadTimes` on Windows, `CLOCK_THREAD_CPUTIME_ID` on POSIX).
+Their difference is contention rather than expensive code. The CPU figures cover the helper thread
+only; a plug-in with its own worker threads would account their CPU elsewhere. An unsupported clock
+reports `-1`, never `0`, so "not measured" cannot be read as "free".
+
+The C++ unit test demonstrates the distinction directly: a 30 ms injected sleep reports
+**wall prepare 30.22 ms against CPU prepare 0.07 ms**, while genuine arithmetic reports
+**13.04 ms of each**. A sleep therefore cannot masquerade as CPU consumption, and real work cannot
+hide.
+
+**Both guards keep their own frame positions.** `pending-deadline-miss` now also reports
+`pendingSequence`, `readySequences` and `drySequences`, matching the vocabulary of `deadline-miss`.
+The two are normalised without being conflated, unreported fields stay null, and each miss is
+labelled `cold` or `mid-session` using a boundary taken from measurement (the round-trip tail sits
+in blocks 0–2, so sequence ≤ 3 counts as cold).
+
+### What is still needed before any conclusion
+
+The corrected correlation has **not yet been exercised by a packaged run**. Until it has:
+
+- no miss may be described as a positive-margin miss;
+- the three previously reported positive-margin cases remain unverified and are probably artefacts;
+- the cold/mid-session split of 6 : 2 stands only for the eight failures whose detail survived, not
+  for all ten.
+
+The next diagnostic must report, per failure: the result acceptance status, the timing labelled
+accepted or rejected, and the wall/CPU/wall-minus-CPU triple for each helper span.
