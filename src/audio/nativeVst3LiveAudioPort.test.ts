@@ -4,6 +4,23 @@ import { MessageChannel } from 'node:worker_threads';
 import { createLiveAudioPortSession } from '../../native/vst3/liveAudioPort.mjs';
 import { VST3_FX_BLOCK_FRAMES } from './nativeVst3EffectRuntime';
 
+/**
+ * Wait for a condition rather than sleeping a fixed interval.
+ *
+ * The fixed 15-25 ms sleeps this replaces were a race, not a measurement: on a
+ * loaded CI runner the in-process round trips had not finished in time and the
+ * assertions below failed. Reproduced locally at 1 failure in 12 runs with four
+ * busy loops running. No assertion is relaxed - if a condition never becomes true
+ * the wait expires and the existing assertion fails exactly as before, so a real
+ * regression still fails the test.
+ */
+const waitFor = async (condition: () => boolean, timeoutMs = 5000): Promise<void> => {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline && !condition()) {
+    await new Promise(resolve => setTimeout(resolve, 5));
+  }
+};
+
 test('live audio port processes independent stereo blocks across two bound sessions without cross-talk', async () => {
   const channelA = new MessageChannel();
   const channelB = new MessageChannel();
@@ -42,7 +59,7 @@ test('live audio port processes independent stereo blocks across two bound sessi
 
     channelA.port2.postMessage({ type: 'process', sequence: 0, samples: inputA }, [inputA.buffer]);
     channelB.port2.postMessage({ type: 'process', sequence: 0, samples: inputB }, [inputB.buffer]);
-    await new Promise(resolve => setTimeout(resolve, 25));
+    await waitFor(() => receivedA.some(m => m?.type === 'result') && receivedB.some(m => m?.type === 'result'));
 
     assert.ok(receivedA.some(m => m?.type === 'bound' && m.sessionId === 'session-a'));
     assert.ok(receivedB.some(m => m?.type === 'bound' && m.sessionId === 'session-b'));
@@ -80,7 +97,7 @@ test('live audio port rejects overlapping requests and stops non-blockingly with
   try {
     const first = new Float32Array(VST3_FX_BLOCK_FRAMES * 2).fill(0.1);
     channel.port2.postMessage({ type: 'process', sequence: 3, samples: first }, [first.buffer]);
-    await new Promise(resolve => setTimeout(resolve, 15));
+    await waitFor(() => rejectInFlight !== undefined);
     assert.ok(rejectInFlight, 'native request is in flight');
 
     // stop() is synchronous and non-blocking even while native processing is in flight
@@ -88,7 +105,7 @@ test('live audio port rejects overlapping requests and stops non-blockingly with
     assert.equal(bound.stopping, true);
 
     rejectInFlight!(new Error('VST3 instance cancelled'));
-    await new Promise(resolve => setTimeout(resolve, 15));
+    await waitFor(() => received.some(m => m?.type === 'cancelled' && m.sequence === 3));
 
     assert.equal(received.some(m => m?.type === 'result'), false, 'no stale PCM result after stop');
     assert.ok(received.some(m => m?.type === 'cancelled' && m.sequence === 3), 'cancelled notice emitted for in-flight sequence');
@@ -113,7 +130,7 @@ test('live audio port rejects overlapping requests and stops non-blockingly with
     const b = new Float32Array(VST3_FX_BLOCK_FRAMES * 2);
     overlapChannel.port2.postMessage({ type: 'process', sequence: 0, samples: a }, [a.buffer]);
     overlapChannel.port2.postMessage({ type: 'process', sequence: 1, samples: b }, [b.buffer]);
-    await new Promise(resolve => setTimeout(resolve, 20));
+    await waitFor(() => overlapMessages.some(m => m?.type === 'error' && /overlapping/i.test(m.reason)));
     assert.ok(overlapMessages.some(m => m?.type === 'error' && /overlapping/i.test(m.reason)));
     releaseFirst?.(new Float32Array(VST3_FX_BLOCK_FRAMES * 2));
   } finally {
