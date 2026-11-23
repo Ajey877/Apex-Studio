@@ -394,6 +394,23 @@ async function runOnce(runIndex, collector) {
     // later as a confusing baseline mismatch. Monitoring is never enabled on an
     // insert that was not proven prepared and processing.
     const warmupOk = warmupSucceeded();
+    // Recorded here as well as after monitoring: a run that fails AT the warmup
+    // never reaches the later capture, and that is precisely the run whose block
+    // decomposition is needed. The after-monitoring capture overwrites this one
+    // when the run gets that far, because it sees more blocks.
+    run.coldStart = {
+      blockBudgetMs: warmup.native.blockBudgetMs ?? null,
+      worstTotalRoundTripMs: warmup.native.worstColdStartTotalMs ?? null,
+      worstMarginMs: warmup.native.worstColdStartMarginMs ?? null,
+      mainEventLoopLagMaxMs: warmup.native.mainEventLoopLagMaxMs ?? null,
+      mainEventLoopLagDuringAudioMs: warmup.native.mainEventLoopLagDuringAudioMs ?? null,
+      mainEventLoopWorstStalls: warmup.native.mainEventLoopWorstStalls ?? null,
+      helperStartup: warmup.native.helperStartup ?? null,
+      blocks: warmup.native.coldStartBlocks ?? [],
+      deadlineMissEvents: warmup.native.deadlineMissEvents ?? [],
+      mainRecordedSequences: warmup.native.mainRecordedSequences ?? [],
+      capturedAt: 'warmup',
+    };
     run.warmup = { succeeded: warmupOk, waitedMs: Date.now() - warmupStartedAt,
       timeoutMs: warmupTimeoutMs, prepared: warmup.native.prepared,
       processedBlocks: warmup.native.processedBlocks, priorBlocks,
@@ -456,6 +473,9 @@ async function runOnce(runIndex, collector) {
       mainEventLoopWorstStalls: stages.afterMonitoring.native.mainEventLoopWorstStalls ?? null,
       helperStartup: stages.afterMonitoring.native.helperStartup ?? null,
       blocks: stages.afterMonitoring.native.coldStartBlocks ?? [],
+      deadlineMissEvents: stages.afterMonitoring.native.deadlineMissEvents ?? [],
+      mainRecordedSequences: stages.afterMonitoring.native.mainRecordedSequences ?? [],
+      capturedAt: 'afterMonitoring',
     };
     run.helpersAfterMonitoring = helperPids();
     run.monitorStatusAfter = await page.evaluate(() => window.__apexAcceptance.liveInputState());
@@ -777,7 +797,8 @@ if (process.env.GITHUB_ACTIONS) {
     if (!cold) continue;
     const startup = Object.values(cold.helperStartup ?? {})[0] ?? null;
     emit(`Cold-start summary run ${run.runIndex} (${run.status})`, {
-      runIndex: run.runIndex, status: run.status, blockBudgetMs: r2(cold.blockBudgetMs),
+      runIndex: run.runIndex, status: run.status, capturedAt: cold.capturedAt ?? null,
+      blockBudgetMs: r2(cold.blockBudgetMs),
       worstTotalRoundTripMs: r2(cold.worstTotalRoundTripMs), worstMarginMs: r2(cold.worstMarginMs),
       mainEventLoopLagMaxMs: r2(cold.mainEventLoopLagMaxMs),
       mainEventLoopLagDuringAudioMs: r2(cold.mainEventLoopLagDuringAudioMs),
@@ -788,6 +809,8 @@ if (process.env.GITHUB_ACTIONS) {
       helperProtocolBoundToFirstWriteMs: r2(startup?.protocolBoundToFirstWriteMs),
       helperFirstRequestRoundTripMs: r2(startup?.firstRequestRoundTripMs),
       helperConstructedToOpenCompletedMs: r2(startup?.constructedToOpenCompletedMs),
+      deadlineMissEvents: cold.deadlineMissEvents ?? [],
+      mainRecordedSequences: (cold.mainRecordedSequences ?? []).slice(0, 24),
     });
     emit(`Cold-start blocks run ${run.runIndex} (${run.status})`, {
       runIndex: run.runIndex, status: run.status,
@@ -803,8 +826,11 @@ if (process.env.GITHUB_ACTIONS) {
   if (evidence.status !== 'PASS') {
     const failed = allRuns.find(run => run.status === 'FAIL');
     const detail = [String(failed?.error ?? 'unknown'),
-      failed?.mixerUi ? `mixerUi=${JSON.stringify(failed.mixerUi)}` : ''].filter(Boolean).join(' || ');
-    console.log(`::error title=Packaged native VST3 coexistence failed at stage '${failed?.lastStage ?? 'unknown'}'::${detail.replaceAll('%', '%25').replaceAll('\r', '%0D').replaceAll('\n', '%0A').slice(0, 1500)}`);
+      // Last and truncated: this blob is large and was pushing the actual
+      // diagnostics past the annotation limit, which is how the failing run's
+      // block decomposition got lost.
+      failed?.mixerUi ? `mixerUi=${JSON.stringify(failed.mixerUi).slice(0, 300)}` : ''].filter(Boolean).join(' || ');
+    console.log(`::error title=Packaged native VST3 coexistence failed at stage '${failed?.lastStage ?? 'unknown'}'::${detail.replaceAll('%', '%25').replaceAll('\r', '%0D').replaceAll('\n', '%0A').slice(0, 3900)}`);
   }
 }
 process.exit(exitCode);

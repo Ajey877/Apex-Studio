@@ -608,6 +608,20 @@ export async function measureNativeVst3MonitoringCoexistence(engine: typeof audi
       // process's worst event-loop stall, and how long the helper took to spawn,
       // bind its protocol channel and load the plug-in.
       coldStartBlocks,
+      // The guard's own report. It names the sequence that was still outstanding
+      // and the frame it was due at, which is what distinguishes "the request
+      // never reached the main process" from "the helper answered too late":
+      // a pending sequence with no main-process record never arrived.
+      deadlineMissEvents: rendererEvents
+        .filter(event => event.event === 'pending-deadline-miss' || event.event === 'deadline-miss')
+        .slice(0, 6)
+        .map(event => ({
+          event: String(event.event), sequence: num(event.sequence), nextSequence: num(event.nextSequence),
+          pendingSequence: num(event.pendingSequence), inputContextFrame: num(event.inputContextFrame),
+          currentOutputFrame: num(event.currentOutputFrame), dueOutputFrame: num(event.dueOutputFrame),
+          sourceFrame: num(event.sourceFrame),
+        })),
+      mainRecordedSequences: records.map(record => num(record.sequence)).filter((v): v is number => v !== null),
       blockBudgetMs,
       worstColdStartTotalMs: coldStartBlocks.reduce((worst, block) => (
         block.totalRoundTripMs !== null && (worst === null || block.totalRoundTripMs > worst)
