@@ -48,6 +48,13 @@ ProcessTimings runPhases(double prepareMs, double callbackMs, double collectMs,
   return out ? *out : ProcessTimings{};
 }
 
+// Stepped clock used to make the span arithmetic exact rather than timing-dependent.
+struct Stepper {
+  static double value;
+  static double next() { return (value += 1.0); }
+};
+double Stepper::value = 0;
+
 }  // namespace
 
 int main() {
@@ -136,6 +143,93 @@ int main() {
     ProcessTimings f{};
     runPhases(1.0, 1.0, 1.0, 1024, true, &f);
     check(f.flush, "an explicit flush is flagged");
+  }
+
+  {
+    // 7+8. Wall and helper-thread CPU time are reported separately, and a sleep
+    // inflates the wall span without becoming CPU time. This is the distinction the
+    // whole phase turns on: a 13 ms host-preparation span has to be attributable to
+    // either executing code or being descheduled, and wall time alone cannot say.
+    ProcessTimings slept{};
+    runPhases(30.0, 1.0, 1.0, 1024, false, &slept);
+    check(slept.cpuTimingSupported, "the platform per-thread CPU clock is reported as supported");
+    check(slept.hostPrepareMs > 25.0, "a 30 ms sleep shows up in host preparation wall time");
+    check(slept.hostPrepareCpuMs >= 0.0, "host preparation CPU time is measured, not absent");
+    check(slept.hostPrepareCpuMs < 15.0,
+          "a sleep does NOT become equivalent helper-thread CPU time");
+    check(slept.instanceProcessCpuMs >= 0.0 && slept.instanceProcessCpuMs < slept.instanceProcessMs,
+          "instance CPU time is strictly below instance wall time when the thread slept");
+    std::printf("  slept: wall prepare=%.2f cpu prepare=%.2f | wall total=%.2f cpu total=%.2f\n",
+                slept.hostPrepareMs, slept.hostPrepareCpuMs,
+                slept.instanceProcessMs, slept.instanceProcessCpuMs);
+
+    // The converse: real work must appear as CPU time, or the CPU numbers would be
+    // useless for telling contention from expensive code.
+    ProcessTimings worked{};
+    {
+      ProcessSpanRecorder span(&worked);
+      volatile double sink = 0;
+      for (int i = 0; i < 4000000; ++i) sink += i * 0.5;
+      span.markCallbackStart();
+      for (int i = 0; i < 200000; ++i) sink += i * 0.25;
+      span.markCallbackEnd();
+      span.finish(1024, false);
+    }
+    check(worked.hostPrepareCpuMs > 1.0,
+          "genuine host work is visible as helper-thread CPU time");
+    check(worked.hostPrepareCpuMs <= worked.hostPrepareMs + tol,
+          "CPU time cannot exceed the wall time that contains it");
+    std::printf("  worked: wall prepare=%.2f cpu prepare=%.2f\n",
+                worked.hostPrepareMs, worked.hostPrepareCpuMs);
+  }
+
+  {
+    // 9. An unsupported CPU clock reports "not measured", never zero. Zero would
+    // claim the work was free; -1 says the platform could not answer.
+    ProcessTimings t{};
+    const auto noCpu = []() { return -1.0; };
+    TimingClocks clocks{};
+    clocks.cpu = +noCpu;
+    {
+      ProcessSpanRecorder span(&t, clocks);
+      sleepMs(3.0);
+      span.markCallbackStart();
+      sleepMs(2.0);
+      span.markCallbackEnd();
+      sleepMs(1.0);
+      span.finish(1024, false);
+    }
+    check(!t.cpuTimingSupported, "an unavailable CPU clock is reported as unsupported");
+    check(t.instanceProcessCpuMs == -1 && t.hostPrepareCpuMs == -1 &&
+              t.pluginCallbackCpuMs == -1 && t.hostCollectCpuMs == -1,
+          "unsupported CPU time stays -1 (null), not 0");
+    check(t.instanceProcessMs > 5.0 && t.pluginCallbackMs > 1.0,
+          "wall spans are still measured when the CPU clock is unavailable");
+  }
+
+  {
+    // A synthetic CPU clock proves the CPU spans partition the CPU total exactly as
+    // the wall spans do, independent of whatever the host clock happens to report.
+    ProcessTimings t{};
+    // Stepped clock: each read advances a fixed amount, so the arithmetic is exact
+    // instead of depending on how the host happens to schedule this process.
+    Stepper::value = 0;
+    TimingClocks clocks{};
+    clocks.wall = &Stepper::next;
+    clocks.cpu = &Stepper::next;
+    {
+      ProcessSpanRecorder span(&t, clocks);
+      span.markCallbackStart();
+      span.markCallbackEnd();
+      span.finish(1024, false);
+    }
+    check(t.cpuTimingSupported, "a working CPU clock is reported as supported");
+    const double wallSum = t.hostPrepareMs + t.pluginCallbackMs + t.hostCollectMs;
+    const double cpuSum = t.hostPrepareCpuMs + t.pluginCallbackCpuMs + t.hostCollectCpuMs;
+    check(std::fabs(wallSum - t.instanceProcessMs) < 1e-9, "wall sub-spans partition the wall total");
+    check(std::fabs(cpuSum - t.instanceProcessCpuMs) < 1e-9, "CPU sub-spans partition the CPU total");
+    check(t.hostPrepareCpuMs > 0 && t.pluginCallbackCpuMs > 0 && t.hostCollectCpuMs > 0,
+          "each span receives its own non-zero CPU measurement");
   }
 
   if (failures == 0) {

@@ -1001,6 +1001,15 @@ int main(int argc, char** argv) {
                {"helperHostPrepareMs", timings.hostPrepareMs},
                {"helperPluginCallbackMs", timings.pluginCallbackMs},
                {"helperHostCollectMs", timings.hostCollectMs},
+               // Helper-THREAD CPU time for the same four spans. These exclude time
+               // the thread spent descheduled, so wall-minus-CPU is contention
+               // rather than expensive code. They cover this thread only: a plug-in
+               // with its own worker threads would account their CPU elsewhere.
+               {"helperInstanceProcessCpuMs", timings.instanceProcessCpuMs},
+               {"helperHostPrepareCpuMs", timings.hostPrepareCpuMs},
+               {"helperPluginCallbackCpuMs", timings.pluginCallbackCpuMs},
+               {"helperHostCollectCpuMs", timings.hostCollectCpuMs},
+               {"helperCpuTimingSupported", timings.cpuTimingSupported},
                {"helperProcessFrames", timings.frames},
                {"helperProcessIsFlush", timings.flush}}, pcm);
       } else if (command == "parameters") {

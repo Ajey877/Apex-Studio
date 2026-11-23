@@ -8,7 +8,8 @@ import { RecordingEngine } from './recordingEngine';
 import { deletePersistedAudioClip } from './audioPersistence';
 import { sessionBlobUrlRegistry } from '../state/sessionBlobUrlRegistry';
 import { DEFAULT_MASTERING_SUITE_STATE } from './masteringState';
-import { collectMissedSequences, orderBlocksAroundMiss } from './nativeMissWindow';
+import { collectMissedSequences, describeDeadlineMiss, orderBlocksAroundMiss } from './nativeMissWindow';
+import { acceptedResultFor, correlateWorkletResults, rejectedResultsFor, runtimeGenerationOf } from './workletResultCorrelation';
 
 const wait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 const requireSignal = (condition: boolean, message: string) => { if (!condition) throw new Error(message); };
@@ -366,6 +367,13 @@ interface NativeProcessRecord {
   helperHostCollectMs?: number | null;
   helperProcessFrames?: number | null;
   helperProcessIsFlush?: boolean | null;
+  // Helper-thread CPU time for the four helper spans. Wall minus CPU is time the
+  // thread spent descheduled rather than executing.
+  helperInstanceProcessCpuMs?: number | null;
+  helperHostPrepareCpuMs?: number | null;
+  helperPluginCallbackCpuMs?: number | null;
+  helperHostCollectCpuMs?: number | null;
+  helperCpuTimingSupported?: boolean | null;
   helperRequestBytes?: number | null;
   eventLoopLagMaxMs?: number | null;
   eventLoopLagDuringBlockMs?: number | null;
@@ -535,23 +543,25 @@ export async function measureNativeVst3MonitoringCoexistence(engine: typeof audi
   // renderer. Epoch stamps are the only cross-process comparable clock.
   const num = (value: unknown): number | null => (typeof value === 'number' && Number.isFinite(value) ? value : null);
   const blockBudgetMs = 1024 * 1000 / context.sampleRate;
-  const resultsBySequence = new Map<number, { acceptedAtEpochMs: number | null; roundTripMs: number | null }>();
-  for (const event of rendererEvents) {
-    if (event.event !== 'worklet-result') continue;
-    const sequence = num(event.sequence);
-    if (sequence === null) continue;
-    resultsBySequence.set(sequence, {
-      acceptedAtEpochMs: num(event.acceptedAtEpochMs), roundTripMs: num(event.roundTripMs),
-    });
-  }
+  // Acceptance is taken from the worklet's own `accepted` flag and joined on
+  // `requestId` (runtimeId:sequence). The previous version keyed by sequence alone
+  // and ignored acceptance, so a result the worklet had REJECTED still supplied an
+  // `acceptedAtEpochMs` - the worklet stamps the clock before computing `valid` -
+  // and produced a positive deadline margin for a block that never completed in
+  // time. Rejected results are kept as separate evidence, never as measurements.
+  const results = correlateWorkletResults(rendererEvents);
   const decompose = (record: NativeProcessRecord) => {
     const sequence = num(record.sequence);
     const submittedAtEpochMs = num(record.submittedAtEpochMs);
     const ipcReceivedAtMainEpochMs = num(record.ipcReceivedAtMainEpochMs);
     const ipcReceivedAtMainMs = num(record.ipcReceivedAtMainMs);
     const serviceCompletedAtMainMs = num(record.serviceCompletedAtMainMs);
-    const accepted = sequence === null ? undefined : resultsBySequence.get(sequence);
+    // Null unless the AudioWorklet genuinely accepted this exact request. A null is
+    // not a missing measurement to be worked around; it means the block was not
+    // accepted, and no round trip or margin may be claimed for it.
+    const accepted = acceptedResultFor(results, record);
     const acceptedAtEpochMs = accepted?.acceptedAtEpochMs ?? null;
+    const rejections = rejectedResultsFor(results, record);
     // The main process's monotonic clock rebased onto the epoch clock, so its
     // completion stamp can be compared with the worklet's acceptance stamp.
     const mainEpochOriginMs = ipcReceivedAtMainEpochMs !== null && ipcReceivedAtMainMs !== null
@@ -581,12 +591,32 @@ export async function measureNativeVst3MonitoringCoexistence(engine: typeof audi
       helperProcessFrames: num(record.helperProcessFrames),
       helperProcessIsFlush: typeof record.helperProcessIsFlush === 'boolean'
         ? record.helperProcessIsFlush : null,
+      helperInstanceProcessCpuMs: num(record.helperInstanceProcessCpuMs),
+      helperHostPrepareCpuMs: num(record.helperHostPrepareCpuMs),
+      helperPluginCallbackCpuMs: num(record.helperPluginCallbackCpuMs),
+      helperHostCollectCpuMs: num(record.helperHostCollectCpuMs),
+      helperCpuTimingSupported: typeof record.helperCpuTimingSupported === 'boolean'
+        ? record.helperCpuTimingSupported : null,
       helperRequestBytes: num(record.helperRequestBytes),
       mainToRendererMs: acceptedAtEpochMs !== null && serviceCompletedAtMainEpochMs !== null
         ? acceptedAtEpochMs - serviceCompletedAtMainEpochMs : null,
+      // Only an accepted result contributes. `accepted?.roundTripMs` is the
+      // worklet's own measurement of an accepted block, so it is equally gated.
       totalRoundTripMs: totalMs ?? accepted?.roundTripMs ?? null,
       budgetMs: blockBudgetMs,
       marginMs: totalMs !== null ? blockBudgetMs - totalMs : null,
+      // Whether the AudioWorklet actually took this block, and if not why. Without
+      // this a rejected block and an accepted one look identical in the evidence.
+      resultAccepted: accepted !== null,
+      resultRejectionReasons: rejections.map(entry => entry.reason),
+      // Late/duplicate responses are preserved as evidence of lateness, with their
+      // frame positions, but they never feed the timings above.
+      rejectedResults: rejections.map(entry => ({
+        reason: entry.reason, pendingSequence: entry.pendingSequence,
+        receivedOutputFrame: entry.receivedOutputFrame, dueOutputFrame: entry.dueOutputFrame,
+        arrivedAtEpochMs: entry.acceptedAtEpochMs, roundTripMs: entry.roundTripMs,
+      })),
+      runtimeGeneration: runtimeGenerationOf(record.requestId),
       eventLoopLagMaxMs: num(record.eventLoopLagMaxMs),
       // The discriminator this whole investigation turns on: the worst main-process
       // event-loop stall sampled inside this block's own request/response window.
@@ -647,15 +677,26 @@ export async function measureNativeVst3MonitoringCoexistence(engine: typeof audi
       // and the frame it was due at, which is what distinguishes "the request
       // never reached the main process" from "the helper answered too late":
       // a pending sequence with no main-process record never arrived.
+      // Both guards, each keeping its own frame positions and its own name. They
+      // fire for different reasons - the pending guard when the next input block
+      // filled with a result still outstanding, the output guard when a result was
+      // absent at the frame that needed it - and conflating them would hide which
+      // boundary was crossed. `phase` separates cold-window from mid-session misses.
       deadlineMissEvents: rendererEvents
-        .filter(event => event.event === 'pending-deadline-miss' || event.event === 'deadline-miss')
-        .slice(0, 6)
-        .map(event => ({
-          event: String(event.event), sequence: num(event.sequence), nextSequence: num(event.nextSequence),
-          pendingSequence: num(event.pendingSequence), inputContextFrame: num(event.inputContextFrame),
-          currentOutputFrame: num(event.currentOutputFrame), dueOutputFrame: num(event.dueOutputFrame),
-          sourceFrame: num(event.sourceFrame),
-        })),
+        .map(event => describeDeadlineMiss(event))
+        .filter((entry): entry is NonNullable<typeof entry> => entry !== null)
+        .slice(0, 6),
+      // Acceptance accounting. Without these three numbers a reader cannot tell
+      // whether the timings above came from blocks the AudioWorklet actually took.
+      workletResultsAccepted: results.acceptedCount,
+      workletResultsRejected: results.rejectedCount,
+      workletResultsUnattributable: results.unattributableCount,
+      workletResultRejections: results.rejected.slice(0, 8).map(entry => ({
+        requestId: entry.requestId, sequence: entry.sequence, reason: entry.reason,
+        pendingSequence: entry.pendingSequence, receivedOutputFrame: entry.receivedOutputFrame,
+        dueOutputFrame: entry.dueOutputFrame, arrivedAtEpochMs: entry.acceptedAtEpochMs,
+        roundTripMs: entry.roundTripMs, unattributable: entry.unattributable,
+      })),
       mainRecordedSequences: records.map(record => num(record.sequence)).filter((v): v is number => v !== null),
       blockBudgetMs,
       worstColdStartTotalMs: coldStartBlocks.reduce((worst, block) => (

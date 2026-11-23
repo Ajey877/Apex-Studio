@@ -1,0 +1,181 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {
+  acceptedResultFor, correlateWorkletResults, rejectedResultsFor, runtimeGenerationOf,
+} from './workletResultCorrelation';
+import { classifyMissSequence, describeDeadlineMiss } from './nativeMissWindow';
+
+/**
+ * Acceptance correlation for native block results.
+ *
+ * These tests exist because the previous extractor produced evidence that looked
+ * measured and was not: it recorded a timestamp for every `worklet-result` event,
+ * keyed by sequence alone, without checking the `accepted` flag. A result the
+ * worklet had rejected therefore supplied a round trip and a positive deadline
+ * margin for a block that never completed in time.
+ */
+
+const GEN_A = 'runtime-aaaa';
+const GEN_B = 'runtime-bbbb';
+const reqId = (gen: string, sequence: number) => `${gen}:${sequence}`;
+
+const acceptedEvent = (gen: string, sequence: number, extra = {}) => ({
+  event: 'worklet-result', requestId: reqId(gen, sequence), sequence, accepted: true,
+  pendingSequence: sequence, receivedOutputFrame: 2048 + sequence * 1024,
+  dueOutputFrame: 2048 + sequence * 1024, acceptedAtEpochMs: 1000 + sequence,
+  submittedAtEpochMs: 990 + sequence, roundTripMs: 10, ...extra,
+});
+
+const rejectedEvent = (gen: string, sequence: number, reason: string, extra = {}) => ({
+  event: 'worklet-result', requestId: reqId(gen, sequence), sequence, accepted: false,
+  reason, pendingSequence: -1, receivedOutputFrame: 4096, dueOutputFrame: 2048 + sequence * 1024,
+  acceptedAtEpochMs: 1500, roundTripMs: 40, ...extra,
+});
+
+test('1. an accepted result produces an accepted round-trip measurement', () => {
+  const correlation = correlateWorkletResults([acceptedEvent(GEN_A, 2)]);
+  assert.equal(correlation.acceptedCount, 1);
+  assert.equal(correlation.rejectedCount, 0);
+  const found = acceptedResultFor(correlation, { requestId: reqId(GEN_A, 2), sequence: 2 });
+  assert.ok(found, 'the accepted block is findable by its request id');
+  assert.equal(found.roundTripMs, 10);
+  assert.equal(found.acceptedAtEpochMs, 1002);
+});
+
+test('2. a rejected result cannot produce an accepted round-trip measurement', () => {
+  // This is the exact defect: the rejected event carries both acceptedAtEpochMs and
+  // roundTripMs, so an extractor that ignores `accepted` would report a 40 ms round
+  // trip and a margin for a block the worklet refused.
+  const correlation = correlateWorkletResults([
+    rejectedEvent(GEN_A, 2, 'after-failure'),
+  ]);
+  assert.equal(correlation.acceptedCount, 0);
+  assert.equal(correlation.rejectedCount, 1);
+  assert.equal(acceptedResultFor(correlation, { requestId: reqId(GEN_A, 2), sequence: 2 }), null,
+    'no accepted measurement may be derived from a rejected result');
+  const rejections = rejectedResultsFor(correlation, { requestId: reqId(GEN_A, 2) });
+  assert.equal(rejections.length, 1, 'but the rejection is still available as evidence');
+  assert.equal(rejections[0].reason, 'after-failure');
+});
+
+test('3. a late result after the fail-closed event stays visible as rejected evidence', () => {
+  const correlation = correlateWorkletResults([
+    rejectedEvent(GEN_A, 2, 'stale-duplicate-or-malformed', {
+      pendingSequence: -1, receivedOutputFrame: 5120, dueOutputFrame: 4096,
+    }),
+  ]);
+  const [late] = rejectedResultsFor(correlation, { requestId: reqId(GEN_A, 2) });
+  assert.equal(late.receivedOutputFrame, 5120);
+  assert.equal(late.dueOutputFrame, 4096);
+  assert.ok((late.receivedOutputFrame as number) > (late.dueOutputFrame as number),
+    'the evidence shows the response arrived after the frame that needed it');
+  assert.equal(acceptedResultFor(correlation, { requestId: reqId(GEN_A, 2) }), null);
+});
+
+test('4. a result with the wrong pending sequence is not counted as valid', () => {
+  // The worklet marks accepted=false when message.sequence !== this.pending. Such an
+  // event must not become the measurement for the block it merely resembles.
+  const correlation = correlateWorkletResults([
+    acceptedEvent(GEN_A, 3),
+    rejectedEvent(GEN_A, 2, 'stale-duplicate-or-malformed', { pendingSequence: 3 }),
+  ]);
+  assert.equal(correlation.acceptedCount, 1);
+  assert.ok(acceptedResultFor(correlation, { requestId: reqId(GEN_A, 3) }), 'sequence 3 was accepted');
+  assert.equal(acceptedResultFor(correlation, { requestId: reqId(GEN_A, 2) }), null,
+    'sequence 2 was not, and its lookalike response does not change that');
+});
+
+test('5. different runtime generations cannot be mixed by sequence-number matching', () => {
+  // Sequence counters restart at zero when the worklet is recreated, so two
+  // generations both have a sequence 2. Joining on requestId keeps them apart.
+  const correlation = correlateWorkletResults([
+    acceptedEvent(GEN_A, 2, { roundTripMs: 10 }),
+    acceptedEvent(GEN_B, 2, { roundTripMs: 99 }),
+  ]);
+  assert.equal(correlation.acceptedCount, 2);
+  assert.equal(acceptedResultFor(correlation, { requestId: reqId(GEN_A, 2) })?.roundTripMs, 10);
+  assert.equal(acceptedResultFor(correlation, { requestId: reqId(GEN_B, 2) })?.roundTripMs, 99,
+    'each generation keeps its own measurement');
+  assert.equal(runtimeGenerationOf(reqId(GEN_A, 2)), GEN_A);
+  assert.equal(runtimeGenerationOf(reqId(GEN_B, 2)), GEN_B);
+  assert.equal(runtimeGenerationOf(null), null);
+  assert.equal(runtimeGenerationOf(''), null);
+});
+
+test('an event with no request id can never count as accepted', () => {
+  const correlation = correlateWorkletResults([
+    { ...acceptedEvent(GEN_A, 0), requestId: undefined },
+  ]);
+  assert.equal(correlation.acceptedCount, 0, 'unattributable even though it claims accepted');
+  assert.equal(correlation.unattributableCount, 1);
+  assert.equal(correlation.rejected[0].unattributable, true);
+});
+
+test('a second accepted result for one block is flagged, not silently merged', () => {
+  const correlation = correlateWorkletResults([
+    acceptedEvent(GEN_A, 1, { roundTripMs: 8 }),
+    acceptedEvent(GEN_A, 1, { roundTripMs: 50 }),
+  ]);
+  assert.equal(correlation.acceptedCount, 1, 'the first measurement is the one acted on');
+  assert.equal(acceptedResultFor(correlation, { requestId: reqId(GEN_A, 1) })?.roundTripMs, 8);
+  assert.equal(correlation.duplicateAccepted.length, 1, 'the duplicate is retained as evidence');
+});
+
+test('non-result events and missing fields are ignored or left null', () => {
+  const correlation = correlateWorkletResults([
+    { event: 'worklet-submit', requestId: reqId(GEN_A, 0), accepted: true },
+    { event: 'worklet-result', requestId: reqId(GEN_A, 1), accepted: true },
+  ]);
+  assert.equal(correlation.acceptedCount, 1, 'a submit event is not a result');
+  const found = acceptedResultFor(correlation, { requestId: reqId(GEN_A, 1) });
+  assert.equal(found?.roundTripMs, null, 'an absent round trip stays null, not zero');
+  assert.equal(found?.acceptedAtEpochMs, null);
+});
+
+// --- both worklet failure paths keep their own frame positions ----------------------
+
+test('6a. the pending guard keeps every frame position it reported', () => {
+  const described = describeDeadlineMiss({
+    event: 'pending-deadline-miss', sequence: 2, pendingSequence: 2, nextSequence: 3,
+    inputContextFrame: 1744895, currentOutputFrame: 3968, dueOutputFrame: 4096,
+    readySequences: [0, 1], drySequences: [0, 1, 2],
+  });
+  assert.ok(described);
+  assert.equal(described.guard, 'pending-deadline-miss');
+  assert.equal(described.sequence, 2);
+  assert.equal(described.nextSequence, 3);
+  assert.equal(described.inputContextFrame, 1744895);
+  assert.equal(described.currentOutputFrame, 3968);
+  assert.equal(described.dueOutputFrame, 4096);
+  assert.deepEqual(described.readySequences, [0, 1]);
+  assert.deepEqual(described.drySequences, [0, 1, 2]);
+  assert.equal(described.phase, 'cold');
+});
+
+test('6b. the output guard keeps its own distinct frame positions', () => {
+  const described = describeDeadlineMiss({
+    event: 'deadline-miss', sequence: 149, sourceFrame: 152576, dueOutputFrame: 154624,
+    currentOutputFrame: 154496, pendingSequence: 150, readySequences: [147, 148],
+    drySequences: [147, 148, 149],
+  });
+  assert.ok(described);
+  assert.equal(described.guard, 'deadline-miss', 'the two guards are not conflated');
+  assert.equal(described.sourceFrame, 152576);
+  assert.equal(described.pendingSequence, 150);
+  assert.equal(described.nextSequence, null, 'a field this guard does not emit stays null');
+  assert.equal(described.inputContextFrame, null);
+  assert.equal(described.phase, 'mid-session');
+});
+
+test('6c. an unrelated event is not described as a deadline miss', () => {
+  assert.equal(describeDeadlineMiss({ event: 'worklet-result', sequence: 1 }), null);
+  assert.equal(describeDeadlineMiss({ event: null, sequence: 1 }), null);
+});
+
+test('cold and mid-session misses are classified from the measured cold window', () => {
+  assert.equal(classifyMissSequence(0), 'cold');
+  assert.equal(classifyMissSequence(3), 'cold', 'the boundary block counts as cold');
+  assert.equal(classifyMissSequence(4), 'mid-session');
+  assert.equal(classifyMissSequence(57), 'mid-session');
+  assert.equal(classifyMissSequence(149), 'mid-session');
+});

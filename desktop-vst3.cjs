@@ -406,6 +406,14 @@ function registerVst3({ app, ipcMain, dialog, getWindow }) {
         helperHostPrepareMs: helper.helperHostPrepareMs ?? null,
         helperPluginCallbackMs: helper.helperPluginCallbackMs ?? null,
         helperHostCollectMs: helper.helperHostCollectMs ?? null,
+        // Helper-thread CPU time for the same four spans. Wall minus CPU is time the
+        // thread spent descheduled: contention, not expensive code. This thread only
+        // - a plug-in with its own worker threads accounts their CPU elsewhere.
+        helperInstanceProcessCpuMs: helper.helperInstanceProcessCpuMs ?? null,
+        helperHostPrepareCpuMs: helper.helperHostPrepareCpuMs ?? null,
+        helperPluginCallbackCpuMs: helper.helperPluginCallbackCpuMs ?? null,
+        helperHostCollectCpuMs: helper.helperHostCollectCpuMs ?? null,
+        helperCpuTimingSupported: helper.helperCpuTimingSupported ?? null,
         helperProcessFrames: helper.helperProcessFrames ?? null,
         // A zero-frame flush is not an audio block and is excluded from per-block
         // statistics rather than dragging the callback median towards zero.
@@ -433,6 +441,14 @@ function registerVst3({ app, ipcMain, dialog, getWindow }) {
         helperHostPrepareMs: helper.helperHostPrepareMs ?? null,
         helperPluginCallbackMs: helper.helperPluginCallbackMs ?? null,
         helperHostCollectMs: helper.helperHostCollectMs ?? null,
+        // Helper-thread CPU time for the same four spans. Wall minus CPU is time the
+        // thread spent descheduled: contention, not expensive code. This thread only
+        // - a plug-in with its own worker threads accounts their CPU elsewhere.
+        helperInstanceProcessCpuMs: helper.helperInstanceProcessCpuMs ?? null,
+        helperHostPrepareCpuMs: helper.helperHostPrepareCpuMs ?? null,
+        helperPluginCallbackCpuMs: helper.helperPluginCallbackCpuMs ?? null,
+        helperHostCollectCpuMs: helper.helperHostCollectCpuMs ?? null,
+        helperCpuTimingSupported: helper.helperCpuTimingSupported ?? null,
         helperProcessFrames: helper.helperProcessFrames ?? null,
         helperProcessIsFlush: helper.helperProcessIsFlush ?? null,
         nativeInputRms: pcmRms(audio), nativeOutputRms: null,

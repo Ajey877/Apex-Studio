@@ -29,6 +29,13 @@ export function coldStartFrom(native, capturedAt) {
     missedSequences: source.missedSequences ?? [],
     deadlineMissEvents: source.deadlineMissEvents ?? [],
     mainRecordedSequences: source.mainRecordedSequences ?? [],
+    // Whether the AudioWorklet actually accepted the results these timings were
+    // built from. A run whose blocks were rejected has no valid round trips or
+    // margins, and that has to be visible next to the numbers rather than assumed.
+    workletResultsAccepted: source.workletResultsAccepted ?? null,
+    workletResultsRejected: source.workletResultsRejected ?? null,
+    workletResultsUnattributable: source.workletResultsUnattributable ?? null,
+    workletResultRejections: source.workletResultRejections ?? [],
     capturedAt,
   };
 }

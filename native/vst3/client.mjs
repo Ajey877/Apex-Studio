@@ -179,8 +179,15 @@ export class NativeVst3Client {
           // name for that same total is gone, because it read as plug-in time when
           // it was host-plus-plug-in time.
           for (const field of ['helperInstanceProcessMs', 'helperHostPrepareMs',
-            'helperPluginCallbackMs', 'helperHostCollectMs', 'helperProcessFrames']) {
+            'helperPluginCallbackMs', 'helperHostCollectMs', 'helperProcessFrames',
+            // Helper-THREAD CPU time for the same spans. Wall minus CPU is time this
+            // thread spent descheduled, which is contention rather than slow code.
+            'helperInstanceProcessCpuMs', 'helperHostPrepareCpuMs',
+            'helperPluginCallbackCpuMs', 'helperHostCollectCpuMs']) {
             if (typeof result[field] === 'number') pending.timings[field] = result[field];
+          }
+          if (typeof result.helperCpuTimingSupported === 'boolean') {
+            pending.timings.helperCpuTimingSupported = result.helperCpuTimingSupported;
           }
           if (typeof result.helperProcessIsFlush === 'boolean') {
             pending.timings.helperProcessIsFlush = result.helperProcessIsFlush;
@@ -240,6 +247,9 @@ export class NativeVst3Client {
       stamp.helperInstanceProcessMs = null; stamp.helperHostPrepareMs = null;
       stamp.helperPluginCallbackMs = null; stamp.helperHostCollectMs = null;
       stamp.helperProcessFrames = null; stamp.helperProcessIsFlush = null;
+      stamp.helperInstanceProcessCpuMs = null; stamp.helperHostPrepareCpuMs = null;
+      stamp.helperPluginCallbackCpuMs = null; stamp.helperHostCollectCpuMs = null;
+      stamp.helperCpuTimingSupported = null;
     }
     const serializeStartedAtMs = performance.now();
     const text = JSON.stringify(message) + '\n';

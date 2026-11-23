@@ -839,6 +839,14 @@ if (process.env.GITHUB_ACTIONS) {
     pipe: r2(block.helperPipeAndScheduleMs), decode: r2(block.helperDecodeMs),
     inst: r2(block.helperInstanceProcessMs), prep: r2(block.helperHostPrepareMs),
     cb: r2(block.helperPluginCallbackMs), coll: r2(block.helperHostCollectMs),
+    // Helper-thread CPU time for the same spans: wall minus CPU is descheduling,
+    // not expensive code. acc = the AudioWorklet genuinely accepted this block;
+    // a false or null acc means no margin below may be read as a pass.
+    instCpu: r2(block.helperInstanceProcessCpuMs), prepCpu: r2(block.helperHostPrepareCpuMs),
+    cbCpu: r2(block.helperPluginCallbackCpuMs), collCpu: r2(block.helperHostCollectCpuMs),
+    cpuOk: block.helperCpuTimingSupported ?? null,
+    acc: block.resultAccepted ?? null, rej: block.resultRejectionReasons ?? [],
+    gen: block.runtimeGeneration ?? null,
     flush: block.helperProcessIsFlush ?? null,
     mainToR: r2(block.mainToRendererMs), total: r2(block.totalRoundTripMs),
     margin: r2(block.marginMs), lagInBlock: r2(block.eventLoopLagDuringBlockMs), err: block.error,
@@ -869,6 +877,22 @@ if (process.env.GITHUB_ACTIONS) {
       deadlineMissEvents: cold.deadlineMissEvents ?? [],
       mainRecordedSequences: (cold.mainRecordedSequences ?? []).slice(0, 24),
       missedSequences: cold.missedSequences ?? [],
+      // Acceptance accounting: how many results the AudioWorklet actually took.
+      // Any margin below is only meaningful for an accepted block.
+      resultsAccepted: cold.workletResultsAccepted ?? null,
+      resultsRejected: cold.workletResultsRejected ?? null,
+      resultsUnattributable: cold.workletResultsUnattributable ?? null,
+      rejections: (cold.workletResultRejections ?? []).slice(0, 4).map(entry => ({
+        seq: entry.sequence, reason: entry.reason, pending: entry.pendingSequence,
+        recvFrame: entry.receivedOutputFrame, dueFrame: entry.dueOutputFrame,
+        rtt: r2(entry.roundTripMs) })),
+      // Cold-window versus mid-session misses, from the guard's own sequences.
+      missPhases: (cold.deadlineMissEvents ?? []).map(entry => ({
+        guard: entry.guard ?? entry.event ?? null, seq: entry.sequence ?? null,
+        phase: entry.phase ?? null, curFrame: entry.currentOutputFrame ?? null,
+        dueFrame: entry.dueOutputFrame ?? null, nextSeq: entry.nextSequence ?? null,
+        inputFrame: entry.inputContextFrame ?? null, srcFrame: entry.sourceFrame ?? null,
+        ready: entry.readySequences ?? null, dry: entry.drySequences ?? null })),
       // The blocks the guard actually gave up on. For a cold-window miss these
       // overlap `blocks`; for a mid-session miss they are the only relevant ones.
       blocksAroundMiss: (cold.blocksAroundMiss ?? []).slice(0, 8).map(fmtBlock),

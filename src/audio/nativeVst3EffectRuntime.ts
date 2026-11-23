@@ -235,9 +235,16 @@ class ApexVst3FxProcessor extends AudioWorkletProcessor {
         this.fill++;
         if (this.fill === this.blockFrames) {
           if (this.pending !== -1) {
+            // Measurement only: the guard and its fail-closed behaviour below are
+            // unchanged. The extra fields distinguish a genuinely late result from
+            // an early pending-state guard. readySequences and drySequences show
+            // what had actually arrived, and pendingSequence repeats the pending
+            // block explicitly so the two failure events carry the same vocabulary.
             if (this.profileEnabled) this.port.postMessage({ type: 'profile', event: 'pending-deadline-miss', sequence: this.pending,
-              nextSequence: this.sequence, inputContextFrame: currentFrame + i, currentOutputFrame: this.outputFrame,
-              dueOutputFrame: this.delayFrames + this.pending * this.blockFrames });
+              pendingSequence: this.pending, nextSequence: this.sequence, inputContextFrame: currentFrame + i,
+              currentOutputFrame: this.outputFrame,
+              dueOutputFrame: this.delayFrames + this.pending * this.blockFrames,
+              readySequences: Array.from(this.ready.keys()), drySequences: Array.from(this.dryReady.keys()) });
             this.fail('Native effect missed its real-time processing deadline; playback stopped rather than replaying stale PCM.');
             break;
           }
