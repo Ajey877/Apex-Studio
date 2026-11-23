@@ -117,9 +117,13 @@ jobs:
       - name: Cold-start deadline diagnostic (high volume, non-gating)
         if: runner.os == 'Windows'
         continue-on-error: true
-        timeout-minutes: 90
+        timeout-minutes: 150
         env:
-          APEX_NATIVE_MONITORING_RUNS: '15'
+          # 15 repetitions passed clean, which is not enough to catch a miss that
+          # happens in a few percent of cold starts. Measured cost is about 0.7 min
+          # per repetition, so 60 fits the timeout and gives a high chance of
+          # capturing one with its full decomposition.
+          APEX_NATIVE_MONITORING_RUNS: '60'
           APEX_NATIVE_MONITORING_LABEL: 'coldstart-diagnostic'
         run: npm run test:native-monitoring-packaged
 

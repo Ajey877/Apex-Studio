@@ -783,20 +783,38 @@ if (process.env.GITHUB_ACTIONS) {
   // channel that carries the timing evidence out of CI. Each line splits one
   // block's round trip into renderer->main, the helper channel and main->renderer,
   // against the one-block budget the fail-closed guard actually enforces.
-  // GitHub truncates an annotation message at 4096 characters, which silently
-  // destroyed the JSON on the first instrumented run. Split the payload in two and
-  // round every number so both halves stay parseable.
-  // Two CI steps emit these annotations into the same job, so a label keeps the
-  // diagnostic high-volume pass distinguishable from the gating 5-run acceptance.
-  const label = process.env.APEX_NATIVE_MONITORING_LABEL ?? 'acceptance';
-  const emit = (title, payload) => console.log(`::notice title=[${label}] ${title}::${JSON.stringify(payload)
-    .replaceAll('%', '%25').replaceAll('\r', '%0D').replaceAll('\n', '%0A').slice(0, 3900)}`);
+  // GitHub both truncates an annotation at 4096 characters and caps how many a
+  // check run keeps - a 15-repetition pass emitted 30 per-run annotations and the
+  // later ones were dropped. So: ONE aggregate annotation covering every
+  // repetition, and full per-block detail only where it is needed - every failing
+  // repetition, plus repetition 1 as a representative cold sample.
   const r2 = value => (typeof value === 'number' && Number.isFinite(value) ? Math.round(value * 100) / 100 : value ?? null);
-  for (const run of allRuns) {
+  const emit = (title, payload) => console.log(`::notice title=${title}::${JSON.stringify(payload)
+    .replaceAll('%', '%25').replaceAll('\r', '%0D').replaceAll('\n', '%0A').slice(0, 3900)}`);
+  const label = process.env.APEX_NATIVE_MONITORING_LABEL ?? 'acceptance';
+  const startupOf = cold => Object.values(cold?.helperStartup ?? {})[0] ?? null;
+  const detailed = allRuns.filter(run => run.coldStart && (run.status !== 'PASS' || run.runIndex === 1));
+  const aggregate = allRuns.filter(run => run.coldStart).map(run => {
+    const startup = startupOf(run.coldStart);
+    return { r: run.runIndex, st: run.status, worst: r2(run.coldStart.worstTotalRoundTripMs),
+      margin: r2(run.coldStart.worstMarginMs), lagAudio: r2(run.coldStart.mainEventLoopLagDuringAudioMs),
+      lagMax: r2(run.coldStart.mainEventLoopLagMaxMs), load: r2(startup?.firstRequestRoundTripMs) };
+  });
+  emit(`[${label}] Cold-start aggregate (${aggregate.length} cold repetitions)`, {
+    label, repetitions: aggregate.length,
+    passed: aggregate.filter(row => row.st === 'PASS').length,
+    failed: aggregate.filter(row => row.st !== 'PASS').length,
+    tightestMarginMs: aggregate.reduce((worst, row) => (
+      row.margin !== null && (worst === null || row.margin < worst) ? row.margin : worst), null),
+    slowestBlockMs: aggregate.reduce((worst, row) => (
+      row.worst !== null && (worst === null || row.worst > worst) ? row.worst : worst), null),
+    blockBudgetMs: r2(allRuns.find(run => run.coldStart)?.coldStart?.blockBudgetMs),
+    runs: aggregate,
+  });
+  for (const run of detailed) {
     const cold = run.coldStart;
-    if (!cold) continue;
-    const startup = Object.values(cold.helperStartup ?? {})[0] ?? null;
-    emit(`Cold-start summary run ${run.runIndex} (${run.status})`, {
+    const startup = startupOf(cold);
+    emit(`[${label}] Cold-start detail run ${run.runIndex} (${run.status}, ${cold.capturedAt ?? 'unknown'})`, {
       runIndex: run.runIndex, status: run.status, capturedAt: cold.capturedAt ?? null,
       blockBudgetMs: r2(cold.blockBudgetMs),
       worstTotalRoundTripMs: r2(cold.worstTotalRoundTripMs), worstMarginMs: r2(cold.worstMarginMs),
@@ -806,15 +824,11 @@ if (process.env.GITHUB_ACTIONS) {
         .map(stall => ({ atMs: r2(stall.atMs), lagMs: r2(stall.lagMs) })),
       helperPid: startup?.pid ?? null,
       helperSpawnToProtocolBoundMs: r2(startup?.spawnToProtocolBoundMs),
-      helperProtocolBoundToFirstWriteMs: r2(startup?.protocolBoundToFirstWriteMs),
       helperFirstRequestRoundTripMs: r2(startup?.firstRequestRoundTripMs),
       helperConstructedToOpenCompletedMs: r2(startup?.constructedToOpenCompletedMs),
       deadlineMissEvents: cold.deadlineMissEvents ?? [],
       mainRecordedSequences: (cold.mainRecordedSequences ?? []).slice(0, 24),
-    });
-    emit(`Cold-start blocks run ${run.runIndex} (${run.status})`, {
-      runIndex: run.runIndex, status: run.status,
-      blocks: (cold.blocks ?? []).slice(0, 6).map(block => ({
+      blocks: (cold.blocks ?? []).slice(0, 8).map(block => ({
         seq: block.sequence, rToMain: r2(block.rendererToMainMs), svc: r2(block.nativeServiceCallMs),
         qWait: r2(block.helperQueueWaitMs), ser: r2(block.helperSerializeMs),
         hRtt: r2(block.helperRoundTripMs), parse: r2(block.helperFrameParseMs),
