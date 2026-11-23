@@ -519,3 +519,78 @@ This host is Linux, so the packaged run was never executed locally; the script s
 - The audio reaching the insert is a deterministic buffer at the insert input, the same
   mechanism the packaged Mixer acceptance uses. The plugin session and its processing are real;
   the source is not a physical instrument performance.
+
+## Native VST3 cold-start deadline: measured decomposition
+
+This section is separate from the harness root cause above, which is resolved. What follows is a
+**real production defect** in the packaged application, still open, and the timing evidence
+gathered so far. Nothing here was inferred from the deadline counter alone.
+
+### The budget
+
+`src/audio/nativeVst3EffectRuntime.ts` uses `VST3_FX_BLOCK_FRAMES = 1024` and
+`VST3_FX_PIPELINE_FRAMES = 2048`. Block *N* is submitted at input frame `(N+1)*1024` and is needed
+at output frame `2048 + N*1024`, so the slack is exactly one block: **21.33 ms at 48 kHz**. The
+guard at `:218` fails closed when a block fills while the previous block's result is still
+`pending`. That guard is correct and has not been weakened.
+
+### First complete decomposition — job `137623128829`, commit `68cdd20`
+
+The 5-repetition gating acceptance passed 5/5 (tightest margin +4.33 ms). The 60-repetition
+non-gating diagnostic then ran for the first time and **reproduced the miss: 36 PASS / 1 FAIL of
+37 attempts**, stopping at the failure. A green gate therefore does *not* mean the defect is gone.
+
+Failing block, repetition 37, helper pid 7060, `missedSequences [2]`, budget 21.33 ms:
+
+| span | seq 0 | seq 1 | **seq 2 (miss)** |
+|---|---|---|---|
+| renderer → main | 0.68 | −0.73 | 0.52 |
+| helper queue wait | 0.14 | 0.05 | 0.08 |
+| request serialize | 0.09 | 0.02 | 0.03 |
+| pipe + OS schedule | 2.36 | 2.80 | 2.92 |
+| helper decode | 0.09 | 0.12 | 0.13 |
+| helper `Instance::process()` | 2.19 | 2.17 | **14.15** |
+| response frame parse | 0.89 | 0.41 | 0.48 |
+| main → renderer | 3.97 | 5.25 | 5.87 |
+| main event-loop lag in block | — | — | **8.44** |
+| **total / margin** | 10 / +11.33 | 9 / +12.33 | **23 / −1.67** |
+
+Ruled out by measurement, with numbers: helper spawn (spawn→protocol bind 0.02 ms), plug-in load
+and init (first-request round trip 32.01 ms, constructed→open 35.10 ms, both inside preparation,
+which transport start awaits before playback), IPC serialization (0.03 ms), JSON/base64 decode
+(0.13 ms), serial-queue wait (0.08 ms), frame parse (0.48 ms), renderer→main (0.52 ms).
+
+What remains is **two contributors that each fit the budget alone and exceed it together**: the
+helper's per-block `Instance::process()` at roughly 6.5× its ~2.2 ms steady state, plus an 8.44 ms
+main-thread stall that inflated main→renderer to 5.87 ms.
+
+**Correction to the 14.15 ms figure.** At the time it was reported as
+`helperPluginProcessMs`, which measured the *whole* of `Instance::process()`. That span is host
+work — base64/PCM decode, parameter queues, output-buffer clearing, `ProcessContext` preparation,
+input-buffer setup, then output validation and PCM extraction — wrapped around one call to
+`processor->process(data)`. It must not be read as plug-in execution time. Commit `0de0280`
+splits it into `helperHostPrepareMs`, `helperPluginCallbackMs` and `helperHostCollectMs`, which
+partition `helperInstanceProcessMs`; the field was renamed rather than left under a misleading
+name. **The split of that 14.15 ms between host and plug-in is not yet measured.**
+
+### A second, different signature
+
+Job `137584706432` (commit `7850c3a`), repetition 4, failed at **sequence 117** — about 2.5 s into
+playback, around where live-input monitoring is enabled — while all 24 recorded blocks were
+healthy (worst margin +4.33 ms). This is not a cold-start failure. It has not recurred since, and
+no decomposition exists for it. A fix aimed only at cold start would not address it. A failing
+repetition now takes a fresh measurement before shutdown, so the next occurrence will be captured
+with its own sequence instead of being described by healthy blocks 0–2.
+
+### Still NOT VERIFIED
+
+- The host/plug-in split of the ~14 ms block.
+- Whether the mid-session (sequence 117) signature recurs, and its cause.
+- Physical hardware: the microphone is Chromium's fake capture fixture and the insert input is a
+  deterministic buffer. Neither is a physical instrument or microphone.
+- Evidence-artifact contents: the zips redirect to blob storage outside this environment's
+  allowlist, so only the annotations were read.
+
+No production fix has been made. The pre-warm hypothesis is *supported* by the distribution —
+blocks 0–2 carry the tail while blocks 3+ stay under 2.8 ms — but it is not proven, and it would
+not address the mid-session signature.
