@@ -111,9 +111,13 @@ jobs:
       # runs. This pass exists because the cold-start deadline miss is intermittent
       # (about 1 repetition in 12), so a 5-run pass rarely captures one: it runs more
       # genuinely cold repetitions to collect the timing decomposition AT the moment
-      # of a miss. Every repetition is reported independently in its own annotation
-      # and no repetition is re-run, so nothing here can turn a failure into a pass.
-      # continue-on-error keeps a diagnostic miss from masking the gating result.
+      # of a miss. No repetition is re-run, so nothing here can turn a failure into a
+      # pass, and continue-on-error keeps a diagnostic miss from masking the gating
+      # result.
+      #
+      # Reporting is ONE aggregate annotation for every repetition plus full detail
+      # for the failures and repetition 1 - not one annotation per repetition, which
+      # hit GitHub's annotation-count cap and silently dropped most of them.
       - name: Cold-start deadline diagnostic (high volume, non-gating)
         if: runner.os == 'Windows'
         continue-on-error: true
@@ -125,6 +129,11 @@ jobs:
           # capturing one with its full decomposition.
           APEX_NATIVE_MONITORING_RUNS: '60'
           APEX_NATIVE_MONITORING_LABEL: 'coldstart-diagnostic'
+          # Continue after a failed repetition so all 60 are attempted and each is
+          # recorded PASS or FAIL. The 5-repetition gate above does NOT set this and
+          # stays fail-fast. The overall diagnostic result is still FAIL if any
+          # repetition failed.
+          APEX_NATIVE_MONITORING_CONTINUE_AFTER_FAILURE: '1'
         run: npm run test:native-monitoring-packaged
 
       # Packaged-application editor acceptance: Playwright drives the REAL packaged

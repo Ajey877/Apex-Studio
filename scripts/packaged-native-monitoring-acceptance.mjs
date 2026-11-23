@@ -39,6 +39,9 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { _electron, expect } from '@playwright/test';
 import { buildCiAnnotation } from './lib/ciAnnotation.mjs';
+import { runRepetitions } from './lib/acceptanceRunLoop.mjs';
+import { captureFailureEvidence } from './lib/failureEvidence.mjs';
+import { coldStartFrom } from './lib/coldStartEvidence.mjs';
 import { writeLiveInputFixture } from './live-input-fixture.mjs';
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
@@ -114,6 +117,7 @@ const helperPids = () => helperProcesses().processes.map(process => process.pid)
  * how far the run got rather than leaving that to a log nobody can read.
  */
 const stage = (run, name) => { run.lastStage = name; };
+
 
 /** Add the native insert through the real Mixer UI, in the order a user does. */
 async function addNativeInsertThroughMixerUi(page) {
@@ -399,24 +403,7 @@ async function runOnce(runIndex, collector) {
     // never reaches the later capture, and that is precisely the run whose block
     // decomposition is needed. The after-monitoring capture overwrites this one
     // when the run gets that far, because it sees more blocks.
-    run.coldStart = {
-      blockBudgetMs: warmup.native.blockBudgetMs ?? null,
-      worstTotalRoundTripMs: warmup.native.worstColdStartTotalMs ?? null,
-      worstMarginMs: warmup.native.worstColdStartMarginMs ?? null,
-      mainEventLoopLagMaxMs: warmup.native.mainEventLoopLagMaxMs ?? null,
-      mainEventLoopLagDuringAudioMs: warmup.native.mainEventLoopLagDuringAudioMs ?? null,
-      mainEventLoopWorstStalls: warmup.native.mainEventLoopWorstStalls ?? null,
-      helperStartup: warmup.native.helperStartup ?? null,
-      blocks: warmup.native.coldStartBlocks ?? [],
-      // A miss at sequence 117 proved the first blocks alone can look perfectly
-      // healthy in a run that still failed, so the guard also names the sequences
-      // it gave up on and the blocks either side of them are captured.
-      blocksAroundMiss: warmup.native.blocksAroundMiss ?? [],
-      missedSequences: warmup.native.missedSequences ?? [],
-      deadlineMissEvents: warmup.native.deadlineMissEvents ?? [],
-      mainRecordedSequences: warmup.native.mainRecordedSequences ?? [],
-      capturedAt: 'warmup',
-    };
+    run.coldStart = coldStartFrom(warmup.native, 'warmup');
     run.warmup = { succeeded: warmupOk, waitedMs: Date.now() - warmupStartedAt,
       timeoutMs: warmupTimeoutMs, prepared: warmup.native.prepared,
       processedBlocks: warmup.native.processedBlocks, priorBlocks,
@@ -470,24 +457,7 @@ async function runOnce(runIndex, collector) {
     // Cold-start forensics, captured BEFORE the assertions so a failing run still
     // carries the evidence that explains it. `coldStartBlocks` is always the first
     // blocks of the session, so reading it here does not lose the cold window.
-    run.coldStart = {
-      blockBudgetMs: stages.afterMonitoring.native.blockBudgetMs ?? null,
-      worstTotalRoundTripMs: stages.afterMonitoring.native.worstColdStartTotalMs ?? null,
-      worstMarginMs: stages.afterMonitoring.native.worstColdStartMarginMs ?? null,
-      mainEventLoopLagMaxMs: stages.afterMonitoring.native.mainEventLoopLagMaxMs ?? null,
-      mainEventLoopLagDuringAudioMs: stages.afterMonitoring.native.mainEventLoopLagDuringAudioMs ?? null,
-      mainEventLoopWorstStalls: stages.afterMonitoring.native.mainEventLoopWorstStalls ?? null,
-      helperStartup: stages.afterMonitoring.native.helperStartup ?? null,
-      blocks: stages.afterMonitoring.native.coldStartBlocks ?? [],
-      // A miss at sequence 117 proved the first blocks alone can look perfectly
-      // healthy in a run that still failed, so the guard also names the sequences
-      // it gave up on and the blocks either side of them are captured.
-      blocksAroundMiss: stages.afterMonitoring.native.blocksAroundMiss ?? [],
-      missedSequences: stages.afterMonitoring.native.missedSequences ?? [],
-      deadlineMissEvents: stages.afterMonitoring.native.deadlineMissEvents ?? [],
-      mainRecordedSequences: stages.afterMonitoring.native.mainRecordedSequences ?? [],
-      capturedAt: 'afterMonitoring',
-    };
+    run.coldStart = coldStartFrom(stages.afterMonitoring.native, 'afterMonitoring');
     run.helpersAfterMonitoring = helperPids();
     run.monitorStatusAfter = await page.evaluate(() => window.__apexAcceptance.liveInputState());
 
@@ -658,6 +628,11 @@ async function runOnce(runIndex, collector) {
           .evaluate(() => window.__apexAcceptance?.liveInputState?.() ?? null).catch(() => null);
       }
     } catch { /* failure context is best-effort; the assertion message is authoritative */ }
+
+    // Take one more measurement before the application closes; see the module for
+    // why the warm-up snapshot alone is not enough. It never throws and never
+    // replaces the acceptance error above, which stays authoritative.
+    Object.assign(run, await captureFailureEvidence({ page, coldStartFrom, helperPids }));
     throw error;
   } finally {
     if (app) {
@@ -696,26 +671,51 @@ const evidence = {
  */
 const allRuns = [];
 
-let exitCode = 0;
-for (let index = 1; index <= runs; index++) {
-  console.log(`[native-monitoring] run ${index}/${runs}`);
-  try {
-    const run = await runOnce(index, allRuns);
-    console.log(`[native-monitoring] run ${index} PASS: session=${JSON.stringify(run.stages.beforeMonitoring.native.runtimeIds)} `
-      + `node=${run.stages.beforeMonitoring.native.nodeId} blocks=${run.nativeProcessing.blocksBefore}/+${run.nativeProcessing.blocksDuringMonitoring}/+${run.nativeProcessing.blocksAfterMonitoringDisabled}`);
-  } catch (error) {
-    // A failing run is a failing acceptance. No retry converts it into a pass.
-    exitCode = 1;
-    console.error(`[native-monitoring] run ${index} FAIL: ${String(error?.message ?? error).split('\n')[0]}`);
-    break;
-  }
-}
+// Diagnostic mode, and ONLY the dedicated CI diagnostic step, sets this. It changes
+// one thing: a failed repetition no longer ends the run, so all requested
+// repetitions are attempted and every one is recorded PASS or FAIL. It does not
+// retry anything - the next index is a fresh application, a fresh profile and a
+// genuinely cold helper, never a rerun of the repetition that failed. The overall
+// result is still FAIL if any repetition failed, and the five-repetition production
+// acceptance keeps its fail-fast meaning because it does not set this.
+const continueAfterFailure = process.env.APEX_NATIVE_MONITORING_CONTINUE_AFTER_FAILURE === '1';
+const loopResult = await runRepetitions({
+  runs,
+  runOnce: index => runOnce(index, allRuns),
+  continueAfterFailure,
+  logStart: (index, total, continuing) => console.log(`[native-monitoring] run ${index}/${total}`
+    + (continuing ? ' (diagnostic mode: a failure does not end the run)' : '')),
+  logPass: message => console.log(message),
+  logError: message => console.error(`[native-monitoring] ${message}`),
+  describePass: run => `run ${run.runIndex} PASS: session=${JSON.stringify(run.stages.beforeMonitoring.native.runtimeIds)} `
+    + `node=${run.stages.beforeMonitoring.native.nodeId} blocks=${run.nativeProcessing.blocksBefore}`
+    + `/+${run.nativeProcessing.blocksDuringMonitoring}/+${run.nativeProcessing.blocksAfterMonitoringDisabled}`,
+  describeFail: error => `run FAIL: ${String(error?.message ?? error).split('\n')[0]}`,
+});
+const exitCode = loopResult.exitCode;
 evidence.runs = allRuns;
 
 const passed = allRuns.filter(run => run.status === 'PASS').length;
 evidence.status = exitCode === 0 && passed === runs ? 'PASS' : 'FAIL';
+evidence.mode = continueAfterFailure ? 'diagnostic' : 'acceptance';
 evidence.summary = { requestedRuns: runs, completedRuns: allRuns.length, passedRuns: passed,
   failedRuns: allRuns.length - passed,
+  attemptedRuns: loopResult.attempted,
+  mode: evidence.mode,
+  // Every attempt and its outcome, so a diagnostic run cannot be read as "the last
+  // one passed". A repetition that failed stays failed even if later ones pass.
+  outcomes: allRuns.map(run => ({ run: run.runIndex, status: run.status,
+    lastStage: run.lastStage ?? null })),
+  // Every block sequence the real-time guard gave up on, across all repetitions.
+  missedSequences: [...new Set(allRuns.flatMap(run => [
+    ...(run.coldStartAtFailure?.missedSequences ?? []),
+    ...(run.coldStart?.missedSequences ?? []),
+  ]))].sort((a, b) => a - b),
+  // Helper identity per repetition, proving each attempt really was cold.
+  helperPids: allRuns.map(run => ({ run: run.runIndex,
+    pid: Object.values((run.coldStartAtFailure ?? run.coldStart)?.helperStartup ?? {})[0]?.pid ?? null,
+    leakedAfterShutdown: run.helpersAfterShutdown ?? [],
+    aliveAtFailure: run.helpersAtFailure ?? null })),
   // Any run whose helper outlived the application is a resource-release failure.
   helperProcessesLeakedAfterShutdown: allRuns.flatMap(run => run.helpersAfterShutdown ?? []),
   // A clean application shutdown is part of the acceptance, not an assumption.
@@ -826,20 +826,36 @@ if (process.env.GITHUB_ACTIONS) {
     blockBudgetMs: r2(allRuns.find(run => run.coldStart)?.coldStart?.blockBudgetMs),
     runs: aggregate,
   });
+  // Block keys, and what each means:
+  //   inst = whole Instance::process() in the helper
+  //   prep / cb / coll = host preparation, the processor->process(data) callback,
+  //     and host output collection. These three PARTITION inst - never add them to
+  //     it. The key this replaces was `plugin`, which reported inst under a name
+  //     that read as plug-in time; it was host-plus-plug-in.
   const fmtBlock = block => ({
     seq: block.sequence, rToMain: r2(block.rendererToMainMs), svc: r2(block.nativeServiceCallMs),
     qWait: r2(block.helperQueueWaitMs), ser: r2(block.helperSerializeMs),
     hRtt: r2(block.helperRoundTripMs), parse: r2(block.helperFrameParseMs),
     pipe: r2(block.helperPipeAndScheduleMs), decode: r2(block.helperDecodeMs),
-    plugin: r2(block.helperPluginProcessMs),
+    inst: r2(block.helperInstanceProcessMs), prep: r2(block.helperHostPrepareMs),
+    cb: r2(block.helperPluginCallbackMs), coll: r2(block.helperHostCollectMs),
+    flush: block.helperProcessIsFlush ?? null,
     mainToR: r2(block.mainToRendererMs), total: r2(block.totalRoundTripMs),
     margin: r2(block.marginMs), lagInBlock: r2(block.eventLoopLagDuringBlockMs), err: block.error,
   });
   for (const run of detailed) {
-    const cold = run.coldStart;
+    // The failure-time capture sees the blocks around a mid-session miss, which the
+    // warm-up snapshot cannot. Prefer it, but keep reporting which one was used, and
+    // fall back to the warm-up snapshot when the capture was unavailable.
+    const cold = run.coldStartAtFailure ?? run.coldStart;
+    const warmupKept = Boolean(run.coldStartAtFailure) && run.coldStart?.capturedAt === 'warmup';
     const startup = startupOf(cold);
     emit(`[${label}] Cold-start detail run ${run.runIndex} (${run.status}, ${cold.capturedAt ?? 'unknown'})`, {
       runIndex: run.runIndex, status: run.status, capturedAt: cold.capturedAt ?? null,
+      warmupSnapshotRetained: warmupKept ? { capturedAt: run.coldStart.capturedAt,
+        worstMarginMs: r2(run.coldStart.worstMarginMs) } : null,
+      failureCaptureError: run.failureCaptureError ?? null,
+      failureCaptureSkipped: run.failureCaptureSkipped ?? null,
       blockBudgetMs: r2(cold.blockBudgetMs),
       worstTotalRoundTripMs: r2(cold.worstTotalRoundTripMs), worstMarginMs: r2(cold.worstMarginMs),
       mainEventLoopLagMaxMs: r2(cold.mainEventLoopLagMaxMs),

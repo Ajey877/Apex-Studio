@@ -366,8 +366,11 @@ function registerVst3({ app, ipcMain, dialog, getWindow }) {
     activeCallsByEffect.set(effectKey, activeForEffectAtStart);
     maximumConcurrentProcessAudioCalls = Math.max(maximumConcurrentProcessAudioCalls, activeAtStart);
     maximumConcurrentCallsPerEffect = Math.max(maximumConcurrentCallsPerEffect, activeForEffectAtStart);
+    // Declared above the try so the catch path can still report whatever the
+    // helper measured before the block failed: a block that errored inside the
+    // plug-in callback is exactly the case where those spans matter most.
+    const helper = {};
     try {
-      const helper = {};
       const blockStartedAtMainMs = performance.now();
       const pcm = await context.service.processAudio(id, frames, audio, bpm, owner, parameters, helper);
       const serviceCompletedAtMainMs = performance.now();
@@ -391,12 +394,22 @@ function registerVst3({ app, ipcMain, dialog, getWindow }) {
         helperRequestBytes: helper.requestBytes ?? null, helperRoundTripMs: helper.helperRoundTripMs ?? null,
         helperFrameParseMs: helper.frameParseMs ?? null,
         // Inside the helper: how long the OS left it descheduled after the request
-        // was written, how long JSON/base64 decode took, and how long the plug-in's
-        // own process() ran. Without these three a slow block can only be blamed on
-        // "the helper" as a whole.
+        // was written, and how long JSON/base64 decode took.
         helperPipeAndScheduleMs: helper.pipeAndScheduleMs ?? null,
         helperDecodeMs: helper.helperDecodeMs ?? null,
-        helperPluginProcessMs: helper.helperPluginProcessMs ?? null,
+        // The helper splits its own per-block work at the host/plug-in boundary.
+        // `helperInstanceProcessMs` is the whole Instance::process(); the three
+        // sub-spans partition it and must not be added to it. The field this
+        // replaces, `helperPluginProcessMs`, was that same total under a name that
+        // read as plug-in execution - it was host-plus-plug-in time.
+        helperInstanceProcessMs: helper.helperInstanceProcessMs ?? null,
+        helperHostPrepareMs: helper.helperHostPrepareMs ?? null,
+        helperPluginCallbackMs: helper.helperPluginCallbackMs ?? null,
+        helperHostCollectMs: helper.helperHostCollectMs ?? null,
+        helperProcessFrames: helper.helperProcessFrames ?? null,
+        // A zero-frame flush is not an audio block and is excluded from per-block
+        // statistics rather than dragging the callback median towards zero.
+        helperProcessIsFlush: helper.helperProcessIsFlush ?? null,
         helperWriteAtMs: helper.writeAtMs ?? null, helperResponseAtMs: helper.responseAtMs ?? null,
         eventLoopLagMaxMs: eventLoopLag.maxLagMs,
         eventLoopLagDuringBlockMs,
@@ -410,6 +423,18 @@ function registerVst3({ app, ipcMain, dialog, getWindow }) {
         ...profile, frames, ipcReceivedAtMainMs: ipcTiming?.ipcReceivedAtMainMs ?? serviceStartAtMainMs,
         ipcReceivedAtMainEpochMs: ipcTiming?.ipcReceivedAtMainEpochMs ?? performance.timeOrigin + serviceStartAtMainMs,
         serviceStartAtMainMs, serviceCompletedAtMainMs, nativeServiceCallMs: serviceCompletedAtMainMs - serviceStartAtMainMs,
+        // Whatever the helper managed to report before failing. Fields the helper
+        // never reached stay null rather than zero.
+        helperQueueWaitMs: helper.queueWaitMs ?? null, helperSerializeMs: helper.serializeMs ?? null,
+        helperRoundTripMs: helper.helperRoundTripMs ?? null, helperFrameParseMs: helper.frameParseMs ?? null,
+        helperPipeAndScheduleMs: helper.pipeAndScheduleMs ?? null,
+        helperDecodeMs: helper.helperDecodeMs ?? null,
+        helperInstanceProcessMs: helper.helperInstanceProcessMs ?? null,
+        helperHostPrepareMs: helper.helperHostPrepareMs ?? null,
+        helperPluginCallbackMs: helper.helperPluginCallbackMs ?? null,
+        helperHostCollectMs: helper.helperHostCollectMs ?? null,
+        helperProcessFrames: helper.helperProcessFrames ?? null,
+        helperProcessIsFlush: helper.helperProcessIsFlush ?? null,
         nativeInputRms: pcmRms(audio), nativeOutputRms: null,
         activeProcessAudioCallsAtStart: activeAtStart, activeCallsForEffectAtStart: activeForEffectAtStart,
         error: error instanceof Error ? error.message : String(error),

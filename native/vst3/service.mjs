@@ -469,6 +469,11 @@ export class Vst3Service {
     if (!Number.isFinite(bpm) || bpm < 20 || bpm > 300) throw new Error('Invalid VST3 tempo');
     const changes = validateProcessParameters(parameters, session.parameters, frames);
     session.processing = true;
+    // `timings` is handed to the client by reference and filled in place, so every
+    // span the helper reports - including the host/callback split inside
+    // Instance::process() - reaches the caller without this layer naming a single
+    // field. Do not introduce a field whitelist here: a new helper span would then
+    // be silently dropped and would read as an unmeasured null.
     try { return (await session.client.processAudio(frames, audio, changes, bpm, timings)).samples; }
     catch (error) { await this.close(id, owner); throw error; }
     finally { session.processing = false; }

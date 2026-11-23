@@ -152,6 +152,10 @@ std::vector<float> decodePlanarAudio(const std::string& encoded, int frames) {
 #include "editor-host.hpp"
 #endif
 
+// The host/plug-in timing split lives in its own header so the recorder can be
+// unit-tested against the same code the helper ships, rather than against a copy.
+#include "process-timings.hpp"
+
 class Instance {
   // Declaration order matters: SDK objects are released BEFORE the module unloads.
   IPtr<HostApplication> host = owned(new HostApplication());
@@ -544,7 +548,9 @@ public:
     checkedProcessing(processor->setProcessing(true), "Cannot resume after state capture"); processing = true;
     return state;
   }
-  std::vector<float> process(const json& request, bool flush = false) {
+  std::vector<float> process(const json& request, bool flush = false,
+                             ProcessTimings* timings = nullptr) {
+    ProcessSpanRecorder span(timings);
     require(processing, "Plugin processing is suspended; reopen instance");
     const int frames = integer(request, "frames", flush ? 0 : 1, kMaxBlock);
     auto inputEvents = request.value("events", json::array());
@@ -626,7 +632,12 @@ public:
     data.inputEvents = &events; data.outputEvents = &outputEvents;
     data.inputParameterChanges = &parameters; data.outputParameterChanges = &outputParameters;
     data.processContext = &context;
+    // Bracket the plug-in callback as tightly as possible: everything the host did
+    // beforehand is already stamped, so host preparation cannot leak into this
+    // span, and the host's own validation below cannot leak in either.
+    span.markCallbackStart();
     checked(processor->process(data), "Plugin process failed");
+    span.markCallbackEnd();
     assertNoActiveProcessRestartFlags(componentHandler->consumeRestartFlags());
     assertPreparedProcessDataMatchesContract();
     // Retain a zero-sample flush for the next audible block too: some SDK
@@ -647,6 +658,7 @@ public:
       }
     }
     cursor += frames;
+    span.finish(frames, flush);
     return pcm;
   }
 };
@@ -784,6 +796,7 @@ int main(int argc, char** argv) {
     // and this line arriving is pipe transfer plus however long the OS left this
     // helper descheduled, which is the part no main-process measurement can see.
     const double requestLineReadAtMs = apexEpochMs();
+    const double requestLineReadMonoMs = monotonicMs();
     std::string command;
     try {
       auto request = json::parse(line);
@@ -968,17 +981,28 @@ int main(int argc, char** argv) {
 #endif
       } else if (command == "process") {
         require(bool(instance), "No plugin instance loaded");
-        // The request is fully parsed and the PCM decoded by the time process() is
-        // entered, so the split below separates helper bookkeeping from the
-        // plug-in's own audio callback.
-        const double processStartAtMs = apexEpochMs();
-        auto pcm = instance->process(request);
-        const double processEndAtMs = apexEpochMs();
+        // JSON parsing and command extraction have already happened, so the decode
+        // span below is monotonic and contains no cross-process component.
+        const double decodeStartMonoMs = monotonicMs();
+        ProcessTimings timings{};
+        auto pcm = instance->process(request, false, &timings);
+        // RENAMED: this response used to carry `helperPluginProcessMs` for the whole
+        // of Instance::process(). That value was host-plus-plug-in time, and reading
+        // it as plug-in execution was wrong. It is now `helperInstanceProcessMs`,
+        // with the plug-in callback isolated in `helperPluginCallbackMs`.
         reply({{"ok", true}, {"frames", pcm.size() / 2}, {"channels", 2},
+               // Cross-process correlation only - both are wall clock.
                {"helperRequestLineReadAtMs", requestLineReadAtMs},
-               {"helperDecodeMs", processStartAtMs - requestLineReadAtMs},
-               {"helperPluginProcessMs", processEndAtMs - processStartAtMs},
-               {"helperRepliedAtMs", apexEpochMs()}}, pcm);
+               {"helperRepliedAtMs", apexEpochMs()},
+               // Intra-process durations, all monotonic. The three sub-spans
+               // partition helperInstanceProcessMs and must not be added to it.
+               {"helperDecodeMs", decodeStartMonoMs - requestLineReadMonoMs},
+               {"helperInstanceProcessMs", timings.instanceProcessMs},
+               {"helperHostPrepareMs", timings.hostPrepareMs},
+               {"helperPluginCallbackMs", timings.pluginCallbackMs},
+               {"helperHostCollectMs", timings.hostCollectMs},
+               {"helperProcessFrames", timings.frames},
+               {"helperProcessIsFlush", timings.flush}}, pcm);
       } else if (command == "parameters") {
         require(bool(instance), "No plugin instance loaded");
         // Instruments retain the established zero-sample flush contract. Audio

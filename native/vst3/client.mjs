@@ -173,7 +173,18 @@ export class NativeVst3Client {
             }
           }
           if (typeof result.helperDecodeMs === 'number') pending.timings.helperDecodeMs = result.helperDecodeMs;
-          if (typeof result.helperPluginProcessMs === 'number') pending.timings.helperPluginProcessMs = result.helperPluginProcessMs;
+          // The helper now splits its own per-block work into host preparation, the
+          // plug-in callback and host output collection. `helperInstanceProcessMs`
+          // is the total those three partition; the old `helperPluginProcessMs`
+          // name for that same total is gone, because it read as plug-in time when
+          // it was host-plus-plug-in time.
+          for (const field of ['helperInstanceProcessMs', 'helperHostPrepareMs',
+            'helperPluginCallbackMs', 'helperHostCollectMs', 'helperProcessFrames']) {
+            if (typeof result[field] === 'number') pending.timings[field] = result[field];
+          }
+          if (typeof result.helperProcessIsFlush === 'boolean') {
+            pending.timings.helperProcessIsFlush = result.helperProcessIsFlush;
+          }
           if (typeof result.helperRepliedAtMs === 'number') pending.timings.helperRepliedAtMs = result.helperRepliedAtMs;
           pending.timings.responseAtMs = performance.now();
           pending.timings.frameParseMs = (pending.timings.firstChunkAtMs === null ? null
@@ -223,7 +234,12 @@ export class NativeVst3Client {
       stamp.firstChunkAtMs = null; stamp.writeAtMs = null; stamp.responseAtMs = null;
       stamp.frameParseMs = null; stamp.helperRoundTripMs = null; stamp.queueWaitMs = null;
       stamp.pipeAndScheduleMs = null; stamp.helperDecodeMs = null; stamp.writeAtEpochMs = null;
-      stamp.helperPluginProcessMs = null; stamp.helperRequestLineReadAtMs = null;
+      stamp.helperRequestLineReadAtMs = null;
+      // Absent helper fields stay null rather than becoming 0: a fabricated zero
+      // would read as "the plug-in callback was instant" instead of "not measured".
+      stamp.helperInstanceProcessMs = null; stamp.helperHostPrepareMs = null;
+      stamp.helperPluginCallbackMs = null; stamp.helperHostCollectMs = null;
+      stamp.helperProcessFrames = null; stamp.helperProcessIsFlush = null;
     }
     const serializeStartedAtMs = performance.now();
     const text = JSON.stringify(message) + '\n';

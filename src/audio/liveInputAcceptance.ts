@@ -358,7 +358,14 @@ interface NativeProcessRecord {
   helperFrameParseMs?: number | null;
   helperPipeAndScheduleMs?: number | null;
   helperDecodeMs?: number | null;
-  helperPluginProcessMs?: number | null;
+  // The helper's own split of Instance::process() at the host/plug-in boundary.
+  // helperInstanceProcessMs is the total; the three sub-spans partition it.
+  helperInstanceProcessMs?: number | null;
+  helperHostPrepareMs?: number | null;
+  helperPluginCallbackMs?: number | null;
+  helperHostCollectMs?: number | null;
+  helperProcessFrames?: number | null;
+  helperProcessIsFlush?: boolean | null;
   helperRequestBytes?: number | null;
   eventLoopLagMaxMs?: number | null;
   eventLoopLagDuringBlockMs?: number | null;
@@ -565,7 +572,15 @@ export async function measureNativeVst3MonitoringCoexistence(engine: typeof audi
       // The three spans measured inside the helper process itself.
       helperPipeAndScheduleMs: num(record.helperPipeAndScheduleMs),
       helperDecodeMs: num(record.helperDecodeMs),
-      helperPluginProcessMs: num(record.helperPluginProcessMs),
+      // `num` yields null for anything absent or non-finite, so a helper that did
+      // not report a span stays visibly unmeasured instead of reading as zero.
+      helperInstanceProcessMs: num(record.helperInstanceProcessMs),
+      helperHostPrepareMs: num(record.helperHostPrepareMs),
+      helperPluginCallbackMs: num(record.helperPluginCallbackMs),
+      helperHostCollectMs: num(record.helperHostCollectMs),
+      helperProcessFrames: num(record.helperProcessFrames),
+      helperProcessIsFlush: typeof record.helperProcessIsFlush === 'boolean'
+        ? record.helperProcessIsFlush : null,
       helperRequestBytes: num(record.helperRequestBytes),
       mainToRendererMs: acceptedAtEpochMs !== null && serviceCompletedAtMainEpochMs !== null
         ? acceptedAtEpochMs - serviceCompletedAtMainEpochMs : null,

@@ -207,15 +207,20 @@ test('helper-reported spans are attributed separately from the main-process roun
   // plug-in's own process() - the distinction between an OS descheduling the helper
   // and a plug-in that is genuinely slow.
   const decodeMs = 1.5;
-  const pluginMs = 60;
+  const instanceMs = 60;
   setNativeHelperSpawnForTests(() => fakeHelper(async request => {
     if (request.command === 'open') return openResponse;
     const readAt = Date.now();
-    await sleep(pluginMs);
+    await sleep(instanceMs);
     return { frames: request.frames,
       helperRequestLineReadAtMs: readAt,
       helperDecodeMs: decodeMs,
-      helperPluginProcessMs: pluginMs,
+      helperInstanceProcessMs: instanceMs,
+      helperHostPrepareMs: 20,
+      helperPluginCallbackMs: 35,
+      helperHostCollectMs: 5,
+      helperProcessFrames: request.frames,
+      helperProcessIsFlush: false,
       helperRepliedAtMs: Date.now() };
   }));
   const client = new NativeVst3Client('/fake/apex-vst3-host.exe', { timeoutMs: 5000 });
@@ -224,7 +229,16 @@ test('helper-reported spans are attributed separately from the main-process roun
     const timings = {};
     await client.processAudio(1024, new Float32Array(2048), [], 120, timings);
     assert.equal(timings.helperDecodeMs, decodeMs, 'the decode span is reported verbatim');
-    assert.equal(timings.helperPluginProcessMs, pluginMs, 'the plug-in process span is reported verbatim');
+    // The host/plug-in boundary. These are the fields that stop host cost being
+    // read as plug-in execution.
+    assert.equal(timings.helperInstanceProcessMs, instanceMs, 'the instance total is reported verbatim');
+    assert.equal(timings.helperHostPrepareMs, 20, 'host preparation is reported separately');
+    assert.equal(timings.helperPluginCallbackMs, 35, 'the plug-in callback is reported separately');
+    assert.equal(timings.helperHostCollectMs, 5, 'host output collection is reported separately');
+    assert.equal(timings.helperProcessFrames, 1024, 'the processed frame count is carried through');
+    assert.equal(timings.helperProcessIsFlush, false, 'an ordinary block is not flagged as a flush');
+    assert.equal(timings.helperPluginProcessMs, undefined,
+      'the retired coarse field is gone: it read as plug-in time but was host plus plug-in');
     assert.equal(typeof timings.pipeAndScheduleMs, 'number',
       'pipe plus scheduling is derived from two comparable wall clocks');
     // This is the assertion that catches a cross-process clock mismatch: mixing a
@@ -232,12 +246,17 @@ test('helper-reported spans are attributed separately from the main-process roun
     assert.ok(Math.abs(timings.pipeAndScheduleMs) < 5000,
       `pipe plus scheduling must be a duration, not an epoch stamp; got ${timings.pipeAndScheduleMs}`);
     assert.equal(typeof timings.helperRequestLineReadAtMs, 'number');
-    // The plug-in's own time must account for the bulk of the round trip, which is
+    // The helper's own work must account for the bulk of the round trip, which is
     // exactly the attribution that was missing before.
-    assert.ok(timings.helperRoundTripMs >= pluginMs - 5,
-      `the round trip must include the plug-in time, got ${timings.helperRoundTripMs}`);
-    assert.ok(timings.helperPluginProcessMs <= timings.helperRoundTripMs,
-      'the plug-in span cannot exceed the round trip that contains it');
+    assert.ok(timings.helperRoundTripMs >= instanceMs - 5,
+      `the round trip must include the helper's instance time, got ${timings.helperRoundTripMs}`);
+    assert.ok(timings.helperInstanceProcessMs <= timings.helperRoundTripMs,
+      'the instance total cannot exceed the round trip that contains it');
+    // The three sub-spans partition the total; they are never added to it.
+    const subSpans = timings.helperHostPrepareMs + timings.helperPluginCallbackMs
+      + timings.helperHostCollectMs;
+    assert.equal(subSpans, timings.helperInstanceProcessMs,
+      'prepare + callback + collect equals the instance total');
   } finally {
     await client.dispose();
     setNativeHelperSpawnForTests(null);
@@ -254,7 +273,12 @@ test('a helper that reports no spans leaves them null instead of inventing them'
     await client.open({ path: '/fake/plugin.vst3', classId: 'abcd' }, { sampleRate: 48000, kind: 'effect' });
     const timings = {};
     await client.processAudio(1024, new Float32Array(2048), [], 120, timings);
-    assert.equal(timings.helperPluginProcessMs, null);
+    assert.equal(timings.helperInstanceProcessMs, null);
+    assert.equal(timings.helperHostPrepareMs, null);
+    assert.equal(timings.helperPluginCallbackMs, null);
+    assert.equal(timings.helperHostCollectMs, null);
+    assert.equal(timings.helperProcessFrames, null);
+    assert.equal(timings.helperProcessIsFlush, null);
     assert.equal(timings.helperDecodeMs, null);
     assert.equal(timings.pipeAndScheduleMs, null);
     assert.equal(typeof timings.helperRoundTripMs, 'number', 'the main-process span is still measured');
