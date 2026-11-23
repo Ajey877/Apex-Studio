@@ -158,6 +158,20 @@ export class NativeVst3Client {
         this.#pending = undefined;
         clearTimeout(pending.timer);
         if (pending.timings) {
+          // Helper-side stamps, reported by the helper itself. These are what
+          // separate "the OS left the helper descheduled" from "the plug-in's
+          // process() was slow": helperRequestLineReadAtMs is comparable with
+          // writeAtMs because both are wall clock, and the rest are durations
+          // measured inside the helper.
+          if (typeof result.helperRequestLineReadAtMs === 'number') {
+            pending.timings.helperRequestLineReadAtMs = result.helperRequestLineReadAtMs;
+            if (typeof pending.timings.writeAtMs === 'number') {
+              pending.timings.pipeAndScheduleMs = result.helperRequestLineReadAtMs - pending.timings.writeAtMs;
+            }
+          }
+          if (typeof result.helperDecodeMs === 'number') pending.timings.helperDecodeMs = result.helperDecodeMs;
+          if (typeof result.helperPluginProcessMs === 'number') pending.timings.helperPluginProcessMs = result.helperPluginProcessMs;
+          if (typeof result.helperRepliedAtMs === 'number') pending.timings.helperRepliedAtMs = result.helperRepliedAtMs;
           pending.timings.responseAtMs = performance.now();
           pending.timings.frameParseMs = (pending.timings.firstChunkAtMs === null ? null
             : pending.timings.responseAtMs - pending.timings.firstChunkAtMs);
@@ -205,6 +219,8 @@ export class NativeVst3Client {
       stamp.command = typeof message?.command === 'string' ? message.command : null;
       stamp.firstChunkAtMs = null; stamp.writeAtMs = null; stamp.responseAtMs = null;
       stamp.frameParseMs = null; stamp.helperRoundTripMs = null; stamp.queueWaitMs = null;
+      stamp.pipeAndScheduleMs = null; stamp.helperDecodeMs = null;
+      stamp.helperPluginProcessMs = null; stamp.helperRequestLineReadAtMs = null;
     }
     const serializeStartedAtMs = performance.now();
     const text = JSON.stringify(message) + '\n';

@@ -201,6 +201,65 @@ test('a helper that never answers is reported as a timeout, not as a slow block'
   }
 });
 
+test('helper-reported spans are attributed separately from the main-process round trip', async () => {
+  // A slow block blamed on "the helper" is not actionable. The helper reports its
+  // own spans, so the round trip splits into pipe/scheduling, decode and the
+  // plug-in's own process() - the distinction between an OS descheduling the helper
+  // and a plug-in that is genuinely slow.
+  const decodeMs = 1.5;
+  const pluginMs = 60;
+  setNativeHelperSpawnForTests(() => fakeHelper(async request => {
+    if (request.command === 'open') return openResponse;
+    const readAt = Date.now();
+    await sleep(pluginMs);
+    return { frames: request.frames,
+      helperRequestLineReadAtMs: readAt,
+      helperDecodeMs: decodeMs,
+      helperPluginProcessMs: pluginMs,
+      helperRepliedAtMs: Date.now() };
+  }));
+  const client = new NativeVst3Client('/fake/apex-vst3-host.exe', { timeoutMs: 5000 });
+  try {
+    await client.open({ path: '/fake/plugin.vst3', classId: 'abcd' }, { sampleRate: 48000, kind: 'effect' });
+    const timings = {};
+    await client.processAudio(1024, new Float32Array(2048), [], 120, timings);
+    assert.equal(timings.helperDecodeMs, decodeMs, 'the decode span is reported verbatim');
+    assert.equal(timings.helperPluginProcessMs, pluginMs, 'the plug-in process span is reported verbatim');
+    assert.equal(typeof timings.pipeAndScheduleMs, 'number',
+      'pipe plus scheduling is derived from two comparable wall clocks');
+    assert.equal(typeof timings.helperRequestLineReadAtMs, 'number');
+    // The plug-in's own time must account for the bulk of the round trip, which is
+    // exactly the attribution that was missing before.
+    assert.ok(timings.helperRoundTripMs >= pluginMs - 5,
+      `the round trip must include the plug-in time, got ${timings.helperRoundTripMs}`);
+    assert.ok(timings.helperPluginProcessMs <= timings.helperRoundTripMs,
+      'the plug-in span cannot exceed the round trip that contains it');
+  } finally {
+    await client.dispose();
+    setNativeHelperSpawnForTests(null);
+  }
+});
+
+test('a helper that reports no spans leaves them null instead of inventing them', async () => {
+  // An older or stub helper answers without the timing fields. Absence must stay
+  // visibly absent - a fabricated zero would read as "the plug-in was instant".
+  setNativeHelperSpawnForTests(() => fakeHelper(request => (
+    request.command === 'open' ? openResponse : { frames: request.frames })));
+  const client = new NativeVst3Client('/fake/apex-vst3-host.exe', { timeoutMs: 5000 });
+  try {
+    await client.open({ path: '/fake/plugin.vst3', classId: 'abcd' }, { sampleRate: 48000, kind: 'effect' });
+    const timings = {};
+    await client.processAudio(1024, new Float32Array(2048), [], 120, timings);
+    assert.equal(timings.helperPluginProcessMs, null);
+    assert.equal(timings.helperDecodeMs, null);
+    assert.equal(timings.pipeAndScheduleMs, null);
+    assert.equal(typeof timings.helperRoundTripMs, 'number', 'the main-process span is still measured');
+  } finally {
+    await client.dispose();
+    setNativeHelperSpawnForTests(null);
+  }
+});
+
 test('omitting the timings argument leaves the protocol path unchanged', async () => {
   // The instrumentation is additive: production callers that pass no timings
   // object must get exactly the behaviour they had before.

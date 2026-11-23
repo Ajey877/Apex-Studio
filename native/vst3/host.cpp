@@ -27,6 +27,7 @@
 #include <map>
 #include <optional>
 #include <set>
+#include <chrono>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -657,6 +658,16 @@ public:
 //
 // Frames leave on the dedicated protocol channel (protocol-channel.hpp), never
 // on stdout: stdout and stderr belong to the plug-in and are diagnostics only.
+// Wall clock in epoch milliseconds. system_clock, not steady_clock, because these
+// stamps are compared with the main process's: only a wall clock is comparable
+// across processes. Used purely for cold-start forensics on the "process" path, so
+// a real-time deadline miss can be attributed to the pipe, the JSON/base64 decode
+// or the plug-in's own process() instead of to "the helper" as a whole.
+inline double apexEpochMs() {
+  return std::chrono::duration<double, std::milli>(
+    std::chrono::system_clock::now().time_since_epoch()).count();
+}
+
 void reply(const json& message, const std::vector<float>& pcm = {}) {
   const auto text = message.dump();
   require(text.size() <= 5 * 1024 * 1024, "VST3 helper response exceeds 5 MiB limit");
@@ -769,6 +780,10 @@ int main(int argc, char** argv) {
       if (line.empty() && !std::cin) break;
     }
 
+    // Stamped before parsing: the gap between the main process writing the request
+    // and this line arriving is pipe transfer plus however long the OS left this
+    // helper descheduled, which is the part no main-process measurement can see.
+    const double requestLineReadAtMs = apexEpochMs();
     std::string command;
     try {
       auto request = json::parse(line);
@@ -953,8 +968,17 @@ int main(int argc, char** argv) {
 #endif
       } else if (command == "process") {
         require(bool(instance), "No plugin instance loaded");
+        // The request is fully parsed and the PCM decoded by the time process() is
+        // entered, so the split below separates helper bookkeeping from the
+        // plug-in's own audio callback.
+        const double processStartAtMs = apexEpochMs();
         auto pcm = instance->process(request);
-        reply({{"ok", true}, {"frames", pcm.size() / 2}, {"channels", 2}}, pcm);
+        const double processEndAtMs = apexEpochMs();
+        reply({{"ok", true}, {"frames", pcm.size() / 2}, {"channels", 2},
+               {"helperRequestLineReadAtMs", requestLineReadAtMs},
+               {"helperDecodeMs", processStartAtMs - requestLineReadAtMs},
+               {"helperPluginProcessMs", processEndAtMs - processStartAtMs},
+               {"helperRepliedAtMs", apexEpochMs()}}, pcm);
       } else if (command == "parameters") {
         require(bool(instance), "No plugin instance loaded");
         // Instruments retain the established zero-sample flush contract. Audio

@@ -355,6 +355,9 @@ interface NativeProcessRecord {
   helperSerializeMs?: number | null;
   helperRoundTripMs?: number | null;
   helperFrameParseMs?: number | null;
+  helperPipeAndScheduleMs?: number | null;
+  helperDecodeMs?: number | null;
+  helperPluginProcessMs?: number | null;
   helperRequestBytes?: number | null;
   eventLoopLagMaxMs?: number | null;
   eventLoopLagDuringBlockMs?: number | null;
@@ -558,6 +561,10 @@ export async function measureNativeVst3MonitoringCoexistence(engine: typeof audi
       helperSerializeMs: num(record.helperSerializeMs),
       helperRoundTripMs: num(record.helperRoundTripMs),
       helperFrameParseMs: num(record.helperFrameParseMs),
+      // The three spans measured inside the helper process itself.
+      helperPipeAndScheduleMs: num(record.helperPipeAndScheduleMs),
+      helperDecodeMs: num(record.helperDecodeMs),
+      helperPluginProcessMs: num(record.helperPluginProcessMs),
       helperRequestBytes: num(record.helperRequestBytes),
       mainToRendererMs: acceptedAtEpochMs !== null && serviceCompletedAtMainEpochMs !== null
         ? acceptedAtEpochMs - serviceCompletedAtMainEpochMs : null,

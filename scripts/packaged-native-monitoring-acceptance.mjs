@@ -832,6 +832,8 @@ if (process.env.GITHUB_ACTIONS) {
         seq: block.sequence, rToMain: r2(block.rendererToMainMs), svc: r2(block.nativeServiceCallMs),
         qWait: r2(block.helperQueueWaitMs), ser: r2(block.helperSerializeMs),
         hRtt: r2(block.helperRoundTripMs), parse: r2(block.helperFrameParseMs),
+        pipe: r2(block.helperPipeAndScheduleMs), decode: r2(block.helperDecodeMs),
+        plugin: r2(block.helperPluginProcessMs),
         mainToR: r2(block.mainToRendererMs), total: r2(block.totalRoundTripMs),
         margin: r2(block.marginMs), lagInBlock: r2(block.eventLoopLagDuringBlockMs), err: block.error,
       })),

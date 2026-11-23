@@ -390,6 +390,13 @@ function registerVst3({ app, ipcMain, dialog, getWindow }) {
         helperQueueWaitMs: helper.queueWaitMs ?? null, helperSerializeMs: helper.serializeMs ?? null,
         helperRequestBytes: helper.requestBytes ?? null, helperRoundTripMs: helper.helperRoundTripMs ?? null,
         helperFrameParseMs: helper.frameParseMs ?? null,
+        // Inside the helper: how long the OS left it descheduled after the request
+        // was written, how long JSON/base64 decode took, and how long the plug-in's
+        // own process() ran. Without these three a slow block can only be blamed on
+        // "the helper" as a whole.
+        helperPipeAndScheduleMs: helper.pipeAndScheduleMs ?? null,
+        helperDecodeMs: helper.helperDecodeMs ?? null,
+        helperPluginProcessMs: helper.helperPluginProcessMs ?? null,
         helperWriteAtMs: helper.writeAtMs ?? null, helperResponseAtMs: helper.responseAtMs ?? null,
         eventLoopLagMaxMs: eventLoopLag.maxLagMs,
         eventLoopLagDuringBlockMs,
