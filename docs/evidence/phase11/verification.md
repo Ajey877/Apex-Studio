@@ -929,12 +929,95 @@ Not changed: the fail-closed guards (`pending-deadline-miss`, `deadline-miss`), 
 latency and buffering, bypass, queue, serialization and transport. No production audio behaviour was
 modified, and the native processing path was not optimised.
 
+### CI results
+
+Two pushes were needed. At `d5155d2` the helper build broke on Windows and Ubuntu alike (the
+file-scope defect above); that is CI run `45341794270` and run `45341794311`. At `7de4599`:
+
+| Workflow | Run | Result |
+|---|---|---|
+| Apex Studio CI | `45343389633` | success |
+| Audio Validation | `45343389611` | success |
+| Native VST3 Validation | `45343389620` | success |
+| P9 High-DPI Editor Acceptance | `45343389672` | success |
+| Desktop Validation | `45343389595` | **failure** — job `138272088065` |
+
+The previously failing step, "Native helper cold-start timing attribution", is **success** at both
+`d5155d2` and `7de4599`, so the §3 fixture fix holds in CI and not only locally.
+
+Inside Desktop Validation, steps 9–15 and 21, 22, 24, 26 all succeeded. **Step 16, "Run packaged
+Windows runtime smoke test", failed** with the pre-existing defect already recorded above —
+`Nonzero-latency dynamic live bypass changed alignment at input frame 24000` (`expected 1563232`,
+onsets `1563232/1563360/1563232`, `rmsDifference 3.33e-10`). It is unrelated to this branch: no
+bypass, latency or alignment behaviour was touched. Because a step without `continue-on-error`
+failed, steps 17 and 19 were skipped, so **no gated five-run acceptance result exists at this HEAD**,
+and the job concluded `failure`. That is the required behaviour: the diagnostic in step 21 completed
+`success` and did not convert the failure into a pass.
+
+That run also demonstrated the §4 fix in production, in a way the gate-failure case could not: the
+diagnostic ran even though an *earlier* step had failed. Its condition depends only on the packaged
+executable and the helper build, both of which succeeded, so it measured a real package while the
+gate was skipped. Under the old OS-only condition it would have been skipped along with everything
+else. Its evidence reached artifact `14899881430` `apex-packaged-native-diagnostic-evidence`,
+534,210 B — the first time the diagnostic's own evidence has reached an artifact at all.
+
+### The 60-repetition diagnostic at `7de4599` (run `45343389595`, job `138272088065`)
+
+**59 PASS / 1 FAIL** of 60. `tightestMarginMs` 3.33, `slowestBlockMs` 18 ms against the 21.33 ms
+budget. `deadlineMisses 0` outside the failing repetition, `helperProcessesLeakedAfterShutdown []`,
+`physicalHardware NOT_VERIFIED`, plug-in `mda RezFilter` (`5653546D6461466D64612072657A6669`),
+transport 0.4127 → 2.0953 → 3.7673 s.
+
+The single failure is repetition **22**: warm-up timed out at `waitedMs 60405` of 60000 with
+`prepared=false`, `processedBlocks 3` equal to `priorBlocks 3`, and `deadlineMisses 1`. The guard
+that fired was `pending-deadline-miss`, sequence 2, phase **cold**:
+
+```
+currentOutputFrame 3968   dueOutputFrame 4096   nextSequence 3
+readySequences [1]        drySequences [1, 2]   inputContextFrame 1740031
+rejection: seq 2  reason "after-failure"  recvFrame 4096  dueFrame 4096  rtt 21
+resultsAccepted 2   resultsRejected 1   resultsUnattributable 0
+worstMarginMs 14.33 (the accepted blocks)   mainEventLoopLagMaxMs 65.4
+```
+
+The pattern matches run 51 at `d960d11`: the guard latched at output frame 3968 while the block was
+due at 4096, and the result then arrived *at* 4096 on a 21 ms round trip — inside the 21.33 ms
+budget — rejected only because failure had already latched. So this is **not** evidence of a late
+result; it is the pending-state guard firing before the due frame, and the cause remains open. The
+two failures now on record differ in sequence (2 vs 1) and in lag (65.4 vs 23 ms), so no single value
+explains both.
+
+**CPU observations, now classified rather than assumed.** Across 60 runs and 711 cold blocks:
+
+| State | Blocks |
+|---|---|
+| `clockUnavailable` | 0 |
+| `cpuFieldNull` | 0 |
+| `noClockTick` (supported clock, never advanced) | **679** |
+| `positiveCpuDelta` (measured CPU) | **32** |
+
+`smallestObservedCpuClockStepMs` **15.625**, measured at helper startup. So 95.5% of blocks measured
+no CPU at all, and that reading means *below one observed clock step*, not zero CPU. The 32 positive
+deltas show the clock does work on this runner when a span is long enough. The helper-versus-
+scheduling question is still unanswered, and no scheduling or production processing decision may use
+these numbers.
+
+**A remaining reporting defect, found in this run and fixed after it.** The aggregate annotation's
+`runs[]` carried repetitions 1–30 only, because the size reducer halves arrays to fit GitHub's 4096
+character cap, and nothing said so. The header (`passed 59`, `failed 1`, `repetitions 60`) was
+authoritative; the per-run list was not complete. `buildCiAnnotation` now takes `keepCounts` and
+writes `runsReducedFrom` / `runsKept` whenever it reduces a field whose length is itself the result,
+and the aggregate carries `perRepetitionVerdicts` — one `P`/`F` per repetition, a string, so it
+cannot be halved — plus `failingRepetitions`. Tested in `tests/ciAnnotation.test.mjs`. The complete
+per-repetition detail is in the artifact either way.
+
 ### Still NOT VERIFIED
 
 - **The cold-start real-time deadline defect is unfixed and NOT VERIFIED.** The most recent packaged
   run on `25442d66` failed 0 of 5 during warm-up, which is not a pass and is not evidence the defect
-  is gone. The corrected-correlation rate measured at `d960d11` was 1 in 60; that result belongs to
-  that commit.
+  is gone. The diagnostic at `7de4599` failed 1 of 60 (repetition 22, cold, sequence 2), and the
+  corrected-correlation rate measured at `d960d11` was 1 in 60; each result belongs to its own
+  commit.
 - The cause of a miss is still not established. Run 51 at `d960d11` showed the guard latching at
   `currentOutputFrame 2944` for a block due at 3072, with the result then arriving at 3072 on a 19 ms
   round trip — inside the 21.33 ms budget — rejected only because failure had already latched. A
@@ -942,8 +1025,8 @@ modified, and the native processing path was not optimised.
   called a late result without checking this.
 - Whether the host-preparation spikes are descheduling rather than expensive code: Windows CPU spans
   read 0, which is below the observed clock step and carries no information either way.
-- Per-repetition detail in the aggregate annotation is incomplete: the reducer in
-  `scripts/lib/ciAnnotation.mjs` still keeps 30 of 60 runs. The pass/fail header is authoritative;
-  the per-run list is not.
+- **No gated five-run acceptance result exists at this HEAD**, because the pre-existing packaged
+  runtime smoke flake failed first and the gate was skipped. The 59/1 figure above is the non-gating
+  diagnostic and does not stand in for the gate.
 - Physical hardware is `NOT_VERIFIED`, and artifact-zip contents have not been read — CI evidence was
   taken from annotations.

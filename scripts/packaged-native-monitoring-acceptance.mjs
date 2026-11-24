@@ -810,8 +810,8 @@ if (process.env.GITHUB_ACTIONS) {
   // truncates at 4096 characters mid-JSON, which is what lost the failing run's
   // per-block decomposition twice. `blocksAroundMiss` is preserved longest because
   // it is the window the real-time guard actually gave up on.
-  const emit = (title, payload) => console.log(
-    buildCiAnnotation(title, payload, { cap: 3900, preserve: 'blocksAroundMiss' }).text);
+  const emit = (title, payload, options = {}) => console.log(
+    buildCiAnnotation(title, payload, { cap: 3900, preserve: 'blocksAroundMiss', ...options }).text);
   const label = process.env.APEX_NATIVE_MONITORING_LABEL ?? 'acceptance';
   const startupOf = cold => Object.values(cold?.helperStartup ?? {})[0] ?? null;
   const detailed = allRuns.filter(run => run.coldStart && (run.status !== 'PASS' || run.runIndex === 1));
@@ -827,8 +827,16 @@ if (process.env.GITHUB_ACTIONS) {
   const cpuObservation = summarizeCpuObservations(
     allRuns.filter(run => run.coldStart).flatMap(run => run.coldStart.blocks ?? []),
     { runsCounted: allRuns.filter(run => run.coldStart).length });
+  // Every repetition's verdict in a form that survives the annotation's size
+  // budget: one character per repetition in run order, 'P' or 'F'. The verbose
+  // `runs` list below is halved when it does not fit, which once left an
+  // annotation carrying 30 of 60 rows with nothing to say so; this string is the
+  // complete per-repetition outcome, and `runs` now records its own reduction.
+  const perRepetitionVerdicts = aggregate.map(row => (row.st === 'PASS' ? 'P' : 'F')).join('');
   emit(`[${label}] Cold-start aggregate (${aggregate.length} cold repetitions)`, {
     label, repetitions: aggregate.length,
+    perRepetitionVerdicts,
+    failingRepetitions: aggregate.filter(row => row.st !== 'PASS').map(row => row.r),
     cpuObservation,
     passed: aggregate.filter(row => row.st === 'PASS').length,
     failed: aggregate.filter(row => row.st !== 'PASS').length,
@@ -838,7 +846,7 @@ if (process.env.GITHUB_ACTIONS) {
       row.worst !== null && (worst === null || row.worst > worst) ? row.worst : worst), null),
     blockBudgetMs: r2(allRuns.find(run => run.coldStart)?.coldStart?.blockBudgetMs),
     runs: aggregate,
-  });
+  }, { keepCounts: ['runs'] });
   // Block keys, and what each means:
   //   inst = whole Instance::process() in the helper
   //   prep / cb / coll = host preparation, the processor->process(data) callback,

@@ -80,3 +80,40 @@ test('the default cap stays under the documented GitHub limit', () => {
   assert.ok(text.length <= ANNOTATION_MESSAGE_LIMIT + 64,
     'title plus the reserved slack must still fit what GitHub accepts');
 });
+
+// A 60-repetition run list halved to 30 once left an annotation that looked like a
+// complete per-repetition record and was not. The reduction has to be visible.
+test('halving a keepCounts field records the reduction instead of hiding it', async () => {
+  const { buildCiAnnotation } = await import('../scripts/lib/ciAnnotation.mjs');
+  const runs = Array.from({ length: 60 }, (_, i) => ({
+    r: i + 1, st: i === 21 ? 'FAIL' : 'PASS', worst: 11.5, margin: 10.25,
+    lagAudio: 2.6, lagMax: 49.0, load: 37.6,
+  }));
+  const payload = {
+    label: 'coldstart-diagnostic', repetitions: 60,
+    // Compact full record: survives any halving because it is a string.
+    perRepetitionVerdicts: runs.map(row => (row.st === 'PASS' ? 'P' : 'F')).join(''),
+    runs,
+  };
+  const { text, truncated } = buildCiAnnotation('aggregate', payload,
+    { cap: 3900, preserve: 'blocksAroundMiss', keepCounts: ['runs'] });
+  assert.equal(truncated, false, 'the message must stay a whole parseable object');
+  const body = JSON.parse(text.slice(text.indexOf('{')));
+  assert.equal(body.perRepetitionVerdicts.length, 60,
+    'all sixty verdicts survive even though the verbose list cannot');
+  assert.equal(body.perRepetitionVerdicts[21], 'F');
+  assert.ok(body.runs.length < 60, 'the verbose list is reduced to fit');
+  assert.equal(body.runsReducedFrom, 60, 'and says how many it started from');
+  assert.equal(body.runsKept, body.runs.length, 'and how many it kept');
+});
+
+test('a payload that fits is not marked as reduced', async () => {
+  const { buildCiAnnotation } = await import('../scripts/lib/ciAnnotation.mjs');
+  const runs = [{ r: 1, st: 'PASS' }, { r: 2, st: 'PASS' }];
+  const { text } = buildCiAnnotation('aggregate', { runs },
+    { cap: 3900, keepCounts: ['runs'] });
+  const body = JSON.parse(text.slice(text.indexOf('{')));
+  assert.equal(body.runs.length, 2);
+  assert.equal(body.runsReducedFrom, undefined, 'nothing was given up, so nothing is claimed');
+  assert.equal(body.runsKept, undefined);
+});

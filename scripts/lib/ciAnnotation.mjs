@@ -18,6 +18,14 @@ export function buildCiAnnotation(title, payload, options = {}) {
   const cap = options.cap ?? ANNOTATION_MESSAGE_LIMIT - 200;
   const shed = options.shed ?? DEFAULT_SHED;
   const preserve = options.preserve ?? 'blocksAroundMiss';
+  // Fields whose LENGTH is itself the result. A 60-repetition run list halved to 30
+  // silently claimed to be the full set, so any reduction of these is recorded in
+  // the body rather than left for the reader to guess at.
+  const keepCounts = new Set(options.keepCounts ?? []);
+  const fullCounts = {};
+  for (const field of keepCounts) {
+    if (Array.isArray(payload[field])) fullCounts[field] = payload[field].length;
+  }
   const encode = text => String(text)
     .replaceAll('%', '%25').replaceAll('\r', '%0D').replaceAll('\n', '%0A');
   const size = body => encode(JSON.stringify(body)).length;
@@ -39,6 +47,13 @@ export function buildCiAnnotation(title, payload, options = {}) {
     .filter(key => key !== preserve && Array.isArray(body[key]) && body[key].length > 1);
   while (size(body) > cap && secondary.some(halve)) { /* keep halving */ }
   while (size(body) > cap && halve(preserve)) { /* keep halving */ }
+
+  for (const [field, full] of Object.entries(fullCounts)) {
+    const kept = Array.isArray(body[field]) ? body[field].length : 0;
+    if (kept < full) {
+      body = { ...body, [`${field}ReducedFrom`]: full, [`${field}Kept`]: kept };
+    }
+  }
 
   let message = encode(JSON.stringify(body));
   let truncated = false;
