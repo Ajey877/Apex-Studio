@@ -374,6 +374,13 @@ interface NativeProcessRecord {
   helperPluginCallbackCpuMs?: number | null;
   helperHostCollectCpuMs?: number | null;
   helperCpuTimingSupported?: boolean | null;
+  // Interpretation of a zero *CpuMs reading. `helperCpuClockTickObserved` false
+  // with a supported clock means the per-thread CPU clock did not advance during
+  // the block, so the CPU time is below one observed step and must NOT be reported
+  // as zero CPU. `helperCpuClockObservedStepMs` is the smallest advance measured
+  // at helper startup - a measured observation, not the clock's exact resolution.
+  helperCpuClockTickObserved?: boolean | null;
+  helperCpuClockObservedStepMs?: number | null;
   helperRequestBytes?: number | null;
   eventLoopLagMaxMs?: number | null;
   eventLoopLagDuringBlockMs?: number | null;
@@ -597,6 +604,9 @@ export async function measureNativeVst3MonitoringCoexistence(engine: typeof audi
       helperHostCollectCpuMs: num(record.helperHostCollectCpuMs),
       helperCpuTimingSupported: typeof record.helperCpuTimingSupported === 'boolean'
         ? record.helperCpuTimingSupported : null,
+      helperCpuClockTickObserved: typeof record.helperCpuClockTickObserved === 'boolean'
+        ? record.helperCpuClockTickObserved : null,
+      helperCpuClockObservedStepMs: num(record.helperCpuClockObservedStepMs),
       helperRequestBytes: num(record.helperRequestBytes),
       mainToRendererMs: acceptedAtEpochMs !== null && serviceCompletedAtMainEpochMs !== null
         ? acceptedAtEpochMs - serviceCompletedAtMainEpochMs : null,
@@ -609,6 +619,7 @@ export async function measureNativeVst3MonitoringCoexistence(engine: typeof audi
       // this a rejected block and an accepted one look identical in the evidence.
       resultAccepted: accepted !== null,
       resultRejectionReasons: rejections.map(entry => entry.reason),
+      resultCorrelationReasons: rejections.map(entry => entry.correlationReason),
       // Late/duplicate responses are preserved as evidence of lateness, with their
       // frame positions, but they never feed the timings above.
       rejectedResults: rejections.map(entry => ({
@@ -691,8 +702,12 @@ export async function measureNativeVst3MonitoringCoexistence(engine: typeof audi
       workletResultsAccepted: results.acceptedCount,
       workletResultsRejected: results.rejectedCount,
       workletResultsUnattributable: results.unattributableCount,
+      // Why correlation refused each event. "not-accepted" is evidence about the
+      // audio path; the identity failures are evidence about the measurement.
+      workletResultRejectionReasons: results.rejectionReasons,
       workletResultRejections: results.rejected.slice(0, 8).map(entry => ({
         requestId: entry.requestId, sequence: entry.sequence, reason: entry.reason,
+        correlationReason: entry.correlationReason,
         pendingSequence: entry.pendingSequence, receivedOutputFrame: entry.receivedOutputFrame,
         dueOutputFrame: entry.dueOutputFrame, arrivedAtEpochMs: entry.acceptedAtEpochMs,
         roundTripMs: entry.roundTripMs, unattributable: entry.unattributable,

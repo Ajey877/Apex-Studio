@@ -414,6 +414,12 @@ function registerVst3({ app, ipcMain, dialog, getWindow }) {
         helperPluginCallbackCpuMs: helper.helperPluginCallbackCpuMs ?? null,
         helperHostCollectCpuMs: helper.helperHostCollectCpuMs ?? null,
         helperCpuTimingSupported: helper.helperCpuTimingSupported ?? null,
+        // Interpretation of a zero *CpuMs. tickObserved false with a supported
+        // clock means the clock did not advance during the span, so the CPU time is
+        // below one observed step - it is NOT zero CPU. The step is the smallest
+        // advance measured at startup, not the clock's exact resolution.
+        helperCpuClockTickObserved: helper.helperCpuClockTickObserved ?? null,
+        helperCpuClockObservedStepMs: helper.helperCpuClockObservedStepMs ?? null,
         helperProcessFrames: helper.helperProcessFrames ?? null,
         // A zero-frame flush is not an audio block and is excluded from per-block
         // statistics rather than dragging the callback median towards zero.
@@ -449,6 +455,12 @@ function registerVst3({ app, ipcMain, dialog, getWindow }) {
         helperPluginCallbackCpuMs: helper.helperPluginCallbackCpuMs ?? null,
         helperHostCollectCpuMs: helper.helperHostCollectCpuMs ?? null,
         helperCpuTimingSupported: helper.helperCpuTimingSupported ?? null,
+        // Interpretation of a zero *CpuMs. tickObserved false with a supported
+        // clock means the clock did not advance during the span, so the CPU time is
+        // below one observed step - it is NOT zero CPU. The step is the smallest
+        // advance measured at startup, not the clock's exact resolution.
+        helperCpuClockTickObserved: helper.helperCpuClockTickObserved ?? null,
+        helperCpuClockObservedStepMs: helper.helperCpuClockObservedStepMs ?? null,
         helperProcessFrames: helper.helperProcessFrames ?? null,
         helperProcessIsFlush: helper.helperProcessIsFlush ?? null,
         nativeInputRms: pcmRms(audio), nativeOutputRms: null,

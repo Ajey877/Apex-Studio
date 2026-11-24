@@ -207,18 +207,34 @@ test('helper-reported spans are attributed separately from the main-process roun
   // plug-in's own process() - the distinction between an OS descheduling the helper
   // and a plug-in that is genuinely slow.
   const decodeMs = 1.5;
-  const instanceMs = 60;
+  // Injected stage durations. The helper below MEASURES what it actually spent in
+  // each stage instead of echoing these constants back.
+  const prepareMs = 20;
+  const callbackMs = 35;
+  const collectMs = 5;
   setNativeHelperSpawnForTests(() => fakeHelper(async request => {
     if (request.command === 'open') return openResponse;
     const readAt = Date.now();
-    await sleep(instanceMs);
+    // The fixture used to report the injected constant as its own instance
+    // duration. That made the containment assertion below compare a fabricated
+    // number with a genuinely measured one, which is not an invariant at all - it
+    // held only while the injected sleep happened to dominate every other overhead
+    // in the same direction. CI run 45204030419 caught it. Measuring for real makes
+    // the containment causal: this window is strictly inside the client's round trip.
+    const startedAtMs = performance.now();
+    await sleep(prepareMs);
+    const preparedAtMs = performance.now();
+    await sleep(callbackMs);
+    const callbackEndAtMs = performance.now();
+    await sleep(collectMs);
+    const endedAtMs = performance.now();
     return { frames: request.frames,
       helperRequestLineReadAtMs: readAt,
       helperDecodeMs: decodeMs,
-      helperInstanceProcessMs: instanceMs,
-      helperHostPrepareMs: 20,
-      helperPluginCallbackMs: 35,
-      helperHostCollectMs: 5,
+      helperInstanceProcessMs: endedAtMs - startedAtMs,
+      helperHostPrepareMs: preparedAtMs - startedAtMs,
+      helperPluginCallbackMs: callbackEndAtMs - preparedAtMs,
+      helperHostCollectMs: endedAtMs - callbackEndAtMs,
       helperProcessFrames: request.frames,
       helperProcessIsFlush: false,
       helperRepliedAtMs: Date.now() };
@@ -228,13 +244,26 @@ test('helper-reported spans are attributed separately from the main-process roun
     await client.open({ path: '/fake/plugin.vst3', classId: 'abcd' }, { sampleRate: 48000, kind: 'effect' });
     const timings = {};
     await client.processAudio(1024, new Float32Array(2048), [], 120, timings);
+    // Every failure message below carries the raw stamps, so a recurrence says
+    // which side of the comparison moved instead of only that it failed.
+    const evidence = () => ` [helperInstanceProcessMs=${timings.helperInstanceProcessMs}`
+      + ` helperRoundTripMs=${timings.helperRoundTripMs}`
+      + ` writeAtMs=${timings.writeAtMs} responseAtMs=${timings.responseAtMs}`
+      + ` helperRequestLineReadAtMs=${timings.helperRequestLineReadAtMs}`
+      + ` helperRepliedAtMs=${timings.helperRepliedAtMs}]`;
     assert.equal(timings.helperDecodeMs, decodeMs, 'the decode span is reported verbatim');
     // The host/plug-in boundary. These are the fields that stop host cost being
-    // read as plug-in execution.
-    assert.equal(timings.helperInstanceProcessMs, instanceMs, 'the instance total is reported verbatim');
-    assert.equal(timings.helperHostPrepareMs, 20, 'host preparation is reported separately');
-    assert.equal(timings.helperPluginCallbackMs, 35, 'the plug-in callback is reported separately');
-    assert.equal(timings.helperHostCollectMs, 5, 'host output collection is reported separately');
+    // read as plug-in execution. Each span must show at least its injected stage,
+    // and the three must be distinguishable from one another.
+    assert.ok(timings.helperHostPrepareMs >= prepareMs - 1,
+      `host preparation is reported separately${evidence()}`);
+    assert.ok(timings.helperPluginCallbackMs >= callbackMs - 1,
+      `the plug-in callback is reported separately${evidence()}`);
+    assert.ok(timings.helperHostCollectMs >= collectMs - 1,
+      `host output collection is reported separately${evidence()}`);
+    assert.ok(timings.helperPluginCallbackMs > timings.helperHostPrepareMs
+      && timings.helperHostPrepareMs > timings.helperHostCollectMs,
+      `the three spans stay distinguishable${evidence()}`);
     assert.equal(timings.helperProcessFrames, 1024, 'the processed frame count is carried through');
     assert.equal(timings.helperProcessIsFlush, false, 'an ordinary block is not flagged as a flush');
     assert.equal(timings.helperPluginProcessMs, undefined,
@@ -248,15 +277,18 @@ test('helper-reported spans are attributed separately from the main-process roun
     assert.equal(typeof timings.helperRequestLineReadAtMs, 'number');
     // The helper's own work must account for the bulk of the round trip, which is
     // exactly the attribution that was missing before.
-    assert.ok(timings.helperRoundTripMs >= instanceMs - 5,
-      `the round trip must include the helper's instance time, got ${timings.helperRoundTripMs}`);
+    assert.ok(timings.helperRoundTripMs >= prepareMs + callbackMs + collectMs - 5,
+      `the round trip must include the helper's instance time${evidence()}`);
+    // Now a real invariant rather than a coincidence: the helper measures its own
+    // window, which begins after the client writes and ends before the client reads
+    // the response, so it is strictly contained. Both sides share one clock here.
     assert.ok(timings.helperInstanceProcessMs <= timings.helperRoundTripMs,
-      'the instance total cannot exceed the round trip that contains it');
+      `the instance total cannot exceed the round trip that contains it${evidence()}`);
     // The three sub-spans partition the total; they are never added to it.
     const subSpans = timings.helperHostPrepareMs + timings.helperPluginCallbackMs
       + timings.helperHostCollectMs;
     assert.equal(subSpans, timings.helperInstanceProcessMs,
-      'prepare + callback + collect equals the instance total');
+      `prepare + callback + collect equals the instance total${evidence()}`);
   } finally {
     await client.dispose();
     setNativeHelperSpawnForTests(null);

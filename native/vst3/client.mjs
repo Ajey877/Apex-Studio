@@ -183,11 +183,16 @@ export class NativeVst3Client {
             // Helper-THREAD CPU time for the same spans. Wall minus CPU is time this
             // thread spent descheduled, which is contention rather than slow code.
             'helperInstanceProcessCpuMs', 'helperHostPrepareCpuMs',
-            'helperPluginCallbackCpuMs', 'helperHostCollectCpuMs']) {
+            'helperPluginCallbackCpuMs', 'helperHostCollectCpuMs',
+            // Smallest CPU-clock advance measured at helper startup. A zero *CpuMs
+            // above means "below this step", never "no CPU used".
+            'helperCpuClockObservedStepMs']) {
             if (typeof result[field] === 'number') pending.timings[field] = result[field];
           }
-          if (typeof result.helperCpuTimingSupported === 'boolean') {
-            pending.timings.helperCpuTimingSupported = result.helperCpuTimingSupported;
+          for (const flag of ['helperCpuTimingSupported',
+            // True only when the CPU clock was seen to advance during the block.
+            'helperCpuClockTickObserved']) {
+            if (typeof result[flag] === 'boolean') pending.timings[flag] = result[flag];
           }
           if (typeof result.helperProcessIsFlush === 'boolean') {
             pending.timings.helperProcessIsFlush = result.helperProcessIsFlush;

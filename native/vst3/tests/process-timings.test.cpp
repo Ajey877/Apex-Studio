@@ -205,6 +205,68 @@ int main() {
           "unsupported CPU time stays -1 (null), not 0");
     check(t.instanceProcessMs > 5.0 && t.pluginCallbackMs > 1.0,
           "wall spans are still measured when the CPU clock is unavailable");
+    check(!t.cpuClockTickObserved,
+          "case 1 (no clock at all): no CPU tick can be claimed");
+  }
+
+  {
+    // 9b. Case 3: the CPU clock IS available but never advanced during the span.
+    // This is what Windows reports for the sub-millisecond spans here. The record
+    // must say "the clock did not tick", never "zero CPU was used".
+    ProcessTimings t{};
+    const auto frozenCpu = []() { return 1000.0; };  // supported, but never moves
+    TimingClocks clocks{};
+    clocks.cpu = +frozenCpu;
+    clocks.cpuStepMs = 15.625;  // a calibrated step, as the helper would supply
+    {
+      ProcessSpanRecorder span(&t, clocks);
+      sleepMs(3.0);
+      span.markCallbackStart();
+      sleepMs(2.0);
+      span.markCallbackEnd();
+      sleepMs(1.0);
+      span.finish(1024, false);
+    }
+    check(t.cpuTimingSupported, "a frozen-but-present CPU clock is still supported");
+    check(t.instanceProcessCpuMs == 0.0, "the measured delta really is zero");
+    check(!t.cpuClockTickObserved,
+          "case 3 (supported clock, no tick): the reader is told the clock did not advance");
+    check(t.instanceProcessMs > 5.0,
+          "the wall span is still reported alongside the uninformative CPU reading");
+    check(t.cpuClockObservedStepMs == 15.625,
+          "the calibrated step is carried through so a zero can be read as below-resolution");
+  }
+
+  {
+    // 9c. Case 2: a positive CPU delta was actually measured. Only this case is
+    // evidence of CPU time, and only this case may set the tick flag.
+    ProcessTimings t{};
+    Stepper::value = 0;
+    TimingClocks clocks{};
+    clocks.wall = &Stepper::next;
+    clocks.cpu = &Stepper::next;
+    clocks.cpuStepMs = 1.0;
+    {
+      ProcessSpanRecorder span(&t, clocks);
+      span.markCallbackStart();
+      span.markCallbackEnd();
+      span.finish(1024, false);
+    }
+    check(t.cpuTimingSupported && t.instanceProcessCpuMs > 0,
+          "case 2: a positive CPU delta is recorded");
+    check(t.cpuClockTickObserved,
+          "case 2 (positive delta): the tick flag is set");
+  }
+
+  {
+    // 9d. The observed step is measured, not assumed. On a real host this returns
+    // either a positive advance it actually saw, or -1 meaning no tick arrived
+    // within the budget. Neither answer may be reported as an exact resolution.
+    const double step = measureCpuClockStepMs(500.0);
+    check(step == -1 || step > 0,
+          "the observed CPU clock step is positive or explicitly unknown, never zero");
+    std::printf("process-timings: observed CPU clock step = %.6f ms%s\n", step,
+                step < 0 ? " (no tick observed within the budget: unknown)" : "");
   }
 
   {

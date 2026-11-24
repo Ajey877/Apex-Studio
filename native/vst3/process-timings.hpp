@@ -63,6 +63,19 @@ struct ProcessTimings {
   // False when the platform exposed no per-thread CPU clock, so a reader can tell
   // "unsupported" apart from "measured as zero".
   bool cpuTimingSupported = false;
+  // True only when the per-thread CPU clock was observed to ADVANCE during this
+  // block's Instance::process() span. A false value with a supported clock means
+  // the span was shorter than one clock step, NOT that no CPU was used: the true
+  // CPU time is somewhere in [0, one clock step). Readers must never report this
+  // as zero CPU.
+  bool cpuClockTickObserved = false;
+  // Smallest positive advance of the per-thread CPU clock measured by this helper
+  // during its startup calibration, in ms, or -1 when no tick was observed. It is
+  // a measured observation of the clock's stepping behaviour, reported so a zero
+  // *CpuMs reading can be interpreted as "below one observed step" rather than as
+  // zero CPU. It is NOT the clock's exact resolution - nothing here measures that
+  // - and it must not be reported as one.
+  double cpuClockObservedStepMs = -1;
   int frames = -1;                // block size actually processed
   bool flush = false;             // zero-frame flush, excluded from audio stats
 };
@@ -99,11 +112,41 @@ inline double threadCpuMs() {
 #endif
 }
 
+// Busy-waits until the current thread's CPU clock is observed to advance, and
+// returns that advance in ms - the smallest step this process has actually seen.
+// Returns -1 when the platform has no such clock or no tick arrived within the
+// budget. Called once per helper at startup, off the audio path: the result is a
+// measured observation used to interpret later zero readings. It does not measure
+// the clock's exact resolution, and callers must not claim it does.
+inline double measureCpuClockStepMs(double wallBudgetMs = 250.0) {
+  const double startCpu = threadCpuMs();
+  if (startCpu < 0) return -1;  // no per-thread CPU clock on this platform
+  const double startWall = monotonicMs();
+  double previous = startCpu;
+  volatile unsigned long long sink = 0;  // keep the thread genuinely on-CPU
+  while (monotonicMs() - startWall < wallBudgetMs) {
+    sink += 1;
+    const double now = threadCpuMs();
+    if (now > previous) {
+      const double step = now - previous;
+      (void)sink;
+      return step;
+    }
+    previous = now;
+  }
+  (void)sink;
+  return -1;  // the clock never advanced inside the budget: unknown, not zero
+}
+
 // The two clock sources, injectable so the unsupported-CPU path can be exercised
 // directly. Production callers use the defaults; nothing else changes.
 struct TimingClocks {
   double (*wall)() = &monotonicMs;
   double (*cpu)() = &threadCpuMs;
+  // Measured once by the helper at startup, off the audio path, and passed in.
+  // The recorder must never measure it itself: doing so would put a busy-wait
+  // inside Instance::process(), which is the very path under measurement.
+  double cpuStepMs = -1;
 };
 
 // Records both clocks for the three sub-spans. Constructed at method entry; the two
@@ -113,7 +156,7 @@ struct TimingClocks {
 class ProcessSpanRecorder {
  public:
   explicit ProcessSpanRecorder(ProcessTimings* out, TimingClocks clocks = {})
-      : out_(out), wall_(clocks.wall), cpu_(clocks.cpu),
+      : out_(out), wall_(clocks.wall), cpu_(clocks.cpu), cpuStepMs_(clocks.cpuStepMs),
         startMs_(clocks.wall()), startCpuMs_(clocks.cpu()) {}
 
   // Called immediately before processor->process(data). Everything the host did
@@ -153,7 +196,15 @@ class ProcessSpanRecorder {
       }
     }
     out_->instanceProcessMs = endMs - startMs_;
-    if (cpuOk) out_->instanceProcessCpuMs = endCpuMs - startCpuMs_;
+    if (cpuOk) {
+      const double cpuDelta = endCpuMs - startCpuMs_;
+      out_->instanceProcessCpuMs = cpuDelta;
+      // Distinguish the three cases a reader needs: no clock at all
+      // (cpuTimingSupported false), a positive delta, and a supported clock that
+      // never ticked during the span. Only the second is evidence of measured CPU.
+      out_->cpuClockTickObserved = cpuDelta > 0;
+      out_->cpuClockObservedStepMs = cpuStepMs_;
+    }
     out_->frames = frames;
     // A zero-frame flush is not an audio block: folding it into per-block
     // statistics would drag the callback median towards zero and hide real cost.
@@ -164,6 +215,7 @@ class ProcessSpanRecorder {
   ProcessTimings* out_;
   double (*wall_)();
   double (*cpu_)();
+  double cpuStepMs_;
   double startMs_;
   double startCpuMs_;
   double prepareEndMs_ = -1;

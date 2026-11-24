@@ -548,9 +548,21 @@ public:
     checkedProcessing(processor->setProcessing(true), "Cannot resume after state capture"); processing = true;
     return state;
   }
+// Smallest positive advance of the per-thread CPU clock observed by this helper
+// during its one-time startup calibration, in ms, or -1 when no tick was observed.
+// It exists so a zero helper*CpuMs reading can be reported honestly as "below the
+// smallest step we measured" instead of being read as zero CPU. It is a measured
+// observation, not the clock's exact resolution.
+static double g_apexObservedCpuStepMs = -1;
+
   std::vector<float> process(const json& request, bool flush = false,
                              ProcessTimings* timings = nullptr) {
-    ProcessSpanRecorder span(timings);
+    // The observed CPU-clock step comes from the one-time startup calibration. It
+    // is never measured here: a busy-wait inside this call would sit inside the
+    // very span being measured.
+    TimingClocks clocks{};
+    clocks.cpuStepMs = g_apexObservedCpuStepMs;
+    ProcessSpanRecorder span(timings, clocks);
     require(processing, "Plugin processing is suspended; reopen instance");
     const int frames = integer(request, "frames", flush ? 0 : 1, kMaxBlock);
     auto inputEvents = request.value("events", json::array());
@@ -748,6 +760,15 @@ int main(int argc, char** argv) {
   auto com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
   if (FAILED(com)) return 2;
 #endif
+  // One-time CPU-clock calibration, before any plug-in instance exists and well
+  // before audio starts, so its busy-wait can never land inside a measured block.
+  // Returns as soon as the first clock advance is seen (typically one tick), or -1
+  // if none arrived inside the budget.
+  g_apexObservedCpuStepMs = measureCpuClockStepMs(100.0);
+  std::fprintf(stderr,
+               "apex-vst3-host: observed CPU clock step %.6f ms%s\n",
+               g_apexObservedCpuStepMs,
+               g_apexObservedCpuStepMs < 0 ? " (no tick observed: unknown)" : "");
   PlugProvider::setErrorStream(&std::cerr);
   // stdout and stderr are diagnostic streams. Plug-in debug output on either
   // is drained by the parent and can never be interpreted as a response or a
@@ -1010,6 +1031,14 @@ int main(int argc, char** argv) {
                {"helperPluginCallbackCpuMs", timings.pluginCallbackCpuMs},
                {"helperHostCollectCpuMs", timings.hostCollectCpuMs},
                {"helperCpuTimingSupported", timings.cpuTimingSupported},
+               // Interpretation of a zero *CpuMs above. cpuClockTickObserved false
+               // with a supported clock means the clock did not advance during the
+               // span, so the true CPU time is below one observed step - it does
+               // NOT mean no CPU was used. cpuClockObservedStepMs is the smallest
+               // advance measured at startup; it is not the clock's exact
+               // resolution and must not be reported as one.
+               {"helperCpuClockTickObserved", timings.cpuClockTickObserved},
+               {"helperCpuClockObservedStepMs", timings.cpuClockObservedStepMs},
                {"helperProcessFrames", timings.frames},
                {"helperProcessIsFlush", timings.flush}}, pcm);
       } else if (command == "parameters") {

@@ -44,7 +44,7 @@
     "test:browser:node": "node --import tsx scripts/realOfflineRenderNode.mjs",
     "native:vst3:build": "node scripts/build-native-vst3.mjs",
     "test:native-vst3": "node --import tsx --test tests/nativeVst3.test.mjs tests/vst3ProtocolIsolation.test.mjs",
-    "test:native-cold-start": "node --import tsx --test tests/nativeHelperColdStartTimings.test.mjs tests/ciAnnotation.test.mjs tests/nativeAcceptanceDiagnostics.test.mjs",
+    "test:native-cold-start": "node --import tsx --test tests/nativeHelperColdStartTimings.test.mjs tests/ciAnnotation.test.mjs tests/nativeAcceptanceDiagnostics.test.mjs tests/ciDiagnosticWorkflow.test.mjs tests/cpuObservation.test.mjs",
     "test:native-timings-cpp": "mkdir -p build && g++ -std=c++17 -Wall -Wextra -O1 -o build/process-timings-test native/vst3/tests/process-timings.test.cpp && ./build/process-timings-test",
     "test:vst3-browser": "playwright test --config=playwright.native.config.ts",
     "test:vst3-daw": "node --import tsx --test tests/vst3DawIntegration.test.mjs tests/vst3Ui.test.mjs tests/vst3SampleRateReconfigure.test.mjs tests/exportStore.test.mjs tests/exportIpc.test.mjs tests/streamedExport.test.mjs",

@@ -72,17 +72,70 @@ test('3. a late result after the fail-closed event stays visible as rejected evi
   assert.equal(acceptedResultFor(correlation, { requestId: reqId(GEN_A, 2) }), null);
 });
 
-test('4. a result with the wrong pending sequence is not counted as valid', () => {
-  // The worklet marks accepted=false when message.sequence !== this.pending. Such an
-  // event must not become the measurement for the block it merely resembles.
+test('4. accepted=true with a mismatched pendingSequence is refused', () => {
+  // The previous version of this test supplied an event ALREADY marked
+  // accepted: false, so it never exercised the mismatch - it only re-tested that a
+  // rejection is a rejection. Here the event claims acceptance while contradicting
+  // itself, which is the case that actually has to be caught.
   const correlation = correlateWorkletResults([
-    acceptedEvent(GEN_A, 3),
-    rejectedEvent(GEN_A, 2, 'stale-duplicate-or-malformed', { pendingSequence: 3 }),
+    acceptedEvent(GEN_A, 2, { pendingSequence: 7 }),
+  ]);
+  assert.equal(correlation.acceptedCount, 0, 'a self-contradictory event is not an accepted measurement');
+  assert.equal(acceptedResultFor(correlation, { requestId: reqId(GEN_A, 2), sequence: 2 }), null);
+  const [refused] = rejectedResultsFor(correlation, { requestId: reqId(GEN_A, 2) });
+  assert.equal(refused.correlationReason, 'pending-sequence-mismatch');
+  assert.equal(refused.roundTripMs, 10, 'its timing is preserved as evidence, not discarded');
+});
+
+test('4b. an accepted event whose sequence disagrees with its requestId is refused', () => {
+  // requestId says block 2, the event claims block 5. Joining either way would put a
+  // measurement against the wrong block.
+  const correlation = correlateWorkletResults([
+    acceptedEvent(GEN_A, 5, { requestId: reqId(GEN_A, 2) }),
+  ]);
+  assert.equal(correlation.acceptedCount, 0);
+  assert.equal(acceptedResultFor(correlation, { requestId: reqId(GEN_A, 2), sequence: 2 }), null);
+  assert.equal(acceptedResultFor(correlation, { requestId: reqId(GEN_A, 5), sequence: 5 }), null);
+  const [refused] = rejectedResultsFor(correlation, { requestId: reqId(GEN_A, 2) });
+  assert.equal(refused.correlationReason, 'sequence-disagrees-with-request-id');
+});
+
+test('4c. a main-process record whose sequence disagrees with its requestId borrows nothing', () => {
+  const correlation = correlateWorkletResults([acceptedEvent(GEN_A, 2)]);
+  assert.ok(acceptedResultFor(correlation, { requestId: reqId(GEN_A, 2), sequence: 2 }),
+    'the agreeing record gets the measurement');
+  assert.equal(acceptedResultFor(correlation, { requestId: reqId(GEN_A, 2), sequence: 9 }), null,
+    'a record disagreeing with its own request id must not take it');
+});
+
+test('4d. malformed and absent request identities are named, not silently dropped', () => {
+  const correlation = correlateWorkletResults([
+    acceptedEvent(GEN_A, 0, { requestId: 'no-separator-here' }),
+    acceptedEvent(GEN_A, 1, { requestId: 'runtime-x:' }),
+    acceptedEvent(GEN_A, 2, { requestId: ':7' }),
+    acceptedEvent(GEN_A, 3, { requestId: 'runtime-x:not-a-number' }),
+    acceptedEvent(GEN_A, 4, { requestId: null }),
+  ]);
+  assert.equal(correlation.acceptedCount, 0, 'no malformed identity can produce a measurement');
+  assert.equal(correlation.unattributableCount, 5);
+  assert.deepEqual(
+    correlation.rejected.map(entry => entry.correlationReason).sort(),
+    ['request-id-malformed', 'request-id-malformed', 'request-id-malformed',
+      'request-id-malformed', 'request-id-missing'].sort());
+});
+
+test('4e. a valid accepted event is accepted, and rejection reasons are counted', () => {
+  const correlation = correlateWorkletResults([
+    acceptedEvent(GEN_A, 2),
+    acceptedEvent(GEN_A, 3, { pendingSequence: 9 }),
+    rejectedEvent(GEN_A, 4, 'after-failure'),
   ]);
   assert.equal(correlation.acceptedCount, 1);
-  assert.ok(acceptedResultFor(correlation, { requestId: reqId(GEN_A, 3) }), 'sequence 3 was accepted');
-  assert.equal(acceptedResultFor(correlation, { requestId: reqId(GEN_A, 2) }), null,
-    'sequence 2 was not, and its lookalike response does not change that');
+  assert.equal(correlation.rejectedCount, 2);
+  assert.deepEqual(correlation.rejectionReasons,
+    { 'pending-sequence-mismatch': 1, 'not-accepted': 1 });
+  const found = acceptedResultFor(correlation, { requestId: reqId(GEN_A, 2), sequence: 2 });
+  assert.equal(found?.roundTripMs, 10);
 });
 
 test('5. different runtime generations cannot be mixed by sequence-number matching', () => {
@@ -109,6 +162,7 @@ test('an event with no request id can never count as accepted', () => {
   assert.equal(correlation.acceptedCount, 0, 'unattributable even though it claims accepted');
   assert.equal(correlation.unattributableCount, 1);
   assert.equal(correlation.rejected[0].unattributable, true);
+  assert.equal(correlation.rejected[0].correlationReason, 'request-id-missing');
 });
 
 test('a second accepted result for one block is flagged, not silently merged', () => {
@@ -118,13 +172,18 @@ test('a second accepted result for one block is flagged, not silently merged', (
   ]);
   assert.equal(correlation.acceptedCount, 1, 'the first measurement is the one acted on');
   assert.equal(acceptedResultFor(correlation, { requestId: reqId(GEN_A, 1) })?.roundTripMs, 8);
-  assert.equal(correlation.duplicateAccepted.length, 1, 'the duplicate is retained as evidence');
+  const [duplicate] = rejectedResultsFor(correlation, { requestId: reqId(GEN_A, 1) });
+  assert.equal(duplicate.correlationReason, 'duplicate-accepted',
+    'the duplicate is retained as evidence and named as such');
 });
 
 test('non-result events and missing fields are ignored or left null', () => {
   const correlation = correlateWorkletResults([
-    { event: 'worklet-submit', requestId: reqId(GEN_A, 0), accepted: true },
-    { event: 'worklet-result', requestId: reqId(GEN_A, 1), accepted: true },
+    { event: 'worklet-submit', requestId: reqId(GEN_A, 0), accepted: true, pendingSequence: 0 },
+    // pendingSequence is supplied: under the completed invariant an accepted event
+    // that omits it is refused, so leaving it out here would test the wrong thing.
+    { event: 'worklet-result', requestId: reqId(GEN_A, 1), sequence: 1, accepted: true,
+      pendingSequence: 1 },
   ]);
   assert.equal(correlation.acceptedCount, 1, 'a submit event is not a result');
   const found = acceptedResultFor(correlation, { requestId: reqId(GEN_A, 1) });

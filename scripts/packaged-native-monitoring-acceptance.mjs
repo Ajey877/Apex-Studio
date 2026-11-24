@@ -42,11 +42,17 @@ import { buildCiAnnotation } from './lib/ciAnnotation.mjs';
 import { runRepetitions } from './lib/acceptanceRunLoop.mjs';
 import { captureFailureEvidence } from './lib/failureEvidence.mjs';
 import { coldStartFrom } from './lib/coldStartEvidence.mjs';
+import { summarizeCpuObservations } from './lib/cpuObservation.mjs';
 import { writeLiveInputFixture } from './live-input-fixture.mjs';
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const runs = Math.max(1, Number(process.env.APEX_NATIVE_MONITORING_RUNS ?? '5'));
-const evidenceDir = path.join(root, 'build', 'native-monitoring-evidence');
+// Overridable so the five-run gate and the sixty-run diagnostic cannot write over
+// each other, and so the directory can live outside the packaged resources tree
+// (which the workflow's artifact upload cannot see).
+const evidenceDir = process.env.APEX_NATIVE_MONITORING_EVIDENCE_DIR
+  ? path.resolve(process.env.APEX_NATIVE_MONITORING_EVIDENCE_DIR)
+  : path.join(root, 'build', 'native-monitoring-evidence');
 mkdirSync(evidenceDir, { recursive: true });
 const evidenceFile = path.join(evidenceDir, 'packaged-windows-native-monitoring.json');
 
@@ -815,8 +821,15 @@ if (process.env.GITHUB_ACTIONS) {
       margin: r2(run.coldStart.worstMarginMs), lagAudio: r2(run.coldStart.mainEventLoopLagDuringAudioMs),
       lagMax: r2(run.coldStart.mainEventLoopLagMaxMs), load: r2(startup?.firstRequestRoundTripMs) };
   });
+  // Honest classification of every helper-thread CPU reading, so a zero can never
+  // be read as "no CPU used". The three states and their limits are defined in the
+  // shared module, where they are unit-tested.
+  const cpuObservation = summarizeCpuObservations(
+    allRuns.filter(run => run.coldStart).flatMap(run => run.coldStart.blocks ?? []),
+    { runsCounted: allRuns.filter(run => run.coldStart).length });
   emit(`[${label}] Cold-start aggregate (${aggregate.length} cold repetitions)`, {
     label, repetitions: aggregate.length,
+    cpuObservation,
     passed: aggregate.filter(row => row.st === 'PASS').length,
     failed: aggregate.filter(row => row.st !== 'PASS').length,
     tightestMarginMs: aggregate.reduce((worst, row) => (
@@ -845,6 +858,11 @@ if (process.env.GITHUB_ACTIONS) {
     instCpu: r2(block.helperInstanceProcessCpuMs), prepCpu: r2(block.helperHostPrepareCpuMs),
     cbCpu: r2(block.helperPluginCallbackCpuMs), collCpu: r2(block.helperHostCollectCpuMs),
     cpuOk: block.helperCpuTimingSupported ?? null,
+    // tick: did the per-thread CPU clock ADVANCE during this block? false with
+    // cpuOk true means the span was below one clock step, not that no CPU was used.
+    // step: the smallest advance measured at helper startup, carried so a zero can
+    // be read as below-resolution. It is not the clock's exact resolution.
+    tick: block.helperCpuClockTickObserved ?? null, step: r2(block.helperCpuClockObservedStepMs),
     acc: block.resultAccepted ?? null, rej: block.resultRejectionReasons ?? [],
     gen: block.runtimeGeneration ?? null,
     flush: block.helperProcessIsFlush ?? null,
