@@ -42,7 +42,7 @@ import { buildCiAnnotation } from './lib/ciAnnotation.mjs';
 import { runRepetitions } from './lib/acceptanceRunLoop.mjs';
 import { captureFailureEvidence } from './lib/failureEvidence.mjs';
 import { coldStartFrom } from './lib/coldStartEvidence.mjs';
-import { summarizeCpuObservations } from './lib/cpuObservation.mjs';
+import { failingRepetitionIndices, summarizeCpuObservations } from './lib/cpuObservation.mjs';
 import { writeLiveInputFixture } from './live-input-fixture.mjs';
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
@@ -836,7 +836,10 @@ if (process.env.GITHUB_ACTIONS) {
   emit(`[${label}] Cold-start aggregate (${aggregate.length} cold repetitions)`, {
     label, repetitions: aggregate.length,
     perRepetitionVerdicts,
-    failingRepetitions: aggregate.filter(row => row.st !== 'PASS').map(row => row.r),
+    // Derived from the verdict string, not from `aggregate`: that list is halved to
+    // fit the annotation, and a failure list computed from half of it reported one
+    // failing repetition for a run that had eight.
+    failingRepetitions: failingRepetitionIndices(perRepetitionVerdicts, aggregate),
     cpuObservation,
     passed: aggregate.filter(row => row.st === 'PASS').length,
     failed: aggregate.filter(row => row.st !== 'PASS').length,

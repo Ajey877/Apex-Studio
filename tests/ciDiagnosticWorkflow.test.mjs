@@ -253,6 +253,35 @@ test('the diagnostic never converts a failed gate into a pass', () => {
   );
 });
 
+test('the diagnostic reports its real result, not the outcome continue-on-error forces', () => {
+  // With continue-on-error, GitHub reports the step outcome as 'success' whether or
+  // not the command succeeded. A run that failed 8 of 60 repetitions printed
+  // 'success' for the diagnostic because the verdict step read `.outcome`. The step
+  // has to publish the real result separately and the verdict step has to use it.
+  assert.match(
+    String(diagnostic.run),
+    /GITHUB_OUTPUT/,
+    'the diagnostic must publish its own result, because its outcome is forced to success',
+  );
+  assert.match(String(diagnostic.run), /result=PASS/);
+  assert.match(String(diagnostic.run), /result=FAIL/);
+  assert.match(
+    String(diagnostic.run),
+    /exit "\$status"/,
+    'the real exit status must still propagate, so continue-on-error is what absorbs it',
+  );
+  const env = diagnosticVerdict.env || {};
+  assert.ok(
+    String(env.DIAGNOSTIC_RESULT || '').includes('native-diagnostic.outputs.result'),
+    'the verdict step must read the published result, not only the outcome',
+  );
+  assert.match(
+    String(diagnosticVerdict.run),
+    /DIAGNOSTIC_RESULT/,
+    'and must print it',
+  );
+});
+
 test('both verdicts are recorded, and separately', () => {
   assert.ok(gateVerdict, 'the gating verdict is recorded');
   assert.ok(diagnosticVerdict, 'the diagnostic verdict is recorded separately');

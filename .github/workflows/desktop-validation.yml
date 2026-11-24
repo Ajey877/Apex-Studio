@@ -158,7 +158,22 @@ jobs:
           # Separate directory: the diagnostic must not overwrite the gating run's
           # evidence, and its own evidence must reach its own artifact.
           APEX_NATIVE_MONITORING_EVIDENCE_DIR: ${{ github.workspace }}/build/native-diagnostic-evidence
-        run: npm run test:native-monitoring-packaged
+        # continue-on-error makes this step's reported outcome 'success' whether or
+        # not the diagnostic passed, so the real result is written to an output as
+        # well. Without it the verdict step below would print 'success' for a
+        # diagnostic that failed - which it did, reporting success for a run whose
+        # own evidence said 52 of 60 passed.
+        run: |
+          set +e
+          npm run test:native-monitoring-packaged
+          status=$?
+          set -e
+          if [ "$status" -eq 0 ]; then
+            echo "result=PASS" >> "$GITHUB_OUTPUT"
+          else
+            echo "result=FAIL" >> "$GITHUB_OUTPUT"
+          fi
+          exit "$status"
 
       # Packaged-application editor acceptance: Playwright drives the REAL packaged
       # exe (Mixer insert -> plug-in's own window), and native facts are read from
@@ -220,10 +235,18 @@ jobs:
         shell: bash
         env:
           GATE_OUTCOME: ${{ steps.native-coexistence-gate.outcome }}
+          # The step's own result, not its reported outcome: continue-on-error
+          # forces the outcome to 'success' even when the diagnostic failed.
+          DIAGNOSTIC_RESULT: ${{ steps.native-diagnostic.outputs.result }}
           DIAGNOSTIC_OUTCOME: ${{ steps.native-diagnostic.outcome }}
         run: |
           echo "Gating five-run acceptance outcome: ${GATE_OUTCOME}"
-          echo "Sixty-run diagnostic outcome (non-gating): ${DIAGNOSTIC_OUTCOME}"
+          if [ -n "${DIAGNOSTIC_RESULT}" ]; then
+            echo "Sixty-run diagnostic result (non-gating): ${DIAGNOSTIC_RESULT}"
+          else
+            echo "Sixty-run diagnostic result (non-gating): did not report one"
+          fi
+          echo "Reported step outcome for comparison: ${DIAGNOSTIC_OUTCOME}"
           echo "The job verdict reflects the gating acceptance; the diagnostic never gates."
 
       - name: Record the packaged acceptance verdict

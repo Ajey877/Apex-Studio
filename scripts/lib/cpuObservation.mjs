@@ -78,3 +78,26 @@ export function summarizeCpuObservations(blocks, options = {}) {
     usageLimit: CPU_OBSERVATION_USAGE_LIMIT,
   };
 }
+
+/**
+ * The repetitions that failed, taken from the compact verdict string rather than
+ * from the verbose row list.
+ *
+ * The row list is halved to fit GitHub's annotation size cap. A failure list
+ * computed from half of it reported one failing repetition for a diagnostic run
+ * that had eight, because seven of them sat past the cut. The verdict string is a
+ * string, so it is never halved, and its index order matches `rows`.
+ */
+export function failingRepetitionIndices(verdicts, rows) {
+  const text = String(verdicts ?? '');
+  const list = Array.isArray(rows) ? rows : [];
+  const out = [];
+  for (let i = 0; i < text.length; i += 1) {
+    if (text[i] !== 'F') continue;
+    const row = list[i];
+    // Fall back to the 1-based position when the row was dropped, so a failure is
+    // still attributed to a repetition rather than disappearing.
+    out.push(row && typeof row.r === 'number' ? row.r : i + 1);
+  }
+  return out;
+}

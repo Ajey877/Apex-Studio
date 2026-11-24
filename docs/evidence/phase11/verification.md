@@ -1011,22 +1011,109 @@ and the aggregate carries `perRepetitionVerdicts` — one `P`/`F` per repetition
 cannot be halved — plus `failingRepetitions`. Tested in `tests/ciAnnotation.test.mjs`. The complete
 per-repetition detail is in the artifact either way.
 
+### Final CI at `bbfbfa9` — all five workflows green
+
+| Workflow | Run | Result |
+|---|---|---|
+| Apex Studio CI | `45350651245` | success |
+| Audio Validation | `45350651247` | success |
+| Native VST3 Validation | `45350651253` | success |
+| P9 High-DPI Editor Acceptance | `45350652724` | success |
+| Desktop Validation | `45350651392` | success — job `138295935775` |
+
+Steps 7 and 8 of Apex Studio CI — the previously failing cold-start attribution test and
+the C++ timing split — both pass. The pre-existing packaged runtime smoke flake did not
+recur, so the gated acceptance ran this time.
+
+**Gating five-run acceptance: PASS 5/5.** `tightestMarginMs` 6.33, `slowestBlockMs` 15 ms
+against the 21.33 ms budget, `deadlineMisses 0`, `nativeFailures 0`,
+`helperProcessesLeakedAfterShutdown []`, `physicalHardware NOT_VERIFIED`. CPU over its 60
+blocks: 55 no-clock-tick, 5 positive delta, observed step 15.625 ms.
+
+**A green gate is not evidence the defect is gone.** The diagnostic measured a 13.3%
+failure rate on the same runner minutes later; at that rate a five-run gate has roughly a
+50% chance of passing by luck.
+
+### The 60-repetition diagnostic at `bbfbfa9`: 52 PASS / 8 FAIL
+
+`tightestMarginMs` 2.33, `slowestBlockMs` 19 ms. Artifacts: `14904011404`
+`apex-packaged-native-diagnostic-evidence` 1,005,426 B; `14903917779`
+`apex-packaged-vst3-evidence` 461,499 B; `14903598264` `apex-studio-windows` 176,457,502 B;
+`14900662861` `apex-packaged-native-monitoring-evidence` 40,219 B; `14900831197`
+`apex-packaged-live-input-evidence` 1,385 B.
+
+Every repetition's verdict, in run order:
+
+```
+FPPPFFPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPFPPPFPPPFPPPPFFPP
+```
+
+Failing repetitions 1, 5, 6, 44, 48, 52, 57, 58. All eight failed the same way, on the
+`pending-deadline-miss` guard:
+
+| run | seq | phase | currentOutputFrame | dueOutputFrame | result received at | round trip ms | lag max ms |
+|---|---|---|---|---|---|---|---|
+| 1  | 1   | cold | 2944   | 3072   | — (none accepted) | —  | 70.07 |
+| 5  | 1   | cold | 2944   | 3072   | 3072   | 22 | 74.60 |
+| 6  | 2   | cold | 3968   | 4096   | 4096   | 24 | 72.12 |
+| 44 | 107 | mid-session | 111488 | 111616 | 111616 | 20 | 72.23 |
+| 48 | 1   | cold | 2944   | 3072   | 3072   | 18 | 73.51 |
+| 52 | 2   | cold | 3968   | 4096   | 4096   | 25 | 71.63 |
+| 57 | 46  | mid-session | 49024  | 49152  | 49152  | 24 | 76.23 |
+| 58 | 2   | cold | 3968   | 4096   | 4096   | 25 | 73.23 |
+
+**`currentOutputFrame` is exactly 128 frames before `dueOutputFrame` in all eight.** In
+seven of the eight the result then arrived *at* the due frame on a round trip of 18–25 ms —
+mostly inside the 21.33 ms budget — and was rejected `"after-failure"`, because the guard
+had already latched. Every rejection reason is `after-failure`; none is a late arrival. So
+**none of these eight is evidence of a late result**: the pending-state guard fires 128
+frames (2.67 ms at 48 kHz) before the block is due, and the block then lands on time.
+
+Two secondary observations, consistent across all eight: main-event-loop lag was 70–76 ms in
+every failing run against 48–53 ms in the passing ones at `7de4599`, and six of eight were
+cold (sequences 1–2) while two were mid-session (46, 107). Neither is established as a cause.
+CPU over the diagnostic's 663 blocks: 620 no-clock-tick, 43 positive delta, observed step
+15.625 ms — unchanged in character from `7de4599`.
+
+### Two reporting defects this run exposed, both fixed
+
+**The diagnostic reported `success` while failing 8 of 60.** With `continue-on-error: true`,
+GitHub reports a step's *outcome* as `success` whatever the command did, and the verdict step
+read `steps.native-diagnostic.outcome`. It printed `success` for a run whose own evidence said
+52 of 60. The step now writes `result=PASS`/`result=FAIL` to `$GITHUB_OUTPUT` while still
+exiting with the real status, and the verdict step prints that result next to the outcome it is
+compared against. Asserted in `tests/ciDiagnosticWorkflow.test.mjs`.
+
+**`failingRepetitions` reported `[1]` for a run with eight failures.** It was computed from the
+halved `aggregate` list, so only failures inside repetitions 1–30 could appear. It is now derived
+from the full `perRepetitionVerdicts` string via `failingRepetitionIndices`, which also attributes
+a failure whose row was dropped to its 1-based position rather than losing it. The test reproduces
+this exact case and shows the old derivation finding `[1, 5, 6]` where the correct answer is eight
+entries.
+
+### Local results at `bbfbfa9`
+
+`lint` clean; `test:native-cold-start` 49/49; `test:native-timings-cpp` all checks;
+`test:audio` 2507/2507 with `Orphaned: 0`; `test:history` 1283/1283; `verify:desktop` pass;
+`build` pass.
+
 ### Still NOT VERIFIED
 
-- **The cold-start real-time deadline defect is unfixed and NOT VERIFIED.** The most recent packaged
-  run on `25442d66` failed 0 of 5 during warm-up, which is not a pass and is not evidence the defect
-  is gone. The diagnostic at `7de4599` failed 1 of 60 (repetition 22, cold, sequence 2), and the
-  corrected-correlation rate measured at `d960d11` was 1 in 60; each result belongs to its own
-  commit.
-- The cause of a miss is still not established. Run 51 at `d960d11` showed the guard latching at
-  `currentOutputFrame 2944` for a block due at 3072, with the result then arriving at 3072 on a 19 ms
-  round trip — inside the 21.33 ms budget — rejected only because failure had already latched. A
-  "miss" can therefore be the pending-state guard firing before the due frame, so no miss may be
-  called a late result without checking this.
+- **The cold-start real-time deadline defect is unfixed and NOT VERIFIED.** The gate passed 5/5 at
+  `bbfbfa9`, but the diagnostic measured 8 failures in 60 on the same runner minutes later, and at
+  that rate a five-run gate passes roughly half the time by luck. The diagnostic at `7de4599` failed
+  1 of 60, the corrected-correlation rate at `d960d11` was 1 in 60, and the packaged run on
+  `25442d66` failed 0 of 5 during warm-up. Each result belongs to its own commit, and none of them
+  is a pass for the defect.
+- The cause of a miss is still not established, but its shape now is. Across all eight failures at
+  `bbfbfa9` the guard latched exactly 128 frames before the due frame, and the result then arrived
+  at the due frame inside budget, rejected `after-failure`. Not one of them is a late result, so the
+  open question is why the pending-state guard fires early — not why results arrive late. The 70–76 ms
+  event-loop lag common to all eight, against 48–53 ms in passing runs, is correlated and unproven.
 - Whether the host-preparation spikes are descheduling rather than expensive code: Windows CPU spans
   read 0, which is below the observed clock step and carries no information either way.
-- **No gated five-run acceptance result exists at this HEAD**, because the pre-existing packaged
-  runtime smoke flake failed first and the gate was skipped. The 59/1 figure above is the non-gating
-  diagnostic and does not stand in for the gate.
+- The gate's 5/5 at `bbfbfa9` and the diagnostic's 52/8 at the same commit are both real and they
+  disagree. That disagreement is the point: five repetitions cannot resolve a 13% failure rate, and
+  the diagnostic is non-gating, so neither number stands in for the other.
 - Physical hardware is `NOT_VERIFIED`, and artifact-zip contents have not been read — CI evidence was
   taken from annotations.

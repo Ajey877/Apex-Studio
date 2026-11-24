@@ -117,3 +117,27 @@ test('the limits are stated in the evidence itself', () => {
   assert.match(summary.usageLimit, /Must not inform any audio scheduling/);
   assert.equal(summary.blocksExamined, 0);
 });
+
+test('the failing list comes from the full verdict string, not the halved row list', async () => {
+  const { failingRepetitionIndices } = await import('../scripts/lib/cpuObservation.mjs');
+  // The real bbfbfa9 diagnostic: eight failures, six of them past the point where
+  // the verbose row list was cut down to 30 rows.
+  const verdicts = 'FPPPFFPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPFPPPFPPPFPPPPFFPP';
+  const rows = Array.from({ length: 30 }, (_, i) => ({ r: i + 1 }));
+  assert.equal(verdicts.length, 60);
+  assert.deepEqual(
+    failingRepetitionIndices(verdicts, rows),
+    [1, 5, 6, 44, 48, 52, 57, 58],
+    'every failing repetition is named, including those beyond the retained rows',
+  );
+  // Deriving it from the rows alone - the old behaviour - finds only one.
+  assert.deepEqual(rows.filter((_, i) => verdicts[i] === 'F').map(r => r.r), [1, 5, 6]);
+});
+
+test('a failure with no surviving row is still attributed to its repetition', async () => {
+  const { failingRepetitionIndices } = await import('../scripts/lib/cpuObservation.mjs');
+  assert.deepEqual(failingRepetitionIndices('PF', [{ r: 7 }]), [2]);
+  assert.deepEqual(failingRepetitionIndices('PFP', []), [2]);
+  assert.deepEqual(failingRepetitionIndices('PPP', [{ r: 1 }, { r: 2 }, { r: 3 }]), []);
+  assert.deepEqual(failingRepetitionIndices('', []), []);
+});
