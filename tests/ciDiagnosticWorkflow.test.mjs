@@ -270,6 +270,13 @@ test('the diagnostic reports its real result, not the outcome continue-on-error 
     /exit "\$status"/,
     'the real exit status must still propagate, so continue-on-error is what absorbs it',
   );
+  assert.equal(diagnostic.shell, 'bash', 'the wrapper is bash, not the platform default shell');
+  assert.match(
+    String(diagnostic.run),
+    /::error title=/,
+    'a failure must publish its own reason: the job log is not readable from here and '
+    + 'continue-on-error keeps the failure out of the job verdict',
+  );
   const env = diagnosticVerdict.env || {};
   assert.ok(
     String(env.DIAGNOSTIC_RESULT || '').includes('native-diagnostic.outputs.result'),

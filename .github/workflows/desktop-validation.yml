@@ -163,15 +163,21 @@ jobs:
         # well. Without it the verdict step below would print 'success' for a
         # diagnostic that failed - which it did, reporting success for a run whose
         # own evidence said 52 of 60 passed.
+        # continue-on-error hides the exit code from the job verdict, and this job's
+        # log redirects to blob storage this environment cannot read, so a failure
+        # here has to publish its own reason as an annotation or it is invisible.
+        shell: bash
         run: |
+          log=$(mktemp)
           set +e
-          npm run test:native-monitoring-packaged
-          status=$?
+          npm run test:native-monitoring-packaged 2>&1 | tee "$log"
+          status=${PIPESTATUS[0]}
           set -e
           if [ "$status" -eq 0 ]; then
             echo "result=PASS" >> "$GITHUB_OUTPUT"
           else
             echo "result=FAIL" >> "$GITHUB_OUTPUT"
+            echo "::error title=cold-start diagnostic exited ${status}::evidenceDir=${APEX_NATIVE_MONITORING_EVIDENCE_DIR} packageDir=dist-electron/win-unpacked node=$(node --version) tail=$(tail -n 40 "$log" | tr '\n' '|')"
           fi
           exit "$status"
 
