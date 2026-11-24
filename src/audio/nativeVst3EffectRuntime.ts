@@ -242,7 +242,22 @@ class ApexVst3FxProcessor extends AudioWorkletProcessor {
             // block explicitly so the two failure events carry the same vocabulary.
             if (this.profileEnabled) this.port.postMessage({ type: 'profile', event: 'pending-deadline-miss', sequence: this.pending,
               pendingSequence: this.pending, nextSequence: this.sequence, inputContextFrame: currentFrame + i,
-              currentOutputFrame: this.outputFrame,
+              // Frame bookkeeping, unambiguous by construction. this.outputFrame
+              // advances only AFTER the whole render quantum, so inside this loop it
+              // is the frame the quantum STARTS at - not the frame being evaluated.
+              // This guard runs at input sample index i, whose output frame is
+              // outputFrame + i, and that is what currentOutputFrame now reports.
+              // MEANING CHANGED, deliberately: currentOutputFrame used to carry the
+              // quantum-start frame. The old value is preserved verbatim under
+              // outputFrameAtQuantumStart, so no reader loses it. Because the
+              // 1024-frame block fills on the LAST sample of a 128-frame quantum,
+              // the two differ by inputQuantumFrames - 1, and nextQuantumOutputFrame
+              // is the frame the pending block is actually first needed at.
+              outputFrameAtQuantumStart: this.outputFrame,
+              inputSampleIndex: i,
+              inputQuantumFrames: left.length,
+              currentOutputFrame: this.outputFrame + i,
+              nextQuantumOutputFrame: this.outputFrame + left.length,
               dueOutputFrame: this.delayFrames + this.pending * this.blockFrames,
               readySequences: Array.from(this.ready.keys()), drySequences: Array.from(this.dryReady.keys()) });
             this.fail('Native effect missed its real-time processing deadline; playback stopped rather than replaying stale PCM.');
@@ -295,9 +310,15 @@ class ApexVst3FxProcessor extends AudioWorkletProcessor {
       if (!processed || !dry) {
         const dueOutputFrame = this.delayFrames + sequence * this.blockFrames;
         const currentOutputFrame = this.outputFrame + i;
+        // Same vocabulary as the pending guard, so the two can be compared field by
+        // field. This guard is evaluated in the OUTPUT loop, so the sample index is
+        // an output sample index; currentOutputFrame here has always been the exact
+        // frame being evaluated, and its meaning is unchanged.
         if (this.profileEnabled) this.port.postMessage({ type: 'profile', event: 'deadline-miss', sequence, sourceFrame,
           dueOutputFrame, currentOutputFrame, pendingSequence: this.pending, readySequences: Array.from(this.ready.keys()),
-          drySequences: Array.from(this.dryReady.keys()) });
+          drySequences: Array.from(this.dryReady.keys()),
+          outputFrameAtQuantumStart: this.outputFrame, outputSampleIndex: i,
+          outputQuantumFrames: out[0].length, nextQuantumOutputFrame: this.outputFrame + out[0].length });
         this.fail('Native effect output was not ready at its scheduled audio frame; playback stopped rather than using dry or stale audio. Sequence ' + sequence + ', source frame ' + sourceFrame + ', due output frame ' + dueOutputFrame + ', current output frame ' + currentOutputFrame + ', pending sequence ' + this.pending + '.');
         break;
       }

@@ -106,6 +106,14 @@ export function describeDeadlineMiss(event: {
   currentOutputFrame?: number | null;
   receivedOutputFrame?: number | null;
   dueOutputFrame?: number | null;
+  // Unambiguous frame bookkeeping, added because `currentOutputFrame` alone could
+  // not say which sample the guard was evaluated on. See the worklet source.
+  outputFrameAtQuantumStart?: number | null;
+  inputSampleIndex?: number | null;
+  inputQuantumFrames?: number | null;
+  outputSampleIndex?: number | null;
+  outputQuantumFrames?: number | null;
+  nextQuantumOutputFrame?: number | null;
   readySequences?: readonly number[] | null;
   drySequences?: readonly number[] | null;
 }): {
@@ -119,6 +127,19 @@ export function describeDeadlineMiss(event: {
   currentOutputFrame: number | null;
   receivedOutputFrame: number | null;
   dueOutputFrame: number | null;
+  outputFrameAtQuantumStart: number | null;
+  inputSampleIndex: number | null;
+  inputQuantumFrames: number | null;
+  outputSampleIndex: number | null;
+  outputQuantumFrames: number | null;
+  nextQuantumOutputFrame: number | null;
+  /**
+   * How many output frames early this guard fired relative to the block's due
+   * frame, or null when either frame is unknown. A positive value means the guard
+   * fired BEFORE the block was needed - which is the difference between an early
+   * pending-state guard and a genuinely late result.
+   */
+  framesBeforeDue: number | null;
   readySequences: number[] | null;
   drySequences: number[] | null;
 } | null {
@@ -141,6 +162,15 @@ export function describeDeadlineMiss(event: {
     currentOutputFrame: isFiniteNumber(event.currentOutputFrame) ? event.currentOutputFrame : null,
     receivedOutputFrame: isFiniteNumber(event.receivedOutputFrame) ? event.receivedOutputFrame : null,
     dueOutputFrame: isFiniteNumber(event.dueOutputFrame) ? event.dueOutputFrame : null,
+    outputFrameAtQuantumStart: isFiniteNumber(event.outputFrameAtQuantumStart) ? event.outputFrameAtQuantumStart : null,
+    inputSampleIndex: isFiniteNumber(event.inputSampleIndex) ? event.inputSampleIndex : null,
+    inputQuantumFrames: isFiniteNumber(event.inputQuantumFrames) ? event.inputQuantumFrames : null,
+    outputSampleIndex: isFiniteNumber(event.outputSampleIndex) ? event.outputSampleIndex : null,
+    outputQuantumFrames: isFiniteNumber(event.outputQuantumFrames) ? event.outputQuantumFrames : null,
+    nextQuantumOutputFrame: isFiniteNumber(event.nextQuantumOutputFrame) ? event.nextQuantumOutputFrame : null,
+    // Derived only from frames the event actually carried. Never inferred.
+    framesBeforeDue: isFiniteNumber(event.currentOutputFrame) && isFiniteNumber(event.dueOutputFrame)
+      ? event.dueOutputFrame - event.currentOutputFrame : null,
     readySequences: list(event.readySequences),
     drySequences: list(event.drySequences),
   };

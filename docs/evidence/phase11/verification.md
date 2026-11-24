@@ -1178,19 +1178,178 @@ them was the `run:` wrapper, so the earlier behaviour is **unexplained and recor
 rather than attributed to a fix. Had the wrapper been in place then, its `::error` annotation
 would have carried the reason.
 
+### `2d4befd` — the five-run gate passed and the diagnostic measured 59/60
+
+Desktop Validation run `45373174373`, job `138372361332`, conclusion **success**, all 27 steps
+success. The other four workflows at the same commit are success too: Apex Studio CI
+`45373175079`, Audio Validation `45373174436`, Native VST3 Validation `45373174397`, P9 High-DPI
+Editor Acceptance `45373174420`.
+
+- **Five-run production gate (step 19, `native-coexistence-gate`): PASS 5/5.**
+  `{"status":"PASS","passedRuns":5,"requestedRuns":5}`, `perRepetitionVerdicts "PPPPP"`,
+  `failingRepetitions []`, `worstMarginMs` 5.33 on the recorded run, transport
+  0.4207 → 2.1300 → 3.8047 s, `blocksBefore 23 → during 79 → after 79`.
+  CPU observation: 5 runs, 60 blocks, `clockUnavailable 0`, `cpuFieldNull 0`, `noClockTick 57`,
+  `positiveCpuDelta 3`, `smallestObservedCpuClockStepMs 15.625`.
+  Ran 10:24:28 → 10:27:55Z. **This is a different commit from `a75cb15`, where the gate FAILED; the
+  two are separate measurements and are not combined into one rate.**
+- **60-repetition diagnostic (step 21, non-gating): 59 PASS / 1 FAIL.**
+  `{"status":"FAIL","passedRuns":59,"requestedRuns":60}`, `perRepetitionVerdicts` 58 P then F then P,
+  `failingRepetitions [58]`. Ran 10:27:56 → 11:09:58Z (42.0 min). CPU observation: 60 runs,
+  710 blocks, `clockUnavailable 0`, `cpuFieldNull 0`, `noClockTick 662`, `positiveCpuDelta 48`,
+  `smallestObservedCpuClockStepMs 15.625`. The wrapper's `::error` annotation
+  (`cold-start diagnostic exited 1`) is present, and the step's reported outcome is still `success`
+  because the step is `continue-on-error: true` — which is exactly why the verdict comes from
+  `$GITHUB_OUTPUT` and not from the step outcome.
+- **Editor acceptance (step 23): 10 PASS / 0 FAIL / 1 NOT_VERIFIED** (`p9b-multi-monitor` needs two
+  physical displays).
+- Artifacts: `14914200944` diagnostic evidence 533,862 B; `14914976086` packaged VST3 evidence
+  464,181 B; `14910798466` native monitoring evidence 40,482 B; `14910202884` live input evidence
+  1,387 B; `14914071919` Windows package 176,457,503 B.
+
+The one failure, run 58, is the same cold-start shape: guard `pending-deadline-miss`, sequence 1,
+phase cold, `currentOutputFrame 2944`, `dueOutputFrame 3072`, `readySequences [0]`,
+`drySequences [0,1]`, `mainEventLoopLagMaxMs 54.79`. Its sequence-1 block measured
+`helperRoundTripMs 36.01`, of which `helperHostPrepareMs 21.49` and `helperInstanceProcessMs 21.59`,
+against a `blockBudgetMs 21.33`. No result was recorded for it at all
+(`resultsRejected 0`, `rejections []`), so this one is a **genuine overrun**, not a result rejected
+at the boundary. Run 58 and `a75cb15` repetition 45 are two different failure modes; see below.
+
+### The pending guard's frame evidence was wrong, and correcting it changed the diagnosis
+
+The guard posted `currentOutputFrame: this.outputFrame` from inside the input loop at sample index
+`i`, but `this.outputFrame` advances only at the end of `process`
+(`this.outputFrame += out[0].length`). So it reported the frame the *quantum started at*, not the
+frame being evaluated. Every recorded `currentOutputFrame` on the pending path understated the true
+position by `i` — 127 for the canonical cold case — and that is why all the historical evidence read
+as a guard firing **128 frames** before the block was due.
+
+That reading was an instrumentation artifact. The block fills on the last sample of a quantum, so the
+guard is really evaluated at output frame 3071 for a block due at 3072. **The guard fires exactly one
+output frame early**, and that is arithmetic rather than timing:
+`due(s) − guardFrame = (delay − 2·block) + 1 = 1` when the pipeline delay is exactly two blocks.
+Verified against the shipped worklet source in `src/audio/nativeVst3PendingGuardBoundary.test.ts`,
+which evaluates `VST3_FX_WORKLET_SOURCE` in a sandbox and drives real 128-frame quanta.
+
+The event now carries the bookkeeping explicitly, with the old value preserved under its own name so
+no reader loses it:
+
+| field | meaning |
+| --- | --- |
+| `outputFrameAtQuantumStart` | `this.outputFrame` at quantum entry — the old `currentOutputFrame` value |
+| `inputSampleIndex` | the input sample the guard was evaluated on (127 in the cold case) |
+| `inputQuantumFrames` | the render quantum length (128) |
+| `currentOutputFrame` | **changed**: the frame actually being evaluated, `outputFrameAtQuantumStart + inputSampleIndex` |
+| `nextQuantumOutputFrame` | the first frame of the next quantum — where the pending block is first needed |
+| `dueOutputFrame` | unchanged: `delayFrames + sequence · blockFrames` |
+
+`describeDeadlineMiss` normalises all of them, adds `outputSampleIndex`/`outputQuantumFrames` for the
+output-side guard, and derives `framesBeforeDue = dueOutputFrame − currentOutputFrame` only from
+frames the event actually carried. It stays null when either is missing, so pre-change evidence keeps
+reading correctly: a historical event yields `framesBeforeDue 128`, which is precisely the
+overstatement this change corrects.
+
+### What the deterministic reproduction settled
+
+Four boundaries, all against the shipped worklet, all ordered by call sequence rather than by
+timestamp:
+
+1. **Before the due frame** — a result delivered while the block is still pending is accepted, and its
+   samples come out at output frame 3072. Neither guard fires.
+2. **Between the final sample of the preceding quantum and the next `process` call** — the guard has
+   already latched at frame 3071. The result is rejected `after-failure` with
+   `receivedOutputFrame 3072` and `dueOutputFrame 3072`. Every frame the preceding quantum rendered
+   (2944–3071) needed only block 0, so not one rendered frame needed the block that was refused, and
+   the quantum that *would* have needed it never ran.
+3. **At the due-frame boundary** — the output-side guard, evaluated in the output loop, reports
+   `currentOutputFrame 3072`, `dueOutputFrame 3072`, `outputSampleIndex 0`. It fires *at* the frame
+   that needs the block and is never early.
+4. **After the due frame** — same as (3); the output-side guard is the one that catches it.
+
+With a result withheld for 40 quanta, only `pending-deadline-miss` ever fires: **the pending guard
+always preempts the output-side guard by exactly one frame**, because it is evaluated one frame
+earlier for the same block.
+
+So, to the question this investigation was opened for: **yes — the pending guard fails a result that
+the due frame could have accepted.** It requires the block in hand at frame `due − 1`; the block is
+not needed until `due`. A result landing in that one-frame window is refused, and the recorded
+evidence at `a75cb15` repetition 45 has exactly that shape — `receivedOutputFrame 3072`,
+`dueOutputFrame 3072`, rejection `after-failure`.
+
+One thing that evidence cannot settle, and must not be inferred from it: its `roundTripMs` was 23
+against a 21.33 ms nominal budget, which reads as "late". The nominal budget is measured from the
+submission stamp against a schedule the audio thread does not necessarily keep, so when the thread is
+behind the true due instant moves later and a 23 ms round trip can still land before the quantum that
+needs the block. **The frame evidence is the reliable one here; the wall-clock number is not.** This
+rests on the AudioWorklet platform property that control-port messages are delivered on the audio
+thread between rendering quanta and never during one — a documented property that this harness models
+by delivering between `process` calls, not something it measures.
+
+### The correlation invariant is now complete
+
+`acceptedResultFor` read `if (recordSequence !== null && recordSequence !== parsed.sequence)`, so a
+main-process record carrying **no** sequence was accepted on its request id alone — and so was any
+non-finite or fractional one, because `int()` maps all three to null. Such a record says nothing about
+which block it describes, so it could borrow the measurement of whichever block shared its request id.
+
+Acceptance now requires all four conditions: the `requestId` parses; the record's own `sequence` is
+present, finite and an integer; that sequence equals the one the `requestId` encodes; and an accepted
+worklet result exists for that exact request id. Seven new test cases cover missing, null, undefined,
+NaN, ±Infinity, a numeric string, a non-number, three fractional values and four mismatches, plus a
+case proving that refusing the measurement does not discard the rejection evidence.
+
+No production call site needed changing. The only caller is
+`liveInputAcceptance.ts`'s `decompose`, and its records come through `desktop-vst3.cjs`'s
+`readProfile`, which already rejects anything without `Number.isInteger(value.sequence)`. The desktop
+smoke's `correlatedTimingSamples` does not call `acceptedResultFor` at all — it reads `event.accepted`
+directly — so tightening could not null out its evidence.
+
+### The smallest safe production correction — reported, deliberately not implemented
+
+The guard latches on `this.fill === this.blockFrames`, which is true on the last sample of the quantum
+*before* the pending block is needed. The minimal change is to make that check frame-based:
+
+```js
+const dueOutputFrame = this.delayFrames + this.pending * this.blockFrames;
+if (this.outputFrame + i >= dueOutputFrame) { /* fail closed, unchanged */ }
+```
+
+That keeps both guards fail-closed and leaves the block size, fixed latency, buffering, bypass,
+transport, serialization, queue and helper processing untouched; it adds no retry and permits no dry or
+stale PCM. It grants exactly one additional frame — 20.8 µs at 48 kHz — and makes the two guards agree
+about when a block is late.
+
+**It is not a fix for the observed failure rate, and it must not be presented as one.** Run 58 at
+`2d4befd` had a 36.01 ms round trip against a 21.33 ms budget and never produced a result; one extra
+frame would not have saved it. The correction would only rescue a result that lands in that single
+frame — which the `a75cb15` repetition-45 evidence suggests does happen, but which the current
+evidence cannot count. Why the first block's helper round trip exceeds the budget at all is a separate
+question, and answering it is a separate change.
+
 ### Still NOT VERIFIED
 
-- **The cold-start real-time deadline defect is unfixed.** At `a75cb15` the production gate FAILED on
-  repetition 1 — warm-up timeout with `deadlineMisses 1` — so this is no longer merely unverified: the
-  gate itself fails on it at the current HEAD. The results across this branch's commits do not agree,
-  and that disagreement is the honest summary: gate 5/5 at `bbfbfa9`, gate FAIL at `a75cb15`;
-  diagnostics of 1/60 at `7de4599`, 8/60 at `bbfbfa9`, 1/60 at `a75cb15`, 1/60 at `d960d11`; and 0 of
-  5 during warm-up at `25442d66`. Each belongs to its own commit, and none is a pass for the defect.
-- The cause of a miss is still not established, but its shape now is. Across all eight failures at
-  `bbfbfa9` the guard latched exactly 128 frames before the due frame, and the result then arrived
-  at the due frame inside budget, rejected `after-failure`. Not one of them is a late result, so the
-  open question is why the pending-state guard fires early — not why results arrive late. The 70–76 ms
-  event-loop lag common to all eight, against 48–53 ms in passing runs, is correlated and unproven.
+- **The cold-start real-time deadline defect is unfixed.** Nothing in the boundary investigation
+  changed production behaviour, by design. At `a75cb15` the production gate FAILED on repetition 1 —
+  warm-up timeout with `deadlineMisses 1` — and at `2d4befd` it passed 5/5, so the gate does not
+  resolve the defect either way. The results across this branch's commits do not agree, and that
+  disagreement is the honest summary: gate 5/5 at `bbfbfa9`, gate FAIL at `a75cb15`, gate 5/5 at
+  `2d4befd`; diagnostics of 1/60 at `d960d11`, 1/60 at `7de4599`, 8/60 at `bbfbfa9`, 1/60 at
+  `a75cb15`, 1/60 at `2d4befd`; and 0 of 5 during warm-up at `25442d66`. Each belongs to its own
+  commit, and none is a pass for the defect.
+- **Corrected by the boundary investigation above:** the "guard latched 128 frames before the due
+  frame" reading in the `bbfbfa9` failures was an instrumentation artifact, not a measurement. The
+  guard fires exactly **one** frame early, which follows from the pipeline delay being exactly two
+  blocks, and the question "why does the pending-state guard fire early" is now answered. What is
+  still not established is how often that single frame is the difference — the `a75cb15`
+  repetition-45 evidence has that shape (`receivedOutputFrame == dueOutputFrame`, rejected
+  `after-failure`), while `2d4befd` run 58 is a plain 36.01 ms overrun against a 21.33 ms budget with
+  no result at all. The two failure modes are now distinguishable, but no failure count has been
+  attributed to either. The 70–76 ms event-loop lag in the `bbfbfa9` failures, against 48–53 ms in
+  passing runs, remains correlated and unproven.
+- Whether the first block's helper round trip overruns the budget because of descheduling or because
+  of expensive work. `2d4befd` run 58 spent 21.49 ms of its 36.01 ms round trip in
+  `helperHostPrepareMs` alone, but 662 of its 710 blocks measured no CPU tick, so the wall-clock
+  figure cannot be attributed.
 - Whether the host-preparation spikes are descheduling rather than expensive code. 668 of the 710
   blocks at `a75cb15` measured no CPU tick, and the one block that did tick reported 15.625 ms of CPU
   inside 7.618 ms of wall. The clock is quantised to 15.625 ms, so these numbers are not durations and
@@ -1198,5 +1357,11 @@ would have carried the reason.
 - The gate's 5/5 at `bbfbfa9` and the diagnostic's 52/8 at the same commit are both real and they
   disagree. That disagreement is the point: five repetitions cannot resolve a 13% failure rate, and
   the diagnostic is non-gating, so neither number stands in for the other.
+- Whether control-port messages really are delivered only between rendering quanta. The conclusion
+  that a result landing in the one-frame window was rejected although the block was still in time
+  depends on it. It is a documented AudioWorklet platform property and the harness models it by
+  delivering between `process` calls; nothing in this repository measures it, and `receivedOutputFrame`
+  alone cannot distinguish "between quanta" from "during the quantum that starts at the due frame"
+  because `this.outputFrame` advances only at the end of `process`.
 - Physical hardware is `NOT_VERIFIED`, and artifact-zip contents have not been read — CI evidence was
   taken from annotations.

@@ -249,11 +249,25 @@ export function correlateWorkletResults(
  * The accepted measurement for one main-process block record, or null when the
  * worklet never accepted a result for that exact request.
  *
- * The record is validated too: a main-process record whose own sequence disagrees
- * with its request id must not borrow another block's measurement.
+ * Acceptance requires ALL of the following, and a failure of any one of them is a
+ * null rather than a best effort:
+ *   1. the record's `requestId` parses as `${runtimeId}:${sequence}`;
+ *   2. the record's own `sequence` is present, finite and an integer;
+ *   3. that sequence equals the sequence the `requestId` encodes;
+ *   4. an accepted worklet result exists for that exact request id.
+ *
+ * Condition 2 is the one that was missing. The check used to read
+ * `if (recordSequence !== null && ...)`, so a record carrying no sequence at all -
+ * or a non-finite or fractional one, which `int` also maps to null - was waved
+ * through on its request id alone. Such a record proves nothing about WHICH block
+ * it describes, so letting it borrow a measurement meant a stale or mis-delivered
+ * response could be reported as the round trip of the block under measurement.
+ * `int` returns null for absent, non-finite and fractional values alike, which is
+ * why one null test covers all three.
  *
  * A null here is meaningful: it means "the AudioWorklet did not accept this block",
  * which is precisely the case that must not be reported as a positive margin.
+ * Rejections are still preserved separately by `rejectedResultsFor`.
  */
 export function acceptedResultFor(
   correlation: WorkletResultCorrelation,
@@ -262,8 +276,11 @@ export function acceptedResultFor(
   const parsed = parseRequestId(record.requestId);
   if (parsed === null) return null;
   const recordSequence = int(record.sequence);
-  if (recordSequence !== null && recordSequence !== parsed.sequence) return null;
-  return correlation.acceptedByRequestId.get(parsed.generation + ':' + parsed.sequence) ?? null;
+  if (recordSequence === null || recordSequence !== parsed.sequence) return null;
+  const accepted = correlation.acceptedByRequestId.get(parsed.generation + ':' + parsed.sequence);
+  // Condition 4, checked against the accepted entry's own sequence rather than
+  // trusting the map key: the entry must describe this exact request.
+  return accepted !== undefined && accepted.sequence === parsed.sequence ? accepted : null;
 }
 
 /** Rejections recorded for one request, in arrival order. */

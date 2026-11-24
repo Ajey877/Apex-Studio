@@ -69,7 +69,10 @@ test('3. a late result after the fail-closed event stays visible as rejected evi
   assert.equal(late.dueOutputFrame, 4096);
   assert.ok((late.receivedOutputFrame as number) > (late.dueOutputFrame as number),
     'the evidence shows the response arrived after the frame that needed it');
-  assert.equal(acceptedResultFor(correlation, { requestId: reqId(GEN_A, 2) }), null);
+  // Sequence supplied so this asserts what the test is about - that no accepted
+  // measurement exists for a rejected block - rather than tripping the record
+  // validation, which has its own test below.
+  assert.equal(acceptedResultFor(correlation, { requestId: reqId(GEN_A, 2), sequence: 2 }), null);
 });
 
 test('4. accepted=true with a mismatched pendingSequence is refused', () => {
@@ -106,6 +109,63 @@ test('4c. a main-process record whose sequence disagrees with its requestId borr
     'the agreeing record gets the measurement');
   assert.equal(acceptedResultFor(correlation, { requestId: reqId(GEN_A, 2), sequence: 9 }), null,
     'a record disagreeing with its own request id must not take it');
+});
+
+test('4e. a main-process record must carry a usable sequence to borrow a measurement', () => {
+  // The incomplete half of the invariant. The check used to read
+  // `if (recordSequence !== null && recordSequence !== parsed.sequence)`, so a record
+  // carrying NO sequence was accepted on its request id alone - and so was any
+  // non-finite or fractional one, because `int` maps all three to null. Such a
+  // record says nothing about which block it describes, so letting it take a
+  // measurement would report some other block's round trip as this one's.
+  const correlation = correlateWorkletResults([acceptedEvent(GEN_A, 2, { roundTripMs: 12 })]);
+  const id = reqId(GEN_A, 2);
+  assert.equal(acceptedResultFor(correlation, { requestId: id, sequence: 2 })?.roundTripMs, 12,
+    'baseline: a complete record agreeing with its request id is accepted');
+
+  // Missing.
+  assert.equal(acceptedResultFor(correlation, { requestId: id }), null, 'absent sequence');
+  assert.equal(acceptedResultFor(correlation, { requestId: id, sequence: null }), null, 'null sequence');
+  assert.equal(acceptedResultFor(correlation, { requestId: id, sequence: undefined }), null, 'undefined sequence');
+
+  // Invalid: present but not a finite integer.
+  assert.equal(acceptedResultFor(correlation, { requestId: id, sequence: Number.NaN }), null, 'NaN');
+  assert.equal(acceptedResultFor(correlation, { requestId: id, sequence: Number.POSITIVE_INFINITY }), null, 'Infinity');
+  assert.equal(acceptedResultFor(correlation, { requestId: id, sequence: Number.NEGATIVE_INFINITY }), null, '-Infinity');
+  assert.equal(acceptedResultFor(correlation, { requestId: id, sequence: '2' as unknown as number }), null, 'numeric string');
+  assert.equal(acceptedResultFor(correlation, { requestId: id, sequence: {} as unknown as number }), null, 'non-number');
+
+  // Fractional.
+  assert.equal(acceptedResultFor(correlation, { requestId: id, sequence: 2.5 }), null, 'fractional');
+  assert.equal(acceptedResultFor(correlation, { requestId: id, sequence: 1.999999 }), null, 'fractional just below');
+  assert.equal(acceptedResultFor(correlation, { requestId: id, sequence: 2.000001 }), null, 'fractional just above');
+
+  // Mismatched with the sequence its own request id encodes.
+  assert.equal(acceptedResultFor(correlation, { requestId: id, sequence: 3 }), null, 'off by one');
+  assert.equal(acceptedResultFor(correlation, { requestId: id, sequence: 1 }), null, 'off by one below');
+  assert.equal(acceptedResultFor(correlation, { requestId: id, sequence: -1 }), null, 'negative');
+  assert.equal(acceptedResultFor(correlation, { requestId: id, sequence: 0 }), null, 'a different block');
+});
+
+test('4f. a record refused for its sequence still keeps its rejection evidence', () => {
+  // Tightening acceptance must not cost evidence: the rejection is the more
+  // important half of the record for a block that failed.
+  const correlation = correlateWorkletResults([rejectedEvent(GEN_A, 2, 'after-failure')]);
+  assert.equal(acceptedResultFor(correlation, { requestId: reqId(GEN_A, 2) }), null,
+    'a record with no sequence gets no measurement');
+  const rejections = rejectedResultsFor(correlation, { requestId: reqId(GEN_A, 2) });
+  assert.equal(rejections.length, 1, 'and its rejection is still reported');
+  assert.equal(rejections[0].reason, 'after-failure');
+});
+
+test('4g. acceptance needs an accepted result for that exact request id', () => {
+  // Conditions 1-3 can all hold while condition 4 fails: a well-formed record for a
+  // block the worklet never accepted.
+  const correlation = correlateWorkletResults([acceptedEvent(GEN_A, 2)]);
+  assert.equal(acceptedResultFor(correlation, { requestId: reqId(GEN_A, 3), sequence: 3 }), null,
+    'no accepted result exists for block 3');
+  assert.equal(acceptedResultFor(correlation, { requestId: reqId(GEN_B, 2), sequence: 2 }), null,
+    'and another generation\'s block 2 does not stand in for it');
 });
 
 test('4d. malformed and absent request identities are named, not silently dropped', () => {
@@ -146,8 +206,8 @@ test('5. different runtime generations cannot be mixed by sequence-number matchi
     acceptedEvent(GEN_B, 2, { roundTripMs: 99 }),
   ]);
   assert.equal(correlation.acceptedCount, 2);
-  assert.equal(acceptedResultFor(correlation, { requestId: reqId(GEN_A, 2) })?.roundTripMs, 10);
-  assert.equal(acceptedResultFor(correlation, { requestId: reqId(GEN_B, 2) })?.roundTripMs, 99,
+  assert.equal(acceptedResultFor(correlation, { requestId: reqId(GEN_A, 2), sequence: 2 })?.roundTripMs, 10);
+  assert.equal(acceptedResultFor(correlation, { requestId: reqId(GEN_B, 2), sequence: 2 })?.roundTripMs, 99,
     'each generation keeps its own measurement');
   assert.equal(runtimeGenerationOf(reqId(GEN_A, 2)), GEN_A);
   assert.equal(runtimeGenerationOf(reqId(GEN_B, 2)), GEN_B);
@@ -171,7 +231,7 @@ test('a second accepted result for one block is flagged, not silently merged', (
     acceptedEvent(GEN_A, 1, { roundTripMs: 50 }),
   ]);
   assert.equal(correlation.acceptedCount, 1, 'the first measurement is the one acted on');
-  assert.equal(acceptedResultFor(correlation, { requestId: reqId(GEN_A, 1) })?.roundTripMs, 8);
+  assert.equal(acceptedResultFor(correlation, { requestId: reqId(GEN_A, 1), sequence: 1 })?.roundTripMs, 8);
   const [duplicate] = rejectedResultsFor(correlation, { requestId: reqId(GEN_A, 1) });
   assert.equal(duplicate.correlationReason, 'duplicate-accepted',
     'the duplicate is retained as evidence and named as such');
@@ -186,7 +246,7 @@ test('non-result events and missing fields are ignored or left null', () => {
       pendingSequence: 1 },
   ]);
   assert.equal(correlation.acceptedCount, 1, 'a submit event is not a result');
-  const found = acceptedResultFor(correlation, { requestId: reqId(GEN_A, 1) });
+  const found = acceptedResultFor(correlation, { requestId: reqId(GEN_A, 1), sequence: 1 });
   assert.equal(found?.roundTripMs, null, 'an absent round trip stays null, not zero');
   assert.equal(found?.acceptedAtEpochMs, null);
 });
@@ -224,6 +284,59 @@ test('6b. the output guard keeps its own distinct frame positions', () => {
   assert.equal(described.nextSequence, null, 'a field this guard does not emit stays null');
   assert.equal(described.inputContextFrame, null);
   assert.equal(described.phase, 'mid-session');
+});
+
+test('6d. the pending guard reports which sample it was evaluated on', () => {
+  // The field set added because `currentOutputFrame` alone could not say whether the
+  // guard was evaluated at the quantum's start or at the sample that tripped it.
+  const described = describeDeadlineMiss({
+    event: 'pending-deadline-miss', sequence: 1, pendingSequence: 1, nextSequence: 2,
+    inputContextFrame: 3071, outputFrameAtQuantumStart: 2944, inputSampleIndex: 127,
+    inputQuantumFrames: 128, currentOutputFrame: 3071, nextQuantumOutputFrame: 3072,
+    dueOutputFrame: 3072, readySequences: [0], drySequences: [0, 1],
+  });
+  assert.ok(described);
+  assert.equal(described.outputFrameAtQuantumStart, 2944, 'the old value, preserved');
+  assert.equal(described.inputSampleIndex, 127, 'the last sample of the quantum');
+  assert.equal(described.inputQuantumFrames, 128);
+  assert.equal(described.currentOutputFrame, 3071, 'the frame actually being evaluated');
+  assert.equal(described.nextQuantumOutputFrame, 3072, 'where the pending block is needed');
+  assert.equal(described.framesBeforeDue, 1, 'it fired one frame before the block was due');
+});
+
+test('6e. the output guard fires AT the due frame, so it is never early', () => {
+  const described = describeDeadlineMiss({
+    event: 'deadline-miss', sequence: 1, dueOutputFrame: 3072, currentOutputFrame: 3072,
+    outputFrameAtQuantumStart: 3072, outputSampleIndex: 0, outputQuantumFrames: 128,
+    nextQuantumOutputFrame: 3200,
+  });
+  assert.ok(described);
+  assert.equal(described.outputSampleIndex, 0);
+  assert.equal(described.outputQuantumFrames, 128);
+  assert.equal(described.inputSampleIndex, null, 'the pending guard\'s index stays null here');
+  assert.equal(described.framesBeforeDue, 0, 'never early: it fires on the sample that needs the block');
+});
+
+test('6f. historical events without the new fields stay readable', () => {
+  // Evidence captured before this change has no outputFrameAtQuantumStart and friends.
+  // Nothing may be invented for them, but the derived distance still follows from the
+  // two frames such an event does carry.
+  const described = describeDeadlineMiss({
+    event: 'pending-deadline-miss', sequence: 1, currentOutputFrame: 2944, dueOutputFrame: 3072,
+  });
+  assert.ok(described);
+  assert.equal(described.outputFrameAtQuantumStart, null);
+  assert.equal(described.inputSampleIndex, null);
+  assert.equal(described.nextQuantumOutputFrame, null);
+  assert.equal(described.framesBeforeDue, 128,
+    'the old quantum-start value reads as 128 frames early, which is exactly the '
+    + 'overstatement this change corrects');
+});
+
+test('6g. framesBeforeDue is null when either frame is unknown', () => {
+  const described = describeDeadlineMiss({ event: 'deadline-miss', sequence: 1, currentOutputFrame: 3072 });
+  assert.ok(described);
+  assert.equal(described.framesBeforeDue, null, 'never inferred from a missing frame');
 });
 
 test('6c. an unrelated event is not described as a deadline miss', () => {
