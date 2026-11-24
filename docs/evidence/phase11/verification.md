@@ -1097,21 +1097,104 @@ entries.
 `test:audio` 2507/2507 with `Orphaned: 0`; `test:history` 1283/1283; `verify:desktop` pass;
 `build` pass.
 
+### `a75cb15` — the gate failed on the first repetition, and the diagnostic proved the verdict fix
+
+| Workflow | Run | Result |
+|---|---|---|
+| Apex Studio CI | `45363852323` | success |
+| Audio Validation | `45363852139` | success |
+| Native VST3 Validation | `45363852096` | success |
+| P9 High-DPI Editor Acceptance | `45363852063` | success |
+| Desktop Validation | `45363852076` | **failure**, job `138340398318` |
+
+**Gating five-run acceptance: FAILED on repetition 1.** Warm-up timed out at
+`waitedMs 60344` of 60000 with `prepared=false`, `processedBlocks 2` equal to
+`priorBlocks 2`, `deadlineMisses 1`. The guard was `pending-deadline-miss`, sequence 1,
+phase cold, `currentOutputFrame 2944`, `dueOutputFrame 3072`, `readySequences [0]`,
+`drySequences [0, 1]`. It failed fast — one repetition, no retry, no re-roll — and the job
+concluded `failure`.
+
+That is the clearest statement yet that **the deadline defect is real and still present**:
+the production gate now fails on it, on the first attempt, at this HEAD.
+
+**The diagnostic ran anyway and completed all 60 repetitions** (42.1 min), which is the §4
+requirement demonstrated on the gate-failure path — the case the condition was written for.
+It reported **59 PASS / 1 FAIL**, failing repetition 45 with the same signature (sequence 1,
+cold, 2944 vs 3072, `lagMax 56.38`). Its evidence reached artifact `14909616404`, 534,357 B.
+
+**The verdict fix is now proven, not just asserted.** The diagnostic exited non-zero because
+one repetition failed, the new wrapper published `::error title=cold-start diagnostic exited
+1` carrying the evidence directory, the node version and the last 40 lines — and GitHub
+*still* reported the step's outcome as `success`, because `continue-on-error` forces it. So
+`steps.native-diagnostic.outcome` is confirmed unusable as a result, and `outputs.result` is
+what carries the truth.
+
+### First CPU-clock tick in the evidence, and it shows why these numbers are not durations
+
+Sequence 1 of the failing block in repetition 45 is the first block on record where the
+per-thread CPU clock actually advanced:
+
+```
+helperDecodeMs                7.250     helperInstanceProcessMs     7.618
+helperHostPrepareMs           1.919     helperInstanceProcessCpuMs 15.625
+helperPluginCallbackMs        5.578     helperPluginCallbackCpuMs  15.625
+helperHostCollectMs           0.121     helperHostCollectCpuMs      0
+helperCpuTimingSupported      true      helperCpuClockTickObserved  true
+helperCpuClockObservedStepMs  15.625    helperRoundTripMs          18.817
+```
+
+**The CPU total, 15.625 ms, exceeds the wall total that contains it, 7.618 ms.** That is not
+a measurement error; it is the clock handing back one whole 15.625 ms tick for a span of
+7.6 ms. The neighbouring block in the same run reads `cpuTimingSupported true`,
+`cpuClockTickObserved false` and every `*CpuMs` 0 against a 1.009 ms wall span.
+
+So both states the new fields exist to separate are now observed on Windows side by side, and
+the conclusion is stronger than before: at this granularity the CPU numbers are **quantised to
+15.625 ms and cannot be interpreted as durations at all** — not merely "too coarse to be
+useful". No audio scheduling or production processing decision may use them, and the
+helper-versus-scheduling question is still unanswered.
+
+### The corrected correlation, working in production
+
+The same rejected block shows the §2 invariant doing its job on real evidence:
+
+```
+resultAccepted false   resultRejectionReasons ["after-failure"]
+resultCorrelationReasons ["not-accepted"]
+totalRoundTripMs null  marginMs null
+rejectedResults [{ reason "after-failure", pendingSequence 1,
+                   receivedOutputFrame 3072, dueOutputFrame 3072, roundTripMs 23 }]
+```
+
+A rejected result yields no round trip and no margin, carries its specific reason, and keeps
+its 23 ms visible only as rejection evidence. And again the result arrived *at* the due frame
+— 3072 against 3072 — so this is not a late arrival.
+
+### The one-second exit at `9c4e28a` was never explained
+
+At `9c4e28a` the diagnostic step ran for one second, exited 1, created no evidence directory
+and produced no artifact. At `a75cb15` it ran normally for 42 minutes. The only change between
+them was the `run:` wrapper, so the earlier behaviour is **unexplained and recorded as such**
+rather than attributed to a fix. Had the wrapper been in place then, its `::error` annotation
+would have carried the reason.
+
 ### Still NOT VERIFIED
 
-- **The cold-start real-time deadline defect is unfixed and NOT VERIFIED.** The gate passed 5/5 at
-  `bbfbfa9`, but the diagnostic measured 8 failures in 60 on the same runner minutes later, and at
-  that rate a five-run gate passes roughly half the time by luck. The diagnostic at `7de4599` failed
-  1 of 60, the corrected-correlation rate at `d960d11` was 1 in 60, and the packaged run on
-  `25442d66` failed 0 of 5 during warm-up. Each result belongs to its own commit, and none of them
-  is a pass for the defect.
+- **The cold-start real-time deadline defect is unfixed.** At `a75cb15` the production gate FAILED on
+  repetition 1 — warm-up timeout with `deadlineMisses 1` — so this is no longer merely unverified: the
+  gate itself fails on it at the current HEAD. The results across this branch's commits do not agree,
+  and that disagreement is the honest summary: gate 5/5 at `bbfbfa9`, gate FAIL at `a75cb15`;
+  diagnostics of 1/60 at `7de4599`, 8/60 at `bbfbfa9`, 1/60 at `a75cb15`, 1/60 at `d960d11`; and 0 of
+  5 during warm-up at `25442d66`. Each belongs to its own commit, and none is a pass for the defect.
 - The cause of a miss is still not established, but its shape now is. Across all eight failures at
   `bbfbfa9` the guard latched exactly 128 frames before the due frame, and the result then arrived
   at the due frame inside budget, rejected `after-failure`. Not one of them is a late result, so the
   open question is why the pending-state guard fires early — not why results arrive late. The 70–76 ms
   event-loop lag common to all eight, against 48–53 ms in passing runs, is correlated and unproven.
-- Whether the host-preparation spikes are descheduling rather than expensive code: Windows CPU spans
-  read 0, which is below the observed clock step and carries no information either way.
+- Whether the host-preparation spikes are descheduling rather than expensive code. 668 of the 710
+  blocks at `a75cb15` measured no CPU tick, and the one block that did tick reported 15.625 ms of CPU
+  inside 7.618 ms of wall. The clock is quantised to 15.625 ms, so these numbers are not durations and
+  cannot settle the question either way.
 - The gate's 5/5 at `bbfbfa9` and the diagnostic's 52/8 at the same commit are both real and they
   disagree. That disagreement is the point: five repetitions cannot resolve a 13% failure rate, and
   the diagnostic is non-gating, so neither number stands in for the other.
