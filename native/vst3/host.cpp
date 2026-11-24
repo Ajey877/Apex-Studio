@@ -156,6 +156,13 @@ std::vector<float> decodePlanarAudio(const std::string& encoded, int frames) {
 // unit-tested against the same code the helper ships, rather than against a copy.
 #include "process-timings.hpp"
 
+// Smallest positive advance of the per-thread CPU clock observed by this helper
+// during its one-time startup calibration, in ms, or -1 when no tick was observed.
+// It exists so a zero helper*CpuMs reading can be reported honestly as "below the
+// smallest step we measured" instead of being read as zero CPU. It is a measured
+// observation, not the clock's exact resolution.
+static double g_apexObservedCpuStepMs = -1;
+
 class Instance {
   // Declaration order matters: SDK objects are released BEFORE the module unloads.
   IPtr<HostApplication> host = owned(new HostApplication());
@@ -548,13 +555,6 @@ public:
     checkedProcessing(processor->setProcessing(true), "Cannot resume after state capture"); processing = true;
     return state;
   }
-// Smallest positive advance of the per-thread CPU clock observed by this helper
-// during its one-time startup calibration, in ms, or -1 when no tick was observed.
-// It exists so a zero helper*CpuMs reading can be reported honestly as "below the
-// smallest step we measured" instead of being read as zero CPU. It is a measured
-// observation, not the clock's exact resolution.
-static double g_apexObservedCpuStepMs = -1;
-
   std::vector<float> process(const json& request, bool flush = false,
                              ProcessTimings* timings = nullptr) {
     // The observed CPU-clock step comes from the one-time startup calibration. It

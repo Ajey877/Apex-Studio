@@ -887,14 +887,30 @@ plug-in running its own worker threads would account that CPU elsewhere; the hel
 question remains **unanswered**; and no audio scheduling or production processing decision may use
 these measurements.
 
+**A build break introduced here, found by CI and fixed.** The calibration variable was first inserted
+immediately before `Instance::process`, which put it inside the class body. `host.cpp` cannot be
+compiled in this sandbox — it needs the VST3 SDK headers only the Windows job fetches — so the error
+surfaced only there: MSVC `C2864` (a static data member with an in-class initializer) at
+`native/vst3/host.cpp:556`, plus `C2065` undeclared identifier in `main()`. That is CI run
+`45341794270`, job `138266934206`, step 10 `Validate Windows package`. The declaration now sits at file
+scope, ahead of `class Instance`, and `tests/nativeHostFileScope.test.mjs` asserts that locally via a
+brace-depth reader: re-inserting it into the class body fails two of its four tests. The reader is a
+brace counter that skips `//` comments and string literals, not a C++ parser; it answers only the
+scope question it is used for.
+
+That run also exercised the diagnostic condition correctly: with step 10 failed, the diagnostic's
+`steps.windows-package-dir.outcome == 'success'` was false, so it was skipped rather than running
+against a package that does not exist, while the new verdict and evidence-upload steps still ran
+(`if: always()`), and the job concluded `failure` on the gating step.
+
 ### Local results at `d5155d2`
 
 | Command | Result |
 |---|---|
 | `npm run lint` | pass, no output |
-| `npm run test:native-cold-start` | 40/40 pass, 0 fail |
+| `npm run test:native-cold-start` | 44/44 pass, 0 fail |
 | `npm run test:native-timings-cpp` | all checks passed |
-| `npm run test:audio` | 2507/2507 pass, `Orphaned: 0` (343 files) |
+| `npm run test:audio` | 2507/2507 pass, `Orphaned: 0` (344 files) |
 | `npm run test:history` | 1283/1283 pass, `Orphaned: 0` |
 | `npm run verify:desktop` | pass |
 | `npm run build` | pass, built in 6.30 s |
@@ -903,9 +919,11 @@ Files changed: `.github/workflows/desktop-validation.yml`, `desktop-vst3.cjs`,
 `native/vst3/client.mjs`, `native/vst3/host.cpp`, `native/vst3/process-timings.hpp`,
 `native/vst3/tests/process-timings.test.cpp`, `package.json`,
 `scripts/packaged-native-monitoring-acceptance.mjs`, `scripts/lib/cpuObservation.mjs` (new),
+`scripts/lib/cppScopeDepth.mjs` (new),
 `src/audio/liveInputAcceptance.ts`, `src/audio/workletResultCorrelation.ts`,
 `src/audio/workletResultCorrelation.test.ts`, `tests/nativeHelperColdStartTimings.test.mjs`,
-`tests/ciDiagnosticWorkflow.test.mjs` (new), `tests/cpuObservation.test.mjs` (new).
+`tests/ciDiagnosticWorkflow.test.mjs` (new), `tests/cpuObservation.test.mjs` (new),
+`tests/nativeHostFileScope.test.mjs` (new).
 
 Not changed: the fail-closed guards (`pending-deadline-miss`, `deadline-miss`), block size, fixed
 latency and buffering, bypass, queue, serialization and transport. No production audio behaviour was
