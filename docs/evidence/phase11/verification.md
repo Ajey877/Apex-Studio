@@ -1393,6 +1393,52 @@ the halving pass and their length is still recorded if the hard cap ever bites.
 the fix and the defect it replaces. The verbose `runs` list is still reduced as before
 (`runsReducedFrom 60`, `runsKept 7` under the reproduction's cap), so the cap is still honoured.
 
+### `25c5b20` — the reducer fix proved in CI, and one failure that removes all doubt
+
+Desktop Validation run `45394221153`, job `138445575612`, conclusion **failure**. The other four
+workflows at this commit are success: Apex Studio CI `45394221130`, Audio Validation `45394221225`,
+Native VST3 Validation `45394221140`, P9 High-DPI Editor Acceptance `45394221136`.
+
+The failure is the packaged Windows runtime smoke test (step 16), not the deadline work:
+`Mixer onset alignment two inserts: production Mixer transport stopped during capture`, with all five
+smoke inserts reporting `VST3 ready. Fixed live block buffering: 42.7 ms`. It cascaded exactly as the
+workflow is written — steps 17, 19, 23 and 27 skipped, step 25 (`Record the packaged acceptance
+verdict`) failed with `Packaged acceptance did not report an exit code`. **The five-run gate did not
+run at this commit, so there is no 5-run measurement for it.** Audio Validation — which runs
+`test:audio`, including the new boundary test file — passed.
+
+The diagnostic runs on its own condition and completed anyway: 12:38:33 → 13:23:11Z (44.6 min),
+**56 PASS / 4 FAIL**, `tightestMarginMs 3.33`, `slowestBlockMs 18`, `blockBudgetMs 21.33`. CPU:
+60 runs, 680 blocks, `clockUnavailable 0`, `cpuFieldNull 0`, `noClockTick 639`, `positiveCpuDelta 41`,
+`smallestObservedCpuClockStepMs 15.625`. Artifacts: diagnostic evidence `14922284734` (726,950 B),
+packaged VST3 evidence `14922554352` (273,026 B).
+
+**The reducer fix is confirmed in production.** The aggregate annotation reports
+`failingRepetitions: [2, 11, 12, 37]` alongside `failed: 4` — the list and the count agree, and both
+agree with the 60-character verdict string. `runsReducedFrom 60 / runsKept 30` shows the verbose list
+is still reduced, so the size cap is still honoured. Under the previous behaviour this annotation
+would have named one repetition for four failures.
+
+All four failures have the same shape as `3c3817d`'s:
+
+| run | `outputFrameAtQuantumStart` | `inputSampleIndex` | `currentOutputFrame` | `dueOutputFrame` | `framesBeforeDue` | rejection |
+| --- | --- | --- | --- | --- | --- | --- |
+| 2  | 2944 | 127 | 3071 | 3072 | **1** | `after-failure`, recv 3072, due 3072, rtt 18 |
+| 11 | 2944 | 127 | 3071 | 3072 | **1** | `after-failure`, recv 3072, due 3072, rtt 11 |
+| 12 | 2944 | 127 | 3071 | 3072 | **1** | `after-failure`, recv 3072, due 3072, rtt 17 |
+| 37 | 2944 | 127 | 3071 | 3072 | **1** | `after-failure`, recv 3072, due 3072, rtt 18 |
+
+**Run 11 removes any remaining doubt about whether these are overruns.** Its sequence-1 block measured
+`nativeServiceCallMs 4.02` and `helperRoundTripMs 3.74` against a 21.33 ms budget — under a fifth of
+the available time — and the worklet's own round trip was 11 ms. The native work finished with roughly
+10 ms to spare, the result came back, and it was refused because the guard had latched one frame
+earlier. No reading of the CPU clock is needed for that conclusion, and none is used: 639 of the 680
+blocks measured no tick.
+
+Across `3c3817d` and `25c5b20` that is eight diagnostic failures, every one with `framesBeforeDue: 1`
+and a result delivered at exactly the due frame. These are two runs of the same instrumentation on
+different commits; they are reported separately and not pooled into one rate.
+
 ### Still NOT VERIFIED
 
 - **The cold-start real-time deadline defect is unfixed.** Nothing in the boundary investigation
@@ -1400,9 +1446,10 @@ the fix and the defect it replaces. The verbose `runs` list is still reduced as 
   warm-up timeout with `deadlineMisses 1` — and at `2d4befd` it passed 5/5, so the gate does not
   resolve the defect either way. The results across this branch's commits do not agree, and that
   disagreement is the honest summary: gate 5/5 at `bbfbfa9`, gate FAIL at `a75cb15`, gate 5/5 at
-  `2d4befd`, gate 5/5 at `3c3817d`; diagnostics of 1/60 at `d960d11`, 1/60 at `7de4599`, 8/60 at
-  `bbfbfa9`, 1/60 at `a75cb15`, 1/60 at `2d4befd`, 4/60 at `3c3817d`; and 0 of 5 during warm-up at
-  `25442d66`. Each belongs to its own commit, and none is a pass for the defect.
+  `2d4befd`, gate 5/5 at `3c3817d`, gate not run at `25c5b20`; diagnostics of 1/60 at `d960d11`,
+  1/60 at `7de4599`, 8/60 at `bbfbfa9`, 1/60 at `a75cb15`, 1/60 at `2d4befd`, 4/60 at `3c3817d`,
+  4/60 at `25c5b20`; and 0 of 5 during warm-up at `25442d66`. Each belongs to its own commit, and
+  none is a pass for the defect.
 - **Corrected by the boundary investigation above:** the "guard latched 128 frames before the due
   frame" reading in the `bbfbfa9` failures was an instrumentation artifact, not a measurement. The
   guard fires exactly **one** frame early, which follows from the pipeline delay being exactly two
