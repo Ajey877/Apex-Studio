@@ -766,3 +766,166 @@ Two consequences, stated plainly:
   actually large enough to see.
 
 This is recorded as a limitation of the instrumentation, not as a result.
+
+## Independent review round 2 (post-`25442d66`)
+
+Started from `25442d6611b784ddf74b4f54d3169078a0a7f534`; this section describes `d5155d2`. Nothing
+above is restated as new: where a result belongs to an earlier commit it is named as such, and the
+historical `d960d11` run stays separated from anything measured at this HEAD.
+
+### 1. The correlation invariant is now complete
+
+`src/audio/workletResultCorrelation.ts` previously checked the event type, `accepted`, and a
+well-formed `requestId`. It did **not** check that `event.sequence` agreed with the sequence encoded
+in that `requestId`, that `pendingSequence` equalled the sequence, or that the main-process record's
+sequence agreed with its own `requestId`. An accepted measurement now has to satisfy every link:
+
+| Link | Failure reason recorded |
+|---|---|
+| event is `worklet-result` | (not a result event: ignored) |
+| `accepted === true` | `not-accepted` |
+| `requestId` present and well formed (`runtimeId:sequence`) | `request-id-missing`, `request-id-malformed` |
+| `event.sequence` present | `sequence-missing` |
+| `event.sequence` equals the `requestId`'s sequence | `sequence-disagrees-with-request-id` |
+| `pendingSequence === sequence` | `pending-sequence-mismatch` |
+| the record's sequence equals its `requestId`'s | `sequence-disagrees-with-request-id` |
+| not already accepted for this generation | `duplicate-accepted` |
+
+Rejected and unattributable evidence is preserved with its reason and its timings; `totalRoundTripMs`
+and `marginMs` stay `null` unless the chain held. `rejectionReasons` gives aggregate counts, and
+`liveInputAcceptance.ts` surfaces `workletResultRejectionReasons` plus a per-rejection
+`correlationReason`. Nothing infers acceptance from a timestamp, and sequence numbers are never
+compared across runtime generations.
+
+**The test the review called insufficient is gone.** The old "wrong pending sequence" case supplied an
+event already carrying `accepted: false`, so the mismatch itself was never exercised — it tested the
+`not-accepted` branch twice. It is replaced by an event with `accepted: true`, `sequence: 3` and
+`pendingSequence: 7`, which now fails on the mismatch and is expected to yield
+`correlationReason: 'pending-sequence-mismatch'` with no round trip or margin, while its round trip
+is still preserved as rejection evidence. Added alongside it: a `requestId` encoding sequence 2
+against `event.sequence` 5; a record whose sequence 9 disagrees with its `requestId`'s 2; five
+malformed or absent identities, all unattributable; and a valid accepted event asserting the exact
+`rejectionReasons` map.
+
+### 2. The cold-start timing failure was a fixture defect
+
+CI run `45204030419` ("Apex Studio CI", head `25442d6`), job `137794777635`, failed at step 7,
+"Native helper cold-start timing attribution", on the assertion at
+`tests/nativeHelperColdStartTimings.test.mjs:253` that the helper instance total cannot exceed the
+round trip containing it. Its annotations carried only `Process completed with exit code 1`, so the
+cause was established by reading the fixture and the client, not from CI detail.
+
+The fake helper reported `helperInstanceProcessMs` by echoing the constant it had been told to sleep
+for — `instanceMs = 60` — while `helperRoundTripMs` was genuinely measured as
+`responseAtMs - writeAtMs`, with `writeAtMs` stamped before the write. The neighbouring assertion
+only required the round trip to be at least 55 ms. So any run landing between 55 and 60 ms failed
+line 253: a real measurement of the container was being compared against a fabricated measurement of
+its contents. **A fixture defect** — not a measurement defect in the instrumentation, and not an
+invalid test assumption: the invariant itself is correct and worth keeping.
+
+It did not reproduce locally: 15 consecutive runs under six competing busy loops passed 15/15, which
+is consistent with a boundary that only a slower runner crosses.
+
+The fix measures instead of asserting. The helper now times its three stages with
+`performance.now()` — prepare 20 ms, callback 35 ms, collect 5 ms — and the assertions require each
+stage to be at least its injected duration, plus a distinctness check so a fixture that collapsed the
+stages would fail. A failure now prints `helperInstanceProcessMs`, `helperRoundTripMs`, `writeAtMs`,
+`responseAtMs`, `helperRequestLineReadAtMs` and `helperRepliedAtMs`. No timeout was raised, no
+assertion was removed, and none was weakened: the container-contains-contents comparison at line 253
+still runs, now against two measured values.
+
+### 3. The 60-run diagnostic now runs after a gate failure
+
+`.github/workflows/desktop-validation.yml` conditioned the diagnostic on `runner.os == 'Windows'`
+alone. In GitHub Actions a step with no explicit `if` inherits `success()`, so when the five-run gate
+failed the job ended and the diagnostic was skipped — it never ran in the one situation it exists
+for. The condition is now
+`!cancelled() && runner.os == 'Windows' && steps.windows-package-dir.outcome == 'success' && steps.native-helper-build.outcome == 'success'`,
+which runs after a failed gate but not when there is nothing to measure or the run was cancelled.
+
+Preserved: the gate stays fail-fast at 5 repetitions with no `continue-on-error`; the diagnostic
+attempts all 60 with `APEX_NATIVE_MONITORING_CONTINUE_AFTER_FAILURE: '1'` and stays
+`continue-on-error: true`; no repetition is retried, re-rolled or counted twice. A job's conclusion
+reflects every step that ran without `continue-on-error`, so the gate alone can still fail the job and
+the diagnostic cannot undo that — and the two verdicts are now printed by separate steps so they are
+never conflated. `tests/ciDiagnosticWorkflow.test.mjs` evaluates the workflow's own condition
+expression against six scenarios, including the gate-failed case; reverting the condition to the
+OS-only form makes it fail, which is how the test was shown to be load-bearing.
+
+Two evidence defects were found while doing this and are fixed. The acceptance script wrote its
+evidence under the **packaged resources tree**, while the upload step read the repository's
+`build/native-monitoring-evidence`, so the coexistence evidence the upload found was not the evidence
+the run produced; the directory is now passed in explicitly and absolutely. And the gate's evidence
+was uploaded *before* the diagnostic ran, so the diagnostic's 60-run evidence never reached an
+artifact at all and would have overwritten the gate's. The diagnostic now writes
+`build/native-diagnostic-evidence`, uploaded by its own step, `if: always()`, after it runs.
+
+### 4. The CPU evidence now distinguishes what it actually saw
+
+`helperCpuTimingSupported` alone could not separate "the platform has no per-thread CPU clock" from
+"the clock exists but never advanced during this span". Two fields are added and plumbed from
+`process-timings.hpp` through `host.cpp`, `client.mjs`, `desktop-vst3.cjs` and
+`liveInputAcceptance.ts`:
+
+- `helperCpuClockTickObserved` — true only when the per-thread CPU clock was seen to advance during
+  the block. False with a supported clock means the span was shorter than one clock step: the CPU time
+  is **unknown, below one step**, not zero.
+- `helperCpuClockObservedStepMs` — the smallest advance measured by a one-time startup calibration,
+  run before any plug-in instance exists and never inside `Instance::process()`, where a busy-wait
+  would sit inside the span being measured.
+
+The three states are counted separately in the aggregate annotation by
+`scripts/lib/cpuObservation.mjs` (`clockUnavailable` / `noClockTick` / `positiveCpuDelta`, plus
+`cpuFieldNull` for absent or sentinel readings), each block landing in exactly one. The observed step
+is reported as an observation of how the clock steps and is explicitly **not** the clock's exact
+resolution — nothing measures that. On Linux the calibration observes a step of about 0.0005–0.009 ms,
+which is why the same code measures a 30 ms injected sleep as 0.07 ms of CPU there while Windows reads
+0 for 1–2 ms spans.
+
+Stated limits, carried in the evidence text itself: these are **helper-thread** CPU times, so a
+plug-in running its own worker threads would account that CPU elsewhere; the helper-versus-scheduling
+question remains **unanswered**; and no audio scheduling or production processing decision may use
+these measurements.
+
+### Local results at `d5155d2`
+
+| Command | Result |
+|---|---|
+| `npm run lint` | pass, no output |
+| `npm run test:native-cold-start` | 40/40 pass, 0 fail |
+| `npm run test:native-timings-cpp` | all checks passed |
+| `npm run test:audio` | 2507/2507 pass, `Orphaned: 0` (343 files) |
+| `npm run test:history` | 1283/1283 pass, `Orphaned: 0` |
+| `npm run verify:desktop` | pass |
+| `npm run build` | pass, built in 6.30 s |
+
+Files changed: `.github/workflows/desktop-validation.yml`, `desktop-vst3.cjs`,
+`native/vst3/client.mjs`, `native/vst3/host.cpp`, `native/vst3/process-timings.hpp`,
+`native/vst3/tests/process-timings.test.cpp`, `package.json`,
+`scripts/packaged-native-monitoring-acceptance.mjs`, `scripts/lib/cpuObservation.mjs` (new),
+`src/audio/liveInputAcceptance.ts`, `src/audio/workletResultCorrelation.ts`,
+`src/audio/workletResultCorrelation.test.ts`, `tests/nativeHelperColdStartTimings.test.mjs`,
+`tests/ciDiagnosticWorkflow.test.mjs` (new), `tests/cpuObservation.test.mjs` (new).
+
+Not changed: the fail-closed guards (`pending-deadline-miss`, `deadline-miss`), block size, fixed
+latency and buffering, bypass, queue, serialization and transport. No production audio behaviour was
+modified, and the native processing path was not optimised.
+
+### Still NOT VERIFIED
+
+- **The cold-start real-time deadline defect is unfixed and NOT VERIFIED.** The most recent packaged
+  run on `25442d66` failed 0 of 5 during warm-up, which is not a pass and is not evidence the defect
+  is gone. The corrected-correlation rate measured at `d960d11` was 1 in 60; that result belongs to
+  that commit.
+- The cause of a miss is still not established. Run 51 at `d960d11` showed the guard latching at
+  `currentOutputFrame 2944` for a block due at 3072, with the result then arriving at 3072 on a 19 ms
+  round trip — inside the 21.33 ms budget — rejected only because failure had already latched. A
+  "miss" can therefore be the pending-state guard firing before the due frame, so no miss may be
+  called a late result without checking this.
+- Whether the host-preparation spikes are descheduling rather than expensive code: Windows CPU spans
+  read 0, which is below the observed clock step and carries no information either way.
+- Per-repetition detail in the aggregate annotation is incomplete: the reducer in
+  `scripts/lib/ciAnnotation.mjs` still keeps 30 of 60 runs. The pass/fail header is authoritative;
+  the per-run list is not.
+- Physical hardware is `NOT_VERIFIED`, and artifact-zip contents have not been read — CI evidence was
+  taken from annotations.
