@@ -1439,6 +1439,52 @@ Across `3c3817d` and `25c5b20` that is eight diagnostic failures, every one with
 and a result delivered at exactly the due frame. These are two runs of the same instrumentation on
 different commits; they are reported separately and not pooled into one rate.
 
+### `3635c6b` — a 60/0 diagnostic on identical production code, which is a measurement of variance
+
+Desktop Validation run `45403320815`, job `138477298626`, conclusion **success**. The five-run gate
+passed 5/5 (`coexistence: PASS 5 of 5`), and the 60-repetition diagnostic measured **60 PASS / 0
+FAIL** — `failingRepetitions []`, the verdict string all `P`, `tightestMarginMs 9.33`,
+`slowestBlockMs 12`, `runsReducedFrom 60 / runsKept 30`.
+
+**This is not evidence of a fix, and it must not be read as one.** The only file that changed between
+`25c5b20` and `3635c6b` is this document:
+
+```
+docs/evidence/phase11/verification.md | 53 +++++++++++++++++++++++++++++++++--
+1 file changed, 50 insertions(+), 3 deletions(-)
+```
+
+The production code is byte-identical. Two consecutive runs of the same binary measured 4 failures in
+60 and then 0 failures in 60. That gap is the single most useful number in this section: it puts the
+run-to-run spread of the diagnostic at four failures or more on unchanged code, so **no 60-repetition
+result on this branch distinguishes "fixed" from "did not happen this time"**, and a 5-repetition gate
+certainly does not. It is also why re-rolling for a green run would be meaningless here.
+
+The P9 High-DPI workflow reported `failure` on this run, in the **baseline** lane only (job
+`138477298773`, step 11); the `branch` and `branch-second-display` lanes passed. That lane pins
+`native/vst3` to tree `2c63e3b7f952945d181207b40d8b3b086f75dd85` of commit `c246e2a9` and expects to
+reproduce the P9-K sizing defect; its own verdict says it did not — `baseline: this run is NOT the
+expected reproduction of the P9-K sizing defect. 6 problem(s)`, with `P9-B`/`P9-C` failing where they
+pass on pre-fix sources. Nothing in `2d4befd..3635c6b` touches `native/` at all
+(`git diff --name-only 2d4befd..3635c6b -- native/` is empty), and this workflow was `success` at
+`2d4befd`, `3c3817d` and `25c5b20`, so this is a runner-condition failure in a lane that does not
+build this branch's native sources. It is unrelated to the deadline work and is reported as such
+rather than explained.
+
+### The failure shape, counted across the instrumented runs
+
+Eight diagnostic failures were measured with the corrected frame fields — four at `3c3817d`
+(repetitions 4, 14, 29, 60) and four at `25c5b20` (repetitions 2, 11, 12, 37). **All eight report
+`framesBeforeDue: 1`**: the guard latched at output frame `due − 1`, and in every one of the eight the
+result was then delivered at exactly the due frame and refused as `after-failure`.
+
+They are not overruns. The helper round trips for those blocks were 16.91, 16.64, 14.35, 19.16, 13.95,
+3.74, 16.87 and 14.64 ms against a 21.33 ms budget. Repetition 11 at `25c5b20` is the clearest:
+`nativeServiceCallMs 4.02`, `helperRoundTripMs 3.74`, worklet round trip 11 ms — the native work
+finished with roughly 10 ms to spare and the result was still refused.
+
+These are two runs on two commits and are reported separately; the eight are not pooled into one rate.
+
 ### Still NOT VERIFIED
 
 - **The cold-start real-time deadline defect is unfixed.** Nothing in the boundary investigation
@@ -1446,10 +1492,12 @@ different commits; they are reported separately and not pooled into one rate.
   warm-up timeout with `deadlineMisses 1` — and at `2d4befd` it passed 5/5, so the gate does not
   resolve the defect either way. The results across this branch's commits do not agree, and that
   disagreement is the honest summary: gate 5/5 at `bbfbfa9`, gate FAIL at `a75cb15`, gate 5/5 at
-  `2d4befd`, gate 5/5 at `3c3817d`, gate not run at `25c5b20`; diagnostics of 1/60 at `d960d11`,
-  1/60 at `7de4599`, 8/60 at `bbfbfa9`, 1/60 at `a75cb15`, 1/60 at `2d4befd`, 4/60 at `3c3817d`,
-  4/60 at `25c5b20`; and 0 of 5 during warm-up at `25442d66`. Each belongs to its own commit, and
-  none is a pass for the defect.
+  `2d4befd`, gate 5/5 at `3c3817d`, gate not run at `25c5b20`, gate 5/5 at `3635c6b`; diagnostics of
+  1/60 at `d960d11`, 1/60 at `7de4599`, 8/60 at `bbfbfa9`, 1/60 at `a75cb15`, 1/60 at `2d4befd`,
+  4/60 at `3c3817d`, 4/60 at `25c5b20`, **0/60 at `3635c6b` on production code identical to
+  `25c5b20`**; and 0 of 5 during warm-up at `25442d66`. Each belongs to its own commit, and none is a
+  pass for the defect. The `25c5b20`/`3635c6b` pair is the clearest statement of the spread: four
+  failures and then none, on the same binary.
 - **Corrected by the boundary investigation above:** the "guard latched 128 frames before the due
   frame" reading in the `bbfbfa9` failures was an instrumentation artifact, not a measurement. The
   guard fires exactly **one** frame early, which follows from the pipeline delay being exactly two
