@@ -849,7 +849,7 @@ if (process.env.GITHUB_ACTIONS) {
       row.worst !== null && (worst === null || row.worst > worst) ? row.worst : worst), null),
     blockBudgetMs: r2(allRuns.find(run => run.coldStart)?.coldStart?.blockBudgetMs),
     runs: aggregate,
-  }, { keepCounts: ['runs'] });
+  }, { keepCounts: ['runs'], exact: ['failingRepetitions'] });
   // Block keys, and what each means:
   //   inst = whole Instance::process() in the helper
   //   prep / cb / coll = host preparation, the processor->process(data) callback,

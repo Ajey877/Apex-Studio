@@ -117,3 +117,48 @@ test('a payload that fits is not marked as reduced', async () => {
   assert.equal(body.runsReducedFrom, undefined, 'nothing was given up, so nothing is claimed');
   assert.equal(body.runsKept, undefined);
 });
+
+test('a failure list is never halved, because its length is the result', async () => {
+  // Regression for the 60-repetition diagnostic at `3c3817d` (job 138406885418),
+  // which reported `failed: 4` alongside `failingRepetitions: [4]`. The reducer's
+  // secondary pass halves every array that is not `preserve`, so a four-entry list
+  // became [4, 29] and then [4] - and a one-entry list still reads as "one
+  // repetition failed". keepCounts records a reduction; it does not prevent one, so
+  // a list that IS the result has to be held out of the halving pass.
+  const { buildCiAnnotation } = await import('../scripts/lib/ciAnnotation.mjs');
+  const failing = [4, 14, 29, 60];
+  const runs = Array.from({ length: 60 }, (_, i) => ({
+    r: i + 1, st: failing.includes(i + 1) ? 'FAIL' : 'PASS',
+    worst: 16, margin: 5.33, lagAudio: 2.82, lagMax: 77.35, load: 53.79,
+  }));
+  const { text, truncated } = buildCiAnnotation('aggregate', {
+    label: 'coldstart-diagnostic', repetitions: 60,
+    perRepetitionVerdicts: runs.map(row => (row.st === 'PASS' ? 'P' : 'F')).join(''),
+    failingRepetitions: failing, passed: 56, failed: 4, tightestMarginMs: 3.33, runs,
+  }, { cap: 1400, keepCounts: ['runs'], exact: ['failingRepetitions'] });
+  assert.equal(truncated, false);
+  const body = JSON.parse(text.slice(text.indexOf('{')));
+  assert.equal(body.failed, 4);
+  assert.deepEqual(body.failingRepetitions, failing,
+    'every failing repetition must be named, not just the first');
+  assert.ok(body.runs.length < 60, 'the verbose list is still reduced to fit the cap');
+  assert.equal(body.runsReducedFrom, 60);
+});
+
+test('without the exact option the old halving is what a reader would have got', async () => {
+  // Pins the defect itself, so the regression test above cannot pass by accident if
+  // `exact` ever stops being honoured: the same payload, unreduced list protected,
+  // loses three of its four entries.
+  const { buildCiAnnotation } = await import('../scripts/lib/ciAnnotation.mjs');
+  const runs = Array.from({ length: 60 }, (_, i) => ({
+    r: i + 1, st: [4, 14, 29, 60].includes(i + 1) ? 'FAIL' : 'PASS',
+    worst: 16, margin: 5.33, lagAudio: 2.82, lagMax: 77.35, load: 53.79,
+  }));
+  const { text } = buildCiAnnotation('aggregate', {
+    label: 'coldstart-diagnostic', repetitions: 60, failingRepetitions: [4, 14, 29, 60],
+    failed: 4, runs,
+  }, { cap: 1400, keepCounts: ['runs'] });
+  const body = JSON.parse(text.slice(text.indexOf('{')));
+  assert.equal(body.failingRepetitions.length, 1,
+    'this is the behaviour `exact` exists to prevent');
+});

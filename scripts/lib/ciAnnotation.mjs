@@ -22,8 +22,16 @@ export function buildCiAnnotation(title, payload, options = {}) {
   // silently claimed to be the full set, so any reduction of these is recorded in
   // the body rather than left for the reader to guess at.
   const keepCounts = new Set(options.keepCounts ?? []);
+  // Fields that ARE the result rather than a window onto data. Halving one of these
+  // does not reduce its detail, it makes it false: `failingRepetitions` cut from
+  // [4, 14, 29, 60] to [4] still reads as "one repetition failed", which is exactly
+  // what the 60-repetition diagnostic reported at `3c3817d` for a run that failed
+  // four times. keepCounts only records a reduction; these are held out of the
+  // halving pass altogether. Their length is still recorded, so if the hard cap ever
+  // does bite, the body says so instead of quietly claiming a shorter list.
+  const exact = new Set(options.exact ?? []);
   const fullCounts = {};
-  for (const field of keepCounts) {
+  for (const field of [...keepCounts, ...exact]) {
     if (Array.isArray(payload[field])) fullCounts[field] = payload[field].length;
   }
   const encode = text => String(text)
@@ -44,7 +52,8 @@ export function buildCiAnnotation(title, payload, options = {}) {
     return true;
   };
   const secondary = Object.keys(body)
-    .filter(key => key !== preserve && Array.isArray(body[key]) && body[key].length > 1);
+    .filter(key => key !== preserve && !exact.has(key)
+      && Array.isArray(body[key]) && body[key].length > 1);
   while (size(body) > cap && secondary.some(halve)) { /* keep halving */ }
   while (size(body) > cap && halve(preserve)) { /* keep halving */ }
 

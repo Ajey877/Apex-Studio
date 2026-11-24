@@ -1319,12 +1319,79 @@ transport, serialization, queue and helper processing untouched; it adds no retr
 stale PCM. It grants exactly one additional frame — 20.8 µs at 48 kHz — and makes the two guards agree
 about when a block is late.
 
-**It is not a fix for the observed failure rate, and it must not be presented as one.** Run 58 at
-`2d4befd` had a 36.01 ms round trip against a 21.33 ms budget and never produced a result; one extra
-frame would not have saved it. The correction would only rescue a result that lands in that single
-frame — which the `a75cb15` repetition-45 evidence suggests does happen, but which the current
-evidence cannot count. Why the first block's helper round trip exceeds the budget at all is a separate
-question, and answering it is a separate change.
+**It is not a fix, and it must not be presented as one.** What the evidence does say is that the
+correction addresses the shape every `3c3817d` failure had: the guard latched at frame 4095 for a
+block due at 4096, and the result then arrived at 4096. Reading the code, the corrected comparison
+would not latch at 4095, the quantum would complete, the result would be accepted before the next
+`process` call, and the block would be present at the frame that needs it. That is a prediction from
+the source and the recorded frames — **no production run has measured the corrected guard**, and this
+commit deliberately does not contain it.
+
+It also would not have helped `2d4befd` run 58, whose 36.01 ms round trip against a 21.33 ms budget
+never produced a result at all. So the correction and the overrun are two separate problems, and only
+the first has a candidate change. Why the cold block's helper round trip reaches 36 ms — or 19 ms —
+is a separate question, and answering it is a separate change.
+
+### `3c3817d` — the corrected instrumentation on Windows CI, and it confirms the one-frame finding
+
+Desktop Validation run `45383087503`, job `138406885418`, conclusion **success**, all 27 steps
+success. All five workflows at this commit are success: Apex Studio CI `45383087495`, Audio
+Validation `45383087590`, Native VST3 Validation `45383087646`, P9 High-DPI Editor Acceptance
+`45383087466`.
+
+- **Five-run production gate (step 19): PASS 5/5.** `{"status":"PASS","passedRuns":5,"requestedRuns":5}`,
+  `perRepetitionVerdicts "PPPPP"`, `failingRepetitions []`, `deadlineMisses 0`, `tightestMarginMs 4.33`,
+  `slowestBlockMs 17`. CPU: 5 runs, 60 blocks, `noClockTick 54`, `positiveCpuDelta 6`,
+  `smallestObservedCpuClockStepMs 15.625`. Ran 11:29:46 → 11:33:15Z.
+- **60-repetition diagnostic (step 21, non-gating): 56 PASS / 4 FAIL.**
+  `{"status":"FAIL","passedRuns":56,"requestedRuns":60}`, `perRepetitionVerdicts`
+  `PPPFPPPPPPPPPFPPPPPPPPPPPPPPFPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPF`, `tightestMarginMs 3.33`,
+  `slowestBlockMs 18`, `blockBudgetMs 21.33`. Ran 11:33:16 → 12:18:32Z (45.3 min). CPU: 60 runs,
+  684 blocks, `clockUnavailable 0`, `cpuFieldNull 0`, `noClockTick 627`, `positiveCpuDelta 57`,
+  `smallestObservedCpuClockStepMs 15.625`.
+- **Failing repetitions: 4, 14, 29 and 60** — read off the 60-character verdict string. The
+  annotation's own `failingRepetitions` field reported only `[4]`; see the reducer defect below.
+- **Editor acceptance (step 23): 10 PASS / 0 FAIL / 1 NOT_VERIFIED** (`p9b-multi-monitor`).
+- Artifacts: `14920025465` diagnostic evidence 735,116 B; `14918469562` packaged VST3 evidence
+  463,126 B; `14916445395` native monitoring evidence 40,363 B; `14915851443` live input evidence
+  1,393 B; `14919063350` Windows package 176,458,588 B.
+
+**All four failures carry the corrected frame fields, and all four read the same way.** Every one is
+guard `pending-deadline-miss`, sequence 2, phase cold:
+
+| run | `outputFrameAtQuantumStart` | `inputSampleIndex` | `currentOutputFrame` | `dueOutputFrame` | `framesBeforeDue` | rejection |
+| --- | --- | --- | --- | --- | --- | --- |
+| 4  | 3968 | 127 | 4095 | 4096 | **1** | `after-failure`, `recvFrame 4096`, `dueFrame 4096`, rtt 23 |
+| 14 | 3968 | 127 | 4095 | 4096 | **1** | `after-failure`, `recvFrame 4096`, `dueFrame 4096`, rtt 21 |
+| 29 | 3968 | 127 | 4095 | 4096 | **1** | `after-failure`, `recvFrame 4096`, `dueFrame 4096`, rtt 21 |
+| 60 | 3968 | 127 | 4095 | 4096 | **1** | `after-failure`, `recvFrame 4096`, `dueFrame 4096`, rtt 23 |
+
+This is the production confirmation of the deterministic reproduction. The guard latched one output
+frame before the block was due, and in every case the result was then delivered **at** the due frame
+and refused as `after-failure`. Under the old instrumentation these four would have been recorded as
+`currentOutputFrame 3968` against `dueOutputFrame 4096` — a 128-frame gap that does not exist.
+
+The helper round trips for the failing blocks were 16.91, 16.64, 14.35 and 19.16 ms against a
+21.33 ms budget, so **none of these four is a plain overrun**: the native work came back inside the
+block period. The worklet's own `roundTripMs` reads 21–23 ms, nominally at or just over budget, but
+that number is measured against a schedule the audio thread does not necessarily keep and
+`Date.now()` resolves to whole milliseconds, so it is not the evidence to decide this on. The frame
+evidence — delivery recorded at exactly the frame the block was due — is.
+
+### The annotation reducer was halving the failure list, and that is now fixed
+
+The diagnostic's aggregate annotation reported `failed: 4` next to `failingRepetitions: [4]`.
+Reproduced locally against the real payload shape: `buildCiAnnotation`'s size reduction halves every
+array field that is not `preserve`, and `failingRepetitions` was one of them, so `[4, 14, 29, 60]`
+became `[4, 29]` and then `[4]`. A one-entry list still reads as "one repetition failed", so the field
+stated something false rather than merely incomplete. `keepCounts` does not help: it records a
+reduction, it does not prevent one.
+
+`buildCiAnnotation` now takes an `exact` option for lists that *are* the result; they are held out of
+the halving pass and their length is still recorded if the hard cap ever bites.
+`packaged-native-monitoring-acceptance.mjs` passes `exact: ['failingRepetitions']`. Two tests pin both
+the fix and the defect it replaces. The verbose `runs` list is still reduced as before
+(`runsReducedFrom 60`, `runsKept 7` under the reproduction's cap), so the cap is still honoured.
 
 ### Still NOT VERIFIED
 
@@ -1333,19 +1400,21 @@ question, and answering it is a separate change.
   warm-up timeout with `deadlineMisses 1` — and at `2d4befd` it passed 5/5, so the gate does not
   resolve the defect either way. The results across this branch's commits do not agree, and that
   disagreement is the honest summary: gate 5/5 at `bbfbfa9`, gate FAIL at `a75cb15`, gate 5/5 at
-  `2d4befd`; diagnostics of 1/60 at `d960d11`, 1/60 at `7de4599`, 8/60 at `bbfbfa9`, 1/60 at
-  `a75cb15`, 1/60 at `2d4befd`; and 0 of 5 during warm-up at `25442d66`. Each belongs to its own
-  commit, and none is a pass for the defect.
+  `2d4befd`, gate 5/5 at `3c3817d`; diagnostics of 1/60 at `d960d11`, 1/60 at `7de4599`, 8/60 at
+  `bbfbfa9`, 1/60 at `a75cb15`, 1/60 at `2d4befd`, 4/60 at `3c3817d`; and 0 of 5 during warm-up at
+  `25442d66`. Each belongs to its own commit, and none is a pass for the defect.
 - **Corrected by the boundary investigation above:** the "guard latched 128 frames before the due
   frame" reading in the `bbfbfa9` failures was an instrumentation artifact, not a measurement. The
   guard fires exactly **one** frame early, which follows from the pipeline delay being exactly two
-  blocks, and the question "why does the pending-state guard fire early" is now answered. What is
-  still not established is how often that single frame is the difference — the `a75cb15`
-  repetition-45 evidence has that shape (`receivedOutputFrame == dueOutputFrame`, rejected
-  `after-failure`), while `2d4befd` run 58 is a plain 36.01 ms overrun against a 21.33 ms budget with
-  no result at all. The two failure modes are now distinguishable, but no failure count has been
-  attributed to either. The 70–76 ms event-loop lag in the `bbfbfa9` failures, against 48–53 ms in
-  passing runs, remains correlated and unproven.
+  blocks, and the question "why does the pending-state guard fire early" is now answered. At
+  `3c3817d`, with the corrected fields in production, **all four** diagnostic failures carry
+  `framesBeforeDue: 1` and a result delivered at exactly the due frame, rejected `after-failure` —
+  so on that run the single frame was the difference in every failure, and the helper round trips
+  (14.35–19.16 ms) were inside the 21.33 ms budget. `2d4befd` run 58 is the other shape: a plain
+  36.01 ms overrun with no result at all. The two failure modes are now distinguishable in the
+  evidence, but only one run of each has been measured, so no rate is attributed to either. The
+  70–76 ms event-loop lag in the `bbfbfa9` failures, against 48–53 ms in passing runs, remains
+  correlated and unproven.
 - Whether the first block's helper round trip overruns the budget because of descheduling or because
   of expensive work. `2d4befd` run 58 spent 21.49 ms of its 36.01 ms round trip in
   `helperHostPrepareMs` alone, but 662 of its 710 blocks measured no CPU tick, so the wall-clock
